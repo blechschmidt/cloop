@@ -41,7 +41,8 @@ Subcommands:
   reset <id>    Reset a task to pending
   add <title>   Add a new task to the plan
   edit <id>     Edit task title, description, or priority
-  remove <id>   Remove a task from the plan`,
+  remove <id>   Remove a task from the plan
+  move <id> up|down  Reorder a task by swapping with adjacent priority`,
 }
 
 var taskListCmd = &cobra.Command{
@@ -299,6 +300,85 @@ var taskNextCmd = &cobra.Command{
 	},
 }
 
+var taskMoveCmd = &cobra.Command{
+	Use:   "move <id> <up|down>",
+	Short: "Move a task up or down in priority order",
+	Long: `Move a task up (higher priority) or down (lower priority) by swapping
+priorities with the adjacent task in the sorted order.
+
+Examples:
+  cloop task move 3 up    # increase priority of task 3
+  cloop task move 5 down  # decrease priority of task 5`,
+	Args: cobra.ExactArgs(2),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		workdir, _ := os.Getwd()
+		s, err := state.Load(workdir)
+		if err != nil {
+			return err
+		}
+		if !s.PMMode || s.Plan == nil || len(s.Plan.Tasks) == 0 {
+			return fmt.Errorf("no task plan found — run 'cloop run --pm' to create one")
+		}
+
+		id, err := strconv.Atoi(args[0])
+		if err != nil {
+			return fmt.Errorf("invalid task ID %q: must be a number", args[0])
+		}
+
+		direction := strings.ToLower(args[1])
+		if direction != "up" && direction != "down" {
+			return fmt.Errorf("direction must be 'up' or 'down', got %q", args[1])
+		}
+
+		// Build a sorted copy (by priority, stable) to find adjacents.
+		sorted := make([]*pm.Task, len(s.Plan.Tasks))
+		copy(sorted, s.Plan.Tasks)
+		sort.SliceStable(sorted, func(i, j int) bool {
+			return sorted[i].Priority < sorted[j].Priority
+		})
+
+		// Find our task's position in the sorted slice.
+		idx := -1
+		for i, t := range sorted {
+			if t.ID == id {
+				idx = i
+				break
+			}
+		}
+		if idx == -1 {
+			return fmt.Errorf("task %d not found", id)
+		}
+
+		var other *pm.Task
+		if direction == "up" {
+			if idx == 0 {
+				return fmt.Errorf("task %d is already at the highest priority", id)
+			}
+			other = sorted[idx-1]
+		} else {
+			if idx == len(sorted)-1 {
+				return fmt.Errorf("task %d is already at the lowest priority", id)
+			}
+			other = sorted[idx+1]
+		}
+
+		// Swap priorities.
+		sorted[idx].Priority, other.Priority = other.Priority, sorted[idx].Priority
+
+		if err := s.Save(); err != nil {
+			return err
+		}
+
+		arrow := "↑"
+		if direction == "down" {
+			arrow = "↓"
+		}
+		color.New(color.FgGreen).Printf("Moved task %d %s %s (priority now %d)\n",
+			id, arrow, direction, sorted[idx].Priority)
+		return nil
+	},
+}
+
 var taskAddCmd = &cobra.Command{
 	Use:   "add <title>",
 	Short: "Add a new task to the plan",
@@ -495,5 +575,6 @@ func init() {
 	taskCmd.AddCommand(taskAddCmd)
 	taskCmd.AddCommand(taskEditCmd)
 	taskCmd.AddCommand(taskRemoveCmd)
+	taskCmd.AddCommand(taskMoveCmd)
 	rootCmd.AddCommand(taskCmd)
 }
