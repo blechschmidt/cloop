@@ -53,6 +53,12 @@ Supports Anthropic (Claude API), OpenAI, Ollama (local), and Claude Code.
   cloop agent logs --tail 30                            # recent activity
   cloop agent follow                                    # live log stream
   cloop agent stop                                      # stop the agent
+  cloop review                                          # AI code review of uncommitted changes
+  cloop review --staged                                 # review only staged changes
+  cloop review --last                                   # review the last commit
+  cloop review HEAD~3..HEAD                             # review a commit range
+  cloop review --task 3                                 # review code in context of PM task 3
+  cloop review --format md -o review.md                 # save review as markdown
   cloop status
   cloop log`,
 }
