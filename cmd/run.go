@@ -38,9 +38,11 @@ var (
 	tokenBudget     int
 	innovateMode    bool
 	parallelMode    bool
-	injectContext   bool
-	adaptiveReplan  bool
-	reviewMode      bool
+	injectContext    bool
+	adaptiveReplan   bool
+	reviewMode       bool
+	verifyTasks      bool
+	maxVerifyRetries int
 )
 
 var runCmd = &cobra.Command{
@@ -130,28 +132,30 @@ Press Ctrl+C to pause gracefully.`,
 		}
 
 		orchCfg := orchestrator.Config{
-			WorkDir:        workdir,
-			Model:          model,
-			MaxTokens:      runMaxTokens,
-			StepTimeout:    timeout,
-			Verbose:        verbose,
-			DryRun:         dryRun,
-			PMMode:         effectivePMMode,
-			PlanOnly:       planOnly,
-			RetryFailed:    retryFailed,
-			Replan:         replan,
-			MaxFailures:    maxFailures,
-			ContextSteps:   contextSteps,
-			StepDelay:      delay,
-			StepsLimit:     runStepsLimit,
-			ProviderName:   providerName,
-			ProviderCfg:    provCfg,
-			TokenBudget:    tokenBudget,
-			InnovateMode:   innovateMode,
-			Parallel:       parallelMode,
-			InjectContext:  injectContext,
-			AdaptiveReplan: adaptiveReplan,
-			ReviewMode:     reviewMode,
+			WorkDir:          workdir,
+			Model:            model,
+			MaxTokens:        runMaxTokens,
+			StepTimeout:      timeout,
+			Verbose:          verbose,
+			DryRun:           dryRun,
+			PMMode:           effectivePMMode,
+			PlanOnly:         planOnly,
+			RetryFailed:      retryFailed,
+			Replan:           replan,
+			MaxFailures:      maxFailures,
+			ContextSteps:     contextSteps,
+			StepDelay:        delay,
+			StepsLimit:       runStepsLimit,
+			ProviderName:     providerName,
+			ProviderCfg:      provCfg,
+			TokenBudget:      tokenBudget,
+			InnovateMode:     innovateMode,
+			Parallel:         parallelMode,
+			InjectContext:    injectContext,
+			AdaptiveReplan:   adaptiveReplan,
+			ReviewMode:       reviewMode,
+			Verify:           verifyTasks,
+			MaxVerifyRetries: maxVerifyRetries,
 		}
 
 		orc, err := orchestrator.New(orchCfg, prov)
@@ -279,5 +283,7 @@ func init() {
 	runCmd.Flags().BoolVar(&injectContext, "inject-context", false, "PM mode: inject project context (git status, file tree) into task prompts")
 	runCmd.Flags().BoolVar(&adaptiveReplan, "adaptive-replan", false, "PM mode: re-plan remaining tasks with AI after a failure")
 	runCmd.Flags().BoolVar(&reviewMode, "review", false, "PM mode: pause before each task for human approval (y/n/skip/quit)")
+	runCmd.Flags().BoolVar(&verifyTasks, "verify", false, "PM mode: run a second AI verification pass after each TASK_DONE to confirm genuine completion")
+	runCmd.Flags().IntVar(&maxVerifyRetries, "max-verify-retries", 2, "PM mode: max times a task can be re-queued by verification failure before marking it failed")
 	rootCmd.AddCommand(runCmd)
 }

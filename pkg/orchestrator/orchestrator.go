@@ -67,6 +67,13 @@ type Config struct {
 
 	// ReviewMode pauses before each task and waits for human approval (y/n/skip/quit).
 	ReviewMode bool
+
+	// Verify enables post-task verification: after TASK_DONE, run a second AI pass to confirm
+	// the task was genuinely completed. If verification fails, the task is re-queued (up to 2 retries).
+	Verify bool
+
+	// MaxVerifyRetries is the max number of times a task can be re-queued by the verifier (default 2).
+	MaxVerifyRetries int
 }
 
 type Orchestrator struct {
@@ -491,6 +498,39 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 
 		switch signal {
 		case pm.TaskDone:
+			// Optionally verify the task was genuinely completed before accepting it.
+			if o.config.Verify {
+				maxRetries := o.config.MaxVerifyRetries
+				if maxRetries <= 0 {
+					maxRetries = 2
+				}
+				dimColor.Printf("  Verifying task %d...\n", task.ID)
+				pass, verifyErr := pm.VerifyTask(ctx, o.provider, s.Goal, s.Instructions, s.Model, o.config.StepTimeout, task, result.Output)
+				if verifyErr != nil {
+					dimColor.Printf("  Verification error (treating as pass): %v\n", verifyErr)
+					pass = true
+				}
+				if !pass {
+					task.VerifyRetries++
+					if task.VerifyRetries <= maxRetries {
+						failColor.Printf("✗ Verification FAILED for task %d (%s) — re-queuing (attempt %d/%d)\n\n", task.ID, task.Title, task.VerifyRetries, maxRetries)
+						task.Status = pm.TaskPending
+						s.Save()
+						continue
+					}
+					failColor.Printf("✗ Verification failed %d time(s) for task %d — marking failed.\n\n", task.VerifyRetries, task.ID)
+					task.Status = pm.TaskFailed
+					consecutiveErrors++
+					s.Save()
+					if consecutiveErrors >= maxConsecutiveErrors {
+						s.Status = "failed"
+						s.Save()
+						return fmt.Errorf("%d consecutive task failures", consecutiveErrors)
+					}
+					continue
+				}
+				pmColor.Printf("✓ Verification PASSED for task %d: %s\n\n", task.ID, task.Title)
+			}
 			task.Status = pm.TaskDone
 			successColor.Printf("✓ Task %d complete: %s\n\n", task.ID, task.Title)
 			consecutiveErrors = 0

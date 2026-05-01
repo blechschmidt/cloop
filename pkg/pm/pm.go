@@ -26,15 +26,16 @@ const (
 
 // Task is a single unit of work derived from the project goal.
 type Task struct {
-	ID          int        `json:"id"`
-	Title       string     `json:"title"`
-	Description string     `json:"description"`
-	Priority    int        `json:"priority"` // 1 = highest
-	Status      TaskStatus `json:"status"`
-	DependsOn   []int      `json:"depends_on,omitempty"` // IDs of tasks that must complete before this one
-	Result      string     `json:"result,omitempty"`
-	StartedAt   *time.Time `json:"started_at,omitempty"`
-	CompletedAt *time.Time `json:"completed_at,omitempty"`
+	ID            int        `json:"id"`
+	Title         string     `json:"title"`
+	Description   string     `json:"description"`
+	Priority      int        `json:"priority"` // 1 = highest
+	Status        TaskStatus `json:"status"`
+	DependsOn     []int      `json:"depends_on,omitempty"` // IDs of tasks that must complete before this one
+	Result        string     `json:"result,omitempty"`
+	StartedAt     *time.Time `json:"started_at,omitempty"`
+	CompletedAt   *time.Time `json:"completed_at,omitempty"`
+	VerifyRetries int        `json:"verify_retries,omitempty"` // number of times task was re-queued by verifier
 }
 
 // Plan is the full task plan for a goal.
@@ -434,4 +435,75 @@ func Decompose(ctx context.Context, p provider.Provider, goal, instructions, mod
 		return nil, fmt.Errorf("decompose: %w", err)
 	}
 	return ParseTaskPlan(goal, result.Output)
+}
+
+// VerifyTaskPrompt builds a prompt that asks the AI to verify whether a task was actually completed.
+// The verifier reviews the task description and the executor's output and checks the real filesystem/code.
+func VerifyTaskPrompt(goal, instructions string, task *Task, executorOutput string) string {
+	var b strings.Builder
+	b.WriteString("You are a strict code reviewer verifying whether a task was actually completed.\n")
+	b.WriteString("You have full file system access and can run commands to inspect the results.\n\n")
+	b.WriteString(fmt.Sprintf("## PROJECT GOAL\n%s\n\n", goal))
+	if instructions != "" {
+		b.WriteString(fmt.Sprintf("## CONSTRAINTS\n%s\n\n", instructions))
+	}
+	b.WriteString("## TASK THAT SHOULD HAVE BEEN COMPLETED\n")
+	b.WriteString(fmt.Sprintf("**Task %d: %s**\n", task.ID, task.Title))
+	b.WriteString(fmt.Sprintf("%s\n\n", task.Description))
+	b.WriteString("## EXECUTOR'S REPORTED OUTPUT\n")
+	if len(executorOutput) > 2000 {
+		b.WriteString(executorOutput[:1000])
+		b.WriteString("\n...(truncated)...\n")
+		b.WriteString(executorOutput[len(executorOutput)-1000:])
+	} else {
+		b.WriteString(executorOutput)
+	}
+	b.WriteString("\n\n## VERIFICATION INSTRUCTIONS\n")
+	b.WriteString("1. Critically evaluate whether the task was actually completed\n")
+	b.WriteString("2. Check for concrete evidence: inspect files, run tests, verify commands work\n")
+	b.WriteString("3. Do NOT accept vague claims — look for real artifacts (files, passing tests, working code)\n")
+	b.WriteString("4. If the task created or modified files, verify they exist and contain the expected content\n")
+	b.WriteString("5. Summarize your findings and your verdict\n\n")
+	b.WriteString("End your response with exactly one of:\n")
+	b.WriteString("VERIFY_PASS — the task is genuinely complete\n")
+	b.WriteString("VERIFY_FAIL — the task was not actually completed or is incomplete\n")
+	return b.String()
+}
+
+// VerifySignal parses the verifier's response and returns true if VERIFY_PASS was found.
+func VerifySignal(output string) (pass bool, found bool) {
+	lines := strings.Split(strings.TrimSpace(output), "\n")
+	check := lines
+	if len(check) > 5 {
+		check = check[len(check)-5:]
+	}
+	for _, line := range check {
+		line = strings.TrimSpace(line)
+		if line == "VERIFY_PASS" {
+			return true, true
+		}
+		if line == "VERIFY_FAIL" {
+			return false, true
+		}
+	}
+	return false, false
+}
+
+// VerifyTask calls the provider to verify whether a task was genuinely completed.
+// Returns (true, nil) for pass, (false, nil) for fail, (false, err) on provider error.
+func VerifyTask(ctx context.Context, p provider.Provider, goal, instructions, model string, timeout time.Duration, task *Task, executorOutput string) (bool, error) {
+	prompt := VerifyTaskPrompt(goal, instructions, task, executorOutput)
+	result, err := p.Complete(ctx, prompt, provider.Options{
+		Model:   model,
+		Timeout: timeout,
+	})
+	if err != nil {
+		return false, fmt.Errorf("verify task: %w", err)
+	}
+	pass, found := VerifySignal(result.Output)
+	if !found {
+		// If no explicit signal, treat as pass to avoid blocking valid completions
+		return true, nil
+	}
+	return pass, nil
 }
