@@ -15,6 +15,7 @@ var (
 	instructions string
 	model        string
 	initProvider string
+	initPMMode   bool
 )
 
 var initCmd = &cobra.Command{
@@ -50,6 +51,9 @@ Examples:
 		}
 		if initProvider != "" {
 			s.Provider = initProvider
+		}
+		if initPMMode {
+			s.PMMode = true
 		}
 		if err := s.Save(); err != nil {
 			return err
@@ -89,7 +93,11 @@ Examples:
 			fmt.Printf("  Instructions: %s\n", instructions)
 		}
 		fmt.Printf("\nRun 'cloop run' to start.\n")
-		fmt.Printf("Use 'cloop run --pm' for product manager mode (task decomposition).\n")
+		if s.PMMode {
+			fmt.Printf("PM mode enabled — run 'cloop run' to decompose and execute tasks.\n")
+		} else {
+			fmt.Printf("Use 'cloop run --pm' for product manager mode (task decomposition).\n")
+		}
 		return nil
 	},
 }
@@ -99,5 +107,6 @@ func init() {
 	initCmd.Flags().StringVar(&instructions, "instructions", "", "Additional instructions/constraints for the AI")
 	initCmd.Flags().StringVar(&model, "model", "", "Model to use (provider-specific)")
 	initCmd.Flags().StringVar(&initProvider, "provider", "", "AI provider: anthropic, openai, ollama, claudecode (default)")
+	initCmd.Flags().BoolVar(&initPMMode, "pm", false, "Enable product manager mode (task decomposition) by default for this project")
 	rootCmd.AddCommand(initCmd)
 }

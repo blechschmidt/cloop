@@ -20,6 +20,8 @@ type Config struct {
 	Verbose     bool
 	DryRun      bool
 	PMMode      bool
+	PlanOnly    bool // only decompose tasks, don't execute them
+	RetryFailed bool // retry failed tasks in PM mode
 
 	// Provider to use. If empty, falls back to state.Provider, then config.yaml, then claudecode.
 	ProviderName string
@@ -193,10 +195,10 @@ func (o *Orchestrator) runPM(ctx context.Context) error {
 
 	// Phase 1: Decompose goal into tasks (if not already done)
 	if s.Plan == nil || len(s.Plan.Tasks) == 0 {
-		pmColor.Printf("📋 Decomposing goal into tasks...\n")
+		pmColor.Printf("Decomposing goal into tasks...\n")
 		plan, err := pm.Decompose(ctx, o.provider, s.Goal, s.Instructions, s.Model, o.config.StepTimeout)
 		if err != nil {
-			failColor.Printf("✗ Failed to decompose goal: %v\n", err)
+			failColor.Printf("x Failed to decompose goal: %v\n", err)
 			s.Status = "failed"
 			s.Save()
 			return err
@@ -207,11 +209,33 @@ func (o *Orchestrator) runPM(ctx context.Context) error {
 		fmt.Printf("\n")
 		pmColor.Printf("Task Plan (%d tasks):\n", len(plan.Tasks))
 		for _, t := range plan.Tasks {
-			fmt.Printf("  %d. [%d] %s\n", t.ID, t.Priority, t.Title)
+			fmt.Printf("  %d. [P%d] %s\n", t.ID, t.Priority, t.Title)
+			dimColor.Printf("       %s\n", truncate(t.Description, 120))
 		}
 		fmt.Println()
 	} else {
+		// If retry-failed is set, reset failed tasks to pending
+		if o.config.RetryFailed {
+			retried := 0
+			for _, t := range s.Plan.Tasks {
+				if t.Status == pm.TaskFailed {
+					t.Status = pm.TaskPending
+					retried++
+				}
+			}
+			if retried > 0 {
+				pmColor.Printf("Retrying %d failed task(s).\n\n", retried)
+				s.Save()
+			}
+		}
 		pmColor.Printf("Resuming plan: %s\n\n", s.Plan.Summary())
+	}
+
+	// Plan-only mode: just show the plan, don't execute
+	if o.config.PlanOnly {
+		s.Status = "paused"
+		s.Save()
+		return nil
 	}
 
 	// Phase 2: Execute tasks in priority order

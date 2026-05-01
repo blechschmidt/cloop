@@ -1,0 +1,241 @@
+package cmd
+
+import (
+	"fmt"
+	"os"
+	"strconv"
+	"strings"
+
+	"github.com/blechschmidt/cloop/pkg/pm"
+	"github.com/blechschmidt/cloop/pkg/state"
+	"github.com/fatih/color"
+	"github.com/spf13/cobra"
+)
+
+var (
+	taskDesc     string
+	taskPriority int
+)
+
+var taskCmd = &cobra.Command{
+	Use:   "task",
+	Short: "Manage PM mode tasks",
+	Long: `Manage tasks in product manager mode.
+
+Subcommands:
+  list          Show all tasks
+  skip <id>     Mark a task as skipped
+  reset <id>    Reset a task to pending
+  done <id>     Mark a task as done
+  add <title>   Add a new task to the plan`,
+}
+
+var taskListCmd = &cobra.Command{
+	Use:     "list",
+	Aliases: []string{"ls"},
+	Short:   "List all tasks",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		workdir, _ := os.Getwd()
+		s, err := state.Load(workdir)
+		if err != nil {
+			return err
+		}
+		if !s.PMMode || s.Plan == nil || len(s.Plan.Tasks) == 0 {
+			return fmt.Errorf("no task plan found — run 'cloop run --pm' to create one")
+		}
+		printTaskList(s.Plan)
+		return nil
+	},
+}
+
+var taskSkipCmd = &cobra.Command{
+	Use:   "skip <id>",
+	Short: "Mark a task as skipped",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return setTaskStatus(args[0], pm.TaskSkipped)
+	},
+}
+
+var taskResetCmd = &cobra.Command{
+	Use:   "reset <id>",
+	Short: "Reset a task to pending",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return setTaskStatus(args[0], pm.TaskPending)
+	},
+}
+
+var taskDoneCmd = &cobra.Command{
+	Use:   "done <id>",
+	Short: "Mark a task as done",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return setTaskStatus(args[0], pm.TaskDone)
+	},
+}
+
+var taskAddCmd = &cobra.Command{
+	Use:   "add <title>",
+	Short: "Add a new task to the plan",
+	Args:  cobra.MinimumNArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		workdir, _ := os.Getwd()
+		s, err := state.Load(workdir)
+		if err != nil {
+			return err
+		}
+		if !s.PMMode {
+			return fmt.Errorf("not in PM mode — run 'cloop init --pm' or 'cloop run --pm' first")
+		}
+		if s.Plan == nil {
+			s.Plan = pm.NewPlan(s.Goal)
+		}
+
+		title := strings.Join(args, " ")
+
+		// Auto-assign ID: max existing ID + 1
+		maxID := 0
+		for _, t := range s.Plan.Tasks {
+			if t.ID > maxID {
+				maxID = t.ID
+			}
+		}
+
+		priority := taskPriority
+		if priority == 0 {
+			// Default: lowest priority (append at end)
+			maxPriority := 0
+			for _, t := range s.Plan.Tasks {
+				if t.Priority > maxPriority {
+					maxPriority = t.Priority
+				}
+			}
+			priority = maxPriority + 1
+		}
+
+		task := &pm.Task{
+			ID:          maxID + 1,
+			Title:       title,
+			Description: taskDesc,
+			Priority:    priority,
+			Status:      pm.TaskPending,
+		}
+		s.Plan.Tasks = append(s.Plan.Tasks, task)
+
+		if err := s.Save(); err != nil {
+			return err
+		}
+
+		color.New(color.FgGreen).Printf("Added task %d: %s (priority %d)\n", task.ID, task.Title, task.Priority)
+		return nil
+	},
+}
+
+func setTaskStatus(idStr string, status pm.TaskStatus) error {
+	workdir, _ := os.Getwd()
+	s, err := state.Load(workdir)
+	if err != nil {
+		return err
+	}
+	if !s.PMMode || s.Plan == nil {
+		return fmt.Errorf("no task plan found — run 'cloop run --pm' to create one")
+	}
+
+	id, err := strconv.Atoi(idStr)
+	if err != nil {
+		return fmt.Errorf("invalid task ID %q: must be a number", idStr)
+	}
+
+	var task *pm.Task
+	for _, t := range s.Plan.Tasks {
+		if t.ID == id {
+			task = t
+			break
+		}
+	}
+	if task == nil {
+		return fmt.Errorf("task %d not found", id)
+	}
+
+	old := task.Status
+	task.Status = status
+	if err := s.Save(); err != nil {
+		return err
+	}
+
+	verb := map[pm.TaskStatus]string{
+		pm.TaskPending: "reset to pending",
+		pm.TaskDone:    "marked done",
+		pm.TaskSkipped: "skipped",
+		pm.TaskFailed:  "marked failed",
+	}[status]
+
+	dimColor := color.New(color.Faint)
+	fmt.Printf("Task %d: %s — %s", id, task.Title, verb)
+	dimColor.Printf(" (was: %s)\n", old)
+	return nil
+}
+
+func printTaskList(plan *pm.Plan) {
+	dimColor := color.New(color.Faint)
+	successColor := color.New(color.FgGreen)
+	failColor := color.New(color.FgRed)
+	warnColor := color.New(color.FgYellow)
+
+	fmt.Printf("Tasks: %s\n\n", plan.Summary())
+	for _, t := range plan.Tasks {
+		line := fmt.Sprintf("  %s #%d [P%d] %s\n", taskMarker(t.Status), t.ID, t.Priority, t.Title)
+		switch t.Status {
+		case pm.TaskDone:
+			successColor.Print(line)
+		case pm.TaskSkipped:
+			dimColor.Print(line)
+		case pm.TaskFailed:
+			failColor.Print(line)
+		case pm.TaskInProgress:
+			warnColor.Print(line)
+		default:
+			fmt.Print(line)
+		}
+		if t.Description != "" {
+			dimColor.Printf("       %s\n", truncateStr(t.Description, 100))
+		}
+	}
+}
+
+func taskMarker(status pm.TaskStatus) string {
+	switch status {
+	case pm.TaskDone:
+		return "[x]"
+	case pm.TaskSkipped:
+		return "[-]"
+	case pm.TaskFailed:
+		return "[!]"
+	case pm.TaskInProgress:
+		return "[~]"
+	default:
+		return "[ ]"
+	}
+}
+
+// truncateStr truncates a string to at most n runes.
+func truncateStr(s string, n int) string {
+	runes := []rune(s)
+	if len(runes) <= n {
+		return s
+	}
+	return string(runes[:n]) + "..."
+}
+
+func init() {
+	taskAddCmd.Flags().StringVar(&taskDesc, "desc", "", "Task description")
+	taskAddCmd.Flags().IntVar(&taskPriority, "priority", 0, "Task priority (1=highest; default: lowest)")
+
+	taskCmd.AddCommand(taskListCmd)
+	taskCmd.AddCommand(taskSkipCmd)
+	taskCmd.AddCommand(taskResetCmd)
+	taskCmd.AddCommand(taskDoneCmd)
+	taskCmd.AddCommand(taskAddCmd)
+	rootCmd.AddCommand(taskCmd)
+}

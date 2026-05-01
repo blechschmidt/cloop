@@ -11,6 +11,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/orchestrator"
 	"github.com/blechschmidt/cloop/pkg/provider"
+	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/spf13/cobra"
 )
 
@@ -24,6 +25,8 @@ var (
 	autoEvolve      bool
 	runProvider     string
 	pmMode          bool
+	planOnly        bool
+	retryFailed     bool
 )
 
 var runCmd = &cobra.Command{
@@ -47,13 +50,19 @@ Press Ctrl+C to pause gracefully.`,
 			return fmt.Errorf("loading config: %w", err)
 		}
 
-		// Determine provider (flag > config > default)
+		// Load state to check for persisted provider/mode settings
+		projectState, _ := state.Load(workdir)
+
+		// Determine provider (flag > config > state > auto-detect > claudecode)
 		providerName := runProvider
 		if providerName == "" {
 			providerName = cfg.Provider
 		}
+		if providerName == "" && projectState != nil {
+			providerName = projectState.Provider
+		}
 		if providerName == "" {
-			providerName = "claudecode"
+			providerName = autoSelectProvider()
 		}
 
 		// Build provider config
@@ -86,6 +95,12 @@ Press Ctrl+C to pause gracefully.`,
 			return fmt.Errorf("provider: %w", err)
 		}
 
+		// Merge PM mode: flag | plan-only flag | persisted state
+		effectivePMMode := pmMode || planOnly
+		if !effectivePMMode && projectState != nil && projectState.PMMode {
+			effectivePMMode = true
+		}
+
 		orchCfg := orchestrator.Config{
 			WorkDir:      workdir,
 			Model:        model,
@@ -93,7 +108,9 @@ Press Ctrl+C to pause gracefully.`,
 			StepTimeout:  timeout,
 			Verbose:      verbose,
 			DryRun:       dryRun,
-			PMMode:       pmMode,
+			PMMode:       effectivePMMode,
+			PlanOnly:     planOnly,
+			RetryFailed:  retryFailed,
 			ProviderName: providerName,
 			ProviderCfg:  provCfg,
 		}
@@ -126,6 +143,18 @@ Press Ctrl+C to pause gracefully.`,
 	},
 }
 
+// autoSelectProvider picks a provider based on available environment variables.
+// Priority: anthropic > openai > claudecode (always available as fallback).
+func autoSelectProvider() string {
+	if os.Getenv("ANTHROPIC_API_KEY") != "" {
+		return "anthropic"
+	}
+	if os.Getenv("OPENAI_API_KEY") != "" {
+		return "openai"
+	}
+	return "claudecode"
+}
+
 func init() {
 	runCmd.Flags().StringVar(&runModel, "model", "", "Override model for this run")
 	runCmd.Flags().StringVar(&stepTimeout, "step-timeout", "10m", "Timeout per step")
@@ -136,5 +165,7 @@ func init() {
 	runCmd.Flags().BoolVar(&autoEvolve, "auto-evolve", false, "After goal completion, keep improving the project autonomously")
 	runCmd.Flags().StringVar(&runProvider, "provider", "", "AI provider: anthropic, openai, ollama, claudecode")
 	runCmd.Flags().BoolVar(&pmMode, "pm", false, "Product manager mode: decompose goal into tasks and execute them")
+	runCmd.Flags().BoolVar(&planOnly, "plan-only", false, "PM mode: decompose goal into tasks but do not execute (implies --pm)")
+	runCmd.Flags().BoolVar(&retryFailed, "retry-failed", false, "PM mode: retry tasks that previously failed")
 	rootCmd.AddCommand(runCmd)
 }
