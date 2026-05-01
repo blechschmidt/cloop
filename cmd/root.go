@@ -18,8 +18,11 @@ Supports Anthropic (Claude API), OpenAI, Ollama (local), and Claude Code.
   cloop init "Build a REST API with user auth and CRUD endpoints"
   cloop init --provider anthropic "Add comprehensive tests"
   cloop init --provider ollama --model llama3.2 "Refactor this module"
-  cloop run           # feedback loop mode
-  cloop run --pm      # product manager mode (task decomposition)
+  cloop init "Build a REST API with user auth and CRUD endpoints"
+  cloop scope "Build a REST API"  # AI scope analysis before you start
+  cloop run                       # feedback loop mode
+  cloop run --pm                  # product manager mode (task decomposition)
+  cloop report                    # generate project progress report
   cloop status
   cloop log`,
 }
