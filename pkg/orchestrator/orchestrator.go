@@ -438,8 +438,6 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		if s.Plan.IsComplete() {
 			successColor.Printf("🎉 All tasks complete! Goal achieved.\n")
 			successColor.Printf("   %s\n\n", s.Plan.Summary())
-			s.Status = "complete"
-			s.Save()
 			done, failed := s.Plan.CountByStatus()
 			o.webhook.Send(webhook.EventSessionComplete, webhook.Payload{
 				Goal: s.Goal,
@@ -452,6 +450,26 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 					Duration:     time.Since(sessionStart).Round(time.Second).String(),
 				},
 			})
+			if s.AutoEvolve {
+				s.Status = "evolving"
+				s.Save()
+				n, err := o.evolvePM(ctx)
+				if err != nil {
+					color.New(color.FgMagenta, color.Bold).Printf("\n⏹ Evolve stopped: %v\n", err)
+					s.Status = "complete"
+					s.Save()
+					return nil
+				}
+				if n == 0 {
+					s.Status = "complete"
+					s.Save()
+					return nil
+				}
+				s.Status = "running"
+				continue
+			}
+			s.Status = "complete"
+			s.Save()
 			return nil
 		}
 
@@ -856,6 +874,24 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 		if s.Plan.IsComplete() {
 			successColor.Printf("🎉 All tasks complete! Goal achieved.\n")
 			successColor.Printf("   %s\n\n", s.Plan.Summary())
+			if s.AutoEvolve {
+				s.Status = "evolving"
+				s.Save()
+				n, err := o.evolvePM(ctx)
+				if err != nil {
+					color.New(color.FgMagenta, color.Bold).Printf("\n⏹ Evolve stopped: %v\n", err)
+					s.Status = "complete"
+					s.Save()
+					return nil
+				}
+				if n == 0 {
+					s.Status = "complete"
+					s.Save()
+					return nil
+				}
+				s.Status = "running"
+				continue
+			}
 			s.Status = "complete"
 			s.Save()
 			return nil
@@ -1081,11 +1117,73 @@ func (o *Orchestrator) buildPrompt() string {
 	return b.String()
 }
 
+// evolvePM discovers new tasks via AI and appends them to the plan.
+// Returns the number of tasks added. Called when AutoEvolve is set and the PM plan is complete.
+func (o *Orchestrator) evolvePM(ctx context.Context) (int, error) {
+	s := o.state
+	s.EvolveStep++
+
+	evolveColor := color.New(color.FgMagenta, color.Bold)
+	dimColor := color.New(color.Faint)
+
+	evolveColor.Printf("━━━ Evolve #%d — Discovering new tasks ━━━\n", s.EvolveStep)
+	dimColor.Printf("→ Asking AI for improvement ideas...\n")
+
+	prompt := pm.EvolveDiscoverPrompt(s.Goal, s.Instructions, s.Plan, s.EvolveStep, o.config.InnovateMode)
+	result, err := o.provider.Complete(ctx, prompt, provider.Options{
+		Model:     s.Model,
+		MaxTokens: o.config.MaxTokens,
+		Timeout:   o.config.StepTimeout,
+		WorkDir:   o.config.WorkDir,
+	})
+	if err != nil {
+		return 0, err
+	}
+
+	stepResult := state.StepResult{
+		Task:         fmt.Sprintf("Evolve #%d: discover tasks", s.EvolveStep),
+		Output:       result.Output,
+		Duration:     result.Duration.Round(time.Second).String(),
+		Time:         time.Now(),
+		InputTokens:  result.InputTokens,
+		OutputTokens: result.OutputTokens,
+	}
+	s.TotalInputTokens += result.InputTokens
+	s.TotalOutputTokens += result.OutputTokens
+	s.AddStep(stepResult)
+
+	newTasks, err := pm.ParseEvolveTasks(s.Goal, result.Output, s.Plan)
+	if err != nil {
+		dimColor.Printf("  Task discovery parse error: %v\n", err)
+		s.Save()
+		return 0, nil
+	}
+	if len(newTasks) == 0 {
+		dimColor.Printf("  No new tasks discovered — project is fully evolved.\n")
+		s.Save()
+		return 0, nil
+	}
+
+	s.Plan.Tasks = append(s.Plan.Tasks, newTasks...)
+	s.Save()
+
+	evolveColor.Printf("  Discovered %d new task(s):\n", len(newTasks))
+	for _, t := range newTasks {
+		fmt.Printf("    + [P%d] %s\n", t.Priority, t.Title)
+		dimColor.Printf("      %s\n", truncate(t.Description, 100))
+	}
+	fmt.Println()
+
+	return len(newTasks), nil
+}
+
 func (o *Orchestrator) evolve(ctx context.Context) error {
 	s := o.state
 
 	evolveColor := color.New(color.FgMagenta, color.Bold)
 	stepColor := color.New(color.FgYellow, color.Bold)
+	successColor := color.New(color.FgGreen, color.Bold)
+	failColor := color.New(color.FgRed, color.Bold)
 	dimColor := color.New(color.Faint)
 
 	evolveColor.Printf("\n🧠 Auto-Evolve — Continuously improving the project\n")
@@ -1099,6 +1197,92 @@ func (o *Orchestrator) evolve(ctx context.Context) error {
 			evolveColor.Printf("\n⏸ Auto-evolve stopped. Project is complete.\n")
 			return nil
 		default:
+		}
+
+		// Prefer pending tasks over random improvements.
+		// If the plan has pending tasks, execute the next one before discovering new ones.
+		if s.Plan != nil {
+			nextTask := s.Plan.NextTask()
+			if nextTask != nil {
+				stepColor.Printf("━━━ Evolve Task %d: %s ━━━\n", nextTask.ID, nextTask.Title)
+				dimColor.Printf("       %s\n\n", truncate(nextTask.Description, 150))
+
+				now := time.Now()
+				nextTask.Status = pm.TaskInProgress
+				nextTask.StartedAt = &now
+				s.Save()
+
+				prompt := pm.ExecuteTaskPrompt(s.Goal, s.Instructions, s.Plan, nextTask)
+				dimColor.Printf("→ Executing task %d via %s...\n", nextTask.ID, o.provider.Name())
+				start := time.Now()
+
+				result, err := o.provider.Complete(ctx, prompt, provider.Options{
+					Model:     s.Model,
+					MaxTokens: o.config.MaxTokens,
+					Timeout:   o.config.StepTimeout,
+					WorkDir:   o.config.WorkDir,
+				})
+				if err != nil {
+					failColor.Printf("✗ Provider error on task %d: %v\n", nextTask.ID, err)
+					nextTask.Status = pm.TaskFailed
+					s.Status = "complete"
+					s.Save()
+					return nil
+				}
+
+				duration := time.Since(start)
+				stepResult := state.StepResult{
+					Task:         fmt.Sprintf("Evolve Task %d: %s", nextTask.ID, nextTask.Title),
+					Output:       result.Output,
+					Duration:     duration.Round(time.Second).String(),
+					Time:         time.Now(),
+					InputTokens:  result.InputTokens,
+					OutputTokens: result.OutputTokens,
+				}
+				s.TotalInputTokens += result.InputTokens
+				s.TotalOutputTokens += result.OutputTokens
+				s.AddStep(stepResult)
+
+				printOutput(result.Output, dimColor, o.config.Verbose)
+				dimColor.Printf("  [%s, provider: %s]\n\n", duration.Round(time.Second), result.Provider)
+
+				completedAt := time.Now()
+				nextTask.CompletedAt = &completedAt
+				nextTask.Result = truncate(result.Output, 500)
+
+				signal := pm.CheckTaskSignal(result.Output)
+				switch signal {
+				case pm.TaskDone:
+					nextTask.Status = pm.TaskDone
+					successColor.Printf("✓ Evolve task %d complete: %s\n\n", nextTask.ID, nextTask.Title)
+				case pm.TaskSkipped:
+					nextTask.Status = pm.TaskSkipped
+					dimColor.Printf("→ Evolve task %d skipped: %s\n\n", nextTask.ID, nextTask.Title)
+				case pm.TaskFailed:
+					nextTask.Status = pm.TaskFailed
+					failColor.Printf("✗ Evolve task %d failed: %s\n\n", nextTask.ID, nextTask.Title)
+				default:
+					nextTask.Status = pm.TaskDone
+					successColor.Printf("✓ Evolve task %d complete (no signal): %s\n\n", nextTask.ID, nextTask.Title)
+				}
+				s.Save()
+				continue
+			}
+
+			// All tasks done — discover new ones via AI before falling back to free-form.
+			if s.Plan.IsComplete() {
+				n, err := o.evolvePM(ctx)
+				if err != nil {
+					evolveColor.Printf("\n⏹ Evolve task discovery failed: %v\n", err)
+					s.Status = "complete"
+					s.Save()
+					return nil
+				}
+				if n > 0 {
+					continue // execute the newly discovered tasks
+				}
+				// No new tasks — fall through to free-form evolve below
+			}
 		}
 
 		s.EvolveStep++

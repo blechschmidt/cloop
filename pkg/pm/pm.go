@@ -488,6 +488,100 @@ func AdaptiveReplanPrompt(goal, instructions string, plan *Plan, failedTask *Tas
 	return b.String()
 }
 
+// EvolveDiscoverPrompt builds a prompt asking the AI to discover new improvement tasks
+// for auto-evolve mode after the current plan is complete.
+func EvolveDiscoverPrompt(goal, instructions string, plan *Plan, evolveStep int, innovate bool) string {
+	var b strings.Builder
+	b.WriteString("You are an AI product manager in AUTO-EVOLVE mode.\n")
+	b.WriteString("The current task plan is complete. Your job is to discover new improvement tasks\n")
+	b.WriteString("to continuously evolve and improve the project.\n\n")
+
+	b.WriteString(fmt.Sprintf("## PROJECT GOAL\n%s\n\n", goal))
+	if instructions != "" {
+		b.WriteString(fmt.Sprintf("## CONSTRAINTS\n%s\n\n", instructions))
+	}
+
+	b.WriteString(fmt.Sprintf("## EVOLVE ITERATION\n#%d\n\n", evolveStep))
+
+	// Show completed tasks
+	done := []*Task{}
+	for _, t := range plan.Tasks {
+		if t.Status == TaskDone || t.Status == TaskSkipped {
+			done = append(done, t)
+		}
+	}
+	if len(done) > 0 {
+		b.WriteString("## COMPLETED TASKS\n")
+		for _, t := range done {
+			b.WriteString(fmt.Sprintf("- [x] Task %d [P%d]: %s\n", t.ID, t.Priority, t.Title))
+			if t.Result != "" {
+				summary := t.Result
+				if len(summary) > 150 {
+					summary = summary[:150] + "..."
+				}
+				b.WriteString(fmt.Sprintf("  Summary: %s\n", strings.ReplaceAll(summary, "\n", " ")))
+			}
+		}
+		b.WriteString("\n")
+	}
+
+	// Find highest existing ID
+	maxID := 0
+	for _, t := range plan.Tasks {
+		if t.ID > maxID {
+			maxID = t.ID
+		}
+	}
+
+	if innovate {
+		b.WriteString("## INNOVATION MODE\n")
+		b.WriteString("Think creatively and unconventionally. Explore novel capabilities,\n")
+		b.WriteString("cross-cutting improvements, or anything that would make this project stand out.\n\n")
+	}
+
+	b.WriteString("## INSTRUCTIONS\n")
+	b.WriteString("Analyze the completed work and propose 1-5 NEW improvement tasks.\n")
+	b.WriteString("Focus on: new features, tests, documentation, performance, security, UX improvements, refactoring.\n")
+	b.WriteString("Each task must be concrete and independently executable.\n")
+	b.WriteString(fmt.Sprintf("Assign IDs starting from %d.\n\n", maxID+1))
+	b.WriteString("If the project is already excellent and needs no further improvement, output: {\"tasks\":[]}\n\n")
+	b.WriteString("Output ONLY valid JSON (no explanation, no markdown):\n")
+	b.WriteString(fmt.Sprintf(`{"tasks":[{"id":%d,"title":"short title","description":"detailed description of what to implement","priority":1,"role":"backend","depends_on":[]}]}`, maxID+1))
+	b.WriteString("\n\nIf no new tasks: {\"tasks\":[]}")
+	return b.String()
+}
+
+// ParseEvolveTasks parses newly discovered tasks from evolve mode output,
+// ensuring IDs don't conflict with existing plan tasks.
+func ParseEvolveTasks(goal, output string, existing *Plan) ([]*Task, error) {
+	// Find highest existing ID to avoid collisions
+	maxID := 0
+	if existing != nil {
+		for _, t := range existing.Tasks {
+			if t.ID > maxID {
+				maxID = t.ID
+			}
+		}
+	}
+
+	newPlan, err := ParseTaskPlan(goal, output)
+	if err != nil {
+		return nil, err
+	}
+	if len(newPlan.Tasks) == 0 {
+		return nil, nil
+	}
+
+	// Re-assign IDs to avoid collisions with existing tasks
+	for i, t := range newPlan.Tasks {
+		if t.ID <= maxID {
+			t.ID = maxID + i + 1
+		}
+	}
+
+	return newPlan.Tasks, nil
+}
+
 // AdaptiveReplan calls the provider to re-plan remaining tasks after a failure.
 // It returns a new set of tasks to append/replace the pending tasks in the plan.
 func AdaptiveReplan(ctx context.Context, p provider.Provider, goal, instructions, model string, timeout time.Duration, plan *Plan, failedTask *Task, failureReason string) ([]*Task, error) {
