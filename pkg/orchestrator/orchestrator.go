@@ -24,6 +24,15 @@ type Config struct {
 	RetryFailed bool // retry failed tasks in PM mode
 	Replan      bool // force re-decompose goal (wipes existing plan, keeps history)
 
+	// MaxFailures is the number of consecutive task failures before PM mode stops (0 = default 3).
+	MaxFailures int
+
+	// ContextSteps is the number of recent steps to include in prompts (0 = default 3).
+	ContextSteps int
+
+	// StepDelay is the duration to wait between steps (0 = no delay).
+	StepDelay time.Duration
+
 	// Provider to use. If empty, falls back to state.Provider, then config.yaml, then claudecode.
 	ProviderName string
 
@@ -174,6 +183,16 @@ func (o *Orchestrator) runLoop(ctx context.Context) error {
 		}
 
 		s.Save()
+
+		if o.config.StepDelay > 0 {
+			select {
+			case <-ctx.Done():
+				s.Status = "paused"
+				s.Save()
+				return ctx.Err()
+			case <-time.After(o.config.StepDelay):
+			}
+		}
 	}
 
 	color.New(color.FgYellow).Printf("⏸ Reached max steps (%d). Run 'cloop run' to continue or 'cloop run --add-steps N' to extend.\n", s.MaxSteps)
@@ -256,7 +275,10 @@ func (o *Orchestrator) runPM(ctx context.Context) error {
 
 	// Phase 2: Execute tasks in priority order
 	consecutiveErrors := 0
-	const maxConsecutiveErrors = 3
+	maxConsecutiveErrors := o.config.MaxFailures
+	if maxConsecutiveErrors <= 0 {
+		maxConsecutiveErrors = 3
+	}
 
 	for {
 		select {
@@ -372,6 +394,16 @@ func (o *Orchestrator) runPM(ctx context.Context) error {
 			consecutiveErrors = 0
 		}
 		s.Save()
+
+		if o.config.StepDelay > 0 {
+			select {
+			case <-ctx.Done():
+				s.Status = "paused"
+				s.Save()
+				return ctx.Err()
+			case <-time.After(o.config.StepDelay):
+			}
+		}
 	}
 
 	s.Status = "paused"
@@ -399,7 +431,11 @@ func (o *Orchestrator) buildPrompt() string {
 		b.WriteString(fmt.Sprintf("## PROGRESS\nStep %d (no step limit).\n\n", s.CurrentStep+1))
 	}
 
-	recent := s.LastNSteps(3)
+	contextSteps := o.config.ContextSteps
+	if contextSteps <= 0 {
+		contextSteps = 3
+	}
+	recent := s.LastNSteps(contextSteps)
 	if len(recent) > 0 {
 		b.WriteString("## RECENT STEPS\n")
 		for _, step := range recent {

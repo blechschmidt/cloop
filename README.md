@@ -160,6 +160,9 @@ cloop run --pm --retry-failed # retry previously failed tasks
 | `--pm` | `false` | Product Manager mode |
 | `--plan-only` | `false` | PM mode: decompose tasks but don't execute |
 | `--retry-failed` | `false` | PM mode: retry failed tasks |
+| `--max-failures` | `3` | PM mode: consecutive task failures before stopping |
+| `--context-steps` | `3` | Recent steps to include in prompts (0 = none) |
+| `--step-delay` | | Delay between steps (e.g. `5s`, `1m`) |
 | `-v, --verbose` | `false` | Verbose output |
 
 **Stopping:** Press `Ctrl+C` to pause gracefully. Run `cloop run` again to resume.

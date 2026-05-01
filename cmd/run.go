@@ -28,6 +28,9 @@ var (
 	planOnly        bool
 	retryFailed     bool
 	replan          bool
+	maxFailures     int
+	contextSteps    int
+	stepDelay       string
 )
 
 var runCmd = &cobra.Command{
@@ -43,6 +46,14 @@ Press Ctrl+C to pause gracefully.`,
 		timeout, err := time.ParseDuration(stepTimeout)
 		if err != nil {
 			return fmt.Errorf("invalid step-timeout: %w", err)
+		}
+
+		var delay time.Duration
+		if stepDelay != "" {
+			delay, err = time.ParseDuration(stepDelay)
+			if err != nil {
+				return fmt.Errorf("invalid step-delay: %w", err)
+			}
 		}
 
 		// Load config
@@ -113,6 +124,9 @@ Press Ctrl+C to pause gracefully.`,
 			PlanOnly:     planOnly,
 			RetryFailed:  retryFailed,
 			Replan:       replan,
+			MaxFailures:  maxFailures,
+			ContextSteps: contextSteps,
+			StepDelay:    delay,
 			ProviderName: providerName,
 			ProviderCfg:  provCfg,
 		}
@@ -173,5 +187,8 @@ func init() {
 	runCmd.Flags().BoolVar(&planOnly, "plan-only", false, "PM mode: decompose goal into tasks but do not execute (implies --pm)")
 	runCmd.Flags().BoolVar(&retryFailed, "retry-failed", false, "PM mode: retry tasks that previously failed")
 	runCmd.Flags().BoolVar(&replan, "replan", false, "PM mode: discard existing plan and re-decompose the goal (implies --pm)")
+	runCmd.Flags().IntVar(&maxFailures, "max-failures", 3, "PM mode: consecutive task failures before stopping")
+	runCmd.Flags().IntVar(&contextSteps, "context-steps", 3, "Recent steps to include in prompts (0 = none)")
+	runCmd.Flags().StringVar(&stepDelay, "step-delay", "", "Delay between steps (e.g. 5s, 1m)")
 	rootCmd.AddCommand(runCmd)
 }

@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -704,6 +705,179 @@ func TestRunPM_Replan_ClearsExistingPlan(t *testing.T) {
 	}
 	if o.state.Plan.Tasks[0].Title != "New Task" {
 		t.Errorf("expected new task title, got %q", o.state.Plan.Tasks[0].Title)
+	}
+}
+
+// --- MaxFailures ---
+
+func TestRunPM_MaxFailures_DefaultIsThree(t *testing.T) {
+	dir := tempDir(t)
+	s := initState(t, dir, "goal", 0)
+	s.PMMode = true
+	s.Plan = &pm.Plan{
+		Goal: "goal",
+		Tasks: []*pm.Task{
+			{ID: 1, Title: "Task A", Priority: 1, Status: pm.TaskPending},
+			{ID: 2, Title: "Task B", Priority: 2, Status: pm.TaskPending},
+			{ID: 3, Title: "Task C", Priority: 3, Status: pm.TaskPending},
+		},
+	}
+	s.Save()
+
+	// All tasks fail → default max (3) should stop after 3 consecutive failures
+	prov := &mockProvider{
+		name: "mock",
+		results: []*provider.Result{
+			{Output: "fail\nTASK_FAILED", Provider: "mock"},
+			{Output: "fail\nTASK_FAILED", Provider: "mock"},
+			{Output: "fail\nTASK_FAILED", Provider: "mock"},
+		},
+	}
+	o := newOrchestrator(t, dir, Config{WorkDir: dir, PMMode: true}, prov)
+	err := o.runPM(context.Background())
+	if err == nil {
+		t.Error("expected error after max consecutive failures")
+	}
+	if o.state.Status != "failed" {
+		t.Errorf("expected status=failed, got %q", o.state.Status)
+	}
+	if prov.calls != 3 {
+		t.Errorf("expected 3 provider calls, got %d", prov.calls)
+	}
+}
+
+func TestRunPM_MaxFailures_CustomValue(t *testing.T) {
+	dir := tempDir(t)
+	s := initState(t, dir, "goal", 0)
+	s.PMMode = true
+	s.Plan = &pm.Plan{
+		Goal: "goal",
+		Tasks: []*pm.Task{
+			{ID: 1, Title: "Task A", Priority: 1, Status: pm.TaskPending},
+			{ID: 2, Title: "Task B", Priority: 2, Status: pm.TaskPending},
+		},
+	}
+	s.Save()
+
+	// With max-failures=1, should stop after the first failure
+	prov := &mockProvider{
+		name: "mock",
+		results: []*provider.Result{
+			{Output: "fail\nTASK_FAILED", Provider: "mock"},
+			{Output: "done\nTASK_DONE", Provider: "mock"},
+		},
+	}
+	o := newOrchestrator(t, dir, Config{WorkDir: dir, PMMode: true, MaxFailures: 1}, prov)
+	err := o.runPM(context.Background())
+	if err == nil {
+		t.Error("expected error after 1 consecutive failure with MaxFailures=1")
+	}
+	if prov.calls != 1 {
+		t.Errorf("expected 1 provider call, got %d", prov.calls)
+	}
+}
+
+func TestRunPM_MaxFailures_ResetOnSuccess(t *testing.T) {
+	dir := tempDir(t)
+	s := initState(t, dir, "goal", 0)
+	s.PMMode = true
+	s.Plan = &pm.Plan{
+		Goal: "goal",
+		Tasks: []*pm.Task{
+			{ID: 1, Title: "Task A", Priority: 1, Status: pm.TaskPending},
+			{ID: 2, Title: "Task B", Priority: 2, Status: pm.TaskPending},
+			{ID: 3, Title: "Task C", Priority: 3, Status: pm.TaskPending},
+		},
+	}
+	s.Save()
+
+	// fail, then succeed, then fail — with max-failures=2, should not stop (counter resets on success)
+	prov := &mockProvider{
+		name: "mock",
+		results: []*provider.Result{
+			{Output: "fail\nTASK_FAILED", Provider: "mock"},
+			{Output: "done\nTASK_DONE", Provider: "mock"},
+			{Output: "fail\nTASK_FAILED", Provider: "mock"},
+		},
+	}
+	o := newOrchestrator(t, dir, Config{WorkDir: dir, PMMode: true, MaxFailures: 2}, prov)
+	err := o.runPM(context.Background())
+	if err != nil {
+		t.Errorf("expected no error (counter reset on success), got: %v", err)
+	}
+	// All 3 tasks processed; 2 failed, 1 done — plan is complete (no more pending)
+	if o.state.Status != "paused" && o.state.Status != "complete" {
+		t.Errorf("unexpected status: %q", o.state.Status)
+	}
+}
+
+// --- ContextSteps ---
+
+func TestBuildPrompt_ContextSteps_Default(t *testing.T) {
+	dir := tempDir(t)
+	s := initState(t, dir, "goal", 0)
+	// Add 5 steps
+	for i := 0; i < 5; i++ {
+		s.AddStep(state.StepResult{
+			Task:     "task",
+			Output:   fmt.Sprintf("step output %d", i),
+			Duration: "1s",
+			Time:     time.Now(),
+		})
+	}
+	s.Save()
+
+	// Default (ContextSteps=0 → uses 3)
+	o := newOrchestrator(t, dir, Config{WorkDir: dir}, &mockProvider{name: "mock"})
+	prompt := o.buildPrompt()
+
+	// Should include only last 3 steps (2, 3, 4), not first 2 (0, 1)
+	if strings.Contains(prompt, "step output 0") {
+		t.Error("expected step 0 to be excluded (only last 3 included)")
+	}
+	if strings.Contains(prompt, "step output 1") {
+		t.Error("expected step 1 to be excluded (only last 3 included)")
+	}
+	if !strings.Contains(prompt, "step output 4") {
+		t.Error("expected step 4 to be included")
+	}
+}
+
+func TestBuildPrompt_ContextSteps_Custom(t *testing.T) {
+	dir := tempDir(t)
+	s := initState(t, dir, "goal", 0)
+	for i := 0; i < 5; i++ {
+		s.AddStep(state.StepResult{
+			Task:     "task",
+			Output:   fmt.Sprintf("step output %d", i),
+			Duration: "1s",
+			Time:     time.Now(),
+		})
+	}
+	s.Save()
+
+	// ContextSteps=1 — only include the most recent step
+	o := newOrchestrator(t, dir, Config{WorkDir: dir, ContextSteps: 1}, &mockProvider{name: "mock"})
+	prompt := o.buildPrompt()
+
+	if !strings.Contains(prompt, "step output 4") {
+		t.Error("expected most recent step to be included")
+	}
+	if strings.Contains(prompt, "step output 3") {
+		t.Error("expected step 3 to be excluded with ContextSteps=1")
+	}
+}
+
+func TestBuildPrompt_ContextSteps_Zero_UsesDefault(t *testing.T) {
+	dir := tempDir(t)
+	s := initState(t, dir, "goal", 0)
+	s.AddStep(state.StepResult{Task: "t", Output: "only step", Duration: "1s", Time: time.Now()})
+	s.Save()
+
+	o := newOrchestrator(t, dir, Config{WorkDir: dir, ContextSteps: 0}, &mockProvider{name: "mock"})
+	prompt := o.buildPrompt()
+	if !strings.Contains(prompt, "only step") {
+		t.Error("ContextSteps=0 should include steps using default (3)")
 	}
 }
 
