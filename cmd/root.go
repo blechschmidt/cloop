@@ -40,6 +40,11 @@ Supports Anthropic (Claude API), OpenAI, Ollama (local), and Claude Code.
   cloop router set backend anthropic        # route backend tasks to Claude
   cloop router set frontend openai          # route frontend tasks to GPT-4o
   cloop router list                         # show routing table
+  cloop standup                             # AI daily standup report
+  cloop standup --post                      # post standup to Slack webhook
+  cloop standup --save                      # save to .cloop/standup-DATE.md
+  cloop prioritize                          # AI task reprioritization suggestions
+  cloop prioritize --apply                  # apply priority changes
   cloop status
   cloop log`,
 }
