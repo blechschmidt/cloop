@@ -34,6 +34,7 @@ Supports Anthropic (Claude API), OpenAI, Ollama (local), and Claude Code.
   cloop github sync                         # import GitHub issues as tasks
   cloop github push --done                  # export tasks + close done issues
   cloop github prs                          # PR list with CI status
+  cloop chat                                # interactive conversational PM interface
   cloop status
   cloop log`,
 }
