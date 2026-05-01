@@ -13,12 +13,14 @@ import (
 const stateFile = ".cloop/state.json"
 
 type StepResult struct {
-	Step     int       `json:"step"`
-	Task     string    `json:"task"`
-	Output   string    `json:"output"`
-	ExitCode int       `json:"exit_code"`
-	Duration string    `json:"duration"`
-	Time     time.Time `json:"time"`
+	Step         int       `json:"step"`
+	Task         string    `json:"task"`
+	Output       string    `json:"output"`
+	ExitCode     int       `json:"exit_code"`
+	Duration     string    `json:"duration"`
+	Time         time.Time `json:"time"`
+	InputTokens  int       `json:"input_tokens,omitempty"`
+	OutputTokens int       `json:"output_tokens,omitempty"`
 }
 
 type ProjectState struct {
@@ -41,6 +43,10 @@ type ProjectState struct {
 	// Product manager mode
 	PMMode bool      `json:"pm_mode,omitempty"`
 	Plan   *pm.Plan  `json:"plan,omitempty"`
+
+	// Cumulative token usage across all steps
+	TotalInputTokens  int `json:"total_input_tokens,omitempty"`
+	TotalOutputTokens int `json:"total_output_tokens,omitempty"`
 }
 
 func StatePath(workdir string) string {
