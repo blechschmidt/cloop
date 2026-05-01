@@ -375,3 +375,53 @@ func TestExecuteTaskPrompt_ShowsPendingTasks(t *testing.T) {
 		t.Errorf("prompt missing current task title")
 	}
 }
+
+func TestExecuteTaskPrompt_IncludesCompletedTaskResult(t *testing.T) {
+	done := &Task{
+		ID:     1,
+		Title:  "Setup DB",
+		Status: TaskDone,
+		Result: "Created schema with users and products tables.",
+	}
+	current := &Task{ID: 2, Title: "Add API", Status: TaskPending}
+	plan := &Plan{Goal: "goal", Tasks: []*Task{done, current}}
+	prompt := ExecuteTaskPrompt("goal", "", plan, current)
+	if !strings.Contains(prompt, "Created schema") {
+		t.Errorf("prompt missing result summary from completed task")
+	}
+}
+
+func TestExecuteTaskPrompt_TruncatesLongResult(t *testing.T) {
+	longResult := strings.Repeat("x", 300)
+	done := &Task{ID: 1, Title: "Big task", Status: TaskDone, Result: longResult}
+	current := &Task{ID: 2, Title: "Next", Status: TaskPending}
+	plan := &Plan{Goal: "goal", Tasks: []*Task{done, current}}
+	prompt := ExecuteTaskPrompt("goal", "", plan, current)
+	// Result should be truncated to 200 chars + "..."
+	if strings.Contains(prompt, longResult) {
+		t.Errorf("prompt should truncate long result, but full result found")
+	}
+	if !strings.Contains(prompt, "...") {
+		t.Errorf("prompt should contain truncation marker '...'")
+	}
+}
+
+func TestExecuteTaskPrompt_SkippedTaskUsesMinusMarker(t *testing.T) {
+	skipped := &Task{ID: 1, Title: "Optional", Status: TaskSkipped}
+	current := &Task{ID: 2, Title: "Main", Status: TaskPending}
+	plan := &Plan{Goal: "goal", Tasks: []*Task{skipped, current}}
+	prompt := ExecuteTaskPrompt("goal", "", plan, current)
+	if !strings.Contains(prompt, "[-]") {
+		t.Errorf("skipped task should use [-] marker")
+	}
+}
+
+func TestExecuteTaskPrompt_NoResultOmitsSummaryLine(t *testing.T) {
+	done := &Task{ID: 1, Title: "Done task", Status: TaskDone, Result: ""}
+	current := &Task{ID: 2, Title: "Next", Status: TaskPending}
+	plan := &Plan{Goal: "goal", Tasks: []*Task{done, current}}
+	prompt := ExecuteTaskPrompt("goal", "", plan, current)
+	if strings.Contains(prompt, "Summary:") {
+		t.Errorf("prompt should not include 'Summary:' when result is empty")
+	}
+}

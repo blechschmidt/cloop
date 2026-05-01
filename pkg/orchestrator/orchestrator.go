@@ -22,6 +22,7 @@ type Config struct {
 	PMMode      bool
 	PlanOnly    bool // only decompose tasks, don't execute them
 	RetryFailed bool // retry failed tasks in PM mode
+	Replan      bool // force re-decompose goal (wipes existing plan, keeps history)
 
 	// Provider to use. If empty, falls back to state.Provider, then config.yaml, then claudecode.
 	ProviderName string
@@ -200,6 +201,13 @@ func (o *Orchestrator) runPM(ctx context.Context) error {
 	fmt.Printf("   Provider: %s\n", o.provider.Name())
 	fmt.Printf("   Goal: %s\n", s.Goal)
 	fmt.Println()
+
+	// If --replan requested, clear existing plan and force re-decomposition.
+	if o.config.Replan && s.Plan != nil {
+		pmColor.Printf("Replanning: clearing existing plan (%d tasks) and re-decomposing.\n\n", len(s.Plan.Tasks))
+		s.Plan = nil
+		s.Save()
+	}
 
 	// Phase 1: Decompose goal into tasks (if not already done)
 	if s.Plan == nil || len(s.Plan.Tasks) == 0 {

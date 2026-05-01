@@ -27,6 +27,7 @@ var (
 	pmMode          bool
 	planOnly        bool
 	retryFailed     bool
+	replan          bool
 )
 
 var runCmd = &cobra.Command{
@@ -95,8 +96,8 @@ Press Ctrl+C to pause gracefully.`,
 			return fmt.Errorf("provider: %w", err)
 		}
 
-		// Merge PM mode: flag | plan-only flag | persisted state
-		effectivePMMode := pmMode || planOnly
+		// Merge PM mode: flag | plan-only | replan | persisted state
+		effectivePMMode := pmMode || planOnly || replan
 		if !effectivePMMode && projectState != nil && projectState.PMMode {
 			effectivePMMode = true
 		}
@@ -111,6 +112,7 @@ Press Ctrl+C to pause gracefully.`,
 			PMMode:       effectivePMMode,
 			PlanOnly:     planOnly,
 			RetryFailed:  retryFailed,
+			Replan:       replan,
 			ProviderName: providerName,
 			ProviderCfg:  provCfg,
 		}
@@ -170,5 +172,6 @@ func init() {
 	runCmd.Flags().BoolVar(&pmMode, "pm", false, "Product manager mode: decompose goal into tasks and execute them")
 	runCmd.Flags().BoolVar(&planOnly, "plan-only", false, "PM mode: decompose goal into tasks but do not execute (implies --pm)")
 	runCmd.Flags().BoolVar(&retryFailed, "retry-failed", false, "PM mode: retry tasks that previously failed")
+	runCmd.Flags().BoolVar(&replan, "replan", false, "PM mode: discard existing plan and re-decompose the goal (implies --pm)")
 	rootCmd.AddCommand(runCmd)
 }

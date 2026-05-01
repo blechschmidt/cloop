@@ -127,7 +127,19 @@ func ExecuteTaskPrompt(goal, instructions string, plan *Plan, task *Task) string
 	if len(done) > 0 {
 		b.WriteString("## COMPLETED TASKS (for context)\n")
 		for _, t := range done {
-			b.WriteString(fmt.Sprintf("- [x] Task %d: %s\n", t.ID, t.Title))
+			marker := "[x]"
+			if t.Status == TaskSkipped {
+				marker = "[-]"
+			}
+			b.WriteString(fmt.Sprintf("- %s Task %d: %s\n", marker, t.ID, t.Title))
+			if t.Result != "" {
+				summary := t.Result
+				if len(summary) > 200 {
+					summary = summary[:200] + "..."
+				}
+				// Indent result lines for readability
+				b.WriteString(fmt.Sprintf("  Summary: %s\n", strings.ReplaceAll(summary, "\n", " ")))
+			}
 		}
 		b.WriteString("\n")
 	}

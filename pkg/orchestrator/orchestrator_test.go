@@ -670,6 +670,43 @@ func TestRun_DispatchesLoop(t *testing.T) {
 	}
 }
 
+// --- Replan ---
+
+func TestRunPM_Replan_ClearsExistingPlan(t *testing.T) {
+	dir := tempDir(t)
+	s := initState(t, dir, "goal", 0)
+	s.PMMode = true
+	// Pre-existing plan — should be wiped by Replan
+	s.Plan = &pm.Plan{
+		Goal: "goal",
+		Tasks: []*pm.Task{
+			{ID: 1, Title: "Old Task", Priority: 1, Status: pm.TaskDone},
+		},
+	}
+	s.Save()
+
+	// The provider returns a new plan JSON, then executes the single new task
+	newPlanJSON := `{"tasks":[{"id":1,"title":"New Task","description":"fresh task","priority":1}]}`
+	prov := &mockProvider{
+		name: "mock",
+		results: []*provider.Result{
+			{Output: newPlanJSON, Provider: "mock"},                     // decompose
+			{Output: "finished new task\nTASK_DONE", Provider: "mock"}, // execute
+		},
+	}
+	o := newOrchestrator(t, dir, Config{WorkDir: dir, PMMode: true, Replan: true}, prov)
+	if err := o.runPM(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(o.state.Plan.Tasks) != 1 {
+		t.Fatalf("expected 1 task in new plan, got %d", len(o.state.Plan.Tasks))
+	}
+	if o.state.Plan.Tasks[0].Title != "New Task" {
+		t.Errorf("expected new task title, got %q", o.state.Plan.Tasks[0].Title)
+	}
+}
+
 // --- buildEvolvePrompt ---
 
 func TestBuildEvolvePrompt_ContainsOriginalGoal(t *testing.T) {
