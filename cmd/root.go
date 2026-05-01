@@ -61,6 +61,10 @@ Supports Anthropic (Claude API), OpenAI, Ollama (local), and Claude Code.
   cloop review --format md -o review.md                 # save review as markdown
   cloop ui                                              # web dashboard (localhost:8080)
   cloop ui --port 9090                                  # custom port
+  cloop suggest                                         # AI brainstorms 5 feature ideas interactively
+  cloop suggest --count 10                              # brainstorm 10 ideas
+  cloop suggest --yes                                   # auto-accept all suggestions
+  cloop suggest --dry-run                               # show ideas without adding tasks
   cloop status
   cloop log`,
 }
