@@ -493,9 +493,7 @@ func (o *Orchestrator) buildEvolvePrompt() string {
 	b.WriteString("3. Implement it\n")
 	b.WriteString("4. Verify it works\n")
 	b.WriteString("5. Summarize what you added and why\n\n")
-	b.WriteString("Pick ONE focused improvement per iteration. Make it count.\n\n")
-	b.WriteString("After completing your changes, run: git add -A && git commit -m \"<summary>\" && GIT_SSH_COMMAND=\"ssh -i ~/.ssh/id_ed25519\" git push\n")
-	b.WriteString("This ensures each iteration is pushed to the remote repository.\n")
+	b.WriteString("Pick ONE focused improvement per iteration. Make it count.\n")
 
 	return b.String()
 }

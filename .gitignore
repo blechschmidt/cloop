@@ -1,0 +1,15 @@
+# Binary
+cloop
+cloop.exe
+
+# cloop state
+.cloop/
+
+# Go
+*.test
+*.out
+vendor/
+
+# OS
+.DS_Store
+Thumbs.db
