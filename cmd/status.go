@@ -75,6 +75,10 @@ var statusCmd = &cobra.Command{
 		fmt.Printf("Created:  %s\n", s.CreatedAt.Format("2006-01-02 15:04"))
 		fmt.Printf("Updated:  %s\n", s.UpdatedAt.Format("2006-01-02 15:04"))
 
+		if s.TotalInputTokens > 0 || s.TotalOutputTokens > 0 {
+			fmt.Printf("Tokens:   %d in / %d out\n", s.TotalInputTokens, s.TotalOutputTokens)
+		}
+
 		if len(s.Steps) > 0 {
 			last := s.Steps[len(s.Steps)-1]
 			fmt.Printf("\nLast step (#%d): %s, %s\n", last.Step+1, last.Task, last.Duration)

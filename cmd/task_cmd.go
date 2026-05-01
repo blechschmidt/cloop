@@ -75,6 +75,48 @@ var taskDoneCmd = &cobra.Command{
 	},
 }
 
+var taskRemoveCmd = &cobra.Command{
+	Use:     "remove <id>",
+	Aliases: []string{"rm", "delete"},
+	Short:   "Remove a task from the plan",
+	Args:    cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		workdir, _ := os.Getwd()
+		s, err := state.Load(workdir)
+		if err != nil {
+			return err
+		}
+		if !s.PMMode || s.Plan == nil {
+			return fmt.Errorf("no task plan found — run 'cloop run --pm' to create one")
+		}
+
+		id, err := strconv.Atoi(args[0])
+		if err != nil {
+			return fmt.Errorf("invalid task ID %q: must be a number", args[0])
+		}
+
+		idx := -1
+		for i, t := range s.Plan.Tasks {
+			if t.ID == id {
+				idx = i
+				break
+			}
+		}
+		if idx == -1 {
+			return fmt.Errorf("task %d not found", id)
+		}
+
+		removed := s.Plan.Tasks[idx]
+		s.Plan.Tasks = append(s.Plan.Tasks[:idx], s.Plan.Tasks[idx+1:]...)
+		if err := s.Save(); err != nil {
+			return err
+		}
+
+		color.New(color.FgYellow).Printf("Removed task %d: %s\n", removed.ID, removed.Title)
+		return nil
+	},
+}
+
 var taskAddCmd = &cobra.Command{
 	Use:   "add <title>",
 	Short: "Add a new task to the plan",
@@ -237,5 +279,6 @@ func init() {
 	taskCmd.AddCommand(taskResetCmd)
 	taskCmd.AddCommand(taskDoneCmd)
 	taskCmd.AddCommand(taskAddCmd)
+	taskCmd.AddCommand(taskRemoveCmd)
 	rootCmd.AddCommand(taskCmd)
 }

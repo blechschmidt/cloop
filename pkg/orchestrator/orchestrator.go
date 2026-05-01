@@ -140,12 +140,16 @@ func (o *Orchestrator) runLoop(ctx context.Context) error {
 		duration := time.Since(start)
 
 		stepResult := state.StepResult{
-			Task:     fmt.Sprintf("Step %d", step),
-			Output:   result.Output,
-			ExitCode: 0,
-			Duration: duration.Round(time.Second).String(),
-			Time:     time.Now(),
+			Task:         fmt.Sprintf("Step %d", step),
+			Output:       result.Output,
+			ExitCode:     0,
+			Duration:     duration.Round(time.Second).String(),
+			Time:         time.Now(),
+			InputTokens:  result.InputTokens,
+			OutputTokens: result.OutputTokens,
 		}
+		s.TotalInputTokens += result.InputTokens
+		s.TotalOutputTokens += result.OutputTokens
 		s.AddStep(stepResult)
 
 		printOutput(result.Output, dimColor)
@@ -311,11 +315,15 @@ func (o *Orchestrator) runPM(ctx context.Context) error {
 
 		duration := time.Since(start)
 		stepResult := state.StepResult{
-			Task:     fmt.Sprintf("Task %d: %s", task.ID, task.Title),
-			Output:   result.Output,
-			Duration: duration.Round(time.Second).String(),
-			Time:     time.Now(),
+			Task:         fmt.Sprintf("Task %d: %s", task.ID, task.Title),
+			Output:       result.Output,
+			Duration:     duration.Round(time.Second).String(),
+			Time:         time.Now(),
+			InputTokens:  result.InputTokens,
+			OutputTokens: result.OutputTokens,
 		}
+		s.TotalInputTokens += result.InputTokens
+		s.TotalOutputTokens += result.OutputTokens
 		s.AddStep(stepResult)
 
 		printOutput(result.Output, dimColor)
@@ -444,11 +452,15 @@ func (o *Orchestrator) evolve(ctx context.Context) error {
 		}
 
 		stepResult := state.StepResult{
-			Task:     fmt.Sprintf("Evolve #%d", s.EvolveStep),
-			Output:   result.Output,
-			Duration: result.Duration.Round(time.Second).String(),
-			Time:     time.Now(),
+			Task:         fmt.Sprintf("Evolve #%d", s.EvolveStep),
+			Output:       result.Output,
+			Duration:     result.Duration.Round(time.Second).String(),
+			Time:         time.Now(),
+			InputTokens:  result.InputTokens,
+			OutputTokens: result.OutputTokens,
 		}
+		s.TotalInputTokens += result.InputTokens
+		s.TotalOutputTokens += result.OutputTokens
 		s.AddStep(stepResult)
 
 		printOutput(result.Output, dimColor)
