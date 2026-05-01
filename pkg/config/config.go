@@ -20,6 +20,7 @@ type Config struct {
 	Ollama     OllamaConfig     `yaml:"ollama"`
 	ClaudeCode ClaudeCodeConfig `yaml:"claudecode"`
 	Webhook    WebhookConfig    `yaml:"webhook,omitempty"`
+	GitHub     GitHubConfig     `yaml:"github,omitempty"`
 }
 
 // WebhookConfig holds outbound notification settings.
@@ -56,6 +57,16 @@ type OllamaConfig struct {
 
 type ClaudeCodeConfig struct {
 	Model string `yaml:"model"`
+}
+
+// GitHubConfig holds GitHub integration settings.
+type GitHubConfig struct {
+	// Personal access token (falls back to GITHUB_TOKEN env var)
+	Token string `yaml:"token,omitempty"`
+	// Default repo in "owner/repo" format (falls back to git remote detection)
+	Repo string `yaml:"repo,omitempty"`
+	// Labels added to issues created by cloop push
+	Labels []string `yaml:"labels,omitempty"`
 }
 
 // Default returns a Config with sensible defaults.
@@ -120,6 +131,9 @@ func (c *Config) applyEnvVars() {
 	}
 	if v := os.Getenv("OLLAMA_BASE_URL"); v != "" {
 		c.Ollama.BaseURL = v
+	}
+	if v := os.Getenv("GITHUB_TOKEN"); v != "" {
+		c.GitHub.Token = v
 	}
 }
 

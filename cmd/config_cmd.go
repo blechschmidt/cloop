@@ -45,6 +45,9 @@ var configShowCmd = &cobra.Command{
 		if displayCfg.OpenAI.APIKey != "" {
 			displayCfg.OpenAI.APIKey = maskSecret(displayCfg.OpenAI.APIKey)
 		}
+		if displayCfg.GitHub.Token != "" {
+			displayCfg.GitHub.Token = maskSecret(displayCfg.GitHub.Token)
+		}
 
 		data, err := yaml.Marshal(&displayCfg)
 		if err != nil {
@@ -133,8 +136,26 @@ func applyConfigKey(cfg *config.Config, key, value string) error {
 			cfg.Webhook.Events = events
 		}
 
+	case "github.token":
+		cfg.GitHub.Token = value
+	case "github.repo":
+		cfg.GitHub.Repo = value
+	case "github.labels":
+		if value == "" {
+			cfg.GitHub.Labels = nil
+		} else {
+			parts := strings.Split(value, ",")
+			labels := make([]string, 0, len(parts))
+			for _, p := range parts {
+				if l := strings.TrimSpace(p); l != "" {
+					labels = append(labels, l)
+				}
+			}
+			cfg.GitHub.Labels = labels
+		}
+
 	default:
-		return fmt.Errorf("unknown config key %q\n\nValid keys:\n  provider\n  anthropic.api_key, anthropic.model, anthropic.base_url\n  openai.api_key, openai.model, openai.base_url\n  ollama.base_url, ollama.model\n  claudecode.model\n  webhook.url, webhook.events", key)
+		return fmt.Errorf("unknown config key %q\n\nValid keys:\n  provider\n  anthropic.api_key, anthropic.model, anthropic.base_url\n  openai.api_key, openai.model, openai.base_url\n  ollama.base_url, ollama.model\n  claudecode.model\n  webhook.url, webhook.events\n  github.token, github.repo, github.labels", key)
 	}
 	return nil
 }
@@ -147,7 +168,7 @@ func maskSecret(s string) string {
 }
 
 func displayValue(key, value string) string {
-	if strings.Contains(key, "api_key") {
+	if strings.Contains(key, "api_key") || key == "github.token" {
 		return maskSecret(value)
 	}
 	return value

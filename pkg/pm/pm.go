@@ -101,12 +101,13 @@ type Task struct {
 	Description   string     `json:"description"`
 	Priority      int        `json:"priority"` // 1 = highest
 	Status        TaskStatus `json:"status"`
-	Role          AgentRole  `json:"role,omitempty"`      // specialized agent role for this task
+	Role          AgentRole  `json:"role,omitempty"`       // specialized agent role for this task
 	DependsOn     []int      `json:"depends_on,omitempty"` // IDs of tasks that must complete before this one
 	Result        string     `json:"result,omitempty"`
 	StartedAt     *time.Time `json:"started_at,omitempty"`
 	CompletedAt   *time.Time `json:"completed_at,omitempty"`
 	VerifyRetries int        `json:"verify_retries,omitempty"` // number of times task was re-queued by verifier
+	GitHubIssue   int        `json:"github_issue,omitempty"`   // linked GitHub issue number (0 = none)
 }
 
 // Plan is the full task plan for a goal.
