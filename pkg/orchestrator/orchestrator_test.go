@@ -242,7 +242,7 @@ func TestBuildPrompt_ContainsRecentSteps(t *testing.T) {
 	})
 	s.Save()
 
-	o := newOrchestrator(t, dir, Config{WorkDir: dir}, &mockProvider{name: "mock"})
+	o := newOrchestrator(t, dir, Config{WorkDir: dir, ContextSteps: 3}, &mockProvider{name: "mock"})
 	prompt := o.buildPrompt()
 	if !strings.Contains(prompt, "did something useful") {
 		t.Error("prompt missing recent step output")
@@ -813,7 +813,7 @@ func TestRunPM_MaxFailures_ResetOnSuccess(t *testing.T) {
 
 // --- ContextSteps ---
 
-func TestBuildPrompt_ContextSteps_Default(t *testing.T) {
+func TestBuildPrompt_ContextSteps_Three(t *testing.T) {
 	dir := tempDir(t)
 	s := initState(t, dir, "goal", 0)
 	// Add 5 steps
@@ -827,8 +827,8 @@ func TestBuildPrompt_ContextSteps_Default(t *testing.T) {
 	}
 	s.Save()
 
-	// Default (ContextSteps=0 → uses 3)
-	o := newOrchestrator(t, dir, Config{WorkDir: dir}, &mockProvider{name: "mock"})
+	// ContextSteps=3 → include last 3 steps
+	o := newOrchestrator(t, dir, Config{WorkDir: dir, ContextSteps: 3}, &mockProvider{name: "mock"})
 	prompt := o.buildPrompt()
 
 	// Should include only last 3 steps (2, 3, 4), not first 2 (0, 1)
@@ -843,7 +843,7 @@ func TestBuildPrompt_ContextSteps_Default(t *testing.T) {
 	}
 }
 
-func TestBuildPrompt_ContextSteps_Custom(t *testing.T) {
+func TestBuildPrompt_ContextSteps_One(t *testing.T) {
 	dir := tempDir(t)
 	s := initState(t, dir, "goal", 0)
 	for i := 0; i < 5; i++ {
@@ -868,16 +868,34 @@ func TestBuildPrompt_ContextSteps_Custom(t *testing.T) {
 	}
 }
 
-func TestBuildPrompt_ContextSteps_Zero_UsesDefault(t *testing.T) {
+func TestBuildPrompt_ContextSteps_Zero_DisablesContext(t *testing.T) {
 	dir := tempDir(t)
 	s := initState(t, dir, "goal", 0)
 	s.AddStep(state.StepResult{Task: "t", Output: "only step", Duration: "1s", Time: time.Now()})
 	s.Save()
 
+	// ContextSteps=0 means no context (disable step history in prompt)
 	o := newOrchestrator(t, dir, Config{WorkDir: dir, ContextSteps: 0}, &mockProvider{name: "mock"})
 	prompt := o.buildPrompt()
+	if strings.Contains(prompt, "only step") {
+		t.Error("ContextSteps=0 should exclude all steps from prompt")
+	}
+	if strings.Contains(prompt, "RECENT STEPS") {
+		t.Error("ContextSteps=0 should not include RECENT STEPS section")
+	}
+}
+
+func TestBuildPrompt_ContextSteps_Negative_UsesDefault(t *testing.T) {
+	dir := tempDir(t)
+	s := initState(t, dir, "goal", 0)
+	s.AddStep(state.StepResult{Task: "t", Output: "only step", Duration: "1s", Time: time.Now()})
+	s.Save()
+
+	// ContextSteps=-1 means use the default (3)
+	o := newOrchestrator(t, dir, Config{WorkDir: dir, ContextSteps: -1}, &mockProvider{name: "mock"})
+	prompt := o.buildPrompt()
 	if !strings.Contains(prompt, "only step") {
-		t.Error("ContextSteps=0 should include steps using default (3)")
+		t.Error("ContextSteps=-1 (use default) should include steps")
 	}
 }
 

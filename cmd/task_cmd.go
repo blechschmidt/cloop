@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -349,8 +350,15 @@ func printTaskList(plan *pm.Plan) {
 	failColor := color.New(color.FgRed)
 	warnColor := color.New(color.FgYellow)
 
+	// Sort by priority (lowest number = highest priority), stable to preserve insertion order for ties.
+	sorted := make([]*pm.Task, len(plan.Tasks))
+	copy(sorted, plan.Tasks)
+	sort.SliceStable(sorted, func(i, j int) bool {
+		return sorted[i].Priority < sorted[j].Priority
+	})
+
 	fmt.Printf("Tasks: %s\n\n", plan.Summary())
-	for _, t := range plan.Tasks {
+	for _, t := range sorted {
 		line := fmt.Sprintf("  %s #%d [P%d] %s\n", taskMarker(t.Status), t.ID, t.Priority, t.Title)
 		switch t.Status {
 		case pm.TaskDone:

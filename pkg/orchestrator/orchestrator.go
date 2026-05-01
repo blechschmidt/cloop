@@ -432,7 +432,7 @@ func (o *Orchestrator) buildPrompt() string {
 	}
 
 	contextSteps := o.config.ContextSteps
-	if contextSteps <= 0 {
+	if contextSteps < 0 {
 		contextSteps = 3
 	}
 	recent := s.LastNSteps(contextSteps)
