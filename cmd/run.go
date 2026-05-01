@@ -18,6 +18,7 @@ import (
 var (
 	runModel        string
 	stepTimeout     string
+	runTimeout      string
 	runMaxTokens    int
 	verbose         bool
 	dryRun          bool
@@ -148,8 +149,19 @@ Press Ctrl+C to pause gracefully.`,
 			orc.SetAutoEvolve(true)
 		}
 
-		// Handle Ctrl+C gracefully
-		ctx, cancel := context.WithCancel(context.Background())
+		// Build context: support total session timeout via --timeout flag.
+		var ctx context.Context
+		var cancel context.CancelFunc
+		if runTimeout != "" {
+			totalTimeout, err := time.ParseDuration(runTimeout)
+			if err != nil {
+				return fmt.Errorf("invalid --timeout: %w", err)
+			}
+			ctx, cancel = context.WithTimeout(context.Background(), totalTimeout)
+			fmt.Printf("Session timeout: %s\n", totalTimeout)
+		} else {
+			ctx, cancel = context.WithCancel(context.Background())
+		}
 		defer cancel()
 
 		sigCh := make(chan os.Signal, 1)
@@ -179,6 +191,7 @@ func autoSelectProvider() string {
 func init() {
 	runCmd.Flags().StringVar(&runModel, "model", "", "Override model for this run")
 	runCmd.Flags().StringVar(&stepTimeout, "step-timeout", "10m", "Timeout per step")
+	runCmd.Flags().StringVar(&runTimeout, "timeout", "", "Total session timeout (e.g. 30m, 2h); 0 = no limit")
 	runCmd.Flags().IntVar(&runMaxTokens, "max-tokens", 0, "Max output tokens per step")
 	runCmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "Verbose output")
 	runCmd.Flags().BoolVar(&dryRun, "dry-run", false, "Show prompts without running the provider")
