@@ -38,12 +38,13 @@ func parseDeps(s string) ([]int, error) {
 }
 
 var (
-	taskDesc     string
-	taskPriority int
-	taskListJSON bool
-	taskShowJSON bool
-	taskDeps     string // comma-separated dep IDs for task add/edit
-	taskRole     string // agent role for task add
+	taskDesc      string
+	taskPriority  int
+	taskListJSON  bool
+	taskListGraph bool
+	taskShowJSON  bool
+	taskDeps      string // comma-separated dep IDs for task add/edit
+	taskRole      string // agent role for task add
 
 	// edit flags
 	editTitle    string
@@ -92,6 +93,10 @@ var taskListCmd = &cobra.Command{
 		}
 		if taskListJSON {
 			fmt.Println(marshalTasksJSON(s.Plan.Tasks))
+			return nil
+		}
+		if taskListGraph {
+			printTaskGraph(s.Plan)
 			return nil
 		}
 		printTaskList(s.Plan)
@@ -602,6 +607,153 @@ func printTaskList(plan *pm.Plan) {
 	}
 }
 
+// printTaskGraph renders the task plan as a layered dependency graph.
+// Tasks are grouped into topological layers: layer 0 has no deps,
+// layer N has all deps in layers < N. Within each layer tasks are sorted
+// by priority. Dependency edges are shown as "needs #x, #y" annotations.
+func printTaskGraph(plan *pm.Plan) {
+	headerColor := color.New(color.FgCyan, color.Bold)
+	dimColor := color.New(color.Faint)
+	successColor := color.New(color.FgGreen)
+	failColor := color.New(color.FgRed)
+	warnColor := color.New(color.FgYellow)
+
+	// Build ID → task index map for fast lookup
+	byID := make(map[int]*pm.Task, len(plan.Tasks))
+	for _, t := range plan.Tasks {
+		byID[t.ID] = t
+	}
+
+	// Compute depth of each task (longest dep chain).
+	depth := make(map[int]int, len(plan.Tasks))
+	var computeDepth func(id int, visited map[int]bool) int
+	computeDepth = func(id int, visited map[int]bool) int {
+		if visited[id] {
+			return 0 // cycle guard
+		}
+		if d, ok := depth[id]; ok {
+			return d
+		}
+		t, ok := byID[id]
+		if !ok {
+			return 0
+		}
+		visited[id] = true
+		max := 0
+		for _, depID := range t.DependsOn {
+			if d := computeDepth(depID, visited) + 1; d > max {
+				max = d
+			}
+		}
+		visited[id] = false
+		depth[id] = max
+		return max
+	}
+	for _, t := range plan.Tasks {
+		computeDepth(t.ID, make(map[int]bool))
+	}
+
+	// Group by depth layer
+	maxDepth := 0
+	for _, d := range depth {
+		if d > maxDepth {
+			maxDepth = d
+		}
+	}
+	layers := make([][]*pm.Task, maxDepth+1)
+	for _, t := range plan.Tasks {
+		d := depth[t.ID]
+		layers[d] = append(layers[d], t)
+	}
+	for _, layer := range layers {
+		sort.SliceStable(layer, func(i, j int) bool {
+			return layer[i].Priority < layer[j].Priority
+		})
+	}
+
+	sep := strings.Repeat("─", 72)
+	fmt.Println(sep)
+	headerColor.Printf("  Task Graph  —  %s\n", plan.Summary())
+	fmt.Println(sep)
+	fmt.Println()
+
+	layerNames := []string{
+		"ROOT  (no dependencies)",
+		"LAYER 2",
+		"LAYER 3",
+		"LAYER 4",
+		"LAYER 5",
+		"LAYER 6",
+		"LAYER 7",
+		"LAYER 8",
+	}
+
+	for layerIdx, layer := range layers {
+		if len(layer) == 0 {
+			continue
+		}
+		label := fmt.Sprintf("LAYER %d", layerIdx+1)
+		if layerIdx == 0 {
+			label = "ROOT  (no dependencies)"
+		}
+		dimColor.Printf("  %s\n", label)
+
+		for _, t := range layer {
+			marker := taskMarker(t.Status)
+
+			// Role badge
+			rolePart := ""
+			if t.Role != "" {
+				rolePart = fmt.Sprintf(" [%s]", t.Role)
+			}
+
+			// Dependency annotation
+			depPart := ""
+			if len(t.DependsOn) > 0 {
+				parts := make([]string, 0, len(t.DependsOn))
+				for _, depID := range t.DependsOn {
+					parts = append(parts, fmt.Sprintf("#%d", depID))
+				}
+				depPart = fmt.Sprintf("  ──needs── %s", strings.Join(parts, ", "))
+			}
+
+			line := fmt.Sprintf("  %s #%-3d P%-2d  %-40s%s%s\n",
+				marker, t.ID, t.Priority, truncateStr(t.Title, 40), rolePart, depPart)
+
+			switch t.Status {
+			case pm.TaskDone:
+				successColor.Print(line)
+			case pm.TaskSkipped:
+				dimColor.Print(line)
+			case pm.TaskFailed:
+				failColor.Print(line)
+			case pm.TaskInProgress:
+				warnColor.Print(line)
+			default:
+				if !plan.DepsReady(t) {
+					dimColor.Print(line)
+				} else {
+					fmt.Print(line)
+				}
+			}
+		}
+		fmt.Println()
+		// Draw a connector line between layers
+		if layerIdx < len(layers)-1 {
+			dimColor.Printf("  %s\n", strings.Repeat("╌", 68))
+			fmt.Println()
+		}
+	}
+
+	// Suppress unused variable warning for layerNames (used only for documentation)
+	_ = layerNames
+
+	fmt.Println(sep)
+	fmt.Printf("  Legend: [x] done  [-] skipped  [!] failed  [~] in-progress  [ ] pending\n")
+	fmt.Println(sep)
+	fmt.Println()
+}
+
 func taskMarker(status pm.TaskStatus) string {
 	switch status {
 	case pm.TaskDone:
@@ -643,6 +795,7 @@ func marshalTasksJSON(tasks []*pm.Task) string {
 
 func init() {
 	taskListCmd.Flags().BoolVar(&taskListJSON, "json", false, "Output tasks as JSON array")
+	taskListCmd.Flags().BoolVar(&taskListGraph, "graph", false, "Render tasks as a layered dependency graph")
 	taskShowCmd.Flags().BoolVar(&taskShowJSON, "json", false, "Output task as JSON")
 
 	taskAddCmd.Flags().StringVar(&taskDesc, "desc", "", "Task description")

@@ -25,6 +25,8 @@ Supports Anthropic (Claude API), OpenAI, Ollama (local), and Claude Code.
   cloop run --pm --fallback anthropic,openai  # with provider fallback chain
   cloop report                    # generate project progress report
   cloop retro                     # AI sprint retrospective
+  cloop backlog                   # AI-generated prioritized product backlog
+  cloop task list --graph         # visual task dependency graph
   cloop status
   cloop log`,
 }
