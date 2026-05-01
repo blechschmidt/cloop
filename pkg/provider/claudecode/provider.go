@@ -29,7 +29,7 @@ func (p *Provider) DefaultModel() string { return "" }
 func (p *Provider) Complete(ctx context.Context, prompt string, opts provider.Options) (*provider.Result, error) {
 	envOnce.Do(loadEnvFiles)
 
-	args := []string{"--print", "--output-format", "text"}
+	args := []string{"--print", "--output-format", "text", "--permission-mode", "auto"}
 	if opts.Model != "" {
 		args = append(args, "--model", opts.Model)
 	}
