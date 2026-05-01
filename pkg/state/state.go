@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/milestone"
 	"github.com/blechschmidt/cloop/pkg/pm"
 )
 
@@ -41,8 +42,9 @@ type ProjectState struct {
 	Provider string `json:"provider,omitempty"`
 
 	// Product manager mode
-	PMMode bool      `json:"pm_mode,omitempty"`
-	Plan   *pm.Plan  `json:"plan,omitempty"`
+	PMMode     bool                    `json:"pm_mode,omitempty"`
+	Plan       *pm.Plan                `json:"plan,omitempty"`
+	Milestones []*milestone.Milestone  `json:"milestones,omitempty"`
 
 	// Cumulative token usage across all steps
 	TotalInputTokens  int `json:"total_input_tokens,omitempty"`

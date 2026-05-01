@@ -6,6 +6,7 @@ import (
 	"os"
 	"sort"
 
+	"github.com/blechschmidt/cloop/pkg/milestone"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/fatih/color"
@@ -78,6 +79,19 @@ var statusCmd = &cobra.Command{
 				fmt.Printf("Progress: %d/%d steps\n", s.CurrentStep, s.MaxSteps)
 			} else {
 				fmt.Printf("Progress: %d steps (unlimited)\n", s.CurrentStep)
+			}
+		}
+
+		if len(s.Milestones) > 0 {
+			milestone.SortByID(s.Milestones)
+			fmt.Printf("Milestones: %d total\n", len(s.Milestones))
+			for _, ms := range s.Milestones {
+				p := ms.Progress(s.Plan)
+				deadlineStr := ""
+				if ms.Deadline != nil {
+					deadlineStr = " (" + ms.Deadline.Format("2006-01-02") + ")"
+				}
+				fmt.Printf("           #%d %s%s — %.0f%%\n", ms.ID, ms.Name, deadlineStr, p.PctDone)
 			}
 		}
 

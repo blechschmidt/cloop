@@ -27,6 +27,8 @@ Supports Anthropic (Claude API), OpenAI, Ollama (local), and Claude Code.
   cloop retro                     # AI sprint retrospective
   cloop backlog                   # AI-generated prioritized product backlog
   cloop task list --graph         # visual task dependency graph
+  cloop milestone plan            # AI sprint/release planning
+  cloop milestone forecast        # velocity-based completion forecast
   cloop status
   cloop log`,
 }
