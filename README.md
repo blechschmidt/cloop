@@ -168,6 +168,7 @@ cloop run --pm --retry-failed # retry previously failed tasks
 | `--on-complete` | | Shell command to run on goal completion (e.g. `notify-send done`) |
 | `--token-budget` | `0` | Stop when cumulative tokens (in+out) reach this limit (0 = unlimited) |
 | `-v, --verbose` | `false` | Show full step output (no truncation) |
+| `--innovate` | `false` | Innovation mode: push evolve iterations toward creative, unconventional features |
 
 **Stopping:** Press `Ctrl+C` to pause gracefully. Run `cloop run` again to resume.
 
@@ -354,6 +355,39 @@ cloop run --auto-evolve
 # Evolve #3: adds unit tests
 # ... keeps going until Ctrl+C
 ```
+
+## Innovation Mode
+
+Innovation mode supercharges `--auto-evolve` by changing the evolve prompt to push the AI beyond incremental improvements toward genuinely novel capabilities.
+
+Without `--innovate`, each evolve iteration picks one conventional improvement: add a feature, write tests, refactor, improve docs, or optimize performance.
+
+With `--innovate`, the AI is explicitly directed to think unconventionally and invent capabilities that don't exist in other tools:
+
+- **Cross-provider intelligence** — use multiple providers together, consensus across models, fallback chains
+- **Self-optimization** — analyze own performance, tune prompts, learn from failures
+- **Predictive capabilities** — anticipate what the user needs next
+- **Meta-learning** — extract patterns from past iterations to improve future ones
+- **Novel interaction patterns** — watch mode enhancements, collaborative modes, execution branching
+- **Emergent behaviors** — capabilities the AI discovers are useful
+- **Integration points** — webhooks, external APIs, CI/CD hooks, tool integrations
+
+The AI is instructed to be bold — if an idea might not work, try it anyway and document what was learned.
+
+```bash
+# Standard evolve: incremental improvements
+cloop run --auto-evolve
+
+# Innovation mode: push toward genuinely novel capabilities
+cloop run --auto-evolve --innovate
+
+# PM mode + innovation: structured execution with creative post-completion evolution
+cloop init --pm "Build a monitoring dashboard"
+cloop run --pm
+cloop run --auto-evolve --innovate
+```
+
+Innovation mode only affects the evolve phase (after `GOAL_COMPLETE`). It has no effect without `--auto-evolve`.
 
 ## Environment Variables
 
