@@ -39,11 +39,16 @@ var logCmd = &cobra.Command{
 		steps := s.Steps
 		if logStep > 0 {
 			// Show specific step
+			found := false
 			for _, step := range s.Steps {
 				if step.Step+1 == logStep {
 					steps = []state.StepResult{step}
+					found = true
 					break
 				}
+			}
+			if !found {
+				return fmt.Errorf("step %d not found (total steps: %d)", logStep, len(s.Steps))
 			}
 		}
 

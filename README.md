@@ -236,6 +236,7 @@ cloop task add "Title" --desc "Description" --priority 1
 cloop task edit <id> --title "New title" --priority 2
 cloop task skip <id>               # mark as skipped
 cloop task done <id>               # mark as done
+cloop task fail <id>               # mark as failed
 cloop task reset <id>              # reset to pending
 cloop task remove <id>             # remove from plan
 ```

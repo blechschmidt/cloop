@@ -33,10 +33,14 @@ var taskCmd = &cobra.Command{
 
 Subcommands:
   list          Show all tasks
+  show <id>     Show full task details
   skip <id>     Mark a task as skipped
-  reset <id>    Reset a task to pending
   done <id>     Mark a task as done
-  add <title>   Add a new task to the plan`,
+  fail <id>     Mark a task as failed
+  reset <id>    Reset a task to pending
+  add <title>   Add a new task to the plan
+  edit <id>     Edit task title, description, or priority
+  remove <id>   Remove a task from the plan`,
 }
 
 var taskListCmd = &cobra.Command{
@@ -85,6 +89,15 @@ var taskDoneCmd = &cobra.Command{
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return setTaskStatus(args[0], pm.TaskDone)
+	},
+}
+
+var taskFailCmd = &cobra.Command{
+	Use:   "fail <id>",
+	Short: "Mark a task as failed",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return setTaskStatus(args[0], pm.TaskFailed)
 	},
 }
 
@@ -449,6 +462,7 @@ func init() {
 	taskCmd.AddCommand(taskSkipCmd)
 	taskCmd.AddCommand(taskResetCmd)
 	taskCmd.AddCommand(taskDoneCmd)
+	taskCmd.AddCommand(taskFailCmd)
 	taskCmd.AddCommand(taskAddCmd)
 	taskCmd.AddCommand(taskEditCmd)
 	taskCmd.AddCommand(taskRemoveCmd)
