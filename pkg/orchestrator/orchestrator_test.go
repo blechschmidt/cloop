@@ -829,19 +829,23 @@ func TestBuildPrompt_ContextSteps_Three(t *testing.T) {
 	}
 	s.Save()
 
-	// ContextSteps=3 → include last 3 steps
+	// ContextSteps=3 → full output for last 3 steps (2, 3, 4); brief history for steps 0, 1.
 	o := newOrchestrator(t, dir, Config{WorkDir: dir, ContextSteps: 3}, &mockProvider{name: "mock"})
 	prompt := o.buildPrompt()
 
-	// Should include only last 3 steps (2, 3, 4), not first 2 (0, 1)
-	if strings.Contains(prompt, "step output 0") {
-		t.Error("expected step 0 to be excluded (only last 3 included)")
+	// Older steps 0, 1 should appear in SESSION HISTORY (brief summaries).
+	if !strings.Contains(prompt, "SESSION HISTORY") {
+		t.Error("expected SESSION HISTORY section for older steps")
 	}
-	if strings.Contains(prompt, "step output 1") {
-		t.Error("expected step 1 to be excluded (only last 3 included)")
+	if !strings.Contains(prompt, "step output 0") {
+		t.Error("expected step 0 summary in SESSION HISTORY")
 	}
+	if !strings.Contains(prompt, "step output 1") {
+		t.Error("expected step 1 summary in SESSION HISTORY")
+	}
+	// Recent step 4 should appear in RECENT STEPS with full output.
 	if !strings.Contains(prompt, "step output 4") {
-		t.Error("expected step 4 to be included")
+		t.Error("expected step 4 to be included in RECENT STEPS")
 	}
 }
 
@@ -858,15 +862,19 @@ func TestBuildPrompt_ContextSteps_One(t *testing.T) {
 	}
 	s.Save()
 
-	// ContextSteps=1 — only include the most recent step
+	// ContextSteps=1 — full output for last step only; steps 0-3 appear in SESSION HISTORY.
 	o := newOrchestrator(t, dir, Config{WorkDir: dir, ContextSteps: 1}, &mockProvider{name: "mock"})
 	prompt := o.buildPrompt()
 
 	if !strings.Contains(prompt, "step output 4") {
-		t.Error("expected most recent step to be included")
+		t.Error("expected most recent step to be included in RECENT STEPS")
 	}
-	if strings.Contains(prompt, "step output 3") {
-		t.Error("expected step 3 to be excluded with ContextSteps=1")
+	// Steps 0-3 should appear in SESSION HISTORY as brief summaries.
+	if !strings.Contains(prompt, "SESSION HISTORY") {
+		t.Error("expected SESSION HISTORY section for older steps")
+	}
+	if !strings.Contains(prompt, "step output 3") {
+		t.Error("expected step 3 in SESSION HISTORY (brief)")
 	}
 }
 
@@ -1251,5 +1259,122 @@ func TestRunPM_TokenBudget_PausesTaskAsPending(t *testing.T) {
 	}
 	if o.state.Plan.Tasks[1].Status != pm.TaskPending {
 		t.Errorf("task B: expected pending (reset for retry), got %q", o.state.Plan.Tasks[1].Status)
+	}
+}
+
+// --- stepSummaryLine ---
+
+func TestStepSummaryLine_LastMeaningfulLine(t *testing.T) {
+	output := "Did some work.\nCreated files.\nAll done."
+	got := stepSummaryLine(output, 150)
+	if got != "All done." {
+		t.Errorf("expected last line, got %q", got)
+	}
+}
+
+func TestStepSummaryLine_SkipsSignals(t *testing.T) {
+	output := "Completed the task.\nTASK_DONE"
+	got := stepSummaryLine(output, 150)
+	if got != "Completed the task." {
+		t.Errorf("expected line before TASK_DONE, got %q", got)
+	}
+}
+
+func TestStepSummaryLine_SkipsGoalCompleteSignal(t *testing.T) {
+	output := "Project finished.\nGOAL_COMPLETE"
+	got := stepSummaryLine(output, 150)
+	if got != "Project finished." {
+		t.Errorf("expected line before GOAL_COMPLETE, got %q", got)
+	}
+}
+
+func TestStepSummaryLine_SkipsEmptyLines(t *testing.T) {
+	output := "Did work.\n\n\n"
+	got := stepSummaryLine(output, 150)
+	if got != "Did work." {
+		t.Errorf("expected non-empty line, got %q", got)
+	}
+}
+
+func TestStepSummaryLine_Truncates(t *testing.T) {
+	output := "This is a very long line that exceeds the maximum length limit set for summary display."
+	got := stepSummaryLine(output, 20)
+	if len([]rune(got)) > 23 { // 20 + "..."
+		t.Errorf("expected truncated output (<=23 runes), got len=%d: %q", len([]rune(got)), got)
+	}
+	if !strings.HasSuffix(got, "...") {
+		t.Errorf("expected '...' suffix for truncated line, got %q", got)
+	}
+}
+
+func TestStepSummaryLine_EmptyOutput(t *testing.T) {
+	got := stepSummaryLine("", 150)
+	if got != "(no summary)" {
+		t.Errorf("expected '(no summary)' for empty output, got %q", got)
+	}
+}
+
+func TestStepSummaryLine_OnlySignals(t *testing.T) {
+	output := "TASK_DONE"
+	got := stepSummaryLine(output, 150)
+	if got != "(no summary)" {
+		t.Errorf("expected '(no summary)' when only signals present, got %q", got)
+	}
+}
+
+// --- SESSION HISTORY in buildPrompt ---
+
+func TestBuildPrompt_SessionHistory_AppearsForOlderSteps(t *testing.T) {
+	dir := tempDir(t)
+	s := initState(t, dir, "goal", 0)
+	// Add 5 steps; with ContextSteps=2, steps 0-2 become "older" history.
+	for i := 0; i < 5; i++ {
+		s.AddStep(state.StepResult{
+			Task:     "task",
+			Output:   fmt.Sprintf("completed step %d output", i),
+			Duration: "1s",
+			Time:     time.Now(),
+		})
+	}
+	s.Save()
+
+	o := newOrchestrator(t, dir, Config{WorkDir: dir, ContextSteps: 2}, &mockProvider{name: "mock"})
+	prompt := o.buildPrompt()
+
+	if !strings.Contains(prompt, "SESSION HISTORY") {
+		t.Error("expected SESSION HISTORY section for sessions longer than contextSteps")
+	}
+	// Steps 0-2 (older) should appear only as brief summaries.
+	if !strings.Contains(prompt, "completed step 0 output") {
+		t.Error("expected step 0 summary in SESSION HISTORY")
+	}
+	// Steps 3-4 (recent) should appear in RECENT STEPS with full output.
+	if !strings.Contains(prompt, "RECENT STEPS") {
+		t.Error("expected RECENT STEPS section")
+	}
+	if !strings.Contains(prompt, "completed step 4 output") {
+		t.Error("expected step 4 in RECENT STEPS")
+	}
+}
+
+func TestBuildPrompt_SessionHistory_AbsentWhenWithinContext(t *testing.T) {
+	dir := tempDir(t)
+	s := initState(t, dir, "goal", 0)
+	// Only 2 steps, ContextSteps=3 — all fit in recent, no history section needed.
+	for i := 0; i < 2; i++ {
+		s.AddStep(state.StepResult{
+			Task:     "task",
+			Output:   fmt.Sprintf("step %d", i),
+			Duration: "1s",
+			Time:     time.Now(),
+		})
+	}
+	s.Save()
+
+	o := newOrchestrator(t, dir, Config{WorkDir: dir, ContextSteps: 3}, &mockProvider{name: "mock"})
+	prompt := o.buildPrompt()
+
+	if strings.Contains(prompt, "SESSION HISTORY") {
+		t.Error("SESSION HISTORY should not appear when all steps fit within context window")
 	}
 }

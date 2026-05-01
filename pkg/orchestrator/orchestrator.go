@@ -343,6 +343,19 @@ func (o *Orchestrator) runPM(ctx context.Context) error {
 
 		task := s.Plan.NextTask()
 		if task == nil {
+			// Auto-skip tasks that are permanently blocked by failed deps
+			skipped := 0
+			for _, t := range s.Plan.Tasks {
+				if t.Status == pm.TaskPending && s.Plan.PermanentlyBlocked(t) {
+					failColor.Printf("⊘ Task %d skipped (blocked by failed dependency): %s\n", t.ID, t.Title)
+					t.Status = pm.TaskSkipped
+					skipped++
+				}
+			}
+			if skipped > 0 {
+				s.Save()
+				continue
+			}
 			break
 		}
 
@@ -489,6 +502,20 @@ func (o *Orchestrator) buildPrompt() string {
 		contextSteps = 3
 	}
 	recent := s.LastNSteps(contextSteps)
+
+	// For older steps beyond the recent window, include a brief one-line summary
+	// so the AI has a high-level view of overall session progress.
+	// When contextSteps==0 (context disabled), skip history entirely.
+	if contextSteps > 0 && len(s.Steps) > len(recent) {
+		older := s.Steps[:len(s.Steps)-len(recent)]
+		b.WriteString("## SESSION HISTORY (brief)\n")
+		for _, step := range older {
+			summary := stepSummaryLine(step.Output, 150)
+			b.WriteString(fmt.Sprintf("- Step %d (%s): %s\n", step.Step+1, step.Duration, summary))
+		}
+		b.WriteString("\n")
+	}
+
 	if len(recent) > 0 {
 		b.WriteString("## RECENT STEPS\n")
 		for _, step := range recent {
@@ -669,6 +696,32 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "..."
+}
+
+// stepSummaryLine returns a short one-line summary of a step's output.
+// It picks the last non-empty, non-signal line (avoiding GOAL_COMPLETE /
+// TASK_* markers) and truncates it to maxLen runes.
+func stepSummaryLine(output string, maxLen int) string {
+	lines := strings.Split(strings.TrimSpace(output), "\n")
+	signals := map[string]bool{
+		"GOAL_COMPLETE": true,
+		"TASK_DONE":     true,
+		"TASK_SKIPPED":  true,
+		"TASK_FAILED":   true,
+	}
+	// Walk backwards to find the last meaningful line.
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if line == "" || signals[line] {
+			continue
+		}
+		if len([]rune(line)) > maxLen {
+			runes := []rune(line)
+			return string(runes[:maxLen]) + "..."
+		}
+		return line
+	}
+	return "(no summary)"
 }
 
 // printSessionSummary prints a one-line summary after a run session ends.

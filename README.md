@@ -195,6 +195,7 @@ cloop log --step 3     # specific step
 cloop log --last 5     # show only the 5 most recent steps
 cloop log --lines 0    # full output (no truncation)
 cloop log --json       # machine-readable JSON array
+cloop log --grep "error"  # filter steps containing "error" (case-insensitive)
 ```
 
 ### `cloop goal`
@@ -255,6 +256,20 @@ cloop task reset <id>              # reset to pending
 cloop task remove <id>             # remove from plan
 ```
 
+### `cloop diff`
+
+Show git changes in the current project.
+
+```bash
+cloop diff              # all uncommitted changes vs HEAD
+cloop diff --stat       # summary (files changed, insertions, deletions)
+cloop diff --name-only  # just the list of changed files
+cloop diff --session    # diff from when the cloop session was initialized
+```
+
+`--session` is useful for reviewing everything the AI changed during this session.
+It finds the last git commit that existed before `cloop init` was run, then diffs from there.
+
 ### `cloop watch`
 
 Live-refresh the project status while `cloop run` runs in another terminal.
@@ -312,6 +327,10 @@ The AI signals task outcomes with terminal keywords:
 - `TASK_DONE` — task completed successfully
 - `TASK_SKIPPED` — task not applicable / already done
 - `TASK_FAILED` — task could not be completed
+
+Tasks can declare dependencies on other tasks via `depends_on` in the JSON plan.
+A task will not start until all its dependencies are `done` or `skipped`.
+If a dependency fails, all tasks that depend on it are automatically skipped.
 
 ## Auto-Evolve
 

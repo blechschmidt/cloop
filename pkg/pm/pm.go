@@ -31,6 +31,7 @@ type Task struct {
 	Description string     `json:"description"`
 	Priority    int        `json:"priority"` // 1 = highest
 	Status      TaskStatus `json:"status"`
+	DependsOn   []int      `json:"depends_on,omitempty"` // IDs of tasks that must complete before this one
 	Result      string     `json:"result,omitempty"`
 	StartedAt   *time.Time `json:"started_at,omitempty"`
 	CompletedAt *time.Time `json:"completed_at,omitempty"`
@@ -48,11 +49,29 @@ func NewPlan(goal string) *Plan {
 	return &Plan{Goal: goal, Tasks: []*Task{}, Version: 1}
 }
 
-// NextTask returns the first pending task ordered by priority.
+// DepsReady returns true when all of this task's dependencies are done or skipped.
+func (p *Plan) DepsReady(t *Task) bool {
+	for _, depID := range t.DependsOn {
+		for _, dep := range p.Tasks {
+			if dep.ID == depID {
+				if dep.Status != TaskDone && dep.Status != TaskSkipped {
+					return false
+				}
+				break
+			}
+		}
+	}
+	return true
+}
+
+// NextTask returns the highest-priority pending task whose dependencies are all satisfied.
 func (p *Plan) NextTask() *Task {
 	var best *Task
 	for _, t := range p.Tasks {
 		if t.Status != TaskPending {
+			continue
+		}
+		if !p.DepsReady(t) {
 			continue
 		}
 		if best == nil || t.Priority < best.Priority {
@@ -62,14 +81,37 @@ func (p *Plan) NextTask() *Task {
 	return best
 }
 
-// IsComplete returns true if all tasks are done or skipped.
+// IsComplete returns true if all tasks are done or skipped, or if remaining
+// pending tasks are permanently blocked (all their deps include a failed task).
 func (p *Plan) IsComplete() bool {
+	if len(p.Tasks) == 0 {
+		return false
+	}
 	for _, t := range p.Tasks {
-		if t.Status == TaskPending || t.Status == TaskInProgress {
+		if t.Status == TaskInProgress {
 			return false
 		}
+		if t.Status == TaskPending {
+			// Check if this task is permanently blocked
+			if !p.PermanentlyBlocked(t) {
+				return false
+			}
+		}
 	}
-	return len(p.Tasks) > 0
+	return true
+}
+
+// PermanentlyBlocked returns true if a task can never run because one of its
+// dependencies has failed (and is not retried).
+func (p *Plan) PermanentlyBlocked(t *Task) bool {
+	for _, depID := range t.DependsOn {
+		for _, dep := range p.Tasks {
+			if dep.ID == depID && dep.Status == TaskFailed {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // Summary returns a short summary of task completion.
@@ -95,10 +137,11 @@ func DecomposePrompt(goal, instructions string) string {
 	b.WriteString("Analyze the goal and produce a JSON task plan. Each task must be:\n")
 	b.WriteString("- Concrete and independently executable\n")
 	b.WriteString("- Ordered by priority (1 = must do first, higher = can do later)\n")
-	b.WriteString("- Specific enough that an AI agent can implement it without clarification\n\n")
+	b.WriteString("- Specific enough that an AI agent can implement it without clarification\n")
+	b.WriteString("- Linked to prerequisite tasks via depends_on (list of task IDs that must complete first)\n\n")
 	b.WriteString("Output ONLY valid JSON in this exact format (no explanation, no markdown):\n")
-	b.WriteString(`{"tasks":[{"id":1,"title":"short title","description":"detailed description of what to do","priority":1}]}`)
-	b.WriteString("\n\nAim for 5-15 tasks. Break large tasks into smaller ones.")
+	b.WriteString(`{"tasks":[{"id":1,"title":"short title","description":"detailed description of what to do","priority":1,"depends_on":[]},{"id":2,"title":"another task","description":"details","priority":2,"depends_on":[1]}]}`)
+	b.WriteString("\n\nAim for 5-15 tasks. Break large tasks into smaller ones. Use depends_on to express real prerequisites (not just ordering preferences). An empty depends_on array means no prerequisites.")
 	return b.String()
 }
 
@@ -115,7 +158,20 @@ func ExecuteTaskPrompt(goal, instructions string, plan *Plan, task *Task) string
 
 	b.WriteString("## CURRENT TASK\n")
 	b.WriteString(fmt.Sprintf("**Task %d: %s**\n", task.ID, task.Title))
-	b.WriteString(fmt.Sprintf("%s\n\n", task.Description))
+	b.WriteString(fmt.Sprintf("%s\n", task.Description))
+	if len(task.DependsOn) > 0 {
+		depTitles := []string{}
+		for _, depID := range task.DependsOn {
+			for _, t := range plan.Tasks {
+				if t.ID == depID {
+					depTitles = append(depTitles, fmt.Sprintf("#%d %s", t.ID, t.Title))
+					break
+				}
+			}
+		}
+		b.WriteString(fmt.Sprintf("*Depends on: %s*\n", strings.Join(depTitles, ", ")))
+	}
+	b.WriteString("\n")
 
 	// Show completed tasks for context
 	done := []*Task{}
@@ -187,6 +243,7 @@ func ParseTaskPlan(goal, output string) (*Plan, error) {
 			Title       string `json:"title"`
 			Description string `json:"description"`
 			Priority    int    `json:"priority"`
+			DependsOn   []int  `json:"depends_on"`
 		} `json:"tasks"`
 	}
 	if err := json.Unmarshal([]byte(jsonStr), &raw); err != nil {
@@ -208,6 +265,7 @@ func ParseTaskPlan(goal, output string) (*Plan, error) {
 			Title:       t.Title,
 			Description: t.Description,
 			Priority:    priority,
+			DependsOn:   t.DependsOn,
 			Status:      TaskPending,
 		})
 	}

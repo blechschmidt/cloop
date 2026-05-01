@@ -14,16 +14,41 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// parseDeps parses a comma-separated string of task IDs (e.g. "1,2,3") into []int.
+// Returns nil and no error for empty input.
+func parseDeps(s string) ([]int, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil, nil
+	}
+	parts := strings.Split(s, ",")
+	deps := make([]int, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		id, err := strconv.Atoi(p)
+		if err != nil {
+			return nil, fmt.Errorf("invalid dependency ID %q: must be a number", p)
+		}
+		deps = append(deps, id)
+	}
+	return deps, nil
+}
+
 var (
 	taskDesc     string
 	taskPriority int
 	taskListJSON bool
 	taskShowJSON bool
+	taskDeps     string // comma-separated dep IDs for task add/edit
 
 	// edit flags
 	editTitle    string
 	editDesc     string
 	editPriority int
+	editDeps     string
 )
 
 var taskCmd = &cobra.Command{
@@ -40,9 +65,14 @@ Subcommands:
   fail <id>     Mark a task as failed
   reset <id>    Reset a task to pending
   add <title>   Add a new task to the plan
-  edit <id>     Edit task title, description, or priority
+  edit <id>     Edit task title, description, priority, or deps
   remove <id>   Remove a task from the plan
-  move <id> up|down  Reorder a task by swapping with adjacent priority`,
+  move <id> up|down  Reorder a task by swapping with adjacent priority
+
+Task dependencies:
+  Use --deps when adding or editing tasks to specify prerequisites.
+  A task with unresolved dependencies will be skipped by the scheduler
+  until all dependencies are done or skipped.`,
 }
 
 var taskListCmd = &cobra.Command{
@@ -191,6 +221,13 @@ var taskShowCmd = &cobra.Command{
 		titleColor.Printf("Task %d: %s\n", task.ID, task.Title)
 		fmt.Printf("Status:   %s\n", task.Status)
 		fmt.Printf("Priority: %d\n", task.Priority)
+		if len(task.DependsOn) > 0 {
+			depParts := make([]string, 0, len(task.DependsOn))
+			for _, depID := range task.DependsOn {
+				depParts = append(depParts, fmt.Sprintf("#%d", depID))
+			}
+			fmt.Printf("Depends:  %s\n", strings.Join(depParts, ", "))
+		}
 		if task.Description != "" {
 			fmt.Printf("\nDescription:\n")
 			fmt.Printf("  %s\n", strings.ReplaceAll(task.Description, "\n", "\n  "))
@@ -240,8 +277,8 @@ var taskEditCmd = &cobra.Command{
 			return fmt.Errorf("task %d not found", id)
 		}
 
-		if !cmd.Flags().Changed("title") && !cmd.Flags().Changed("desc") && !cmd.Flags().Changed("priority") {
-			return fmt.Errorf("no changes specified — use --title, --desc, or --priority")
+		if !cmd.Flags().Changed("title") && !cmd.Flags().Changed("desc") && !cmd.Flags().Changed("priority") && !cmd.Flags().Changed("deps") {
+			return fmt.Errorf("no changes specified — use --title, --desc, --priority, or --deps")
 		}
 
 		changed := []string{}
@@ -256,6 +293,14 @@ var taskEditCmd = &cobra.Command{
 		if cmd.Flags().Changed("priority") {
 			task.Priority = editPriority
 			changed = append(changed, "priority")
+		}
+		if cmd.Flags().Changed("deps") {
+			deps, err := parseDeps(editDeps)
+			if err != nil {
+				return err
+			}
+			task.DependsOn = deps
+			changed = append(changed, "deps")
 		}
 
 		if err := s.Save(); err != nil {
@@ -418,11 +463,17 @@ var taskAddCmd = &cobra.Command{
 			priority = maxPriority + 1
 		}
 
+		deps, err := parseDeps(taskDeps)
+		if err != nil {
+			return err
+		}
+
 		task := &pm.Task{
 			ID:          maxID + 1,
 			Title:       title,
 			Description: taskDesc,
 			Priority:    priority,
+			DependsOn:   deps,
 			Status:      pm.TaskPending,
 		}
 		s.Plan.Tasks = append(s.Plan.Tasks, task)
@@ -431,7 +482,11 @@ var taskAddCmd = &cobra.Command{
 			return err
 		}
 
-		color.New(color.FgGreen).Printf("Added task %d: %s (priority %d)\n", task.ID, task.Title, task.Priority)
+		msg := fmt.Sprintf("Added task %d: %s (priority %d)", task.ID, task.Title, task.Priority)
+		if len(deps) > 0 {
+			msg += fmt.Sprintf(", depends on: %s", taskDeps)
+		}
+		color.New(color.FgGreen).Println(msg)
 		return nil
 	},
 }
@@ -507,10 +562,22 @@ func printTaskList(plan *pm.Plan) {
 		case pm.TaskInProgress:
 			warnColor.Print(line)
 		default:
-			fmt.Print(line)
+			// Check if blocked by unresolved dependencies
+			if t.Status == pm.TaskPending && !plan.DepsReady(t) {
+				dimColor.Print(line)
+			} else {
+				fmt.Print(line)
+			}
 		}
 		if t.Description != "" {
 			dimColor.Printf("       %s\n", truncateStr(t.Description, 100))
+		}
+		if len(t.DependsOn) > 0 {
+			depParts := make([]string, 0, len(t.DependsOn))
+			for _, depID := range t.DependsOn {
+				depParts = append(depParts, fmt.Sprintf("#%d", depID))
+			}
+			dimColor.Printf("       depends on: %s\n", strings.Join(depParts, ", "))
 		}
 	}
 }
@@ -560,10 +627,12 @@ func init() {
 
 	taskAddCmd.Flags().StringVar(&taskDesc, "desc", "", "Task description")
 	taskAddCmd.Flags().IntVar(&taskPriority, "priority", 0, "Task priority (1=highest; default: lowest)")
+	taskAddCmd.Flags().StringVar(&taskDeps, "deps", "", "Comma-separated IDs of tasks this task depends on (e.g. '1,2')")
 
 	taskEditCmd.Flags().StringVar(&editTitle, "title", "", "New title for the task")
 	taskEditCmd.Flags().StringVar(&editDesc, "desc", "", "New description for the task")
 	taskEditCmd.Flags().IntVar(&editPriority, "priority", 0, "New priority for the task (1=highest)")
+	taskEditCmd.Flags().StringVar(&editDeps, "deps", "", "Comma-separated IDs of tasks this task depends on (e.g. '1,2'); use '' to clear")
 
 	taskCmd.AddCommand(taskListCmd)
 	taskCmd.AddCommand(taskShowCmd)

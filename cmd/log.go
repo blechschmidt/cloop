@@ -16,6 +16,7 @@ var (
 	logLines int
 	logLast  int
 	logJSON  bool
+	logGrep  string
 )
 
 var logCmd = &cobra.Command{
@@ -40,6 +41,18 @@ var logCmd = &cobra.Command{
 		steps, err := filterSteps(s.Steps, logStep, logLast)
 		if err != nil {
 			return err
+		}
+
+		if logGrep != "" {
+			steps = grepSteps(steps, logGrep)
+			if len(steps) == 0 {
+				if logJSON {
+					fmt.Println("[]")
+				} else {
+					fmt.Printf("No steps matching %q.\n", logGrep)
+				}
+				return nil
+			}
 		}
 
 		if logJSON {
@@ -84,6 +97,19 @@ var logCmd = &cobra.Command{
 	},
 }
 
+// grepSteps returns steps whose output or task name contains pattern (case-insensitive).
+func grepSteps(steps []state.StepResult, pattern string) []state.StepResult {
+	lower := strings.ToLower(pattern)
+	var out []state.StepResult
+	for _, s := range steps {
+		if strings.Contains(strings.ToLower(s.Output), lower) ||
+			strings.Contains(strings.ToLower(s.Task), lower) {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
 // filterSteps applies --step and --last filters to a step slice.
 // stepNum is 1-indexed (0 means no filter). lastN is a suffix limit (0 means all).
 func filterSteps(steps []state.StepResult, stepNum, lastN int) ([]state.StepResult, error) {
@@ -106,5 +132,6 @@ func init() {
 	logCmd.Flags().IntVar(&logLines, "lines", 50, "Max output lines per step (0=all)")
 	logCmd.Flags().IntVar(&logLast, "last", 0, "Show only the last N steps (0=all)")
 	logCmd.Flags().BoolVar(&logJSON, "json", false, "Output steps as JSON array")
+	logCmd.Flags().StringVar(&logGrep, "grep", "", "Filter steps whose output or task name contains this string (case-insensitive)")
 	rootCmd.AddCommand(logCmd)
 }

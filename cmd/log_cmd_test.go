@@ -7,6 +7,76 @@ import (
 	"github.com/blechschmidt/cloop/pkg/state"
 )
 
+// --- grepSteps ---
+
+func TestGrepSteps_MatchesOutput(t *testing.T) {
+	steps := []state.StepResult{
+		{Step: 0, Task: "task", Output: "wrote main.go with handler", Duration: "1s", Time: time.Now()},
+		{Step: 1, Task: "task", Output: "added unit tests", Duration: "1s", Time: time.Now()},
+		{Step: 2, Task: "task", Output: "fixed compilation error", Duration: "1s", Time: time.Now()},
+	}
+	got := grepSteps(steps, "unit tests")
+	if len(got) != 1 {
+		t.Fatalf("expected 1 match, got %d", len(got))
+	}
+	if got[0].Step != 1 {
+		t.Errorf("expected step index 1, got %d", got[0].Step)
+	}
+}
+
+func TestGrepSteps_CaseInsensitive(t *testing.T) {
+	steps := []state.StepResult{
+		{Step: 0, Task: "task", Output: "Added REST API endpoints", Duration: "1s", Time: time.Now()},
+	}
+	got := grepSteps(steps, "rest api")
+	if len(got) != 1 {
+		t.Fatalf("expected 1 match (case-insensitive), got %d", len(got))
+	}
+}
+
+func TestGrepSteps_MatchesTaskName(t *testing.T) {
+	steps := []state.StepResult{
+		{Step: 0, Task: "Setup database", Output: "running migrations", Duration: "1s", Time: time.Now()},
+		{Step: 1, Task: "Add auth routes", Output: "implemented JWT", Duration: "1s", Time: time.Now()},
+	}
+	got := grepSteps(steps, "database")
+	if len(got) != 1 {
+		t.Fatalf("expected 1 match by task name, got %d", len(got))
+	}
+	if got[0].Step != 0 {
+		t.Errorf("expected step 0, got %d", got[0].Step)
+	}
+}
+
+func TestGrepSteps_NoMatch(t *testing.T) {
+	steps := []state.StepResult{
+		{Step: 0, Task: "task", Output: "did something", Duration: "1s", Time: time.Now()},
+	}
+	got := grepSteps(steps, "nonexistent pattern xyz")
+	if len(got) != 0 {
+		t.Errorf("expected 0 matches, got %d", len(got))
+	}
+}
+
+func TestGrepSteps_EmptyInput(t *testing.T) {
+	got := grepSteps([]state.StepResult{}, "anything")
+	if got != nil && len(got) != 0 {
+		t.Errorf("expected empty result for empty input, got %d", len(got))
+	}
+}
+
+func TestGrepSteps_MultipleMatches(t *testing.T) {
+	steps := []state.StepResult{
+		{Step: 0, Task: "task", Output: "error: file not found", Duration: "1s", Time: time.Now()},
+		{Step: 1, Task: "task", Output: "no error this time", Duration: "1s", Time: time.Now()},
+		{Step: 2, Task: "task", Output: "another error occurred", Duration: "1s", Time: time.Now()},
+	}
+	got := grepSteps(steps, "error")
+	if len(got) != 3 {
+		t.Errorf("expected 3 matches (all contain 'error'), got %d", len(got))
+	}
+}
+
 // makeSteps builds a slice of N StepResults with sequential Step indices.
 func makeSteps(n int) []state.StepResult {
 	steps := make([]state.StepResult, n)
