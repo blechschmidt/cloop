@@ -6,12 +6,14 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/orchestrator"
 	"github.com/blechschmidt/cloop/pkg/provider"
+	"github.com/blechschmidt/cloop/pkg/provider/fallback"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/spf13/cobra"
 )
@@ -48,6 +50,7 @@ var (
 	memoryLimit      int
 	webhookURL       string
 	webhookEvents    []string
+	fallbackProviders []string
 )
 
 var runCmd = &cobra.Command{
@@ -125,7 +128,7 @@ Press Ctrl+C to pause gracefully.`,
 			}
 		}
 
-		prov, err := provider.Build(provCfg)
+		prov, err := buildProviderWithFallback(providerName, provCfg, fallbackProviders, cfg)
 		if err != nil {
 			return fmt.Errorf("provider: %w", err)
 		}
@@ -278,6 +281,46 @@ func applyEnvOverrides(cfg *config.Config) {
 	}
 }
 
+// buildProviderWithFallback builds the primary provider and optionally wraps it
+// in a fallback chain if --fallback names are provided.
+func buildProviderWithFallback(primaryName string, primaryCfg provider.ProviderConfig, fallbackNames []string, cfg *config.Config) (provider.Provider, error) {
+	primary, err := provider.Build(primaryCfg)
+	if err != nil {
+		return nil, fmt.Errorf("primary provider %q: %w", primaryName, err)
+	}
+
+	if len(fallbackNames) == 0 {
+		return primary, nil
+	}
+
+	providers := []provider.Provider{primary}
+	for _, name := range fallbackNames {
+		name = strings.TrimSpace(name)
+		if name == "" || name == primaryName {
+			continue
+		}
+		fbCfg := provider.ProviderConfig{
+			Name:             name,
+			AnthropicAPIKey:  cfg.Anthropic.APIKey,
+			AnthropicBaseURL: cfg.Anthropic.BaseURL,
+			OpenAIAPIKey:     cfg.OpenAI.APIKey,
+			OpenAIBaseURL:    cfg.OpenAI.BaseURL,
+			OllamaBaseURL:    cfg.Ollama.BaseURL,
+		}
+		fb, err := provider.Build(fbCfg)
+		if err != nil {
+			return nil, fmt.Errorf("fallback provider %q: %w", name, err)
+		}
+		providers = append(providers, fb)
+	}
+
+	if len(providers) == 1 {
+		return primary, nil
+	}
+
+	return fallback.New(providers)
+}
+
 func init() {
 	runCmd.Flags().StringVar(&runModel, "model", "", "Override model for this run")
 	runCmd.Flags().StringVar(&stepTimeout, "step-timeout", "10m", "Timeout per step")
@@ -310,5 +353,6 @@ func init() {
 	runCmd.Flags().IntVar(&memoryLimit, "memory-limit", 20, "Max number of memory entries to inject into prompts (0 = all)")
 	runCmd.Flags().StringVar(&webhookURL, "webhook-url", "", "HTTP(S) URL to POST lifecycle events to (overrides config webhook.url)")
 	runCmd.Flags().StringSliceVar(&webhookEvents, "webhook-events", nil, "Comma-separated events to fire: task_done,task_failed,session_complete,... (default: all)")
+	runCmd.Flags().StringSliceVar(&fallbackProviders, "fallback", nil, "Fallback provider chain (e.g. --fallback anthropic,openai). Tried in order after primary fails.")
 	rootCmd.AddCommand(runCmd)
 }

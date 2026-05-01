@@ -22,7 +22,9 @@ Supports Anthropic (Claude API), OpenAI, Ollama (local), and Claude Code.
   cloop scope "Build a REST API"  # AI scope analysis before you start
   cloop run                       # feedback loop mode
   cloop run --pm                  # product manager mode (task decomposition)
+  cloop run --pm --fallback anthropic,openai  # with provider fallback chain
   cloop report                    # generate project progress report
+  cloop retro                     # AI sprint retrospective
   cloop status
   cloop log`,
 }
