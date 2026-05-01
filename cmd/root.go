@@ -9,14 +9,17 @@ import (
 
 var rootCmd = &cobra.Command{
 	Use:   "cloop",
-	Short: "Autonomous feedback loop for Claude Code",
-	Long: `cloop wraps Claude Code in a goal-driven feedback loop.
+	Short: "AI product manager and autonomous feedback loop",
+	Long: `cloop is a multi-provider AI product manager and feedback loop.
 
-Define a project goal, and cloop will autonomously drive Claude Code
-through multiple iterations until the goal is complete.
+Define a project goal and cloop drives an AI provider through it autonomously.
+Supports Anthropic (Claude API), OpenAI, Ollama (local), and Claude Code.
 
   cloop init "Build a REST API with user auth and CRUD endpoints"
-  cloop run
+  cloop init --provider anthropic "Add comprehensive tests"
+  cloop init --provider ollama --model llama3.2 "Refactor this module"
+  cloop run           # feedback loop mode
+  cloop run --pm      # product manager mode (task decomposition)
   cloop status
   cloop log`,
 }

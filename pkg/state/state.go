@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/blechschmidt/cloop/pkg/pm"
 )
 
 const stateFile = ".cloop/state.json"
@@ -32,6 +34,13 @@ type ProjectState struct {
 	Instructions   string       `json:"instructions,omitempty"`
 	AutoEvolve     bool         `json:"auto_evolve"`
 	EvolveStep     int          `json:"evolve_step"`
+
+	// Provider settings
+	Provider string `json:"provider,omitempty"`
+
+	// Product manager mode
+	PMMode bool      `json:"pm_mode,omitempty"`
+	Plan   *pm.Plan  `json:"plan,omitempty"`
 }
 
 func StatePath(workdir string) string {

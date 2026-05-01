@@ -6,27 +6,35 @@ import (
 	"strings"
 	"time"
 
-	"github.com/blechschmidt/cloop/pkg/claude"
+	"github.com/blechschmidt/cloop/pkg/pm"
+	"github.com/blechschmidt/cloop/pkg/provider"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/fatih/color"
 )
 
 type Config struct {
-	WorkDir         string
-	Model           string
-	MaxTokens       int
-	StepTimeout     time.Duration
-	Verbose         bool
-	DryRun          bool
-	SkipPermissions bool
+	WorkDir     string
+	Model       string
+	MaxTokens   int
+	StepTimeout time.Duration
+	Verbose     bool
+	DryRun      bool
+	PMMode      bool
+
+	// Provider to use. If empty, falls back to state.Provider, then config.yaml, then claudecode.
+	ProviderName string
+
+	// Provider config for building providers
+	ProviderCfg provider.ProviderConfig
 }
 
 type Orchestrator struct {
-	config Config
-	state  *state.ProjectState
+	config   Config
+	state    *state.ProjectState
+	provider provider.Provider
 }
 
-func New(cfg Config) (*Orchestrator, error) {
+func New(cfg Config, prov provider.Provider) (*Orchestrator, error) {
 	s, err := state.Load(cfg.WorkDir)
 	if err != nil {
 		return nil, err
@@ -34,7 +42,10 @@ func New(cfg Config) (*Orchestrator, error) {
 	if cfg.Model != "" {
 		s.Model = cfg.Model
 	}
-	return &Orchestrator{config: cfg, state: s}, nil
+	if cfg.PMMode {
+		s.PMMode = true
+	}
+	return &Orchestrator{config: cfg, state: s, provider: prov}, nil
 }
 
 func (o *Orchestrator) AddSteps(n int) {
@@ -48,6 +59,14 @@ func (o *Orchestrator) SetAutoEvolve(enabled bool) {
 }
 
 func (o *Orchestrator) Run(ctx context.Context) error {
+	if o.state.PMMode {
+		return o.runPM(ctx)
+	}
+	return o.runLoop(ctx)
+}
+
+// runLoop is the original autonomous feedback loop.
+func (o *Orchestrator) runLoop(ctx context.Context) error {
 	s := o.state
 	s.Status = "running"
 	if err := s.Save(); err != nil {
@@ -60,7 +79,8 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	failColor := color.New(color.FgRed, color.Bold)
 	dimColor := color.New(color.Faint)
 
-	header.Printf("\n🔄 cloop — Feedback Loop for Claude Code\n")
+	header.Printf("\n🔄 cloop — Autonomous AI Feedback Loop\n")
+	fmt.Printf("   Provider: %s\n", o.provider.Name())
 	fmt.Printf("   Goal: %s\n", s.Goal)
 	if s.MaxSteps > 0 {
 		fmt.Printf("   Steps: %d/%d (completed/max)\n", s.CurrentStep, s.MaxSteps)
@@ -91,7 +111,6 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 			stepColor.Printf("━━━ Step %d ━━━\n", step)
 		}
 
-		// Build the prompt with full context
 		prompt := o.buildPrompt()
 
 		if o.config.DryRun {
@@ -100,19 +119,17 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 			continue
 		}
 
-		// Run Claude Code
-		dimColor.Printf("→ Running Claude Code...\n")
+		dimColor.Printf("→ Running %s...\n", o.provider.Name())
 		start := time.Now()
 
-		result, err := claude.Run(ctx, prompt, claude.Options{
-			Model:           s.Model,
-			WorkDir:         o.config.WorkDir,
-			MaxTokens:       o.config.MaxTokens,
-			Timeout:         o.config.StepTimeout,
-			SkipPermissions: o.config.SkipPermissions,
+		result, err := o.provider.Complete(ctx, prompt, provider.Options{
+			Model:     s.Model,
+			MaxTokens: o.config.MaxTokens,
+			Timeout:   o.config.StepTimeout,
+			WorkDir:   o.config.WorkDir,
 		})
 		if err != nil {
-			failColor.Printf("✗ Claude Code failed: %v\n", err)
+			failColor.Printf("✗ Provider error: %v\n", err)
 			s.Status = "failed"
 			s.Save()
 			return err
@@ -120,35 +137,18 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 
 		duration := time.Since(start)
 
-		// Store step result
 		stepResult := state.StepResult{
 			Task:     fmt.Sprintf("Step %d", step),
 			Output:   result.Output,
-			ExitCode: result.ExitCode,
+			ExitCode: 0,
 			Duration: duration.Round(time.Second).String(),
 			Time:     time.Now(),
 		}
 		s.AddStep(stepResult)
 
-		// Print output summary
-		outputLines := strings.Split(result.Output, "\n")
-		if len(outputLines) > 20 {
-			for _, line := range outputLines[:10] {
-				fmt.Printf("  %s\n", line)
-			}
-			dimColor.Printf("  ... (%d lines omitted) ...\n", len(outputLines)-20)
-			for _, line := range outputLines[len(outputLines)-10:] {
-				fmt.Printf("  %s\n", line)
-			}
-		} else {
-			for _, line := range outputLines {
-				fmt.Printf("  %s\n", line)
-			}
-		}
+		printOutput(result.Output, dimColor)
+		dimColor.Printf("  [%s, provider: %s]\n\n", duration.Round(time.Second), result.Provider)
 
-		dimColor.Printf("  [%s, exit %d]\n\n", duration.Round(time.Second), result.ExitCode)
-
-		// Check if goal is complete
 		if o.isGoalComplete(result.Output) {
 			successColor.Printf("🎉 Goal complete after %d steps!\n\n", step)
 			if s.AutoEvolve {
@@ -161,25 +161,175 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 			return nil
 		}
 
-		// Check for failure
-		if result.ExitCode != 0 {
-			consecutiveErrors++
-			failColor.Printf("⚠ Step %d exited with code %d (%d/%d consecutive errors)\n\n",
-				step, result.ExitCode, consecutiveErrors, maxConsecutiveErrors)
-			if consecutiveErrors >= maxConsecutiveErrors {
-				failColor.Printf("✗ Too many consecutive errors. Stopping.\n")
-				s.Status = "failed"
-				s.Save()
-				return fmt.Errorf("%d consecutive errors", consecutiveErrors)
-			}
-		} else {
-			consecutiveErrors = 0
-		}
-
+		consecutiveErrors = updateErrorCount(consecutiveErrors, 0, maxConsecutiveErrors, step, failColor)
 		s.Save()
 	}
 
 	color.New(color.FgYellow).Printf("⏸ Reached max steps (%d). Run 'cloop run' to continue or 'cloop run --add-steps N' to extend.\n", s.MaxSteps)
+	s.Status = "paused"
+	s.Save()
+	return nil
+}
+
+// runPM runs the product manager mode: decompose goal → execute tasks → verify.
+func (o *Orchestrator) runPM(ctx context.Context) error {
+	s := o.state
+	s.Status = "running"
+	if err := s.Save(); err != nil {
+		return err
+	}
+
+	header := color.New(color.FgCyan, color.Bold)
+	stepColor := color.New(color.FgYellow, color.Bold)
+	successColor := color.New(color.FgGreen, color.Bold)
+	failColor := color.New(color.FgRed, color.Bold)
+	dimColor := color.New(color.Faint)
+	pmColor := color.New(color.FgMagenta, color.Bold)
+
+	header.Printf("\n🧠 cloop PM — AI Product Manager Mode\n")
+	fmt.Printf("   Provider: %s\n", o.provider.Name())
+	fmt.Printf("   Goal: %s\n", s.Goal)
+	fmt.Println()
+
+	// Phase 1: Decompose goal into tasks (if not already done)
+	if s.Plan == nil || len(s.Plan.Tasks) == 0 {
+		pmColor.Printf("📋 Decomposing goal into tasks...\n")
+		plan, err := pm.Decompose(ctx, o.provider, s.Goal, s.Instructions, s.Model, o.config.StepTimeout)
+		if err != nil {
+			failColor.Printf("✗ Failed to decompose goal: %v\n", err)
+			s.Status = "failed"
+			s.Save()
+			return err
+		}
+		s.Plan = plan
+		s.Save()
+
+		fmt.Printf("\n")
+		pmColor.Printf("Task Plan (%d tasks):\n", len(plan.Tasks))
+		for _, t := range plan.Tasks {
+			fmt.Printf("  %d. [%d] %s\n", t.ID, t.Priority, t.Title)
+		}
+		fmt.Println()
+	} else {
+		pmColor.Printf("Resuming plan: %s\n\n", s.Plan.Summary())
+	}
+
+	// Phase 2: Execute tasks in priority order
+	consecutiveErrors := 0
+	const maxConsecutiveErrors = 3
+
+	for {
+		select {
+		case <-ctx.Done():
+			s.Status = "paused"
+			s.Save()
+			return ctx.Err()
+		default:
+		}
+
+		if s.Plan.IsComplete() {
+			successColor.Printf("🎉 All tasks complete! Goal achieved.\n")
+			successColor.Printf("   %s\n\n", s.Plan.Summary())
+			s.Status = "complete"
+			s.Save()
+			return nil
+		}
+
+		task := s.Plan.NextTask()
+		if task == nil {
+			break
+		}
+
+		// Check max steps limit
+		if s.MaxSteps > 0 && s.CurrentStep >= s.MaxSteps {
+			color.New(color.FgYellow).Printf("⏸ Reached max steps (%d). Run 'cloop run' to continue.\n", s.MaxSteps)
+			s.Status = "paused"
+			s.Save()
+			return nil
+		}
+
+		stepColor.Printf("━━━ Task %d/%d: %s ━━━\n", task.ID, len(s.Plan.Tasks), task.Title)
+		now := time.Now()
+		task.Status = pm.TaskInProgress
+		task.StartedAt = &now
+		s.Save()
+
+		prompt := pm.ExecuteTaskPrompt(s.Goal, s.Instructions, s.Plan, task)
+
+		if o.config.DryRun {
+			dimColor.Printf("[dry-run] Task prompt:\n%s\n\n", prompt)
+			task.Status = pm.TaskDone
+			s.Save()
+			continue
+		}
+
+		dimColor.Printf("→ Running %s on task %d...\n", o.provider.Name(), task.ID)
+		start := time.Now()
+
+		result, err := o.provider.Complete(ctx, prompt, provider.Options{
+			Model:     s.Model,
+			MaxTokens: o.config.MaxTokens,
+			Timeout:   o.config.StepTimeout,
+			WorkDir:   o.config.WorkDir,
+		})
+		if err != nil {
+			failColor.Printf("✗ Provider error: %v\n", err)
+			task.Status = pm.TaskFailed
+			consecutiveErrors++
+			s.Save()
+			if consecutiveErrors >= maxConsecutiveErrors {
+				s.Status = "failed"
+				s.Save()
+				return fmt.Errorf("%d consecutive errors", consecutiveErrors)
+			}
+			continue
+		}
+
+		duration := time.Since(start)
+		stepResult := state.StepResult{
+			Task:     fmt.Sprintf("Task %d: %s", task.ID, task.Title),
+			Output:   result.Output,
+			Duration: duration.Round(time.Second).String(),
+			Time:     time.Now(),
+		}
+		s.AddStep(stepResult)
+
+		printOutput(result.Output, dimColor)
+		dimColor.Printf("  [%s, provider: %s]\n\n", duration.Round(time.Second), result.Provider)
+
+		// Update task status based on signal in output
+		signal := pm.CheckTaskSignal(result.Output)
+		completedAt := time.Now()
+		task.CompletedAt = &completedAt
+		task.Result = truncate(result.Output, 500)
+
+		switch signal {
+		case pm.TaskDone:
+			task.Status = pm.TaskDone
+			successColor.Printf("✓ Task %d complete: %s\n\n", task.ID, task.Title)
+			consecutiveErrors = 0
+		case pm.TaskSkipped:
+			task.Status = pm.TaskSkipped
+			dimColor.Printf("→ Task %d skipped: %s\n\n", task.ID, task.Title)
+			consecutiveErrors = 0
+		case pm.TaskFailed:
+			task.Status = pm.TaskFailed
+			failColor.Printf("✗ Task %d failed: %s\n\n", task.ID, task.Title)
+			consecutiveErrors++
+			if consecutiveErrors >= maxConsecutiveErrors {
+				s.Status = "failed"
+				s.Save()
+				return fmt.Errorf("%d consecutive task failures", consecutiveErrors)
+			}
+		default:
+			// No signal found — treat as done (AI finished without explicit signal)
+			task.Status = pm.TaskDone
+			successColor.Printf("✓ Task %d complete (no explicit signal): %s\n\n", task.ID, task.Title)
+			consecutiveErrors = 0
+		}
+		s.Save()
+	}
+
 	s.Status = "paused"
 	s.Save()
 	return nil
@@ -205,13 +355,11 @@ func (o *Orchestrator) buildPrompt() string {
 		b.WriteString(fmt.Sprintf("## PROGRESS\nStep %d (no step limit).\n\n", s.CurrentStep+1))
 	}
 
-	// Include recent step history for context
 	recent := s.LastNSteps(3)
 	if len(recent) > 0 {
 		b.WriteString("## RECENT STEPS\n")
 		for _, step := range recent {
 			b.WriteString(fmt.Sprintf("### Step %d (%s)\n", step.Step+1, step.Duration))
-			// Truncate output to keep prompt manageable
 			output := step.Output
 			if len(output) > 2000 {
 				output = output[:1000] + "\n...(truncated)...\n" + output[len(output)-1000:]
@@ -239,7 +387,7 @@ func (o *Orchestrator) evolve(ctx context.Context) error {
 	stepColor := color.New(color.FgYellow, color.Bold)
 	dimColor := color.New(color.Faint)
 
-	evolveColor.Printf("\n🧠 Auto-Evolve — Claude is now improving the project on its own\n")
+	evolveColor.Printf("\n🧠 Auto-Evolve — Continuously improving the project\n")
 	fmt.Printf("   Press Ctrl+C to stop.\n\n")
 
 	for {
@@ -256,18 +404,15 @@ func (o *Orchestrator) evolve(ctx context.Context) error {
 		stepColor.Printf("━━━ Evolve #%d ━━━\n", s.EvolveStep)
 
 		prompt := o.buildEvolvePrompt()
+		dimColor.Printf("→ Thinking of improvements...\n")
 
-		dimColor.Printf("→ Claude is thinking of improvements...\n")
-
-		result, err := claude.Run(ctx, prompt, claude.Options{
-			Model:           s.Model,
-			WorkDir:         o.config.WorkDir,
-			MaxTokens:       o.config.MaxTokens,
-			Timeout:         o.config.StepTimeout,
-			SkipPermissions: o.config.SkipPermissions,
+		result, err := o.provider.Complete(ctx, prompt, provider.Options{
+			Model:     s.Model,
+			MaxTokens: o.config.MaxTokens,
+			Timeout:   o.config.StepTimeout,
+			WorkDir:   o.config.WorkDir,
 		})
 		if err != nil {
-			// Token exhaustion or other error — stop gracefully
 			evolveColor.Printf("\n⏹ Auto-evolve ended: %v\n", err)
 			s.Status = "complete"
 			s.Save()
@@ -277,29 +422,13 @@ func (o *Orchestrator) evolve(ctx context.Context) error {
 		stepResult := state.StepResult{
 			Task:     fmt.Sprintf("Evolve #%d", s.EvolveStep),
 			Output:   result.Output,
-			ExitCode: result.ExitCode,
 			Duration: result.Duration.Round(time.Second).String(),
 			Time:     time.Now(),
 		}
 		s.AddStep(stepResult)
 
-		// Print summary
-		outputLines := strings.Split(result.Output, "\n")
-		if len(outputLines) > 20 {
-			for _, line := range outputLines[:10] {
-				fmt.Printf("  %s\n", line)
-			}
-			dimColor.Printf("  ... (%d lines omitted) ...\n", len(outputLines)-20)
-			for _, line := range outputLines[len(outputLines)-10:] {
-				fmt.Printf("  %s\n", line)
-			}
-		} else {
-			for _, line := range outputLines {
-				fmt.Printf("  %s\n", line)
-			}
-		}
-
-		dimColor.Printf("  [%s, exit %d]\n\n", result.Duration.Round(time.Second), result.ExitCode)
+		printOutput(result.Output, dimColor)
+		dimColor.Printf("  [%s, provider: %s]\n\n", result.Duration.Round(time.Second), result.Provider)
 		s.Save()
 	}
 }
@@ -320,7 +449,6 @@ func (o *Orchestrator) buildEvolvePrompt() string {
 
 	b.WriteString(fmt.Sprintf("## EVOLVE ITERATION\n#%d\n\n", s.EvolveStep))
 
-	// Show the last 2 steps for context
 	recent := s.LastNSteps(2)
 	if len(recent) > 0 {
 		b.WriteString("## RECENT WORK\n")
@@ -351,15 +479,49 @@ func (o *Orchestrator) isGoalComplete(output string) bool {
 	if len(lines) == 0 {
 		return false
 	}
-	// Check last few lines for the signal
-	checkLines := lines
-	if len(checkLines) > 5 {
-		checkLines = checkLines[len(checkLines)-5:]
+	check := lines
+	if len(check) > 5 {
+		check = check[len(check)-5:]
 	}
-	for _, line := range checkLines {
+	for _, line := range check {
 		if strings.TrimSpace(line) == "GOAL_COMPLETE" {
 			return true
 		}
 	}
 	return false
+}
+
+func printOutput(output string, dimColor *color.Color) {
+	lines := strings.Split(output, "\n")
+	if len(lines) > 20 {
+		for _, line := range lines[:10] {
+			fmt.Printf("  %s\n", line)
+		}
+		dimColor.Printf("  ... (%d lines omitted) ...\n", len(lines)-20)
+		for _, line := range lines[len(lines)-10:] {
+			fmt.Printf("  %s\n", line)
+		}
+	} else {
+		for _, line := range lines {
+			fmt.Printf("  %s\n", line)
+		}
+	}
+}
+
+func updateErrorCount(count, exitCode, max, step int, failColor *color.Color) int {
+	if exitCode != 0 {
+		count++
+		failColor.Printf("⚠ Step %d exited with code %d (%d/%d consecutive errors)\n\n",
+			step, exitCode, count, max)
+	} else {
+		count = 0
+	}
+	return count
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
 }

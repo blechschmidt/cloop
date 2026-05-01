@@ -8,25 +8,28 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/orchestrator"
+	"github.com/blechschmidt/cloop/pkg/provider"
 	"github.com/spf13/cobra"
 )
 
 var (
-	runModel          string
-	stepTimeout       string
-	runMaxTokens      int
-	verbose           bool
-	dryRun            bool
-	continueSteps     int
-	skipPermissions   bool
-	autoEvolve        bool
+	runModel        string
+	stepTimeout     string
+	runMaxTokens    int
+	verbose         bool
+	dryRun          bool
+	continueSteps   int
+	autoEvolve      bool
+	runProvider     string
+	pmMode          bool
 )
 
 var runCmd = &cobra.Command{
 	Use:   "run",
 	Short: "Start or continue the autonomous feedback loop",
-	Long: `Run the cloop feedback loop. Claude Code will work through
+	Long: `Run the cloop feedback loop. The AI provider will work through
 the project goal step by step until completion or max steps.
 
 Press Ctrl+C to pause gracefully.`,
@@ -38,17 +41,64 @@ Press Ctrl+C to pause gracefully.`,
 			return fmt.Errorf("invalid step-timeout: %w", err)
 		}
 
-		cfg := orchestrator.Config{
-			WorkDir:         workdir,
-			Model:           runModel,
-			MaxTokens:       runMaxTokens,
-			StepTimeout:     timeout,
-			Verbose:         verbose,
-			DryRun:          dryRun,
-			SkipPermissions: skipPermissions,
+		// Load config
+		cfg, err := config.Load(workdir)
+		if err != nil {
+			return fmt.Errorf("loading config: %w", err)
 		}
 
-		orc, err := orchestrator.New(cfg)
+		// Determine provider (flag > config > default)
+		providerName := runProvider
+		if providerName == "" {
+			providerName = cfg.Provider
+		}
+		if providerName == "" {
+			providerName = "claudecode"
+		}
+
+		// Build provider config
+		model := runModel
+		provCfg := provider.ProviderConfig{
+			Name:             providerName,
+			AnthropicAPIKey:  cfg.Anthropic.APIKey,
+			AnthropicBaseURL: cfg.Anthropic.BaseURL,
+			OpenAIAPIKey:     cfg.OpenAI.APIKey,
+			OpenAIBaseURL:    cfg.OpenAI.BaseURL,
+			OllamaBaseURL:    cfg.Ollama.BaseURL,
+		}
+
+		// Apply per-provider model defaults from config if not overridden by flag
+		if model == "" {
+			switch providerName {
+			case "anthropic":
+				model = cfg.Anthropic.Model
+			case "openai":
+				model = cfg.OpenAI.Model
+			case "ollama":
+				model = cfg.Ollama.Model
+			case "claudecode":
+				model = cfg.ClaudeCode.Model
+			}
+		}
+
+		prov, err := provider.Build(provCfg)
+		if err != nil {
+			return fmt.Errorf("provider: %w", err)
+		}
+
+		orchCfg := orchestrator.Config{
+			WorkDir:      workdir,
+			Model:        model,
+			MaxTokens:    runMaxTokens,
+			StepTimeout:  timeout,
+			Verbose:      verbose,
+			DryRun:       dryRun,
+			PMMode:       pmMode,
+			ProviderName: providerName,
+			ProviderCfg:  provCfg,
+		}
+
+		orc, err := orchestrator.New(orchCfg, prov)
 		if err != nil {
 			return err
 		}
@@ -81,9 +131,10 @@ func init() {
 	runCmd.Flags().StringVar(&stepTimeout, "step-timeout", "10m", "Timeout per step")
 	runCmd.Flags().IntVar(&runMaxTokens, "max-tokens", 0, "Max output tokens per step")
 	runCmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "Verbose output")
-	runCmd.Flags().BoolVar(&dryRun, "dry-run", false, "Show prompts without running Claude")
+	runCmd.Flags().BoolVar(&dryRun, "dry-run", false, "Show prompts without running the provider")
 	runCmd.Flags().IntVar(&continueSteps, "add-steps", 0, "Add more steps to max before running")
-	runCmd.Flags().BoolVar(&skipPermissions, "dangerously-skip-permissions", false, "Pass --dangerously-skip-permissions to Claude Code")
 	runCmd.Flags().BoolVar(&autoEvolve, "auto-evolve", false, "After goal completion, keep improving the project autonomously")
+	runCmd.Flags().StringVar(&runProvider, "provider", "", "AI provider: anthropic, openai, ollama, claudecode")
+	runCmd.Flags().BoolVar(&pmMode, "pm", false, "Product manager mode: decompose goal into tasks and execute them")
 	rootCmd.AddCommand(runCmd)
 }
