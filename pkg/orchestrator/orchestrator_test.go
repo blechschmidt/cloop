@@ -1161,3 +1161,95 @@ func TestBuildEvolvePrompt_ContainsOriginalGoal(t *testing.T) {
 		t.Error("evolve prompt missing AUTO-EVOLVE marker")
 	}
 }
+
+// --- TokenBudget ---
+
+func TestRunLoop_TokenBudget_PausesWhenExceeded(t *testing.T) {
+	dir := tempDir(t)
+	initState(t, dir, "goal", 0) // unlimited steps
+
+	prov := &mockProvider{
+		name: "mock",
+		results: []*provider.Result{
+			{Output: "step 1", Provider: "mock", InputTokens: 100, OutputTokens: 50},  // 150 total
+			{Output: "step 2", Provider: "mock", InputTokens: 100, OutputTokens: 50},  // 300 total
+			{Output: "step 3\nGOAL_COMPLETE", Provider: "mock", InputTokens: 100, OutputTokens: 50},
+		},
+	}
+	// Budget of 250 — should stop after step 2 (cumulative = 300 >= 250)
+	o := newOrchestrator(t, dir, Config{WorkDir: dir, TokenBudget: 250}, prov)
+	err := o.runLoop(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if prov.calls != 2 {
+		t.Errorf("expected 2 provider calls before budget hit, got %d", prov.calls)
+	}
+	if o.state.Status != "paused" {
+		t.Errorf("expected status=paused when budget exceeded, got %q", o.state.Status)
+	}
+}
+
+func TestRunLoop_TokenBudget_Zero_NoLimit(t *testing.T) {
+	dir := tempDir(t)
+	initState(t, dir, "goal", 0)
+
+	prov := &mockProvider{
+		name: "mock",
+		results: []*provider.Result{
+			{Output: "step 1", Provider: "mock", InputTokens: 10000, OutputTokens: 5000},
+			{Output: "step 2\nGOAL_COMPLETE", Provider: "mock", InputTokens: 10000, OutputTokens: 5000},
+		},
+	}
+	// TokenBudget=0 means unlimited
+	o := newOrchestrator(t, dir, Config{WorkDir: dir, TokenBudget: 0}, prov)
+	err := o.runLoop(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if o.state.Status != "complete" {
+		t.Errorf("expected status=complete, got %q", o.state.Status)
+	}
+	if prov.calls != 2 {
+		t.Errorf("expected 2 provider calls, got %d", prov.calls)
+	}
+}
+
+func TestRunPM_TokenBudget_PausesTaskAsPending(t *testing.T) {
+	dir := tempDir(t)
+	s := initState(t, dir, "goal", 0)
+	s.PMMode = true
+	s.Plan = &pm.Plan{
+		Goal: "goal",
+		Tasks: []*pm.Task{
+			{ID: 1, Title: "Task A", Priority: 1, Status: pm.TaskPending},
+			{ID: 2, Title: "Task B", Priority: 2, Status: pm.TaskPending},
+		},
+	}
+	s.Save()
+
+	prov := &mockProvider{
+		name: "mock",
+		results: []*provider.Result{
+			{Output: "done A\nTASK_DONE", Provider: "mock", InputTokens: 200, OutputTokens: 100}, // 300 total
+			{Output: "done B\nTASK_DONE", Provider: "mock", InputTokens: 200, OutputTokens: 100}, // 600 total
+		},
+	}
+	// Budget of 400 — exceeded after task A's output is counted (300 < 400, task A is DONE);
+	// then task B runs and cumulative = 600 >= 400, so task B is reset to pending.
+	o := newOrchestrator(t, dir, Config{WorkDir: dir, PMMode: true, TokenBudget: 400}, prov)
+	err := o.runPM(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if o.state.Status != "paused" {
+		t.Errorf("expected status=paused, got %q", o.state.Status)
+	}
+	// Task A should be done, task B should be reset to pending
+	if o.state.Plan.Tasks[0].Status != pm.TaskDone {
+		t.Errorf("task A: expected done, got %q", o.state.Plan.Tasks[0].Status)
+	}
+	if o.state.Plan.Tasks[1].Status != pm.TaskPending {
+		t.Errorf("task B: expected pending (reset for retry), got %q", o.state.Plan.Tasks[1].Status)
+	}
+}

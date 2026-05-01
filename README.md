@@ -166,6 +166,7 @@ cloop run --pm --retry-failed # retry previously failed tasks
 | `--context-steps` | `3` | Recent steps to include in prompts (0 = none) |
 | `--step-delay` | | Delay between steps (e.g. `5s`, `1m`) |
 | `--on-complete` | | Shell command to run on goal completion (e.g. `notify-send done`) |
+| `--token-budget` | `0` | Stop when cumulative tokens (in+out) reach this limit (0 = unlimited) |
 | `-v, --verbose` | `false` | Show full step output (no truncation) |
 
 **Stopping:** Press `Ctrl+C` to pause gracefully. Run `cloop run` again to resume.
@@ -334,6 +335,22 @@ cloop run --auto-evolve
 # Evolve #3: adds unit tests
 # ... keeps going until Ctrl+C
 ```
+
+## Environment Variables
+
+`CLOOP_*` environment variables override config file values but are overridden by CLI flags. Useful for CI/CD pipelines or when you don't want to persist credentials in `.cloop/config.yaml`.
+
+| Variable | Overrides |
+|----------|-----------|
+| `CLOOP_PROVIDER` | Default provider |
+| `CLOOP_MODEL` | Model for this run |
+| `CLOOP_ANTHROPIC_API_KEY` | `config.anthropic.api_key` |
+| `CLOOP_ANTHROPIC_BASE_URL` | `config.anthropic.base_url` |
+| `CLOOP_OPENAI_API_KEY` | `config.openai.api_key` |
+| `CLOOP_OPENAI_BASE_URL` | `config.openai.base_url` |
+| `CLOOP_OLLAMA_BASE_URL` | `config.ollama.base_url` |
+
+Standard provider env vars (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`) are also read for provider auto-detection.
 
 ## State
 

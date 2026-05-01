@@ -35,6 +35,7 @@ var (
 	contextSteps    int
 	stepDelay       string
 	onComplete      string
+	tokenBudget     int
 )
 
 var runCmd = &cobra.Command{
@@ -69,7 +70,10 @@ Press Ctrl+C to pause gracefully.`,
 		// Load state to check for persisted provider/mode settings
 		projectState, _ := state.Load(workdir)
 
-		// Determine provider (flag > config > state > auto-detect > claudecode)
+		// Apply CLOOP_* environment variable overrides to config (env > config file).
+		applyEnvOverrides(cfg)
+
+		// Determine provider (flag > env > config > state > auto-detect > claudecode)
 		providerName := runProvider
 		if providerName == "" {
 			providerName = cfg.Provider
@@ -83,6 +87,9 @@ Press Ctrl+C to pause gracefully.`,
 
 		// Build provider config
 		model := runModel
+		if model == "" {
+			model = os.Getenv("CLOOP_MODEL")
+		}
 		provCfg := provider.ProviderConfig{
 			Name:             providerName,
 			AnthropicAPIKey:  cfg.Anthropic.APIKey,
@@ -134,6 +141,7 @@ Press Ctrl+C to pause gracefully.`,
 			StepsLimit:   runStepsLimit,
 			ProviderName: providerName,
 			ProviderCfg:  provCfg,
+			TokenBudget:  tokenBudget,
 		}
 
 		orc, err := orchestrator.New(orchCfg, prov)
@@ -197,13 +205,43 @@ Press Ctrl+C to pause gracefully.`,
 // autoSelectProvider picks a provider based on available environment variables.
 // Priority: anthropic > openai > claudecode (always available as fallback).
 func autoSelectProvider() string {
-	if os.Getenv("ANTHROPIC_API_KEY") != "" {
+	if os.Getenv("ANTHROPIC_API_KEY") != "" || os.Getenv("CLOOP_ANTHROPIC_API_KEY") != "" {
 		return "anthropic"
 	}
-	if os.Getenv("OPENAI_API_KEY") != "" {
+	if os.Getenv("OPENAI_API_KEY") != "" || os.Getenv("CLOOP_OPENAI_API_KEY") != "" {
 		return "openai"
 	}
 	return "claudecode"
+}
+
+// applyEnvOverrides applies CLOOP_* environment variables onto the config.
+// Env vars take precedence over config file values but are overridden by CLI flags.
+//
+//   CLOOP_PROVIDER            → config.Provider
+//   CLOOP_ANTHROPIC_API_KEY   → config.Anthropic.APIKey
+//   CLOOP_ANTHROPIC_BASE_URL  → config.Anthropic.BaseURL
+//   CLOOP_OPENAI_API_KEY      → config.OpenAI.APIKey
+//   CLOOP_OPENAI_BASE_URL     → config.OpenAI.BaseURL
+//   CLOOP_OLLAMA_BASE_URL     → config.Ollama.BaseURL
+func applyEnvOverrides(cfg *config.Config) {
+	if v := os.Getenv("CLOOP_PROVIDER"); v != "" {
+		cfg.Provider = v
+	}
+	if v := os.Getenv("CLOOP_ANTHROPIC_API_KEY"); v != "" {
+		cfg.Anthropic.APIKey = v
+	}
+	if v := os.Getenv("CLOOP_ANTHROPIC_BASE_URL"); v != "" {
+		cfg.Anthropic.BaseURL = v
+	}
+	if v := os.Getenv("CLOOP_OPENAI_API_KEY"); v != "" {
+		cfg.OpenAI.APIKey = v
+	}
+	if v := os.Getenv("CLOOP_OPENAI_BASE_URL"); v != "" {
+		cfg.OpenAI.BaseURL = v
+	}
+	if v := os.Getenv("CLOOP_OLLAMA_BASE_URL"); v != "" {
+		cfg.Ollama.BaseURL = v
+	}
 }
 
 func init() {
@@ -225,5 +263,6 @@ func init() {
 	runCmd.Flags().IntVar(&contextSteps, "context-steps", 3, "Recent steps to include in prompts (0 = disable context)")
 	runCmd.Flags().StringVar(&stepDelay, "step-delay", "", "Delay between steps (e.g. 5s, 1m)")
 	runCmd.Flags().StringVar(&onComplete, "on-complete", "", "Shell command to run when the goal is complete (e.g. 'notify-send done')")
+	runCmd.Flags().IntVar(&tokenBudget, "token-budget", 0, "Stop when cumulative tokens (in+out) reach this limit (0 = unlimited)")
 	rootCmd.AddCommand(runCmd)
 }

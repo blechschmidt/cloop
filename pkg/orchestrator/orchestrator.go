@@ -39,6 +39,10 @@ type Config struct {
 	// StepDelay is the duration to wait between steps (0 = no delay).
 	StepDelay time.Duration
 
+	// TokenBudget is the maximum total tokens (input + output) for the session (0 = unlimited).
+	// When the cumulative token count reaches or exceeds this value the session pauses.
+	TokenBudget int
+
 	// Provider to use. If empty, falls back to state.Provider, then config.yaml, then claudecode.
 	ProviderName string
 
@@ -188,6 +192,13 @@ func (o *Orchestrator) runLoop(ctx context.Context) error {
 
 		printOutput(result.Output, dimColor, o.config.Verbose)
 		dimColor.Printf("  [%s, provider: %s]\n\n", duration.Round(time.Second), result.Provider)
+
+		if o.config.TokenBudget > 0 && s.TotalInputTokens+s.TotalOutputTokens >= o.config.TokenBudget {
+			color.New(color.FgYellow).Printf("⏸ Token budget reached (%d tokens). Run 'cloop run' to continue.\n", o.config.TokenBudget)
+			s.Status = "paused"
+			s.Save()
+			return nil
+		}
 
 		if o.isGoalComplete(result.Output) {
 			successColor.Printf("🎉 Goal complete after %d steps!\n\n", step)
@@ -392,6 +403,15 @@ func (o *Orchestrator) runPM(ctx context.Context) error {
 
 		printOutput(result.Output, dimColor, o.config.Verbose)
 		dimColor.Printf("  [%s, provider: %s]\n\n", duration.Round(time.Second), result.Provider)
+
+		if o.config.TokenBudget > 0 && s.TotalInputTokens+s.TotalOutputTokens >= o.config.TokenBudget {
+			color.New(color.FgYellow).Printf("⏸ Token budget reached (%d tokens). Run 'cloop run' to continue.\n", o.config.TokenBudget)
+			// Mark the in-progress task as pending so it retries next time
+			task.Status = pm.TaskPending
+			s.Status = "paused"
+			s.Save()
+			return nil
+		}
 
 		// Update task status based on signal in output
 		signal := pm.CheckTaskSignal(result.Output)
