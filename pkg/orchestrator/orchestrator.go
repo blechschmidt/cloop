@@ -32,6 +32,10 @@ type Config struct {
 	// ContextSteps is the number of recent steps to include in prompts (0 = default 3).
 	ContextSteps int
 
+	// StepsLimit is the maximum number of steps to run in this session only (not persisted).
+	// 0 means no session limit. Takes precedence over MaxSteps when both are set.
+	StepsLimit int
+
 	// StepDelay is the duration to wait between steps (0 = no delay).
 	StepDelay time.Duration
 
@@ -109,12 +113,22 @@ func (o *Orchestrator) runLoop(ctx context.Context) error {
 	} else {
 		fmt.Printf("   Steps: %d (unlimited)\n", s.CurrentStep)
 	}
+	if o.config.StepsLimit > 0 {
+		fmt.Printf("   Session limit: %d step(s) this run\n", o.config.StepsLimit)
+	}
 	if s.Instructions != "" {
 		fmt.Printf("   Instructions: %s\n", s.Instructions)
 	}
 	fmt.Println()
 
+	startStep := s.CurrentStep
 	for s.MaxSteps == 0 || s.CurrentStep < s.MaxSteps {
+		if o.config.StepsLimit > 0 && s.CurrentStep >= startStep+o.config.StepsLimit {
+			color.New(color.FgYellow).Printf("⏸ Reached --steps limit (%d). Run 'cloop run' to continue.\n", o.config.StepsLimit)
+			s.Status = "paused"
+			s.Save()
+			return nil
+		}
 		select {
 		case <-ctx.Done():
 			s.Status = "paused"
@@ -282,6 +296,7 @@ func (o *Orchestrator) runPM(ctx context.Context) error {
 		maxConsecutiveErrors = 3
 	}
 
+	startStep := s.CurrentStep
 	for {
 		select {
 		case <-ctx.Done():
@@ -289,6 +304,13 @@ func (o *Orchestrator) runPM(ctx context.Context) error {
 			s.Save()
 			return ctx.Err()
 		default:
+		}
+
+		if o.config.StepsLimit > 0 && s.CurrentStep >= startStep+o.config.StepsLimit {
+			color.New(color.FgYellow).Printf("⏸ Reached --steps limit (%d). Run 'cloop run' to continue.\n", o.config.StepsLimit)
+			s.Status = "paused"
+			s.Save()
+			return nil
 		}
 
 		if s.Plan.IsComplete() {

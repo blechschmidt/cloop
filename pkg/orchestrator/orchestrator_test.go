@@ -993,6 +993,116 @@ func TestRunLoop_Verbose_PassedToOrchestratorConfig(t *testing.T) {
 	}
 }
 
+// --- StepsLimit ---
+
+func TestRunLoop_StepsLimit_StopsAfterN(t *testing.T) {
+	dir := tempDir(t)
+	initState(t, dir, "goal", 0) // unlimited MaxSteps
+
+	prov := &mockProvider{
+		name: "mock",
+		// Provide more results than StepsLimit so we can tell if it stops early.
+		results: []*provider.Result{
+			{Output: "step 1", Provider: "mock"},
+			{Output: "step 2", Provider: "mock"},
+			{Output: "step 3\nGOAL_COMPLETE", Provider: "mock"},
+		},
+	}
+	o := newOrchestrator(t, dir, Config{WorkDir: dir, StepsLimit: 2}, prov)
+	err := o.runLoop(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if prov.calls != 2 {
+		t.Errorf("expected 2 provider calls (StepsLimit=2), got %d", prov.calls)
+	}
+	if o.state.Status != "paused" {
+		t.Errorf("expected status=paused after hitting session limit, got %q", o.state.Status)
+	}
+}
+
+func TestRunLoop_StepsLimit_DoesNotPersistMaxSteps(t *testing.T) {
+	dir := tempDir(t)
+	initState(t, dir, "goal", 0) // MaxSteps=0 (unlimited)
+
+	prov := &mockProvider{
+		name:    "mock",
+		results: []*provider.Result{{Output: "step 1", Provider: "mock"}},
+	}
+	o := newOrchestrator(t, dir, Config{WorkDir: dir, StepsLimit: 1}, prov)
+	o.runLoop(context.Background())
+
+	// MaxSteps must still be 0 (session limit is not persisted)
+	loaded, err := state.Load(dir)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if loaded.MaxSteps != 0 {
+		t.Errorf("StepsLimit must not modify persisted MaxSteps, got %d", loaded.MaxSteps)
+	}
+}
+
+func TestRunLoop_StepsLimit_Zero_Means_NoLimit(t *testing.T) {
+	dir := tempDir(t)
+	initState(t, dir, "goal", 2) // MaxSteps=2
+
+	prov := &mockProvider{
+		name: "mock",
+		results: []*provider.Result{
+			{Output: "step 1", Provider: "mock"},
+			{Output: "step 2\nGOAL_COMPLETE", Provider: "mock"},
+		},
+	}
+	o := newOrchestrator(t, dir, Config{WorkDir: dir, StepsLimit: 0}, prov)
+	err := o.runLoop(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// StepsLimit=0 means no session limit; stops at MaxSteps=2
+	if prov.calls != 2 {
+		t.Errorf("expected 2 calls (StepsLimit=0 means no session limit), got %d", prov.calls)
+	}
+}
+
+func TestRunPM_StepsLimit_StopsAfterN(t *testing.T) {
+	dir := tempDir(t)
+	s := initState(t, dir, "goal", 0)
+	s.PMMode = true
+	s.Plan = &pm.Plan{
+		Goal: "goal",
+		Tasks: []*pm.Task{
+			{ID: 1, Title: "Task A", Priority: 1, Status: pm.TaskPending},
+			{ID: 2, Title: "Task B", Priority: 2, Status: pm.TaskPending},
+			{ID: 3, Title: "Task C", Priority: 3, Status: pm.TaskPending},
+		},
+	}
+	s.Save()
+
+	prov := &mockProvider{
+		name: "mock",
+		results: []*provider.Result{
+			{Output: "done A\nTASK_DONE", Provider: "mock"},
+			{Output: "done B\nTASK_DONE", Provider: "mock"},
+			{Output: "done C\nTASK_DONE", Provider: "mock"},
+		},
+	}
+	o := newOrchestrator(t, dir, Config{WorkDir: dir, PMMode: true, StepsLimit: 2}, prov)
+	err := o.runPM(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if prov.calls != 2 {
+		t.Errorf("expected 2 provider calls (StepsLimit=2), got %d", prov.calls)
+	}
+	if o.state.Status != "paused" {
+		t.Errorf("expected status=paused, got %q", o.state.Status)
+	}
+	// Tasks A and B done; C still pending
+	if o.state.Plan.Tasks[2].Status != pm.TaskPending {
+		t.Errorf("task C should remain pending, got %q", o.state.Plan.Tasks[2].Status)
+	}
+}
+
 // --- buildEvolvePrompt ---
 
 func TestBuildEvolvePrompt_ContainsOriginalGoal(t *testing.T) {

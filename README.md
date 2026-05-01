@@ -156,6 +156,7 @@ cloop run --pm --retry-failed # retry previously failed tasks
 | `--step-timeout` | `10m` | Timeout per step |
 | `--max-tokens` | `0` | Max output tokens per step |
 | `--add-steps` | `0` | Add more steps to max before running |
+| `--steps` | `0` | Run at most N steps this session (not persisted) |
 | `--dry-run` | `false` | Show prompts without running |
 | `--pm` | `false` | Product Manager mode |
 | `--plan-only` | `false` | PM mode: decompose tasks but don't execute |
@@ -232,6 +233,7 @@ cloop task list                    # show all tasks with status
 cloop task list --json             # output tasks as JSON array (for scripting)
 cloop task show <id>               # show full task details (untruncated)
 cloop task show <id> --json        # output task as JSON
+cloop task next                    # show the next pending task (preview before running)
 cloop task add "Title" --desc "Description" --priority 1
 cloop task edit <id> --title "New title" --priority 2
 cloop task skip <id>               # mark as skipped

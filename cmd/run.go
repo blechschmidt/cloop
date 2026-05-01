@@ -22,6 +22,7 @@ var (
 	verbose         bool
 	dryRun          bool
 	continueSteps   int
+	runStepsLimit   int
 	autoEvolve      bool
 	runProvider     string
 	pmMode          bool
@@ -127,6 +128,7 @@ Press Ctrl+C to pause gracefully.`,
 			MaxFailures:  maxFailures,
 			ContextSteps: contextSteps,
 			StepDelay:    delay,
+			StepsLimit:   runStepsLimit,
 			ProviderName: providerName,
 			ProviderCfg:  provCfg,
 		}
@@ -181,6 +183,7 @@ func init() {
 	runCmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "Verbose output")
 	runCmd.Flags().BoolVar(&dryRun, "dry-run", false, "Show prompts without running the provider")
 	runCmd.Flags().IntVar(&continueSteps, "add-steps", 0, "Add more steps to max before running")
+	runCmd.Flags().IntVar(&runStepsLimit, "steps", 0, "Run at most N steps this session (not persisted; 0 = no session limit)")
 	runCmd.Flags().BoolVar(&autoEvolve, "auto-evolve", false, "After goal completion, keep improving the project autonomously")
 	runCmd.Flags().StringVar(&runProvider, "provider", "", "AI provider: anthropic, openai, ollama, claudecode")
 	runCmd.Flags().BoolVar(&pmMode, "pm", false, "Product manager mode: decompose goal into tasks and execute them")

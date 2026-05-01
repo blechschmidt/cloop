@@ -34,6 +34,7 @@ var taskCmd = &cobra.Command{
 Subcommands:
   list          Show all tasks
   show <id>     Show full task details
+  next          Show the next pending task
   skip <id>     Mark a task as skipped
   done <id>     Mark a task as done
   fail <id>     Mark a task as failed
@@ -271,6 +272,33 @@ var taskEditCmd = &cobra.Command{
 	},
 }
 
+var taskNextCmd = &cobra.Command{
+	Use:   "next",
+	Short: "Show the next pending task",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		workdir, _ := os.Getwd()
+		s, err := state.Load(workdir)
+		if err != nil {
+			return err
+		}
+		if !s.PMMode || s.Plan == nil || len(s.Plan.Tasks) == 0 {
+			return fmt.Errorf("no task plan found — run 'cloop run --pm' to create one")
+		}
+		task := s.Plan.NextTask()
+		if task == nil {
+			color.New(color.FgGreen).Printf("All tasks complete — no pending tasks remaining.\n")
+			return nil
+		}
+		titleColor := color.New(color.FgWhite, color.Bold)
+		dimColor := color.New(color.Faint)
+		titleColor.Printf("Next task: #%d [P%d] %s\n", task.ID, task.Priority, task.Title)
+		if task.Description != "" {
+			dimColor.Printf("  %s\n", task.Description)
+		}
+		return nil
+	},
+}
+
 var taskAddCmd = &cobra.Command{
 	Use:   "add <title>",
 	Short: "Add a new task to the plan",
@@ -459,6 +487,7 @@ func init() {
 
 	taskCmd.AddCommand(taskListCmd)
 	taskCmd.AddCommand(taskShowCmd)
+	taskCmd.AddCommand(taskNextCmd)
 	taskCmd.AddCommand(taskSkipCmd)
 	taskCmd.AddCommand(taskResetCmd)
 	taskCmd.AddCommand(taskDoneCmd)
