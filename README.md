@@ -186,6 +186,16 @@ Show step history.
 cloop log              # all steps (truncated output)
 cloop log --step 3     # specific step
 cloop log --lines 0    # full output (no truncation)
+cloop log --json       # machine-readable JSON array
+```
+
+### `cloop export`
+
+Export the session as a markdown report (goal, steps, task plan).
+
+```bash
+cloop export                  # print to stdout
+cloop export -o report.md     # write to file
 ```
 
 ### `cloop providers [--test]`
@@ -214,12 +224,14 @@ Supported keys: `provider`, `anthropic.api_key`, `anthropic.model`, `anthropic.b
 Manage tasks in Product Manager mode.
 
 ```bash
-cloop task list           # show all tasks with status
+cloop task list                    # show all tasks with status
+cloop task show <id>               # show full task details (untruncated)
 cloop task add "Title" --desc "Description" --priority 1
-cloop task skip <id>      # mark as skipped
-cloop task done <id>      # mark as done
-cloop task reset <id>     # reset to pending
-cloop task remove <id>    # remove from plan
+cloop task edit <id> --title "New title" --priority 2
+cloop task skip <id>               # mark as skipped
+cloop task done <id>               # mark as done
+cloop task reset <id>              # reset to pending
+cloop task remove <id>             # remove from plan
 ```
 
 ### `cloop reset`
@@ -293,7 +305,8 @@ Status values: `initialized`, `running`, `complete`, `failed`, `paused`, `evolvi
 
 ## Error Handling
 
-- **3 consecutive errors** → cloop stops automatically
+- **Provider error (regular mode)** → stops immediately
+- **3 consecutive task failures (PM mode)** → stops automatically
 - **Ctrl+C** → graceful pause after current step
 - **Rate limits / transient errors** → automatic retry with exponential backoff (up to 3 attempts)
 
