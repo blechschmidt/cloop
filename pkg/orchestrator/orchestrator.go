@@ -99,6 +99,10 @@ func (o *Orchestrator) runLoop(ctx context.Context) error {
 		return err
 	}
 
+	sessionStart := time.Now()
+	startStep := s.CurrentStep
+	defer func() { printSessionSummary(sessionStart, startStep, s) }()
+
 	header := color.New(color.FgCyan, color.Bold)
 	stepColor := color.New(color.FgYellow, color.Bold)
 	successColor := color.New(color.FgGreen, color.Bold)
@@ -121,7 +125,6 @@ func (o *Orchestrator) runLoop(ctx context.Context) error {
 	}
 	fmt.Println()
 
-	startStep := s.CurrentStep
 	for s.MaxSteps == 0 || s.CurrentStep < s.MaxSteps {
 		if o.config.StepsLimit > 0 && s.CurrentStep >= startStep+o.config.StepsLimit {
 			color.New(color.FgYellow).Printf("⏸ Reached --steps limit (%d). Run 'cloop run' to continue.\n", o.config.StepsLimit)
@@ -225,6 +228,10 @@ func (o *Orchestrator) runPM(ctx context.Context) error {
 		return err
 	}
 
+	sessionStart := time.Now()
+	startStep := s.CurrentStep
+	defer func() { printSessionSummary(sessionStart, startStep, s) }()
+
 	header := color.New(color.FgCyan, color.Bold)
 	stepColor := color.New(color.FgYellow, color.Bold)
 	successColor := color.New(color.FgGreen, color.Bold)
@@ -296,7 +303,6 @@ func (o *Orchestrator) runPM(ctx context.Context) error {
 		maxConsecutiveErrors = 3
 	}
 
-	startStep := s.CurrentStep
 	for {
 		select {
 		case <-ctx.Done():
@@ -625,4 +631,17 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "..."
+}
+
+// printSessionSummary prints a one-line summary after a run session ends.
+// It is called via defer so it always runs, even on error paths.
+func printSessionSummary(start time.Time, startStep int, s *state.ProjectState) {
+	steps := s.CurrentStep - startStep
+	elapsed := time.Since(start).Round(time.Second)
+	dimColor := color.New(color.Faint)
+	dimColor.Printf("Session: %d step(s) in %s", steps, elapsed)
+	if s.TotalInputTokens > 0 || s.TotalOutputTokens > 0 {
+		dimColor.Printf(", %d in / %d out tokens (cumulative)", s.TotalInputTokens, s.TotalOutputTokens)
+	}
+	dimColor.Printf("\n")
 }
