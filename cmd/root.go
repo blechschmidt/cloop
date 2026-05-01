@@ -29,6 +29,8 @@ Supports Anthropic (Claude API), OpenAI, Ollama (local), and Claude Code.
   cloop task list --graph         # visual task dependency graph
   cloop milestone plan            # AI sprint/release planning
   cloop milestone forecast        # velocity-based completion forecast
+  cloop compare "Explain REST vs GraphQL"   # benchmark across providers
+  cloop compare --judge --providers anthropic,openai "Design a caching layer"
   cloop status
   cloop log`,
 }
