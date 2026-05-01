@@ -120,6 +120,9 @@ Press Ctrl+C to pause gracefully.`,
 			return err
 		}
 
+		// Persist the resolved provider in state so subsequent runs default to the same provider.
+		orc.SetProvider(providerName)
+
 		if continueSteps > 0 {
 			orc.AddSteps(continueSteps)
 		}

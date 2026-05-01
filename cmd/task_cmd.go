@@ -15,6 +15,11 @@ import (
 var (
 	taskDesc     string
 	taskPriority int
+
+	// edit flags
+	editTitle    string
+	editDesc     string
+	editPriority int
 )
 
 var taskCmd = &cobra.Command{
@@ -167,6 +172,70 @@ var taskShowCmd = &cobra.Command{
 		if task.Result != "" {
 			fmt.Printf("\nResult summary:\n")
 			dimColor.Printf("  %s\n", strings.ReplaceAll(task.Result, "\n", "\n  "))
+		}
+		return nil
+	},
+}
+
+var taskEditCmd = &cobra.Command{
+	Use:     "edit <id>",
+	Aliases: []string{"update"},
+	Short:   "Edit a task's title, description, or priority",
+	Args:    cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		workdir, _ := os.Getwd()
+		s, err := state.Load(workdir)
+		if err != nil {
+			return err
+		}
+		if !s.PMMode || s.Plan == nil || len(s.Plan.Tasks) == 0 {
+			return fmt.Errorf("no task plan found — run 'cloop run --pm' to create one")
+		}
+
+		id, err := strconv.Atoi(args[0])
+		if err != nil {
+			return fmt.Errorf("invalid task ID %q: must be a number", args[0])
+		}
+
+		var task *pm.Task
+		for _, t := range s.Plan.Tasks {
+			if t.ID == id {
+				task = t
+				break
+			}
+		}
+		if task == nil {
+			return fmt.Errorf("task %d not found", id)
+		}
+
+		if !cmd.Flags().Changed("title") && !cmd.Flags().Changed("desc") && !cmd.Flags().Changed("priority") {
+			return fmt.Errorf("no changes specified — use --title, --desc, or --priority")
+		}
+
+		changed := []string{}
+		if cmd.Flags().Changed("title") {
+			task.Title = editTitle
+			changed = append(changed, "title")
+		}
+		if cmd.Flags().Changed("desc") {
+			task.Description = editDesc
+			changed = append(changed, "description")
+		}
+		if cmd.Flags().Changed("priority") {
+			task.Priority = editPriority
+			changed = append(changed, "priority")
+		}
+
+		if err := s.Save(); err != nil {
+			return err
+		}
+
+		color.New(color.FgGreen).Printf("Task %d updated (%s)\n", task.ID, strings.Join(changed, ", "))
+		fmt.Printf("  Title:    %s\n", task.Title)
+		fmt.Printf("  Priority: %d\n", task.Priority)
+		if task.Description != "" {
+			dimColor := color.New(color.Faint)
+			dimColor.Printf("  Desc:     %s\n", truncateStr(task.Description, 100))
 		}
 		return nil
 	},
@@ -329,12 +398,17 @@ func init() {
 	taskAddCmd.Flags().StringVar(&taskDesc, "desc", "", "Task description")
 	taskAddCmd.Flags().IntVar(&taskPriority, "priority", 0, "Task priority (1=highest; default: lowest)")
 
+	taskEditCmd.Flags().StringVar(&editTitle, "title", "", "New title for the task")
+	taskEditCmd.Flags().StringVar(&editDesc, "desc", "", "New description for the task")
+	taskEditCmd.Flags().IntVar(&editPriority, "priority", 0, "New priority for the task (1=highest)")
+
 	taskCmd.AddCommand(taskListCmd)
 	taskCmd.AddCommand(taskShowCmd)
 	taskCmd.AddCommand(taskSkipCmd)
 	taskCmd.AddCommand(taskResetCmd)
 	taskCmd.AddCommand(taskDoneCmd)
 	taskCmd.AddCommand(taskAddCmd)
+	taskCmd.AddCommand(taskEditCmd)
 	taskCmd.AddCommand(taskRemoveCmd)
 	rootCmd.AddCommand(taskCmd)
 }

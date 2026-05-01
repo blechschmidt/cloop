@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -13,6 +14,7 @@ import (
 var (
 	logStep  int
 	logLines int
+	logJSON  bool
 )
 
 var logCmd = &cobra.Command{
@@ -26,12 +28,13 @@ var logCmd = &cobra.Command{
 		}
 
 		if len(s.Steps) == 0 {
-			fmt.Println("No steps recorded yet.")
+			if logJSON {
+				fmt.Println("[]")
+			} else {
+				fmt.Println("No steps recorded yet.")
+			}
 			return nil
 		}
-
-		stepColor := color.New(color.FgYellow, color.Bold)
-		dimColor := color.New(color.Faint)
 
 		steps := s.Steps
 		if logStep > 0 {
@@ -44,9 +47,25 @@ var logCmd = &cobra.Command{
 			}
 		}
 
+		if logJSON {
+			data, err := json.MarshalIndent(steps, "", "  ")
+			if err != nil {
+				return fmt.Errorf("marshaling log: %w", err)
+			}
+			fmt.Println(string(data))
+			return nil
+		}
+
+		stepColor := color.New(color.FgYellow, color.Bold)
+		dimColor := color.New(color.Faint)
+
 		for _, step := range steps {
 			stepColor.Printf("━━━ Step %d ━━━", step.Step+1)
-			dimColor.Printf(" [%s, exit %d, %s]\n", step.Time.Format("15:04:05"), step.ExitCode, step.Duration)
+			dimColor.Printf(" [%s, exit %d, %s", step.Time.Format("15:04:05"), step.ExitCode, step.Duration)
+			if step.InputTokens > 0 || step.OutputTokens > 0 {
+				dimColor.Printf(", %d/%d tokens", step.InputTokens, step.OutputTokens)
+			}
+			dimColor.Printf("]\n")
 
 			output := step.Output
 			lines := strings.Split(output, "\n")
@@ -73,5 +92,6 @@ var logCmd = &cobra.Command{
 func init() {
 	logCmd.Flags().IntVar(&logStep, "step", 0, "Show specific step (1-indexed)")
 	logCmd.Flags().IntVar(&logLines, "lines", 50, "Max output lines per step (0=all)")
+	logCmd.Flags().BoolVar(&logJSON, "json", false, "Output steps as JSON array")
 	rootCmd.AddCommand(logCmd)
 }

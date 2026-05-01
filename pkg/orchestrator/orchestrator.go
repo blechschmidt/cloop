@@ -60,6 +60,14 @@ func (o *Orchestrator) SetAutoEvolve(enabled bool) {
 	o.state.Save()
 }
 
+// SetProvider persists the provider name in state so subsequent runs default to the same provider.
+func (o *Orchestrator) SetProvider(name string) {
+	if name != "" {
+		o.state.Provider = name
+		o.state.Save()
+	}
+}
+
 func (o *Orchestrator) Run(ctx context.Context) error {
 	if o.state.PMMode {
 		return o.runPM(ctx)
@@ -93,9 +101,6 @@ func (o *Orchestrator) runLoop(ctx context.Context) error {
 		fmt.Printf("   Instructions: %s\n", s.Instructions)
 	}
 	fmt.Println()
-
-	consecutiveErrors := 0
-	const maxConsecutiveErrors = 3
 
 	for s.MaxSteps == 0 || s.CurrentStep < s.MaxSteps {
 		select {
@@ -167,7 +172,6 @@ func (o *Orchestrator) runLoop(ctx context.Context) error {
 			return nil
 		}
 
-		consecutiveErrors = updateErrorCount(consecutiveErrors, 0, maxConsecutiveErrors, step, failColor)
 		s.Save()
 	}
 
@@ -542,17 +546,6 @@ func printOutput(output string, dimColor *color.Color) {
 			fmt.Printf("  %s\n", line)
 		}
 	}
-}
-
-func updateErrorCount(count, exitCode, max, step int, failColor *color.Color) int {
-	if exitCode != 0 {
-		count++
-		failColor.Printf("⚠ Step %d exited with code %d (%d/%d consecutive errors)\n\n",
-			step, exitCode, count, max)
-	} else {
-		count = 0
-	}
-	return count
 }
 
 func truncate(s string, n int) string {
