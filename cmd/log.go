@@ -37,22 +37,9 @@ var logCmd = &cobra.Command{
 			return nil
 		}
 
-		steps := s.Steps
-		if logStep > 0 {
-			// Show specific step
-			found := false
-			for _, step := range s.Steps {
-				if step.Step+1 == logStep {
-					steps = []state.StepResult{step}
-					found = true
-					break
-				}
-			}
-			if !found {
-				return fmt.Errorf("step %d not found (total steps: %d)", logStep, len(s.Steps))
-			}
-		} else if logLast > 0 && len(steps) > logLast {
-			steps = steps[len(steps)-logLast:]
+		steps, err := filterSteps(s.Steps, logStep, logLast)
+		if err != nil {
+			return err
 		}
 
 		if logJSON {
@@ -95,6 +82,23 @@ var logCmd = &cobra.Command{
 
 		return nil
 	},
+}
+
+// filterSteps applies --step and --last filters to a step slice.
+// stepNum is 1-indexed (0 means no filter). lastN is a suffix limit (0 means all).
+func filterSteps(steps []state.StepResult, stepNum, lastN int) ([]state.StepResult, error) {
+	if stepNum > 0 {
+		for _, step := range steps {
+			if step.Step+1 == stepNum {
+				return []state.StepResult{step}, nil
+			}
+		}
+		return nil, fmt.Errorf("step %d not found (total steps: %d)", stepNum, len(steps))
+	}
+	if lastN > 0 && len(steps) > lastN {
+		return steps[len(steps)-lastN:], nil
+	}
+	return steps, nil
 }
 
 func init() {

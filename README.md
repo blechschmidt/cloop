@@ -190,8 +190,18 @@ Show step history.
 ```bash
 cloop log              # all steps (truncated output)
 cloop log --step 3     # specific step
+cloop log --last 5     # show only the 5 most recent steps
 cloop log --lines 0    # full output (no truncation)
 cloop log --json       # machine-readable JSON array
+```
+
+### `cloop goal`
+
+Show or update the project goal without reinitializing (preserves all steps, task plan, and settings).
+
+```bash
+cloop goal                        # show current goal
+cloop goal "New goal text"        # update the goal in-place
 ```
 
 ### `cloop export`
