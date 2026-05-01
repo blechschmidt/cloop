@@ -160,6 +160,7 @@ cloop run --pm --retry-failed # retry previously failed tasks
 | `--pm` | `false` | Product Manager mode |
 | `--plan-only` | `false` | PM mode: decompose tasks but don't execute |
 | `--retry-failed` | `false` | PM mode: retry failed tasks |
+| `--replan` | `false` | PM mode: discard existing plan and re-decompose the goal |
 | `--max-failures` | `3` | PM mode: consecutive task failures before stopping |
 | `--context-steps` | `3` | Recent steps to include in prompts (0 = none) |
 | `--step-delay` | | Delay between steps (e.g. `5s`, `1m`) |
@@ -266,6 +267,9 @@ cloop run --pm
 
 # Retry any failed tasks
 cloop run --pm --retry-failed
+
+# Discard the existing plan and re-decompose
+cloop run --pm --replan
 ```
 
 The AI signals task outcomes with terminal keywords:
