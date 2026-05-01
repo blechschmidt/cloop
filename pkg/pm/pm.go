@@ -24,6 +24,76 @@ const (
 	TaskSkipped    TaskStatus = "skipped"
 )
 
+// AgentRole defines specialized AI expertise for a task category.
+// The role shapes the AI's perspective and focus during task execution.
+type AgentRole string
+
+const (
+	RoleBackend  AgentRole = "backend"  // API, server, database, business logic
+	RoleFrontend AgentRole = "frontend" // UI, UX, HTML, CSS, JavaScript/TypeScript
+	RoleTesting  AgentRole = "testing"  // Unit, integration, e2e, and benchmark tests
+	RoleSecurity AgentRole = "security" // Auth, permissions, hardening, threat modeling
+	RoleDevOps   AgentRole = "devops"   // CI/CD, Docker, deployment, infrastructure
+	RoleData     AgentRole = "data"     // Databases, migrations, data modeling, ETL
+	RoleDocs     AgentRole = "docs"     // Documentation, README, API docs, comments
+	RoleReview   AgentRole = "review"   // Code review, quality, refactoring
+)
+
+// RoleSystemPrompt returns a role-specific system context prepended to task execution prompts.
+// Returns empty string for unknown roles or empty role (generic execution).
+func RoleSystemPrompt(role AgentRole) string {
+	switch role {
+	case RoleBackend:
+		return "You are a senior backend engineer. Focus on correctness, performance, and maintainability. " +
+			"Apply best practices for API design, error handling, database interaction, and security. " +
+			"Prefer explicit error handling and well-structured code over brevity.\n\n"
+	case RoleFrontend:
+		return "You are a senior frontend engineer. Focus on user experience, accessibility, and performance. " +
+			"Apply best practices for component structure, state management, and responsive design. " +
+			"Ensure cross-browser compatibility and follow the project's existing UI conventions.\n\n"
+	case RoleTesting:
+		return "You are a test engineering expert. Write comprehensive, maintainable tests that give real confidence. " +
+			"Cover happy paths, edge cases, and error conditions. Avoid over-mocking — prefer integration tests " +
+			"where feasible. Ensure tests are deterministic and fast.\n\n"
+	case RoleSecurity:
+		return "You are a security engineer. Think like an attacker, build like a defender. " +
+			"Review for OWASP Top 10 vulnerabilities, injection flaws, broken auth, and data exposure. " +
+			"Validate all inputs, enforce least-privilege, and document security decisions.\n\n"
+	case RoleDevOps:
+		return "You are a DevOps/platform engineer. Focus on reliability, repeatability, and observability. " +
+			"Apply best practices for containerization, CI/CD pipelines, infrastructure-as-code, and monitoring. " +
+			"Ensure configurations are idempotent and rollback-safe.\n\n"
+	case RoleData:
+		return "You are a data engineer. Focus on data integrity, query performance, and schema correctness. " +
+			"Design schemas with normalization and indexing in mind. Write efficient queries and safe migrations " +
+			"that can be rolled back. Document data models clearly.\n\n"
+	case RoleDocs:
+		return "You are a technical writer and documentation engineer. Write clear, accurate, and complete documentation. " +
+			"Focus on the reader's perspective — explain the 'why' not just the 'what'. " +
+			"Keep docs concise, well-organized, and always synchronized with the code.\n\n"
+	case RoleReview:
+		return "You are a code reviewer and refactoring expert. Focus on code quality, readability, and maintainability. " +
+			"Identify code smells, unnecessary complexity, and opportunities for simplification. " +
+			"Enforce consistency with project conventions and flag any correctness issues.\n\n"
+	default:
+		return ""
+	}
+}
+
+// ValidRoles returns all known role names as strings (for help text and validation).
+func ValidRoles() []string {
+	return []string{
+		string(RoleBackend),
+		string(RoleFrontend),
+		string(RoleTesting),
+		string(RoleSecurity),
+		string(RoleDevOps),
+		string(RoleData),
+		string(RoleDocs),
+		string(RoleReview),
+	}
+}
+
 // Task is a single unit of work derived from the project goal.
 type Task struct {
 	ID            int        `json:"id"`
@@ -31,6 +101,7 @@ type Task struct {
 	Description   string     `json:"description"`
 	Priority      int        `json:"priority"` // 1 = highest
 	Status        TaskStatus `json:"status"`
+	Role          AgentRole  `json:"role,omitempty"`      // specialized agent role for this task
 	DependsOn     []int      `json:"depends_on,omitempty"` // IDs of tasks that must complete before this one
 	Result        string     `json:"result,omitempty"`
 	StartedAt     *time.Time `json:"started_at,omitempty"`
@@ -166,8 +237,10 @@ func DecomposePrompt(goal, instructions string) string {
 	b.WriteString("- Specific enough that an AI agent can implement it without clarification\n")
 	b.WriteString("- Linked to prerequisite tasks via depends_on (list of task IDs that must complete first)\n\n")
 	b.WriteString("Output ONLY valid JSON in this exact format (no explanation, no markdown):\n")
-	b.WriteString(`{"tasks":[{"id":1,"title":"short title","description":"detailed description of what to do","priority":1,"depends_on":[]},{"id":2,"title":"another task","description":"details","priority":2,"depends_on":[1]}]}`)
-	b.WriteString("\n\nAim for 5-15 tasks. Break large tasks into smaller ones. Use depends_on to express real prerequisites (not just ordering preferences). An empty depends_on array means no prerequisites.")
+	b.WriteString(`{"tasks":[{"id":1,"title":"short title","description":"detailed description of what to do","priority":1,"role":"backend","depends_on":[]},{"id":2,"title":"another task","description":"details","priority":2,"role":"testing","depends_on":[1]}]}`)
+	b.WriteString("\n\nAim for 5-15 tasks. Break large tasks into smaller ones.")
+	b.WriteString("\nUse depends_on to express real prerequisites. An empty depends_on array means no prerequisites.")
+	b.WriteString("\nFor role, choose the best fit from: backend, frontend, testing, security, devops, data, docs, review. Use empty string if none applies.")
 	return b.String()
 }
 
@@ -175,6 +248,12 @@ func DecomposePrompt(goal, instructions string) string {
 // Pass a non-nil ProjectContext to include project state (git, file tree) in the prompt.
 func ExecuteTaskPrompt(goal, instructions string, plan *Plan, task *Task, ctx ...*ProjectContext) string {
 	var b strings.Builder
+
+	// Inject role-specific expertise if task has a role assigned.
+	if rolePrompt := RoleSystemPrompt(task.Role); rolePrompt != "" {
+		b.WriteString(rolePrompt)
+	}
+
 	b.WriteString("You are an AI agent executing a task as part of a larger project goal.\n")
 	b.WriteString("You have full file system access and can run commands.\n\n")
 
@@ -184,7 +263,11 @@ func ExecuteTaskPrompt(goal, instructions string, plan *Plan, task *Task, ctx ..
 	}
 
 	b.WriteString("## CURRENT TASK\n")
-	b.WriteString(fmt.Sprintf("**Task %d: %s**\n", task.ID, task.Title))
+	if task.Role != "" {
+		b.WriteString(fmt.Sprintf("**Task %d: %s** [role: %s]\n", task.ID, task.Title, task.Role))
+	} else {
+		b.WriteString(fmt.Sprintf("**Task %d: %s**\n", task.ID, task.Title))
+	}
 	b.WriteString(fmt.Sprintf("%s\n", task.Description))
 	if len(task.DependsOn) > 0 {
 		depTitles := []string{}
@@ -273,11 +356,12 @@ func ParseTaskPlan(goal, output string) (*Plan, error) {
 
 	var raw struct {
 		Tasks []struct {
-			ID          int    `json:"id"`
-			Title       string `json:"title"`
-			Description string `json:"description"`
-			Priority    int    `json:"priority"`
-			DependsOn   []int  `json:"depends_on"`
+			ID          int       `json:"id"`
+			Title       string    `json:"title"`
+			Description string    `json:"description"`
+			Priority    int       `json:"priority"`
+			Role        AgentRole `json:"role"`
+			DependsOn   []int     `json:"depends_on"`
 		} `json:"tasks"`
 	}
 	if err := json.Unmarshal([]byte(jsonStr), &raw); err != nil {
@@ -299,6 +383,7 @@ func ParseTaskPlan(goal, output string) (*Plan, error) {
 			Title:       t.Title,
 			Description: t.Description,
 			Priority:    priority,
+			Role:        t.Role,
 			DependsOn:   t.DependsOn,
 			Status:      TaskPending,
 		})

@@ -43,12 +43,14 @@ var (
 	taskListJSON bool
 	taskShowJSON bool
 	taskDeps     string // comma-separated dep IDs for task add/edit
+	taskRole     string // agent role for task add
 
 	// edit flags
 	editTitle    string
 	editDesc     string
 	editPriority int
 	editDeps     string
+	editRole     string // agent role for task edit
 )
 
 var taskCmd = &cobra.Command{
@@ -221,6 +223,9 @@ var taskShowCmd = &cobra.Command{
 		titleColor.Printf("Task %d: %s\n", task.ID, task.Title)
 		fmt.Printf("Status:   %s\n", task.Status)
 		fmt.Printf("Priority: %d\n", task.Priority)
+		if task.Role != "" {
+			fmt.Printf("Role:     %s\n", task.Role)
+		}
 		if len(task.DependsOn) > 0 {
 			depParts := make([]string, 0, len(task.DependsOn))
 			for _, depID := range task.DependsOn {
@@ -277,8 +282,8 @@ var taskEditCmd = &cobra.Command{
 			return fmt.Errorf("task %d not found", id)
 		}
 
-		if !cmd.Flags().Changed("title") && !cmd.Flags().Changed("desc") && !cmd.Flags().Changed("priority") && !cmd.Flags().Changed("deps") {
-			return fmt.Errorf("no changes specified — use --title, --desc, --priority, or --deps")
+		if !cmd.Flags().Changed("title") && !cmd.Flags().Changed("desc") && !cmd.Flags().Changed("priority") && !cmd.Flags().Changed("deps") && !cmd.Flags().Changed("role") {
+			return fmt.Errorf("no changes specified — use --title, --desc, --priority, --deps, or --role")
 		}
 
 		changed := []string{}
@@ -302,6 +307,10 @@ var taskEditCmd = &cobra.Command{
 			task.DependsOn = deps
 			changed = append(changed, "deps")
 		}
+		if cmd.Flags().Changed("role") {
+			task.Role = pm.AgentRole(editRole)
+			changed = append(changed, "role")
+		}
 
 		if err := s.Save(); err != nil {
 			return err
@@ -310,6 +319,9 @@ var taskEditCmd = &cobra.Command{
 		color.New(color.FgGreen).Printf("Task %d updated (%s)\n", task.ID, strings.Join(changed, ", "))
 		fmt.Printf("  Title:    %s\n", task.Title)
 		fmt.Printf("  Priority: %d\n", task.Priority)
+		if task.Role != "" {
+			fmt.Printf("  Role:     %s\n", task.Role)
+		}
 		if task.Description != "" {
 			dimColor := color.New(color.Faint)
 			dimColor.Printf("  Desc:     %s\n", truncateStr(task.Description, 100))
@@ -473,6 +485,7 @@ var taskAddCmd = &cobra.Command{
 			Title:       title,
 			Description: taskDesc,
 			Priority:    priority,
+			Role:        pm.AgentRole(taskRole),
 			DependsOn:   deps,
 			Status:      pm.TaskPending,
 		}
@@ -483,6 +496,9 @@ var taskAddCmd = &cobra.Command{
 		}
 
 		msg := fmt.Sprintf("Added task %d: %s (priority %d)", task.ID, task.Title, task.Priority)
+		if task.Role != "" {
+			msg += fmt.Sprintf(", role: %s", task.Role)
+		}
 		if len(deps) > 0 {
 			msg += fmt.Sprintf(", depends on: %s", taskDeps)
 		}
@@ -551,7 +567,11 @@ func printTaskList(plan *pm.Plan) {
 
 	fmt.Printf("Tasks: %s\n\n", plan.Summary())
 	for _, t := range sorted {
-		line := fmt.Sprintf("  %s #%d [P%d] %s\n", taskMarker(t.Status), t.ID, t.Priority, t.Title)
+		rolePart := ""
+		if t.Role != "" {
+			rolePart = fmt.Sprintf(" [%s]", t.Role)
+		}
+		line := fmt.Sprintf("  %s #%d [P%d]%s %s\n", taskMarker(t.Status), t.ID, t.Priority, rolePart, t.Title)
 		switch t.Status {
 		case pm.TaskDone:
 			successColor.Print(line)
@@ -628,11 +648,13 @@ func init() {
 	taskAddCmd.Flags().StringVar(&taskDesc, "desc", "", "Task description")
 	taskAddCmd.Flags().IntVar(&taskPriority, "priority", 0, "Task priority (1=highest; default: lowest)")
 	taskAddCmd.Flags().StringVar(&taskDeps, "deps", "", "Comma-separated IDs of tasks this task depends on (e.g. '1,2')")
+	taskAddCmd.Flags().StringVar(&taskRole, "role", "", "Agent role: backend, frontend, testing, security, devops, data, docs, review")
 
 	taskEditCmd.Flags().StringVar(&editTitle, "title", "", "New title for the task")
 	taskEditCmd.Flags().StringVar(&editDesc, "desc", "", "New description for the task")
 	taskEditCmd.Flags().IntVar(&editPriority, "priority", 0, "New priority for the task (1=highest)")
 	taskEditCmd.Flags().StringVar(&editDeps, "deps", "", "Comma-separated IDs of tasks this task depends on (e.g. '1,2'); use '' to clear")
+	taskEditCmd.Flags().StringVar(&editRole, "role", "", "Agent role: backend, frontend, testing, security, devops, data, docs, review")
 
 	taskCmd.AddCommand(taskListCmd)
 	taskCmd.AddCommand(taskShowCmd)
