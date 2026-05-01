@@ -45,6 +45,8 @@ Supports Anthropic (Claude API), OpenAI, Ollama (local), and Claude Code.
   cloop standup --save                      # save to .cloop/standup-DATE.md
   cloop prioritize                          # AI task reprioritization suggestions
   cloop prioritize --apply                  # apply priority changes
+  cloop simulate "what if we cut scope by 30%?"        # AI what-if scenario analysis
+  cloop simulate "what if the deadline moves up 2 weeks?" --apply
   cloop status
   cloop log`,
 }
