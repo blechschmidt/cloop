@@ -58,8 +58,10 @@ type responseBody struct {
 		Role    string `json:"role"`
 		Content string `json:"content"`
 	} `json:"message"`
-	Error string `json:"error"`
-	Done  bool   `json:"done"`
+	Error           string `json:"error"`
+	Done            bool   `json:"done"`
+	PromptEvalCount int    `json:"prompt_eval_count"`
+	EvalCount       int    `json:"eval_count"`
 }
 
 func (p *Provider) Complete(ctx context.Context, prompt string, opts provider.Options) (*provider.Result, error) {
@@ -81,56 +83,64 @@ func (p *Provider) Complete(ctx context.Context, prompt string, opts provider.Op
 	}
 	messages = append(messages, ollamaMessage{Role: "user", Content: prompt})
 
-	body := requestBody{
+	reqBody := requestBody{
 		Model:    model,
 		Messages: messages,
 		Stream:   false,
 	}
 	if opts.MaxTokens > 0 {
-		body.Options = &ollamaOptions{NumPredict: opts.MaxTokens}
+		reqBody.Options = &ollamaOptions{NumPredict: opts.MaxTokens}
 	}
 
-	data, err := json.Marshal(body)
+	data, err := json.Marshal(reqBody)
 	if err != nil {
 		return nil, err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.BaseURL+"/api/chat", bytes.NewReader(data))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-
+	url := p.BaseURL + "/api/chat"
+	var result *provider.Result
 	start := time.Now()
-	resp, err := p.client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("ollama: request failed (is ollama running at %s?): %w", p.BaseURL, err)
-	}
-	defer resp.Body.Close()
-	duration := time.Since(start)
 
-	respData, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("ollama: reading response: %w", err)
-	}
+	retryErr := provider.DoWithRetry(ctx, provider.RetryConfig{}, func() (int, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(data))
+		if err != nil {
+			return 0, err
+		}
+		req.Header.Set("Content-Type", "application/json")
 
-	var result responseBody
-	if err := json.Unmarshal(respData, &result); err != nil {
-		return nil, fmt.Errorf("ollama: parsing response: %w", err)
-	}
+		resp, err := p.client.Do(req)
+		if err != nil {
+			return 0, fmt.Errorf("ollama: request failed (is ollama running at %s?): %w", p.BaseURL, err)
+		}
+		defer resp.Body.Close()
 
-	if result.Error != "" {
-		return nil, fmt.Errorf("ollama error: %s", result.Error)
-	}
+		respData, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return resp.StatusCode, fmt.Errorf("ollama: reading response: %w", err)
+		}
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("ollama: HTTP %d: %s", resp.StatusCode, string(respData))
-	}
+		var body responseBody
+		if err := json.Unmarshal(respData, &body); err != nil {
+			return resp.StatusCode, fmt.Errorf("ollama: parsing response: %w", err)
+		}
 
-	return &provider.Result{
-		Output:   result.Message.Content,
-		Duration: duration,
-		Provider: ProviderName,
-		Model:    model,
-	}, nil
+		if body.Error != "" {
+			return resp.StatusCode, fmt.Errorf("ollama error: %s", body.Error)
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			return resp.StatusCode, fmt.Errorf("ollama: HTTP %d: %s", resp.StatusCode, string(respData))
+		}
+
+		result = &provider.Result{
+			Output:        body.Message.Content,
+			Duration:      time.Since(start),
+			Provider:      ProviderName,
+			Model:         model,
+			InputTokens:   body.PromptEvalCount,
+			OutputTokens:  body.EvalCount,
+		}
+		return resp.StatusCode, nil
+	})
+	return result, retryErr
 }

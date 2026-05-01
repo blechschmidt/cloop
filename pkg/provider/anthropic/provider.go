@@ -61,6 +61,10 @@ type responseBody struct {
 		Type string `json:"type"`
 		Text string `json:"text"`
 	} `json:"content"`
+	Usage *struct {
+		InputTokens  int `json:"input_tokens"`
+		OutputTokens int `json:"output_tokens"`
+	} `json:"usage"`
 	Error *struct {
 		Type    string `json:"type"`
 		Message string `json:"message"`
@@ -103,51 +107,60 @@ func (p *Provider) Complete(ctx context.Context, prompt string, opts provider.Op
 		return nil, err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.BaseURL+"/messages", bytes.NewReader(data))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("x-api-key", p.APIKey)
-	req.Header.Set("anthropic-version", apiVersion)
-	req.Header.Set("content-type", "application/json")
-
+	url := p.BaseURL + "/messages"
+	var result *provider.Result
 	start := time.Now()
-	resp, err := p.client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("anthropic: request failed: %w", err)
-	}
-	defer resp.Body.Close()
-	duration := time.Since(start)
 
-	respData, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("anthropic: reading response: %w", err)
-	}
-
-	var result responseBody
-	if err := json.Unmarshal(respData, &result); err != nil {
-		return nil, fmt.Errorf("anthropic: parsing response: %w", err)
-	}
-
-	if result.Error != nil {
-		return nil, fmt.Errorf("anthropic API error (%s): %s", result.Error.Type, result.Error.Message)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("anthropic: HTTP %d: %s", resp.StatusCode, string(respData))
-	}
-
-	var output string
-	for _, c := range result.Content {
-		if c.Type == "text" {
-			output += c.Text
+	retryErr := provider.DoWithRetry(ctx, provider.RetryConfig{}, func() (int, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(data))
+		if err != nil {
+			return 0, err
 		}
-	}
+		req.Header.Set("x-api-key", p.APIKey)
+		req.Header.Set("anthropic-version", apiVersion)
+		req.Header.Set("content-type", "application/json")
 
-	return &provider.Result{
-		Output:   output,
-		Duration: duration,
-		Provider: ProviderName,
-		Model:    model,
-	}, nil
+		resp, err := p.client.Do(req)
+		if err != nil {
+			return 0, fmt.Errorf("anthropic: request failed: %w", err)
+		}
+		defer resp.Body.Close()
+
+		respData, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return resp.StatusCode, fmt.Errorf("anthropic: reading response: %w", err)
+		}
+
+		var body responseBody
+		if err := json.Unmarshal(respData, &body); err != nil {
+			return resp.StatusCode, fmt.Errorf("anthropic: parsing response: %w", err)
+		}
+
+		if body.Error != nil {
+			return resp.StatusCode, fmt.Errorf("anthropic API error (%s): %s", body.Error.Type, body.Error.Message)
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			return resp.StatusCode, fmt.Errorf("anthropic: HTTP %d: %s", resp.StatusCode, string(respData))
+		}
+
+		var output string
+		for _, c := range body.Content {
+			if c.Type == "text" {
+				output += c.Text
+			}
+		}
+		result = &provider.Result{
+			Output:   output,
+			Duration: time.Since(start),
+			Provider: ProviderName,
+			Model:    model,
+		}
+		if body.Usage != nil {
+			result.InputTokens = body.Usage.InputTokens
+			result.OutputTokens = body.Usage.OutputTokens
+		}
+		return resp.StatusCode, nil
+	})
+	return result, retryErr
 }

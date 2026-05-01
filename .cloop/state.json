@@ -2,7 +2,7 @@
   "goal": "Build an AI product manager that supports multiple AI inference providers as well as local models. When a goal is specified, it should work to fulfill and then evolve that goal.",
   "workdir": "/root/Projects/cloop",
   "max_steps": 0,
-  "current_step": 4,
+  "current_step": 5,
   "status": "evolving",
   "steps": [
     {
@@ -36,11 +36,19 @@
       "exit_code": 0,
       "duration": "1m42s",
       "time": "2026-05-01T19:12:08.60642885Z"
+    },
+    {
+      "step": 4,
+      "task": "Evolve #3",
+      "output": "---\n\n## What was added and why\n\n### Retry with exponential backoff (`pkg/provider/retry.go`)\n\nLong `cloop run` sessions — especially in PM mode with many tasks — are vulnerable to transient API failures. A single 429 rate-limit response or network blip would previously abort the entire run, losing all progress on the current task. Now all three API-backed providers (anthropic, openai, ollama) automatically retry.\n\n**`DoWithRetry`** — generic retry helper that:\n- Retries up to **3 attempts** by default (configurable via `RetryConfig`)\n- Uses **exponential backoff**: 1s → 2s → 4s, capped at 30s\n- Adds **±25% jitter** to spread concurrent retries\n- Retries on **429** (rate limited), **500/502/503/504** (transient server errors), and **network-level errors** (connection refused, DNS failure)\n- **Does NOT retry** on 4xx client errors (400, 401, 403, 404) — those indicate a real problem that won't self-heal\n- Respects **context cancellation** — stops sleeping immediately when context is done\n\nEach provider was refactored to rebuild the HTTP request inside the retry closure (necessary because `bytes.Reader` is position-based and needs to be reset per attempt).\n\n### Tests (`pkg/provider/retry_test.go`) — 10 new tests\n\n| Test | Covers |\n|---|---|\n| `SuccessFirstAttempt` | No unnecessary retries on success |\n| `RetriesOnRateLimit` | 429 triggers retry, succeeds on 3rd attempt |\n| `RetriesOnServerError` | All of 500/502/503/504 trigger retry |\n| `NoRetryOnClientError` | 400/401/403/404 fail immediately |\n| `RetriesNetworkError` | Status=0 (network error) always retries |\n| `MaxAttemptsExhausted` | Returns last error after all attempts fail |\n| `ContextCancelledBeforeSleep` | Context cancellation stops between-attempt sleep |\n| `DefaultConfig` | Defaults fill in correctly |\n| `IsRetryableStatus` | Correct classification of all status codes |\n| `RetryDelay_Bounds` | Delay never negative, never exceeds max + jitter |\n\n**Total tests: 54** (44 existing + 10 new). All passing.",
+      "exit_code": 0,
+      "duration": "4m18s",
+      "time": "2026-05-01T19:16:26.434675558Z"
     }
   ],
   "created_at": "2026-05-01T18:53:25.001567006Z",
-  "updated_at": "2026-05-01T19:12:08.606494518Z",
+  "updated_at": "2026-05-01T19:16:26.434893064Z",
   "instructions": "This IS the cloop project itself — you are evolving your own codebase. Current state: Go CLI using Claude Code via stdin pipe. Transform it into a multi-provider AI product manager. Key requirements:\n1. Support multiple inference providers: Anthropic (Claude API direct), OpenAI, local models (Ollama), and keep Claude Code as one backend option\n2. Provider abstraction layer — easy to add new providers\n3. Product manager mode: when given a goal, break it into tasks, prioritize, execute, verify, iterate\n4. Keep the existing CLI UX (init/run/status/log/reset/clean)\n5. Config file (.cloop/config.yaml) for provider settings, API keys, model preferences\n6. Provider selection: --provider flag or auto-select based on task complexity\n7. Keep backward compatibility — existing 'claude code' mode should still work\nBuild incrementally. Go 1.24 at /usr/local/go/bin/go. After changes, run 'go build -o cloop .' to verify.",
   "auto_evolve": true,
-  "evolve_step": 2
+  "evolve_step": 3
 }

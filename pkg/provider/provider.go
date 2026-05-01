@@ -16,10 +16,12 @@ type Options struct {
 
 // Result from a completion request.
 type Result struct {
-	Output   string
-	Duration time.Duration
-	Provider string
-	Model    string
+	Output       string
+	Duration     time.Duration
+	Provider     string
+	Model        string
+	InputTokens  int // tokens in the prompt/input
+	OutputTokens int // tokens in the completion/output
 }
 
 // Provider is the interface all AI backends must implement.
