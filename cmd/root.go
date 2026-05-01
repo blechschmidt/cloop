@@ -35,6 +35,11 @@ Supports Anthropic (Claude API), OpenAI, Ollama (local), and Claude Code.
   cloop github push --done                  # export tasks + close done issues
   cloop github prs                          # PR list with CI status
   cloop chat                                # interactive conversational PM interface
+  cloop insights                            # AI-powered project health & risk analysis
+  cloop insights --quick                    # metrics only, no AI call
+  cloop router set backend anthropic        # route backend tasks to Claude
+  cloop router set frontend openai          # route frontend tasks to GPT-4o
+  cloop router list                         # show routing table
   cloop status
   cloop log`,
 }

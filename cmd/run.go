@@ -12,6 +12,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/orchestrator"
+	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/provider"
 	"github.com/blechschmidt/cloop/pkg/provider/fallback"
 	"github.com/blechschmidt/cloop/pkg/state"
@@ -184,6 +185,25 @@ Press Ctrl+C to pause gracefully.`,
 		orc, err := orchestrator.New(orchCfg, prov)
 		if err != nil {
 			return err
+		}
+
+		// Wire up role-based provider routing from config.
+		if len(cfg.Router.Routes) > 0 {
+			for role, routeProvName := range cfg.Router.Routes {
+				routeProvCfg := provider.ProviderConfig{
+					Name:             routeProvName,
+					AnthropicAPIKey:  cfg.Anthropic.APIKey,
+					AnthropicBaseURL: cfg.Anthropic.BaseURL,
+					OpenAIAPIKey:     cfg.OpenAI.APIKey,
+					OpenAIBaseURL:    cfg.OpenAI.BaseURL,
+					OllamaBaseURL:    cfg.Ollama.BaseURL,
+				}
+				routeProv, err := provider.Build(routeProvCfg)
+				if err != nil {
+					return fmt.Errorf("router: role %q provider %q: %w", role, routeProvName, err)
+				}
+				orc.RegisterRoute(pm.AgentRole(role), routeProv)
+			}
 		}
 
 		// Persist the resolved provider in state so subsequent runs default to the same provider.

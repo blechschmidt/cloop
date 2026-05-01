@@ -21,6 +21,17 @@ type Config struct {
 	ClaudeCode ClaudeCodeConfig `yaml:"claudecode"`
 	Webhook    WebhookConfig    `yaml:"webhook,omitempty"`
 	GitHub     GitHubConfig     `yaml:"github,omitempty"`
+	// Router maps task roles to provider names for heterogeneous multi-agent execution.
+	// Example: router.backend = "anthropic", router.frontend = "openai"
+	Router RouterConfig `yaml:"router,omitempty"`
+}
+
+// RouterConfig maps AgentRole names to provider names.
+// Roles not listed here use the default provider.
+type RouterConfig struct {
+	// Routes maps role name (backend, frontend, testing, security, devops, data, docs, review)
+	// to a provider name (anthropic, openai, ollama, claudecode).
+	Routes map[string]string `yaml:"routes,omitempty"`
 }
 
 // WebhookConfig holds outbound notification settings.

@@ -14,6 +14,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/memory"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/provider"
+	"github.com/blechschmidt/cloop/pkg/router"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/webhook"
 	"github.com/fatih/color"
@@ -98,6 +99,7 @@ type Orchestrator struct {
 	config   Config
 	state    *state.ProjectState
 	provider provider.Provider
+	router   *router.Router // routes tasks to role-specific providers
 	memory   *memory.Memory
 	webhook  *webhook.Client
 }
@@ -124,7 +126,14 @@ func New(cfg Config, prov provider.Provider) (*Orchestrator, error) {
 		wh = webhook.New(cfg.WebhookURL, cfg.WebhookEvents, nil)
 	}
 
-	return &Orchestrator{config: cfg, state: s, provider: prov, memory: mem, webhook: wh}, nil
+	r := router.New(prov)
+	return &Orchestrator{config: cfg, state: s, provider: prov, router: r, memory: mem, webhook: wh}, nil
+}
+
+// RegisterRoute adds a role→provider binding to the orchestrator's router.
+// Must be called before Run().
+func (o *Orchestrator) RegisterRoute(role pm.AgentRole, prov provider.Provider) {
+	o.router.Register(role, prov)
 }
 
 func (o *Orchestrator) AddSteps(n int) {
@@ -532,10 +541,12 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			continue
 		}
 
-		dimColor.Printf("→ Running %s on task %d...\n", o.provider.Name(), task.ID)
+		// Select provider: role-specific route takes precedence over default.
+		taskProvider := o.router.For(task.Role)
+		dimColor.Printf("→ Running %s on task %d...\n", taskProvider.Name(), task.ID)
 		start := time.Now()
 
-		result, err := o.provider.Complete(ctx, prompt, provider.Options{
+		result, err := taskProvider.Complete(ctx, prompt, provider.Options{
 			Model:     s.Model,
 			MaxTokens: o.config.MaxTokens,
 			Timeout:   o.config.StepTimeout,
@@ -895,7 +906,9 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 				defer wg.Done()
 				prompt := pm.ExecuteTaskPrompt(s.Goal, s.Instructions, s.Plan, t)
 				start := time.Now()
-				result, err := o.provider.Complete(ctx, prompt, provider.Options{
+				// Use role-specific provider if configured.
+				taskProvider := o.router.For(t.Role)
+				result, err := taskProvider.Complete(ctx, prompt, provider.Options{
 					Model:     s.Model,
 					MaxTokens: o.config.MaxTokens,
 					Timeout:   o.config.StepTimeout,
