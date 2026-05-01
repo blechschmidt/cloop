@@ -46,6 +46,8 @@ var (
 	useMemory        bool
 	learn            bool
 	memoryLimit      int
+	webhookURL       string
+	webhookEvents    []string
 )
 
 var runCmd = &cobra.Command{
@@ -134,6 +136,16 @@ Press Ctrl+C to pause gracefully.`,
 			effectivePMMode = true
 		}
 
+		// Webhook: flag overrides config file
+		effectiveWebhookURL := webhookURL
+		if effectiveWebhookURL == "" {
+			effectiveWebhookURL = cfg.Webhook.URL
+		}
+		effectiveWebhookEvents := webhookEvents
+		if len(effectiveWebhookEvents) == 0 {
+			effectiveWebhookEvents = cfg.Webhook.Events
+		}
+
 		orchCfg := orchestrator.Config{
 			WorkDir:          workdir,
 			Model:            model,
@@ -162,6 +174,8 @@ Press Ctrl+C to pause gracefully.`,
 			UseMemory:        useMemory,
 			Learn:            learn,
 			MemoryLimit:      memoryLimit,
+			WebhookURL:       effectiveWebhookURL,
+			WebhookEvents:    effectiveWebhookEvents,
 		}
 
 		orc, err := orchestrator.New(orchCfg, prov)
@@ -294,5 +308,7 @@ func init() {
 	runCmd.Flags().BoolVar(&useMemory, "use-memory", false, "Inject past session learnings into prompts")
 	runCmd.Flags().BoolVar(&learn, "learn", false, "Extract key learnings at end of session and store in project memory")
 	runCmd.Flags().IntVar(&memoryLimit, "memory-limit", 20, "Max number of memory entries to inject into prompts (0 = all)")
+	runCmd.Flags().StringVar(&webhookURL, "webhook-url", "", "HTTP(S) URL to POST lifecycle events to (overrides config webhook.url)")
+	runCmd.Flags().StringSliceVar(&webhookEvents, "webhook-events", nil, "Comma-separated events to fire: task_done,task_failed,session_complete,... (default: all)")
 	rootCmd.AddCommand(runCmd)
 }

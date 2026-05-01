@@ -116,8 +116,25 @@ func applyConfigKey(cfg *config.Config, key, value string) error {
 	case "claudecode.model":
 		cfg.ClaudeCode.Model = value
 
+	case "webhook.url":
+		cfg.Webhook.URL = value
+	case "webhook.events":
+		// Accept comma-separated list of event names
+		if value == "" {
+			cfg.Webhook.Events = nil
+		} else {
+			parts := strings.Split(value, ",")
+			events := make([]string, 0, len(parts))
+			for _, p := range parts {
+				if e := strings.TrimSpace(p); e != "" {
+					events = append(events, e)
+				}
+			}
+			cfg.Webhook.Events = events
+		}
+
 	default:
-		return fmt.Errorf("unknown config key %q\n\nValid keys:\n  provider\n  anthropic.api_key, anthropic.model, anthropic.base_url\n  openai.api_key, openai.model, openai.base_url\n  ollama.base_url, ollama.model\n  claudecode.model", key)
+		return fmt.Errorf("unknown config key %q\n\nValid keys:\n  provider\n  anthropic.api_key, anthropic.model, anthropic.base_url\n  openai.api_key, openai.model, openai.base_url\n  ollama.base_url, ollama.model\n  claudecode.model\n  webhook.url, webhook.events", key)
 	}
 	return nil
 }

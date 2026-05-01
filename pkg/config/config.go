@@ -15,10 +15,23 @@ type Config struct {
 	// Default provider: anthropic, openai, ollama, claudecode
 	Provider string `yaml:"provider"`
 
-	Anthropic AnthropicConfig `yaml:"anthropic"`
-	OpenAI    OpenAIConfig    `yaml:"openai"`
-	Ollama    OllamaConfig    `yaml:"ollama"`
+	Anthropic  AnthropicConfig  `yaml:"anthropic"`
+	OpenAI     OpenAIConfig     `yaml:"openai"`
+	Ollama     OllamaConfig     `yaml:"ollama"`
 	ClaudeCode ClaudeCodeConfig `yaml:"claudecode"`
+	Webhook    WebhookConfig    `yaml:"webhook,omitempty"`
+}
+
+// WebhookConfig holds outbound notification settings.
+type WebhookConfig struct {
+	// URL to POST events to (empty = disabled).
+	URL string `yaml:"url,omitempty"`
+	// Events to fire (empty = all). Valid values:
+	//   session_started, session_complete, session_failed,
+	//   task_started, task_done, task_failed, task_skipped
+	Events []string `yaml:"events,omitempty"`
+	// Optional HTTP headers added to every request (e.g. Authorization).
+	Headers map[string]string `yaml:"headers,omitempty"`
 }
 
 type AnthropicConfig struct {

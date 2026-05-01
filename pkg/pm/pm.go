@@ -138,6 +138,19 @@ func (p *Plan) Summary() string {
 	return fmt.Sprintf("%d/%d tasks complete", done, total)
 }
 
+// CountByStatus returns the number of done (includes skipped) and failed tasks.
+func (p *Plan) CountByStatus() (done, failed int) {
+	for _, t := range p.Tasks {
+		switch t.Status {
+		case TaskDone, TaskSkipped:
+			done++
+		case TaskFailed:
+			failed++
+		}
+	}
+	return
+}
+
 // DecomposePrompt builds the prompt for decomposing a goal into tasks.
 func DecomposePrompt(goal, instructions string) string {
 	var b strings.Builder

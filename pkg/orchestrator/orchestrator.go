@@ -10,10 +10,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/cost"
 	"github.com/blechschmidt/cloop/pkg/memory"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/provider"
 	"github.com/blechschmidt/cloop/pkg/state"
+	"github.com/blechschmidt/cloop/pkg/webhook"
 	"github.com/fatih/color"
 )
 
@@ -84,6 +86,12 @@ type Config struct {
 
 	// MemoryLimit is the max number of memory entries to inject into prompts (0 = all).
 	MemoryLimit int
+
+	// WebhookURL overrides the config-file webhook URL for this run (optional).
+	WebhookURL string
+
+	// WebhookEvents is the list of event types to fire (empty = all).
+	WebhookEvents []string
 }
 
 type Orchestrator struct {
@@ -91,6 +99,7 @@ type Orchestrator struct {
 	state    *state.ProjectState
 	provider provider.Provider
 	memory   *memory.Memory
+	webhook  *webhook.Client
 }
 
 func New(cfg Config, prov provider.Provider) (*Orchestrator, error) {
@@ -108,7 +117,14 @@ func New(cfg Config, prov provider.Provider) (*Orchestrator, error) {
 	if mem == nil {
 		mem = &memory.Memory{}
 	}
-	return &Orchestrator{config: cfg, state: s, provider: prov, memory: mem}, nil
+
+	// Build webhook client (flag URL overrides config URL).
+	var wh *webhook.Client
+	if cfg.WebhookURL != "" {
+		wh = webhook.New(cfg.WebhookURL, cfg.WebhookEvents, nil)
+	}
+
+	return &Orchestrator{config: cfg, state: s, provider: prov, memory: mem, webhook: wh}, nil
 }
 
 func (o *Orchestrator) AddSteps(n int) {
@@ -179,6 +195,8 @@ func (o *Orchestrator) runLoop(ctx context.Context) error {
 	}
 	fmt.Println()
 
+	o.webhook.Send(webhook.EventSessionStarted, webhook.Payload{Goal: s.Goal})
+
 	for s.MaxSteps == 0 || s.CurrentStep < s.MaxSteps {
 		if o.config.StepsLimit > 0 && s.CurrentStep >= startStep+o.config.StepsLimit {
 			color.New(color.FgYellow).Printf("⏸ Reached --steps limit (%d). Run 'cloop run' to continue.\n", o.config.StepsLimit)
@@ -222,6 +240,7 @@ func (o *Orchestrator) runLoop(ctx context.Context) error {
 			failColor.Printf("✗ Provider error: %v\n", err)
 			s.Status = "failed"
 			s.Save()
+			o.webhook.Send(webhook.EventSessionFailed, webhook.Payload{Goal: s.Goal})
 			return err
 		}
 
@@ -252,6 +271,14 @@ func (o *Orchestrator) runLoop(ctx context.Context) error {
 
 		if o.isGoalComplete(result.Output) {
 			successColor.Printf("🎉 Goal complete after %d steps!\n\n", step)
+			o.webhook.Send(webhook.EventSessionComplete, webhook.Payload{
+				Goal: s.Goal,
+				Session: &webhook.SessionInfo{
+					InputTokens:  s.TotalInputTokens,
+					OutputTokens: s.TotalOutputTokens,
+					Duration:     time.Since(sessionStart).Round(time.Second).String(),
+				},
+			})
 			if s.AutoEvolve {
 				s.Status = "evolving"
 				s.Save()
@@ -321,6 +348,8 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 	fmt.Printf("   Provider: %s\n", o.provider.Name())
 	fmt.Printf("   Goal: %s\n", s.Goal)
 	fmt.Println()
+
+	o.webhook.Send(webhook.EventSessionStarted, webhook.Payload{Goal: s.Goal})
 
 	// If --replan requested, clear existing plan and force re-decomposition.
 	if o.config.Replan && s.Plan != nil {
@@ -402,6 +431,18 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			successColor.Printf("   %s\n\n", s.Plan.Summary())
 			s.Status = "complete"
 			s.Save()
+			done, failed := s.Plan.CountByStatus()
+			o.webhook.Send(webhook.EventSessionComplete, webhook.Payload{
+				Goal: s.Goal,
+				Session: &webhook.SessionInfo{
+					TotalTasks:   len(s.Plan.Tasks),
+					DoneTasks:    done,
+					FailedTasks:  failed,
+					InputTokens:  s.TotalInputTokens,
+					OutputTokens: s.TotalOutputTokens,
+					Duration:     time.Since(sessionStart).Round(time.Second).String(),
+				},
+			})
 			return nil
 		}
 
@@ -461,6 +502,11 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		task.Status = pm.TaskInProgress
 		task.StartedAt = &now
 		s.Save()
+
+		o.webhook.Send(webhook.EventTaskStarted, webhook.Payload{
+			Goal: s.Goal,
+			Task: &webhook.TaskInfo{ID: task.ID, Title: task.Title, Description: task.Description, Status: "in_progress"},
+		})
 
 		// Build prompt with optional project context injection.
 		var projCtx *pm.ProjectContext
@@ -539,6 +585,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		task.CompletedAt = &completedAt
 		task.Result = truncate(result.Output, 500)
 
+		taskDur := time.Since(*task.StartedAt).Round(time.Second).String()
 		switch signal {
 		case pm.TaskDone:
 			// Optionally verify the task was genuinely completed before accepting it.
@@ -563,11 +610,16 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 					}
 					failColor.Printf("✗ Verification failed %d time(s) for task %d — marking failed.\n\n", task.VerifyRetries, task.ID)
 					task.Status = pm.TaskFailed
+					o.webhook.Send(webhook.EventTaskFailed, webhook.Payload{
+						Goal: s.Goal,
+						Task: &webhook.TaskInfo{ID: task.ID, Title: task.Title, Status: "failed", Duration: taskDur},
+					})
 					consecutiveErrors++
 					s.Save()
 					if consecutiveErrors >= maxConsecutiveErrors {
 						s.Status = "failed"
 						s.Save()
+						o.webhook.Send(webhook.EventSessionFailed, webhook.Payload{Goal: s.Goal})
 						return fmt.Errorf("%d consecutive task failures", consecutiveErrors)
 					}
 					continue
@@ -576,14 +628,26 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			}
 			task.Status = pm.TaskDone
 			successColor.Printf("✓ Task %d complete: %s\n\n", task.ID, task.Title)
+			o.webhook.Send(webhook.EventTaskDone, webhook.Payload{
+				Goal: s.Goal,
+				Task: &webhook.TaskInfo{ID: task.ID, Title: task.Title, Status: "done", Duration: taskDur},
+			})
 			consecutiveErrors = 0
 		case pm.TaskSkipped:
 			task.Status = pm.TaskSkipped
 			dimColor.Printf("→ Task %d skipped: %s\n\n", task.ID, task.Title)
+			o.webhook.Send(webhook.EventTaskSkipped, webhook.Payload{
+				Goal: s.Goal,
+				Task: &webhook.TaskInfo{ID: task.ID, Title: task.Title, Status: "skipped"},
+			})
 			consecutiveErrors = 0
 		case pm.TaskFailed:
 			task.Status = pm.TaskFailed
 			failColor.Printf("✗ Task %d failed: %s\n\n", task.ID, task.Title)
+			o.webhook.Send(webhook.EventTaskFailed, webhook.Payload{
+				Goal: s.Goal,
+				Task: &webhook.TaskInfo{ID: task.ID, Title: task.Title, Status: "failed", Duration: taskDur},
+			})
 			consecutiveErrors++
 
 			// Adaptive replanning: re-think remaining tasks on failure.
@@ -614,12 +678,17 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			if consecutiveErrors >= maxConsecutiveErrors {
 				s.Status = "failed"
 				s.Save()
+				o.webhook.Send(webhook.EventSessionFailed, webhook.Payload{Goal: s.Goal})
 				return fmt.Errorf("%d consecutive task failures", consecutiveErrors)
 			}
 		default:
 			// No signal found — treat as done (AI finished without explicit signal)
 			task.Status = pm.TaskDone
 			successColor.Printf("✓ Task %d complete (no explicit signal): %s\n\n", task.ID, task.Title)
+			o.webhook.Send(webhook.EventTaskDone, webhook.Payload{
+				Goal: s.Goal,
+				Task: &webhook.TaskInfo{ID: task.ID, Title: task.Title, Status: "done", Duration: taskDur},
+			})
 			consecutiveErrors = 0
 		}
 		s.Save()
@@ -1227,6 +1296,11 @@ func printSessionSummary(start time.Time, startStep int, s *state.ProjectState) 
 	dimColor.Printf("Session: %d step(s) in %s", steps, elapsed)
 	if s.TotalInputTokens > 0 || s.TotalOutputTokens > 0 {
 		dimColor.Printf(", %d in / %d out tokens (cumulative)", s.TotalInputTokens, s.TotalOutputTokens)
+		if s.Model != "" {
+			if usd, ok := cost.Estimate(s.Model, s.TotalInputTokens, s.TotalOutputTokens); ok {
+				dimColor.Printf(" ≈ %s", cost.FormatCost(usd))
+			}
+		}
 	}
 	dimColor.Printf("\n")
 }
