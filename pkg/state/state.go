@@ -69,6 +69,11 @@ func Load(workdir string) (*ProjectState, error) {
 
 func (s *ProjectState) Save() error {
 	s.UpdatedAt = time.Now()
+
+	// Merge externally-added tasks: re-read the plan from disk and
+	// incorporate any tasks that were added while we were running.
+	s.mergeExternalTasks()
+
 	dir := filepath.Dir(StatePath(s.WorkDir))
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
@@ -78,6 +83,45 @@ func (s *ProjectState) Save() error {
 		return err
 	}
 	return os.WriteFile(StatePath(s.WorkDir), data, 0o644)
+}
+
+// mergeExternalTasks reads the current state from disk and merges any tasks
+// that were added externally (e.g. via 'cloop task add' while running).
+// Tasks are matched by ID — new IDs on disk are appended to the in-memory plan.
+func (s *ProjectState) mergeExternalTasks() {
+	disk, err := Load(s.WorkDir)
+	if err != nil || disk == nil || disk.Plan == nil || len(disk.Plan.Tasks) == 0 {
+		return
+	}
+	if s.Plan == nil {
+		s.Plan = disk.Plan
+		s.PMMode = true
+		return
+	}
+	// Build set of known task IDs in memory
+	known := make(map[int]bool)
+	for _, t := range s.Plan.Tasks {
+		known[t.ID] = true
+	}
+	// Append any tasks from disk that we don't have
+	for _, t := range disk.Plan.Tasks {
+		if !known[t.ID] {
+			s.Plan.Tasks = append(s.Plan.Tasks, t)
+		}
+	}
+	// Sync max task ID
+	maxID := 0
+	for _, t := range s.Plan.Tasks {
+		if t.ID > maxID { maxID = t.ID }
+	}
+	// If disk state has PMMode enabled, preserve it
+	if disk.PMMode {
+		s.PMMode = true
+	}
+	// Also merge instructions if disk has additions
+	if len(disk.Instructions) > len(s.Instructions) {
+		s.Instructions = disk.Instructions
+	}
 }
 
 func Init(workdir, goal string, maxSteps int) (*ProjectState, error) {
