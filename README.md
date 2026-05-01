@@ -163,7 +163,7 @@ cloop run --pm --retry-failed # retry previously failed tasks
 | `--max-failures` | `3` | PM mode: consecutive task failures before stopping |
 | `--context-steps` | `3` | Recent steps to include in prompts (0 = none) |
 | `--step-delay` | | Delay between steps (e.g. `5s`, `1m`) |
-| `-v, --verbose` | `false` | Verbose output |
+| `-v, --verbose` | `false` | Show full step output (no truncation) |
 
 **Stopping:** Press `Ctrl+C` to pause gracefully. Run `cloop run` again to resume.
 
@@ -228,7 +228,9 @@ Manage tasks in Product Manager mode.
 
 ```bash
 cloop task list                    # show all tasks with status
+cloop task list --json             # output tasks as JSON array (for scripting)
 cloop task show <id>               # show full task details (untruncated)
+cloop task show <id> --json        # output task as JSON
 cloop task add "Title" --desc "Description" --priority 1
 cloop task edit <id> --title "New title" --priority 2
 cloop task skip <id>               # mark as skipped

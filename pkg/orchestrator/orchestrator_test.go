@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/provider"
 	"github.com/blechschmidt/cloop/pkg/state"
+	"github.com/fatih/color"
 )
 
 // mockProvider is a test double for provider.Provider.
@@ -896,6 +898,98 @@ func TestBuildPrompt_ContextSteps_Negative_UsesDefault(t *testing.T) {
 	prompt := o.buildPrompt()
 	if !strings.Contains(prompt, "only step") {
 		t.Error("ContextSteps=-1 (use default) should include steps")
+	}
+}
+
+// --- printOutputTo ---
+
+func TestPrintOutputTo_TruncatesLongOutput(t *testing.T) {
+	// Build 25-line output — should trigger truncation when not verbose
+	lines := make([]string, 25)
+	for i := range lines {
+		lines[i] = fmt.Sprintf("line %d", i)
+	}
+	output := strings.Join(lines, "\n")
+
+	var buf bytes.Buffer
+	color.NoColor = true // disable colors for deterministic output
+	printOutputTo(&buf, output, color.New(color.Faint), false)
+	got := buf.String()
+
+	if !strings.Contains(got, "omitted") {
+		t.Error("expected truncation message in non-verbose output")
+	}
+	if strings.Contains(got, "line 12") {
+		t.Error("middle lines should be omitted in non-verbose mode")
+	}
+}
+
+func TestPrintOutputTo_VerboseShowsAllLines(t *testing.T) {
+	lines := make([]string, 25)
+	for i := range lines {
+		lines[i] = fmt.Sprintf("line %d", i)
+	}
+	output := strings.Join(lines, "\n")
+
+	var buf bytes.Buffer
+	color.NoColor = true
+	printOutputTo(&buf, output, color.New(color.Faint), true)
+	got := buf.String()
+
+	if strings.Contains(got, "omitted") {
+		t.Error("verbose mode should not truncate output")
+	}
+	if !strings.Contains(got, "line 12") {
+		t.Error("verbose mode should show all lines including middle ones")
+	}
+}
+
+func TestPrintOutputTo_ShortOutput_NeverTruncated(t *testing.T) {
+	output := "line 1\nline 2\nline 3"
+
+	var buf bytes.Buffer
+	color.NoColor = true
+	printOutputTo(&buf, output, color.New(color.Faint), false)
+	got := buf.String()
+
+	if strings.Contains(got, "omitted") {
+		t.Error("short output should never be truncated")
+	}
+	if !strings.Contains(got, "line 1") || !strings.Contains(got, "line 3") {
+		t.Error("all lines should be present in short output")
+	}
+}
+
+func TestPrintOutputTo_TruncationThresholdIsExactly20(t *testing.T) {
+	// Exactly 20 lines — should NOT trigger truncation
+	lines := make([]string, 20)
+	for i := range lines {
+		lines[i] = fmt.Sprintf("line %d", i)
+	}
+	output := strings.Join(lines, "\n")
+
+	var buf bytes.Buffer
+	color.NoColor = true
+	printOutputTo(&buf, output, color.New(color.Faint), false)
+	got := buf.String()
+
+	if strings.Contains(got, "omitted") {
+		t.Error("exactly 20 lines should not be truncated")
+	}
+}
+
+func TestRunLoop_Verbose_PassedToOrchestratorConfig(t *testing.T) {
+	dir := tempDir(t)
+	initState(t, dir, "goal", 1)
+
+	prov := &mockProvider{
+		name:    "mock",
+		results: []*provider.Result{{Output: "step 1\nGOAL_COMPLETE", Provider: "mock"}},
+	}
+	o := newOrchestrator(t, dir, Config{WorkDir: dir, Verbose: true}, prov)
+
+	if !o.config.Verbose {
+		t.Error("expected Verbose=true in orchestrator config")
 	}
 }
 

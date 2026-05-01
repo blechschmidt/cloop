@@ -3,6 +3,8 @@ package orchestrator
 import (
 	"context"
 	"fmt"
+	"io"
+	"os"
 	"strings"
 	"time"
 
@@ -167,7 +169,7 @@ func (o *Orchestrator) runLoop(ctx context.Context) error {
 		s.TotalOutputTokens += result.OutputTokens
 		s.AddStep(stepResult)
 
-		printOutput(result.Output, dimColor)
+		printOutput(result.Output, dimColor, o.config.Verbose)
 		dimColor.Printf("  [%s, provider: %s]\n\n", duration.Round(time.Second), result.Provider)
 
 		if o.isGoalComplete(result.Output) {
@@ -360,7 +362,7 @@ func (o *Orchestrator) runPM(ctx context.Context) error {
 		s.TotalOutputTokens += result.OutputTokens
 		s.AddStep(stepResult)
 
-		printOutput(result.Output, dimColor)
+		printOutput(result.Output, dimColor, o.config.Verbose)
 		dimColor.Printf("  [%s, provider: %s]\n\n", duration.Round(time.Second), result.Provider)
 
 		// Update task status based on signal in output
@@ -511,7 +513,7 @@ func (o *Orchestrator) evolve(ctx context.Context) error {
 		s.TotalOutputTokens += result.OutputTokens
 		s.AddStep(stepResult)
 
-		printOutput(result.Output, dimColor)
+		printOutput(result.Output, dimColor, o.config.Verbose)
 		dimColor.Printf("  [%s, provider: %s]\n\n", result.Duration.Round(time.Second), result.Provider)
 		s.Save()
 	}
@@ -575,19 +577,23 @@ func (o *Orchestrator) isGoalComplete(output string) bool {
 	return false
 }
 
-func printOutput(output string, dimColor *color.Color) {
+func printOutput(output string, dimColor *color.Color, verbose bool) {
+	printOutputTo(os.Stdout, output, dimColor, verbose)
+}
+
+func printOutputTo(w io.Writer, output string, dimColor *color.Color, verbose bool) {
 	lines := strings.Split(output, "\n")
-	if len(lines) > 20 {
+	if !verbose && len(lines) > 20 {
 		for _, line := range lines[:10] {
-			fmt.Printf("  %s\n", line)
+			fmt.Fprintf(w, "  %s\n", line)
 		}
-		dimColor.Printf("  ... (%d lines omitted) ...\n", len(lines)-20)
+		dimColor.Fprintf(w, "  ... (%d lines omitted, use --verbose to see all) ...\n", len(lines)-20)
 		for _, line := range lines[len(lines)-10:] {
-			fmt.Printf("  %s\n", line)
+			fmt.Fprintf(w, "  %s\n", line)
 		}
 	} else {
 		for _, line := range lines {
-			fmt.Printf("  %s\n", line)
+			fmt.Fprintf(w, "  %s\n", line)
 		}
 	}
 }

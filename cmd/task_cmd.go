@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"sort"
@@ -16,6 +17,8 @@ import (
 var (
 	taskDesc     string
 	taskPriority int
+	taskListJSON bool
+	taskShowJSON bool
 
 	// edit flags
 	editTitle    string
@@ -48,6 +51,10 @@ var taskListCmd = &cobra.Command{
 		}
 		if !s.PMMode || s.Plan == nil || len(s.Plan.Tasks) == 0 {
 			return fmt.Errorf("no task plan found — run 'cloop run --pm' to create one")
+		}
+		if taskListJSON {
+			fmt.Println(marshalTasksJSON(s.Plan.Tasks))
+			return nil
 		}
 		printTaskList(s.Plan)
 		return nil
@@ -152,6 +159,15 @@ var taskShowCmd = &cobra.Command{
 		}
 		if task == nil {
 			return fmt.Errorf("task %d not found", id)
+		}
+
+		if taskShowJSON {
+			data, err := json.MarshalIndent(task, "", "  ")
+			if err != nil {
+				return fmt.Errorf("marshaling task: %w", err)
+			}
+			fmt.Println(string(data))
+			return nil
 		}
 
 		dimColor := color.New(color.Faint)
@@ -402,7 +418,25 @@ func truncateStr(s string, n int) string {
 	return string(runes[:n]) + "..."
 }
 
+// marshalTasksJSON returns tasks sorted by priority as a formatted JSON string.
+// Returns an empty JSON array on marshal error (should never happen for valid tasks).
+func marshalTasksJSON(tasks []*pm.Task) string {
+	sorted := make([]*pm.Task, len(tasks))
+	copy(sorted, tasks)
+	sort.SliceStable(sorted, func(i, j int) bool {
+		return sorted[i].Priority < sorted[j].Priority
+	})
+	data, err := json.MarshalIndent(sorted, "", "  ")
+	if err != nil {
+		return "[]"
+	}
+	return string(data)
+}
+
 func init() {
+	taskListCmd.Flags().BoolVar(&taskListJSON, "json", false, "Output tasks as JSON array")
+	taskShowCmd.Flags().BoolVar(&taskShowJSON, "json", false, "Output task as JSON")
+
 	taskAddCmd.Flags().StringVar(&taskDesc, "desc", "", "Task description")
 	taskAddCmd.Flags().IntVar(&taskPriority, "priority", 0, "Task priority (1=highest; default: lowest)")
 
