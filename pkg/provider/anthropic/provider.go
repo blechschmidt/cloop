@@ -2,6 +2,7 @@
 package anthropic
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -9,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/provider"
@@ -54,6 +56,7 @@ type requestBody struct {
 	MaxTokens int       `json:"max_tokens"`
 	System    string    `json:"system,omitempty"`
 	Messages  []message `json:"messages"`
+	Stream    bool      `json:"stream,omitempty"`
 }
 
 type responseBody struct {
@@ -69,6 +72,31 @@ type responseBody struct {
 		Type    string `json:"type"`
 		Message string `json:"message"`
 	} `json:"error"`
+}
+
+// SSE event types for streaming
+type sseEvent struct {
+	Type    string    `json:"type"`
+	Index   int       `json:"index"`
+	Delta   *sseDelta `json:"delta"`
+	Usage   *sseUsage `json:"usage"`
+	Message *struct {
+		Usage *sseUsage `json:"usage"`
+	} `json:"message"`
+	Error *struct {
+		Type    string `json:"type"`
+		Message string `json:"message"`
+	} `json:"error"`
+}
+
+type sseDelta struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}
+
+type sseUsage struct {
+	InputTokens  int `json:"input_tokens"`
+	OutputTokens int `json:"output_tokens"`
 }
 
 func (p *Provider) Complete(ctx context.Context, prompt string, opts provider.Options) (*provider.Result, error) {
@@ -93,10 +121,13 @@ func (p *Provider) Complete(ctx context.Context, prompt string, opts provider.Op
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
+	useStream := opts.OnToken != nil
+
 	body := requestBody{
 		Model:     model,
 		MaxTokens: maxTokens,
 		Messages:  []message{{Role: "user", Content: prompt}},
+		Stream:    useStream,
 	}
 	if opts.SystemPrompt != "" {
 		body.System = opts.SystemPrompt
@@ -108,8 +139,13 @@ func (p *Provider) Complete(ctx context.Context, prompt string, opts provider.Op
 	}
 
 	url := p.BaseURL + "/messages"
-	var result *provider.Result
 	start := time.Now()
+
+	if useStream {
+		return p.completeStreaming(ctx, url, data, model, start, opts.OnToken)
+	}
+
+	var result *provider.Result
 
 	retryErr := provider.DoWithRetry(ctx, provider.RetryConfig{}, func() (int, error) {
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(data))
@@ -163,4 +199,84 @@ func (p *Provider) Complete(ctx context.Context, prompt string, opts provider.Op
 		return resp.StatusCode, nil
 	})
 	return result, retryErr
+}
+
+func (p *Provider) completeStreaming(ctx context.Context, url string, data []byte, model string, start time.Time, onToken func(string)) (*provider.Result, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(data))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("x-api-key", p.APIKey)
+	req.Header.Set("anthropic-version", apiVersion)
+	req.Header.Set("content-type", "application/json")
+	req.Header.Set("accept", "text/event-stream")
+
+	resp, err := p.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("anthropic: request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		var errResp responseBody
+		if jsonErr := json.Unmarshal(body, &errResp); jsonErr == nil && errResp.Error != nil {
+			return nil, fmt.Errorf("anthropic API error (%s): %s", errResp.Error.Type, errResp.Error.Message)
+		}
+		return nil, fmt.Errorf("anthropic: HTTP %d: %s", resp.StatusCode, string(body))
+	}
+
+	var sb strings.Builder
+	var inputTokens, outputTokens int
+
+	scanner := bufio.NewScanner(resp.Body)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		payload := strings.TrimPrefix(line, "data: ")
+		if payload == "[DONE]" {
+			break
+		}
+
+		var event sseEvent
+		if err := json.Unmarshal([]byte(payload), &event); err != nil {
+			continue
+		}
+
+		if event.Error != nil {
+			return nil, fmt.Errorf("anthropic stream error (%s): %s", event.Error.Type, event.Error.Message)
+		}
+
+		switch event.Type {
+		case "message_start":
+			if event.Message != nil && event.Message.Usage != nil {
+				inputTokens = event.Message.Usage.InputTokens
+			}
+		case "content_block_delta":
+			if event.Delta != nil && event.Delta.Type == "text_delta" {
+				token := event.Delta.Text
+				sb.WriteString(token)
+				onToken(token)
+			}
+		case "message_delta":
+			if event.Usage != nil {
+				outputTokens = event.Usage.OutputTokens
+			}
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("anthropic: reading stream: %w", err)
+	}
+
+	return &provider.Result{
+		Output:       sb.String(),
+		Duration:     time.Since(start),
+		Provider:     ProviderName,
+		Model:        model,
+		InputTokens:  inputTokens,
+		OutputTokens: outputTokens,
+	}, nil
 }

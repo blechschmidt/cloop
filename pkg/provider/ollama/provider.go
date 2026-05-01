@@ -2,12 +2,14 @@
 package ollama
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/provider"
@@ -83,10 +85,12 @@ func (p *Provider) Complete(ctx context.Context, prompt string, opts provider.Op
 	}
 	messages = append(messages, ollamaMessage{Role: "user", Content: prompt})
 
+	useStream := opts.OnToken != nil
+
 	reqBody := requestBody{
 		Model:    model,
 		Messages: messages,
-		Stream:   false,
+		Stream:   useStream,
 	}
 	if opts.MaxTokens > 0 {
 		reqBody.Options = &ollamaOptions{NumPredict: opts.MaxTokens}
@@ -98,8 +102,13 @@ func (p *Provider) Complete(ctx context.Context, prompt string, opts provider.Op
 	}
 
 	url := p.BaseURL + "/api/chat"
-	var result *provider.Result
 	start := time.Now()
+
+	if useStream {
+		return p.completeStreaming(ctx, url, data, model, start, opts.OnToken)
+	}
+
+	var result *provider.Result
 
 	retryErr := provider.DoWithRetry(ctx, provider.RetryConfig{}, func() (int, error) {
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(data))
@@ -133,14 +142,79 @@ func (p *Provider) Complete(ctx context.Context, prompt string, opts provider.Op
 		}
 
 		result = &provider.Result{
-			Output:        body.Message.Content,
-			Duration:      time.Since(start),
-			Provider:      ProviderName,
-			Model:         model,
-			InputTokens:   body.PromptEvalCount,
-			OutputTokens:  body.EvalCount,
+			Output:       body.Message.Content,
+			Duration:     time.Since(start),
+			Provider:     ProviderName,
+			Model:        model,
+			InputTokens:  body.PromptEvalCount,
+			OutputTokens: body.EvalCount,
 		}
 		return resp.StatusCode, nil
 	})
 	return result, retryErr
+}
+
+// completeStreaming uses Ollama's newline-delimited JSON streaming.
+func (p *Provider) completeStreaming(ctx context.Context, url string, data []byte, model string, start time.Time, onToken func(string)) (*provider.Result, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(data))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := p.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("ollama: request failed (is ollama running at %s?): %w", p.BaseURL, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("ollama: HTTP %d: %s", resp.StatusCode, string(body))
+	}
+
+	var sb strings.Builder
+	var inputTokens, outputTokens int
+
+	scanner := bufio.NewScanner(resp.Body)
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+
+		var chunk responseBody
+		if err := json.Unmarshal(line, &chunk); err != nil {
+			continue
+		}
+
+		if chunk.Error != "" {
+			return nil, fmt.Errorf("ollama error: %s", chunk.Error)
+		}
+
+		token := chunk.Message.Content
+		if token != "" {
+			sb.WriteString(token)
+			onToken(token)
+		}
+
+		if chunk.Done {
+			inputTokens = chunk.PromptEvalCount
+			outputTokens = chunk.EvalCount
+			break
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("ollama: reading stream: %w", err)
+	}
+
+	return &provider.Result{
+		Output:       sb.String(),
+		Duration:     time.Since(start),
+		Provider:     ProviderName,
+		Model:        model,
+		InputTokens:  inputTokens,
+		OutputTokens: outputTokens,
+	}, nil
 }

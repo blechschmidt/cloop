@@ -30,6 +30,10 @@ type Session struct {
 	Model    string
 	Timeout  time.Duration
 
+	// OnToken, if set, enables streaming mode. Each token chunk is passed
+	// to this callback as the AI generates its response.
+	OnToken func(token string)
+
 	// Action callbacks — called when AI emits a PM directive.
 	OnTaskUpdate func(taskID int, status pm.TaskStatus) error
 	OnTaskCreate func(title, description string, priority int) (*pm.Task, error)
@@ -60,6 +64,7 @@ func (sess *Session) Send(ctx context.Context, userMsg string) (string, []Action
 	result, err := sess.Provider.Complete(ctx, prompt, provider.Options{
 		Model:   sess.Model,
 		Timeout: sess.Timeout,
+		OnToken: sess.OnToken,
 	})
 	if err != nil {
 		return "", nil, fmt.Errorf("chat: %w", err)

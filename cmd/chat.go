@@ -173,6 +173,30 @@ func runChatLoop(sess *chat.Session, prov provider.Provider, s *state.ProjectSta
 	errorColor := color.New(color.FgRed)
 	successColor := color.New(color.FgGreen)
 
+	// Set up streaming: buffer partial lines and suppress ACTION: directives.
+	var streamLineBuf strings.Builder
+	flushStreamBuf := func() {
+		if remaining := streamLineBuf.String(); remaining != "" {
+			streamLineBuf.Reset()
+			if !strings.HasPrefix(strings.TrimSpace(remaining), "ACTION:") {
+				fmt.Print(remaining)
+			}
+		}
+	}
+	sess.OnToken = func(token string) {
+		for _, ch := range token {
+			if ch == '\n' {
+				line := streamLineBuf.String()
+				streamLineBuf.Reset()
+				if !strings.HasPrefix(strings.TrimSpace(line), "ACTION:") {
+					fmt.Print(line + "\n")
+				}
+			} else {
+				streamLineBuf.WriteRune(ch)
+			}
+		}
+	}
+
 	// Print header
 	headerColor.Printf("\ncloop chat")
 	dimColor.Printf(" — %s\n", prov.Name())
@@ -242,26 +266,40 @@ func runChatLoop(sess *chat.Session, prov provider.Provider, s *state.ProjectSta
 		// Record user message in transcript
 		transcript = append(transcript, "you: "+input)
 
-		// Spinner / thinking indicator
-		dimColor.Printf("thinking...")
-
 		ctx := context.Background()
 		start := time.Now()
+
+		streaming := sess.OnToken != nil
+		if streaming {
+			// Print "ai> " prefix; tokens will follow immediately as they stream in.
+			aiColor.Printf("ai> ")
+		} else {
+			dimColor.Printf("thinking...")
+		}
+
 		response, actions, err := sess.Send(ctx, input)
 		elapsed := time.Since(start).Round(100 * time.Millisecond)
 
-		// Clear "thinking..."
-		fmt.Printf("\r%s\r", strings.Repeat(" ", 20))
+		if streaming {
+			// Flush any partial line remaining in the stream buffer (no trailing newline from AI).
+			flushStreamBuf()
+			fmt.Println() // end the streamed line
+		} else {
+			// Clear "thinking..."
+			fmt.Printf("\r%s\r", strings.Repeat(" ", 20))
+		}
 
 		if err != nil {
 			errorColor.Printf("Error: %v\n\n", err)
 			continue
 		}
 
-		// Print AI response (filter out ACTION: lines from display)
 		displayResponse := filterActionLines(response)
-		aiColor.Printf("ai> ")
-		fmt.Printf("%s\n", displayResponse)
+		if !streaming {
+			// Print AI response (filter out ACTION: lines from display)
+			aiColor.Printf("ai> ")
+			fmt.Printf("%s\n", displayResponse)
+		}
 		dimColor.Printf("(%s)\n\n", elapsed)
 
 		transcript = append(transcript, "ai: "+displayResponse)

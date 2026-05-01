@@ -249,7 +249,8 @@ func renderTable(b *strings.Builder, entries []*compare.Entry, full bool, boldCo
 	headerColor := color.New(color.FgCyan, color.Bold)
 
 	// Summary row
-	headerColor.Fprintln(b, "=== COMPARISON RESULTS ===\n")
+	headerColor.Fprintln(b, "=== COMPARISON RESULTS ===")
+	fmt.Fprintln(b)
 
 	for i, e := range entries {
 		if e == nil {
@@ -327,7 +328,8 @@ func writeRankings(b *strings.Builder, entries []*compare.Entry) {
 		}
 	}
 
-	rankColor.Fprintln(b, "=== RANKINGS ===\n")
+	rankColor.Fprintln(b, "=== RANKINGS ===")
+	fmt.Fprintln(b)
 	if fastest != nil {
 		dimColor.Fprintf(b, "  Fastest:  %s (%s)\n", fastest.ProviderName, fastest.Duration.Round(time.Millisecond))
 	}

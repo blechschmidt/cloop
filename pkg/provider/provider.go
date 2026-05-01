@@ -12,6 +12,10 @@ type Options struct {
 	Timeout      time.Duration
 	SystemPrompt string
 	WorkDir      string
+	// OnToken, if set, is called for each token chunk as it streams in.
+	// When set, the provider should use streaming mode.
+	// The full output is still returned in Result.Output.
+	OnToken func(token string)
 }
 
 // Result from a completion request.
