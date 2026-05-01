@@ -117,6 +117,61 @@ var taskRemoveCmd = &cobra.Command{
 	},
 }
 
+var taskShowCmd = &cobra.Command{
+	Use:     "show <id>",
+	Aliases: []string{"view", "detail"},
+	Short:   "Show full details of a task",
+	Args:    cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		workdir, _ := os.Getwd()
+		s, err := state.Load(workdir)
+		if err != nil {
+			return err
+		}
+		if !s.PMMode || s.Plan == nil || len(s.Plan.Tasks) == 0 {
+			return fmt.Errorf("no task plan found — run 'cloop run --pm' to create one")
+		}
+
+		id, err := strconv.Atoi(args[0])
+		if err != nil {
+			return fmt.Errorf("invalid task ID %q: must be a number", args[0])
+		}
+
+		var task *pm.Task
+		for _, t := range s.Plan.Tasks {
+			if t.ID == id {
+				task = t
+				break
+			}
+		}
+		if task == nil {
+			return fmt.Errorf("task %d not found", id)
+		}
+
+		dimColor := color.New(color.Faint)
+		titleColor := color.New(color.FgWhite, color.Bold)
+
+		titleColor.Printf("Task %d: %s\n", task.ID, task.Title)
+		fmt.Printf("Status:   %s\n", task.Status)
+		fmt.Printf("Priority: %d\n", task.Priority)
+		if task.Description != "" {
+			fmt.Printf("\nDescription:\n")
+			fmt.Printf("  %s\n", strings.ReplaceAll(task.Description, "\n", "\n  "))
+		}
+		if task.StartedAt != nil {
+			fmt.Printf("\nStarted:  %s\n", task.StartedAt.Format("2006-01-02 15:04:05"))
+		}
+		if task.CompletedAt != nil {
+			fmt.Printf("Finished: %s\n", task.CompletedAt.Format("2006-01-02 15:04:05"))
+		}
+		if task.Result != "" {
+			fmt.Printf("\nResult summary:\n")
+			dimColor.Printf("  %s\n", strings.ReplaceAll(task.Result, "\n", "\n  "))
+		}
+		return nil
+	},
+}
+
 var taskAddCmd = &cobra.Command{
 	Use:   "add <title>",
 	Short: "Add a new task to the plan",
@@ -275,6 +330,7 @@ func init() {
 	taskAddCmd.Flags().IntVar(&taskPriority, "priority", 0, "Task priority (1=highest; default: lowest)")
 
 	taskCmd.AddCommand(taskListCmd)
+	taskCmd.AddCommand(taskShowCmd)
 	taskCmd.AddCommand(taskSkipCmd)
 	taskCmd.AddCommand(taskResetCmd)
 	taskCmd.AddCommand(taskDoneCmd)

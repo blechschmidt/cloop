@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
@@ -52,13 +53,13 @@ var statusCmd = &cobra.Command{
 				for _, t := range s.Plan.Tasks {
 					marker := "[ ]"
 					switch t.Status {
-					case "done":
+					case pm.TaskDone:
 						marker = "[x]"
-					case "skipped":
+					case pm.TaskSkipped:
 						marker = "[-]"
-					case "failed":
+					case pm.TaskFailed:
 						marker = "[!]"
-					case "in_progress":
+					case pm.TaskInProgress:
 						marker = "[~]"
 					}
 					fmt.Printf("          %s Task %d: %s\n", marker, t.ID, t.Title)
