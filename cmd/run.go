@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
 	"syscall"
 	"time"
@@ -33,6 +34,7 @@ var (
 	maxFailures     int
 	contextSteps    int
 	stepDelay       string
+	onComplete      string
 )
 
 var runCmd = &cobra.Command{
@@ -172,7 +174,23 @@ Press Ctrl+C to pause gracefully.`,
 			cancel()
 		}()
 
-		return orc.Run(ctx)
+		runErr := orc.Run(ctx)
+
+		// Run the on-complete hook if provided and session ended normally.
+		if onComplete != "" {
+			finalState, _ := state.Load(workdir)
+			if finalState != nil && (finalState.Status == "complete" || finalState.Status == "evolving") {
+				fmt.Printf("\nRunning --on-complete hook: %s\n", onComplete)
+				hookCmd := exec.Command("sh", "-c", onComplete)
+				hookCmd.Stdout = os.Stdout
+				hookCmd.Stderr = os.Stderr
+				if err := hookCmd.Run(); err != nil {
+					fmt.Printf("on-complete hook exited with error: %v\n", err)
+				}
+			}
+		}
+
+		return runErr
 	},
 }
 
@@ -206,5 +224,6 @@ func init() {
 	runCmd.Flags().IntVar(&maxFailures, "max-failures", 3, "PM mode: consecutive task failures before stopping")
 	runCmd.Flags().IntVar(&contextSteps, "context-steps", 3, "Recent steps to include in prompts (0 = disable context)")
 	runCmd.Flags().StringVar(&stepDelay, "step-delay", "", "Delay between steps (e.g. 5s, 1m)")
+	runCmd.Flags().StringVar(&onComplete, "on-complete", "", "Shell command to run when the goal is complete (e.g. 'notify-send done')")
 	rootCmd.AddCommand(runCmd)
 }

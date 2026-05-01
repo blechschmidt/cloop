@@ -165,6 +165,7 @@ cloop run --pm --retry-failed # retry previously failed tasks
 | `--max-failures` | `3` | PM mode: consecutive task failures before stopping |
 | `--context-steps` | `3` | Recent steps to include in prompts (0 = none) |
 | `--step-delay` | | Delay between steps (e.g. `5s`, `1m`) |
+| `--on-complete` | | Shell command to run on goal completion (e.g. `notify-send done`) |
 | `-v, --verbose` | `false` | Show full step output (no truncation) |
 
 **Stopping:** Press `Ctrl+C` to pause gracefully. Run `cloop run` again to resume.
@@ -252,6 +253,27 @@ cloop task fail <id>               # mark as failed
 cloop task reset <id>              # reset to pending
 cloop task remove <id>             # remove from plan
 ```
+
+### `cloop watch`
+
+Live-refresh the project status while `cloop run` runs in another terminal.
+
+```bash
+cloop watch              # refresh every 2s (default)
+cloop watch --interval 5s
+```
+
+Shows: goal, status, provider, step/task progress, token counts, and the last step's output — automatically stopping when the session ends.
+
+### `cloop stats`
+
+Show aggregated session statistics.
+
+```bash
+cloop stats
+```
+
+Includes step timing (total/avg/min/max), token usage, cost estimate for known models, and task breakdown in PM mode.
 
 ### `cloop reset`
 
