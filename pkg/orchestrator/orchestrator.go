@@ -48,6 +48,9 @@ type Config struct {
 
 	// Provider config for building providers
 	ProviderCfg provider.ProviderConfig
+
+	// InnovateMode enables creative/experimental feature exploration in evolve prompts.
+	InnovateMode bool
 }
 
 type Orchestrator struct {
@@ -604,6 +607,21 @@ func (o *Orchestrator) buildEvolvePrompt() string {
 	b.WriteString("4. Verify it works\n")
 	b.WriteString("5. Summarize what you added and why\n\n")
 	b.WriteString("Pick ONE focused improvement per iteration. Make it count.\n")
+
+	if o.config.InnovateMode {
+		b.WriteString("\n## 🚀 INNOVATION MODE ACTIVE\n")
+		b.WriteString("Go beyond obvious improvements. Think creatively and unconventionally.\n")
+		b.WriteString("Explore ideas that could be genuinely novel or surprising:\n")
+		b.WriteString("- Cross-provider intelligence (use multiple providers together, consensus, fallback chains)\n")
+		b.WriteString("- Self-optimization (analyze own performance, tune prompts, learn from failures)\n")
+		b.WriteString("- Predictive capabilities (anticipate what the user needs next)\n")
+		b.WriteString("- Meta-learning (extract patterns from past iterations to improve future ones)\n")
+		b.WriteString("- Novel interaction patterns (watch mode enhancements, collaborative modes, branching)\n")
+		b.WriteString("- Emergent behaviors (let the system surprise you with useful capabilities)\n")
+		b.WriteString("- Integration points (webhooks, APIs, CI/CD, external tools)\n")
+		b.WriteString("\nDon't just add features — invent capabilities that don't exist in other tools.\n")
+		b.WriteString("Be bold. If it might not work, try it anyway and document what you learned.\n")
+	}
 
 	return b.String()
 }

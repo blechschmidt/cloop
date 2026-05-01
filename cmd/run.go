@@ -36,6 +36,7 @@ var (
 	stepDelay       string
 	onComplete      string
 	tokenBudget     int
+	innovateMode    bool
 )
 
 var runCmd = &cobra.Command{
@@ -142,6 +143,7 @@ Press Ctrl+C to pause gracefully.`,
 			ProviderName: providerName,
 			ProviderCfg:  provCfg,
 			TokenBudget:  tokenBudget,
+			InnovateMode: innovateMode,
 		}
 
 		orc, err := orchestrator.New(orchCfg, prov)
@@ -264,5 +266,6 @@ func init() {
 	runCmd.Flags().StringVar(&stepDelay, "step-delay", "", "Delay between steps (e.g. 5s, 1m)")
 	runCmd.Flags().StringVar(&onComplete, "on-complete", "", "Shell command to run when the goal is complete (e.g. 'notify-send done')")
 	runCmd.Flags().IntVar(&tokenBudget, "token-budget", 0, "Stop when cumulative tokens (in+out) reach this limit (0 = unlimited)")
+	runCmd.Flags().BoolVar(&innovateMode, "innovate", false, "Innovation mode: encourage creative, unconventional features in evolve iterations")
 	rootCmd.AddCommand(runCmd)
 }
