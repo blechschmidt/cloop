@@ -180,3 +180,130 @@ func TestWriteDefault_DoesNotOverwriteExisting(t *testing.T) {
 		t.Errorf("WriteDefault overwrote existing config: got provider %q", loaded.Provider)
 	}
 }
+
+// --- applyEnvVars / env var override ---
+
+func setenv(t *testing.T, key, value string) {
+	t.Helper()
+	old, hadOld := os.LookupEnv(key)
+	os.Setenv(key, value)
+	t.Cleanup(func() {
+		if hadOld {
+			os.Setenv(key, old)
+		} else {
+			os.Unsetenv(key)
+		}
+	})
+}
+
+func TestLoad_EnvVar_AnthropicAPIKey(t *testing.T) {
+	setenv(t, "ANTHROPIC_API_KEY", "env-anthropic-key")
+	dir := tempDir(t)
+	cfg, err := Load(dir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Anthropic.APIKey != "env-anthropic-key" {
+		t.Errorf("expected env key, got %q", cfg.Anthropic.APIKey)
+	}
+}
+
+func TestLoad_EnvVar_AnthropicBaseURL(t *testing.T) {
+	setenv(t, "ANTHROPIC_BASE_URL", "https://custom.anthropic.com")
+	dir := tempDir(t)
+	cfg, err := Load(dir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Anthropic.BaseURL != "https://custom.anthropic.com" {
+		t.Errorf("expected env base_url, got %q", cfg.Anthropic.BaseURL)
+	}
+}
+
+func TestLoad_EnvVar_OpenAIAPIKey(t *testing.T) {
+	setenv(t, "OPENAI_API_KEY", "env-openai-key")
+	dir := tempDir(t)
+	cfg, err := Load(dir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.OpenAI.APIKey != "env-openai-key" {
+		t.Errorf("expected env openai key, got %q", cfg.OpenAI.APIKey)
+	}
+}
+
+func TestLoad_EnvVar_OpenAIBaseURL(t *testing.T) {
+	setenv(t, "OPENAI_BASE_URL", "https://custom.openai.com")
+	dir := tempDir(t)
+	cfg, err := Load(dir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.OpenAI.BaseURL != "https://custom.openai.com" {
+		t.Errorf("expected env openai base_url, got %q", cfg.OpenAI.BaseURL)
+	}
+}
+
+func TestLoad_EnvVar_OllamaBaseURL(t *testing.T) {
+	setenv(t, "OLLAMA_BASE_URL", "http://remote:11434")
+	dir := tempDir(t)
+	cfg, err := Load(dir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Ollama.BaseURL != "http://remote:11434" {
+		t.Errorf("expected env ollama base_url, got %q", cfg.Ollama.BaseURL)
+	}
+}
+
+func TestLoad_EnvVar_CloopProvider(t *testing.T) {
+	setenv(t, "CLOOP_PROVIDER", "anthropic")
+	dir := tempDir(t)
+	cfg, err := Load(dir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Provider != "anthropic" {
+		t.Errorf("expected env provider 'anthropic', got %q", cfg.Provider)
+	}
+}
+
+func TestLoad_EnvVar_OverridesFileValue(t *testing.T) {
+	// Env var should win over config file value
+	setenv(t, "ANTHROPIC_API_KEY", "env-wins")
+	dir := tempDir(t)
+
+	cfg := Default()
+	cfg.Anthropic.APIKey = "file-value"
+	if err := Save(dir, cfg); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	loaded, err := Load(dir)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if loaded.Anthropic.APIKey != "env-wins" {
+		t.Errorf("expected env var to override file, got %q", loaded.Anthropic.APIKey)
+	}
+}
+
+func TestLoad_EnvVar_EmptyDoesNotOverride(t *testing.T) {
+	// Unset env var should not clear file value
+	os.Unsetenv("ANTHROPIC_API_KEY")
+	dir := tempDir(t)
+
+	cfg := Default()
+	cfg.Anthropic.APIKey = "file-value"
+	if err := Save(dir, cfg); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	loaded, err := Load(dir)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if loaded.Anthropic.APIKey != "file-value" {
+		t.Errorf("expected file value to persist, got %q", loaded.Anthropic.APIKey)
+	}
+}

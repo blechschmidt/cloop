@@ -68,10 +68,13 @@ func ConfigPath(workdir string) string {
 }
 
 // Load reads config from .cloop/config.yaml. Returns defaults if missing.
+// Environment variables override file values: ANTHROPIC_API_KEY, OPENAI_API_KEY,
+// ANTHROPIC_BASE_URL, OPENAI_BASE_URL, OLLAMA_BASE_URL, CLOOP_PROVIDER.
 func Load(workdir string) (*Config, error) {
 	cfg := Default()
 	data, err := os.ReadFile(ConfigPath(workdir))
 	if os.IsNotExist(err) {
+		cfg.applyEnvVars()
 		return cfg, nil
 	}
 	if err != nil {
@@ -80,7 +83,31 @@ func Load(workdir string) (*Config, error) {
 	if err := yaml.Unmarshal(data, cfg); err != nil {
 		return nil, err
 	}
+	cfg.applyEnvVars()
 	return cfg, nil
+}
+
+// applyEnvVars overlays environment variable values onto config fields.
+// Env vars take precedence over file-based config values.
+func (c *Config) applyEnvVars() {
+	if v := os.Getenv("CLOOP_PROVIDER"); v != "" {
+		c.Provider = v
+	}
+	if v := os.Getenv("ANTHROPIC_API_KEY"); v != "" {
+		c.Anthropic.APIKey = v
+	}
+	if v := os.Getenv("ANTHROPIC_BASE_URL"); v != "" {
+		c.Anthropic.BaseURL = v
+	}
+	if v := os.Getenv("OPENAI_API_KEY"); v != "" {
+		c.OpenAI.APIKey = v
+	}
+	if v := os.Getenv("OPENAI_BASE_URL"); v != "" {
+		c.OpenAI.BaseURL = v
+	}
+	if v := os.Getenv("OLLAMA_BASE_URL"); v != "" {
+		c.Ollama.BaseURL = v
+	}
 }
 
 // Save writes the config to .cloop/config.yaml.
