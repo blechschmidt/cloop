@@ -47,6 +47,12 @@ Supports Anthropic (Claude API), OpenAI, Ollama (local), and Claude Code.
   cloop prioritize --apply                  # apply priority changes
   cloop simulate "what if we cut scope by 30%?"        # AI what-if scenario analysis
   cloop simulate "what if the deadline moves up 2 weeks?" --apply
+  cloop agent start                                     # autonomous background agent
+  cloop agent start --interval 2m --provider anthropic  # agent with custom settings
+  cloop agent status                                    # is it running?
+  cloop agent logs --tail 30                            # recent activity
+  cloop agent follow                                    # live log stream
+  cloop agent stop                                      # stop the agent
   cloop status
   cloop log`,
 }
