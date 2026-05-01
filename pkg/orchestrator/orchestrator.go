@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/memory"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/provider"
 	"github.com/blechschmidt/cloop/pkg/state"
@@ -74,12 +75,22 @@ type Config struct {
 
 	// MaxVerifyRetries is the max number of times a task can be re-queued by the verifier (default 2).
 	MaxVerifyRetries int
+
+	// UseMemory injects past session learnings into prompts.
+	UseMemory bool
+
+	// Learn extracts key learnings at end of session and saves them to memory.
+	Learn bool
+
+	// MemoryLimit is the max number of memory entries to inject into prompts (0 = all).
+	MemoryLimit int
 }
 
 type Orchestrator struct {
 	config   Config
 	state    *state.ProjectState
 	provider provider.Provider
+	memory   *memory.Memory
 }
 
 func New(cfg Config, prov provider.Provider) (*Orchestrator, error) {
@@ -93,7 +104,11 @@ func New(cfg Config, prov provider.Provider) (*Orchestrator, error) {
 	if cfg.PMMode {
 		s.PMMode = true
 	}
-	return &Orchestrator{config: cfg, state: s, provider: prov}, nil
+	mem, _ := memory.Load(cfg.WorkDir)
+	if mem == nil {
+		mem = &memory.Memory{}
+	}
+	return &Orchestrator{config: cfg, state: s, provider: prov, memory: mem}, nil
 }
 
 func (o *Orchestrator) AddSteps(n int) {
@@ -131,7 +146,16 @@ func (o *Orchestrator) runLoop(ctx context.Context) error {
 
 	sessionStart := time.Now()
 	startStep := s.CurrentStep
-	defer func() { printSessionSummary(sessionStart, startStep, s) }()
+	defer func() {
+		newSteps := s.Steps
+		if startStep < len(newSteps) {
+			newSteps = newSteps[startStep:]
+		} else {
+			newSteps = nil
+		}
+		o.learnFromSession(ctx, newSteps)
+		printSessionSummary(sessionStart, startStep, s)
+	}()
 
 	header := color.New(color.FgCyan, color.Bold)
 	stepColor := color.New(color.FgYellow, color.Bold)
@@ -275,7 +299,16 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 
 	sessionStart := time.Now()
 	startStep := s.CurrentStep
-	defer func() { printSessionSummary(sessionStart, startStep, s) }()
+	defer func() {
+		newSteps := s.Steps
+		if startStep < len(newSteps) {
+			newSteps = newSteps[startStep:]
+		} else {
+			newSteps = nil
+		}
+		o.learnFromSession(ctx, newSteps)
+		printSessionSummary(sessionStart, startStep, s)
+	}()
 
 	header := color.New(color.FgCyan, color.Bold)
 	stepColor := color.New(color.FgYellow, color.Bold)
@@ -435,6 +468,16 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			projCtx = pm.BuildProjectContext(o.config.WorkDir)
 		}
 		prompt := pm.ExecuteTaskPrompt(s.Goal, s.Instructions, s.Plan, task, projCtx)
+		// Prepend memory if enabled
+		if o.config.UseMemory && o.memory != nil {
+			limit := o.config.MemoryLimit
+			if limit == 0 {
+				limit = 20
+			}
+			if mem := o.memory.FormatForPrompt(limit); mem != "" {
+				prompt = mem + prompt
+			}
+		}
 
 		if o.config.DryRun {
 			dimColor.Printf("[dry-run] Task prompt:\n%s\n\n", prompt)
@@ -892,6 +935,17 @@ func (o *Orchestrator) buildPrompt() string {
 
 	b.WriteString(fmt.Sprintf("## PROJECT GOAL\n%s\n\n", s.Goal))
 
+	// Inject memory if enabled
+	if o.config.UseMemory && o.memory != nil {
+		limit := o.config.MemoryLimit
+		if limit == 0 {
+			limit = 20
+		}
+		if mem := o.memory.FormatForPrompt(limit); mem != "" {
+			b.WriteString(mem)
+		}
+	}
+
 	if s.Instructions != "" {
 		b.WriteString(fmt.Sprintf("## ADDITIONAL INSTRUCTIONS\n%s\n\n", s.Instructions))
 	}
@@ -1127,6 +1181,41 @@ func stepSummaryLine(output string, maxLen int) string {
 		return line
 	}
 	return "(no summary)"
+}
+
+// learnFromSession asks the AI to extract learnings from the session and saves them.
+func (o *Orchestrator) learnFromSession(ctx context.Context, steps []state.StepResult) {
+	if !o.config.Learn || o.memory == nil || len(steps) == 0 {
+		return
+	}
+	// Build a compact session summary from step outputs.
+	var sb strings.Builder
+	for i, step := range steps {
+		if i >= 10 {
+			sb.WriteString(fmt.Sprintf("... (%d more steps)\n", len(steps)-10))
+			break
+		}
+		sb.WriteString(fmt.Sprintf("Step %d (%s): %s\n", step.Step+1, step.Duration, truncate(step.Output, 300)))
+	}
+	summary := sb.String()
+
+	dimColor := color.New(color.Faint)
+	dimColor.Printf("  Extracting session learnings...\n")
+
+	learnings, err := memory.ExtractLearnings(ctx, o.provider, o.state.Model, o.state.Goal, summary, o.memory)
+	if err != nil {
+		dimColor.Printf("  Memory extraction failed: %v\n", err)
+		return
+	}
+	if len(learnings) == 0 {
+		dimColor.Printf("  No new learnings extracted.\n")
+		return
+	}
+	if err := o.memory.Save(o.config.WorkDir); err != nil {
+		dimColor.Printf("  Failed to save memory: %v\n", err)
+		return
+	}
+	dimColor.Printf("  Saved %d learning(s) to project memory.\n", len(learnings))
 }
 
 // printSessionSummary prints a one-line summary after a run session ends.

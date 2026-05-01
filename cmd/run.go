@@ -43,6 +43,9 @@ var (
 	reviewMode       bool
 	verifyTasks      bool
 	maxVerifyRetries int
+	useMemory        bool
+	learn            bool
+	memoryLimit      int
 )
 
 var runCmd = &cobra.Command{
@@ -156,6 +159,9 @@ Press Ctrl+C to pause gracefully.`,
 			ReviewMode:       reviewMode,
 			Verify:           verifyTasks,
 			MaxVerifyRetries: maxVerifyRetries,
+			UseMemory:        useMemory,
+			Learn:            learn,
+			MemoryLimit:      memoryLimit,
 		}
 
 		orc, err := orchestrator.New(orchCfg, prov)
@@ -285,5 +291,8 @@ func init() {
 	runCmd.Flags().BoolVar(&reviewMode, "review", false, "PM mode: pause before each task for human approval (y/n/skip/quit)")
 	runCmd.Flags().BoolVar(&verifyTasks, "verify", false, "PM mode: run a second AI verification pass after each TASK_DONE to confirm genuine completion")
 	runCmd.Flags().IntVar(&maxVerifyRetries, "max-verify-retries", 2, "PM mode: max times a task can be re-queued by verification failure before marking it failed")
+	runCmd.Flags().BoolVar(&useMemory, "use-memory", false, "Inject past session learnings into prompts")
+	runCmd.Flags().BoolVar(&learn, "learn", false, "Extract key learnings at end of session and store in project memory")
+	runCmd.Flags().IntVar(&memoryLimit, "memory-limit", 20, "Max number of memory entries to inject into prompts (0 = all)")
 	rootCmd.AddCommand(runCmd)
 }

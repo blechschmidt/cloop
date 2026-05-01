@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -38,6 +39,23 @@ func (m *mockProvider) Complete(_ context.Context, _ string, _ provider.Options)
 
 func (m *mockProvider) Name() string         { return m.name }
 func (m *mockProvider) DefaultModel() string { return "mock-model" }
+
+// safeProvider is a thread-safe mock provider for parallel tests.
+type safeProvider struct {
+	name   string
+	output string // returned for every call
+	mu     sync.Mutex
+	calls  int
+}
+
+func (s *safeProvider) Complete(_ context.Context, _ string, _ provider.Options) (*provider.Result, error) {
+	s.mu.Lock()
+	s.calls++
+	s.mu.Unlock()
+	return &provider.Result{Output: s.output, Provider: s.name}, nil
+}
+func (s *safeProvider) Name() string         { return s.name }
+func (s *safeProvider) DefaultModel() string { return "mock-model" }
 
 func tempDir(t *testing.T) string {
 	t.Helper()
@@ -1376,5 +1394,78 @@ func TestBuildPrompt_SessionHistory_AbsentWhenWithinContext(t *testing.T) {
 
 	if strings.Contains(prompt, "SESSION HISTORY") {
 		t.Error("SESSION HISTORY should not appear when all steps fit within context window")
+	}
+}
+
+// TestRunPMParallel_IndependentTasksRunConcurrently checks that parallel mode
+// runs all independent tasks and marks them done.
+func TestRunPMParallel_IndependentTasksRunConcurrently(t *testing.T) {
+	dir := tempDir(t)
+	s := initState(t, dir, "goal", 0)
+	s.PMMode = true
+	// Three tasks with no dependencies — all should run in one parallel round.
+	s.Plan = &pm.Plan{
+		Goal: "goal",
+		Tasks: []*pm.Task{
+			{ID: 1, Title: "A", Priority: 1, Status: pm.TaskPending},
+			{ID: 2, Title: "B", Priority: 2, Status: pm.TaskPending},
+			{ID: 3, Title: "C", Priority: 3, Status: pm.TaskPending},
+		},
+	}
+	s.Save()
+
+	prov := &safeProvider{name: "mock", output: "done\nTASK_DONE"}
+	o := newOrchestrator(t, dir, Config{WorkDir: dir, PMMode: true, Parallel: true}, prov)
+
+	if err := o.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	final, _ := state.Load(dir)
+	for _, task := range final.Plan.Tasks {
+		if task.Status != pm.TaskDone {
+			t.Errorf("task %d (%s): expected done, got %s", task.ID, task.Title, task.Status)
+		}
+	}
+	// All 3 tasks were called (+ the implicit Decompose call is skipped since plan exists).
+	if prov.calls != 3 {
+		t.Errorf("expected 3 provider calls, got %d", prov.calls)
+	}
+	if final.Status != "complete" {
+		t.Errorf("expected status complete, got %s", final.Status)
+	}
+}
+
+// TestRunPMParallel_DependencyBlocking ensures tasks with deps wait for prerequisites.
+func TestRunPMParallel_DependencyBlocking(t *testing.T) {
+	dir := tempDir(t)
+	s := initState(t, dir, "goal", 0)
+	s.PMMode = true
+	// Task 2 depends on task 1 — must run after task 1 completes.
+	s.Plan = &pm.Plan{
+		Goal: "goal",
+		Tasks: []*pm.Task{
+			{ID: 1, Title: "First", Priority: 1, Status: pm.TaskPending},
+			{ID: 2, Title: "Second", Priority: 2, Status: pm.TaskPending, DependsOn: []int{1}},
+		},
+	}
+	s.Save()
+
+	prov := &safeProvider{name: "mock", output: "done\nTASK_DONE"}
+	o := newOrchestrator(t, dir, Config{WorkDir: dir, PMMode: true, Parallel: true}, prov)
+
+	if err := o.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	final, _ := state.Load(dir)
+	for _, task := range final.Plan.Tasks {
+		if task.Status != pm.TaskDone {
+			t.Errorf("task %d: expected done, got %s", task.ID, task.Status)
+		}
+	}
+	// 2 tasks = 2 provider calls.
+	if prov.calls != 2 {
+		t.Errorf("expected 2 provider calls, got %d", prov.calls)
 	}
 }
