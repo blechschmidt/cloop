@@ -59,6 +59,8 @@ Supports Anthropic (Claude API), OpenAI, Ollama (local), and Claude Code.
   cloop review HEAD~3..HEAD                             # review a commit range
   cloop review --task 3                                 # review code in context of PM task 3
   cloop review --format md -o review.md                 # save review as markdown
+  cloop ui                                              # web dashboard (localhost:8080)
+  cloop ui --port 9090                                  # custom port
   cloop status
   cloop log`,
 }
