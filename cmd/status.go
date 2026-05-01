@@ -1,14 +1,18 @@
 package cmd
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 )
+
+var statusJSON bool
 
 var statusCmd = &cobra.Command{
 	Use:   "status",
@@ -18,6 +22,15 @@ var statusCmd = &cobra.Command{
 		s, err := state.Load(workdir)
 		if err != nil {
 			return err
+		}
+
+		if statusJSON {
+			data, err := json.MarshalIndent(s, "", "  ")
+			if err != nil {
+				return fmt.Errorf("marshaling status: %w", err)
+			}
+			fmt.Println(string(data))
+			return nil
 		}
 
 		statusColor := color.New(color.FgWhite, color.Bold)
@@ -50,19 +63,14 @@ var statusCmd = &cobra.Command{
 			fmt.Printf("Mode:     product manager\n")
 			if s.Plan != nil {
 				fmt.Printf("Tasks:    %s\n", s.Plan.Summary())
-				for _, t := range s.Plan.Tasks {
-					marker := "[ ]"
-					switch t.Status {
-					case pm.TaskDone:
-						marker = "[x]"
-					case pm.TaskSkipped:
-						marker = "[-]"
-					case pm.TaskFailed:
-						marker = "[!]"
-					case pm.TaskInProgress:
-						marker = "[~]"
-					}
-					fmt.Printf("          %s Task %d: %s\n", marker, t.ID, t.Title)
+				// Sort tasks by priority (ascending) for consistent display.
+				sorted := make([]*pm.Task, len(s.Plan.Tasks))
+				copy(sorted, s.Plan.Tasks)
+				sort.SliceStable(sorted, func(i, j int) bool {
+					return sorted[i].Priority < sorted[j].Priority
+				})
+				for _, t := range sorted {
+					fmt.Printf("          %s Task %d: %s\n", taskMarker(t.Status), t.ID, t.Title)
 				}
 			}
 		} else {
@@ -90,5 +98,6 @@ var statusCmd = &cobra.Command{
 }
 
 func init() {
+	statusCmd.Flags().BoolVar(&statusJSON, "json", false, "Output status as JSON")
 	rootCmd.AddCommand(statusCmd)
 }
