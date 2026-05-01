@@ -1,11 +1,13 @@
 package orchestrator
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"io"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/pm"
@@ -51,6 +53,20 @@ type Config struct {
 
 	// InnovateMode enables creative/experimental feature exploration in evolve prompts.
 	InnovateMode bool
+
+	// Parallel enables concurrent task execution in PM mode.
+	// Independent tasks (all deps satisfied) run simultaneously.
+	Parallel bool
+
+	// InjectContext enables project context injection (git status, file tree) into task prompts.
+	InjectContext bool
+
+	// AdaptiveReplan enables AI-driven replanning after task failures.
+	// When enabled and a task fails, the provider re-thinks the remaining work.
+	AdaptiveReplan bool
+
+	// ReviewMode pauses before each task and waits for human approval (y/n/skip/quit).
+	ReviewMode bool
 }
 
 type Orchestrator struct {
@@ -234,8 +250,16 @@ func (o *Orchestrator) runLoop(ctx context.Context) error {
 	return nil
 }
 
-// runPM runs the product manager mode: decompose goal → execute tasks → verify.
+// runPM dispatches to sequential or parallel task execution based on config.
 func (o *Orchestrator) runPM(ctx context.Context) error {
+	if o.config.Parallel {
+		return o.runPMParallel(ctx)
+	}
+	return o.runPMSequential(ctx)
+}
+
+// runPMSequential runs PM tasks one at a time (original behaviour).
+func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 	s := o.state
 	s.Status = "running"
 	if err := s.Save(); err != nil {
@@ -368,12 +392,42 @@ func (o *Orchestrator) runPM(ctx context.Context) error {
 		}
 
 		stepColor.Printf("━━━ Task %d/%d: %s ━━━\n", task.ID, len(s.Plan.Tasks), task.Title)
+		dimColor.Printf("       %s\n\n", truncate(task.Description, 150))
+
+		// Human-in-the-loop review mode: ask before executing each task.
+		if o.config.ReviewMode {
+			action := reviewTask(task)
+			switch action {
+			case "skip":
+				task.Status = pm.TaskSkipped
+				dimColor.Printf("→ Task %d skipped by user.\n\n", task.ID)
+				s.Save()
+				continue
+			case "quit":
+				s.Status = "paused"
+				s.Save()
+				color.New(color.FgYellow).Printf("⏸ Review mode: user quit. Run 'cloop run' to resume.\n")
+				return nil
+			case "no":
+				s.Status = "paused"
+				s.Save()
+				color.New(color.FgYellow).Printf("⏸ Task execution declined. Run 'cloop run' to resume.\n")
+				return nil
+			}
+			// "yes" falls through
+		}
+
 		now := time.Now()
 		task.Status = pm.TaskInProgress
 		task.StartedAt = &now
 		s.Save()
 
-		prompt := pm.ExecuteTaskPrompt(s.Goal, s.Instructions, s.Plan, task)
+		// Build prompt with optional project context injection.
+		var projCtx *pm.ProjectContext
+		if o.config.InjectContext {
+			projCtx = pm.BuildProjectContext(o.config.WorkDir)
+		}
+		prompt := pm.ExecuteTaskPrompt(s.Goal, s.Instructions, s.Plan, task, projCtx)
 
 		if o.config.DryRun {
 			dimColor.Printf("[dry-run] Task prompt:\n%s\n\n", prompt)
@@ -448,6 +502,32 @@ func (o *Orchestrator) runPM(ctx context.Context) error {
 			task.Status = pm.TaskFailed
 			failColor.Printf("✗ Task %d failed: %s\n\n", task.ID, task.Title)
 			consecutiveErrors++
+
+			// Adaptive replanning: re-think remaining tasks on failure.
+			if o.config.AdaptiveReplan {
+				pmColor.Printf("Adaptive replan: re-thinking remaining tasks after failure...\n")
+				failureReason := truncate(result.Output, 400)
+				newTasks, replanErr := pm.AdaptiveReplan(ctx, o.provider, s.Goal, s.Instructions, s.Model, o.config.StepTimeout, s.Plan, task, failureReason)
+				if replanErr != nil {
+					failColor.Printf("  Replan failed: %v — continuing with existing plan.\n\n", replanErr)
+				} else if len(newTasks) > 0 {
+					// Replace remaining pending tasks with replanned tasks.
+					kept := []*pm.Task{}
+					for _, t := range s.Plan.Tasks {
+						if t.Status != pm.TaskPending {
+							kept = append(kept, t)
+						}
+					}
+					s.Plan.Tasks = append(kept, newTasks...)
+					pmColor.Printf("  Replanned: added %d revised task(s).\n\n", len(newTasks))
+					consecutiveErrors = 0 // reset after successful replan
+					s.Save()
+					continue
+				} else {
+					pmColor.Printf("  Replan: no new tasks — plan is complete or blocked.\n\n")
+				}
+			}
+
 			if consecutiveErrors >= maxConsecutiveErrors {
 				s.Status = "failed"
 				s.Save()
@@ -468,6 +548,291 @@ func (o *Orchestrator) runPM(ctx context.Context) error {
 				s.Save()
 				return ctx.Err()
 			case <-time.After(o.config.StepDelay):
+			}
+		}
+	}
+
+	s.Status = "paused"
+	s.Save()
+	return nil
+}
+
+// reviewTask prompts the user to approve, skip, or quit before executing a task.
+// Returns "yes", "no", "skip", or "quit".
+func reviewTask(task *pm.Task) string {
+	reviewColor := color.New(color.FgCyan)
+	reviewColor.Printf("Review: Task %d [P%d] — %s\n", task.ID, task.Priority, task.Title)
+	if task.Description != "" {
+		color.New(color.Faint).Printf("  %s\n", truncate(task.Description, 200))
+	}
+	fmt.Printf("Execute this task? [y]es / [n]o (pause) / [s]kip / [q]uit: ")
+	scanner := bufio.NewScanner(os.Stdin)
+	for scanner.Scan() {
+		answer := strings.ToLower(strings.TrimSpace(scanner.Text()))
+		switch answer {
+		case "y", "yes", "":
+			return "yes"
+		case "n", "no":
+			return "no"
+		case "s", "skip":
+			return "skip"
+		case "q", "quit":
+			return "quit"
+		}
+		fmt.Printf("Please enter y, n, s, or q: ")
+	}
+	return "quit" // EOF or error
+}
+
+// taskResult holds the output of a single parallel task execution.
+type taskResult struct {
+	task         *pm.Task
+	result       *provider.Result
+	err          error
+	duration     time.Duration
+	bufferedOut  string
+}
+
+// runPMParallel runs all dependency-ready tasks concurrently in each round,
+// then waits for them to complete before starting the next round.
+func (o *Orchestrator) runPMParallel(ctx context.Context) error {
+	s := o.state
+	s.Status = "running"
+	if err := s.Save(); err != nil {
+		return err
+	}
+
+	sessionStart := time.Now()
+	startStep := s.CurrentStep
+	defer func() { printSessionSummary(sessionStart, startStep, s) }()
+
+	header := color.New(color.FgCyan, color.Bold)
+	successColor := color.New(color.FgGreen, color.Bold)
+	failColor := color.New(color.FgRed, color.Bold)
+	dimColor := color.New(color.Faint)
+	pmColor := color.New(color.FgMagenta, color.Bold)
+	stepColor := color.New(color.FgYellow, color.Bold)
+
+	header.Printf("\n🧠 cloop PM — AI Product Manager Mode (parallel)\n")
+	fmt.Printf("   Provider: %s\n", o.provider.Name())
+	fmt.Printf("   Goal: %s\n", s.Goal)
+	fmt.Println()
+
+	// Replan / decompose phase (same as sequential).
+	if o.config.Replan && s.Plan != nil {
+		pmColor.Printf("Replanning: clearing existing plan (%d tasks) and re-decomposing.\n\n", len(s.Plan.Tasks))
+		s.Plan = nil
+		s.Save()
+	}
+
+	if s.Plan == nil || len(s.Plan.Tasks) == 0 {
+		pmColor.Printf("Decomposing goal into tasks...\n")
+		plan, err := pm.Decompose(ctx, o.provider, s.Goal, s.Instructions, s.Model, o.config.StepTimeout)
+		if err != nil {
+			failColor.Printf("x Failed to decompose goal: %v\n", err)
+			s.Status = "failed"
+			s.Save()
+			return err
+		}
+		s.Plan = plan
+		s.Save()
+		fmt.Printf("\n")
+		pmColor.Printf("Task Plan (%d tasks):\n", len(plan.Tasks))
+		for _, t := range plan.Tasks {
+			fmt.Printf("  %d. [P%d] %s\n", t.ID, t.Priority, t.Title)
+			dimColor.Printf("       %s\n", truncate(t.Description, 120))
+		}
+		fmt.Println()
+	} else {
+		if o.config.RetryFailed {
+			retried := 0
+			for _, t := range s.Plan.Tasks {
+				if t.Status == pm.TaskFailed {
+					t.Status = pm.TaskPending
+					retried++
+				}
+			}
+			if retried > 0 {
+				pmColor.Printf("Retrying %d failed task(s).\n\n", retried)
+				s.Save()
+			}
+		}
+		pmColor.Printf("Resuming plan: %s\n\n", s.Plan.Summary())
+	}
+
+	if o.config.PlanOnly {
+		s.Status = "paused"
+		s.Save()
+		return nil
+	}
+
+	consecutiveErrors := 0
+	maxConsecutiveErrors := o.config.MaxFailures
+	if maxConsecutiveErrors <= 0 {
+		maxConsecutiveErrors = 3
+	}
+
+	var mu sync.Mutex
+
+	for {
+		select {
+		case <-ctx.Done():
+			s.Status = "paused"
+			s.Save()
+			return ctx.Err()
+		default:
+		}
+
+		if o.config.StepsLimit > 0 && s.CurrentStep >= startStep+o.config.StepsLimit {
+			color.New(color.FgYellow).Printf("⏸ Reached --steps limit (%d). Run 'cloop run' to continue.\n", o.config.StepsLimit)
+			s.Status = "paused"
+			s.Save()
+			return nil
+		}
+
+		if s.Plan.IsComplete() {
+			successColor.Printf("🎉 All tasks complete! Goal achieved.\n")
+			successColor.Printf("   %s\n\n", s.Plan.Summary())
+			s.Status = "complete"
+			s.Save()
+			return nil
+		}
+
+		// Auto-skip permanently blocked tasks.
+		skipped := 0
+		for _, t := range s.Plan.Tasks {
+			if t.Status == pm.TaskPending && s.Plan.PermanentlyBlocked(t) {
+				failColor.Printf("⊘ Task %d skipped (blocked by failed dependency): %s\n", t.ID, t.Title)
+				t.Status = pm.TaskSkipped
+				skipped++
+			}
+		}
+		if skipped > 0 {
+			s.Save()
+			continue
+		}
+
+		ready := s.Plan.ReadyTasks()
+		if len(ready) == 0 {
+			break
+		}
+
+		// Mark all ready tasks as in-progress before starting goroutines.
+		now := time.Now()
+		for _, t := range ready {
+			t.Status = pm.TaskInProgress
+			t.StartedAt = &now
+		}
+		s.Save()
+
+		if len(ready) == 1 {
+			stepColor.Printf("━━━ Task %d/%d: %s ━━━\n", ready[0].ID, len(s.Plan.Tasks), ready[0].Title)
+		} else {
+			stepColor.Printf("━━━ Running %d tasks in parallel ━━━\n", len(ready))
+			for _, t := range ready {
+				dimColor.Printf("   • Task %d: %s\n", t.ID, t.Title)
+			}
+		}
+
+		// Launch goroutines for each ready task.
+		results := make([]taskResult, len(ready))
+		var wg sync.WaitGroup
+		for i, task := range ready {
+			wg.Add(1)
+			go func(idx int, t *pm.Task) {
+				defer wg.Done()
+				prompt := pm.ExecuteTaskPrompt(s.Goal, s.Instructions, s.Plan, t)
+				start := time.Now()
+				result, err := o.provider.Complete(ctx, prompt, provider.Options{
+					Model:     s.Model,
+					MaxTokens: o.config.MaxTokens,
+					Timeout:   o.config.StepTimeout,
+					WorkDir:   o.config.WorkDir,
+				})
+				dur := time.Since(start)
+				results[idx] = taskResult{task: t, result: result, err: err, duration: dur}
+			}(i, task)
+		}
+		wg.Wait()
+
+		// Process results sequentially for clean output.
+		for _, res := range results {
+			task := res.task
+			if res.err != nil {
+				failColor.Printf("✗ Provider error on task %d: %v\n", task.ID, res.err)
+				mu.Lock()
+				task.Status = pm.TaskFailed
+				consecutiveErrors++
+				s.Save()
+				tooManyErrors := consecutiveErrors >= maxConsecutiveErrors
+				mu.Unlock()
+				if tooManyErrors {
+					s.Status = "failed"
+					s.Save()
+					return fmt.Errorf("%d consecutive errors", consecutiveErrors)
+				}
+				continue
+			}
+
+			result := res.result
+			stepResult := state.StepResult{
+				Task:         fmt.Sprintf("Task %d: %s", task.ID, task.Title),
+				Output:       result.Output,
+				Duration:     res.duration.Round(time.Second).String(),
+				Time:         time.Now(),
+				InputTokens:  result.InputTokens,
+				OutputTokens: result.OutputTokens,
+			}
+
+			mu.Lock()
+			s.TotalInputTokens += result.InputTokens
+			s.TotalOutputTokens += result.OutputTokens
+			s.AddStep(stepResult)
+			mu.Unlock()
+
+			printOutput(result.Output, dimColor, o.config.Verbose)
+			dimColor.Printf("  [%s, provider: %s]\n\n", res.duration.Round(time.Second), result.Provider)
+
+			if o.config.TokenBudget > 0 && s.TotalInputTokens+s.TotalOutputTokens >= o.config.TokenBudget {
+				color.New(color.FgYellow).Printf("⏸ Token budget reached (%d tokens). Run 'cloop run' to continue.\n", o.config.TokenBudget)
+				task.Status = pm.TaskPending
+				s.Status = "paused"
+				s.Save()
+				return nil
+			}
+
+			signal := pm.CheckTaskSignal(result.Output)
+			completedAt := time.Now()
+			task.CompletedAt = &completedAt
+			task.Result = truncate(result.Output, 500)
+
+			mu.Lock()
+			switch signal {
+			case pm.TaskDone:
+				task.Status = pm.TaskDone
+				successColor.Printf("✓ Task %d complete: %s\n\n", task.ID, task.Title)
+				consecutiveErrors = 0
+			case pm.TaskSkipped:
+				task.Status = pm.TaskSkipped
+				dimColor.Printf("→ Task %d skipped: %s\n\n", task.ID, task.Title)
+				consecutiveErrors = 0
+			case pm.TaskFailed:
+				task.Status = pm.TaskFailed
+				failColor.Printf("✗ Task %d failed: %s\n\n", task.ID, task.Title)
+				consecutiveErrors++
+			default:
+				task.Status = pm.TaskDone
+				successColor.Printf("✓ Task %d complete (no explicit signal): %s\n\n", task.ID, task.Title)
+				consecutiveErrors = 0
+			}
+			tooManyErrors := consecutiveErrors >= maxConsecutiveErrors
+			s.Save()
+			mu.Unlock()
+
+			if tooManyErrors {
+				s.Status = "failed"
+				s.Save()
+				return fmt.Errorf("%d consecutive task failures", consecutiveErrors)
 			}
 		}
 	}

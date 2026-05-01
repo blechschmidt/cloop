@@ -37,6 +37,10 @@ var (
 	onComplete      string
 	tokenBudget     int
 	innovateMode    bool
+	parallelMode    bool
+	injectContext   bool
+	adaptiveReplan  bool
+	reviewMode      bool
 )
 
 var runCmd = &cobra.Command{
@@ -119,31 +123,35 @@ Press Ctrl+C to pause gracefully.`,
 			return fmt.Errorf("provider: %w", err)
 		}
 
-		// Merge PM mode: flag | plan-only | replan | persisted state
-		effectivePMMode := pmMode || planOnly || replan
+		// Merge PM mode: flag | plan-only | replan | parallel | persisted state
+		effectivePMMode := pmMode || planOnly || replan || parallelMode
 		if !effectivePMMode && projectState != nil && projectState.PMMode {
 			effectivePMMode = true
 		}
 
 		orchCfg := orchestrator.Config{
-			WorkDir:      workdir,
-			Model:        model,
-			MaxTokens:    runMaxTokens,
-			StepTimeout:  timeout,
-			Verbose:      verbose,
-			DryRun:       dryRun,
-			PMMode:       effectivePMMode,
-			PlanOnly:     planOnly,
-			RetryFailed:  retryFailed,
-			Replan:       replan,
-			MaxFailures:  maxFailures,
-			ContextSteps: contextSteps,
-			StepDelay:    delay,
-			StepsLimit:   runStepsLimit,
-			ProviderName: providerName,
-			ProviderCfg:  provCfg,
-			TokenBudget:  tokenBudget,
-			InnovateMode: innovateMode,
+			WorkDir:        workdir,
+			Model:          model,
+			MaxTokens:      runMaxTokens,
+			StepTimeout:    timeout,
+			Verbose:        verbose,
+			DryRun:         dryRun,
+			PMMode:         effectivePMMode,
+			PlanOnly:       planOnly,
+			RetryFailed:    retryFailed,
+			Replan:         replan,
+			MaxFailures:    maxFailures,
+			ContextSteps:   contextSteps,
+			StepDelay:      delay,
+			StepsLimit:     runStepsLimit,
+			ProviderName:   providerName,
+			ProviderCfg:    provCfg,
+			TokenBudget:    tokenBudget,
+			InnovateMode:   innovateMode,
+			Parallel:       parallelMode,
+			InjectContext:  injectContext,
+			AdaptiveReplan: adaptiveReplan,
+			ReviewMode:     reviewMode,
 		}
 
 		orc, err := orchestrator.New(orchCfg, prov)
@@ -267,5 +275,9 @@ func init() {
 	runCmd.Flags().StringVar(&onComplete, "on-complete", "", "Shell command to run when the goal is complete (e.g. 'notify-send done')")
 	runCmd.Flags().IntVar(&tokenBudget, "token-budget", 0, "Stop when cumulative tokens (in+out) reach this limit (0 = unlimited)")
 	runCmd.Flags().BoolVar(&innovateMode, "innovate", false, "Innovation mode: encourage creative, unconventional features in evolve iterations")
+	runCmd.Flags().BoolVar(&parallelMode, "parallel", false, "PM mode: run all dependency-ready tasks concurrently (implies --pm)")
+	runCmd.Flags().BoolVar(&injectContext, "inject-context", false, "PM mode: inject project context (git status, file tree) into task prompts")
+	runCmd.Flags().BoolVar(&adaptiveReplan, "adaptive-replan", false, "PM mode: re-plan remaining tasks with AI after a failure")
+	runCmd.Flags().BoolVar(&reviewMode, "review", false, "PM mode: pause before each task for human approval (y/n/skip/quit)")
 	rootCmd.AddCommand(runCmd)
 }

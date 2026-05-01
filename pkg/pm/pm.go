@@ -81,6 +81,18 @@ func (p *Plan) NextTask() *Task {
 	return best
 }
 
+// ReadyTasks returns all pending tasks whose dependencies are satisfied.
+// In parallel mode, all of these can be run concurrently.
+func (p *Plan) ReadyTasks() []*Task {
+	var ready []*Task
+	for _, t := range p.Tasks {
+		if t.Status == TaskPending && p.DepsReady(t) {
+			ready = append(ready, t)
+		}
+	}
+	return ready
+}
+
 // IsComplete returns true if all tasks are done or skipped, or if remaining
 // pending tasks are permanently blocked (all their deps include a failed task).
 func (p *Plan) IsComplete() bool {
@@ -146,7 +158,8 @@ func DecomposePrompt(goal, instructions string) string {
 }
 
 // ExecuteTaskPrompt builds the prompt for executing a specific task.
-func ExecuteTaskPrompt(goal, instructions string, plan *Plan, task *Task) string {
+// Pass a non-nil ProjectContext to include project state (git, file tree) in the prompt.
+func ExecuteTaskPrompt(goal, instructions string, plan *Plan, task *Task, ctx ...*ProjectContext) string {
 	var b strings.Builder
 	b.WriteString("You are an AI agent executing a task as part of a larger project goal.\n")
 	b.WriteString("You have full file system access and can run commands.\n\n")
@@ -213,6 +226,13 @@ func ExecuteTaskPrompt(goal, instructions string, plan *Plan, task *Task) string
 			b.WriteString(fmt.Sprintf("- [ ] Task %d: %s\n", t.ID, t.Title))
 		}
 		b.WriteString("\n")
+	}
+
+	// Inject project context if provided
+	if len(ctx) > 0 && ctx[0] != nil {
+		if formatted := ctx[0].Format(); formatted != "" {
+			b.WriteString(formatted)
+		}
 	}
 
 	b.WriteString("## INSTRUCTIONS\n")
@@ -293,6 +313,114 @@ func CheckTaskSignal(output string) TaskStatus {
 		}
 	}
 	return TaskInProgress
+}
+
+// AdaptiveReplanPrompt builds a prompt to re-plan remaining tasks after failures.
+func AdaptiveReplanPrompt(goal, instructions string, plan *Plan, failedTask *Task, failureReason string) string {
+	var b strings.Builder
+	b.WriteString("You are an AI product manager performing adaptive replanning.\n")
+	b.WriteString("A task has failed and you need to re-think the remaining work.\n\n")
+	b.WriteString(fmt.Sprintf("## PROJECT GOAL\n%s\n\n", goal))
+	if instructions != "" {
+		b.WriteString(fmt.Sprintf("## CONSTRAINTS\n%s\n\n", instructions))
+	}
+
+	// Report completed tasks
+	done := []*Task{}
+	for _, t := range plan.Tasks {
+		if t.Status == TaskDone || t.Status == TaskSkipped {
+			done = append(done, t)
+		}
+	}
+	if len(done) > 0 {
+		b.WriteString("## COMPLETED TASKS\n")
+		for _, t := range done {
+			b.WriteString(fmt.Sprintf("- [x] Task %d: %s\n", t.ID, t.Title))
+		}
+		b.WriteString("\n")
+	}
+
+	b.WriteString("## FAILED TASK\n")
+	b.WriteString(fmt.Sprintf("Task %d: %s\n", failedTask.ID, failedTask.Title))
+	if failedTask.Description != "" {
+		b.WriteString(fmt.Sprintf("Description: %s\n", failedTask.Description))
+	}
+	if failureReason != "" {
+		b.WriteString(fmt.Sprintf("Failure context: %s\n", failureReason))
+	}
+	b.WriteString("\n")
+
+	// Report remaining pending tasks
+	pending := []*Task{}
+	for _, t := range plan.Tasks {
+		if t.Status == TaskPending {
+			pending = append(pending, t)
+		}
+	}
+	if len(pending) > 0 {
+		b.WriteString("## REMAINING PENDING TASKS (before replanning)\n")
+		for _, t := range pending {
+			b.WriteString(fmt.Sprintf("- [ ] Task %d [P%d]: %s\n", t.ID, t.Priority, t.Title))
+			if t.Description != "" {
+				b.WriteString(fmt.Sprintf("  %s\n", t.Description))
+			}
+		}
+		b.WriteString("\n")
+	}
+
+	// Find highest existing ID
+	maxID := 0
+	for _, t := range plan.Tasks {
+		if t.ID > maxID {
+			maxID = t.ID
+		}
+	}
+
+	b.WriteString("## INSTRUCTIONS\n")
+	b.WriteString("Given the failure above, produce a revised plan for the REMAINING work only.\n")
+	b.WriteString("- You may modify, merge, split, or reorder tasks to work around the failure\n")
+	b.WriteString("- Do not re-include already completed tasks\n")
+	b.WriteString("- Assign new sequential IDs starting from " + fmt.Sprintf("%d", maxID+1) + "\n")
+	b.WriteString("- Use depends_on to express prerequisites\n\n")
+	b.WriteString("Output ONLY valid JSON (no explanation, no markdown):\n")
+	b.WriteString(`{"tasks":[{"id":` + fmt.Sprintf("%d", maxID+1) + `,"title":"...","description":"...","priority":1,"depends_on":[]}]}`)
+	b.WriteString("\n\nIf no replanning is needed (all remaining work is blocked or complete), output: {\"tasks\":[]}")
+	return b.String()
+}
+
+// AdaptiveReplan calls the provider to re-plan remaining tasks after a failure.
+// It returns a new set of tasks to append/replace the pending tasks in the plan.
+func AdaptiveReplan(ctx context.Context, p provider.Provider, goal, instructions, model string, timeout time.Duration, plan *Plan, failedTask *Task, failureReason string) ([]*Task, error) {
+	prompt := AdaptiveReplanPrompt(goal, instructions, plan, failedTask, failureReason)
+	result, err := p.Complete(ctx, prompt, provider.Options{
+		Model:   model,
+		Timeout: timeout,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("adaptive replan: %w", err)
+	}
+
+	// Find the highest existing ID to validate new task IDs
+	maxID := 0
+	for _, t := range plan.Tasks {
+		if t.ID > maxID {
+			maxID = t.ID
+		}
+	}
+
+	newPlan, err := ParseTaskPlan(goal, result.Output)
+	if err != nil {
+		return nil, fmt.Errorf("parse replan: %w", err)
+	}
+
+	// Re-assign IDs to avoid collisions (ensure they start after maxID)
+	for i, t := range newPlan.Tasks {
+		if t.ID <= maxID {
+			t.ID = maxID + i + 1
+		}
+	}
+
+	return newPlan.Tasks, nil
 }
 
 // Decompose calls the provider to decompose a goal into a task plan.
