@@ -14,6 +14,7 @@ import (
 var (
 	logStep  int
 	logLines int
+	logLast  int
 	logJSON  bool
 )
 
@@ -50,6 +51,8 @@ var logCmd = &cobra.Command{
 			if !found {
 				return fmt.Errorf("step %d not found (total steps: %d)", logStep, len(s.Steps))
 			}
+		} else if logLast > 0 && len(steps) > logLast {
+			steps = steps[len(steps)-logLast:]
 		}
 
 		if logJSON {
@@ -97,6 +100,7 @@ var logCmd = &cobra.Command{
 func init() {
 	logCmd.Flags().IntVar(&logStep, "step", 0, "Show specific step (1-indexed)")
 	logCmd.Flags().IntVar(&logLines, "lines", 50, "Max output lines per step (0=all)")
+	logCmd.Flags().IntVar(&logLast, "last", 0, "Show only the last N steps (0=all)")
 	logCmd.Flags().BoolVar(&logJSON, "json", false, "Output steps as JSON array")
 	rootCmd.AddCommand(logCmd)
 }
