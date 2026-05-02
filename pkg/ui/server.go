@@ -722,6 +722,7 @@ func (s *Server) handleGetTasks(w http.ResponseWriter, r *http.Request) {
 		out = append(out, t)
 	}
 
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	jsonOK(w, map[string]interface{}{"tasks": out, "total": len(ps.Plan.Tasks)})
 }
 
@@ -1190,7 +1191,7 @@ func (s *Server) handleTaskAdd(w http.ResponseWriter, r *http.Request) {
 	}
 	ps.Plan.Tasks = append(ps.Plan.Tasks, task)
 
-	if err := ps.Save(); err != nil {
+	if err := ps.SaveDirect(); err != nil {
 		jsonErr(w, "save failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -1257,7 +1258,7 @@ func (s *Server) handleTaskStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	task.Status = newStatus
-	if err := ps.Save(); err != nil {
+	if err := ps.SaveDirect(); err != nil {
 		jsonErr(w, "save failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -1324,7 +1325,7 @@ func (s *Server) handleTaskMove(w http.ResponseWriter, r *http.Request) {
 	}
 	sorted[idx].Priority, other.Priority = other.Priority, sorted[idx].Priority
 
-	if err := ps.Save(); err != nil {
+	if err := ps.SaveDirect(); err != nil {
 		jsonErr(w, "save failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -1383,7 +1384,7 @@ func (s *Server) handleTaskEdit(w http.ResponseWriter, r *http.Request) {
 		task.DependsOn = *req.DependsOn
 	}
 
-	if err := ps.Save(); err != nil {
+	if err := ps.SaveDirect(); err != nil {
 		jsonErr(w, "save failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -1426,7 +1427,7 @@ func (s *Server) handleTaskRemove(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ps.Plan.Tasks = append(ps.Plan.Tasks[:idx], ps.Plan.Tasks[idx+1:]...)
-	if err := ps.Save(); err != nil {
+	if err := ps.SaveDirect(); err != nil {
 		jsonErr(w, "save failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -1506,7 +1507,7 @@ func (s *Server) handlePutTask(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if err := ps.Save(); err != nil {
+	if err := ps.SaveDirect(); err != nil {
 		jsonErr(w, "save failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -1580,7 +1581,7 @@ func (s *Server) handleDeleteTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ps.Plan.Tasks = append(ps.Plan.Tasks[:idx], ps.Plan.Tasks[idx+1:]...)
-	if err := ps.Save(); err != nil {
+	if err := ps.SaveDirect(); err != nil {
 		jsonErr(w, "save failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -1682,7 +1683,7 @@ func (s *Server) handleTaskBlocker(w http.ResponseWriter, r *http.Request) {
 		annotation := "[ai-blocker] Recommendation: " + strings.ToUpper(report.Recommendation) +
 			". Root cause: " + report.RootCause
 		pm.AddAnnotation(task, "ai-blocker", annotation)
-		if saveErr := ps.Save(); saveErr != nil {
+		if saveErr := ps.SaveDirect(); saveErr != nil {
 			jsonErr(w, "save failed: "+saveErr.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -1728,7 +1729,7 @@ func (s *Server) handleReorderTasks(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if err := ps.Save(); err != nil {
+	if err := ps.SaveDirect(); err != nil {
 		jsonErr(w, "save failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -1868,7 +1869,7 @@ func (s *Server) handleInit(w http.ResponseWriter, r *http.Request) {
 	if req.PMMode {
 		ps.PMMode = true
 	}
-	if err := ps.Save(); err != nil {
+	if err := ps.SaveDirect(); err != nil {
 		jsonErr(w, "save failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -4669,7 +4670,7 @@ const dashboardHTML = `<!DOCTYPE html>
 
         <!-- Stats -->
         <div class="section">
-          <div class="section-title">Overview</div>
+          <div class="section-title" id="overviewSectionTitle">Overview</div>
           <div class="stats-grid">
             <div class="stat-card">
               <div class="stat-label">Steps</div>
@@ -5573,8 +5574,8 @@ window.switchTab = function(name) {
   const projectScopedTabs = ['overview','tasks','kanban','timeline','kb','deps','risk-matrix','analytics','chat','assistant','suggest'];
   if (isMultiProject && selectedProjectIdx === null && name === 'overview') {
     // No project selected: show the all-projects summary panel.
-    renderMultiProjectOverview();
-    if (!window._lastProjectsData) loadProjects();
+    // Always reload so the cards reflect the latest project statuses.
+    loadProjects();
   } else if (isMultiProject && selectedProjectIdx !== null && projectScopedTabs.includes(name)) {
     api(pUrl('/api/state')).then(s => render(s)).catch(() => {
       if (name === 'tasks'  && appState) renderTasks(appState);
@@ -5763,6 +5764,12 @@ function render(s) {
   const goalEl = document.getElementById('goalText');
   goalEl.textContent = s.goal;
   goalEl.classList.toggle('empty', !s.goal);
+
+  // Update the "Overview" section title to show the selected project name in multi-project mode.
+  const overviewTitle = document.getElementById('overviewSectionTitle');
+  if (overviewTitle) {
+    overviewTitle.textContent = (isMultiProject && selectedProjectName) ? 'Overview — ' + selectedProjectName : 'Overview';
+  }
 
   // Status badge
   document.getElementById('statusBadge').innerHTML = statusBadge(s.status);
@@ -6489,6 +6496,10 @@ function handleRealtimeMsg(type, data) {
         if (isMultiProject && selectedProjectIdx !== null) {
           api(pUrl('/api/state')).then(s => render(s)).catch(() => {});
         }
+        // Refresh the overview cards if on the overview tab with no project selected.
+        if (isMultiProject && selectedProjectIdx === null && activeTab === 'overview') {
+          renderMultiProjectOverview();
+        }
       } catch(_) {}
       break;
     case 'presence':
@@ -6652,6 +6663,10 @@ function loadProjects() {
     isMultiProject = d.multi_project === true || projects.length > 1;
     renderProjects(projects, d.stats || {});
     updateProjectSelector();
+    // Refresh the overview cards if we're on the overview tab with no project selected.
+    if (isMultiProject && selectedProjectIdx === null && activeTab === 'overview') {
+      renderMultiProjectOverview();
+    }
   }).catch(() => {});
 }
 

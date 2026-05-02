@@ -191,7 +191,11 @@ func LoadFromDir(dir string) (*ProjectState, error) {
 	return s, nil
 }
 
-// Save writes the project state to the SQLite store.
+// Save writes the project state to the SQLite store, first merging any tasks
+// that were added externally while this state object was in memory. This is the
+// standard save path used by the orchestrator.
+// UI handlers that intentionally mutate (add/edit/delete) tasks should use
+// SaveDirect to avoid the merge re-adding deleted tasks.
 func (s *ProjectState) Save() error {
 	s.UpdatedAt = time.Now()
 
@@ -215,6 +219,34 @@ func (s *ProjectState) Save() error {
 	}
 
 	// Append a plan history snapshot whenever the plan changes.
+	if s.PMMode && s.Plan != nil {
+		_ = pm.SaveSnapshot(s.WorkDir, s.Plan)
+	}
+	return nil
+}
+
+// SaveDirect writes the project state to the SQLite store WITHOUT merging
+// externally-added tasks. Use this for intentional UI mutations (add, edit,
+// delete tasks) where the caller has already loaded the latest state and
+// does not want deleted tasks re-added from disk.
+func (s *ProjectState) SaveDirect() error {
+	s.UpdatedAt = time.Now()
+
+	dbPath := effectiveDBPath(s.WorkDir)
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
+		return err
+	}
+
+	db, err := statedb.Open(dbPath)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	if err := db.SaveState(toRaw(s)); err != nil {
+		return err
+	}
+
 	if s.PMMode && s.Plan != nil {
 		_ = pm.SaveSnapshot(s.WorkDir, s.Plan)
 	}
