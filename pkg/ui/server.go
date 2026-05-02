@@ -234,6 +234,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/task/remove", s.handleTaskRemove)
 
 	// RESTful task endpoints (Go 1.22+ method+path routing)
+	mux.HandleFunc("GET /api/tasks", s.handleGetTasks)
 	mux.HandleFunc("POST /api/tasks", s.handlePostTasks)
 	mux.HandleFunc("POST /api/tasks/reorder", s.handleReorderTasks)
 	mux.HandleFunc("PUT /api/tasks/{id}", s.handlePutTask)
@@ -524,6 +525,82 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonOK(w, ps)
+}
+
+// handleGetTasks returns tasks filtered by query params: q, status (csv), tags (csv), assignee, priority (1-4).
+// GET /api/tasks?q=text&status=pending,in_progress&tags=backend&assignee=alice&priority=1
+func (s *Server) handleGetTasks(w http.ResponseWriter, r *http.Request) {
+	ps, err := state.Load(s.resolveWorkDir(r))
+	if err != nil || ps.Plan == nil {
+		jsonOK(w, map[string]interface{}{"tasks": []*pm.Task{}, "total": 0})
+		return
+	}
+
+	q := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
+	statusCSV := r.URL.Query().Get("status")
+	tagsCSV := r.URL.Query().Get("tags")
+	assignee := r.URL.Query().Get("assignee")
+	priorityStr := r.URL.Query().Get("priority")
+
+	statusSet := map[string]bool{}
+	if statusCSV != "" {
+		for _, sv := range strings.Split(statusCSV, ",") {
+			if sv = strings.TrimSpace(sv); sv != "" {
+				statusSet[sv] = true
+			}
+		}
+	}
+	tagSet := map[string]bool{}
+	if tagsCSV != "" {
+		for _, tv := range strings.Split(tagsCSV, ",") {
+			if tv = strings.TrimSpace(tv); tv != "" {
+				tagSet[tv] = true
+			}
+		}
+	}
+	var priority int
+	if priorityStr != "" {
+		priority, _ = strconv.Atoi(priorityStr)
+	}
+
+	out := make([]*pm.Task, 0, len(ps.Plan.Tasks))
+	for _, t := range ps.Plan.Tasks {
+		if q != "" {
+			if !strings.Contains(strings.ToLower(t.Title), q) && !strings.Contains(strings.ToLower(t.Description), q) {
+				continue
+			}
+		}
+		if len(statusSet) > 0 {
+			st := string(t.Status)
+			if st == "" {
+				st = "pending"
+			}
+			if !statusSet[st] {
+				continue
+			}
+		}
+		if len(tagSet) > 0 {
+			found := false
+			for _, tag := range t.Tags {
+				if tagSet[tag] {
+					found = true
+					break
+				}
+			}
+			if !found {
+				continue
+			}
+		}
+		if assignee != "" && t.Assignee != assignee {
+			continue
+		}
+		if priority > 0 && t.Priority != priority {
+			continue
+		}
+		out = append(out, t)
+	}
+
+	jsonOK(w, map[string]interface{}{"tasks": out, "total": len(ps.Plan.Tasks)})
 }
 
 // handleEvents is an SSE endpoint that streams state updates to the browser.
@@ -2496,6 +2573,97 @@ const dashboardHTML = `<!DOCTYPE html>
   .spacer { flex: 1; min-width: 8px; }
   .updated-at { font-size: 11px; color: var(--muted); white-space: nowrap; }
 
+  /* ── Unified filter bar ────────────────────────────────────────────────────── */
+  .filter-bar {
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    padding: 6px 24px;
+    position: sticky;
+    top: 52px;
+    z-index: 19;
+  }
+  .filter-bar-inner {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .filter-search-input {
+    flex: 1 1 180px;
+    min-width: 120px;
+    max-width: 260px;
+    padding: 4px 8px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--bg);
+    color: var(--fg);
+    font-size: 12px;
+  }
+  .filter-search-input:focus { outline: 2px solid var(--accent); border-color: transparent; }
+  .filter-group { display: flex; align-items: center; gap: 5px; flex-shrink: 0; }
+  .filter-label { font-size: 11px; color: var(--muted); white-space: nowrap; }
+  .filter-check { display: flex; align-items: center; gap: 3px; font-size: 11px; cursor: pointer; user-select: none; white-space: nowrap; }
+  .filter-check input[type=checkbox] { cursor: pointer; accent-color: var(--accent); }
+  .filter-select {
+    padding: 3px 6px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--bg);
+    color: var(--fg);
+    font-size: 11px;
+    cursor: pointer;
+    max-width: 130px;
+  }
+  .filter-select:focus { outline: 2px solid var(--accent); }
+  .filter-tags-wrap { position: relative; }
+  .filter-tag-toggle {
+    padding: 3px 8px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--bg);
+    color: var(--fg);
+    font-size: 11px;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .filter-tag-toggle:hover, .filter-tag-toggle.active { border-color: var(--accent); color: var(--accent); }
+  .filter-tags-panel {
+    display: none;
+    position: absolute;
+    top: calc(100% + 4px);
+    left: 0;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: 0 4px 16px rgba(0,0,0,.35);
+    padding: 6px;
+    z-index: 40;
+    min-width: 140px;
+    max-height: 200px;
+    overflow-y: auto;
+  }
+  .filter-tags-panel.open { display: block; }
+  .filter-tag-item {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    padding: 3px 4px;
+    font-size: 11px;
+    cursor: pointer;
+    white-space: nowrap;
+    border-radius: 3px;
+  }
+  .filter-tag-item:hover { background: var(--hover-bg); }
+  .filter-tag-item input[type=checkbox] { cursor: pointer; accent-color: var(--accent); }
+  .filter-clear-btn { padding: 3px 9px; font-size: 11px; flex-shrink: 0; }
+  .filter-badge { font-size: 11px; color: var(--accent); white-space: nowrap; font-weight: 600; margin-left: auto; }
+  @media(max-width:767px) {
+    .filter-bar { top: 0; padding: 6px 12px; }
+    .filter-bar-inner { gap: 6px; }
+    .filter-search-input { max-width: 100%; }
+    .filter-status-group { display: none; }
+  }
+
   /* ── Tabs ── */
   .tab-nav { display: flex; gap: 2px; }
   .tab-btn {
@@ -3662,6 +3830,47 @@ const dashboardHTML = `<!DOCTYPE html>
     <div class="updated-at" id="updatedAt"></div>
   </header>
 
+  <!-- ── Unified search / filter bar ── -->
+  <div id="filterBar" class="filter-bar" style="display:none" role="search" aria-label="Filter tasks">
+    <div class="filter-bar-inner">
+      <input type="search" id="filterQ" class="filter-search-input" placeholder="&#x1F50D;&#xFE0E; Search title &amp; description…" aria-label="Search tasks" oninput="onFilterChange()">
+      <div class="filter-group filter-status-group">
+        <span class="filter-label">Status:</span>
+        <label class="filter-check"><input type="checkbox" class="filter-status-cb" value="pending" onchange="onFilterChange()"> Pending</label>
+        <label class="filter-check"><input type="checkbox" class="filter-status-cb" value="in_progress" onchange="onFilterChange()"> In Progress</label>
+        <label class="filter-check"><input type="checkbox" class="filter-status-cb" value="done" onchange="onFilterChange()"> Done</label>
+        <label class="filter-check"><input type="checkbox" class="filter-status-cb" value="failed" onchange="onFilterChange()"> Failed</label>
+      </div>
+      <div class="filter-group">
+        <span class="filter-label">Priority:</span>
+        <select id="filterPriority" class="filter-select" aria-label="Filter by priority" onchange="onFilterChange()">
+          <option value="">Any</option>
+          <option value="1">P1 Critical</option>
+          <option value="2">P2 High</option>
+          <option value="3">P3 Medium</option>
+          <option value="4">P4 Low</option>
+        </select>
+      </div>
+      <div class="filter-group">
+        <span class="filter-label">Assignee:</span>
+        <select id="filterAssignee" class="filter-select" aria-label="Filter by assignee" onchange="onFilterChange()">
+          <option value="">Any</option>
+        </select>
+      </div>
+      <div class="filter-group">
+        <span class="filter-label">Tags:</span>
+        <div class="filter-tags-wrap" id="filterTagsWrap">
+          <button type="button" class="filter-tag-toggle" id="filterTagToggle" onclick="toggleTagDropdown(event)" aria-haspopup="listbox" aria-expanded="false">
+            Tags <span id="filterTagCount"></span>&#9662;
+          </button>
+          <div class="filter-tags-panel" id="filterTagsPanel" role="listbox" aria-label="Tag filter"></div>
+        </div>
+      </div>
+      <button class="btn filter-clear-btn" id="filterClearBtn" onclick="clearFilters()" style="display:none" title="Clear all filters">Clear filters</button>
+      <span class="filter-badge" id="filterBadge" aria-live="polite"></span>
+    </div>
+  </div>
+
   <!-- ── Mobile navigation overlay ── -->
   <div class="mobile-nav-overlay" id="mobileNavOverlay" onclick="if(event.target===this)closeMobileNav()" aria-hidden="true">
     <nav class="mobile-nav-panel" role="navigation" aria-label="Main navigation">
@@ -4428,6 +4637,17 @@ let activeTab = 'overview';
 let showCompletedTasks    = false;
 let showCompletedProjects = false;
 
+// ── Filter bar state ─────────────────────────────────────────────────────────
+let filterState = { q: '', status: [], tags: [], assignee: '', priority: '' };
+const FILTER_TABS = new Set(['tasks','kanban','timeline','deps']);
+
+(function _loadFilterState() {
+  try {
+    const saved = localStorage.getItem('cloop_filter_state');
+    if (saved) filterState = Object.assign({ q:'', status:[], tags:[], assignee:'', priority:'' }, JSON.parse(saved));
+  } catch(e) {}
+})();
+
 // ── Multi-project mode ───────────────────────────────────────────────────────
 let isMultiProject      = false;  // true when multiple projects are registered
 let selectedProjectIdx  = null;   // null = no project selected (Projects landing page)
@@ -4499,6 +4719,9 @@ window.switchTab = function(name) {
   if (panel) panel.classList.add('active');
   if (btn)   btn.classList.add('active');
   if (mBtn)  mBtn.classList.add('active');
+
+  // Show/hide unified filter bar.
+  _syncFilterBarVisibility(name);
 
   // Close mobile nav when a tab is selected.
   closeMobileNav();
@@ -4773,6 +4996,14 @@ function render(s) {
     }).join('');
   }
 
+  // Rebuild filter dropdowns from current task list.
+  if (s.plan && s.plan.tasks) {
+    rebuildTagOptions(s.plan.tasks);
+    rebuildAssigneeOptions(s.plan.tasks);
+    _restoreFilterInputs();
+    _updateFilterClearBtn();
+  }
+
   // Tasks tab
   if (activeTab === 'tasks')  renderTasks(s);
   // Kanban tab
@@ -4789,6 +5020,156 @@ function render(s) {
 
 window.toggleStep = function(el) { el.classList.toggle('expanded'); };
 
+// ── Filter bar ───────────────────────────────────────────────────────────────
+
+function _saveFilterState() {
+  try { localStorage.setItem('cloop_filter_state', JSON.stringify(filterState)); } catch(e) {}
+}
+
+// Returns whether any filter is active.
+function _filterActive() {
+  return !!(filterState.q || filterState.status.length || filterState.tags.length || filterState.assignee || filterState.priority);
+}
+
+// Apply filterState to a task array; returns a new filtered array.
+function applyFilters(tasks) {
+  if (!tasks) return [];
+  let result = tasks;
+  const q = filterState.q ? filterState.q.toLowerCase() : '';
+  if (q) result = result.filter(t => (t.title||'').toLowerCase().includes(q) || (t.description||'').toLowerCase().includes(q));
+  if (filterState.status && filterState.status.length) {
+    const ss = new Set(filterState.status);
+    result = result.filter(t => ss.has(t.status || 'pending'));
+  }
+  if (filterState.tags && filterState.tags.length) {
+    const ts = new Set(filterState.tags);
+    result = result.filter(t => (t.tags||[]).some(tg => ts.has(tg)));
+  }
+  if (filterState.assignee) result = result.filter(t => (t.assignee||'') === filterState.assignee);
+  if (filterState.priority) result = result.filter(t => String(t.priority) === filterState.priority);
+  return result;
+}
+
+// Update the "N of M tasks" badge.
+function updateFilterBadge(visible, total) {
+  const badge = document.getElementById('filterBadge');
+  if (!badge) return;
+  badge.textContent = _filterActive() ? visible + ' of ' + total + ' tasks' : '';
+}
+
+// Sync all filter DOM inputs to the current filterState (called on page load).
+function _restoreFilterInputs() {
+  const qEl = document.getElementById('filterQ');
+  if (qEl) qEl.value = filterState.q || '';
+  document.querySelectorAll('.filter-status-cb').forEach(cb => {
+    cb.checked = (filterState.status||[]).includes(cb.value);
+  });
+  const prEl = document.getElementById('filterPriority');
+  if (prEl) prEl.value = filterState.priority || '';
+  const asEl = document.getElementById('filterAssignee');
+  if (asEl) asEl.value = filterState.assignee || '';
+  // Tags are rebuilt dynamically via rebuildTagOptions().
+}
+
+// Rebuild tag checkboxes from current task list.
+function rebuildTagOptions(tasks) {
+  const panel = document.getElementById('filterTagsPanel');
+  if (!panel) return;
+  const tagSet = new Set();
+  (tasks||[]).forEach(t => (t.tags||[]).forEach(tg => tagSet.add(tg)));
+  const tags = [...tagSet].sort();
+  if (!tags.length) {
+    panel.innerHTML = '<span style="color:var(--muted);padding:4px 8px;display:block;font-size:11px">No tags</span>';
+    return;
+  }
+  panel.innerHTML = tags.map(tag =>
+    '<label class="filter-tag-item"><input type="checkbox" class="filter-tag-cb" value="'+esc(tag)+'" onchange="onFilterChange()"'+
+    ((filterState.tags||[]).includes(tag) ? ' checked' : '')+'> '+esc(tag)+'</label>'
+  ).join('');
+}
+
+// Rebuild assignee dropdown from current task list.
+function rebuildAssigneeOptions(tasks) {
+  const sel = document.getElementById('filterAssignee');
+  if (!sel) return;
+  const people = [...new Set((tasks||[]).map(t => t.assignee||'').filter(Boolean))].sort();
+  const cur = filterState.assignee || '';
+  sel.innerHTML = '<option value="">Any</option>' +
+    people.map(a => '<option value="'+esc(a)+'"'+(a===cur?' selected':'')+'>'+esc(a)+'</option>').join('');
+}
+
+window.onFilterChange = function() {
+  const qEl = document.getElementById('filterQ');
+  filterState.q = qEl ? qEl.value : '';
+  filterState.status = Array.from(document.querySelectorAll('.filter-status-cb:checked')).map(cb => cb.value);
+  filterState.tags   = Array.from(document.querySelectorAll('.filter-tag-cb:checked')).map(cb => cb.value);
+  const asEl = document.getElementById('filterAssignee');
+  filterState.assignee = asEl ? asEl.value : '';
+  const prEl = document.getElementById('filterPriority');
+  filterState.priority = prEl ? prEl.value : '';
+  _saveFilterState();
+  _updateFilterClearBtn();
+  const tagCnt = document.getElementById('filterTagCount');
+  if (tagCnt) tagCnt.textContent = filterState.tags.length ? '('+filterState.tags.length+') ' : '';
+  // Re-render active panel.
+  if (appState) {
+    if (activeTab === 'tasks')    renderTasks(appState);
+    if (activeTab === 'kanban')   renderKanban(appState);
+    if (activeTab === 'deps' && _depsData)   renderDepsGraph(_depsData);
+  }
+  if (activeTab === 'timeline') loadTimeline();
+};
+
+window.clearFilters = function() {
+  filterState = { q: '', status: [], tags: [], assignee: '', priority: '' };
+  _saveFilterState();
+  _restoreFilterInputs();
+  document.querySelectorAll('.filter-tag-cb').forEach(cb => { cb.checked = false; });
+  _updateFilterClearBtn();
+  const tagCnt = document.getElementById('filterTagCount');
+  if (tagCnt) tagCnt.textContent = '';
+  if (appState) {
+    if (activeTab === 'tasks')    renderTasks(appState);
+    if (activeTab === 'kanban')   renderKanban(appState);
+    if (activeTab === 'deps' && _depsData)   renderDepsGraph(_depsData);
+  }
+  if (activeTab === 'timeline') loadTimeline();
+};
+
+function _updateFilterClearBtn() {
+  const btn = document.getElementById('filterClearBtn');
+  if (btn) btn.style.display = _filterActive() ? '' : 'none';
+}
+
+window.toggleTagDropdown = function(e) {
+  if (e) e.stopPropagation();
+  const panel = document.getElementById('filterTagsPanel');
+  const btn   = document.getElementById('filterTagToggle');
+  if (!panel) return;
+  const open = panel.classList.toggle('open');
+  if (btn) {
+    btn.classList.toggle('active', open);
+    btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+  }
+};
+
+// Close tag dropdown when clicking outside.
+document.addEventListener('click', function(e) {
+  const wrap = document.getElementById('filterTagsWrap');
+  if (wrap && !wrap.contains(e.target)) {
+    const panel = document.getElementById('filterTagsPanel');
+    const btn   = document.getElementById('filterTagToggle');
+    if (panel) panel.classList.remove('open');
+    if (btn) { btn.classList.remove('active'); btn.setAttribute('aria-expanded','false'); }
+  }
+});
+
+// Show or hide the filter bar based on the active tab.
+function _syncFilterBarVisibility(tabName) {
+  const bar = document.getElementById('filterBar');
+  if (bar) bar.style.display = FILTER_TABS.has(tabName) ? '' : 'none';
+}
+
 // ── Render tasks tab ─────────────────────────────────────────────────────────
 
 window.toggleCompletedTasks = function() {
@@ -4803,6 +5184,7 @@ function renderTasks(s) {
   const badge     = document.getElementById('taskCountBadge');
   if (!s || !s.plan || !s.plan.tasks || !s.plan.tasks.length) {
     badge.textContent = '';
+    updateFilterBadge(0, 0);
     container.innerHTML = '<div class="empty-state"><h3>No tasks yet</h3><p>Add a task above, or run <code>cloop run --pm</code> to generate a task plan.</p></div>';
     return;
   }
@@ -4810,12 +5192,23 @@ function renderTasks(s) {
   const sorted = [...byPriority.filter(t=>t.pinned), ...byPriority.filter(t=>!t.pinned)];
   const done    = sorted.filter(t => t.status==='done').length;
   const hidden  = ['done', 'skipped', 'failed', 'timed_out'];
-  const visible = showCompletedTasks ? sorted : sorted.filter(t => !hidden.includes(t.status || 'pending'));
+
+  // Apply search/filter bar. When status filters are active they override the showCompleted toggle.
+  let visible = applyFilters(sorted);
+  if (!filterState.status.length) {
+    visible = showCompletedTasks ? visible : visible.filter(t => !hidden.includes(t.status || 'pending'));
+  }
+
   const hiddenCount = sorted.length - visible.length;
-  badge.textContent = '(' + done + '/' + sorted.length + ' done' + (hiddenCount > 0 && !showCompletedTasks ? ', ' + hiddenCount + ' hidden' : '') + ')';
+  badge.textContent = '(' + done + '/' + sorted.length + ' done' +
+    (hiddenCount > 0 && !showCompletedTasks && !filterState.status.length ? ', ' + hiddenCount + ' hidden' : '') + ')';
+  updateFilterBadge(visible.length, sorted.length);
 
   if (!visible.length) {
-    container.innerHTML = '<div class="empty-state"><h3>All tasks completed</h3><p>Click <strong>Show completed</strong> to view all tasks.</p></div>';
+    const msg = _filterActive()
+      ? '<div class="empty-state"><h3>No matching tasks</h3><p>Try adjusting your search or filters.</p></div>'
+      : '<div class="empty-state"><h3>All tasks completed</h3><p>Click <strong>Show completed</strong> to view all tasks.</p></div>';
+    container.innerHTML = msg;
     return;
   }
 
@@ -4952,12 +5345,17 @@ function renderKanban(s) {
       if (body) body.innerHTML = '<div style="font-size:11px;color:var(--muted);padding:8px 0;text-align:center">No tasks</div>';
       if (cnt)  cnt.textContent = '0';
     });
+    updateFilterBadge(0, 0);
     return;
   }
 
+  // Apply filter bar before grouping into columns.
+  const filteredTasks = applyFilters(s.plan.tasks);
+  updateFilterBadge(filteredTasks.length, s.plan.tasks.length);
+
   // Group tasks by column
   const groups = { pending:[], in_progress:[], done:[], failed:[] };
-  for (const t of s.plan.tasks) {
+  for (const t of filteredTasks) {
     const col = kbColFor(t.status);
     groups[col].push(t);
   }
@@ -5616,8 +6014,16 @@ function renderDepsGraph(data) {
   const container = document.getElementById('depsContainer');
   const svg = document.getElementById('depsSvg');
 
-  // Filter: by default hide done/skipped tasks if not showAll
-  const visNodes = showAll ? nodes : nodes.filter(n => n.status !== 'done' && n.status !== 'skipped');
+  // Filter: when filter bar is active, use applyFilters; otherwise use showAll toggle.
+  let visNodes;
+  if (_filterActive() && appState && appState.plan && appState.plan.tasks) {
+    const filteredIds = new Set(applyFilters(appState.plan.tasks).map(t => t.id));
+    visNodes = nodes.filter(n => filteredIds.has(n.id));
+    updateFilterBadge(visNodes.length, nodes.length);
+  } else {
+    visNodes = showAll ? nodes : nodes.filter(n => n.status !== 'done' && n.status !== 'skipped');
+    updateFilterBadge(visNodes.length, nodes.length);
+  }
   const visIds   = new Set(visNodes.map(n => n.id));
   const visEdges = edges.filter(e => visIds.has(e.from) && visIds.has(e.to));
 
@@ -5928,7 +6334,15 @@ function loadTimeline() {
 }
 
 function renderTimeline(data) {
-  const bars = data.bars || [];
+  // Apply filter bar: restrict to matching task IDs.
+  let bars = data.bars || [];
+  if (_filterActive() && appState && appState.plan && appState.plan.tasks) {
+    const filteredIds = new Set(applyFilters(appState.plan.tasks).map(t => t.id));
+    bars = bars.filter(b => filteredIds.has(b.taskId));
+    updateFilterBadge(bars.length, (data.bars||[]).length);
+  } else {
+    updateFilterBadge((data.bars||[]).length, (data.bars||[]).length);
+  }
   const nowStr = data.now;
 
   const chartWrap = document.getElementById('timelineChart');
