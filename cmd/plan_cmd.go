@@ -23,9 +23,11 @@ var planCmd = &cobra.Command{
 	Long: `Inspect and mutate your AI-managed task plan.
 
 Subcommands:
-  history          List all saved plan snapshots
-  diff [v1] [v2]  Show a human-readable diff between two plan versions
-  edit <instr>    Apply a natural-language instruction to mutate the plan`,
+  history               List all saved plan snapshots
+  diff [v1] [v2]       Show a human-readable diff between two plan versions
+  edit <instr>         Apply a natural-language instruction to mutate the plan
+  export [--format]    Export plan to a portable YAML/JSON/TOML file
+  import <file>        Import a plan from a portable file (--merge or --replace)`,
 }
 
 var planHistoryCmd = &cobra.Command{
@@ -310,5 +312,7 @@ func init() {
 	planCmd.AddCommand(planHistoryCmd)
 	planCmd.AddCommand(planDiffCmd)
 	planCmd.AddCommand(planEditCmd)
+	planCmd.AddCommand(planExportCmd)
+	planCmd.AddCommand(planImportCmd)
 	rootCmd.AddCommand(planCmd)
 }
