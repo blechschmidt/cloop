@@ -3024,6 +3024,9 @@ func (o *Orchestrator) evolvePM(ctx context.Context) (int, error) {
 	s.TotalOutputTokens += result.OutputTokens
 	s.AddStep(stepResult)
 
+	// Sync from disk before computing maxID so that any tasks added externally
+	// during the evolve AI call are accounted for — preventing ID reuse.
+	s.SyncFromDisk()
 	newTasks, err := pm.ParseEvolveTasks(s.Goal, result.Output, s.Plan)
 	if err != nil {
 		dimColor.Printf("  Task discovery parse error: %v\n", err)

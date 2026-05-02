@@ -217,8 +217,10 @@ func (s *ProjectState) SyncFromDisk() {
 }
 
 // mergeExternalTasks reads the current state from disk and merges tasks added
-// externally (e.g. via 'cloop task add' while running). Only tasks with IDs
-// strictly greater than the highest in-memory ID are appended.
+// externally (e.g. via 'cloop task add' while running). Any task on disk whose
+// ID is not present in the in-memory plan is appended, preserving its full
+// content. This is an ID-set merge — it does NOT rely on maxInMemID comparisons,
+// so externally-added tasks are never silently dropped due to ID ordering.
 func (s *ProjectState) mergeExternalTasks() {
 	disk, err := Load(s.WorkDir)
 	if err != nil || disk == nil || disk.Plan == nil || len(disk.Plan.Tasks) == 0 {
@@ -227,14 +229,14 @@ func (s *ProjectState) mergeExternalTasks() {
 	if s.Plan == nil {
 		return
 	}
-	maxInMemID := 0
+	// Build set of in-memory task IDs.
+	inMemIDs := make(map[int]struct{}, len(s.Plan.Tasks))
 	for _, t := range s.Plan.Tasks {
-		if t.ID > maxInMemID {
-			maxInMemID = t.ID
-		}
+		inMemIDs[t.ID] = struct{}{}
 	}
+	// Append every disk task whose ID is absent from memory (full content preserved).
 	for _, t := range disk.Plan.Tasks {
-		if t.ID > maxInMemID {
+		if _, exists := inMemIDs[t.ID]; !exists {
 			s.Plan.Tasks = append(s.Plan.Tasks, t)
 		}
 	}

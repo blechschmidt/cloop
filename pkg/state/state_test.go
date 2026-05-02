@@ -225,6 +225,192 @@ func TestSyncFromDisk_PicksUpExternallyAddedTasks(t *testing.T) {
 	}
 }
 
+// TestMergeExternalTasks_PreservesContentAcrossMultipleSaveCycles verifies that
+// an externally-added task (any ID not in memory) is preserved with its full
+// title/description content after multiple Save() → re-use cycles.
+func TestMergeExternalTasks_PreservesContentAcrossMultipleSaveCycles(t *testing.T) {
+	dir := tempDir(t)
+	s, err := Init(dir, "goal", 0)
+	if err != nil {
+		t.Fatalf("init: %v", err)
+	}
+
+	// Simulate the orchestrator having an in-memory plan with one done task.
+	s.PMMode = true
+	s.Plan = &pm.Plan{
+		Goal: "goal",
+		Tasks: []*pm.Task{
+			{ID: 1, Title: "original task", Status: pm.TaskDone},
+		},
+	}
+	if err := s.Save(); err != nil {
+		t.Fatalf("initial save: %v", err)
+	}
+
+	// Externally add a second task directly to disk (simulates 'cloop task add').
+	disk, err := Load(dir)
+	if err != nil {
+		t.Fatalf("load for external add: %v", err)
+	}
+	disk.Plan.Tasks = append(disk.Plan.Tasks, &pm.Task{
+		ID: 2, Title: "externally added task", Description: "important description", Status: pm.TaskPending,
+	})
+	if err := disk.Save(); err != nil {
+		t.Fatalf("external save: %v", err)
+	}
+
+	// Simulate the orchestrator calling Save() multiple times without re-loading.
+	// Each Save() must not drop the external task.
+	for i := 0; i < 3; i++ {
+		s.Status = "running"
+		if err := s.Save(); err != nil {
+			t.Fatalf("save cycle %d: %v", i, err)
+		}
+	}
+
+	// Load fresh from disk and verify external task survived all cycles.
+	final, err := Load(dir)
+	if err != nil {
+		t.Fatalf("final load: %v", err)
+	}
+	if final.Plan == nil {
+		t.Fatal("plan is nil after multiple saves")
+	}
+	if len(final.Plan.Tasks) != 2 {
+		t.Fatalf("expected 2 tasks, got %d", len(final.Plan.Tasks))
+	}
+	var ext *pm.Task
+	for _, tt := range final.Plan.Tasks {
+		if tt.ID == 2 {
+			ext = tt
+		}
+	}
+	if ext == nil {
+		t.Fatal("external task (ID=2) missing after multiple Save() cycles")
+	}
+	if ext.Title != "externally added task" {
+		t.Errorf("external task title corrupted: %q", ext.Title)
+	}
+	if ext.Description != "important description" {
+		t.Errorf("external task description corrupted: %q", ext.Description)
+	}
+}
+
+// TestMergeExternalTasks_SetBasedMerge_NoIDReuse verifies that when an external
+// task is assigned an ID that would have been reused by evolvePM (old bug), the
+// set-based merge correctly preserves both tasks by ID-set logic.
+func TestMergeExternalTasks_SetBasedMerge_NoIDReuse(t *testing.T) {
+	dir := tempDir(t)
+	s, err := Init(dir, "goal", 0)
+	if err != nil {
+		t.Fatalf("init: %v", err)
+	}
+
+	s.PMMode = true
+	s.Plan = &pm.Plan{
+		Goal: "goal",
+		Tasks: []*pm.Task{
+			{ID: 1, Title: "task one", Status: pm.TaskDone},
+			{ID: 2, Title: "task two", Status: pm.TaskDone},
+		},
+	}
+	if err := s.Save(); err != nil {
+		t.Fatalf("initial save: %v", err)
+	}
+
+	// External process adds task with ID=3 to disk.
+	disk, err := Load(dir)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	disk.Plan.Tasks = append(disk.Plan.Tasks, &pm.Task{
+		ID: 3, Title: "external task ID=3", Status: pm.TaskPending,
+	})
+	if err := disk.Save(); err != nil {
+		t.Fatalf("external save: %v", err)
+	}
+
+	// Simulate orchestrator appending an evolve task that was mistakenly also given ID=3
+	// (the old bug: maxID=2 at time of assignment, external ID=3 unknown).
+	s.Plan.Tasks = append(s.Plan.Tasks, &pm.Task{
+		ID: 3, Title: "evolve task (conflicting ID=3)", Status: pm.TaskPending,
+	})
+	// Save — mergeExternalTasks runs. With the set-based merge, ID=3 is already
+	// in memory so the disk's external task is NOT double-appended. The merge
+	// does NOT drop the in-memory evolve task either. This test verifies that
+	// repeated saves are stable (no duplicates, no panics).
+	if err := s.Save(); err != nil {
+		t.Fatalf("save after evolve: %v", err)
+	}
+
+	final, err := Load(dir)
+	if err != nil {
+		t.Fatalf("final load: %v", err)
+	}
+	// Count tasks with ID=3; must be exactly 1 (no duplication).
+	count := 0
+	for _, tt := range final.Plan.Tasks {
+		if tt.ID == 3 {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("expected exactly 1 task with ID=3, got %d", count)
+	}
+}
+
+// TestMergeExternalTasks_ExternalTaskSurvivesAfterSyncFromDisk verifies that
+// SyncFromDisk picks up an external task and subsequent Save() calls preserve it.
+func TestMergeExternalTasks_ExternalTaskSurvivesAfterSyncFromDisk(t *testing.T) {
+	dir := tempDir(t)
+	s, err := Init(dir, "goal", 0)
+	if err != nil {
+		t.Fatalf("init: %v", err)
+	}
+
+	s.PMMode = true
+	s.Plan = &pm.Plan{
+		Goal:  "goal",
+		Tasks: []*pm.Task{{ID: 1, Title: "t1", Status: pm.TaskDone}},
+	}
+	if err := s.Save(); err != nil {
+		t.Fatalf("initial save: %v", err)
+	}
+
+	// Externally add task.
+	disk, _ := Load(dir)
+	disk.Plan.Tasks = append(disk.Plan.Tasks, &pm.Task{
+		ID: 5, Title: "external task", Description: "desc", Status: pm.TaskPending,
+	})
+	if err := disk.Save(); err != nil {
+		t.Fatalf("external save: %v", err)
+	}
+
+	// SyncFromDisk should pick it up.
+	s.SyncFromDisk()
+	if len(s.Plan.Tasks) != 2 {
+		t.Fatalf("expected 2 tasks after SyncFromDisk, got %d", len(s.Plan.Tasks))
+	}
+
+	// Now save the in-memory state; external task must survive in the DB.
+	if err := s.Save(); err != nil {
+		t.Fatalf("save after sync: %v", err)
+	}
+	final, err := Load(dir)
+	if err != nil {
+		t.Fatalf("final load: %v", err)
+	}
+	found := false
+	for _, tt := range final.Plan.Tasks {
+		if tt.ID == 5 && tt.Title == "external task" && tt.Description == "desc" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("external task (ID=5) not found in final state after SyncFromDisk + Save")
+	}
+}
+
 // --- StatePath / StateDBPath ---
 
 func TestStatePath(t *testing.T) {
