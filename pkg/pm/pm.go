@@ -137,6 +137,8 @@ type Task struct {
 	HealAttempts      int          `json:"heal_attempts,omitempty"`       // number of auto-heal re-attempts made for this task
 	Annotations       []Annotation `json:"annotations,omitempty"`         // timestamped notes from user or AI
 	Condition         string       `json:"condition,omitempty"`           // optional gate: "$cmd" = shell check, else AI yes/no prompt
+	Recurrence        string       `json:"recurrence,omitempty"`          // cron expression (5-field); auto-resets task when due
+	NextRunAt         *time.Time   `json:"next_run_at,omitempty"`         // computed next trigger time for recurring tasks
 }
 
 // Plan is the full task plan for a goal.

@@ -769,6 +769,13 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		}
 
 		s.SyncFromDisk()
+		// Reactivate recurring tasks whose schedule has fired.
+		for _, t := range s.Plan.Tasks {
+			if pm.ResetIfDue(t, time.Now()) {
+				dimColor.Printf("↺ Task %d recurring: reset to pending (%s)\n", t.ID, t.Recurrence)
+				s.Save()
+			}
+		}
 		if s.Plan.IsComplete() {
 			if !o.log.IsJSON() {
 				successColor.Printf("🎉 All tasks complete! Goal achieved.\n")
@@ -1790,6 +1797,13 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 		}
 
 		s.SyncFromDisk()
+		// Reactivate recurring tasks whose schedule has fired.
+		for _, t := range s.Plan.Tasks {
+			if pm.ResetIfDue(t, time.Now()) {
+				dimColor.Printf("↺ Task %d recurring: reset to pending (%s)\n", t.ID, t.Recurrence)
+				s.Save()
+			}
+		}
 		if s.Plan.IsComplete() {
 			successColor.Printf("🎉 All tasks complete! Goal achieved.\n")
 			successColor.Printf("   %s\n\n", s.Plan.Summary())
