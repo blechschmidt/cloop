@@ -33,6 +33,7 @@ const liveLogMaxLines = 500
 type Server struct {
 	WorkDir string
 	Port    int
+	Token   string // optional auth token; empty = no auth
 
 	mu      sync.Mutex
 	clients map[chan sseEvent]struct{}
@@ -52,10 +53,13 @@ type Server struct {
 }
 
 // New creates a new UI server for the given working directory and port.
-func New(workdir string, port int) *Server {
+// token is optional; if non-empty every API request must supply it via
+// "Authorization: Bearer <token>" header or "?token=<token>" query param.
+func New(workdir string, port int, token string) *Server {
 	return &Server{
 		WorkDir: workdir,
 		Port:    port,
+		Token:   token,
 		clients: make(map[chan sseEvent]struct{}),
 	}
 }
@@ -106,8 +110,40 @@ func (s *Server) Start() error {
 	go s.watchState()
 
 	addr := ":" + strconv.Itoa(s.Port)
-	fmt.Printf("cloop dashboard running at http://localhost%s\n", addr)
-	return http.ListenAndServe(addr, mux)
+	if s.Token != "" {
+		fmt.Printf("cloop dashboard running at http://localhost%s (token auth enabled)\n", addr)
+	} else {
+		fmt.Printf("cloop dashboard running at http://localhost%s\n", addr)
+	}
+	return http.ListenAndServe(addr, s.authMiddleware(mux))
+}
+
+// authMiddleware enforces Bearer-token authentication on all /api/* routes when
+// s.Token is set. The root path "/" is always served without auth so the login
+// page can be loaded in the browser.
+func (s *Server) authMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.Token == "" || r.URL.Path == "/" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		// Check Authorization: Bearer <token> header.
+		if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
+			if strings.TrimPrefix(auth, "Bearer ") == s.Token {
+				next.ServeHTTP(w, r)
+				return
+			}
+		}
+		// Fallback: ?token=<token> query param (needed for EventSource which
+		// cannot send custom headers).
+		if r.URL.Query().Get("token") == s.Token {
+			next.ServeHTTP(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]string{"error": "unauthorized"}) //nolint:errcheck
+	})
 }
 
 // watchState polls the state file every second and notifies SSE clients on change.
@@ -1424,9 +1460,56 @@ const dashboardHTML = `<!DOCTYPE html>
   .danger-zone h3 { color:var(--red); }
 
   @media(max-width:600px){ main{padding:12px;} header{padding:8px 12px;} .stats-grid{grid-template-columns:repeat(2,1fr);} }
+
+  /* ── Login modal ── */
+  #loginOverlay {
+    display: none;
+    position: fixed; inset: 0; z-index: 1000;
+    background: rgba(13,17,23,.85);
+    backdrop-filter: blur(4px);
+    align-items: center; justify-content: center;
+  }
+  #loginOverlay.visible { display: flex; }
+  .login-box {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 32px 36px;
+    width: 100%; max-width: 380px;
+    display: flex; flex-direction: column; gap: 16px;
+  }
+  .login-box h2 { font-size: 16px; font-weight: 700; color: var(--text); }
+  .login-box p  { font-size: 13px; color: var(--muted); line-height: 1.5; }
+  .login-box input {
+    width: 100%; padding: 9px 12px;
+    background: var(--bg); border: 1px solid var(--border);
+    border-radius: 6px; color: var(--text); font-size: 14px;
+    font-family: monospace;
+  }
+  .login-box input:focus { outline: none; border-color: var(--accent); }
+  .login-box button {
+    padding: 9px 0; border-radius: 6px; border: none; cursor: pointer;
+    background: var(--accent); color: #000; font-size: 14px; font-weight: 600;
+  }
+  .login-box button:hover { opacity: .85; }
+  .login-error { font-size: 12px; color: var(--red); display: none; }
+  .login-error.visible { display: block; }
 </style>
 </head>
 <body>
+
+<!-- ── Login overlay ── -->
+<div id="loginOverlay">
+  <div class="login-box">
+    <h2>cloop dashboard</h2>
+    <p>This dashboard is protected. Enter the access token to continue.</p>
+    <input type="password" id="loginTokenInput" placeholder="Access token" autocomplete="off"
+           onkeydown="if(event.key==='Enter')submitLogin()">
+    <div class="login-error" id="loginError">Invalid token. Please try again.</div>
+    <button onclick="submitLogin()">Unlock</button>
+  </div>
+</div>
+
 <div class="layout">
   <header>
     <h1>cloop <span>dashboard</span></h1>
@@ -1798,6 +1881,45 @@ let evtSource = null;
 let suggestPollTimer = null;
 let activeTab = 'overview';
 
+// ── Auth token (stored in sessionStorage) ───────────────────────────────────
+let authToken = sessionStorage.getItem('cloop_token') || '';
+
+function authHeaders() {
+  return authToken ? {'Authorization': 'Bearer ' + authToken} : {};
+}
+
+function showLoginModal() {
+  document.getElementById('loginOverlay').classList.add('visible');
+  setTimeout(() => document.getElementById('loginTokenInput').focus(), 50);
+}
+
+function hideLoginModal() {
+  document.getElementById('loginOverlay').classList.remove('visible');
+  document.getElementById('loginError').classList.remove('visible');
+  document.getElementById('loginTokenInput').value = '';
+}
+
+window.submitLogin = function() {
+  const input = document.getElementById('loginTokenInput');
+  const token = input.value.trim();
+  if (!token) return;
+  // Test the token against the state endpoint.
+  fetch('/api/state', {headers: {'Authorization': 'Bearer ' + token}}).then(r => {
+    if (r.status === 401) {
+      document.getElementById('loginError').classList.add('visible');
+      input.select();
+    } else {
+      authToken = token;
+      sessionStorage.setItem('cloop_token', token);
+      hideLoginModal();
+      connectSSE();
+      refreshState();
+    }
+  }).catch(() => {
+    document.getElementById('loginError').classList.add('visible');
+  });
+};
+
 // ── Drag-and-drop state ──────────────────────────────────────────────────────
 let dragSrcId = null;
 let pendingDeleteId = null;
@@ -1908,19 +2030,26 @@ function toast(msg, type) {
 }
 
 function api(url, body) {
+  const ah = authHeaders();
   const opts = body !== undefined
-    ? { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) }
-    : { method: 'GET' };
-  return fetch(url, opts).then(r => r.json());
+    ? { method: 'POST', headers: Object.assign({'Content-Type':'application/json'}, ah), body: JSON.stringify(body) }
+    : { method: 'GET',  headers: ah };
+  return fetch(url, opts).then(r => {
+    if (r.status === 401) { showLoginModal(); return Promise.reject(new Error('401')); }
+    return r.json();
+  });
 }
 
 function apiMethod(method, url, body) {
-  const opts = { method };
+  const opts = { method, headers: authHeaders() };
   if (body !== null && body !== undefined) {
-    opts.headers = {'Content-Type':'application/json'};
+    opts.headers['Content-Type'] = 'application/json';
     opts.body = JSON.stringify(body);
   }
-  return fetch(url, opts).then(r => r.json());
+  return fetch(url, opts).then(r => {
+    if (r.status === 401) { showLoginModal(); return Promise.reject(new Error('401')); }
+    return r.json();
+  });
 }
 
 function statusBadge(status) {
@@ -2145,7 +2274,8 @@ window.clearLiveLog = function() {
 
 function connectSSE() {
   if (evtSource) evtSource.close();
-  evtSource = new EventSource('/api/events');
+  const sseUrl = authToken ? '/api/events?token=' + encodeURIComponent(authToken) : '/api/events';
+  evtSource = new EventSource(sseUrl);
   const dot = document.getElementById('liveDot');
   evtSource.onopen = () => {
     dot.classList.add('connected');
@@ -2168,7 +2298,16 @@ function connectSSE() {
   });
   evtSource.onerror = () => {
     dot.classList.remove('connected');
-    setTimeout(connectSSE, 3000);
+    evtSource.close();
+    evtSource = null;
+    // Probe the state endpoint to distinguish 401 from network error.
+    fetch('/api/state', {headers: authHeaders()}).then(r => {
+      if (r.status === 401) {
+        showLoginModal();
+      } else {
+        setTimeout(connectSSE, 3000);
+      }
+    }).catch(() => setTimeout(connectSSE, 3000));
   };
 }
 
@@ -2526,8 +2665,23 @@ window.confirmReset = function() {
 
 // ── Init ─────────────────────────────────────────────────────────────────────
 
-connectSSE();
-refreshState();
+// On page load, probe the server. If it returns 401 show the login modal,
+// otherwise proceed normally. This avoids the EventSource not reporting 401.
+function checkAuthAndInit() {
+  fetch('/api/state', {headers: authHeaders()}).then(r => {
+    if (r.status === 401) {
+      showLoginModal();
+    } else {
+      connectSSE();
+      r.json().then(s => render(s)).catch(() => {});
+    }
+  }).catch(() => {
+    // Network error — still try to connect SSE, it will retry on failure.
+    connectSSE();
+  });
+}
+
+checkAuthAndInit();
 })();
 </script>
 </body>

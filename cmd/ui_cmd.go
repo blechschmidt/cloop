@@ -12,8 +12,9 @@ import (
 )
 
 var (
-	uiPort   int
+	uiPort      int
 	uiNoBrowser bool
+	uiToken     string
 )
 
 var uiCmd = &cobra.Command{
@@ -30,11 +31,16 @@ task list (PM mode), live progress via SSE, and run/stop controls.
 	RunE: func(cmd *cobra.Command, args []string) error {
 		workdir, _ := os.Getwd()
 
+		token := uiToken
+		if token == "" {
+			token = os.Getenv("CLOOP_UI_TOKEN")
+		}
+
 		if !uiNoBrowser {
 			go openBrowser("http://localhost:" + strconv.Itoa(uiPort))
 		}
 
-		srv := ui.New(workdir, uiPort)
+		srv := ui.New(workdir, uiPort, token)
 		return srv.Start()
 	},
 }
@@ -58,5 +64,6 @@ func openBrowser(url string) {
 func init() {
 	uiCmd.Flags().IntVar(&uiPort, "port", 8080, "Port to listen on")
 	uiCmd.Flags().BoolVar(&uiNoBrowser, "no-browser", false, "Do not open the browser automatically")
+	uiCmd.Flags().StringVar(&uiToken, "token", "", "Auth token (also reads CLOOP_UI_TOKEN env var); if set, all API requests must supply it")
 	rootCmd.AddCommand(uiCmd)
 }
