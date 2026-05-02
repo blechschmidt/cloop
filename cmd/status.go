@@ -12,6 +12,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/profile"
 	"github.com/blechschmidt/cloop/pkg/state"
+	"github.com/blechschmidt/cloop/pkg/trace"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 )
@@ -198,6 +199,15 @@ var statusCmd = &cobra.Command{
 		if len(s.Steps) > 0 {
 			last := s.Steps[len(s.Steps)-1]
 			fmt.Printf("\nLast step (#%d): %s, %s\n", last.Step+1, last.Task, last.Duration)
+		}
+
+		if linked := trace.LastLinkedCommit(workdir); linked != nil {
+			taskRef := fmt.Sprintf("task #%d", linked.MatchedTaskID)
+			if linked.MatchedTaskTitle != "" {
+				taskRef = fmt.Sprintf("task #%d (%s)", linked.MatchedTaskID, linked.MatchedTaskTitle)
+			}
+			color.New(color.Faint).Printf("Trace:    last commit %s → %s [%s]\n",
+				linked.Hash, taskRef, linked.Confidence)
 		}
 
 		return nil
