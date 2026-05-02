@@ -29,6 +29,14 @@ type sseEvent struct {
 	Data  string
 }
 
+// ChatMessage is a single turn in the chat conversation history.
+type ChatMessage struct {
+	Role      string    `json:"role"`            // "user" or "assistant"
+	Content   string    `json:"content"`
+	Timestamp time.Time `json:"timestamp"`
+	Action    string    `json:"action,omitempty"` // resolved cloop command, if any
+}
+
 const liveLogMaxLines = 500
 
 // Server is the cloop web dashboard HTTP server.
@@ -58,6 +66,10 @@ type Server struct {
 	projMu       sync.RWMutex
 	projStatuses []multiui.ProjectStatus
 	projLastMod  map[string]time.Time // path -> last mod time
+
+	// Chat conversation history
+	chatMu      sync.Mutex
+	chatHistory []ChatMessage
 }
 
 // New creates a new UI server for the given working directory and port.
@@ -113,6 +125,10 @@ func (s *Server) Start() error {
 
 	// Voice / STT
 	mux.HandleFunc("/api/voice", s.handleVoice)
+
+	// Chat
+	mux.HandleFunc("/api/chat", s.handleChat)
+	mux.HandleFunc("/api/chat/history", s.handleChatHistory)
 
 	// Init & reset
 	mux.HandleFunc("/api/init", s.handleInit)
@@ -1192,7 +1208,13 @@ func (s *Server) handleVoice(w http.ResponseWriter, r *http.Request) {
 	tmp.Close()
 
 	// Build cloop listen args.
-	listenArgs := []string{"listen", "--file", tmp.Name(), "--dry-run"}
+	// dry_run=false (or execute=true) means the resolved command is actually
+	// executed; otherwise we default to --dry-run to just show the intent.
+	dryRun := r.FormValue("execute") != "true" && r.FormValue("dry_run") != "false"
+	listenArgs := []string{"listen", "--file", tmp.Name()}
+	if dryRun {
+		listenArgs = append(listenArgs, "--dry-run")
+	}
 
 	if v := r.FormValue("stt_provider"); v != "" {
 		listenArgs = append(listenArgs, "--stt-provider", v)
@@ -1225,6 +1247,75 @@ func (s *Server) handleVoice(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]interface{}{
 		"ok":     true,
 		"output": output,
+	})
+}
+
+// handleChatHistory returns the full chat conversation history as JSON.
+// GET /api/chat/history
+func (s *Server) handleChatHistory(w http.ResponseWriter, r *http.Request) {
+	s.chatMu.Lock()
+	h := make([]ChatMessage, len(s.chatHistory))
+	copy(h, s.chatHistory)
+	s.chatMu.Unlock()
+	jsonOK(w, h)
+}
+
+// handleChat receives a natural-language message, attempts to execute it as a
+// cloop command (via `cloop do`), and returns the result.
+// POST /api/chat  {"message":"..."}
+func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
+	if !requirePOST(w, r) {
+		return
+	}
+
+	var req struct {
+		Message string `json:"message"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Message) == "" {
+		jsonErr(w, "message required", http.StatusBadRequest)
+		return
+	}
+	msg := strings.TrimSpace(req.Message)
+
+	// Store user message.
+	s.chatMu.Lock()
+	s.chatHistory = append(s.chatHistory, ChatMessage{
+		Role:      "user",
+		Content:   msg,
+		Timestamp: time.Now(),
+	})
+	s.chatMu.Unlock()
+
+	// Run cloop do <message> to parse and execute the intent.
+	exe, err := os.Executable()
+	if err != nil {
+		exe = "cloop"
+	}
+	out, cmdErr := exec.Command(exe, "do", msg).CombinedOutput()
+	output := strings.TrimSpace(string(out))
+
+	ok := cmdErr == nil
+	response := output
+	if response == "" {
+		if ok {
+			response = "Command executed successfully."
+		} else {
+			response = "Failed: " + cmdErr.Error()
+		}
+	}
+
+	// Store assistant message.
+	s.chatMu.Lock()
+	s.chatHistory = append(s.chatHistory, ChatMessage{
+		Role:      "assistant",
+		Content:   response,
+		Timestamp: time.Now(),
+	})
+	s.chatMu.Unlock()
+
+	jsonOK(w, map[string]interface{}{
+		"ok":       ok,
+		"response": response,
 	})
 }
 
@@ -1876,6 +1967,140 @@ const dashboardHTML = `<!DOCTYPE html>
   .proj-progress-fill { height: 100%; background: var(--green); border-radius: 2px; transition: width .4s; }
   .proj-actions { display: flex; gap: 6px; flex-shrink: 0; }
   .proj-actions .btn { padding: 4px 10px; font-size: 12px; }
+
+  /* ── Chat panel ── */
+  .chat-layout {
+    display: flex;
+    flex-direction: column;
+    height: calc(100vh - 120px);
+    min-height: 400px;
+  }
+  .chat-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 0;
+    flex-wrap: wrap;
+  }
+  .chat-hint { font-size: 12px; color: var(--muted); }
+  .chat-hint kbd {
+    display: inline-block;
+    padding: 1px 5px;
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    font-size: 11px;
+    background: var(--surface);
+    color: var(--text);
+    font-family: inherit;
+  }
+  .chat-tts-label {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 12px;
+    color: var(--muted);
+    cursor: pointer;
+  }
+  .chat-tts-label input { accent-color: var(--accent); }
+  .chat-messages {
+    flex: 1;
+    overflow-y: auto;
+    padding: 16px 0;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .chat-welcome {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    padding: 40px 20px;
+    color: var(--muted);
+    text-align: center;
+  }
+  .chat-welcome-icon { font-size: 32px; }
+  .chat-welcome-title { font-size: 15px; font-weight: 600; color: var(--text); }
+  .chat-welcome-text { font-size: 13px; line-height: 1.6; }
+  .chat-welcome-text em { color: var(--accent); font-style: normal; font-family: monospace; }
+  .chat-bubble-row {
+    display: flex;
+    gap: 10px;
+    align-items: flex-start;
+  }
+  .chat-bubble-row.user { flex-direction: row-reverse; }
+  .chat-avatar {
+    width: 28px; height: 28px;
+    border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 12px; font-weight: 700;
+    flex-shrink: 0;
+  }
+  .chat-avatar.user      { background: var(--accent); color: #000; }
+  .chat-avatar.assistant { background: var(--purple);  color: #000; }
+  .chat-bubble {
+    max-width: 72%;
+    padding: 10px 14px;
+    border-radius: var(--radius);
+    font-size: 13px;
+    line-height: 1.6;
+    word-break: break-word;
+    white-space: pre-wrap;
+  }
+  .chat-bubble.user      { background: rgba(88,166,255,.15); border: 1px solid rgba(88,166,255,.25); color: var(--text); }
+  .chat-bubble.assistant { background: var(--surface);       border: 1px solid var(--border);        color: var(--text); }
+  .chat-bubble.error     { background: rgba(248,81,73,.1);   border: 1px solid rgba(248,81,73,.3);   color: var(--red); }
+  .chat-bubble-time { font-size: 10px; color: var(--muted); margin-top: 4px; }
+  .chat-bubble-action {
+    display: inline-block;
+    margin-top: 6px;
+    padding: 2px 8px;
+    background: rgba(63,185,80,.1);
+    border: 1px solid rgba(63,185,80,.25);
+    border-radius: 10px;
+    font-size: 11px;
+    color: var(--green);
+    font-family: monospace;
+  }
+  .chat-thinking {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--muted);
+    font-size: 12px;
+    padding: 6px 0;
+  }
+  .chat-input-bar {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    padding-top: 10px;
+    border-top: 1px solid var(--border);
+  }
+  .chat-input { flex: 1; }
+  .chat-mic-btn { flex-shrink: 0; padding: 7px 10px; }
+  .chat-mic-btn.recording { color: var(--red); border-color: rgba(248,81,73,.4); animation: pulse 1s infinite; }
+  .chat-voice-bar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 0 0;
+    font-size: 13px;
+    color: var(--muted);
+  }
+  .chat-voice-indicator { display: flex; align-items: center; gap: 6px; }
+  .chat-tts-btn {
+    background: none;
+    border: none;
+    color: var(--muted);
+    cursor: pointer;
+    font-size: 11px;
+    padding: 2px 5px;
+    border-radius: 3px;
+  }
+  .chat-tts-btn:hover { color: var(--accent); background: rgba(88,166,255,.1); }
 </style>
 </head>
 <body>
@@ -1899,6 +2124,7 @@ const dashboardHTML = `<!DOCTYPE html>
     <div class="tab-nav">
       <button class="tab-btn active" onclick="switchTab('overview')"  id="tbtn-overview">Overview</button>
       <button class="tab-btn"        onclick="switchTab('tasks')"     id="tbtn-tasks">Tasks</button>
+      <button class="tab-btn"        onclick="switchTab('chat')"      id="tbtn-chat">Chat</button>
       <button class="tab-btn"        onclick="switchTab('projects')"  id="tbtn-projects">Projects</button>
       <button class="tab-btn"        onclick="switchTab('suggest')"   id="tbtn-suggest">Suggest</button>
       <button class="tab-btn"        onclick="switchTab('settings')"  id="tbtn-settings">Settings</button>
@@ -2115,6 +2341,49 @@ const dashboardHTML = `<!DOCTYPE html>
         <div class="section-title">Tasks <span id="taskCountBadge" style="color:var(--muted);font-weight:400;text-transform:none;letter-spacing:0"></span></div>
         <div class="task-list" id="taskListFull">
           <div class="empty-state"><h3>No tasks yet</h3><p>Add a task above, or run <code>cloop run --pm</code> to generate a task plan.</p></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ════════════════════════════════════════════════════════════ CHAT -->
+    <div id="tab-chat" class="tab-panel">
+      <div class="chat-layout">
+        <div class="chat-header">
+          <span class="section-title" style="margin:0">AI Chat</span>
+          <span class="chat-hint">Type a command or question — or hold <kbd>Space</kbd> to talk</span>
+          <div style="display:flex;gap:6px;align-items:center;margin-left:auto">
+            <label class="chat-tts-label" title="Read responses aloud">
+              <input type="checkbox" id="chatTtsToggle" onchange="toggleTTS(this.checked)"> TTS
+            </label>
+            <button class="btn" style="padding:4px 10px;font-size:12px" onclick="clearChatHistory()">Clear</button>
+          </div>
+        </div>
+        <div class="chat-messages" id="chatMessages">
+          <div class="chat-welcome">
+            <div class="chat-welcome-icon">💬</div>
+            <div class="chat-welcome-title">Chat with cloop</div>
+            <div class="chat-welcome-text">Type a natural language command to control your project.<br>
+            Examples: <em>"add a task to fix the login bug"</em>, <em>"start the run"</em>, <em>"show me task 3"</em>, <em>"pause"</em></div>
+          </div>
+        </div>
+        <div class="chat-input-bar">
+          <button class="btn mic chat-mic-btn" id="chatMicBtn" onclick="toggleChatVoice()" title="Hold Space or click to record voice command">
+            <svg viewBox="0 0 16 16" fill="currentColor" width="14" height="14"><path d="M5 3a3 3 0 0 1 6 0v5a3 3 0 0 1-6 0V3z"/><path d="M3.5 6.5A.5.5 0 0 1 4 7v1a4 4 0 0 0 8 0V7a.5.5 0 0 1 1 0v1a5 5 0 0 1-4.5 4.975V15h2.5a.5.5 0 0 1 0 1h-6a.5.5 0 0 1 0-1H7.5v-2.025A5 5 0 0 1 3 8V7a.5.5 0 0 1 .5-.5z"/></svg>
+          </button>
+          <input class="form-input chat-input" id="chatInput" placeholder="Ask anything or give a command..."
+                 onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();submitChat();}">
+          <button class="btn primary" onclick="submitChat()" style="flex-shrink:0">
+            <svg viewBox="0 0 16 16" fill="currentColor" width="13" height="13"><path d="M15.854.146a.5.5 0 0 1 .11.54l-5.819 14.547a.75.75 0 0 1-1.329.124l-3.178-4.995L.643 7.184a.75.75 0 0 1 .124-1.33L15.314.037a.5.5 0 0 1 .54.11z"/></svg>
+            Send
+          </button>
+        </div>
+        <div class="chat-voice-bar" id="chatVoiceBar" style="display:none">
+          <span class="chat-voice-indicator">
+            <span class="live-dot connected" style="width:6px;height:6px"></span>
+            Recording...
+          </span>
+          <button class="btn danger" style="padding:4px 10px;font-size:12px" onclick="stopChatVoice()">Stop &amp; Send</button>
+          <button class="btn" style="padding:4px 10px;font-size:12px" onclick="cancelChatVoice()">Cancel</button>
         </div>
       </div>
     </div>
@@ -2401,6 +2670,7 @@ window.switchTab = function(name) {
   if (name === 'settings') loadConfig();
   if (name === 'tasks' && appState) renderTasks(appState);
   if (name === 'projects') loadProjects();
+  if (name === 'chat') loadChatHistory();
 };
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -3349,6 +3619,249 @@ window.sendVoiceAudio = async function() {
     toast('Voice request failed', 'err');
   }
 };
+
+// ── Chat ─────────────────────────────────────────────────────────────────────
+
+let chatTtsEnabled = false;
+let chatVoiceMediaRecorder = null;
+let chatVoiceChunks = [];
+let chatVoiceRecording = false;
+let chatVoiceBlob = null;
+let spaceVoiceActive = false;
+
+// Restore TTS preference.
+(function() {
+  const saved = localStorage.getItem('cloop_chat_tts');
+  if (saved === 'true') {
+    chatTtsEnabled = true;
+    const el = document.getElementById('chatTtsToggle');
+    if (el) el.checked = true;
+  }
+})();
+
+window.toggleTTS = function(enabled) {
+  chatTtsEnabled = enabled;
+  localStorage.setItem('cloop_chat_tts', enabled ? 'true' : 'false');
+  if (!enabled && window.speechSynthesis) window.speechSynthesis.cancel();
+};
+
+function speakText(text) {
+  if (!chatTtsEnabled || !window.speechSynthesis) return;
+  window.speechSynthesis.cancel();
+  const utt = new SpeechSynthesisUtterance(text);
+  utt.rate = 1.05;
+  window.speechSynthesis.speak(utt);
+}
+
+function chatFmtTime(ts) {
+  const d = ts ? new Date(ts) : new Date();
+  return d.toLocaleTimeString(undefined, {hour:'2-digit', minute:'2-digit'});
+}
+
+function appendChatBubble(role, content, opts) {
+  const box = document.getElementById('chatMessages');
+  if (!box) return;
+  const welcome = box.querySelector('.chat-welcome');
+  if (welcome) welcome.remove();
+
+  const row = document.createElement('div');
+  row.className = 'chat-bubble-row ' + role;
+  const initials = role === 'user' ? 'U' : 'AI';
+  const action   = (opts && opts.action) ? opts.action : '';
+  const ts       = (opts && opts.ts)     ? opts.ts     : null;
+  const isError  = opts && opts.error;
+
+  row.innerHTML =
+    '<div class="chat-avatar ' + role + '">' + initials + '</div>' +
+    '<div>' +
+      '<div class="chat-bubble ' + role + (isError ? ' error' : '') + '">' +
+        esc(content) +
+        (action ? '<br><span class="chat-bubble-action">$ cloop ' + esc(action) + '</span>' : '') +
+      '</div>' +
+      '<div class="chat-bubble-time">' + chatFmtTime(ts) + '</div>' +
+    '</div>';
+
+  box.appendChild(row);
+  box.scrollTop = box.scrollHeight;
+  return row;
+}
+
+function showChatThinking() {
+  const box = document.getElementById('chatMessages');
+  if (!box) return null;
+  const el = document.createElement('div');
+  el.className = 'chat-thinking';
+  el.id = 'chatThinking';
+  el.innerHTML = '<span class="spinner"></span> Thinking...';
+  box.appendChild(el);
+  box.scrollTop = box.scrollHeight;
+  return el;
+}
+
+function removeChatThinking() {
+  const el = document.getElementById('chatThinking');
+  if (el) el.remove();
+}
+
+window.submitChat = async function() {
+  const input = document.getElementById('chatInput');
+  if (!input) return;
+  const msg = input.value.trim();
+  if (!msg) return;
+  input.value = '';
+
+  appendChatBubble('user', msg, {ts: new Date()});
+  showChatThinking();
+
+  try {
+    const resp = await fetch('/api/chat', {
+      method: 'POST',
+      headers: Object.assign({'Content-Type': 'application/json'}, authHeaders()),
+      body: JSON.stringify({message: msg}),
+    });
+    if (resp.status === 401) { showLoginModal(); removeChatThinking(); return; }
+    const data = await resp.json();
+    removeChatThinking();
+    const content = data.response || (data.ok ? 'Done.' : (data.error || 'Error'));
+    appendChatBubble('assistant', content, {ts: new Date(), error: !data.ok, action: data.action});
+    if (data.ok) speakText(content);
+    if (data.ok) refreshState();
+  } catch(err) {
+    removeChatThinking();
+    appendChatBubble('assistant', 'Request failed: ' + err.message, {ts: new Date(), error: true});
+  }
+};
+
+window.clearChatHistory = function() {
+  const box = document.getElementById('chatMessages');
+  if (!box) return;
+  box.innerHTML =
+    '<div class="chat-welcome">' +
+    '<div class="chat-welcome-icon">&#x1F4AC;</div>' +
+    '<div class="chat-welcome-title">Chat with cloop</div>' +
+    '<div class="chat-welcome-text">Type a natural language command to control your project.<br>' +
+    'Examples: <em>"add a task to fix the login bug"</em>, <em>"start the run"</em>, <em>"show me task 3"</em>, <em>"pause"</em></div>' +
+    '</div>';
+};
+
+function loadChatHistory() {
+  fetch('/api/chat/history', {headers: authHeaders()}).then(r => r.json()).then(history => {
+    if (!history || !history.length) return;
+    const box = document.getElementById('chatMessages');
+    if (!box) return;
+    box.innerHTML = '';
+    history.forEach(m => appendChatBubble(m.role, m.content, {ts: m.timestamp, action: m.action}));
+  }).catch(() => {});
+}
+
+// ── Chat voice ────────────────────────────────────────────────────────────────
+
+window.toggleChatVoice = async function() {
+  if (chatVoiceRecording) { stopChatVoice(); return; }
+  await startChatVoice();
+};
+
+async function startChatVoice() {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({audio: true});
+    chatVoiceChunks = []; chatVoiceBlob = null;
+    const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+      ? 'audio/webm;codecs=opus'
+      : (MediaRecorder.isTypeSupported('audio/ogg') ? 'audio/ogg' : '');
+    chatVoiceMediaRecorder = new MediaRecorder(stream, mimeType ? {mimeType} : {});
+    chatVoiceMediaRecorder.ondataavailable = e => { if (e.data.size > 0) chatVoiceChunks.push(e.data); };
+    chatVoiceMediaRecorder.onstop = () => {
+      stream.getTracks().forEach(t => t.stop());
+      const ext = (chatVoiceMediaRecorder.mimeType || '').includes('ogg') ? 'ogg' : 'webm';
+      chatVoiceBlob = new Blob(chatVoiceChunks, {type: chatVoiceMediaRecorder.mimeType || 'audio/webm'});
+      chatVoiceBlob._ext = ext;
+      chatVoiceRecording = false;
+      document.getElementById('chatMicBtn').classList.remove('recording');
+      document.getElementById('chatVoiceBar').style.display = 'none';
+      sendChatVoice();
+    };
+    chatVoiceMediaRecorder.start(200);
+    chatVoiceRecording = true;
+    document.getElementById('chatMicBtn').classList.add('recording');
+    document.getElementById('chatVoiceBar').style.display = 'flex';
+  } catch(err) {
+    toast('Microphone error: ' + err.message, 'err');
+  }
+}
+
+window.stopChatVoice = function() {
+  if (chatVoiceMediaRecorder && chatVoiceMediaRecorder.state !== 'inactive') chatVoiceMediaRecorder.stop();
+};
+
+window.cancelChatVoice = function() {
+  if (chatVoiceMediaRecorder && chatVoiceMediaRecorder.state !== 'inactive') chatVoiceMediaRecorder.stop();
+  chatVoiceBlob = null;
+  chatVoiceRecording = false;
+  document.getElementById('chatMicBtn').classList.remove('recording');
+  document.getElementById('chatVoiceBar').style.display = 'none';
+};
+
+async function sendChatVoice() {
+  if (!chatVoiceBlob) return;
+  appendChatBubble('user', '&#x1F3A4; Voice message (transcribing\u2026)', {ts: new Date()});
+  showChatThinking();
+
+  const ext = chatVoiceBlob._ext || 'webm';
+  const formData = new FormData();
+  formData.append('audio', chatVoiceBlob, 'recording.' + ext);
+  formData.append('execute', 'true');
+
+  try {
+    const headers = authHeaders();
+    delete headers['Content-Type'];
+    const resp = await fetch('/api/voice', {method: 'POST', headers, body: formData});
+    if (resp.status === 401) { showLoginModal(); removeChatThinking(); return; }
+    const data = await resp.json();
+    removeChatThinking();
+
+    // Update the placeholder bubble with actual transcription.
+    const msgBox = document.getElementById('chatMessages');
+    if (msgBox) {
+      const userBubbles = msgBox.querySelectorAll('.chat-bubble-row.user');
+      if (userBubbles.length > 0) {
+        const lastBubble = userBubbles[userBubbles.length - 1].querySelector('.chat-bubble');
+        const lines = (data.output || '').split('\n');
+        const tVal  = lines.find(l => l.trim().startsWith('"') && l.trim().endsWith('"'));
+        const tText = tVal ? tVal.trim().replace(/^"|"$/g, '') : '&#x1F3A4; (voice command)';
+        if (lastBubble) lastBubble.textContent = '\uD83C\uDFA4 ' + (tVal ? tVal.trim().replace(/^"|"$/g, '') : '(voice command)');
+      }
+    }
+
+    const content = data.output || (data.ok ? 'Done.' : (data.error || 'Error'));
+    appendChatBubble('assistant', content, {ts: new Date(), error: !data.ok});
+    if (data.ok) speakText(content);
+    if (data.ok) refreshState();
+    chatVoiceBlob = null;
+  } catch(err) {
+    removeChatThinking();
+    appendChatBubble('assistant', 'Voice request failed: ' + err.message, {ts: new Date(), error: true});
+  }
+}
+
+// ── Space push-to-talk (Chat tab only) ───────────────────────────────────────
+
+document.addEventListener('keydown', async function(e) {
+  if (activeTab !== 'chat') return;
+  if (e.code !== 'Space') return;
+  const tag = ((e.target && e.target.tagName) || '').toUpperCase();
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'BUTTON') return;
+  if (spaceVoiceActive || chatVoiceRecording) return;
+  e.preventDefault();
+  spaceVoiceActive = true;
+  await startChatVoice();
+});
+
+document.addEventListener('keyup', function(e) {
+  if (e.code !== 'Space') return;
+  if (!spaceVoiceActive) return;
+  spaceVoiceActive = false;
+  if (chatVoiceRecording) stopChatVoice();
+});
 
 // ── Init ─────────────────────────────────────────────────────────────────────
 
