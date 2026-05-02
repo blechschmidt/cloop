@@ -162,6 +162,12 @@ type Config struct {
 	// server and writing the final JSON summary — the orchestrator writes metrics.json at
 	// plan completion via Metrics.WriteJSON. Pass nil to disable metrics collection.
 	Metrics *metrics.Metrics
+
+	// NoDedup disables semantic task deduplication in auto-evolve mode.
+	// By default, before injecting newly discovered tasks the orchestrator asks the
+	// AI to filter out candidates that duplicate existing (completed or pending) work.
+	// Set this to true to skip that check and inject all discovered tasks as-is.
+	NoDedup bool
 }
 
 type Orchestrator struct {
@@ -1795,6 +1801,27 @@ func (o *Orchestrator) evolvePM(ctx context.Context) (int, error) {
 	}
 	if len(newTasks) == 0 {
 		dimColor.Printf("  No new tasks discovered — project is fully evolved.\n")
+		s.Save()
+		return 0, nil
+	}
+
+	// Semantic deduplication: filter out candidates that duplicate existing work.
+	if !o.config.NoDedup {
+		dedupOpts, _ := o.makeOpts(s.Model, false)
+		deduped, dedupErr := pm.DeduplicateTasks(ctx, o.provider, dedupOpts, s.Plan.Tasks, newTasks)
+		if dedupErr != nil {
+			dimColor.Printf("  Dedup warning: %v\n", dedupErr)
+			// fail-open: deduped already contains all newTasks in this case
+		}
+		dropped := len(newTasks) - len(deduped)
+		if dropped > 0 {
+			dimColor.Printf("  Dedup: removed %d duplicate task(s), %d novel task(s) remain.\n", dropped, len(deduped))
+		}
+		newTasks = deduped
+	}
+
+	if len(newTasks) == 0 {
+		dimColor.Printf("  No novel tasks after deduplication — project is fully evolved.\n")
 		s.Save()
 		return 0, nil
 	}

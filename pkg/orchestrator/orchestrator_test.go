@@ -1546,11 +1546,13 @@ func TestRunPM_AutoEvolve_DiscoversAndExecutesNewTasks(t *testing.T) {
 
 	// IDs in evolve JSON will be re-assigned (maxID=1 → new task gets ID=2).
 	evolvedJSON := `{"tasks":[{"id":1,"title":"Evolve Task","description":"add improvement","priority":1}]}`
+	dedupAllNovel := `{"novel":[0],"reason":"all novel"}`
 	prov := &mockProvider{
 		name: "mock",
 		results: []*provider.Result{
 			{Output: "done initial\nTASK_DONE", Provider: "mock"}, // execute task 1
 			{Output: evolvedJSON, Provider: "mock"},               // evolvePM → 1 new task
+			{Output: dedupAllNovel, Provider: "mock"},             // dedup → all novel
 			{Output: "done evolve\nTASK_DONE", Provider: "mock"},  // execute evolve task
 			{Output: `{"tasks":[]}`, Provider: "mock"},            // evolvePM → no new tasks
 		},
@@ -1560,9 +1562,9 @@ func TestRunPM_AutoEvolve_DiscoversAndExecutesNewTasks(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// 4 calls: execute task1 + evolvePM (new tasks) + execute evolve task + evolvePM (empty).
-	if prov.calls != 4 {
-		t.Errorf("expected 4 provider calls, got %d", prov.calls)
+	// 5 calls: execute task1 + evolvePM (new tasks) + dedup + execute evolve task + evolvePM (empty).
+	if prov.calls != 5 {
+		t.Errorf("expected 5 provider calls, got %d", prov.calls)
 	}
 	if o.state.Status != "complete" {
 		t.Errorf("expected status=complete, got %q", o.state.Status)
@@ -1632,13 +1634,16 @@ func TestRunPM_AutoEvolve_MultipleRounds(t *testing.T) {
 	// Each evolvePM call returns exactly one new task, except the last which returns empty.
 	round1JSON := `{"tasks":[{"id":1,"title":"Round1 Task","description":"r1","priority":1}]}`
 	round2JSON := `{"tasks":[{"id":1,"title":"Round2 Task","description":"r2","priority":1}]}`
+	dedupAllNovel := `{"novel":[0],"reason":"all novel"}`
 	prov := &mockProvider{
 		name: "mock",
 		results: []*provider.Result{
 			{Output: "done A\nTASK_DONE", Provider: "mock"},    // execute task 1
 			{Output: round1JSON, Provider: "mock"},             // evolvePM round 1 → task 2
+			{Output: dedupAllNovel, Provider: "mock"},          // dedup round 1 → all novel
 			{Output: "done r1\nTASK_DONE", Provider: "mock"},   // execute task 2
 			{Output: round2JSON, Provider: "mock"},             // evolvePM round 2 → task 3
+			{Output: dedupAllNovel, Provider: "mock"},          // dedup round 2 → all novel
 			{Output: "done r2\nTASK_DONE", Provider: "mock"},   // execute task 3
 			{Output: `{"tasks":[]}`, Provider: "mock"},         // evolvePM round 3 → none
 		},
@@ -1648,8 +1653,8 @@ func TestRunPM_AutoEvolve_MultipleRounds(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if prov.calls != 6 {
-		t.Errorf("expected 6 provider calls, got %d", prov.calls)
+	if prov.calls != 8 {
+		t.Errorf("expected 8 provider calls, got %d", prov.calls)
 	}
 	if o.state.Status != "complete" {
 		t.Errorf("expected status=complete, got %q", o.state.Status)
