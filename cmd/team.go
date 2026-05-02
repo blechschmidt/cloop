@@ -15,6 +15,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/provider"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/team"
+	"github.com/blechschmidt/cloop/pkg/teamassign"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 )
@@ -345,6 +346,98 @@ Examples:
 	},
 }
 
+var teamWorkloadCmd = &cobra.Command{
+	Use:   "workload",
+	Short: "Show per-member workload with inferred skill tags",
+	Long: `Display a workload summary for each team member including skill tags
+automatically inferred from their completed task history.
+
+Skill tags are derived from:
+  - Explicit task tags on completed tasks
+  - Task role (backend, frontend, etc.)
+  - Meaningful keywords from completed task titles
+
+Examples:
+  cloop team workload`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		workdir, _ := os.Getwd()
+		s, err := state.Load(workdir)
+		if err != nil {
+			return err
+		}
+		if !s.PMMode || s.Plan == nil || len(s.Plan.Tasks) == 0 {
+			return fmt.Errorf("no task plan found — run 'cloop run --pm' to create one")
+		}
+
+		members := team.Members(s.Plan)
+		wl := team.Workload(s.Plan)
+		workloadCounts := teamassign.WorkloadCount(s.Plan)
+
+		headerColor := color.New(color.FgCyan, color.Bold)
+		skillColor := color.New(color.FgMagenta)
+
+		for _, member := range members {
+			tasks := wl[member]
+			done, pending, inProg := 0, 0, 0
+			for _, t := range tasks {
+				switch t.Status {
+				case pm.TaskDone, pm.TaskSkipped:
+					done++
+				case pm.TaskPending:
+					pending++
+				case pm.TaskInProgress:
+					inProg++
+				}
+			}
+
+			skills := teamassign.SkillTagsFromHistory(s.Plan, member)
+			active := workloadCounts[member]
+
+			headerColor.Printf("\n%s", member)
+			fmt.Printf("  (%d total: %d done, %d pending, %d in-progress | %d active)\n",
+				len(tasks), done, pending, inProg, active)
+
+			if len(skills) > 0 {
+				fmt.Printf("  Skills: ")
+				skillColor.Printf("%s\n", strings.Join(skills, ", "))
+			} else {
+				color.New(color.Faint).Println("  Skills: (none — complete tasks to build skill history)")
+			}
+
+			// Show active (non-done) tasks summary.
+			fmt.Printf("  %-5s  %-12s  %-4s  %s\n", "ID", "STATUS", "PRIO", "TITLE")
+			fmt.Printf("  %-5s  %-12s  %-4s  %s\n", "-----", "------------", "----", "-----")
+			sorted := make([]*pm.Task, len(tasks))
+			copy(sorted, tasks)
+			sort.SliceStable(sorted, func(i, j int) bool {
+				// Put active tasks first, then by priority.
+				iDone := sorted[i].Status == pm.TaskDone || sorted[i].Status == pm.TaskSkipped
+				jDone := sorted[j].Status == pm.TaskDone || sorted[j].Status == pm.TaskSkipped
+				if iDone != jDone {
+					return !iDone
+				}
+				return sorted[i].Priority < sorted[j].Priority
+			})
+			for _, t := range sorted {
+				overdueTag := ""
+				if pm.IsOverdue(t) {
+					overdueTag = " [OVERDUE]"
+				}
+				line := fmt.Sprintf("  %-5d  %-12s  P%-3d  %s%s",
+					t.ID, string(t.Status), t.Priority,
+					truncateStr(t.Title, 55), overdueTag)
+				statusRowColor(t.Status).Println(line)
+			}
+		}
+
+		if len(members) == 0 {
+			color.New(color.Faint).Println("No assignments yet. Use 'cloop team assign <task-id> <user>' or 'cloop task bulk-assign'.")
+		}
+		fmt.Println()
+		return nil
+	},
+}
+
 // statusRowColor returns a color appropriate for a task row based on status.
 func statusRowColor(status pm.TaskStatus) *color.Color {
 	switch status {
@@ -371,5 +464,6 @@ func init() {
 	teamCmd.AddCommand(teamUnassignCmd)
 	teamCmd.AddCommand(teamStatusCmd)
 	teamCmd.AddCommand(teamBalanceCmd)
+	teamCmd.AddCommand(teamWorkloadCmd)
 	rootCmd.AddCommand(teamCmd)
 }
