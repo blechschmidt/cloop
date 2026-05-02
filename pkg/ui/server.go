@@ -20,14 +20,28 @@ import (
 	"github.com/blechschmidt/cloop/pkg/state"
 )
 
+// sseEvent is a typed SSE message. If Event is empty the browser receives a
+// default "message" event; otherwise the named event type is sent.
+type sseEvent struct {
+	Event string // e.g. "" or "log"
+	Data  string
+}
+
+const liveLogMaxLines = 500
+
 // Server is the cloop web dashboard HTTP server.
 type Server struct {
 	WorkDir string
 	Port    int
 
 	mu      sync.Mutex
-	clients map[chan string]struct{}
+	clients map[chan sseEvent]struct{}
 	lastMod time.Time
+
+	// Live log ring-buffer (last liveLogMaxLines lines of subprocess output).
+	liveLogMu      sync.Mutex
+	liveLogLines   []string
+	liveLogRunning bool
 
 	// Suggest background job state
 	suggestMu      sync.Mutex
@@ -42,7 +56,7 @@ func New(workdir string, port int) *Server {
 	return &Server{
 		WorkDir: workdir,
 		Port:    port,
-		clients: make(map[chan string]struct{}),
+		clients: make(map[chan sseEvent]struct{}),
 	}
 }
 
@@ -75,6 +89,9 @@ func (s *Server) Start() error {
 	// Suggest
 	mux.HandleFunc("/api/suggest/run", s.handleSuggestRun)
 	mux.HandleFunc("/api/suggest/status", s.handleSuggestStatus)
+
+	// Live log
+	mux.HandleFunc("/api/livelog", s.handleLiveLog)
 
 	// Init & reset
 	mux.HandleFunc("/api/init", s.handleInit)
@@ -110,13 +127,41 @@ func (s *Server) watchState() {
 	}
 }
 
-// broadcast sends a state JSON payload to all connected SSE clients.
+// broadcast sends a state JSON payload to all connected SSE clients as a
+// default ("message") SSE event.
 func (s *Server) broadcast(data string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for ch := range s.clients {
 		select {
-		case ch <- data:
+		case ch <- sseEvent{Data: data}:
+		default:
+		}
+	}
+}
+
+// broadcastLog sends a log chunk to all connected SSE clients as a "log"
+// SSE event, and stores it in the ring buffer.
+func (s *Server) broadcastLog(chunk string) {
+	// Update ring buffer: split chunk into lines and append.
+	s.liveLogMu.Lock()
+	for _, line := range strings.SplitAfter(chunk, "\n") {
+		if line == "" {
+			continue
+		}
+		s.liveLogLines = append(s.liveLogLines, line)
+		if len(s.liveLogLines) > liveLogMaxLines {
+			s.liveLogLines = s.liveLogLines[len(s.liveLogLines)-liveLogMaxLines:]
+		}
+	}
+	s.liveLogMu.Unlock()
+
+	data, _ := json.Marshal(map[string]string{"chunk": chunk})
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for ch := range s.clients {
+		select {
+		case ch <- sseEvent{Event: "log", Data: string(data)}:
 		default:
 		}
 	}
@@ -180,7 +225,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 
-	ch := make(chan string, 4)
+	ch := make(chan sseEvent, 8)
 	s.mu.Lock()
 	s.clients[ch] = struct{}{}
 	s.mu.Unlock()
@@ -190,6 +235,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		s.mu.Unlock()
 	}()
 
+	// Send current state immediately on connect.
 	if ps, err := state.Load(s.WorkDir); err == nil {
 		if data, err := json.Marshal(ps); err == nil {
 			fmt.Fprintf(w, "data: %s\n\n", data)
@@ -197,13 +243,30 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Send current live log buffer so reconnecting clients see recent output.
+	s.liveLogMu.Lock()
+	if len(s.liveLogLines) > 0 {
+		buf := strings.Join(s.liveLogLines, "")
+		s.liveLogMu.Unlock()
+		if d, err := json.Marshal(map[string]string{"chunk": buf}); err == nil {
+			fmt.Fprintf(w, "event: log\ndata: %s\n\n", d)
+			flusher.Flush()
+		}
+	} else {
+		s.liveLogMu.Unlock()
+	}
+
 	ctx := r.Context()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case data := <-ch:
-			fmt.Fprintf(w, "data: %s\n\n", data)
+		case ev := <-ch:
+			if ev.Event != "" {
+				fmt.Fprintf(w, "event: %s\ndata: %s\n\n", ev.Event, ev.Data)
+			} else {
+				fmt.Fprintf(w, "data: %s\n\n", ev.Data)
+			}
 			flusher.Flush()
 		}
 	}
@@ -264,13 +327,65 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 	}
 	cmd := exec.Command(exe, args...)
 	cmd.Dir = s.WorkDir
-	cmd.Stdout = os.Stderr
-	cmd.Stderr = os.Stderr
+
+	// Pipe combined output so we can stream it to the live log panel.
+	pipeR, pipeW, pipeErr := os.Pipe()
+	if pipeErr != nil {
+		// Fall back to inheriting stderr if pipe creation fails.
+		cmd.Stdout = os.Stderr
+		cmd.Stderr = os.Stderr
+	} else {
+		cmd.Stdout = pipeW
+		cmd.Stderr = pipeW
+	}
+
 	if err := cmd.Start(); err != nil {
+		if pipeR != nil {
+			pipeR.Close()
+			pipeW.Close()
+		}
 		jsonErr(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	go func() { _ = cmd.Wait() }()
+
+	if pipeErr == nil {
+		// Clear old log and mark running.
+		s.liveLogMu.Lock()
+		s.liveLogLines = nil
+		s.liveLogRunning = true
+		s.liveLogMu.Unlock()
+
+		pipeW.Close() // parent doesn't write; close its end so reader gets EOF when child exits.
+
+		go func() {
+			buf := make([]byte, 4096)
+			for {
+				n, readErr := pipeR.Read(buf)
+				if n > 0 {
+					chunk := string(buf[:n])
+					os.Stderr.WriteString(chunk) // also echo to server's stderr
+					s.broadcastLog(chunk)
+				}
+				if readErr != nil {
+					break
+				}
+			}
+			pipeR.Close()
+			_ = cmd.Wait()
+			s.liveLogMu.Lock()
+			s.liveLogRunning = false
+			s.liveLogMu.Unlock()
+			// Broadcast updated state after run completes.
+			if ps, loadErr := state.Load(s.WorkDir); loadErr == nil {
+				if data, marshalErr := json.Marshal(ps); marshalErr == nil {
+					s.broadcast(string(data))
+				}
+			}
+		}()
+	} else {
+		go func() { _ = cmd.Wait() }()
+	}
+
 	jsonOK(w, map[string]interface{}{"ok": true, "command": "cloop " + strings.Join(args, " ")})
 }
 
@@ -678,6 +793,20 @@ func (s *Server) handleTaskRemove(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]bool{"ok": true})
 }
 
+// handleLiveLog returns the current live log ring buffer and running status.
+func (s *Server) handleLiveLog(w http.ResponseWriter, r *http.Request) {
+	s.liveLogMu.Lock()
+	lines := make([]string, len(s.liveLogLines))
+	copy(lines, s.liveLogLines)
+	running := s.liveLogRunning
+	s.liveLogMu.Unlock()
+
+	jsonOK(w, map[string]interface{}{
+		"running": running,
+		"lines":   lines,
+	})
+}
+
 // handleSuggestRun triggers background suggest generation via `cloop suggest --yes`.
 func (s *Server) handleSuggestRun(w http.ResponseWriter, r *http.Request) {
 	if !requirePOST(w, r) {
@@ -729,8 +858,8 @@ func (s *Server) handleSuggestRun(w http.ResponseWriter, r *http.Request) {
 		s.suggestMu.Unlock()
 
 		// Force SSE broadcast of updated state (new tasks were added).
-		if ps, err := state.Load(s.WorkDir); err == nil {
-			if data, err := json.Marshal(ps); err == nil {
+		if ps, loadErr := state.Load(s.WorkDir); loadErr == nil {
+			if data, marshalErr := json.Marshal(ps); marshalErr == nil {
 				s.broadcast(string(data))
 			}
 		}
@@ -1037,6 +1166,41 @@ const dashboardHTML = `<!DOCTYPE html>
   .step-output { display:none; background:#0d1117; border-top:1px solid var(--border); padding:10px 12px; font-family:monospace; font-size:11px; white-space:pre-wrap; word-break:break-all; max-height:360px; overflow-y:auto; color:#adbac7; }
   .step-item.expanded .step-output { display:block; }
 
+  /* ── Live output panel ── */
+  .live-output-wrap { margin-bottom: 24px; }
+  .live-output-header { display:flex; align-items:center; gap:8px; margin-bottom:8px; }
+  .live-output-header .section-title { margin:0; }
+  .live-output-clear { font-size:11px; color:var(--muted); background:none; border:none; cursor:pointer; padding:2px 6px; }
+  .live-output-clear:hover { color:var(--text); }
+  .live-output-box {
+    background:#090d14;
+    border:1px solid var(--border);
+    border-radius:var(--radius);
+    padding:12px 14px;
+    font-family:'SF Mono','Consolas','Menlo',monospace;
+    font-size:12px;
+    line-height:1.6;
+    white-space:pre-wrap;
+    word-break:break-all;
+    color:#cdd9e5;
+    max-height:380px;
+    overflow-y:auto;
+    min-height:80px;
+    position:relative;
+  }
+  .live-output-box:empty::before {
+    content: 'No output yet. Start a run to see live output here.';
+    color: var(--muted);
+    font-style: italic;
+    font-family: inherit;
+  }
+  .live-output-running .live-output-box {
+    border-color: rgba(57,197,207,.35);
+    box-shadow: 0 0 0 1px rgba(57,197,207,.1);
+  }
+  .live-cursor { display:inline-block; width:7px; height:13px; background:var(--cyan); vertical-align:text-bottom; animation:blink 1s step-end infinite; }
+  @keyframes blink { 50%{opacity:0} }
+
   /* ── Suggest ── */
   .suggest-controls { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:12px; }
   .suggest-log { background:#0d1117; border:1px solid var(--border); border-radius:var(--radius); padding:12px; font-family:monospace; font-size:12px; white-space:pre-wrap; color:#adbac7; max-height:320px; overflow-y:auto; margin-top:10px; }
@@ -1224,6 +1388,15 @@ const dashboardHTML = `<!DOCTYPE html>
               <button class="btn primary" onclick="apiRunAdv(true)">Run PM with options</button>
             </div>
           </details>
+        </div>
+
+        <!-- Live Output panel -->
+        <div class="live-output-wrap" id="liveOutputWrap">
+          <div class="live-output-header">
+            <div class="section-title">Live Output</div>
+            <button class="live-output-clear" onclick="clearLiveLog()" title="Clear output">Clear</button>
+          </div>
+          <div class="live-output-box" id="liveOutputBox" role="log" aria-live="polite" aria-label="Live run output"></div>
         </div>
 
         <!-- Step history -->
@@ -1421,6 +1594,10 @@ let evtSource = null;
 let suggestPollTimer = null;
 let activeTab = 'overview';
 
+// ── Live output state ────────────────────────────────────────────────────────
+let liveLogText = '';         // accumulated text for the panel
+let liveLogAutoScroll = true; // whether to auto-scroll (user can disable by scrolling up)
+
 // ── Tab switching ───────────────────────────────────────────────────────────
 
 window.switchTab = function(name) {
@@ -1556,6 +1733,9 @@ function render(s) {
   if (activeTab === 'tasks') renderTasks(s);
 
   document.getElementById('updatedAt').textContent = s.updated_at ? fmtDate(s.updated_at) : '';
+
+  // Update live output running indicator.
+  renderLiveLog();
 }
 
 window.toggleStep = function(el) { el.classList.toggle('expanded'); };
@@ -1615,21 +1795,84 @@ function buildStatusActions(t) {
   return btns;
 }
 
+// ── Live output ──────────────────────────────────────────────────────────────
+
+function appendLiveLog(chunk) {
+  liveLogText += chunk;
+  // Keep at most ~liveLogMaxLines worth of content (trimmed from top).
+  const lines = liveLogText.split('\n');
+  if (lines.length > 500) {
+    liveLogText = lines.slice(lines.length - 500).join('\n');
+  }
+  renderLiveLog();
+}
+
+function renderLiveLog() {
+  const box = document.getElementById('liveOutputBox');
+  if (!box) return;
+  // Use a text node for safe rendering of raw output.
+  box.textContent = liveLogText;
+  // Blinking cursor appended when running.
+  const wrap = document.getElementById('liveOutputWrap');
+  const isRunning = appState && appState.status === 'running';
+  if (wrap) wrap.classList.toggle('live-output-running', isRunning);
+  if (isRunning) {
+    const cur = document.createElement('span');
+    cur.className = 'live-cursor';
+    cur.setAttribute('aria-hidden', 'true');
+    box.appendChild(cur);
+  }
+  if (liveLogAutoScroll) {
+    box.scrollTop = box.scrollHeight;
+  }
+}
+
+window.clearLiveLog = function() {
+  liveLogText = '';
+  renderLiveLog();
+};
+
 // ── SSE ─────────────────────────────────────────────────────────────────────
 
 function connectSSE() {
   if (evtSource) evtSource.close();
   evtSource = new EventSource('/api/events');
   const dot = document.getElementById('liveDot');
-  evtSource.onopen = () => dot.classList.add('connected');
+  evtSource.onopen = () => {
+    dot.classList.add('connected');
+    // On reconnect, fetch current live log buffer.
+    api('/api/livelog').then(d => {
+      if (d.lines && d.lines.length) {
+        liveLogText = d.lines.join('');
+        renderLiveLog();
+      }
+    }).catch(() => {});
+  };
   evtSource.onmessage = (e) => {
     try { render(JSON.parse(e.data)); } catch(_) {}
   };
+  evtSource.addEventListener('log', (e) => {
+    try {
+      const d = JSON.parse(e.data);
+      if (d.chunk) appendLiveLog(d.chunk);
+    } catch(_) {}
+  });
   evtSource.onerror = () => {
     dot.classList.remove('connected');
     setTimeout(connectSSE, 3000);
   };
 }
+
+// Track user scroll in live output to disable auto-scroll when they scroll up.
+document.addEventListener('DOMContentLoaded', () => {
+  const box = document.getElementById('liveOutputBox');
+  if (box) {
+    box.addEventListener('scroll', () => {
+      const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
+      liveLogAutoScroll = atBottom;
+    });
+  }
+});
 
 // ── Actions ─────────────────────────────────────────────────────────────────
 
