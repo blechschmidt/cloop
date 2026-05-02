@@ -4,11 +4,16 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/blechschmidt/cloop/pkg/workspace"
 	"github.com/spf13/cobra"
 )
 
 // globalLogJSON is the global --log-json flag value for structured NDJSON output.
 var globalLogJSON bool
+
+// globalWorkspace is the --workspace flag value. When set, all commands operate
+// in the named workspace's directory instead of the current working directory.
+var globalWorkspace string
 
 var rootCmd = &cobra.Command{
 	Use:   "cloop",
@@ -89,4 +94,17 @@ func Execute() {
 
 func init() {
 	rootCmd.PersistentFlags().BoolVar(&globalLogJSON, "log-json", false, "Emit structured NDJSON log lines for key events (task_start, task_done, step, etc.) instead of colored text. Enables piping to Datadog, Splunk, or jq.")
+	rootCmd.PersistentFlags().StringVar(&globalWorkspace, "workspace", "", "Named workspace to operate in (overrides cwd for all commands)")
+	rootCmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
+		if globalWorkspace == "" {
+			return nil
+		}
+		// Resolve the workspace path and chdir so all commands transparently
+		// use the workspace directory when calling os.Getwd().
+		workDir, err := workspace.ResolveWorkDir(globalWorkspace)
+		if err != nil {
+			return fmt.Errorf("--workspace: %w", err)
+		}
+		return os.Chdir(workDir)
+	}
 }
