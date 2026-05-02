@@ -23,6 +23,7 @@ var (
 	addPriority  int
 	addDeps      string
 	addRole      string
+	addCondition string
 	addNoAI      bool
 	addAuto      bool
 	addProvider  string
@@ -194,6 +195,7 @@ Examples:
 			role = pm.AgentRole(addRole)
 		}
 
+		taskCondition := addCondition // may be empty
 		task := &pm.Task{
 			ID:               maxID + 1,
 			Title:            spec.Title,
@@ -203,6 +205,7 @@ Examples:
 			DependsOn:        deps,
 			Tags:             spec.Tags,
 			EstimatedMinutes: spec.EstimatedMinutes,
+			Condition:        taskCondition,
 			Status:           pm.TaskPending,
 		}
 		s.Plan.Tasks = append(s.Plan.Tasks, task)
@@ -280,6 +283,7 @@ func addTaskDirect(s *state.ProjectState, description string) error {
 		Priority:    priority,
 		Role:        pm.AgentRole(addRole),
 		DependsOn:   deps,
+		Condition:   addCondition,
 		Status:      pm.TaskPending,
 	}
 	s.Plan.Tasks = append(s.Plan.Tasks, task)
@@ -301,6 +305,7 @@ func init() {
 	taskAddCmd.Flags().IntVar(&addPriority, "priority", 0, "Override AI-suggested priority (1=highest)")
 	taskAddCmd.Flags().StringVar(&addDeps, "depends-on", "", "Override dependency IDs (comma-separated, e.g. '1,2')")
 	taskAddCmd.Flags().StringVar(&addRole, "role", "", "Override AI-suggested role (backend, frontend, testing, security, devops, data, docs, review)")
+	taskAddCmd.Flags().StringVar(&addCondition, "condition", "", "Execution gate: '$cmd' runs a shell check (exit 0=proceed); any other string is sent to AI for yes/no evaluation")
 	taskAddCmd.Flags().BoolVar(&addNoAI, "no-ai", false, "Skip AI structuring; use description as task title directly")
 	taskAddCmd.Flags().BoolVar(&addAuto, "auto", false, "Skip confirmation prompt and add immediately")
 	taskAddCmd.Flags().StringVar(&addProvider, "provider", "", "AI provider to use (anthropic, openai, ollama, claudecode)")

@@ -134,6 +134,7 @@ type Task struct {
 	FailCount         int          `json:"fail_count,omitempty"`          // number of times this task has been marked failed
 	HealAttempts      int          `json:"heal_attempts,omitempty"`       // number of auto-heal re-attempts made for this task
 	Annotations       []Annotation `json:"annotations,omitempty"`         // timestamped notes from user or AI
+	Condition         string       `json:"condition,omitempty"`           // optional gate: "$cmd" = shell check, else AI yes/no prompt
 }
 
 // Plan is the full task plan for a goal.

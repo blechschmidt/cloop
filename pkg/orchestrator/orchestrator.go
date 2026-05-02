@@ -12,6 +12,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/artifact"
 	"github.com/blechschmidt/cloop/pkg/checkpoint"
+	"github.com/blechschmidt/cloop/pkg/condition"
 	"github.com/blechschmidt/cloop/pkg/cost"
 	cloopenv "github.com/blechschmidt/cloop/pkg/env"
 	"github.com/blechschmidt/cloop/pkg/diagnosis"
@@ -832,6 +833,26 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			task.Status = pm.TaskSkipped
 			s.Save()
 			continue
+		}
+
+		// Condition gate: evaluate the task's condition before execution.
+		if task.Condition != "" {
+			condOpts := provider.Options{
+				Model:   s.Model,
+				Timeout: o.config.StepTimeout,
+			}
+			res, condErr := condition.Evaluate(ctx, task, s.Plan, o.provider, condOpts, o.config.WorkDir)
+			if condErr != nil {
+				dimColor.Printf("  condition eval error for task %d (proceeding): %v\n", task.ID, condErr)
+			}
+			if !res.Proceed {
+				color.New(color.Faint).Printf("⊘ Task %d skipped (condition not met): %s\n  Condition: %s\n  Reason: %s\n",
+					task.ID, task.Title, task.Condition, res.Reason)
+				task.Status = pm.TaskSkipped
+				s.Save()
+				continue
+			}
+			dimColor.Printf("  Condition met for task %d: %s\n", task.ID, res.Reason)
 		}
 
 		// Check max steps limit
@@ -1773,6 +1794,40 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 				s.Save()
 			}
 			ready = filtered
+			if len(ready) == 0 {
+				continue
+			}
+		}
+
+		// Condition gate: evaluate each task's condition and skip those that fail.
+		{
+			condOpts := provider.Options{
+				Model:   s.Model,
+				Timeout: o.config.StepTimeout,
+			}
+			gated := ready[:0]
+			for _, t := range ready {
+				if t.Condition == "" {
+					gated = append(gated, t)
+					continue
+				}
+				res, condErr := condition.Evaluate(ctx, t, s.Plan, o.provider, condOpts, o.config.WorkDir)
+				if condErr != nil {
+					dimColor.Printf("  condition eval error for task %d (proceeding): %v\n", t.ID, condErr)
+				}
+				if !res.Proceed {
+					color.New(color.Faint).Printf("⊘ Task %d skipped (condition not met): %s\n  Condition: %s\n  Reason: %s\n",
+						t.ID, t.Title, t.Condition, res.Reason)
+					t.Status = pm.TaskSkipped
+				} else {
+					dimColor.Printf("  Condition met for task %d: %s\n", t.ID, res.Reason)
+					gated = append(gated, t)
+				}
+			}
+			if len(ready) != len(gated) {
+				s.Save()
+			}
+			ready = gated
 			if len(ready) == 0 {
 				continue
 			}

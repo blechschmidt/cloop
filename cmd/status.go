@@ -119,6 +119,17 @@ var statusCmd = &cobra.Command{
 						reviewSuffix = color.New(color.FgRed).Sprint(" [review:FAIL]")
 					}
 					fmt.Printf("          %s Task %d: %s%s%s%s\n", taskMarker(t.Status), t.ID, t.Title, failCountSuffix, notesSuffix, reviewSuffix)
+					if t.Condition != "" {
+						condStr := t.Condition
+						if len(condStr) > 80 {
+							condStr = condStr[:80] + "..."
+						}
+						condColor := color.New(color.Faint)
+						if t.Status == pm.TaskSkipped {
+							condColor = color.New(color.FgYellow)
+						}
+						condColor.Printf("            [condition: %s]\n", condStr)
+					}
 					if t.Status == pm.TaskFailed && t.FailureDiagnosis != "" {
 						diag := t.FailureDiagnosis
 						if len(diag) > 300 {
