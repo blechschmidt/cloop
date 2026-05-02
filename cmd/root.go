@@ -65,6 +65,10 @@ Supports Anthropic (Claude API), OpenAI, Ollama (local), and Claude Code.
   cloop suggest --count 10                              # brainstorm 10 ideas
   cloop suggest --yes                                   # auto-accept all suggestions
   cloop suggest --dry-run                               # show ideas without adding tasks
+  cloop changelog                                       # AI-generated CHANGELOG from task history
+  cloop changelog --dry-run                             # print changelog to stdout
+  cloop changelog --since 2024-01-01                   # only include work after a date
+  cloop changelog --format json                         # emit JSON instead of markdown
   cloop status
   cloop log`,
 }
