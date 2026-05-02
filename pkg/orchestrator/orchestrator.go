@@ -12,6 +12,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/artifact"
 	"github.com/blechschmidt/cloop/pkg/cost"
+	cloopgit "github.com/blechschmidt/cloop/pkg/git"
 	"github.com/blechschmidt/cloop/pkg/hooks"
 	"github.com/blechschmidt/cloop/pkg/memory"
 	"github.com/blechschmidt/cloop/pkg/notify"
@@ -122,6 +123,12 @@ type Config struct {
 
 	// Hooks configures shell commands run at task and plan lifecycle events.
 	Hooks hooks.Config
+
+	// GitMode enables per-task git branch workflow in PM mode (sequential only).
+	// Each task is executed on a dedicated branch cloop/task-<id>-<slug>.
+	// On TASK_DONE the branch is committed and merged back to the original branch.
+	// On TASK_FAILED the branch is left open for inspection.
+	GitMode bool
 }
 
 type Orchestrator struct {
@@ -481,6 +488,18 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 	}()
 
 	// Phase 2: Execute tasks in priority order
+
+	// Capture the original git branch once before execution so we can merge back.
+	var gitOriginalBranch string
+	if o.config.GitMode {
+		var gitErr error
+		gitOriginalBranch, gitErr = cloopgit.CurrentBranch(o.config.WorkDir)
+		if gitErr != nil {
+			failColor.Printf("✗ --git: could not determine current branch: %v — disabling git mode.\n", gitErr)
+			o.config.GitMode = false
+		}
+	}
+
 	consecutiveErrors := 0
 	maxConsecutiveErrors := o.config.MaxFailures
 	if maxConsecutiveErrors <= 0 {
@@ -648,6 +667,19 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			task.Status = pm.TaskDone
 			s.Save()
 			continue
+		}
+
+		// Git mode: create a dedicated branch for this task before execution.
+		var gitTaskBranch string
+		if o.config.GitMode {
+			var gitErr error
+			gitTaskBranch, gitErr = cloopgit.CreateTaskBranch(o.config.WorkDir, task)
+			if gitErr != nil {
+				dimColor.Printf("  git branch error (ignored): %v\n", gitErr)
+				gitTaskBranch = ""
+			} else {
+				dimColor.Printf("  git: checked out branch %s\n", gitTaskBranch)
+			}
 		}
 
 		// Select provider: role-specific route takes precedence over default.
@@ -863,6 +895,26 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 
 		// Persist full AI response as a Markdown artifact file.
 		o.writeTaskArtifact(task, result.Output)
+
+		// Git mode: commit and merge on success; leave branch open on failure.
+		if o.config.GitMode && gitTaskBranch != "" {
+			switch task.Status {
+			case pm.TaskDone, pm.TaskSkipped:
+				if commitErr := cloopgit.CommitTaskArtifacts(o.config.WorkDir, task); commitErr != nil {
+					dimColor.Printf("  git commit error (ignored): %v\n", commitErr)
+				} else if mergeErr := cloopgit.MergeBranch(o.config.WorkDir, gitOriginalBranch, gitTaskBranch); mergeErr != nil {
+					dimColor.Printf("  git merge error (ignored): %v\n", mergeErr)
+				} else {
+					dimColor.Printf("  git: merged %s → %s\n", gitTaskBranch, gitOriginalBranch)
+				}
+			case pm.TaskFailed:
+				dimColor.Printf("  git: leaving branch %s open for inspection (task failed)\n", gitTaskBranch)
+				// Return to original branch so the next task can start from it.
+				if checkoutErr := cloopgit.CheckoutBranch(o.config.WorkDir, gitOriginalBranch); checkoutErr != nil {
+					dimColor.Printf("  git checkout original branch error (ignored): %v\n", checkoutErr)
+				}
+			}
+		}
 
 		// Post-task hook: always run regardless of task outcome.
 		if hookErr := hooks.RunPostTask(o.config.Hooks, hooks.TaskContext{
