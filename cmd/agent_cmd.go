@@ -26,6 +26,11 @@ var (
 	agentModel       string
 	agentTail        int
 	agentLogLines    int
+
+	// agentRun flags
+	agentRunMaxSteps int
+	agentRunTimeout  string
+	agentRunDryRun   bool
 )
 
 var agentCmd = &cobra.Command{
@@ -556,6 +561,109 @@ func countTasks(ps *state.ProjectState, status string) int {
 	return n
 }
 
+// agentRunCmd is the ReAct-style autonomous tool-using agent.
+var agentRunCmd = &cobra.Command{
+	Use:   "run <goal>",
+	Short: "Run an autonomous tool-using ReAct agent to accomplish a goal",
+	Long: `Run an autonomous ReAct (Reason + Act) agent that drives a think→act→observe
+loop until the goal is achieved or the step limit is reached.
+
+The agent has access to built-in tools:
+  read_file     — read file contents
+  write_file    — create or overwrite files
+  run_shell     — execute shell commands
+  search_files  — find files by glob pattern
+  web_fetch     — fetch a URL's content
+
+Examples:
+  cloop agent run "List all Go source files and count lines of code"
+  cloop agent run "Read README.md and summarise the key points"
+  cloop agent run --dry-run "Create a hello.txt file with 'Hello World'"
+  cloop agent run --max-steps 30 "Refactor the config package to add validation"`,
+	Args: cobra.MinimumNArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		goal := strings.Join(args, " ")
+		workDir, _ := os.Getwd()
+
+		// Parse timeout
+		timeout := 2 * time.Minute
+		if agentRunTimeout != "" {
+			d, err := time.ParseDuration(agentRunTimeout)
+			if err != nil {
+				return fmt.Errorf("invalid --timeout: %w", err)
+			}
+			timeout = d
+		}
+
+		// Load config and build provider
+		cfg, err := config.Load(workDir)
+		if err != nil {
+			return fmt.Errorf("loading config: %w", err)
+		}
+
+		providerName := agentProvider
+		if providerName == "" {
+			providerName = cfg.Provider
+		}
+		if providerName == "" {
+			providerName = "claudecode"
+		}
+
+		model := agentModel
+		if model == "" {
+			switch providerName {
+			case "anthropic":
+				model = cfg.Anthropic.Model
+			case "openai":
+				model = cfg.OpenAI.Model
+			case "ollama":
+				model = cfg.Ollama.Model
+			case "claudecode":
+				model = cfg.ClaudeCode.Model
+			}
+		}
+
+		provCfg := provider.ProviderConfig{
+			Name:             providerName,
+			AnthropicAPIKey:  cfg.Anthropic.APIKey,
+			AnthropicBaseURL: cfg.Anthropic.BaseURL,
+			OpenAIAPIKey:     cfg.OpenAI.APIKey,
+			OpenAIBaseURL:    cfg.OpenAI.BaseURL,
+			OllamaBaseURL:    cfg.Ollama.BaseURL,
+		}
+		prov, err := provider.Build(provCfg)
+		if err != nil {
+			return fmt.Errorf("building provider %q: %w", providerName, err)
+		}
+
+		a := agent.New(agent.AgentConfig{
+			Provider: prov,
+			Model:    model,
+			Timeout:  timeout,
+			DryRun:   agentRunDryRun,
+			WorkDir:  workDir,
+		})
+
+		ctx, cancel := context.WithCancel(context.Background())
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+		go func() {
+			<-sigCh
+			cancel()
+		}()
+		defer signal.Stop(sigCh)
+
+		if _, err := a.Run(ctx, goal, agentRunMaxSteps); err != nil {
+			if ctx.Err() != nil {
+				color.New(color.FgYellow, color.Bold).Printf("\nAgent interrupted.\n")
+				return nil
+			}
+			return err
+		}
+		return nil
+	},
+}
+
 // agentClearLogsCmd truncates the log file.
 var agentClearLogsCmd = &cobra.Command{
 	Use:   "clear-logs",
@@ -653,6 +761,14 @@ func init() {
 	agentWorkerCmd.Flags().StringVar(&agentProvider, "provider", "", "")
 	agentWorkerCmd.Flags().StringVar(&agentModel, "model", "", "")
 
+	// agentRunCmd flags
+	agentRunCmd.Flags().IntVar(&agentRunMaxSteps, "max-steps", 20, "Maximum number of ReAct steps before stopping")
+	agentRunCmd.Flags().StringVar(&agentRunTimeout, "timeout", "2m", "Per-step provider timeout (e.g. 30s, 2m, 5m)")
+	agentRunCmd.Flags().BoolVar(&agentRunDryRun, "dry-run", false, "Print actions without executing shell/write tools")
+	agentRunCmd.Flags().StringVar(&agentProvider, "provider", "", "AI provider (default: from config)")
+	agentRunCmd.Flags().StringVar(&agentModel, "model", "", "Model to use")
+
+	agentCmd.AddCommand(agentRunCmd)
 	agentCmd.AddCommand(agentStartCmd)
 	agentCmd.AddCommand(agentStopCmd)
 	agentCmd.AddCommand(agentStatusCmd)
