@@ -30,6 +30,8 @@ var (
 	stepTimeout     string
 	runTimeout      string
 	runMaxTokens    int
+	runTemperature  float64
+	runTopP         float64
 	verbose         bool
 	dryRun          bool
 	continueSteps   int
@@ -189,6 +191,25 @@ Press Ctrl+C to pause gracefully.`,
 			}
 		}
 
+		// Resolve inference parameters: flag > per-provider config > nil (provider default).
+		// A flag value of -1 means "not set"; use config if present.
+		effectiveTemperature := resolveFloatParam(runTemperature, providerName, cfg, "temperature")
+		effectiveTopP := resolveFloatParam(runTopP, providerName, cfg, "top_p")
+		effectiveFreqPenalty := resolveFloatParam(-1, providerName, cfg, "frequency_penalty")
+
+		// MaxTokens: flag > per-provider config > 0 (orchestrator default)
+		effectiveMaxTokens := runMaxTokens
+		if effectiveMaxTokens == 0 {
+			switch providerName {
+			case "anthropic":
+				effectiveMaxTokens = cfg.Anthropic.MaxTokens
+			case "openai":
+				effectiveMaxTokens = cfg.OpenAI.MaxTokens
+			case "ollama":
+				effectiveMaxTokens = cfg.Ollama.MaxTokens
+			}
+		}
+
 		prov, err := buildProviderWithFallback(providerName, provCfg, fallbackProviders, cfg)
 		if err != nil {
 			return fmt.Errorf("provider: %w", err)
@@ -290,7 +311,10 @@ Press Ctrl+C to pause gracefully.`,
 			},
 			WorkDir:          workdir,
 			Model:            model,
-			MaxTokens:        runMaxTokens,
+			MaxTokens:        effectiveMaxTokens,
+			Temperature:      effectiveTemperature,
+			TopP:             effectiveTopP,
+			FrequencyPenalty: effectiveFreqPenalty,
 			StepTimeout:      timeout,
 			Verbose:          verbose,
 			DryRun:           dryRun,
@@ -461,6 +485,41 @@ func applyEnvOverrides(cfg *config.Config) {
 	}
 }
 
+// resolveFloatParam resolves an inference parameter: if flagVal >= 0 it is used;
+// otherwise the per-provider config value is returned (nil when not configured).
+func resolveFloatParam(flagVal float64, providerName string, cfg *config.Config, param string) *float64 {
+	if flagVal >= 0 {
+		v := flagVal
+		return &v
+	}
+	// Fall back to per-provider config
+	switch param {
+	case "temperature":
+		switch providerName {
+		case "anthropic":
+			return cfg.Anthropic.Temperature
+		case "openai":
+			return cfg.OpenAI.Temperature
+		case "ollama":
+			return cfg.Ollama.Temperature
+		}
+	case "top_p":
+		switch providerName {
+		case "anthropic":
+			return cfg.Anthropic.TopP
+		case "openai":
+			return cfg.OpenAI.TopP
+		case "ollama":
+			return cfg.Ollama.TopP
+		}
+	case "frequency_penalty":
+		if providerName == "openai" {
+			return cfg.OpenAI.FrequencyPenalty
+		}
+	}
+	return nil
+}
+
 // buildProviderWithFallback builds the primary provider and optionally wraps it
 // in a fallback chain if --fallback names are provided.
 func buildProviderWithFallback(primaryName string, primaryCfg provider.ProviderConfig, fallbackNames []string, cfg *config.Config) (provider.Provider, error) {
@@ -505,7 +564,9 @@ func init() {
 	runCmd.Flags().StringVar(&runModel, "model", "", "Override model for this run")
 	runCmd.Flags().StringVar(&stepTimeout, "step-timeout", "10m", "Timeout per step")
 	runCmd.Flags().StringVar(&runTimeout, "timeout", "", "Total session timeout (e.g. 30m, 2h); 0 = no limit")
-	runCmd.Flags().IntVar(&runMaxTokens, "max-tokens", 0, "Max output tokens per step")
+	runCmd.Flags().IntVar(&runMaxTokens, "max-tokens", 0, "Max output tokens per step (overrides config provider.max_tokens)")
+	runCmd.Flags().Float64Var(&runTemperature, "temperature", -1, "Sampling temperature override (0–1 for Anthropic/Ollama, 0–2 for OpenAI; -1 = use config/provider default)")
+	runCmd.Flags().Float64Var(&runTopP, "top-p", -1, "Top-p nucleus sampling override (0–1; -1 = use config/provider default)")
 	runCmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "Verbose output")
 	runCmd.Flags().BoolVar(&dryRun, "dry-run", false, "Show prompts without running the provider")
 	runCmd.Flags().IntVar(&continueSteps, "add-steps", 0, "Add more steps to max before running")

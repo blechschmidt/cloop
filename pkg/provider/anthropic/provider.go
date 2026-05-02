@@ -52,11 +52,13 @@ type message struct {
 }
 
 type requestBody struct {
-	Model     string    `json:"model"`
-	MaxTokens int       `json:"max_tokens"`
-	System    string    `json:"system,omitempty"`
-	Messages  []message `json:"messages"`
-	Stream    bool      `json:"stream,omitempty"`
+	Model       string    `json:"model"`
+	MaxTokens   int       `json:"max_tokens"`
+	System      string    `json:"system,omitempty"`
+	Messages    []message `json:"messages"`
+	Stream      bool      `json:"stream,omitempty"`
+	Temperature *float64  `json:"temperature,omitempty"`
+	TopP        *float64  `json:"top_p,omitempty"`
 }
 
 type responseBody struct {
@@ -124,10 +126,12 @@ func (p *Provider) Complete(ctx context.Context, prompt string, opts provider.Op
 	useStream := opts.OnToken != nil
 
 	body := requestBody{
-		Model:     model,
-		MaxTokens: maxTokens,
-		Messages:  []message{{Role: "user", Content: prompt}},
-		Stream:    useStream,
+		Model:       model,
+		MaxTokens:   maxTokens,
+		Messages:    []message{{Role: "user", Content: prompt}},
+		Stream:      useStream,
+		Temperature: opts.Temperature,
+		TopP:        opts.TopP,
 	}
 	if opts.SystemPrompt != "" {
 		body.System = opts.SystemPrompt

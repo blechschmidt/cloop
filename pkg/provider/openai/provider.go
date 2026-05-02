@@ -52,10 +52,13 @@ type chatMessage struct {
 }
 
 type requestBody struct {
-	Model     string        `json:"model"`
-	MaxTokens int           `json:"max_tokens,omitempty"`
-	Messages  []chatMessage `json:"messages"`
-	Stream    bool          `json:"stream,omitempty"`
+	Model            string        `json:"model"`
+	MaxTokens        int           `json:"max_tokens,omitempty"`
+	Messages         []chatMessage `json:"messages"`
+	Stream           bool          `json:"stream,omitempty"`
+	Temperature      *float64      `json:"temperature,omitempty"`
+	TopP             *float64      `json:"top_p,omitempty"`
+	FrequencyPenalty *float64      `json:"frequency_penalty,omitempty"`
 }
 
 type responseBody struct {
@@ -118,10 +121,13 @@ func (p *Provider) Complete(ctx context.Context, prompt string, opts provider.Op
 	useStream := opts.OnToken != nil
 
 	reqBody := requestBody{
-		Model:     model,
-		MaxTokens: opts.MaxTokens,
-		Messages:  messages,
-		Stream:    useStream,
+		Model:            model,
+		MaxTokens:        opts.MaxTokens,
+		Messages:         messages,
+		Stream:           useStream,
+		Temperature:      opts.Temperature,
+		TopP:             opts.TopP,
+		FrequencyPenalty: opts.FrequencyPenalty,
 	}
 
 	data, err := json.Marshal(reqBody)

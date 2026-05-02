@@ -113,6 +113,11 @@ type AnthropicConfig struct {
 	APIKey  string `yaml:"api_key"`
 	Model   string `yaml:"model"`
 	BaseURL string `yaml:"base_url"`
+
+	// Inference parameters (nil = use provider default)
+	Temperature *float64 `yaml:"temperature,omitempty"`
+	TopP        *float64 `yaml:"top_p,omitempty"`
+	MaxTokens   int      `yaml:"max_tokens,omitempty"`
 }
 
 type OpenAIConfig struct {
@@ -121,11 +126,22 @@ type OpenAIConfig struct {
 	Model   string `yaml:"model"`
 	// Optional: set for Azure OpenAI or OpenAI-compatible servers
 	BaseURL string `yaml:"base_url"`
+
+	// Inference parameters (nil = use provider default)
+	Temperature      *float64 `yaml:"temperature,omitempty"`
+	TopP             *float64 `yaml:"top_p,omitempty"`
+	FrequencyPenalty *float64 `yaml:"frequency_penalty,omitempty"`
+	MaxTokens        int      `yaml:"max_tokens,omitempty"`
 }
 
 type OllamaConfig struct {
 	BaseURL string `yaml:"base_url"`
 	Model   string `yaml:"model"`
+
+	// Inference parameters (nil = use provider default)
+	Temperature *float64 `yaml:"temperature,omitempty"`
+	TopP        *float64 `yaml:"top_p,omitempty"`
+	MaxTokens   int      `yaml:"max_tokens,omitempty"`
 }
 
 type ClaudeCodeConfig struct {

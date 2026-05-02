@@ -55,6 +55,11 @@ type Config struct {
 	Model       string
 	MaxTokens   int
 	StepTimeout time.Duration
+
+	// Inference parameter overrides (nil = use provider default).
+	Temperature      *float64
+	TopP             *float64
+	FrequencyPenalty *float64
 	Verbose     bool
 	DryRun      bool
 	PMMode      bool
@@ -2791,10 +2796,13 @@ func (o *Orchestrator) buildConsensusProviders(primary provider.Provider) []prov
 func (o *Orchestrator) makeOpts(model string, streaming bool) (provider.Options, func() bool) {
 	var streamed bool
 	opts := provider.Options{
-		Model:     model,
-		MaxTokens: o.config.MaxTokens,
-		Timeout:   o.config.StepTimeout,
-		WorkDir:   o.config.WorkDir,
+		Model:            model,
+		MaxTokens:        o.config.MaxTokens,
+		Timeout:          o.config.StepTimeout,
+		WorkDir:          o.config.WorkDir,
+		Temperature:      o.config.Temperature,
+		TopP:             o.config.TopP,
+		FrequencyPenalty: o.config.FrequencyPenalty,
 	}
 	if streaming && o.config.Streaming {
 		opts.OnToken = func(token string) {

@@ -52,7 +52,9 @@ type requestBody struct {
 }
 
 type ollamaOptions struct {
-	NumPredict int `json:"num_predict,omitempty"`
+	NumPredict  int      `json:"num_predict,omitempty"`
+	Temperature *float64 `json:"temperature,omitempty"`
+	TopP        *float64 `json:"top_p,omitempty"`
 }
 
 type responseBody struct {
@@ -92,8 +94,12 @@ func (p *Provider) Complete(ctx context.Context, prompt string, opts provider.Op
 		Messages: messages,
 		Stream:   useStream,
 	}
-	if opts.MaxTokens > 0 {
-		reqBody.Options = &ollamaOptions{NumPredict: opts.MaxTokens}
+	if opts.MaxTokens > 0 || opts.Temperature != nil || opts.TopP != nil {
+		reqBody.Options = &ollamaOptions{
+			NumPredict:  opts.MaxTokens,
+			Temperature: opts.Temperature,
+			TopP:        opts.TopP,
+		}
 	}
 
 	data, err := json.Marshal(reqBody)

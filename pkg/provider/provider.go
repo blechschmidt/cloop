@@ -16,6 +16,14 @@ type Options struct {
 	// When set, the provider should use streaming mode.
 	// The full output is still returned in Result.Output.
 	OnToken func(token string)
+
+	// Inference parameters — nil means "use provider default".
+	// Temperature controls randomness (0 = deterministic, higher = more creative).
+	// TopP is nucleus sampling threshold (0–1).
+	// FrequencyPenalty reduces repetition (OpenAI only, 0–2).
+	Temperature      *float64
+	TopP             *float64
+	FrequencyPenalty *float64
 }
 
 // Result from a completion request.
