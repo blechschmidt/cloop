@@ -30,7 +30,8 @@ Subcommands:
   import <file>        Import a plan from a portable file (--merge or --replace)
   critique             AI adversarial plan review — devil's advocate pressure-test
   ai-brief             Generate a one-page AI executive brief for stakeholders
-  ai-roadmap           Generate a quarterly milestone roadmap with ASCII/MD/HTML output`,
+  ai-roadmap           Generate a quarterly milestone roadmap with ASCII/MD/HTML output
+  ai-epic              Cluster tasks into 3-7 named epics/themes using AI`,
 }
 
 var planHistoryCmd = &cobra.Command{

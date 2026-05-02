@@ -22,6 +22,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/blocker"
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/cost"
+	"github.com/blechschmidt/cloop/pkg/epic"
 	"github.com/blechschmidt/cloop/pkg/kb"
 	"github.com/blechschmidt/cloop/pkg/multiui"
 	"github.com/blechschmidt/cloop/pkg/pm"
@@ -314,6 +315,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 
 	// Analytics dashboard
 	mux.HandleFunc("GET /api/analytics", s.handleAnalytics)
+	mux.HandleFunc("GET /api/epics", s.handleEpics)
 
 	// Multi-project dashboard
 	mux.HandleFunc("/api/projects", s.handleProjects)
@@ -3096,6 +3098,28 @@ func (s *Server) handleAnalytics(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleEpics returns the epic groupings derived from "epic:" task tags.
+// It rebuilds epics from existing tags in the plan — no AI call is made here.
+// GET /api/epics
+func (s *Server) handleEpics(w http.ResponseWriter, r *http.Request) {
+	workDir := s.resolveWorkDir(r)
+
+	ps, err := state.Load(workDir)
+	if err != nil || ps.Plan == nil {
+		jsonOK(w, map[string]interface{}{"epics": []interface{}{}})
+		return
+	}
+
+	epics := epic.EpicsFromTags(ps.Plan)
+	if len(epics) == 0 {
+		jsonOK(w, map[string]interface{}{"epics": []interface{}{}})
+		return
+	}
+
+	progress := epic.Progress(ps.Plan, epics)
+	jsonOK(w, map[string]interface{}{"epics": progress})
+}
+
 // ── dashboard HTML ────────────────────────────────────────────────────────────
 
 const dashboardHTML = `<!DOCTYPE html>
@@ -5289,6 +5313,14 @@ const dashboardHTML = `<!DOCTYPE html>
             <div id="analyticsLatencyEmpty" style="display:none;color:var(--muted);font-size:12px;text-align:center;padding:8px 0">
               No latency data yet — run tasks to populate.
             </div>
+          </div>
+        </div>
+
+        <!-- Row 4: Epics progress -->
+        <div style="margin-top:16px">
+          <div class="analytics-card" id="epicsCard" style="display:none">
+            <div class="analytics-card-title">Epic Progress</div>
+            <div id="epicsList" style="padding:4px 0"></div>
           </div>
         </div>
 
@@ -8842,6 +8874,11 @@ window.loadAnalytics = function() {
     console.warn('analytics load error', err);
   });
 
+  // Load epics panel separately (no date filter needed).
+  api(pUrl('/api/epics')).then(d => {
+    _renderEpics(d);
+  }).catch(() => {});
+
   // Restart 30s auto-refresh timer.
   if (_analyticsTimer) clearTimeout(_analyticsTimer);
   _analyticsTimer = setTimeout(() => {
@@ -9046,6 +9083,55 @@ function _renderAnalytics(d) {
   // Last-refresh timestamp.
   const lr = document.getElementById('analyticsLastRefresh');
   if (lr) lr.textContent = 'Last refreshed: ' + new Date().toLocaleTimeString();
+}
+
+// ── Epics panel renderer ───────────────────────────────────────
+function _renderEpics(d) {
+  const card = document.getElementById('epicsCard');
+  const list = document.getElementById('epicsList');
+  if (!card || !list) return;
+
+  const epics = (d && d.epics) || [];
+  if (epics.length === 0) {
+    card.style.display = 'none';
+    return;
+  }
+
+  const epicPalette = [
+    '#58a6ff', '#3fb950', '#f78166', '#d2a8ff', '#ffa657', '#79c0ff', '#ff7b72',
+  ];
+
+  let html = '';
+  epics.forEach((ep, i) => {
+    const color = epicPalette[i % epicPalette.length];
+    const total = ep.total || 0;
+    const done  = ep.done  || 0;
+    const pct   = total > 0 ? Math.round(done * 100 / total) : 0;
+    const desc  = ep.description || '';
+
+    html += '<div style="margin-bottom:14px">';
+    html += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">';
+    html += '<span style="font-size:13px;font-weight:600;color:' + color + '">' + esc(ep.name) + '</span>';
+    html += '<span style="font-size:11px;color:var(--muted)">' + done + ' / ' + total + ' done &nbsp;(' + pct + '%)</span>';
+    html += '</div>';
+    if (desc) {
+      html += '<div style="font-size:11px;color:var(--muted);margin-bottom:5px">' + esc(desc) + '</div>';
+    }
+    // Progress bar
+    html += '<div style="height:8px;background:var(--border);border-radius:4px;overflow:hidden">';
+    html += '<div style="height:100%;width:' + pct + '%;background:' + color + ';border-radius:4px;transition:width .3s"></div>';
+    html += '</div>';
+    // Stat badges
+    html += '<div style="display:flex;gap:8px;margin-top:4px;flex-wrap:wrap">';
+    if (ep.pending  > 0) html += '<span style="font-size:10px;color:var(--muted)">' + ep.pending  + ' pending</span>';
+    if (ep.failed   > 0) html += '<span style="font-size:10px;color:#f78166">'      + ep.failed   + ' failed</span>';
+    if (ep.skipped  > 0) html += '<span style="font-size:10px;color:var(--muted)">' + ep.skipped  + ' skipped</span>';
+    html += '</div>';
+    html += '</div>';
+  });
+
+  list.innerHTML = html;
+  card.style.display = '';
 }
 
 // ── Mobile nav helpers ─────────────────────────────────────────
