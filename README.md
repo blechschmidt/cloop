@@ -4,23 +4,6 @@
 
 cloop drives AI providers (Claude Code, Anthropic API, OpenAI, Ollama) in a goal-driven autonomous loop. Define a project goal and cloop iterates until it's done — decomposing work into tasks, executing them, reviewing code, forecasting delivery, and continuously improving.
 
-## Screenshots
-
-### Multi-Project Overview
-![Projects Overview](docs/screenshots/01-projects-overview.png)
-
-### Task Management
-![Tasks](docs/screenshots/03-tasks.png)
-
-### Project Overview
-![Project Overview](docs/screenshots/02-cloop-overview.png)
-
-### Step History
-![Steps](docs/screenshots/04-steps.png)
-
-### Settings
-![Settings](docs/screenshots/05-settings.png)
-
 ## Install
 
 ```bash
@@ -1307,3 +1290,20 @@ resolves all known stdlib vulnerabilities.
 ## License
 
 MIT
+
+## Screenshots
+
+### Multi-Project Overview
+![Projects Overview](docs/screenshots/01-projects-overview.png)
+
+### Task Management
+![Tasks](docs/screenshots/03-tasks.png)
+
+### Project Overview
+![Project Overview](docs/screenshots/02-cloop-overview.png)
+
+### Step History
+![Steps](docs/screenshots/04-steps.png)
+
+### Settings
+![Settings](docs/screenshots/05-settings.png)
