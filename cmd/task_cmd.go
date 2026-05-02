@@ -87,6 +87,7 @@ Subcommands:
   untag <id> <tag...>    Remove one or more tags from a task
   annotate <id> <text>   Append a user note to a task
   notes <id>             List all annotations for a task
+  query <question>       Answer a natural language question about the plan
 
 Task dependencies:
   Use --deps when adding or editing tasks to specify prerequisites.
