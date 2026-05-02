@@ -85,6 +85,7 @@ Subcommands:
   annotate <id> <text>   Append a user note to a task
   notes <id>             List all annotations for a task
   query <question>       Answer a natural language question about the plan
+  merge <id1> <id2>...   Merge multiple tasks into one AI-synthesised task
 
 Task dependencies:
   Use --deps when adding or editing tasks to specify prerequisites.
@@ -934,6 +935,13 @@ var (
 	splitTimeout  string
 )
 
+var (
+	mergeYes      bool
+	mergeProvider string
+	mergeModel    string
+	mergeTimeout  string
+)
+
 var taskSplitCmd = &cobra.Command{
 	Use:   "split <id>",
 	Short: "AI-powered task decomposition: split a task into smaller subtasks",
@@ -1114,6 +1122,201 @@ Examples:
 	},
 }
 
+var taskMergeCmd = &cobra.Command{
+	Use:   "merge <id1> <id2> [id3...]",
+	Short: "AI-powered task merging: combine multiple tasks into one",
+	Long: `Ask the AI to synthesise a merged task from the selected tasks' titles,
+descriptions, and annotations. The merged task inherits:
+  - Union of all dependencies (excluding internal ones) and tags
+  - Highest priority (lowest number) among input tasks
+  - Earliest deadline among input tasks
+
+After optional confirmation the input tasks are marked skipped and the new
+merged task is appended to the plan.
+
+Examples:
+  cloop task merge 3 5
+  cloop task merge 1 2 4 --yes
+  cloop task merge 7 8 --provider anthropic --model claude-opus-4-5`,
+	Args: cobra.MinimumNArgs(2),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		workdir, _ := os.Getwd()
+
+		s, err := state.Load(workdir)
+		if err != nil {
+			return err
+		}
+		if !s.PMMode || s.Plan == nil || len(s.Plan.Tasks) == 0 {
+			return fmt.Errorf("no task plan found — run 'cloop run --pm' to create one")
+		}
+
+		// Build provider
+		cfg, err := config.Load(workdir)
+		if err != nil {
+			return fmt.Errorf("loading config: %w", err)
+		}
+		applyEnvOverrides(cfg)
+
+		pName := mergeProvider
+		if pName == "" {
+			pName = cfg.Provider
+		}
+		if pName == "" && s.Provider != "" {
+			pName = s.Provider
+		}
+		if pName == "" {
+			pName = autoSelectProvider()
+		}
+
+		model := mergeModel
+		if model == "" {
+			switch pName {
+			case "anthropic":
+				model = cfg.Anthropic.Model
+			case "openai":
+				model = cfg.OpenAI.Model
+			case "ollama":
+				model = cfg.Ollama.Model
+			case "claudecode":
+				model = cfg.ClaudeCode.Model
+			}
+		}
+		if model == "" {
+			model = s.Model
+		}
+
+		provCfg := provider.ProviderConfig{
+			Name:             pName,
+			AnthropicAPIKey:  cfg.Anthropic.APIKey,
+			AnthropicBaseURL: cfg.Anthropic.BaseURL,
+			OpenAIAPIKey:     cfg.OpenAI.APIKey,
+			OpenAIBaseURL:    cfg.OpenAI.BaseURL,
+			OllamaBaseURL:    cfg.Ollama.BaseURL,
+		}
+		prov, err := provider.Build(provCfg)
+		if err != nil {
+			return fmt.Errorf("provider: %w", err)
+		}
+
+		timeout := 5 * time.Minute
+		if mergeTimeout != "" {
+			timeout, err = time.ParseDuration(mergeTimeout)
+			if err != nil {
+				return fmt.Errorf("invalid timeout: %w", err)
+			}
+		}
+
+		dimColor := color.New(color.Faint)
+		headerColor := color.New(color.FgCyan, color.Bold)
+		warnColor := color.New(color.FgYellow)
+
+		// Show input tasks
+		headerColor.Printf("Merging %d tasks into one...\n\n", len(args))
+		for _, idStr := range args {
+			var id int
+			if _, scanErr := fmt.Sscanf(idStr, "%d", &id); scanErr != nil {
+				return fmt.Errorf("invalid task ID %q: must be a number", idStr)
+			}
+			var t *pm.Task
+			for _, task := range s.Plan.Tasks {
+				if task.ID == id {
+					t = task
+					break
+				}
+			}
+			if t == nil {
+				return fmt.Errorf("task %d not found", id)
+			}
+			rolePart := ""
+			if t.Role != "" {
+				rolePart = fmt.Sprintf(" [%s]", t.Role)
+			}
+			dimColor.Printf("  #%d%s %s\n", t.ID, rolePart, t.Title)
+		}
+		fmt.Println()
+
+		// Deep-copy plan so we can preview before committing
+		planCopy := &pm.Plan{
+			Goal:    s.Plan.Goal,
+			Tasks:   make([]*pm.Task, len(s.Plan.Tasks)),
+			Version: s.Plan.Version,
+		}
+		for i, t := range s.Plan.Tasks {
+			tc := *t
+			// deep-copy slices
+			if tc.DependsOn != nil {
+				tc.DependsOn = append([]int{}, tc.DependsOn...)
+			}
+			if tc.Tags != nil {
+				tc.Tags = append([]string{}, tc.Tags...)
+			}
+			planCopy.Tasks[i] = &tc
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+
+		opts := pm.MergeOptions{
+			Provider: provider.Options{
+				Model:   model,
+				Timeout: timeout,
+			},
+		}
+
+		newTask, err := pm.Merge(ctx, prov, opts, planCopy, args)
+		if err != nil {
+			return fmt.Errorf("merge failed: %w", err)
+		}
+
+		// Preview merged task
+		fmt.Printf("Proposed merged task:\n\n")
+		rolePart := ""
+		if newTask.Role != "" {
+			rolePart = fmt.Sprintf(" [%s]", newTask.Role)
+		}
+		warnColor.Printf("  #%d%s %s\n", newTask.ID, rolePart, newTask.Title)
+		if newTask.Description != "" {
+			dimColor.Printf("       %s\n", truncateStr(newTask.Description, 140))
+		}
+		if len(newTask.DependsOn) > 0 {
+			deps := make([]string, 0, len(newTask.DependsOn))
+			for _, depID := range newTask.DependsOn {
+				deps = append(deps, fmt.Sprintf("#%d", depID))
+			}
+			dimColor.Printf("       depends on: %s\n", strings.Join(deps, ", "))
+		}
+		if len(newTask.Tags) > 0 {
+			dimColor.Printf("       tags: %s\n", strings.Join(newTask.Tags, ", "))
+		}
+		fmt.Println()
+
+		// Confirm unless --yes
+		if !mergeYes {
+			fmt.Printf("Apply merge? Input tasks will be marked skipped. (y/N): ")
+			scanner := bufio.NewScanner(os.Stdin)
+			if !scanner.Scan() {
+				return fmt.Errorf("no input received")
+			}
+			answer := strings.TrimSpace(strings.ToLower(scanner.Text()))
+			if answer != "y" && answer != "yes" {
+				fmt.Println("Merge cancelled.")
+				return nil
+			}
+		}
+
+		// Apply: replace active plan with the modified copy
+		s.Plan = planCopy
+
+		if err := s.Save(); err != nil {
+			return fmt.Errorf("saving state: %w", err)
+		}
+
+		color.New(color.FgGreen).Printf("Merge applied: %d tasks merged into task #%d — %s\n",
+			len(args), newTask.ID, newTask.Title)
+		return nil
+	},
+}
+
 var taskAnnotateCmd = &cobra.Command{
 	Use:   "annotate <id> <text>",
 	Short: "Append a user note to a task",
@@ -1243,6 +1446,11 @@ func init() {
 	taskSplitCmd.Flags().StringVar(&splitModel, "model", "", "Model override for the AI provider")
 	taskSplitCmd.Flags().StringVar(&splitTimeout, "timeout", "5m", "Timeout for the AI call (e.g. 2m, 300s)")
 
+	taskMergeCmd.Flags().BoolVar(&mergeYes, "yes", false, "Skip confirmation prompt and apply the merge immediately")
+	taskMergeCmd.Flags().StringVar(&mergeProvider, "provider", "", "AI provider to use (anthropic, openai, ollama, claudecode)")
+	taskMergeCmd.Flags().StringVar(&mergeModel, "model", "", "Model override for the AI provider")
+	taskMergeCmd.Flags().StringVar(&mergeTimeout, "timeout", "5m", "Timeout for the AI call (e.g. 2m, 300s)")
+
 	taskCmd.AddCommand(taskListCmd)
 	taskCmd.AddCommand(taskShowCmd)
 	taskCmd.AddCommand(taskNextCmd)
@@ -1256,6 +1464,7 @@ func init() {
 	taskCmd.AddCommand(taskTagCmd)
 	taskCmd.AddCommand(taskUntagCmd)
 	taskCmd.AddCommand(taskSplitCmd)
+	taskCmd.AddCommand(taskMergeCmd)
 	taskCmd.AddCommand(taskAnnotateCmd)
 	taskCmd.AddCommand(taskNotesCmd)
 	rootCmd.AddCommand(taskCmd)
