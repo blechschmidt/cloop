@@ -1436,6 +1436,373 @@ func TestRunPMParallel_IndependentTasksRunConcurrently(t *testing.T) {
 	}
 }
 
+// --- Integration: full decompose → execute flow ---
+
+// TestRunPM_Decompose_NoExistingPlan_FullFlow tests the complete happy-path where
+// there is no pre-existing plan: the provider is first called to decompose the goal
+// into tasks (returning JSON), and then each task is executed in priority order.
+func TestRunPM_Decompose_NoExistingPlan_FullFlow(t *testing.T) {
+	dir := tempDir(t)
+	s := initState(t, dir, "build a calculator", 0)
+	s.PMMode = true
+	// No plan — forces decompose call.
+	s.Save()
+
+	planJSON := `{"tasks":[{"id":1,"title":"Implement add","description":"Add two numbers","priority":1},{"id":2,"title":"Write tests","description":"Write unit tests","priority":2}]}`
+	prov := &mockProvider{
+		name: "mock",
+		results: []*provider.Result{
+			{Output: planJSON, Provider: "mock"},                        // decompose
+			{Output: "implemented add\nTASK_DONE", Provider: "mock"},   // task 1
+			{Output: "wrote tests\nTASK_DONE", Provider: "mock"},       // task 2
+		},
+	}
+	o := newOrchestrator(t, dir, Config{WorkDir: dir, PMMode: true}, prov)
+	if err := o.runPM(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// 3 calls: 1 decompose + 2 task executions.
+	if prov.calls != 3 {
+		t.Errorf("expected 3 provider calls (1 decompose + 2 execute), got %d", prov.calls)
+	}
+	if len(o.state.Plan.Tasks) != 2 {
+		t.Fatalf("expected 2 tasks in plan, got %d", len(o.state.Plan.Tasks))
+	}
+	for _, task := range o.state.Plan.Tasks {
+		if task.Status != pm.TaskDone {
+			t.Errorf("task %d: expected done, got %q", task.ID, task.Status)
+		}
+	}
+	if o.state.Status != "complete" {
+		t.Errorf("expected status=complete, got %q", o.state.Status)
+	}
+}
+
+// TestRunPM_Decompose_ProviderError_FailsGracefully verifies that a provider error
+// during decomposition sets status=failed and surfaces the error.
+func TestRunPM_Decompose_ProviderError_FailsGracefully(t *testing.T) {
+	dir := tempDir(t)
+	s := initState(t, dir, "goal", 0)
+	s.PMMode = true
+	s.Save()
+
+	prov := &mockProvider{
+		name: "mock",
+		errs: []error{fmt.Errorf("provider unavailable")},
+	}
+	o := newOrchestrator(t, dir, Config{WorkDir: dir, PMMode: true}, prov)
+	err := o.runPM(context.Background())
+	if err == nil {
+		t.Error("expected error from decompose provider failure")
+	}
+	if o.state.Status != "failed" {
+		t.Errorf("expected status=failed, got %q", o.state.Status)
+	}
+}
+
+// TestRunPM_Decompose_InvalidJSON_FailsGracefully verifies that invalid JSON from the
+// provider during decomposition fails gracefully (not a panic).
+func TestRunPM_Decompose_InvalidJSON_FailsGracefully(t *testing.T) {
+	dir := tempDir(t)
+	s := initState(t, dir, "goal", 0)
+	s.PMMode = true
+	s.Save()
+
+	prov := &mockProvider{
+		name: "mock",
+		results: []*provider.Result{
+			{Output: "I cannot decompose this goal at the moment.", Provider: "mock"},
+		},
+	}
+	o := newOrchestrator(t, dir, Config{WorkDir: dir, PMMode: true}, prov)
+	err := o.runPM(context.Background())
+	if err == nil {
+		t.Error("expected error when provider returns non-JSON for decompose")
+	}
+	if o.state.Status != "failed" {
+		t.Errorf("expected status=failed, got %q", o.state.Status)
+	}
+}
+
+// --- Integration: auto-evolve discovers new tasks ---
+
+// TestRunPM_AutoEvolve_DiscoversAndExecutesNewTasks tests the full auto-evolve cycle:
+// 1. All tasks complete → AutoEvolve=true → evolvePM discovers new tasks (JSON).
+// 2. New tasks are executed.
+// 3. evolvePM called again → returns no JSON → n=0 → status=complete.
+func TestRunPM_AutoEvolve_DiscoversAndExecutesNewTasks(t *testing.T) {
+	dir := tempDir(t)
+	s := initState(t, dir, "improve the project", 0)
+	s.PMMode = true
+	s.AutoEvolve = true
+	s.Plan = &pm.Plan{
+		Goal: "improve the project",
+		Tasks: []*pm.Task{
+			{ID: 1, Title: "Initial Task", Priority: 1, Status: pm.TaskPending},
+		},
+	}
+	s.Save()
+
+	// IDs in evolve JSON will be re-assigned (maxID=1 → new task gets ID=2).
+	evolvedJSON := `{"tasks":[{"id":1,"title":"Evolve Task","description":"add improvement","priority":1}]}`
+	prov := &mockProvider{
+		name: "mock",
+		results: []*provider.Result{
+			{Output: "done initial\nTASK_DONE", Provider: "mock"}, // execute task 1
+			{Output: evolvedJSON, Provider: "mock"},               // evolvePM → 1 new task
+			{Output: "done evolve\nTASK_DONE", Provider: "mock"},  // execute evolve task
+			{Output: `{"tasks":[]}`, Provider: "mock"},            // evolvePM → no new tasks
+		},
+	}
+	o := newOrchestrator(t, dir, Config{WorkDir: dir, PMMode: true}, prov)
+	if err := o.runPM(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// 4 calls: execute task1 + evolvePM (new tasks) + execute evolve task + evolvePM (empty).
+	if prov.calls != 4 {
+		t.Errorf("expected 4 provider calls, got %d", prov.calls)
+	}
+	if o.state.Status != "complete" {
+		t.Errorf("expected status=complete, got %q", o.state.Status)
+	}
+	// Both original and evolved tasks should be done.
+	if len(o.state.Plan.Tasks) != 2 {
+		t.Errorf("expected 2 tasks total (original + evolved), got %d", len(o.state.Plan.Tasks))
+	}
+	for _, task := range o.state.Plan.Tasks {
+		if task.Status != pm.TaskDone {
+			t.Errorf("task %d (%s): expected done, got %q", task.ID, task.Title, task.Status)
+		}
+	}
+}
+
+// TestRunPM_AutoEvolve_StopsWhenNoNewTasksDiscovered verifies that evolvePM returning
+// zero new tasks causes the orchestrator to finalize with status=complete and not loop.
+func TestRunPM_AutoEvolve_StopsWhenNoNewTasksDiscovered(t *testing.T) {
+	dir := tempDir(t)
+	s := initState(t, dir, "goal", 0)
+	s.PMMode = true
+	s.AutoEvolve = true
+	s.Plan = &pm.Plan{
+		Goal: "goal",
+		Tasks: []*pm.Task{
+			{ID: 1, Title: "Task A", Priority: 1, Status: pm.TaskPending},
+		},
+	}
+	s.Save()
+
+	prov := &mockProvider{
+		name: "mock",
+		results: []*provider.Result{
+			{Output: "done\nTASK_DONE", Provider: "mock"}, // execute task 1
+			{Output: "no JSON here", Provider: "mock"},    // evolvePM → parse error → n=0
+		},
+	}
+	o := newOrchestrator(t, dir, Config{WorkDir: dir, PMMode: true}, prov)
+	if err := o.runPM(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// 2 calls: execute + evolvePM (no new tasks).
+	if prov.calls != 2 {
+		t.Errorf("expected 2 provider calls (1 execute + 1 evolve), got %d", prov.calls)
+	}
+	if o.state.Status != "complete" {
+		t.Errorf("expected status=complete, got %q", o.state.Status)
+	}
+}
+
+// TestRunPM_AutoEvolve_MultipleRounds tests multiple successive evolve rounds, each
+// discovering and executing one new task until finally no new tasks are returned.
+func TestRunPM_AutoEvolve_MultipleRounds(t *testing.T) {
+	dir := tempDir(t)
+	s := initState(t, dir, "goal", 0)
+	s.PMMode = true
+	s.AutoEvolve = true
+	s.Plan = &pm.Plan{
+		Goal: "goal",
+		Tasks: []*pm.Task{
+			{ID: 1, Title: "Task A", Priority: 1, Status: pm.TaskPending},
+		},
+	}
+	s.Save()
+
+	// Each evolvePM call returns exactly one new task, except the last which returns empty.
+	round1JSON := `{"tasks":[{"id":1,"title":"Round1 Task","description":"r1","priority":1}]}`
+	round2JSON := `{"tasks":[{"id":1,"title":"Round2 Task","description":"r2","priority":1}]}`
+	prov := &mockProvider{
+		name: "mock",
+		results: []*provider.Result{
+			{Output: "done A\nTASK_DONE", Provider: "mock"},    // execute task 1
+			{Output: round1JSON, Provider: "mock"},             // evolvePM round 1 → task 2
+			{Output: "done r1\nTASK_DONE", Provider: "mock"},   // execute task 2
+			{Output: round2JSON, Provider: "mock"},             // evolvePM round 2 → task 3
+			{Output: "done r2\nTASK_DONE", Provider: "mock"},   // execute task 3
+			{Output: `{"tasks":[]}`, Provider: "mock"},         // evolvePM round 3 → none
+		},
+	}
+	o := newOrchestrator(t, dir, Config{WorkDir: dir, PMMode: true}, prov)
+	if err := o.runPM(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if prov.calls != 6 {
+		t.Errorf("expected 6 provider calls, got %d", prov.calls)
+	}
+	if o.state.Status != "complete" {
+		t.Errorf("expected status=complete, got %q", o.state.Status)
+	}
+	if len(o.state.Plan.Tasks) != 3 {
+		t.Errorf("expected 3 total tasks, got %d", len(o.state.Plan.Tasks))
+	}
+}
+
+// --- Integration: SyncFromDisk mid-run ---
+
+// sideEffectResponse pairs a provider result with an optional side-effect
+// function that runs inside Complete() before returning — useful for simulating
+// external state mutations (e.g. 'cloop task add') while the orchestrator runs.
+type sideEffectResponse struct {
+	result *provider.Result
+	err    error
+	after  func() // called within Complete before returning to caller
+}
+
+// sideEffectProvider is a mock provider that can trigger arbitrary side-effects
+// (e.g. writing tasks to disk) after returning each response.
+type sideEffectProvider struct {
+	name      string
+	responses []sideEffectResponse
+	mu        sync.Mutex
+	calls     int
+}
+
+func (p *sideEffectProvider) Complete(_ context.Context, _ string, _ provider.Options) (*provider.Result, error) {
+	p.mu.Lock()
+	i := p.calls
+	p.calls++
+	p.mu.Unlock()
+
+	if i < len(p.responses) {
+		resp := p.responses[i]
+		if resp.after != nil {
+			resp.after()
+		}
+		if resp.err != nil {
+			return nil, resp.err
+		}
+		return resp.result, nil
+	}
+	return &provider.Result{Output: "default", Provider: p.name}, nil
+}
+func (p *sideEffectProvider) Name() string         { return p.name }
+func (p *sideEffectProvider) DefaultModel() string { return "mock-model" }
+
+// TestRunPM_SyncFromDisk_PicksUpExternallyAddedTask tests that when an external
+// process appends a new task to the state file while the orchestrator is running
+// (simulated via a sideEffectProvider callback), SyncFromDisk picks it up and
+// the orchestrator executes it before declaring the plan complete.
+func TestRunPM_SyncFromDisk_PicksUpExternallyAddedTask(t *testing.T) {
+	dir := tempDir(t)
+	s := initState(t, dir, "goal", 0)
+	s.PMMode = true
+	s.Plan = &pm.Plan{
+		Goal: "goal",
+		Tasks: []*pm.Task{
+			{ID: 1, Title: "Task A", Priority: 1, Status: pm.TaskPending},
+		},
+	}
+	s.Save()
+
+	// After task A executes, write a new task (ID=2) to the state file on disk.
+	// The orchestrator calls s.Save() after task completion which triggers
+	// mergeExternalTasks → the new task is incorporated into the in-memory plan.
+	prov := &sideEffectProvider{
+		name: "mock",
+		responses: []sideEffectResponse{
+			{
+				result: &provider.Result{Output: "done A\nTASK_DONE", Provider: "mock"},
+				after: func() {
+					// Simulate 'cloop task add': load disk state, append task, save.
+					disk, err := state.Load(dir)
+					if err != nil {
+						return
+					}
+					disk.Plan.Tasks = append(disk.Plan.Tasks, &pm.Task{
+						ID:       2,
+						Title:    "External Task",
+						Priority: 2,
+						Status:   pm.TaskPending,
+					})
+					disk.Save()
+				},
+			},
+			{
+				result: &provider.Result{Output: "done external\nTASK_DONE", Provider: "mock"},
+			},
+		},
+	}
+
+	o := newOrchestrator(t, dir, Config{WorkDir: dir, PMMode: true}, prov)
+	if err := o.runPM(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Both task A and the externally-added task should have been executed.
+	if prov.calls != 2 {
+		t.Errorf("expected 2 provider calls (task A + external task), got %d", prov.calls)
+	}
+	if len(o.state.Plan.Tasks) != 2 {
+		t.Errorf("expected 2 tasks in final plan (original + external), got %d", len(o.state.Plan.Tasks))
+	}
+	if o.state.Status != "complete" {
+		t.Errorf("expected status=complete, got %q", o.state.Status)
+	}
+	// Verify external task was executed and marked done.
+	extTask := o.state.Plan.Tasks[1]
+	if extTask.Title != "External Task" {
+		t.Errorf("expected second task to be 'External Task', got %q", extTask.Title)
+	}
+	if extTask.Status != pm.TaskDone {
+		t.Errorf("external task: expected done, got %q", extTask.Status)
+	}
+}
+
+// TestRunPM_SyncFromDisk_ExternalTasksDoNotDuplicateOnRepeatedSync verifies that
+// repeated SyncFromDisk calls (one per loop iteration) do not duplicate tasks.
+func TestRunPM_SyncFromDisk_ExternalTasksDoNotDuplicateOnRepeatedSync(t *testing.T) {
+	dir := tempDir(t)
+	s := initState(t, dir, "goal", 0)
+	s.PMMode = true
+	s.Plan = &pm.Plan{
+		Goal: "goal",
+		Tasks: []*pm.Task{
+			{ID: 1, Title: "Task A", Priority: 1, Status: pm.TaskPending},
+			{ID: 2, Title: "Task B", Priority: 2, Status: pm.TaskPending},
+		},
+	}
+	s.Save()
+
+	prov := &mockProvider{
+		name: "mock",
+		results: []*provider.Result{
+			{Output: "done A\nTASK_DONE", Provider: "mock"},
+			{Output: "done B\nTASK_DONE", Provider: "mock"},
+		},
+	}
+	o := newOrchestrator(t, dir, Config{WorkDir: dir, PMMode: true}, prov)
+	if err := o.runPM(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Tasks must not be duplicated; should still be exactly 2.
+	if len(o.state.Plan.Tasks) != 2 {
+		t.Errorf("expected 2 tasks (no duplicates), got %d", len(o.state.Plan.Tasks))
+	}
+}
+
 // TestRunPMParallel_DependencyBlocking ensures tasks with deps wait for prerequisites.
 func TestRunPMParallel_DependencyBlocking(t *testing.T) {
 	dir := tempDir(t)
