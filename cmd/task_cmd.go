@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -13,6 +14,9 @@ import (
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 )
+
+// taskShowArtifact controls whether task show prints the full artifact file.
+var taskShowArtifact bool
 
 // parseDeps parses a comma-separated string of task IDs (e.g. "1,2,3") into []int.
 // Returns nil and no error for empty input.
@@ -251,6 +255,17 @@ var taskShowCmd = &cobra.Command{
 		if task.Result != "" {
 			fmt.Printf("\nResult summary:\n")
 			dimColor.Printf("  %s\n", strings.ReplaceAll(task.Result, "\n", "\n  "))
+		}
+		if task.ArtifactPath != "" {
+			fmt.Printf("\nArtifact: %s\n", task.ArtifactPath)
+			if taskShowArtifact {
+				data, readErr := os.ReadFile(filepath.Join(workdir, task.ArtifactPath))
+				if readErr != nil {
+					fmt.Printf("  (could not read artifact: %v)\n", readErr)
+				} else {
+					fmt.Printf("\n%s\n", string(data))
+				}
+			}
 		}
 		return nil
 	},
@@ -797,6 +812,7 @@ func init() {
 	taskListCmd.Flags().BoolVar(&taskListJSON, "json", false, "Output tasks as JSON array")
 	taskListCmd.Flags().BoolVar(&taskListGraph, "graph", false, "Render tasks as a layered dependency graph")
 	taskShowCmd.Flags().BoolVar(&taskShowJSON, "json", false, "Output task as JSON")
+	taskShowCmd.Flags().BoolVar(&taskShowArtifact, "artifact", false, "Print full artifact file contents")
 
 	taskAddCmd.Flags().StringVar(&taskDesc, "desc", "", "Task description")
 	taskAddCmd.Flags().IntVar(&taskPriority, "priority", 0, "Task priority (1=highest; default: lowest)")

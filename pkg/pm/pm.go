@@ -110,6 +110,7 @@ type Task struct {
 	GitHubIssue      int        `json:"github_issue,omitempty"`      // linked GitHub issue number (0 = none)
 	EstimatedMinutes int        `json:"estimated_minutes,omitempty"` // AI-predicted duration
 	ActualMinutes    int        `json:"actual_minutes,omitempty"`    // measured duration (set on completion)
+	ArtifactPath     string     `json:"artifact_path,omitempty"`     // path to the full AI response artifact file
 }
 
 // Plan is the full task plan for a goal.

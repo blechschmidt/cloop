@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/artifact"
 	"github.com/blechschmidt/cloop/pkg/cost"
 	"github.com/blechschmidt/cloop/pkg/hooks"
 	"github.com/blechschmidt/cloop/pkg/memory"
@@ -840,6 +841,9 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			consecutiveErrors = 0
 		}
 
+		// Persist full AI response as a Markdown artifact file.
+		o.writeTaskArtifact(task, result.Output)
+
 		// Post-task hook: always run regardless of task outcome.
 		if hookErr := hooks.RunPostTask(o.config.Hooks, hooks.TaskContext{
 			ID:     task.ID,
@@ -1220,6 +1224,9 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 				}
 				consecutiveErrors = 0
 			}
+			// Persist full AI response as a Markdown artifact file.
+			o.writeTaskArtifact(task, result.Output)
+
 			tooManyErrors := consecutiveErrors >= maxConsecutiveErrors
 			s.Save()
 			mu.Unlock()
@@ -1235,6 +1242,18 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 	s.Status = "paused"
 	s.Save()
 	return nil
+}
+
+// writeTaskArtifact persists the full AI response for a task to
+// .cloop/tasks/<id>-<slug>.md and sets task.ArtifactPath. Errors are
+// non-fatal — logged to stderr but do not abort the run.
+func (o *Orchestrator) writeTaskArtifact(task *pm.Task, output string) {
+	path, err := artifact.WriteTaskArtifact(o.config.WorkDir, task, output)
+	if err != nil {
+		color.New(color.Faint).Printf("  artifact write error (ignored): %v\n", err)
+		return
+	}
+	task.ArtifactPath = path
 }
 
 // makeOpts builds provider.Options for a completion call.
