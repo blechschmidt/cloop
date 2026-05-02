@@ -40,6 +40,12 @@ type Config struct {
 
 	// Sync configures git-based team plan sharing and merging.
 	Sync SyncConfig `yaml:"sync,omitempty"`
+
+	// LogJSON switches all cloop output to newline-delimited JSON (NDJSON).
+	// Equivalent to passing --log-json on the command line.
+	// Each structured event is emitted as a JSON object with fields:
+	//   time, level, event, task_id, message, data
+	LogJSON bool `yaml:"log_json,omitempty"`
 }
 
 // WatchConfig configures file-triggered plan re-evaluation.

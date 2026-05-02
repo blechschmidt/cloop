@@ -7,6 +7,9 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// globalLogJSON is the global --log-json flag value for structured NDJSON output.
+var globalLogJSON bool
+
 var rootCmd = &cobra.Command{
 	Use:   "cloop",
 	Short: "AI product manager and autonomous feedback loop",
@@ -82,4 +85,8 @@ func Execute() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+}
+
+func init() {
+	rootCmd.PersistentFlags().BoolVar(&globalLogJSON, "log-json", false, "Emit structured NDJSON log lines for key events (task_start, task_done, step, etc.) instead of colored text. Enables piping to Datadog, Splunk, or jq.")
 }

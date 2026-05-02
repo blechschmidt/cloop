@@ -221,7 +221,11 @@ Press Ctrl+C to pause gracefully.`,
 			fmt.Printf("Prometheus metrics: http://%s/metrics\n", metricsAddr)
 		}
 
+		// Merge --log-json flag with config file setting.
+		effectiveLogJSON := globalLogJSON || cfg.LogJSON
+
 		orchCfg := orchestrator.Config{
+			LogJSON:         effectiveLogJSON,
 			SkipHealthCheck: skipHealthCheck,
 			MultiAgent:      multiAgentMode,
 			PostReview:      postReview,

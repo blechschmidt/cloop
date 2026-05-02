@@ -18,6 +18,7 @@ import (
 	cloopgit "github.com/blechschmidt/cloop/pkg/git"
 	"github.com/blechschmidt/cloop/pkg/health"
 	"github.com/blechschmidt/cloop/pkg/hooks"
+	"github.com/blechschmidt/cloop/pkg/logger"
 	"github.com/blechschmidt/cloop/pkg/memory"
 	"github.com/blechschmidt/cloop/pkg/metrics"
 	"github.com/blechschmidt/cloop/pkg/multiagent"
@@ -236,6 +237,13 @@ type Config struct {
 	// NoHeal disables the auto-heal loop. When true, TASK_FAILED immediately
 	// proceeds to permanent failure handling without any re-attempt.
 	NoHeal bool
+
+	// LogJSON switches all structured event output to newline-delimited JSON (NDJSON).
+	// When true, key lifecycle events (session_start, task_start, task_done, task_failed,
+	// task_skipped, step, heal, session_done) are emitted as JSON objects to stdout.
+	// Decorative color/text output is suppressed so the stream is machine-parseable.
+	// Equivalent to the --log-json CLI flag.
+	LogJSON bool
 }
 
 type Orchestrator struct {
@@ -247,6 +255,7 @@ type Orchestrator struct {
 	webhook  *webhook.Client
 	metrics  *metrics.Metrics
 	envVars  []cloopenv.Var
+	log      logger.Logger
 }
 
 func New(cfg Config, prov provider.Provider) (*Orchestrator, error) {
@@ -275,7 +284,8 @@ func New(cfg Config, prov provider.Provider) (*Orchestrator, error) {
 	}
 
 	r := router.New(prov)
-	return &Orchestrator{config: cfg, state: s, provider: prov, router: r, memory: mem, webhook: wh, metrics: cfg.Metrics, envVars: envVars}, nil
+	log := logger.New(cfg.LogJSON)
+	return &Orchestrator{config: cfg, state: s, provider: prov, router: r, memory: mem, webhook: wh, metrics: cfg.Metrics, envVars: envVars, log: log}, nil
 }
 
 // notifyWebhooks sends a rich notification to the configured Slack and/or Discord
@@ -352,21 +362,28 @@ func (o *Orchestrator) runLoop(ctx context.Context) error {
 	failColor := color.New(color.FgRed, color.Bold)
 	dimColor := color.New(color.Faint)
 
-	header.Printf("\n🔄 cloop — Autonomous AI Feedback Loop\n")
-	fmt.Printf("   Provider: %s\n", o.provider.Name())
-	fmt.Printf("   Goal: %s\n", s.Goal)
-	if s.MaxSteps > 0 {
-		fmt.Printf("   Steps: %d/%d (completed/max)\n", s.CurrentStep, s.MaxSteps)
-	} else {
-		fmt.Printf("   Steps: %d (unlimited)\n", s.CurrentStep)
+	if !o.log.IsJSON() {
+		header.Printf("\n🔄 cloop — Autonomous AI Feedback Loop\n")
+		fmt.Printf("   Provider: %s\n", o.provider.Name())
+		fmt.Printf("   Goal: %s\n", s.Goal)
+		if s.MaxSteps > 0 {
+			fmt.Printf("   Steps: %d/%d (completed/max)\n", s.CurrentStep, s.MaxSteps)
+		} else {
+			fmt.Printf("   Steps: %d (unlimited)\n", s.CurrentStep)
+		}
+		if o.config.StepsLimit > 0 {
+			fmt.Printf("   Session limit: %d step(s) this run\n", o.config.StepsLimit)
+		}
+		if s.Instructions != "" {
+			fmt.Printf("   Instructions: %s\n", s.Instructions)
+		}
+		fmt.Println()
 	}
-	if o.config.StepsLimit > 0 {
-		fmt.Printf("   Session limit: %d step(s) this run\n", o.config.StepsLimit)
-	}
-	if s.Instructions != "" {
-		fmt.Printf("   Instructions: %s\n", s.Instructions)
-	}
-	fmt.Println()
+	o.log.Info(logger.EventSessionStart, 0, "session started", map[string]interface{}{
+		"provider":  o.provider.Name(),
+		"goal":      s.Goal,
+		"max_steps": s.MaxSteps,
+	})
 
 	o.webhook.Send(webhook.EventSessionStarted, webhook.Payload{Goal: s.Goal})
 
@@ -386,11 +403,14 @@ func (o *Orchestrator) runLoop(ctx context.Context) error {
 		}
 
 		step := s.CurrentStep + 1
-		if s.MaxSteps > 0 {
-			stepColor.Printf("━━━ Step %d/%d ━━━\n", step, s.MaxSteps)
-		} else {
-			stepColor.Printf("━━━ Step %d ━━━\n", step)
+		if !o.log.IsJSON() {
+			if s.MaxSteps > 0 {
+				stepColor.Printf("━━━ Step %d/%d ━━━\n", step, s.MaxSteps)
+			} else {
+				stepColor.Printf("━━━ Step %d ━━━\n", step)
+			}
 		}
+		o.log.Info(logger.EventStep, 0, fmt.Sprintf("step %d", step), map[string]interface{}{"step": step})
 
 		prompt := o.buildPrompt()
 
@@ -457,7 +477,14 @@ func (o *Orchestrator) runLoop(ctx context.Context) error {
 		}
 
 		if o.isGoalComplete(result.Output) {
-			successColor.Printf("🎉 Goal complete after %d steps!\n\n", step)
+			if !o.log.IsJSON() {
+				successColor.Printf("🎉 Goal complete after %d steps!\n\n", step)
+			}
+			o.log.Info(logger.EventSessionDone, 0, "goal complete", map[string]interface{}{
+				"steps":         step,
+				"input_tokens":  s.TotalInputTokens,
+				"output_tokens": s.TotalOutputTokens,
+			})
 			if o.config.Notify {
 				notify.Send("cloop: Goal Complete", s.Goal)
 			}
@@ -534,10 +561,17 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 	dimColor := color.New(color.Faint)
 	pmColor := color.New(color.FgMagenta, color.Bold)
 
-	header.Printf("\n🧠 cloop PM — AI Product Manager Mode\n")
-	fmt.Printf("   Provider: %s\n", o.provider.Name())
-	fmt.Printf("   Goal: %s\n", s.Goal)
-	fmt.Println()
+	if !o.log.IsJSON() {
+		header.Printf("\n🧠 cloop PM — AI Product Manager Mode\n")
+		fmt.Printf("   Provider: %s\n", o.provider.Name())
+		fmt.Printf("   Goal: %s\n", s.Goal)
+		fmt.Println()
+	}
+	o.log.Info(logger.EventSessionStart, 0, "session started", map[string]interface{}{
+		"provider": o.provider.Name(),
+		"goal":     s.Goal,
+		"mode":     "pm",
+	})
 
 	o.webhook.Send(webhook.EventSessionStarted, webhook.Payload{Goal: s.Goal})
 
@@ -721,8 +755,13 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 
 		s.SyncFromDisk()
 		if s.Plan.IsComplete() {
-			successColor.Printf("🎉 All tasks complete! Goal achieved.\n")
-			successColor.Printf("   %s\n\n", s.Plan.Summary())
+			if !o.log.IsJSON() {
+				successColor.Printf("🎉 All tasks complete! Goal achieved.\n")
+				successColor.Printf("   %s\n\n", s.Plan.Summary())
+			}
+			o.log.Info(logger.EventSessionDone, 0, "all tasks complete", map[string]interface{}{
+				"summary": s.Plan.Summary(),
+			})
 			if o.config.Notify {
 				notify.Send("cloop: All Tasks Complete", s.Goal)
 			}
@@ -802,8 +841,15 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			return nil
 		}
 
-		stepColor.Printf("━━━ Task %d/%d: %s ━━━\n", task.ID, len(s.Plan.Tasks), task.Title)
-		dimColor.Printf("       %s\n\n", truncate(task.Description, 150))
+		if !o.log.IsJSON() {
+			stepColor.Printf("━━━ Task %d/%d: %s ━━━\n", task.ID, len(s.Plan.Tasks), task.Title)
+			dimColor.Printf("       %s\n\n", truncate(task.Description, 150))
+		}
+		o.log.Info(logger.EventTaskStart, task.ID, task.Title, map[string]interface{}{
+			"priority":    task.Priority,
+			"description": task.Description,
+			"role":        string(task.Role),
+		})
 
 		// Human-in-the-loop review mode: ask before executing each task.
 		if o.config.ReviewMode {
@@ -1069,7 +1115,10 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			}
 			for healAttempt := 1; healAttempt <= maxHealRetries && signal == pm.TaskFailed; healAttempt++ {
 				task.HealAttempts++
-				healColor.Printf("[HEAL attempt %d/%d] Diagnosing failure for task %d: %s\n", healAttempt, maxHealRetries, task.ID, task.Title)
+				if !o.log.IsJSON() {
+					healColor.Printf("[HEAL attempt %d/%d] Diagnosing failure for task %d: %s\n", healAttempt, maxHealRetries, task.ID, task.Title)
+				}
+				o.log.Warn(logger.EventHeal, task.ID, fmt.Sprintf("heal attempt %d/%d", healAttempt, maxHealRetries), map[string]interface{}{"attempt": healAttempt, "max": maxHealRetries})
 
 				diag, diagErr := diagnosis.AnalyzeFailure(ctx, o.provider, s.Model, o.config.StepTimeout, task, taskOutput)
 				if diagErr != nil {
@@ -1223,7 +1272,12 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			if !scriptVerifyFailed {
 				task.Status = pm.TaskDone
 				pm.AddAnnotation(task, "ai", fmt.Sprintf("Task completed successfully in %s.", taskDur))
-				successColor.Printf("✓ Task %d complete: %s\n\n", task.ID, task.Title)
+				if !o.log.IsJSON() {
+					successColor.Printf("✓ Task %d complete: %s\n\n", task.ID, task.Title)
+				}
+				o.log.Info(logger.EventTaskDone, task.ID, task.Title, map[string]interface{}{
+					"duration": taskDur,
+				})
 				if o.config.Notify {
 					notify.Send("cloop: Task Done", task.Title)
 				}
@@ -1241,7 +1295,10 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			}
 		case pm.TaskSkipped:
 			task.Status = pm.TaskSkipped
-			dimColor.Printf("→ Task %d skipped: %s\n\n", task.ID, task.Title)
+			if !o.log.IsJSON() {
+				dimColor.Printf("→ Task %d skipped: %s\n\n", task.ID, task.Title)
+			}
+			o.log.Info(logger.EventTaskSkipped, task.ID, task.Title, nil)
 			{
 				done, failed := s.Plan.CountByStatus()
 				o.webhook.Send(webhook.EventTaskSkipped, webhook.Payload{
@@ -1255,7 +1312,13 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		case pm.TaskFailed:
 			task.Status = pm.TaskFailed
 			task.FailCount++
-			failColor.Printf("✗ Task %d failed: %s\n\n", task.ID, task.Title)
+			if !o.log.IsJSON() {
+				failColor.Printf("✗ Task %d failed: %s\n\n", task.ID, task.Title)
+			}
+			o.log.Error(logger.EventTaskFailed, task.ID, task.Title, map[string]interface{}{
+				"duration": taskDur,
+				"fail_count": task.FailCount,
+			})
 			{
 				done, failed := s.Plan.CountByStatus()
 				o.webhook.Send(webhook.EventTaskFailed, webhook.Payload{
@@ -1342,7 +1405,13 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		default:
 			// No signal found — treat as done (AI finished without explicit signal)
 			task.Status = pm.TaskDone
-			successColor.Printf("✓ Task %d complete (no explicit signal): %s\n\n", task.ID, task.Title)
+			if !o.log.IsJSON() {
+				successColor.Printf("✓ Task %d complete (no explicit signal): %s\n\n", task.ID, task.Title)
+			}
+			o.log.Info(logger.EventTaskDone, task.ID, task.Title, map[string]interface{}{
+				"duration": taskDur,
+				"implicit": true,
+			})
 			if o.config.Notify {
 				notify.Send("cloop: Task Done", task.Title)
 			}
@@ -1839,7 +1908,10 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 			switch signal {
 			case pm.TaskDone:
 				task.Status = pm.TaskDone
-				successColor.Printf("✓ Task %d complete: %s\n\n", task.ID, task.Title)
+				if !o.log.IsJSON() {
+					successColor.Printf("✓ Task %d complete: %s\n\n", task.ID, task.Title)
+				}
+				o.log.Info(logger.EventTaskDone, task.ID, task.Title, map[string]interface{}{"duration": taskDur})
 				if o.config.Notify {
 					notify.Send("cloop: Task Done", task.Title)
 				}
@@ -1856,7 +1928,10 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 				consecutiveErrors = 0
 			case pm.TaskSkipped:
 				task.Status = pm.TaskSkipped
-				dimColor.Printf("→ Task %d skipped: %s\n\n", task.ID, task.Title)
+				if !o.log.IsJSON() {
+					dimColor.Printf("→ Task %d skipped: %s\n\n", task.ID, task.Title)
+				}
+				o.log.Info(logger.EventTaskSkipped, task.ID, task.Title, nil)
 				{
 					done, failed := s.Plan.CountByStatus()
 					o.webhook.Send(webhook.EventTaskSkipped, webhook.Payload{
@@ -1869,7 +1944,10 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 				consecutiveErrors = 0
 			case pm.TaskFailed:
 				task.Status = pm.TaskFailed
-				failColor.Printf("✗ Task %d failed: %s\n\n", task.ID, task.Title)
+				if !o.log.IsJSON() {
+					failColor.Printf("✗ Task %d failed: %s\n\n", task.ID, task.Title)
+				}
+				o.log.Error(logger.EventTaskFailed, task.ID, task.Title, map[string]interface{}{"duration": taskDur})
 				if o.config.Notify {
 					notify.Send("cloop: Task Failed", task.Title)
 				}
@@ -1886,7 +1964,13 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 				consecutiveErrors++
 			default:
 				task.Status = pm.TaskDone
-				successColor.Printf("✓ Task %d complete (no explicit signal): %s\n\n", task.ID, task.Title)
+				if !o.log.IsJSON() {
+					successColor.Printf("✓ Task %d complete (no explicit signal): %s\n\n", task.ID, task.Title)
+				}
+				o.log.Info(logger.EventTaskDone, task.ID, task.Title, map[string]interface{}{
+					"duration": taskDur,
+					"implicit": true,
+				})
 				if o.config.Notify {
 					notify.Send("cloop: Task Done", task.Title)
 				}
