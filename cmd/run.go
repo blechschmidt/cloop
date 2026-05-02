@@ -58,9 +58,11 @@ var (
 	streamOutput      bool
 	notifyEnabled     bool
 	costLimit         float64
-	gitMode           bool
-	diagnoseFailures  bool
-	contextTokenLimit int
+	gitMode              bool
+	diagnoseFailures     bool
+	contextTokenLimit    int
+	optimizePlan         bool
+	optimizeInteractive  bool
 )
 
 var runCmd = &cobra.Command{
@@ -214,9 +216,11 @@ Press Ctrl+C to pause gracefully.`,
 			WebhookSecret:    effectiveWebhookSecret,
 			Streaming:        streamOutput,
 			Notify:           notifyEnabled,
-			GitMode:           gitMode,
-			DiagnoseFailures:  diagnoseFailures,
-			ContextTokenLimit: contextTokenLimit,
+			GitMode:             gitMode,
+			DiagnoseFailures:    diagnoseFailures,
+			ContextTokenLimit:   contextTokenLimit,
+			Optimize:            optimizePlan,
+			OptimizeInteractive: optimizeInteractive,
 		}
 
 		orc, err := orchestrator.New(orchCfg, prov)
@@ -419,5 +423,7 @@ func init() {
 	runCmd.Flags().BoolVar(&gitMode, "git", false, "PM mode: create a git branch per task, commit on done, leave branch on failure (sequential only)")
 	runCmd.Flags().BoolVar(&diagnoseFailures, "diagnose", false, "PM mode: run AI failure diagnosis on TASK_FAILED to analyze root cause and guide retries")
 	runCmd.Flags().IntVar(&contextTokenLimit, "context-tokens", 0, "Maximum estimated tokens for step/task-result history in prompts (0 = default 100000); prunes oldest entries when exceeded")
+	runCmd.Flags().BoolVar(&optimizePlan, "optimize", false, "PM mode: run AI plan optimizer before execution to suggest reordering, splits, merges, and flag issues")
+	runCmd.Flags().BoolVar(&optimizeInteractive, "optimize-interactive", false, "PM mode: prompt before applying optimizer reordering (default: apply automatically)")
 	rootCmd.AddCommand(runCmd)
 }

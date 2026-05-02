@@ -18,6 +18,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/hooks"
 	"github.com/blechschmidt/cloop/pkg/memory"
 	"github.com/blechschmidt/cloop/pkg/notify"
+	"github.com/blechschmidt/cloop/pkg/optimizer"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/provider"
 	"github.com/blechschmidt/cloop/pkg/router"
@@ -143,6 +144,17 @@ type Config struct {
 	// prunes oldest intermediate entries (keeping the first and last two) before building
 	// the prompt. 0 means no limit. Default when unset: 100000.
 	ContextTokenLimit int
+
+	// Optimize runs the AI plan optimizer before task execution begins.
+	// The optimizer reviews the full task list and suggests reordering, splits,
+	// merges, and flags. In non-interactive mode the reordering is applied automatically;
+	// in interactive mode the user is prompted to approve.
+	Optimize bool
+
+	// OptimizeInteractive prompts the user before applying optimizer suggestions.
+	// When false (default), reordering is applied automatically and other suggestions
+	// are printed for awareness.
+	OptimizeInteractive bool
 }
 
 type Orchestrator struct {
@@ -461,6 +473,11 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			}
 		}
 		pmColor.Printf("Resuming plan: %s\n\n", s.Plan.Summary())
+	}
+
+	// Optimization pass: AI reviews the plan before execution.
+	if o.config.Optimize && s.Plan != nil && len(s.Plan.Tasks) > 0 {
+		o.runOptimizer(ctx, s, pmColor, dimColor)
 	}
 
 	// Plan-only mode: just show the plan, don't execute
@@ -1144,6 +1161,11 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 			}
 		}
 		pmColor.Printf("Resuming plan: %s\n\n", s.Plan.Summary())
+	}
+
+	// Optimization pass (parallel mode).
+	if o.config.Optimize && s.Plan != nil && len(s.Plan.Tasks) > 0 {
+		o.runOptimizer(ctx, s, pmColor, dimColor)
 	}
 
 	if o.config.PlanOnly {
@@ -2066,6 +2088,109 @@ func (o *Orchestrator) checkCostLimit(s *state.ProjectState) (stop bool) {
 
 // printSessionSummary prints a one-line summary after a run session ends.
 // It is called via defer so it always runs, even on error paths.
+// runOptimizer calls the AI plan optimizer, prints suggestions, and applies
+// the reordering automatically (or interactively if OptimizeInteractive is set).
+// A snapshot of the pre-optimization plan is saved before any changes.
+func (o *Orchestrator) runOptimizer(ctx context.Context, s *state.ProjectState, pmColor, dimColor *color.Color) {
+	pmColor.Printf("Running AI plan optimizer...\n")
+
+	result, err := optimizer.Optimize(ctx, o.provider, s.Model, o.config.StepTimeout, s.Plan)
+	if err != nil {
+		fmt.Printf("  optimizer: %v (skipping)\n\n", err)
+		return
+	}
+
+	fmt.Printf("\n")
+	pmColor.Printf("Optimizer Result:\n")
+	fmt.Printf("  %s\n\n", result.Summary)
+
+	if len(result.Suggestions) > 0 {
+		pmColor.Printf("Suggestions:\n")
+		for i, sg := range result.Suggestions {
+			icon := "i"
+			switch sg.Severity {
+			case optimizer.SeverityWarning:
+				icon = "!"
+			case optimizer.SeverityError:
+				icon = "x"
+			}
+			ids := ""
+			if len(sg.TaskIDs) > 0 {
+				parts := make([]string, len(sg.TaskIDs))
+				for j, id := range sg.TaskIDs {
+					parts[j] = fmt.Sprintf("#%d", id)
+				}
+				ids = " [" + strings.Join(parts, ", ") + "]"
+			}
+			fmt.Printf("  %d. [%s] [%s]%s %s\n", i+1, sg.Type, icon, ids, sg.Description)
+		}
+		fmt.Println()
+	}
+
+	if len(result.Splits) > 0 {
+		pmColor.Printf("Suggested Splits:\n")
+		for _, sp := range result.Splits {
+			fmt.Printf("  Task #%d → %s\n", sp.OriginalID, strings.Join(sp.NewTasks, " | "))
+		}
+		fmt.Println()
+	}
+
+	if len(result.Merges) > 0 {
+		pmColor.Printf("Suggested Merges:\n")
+		for _, mg := range result.Merges {
+			parts := make([]string, len(mg.TaskIDs))
+			for i, id := range mg.TaskIDs {
+				parts[i] = fmt.Sprintf("#%d", id)
+			}
+			fmt.Printf("  [%s] → %q\n", strings.Join(parts, " + "), mg.MergedTitle)
+		}
+		fmt.Println()
+	}
+
+	if len(result.ReorderedIDs) == 0 {
+		dimColor.Printf("  No reordering suggested.\n\n")
+		return
+	}
+
+	// Show the reordering proposal.
+	pmColor.Printf("Suggested Execution Order:\n")
+	idToTitle := make(map[int]string, len(s.Plan.Tasks))
+	for _, t := range s.Plan.Tasks {
+		idToTitle[t.ID] = t.Title
+	}
+	for i, id := range result.ReorderedIDs {
+		fmt.Printf("  %d. #%d %s\n", i+1, id, idToTitle[id])
+	}
+	fmt.Println()
+
+	// Determine whether to apply the reordering.
+	applyReorder := true
+	if o.config.OptimizeInteractive {
+		fmt.Print("Apply suggested reordering? [y/N] ")
+		var answer string
+		fmt.Scanln(&answer) //nolint:errcheck
+		applyReorder = strings.ToLower(strings.TrimSpace(answer)) == "y"
+	}
+
+	if applyReorder {
+		// Save pre-optimization snapshot before mutating the plan.
+		if snapErr := pm.SaveSnapshot(o.config.WorkDir, s.Plan); snapErr != nil {
+			fmt.Printf("  warning: could not save pre-optimization snapshot: %v\n", snapErr)
+		}
+		optimizer.ApplyReorder(s.Plan, result.ReorderedIDs)
+		if err := s.Save(); err != nil {
+			fmt.Printf("  warning: could not persist reordered plan: %v\n", err)
+		}
+		pmColor.Printf("Plan reordered. Updated Task Plan:\n")
+		for _, t := range s.Plan.Tasks {
+			fmt.Printf("  %d. [P%d] %s\n", t.ID, t.Priority, t.Title)
+		}
+		fmt.Println()
+	} else {
+		dimColor.Printf("  Reordering skipped.\n\n")
+	}
+}
+
 func printSessionSummary(start time.Time, startStep int, s *state.ProjectState) {
 	steps := s.CurrentStep - startStep
 	elapsed := time.Since(start).Round(time.Second)
