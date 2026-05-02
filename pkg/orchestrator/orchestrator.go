@@ -27,6 +27,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/promptstats"
 	"github.com/blechschmidt/cloop/pkg/provider"
+	"github.com/blechschmidt/cloop/pkg/ctxedit"
 	"github.com/blechschmidt/cloop/pkg/replay"
 	"github.com/blechschmidt/cloop/pkg/review"
 	"github.com/blechschmidt/cloop/pkg/router"
@@ -929,6 +930,11 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			color.New(color.FgYellow).Printf("Context pruned: kept %d of %d steps to fit token budget\n", keptResults, totalResults)
 		}
 		prompt := pm.ExecuteTaskPrompt(s.Goal, s.Instructions, o.config.WorkDir, promptPlan, task, projCtx)
+		// Check for a user-edited context override. If one exists, use it instead.
+		if override, overrideErr := ctxedit.LoadOverride(o.config.WorkDir, task.ID); overrideErr == nil && override != "" {
+			color.New(color.FgYellow).Printf("  Using context override for task %d (from .cloop/context_override_%d.txt)\n", task.ID, task.ID)
+			prompt = override
+		}
 		prompt = cloopenv.InjectIntoPrompt(prompt, o.envVars)
 		// Prepend memory if enabled
 		if o.config.UseMemory && o.memory != nil {
@@ -1812,6 +1818,10 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 			go func(idx int, t *pm.Task) {
 				defer wg.Done()
 				prompt := pm.ExecuteTaskPrompt(s.Goal, s.Instructions, o.config.WorkDir, parallelPromptPlan, t)
+				// Check for a user-edited context override.
+				if override, overrideErr := ctxedit.LoadOverride(o.config.WorkDir, t.ID); overrideErr == nil && override != "" {
+					prompt = override
+				}
 				prompt = cloopenv.InjectIntoPrompt(prompt, o.envVars)
 				start := time.Now()
 				// Use role-specific provider if configured.
@@ -2370,6 +2380,11 @@ func (o *Orchestrator) evolve(ctx context.Context) error {
 					color.New(color.FgYellow).Printf("Context pruned: kept %d of %d steps to fit token budget\n", keptEv, totalEv)
 				}
 				prompt := pm.ExecuteTaskPrompt(s.Goal, s.Instructions, o.config.WorkDir, evolvePrunedPlan, nextTask)
+				// Check for a user-edited context override.
+				if override, overrideErr := ctxedit.LoadOverride(o.config.WorkDir, nextTask.ID); overrideErr == nil && override != "" {
+					color.New(color.FgYellow).Printf("  Using context override for task %d\n", nextTask.ID)
+					prompt = override
+				}
 				prompt = cloopenv.InjectIntoPrompt(prompt, o.envVars)
 				dimColor.Printf("→ Executing task %d via %s...\n", nextTask.ID, o.provider.Name())
 				start := time.Now()
