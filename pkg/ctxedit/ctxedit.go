@@ -41,7 +41,7 @@ func Build(plan *pm.Plan, task *pm.Task, workDir string, injectCtx bool, pruneTo
 		projCtx = pm.BuildProjectContext(workDir)
 	}
 
-	return pm.ExecuteTaskPrompt(plan.Goal, "", workDir, promptPlan, task, projCtx)
+	return pm.ExecuteTaskPrompt(plan.Goal, "", workDir, promptPlan, task, false, projCtx)
 }
 
 // prunePlan returns a shallow copy of plan where each task's Result is pruned so

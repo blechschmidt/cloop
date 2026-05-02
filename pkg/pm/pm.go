@@ -305,10 +305,12 @@ func DecomposePrompt(goal, instructions string) string {
 }
 
 // ExecuteTaskPrompt builds the prompt for executing a specific task.
-// workDir is the project root used to load prompt-stats for adaptive hints;
-// pass "" to skip hint injection. Pass a non-nil ProjectContext to include
-// project state (git, file tree) in the prompt.
-func ExecuteTaskPrompt(goal, instructions, workDir string, plan *Plan, task *Task, ctx ...*ProjectContext) string {
+// workDir is the project root used to load prompt-stats, KB entries, and
+// codebase context; pass "" to skip all workDir-based injections.
+// noCodeInject disables the automatic codebase context snippet injection
+// (equivalent to the --no-context-inject CLI flag).
+// Pass a non-nil ProjectContext to include project state (git, file tree).
+func ExecuteTaskPrompt(goal, instructions, workDir string, plan *Plan, task *Task, noCodeInject bool, ctx ...*ProjectContext) string {
 	var b strings.Builder
 
 	// Prepend adaptive hint derived from historical prompt outcomes when
@@ -401,6 +403,14 @@ func ExecuteTaskPrompt(goal, instructions, workDir string, plan *Plan, task *Tas
 	if len(ctx) > 0 && ctx[0] != nil {
 		if formatted := ctx[0].Format(); formatted != "" {
 			b.WriteString(formatted)
+		}
+	}
+
+	// Inject relevant codebase context snippets (top-scored files by keyword
+	// overlap with task title+description and recent git diff).
+	if workDir != "" && !noCodeInject {
+		if codeCtx := CollectRelevantContext(workDir, task, 2000); codeCtx != "" {
+			b.WriteString(codeCtx)
 		}
 	}
 

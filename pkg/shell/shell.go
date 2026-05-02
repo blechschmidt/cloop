@@ -277,7 +277,7 @@ func (sh *Shell) runTask(ctx context.Context, taskID int, out io.Writer) error {
 	fmt.Fprintf(out, "Running task #%d: %s\n", task.ID, task.Title)
 	fmt.Fprintln(out, strings.Repeat("-", 60))
 
-	prompt := pm.ExecuteTaskPrompt(sh.State.Goal, sh.State.Instructions, sh.WorkDir, sh.State.Plan, task)
+	prompt := pm.ExecuteTaskPrompt(sh.State.Goal, sh.State.Instructions, sh.WorkDir, sh.State.Plan, task, false)
 
 	callCtx, cancel := context.WithTimeout(ctx, sh.Timeout)
 	defer cancel()

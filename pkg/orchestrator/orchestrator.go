@@ -269,6 +269,13 @@ type Config struct {
 	// is used. The judge call uses the primary provider. The consensus decision
 	// and runner-up scores are appended to the task artifact.
 	ConsensusN int
+
+	// NoCodeContextInject disables automatic codebase context snippet injection
+	// in PM mode task prompts. When false (default), CollectRelevantContext scans
+	// the working directory for files matching the task keywords and prepends up
+	// to ~2000 tokens of relevant snippets to each task prompt. Set this to true
+	// (via --no-context-inject) to disable the feature entirely.
+	NoCodeContextInject bool
 }
 
 type Orchestrator struct {
@@ -1033,7 +1040,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		if keptResults < totalResults {
 			color.New(color.FgYellow).Printf("Context pruned: kept %d of %d steps to fit token budget\n", keptResults, totalResults)
 		}
-		prompt := pm.ExecuteTaskPrompt(s.Goal, s.Instructions, o.config.WorkDir, promptPlan, task, projCtx)
+		prompt := pm.ExecuteTaskPrompt(s.Goal, s.Instructions, o.config.WorkDir, promptPlan, task, o.config.NoCodeContextInject, projCtx)
 		// Check for a user-edited context override. If one exists, use it instead.
 		if override, overrideErr := ctxedit.LoadOverride(o.config.WorkDir, task.ID); overrideErr == nil && override != "" {
 			color.New(color.FgYellow).Printf("  Using context override for task %d (from .cloop/context_override_%d.txt)\n", task.ID, task.ID)
@@ -2036,7 +2043,7 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 			wg.Add(1)
 			go func(idx int, t *pm.Task) {
 				defer wg.Done()
-				prompt := pm.ExecuteTaskPrompt(s.Goal, s.Instructions, o.config.WorkDir, parallelPromptPlan, t)
+				prompt := pm.ExecuteTaskPrompt(s.Goal, s.Instructions, o.config.WorkDir, parallelPromptPlan, t, o.config.NoCodeContextInject)
 				// Check for a user-edited context override.
 				if override, overrideErr := ctxedit.LoadOverride(o.config.WorkDir, t.ID); overrideErr == nil && override != "" {
 					prompt = override
@@ -2654,7 +2661,7 @@ func (o *Orchestrator) evolve(ctx context.Context) error {
 				if keptEv < totalEv {
 					color.New(color.FgYellow).Printf("Context pruned: kept %d of %d steps to fit token budget\n", keptEv, totalEv)
 				}
-				prompt := pm.ExecuteTaskPrompt(s.Goal, s.Instructions, o.config.WorkDir, evolvePrunedPlan, nextTask)
+				prompt := pm.ExecuteTaskPrompt(s.Goal, s.Instructions, o.config.WorkDir, evolvePrunedPlan, nextTask, o.config.NoCodeContextInject)
 				// Check for a user-edited context override.
 				if override, overrideErr := ctxedit.LoadOverride(o.config.WorkDir, nextTask.ID); overrideErr == nil && override != "" {
 					color.New(color.FgYellow).Printf("  Using context override for task %d\n", nextTask.ID)

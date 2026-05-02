@@ -345,7 +345,7 @@ func TestDecomposePrompt_NoInstructions(t *testing.T) {
 func TestExecuteTaskPrompt_ContainsTask(t *testing.T) {
 	task := &Task{ID: 3, Title: "Write tests", Description: "Add unit tests for the pm package"}
 	plan := &Plan{Goal: "Build CLI", Tasks: []*Task{task}}
-	prompt := ExecuteTaskPrompt("Build CLI", "", "", plan, task)
+	prompt := ExecuteTaskPrompt("Build CLI", "", "", plan, task, true)
 	if !strings.Contains(prompt, "Write tests") {
 		t.Errorf("prompt missing task title")
 	}
@@ -358,7 +358,7 @@ func TestExecuteTaskPrompt_ShowsCompletedTasks(t *testing.T) {
 	done := &Task{ID: 1, Title: "Init project", Status: TaskDone}
 	current := &Task{ID: 2, Title: "Add features", Status: TaskPending}
 	plan := &Plan{Goal: "goal", Tasks: []*Task{done, current}}
-	prompt := ExecuteTaskPrompt("goal", "", "", plan, current)
+	prompt := ExecuteTaskPrompt("goal", "", "", plan, current, true)
 	if !strings.Contains(prompt, "Init project") {
 		t.Errorf("prompt missing completed task")
 	}
@@ -368,7 +368,7 @@ func TestExecuteTaskPrompt_ShowsPendingTasks(t *testing.T) {
 	current := &Task{ID: 1, Title: "First", Status: TaskPending}
 	upcoming := &Task{ID: 2, Title: "Second", Status: TaskPending}
 	plan := &Plan{Goal: "goal", Tasks: []*Task{current, upcoming}}
-	prompt := ExecuteTaskPrompt("goal", "", "", plan, current)
+	prompt := ExecuteTaskPrompt("goal", "", "", plan, current, true)
 	if !strings.Contains(prompt, "Second") {
 		t.Errorf("prompt missing upcoming task")
 	}
@@ -386,7 +386,7 @@ func TestExecuteTaskPrompt_IncludesCompletedTaskResult(t *testing.T) {
 	}
 	current := &Task{ID: 2, Title: "Add API", Status: TaskPending}
 	plan := &Plan{Goal: "goal", Tasks: []*Task{done, current}}
-	prompt := ExecuteTaskPrompt("goal", "", "", plan, current)
+	prompt := ExecuteTaskPrompt("goal", "", "", plan, current, true)
 	if !strings.Contains(prompt, "Created schema") {
 		t.Errorf("prompt missing result summary from completed task")
 	}
@@ -397,7 +397,7 @@ func TestExecuteTaskPrompt_TruncatesLongResult(t *testing.T) {
 	done := &Task{ID: 1, Title: "Big task", Status: TaskDone, Result: longResult}
 	current := &Task{ID: 2, Title: "Next", Status: TaskPending}
 	plan := &Plan{Goal: "goal", Tasks: []*Task{done, current}}
-	prompt := ExecuteTaskPrompt("goal", "", "", plan, current)
+	prompt := ExecuteTaskPrompt("goal", "", "", plan, current, true)
 	// Result should be truncated to 200 chars + "..."
 	if strings.Contains(prompt, longResult) {
 		t.Errorf("prompt should truncate long result, but full result found")
@@ -411,7 +411,7 @@ func TestExecuteTaskPrompt_SkippedTaskUsesMinusMarker(t *testing.T) {
 	skipped := &Task{ID: 1, Title: "Optional", Status: TaskSkipped}
 	current := &Task{ID: 2, Title: "Main", Status: TaskPending}
 	plan := &Plan{Goal: "goal", Tasks: []*Task{skipped, current}}
-	prompt := ExecuteTaskPrompt("goal", "", "", plan, current)
+	prompt := ExecuteTaskPrompt("goal", "", "", plan, current, true)
 	if !strings.Contains(prompt, "[-]") {
 		t.Errorf("skipped task should use [-] marker")
 	}
@@ -421,7 +421,7 @@ func TestExecuteTaskPrompt_NoResultOmitsSummaryLine(t *testing.T) {
 	done := &Task{ID: 1, Title: "Done task", Status: TaskDone, Result: ""}
 	current := &Task{ID: 2, Title: "Next", Status: TaskPending}
 	plan := &Plan{Goal: "goal", Tasks: []*Task{done, current}}
-	prompt := ExecuteTaskPrompt("goal", "", "", plan, current)
+	prompt := ExecuteTaskPrompt("goal", "", "", plan, current, true)
 	if strings.Contains(prompt, "Summary:") {
 		t.Errorf("prompt should not include 'Summary:' when result is empty")
 	}
