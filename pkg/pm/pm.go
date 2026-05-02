@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/kb"
 	"github.com/blechschmidt/cloop/pkg/promptstats"
 	"github.com/blechschmidt/cloop/pkg/provider"
 )
@@ -388,6 +389,14 @@ func ExecuteTaskPrompt(goal, instructions, workDir string, plan *Plan, task *Tas
 	if len(ctx) > 0 && ctx[0] != nil {
 		if formatted := ctx[0].Format(); formatted != "" {
 			b.WriteString(formatted)
+		}
+	}
+
+	// Inject relevant KB entries (top-3 by keyword overlap with task title+description).
+	if workDir != "" {
+		query := task.Title + " " + task.Description
+		if kbEntries, err := kb.TopRelevant(workDir, query, 3); err == nil && len(kbEntries) > 0 {
+			b.WriteString(kb.FormatKBSection(kbEntries))
 		}
 	}
 
