@@ -1070,6 +1070,68 @@ cloop run --pm                               # execute imported tasks
 cloop github push --done                     # close completed issues
 ```
 
+## Shell Completion
+
+cloop provides tab-completion scripts for **bash**, **zsh**, **fish**, and **PowerShell** via the built-in `completion` command. Completions cover all subcommands, flags, and dynamic values such as provider names, template names, and task IDs.
+
+### Quick load (current session)
+
+```bash
+# Bash
+source <(cloop completion bash)
+
+# Zsh
+source <(cloop completion zsh)
+
+# Fish
+cloop completion fish | source
+
+# PowerShell
+cloop completion powershell | Out-String | Invoke-Expression
+```
+
+### Permanent installation
+
+**Bash — Linux**
+```bash
+cloop completion bash > /etc/bash_completion.d/cloop
+```
+
+**Bash — macOS** (requires [bash-completion@2](https://formulae.brew.sh/formula/bash-completion@2))
+```bash
+cloop completion bash > $(brew --prefix)/etc/bash_completion.d/cloop
+```
+
+**Zsh**
+```zsh
+# Add to ~/.zshrc:
+source <(cloop completion zsh)
+
+# Or install to $fpath:
+cloop completion zsh > "${fpath[1]}/_cloop"
+```
+
+**Fish**
+```fish
+cloop completion fish > ~/.config/fish/completions/cloop.fish
+```
+
+**PowerShell** — add to your `$PROFILE`:
+```powershell
+Invoke-Expression (&cloop completion powershell)
+```
+
+### What gets completed
+
+| Context | Completions |
+|---------|-------------|
+| `--provider` flag (all commands) | `anthropic`, `claudecode`, `ollama`, `openai` |
+| `--template` flag (`cloop init`) | `web-app`, `cli-tool`, `data-pipeline`, `api-service`, `refactor`, `security-audit` |
+| `cloop task show/skip/done/fail/reset/edit/…` | Live task IDs from `.cloop/state.json` |
+| `cloop task tag/untag <id>` | Task ID for first argument |
+| `cloop task merge <id…>` | All task IDs for multi-ID arguments |
+| Subcommands | All registered subcommands with descriptions |
+
 ## License
 
 MIT

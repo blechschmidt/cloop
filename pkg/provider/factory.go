@@ -50,3 +50,12 @@ func Available() string {
 	}
 	return strings.Join(names, ", ")
 }
+
+// RegisteredNames returns the names of all registered providers as a slice.
+func RegisteredNames() []string {
+	names := make([]string, 0, len(registry))
+	for name := range registry {
+		names = append(names, name)
+	}
+	return names
+}
