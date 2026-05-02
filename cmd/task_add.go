@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/config"
+	"github.com/blechschmidt/cloop/pkg/health"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/provider"
 	"github.com/blechschmidt/cloop/pkg/state"
@@ -27,6 +28,7 @@ var (
 	addProvider  string
 	addModel     string
 	addTimeout   string
+	addHealth    bool
 )
 
 var taskAddCmd = &cobra.Command{
@@ -131,9 +133,6 @@ Examples:
 		}
 
 		headerColor := color.New(color.FgCyan, color.Bold)
-		dimColor := color.New(color.Faint)
-		warnColor := color.New(color.FgYellow)
-
 		headerColor.Printf("Structuring task with AI...\n\n")
 
 		spec, err := taskadd.Enrich(ctx, prov, opts, description, s.Plan)
@@ -141,45 +140,15 @@ Examples:
 			return fmt.Errorf("AI structuring failed: %w\n\nUse --no-ai to add without AI structuring.", err)
 		}
 
-		// Preview
-		fmt.Printf("Proposed task:\n\n")
-		warnColor.Printf("  Title:     %s\n", spec.Title)
-		fmt.Printf("  Priority:  %d\n", spec.Priority)
-		if spec.Role != "" {
-			fmt.Printf("  Role:      %s\n", spec.Role)
-		}
-		if spec.EstimatedMinutes > 0 {
-			fmt.Printf("  Estimate:  %d min\n", spec.EstimatedMinutes)
-		}
-		if len(spec.Tags) > 0 {
-			fmt.Printf("  Tags:      %s\n", strings.Join(spec.Tags, ", "))
-		}
-		if len(spec.SuggestedDependsOn) > 0 {
-			deps := make([]string, 0, len(spec.SuggestedDependsOn))
-			for _, id := range spec.SuggestedDependsOn {
-				deps = append(deps, fmt.Sprintf("#%d", id))
-			}
-			fmt.Printf("  Depends:   %s\n", strings.Join(deps, ", "))
-		}
-		if spec.Description != "" {
-			fmt.Printf("  Desc:      ")
-			dimColor.Printf("%s\n", spec.Description)
-		}
-		if spec.Rationale != "" {
-			fmt.Printf("\n  Rationale: ")
-			dimColor.Printf("%s\n", spec.Rationale)
-		}
-		fmt.Println()
-
 		if !addAuto {
-			fmt.Printf("Add this task? (y/N): ")
+			// Interactive refinement REPL
 			scanner := bufio.NewScanner(os.Stdin)
-			if !scanner.Scan() {
-				return fmt.Errorf("no input received")
+			var accepted bool
+			spec, accepted, err = taskadd.Refine(ctx, prov, opts, description, spec, s.Plan, scanner)
+			if err != nil {
+				return fmt.Errorf("refinement error: %w", err)
 			}
-			answer := strings.TrimSpace(strings.ToLower(scanner.Text()))
-			if answer != "y" && answer != "yes" {
-				fmt.Println("Cancelled.")
+			if !accepted {
 				return nil
 			}
 		}
@@ -243,6 +212,37 @@ Examples:
 		}
 
 		color.New(color.FgGreen).Printf("Added task %d: %s (priority %d)\n", task.ID, task.Title, task.Priority)
+
+		// Optional plan health re-score
+		if addHealth {
+			color.New(color.FgCyan).Printf("\nScoring plan health...\n")
+			report, herr := health.Score(ctx, prov, model, timeout, s.Plan)
+			if herr != nil {
+				color.New(color.FgYellow).Printf("Health check failed: %v\n", herr)
+			} else {
+				scoreColor := color.New(color.FgGreen)
+				if report.Score < 70 {
+					scoreColor = color.New(color.FgYellow)
+				}
+				if report.Score < 50 {
+					scoreColor = color.New(color.FgRed)
+				}
+				scoreColor.Printf("Plan health score: %d/100 — %s\n", report.Score, report.Summary)
+				if len(report.Issues) > 0 {
+					fmt.Println("Issues:")
+					for _, iss := range report.Issues {
+						fmt.Printf("  • %s\n", iss)
+					}
+				}
+				if len(report.Suggestions) > 0 {
+					fmt.Println("Suggestions:")
+					for _, sug := range report.Suggestions {
+						fmt.Printf("  → %s\n", sug)
+					}
+				}
+			}
+		}
+
 		return nil
 	},
 }
@@ -306,6 +306,7 @@ func init() {
 	taskAddCmd.Flags().StringVar(&addProvider, "provider", "", "AI provider to use (anthropic, openai, ollama, claudecode)")
 	taskAddCmd.Flags().StringVar(&addModel, "model", "", "Model override for the AI provider")
 	taskAddCmd.Flags().StringVar(&addTimeout, "timeout", "3m", "Timeout for the AI call (e.g. 2m, 300s)")
+	taskAddCmd.Flags().BoolVar(&addHealth, "health", false, "Re-score plan health after adding the task")
 
 	taskCmd.AddCommand(taskAddCmd)
 }
