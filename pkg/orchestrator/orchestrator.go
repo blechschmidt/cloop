@@ -52,6 +52,10 @@ type Config struct {
 	// When the cumulative token count reaches or exceeds this value the session pauses.
 	TokenBudget int
 
+	// CostLimit is the maximum estimated cost in USD for the session (0 = unlimited).
+	// The session warns at 80% of the limit and pauses when the limit is reached.
+	CostLimit float64
+
 	// Provider to use. If empty, falls back to state.Provider, then config.yaml, then claudecode.
 	ProviderName string
 
@@ -293,6 +297,11 @@ func (o *Orchestrator) runLoop(ctx context.Context) error {
 
 		if o.config.TokenBudget > 0 && s.TotalInputTokens+s.TotalOutputTokens >= o.config.TokenBudget {
 			color.New(color.FgYellow).Printf("⏸ Token budget reached (%d tokens). Run 'cloop run' to continue.\n", o.config.TokenBudget)
+			s.Status = "paused"
+			s.Save()
+			return nil
+		}
+		if o.checkCostLimit(s) {
 			s.Status = "paused"
 			s.Save()
 			return nil
@@ -679,6 +688,12 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		if o.config.TokenBudget > 0 && s.TotalInputTokens+s.TotalOutputTokens >= o.config.TokenBudget {
 			color.New(color.FgYellow).Printf("⏸ Token budget reached (%d tokens). Run 'cloop run' to continue.\n", o.config.TokenBudget)
 			// Mark the in-progress task as pending so it retries next time
+			task.Status = pm.TaskPending
+			s.Status = "paused"
+			s.Save()
+			return nil
+		}
+		if o.checkCostLimit(s) {
 			task.Status = pm.TaskPending
 			s.Status = "paused"
 			s.Save()
@@ -1145,6 +1160,12 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 
 			if o.config.TokenBudget > 0 && s.TotalInputTokens+s.TotalOutputTokens >= o.config.TokenBudget {
 				color.New(color.FgYellow).Printf("⏸ Token budget reached (%d tokens). Run 'cloop run' to continue.\n", o.config.TokenBudget)
+				task.Status = pm.TaskPending
+				s.Status = "paused"
+				s.Save()
+				return nil
+			}
+			if o.checkCostLimit(s) {
 				task.Status = pm.TaskPending
 				s.Status = "paused"
 				s.Save()
@@ -1728,6 +1749,34 @@ func (o *Orchestrator) learnFromSession(ctx context.Context, steps []state.StepR
 		return
 	}
 	dimColor.Printf("  Saved %d learning(s) to project memory.\n", len(learnings))
+}
+
+// checkCostLimit evaluates the current session cost against the configured
+// CostLimit. It logs a warning at 80% and returns true (stop) when the limit
+// is reached. model and provider come from state/config respectively.
+func (o *Orchestrator) checkCostLimit(s *state.ProjectState) (stop bool) {
+	if o.config.CostLimit <= 0 {
+		return false
+	}
+	model := s.Model
+	if model == "" {
+		model = o.config.Model
+	}
+	usd := cost.EstimateSessionCost(o.config.ProviderName, model, s.TotalInputTokens, s.TotalOutputTokens)
+	if usd >= o.config.CostLimit {
+		color.New(color.FgRed).Printf(
+			"⏸ Cost limit reached (%s). Run 'cloop run' to continue.\n",
+			cost.FormatCostWithLimit(usd, o.config.CostLimit),
+		)
+		return true
+	}
+	if usd >= o.config.CostLimit*0.8 {
+		color.New(color.FgYellow).Printf(
+			"  Cost warning: %s (80%% of limit %s)\n",
+			cost.FormatCost(usd), cost.FormatCost(o.config.CostLimit),
+		)
+	}
+	return false
 }
 
 // printSessionSummary prints a one-line summary after a run session ends.

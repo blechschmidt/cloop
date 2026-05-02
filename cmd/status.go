@@ -6,6 +6,7 @@ import (
 	"os"
 	"sort"
 
+	"github.com/blechschmidt/cloop/pkg/cost"
 	"github.com/blechschmidt/cloop/pkg/milestone"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/state"
@@ -100,6 +101,9 @@ var statusCmd = &cobra.Command{
 
 		if s.TotalInputTokens > 0 || s.TotalOutputTokens > 0 {
 			fmt.Printf("Tokens:   %d in / %d out\n", s.TotalInputTokens, s.TotalOutputTokens)
+			if usd := cost.EstimateSessionCost(s.Provider, s.Model, s.TotalInputTokens, s.TotalOutputTokens); usd > 0 {
+				fmt.Printf("Cost:     %s\n", cost.FormatCost(usd))
+			}
 		}
 
 		if len(s.Steps) > 0 {

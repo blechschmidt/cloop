@@ -1332,6 +1332,11 @@ const dashboardHTML = `<!DOCTYPE html>
                 <div class="token-bar-track"><div class="token-bar-fill" id="tokenBarFill" style="width:0%"></div></div>
               </div>
             </div>
+            <div class="stat-card" id="statCostCard" style="display:none">
+              <div class="stat-label">Est. Cost</div>
+              <div class="stat-value" id="statCost" style="font-size:16px;margin-top:4px">—</div>
+              <div class="stat-sub" id="statCostSub"></div>
+            </div>
             <div class="stat-card">
               <div class="stat-label">Created</div>
               <div class="stat-value" id="statCreated" style="font-size:12px;margin-top:4px">—</div>
@@ -1615,6 +1620,62 @@ window.switchTab = function(name) {
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
+// estimateCost returns estimated USD cost or null if the model is unknown.
+// Returns 0 for local (ollama) providers. Prices are per 1M tokens.
+function estimateCost(provider, model, inputTok, outputTok) {
+  const p = (provider || '').toLowerCase();
+  if (p === 'ollama') return 0;
+  const m = (model || '').toLowerCase();
+  // Pricing table: [inputPerM, outputPerM] in USD
+  const prices = {
+    'claude-opus-4-6':            [15.00, 75.00],
+    'claude-opus-4-5':            [15.00, 75.00],
+    'claude-sonnet-4-6':          [3.00,  15.00],
+    'claude-sonnet-4-5':          [3.00,  15.00],
+    'claude-haiku-4-5':           [0.80,  4.00],
+    'claude-3-opus-20240229':     [15.00, 75.00],
+    'claude-3-5-sonnet-20241022': [3.00,  15.00],
+    'claude-3-5-haiku-20241022':  [0.80,  4.00],
+    'claude-3-haiku-20240307':    [0.25,  1.25],
+    'gpt-4o':                     [2.50,  10.00],
+    'gpt-4o-mini':                [0.15,  0.60],
+    'gpt-4-turbo':                [10.00, 30.00],
+    'gpt-4':                      [30.00, 60.00],
+    'gpt-3.5-turbo':              [0.50,  1.50],
+    'o1':                         [15.00, 60.00],
+    'o1-mini':                    [3.00,  12.00],
+    'o3-mini':                    [1.10,  4.40],
+    'gemini-1.5-pro':             [1.25,  5.00],
+    'gemini-1.5-flash':           [0.075, 0.30],
+    'llama3':                     [0,     0],
+    'llama3.1':                   [0,     0],
+    'llama3.2':                   [0,     0],
+    'mistral':                    [0,     0],
+    'mixtral':                    [0,     0],
+  };
+  // Exact match
+  if (prices[m]) {
+    const [inM, outM] = prices[m];
+    return (inputTok / 1e6) * inM + (outputTok / 1e6) * outM;
+  }
+  // Prefix match (longest wins)
+  let best = null, bestLen = 0;
+  for (const key of Object.keys(prices)) {
+    if (key.length > bestLen && m.startsWith(key)) {
+      best = prices[key]; bestLen = key.length;
+    }
+  }
+  if (best) {
+    return (inputTok / 1e6) * best[0] + (outputTok / 1e6) * best[1];
+  }
+  // claudecode without explicit model: assume sonnet
+  if (p === 'claudecode' || p === '') {
+    const [inM, outM] = prices['claude-sonnet-4-6'];
+    return (inputTok / 1e6) * inM + (outputTok / 1e6) * outM;
+  }
+  return null;
+}
+
 function fmtDate(iso) {
   if (!iso) return '—';
   const d = new Date(iso);
@@ -1699,6 +1760,17 @@ function render(s) {
   const ti = s.total_input_tokens || 0, to = s.total_output_tokens || 0;
   document.getElementById('statTokens').textContent    = fmtNum(ti + to);
   document.getElementById('statTokensSub').textContent = ti > 0 ? fmtNum(ti)+' in / '+fmtNum(to)+' out' : '';
+
+  // Estimated cost
+  const usd = estimateCost(s.provider || '', s.model || '', ti, to);
+  const costCard = document.getElementById('statCostCard');
+  if (usd !== null && (ti > 0 || to > 0)) {
+    costCard.style.display = '';
+    document.getElementById('statCost').textContent = usd === 0 ? '$0 (local)' : '$' + usd.toFixed(usd < 0.01 ? 4 : 2);
+    document.getElementById('statCostSub').textContent = (s.provider || '') + (s.model ? ' / '+s.model : '');
+  } else {
+    costCard.style.display = 'none';
+  }
 
   // Steps
   const stepListEl = document.getElementById('stepList');

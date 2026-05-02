@@ -56,6 +56,7 @@ var (
 	fallbackProviders []string
 	streamOutput      bool
 	notifyEnabled     bool
+	costLimit         float64
 )
 
 var runCmd = &cobra.Command{
@@ -182,6 +183,7 @@ Press Ctrl+C to pause gracefully.`,
 			ProviderName:     providerName,
 			ProviderCfg:      provCfg,
 			TokenBudget:      tokenBudget,
+			CostLimit:        costLimit,
 			InnovateMode:     innovateMode,
 			Parallel:         parallelMode,
 			InjectContext:    injectContext,
@@ -394,5 +396,6 @@ func init() {
 	runCmd.Flags().StringSliceVar(&fallbackProviders, "fallback", nil, "Fallback provider chain (e.g. --fallback anthropic,openai). Tried in order after primary fails.")
 	runCmd.Flags().BoolVar(&streamOutput, "stream", false, "Stream tokens to the terminal as they are generated (anthropic, openai, ollama; ignored by claudecode)")
 	runCmd.Flags().BoolVar(&notifyEnabled, "notify", false, "Send OS desktop notifications on task done, task failed, and session complete (notify-send on Linux, osascript on macOS)")
+	runCmd.Flags().Float64Var(&costLimit, "cost-limit", 0, "Stop when estimated session cost reaches this USD amount (0 = unlimited); warns at 80%")
 	rootCmd.AddCommand(runCmd)
 }

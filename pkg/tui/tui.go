@@ -416,7 +416,9 @@ func (m Model) renderStats() string {
 	tokens := fmt.Sprintf("in:%d  out:%d", s.TotalInputTokens, s.TotalOutputTokens)
 
 	var costStr string
-	if s.Model != "" {
+	if usd := cost.EstimateSessionCost(s.Provider, s.Model, s.TotalInputTokens, s.TotalOutputTokens); usd > 0 || s.Provider == "ollama" {
+		costStr = cost.FormatCost(usd)
+	} else if s.Model != "" {
 		if usd, ok := cost.Estimate(s.Model, s.TotalInputTokens, s.TotalOutputTokens); ok {
 			costStr = cost.FormatCost(usd)
 		}
