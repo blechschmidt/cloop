@@ -194,6 +194,7 @@ type Task struct {
 	Pinned            bool         `json:"pinned,omitempty"`              // pinned tasks always appear at the top of task lists
 	TDDStatus         string       `json:"tdd_status,omitempty"`          // TDD verification outcome: "pass", "fail", or "skipped"
 	TDDScore          int          `json:"tdd_score,omitempty"`           // TDD score 0-100 (percentage of acceptance criteria met)
+	SprintID          int          `json:"sprint_id,omitempty"`           // sprint this task belongs to (0 = unassigned)
 }
 
 // Plan is the full task plan for a goal.
