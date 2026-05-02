@@ -26,6 +26,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/notify"
 	"github.com/blechschmidt/cloop/pkg/optimizer"
 	"github.com/blechschmidt/cloop/pkg/pm"
+	"github.com/blechschmidt/cloop/pkg/promptopt"
 	"github.com/blechschmidt/cloop/pkg/promptstats"
 	"github.com/blechschmidt/cloop/pkg/provider"
 	"github.com/blechschmidt/cloop/pkg/ctxedit"
@@ -989,6 +990,12 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			}
 		}
 
+		// Prompt A/B testing: track the currently recommended variant for this
+		// task's role. Used to record outcomes and to select a replacement on
+		// heal retries. Does not modify the main task prompt — variant injection
+		// only happens in the heal loop below.
+		activeVariant := promptopt.BestVariant(o.config.WorkDir, task.Role)
+
 		if o.config.DryRun {
 			dimColor.Printf("[dry-run] Task prompt:\n%s\n\n", prompt)
 			task.Status = pm.TaskDone
@@ -1161,6 +1168,8 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			if maxHealRetries <= 0 {
 				maxHealRetries = 2
 			}
+			// currentHealVariant tracks the variant used across heal iterations.
+			currentHealVariant := activeVariant
 			for healAttempt := 1; healAttempt <= maxHealRetries && signal == pm.TaskFailed; healAttempt++ {
 				task.HealAttempts++
 				if !o.log.IsJSON() {
@@ -1177,8 +1186,22 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 				pm.AddAnnotation(task, "ai", fmt.Sprintf("[HEAL %d/%d] Diagnosis: %s", healAttempt, maxHealRetries, diag))
 				healColor.Printf("[HEAL attempt %d/%d] Diagnosis: %s\n\n", healAttempt, maxHealRetries, truncate(diag, 300))
 
-				healPrompt := buildHealPrompt(prompt, diag, healAttempt, maxHealRetries)
-				healColor.Printf("[HEAL attempt %d/%d] Re-attempting task %d with mutated prompt...\n", healAttempt, maxHealRetries, task.ID)
+				// Switch to the next best prompt variant so a different instruction style
+				// gets a chance when the current one failed.
+				nextVariant := promptopt.NextBestVariant(o.config.WorkDir, task.Role, currentHealVariant.ID)
+				if nextVariant.ID != currentHealVariant.ID {
+					healColor.Printf("[HEAL attempt %d/%d] Switching prompt variant: %s -> %s (%s)\n",
+						healAttempt, maxHealRetries, currentHealVariant.ID, nextVariant.ID, nextVariant.Name)
+					pm.AddAnnotation(task, "ai", fmt.Sprintf("[HEAL %d/%d] Prompt variant switched to %s", healAttempt, maxHealRetries, nextVariant.ID))
+					currentHealVariant = nextVariant
+				}
+				// Inject the variant system prompt as prefix for this heal attempt.
+				healBasePrompt := prompt
+				if vp := currentHealVariant.SystemPrompt; vp != "" {
+					healBasePrompt = vp + prompt
+				}
+				healPrompt := buildHealPrompt(healBasePrompt, diag, healAttempt, maxHealRetries)
+				healColor.Printf("[HEAL attempt %d/%d] Re-attempting task %d (variant: %s)...\n", healAttempt, maxHealRetries, task.ID, currentHealVariant.ID)
 
 				healOpts, healWasStreamed := o.makeOpts(s.Model, true)
 				healResult, healErr := taskProvider.Complete(ctx, healPrompt, healOpts)
@@ -1501,6 +1524,11 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			}
 			if psErr := promptstats.Append(o.config.WorkDir, rec); psErr != nil {
 				dimColor.Printf("  prompt-stats write error (ignored): %v\n", psErr)
+			}
+			// Record outcome for A/B variant testing.
+			success := task.Status == pm.TaskDone || task.Status == pm.TaskSkipped
+			if optErr := promptopt.RecordOutcome(o.config.WorkDir, activeVariant.ID, success, int(durMs)); optErr != nil {
+				dimColor.Printf("  prompt-opt write error (ignored): %v\n", optErr)
 			}
 		}
 
