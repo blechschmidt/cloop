@@ -334,6 +334,8 @@ Press Ctrl+C to pause gracefully.`,
 			NoHeal:              noHeal,
 			RiskCheck:           riskCheck,
 			RiskForce:           riskForce,
+			Budget:              cfg.Budget,
+			NotifyCfg:           cfg.Notify,
 		}
 
 		orc, err := orchestrator.New(orchCfg, prov)

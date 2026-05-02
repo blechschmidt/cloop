@@ -13,9 +13,11 @@ import (
 	"github.com/blechschmidt/cloop/pkg/alert"
 	"github.com/blechschmidt/cloop/pkg/approvalgate"
 	"github.com/blechschmidt/cloop/pkg/artifact"
+	"github.com/blechschmidt/cloop/pkg/budget"
 	"github.com/blechschmidt/cloop/pkg/checkpoint"
 	"github.com/blechschmidt/cloop/pkg/clarify"
 	"github.com/blechschmidt/cloop/pkg/condition"
+	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/consensus"
 	"github.com/blechschmidt/cloop/pkg/cost"
 	cloopenv "github.com/blechschmidt/cloop/pkg/env"
@@ -299,6 +301,16 @@ type Config struct {
 	// output against the default rubric and saves the result to
 	// .cloop/evals/<task-id>.json. The weighted average is printed to the terminal.
 	AutoEval bool
+
+	// Budget configures daily token and USD spend limits. When set, the
+	// orchestrator checks the budget before each task and aborts with a clear
+	// message when any limit is exceeded. Threshold alerts are fired via
+	// desktop/webhook notifications when AlertThresholdPct is crossed.
+	Budget config.BudgetConfig
+
+	// NotifyCfg holds notification channel settings used by the budget enforcer
+	// to send threshold alerts. It mirrors config.NotifyConfig.
+	NotifyCfg config.NotifyConfig
 }
 
 type Orchestrator struct {
@@ -1099,6 +1111,14 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			s.Status = "paused"
 			s.Save()
 			return nil
+		}
+
+		// Daily budget enforcement: abort before spending tokens if any limit is exceeded.
+		if budgetErr := budget.Enforce(o.config.WorkDir, o.config.Budget, o.config.NotifyCfg); budgetErr != nil {
+			failColor.Printf("\n✗ Budget limit reached: %v\n", budgetErr)
+			s.Status = "paused"
+			s.Save()
+			return budgetErr
 		}
 
 		if !o.log.IsJSON() {
@@ -2337,6 +2357,14 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 			if len(ready) == 0 {
 				continue
 			}
+		}
+
+		// Daily budget enforcement: abort before spending tokens if any limit is exceeded.
+		if budgetErr := budget.Enforce(o.config.WorkDir, o.config.Budget, o.config.NotifyCfg); budgetErr != nil {
+			failColor.Printf("\n✗ Budget limit reached: %v\n", budgetErr)
+			s.Status = "paused"
+			s.Save()
+			return budgetErr
 		}
 
 		// Apply worker pool limit: cap the batch to MaxParallel if set.

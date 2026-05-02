@@ -176,11 +176,23 @@ type GitHubConfig struct {
 	Labels []string `yaml:"labels,omitempty"`
 }
 
-// BudgetConfig holds monthly spend limit settings.
+// BudgetConfig holds spend limit settings.
 type BudgetConfig struct {
 	// MonthlyUSD is the maximum allowed API spend per calendar month.
 	// 0 means no limit. When exceeded, cloop warns (or blocks) new task runs.
 	MonthlyUSD float64 `yaml:"monthly_usd,omitempty"`
+
+	// DailyUSDLimit is the maximum allowed API spend per calendar day (UTC).
+	// 0 means no limit. When exceeded, cloop aborts task execution.
+	DailyUSDLimit float64 `yaml:"daily_usd_limit,omitempty"`
+
+	// DailyTokenLimit is the maximum total tokens (input + output) allowed per
+	// calendar day (UTC). 0 means no limit.
+	DailyTokenLimit int `yaml:"daily_token_limit,omitempty"`
+
+	// AlertThresholdPct is the percentage of the daily budget at which cloop
+	// fires a desktop/webhook alert. Default 80 (80%).
+	AlertThresholdPct int `yaml:"alert_threshold_pct,omitempty"`
 }
 
 // Default returns a Config with sensible defaults.
