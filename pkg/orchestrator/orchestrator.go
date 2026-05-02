@@ -69,6 +69,11 @@ type Config struct {
 	// Independent tasks (all deps satisfied) run simultaneously.
 	Parallel bool
 
+	// MaxParallel is the maximum number of tasks to execute concurrently in PM
+	// parallel mode. 0 (or unset) means no limit — all ready tasks run at once.
+	// Setting this to 1 is equivalent to sequential execution.
+	MaxParallel int
+
 	// InjectContext enables project context injection (git status, file tree) into task prompts.
 	InjectContext bool
 
@@ -1081,6 +1086,11 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 		ready := s.Plan.ReadyTasks()
 		if len(ready) == 0 {
 			break
+		}
+
+		// Apply worker pool limit: cap the batch to MaxParallel if set.
+		if o.config.MaxParallel > 0 && len(ready) > o.config.MaxParallel {
+			ready = ready[:o.config.MaxParallel]
 		}
 
 		// Mark all ready tasks as in-progress before starting goroutines.

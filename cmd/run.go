@@ -42,6 +42,7 @@ var (
 	tokenBudget     int
 	innovateMode    bool
 	parallelMode    bool
+	maxParallel     int
 	injectContext    bool
 	adaptiveReplan   bool
 	reviewMode       bool
@@ -139,6 +140,16 @@ Press Ctrl+C to pause gracefully.`,
 			return fmt.Errorf("provider: %w", err)
 		}
 
+		// --max-parallel / -j implies parallel mode.
+		if maxParallel > 0 {
+			parallelMode = true
+		}
+		// Apply config-level MaxParallel as default when flag not set.
+		effectiveMaxParallel := maxParallel
+		if effectiveMaxParallel == 0 {
+			effectiveMaxParallel = cfg.MaxParallel
+		}
+
 		// Merge PM mode: flag | plan-only | replan | parallel | persisted state
 		effectivePMMode := pmMode || planOnly || replan || parallelMode
 		if !effectivePMMode && projectState != nil && projectState.PMMode {
@@ -186,6 +197,7 @@ Press Ctrl+C to pause gracefully.`,
 			CostLimit:        costLimit,
 			InnovateMode:     innovateMode,
 			Parallel:         parallelMode,
+			MaxParallel:      effectiveMaxParallel,
 			InjectContext:    injectContext,
 			AdaptiveReplan:   adaptiveReplan,
 			ReviewMode:       reviewMode,
@@ -382,6 +394,7 @@ func init() {
 	runCmd.Flags().IntVar(&tokenBudget, "token-budget", 0, "Stop when cumulative tokens (in+out) reach this limit (0 = unlimited)")
 	runCmd.Flags().BoolVar(&innovateMode, "innovate", false, "Innovation mode: encourage creative, unconventional features in evolve iterations")
 	runCmd.Flags().BoolVar(&parallelMode, "parallel", false, "PM mode: run all dependency-ready tasks concurrently (implies --pm)")
+	runCmd.Flags().IntVarP(&maxParallel, "max-parallel", "j", 0, "PM mode: max tasks to run concurrently (implies --parallel; 0 = unlimited)")
 	runCmd.Flags().BoolVar(&injectContext, "inject-context", false, "PM mode: inject project context (git status, file tree) into task prompts")
 	runCmd.Flags().BoolVar(&adaptiveReplan, "adaptive-replan", false, "PM mode: re-plan remaining tasks with AI after a failure")
 	runCmd.Flags().BoolVar(&reviewMode, "review", false, "PM mode: pause before each task for human approval (y/n/skip/quit)")

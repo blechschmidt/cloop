@@ -26,6 +26,11 @@ type Config struct {
 	Router RouterConfig `yaml:"router,omitempty"`
 	// Hooks defines shell commands to run at task and plan lifecycle events.
 	Hooks HooksConfig `yaml:"hooks,omitempty"`
+
+	// MaxParallel sets the default worker pool size for parallel PM mode.
+	// 0 means no limit (all ready tasks run concurrently).
+	// Overridden by --max-parallel / -j on the command line.
+	MaxParallel int `yaml:"max_parallel,omitempty"`
 }
 
 // HooksConfig holds shell commands executed at task and plan lifecycle events.

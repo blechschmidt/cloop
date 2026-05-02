@@ -1803,6 +1803,148 @@ func TestRunPM_SyncFromDisk_ExternalTasksDoNotDuplicateOnRepeatedSync(t *testing
 	}
 }
 
+// --- MaxParallel worker pool ---
+
+// concurrencyTrackingProvider counts peak simultaneous goroutines inside Complete().
+type concurrencyTrackingProvider struct {
+	mu          sync.Mutex
+	active      int
+	peakActive  int
+	totalCalls  int
+	output      string
+}
+
+func (p *concurrencyTrackingProvider) Complete(_ context.Context, _ string, _ provider.Options) (*provider.Result, error) {
+	p.mu.Lock()
+	p.active++
+	if p.active > p.peakActive {
+		p.peakActive = p.active
+	}
+	p.totalCalls++
+	p.mu.Unlock()
+
+	// Hold the lock for a brief moment to make concurrency detectable.
+	time.Sleep(5 * time.Millisecond)
+
+	p.mu.Lock()
+	p.active--
+	p.mu.Unlock()
+
+	out := p.output
+	if out == "" {
+		out = "done\nTASK_DONE"
+	}
+	return &provider.Result{Output: out, Provider: "concurrency-mock"}, nil
+}
+func (p *concurrencyTrackingProvider) Name() string         { return "concurrency-mock" }
+func (p *concurrencyTrackingProvider) DefaultModel() string { return "mock-model" }
+
+// TestRunPMParallel_MaxParallel_LimitsBatchSize verifies that with MaxParallel=2 and
+// 4 independent tasks, no more than 2 tasks execute concurrently.
+func TestRunPMParallel_MaxParallel_LimitsBatchSize(t *testing.T) {
+	dir := tempDir(t)
+	s := initState(t, dir, "goal", 0)
+	s.PMMode = true
+	s.Plan = &pm.Plan{
+		Goal: "goal",
+		Tasks: []*pm.Task{
+			{ID: 1, Title: "A", Priority: 1, Status: pm.TaskPending},
+			{ID: 2, Title: "B", Priority: 1, Status: pm.TaskPending},
+			{ID: 3, Title: "C", Priority: 1, Status: pm.TaskPending},
+			{ID: 4, Title: "D", Priority: 1, Status: pm.TaskPending},
+		},
+	}
+	s.Save()
+
+	prov := &concurrencyTrackingProvider{output: "done\nTASK_DONE"}
+	o := newOrchestrator(t, dir, Config{WorkDir: dir, PMMode: true, Parallel: true, MaxParallel: 2}, prov)
+
+	if err := o.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if prov.peakActive > 2 {
+		t.Errorf("peak concurrent tasks exceeded MaxParallel=2: got %d", prov.peakActive)
+	}
+	if prov.totalCalls != 4 {
+		t.Errorf("expected 4 total provider calls, got %d", prov.totalCalls)
+	}
+
+	final, _ := state.Load(dir)
+	for _, task := range final.Plan.Tasks {
+		if task.Status != pm.TaskDone {
+			t.Errorf("task %d: expected done, got %s", task.ID, task.Status)
+		}
+	}
+	if final.Status != "complete" {
+		t.Errorf("expected status=complete, got %s", final.Status)
+	}
+}
+
+// TestRunPMParallel_MaxParallel_One_IsSequential verifies that MaxParallel=1 results
+// in a peak concurrency of 1 (effectively sequential within the parallel dispatch path).
+func TestRunPMParallel_MaxParallel_One_IsSequential(t *testing.T) {
+	dir := tempDir(t)
+	s := initState(t, dir, "goal", 0)
+	s.PMMode = true
+	s.Plan = &pm.Plan{
+		Goal: "goal",
+		Tasks: []*pm.Task{
+			{ID: 1, Title: "A", Priority: 1, Status: pm.TaskPending},
+			{ID: 2, Title: "B", Priority: 1, Status: pm.TaskPending},
+			{ID: 3, Title: "C", Priority: 1, Status: pm.TaskPending},
+		},
+	}
+	s.Save()
+
+	prov := &concurrencyTrackingProvider{output: "done\nTASK_DONE"}
+	o := newOrchestrator(t, dir, Config{WorkDir: dir, PMMode: true, Parallel: true, MaxParallel: 1}, prov)
+
+	if err := o.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if prov.peakActive > 1 {
+		t.Errorf("MaxParallel=1 should allow at most 1 concurrent task, got peak=%d", prov.peakActive)
+	}
+	if prov.totalCalls != 3 {
+		t.Errorf("expected 3 provider calls, got %d", prov.totalCalls)
+	}
+}
+
+// TestRunPMParallel_MaxParallel_Zero_AllTasksRunAtOnce verifies that MaxParallel=0
+// (unlimited) allows all independent tasks to run in a single parallel round.
+func TestRunPMParallel_MaxParallel_Zero_AllTasksRunAtOnce(t *testing.T) {
+	dir := tempDir(t)
+	s := initState(t, dir, "goal", 0)
+	s.PMMode = true
+	s.Plan = &pm.Plan{
+		Goal: "goal",
+		Tasks: []*pm.Task{
+			{ID: 1, Title: "A", Priority: 1, Status: pm.TaskPending},
+			{ID: 2, Title: "B", Priority: 1, Status: pm.TaskPending},
+			{ID: 3, Title: "C", Priority: 1, Status: pm.TaskPending},
+		},
+	}
+	s.Save()
+
+	prov := &concurrencyTrackingProvider{output: "done\nTASK_DONE"}
+	// MaxParallel=0 means unlimited (all 3 should run in one round).
+	o := newOrchestrator(t, dir, Config{WorkDir: dir, PMMode: true, Parallel: true, MaxParallel: 0}, prov)
+
+	if err := o.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	// All 3 tasks are independent so peak should reach 3.
+	if prov.peakActive < 3 {
+		t.Errorf("MaxParallel=0 (unlimited) should run all 3 tasks at once; peak was %d", prov.peakActive)
+	}
+	if prov.totalCalls != 3 {
+		t.Errorf("expected 3 provider calls, got %d", prov.totalCalls)
+	}
+}
+
 // TestRunPMParallel_DependencyBlocking ensures tasks with deps wait for prerequisites.
 func TestRunPMParallel_DependencyBlocking(t *testing.T) {
 	dir := tempDir(t)
