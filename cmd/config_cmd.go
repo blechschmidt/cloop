@@ -24,7 +24,9 @@ Examples:
   cloop config set openai.api_key sk-...
   cloop config set openai.base_url http://localhost:8080/v1
   cloop config set ollama.base_url http://localhost:11434
-  cloop config set ollama.model llama3.2`,
+  cloop config set ollama.model llama3.2
+  cloop config set notify.slack_webhook https://hooks.slack.com/services/...
+  cloop config set notify.discord_webhook https://discord.com/api/webhooks/...`,
 }
 
 var configShowCmd = &cobra.Command{
@@ -119,6 +121,11 @@ func applyConfigKey(cfg *config.Config, key, value string) error {
 	case "claudecode.model":
 		cfg.ClaudeCode.Model = value
 
+	case "notify.slack_webhook":
+		cfg.Notify.SlackWebhook = value
+	case "notify.discord_webhook":
+		cfg.Notify.DiscordWebhook = value
+
 	case "webhook.url":
 		cfg.Webhook.URL = value
 	case "webhook.events":
@@ -155,7 +162,7 @@ func applyConfigKey(cfg *config.Config, key, value string) error {
 		}
 
 	default:
-		return fmt.Errorf("unknown config key %q\n\nValid keys:\n  provider\n  anthropic.api_key, anthropic.model, anthropic.base_url\n  openai.api_key, openai.model, openai.base_url\n  ollama.base_url, ollama.model\n  claudecode.model\n  webhook.url, webhook.events\n  github.token, github.repo, github.labels", key)
+		return fmt.Errorf("unknown config key %q\n\nValid keys:\n  provider\n  anthropic.api_key, anthropic.model, anthropic.base_url\n  openai.api_key, openai.model, openai.base_url\n  ollama.base_url, ollama.model\n  claudecode.model\n  webhook.url, webhook.events\n  notify.slack_webhook, notify.discord_webhook\n  github.token, github.repo, github.labels", key)
 	}
 	return nil
 }

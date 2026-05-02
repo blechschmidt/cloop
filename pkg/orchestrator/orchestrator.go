@@ -173,6 +173,16 @@ type Config struct {
 	// Tasks that do not match any tag in the filter are skipped for this run.
 	// An empty filter (default) executes all ready tasks regardless of tags.
 	TagFilter []string
+
+	// SlackWebhookURL is the Slack incoming webhook URL for rich notifications.
+	// When set, the orchestrator sends a Slack attachment on task_done, task_failed,
+	// and plan_complete events. Empty = disabled.
+	SlackWebhookURL string
+
+	// DiscordWebhookURL is the Discord webhook URL for rich notifications.
+	// When set, the orchestrator sends a Discord embed on task_done, task_failed,
+	// and plan_complete events. Empty = disabled.
+	DiscordWebhookURL string
 }
 
 type Orchestrator struct {
@@ -209,6 +219,22 @@ func New(cfg Config, prov provider.Provider) (*Orchestrator, error) {
 
 	r := router.New(prov)
 	return &Orchestrator{config: cfg, state: s, provider: prov, router: r, memory: mem, webhook: wh, metrics: cfg.Metrics}, nil
+}
+
+// notifyWebhooks sends a rich notification to the configured Slack and/or Discord
+// webhook URLs. Errors are printed as dim warnings and never interrupt execution.
+func (o *Orchestrator) notifyWebhooks(title, body string) {
+	dimColor := color.New(color.Faint)
+	if u := o.config.SlackWebhookURL; u != "" {
+		if err := notify.SendWebhook(u, title, body); err != nil {
+			dimColor.Printf("  slack notify error (ignored): %v\n", err)
+		}
+	}
+	if u := o.config.DiscordWebhookURL; u != "" {
+		if err := notify.SendWebhook(u, title, body); err != nil {
+			dimColor.Printf("  discord notify error (ignored): %v\n", err)
+		}
+	}
 }
 
 // RegisterRoute adds a role→provider binding to the orchestrator's router.
@@ -638,6 +664,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			if o.config.Notify {
 				notify.Send("cloop: All Tasks Complete", s.Goal)
 			}
+			o.notifyWebhooks("cloop: Plan Complete", fmt.Sprintf("Goal: %s\n%s", s.Goal, s.Plan.Summary()))
 			if o.metrics != nil {
 				if err := o.metrics.WriteJSON(o.config.WorkDir); err != nil {
 					dimColor.Printf("  metrics write error (ignored): %v\n", err)
@@ -951,6 +978,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			if o.config.Notify {
 				notify.Send("cloop: Task Done", task.Title)
 			}
+			o.notifyWebhooks("cloop: Task Done", fmt.Sprintf("Task #%d: %s\nGoal: %s\nElapsed: %s", task.ID, task.Title, s.Goal, taskDur))
 			{
 				done, failed := s.Plan.CountByStatus()
 				o.webhook.Send(webhook.EventTaskDone, webhook.Payload{
@@ -989,6 +1017,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			if o.config.Notify {
 				notify.Send("cloop: Task Failed", task.Title)
 			}
+			o.notifyWebhooks("cloop: Task Failed", fmt.Sprintf("Task #%d: %s\nGoal: %s\nElapsed: %s", task.ID, task.Title, s.Goal, taskDur))
 			consecutiveErrors++
 
 			// AI failure diagnosis: analyze what went wrong and store it on the task.
@@ -1046,6 +1075,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			if o.config.Notify {
 				notify.Send("cloop: Task Done", task.Title)
 			}
+			o.notifyWebhooks("cloop: Task Done", fmt.Sprintf("Task #%d: %s\nGoal: %s\nElapsed: %s", task.ID, task.Title, s.Goal, taskDur))
 			{
 				done, failed := s.Plan.CountByStatus()
 				o.webhook.Send(webhook.EventTaskDone, webhook.Payload{
@@ -1272,6 +1302,7 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 			if o.config.Notify {
 				notify.Send("cloop: All Tasks Complete", s.Goal)
 			}
+			o.notifyWebhooks("cloop: Plan Complete", fmt.Sprintf("Goal: %s\n%s", s.Goal, s.Plan.Summary()))
 			if o.metrics != nil {
 				if err := o.metrics.WriteJSON(o.config.WorkDir); err != nil {
 					dimColor.Printf("  metrics write error (ignored): %v\n", err)
@@ -1482,6 +1513,7 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 				if o.config.Notify {
 					notify.Send("cloop: Task Done", task.Title)
 				}
+				o.notifyWebhooks("cloop: Task Done", fmt.Sprintf("Task #%d: %s\nGoal: %s\nElapsed: %s", task.ID, task.Title, s.Goal, taskDur))
 				{
 					done, failed := s.Plan.CountByStatus()
 					o.webhook.Send(webhook.EventTaskDone, webhook.Payload{
@@ -1511,6 +1543,7 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 				if o.config.Notify {
 					notify.Send("cloop: Task Failed", task.Title)
 				}
+				o.notifyWebhooks("cloop: Task Failed", fmt.Sprintf("Task #%d: %s\nGoal: %s\nElapsed: %s", task.ID, task.Title, s.Goal, taskDur))
 				{
 					done, failed := s.Plan.CountByStatus()
 					o.webhook.Send(webhook.EventTaskFailed, webhook.Payload{
@@ -1527,6 +1560,7 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 				if o.config.Notify {
 					notify.Send("cloop: Task Done", task.Title)
 				}
+				o.notifyWebhooks("cloop: Task Done", fmt.Sprintf("Task #%d: %s\nGoal: %s\nElapsed: %s", task.ID, task.Title, s.Goal, taskDur))
 				{
 					done, failed := s.Plan.CountByStatus()
 					o.webhook.Send(webhook.EventTaskDone, webhook.Payload{

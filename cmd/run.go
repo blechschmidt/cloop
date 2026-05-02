@@ -199,6 +199,8 @@ Press Ctrl+C to pause gracefully.`,
 		}
 
 		orchCfg := orchestrator.Config{
+			SlackWebhookURL:   cfg.Notify.SlackWebhook,
+			DiscordWebhookURL: cfg.Notify.DiscordWebhook,
 			Hooks: hooks.Config{
 				PreTask:  cfg.Hooks.PreTask,
 				PostTask: cfg.Hooks.PostTask,

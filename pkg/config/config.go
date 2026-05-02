@@ -34,6 +34,9 @@ type Config struct {
 
 	// Watch configures the file-watch mode for `cloop watch --glob`.
 	Watch WatchConfig `yaml:"watch,omitempty"`
+
+	// Notify configures Slack and Discord incoming webhook notifications.
+	Notify NotifyConfig `yaml:"notify,omitempty"`
 }
 
 // WatchConfig configures file-triggered plan re-evaluation.
@@ -109,6 +112,16 @@ type OllamaConfig struct {
 
 type ClaudeCodeConfig struct {
 	Model string `yaml:"model"`
+}
+
+// NotifyConfig holds Slack and Discord incoming webhook notification settings.
+type NotifyConfig struct {
+	// SlackWebhook is the Slack incoming webhook URL.
+	// Format: https://hooks.slack.com/services/...
+	SlackWebhook string `yaml:"slack_webhook,omitempty"`
+	// DiscordWebhook is the Discord webhook URL.
+	// Format: https://discord.com/api/webhooks/...
+	DiscordWebhook string `yaml:"discord_webhook,omitempty"`
 }
 
 // GitHubConfig holds GitHub integration settings.
