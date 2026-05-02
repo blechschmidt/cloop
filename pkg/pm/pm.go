@@ -144,6 +144,7 @@ type Task struct {
 	RequiresApproval  bool         `json:"requires_approval,omitempty"`   // task must be interactively approved before execution
 	Approved          bool         `json:"approved,omitempty"`            // pre-approved via 'cloop task approve'; bypasses interactive gate
 	MaxMinutes        int          `json:"max_minutes,omitempty"`         // per-task execution time budget in minutes (0 = no limit)
+	Assignee          string       `json:"assignee,omitempty"`            // team member assigned to this task
 }
 
 // Plan is the full task plan for a goal.

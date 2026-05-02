@@ -128,7 +128,11 @@ var statusCmd = &cobra.Command{
 							deadlineSuffix = color.New(color.FgYellow).Sprintf(" [deadline: %s]", countdown)
 						}
 					}
-					fmt.Printf("          %s Task %d: %s%s%s%s%s\n", taskMarker(t.Status), t.ID, t.Title, failCountSuffix, notesSuffix, reviewSuffix, deadlineSuffix)
+					assigneeSuffix := ""
+				if t.Assignee != "" {
+					assigneeSuffix = color.New(color.FgBlue).Sprintf(" [@%s]", t.Assignee)
+				}
+				fmt.Printf("          %s Task %d: %s%s%s%s%s%s\n", taskMarker(t.Status), t.ID, t.Title, failCountSuffix, notesSuffix, reviewSuffix, deadlineSuffix, assigneeSuffix)
 					if t.Condition != "" {
 						condStr := t.Condition
 						if len(condStr) > 80 {
