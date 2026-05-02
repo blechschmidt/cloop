@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/alert"
+	cloopdocs "github.com/blechschmidt/cloop/pkg/docs"
 	"github.com/blechschmidt/cloop/pkg/approvalgate"
 	"github.com/blechschmidt/cloop/pkg/artifact"
 	"github.com/blechschmidt/cloop/pkg/budget"
@@ -311,6 +312,15 @@ type Config struct {
 	// NotifyCfg holds notification channel settings used by the budget enforcer
 	// to send threshold alerts. It mirrors config.NotifyConfig.
 	NotifyCfg config.NotifyConfig
+
+	// DocsUpdateOnComplete runs `cloop docs update --yes` after the plan
+	// finishes. When true, all tracked documentation files are AI-refreshed
+	// automatically at the end of a successful PM run.
+	DocsUpdateOnComplete bool
+
+	// DocsUpdateFile limits the post-plan docs update to a single file.
+	// Empty means all tracked docs files are updated.
+	DocsUpdateFile string
 }
 
 type Orchestrator struct {
@@ -939,6 +949,35 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			Skipped: skipped,
 		}, o.allEnvLines()...); hookErr != nil {
 			dimColor.Printf("  post_plan hook error (ignored): %v\n", hookErr)
+		}
+
+		// Optional docs update hook: AI-refresh documentation after plan completes.
+		if o.config.DocsUpdateOnComplete {
+			dimColor.Printf("Running post-plan docs update...\n")
+			pd, docsErr := cloopdocs.Collect(o.config.WorkDir, o.config.WorkDir)
+			if docsErr == nil {
+				docsCtx := context.Background()
+				for _, df := range pd.Files {
+					if o.config.DocsUpdateFile != "" && df.RelPath != o.config.DocsUpdateFile {
+						continue
+					}
+					if !df.Exists {
+						continue
+					}
+					updated, refreshErr := cloopdocs.Refresh(docsCtx, o.provider, o.config.Model, 3*time.Minute, df, pd)
+					if refreshErr != nil {
+						dimColor.Printf("  docs update error (%s): %v\n", df.RelPath, refreshErr)
+						continue
+					}
+					if writeErr := os.WriteFile(df.AbsPath, []byte(updated), 0o644); writeErr != nil {
+						dimColor.Printf("  docs write error (%s): %v\n", df.RelPath, writeErr)
+						continue
+					}
+					dimColor.Printf("  docs updated: %s\n", df.RelPath)
+				}
+			} else {
+				dimColor.Printf("  docs collect error (ignored): %v\n", docsErr)
+			}
 		}
 	}()
 

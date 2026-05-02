@@ -86,6 +86,8 @@ var (
 	requireApproval      bool
 	skipClarify          bool
 	autoEvalRun          bool
+	docsUpdateOnComplete bool
+	docsUpdateFile       string
 	noCache              bool
 	cacheTTL             string
 	cacheMaxSize         int
@@ -334,8 +336,10 @@ Press Ctrl+C to pause gracefully.`,
 			NoHeal:              noHeal,
 			RiskCheck:           riskCheck,
 			RiskForce:           riskForce,
-			Budget:              cfg.Budget,
-			NotifyCfg:           cfg.Notify,
+			Budget:               cfg.Budget,
+			NotifyCfg:            cfg.Notify,
+			DocsUpdateOnComplete: docsUpdateOnComplete,
+			DocsUpdateFile:       docsUpdateFile,
 		}
 
 		orc, err := orchestrator.New(orchCfg, prov)
@@ -562,5 +566,7 @@ func init() {
 	runCmd.Flags().StringVar(&cacheTTL, "cache-ttl", "", "Response cache TTL (e.g. 1h, 48h); default 24h")
 	runCmd.Flags().IntVar(&cacheMaxSize, "cache-max-size", 0, "Maximum number of cached entries before LRU eviction (default 100)")
 	runCmd.Flags().BoolVar(&mockMode, "mock", false, "Use the deterministic offline mock provider (shorthand for --provider mock); responses loaded from .cloop/mock_responses.yaml")
+	runCmd.Flags().BoolVar(&docsUpdateOnComplete, "docs-update", false, "PM mode: AI-refresh all tracked documentation files (README.md, CONTRIBUTING.md, etc.) automatically when the plan finishes")
+	runCmd.Flags().StringVar(&docsUpdateFile, "docs-update-file", "", "Limit --docs-update to a single file (e.g. README.md)")
 	rootCmd.AddCommand(runCmd)
 }
