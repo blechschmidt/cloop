@@ -225,6 +225,17 @@ type Config struct {
 	// result as a task annotation with author "ai-reviewer". The verdict (PASS/FAIL)
 	// is surfaced in `cloop status`.
 	PostReview bool
+
+	// HealRetries is the maximum number of auto-heal re-attempts after a TASK_FAILED
+	// signal in PM sequential mode. On each attempt the orchestrator diagnoses the
+	// failure, builds a mutated retry prompt incorporating the root cause and fix
+	// strategy, and re-executes the task. 0 means use the default (2). When NoHeal
+	// is true this field is ignored entirely.
+	HealRetries int
+
+	// NoHeal disables the auto-heal loop. When true, TASK_FAILED immediately
+	// proceeds to permanent failure handling without any re-attempt.
+	NoHeal bool
 }
 
 type Orchestrator struct {
@@ -1046,6 +1057,59 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 
 		// Update task status based on signal in output
 		signal := pm.CheckTaskSignal(taskOutput)
+
+		// Auto-heal: when a task emits TASK_FAILED, diagnose the failure and
+		// re-attempt with a mutated prompt up to HealRetries times (default 2)
+		// before permanently marking the task failed. Disabled by --no-heal.
+		if signal == pm.TaskFailed && !o.config.NoHeal {
+			healColor := color.New(color.FgCyan, color.Bold)
+			maxHealRetries := o.config.HealRetries
+			if maxHealRetries <= 0 {
+				maxHealRetries = 2
+			}
+			for healAttempt := 1; healAttempt <= maxHealRetries && signal == pm.TaskFailed; healAttempt++ {
+				task.HealAttempts++
+				healColor.Printf("[HEAL attempt %d/%d] Diagnosing failure for task %d: %s\n", healAttempt, maxHealRetries, task.ID, task.Title)
+
+				diag, diagErr := diagnosis.AnalyzeFailure(ctx, o.provider, s.Model, o.config.StepTimeout, task, taskOutput)
+				if diagErr != nil {
+					dimColor.Printf("  [HEAL] Diagnosis error — aborting heal: %v\n", diagErr)
+					break
+				}
+				task.FailureDiagnosis = diag
+				pm.AddAnnotation(task, "ai", fmt.Sprintf("[HEAL %d/%d] Diagnosis: %s", healAttempt, maxHealRetries, diag))
+				healColor.Printf("[HEAL attempt %d/%d] Diagnosis: %s\n\n", healAttempt, maxHealRetries, truncate(diag, 300))
+
+				healPrompt := buildHealPrompt(prompt, diag, healAttempt, maxHealRetries)
+				healColor.Printf("[HEAL attempt %d/%d] Re-attempting task %d with mutated prompt...\n", healAttempt, maxHealRetries, task.ID)
+
+				healOpts, healWasStreamed := o.makeOpts(s.Model, true)
+				healResult, healErr := taskProvider.Complete(ctx, healPrompt, healOpts)
+				if healErr != nil {
+					healColor.Printf("[HEAL attempt %d/%d] Provider error: %v\n", healAttempt, maxHealRetries, healErr)
+					continue
+				}
+				if healWasStreamed() {
+					fmt.Println()
+				} else {
+					printOutput(healResult.Output, dimColor, o.config.Verbose)
+				}
+				taskOutput = healResult.Output
+
+				// Account for tokens used by heal attempts.
+				s.TotalInputTokens += healResult.InputTokens
+				s.TotalOutputTokens += healResult.OutputTokens
+
+				signal = pm.CheckTaskSignal(taskOutput)
+				if signal != pm.TaskFailed {
+					pm.AddAnnotation(task, "ai", fmt.Sprintf("[HEAL %d/%d] Succeeded — task signal: %s", healAttempt, maxHealRetries, signal))
+					healColor.Printf("[HEAL attempt %d/%d] ✓ Task %d healed successfully (signal: %s)\n\n", healAttempt, maxHealRetries, task.ID, signal)
+				} else {
+					healColor.Printf("[HEAL attempt %d/%d] Task %d still failing — %s\n\n", healAttempt, maxHealRetries, task.ID, truncate(taskOutput, 120))
+				}
+			}
+		}
+
 		completedAt := time.Now()
 		task.CompletedAt = &completedAt
 		task.Result = truncate(taskOutput, 500)
@@ -2435,6 +2499,27 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "..."
+}
+
+// buildHealPrompt constructs a modified retry prompt that incorporates the
+// diagnosed root cause and suggested fix strategy from a prior failure.
+// originalPrompt is the full prompt that produced TASK_FAILED; diagnosis is
+// the concise root-cause / fix-strategy string from AnalyzeFailure.
+func buildHealPrompt(originalPrompt, diagnosis string, attempt, maxAttempts int) string {
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("## AUTO-HEAL RETRY (attempt %d of %d)\n", attempt, maxAttempts))
+	b.WriteString("A previous attempt at this task failed. The failure was diagnosed and a fix\n")
+	b.WriteString("strategy has been identified. You MUST address the root cause before proceeding.\n\n")
+	b.WriteString("### FAILURE DIAGNOSIS AND FIX STRATEGY\n")
+	b.WriteString(diagnosis)
+	b.WriteString("\n\n")
+	b.WriteString("### INSTRUCTIONS\n")
+	b.WriteString("Apply the fix strategy above. Do not repeat the same approach that failed.\n")
+	b.WriteString("When complete, end your response with TASK_DONE, TASK_SKIPPED, or TASK_FAILED.\n\n")
+	b.WriteString("---\n\n")
+	b.WriteString("## ORIGINAL TASK\n\n")
+	b.WriteString(originalPrompt)
+	return b.String()
 }
 
 // stepSummaryLine returns a short one-line summary of a step's output.

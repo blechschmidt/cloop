@@ -75,6 +75,8 @@ var (
 	skipHealthCheck      bool
 	multiAgentMode       bool
 	postReview           bool
+	healRetries          int
+	noHeal               bool
 )
 
 var runCmd = &cobra.Command{
@@ -276,6 +278,8 @@ Press Ctrl+C to pause gracefully.`,
 			TagFilter:           runTags,
 			ScriptVerify:        scriptVerify,
 			AutoSplit:           autoSplit,
+			HealRetries:         healRetries,
+			NoHeal:              noHeal,
 		}
 
 		orc, err := orchestrator.New(orchCfg, prov)
@@ -489,5 +493,7 @@ func init() {
 	runCmd.Flags().BoolVar(&skipHealthCheck, "skip-health-check", false, "PM mode: skip the AI plan health evaluation that runs after decomposition")
 	runCmd.Flags().BoolVar(&multiAgentMode, "multi-agent", false, "PM mode: run each task through a three-pass specialist pipeline: architect→coder→reviewer (sequential only). Each pass uses a distinct system prompt; the reviewer's verdict overrides the coder's signal. Sub-agent outputs are stored as .cloop/tasks/<id>-<slug>-multiagent/{architect,coder,reviewer}.txt")
 	runCmd.Flags().BoolVar(&postReview, "post-review", false, "PM mode: after each TASK_DONE run an AI code review on `git diff HEAD~1` and store the verdict as a task annotation (sequential only). Can also be enabled via hooks.post_task_review in config.")
+	runCmd.Flags().IntVar(&healRetries, "heal-retries", 0, "PM mode: max auto-heal re-attempts after TASK_FAILED before permanently marking the task failed (0 = default 2); each attempt diagnoses the failure and retries with a modified prompt")
+	runCmd.Flags().BoolVar(&noHeal, "no-heal", false, "PM mode: disable the auto-heal loop — TASK_FAILED immediately marks the task failed without any re-attempt")
 	rootCmd.AddCommand(runCmd)
 }
