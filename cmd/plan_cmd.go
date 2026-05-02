@@ -20,11 +20,12 @@ import (
 var planCmd = &cobra.Command{
 	Use:   "plan",
 	Short: "Manage plan version history and diffs",
-	Long: `Inspect the versioned history of your AI-managed task plan.
+	Long: `Inspect and mutate your AI-managed task plan.
 
 Subcommands:
   history          List all saved plan snapshots
-  diff [v1] [v2]  Show a human-readable diff between two plan versions`,
+  diff [v1] [v2]  Show a human-readable diff between two plan versions
+  edit <instr>    Apply a natural-language instruction to mutate the plan`,
 }
 
 var planHistoryCmd = &cobra.Command{
@@ -308,5 +309,6 @@ func init() {
 	planDiffCmd.Flags().StringVar(&planDiffModel, "model", "", "Model override for narrative provider")
 	planCmd.AddCommand(planHistoryCmd)
 	planCmd.AddCommand(planDiffCmd)
+	planCmd.AddCommand(planEditCmd)
 	rootCmd.AddCommand(planCmd)
 }
