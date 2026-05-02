@@ -205,12 +205,20 @@ func GetStatus(entry ProjectEntry) ProjectStatus {
 func computeHealth(st *state.ProjectState) Health {
 	switch st.Status {
 	case "running", "evolving":
-		// Check for stall: last step older than 10 minutes while status is running.
+		// If state was updated recently the run is still active — never stalled.
+		if !st.UpdatedAt.IsZero() && time.Since(st.UpdatedAt) <= 15*time.Minute {
+			return HealthRunning
+		}
+		// Check for stall: last step older than 15 minutes while status is running.
 		if len(st.Steps) > 0 {
 			last := st.Steps[len(st.Steps)-1].Time
-			if !last.IsZero() && time.Since(last) > 10*time.Minute {
+			if !last.IsZero() && time.Since(last) > 15*time.Minute {
 				return HealthStalled
 			}
+		}
+		// If we have no steps but UpdatedAt is older than 15 min, consider stalled.
+		if !st.UpdatedAt.IsZero() && time.Since(st.UpdatedAt) > 15*time.Minute {
+			return HealthStalled
 		}
 		return HealthRunning
 	case "complete":
