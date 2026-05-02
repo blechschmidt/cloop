@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/blechschmidt/cloop/pkg/pm"
 )
 
 func tempDir(t *testing.T) string {
@@ -171,6 +173,55 @@ func TestLastNSteps_Zero(t *testing.T) {
 	result := s.LastNSteps(3)
 	if len(result) != 0 {
 		t.Errorf("expected 0 steps, got %d", len(result))
+	}
+}
+
+// --- SyncFromDisk / mergeExternalTasks ---
+
+func TestSyncFromDisk_PicksUpExternallyAddedTasks(t *testing.T) {
+	dir := tempDir(t)
+	s, err := Init(dir, "goal", 0)
+	if err != nil {
+		t.Fatalf("init: %v", err)
+	}
+
+	// Simulate the orchestrator having a plan with one completed task.
+	s.PMMode = true
+	s.Plan = &pm.Plan{
+		Goal: "goal",
+		Tasks: []*pm.Task{
+			{ID: 1, Title: "task one", Status: pm.TaskDone},
+		},
+	}
+	if err := s.Save(); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	// Externally add a second task directly to disk (simulates 'cloop task add').
+	disk, err := Load(dir)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	disk.Plan.Tasks = append(disk.Plan.Tasks, &pm.Task{
+		ID: 2, Title: "task two", Status: pm.TaskPending,
+	})
+	if err := disk.Save(); err != nil {
+		t.Fatalf("save external: %v", err)
+	}
+
+	// At this point s (in-memory) only knows about task 1 and plan appears complete.
+	if !s.Plan.IsComplete() {
+		t.Fatal("expected plan to be complete before SyncFromDisk")
+	}
+
+	// SyncFromDisk should pick up the externally added task.
+	s.SyncFromDisk()
+
+	if s.Plan.IsComplete() {
+		t.Fatal("expected plan to NOT be complete after SyncFromDisk (external task pending)")
+	}
+	if len(s.Plan.Tasks) != 2 {
+		t.Fatalf("expected 2 tasks after sync, got %d", len(s.Plan.Tasks))
 	}
 }
 

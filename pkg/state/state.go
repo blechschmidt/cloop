@@ -85,6 +85,13 @@ func (s *ProjectState) Save() error {
 	return os.WriteFile(StatePath(s.WorkDir), data, 0o644)
 }
 
+// SyncFromDisk re-reads the on-disk state and merges any tasks that were
+// added externally while the orchestrator was running. Call this before
+// checking plan completion so that externally-added tasks are visible.
+func (s *ProjectState) SyncFromDisk() {
+	s.mergeExternalTasks()
+}
+
 // mergeExternalTasks reads the current state from disk and merges any tasks
 // that were added externally (e.g. via 'cloop task add' while running).
 // Tasks are matched by ID — new IDs on disk are appended to the in-memory plan.
@@ -94,25 +101,25 @@ func (s *ProjectState) mergeExternalTasks() {
 		return
 	}
 	if s.Plan == nil {
-		s.Plan = disk.Plan
-		s.PMMode = true
+		// Caller intentionally cleared the plan (e.g., replan). Do not restore.
 		return
 	}
-	// Build set of known task IDs in memory
-	known := make(map[int]bool)
+	// Determine the highest task ID currently in memory. We only merge tasks
+	// from disk whose IDs are strictly greater — this ensures that:
+	//   (a) externally-added tasks (always assigned maxID+1) are picked up, and
+	//   (b) tasks intentionally removed from the in-memory plan are not restored
+	//       (their IDs are ≤ maxInMemID and would otherwise be re-added).
+	maxInMemID := 0
 	for _, t := range s.Plan.Tasks {
-		known[t.ID] = true
-	}
-	// Append any tasks from disk that we don't have
-	for _, t := range disk.Plan.Tasks {
-		if !known[t.ID] {
-			s.Plan.Tasks = append(s.Plan.Tasks, t)
+		if t.ID > maxInMemID {
+			maxInMemID = t.ID
 		}
 	}
-	// Sync max task ID
-	maxID := 0
-	for _, t := range s.Plan.Tasks {
-		if t.ID > maxID { maxID = t.ID }
+	// Append any tasks from disk that were added externally (new higher IDs).
+	for _, t := range disk.Plan.Tasks {
+		if t.ID > maxInMemID {
+			s.Plan.Tasks = append(s.Plan.Tasks, t)
+		}
 	}
 	// If disk state has PMMode enabled, preserve it
 	if disk.PMMode {

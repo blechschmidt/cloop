@@ -435,6 +435,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			return nil
 		}
 
+		s.SyncFromDisk()
 		if s.Plan.IsComplete() {
 			successColor.Printf("🎉 All tasks complete! Goal achieved.\n")
 			successColor.Printf("   %s\n\n", s.Plan.Summary())
@@ -871,6 +872,7 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 			return nil
 		}
 
+		s.SyncFromDisk()
 		if s.Plan.IsComplete() {
 			successColor.Printf("🎉 All tasks complete! Goal achieved.\n")
 			successColor.Printf("   %s\n\n", s.Plan.Summary())
@@ -1270,6 +1272,7 @@ func (o *Orchestrator) evolve(ctx context.Context) error {
 			}
 
 			// All tasks done — discover new ones via AI before falling back to free-form.
+			s.SyncFromDisk()
 			if s.Plan.IsComplete() {
 				n, err := o.evolvePM(ctx)
 				if err != nil {

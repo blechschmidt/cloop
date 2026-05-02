@@ -211,7 +211,7 @@ Examples:
 		if aiOutput.Len() == 0 {
 			fmt.Print(report.AIText)
 		}
-		fmt.Println("\n")
+		fmt.Println()
 
 		dimColor.Printf("Generated at %s using %s\n\n", report.GeneratedAt.Format("2006-01-02 15:04:05"), provName)
 
