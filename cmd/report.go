@@ -27,6 +27,7 @@ Examples:
   cloop report                        # terminal report
   cloop report --format md            # markdown report to stdout
   cloop report --format md -o out.md  # save markdown to file
+  cloop report --format html -o report.html  # self-contained HTML report
   cloop report --show-outputs         # include output excerpts`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		workdir, _ := os.Getwd()
@@ -35,13 +36,16 @@ Examples:
 			return err
 		}
 
-		format := report.Format(reportFormat)
-		if format != report.FormatMarkdown && format != report.FormatTerminal {
-			return fmt.Errorf("invalid format %q: must be 'terminal' or 'md'/'markdown'", reportFormat)
+		// Normalize format aliases
+		switch reportFormat {
+		case "md":
+			reportFormat = "markdown"
+		case "htm":
+			reportFormat = "html"
 		}
-		// Allow "md" as alias for "markdown"
-		if reportFormat == "md" {
-			format = report.FormatMarkdown
+		format := report.Format(reportFormat)
+		if format != report.FormatMarkdown && format != report.FormatTerminal && format != report.FormatHTML {
+			return fmt.Errorf("invalid format %q: must be 'terminal', 'md'/'markdown', or 'html'", reportFormat)
 		}
 
 		opts := report.Options{
@@ -66,7 +70,7 @@ Examples:
 }
 
 func init() {
-	reportCmd.Flags().StringVar(&reportFormat, "format", "terminal", "Output format: terminal, md, markdown")
+	reportCmd.Flags().StringVar(&reportFormat, "format", "terminal", "Output format: terminal, md/markdown, html")
 	reportCmd.Flags().BoolVar(&reportShowOutputs, "show-outputs", false, "Include step/task output excerpts")
 	reportCmd.Flags().StringVarP(&reportOutput, "output", "o", "", "Save report to file instead of stdout")
 	rootCmd.AddCommand(reportCmd)
