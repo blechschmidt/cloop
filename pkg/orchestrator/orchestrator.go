@@ -17,6 +17,7 @@ import (
 	cloopgit "github.com/blechschmidt/cloop/pkg/git"
 	"github.com/blechschmidt/cloop/pkg/hooks"
 	"github.com/blechschmidt/cloop/pkg/memory"
+	"github.com/blechschmidt/cloop/pkg/metrics"
 	"github.com/blechschmidt/cloop/pkg/notify"
 	"github.com/blechschmidt/cloop/pkg/optimizer"
 	"github.com/blechschmidt/cloop/pkg/pm"
@@ -155,6 +156,12 @@ type Config struct {
 	// When false (default), reordering is applied automatically and other suggestions
 	// are printed for awareness.
 	OptimizeInteractive bool
+
+	// Metrics is the metrics registry for this run. When non-nil the orchestrator records
+	// task/step/token/cost events into it. The caller is responsible for starting any HTTP
+	// server and writing the final JSON summary — the orchestrator writes metrics.json at
+	// plan completion via Metrics.WriteJSON. Pass nil to disable metrics collection.
+	Metrics *metrics.Metrics
 }
 
 type Orchestrator struct {
@@ -164,6 +171,7 @@ type Orchestrator struct {
 	router   *router.Router // routes tasks to role-specific providers
 	memory   *memory.Memory
 	webhook  *webhook.Client
+	metrics  *metrics.Metrics
 }
 
 func New(cfg Config, prov provider.Provider) (*Orchestrator, error) {
@@ -189,7 +197,7 @@ func New(cfg Config, prov provider.Provider) (*Orchestrator, error) {
 	}
 
 	r := router.New(prov)
-	return &Orchestrator{config: cfg, state: s, provider: prov, router: r, memory: mem, webhook: wh}, nil
+	return &Orchestrator{config: cfg, state: s, provider: prov, router: r, memory: mem, webhook: wh, metrics: cfg.Metrics}, nil
 }
 
 // RegisterRoute adds a role→provider binding to the orchestrator's router.
@@ -325,6 +333,15 @@ func (o *Orchestrator) runLoop(ctx context.Context) error {
 		s.TotalInputTokens += result.InputTokens
 		s.TotalOutputTokens += result.OutputTokens
 		s.AddStep(stepResult)
+
+		// Record metrics for this step.
+		if o.metrics != nil {
+			o.metrics.RecordStep()
+			o.metrics.RecordTokens(result.Provider, result.Model, result.InputTokens, result.OutputTokens)
+			if usd, ok := cost.Estimate(strings.ToLower(result.Model), result.InputTokens, result.OutputTokens); ok {
+				o.metrics.RecordCost(result.Provider, result.Model, usd)
+			}
+		}
 
 		if wasStreamed() {
 			fmt.Println()
@@ -610,6 +627,11 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			if o.config.Notify {
 				notify.Send("cloop: All Tasks Complete", s.Goal)
 			}
+			if o.metrics != nil {
+				if err := o.metrics.WriteJSON(o.config.WorkDir); err != nil {
+					dimColor.Printf("  metrics write error (ignored): %v\n", err)
+				}
+			}
 			done, failed := s.Plan.CountByStatus()
 			o.webhook.Send(webhook.EventPlanComplete, webhook.Payload{
 				Goal: s.Goal,
@@ -716,6 +738,10 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		task.StartedAt = &now
 		s.Save()
 
+		if o.metrics != nil {
+			o.metrics.RecordTaskStarted()
+		}
+
 		// Write mid-execution checkpoint so an interrupted run can resume.
 		cp := &checkpoint.Checkpoint{
 			TaskID:         task.ID,
@@ -811,6 +837,15 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		s.TotalInputTokens += result.InputTokens
 		s.TotalOutputTokens += result.OutputTokens
 		s.AddStep(stepResult)
+
+		// Record step tokens/cost into metrics.
+		if o.metrics != nil {
+			o.metrics.RecordStep()
+			o.metrics.RecordTokens(result.Provider, result.Model, result.InputTokens, result.OutputTokens)
+			if usd, ok := cost.Estimate(strings.ToLower(result.Model), result.InputTokens, result.OutputTokens); ok {
+				o.metrics.RecordCost(result.Provider, result.Model, usd)
+			}
+		}
 
 		if wasStreamed() {
 			fmt.Println()
@@ -1002,6 +1037,19 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 				})
 			}
 			consecutiveErrors = 0
+		}
+
+		// Record task outcome into metrics.
+		if o.metrics != nil && task.StartedAt != nil {
+			durSecs := time.Since(*task.StartedAt).Seconds()
+			switch task.Status {
+			case pm.TaskDone:
+				o.metrics.RecordTaskCompleted(durSecs)
+			case pm.TaskFailed:
+				o.metrics.RecordTaskFailed(durSecs)
+			case pm.TaskSkipped:
+				o.metrics.RecordTaskSkipped()
+			}
 		}
 
 		// Persist full AI response as a Markdown artifact file.
@@ -1205,6 +1253,11 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 			if o.config.Notify {
 				notify.Send("cloop: All Tasks Complete", s.Goal)
 			}
+			if o.metrics != nil {
+				if err := o.metrics.WriteJSON(o.config.WorkDir); err != nil {
+					dimColor.Printf("  metrics write error (ignored): %v\n", err)
+				}
+			}
 			{
 				done, failed := s.Plan.CountByStatus()
 				o.webhook.Send(webhook.EventPlanComplete, webhook.Payload{
@@ -1271,6 +1324,9 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 		for _, t := range ready {
 			t.Status = pm.TaskInProgress
 			t.StartedAt = &now
+			if o.metrics != nil {
+				o.metrics.RecordTaskStarted()
+			}
 		}
 		s.Save()
 
@@ -1343,6 +1399,15 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 			s.TotalOutputTokens += result.OutputTokens
 			s.AddStep(stepResult)
 			mu.Unlock()
+
+			// Record step metrics.
+			if o.metrics != nil {
+				o.metrics.RecordStep()
+				o.metrics.RecordTokens(result.Provider, result.Model, result.InputTokens, result.OutputTokens)
+				if usd, ok := cost.Estimate(strings.ToLower(result.Model), result.InputTokens, result.OutputTokens); ok {
+					o.metrics.RecordCost(result.Provider, result.Model, usd)
+				}
+			}
 
 			printOutput(result.Output, dimColor, o.config.Verbose)
 			dimColor.Printf("  [%s, provider: %s]\n\n", res.duration.Round(time.Second), result.Provider)
@@ -1434,6 +1499,20 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 				}
 				consecutiveErrors = 0
 			}
+
+			// Record task outcome into metrics.
+			if o.metrics != nil && task.StartedAt != nil {
+				durSecs := time.Since(*task.StartedAt).Seconds()
+				switch task.Status {
+				case pm.TaskDone:
+					o.metrics.RecordTaskCompleted(durSecs)
+				case pm.TaskFailed:
+					o.metrics.RecordTaskFailed(durSecs)
+				case pm.TaskSkipped:
+					o.metrics.RecordTaskSkipped()
+				}
+			}
+
 			// Persist full AI response as a Markdown artifact file.
 			o.writeTaskArtifact(task, result.Output)
 

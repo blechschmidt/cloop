@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/hooks"
+	"github.com/blechschmidt/cloop/pkg/metrics"
 	"github.com/blechschmidt/cloop/pkg/orchestrator"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/provider"
@@ -63,6 +65,7 @@ var (
 	contextTokenLimit    int
 	optimizePlan         bool
 	optimizeInteractive  bool
+	metricsAddr          string
 )
 
 var runCmd = &cobra.Command{
@@ -175,6 +178,24 @@ Press Ctrl+C to pause gracefully.`,
 			effectiveWebhookSecret = cfg.Webhook.Secret
 		}
 
+		// Set up metrics collection when --metrics-addr is provided.
+		var runMetrics *metrics.Metrics
+		if metricsAddr != "" {
+			runMetrics = metrics.New(providerName, model)
+			mux := http.NewServeMux()
+			mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+				fmt.Fprint(w, runMetrics.Prometheus())
+			})
+			srv := &http.Server{Addr: metricsAddr, Handler: mux}
+			go func() {
+				if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+					fmt.Fprintf(os.Stderr, "metrics server: %v\n", err)
+				}
+			}()
+			fmt.Printf("Prometheus metrics: http://%s/metrics\n", metricsAddr)
+		}
+
 		orchCfg := orchestrator.Config{
 			Hooks: hooks.Config{
 				PreTask:  cfg.Hooks.PreTask,
@@ -221,6 +242,7 @@ Press Ctrl+C to pause gracefully.`,
 			ContextTokenLimit:   contextTokenLimit,
 			Optimize:            optimizePlan,
 			OptimizeInteractive: optimizeInteractive,
+			Metrics:             runMetrics,
 		}
 
 		orc, err := orchestrator.New(orchCfg, prov)
@@ -425,5 +447,6 @@ func init() {
 	runCmd.Flags().IntVar(&contextTokenLimit, "context-tokens", 0, "Maximum estimated tokens for step/task-result history in prompts (0 = default 100000); prunes oldest entries when exceeded")
 	runCmd.Flags().BoolVar(&optimizePlan, "optimize", false, "PM mode: run AI plan optimizer before execution to suggest reordering, splits, merges, and flag issues")
 	runCmd.Flags().BoolVar(&optimizeInteractive, "optimize-interactive", false, "PM mode: prompt before applying optimizer reordering (default: apply automatically)")
+	runCmd.Flags().StringVar(&metricsAddr, "metrics-addr", "", "Start a Prometheus /metrics HTTP server on this address (e.g. :9090); writes metrics.json to .cloop/ at plan completion")
 	rootCmd.AddCommand(runCmd)
 }
