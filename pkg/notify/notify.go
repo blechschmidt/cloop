@@ -42,10 +42,11 @@ func sendDarwin(title, body string) {
 	_ = cmd.Run()
 }
 
-// SendWebhook sends a rich notification to a Slack or Discord incoming webhook URL.
+// SendWebhook sends a rich notification to a Slack, Discord, or custom HTTP webhook URL.
 // The format is auto-detected from the URL:
 //   - hooks.slack.com → Slack attachments format
 //   - discord.com/api/webhooks → Discord embeds format
+//   - anything else → generic JSON: {"title":"...","body":"...","source":"cloop"}
 //
 // Errors are returned; callers should treat them as best-effort and not block
 // the main orchestration flow.
@@ -63,7 +64,7 @@ func SendWebhook(webhookURL, title, body string) error {
 	case strings.Contains(webhookURL, "discord.com/api/webhooks"):
 		payload, err = buildDiscordPayload(title, body)
 	default:
-		return fmt.Errorf("notify: unsupported webhook URL (must contain hooks.slack.com or discord.com/api/webhooks)")
+		payload, err = buildCustomPayload(title, body)
 	}
 	if err != nil {
 		return fmt.Errorf("notify: marshal payload: %w", err)
@@ -134,6 +135,17 @@ func buildDiscordPayload(title, body string) ([]byte, error) {
 		},
 	}
 	return json.Marshal(p)
+}
+
+// customPayload is the JSON body for generic HTTP webhook endpoints.
+type customPayload struct {
+	Title  string `json:"title"`
+	Body   string `json:"body"`
+	Source string `json:"source"`
+}
+
+func buildCustomPayload(title, body string) ([]byte, error) {
+	return json.Marshal(customPayload{Title: title, Body: body, Source: "cloop"})
 }
 
 // escapeAppleScript escapes double-quotes and backslashes for embedding in an

@@ -126,14 +126,19 @@ type ClaudeCodeConfig struct {
 	Model string `yaml:"model"`
 }
 
-// NotifyConfig holds Slack and Discord incoming webhook notification settings.
+// NotifyConfig holds notification channel settings.
 type NotifyConfig struct {
+	// Desktop enables OS desktop notifications (notify-send on Linux, osascript on macOS).
+	Desktop bool `yaml:"desktop,omitempty"`
 	// SlackWebhook is the Slack incoming webhook URL.
 	// Format: https://hooks.slack.com/services/...
 	SlackWebhook string `yaml:"slack_webhook,omitempty"`
 	// DiscordWebhook is the Discord webhook URL.
 	// Format: https://discord.com/api/webhooks/...
 	DiscordWebhook string `yaml:"discord_webhook,omitempty"`
+	// CustomWebhook is a generic HTTP webhook URL for custom integrations.
+	// cloop POSTs JSON: {"title":"...", "body":"...", "source":"cloop"}
+	CustomWebhook string `yaml:"custom_webhook,omitempty"`
 }
 
 // SyncConfig configures git-based team plan sharing.
