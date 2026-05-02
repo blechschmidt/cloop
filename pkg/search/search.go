@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/archive"
 	"github.com/blechschmidt/cloop/pkg/journal"
 	"github.com/blechschmidt/cloop/pkg/kb"
 	"github.com/blechschmidt/cloop/pkg/pm"
@@ -34,12 +35,14 @@ const (
 	SourceChangelog SourceType = "changelog"
 	SourceRetro     SourceType = "retro"
 	SourceSnapshot  SourceType = "snapshot"
+	SourceArchive   SourceType = "archive"
 )
 
 // AllSources is the full set of source types.
 var AllSources = []SourceType{
 	SourceTask, SourceKB, SourceJournal, SourceStepLog,
 	SourceArtifact, SourceChangelog, SourceRetro, SourceSnapshot,
+	SourceArchive,
 }
 
 // Result is one match returned by a search.
@@ -209,6 +212,13 @@ func Run(ctx context.Context, workDir, query string, opts Options) ([]Result, er
 		}
 	}
 
+	if enabled(SourceArchive, opts.Types) {
+		r, err := searchArchive(workDir, query)
+		if err == nil {
+			results = append(results, r...)
+		}
+	}
+
 	// Remove zero-score results.
 	filtered := results[:0]
 	for _, r := range results {
@@ -256,6 +266,37 @@ func searchTasks(workDir, query string) ([]Result, error) {
 			Title:   fmt.Sprintf("Task %d: %s", t.ID, t.Title),
 			Excerpt: excerpt,
 			Score:   score * 3, // tasks weighted higher
+		})
+	}
+	return results, nil
+}
+
+// searchArchive searches tasks in .cloop/archive.json.
+func searchArchive(workDir, query string) ([]Result, error) {
+	tasks, err := archive.Load(workDir)
+	if err != nil || len(tasks) == 0 {
+		return nil, nil
+	}
+	var results []Result
+	for _, a := range tasks {
+		t := a.Task
+		haystack := t.Title + " " + t.Description
+		for _, ann := range t.Annotations {
+			haystack += " " + ann.Text
+		}
+		score := substringScore(haystack, query)
+		if score == 0 {
+			continue
+		}
+		excerpt := excerptAround(haystack, query, 200)
+		results = append(results, Result{
+			Source:    SourceArchive,
+			ID:        fmt.Sprintf("%d", t.ID),
+			Title:     fmt.Sprintf("Archived Task %d: %s [%s]", t.ID, t.Title, t.Status),
+			Excerpt:   excerpt,
+			FilePath:  ".cloop/archive.json",
+			Timestamp: a.ArchivedAt,
+			Score:     score * 2,
 		})
 	}
 	return results, nil

@@ -1771,5 +1771,7 @@ func init() {
 	taskCmd.AddCommand(taskExecCmd)
 	taskCmd.AddCommand(taskSummarizeCmd)
 	taskCmd.AddCommand(taskCalibrateCmd)
+	taskCmd.AddCommand(taskArchiveCmd)
+	taskCmd.AddCommand(taskUnarchiveCmd)
 	rootCmd.AddCommand(taskCmd)
 }
