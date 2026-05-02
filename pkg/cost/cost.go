@@ -4,9 +4,94 @@
 package cost
 
 import (
+	"bufio"
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
+	"time"
 )
+
+const ledgerFile = ".cloop/costs.jsonl"
+
+// LedgerEntry records the cost of one task execution.
+type LedgerEntry struct {
+	Timestamp     time.Time `json:"timestamp"`
+	TaskID        int       `json:"task_id"`
+	TaskTitle     string    `json:"task_title"`
+	Provider      string    `json:"provider"`
+	Model         string    `json:"model"`
+	InputTokens   int       `json:"input_tokens"`
+	OutputTokens  int       `json:"output_tokens"`
+	EstimatedUSD  float64   `json:"estimated_usd"`
+}
+
+// AppendLedger appends a cost entry to .cloop/costs.jsonl, creating the file
+// if it does not exist.
+func AppendLedger(workDir string, entry LedgerEntry) error {
+	if entry.Timestamp.IsZero() {
+		entry.Timestamp = time.Now().UTC()
+	}
+	path := filepath.Join(workDir, ledgerFile)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	enc := json.NewEncoder(f)
+	return enc.Encode(entry)
+}
+
+// ReadLedger reads all entries from .cloop/costs.jsonl. Returns an empty slice
+// (not an error) when the file does not exist.
+func ReadLedger(workDir string) ([]LedgerEntry, error) {
+	path := filepath.Join(workDir, ledgerFile)
+	f, err := os.Open(path)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	var entries []LedgerEntry
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 1<<20), 1<<20)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" {
+			continue
+		}
+		var e LedgerEntry
+		if err := json.Unmarshal([]byte(line), &e); err != nil {
+			// Skip malformed lines
+			continue
+		}
+		entries = append(entries, e)
+	}
+	return entries, sc.Err()
+}
+
+// MonthlyTotal returns the total estimated USD spent in the current calendar month.
+func MonthlyTotal(workDir string) (float64, error) {
+	entries, err := ReadLedger(workDir)
+	if err != nil {
+		return 0, err
+	}
+	now := time.Now().UTC()
+	var total float64
+	for _, e := range entries {
+		if e.Timestamp.Year() == now.Year() && e.Timestamp.Month() == now.Month() {
+			total += e.EstimatedUSD
+		}
+	}
+	return total, nil
+}
 
 // ModelPricing holds the input and output cost in USD per 1M tokens.
 type ModelPricing struct {

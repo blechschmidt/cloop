@@ -47,6 +47,9 @@ type Config struct {
 	// Each structured event is emitted as a JSON object with fields:
 	//   time, level, event, task_id, message, data
 	LogJSON bool `yaml:"log_json,omitempty"`
+
+	// Budget configures monthly spend limits.
+	Budget BudgetConfig `yaml:"budget,omitempty"`
 }
 
 // WatchConfig configures file-triggered plan re-evaluation.
@@ -169,6 +172,13 @@ type GitHubConfig struct {
 	Repo string `yaml:"repo,omitempty"`
 	// Labels added to issues created by cloop push
 	Labels []string `yaml:"labels,omitempty"`
+}
+
+// BudgetConfig holds monthly spend limit settings.
+type BudgetConfig struct {
+	// MonthlyUSD is the maximum allowed API spend per calendar month.
+	// 0 means no limit. When exceeded, cloop warns (or blocks) new task runs.
+	MonthlyUSD float64 `yaml:"monthly_usd,omitempty"`
 }
 
 // Default returns a Config with sensible defaults.
