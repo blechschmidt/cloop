@@ -1,5 +1,7 @@
 // Package hooks executes user-defined shell commands before and after tasks and plans.
 // Commands run via "sh -c" with task context passed as environment variables.
+// Hook values prefixed with "plugin:<name>" invoke a discovered plugin instead of
+// a raw shell command.
 package hooks
 
 import (
@@ -7,6 +9,9 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+	"strings"
+
+	"github.com/blechschmidt/cloop/pkg/plugin"
 )
 
 // Config holds the shell commands to run at lifecycle events.
@@ -91,7 +96,26 @@ func RunPostPlan(cfg Config, plan PlanContext, extraEnv ...string) error {
 // runHook executes cmd via "sh -c" with extra env vars merged into the
 // current process environment. Output (stdout+stderr) is forwarded to the
 // caller's terminal so hook scripts can print messages.
+//
+// If cmd is prefixed with "plugin:<name>", the named plugin is invoked via
+// plugin.Run instead of a shell command. Optional arguments can follow the
+// name separated by spaces: "plugin:lint --strict".
 func runHook(cmd string, extra []string, hookName string) error {
+	if strings.HasPrefix(cmd, "plugin:") {
+		rest := strings.TrimPrefix(cmd, "plugin:")
+		parts := strings.Fields(rest)
+		if len(parts) == 0 {
+			return fmt.Errorf("hook %s: plugin: requires a plugin name", hookName)
+		}
+		name := parts[0]
+		args := parts[1:]
+		workDir, _ := os.Getwd()
+		if err := plugin.Run(workDir, name, args, extra); err != nil {
+			return fmt.Errorf("hook %s failed: %w", hookName, err)
+		}
+		return nil
+	}
+
 	c := exec.Command("sh", "-c", cmd)
 	c.Env = append(os.Environ(), extra...)
 	c.Stdout = os.Stdout
