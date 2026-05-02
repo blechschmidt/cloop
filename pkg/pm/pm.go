@@ -124,6 +124,7 @@ type Task struct {
 	Result           string     `json:"result,omitempty"`
 	StartedAt        *time.Time `json:"started_at,omitempty"`
 	CompletedAt      *time.Time `json:"completed_at,omitempty"`
+	Deadline         *time.Time `json:"deadline,omitempty"`         // optional SLA deadline; overdue tasks are auto-boosted to P1
 	VerifyRetries    int        `json:"verify_retries,omitempty"`    // number of times task was re-queued by verifier
 	GitHubIssue      int        `json:"github_issue,omitempty"`      // linked GitHub issue number (0 = none)
 	EstimatedMinutes int        `json:"estimated_minutes,omitempty"` // AI-predicted duration

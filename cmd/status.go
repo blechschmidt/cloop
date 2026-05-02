@@ -118,7 +118,16 @@ var statusCmd = &cobra.Command{
 					} else if reviewVerdict == "FAIL" {
 						reviewSuffix = color.New(color.FgRed).Sprint(" [review:FAIL]")
 					}
-					fmt.Printf("          %s Task %d: %s%s%s%s\n", taskMarker(t.Status), t.ID, t.Title, failCountSuffix, notesSuffix, reviewSuffix)
+					deadlineSuffix := ""
+					if t.Deadline != nil && t.Status != pm.TaskDone && t.Status != pm.TaskSkipped {
+						countdown := pm.FormatCountdown(pm.TimeUntilDeadlineD(t))
+						if pm.IsOverdue(t) {
+							deadlineSuffix = color.New(color.FgRed, color.Bold).Sprintf(" [deadline: %s]", countdown)
+						} else {
+							deadlineSuffix = color.New(color.FgYellow).Sprintf(" [deadline: %s]", countdown)
+						}
+					}
+					fmt.Printf("          %s Task %d: %s%s%s%s%s\n", taskMarker(t.Status), t.ID, t.Title, failCountSuffix, notesSuffix, reviewSuffix, deadlineSuffix)
 					if t.Condition != "" {
 						condStr := t.Condition
 						if len(condStr) > 80 {

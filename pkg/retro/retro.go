@@ -15,6 +15,19 @@ import (
 	"github.com/blechschmidt/cloop/pkg/state"
 )
 
+// SLASection renders SLA compliance stats for inclusion in retro output.
+// Returns empty string when there are no tasks with deadlines.
+func SLASection(plan *pm.Plan) string {
+	stats := pm.ComputeSLAStats(plan)
+	if stats.Total == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("- SLA tasks: %d total, %d met, %d missed (compliance: %.0f%%)\n",
+		stats.Total, stats.Met, stats.Missed, stats.ComplianceRatio*100))
+	return b.String()
+}
+
 // Analysis is the structured output of a retrospective.
 type Analysis struct {
 	// HealthScore is an overall project health score from 1-10.
@@ -191,6 +204,12 @@ func buildPromptInternal(s *state.ProjectState, stats SessionStats, plan *pm.Pla
 	if costSummary != "" {
 		b.WriteString(fmt.Sprintf("- Cost: %s\n", costSummary))
 	}
+	// SLA compliance
+	if plan != nil {
+		if slaStr := SLASection(plan); slaStr != "" {
+			b.WriteString(slaStr)
+		}
+	}
 	b.WriteString("\n")
 
 	// Task breakdown with estimated vs actual time
@@ -271,6 +290,15 @@ func buildPromptInternal(s *state.ProjectState, stats SessionStats, plan *pm.Pla
 				output = output[:300] + "..."
 			}
 			b.WriteString(fmt.Sprintf("### %s (%s)\n%s\n\n", step.Task, step.Duration, output))
+		}
+	}
+
+	// SLA section in the AI prompt
+	if plan != nil {
+		if slaStr := SLASection(plan); slaStr != "" {
+			b.WriteString("## SLA COMPLIANCE\n")
+			b.WriteString(slaStr)
+			b.WriteString("\n")
 		}
 	}
 
@@ -474,6 +502,21 @@ func FormatMarkdownFull(a *Analysis, goal string, plan *pm.Plan, costSummary str
 				b.WriteString(fmt.Sprintf("| Task %d: %s | %s | %s | %s | %s |\n",
 					tc.TaskID, truncateMd(tc.Title, 40), tc.Status, estStr, actualStr, deltaStr))
 			}
+			b.WriteString("\n")
+		}
+	}
+
+	// SLA compliance
+	if plan != nil {
+		sla := pm.ComputeSLAStats(plan)
+		if sla.Total > 0 {
+			pct := int(sla.ComplianceRatio * 100)
+			b.WriteString("## SLA Compliance\n\n")
+			b.WriteString(fmt.Sprintf("| Metric | Value |\n|--------|-------|\n"))
+			b.WriteString(fmt.Sprintf("| Tasks with deadlines | %d |\n", sla.Total))
+			b.WriteString(fmt.Sprintf("| Met on time | %d |\n", sla.Met))
+			b.WriteString(fmt.Sprintf("| Missed | %d |\n", sla.Missed))
+			b.WriteString(fmt.Sprintf("| Compliance ratio | **%d%%** |\n", pct))
 			b.WriteString("\n")
 		}
 	}

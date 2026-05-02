@@ -809,6 +809,27 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			return nil
 		}
 
+		// Deadline check: boost overdue task priorities and fire notifications each iteration.
+		{
+			results := pm.CheckAndBoostOverdue(s.Plan)
+			for _, r := range results {
+				if r.Boosted {
+					s.Save()
+					color.New(color.FgRed, color.Bold).Printf("\u26a0 Task %d overdue and boosted to P1: %s\n", r.Task.ID, r.Task.Title)
+				}
+				if o.config.Notify {
+					notify.Send(
+						fmt.Sprintf("cloop: Overdue Task #%d", r.Task.ID),
+						fmt.Sprintf("%s — %s", r.Task.Title, pm.FormatCountdown(pm.TimeUntilDeadlineD(r.Task))),
+					)
+				}
+				o.notifyWebhooks(
+					fmt.Sprintf("cloop: Overdue Task #%d", r.Task.ID),
+					fmt.Sprintf("%s is overdue (%s)", r.Task.Title, pm.FormatCountdown(pm.TimeUntilDeadlineD(r.Task))),
+				)
+			}
+		}
+
 		task := s.Plan.NextTask()
 		if task == nil {
 			// Auto-skip tasks that are permanently blocked by failed deps

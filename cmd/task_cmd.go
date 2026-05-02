@@ -57,6 +57,7 @@ var (
 	editPriority int
 	editDeps     string
 	editRole     string // agent role for task edit
+	editDeadline string // deadline override
 
 	// filter flags
 	taskListTags []string // --tags filter for task list
@@ -328,8 +329,8 @@ var taskEditCmd = &cobra.Command{
 			return fmt.Errorf("task %d not found", id)
 		}
 
-		if !cmd.Flags().Changed("title") && !cmd.Flags().Changed("desc") && !cmd.Flags().Changed("priority") && !cmd.Flags().Changed("depends-on") && !cmd.Flags().Changed("role") {
-			return fmt.Errorf("no changes specified — use --title, --desc, --priority, --depends-on, or --role")
+		if !cmd.Flags().Changed("title") && !cmd.Flags().Changed("desc") && !cmd.Flags().Changed("priority") && !cmd.Flags().Changed("depends-on") && !cmd.Flags().Changed("role") && !cmd.Flags().Changed("deadline") {
+			return fmt.Errorf("no changes specified — use --title, --desc, --priority, --depends-on, --role, or --deadline")
 		}
 
 		changed := []string{}
@@ -356,6 +357,19 @@ var taskEditCmd = &cobra.Command{
 		if cmd.Flags().Changed("role") {
 			task.Role = pm.AgentRole(editRole)
 			changed = append(changed, "role")
+		}
+		if cmd.Flags().Changed("deadline") {
+			if editDeadline == "" || editDeadline == "none" || editDeadline == "clear" {
+				task.Deadline = nil
+				changed = append(changed, "deadline cleared")
+			} else {
+				dl, err := pm.ParseDeadline(editDeadline)
+				if err != nil {
+					return fmt.Errorf("invalid deadline: %w", err)
+				}
+				task.Deadline = &dl
+				changed = append(changed, "deadline")
+			}
 		}
 
 		if err := s.Save(); err != nil {
@@ -1219,6 +1233,7 @@ func init() {
 	taskEditCmd.Flags().IntVar(&editPriority, "priority", 0, "New priority for the task (1=highest)")
 	taskEditCmd.Flags().StringVar(&editDeps, "depends-on", "", "Comma-separated IDs of tasks this task depends on (e.g. '1,2'); use '' to clear")
 	taskEditCmd.Flags().StringVar(&editRole, "role", "", "Agent role: backend, frontend, testing, security, devops, data, docs, review")
+	taskEditCmd.Flags().StringVar(&editDeadline, "deadline", "", "Task deadline: relative ('2h', '3d', '1w'), RFC3339, date ('2025-12-31'), or 'none'/'clear' to remove")
 
 	taskListCmd.Flags().StringSliceVar(&taskListTags, "tags", nil, "Filter listed tasks by tag (comma-separated or repeated --tags)")
 

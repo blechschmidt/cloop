@@ -24,6 +24,7 @@ var (
 	addDeps      string
 	addRole      string
 	addCondition string
+	addDeadline  string
 	addNoAI      bool
 	addAuto      bool
 	addProvider  string
@@ -196,6 +197,16 @@ Examples:
 		}
 
 		taskCondition := addCondition // may be empty
+
+		var deadlinePtr *time.Time
+		if addDeadline != "" {
+			dl, err := pm.ParseDeadline(addDeadline)
+			if err != nil {
+				return fmt.Errorf("invalid deadline: %w", err)
+			}
+			deadlinePtr = &dl
+		}
+
 		task := &pm.Task{
 			ID:               maxID + 1,
 			Title:            spec.Title,
@@ -206,6 +217,7 @@ Examples:
 			Tags:             spec.Tags,
 			EstimatedMinutes: spec.EstimatedMinutes,
 			Condition:        taskCondition,
+			Deadline:         deadlinePtr,
 			Status:           pm.TaskPending,
 		}
 		s.Plan.Tasks = append(s.Plan.Tasks, task)
@@ -276,6 +288,15 @@ func addTaskDirect(s *state.ProjectState, description string) error {
 		return err
 	}
 
+	var deadlinePtr *time.Time
+	if addDeadline != "" {
+		dl, err := pm.ParseDeadline(addDeadline)
+		if err != nil {
+			return fmt.Errorf("invalid deadline: %w", err)
+		}
+		deadlinePtr = &dl
+	}
+
 	task := &pm.Task{
 		ID:          maxID + 1,
 		Title:       description,
@@ -284,6 +305,7 @@ func addTaskDirect(s *state.ProjectState, description string) error {
 		Role:        pm.AgentRole(addRole),
 		DependsOn:   deps,
 		Condition:   addCondition,
+		Deadline:    deadlinePtr,
 		Status:      pm.TaskPending,
 	}
 	s.Plan.Tasks = append(s.Plan.Tasks, task)
@@ -306,6 +328,7 @@ func init() {
 	taskAddCmd.Flags().StringVar(&addDeps, "depends-on", "", "Override dependency IDs (comma-separated, e.g. '1,2')")
 	taskAddCmd.Flags().StringVar(&addRole, "role", "", "Override AI-suggested role (backend, frontend, testing, security, devops, data, docs, review)")
 	taskAddCmd.Flags().StringVar(&addCondition, "condition", "", "Execution gate: '$cmd' runs a shell check (exit 0=proceed); any other string is sent to AI for yes/no evaluation")
+	taskAddCmd.Flags().StringVar(&addDeadline, "deadline", "", "Task deadline: relative ('2h', '3d', '1w') or RFC3339 ('2025-12-31T23:59:00Z') or date ('2025-12-31')")
 	taskAddCmd.Flags().BoolVar(&addNoAI, "no-ai", false, "Skip AI structuring; use description as task title directly")
 	taskAddCmd.Flags().BoolVar(&addAuto, "auto", false, "Skip confirmation prompt and add immediately")
 	taskAddCmd.Flags().StringVar(&addProvider, "provider", "", "AI provider to use (anthropic, openai, ollama, claudecode)")
