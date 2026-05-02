@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/config"
+	"github.com/blechschmidt/cloop/pkg/configvalidate"
 	"github.com/blechschmidt/cloop/pkg/provider"
 )
 
@@ -84,6 +85,7 @@ func Run(ctx context.Context, workdir string, cfg *config.Config, testProviders 
 	checkWebhooks(ctx, cfg, add)
 	checkHookScripts(cfg, add)
 	checkEnvYamlGitignored(workdir, add)
+	checkConfigValidate(ctx, workdir, add)
 
 	return rep
 }
@@ -500,6 +502,52 @@ func checkEnvYamlGitignored(workdir string, add addFn) {
 		Message: ".cloop/env.yaml is NOT in .gitignore — secrets may be accidentally committed",
 		Fix:     "Add '.cloop/env.yaml' to .gitignore: echo '.cloop/env.yaml' >> .gitignore",
 	})
+}
+
+// checkConfigValidate runs the config/state schema validator and surfaces any findings
+// as doctor results. ERRORs → Fail, WARNs → Warn, no issues → Pass.
+func checkConfigValidate(ctx context.Context, workdir string, add addFn) {
+	rep, err := configvalidate.Run(ctx, workdir, configvalidate.ValidateOptions{})
+	if err != nil {
+		add(Result{
+			Name:    "config validate",
+			Level:   Warn,
+			Message: fmt.Sprintf("config validate could not run: %v", err),
+		})
+		return
+	}
+
+	if len(rep.Findings) == 0 {
+		add(Result{
+			Name:    "config validate",
+			Level:   Pass,
+			Message: "config.yaml and state.db pass schema validation",
+		})
+		return
+	}
+
+	// Surface each finding as its own result so the user sees details.
+	for _, f := range rep.Findings {
+		var lvl Level
+		var fixHint string
+		switch f.Severity {
+		case configvalidate.SeverityError:
+			lvl = Fail
+		case configvalidate.SeverityWarn:
+			lvl = Warn
+		default:
+			lvl = Pass
+		}
+		if f.FixNote != "" {
+			fixHint = "cloop config validate --fix: " + f.FixNote
+		}
+		add(Result{
+			Name:    fmt.Sprintf("config validate: %s", f.Field),
+			Level:   lvl,
+			Message: f.Message,
+			Fix:     fixHint,
+		})
+	}
 }
 
 // checkHookScripts verifies that configured hook script paths are executable.
