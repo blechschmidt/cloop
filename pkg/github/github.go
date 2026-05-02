@@ -339,6 +339,41 @@ func ParseRepoFromRemote(remote string) (string, error) {
 	return "", fmt.Errorf("cannot parse GitHub repo from remote: %q", remote)
 }
 
+// GHRelease represents a GitHub release.
+type GHRelease struct {
+	ID      int    `json:"id"`
+	TagName string `json:"tag_name"`
+	Name    string `json:"name"`
+	Body    string `json:"body"`
+	HTMLURL string `json:"html_url"`
+	Draft   bool   `json:"draft"`
+}
+
+// CreateRelease creates a GitHub release for the given tag.
+// tagName is the git tag (e.g. "v1.2.3"), name is the release title,
+// body is the markdown release notes. Set draft=false to publish immediately.
+func (c *Client) CreateRelease(tagName, name, body string, draft bool) (*GHRelease, error) {
+	payload := map[string]interface{}{
+		"tag_name":               tagName,
+		"name":                   name,
+		"body":                   body,
+		"draft":                  draft,
+		"generate_release_notes": false,
+	}
+	data, status, err := c.do("POST", "/releases", payload)
+	if err != nil {
+		return nil, err
+	}
+	if status != 201 {
+		return nil, fmt.Errorf("GitHub API error %d: %s", status, string(data))
+	}
+	var rel GHRelease
+	if err := json.Unmarshal(data, &rel); err != nil {
+		return nil, fmt.Errorf("parsing created release: %w", err)
+	}
+	return &rel, nil
+}
+
 // CheckRunSummary returns a one-line summary of check run results.
 func CheckRunSummary(runs []CheckRun) string {
 	if len(runs) == 0 {
