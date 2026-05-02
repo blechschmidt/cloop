@@ -16,6 +16,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/metrics"
 	"github.com/blechschmidt/cloop/pkg/orchestrator"
 	"github.com/blechschmidt/cloop/pkg/pm"
+	"github.com/blechschmidt/cloop/pkg/profile"
 	"github.com/blechschmidt/cloop/pkg/provider"
 	"github.com/blechschmidt/cloop/pkg/provider/fallback"
 	"github.com/blechschmidt/cloop/pkg/state"
@@ -69,6 +70,7 @@ var (
 	noDedup              bool
 	runTags              []string
 	scriptVerify         bool
+	runProfile           string
 )
 
 var runCmd = &cobra.Command{
@@ -105,6 +107,20 @@ Press Ctrl+C to pause gracefully.`,
 
 		// Apply CLOOP_* environment variable overrides to config (env > config file).
 		applyEnvOverrides(cfg)
+
+		// Apply named profile: --profile flag > active profile from ~/.cloop/active_profile.
+		// Profiles overlay provider/model/key settings onto the config before CLI flags take effect.
+		activeProfileName := runProfile
+		if activeProfileName == "" {
+			activeProfileName = profile.GetActive()
+		}
+		if activeProfileName != "" {
+			if prof, err := profile.Get(activeProfileName); err == nil {
+				profile.Apply(*prof, cfg)
+			} else {
+				fmt.Fprintf(os.Stderr, "warning: profile %q not found: %v\n", activeProfileName, err)
+			}
+		}
 
 		// Determine provider (flag > env > config > state > auto-detect > claudecode)
 		providerName := runProvider
@@ -459,5 +475,6 @@ func init() {
 	runCmd.Flags().BoolVar(&noDedup, "no-dedup", false, "auto-evolve: disable semantic task deduplication (inject all discovered tasks without filtering duplicates)")
 	runCmd.Flags().StringSliceVar(&runTags, "tags", nil, "PM mode: restrict execution to tasks matching any of the given tags (comma-separated or repeated --tags flag)")
 	runCmd.Flags().BoolVar(&scriptVerify, "script-verify", false, "PM mode: after each TASK_DONE, generate and run an AI shell script that confirms the task was accomplished; marks task failed if the script exits non-zero")
+	runCmd.Flags().StringVar(&runProfile, "profile", "", "Named configuration profile to apply (overrides the active profile set by 'cloop profile use')")
 	rootCmd.AddCommand(runCmd)
 }

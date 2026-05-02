@@ -5,6 +5,7 @@ import (
 	"os"
 
 	"github.com/blechschmidt/cloop/pkg/config"
+	"github.com/blechschmidt/cloop/pkg/profile"
 	"github.com/blechschmidt/cloop/pkg/state"
 	clooptemplate "github.com/blechschmidt/cloop/pkg/template"
 	"github.com/fatih/color"
@@ -18,6 +19,7 @@ var (
 	initProvider string
 	initPMMode   bool
 	initTemplate string
+	initProfile  string
 )
 
 var initCmd = &cobra.Command{
@@ -65,6 +67,39 @@ Examples:
 		s, err := state.Init(workdir, goal, maxSteps)
 		if err != nil {
 			return fmt.Errorf("failed to initialize: %w", err)
+		}
+
+		// Apply named profile before explicit flags so flags always win.
+		activeProfileName := initProfile
+		if activeProfileName == "" {
+			activeProfileName = profile.GetActive()
+		}
+		if activeProfileName != "" {
+			if prof, err := profile.Get(activeProfileName); err == nil {
+				cfg, _ := config.Load(workdir)
+				if cfg == nil {
+					cfg = config.Default()
+				}
+				profile.Apply(*prof, cfg)
+				if s.Provider == "" && cfg.Provider != "" {
+					s.Provider = cfg.Provider
+				}
+				// Derive model from the profile-applied config if not already set.
+				if s.Model == "" {
+					switch cfg.Provider {
+					case "anthropic":
+						s.Model = cfg.Anthropic.Model
+					case "openai":
+						s.Model = cfg.OpenAI.Model
+					case "ollama":
+						s.Model = cfg.Ollama.Model
+					case "claudecode":
+						s.Model = cfg.ClaudeCode.Model
+					}
+				}
+			} else {
+				color.Yellow("⚠ profile %q not found: %v", activeProfileName, err)
+			}
 		}
 
 		if instructions != "" {
@@ -150,5 +185,6 @@ func init() {
 	initCmd.Flags().StringVar(&initProvider, "provider", "", "AI provider: anthropic, openai, ollama, claudecode (default)")
 	initCmd.Flags().BoolVar(&initPMMode, "pm", false, "Enable product manager mode (task decomposition) by default for this project")
 	initCmd.Flags().StringVar(&initTemplate, "template", "", "Bootstrap from a built-in template ("+clooptemplate.NamesString()+")")
+	initCmd.Flags().StringVar(&initProfile, "profile", "", "Named configuration profile to apply (overrides the active profile)")
 	rootCmd.AddCommand(initCmd)
 }

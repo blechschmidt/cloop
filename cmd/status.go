@@ -9,6 +9,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/cost"
 	"github.com/blechschmidt/cloop/pkg/milestone"
 	"github.com/blechschmidt/cloop/pkg/pm"
+	"github.com/blechschmidt/cloop/pkg/profile"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
@@ -50,6 +51,10 @@ var statusCmd = &cobra.Command{
 		fmt.Printf("Goal:     %s\n", s.Goal)
 		fmt.Printf("Status:   ")
 		statusColor.Println(s.Status)
+
+		if activeProf := profile.GetActive(); activeProf != "" {
+			fmt.Printf("Profile:  %s\n", activeProf)
+		}
 
 		prov := s.Provider
 		if prov == "" {
