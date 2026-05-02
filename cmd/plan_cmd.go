@@ -28,7 +28,8 @@ Subcommands:
   edit <instr>         Apply a natural-language instruction to mutate the plan
   export [--format]    Export plan to a portable YAML/JSON/TOML file
   import <file>        Import a plan from a portable file (--merge or --replace)
-  critique             AI adversarial plan review — devil's advocate pressure-test`,
+  critique             AI adversarial plan review — devil's advocate pressure-test
+  ai-brief             Generate a one-page AI executive brief for stakeholders`,
 }
 
 var planHistoryCmd = &cobra.Command{
