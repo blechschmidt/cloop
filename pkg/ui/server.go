@@ -53,12 +53,23 @@ const (
 	authLockoutSeconds = 60              // lockout duration in seconds
 )
 
+// uiIPBucket is a token-bucket state for one remote IP in the UI server.
+type uiIPBucket struct {
+	tokens   float64
+	lastSeen time.Time
+}
+
 // Server is the cloop web dashboard HTTP server.
 type Server struct {
 	WorkDir  string
 	Port     int
 	Token    string   // optional auth token; empty = no auth
 	Projects []string // extra project directories for multi-project dashboard
+
+	// RPS and Burst control the per-IP token-bucket rate limiter.
+	// Zero values use 20 req/s and burst 50.
+	RPS   float64
+	Burst int
 
 	mu      sync.Mutex
 	clients map[chan sseEvent]struct{}
@@ -67,6 +78,10 @@ type Server struct {
 	// Rate limiting: tracks per-IP auth failure counts.
 	authMu   sync.Mutex
 	authFails map[string]*authFailEntry
+
+	// Per-IP request rate-limit buckets.
+	rlMu      sync.Mutex
+	rlBuckets map[string]*uiIPBucket
 
 	// Live log ring-buffer (last liveLogMaxLines lines of subprocess output).
 	liveLogMu      sync.Mutex
@@ -100,8 +115,63 @@ func New(workdir string, port int, token string) *Server {
 		Token:         token,
 		clients:       make(map[chan sseEvent]struct{}),
 		authFails:     make(map[string]*authFailEntry),
+		rlBuckets:     make(map[string]*uiIPBucket),
 		chatHistories: make(map[string][]ChatMessage),
 	}
+}
+
+// uiAllow reports whether the request from ip is within the rate limit.
+func (s *Server) uiAllow(ip string) bool {
+	rps := s.RPS
+	if rps <= 0 {
+		rps = 20.0
+	}
+	burst := s.Burst
+	if burst <= 0 {
+		burst = 50
+	}
+
+	now := time.Now()
+	s.rlMu.Lock()
+	defer s.rlMu.Unlock()
+
+	b, ok := s.rlBuckets[ip]
+	if !ok {
+		b = &uiIPBucket{tokens: float64(burst), lastSeen: now}
+		s.rlBuckets[ip] = b
+	}
+
+	elapsed := now.Sub(b.lastSeen).Seconds()
+	b.tokens += elapsed * rps
+	if b.tokens > float64(burst) {
+		b.tokens = float64(burst)
+	}
+	b.lastSeen = now
+
+	if b.tokens < 1 {
+		return false
+	}
+	b.tokens--
+	return true
+}
+
+// uiRateLimitMiddleware wraps next with per-IP token-bucket rate limiting.
+func (s *Server) uiRateLimitMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !s.uiAllow(clientIP(r)) {
+			rps := s.RPS
+			if rps <= 0 {
+				rps = 20.0
+			}
+			retryAfter := int(1.0/rps) + 1
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+			w.WriteHeader(http.StatusTooManyRequests)
+			json.NewEncoder(w).Encode(map[string]string{"error": "rate limit exceeded"}) //nolint:errcheck
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // resolveWorkDir returns the effective working directory for a request.
@@ -127,7 +197,7 @@ func (s *Server) resolveWorkDir(r *http.Request) string {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	s.registerRoutes(mux)
-	return securityHeaders(s.authMiddleware(mux))
+	return s.uiRateLimitMiddleware(securityHeaders(s.authMiddleware(mux)))
 }
 
 // registerRoutes wires all API and UI routes onto mux.
@@ -213,7 +283,7 @@ func (s *Server) Start() error {
 	} else {
 		fmt.Printf("cloop dashboard running at http://localhost%s\n", addr)
 	}
-	return http.ListenAndServe(addr, securityHeaders(s.authMiddleware(mux)))
+	return http.ListenAndServe(addr, s.uiRateLimitMiddleware(securityHeaders(s.authMiddleware(mux))))
 }
 
 // securityHeaders adds hardening HTTP response headers to every response.

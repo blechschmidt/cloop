@@ -8,8 +8,10 @@ import (
 )
 
 var (
-	servePort  int
-	serveToken string
+	servePort      int
+	serveToken     string
+	serveRateLimit float64
+	serveRateBurst int
 )
 
 var serveCmd = &cobra.Command{
@@ -56,6 +58,8 @@ Examples:
 		}
 
 		srv := apiserver.New(workdir, servePort, token)
+		srv.RPS = serveRateLimit
+		srv.Burst = serveRateBurst
 		return srv.Start()
 	},
 }
@@ -63,5 +67,7 @@ Examples:
 func init() {
 	serveCmd.Flags().IntVar(&servePort, "port", 8081, "Port to listen on")
 	serveCmd.Flags().StringVar(&serveToken, "token", "", "Bearer auth token (also reads CLOOP_API_TOKEN env var)")
+	serveCmd.Flags().Float64Var(&serveRateLimit, "rate-limit", 0, "Requests per second per IP (default 20; 0 = use default)")
+	serveCmd.Flags().IntVar(&serveRateBurst, "rate-burst", 0, "Burst size per IP for rate limiter (default 50; 0 = use default)")
 	rootCmd.AddCommand(serveCmd)
 }

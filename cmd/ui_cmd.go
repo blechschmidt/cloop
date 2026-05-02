@@ -13,11 +13,13 @@ import (
 )
 
 var (
-	uiPort      int
-	uiNoBrowser bool
-	uiToken     string
-	uiProjects  []string
-	uiScan      string
+	uiPort        int
+	uiNoBrowser   bool
+	uiToken       string
+	uiProjects    []string
+	uiScan        string
+	uiRateLimit   float64
+	uiRateBurst   int
 )
 
 var uiCmd = &cobra.Command{
@@ -66,6 +68,8 @@ task list (PM mode), live progress via SSE, and run/stop controls.
 
 		srv := ui.New(workdir, uiPort, token)
 		srv.Projects = projectPaths
+		srv.RPS = uiRateLimit
+		srv.Burst = uiRateBurst
 		return srv.Start()
 	},
 }
@@ -92,5 +96,7 @@ func init() {
 	uiCmd.Flags().StringVar(&uiToken, "token", "", "Auth token (also reads CLOOP_UI_TOKEN env var); if set, all API requests must supply it")
 	uiCmd.Flags().StringArrayVar(&uiProjects, "projects", nil, "Additional project directories to include in the multi-project dashboard")
 	uiCmd.Flags().StringVar(&uiScan, "scan", "", "Scan this directory for cloop projects and add them to the dashboard")
+	uiCmd.Flags().Float64Var(&uiRateLimit, "rate-limit", 0, "Requests per second per IP (default 20; 0 = use default)")
+	uiCmd.Flags().IntVar(&uiRateBurst, "rate-burst", 0, "Burst size per IP for rate limiter (default 50; 0 = use default)")
 	rootCmd.AddCommand(uiCmd)
 }

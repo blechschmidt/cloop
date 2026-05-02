@@ -6,6 +6,7 @@ package apiserver
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -19,24 +20,115 @@ import (
 	"github.com/blechschmidt/cloop/pkg/state"
 )
 
+const (
+	defaultRPS   = 20.0 // requests per second per IP
+	defaultBurst = 50   // bucket capacity per IP
+)
+
+// ipBucket is a token-bucket state for one remote IP.
+type ipBucket struct {
+	tokens   float64
+	lastSeen time.Time
+}
+
 // Server is the cloop REST API HTTP server.
 type Server struct {
 	WorkDir string
 	Port    int
 	Token   string // optional bearer token; empty = no auth
 
+	// RPS and Burst control the per-IP token-bucket rate limiter.
+	// Zero values use defaultRPS / defaultBurst.
+	RPS   float64
+	Burst int
+
 	mu      sync.Mutex
 	runCmd  *exec.Cmd // currently-running `cloop run` subprocess, if any
 	runLog  strings.Builder
+
+	// Per-IP rate-limit buckets.
+	rlMu     sync.Mutex
+	rlBuckets map[string]*ipBucket
 }
 
 // New creates a new API server.
 func New(workdir string, port int, token string) *Server {
 	return &Server{
-		WorkDir: workdir,
-		Port:    port,
-		Token:   token,
+		WorkDir:   workdir,
+		Port:      port,
+		Token:     token,
+		rlBuckets: make(map[string]*ipBucket),
 	}
+}
+
+// remoteIP extracts the client IP from the request, honouring X-Forwarded-For
+// when the connection comes from localhost (reverse-proxy pattern).
+func remoteIP(r *http.Request) string {
+	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
+		if idx := strings.Index(fwd, ","); idx != -1 {
+			return strings.TrimSpace(fwd[:idx])
+		}
+		return strings.TrimSpace(fwd)
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
+}
+
+// allow reports whether the request from ip is within the rate limit. It
+// refills the bucket based on elapsed time and consumes one token.
+func (s *Server) allow(ip string) bool {
+	rps := s.RPS
+	if rps <= 0 {
+		rps = defaultRPS
+	}
+	burst := s.Burst
+	if burst <= 0 {
+		burst = defaultBurst
+	}
+
+	now := time.Now()
+	s.rlMu.Lock()
+	defer s.rlMu.Unlock()
+
+	b, ok := s.rlBuckets[ip]
+	if !ok {
+		b = &ipBucket{tokens: float64(burst), lastSeen: now}
+		s.rlBuckets[ip] = b
+	}
+
+	// Refill based on elapsed time.
+	elapsed := now.Sub(b.lastSeen).Seconds()
+	b.tokens += elapsed * rps
+	if b.tokens > float64(burst) {
+		b.tokens = float64(burst)
+	}
+	b.lastSeen = now
+
+	if b.tokens < 1 {
+		return false
+	}
+	b.tokens--
+	return true
+}
+
+// rateLimitMiddleware wraps next with per-IP token-bucket rate limiting.
+func (s *Server) rateLimitMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !s.allow(remoteIP(r)) {
+			rps := s.RPS
+			if rps <= 0 {
+				rps = defaultRPS
+			}
+			retryAfter := int(1.0/rps) + 1
+			w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+			jsonErr(w, "rate limit exceeded", http.StatusTooManyRequests)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // Start begins listening on the configured port.
@@ -70,7 +162,7 @@ func (s *Server) Start() error {
 		fmt.Printf("cloop API server running at http://localhost%s\n", addr)
 	}
 	fmt.Printf("OpenAPI spec: http://localhost%s/openapi.json\n", addr)
-	return http.ListenAndServe(addr, s.authMiddleware(mux))
+	return http.ListenAndServe(addr, s.rateLimitMiddleware(s.authMiddleware(mux)))
 }
 
 // authMiddleware enforces Bearer-token authentication on all routes when

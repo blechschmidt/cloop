@@ -58,6 +58,21 @@ type Config struct {
 	// time_estimate_minutes value by this factor before storing the task.
 	// This closes the feedback loop between historical actuals and future plans.
 	CalibrationFactor float64 `yaml:"calibration_factor,omitempty"`
+
+	// RateLimit configures the per-IP token-bucket rate limiter for HTTP servers
+	// (cloop serve and cloop ui). Zero values use built-in defaults.
+	RateLimit RateLimitConfig `yaml:"rate_limit,omitempty"`
+}
+
+// RateLimitConfig controls the per-IP token-bucket rate limiter applied to
+// the REST API server (cloop serve) and the Web UI server (cloop ui).
+type RateLimitConfig struct {
+	// RequestsPerSecond is the sustained request rate allowed per remote IP.
+	// Default: 20 requests/second.
+	RequestsPerSecond float64 `yaml:"requests_per_second,omitempty"`
+	// Burst is the maximum burst size (bucket capacity) per remote IP.
+	// Default: 50 requests.
+	Burst int `yaml:"burst,omitempty"`
 }
 
 // WatchConfig configures file-triggered plan re-evaluation.
