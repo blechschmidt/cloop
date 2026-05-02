@@ -18,12 +18,13 @@ import (
 )
 
 var (
-	retroProvider    string
-	retroModel       string
-	retroFormat      string
-	retroOutput      string
-	retroSaveMemory  bool
-	retroTimeout     string
+	retroProvider   string
+	retroModel      string
+	retroFormat     string
+	retroOutput     string
+	retroSave       bool
+	retroSaveMemory bool
+	retroTimeout    string
 )
 
 var retroCmd = &cobra.Command{
@@ -114,25 +115,59 @@ Examples:
 		dimColor := color.New(color.Faint)
 		dimColor.Printf("Running retrospective analysis with %s...\n\n", prov.Name())
 
+		// Build cost summary string if token data is available.
+		costSummary := ""
+		if s.TotalInputTokens > 0 || s.TotalOutputTokens > 0 {
+			usd := cost.EstimateSessionCost(providerName, model, s.TotalInputTokens, s.TotalOutputTokens)
+			costSummary = fmt.Sprintf("Input: %d tokens, Output: %d tokens, Estimated cost: %s",
+				s.TotalInputTokens, s.TotalOutputTokens, cost.FormatCost(usd))
+		}
+
 		ctx := context.Background()
-		analysis, err := retro.Analyze(ctx, prov, model, timeout, s)
+		var analysis *retro.Analysis
+		if s.Plan != nil {
+			// Use Generate() when a plan is available — richer per-task analysis.
+			analysis, err = retro.Generate(ctx, prov, model, timeout, s.Plan, costSummary)
+		} else {
+			analysis, err = retro.Analyze(ctx, prov, model, timeout, s)
+		}
 		if err != nil {
 			return fmt.Errorf("analysis failed: %w", err)
 		}
 
+		goal := s.Goal
+		var plan *pm.Plan
+		if s.Plan != nil {
+			plan = s.Plan
+		}
+
 		switch retroFormat {
 		case "md", "markdown":
-			md := retro.FormatMarkdown(analysis, s)
-			if retroOutput != "" {
-				if err := os.WriteFile(retroOutput, []byte(md), 0o644); err != nil {
+			md := retro.FormatMarkdownFull(analysis, goal, plan, costSummary)
+			dest := retroOutput
+			if dest == "" && retroSave {
+				dest = fmt.Sprintf(".cloop/retro-%s.md", time.Now().Format("20060102-150405"))
+			}
+			if dest != "" {
+				if err := os.WriteFile(dest, []byte(md), 0o644); err != nil {
 					return fmt.Errorf("writing output: %w", err)
 				}
-				color.New(color.FgGreen).Printf("Retrospective saved to %s\n", retroOutput)
+				color.New(color.FgGreen).Printf("Retrospective saved to %s\n", dest)
 			} else {
 				fmt.Print(md)
 			}
 		default:
+			// Terminal format: print markdown to stdout by default, optionally save.
+			md := retro.FormatMarkdownFull(analysis, goal, plan, costSummary)
 			printRetroTerminal(analysis, s)
+			if retroSave {
+				dest := fmt.Sprintf(".cloop/retro-%s.md", time.Now().Format("20060102-150405"))
+				if err := os.WriteFile(dest, []byte(md), 0o644); err != nil {
+					dimColor.Printf("Warning: could not save retro file: %v\n", err)
+				} else {
+					color.New(color.FgGreen).Printf("\nRetrospective saved to %s\n", dest)
+				}
+			}
 		}
 
 		// Optionally save insights to project memory.
@@ -308,6 +343,7 @@ func init() {
 	retroCmd.Flags().StringVar(&retroModel, "model", "", "Model to use for analysis")
 	retroCmd.Flags().StringVar(&retroFormat, "format", "terminal", "Output format: terminal (default) or md")
 	retroCmd.Flags().StringVarP(&retroOutput, "output", "o", "", "Write output to file (for --format md)")
+	retroCmd.Flags().BoolVar(&retroSave, "save", false, "Save report to .cloop/retro-<timestamp>.md")
 	retroCmd.Flags().BoolVar(&retroSaveMemory, "save-memory", false, "Save insights to project memory")
 	retroCmd.Flags().StringVar(&retroTimeout, "timeout", "", "Analysis timeout (e.g. 120s, 2m)")
 	rootCmd.AddCommand(retroCmd)

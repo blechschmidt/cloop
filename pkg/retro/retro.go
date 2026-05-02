@@ -40,6 +40,23 @@ type Analysis struct {
 
 	// VelocityNotes is a human-readable assessment of task throughput.
 	VelocityNotes string `json:"velocity_notes"`
+
+	// LessonsLearned is an AI-written narrative of lessons learned.
+	LessonsLearned string `json:"lessons_learned"`
+
+	// ProcessImprovements is an AI-written narrative of suggested process improvements.
+	ProcessImprovements string `json:"process_improvements"`
+}
+
+// TaskTimeComparison holds per-task estimated vs actual time data.
+type TaskTimeComparison struct {
+	TaskID           int
+	Title            string
+	Status           pm.TaskStatus
+	EstimatedMinutes int
+	ActualMinutes    int
+	// WallClockMinutes is derived from StartedAt/CompletedAt when ActualMinutes is 0.
+	WallClockMinutes int
 }
 
 // SessionStats holds computed metrics about a session.
@@ -91,32 +108,79 @@ func ComputeStats(s *state.ProjectState) SessionStats {
 	return stats
 }
 
+// ComputeTimeComparisons builds per-task estimated vs actual time data.
+func ComputeTimeComparisons(plan *pm.Plan) []TaskTimeComparison {
+	if plan == nil {
+		return nil
+	}
+	var out []TaskTimeComparison
+	for _, t := range plan.Tasks {
+		tc := TaskTimeComparison{
+			TaskID:           t.ID,
+			Title:            t.Title,
+			Status:           t.Status,
+			EstimatedMinutes: t.EstimatedMinutes,
+			ActualMinutes:    t.ActualMinutes,
+		}
+		if tc.ActualMinutes == 0 && t.StartedAt != nil && t.CompletedAt != nil {
+			tc.WallClockMinutes = int(t.CompletedAt.Sub(*t.StartedAt).Minutes())
+		}
+		out = append(out, tc)
+	}
+	return out
+}
+
 // BuildPrompt constructs the retrospective analysis prompt.
 func BuildPrompt(s *state.ProjectState, stats SessionStats) string {
+	var plan *pm.Plan
+	if s != nil {
+		plan = s.Plan
+	}
+	return buildPromptInternal(s, stats, plan, "")
+}
+
+// buildPromptInternal is the shared prompt builder for both Analyze and Generate.
+func buildPromptInternal(s *state.ProjectState, stats SessionStats, plan *pm.Plan, costSummary string) string {
 	var b strings.Builder
 
 	b.WriteString("You are an expert engineering manager performing a sprint retrospective.\n")
 	b.WriteString("Analyze the following AI-driven project session and provide structured insights.\n\n")
 
-	b.WriteString(fmt.Sprintf("## PROJECT GOAL\n%s\n\n", s.Goal))
-
-	if s.Instructions != "" {
-		b.WriteString(fmt.Sprintf("## CONSTRAINTS\n%s\n\n", s.Instructions))
+	if s != nil {
+		b.WriteString(fmt.Sprintf("## PROJECT GOAL\n%s\n\n", s.Goal))
+		if s.Instructions != "" {
+			b.WriteString(fmt.Sprintf("## CONSTRAINTS\n%s\n\n", s.Instructions))
+		}
+	} else if plan != nil {
+		b.WriteString(fmt.Sprintf("## PROJECT GOAL\n%s\n\n", plan.Goal))
 	}
 
 	// Session metrics
 	b.WriteString("## SESSION METRICS\n")
-	b.WriteString(fmt.Sprintf("- Status: %s\n", s.Status))
-	b.WriteString(fmt.Sprintf("- Provider: %s\n", s.Provider))
-	if s.Model != "" {
-		b.WriteString(fmt.Sprintf("- Model: %s\n", s.Model))
+	if s != nil {
+		b.WriteString(fmt.Sprintf("- Status: %s\n", s.Status))
+		b.WriteString(fmt.Sprintf("- Provider: %s\n", s.Provider))
+		if s.Model != "" {
+			b.WriteString(fmt.Sprintf("- Model: %s\n", s.Model))
+		}
+		b.WriteString(fmt.Sprintf("- Total steps: %d\n", s.CurrentStep))
+		b.WriteString(fmt.Sprintf("- Input tokens: %d\n", stats.InputTokens))
+		b.WriteString(fmt.Sprintf("- Output tokens: %d\n", stats.OutputTokens))
 	}
-	b.WriteString(fmt.Sprintf("- Total steps: %d\n", s.CurrentStep))
-	b.WriteString(fmt.Sprintf("- Input tokens: %d\n", stats.InputTokens))
-	b.WriteString(fmt.Sprintf("- Output tokens: %d\n", stats.OutputTokens))
 	if stats.TotalTasks > 0 {
-		b.WriteString(fmt.Sprintf("- Tasks: %d total, %d done, %d failed, %d skipped, %d pending\n",
-			stats.TotalTasks, stats.DoneTasks, stats.FailedTasks, stats.SkippedTasks, stats.PendingTasks))
+		pct := func(n int) string {
+			if stats.TotalTasks == 0 {
+				return "0%"
+			}
+			return fmt.Sprintf("%.0f%%", float64(n)/float64(stats.TotalTasks)*100)
+		}
+		b.WriteString(fmt.Sprintf("- Tasks: %d total, %d done (%s), %d failed (%s), %d skipped (%s), %d pending (%s)\n",
+			stats.TotalTasks,
+			stats.DoneTasks, pct(stats.DoneTasks),
+			stats.FailedTasks, pct(stats.FailedTasks),
+			stats.SkippedTasks, pct(stats.SkippedTasks),
+			stats.PendingTasks, pct(stats.PendingTasks),
+		))
 		if stats.AvgTaskDur > 0 {
 			b.WriteString(fmt.Sprintf("- Avg task duration: %s\n", stats.AvgTaskDur.Round(time.Second)))
 		}
@@ -124,12 +188,22 @@ func BuildPrompt(s *state.ProjectState, stats SessionStats) string {
 			b.WriteString(fmt.Sprintf("- Total task time: %s\n", stats.TotalDuration.Round(time.Second)))
 		}
 	}
+	if costSummary != "" {
+		b.WriteString(fmt.Sprintf("- Cost: %s\n", costSummary))
+	}
 	b.WriteString("\n")
 
-	// Task breakdown
-	if s.Plan != nil && len(s.Plan.Tasks) > 0 {
-		b.WriteString("## TASK BREAKDOWN\n")
-		for _, t := range s.Plan.Tasks {
+	// Task breakdown with estimated vs actual time
+	if plan != nil && len(plan.Tasks) > 0 {
+		b.WriteString("## TASK BREAKDOWN (with time estimates)\n")
+		hasTimeData := false
+		for _, t := range plan.Tasks {
+			if t.EstimatedMinutes > 0 || t.ActualMinutes > 0 {
+				hasTimeData = true
+				break
+			}
+		}
+		for _, t := range plan.Tasks {
 			statusIcon := map[pm.TaskStatus]string{
 				pm.TaskDone:       "[DONE]",
 				pm.TaskFailed:     "[FAIL]",
@@ -138,13 +212,37 @@ func BuildPrompt(s *state.ProjectState, stats SessionStats) string {
 				pm.TaskInProgress: "[PROG]",
 			}[t.Status]
 
-			durStr := ""
-			if t.StartedAt != nil && t.CompletedAt != nil {
+			var timeParts []string
+			if hasTimeData {
+				if t.EstimatedMinutes > 0 {
+					timeParts = append(timeParts, fmt.Sprintf("est=%dm", t.EstimatedMinutes))
+				}
+				actual := t.ActualMinutes
+				if actual == 0 && t.StartedAt != nil && t.CompletedAt != nil {
+					actual = int(t.CompletedAt.Sub(*t.StartedAt).Minutes())
+				}
+				if actual > 0 {
+					timeParts = append(timeParts, fmt.Sprintf("actual=%dm", actual))
+					if t.EstimatedMinutes > 0 {
+						delta := actual - t.EstimatedMinutes
+						if delta > 0 {
+							timeParts = append(timeParts, fmt.Sprintf("over=%dm", delta))
+						} else if delta < 0 {
+							timeParts = append(timeParts, fmt.Sprintf("under=%dm", -delta))
+						}
+					}
+				}
+			} else if t.StartedAt != nil && t.CompletedAt != nil {
 				dur := t.CompletedAt.Sub(*t.StartedAt).Round(time.Second)
-				durStr = fmt.Sprintf(" (%s)", dur)
+				timeParts = append(timeParts, fmt.Sprintf("dur=%s", dur))
 			}
 
-			b.WriteString(fmt.Sprintf("- %s Task %d [P%d]: %s%s\n", statusIcon, t.ID, t.Priority, t.Title, durStr))
+			timeStr := ""
+			if len(timeParts) > 0 {
+				timeStr = " (" + strings.Join(timeParts, ", ") + ")"
+			}
+
+			b.WriteString(fmt.Sprintf("- %s Task %d [P%d]: %s%s\n", statusIcon, t.ID, t.Priority, t.Title, timeStr))
 
 			if t.Result != "" {
 				summary := t.Result
@@ -153,12 +251,15 @@ func BuildPrompt(s *state.ProjectState, stats SessionStats) string {
 				}
 				b.WriteString(fmt.Sprintf("  Result: %s\n", strings.ReplaceAll(summary, "\n", " ")))
 			}
+			if t.FailureDiagnosis != "" {
+				b.WriteString(fmt.Sprintf("  Diagnosis: %s\n", strings.ReplaceAll(t.FailureDiagnosis[:min(len(t.FailureDiagnosis), 150)], "\n", " ")))
+			}
 		}
 		b.WriteString("\n")
 	}
 
 	// Recent step outputs for context
-	if len(s.Steps) > 0 {
+	if s != nil && len(s.Steps) > 0 {
 		recent := s.Steps
 		if len(recent) > 5 {
 			recent = recent[len(recent)-5:]
@@ -178,6 +279,7 @@ func BuildPrompt(s *state.ProjectState, stats SessionStats) string {
 	b.WriteString("- What execution patterns led to success or failure?\n")
 	b.WriteString("- Were there any tasks that should have been broken down differently?\n")
 	b.WriteString("- Did the task ordering/priority make sense?\n")
+	b.WriteString("- Were estimated times accurate? What caused overruns or underruns?\n")
 	b.WriteString("- What would improve the next run of this type of project?\n")
 	b.WriteString("- Any patterns in failures that reveal systemic issues?\n\n")
 	b.WriteString("Output ONLY valid JSON (no explanation, no markdown fence):\n")
@@ -189,13 +291,22 @@ func BuildPrompt(s *state.ProjectState, stats SessionStats) string {
 	b.WriteString(`"bottlenecks":["bottleneck 1"],`)
 	b.WriteString(`"insights":["key learning 1","key learning 2"],`)
 	b.WriteString(`"next_actions":["concrete step 1","concrete step 2"],`)
-	b.WriteString(`"velocity_notes":"Assessment of task throughput and time distribution"`)
+	b.WriteString(`"velocity_notes":"Assessment of task throughput and time distribution",`)
+	b.WriteString(`"lessons_learned":"Multi-sentence narrative of the key lessons learned from this plan execution",`)
+	b.WriteString(`"process_improvements":"Multi-sentence narrative of concrete process improvements for the next run"`)
 	b.WriteString(`}`)
 	b.WriteString("\n\nProvide 2-5 items per list. Be specific and actionable, not generic.")
 	return b.String()
 }
 
-// Analyze calls the provider to generate a retrospective analysis.
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+// Analyze calls the provider to generate a retrospective analysis from full session state.
 func Analyze(ctx context.Context, p provider.Provider, model string, timeout time.Duration, s *state.ProjectState) (*Analysis, error) {
 	stats := ComputeStats(s)
 	prompt := BuildPrompt(s, stats)
@@ -206,6 +317,45 @@ func Analyze(ctx context.Context, p provider.Provider, model string, timeout tim
 	})
 	if err != nil {
 		return nil, fmt.Errorf("retro analysis: %w", err)
+	}
+
+	return ParseAnalysis(result.Output)
+}
+
+// Generate produces a retrospective report from a plan and an optional cost summary string.
+// It is the primary entry point when the full session state is unavailable.
+func Generate(ctx context.Context, p provider.Provider, model string, timeout time.Duration, plan *pm.Plan, costSummary string) (*Analysis, error) {
+	// Build synthetic stats from the plan alone.
+	stats := SessionStats{}
+	for _, t := range plan.Tasks {
+		stats.TotalTasks++
+		switch t.Status {
+		case pm.TaskDone:
+			stats.DoneTasks++
+		case pm.TaskFailed:
+			stats.FailedTasks++
+		case pm.TaskSkipped:
+			stats.SkippedTasks++
+		case pm.TaskPending, pm.TaskInProgress:
+			stats.PendingTasks++
+		}
+		if t.StartedAt != nil && t.CompletedAt != nil {
+			stats.TotalDuration += t.CompletedAt.Sub(*t.StartedAt)
+		}
+	}
+	if stats.DoneTasks+stats.FailedTasks+stats.SkippedTasks > 0 {
+		completed := stats.DoneTasks + stats.FailedTasks + stats.SkippedTasks
+		stats.AvgTaskDur = stats.TotalDuration / time.Duration(completed)
+	}
+
+	prompt := buildPromptInternal(nil, stats, plan, costSummary)
+
+	result, err := p.Complete(ctx, prompt, provider.Options{
+		Model:   model,
+		Timeout: timeout,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("retro generate: %w", err)
 	}
 
 	return ParseAnalysis(result.Output)
@@ -227,14 +377,113 @@ func ParseAnalysis(output string) (*Analysis, error) {
 	return &a, nil
 }
 
-// FormatMarkdown renders the analysis as a markdown report.
+// FormatMarkdown renders the analysis as a comprehensive markdown retrospective report.
+// plan is optional; when non-nil a task time comparison table is included.
+// costSummary is optional; when non-empty a cost section is included.
 func FormatMarkdown(a *Analysis, s *state.ProjectState) string {
+	var plan *pm.Plan
+	var goal string
+	if s != nil {
+		plan = s.Plan
+		goal = s.Goal
+	}
+	return FormatMarkdownFull(a, goal, plan, "")
+}
+
+// FormatMarkdownFull is the full renderer used by both Analyze (state-based) and Generate (plan-based).
+func FormatMarkdownFull(a *Analysis, goal string, plan *pm.Plan, costSummary string) string {
 	var b strings.Builder
 
-	b.WriteString("# Sprint Retrospective\n\n")
-	b.WriteString(fmt.Sprintf("**Goal:** %s\n\n", s.Goal))
-	b.WriteString(fmt.Sprintf("**Health Score:** %.1f/10\n\n", a.HealthScore))
-	b.WriteString(fmt.Sprintf("**Summary:** %s\n\n", a.Summary))
+	b.WriteString("# Plan Retrospective\n\n")
+	if goal != "" {
+		b.WriteString(fmt.Sprintf("**Goal:** %s\n\n", goal))
+	}
+	b.WriteString(fmt.Sprintf("**Health Score:** %.1f / 10\n\n", a.HealthScore))
+
+	if a.Summary != "" {
+		b.WriteString("## Executive Summary\n\n")
+		b.WriteString(a.Summary)
+		b.WriteString("\n\n")
+	}
+
+	// Task breakdown table
+	if plan != nil && len(plan.Tasks) > 0 {
+		var done, failed, skipped, pending int
+		for _, t := range plan.Tasks {
+			switch t.Status {
+			case pm.TaskDone:
+				done++
+			case pm.TaskFailed:
+				failed++
+			case pm.TaskSkipped:
+				skipped++
+			default:
+				pending++
+			}
+		}
+		total := len(plan.Tasks)
+		pct := func(n int) string {
+			return fmt.Sprintf("%.0f%%", float64(n)/float64(total)*100)
+		}
+		b.WriteString("## Task Summary\n\n")
+		b.WriteString(fmt.Sprintf("| Status | Count | %% |\n|--------|-------|----|\n"))
+		b.WriteString(fmt.Sprintf("| Done | %d | %s |\n", done, pct(done)))
+		b.WriteString(fmt.Sprintf("| Failed | %d | %s |\n", failed, pct(failed)))
+		b.WriteString(fmt.Sprintf("| Skipped | %d | %s |\n", skipped, pct(skipped)))
+		b.WriteString(fmt.Sprintf("| Pending | %d | %s |\n", pending, pct(pending)))
+		b.WriteString(fmt.Sprintf("| **Total** | **%d** | **100%%** |\n", total))
+		b.WriteString("\n")
+
+		// Time comparison table (only if any task has time data)
+		comparisons := ComputeTimeComparisons(plan)
+		hasTime := false
+		for _, tc := range comparisons {
+			if tc.EstimatedMinutes > 0 || tc.ActualMinutes > 0 || tc.WallClockMinutes > 0 {
+				hasTime = true
+				break
+			}
+		}
+		if hasTime {
+			b.WriteString("## Estimated vs Actual Time\n\n")
+			b.WriteString("| Task | Status | Est (min) | Actual (min) | Delta |\n")
+			b.WriteString("|------|--------|-----------|--------------|-------|\n")
+			for _, tc := range comparisons {
+				actual := tc.ActualMinutes
+				if actual == 0 {
+					actual = tc.WallClockMinutes
+				}
+				deltaStr := "—"
+				if tc.EstimatedMinutes > 0 && actual > 0 {
+					delta := actual - tc.EstimatedMinutes
+					if delta > 0 {
+						deltaStr = fmt.Sprintf("+%dm", delta)
+					} else if delta < 0 {
+						deltaStr = fmt.Sprintf("%dm", delta)
+					} else {
+						deltaStr = "on time"
+					}
+				}
+				estStr := "—"
+				if tc.EstimatedMinutes > 0 {
+					estStr = fmt.Sprintf("%d", tc.EstimatedMinutes)
+				}
+				actualStr := "—"
+				if actual > 0 {
+					actualStr = fmt.Sprintf("%d", actual)
+				}
+				b.WriteString(fmt.Sprintf("| Task %d: %s | %s | %s | %s | %s |\n",
+					tc.TaskID, truncateMd(tc.Title, 40), tc.Status, estStr, actualStr, deltaStr))
+			}
+			b.WriteString("\n")
+		}
+	}
+
+	// Cost summary
+	if costSummary != "" {
+		b.WriteString("## Provider Cost\n\n")
+		b.WriteString(costSummary)
+		b.WriteString("\n\n")
+	}
 
 	if len(a.WentWell) > 0 {
 		b.WriteString("## What Went Well\n\n")
@@ -274,6 +523,18 @@ func FormatMarkdown(a *Analysis, s *state.ProjectState) string {
 		b.WriteString("\n")
 	}
 
+	if a.LessonsLearned != "" {
+		b.WriteString("## Lessons Learned\n\n")
+		b.WriteString(a.LessonsLearned)
+		b.WriteString("\n\n")
+	}
+
+	if a.ProcessImprovements != "" {
+		b.WriteString("## Process Improvements\n\n")
+		b.WriteString(a.ProcessImprovements)
+		b.WriteString("\n\n")
+	}
+
 	if len(a.NextActions) > 0 {
 		b.WriteString("## Recommended Next Actions\n\n")
 		for i, item := range a.NextActions {
@@ -283,4 +544,11 @@ func FormatMarkdown(a *Analysis, s *state.ProjectState) string {
 	}
 
 	return b.String()
+}
+
+func truncateMd(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n-1] + "…"
 }
