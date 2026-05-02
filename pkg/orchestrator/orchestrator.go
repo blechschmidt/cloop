@@ -93,6 +93,12 @@ type Config struct {
 
 	// WebhookEvents is the list of event types to fire (empty = all).
 	WebhookEvents []string
+
+	// Streaming enables token-by-token output to the terminal for providers that
+	// support SSE streaming (anthropic, openai, ollama). When true, the orchestrator
+	// passes an OnToken callback to Complete(); providers that do not support
+	// streaming (e.g. claudecode) simply ignore it and fall back to buffered output.
+	Streaming bool
 }
 
 type Orchestrator struct {
@@ -239,12 +245,8 @@ func (o *Orchestrator) runLoop(ctx context.Context) error {
 		dimColor.Printf("→ Running %s...\n", o.provider.Name())
 		start := time.Now()
 
-		result, err := o.provider.Complete(ctx, prompt, provider.Options{
-			Model:     s.Model,
-			MaxTokens: o.config.MaxTokens,
-			Timeout:   o.config.StepTimeout,
-			WorkDir:   o.config.WorkDir,
-		})
+		opts, wasStreamed := o.makeOpts(s.Model, true)
+		result, err := o.provider.Complete(ctx, prompt, opts)
 		if err != nil {
 			failColor.Printf("✗ Provider error: %v\n", err)
 			s.Status = "failed"
@@ -268,7 +270,11 @@ func (o *Orchestrator) runLoop(ctx context.Context) error {
 		s.TotalOutputTokens += result.OutputTokens
 		s.AddStep(stepResult)
 
-		printOutput(result.Output, dimColor, o.config.Verbose)
+		if wasStreamed() {
+			fmt.Println()
+		} else {
+			printOutput(result.Output, dimColor, o.config.Verbose)
+		}
 		dimColor.Printf("  [%s, provider: %s]\n\n", duration.Round(time.Second), result.Provider)
 
 		if o.config.TokenBudget > 0 && s.TotalInputTokens+s.TotalOutputTokens >= o.config.TokenBudget {
@@ -565,12 +571,8 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		dimColor.Printf("→ Running %s on task %d...\n", taskProvider.Name(), task.ID)
 		start := time.Now()
 
-		result, err := taskProvider.Complete(ctx, prompt, provider.Options{
-			Model:     s.Model,
-			MaxTokens: o.config.MaxTokens,
-			Timeout:   o.config.StepTimeout,
-			WorkDir:   o.config.WorkDir,
-		})
+		opts, wasStreamed := o.makeOpts(s.Model, true)
+		result, err := taskProvider.Complete(ctx, prompt, opts)
 		if err != nil {
 			failColor.Printf("✗ Provider error: %v\n", err)
 			task.Status = pm.TaskFailed
@@ -597,7 +599,11 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		s.TotalOutputTokens += result.OutputTokens
 		s.AddStep(stepResult)
 
-		printOutput(result.Output, dimColor, o.config.Verbose)
+		if wasStreamed() {
+			fmt.Println()
+		} else {
+			printOutput(result.Output, dimColor, o.config.Verbose)
+		}
 		dimColor.Printf("  [%s, provider: %s]\n\n", duration.Round(time.Second), result.Provider)
 
 		if o.config.TokenBudget > 0 && s.TotalInputTokens+s.TotalOutputTokens >= o.config.TokenBudget {
@@ -936,6 +942,7 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 		}
 
 		// Launch goroutines for each ready task.
+		// Streaming is disabled in parallel mode to avoid interleaved token output.
 		results := make([]taskResult, len(ready))
 		var wg sync.WaitGroup
 		for i, task := range ready {
@@ -946,12 +953,8 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 				start := time.Now()
 				// Use role-specific provider if configured.
 				taskProvider := o.router.For(t.Role)
-				result, err := taskProvider.Complete(ctx, prompt, provider.Options{
-					Model:     s.Model,
-					MaxTokens: o.config.MaxTokens,
-					Timeout:   o.config.StepTimeout,
-					WorkDir:   o.config.WorkDir,
-				})
+				opts, _ := o.makeOpts(s.Model, false) // no streaming in parallel
+				result, err := taskProvider.Complete(ctx, prompt, opts)
 				dur := time.Since(start)
 				results[idx] = taskResult{task: t, result: result, err: err, duration: dur}
 			}(i, task)
@@ -1045,6 +1048,29 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 	return nil
 }
 
+// makeOpts builds provider.Options for a completion call.
+// When o.config.Streaming is true it attaches an OnToken callback that prints
+// each token immediately to stdout; wasStreamed() returns true if at least one
+// token was received that way.  Callers should call printOutput() only when
+// wasStreamed() is false to avoid double-printing.
+// For parallel execution pass streaming=false to avoid interleaved output.
+func (o *Orchestrator) makeOpts(model string, streaming bool) (provider.Options, func() bool) {
+	var streamed bool
+	opts := provider.Options{
+		Model:     model,
+		MaxTokens: o.config.MaxTokens,
+		Timeout:   o.config.StepTimeout,
+		WorkDir:   o.config.WorkDir,
+	}
+	if streaming && o.config.Streaming {
+		opts.OnToken = func(token string) {
+			fmt.Print(token)
+			streamed = true
+		}
+	}
+	return opts, func() bool { return streamed }
+}
+
 func (o *Orchestrator) buildPrompt() string {
 	s := o.state
 	var b strings.Builder
@@ -1132,12 +1158,8 @@ func (o *Orchestrator) evolvePM(ctx context.Context) (int, error) {
 	dimColor.Printf("→ Asking AI for improvement ideas...\n")
 
 	prompt := pm.EvolveDiscoverPrompt(s.Goal, s.Instructions, s.Plan, s.EvolveStep, o.config.InnovateMode)
-	result, err := o.provider.Complete(ctx, prompt, provider.Options{
-		Model:     s.Model,
-		MaxTokens: o.config.MaxTokens,
-		Timeout:   o.config.StepTimeout,
-		WorkDir:   o.config.WorkDir,
-	})
+	opts, _ := o.makeOpts(s.Model, true)
+	result, err := o.provider.Complete(ctx, prompt, opts)
 	if err != nil {
 		return 0, err
 	}
@@ -1218,12 +1240,8 @@ func (o *Orchestrator) evolve(ctx context.Context) error {
 				dimColor.Printf("→ Executing task %d via %s...\n", nextTask.ID, o.provider.Name())
 				start := time.Now()
 
-				result, err := o.provider.Complete(ctx, prompt, provider.Options{
-					Model:     s.Model,
-					MaxTokens: o.config.MaxTokens,
-					Timeout:   o.config.StepTimeout,
-					WorkDir:   o.config.WorkDir,
-				})
+				evoOpts, evoWasStreamed := o.makeOpts(s.Model, true)
+				result, err := o.provider.Complete(ctx, prompt, evoOpts)
 				if err != nil {
 					failColor.Printf("✗ Provider error on task %d: %v\n", nextTask.ID, err)
 					nextTask.Status = pm.TaskFailed
@@ -1245,7 +1263,11 @@ func (o *Orchestrator) evolve(ctx context.Context) error {
 				s.TotalOutputTokens += result.OutputTokens
 				s.AddStep(stepResult)
 
-				printOutput(result.Output, dimColor, o.config.Verbose)
+				if evoWasStreamed() {
+					fmt.Println()
+				} else {
+					printOutput(result.Output, dimColor, o.config.Verbose)
+				}
 				dimColor.Printf("  [%s, provider: %s]\n\n", duration.Round(time.Second), result.Provider)
 
 				completedAt := time.Now()
@@ -1294,12 +1316,8 @@ func (o *Orchestrator) evolve(ctx context.Context) error {
 		prompt := o.buildEvolvePrompt()
 		dimColor.Printf("→ Thinking of improvements...\n")
 
-		result, err := o.provider.Complete(ctx, prompt, provider.Options{
-			Model:     s.Model,
-			MaxTokens: o.config.MaxTokens,
-			Timeout:   o.config.StepTimeout,
-			WorkDir:   o.config.WorkDir,
-		})
+		freeOpts, freeWasStreamed := o.makeOpts(s.Model, true)
+		result, err := o.provider.Complete(ctx, prompt, freeOpts)
 		if err != nil {
 			evolveColor.Printf("\n⏹ Auto-evolve ended: %v\n", err)
 			s.Status = "complete"
@@ -1319,7 +1337,11 @@ func (o *Orchestrator) evolve(ctx context.Context) error {
 		s.TotalOutputTokens += result.OutputTokens
 		s.AddStep(stepResult)
 
-		printOutput(result.Output, dimColor, o.config.Verbose)
+		if freeWasStreamed() {
+			fmt.Println()
+		} else {
+			printOutput(result.Output, dimColor, o.config.Verbose)
+		}
 		dimColor.Printf("  [%s, provider: %s]\n\n", result.Duration.Round(time.Second), result.Provider)
 		s.Save()
 	}

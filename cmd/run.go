@@ -49,9 +49,10 @@ var (
 	useMemory        bool
 	learn            bool
 	memoryLimit      int
-	webhookURL       string
-	webhookEvents    []string
+	webhookURL        string
+	webhookEvents     []string
 	fallbackProviders []string
+	streamOutput      bool
 )
 
 var runCmd = &cobra.Command{
@@ -180,6 +181,7 @@ Press Ctrl+C to pause gracefully.`,
 			MemoryLimit:      memoryLimit,
 			WebhookURL:       effectiveWebhookURL,
 			WebhookEvents:    effectiveWebhookEvents,
+			Streaming:        streamOutput,
 		}
 
 		orc, err := orchestrator.New(orchCfg, prov)
@@ -374,5 +376,6 @@ func init() {
 	runCmd.Flags().StringVar(&webhookURL, "webhook-url", "", "HTTP(S) URL to POST lifecycle events to (overrides config webhook.url)")
 	runCmd.Flags().StringSliceVar(&webhookEvents, "webhook-events", nil, "Comma-separated events to fire: task_done,task_failed,session_complete,... (default: all)")
 	runCmd.Flags().StringSliceVar(&fallbackProviders, "fallback", nil, "Fallback provider chain (e.g. --fallback anthropic,openai). Tried in order after primary fails.")
+	runCmd.Flags().BoolVar(&streamOutput, "stream", false, "Stream tokens to the terminal as they are generated (anthropic, openai, ollama; ignored by claudecode)")
 	rootCmd.AddCommand(runCmd)
 }
