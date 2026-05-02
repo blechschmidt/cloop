@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/blechschmidt/cloop/pkg/learning"
 	"github.com/blechschmidt/cloop/pkg/memory"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
@@ -67,11 +68,29 @@ var memoryAddCmd = &cobra.Command{
 	},
 }
 
-var memoryClearCmd = &cobra.Command{
-	Use:   "clear",
-	Short: "Delete all memory entries",
+var memoryShowCmd = &cobra.Command{
+	Use:   "show",
+	Short: "Show the narrative project memory (.cloop/memory.md)",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		workdir, _ := os.Getwd()
+		content := learning.LoadMemory(workdir)
+		if content == "" {
+			fmt.Println("No narrative memory yet. Run cloop in PM mode to start accumulating knowledge.")
+			return nil
+		}
+		color.New(color.FgCyan, color.Bold).Println("Project Memory (.cloop/memory.md)")
+		fmt.Println()
+		fmt.Println(content)
+		return nil
+	},
+}
+
+var memoryClearCmd = &cobra.Command{
+	Use:   "clear",
+	Short: "Delete all memory entries and narrative memory",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		workdir, _ := os.Getwd()
+		// Clear JSON entries.
 		mem, err := memory.Load(workdir)
 		if err != nil {
 			return err
@@ -81,7 +100,19 @@ var memoryClearCmd = &cobra.Command{
 		if err := mem.Save(workdir); err != nil {
 			return err
 		}
-		color.New(color.FgYellow).Printf("Cleared %d memory entries.\n", count)
+		// Clear narrative memory.md.
+		mdPath := workdir + "/.cloop/memory.md"
+		mdCleared := false
+		if _, statErr := os.Stat(mdPath); statErr == nil {
+			if removeErr := os.Remove(mdPath); removeErr == nil {
+				mdCleared = true
+			}
+		}
+		msg := fmt.Sprintf("Cleared %d memory entries", count)
+		if mdCleared {
+			msg += " and narrative memory (.cloop/memory.md)"
+		}
+		color.New(color.FgYellow).Println(msg + ".")
 		return nil
 	},
 }
@@ -116,5 +147,6 @@ func init() {
 	memoryCmd.AddCommand(memoryAddCmd)
 	memoryCmd.AddCommand(memoryClearCmd)
 	memoryCmd.AddCommand(memoryDeleteCmd)
+	memoryCmd.AddCommand(memoryShowCmd)
 	rootCmd.AddCommand(memoryCmd)
 }

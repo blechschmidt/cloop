@@ -25,6 +25,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/health"
 	"github.com/blechschmidt/cloop/pkg/hooks"
 	"github.com/blechschmidt/cloop/pkg/logger"
+	"github.com/blechschmidt/cloop/pkg/learning"
 	"github.com/blechschmidt/cloop/pkg/memory"
 	"github.com/blechschmidt/cloop/pkg/metrics"
 	"github.com/blechschmidt/cloop/pkg/multiagent"
@@ -1203,6 +1204,10 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 				prompt = mem + prompt
 			}
 		}
+		// Always prepend cross-session narrative memory from .cloop/memory.md.
+		if learningMem := learning.FormatForPrompt(o.config.WorkDir); learningMem != "" {
+			prompt = learningMem + prompt
+		}
 
 		// Prompt A/B testing: track the currently recommended variant for this
 		// task's role. Used to record outcomes and to select a replacement on
@@ -1936,6 +1941,10 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 
 	s.Status = "paused"
 	s.Save()
+
+	// Distil cross-session learnings into .cloop/memory.md after the plan completes.
+	o.distillLearnings(ctx, s.Plan)
+
 	return nil
 }
 
@@ -2277,9 +2286,13 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 					prompt = override
 				}
 				prompt = cloopenv.InjectIntoPrompt(prompt, o.envVars)
-		if o.secretStore != nil {
-			prompt = o.secretStore.InjectIntoPrompt(prompt)
-		}
+				if o.secretStore != nil {
+					prompt = o.secretStore.InjectIntoPrompt(prompt)
+				}
+				// Always prepend cross-session narrative memory from .cloop/memory.md.
+				if learningMem := learning.FormatForPrompt(o.config.WorkDir); learningMem != "" {
+					prompt = learningMem + prompt
+				}
 				start := time.Now()
 				// Use role-specific provider if configured.
 				taskProvider := o.router.For(t.Role)
@@ -2503,6 +2516,10 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 
 	s.Status = "paused"
 	s.Save()
+
+	// Distil cross-session learnings into .cloop/memory.md after the plan completes.
+	o.distillLearnings(ctx, s.Plan)
+
 	return nil
 }
 
@@ -3203,6 +3220,30 @@ func stepSummaryLine(output string, maxLen int) string {
 		return line
 	}
 	return "(no summary)"
+}
+
+// distillLearnings calls the AI to distill plan outcomes into .cloop/memory.md.
+// This always runs after a PM plan completes (no flag required).
+func (o *Orchestrator) distillLearnings(ctx context.Context, plan *pm.Plan) {
+	if plan == nil || len(plan.Tasks) == 0 {
+		return
+	}
+	dimColor := color.New(color.Faint)
+	dimColor.Printf("  Distilling session into project memory...\n")
+	summary, err := learning.Distill(ctx, o.provider, o.state.Model, plan)
+	if err != nil {
+		dimColor.Printf("  Memory distillation failed (ignored): %v\n", err)
+		return
+	}
+	if summary == "" {
+		dimColor.Printf("  No memory update needed.\n")
+		return
+	}
+	if err := learning.SaveMemory(o.config.WorkDir, summary); err != nil {
+		dimColor.Printf("  Failed to save memory (ignored): %v\n", err)
+		return
+	}
+	dimColor.Printf("  Project memory updated (.cloop/memory.md).\n")
 }
 
 // learnFromSession asks the AI to extract learnings from the session and saves them.
