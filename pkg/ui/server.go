@@ -1572,7 +1572,10 @@ const dashboardHTML = `<!DOCTYPE html>
           <div class="section-title">Project Goal</div>
           <div class="card goal-card">
             <div class="goal-text empty" id="goalText">Loading...</div>
-            <div id="statusBadge"></div>
+            <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+              <div id="statusBadge"></div>
+              <div id="healthBadge" style="display:none"></div>
+            </div>
           </div>
         </div>
 
@@ -1606,6 +1609,11 @@ const dashboardHTML = `<!DOCTYPE html>
               <div class="stat-label">Est. Cost</div>
               <div class="stat-value" id="statCost" style="font-size:16px;margin-top:4px">—</div>
               <div class="stat-sub" id="statCostSub"></div>
+            </div>
+            <div class="stat-card" id="statHealthCard" style="display:none">
+              <div class="stat-label">Plan Health</div>
+              <div class="stat-value" id="statHealth" style="font-size:22px;margin-top:4px">—</div>
+              <div class="stat-sub" id="statHealthSub"></div>
             </div>
             <div class="stat-card">
               <div class="stat-label">Created</div>
@@ -2111,6 +2119,34 @@ function render(s) {
     document.getElementById('statCostSub').textContent = (s.provider || '') + (s.model ? ' / '+s.model : '');
   } else {
     costCard.style.display = 'none';
+  }
+
+  // Plan health score
+  const hr = s.health_report;
+  const healthCard = document.getElementById('statHealthCard');
+  const healthBadge = document.getElementById('healthBadge');
+  if (hr && typeof hr.score === 'number') {
+    healthCard.style.display = '';
+    const score = hr.score;
+    const grade = score >= 90 ? 'A' : score >= 80 ? 'B' : score >= 70 ? 'C' : score >= 60 ? 'D' : 'F';
+    const col = score >= 75 ? 'var(--green)' : score >= 60 ? 'var(--yellow)' : 'var(--red)';
+    document.getElementById('statHealth').innerHTML =
+      '<span style="color:'+col+'">' + score + '</span>' +
+      '<span style="font-size:13px;color:var(--muted);margin-left:4px">/ 100</span>';
+    document.getElementById('statHealthSub').innerHTML =
+      '<span style="color:'+col+'">Grade: ' + grade + '</span>';
+    // Header badge
+    healthBadge.style.display = '';
+    healthBadge.innerHTML =
+      '<span style="display:inline-flex;align-items:center;gap:5px;padding:3px 9px;border-radius:12px;' +
+      'border:1px solid '+col+';font-size:12px;font-weight:600;color:'+col+'">'+
+      '&#10003; Health ' + score + '/100</span>';
+    if (hr.issues && hr.issues.length) {
+      healthBadge.title = hr.issues.slice(0, 3).join('\n');
+    }
+  } else {
+    healthCard.style.display = 'none';
+    healthBadge.style.display = 'none';
   }
 
   // Steps

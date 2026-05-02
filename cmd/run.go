@@ -72,6 +72,7 @@ var (
 	scriptVerify         bool
 	runProfile           string
 	autoSplit            bool
+	skipHealthCheck      bool
 )
 
 var runCmd = &cobra.Command{
@@ -217,6 +218,7 @@ Press Ctrl+C to pause gracefully.`,
 		}
 
 		orchCfg := orchestrator.Config{
+			SkipHealthCheck: skipHealthCheck,
 			SlackWebhookURL:   cfg.Notify.SlackWebhook,
 			DiscordWebhookURL: cfg.Notify.DiscordWebhook,
 			Hooks: hooks.Config{
@@ -479,5 +481,6 @@ func init() {
 	runCmd.Flags().BoolVar(&scriptVerify, "script-verify", false, "PM mode: after each TASK_DONE, generate and run an AI shell script that confirms the task was accomplished; marks task failed if the script exits non-zero")
 	runCmd.Flags().StringVar(&runProfile, "profile", "", "Named configuration profile to apply (overrides the active profile set by 'cloop profile use')")
 	runCmd.Flags().BoolVar(&autoSplit, "auto-split", false, "PM mode: automatically decompose a task into subtasks when it has failed 2+ times (sequential only)")
+	runCmd.Flags().BoolVar(&skipHealthCheck, "skip-health-check", false, "PM mode: skip the AI plan health evaluation that runs after decomposition")
 	rootCmd.AddCommand(runCmd)
 }

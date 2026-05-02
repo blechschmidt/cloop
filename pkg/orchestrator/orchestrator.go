@@ -16,6 +16,7 @@ import (
 	cloopenv "github.com/blechschmidt/cloop/pkg/env"
 	"github.com/blechschmidt/cloop/pkg/diagnosis"
 	cloopgit "github.com/blechschmidt/cloop/pkg/git"
+	"github.com/blechschmidt/cloop/pkg/health"
 	"github.com/blechschmidt/cloop/pkg/hooks"
 	"github.com/blechschmidt/cloop/pkg/memory"
 	"github.com/blechschmidt/cloop/pkg/metrics"
@@ -201,6 +202,12 @@ type Config struct {
 	// it into smaller subtasks that replace it in the plan. This prevents repeated
 	// failures on tasks that are too large or ambiguous.
 	AutoSplit bool
+
+	// SkipHealthCheck disables the AI plan health evaluation that normally runs
+	// after decomposition and before the first task execution in PM mode.
+	// When false (default), the health score, issues, and suggestions are printed
+	// and stored in state. Plans scoring below 60 print a prominent warning.
+	SkipHealthCheck bool
 }
 
 type Orchestrator struct {
@@ -554,6 +561,11 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 	// Optimization pass: AI reviews the plan before execution.
 	if o.config.Optimize && s.Plan != nil && len(s.Plan.Tasks) > 0 {
 		o.runOptimizer(ctx, s, pmColor, dimColor)
+	}
+
+	// Health check: AI rates plan quality before execution.
+	if !o.config.SkipHealthCheck && s.Plan != nil && len(s.Plan.Tasks) > 0 {
+		o.runHealthCheck(ctx, s, pmColor, dimColor)
 	}
 
 	// Plan-only mode: just show the plan, don't execute
@@ -1390,6 +1402,11 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 	// Optimization pass (parallel mode).
 	if o.config.Optimize && s.Plan != nil && len(s.Plan.Tasks) > 0 {
 		o.runOptimizer(ctx, s, pmColor, dimColor)
+	}
+
+	// Health check: AI rates plan quality before execution (parallel mode).
+	if !o.config.SkipHealthCheck && s.Plan != nil && len(s.Plan.Tasks) > 0 {
+		o.runHealthCheck(ctx, s, pmColor, dimColor)
 	}
 
 	if o.config.PlanOnly {
@@ -2501,6 +2518,65 @@ func (o *Orchestrator) runOptimizer(ctx context.Context, s *state.ProjectState, 
 	} else {
 		dimColor.Printf("  Reordering skipped.\n\n")
 	}
+}
+
+// runHealthCheck calls the AI health scorer, prints the report, and persists it in state.
+// Errors are non-fatal: a warning is printed and execution continues.
+func (o *Orchestrator) runHealthCheck(ctx context.Context, s *state.ProjectState, pmColor, dimColor *color.Color) {
+	pmColor.Printf("Running plan health check...\n")
+
+	report, err := health.Score(ctx, o.provider, s.Model, o.config.StepTimeout, s.Plan)
+	if err != nil {
+		fmt.Printf("  health check: %v (skipping)\n\n", err)
+		return
+	}
+
+	// Persist the report in state so status and UI can surface it.
+	s.HealthReport = &report
+	if saveErr := s.Save(); saveErr != nil {
+		dimColor.Printf("  warning: could not persist health report: %v\n", saveErr)
+	}
+
+	fmt.Println()
+
+	// Choose display color based on score.
+	scoreColor := color.New(color.FgGreen, color.Bold)
+	if report.Score < 60 {
+		scoreColor = color.New(color.FgRed, color.Bold)
+	} else if report.Score < 75 {
+		scoreColor = color.New(color.FgYellow, color.Bold)
+	}
+
+	pmColor.Printf("Plan Health Report:\n")
+	fmt.Printf("  Score: ")
+	scoreColor.Printf("%d/100 (Grade: %s)\n", report.Score, report.Grade())
+	if report.Summary != "" {
+		fmt.Printf("  %s\n", report.Summary)
+	}
+
+	if len(report.Issues) > 0 {
+		fmt.Println()
+		pmColor.Printf("  Issues:\n")
+		for i, issue := range report.Issues {
+			fmt.Printf("    %d. %s\n", i+1, issue)
+		}
+	}
+
+	if len(report.Suggestions) > 0 {
+		fmt.Println()
+		pmColor.Printf("  Suggestions:\n")
+		for i, suggestion := range report.Suggestions {
+			fmt.Printf("    %d. %s\n", i+1, suggestion)
+		}
+	}
+
+	if report.Score < 60 {
+		fmt.Println()
+		color.New(color.FgRed, color.Bold).Printf("  WARNING: Plan health score is below 60. Consider addressing the issues above before proceeding.\n")
+		color.New(color.FgRed).Printf("  Use --skip-health-check to bypass this check.\n")
+	}
+
+	fmt.Println()
 }
 
 func printSessionSummary(start time.Time, startStep int, s *state.ProjectState) {

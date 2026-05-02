@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/health"
 	"github.com/blechschmidt/cloop/pkg/milestone"
 	"github.com/blechschmidt/cloop/pkg/pm"
 )
@@ -49,6 +50,10 @@ type ProjectState struct {
 	// Cumulative token usage across all steps
 	TotalInputTokens  int `json:"total_input_tokens,omitempty"`
 	TotalOutputTokens int `json:"total_output_tokens,omitempty"`
+
+	// HealthReport is the most recent plan health evaluation result.
+	// Populated after decomposition in PM mode (unless --skip-health-check).
+	HealthReport *health.HealthReport `json:"health_report,omitempty"`
 }
 
 func StatePath(workdir string) string {

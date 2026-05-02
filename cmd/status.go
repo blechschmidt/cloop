@@ -15,6 +15,17 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// healthScoreColor returns the display color for a given health score.
+func healthScoreColor(score int) *color.Color {
+	if score >= 75 {
+		return color.New(color.FgGreen, color.Bold)
+	}
+	if score >= 60 {
+		return color.New(color.FgYellow, color.Bold)
+	}
+	return color.New(color.FgRed, color.Bold)
+}
+
 var statusJSON bool
 
 var statusCmd = &cobra.Command{
@@ -113,6 +124,22 @@ var statusCmd = &cobra.Command{
 					deadlineStr = " (" + ms.Deadline.Format("2006-01-02") + ")"
 				}
 				fmt.Printf("           #%d %s%s — %.0f%%\n", ms.ID, ms.Name, deadlineStr, p.PctDone)
+			}
+		}
+
+		if s.HealthReport != nil {
+			hr := s.HealthReport
+			scoreCol := healthScoreColor(hr.Score)
+			fmt.Printf("Health:   ")
+			scoreCol.Printf("%d/100 (Grade: %s)", hr.Score, hr.Grade())
+			if hr.Summary != "" {
+				fmt.Printf("  — %s", hr.Summary)
+			}
+			fmt.Println()
+			if len(hr.Issues) > 0 {
+				for _, issue := range hr.Issues {
+					color.New(color.FgRed).Printf("          ! %s\n", issue)
+				}
 			}
 		}
 
