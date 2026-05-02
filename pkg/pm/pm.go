@@ -192,6 +192,8 @@ type Task struct {
 	ExternalURL       string       `json:"external_url,omitempty"`        // URL of the external resource (e.g. GitHub PR)
 	Links             []Link       `json:"links,omitempty"`               // external URLs/tickets/docs associated with this task
 	Pinned            bool         `json:"pinned,omitempty"`              // pinned tasks always appear at the top of task lists
+	TDDStatus         string       `json:"tdd_status,omitempty"`          // TDD verification outcome: "pass", "fail", or "skipped"
+	TDDScore          int          `json:"tdd_score,omitempty"`           // TDD score 0-100 (percentage of acceptance criteria met)
 }
 
 // Plan is the full task plan for a goal.

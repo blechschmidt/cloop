@@ -48,6 +48,9 @@ type Entry struct {
 	Level   Level                  `json:"level"`
 	Event   Event                  `json:"event"`
 	TaskID  int                    `json:"task_id,omitempty"`
+	// TraceID is the OpenTelemetry trace ID of the active span when this entry
+	// was emitted. Present only when tracing is enabled and a span is active.
+	TraceID string                 `json:"trace_id,omitempty"`
 	Message string                 `json:"message"`
 	Data    map[string]interface{} `json:"data,omitempty"`
 }
@@ -103,6 +106,25 @@ func (j *JSONLogger) Log(level Level, event Event, taskID int, message string, d
 		TaskID:  taskID,
 		Message: message,
 		Data:    data,
+	}
+	// Promote trace_id from data map to top-level field for easy log correlation.
+	// Callers that hold an OTel context can include {"trace_id": tracing.TraceIDFromContext(ctx)}.
+	if data != nil {
+		if tid, ok := data["trace_id"].(string); ok && tid != "" {
+			entry.TraceID = tid
+			// Remove from data to avoid duplication.
+			filtered := make(map[string]interface{}, len(data)-1)
+			for k, v := range data {
+				if k != "trace_id" {
+					filtered[k] = v
+				}
+			}
+			if len(filtered) > 0 {
+				entry.Data = filtered
+			} else {
+				entry.Data = nil
+			}
+		}
 	}
 	if err := j.enc.Encode(entry); err != nil {
 		fmt.Fprintf(os.Stderr, "logger encode error: %v\n", err)

@@ -26,7 +26,10 @@ Examples:
   cloop config set ollama.base_url http://localhost:11434
   cloop config set ollama.model llama3.2
   cloop config set notify.slack_webhook https://hooks.slack.com/services/...
-  cloop config set notify.discord_webhook https://discord.com/api/webhooks/...`,
+  cloop config set notify.discord_webhook https://discord.com/api/webhooks/...
+  cloop config set tracing.enabled true
+  cloop config set tracing.endpoint http://localhost:4318
+  cloop config set tracing.service_name my-project`,
 }
 
 var configShowCmd = &cobra.Command{
@@ -171,8 +174,22 @@ func applyConfigKey(cfg *config.Config, key, value string) error {
 	case "mock.default":
 		cfg.Mock.Default = value
 
+	case "tracing.enabled":
+		switch strings.ToLower(value) {
+		case "true", "1", "yes", "on":
+			cfg.Tracing.Enabled = true
+		case "false", "0", "no", "off":
+			cfg.Tracing.Enabled = false
+		default:
+			return fmt.Errorf("tracing.enabled: expected true/false, got %q", value)
+		}
+	case "tracing.endpoint":
+		cfg.Tracing.Endpoint = value
+	case "tracing.service_name":
+		cfg.Tracing.ServiceName = value
+
 	default:
-		return fmt.Errorf("unknown config key %q\n\nValid keys:\n  provider\n  anthropic.api_key, anthropic.model, anthropic.base_url\n  openai.api_key, openai.model, openai.base_url\n  ollama.base_url, ollama.model\n  claudecode.model\n  mock.responses_file, mock.default\n  webhook.url, webhook.events\n  notify.slack_webhook, notify.discord_webhook\n  github.token, github.repo, github.labels\n  sync.remote, sync.branch", key)
+		return fmt.Errorf("unknown config key %q\n\nValid keys:\n  provider\n  anthropic.api_key, anthropic.model, anthropic.base_url\n  openai.api_key, openai.model, openai.base_url\n  ollama.base_url, ollama.model\n  claudecode.model\n  mock.responses_file, mock.default\n  webhook.url, webhook.events\n  notify.slack_webhook, notify.discord_webhook\n  github.token, github.repo, github.labels\n  sync.remote, sync.branch\n  tracing.enabled, tracing.endpoint, tracing.service_name", key)
 	}
 	return nil
 }

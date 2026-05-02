@@ -62,6 +62,24 @@ type Config struct {
 	// RateLimit configures the per-IP token-bucket rate limiter for HTTP servers
 	// (cloop serve and cloop ui). Zero values use built-in defaults.
 	RateLimit RateLimitConfig `yaml:"rate_limit,omitempty"`
+
+	// Tracing configures OTLP distributed trace export.
+	// When Tracing.Enabled is true and Tracing.Endpoint is set, cloop exports
+	// per-call spans to the specified OTLP HTTP endpoint (e.g. Jaeger, Tempo,
+	// or an OTel Collector). Disabled by default (zero overhead when off).
+	Tracing TracingConfig `yaml:"tracing,omitempty"`
+}
+
+// TracingConfig holds OpenTelemetry tracing settings.
+type TracingConfig struct {
+	// Enabled activates OTLP trace export. Default: false (no-op).
+	Enabled bool `yaml:"enabled,omitempty"`
+	// Endpoint is the OTLP HTTP receiver base URL, e.g. "http://localhost:4318".
+	// The exporter appends /v1/traces automatically.
+	Endpoint string `yaml:"endpoint,omitempty"`
+	// ServiceName is reported as the OTel service.name resource attribute.
+	// Defaults to "cloop".
+	ServiceName string `yaml:"service_name,omitempty"`
 }
 
 // RateLimitConfig controls the per-IP token-bucket rate limiter applied to

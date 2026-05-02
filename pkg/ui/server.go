@@ -23,6 +23,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/kb"
 	"github.com/blechschmidt/cloop/pkg/multiui"
 	"github.com/blechschmidt/cloop/pkg/pm"
+	"github.com/blechschmidt/cloop/pkg/provider"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/timeline"
 )
@@ -256,6 +257,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	// Chat
 	mux.HandleFunc("/api/chat", s.handleChat)
 	mux.HandleFunc("/api/chat/history", s.handleChatHistory)
+	mux.HandleFunc("POST /api/chat/plan", s.handlePlanChat)
 
 	// Init & reset
 	mux.HandleFunc("/api/init", s.handleInit)
@@ -1639,6 +1641,167 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handlePlanChat streams an AI response that is contextualised with the full
+// plan (tasks, statuses, annotations) via SSE.
+// POST /api/chat/plan  {"message":"...","history":[{"role":"user","content":"..."},...]}
+func (s *Server) handlePlanChat(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Message string `json:"message"`
+		History []struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		} `json:"history"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Message) == "" {
+		jsonErr(w, "message required", http.StatusBadRequest)
+		return
+	}
+	msg := strings.TrimSpace(req.Message)
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		jsonErr(w, "streaming not supported", http.StatusInternalServerError)
+		return
+	}
+
+	workDir := s.resolveWorkDir(r)
+	cfg, err := config.Load(workDir)
+	if err != nil {
+		jsonErr(w, "config load failed", http.StatusInternalServerError)
+		return
+	}
+
+	// Build plan context.
+	var sysB strings.Builder
+	sysB.WriteString("You are a plan-aware AI assistant for the cloop AI product manager.\n")
+	sysB.WriteString("You help the user understand, analyse, and improve their project plan.\n")
+	sysB.WriteString("Be concise, practical, and reference specific task IDs when relevant.\n\n")
+
+	ps, _ := state.Load(workDir)
+	if ps != nil && ps.Plan != nil {
+		sysB.WriteString("## Current Plan\n")
+		sysB.WriteString("**Goal:** " + ps.Goal + "\n\n")
+		total := len(ps.Plan.Tasks)
+		done, inProg, failed, pending := 0, 0, 0, 0
+		for _, t := range ps.Plan.Tasks {
+			switch t.Status {
+			case pm.TaskDone:
+				done++
+			case pm.TaskInProgress:
+				inProg++
+			case pm.TaskFailed:
+				failed++
+			default:
+				pending++
+			}
+		}
+		fmt.Fprintf(&sysB, "**Progress:** %d/%d done, %d in-progress, %d pending, %d failed\n\n",
+			done, total, inProg, pending, failed)
+		sysB.WriteString("### Tasks\n")
+		for _, t := range ps.Plan.Tasks {
+			fmt.Fprintf(&sysB, "- [#%d] **%s** — status: `%s`, priority: %d", t.ID, t.Title, t.Status, t.Priority)
+			if t.Assignee != "" {
+				fmt.Fprintf(&sysB, ", assignee: %s", t.Assignee)
+			}
+			if t.EstimatedMinutes > 0 {
+				fmt.Fprintf(&sysB, ", est: %dm", t.EstimatedMinutes)
+			}
+			if t.ActualMinutes > 0 {
+				fmt.Fprintf(&sysB, ", actual: %dm", t.ActualMinutes)
+			}
+			if len(t.DependsOn) > 0 {
+				fmt.Fprintf(&sysB, ", depends on: %v", t.DependsOn)
+			}
+			if t.Pinned {
+				sysB.WriteString(", pinned")
+			}
+			sysB.WriteString("\n")
+			if t.Description != "" {
+				fmt.Fprintf(&sysB, "  %s\n", t.Description)
+			}
+			if len(t.Annotations) > 0 {
+				sysB.WriteString("  annotations:\n")
+				for _, a := range t.Annotations {
+					fmt.Fprintf(&sysB, "    • [%s] %s\n", a.Author, a.Text)
+				}
+			}
+		}
+	} else {
+		sysB.WriteString("No plan is currently initialised for this project.\n")
+	}
+
+	// Build conversation prompt.
+	var convB strings.Builder
+	for _, h := range req.History {
+		switch h.Role {
+		case "user":
+			fmt.Fprintf(&convB, "Human: %s\n\n", h.Content)
+		case "assistant":
+			fmt.Fprintf(&convB, "Assistant: %s\n\n", h.Content)
+		}
+	}
+	fmt.Fprintf(&convB, "Human: %s\n\nAssistant: ", msg)
+
+	// Build provider.
+	pName := cfg.Provider
+	if pName == "" {
+		pName = "claudecode"
+	}
+	provCfg := provider.ProviderConfig{
+		Name:             pName,
+		AnthropicAPIKey:  cfg.Anthropic.APIKey,
+		AnthropicBaseURL: cfg.Anthropic.BaseURL,
+		OpenAIAPIKey:     cfg.OpenAI.APIKey,
+		OpenAIBaseURL:    cfg.OpenAI.BaseURL,
+		OllamaBaseURL:    cfg.Ollama.BaseURL,
+	}
+	prov, buildErr := provider.Build(provCfg)
+	if buildErr != nil {
+		jsonErr(w, "provider: "+buildErr.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	model := ""
+	switch pName {
+	case "anthropic":
+		model = cfg.Anthropic.Model
+	case "openai":
+		model = cfg.OpenAI.Model
+	case "ollama":
+		model = cfg.Ollama.Model
+	case "claudecode":
+		model = cfg.ClaudeCode.Model
+	}
+
+	// Start SSE response.
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	flusher.Flush()
+
+	ctx := r.Context()
+	opts := provider.Options{
+		Model:        model,
+		SystemPrompt: sysB.String(),
+		WorkDir:      workDir,
+		Timeout:      2 * time.Minute,
+		OnToken: func(token string) {
+			d, _ := json.Marshal(map[string]string{"token": token})
+			fmt.Fprintf(w, "event: token\ndata: %s\n\n", d)
+			flusher.Flush()
+		},
+	}
+
+	_, callErr := prov.Complete(ctx, convB.String(), opts)
+	if callErr != nil {
+		d, _ := json.Marshal(map[string]string{"error": callErr.Error()})
+		fmt.Fprintf(w, "event: error\ndata: %s\n\n", d)
+	} else {
+		fmt.Fprintf(w, "event: done\ndata: {}\n\n")
+	}
+	flusher.Flush()
+}
+
 // handleReset resets the project state by running `cloop reset`.
 func (s *Server) handleReset(w http.ResponseWriter, r *http.Request) {
 	if !requirePOST(w, r) {
@@ -2995,6 +3158,47 @@ const dashboardHTML = `<!DOCTYPE html>
   }
   .chat-tts-btn:hover { color: var(--accent); background: rgba(88,166,255,.1); }
 
+  /* ── Assistant tab ── */
+  .assistant-chips {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 4px;
+  }
+  .chip-label { font-size: 11px; color: var(--muted); margin-right: 4px; white-space: nowrap; }
+  .assist-chip {
+    font-size: 12px;
+    padding: 4px 10px;
+    border-radius: 12px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text);
+    cursor: pointer;
+    transition: background .15s, border-color .15s;
+    white-space: nowrap;
+  }
+  .assist-chip:hover { background: rgba(88,166,255,.12); border-color: var(--accent); color: var(--accent); }
+  .assistant-textarea {
+    resize: none;
+    overflow: hidden;
+    min-height: 36px;
+    max-height: 120px;
+    line-height: 1.5;
+  }
+  .assistant-streaming-cursor {
+    display: inline-block;
+    width: 2px;
+    height: 14px;
+    background: var(--accent);
+    margin-left: 2px;
+    vertical-align: text-bottom;
+    animation: blink 1s step-end infinite;
+  }
+  @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0} }
+
   /* ── Knowledge Base tab ── */
   .kb-tab-toolbar {
     display: flex; align-items: center; gap: 10px; padding: 12px 0 10px; flex-wrap: wrap;
@@ -3446,6 +3650,7 @@ const dashboardHTML = `<!DOCTYPE html>
       <button class="tab-btn"        onclick="switchTab('kb')"        id="tbtn-kb">Knowledge Base</button>
       <button class="tab-btn"        onclick="switchTab('deps')"      id="tbtn-deps">Dependencies</button>
       <button class="tab-btn"        onclick="switchTab('chat')"      id="tbtn-chat">Chat</button>
+      <button class="tab-btn"        onclick="switchTab('assistant')" id="tbtn-assistant">Assistant</button>
       <button class="tab-btn"        onclick="switchTab('projects')"  id="tbtn-projects">Projects</button>
       <button class="tab-btn"        onclick="switchTab('suggest')"   id="tbtn-suggest">Suggest</button>
       <button class="tab-btn"        onclick="switchTab('settings')"  id="tbtn-settings">Settings</button>
@@ -3471,6 +3676,7 @@ const dashboardHTML = `<!DOCTYPE html>
       <button class="m-tab-btn" onclick="switchTab('kb')"        id="mtbtn-kb"><span class="m-tab-icon">&#128218;</span>Knowledge Base</button>
       <button class="m-tab-btn" onclick="switchTab('deps')"      id="mtbtn-deps"><span class="m-tab-icon">&#128279;</span>Dependencies</button>
       <button class="m-tab-btn" onclick="switchTab('chat')"      id="mtbtn-chat"><span class="m-tab-icon">&#128172;</span>Chat</button>
+      <button class="m-tab-btn" onclick="switchTab('assistant')" id="mtbtn-assistant"><span class="m-tab-icon">&#129302;</span>Assistant</button>
       <button class="m-tab-btn" onclick="switchTab('projects')"  id="mtbtn-projects"><span class="m-tab-icon">&#128193;</span>Projects</button>
       <button class="m-tab-btn" onclick="switchTab('suggest')"   id="mtbtn-suggest"><span class="m-tab-icon">&#128161;</span>Suggest</button>
       <button class="m-tab-btn" onclick="switchTab('settings')"  id="mtbtn-settings"><span class="m-tab-icon">&#9881;</span>Settings</button>
@@ -3879,6 +4085,43 @@ const dashboardHTML = `<!DOCTYPE html>
       </div>
     </div>
 
+    <!-- ══════════════════════════════════════════════════════ ASSISTANT -->
+    <div id="tab-assistant" class="tab-panel">
+      <div class="chat-layout">
+        <div class="chat-header">
+          <span class="section-title" style="margin:0">&#129302; Plan Assistant</span>
+          <span class="chat-hint">Ask questions about your plan — the AI has full task context</span>
+          <button class="btn" style="padding:4px 10px;font-size:12px;margin-left:auto" onclick="clearAssistantPanel()">Clear</button>
+        </div>
+        <div class="assistant-chips" id="assistantChips">
+          <span class="chip-label">Try asking:</span>
+          <button class="assist-chip" onclick="assistantChipAsk('What tasks are blocked?')">What tasks are blocked?</button>
+          <button class="assist-chip" onclick="assistantChipAsk('What should I work on next?')">What should I work on next?</button>
+          <button class="assist-chip" onclick="assistantChipAsk('Summarise progress for stakeholders')">Summarise progress for stakeholders</button>
+          <button class="assist-chip" onclick="assistantChipAsk('Which tasks are overdue or at risk?')">Which tasks are overdue or at risk?</button>
+          <button class="assist-chip" onclick="assistantChipAsk('Give me a risk assessment of the current plan')">Risk assessment</button>
+        </div>
+        <div class="chat-messages" id="assistantMessages">
+          <div class="chat-welcome" id="assistantWelcome">
+            <div class="chat-welcome-icon">&#129302;</div>
+            <div class="chat-welcome-title">Plan-Aware Assistant</div>
+            <div class="chat-welcome-text">I have full knowledge of your plan — tasks, statuses, priorities, and annotations.<br>
+            Ask me anything about your project or click a suggested question above.</div>
+          </div>
+        </div>
+        <div class="chat-input-bar">
+          <textarea class="form-input chat-input assistant-textarea" id="assistantInput"
+                    rows="1" placeholder="Ask about your plan..."
+                    onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();submitAssistantChat();}
+                               autoGrowTextarea(this);"></textarea>
+          <button class="btn primary" onclick="submitAssistantChat()" style="flex-shrink:0">
+            <svg viewBox="0 0 16 16" fill="currentColor" width="13" height="13"><path d="M15.854.146a.5.5 0 0 1 .11.54l-5.819 14.547a.75.75 0 0 1-1.329.124l-3.178-4.995L.643 7.184a.75.75 0 0 1 .124-1.33L15.314.037a.5.5 0 0 1 .54.11z"/></svg>
+            Send
+          </button>
+        </div>
+      </div>
+    </div>
+
     <!-- ═══════════════════════════════════════════════════════════ SUGGEST -->
     <div id="tab-suggest" class="tab-panel">
       <div class="section">
@@ -4266,7 +4509,7 @@ window.switchTab = function(name) {
 
   // In multi-project mode, re-fetch state for the selected project when
   // switching to any project-scoped tab so the data is always current.
-  const projectScopedTabs = ['overview','tasks','kanban','timeline','kb','deps','chat','suggest'];
+  const projectScopedTabs = ['overview','tasks','kanban','timeline','kb','deps','chat','assistant','suggest'];
   if (isMultiProject && selectedProjectIdx !== null && projectScopedTabs.includes(name)) {
     api(pUrl('/api/state')).then(s => render(s)).catch(() => {
       if (name === 'tasks'  && appState) renderTasks(appState);
@@ -4276,12 +4519,14 @@ window.switchTab = function(name) {
     if (name === 'kb') loadKB();
     if (name === 'deps') loadDeps();
     if (name === 'chat') loadChatHistory();
+    if (name === 'assistant') loadAssistantHistory();
   } else {
     if (name === 'settings') loadConfig();
     if (name === 'tasks'  && appState) renderTasks(appState);
     if (name === 'kanban' && appState) renderKanban(appState);
     if (name === 'projects') loadProjects();
     if (name === 'chat') loadChatHistory();
+    if (name === 'assistant') loadAssistantHistory();
     if (name === 'timeline') loadTimeline();
     if (name === 'kb') loadKB();
     if (name === 'deps') loadDeps();
@@ -6479,6 +6724,209 @@ function loadChatHistory() {
   }).catch(() => {});
 }
 
+// ── Plan Assistant tab ────────────────────────────────────────────────────────
+
+const ASSISTANT_STORAGE_KEY = 'cloop_assistant_history';
+let assistantHistory = []; // [{role, content}]
+let assistantStreaming = false;
+
+function loadAssistantHistory() {
+  try {
+    const raw = sessionStorage.getItem(ASSISTANT_STORAGE_KEY);
+    if (raw) {
+      assistantHistory = JSON.parse(raw) || [];
+    }
+  } catch(e) {
+    assistantHistory = [];
+  }
+  const box = document.getElementById('assistantMessages');
+  if (!box) return;
+  box.innerHTML = '';
+  if (assistantHistory.length === 0) {
+    box.innerHTML = '<div class="chat-welcome" id="assistantWelcome">' +
+      '<div class="chat-welcome-icon">&#129302;</div>' +
+      '<div class="chat-welcome-title">Plan-Aware Assistant</div>' +
+      '<div class="chat-welcome-text">I have full knowledge of your plan — tasks, statuses, priorities, and annotations.<br>' +
+      'Ask me anything about your project or click a suggested question above.</div>' +
+      '</div>';
+    return;
+  }
+  assistantHistory.forEach(m => appendAssistantBubble(m.role, m.content, false));
+}
+
+function saveAssistantHistory() {
+  try {
+    sessionStorage.setItem(ASSISTANT_STORAGE_KEY, JSON.stringify(assistantHistory));
+  } catch(e) {}
+}
+
+function appendAssistantBubble(role, content, streaming) {
+  const box = document.getElementById('assistantMessages');
+  if (!box) return null;
+  const welcome = box.querySelector('.chat-welcome');
+  if (welcome) welcome.remove();
+
+  const row = document.createElement('div');
+  row.className = 'chat-bubble-row ' + role;
+  const initials = role === 'user' ? 'U' : 'AI';
+
+  const bubbleDiv = document.createElement('div');
+  bubbleDiv.className = 'chat-bubble ' + role;
+  bubbleDiv.textContent = content;
+  if (streaming) {
+    const cursor = document.createElement('span');
+    cursor.className = 'assistant-streaming-cursor';
+    cursor.id = 'assistantCursor';
+    bubbleDiv.appendChild(cursor);
+  }
+
+  const timeDiv = document.createElement('div');
+  timeDiv.className = 'chat-bubble-time';
+  timeDiv.textContent = chatFmtTime(new Date());
+
+  const avatarDiv = document.createElement('div');
+  avatarDiv.className = 'chat-avatar ' + role;
+  avatarDiv.textContent = initials;
+
+  const inner = document.createElement('div');
+  inner.appendChild(bubbleDiv);
+  inner.appendChild(timeDiv);
+
+  row.appendChild(avatarDiv);
+  row.appendChild(inner);
+  box.appendChild(row);
+  box.scrollTop = box.scrollHeight;
+  return { row, bubbleDiv };
+}
+
+window.assistantChipAsk = function(question) {
+  const inp = document.getElementById('assistantInput');
+  if (inp) inp.value = question;
+  submitAssistantChat();
+};
+
+function autoGrowTextarea(el) {
+  el.style.height = 'auto';
+  el.style.height = Math.min(el.scrollHeight, 120) + 'px';
+}
+
+window.submitAssistantChat = async function() {
+  if (assistantStreaming) return;
+  const input = document.getElementById('assistantInput');
+  if (!input) return;
+  const msg = input.value.trim();
+  if (!msg) return;
+  input.value = '';
+  input.style.height = 'auto';
+
+  // Add user bubble.
+  appendAssistantBubble('user', msg, false);
+  assistantHistory.push({role: 'user', content: msg});
+
+  // Show streaming assistant bubble.
+  const result = appendAssistantBubble('assistant', '', true);
+  if (!result) return;
+  const { bubbleDiv } = result;
+  let accumulated = '';
+
+  assistantStreaming = true;
+  const box = document.getElementById('assistantMessages');
+
+  try {
+    const body = JSON.stringify({
+      message: msg,
+      history: assistantHistory.slice(0, -1), // exclude the user message just added
+    });
+    const resp = await fetch(pUrl('/api/chat/plan'), {
+      method: 'POST',
+      headers: Object.assign({'Content-Type': 'application/json'}, authHeaders()),
+      body,
+    });
+    if (resp.status === 401) { showLoginModal(); return; }
+    if (!resp.ok || !resp.body) {
+      const errText = await resp.text().catch(() => 'Request failed');
+      bubbleDiv.textContent = errText;
+      bubbleDiv.classList.add('error');
+      assistantStreaming = false;
+      return;
+    }
+
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop(); // keep incomplete line
+
+      let eventType = '';
+      for (const line of lines) {
+        if (line.startsWith('event: ')) {
+          eventType = line.slice(7).trim();
+        } else if (line.startsWith('data: ')) {
+          const raw = line.slice(6).trim();
+          if (eventType === 'token') {
+            try {
+              const d = JSON.parse(raw);
+              accumulated += (d.token || '');
+              // Update bubble text while keeping cursor.
+              const cursor = document.getElementById('assistantCursor');
+              bubbleDiv.textContent = accumulated;
+              if (cursor) bubbleDiv.appendChild(cursor);
+              if (box) box.scrollTop = box.scrollHeight;
+            } catch(e) {}
+          } else if (eventType === 'error') {
+            try {
+              const d = JSON.parse(raw);
+              accumulated = d.error || 'Error';
+              bubbleDiv.textContent = accumulated;
+              bubbleDiv.classList.add('error');
+            } catch(e) {}
+          } else if (eventType === 'done') {
+            // Remove cursor.
+            const cursor = document.getElementById('assistantCursor');
+            if (cursor) cursor.remove();
+          }
+          eventType = '';
+        }
+      }
+    }
+  } catch(err) {
+    const cursor = document.getElementById('assistantCursor');
+    if (cursor) cursor.remove();
+    accumulated = 'Request failed: ' + err.message;
+    bubbleDiv.textContent = accumulated;
+    bubbleDiv.classList.add('error');
+  }
+
+  // Remove blinking cursor if still present.
+  const cursor = document.getElementById('assistantCursor');
+  if (cursor) cursor.remove();
+
+  assistantStreaming = false;
+
+  if (accumulated && !bubbleDiv.classList.contains('error')) {
+    assistantHistory.push({role: 'assistant', content: accumulated});
+    saveAssistantHistory();
+  }
+};
+
+window.clearAssistantPanel = function() {
+  assistantHistory = [];
+  saveAssistantHistory();
+  const box = document.getElementById('assistantMessages');
+  if (!box) return;
+  box.innerHTML = '<div class="chat-welcome" id="assistantWelcome">' +
+    '<div class="chat-welcome-icon">&#129302;</div>' +
+    '<div class="chat-welcome-title">Plan-Aware Assistant</div>' +
+    '<div class="chat-welcome-text">I have full knowledge of your plan — tasks, statuses, priorities, and annotations.<br>' +
+    'Ask me anything about your project or click a suggested question above.</div>' +
+    '</div>';
+};
+
 // ── Chat voice ────────────────────────────────────────────────────────────────
 
 window.toggleChatVoice = async function() {
@@ -6591,7 +7039,7 @@ document.addEventListener('keyup', function(e) {
 // ── Keyboard shortcuts & Command Palette ─────────────────────────────────────
 
 // Maps 1-8 to tab names in left-to-right order.
-const TAB_KEYS = ['overview','tasks','kanban','timeline','chat','projects','suggest','settings'];
+const TAB_KEYS = ['overview','tasks','kanban','timeline','chat','assistant','projects','suggest','settings'];
 
 // All commands registered in the palette.
 const CMD_REGISTRY = [
@@ -6600,9 +7048,10 @@ const CMD_REGISTRY = [
   { label:'Kanban',          icon:'🗂', shortcut:'3', action:()=>switchTab('kanban') },
   { label:'Timeline',        icon:'📅', shortcut:'4', action:()=>switchTab('timeline') },
   { label:'Chat',            icon:'💬', shortcut:'5', action:()=>switchTab('chat') },
-  { label:'Projects',        icon:'📁', shortcut:'6', action:()=>switchTab('projects') },
-  { label:'Suggest',         icon:'💡', shortcut:'7', action:()=>switchTab('suggest') },
-  { label:'Settings',        icon:'⚙️', shortcut:'8', action:()=>switchTab('settings') },
+  { label:'Assistant',       icon:'🤖', shortcut:'6', action:()=>switchTab('assistant') },
+  { label:'Projects',        icon:'📁', shortcut:'7', action:()=>switchTab('projects') },
+  { label:'Suggest',         icon:'💡', shortcut:'8', action:()=>switchTab('suggest') },
+  { label:'Settings',        icon:'⚙️', shortcut:'9', action:()=>switchTab('settings') },
   { label:'Refresh state',   icon:'🔄', shortcut:'r',  action:()=>{ api(pUrl('/api/state')).then(s=>render(s)).catch(()=>{}); toast('Refreshed','ok'); } },
   { label:'New task',        icon:'➕', shortcut:'n',  action:()=>{ switchTab('tasks'); setTimeout(()=>{ const el=document.getElementById('newTaskTitle'); if(el){el.focus();} },100); } },
   { label:'Start run',       icon:'▶️', shortcut:'',   action:()=>submitRun() },
@@ -6610,6 +7059,7 @@ const CMD_REGISTRY = [
   { label:'Show kanban',     icon:'🗂', shortcut:'',   action:()=>switchTab('kanban') },
   { label:'Show timeline',   icon:'📊', shortcut:'',   action:()=>switchTab('timeline') },
   { label:'Show chat',       icon:'🤖', shortcut:'',   action:()=>switchTab('chat') },
+  { label:'Show assistant',  icon:'🤖', shortcut:'',   action:()=>switchTab('assistant') },
   { label:'Add task',        icon:'✏️', shortcut:'',   action:()=>{ switchTab('tasks'); setTimeout(()=>{ const el=document.getElementById('newTaskTitle'); if(el){el.focus();} },100); } },
   { label:'Run plan',        icon:'🚀', shortcut:'',   action:()=>submitRun() },
   { label:'Reset session',   icon:'🗑', shortcut:'',   action:()=>submitReset() },
