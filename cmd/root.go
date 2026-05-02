@@ -70,6 +70,9 @@ Supports Anthropic (Claude API), OpenAI, Ollama (local), and Claude Code.
   cloop changelog --dry-run                             # print changelog to stdout
   cloop changelog --since 2024-01-01                   # only include work after a date
   cloop changelog --format json                         # emit JSON instead of markdown
+  cloop bench --prompt "Explain how a B-tree works"              # benchmark across providers
+  cloop bench --prompt "Write a Go HTTP handler" --providers anthropic,openai --runs 3
+  cloop bench --prompt "Design a cache layer" --judge anthropic --output
   cloop status
   cloop log`,
 }
