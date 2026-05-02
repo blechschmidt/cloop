@@ -110,7 +110,8 @@ type Task struct {
 	GitHubIssue      int        `json:"github_issue,omitempty"`      // linked GitHub issue number (0 = none)
 	EstimatedMinutes int        `json:"estimated_minutes,omitempty"` // AI-predicted duration
 	ActualMinutes    int        `json:"actual_minutes,omitempty"`    // measured duration (set on completion)
-	ArtifactPath     string     `json:"artifact_path,omitempty"`     // path to the full AI response artifact file
+	ArtifactPath      string     `json:"artifact_path,omitempty"`       // path to the full AI response artifact file
+	FailureDiagnosis  string     `json:"failure_diagnosis,omitempty"`   // AI diagnosis of what went wrong on failure
 }
 
 // Plan is the full task plan for a goal.
@@ -335,6 +336,17 @@ func ExecuteTaskPrompt(goal, instructions string, plan *Plan, task *Task, ctx ..
 		if formatted := ctx[0].Format(); formatted != "" {
 			b.WriteString(formatted)
 		}
+	}
+
+	// If this task previously failed and has a diagnosis, inject it as context
+	// so the retry attempt benefits from the prior analysis.
+	if task.FailureDiagnosis != "" {
+		b.WriteString("## PREVIOUS ATTEMPT FAILED — DIAGNOSIS\n")
+		b.WriteString("This task was attempted before and failed. Here is the diagnosis of what went wrong\n")
+		b.WriteString("and what should be tried differently this time:\n\n")
+		b.WriteString(task.FailureDiagnosis)
+		b.WriteString("\n\n")
+		b.WriteString("**Apply this diagnosis: address the root cause identified above before proceeding.**\n\n")
 	}
 
 	b.WriteString("## INSTRUCTIONS\n")

@@ -73,6 +73,13 @@ var statusCmd = &cobra.Command{
 				})
 				for _, t := range sorted {
 					fmt.Printf("          %s Task %d: %s\n", taskMarker(t.Status), t.ID, t.Title)
+					if t.Status == pm.TaskFailed && t.FailureDiagnosis != "" {
+						diag := t.FailureDiagnosis
+						if len(diag) > 300 {
+							diag = diag[:300] + "..."
+						}
+						color.New(color.FgRed).Printf("            Diagnosis: %s\n", diag)
+					}
 				}
 			}
 		} else {

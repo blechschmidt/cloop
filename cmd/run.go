@@ -59,6 +59,7 @@ var (
 	notifyEnabled     bool
 	costLimit         float64
 	gitMode           bool
+	diagnoseFailures  bool
 )
 
 var runCmd = &cobra.Command{
@@ -213,6 +214,7 @@ Press Ctrl+C to pause gracefully.`,
 			Streaming:        streamOutput,
 			Notify:           notifyEnabled,
 			GitMode:          gitMode,
+			DiagnoseFailures: diagnoseFailures,
 		}
 
 		orc, err := orchestrator.New(orchCfg, prov)
@@ -413,5 +415,6 @@ func init() {
 	runCmd.Flags().BoolVar(&notifyEnabled, "notify", false, "Send OS desktop notifications on task done, task failed, and session complete (notify-send on Linux, osascript on macOS)")
 	runCmd.Flags().Float64Var(&costLimit, "cost-limit", 0, "Stop when estimated session cost reaches this USD amount (0 = unlimited); warns at 80%")
 	runCmd.Flags().BoolVar(&gitMode, "git", false, "PM mode: create a git branch per task, commit on done, leave branch on failure (sequential only)")
+	runCmd.Flags().BoolVar(&diagnoseFailures, "diagnose", false, "PM mode: run AI failure diagnosis on TASK_FAILED to analyze root cause and guide retries")
 	rootCmd.AddCommand(runCmd)
 }

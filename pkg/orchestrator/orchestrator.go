@@ -12,6 +12,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/artifact"
 	"github.com/blechschmidt/cloop/pkg/cost"
+	"github.com/blechschmidt/cloop/pkg/diagnosis"
 	cloopgit "github.com/blechschmidt/cloop/pkg/git"
 	"github.com/blechschmidt/cloop/pkg/hooks"
 	"github.com/blechschmidt/cloop/pkg/memory"
@@ -123,6 +124,12 @@ type Config struct {
 
 	// Hooks configures shell commands run at task and plan lifecycle events.
 	Hooks hooks.Config
+
+	// DiagnoseFailures enables AI-powered failure diagnosis in PM mode (sequential only).
+	// When a task emits TASK_FAILED, a second AI call analyzes the failure output and
+	// stores a diagnosis in task.FailureDiagnosis. On retry (--retry-failed), the
+	// diagnosis is injected into the retry prompt so the AI can correct its approach.
+	DiagnoseFailures bool
 
 	// GitMode enables per-task git branch workflow in PM mode (sequential only).
 	// Each task is executed on a dedicated branch cloop/task-<id>-<slug>.
@@ -839,6 +846,20 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 				notify.Send("cloop: Task Failed", task.Title)
 			}
 			consecutiveErrors++
+
+			// AI failure diagnosis: analyze what went wrong and store it on the task.
+			// This runs before adaptive replan so the diagnosis can inform replanning too.
+			if o.config.DiagnoseFailures {
+				dimColor.Printf("  Diagnosing failure for task %d...\n", task.ID)
+				diag, diagErr := diagnosis.AnalyzeFailure(ctx, o.provider, s.Model, o.config.StepTimeout, task, result.Output)
+				if diagErr != nil {
+					dimColor.Printf("  Diagnosis error (ignored): %v\n", diagErr)
+				} else if diag != "" {
+					task.FailureDiagnosis = diag
+					dimColor.Printf("  Diagnosis: %s\n\n", truncate(diag, 200))
+				}
+				s.Save()
+			}
 
 			// Adaptive replanning: re-think remaining tasks on failure.
 			if o.config.AdaptiveReplan {
