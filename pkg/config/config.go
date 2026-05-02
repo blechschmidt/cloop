@@ -24,6 +24,25 @@ type Config struct {
 	// Router maps task roles to provider names for heterogeneous multi-agent execution.
 	// Example: router.backend = "anthropic", router.frontend = "openai"
 	Router RouterConfig `yaml:"router,omitempty"`
+	// Hooks defines shell commands to run at task and plan lifecycle events.
+	Hooks HooksConfig `yaml:"hooks,omitempty"`
+}
+
+// HooksConfig holds shell commands executed at task and plan lifecycle events.
+// Commands run via "sh -c" with context passed as environment variables.
+type HooksConfig struct {
+	// PreTask runs before each task. Exit non-zero causes the task to be skipped.
+	// Env: CLOOP_TASK_ID, CLOOP_TASK_TITLE, CLOOP_TASK_STATUS, CLOOP_TASK_ROLE
+	PreTask string `yaml:"pre_task,omitempty"`
+	// PostTask runs after each task completes (regardless of outcome).
+	// Same env vars as PreTask, with CLOOP_TASK_STATUS set to the final status.
+	PostTask string `yaml:"post_task,omitempty"`
+	// PrePlan runs once before plan execution begins.
+	// Env: CLOOP_PLAN_GOAL, CLOOP_PLAN_TOTAL
+	PrePlan string `yaml:"pre_plan,omitempty"`
+	// PostPlan runs once after the plan finishes.
+	// Env: CLOOP_PLAN_GOAL, CLOOP_PLAN_TOTAL, CLOOP_PLAN_DONE, CLOOP_PLAN_FAILED, CLOOP_PLAN_SKIPPED
+	PostPlan string `yaml:"post_plan,omitempty"`
 }
 
 // RouterConfig maps AgentRole names to provider names.

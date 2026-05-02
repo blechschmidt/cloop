@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/config"
+	"github.com/blechschmidt/cloop/pkg/hooks"
 	"github.com/blechschmidt/cloop/pkg/orchestrator"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/provider"
@@ -158,6 +159,12 @@ Press Ctrl+C to pause gracefully.`,
 		}
 
 		orchCfg := orchestrator.Config{
+			Hooks: hooks.Config{
+				PreTask:  cfg.Hooks.PreTask,
+				PostTask: cfg.Hooks.PostTask,
+				PrePlan:  cfg.Hooks.PrePlan,
+				PostPlan: cfg.Hooks.PostPlan,
+			},
 			WorkDir:          workdir,
 			Model:            model,
 			MaxTokens:        runMaxTokens,

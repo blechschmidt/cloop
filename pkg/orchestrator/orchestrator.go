@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/cost"
+	"github.com/blechschmidt/cloop/pkg/hooks"
 	"github.com/blechschmidt/cloop/pkg/memory"
 	"github.com/blechschmidt/cloop/pkg/notify"
 	"github.com/blechschmidt/cloop/pkg/pm"
@@ -108,6 +109,9 @@ type Config struct {
 	// Notify enables OS desktop notifications for key events: task done, task failed,
 	// and session complete. Uses notify-send on Linux and osascript on macOS.
 	Notify bool
+
+	// Hooks configures shell commands run at task and plan lifecycle events.
+	Hooks hooks.Config
 }
 
 type Orchestrator struct {
@@ -430,6 +434,37 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		return nil
 	}
 
+	// Pre-plan hook: run once before execution starts.
+	if err := hooks.RunPrePlan(o.config.Hooks, hooks.PlanContext{
+		Goal:  s.Goal,
+		Total: len(s.Plan.Tasks),
+	}); err != nil {
+		failColor.Printf("✗ pre_plan hook failed: %v — aborting plan execution.\n", err)
+		s.Status = "failed"
+		s.Save()
+		return err
+	}
+
+	// Post-plan hook: runs when plan finishes (done or paused).
+	defer func() {
+		done, failed := s.Plan.CountByStatus()
+		skipped := 0
+		for _, t := range s.Plan.Tasks {
+			if t.Status == pm.TaskSkipped {
+				skipped++
+			}
+		}
+		if hookErr := hooks.RunPostPlan(o.config.Hooks, hooks.PlanContext{
+			Goal:    s.Goal,
+			Total:   len(s.Plan.Tasks),
+			Done:    done,
+			Failed:  failed,
+			Skipped: skipped,
+		}); hookErr != nil {
+			dimColor.Printf("  post_plan hook error (ignored): %v\n", hookErr)
+		}
+	}()
+
 	// Phase 2: Execute tasks in priority order
 	consecutiveErrors := 0
 	maxConsecutiveErrors := o.config.MaxFailures
@@ -546,6 +581,19 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 				return nil
 			}
 			// "yes" falls through
+		}
+
+		// Pre-task hook: skip the task if it exits non-zero.
+		if hookErr := hooks.RunPreTask(o.config.Hooks, hooks.TaskContext{
+			ID:     task.ID,
+			Title:  task.Title,
+			Status: "pending",
+			Role:   string(task.Role),
+		}); hookErr != nil {
+			dimColor.Printf("⊘ pre_task hook failed for task %d (%s): %v — skipping task.\n", task.ID, task.Title, hookErr)
+			task.Status = pm.TaskSkipped
+			s.Save()
+			continue
 		}
 
 		now := time.Now()
@@ -791,6 +839,17 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			}
 			consecutiveErrors = 0
 		}
+
+		// Post-task hook: always run regardless of task outcome.
+		if hookErr := hooks.RunPostTask(o.config.Hooks, hooks.TaskContext{
+			ID:     task.ID,
+			Title:  task.Title,
+			Status: string(task.Status),
+			Role:   string(task.Role),
+		}); hookErr != nil {
+			dimColor.Printf("  post_task hook error (ignored): %v\n", hookErr)
+		}
+
 		s.Save()
 
 		if o.config.StepDelay > 0 {
