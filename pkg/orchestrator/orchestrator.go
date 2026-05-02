@@ -60,6 +60,14 @@ type Config struct {
 	Temperature      *float64
 	TopP             *float64
 	FrequencyPenalty *float64
+
+	// ExtendedThinking enables reasoning/thinking mode for supported providers.
+	// Anthropic: adds the "thinking" block; OpenAI o-series: sets reasoning_effort.
+	ExtendedThinking bool
+
+	// ThinkingBudget is the token budget for reasoning content (default 8000).
+	// See provider.Options.ThinkingBudget for per-provider semantics.
+	ThinkingBudget int
 	Verbose     bool
 	DryRun      bool
 	PMMode      bool
@@ -1383,7 +1391,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		// single provider call. The combined reviewer output becomes the task
 		// result for signal detection and artifact storage.
 		var taskOutput string
-		var taskInputTokens, taskOutputTokens int
+		var taskInputTokens, taskOutputTokens, taskThinkingTokens int
 		var taskProviderName, taskModelName string
 		var consensusReport *consensus.Report // non-nil when consensus was used
 
@@ -1548,6 +1556,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 				taskOutput = result.Output
 				taskInputTokens = result.InputTokens
 				taskOutputTokens = result.OutputTokens
+				taskThinkingTokens = result.ThinkingTokens
 				taskProviderName = result.Provider
 				taskModelName = result.Model
 
@@ -1965,6 +1974,24 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 				o.metrics.RecordTaskFailed(durSecs)
 			case pm.TaskSkipped:
 				o.metrics.RecordTaskSkipped()
+			}
+		}
+
+		// Record task cost to ledger.
+		{
+			usd, _ := cost.Estimate(strings.ToLower(taskModelName), taskInputTokens, taskOutputTokens)
+			entry := cost.LedgerEntry{
+				TaskID:         task.ID,
+				TaskTitle:      task.Title,
+				Provider:       taskProviderName,
+				Model:          taskModelName,
+				InputTokens:    taskInputTokens,
+				OutputTokens:   taskOutputTokens,
+				ThinkingTokens: taskThinkingTokens,
+				EstimatedUSD:   usd,
+			}
+			if lErr := cost.AppendLedger(o.config.WorkDir, entry); lErr != nil {
+				dimColor.Printf("  cost ledger write error (ignored): %v\n", lErr)
 			}
 		}
 
@@ -2816,6 +2843,8 @@ func (o *Orchestrator) makeOpts(model string, streaming bool) (provider.Options,
 		Temperature:      o.config.Temperature,
 		TopP:             o.config.TopP,
 		FrequencyPenalty: o.config.FrequencyPenalty,
+		ExtendedThinking: o.config.ExtendedThinking,
+		ThinkingBudget:   o.config.ThinkingBudget,
 	}
 	if streaming && o.config.Streaming {
 		opts.OnToken = func(token string) {

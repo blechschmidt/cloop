@@ -51,22 +51,31 @@ type message struct {
 	Content string `json:"content"`
 }
 
+type thinkingConfig struct {
+	Type         string `json:"type"`
+	BudgetTokens int    `json:"budget_tokens"`
+}
+
 type requestBody struct {
-	Model       string    `json:"model"`
-	MaxTokens   int       `json:"max_tokens"`
-	System      string    `json:"system,omitempty"`
-	Messages    []message `json:"messages"`
-	Stream      bool      `json:"stream,omitempty"`
-	Temperature *float64  `json:"temperature,omitempty"`
-	TopP        *float64  `json:"top_p,omitempty"`
+	Model       string          `json:"model"`
+	MaxTokens   int             `json:"max_tokens"`
+	System      string          `json:"system,omitempty"`
+	Messages    []message       `json:"messages"`
+	Stream      bool            `json:"stream,omitempty"`
+	Temperature *float64        `json:"temperature,omitempty"`
+	TopP        *float64        `json:"top_p,omitempty"`
+	Thinking    *thinkingConfig `json:"thinking,omitempty"`
+}
+
+type contentBlock struct {
+	Type     string `json:"type"`
+	Text     string `json:"text"`
+	Thinking string `json:"thinking"`
 }
 
 type responseBody struct {
-	Content []struct {
-		Type string `json:"type"`
-		Text string `json:"text"`
-	} `json:"content"`
-	Usage *struct {
+	Content []contentBlock `json:"content"`
+	Usage   *struct {
 		InputTokens  int `json:"input_tokens"`
 		OutputTokens int `json:"output_tokens"`
 	} `json:"usage"`
@@ -85,6 +94,10 @@ type sseEvent struct {
 	Message *struct {
 		Usage *sseUsage `json:"usage"`
 	} `json:"message"`
+	// ContentBlock is present in content_block_start events and reveals the block type.
+	ContentBlock *struct {
+		Type string `json:"type"`
+	} `json:"content_block"`
 	Error *struct {
 		Type    string `json:"type"`
 		Message string `json:"message"`
@@ -92,8 +105,9 @@ type sseEvent struct {
 }
 
 type sseDelta struct {
-	Type string `json:"type"`
-	Text string `json:"text"`
+	Type     string `json:"type"`
+	Text     string `json:"text"`
+	Thinking string `json:"thinking"`
 }
 
 type sseUsage struct {
@@ -126,15 +140,24 @@ func (p *Provider) Complete(ctx context.Context, prompt string, opts provider.Op
 	useStream := opts.OnToken != nil
 
 	body := requestBody{
-		Model:       model,
-		MaxTokens:   maxTokens,
-		Messages:    []message{{Role: "user", Content: prompt}},
-		Stream:      useStream,
-		Temperature: opts.Temperature,
-		TopP:        opts.TopP,
+		Model:     model,
+		MaxTokens: maxTokens,
+		Messages:  []message{{Role: "user", Content: prompt}},
+		Stream:    useStream,
 	}
 	if opts.SystemPrompt != "" {
 		body.System = opts.SystemPrompt
+	}
+	// Extended thinking: omit temperature/top_p (incompatible with thinking mode).
+	if opts.ExtendedThinking {
+		budget := opts.ThinkingBudget
+		if budget <= 0 {
+			budget = 8000
+		}
+		body.Thinking = &thinkingConfig{Type: "enabled", BudgetTokens: budget}
+	} else {
+		body.Temperature = opts.Temperature
+		body.TopP = opts.TopP
 	}
 
 	data, err := json.Marshal(body)
@@ -185,16 +208,21 @@ func (p *Provider) Complete(ctx context.Context, prompt string, opts provider.Op
 		}
 
 		var output string
+		var thinkingText string
 		for _, c := range body.Content {
-			if c.Type == "text" {
+			switch c.Type {
+			case "text":
 				output += c.Text
+			case "thinking":
+				thinkingText += c.Thinking
 			}
 		}
 		result = &provider.Result{
-			Output:   output,
-			Duration: time.Since(start),
-			Provider: ProviderName,
-			Model:    model,
+			Output:         output,
+			Duration:       time.Since(start),
+			Provider:       ProviderName,
+			Model:          model,
+			ThinkingTokens: len([]rune(thinkingText)) / 4,
 		}
 		if body.Usage != nil {
 			result.InputTokens = body.Usage.InputTokens
@@ -231,7 +259,11 @@ func (p *Provider) completeStreaming(ctx context.Context, url string, data []byt
 	}
 
 	var sb strings.Builder
+	var thinkingSb strings.Builder
 	var inputTokens, outputTokens int
+	// Track which content block type is currently streaming.
+	// Blocks are indexed; we detect type from content_block_start events.
+	currentBlockIsThinking := false
 
 	scanner := bufio.NewScanner(resp.Body)
 	for scanner.Scan() {
@@ -258,11 +290,27 @@ func (p *Provider) completeStreaming(ctx context.Context, url string, data []byt
 			if event.Message != nil && event.Message.Usage != nil {
 				inputTokens = event.Message.Usage.InputTokens
 			}
+		case "content_block_start":
+			// Detect block type from the content_block field in the event.
+			currentBlockIsThinking = event.ContentBlock != nil && event.ContentBlock.Type == "thinking"
 		case "content_block_delta":
-			if event.Delta != nil && event.Delta.Type == "text_delta" {
-				token := event.Delta.Text
-				sb.WriteString(token)
-				onToken(token)
+			if event.Delta != nil {
+				switch event.Delta.Type {
+				case "text_delta":
+					token := event.Delta.Text
+					sb.WriteString(token)
+					onToken(token)
+				case "thinking_delta":
+					thinkingSb.WriteString(event.Delta.Thinking)
+				default:
+					if currentBlockIsThinking && event.Delta.Thinking != "" {
+						thinkingSb.WriteString(event.Delta.Thinking)
+					} else if !currentBlockIsThinking && event.Delta.Text != "" {
+						token := event.Delta.Text
+						sb.WriteString(token)
+						onToken(token)
+					}
+				}
 			}
 		case "message_delta":
 			if event.Usage != nil {
@@ -275,12 +323,14 @@ func (p *Provider) completeStreaming(ctx context.Context, url string, data []byt
 		return nil, fmt.Errorf("anthropic: reading stream: %w", err)
 	}
 
+	thinkingText := thinkingSb.String()
 	return &provider.Result{
-		Output:       sb.String(),
-		Duration:     time.Since(start),
-		Provider:     ProviderName,
-		Model:        model,
-		InputTokens:  inputTokens,
-		OutputTokens: outputTokens,
+		Output:         sb.String(),
+		Duration:       time.Since(start),
+		Provider:       ProviderName,
+		Model:          model,
+		InputTokens:    inputTokens,
+		OutputTokens:   outputTokens,
+		ThinkingTokens: len([]rune(thinkingText)) / 4,
 	}, nil
 }

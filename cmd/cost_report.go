@@ -191,12 +191,13 @@ func budgetBar(pct float64, width int) string {
 // printByTask renders a table grouped by task ID+title.
 func printByTask(entries []cost.LedgerEntry) {
 	type row struct {
-		id           int
-		title        string
-		inputTokens  int
-		outputTokens int
-		usd          float64
-		count        int
+		id             int
+		title          string
+		inputTokens    int
+		outputTokens   int
+		thinkingTokens int
+		usd            float64
+		count          int
 	}
 	byTask := map[int]*row{}
 	for _, e := range entries {
@@ -207,6 +208,7 @@ func printByTask(entries []cost.LedgerEntry) {
 		}
 		r.inputTokens += e.InputTokens
 		r.outputTokens += e.OutputTokens
+		r.thinkingTokens += e.ThinkingTokens
 		r.usd += e.EstimatedUSD
 		r.count++
 	}
@@ -217,29 +219,51 @@ func printByTask(entries []cost.LedgerEntry) {
 	}
 	sort.Ints(ids)
 
+	// Check whether any entry has thinking tokens so we can add the column conditionally.
+	var totalThinking int
+	for _, r := range byTask {
+		totalThinking += r.thinkingTokens
+	}
+
 	bold := color.New(color.Bold)
-	bold.Printf("%-5s  %-35s  %8s  %9s  %10s  %5s\n",
-		"ID", "Task", "In-tok", "Out-tok", "Cost", "Runs")
-	fmt.Println(strings.Repeat("-", 80))
-	for _, id := range ids {
-		r := byTask[id]
-		title := r.title
-		if len(title) > 35 {
-			title = title[:32] + "..."
+	if totalThinking > 0 {
+		bold.Printf("%-5s  %-35s  %8s  %9s  %10s  %10s  %5s\n",
+			"ID", "Task", "In-tok", "Out-tok", "Think-tok", "Cost", "Runs")
+		fmt.Println(strings.Repeat("-", 90))
+		for _, id := range ids {
+			r := byTask[id]
+			title := r.title
+			if len(title) > 35 {
+				title = title[:32] + "..."
+			}
+			fmt.Printf("%-5d  %-35s  %8d  %9d  %10d  %10s  %5d\n",
+				r.id, title, r.inputTokens, r.outputTokens, r.thinkingTokens, cost.FormatCost(r.usd), r.count)
 		}
-		fmt.Printf("%-5d  %-35s  %8d  %9d  %10s  %5d\n",
-			r.id, title, r.inputTokens, r.outputTokens, cost.FormatCost(r.usd), r.count)
+	} else {
+		bold.Printf("%-5s  %-35s  %8s  %9s  %10s  %5s\n",
+			"ID", "Task", "In-tok", "Out-tok", "Cost", "Runs")
+		fmt.Println(strings.Repeat("-", 80))
+		for _, id := range ids {
+			r := byTask[id]
+			title := r.title
+			if len(title) > 35 {
+				title = title[:32] + "..."
+			}
+			fmt.Printf("%-5d  %-35s  %8d  %9d  %10s  %5d\n",
+				r.id, title, r.inputTokens, r.outputTokens, cost.FormatCost(r.usd), r.count)
+		}
 	}
 }
 
 // printByProvider renders a table grouped by provider.
 func printByProvider(entries []cost.LedgerEntry) {
 	type row struct {
-		provider     string
-		inputTokens  int
-		outputTokens int
-		usd          float64
-		count        int
+		provider       string
+		inputTokens    int
+		outputTokens   int
+		thinkingTokens int
+		usd            float64
+		count          int
 	}
 	byProv := map[string]*row{}
 	for _, e := range entries {
@@ -254,6 +278,7 @@ func printByProvider(entries []cost.LedgerEntry) {
 		}
 		r.inputTokens += e.InputTokens
 		r.outputTokens += e.OutputTokens
+		r.thinkingTokens += e.ThinkingTokens
 		r.usd += e.EstimatedUSD
 		r.count++
 	}
@@ -263,14 +288,30 @@ func printByProvider(entries []cost.LedgerEntry) {
 	}
 	sort.Strings(keys)
 
+	var totalThinking int
+	for _, r := range byProv {
+		totalThinking += r.thinkingTokens
+	}
+
 	bold := color.New(color.Bold)
-	bold.Printf("%-20s  %8s  %9s  %10s  %5s\n",
-		"Provider", "In-tok", "Out-tok", "Cost", "Runs")
-	fmt.Println(strings.Repeat("-", 60))
-	for _, k := range keys {
-		r := byProv[k]
-		fmt.Printf("%-20s  %8d  %9d  %10s  %5d\n",
-			r.provider, r.inputTokens, r.outputTokens, cost.FormatCost(r.usd), r.count)
+	if totalThinking > 0 {
+		bold.Printf("%-20s  %8s  %9s  %10s  %10s  %5s\n",
+			"Provider", "In-tok", "Out-tok", "Think-tok", "Cost", "Runs")
+		fmt.Println(strings.Repeat("-", 70))
+		for _, k := range keys {
+			r := byProv[k]
+			fmt.Printf("%-20s  %8d  %9d  %10d  %10s  %5d\n",
+				r.provider, r.inputTokens, r.outputTokens, r.thinkingTokens, cost.FormatCost(r.usd), r.count)
+		}
+	} else {
+		bold.Printf("%-20s  %8s  %9s  %10s  %5s\n",
+			"Provider", "In-tok", "Out-tok", "Cost", "Runs")
+		fmt.Println(strings.Repeat("-", 60))
+		for _, k := range keys {
+			r := byProv[k]
+			fmt.Printf("%-20s  %8d  %9d  %10s  %5d\n",
+				r.provider, r.inputTokens, r.outputTokens, cost.FormatCost(r.usd), r.count)
+		}
 	}
 }
 

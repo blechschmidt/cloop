@@ -94,6 +94,8 @@ var (
 	cacheTTL             string
 	cacheMaxSize         int
 	mockMode             bool
+	extendedThinking     bool
+	thinkingBudget       int
 )
 
 var runCmd = &cobra.Command{
@@ -365,6 +367,8 @@ Press Ctrl+C to pause gracefully.`,
 			DocsUpdateOnComplete: docsUpdateOnComplete,
 			DocsUpdateFile:       docsUpdateFile,
 			CalibrationFactor:    cfg.CalibrationFactor,
+		ExtendedThinking:     extendedThinking,
+		ThinkingBudget:       thinkingBudget,
 		}
 
 		orc, err := orchestrator.New(orchCfg, prov)
@@ -630,5 +634,7 @@ func init() {
 	runCmd.Flags().BoolVar(&mockMode, "mock", false, "Use the deterministic offline mock provider (shorthand for --provider mock); responses loaded from .cloop/mock_responses.yaml")
 	runCmd.Flags().BoolVar(&docsUpdateOnComplete, "docs-update", false, "PM mode: AI-refresh all tracked documentation files (README.md, CONTRIBUTING.md, etc.) automatically when the plan finishes")
 	runCmd.Flags().StringVar(&docsUpdateFile, "docs-update-file", "", "Limit --docs-update to a single file (e.g. README.md)")
+	runCmd.Flags().BoolVar(&extendedThinking, "think", false, "Enable extended thinking/reasoning mode (Anthropic: thinking block; OpenAI o-series: reasoning_effort)")
+	runCmd.Flags().IntVar(&thinkingBudget, "think-budget", 8000, "Token budget for reasoning content (--think); maps to budget_tokens for Anthropic, reasoning_effort for OpenAI o-series")
 	rootCmd.AddCommand(runCmd)
 }

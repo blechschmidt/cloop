@@ -17,14 +17,15 @@ const ledgerFile = ".cloop/costs.jsonl"
 
 // LedgerEntry records the cost of one task execution.
 type LedgerEntry struct {
-	Timestamp     time.Time `json:"timestamp"`
-	TaskID        int       `json:"task_id"`
-	TaskTitle     string    `json:"task_title"`
-	Provider      string    `json:"provider"`
-	Model         string    `json:"model"`
-	InputTokens   int       `json:"input_tokens"`
-	OutputTokens  int       `json:"output_tokens"`
-	EstimatedUSD  float64   `json:"estimated_usd"`
+	Timestamp      time.Time `json:"timestamp"`
+	TaskID         int       `json:"task_id"`
+	TaskTitle      string    `json:"task_title"`
+	Provider       string    `json:"provider"`
+	Model          string    `json:"model"`
+	InputTokens    int       `json:"input_tokens"`
+	OutputTokens   int       `json:"output_tokens"`
+	ThinkingTokens int       `json:"thinking_tokens,omitempty"`
+	EstimatedUSD   float64   `json:"estimated_usd"`
 }
 
 // AppendLedger appends a cost entry to .cloop/costs.jsonl, creating the file

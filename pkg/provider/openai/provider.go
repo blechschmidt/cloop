@@ -17,6 +17,24 @@ import (
 	"github.com/blechschmidt/cloop/pkg/provider"
 )
 
+// isReasoningModel returns true for OpenAI o-series models that do not support
+// temperature or system messages but do support reasoning_effort.
+func isReasoningModel(model string) bool {
+	m := strings.ToLower(model)
+	return strings.HasPrefix(m, "o1") || strings.HasPrefix(m, "o3") || strings.HasPrefix(m, "o4-mini")
+}
+
+// reasoningEffort maps a thinking budget (token count) to an OpenAI reasoning_effort value.
+func reasoningEffort(budget int) string {
+	if budget <= 0 || budget >= 12000 {
+		return "high"
+	}
+	if budget >= 4000 {
+		return "medium"
+	}
+	return "low"
+}
+
 const (
 	ProviderName   = "openai"
 	DefaultModel   = "gpt-4o"
@@ -54,11 +72,13 @@ type chatMessage struct {
 type requestBody struct {
 	Model            string        `json:"model"`
 	MaxTokens        int           `json:"max_tokens,omitempty"`
+	MaxCompletionTokens int        `json:"max_completion_tokens,omitempty"`
 	Messages         []chatMessage `json:"messages"`
 	Stream           bool          `json:"stream,omitempty"`
 	Temperature      *float64      `json:"temperature,omitempty"`
 	TopP             *float64      `json:"top_p,omitempty"`
 	FrequencyPenalty *float64      `json:"frequency_penalty,omitempty"`
+	ReasoningEffort  string        `json:"reasoning_effort,omitempty"`
 }
 
 type responseBody struct {
@@ -70,6 +90,9 @@ type responseBody struct {
 	Usage *struct {
 		PromptTokens     int `json:"prompt_tokens"`
 		CompletionTokens int `json:"completion_tokens"`
+		CompletionTokensDetails *struct {
+			ReasoningTokens int `json:"reasoning_tokens"`
+		} `json:"completion_tokens_details"`
 	} `json:"usage"`
 	Error *struct {
 		Message string `json:"message"`
@@ -88,6 +111,9 @@ type streamChunk struct {
 	Usage *struct {
 		PromptTokens     int `json:"prompt_tokens"`
 		CompletionTokens int `json:"completion_tokens"`
+		CompletionTokensDetails *struct {
+			ReasoningTokens int `json:"reasoning_tokens"`
+		} `json:"completion_tokens_details"`
 	} `json:"usage"`
 	Error *struct {
 		Message string `json:"message"`
@@ -112,8 +138,11 @@ func (p *Provider) Complete(ctx context.Context, prompt string, opts provider.Op
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
+	reasoning := isReasoningModel(model)
+
 	messages := []chatMessage{}
-	if opts.SystemPrompt != "" {
+	// o-series models do not support the system role — omit the system prompt.
+	if opts.SystemPrompt != "" && !reasoning {
 		messages = append(messages, chatMessage{Role: "system", Content: opts.SystemPrompt})
 	}
 	messages = append(messages, chatMessage{Role: "user", Content: prompt})
@@ -121,13 +150,23 @@ func (p *Provider) Complete(ctx context.Context, prompt string, opts provider.Op
 	useStream := opts.OnToken != nil
 
 	reqBody := requestBody{
-		Model:            model,
-		MaxTokens:        opts.MaxTokens,
-		Messages:         messages,
-		Stream:           useStream,
-		Temperature:      opts.Temperature,
-		TopP:             opts.TopP,
-		FrequencyPenalty: opts.FrequencyPenalty,
+		Model:    model,
+		Messages: messages,
+		Stream:   useStream,
+	}
+	if reasoning {
+		// o-series: use max_completion_tokens, omit temperature/top_p/freq_penalty.
+		if opts.MaxTokens > 0 {
+			reqBody.MaxCompletionTokens = opts.MaxTokens
+		}
+		if opts.ExtendedThinking {
+			reqBody.ReasoningEffort = reasoningEffort(opts.ThinkingBudget)
+		}
+	} else {
+		reqBody.MaxTokens = opts.MaxTokens
+		reqBody.Temperature = opts.Temperature
+		reqBody.TopP = opts.TopP
+		reqBody.FrequencyPenalty = opts.FrequencyPenalty
 	}
 
 	data, err := json.Marshal(reqBody)
@@ -189,6 +228,9 @@ func (p *Provider) Complete(ctx context.Context, prompt string, opts provider.Op
 		if body.Usage != nil {
 			result.InputTokens = body.Usage.PromptTokens
 			result.OutputTokens = body.Usage.CompletionTokens
+			if body.Usage.CompletionTokensDetails != nil {
+				result.ThinkingTokens = body.Usage.CompletionTokensDetails.ReasoningTokens
+			}
 		}
 		return resp.StatusCode, nil
 	})
@@ -220,7 +262,7 @@ func (p *Provider) completeStreaming(ctx context.Context, url string, data []byt
 	}
 
 	var sb strings.Builder
-	var inputTokens, outputTokens int
+	var inputTokens, outputTokens, reasoningTokens int
 
 	scanner := bufio.NewScanner(resp.Body)
 	for scanner.Scan() {
@@ -254,6 +296,9 @@ func (p *Provider) completeStreaming(ctx context.Context, url string, data []byt
 		if chunk.Usage != nil {
 			inputTokens = chunk.Usage.PromptTokens
 			outputTokens = chunk.Usage.CompletionTokens
+			if chunk.Usage.CompletionTokensDetails != nil {
+				reasoningTokens = chunk.Usage.CompletionTokensDetails.ReasoningTokens
+			}
 		}
 	}
 
@@ -262,11 +307,12 @@ func (p *Provider) completeStreaming(ctx context.Context, url string, data []byt
 	}
 
 	return &provider.Result{
-		Output:       sb.String(),
-		Duration:     time.Since(start),
-		Provider:     ProviderName,
-		Model:        model,
-		InputTokens:  inputTokens,
-		OutputTokens: outputTokens,
+		Output:         sb.String(),
+		Duration:       time.Since(start),
+		Provider:       ProviderName,
+		Model:          model,
+		InputTokens:    inputTokens,
+		OutputTokens:   outputTokens,
+		ThinkingTokens: reasoningTokens,
 	}, nil
 }
