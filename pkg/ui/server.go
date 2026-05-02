@@ -17,6 +17,8 @@ import (
 	"sync"
 	"time"
 
+	"nhooyr.io/websocket"
+
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/kb"
 	"github.com/blechschmidt/cloop/pkg/multiui"
@@ -30,6 +32,13 @@ import (
 type sseEvent struct {
 	Event string // e.g. "" or "log"
 	Data  string
+}
+
+// wsMessage is a typed WebSocket message envelope.
+// Type values: "task_update", "step_output", "plan_complete", "projects", "error".
+type wsMessage struct {
+	Type string          `json:"type"`
+	Data json.RawMessage `json:"data"`
 }
 
 // ChatMessage is a single turn in the chat conversation history.
@@ -71,9 +80,10 @@ type Server struct {
 	RPS   float64
 	Burst int
 
-	mu      sync.Mutex
-	clients map[chan sseEvent]struct{}
-	lastMod time.Time
+	mu        sync.Mutex
+	clients   map[chan sseEvent]struct{}
+	wsClients map[chan wsMessage]struct{}
+	lastMod   time.Time
 
 	// Rate limiting: tracks per-IP auth failure counts.
 	authMu   sync.Mutex
@@ -114,6 +124,7 @@ func New(workdir string, port int, token string) *Server {
 		Port:          port,
 		Token:         token,
 		clients:       make(map[chan sseEvent]struct{}),
+		wsClients:     make(map[chan wsMessage]struct{}),
 		authFails:     make(map[string]*authFailEntry),
 		rlBuckets:     make(map[string]*uiIPBucket),
 		chatHistories: make(map[string][]ChatMessage),
@@ -205,8 +216,9 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	// Dashboard SPA
 	mux.HandleFunc("/", s.handleDashboard)
 
-	// Read-only state & SSE
+	// Read-only state, WebSocket, and SSE (SSE kept as fallback)
 	mux.HandleFunc("/api/state", s.handleState)
+	mux.HandleFunc("/api/ws", s.handleWS)
 	mux.HandleFunc("/api/events", s.handleEvents)
 
 	// Run controls
@@ -414,14 +426,22 @@ func (s *Server) watchState() {
 	}
 }
 
-// broadcast sends a state JSON payload to all connected SSE clients as a
-// default ("message") SSE event.
+// broadcast sends a state JSON payload to all connected SSE and WebSocket
+// clients. SSE clients receive a default "message" event; WebSocket clients
+// receive a "task_update" typed envelope.
 func (s *Server) broadcast(data string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for ch := range s.clients {
 		select {
 		case ch <- sseEvent{Data: data}:
+		default:
+		}
+	}
+	wsData := json.RawMessage(data)
+	for ch := range s.wsClients {
+		select {
+		case ch <- wsMessage{Type: "task_update", Data: wsData}:
 		default:
 		}
 	}
@@ -449,6 +469,13 @@ func (s *Server) broadcastLog(chunk string) {
 	for ch := range s.clients {
 		select {
 		case ch <- sseEvent{Event: "log", Data: string(data)}:
+		default:
+		}
+	}
+	wsData := json.RawMessage(data)
+	for ch := range s.wsClients {
+		select {
+		case ch <- wsMessage{Type: "step_output", Data: wsData}:
 		default:
 		}
 	}
@@ -551,6 +578,84 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 				fmt.Fprintf(w, "data: %s\n\n", ev.Data)
 			}
 			flusher.Flush()
+		}
+	}
+}
+
+// handleWS upgrades the connection to a WebSocket and streams typed JSON
+// messages to the client.  It also accepts incoming text frames so future
+// bidirectional features (approval gates, chat commands) can be layered on.
+// Clients that cannot upgrade (e.g., proxies that strip the Upgrade header)
+// should fall back to the /api/events SSE endpoint.
+func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
+	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
+		InsecureSkipVerify: true, // local dashboard — origin check is unnecessary
+	})
+	if err != nil {
+		// Accept already wrote the HTTP error response.
+		return
+	}
+	defer conn.CloseNow() //nolint:errcheck
+
+	ctx := r.Context()
+
+	ch := make(chan wsMessage, 16)
+	s.mu.Lock()
+	s.wsClients[ch] = struct{}{}
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		delete(s.wsClients, ch)
+		s.mu.Unlock()
+	}()
+
+	// Send current state immediately so the client doesn't need a separate
+	// REST call after connecting.
+	if ps, err := state.Load(s.resolveWorkDir(r)); err == nil {
+		if raw, err := json.Marshal(ps); err == nil {
+			if msg, err := json.Marshal(wsMessage{Type: "task_update", Data: raw}); err == nil {
+				_ = conn.Write(ctx, websocket.MessageText, msg)
+			}
+		}
+	}
+
+	// Replay the live log ring-buffer so reconnecting clients see recent output.
+	s.liveLogMu.Lock()
+	if len(s.liveLogLines) > 0 {
+		buf := strings.Join(s.liveLogLines, "")
+		s.liveLogMu.Unlock()
+		if d, err := json.Marshal(map[string]string{"chunk": buf}); err == nil {
+			if msg, err := json.Marshal(wsMessage{Type: "step_output", Data: d}); err == nil {
+				_ = conn.Write(ctx, websocket.MessageText, msg)
+			}
+		}
+	} else {
+		s.liveLogMu.Unlock()
+	}
+
+	// Pump outgoing messages; also drain any incoming frames (ignored for now).
+	go func() {
+		for {
+			_, _, err := conn.Read(ctx)
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	for {
+		select {
+		case <-ctx.Done():
+			conn.Close(websocket.StatusNormalClosure, "") //nolint:errcheck
+			return
+		case msg := <-ch:
+			data, err := json.Marshal(msg)
+			if err != nil {
+				continue
+			}
+			if err := conn.Write(ctx, websocket.MessageText, data); err != nil {
+				return
+			}
 		}
 	}
 }
@@ -1678,6 +1783,13 @@ func (s *Server) broadcastProjectsUpdate() {
 	for ch := range s.clients {
 		select {
 		case ch <- sseEvent{Event: "projects", Data: string(payload)}:
+		default:
+		}
+	}
+	wsData := json.RawMessage(payload)
+	for ch := range s.wsClients {
+		select {
+		case ch <- wsMessage{Type: "projects", Data: wsData}:
 		default:
 		}
 	}
@@ -4729,7 +4841,108 @@ window.clearLiveLog = function() {
   renderLiveLog();
 };
 
-// ── SSE ─────────────────────────────────────────────────────────────────────
+// ── Real-time push: WebSocket (primary) with SSE fallback ────────────────────
+
+// wsBackoff tracks the reconnect delay for WebSocket (ms).
+let wsBackoff = 1000;
+let wsConn = null;      // active WebSocket
+let sseUsed = false;    // true when we fell back to SSE
+
+// handleRealtimeMsg dispatches a typed message from either WebSocket or SSE.
+function handleRealtimeMsg(type, data) {
+  const dot = document.getElementById('liveDot');
+  if (dot) dot.classList.add('connected');
+  switch (type) {
+    case 'task_update':
+    case 'plan_complete':
+      // In multi-project mode with a non-primary project selected, the
+      // primary-project state update should be ignored.
+      if (isMultiProject && selectedProjectIdx !== null && selectedProjectIdx !== 0) return;
+      try { render(data); } catch(_) {}
+      break;
+    case 'step_output':
+      try { if (data.chunk) appendLiveLog(data.chunk); } catch(_) {}
+      break;
+    case 'projects':
+      try {
+        renderProjects(data.projects || [], data.stats || {});
+        updateProjectSelector();
+        // Keep the selected project's state fresh in multi-project mode.
+        if (isMultiProject && selectedProjectIdx !== null) {
+          api(pUrl('/api/state')).then(s => render(s)).catch(() => {});
+        }
+      } catch(_) {}
+      break;
+    case 'error':
+      console.warn('cloop ws error:', data);
+      break;
+  }
+}
+
+function connectWS() {
+  if (wsConn) { wsConn.close(); wsConn = null; }
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const tok   = authToken ? '?token=' + encodeURIComponent(authToken) : '';
+  const url   = proto + '//' + location.host + '/api/ws' + tok;
+  const dot   = document.getElementById('liveDot');
+
+  let ws;
+  try { ws = new WebSocket(url); } catch(_) { _fallbackToSSE(); return; }
+  wsConn = ws;
+
+  ws.onopen = () => {
+    wsBackoff = 1000; // reset on successful connect
+    sseUsed = false;
+    if (dot) dot.classList.add('connected');
+    // On reconnect also refresh the live log buffer in case we missed output.
+    api('/api/livelog').then(d => {
+      if (d.lines && d.lines.length) {
+        liveLogText = d.lines.join('');
+        renderLiveLog();
+      }
+    }).catch(() => {});
+  };
+
+  ws.onmessage = (e) => {
+    try {
+      const msg = JSON.parse(e.data);
+      handleRealtimeMsg(msg.type, msg.data);
+    } catch(_) {}
+  };
+
+  ws.onclose = (ev) => {
+    wsConn = null;
+    if (dot) dot.classList.remove('connected');
+    // If the close was a normal shutdown or we haven't tried SSE yet on the
+    // first connection, probe the state endpoint to detect auth failures.
+    fetch('/api/state', {headers: authHeaders()}).then(r => {
+      if (r.status === 401) { showLoginModal(); return; }
+      // Exponential backoff reconnect (cap at 30 s).
+      const delay = Math.min(wsBackoff, 30000);
+      wsBackoff = Math.min(wsBackoff * 2, 30000);
+      setTimeout(connectWS, delay);
+    }).catch(() => {
+      const delay = Math.min(wsBackoff, 30000);
+      wsBackoff = Math.min(wsBackoff * 2, 30000);
+      setTimeout(connectWS, delay);
+    });
+  };
+
+  ws.onerror = () => {
+    // onerror is always followed by onclose; fallback only if WebSocket is
+    // not supported at all (readyState stuck at CONNECTING).
+    if (ws.readyState !== WebSocket.OPEN && ws.readyState !== WebSocket.CONNECTING) {
+      _fallbackToSSE();
+    }
+  };
+}
+
+// _fallbackToSSE: used when WebSocket upgrades are blocked by a proxy.
+function _fallbackToSSE() {
+  if (sseUsed) return; // already in SSE mode
+  sseUsed = true;
+  connectSSE();
+}
 
 function connectSSE() {
   if (evtSource) evtSource.close();
@@ -4738,7 +4951,6 @@ function connectSSE() {
   const dot = document.getElementById('liveDot');
   evtSource.onopen = () => {
     dot.classList.add('connected');
-    // On reconnect, fetch current live log buffer.
     api('/api/livelog').then(d => {
       if (d.lines && d.lines.length) {
         liveLogText = d.lines.join('');
@@ -4748,34 +4960,19 @@ function connectSSE() {
   };
   evtSource.onmessage = (e) => {
     try {
-      // In multi-project mode with a non-primary project selected the SSE
-      // message carries the primary-project state — ignore it.
-      if (isMultiProject && selectedProjectIdx !== null && selectedProjectIdx !== 0) return;
-      render(JSON.parse(e.data));
+      handleRealtimeMsg('task_update', JSON.parse(e.data));
     } catch(_) {}
   };
   evtSource.addEventListener('log', (e) => {
-    try {
-      const d = JSON.parse(e.data);
-      if (d.chunk) appendLiveLog(d.chunk);
-    } catch(_) {}
+    try { handleRealtimeMsg('step_output', JSON.parse(e.data)); } catch(_) {}
   });
   evtSource.addEventListener('projects', (e) => {
-    try {
-      const d = JSON.parse(e.data);
-      renderProjects(d.projects || [], d.stats || {});
-      updateProjectSelector();
-      // In multi-project mode, keep the selected project's state fresh.
-      if (isMultiProject && selectedProjectIdx !== null) {
-        api(pUrl('/api/state')).then(s => render(s)).catch(() => {});
-      }
-    } catch(_) {}
+    try { handleRealtimeMsg('projects', JSON.parse(e.data)); } catch(_) {}
   });
   evtSource.onerror = () => {
     dot.classList.remove('connected');
     evtSource.close();
     evtSource = null;
-    // Probe the state endpoint to distinguish 401 from network error.
     fetch('/api/state', {headers: authHeaders()}).then(r => {
       if (r.status === 401) {
         showLoginModal();
@@ -6600,7 +6797,7 @@ document.addEventListener('keydown', function(e) {
 // ── Init ─────────────────────────────────────────────────────────────────────
 
 // On page load, probe the server. If it returns 401 show the login modal,
-// otherwise detect multi-project mode and start SSE.
+// otherwise detect multi-project mode and start WebSocket (SSE as fallback).
 function checkAuthAndInit() {
   fetch('/api/state', {headers: authHeaders()}).then(r => {
     if (r.status === 401) {
@@ -6611,7 +6808,7 @@ function checkAuthAndInit() {
     fetch('/api/projects', {headers: authHeaders()}).then(pr => pr.json()).then(pd => {
       const projects = pd.projects || [];
       isMultiProject = pd.multi_project === true || projects.length > 1;
-      connectSSE();
+      connectWS();
       if (isMultiProject) {
         // In multi-project mode, Projects list is the landing page.
         renderProjects(projects, pd.stats || {});
@@ -6621,11 +6818,11 @@ function checkAuthAndInit() {
         r.json().then(s => render(s)).catch(() => {});
       }
     }).catch(() => {
-      connectSSE();
+      connectWS();
       r.json().then(s => render(s)).catch(() => {});
     });
   }).catch(() => {
-    connectSSE();
+    connectWS();
   });
 }
 
