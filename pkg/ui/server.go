@@ -83,9 +83,9 @@ type Server struct {
 	projStatuses []multiui.ProjectStatus
 	projLastMod  map[string]time.Time // path -> last mod time
 
-	// Chat conversation history
-	chatMu      sync.Mutex
-	chatHistory []ChatMessage
+	// Per-project chat conversation histories (keyed by resolved workDir path).
+	chatMu        sync.Mutex
+	chatHistories map[string][]ChatMessage
 }
 
 // New creates a new UI server for the given working directory and port.
@@ -93,12 +93,29 @@ type Server struct {
 // "Authorization: Bearer <token>" header or "?token=<token>" query param.
 func New(workdir string, port int, token string) *Server {
 	return &Server{
-		WorkDir:   workdir,
-		Port:      port,
-		Token:     token,
-		clients:   make(map[chan sseEvent]struct{}),
-		authFails: make(map[string]*authFailEntry),
+		WorkDir:       workdir,
+		Port:          port,
+		Token:         token,
+		clients:       make(map[chan sseEvent]struct{}),
+		authFails:     make(map[string]*authFailEntry),
+		chatHistories: make(map[string][]ChatMessage),
 	}
+}
+
+// resolveWorkDir returns the effective working directory for a request.
+// In multi-project mode the caller may supply ?project_idx=N to scope the
+// request to a registered project's directory instead of the server's WorkDir.
+func (s *Server) resolveWorkDir(r *http.Request) string {
+	if idx := r.URL.Query().Get("project_idx"); idx != "" {
+		i, err := strconv.Atoi(idx)
+		if err == nil {
+			entries := s.allProjectEntries()
+			if i >= 0 && i < len(entries) {
+				return entries[i].Path
+			}
+		}
+	}
+	return s.WorkDir
 }
 
 // Start begins listening on the configured port and broadcasting state updates.
@@ -372,7 +389,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 
 // handleState returns the current project state as JSON.
 func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
-	ps, err := state.Load(s.WorkDir)
+	ps, err := state.Load(s.resolveWorkDir(r))
 	if err != nil {
 		jsonErr(w, "no cloop project found", http.StatusNotFound)
 		return
@@ -491,8 +508,9 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		exe = "cloop"
 	}
+	workDir := s.resolveWorkDir(r)
 	cmd := exec.Command(exe, args...)
-	cmd.Dir = s.WorkDir
+	cmd.Dir = workDir
 
 	// Pipe combined output so we can stream it to the live log panel.
 	pipeR, pipeW, pipeErr := os.Pipe()
@@ -542,7 +560,7 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 			s.liveLogRunning = false
 			s.liveLogMu.Unlock()
 			// Broadcast updated state after run completes.
-			if ps, loadErr := state.Load(s.WorkDir); loadErr == nil {
+			if ps, loadErr := state.Load(workDir); loadErr == nil {
 				if data, marshalErr := json.Marshal(ps); marshalErr == nil {
 					s.broadcast(string(data))
 				}
@@ -578,7 +596,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "GET required", http.StatusMethodNotAllowed)
 		return
 	}
-	cfg, err := config.Load(s.WorkDir)
+	cfg, err := config.Load(s.resolveWorkDir(r))
 	if err != nil {
 		jsonErr(w, "config load failed", http.StatusInternalServerError)
 		return
@@ -623,7 +641,8 @@ func (s *Server) handleConfigSet(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
-	cfg, err := config.Load(s.WorkDir)
+	workDir := s.resolveWorkDir(r)
+	cfg, err := config.Load(workDir)
 	if err != nil {
 		jsonErr(w, "config load failed", http.StatusInternalServerError)
 		return
@@ -632,7 +651,7 @@ func (s *Server) handleConfigSet(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if err := config.Save(s.WorkDir, cfg); err != nil {
+	if err := config.Save(workDir, cfg); err != nil {
 		jsonErr(w, "save failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -693,7 +712,7 @@ func (s *Server) handleTaskAdd(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ps, err := state.Load(s.WorkDir)
+	ps, err := state.Load(s.resolveWorkDir(r))
 	if err != nil {
 		jsonErr(w, "no project found — run cloop init first", http.StatusNotFound)
 		return
@@ -760,7 +779,7 @@ func (s *Server) handleTaskStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ps, err := state.Load(s.WorkDir)
+	ps, err := state.Load(s.resolveWorkDir(r))
 	if err != nil {
 		jsonErr(w, "no project found", http.StatusNotFound)
 		return
@@ -808,7 +827,7 @@ func (s *Server) handleTaskMove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ps, err := state.Load(s.WorkDir)
+	ps, err := state.Load(s.resolveWorkDir(r))
 	if err != nil {
 		jsonErr(w, "no project found", http.StatusNotFound)
 		return
@@ -874,7 +893,7 @@ func (s *Server) handleTaskEdit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ps, err := state.Load(s.WorkDir)
+	ps, err := state.Load(s.resolveWorkDir(r))
 	if err != nil {
 		jsonErr(w, "no project found", http.StatusNotFound)
 		return
@@ -929,7 +948,7 @@ func (s *Server) handleTaskRemove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ps, err := state.Load(s.WorkDir)
+	ps, err := state.Load(s.resolveWorkDir(r))
 	if err != nil {
 		jsonErr(w, "no project found", http.StatusNotFound)
 		return
@@ -985,7 +1004,7 @@ func (s *Server) handlePutTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ps, err := state.Load(s.WorkDir)
+	ps, err := state.Load(s.resolveWorkDir(r))
 	if err != nil {
 		jsonErr(w, "no project found", http.StatusNotFound)
 		return
@@ -1048,7 +1067,7 @@ func (s *Server) handleDeleteTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ps, err := state.Load(s.WorkDir)
+	ps, err := state.Load(s.resolveWorkDir(r))
 	if err != nil {
 		jsonErr(w, "no project found", http.StatusNotFound)
 		return
@@ -1095,7 +1114,7 @@ func (s *Server) handleReorderTasks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ps, err := state.Load(s.WorkDir)
+	ps, err := state.Load(s.resolveWorkDir(r))
 	if err != nil {
 		jsonErr(w, "no project found", http.StatusNotFound)
 		return
@@ -1168,10 +1187,11 @@ func (s *Server) handleSuggestRun(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		exe = "cloop"
 	}
+	suggestWorkDir := s.resolveWorkDir(r)
 
 	go func() {
 		cmd := exec.Command(exe, "suggest", "--yes", "--count", strconv.Itoa(req.Count))
-		cmd.Dir = s.WorkDir
+		cmd.Dir = suggestWorkDir
 		var buf bytes.Buffer
 		cmd.Stdout = &buf
 		cmd.Stderr = &buf
@@ -1187,7 +1207,7 @@ func (s *Server) handleSuggestRun(w http.ResponseWriter, r *http.Request) {
 		s.suggestMu.Unlock()
 
 		// Force SSE broadcast of updated state (new tasks were added).
-		if ps, loadErr := state.Load(s.WorkDir); loadErr == nil {
+		if ps, loadErr := state.Load(suggestWorkDir); loadErr == nil {
 			if data, marshalErr := json.Marshal(ps); marshalErr == nil {
 				s.broadcast(string(data))
 			}
@@ -1237,7 +1257,7 @@ func (s *Server) handleInit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ps, err := state.Init(s.WorkDir, req.Goal, req.MaxSteps)
+	ps, err := state.Init(s.resolveWorkDir(r), req.Goal, req.MaxSteps)
 	if err != nil {
 		jsonErr(w, "init failed: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -1343,9 +1363,11 @@ func (s *Server) handleVoice(w http.ResponseWriter, r *http.Request) {
 // handleChatHistory returns the full chat conversation history as JSON.
 // GET /api/chat/history
 func (s *Server) handleChatHistory(w http.ResponseWriter, r *http.Request) {
+	workDir := s.resolveWorkDir(r)
 	s.chatMu.Lock()
-	h := make([]ChatMessage, len(s.chatHistory))
-	copy(h, s.chatHistory)
+	hist := s.chatHistories[workDir]
+	h := make([]ChatMessage, len(hist))
+	copy(h, hist)
 	s.chatMu.Unlock()
 	jsonOK(w, h)
 }
@@ -1366,10 +1388,11 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	msg := strings.TrimSpace(req.Message)
+	chatWorkDir := s.resolveWorkDir(r)
 
 	// Store user message.
 	s.chatMu.Lock()
-	s.chatHistory = append(s.chatHistory, ChatMessage{
+	s.chatHistories[chatWorkDir] = append(s.chatHistories[chatWorkDir], ChatMessage{
 		Role:      "user",
 		Content:   msg,
 		Timestamp: time.Now(),
@@ -1381,7 +1404,9 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		exe = "cloop"
 	}
-	out, cmdErr := exec.Command(exe, "do", msg).CombinedOutput()
+	doCmd := exec.Command(exe, "do", msg)
+	doCmd.Dir = chatWorkDir
+	out, cmdErr := doCmd.CombinedOutput()
 	output := strings.TrimSpace(string(out))
 
 	ok := cmdErr == nil
@@ -1396,7 +1421,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 
 	// Store assistant message.
 	s.chatMu.Lock()
-	s.chatHistory = append(s.chatHistory, ChatMessage{
+	s.chatHistories[chatWorkDir] = append(s.chatHistories[chatWorkDir], ChatMessage{
 		Role:      "assistant",
 		Content:   response,
 		Timestamp: time.Now(),
@@ -1418,7 +1443,9 @@ func (s *Server) handleReset(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		exe = "cloop"
 	}
-	out, err := exec.Command(exe, "reset").CombinedOutput()
+	resetCmd := exec.Command(exe, "reset")
+	resetCmd.Dir = s.resolveWorkDir(r)
+	out, err := resetCmd.CombinedOutput()
 	if err != nil {
 		msg := strings.TrimSpace(string(out))
 		if msg == "" {
@@ -1563,9 +1590,13 @@ func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
 	statuses := s.projStatuses
 	stats := multiui.Aggregate(statuses)
 	s.projMu.RUnlock()
+	// multi_project is true when there are multiple registered projects so the
+	// frontend can enable the scoped-tabs experience.
+	multiProject := len(statuses) > 1 || len(s.Projects) > 0
 	jsonOK(w, map[string]interface{}{
-		"projects": statuses,
-		"stats":    stats,
+		"projects":      statuses,
+		"stats":         stats,
+		"multi_project": multiProject,
 	})
 }
 
@@ -2210,7 +2241,12 @@ const dashboardHTML = `<!DOCTYPE html>
   <header>
     <h1>cloop <span>dashboard</span></h1>
     <div class="live-dot" id="liveDot"></div>
-    <div class="tab-nav">
+    <!-- Project breadcrumb (shown in multi-project mode when a project is selected) -->
+    <div id="projectBreadcrumb" style="display:none;align-items:center;gap:8px;flex-shrink:0">
+      <button class="tab-btn" onclick="clearProjectSelection()" style="padding:4px 10px;font-size:12px">&#8592; Projects</button>
+      <span id="breadcrumbName" style="font-weight:600;color:var(--accent);font-size:13px;white-space:nowrap"></span>
+    </div>
+    <div class="tab-nav" id="tabNav">
       <button class="tab-btn active" onclick="switchTab('overview')"  id="tbtn-overview">Overview</button>
       <button class="tab-btn"        onclick="switchTab('tasks')"     id="tbtn-tasks">Tasks</button>
       <button class="tab-btn"        onclick="switchTab('chat')"      id="tbtn-chat">Chat</button>
@@ -2707,6 +2743,18 @@ let activeTab = 'overview';
 let showCompletedTasks    = false;
 let showCompletedProjects = false;
 
+// ── Multi-project mode ───────────────────────────────────────────────────────
+let isMultiProject      = false;  // true when multiple projects are registered
+let selectedProjectIdx  = null;   // null = no project selected (Projects landing page)
+let selectedProjectName = '';
+
+// pUrl appends ?project_idx=N to a URL when a project is selected in multi-project mode.
+function pUrl(url) {
+  if (selectedProjectIdx === null) return url;
+  const sep = url.includes('?') ? '&' : '?';
+  return url + sep + 'project_idx=' + selectedProjectIdx;
+}
+
 // ── Auth token (stored in sessionStorage) ───────────────────────────────────
 let authToken = sessionStorage.getItem('cloop_token') || '';
 
@@ -2738,8 +2786,7 @@ window.submitLogin = function() {
       authToken = token;
       sessionStorage.setItem('cloop_token', token);
       hideLoginModal();
-      connectSSE();
-      refreshState();
+      checkAuthAndInit();
     }
   }).catch(() => {
     document.getElementById('loginError').classList.add('visible');
@@ -2769,6 +2816,19 @@ window.switchTab = function(name) {
   if (name === 'tasks' && appState) renderTasks(appState);
   if (name === 'projects') loadProjects();
   if (name === 'chat') loadChatHistory();
+
+  // In multi-project mode, show/hide breadcrumb and project-scoped tabs.
+  if (isMultiProject) {
+    const bc = document.getElementById('projectBreadcrumb');
+    const projectScopedTabs = ['overview','tasks','chat','suggest'];
+    if (name === 'projects' || name === 'settings') {
+      // Global tabs: hide breadcrumb
+      if (bc) bc.style.display = 'none';
+    } else {
+      // Project-scoped tabs: show breadcrumb when a project is selected
+      if (bc) bc.style.display = selectedProjectIdx !== null ? 'flex' : 'none';
+    }
+  }
 };
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -3159,7 +3219,12 @@ function connectSSE() {
     }).catch(() => {});
   };
   evtSource.onmessage = (e) => {
-    try { render(JSON.parse(e.data)); } catch(_) {}
+    try {
+      // In multi-project mode with a non-primary project selected the SSE
+      // message carries the primary-project state — ignore it.
+      if (isMultiProject && selectedProjectIdx !== null && selectedProjectIdx !== 0) return;
+      render(JSON.parse(e.data));
+    } catch(_) {}
   };
   evtSource.addEventListener('log', (e) => {
     try {
@@ -3171,6 +3236,10 @@ function connectSSE() {
     try {
       const d = JSON.parse(e.data);
       renderProjects(d.projects || [], d.stats || {});
+      // In multi-project mode, keep the selected project's state fresh.
+      if (isMultiProject && selectedProjectIdx !== null) {
+        api(pUrl('/api/state')).then(s => render(s)).catch(() => {});
+      }
     } catch(_) {}
   });
   evtSource.onerror = () => {
@@ -3203,7 +3272,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
 function loadProjects() {
   api('/api/projects').then(d => {
-    renderProjects(d.projects || [], d.stats || {});
+    const projects = d.projects || [];
+    isMultiProject = d.multi_project === true || projects.length > 1;
+    renderProjects(projects, d.stats || {});
   }).catch(() => {});
 }
 
@@ -3275,6 +3346,7 @@ function renderProjects(projects, stats) {
           ${p.provider ? ` + "`" + `<span>${esc(p.provider)}</span>` + "`" + ` : ''}
         </div>
         <div class="proj-actions">
+          <button class="btn" onclick="openProject(${idx},${JSON.stringify(esc(p.name))})" title="View scoped tabs for this project">&#128269; Open</button>
           <button class="btn success" onclick="projectRun(${idx},false)" title="Run">&#9654; Run</button>
           <button class="btn primary"  onclick="projectRun(${idx},true)"  title="Run PM">&#9654; PM</button>
           <button class="btn danger"   onclick="projectStop(${idx})"     title="Stop">&#9632; Stop</button>
@@ -3304,14 +3376,36 @@ window.projectStop = function(idx) {
     .catch(() => toast('Failed to stop', 'err'));
 };
 
+// Opens a project in scoped-tabs mode: sets selectedProjectIdx and drills into Overview.
+window.openProject = function(idx, name) {
+  selectedProjectIdx  = idx;
+  selectedProjectName = name;
+  const bc = document.getElementById('projectBreadcrumb');
+  if (bc) { bc.style.display = 'flex'; }
+  const bn = document.getElementById('breadcrumbName');
+  if (bn) bn.textContent = name;
+  switchTab('overview');
+  api(pUrl('/api/state')).then(s => render(s)).catch(() => {});
+};
+
+// Returns to the Projects landing page from a scoped project view.
+window.clearProjectSelection = function() {
+  selectedProjectIdx  = null;
+  selectedProjectName = '';
+  appState            = null;
+  const bc = document.getElementById('projectBreadcrumb');
+  if (bc) bc.style.display = 'none';
+  switchTab('projects');
+};
+
 // ── Actions ─────────────────────────────────────────────────────────────────
 
 window.refreshState = function() {
-  api('/api/state').then(s => { render(s); toast('Refreshed', 'ok'); }).catch(() => toast('Load failed', 'err'));
+  api(pUrl('/api/state')).then(s => { render(s); toast('Refreshed', 'ok'); }).catch(() => toast('Load failed', 'err'));
 };
 
 window.apiRun = function(opts) {
-  api('/api/run', opts).then(d => {
+  api(pUrl('/api/run'), opts).then(d => {
     if (d.ok) toast('Started: '+d.command, 'ok');
     else toast(d.error||'Failed to start', 'err');
   }).catch(() => toast('Request failed', 'err'));
@@ -3328,7 +3422,7 @@ window.apiRunAdv = function(pm) {
     provider:    document.getElementById('optProvider').value,
     model:       document.getElementById('optModel').value.trim(),
   };
-  api('/api/run', opts).then(d => {
+  api(pUrl('/api/run'), opts).then(d => {
     if (d.ok) toast('Started: '+d.command, 'ok');
     else toast(d.error||'Failed to start', 'err');
   }).catch(() => toast('Request failed', 'err'));
@@ -3345,7 +3439,7 @@ window.apiStop = function() {
 window.submitInit = function() {
   const goal = document.getElementById('initGoal').value.trim();
   if (!goal) { toast('Goal is required', 'err'); return; }
-  api('/api/init', {
+  api(pUrl('/api/init'), {
     goal:         goal,
     provider:     document.getElementById('initProvider').value,
     maxSteps:     parseInt(document.getElementById('initMaxSteps').value)||0,
@@ -3367,7 +3461,7 @@ function parseDepsInput(val) {
 window.submitAddTask = function() {
   const title = document.getElementById('newTaskTitle').value.trim();
   if (!title) { toast('Title is required', 'err'); return; }
-  api('/api/task/add', {
+  api(pUrl('/api/task/add'), {
     title:       title,
     description: document.getElementById('newTaskDesc').value.trim(),
     priority:    parseInt(document.getElementById('newTaskPriority').value)||0,
@@ -3385,14 +3479,14 @@ window.submitAddTask = function() {
 };
 
 window.setStatus = function(id, status) {
-  api('/api/task/status', {id, status}).then(d => {
+  api(pUrl('/api/task/status'), {id, status}).then(d => {
     if (d.ok) { toast('Task '+id+': '+status, 'ok'); refreshState(); }
     else toast(d.error||'Update failed', 'err');
   }).catch(() => toast('Request failed', 'err'));
 };
 
 window.moveTask = function(id, direction) {
-  api('/api/task/move', {id, direction}).then(d => {
+  api(pUrl('/api/task/move'), {id, direction}).then(d => {
     if (d.ok) { refreshState(); }
     else toast(d.error||'Move failed', 'err');
   }).catch(() => toast('Request failed', 'err'));
@@ -3418,7 +3512,7 @@ window.executeDeleteTask = function() {
   const id = pendingDeleteId;
   closeDeleteModal();
   if (!id) return;
-  apiMethod('DELETE', '/api/tasks/' + id, null).then(d => {
+  apiMethod('DELETE', pUrl('/api/tasks/' + id), null).then(d => {
     if (d.ok) { toast('Task #' + id + ' removed', 'ok'); refreshState(); }
     else toast(d.error || 'Remove failed', 'err');
   }).catch(() => toast('Request failed', 'err'));
@@ -3464,7 +3558,7 @@ window.onDrop = function(e, targetId) {
   ids.splice(toIdx, 0, dragSrcId);
   dragSrcId = null;
 
-  apiMethod('POST', '/api/tasks/reorder', {ids}).then(d => {
+  apiMethod('POST', pUrl('/api/tasks/reorder'), {ids}).then(d => {
     if (d.ok) refreshState();
     else toast(d.error || 'Reorder failed', 'err');
   }).catch(() => toast('Request failed', 'err'));
@@ -3497,8 +3591,7 @@ window.submitEditTask = function() {
   const desc     = document.getElementById('modalDesc').value.trim();
   const priority = parseInt(document.getElementById('modalPriority').value)||0;
   if (!title) { toast('Title is required', 'err'); return; }
-
-  api('/api/task/edit', {
+  api(pUrl('/api/task/edit'), {
     id,
     title,
     description: desc,
@@ -3520,7 +3613,7 @@ window.runSuggest = function() {
   document.getElementById('suggestStatusText').textContent   = 'Generating '+count+' ideas with AI...';
   document.getElementById('suggestLogWrap').style.display    = 'none';
 
-  api('/api/suggest/run', {count}).then(d => {
+  api(pUrl('/api/suggest/run'), {count}).then(d => {
     if (!d.ok) {
       stopSuggestPoll('Error: '+(d.error||'failed'));
       return;
@@ -3639,7 +3732,7 @@ window.saveOllamaCfg = function() {
 
 window.confirmReset = function() {
   if (!confirm('Reset project state? This clears step history and resets status. Goal and config are preserved.')) return;
-  api('/api/reset', {}).then(d => {
+  api(pUrl('/api/reset'), {}).then(d => {
     if (d.ok) { toast('Project reset', 'ok'); refreshState(); }
     else toast(d.error||'Reset failed', 'err');
   }).catch(() => toast('Request failed', 'err'));
@@ -3853,7 +3946,7 @@ window.submitChat = async function() {
   showChatThinking();
 
   try {
-    const resp = await fetch('/api/chat', {
+    const resp = await fetch(pUrl('/api/chat'), {
       method: 'POST',
       headers: Object.assign({'Content-Type': 'application/json'}, authHeaders()),
       body: JSON.stringify({message: msg}),
@@ -3884,7 +3977,7 @@ window.clearChatHistory = function() {
 };
 
 function loadChatHistory() {
-  fetch('/api/chat/history', {headers: authHeaders()}).then(r => r.json()).then(history => {
+  fetch(pUrl('/api/chat/history'), {headers: authHeaders()}).then(r => r.json()).then(history => {
     if (!history || !history.length) return;
     const box = document.getElementById('chatMessages');
     if (!box) return;
@@ -4005,17 +4098,30 @@ document.addEventListener('keyup', function(e) {
 // ── Init ─────────────────────────────────────────────────────────────────────
 
 // On page load, probe the server. If it returns 401 show the login modal,
-// otherwise proceed normally. This avoids the EventSource not reporting 401.
+// otherwise detect multi-project mode and start SSE.
 function checkAuthAndInit() {
   fetch('/api/state', {headers: authHeaders()}).then(r => {
     if (r.status === 401) {
       showLoginModal();
-    } else {
+      return;
+    }
+    // Also check for multi-project mode.
+    fetch('/api/projects', {headers: authHeaders()}).then(pr => pr.json()).then(pd => {
+      const projects = pd.projects || [];
+      isMultiProject = pd.multi_project === true || projects.length > 1;
+      connectSSE();
+      if (isMultiProject) {
+        // In multi-project mode, Projects list is the landing page.
+        renderProjects(projects, pd.stats || {});
+        switchTab('projects');
+      } else {
+        r.json().then(s => render(s)).catch(() => {});
+      }
+    }).catch(() => {
       connectSSE();
       r.json().then(s => render(s)).catch(() => {});
-    }
+    });
   }).catch(() => {
-    // Network error — still try to connect SSE, it will retry on failure.
     connectSSE();
   });
 }
