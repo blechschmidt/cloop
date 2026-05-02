@@ -86,6 +86,7 @@ func Run(ctx context.Context, workdir string, cfg *config.Config, testProviders 
 	checkHookScripts(cfg, add)
 	checkEnvYamlGitignored(workdir, add)
 	checkConfigValidate(ctx, workdir, add)
+	checkDiskUsage(workdir, add)
 
 	return rep
 }
@@ -618,5 +619,37 @@ func checkHookScripts(cfg *config.Config, add addFn) {
 				Message: fmt.Sprintf("hook script %q exists and is executable", script),
 			})
 		}
+	}
+}
+
+// checkDiskUsage warns when .cloop/ exceeds 50 MB and recommends cloop compact.
+func checkDiskUsage(workdir string, add addFn) {
+	clDir := filepath.Join(workdir, ".cloop")
+	const warnThreshold int64 = 50 * 1024 * 1024 // 50 MB
+
+	var size int64
+	_ = filepath.Walk(clDir, func(_ string, fi os.FileInfo, err error) error {
+		if err == nil && !fi.IsDir() {
+			size += fi.Size()
+		}
+		return nil
+	})
+
+	const MB = 1024 * 1024
+	msg := fmt.Sprintf(".cloop/ directory uses %.1f MB", float64(size)/float64(MB))
+
+	if size >= warnThreshold {
+		add(Result{
+			Name:    ".cloop/ disk usage",
+			Level:   Warn,
+			Message: msg + " (exceeds 50 MB recommended limit)",
+			Fix:     "Run: cloop compact  (or --dry-run to preview)",
+		})
+	} else {
+		add(Result{
+			Name:    ".cloop/ disk usage",
+			Level:   Pass,
+			Message: msg,
+		})
 	}
 }
