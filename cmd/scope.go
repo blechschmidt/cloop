@@ -9,7 +9,9 @@ import (
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/config"
+	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/provider"
+	"github.com/blechschmidt/cloop/pkg/scope"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
@@ -268,9 +270,250 @@ func truncateGoal(goal string, n int) string {
 	return goal[:n] + "..."
 }
 
+// ── scope creep subcommand ────────────────────────────────────────────────────
+
+var (
+	creepSince    int
+	creepNoAI     bool
+	creepProvider string
+	creepModel    string
+)
+
+var scopeCreepCmd = &cobra.Command{
+	Use:   "creep",
+	Short: "Detect and report scope creep across plan evolution",
+	Long: `Analyze plan snapshot history to detect scope creep.
+
+Compares the original plan snapshot (or a specific baseline via --since) against
+the current plan and reports:
+  - Tasks added vs original
+  - Tasks removed
+  - Priority escalations and de-escalations
+  - Goal drift (if the goal text changed)
+  - A scope creep score (0–100) based on how much the plan has expanded
+
+An AI narrative assesses whether the scope changes are justified or represent
+problematic drift.
+
+Examples:
+  cloop scope creep                # compare first snapshot vs latest
+  cloop scope creep --since 3     # compare v3 against latest
+  cloop scope creep --no-ai       # structural report only, skip AI narrative`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		workdir, _ := os.Getwd()
+
+		// Compute the structural report.
+		rep, err := scope.Analyze(workdir, creepSince)
+		if err != nil {
+			return err
+		}
+
+		printScopeCreepReport(rep)
+
+		if creepNoAI {
+			return nil
+		}
+
+		// Build provider for AI narration.
+		cfg, cfgErr := config.Load(workdir)
+		if cfgErr != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not load config (%v); skipping AI narrative\n", cfgErr)
+			return nil
+		}
+		applyEnvOverrides(cfg)
+
+		s, _ := state.Load(workdir)
+
+		pName := creepProvider
+		if pName == "" {
+			pName = cfg.Provider
+		}
+		if pName == "" && s != nil && s.Provider != "" {
+			pName = s.Provider
+		}
+		if pName == "" {
+			pName = autoSelectProvider()
+		}
+
+		model := creepModel
+		if model == "" {
+			switch pName {
+			case "anthropic":
+				model = cfg.Anthropic.Model
+			case "openai":
+				model = cfg.OpenAI.Model
+			case "ollama":
+				model = cfg.Ollama.Model
+			case "claudecode":
+				model = cfg.ClaudeCode.Model
+			}
+		}
+
+		provCfg := provider.ProviderConfig{
+			Name:             pName,
+			AnthropicAPIKey:  cfg.Anthropic.APIKey,
+			AnthropicBaseURL: cfg.Anthropic.BaseURL,
+			OpenAIAPIKey:     cfg.OpenAI.APIKey,
+			OpenAIBaseURL:    cfg.OpenAI.BaseURL,
+			OllamaBaseURL:    cfg.Ollama.BaseURL,
+		}
+		prov, err := provider.Build(provCfg)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not build provider (%v); skipping AI narrative\n", err)
+			return nil
+		}
+
+		dimColor := color.New(color.Faint)
+		dimColor.Printf("\nGenerating AI narrative (provider: %s)...\n\n", prov.Name())
+
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+
+		if err := scope.Narrate(ctx, prov, model, rep); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: AI narrative failed: %v\n", err)
+			dimColor.Printf("(Use --no-ai to skip the narrative.)\n")
+			return nil
+		}
+
+		narrateColor := color.New(color.FgCyan)
+		narrateColor.Println("AI Assessment")
+		fmt.Println(strings.Repeat("─", 72))
+		fmt.Println(rep.Narrative)
+		fmt.Println(strings.Repeat("─", 72))
+		return nil
+	},
+}
+
+func printScopeCreepReport(r *scope.Report) {
+	headerColor := color.New(color.FgCyan, color.Bold)
+	labelColor := color.New(color.FgYellow)
+	greenColor := color.New(color.FgGreen, color.Bold)
+	warnColor := color.New(color.FgYellow, color.Bold)
+	failColor := color.New(color.FgRed, color.Bold)
+	dimColor := color.New(color.Faint)
+	addColor := color.New(color.FgGreen)
+	removeColor := color.New(color.FgRed)
+	escalateColor := color.New(color.FgMagenta)
+
+	sep := strings.Repeat("─", 72)
+	fmt.Println(sep)
+	headerColor.Printf("  Scope Creep Report\n")
+	fmt.Println(sep)
+
+	fmt.Printf("  Baseline : v%d  (%s)  %d tasks\n",
+		r.BaselineVersion,
+		r.BaselineTimestamp.Format("2006-01-02 15:04"),
+		r.BaselineTaskCount,
+	)
+	fmt.Printf("  Current  : v%d  (%s)  %d tasks\n",
+		r.CurrentVersion,
+		r.CurrentTimestamp.Format("2006-01-02 15:04"),
+		r.CurrentTaskCount,
+	)
+	fmt.Println()
+
+	// Score.
+	labelColor.Printf("  Scope Creep Score: ")
+	scoreStr := fmt.Sprintf("%d / 100", r.ScopeCreepScore)
+	switch {
+	case r.ScopeCreepScore >= 60:
+		failColor.Println(scoreStr)
+	case r.ScopeCreepScore >= 30:
+		warnColor.Println(scoreStr)
+	default:
+		greenColor.Println(scoreStr)
+	}
+	fmt.Println()
+
+	// Goal drift.
+	if r.GoalDrifted {
+		labelColor.Printf("  Goal Drift: ")
+		warnColor.Println("YES")
+		dimColor.Printf("    Before: %s\n", r.BaselineGoal)
+		dimColor.Printf("    After:  %s\n", r.CurrentGoal)
+		fmt.Println()
+	} else {
+		labelColor.Printf("  Goal Drift: ")
+		greenColor.Println("no")
+		fmt.Println()
+	}
+
+	// Tasks added.
+	labelColor.Printf("  Tasks Added (%d):\n", len(r.TasksAdded))
+	if len(r.TasksAdded) == 0 {
+		dimColor.Printf("    none\n")
+	} else {
+		for _, t := range r.TasksAdded {
+			addColor.Printf("    + ")
+			fmt.Printf("[%d] %s  (priority %d)\n", t.ID, t.Title, t.Priority)
+		}
+	}
+	fmt.Println()
+
+	// Tasks removed.
+	labelColor.Printf("  Tasks Removed (%d):\n", len(r.TasksRemoved))
+	if len(r.TasksRemoved) == 0 {
+		dimColor.Printf("    none\n")
+	} else {
+		for _, t := range r.TasksRemoved {
+			removeColor.Printf("    - ")
+			fmt.Printf("[%d] %s\n", t.ID, t.Title)
+		}
+	}
+	fmt.Println()
+
+	// Priority changes.
+	if len(r.PriorityEscalated) > 0 {
+		labelColor.Printf("  Priority Escalations (%d):\n", len(r.PriorityEscalated))
+		for _, pc := range r.PriorityEscalated {
+			escalateColor.Printf("    ^ ")
+			fmt.Printf("[%d] %s: %d → %d\n", pc.TaskID, pc.TaskTitle, pc.OldPriority, pc.NewPriority)
+		}
+		fmt.Println()
+	}
+	if len(r.PriorityDeescalated) > 0 {
+		labelColor.Printf("  Priority De-escalations (%d):\n", len(r.PriorityDeescalated))
+		for _, pc := range r.PriorityDeescalated {
+			dimColor.Printf("    v ")
+			fmt.Printf("[%d] %s: %d → %d\n", pc.TaskID, pc.TaskTitle, pc.OldPriority, pc.NewPriority)
+		}
+		fmt.Println()
+	}
+
+	// Snapshot history hint.
+	fmt.Println(sep)
+	dimColor.Printf("  Use 'cloop scope creep --since <version>' to compare against a specific baseline.\n")
+	dimColor.Printf("  Use 'cloop diff --plan' for a per-task structural diff.\n")
+	fmt.Println(sep)
+	fmt.Println()
+}
+
+// listScopeSnapshotsForCompletion returns snapshot version numbers (used by tab completion).
+func listScopeSnapshotsForCompletion(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+	workdir, _ := os.Getwd()
+	metas, err := pm.ListSnapshots(workdir)
+	if err != nil || len(metas) == 0 {
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+	var versions []string
+	for _, m := range metas {
+		versions = append(versions, fmt.Sprintf("%d", m.Version))
+	}
+	return versions, cobra.ShellCompDirectiveNoFileComp
+}
+
 func init() {
 	scopeCmd.Flags().StringVarP(&scopeGoal, "goal", "g", "", "Goal to analyze (overrides positional argument)")
 	scopeCmd.Flags().StringVar(&scopeProvider, "provider", "", "Provider to use for analysis")
 	scopeCmd.Flags().StringVar(&scopeModel, "model", "", "Model to use for analysis")
+
+	// scope creep subcommand flags.
+	scopeCreepCmd.Flags().IntVar(&creepSince, "since", 0, "Baseline snapshot version (default: first snapshot)")
+	scopeCreepCmd.Flags().BoolVar(&creepNoAI, "no-ai", false, "Skip AI narrative, show structural report only")
+	scopeCreepCmd.Flags().StringVar(&creepProvider, "provider", "", "AI provider for narrative")
+	scopeCreepCmd.Flags().StringVar(&creepModel, "model", "", "Model override for narrative provider")
+	_ = scopeCreepCmd.RegisterFlagCompletionFunc("since", listScopeSnapshotsForCompletion)
+
+	scopeCmd.AddCommand(scopeCreepCmd)
 	rootCmd.AddCommand(scopeCmd)
 }
