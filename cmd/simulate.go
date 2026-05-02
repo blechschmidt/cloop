@@ -316,10 +316,210 @@ func wordWrap(text string, width int) []string {
 	return lines
 }
 
+var simulatePlanCmd = &cobra.Command{
+	Use:   "plan",
+	Short: "Dry-run: AI predicts outcome of each pending task without executing",
+	Long: `Simulate a plan dry-run: the AI predicts the likely outcome of every pending
+task given the codebase context, without actually executing anything.
+
+Each prediction includes:
+  • Success probability  (0-100)
+  • Expected output summary
+  • Potential risks
+  • Suggested pre-conditions to check
+
+An overall confidence score is computed as the average success probability.
+The report is saved to .cloop/simulation-<timestamp>.json.
+
+Examples:
+  cloop simulate plan
+  cloop simulate plan --provider anthropic
+  cloop simulate plan --model claude-opus-4-5`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		workdir, _ := os.Getwd()
+
+		cfg, err := config.Load(workdir)
+		if err != nil {
+			return fmt.Errorf("loading config: %w", err)
+		}
+
+		s, err := state.Load(workdir)
+		if err != nil {
+			return fmt.Errorf("loading state: %w", err)
+		}
+		if !s.PMMode || s.Plan == nil || len(s.Plan.Tasks) == 0 {
+			return fmt.Errorf("no task plan found — run 'cloop run --pm --plan-only' to create one")
+		}
+
+		provName := simulateProvider
+		if provName == "" {
+			provName = cfg.Provider
+		}
+		if provName == "" {
+			provName = s.Provider
+		}
+		if provName == "" {
+			provName = autoSelectProvider()
+		}
+
+		modelName := simulateModel
+		if modelName == "" {
+			switch provName {
+			case "anthropic":
+				modelName = cfg.Anthropic.Model
+			case "openai":
+				modelName = cfg.OpenAI.Model
+			case "ollama":
+				modelName = cfg.Ollama.Model
+			case "claudecode":
+				modelName = cfg.ClaudeCode.Model
+			}
+		}
+
+		provCfg := provider.ProviderConfig{
+			Name:             provName,
+			AnthropicAPIKey:  cfg.Anthropic.APIKey,
+			AnthropicBaseURL: cfg.Anthropic.BaseURL,
+			OpenAIAPIKey:     cfg.OpenAI.APIKey,
+			OpenAIBaseURL:    cfg.OpenAI.BaseURL,
+			OllamaBaseURL:    cfg.Ollama.BaseURL,
+		}
+		prov, err := provider.Build(provCfg)
+		if err != nil {
+			return fmt.Errorf("provider: %w", err)
+		}
+
+		headerColor := color.New(color.FgMagenta, color.Bold)
+		dimColor := color.New(color.Faint)
+		boldColor := color.New(color.Bold)
+
+		headerColor.Printf("\n  cloop simulate plan — AI dry-run\n")
+		dimColor.Printf("  Provider: %s | Goal: %s\n\n", provName, truncate(s.Goal, 70))
+
+		// Count pending tasks
+		pendingCount := 0
+		for _, t := range s.Plan.Tasks {
+			if t.Status == "pending" || t.Status == "in_progress" {
+				pendingCount++
+			}
+		}
+		if pendingCount == 0 {
+			color.New(color.FgGreen).Printf("  No pending tasks to simulate.\n\n")
+			return nil
+		}
+		boldColor.Printf("  Simulating %d pending task(s)...\n\n", pendingCount)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+		go func() {
+			<-sigCh
+			cancel()
+		}()
+		defer signal.Stop(sigCh)
+
+		report, err := simulate.Simulate(ctx, prov, modelName, s.Plan, workdir)
+		if err != nil {
+			return fmt.Errorf("simulation failed: %w", err)
+		}
+
+		renderSimulationReport(report)
+		return nil
+	},
+}
+
+// renderSimulationReport prints a colored table of per-task predictions.
+func renderSimulationReport(report *simulate.SimulationReport) {
+	headerColor := color.New(color.FgMagenta, color.Bold)
+	boldColor := color.New(color.Bold)
+	dimColor := color.New(color.Faint)
+	goodColor := color.New(color.FgGreen, color.Bold)
+	warnColor := color.New(color.FgYellow, color.Bold)
+	badColor := color.New(color.FgRed, color.Bold)
+	cyanColor := color.New(color.FgCyan)
+
+	sep := strings.Repeat("─", 72)
+
+	headerColor.Printf("  Simulation Results\n")
+	fmt.Printf("  %s\n\n", sep)
+
+	for _, pred := range report.Predictions {
+		boldColor.Printf("  Task #%d — %s\n", pred.TaskID, pred.TaskTitle)
+
+		// Success probability bar
+		fmt.Printf("  %-22s ", "Success probability:")
+		probColor := goodColor
+		if pred.SuccessProb < 50 {
+			probColor = badColor
+		} else if pred.SuccessProb < 75 {
+			probColor = warnColor
+		}
+		probColor.Printf("%d%%", pred.SuccessProb)
+		// ASCII bar (20 chars wide)
+		filled := pred.SuccessProb * 20 / 100
+		bar := "[" + strings.Repeat("█", filled) + strings.Repeat("░", 20-filled) + "]"
+		probColor.Printf("  %s\n", bar)
+
+		// Expected output
+		fmt.Printf("  %-22s ", "Expected output:")
+		for i, line := range wordWrap(pred.ExpectedOutput, 50) {
+			if i == 0 {
+				fmt.Printf("%s\n", line)
+			} else {
+				fmt.Printf("  %-22s %s\n", "", line)
+			}
+		}
+
+		// Risks
+		if len(pred.Risks) > 0 {
+			fmt.Printf("  %-22s", "Risks:")
+			for i, r := range pred.Risks {
+				if i == 0 {
+					warnColor.Printf(" %s\n", r)
+				} else {
+					fmt.Printf("  %-22s", "")
+					warnColor.Printf(" %s\n", r)
+				}
+			}
+		}
+
+		// Pre-conditions
+		if len(pred.PreConditions) > 0 {
+			fmt.Printf("  %-22s", "Pre-conditions:")
+			for i, pc := range pred.PreConditions {
+				if i == 0 {
+					cyanColor.Printf(" %s\n", pc)
+				} else {
+					fmt.Printf("  %-22s", "")
+					cyanColor.Printf(" %s\n", pc)
+				}
+			}
+		}
+
+		fmt.Printf("  %s\n\n", sep)
+	}
+
+	// Overall confidence
+	boldColor.Printf("  Overall confidence: ")
+	switch {
+	case report.OverallConfidence >= 75:
+		goodColor.Printf("%d%%\n", report.OverallConfidence)
+	case report.OverallConfidence >= 50:
+		warnColor.Printf("%d%%\n", report.OverallConfidence)
+	default:
+		badColor.Printf("%d%%\n", report.OverallConfidence)
+	}
+
+	dimColor.Printf("\n  Report saved to .cloop/simulation-<timestamp>.json\n\n")
+}
+
 func init() {
 	simulateCmd.Flags().StringVar(&simulateProvider, "provider", "", "AI provider (anthropic, openai, ollama, claudecode)")
 	simulateCmd.Flags().StringVar(&simulateModel, "model", "", "Model override")
 	simulateCmd.Flags().BoolVar(&simulateApply, "apply", false, "Apply recommended task changes to the project")
 	simulateCmd.Flags().BoolVar(&simulateQuick, "quick", false, "Print project snapshot only, no AI call")
+	simulatePlanCmd.Flags().StringVar(&simulateProvider, "provider", "", "AI provider (anthropic, openai, ollama, claudecode)")
+	simulatePlanCmd.Flags().StringVar(&simulateModel, "model", "", "Model override")
+	simulateCmd.AddCommand(simulatePlanCmd)
 	rootCmd.AddCommand(simulateCmd)
 }

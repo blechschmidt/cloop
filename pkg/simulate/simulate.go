@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -233,4 +234,227 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Per-task dry-run simulation (Task 101)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TaskPrediction holds the AI-predicted outcome for a single pending task.
+type TaskPrediction struct {
+	TaskID          int      `json:"task_id"`
+	TaskTitle       string   `json:"task_title"`
+	SuccessProb     int      `json:"success_probability"` // 0-100
+	ExpectedOutput  string   `json:"expected_output"`
+	Risks           []string `json:"risks"`
+	PreConditions   []string `json:"pre_conditions"`
+}
+
+// SimulationReport aggregates per-task predictions into an overall assessment.
+type SimulationReport struct {
+	Goal            string           `json:"goal"`
+	GeneratedAt     time.Time        `json:"generated_at"`
+	Predictions     []TaskPrediction `json:"predictions"`
+	OverallConfidence int            `json:"overall_confidence"` // 0-100 average success prob
+}
+
+// predictionPrompt builds the AI prompt for a single pending task.
+func predictionPrompt(goal string, task *pm.Task, codebaseCtx string) string {
+	var sb strings.Builder
+	sb.WriteString("You are an AI product manager performing a dry-run simulation of a task.\n")
+	sb.WriteString("Do NOT execute anything. Predict the likely outcome based on the task description and any codebase context.\n\n")
+
+	sb.WriteString("## PROJECT GOAL\n")
+	sb.WriteString(goal)
+	sb.WriteString("\n\n")
+
+	sb.WriteString("## TASK\n")
+	sb.WriteString(fmt.Sprintf("ID: %d\nTitle: %s\n", task.ID, task.Title))
+	if task.Description != "" {
+		sb.WriteString(fmt.Sprintf("Description: %s\n", task.Description))
+	}
+	sb.WriteString(fmt.Sprintf("Priority: %d | Role: %s\n", task.Priority, task.Role))
+	if len(task.Tags) > 0 {
+		sb.WriteString(fmt.Sprintf("Tags: %s\n", strings.Join(task.Tags, ", ")))
+	}
+
+	if codebaseCtx != "" {
+		sb.WriteString("\n## CODEBASE CONTEXT\n")
+		sb.WriteString(codebaseCtx)
+		sb.WriteString("\n")
+	}
+
+	sb.WriteString(`
+## INSTRUCTIONS
+Predict the likely outcome if this task were executed now.
+
+Return ONLY a JSON object matching this exact schema (no prose, no markdown fences):
+{
+  "success_probability": <integer 0-100>,
+  "expected_output": "<1-3 sentence summary of what the task would produce>",
+  "risks": ["<risk 1>", "<risk 2>"],
+  "pre_conditions": ["<condition to check before running>"]
+}
+
+Rules:
+- success_probability: 0=certain failure, 100=certain success
+- expected_output: describe the artifact or outcome, not the process
+- risks: 0-4 items; only genuine risks, not hypotheticals
+- pre_conditions: 0-4 practical checks the executor should verify first
+`)
+	return sb.String()
+}
+
+// gatherCodebaseContext returns a brief summary of the working directory for AI context.
+func gatherCodebaseContext(workDir string) string {
+	var sb strings.Builder
+
+	// Try to read README
+	readmePaths := []string{
+		workDir + "/README.md",
+		workDir + "/readme.md",
+		workDir + "/README.txt",
+	}
+	for _, p := range readmePaths {
+		// Use a simple read approach
+		data, err := readFileTruncated(p, 800)
+		if err == nil && data != "" {
+			sb.WriteString("README (excerpt):\n")
+			sb.WriteString(data)
+			sb.WriteString("\n\n")
+			break
+		}
+	}
+
+	// Try go.mod for Go projects
+	if data, err := readFileTruncated(workDir+"/go.mod", 300); err == nil {
+		sb.WriteString("go.mod:\n")
+		sb.WriteString(data)
+		sb.WriteString("\n\n")
+	}
+
+	// Try package.json for Node projects
+	if data, err := readFileTruncated(workDir+"/package.json", 300); err == nil {
+		sb.WriteString("package.json:\n")
+		sb.WriteString(data)
+		sb.WriteString("\n\n")
+	}
+
+	return strings.TrimSpace(sb.String())
+}
+
+// readFileTruncated reads a file and truncates it to maxBytes.
+func readFileTruncated(path string, maxBytes int) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	s := string(data)
+	if len(s) > maxBytes {
+		s = s[:maxBytes] + "..."
+	}
+	return s, nil
+}
+
+// parsePrediction parses the AI JSON output into a TaskPrediction.
+func parsePrediction(task *pm.Task, raw string) TaskPrediction {
+	pred := TaskPrediction{
+		TaskID:    task.ID,
+		TaskTitle: task.Title,
+	}
+
+	// Extract first {...} block
+	start := strings.Index(raw, "{")
+	end := strings.LastIndex(raw, "}")
+	if start == -1 || end == -1 || end < start {
+		pred.ExpectedOutput = "Unable to parse AI response."
+		pred.SuccessProb = 50
+		return pred
+	}
+
+	var tmp struct {
+		SuccessProb    int      `json:"success_probability"`
+		ExpectedOutput string   `json:"expected_output"`
+		Risks          []string `json:"risks"`
+		PreConditions  []string `json:"pre_conditions"`
+	}
+	if err := json.Unmarshal([]byte(raw[start:end+1]), &tmp); err != nil {
+		pred.ExpectedOutput = "Unable to parse AI response."
+		pred.SuccessProb = 50
+		return pred
+	}
+
+	pred.SuccessProb = tmp.SuccessProb
+	pred.ExpectedOutput = tmp.ExpectedOutput
+	pred.Risks = tmp.Risks
+	pred.PreConditions = tmp.PreConditions
+	return pred
+}
+
+// Simulate runs a dry-run simulation of all pending tasks in the plan.
+// It calls the AI provider once per pending task to predict the outcome
+// and returns a SimulationReport. The report is also saved to
+// .cloop/simulation-<timestamp>.json.
+func Simulate(ctx context.Context, prov provider.Provider, model string, plan *pm.Plan, workDir string) (*SimulationReport, error) {
+	if plan == nil {
+		return nil, fmt.Errorf("no plan loaded")
+	}
+
+	codeCtx := gatherCodebaseContext(workDir)
+
+	report := &SimulationReport{
+		Goal:        plan.Goal,
+		GeneratedAt: time.Now(),
+	}
+
+	for _, task := range plan.Tasks {
+		if task.Status != pm.TaskPending && task.Status != pm.TaskInProgress {
+			continue
+		}
+
+		prompt := predictionPrompt(plan.Goal, task, codeCtx)
+		res, err := prov.Complete(ctx, prompt, provider.Options{
+			Model:   model,
+			Timeout: 90 * time.Second,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("predicting task #%d: %w", task.ID, err)
+		}
+
+		pred := parsePrediction(task, res.Output)
+		report.Predictions = append(report.Predictions, pred)
+	}
+
+	// Compute overall confidence as average success probability
+	if len(report.Predictions) > 0 {
+		total := 0
+		for _, p := range report.Predictions {
+			total += p.SuccessProb
+		}
+		report.OverallConfidence = total / len(report.Predictions)
+	}
+
+	// Save report to .cloop/simulation-<timestamp>.json
+	if err := saveSimulationReport(workDir, report); err != nil {
+		// Non-fatal: log to stderr but continue
+		fmt.Fprintf(os.Stderr, "warning: could not save simulation report: %v\n", err)
+	}
+
+	return report, nil
+}
+
+// saveSimulationReport persists the report as JSON in .cloop/.
+func saveSimulationReport(workDir string, report *SimulationReport) error {
+	dir := workDir + "/.cloop"
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	ts := report.GeneratedAt.Format("20060102-150405")
+	path := fmt.Sprintf("%s/simulation-%s.json", dir, ts)
+
+	data, err := json.MarshalIndent(report, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0o644)
 }
