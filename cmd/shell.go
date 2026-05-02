@@ -109,6 +109,7 @@ Examples:
 
 		sh := shell.New(s, prov, model)
 		sh.Timeout = timeout
+		sh.WorkDir = workdir
 
 		if shellStream {
 			sh.OnToken = func(token string) {

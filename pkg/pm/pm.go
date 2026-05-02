@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/promptstats"
 	"github.com/blechschmidt/cloop/pkg/provider"
 )
 
@@ -269,9 +270,21 @@ func DecomposePrompt(goal, instructions string) string {
 }
 
 // ExecuteTaskPrompt builds the prompt for executing a specific task.
-// Pass a non-nil ProjectContext to include project state (git, file tree) in the prompt.
-func ExecuteTaskPrompt(goal, instructions string, plan *Plan, task *Task, ctx ...*ProjectContext) string {
+// workDir is the project root used to load prompt-stats for adaptive hints;
+// pass "" to skip hint injection. Pass a non-nil ProjectContext to include
+// project state (git, file tree) in the prompt.
+func ExecuteTaskPrompt(goal, instructions, workDir string, plan *Plan, task *Task, ctx ...*ProjectContext) string {
 	var b strings.Builder
+
+	// Prepend adaptive hint derived from historical prompt outcomes when
+	// a workDir is available and matching history exists.
+	if workDir != "" {
+		if records, err := promptstats.Load(workDir); err == nil {
+			if hint := promptstats.AdaptiveHint(records, task.Title); hint != "" {
+				b.WriteString(hint)
+			}
+		}
+	}
 
 	// Inject role-specific expertise if task has a role assigned.
 	if rolePrompt := RoleSystemPrompt(task.Role); rolePrompt != "" {

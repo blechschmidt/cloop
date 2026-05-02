@@ -21,6 +21,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/notify"
 	"github.com/blechschmidt/cloop/pkg/optimizer"
 	"github.com/blechschmidt/cloop/pkg/pm"
+	"github.com/blechschmidt/cloop/pkg/promptstats"
 	"github.com/blechschmidt/cloop/pkg/provider"
 	"github.com/blechschmidt/cloop/pkg/replay"
 	"github.com/blechschmidt/cloop/pkg/router"
@@ -829,7 +830,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		if keptResults < totalResults {
 			color.New(color.FgYellow).Printf("Context pruned: kept %d of %d steps to fit token budget\n", keptResults, totalResults)
 		}
-		prompt := pm.ExecuteTaskPrompt(s.Goal, s.Instructions, promptPlan, task, projCtx)
+		prompt := pm.ExecuteTaskPrompt(s.Goal, s.Instructions, o.config.WorkDir, promptPlan, task, projCtx)
 		// Prepend memory if enabled
 		if o.config.UseMemory && o.memory != nil {
 			limit := o.config.MemoryLimit
@@ -1174,6 +1175,21 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			}
 		}
 
+		// Record prompt outcome for adaptive hint learning.
+		{
+			outcomeStr := strings.ToLower(string(task.Status))
+			durMs := duration.Milliseconds()
+			rec := promptstats.Record{
+				TaskTitle:  task.Title,
+				PromptHash: promptstats.HashPrompt(prompt),
+				Outcome:    outcomeStr,
+				DurationMs: durMs,
+			}
+			if psErr := promptstats.Append(o.config.WorkDir, rec); psErr != nil {
+				dimColor.Printf("  prompt-stats write error (ignored): %v\n", psErr)
+			}
+		}
+
 		// Persist full AI response as a Markdown artifact file.
 		o.writeTaskArtifact(task, result.Output)
 
@@ -1496,7 +1512,7 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 			wg.Add(1)
 			go func(idx int, t *pm.Task) {
 				defer wg.Done()
-				prompt := pm.ExecuteTaskPrompt(s.Goal, s.Instructions, parallelPromptPlan, t)
+				prompt := pm.ExecuteTaskPrompt(s.Goal, s.Instructions, o.config.WorkDir, parallelPromptPlan, t)
 				start := time.Now()
 				// Use role-specific provider if configured.
 				taskProvider := o.router.For(t.Role)
@@ -2038,7 +2054,7 @@ func (o *Orchestrator) evolve(ctx context.Context) error {
 				if keptEv < totalEv {
 					color.New(color.FgYellow).Printf("Context pruned: kept %d of %d steps to fit token budget\n", keptEv, totalEv)
 				}
-				prompt := pm.ExecuteTaskPrompt(s.Goal, s.Instructions, evolvePrunedPlan, nextTask)
+				prompt := pm.ExecuteTaskPrompt(s.Goal, s.Instructions, o.config.WorkDir, evolvePrunedPlan, nextTask)
 				dimColor.Printf("→ Executing task %d via %s...\n", nextTask.ID, o.provider.Name())
 				start := time.Now()
 

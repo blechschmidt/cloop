@@ -29,6 +29,7 @@ type Shell struct {
 	Model    string
 	Timeout  time.Duration
 	History  []Message
+	WorkDir  string // project root, used for prompt-stats hint injection
 
 	// OnToken, if set, enables streaming. Each token chunk is passed to this
 	// callback as the AI generates its response.
@@ -276,7 +277,7 @@ func (sh *Shell) runTask(ctx context.Context, taskID int, out io.Writer) error {
 	fmt.Fprintf(out, "Running task #%d: %s\n", task.ID, task.Title)
 	fmt.Fprintln(out, strings.Repeat("-", 60))
 
-	prompt := pm.ExecuteTaskPrompt(sh.State.Goal, sh.State.Instructions, sh.State.Plan, task)
+	prompt := pm.ExecuteTaskPrompt(sh.State.Goal, sh.State.Instructions, sh.WorkDir, sh.State.Plan, task)
 
 	callCtx, cancel := context.WithTimeout(ctx, sh.Timeout)
 	defer cancel()
