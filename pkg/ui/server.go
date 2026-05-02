@@ -2427,7 +2427,10 @@ const dashboardHTML = `<!DOCTYPE html>
         </div>
       </div>
       <div class="section">
-        <div class="section-title">Tasks <span id="taskCountBadge" style="color:var(--muted);font-weight:400;text-transform:none;letter-spacing:0"></span></div>
+        <div class="section-title" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          Tasks <span id="taskCountBadge" style="color:var(--muted);font-weight:400;text-transform:none;letter-spacing:0"></span>
+          <button id="toggleCompletedBtn" class="btn" style="margin-left:auto;padding:3px 10px;font-size:11px" onclick="toggleCompletedTasks()">Show completed</button>
+        </div>
         <div class="task-list" id="taskListFull">
           <div class="empty-state"><h3>No tasks yet</h3><p>Add a task above, or run <code>cloop run --pm</code> to generate a task plan.</p></div>
         </div>
@@ -2634,6 +2637,10 @@ const dashboardHTML = `<!DOCTYPE html>
 
       <!-- Project list -->
       <div class="section">
+        <div class="section-title" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          Projects
+          <button id="toggleCompletedProjectsBtn" class="btn" style="margin-left:auto;padding:3px 10px;font-size:11px" onclick="toggleCompletedProjects()">Show completed</button>
+        </div>
         <div id="projListEmpty" style="display:none;color:var(--muted);font-size:13px;padding:12px 0">
           No projects loaded. Use <code>cloop ui --projects /path/a /path/b</code> or <code>--scan /root/Projects</code>.
         </div>
@@ -2697,6 +2704,8 @@ let appState = null;
 let evtSource = null;
 let suggestPollTimer = null;
 let activeTab = 'overview';
+let showCompletedTasks    = false;
+let showCompletedProjects = false;
 
 // ── Auth token (stored in sessionStorage) ───────────────────────────────────
 let authToken = sessionStorage.getItem('cloop_token') || '';
@@ -3002,6 +3011,13 @@ window.toggleStep = function(el) { el.classList.toggle('expanded'); };
 
 // ── Render tasks tab ─────────────────────────────────────────────────────────
 
+window.toggleCompletedTasks = function() {
+  showCompletedTasks = !showCompletedTasks;
+  const btn = document.getElementById('toggleCompletedBtn');
+  if (btn) btn.textContent = showCompletedTasks ? 'Hide completed' : 'Show completed';
+  if (appState) renderTasks(appState);
+};
+
 function renderTasks(s) {
   const container = document.getElementById('taskListFull');
   const badge     = document.getElementById('taskCountBadge');
@@ -3011,10 +3027,18 @@ function renderTasks(s) {
     return;
   }
   const sorted = [...s.plan.tasks].sort((a,b) => a.priority - b.priority);
-  const done = sorted.filter(t => t.status==='done').length;
-  badge.textContent = '('+done+'/'+sorted.length+' done)';
+  const done    = sorted.filter(t => t.status==='done').length;
+  const hidden  = ['done', 'skipped', 'failed', 'timed_out'];
+  const visible = showCompletedTasks ? sorted : sorted.filter(t => !hidden.includes(t.status || 'pending'));
+  const hiddenCount = sorted.length - visible.length;
+  badge.textContent = '(' + done + '/' + sorted.length + ' done' + (hiddenCount > 0 && !showCompletedTasks ? ', ' + hiddenCount + ' hidden' : '') + ')';
 
-  container.innerHTML = sorted.map(t => {
+  if (!visible.length) {
+    container.innerHTML = '<div class="empty-state"><h3>All tasks completed</h3><p>Click <strong>Show completed</strong> to view all tasks.</p></div>';
+    return;
+  }
+
+  container.innerHTML = visible.map(t => {
     const cls = t.status || 'pending';
     const statusActions = buildStatusActions(t);
     const tid = t.id;
@@ -3183,7 +3207,16 @@ function loadProjects() {
   }).catch(() => {});
 }
 
+window.toggleCompletedProjects = function() {
+  showCompletedProjects = !showCompletedProjects;
+  const btn = document.getElementById('toggleCompletedProjectsBtn');
+  if (btn) btn.textContent = showCompletedProjects ? 'Hide completed' : 'Show completed';
+  // Re-render with cached state.
+  if (window._lastProjectsData) renderProjects(window._lastProjectsData.projects, window._lastProjectsData.stats);
+};
+
 function renderProjects(projects, stats) {
+  window._lastProjectsData = {projects, stats};
   // Update aggregate stats.
   const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v === undefined ? '—' : v; };
   set('paTotal',  stats.total_projects  ?? projects.length);
@@ -3204,7 +3237,24 @@ function renderProjects(projects, stats) {
   }
   empty.style.display = 'none';
 
-  list.innerHTML = projects.map((p, idx) => {
+  // Filter out fully-completed projects unless toggle is on; preserve original index for API calls.
+  const isCompleted = p => p.pm_mode && p.total_tasks > 0 && p.done_tasks >= p.total_tasks;
+  const indexed  = projects.map((p, i) => ({p, i}));
+  const visibleI = showCompletedProjects ? indexed : indexed.filter(({p}) => !isCompleted(p));
+  const hiddenCount = projects.length - visibleI.length;
+  const btn = document.getElementById('toggleCompletedProjectsBtn');
+  if (btn && hiddenCount > 0 && !showCompletedProjects) {
+    btn.textContent = 'Show completed (' + hiddenCount + ')';
+  } else if (btn) {
+    btn.textContent = showCompletedProjects ? 'Hide completed' : 'Show completed';
+  }
+
+  if (!visibleI.length) {
+    list.innerHTML = '<div class="empty-state" style="padding:16px 0"><h3>All projects completed</h3><p>Click <strong>Show completed</strong> to view them.</p></div>';
+    return;
+  }
+
+  list.innerHTML = visibleI.map(({p, i: idx}) => {
     const health = p.health || 'unknown';
     const pct    = p.total_tasks > 0 ? Math.round(p.done_tasks / p.total_tasks * 100) : 0;
     const goal   = p.goal ? esc(p.goal.substring(0, 80)) : '<em style="color:var(--muted)">no goal set</em>';
