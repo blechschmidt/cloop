@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/alert"
 	"github.com/blechschmidt/cloop/pkg/approvalgate"
 	"github.com/blechschmidt/cloop/pkg/artifact"
 	"github.com/blechschmidt/cloop/pkg/checkpoint"
@@ -439,6 +440,58 @@ func (o *Orchestrator) notifyWebhooks(title, body string) {
 	if u := o.config.DiscordWebhookURL; u != "" {
 		if err := notify.SendWebhook(u, title, body); err != nil {
 			dimColor.Printf("  discord notify error (ignored): %v\n", err)
+		}
+	}
+}
+
+// evaluateAlerts loads alert rules and fires notifications for any violations
+// after a task completes. Errors are silently ignored (best-effort).
+func (o *Orchestrator) evaluateAlerts(s *state.ProjectState, task *pm.Task) {
+	rules, err := alert.Load(o.config.WorkDir)
+	if err != nil || len(rules) == 0 {
+		return
+	}
+
+	lastMinutes := float64(task.ActualMinutes)
+	ctx := alert.EvalContext{
+		Plan:            s.Plan,
+		LastTaskMinutes: lastMinutes,
+		TotalCostUSD:    alert.SessionCostUSD(o.config.WorkDir),
+	}
+
+	violations := alert.Evaluate(o.config.WorkDir, rules, ctx)
+	if len(violations) == 0 {
+		return
+	}
+
+	dimColor := color.New(color.Faint)
+	alertColor := color.New(color.FgRed, color.Bold)
+	for _, v := range violations {
+		alertColor.Printf("  ALERT %q: %s %s %.4g (observed %.4g)\n",
+			v.Rule.Name, v.Rule.Metric, v.Rule.Op, v.Rule.Threshold, v.ObservedValue)
+		fireViolationNotification(v, dimColor)
+	}
+}
+
+// fireViolationNotification dispatches the notification for a triggered alert.
+func fireViolationNotification(v alert.Violation, dimColor *color.Color) {
+	title := fmt.Sprintf("cloop alert: %s", v.Rule.Name)
+	body := fmt.Sprintf("Metric %s %s %.4g (observed %.4g)",
+		v.Rule.Metric, v.Rule.Op, v.Rule.Threshold, v.ObservedValue)
+
+	ch := v.Rule.Notify
+	switch {
+	case ch == "" || ch == "desktop":
+		notify.Send(title, body)
+	case len(ch) > 8 && ch[:8] == "webhook:":
+		url := ch[8:]
+		if err := notify.SendWebhook(url, title, body); err != nil {
+			dimColor.Printf("  alert webhook error (ignored): %v\n", err)
+		}
+	case len(ch) > 6 && ch[:6] == "slack:":
+		url := ch[6:]
+		if err := notify.SendWebhook(url, title, body); err != nil {
+			dimColor.Printf("  alert slack error (ignored): %v\n", err)
 		}
 	}
 }
@@ -1967,6 +2020,9 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		}, o.allEnvLines()...); hookErr != nil {
 			dimColor.Printf("  post_task hook error (ignored): %v\n", hookErr)
 		}
+
+		// Alert rule evaluation: check thresholds after each task completion.
+		o.evaluateAlerts(s, task)
 
 		s.Save()
 
