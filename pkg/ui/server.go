@@ -75,12 +75,18 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/api/run", s.handleRun)
 	mux.HandleFunc("/api/stop", s.handleStop)
 
-	// Task management
+	// Task management (legacy endpoints)
 	mux.HandleFunc("/api/task/add", s.handleTaskAdd)
 	mux.HandleFunc("/api/task/status", s.handleTaskStatus)
 	mux.HandleFunc("/api/task/move", s.handleTaskMove)
 	mux.HandleFunc("/api/task/edit", s.handleTaskEdit)
 	mux.HandleFunc("/api/task/remove", s.handleTaskRemove)
+
+	// RESTful task endpoints (Go 1.22+ method+path routing)
+	mux.HandleFunc("POST /api/tasks", s.handlePostTasks)
+	mux.HandleFunc("POST /api/tasks/reorder", s.handleReorderTasks)
+	mux.HandleFunc("PUT /api/tasks/{id}", s.handlePutTask)
+	mux.HandleFunc("DELETE /api/tasks/{id}", s.handleDeleteTask)
 
 	// Config
 	mux.HandleFunc("/api/config", s.handleConfig)
@@ -793,6 +799,169 @@ func (s *Server) handleTaskRemove(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]bool{"ok": true})
 }
 
+// handlePostTasks is a RESTful alias for handleTaskAdd (POST /api/tasks).
+func (s *Server) handlePostTasks(w http.ResponseWriter, r *http.Request) {
+	s.handleTaskAdd(w, r)
+}
+
+// handlePutTask updates a task by ID (PUT /api/tasks/{id}).
+func (s *Server) handlePutTask(w http.ResponseWriter, r *http.Request) {
+	idStr := r.PathValue("id")
+	id, err := strconv.Atoi(idStr)
+	if err != nil || id <= 0 {
+		jsonErr(w, "invalid task id", http.StatusBadRequest)
+		return
+	}
+
+	var req struct {
+		Title       string `json:"title"`
+		Description string `json:"description"`
+		Priority    int    `json:"priority"`
+		Status      string `json:"status"`
+		DependsOn   *[]int `json:"depends_on"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonErr(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	ps, err := state.Load(s.WorkDir)
+	if err != nil {
+		jsonErr(w, "no project found", http.StatusNotFound)
+		return
+	}
+	if ps.Plan == nil {
+		jsonErr(w, "no task plan", http.StatusNotFound)
+		return
+	}
+
+	var task *pm.Task
+	for _, t := range ps.Plan.Tasks {
+		if t.ID == id {
+			task = t
+			break
+		}
+	}
+	if task == nil {
+		jsonErr(w, fmt.Sprintf("task %d not found", id), http.StatusNotFound)
+		return
+	}
+
+	if t := strings.TrimSpace(req.Title); t != "" {
+		task.Title = t
+	}
+	if req.Description != "" {
+		task.Description = req.Description
+	}
+	if req.Priority > 0 {
+		task.Priority = req.Priority
+	}
+	if req.DependsOn != nil {
+		task.DependsOn = *req.DependsOn
+	}
+	if req.Status != "" {
+		validStatuses := map[string]pm.TaskStatus{
+			"pending":     pm.TaskPending,
+			"in_progress": pm.TaskInProgress,
+			"done":        pm.TaskDone,
+			"skipped":     pm.TaskSkipped,
+			"failed":      pm.TaskFailed,
+		}
+		if ns, ok := validStatuses[req.Status]; ok {
+			task.Status = ns
+		}
+	}
+
+	if err := ps.Save(); err != nil {
+		jsonErr(w, "save failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	jsonOK(w, map[string]interface{}{"ok": true, "task": task})
+}
+
+// handleDeleteTask removes a task by ID (DELETE /api/tasks/{id}).
+func (s *Server) handleDeleteTask(w http.ResponseWriter, r *http.Request) {
+	idStr := r.PathValue("id")
+	id, err := strconv.Atoi(idStr)
+	if err != nil || id <= 0 {
+		jsonErr(w, "invalid task id", http.StatusBadRequest)
+		return
+	}
+
+	ps, err := state.Load(s.WorkDir)
+	if err != nil {
+		jsonErr(w, "no project found", http.StatusNotFound)
+		return
+	}
+	if ps.Plan == nil {
+		jsonErr(w, "no task plan", http.StatusNotFound)
+		return
+	}
+
+	idx := -1
+	for i, t := range ps.Plan.Tasks {
+		if t.ID == id {
+			idx = i
+			break
+		}
+	}
+	if idx == -1 {
+		jsonErr(w, fmt.Sprintf("task %d not found", id), http.StatusNotFound)
+		return
+	}
+
+	ps.Plan.Tasks = append(ps.Plan.Tasks[:idx], ps.Plan.Tasks[idx+1:]...)
+	if err := ps.Save(); err != nil {
+		jsonErr(w, "save failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	jsonOK(w, map[string]bool{"ok": true})
+}
+
+// handleReorderTasks reassigns priorities from the given task ID order (POST /api/tasks/reorder).
+func (s *Server) handleReorderTasks(w http.ResponseWriter, r *http.Request) {
+	if !requirePOST(w, r) {
+		return
+	}
+	var req struct {
+		IDs []int `json:"ids"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonErr(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if len(req.IDs) == 0 {
+		jsonErr(w, "ids is required", http.StatusBadRequest)
+		return
+	}
+
+	ps, err := state.Load(s.WorkDir)
+	if err != nil {
+		jsonErr(w, "no project found", http.StatusNotFound)
+		return
+	}
+	if ps.Plan == nil {
+		jsonErr(w, "no task plan", http.StatusNotFound)
+		return
+	}
+
+	taskMap := make(map[int]*pm.Task, len(ps.Plan.Tasks))
+	for _, t := range ps.Plan.Tasks {
+		taskMap[t.ID] = t
+	}
+	for i, id := range req.IDs {
+		if t, ok := taskMap[id]; ok {
+			t.Priority = i + 1
+		}
+	}
+
+	if err := ps.Save(); err != nil {
+		jsonErr(w, "save failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	jsonOK(w, map[string]bool{"ok": true})
+}
+
 // handleLiveLog returns the current live log ring buffer and running status.
 func (s *Server) handleLiveLog(w http.ResponseWriter, r *http.Request) {
 	s.liveLogMu.Lock()
@@ -1126,6 +1295,22 @@ const dashboardHTML = `<!DOCTYPE html>
   .act.reset:hover  { color:var(--accent); border-color:var(--accent); }
   .act.remove:hover { color:var(--red);    border-color:var(--red); }
   .act.edit:hover   { color:var(--accent); border-color:var(--accent); }
+
+  /* ── Drag-and-drop ── */
+  .task-item[draggable] { cursor: grab; }
+  .task-item[draggable]:active { cursor: grabbing; }
+  .task-item.dragging { opacity: .4; pointer-events: none; }
+  .task-item.drag-over {
+    border-color: var(--accent);
+    background: rgba(88,166,255,.08);
+    box-shadow: 0 0 0 1px rgba(88,166,255,.2);
+  }
+  .drag-handle {
+    display: flex; align-items: center; padding: 0 4px 0 0;
+    color: var(--muted); font-size: 14px; cursor: grab; flex-shrink: 0;
+    opacity: 0.5; user-select: none;
+  }
+  .task-item:hover .drag-handle { opacity: 1; }
 
   /* ── Add task form ── */
   .add-task-bar { display:flex; gap:8px; margin-bottom:14px; flex-wrap:wrap; }
@@ -1558,6 +1743,18 @@ const dashboardHTML = `<!DOCTYPE html>
   </main>
 </div>
 
+<!-- Delete confirmation modal -->
+<div id="delete-modal-overlay" onclick="if(event.target===this)closeDeleteModal()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
+  <div id="delete-modal" style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;width:400px;max-width:92vw">
+    <h2 style="font-size:15px;font-weight:600;margin-bottom:10px;color:var(--red)">Delete Task</h2>
+    <p id="deleteModalMsg" style="font-size:13px;color:var(--muted);margin-bottom:16px"></p>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeDeleteModal()">Cancel</button>
+      <button class="btn danger" onclick="executeDeleteTask()">Delete</button>
+    </div>
+  </div>
+</div>
+
 <!-- Edit task modal -->
 <div id="modal-overlay" onclick="if(event.target===this)closeModal()">
   <div id="modal">
@@ -1598,6 +1795,10 @@ let appState = null;
 let evtSource = null;
 let suggestPollTimer = null;
 let activeTab = 'overview';
+
+// ── Drag-and-drop state ──────────────────────────────────────────────────────
+let dragSrcId = null;
+let pendingDeleteId = null;
 
 // ── Live output state ────────────────────────────────────────────────────────
 let liveLogText = '';         // accumulated text for the panel
@@ -1708,6 +1909,15 @@ function api(url, body) {
   const opts = body !== undefined
     ? { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) }
     : { method: 'GET' };
+  return fetch(url, opts).then(r => r.json());
+}
+
+function apiMethod(method, url, body) {
+  const opts = { method };
+  if (body !== null && body !== undefined) {
+    opts.headers = {'Content-Type':'application/json'};
+    opts.body = JSON.stringify(body);
+  }
   return fetch(url, opts).then(r => r.json());
 }
 
@@ -1829,7 +2039,14 @@ function renderTasks(s) {
   container.innerHTML = sorted.map(t => {
     const cls = t.status || 'pending';
     const statusActions = buildStatusActions(t);
-    return '<div class="task-item '+esc(cls)+'">'+
+    const tid = t.id;
+    return '<div class="task-item '+esc(cls)+'" draggable="true" data-task-id="'+tid+'" '+
+      'ondragstart="onDragStart(event,'+tid+')" '+
+      'ondragover="onDragOver(event,'+tid+')" '+
+      'ondragleave="onDragLeave(event)" '+
+      'ondrop="onDrop(event,'+tid+')" '+
+      'ondragend="onDragEnd(event)">'+
+      '<div class="drag-handle" title="Drag to reorder">&#8597;</div>'+
       '<div class="task-icon">'+taskIcon(cls)+'</div>'+
       '<div class="task-body">'+
         '<div class="task-title">'+esc(t.title)+'</div>'+
@@ -1843,16 +2060,14 @@ function renderTasks(s) {
       '</div>'+
       '<div class="task-actions">'+
         statusActions+
-        '<button class="act" title="Move up"    onclick="moveTask('+t.id+',\'up\')">↑</button>'+
-        '<button class="act" title="Move down"  onclick="moveTask('+t.id+',\'down\')">↓</button>'+
-        '<button class="act edit"   title="Edit"   onclick="openEditModal('+t.id+','+
+        '<button class="act edit"   title="Edit"   onclick="openEditModal('+tid+','+
           JSON.stringify(t.title).replace(/</g,'\\u003c')+','+
           JSON.stringify(t.description||'').replace(/</g,'\\u003c')+','+
           t.priority+','+
           JSON.stringify(t.depends_on||[]).replace(/</g,'\\u003c')+')">Edit</button>'+
-        '<button class="act remove" title="Remove" onclick="removeTask('+t.id+')">Remove</button>'+
+        '<button class="act remove" title="Remove" onclick="removeTask('+tid+')">Remove</button>'+
         priorityBadge(t.priority)+
-        '<span style="font-size:11px;color:var(--muted)">#'+t.id+'</span>'+
+        '<span style="font-size:11px;color:var(--muted)">#'+tid+'</span>'+
       '</div>'+
     '</div>';
   }).join('');
@@ -2060,11 +2275,80 @@ window.moveTask = function(id, direction) {
 };
 
 window.removeTask = function(id) {
-  if (!confirm('Remove task #'+id+'?')) return;
-  api('/api/task/remove', {id}).then(d => {
-    if (d.ok) { toast('Task #'+id+' removed', 'ok'); refreshState(); }
-    else toast(d.error||'Remove failed', 'err');
+  pendingDeleteId = id;
+  const task = appState && appState.plan && appState.plan.tasks
+    ? appState.plan.tasks.find(t => t.id === id) : null;
+  const title = task ? task.title : '#' + id;
+  document.getElementById('deleteModalMsg').textContent =
+    'Delete task "' + title + '"? This action cannot be undone.';
+  const overlay = document.getElementById('delete-modal-overlay');
+  overlay.style.display = 'flex';
+};
+
+window.closeDeleteModal = function() {
+  document.getElementById('delete-modal-overlay').style.display = 'none';
+  pendingDeleteId = null;
+};
+
+window.executeDeleteTask = function() {
+  const id = pendingDeleteId;
+  closeDeleteModal();
+  if (!id) return;
+  apiMethod('DELETE', '/api/tasks/' + id, null).then(d => {
+    if (d.ok) { toast('Task #' + id + ' removed', 'ok'); refreshState(); }
+    else toast(d.error || 'Remove failed', 'err');
   }).catch(() => toast('Request failed', 'err'));
+};
+
+// ── Drag-and-drop handlers ───────────────────────────────────────────────────
+
+window.onDragStart = function(e, id) {
+  dragSrcId = id;
+  e.dataTransfer.effectAllowed = 'move';
+  // Use setTimeout so the class is applied after browser snapshot
+  setTimeout(() => {
+    const el = document.querySelector('.task-item[data-task-id="'+id+'"]');
+    if (el) el.classList.add('dragging');
+  }, 0);
+};
+
+window.onDragOver = function(e, id) {
+  e.preventDefault();
+  e.dataTransfer.dropEffect = 'move';
+  document.querySelectorAll('.task-item').forEach(el => el.classList.remove('drag-over'));
+  const el = document.querySelector('.task-item[data-task-id="'+id+'"]');
+  if (el && id !== dragSrcId) el.classList.add('drag-over');
+};
+
+window.onDragLeave = function(e) {
+  e.currentTarget.classList.remove('drag-over');
+};
+
+window.onDrop = function(e, targetId) {
+  e.preventDefault();
+  document.querySelectorAll('.task-item').forEach(el => el.classList.remove('drag-over', 'dragging'));
+  if (dragSrcId === null || dragSrcId === targetId) { dragSrcId = null; return; }
+  if (!appState || !appState.plan || !appState.plan.tasks) { dragSrcId = null; return; }
+
+  const sorted = [...appState.plan.tasks].sort((a,b) => a.priority - b.priority);
+  const ids = sorted.map(t => t.id);
+  const fromIdx = ids.indexOf(dragSrcId);
+  const toIdx   = ids.indexOf(targetId);
+  if (fromIdx === -1 || toIdx === -1) { dragSrcId = null; return; }
+
+  ids.splice(fromIdx, 1);
+  ids.splice(toIdx, 0, dragSrcId);
+  dragSrcId = null;
+
+  apiMethod('POST', '/api/tasks/reorder', {ids}).then(d => {
+    if (d.ok) refreshState();
+    else toast(d.error || 'Reorder failed', 'err');
+  }).catch(() => toast('Request failed', 'err'));
+};
+
+window.onDragEnd = function(e) {
+  document.querySelectorAll('.task-item').forEach(el => el.classList.remove('dragging', 'drag-over'));
+  dragSrcId = null;
 };
 
 // ── Edit modal ───────────────────────────────────────────────────────────────
