@@ -20,6 +20,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/hooks"
 	"github.com/blechschmidt/cloop/pkg/memory"
 	"github.com/blechschmidt/cloop/pkg/metrics"
+	"github.com/blechschmidt/cloop/pkg/multiagent"
 	"github.com/blechschmidt/cloop/pkg/notify"
 	"github.com/blechschmidt/cloop/pkg/optimizer"
 	"github.com/blechschmidt/cloop/pkg/pm"
@@ -208,6 +209,14 @@ type Config struct {
 	// When false (default), the health score, issues, and suggestions are printed
 	// and stored in state. Plans scoring below 60 print a prominent warning.
 	SkipHealthCheck bool
+
+	// MultiAgent enables the three-pass specialist sub-agent pipeline in PM mode
+	// (sequential only). Each task is processed by an architect (designs the
+	// approach), a coder (implements the design), and a reviewer (critiques and
+	// confirms). Sub-agent responses are stored as separate artifact files
+	// (.cloop/tasks/<id>-<slug>-multiagent/{architect,coder,reviewer}.txt).
+	// The reviewer's verdict overrides the coder's task signal.
+	MultiAgent bool
 }
 
 type Orchestrator struct {
@@ -889,35 +898,102 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 
 		// Select provider: role-specific route takes precedence over default.
 		taskProvider := o.router.For(task.Role)
-		dimColor.Printf("→ Running %s on task %d...\n", taskProvider.Name(), task.ID)
 		start := time.Now()
 
-		opts, wasStreamed := o.makeOpts(s.Model, true)
-		result, err := taskProvider.Complete(ctx, prompt, opts)
-		if err != nil {
-			failColor.Printf("✗ Provider error: %v\n", err)
-			task.Status = pm.TaskFailed
-			consecutiveErrors++
-			s.Save()
-			if consecutiveErrors >= maxConsecutiveErrors {
-				s.Status = "failed"
-				s.Save()
-				return fmt.Errorf("%d consecutive errors", consecutiveErrors)
+		// ── Multi-agent path ───────────────────────────────────────────────
+		// When --multi-agent is set, run the three-pass pipeline instead of a
+		// single provider call. The combined reviewer output becomes the task
+		// result for signal detection and artifact storage.
+		var taskOutput string
+		var taskInputTokens, taskOutputTokens int
+		var taskProviderName, taskModelName string
+
+		if o.config.MultiAgent {
+			dimColor.Printf("→ Running multi-agent pipeline on task %d (architect→coder→reviewer)...\n", task.ID)
+
+			// Build optional project context string for the multi-agent prompt.
+			var projCtxStr string
+			if projCtx != nil {
+				projCtxStr = projCtx.Format()
 			}
-			continue
+
+			maRes, maErr := multiagent.RunTask(
+				ctx,
+				taskProvider,
+				s.Model,
+				o.config.StepTimeout,
+				task,
+				s.Goal,
+				s.Instructions,
+				projCtxStr,
+			)
+			if maErr != nil {
+				failColor.Printf("✗ Multi-agent error: %v\n", maErr)
+				task.Status = pm.TaskFailed
+				consecutiveErrors++
+				s.Save()
+				if consecutiveErrors >= maxConsecutiveErrors {
+					s.Status = "failed"
+					s.Save()
+					return fmt.Errorf("%d consecutive errors", consecutiveErrors)
+				}
+				continue
+			}
+
+			// Persist sub-agent artifacts.
+			if artifactDir, aErr := multiagent.WriteArtifacts(o.config.WorkDir, task, maRes); aErr != nil {
+				dimColor.Printf("  multi-agent artifact write error (ignored): %v\n", aErr)
+			} else {
+				dimColor.Printf("  sub-agent artifacts: %s/{architect,coder,reviewer}.txt\n", artifactDir)
+			}
+
+			// The reviewer output is the canonical task result.
+			taskOutput = maRes.ReviewerOutput
+			taskProviderName = taskProvider.Name()
+			taskModelName = s.Model
+		} else {
+			// ── Standard single-agent path ─────────────────────────────────
+			dimColor.Printf("→ Running %s on task %d...\n", taskProvider.Name(), task.ID)
+
+			opts, wasStreamed := o.makeOpts(s.Model, true)
+			result, err := taskProvider.Complete(ctx, prompt, opts)
+			if err != nil {
+				failColor.Printf("✗ Provider error: %v\n", err)
+				task.Status = pm.TaskFailed
+				consecutiveErrors++
+				s.Save()
+				if consecutiveErrors >= maxConsecutiveErrors {
+					s.Status = "failed"
+					s.Save()
+					return fmt.Errorf("%d consecutive errors", consecutiveErrors)
+				}
+				continue
+			}
+
+			taskOutput = result.Output
+			taskInputTokens = result.InputTokens
+			taskOutputTokens = result.OutputTokens
+			taskProviderName = result.Provider
+			taskModelName = result.Model
+
+			if wasStreamed() {
+				fmt.Println()
+			} else {
+				printOutput(result.Output, dimColor, o.config.Verbose)
+			}
 		}
 
 		duration := time.Since(start)
 		stepResult := state.StepResult{
 			Task:         fmt.Sprintf("Task %d: %s", task.ID, task.Title),
-			Output:       result.Output,
+			Output:       taskOutput,
 			Duration:     duration.Round(time.Second).String(),
 			Time:         time.Now(),
-			InputTokens:  result.InputTokens,
-			OutputTokens: result.OutputTokens,
+			InputTokens:  taskInputTokens,
+			OutputTokens: taskOutputTokens,
 		}
-		s.TotalInputTokens += result.InputTokens
-		s.TotalOutputTokens += result.OutputTokens
+		s.TotalInputTokens += taskInputTokens
+		s.TotalOutputTokens += taskOutputTokens
 		replayStep := s.CurrentStep
 		s.AddStep(stepResult)
 		if err := replay.Append(o.config.WorkDir, replay.Entry{
@@ -925,7 +1001,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			TaskID:    task.ID,
 			TaskTitle: task.Title,
 			Step:      replayStep,
-			Content:   result.Output,
+			Content:   taskOutput,
 		}); err != nil {
 			dimColor.Printf("  replay log write error (ignored): %v\n", err)
 		}
@@ -933,18 +1009,17 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		// Record step tokens/cost into metrics.
 		if o.metrics != nil {
 			o.metrics.RecordStep()
-			o.metrics.RecordTokens(result.Provider, result.Model, result.InputTokens, result.OutputTokens)
-			if usd, ok := cost.Estimate(strings.ToLower(result.Model), result.InputTokens, result.OutputTokens); ok {
-				o.metrics.RecordCost(result.Provider, result.Model, usd)
+			o.metrics.RecordTokens(taskProviderName, taskModelName, taskInputTokens, taskOutputTokens)
+			if usd, ok := cost.Estimate(strings.ToLower(taskModelName), taskInputTokens, taskOutputTokens); ok {
+				o.metrics.RecordCost(taskProviderName, taskModelName, usd)
 			}
 		}
 
-		if wasStreamed() {
-			fmt.Println()
+		if !o.config.MultiAgent {
+			dimColor.Printf("  [%s, provider: %s]\n\n", duration.Round(time.Second), taskProviderName)
 		} else {
-			printOutput(result.Output, dimColor, o.config.Verbose)
+			dimColor.Printf("  [%s, multi-agent, provider: %s]\n\n", duration.Round(time.Second), taskProviderName)
 		}
-		dimColor.Printf("  [%s, provider: %s]\n\n", duration.Round(time.Second), result.Provider)
 
 		if o.config.TokenBudget > 0 && s.TotalInputTokens+s.TotalOutputTokens >= o.config.TokenBudget {
 			color.New(color.FgYellow).Printf("⏸ Token budget reached (%d tokens). Run 'cloop run' to continue.\n", o.config.TokenBudget)
@@ -962,10 +1037,10 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		}
 
 		// Update task status based on signal in output
-		signal := pm.CheckTaskSignal(result.Output)
+		signal := pm.CheckTaskSignal(taskOutput)
 		completedAt := time.Now()
 		task.CompletedAt = &completedAt
-		task.Result = truncate(result.Output, 500)
+		task.Result = truncate(taskOutput, 500)
 		if task.StartedAt != nil {
 			task.ActualMinutes = int(completedAt.Sub(*task.StartedAt).Minutes())
 		}
@@ -980,7 +1055,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 					maxRetries = 2
 				}
 				dimColor.Printf("  Verifying task %d...\n", task.ID)
-				pass, verifyErr := pm.VerifyTask(ctx, o.provider, s.Goal, s.Instructions, s.Model, o.config.StepTimeout, task, result.Output)
+				pass, verifyErr := pm.VerifyTask(ctx, o.provider, s.Goal, s.Instructions, s.Model, o.config.StepTimeout, task, taskOutput)
 				if verifyErr != nil {
 					dimColor.Printf("  Verification error (treating as pass): %v\n", verifyErr)
 					pass = true
@@ -1027,7 +1102,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			scriptVerifyFailed := false
 			if o.config.ScriptVerify {
 				dimColor.Printf("  Running shell verification for task %d...\n", task.ID)
-				vr, svErr := verify.GenerateAndRun(ctx, o.provider, s.Model, o.config.StepTimeout, o.config.WorkDir, task, result.Output)
+				vr, svErr := verify.GenerateAndRun(ctx, o.provider, s.Model, o.config.StepTimeout, o.config.WorkDir, task, taskOutput)
 				if svErr != nil {
 					dimColor.Printf("  Script verification error (treating as pass): %v\n", svErr)
 				} else {
@@ -1047,7 +1122,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 						// Trigger failure diagnosis so retry prompts can learn from the failure.
 						if o.config.DiagnoseFailures {
 							dimColor.Printf("  Diagnosing script-verify failure for task %d...\n", task.ID)
-							diagInput := "Shell verification script exited non-zero.\n\nScript output:\n" + vr.Output + "\n\nTask output:\n" + result.Output
+							diagInput := "Shell verification script exited non-zero.\n\nScript output:\n" + vr.Output + "\n\nTask output:\n" + taskOutput
 							diag, diagErr := diagnosis.AnalyzeFailure(ctx, o.provider, s.Model, o.config.StepTimeout, task, diagInput)
 							if diagErr != nil {
 								dimColor.Printf("  Diagnosis error (ignored): %v\n", diagErr)
@@ -1128,7 +1203,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			// This runs before adaptive replan so the diagnosis can inform replanning too.
 			if o.config.DiagnoseFailures {
 				dimColor.Printf("  Diagnosing failure for task %d...\n", task.ID)
-				diag, diagErr := diagnosis.AnalyzeFailure(ctx, o.provider, s.Model, o.config.StepTimeout, task, result.Output)
+				diag, diagErr := diagnosis.AnalyzeFailure(ctx, o.provider, s.Model, o.config.StepTimeout, task, taskOutput)
 				if diagErr != nil {
 					dimColor.Printf("  Diagnosis error (ignored): %v\n", diagErr)
 				} else if diag != "" {
@@ -1142,7 +1217,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			// Auto-split: if a task has failed 2+ times, decompose it into smaller subtasks.
 			if o.config.AutoSplit && task.FailCount >= 2 {
 				pmColor.Printf("Auto-split: task %d has failed %d times — decomposing into subtasks...\n", task.ID, task.FailCount)
-				splitReason := fmt.Sprintf("Task failed %d times. Last failure output:\n%s", task.FailCount, truncate(result.Output, 400))
+				splitReason := fmt.Sprintf("Task failed %d times. Last failure output:\n%s", task.FailCount, truncate(taskOutput, 400))
 				splitOpts := provider.Options{
 					Model:   s.Model,
 					Timeout: o.config.StepTimeout,
@@ -1161,7 +1236,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			// Adaptive replanning: re-think remaining tasks on failure.
 			if o.config.AdaptiveReplan {
 				pmColor.Printf("Adaptive replan: re-thinking remaining tasks after failure...\n")
-				failureReason := truncate(result.Output, 400)
+				failureReason := truncate(taskOutput, 400)
 				newTasks, replanErr := pm.AdaptiveReplan(ctx, o.provider, s.Goal, s.Instructions, s.Model, o.config.StepTimeout, s.Plan, task, failureReason)
 				if replanErr != nil {
 					failColor.Printf("  Replan failed: %v — continuing with existing plan.\n\n", replanErr)
@@ -1241,7 +1316,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		}
 
 		// Persist full AI response as a Markdown artifact file.
-		o.writeTaskArtifact(task, result.Output)
+		o.writeTaskArtifact(task, taskOutput)
 
 		// Task completed (done/skipped/failed) — clear the mid-execution checkpoint.
 		if cpClearErr := checkpoint.Clear(o.config.WorkDir); cpClearErr != nil {

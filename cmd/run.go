@@ -73,6 +73,7 @@ var (
 	runProfile           string
 	autoSplit            bool
 	skipHealthCheck      bool
+	multiAgentMode       bool
 )
 
 var runCmd = &cobra.Command{
@@ -219,6 +220,7 @@ Press Ctrl+C to pause gracefully.`,
 
 		orchCfg := orchestrator.Config{
 			SkipHealthCheck: skipHealthCheck,
+			MultiAgent:      multiAgentMode,
 			SlackWebhookURL:   cfg.Notify.SlackWebhook,
 			DiscordWebhookURL: cfg.Notify.DiscordWebhook,
 			Hooks: hooks.Config{
@@ -482,5 +484,6 @@ func init() {
 	runCmd.Flags().StringVar(&runProfile, "profile", "", "Named configuration profile to apply (overrides the active profile set by 'cloop profile use')")
 	runCmd.Flags().BoolVar(&autoSplit, "auto-split", false, "PM mode: automatically decompose a task into subtasks when it has failed 2+ times (sequential only)")
 	runCmd.Flags().BoolVar(&skipHealthCheck, "skip-health-check", false, "PM mode: skip the AI plan health evaluation that runs after decomposition")
+	runCmd.Flags().BoolVar(&multiAgentMode, "multi-agent", false, "PM mode: run each task through a three-pass specialist pipeline: architect→coder→reviewer (sequential only). Each pass uses a distinct system prompt; the reviewer's verdict overrides the coder's signal. Sub-agent outputs are stored as .cloop/tasks/<id>-<slug>-multiagent/{architect,coder,reviewer}.txt")
 	rootCmd.AddCommand(runCmd)
 }
