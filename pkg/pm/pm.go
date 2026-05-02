@@ -206,6 +206,10 @@ type Task struct {
 	// OnFailure lists task IDs to activate (keep pending) when this task fails.
 	// Tasks in OnSuccess are skipped when the failure branch is taken.
 	OnFailure []string `json:"on_failure,omitempty"`
+	// RiskScore is the cached AI likelihood/risk score 1-10 (set by ai-risk-matrix).
+	RiskScore int `json:"risk_score,omitempty"`
+	// ImpactScore is the cached AI strategic impact score 1-10 (set by ai-risk-matrix or ai-impact).
+	ImpactScore int `json:"impact_score,omitempty"`
 }
 
 // Plan is the full task plan for a goal.
