@@ -1,0 +1,28 @@
+{
+  "plugins": [
+    {
+      "name": "cloop-notify-slack",
+      "description": "Send cloop task completion notifications to a Slack channel via incoming webhook",
+      "author": "cloop-community",
+      "url": "https://raw.githubusercontent.com/blechschmidt/cloop/main/plugins/scripts/notify-slack.sh",
+      "version": "1.0.0",
+      "tags": ["notifications", "slack", "webhook"]
+    },
+    {
+      "name": "cloop-lint-go",
+      "description": "Run golangci-lint on the workspace after each task and annotate the plan with findings",
+      "author": "cloop-community",
+      "url": "https://raw.githubusercontent.com/blechschmidt/cloop/main/plugins/scripts/lint-go.sh",
+      "version": "1.0.0",
+      "tags": ["lint", "go", "quality", "ci"]
+    },
+    {
+      "name": "cloop-deploy-docker",
+      "description": "Build and push a Docker image tagged with the current plan version after a successful run",
+      "author": "cloop-community",
+      "url": "https://raw.githubusercontent.com/blechschmidt/cloop/main/plugins/scripts/deploy-docker.sh",
+      "version": "1.0.0",
+      "tags": ["deploy", "docker", "ci", "release"]
+    }
+  ]
+}
