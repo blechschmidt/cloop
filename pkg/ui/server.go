@@ -21,6 +21,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/blocker"
 	"github.com/blechschmidt/cloop/pkg/config"
+	"github.com/blechschmidt/cloop/pkg/cost"
 	"github.com/blechschmidt/cloop/pkg/kb"
 	"github.com/blechschmidt/cloop/pkg/multiui"
 	"github.com/blechschmidt/cloop/pkg/pm"
@@ -279,6 +280,9 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	// Dependency graph
 	mux.HandleFunc("GET /api/deps", s.handleDeps)
 	mux.HandleFunc("GET /api/risk-matrix", s.handleRiskMatrix)
+
+	// Analytics dashboard
+	mux.HandleFunc("GET /api/analytics", s.handleAnalytics)
 
 	// Multi-project dashboard
 	mux.HandleFunc("/api/projects", s.handleProjects)
@@ -2611,6 +2615,274 @@ func (s *Server) handleRiskMatrix(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// ── Analytics handler ─────────────────────────────────────────────────────────
+
+// handleAnalytics returns a JSON payload with all data needed by the analytics
+// dashboard tab. Accepts optional ?from=YYYY-MM-DD and ?to=YYYY-MM-DD query
+// params. GET /api/analytics
+func (s *Server) handleAnalytics(w http.ResponseWriter, r *http.Request) {
+	workDir := s.resolveWorkDir(r)
+
+	// Parse optional date-range filter (default: last 30 days).
+	const dayFmt = "2006-01-02"
+	now := time.Now().UTC()
+	fromDefault := now.AddDate(0, 0, -30).Truncate(24 * time.Hour)
+	toDefault := now.Add(24 * time.Hour).Truncate(24 * time.Hour)
+
+	parseDay := func(s string, def time.Time) time.Time {
+		if s == "" {
+			return def
+		}
+		if t, err := time.Parse(dayFmt, s); err == nil {
+			return t.UTC()
+		}
+		return def
+	}
+	fromTime := parseDay(r.URL.Query().Get("from"), fromDefault)
+	toTime := parseDay(r.URL.Query().Get("to"), toDefault).Add(24 * time.Hour) // inclusive
+
+	// ── 1. Status donut (current plan state) ──────────────────────────────────
+	type statusDonut struct {
+		Labels []string `json:"labels"`
+		Values []int    `json:"values"`
+	}
+	donut := statusDonut{
+		Labels: []string{"Pending", "In Progress", "Done", "Failed", "Skipped", "Timed Out"},
+		Values: make([]int, 6),
+	}
+	ps, stateErr := state.Load(workDir)
+	if stateErr == nil && ps.Plan != nil {
+		for _, t := range ps.Plan.Tasks {
+			switch t.Status {
+			case pm.TaskPending:
+				donut.Values[0]++
+			case pm.TaskInProgress:
+				donut.Values[1]++
+			case pm.TaskDone:
+				donut.Values[2]++
+			case pm.TaskFailed:
+				donut.Values[3]++
+			case pm.TaskSkipped:
+				donut.Values[4]++
+			default:
+				donut.Values[5]++
+			}
+		}
+	}
+
+	// ── 2. Read cost ledger (source for cost trend + velocity + latency) ───────
+	ledger, _ := cost.ReadLedger(workDir)
+
+	// Build date → per-provider cost map, and date → count for velocity.
+	type costKey struct {
+		Date     string
+		Provider string
+	}
+	costByDayProvider := map[costKey]float64{}
+	velocityByDay := map[string]int{}
+	providerSet := map[string]struct{}{}
+
+	for _, e := range ledger {
+		if e.Timestamp.IsZero() {
+			continue
+		}
+		if e.Timestamp.Before(fromTime) || !e.Timestamp.Before(toTime) {
+			continue
+		}
+		day := e.Timestamp.UTC().Format(dayFmt)
+		k := costKey{Date: day, Provider: e.Provider}
+		costByDayProvider[k] += e.EstimatedUSD
+		velocityByDay[day]++
+		if e.Provider != "" {
+			providerSet[e.Provider] = struct{}{}
+		}
+	}
+
+	// ── 3. Generate date labels spanning the range ────────────────────────────
+	var dateLabels []string
+	for d := fromTime; !d.After(toTime.Add(-24 * time.Hour)); d = d.AddDate(0, 0, 1) {
+		dateLabels = append(dateLabels, d.Format(dayFmt))
+	}
+	if len(dateLabels) == 0 {
+		dateLabels = []string{now.Format(dayFmt)}
+	}
+
+	// ── 4. Cost trend datasets ─────────────────────────────────────────────────
+	type costDataset struct {
+		Provider string    `json:"provider"`
+		Values   []float64 `json:"values"`
+	}
+	var providers []string
+	for p := range providerSet {
+		providers = append(providers, p)
+	}
+	sort.Strings(providers)
+
+	costDatasets := make([]costDataset, 0, len(providers))
+	for _, p := range providers {
+		vals := make([]float64, len(dateLabels))
+		for i, d := range dateLabels {
+			vals[i] = costByDayProvider[costKey{Date: d, Provider: p}]
+		}
+		costDatasets = append(costDatasets, costDataset{Provider: p, Values: vals})
+	}
+
+	// ── 5. Velocity sparkline (tasks/day) ─────────────────────────────────────
+	// Last 14 days regardless of selected range.
+	velFrom := now.AddDate(0, 0, -13).Truncate(24 * time.Hour)
+	var velLabels []string
+	var velValues []int
+	for d := velFrom; !d.After(now); d = d.AddDate(0, 0, 1) {
+		day := d.Format(dayFmt)
+		velLabels = append(velLabels, day)
+		// Count from full ledger (not date-filtered).
+		cnt := 0
+		for _, e := range ledger {
+			if !e.Timestamp.IsZero() && e.Timestamp.UTC().Format(dayFmt) == day {
+				cnt++
+			}
+		}
+		velValues = append(velValues, cnt)
+	}
+
+	// ── 6. Burndown chart ─────────────────────────────────────────────────────
+	// Cumulative tasks completed (from ledger) vs. remaining (from plan).
+	totalTasks := 0
+	if stateErr == nil && ps.Plan != nil {
+		totalTasks = len(ps.Plan.Tasks)
+	}
+	// Map day → cumulative done up to that day.
+	cumDone := make([]int, len(dateLabels))
+	remaining := make([]int, len(dateLabels))
+	// Count completed tasks per day from the ledger.
+	doneByDay := map[string]int{}
+	for _, e := range ledger {
+		if e.Timestamp.IsZero() {
+			continue
+		}
+		if e.Timestamp.Before(fromTime) || !e.Timestamp.Before(toTime) {
+			continue
+		}
+		doneByDay[e.Timestamp.UTC().Format(dayFmt)]++
+	}
+	running := 0
+	for i, d := range dateLabels {
+		running += doneByDay[d]
+		cumDone[i] = running
+		rem := totalTasks - running
+		if rem < 0 {
+			rem = 0
+		}
+		remaining[i] = rem
+	}
+
+	// ── 7. Latency histogram (from checkpoint history) ────────────────────────
+	// Scan .cloop/task-checkpoints/ for "complete" events with ElapsedSec.
+	type latHistEntry struct {
+		Provider string  `json:"provider"`
+		ElapsedS float64 `json:"elapsed_s"`
+	}
+	latByProvider := map[string][]float64{}
+
+	cpBase := filepath.Join(workDir, ".cloop", "task-checkpoints")
+	if entries, err := os.ReadDir(cpBase); err == nil {
+		for _, taskDir := range entries {
+			if !taskDir.IsDir() {
+				continue
+			}
+			taskPath := filepath.Join(cpBase, taskDir.Name())
+			files, err := os.ReadDir(taskPath)
+			if err != nil {
+				continue
+			}
+			for _, f := range files {
+				if f.IsDir() || !strings.HasSuffix(f.Name(), ".json") {
+					continue
+				}
+				raw, err := os.ReadFile(filepath.Join(taskPath, f.Name()))
+				if err != nil {
+					continue
+				}
+				var cp struct {
+					Event     string    `json:"event"`
+					Provider  string    `json:"provider"`
+					ElapsedSec float64  `json:"elapsed_sec"`
+					Timestamp time.Time `json:"timestamp"`
+				}
+				if err := json.Unmarshal(raw, &cp); err != nil {
+					continue
+				}
+				if cp.Event != "complete" || cp.ElapsedSec <= 0 {
+					continue
+				}
+				if !cp.Timestamp.IsZero() {
+					if cp.Timestamp.Before(fromTime) || !cp.Timestamp.Before(toTime) {
+						continue
+					}
+				}
+				prov := cp.Provider
+				if prov == "" {
+					prov = "unknown"
+				}
+				latByProvider[prov] = append(latByProvider[prov], cp.ElapsedSec)
+			}
+		}
+	}
+
+	// Build histogram buckets: 0-5s, 5-15s, 15-30s, 30-60s, 60-120s, >120s
+	bucketLabels := []string{"0–5s", "5–15s", "15–30s", "30–60s", "1–2m", ">2m"}
+	bucketEdges := []float64{5, 15, 30, 60, 120}
+
+	bucket := func(sec float64) int {
+		for i, edge := range bucketEdges {
+			if sec < edge {
+				return i
+			}
+		}
+		return len(bucketEdges)
+	}
+
+	type latDataset struct {
+		Provider string `json:"provider"`
+		Counts   []int  `json:"counts"`
+	}
+	var latProviders []string
+	for p := range latByProvider {
+		latProviders = append(latProviders, p)
+	}
+	sort.Strings(latProviders)
+
+	latDatasets := make([]latDataset, 0, len(latProviders))
+	for _, p := range latProviders {
+		counts := make([]int, len(bucketLabels))
+		for _, s := range latByProvider[p] {
+			counts[bucket(s)]++
+		}
+		latDatasets = append(latDatasets, latDataset{Provider: p, Counts: counts})
+	}
+
+	jsonOK(w, map[string]interface{}{
+		"status_donut": donut,
+		"burndown": map[string]interface{}{
+			"labels":          dateLabels,
+			"done_cumulative": cumDone,
+			"remaining":       remaining,
+		},
+		"cost_trend": map[string]interface{}{
+			"labels":   dateLabels,
+			"datasets": costDatasets,
+		},
+		"velocity": map[string]interface{}{
+			"labels": velLabels,
+			"values": velValues,
+		},
+		"latency": map[string]interface{}{
+			"buckets":  bucketLabels,
+			"datasets": latDatasets,
+		},
+	})
+}
+
 // ── dashboard HTML ────────────────────────────────────────────────────────────
 
 const dashboardHTML = `<!DOCTYPE html>
@@ -2620,6 +2892,7 @@ const dashboardHTML = `<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>cloop dashboard</title>
 <script>(function(){var t=localStorage.getItem('cloop-theme')||(window.matchMedia('(prefers-color-scheme: light)').matches?'light':'dark');document.documentElement.setAttribute('data-theme',t);})();</script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js" crossorigin="anonymous"></script>
 <style>
   :root {
     --bg:          #0d1117;
@@ -3533,6 +3806,25 @@ const dashboardHTML = `<!DOCTYPE html>
   }
   .kb-card-del:hover { color: #ef4444; background: rgba(239,68,68,.1); }
 
+  /* ── Analytics tab ── */
+  .analytics-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 16px;
+  }
+  .analytics-card-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: .04em;
+    margin-bottom: 10px;
+  }
+  @media (max-width: 600px) {
+    .analytics-grid { grid-template-columns: 1fr !important; }
+  }
+
   /* ── Dependency graph tab ── */
   .deps-toolbar {
     display: flex; align-items: center; gap: 10px; padding: 12px 0 10px; flex-wrap: wrap;
@@ -3935,6 +4227,7 @@ const dashboardHTML = `<!DOCTYPE html>
       <button class="tab-btn"        onclick="switchTab('kb')"        id="tbtn-kb">Knowledge Base</button>
       <button class="tab-btn"        onclick="switchTab('deps')"      id="tbtn-deps">Dependencies</button>
       <button class="tab-btn"        onclick="switchTab('risk-matrix')" id="tbtn-risk-matrix">Risk Matrix</button>
+      <button class="tab-btn"        onclick="switchTab('analytics')" id="tbtn-analytics">Analytics</button>
       <button class="tab-btn"        onclick="switchTab('chat')"      id="tbtn-chat">Chat</button>
       <button class="tab-btn"        onclick="switchTab('assistant')" id="tbtn-assistant">Assistant</button>
       <button class="tab-btn"        onclick="switchTab('projects')"  id="tbtn-projects">Projects</button>
@@ -4003,6 +4296,7 @@ const dashboardHTML = `<!DOCTYPE html>
       <button class="m-tab-btn" onclick="switchTab('kb')"        id="mtbtn-kb"><span class="m-tab-icon">&#128218;</span>Knowledge Base</button>
       <button class="m-tab-btn" onclick="switchTab('deps')"      id="mtbtn-deps"><span class="m-tab-icon">&#128279;</span>Dependencies</button>
       <button class="m-tab-btn" onclick="switchTab('risk-matrix')" id="mtbtn-risk-matrix"><span class="m-tab-icon">&#9888;</span>Risk Matrix</button>
+      <button class="m-tab-btn" onclick="switchTab('analytics')" id="mtbtn-analytics"><span class="m-tab-icon">&#128200;</span>Analytics</button>
       <button class="m-tab-btn" onclick="switchTab('chat')"      id="mtbtn-chat"><span class="m-tab-icon">&#128172;</span>Chat</button>
       <button class="m-tab-btn" onclick="switchTab('assistant')" id="mtbtn-assistant"><span class="m-tab-icon">&#129302;</span>Assistant</button>
       <button class="m-tab-btn" onclick="switchTab('projects')"  id="mtbtn-projects"><span class="m-tab-icon">&#128193;</span>Projects</button>
@@ -4663,6 +4957,73 @@ const dashboardHTML = `<!DOCTYPE html>
 
     </div>
 
+    <!-- ═══════════════════════════════════════════════════════ ANALYTICS -->
+    <div id="tab-analytics" class="tab-panel">
+      <div class="section">
+        <div class="section-title" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+          Analytics
+          <div style="display:flex;align-items:center;gap:8px;margin-left:auto;flex-wrap:wrap">
+            <label style="font-size:12px;color:var(--muted)">From:</label>
+            <input type="date" id="analyticsFrom" class="form-input" style="width:140px;padding:4px 8px;font-size:12px" onchange="loadAnalytics()">
+            <label style="font-size:12px;color:var(--muted)">To:</label>
+            <input type="date" id="analyticsTo" class="form-input" style="width:140px;padding:4px 8px;font-size:12px" onchange="loadAnalytics()">
+            <button class="btn" style="padding:4px 10px;font-size:12px" onclick="analyticsResetRange()">Last 30d</button>
+            <button class="btn" style="padding:4px 10px;font-size:12px" onclick="loadAnalytics()">&#8635; Refresh</button>
+          </div>
+        </div>
+
+        <!-- Row 1: Donut + Velocity -->
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px" class="analytics-grid">
+          <div class="analytics-card">
+            <div class="analytics-card-title">Task Status</div>
+            <div style="position:relative;height:220px;display:flex;align-items:center;justify-content:center">
+              <canvas id="chartStatusDonut" aria-label="Task status donut chart" role="img"></canvas>
+            </div>
+          </div>
+          <div class="analytics-card">
+            <div class="analytics-card-title">Velocity — Tasks/Day (last 14 days)</div>
+            <div style="position:relative;height:220px">
+              <canvas id="chartVelocity" aria-label="Velocity sparkline chart" role="img"></canvas>
+            </div>
+          </div>
+        </div>
+
+        <!-- Row 2: Burndown -->
+        <div style="margin-top:16px">
+          <div class="analytics-card">
+            <div class="analytics-card-title">Task Burn-Down</div>
+            <div style="position:relative;height:240px">
+              <canvas id="chartBurndown" aria-label="Task burndown chart" role="img"></canvas>
+            </div>
+          </div>
+        </div>
+
+        <!-- Row 3: Cost trend + Latency -->
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px" class="analytics-grid">
+          <div class="analytics-card">
+            <div class="analytics-card-title">Provider Cost Trend (USD/day)</div>
+            <div style="position:relative;height:240px">
+              <canvas id="chartCostTrend" aria-label="Provider cost trend chart" role="img"></canvas>
+            </div>
+          </div>
+          <div class="analytics-card">
+            <div class="analytics-card-title">Per-Provider Latency Histogram</div>
+            <div style="position:relative;height:240px">
+              <canvas id="chartLatency" aria-label="Per-provider latency histogram" role="img"></canvas>
+            </div>
+            <div id="analyticsLatencyEmpty" style="display:none;color:var(--muted);font-size:12px;text-align:center;padding:8px 0">
+              No latency data yet — run tasks to populate.
+            </div>
+          </div>
+        </div>
+
+        <div id="analyticsEmpty" style="display:none;color:var(--muted);font-size:13px;padding:16px 0;text-align:center">
+          No data yet for the selected date range. Run some tasks to see analytics.
+        </div>
+        <div style="color:var(--muted);font-size:11px;margin-top:10px;text-align:right" id="analyticsLastRefresh"></div>
+      </div>
+    </div>
+
   </main>
 
   <!-- ── FAB: quick task add (mobile only) ── -->
@@ -4894,7 +5255,7 @@ window.switchTab = function(name) {
 
   // In multi-project mode, re-fetch state for the selected project when
   // switching to any project-scoped tab so the data is always current.
-  const projectScopedTabs = ['overview','tasks','kanban','timeline','kb','deps','risk-matrix','chat','assistant','suggest'];
+  const projectScopedTabs = ['overview','tasks','kanban','timeline','kb','deps','risk-matrix','analytics','chat','assistant','suggest'];
   if (isMultiProject && selectedProjectIdx !== null && projectScopedTabs.includes(name)) {
     api(pUrl('/api/state')).then(s => render(s)).catch(() => {
       if (name === 'tasks'  && appState) renderTasks(appState);
@@ -4904,6 +5265,7 @@ window.switchTab = function(name) {
     if (name === 'kb') loadKB();
     if (name === 'deps') loadDeps();
     if (name === 'risk-matrix') loadRiskMatrix();
+    if (name === 'analytics') loadAnalytics();
     if (name === 'chat') loadChatHistory();
     if (name === 'assistant') loadAssistantHistory();
   } else {
@@ -4917,6 +5279,7 @@ window.switchTab = function(name) {
     if (name === 'kb') loadKB();
     if (name === 'deps') loadDeps();
     if (name === 'risk-matrix') loadRiskMatrix();
+    if (name === 'analytics') loadAnalytics();
   }
 
   // In multi-project mode, show/hide breadcrumb and project selector.
@@ -5684,6 +6047,8 @@ function handleRealtimeMsg(type, data) {
       // primary-project state update should be ignored.
       if (isMultiProject && selectedProjectIdx !== null && selectedProjectIdx !== 0) return;
       try { render(data); } catch(_) {}
+      // Refresh analytics if the analytics tab is active.
+      if (activeTab === 'analytics') { try { loadAnalytics(); } catch(_) {} }
       break;
     case 'step_output':
       try { if (data.chunk) appendLiveLog(data.chunk); } catch(_) {}
@@ -8058,6 +8423,258 @@ window.toggleTheme = function() {
 };
 
 checkAuthAndInit();
+
+// ── Analytics dashboard ────────────────────────────────────────
+
+// Chart.js instances — stored so we can destroy+recreate on refresh.
+let _chartDonut = null, _chartVelocity = null, _chartBurndown = null,
+    _chartCost = null, _chartLatency = null;
+
+// 30-second auto-refresh timer (only fires when analytics tab is visible).
+let _analyticsTimer = null;
+
+// Palette for multi-provider datasets.
+const _paletteBg   = ['rgba(88,166,255,.7)','rgba(63,185,80,.7)','rgba(188,140,255,.7)','rgba(57,197,207,.7)','rgba(248,81,73,.7)','rgba(210,153,34,.7)'];
+const _paletteLine = ['#58a6ff','#3fb950','#bc8cff','#39c5cf','#f85149','#d29922'];
+
+function analyticsResetRange() {
+  const to   = new Date();
+  const from = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+  const fmt = d => d.toISOString().slice(0,10);
+  const fi = document.getElementById('analyticsFrom');
+  const ti = document.getElementById('analyticsTo');
+  if (fi) fi.value = fmt(from);
+  if (ti) ti.value = fmt(to);
+  loadAnalytics();
+}
+
+window.loadAnalytics = function() {
+  // Initialise date pickers if empty.
+  const fi = document.getElementById('analyticsFrom');
+  const ti = document.getElementById('analyticsTo');
+  if (fi && !fi.value) {
+    const from = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    fi.value = from.toISOString().slice(0,10);
+  }
+  if (ti && !ti.value) {
+    ti.value = new Date().toISOString().slice(0,10);
+  }
+
+  const fromVal = fi ? fi.value : '';
+  const toVal   = ti ? ti.value : '';
+  const qs = (fromVal ? '&from=' + fromVal : '') + (toVal ? '&to=' + toVal : '');
+
+  api(pUrl('/api/analytics?' + qs)).then(d => {
+    _renderAnalytics(d);
+  }).catch(err => {
+    console.warn('analytics load error', err);
+  });
+
+  // Restart 30s auto-refresh timer.
+  if (_analyticsTimer) clearTimeout(_analyticsTimer);
+  _analyticsTimer = setTimeout(() => {
+    if (activeTab === 'analytics') loadAnalytics();
+  }, 30000);
+};
+
+function _destroyChart(ch) {
+  try { if (ch) ch.destroy(); } catch(_) {}
+  return null;
+}
+
+function _analyticsColors() {
+  const isDark = document.documentElement.getAttribute('data-theme') !== 'light';
+  return {
+    text:   isDark ? '#e6edf3' : '#1f2328',
+    muted:  isDark ? '#8b949e' : '#656d76',
+    grid:   isDark ? 'rgba(48,54,61,.6)' : 'rgba(208,215,222,.6)',
+  };
+}
+
+function _renderAnalytics(d) {
+  const clr = _analyticsColors();
+  const tickOpts = { color: clr.muted, font: { size: 11 } };
+  const gridOpts = { color: clr.grid };
+  const legendOpts = { labels: { color: clr.text, font: { size: 11 }, boxWidth: 12 } };
+
+  // ── Status Donut ──────────────────────────────────────────────
+  _chartDonut = _destroyChart(_chartDonut);
+  const donutCtx = document.getElementById('chartStatusDonut');
+  if (donutCtx && d.status_donut) {
+    const nonzero = d.status_donut.values.some(v => v > 0);
+    donutCtx.closest('div').style.display = nonzero ? '' : 'none';
+    if (nonzero) {
+      _chartDonut = new Chart(donutCtx, {
+        type: 'doughnut',
+        data: {
+          labels: d.status_donut.labels,
+          datasets: [{
+            data: d.status_donut.values,
+            backgroundColor: ['#8b949e','#39c5cf','#3fb950','#f85149','#d29922','#bc8cff'],
+            borderWidth: 0,
+          }]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          cutout: '60%',
+          plugins: { legend: legendOpts, tooltip: { callbacks: {
+            label: ctx => ' ' + ctx.label + ': ' + ctx.raw
+          }}}
+        }
+      });
+    }
+  }
+
+  // ── Velocity Sparkline ────────────────────────────────────────
+  _chartVelocity = _destroyChart(_chartVelocity);
+  const velCtx = document.getElementById('chartVelocity');
+  if (velCtx && d.velocity) {
+    _chartVelocity = new Chart(velCtx, {
+      type: 'bar',
+      data: {
+        labels: d.velocity.labels.map(l => l.slice(5)), // MM-DD
+        datasets: [{
+          label: 'Tasks completed',
+          data: d.velocity.values,
+          backgroundColor: 'rgba(88,166,255,.6)',
+          borderColor: '#58a6ff',
+          borderWidth: 1,
+          borderRadius: 3,
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: {
+          x: { ticks: { ...tickOpts, maxRotation: 45 }, grid: gridOpts },
+          y: { ticks: { ...tickOpts, stepSize: 1 }, grid: gridOpts, beginAtZero: true }
+        }
+      }
+    });
+  }
+
+  // ── Burndown ──────────────────────────────────────────────────
+  _chartBurndown = _destroyChart(_chartBurndown);
+  const bdCtx = document.getElementById('chartBurndown');
+  if (bdCtx && d.burndown) {
+    _chartBurndown = new Chart(bdCtx, {
+      type: 'line',
+      data: {
+        labels: d.burndown.labels.map(l => l.slice(5)),
+        datasets: [
+          {
+            label: 'Done (cumulative)',
+            data: d.burndown.done_cumulative,
+            borderColor: '#3fb950',
+            backgroundColor: 'rgba(63,185,80,.15)',
+            fill: true,
+            tension: 0.3,
+            pointRadius: 2,
+          },
+          {
+            label: 'Remaining',
+            data: d.burndown.remaining,
+            borderColor: '#f85149',
+            backgroundColor: 'rgba(248,81,73,.1)',
+            fill: true,
+            tension: 0.3,
+            pointRadius: 2,
+          }
+        ]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: { legend: legendOpts },
+        scales: {
+          x: { ticks: { ...tickOpts, maxRotation: 45 }, grid: gridOpts },
+          y: { ticks: tickOpts, grid: gridOpts, beginAtZero: true }
+        }
+      }
+    });
+  }
+
+  // ── Cost Trend ────────────────────────────────────────────────
+  _chartCost = _destroyChart(_chartCost);
+  const costCtx = document.getElementById('chartCostTrend');
+  if (costCtx && d.cost_trend) {
+    const datasets = (d.cost_trend.datasets || []).map((ds, i) => ({
+      label: ds.provider,
+      data: ds.values,
+      borderColor: _paletteLine[i % _paletteLine.length],
+      backgroundColor: _paletteBg[i % _paletteBg.length],
+      fill: false,
+      tension: 0.3,
+      pointRadius: 2,
+    }));
+    if (datasets.length === 0) {
+      datasets.push({
+        label: 'No data',
+        data: (d.cost_trend.labels || []).map(() => 0),
+        borderColor: clr.muted,
+        fill: false,
+        tension: 0,
+        pointRadius: 0,
+      });
+    }
+    _chartCost = new Chart(costCtx, {
+      type: 'line',
+      data: { labels: (d.cost_trend.labels || []).map(l => l.slice(5)), datasets },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: { legend: legendOpts },
+        scales: {
+          x: { ticks: { ...tickOpts, maxRotation: 45 }, grid: gridOpts },
+          y: { ticks: { ...tickOpts, callback: v => '$' + v.toFixed(4) }, grid: gridOpts, beginAtZero: true }
+        }
+      }
+    });
+  }
+
+  // ── Latency Histogram ─────────────────────────────────────────
+  _chartLatency = _destroyChart(_chartLatency);
+  const latCtx = document.getElementById('chartLatency');
+  const latEmpty = document.getElementById('analyticsLatencyEmpty');
+  const hasLatency = d.latency && d.latency.datasets && d.latency.datasets.length > 0;
+  if (latEmpty) latEmpty.style.display = hasLatency ? 'none' : 'block';
+  if (latCtx && hasLatency) {
+    const datasets = d.latency.datasets.map((ds, i) => ({
+      label: ds.provider,
+      data: ds.counts,
+      backgroundColor: _paletteBg[i % _paletteBg.length],
+      borderColor: _paletteLine[i % _paletteLine.length],
+      borderWidth: 1,
+      borderRadius: 3,
+    }));
+    _chartLatency = new Chart(latCtx, {
+      type: 'bar',
+      data: { labels: d.latency.buckets, datasets },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: { legend: legendOpts },
+        scales: {
+          x: { ticks: tickOpts, grid: gridOpts },
+          y: { ticks: { ...tickOpts, stepSize: 1 }, grid: gridOpts, beginAtZero: true }
+        }
+      }
+    });
+  }
+
+  // Empty state.
+  const anyData = (d.burndown && d.burndown.done_cumulative && d.burndown.done_cumulative.some(v => v > 0)) ||
+                  hasLatency ||
+                  (d.cost_trend && d.cost_trend.datasets && d.cost_trend.datasets.length > 0);
+  const emptyEl = document.getElementById('analyticsEmpty');
+  if (emptyEl) emptyEl.style.display = anyData ? 'none' : 'block';
+
+  // Last-refresh timestamp.
+  const lr = document.getElementById('analyticsLastRefresh');
+  if (lr) lr.textContent = 'Last refreshed: ' + new Date().toLocaleTimeString();
+}
 
 // ── Mobile nav helpers ─────────────────────────────────────────
 window.openMobileNav = function() {
