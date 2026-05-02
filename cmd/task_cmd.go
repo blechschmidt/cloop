@@ -47,13 +47,9 @@ func parseDeps(s string) ([]int, error) {
 }
 
 var (
-	taskDesc      string
-	taskPriority  int
 	taskListJSON  bool
 	taskListGraph bool
 	taskShowJSON  bool
-	taskDeps      string // comma-separated dep IDs for task add/edit
-	taskRole      string // agent role for task add
 
 	// edit flags
 	editTitle    string
@@ -482,77 +478,6 @@ Examples:
 		}
 		color.New(color.FgGreen).Printf("Moved task %d %s %s (priority now %d)\n",
 			id, arrow, direction, sorted[idx].Priority)
-		return nil
-	},
-}
-
-var taskAddCmd = &cobra.Command{
-	Use:   "add <title>",
-	Short: "Add a new task to the plan",
-	Args:  cobra.MinimumNArgs(1),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		workdir, _ := os.Getwd()
-		s, err := state.Load(workdir)
-		if err != nil {
-			return err
-		}
-		if !s.PMMode {
-			return fmt.Errorf("not in PM mode — run 'cloop init --pm' or 'cloop run --pm' first")
-		}
-		if s.Plan == nil {
-			s.Plan = pm.NewPlan(s.Goal)
-		}
-
-		title := strings.Join(args, " ")
-
-		// Auto-assign ID: max existing ID + 1
-		maxID := 0
-		for _, t := range s.Plan.Tasks {
-			if t.ID > maxID {
-				maxID = t.ID
-			}
-		}
-
-		priority := taskPriority
-		if priority == 0 {
-			// Default: lowest priority (append at end)
-			maxPriority := 0
-			for _, t := range s.Plan.Tasks {
-				if t.Priority > maxPriority {
-					maxPriority = t.Priority
-				}
-			}
-			priority = maxPriority + 1
-		}
-
-		deps, err := parseDeps(taskDeps)
-		if err != nil {
-			return err
-		}
-
-		task := &pm.Task{
-			ID:          maxID + 1,
-			Title:       title,
-			Description: taskDesc,
-			Priority:    priority,
-			Role:        pm.AgentRole(taskRole),
-			DependsOn:   deps,
-			Status:      pm.TaskPending,
-		}
-		s.Plan.Tasks = append(s.Plan.Tasks, task)
-
-		if err := s.Save(); err != nil {
-			return err
-		}
-
-		msg := fmt.Sprintf("Added task %d: %s (priority %d)", task.ID, task.Title, task.Priority)
-		if task.Role != "" {
-			msg += fmt.Sprintf(", role: %s", task.Role)
-		}
-		if len(deps) > 0 {
-			msg += fmt.Sprintf(", depends on: %s", taskDeps)
-		}
-		color.New(color.FgGreen).Println(msg)
 		return nil
 	},
 }
@@ -1289,11 +1214,6 @@ func init() {
 	taskShowCmd.Flags().BoolVar(&taskShowJSON, "json", false, "Output task as JSON")
 	taskShowCmd.Flags().BoolVar(&taskShowArtifact, "artifact", false, "Print full artifact file contents")
 
-	taskAddCmd.Flags().StringVar(&taskDesc, "desc", "", "Task description")
-	taskAddCmd.Flags().IntVar(&taskPriority, "priority", 0, "Task priority (1=highest; default: lowest)")
-	taskAddCmd.Flags().StringVar(&taskDeps, "depends-on", "", "Comma-separated IDs of tasks this task depends on (e.g. '1,2')")
-	taskAddCmd.Flags().StringVar(&taskRole, "role", "", "Agent role: backend, frontend, testing, security, devops, data, docs, review")
-
 	taskEditCmd.Flags().StringVar(&editTitle, "title", "", "New title for the task")
 	taskEditCmd.Flags().StringVar(&editDesc, "desc", "", "New description for the task")
 	taskEditCmd.Flags().IntVar(&editPriority, "priority", 0, "New priority for the task (1=highest)")
@@ -1315,7 +1235,6 @@ func init() {
 	taskCmd.AddCommand(taskResetCmd)
 	taskCmd.AddCommand(taskDoneCmd)
 	taskCmd.AddCommand(taskFailCmd)
-	taskCmd.AddCommand(taskAddCmd)
 	taskCmd.AddCommand(taskEditCmd)
 	taskCmd.AddCommand(taskRemoveCmd)
 	taskCmd.AddCommand(taskMoveCmd)
