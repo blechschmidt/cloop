@@ -68,6 +68,7 @@ var (
 	metricsAddr          string
 	noDedup              bool
 	runTags              []string
+	scriptVerify         bool
 )
 
 var runCmd = &cobra.Command{
@@ -249,6 +250,7 @@ Press Ctrl+C to pause gracefully.`,
 			Metrics:             runMetrics,
 			NoDedup:             noDedup,
 			TagFilter:           runTags,
+			ScriptVerify:        scriptVerify,
 		}
 
 		orc, err := orchestrator.New(orchCfg, prov)
@@ -456,5 +458,6 @@ func init() {
 	runCmd.Flags().StringVar(&metricsAddr, "metrics-addr", "", "Start a Prometheus /metrics HTTP server on this address (e.g. :9090); writes metrics.json to .cloop/ at plan completion")
 	runCmd.Flags().BoolVar(&noDedup, "no-dedup", false, "auto-evolve: disable semantic task deduplication (inject all discovered tasks without filtering duplicates)")
 	runCmd.Flags().StringSliceVar(&runTags, "tags", nil, "PM mode: restrict execution to tasks matching any of the given tags (comma-separated or repeated --tags flag)")
+	runCmd.Flags().BoolVar(&scriptVerify, "script-verify", false, "PM mode: after each TASK_DONE, generate and run an AI shell script that confirms the task was accomplished; marks task failed if the script exits non-zero")
 	rootCmd.AddCommand(runCmd)
 }

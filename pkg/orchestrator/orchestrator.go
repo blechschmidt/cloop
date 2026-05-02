@@ -24,6 +24,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/provider"
 	"github.com/blechschmidt/cloop/pkg/router"
 	"github.com/blechschmidt/cloop/pkg/state"
+	"github.com/blechschmidt/cloop/pkg/verify"
 	"github.com/blechschmidt/cloop/pkg/webhook"
 	"github.com/fatih/color"
 )
@@ -183,6 +184,14 @@ type Config struct {
 	// When set, the orchestrator sends a Discord embed on task_done, task_failed,
 	// and plan_complete events. Empty = disabled.
 	DiscordWebhookURL string
+
+	// ScriptVerify enables AI-generated shell verification scripts in PM mode
+	// (sequential only). After each task completes with TASK_DONE the provider
+	// generates a 5-15 line bash script that confirms the task was accomplished
+	// (new files exist, commands succeed, etc.). The script and its result are
+	// stored as a verification artifact. If the script exits non-zero the task
+	// is marked failed and failure diagnosis is triggered.
+	ScriptVerify bool
 }
 
 type Orchestrator struct {
@@ -973,22 +982,75 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 				}
 				pmColor.Printf("✓ Verification PASSED for task %d: %s\n\n", task.ID, task.Title)
 			}
-			task.Status = pm.TaskDone
-			successColor.Printf("✓ Task %d complete: %s\n\n", task.ID, task.Title)
-			if o.config.Notify {
-				notify.Send("cloop: Task Done", task.Title)
+
+			// Script-verify: generate and run a shell verification script to confirm
+			// the task was genuinely accomplished beyond the AI's own claim.
+			scriptVerifyFailed := false
+			if o.config.ScriptVerify {
+				dimColor.Printf("  Running shell verification for task %d...\n", task.ID)
+				vr, svErr := verify.GenerateAndRun(ctx, o.provider, s.Model, o.config.StepTimeout, o.config.WorkDir, task, result.Output)
+				if svErr != nil {
+					dimColor.Printf("  Script verification error (treating as pass): %v\n", svErr)
+				} else {
+					// Persist script + result as artifact regardless of outcome.
+					if artPath, artErr := artifact.WriteVerificationArtifact(o.config.WorkDir, task, vr.Script, vr.Output, vr.Passed); artErr != nil {
+						dimColor.Printf("  verification artifact write error (ignored): %v\n", artErr)
+					} else {
+						dimColor.Printf("  verification artifact: %s\n", artPath)
+					}
+					if !vr.Passed {
+						scriptVerifyFailed = true
+						failColor.Printf("✗ Shell verification FAILED for task %d (%s)\n", task.ID, task.Title)
+						if vr.Output != "" {
+							failColor.Printf("  Script output:\n%s\n\n", vr.Output)
+						}
+						task.Status = pm.TaskFailed
+						// Trigger failure diagnosis so retry prompts can learn from the failure.
+						if o.config.DiagnoseFailures {
+							dimColor.Printf("  Diagnosing script-verify failure for task %d...\n", task.ID)
+							diagInput := "Shell verification script exited non-zero.\n\nScript output:\n" + vr.Output + "\n\nTask output:\n" + result.Output
+							diag, diagErr := diagnosis.AnalyzeFailure(ctx, o.provider, s.Model, o.config.StepTimeout, task, diagInput)
+							if diagErr != nil {
+								dimColor.Printf("  Diagnosis error (ignored): %v\n", diagErr)
+							} else if diag != "" {
+								task.FailureDiagnosis = diag
+								dimColor.Printf("  Diagnosis: %s\n\n", diag)
+							}
+						}
+						{
+							done, failed := s.Plan.CountByStatus()
+							o.webhook.Send(webhook.EventTaskFailed, webhook.Payload{
+								Goal:     s.Goal,
+								Task:     &webhook.TaskInfo{ID: task.ID, Title: task.Title, Status: "failed", Duration: taskDur},
+								Progress: &webhook.Progress{Done: done, Total: len(s.Plan.Tasks), Failed: failed},
+								Session:  &webhook.SessionInfo{InputTokens: s.TotalInputTokens, OutputTokens: s.TotalOutputTokens},
+							})
+						}
+						consecutiveErrors++
+					} else {
+						pmColor.Printf("✓ Shell verification PASSED for task %d: %s\n\n", task.ID, task.Title)
+					}
+				}
 			}
-			o.notifyWebhooks("cloop: Task Done", fmt.Sprintf("Task #%d: %s\nGoal: %s\nElapsed: %s", task.ID, task.Title, s.Goal, taskDur))
-			{
-				done, failed := s.Plan.CountByStatus()
-				o.webhook.Send(webhook.EventTaskDone, webhook.Payload{
-					Goal:     s.Goal,
-					Task:     &webhook.TaskInfo{ID: task.ID, Title: task.Title, Status: "done", Duration: taskDur},
-					Progress: &webhook.Progress{Done: done, Total: len(s.Plan.Tasks), Failed: failed},
-					Session:  &webhook.SessionInfo{InputTokens: s.TotalInputTokens, OutputTokens: s.TotalOutputTokens},
-				})
+
+			if !scriptVerifyFailed {
+				task.Status = pm.TaskDone
+				successColor.Printf("✓ Task %d complete: %s\n\n", task.ID, task.Title)
+				if o.config.Notify {
+					notify.Send("cloop: Task Done", task.Title)
+				}
+				o.notifyWebhooks("cloop: Task Done", fmt.Sprintf("Task #%d: %s\nGoal: %s\nElapsed: %s", task.ID, task.Title, s.Goal, taskDur))
+				{
+					done, failed := s.Plan.CountByStatus()
+					o.webhook.Send(webhook.EventTaskDone, webhook.Payload{
+						Goal:     s.Goal,
+						Task:     &webhook.TaskInfo{ID: task.ID, Title: task.Title, Status: "done", Duration: taskDur},
+						Progress: &webhook.Progress{Done: done, Total: len(s.Plan.Tasks), Failed: failed},
+						Session:  &webhook.SessionInfo{InputTokens: s.TotalInputTokens, OutputTokens: s.TotalOutputTokens},
+					})
+				}
+				consecutiveErrors = 0
 			}
-			consecutiveErrors = 0
 		case pm.TaskSkipped:
 			task.Status = pm.TaskSkipped
 			dimColor.Printf("→ Task %d skipped: %s\n\n", task.ID, task.Title)

@@ -1,5 +1,6 @@
 // Package artifact persists the full AI response for each PM task as a
 // human-readable Markdown file with YAML frontmatter under .cloop/tasks/.
+// It also stores shell verification scripts and their results.
 package artifact
 
 import (
@@ -81,6 +82,69 @@ func WriteTaskArtifact(workDir string, task *pm.Task, fullOutput string) (string
 	}
 
 	// Return path relative to workDir for storage in task.ArtifactPath.
+	rel, err := filepath.Rel(workDir, absPath)
+	if err != nil {
+		rel = absPath
+	}
+	return rel, nil
+}
+
+// WriteVerificationArtifact persists a shell verification script and its
+// execution result under .cloop/tasks/<id>-<slug>-verify.md.
+// Returns the relative path (relative to workDir) of the artifact file.
+func WriteVerificationArtifact(workDir string, task *pm.Task, script, scriptOutput string, passed bool) (string, error) {
+	dir := filepath.Join(workDir, ".cloop", "tasks")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", fmt.Errorf("create artifact dir: %w", err)
+	}
+
+	s := slug(task.Title, 40)
+	filename := fmt.Sprintf("%d-%s-verify.md", task.ID, s)
+	absPath := filepath.Join(dir, filename)
+
+	verdict := "PASS"
+	if !passed {
+		verdict = "FAIL"
+	}
+
+	var b strings.Builder
+
+	// YAML frontmatter
+	b.WriteString("---\n")
+	b.WriteString(fmt.Sprintf("id: %d\n", task.ID))
+	b.WriteString(fmt.Sprintf("title: %q\n", task.Title))
+	b.WriteString(fmt.Sprintf("verification: %s\n", verdict))
+	b.WriteString(fmt.Sprintf("generated_at: %s\n", time.Now().UTC().Format(time.RFC3339)))
+	b.WriteString("---\n\n")
+
+	// Script
+	b.WriteString("## Verification Script\n\n")
+	b.WriteString("```bash\n")
+	b.WriteString(script)
+	if !strings.HasSuffix(script, "\n") {
+		b.WriteByte('\n')
+	}
+	b.WriteString("```\n\n")
+
+	// Output
+	b.WriteString("## Script Output\n\n")
+	b.WriteString("```\n")
+	if scriptOutput != "" {
+		b.WriteString(scriptOutput)
+		if !strings.HasSuffix(scriptOutput, "\n") {
+			b.WriteByte('\n')
+		}
+	} else {
+		b.WriteString("(no output)\n")
+	}
+	b.WriteString("```\n\n")
+
+	b.WriteString(fmt.Sprintf("**Verdict: %s**\n", verdict))
+
+	if err := os.WriteFile(absPath, []byte(b.String()), 0o644); err != nil {
+		return "", fmt.Errorf("write verification artifact: %w", err)
+	}
+
 	rel, err := filepath.Rel(workDir, absPath)
 	if err != nil {
 		rel = absPath
