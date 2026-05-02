@@ -96,18 +96,20 @@ func ValidRoles() []string {
 
 // Task is a single unit of work derived from the project goal.
 type Task struct {
-	ID            int        `json:"id"`
-	Title         string     `json:"title"`
-	Description   string     `json:"description"`
-	Priority      int        `json:"priority"` // 1 = highest
-	Status        TaskStatus `json:"status"`
-	Role          AgentRole  `json:"role,omitempty"`       // specialized agent role for this task
-	DependsOn     []int      `json:"depends_on,omitempty"` // IDs of tasks that must complete before this one
-	Result        string     `json:"result,omitempty"`
-	StartedAt     *time.Time `json:"started_at,omitempty"`
-	CompletedAt   *time.Time `json:"completed_at,omitempty"`
-	VerifyRetries int        `json:"verify_retries,omitempty"` // number of times task was re-queued by verifier
-	GitHubIssue   int        `json:"github_issue,omitempty"`   // linked GitHub issue number (0 = none)
+	ID               int        `json:"id"`
+	Title            string     `json:"title"`
+	Description      string     `json:"description"`
+	Priority         int        `json:"priority"` // 1 = highest
+	Status           TaskStatus `json:"status"`
+	Role             AgentRole  `json:"role,omitempty"`       // specialized agent role for this task
+	DependsOn        []int      `json:"depends_on,omitempty"` // IDs of tasks that must complete before this one
+	Result           string     `json:"result,omitempty"`
+	StartedAt        *time.Time `json:"started_at,omitempty"`
+	CompletedAt      *time.Time `json:"completed_at,omitempty"`
+	VerifyRetries    int        `json:"verify_retries,omitempty"`    // number of times task was re-queued by verifier
+	GitHubIssue      int        `json:"github_issue,omitempty"`      // linked GitHub issue number (0 = none)
+	EstimatedMinutes int        `json:"estimated_minutes,omitempty"` // AI-predicted duration
+	ActualMinutes    int        `json:"actual_minutes,omitempty"`    // measured duration (set on completion)
 }
 
 // Plan is the full task plan for a goal.
@@ -238,10 +240,11 @@ func DecomposePrompt(goal, instructions string) string {
 	b.WriteString("- Specific enough that an AI agent can implement it without clarification\n")
 	b.WriteString("- Linked to prerequisite tasks via depends_on (list of task IDs that must complete first)\n\n")
 	b.WriteString("Output ONLY valid JSON in this exact format (no explanation, no markdown):\n")
-	b.WriteString(`{"tasks":[{"id":1,"title":"short title","description":"detailed description of what to do","priority":1,"role":"backend","depends_on":[]},{"id":2,"title":"another task","description":"details","priority":2,"role":"testing","depends_on":[1]}]}`)
+	b.WriteString(`{"tasks":[{"id":1,"title":"short title","description":"detailed description of what to do","priority":1,"role":"backend","depends_on":[],"time_estimate_minutes":30},{"id":2,"title":"another task","description":"details","priority":2,"role":"testing","depends_on":[1],"time_estimate_minutes":15}]}`)
 	b.WriteString("\n\nAim for 5-15 tasks. Break large tasks into smaller ones.")
 	b.WriteString("\nUse depends_on to express real prerequisites. An empty depends_on array means no prerequisites.")
 	b.WriteString("\nFor role, choose the best fit from: backend, frontend, testing, security, devops, data, docs, review. Use empty string if none applies.")
+	b.WriteString("\nFor time_estimate_minutes, estimate how many minutes a skilled engineer would need. Use realistic estimates (e.g. 15, 30, 60, 120).")
 	return b.String()
 }
 
@@ -357,12 +360,13 @@ func ParseTaskPlan(goal, output string) (*Plan, error) {
 
 	var raw struct {
 		Tasks []struct {
-			ID          int       `json:"id"`
-			Title       string    `json:"title"`
-			Description string    `json:"description"`
-			Priority    int       `json:"priority"`
-			Role        AgentRole `json:"role"`
-			DependsOn   []int     `json:"depends_on"`
+			ID                   int       `json:"id"`
+			Title                string    `json:"title"`
+			Description          string    `json:"description"`
+			Priority             int       `json:"priority"`
+			Role                 AgentRole `json:"role"`
+			DependsOn            []int     `json:"depends_on"`
+			TimeEstimateMinutes  int       `json:"time_estimate_minutes"`
 		} `json:"tasks"`
 	}
 	if err := json.Unmarshal([]byte(jsonStr), &raw); err != nil {
@@ -380,13 +384,14 @@ func ParseTaskPlan(goal, output string) (*Plan, error) {
 			id = i + 1
 		}
 		plan.Tasks = append(plan.Tasks, &Task{
-			ID:          id,
-			Title:       t.Title,
-			Description: t.Description,
-			Priority:    priority,
-			Role:        t.Role,
-			DependsOn:   t.DependsOn,
-			Status:      TaskPending,
+			ID:               id,
+			Title:            t.Title,
+			Description:      t.Description,
+			Priority:         priority,
+			Role:             t.Role,
+			DependsOn:        t.DependsOn,
+			Status:           TaskPending,
+			EstimatedMinutes: t.TimeEstimateMinutes,
 		})
 	}
 

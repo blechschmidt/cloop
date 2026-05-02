@@ -630,6 +630,9 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		completedAt := time.Now()
 		task.CompletedAt = &completedAt
 		task.Result = truncate(result.Output, 500)
+		if task.StartedAt != nil {
+			task.ActualMinutes = int(completedAt.Sub(*task.StartedAt).Minutes())
+		}
 
 		taskDur := time.Since(*task.StartedAt).Round(time.Second).String()
 		switch signal {
@@ -1066,6 +1069,9 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 			completedAt := time.Now()
 			task.CompletedAt = &completedAt
 			task.Result = truncate(result.Output, 500)
+			if task.StartedAt != nil {
+				task.ActualMinutes = int(completedAt.Sub(*task.StartedAt).Minutes())
+			}
 
 			taskDur := res.duration.Round(time.Second).String()
 			mu.Lock()
@@ -1375,6 +1381,9 @@ func (o *Orchestrator) evolve(ctx context.Context) error {
 				completedAt := time.Now()
 				nextTask.CompletedAt = &completedAt
 				nextTask.Result = truncate(result.Output, 500)
+				if nextTask.StartedAt != nil {
+					nextTask.ActualMinutes = int(completedAt.Sub(*nextTask.StartedAt).Minutes())
+				}
 
 				signal := pm.CheckTaskSignal(result.Output)
 				switch signal {

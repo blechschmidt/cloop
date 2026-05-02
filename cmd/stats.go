@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"time"
 
@@ -10,6 +11,8 @@ import (
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 )
+
+var statsEstimates bool
 
 var statsCmd = &cobra.Command{
 	Use:   "stats",
@@ -24,6 +27,10 @@ Includes step timing, token usage, and task completion breakdown (in PM mode).`,
 			return err
 		}
 
+		if statsEstimates {
+			printEstimatesTable(s)
+			return nil
+		}
 		printStats(s)
 		return nil
 	},
@@ -186,6 +193,80 @@ func estimateCost(s *state.ProjectState) (float64, bool) {
 	return cost, true
 }
 
+// printEstimatesTable prints a table comparing AI-estimated vs actual task durations.
+func printEstimatesTable(s *state.ProjectState) {
+	bold := color.New(color.Bold)
+	green := color.New(color.FgGreen)
+	red := color.New(color.FgRed)
+	dimColor := color.New(color.Faint)
+
+	if !s.PMMode || s.Plan == nil || len(s.Plan.Tasks) == 0 {
+		dimColor.Println("No PM task plan found. Run cloop in PM mode first.")
+		return
+	}
+
+	bold.Printf("Task Time Estimates vs Actuals\n\n")
+
+	// Header
+	fmt.Printf("%-4s  %-30s  %8s  %8s  %8s\n", "ID", "Title", "Est(min)", "Act(min)", "Variance")
+	fmt.Printf("%-4s  %-30s  %8s  %8s  %8s\n", "----", "------------------------------", "--------", "--------", "--------")
+
+	var totalEst, totalAct int
+	var withBoth int
+	for _, t := range s.Plan.Tasks {
+		title := t.Title
+		if len(title) > 30 {
+			title = title[:27] + "..."
+		}
+
+		estStr := "-"
+		if t.EstimatedMinutes > 0 {
+			estStr = fmt.Sprintf("%d", t.EstimatedMinutes)
+		}
+
+		actStr := "-"
+		if t.ActualMinutes > 0 {
+			actStr = fmt.Sprintf("%d", t.ActualMinutes)
+		} else if t.StartedAt != nil && t.CompletedAt != nil {
+			// Compute on the fly for backward compat (tasks completed before this field was added)
+			act := int(t.CompletedAt.Sub(*t.StartedAt).Minutes())
+			if act > 0 {
+				actStr = fmt.Sprintf("%d", act)
+				t.ActualMinutes = act
+			}
+		}
+
+		varStr := "-"
+		if t.EstimatedMinutes > 0 && t.ActualMinutes > 0 {
+			variance := float64(t.ActualMinutes-t.EstimatedMinutes) / float64(t.EstimatedMinutes) * 100
+			varStr = fmt.Sprintf("%+.0f%%", variance)
+			totalEst += t.EstimatedMinutes
+			totalAct += t.ActualMinutes
+			withBoth++
+
+			if math.Abs(variance) <= 20 {
+				green.Printf("%-4d  %-30s  %8s  %8s  %8s\n", t.ID, title, estStr, actStr, varStr)
+			} else if variance > 0 {
+				red.Printf("%-4d  %-30s  %8s  %8s  %8s\n", t.ID, title, estStr, actStr, varStr)
+			} else {
+				green.Printf("%-4d  %-30s  %8s  %8s  %8s\n", t.ID, title, estStr, actStr, varStr)
+			}
+		} else {
+			fmt.Printf("%-4d  %-30s  %8s  %8s  %8s\n", t.ID, title, estStr, actStr, varStr)
+		}
+	}
+
+	fmt.Println()
+	if withBoth > 0 {
+		totalVariance := float64(totalAct-totalEst) / float64(totalEst) * 100
+		bold.Printf("Totals: estimated=%dm, actual=%dm, overall variance=%+.0f%% (%d tasks)\n",
+			totalEst, totalAct, totalVariance, withBoth)
+	} else {
+		dimColor.Printf("No tasks have both estimates and actuals yet.\n")
+	}
+}
+
 func init() {
+	statsCmd.Flags().BoolVar(&statsEstimates, "estimates", false, "Show estimated vs actual time table for PM tasks")
 	rootCmd.AddCommand(statsCmd)
 }

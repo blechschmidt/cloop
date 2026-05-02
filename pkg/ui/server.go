@@ -1766,6 +1766,7 @@ function renderTasks(s) {
           '<span>'+esc(cls)+'</span>'+
           (t.role?'<span>'+esc(t.role)+'</span>':'')+
           (t.depends_on&&t.depends_on.length?'<span>deps: #'+t.depends_on.join(', #')+'</span>':'')+
+          fmtTimeEstimate(t)+
         '</div>'+
       '</div>'+
       '<div class="task-actions">'+
@@ -1783,6 +1784,24 @@ function renderTasks(s) {
       '</div>'+
     '</div>';
   }).join('');
+}
+
+function fmtTimeEstimate(t) {
+  const est = t.estimated_minutes || 0;
+  const act = t.actual_minutes || 0;
+  if (!est && !act) return '';
+  let s = '';
+  if (est > 0) s += 'est: ' + est + 'm';
+  if (act > 0) {
+    if (s) s += ' / ';
+    s += 'actual: ' + act + 'm';
+    if (est > 0) {
+      const variance = Math.round((act - est) / est * 100);
+      const sign = variance >= 0 ? '+' : '';
+      s += ' (' + sign + variance + '%)';
+    }
+  }
+  return '<span title="Time estimate vs actual">⏱ ' + s + '</span>';
 }
 
 function buildStatusActions(t) {

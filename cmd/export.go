@@ -105,12 +105,29 @@ func buildReport(s *state.ProjectState) string {
 	if s.PMMode && s.Plan != nil && len(s.Plan.Tasks) > 0 {
 		b.WriteString("\n## Task Plan\n\n")
 		b.WriteString(fmt.Sprintf("*%s*\n\n", s.Plan.Summary()))
-		b.WriteString("| # | Priority | Status | Title |\n")
-		b.WriteString("|---|----------|--------|-------|\n")
+		b.WriteString("| # | Priority | Status | Title | Est (min) | Actual (min) | Variance |\n")
+		b.WriteString("|---|----------|--------|-------|-----------|--------------|----------|\n")
 		for _, t := range s.Plan.Tasks {
 			marker := taskStatusIcon(t.Status)
-			b.WriteString(fmt.Sprintf("| %d | %d | %s %s | %s |\n",
-				t.ID, t.Priority, marker, t.Status, escapeMD(t.Title)))
+			estStr := "-"
+			actStr := "-"
+			varStr := "-"
+			if t.EstimatedMinutes > 0 {
+				estStr = strconv.Itoa(t.EstimatedMinutes)
+			}
+			actual := t.ActualMinutes
+			if actual == 0 && t.StartedAt != nil && t.CompletedAt != nil {
+				actual = int(t.CompletedAt.Sub(*t.StartedAt).Minutes())
+			}
+			if actual > 0 {
+				actStr = strconv.Itoa(actual)
+			}
+			if t.EstimatedMinutes > 0 && actual > 0 {
+				variance := float64(actual-t.EstimatedMinutes) / float64(t.EstimatedMinutes) * 100
+				varStr = fmt.Sprintf("%+.0f%%", variance)
+			}
+			b.WriteString(fmt.Sprintf("| %d | %d | %s %s | %s | %s | %s | %s |\n",
+				t.ID, t.Priority, marker, t.Status, escapeMD(t.Title), estStr, actStr, varStr))
 		}
 
 		// Detailed task descriptions
@@ -121,6 +138,9 @@ func buildReport(s *state.ProjectState) string {
 			if t.Description != "" {
 				b.WriteString(t.Description + "\n\n")
 			}
+			if t.EstimatedMinutes > 0 {
+				b.WriteString(fmt.Sprintf("*Estimated: %d min*\n", t.EstimatedMinutes))
+			}
 			if t.StartedAt != nil {
 				b.WriteString(fmt.Sprintf("*Started: %s*\n", t.StartedAt.Format("2006-01-02 15:04:05")))
 			}
@@ -129,6 +149,14 @@ func buildReport(s *state.ProjectState) string {
 				if t.StartedAt != nil {
 					dur := t.CompletedAt.Sub(*t.StartedAt).Round(time.Second)
 					b.WriteString(fmt.Sprintf("*Duration: %s*\n", dur))
+					actualMin := t.ActualMinutes
+					if actualMin == 0 {
+						actualMin = int(dur.Minutes())
+					}
+					if t.EstimatedMinutes > 0 && actualMin > 0 {
+						variance := float64(actualMin-t.EstimatedMinutes) / float64(t.EstimatedMinutes) * 100
+						b.WriteString(fmt.Sprintf("*Time variance: %+.0f%%*\n", variance))
+					}
 				}
 			}
 			if t.Result != "" {
@@ -180,25 +208,45 @@ func buildJSONReport(s *state.ProjectState) ([]byte, error) {
 	return json.MarshalIndent(s, "", "  ")
 }
 
-// buildCSVReport returns a CSV with columns: id,title,status,priority,role
+// buildCSVReport returns a CSV with columns: id,title,status,priority,role,estimated_minutes,actual_minutes,variance_pct
 // Only meaningful in PM mode; falls back to a header-only CSV if no plan exists.
 func buildCSVReport(s *state.ProjectState) (string, error) {
 	var sb strings.Builder
 	w := csv.NewWriter(&sb)
 
-	header := []string{"id", "title", "status", "priority", "role"}
+	header := []string{"id", "title", "status", "priority", "role", "estimated_minutes", "actual_minutes", "variance_pct"}
 	if err := w.Write(header); err != nil {
 		return "", fmt.Errorf("csv write: %w", err)
 	}
 
 	if s.Plan != nil {
 		for _, t := range s.Plan.Tasks {
+			actual := t.ActualMinutes
+			if actual == 0 && t.StartedAt != nil && t.CompletedAt != nil {
+				actual = int(t.CompletedAt.Sub(*t.StartedAt).Minutes())
+			}
+			varStr := ""
+			if t.EstimatedMinutes > 0 && actual > 0 {
+				variance := float64(actual-t.EstimatedMinutes) / float64(t.EstimatedMinutes) * 100
+				varStr = fmt.Sprintf("%.1f", variance)
+			}
+			actStr := ""
+			if actual > 0 {
+				actStr = strconv.Itoa(actual)
+			}
+			estStr := ""
+			if t.EstimatedMinutes > 0 {
+				estStr = strconv.Itoa(t.EstimatedMinutes)
+			}
 			row := []string{
 				strconv.Itoa(t.ID),
 				t.Title,
 				string(t.Status),
 				strconv.Itoa(t.Priority),
 				string(t.Role),
+				estStr,
+				actStr,
+				varStr,
 			}
 			if err := w.Write(row); err != nil {
 				return "", fmt.Errorf("csv write row: %w", err)
