@@ -170,6 +170,16 @@ func NewPlan(goal string) *Plan {
 	return &Plan{Goal: goal, Tasks: []*Task{}, Version: 1}
 }
 
+// TaskByID returns the task with the given ID, or nil if not found.
+func (p *Plan) TaskByID(id int) *Task {
+	for _, t := range p.Tasks {
+		if t.ID == id {
+			return t
+		}
+	}
+	return nil
+}
+
 // DepsReady returns true when all of this task's dependencies are done or skipped.
 func (p *Plan) DepsReady(t *Task) bool {
 	for _, depID := range t.DependsOn {
