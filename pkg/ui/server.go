@@ -400,6 +400,7 @@ func (s *Server) handleTaskAdd(w http.ResponseWriter, r *http.Request) {
 		Title       string `json:"title"`
 		Description string `json:"description"`
 		Priority    int    `json:"priority"`
+		DependsOn   []int  `json:"depends_on"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonErr(w, "invalid request body", http.StatusBadRequest)
@@ -440,6 +441,7 @@ func (s *Server) handleTaskAdd(w http.ResponseWriter, r *http.Request) {
 		Title:       req.Title,
 		Description: req.Description,
 		Priority:    priority,
+		DependsOn:   req.DependsOn,
 		Status:      pm.TaskPending,
 	}
 	ps.Plan.Tasks = append(ps.Plan.Tasks, task)
@@ -574,7 +576,7 @@ func (s *Server) handleTaskMove(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]interface{}{"ok": true, "id": req.ID})
 }
 
-// handleTaskEdit edits a task's title, description, and/or priority.
+// handleTaskEdit edits a task's title, description, priority, and/or depends_on.
 func (s *Server) handleTaskEdit(w http.ResponseWriter, r *http.Request) {
 	if !requirePOST(w, r) {
 		return
@@ -584,6 +586,7 @@ func (s *Server) handleTaskEdit(w http.ResponseWriter, r *http.Request) {
 		Title       string `json:"title"`
 		Description string `json:"description"`
 		Priority    int    `json:"priority"`
+		DependsOn   *[]int `json:"depends_on"` // nil = don't change; []int{} = clear; [1,2] = set
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonErr(w, "invalid request body", http.StatusBadRequest)
@@ -620,6 +623,9 @@ func (s *Server) handleTaskEdit(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Priority > 0 {
 		task.Priority = req.Priority
+	}
+	if req.DependsOn != nil {
+		task.DependsOn = *req.DependsOn
 	}
 
 	if err := ps.Save(); err != nil {
@@ -1238,6 +1244,7 @@ const dashboardHTML = `<!DOCTYPE html>
           <input class="form-input" id="newTaskTitle" placeholder="Task title..." style="flex:2;min-width:200px" onkeydown="if(event.key==='Enter')submitAddTask()">
           <input class="form-input" id="newTaskDesc"  placeholder="Description (optional)" style="flex:2;min-width:160px">
           <input class="form-input" id="newTaskPriority" placeholder="Priority (1=high)" type="number" min="1" style="flex:0 0 140px">
+          <input class="form-input" id="newTaskDeps" placeholder="Depends on (IDs, e.g. 1,2)" style="flex:1;min-width:160px">
           <button class="btn primary" onclick="submitAddTask()">Add Task</button>
         </div>
       </div>
@@ -1389,6 +1396,10 @@ const dashboardHTML = `<!DOCTYPE html>
       <div class="form-group">
         <label class="form-label">Priority (1 = highest)</label>
         <input class="form-input" id="modalPriority" type="number" min="1">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Depends on (task IDs, e.g. 1,2)</label>
+        <input class="form-input" id="modalDeps" placeholder="e.g. 1,2 or leave blank">
       </div>
     </div>
     <input type="hidden" id="modalTaskId">
@@ -1574,6 +1585,7 @@ function renderTasks(s) {
         '<div class="task-meta">'+
           '<span>'+esc(cls)+'</span>'+
           (t.role?'<span>'+esc(t.role)+'</span>':'')+
+          (t.depends_on&&t.depends_on.length?'<span>deps: #'+t.depends_on.join(', #')+'</span>':'')+
         '</div>'+
       '</div>'+
       '<div class="task-actions">'+
@@ -1583,7 +1595,8 @@ function renderTasks(s) {
         '<button class="act edit"   title="Edit"   onclick="openEditModal('+t.id+','+
           JSON.stringify(t.title).replace(/</g,'\\u003c')+','+
           JSON.stringify(t.description||'').replace(/</g,'\\u003c')+','+
-          t.priority+')">Edit</button>'+
+          t.priority+','+
+          JSON.stringify(t.depends_on||[]).replace(/</g,'\\u003c')+')">Edit</button>'+
         '<button class="act remove" title="Remove" onclick="removeTask('+t.id+')">Remove</button>'+
         priorityBadge(t.priority)+
         '<span style="font-size:11px;color:var(--muted)">#'+t.id+'</span>'+
@@ -1673,6 +1686,11 @@ window.submitInit = function() {
 
 // ── Task CRUD ────────────────────────────────────────────────────────────────
 
+function parseDepsInput(val) {
+  if (!val || !val.trim()) return [];
+  return val.split(',').map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n) && n > 0);
+}
+
 window.submitAddTask = function() {
   const title = document.getElementById('newTaskTitle').value.trim();
   if (!title) { toast('Title is required', 'err'); return; }
@@ -1680,11 +1698,13 @@ window.submitAddTask = function() {
     title:       title,
     description: document.getElementById('newTaskDesc').value.trim(),
     priority:    parseInt(document.getElementById('newTaskPriority').value)||0,
+    depends_on:  parseDepsInput(document.getElementById('newTaskDeps').value),
   }).then(d => {
     if (d.ok) {
       document.getElementById('newTaskTitle').value    = '';
       document.getElementById('newTaskDesc').value     = '';
       document.getElementById('newTaskPriority').value = '';
+      document.getElementById('newTaskDeps').value     = '';
       toast('Task added: '+title, 'ok');
       refreshState();
     } else toast(d.error||'Add failed', 'err');
@@ -1715,11 +1735,12 @@ window.removeTask = function(id) {
 
 // ── Edit modal ───────────────────────────────────────────────────────────────
 
-window.openEditModal = function(id, title, desc, priority) {
+window.openEditModal = function(id, title, desc, priority, dependsOn) {
   document.getElementById('modalTaskId').value   = id;
   document.getElementById('modalTitle_').value   = title;
   document.getElementById('modalDesc').value     = desc;
   document.getElementById('modalPriority').value = priority;
+  document.getElementById('modalDeps').value     = (dependsOn && dependsOn.length) ? dependsOn.join(',') : '';
   document.getElementById('modal-overlay').classList.add('open');
   document.getElementById('modalTitle_').focus();
 };
@@ -1735,7 +1756,13 @@ window.submitEditTask = function() {
   const priority = parseInt(document.getElementById('modalPriority').value)||0;
   if (!title) { toast('Title is required', 'err'); return; }
 
-  api('/api/task/edit', {id, title, description: desc, priority}).then(d => {
+  api('/api/task/edit', {
+    id,
+    title,
+    description: desc,
+    priority,
+    depends_on: parseDepsInput(document.getElementById('modalDeps').value),
+  }).then(d => {
     if (d.ok) { closeModal(); toast('Task updated', 'ok'); refreshState(); }
     else toast(d.error||'Edit failed', 'err');
   }).catch(() => toast('Request failed', 'err'));

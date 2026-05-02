@@ -287,8 +287,8 @@ var taskEditCmd = &cobra.Command{
 			return fmt.Errorf("task %d not found", id)
 		}
 
-		if !cmd.Flags().Changed("title") && !cmd.Flags().Changed("desc") && !cmd.Flags().Changed("priority") && !cmd.Flags().Changed("deps") && !cmd.Flags().Changed("role") {
-			return fmt.Errorf("no changes specified — use --title, --desc, --priority, --deps, or --role")
+		if !cmd.Flags().Changed("title") && !cmd.Flags().Changed("desc") && !cmd.Flags().Changed("priority") && !cmd.Flags().Changed("depends-on") && !cmd.Flags().Changed("role") {
+			return fmt.Errorf("no changes specified — use --title, --desc, --priority, --depends-on, or --role")
 		}
 
 		changed := []string{}
@@ -304,7 +304,7 @@ var taskEditCmd = &cobra.Command{
 			task.Priority = editPriority
 			changed = append(changed, "priority")
 		}
-		if cmd.Flags().Changed("deps") {
+		if cmd.Flags().Changed("depends-on") {
 			deps, err := parseDeps(editDeps)
 			if err != nil {
 				return err
@@ -800,13 +800,13 @@ func init() {
 
 	taskAddCmd.Flags().StringVar(&taskDesc, "desc", "", "Task description")
 	taskAddCmd.Flags().IntVar(&taskPriority, "priority", 0, "Task priority (1=highest; default: lowest)")
-	taskAddCmd.Flags().StringVar(&taskDeps, "deps", "", "Comma-separated IDs of tasks this task depends on (e.g. '1,2')")
+	taskAddCmd.Flags().StringVar(&taskDeps, "depends-on", "", "Comma-separated IDs of tasks this task depends on (e.g. '1,2')")
 	taskAddCmd.Flags().StringVar(&taskRole, "role", "", "Agent role: backend, frontend, testing, security, devops, data, docs, review")
 
 	taskEditCmd.Flags().StringVar(&editTitle, "title", "", "New title for the task")
 	taskEditCmd.Flags().StringVar(&editDesc, "desc", "", "New description for the task")
 	taskEditCmd.Flags().IntVar(&editPriority, "priority", 0, "New priority for the task (1=highest)")
-	taskEditCmd.Flags().StringVar(&editDeps, "deps", "", "Comma-separated IDs of tasks this task depends on (e.g. '1,2'); use '' to clear")
+	taskEditCmd.Flags().StringVar(&editDeps, "depends-on", "", "Comma-separated IDs of tasks this task depends on (e.g. '1,2'); use '' to clear")
 	taskEditCmd.Flags().StringVar(&editRole, "role", "", "Agent role: backend, frontend, testing, security, devops, data, docs, review")
 
 	taskCmd.AddCommand(taskListCmd)
