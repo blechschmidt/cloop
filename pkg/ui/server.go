@@ -188,6 +188,9 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	// Timeline
 	mux.HandleFunc("/api/timeline", s.handleTimeline)
 
+	// Dependency graph
+	mux.HandleFunc("GET /api/deps", s.handleDeps)
+
 	// Multi-project dashboard
 	mux.HandleFunc("/api/projects", s.handleProjects)
 	mux.HandleFunc("/api/projects/events", s.handleProjectsEvents)
@@ -2018,6 +2021,57 @@ func (s *Server) handleTimeline(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// ── Dependency graph handler ─────────────────────────────────────────────────
+
+// handleDeps returns nodes (id, title, status, priority) and edges (from, to)
+// for the task dependency graph. GET /api/deps
+func (s *Server) handleDeps(w http.ResponseWriter, r *http.Request) {
+	ps, err := state.Load(s.resolveWorkDir(r))
+	if err != nil || ps.Plan == nil {
+		jsonOK(w, map[string]interface{}{"nodes": []struct{}{}, "edges": []struct{}{}})
+		return
+	}
+
+	type Node struct {
+		ID          int    `json:"id"`
+		Title       string `json:"title"`
+		Status      string `json:"status"`
+		Priority    int    `json:"priority"`
+		Description string `json:"description"`
+		Assignee    string `json:"assignee,omitempty"`
+		Deadline    string `json:"deadline,omitempty"`
+	}
+	type Edge struct {
+		From int `json:"from"`
+		To   int `json:"to"`
+	}
+
+	nodes := make([]Node, 0, len(ps.Plan.Tasks))
+	edges := make([]Edge, 0)
+
+	for _, t := range ps.Plan.Tasks {
+		deadline := ""
+		if t.Deadline != nil && !t.Deadline.IsZero() {
+			deadline = t.Deadline.Format("2006-01-02 15:04")
+		}
+		nodes = append(nodes, Node{
+			ID:          t.ID,
+			Title:       t.Title,
+			Status:      string(t.Status),
+			Priority:    t.Priority,
+			Description: t.Description,
+			Assignee:    t.Assignee,
+			Deadline:    deadline,
+		})
+		for _, dep := range t.DependsOn {
+			// Edge means dep must complete before t → dep blocks t
+			edges = append(edges, Edge{From: dep, To: t.ID})
+		}
+	}
+
+	jsonOK(w, map[string]interface{}{"nodes": nodes, "edges": edges})
+}
+
 // ── dashboard HTML ────────────────────────────────────────────────────────────
 
 const dashboardHTML = `<!DOCTYPE html>
@@ -2804,6 +2858,59 @@ const dashboardHTML = `<!DOCTYPE html>
   }
   .kb-card-del:hover { color: #ef4444; background: rgba(239,68,68,.1); }
 
+  /* ── Dependency graph tab ── */
+  .deps-toolbar {
+    display: flex; align-items: center; gap: 10px; padding: 12px 0 10px; flex-wrap: wrap;
+  }
+  .deps-container {
+    position: relative; width: 100%; border: 1px solid var(--border); border-radius: var(--radius);
+    background: var(--card-bg); overflow: hidden; min-height: 420px;
+  }
+  .deps-svg {
+    display: block; width: 100%; height: 520px; cursor: default;
+  }
+  @media (max-width: 600px) { .deps-svg { height: 340px; } }
+  .deps-empty {
+    text-align: center; padding: 60px 20px; color: var(--muted);
+  }
+  /* SVG node circles */
+  .deps-node { cursor: pointer; }
+  .deps-node circle { stroke-width: 2.5; transition: r .15s; }
+  .deps-node:hover circle { filter: brightness(1.2); }
+  .deps-node text { font-size: 10px; fill: var(--text); pointer-events: none; user-select: none; }
+  /* Edge lines with arrowheads */
+  .deps-edge { stroke: var(--muted); stroke-width: 1.5; fill: none; marker-end: url(#deps-arrow); }
+  /* Node status colors */
+  .deps-node-pending    circle { fill: #6b7280; stroke: #9ca3af; }
+  .deps-node-in_progress circle { fill: #3b82f6; stroke: #60a5fa; }
+  .deps-node-done       circle { fill: #22c55e; stroke: #4ade80; }
+  .deps-node-failed     circle { fill: #ef4444; stroke: #f87171; }
+  .deps-node-skipped    circle { fill: #a855f7; stroke: #c084fc; }
+  .deps-node-timed_out  circle { fill: #f97316; stroke: #fb923c; }
+  /* Sidebar */
+  .deps-sidebar {
+    position: absolute; top: 0; right: 0; width: min(300px, 88%); height: 100%;
+    background: var(--card-bg); border-left: 1px solid var(--border);
+    box-shadow: -4px 0 16px rgba(0,0,0,.2); display: flex; flex-direction: column;
+    z-index: 10; overflow-y: auto;
+  }
+  .deps-sidebar-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 12px 14px 10px; border-bottom: 1px solid var(--border); flex-shrink: 0;
+  }
+  .deps-sidebar-title { font-weight: 600; font-size: 14px; color: var(--text); flex: 1; }
+  .deps-sidebar-close {
+    background: none; border: none; color: var(--muted); cursor: pointer;
+    font-size: 16px; line-height: 1; padding: 2px 5px; border-radius: 4px;
+  }
+  .deps-sidebar-close:hover { color: var(--text); background: var(--hover-bg); }
+  .deps-sidebar-body { padding: 12px 14px; font-size: 12px; color: var(--muted); flex: 1; }
+  .deps-sidebar-body .deps-detail-row { margin-bottom: 8px; line-height: 1.5; }
+  .deps-sidebar-body .deps-detail-label { font-weight: 600; color: var(--text); display: block; }
+  .deps-legend { display: flex; flex-wrap: wrap; gap: 10px; padding: 8px 0 4px; font-size: 11px; color: var(--muted); }
+  .deps-legend-item { display: flex; align-items: center; gap: 5px; }
+  .deps-legend-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+
   /* ── Timeline / Gantt chart ── */
   .timeline-toolbar {
     display: flex;
@@ -3151,6 +3258,7 @@ const dashboardHTML = `<!DOCTYPE html>
       <button class="tab-btn"        onclick="switchTab('kanban')"    id="tbtn-kanban">Kanban</button>
       <button class="tab-btn"        onclick="switchTab('timeline')"  id="tbtn-timeline">Timeline</button>
       <button class="tab-btn"        onclick="switchTab('kb')"        id="tbtn-kb">Knowledge Base</button>
+      <button class="tab-btn"        onclick="switchTab('deps')"      id="tbtn-deps">Dependencies</button>
       <button class="tab-btn"        onclick="switchTab('chat')"      id="tbtn-chat">Chat</button>
       <button class="tab-btn"        onclick="switchTab('projects')"  id="tbtn-projects">Projects</button>
       <button class="tab-btn"        onclick="switchTab('suggest')"   id="tbtn-suggest">Suggest</button>
@@ -3175,6 +3283,7 @@ const dashboardHTML = `<!DOCTYPE html>
       <button class="m-tab-btn" onclick="switchTab('kanban')"    id="mtbtn-kanban"><span class="m-tab-icon">&#9783;</span>Kanban</button>
       <button class="m-tab-btn" onclick="switchTab('timeline')"  id="mtbtn-timeline"><span class="m-tab-icon">&#128197;</span>Timeline</button>
       <button class="m-tab-btn" onclick="switchTab('kb')"        id="mtbtn-kb"><span class="m-tab-icon">&#128218;</span>Knowledge Base</button>
+      <button class="m-tab-btn" onclick="switchTab('deps')"      id="mtbtn-deps"><span class="m-tab-icon">&#128279;</span>Dependencies</button>
       <button class="m-tab-btn" onclick="switchTab('chat')"      id="mtbtn-chat"><span class="m-tab-icon">&#128172;</span>Chat</button>
       <button class="m-tab-btn" onclick="switchTab('projects')"  id="mtbtn-projects"><span class="m-tab-icon">&#128193;</span>Projects</button>
       <button class="m-tab-btn" onclick="switchTab('suggest')"   id="mtbtn-suggest"><span class="m-tab-icon">&#128161;</span>Suggest</button>
@@ -3504,6 +3613,41 @@ const dashboardHTML = `<!DOCTYPE html>
         <p>Click <strong>+ Add Entry</strong> to add your first knowledge base entry.</p>
       </div>
       <div id="kbGrid" class="kb-grid"></div>
+    </div>
+
+    <!-- ══════════════════════════════════════════════ DEPENDENCIES -->
+    <div id="tab-deps" class="tab-panel">
+      <div class="deps-toolbar">
+        <span class="section-title" style="margin:0">Task Dependency Graph</span>
+        <button class="btn" style="padding:3px 10px;font-size:11px" onclick="loadDeps()">Refresh</button>
+        <label style="font-size:12px;color:var(--muted);display:flex;align-items:center;gap:4px;margin-left:8px">
+          <input type="checkbox" id="depsShowAll" onchange="loadDeps()"> Show all tasks
+        </label>
+      </div>
+      <div id="depsEmpty" class="deps-empty" style="display:none">
+        <div style="font-size:32px;margin-bottom:12px">&#128279;</div>
+        <div style="font-size:15px;font-weight:600;margin-bottom:6px">No dependencies defined</div>
+        <div style="font-size:13px;color:var(--muted)">Use <code>cloop task deps</code> to add dependencies between tasks.</div>
+      </div>
+      <div class="deps-legend">
+        <span class="deps-legend-item"><span class="deps-legend-dot" style="background:#6b7280"></span>Pending</span>
+        <span class="deps-legend-item"><span class="deps-legend-dot" style="background:#3b82f6"></span>In Progress</span>
+        <span class="deps-legend-item"><span class="deps-legend-dot" style="background:#22c55e"></span>Done</span>
+        <span class="deps-legend-item"><span class="deps-legend-dot" style="background:#ef4444"></span>Failed</span>
+        <span class="deps-legend-item"><span class="deps-legend-dot" style="background:#a855f7"></span>Skipped</span>
+        <span class="deps-legend-item"><span class="deps-legend-dot" style="background:#f97316"></span>Timed Out</span>
+      </div>
+      <div id="depsContainer" class="deps-container">
+        <svg id="depsSvg" class="deps-svg"></svg>
+      </div>
+      <!-- Detail sidebar -->
+      <div id="depsSidebar" class="deps-sidebar" style="display:none">
+        <div class="deps-sidebar-header">
+          <span id="depsSidebarTitle" class="deps-sidebar-title"></span>
+          <button class="deps-sidebar-close" onclick="closeDepsDetail()" aria-label="Close">&#x2715;</button>
+        </div>
+        <div id="depsSidebarBody" class="deps-sidebar-body"></div>
+      </div>
     </div>
 
     <!-- ════════════════════════════════════════════════════════════ CHAT -->
@@ -3936,7 +4080,7 @@ window.switchTab = function(name) {
 
   // In multi-project mode, re-fetch state for the selected project when
   // switching to any project-scoped tab so the data is always current.
-  const projectScopedTabs = ['overview','tasks','kanban','timeline','kb','chat','suggest'];
+  const projectScopedTabs = ['overview','tasks','kanban','timeline','kb','deps','chat','suggest'];
   if (isMultiProject && selectedProjectIdx !== null && projectScopedTabs.includes(name)) {
     api(pUrl('/api/state')).then(s => render(s)).catch(() => {
       if (name === 'tasks'  && appState) renderTasks(appState);
@@ -3944,6 +4088,7 @@ window.switchTab = function(name) {
     });
     if (name === 'timeline') loadTimeline();
     if (name === 'kb') loadKB();
+    if (name === 'deps') loadDeps();
     if (name === 'chat') loadChatHistory();
   } else {
     if (name === 'settings') loadConfig();
@@ -3953,6 +4098,7 @@ window.switchTab = function(name) {
     if (name === 'chat') loadChatHistory();
     if (name === 'timeline') loadTimeline();
     if (name === 'kb') loadKB();
+    if (name === 'deps') loadDeps();
   }
 
   // In multi-project mode, show/hide breadcrumb and project selector.
@@ -4905,6 +5051,338 @@ window.deleteKBEntry = function(id) {
     if (d.ok) { toast('Entry deleted', 'ok'); loadKB(); }
     else toast(d.error || 'Delete failed', 'err');
   }).catch(() => toast('Delete failed', 'err'));
+};
+
+// ── Dependency graph tab ─────────────────────────────────────────────────────
+
+window.loadDeps = function() { loadDeps(); };
+
+let _depsData   = null;   // { nodes, edges }
+let _depsNodes  = [];     // positioned nodes
+let _dragNode   = null;   // node being dragged
+let _simRunning = false;
+
+const STATUS_COLORS = {
+  pending:     '#6b7280',
+  in_progress: '#3b82f6',
+  done:        '#22c55e',
+  failed:      '#ef4444',
+  skipped:     '#a855f7',
+  timed_out:   '#f97316',
+};
+
+function loadDeps() {
+  api(pUrl('/api/deps')).then(data => {
+    _depsData = data;
+    renderDepsGraph(data);
+  }).catch(() => {});
+}
+
+function renderDepsGraph(data) {
+  const nodes  = data.nodes  || [];
+  const edges  = data.edges  || [];
+  const showAll = document.getElementById('depsShowAll') && document.getElementById('depsShowAll').checked;
+  const emptyEl = document.getElementById('depsEmpty');
+  const container = document.getElementById('depsContainer');
+  const svg = document.getElementById('depsSvg');
+
+  // Filter: by default hide done/skipped tasks if not showAll
+  const visNodes = showAll ? nodes : nodes.filter(n => n.status !== 'done' && n.status !== 'skipped');
+  const visIds   = new Set(visNodes.map(n => n.id));
+  const visEdges = edges.filter(e => visIds.has(e.from) && visIds.has(e.to));
+
+  if (visNodes.length === 0) {
+    if (emptyEl) emptyEl.style.display = '';
+    container.style.display = 'none';
+    return;
+  }
+  if (emptyEl) emptyEl.style.display = 'none';
+  container.style.display = '';
+
+  const W = svg.clientWidth  || svg.getBoundingClientRect().width  || 700;
+  const H = svg.clientHeight || svg.getBoundingClientRect().height || 520;
+  const R = 22; // node radius
+
+  // Initialise positions with a grid layout, then run force simulation
+  const posMap = {};
+  visNodes.forEach((n, i) => {
+    const cols = Math.max(1, Math.ceil(Math.sqrt(visNodes.length)));
+    const col  = i % cols;
+    const row  = Math.floor(i / cols);
+    posMap[n.id] = {
+      x: 60 + col * ((W - 120) / Math.max(cols - 1, 1)),
+      y: 60 + row * ((H - 120) / Math.max(Math.ceil(visNodes.length / cols) - 1, 1)),
+      vx: 0, vy: 0,
+      node: n,
+    };
+  });
+  _depsNodes = Object.values(posMap);
+
+  // Build SVG
+  svg.innerHTML = '';
+  svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
+
+  // Defs: arrowhead marker
+  const defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
+  defs.innerHTML = '<marker id="deps-arrow" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L0,6 L8,3 z" fill="#6b7280"/></marker>';
+  svg.appendChild(defs);
+
+  // Edge layer
+  const edgeLayer = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+  edgeLayer.id = 'depsEdgeLayer';
+  svg.appendChild(edgeLayer);
+
+  // Node layer
+  const nodeLayer = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+  nodeLayer.id = 'depsNodeLayer';
+  svg.appendChild(nodeLayer);
+
+  // Draw edges
+  visEdges.forEach(e => {
+    const line = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    line.classList.add('deps-edge');
+    line.dataset.from = e.from;
+    line.dataset.to   = e.to;
+    edgeLayer.appendChild(line);
+  });
+
+  // Draw nodes
+  _depsNodes.forEach(p => {
+    const n = p.node;
+    const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+    g.classList.add('deps-node', 'deps-node-' + n.status);
+    g.dataset.id = n.id;
+
+    const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+    circle.setAttribute('r', R);
+    circle.setAttribute('cx', 0);
+    circle.setAttribute('cy', 0);
+    g.appendChild(circle);
+
+    // Priority badge
+    if (n.priority && n.priority <= 3) {
+      const badge = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+      badge.setAttribute('x', R - 6);
+      badge.setAttribute('y', -(R - 6));
+      badge.setAttribute('font-size', '9');
+      badge.setAttribute('fill', '#facc15');
+      badge.setAttribute('text-anchor', 'middle');
+      badge.textContent = 'P' + n.priority;
+      g.appendChild(badge);
+    }
+
+    // Label
+    const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    label.setAttribute('x', 0);
+    label.setAttribute('y', R + 14);
+    label.setAttribute('text-anchor', 'middle');
+    label.setAttribute('font-size', '10');
+    label.textContent = truncateLabel(n.title, 18);
+    g.appendChild(label);
+
+    // ID label inside circle
+    const idTxt = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    idTxt.setAttribute('x', 0);
+    idTxt.setAttribute('y', 4);
+    idTxt.setAttribute('text-anchor', 'middle');
+    idTxt.setAttribute('font-size', '11');
+    idTxt.setAttribute('font-weight', '600');
+    idTxt.setAttribute('fill', '#fff');
+    idTxt.setAttribute('pointer-events', 'none');
+    idTxt.textContent = '#' + n.id;
+    g.appendChild(idTxt);
+
+    // Drag & click
+    g.addEventListener('mousedown', e => startDrag(e, p));
+    g.addEventListener('touchstart', e => startDrag(e, p), {passive: false});
+    g.addEventListener('click', e => { e.stopPropagation(); openDepsDetail(n); });
+
+    nodeLayer.appendChild(g);
+  });
+
+  updateDepsPositions();
+
+  // Run force simulation
+  runForce(visEdges, posMap, W, H, R);
+
+  // Click on empty area closes sidebar
+  svg.addEventListener('click', () => closeDepsDetail());
+}
+
+function truncateLabel(s, max) {
+  return s.length > max ? s.slice(0, max - 1) + '…' : s;
+}
+
+function updateDepsPositions() {
+  const svg = document.getElementById('depsSvg');
+  if (!svg) return;
+  _depsNodes.forEach(p => {
+    const g = svg.querySelector('.deps-node[data-id="' + p.node.id + '"]');
+    if (g) g.setAttribute('transform', 'translate(' + p.x.toFixed(1) + ',' + p.y.toFixed(1) + ')');
+  });
+  // Update edges
+  const edgeLayer = document.getElementById('depsEdgeLayer');
+  if (!edgeLayer || !_depsData) return;
+  const posMap = {};
+  _depsNodes.forEach(p => { posMap[p.node.id] = p; });
+  edgeLayer.querySelectorAll('.deps-edge').forEach(line => {
+    const from = posMap[parseInt(line.dataset.from)];
+    const to   = posMap[parseInt(line.dataset.to)];
+    if (!from || !to) return;
+    const dx = to.x - from.x, dy = to.y - from.y;
+    const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+    const R = 22;
+    // shorten path so arrowhead touches circle edge
+    const sx = from.x + dx / dist * R;
+    const sy = from.y + dy / dist * R;
+    const ex = to.x   - dx / dist * (R + 8);
+    const ey = to.y   - dy / dist * (R + 8);
+    line.setAttribute('d', 'M' + sx.toFixed(1) + ',' + sy.toFixed(1) + ' L' + ex.toFixed(1) + ',' + ey.toFixed(1));
+  });
+}
+
+function runForce(edges, posMap, W, H, R) {
+  if (_simRunning) return;
+  _simRunning = true;
+  let iter = 0;
+  const maxIter = 200;
+  const idealLen = 130;
+
+  function step() {
+    if (iter++ > maxIter || !_simRunning) { _simRunning = false; return; }
+    const nodes = _depsNodes;
+    // Repulsion
+    for (let i = 0; i < nodes.length; i++) {
+      for (let j = i + 1; j < nodes.length; j++) {
+        const a = nodes[i], b = nodes[j];
+        const dx = b.x - a.x, dy = b.y - a.y;
+        const dist = Math.sqrt(dx * dx + dy * dy) || 0.1;
+        const force = Math.min(3000 / (dist * dist), 8);
+        const fx = force * dx / dist, fy = force * dy / dist;
+        a.vx -= fx; a.vy -= fy;
+        b.vx += fx; b.vy += fy;
+      }
+    }
+    // Spring attraction along edges
+    edges.forEach(e => {
+      const a = posMap[e.from], b = posMap[e.to];
+      if (!a || !b) return;
+      const dx = b.x - a.x, dy = b.y - a.y;
+      const dist = Math.sqrt(dx * dx + dy * dy) || 0.1;
+      const force = (dist - idealLen) * 0.04;
+      const fx = force * dx / dist, fy = force * dy / dist;
+      a.vx += fx; a.vy += fy;
+      b.vx -= fx; b.vy -= fy;
+    });
+    // Center gravity
+    nodes.forEach(p => {
+      p.vx += (W / 2 - p.x) * 0.005;
+      p.vy += (H / 2 - p.y) * 0.005;
+    });
+    // Dampen & integrate
+    const dampen = 0.8;
+    nodes.forEach(p => {
+      if (p === _dragNode) { p.vx = 0; p.vy = 0; return; }
+      p.vx *= dampen; p.vy *= dampen;
+      p.x  = Math.max(R + 2, Math.min(W - R - 2, p.x + p.vx));
+      p.y  = Math.max(R + 2, Math.min(H - R - 2, p.y + p.vy));
+    });
+    updateDepsPositions();
+    requestAnimationFrame(step);
+  }
+  requestAnimationFrame(step);
+}
+
+// ── Drag support ─────────────────────────────────────────────────────────────
+
+function startDrag(evt, posNode) {
+  _dragNode = posNode;
+  evt.preventDefault && evt.preventDefault();
+  const svg = document.getElementById('depsSvg');
+  const rect = svg.getBoundingClientRect();
+  const W = rect.width, H = rect.height;
+  const vbW = parseFloat(svg.getAttribute('viewBox').split(' ')[2]) || W;
+  const vbH = parseFloat(svg.getAttribute('viewBox').split(' ')[3]) || H;
+  const scaleX = vbW / W, scaleY = vbH / H;
+
+  function getPos(e) {
+    const touch = e.touches ? e.touches[0] : e;
+    return {
+      x: (touch.clientX - rect.left)  * scaleX,
+      y: (touch.clientY - rect.top)   * scaleY,
+    };
+  }
+
+  function onMove(e) {
+    if (!_dragNode) return;
+    const pos = getPos(e);
+    _dragNode.x = pos.x;
+    _dragNode.y = pos.y;
+    _dragNode.vx = 0;
+    _dragNode.vy = 0;
+    updateDepsPositions();
+  }
+  function onUp() {
+    _dragNode = null;
+    document.removeEventListener('mousemove', onMove);
+    document.removeEventListener('mouseup',   onUp);
+    document.removeEventListener('touchmove', onMove);
+    document.removeEventListener('touchend',  onUp);
+  }
+  document.addEventListener('mousemove', onMove);
+  document.addEventListener('mouseup',   onUp);
+  document.addEventListener('touchmove', onMove, {passive: false});
+  document.addEventListener('touchend',  onUp);
+}
+
+// ── Detail sidebar ────────────────────────────────────────────────────────────
+
+function openDepsDetail(node) {
+  const sidebar = document.getElementById('depsSidebar');
+  if (!sidebar) return;
+  document.getElementById('depsSidebarTitle').textContent = '#' + node.id + ' ' + node.title;
+  const statusLabel = {
+    pending: 'Pending', in_progress: 'In Progress', done: 'Done',
+    failed: 'Failed', skipped: 'Skipped', timed_out: 'Timed Out',
+  }[node.status] || node.status;
+  const color = STATUS_COLORS[node.status] || '#6b7280';
+  let html = '';
+  html += '<div class="deps-detail-row"><span class="deps-detail-label">Status</span>'
+        + '<span style="color:' + color + '">' + statusLabel + '</span></div>';
+  html += '<div class="deps-detail-row"><span class="deps-detail-label">Priority</span>'
+        + 'P' + (node.priority || '?') + '</div>';
+  if (node.assignee) {
+    html += '<div class="deps-detail-row"><span class="deps-detail-label">Assignee</span>'
+          + esc(node.assignee) + '</div>';
+  }
+  if (node.deadline) {
+    html += '<div class="deps-detail-row"><span class="deps-detail-label">Deadline</span>'
+          + esc(node.deadline) + '</div>';
+  }
+  if (node.description) {
+    html += '<div class="deps-detail-row"><span class="deps-detail-label">Description</span>'
+          + '<div style="margin-top:4px;white-space:pre-wrap;line-height:1.5">' + esc(node.description) + '</div></div>';
+  }
+  // Show blocking/blocked-by info
+  if (_depsData) {
+    const blockedBy = (_depsData.edges || []).filter(e => e.to   === node.id).map(e => '#' + e.from);
+    const blocks    = (_depsData.edges || []).filter(e => e.from === node.id).map(e => '#' + e.to);
+    if (blockedBy.length) {
+      html += '<div class="deps-detail-row"><span class="deps-detail-label">Blocked by</span>'
+            + blockedBy.join(', ') + '</div>';
+    }
+    if (blocks.length) {
+      html += '<div class="deps-detail-row"><span class="deps-detail-label">Blocks</span>'
+            + blocks.join(', ') + '</div>';
+    }
+  }
+  document.getElementById('depsSidebarBody').innerHTML = html;
+  sidebar.style.display = 'flex';
+}
+
+window.closeDepsDetail = function() {
+  const sidebar = document.getElementById('depsSidebar');
+  if (sidebar) sidebar.style.display = 'none';
 };
 
 // ── Timeline (Gantt) tab ─────────────────────────────────────────────────────
