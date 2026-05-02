@@ -145,6 +145,7 @@ type Task struct {
 	Approved          bool         `json:"approved,omitempty"`            // pre-approved via 'cloop task approve'; bypasses interactive gate
 	MaxMinutes        int          `json:"max_minutes,omitempty"`         // per-task execution time budget in minutes (0 = no limit)
 	Assignee          string       `json:"assignee,omitempty"`            // team member assigned to this task
+	ExternalURL       string       `json:"external_url,omitempty"`        // URL of the external resource (e.g. GitHub PR)
 }
 
 // Plan is the full task plan for a goal.

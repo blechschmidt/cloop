@@ -60,12 +60,13 @@ type GHMilestone struct {
 
 // PR represents a GitHub pull request.
 type PR struct {
-	Number    int    `json:"number"`
-	Title     string `json:"title"`
-	State     string `json:"state"`
-	Draft     bool   `json:"draft"`
-	HTMLURL   string `json:"html_url"`
-	User      User   `json:"user"`
+	Number    int     `json:"number"`
+	Title     string  `json:"title"`
+	State     string  `json:"state"`
+	Draft     bool    `json:"draft"`
+	HTMLURL   string  `json:"html_url"`
+	User      User    `json:"user"`
+	Labels    []Label `json:"labels"`
 	Head      struct {
 		Ref string `json:"ref"`
 		SHA string `json:"sha"`
@@ -75,6 +76,13 @@ type PR struct {
 	} `json:"base"`
 	UpdatedAt time.Time `json:"updated_at"`
 	Body      string    `json:"body"`
+}
+
+// PRFile represents a file changed in a pull request.
+type PRFile struct {
+	Filename string `json:"filename"`
+	Status   string `json:"status"` // added, modified, removed, renamed
+	Changes  int    `json:"changes"`
 }
 
 // CheckRun represents a CI check result.
@@ -237,6 +245,31 @@ func (c *Client) AddComment(number int, body string) error {
 		return fmt.Errorf("GitHub API error %d: %s", status, string(data))
 	}
 	return nil
+}
+
+// LabelNames returns a comma-separated list of label names for a PR.
+func (p *PR) LabelNames() string {
+	names := make([]string, len(p.Labels))
+	for i, l := range p.Labels {
+		names[i] = l.Name
+	}
+	return strings.Join(names, ", ")
+}
+
+// GetPRFiles returns the list of files changed in a pull request.
+func (c *Client) GetPRFiles(number int) ([]PRFile, error) {
+	data, status, err := c.do("GET", fmt.Sprintf("/pulls/%d/files?per_page=100", number), nil)
+	if err != nil {
+		return nil, err
+	}
+	if status != 200 {
+		return nil, fmt.Errorf("GitHub API error %d: %s", status, string(data))
+	}
+	var files []PRFile
+	if err := json.Unmarshal(data, &files); err != nil {
+		return nil, fmt.Errorf("parsing PR files: %w", err)
+	}
+	return files, nil
 }
 
 // ListPRs lists pull requests.
