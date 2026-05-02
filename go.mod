@@ -2,6 +2,8 @@ module github.com/blechschmidt/cloop
 
 go 1.25.0
 
+toolchain go1.25.9
+
 require (
 	github.com/fatih/color v1.18.0
 	github.com/spf13/cobra v1.9.1

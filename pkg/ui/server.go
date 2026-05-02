@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -39,6 +40,17 @@ type ChatMessage struct {
 
 const liveLogMaxLines = 500
 
+// authFailEntry tracks failed authentication attempts for rate-limiting.
+type authFailEntry struct {
+	count     int
+	lockedUntil time.Time
+}
+
+const (
+	authMaxFailures    = 5               // failures before lockout
+	authLockoutSeconds = 60              // lockout duration in seconds
+)
+
 // Server is the cloop web dashboard HTTP server.
 type Server struct {
 	WorkDir  string
@@ -49,6 +61,10 @@ type Server struct {
 	mu      sync.Mutex
 	clients map[chan sseEvent]struct{}
 	lastMod time.Time
+
+	// Rate limiting: tracks per-IP auth failure counts.
+	authMu   sync.Mutex
+	authFails map[string]*authFailEntry
 
 	// Live log ring-buffer (last liveLogMaxLines lines of subprocess output).
 	liveLogMu      sync.Mutex
@@ -77,10 +93,11 @@ type Server struct {
 // "Authorization: Bearer <token>" header or "?token=<token>" query param.
 func New(workdir string, port int, token string) *Server {
 	return &Server{
-		WorkDir: workdir,
-		Port:    port,
-		Token:   token,
-		clients: make(map[chan sseEvent]struct{}),
+		WorkDir:   workdir,
+		Port:      port,
+		Token:     token,
+		clients:   make(map[chan sseEvent]struct{}),
+		authFails: make(map[string]*authFailEntry),
 	}
 }
 
@@ -149,18 +166,85 @@ func (s *Server) Start() error {
 	} else {
 		fmt.Printf("cloop dashboard running at http://localhost%s\n", addr)
 	}
-	return http.ListenAndServe(addr, s.authMiddleware(mux))
+	return http.ListenAndServe(addr, securityHeaders(s.authMiddleware(mux)))
+}
+
+// securityHeaders adds hardening HTTP response headers to every response.
+func securityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Prevent MIME-type sniffing.
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		// Deny framing to prevent clickjacking.
+		w.Header().Set("X-Frame-Options", "DENY")
+		// Strict CSP: only allow same-origin resources plus inline styles/scripts
+		// needed by the SPA. No external connections permitted.
+		w.Header().Set("Content-Security-Policy",
+			"default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'")
+		// Disable the Referrer header for privacy.
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		// Restrict CORS to localhost only (not wildcard).
+		origin := r.Header.Get("Origin")
+		if origin != "" {
+			if strings.HasPrefix(origin, "http://localhost") || strings.HasPrefix(origin, "http://127.0.0.1") {
+				w.Header().Set("Access-Control-Allow-Origin", origin)
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// clientIP extracts the real client IP, preferring X-Forwarded-For when running
+// behind a reverse proxy on localhost.
+func clientIP(r *http.Request) string {
+	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
+		// Take first address only.
+		if idx := strings.Index(fwd, ","); idx != -1 {
+			return strings.TrimSpace(fwd[:idx])
+		}
+		return strings.TrimSpace(fwd)
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
 }
 
 // authMiddleware enforces Bearer-token authentication on all /api/* routes when
 // s.Token is set. The root path "/" is always served without auth so the login
-// page can be loaded in the browser.
+// page can be loaded in the browser. Failed attempts are rate-limited per IP.
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if s.Token == "" || r.URL.Path == "/" {
 			next.ServeHTTP(w, r)
 			return
 		}
+
+		ip := clientIP(r)
+
+		// Check rate limit before evaluating the token.
+		if s.Token != "" {
+			s.authMu.Lock()
+			entry, ok := s.authFails[ip]
+			if !ok {
+				entry = &authFailEntry{}
+				s.authFails[ip] = entry
+			}
+			if entry.count >= authMaxFailures && time.Now().Before(entry.lockedUntil) {
+				s.authMu.Unlock()
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("Retry-After", strconv.Itoa(authLockoutSeconds))
+				w.WriteHeader(http.StatusTooManyRequests)
+				json.NewEncoder(w).Encode(map[string]string{"error": "too many failed attempts, try again later"}) //nolint:errcheck
+				return
+			}
+			// Reset counter if lockout has expired.
+			if entry.count >= authMaxFailures && time.Now().After(entry.lockedUntil) {
+				entry.count = 0
+			}
+			s.authMu.Unlock()
+		}
+
 		// Check Authorization: Bearer <token> header.
 		if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
 			if strings.TrimPrefix(auth, "Bearer ") == s.Token {
@@ -174,6 +258,16 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
+
+		// Auth failed — increment failure counter.
+		s.authMu.Lock()
+		entry := s.authFails[ip]
+		entry.count++
+		if entry.count >= authMaxFailures {
+			entry.lockedUntil = time.Now().Add(authLockoutSeconds * time.Second)
+		}
+		s.authMu.Unlock()
+
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusUnauthorized)
 		json.NewEncoder(w).Encode(map[string]string{"error": "unauthorized"}) //nolint:errcheck
@@ -247,13 +341,11 @@ func (s *Server) broadcastLog(chunk string) {
 
 func jsonOK(w http.ResponseWriter, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
 	_ = json.NewEncoder(w).Encode(v)
 }
 
 func jsonErr(w http.ResponseWriter, msg string, code int) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
@@ -280,7 +372,6 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 
 // handleState returns the current project state as JSON.
 func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Access-Control-Allow-Origin", "*")
 	ps, err := state.Load(s.WorkDir)
 	if err != nil {
 		jsonErr(w, "no cloop project found", http.StatusNotFound)
@@ -299,7 +390,6 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
 
 	ch := make(chan sseEvent, 8)
 	s.mu.Lock()
@@ -1489,7 +1579,6 @@ func (s *Server) handleProjectsEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
 
 	ch := make(chan sseEvent, 8)
 	s.mu.Lock()

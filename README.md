@@ -1208,6 +1208,85 @@ Invoke-Expression (&cloop completion powershell)
 | `cloop task merge <id…>` | All task IDs for multi-ID arguments |
 | Subcommands | All registered subcommands with descriptions |
 
+## Security Model
+
+### What data leaves the machine
+
+When you run cloop in any AI-powered mode (PM, suggest, explain, etc.) cloop sends
+**only the following** to your configured AI provider:
+
+| Data sent | When |
+|-----------|------|
+| Your project **goal** and **task descriptions** | Every prompt |
+| **Step output** from previous tasks (for context) | When building task context |
+| **Codebase snippets** injected by `--inject-context` or `cloop context` | When context injection is enabled |
+| Git log / diff excerpts | Commands that require them (pr, commit-msg, trace, …) |
+
+**No API keys, passwords, or environment variables** are ever included in prompts.
+**No telemetry** is sent to Anthropic or any third party by cloop itself.
+
+### API key storage
+
+| Location | What is stored |
+|----------|----------------|
+| `.cloop/config.yaml` | API keys (optional — env vars are preferred) |
+| Environment variables | Recommended: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GITHUB_TOKEN` |
+| `.cloop/state.db` | Goal, task list, step outputs — **no API keys** |
+
+**Config file permissions:** cloop writes `.cloop/config.yaml` with mode `0600`
+(owner read/write only). On load, cloop warns if the file has world- or
+group-readable permissions so you can run `chmod 600 .cloop/config.yaml`.
+
+**Encrypted secrets** (`cloop secret`) are stored in `.cloop/secrets.enc` using
+AES-256-GCM and never written to any AI prompt.
+
+### State file integrity (optional HMAC)
+
+Set the `CLOOP_STATE_HMAC_KEY` environment variable to enable HMAC-SHA256
+signing of exported state. The `pkg/security` package provides `Sign()` /
+`Verify()` utilities; tooling that exports or imports state can use these to
+detect tampering.
+
+### Web UI (`cloop ui`)
+
+The web dashboard binds to **localhost only** by default. When a `--token` is
+set:
+
+- Every `/api/*` request must present `Authorization: Bearer <token>` or
+  `?token=<token>`.
+- Failed authentication attempts are **rate-limited**: after 5 consecutive
+  failures from the same IP the endpoint returns HTTP 429 and blocks that IP
+  for 60 seconds.
+- All responses include hardened HTTP headers:
+  - `Content-Security-Policy` — restricts resource loading to same-origin
+  - `X-Content-Type-Options: nosniff`
+  - `X-Frame-Options: DENY`
+  - `Referrer-Policy: no-referrer`
+- CORS is restricted to `localhost` / `127.0.0.1` origins only (no wildcard).
+
+### TLS / provider communication
+
+All three remote providers (Anthropic, OpenAI, custom OpenAI-compatible) use
+Go's default `http.Client` which validates TLS certificates against the system
+CA pool. There is **no `InsecureSkipVerify` option** in cloop.
+
+For self-hosted models on plain HTTP (Ollama), set `ollama.base_url` to the
+local endpoint. Outbound traffic to Anthropic/OpenAI is always TLS.
+
+### Shell hooks and command injection
+
+Pre/post task hooks (`hooks.pre_task`, `hooks.post_task`, etc.) are **user-
+configured shell commands** from `.cloop/config.yaml`. Task context
+(title, status, role) is passed as **environment variables** — never
+interpolated into the hook command string — so task content cannot inject shell
+commands through the hook mechanism.
+
+### Dependency security
+
+cloop uses `govulncheck` (golang.org/x/vuln) for dependency audits. The
+`toolchain` directive in `go.mod` pins the minimum Go version to one that
+resolves all known stdlib vulnerabilities.
+
 ## License
 
 MIT

@@ -2,8 +2,10 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 
 	"gopkg.in/yaml.v3"
 )
@@ -206,15 +208,27 @@ func ConfigPath(workdir string) string {
 // Load reads config from .cloop/config.yaml. Returns defaults if missing.
 // Environment variables override file values: ANTHROPIC_API_KEY, OPENAI_API_KEY,
 // ANTHROPIC_BASE_URL, OPENAI_BASE_URL, OLLAMA_BASE_URL, CLOOP_PROVIDER.
+// On Unix systems, Load prints a warning when the config file is world-readable
+// (permissions wider than 0600) because it may contain API keys.
 func Load(workdir string) (*Config, error) {
 	cfg := Default()
-	data, err := os.ReadFile(ConfigPath(workdir))
+	path := ConfigPath(workdir)
+	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
 		cfg.applyEnvVars()
 		return cfg, nil
 	}
 	if err != nil {
 		return nil, err
+	}
+	// Warn on Unix if the config file is world- or group-readable.
+	if runtime.GOOS != "windows" {
+		if fi, statErr := os.Stat(path); statErr == nil {
+			if fi.Mode().Perm()&0o077 != 0 {
+				fmt.Fprintf(os.Stderr, "warning: %s has permissions %o — it may contain API keys. Run: chmod 600 %s\n",
+					path, fi.Mode().Perm(), path)
+			}
+		}
 	}
 	if err := yaml.Unmarshal(data, cfg); err != nil {
 		return nil, err
@@ -259,7 +273,8 @@ func Save(workdir string, cfg *Config) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(ConfigPath(workdir), data, 0o644)
+	// 0o600: owner read/write only — the file may contain API keys.
+	return os.WriteFile(ConfigPath(workdir), data, 0o600)
 }
 
 // WriteDefault creates a default config.yaml if one doesn't exist.
