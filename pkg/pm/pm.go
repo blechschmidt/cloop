@@ -195,6 +195,9 @@ type Task struct {
 	TDDStatus         string       `json:"tdd_status,omitempty"`          // TDD verification outcome: "pass", "fail", or "skipped"
 	TDDScore          int          `json:"tdd_score,omitempty"`           // TDD score 0-100 (percentage of acceptance criteria met)
 	SprintID          int          `json:"sprint_id,omitempty"`           // sprint this task belongs to (0 = unassigned)
+	// ChainInput holds the previous task's output when this task is part of a pipeline
+	// chain (tagged "chain:<uuid>"). It is runtime-only and never persisted.
+	ChainInput string `json:"-"`
 }
 
 // Plan is the full task plan for a goal.
@@ -453,6 +456,11 @@ func ExecuteTaskPrompt(goal, instructions, workDir string, plan *Plan, task *Tas
 		b.WriteString(fmt.Sprintf("*Depends on: %s*\n", strings.Join(depTitles, ", ")))
 	}
 	b.WriteString("\n")
+
+	// Inject previous step output when this task is part of a pipeline chain.
+	if task.ChainInput != "" {
+		b.WriteString(BuildChainPrompt(task, task.ChainInput))
+	}
 
 	// Show completed tasks for context
 	done := []*Task{}

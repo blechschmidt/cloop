@@ -2081,6 +2081,9 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			o.appendConsensusReport(task, consensusReport)
 		}
 
+		// Chain pipeline: propagate this task's output to downstream chained tasks.
+		o.injectChainOutput(s.Plan, task, taskOutput)
+
 		// Save a history entry for the task completion before clearing the checkpoint.
 		{
 			var elapsedSec float64
@@ -2819,6 +2822,65 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 	o.distillLearnings(ctx, s.Plan)
 
 	return nil
+}
+
+// injectChainOutput propagates a completed task's AI output to downstream tasks
+// that are chained to it.  A task is "chained" when it carries a "chain:<uuid>"
+// tag and lists the completed task in its DependsOn field.
+// The output is stored in the runtime-only ChainInput field so that
+// ExecuteTaskPrompt can prepend it as a "Previous step output:" section.
+func (o *Orchestrator) injectChainOutput(plan *pm.Plan, completedTask *pm.Task, output string) {
+	if completedTask.Status != pm.TaskDone {
+		return
+	}
+	chainTag := chainTagOf(completedTask.Tags)
+	if chainTag == "" {
+		return
+	}
+	dimColor := color.New(color.Faint)
+	for _, t := range plan.Tasks {
+		if !hasChainTag(t.Tags, chainTag) {
+			continue
+		}
+		if !sliceContains(t.DependsOn, completedTask.ID) {
+			continue
+		}
+		t.ChainInput = artifact.ReadTaskOutput(o.config.WorkDir, completedTask)
+		if t.ChainInput == "" {
+			t.ChainInput = output
+		}
+		dimColor.Printf("  chain: injecting output of task %d → task %d\n", completedTask.ID, t.ID)
+	}
+}
+
+// chainTagOf returns the first "chain:<uuid>" tag found in tags, or "".
+func chainTagOf(tags []string) string {
+	for _, t := range tags {
+		if strings.HasPrefix(t, "chain:") {
+			return t
+		}
+	}
+	return ""
+}
+
+// hasChainTag reports whether tags contains the given chain tag.
+func hasChainTag(tags []string, chainTag string) bool {
+	for _, t := range tags {
+		if t == chainTag {
+			return true
+		}
+	}
+	return false
+}
+
+// sliceContains reports whether id is present in ids.
+func sliceContains(ids []int, id int) bool {
+	for _, v := range ids {
+		if v == id {
+			return true
+		}
+	}
+	return false
 }
 
 // writeTaskArtifact persists the full AI response for a task to

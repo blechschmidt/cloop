@@ -68,6 +68,38 @@ func WriteExecArtifact(workDir string, task *pm.Task, cmdArgs []string, exitCode
 
 var nonSlugRe = regexp.MustCompile(`[^a-z0-9-]+`)
 
+// ReadTaskOutput reads the full AI output for a completed task.
+// If task.ArtifactPath is set and readable, it returns the artifact body with
+// YAML frontmatter stripped.  Falls back to task.Result if the file is missing.
+// Returns empty string when neither source is available.
+func ReadTaskOutput(workDir string, task *pm.Task) string {
+	if task.ArtifactPath != "" {
+		absPath := task.ArtifactPath
+		if !filepath.IsAbs(absPath) {
+			absPath = filepath.Join(workDir, absPath)
+		}
+		if data, err := os.ReadFile(absPath); err == nil {
+			return stripFrontmatter(string(data))
+		}
+	}
+	return task.Result
+}
+
+// stripFrontmatter removes YAML frontmatter (--- ... ---\n) from the start of s.
+func stripFrontmatter(s string) string {
+	if len(s) < 4 || s[:3] != "---" {
+		return s
+	}
+	rest := s[3:]
+	idx := strings.Index(rest, "\n---")
+	if idx < 0 {
+		return s
+	}
+	body := rest[idx+4:]
+	body = strings.TrimLeft(body, "\n")
+	return body
+}
+
 // LiveArtifactDir returns the directory where live streaming artifacts are written.
 func LiveArtifactDir(workDir string) string {
 	return filepath.Join(workDir, ".cloop", "artifacts")
