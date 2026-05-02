@@ -1483,7 +1483,29 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 				dimColor.Printf("→ Running %s on task %d...\n", taskProvider.Name(), task.ID)
 
 				opts, wasStreamed := o.makeOpts(s.Model, true)
+				// Open live artifact file so `cloop task watch` can tail output.
+				liveFile, liveErr := artifact.OpenLiveArtifact(o.config.WorkDir, task.ID)
+				if liveErr != nil {
+					dimColor.Printf("  live artifact open error (ignored): %v\n", liveErr)
+					liveFile = nil
+				}
+				if liveFile != nil {
+					prevOnToken := opts.OnToken
+					opts.OnToken = func(token string) {
+						if prevOnToken != nil {
+							prevOnToken(token)
+						}
+						_, _ = liveFile.WriteString(token)
+					}
+				}
 				result, err := taskProvider.Complete(taskCtx, prompt, opts)
+				if liveFile != nil {
+					if err == nil && !wasStreamed() {
+						// Non-streaming provider: write full output so watchers can read it.
+						_, _ = liveFile.WriteString(result.Output)
+					}
+					_ = liveFile.Close()
+				}
 				if err != nil {
 					if isTimeoutErr(taskCtx, err) {
 						color.New(color.FgYellow).Printf("⏱ Task %d timed out (%dm): %s\n", task.ID, task.MaxMinutes, task.Title)
@@ -2466,6 +2488,13 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 				tTaskCtx, tTaskCancel := o.taskContextWithTimeout(ctx, t)
 				defer tTaskCancel()
 				result, err := taskProvider.Complete(tTaskCtx, prompt, opts)
+				// Write live artifact for parallel task (non-streaming).
+				if err == nil {
+					if lf, lfErr := artifact.OpenLiveArtifact(o.config.WorkDir, t.ID); lfErr == nil {
+						_, _ = lf.WriteString(result.Output)
+						_ = lf.Close()
+					}
+				}
 				dur := time.Since(start)
 				timedOut := isTimeoutErr(tTaskCtx, err)
 				results[idx] = taskResult{task: t, result: result, err: err, duration: dur, timedOut: timedOut}

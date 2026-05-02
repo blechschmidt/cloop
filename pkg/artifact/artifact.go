@@ -16,6 +16,28 @@ import (
 
 var nonSlugRe = regexp.MustCompile(`[^a-z0-9-]+`)
 
+// LiveArtifactDir returns the directory where live streaming artifacts are written.
+func LiveArtifactDir(workDir string) string {
+	return filepath.Join(workDir, ".cloop", "artifacts")
+}
+
+// LiveArtifactPath returns the canonical path for the live streaming output file
+// for the given task ID. The file is written incrementally during execution.
+func LiveArtifactPath(workDir string, taskID int) string {
+	return filepath.Join(LiveArtifactDir(workDir), fmt.Sprintf("%d_output.txt", taskID))
+}
+
+// OpenLiveArtifact creates (or truncates) the live streaming output file for a
+// task and returns the open file handle. The caller is responsible for closing it.
+// Errors are non-fatal; the caller should treat nil as "no live artifact".
+func OpenLiveArtifact(workDir string, taskID int) (*os.File, error) {
+	dir := LiveArtifactDir(workDir)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, fmt.Errorf("create artifact dir: %w", err)
+	}
+	return os.OpenFile(LiveArtifactPath(workDir, taskID), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+}
+
 // slug converts a task title into a URL-safe, lowercase, hyphen-separated
 // string truncated to maxLen characters.
 func slug(title string, maxLen int) string {
