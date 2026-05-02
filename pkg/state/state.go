@@ -82,7 +82,16 @@ func (s *ProjectState) Save() error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(StatePath(s.WorkDir), data, 0o644)
+	if err := os.WriteFile(StatePath(s.WorkDir), data, 0o644); err != nil {
+		return err
+	}
+
+	// Append a plan history snapshot whenever the plan changes.
+	if s.PMMode && s.Plan != nil {
+		// SaveSnapshot deduplicates — it's safe to call on every Save.
+		_ = pm.SaveSnapshot(s.WorkDir, s.Plan)
+	}
+	return nil
 }
 
 // SyncFromDisk re-reads the on-disk state and merges any tasks that were
