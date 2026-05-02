@@ -12,13 +12,14 @@ const configFile = ".cloop/config.yaml"
 
 // Config is the project configuration loaded from .cloop/config.yaml.
 type Config struct {
-	// Default provider: anthropic, openai, ollama, claudecode
+	// Default provider: anthropic, openai, ollama, claudecode, mock
 	Provider string `yaml:"provider"`
 
 	Anthropic  AnthropicConfig  `yaml:"anthropic"`
 	OpenAI     OpenAIConfig     `yaml:"openai"`
 	Ollama     OllamaConfig     `yaml:"ollama"`
 	ClaudeCode ClaudeCodeConfig `yaml:"claudecode"`
+	Mock       MockConfig       `yaml:"mock,omitempty"`
 	Webhook    WebhookConfig    `yaml:"webhook,omitempty"`
 	GitHub     GitHubConfig     `yaml:"github,omitempty"`
 	// Router maps task roles to provider names for heterogeneous multi-agent execution.
@@ -124,6 +125,17 @@ type OllamaConfig struct {
 
 type ClaudeCodeConfig struct {
 	Model string `yaml:"model"`
+}
+
+// MockConfig holds settings for the deterministic offline mock provider.
+type MockConfig struct {
+	// ResponsesFile is the path (absolute or relative to workdir) to a YAML file
+	// mapping prompt substrings/hashes to canned responses.
+	// Defaults to .cloop/mock_responses.yaml when empty.
+	ResponsesFile string `yaml:"responses_file,omitempty"`
+	// Default is the response returned when no rule matches.
+	// Defaults to "TASK_DONE".
+	Default string `yaml:"default,omitempty"`
 }
 
 // NotifyConfig holds notification channel settings.

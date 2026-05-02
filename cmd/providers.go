@@ -7,6 +7,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/provider"
 	"github.com/blechschmidt/cloop/pkg/provider/anthropic"
 	"github.com/blechschmidt/cloop/pkg/provider/claudecode"
+	mockprovider "github.com/blechschmidt/cloop/pkg/provider/mock"
 	"github.com/blechschmidt/cloop/pkg/provider/ollama"
 	"github.com/blechschmidt/cloop/pkg/provider/openai"
 )
@@ -26,5 +27,9 @@ func init() {
 
 	provider.Register(ollama.ProviderName, func(cfg provider.ProviderConfig) (provider.Provider, error) {
 		return ollama.New(cfg.OllamaBaseURL), nil
+	})
+
+	provider.Register(mockprovider.ProviderName, func(cfg provider.ProviderConfig) (provider.Provider, error) {
+		return mockprovider.New(cfg.MockResponsesFile), nil
 	})
 }

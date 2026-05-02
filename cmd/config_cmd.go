@@ -93,9 +93,9 @@ var configSetCmd = &cobra.Command{
 func applyConfigKey(cfg *config.Config, key, value string) error {
 	switch key {
 	case "provider":
-		validProviders := map[string]bool{"anthropic": true, "openai": true, "ollama": true, "claudecode": true}
+		validProviders := map[string]bool{"anthropic": true, "openai": true, "ollama": true, "claudecode": true, "mock": true}
 		if !validProviders[value] {
-			return fmt.Errorf("unknown provider %q — valid: anthropic, openai, ollama, claudecode", value)
+			return fmt.Errorf("unknown provider %q — valid: anthropic, openai, ollama, claudecode, mock", value)
 		}
 		cfg.Provider = value
 
@@ -166,8 +166,13 @@ func applyConfigKey(cfg *config.Config, key, value string) error {
 	case "sync.branch":
 		cfg.Sync.Branch = value
 
+	case "mock.responses_file":
+		cfg.Mock.ResponsesFile = value
+	case "mock.default":
+		cfg.Mock.Default = value
+
 	default:
-		return fmt.Errorf("unknown config key %q\n\nValid keys:\n  provider\n  anthropic.api_key, anthropic.model, anthropic.base_url\n  openai.api_key, openai.model, openai.base_url\n  ollama.base_url, ollama.model\n  claudecode.model\n  webhook.url, webhook.events\n  notify.slack_webhook, notify.discord_webhook\n  github.token, github.repo, github.labels\n  sync.remote, sync.branch", key)
+		return fmt.Errorf("unknown config key %q\n\nValid keys:\n  provider\n  anthropic.api_key, anthropic.model, anthropic.base_url\n  openai.api_key, openai.model, openai.base_url\n  ollama.base_url, ollama.model\n  claudecode.model\n  mock.responses_file, mock.default\n  webhook.url, webhook.events\n  notify.slack_webhook, notify.discord_webhook\n  github.token, github.repo, github.labels\n  sync.remote, sync.branch", key)
 	}
 	return nil
 }

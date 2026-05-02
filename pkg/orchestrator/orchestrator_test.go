@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/provider"
+	mockprovider "github.com/blechschmidt/cloop/pkg/provider/mock"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/fatih/color"
 )
@@ -1981,5 +1983,203 @@ func TestRunPMParallel_DependencyBlocking(t *testing.T) {
 	// 2 tasks = 2 provider calls.
 	if prov.calls != 2 {
 		t.Errorf("expected 2 provider calls, got %d", prov.calls)
+	}
+}
+
+// --- Mock provider integration tests ---
+// These tests use pkg/provider/mock directly, demonstrating deterministic CI-safe
+// integration tests that require no API keys.
+
+// writeMockResponses writes a mock_responses.yaml file to dir/.cloop/.
+func writeMockResponses(t *testing.T, dir, content string) {
+	t.Helper()
+	cloopDir := filepath.Join(dir, ".cloop")
+	if err := os.MkdirAll(cloopDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cloopDir, "mock_responses.yaml"), []byte(content), 0o644); err != nil {
+		t.Fatalf("write mock_responses.yaml: %v", err)
+	}
+}
+
+// TestMockProvider_DefaultResponse verifies that the mock provider returns TASK_DONE
+// when no responses file exists and no config is given.
+func TestMockProvider_DefaultResponse(t *testing.T) {
+	dir := tempDir(t)
+	s := initState(t, dir, "goal", 0)
+	s.PMMode = true
+	s.Plan = &pm.Plan{
+		Goal:  "goal",
+		Tasks: []*pm.Task{{ID: 1, Title: "Task A", Priority: 1, Status: pm.TaskPending}},
+	}
+	s.Save()
+
+	// No responses file: provider must default to TASK_DONE.
+	prov := mockprovider.NewWithWorkDir("", dir)
+	o := newOrchestrator(t, dir, Config{WorkDir: dir, PMMode: true}, prov)
+	if err := o.runPM(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if o.state.Plan.Tasks[0].Status != pm.TaskDone {
+		t.Errorf("expected task done via default TASK_DONE response, got %q", o.state.Plan.Tasks[0].Status)
+	}
+}
+
+// TestMockProvider_SubstringMatch verifies that a prompt-substring rule returns the
+// configured canned response rather than the default.
+// Uses the CURRENT TASK header format "**Task N: Title**" which is unique per task.
+func TestMockProvider_SubstringMatch(t *testing.T) {
+	dir := tempDir(t)
+	s := initState(t, dir, "goal", 0)
+	s.PMMode = true
+	s.Plan = &pm.Plan{
+		Goal: "goal",
+		Tasks: []*pm.Task{
+			{ID: 1, Title: "Build feature", Priority: 1, Status: pm.TaskPending},
+			{ID: 2, Title: "Write docs",    Priority: 2, Status: pm.TaskPending},
+		},
+	}
+	s.Save()
+
+	// Use the CURRENT TASK prompt format: "**Task 2: Write docs**" only appears
+	// in task 2's execution prompt (task 1's prompt lists task 2 only as an upcoming
+	// task in the format "- [ ] Task 2: Write docs", without double asterisks).
+	writeMockResponses(t, dir, "rules:\n  - substring: \"**Task 2: Write docs**\"\n    response: |-\n      docs skipped\n      TASK_SKIPPED\ndefault: |-\n  done\n  TASK_DONE\n")
+
+	prov := mockprovider.NewWithWorkDir("", dir)
+	o := newOrchestrator(t, dir, Config{WorkDir: dir, PMMode: true}, prov)
+	if err := o.runPM(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	tasks := o.state.Plan.Tasks
+	if tasks[0].Status != pm.TaskDone {
+		t.Errorf("task 1: expected done (default), got %q", tasks[0].Status)
+	}
+	if tasks[1].Status != pm.TaskSkipped {
+		t.Errorf("task 2: expected skipped (substring match), got %q", tasks[1].Status)
+	}
+}
+
+// TestMockProvider_ExplicitResponsesFile verifies that a non-default responses file
+// path is respected when passed directly to the constructor.
+func TestMockProvider_ExplicitResponsesFile(t *testing.T) {
+	dir := tempDir(t)
+	s := initState(t, dir, "goal", 0)
+	s.PMMode = true
+	s.Plan = &pm.Plan{
+		Goal:  "goal",
+		Tasks: []*pm.Task{{ID: 1, Title: "Deploy", Priority: 1, Status: pm.TaskPending}},
+	}
+	s.Save()
+
+	// Write to a custom path, not the default .cloop/mock_responses.yaml.
+	customFile := filepath.Join(dir, "custom_responses.yaml")
+	if err := os.WriteFile(customFile, []byte("default: \"deployed\nTASK_DONE\"\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	prov := mockprovider.NewWithWorkDir(customFile, dir)
+	o := newOrchestrator(t, dir, Config{WorkDir: dir, PMMode: true}, prov)
+	if err := o.runPM(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if o.state.Plan.Tasks[0].Status != pm.TaskDone {
+		t.Errorf("expected done, got %q", o.state.Plan.Tasks[0].Status)
+	}
+}
+
+// TestMockProvider_HashMatch verifies that a SHA-256 hash rule matches the exact
+// prompt and returns the configured response.
+func TestMockProvider_HashMatch(t *testing.T) {
+	// Compute the hash of a known string.
+	knownPrompt := "exact-prompt-for-hash-test"
+	hash := mockprovider.HashPrompt(knownPrompt)
+
+	dir := tempDir(t)
+
+	writeMockResponses(t, dir, fmt.Sprintf(`
+rules:
+  - hash: "%s"
+    response: "hash matched\nTASK_DONE"
+default: "TASK_FAILED"
+`, hash))
+
+	// Test the provider directly — Complete should return the hash-matched response.
+	prov := mockprovider.NewWithWorkDir("", dir)
+	result, err := prov.Complete(context.Background(), knownPrompt, provider.Options{WorkDir: dir})
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if !strings.Contains(result.Output, "hash matched") {
+		t.Errorf("expected hash-matched response, got %q", result.Output)
+	}
+}
+
+// TestMockProvider_NoMatchFallsBackToDefault verifies that when no rule matches,
+// the configured default response is returned (not TASK_DONE hardcoded).
+func TestMockProvider_NoMatchFallsBackToDefault(t *testing.T) {
+	dir := tempDir(t)
+
+	writeMockResponses(t, dir, `
+rules:
+  - substring: "will-never-match-xyz"
+    response: "TASK_FAILED"
+default: "custom default\nTASK_SKIPPED"
+`)
+
+	prov := mockprovider.NewWithWorkDir("", dir)
+	result, err := prov.Complete(context.Background(), "some other prompt", provider.Options{WorkDir: dir})
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if !strings.Contains(result.Output, "TASK_SKIPPED") {
+		t.Errorf("expected custom default (TASK_SKIPPED), got %q", result.Output)
+	}
+}
+
+// TestMockProvider_FullPMFlowWithDecompose tests a complete PM flow using the mock
+// provider for both decomposition and task execution — no API key required.
+func TestMockProvider_FullPMFlowWithDecompose(t *testing.T) {
+	dir := tempDir(t)
+	s := initState(t, dir, "build a CLI tool", 0)
+	s.PMMode = true
+	s.Save() // no plan — forces decompose call
+
+	// Write the responses file using a YAML literal block scalar (|-) so the JSON
+	// is not misinterpreted as a YAML flow mapping.
+	planJSON := `{"tasks":[{"id":1,"title":"Implement core","description":"Write core logic","priority":1},{"id":2,"title":"Add tests","description":"Write unit tests","priority":2}]}`
+
+	// Build YAML manually using block scalars to avoid YAML/JSON quoting conflicts.
+	yaml := "rules:\n" +
+		"  - substring: \"product manager\"\n" +
+		"    response: |-\n" +
+		"      " + planJSON + "\n" +
+		"  - substring: \"**Task 1: Implement core**\"\n" +
+		"    response: |-\n" +
+		"      core implemented\n" +
+		"      TASK_DONE\n" +
+		"  - substring: \"**Task 2: Add tests**\"\n" +
+		"    response: |-\n" +
+		"      tests written\n" +
+		"      TASK_DONE\n" +
+		"default: |-\n" +
+		"  " + planJSON + "\n"
+
+	writeMockResponses(t, dir, yaml)
+
+	prov := mockprovider.NewWithWorkDir("", dir)
+	o := newOrchestrator(t, dir, Config{WorkDir: dir, PMMode: true}, prov)
+	if err := o.runPM(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if o.state.Status != "complete" {
+		t.Errorf("expected status=complete, got %q", o.state.Status)
+	}
+	for _, task := range o.state.Plan.Tasks {
+		if task.Status != pm.TaskDone {
+			t.Errorf("task %d (%s): expected done, got %q", task.ID, task.Title, task.Status)
+		}
 	}
 }

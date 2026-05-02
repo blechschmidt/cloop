@@ -20,6 +20,9 @@ type ProviderConfig struct {
 
 	// Ollama settings
 	OllamaBaseURL string
+
+	// Mock settings
+	MockResponsesFile string
 }
 
 // ProviderFactory is a function that creates a Provider from a ProviderConfig.

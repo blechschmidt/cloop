@@ -89,6 +89,7 @@ var (
 	noCache              bool
 	cacheTTL             string
 	cacheMaxSize         int
+	mockMode             bool
 )
 
 var runCmd = &cobra.Command{
@@ -140,6 +141,11 @@ Press Ctrl+C to pause gracefully.`,
 			}
 		}
 
+		// --mock is a shorthand for --provider mock
+		if mockMode {
+			runProvider = "mock"
+		}
+
 		// Determine provider (flag > env > config > state > auto-detect > claudecode)
 		providerName := runProvider
 		if providerName == "" {
@@ -158,12 +164,13 @@ Press Ctrl+C to pause gracefully.`,
 			model = os.Getenv("CLOOP_MODEL")
 		}
 		provCfg := provider.ProviderConfig{
-			Name:             providerName,
-			AnthropicAPIKey:  cfg.Anthropic.APIKey,
-			AnthropicBaseURL: cfg.Anthropic.BaseURL,
-			OpenAIAPIKey:     cfg.OpenAI.APIKey,
-			OpenAIBaseURL:    cfg.OpenAI.BaseURL,
-			OllamaBaseURL:    cfg.Ollama.BaseURL,
+			Name:              providerName,
+			AnthropicAPIKey:   cfg.Anthropic.APIKey,
+			AnthropicBaseURL:  cfg.Anthropic.BaseURL,
+			OpenAIAPIKey:      cfg.OpenAI.APIKey,
+			OpenAIBaseURL:     cfg.OpenAI.BaseURL,
+			OllamaBaseURL:     cfg.Ollama.BaseURL,
+			MockResponsesFile: cfg.Mock.ResponsesFile,
 		}
 
 		// Apply per-provider model defaults from config if not overridden by flag
@@ -552,5 +559,6 @@ func init() {
 	runCmd.Flags().BoolVar(&noCache, "no-cache", false, "Disable the disk-based AI response cache for this run")
 	runCmd.Flags().StringVar(&cacheTTL, "cache-ttl", "", "Response cache TTL (e.g. 1h, 48h); default 24h")
 	runCmd.Flags().IntVar(&cacheMaxSize, "cache-max-size", 0, "Maximum number of cached entries before LRU eviction (default 100)")
+	runCmd.Flags().BoolVar(&mockMode, "mock", false, "Use the deterministic offline mock provider (shorthand for --provider mock); responses loaded from .cloop/mock_responses.yaml")
 	rootCmd.AddCommand(runCmd)
 }
