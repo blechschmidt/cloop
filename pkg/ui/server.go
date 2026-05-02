@@ -153,6 +153,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/tasks", s.handlePostTasks)
 	mux.HandleFunc("POST /api/tasks/reorder", s.handleReorderTasks)
 	mux.HandleFunc("PUT /api/tasks/{id}", s.handlePutTask)
+	mux.HandleFunc("PATCH /api/tasks/{id}", s.handlePutTask)
 	mux.HandleFunc("DELETE /api/tasks/{id}", s.handleDeleteTask)
 
 	// Config
@@ -2120,6 +2121,76 @@ const dashboardHTML = `<!DOCTYPE html>
   }
   .task-item:hover .drag-handle { opacity: 1; }
 
+  /* ── Kanban board ── */
+  .kanban-toolbar { display:flex; align-items:center; gap:10px; padding:12px 0 10px; flex-wrap:wrap; }
+  .kanban-board {
+    display:grid; grid-template-columns:repeat(4,1fr); gap:12px;
+    align-items:start; padding-bottom:20px;
+  }
+  .kanban-col {
+    background:var(--surface); border:1px solid var(--border);
+    border-radius:var(--radius); display:flex; flex-direction:column; min-height:120px;
+  }
+  .kanban-col-header {
+    display:flex; align-items:center; justify-content:space-between;
+    padding:9px 12px 8px; border-bottom:1px solid var(--border); flex-shrink:0;
+  }
+  .kanban-col-title { font-size:12px; font-weight:600; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); }
+  .kanban-col-count {
+    font-size:11px; font-weight:600; background:var(--bg);
+    border:1px solid var(--border); border-radius:10px; padding:1px 7px; color:var(--muted);
+  }
+  #kb-col-pending .kanban-col-header   { border-top:3px solid #8b949e; border-radius:var(--radius) var(--radius) 0 0; }
+  #kb-col-in_progress .kanban-col-header { border-top:3px solid var(--cyan); border-radius:var(--radius) var(--radius) 0 0; }
+  #kb-col-done .kanban-col-header      { border-top:3px solid var(--green); border-radius:var(--radius) var(--radius) 0 0; }
+  #kb-col-failed .kanban-col-header    { border-top:3px solid var(--red); border-radius:var(--radius) var(--radius) 0 0; }
+  .kanban-col-body {
+    padding:8px; display:flex; flex-direction:column; gap:6px;
+    flex:1; min-height:60px; transition:background .15s;
+  }
+  .kanban-col-body.kb-drag-over {
+    background:rgba(88,166,255,.06); border-radius:0 0 var(--radius) var(--radius);
+    outline:2px dashed rgba(88,166,255,.4); outline-offset:-4px;
+  }
+  /* Kanban card */
+  .kb-card {
+    background:var(--bg); border:1px solid var(--border); border-radius:5px;
+    padding:8px 10px; cursor:grab; position:relative;
+    border-left:3px solid transparent;
+    transition:box-shadow .15s, opacity .2s, transform .2s;
+    animation:kb-enter .18s ease-out;
+  }
+  @keyframes kb-enter { from { opacity:0; transform:translateY(-6px); } to { opacity:1; transform:none; } }
+  .kb-card:hover { box-shadow:0 2px 8px rgba(0,0,0,.35); border-color:var(--muted); }
+  .kb-card.kb-dragging { opacity:.35; transform:scale(.97); cursor:grabbing; }
+  .kb-card.kb-compact .kb-card-desc,
+  .kb-card.kb-compact .kb-card-tags,
+  .kb-card.kb-compact .kb-card-meta { display:none; }
+  /* Priority left-border colors */
+  .kb-card.kbp1 { border-left-color:var(--red); }
+  .kb-card.kbp2 { border-left-color:var(--yellow); }
+  .kb-card.kbp3 { border-left-color:var(--cyan); }
+  .kb-card-header { display:flex; align-items:flex-start; gap:6px; }
+  .kb-card-title { font-size:12px; font-weight:500; flex:1; line-height:1.4; }
+  .kb-avatar {
+    width:22px; height:22px; border-radius:50%; background:var(--accent);
+    color:#fff; font-size:9px; font-weight:700; display:flex; align-items:center;
+    justify-content:center; flex-shrink:0; text-transform:uppercase;
+  }
+  .kb-card-desc { font-size:11px; color:var(--muted); margin-top:4px; line-height:1.4;
+    display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+  .kb-card-tags { display:flex; flex-wrap:wrap; gap:3px; margin-top:5px; }
+  .kb-chip { font-size:10px; padding:1px 5px; border-radius:3px; background:rgba(88,166,255,.12);
+    color:var(--accent); border:1px solid rgba(88,166,255,.2); }
+  .kb-card-meta { display:flex; align-items:center; gap:6px; margin-top:6px; flex-wrap:wrap; }
+  .kb-deadline { font-size:10px; padding:1px 5px; border-radius:3px;
+    background:rgba(248,81,73,.12); color:var(--red); border:1px solid rgba(248,81,73,.2); }
+  .kb-deadline.kb-due-soon { background:rgba(210,153,34,.12); color:var(--yellow); border-color:rgba(210,153,34,.2); }
+  .kb-deadline.kb-ok { background:rgba(63,185,80,.08); color:var(--green); border-color:rgba(63,185,80,.2); }
+  .kb-taskid { font-size:10px; color:var(--muted); margin-left:auto; }
+  @media (max-width:900px) { .kanban-board { grid-template-columns:repeat(2,1fr); } }
+  @media (max-width:560px) { .kanban-board { grid-template-columns:1fr; } }
+
   /* ── Add task form ── */
   .add-task-bar { display:flex; gap:8px; margin-bottom:14px; flex-wrap:wrap; }
   .add-task-bar input { flex:1; min-width:160px; }
@@ -2886,6 +2957,7 @@ const dashboardHTML = `<!DOCTYPE html>
     <div class="tab-nav" id="tabNav">
       <button class="tab-btn active" onclick="switchTab('overview')"  id="tbtn-overview">Overview</button>
       <button class="tab-btn"        onclick="switchTab('tasks')"     id="tbtn-tasks">Tasks</button>
+      <button class="tab-btn"        onclick="switchTab('kanban')"    id="tbtn-kanban">Kanban</button>
       <button class="tab-btn"        onclick="switchTab('timeline')"  id="tbtn-timeline">Timeline</button>
       <button class="tab-btn"        onclick="switchTab('chat')"      id="tbtn-chat">Chat</button>
       <button class="tab-btn"        onclick="switchTab('projects')"  id="tbtn-projects">Projects</button>
@@ -2905,6 +2977,7 @@ const dashboardHTML = `<!DOCTYPE html>
       </div>
       <button class="m-tab-btn" onclick="switchTab('overview')"  id="mtbtn-overview"><span class="m-tab-icon">&#128200;</span>Overview</button>
       <button class="m-tab-btn" onclick="switchTab('tasks')"     id="mtbtn-tasks"><span class="m-tab-icon">&#10003;</span>Tasks</button>
+      <button class="m-tab-btn" onclick="switchTab('kanban')"    id="mtbtn-kanban"><span class="m-tab-icon">&#9783;</span>Kanban</button>
       <button class="m-tab-btn" onclick="switchTab('timeline')"  id="mtbtn-timeline"><span class="m-tab-icon">&#128197;</span>Timeline</button>
       <button class="m-tab-btn" onclick="switchTab('chat')"      id="mtbtn-chat"><span class="m-tab-icon">&#128172;</span>Chat</button>
       <button class="m-tab-btn" onclick="switchTab('projects')"  id="mtbtn-projects"><span class="m-tab-icon">&#128193;</span>Projects</button>
@@ -3124,6 +3197,49 @@ const dashboardHTML = `<!DOCTYPE html>
         </div>
         <div class="task-list" id="taskListFull">
           <div class="empty-state"><h3>No tasks yet</h3><p>Add a task above, or run <code>cloop run --pm</code> to generate a task plan.</p></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══════════════════════════════════════════════════════════ KANBAN -->
+    <div id="tab-kanban" class="tab-panel">
+      <div class="kanban-toolbar">
+        <span class="section-title" style="margin:0">Kanban Board</span>
+        <button class="btn" id="kanbanCompactBtn" style="padding:3px 10px;font-size:11px" onclick="toggleKanbanCompact()">Compact</button>
+        <button class="btn" style="padding:3px 10px;font-size:11px" onclick="refreshState()">Refresh</button>
+      </div>
+      <div id="kanbanBoard" class="kanban-board">
+        <div class="kanban-col" id="kb-col-pending"     data-status="pending">
+          <div class="kanban-col-header"><span class="kanban-col-title">Pending</span><span class="kanban-col-count" id="kb-cnt-pending">0</span></div>
+          <div class="kanban-col-body" id="kb-body-pending"
+               ondragover="kanbanColDragOver(event,'pending')"
+               ondragleave="kanbanColDragLeave(event,'pending')"
+               ondrop="kanbanColDrop(event,'pending')">
+          </div>
+        </div>
+        <div class="kanban-col" id="kb-col-in_progress" data-status="in_progress">
+          <div class="kanban-col-header"><span class="kanban-col-title">In Progress</span><span class="kanban-col-count" id="kb-cnt-in_progress">0</span></div>
+          <div class="kanban-col-body" id="kb-body-in_progress"
+               ondragover="kanbanColDragOver(event,'in_progress')"
+               ondragleave="kanbanColDragLeave(event,'in_progress')"
+               ondrop="kanbanColDrop(event,'in_progress')">
+          </div>
+        </div>
+        <div class="kanban-col" id="kb-col-done"        data-status="done">
+          <div class="kanban-col-header"><span class="kanban-col-title">Done</span><span class="kanban-col-count" id="kb-cnt-done">0</span></div>
+          <div class="kanban-col-body" id="kb-body-done"
+               ondragover="kanbanColDragOver(event,'done')"
+               ondragleave="kanbanColDragLeave(event,'done')"
+               ondrop="kanbanColDrop(event,'done')">
+          </div>
+        </div>
+        <div class="kanban-col" id="kb-col-failed"      data-status="failed">
+          <div class="kanban-col-header"><span class="kanban-col-title">Failed / Skipped</span><span class="kanban-col-count" id="kb-cnt-failed">0</span></div>
+          <div class="kanban-col-body" id="kb-body-failed"
+               ondragover="kanbanColDragOver(event,'failed')"
+               ondragleave="kanbanColDragLeave(event,'failed')"
+               ondrop="kanbanColDrop(event,'failed')">
+          </div>
         </div>
       </div>
     </div>
@@ -3585,16 +3701,18 @@ window.switchTab = function(name) {
 
   // In multi-project mode, re-fetch state for the selected project when
   // switching to any project-scoped tab so the data is always current.
-  const projectScopedTabs = ['overview','tasks','timeline','chat','suggest'];
+  const projectScopedTabs = ['overview','tasks','kanban','timeline','chat','suggest'];
   if (isMultiProject && selectedProjectIdx !== null && projectScopedTabs.includes(name)) {
     api(pUrl('/api/state')).then(s => render(s)).catch(() => {
-      if (name === 'tasks' && appState) renderTasks(appState);
+      if (name === 'tasks'  && appState) renderTasks(appState);
+      if (name === 'kanban' && appState) renderKanban(appState);
     });
     if (name === 'timeline') loadTimeline();
     if (name === 'chat') loadChatHistory();
   } else {
     if (name === 'settings') loadConfig();
-    if (name === 'tasks' && appState) renderTasks(appState);
+    if (name === 'tasks'  && appState) renderTasks(appState);
+    if (name === 'kanban' && appState) renderKanban(appState);
     if (name === 'projects') loadProjects();
     if (name === 'chat') loadChatHistory();
     if (name === 'timeline') loadTimeline();
@@ -3842,7 +3960,9 @@ function render(s) {
   }
 
   // Tasks tab
-  if (activeTab === 'tasks') renderTasks(s);
+  if (activeTab === 'tasks')  renderTasks(s);
+  // Kanban tab
+  if (activeTab === 'kanban') renderKanban(s);
 
   // Timeline tab: refresh on state change so the 'now' cursor and bar colors stay current.
   if (activeTab === 'timeline') loadTimeline();
@@ -3949,6 +4069,175 @@ function buildStatusActions(t) {
   if (cls !== 'pending')     btns += '<button class="act reset" onclick="setStatus('+t.id+',\'pending\')">Reset</button>';
   return btns;
 }
+
+// ── Kanban board ──────────────────────────────────────────────────────────────
+
+let kanbanCompact = false;
+let kbDragTaskId  = null;
+
+window.toggleKanbanCompact = function() {
+  kanbanCompact = !kanbanCompact;
+  const btn = document.getElementById('kanbanCompactBtn');
+  if (btn) btn.textContent = kanbanCompact ? 'Expanded' : 'Compact';
+  if (appState) renderKanban(appState);
+};
+
+// Map status values to their column bucket (failed + skipped + timed_out → 'failed' col)
+function kbColFor(status) {
+  if (!status || status === 'pending')               return 'pending';
+  if (status === 'in_progress')                      return 'in_progress';
+  if (status === 'done')                             return 'done';
+  return 'failed'; // failed | skipped | timed_out
+}
+
+function kbPriorityClass(p) {
+  if (!p || p <= 0) return '';
+  return p <= 1 ? 'kbp1' : p <= 3 ? 'kbp2' : 'kbp3';
+}
+
+function kbAvatarHtml(assignee) {
+  if (!assignee) return '';
+  const initials = assignee.split(/[\s._@-]+/).map(w => w[0]||'').join('').slice(0,2).toUpperCase() || '?';
+  return '<div class="kb-avatar" title="'+esc(assignee)+'">'+esc(initials)+'</div>';
+}
+
+function kbDeadlineBadge(deadline) {
+  if (!deadline) return '';
+  const d = new Date(deadline);
+  if (isNaN(d.getTime())) return '';
+  const now = Date.now();
+  const diff = d - now; // ms
+  const label = d.toLocaleDateString();
+  let cls = 'kb-deadline';
+  if (diff < 0)              cls += ''; // overdue — red (default)
+  else if (diff < 86400000*2) cls += ' kb-due-soon'; // < 2 days — yellow
+  else                        cls += ' kb-ok';       // fine — green
+  return '<span class="'+cls+'" title="Deadline: '+esc(label)+'">'+esc(label)+'</span>';
+}
+
+function renderKanban(s) {
+  const board = document.getElementById('kanbanBoard');
+  if (!board) return;
+  if (!s || !s.plan || !s.plan.tasks || !s.plan.tasks.length) {
+    ['pending','in_progress','done','failed'].forEach(col => {
+      const body = document.getElementById('kb-body-'+col);
+      const cnt  = document.getElementById('kb-cnt-'+col);
+      if (body) body.innerHTML = '<div style="font-size:11px;color:var(--muted);padding:8px 0;text-align:center">No tasks</div>';
+      if (cnt)  cnt.textContent = '0';
+    });
+    return;
+  }
+
+  // Group tasks by column
+  const groups = { pending:[], in_progress:[], done:[], failed:[] };
+  for (const t of s.plan.tasks) {
+    const col = kbColFor(t.status);
+    groups[col].push(t);
+  }
+
+  // Sort each group by priority
+  for (const col of Object.keys(groups)) {
+    groups[col].sort((a,b) => (a.priority||99) - (b.priority||99));
+  }
+
+  // Render each column
+  for (const col of ['pending','in_progress','done','failed']) {
+    const body = document.getElementById('kb-body-'+col);
+    const cnt  = document.getElementById('kb-cnt-'+col);
+    if (!body || !cnt) continue;
+    cnt.textContent = groups[col].length;
+
+    if (!groups[col].length) {
+      body.innerHTML = '<div style="font-size:11px;color:var(--muted);padding:10px 0;text-align:center">Drop tasks here</div>';
+      continue;
+    }
+
+    body.innerHTML = groups[col].map(t => {
+      const pc     = kbPriorityClass(t.priority);
+      const avatar = kbAvatarHtml(t.assignee || '');
+      const tags   = (t.tags && t.tags.length)
+        ? '<div class="kb-card-tags">'+t.tags.map(tg=>'<span class="kb-chip">'+esc(tg)+'</span>').join('')+'</div>' : '';
+      const dl     = kbDeadlineBadge(t.deadline || '');
+      const compact = kanbanCompact ? ' kb-compact' : '';
+      return (
+        '<div class="kb-card '+pc+compact+'" draggable="true" data-task-id="'+t.id+'" '+
+          'ondragstart="kbDragStart(event,'+t.id+')" '+
+          'ondragend="kbDragEnd(event)">'+
+          '<div class="kb-card-header">'+
+            '<div class="kb-card-title">'+esc(t.title)+'</div>'+
+            avatar+
+          '</div>'+
+          (t.description ? '<div class="kb-card-desc">'+esc(t.description)+'</div>' : '')+
+          tags+
+          '<div class="kb-card-meta">'+
+            dl+
+            '<span class="kb-taskid">#'+t.id+'</span>'+
+          '</div>'+
+        '</div>'
+      );
+    }).join('');
+  }
+}
+
+// ── Kanban drag-and-drop ─────────────────────────────────────────────────────
+
+window.kbDragStart = function(e, id) {
+  kbDragTaskId = id;
+  e.dataTransfer.effectAllowed = 'move';
+  e.dataTransfer.setData('text/plain', String(id));
+  setTimeout(() => {
+    const el = document.querySelector('.kb-card[data-task-id="'+id+'"]');
+    if (el) el.classList.add('kb-dragging');
+  }, 0);
+};
+
+window.kbDragEnd = function(e) {
+  kbDragTaskId = null;
+  document.querySelectorAll('.kb-card').forEach(el => el.classList.remove('kb-dragging'));
+  document.querySelectorAll('.kanban-col-body').forEach(el => el.classList.remove('kb-drag-over'));
+};
+
+window.kanbanColDragOver = function(e, col) {
+  e.preventDefault();
+  e.dataTransfer.dropEffect = 'move';
+  document.querySelectorAll('.kanban-col-body').forEach(el => el.classList.remove('kb-drag-over'));
+  const body = document.getElementById('kb-body-'+col);
+  if (body) body.classList.add('kb-drag-over');
+};
+
+window.kanbanColDragLeave = function(e, col) {
+  // Only remove if leaving the column body itself (not entering a child card)
+  if (!e.currentTarget.contains(e.relatedTarget)) {
+    const body = document.getElementById('kb-body-'+col);
+    if (body) body.classList.remove('kb-drag-over');
+  }
+};
+
+window.kanbanColDrop = function(e, col) {
+  e.preventDefault();
+  document.querySelectorAll('.kanban-col-body').forEach(el => el.classList.remove('kb-drag-over'));
+  const id = kbDragTaskId || parseInt(e.dataTransfer.getData('text/plain'), 10);
+  if (!id) return;
+
+  // Map column key to status string
+  const statusMap = { pending:'pending', in_progress:'in_progress', done:'done', failed:'failed' };
+  const newStatus = statusMap[col];
+  if (!newStatus) return;
+
+  // Check current status to avoid no-op
+  const task = appState && appState.plan && appState.plan.tasks
+    ? appState.plan.tasks.find(t => t.id === id) : null;
+  if (task && kbColFor(task.status) === col) return; // already in this column
+
+  apiMethod('PATCH', pUrl('/api/tasks/'+id), {status: newStatus}).then(d => {
+    if (d.ok) {
+      toast('Task #'+id+': moved to '+newStatus.replace('_',' '), 'ok');
+      refreshState();
+    } else {
+      toast(d.error || 'Update failed', 'err');
+    }
+  }).catch(() => toast('Request failed', 'err'));
+};
 
 // ── Live output ──────────────────────────────────────────────────────────────
 
@@ -5212,23 +5501,24 @@ document.addEventListener('keyup', function(e) {
 
 // ── Keyboard shortcuts & Command Palette ─────────────────────────────────────
 
-// Maps 1-7 to tab names in left-to-right order.
-const TAB_KEYS = ['overview','tasks','timeline','chat','projects','suggest','settings'];
+// Maps 1-8 to tab names in left-to-right order.
+const TAB_KEYS = ['overview','tasks','kanban','timeline','chat','projects','suggest','settings'];
 
 // All commands registered in the palette.
 const CMD_REGISTRY = [
   { label:'Overview',        icon:'🏠', shortcut:'1', action:()=>switchTab('overview') },
   { label:'Tasks',           icon:'📋', shortcut:'2', action:()=>switchTab('tasks') },
-  { label:'Timeline',        icon:'📅', shortcut:'3', action:()=>switchTab('timeline') },
-  { label:'Chat',            icon:'💬', shortcut:'4', action:()=>switchTab('chat') },
-  { label:'Projects',        icon:'📁', shortcut:'5', action:()=>switchTab('projects') },
-  { label:'Suggest',         icon:'💡', shortcut:'6', action:()=>switchTab('suggest') },
-  { label:'Settings',        icon:'⚙️', shortcut:'7', action:()=>switchTab('settings') },
+  { label:'Kanban',          icon:'🗂', shortcut:'3', action:()=>switchTab('kanban') },
+  { label:'Timeline',        icon:'📅', shortcut:'4', action:()=>switchTab('timeline') },
+  { label:'Chat',            icon:'💬', shortcut:'5', action:()=>switchTab('chat') },
+  { label:'Projects',        icon:'📁', shortcut:'6', action:()=>switchTab('projects') },
+  { label:'Suggest',         icon:'💡', shortcut:'7', action:()=>switchTab('suggest') },
+  { label:'Settings',        icon:'⚙️', shortcut:'8', action:()=>switchTab('settings') },
   { label:'Refresh state',   icon:'🔄', shortcut:'r',  action:()=>{ api(pUrl('/api/state')).then(s=>render(s)).catch(()=>{}); toast('Refreshed','ok'); } },
   { label:'New task',        icon:'➕', shortcut:'n',  action:()=>{ switchTab('tasks'); setTimeout(()=>{ const el=document.getElementById('newTaskTitle'); if(el){el.focus();} },100); } },
   { label:'Start run',       icon:'▶️', shortcut:'',   action:()=>submitRun() },
   { label:'Stop run',        icon:'⏹', shortcut:'',   action:()=>submitStop() },
-  { label:'Show kanban',     icon:'🗂', shortcut:'',   action:()=>switchTab('tasks') },
+  { label:'Show kanban',     icon:'🗂', shortcut:'',   action:()=>switchTab('kanban') },
   { label:'Show timeline',   icon:'📊', shortcut:'',   action:()=>switchTab('timeline') },
   { label:'Show chat',       icon:'🤖', shortcut:'',   action:()=>switchTab('chat') },
   { label:'Add task',        icon:'✏️', shortcut:'',   action:()=>{ switchTab('tasks'); setTimeout(()=>{ const el=document.getElementById('newTaskTitle'); if(el){el.focus();} },100); } },
