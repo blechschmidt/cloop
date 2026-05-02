@@ -32,10 +32,10 @@ func TestE2EInitAndStatus(t *testing.T) {
 	assertContains(t, out, "State:")
 	assertContains(t, out, "Config:")
 
-	// State file must exist.
-	statePath := filepath.Join(dir, ".cloop", "state.json")
+	// State file must exist (SQLite database).
+	statePath := filepath.Join(dir, ".cloop", "state.db")
 	if _, err := os.Stat(statePath); os.IsNotExist(err) {
-		t.Fatalf("state.json not created after init")
+		t.Fatalf("state.db not created after init")
 	}
 
 	// Config file must exist.

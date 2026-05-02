@@ -162,13 +162,17 @@ func assertNotContains(t *testing.T, s, substr string) {
 	}
 }
 
-// writeFixtureState writes a pre-built state.json to workDir/.cloop/.
+// writeFixtureState writes a pre-built state as state.json to workDir/.cloop/
+// and removes any existing state.db so that the migration path is triggered on
+// the next cloop command.
 func writeFixtureState(t *testing.T, workDir string, state map[string]interface{}) {
 	t.Helper()
 	cloopDir := filepath.Join(workDir, ".cloop")
 	if err := os.MkdirAll(cloopDir, 0o755); err != nil {
 		t.Fatalf("mkdir .cloop: %v", err)
 	}
+	// Remove any existing SQLite database so the JSON migration path triggers.
+	_ = os.Remove(filepath.Join(cloopDir, "state.db"))
 	data, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
 		t.Fatalf("marshal fixture state: %v", err)

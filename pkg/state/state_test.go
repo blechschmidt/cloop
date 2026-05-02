@@ -36,7 +36,7 @@ func TestInit_CreatesStateFile(t *testing.T) {
 	if s.Status != "initialized" {
 		t.Errorf("unexpected status: %q", s.Status)
 	}
-	if _, err := os.Stat(StatePath(dir)); err != nil {
+	if _, err := os.Stat(StateDBPath(dir)); err != nil {
 		t.Errorf("state file not created: %v", err)
 	}
 }
@@ -225,11 +225,19 @@ func TestSyncFromDisk_PicksUpExternallyAddedTasks(t *testing.T) {
 	}
 }
 
-// --- StatePath ---
+// --- StatePath / StateDBPath ---
 
 func TestStatePath(t *testing.T) {
 	got := StatePath("/some/dir")
 	expected := "/some/dir/.cloop/state.json"
+	if got != expected {
+		t.Errorf("expected %q, got %q", expected, got)
+	}
+}
+
+func TestStateDBPath(t *testing.T) {
+	got := StateDBPath("/some/dir")
+	expected := "/some/dir/.cloop/state.db"
 	if got != expected {
 		t.Errorf("expected %q, got %q", expected, got)
 	}
