@@ -195,6 +195,8 @@ type Task struct {
 	TDDStatus         string       `json:"tdd_status,omitempty"`          // TDD verification outcome: "pass", "fail", or "skipped"
 	TDDScore          int          `json:"tdd_score,omitempty"`           // TDD score 0-100 (percentage of acceptance criteria met)
 	SprintID          int          `json:"sprint_id,omitempty"`           // sprint this task belongs to (0 = unassigned)
+	ComplexitySize    string       `json:"complexity_size,omitempty"`     // T-shirt size: XS/S/M/L/XL (set by ai-complexity)
+	StoryPoints       int          `json:"story_points,omitempty"`        // Fibonacci story points: 1/2/3/5/8/13 (set by ai-complexity)
 	// ChainInput holds the previous task's output when this task is part of a pipeline
 	// chain (tagged "chain:<uuid>"). It is runtime-only and never persisted.
 	ChainInput string `json:"-"`

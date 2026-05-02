@@ -126,8 +126,24 @@ func PlanPrompt(s *state.ProjectState, f *forecast.Forecast, sprintDays int) str
 	}
 	b.WriteString(fmt.Sprintf("- Sprint duration: %d days\n\n", sprintDays))
 
+	// Check if any tasks have story points set (from ai-complexity)
+	hasStoryPoints := false
+	if s.Plan != nil {
+		for _, t := range s.Plan.Tasks {
+			if (t.Status == pm.TaskPending || t.Status == pm.TaskInProgress) && t.StoryPoints > 0 {
+				hasStoryPoints = true
+				break
+			}
+		}
+	}
+
 	b.WriteString("## PENDING TASKS (to be assigned to sprints)\n")
-	b.WriteString("Format: [ID] Priority | Title | Estimated (adjusted) minutes | Deadline | DependsOn\n\n")
+	if hasStoryPoints {
+		b.WriteString("Format: [ID] Priority | Title | StoryPoints | Estimated (adjusted) minutes | Deadline | DependsOn\n")
+		b.WriteString("Note: Story points are available — use them as the primary sizing signal for sprint capacity.\n\n")
+	} else {
+		b.WriteString("Format: [ID] Priority | Title | Estimated (adjusted) minutes | Deadline | DependsOn\n\n")
+	}
 
 	now := time.Now()
 	// Collect pending/in-progress tasks sorted by priority.
@@ -180,19 +196,31 @@ func PlanPrompt(s *state.ProjectState, f *forecast.Forecast, sprintDays int) str
 			depsStr = strings.Join(parts, ", ")
 		}
 
-		b.WriteString(fmt.Sprintf("[%d] P%d | %s | est=%.0fm adj=%.0fm | deadline=%s | deps=%s\n",
-			t.ID, t.Priority, t.Title, est, adjusted, deadlineStr, depsStr))
+		if hasStoryPoints && t.StoryPoints > 0 {
+			b.WriteString(fmt.Sprintf("[%d] P%d | %s | %dpts(%s) | est=%.0fm adj=%.0fm | deadline=%s | deps=%s\n",
+				t.ID, t.Priority, t.Title, t.StoryPoints, t.ComplexitySize, est, adjusted, deadlineStr, depsStr))
+		} else {
+			b.WriteString(fmt.Sprintf("[%d] P%d | %s | est=%.0fm adj=%.0fm | deadline=%s | deps=%s\n",
+				t.ID, t.Priority, t.Title, est, adjusted, deadlineStr, depsStr))
+		}
 	}
 
 	b.WriteString(fmt.Sprintf("\nTotal pending tasks: %d\n", len(tasks)))
 
 	b.WriteString("\n## SPRINT PLANNING REQUEST\n")
-	b.WriteString(fmt.Sprintf(`Group ALL the pending tasks above into sprints of %d days each.
-Use adjusted minutes (velocity-corrected) when computing hours per sprint.
+	planNote := `Group ALL the pending tasks above into sprints of %d days each.
+Use adjusted minutes (velocity-corrected) when computing hours per sprint.`
+	if hasStoryPoints {
+		planNote += `
+When story points are available, also use them to balance sprint capacity:
+  a typical sprint velocity is 20-30 story points per week for a single developer.`
+	}
+	planNote += `
 Respect dependencies: a task cannot be in an earlier sprint than its dependencies.
 Respect deadlines: urgent/overdue tasks must appear in Sprint 1.
 Keep each sprint focused with a clear, concise goal (1 sentence).
-Give each sprint a memorable name (e.g. "Foundation Sprint", "Core Features", "Polish & Ship").
+Give each sprint a memorable name (e.g. "Foundation Sprint", "Core Features", "Polish & Ship").`
+	b.WriteString(fmt.Sprintf(planNote+`
 
 Respond with ONLY valid JSON in this exact schema (no markdown, no prose):
 {
