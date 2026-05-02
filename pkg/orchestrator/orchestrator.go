@@ -332,6 +332,77 @@ func New(cfg Config, prov provider.Provider) (*Orchestrator, error) {
 	return &Orchestrator{config: cfg, state: s, provider: prov, router: r, memory: mem, webhook: wh, metrics: cfg.Metrics, envVars: envVars, secretStore: secretStore, log: log}, nil
 }
 
+// taskContextWithTimeout returns a context (and cancel) scoped to the given task's
+// time budget. If the task has no MaxMinutes and the state has no DefaultMaxMinutes,
+// the parent ctx is returned unchanged with a no-op cancel.
+func (o *Orchestrator) taskContextWithTimeout(ctx context.Context, task *pm.Task) (context.Context, context.CancelFunc) {
+	maxMin := task.MaxMinutes
+	if maxMin == 0 {
+		maxMin = o.state.DefaultMaxMinutes
+	}
+	if maxMin > 0 {
+		return context.WithTimeout(ctx, time.Duration(maxMin)*time.Minute)
+	}
+	return ctx, func() {}
+}
+
+// isTimeoutErr returns true when err is a context deadline-exceeded error and
+// the per-task context (not the parent session context) was the one that expired.
+func isTimeoutErr(taskCtx context.Context, err error) bool {
+	if err == nil {
+		return false
+	}
+	return taskCtx.Err() == context.DeadlineExceeded
+}
+
+// handleTaskTimeout marks the task as timed_out, fires desktop and webhook notifications,
+// and persists any partial output as an artifact.
+func (o *Orchestrator) handleTaskTimeout(_ context.Context, s *state.ProjectState, task *pm.Task, partialOutput string, dimColor *color.Color) {
+	task.Status = pm.TaskTimedOut
+	completedAt := time.Now()
+	task.CompletedAt = &completedAt
+	if task.StartedAt != nil {
+		task.ActualMinutes = int(completedAt.Sub(*task.StartedAt).Minutes())
+	}
+	pm.AddAnnotation(task, "ai", fmt.Sprintf("Task timed out after %d minute(s) budget", task.MaxMinutes))
+
+	// Record partial artifact if any output was captured.
+	if partialOutput != "" {
+		if ap, aErr := artifact.WriteTaskArtifact(o.config.WorkDir, task, "[PARTIAL — timed out]\n"+partialOutput); aErr != nil {
+			dimColor.Printf("  artifact write error (ignored): %v\n", aErr)
+		} else {
+			task.ArtifactPath = ap
+			dimColor.Printf("  partial artifact: %s\n", ap)
+		}
+	}
+
+	// Desktop notification.
+	if o.config.Notify {
+		notify.Send("cloop: Task Timed Out", fmt.Sprintf("%s (budget: %dm)", task.Title, task.MaxMinutes))
+	}
+	// Slack/Discord webhook notifications.
+	o.notifyWebhooks(
+		"cloop: Task Timed Out",
+		fmt.Sprintf("Task #%d: %s\nGoal: %s\nBudget: %dm", task.ID, task.Title, s.Goal, task.MaxMinutes),
+	)
+	// Structured event webhook.
+	done, failed := s.Plan.CountByStatus()
+	o.webhook.Send(webhook.EventTaskFailed, webhook.Payload{
+		Goal: s.Goal,
+		Task: &webhook.TaskInfo{
+			ID:     task.ID,
+			Title:  task.Title,
+			Status: "timed_out",
+		},
+		Progress: &webhook.Progress{Done: done, Total: len(s.Plan.Tasks), Failed: failed},
+		Session:  &webhook.SessionInfo{InputTokens: s.TotalInputTokens, OutputTokens: s.TotalOutputTokens},
+	})
+	o.log.Error(logger.EventTaskFailed, task.ID, task.Title, map[string]interface{}{
+		"reason": "timed_out",
+		"budget": task.MaxMinutes,
+	})
+}
+
 // allEnvLines returns the combined KEY=value env lines from per-project env vars
 // and the encrypted secrets store, suitable for os/exec Env injection.
 func (o *Orchestrator) allEnvLines() []string {
@@ -1130,6 +1201,10 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		taskProvider := o.router.For(task.Role)
 		start := time.Now()
 
+		// Apply per-task time budget.
+		taskCtx, taskCancel := o.taskContextWithTimeout(ctx, task)
+		defer taskCancel()
+
 		// ── Multi-agent path ───────────────────────────────────────────────
 		// When --multi-agent is set, run the three-pass pipeline instead of a
 		// single provider call. The combined reviewer output becomes the task
@@ -1149,7 +1224,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			}
 
 			maRes, maErr := multiagent.RunTask(
-				ctx,
+				taskCtx,
 				taskProvider,
 				s.Model,
 				o.config.StepTimeout,
@@ -1159,6 +1234,18 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 				projCtxStr,
 			)
 			if maErr != nil {
+				if isTimeoutErr(taskCtx, maErr) {
+					color.New(color.FgYellow).Printf("⏱ Task %d timed out (%dm): %s\n", task.ID, task.MaxMinutes, task.Title)
+					o.handleTaskTimeout(ctx, s, task, "", dimColor)
+					consecutiveErrors++
+					s.Save()
+					if consecutiveErrors >= maxConsecutiveErrors {
+						s.Status = "failed"
+						s.Save()
+						return fmt.Errorf("%d consecutive errors", consecutiveErrors)
+					}
+					continue
+				}
 				failColor.Printf("✗ Multi-agent error: %v\n", maErr)
 				task.Status = pm.TaskFailed
 				consecutiveErrors++
@@ -1192,7 +1279,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 				consensusProviders := o.buildConsensusProviders(taskProvider)
 				opts, _ := o.makeOpts(s.Model, false) // no streaming in consensus mode
 				cOutput, cReport, cErr := consensus.RunConsensus(
-					ctx,
+					taskCtx,
 					consensusProviders,
 					prompt,
 					opts,
@@ -1203,6 +1290,18 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 					task.Title,
 				)
 				if cErr != nil {
+					if isTimeoutErr(taskCtx, cErr) {
+						color.New(color.FgYellow).Printf("⏱ Task %d timed out (%dm): %s\n", task.ID, task.MaxMinutes, task.Title)
+						o.handleTaskTimeout(ctx, s, task, "", dimColor)
+						consecutiveErrors++
+						s.Save()
+						if consecutiveErrors >= maxConsecutiveErrors {
+							s.Status = "failed"
+							s.Save()
+							return fmt.Errorf("%d consecutive errors", consecutiveErrors)
+						}
+						continue
+					}
 					failColor.Printf("✗ Consensus error: %v\n", cErr)
 					task.Status = pm.TaskFailed
 					consecutiveErrors++
@@ -1225,8 +1324,20 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 				dimColor.Printf("→ Running %s on task %d...\n", taskProvider.Name(), task.ID)
 
 				opts, wasStreamed := o.makeOpts(s.Model, true)
-				result, err := taskProvider.Complete(ctx, prompt, opts)
+				result, err := taskProvider.Complete(taskCtx, prompt, opts)
 				if err != nil {
+					if isTimeoutErr(taskCtx, err) {
+						color.New(color.FgYellow).Printf("⏱ Task %d timed out (%dm): %s\n", task.ID, task.MaxMinutes, task.Title)
+						o.handleTaskTimeout(ctx, s, task, "", dimColor)
+						consecutiveErrors++
+						s.Save()
+						if consecutiveErrors >= maxConsecutiveErrors {
+							s.Status = "failed"
+							s.Save()
+							return fmt.Errorf("%d consecutive errors", consecutiveErrors)
+						}
+						continue
+					}
 					failColor.Printf("✗ Provider error: %v\n", err)
 					task.Status = pm.TaskFailed
 					consecutiveErrors++
@@ -1804,6 +1915,8 @@ type taskResult struct {
 	err          error
 	duration     time.Duration
 	bufferedOut  string
+	timedOut     bool   // true when the task's per-task budget was exceeded
+	partialOut   string // partial output captured before timeout
 }
 
 // runPMParallel runs all dependency-ready tasks concurrently in each round,
@@ -2095,9 +2208,13 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 				// Use role-specific provider if configured.
 				taskProvider := o.router.For(t.Role)
 				opts, _ := o.makeOpts(s.Model, false) // no streaming in parallel
-				result, err := taskProvider.Complete(ctx, prompt, opts)
+				// Apply per-task time budget in parallel mode.
+				tTaskCtx, tTaskCancel := o.taskContextWithTimeout(ctx, t)
+				defer tTaskCancel()
+				result, err := taskProvider.Complete(tTaskCtx, prompt, opts)
 				dur := time.Since(start)
-				results[idx] = taskResult{task: t, result: result, err: err, duration: dur}
+				timedOut := isTimeoutErr(tTaskCtx, err)
+				results[idx] = taskResult{task: t, result: result, err: err, duration: dur, timedOut: timedOut}
 			}(i, task)
 		}
 		wg.Wait()
@@ -2106,6 +2223,21 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 		for _, res := range results {
 			task := res.task
 			if res.err != nil {
+				if res.timedOut {
+					color.New(color.FgYellow).Printf("⏱ Task %d timed out (%dm): %s\n", task.ID, task.MaxMinutes, task.Title)
+					o.handleTaskTimeout(ctx, s, task, res.partialOut, dimColor)
+					mu.Lock()
+					consecutiveErrors++
+					s.Save()
+					tooManyErrors := consecutiveErrors >= maxConsecutiveErrors
+					mu.Unlock()
+					if tooManyErrors {
+						s.Status = "failed"
+						s.Save()
+						return fmt.Errorf("%d consecutive errors", consecutiveErrors)
+					}
+					continue
+				}
 				failColor.Printf("✗ Provider error on task %d: %v\n", task.ID, res.err)
 				mu.Lock()
 				task.Status = pm.TaskFailed

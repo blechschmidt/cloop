@@ -89,6 +89,7 @@ func Lint(ctx context.Context, plan *pm.Plan, opts Options) ([]Issue, error) {
 	issues = append(issues, checkZeroPriority(tasks)...)
 	issues = append(issues, checkCircularDeps(plan.Tasks)...)
 	issues = append(issues, checkDuplicateCompletedTitle(plan.Tasks, tasks)...)
+	issues = append(issues, checkHighPriorityNoTimeBudget(tasks)...)
 
 	// --- AI checks ---
 	if !opts.SkipAI && opts.Provider != nil && len(tasks) > 0 {
@@ -161,6 +162,25 @@ func checkZeroPriority(tasks []*pm.Task) []Issue {
 				Code:       "zero-priority",
 				Message:    fmt.Sprintf("Task #%d %q has priority 0 (unset)", t.ID, t.Title),
 				Suggestion: "Set a priority ≥ 1 (lower number = higher priority).",
+			})
+		}
+	}
+	return issues
+}
+
+// checkHighPriorityNoTimeBudget warns when a high-priority task (priority ≤ 2)
+// has no MaxMinutes set, which means it could run indefinitely and block the plan.
+func checkHighPriorityNoTimeBudget(tasks []*pm.Task) []Issue {
+	var issues []Issue
+	for _, t := range tasks {
+		if t.Priority > 0 && t.Priority <= 2 && t.MaxMinutes == 0 {
+			issues = append(issues, Issue{
+				TaskID:     t.ID,
+				Field:      "max_minutes",
+				Severity:   SeverityWarn,
+				Code:       "no-time-budget",
+				Message:    fmt.Sprintf("Task #%d %q is high-priority (P%d) but has no time budget set", t.ID, t.Title, t.Priority),
+				Suggestion: "Set max_minutes (e.g. via 'cloop task add --max-minutes 30') to prevent runaway execution from blocking the plan.",
 			})
 		}
 	}

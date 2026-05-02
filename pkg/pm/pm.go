@@ -25,6 +25,7 @@ const (
 	TaskDone       TaskStatus = "done"
 	TaskFailed     TaskStatus = "failed"
 	TaskSkipped    TaskStatus = "skipped"
+	TaskTimedOut   TaskStatus = "timed_out"
 )
 
 // AgentRole defines specialized AI expertise for a task category.
@@ -142,6 +143,7 @@ type Task struct {
 	NextRunAt         *time.Time   `json:"next_run_at,omitempty"`         // computed next trigger time for recurring tasks
 	RequiresApproval  bool         `json:"requires_approval,omitempty"`   // task must be interactively approved before execution
 	Approved          bool         `json:"approved,omitempty"`            // pre-approved via 'cloop task approve'; bypasses interactive gate
+	MaxMinutes        int          `json:"max_minutes,omitempty"`         // per-task execution time budget in minutes (0 = no limit)
 }
 
 // Plan is the full task plan for a goal.
@@ -198,6 +200,11 @@ func (p *Plan) DepsReady(t *Task) bool {
 	return true
 }
 
+// depIsTerminalFailure returns true when a dependency has failed or timed out (unrecoverable).
+func depIsTerminalFailure(dep *Task) bool {
+	return dep.Status == TaskFailed || dep.Status == TaskTimedOut
+}
+
 // NextTask returns the highest-priority pending task whose dependencies are all satisfied.
 func (p *Plan) NextTask() *Task {
 	var best *Task
@@ -248,11 +255,11 @@ func (p *Plan) IsComplete() bool {
 }
 
 // PermanentlyBlocked returns true if a task can never run because one of its
-// dependencies has failed (and is not retried).
+// dependencies has failed or timed out (and is not retried).
 func (p *Plan) PermanentlyBlocked(t *Task) bool {
 	for _, depID := range t.DependsOn {
 		for _, dep := range p.Tasks {
-			if dep.ID == depID && dep.Status == TaskFailed {
+			if dep.ID == depID && depIsTerminalFailure(dep) {
 				return true
 			}
 		}
@@ -272,12 +279,13 @@ func (p *Plan) Summary() string {
 }
 
 // CountByStatus returns the number of done (includes skipped) and failed tasks.
+// Timed-out tasks are counted as failed.
 func (p *Plan) CountByStatus() (done, failed int) {
 	for _, t := range p.Tasks {
 		switch t.Status {
 		case TaskDone, TaskSkipped:
 			done++
-		case TaskFailed:
+		case TaskFailed, TaskTimedOut:
 			failed++
 		}
 	}

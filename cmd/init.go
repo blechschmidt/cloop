@@ -14,13 +14,14 @@ import (
 )
 
 var (
-	maxSteps     int
-	instructions string
-	model        string
-	initProvider string
-	initPMMode   bool
-	initTemplate string
-	initProfile  string
+	maxSteps        int
+	instructions    string
+	model           string
+	initProvider    string
+	initPMMode      bool
+	initTemplate    string
+	initProfile     string
+	initMaxMinutes  int
 )
 
 var initCmd = &cobra.Command{
@@ -114,6 +115,9 @@ Examples:
 		}
 		if initPMMode {
 			s.PMMode = true
+		}
+		if initMaxMinutes > 0 {
+			s.DefaultMaxMinutes = initMaxMinutes
 		}
 		// Apply template: pre-populate the plan with template tasks, enabling
 		// PM mode automatically so 'cloop run' executes them directly without
@@ -212,5 +216,6 @@ func init() {
 	initCmd.Flags().BoolVar(&initPMMode, "pm", false, "Enable product manager mode (task decomposition) by default for this project")
 	initCmd.Flags().StringVar(&initTemplate, "template", "", "Bootstrap from a built-in template ("+clooptemplate.NamesString()+")")
 	initCmd.Flags().StringVar(&initProfile, "profile", "", "Named configuration profile to apply (overrides the active profile)")
+	initCmd.Flags().IntVar(&initMaxMinutes, "max-minutes", 0, "Default per-task execution time budget in minutes for this project (0 = no limit)")
 	rootCmd.AddCommand(initCmd)
 }

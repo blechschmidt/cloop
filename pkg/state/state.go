@@ -54,6 +54,10 @@ type ProjectState struct {
 	// HealthReport is the most recent plan health evaluation result.
 	// Populated after decomposition in PM mode (unless --skip-health-check).
 	HealthReport *health.HealthReport `json:"health_report,omitempty"`
+
+	// DefaultMaxMinutes is the project-level per-task execution time budget.
+	// When a task's own MaxMinutes is 0, this value is used. 0 = no limit.
+	DefaultMaxMinutes int `json:"default_max_minutes,omitempty"`
 }
 
 func StatePath(workdir string) string {

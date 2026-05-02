@@ -19,18 +19,19 @@ import (
 )
 
 var (
-	addDesc      string
-	addPriority  int
-	addDeps      string
-	addRole      string
-	addCondition string
-	addDeadline  string
-	addNoAI      bool
-	addAuto      bool
-	addProvider  string
-	addModel     string
-	addTimeout   string
-	addHealth    bool
+	addDesc       string
+	addPriority   int
+	addDeps       string
+	addRole       string
+	addCondition  string
+	addDeadline   string
+	addMaxMinutes int
+	addNoAI       bool
+	addAuto       bool
+	addProvider   string
+	addModel      string
+	addTimeout    string
+	addHealth     bool
 )
 
 var taskAddCmd = &cobra.Command{
@@ -207,6 +208,8 @@ Examples:
 			deadlinePtr = &dl
 		}
 
+		maxMin := addMaxMinutes // may be 0 (no limit)
+
 		task := &pm.Task{
 			ID:               maxID + 1,
 			Title:            spec.Title,
@@ -218,6 +221,7 @@ Examples:
 			EstimatedMinutes: spec.EstimatedMinutes,
 			Condition:        taskCondition,
 			Deadline:         deadlinePtr,
+			MaxMinutes:       maxMin,
 			Status:           pm.TaskPending,
 		}
 		s.Plan.Tasks = append(s.Plan.Tasks, task)
@@ -306,6 +310,7 @@ func addTaskDirect(s *state.ProjectState, description string) error {
 		DependsOn:   deps,
 		Condition:   addCondition,
 		Deadline:    deadlinePtr,
+		MaxMinutes:  addMaxMinutes,
 		Status:      pm.TaskPending,
 	}
 	s.Plan.Tasks = append(s.Plan.Tasks, task)
@@ -329,6 +334,7 @@ func init() {
 	taskAddCmd.Flags().StringVar(&addRole, "role", "", "Override AI-suggested role (backend, frontend, testing, security, devops, data, docs, review)")
 	taskAddCmd.Flags().StringVar(&addCondition, "condition", "", "Execution gate: '$cmd' runs a shell check (exit 0=proceed); any other string is sent to AI for yes/no evaluation")
 	taskAddCmd.Flags().StringVar(&addDeadline, "deadline", "", "Task deadline: relative ('2h', '3d', '1w') or RFC3339 ('2025-12-31T23:59:00Z') or date ('2025-12-31')")
+	taskAddCmd.Flags().IntVar(&addMaxMinutes, "max-minutes", 0, "Per-task execution time budget in minutes (0 = no limit); triggers auto-interrupt and timed_out status on expiry")
 	taskAddCmd.Flags().BoolVar(&addNoAI, "no-ai", false, "Skip AI structuring; use description as task title directly")
 	taskAddCmd.Flags().BoolVar(&addAuto, "auto", false, "Skip confirmation prompt and add immediately")
 	taskAddCmd.Flags().StringVar(&addProvider, "provider", "", "AI provider to use (anthropic, openai, ollama, claudecode)")
