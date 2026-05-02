@@ -239,6 +239,13 @@ func printAggregateStats(agg *taskstats.AggregateStats, s *state.ProjectState) {
 		yellow.Printf("    In progress:   %d\n", agg.InProgressTasks)
 	}
 	dim.Printf("    Pending:       %d\n", agg.PendingTasks)
+	// Pinned count
+	pinnedCount := pm.PinnedCount(s.Plan.Tasks)
+	if pinnedCount > 0 {
+		cyan.Printf("    Pinned:        %d\n", pinnedCount)
+	} else {
+		dim.Printf("    Pinned:        0\n")
+	}
 	fmt.Println()
 
 	// Rates
@@ -442,6 +449,7 @@ func printAggregateStatsJSON(agg *taskstats.AggregateStats, s *state.ProjectStat
 		FailedTasks           int           `json:"failed_tasks"`
 		PendingTasks          int           `json:"pending_tasks"`
 		InProgressTasks       int           `json:"in_progress_tasks"`
+		PinnedTasks           int           `json:"pinned_tasks"`
 		CompletionRatePct     float64       `json:"completion_rate_pct"`
 		SuccessRatePct        float64       `json:"success_rate_pct,omitempty"`
 		TotalEstimatedMinutes int           `json:"total_estimated_minutes,omitempty"`
@@ -462,6 +470,7 @@ func printAggregateStatsJSON(agg *taskstats.AggregateStats, s *state.ProjectStat
 		FailedTasks:           agg.FailedTasks,
 		PendingTasks:          agg.PendingTasks,
 		InProgressTasks:       agg.InProgressTasks,
+		PinnedTasks:           pm.PinnedCount(s.Plan.Tasks),
 		CompletionRatePct:     agg.CompletionRate,
 		SuccessRatePct:        agg.SuccessRate,
 		TotalEstimatedMinutes: agg.TotalEstimatedMinutes,

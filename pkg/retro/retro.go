@@ -194,6 +194,11 @@ func buildPromptInternal(s *state.ProjectState, stats SessionStats, plan *pm.Pla
 			stats.SkippedTasks, pct(stats.SkippedTasks),
 			stats.PendingTasks, pct(stats.PendingTasks),
 		))
+		if plan != nil {
+			if pc := pm.PinnedCount(plan.Tasks); pc > 0 {
+				b.WriteString(fmt.Sprintf("- Pinned tasks: %d\n", pc))
+			}
+		}
 		if stats.AvgTaskDur > 0 {
 			b.WriteString(fmt.Sprintf("- Avg task duration: %s\n", stats.AvgTaskDur.Round(time.Second)))
 		}

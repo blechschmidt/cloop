@@ -191,6 +191,7 @@ type Task struct {
 	Assignee          string       `json:"assignee,omitempty"`            // team member assigned to this task
 	ExternalURL       string       `json:"external_url,omitempty"`        // URL of the external resource (e.g. GitHub PR)
 	Links             []Link       `json:"links,omitempty"`               // external URLs/tickets/docs associated with this task
+	Pinned            bool         `json:"pinned,omitempty"`              // pinned tasks always appear at the top of task lists
 }
 
 // Plan is the full task plan for a goal.
@@ -198,6 +199,35 @@ type Plan struct {
 	Goal    string  `json:"goal"`
 	Tasks   []*Task `json:"tasks"`
 	Version int     `json:"version"`
+}
+
+// SortPinnedFirst returns a shallow copy of tasks sorted so that pinned tasks
+// come first, preserving original order within each group. It does NOT mutate
+// the input slice.
+func SortPinnedFirst(tasks []*Task) []*Task {
+	out := make([]*Task, 0, len(tasks))
+	for _, t := range tasks {
+		if t.Pinned {
+			out = append(out, t)
+		}
+	}
+	for _, t := range tasks {
+		if !t.Pinned {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// PinnedCount returns the number of pinned tasks in the slice.
+func PinnedCount(tasks []*Task) int {
+	n := 0
+	for _, t := range tasks {
+		if t.Pinned {
+			n++
+		}
+	}
+	return n
 }
 
 // TaskMatchesTags returns true when the task has at least one tag in filter,

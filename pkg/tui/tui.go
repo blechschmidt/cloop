@@ -334,7 +334,7 @@ func (m Model) renderTaskPanel(w, h int) string {
 	if m.state == nil || m.state.Plan == nil || len(m.state.Plan.Tasks) == 0 {
 		rows = append(rows, styleHelp.Render("no tasks — press 'a' to add"))
 	} else {
-		tasks := m.state.Plan.Tasks
+		tasks := pm.SortPinnedFirst(m.state.Plan.Tasks)
 		visibleLines := h - 3
 		if visibleLines < 1 {
 			visibleLines = 1
@@ -366,7 +366,11 @@ func (m Model) renderTaskPanel(w, h int) string {
 			if len(t.Annotations) > 0 {
 				notesStr = fmt.Sprintf(" ✎%d", len(t.Annotations))
 			}
-			line := fmt.Sprintf("%s %s %s%s%s", badge, pri, title, tagStr, notesStr)
+			pinStr := ""
+			if t.Pinned {
+				pinStr = lipgloss.NewStyle().Foreground(lipgloss.Color("14")).Render("📌") + " "
+			}
+			line := fmt.Sprintf("%s%s %s %s%s%s", pinStr, badge, pri, title, tagStr, notesStr)
 			if i == m.cursor {
 				line = styleTaskSelected.Width(inner).Render(line)
 			}

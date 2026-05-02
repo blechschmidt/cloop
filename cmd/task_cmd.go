@@ -708,6 +708,7 @@ func printTaskList(plan *pm.Plan) {
 	successColor := color.New(color.FgGreen)
 	failColor := color.New(color.FgRed)
 	warnColor := color.New(color.FgYellow)
+	pinColor := color.New(color.FgCyan)
 
 	// Sort by priority (lowest number = highest priority), stable to preserve insertion order for ties.
 	sorted := make([]*pm.Task, len(plan.Tasks))
@@ -715,6 +716,8 @@ func printTaskList(plan *pm.Plan) {
 	sort.SliceStable(sorted, func(i, j int) bool {
 		return sorted[i].Priority < sorted[j].Priority
 	})
+	// Pinned tasks always float to the top (preserving their relative order among pinned).
+	sorted = pm.SortPinnedFirst(sorted)
 
 	fmt.Printf("Tasks: %s\n\n", plan.Summary())
 	for _, t := range sorted {
@@ -722,7 +725,11 @@ func printTaskList(plan *pm.Plan) {
 		if t.Role != "" {
 			rolePart = fmt.Sprintf(" [%s]", t.Role)
 		}
-		line := fmt.Sprintf("  %s #%d [P%d]%s %s\n", taskMarker(t.Status), t.ID, t.Priority, rolePart, t.Title)
+		pinPart := ""
+		if t.Pinned {
+			pinPart = " [PIN]"
+		}
+		line := fmt.Sprintf("  %s #%d [P%d]%s%s %s\n", taskMarker(t.Status), t.ID, t.Priority, rolePart, pinPart, t.Title)
 		switch t.Status {
 		case pm.TaskDone:
 			successColor.Print(line)
@@ -736,6 +743,8 @@ func printTaskList(plan *pm.Plan) {
 			// Check if blocked by unresolved dependencies
 			if t.Status == pm.TaskPending && !plan.DepsReady(t) {
 				dimColor.Print(line)
+			} else if t.Pinned {
+				pinColor.Print(line)
 			} else {
 				fmt.Print(line)
 			}
@@ -927,7 +936,7 @@ func truncateStr(s string, n int) string {
 	return string(runes[:n]) + "..."
 }
 
-// marshalTasksJSON returns tasks sorted by priority as a formatted JSON string.
+// marshalTasksJSON returns tasks sorted by priority (pinned first) as a formatted JSON string.
 // Returns an empty JSON array on marshal error (should never happen for valid tasks).
 func marshalTasksJSON(tasks []*pm.Task) string {
 	sorted := make([]*pm.Task, len(tasks))
@@ -935,6 +944,7 @@ func marshalTasksJSON(tasks []*pm.Task) string {
 	sort.SliceStable(sorted, func(i, j int) bool {
 		return sorted[i].Priority < sorted[j].Priority
 	})
+	sorted = pm.SortPinnedFirst(sorted)
 	data, err := json.MarshalIndent(sorted, "", "  ")
 	if err != nil {
 		return "[]"

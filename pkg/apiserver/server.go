@@ -248,7 +248,7 @@ func (s *Server) handleGetPlan(w http.ResponseWriter, r *http.Request) {
 		PMMode: ps.PMMode,
 	}
 	if ps.Plan != nil {
-		resp.Tasks = ps.Plan.Tasks
+		resp.Tasks = pm.SortPinnedFirst(ps.Plan.Tasks)
 	}
 	jsonOK(w, resp)
 }

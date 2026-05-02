@@ -90,6 +90,7 @@ func Lint(ctx context.Context, plan *pm.Plan, opts Options) ([]Issue, error) {
 	issues = append(issues, checkCircularDeps(plan.Tasks)...)
 	issues = append(issues, checkDuplicateCompletedTitle(plan.Tasks, tasks)...)
 	issues = append(issues, checkHighPriorityNoTimeBudget(tasks)...)
+	issues = append(issues, checkPinInflation(plan.Tasks)...)
 
 	// --- AI checks ---
 	if !opts.SkipAI && opts.Provider != nil && len(tasks) > 0 {
@@ -264,6 +265,22 @@ func checkDuplicateCompletedTitle(allTasks, targetTasks []*pm.Task) []Issue {
 		}
 	}
 	return issues
+}
+
+// checkPinInflation warns when more than 5 tasks are pinned simultaneously,
+// since the usefulness of pinning diminishes when everything is pinned.
+func checkPinInflation(allTasks []*pm.Task) []Issue {
+	count := pm.PinnedCount(allTasks)
+	if count <= 5 {
+		return nil
+	}
+	return []Issue{{
+		Field:      "pinned",
+		Severity:   SeverityWarn,
+		Code:       "pin-inflation",
+		Message:    fmt.Sprintf("%d tasks are currently pinned — consider reducing to ≤5 to keep the pin indicator meaningful", count),
+		Suggestion: "Run 'cloop task unpin <id>' on lower-priority pinned tasks to avoid pin inflation.",
+	}}
 }
 
 // --- AI check ---

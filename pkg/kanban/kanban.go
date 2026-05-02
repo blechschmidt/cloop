@@ -222,6 +222,17 @@ func (m *Model) rebuildCols() {
 			m.cols[colPending] = append(m.cols[colPending], t)
 		}
 	}
+	// Sort each column: pinned tasks first, then by priority.
+	for ci := range m.cols {
+		col := m.cols[ci]
+		// stable sort by priority first
+		for i := 1; i < len(col); i++ {
+			for j := i; j > 0 && col[j].Priority < col[j-1].Priority; j-- {
+				col[j], col[j-1] = col[j-1], col[j]
+			}
+		}
+		m.cols[ci] = pm.SortPinnedFirst(col)
+	}
 	// clamp cursor
 	if col := m.col; col >= 0 && col < numCols {
 		if n := len(m.cols[col]); n == 0 {
@@ -484,12 +495,19 @@ func renderTaskCard(t *pm.Task, width int) string {
 		priColor = priorityColors[idx]
 	}
 	priLabel := lipgloss.NewStyle().Foreground(priColor).Render(fmt.Sprintf("P%d", t.Priority))
+	pinLabel := ""
+	if t.Pinned {
+		pinLabel = lipgloss.NewStyle().Foreground(lipgloss.Color("14")).Render("📌")
+	}
 	titleW := width - 7
 	if titleW < 4 {
 		titleW = 4
 	}
 	title := truncate(t.Title, titleW)
 	line := fmt.Sprintf("%s %s %s", sym, priLabel, title)
+	if pinLabel != "" {
+		line = pinLabel + " " + line
+	}
 	if len(t.Tags) > 0 {
 		line += " [" + strings.Join(t.Tags, ",") + "]"
 	}

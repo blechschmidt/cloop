@@ -2377,6 +2377,7 @@ const dashboardHTML = `<!DOCTYPE html>
   .badge.running .badge-dot { animation: pulse 1.5s infinite; }
   .task-tags { display:inline-flex; flex-wrap:wrap; gap:3px; margin-left:4px; }
   .task-tag  { display:inline-block; padding:1px 6px; border-radius:10px; font-size:10px; font-weight:600; background:rgba(139,148,158,.15); color:var(--muted); border:1px solid rgba(139,148,158,.3); }
+  .pin-badge { font-size:14px; vertical-align:middle; }
   .task-links { display:flex; flex-wrap:wrap; gap:6px; margin-top:5px; }
   .task-link-item { display:inline-flex; align-items:center; gap:3px; font-size:11px; color:var(--accent); text-decoration:none; padding:2px 7px; border-radius:10px; border:1px solid rgba(88,166,255,.3); background:rgba(88,166,255,.08); }
   .task-link-item:hover { text-decoration:underline; background:rgba(88,166,255,.15); }
@@ -4560,7 +4561,8 @@ function renderTasks(s) {
     container.innerHTML = '<div class="empty-state"><h3>No tasks yet</h3><p>Add a task above, or run <code>cloop run --pm</code> to generate a task plan.</p></div>';
     return;
   }
-  const sorted = [...s.plan.tasks].sort((a,b) => a.priority - b.priority);
+  const byPriority = [...s.plan.tasks].sort((a,b) => a.priority - b.priority);
+  const sorted = [...byPriority.filter(t=>t.pinned), ...byPriority.filter(t=>!t.pinned)];
   const done    = sorted.filter(t => t.status==='done').length;
   const hidden  = ['done', 'skipped', 'failed', 'timed_out'];
   const visible = showCompletedTasks ? sorted : sorted.filter(t => !hidden.includes(t.status || 'pending'));
@@ -4585,7 +4587,7 @@ function renderTasks(s) {
       '<div class="drag-handle" title="Drag to reorder">&#8597;</div>'+
       '<div class="task-icon">'+taskIcon(cls)+'</div>'+
       '<div class="task-body">'+
-        '<div class="task-title">'+esc(t.title)+'</div>'+
+        '<div class="task-title">'+(t.pinned?'<span class="pin-badge" title="Pinned">📌</span> ':'')+esc(t.title)+'</div>'+
         (t.description ? '<div class="task-desc">'+esc(t.description)+'</div>' : '')+
         '<div class="task-meta">'+
           '<span>'+esc(cls)+'</span>'+
@@ -4715,9 +4717,10 @@ function renderKanban(s) {
     groups[col].push(t);
   }
 
-  // Sort each group by priority
+  // Sort each group: pinned first, then by priority
   for (const col of Object.keys(groups)) {
     groups[col].sort((a,b) => (a.priority||99) - (b.priority||99));
+    groups[col] = [...groups[col].filter(t=>t.pinned), ...groups[col].filter(t=>!t.pinned)];
   }
 
   // Render each column
@@ -4744,7 +4747,7 @@ function renderKanban(s) {
           'ondragstart="kbDragStart(event,'+t.id+')" '+
           'ondragend="kbDragEnd(event)">'+
           '<div class="kb-card-header">'+
-            '<div class="kb-card-title">'+esc(t.title)+'</div>'+
+            '<div class="kb-card-title">'+(t.pinned?'<span class="pin-badge" title="Pinned">📌</span> ':'')+esc(t.title)+'</div>'+
             avatar+
           '</div>'+
           (t.description ? '<div class="kb-card-desc">'+esc(t.description)+'</div>' : '')+
