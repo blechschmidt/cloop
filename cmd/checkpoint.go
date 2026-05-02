@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/checkpoint"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 )
@@ -169,11 +170,36 @@ var checkpointDeleteCmd = &cobra.Command{
 	},
 }
 
+var checkpointClearCmd = &cobra.Command{
+	Use:   "clear",
+	Short: "Discard the auto-generated mid-execution checkpoint",
+	Long: `Remove the .cloop/checkpoint.json file that cloop writes automatically
+before each task starts in PM mode. Use this if you want to discard stale
+checkpoint state without running 'cloop run' (which prompts you interactively).`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		workdir, _ := os.Getwd()
+		if !checkpoint.Exists(workdir) {
+			fmt.Println("No mid-execution checkpoint found (.cloop/checkpoint.json).")
+			return nil
+		}
+		cp, err := checkpoint.Load(workdir)
+		if err == nil && cp != nil {
+			color.New(color.Faint).Printf("Clearing checkpoint for Task %d: %s\n", cp.TaskID, cp.TaskTitle)
+		}
+		if err := checkpoint.Clear(workdir); err != nil {
+			return fmt.Errorf("clearing checkpoint: %w", err)
+		}
+		color.New(color.FgGreen).Printf("✓ Checkpoint cleared.\n")
+		return nil
+	},
+}
+
 func init() {
 	checkpointCmd.AddCommand(checkpointSaveCmd)
 	checkpointCmd.AddCommand(checkpointRestoreCmd)
 	checkpointCmd.AddCommand(checkpointListCmd)
 	checkpointCmd.AddCommand(checkpointDeleteCmd)
+	checkpointCmd.AddCommand(checkpointClearCmd)
 	rootCmd.AddCommand(checkpointCmd)
 }
 

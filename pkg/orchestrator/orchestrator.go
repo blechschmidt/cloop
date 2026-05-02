@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/artifact"
+	"github.com/blechschmidt/cloop/pkg/checkpoint"
 	"github.com/blechschmidt/cloop/pkg/cost"
 	"github.com/blechschmidt/cloop/pkg/diagnosis"
 	cloopgit "github.com/blechschmidt/cloop/pkg/git"
@@ -469,6 +470,56 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		return nil
 	}
 
+	// Stale checkpoint detection: if a checkpoint.json exists for a task that is
+	// still marked in_progress (e.g. the previous run was killed), ask the user
+	// whether to resume or restart that task.
+	// Note: NextTask() only returns pending tasks, so an in_progress task would be
+	// permanently skipped without intervention. The checkpoint ensures we notice and
+	// give the user control.
+	if cp, cpErr := checkpoint.Load(o.config.WorkDir); cpErr == nil && cp != nil {
+		// Find the matching task in the current plan.
+		var staleTask *pm.Task
+		for _, t := range s.Plan.Tasks {
+			if t.ID == cp.TaskID && t.Status == pm.TaskInProgress {
+				staleTask = t
+				break
+			}
+		}
+		if staleTask != nil {
+			color.New(color.FgYellow, color.Bold).Printf("\n⚠ Stale checkpoint detected: Task %d — %s\n", cp.TaskID, cp.TaskTitle)
+			dimColor.Printf("  The previous run was interrupted while executing this task.\n")
+			dimColor.Printf("  Started: %s ago\n\n", time.Since(cp.StartTimestamp).Round(time.Second))
+			fmt.Printf("Retry this task or skip it? [r]etry / [s]kip: ")
+			scanner := bufio.NewScanner(os.Stdin)
+			if scanner.Scan() {
+				answer := strings.ToLower(strings.TrimSpace(scanner.Text()))
+				if answer == "s" || answer == "skip" {
+					staleTask.Status = pm.TaskSkipped
+					staleTask.StartedAt = nil
+					s.Save()
+					_ = checkpoint.Clear(o.config.WorkDir)
+					dimColor.Printf("→ Task %d skipped.\n\n", staleTask.ID)
+				} else {
+					// Default: retry — reset to pending so NextTask() picks it up.
+					staleTask.Status = pm.TaskPending
+					staleTask.StartedAt = nil
+					s.Save()
+					_ = checkpoint.Clear(o.config.WorkDir)
+					dimColor.Printf("→ Retrying task %d.\n\n", staleTask.ID)
+				}
+			} else {
+				// EOF / non-interactive: default to retry.
+				staleTask.Status = pm.TaskPending
+				staleTask.StartedAt = nil
+				s.Save()
+				_ = checkpoint.Clear(o.config.WorkDir)
+			}
+		} else {
+			// No matching in-progress task — checkpoint is fully stale; remove it.
+			_ = checkpoint.Clear(o.config.WorkDir)
+		}
+	}
+
 	// Pre-plan hook: run once before execution starts.
 	if err := hooks.RunPrePlan(o.config.Hooks, hooks.PlanContext{
 		Goal:  s.Goal,
@@ -647,6 +698,18 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		task.Status = pm.TaskInProgress
 		task.StartedAt = &now
 		s.Save()
+
+		// Write mid-execution checkpoint so an interrupted run can resume.
+		cp := &checkpoint.Checkpoint{
+			TaskID:         task.ID,
+			TaskTitle:      task.Title,
+			StepNumber:     s.CurrentStep,
+			StartTimestamp: now,
+			Provider:       o.provider.Name(),
+		}
+		if cpErr := checkpoint.Save(o.config.WorkDir, cp); cpErr != nil {
+			dimColor.Printf("  checkpoint write error (ignored): %v\n", cpErr)
+		}
 
 		{
 			done, failed := s.Plan.CountByStatus()
@@ -926,6 +989,11 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 
 		// Persist full AI response as a Markdown artifact file.
 		o.writeTaskArtifact(task, result.Output)
+
+		// Task completed (done/skipped/failed) — clear the mid-execution checkpoint.
+		if cpClearErr := checkpoint.Clear(o.config.WorkDir); cpClearErr != nil {
+			dimColor.Printf("  checkpoint clear error (ignored): %v\n", cpClearErr)
+		}
 
 		// Git mode: commit and merge on success; leave branch open on failure.
 		if o.config.GitMode && gitTaskBranch != "" {
