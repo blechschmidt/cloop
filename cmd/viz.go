@@ -11,6 +11,7 @@ import (
 
 var vizFormat string
 var vizOutput string
+var vizHighlight int
 
 var vizCmd = &cobra.Command{
 	Use:   "viz",
@@ -27,7 +28,8 @@ Examples:
   cloop viz                          # ASCII graph in terminal
   cloop viz --format mermaid         # Mermaid for GitHub markdown
   cloop viz --format dot             # DOT for Graphviz
-  cloop viz --format dot -o graph.dot && dot -Tpng graph.dot -o graph.png`,
+  cloop viz --format dot -o graph.dot && dot -Tpng graph.dot -o graph.png
+  cloop viz --highlight 5            # highlight task 5 and its dependency cone`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		workdir, _ := os.Getwd()
 		s, err := state.Load(workdir)
@@ -47,7 +49,11 @@ Examples:
 			output = viz.RenderDOT(s.Plan)
 		case viz.FormatASCII, "":
 			useColor := vizOutput == "" // color only when writing to stdout
-			output = viz.RenderASCII(s.Plan, useColor)
+			if vizHighlight > 0 {
+				output = viz.RenderASCIIHighlighted(s.Plan, vizHighlight, useColor)
+			} else {
+				output = viz.RenderASCII(s.Plan, useColor)
+			}
 		default:
 			return fmt.Errorf("unknown format %q — use ascii, mermaid, or dot", vizFormat)
 		}
@@ -68,5 +74,6 @@ Examples:
 func init() {
 	vizCmd.Flags().StringVarP(&vizFormat, "format", "f", "ascii", "Output format: ascii, mermaid, or dot")
 	vizCmd.Flags().StringVarP(&vizOutput, "output", "o", "", "Write output to file instead of stdout")
+	vizCmd.Flags().IntVar(&vizHighlight, "highlight", 0, "Highlight a task and its dependency cone (ASCII format only)")
 	rootCmd.AddCommand(vizCmd)
 }

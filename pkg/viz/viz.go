@@ -282,6 +282,212 @@ func stripANSI(s string) string {
 	return out.String()
 }
 
+// highlightColor is the ANSI escape for the highlighted task and its dep cone.
+const highlightColor = "\033[95m" // bright magenta
+
+// dependencyCone returns the set of task IDs reachable from highlightID by
+// following DependsOn edges (the task itself plus all transitive deps).
+func dependencyCone(plan *pm.Plan, highlightID int) map[int]bool {
+	cone := map[int]bool{highlightID: true}
+	taskByID := make(map[int]*pm.Task, len(plan.Tasks))
+	for _, t := range plan.Tasks {
+		taskByID[t.ID] = t
+	}
+
+	// BFS/DFS over DependsOn edges.
+	queue := []int{highlightID}
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		t, ok := taskByID[cur]
+		if !ok {
+			continue
+		}
+		for _, dep := range t.DependsOn {
+			if !cone[dep] {
+				cone[dep] = true
+				queue = append(queue, dep)
+			}
+		}
+	}
+	return cone
+}
+
+// RenderASCIIHighlighted renders the ASCII graph with the selected task and its
+// full dependency cone (the task itself plus all transitive dependencies)
+// rendered in a distinct bright-magenta colour.  Tasks outside the cone are
+// dimmed.  Pass highlightID <= 0 to disable highlighting (identical to
+// RenderASCII).
+func RenderASCIIHighlighted(plan *pm.Plan, highlightID int, useColor bool) string {
+	if highlightID <= 0 || !useColor {
+		return RenderASCII(plan, useColor)
+	}
+
+	cone := dependencyCone(plan, highlightID)
+
+	// We produce a modified render by overriding the color logic.
+	// Rather than duplicating the full render logic, we render a copy of the
+	// plan where highlighted tasks use a distinct prefix that we post-process.
+	// Instead, we directly override the color used per task.
+
+	if plan == nil || len(plan.Tasks) == 0 {
+		return "(no tasks in plan)\n"
+	}
+
+	taskByID := make(map[int]*pm.Task, len(plan.Tasks))
+	for _, t := range plan.Tasks {
+		taskByID[t.ID] = t
+	}
+
+	inDeg := make(map[int]int, len(plan.Tasks))
+	children := make(map[int][]int, len(plan.Tasks))
+	for _, t := range plan.Tasks {
+		if _, ok := inDeg[t.ID]; !ok {
+			inDeg[t.ID] = 0
+		}
+		for _, dep := range t.DependsOn {
+			inDeg[t.ID]++
+			children[dep] = append(children[dep], t.ID)
+		}
+	}
+
+	queue := []int{}
+	for _, t := range plan.Tasks {
+		if inDeg[t.ID] == 0 {
+			queue = append(queue, t.ID)
+		}
+	}
+	sort.Ints(queue)
+
+	order := []int{}
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		order = append(order, cur)
+		ch := children[cur]
+		sort.Ints(ch)
+		for _, c := range ch {
+			inDeg[c]--
+			if inDeg[c] == 0 {
+				queue = append(queue, c)
+			}
+		}
+	}
+	seen := make(map[int]bool, len(order))
+	for _, id := range order {
+		seen[id] = true
+	}
+	for _, t := range plan.Tasks {
+		if !seen[t.ID] {
+			order = append(order, t.ID)
+		}
+	}
+
+	var sb strings.Builder
+
+	sb.WriteString("Task Dependency Graph")
+	if plan.Goal != "" {
+		sb.WriteString(": ")
+		goal := plan.Goal
+		if len(goal) > 60 {
+			goal = goal[:57] + "..."
+		}
+		sb.WriteString(goal)
+	}
+	sb.WriteString("\n")
+	sb.WriteString(strings.Repeat("─", 60))
+	sb.WriteString("\n\n")
+
+	sb.WriteString(highlightColor + "★ highlighted task + dependency cone" + colorReset + "  ")
+	sb.WriteString(statusColor(pm.TaskPending) + "○ pending" + colorReset + "  ")
+	sb.WriteString(statusColor(pm.TaskDone) + "✓ done" + colorReset)
+	sb.WriteString("\n\n")
+
+	for _, id := range order {
+		t, ok := taskByID[id]
+		if !ok {
+			continue
+		}
+
+		inCone := cone[id]
+
+		sym := statusSymbol(t.Status)
+		title := t.Title
+		if len(title) > 50 {
+			title = title[:47] + "..."
+		}
+
+		var nodeColor string
+		if inCone {
+			nodeColor = highlightColor
+		} else {
+			nodeColor = "\033[2m" // dim for tasks outside the cone
+		}
+
+		label := fmt.Sprintf("[%d] %s %s", t.ID, sym, title)
+		boxWidth := len(label) + 4
+		if boxWidth < 30 {
+			boxWidth = 30
+		}
+		innerWidth := boxWidth - 2
+
+		top := nodeColor + "┌" + strings.Repeat("─", innerWidth) + "┐" + colorReset
+		symStr := sym
+		if inCone {
+			symStr = highlightColor + sym + colorReset
+		}
+		titleStr := nodeColor + title + colorReset
+		idStr := fmt.Sprintf("[%d]", t.ID)
+		mid := nodeColor + "│ " + colorReset + padRight(fmt.Sprintf("%s %s %s", symStr, idStr, titleStr), innerWidth-2, true) + nodeColor + " │" + colorReset
+		bot := nodeColor + "└" + strings.Repeat("─", innerWidth) + "┘" + colorReset
+
+		var depStr string
+		if len(t.DependsOn) > 0 {
+			depIDs := make([]string, len(t.DependsOn))
+			for i, d := range t.DependsOn {
+				depIDs[i] = fmt.Sprintf("#%d", d)
+			}
+			depStr = "  needs: " + strings.Join(depIDs, ", ")
+			if len(depStr) > innerWidth-2 {
+				depStr = depStr[:innerWidth-5] + "..."
+			}
+		}
+
+		sb.WriteString(top + "\n")
+		sb.WriteString(mid + "\n")
+		if depStr != "" {
+			depLine := nodeColor + "│ " + colorReset + padRightPlain(depStr, innerWidth-2) + nodeColor + " │" + colorReset
+			sb.WriteString(depLine + "\n")
+		}
+		sb.WriteString(bot + "\n")
+
+		ch := children[id]
+		sort.Ints(ch)
+		for i, cid := range ch {
+			child, ok2 := taskByID[cid]
+			if !ok2 {
+				continue
+			}
+			connector := "├──▶"
+			if i == len(ch)-1 {
+				connector = "└──▶"
+			}
+			childTitle := child.Title
+			if len(childTitle) > 40 {
+				childTitle = childTitle[:37] + "..."
+			}
+			arrowColor := "\033[2m"
+			if inCone {
+				arrowColor = highlightColor
+			}
+			sb.WriteString(fmt.Sprintf("  %s%s #%d %s%s\n", arrowColor, connector, child.ID, childTitle, colorReset))
+		}
+		sb.WriteString("\n")
+	}
+
+	return sb.String()
+}
+
 // RenderMermaid renders the dependency graph in Mermaid flowchart format.
 func RenderMermaid(plan *pm.Plan) string {
 	if plan == nil || len(plan.Tasks) == 0 {
