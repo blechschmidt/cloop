@@ -122,10 +122,20 @@ func Load(workdir string) (*ProjectState, error) {
 	jsonPath := effectiveLegacyPath(dir)
 
 	// If state.db doesn't exist but state.json does, run the migration.
-	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+	// Also re-migrate when state.json is newer than state.db (e.g. cloop-stable
+	// continues writing the legacy file while the UI reads via the new path).
+	if dbInfo, dbErr := os.Stat(dbPath); os.IsNotExist(dbErr) {
 		if _, jsonErr := os.Stat(jsonPath); jsonErr == nil {
 			if migrateErr := migrateFromJSON(dir, jsonPath, dbPath); migrateErr != nil {
 				return nil, fmt.Errorf("migrate state.json → state.db: %w", migrateErr)
+			}
+		}
+	} else if dbErr == nil {
+		if jsonInfo, jsonErr := os.Stat(jsonPath); jsonErr == nil {
+			if jsonInfo.ModTime().After(dbInfo.ModTime()) {
+				if migrateErr := migrateFromJSON(dir, jsonPath, dbPath); migrateErr != nil {
+					return nil, fmt.Errorf("re-migrate state.json → state.db: %w", migrateErr)
+				}
 			}
 		}
 	}
