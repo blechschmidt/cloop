@@ -45,6 +45,27 @@ type wsMessage struct {
 	Data json.RawMessage `json:"data"`
 }
 
+// hubClient represents a single WebSocket connection with presence metadata.
+type hubClient struct {
+	ch    chan wsMessage
+	id    string // unique per-connection identifier
+	name  string // display name (e.g. "Swift Panda")
+	color string // hex color code (e.g. "#58a6ff")
+}
+
+// conflictEntry records the last editor of a specific task field.
+type conflictEntry struct {
+	clientID string
+	editedAt time.Time
+}
+
+// presenceUser is the JSON representation of a connected user sent to clients.
+type presenceUser struct {
+	ID    string `json:"id"`
+	Name  string `json:"name"`
+	Color string `json:"color"`
+}
+
 // ChatMessage is a single turn in the chat conversation history.
 type ChatMessage struct {
 	Role      string    `json:"role"`            // "user" or "assistant"
@@ -84,10 +105,19 @@ type Server struct {
 	RPS   float64
 	Burst int
 
-	mu        sync.Mutex
-	clients   map[chan sseEvent]struct{}
-	wsClients map[chan wsMessage]struct{}
-	lastMod   time.Time
+	mu      sync.Mutex
+	clients map[chan sseEvent]struct{}
+	lastMod time.Time
+
+	// Hub registry: per-project WebSocket client presence tracking.
+	// Key is the resolved workDir path.
+	hubMu      sync.Mutex
+	hubClients map[string]map[*hubClient]struct{}
+
+	// Conflict tracker: per-project, per-task-field last-edit records.
+	// Outer key: workDir, inner key: "taskID:field".
+	conflictMu      sync.Mutex
+	conflictTracker map[string]map[string]*conflictEntry
 
 	// Rate limiting: tracks per-IP auth failure counts.
 	authMu   sync.Mutex
@@ -124,14 +154,15 @@ type Server struct {
 // "Authorization: Bearer <token>" header or "?token=<token>" query param.
 func New(workdir string, port int, token string) *Server {
 	return &Server{
-		WorkDir:       workdir,
-		Port:          port,
-		Token:         token,
-		clients:       make(map[chan sseEvent]struct{}),
-		wsClients:     make(map[chan wsMessage]struct{}),
-		authFails:     make(map[string]*authFailEntry),
-		rlBuckets:     make(map[string]*uiIPBucket),
-		chatHistories: make(map[string][]ChatMessage),
+		WorkDir:         workdir,
+		Port:            port,
+		Token:           token,
+		clients:         make(map[chan sseEvent]struct{}),
+		hubClients:      make(map[string]map[*hubClient]struct{}),
+		conflictTracker: make(map[string]map[string]*conflictEntry),
+		authFails:       make(map[string]*authFailEntry),
+		rlBuckets:       make(map[string]*uiIPBucket),
+		chatHistories:   make(map[string][]ChatMessage),
 	}
 }
 
@@ -438,25 +469,101 @@ func (s *Server) watchState() {
 }
 
 // broadcast sends a state JSON payload to all connected SSE and WebSocket
-// clients. SSE clients receive a default "message" event; WebSocket clients
-// receive a "task_update" typed envelope.
+// clients across all projects. SSE clients receive a default "message" event;
+// WebSocket clients receive a "task_update" typed envelope.
 func (s *Server) broadcast(data string) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	for ch := range s.clients {
 		select {
 		case ch <- sseEvent{Data: data}:
 		default:
 		}
 	}
+	s.mu.Unlock()
+
 	wsData := json.RawMessage(data)
-	for ch := range s.wsClients {
+	msg := wsMessage{Type: "task_update", Data: wsData}
+	s.hubMu.Lock()
+	for _, clients := range s.hubClients {
+		for hc := range clients {
+			select {
+			case hc.ch <- msg:
+			default:
+			}
+		}
+	}
+	s.hubMu.Unlock()
+}
+
+// broadcastToProject sends a WebSocket message only to clients connected to
+// the given project (identified by its resolved workDir path).
+func (s *Server) broadcastToProject(workDir string, msg wsMessage) {
+	s.hubMu.Lock()
+	clients := s.hubClients[workDir]
+	s.hubMu.Unlock()
+	for hc := range clients {
 		select {
-		case ch <- wsMessage{Type: "task_update", Data: wsData}:
+		case hc.ch <- msg:
 		default:
 		}
 	}
 }
+
+// presenceUsers returns a snapshot of all users connected to a project.
+func (s *Server) presenceUsers(workDir string) []presenceUser {
+	s.hubMu.Lock()
+	defer s.hubMu.Unlock()
+	clients := s.hubClients[workDir]
+	users := make([]presenceUser, 0, len(clients))
+	for hc := range clients {
+		users = append(users, presenceUser{ID: hc.id, Name: hc.name, Color: hc.color})
+	}
+	return users
+}
+
+// broadcastPresence sends the current presence list to all clients in a project.
+func (s *Server) broadcastPresence(workDir string) {
+	users := s.presenceUsers(workDir)
+	raw, _ := json.Marshal(map[string]interface{}{"users": users})
+	s.broadcastToProject(workDir, wsMessage{Type: "presence", Data: raw})
+}
+
+// checkAndRecordEdit records that clientID edited the given fields of taskID in
+// workDir. Returns true if a conflict is detected (same field edited by a
+// different client within the last 2 seconds).
+func (s *Server) checkAndRecordEdit(workDir, clientID string, taskID int, fields []string) bool {
+	now := time.Now()
+	s.conflictMu.Lock()
+	defer s.conflictMu.Unlock()
+	if s.conflictTracker[workDir] == nil {
+		s.conflictTracker[workDir] = make(map[string]*conflictEntry)
+	}
+	conflict := false
+	for _, field := range fields {
+		key := fmt.Sprintf("%d:%s", taskID, field)
+		if prev, ok := s.conflictTracker[workDir][key]; ok {
+			if prev.clientID != clientID && now.Sub(prev.editedAt) < 2*time.Second {
+				conflict = true
+			}
+		}
+		s.conflictTracker[workDir][key] = &conflictEntry{clientID: clientID, editedAt: now}
+	}
+	return conflict
+}
+
+// presenceNames is a list of fun display names for anonymous users.
+var presenceNames = []string{
+	"Swift Panda", "Bold Fox", "Keen Owl", "Calm Deer", "Brave Wolf",
+	"Quick Lynx", "Sharp Hawk", "Witty Otter", "Sage Raven", "Bright Ibis",
+	"Cool Moose", "Deft Crane", "Eager Bison", "Fable Lynx", "Glad Ferret",
+}
+
+// presenceColors are the accent colors assigned to users (cycling).
+var presenceColors = []string{
+	"#58a6ff", "#3fb950", "#bc8cff", "#39c5cf", "#f85149",
+	"#d29922", "#e3b341", "#ff7b72", "#79c0ff", "#56d364",
+}
+
 
 // broadcastLog sends a log chunk to all connected SSE clients as a "log"
 // SSE event, and stores it in the ring buffer.
@@ -484,12 +591,17 @@ func (s *Server) broadcastLog(chunk string) {
 		}
 	}
 	wsData := json.RawMessage(data)
-	for ch := range s.wsClients {
-		select {
-		case ch <- wsMessage{Type: "step_output", Data: wsData}:
-		default:
+	logMsg := wsMessage{Type: "step_output", Data: wsData}
+	s.hubMu.Lock()
+	for _, clients := range s.hubClients {
+		for hc := range clients {
+			select {
+			case hc.ch <- logMsg:
+			default:
+			}
 		}
 	}
+	s.hubMu.Unlock()
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -670,8 +782,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleWS upgrades the connection to a WebSocket and streams typed JSON
-// messages to the client.  It also accepts incoming text frames so future
-// bidirectional features (approval gates, chat commands) can be layered on.
+// messages to the client. It also manages per-project presence tracking.
 // Clients that cannot upgrade (e.g., proxies that strip the Upgrade header)
 // should fall back to the /api/events SSE endpoint.
 func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
@@ -679,26 +790,54 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		InsecureSkipVerify: true, // local dashboard — origin check is unnecessary
 	})
 	if err != nil {
-		// Accept already wrote the HTTP error response.
 		return
 	}
 	defer conn.CloseNow() //nolint:errcheck
 
 	ctx := r.Context()
+	workDir := s.resolveWorkDir(r)
 
-	ch := make(chan wsMessage, 16)
-	s.mu.Lock()
-	s.wsClients[ch] = struct{}{}
-	s.mu.Unlock()
+	// Assign a unique id, color-coded name and accent color to this connection.
+	connID := fmt.Sprintf("%x", time.Now().UnixNano())
+	s.hubMu.Lock()
+	totalClients := 0
+	for _, cl := range s.hubClients {
+		totalClients += len(cl)
+	}
+	name  := presenceNames[totalClients%len(presenceNames)]
+	color := presenceColors[totalClients%len(presenceColors)]
+	// Override with user-supplied name/color from query params if provided.
+	if qn := r.URL.Query().Get("name"); qn != "" {
+		name = qn
+	}
+	if qc := r.URL.Query().Get("color"); qc != "" {
+		color = qc
+	}
+	hc := &hubClient{
+		ch:    make(chan wsMessage, 32),
+		id:    connID,
+		name:  name,
+		color: color,
+	}
+	if s.hubClients[workDir] == nil {
+		s.hubClients[workDir] = make(map[*hubClient]struct{})
+	}
+	s.hubClients[workDir][hc] = struct{}{}
+	s.hubMu.Unlock()
+
 	defer func() {
-		s.mu.Lock()
-		delete(s.wsClients, ch)
-		s.mu.Unlock()
+		s.hubMu.Lock()
+		delete(s.hubClients[workDir], hc)
+		if len(s.hubClients[workDir]) == 0 {
+			delete(s.hubClients, workDir)
+		}
+		s.hubMu.Unlock()
+		// Broadcast updated presence list after disconnection.
+		s.broadcastPresence(workDir)
 	}()
 
-	// Send current state immediately so the client doesn't need a separate
-	// REST call after connecting.
-	if ps, err := state.Load(s.resolveWorkDir(r)); err == nil {
+	// Send current state immediately.
+	if ps, err := state.Load(workDir); err == nil {
 		if raw, err := json.Marshal(ps); err == nil {
 			if msg, err := json.Marshal(wsMessage{Type: "task_update", Data: raw}); err == nil {
 				_ = conn.Write(ctx, websocket.MessageText, msg)
@@ -706,7 +845,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Replay the live log ring-buffer so reconnecting clients see recent output.
+	// Replay live log ring-buffer for reconnecting clients.
 	s.liveLogMu.Lock()
 	if len(s.liveLogLines) > 0 {
 		buf := strings.Join(s.liveLogLines, "")
@@ -720,7 +859,18 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		s.liveLogMu.Unlock()
 	}
 
-	// Pump outgoing messages; also drain any incoming frames (ignored for now).
+	// Send initial presence list to this client, then announce to everyone.
+	if users := s.presenceUsers(workDir); len(users) > 0 {
+		if raw, err := json.Marshal(map[string]interface{}{"users": users, "you": connID}); err == nil {
+			if msg, err := json.Marshal(wsMessage{Type: "presence", Data: raw}); err == nil {
+				_ = conn.Write(ctx, websocket.MessageText, msg)
+			}
+		}
+	}
+	// Broadcast to others that a new user joined.
+	go s.broadcastPresence(workDir)
+
+	// Drain incoming frames (bidirectional hook for future use).
 	go func() {
 		for {
 			_, _, err := conn.Read(ctx)
@@ -735,7 +885,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		case <-ctx.Done():
 			conn.Close(websocket.StatusNormalClosure, "") //nolint:errcheck
 			return
-		case msg := <-ch:
+		case msg := <-hc.ch:
 			data, err := json.Marshal(msg)
 			if err != nil {
 				continue
@@ -1042,6 +1192,17 @@ func (s *Server) handleTaskAdd(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "save failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	// Broadcast the new task to all WebSocket clients watching this project.
+	addWorkDir := s.resolveWorkDir(r)
+	if raw, err := json.Marshal(ps); err == nil {
+		addRaw, _ := json.Marshal(map[string]interface{}{
+			"task":  task,
+			"state": json.RawMessage(raw),
+		})
+		s.broadcastToProject(addWorkDir, wsMessage{Type: "task_added", Data: addRaw})
+	}
+
 	jsonOK(w, map[string]interface{}{"ok": true, "task": task})
 }
 
@@ -1347,7 +1508,42 @@ func (s *Server) handlePutTask(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "save failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	jsonOK(w, map[string]interface{}{"ok": true, "task": task})
+
+	// Detect which fields were mutated and check for concurrent-edit conflicts.
+	mutatedFields := []string{}
+	if req.Title != "" {
+		mutatedFields = append(mutatedFields, "title")
+	}
+	if req.Description != "" {
+		mutatedFields = append(mutatedFields, "description")
+	}
+	if req.Priority > 0 {
+		mutatedFields = append(mutatedFields, "priority")
+	}
+	if req.Status != "" {
+		mutatedFields = append(mutatedFields, "status")
+	}
+	workDir := s.resolveWorkDir(r)
+	clientID := r.Header.Get("X-Client-ID")
+	if clientID == "" {
+		clientID = clientIP(r)
+	}
+	conflict := false
+	if len(mutatedFields) > 0 {
+		conflict = s.checkAndRecordEdit(workDir, clientID, id, mutatedFields)
+	}
+
+	// Broadcast the mutation to all WebSocket clients watching this project.
+	if raw, err := json.Marshal(ps); err == nil {
+		mutRaw, _ := json.Marshal(map[string]interface{}{
+			"task":     task,
+			"state":    json.RawMessage(raw),
+			"conflict": conflict,
+		})
+		s.broadcastToProject(workDir, wsMessage{Type: "task_mutation", Data: mutRaw})
+	}
+
+	jsonOK(w, map[string]interface{}{"ok": true, "task": task, "conflict": conflict})
 }
 
 // handleDeleteTask removes a task by ID (DELETE /api/tasks/{id}).
@@ -1386,6 +1582,17 @@ func (s *Server) handleDeleteTask(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "save failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	// Broadcast deletion to all WebSocket clients watching this project.
+	workDir2 := s.resolveWorkDir(r)
+	if raw, err := json.Marshal(ps); err == nil {
+		delRaw, _ := json.Marshal(map[string]interface{}{
+			"deleted_id": id,
+			"state":      json.RawMessage(raw),
+		})
+		s.broadcastToProject(workDir2, wsMessage{Type: "task_deleted", Data: delRaw})
+	}
+
 	jsonOK(w, map[string]bool{"ok": true})
 }
 
@@ -2120,20 +2327,26 @@ func (s *Server) broadcastProjectsUpdate() {
 		return
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	for ch := range s.clients {
 		select {
 		case ch <- sseEvent{Event: "projects", Data: string(payload)}:
 		default:
 		}
 	}
+	s.mu.Unlock()
+
 	wsData := json.RawMessage(payload)
-	for ch := range s.wsClients {
-		select {
-		case ch <- wsMessage{Type: "projects", Data: wsData}:
-		default:
+	projMsg := wsMessage{Type: "projects", Data: wsData}
+	s.hubMu.Lock()
+	for _, clients := range s.hubClients {
+		for hc := range clients {
+			select {
+			case hc.ch <- projMsg:
+			default:
+			}
 		}
 	}
+	s.hubMu.Unlock()
 }
 
 // handleProjects returns all project statuses and aggregate stats.
@@ -2962,6 +3175,55 @@ const dashboardHTML = `<!DOCTYPE html>
   @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
   .spacer { flex: 1; min-width: 8px; }
   .updated-at { font-size: 11px; color: var(--muted); white-space: nowrap; }
+
+  /* ── Presence bar ────────────────────────────────────────────────────────── */
+  #presenceBar {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 16px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    min-height: 28px;
+    flex-wrap: wrap;
+  }
+  #presenceBar:empty { display: none; }
+  .presence-label { font-size: 11px; color: var(--muted); margin-right: 4px; flex-shrink: 0; }
+  .presence-avatar {
+    width: 24px; height: 24px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 10px; font-weight: 700; color: #fff;
+    border: 2px solid var(--bg);
+    cursor: default;
+    position: relative;
+    flex-shrink: 0;
+    transition: transform .15s;
+  }
+  .presence-avatar:hover { transform: scale(1.15); z-index: 2; }
+  .presence-avatar .presence-tooltip {
+    display: none; position: absolute; top: 28px; left: 50%; transform: translateX(-50%);
+    background: var(--surface); border: 1px solid var(--border); border-radius: 4px;
+    padding: 3px 7px; font-size: 11px; white-space: nowrap; z-index: 99;
+    box-shadow: 0 2px 6px rgba(0,0,0,.3);
+  }
+  .presence-avatar:hover .presence-tooltip { display: block; }
+  .presence-avatar.you { border-color: var(--accent); }
+
+  /* ── Conflict toast ────────────────────────────────────────────────────────── */
+  #conflictToast {
+    position: fixed; bottom: 72px; right: 16px; z-index: 9999;
+    background: #d29922; color: #000; border-radius: 6px;
+    padding: 10px 14px; font-size: 13px; max-width: 320px;
+    box-shadow: 0 4px 12px rgba(0,0,0,.4);
+    display: none; animation: slideUp .2s ease;
+    cursor: pointer;
+  }
+  #conflictToast.visible { display: flex; align-items: flex-start; gap: 8px; }
+  #conflictToast .conflict-icon { font-size: 16px; flex-shrink: 0; }
+  #conflictToast .conflict-body { flex: 1; }
+  #conflictToast .conflict-title { font-weight: 700; margin-bottom: 2px; }
+  #conflictToast .conflict-dismiss { font-size: 16px; cursor: pointer; flex-shrink: 0; opacity: .7; }
+  @keyframes slideUp { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:translateY(0); } }
 
   /* ── Unified filter bar ────────────────────────────────────────────────────── */
   .filter-bar {
@@ -4240,6 +4502,19 @@ const dashboardHTML = `<!DOCTYPE html>
     </button>
     <div class="updated-at" id="updatedAt"></div>
   </header>
+
+  <!-- ── Presence bar ── -->
+  <div id="presenceBar" role="status" aria-live="polite" aria-label="Connected collaborators"></div>
+
+  <!-- ── Conflict toast ── -->
+  <div id="conflictToast" role="alert" aria-live="assertive" onclick="dismissConflictToast()">
+    <span class="conflict-icon">&#x26A0;&#xFE0F;</span>
+    <div class="conflict-body">
+      <div class="conflict-title">Edit conflict detected</div>
+      <div class="conflict-msg" id="conflictMsg">Another user edited this task recently.</div>
+    </div>
+    <span class="conflict-dismiss" aria-label="Dismiss">&#x2715;</span>
+  </div>
 
   <!-- ── Unified search / filter bar ── -->
   <div id="filterBar" class="filter-bar" style="display:none" role="search" aria-label="Filter tasks">
@@ -6036,6 +6311,71 @@ let wsBackoff = 1000;
 let wsConn = null;      // active WebSocket
 let sseUsed = false;    // true when we fell back to SSE
 
+// ── Presence ─────────────────────────────────────────────────────────────────
+
+// myClientID: set on first WS presence message so we can highlight "you".
+let myClientID = null;
+
+// renderPresenceBar updates the presence indicator strip below the header.
+function renderPresenceBar(users) {
+  const bar = document.getElementById('presenceBar');
+  if (!bar) return;
+  if (!users || users.length === 0) { bar.innerHTML = ''; return; }
+
+  let html = '<span class="presence-label">&#x1F465; Online:</span>';
+  for (const u of users) {
+    const isYou = u.id === myClientID;
+    const initials = u.name.split(' ').map(w => w[0]).join('').toUpperCase().slice(0, 2);
+    const cls = isYou ? 'presence-avatar you' : 'presence-avatar';
+    const tip = isYou ? u.name + ' (you)' : u.name;
+    html += '<div class="' + cls + '" style="background:' + u.color + '" title="' + tip + '">'
+          + initials
+          + '<span class="presence-tooltip">' + tip + '</span>'
+          + '</div>';
+  }
+  bar.innerHTML = html;
+}
+
+// ── Conflict toast ────────────────────────────────────────────────────────────
+
+let _conflictDismissTimer = null;
+
+function showConflictToast(msg) {
+  const toast = document.getElementById('conflictToast');
+  const msgEl = document.getElementById('conflictMsg');
+  if (!toast) return;
+  if (msgEl) msgEl.textContent = msg || 'Another user edited this task recently.';
+  toast.classList.add('visible');
+  clearTimeout(_conflictDismissTimer);
+  _conflictDismissTimer = setTimeout(dismissConflictToast, 6000);
+}
+
+window.dismissConflictToast = function() {
+  const toast = document.getElementById('conflictToast');
+  if (toast) toast.classList.remove('visible');
+  clearTimeout(_conflictDismissTimer);
+};
+
+// ── Client ID (sent with every REST mutation for conflict detection) ──────────
+
+// Persist a per-tab client ID so the server can detect concurrent edits.
+let _clientID = sessionStorage.getItem('cloop-client-id');
+if (!_clientID) {
+  _clientID = 'ui-' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+  sessionStorage.setItem('cloop-client-id', _clientID);
+}
+
+// Intercept fetch to inject X-Client-ID on every mutating request.
+(function() {
+  const _orig = window.fetch.bind(window);
+  window.fetch = function(url, opts) {
+    if (opts && opts.method && opts.method !== 'GET' && opts.method !== 'HEAD') {
+      opts.headers = Object.assign({}, opts.headers || {}, { 'X-Client-ID': _clientID });
+    }
+    return _orig(url, opts);
+  };
+})();
+
 // handleRealtimeMsg dispatches a typed message from either WebSocket or SSE.
 function handleRealtimeMsg(type, data) {
   const dot = document.getElementById('liveDot');
@@ -6060,6 +6400,38 @@ function handleRealtimeMsg(type, data) {
         // Keep the selected project's state fresh in multi-project mode.
         if (isMultiProject && selectedProjectIdx !== null) {
           api(pUrl('/api/state')).then(s => render(s)).catch(() => {});
+        }
+      } catch(_) {}
+      break;
+    case 'presence':
+      try {
+        // Remember own ID on first presence message.
+        if (data.you && !myClientID) myClientID = data.you;
+        renderPresenceBar(data.users || []);
+      } catch(_) {}
+      break;
+    case 'task_mutation':
+      // Re-render with latest state and show conflict toast if needed.
+      try {
+        if (data.state) {
+          if (!isMultiProject || selectedProjectIdx === null || selectedProjectIdx === 0) {
+            render(data.state);
+          }
+        }
+        if (data.conflict) {
+          const taskTitle = data.task && data.task.title ? '"' + data.task.title + '"' : 'a task';
+          showConflictToast('Another user edited ' + taskTitle + ' at the same time. Review the latest version.');
+        }
+      } catch(_) {}
+      break;
+    case 'task_added':
+    case 'task_deleted':
+      // Re-render with the updated state snapshot.
+      try {
+        if (data.state) {
+          if (!isMultiProject || selectedProjectIdx === null || selectedProjectIdx === 0) {
+            render(data.state);
+          }
         }
       } catch(_) {}
       break;
