@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/config"
+	"github.com/blechschmidt/cloop/pkg/kb"
 	"github.com/blechschmidt/cloop/pkg/multiui"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/state"
@@ -177,6 +178,12 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	// Init & reset
 	mux.HandleFunc("/api/init", s.handleInit)
 	mux.HandleFunc("/api/reset", s.handleReset)
+
+	// Knowledge Base
+	mux.HandleFunc("GET /api/kb", s.handleKBList)
+	mux.HandleFunc("POST /api/kb", s.handleKBAdd)
+	mux.HandleFunc("DELETE /api/kb/{id}", s.handleKBDelete)
+	mux.HandleFunc("GET /api/kb/search", s.handleKBSearch)
 
 	// Timeline
 	mux.HandleFunc("/api/timeline", s.handleTimeline)
@@ -1829,6 +1836,100 @@ func (s *Server) handleProjectNew(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]interface{}{"ok": true, "dir": abs, "project_idx": newIdx})
 }
 
+// ── Knowledge Base handlers ──────────────────────────────────────────────────
+
+// handleKBList returns all KB entries as JSON (GET /api/kb).
+func (s *Server) handleKBList(w http.ResponseWriter, r *http.Request) {
+	workDir := s.resolveWorkDir(r)
+	store, err := kb.Load(workDir)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	entries := store.Entries
+	if entries == nil {
+		entries = []*kb.Entry{}
+	}
+	jsonOK(w, map[string]interface{}{"entries": entries})
+}
+
+// handleKBAdd creates a new KB entry (POST /api/kb).
+// Body: { "title": "...", "body": "...", "tags": ["a","b"] }
+func (s *Server) handleKBAdd(w http.ResponseWriter, r *http.Request) {
+	workDir := s.resolveWorkDir(r)
+	var req struct {
+		Title string   `json:"title"`
+		Body  string   `json:"body"`
+		Tags  []string `json:"tags"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	req.Title = strings.TrimSpace(req.Title)
+	req.Body = strings.TrimSpace(req.Body)
+	if req.Title == "" {
+		http.Error(w, "title required", http.StatusBadRequest)
+		return
+	}
+	entry, err := kb.Add(workDir, req.Title, req.Body, req.Tags)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{"ok": true, "entry": entry})
+}
+
+// handleKBDelete removes a KB entry by ID (DELETE /api/kb/{id}).
+func (s *Server) handleKBDelete(w http.ResponseWriter, r *http.Request) {
+	workDir := s.resolveWorkDir(r)
+	idStr := r.PathValue("id")
+	id, err := strconv.Atoi(idStr)
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	if err := kb.Remove(workDir, id); err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	jsonOK(w, map[string]interface{}{"ok": true})
+}
+
+// handleKBSearch returns KB entries whose title, content, or tags contain the
+// query string (case-insensitive substring match). GET /api/kb/search?q=...
+func (s *Server) handleKBSearch(w http.ResponseWriter, r *http.Request) {
+	workDir := s.resolveWorkDir(r)
+	q := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
+	store, err := kb.Load(workDir)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	var matched []*kb.Entry
+	for _, e := range store.Entries {
+		if q == "" ||
+			strings.Contains(strings.ToLower(e.Title), q) ||
+			strings.Contains(strings.ToLower(e.Content), q) ||
+			func() bool {
+				for _, t := range e.Tags {
+					if strings.Contains(strings.ToLower(t), q) {
+						return true
+					}
+				}
+				return false
+			}() {
+			matched = append(matched, e)
+		}
+	}
+	if matched == nil {
+		matched = []*kb.Entry{}
+	}
+	jsonOK(w, map[string]interface{}{"entries": matched})
+}
+
 // handleTimeline returns timeline bar data derived from pkg/timeline for the
 // SVG Gantt chart in the web UI. Response JSON:
 //
@@ -2654,6 +2755,55 @@ const dashboardHTML = `<!DOCTYPE html>
   }
   .chat-tts-btn:hover { color: var(--accent); background: rgba(88,166,255,.1); }
 
+  /* ── Knowledge Base tab ── */
+  .kb-tab-toolbar {
+    display: flex; align-items: center; gap: 10px; padding: 12px 0 10px; flex-wrap: wrap;
+  }
+  .kb-search-wrap { flex: 1; min-width: 160px; max-width: 320px; }
+  .kb-search-input { width: 100%; }
+  .kb-add-form {
+    background: var(--card-bg); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 14px 16px; margin-bottom: 16px;
+  }
+  .kb-form-row {
+    display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;
+  }
+  .kb-form-row .form-label { width: 48px; padding-top: 7px; flex-shrink: 0; }
+  .kb-form-row .form-input, .kb-form-row textarea.form-input { flex: 1; }
+  .kb-new-body { resize: vertical; font-family: inherit; }
+  .kb-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    gap: 14px;
+    margin-top: 4px;
+  }
+  .kb-entry-card {
+    background: var(--card-bg); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 14px 14px 10px; display: flex; flex-direction: column; gap: 8px;
+    position: relative; transition: border-color .15s;
+  }
+  .kb-entry-card:hover { border-color: var(--accent); }
+  .kb-entry-title {
+    font-weight: 600; font-size: 14px; color: var(--text); margin: 0;
+    padding-right: 28px; word-break: break-word;
+  }
+  .kb-entry-body {
+    font-size: 12px; color: var(--muted); line-height: 1.5;
+    display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical;
+    overflow: hidden; word-break: break-word; white-space: pre-wrap;
+  }
+  .kb-tags { display: flex; flex-wrap: wrap; gap: 4px; }
+  .kb-tag {
+    font-size: 10px; background: rgba(88,166,255,.12); color: var(--accent);
+    border-radius: 10px; padding: 1px 7px; font-weight: 500;
+  }
+  .kb-card-del {
+    position: absolute; top: 8px; right: 8px; background: none; border: none;
+    cursor: pointer; color: var(--muted); padding: 2px 5px; font-size: 14px;
+    border-radius: 4px; line-height: 1;
+  }
+  .kb-card-del:hover { color: #ef4444; background: rgba(239,68,68,.1); }
+
   /* ── Timeline / Gantt chart ── */
   .timeline-toolbar {
     display: flex;
@@ -3000,6 +3150,7 @@ const dashboardHTML = `<!DOCTYPE html>
       <button class="tab-btn"        onclick="switchTab('tasks')"     id="tbtn-tasks">Tasks</button>
       <button class="tab-btn"        onclick="switchTab('kanban')"    id="tbtn-kanban">Kanban</button>
       <button class="tab-btn"        onclick="switchTab('timeline')"  id="tbtn-timeline">Timeline</button>
+      <button class="tab-btn"        onclick="switchTab('kb')"        id="tbtn-kb">Knowledge Base</button>
       <button class="tab-btn"        onclick="switchTab('chat')"      id="tbtn-chat">Chat</button>
       <button class="tab-btn"        onclick="switchTab('projects')"  id="tbtn-projects">Projects</button>
       <button class="tab-btn"        onclick="switchTab('suggest')"   id="tbtn-suggest">Suggest</button>
@@ -3023,6 +3174,7 @@ const dashboardHTML = `<!DOCTYPE html>
       <button class="m-tab-btn" onclick="switchTab('tasks')"     id="mtbtn-tasks"><span class="m-tab-icon">&#10003;</span>Tasks</button>
       <button class="m-tab-btn" onclick="switchTab('kanban')"    id="mtbtn-kanban"><span class="m-tab-icon">&#9783;</span>Kanban</button>
       <button class="m-tab-btn" onclick="switchTab('timeline')"  id="mtbtn-timeline"><span class="m-tab-icon">&#128197;</span>Timeline</button>
+      <button class="m-tab-btn" onclick="switchTab('kb')"        id="mtbtn-kb"><span class="m-tab-icon">&#128218;</span>Knowledge Base</button>
       <button class="m-tab-btn" onclick="switchTab('chat')"      id="mtbtn-chat"><span class="m-tab-icon">&#128172;</span>Chat</button>
       <button class="m-tab-btn" onclick="switchTab('projects')"  id="mtbtn-projects"><span class="m-tab-icon">&#128193;</span>Projects</button>
       <button class="m-tab-btn" onclick="switchTab('suggest')"   id="mtbtn-suggest"><span class="m-tab-icon">&#128161;</span>Suggest</button>
@@ -3313,6 +3465,45 @@ const dashboardHTML = `<!DOCTYPE html>
       </div>
       <!-- Tooltip -->
       <div id="tlTooltip" class="tl-tooltip"></div>
+    </div>
+
+    <!-- ══════════════════════════════════════════════ KNOWLEDGE BASE -->
+    <div id="tab-kb" class="tab-panel">
+      <div class="kb-tab-toolbar">
+        <span class="section-title" style="margin:0">Knowledge Base</span>
+        <div class="kb-search-wrap">
+          <input class="form-input kb-search-input" id="kbSearchInput" placeholder="Search entries..." oninput="filterKBCards(this.value)">
+        </div>
+        <button class="btn primary" style="padding:4px 12px;font-size:12px" onclick="toggleKBAddForm()">+ Add Entry</button>
+        <button class="btn" style="padding:4px 10px;font-size:12px" onclick="loadKB()">Refresh</button>
+      </div>
+
+      <!-- Add Entry form (hidden by default) -->
+      <div id="kbAddForm" class="kb-add-form" style="display:none">
+        <div class="section-title">New Entry</div>
+        <div class="kb-form-row">
+          <label class="form-label">Title</label>
+          <input class="form-input" id="kbNewTitle" placeholder="Entry title..." style="flex:1">
+        </div>
+        <div class="kb-form-row">
+          <label class="form-label">Body</label>
+          <textarea class="form-input kb-new-body" id="kbNewBody" placeholder="Entry content..." rows="4"></textarea>
+        </div>
+        <div class="kb-form-row">
+          <label class="form-label">Tags</label>
+          <input class="form-input" id="kbNewTags" placeholder="Comma-separated tags, e.g. api,auth" style="flex:1">
+        </div>
+        <div style="display:flex;gap:8px;margin-top:6px">
+          <button class="btn primary" onclick="submitKBAdd()">Save Entry</button>
+          <button class="btn" onclick="toggleKBAddForm()">Cancel</button>
+        </div>
+      </div>
+
+      <div id="kbEmpty" class="empty-state" style="display:none">
+        <h3>No entries yet</h3>
+        <p>Click <strong>+ Add Entry</strong> to add your first knowledge base entry.</p>
+      </div>
+      <div id="kbGrid" class="kb-grid"></div>
     </div>
 
     <!-- ════════════════════════════════════════════════════════════ CHAT -->
@@ -3745,13 +3936,14 @@ window.switchTab = function(name) {
 
   // In multi-project mode, re-fetch state for the selected project when
   // switching to any project-scoped tab so the data is always current.
-  const projectScopedTabs = ['overview','tasks','kanban','timeline','chat','suggest'];
+  const projectScopedTabs = ['overview','tasks','kanban','timeline','kb','chat','suggest'];
   if (isMultiProject && selectedProjectIdx !== null && projectScopedTabs.includes(name)) {
     api(pUrl('/api/state')).then(s => render(s)).catch(() => {
       if (name === 'tasks'  && appState) renderTasks(appState);
       if (name === 'kanban' && appState) renderKanban(appState);
     });
     if (name === 'timeline') loadTimeline();
+    if (name === 'kb') loadKB();
     if (name === 'chat') loadChatHistory();
   } else {
     if (name === 'settings') loadConfig();
@@ -3760,6 +3952,7 @@ window.switchTab = function(name) {
     if (name === 'projects') loadProjects();
     if (name === 'chat') loadChatHistory();
     if (name === 'timeline') loadTimeline();
+    if (name === 'kb') loadKB();
   }
 
   // In multi-project mode, show/hide breadcrumb and project selector.
@@ -4629,6 +4822,89 @@ window.submitNewProject = function() {
       }
     }).catch(() => {});
   }).catch(() => toast('Request failed', 'err'));
+};
+
+// ── Knowledge Base tab ───────────────────────────────────────────────────────
+
+let _kbEntries = [];  // full entry list for client-side search
+
+window.loadKB = function() { loadKB(); };
+
+function loadKB() {
+  api(pUrl('/api/kb')).then(data => {
+    _kbEntries = data.entries || [];
+    renderKBCards(_kbEntries);
+  }).catch(() => toast('Failed to load knowledge base', 'err'));
+}
+
+function renderKBCards(entries) {
+  const grid  = document.getElementById('kbGrid');
+  const empty = document.getElementById('kbEmpty');
+  if (!grid) return;
+  if (!entries || entries.length === 0) {
+    grid.innerHTML = '';
+    if (empty) empty.style.display = '';
+    return;
+  }
+  if (empty) empty.style.display = 'none';
+  grid.innerHTML = entries.map(e => {
+    const tags = (e.tags || []).map(t => '<span class="kb-tag">' + esc(t) + '</span>').join('');
+    const bodyText = (e.content || '').replace(/\n/g, '\n');
+    return '<div class="kb-entry-card" data-id="' + e.id + '">' +
+      '<button class="kb-card-del" onclick="deleteKBEntry(' + e.id + ')" title="Delete entry">&#x2715;</button>' +
+      '<div class="kb-entry-title">' + esc(e.title) + '</div>' +
+      (tags ? '<div class="kb-tags">' + tags + '</div>' : '') +
+      (bodyText ? '<div class="kb-entry-body">' + esc(bodyText) + '</div>' : '') +
+      '</div>';
+  }).join('');
+}
+
+function filterKBCards(q) {
+  if (!q) { renderKBCards(_kbEntries); return; }
+  const lq = q.toLowerCase();
+  const filtered = _kbEntries.filter(e =>
+    (e.title || '').toLowerCase().includes(lq) ||
+    (e.content || '').toLowerCase().includes(lq) ||
+    (e.tags || []).some(t => t.toLowerCase().includes(lq))
+  );
+  renderKBCards(filtered);
+}
+
+window.toggleKBAddForm = function() {
+  const form = document.getElementById('kbAddForm');
+  if (!form) return;
+  const visible = form.style.display !== 'none';
+  form.style.display = visible ? 'none' : '';
+  if (!visible) {
+    document.getElementById('kbNewTitle').value = '';
+    document.getElementById('kbNewBody').value = '';
+    document.getElementById('kbNewTags').value = '';
+    document.getElementById('kbNewTitle').focus();
+  }
+};
+
+window.submitKBAdd = function() {
+  const title = (document.getElementById('kbNewTitle').value || '').trim();
+  const body  = (document.getElementById('kbNewBody').value  || '').trim();
+  const tagsRaw = (document.getElementById('kbNewTags').value || '').trim();
+  const tags = tagsRaw ? tagsRaw.split(',').map(t => t.trim()).filter(Boolean) : [];
+  if (!title) { toast('Title is required', 'err'); return; }
+  apiMethod('POST', pUrl('/api/kb'), {title, body, tags}).then(d => {
+    if (d.ok || d.entry) {
+      toast('Entry added', 'ok');
+      toggleKBAddForm();
+      loadKB();
+    } else {
+      toast(d.error || 'Failed to add entry', 'err');
+    }
+  }).catch(() => toast('Failed to add entry', 'err'));
+};
+
+window.deleteKBEntry = function(id) {
+  apiMethod('DELETE', pUrl('/api/kb/' + id), null).then(d => {
+    if (d.ok) { toast('Entry deleted', 'ok'); loadKB(); }
+    else toast(d.error || 'Delete failed', 'err');
+  }).catch(() => toast('Delete failed', 'err'));
 };
 
 // ── Timeline (Gantt) tab ─────────────────────────────────────────────────────
