@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/blechschmidt/cloop/pkg/blocker"
 	"github.com/blechschmidt/cloop/pkg/cost"
 	"github.com/blechschmidt/cloop/pkg/milestone"
 	"github.com/blechschmidt/cloop/pkg/pm"
@@ -89,6 +90,12 @@ var statusCmd = &cobra.Command{
 				sort.SliceStable(sorted, func(i, j int) bool {
 					return sorted[i].Priority < sorted[j].Priority
 				})
+				// Pre-compute blocked task IDs for O(1) lookup
+				blockedInfos := blocker.DetectAll(workdir, s.Plan)
+				blockedIDs := make(map[int]*blocker.BlockerInfo, len(blockedInfos))
+				for _, bi := range blockedInfos {
+					blockedIDs[bi.TaskID] = bi
+				}
 				for _, t := range sorted {
 					failCountSuffix := ""
 					if t.FailCount > 0 {
@@ -132,7 +139,11 @@ var statusCmd = &cobra.Command{
 				if t.Assignee != "" {
 					assigneeSuffix = color.New(color.FgBlue).Sprintf(" [@%s]", t.Assignee)
 				}
-				fmt.Printf("          %s Task %d: %s%s%s%s%s%s\n", taskMarker(t.Status), t.ID, t.Title, failCountSuffix, notesSuffix, reviewSuffix, deadlineSuffix, assigneeSuffix)
+				blockerSuffix := ""
+				if _, isBlocked := blockedIDs[t.ID]; isBlocked {
+					blockerSuffix = color.New(color.FgRed, color.Bold).Sprint(" [BLOCKED]")
+				}
+				fmt.Printf("          %s Task %d: %s%s%s%s%s%s%s\n", taskMarker(t.Status), t.ID, t.Title, failCountSuffix, notesSuffix, reviewSuffix, deadlineSuffix, assigneeSuffix, blockerSuffix)
 					if t.Condition != "" {
 						condStr := t.Condition
 						if len(condStr) > 80 {

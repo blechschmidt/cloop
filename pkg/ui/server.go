@@ -19,6 +19,7 @@ import (
 
 	"nhooyr.io/websocket"
 
+	"github.com/blechschmidt/cloop/pkg/blocker"
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/kb"
 	"github.com/blechschmidt/cloop/pkg/multiui"
@@ -240,6 +241,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("PUT /api/tasks/{id}", s.handlePutTask)
 	mux.HandleFunc("PATCH /api/tasks/{id}", s.handlePutTask)
 	mux.HandleFunc("DELETE /api/tasks/{id}", s.handleDeleteTask)
+	mux.HandleFunc("GET /api/tasks/{id}/blocker", s.handleTaskBlocker)
 
 	// Config
 	mux.HandleFunc("/api/config", s.handleConfig)
@@ -1379,6 +1381,99 @@ func (s *Server) handleDeleteTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonOK(w, map[string]bool{"ok": true})
+}
+
+// handleTaskBlocker runs blocker detection (and optionally AI analysis) for a task
+// (GET /api/tasks/{id}/blocker).
+// Query params:
+//
+//	analyze=true   — also call the AI for root-cause + actions (requires provider config)
+//	apply=true     — annotate the task with the AI recommendation (requires analyze=true)
+func (s *Server) handleTaskBlocker(w http.ResponseWriter, r *http.Request) {
+	idStr := r.PathValue("id")
+	id, err := strconv.Atoi(idStr)
+	if err != nil || id <= 0 {
+		jsonErr(w, "invalid task id", http.StatusBadRequest)
+		return
+	}
+
+	workDir := s.resolveWorkDir(r)
+	ps, err := state.Load(workDir)
+	if err != nil || ps.Plan == nil {
+		jsonErr(w, "no task plan found", http.StatusNotFound)
+		return
+	}
+
+	task := ps.Plan.TaskByID(id)
+	if task == nil {
+		jsonErr(w, fmt.Sprintf("task %d not found", id), http.StatusNotFound)
+		return
+	}
+
+	info := blocker.Detect(workDir, task, ps.Plan)
+
+	// Detection-only response
+	if r.URL.Query().Get("analyze") != "true" {
+		jsonOK(w, info)
+		return
+	}
+
+	// AI analysis requested — need a provider
+	cfg, cfgErr := config.Load(workDir)
+	if cfgErr != nil {
+		jsonErr(w, "config load error: "+cfgErr.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	pName := cfg.Provider
+	if pName == "" {
+		pName = "claudecode"
+	}
+	provCfg := provider.ProviderConfig{
+		Name:             pName,
+		AnthropicAPIKey:  cfg.Anthropic.APIKey,
+		AnthropicBaseURL: cfg.Anthropic.BaseURL,
+		OpenAIAPIKey:     cfg.OpenAI.APIKey,
+		OpenAIBaseURL:    cfg.OpenAI.BaseURL,
+		OllamaBaseURL:    cfg.Ollama.BaseURL,
+	}
+	prov, provErr := provider.Build(provCfg)
+	if provErr != nil {
+		jsonErr(w, "provider error: "+provErr.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	model := ""
+	switch pName {
+	case "anthropic":
+		model = cfg.Anthropic.Model
+	case "openai":
+		model = cfg.OpenAI.Model
+	case "ollama":
+		model = cfg.Ollama.Model
+	case "claudecode":
+		model = cfg.ClaudeCode.Model
+	}
+
+	ctx := r.Context()
+	report, analyzeErr := blocker.Analyze(ctx, prov, model, 3*time.Minute, task, ps.Plan, workDir)
+	if analyzeErr != nil {
+		jsonErr(w, "analysis error: "+analyzeErr.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// --apply: annotate the task
+	if r.URL.Query().Get("apply") == "true" {
+		annotation := "[ai-blocker] Recommendation: " + strings.ToUpper(report.Recommendation) +
+			". Root cause: " + report.RootCause
+		pm.AddAnnotation(task, "ai-blocker", annotation)
+		if saveErr := ps.Save(); saveErr != nil {
+			jsonErr(w, "save failed: "+saveErr.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+
+	jsonOK(w, report)
 }
 
 // handleReorderTasks reassigns priorities from the given task ID order (POST /api/tasks/reorder).
