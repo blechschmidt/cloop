@@ -10,9 +10,12 @@ import (
 	"sync"
 	"time"
 
+	goOtelAttr "go.opentelemetry.io/otel/attribute"
+
 	"github.com/blechschmidt/cloop/pkg/alert"
 	cloopdocs "github.com/blechschmidt/cloop/pkg/docs"
 	"github.com/blechschmidt/cloop/pkg/approvalgate"
+	clooptracing "github.com/blechschmidt/cloop/pkg/tracing"
 	"github.com/blechschmidt/cloop/pkg/artifact"
 	"github.com/blechschmidt/cloop/pkg/budget"
 	"github.com/blechschmidt/cloop/pkg/checkpoint"
@@ -36,6 +39,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/notify"
 	"github.com/blechschmidt/cloop/pkg/optimizer"
 	"github.com/blechschmidt/cloop/pkg/pm"
+	"github.com/blechschmidt/cloop/pkg/promote"
 	"github.com/blechschmidt/cloop/pkg/promptopt"
 	"github.com/blechschmidt/cloop/pkg/promptstats"
 	"github.com/blechschmidt/cloop/pkg/provider"
@@ -339,6 +343,22 @@ type Config struct {
 	// Set by 'cloop task effort-calibrate --apply'. 0 and 1.0 are equivalent (no scaling).
 	// Values > 1.0 inflate estimates (AI historically underestimates), < 1.0 deflate.
 	CalibrationFactor float64
+
+	// TracingEnabled wraps the provider with an OTel tracing decorator when true.
+	// Spans are exported to the endpoint configured in config.yaml under the
+	// "tracing" key. When false (default), no tracing overhead is incurred.
+	TracingEnabled bool
+
+	// AutoPromote enables deadline-aware automatic priority escalation at the
+	// start of each task-selection cycle in PM sequential mode.
+	// For each pending/in-progress task whose deadline is within
+	// AutoPromoteThresholdDays days, the priority is escalated by 1.
+	// Tasks that are direct prerequisites of overdue tasks are also promoted.
+	AutoPromote bool
+
+	// AutoPromoteThresholdDays is the number of days remaining before the
+	// deadline at which auto-promotion kicks in (default 3).
+	AutoPromoteThresholdDays int
 }
 
 type Orchestrator struct {
@@ -380,6 +400,11 @@ func New(cfg Config, prov provider.Provider) (*Orchestrator, error) {
 	var wh *webhook.Client
 	if cfg.WebhookURL != "" {
 		wh = webhook.New(cfg.WebhookURL, cfg.WebhookEvents, nil, cfg.WebhookSecret)
+	}
+
+	// Wrap provider with OTel tracing decorator when tracing is enabled.
+	if cfg.TracingEnabled {
+		prov = clooptracing.WrapProvider(prov)
 	}
 
 	r := router.New(prov)
@@ -759,6 +784,15 @@ func (o *Orchestrator) runLoop(ctx context.Context) error {
 
 // runPM dispatches to sequential or parallel task execution based on config.
 func (o *Orchestrator) runPM(ctx context.Context) error {
+	// Root span for the entire PM run. All task_execute and provider_call spans
+	// are children of this span, providing causality and latency drill-down.
+	spanCtx, span := clooptracing.StartSpan(ctx, "plan_run",
+		goOtelAttr.String("provider", o.provider.Name()),
+		goOtelAttr.String("model", o.config.Model),
+	)
+	defer span.End()
+	ctx = spanCtx
+
 	if o.config.Parallel {
 		return o.runPMParallel(ctx)
 	}
@@ -803,6 +837,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		"provider": o.provider.Name(),
 		"goal":     s.Goal,
 		"mode":     "pm",
+		"trace_id": clooptracing.TraceIDFromContext(ctx),
 	})
 
 	o.webhook.Send(webhook.EventSessionStarted, webhook.Payload{Goal: s.Goal})
@@ -1120,6 +1155,20 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			}
 		}
 
+		// Auto-promote: escalate priorities for tasks approaching their deadlines.
+		if o.config.AutoPromote {
+			promotions := promote.Run(s.Plan, o.config.AutoPromoteThresholdDays, false)
+			if len(promotions) > 0 {
+				s.Save()
+				for _, p := range promotions {
+					color.New(color.FgYellow, color.Bold).Printf(
+						"\u2191 Task %d promoted P%d→P%d (%s): %s\n",
+						p.TaskID, p.OldPriority, p.NewPriority, p.Reason, p.Title,
+					)
+				}
+			}
+		}
+
 		task := s.Plan.NextTask()
 		if task == nil {
 			// Auto-skip tasks that are permanently blocked by failed deps
@@ -1190,6 +1239,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			"priority":    task.Priority,
 			"description": task.Description,
 			"role":        string(task.Role),
+			"trace_id":    clooptracing.TraceIDFromContext(ctx),
 		})
 
 		// Pre-execution risk assessment: evaluate risks and optionally abort on CRITICAL findings.
@@ -1520,7 +1570,16 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 						_, _ = liveFile.WriteString(token)
 					}
 				}
-				result, err := taskProvider.Complete(taskCtx, prompt, opts)
+				// task_execute span: covers the provider call, giving the hierarchy
+				// plan_run > task_execute > provider_call when tracing is enabled.
+				taskExecCtx, taskExecSpan := clooptracing.StartSpan(taskCtx, "task_execute",
+					goOtelAttr.Int("task.id", task.ID),
+					goOtelAttr.String("task.title", task.Title),
+					goOtelAttr.Int("task.priority", task.Priority),
+					goOtelAttr.String("task.role", string(task.Role)),
+				)
+				result, err := taskProvider.Complete(taskExecCtx, prompt, opts)
+				taskExecSpan.End()
 				if liveFile != nil {
 					if err == nil && !wasStreamed() {
 						// Non-streaming provider: write full output so watchers can read it.

@@ -22,6 +22,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/provider/cached"
 	"github.com/blechschmidt/cloop/pkg/provider/fallback"
 	"github.com/blechschmidt/cloop/pkg/state"
+	"github.com/blechschmidt/cloop/pkg/tracing"
 	"github.com/spf13/cobra"
 )
 
@@ -94,8 +95,10 @@ var (
 	cacheTTL             string
 	cacheMaxSize         int
 	mockMode             bool
-	extendedThinking     bool
-	thinkingBudget       int
+	extendedThinking         bool
+	thinkingBudget           int
+	autoPromote              bool
+	autoPromoteThresholdDays int
 )
 
 var runCmd = &cobra.Command{
@@ -292,6 +295,19 @@ Press Ctrl+C to pause gracefully.`,
 		// Merge --log-json flag with config file setting.
 		effectiveLogJSON := globalLogJSON || cfg.LogJSON
 
+		// Initialise OpenTelemetry tracing when enabled in config.
+		// The shutdown function flushes pending spans before the process exits.
+		tracingShutdown, tracingErr := tracing.Init(tracing.Config{
+			Enabled:     cfg.Tracing.Enabled,
+			Endpoint:    cfg.Tracing.Endpoint,
+			ServiceName: cfg.Tracing.ServiceName,
+		})
+		if tracingErr != nil {
+			fmt.Fprintf(os.Stderr, "warning: tracing init failed: %v\n", tracingErr)
+		} else {
+			defer func() { _ = tracingShutdown(context.Background()) }()
+		}
+
 		orchCfg := orchestrator.Config{
 			LogJSON:             effectiveLogJSON,
 			SkipHealthCheck:     skipHealthCheck,
@@ -367,8 +383,11 @@ Press Ctrl+C to pause gracefully.`,
 			DocsUpdateOnComplete: docsUpdateOnComplete,
 			DocsUpdateFile:       docsUpdateFile,
 			CalibrationFactor:    cfg.CalibrationFactor,
-		ExtendedThinking:     extendedThinking,
-		ThinkingBudget:       thinkingBudget,
+		ExtendedThinking:         extendedThinking,
+		ThinkingBudget:           thinkingBudget,
+		TracingEnabled:           cfg.Tracing.Enabled && cfg.Tracing.Endpoint != "",
+		AutoPromote:              autoPromote,
+		AutoPromoteThresholdDays: autoPromoteThresholdDays,
 		}
 
 		orc, err := orchestrator.New(orchCfg, prov)
@@ -636,5 +655,7 @@ func init() {
 	runCmd.Flags().StringVar(&docsUpdateFile, "docs-update-file", "", "Limit --docs-update to a single file (e.g. README.md)")
 	runCmd.Flags().BoolVar(&extendedThinking, "think", false, "Enable extended thinking/reasoning mode (Anthropic: thinking block; OpenAI o-series: reasoning_effort)")
 	runCmd.Flags().IntVar(&thinkingBudget, "think-budget", 8000, "Token budget for reasoning content (--think); maps to budget_tokens for Anthropic, reasoning_effort for OpenAI o-series")
+	runCmd.Flags().BoolVar(&autoPromote, "auto-promote", false, "PM mode: automatically escalate task priorities when deadlines are within the threshold (see --promote-threshold)")
+	runCmd.Flags().IntVar(&autoPromoteThresholdDays, "promote-threshold", 3, "PM mode: days-remaining window used by --auto-promote to trigger priority escalation (default 3)")
 	rootCmd.AddCommand(runCmd)
 }
