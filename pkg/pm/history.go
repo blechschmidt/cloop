@@ -295,6 +295,21 @@ func planFingerprint(plan *Plan) (string, error) {
 	return string(data), nil
 }
 
+// RestoreSnapshot loads the snapshot identified by snapshotID (a version number
+// as a string, e.g. "3") and returns its Plan. The caller is responsible for
+// persisting the returned plan back to state.
+func RestoreSnapshot(workDir, snapshotID string) (*Plan, error) {
+	var version int
+	if _, err := fmt.Sscanf(snapshotID, "%d", &version); err != nil {
+		return nil, fmt.Errorf("invalid snapshot ID %q: must be a version number", snapshotID)
+	}
+	snap, err := LoadSnapshot(workDir, version)
+	if err != nil {
+		return nil, err
+	}
+	return snap.Plan, nil
+}
+
 // truncateHistStr truncates a string to n runes, appending "..." if truncated.
 func truncateHistStr(s string, n int) string {
 	runes := []rune(s)
