@@ -32,6 +32,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/ctxedit"
 	"github.com/blechschmidt/cloop/pkg/replay"
 	"github.com/blechschmidt/cloop/pkg/review"
+	"github.com/blechschmidt/cloop/pkg/risk"
 	"github.com/blechschmidt/cloop/pkg/router"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/verify"
@@ -247,6 +248,17 @@ type Config struct {
 	// Decorative color/text output is suppressed so the stream is machine-parseable.
 	// Equivalent to the --log-json CLI flag.
 	LogJSON bool
+
+	// RiskCheck enables pre-execution AI risk assessment for each task in PM mode
+	// (sequential only). Before a task begins executing the orchestrator calls the
+	// risk package to assess findings. Tasks with at least one CRITICAL finding are
+	// aborted (marked failed) unless RiskForce is also set.
+	RiskCheck bool
+
+	// RiskForce overrides CRITICAL risk findings when RiskCheck is enabled. When
+	// true, CRITICAL tasks are executed anyway with a prominent warning instead of
+	// being aborted. Has no effect when RiskCheck is false.
+	RiskForce bool
 }
 
 type Orchestrator struct {
@@ -894,6 +906,24 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			"description": task.Description,
 			"role":        string(task.Role),
 		})
+
+		// Pre-execution risk assessment: evaluate risks and optionally abort on CRITICAL findings.
+		if o.config.RiskCheck {
+			riskCtx, riskCancel := context.WithTimeout(ctx, 2*time.Minute)
+			riskReport, riskErr := risk.AssessTask(riskCtx, o.provider, o.config.Model, s.Plan, task)
+			riskCancel()
+			if riskErr != nil {
+				dimColor.Printf("⚠  Risk assessment failed for task %d: %v (continuing)\n\n", task.ID, riskErr)
+			} else if riskReport != nil && len(riskReport.Findings) > 0 {
+				printRiskBanner(riskReport)
+				if riskReport.HasCritical() && !o.config.RiskForce {
+					failColor.Printf("✗ Task %d aborted: CRITICAL risk finding(s). Use --force to override.\n\n", task.ID)
+					task.Status = pm.TaskFailed
+					s.Save()
+					continue
+				}
+			}
+		}
 
 		// Human-in-the-loop review mode: ask before executing each task.
 		if o.config.ReviewMode {
@@ -2702,6 +2732,32 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "..."
+}
+
+// printRiskBanner prints a compact risk summary to the terminal for a single task.
+func printRiskBanner(r *risk.RiskReport) {
+	levelColor := func(l risk.Level) *color.Color {
+		switch l {
+		case risk.LevelCritical:
+			return color.New(color.FgRed, color.Bold)
+		case risk.LevelHigh:
+			return color.New(color.FgRed)
+		case risk.LevelMedium:
+			return color.New(color.FgYellow)
+		default:
+			return color.New(color.FgGreen)
+		}
+	}
+
+	color.New(color.FgCyan).Printf("  ⚑ Risk assessment — Task #%d: %s  (overall: ", r.TaskID, r.TaskTitle)
+	levelColor(r.OverallLevel).Printf("%s", r.OverallLevel)
+	color.New(color.FgCyan).Printf(")\n")
+	for _, f := range r.Findings {
+		levelColor(f.Level).Printf("    [%s]", f.Level)
+		fmt.Printf(" %s — %s\n", f.Category, f.Rationale)
+		color.New(color.Faint).Printf("    ↳ Mitigation: %s\n", f.Mitigation)
+	}
+	fmt.Println()
 }
 
 // buildHealPrompt constructs a modified retry prompt that incorporates the

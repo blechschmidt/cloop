@@ -77,6 +77,8 @@ var (
 	postReview           bool
 	healRetries          int
 	noHeal               bool
+	riskCheck            bool
+	riskForce            bool
 )
 
 var runCmd = &cobra.Command{
@@ -284,6 +286,8 @@ Press Ctrl+C to pause gracefully.`,
 			AutoSplit:           autoSplit,
 			HealRetries:         healRetries,
 			NoHeal:              noHeal,
+			RiskCheck:           riskCheck,
+			RiskForce:           riskForce,
 		}
 
 		orc, err := orchestrator.New(orchCfg, prov)
@@ -499,5 +503,7 @@ func init() {
 	runCmd.Flags().BoolVar(&postReview, "post-review", false, "PM mode: after each TASK_DONE run an AI code review on `git diff HEAD~1` and store the verdict as a task annotation (sequential only). Can also be enabled via hooks.post_task_review in config.")
 	runCmd.Flags().IntVar(&healRetries, "heal-retries", 0, "PM mode: max auto-heal re-attempts after TASK_FAILED before permanently marking the task failed (0 = default 2); each attempt diagnoses the failure and retries with a modified prompt")
 	runCmd.Flags().BoolVar(&noHeal, "no-heal", false, "PM mode: disable the auto-heal loop — TASK_FAILED immediately marks the task failed without any re-attempt")
+	runCmd.Flags().BoolVar(&riskCheck, "risk-check", false, "PM mode: run AI risk assessment before each task; abort tasks with CRITICAL findings (use --force to override)")
+	runCmd.Flags().BoolVar(&riskForce, "force", false, "PM mode: with --risk-check, execute tasks even when CRITICAL risk findings are present (prints a warning)")
 	rootCmd.AddCommand(runCmd)
 }
