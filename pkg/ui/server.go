@@ -4608,6 +4608,14 @@ const dashboardHTML = `<!DOCTYPE html>
     <!-- ═══════════════════════════════════════════════════════════ OVERVIEW -->
     <div id="tab-overview" class="tab-panel active">
 
+      <!-- Multi-project summary (shown in multi-project mode when no project is selected) -->
+      <div id="multiProjectOverview" style="display:none">
+        <div class="section">
+          <div class="section-title">All Projects — Overview</div>
+          <div id="multiProjectCards" class="stats-grid" style="margin-top:12px"></div>
+        </div>
+      </div>
+
       <!-- No-project init panel -->
       <div id="initPanel" style="display:none">
         <div class="init-panel">
@@ -5563,7 +5571,11 @@ window.switchTab = function(name) {
   // In multi-project mode, re-fetch state for the selected project when
   // switching to any project-scoped tab so the data is always current.
   const projectScopedTabs = ['overview','tasks','kanban','timeline','kb','deps','risk-matrix','analytics','chat','assistant','suggest'];
-  if (isMultiProject && selectedProjectIdx !== null && projectScopedTabs.includes(name)) {
+  if (isMultiProject && selectedProjectIdx === null && name === 'overview') {
+    // No project selected: show the all-projects summary panel.
+    renderMultiProjectOverview();
+    if (!window._lastProjectsData) loadProjects();
+  } else if (isMultiProject && selectedProjectIdx !== null && projectScopedTabs.includes(name)) {
     api(pUrl('/api/state')).then(s => render(s)).catch(() => {
       if (name === 'tasks'  && appState) renderTasks(appState);
       if (name === 'kanban' && appState) renderKanban(appState);
@@ -5735,6 +5747,13 @@ function priorityBadge(p) {
 function render(s) {
   appState = s;
 
+  // In multi-project mode with no project selected, don't overwrite the UI
+  // with single-project data from WebSocket events or stale fetches.
+  if (isMultiProject && selectedProjectIdx === null) return;
+
+  const multiPanel = document.getElementById('multiProjectOverview');
+  if (multiPanel) multiPanel.style.display = 'none';
+
   const hasProject = s && s.goal;
   document.getElementById('initPanel').style.display    = hasProject ? 'none' : '';
   document.getElementById('projectPanel').style.display = hasProject ? '' : 'none';
@@ -5850,6 +5869,42 @@ function render(s) {
 
   // Update live output running indicator.
   renderLiveLog();
+}
+
+// renderMultiProjectOverview shows a card grid summary of all projects on the
+// Overview tab when no specific project is selected in multi-project mode.
+function renderMultiProjectOverview() {
+  const panel    = document.getElementById('multiProjectOverview');
+  const initP    = document.getElementById('initPanel');
+  const projP    = document.getElementById('projectPanel');
+  if (!panel) return;
+  if (initP) initP.style.display = 'none';
+  if (projP) projP.style.display = 'none';
+  panel.style.display = '';
+
+  const data = window._lastProjectsData;
+  const grid = document.getElementById('multiProjectCards');
+  if (!grid) return;
+  if (!data || !data.projects || !data.projects.length) {
+    grid.innerHTML = '<div class="empty-state"><h3>No projects loaded</h3><p>Use <code>cloop ui --projects /path/a /path/b</code> to add projects.</p></div>';
+    return;
+  }
+  grid.innerHTML = data.projects.map(function(p, i) {
+    const health   = p.health || 'unknown';
+    const hCol     = healthColor(health);
+    const total    = p.total_tasks || 0;
+    const done     = p.done_tasks  || 0;
+    const pct      = total > 0 ? Math.round(100 * done / total) : -1;
+    const nameSafe = JSON.stringify(p.name).replace(/"/g, '&quot;');
+    const valueStr = pct >= 0 ? pct + '% done' : (p.total_steps || 0) + ' steps';
+    const subStr   = pct >= 0 ? done + '/' + total + ' tasks' : (p.status || '');
+    return '<div class="stat-card" style="cursor:pointer" onclick="openProject('+i+','+nameSafe+')" title="Open project">' +
+      '<div class="stat-label" style="font-weight:600">' + esc(p.name) + '</div>' +
+      '<div style="font-size:11px;margin:3px 0"><span style="color:' + hCol + '">&#9679;</span> ' + esc(health) + '</div>' +
+      '<div class="stat-value" style="font-size:15px;margin-top:4px">' + esc(valueStr) + '</div>' +
+      '<div class="stat-sub">' + esc(subStr) + '</div>' +
+    '</div>';
+  }).join('');
 }
 
 window.toggleStep = function(el) { el.classList.toggle('expanded'); };
@@ -6415,9 +6470,10 @@ function handleRealtimeMsg(type, data) {
   switch (type) {
     case 'task_update':
     case 'plan_complete':
-      // In multi-project mode with a non-primary project selected, the
-      // primary-project state update should be ignored.
-      if (isMultiProject && selectedProjectIdx !== null && selectedProjectIdx !== 0) return;
+      // In multi-project mode, only render when the primary project (idx=0)
+      // is explicitly selected. Ignore when no project is selected (null) or
+      // when a non-primary project is selected.
+      if (isMultiProject && selectedProjectIdx !== 0) return;
       try { render(data); } catch(_) {}
       // Refresh analytics if the analytics tab is active.
       if (activeTab === 'analytics') { try { loadAnalytics(); } catch(_) {} }
@@ -6446,7 +6502,7 @@ function handleRealtimeMsg(type, data) {
       // Re-render with latest state and show conflict toast if needed.
       try {
         if (data.state) {
-          if (!isMultiProject || selectedProjectIdx === null || selectedProjectIdx === 0) {
+          if (!isMultiProject || selectedProjectIdx === 0) {
             render(data.state);
           }
         }
@@ -6461,7 +6517,7 @@ function handleRealtimeMsg(type, data) {
       // Re-render with the updated state snapshot.
       try {
         if (data.state) {
-          if (!isMultiProject || selectedProjectIdx === null || selectedProjectIdx === 0) {
+          if (!isMultiProject || selectedProjectIdx === 0) {
             render(data.state);
           }
         }
