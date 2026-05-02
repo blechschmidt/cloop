@@ -364,6 +364,7 @@ Press Ctrl+C to pause gracefully.`,
 			NotifyCfg:            cfg.Notify,
 			DocsUpdateOnComplete: docsUpdateOnComplete,
 			DocsUpdateFile:       docsUpdateFile,
+			CalibrationFactor:    cfg.CalibrationFactor,
 		}
 
 		orc, err := orchestrator.New(orchCfg, prov)

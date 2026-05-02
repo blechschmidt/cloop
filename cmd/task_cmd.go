@@ -1770,5 +1770,6 @@ func init() {
 	taskCmd.AddCommand(taskTimeTravelCmd)
 	taskCmd.AddCommand(taskExecCmd)
 	taskCmd.AddCommand(taskSummarizeCmd)
+	taskCmd.AddCommand(taskCalibrateCmd)
 	rootCmd.AddCommand(taskCmd)
 }

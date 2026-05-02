@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -737,6 +738,26 @@ func AdaptiveReplan(ctx context.Context, p provider.Provider, goal, instructions
 	}
 
 	return newPlan.Tasks, nil
+}
+
+// ApplyCalibrationFactor scales the EstimatedMinutes of every task in the plan
+// by factor. Values <= 0 or == 1.0 are no-ops. Values > 1 increase estimates
+// (AI historically underestimates), values < 1 decrease them. Each task's
+// estimate is rounded to the nearest whole minute and clamped to 1 minimum.
+func ApplyCalibrationFactor(plan *Plan, factor float64) {
+	if factor <= 0 || factor == 1.0 {
+		return
+	}
+	for _, t := range plan.Tasks {
+		if t.EstimatedMinutes <= 0 {
+			continue
+		}
+		scaled := int(math.Round(float64(t.EstimatedMinutes) * factor))
+		if scaled < 1 {
+			scaled = 1
+		}
+		t.EstimatedMinutes = scaled
+	}
 }
 
 // Decompose calls the provider to decompose a goal into a task plan.

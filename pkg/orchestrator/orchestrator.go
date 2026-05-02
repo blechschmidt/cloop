@@ -326,6 +326,11 @@ type Config struct {
 	// DocsUpdateFile limits the post-plan docs update to a single file.
 	// Empty means all tracked docs files are updated.
 	DocsUpdateFile string
+
+	// CalibrationFactor scales AI-generated time estimates in new plans.
+	// Set by 'cloop task effort-calibrate --apply'. 0 and 1.0 are equivalent (no scaling).
+	// Values > 1.0 inflate estimates (AI historically underestimates), < 1.0 deflate.
+	CalibrationFactor float64
 }
 
 type Orchestrator struct {
@@ -830,6 +835,9 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			s.Status = "failed"
 			s.Save()
 			return err
+		}
+		if o.config.CalibrationFactor != 0 && o.config.CalibrationFactor != 1.0 {
+			pm.ApplyCalibrationFactor(plan, o.config.CalibrationFactor)
 		}
 		s.Plan = plan
 		s.Save()
@@ -2228,6 +2236,9 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 			s.Status = "failed"
 			s.Save()
 			return err
+		}
+		if o.config.CalibrationFactor != 0 && o.config.CalibrationFactor != 1.0 {
+			pm.ApplyCalibrationFactor(plan, o.config.CalibrationFactor)
 		}
 		s.Plan = plan
 		s.Save()

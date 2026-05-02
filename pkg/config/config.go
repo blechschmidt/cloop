@@ -52,6 +52,12 @@ type Config struct {
 
 	// Budget configures monthly spend limits.
 	Budget BudgetConfig `yaml:"budget,omitempty"`
+
+	// CalibrationFactor is set by 'cloop task effort-calibrate --apply'.
+	// When non-zero and != 1.0, Decompose() multiplies every AI-generated
+	// time_estimate_minutes value by this factor before storing the task.
+	// This closes the feedback loop between historical actuals and future plans.
+	CalibrationFactor float64 `yaml:"calibration_factor,omitempty"`
 }
 
 // WatchConfig configures file-triggered plan re-evaluation.
