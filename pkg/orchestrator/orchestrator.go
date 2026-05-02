@@ -1164,6 +1164,15 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		if cpErr := checkpoint.Save(o.config.WorkDir, cp); cpErr != nil {
 			dimColor.Printf("  checkpoint write error (ignored): %v\n", cpErr)
 		}
+		// Persist a history entry so checkpoint-diff can show what changed over time.
+		histCP := *cp
+		histCP.Event = "start"
+		histCP.Status = string(pm.TaskInProgress)
+		histCP.Timestamp = now
+		histCP.TokenCount = s.TotalInputTokens + s.TotalOutputTokens
+		if hErr := checkpoint.SaveHistoryEntry(o.config.WorkDir, &histCP); hErr != nil {
+			dimColor.Printf("  checkpoint history write error (ignored): %v\n", hErr)
+		}
 
 		{
 			done, failed := s.Plan.CountByStatus()
@@ -1836,6 +1845,39 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		// If consensus was used, append the decision report to the artifact.
 		if consensusReport != nil {
 			o.appendConsensusReport(task, consensusReport)
+		}
+
+		// Save a history entry for the task completion before clearing the checkpoint.
+		{
+			var elapsedSec float64
+			if task.StartedAt != nil {
+				elapsedSec = time.Since(*task.StartedAt).Seconds()
+			}
+			event := "complete"
+			switch task.Status {
+			case pm.TaskFailed:
+				event = "fail"
+			case pm.TaskSkipped:
+				event = "skip"
+			}
+			doneCP := &checkpoint.Checkpoint{
+				TaskID:     task.ID,
+				TaskTitle:  task.Title,
+				Event:      event,
+				Status:     string(task.Status),
+				Timestamp:  time.Now(),
+				Provider:   o.provider.Name(),
+				TokenCount: s.TotalInputTokens + s.TotalOutputTokens,
+				ElapsedSec: elapsedSec,
+			}
+			if taskOutput != "" {
+				doneCP.AccumulatedOutput = taskOutput
+				doneCP.OutputHash = checkpoint.HashOutput(taskOutput)
+				doneCP.OutputLength = len(taskOutput)
+			}
+			if hErr := checkpoint.SaveHistoryEntry(o.config.WorkDir, doneCP); hErr != nil {
+				dimColor.Printf("  checkpoint history write error (ignored): %v\n", hErr)
+			}
 		}
 
 		// Task completed (done/skipped/failed) — clear the mid-execution checkpoint.

@@ -1530,5 +1530,6 @@ func init() {
 	taskCmd.AddCommand(taskApproveCmd)
 	taskCmd.AddCommand(taskAnnotateCmd)
 	taskCmd.AddCommand(taskNotesCmd)
+	taskCmd.AddCommand(taskCheckpointDiffCmd)
 	rootCmd.AddCommand(taskCmd)
 }
