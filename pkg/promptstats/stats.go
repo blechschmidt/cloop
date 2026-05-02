@@ -226,6 +226,78 @@ func AdaptiveHint(records []Record, taskTitle string) string {
 	return b.String()
 }
 
+// FeedbackRecord is a minimal view of pkg/feedback.Record used here to avoid
+// an import cycle. Callers should pass feedback records cast to this type.
+type FeedbackRecord struct {
+	TaskID    int
+	TaskTitle string
+	Rating    int // 1-5
+	Comment   string
+}
+
+// FeedbackHint returns a short advisory string derived from human ratings of
+// similar tasks. Returns "" when there are fewer than 2 matching records.
+// High-rated tasks (4-5) indicate an approach that worked well; low-rated
+// ones (1-2) flag patterns to avoid.
+func FeedbackHint(records []FeedbackRecord, taskTitle string) string {
+	if len(records) < 2 {
+		return ""
+	}
+	titleWords := tokenize(taskTitle)
+
+	var highRated []string
+	var lowRated []string
+	for _, r := range records {
+		if similarity(titleWords, tokenize(r.TaskTitle)) < 0.25 {
+			continue
+		}
+		switch {
+		case r.Rating >= 4:
+			label := r.TaskTitle
+			if r.Comment != "" {
+				label += fmt.Sprintf(" (%s)", r.Comment)
+			}
+			highRated = append(highRated, label)
+		case r.Rating <= 2:
+			label := r.TaskTitle
+			if r.Comment != "" {
+				label += fmt.Sprintf(" (%s)", r.Comment)
+			}
+			lowRated = append(lowRated, label)
+		}
+	}
+
+	if len(highRated) == 0 && len(lowRated) == 0 {
+		return ""
+	}
+
+	var b strings.Builder
+	b.WriteString("## HUMAN FEEDBACK HINT (from rated task outputs)\n")
+	if len(highRated) > 0 {
+		ex := highRated
+		if len(ex) > 2 {
+			ex = ex[len(ex)-2:]
+		}
+		b.WriteString(fmt.Sprintf(
+			"Highly-rated similar tasks: %s\n",
+			strings.Join(ex, "; "),
+		))
+		b.WriteString("Maintain this quality: be thorough, address edge cases, and verify the output works end-to-end.\n")
+	}
+	if len(lowRated) > 0 {
+		ex := lowRated
+		if len(ex) > 2 {
+			ex = ex[len(ex)-2:]
+		}
+		b.WriteString(fmt.Sprintf(
+			"Poorly-rated similar tasks: %s — avoid the same mistakes, pay extra attention to completeness and clarity.\n",
+			strings.Join(ex, "; "),
+		))
+	}
+	b.WriteString("\n")
+	return b.String()
+}
+
 // tokenize splits a string into lowercase words of length >= 3.
 func tokenize(s string) []string {
 	words := strings.FieldsFunc(strings.ToLower(s), func(r rune) bool {
