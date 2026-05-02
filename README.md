@@ -771,6 +771,84 @@ Checkpoints are stored as `.json` files in `.cloop/checkpoints/`. Restoring a ch
 
 ---
 
+## MCP Server (Model Context Protocol)
+
+### `cloop mcp`
+
+Start cloop as an MCP server, exposing it as a set of tools to Claude Desktop, Cursor, Zed, and any other client that supports the [Model Context Protocol](https://spec.modelcontextprotocol.io).
+
+The server speaks JSON-RPC 2.0 over newline-delimited stdio. All log output goes to stderr so it does not corrupt the MCP stream.
+
+```bash
+cloop mcp                          # use the configured/auto-detected provider
+cloop mcp --provider anthropic     # force a specific provider
+cloop mcp --provider openai --model gpt-4o
+```
+
+#### Available MCP Tools
+
+| Tool | Description |
+|------|-------------|
+| `get_status` | Return current orchestrator state: goal, status, step counts, provider |
+| `get_plan` | Return the full PM-mode task plan as JSON with all task details |
+| `add_task` | Append a new task to the current plan (title, description, priority) |
+| `complete_task` | Mark a task done by ID with an optional result summary |
+| `run_task` | Execute a one-shot AI prompt using the configured provider |
+
+#### Claude Desktop Configuration
+
+Add to `~/.claude/claude_desktop_config.json` (or the equivalent on your OS):
+
+```json
+{
+  "mcpServers": {
+    "cloop": {
+      "command": "cloop",
+      "args": ["mcp"],
+      "cwd": "/path/to/your/project"
+    }
+  }
+}
+```
+
+Once configured, Claude Desktop will offer the cloop tools in any conversation. You can ask Claude to check the plan status, add tasks, or run one-off AI prompts directly through cloop's provider.
+
+#### Cursor Configuration
+
+In `.cursor/mcp.json` at the project root:
+
+```json
+{
+  "mcpServers": {
+    "cloop": {
+      "command": "cloop",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+#### Example Session (raw JSON-RPC)
+
+```json
+// Client → cloop
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{}}}
+
+// cloop → Client
+{"jsonrpc":"2.0","id":1,"result":{"capabilities":{"tools":{}},"protocolVersion":"2024-11-05","serverInfo":{"name":"cloop","version":"1.0.0"}}}
+
+// Client → cloop
+{"jsonrpc":"2.0","method":"initialized"}
+
+// Client → cloop
+{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"get_plan","arguments":{}}}
+
+// cloop → Client
+{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"{ ... plan JSON ... }"}]}}
+```
+
+---
+
 ## Web Dashboard
 
 ### `cloop ui`
