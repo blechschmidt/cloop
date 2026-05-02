@@ -1,73 +1,173 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
 	"sort"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/config"
+	"github.com/blechschmidt/cloop/pkg/filewatch"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 )
 
-var watchIntervalStr string
+var (
+	watchIntervalStr string
+	watchGlobs       []string
+	watchDebounceStr string
+	watchAutoRun     bool
+)
 
 var watchCmd = &cobra.Command{
 	Use:   "watch",
-	Short: "Live-refresh the project status while cloop runs",
-	Long: `Watch polls the project state and refreshes the display on a fixed interval.
-Useful when cloop run is running in another terminal.
+	Short: "Live-refresh status or trigger plan re-evaluation on file changes",
+	Long: `Watch has two modes:
 
-Press Ctrl+C to stop watching.`,
+  Default (no --glob): polls project state and refreshes the display on a
+  fixed interval. Useful when cloop run is in another terminal.
+
+  File-watch mode (--glob): monitors file patterns with fsnotify. When a
+  watched file changes, cloop resets relevant tasks to pending and (with
+  --auto-run) triggers re-execution. Ideal for TDD-style AI loops.
+
+  Examples:
+    cloop watch                          # live status dashboard
+    cloop watch --glob "**/*.go"         # re-evaluate plan on Go file changes
+    cloop watch --glob "**/*.go" --auto-run  # re-evaluate and re-run automatically
+    cloop watch --glob "src/**" --glob "tests/**" --debounce 5s
+
+Glob patterns support ** for recursive matching (e.g. "**/*.go", "src/**/*.ts").
+Multiple --glob flags are OR-combined.
+
+Press Ctrl+C to stop.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		interval := 2 * time.Second
-		if watchIntervalStr != "" {
-			d, err := time.ParseDuration(watchIntervalStr)
-			if err != nil {
-				return fmt.Errorf("invalid --interval: %w", err)
-			}
-			interval = d
-		}
-
 		workdir, _ := os.Getwd()
 
-		sigCh := make(chan os.Signal, 1)
-		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-		defer signal.Stop(sigCh)
-
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-
-		// Initial render before first tick
-		clearScreen()
-		if _, err := renderWatchView(workdir, interval); err != nil {
-			return err
+		// File-watch mode when --glob is provided.
+		if len(watchGlobs) > 0 {
+			return runFileWatchMode(workdir)
 		}
 
-		for {
-			select {
-			case <-sigCh:
-				fmt.Println()
+		// Default: status polling mode.
+		return runStatusWatchMode(workdir)
+	},
+}
+
+// runFileWatchMode uses fsnotify to monitor files and trigger plan re-evaluation.
+func runFileWatchMode(workdir string) error {
+	debounce := 2 * time.Second
+	if watchDebounceStr != "" {
+		d, err := time.ParseDuration(watchDebounceStr)
+		if err != nil {
+			return fmt.Errorf("invalid --debounce: %w", err)
+		}
+		debounce = d
+	}
+
+	// Load config for additional watch patterns.
+	cfg, err := config.Load(workdir)
+	if err != nil {
+		return fmt.Errorf("loading config: %w", err)
+	}
+
+	globs := watchGlobs
+	if len(globs) == 0 && len(cfg.Watch.Globs) > 0 {
+		globs = cfg.Watch.Globs
+	}
+	if debounce == 2*time.Second && cfg.Watch.Debounce != "" {
+		if d, err := time.ParseDuration(cfg.Watch.Debounce); err == nil {
+			debounce = d
+		}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sigCh
+		fmt.Println("\n[watch] stopping...")
+		cancel()
+	}()
+	defer signal.Stop(sigCh)
+
+	fwCfg := filewatch.Config{
+		WorkDir:  workdir,
+		Globs:    globs,
+		Debounce: debounce,
+	}
+
+	bold := color.New(color.Bold)
+	dim := color.New(color.Faint)
+
+	onTrigger := func(evt filewatch.ChangeEvent) {
+		filewatch.PrintEvent(evt)
+
+		if len(evt.ResetTaskIDs) > 0 && watchAutoRun {
+			bold.Printf("[watch] triggering cloop run --pm ...\n")
+			runArgs := []string{"run", "--pm"}
+			runCmd := exec.CommandContext(ctx, os.Args[0], runArgs...)
+			runCmd.Stdout = os.Stdout
+			runCmd.Stderr = os.Stderr
+			runCmd.Dir = workdir
+			if err := runCmd.Run(); err != nil {
+				dim.Printf("[watch] cloop run exited: %v\n", err)
+			}
+		} else if len(evt.ResetTaskIDs) > 0 {
+			dim.Printf("[watch] run 'cloop run --pm' to re-execute, or use --auto-run\n")
+		}
+	}
+
+	return filewatch.Run(ctx, fwCfg, onTrigger)
+}
+
+// runStatusWatchMode polls state and refreshes the display on a fixed interval.
+func runStatusWatchMode(workdir string) error {
+	interval := 2 * time.Second
+	if watchIntervalStr != "" {
+		d, err := time.ParseDuration(watchIntervalStr)
+		if err != nil {
+			return fmt.Errorf("invalid --interval: %w", err)
+		}
+		interval = d
+	}
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	clearScreen()
+	if _, err := renderWatchView(workdir, interval); err != nil {
+		return err
+	}
+
+	for {
+		select {
+		case <-sigCh:
+			fmt.Println()
+			return nil
+		case <-ticker.C:
+			clearScreen()
+			s, err := renderWatchView(workdir, interval)
+			if err != nil {
+				fmt.Printf("Error: %v\n", err)
+				continue
+			}
+			if s != nil && (s.Status == "complete" || s.Status == "failed") {
 				return nil
-			case <-ticker.C:
-				clearScreen()
-				s, err := renderWatchView(workdir, interval)
-				if err != nil {
-					fmt.Printf("Error: %v\n", err)
-					continue
-				}
-				// Auto-stop when session ends
-				if s != nil && (s.Status == "complete" || s.Status == "failed") {
-					return nil
-				}
 			}
 		}
-	},
+	}
 }
 
 // clearScreen moves cursor to top-left and clears the terminal.
@@ -186,6 +286,9 @@ func truncateWatch(s string, n int) string {
 }
 
 func init() {
-	watchCmd.Flags().StringVar(&watchIntervalStr, "interval", "2s", "Refresh interval (e.g. 1s, 5s, 10s)")
+	watchCmd.Flags().StringVar(&watchIntervalStr, "interval", "2s", "Status-poll refresh interval (e.g. 1s, 5s, 10s)")
+	watchCmd.Flags().StringArrayVar(&watchGlobs, "glob", nil, "File glob pattern to watch (repeatable; enables file-watch mode)")
+	watchCmd.Flags().StringVar(&watchDebounceStr, "debounce", "2s", "Debounce duration after last file change before triggering (e.g. 500ms, 5s)")
+	watchCmd.Flags().BoolVar(&watchAutoRun, "auto-run", false, "Automatically run 'cloop run --pm' after each triggered re-evaluation")
 	rootCmd.AddCommand(watchCmd)
 }

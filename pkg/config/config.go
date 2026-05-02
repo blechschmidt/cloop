@@ -31,6 +31,19 @@ type Config struct {
 	// 0 means no limit (all ready tasks run concurrently).
 	// Overridden by --max-parallel / -j on the command line.
 	MaxParallel int `yaml:"max_parallel,omitempty"`
+
+	// Watch configures the file-watch mode for `cloop watch --glob`.
+	Watch WatchConfig `yaml:"watch,omitempty"`
+}
+
+// WatchConfig configures file-triggered plan re-evaluation.
+type WatchConfig struct {
+	// Globs are file patterns to monitor (e.g. "**/*.go").
+	// Used as defaults when --glob is not specified on the command line.
+	Globs []string `yaml:"globs,omitempty"`
+	// Debounce is the duration to wait after the last change before triggering
+	// (e.g. "2s", "500ms"). Defaults to 2s.
+	Debounce string `yaml:"debounce,omitempty"`
 }
 
 // HooksConfig holds shell commands executed at task and plan lifecycle events.
