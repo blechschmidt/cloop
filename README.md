@@ -189,6 +189,7 @@ cloop run --pm --replan       # discard plan and re-decompose
 | `--step-delay` | | Delay between steps (e.g. `5s`, `1m`) |
 | `--on-complete` | | Shell command to run on goal completion (e.g. `notify-send done`) |
 | `--token-budget` | `0` | Stop when cumulative tokens reach this limit (0 = unlimited) |
+| `--notify` | `false` | Send OS desktop notifications on task done, task failed, and session complete |
 | `-v, --verbose` | `false` | Show full step output (no truncation) |
 
 **Stopping:** Press `Ctrl+C` to pause gracefully. Run `cloop run` again to resume.
@@ -962,6 +963,18 @@ cloop agent status                 # check progress
 cloop agent follow                 # watch in real time
 cloop agent stop                   # when done
 ```
+
+### Desktop notifications for long-running sessions
+
+```bash
+# Get notified when each task completes or fails, and when the session finishes
+cloop run --pm --notify
+
+# Combine with a completion hook for maximum alerting
+cloop run --pm --notify --on-complete 'say "cloop done"'
+```
+
+`--notify` uses `notify-send` on Linux (requires `libnotify`) and `osascript` on macOS. It is silently ignored on unsupported platforms or headless environments. Events fired: **Task Done**, **Task Failed**, **All Tasks Complete** (PM mode) / **Goal Complete** (loop mode).
 
 ### Cross-provider comparison
 

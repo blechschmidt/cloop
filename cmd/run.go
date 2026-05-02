@@ -54,6 +54,7 @@ var (
 	webhookSecret     string
 	fallbackProviders []string
 	streamOutput      bool
+	notifyEnabled     bool
 )
 
 var runCmd = &cobra.Command{
@@ -188,6 +189,7 @@ Press Ctrl+C to pause gracefully.`,
 			WebhookEvents:    effectiveWebhookEvents,
 			WebhookSecret:    effectiveWebhookSecret,
 			Streaming:        streamOutput,
+			Notify:           notifyEnabled,
 		}
 
 		orc, err := orchestrator.New(orchCfg, prov)
@@ -384,5 +386,6 @@ func init() {
 	runCmd.Flags().StringVar(&webhookSecret, "webhook-secret", "", "HMAC-SHA256 signing secret; sets X-Hub-Signature-256 on every request (overrides config webhook.secret)")
 	runCmd.Flags().StringSliceVar(&fallbackProviders, "fallback", nil, "Fallback provider chain (e.g. --fallback anthropic,openai). Tried in order after primary fails.")
 	runCmd.Flags().BoolVar(&streamOutput, "stream", false, "Stream tokens to the terminal as they are generated (anthropic, openai, ollama; ignored by claudecode)")
+	runCmd.Flags().BoolVar(&notifyEnabled, "notify", false, "Send OS desktop notifications on task done, task failed, and session complete (notify-send on Linux, osascript on macOS)")
 	rootCmd.AddCommand(runCmd)
 }

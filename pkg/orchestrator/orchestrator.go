@@ -12,6 +12,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/cost"
 	"github.com/blechschmidt/cloop/pkg/memory"
+	"github.com/blechschmidt/cloop/pkg/notify"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/provider"
 	"github.com/blechschmidt/cloop/pkg/router"
@@ -103,6 +104,10 @@ type Config struct {
 	// passes an OnToken callback to Complete(); providers that do not support
 	// streaming (e.g. claudecode) simply ignore it and fall back to buffered output.
 	Streaming bool
+
+	// Notify enables OS desktop notifications for key events: task done, task failed,
+	// and session complete. Uses notify-send on Linux and osascript on macOS.
+	Notify bool
 }
 
 type Orchestrator struct {
@@ -290,6 +295,9 @@ func (o *Orchestrator) runLoop(ctx context.Context) error {
 
 		if o.isGoalComplete(result.Output) {
 			successColor.Printf("🎉 Goal complete after %d steps!\n\n", step)
+			if o.config.Notify {
+				notify.Send("cloop: Goal Complete", s.Goal)
+			}
 			o.webhook.Send(webhook.EventSessionComplete, webhook.Payload{
 				Goal: s.Goal,
 				Session: &webhook.SessionInfo{
@@ -449,6 +457,9 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		if s.Plan.IsComplete() {
 			successColor.Printf("🎉 All tasks complete! Goal achieved.\n")
 			successColor.Printf("   %s\n\n", s.Plan.Summary())
+			if o.config.Notify {
+				notify.Send("cloop: All Tasks Complete", s.Goal)
+			}
 			done, failed := s.Plan.CountByStatus()
 			o.webhook.Send(webhook.EventPlanComplete, webhook.Payload{
 				Goal: s.Goal,
@@ -685,6 +696,9 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			}
 			task.Status = pm.TaskDone
 			successColor.Printf("✓ Task %d complete: %s\n\n", task.ID, task.Title)
+			if o.config.Notify {
+				notify.Send("cloop: Task Done", task.Title)
+			}
 			{
 				done, failed := s.Plan.CountByStatus()
 				o.webhook.Send(webhook.EventTaskDone, webhook.Payload{
@@ -719,6 +733,9 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 					Progress: &webhook.Progress{Done: done, Total: len(s.Plan.Tasks), Failed: failed},
 					Session:  &webhook.SessionInfo{InputTokens: s.TotalInputTokens, OutputTokens: s.TotalOutputTokens},
 				})
+			}
+			if o.config.Notify {
+				notify.Send("cloop: Task Failed", task.Title)
 			}
 			consecutiveErrors++
 
@@ -760,6 +777,9 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			// No signal found — treat as done (AI finished without explicit signal)
 			task.Status = pm.TaskDone
 			successColor.Printf("✓ Task %d complete (no explicit signal): %s\n\n", task.ID, task.Title)
+			if o.config.Notify {
+				notify.Send("cloop: Task Done", task.Title)
+			}
 			{
 				done, failed := s.Plan.CountByStatus()
 				o.webhook.Send(webhook.EventTaskDone, webhook.Payload{
@@ -926,6 +946,9 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 		if s.Plan.IsComplete() {
 			successColor.Printf("🎉 All tasks complete! Goal achieved.\n")
 			successColor.Printf("   %s\n\n", s.Plan.Summary())
+			if o.config.Notify {
+				notify.Send("cloop: All Tasks Complete", s.Goal)
+			}
 			{
 				done, failed := s.Plan.CountByStatus()
 				o.webhook.Send(webhook.EventPlanComplete, webhook.Payload{
@@ -1079,6 +1102,9 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 			case pm.TaskDone:
 				task.Status = pm.TaskDone
 				successColor.Printf("✓ Task %d complete: %s\n\n", task.ID, task.Title)
+				if o.config.Notify {
+					notify.Send("cloop: Task Done", task.Title)
+				}
 				{
 					done, failed := s.Plan.CountByStatus()
 					o.webhook.Send(webhook.EventTaskDone, webhook.Payload{
@@ -1105,6 +1131,9 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 			case pm.TaskFailed:
 				task.Status = pm.TaskFailed
 				failColor.Printf("✗ Task %d failed: %s\n\n", task.ID, task.Title)
+				if o.config.Notify {
+					notify.Send("cloop: Task Failed", task.Title)
+				}
 				{
 					done, failed := s.Plan.CountByStatus()
 					o.webhook.Send(webhook.EventTaskFailed, webhook.Payload{
@@ -1118,6 +1147,9 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 			default:
 				task.Status = pm.TaskDone
 				successColor.Printf("✓ Task %d complete (no explicit signal): %s\n\n", task.ID, task.Title)
+				if o.config.Notify {
+					notify.Send("cloop: Task Done", task.Title)
+				}
 				{
 					done, failed := s.Plan.CountByStatus()
 					o.webhook.Send(webhook.EventTaskDone, webhook.Payload{
