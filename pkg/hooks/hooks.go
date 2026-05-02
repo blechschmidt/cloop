@@ -43,40 +43,45 @@ type PlanContext struct {
 // Returns a non-nil error (with message) if the command exits non-zero;
 // callers should skip the task when this happens.
 // Returns nil immediately if cfg.PreTask is empty.
-func RunPreTask(cfg Config, task TaskContext) error {
+// extraEnv is an optional list of KEY=value strings (e.g. from cloop env vars)
+// that are added to the subprocess environment alongside task context vars.
+func RunPreTask(cfg Config, task TaskContext, extraEnv ...string) error {
 	if cfg.PreTask == "" {
 		return nil
 	}
-	return runHook(cfg.PreTask, taskEnv(task), "pre_task")
+	return runHook(cfg.PreTask, append(taskEnv(task), extraEnv...), "pre_task")
 }
 
 // RunPostTask executes cfg.PostTask. Errors are returned but callers
 // typically only log them — post-task failures do not affect task status.
 // Returns nil immediately if cfg.PostTask is empty.
-func RunPostTask(cfg Config, task TaskContext) error {
+// extraEnv is an optional list of KEY=value strings injected into the subprocess env.
+func RunPostTask(cfg Config, task TaskContext, extraEnv ...string) error {
 	if cfg.PostTask == "" {
 		return nil
 	}
-	return runHook(cfg.PostTask, taskEnv(task), "post_task")
+	return runHook(cfg.PostTask, append(taskEnv(task), extraEnv...), "post_task")
 }
 
 // RunPrePlan executes cfg.PrePlan. Returns a non-nil error if the command
 // exits non-zero; callers should abort plan execution in that case.
 // Returns nil immediately if cfg.PrePlan is empty.
-func RunPrePlan(cfg Config, plan PlanContext) error {
+// extraEnv is an optional list of KEY=value strings injected into the subprocess env.
+func RunPrePlan(cfg Config, plan PlanContext, extraEnv ...string) error {
 	if cfg.PrePlan == "" {
 		return nil
 	}
-	return runHook(cfg.PrePlan, planEnv(plan), "pre_plan")
+	return runHook(cfg.PrePlan, append(planEnv(plan), extraEnv...), "pre_plan")
 }
 
 // RunPostPlan executes cfg.PostPlan. Errors are returned but do not abort anything.
 // Returns nil immediately if cfg.PostPlan is empty.
-func RunPostPlan(cfg Config, plan PlanContext) error {
+// extraEnv is an optional list of KEY=value strings injected into the subprocess env.
+func RunPostPlan(cfg Config, plan PlanContext, extraEnv ...string) error {
 	if cfg.PostPlan == "" {
 		return nil
 	}
-	return runHook(cfg.PostPlan, planEnv(plan), "post_plan")
+	return runHook(cfg.PostPlan, append(planEnv(plan), extraEnv...), "post_plan")
 }
 
 // runHook executes cmd via "sh -c" with extra env vars merged into the

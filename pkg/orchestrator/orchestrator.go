@@ -13,6 +13,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/artifact"
 	"github.com/blechschmidt/cloop/pkg/checkpoint"
 	"github.com/blechschmidt/cloop/pkg/cost"
+	cloopenv "github.com/blechschmidt/cloop/pkg/env"
 	"github.com/blechschmidt/cloop/pkg/diagnosis"
 	cloopgit "github.com/blechschmidt/cloop/pkg/git"
 	"github.com/blechschmidt/cloop/pkg/hooks"
@@ -210,6 +211,7 @@ type Orchestrator struct {
 	memory   *memory.Memory
 	webhook  *webhook.Client
 	metrics  *metrics.Metrics
+	envVars  []cloopenv.Var
 }
 
 func New(cfg Config, prov provider.Provider) (*Orchestrator, error) {
@@ -228,6 +230,9 @@ func New(cfg Config, prov provider.Provider) (*Orchestrator, error) {
 		mem = &memory.Memory{}
 	}
 
+	// Load per-project env vars (best-effort; errors are non-fatal).
+	envVars, _ := cloopenv.Load(cfg.WorkDir)
+
 	// Build webhook client (flag URL overrides config URL).
 	var wh *webhook.Client
 	if cfg.WebhookURL != "" {
@@ -235,7 +240,7 @@ func New(cfg Config, prov provider.Provider) (*Orchestrator, error) {
 	}
 
 	r := router.New(prov)
-	return &Orchestrator{config: cfg, state: s, provider: prov, router: r, memory: mem, webhook: wh, metrics: cfg.Metrics}, nil
+	return &Orchestrator{config: cfg, state: s, provider: prov, router: r, memory: mem, webhook: wh, metrics: cfg.Metrics, envVars: envVars}, nil
 }
 
 // notifyWebhooks sends a rich notification to the configured Slack and/or Discord
@@ -612,7 +617,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 	if err := hooks.RunPrePlan(o.config.Hooks, hooks.PlanContext{
 		Goal:  s.Goal,
 		Total: len(s.Plan.Tasks),
-	}); err != nil {
+	}, cloopenv.EnvLines(o.envVars)...); err != nil {
 		failColor.Printf("✗ pre_plan hook failed: %v — aborting plan execution.\n", err)
 		s.Status = "failed"
 		s.Save()
@@ -634,7 +639,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			Done:    done,
 			Failed:  failed,
 			Skipped: skipped,
-		}); hookErr != nil {
+		}, cloopenv.EnvLines(o.envVars)...); hookErr != nil {
 			dimColor.Printf("  post_plan hook error (ignored): %v\n", hookErr)
 		}
 	}()
@@ -789,7 +794,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			Title:  task.Title,
 			Status: "pending",
 			Role:   string(task.Role),
-		}); hookErr != nil {
+		}, cloopenv.EnvLines(o.envVars)...); hookErr != nil {
 			dimColor.Printf("⊘ pre_task hook failed for task %d (%s): %v — skipping task.\n", task.ID, task.Title, hookErr)
 			task.Status = pm.TaskSkipped
 			s.Save()
@@ -837,6 +842,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			color.New(color.FgYellow).Printf("Context pruned: kept %d of %d steps to fit token budget\n", keptResults, totalResults)
 		}
 		prompt := pm.ExecuteTaskPrompt(s.Goal, s.Instructions, o.config.WorkDir, promptPlan, task, projCtx)
+		prompt = cloopenv.InjectIntoPrompt(prompt, o.envVars)
 		// Prepend memory if enabled
 		if o.config.UseMemory && o.memory != nil {
 			limit := o.config.MemoryLimit
@@ -1250,7 +1256,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			Title:  task.Title,
 			Status: string(task.Status),
 			Role:   string(task.Role),
-		}); hookErr != nil {
+		}, cloopenv.EnvLines(o.envVars)...); hookErr != nil {
 			dimColor.Printf("  post_task hook error (ignored): %v\n", hookErr)
 		}
 
@@ -1539,6 +1545,7 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 			go func(idx int, t *pm.Task) {
 				defer wg.Done()
 				prompt := pm.ExecuteTaskPrompt(s.Goal, s.Instructions, o.config.WorkDir, parallelPromptPlan, t)
+				prompt = cloopenv.InjectIntoPrompt(prompt, o.envVars)
 				start := time.Now()
 				// Use role-specific provider if configured.
 				taskProvider := o.router.For(t.Role)
@@ -2081,6 +2088,7 @@ func (o *Orchestrator) evolve(ctx context.Context) error {
 					color.New(color.FgYellow).Printf("Context pruned: kept %d of %d steps to fit token budget\n", keptEv, totalEv)
 				}
 				prompt := pm.ExecuteTaskPrompt(s.Goal, s.Instructions, o.config.WorkDir, evolvePrunedPlan, nextTask)
+				prompt = cloopenv.InjectIntoPrompt(prompt, o.envVars)
 				dimColor.Printf("→ Executing task %d via %s...\n", nextTask.ID, o.provider.Name())
 				start := time.Now()
 

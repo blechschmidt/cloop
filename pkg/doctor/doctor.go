@@ -83,6 +83,7 @@ func Run(ctx context.Context, workdir string, cfg *config.Config, testProviders 
 	checkGitRepo(workdir, cfg, add)
 	checkWebhooks(ctx, cfg, add)
 	checkHookScripts(cfg, add)
+	checkEnvYamlGitignored(workdir, add)
 
 	return rep
 }
@@ -461,6 +462,44 @@ func checkWebhooks(ctx context.Context, cfg *config.Config, add addFn) {
 			})
 		}
 	}
+}
+
+// checkEnvYamlGitignored warns if .cloop/env.yaml exists but is not in .gitignore.
+// Committing env.yaml could expose secrets stored in it.
+func checkEnvYamlGitignored(workdir string, add addFn) {
+	envYaml := filepath.Join(workdir, ".cloop", "env.yaml")
+	if _, err := os.Stat(envYaml); os.IsNotExist(err) {
+		return // no env.yaml → nothing to check
+	}
+
+	giPath := filepath.Join(workdir, ".gitignore")
+	data, err := os.ReadFile(giPath)
+	if err != nil {
+		// No .gitignore at all.
+		add(Result{
+			Name:    ".cloop/env.yaml in .gitignore",
+			Level:   Warn,
+			Message: ".cloop/env.yaml exists but no .gitignore found — secrets may be committed",
+			Fix:     "Add '.cloop/env.yaml' to .gitignore: echo '.cloop/env.yaml' >> .gitignore",
+		})
+		return
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.TrimSpace(line) == ".cloop/env.yaml" {
+			add(Result{
+				Name:    ".cloop/env.yaml in .gitignore",
+				Level:   Pass,
+				Message: ".cloop/env.yaml is listed in .gitignore",
+			})
+			return
+		}
+	}
+	add(Result{
+		Name:    ".cloop/env.yaml in .gitignore",
+		Level:   Warn,
+		Message: ".cloop/env.yaml is NOT in .gitignore — secrets may be accidentally committed",
+		Fix:     "Add '.cloop/env.yaml' to .gitignore: echo '.cloop/env.yaml' >> .gitignore",
+	})
 }
 
 // checkHookScripts verifies that configured hook script paths are executable.

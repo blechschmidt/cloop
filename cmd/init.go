@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/profile"
@@ -144,6 +145,9 @@ Examples:
 			config.WriteDefault(workdir)
 		}
 
+		// Ensure .cloop/env.yaml is in .gitignore so secrets are not committed.
+		ensureGitignore(workdir, ".cloop/env.yaml")
+
 		color.Green("✓ cloop initialized")
 		fmt.Printf("  Goal: %s\n", goal)
 		if tmpl != nil {
@@ -176,6 +180,28 @@ Examples:
 		}
 		return nil
 	},
+}
+
+// ensureGitignore appends entry to .gitignore in workDir if it is not already present.
+// Creates the file if it does not exist.
+func ensureGitignore(workDir, entry string) {
+	giPath := workDir + "/.gitignore"
+	data, _ := os.ReadFile(giPath)
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.TrimSpace(line) == entry {
+			return // already present
+		}
+	}
+	f, err := os.OpenFile(giPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	// Ensure new line separation.
+	if len(data) > 0 && data[len(data)-1] != '\n' {
+		f.WriteString("\n")
+	}
+	f.WriteString(entry + "\n")
 }
 
 func init() {
