@@ -86,6 +86,7 @@ Subcommands:
   notes <id>             List all annotations for a task
   query <question>       Answer a natural language question about the plan
   merge <id1> <id2>...   Merge multiple tasks into one AI-synthesised task
+  clone <id>             Duplicate a task, optionally AI-adapting it for a new context
   approve <id>           Pre-approve a task to bypass the --require-approval gate
 
 Task dependencies:
@@ -943,6 +944,14 @@ var (
 	mergeTimeout  string
 )
 
+var (
+	cloneAdapt    string
+	cloneYes      bool
+	cloneProvider string
+	cloneModel    string
+	cloneTimeout  string
+)
+
 var taskSplitCmd = &cobra.Command{
 	Use:   "split <id>",
 	Short: "AI-powered task decomposition: split a task into smaller subtasks",
@@ -1318,6 +1327,226 @@ Examples:
 	},
 }
 
+var taskCloneCmd = &cobra.Command{
+	Use:   "clone <id>",
+	Short: "Duplicate a task, optionally AI-adapting it for a new context",
+	Long: `Clone duplicates a task and appends the copy to the plan with the next
+available ID. All metadata (priority, role, tags, deps, estimated time) is
+inherited from the original; the new task starts as pending.
+
+Without --adapt, the title gets a " (copy)" suffix and the description is
+copied verbatim.
+
+With --adapt, the AI rewrites the title and description for the supplied
+context. This is useful for cloning a task like "add unit tests for X" and
+adapting it to "add unit tests for Y" without manually re-writing it.
+
+Examples:
+  cloop task clone 5
+  cloop task clone 5 --adapt "for the payment module instead of auth"
+  cloop task clone 5 --adapt "for the v2 API" --yes
+  cloop task clone 5 --provider anthropic --model claude-opus-4-5`,
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		workdir, _ := os.Getwd()
+
+		s, err := state.Load(workdir)
+		if err != nil {
+			return err
+		}
+		if !s.PMMode || s.Plan == nil || len(s.Plan.Tasks) == 0 {
+			return fmt.Errorf("no task plan found — run 'cloop run --pm' to create one")
+		}
+
+		taskID, err := strconv.Atoi(args[0])
+		if err != nil {
+			return fmt.Errorf("invalid task ID %q: must be a number", args[0])
+		}
+
+		// Find the original task for display
+		var original *pm.Task
+		for _, t := range s.Plan.Tasks {
+			if t.ID == taskID {
+				original = t
+				break
+			}
+		}
+		if original == nil {
+			return fmt.Errorf("task %d not found", taskID)
+		}
+
+		headerColor := color.New(color.FgCyan, color.Bold)
+		dimColor := color.New(color.Faint)
+		warnColor := color.New(color.FgYellow)
+
+		headerColor.Printf("Cloning task %d: %s\n", original.ID, original.Title)
+
+		// Simple copy path — no AI needed
+		if cloneAdapt == "" {
+			newID := 0
+			for _, t := range s.Plan.Tasks {
+				if t.ID > newID {
+					newID = t.ID
+				}
+			}
+			newID++
+
+			warnColor.Printf("\nProposed clone:\n")
+			fmt.Printf("  #%d %s (copy)\n", newID, original.Title)
+			if original.Description != "" {
+				dimColor.Printf("       %s\n", truncateStr(original.Description, 120))
+			}
+			fmt.Println()
+
+			if !cloneYes {
+				fmt.Printf("Apply clone? (y/N): ")
+				scanner := bufio.NewScanner(os.Stdin)
+				if !scanner.Scan() {
+					return fmt.Errorf("no input received")
+				}
+				answer := strings.TrimSpace(strings.ToLower(scanner.Text()))
+				if answer != "y" && answer != "yes" {
+					fmt.Println("Clone cancelled.")
+					return nil
+				}
+			}
+
+			cloned, err := pm.Clone(cmd.Context(), nil, provider.Options{}, s.Plan, taskID, "")
+			if err != nil {
+				return fmt.Errorf("clone failed: %w", err)
+			}
+			if err := s.Save(); err != nil {
+				return fmt.Errorf("saving state: %w", err)
+			}
+			color.New(color.FgGreen).Printf("Cloned task %d → task %d: %s\n", taskID, cloned.ID, cloned.Title)
+			return nil
+		}
+
+		// AI-adaptation path — build provider
+		cfg, err := config.Load(workdir)
+		if err != nil {
+			return fmt.Errorf("loading config: %w", err)
+		}
+		applyEnvOverrides(cfg)
+
+		pName := cloneProvider
+		if pName == "" {
+			pName = cfg.Provider
+		}
+		if pName == "" && s.Provider != "" {
+			pName = s.Provider
+		}
+		if pName == "" {
+			pName = autoSelectProvider()
+		}
+
+		model := cloneModel
+		if model == "" {
+			switch pName {
+			case "anthropic":
+				model = cfg.Anthropic.Model
+			case "openai":
+				model = cfg.OpenAI.Model
+			case "ollama":
+				model = cfg.Ollama.Model
+			case "claudecode":
+				model = cfg.ClaudeCode.Model
+			}
+		}
+		if model == "" {
+			model = s.Model
+		}
+
+		provCfg := provider.ProviderConfig{
+			Name:             pName,
+			AnthropicAPIKey:  cfg.Anthropic.APIKey,
+			AnthropicBaseURL: cfg.Anthropic.BaseURL,
+			OpenAIAPIKey:     cfg.OpenAI.APIKey,
+			OpenAIBaseURL:    cfg.OpenAI.BaseURL,
+			OllamaBaseURL:    cfg.Ollama.BaseURL,
+		}
+		prov, err := provider.Build(provCfg)
+		if err != nil {
+			return fmt.Errorf("provider: %w", err)
+		}
+
+		timeout := 5 * time.Minute
+		if cloneTimeout != "" {
+			timeout, err = time.ParseDuration(cloneTimeout)
+			if err != nil {
+				return fmt.Errorf("invalid timeout: %w", err)
+			}
+		}
+
+		fmt.Printf("Asking AI to adapt task for new context: %q\n\n", cloneAdapt)
+
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+
+		opts := provider.Options{
+			Model:   model,
+			Timeout: timeout,
+		}
+
+		// Deep-copy plan to allow preview before committing
+		planCopy := &pm.Plan{
+			Goal:    s.Plan.Goal,
+			Tasks:   make([]*pm.Task, len(s.Plan.Tasks)),
+			Version: s.Plan.Version,
+		}
+		for i, t := range s.Plan.Tasks {
+			tc := *t
+			if tc.DependsOn != nil {
+				tc.DependsOn = append([]int{}, tc.DependsOn...)
+			}
+			if tc.Tags != nil {
+				tc.Tags = append([]string{}, tc.Tags...)
+			}
+			planCopy.Tasks[i] = &tc
+		}
+
+		cloned, err := pm.Clone(ctx, prov, opts, planCopy, taskID, cloneAdapt)
+		if err != nil {
+			return fmt.Errorf("clone failed: %w", err)
+		}
+
+		// Preview
+		warnColor.Printf("Proposed adapted clone:\n\n")
+		rolePart := ""
+		if cloned.Role != "" {
+			rolePart = fmt.Sprintf(" [%s]", cloned.Role)
+		}
+		warnColor.Printf("  #%d%s %s\n", cloned.ID, rolePart, cloned.Title)
+		if cloned.Description != "" {
+			dimColor.Printf("       %s\n", truncateStr(cloned.Description, 140))
+		}
+		if len(cloned.Tags) > 0 {
+			dimColor.Printf("       tags: %s\n", strings.Join(cloned.Tags, ", "))
+		}
+		fmt.Println()
+
+		if !cloneYes {
+			fmt.Printf("Apply adapted clone? (y/N): ")
+			scanner := bufio.NewScanner(os.Stdin)
+			if !scanner.Scan() {
+				return fmt.Errorf("no input received")
+			}
+			answer := strings.TrimSpace(strings.ToLower(scanner.Text()))
+			if answer != "y" && answer != "yes" {
+				fmt.Println("Clone cancelled.")
+				return nil
+			}
+		}
+
+		s.Plan = planCopy
+		if err := s.Save(); err != nil {
+			return fmt.Errorf("saving state: %w", err)
+		}
+		color.New(color.FgGreen).Printf("Cloned task %d → task %d: %s\n", taskID, cloned.ID, cloned.Title)
+		return nil
+	},
+}
+
 var taskApproveCmd = &cobra.Command{
 	Use:   "approve <id>",
 	Short: "Pre-approve a task so unattended runs skip the approval gate",
@@ -1512,6 +1741,12 @@ func init() {
 	taskMergeCmd.Flags().StringVar(&mergeModel, "model", "", "Model override for the AI provider")
 	taskMergeCmd.Flags().StringVar(&mergeTimeout, "timeout", "5m", "Timeout for the AI call (e.g. 2m, 300s)")
 
+	taskCloneCmd.Flags().StringVar(&cloneAdapt, "adapt", "", "New context for AI-driven title/description adaptation")
+	taskCloneCmd.Flags().BoolVar(&cloneYes, "yes", false, "Skip confirmation prompt and apply immediately")
+	taskCloneCmd.Flags().StringVar(&cloneProvider, "provider", "", "AI provider to use (anthropic, openai, ollama, claudecode)")
+	taskCloneCmd.Flags().StringVar(&cloneModel, "model", "", "Model override for the AI provider")
+	taskCloneCmd.Flags().StringVar(&cloneTimeout, "timeout", "5m", "Timeout for the AI call (e.g. 2m, 300s)")
+
 	taskCmd.AddCommand(taskListCmd)
 	taskCmd.AddCommand(taskShowCmd)
 	taskCmd.AddCommand(taskNextCmd)
@@ -1526,6 +1761,7 @@ func init() {
 	taskCmd.AddCommand(taskUntagCmd)
 	taskCmd.AddCommand(taskSplitCmd)
 	taskCmd.AddCommand(taskMergeCmd)
+	taskCmd.AddCommand(taskCloneCmd)
 	taskApproveCmd.Flags().Bool("revoke", false, "Revoke a previously granted pre-approval")
 	taskCmd.AddCommand(taskApproveCmd)
 	taskCmd.AddCommand(taskAnnotateCmd)
