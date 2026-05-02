@@ -63,6 +63,64 @@ func (c *ProjectContext) Format() string {
 	return b.String()
 }
 
+// EstimateTokens estimates the token count of text using the rule 4 chars ≈ 1 token.
+func EstimateTokens(text string) int {
+	return (len(text) + 3) / 4
+}
+
+// PruneToTokenBudget prunes steps to fit within budgetTokens using the 4 chars ≈ 1 token
+// estimate. It always retains steps[0] (the initial goal / first step) and the last two
+// steps. Oldest intermediate steps (index 1 through n-3) are dropped from the front until
+// the total fits within the budget. If len(steps) ≤ 3 or the total already fits, steps is
+// returned unchanged. budgetTokens ≤ 0 disables pruning and returns steps unchanged.
+func PruneToTokenBudget(steps []string, budgetTokens int) []string {
+	if budgetTokens <= 0 || len(steps) == 0 {
+		return steps
+	}
+	total := 0
+	for _, s := range steps {
+		total += EstimateTokens(s)
+	}
+	if total <= budgetTokens {
+		return steps
+	}
+	// Cannot prune further without violating the always-keep constraints.
+	if len(steps) <= 3 {
+		return steps
+	}
+
+	first := steps[0]
+	last2 := steps[len(steps)-2:]
+	middle := steps[1 : len(steps)-2]
+
+	fixed := EstimateTokens(first)
+	for _, s := range last2 {
+		fixed += EstimateTokens(s)
+	}
+	middleBudget := budgetTokens - fixed
+
+	// Retain the newest middle steps; drop oldest until budget fits.
+	start := len(middle) // default: drop all middle steps
+	if middleBudget > 0 {
+		used := 0
+		for i := len(middle) - 1; i >= 0; i-- {
+			t := EstimateTokens(middle[i])
+			if used+t > middleBudget {
+				break
+			}
+			used += t
+			start = i
+		}
+	}
+
+	kept := middle[start:]
+	result := make([]string, 0, 1+len(kept)+2)
+	result = append(result, first)
+	result = append(result, kept...)
+	result = append(result, last2...)
+	return result
+}
+
 // runGit runs a git command in workdir and returns stdout (trimmed).
 // Returns empty string on error.
 func runGit(workdir string, args ...string) string {

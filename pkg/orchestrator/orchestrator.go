@@ -136,6 +136,12 @@ type Config struct {
 	// On TASK_DONE the branch is committed and merged back to the original branch.
 	// On TASK_FAILED the branch is left open for inspection.
 	GitMode bool
+
+	// ContextTokenLimit is the maximum estimated token count for step/task-result history
+	// included in prompts. When the accumulated history exceeds this limit the orchestrator
+	// prunes oldest intermediate entries (keeping the first and last two) before building
+	// the prompt. 0 means no limit. Default when unset: 100000.
+	ContextTokenLimit int
 }
 
 type Orchestrator struct {
@@ -657,7 +663,11 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		if o.config.InjectContext {
 			projCtx = pm.BuildProjectContext(o.config.WorkDir)
 		}
-		prompt := pm.ExecuteTaskPrompt(s.Goal, s.Instructions, s.Plan, task, projCtx)
+		promptPlan, keptResults, totalResults := o.prunePlanForPrompt(s.Plan)
+		if keptResults < totalResults {
+			color.New(color.FgYellow).Printf("Context pruned: kept %d of %d steps to fit token budget\n", keptResults, totalResults)
+		}
+		prompt := pm.ExecuteTaskPrompt(s.Goal, s.Instructions, promptPlan, task, projCtx)
 		// Prepend memory if enabled
 		if o.config.UseMemory && o.memory != nil {
 			limit := o.config.MemoryLimit
@@ -1183,6 +1193,12 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 			}
 		}
 
+		// Apply token-budget pruning to the plan once before launching parallel tasks.
+		parallelPromptPlan, keptPar, totalPar := o.prunePlanForPrompt(s.Plan)
+		if keptPar < totalPar {
+			color.New(color.FgYellow).Printf("Context pruned: kept %d of %d steps to fit token budget\n", keptPar, totalPar)
+		}
+
 		// Launch goroutines for each ready task.
 		// Streaming is disabled in parallel mode to avoid interleaved token output.
 		results := make([]taskResult, len(ready))
@@ -1191,7 +1207,7 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 			wg.Add(1)
 			go func(idx int, t *pm.Task) {
 				defer wg.Done()
-				prompt := pm.ExecuteTaskPrompt(s.Goal, s.Instructions, s.Plan, t)
+				prompt := pm.ExecuteTaskPrompt(s.Goal, s.Instructions, parallelPromptPlan, t)
 				start := time.Now()
 				// Use role-specific provider if configured.
 				taskProvider := o.router.For(t.Role)
@@ -1383,6 +1399,99 @@ func (o *Orchestrator) makeOpts(model string, streaming bool) (provider.Options,
 	return opts, func() bool { return streamed }
 }
 
+// tokenLimit returns the effective ContextTokenLimit: the configured value or the default
+// of 100000 when the field is zero.
+func (o *Orchestrator) tokenLimit() int {
+	if o.config.ContextTokenLimit > 0 {
+		return o.config.ContextTokenLimit
+	}
+	return 100000
+}
+
+// pruneStepHistory applies token-budget pruning to a step slice.
+// It collects the step outputs as strings, calls pm.PruneToTokenBudget, then
+// reconstructs the []state.StepResult slice for the entries that were retained.
+// Returns (prunedSteps, originalCount, keptCount).
+func pruneStepHistory(steps []state.StepResult, budgetTokens int) ([]state.StepResult, int, int) {
+	n := len(steps)
+	if n == 0 {
+		return steps, 0, 0
+	}
+	texts := make([]string, n)
+	for i, step := range steps {
+		texts[i] = step.Output
+	}
+	pruned := pm.PruneToTokenBudget(texts, budgetTokens)
+	if len(pruned) == n {
+		return steps, n, n
+	}
+	// Reconstruct the StepResult slice that corresponds to the pruned text slice.
+	// PruneToTokenBudget always keeps index 0 and the last two; it drops oldest
+	// intermediates from index 1 forward. The drop count equals n - len(pruned).
+	dropCount := n - len(pruned)
+	result := make([]state.StepResult, 0, len(pruned))
+	result = append(result, steps[0])
+	if n >= 3 {
+		// Middle: steps[1:n-2]; kept = steps[1+dropCount:n-2]
+		middleStart := 1 + dropCount
+		if middleStart < n-2 {
+			result = append(result, steps[middleStart:n-2]...)
+		}
+		result = append(result, steps[n-2:]...)
+	} else if n == 2 {
+		result = append(result, steps[1])
+	}
+	return result, n, len(result)
+}
+
+// prunePlanForPrompt returns a shallow copy of plan with the Result field of older
+// completed tasks cleared so that the prompt fits within the token budget.
+// Returns the (possibly modified) plan and counts (kept, total) for warning output.
+// Returns the original plan unchanged when no pruning is needed.
+func (o *Orchestrator) prunePlanForPrompt(plan *pm.Plan) (*pm.Plan, int, int) {
+	budget := o.tokenLimit()
+	if plan == nil {
+		return plan, 0, 0
+	}
+	// Collect completed-task result strings and their indices in plan.Tasks.
+	var results []string
+	var completedIdx []int
+	for i, t := range plan.Tasks {
+		if t.Status == pm.TaskDone || t.Status == pm.TaskSkipped {
+			results = append(results, t.Result)
+			completedIdx = append(completedIdx, i)
+		}
+	}
+	total := len(results)
+	if total == 0 {
+		return plan, 0, 0
+	}
+	pruned := pm.PruneToTokenBudget(results, budget)
+	if len(pruned) == total {
+		return plan, total, total
+	}
+	// PruneToTokenBudget drops oldest intermediates: completedIdx[1..dropCount].
+	dropCount := total - len(pruned)
+	droppedSet := make(map[int]bool, dropCount)
+	for i := 1; i <= dropCount && i < total; i++ {
+		droppedSet[completedIdx[i]] = true
+	}
+	// Build a shallow copy of the plan with Result cleared for dropped tasks.
+	newPlan := *plan
+	newTasks := make([]*pm.Task, len(plan.Tasks))
+	for i, t := range plan.Tasks {
+		if droppedSet[i] {
+			tc := *t
+			tc.Result = ""
+			newTasks[i] = &tc
+		} else {
+			newTasks[i] = t
+		}
+	}
+	newPlan.Tasks = newTasks
+	return &newPlan, len(pruned), total
+}
+
 func (o *Orchestrator) buildPrompt() string {
 	s := o.state
 	var b strings.Builder
@@ -1418,13 +1527,34 @@ func (o *Orchestrator) buildPrompt() string {
 	if contextSteps < 0 {
 		contextSteps = 3
 	}
-	recent := s.LastNSteps(contextSteps)
+
+	// Apply token-budget pruning to the full step list before count-based slicing.
+	effectiveSteps := s.Steps
+	if len(s.Steps) > 0 {
+		pruned, origCount, keptCount := pruneStepHistory(s.Steps, o.tokenLimit())
+		if keptCount < origCount {
+			color.New(color.FgYellow).Printf("Context pruned: kept %d of %d steps to fit token budget\n", keptCount, origCount)
+			effectiveSteps = pruned
+		}
+	}
+
+	// Derive recent / older split from the (possibly pruned) step list.
+	var recent []state.StepResult
+	if contextSteps > 0 {
+		n := contextSteps
+		if n > len(effectiveSteps) {
+			n = len(effectiveSteps)
+		}
+		if n > 0 {
+			recent = effectiveSteps[len(effectiveSteps)-n:]
+		}
+	}
 
 	// For older steps beyond the recent window, include a brief one-line summary
 	// so the AI has a high-level view of overall session progress.
 	// When contextSteps==0 (context disabled), skip history entirely.
-	if contextSteps > 0 && len(s.Steps) > len(recent) {
-		older := s.Steps[:len(s.Steps)-len(recent)]
+	if contextSteps > 0 && len(effectiveSteps) > len(recent) {
+		older := effectiveSteps[:len(effectiveSteps)-len(recent)]
 		b.WriteString("## SESSION HISTORY (brief)\n")
 		for _, step := range older {
 			summary := stepSummaryLine(step.Output, 150)
@@ -1558,7 +1688,11 @@ func (o *Orchestrator) evolve(ctx context.Context) error {
 				nextTask.StartedAt = &now
 				s.Save()
 
-				prompt := pm.ExecuteTaskPrompt(s.Goal, s.Instructions, s.Plan, nextTask)
+				evolvePrunedPlan, keptEv, totalEv := o.prunePlanForPrompt(s.Plan)
+				if keptEv < totalEv {
+					color.New(color.FgYellow).Printf("Context pruned: kept %d of %d steps to fit token budget\n", keptEv, totalEv)
+				}
+				prompt := pm.ExecuteTaskPrompt(s.Goal, s.Instructions, evolvePrunedPlan, nextTask)
 				dimColor.Printf("→ Executing task %d via %s...\n", nextTask.ID, o.provider.Name())
 				start := time.Now()
 

@@ -8,6 +8,108 @@ import (
 	"testing"
 )
 
+// --- EstimateTokens ---
+
+func TestEstimateTokens_Empty(t *testing.T) {
+	if got := EstimateTokens(""); got != 0 {
+		t.Errorf("EstimateTokens(\"\") = %d, want 0", got)
+	}
+}
+
+func TestEstimateTokens_FourChars(t *testing.T) {
+	// "abcd" = 4 chars → 1 token
+	if got := EstimateTokens("abcd"); got != 1 {
+		t.Errorf("EstimateTokens(4 chars) = %d, want 1", got)
+	}
+}
+
+func TestEstimateTokens_Rounding(t *testing.T) {
+	// 5 chars → ceil(5/4) = 2
+	if got := EstimateTokens("abcde"); got != 2 {
+		t.Errorf("EstimateTokens(5 chars) = %d, want 2", got)
+	}
+}
+
+// --- PruneToTokenBudget ---
+
+func TestPruneToTokenBudget_NoBudget(t *testing.T) {
+	steps := []string{"a", "b", "c", "d"}
+	got := PruneToTokenBudget(steps, 0)
+	if len(got) != len(steps) {
+		t.Errorf("budget=0 should disable pruning, got %d steps", len(got))
+	}
+}
+
+func TestPruneToTokenBudget_FitsNoPrune(t *testing.T) {
+	steps := []string{"a", "b", "c", "d"}
+	// Each "a","b","c","d" = 1 token. Total = 4. Budget = 10.
+	got := PruneToTokenBudget(steps, 10)
+	if len(got) != len(steps) {
+		t.Errorf("should not prune when total fits, got %d steps", len(got))
+	}
+}
+
+func TestPruneToTokenBudget_TooFewSteps(t *testing.T) {
+	steps := []string{"first", "last"}
+	// Even if total > budget, ≤3 steps are never pruned.
+	got := PruneToTokenBudget(steps, 1)
+	if len(got) != len(steps) {
+		t.Errorf("≤3 steps should not be pruned, got %d", len(got))
+	}
+}
+
+func TestPruneToTokenBudget_KeepsFirstAndLast2(t *testing.T) {
+	// Build 6 steps where total > budget.
+	// Each step is 40 chars → 10 tokens. 6 steps = 60 tokens total.
+	// Budget = 32 tokens → keep first (10) + last2 (20) + some middle.
+	// 32 - 30 = 2 tokens left for middle; each middle step = 10 tokens → no middle fits.
+	step := strings.Repeat("x", 40) // 40 chars = 10 tokens
+	steps := []string{step, step, step, step, step, step}
+	got := PruneToTokenBudget(steps, 32)
+	// Should keep 3: first + last2
+	if len(got) != 3 {
+		t.Errorf("expected 3 steps (first+last2), got %d", len(got))
+	}
+	if got[0] != steps[0] {
+		t.Error("first step must be retained")
+	}
+	if got[1] != steps[len(steps)-2] || got[2] != steps[len(steps)-1] {
+		t.Error("last two steps must be retained")
+	}
+}
+
+func TestPruneToTokenBudget_KeepsNewestMiddle(t *testing.T) {
+	// 5 steps: first(10tok), middle1(10tok), middle2(10tok), last2a(10tok), last2b(10tok)
+	// Budget = 40 tokens → first(10) + last2(20) = 30 fixed.
+	// Remaining for middle = 10 → one middle step fits. Should keep middle2 (newest).
+	small := strings.Repeat("x", 40) // 10 tokens
+	steps := []string{small, small, small, small, small}
+	got := PruneToTokenBudget(steps, 40)
+	if len(got) != 4 {
+		t.Errorf("expected 4 steps, got %d", len(got))
+	}
+	if got[0] != steps[0] {
+		t.Error("first step must be retained")
+	}
+	if got[len(got)-2] != steps[len(steps)-2] || got[len(got)-1] != steps[len(steps)-1] {
+		t.Error("last two steps must be retained")
+	}
+}
+
+func TestPruneToTokenBudget_LogMessage(t *testing.T) {
+	// Ensure pruned count < original when over budget
+	step := strings.Repeat("x", 400) // 100 tokens each
+	steps := make([]string, 10)
+	for i := range steps {
+		steps[i] = step
+	}
+	// Budget = 300 tokens: first(100) + last2(200) = 300, no middle
+	got := PruneToTokenBudget(steps, 300)
+	if len(got) >= len(steps) {
+		t.Errorf("expected pruning, got %d (orig %d)", len(got), len(steps))
+	}
+}
+
 // --- ProjectContext.Format ---
 
 func TestFormat_NilContext(t *testing.T) {

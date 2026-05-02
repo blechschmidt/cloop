@@ -60,6 +60,7 @@ var (
 	costLimit         float64
 	gitMode           bool
 	diagnoseFailures  bool
+	contextTokenLimit int
 )
 
 var runCmd = &cobra.Command{
@@ -213,8 +214,9 @@ Press Ctrl+C to pause gracefully.`,
 			WebhookSecret:    effectiveWebhookSecret,
 			Streaming:        streamOutput,
 			Notify:           notifyEnabled,
-			GitMode:          gitMode,
-			DiagnoseFailures: diagnoseFailures,
+			GitMode:           gitMode,
+			DiagnoseFailures:  diagnoseFailures,
+			ContextTokenLimit: contextTokenLimit,
 		}
 
 		orc, err := orchestrator.New(orchCfg, prov)
@@ -416,5 +418,6 @@ func init() {
 	runCmd.Flags().Float64Var(&costLimit, "cost-limit", 0, "Stop when estimated session cost reaches this USD amount (0 = unlimited); warns at 80%")
 	runCmd.Flags().BoolVar(&gitMode, "git", false, "PM mode: create a git branch per task, commit on done, leave branch on failure (sequential only)")
 	runCmd.Flags().BoolVar(&diagnoseFailures, "diagnose", false, "PM mode: run AI failure diagnosis on TASK_FAILED to analyze root cause and guide retries")
+	runCmd.Flags().IntVar(&contextTokenLimit, "context-tokens", 0, "Maximum estimated tokens for step/task-result history in prompts (0 = default 100000); prunes oldest entries when exceeded")
 	rootCmd.AddCommand(runCmd)
 }
