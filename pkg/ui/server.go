@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/config"
+	"github.com/blechschmidt/cloop/pkg/multiui"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/state"
 )
@@ -31,9 +33,10 @@ const liveLogMaxLines = 500
 
 // Server is the cloop web dashboard HTTP server.
 type Server struct {
-	WorkDir string
-	Port    int
-	Token   string // optional auth token; empty = no auth
+	WorkDir  string
+	Port     int
+	Token    string   // optional auth token; empty = no auth
+	Projects []string // extra project directories for multi-project dashboard
 
 	mu      sync.Mutex
 	clients map[chan sseEvent]struct{}
@@ -50,6 +53,11 @@ type Server struct {
 	suggestLog     bytes.Buffer
 	suggestErr     string
 	suggestDone    bool
+
+	// Multi-project state cache
+	projMu       sync.RWMutex
+	projStatuses []multiui.ProjectStatus
+	projLastMod  map[string]time.Time // path -> last mod time
 }
 
 // New creates a new UI server for the given working directory and port.
@@ -110,7 +118,14 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/api/init", s.handleInit)
 	mux.HandleFunc("/api/reset", s.handleReset)
 
+	// Multi-project dashboard
+	mux.HandleFunc("/api/projects", s.handleProjects)
+	mux.HandleFunc("/api/projects/events", s.handleProjectsEvents)
+	mux.HandleFunc("POST /api/projects/{idx}/run", s.handleProjectRun)
+	mux.HandleFunc("POST /api/projects/{idx}/stop", s.handleProjectStop)
+
 	go s.watchState()
+	go s.watchProjects()
 
 	addr := ":" + strconv.Itoa(s.Port)
 	if s.Token != "" {
@@ -1234,6 +1249,255 @@ func (s *Server) handleReset(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]bool{"ok": true})
 }
 
+// ── multi-project handlers ────────────────────────────────────────────────────
+
+// allProjectEntries returns the union of Projects flag paths + registry.
+func (s *Server) allProjectEntries() []multiui.ProjectEntry {
+	seen := make(map[string]bool)
+	var entries []multiui.ProjectEntry
+
+	// Always include current WorkDir as the "primary" project.
+	if s.WorkDir != "" {
+		abs, _ := filepath.Abs(s.WorkDir)
+		if !seen[abs] {
+			seen[abs] = true
+			entries = append(entries, multiui.ProjectEntry{
+				Name: filepath.Base(abs),
+				Path: abs,
+			})
+		}
+	}
+
+	// Paths from --projects / --scan flags.
+	for _, p := range s.Projects {
+		abs, err := filepath.Abs(p)
+		if err != nil {
+			continue
+		}
+		if seen[abs] {
+			continue
+		}
+		seen[abs] = true
+		entries = append(entries, multiui.ProjectEntry{
+			Name: filepath.Base(abs),
+			Path: abs,
+		})
+	}
+
+	// Paths from persistent registry (~/.cloop/projects.json).
+	registered, _ := multiui.Load()
+	for _, e := range registered {
+		abs, err := filepath.Abs(e.Path)
+		if err != nil {
+			continue
+		}
+		if seen[abs] {
+			continue
+		}
+		seen[abs] = true
+		name := e.Name
+		if name == "" {
+			name = filepath.Base(abs)
+		}
+		entries = append(entries, multiui.ProjectEntry{Name: name, Path: abs})
+	}
+
+	return entries
+}
+
+// refreshProjectStatuses rebuilds the projStatuses cache from disk.
+func (s *Server) refreshProjectStatuses() {
+	entries := s.allProjectEntries()
+	statuses := make([]multiui.ProjectStatus, 0, len(entries))
+	for _, e := range entries {
+		statuses = append(statuses, multiui.GetStatus(e))
+	}
+	s.projMu.Lock()
+	s.projStatuses = statuses
+	s.projMu.Unlock()
+}
+
+// watchProjects polls state files for all registered projects and broadcasts
+// updates to SSE clients on change.
+func (s *Server) watchProjects() {
+	s.projLastMod = make(map[string]time.Time)
+	s.refreshProjectStatuses()
+
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		changed := false
+		for _, e := range s.allProjectEntries() {
+			statePath := filepath.Join(e.Path, ".cloop", "state.json")
+			fi, err := os.Stat(statePath)
+			if err != nil {
+				// Also try state.db.
+				statePath = filepath.Join(e.Path, ".cloop", "state.db")
+				fi, err = os.Stat(statePath)
+			}
+			if err != nil {
+				continue
+			}
+			prev := s.projLastMod[e.Path]
+			if !fi.ModTime().Equal(prev) {
+				s.projLastMod[e.Path] = fi.ModTime()
+				changed = true
+			}
+		}
+		if changed {
+			s.refreshProjectStatuses()
+			s.broadcastProjectsUpdate()
+		}
+	}
+}
+
+// broadcastProjectsUpdate sends the updated project statuses to SSE clients.
+func (s *Server) broadcastProjectsUpdate() {
+	s.projMu.RLock()
+	statuses := s.projStatuses
+	stats := multiui.Aggregate(statuses)
+	s.projMu.RUnlock()
+
+	payload, err := json.Marshal(map[string]interface{}{
+		"projects": statuses,
+		"stats":    stats,
+	})
+	if err != nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for ch := range s.clients {
+		select {
+		case ch <- sseEvent{Event: "projects", Data: string(payload)}:
+		default:
+		}
+	}
+}
+
+// handleProjects returns all project statuses and aggregate stats.
+func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
+	s.refreshProjectStatuses()
+	s.projMu.RLock()
+	statuses := s.projStatuses
+	stats := multiui.Aggregate(statuses)
+	s.projMu.RUnlock()
+	jsonOK(w, map[string]interface{}{
+		"projects": statuses,
+		"stats":    stats,
+	})
+}
+
+// handleProjectsEvents is an SSE endpoint for multi-project updates.
+func (s *Server) handleProjectsEvents(w http.ResponseWriter, r *http.Request) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "SSE not supported", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	ch := make(chan sseEvent, 8)
+	s.mu.Lock()
+	s.clients[ch] = struct{}{}
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		delete(s.clients, ch)
+		s.mu.Unlock()
+	}()
+
+	// Send current snapshot immediately.
+	s.projMu.RLock()
+	statuses := s.projStatuses
+	stats := multiui.Aggregate(statuses)
+	s.projMu.RUnlock()
+	if payload, err := json.Marshal(map[string]interface{}{"projects": statuses, "stats": stats}); err == nil {
+		fmt.Fprintf(w, "event: projects\ndata: %s\n\n", payload)
+		flusher.Flush()
+	}
+
+	ctx := r.Context()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case ev := <-ch:
+			if ev.Event == "projects" {
+				fmt.Fprintf(w, "event: projects\ndata: %s\n\n", ev.Data)
+				flusher.Flush()
+			}
+		}
+	}
+}
+
+// handleProjectRun starts a `cloop run` in the specified project directory.
+func (s *Server) handleProjectRun(w http.ResponseWriter, r *http.Request) {
+	idx, err := strconv.Atoi(r.PathValue("idx"))
+	if err != nil {
+		jsonErr(w, "invalid project index", http.StatusBadRequest)
+		return
+	}
+	entries := s.allProjectEntries()
+	if idx < 0 || idx >= len(entries) {
+		jsonErr(w, "project index out of range", http.StatusBadRequest)
+		return
+	}
+	entry := entries[idx]
+
+	var req struct {
+		PM bool `json:"pm"`
+	}
+	if ct := r.Header.Get("Content-Type"); strings.Contains(ct, "application/json") {
+		_ = json.NewDecoder(r.Body).Decode(&req)
+	}
+
+	exe, err := os.Executable()
+	if err != nil {
+		exe = "cloop"
+	}
+	args := []string{"run"}
+	if req.PM {
+		args = append(args, "--pm")
+	}
+	cmd := exec.Command(exe, args...)
+	cmd.Dir = entry.Path
+	cmd.Stdout = os.Stderr
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		jsonErr(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	go func() { _ = cmd.Wait() }()
+	jsonOK(w, map[string]interface{}{"ok": true, "project": entry.Name, "command": strings.Join(args, " ")})
+}
+
+// handleProjectStop sends SIGINT to `cloop run` processes in the given project directory.
+func (s *Server) handleProjectStop(w http.ResponseWriter, r *http.Request) {
+	idx, err := strconv.Atoi(r.PathValue("idx"))
+	if err != nil {
+		jsonErr(w, "invalid project index", http.StatusBadRequest)
+		return
+	}
+	entries := s.allProjectEntries()
+	if idx < 0 || idx >= len(entries) {
+		jsonErr(w, "project index out of range", http.StatusBadRequest)
+		return
+	}
+	entry := entries[idx]
+	// pkill processes running in that directory.
+	out, err := exec.Command("pkill", "-SIGINT", "-f", "cloop run").CombinedOutput()
+	_ = out
+	if err != nil {
+		jsonOK(w, map[string]interface{}{"ok": false, "project": entry.Name, "message": "no running process found"})
+		return
+	}
+	jsonOK(w, map[string]interface{}{"ok": true, "project": entry.Name})
+}
+
 // ── dashboard HTML ────────────────────────────────────────────────────────────
 
 const dashboardHTML = `<!DOCTYPE html>
@@ -1582,6 +1846,36 @@ const dashboardHTML = `<!DOCTYPE html>
   .login-box button:hover { opacity: .85; }
   .login-error { font-size: 12px; color: var(--red); display: none; }
   .login-error.visible { display: block; }
+
+  /* ── Project cards (multi-project tab) ── */
+  .proj-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 14px 18px;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    flex-wrap: wrap;
+  }
+  .proj-card:hover { border-color: var(--accent); }
+  .proj-health-dot {
+    width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0;
+  }
+  .proj-health-dot.running  { background: var(--cyan); animation: pulse 1.5s infinite; }
+  .proj-health-dot.stalled  { background: var(--yellow); }
+  .proj-health-dot.failed   { background: var(--red); }
+  .proj-health-dot.complete { background: var(--green); }
+  .proj-health-dot.idle     { background: var(--muted); }
+  .proj-health-dot.unknown  { background: var(--border); }
+  .proj-name   { font-weight: 600; font-size: 14px; min-width: 120px; }
+  .proj-goal   { flex: 1; font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 320px; }
+  .proj-meta   { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; font-size: 12px; color: var(--muted); }
+  .proj-progress-wrap { display: flex; align-items: center; gap: 6px; }
+  .proj-progress-bar  { width: 80px; height: 4px; background: var(--border); border-radius: 2px; overflow: hidden; }
+  .proj-progress-fill { height: 100%; background: var(--green); border-radius: 2px; transition: width .4s; }
+  .proj-actions { display: flex; gap: 6px; flex-shrink: 0; }
+  .proj-actions .btn { padding: 4px 10px; font-size: 12px; }
 </style>
 </head>
 <body>
@@ -1605,6 +1899,7 @@ const dashboardHTML = `<!DOCTYPE html>
     <div class="tab-nav">
       <button class="tab-btn active" onclick="switchTab('overview')"  id="tbtn-overview">Overview</button>
       <button class="tab-btn"        onclick="switchTab('tasks')"     id="tbtn-tasks">Tasks</button>
+      <button class="tab-btn"        onclick="switchTab('projects')"  id="tbtn-projects">Projects</button>
       <button class="tab-btn"        onclick="switchTab('suggest')"   id="tbtn-suggest">Suggest</button>
       <button class="tab-btn"        onclick="switchTab('settings')"  id="tbtn-settings">Settings</button>
     </div>
@@ -1945,6 +2240,50 @@ const dashboardHTML = `<!DOCTYPE html>
       </div>
     </div>
 
+    <!-- ══════════════════════════════════════════════════════════ PROJECTS -->
+    <div id="tab-projects" class="tab-panel">
+
+      <!-- Aggregate stats bar -->
+      <div class="section">
+        <div class="section-title">All Projects</div>
+        <div class="stats-grid" id="projAggStats">
+          <div class="stat-card">
+            <div class="stat-label">Projects</div>
+            <div class="stat-value accent" id="paTotal">—</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Active Runs</div>
+            <div class="stat-value" id="paActive" style="color:var(--cyan)">—</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Total Tasks</div>
+            <div class="stat-value" id="paTasks">—</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Done Tasks</div>
+            <div class="stat-value" id="paDone" style="color:var(--green)">—</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Failed Tasks</div>
+            <div class="stat-value" id="paFailed" style="color:var(--red)">—</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Total Steps</div>
+            <div class="stat-value" id="paSteps">—</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Project list -->
+      <div class="section">
+        <div id="projListEmpty" style="display:none;color:var(--muted);font-size:13px;padding:12px 0">
+          No projects loaded. Use <code>cloop ui --projects /path/a /path/b</code> or <code>--scan /root/Projects</code>.
+        </div>
+        <div id="projList" style="display:flex;flex-direction:column;gap:10px"></div>
+      </div>
+
+    </div>
+
   </main>
 </div>
 
@@ -2061,6 +2400,7 @@ window.switchTab = function(name) {
 
   if (name === 'settings') loadConfig();
   if (name === 'tasks' && appState) renderTasks(appState);
+  if (name === 'projects') loadProjects();
 };
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -2444,6 +2784,12 @@ function connectSSE() {
       if (d.chunk) appendLiveLog(d.chunk);
     } catch(_) {}
   });
+  evtSource.addEventListener('projects', (e) => {
+    try {
+      const d = JSON.parse(e.data);
+      renderProjects(d.projects || [], d.stats || {});
+    } catch(_) {}
+  });
   evtSource.onerror = () => {
     dot.classList.remove('connected');
     evtSource.close();
@@ -2469,6 +2815,85 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 });
+
+// ── Projects tab ─────────────────────────────────────────────────────────────
+
+function loadProjects() {
+  api('/api/projects').then(d => {
+    renderProjects(d.projects || [], d.stats || {});
+  }).catch(() => {});
+}
+
+function renderProjects(projects, stats) {
+  // Update aggregate stats.
+  const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v === undefined ? '—' : v; };
+  set('paTotal',  stats.total_projects  ?? projects.length);
+  set('paActive', stats.active_runs     ?? 0);
+  set('paTasks',  stats.total_tasks     ?? 0);
+  set('paDone',   stats.done_tasks      ?? 0);
+  set('paFailed', stats.failed_tasks    ?? 0);
+  set('paSteps',  stats.total_steps     ?? 0);
+
+  const list  = document.getElementById('projList');
+  const empty = document.getElementById('projListEmpty');
+  if (!list) return;
+
+  if (!projects.length) {
+    empty.style.display = '';
+    list.innerHTML = '';
+    return;
+  }
+  empty.style.display = 'none';
+
+  list.innerHTML = projects.map((p, idx) => {
+    const health = p.health || 'unknown';
+    const pct    = p.total_tasks > 0 ? Math.round(p.done_tasks / p.total_tasks * 100) : 0;
+    const goal   = p.goal ? esc(p.goal.substring(0, 80)) : '<em style="color:var(--muted)">no goal set</em>';
+    const lastAct = p.last_activity ? relTime(new Date(p.last_activity)) : '—';
+    const taskInfo = p.pm_mode
+      ? p.done_tasks + '/' + p.total_tasks + ' tasks'
+      : (p.total_steps ? p.total_steps + ' steps' : 'no steps');
+    return ` + "`" + `
+      <div class="proj-card">
+        <div class="proj-health-dot ${health}"></div>
+        <div class="proj-name">${esc(p.name)}</div>
+        <div class="proj-goal" title="${esc(p.goal || '')}">${goal}</div>
+        <div class="proj-meta">
+          <span class="badge ${health}" style="font-size:10px">${health}</span>
+          ${p.pm_mode ? ` + "`" + `<div class="proj-progress-wrap"><div class="proj-progress-bar"><div class="proj-progress-fill" style="width:${pct}%"></div></div><span>${pct}%</span></div>` + "`" + ` : ''}
+          <span>${taskInfo}</span>
+          <span title="last activity">${lastAct}</span>
+          ${p.provider ? ` + "`" + `<span>${esc(p.provider)}</span>` + "`" + ` : ''}
+        </div>
+        <div class="proj-actions">
+          <button class="btn success" onclick="projectRun(${idx},false)" title="Run">&#9654; Run</button>
+          <button class="btn primary"  onclick="projectRun(${idx},true)"  title="Run PM">&#9654; PM</button>
+          <button class="btn danger"   onclick="projectStop(${idx})"     title="Stop">&#9632; Stop</button>
+        </div>
+      </div>
+    ` + "`" + `;
+  }).join('');
+}
+
+function relTime(date) {
+  const diff = Date.now() - date.getTime();
+  if (diff < 60000)  return 'just now';
+  if (diff < 3600000) return Math.floor(diff/60000) + 'm ago';
+  if (diff < 86400000) return Math.floor(diff/3600000) + 'h ago';
+  return Math.floor(diff/86400000) + 'd ago';
+}
+
+window.projectRun = function(idx, pm) {
+  api('/api/projects/' + idx + '/run', {method:'POST', body: JSON.stringify({pm})})
+    .then(() => { toast('Run started', 'ok'); setTimeout(loadProjects, 800); })
+    .catch(() => toast('Failed to start run', 'err'));
+};
+
+window.projectStop = function(idx) {
+  api('/api/projects/' + idx + '/stop', {method:'POST'})
+    .then(d => { toast(d.ok ? 'Stopped' : 'Nothing running', d.ok ? 'ok' : 'err'); setTimeout(loadProjects, 800); })
+    .catch(() => toast('Failed to stop', 'err'));
+};
 
 // ── Actions ─────────────────────────────────────────────────────────────────
 
