@@ -260,6 +260,31 @@ func (c *Client) ListPRs(state string) ([]PR, error) {
 	return prs, nil
 }
 
+// CreatePR creates a new pull request and returns it.
+// head is the branch containing the changes (e.g. "feature/my-branch").
+// base is the branch the PR should merge into (e.g. "main").
+func (c *Client) CreatePR(head, base, title, body string, draft bool) (*PR, error) {
+	payload := map[string]interface{}{
+		"title": title,
+		"body":  body,
+		"head":  head,
+		"base":  base,
+		"draft": draft,
+	}
+	data, status, err := c.do("POST", "/pulls", payload)
+	if err != nil {
+		return nil, err
+	}
+	if status != 201 {
+		return nil, fmt.Errorf("GitHub API error %d: %s", status, string(data))
+	}
+	var pr PR
+	if err := json.Unmarshal(data, &pr); err != nil {
+		return nil, fmt.Errorf("parsing created PR: %w", err)
+	}
+	return &pr, nil
+}
+
 // ListCheckRuns returns CI check runs for a commit SHA.
 func (c *Client) ListCheckRuns(sha string) ([]CheckRun, error) {
 	data, status, err := c.do("GET", fmt.Sprintf("/commits/%s/check-runs?per_page=100", sha), nil)
