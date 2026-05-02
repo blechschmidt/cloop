@@ -99,6 +99,7 @@ var (
 	thinkingBudget           int
 	autoPromote              bool
 	autoPromoteThresholdDays int
+	coachMode                bool
 )
 
 var runCmd = &cobra.Command{
@@ -388,6 +389,7 @@ Press Ctrl+C to pause gracefully.`,
 		TracingEnabled:           cfg.Tracing.Enabled && cfg.Tracing.Endpoint != "",
 		AutoPromote:              autoPromote,
 		AutoPromoteThresholdDays: autoPromoteThresholdDays,
+		CoachMode:                coachMode,
 		}
 
 		orc, err := orchestrator.New(orchCfg, prov)
@@ -657,5 +659,6 @@ func init() {
 	runCmd.Flags().IntVar(&thinkingBudget, "think-budget", 8000, "Token budget for reasoning content (--think); maps to budget_tokens for Anthropic, reasoning_effort for OpenAI o-series")
 	runCmd.Flags().BoolVar(&autoPromote, "auto-promote", false, "PM mode: automatically escalate task priorities when deadlines are within the threshold (see --promote-threshold)")
 	runCmd.Flags().IntVar(&autoPromoteThresholdDays, "promote-threshold", 3, "PM mode: days-remaining window used by --auto-promote to trigger priority escalation (default 3)")
+	runCmd.Flags().BoolVar(&coachMode, "coach", false, "PM mode: before each task, run an AI coaching session with 3-5 actionable tips, a key clarifying question, and success criteria (sequential only)")
 	rootCmd.AddCommand(runCmd)
 }

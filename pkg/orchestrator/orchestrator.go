@@ -13,6 +13,7 @@ import (
 	goOtelAttr "go.opentelemetry.io/otel/attribute"
 
 	"github.com/blechschmidt/cloop/pkg/alert"
+	"github.com/blechschmidt/cloop/pkg/coach"
 	cloopdocs "github.com/blechschmidt/cloop/pkg/docs"
 	"github.com/blechschmidt/cloop/pkg/approvalgate"
 	clooptracing "github.com/blechschmidt/cloop/pkg/tracing"
@@ -359,6 +360,12 @@ type Config struct {
 	// AutoPromoteThresholdDays is the number of days remaining before the
 	// deadline at which auto-promotion kicks in (default 3).
 	AutoPromoteThresholdDays int
+
+	// CoachMode runs a pre-task AI coaching session before each task in PM
+	// sequential mode. The AI plays the role of a senior engineer and gives
+	// 3-5 concrete, actionable tips specific to the task: how to approach it
+	// well, what to watch out for, and what done looks like.
+	CoachMode bool
 }
 
 type Orchestrator struct {
@@ -1312,6 +1319,18 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 				return nil
 			}
 			// "yes" falls through
+		}
+
+		// Pre-task coaching: give the executor AI-generated coaching tips.
+		if o.config.CoachMode {
+			coachCtx, coachCancel := context.WithTimeout(ctx, 3*time.Minute)
+			session, coachErr := coach.Coach(coachCtx, o.provider, o.config.Model, task, s.Plan, o.config.WorkDir)
+			coachCancel()
+			if coachErr != nil {
+				dimColor.Printf("⚠  Coaching failed for task %d: %v (continuing)\n\n", task.ID, coachErr)
+			} else {
+				printCoachBanner(session)
+			}
 		}
 
 		// Pre-task hook: skip the task if it exits non-zero.
@@ -3565,6 +3584,64 @@ func printRiskBanner(r *risk.RiskReport) {
 		color.New(color.Faint).Printf("    ↳ Mitigation: %s\n", f.Mitigation)
 	}
 	fmt.Println()
+}
+
+// printCoachBanner renders a compact coaching session card to the terminal.
+func printCoachBanner(s *coach.CoachingSession) {
+	cyan := color.New(color.FgCyan, color.Bold)
+	bold := color.New(color.Bold)
+	dim := color.New(color.Faint)
+	yellow := color.New(color.FgYellow)
+	green := color.New(color.FgGreen)
+
+	cyan.Printf("  ┌─ Coaching: Task #%d — %s\n", s.TaskID, s.TaskTitle)
+	for i, tip := range s.Tips {
+		bold.Printf("  │ [%s] ", strings.ToUpper(tip.Category))
+		fmt.Printf("Tip %d: ", i+1)
+		lines := wrapOrchestratorText(tip.Advice, 58)
+		for j, line := range lines {
+			if j == 0 {
+				fmt.Printf("%s\n", line)
+			} else {
+				dim.Printf("  │         %s\n", line)
+			}
+		}
+	}
+	if s.KeyQuestion != "" {
+		yellow.Printf("  │ ? KEY: ")
+		fmt.Printf("%s\n", s.KeyQuestion)
+	}
+	if len(s.SuccessCriteria) > 0 {
+		green.Printf("  │ ✓ DONE WHEN: ")
+		fmt.Printf("%s\n", s.SuccessCriteria[0])
+		for _, c := range s.SuccessCriteria[1:] {
+			green.Printf("  │            ")
+			fmt.Printf("%s\n", c)
+		}
+	}
+	cyan.Printf("  └─────────────────────────────────────────────────────\n\n")
+}
+
+// wrapOrchestratorText wraps text to width runes, returning word-wrapped lines.
+func wrapOrchestratorText(text string, width int) []string {
+	words := strings.Fields(text)
+	if len(words) == 0 {
+		return nil
+	}
+	var lines []string
+	line := words[0]
+	for _, w := range words[1:] {
+		if len([]rune(line))+1+len([]rune(w)) <= width {
+			line += " " + w
+		} else {
+			lines = append(lines, line)
+			line = w
+		}
+	}
+	if line != "" {
+		lines = append(lines, line)
+	}
+	return lines
 }
 
 // buildHealPrompt constructs a modified retry prompt that incorporates the
