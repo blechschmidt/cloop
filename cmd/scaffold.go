@@ -151,7 +151,8 @@ Examples:
 		sort.Slice(entries, func(i, j int) bool { return entries[i].path < entries[j].path })
 
 		if scaffoldDryRun {
-			warnColor.Println("DRY-RUN — no files written\n")
+			warnColor.Println("DRY-RUN — no files written")
+		fmt.Println()
 		}
 
 		fmt.Printf("%-6s  %s\n", "TYPE", "PATH")

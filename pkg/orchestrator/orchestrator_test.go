@@ -563,7 +563,7 @@ func TestRunPM_SignalDetection(t *testing.T) {
 			{Output: "task C failed\nTASK_FAILED", Provider: "mock"},
 		},
 	}
-	o := newOrchestrator(t, dir, Config{WorkDir: dir, PMMode: true}, prov)
+	o := newOrchestrator(t, dir, Config{WorkDir: dir, PMMode: true, SkipHealthCheck: true, NoHeal: true}, prov)
 	o.runPM(context.Background())
 
 	tasks := o.state.Plan.Tasks
@@ -647,7 +647,7 @@ func TestRunPM_TokenTracking(t *testing.T) {
 			{Output: "done\nTASK_DONE", Provider: "mock", InputTokens: 200, OutputTokens: 80},
 		},
 	}
-	o := newOrchestrator(t, dir, Config{WorkDir: dir, PMMode: true}, prov)
+	o := newOrchestrator(t, dir, Config{WorkDir: dir, PMMode: true, SkipHealthCheck: true}, prov)
 	o.runPM(context.Background())
 
 	if o.state.TotalInputTokens != 200 {
@@ -1559,7 +1559,7 @@ func TestRunPM_AutoEvolve_DiscoversAndExecutesNewTasks(t *testing.T) {
 			{Output: `{"tasks":[]}`, Provider: "mock"},            // evolvePM → no new tasks
 		},
 	}
-	o := newOrchestrator(t, dir, Config{WorkDir: dir, PMMode: true}, prov)
+	o := newOrchestrator(t, dir, Config{WorkDir: dir, PMMode: true, SkipHealthCheck: true}, prov)
 	if err := o.runPM(context.Background()); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1604,7 +1604,7 @@ func TestRunPM_AutoEvolve_StopsWhenNoNewTasksDiscovered(t *testing.T) {
 			{Output: "no JSON here", Provider: "mock"},    // evolvePM → parse error → n=0
 		},
 	}
-	o := newOrchestrator(t, dir, Config{WorkDir: dir, PMMode: true}, prov)
+	o := newOrchestrator(t, dir, Config{WorkDir: dir, PMMode: true, SkipHealthCheck: true}, prov)
 	if err := o.runPM(context.Background()); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1650,7 +1650,7 @@ func TestRunPM_AutoEvolve_MultipleRounds(t *testing.T) {
 			{Output: `{"tasks":[]}`, Provider: "mock"},         // evolvePM round 3 → none
 		},
 	}
-	o := newOrchestrator(t, dir, Config{WorkDir: dir, PMMode: true}, prov)
+	o := newOrchestrator(t, dir, Config{WorkDir: dir, PMMode: true, SkipHealthCheck: true}, prov)
 	if err := o.runPM(context.Background()); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1752,7 +1752,7 @@ func TestRunPM_SyncFromDisk_PicksUpExternallyAddedTask(t *testing.T) {
 		},
 	}
 
-	o := newOrchestrator(t, dir, Config{WorkDir: dir, PMMode: true}, prov)
+	o := newOrchestrator(t, dir, Config{WorkDir: dir, PMMode: true, SkipHealthCheck: true}, prov)
 	if err := o.runPM(context.Background()); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

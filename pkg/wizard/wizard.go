@@ -220,7 +220,7 @@ func printBanner() {
 }
 
 func printStep(n, total int, title string) {
-	fmt.Printf("\n"+bold(cyan(fmt.Sprintf("  Step %d/%d — %s", n, total, title)))+"\n")
+	fmt.Print("\n" + bold(cyan(fmt.Sprintf("  Step %d/%d — %s", n, total, title))) + "\n")
 	fmt.Println(strings.Repeat("─", 42))
 }
 

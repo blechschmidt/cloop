@@ -1925,20 +1925,44 @@ const dashboardHTML = `<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>cloop dashboard</title>
+<script>(function(){var t=localStorage.getItem('cloop-theme')||(window.matchMedia('(prefers-color-scheme: light)').matches?'light':'dark');document.documentElement.setAttribute('data-theme',t);})();</script>
 <style>
   :root {
-    --bg:      #0d1117;
-    --surface: #161b22;
-    --border:  #30363d;
-    --text:    #e6edf3;
-    --muted:   #8b949e;
-    --accent:  #58a6ff;
-    --green:   #3fb950;
-    --yellow:  #d29922;
-    --red:     #f85149;
-    --cyan:    #39c5cf;
-    --purple:  #bc8cff;
-    --radius:  8px;
+    --bg:          #0d1117;
+    --surface:     #161b22;
+    --border:      #30363d;
+    --text:        #e6edf3;
+    --muted:       #8b949e;
+    --accent:      #58a6ff;
+    --green:       #3fb950;
+    --yellow:      #d29922;
+    --red:         #f85149;
+    --cyan:        #39c5cf;
+    --purple:      #bc8cff;
+    --radius:      8px;
+    --hover-bg:    #21262d;
+    --terminal-bg: #090d14;
+    --code-bg:     #0d1117;
+    --on-accent:   #0d1117;
+    --accent-hover:#79bcff;
+  }
+  [data-theme="light"] {
+    --bg:          #ffffff;
+    --surface:     #f6f8fa;
+    --border:      #d0d7de;
+    --text:        #1f2328;
+    --muted:       #656d76;
+    --accent:      #0969da;
+    --green:       #1a7f37;
+    --yellow:      #9a6700;
+    --red:         #cf222e;
+    --cyan:        #0969da;
+    --purple:      #8250df;
+    --hover-bg:    #eaeef2;
+    --terminal-bg: #090d14;
+    --code-bg:     #161b22;
+    --on-accent:   #ffffff;
+    --accent-hover:#0550ae;
   }
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   html, body { height: 100%; }
@@ -2037,9 +2061,9 @@ const dashboardHTML = `<!DOCTYPE html>
     color:var(--text); font-size:13px; font-weight:500;
     cursor:pointer; transition:all .15s; text-decoration:none; white-space:nowrap;
   }
-  .btn:hover { background:#21262d; border-color:#8b949e; }
-  .btn.primary { background:var(--accent); color:#0d1117; border-color:var(--accent); }
-  .btn.primary:hover { background:#79bcff; }
+  .btn:hover { background:var(--hover-bg); border-color:var(--muted); }
+  .btn.primary { background:var(--accent); color:var(--on-accent); border-color:var(--accent); }
+  .btn.primary:hover { background:var(--accent-hover); }
   .btn.danger  { color:var(--red);   border-color:rgba(248,81,73,.4); }
   .btn.danger:hover  { background:rgba(248,81,73,.1); border-color:var(--red); }
   .btn.success { color:var(--green); border-color:rgba(63,185,80,.4); }
@@ -2097,7 +2121,7 @@ const dashboardHTML = `<!DOCTYPE html>
   .task-priority.p3 { background:rgba(57,197,207,.15);  color:var(--cyan); }
   .task-actions { display:flex; gap:3px; flex-shrink:0; flex-wrap:wrap; justify-content:flex-end; align-items:center; max-width:220px; }
   .act { font-size:11px; padding:2px 6px; border-radius:3px; border:1px solid var(--border); background:none; color:var(--muted); cursor:pointer; white-space:nowrap; }
-  .act:hover { background:#21262d; color:var(--text); }
+  .act:hover { background:var(--hover-bg); color:var(--text); }
   .act.done:hover   { color:var(--green);  border-color:var(--green); }
   .act.skip:hover   { color:var(--yellow); border-color:var(--yellow); }
   .act.fail:hover   { color:var(--red);    border-color:var(--red); }
@@ -2219,7 +2243,7 @@ const dashboardHTML = `<!DOCTYPE html>
   .step-list { display:flex; flex-direction:column; gap:5px; }
   .step-item { border:1px solid var(--border); border-radius:var(--radius); overflow:hidden; }
   .step-header { display:flex; align-items:center; gap:8px; padding:9px 12px; background:var(--surface); cursor:pointer; user-select:none; }
-  .step-header:hover { background:#21262d; }
+  .step-header:hover { background:var(--hover-bg); }
   .step-num { font-size:11px; color:var(--muted); font-weight:600; min-width:24px; flex-shrink:0; }
   .step-task { flex:1; font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .step-meta { font-size:11px; color:var(--muted); flex-shrink:0; display:flex; gap:8px; align-items:center; }
@@ -2227,7 +2251,7 @@ const dashboardHTML = `<!DOCTYPE html>
   .step-bad { color:var(--red); }
   .step-chevron { color:var(--muted); transition:transform .2s; flex-shrink:0; font-size:9px; }
   .step-item.expanded .step-chevron { transform:rotate(90deg); }
-  .step-output { display:none; background:#0d1117; border-top:1px solid var(--border); padding:10px 12px; font-family:monospace; font-size:11px; white-space:pre-wrap; word-break:break-all; max-height:360px; overflow-y:auto; color:#adbac7; }
+  .step-output { display:none; background:var(--code-bg); border-top:1px solid var(--border); padding:10px 12px; font-family:monospace; font-size:11px; white-space:pre-wrap; word-break:break-all; max-height:360px; overflow-y:auto; color:#adbac7; }
   .step-item.expanded .step-output { display:block; }
 
   /* ── Live output panel ── */
@@ -2237,7 +2261,7 @@ const dashboardHTML = `<!DOCTYPE html>
   .live-output-clear { font-size:11px; color:var(--muted); background:none; border:none; cursor:pointer; padding:2px 6px; }
   .live-output-clear:hover { color:var(--text); }
   .live-output-box {
-    background:#090d14;
+    background:var(--terminal-bg);
     border:1px solid var(--border);
     border-radius:var(--radius);
     padding:12px 14px;
@@ -2267,7 +2291,7 @@ const dashboardHTML = `<!DOCTYPE html>
 
   /* ── Suggest ── */
   .suggest-controls { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:12px; }
-  .suggest-log { background:#0d1117; border:1px solid var(--border); border-radius:var(--radius); padding:12px; font-family:monospace; font-size:12px; white-space:pre-wrap; color:#adbac7; max-height:320px; overflow-y:auto; margin-top:10px; }
+  .suggest-log { background:var(--code-bg); border:1px solid var(--border); border-radius:var(--radius); padding:12px; font-family:monospace; font-size:12px; white-space:pre-wrap; color:#adbac7; max-height:320px; overflow-y:auto; margin-top:10px; }
   .suggest-status { font-size:13px; color:var(--muted); display:flex; align-items:center; gap:8px; }
   .spinner { display:inline-block; width:12px; height:12px; border:2px solid var(--border); border-top-color:var(--accent); border-radius:50%; animation:spin .8s linear infinite; }
   @keyframes spin { to { transform:rotate(360deg); } }
@@ -2301,6 +2325,23 @@ const dashboardHTML = `<!DOCTYPE html>
   .danger-zone h3 { color:var(--red); }
 
   @media(max-width:600px){ main{padding:12px;} header{padding:8px 12px;} .stats-grid{grid-template-columns:repeat(2,1fr);} }
+
+  /* ── Theme toggle button ── */
+  .theme-toggle-btn {
+    background: none;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--muted);
+    cursor: pointer;
+    padding: 5px 9px;
+    font-size: 15px;
+    line-height: 1;
+    display: flex;
+    align-items: center;
+    flex-shrink: 0;
+    transition: all .15s;
+  }
+  .theme-toggle-btn:hover { color: var(--text); border-color: var(--muted); background: var(--hover-bg); }
 
   /* ── Keyboard shortcut footer ── */
   #kb-footer {
@@ -2631,32 +2672,32 @@ const dashboardHTML = `<!DOCTYPE html>
     position: relative;
   }
   .timeline-chart-wrap svg { display: block; }
-  .tl-task-label { font-size: 12px; fill: #d1d5db; }
-  .tl-tick-label { font-size: 10px; fill: #6b7280; }
-  .tl-grid-line  { stroke: #30363d; stroke-width: 1; }
-  .tl-row-even   { fill: #161b22; }
-  .tl-row-odd    { fill: #0d1117; }
+  .tl-task-label { font-size: 12px; fill: var(--text); }
+  .tl-tick-label { font-size: 10px; fill: var(--muted); }
+  .tl-grid-line  { stroke: var(--border); stroke-width: 1; }
+  .tl-row-even   { fill: var(--surface); }
+  .tl-row-odd    { fill: var(--bg); }
   .tl-bar        { rx: 4; ry: 4; cursor: pointer; opacity: 0.88; transition: opacity .15s, filter .15s; }
   .tl-bar:hover  { opacity: 1; filter: brightness(1.15); }
   .tl-now-line   { stroke: #f87171; stroke-width: 2; stroke-dasharray: 4 3; }
-  .tl-dep-arrow  { fill: none; stroke: #6b7280; stroke-width: 1.5; marker-end: url(#arrowhead); opacity: 0.6; }
+  .tl-dep-arrow  { fill: none; stroke: var(--muted); stroke-width: 1.5; marker-end: url(#arrowhead); opacity: 0.6; }
   .tl-tooltip {
     position: fixed;
     pointer-events: none;
     display: none;
-    background: #1f2937;
-    border: 1px solid #374151;
+    background: var(--surface);
+    border: 1px solid var(--border);
     border-radius: 6px;
     padding: 10px 14px;
     font-size: 12px;
-    color: #f9fafb;
+    color: var(--text);
     box-shadow: 0 4px 12px rgba(0,0,0,.55);
     max-width: 320px;
     z-index: 9999;
     line-height: 1.5;
   }
-  .tl-tooltip strong { display: block; margin-bottom: 4px; font-size: 13px; color: #f9fafb; }
-  .tl-tooltip .tl-tip-row { color: #9ca3af; }
+  .tl-tooltip strong { display: block; margin-bottom: 4px; font-size: 13px; color: var(--text); }
+  .tl-tooltip .tl-tip-row { color: var(--muted); }
   .tl-tooltip .tl-tip-status { font-weight: 600; }
   .timeline-legend {
     display: flex;
@@ -2669,7 +2710,7 @@ const dashboardHTML = `<!DOCTYPE html>
     align-items: center;
     gap: 5px;
     font-size: 12px;
-    color: #9ca3af;
+    color: var(--muted);
   }
   .tl-legend-dot {
     width: 12px;
@@ -2697,7 +2738,7 @@ const dashboardHTML = `<!DOCTYPE html>
     justify-content: center;
     flex-shrink: 0;
   }
-  .hamburger-btn:hover { background: rgba(255,255,255,.08); }
+  .hamburger-btn:hover { background: var(--hover-bg); }
   .hamburger-btn svg { display: block; pointer-events: none; }
 
   /* ── Mobile nav overlay + slide-in panel ── */
@@ -2752,7 +2793,7 @@ const dashboardHTML = `<!DOCTYPE html>
     border-radius: 6px;
     line-height: 1;
   }
-  .mobile-nav-close:hover { color: var(--text); background: rgba(255,255,255,.06); }
+  .mobile-nav-close:hover { color: var(--text); background: var(--hover-bg); }
   .mobile-nav-panel .m-tab-btn {
     width: 100%;
     text-align: left;
@@ -2769,7 +2810,7 @@ const dashboardHTML = `<!DOCTYPE html>
     align-items: center;
     gap: 10px;
   }
-  .mobile-nav-panel .m-tab-btn:hover { color: var(--text); background: rgba(255,255,255,.05); }
+  .mobile-nav-panel .m-tab-btn:hover { color: var(--text); background: var(--hover-bg); }
   .mobile-nav-panel .m-tab-btn.active { color: var(--text); background: var(--bg); border-color: var(--border); }
   .mobile-nav-panel .m-tab-btn .m-tab-icon { font-size: 16px; width: 20px; text-align: center; flex-shrink: 0; }
 
@@ -2795,7 +2836,7 @@ const dashboardHTML = `<!DOCTYPE html>
     transition: background .15s, transform .1s;
     font-weight: 700;
   }
-  #fab-add-task:hover { background: #79bcff; transform: scale(1.05); }
+  #fab-add-task:hover { background: var(--accent-hover); transform: scale(1.05); }
   #fab-add-task:active { transform: scale(.95); }
 
   /* ══════════════════════════════════════════════════════════════
@@ -2965,6 +3006,9 @@ const dashboardHTML = `<!DOCTYPE html>
       <button class="tab-btn"        onclick="switchTab('settings')"  id="tbtn-settings">Settings</button>
     </div>
     <div class="spacer"></div>
+    <button class="theme-toggle-btn" id="themeToggleBtn" onclick="toggleTheme()" aria-label="Toggle dark/light mode" title="Toggle theme">
+      <span id="themeToggleIcon">&#9788;</span>
+    </button>
     <div class="updated-at" id="updatedAt"></div>
   </header>
 
@@ -4684,18 +4728,24 @@ function renderTimeline(data) {
     return h ? h + 'h ' + mm + 'm' : mm + 'm';
   }
 
+  // Read CSS custom properties for theme-aware SVG colors.
+  const _cs = getComputedStyle(document.documentElement);
+  const svgBg      = _cs.getPropertyValue('--bg').trim()      || '#0d1117';
+  const svgSurface = _cs.getPropertyValue('--surface').trim() || '#161b22';
+  const svgMuted   = _cs.getPropertyValue('--muted').trim()   || '#8b949e';
+
   // Build SVG as a string for simplicity (avoids DOM thrash on re-renders).
   let svg = ` + "`" + `<svg width="${SVG_W}" height="${SVG_H}" xmlns="http://www.w3.org/2000/svg" style="font-family:inherit">` + "`" + `;
 
   // Arrow marker definition.
   svg += ` + "`" + `<defs>
     <marker id="arrowhead" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto">
-      <polygon points="0 0, 7 3.5, 0 7" fill="#6b7280" opacity="0.7"/>
+      <polygon points="0 0, 7 3.5, 0 7" fill="${svgMuted}" opacity="0.7"/>
     </marker>
   </defs>` + "`" + `;
 
   // Background.
-  svg += ` + "`" + `<rect width="${SVG_W}" height="${SVG_H}" fill="#0d1117"/>` + "`" + `;
+  svg += ` + "`" + `<rect width="${SVG_W}" height="${SVG_H}" fill="${svgBg}"/>` + "`" + `;
 
   // Tick marks and vertical grid lines.
   const tickIntervalMs = 30 * 60 * 1000; // 30 min
@@ -4714,12 +4764,12 @@ function renderTimeline(data) {
   }
 
   // Date label.
-  svg += ` + "`" + `<text x="${PAD_LEFT}" y="14" font-size="11" fill="#6b7280">${earliest.toLocaleDateString()}</text>` + "`" + `;
+  svg += ` + "`" + `<text x="${PAD_LEFT}" y="14" font-size="11" fill="${svgMuted}">${earliest.toLocaleDateString()}</text>` + "`" + `;
 
   // Task rows.
   bars.forEach((b, i) => {
     const y = PAD_TOP + i * ROW_H;
-    const rowFill = i % 2 === 0 ? '#161b22' : '#0d1117';
+    const rowFill = i % 2 === 0 ? svgSurface : svgBg;
     svg += ` + "`" + `<rect x="0" y="${y}" width="${SVG_W}" height="${ROW_H}" fill="${rowFill}"/>` + "`" + `;
 
     // Label (truncated to ~28 chars).
@@ -5754,6 +5804,36 @@ function checkAuthAndInit() {
     connectSSE();
   });
 }
+
+// ── Theme toggle ─────────────────────────────────────────────────────────────
+
+function _applyTheme(theme) {
+  document.documentElement.setAttribute('data-theme', theme);
+  const icon = document.getElementById('themeToggleIcon');
+  if (icon) {
+    // Sun = currently dark (click to go light), Moon = currently light (click to go dark).
+    icon.textContent = theme === 'light' ? '\u263D' : '\u2600';
+  }
+  const btn = document.getElementById('themeToggleBtn');
+  if (btn) btn.setAttribute('aria-label', theme === 'light' ? 'Switch to dark mode' : 'Switch to light mode');
+}
+
+// Sync icon with whatever the FOUC script already set.
+(function() {
+  const t = document.documentElement.getAttribute('data-theme') || 'dark';
+  _applyTheme(t);
+})();
+
+window.toggleTheme = function() {
+  const current = document.documentElement.getAttribute('data-theme') || 'dark';
+  const next = current === 'light' ? 'dark' : 'light';
+  localStorage.setItem('cloop-theme', next);
+  _applyTheme(next);
+  // Re-render timeline if it's the active tab so SVG colors update.
+  if (typeof activeTab !== 'undefined' && activeTab === 'timeline') {
+    renderTimeline();
+  }
+};
 
 checkAuthAndInit();
 

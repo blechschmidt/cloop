@@ -369,7 +369,7 @@ func extractArchive(archivePath, destDir string) error {
 			}
 		case tar.TypeReg, tar.TypeRegA:
 			if err := os.MkdirAll(filepath.Dir(target), 0o750); err != nil {
-				return fmt.Errorf("mkdir parent: %w", target, err)
+				return fmt.Errorf("mkdir parent %s: %w", target, err)
 			}
 			out, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.FileMode(hdr.Mode)|0o600)
 			if err != nil {

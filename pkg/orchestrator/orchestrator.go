@@ -873,7 +873,8 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 	}
 
 	// Health check: AI rates plan quality before execution.
-	if !o.config.SkipHealthCheck && s.Plan != nil && len(s.Plan.Tasks) > 0 {
+	// Skip in dry-run mode (no provider calls) and when the plan is already complete.
+	if !o.config.SkipHealthCheck && !o.config.DryRun && s.Plan != nil && len(s.Plan.Tasks) > 0 && !s.Plan.IsComplete() {
 		o.runHealthCheck(ctx, s, pmColor, dimColor)
 	}
 
@@ -2272,7 +2273,8 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 	}
 
 	// Health check: AI rates plan quality before execution (parallel mode).
-	if !o.config.SkipHealthCheck && s.Plan != nil && len(s.Plan.Tasks) > 0 {
+	// Skip in dry-run mode (no provider calls) and when the plan is already complete.
+	if !o.config.SkipHealthCheck && !o.config.DryRun && s.Plan != nil && len(s.Plan.Tasks) > 0 && !s.Plan.IsComplete() {
 		o.runHealthCheck(ctx, s, pmColor, dimColor)
 	}
 
