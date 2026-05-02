@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/cache"
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/hooks"
 	"github.com/blechschmidt/cloop/pkg/metrics"
@@ -18,6 +19,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/profile"
 	"github.com/blechschmidt/cloop/pkg/provider"
+	"github.com/blechschmidt/cloop/pkg/provider/cached"
 	"github.com/blechschmidt/cloop/pkg/provider/fallback"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/spf13/cobra"
@@ -84,6 +86,9 @@ var (
 	requireApproval      bool
 	skipClarify          bool
 	autoEvalRun          bool
+	noCache              bool
+	cacheTTL             string
+	cacheMaxSize         int
 )
 
 var runCmd = &cobra.Command{
@@ -178,6 +183,24 @@ Press Ctrl+C to pause gracefully.`,
 		prov, err := buildProviderWithFallback(providerName, provCfg, fallbackProviders, cfg)
 		if err != nil {
 			return fmt.Errorf("provider: %w", err)
+		}
+
+		// Wrap with response cache unless --no-cache is set.
+		if !noCache {
+			ttl := cache.DefaultTTL
+			if cacheTTL != "" {
+				ttl, err = time.ParseDuration(cacheTTL)
+				if err != nil {
+					return fmt.Errorf("invalid --cache-ttl: %w", err)
+				}
+			}
+			maxSz := cacheMaxSize
+			if maxSz <= 0 {
+				maxSz = cache.DefaultMaxSize
+			}
+			if c, cacheErr := cache.New(workdir, ttl, maxSz); cacheErr == nil {
+				prov = cached.New(prov, c)
+			}
 		}
 
 		// --max-parallel / -j implies parallel mode.
@@ -526,5 +549,8 @@ func init() {
 	runCmd.Flags().BoolVar(&requireApproval, "require-approval", false, "PM mode: require interactive approval (y/n/skip/edit) before executing P0/P1 tasks or tasks with requires_approval:true; pre-approved tasks (via 'cloop task approve') are not re-prompted")
 	runCmd.Flags().BoolVar(&skipClarify, "skip-clarify", false, "PM mode: skip the interactive goal clarification Q&A dialog before plan decomposition (useful for automation and CI)")
 	runCmd.Flags().BoolVar(&autoEvalRun, "auto-eval", false, "PM mode: automatically score each successful task with the default quality rubric and save to .cloop/evals/<task-id>.json (sequential only)")
+	runCmd.Flags().BoolVar(&noCache, "no-cache", false, "Disable the disk-based AI response cache for this run")
+	runCmd.Flags().StringVar(&cacheTTL, "cache-ttl", "", "Response cache TTL (e.g. 1h, 48h); default 24h")
+	runCmd.Flags().IntVar(&cacheMaxSize, "cache-max-size", 0, "Maximum number of cached entries before LRU eviction (default 100)")
 	rootCmd.AddCommand(runCmd)
 }
