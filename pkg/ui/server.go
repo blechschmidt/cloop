@@ -3836,7 +3836,7 @@ function renderProjects(projects, stats) {
       ? p.done_tasks + '/' + p.total_tasks + ' tasks'
       : (p.total_steps ? p.total_steps + ' steps' : 'no steps');
     const selCls  = (selectedProjectIdx === idx) ? ' selected' : '';
-    const nameSafe = JSON.stringify(p.name);
+    const nameSafe = JSON.stringify(p.name).replace(/"/g, '&quot;');
     return ` + "`" + `
       <div class="proj-card${selCls}" onclick="openProject(${idx},${nameSafe})" title="Open project">
         <div class="proj-health-dot ${health}"></div>
@@ -3930,7 +3930,7 @@ function updateProjectSelector() {
     const health = p.health || 'unknown';
     const activeCls = selectedProjectIdx === i ? ' active' : '';
     const dotStyle = 'background:' + healthColor(health);
-    return '<div class="proj-selector-item'+activeCls+'" onclick="selectProjectFromDropdown('+i+','+JSON.stringify(p.name)+')">' +
+    return '<div class="proj-selector-item'+activeCls+'" onclick="selectProjectFromDropdown('+i+','+JSON.stringify(p.name).replace(/"/g,'&quot;')+')">' +
       '<span class="pi-dot" style="'+dotStyle+'"></span>' +
       '<span class="pi-name">'+esc(p.name)+'</span>' +
       '<span style="font-size:10px;color:var(--muted)">'+health+'</span>' +
