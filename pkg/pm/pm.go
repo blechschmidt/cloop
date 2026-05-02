@@ -114,6 +114,7 @@ type Task struct {
 	ArtifactPath      string     `json:"artifact_path,omitempty"`       // path to the full AI response artifact file
 	FailureDiagnosis  string     `json:"failure_diagnosis,omitempty"`   // AI diagnosis of what went wrong on failure
 	Tags              []string   `json:"tags,omitempty"`                // user-defined labels for filtering
+	FailCount         int        `json:"fail_count,omitempty"`          // number of times this task has been marked failed
 }
 
 // Plan is the full task plan for a goal.

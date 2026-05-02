@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -8,8 +10,11 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/pm"
+	"github.com/blechschmidt/cloop/pkg/provider"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
@@ -979,6 +984,194 @@ func marshalTasksJSON(tasks []*pm.Task) string {
 	return string(data)
 }
 
+var (
+	splitReason   string
+	splitAuto     bool
+	splitProvider string
+	splitModel    string
+	splitTimeout  string
+)
+
+var taskSplitCmd = &cobra.Command{
+	Use:   "split <id>",
+	Short: "AI-powered task decomposition: split a task into smaller subtasks",
+	Long: `Ask the AI to intelligently decompose a task into 2-5 smaller,
+concrete subtasks. The subtasks replace the original task in the plan.
+
+By default, the proposed subtasks are shown and you are prompted for
+confirmation before any changes are made. Use --auto to skip confirmation.
+
+Examples:
+  cloop task split 5
+  cloop task split 5 --reason "too complex, keeps failing"
+  cloop task split 5 --auto
+  cloop task split 5 --provider anthropic --model claude-opus-4-5`,
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		workdir, _ := os.Getwd()
+
+		s, err := state.Load(workdir)
+		if err != nil {
+			return err
+		}
+		if !s.PMMode || s.Plan == nil || len(s.Plan.Tasks) == 0 {
+			return fmt.Errorf("no task plan found — run 'cloop run --pm' to create one")
+		}
+
+		taskID, err := strconv.Atoi(args[0])
+		if err != nil {
+			return fmt.Errorf("invalid task ID %q: must be a number", args[0])
+		}
+
+		// Find the task
+		var task *pm.Task
+		for _, t := range s.Plan.Tasks {
+			if t.ID == taskID {
+				task = t
+				break
+			}
+		}
+		if task == nil {
+			return fmt.Errorf("task %d not found", taskID)
+		}
+
+		// Build provider
+		cfg, err := config.Load(workdir)
+		if err != nil {
+			return fmt.Errorf("loading config: %w", err)
+		}
+		applyEnvOverrides(cfg)
+
+		pName := splitProvider
+		if pName == "" {
+			pName = cfg.Provider
+		}
+		if pName == "" && s.Provider != "" {
+			pName = s.Provider
+		}
+		if pName == "" {
+			pName = autoSelectProvider()
+		}
+
+		model := splitModel
+		if model == "" {
+			switch pName {
+			case "anthropic":
+				model = cfg.Anthropic.Model
+			case "openai":
+				model = cfg.OpenAI.Model
+			case "ollama":
+				model = cfg.Ollama.Model
+			case "claudecode":
+				model = cfg.ClaudeCode.Model
+			}
+		}
+		if model == "" {
+			model = s.Model
+		}
+
+		provCfg := provider.ProviderConfig{
+			Name:             pName,
+			AnthropicAPIKey:  cfg.Anthropic.APIKey,
+			AnthropicBaseURL: cfg.Anthropic.BaseURL,
+			OpenAIAPIKey:     cfg.OpenAI.APIKey,
+			OpenAIBaseURL:    cfg.OpenAI.BaseURL,
+			OllamaBaseURL:    cfg.Ollama.BaseURL,
+		}
+		prov, err := provider.Build(provCfg)
+		if err != nil {
+			return fmt.Errorf("provider: %w", err)
+		}
+
+		timeout := 5 * time.Minute
+		if splitTimeout != "" {
+			timeout, err = time.ParseDuration(splitTimeout)
+			if err != nil {
+				return fmt.Errorf("invalid timeout: %w", err)
+			}
+		}
+
+		dimColor := color.New(color.Faint)
+		headerColor := color.New(color.FgCyan, color.Bold)
+		warnColor := color.New(color.FgYellow)
+
+		headerColor.Printf("Splitting task %d: %s\n", task.ID, task.Title)
+		fmt.Printf("Asking AI to decompose this task into smaller subtasks...\n\n")
+
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+
+		opts := provider.Options{
+			Model:   model,
+			Timeout: timeout,
+		}
+
+		// Call AI to split — pass a copy of the plan so we can preview before applying
+		planCopy := &pm.Plan{
+			Goal:    s.Plan.Goal,
+			Tasks:   make([]*pm.Task, len(s.Plan.Tasks)),
+			Version: s.Plan.Version,
+		}
+		copy(planCopy.Tasks, s.Plan.Tasks)
+		// Deep-copy tasks to avoid mutating original before confirmation
+		for i, t := range s.Plan.Tasks {
+			tc := *t
+			planCopy.Tasks[i] = &tc
+		}
+
+		subtasks, err := pm.SplitTask(ctx, prov, opts, planCopy, taskID, splitReason)
+		if err != nil {
+			return fmt.Errorf("split failed: %w", err)
+		}
+
+		// Preview the subtasks
+		fmt.Printf("Proposed subtasks to replace task %d:\n\n", taskID)
+		for _, st := range subtasks {
+			rolePart := ""
+			if st.Role != "" {
+				rolePart = fmt.Sprintf(" [%s]", st.Role)
+			}
+			warnColor.Printf("  #%d%s %s\n", st.ID, rolePart, st.Title)
+			if st.Description != "" {
+				dimColor.Printf("       %s\n", truncateStr(st.Description, 120))
+			}
+			if len(st.DependsOn) > 0 {
+				deps := make([]string, 0, len(st.DependsOn))
+				for _, depID := range st.DependsOn {
+					deps = append(deps, fmt.Sprintf("#%d", depID))
+				}
+				dimColor.Printf("       depends on: %s\n", strings.Join(deps, ", "))
+			}
+		}
+		fmt.Println()
+
+		// Confirm unless --auto
+		if !splitAuto {
+			fmt.Printf("Apply this split? (y/N): ")
+			scanner := bufio.NewScanner(os.Stdin)
+			if !scanner.Scan() {
+				return fmt.Errorf("no input received")
+			}
+			answer := strings.TrimSpace(strings.ToLower(scanner.Text()))
+			if answer != "y" && answer != "yes" {
+				fmt.Println("Split cancelled.")
+				return nil
+			}
+		}
+
+		// planCopy already has the split applied — make it the active plan.
+		s.Plan = planCopy
+
+		if err := s.Save(); err != nil {
+			return fmt.Errorf("saving state: %w", err)
+		}
+
+		color.New(color.FgGreen).Printf("Split applied: task %d replaced with %d subtasks.\n",
+			taskID, len(subtasks))
+		return nil
+	},
+}
+
 func init() {
 	taskListCmd.Flags().BoolVar(&taskListJSON, "json", false, "Output tasks as JSON array")
 	taskListCmd.Flags().BoolVar(&taskListGraph, "graph", false, "Render tasks as a layered dependency graph")
@@ -998,6 +1191,12 @@ func init() {
 
 	taskListCmd.Flags().StringSliceVar(&taskListTags, "tags", nil, "Filter listed tasks by tag (comma-separated or repeated --tags)")
 
+	taskSplitCmd.Flags().StringVar(&splitReason, "reason", "", "Reason for splitting (e.g. 'too complex, keeps failing')")
+	taskSplitCmd.Flags().BoolVar(&splitAuto, "auto", false, "Skip confirmation prompt and apply the split immediately")
+	taskSplitCmd.Flags().StringVar(&splitProvider, "provider", "", "AI provider to use (anthropic, openai, ollama, claudecode)")
+	taskSplitCmd.Flags().StringVar(&splitModel, "model", "", "Model override for the AI provider")
+	taskSplitCmd.Flags().StringVar(&splitTimeout, "timeout", "5m", "Timeout for the AI call (e.g. 2m, 300s)")
+
 	taskCmd.AddCommand(taskListCmd)
 	taskCmd.AddCommand(taskShowCmd)
 	taskCmd.AddCommand(taskNextCmd)
@@ -1011,5 +1210,6 @@ func init() {
 	taskCmd.AddCommand(taskMoveCmd)
 	taskCmd.AddCommand(taskTagCmd)
 	taskCmd.AddCommand(taskUntagCmd)
+	taskCmd.AddCommand(taskSplitCmd)
 	rootCmd.AddCommand(taskCmd)
 }

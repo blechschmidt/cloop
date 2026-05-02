@@ -77,7 +77,11 @@ var statusCmd = &cobra.Command{
 					return sorted[i].Priority < sorted[j].Priority
 				})
 				for _, t := range sorted {
-					fmt.Printf("          %s Task %d: %s\n", taskMarker(t.Status), t.ID, t.Title)
+					failCountSuffix := ""
+					if t.FailCount > 0 {
+						failCountSuffix = fmt.Sprintf(" (failed %d×)", t.FailCount)
+					}
+					fmt.Printf("          %s Task %d: %s%s\n", taskMarker(t.Status), t.ID, t.Title, failCountSuffix)
 					if t.Status == pm.TaskFailed && t.FailureDiagnosis != "" {
 						diag := t.FailureDiagnosis
 						if len(diag) > 300 {

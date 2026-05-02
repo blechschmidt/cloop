@@ -71,6 +71,7 @@ var (
 	runTags              []string
 	scriptVerify         bool
 	runProfile           string
+	autoSplit            bool
 )
 
 var runCmd = &cobra.Command{
@@ -267,6 +268,7 @@ Press Ctrl+C to pause gracefully.`,
 			NoDedup:             noDedup,
 			TagFilter:           runTags,
 			ScriptVerify:        scriptVerify,
+			AutoSplit:           autoSplit,
 		}
 
 		orc, err := orchestrator.New(orchCfg, prov)
@@ -476,5 +478,6 @@ func init() {
 	runCmd.Flags().StringSliceVar(&runTags, "tags", nil, "PM mode: restrict execution to tasks matching any of the given tags (comma-separated or repeated --tags flag)")
 	runCmd.Flags().BoolVar(&scriptVerify, "script-verify", false, "PM mode: after each TASK_DONE, generate and run an AI shell script that confirms the task was accomplished; marks task failed if the script exits non-zero")
 	runCmd.Flags().StringVar(&runProfile, "profile", "", "Named configuration profile to apply (overrides the active profile set by 'cloop profile use')")
+	runCmd.Flags().BoolVar(&autoSplit, "auto-split", false, "PM mode: automatically decompose a task into subtasks when it has failed 2+ times (sequential only)")
 	rootCmd.AddCommand(runCmd)
 }

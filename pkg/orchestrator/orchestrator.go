@@ -194,6 +194,12 @@ type Config struct {
 	// stored as a verification artifact. If the script exits non-zero the task
 	// is marked failed and failure diagnosis is triggered.
 	ScriptVerify bool
+
+	// AutoSplit enables automatic AI-powered task splitting in PM mode (sequential only).
+	// When a task's FailCount reaches 2, the orchestrator asks the AI to decompose
+	// it into smaller subtasks that replace it in the plan. This prevents repeated
+	// failures on tasks that are too large or ambiguous.
+	AutoSplit bool
 }
 
 type Orchestrator struct {
@@ -1078,6 +1084,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			consecutiveErrors = 0
 		case pm.TaskFailed:
 			task.Status = pm.TaskFailed
+			task.FailCount++
 			failColor.Printf("✗ Task %d failed: %s\n\n", task.ID, task.Title)
 			{
 				done, failed := s.Plan.CountByStatus()
@@ -1106,6 +1113,25 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 					dimColor.Printf("  Diagnosis: %s\n\n", truncate(diag, 200))
 				}
 				s.Save()
+			}
+
+			// Auto-split: if a task has failed 2+ times, decompose it into smaller subtasks.
+			if o.config.AutoSplit && task.FailCount >= 2 {
+				pmColor.Printf("Auto-split: task %d has failed %d times — decomposing into subtasks...\n", task.ID, task.FailCount)
+				splitReason := fmt.Sprintf("Task failed %d times. Last failure output:\n%s", task.FailCount, truncate(result.Output, 400))
+				splitOpts := provider.Options{
+					Model:   s.Model,
+					Timeout: o.config.StepTimeout,
+				}
+				subtasks, splitErr := pm.SplitTask(ctx, o.provider, splitOpts, s.Plan, task.ID, splitReason)
+				if splitErr != nil {
+					dimColor.Printf("  Auto-split error (ignored): %v\n", splitErr)
+				} else if len(subtasks) > 0 {
+					pmColor.Printf("  Split into %d subtasks. Continuing plan...\n\n", len(subtasks))
+					consecutiveErrors = 0
+					s.Save()
+					continue
+				}
 			}
 
 			// Adaptive replanning: re-think remaining tasks on failure.
