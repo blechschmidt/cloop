@@ -13,6 +13,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/kb"
 	"github.com/blechschmidt/cloop/pkg/promptstats"
 	"github.com/blechschmidt/cloop/pkg/provider"
+	"github.com/blechschmidt/cloop/pkg/skill"
 )
 
 // TaskStatus represents the state of a task.
@@ -444,7 +445,8 @@ func ExecuteTaskPrompt(goal, instructions, workDir string, plan *Plan, task *Tas
 	b.WriteString("If the task is not applicable or already done, end with: TASK_SKIPPED\n")
 	b.WriteString("If you cannot complete the task, end with: TASK_FAILED\n")
 
-	return b.String()
+	// Expand {{skill:name}} references in the fully assembled prompt.
+	return skill.Expand(workDir, b.String())
 }
 
 // ParseTaskPlan extracts a Plan from the AI's JSON response.
