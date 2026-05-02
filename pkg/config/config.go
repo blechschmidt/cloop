@@ -40,10 +40,14 @@ type WebhookConfig struct {
 	URL string `yaml:"url,omitempty"`
 	// Events to fire (empty = all). Valid values:
 	//   session_started, session_complete, session_failed,
-	//   task_started, task_done, task_failed, task_skipped
+	//   task_started, task_done, task_failed, task_skipped,
+	//   plan_complete, evolve_discovered
 	Events []string `yaml:"events,omitempty"`
 	// Optional HTTP headers added to every request (e.g. Authorization).
 	Headers map[string]string `yaml:"headers,omitempty"`
+	// Secret, if set, signs every request with HMAC-SHA256 in the
+	// X-Hub-Signature-256 header (GitHub-style webhook signing).
+	Secret string `yaml:"secret,omitempty"`
 }
 
 type AnthropicConfig struct {

@@ -51,6 +51,7 @@ var (
 	memoryLimit      int
 	webhookURL        string
 	webhookEvents     []string
+	webhookSecret     string
 	fallbackProviders []string
 	streamOutput      bool
 )
@@ -150,6 +151,10 @@ Press Ctrl+C to pause gracefully.`,
 		if len(effectiveWebhookEvents) == 0 {
 			effectiveWebhookEvents = cfg.Webhook.Events
 		}
+		effectiveWebhookSecret := webhookSecret
+		if effectiveWebhookSecret == "" {
+			effectiveWebhookSecret = cfg.Webhook.Secret
+		}
 
 		orchCfg := orchestrator.Config{
 			WorkDir:          workdir,
@@ -181,6 +186,7 @@ Press Ctrl+C to pause gracefully.`,
 			MemoryLimit:      memoryLimit,
 			WebhookURL:       effectiveWebhookURL,
 			WebhookEvents:    effectiveWebhookEvents,
+			WebhookSecret:    effectiveWebhookSecret,
 			Streaming:        streamOutput,
 		}
 
@@ -375,6 +381,7 @@ func init() {
 	runCmd.Flags().IntVar(&memoryLimit, "memory-limit", 20, "Max number of memory entries to inject into prompts (0 = all)")
 	runCmd.Flags().StringVar(&webhookURL, "webhook-url", "", "HTTP(S) URL to POST lifecycle events to (overrides config webhook.url)")
 	runCmd.Flags().StringSliceVar(&webhookEvents, "webhook-events", nil, "Comma-separated events to fire: task_done,task_failed,session_complete,... (default: all)")
+	runCmd.Flags().StringVar(&webhookSecret, "webhook-secret", "", "HMAC-SHA256 signing secret; sets X-Hub-Signature-256 on every request (overrides config webhook.secret)")
 	runCmd.Flags().StringSliceVar(&fallbackProviders, "fallback", nil, "Fallback provider chain (e.g. --fallback anthropic,openai). Tried in order after primary fails.")
 	runCmd.Flags().BoolVar(&streamOutput, "stream", false, "Stream tokens to the terminal as they are generated (anthropic, openai, ollama; ignored by claudecode)")
 	rootCmd.AddCommand(runCmd)

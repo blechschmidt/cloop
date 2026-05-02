@@ -94,6 +94,10 @@ type Config struct {
 	// WebhookEvents is the list of event types to fire (empty = all).
 	WebhookEvents []string
 
+	// WebhookSecret is used to sign each webhook POST body with HMAC-SHA256
+	// in the X-Hub-Signature-256 header (GitHub-style). Empty = no signing.
+	WebhookSecret string
+
 	// Streaming enables token-by-token output to the terminal for providers that
 	// support SSE streaming (anthropic, openai, ollama). When true, the orchestrator
 	// passes an OnToken callback to Complete(); providers that do not support
@@ -129,7 +133,7 @@ func New(cfg Config, prov provider.Provider) (*Orchestrator, error) {
 	// Build webhook client (flag URL overrides config URL).
 	var wh *webhook.Client
 	if cfg.WebhookURL != "" {
-		wh = webhook.New(cfg.WebhookURL, cfg.WebhookEvents, nil)
+		wh = webhook.New(cfg.WebhookURL, cfg.WebhookEvents, nil, cfg.WebhookSecret)
 	}
 
 	r := router.New(prov)
@@ -446,8 +450,9 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			successColor.Printf("🎉 All tasks complete! Goal achieved.\n")
 			successColor.Printf("   %s\n\n", s.Plan.Summary())
 			done, failed := s.Plan.CountByStatus()
-			o.webhook.Send(webhook.EventSessionComplete, webhook.Payload{
+			o.webhook.Send(webhook.EventPlanComplete, webhook.Payload{
 				Goal: s.Goal,
+				Progress: &webhook.Progress{Done: done, Total: len(s.Plan.Tasks), Failed: failed},
 				Session: &webhook.SessionInfo{
 					TotalTasks:   len(s.Plan.Tasks),
 					DoneTasks:    done,
@@ -537,10 +542,15 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		task.StartedAt = &now
 		s.Save()
 
-		o.webhook.Send(webhook.EventTaskStarted, webhook.Payload{
-			Goal: s.Goal,
-			Task: &webhook.TaskInfo{ID: task.ID, Title: task.Title, Description: task.Description, Status: "in_progress"},
-		})
+		{
+			done, failed := s.Plan.CountByStatus()
+			o.webhook.Send(webhook.EventTaskStarted, webhook.Payload{
+				Goal: s.Goal,
+				Task: &webhook.TaskInfo{ID: task.ID, Title: task.Title, Description: task.Description, Status: "in_progress"},
+				Progress: &webhook.Progress{Done: done, Total: len(s.Plan.Tasks), Failed: failed},
+				Session:  &webhook.SessionInfo{InputTokens: s.TotalInputTokens, OutputTokens: s.TotalOutputTokens},
+			})
+		}
 
 		// Build prompt with optional project context injection.
 		var projCtx *pm.ProjectContext
@@ -646,16 +656,24 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 					}
 					failColor.Printf("✗ Verification failed %d time(s) for task %d — marking failed.\n\n", task.VerifyRetries, task.ID)
 					task.Status = pm.TaskFailed
-					o.webhook.Send(webhook.EventTaskFailed, webhook.Payload{
-						Goal: s.Goal,
-						Task: &webhook.TaskInfo{ID: task.ID, Title: task.Title, Status: "failed", Duration: taskDur},
-					})
+					{
+						done, failed := s.Plan.CountByStatus()
+						o.webhook.Send(webhook.EventTaskFailed, webhook.Payload{
+							Goal:     s.Goal,
+							Task:     &webhook.TaskInfo{ID: task.ID, Title: task.Title, Status: "failed", Duration: taskDur},
+							Progress: &webhook.Progress{Done: done, Total: len(s.Plan.Tasks), Failed: failed},
+							Session:  &webhook.SessionInfo{InputTokens: s.TotalInputTokens, OutputTokens: s.TotalOutputTokens},
+						})
+					}
 					consecutiveErrors++
 					s.Save()
 					if consecutiveErrors >= maxConsecutiveErrors {
 						s.Status = "failed"
 						s.Save()
-						o.webhook.Send(webhook.EventSessionFailed, webhook.Payload{Goal: s.Goal})
+						o.webhook.Send(webhook.EventSessionFailed, webhook.Payload{
+							Goal:    s.Goal,
+							Session: &webhook.SessionInfo{InputTokens: s.TotalInputTokens, OutputTokens: s.TotalOutputTokens},
+						})
 						return fmt.Errorf("%d consecutive task failures", consecutiveErrors)
 					}
 					continue
@@ -664,26 +682,41 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			}
 			task.Status = pm.TaskDone
 			successColor.Printf("✓ Task %d complete: %s\n\n", task.ID, task.Title)
-			o.webhook.Send(webhook.EventTaskDone, webhook.Payload{
-				Goal: s.Goal,
-				Task: &webhook.TaskInfo{ID: task.ID, Title: task.Title, Status: "done", Duration: taskDur},
-			})
+			{
+				done, failed := s.Plan.CountByStatus()
+				o.webhook.Send(webhook.EventTaskDone, webhook.Payload{
+					Goal:     s.Goal,
+					Task:     &webhook.TaskInfo{ID: task.ID, Title: task.Title, Status: "done", Duration: taskDur},
+					Progress: &webhook.Progress{Done: done, Total: len(s.Plan.Tasks), Failed: failed},
+					Session:  &webhook.SessionInfo{InputTokens: s.TotalInputTokens, OutputTokens: s.TotalOutputTokens},
+				})
+			}
 			consecutiveErrors = 0
 		case pm.TaskSkipped:
 			task.Status = pm.TaskSkipped
 			dimColor.Printf("→ Task %d skipped: %s\n\n", task.ID, task.Title)
-			o.webhook.Send(webhook.EventTaskSkipped, webhook.Payload{
-				Goal: s.Goal,
-				Task: &webhook.TaskInfo{ID: task.ID, Title: task.Title, Status: "skipped"},
-			})
+			{
+				done, failed := s.Plan.CountByStatus()
+				o.webhook.Send(webhook.EventTaskSkipped, webhook.Payload{
+					Goal:     s.Goal,
+					Task:     &webhook.TaskInfo{ID: task.ID, Title: task.Title, Status: "skipped"},
+					Progress: &webhook.Progress{Done: done, Total: len(s.Plan.Tasks), Failed: failed},
+					Session:  &webhook.SessionInfo{InputTokens: s.TotalInputTokens, OutputTokens: s.TotalOutputTokens},
+				})
+			}
 			consecutiveErrors = 0
 		case pm.TaskFailed:
 			task.Status = pm.TaskFailed
 			failColor.Printf("✗ Task %d failed: %s\n\n", task.ID, task.Title)
-			o.webhook.Send(webhook.EventTaskFailed, webhook.Payload{
-				Goal: s.Goal,
-				Task: &webhook.TaskInfo{ID: task.ID, Title: task.Title, Status: "failed", Duration: taskDur},
-			})
+			{
+				done, failed := s.Plan.CountByStatus()
+				o.webhook.Send(webhook.EventTaskFailed, webhook.Payload{
+					Goal:     s.Goal,
+					Task:     &webhook.TaskInfo{ID: task.ID, Title: task.Title, Status: "failed", Duration: taskDur},
+					Progress: &webhook.Progress{Done: done, Total: len(s.Plan.Tasks), Failed: failed},
+					Session:  &webhook.SessionInfo{InputTokens: s.TotalInputTokens, OutputTokens: s.TotalOutputTokens},
+				})
+			}
 			consecutiveErrors++
 
 			// Adaptive replanning: re-think remaining tasks on failure.
@@ -714,17 +747,25 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			if consecutiveErrors >= maxConsecutiveErrors {
 				s.Status = "failed"
 				s.Save()
-				o.webhook.Send(webhook.EventSessionFailed, webhook.Payload{Goal: s.Goal})
+				o.webhook.Send(webhook.EventSessionFailed, webhook.Payload{
+					Goal:    s.Goal,
+					Session: &webhook.SessionInfo{InputTokens: s.TotalInputTokens, OutputTokens: s.TotalOutputTokens},
+				})
 				return fmt.Errorf("%d consecutive task failures", consecutiveErrors)
 			}
 		default:
 			// No signal found — treat as done (AI finished without explicit signal)
 			task.Status = pm.TaskDone
 			successColor.Printf("✓ Task %d complete (no explicit signal): %s\n\n", task.ID, task.Title)
-			o.webhook.Send(webhook.EventTaskDone, webhook.Payload{
-				Goal: s.Goal,
-				Task: &webhook.TaskInfo{ID: task.ID, Title: task.Title, Status: "done", Duration: taskDur},
-			})
+			{
+				done, failed := s.Plan.CountByStatus()
+				o.webhook.Send(webhook.EventTaskDone, webhook.Payload{
+					Goal:     s.Goal,
+					Task:     &webhook.TaskInfo{ID: task.ID, Title: task.Title, Status: "done", Duration: taskDur},
+					Progress: &webhook.Progress{Done: done, Total: len(s.Plan.Tasks), Failed: failed},
+					Session:  &webhook.SessionInfo{InputTokens: s.TotalInputTokens, OutputTokens: s.TotalOutputTokens},
+				})
+			}
 			consecutiveErrors = 0
 		}
 		s.Save()
@@ -882,6 +923,20 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 		if s.Plan.IsComplete() {
 			successColor.Printf("🎉 All tasks complete! Goal achieved.\n")
 			successColor.Printf("   %s\n\n", s.Plan.Summary())
+			{
+				done, failed := s.Plan.CountByStatus()
+				o.webhook.Send(webhook.EventPlanComplete, webhook.Payload{
+					Goal:     s.Goal,
+					Progress: &webhook.Progress{Done: done, Total: len(s.Plan.Tasks), Failed: failed},
+					Session:  &webhook.SessionInfo{
+						TotalTasks:   len(s.Plan.Tasks),
+						DoneTasks:    done,
+						FailedTasks:  failed,
+						InputTokens:  s.TotalInputTokens,
+						OutputTokens: s.TotalOutputTokens,
+					},
+				})
+			}
 			if s.AutoEvolve {
 				s.Status = "evolving"
 				s.Save()
@@ -1012,23 +1067,60 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 			task.CompletedAt = &completedAt
 			task.Result = truncate(result.Output, 500)
 
+			taskDur := res.duration.Round(time.Second).String()
 			mu.Lock()
 			switch signal {
 			case pm.TaskDone:
 				task.Status = pm.TaskDone
 				successColor.Printf("✓ Task %d complete: %s\n\n", task.ID, task.Title)
+				{
+					done, failed := s.Plan.CountByStatus()
+					o.webhook.Send(webhook.EventTaskDone, webhook.Payload{
+						Goal:     s.Goal,
+						Task:     &webhook.TaskInfo{ID: task.ID, Title: task.Title, Status: "done", Duration: taskDur},
+						Progress: &webhook.Progress{Done: done, Total: len(s.Plan.Tasks), Failed: failed},
+						Session:  &webhook.SessionInfo{InputTokens: s.TotalInputTokens, OutputTokens: s.TotalOutputTokens},
+					})
+				}
 				consecutiveErrors = 0
 			case pm.TaskSkipped:
 				task.Status = pm.TaskSkipped
 				dimColor.Printf("→ Task %d skipped: %s\n\n", task.ID, task.Title)
+				{
+					done, failed := s.Plan.CountByStatus()
+					o.webhook.Send(webhook.EventTaskSkipped, webhook.Payload{
+						Goal:     s.Goal,
+						Task:     &webhook.TaskInfo{ID: task.ID, Title: task.Title, Status: "skipped"},
+						Progress: &webhook.Progress{Done: done, Total: len(s.Plan.Tasks), Failed: failed},
+						Session:  &webhook.SessionInfo{InputTokens: s.TotalInputTokens, OutputTokens: s.TotalOutputTokens},
+					})
+				}
 				consecutiveErrors = 0
 			case pm.TaskFailed:
 				task.Status = pm.TaskFailed
 				failColor.Printf("✗ Task %d failed: %s\n\n", task.ID, task.Title)
+				{
+					done, failed := s.Plan.CountByStatus()
+					o.webhook.Send(webhook.EventTaskFailed, webhook.Payload{
+						Goal:     s.Goal,
+						Task:     &webhook.TaskInfo{ID: task.ID, Title: task.Title, Status: "failed", Duration: taskDur},
+						Progress: &webhook.Progress{Done: done, Total: len(s.Plan.Tasks), Failed: failed},
+						Session:  &webhook.SessionInfo{InputTokens: s.TotalInputTokens, OutputTokens: s.TotalOutputTokens},
+					})
+				}
 				consecutiveErrors++
 			default:
 				task.Status = pm.TaskDone
 				successColor.Printf("✓ Task %d complete (no explicit signal): %s\n\n", task.ID, task.Title)
+				{
+					done, failed := s.Plan.CountByStatus()
+					o.webhook.Send(webhook.EventTaskDone, webhook.Payload{
+						Goal:     s.Goal,
+						Task:     &webhook.TaskInfo{ID: task.ID, Title: task.Title, Status: "done", Duration: taskDur},
+						Progress: &webhook.Progress{Done: done, Total: len(s.Plan.Tasks), Failed: failed},
+						Session:  &webhook.SessionInfo{InputTokens: s.TotalInputTokens, OutputTokens: s.TotalOutputTokens},
+					})
+				}
 				consecutiveErrors = 0
 			}
 			tooManyErrors := consecutiveErrors >= maxConsecutiveErrors
@@ -1190,6 +1282,16 @@ func (o *Orchestrator) evolvePM(ctx context.Context) (int, error) {
 
 	s.Plan.Tasks = append(s.Plan.Tasks, newTasks...)
 	s.Save()
+
+	o.webhook.Send(webhook.EventEvolveDiscovered, webhook.Payload{
+		Goal: s.Goal,
+		Session: &webhook.SessionInfo{
+			NewTasksFound: len(newTasks),
+			EvolveStep:    s.EvolveStep,
+			InputTokens:   s.TotalInputTokens,
+			OutputTokens:  s.TotalOutputTokens,
+		},
+	})
 
 	evolveColor.Printf("  Discovered %d new task(s):\n", len(newTasks))
 	for _, t := range newTasks {
