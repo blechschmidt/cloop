@@ -107,6 +107,49 @@ type Annotation struct {
 	Text      string    `json:"text"`
 }
 
+// LinkKind classifies an external link attached to a task.
+type LinkKind string
+
+const (
+	LinkKindTicket   LinkKind = "ticket"   // bug tracker issue (e.g. GitHub Issues, Jira)
+	LinkKindPR       LinkKind = "pr"       // pull / merge request
+	LinkKindDoc      LinkKind = "doc"      // documentation page
+	LinkKindArtifact LinkKind = "artifact" // build artifact, download, or generic URL
+)
+
+// Link is an external URL associated with a task (ticket, PR, doc, artifact).
+type Link struct {
+	URL   string   `json:"url"`
+	Label string   `json:"label,omitempty"`
+	Kind  LinkKind `json:"kind"`
+}
+
+// DetectLinkKind infers a LinkKind from a URL string using simple pattern matching.
+// Callers can override the detected kind with an explicit flag.
+func DetectLinkKind(rawURL string) LinkKind {
+	u := strings.ToLower(rawURL)
+	switch {
+	case strings.Contains(u, "github.com") && strings.Contains(u, "/issues/"):
+		return LinkKindTicket
+	case strings.Contains(u, "github.com") && strings.Contains(u, "/issues"):
+		return LinkKindTicket
+	case strings.Contains(u, "github.com") && strings.Contains(u, "/pull/"):
+		return LinkKindPR
+	case strings.Contains(u, "github.com") && strings.Contains(u, "/pull"):
+		return LinkKindPR
+	case strings.Contains(u, "jira.") || strings.Contains(u, "/jira/") || strings.Contains(u, "atlassian.net/browse/"):
+		return LinkKindTicket
+	case strings.Contains(u, "linear.app"):
+		return LinkKindTicket
+	case strings.HasPrefix(u, "https://docs.") || strings.HasPrefix(u, "http://docs.") ||
+		strings.Contains(u, "/docs/") || strings.Contains(u, "readthedocs.") ||
+		strings.Contains(u, "confluence."):
+		return LinkKindDoc
+	default:
+		return LinkKindArtifact
+	}
+}
+
 // AddAnnotation appends a new annotation to the task.
 func AddAnnotation(task *Task, author, text string) {
 	task.Annotations = append(task.Annotations, Annotation{
@@ -147,6 +190,7 @@ type Task struct {
 	MaxMinutes        int          `json:"max_minutes,omitempty"`         // per-task execution time budget in minutes (0 = no limit)
 	Assignee          string       `json:"assignee,omitempty"`            // team member assigned to this task
 	ExternalURL       string       `json:"external_url,omitempty"`        // URL of the external resource (e.g. GitHub PR)
+	Links             []Link       `json:"links,omitempty"`               // external URLs/tickets/docs associated with this task
 }
 
 // Plan is the full task plan for a goal.

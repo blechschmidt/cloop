@@ -2377,6 +2377,9 @@ const dashboardHTML = `<!DOCTYPE html>
   .badge.running .badge-dot { animation: pulse 1.5s infinite; }
   .task-tags { display:inline-flex; flex-wrap:wrap; gap:3px; margin-left:4px; }
   .task-tag  { display:inline-block; padding:1px 6px; border-radius:10px; font-size:10px; font-weight:600; background:rgba(139,148,158,.15); color:var(--muted); border:1px solid rgba(139,148,158,.3); }
+  .task-links { display:flex; flex-wrap:wrap; gap:6px; margin-top:5px; }
+  .task-link-item { display:inline-flex; align-items:center; gap:3px; font-size:11px; color:var(--accent); text-decoration:none; padding:2px 7px; border-radius:10px; border:1px solid rgba(88,166,255,.3); background:rgba(88,166,255,.08); }
+  .task-link-item:hover { text-decoration:underline; background:rgba(88,166,255,.15); }
 
   /* ── Stats grid ── */
   .stats-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(140px,1fr)); gap:10px; }
@@ -4591,6 +4594,7 @@ function renderTasks(s) {
           (t.tags&&t.tags.length?'<span class="task-tags">'+t.tags.map(function(tg){return '<span class="task-tag">'+esc(tg)+'</span>';}).join('')+'</span>':'')+
           fmtTimeEstimate(t)+
         '</div>'+
+        fmtTaskLinks(t)+
       '</div>'+
       '<div class="task-actions">'+
         statusActions+
@@ -4623,6 +4627,17 @@ function fmtTimeEstimate(t) {
     }
   }
   return '<span title="Time estimate vs actual">⏱ ' + s + '</span>';
+}
+
+function fmtTaskLinks(t) {
+  if (!t.links || !t.links.length) return '';
+  const kindIcon = { ticket: '🎫', pr: '🔀', doc: '📄', artifact: '📦' };
+  const items = t.links.map(function(lnk) {
+    const icon = kindIcon[lnk.kind] || '🔗';
+    const label = lnk.label || lnk.url;
+    return '<a class="task-link-item" href="'+esc(lnk.url)+'" target="_blank" rel="noopener" title="['+esc(lnk.kind)+'] '+esc(lnk.url)+'">'+icon+' '+esc(label)+'</a>';
+  });
+  return '<div class="task-links">'+items.join('')+'</div>';
 }
 
 function buildStatusActions(t) {

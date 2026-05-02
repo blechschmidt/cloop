@@ -273,6 +273,15 @@ func buildPromptInternal(s *state.ProjectState, stats SessionStats, plan *pm.Pla
 			if t.FailureDiagnosis != "" {
 				b.WriteString(fmt.Sprintf("  Diagnosis: %s\n", strings.ReplaceAll(t.FailureDiagnosis[:min(len(t.FailureDiagnosis), 150)], "\n", " ")))
 			}
+			if len(t.Links) > 0 {
+				for _, lnk := range t.Links {
+					label := lnk.Label
+					if label == "" {
+						label = lnk.URL
+					}
+					b.WriteString(fmt.Sprintf("  Link [%s]: %s\n", lnk.Kind, label))
+				}
+			}
 		}
 		b.WriteString("\n")
 	}

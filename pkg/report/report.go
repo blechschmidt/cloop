@@ -173,6 +173,13 @@ func generateTerminal(w io.Writer, s *state.ProjectState, opts Options) {
 			if opts.ShowOutputs && t.Result != "" {
 				fmt.Fprintf(w, "           Result: %s\n", truncate(t.Result, 200))
 			}
+			for _, lnk := range t.Links {
+				label := lnk.Label
+				if label == "" {
+					label = lnk.URL
+				}
+				fmt.Fprintf(w, "           Link [%s]: %s\n", lnk.Kind, label)
+			}
 		}
 
 		// Blockers

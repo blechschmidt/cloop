@@ -286,6 +286,19 @@ var taskShowCmd = &cobra.Command{
 			fmt.Printf("\nResult summary:\n")
 			dimColor.Printf("  %s\n", strings.ReplaceAll(task.Result, "\n", "\n  "))
 		}
+		if len(task.Links) > 0 {
+			fmt.Printf("\nLinks:\n")
+			for i, lnk := range task.Links {
+				label := lnk.Label
+				if label == "" {
+					label = lnk.URL
+				}
+				dimColor.Printf("  %d. [%s] %s\n", i+1, lnk.Kind, label)
+				if lnk.Label != "" {
+					dimColor.Printf("       %s\n", lnk.URL)
+				}
+			}
+		}
 		if task.ArtifactPath != "" {
 			fmt.Printf("\nArtifact: %s\n", task.ArtifactPath)
 			if taskShowArtifact {
@@ -1766,6 +1779,7 @@ func init() {
 	taskCmd.AddCommand(taskApproveCmd)
 	taskCmd.AddCommand(taskAnnotateCmd)
 	taskCmd.AddCommand(taskNotesCmd)
+	taskCmd.AddCommand(taskLinkCmd)
 	taskCmd.AddCommand(taskCheckpointDiffCmd)
 	taskCmd.AddCommand(taskTimeTravelCmd)
 	taskCmd.AddCommand(taskExecCmd)

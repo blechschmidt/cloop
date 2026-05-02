@@ -144,6 +144,13 @@ func buildPromptFromPlan(goal string, plan *pm.Plan) string {
 				}
 				b.WriteString(fmt.Sprintf(" [outcome: %s]", strings.ReplaceAll(result, "\n", " ")))
 			}
+			for _, lnk := range t.Links {
+				label := lnk.Label
+				if label == "" {
+					label = lnk.URL
+				}
+				b.WriteString(fmt.Sprintf(" [%s: %s]", lnk.Kind, label))
+			}
 			b.WriteString("\n")
 		}
 		b.WriteString("\n")
