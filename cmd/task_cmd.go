@@ -1769,5 +1769,6 @@ func init() {
 	taskCmd.AddCommand(taskCheckpointDiffCmd)
 	taskCmd.AddCommand(taskTimeTravelCmd)
 	taskCmd.AddCommand(taskExecCmd)
+	taskCmd.AddCommand(taskSummarizeCmd)
 	rootCmd.AddCommand(taskCmd)
 }
