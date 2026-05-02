@@ -1,12 +1,17 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/blechschmidt/cloop/pkg/config"
+	"github.com/blechschmidt/cloop/pkg/plandiff"
 	"github.com/blechschmidt/cloop/pkg/pm"
+	"github.com/blechschmidt/cloop/pkg/provider"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
@@ -57,18 +62,27 @@ var planHistoryCmd = &cobra.Command{
 	},
 }
 
+var (
+	planDiffNoAI    bool
+	planDiffProvider string
+	planDiffModel   string
+)
+
 var planDiffCmd = &cobra.Command{
 	Use:   "diff [v1] [v2]",
-	Short: "Show diff between two plan versions",
-	Long: `Show a colorized diff between two plan versions.
+	Short: "Show diff between two plan versions with AI narrative",
+	Long: `Show a colorized diff between two plan versions, followed by an AI-generated
+plain-English narrative explaining what the changes mean for the project direction.
 
-  cloop plan diff          # diff between the last two snapshots
-  cloop plan diff 3        # diff between v3 and the latest snapshot
-  cloop plan diff 2 5      # diff between v2 and v5`,
+  cloop plan diff              # diff between the last two snapshots
+  cloop plan diff 3            # diff between v3 and the latest snapshot
+  cloop plan diff 2 5          # diff between v2 and v5
+  cloop plan diff --no-ai      # structural diff only, skip AI narrative`,
 	Args: cobra.MaximumNArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		workdir, _ := os.Getwd()
-		if _, err := state.Load(workdir); err != nil {
+		s, err := state.Load(workdir)
+		if err != nil {
 			return err
 		}
 
@@ -123,8 +137,85 @@ var planDiffCmd = &cobra.Command{
 			return fmt.Errorf("loading v%d: %w", v2, err)
 		}
 
-		diff := pm.DiffPlans(snap1.Plan, snap2.Plan)
-		printPlanDiff(snap1, snap2, diff)
+		d := pm.DiffPlans(snap1.Plan, snap2.Plan)
+		printPlanDiff(snap1, snap2, d)
+
+		if planDiffNoAI {
+			return nil
+		}
+
+		// Build provider for AI narrative.
+		cfg, err := config.Load(workdir)
+		if err != nil {
+			return fmt.Errorf("loading config: %w", err)
+		}
+		applyEnvOverrides(cfg)
+
+		pName := planDiffProvider
+		if pName == "" {
+			pName = cfg.Provider
+		}
+		if pName == "" && s.Provider != "" {
+			pName = s.Provider
+		}
+		if pName == "" {
+			pName = autoSelectProvider()
+		}
+
+		model := planDiffModel
+		if model == "" {
+			switch pName {
+			case "anthropic":
+				model = cfg.Anthropic.Model
+			case "openai":
+				model = cfg.OpenAI.Model
+			case "ollama":
+				model = cfg.Ollama.Model
+			case "claudecode":
+				model = cfg.ClaudeCode.Model
+			}
+		}
+		if model == "" {
+			model = s.Model
+		}
+
+		provCfg := provider.ProviderConfig{
+			Name:             pName,
+			AnthropicAPIKey:  cfg.Anthropic.APIKey,
+			AnthropicBaseURL: cfg.Anthropic.BaseURL,
+			OpenAIAPIKey:     cfg.OpenAI.APIKey,
+			OpenAIBaseURL:    cfg.OpenAI.BaseURL,
+			OllamaBaseURL:    cfg.Ollama.BaseURL,
+		}
+		prov, err := provider.Build(provCfg)
+		if err != nil {
+			return fmt.Errorf("provider: %w", err)
+		}
+
+		dimColor := color.New(color.Faint)
+		narrateColor := color.New(color.FgCyan)
+
+		fmt.Println()
+		dimColor.Printf("Generating AI narrative (provider: %s)...\n\n", prov.Name())
+
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+
+		narrative, err := plandiff.Narrate(ctx, prov, model, plandiff.NarrateInput{
+			Snap1: snap1,
+			Snap2: snap2,
+			Diff:  d,
+		})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: AI narrative failed: %v\n", err)
+			dimColor.Printf("(Use --no-ai to skip the narrative.)\n")
+			return nil
+		}
+
+		narrateColor.Println("AI Narrative")
+		fmt.Println(strings.Repeat("─", 72))
+		fmt.Println(narrative)
+		fmt.Println(strings.Repeat("─", 72))
 		return nil
 	},
 }
@@ -212,6 +303,9 @@ func printPlanDiff(snap1, snap2 *pm.Snapshot, diff pm.PlanDiff) {
 }
 
 func init() {
+	planDiffCmd.Flags().BoolVar(&planDiffNoAI, "no-ai", false, "Skip AI narrative and show only structural diff")
+	planDiffCmd.Flags().StringVar(&planDiffProvider, "provider", "", "AI provider for narrative (anthropic, openai, ollama, claudecode)")
+	planDiffCmd.Flags().StringVar(&planDiffModel, "model", "", "Model override for narrative provider")
 	planCmd.AddCommand(planHistoryCmd)
 	planCmd.AddCommand(planDiffCmd)
 	rootCmd.AddCommand(planCmd)
