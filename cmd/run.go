@@ -83,6 +83,7 @@ var (
 	noContextInject      bool
 	requireApproval      bool
 	skipClarify          bool
+	autoEvalRun          bool
 )
 
 var runCmd = &cobra.Command{
@@ -245,6 +246,7 @@ Press Ctrl+C to pause gracefully.`,
 			NoCodeContextInject: noContextInject,
 			RequireApproval:     requireApproval,
 			SkipClarify:         effectiveSkipClarify,
+			AutoEval:            autoEvalRun,
 			SlackWebhookURL:   cfg.Notify.SlackWebhook,
 			DiscordWebhookURL: cfg.Notify.DiscordWebhook,
 			Hooks: hooks.Config{
@@ -523,5 +525,6 @@ func init() {
 	runCmd.Flags().BoolVar(&noContextInject, "no-context-inject", false, "PM mode: disable automatic codebase context snippet injection in task prompts (keyword-matched source files are injected by default)")
 	runCmd.Flags().BoolVar(&requireApproval, "require-approval", false, "PM mode: require interactive approval (y/n/skip/edit) before executing P0/P1 tasks or tasks with requires_approval:true; pre-approved tasks (via 'cloop task approve') are not re-prompted")
 	runCmd.Flags().BoolVar(&skipClarify, "skip-clarify", false, "PM mode: skip the interactive goal clarification Q&A dialog before plan decomposition (useful for automation and CI)")
+	runCmd.Flags().BoolVar(&autoEvalRun, "auto-eval", false, "PM mode: automatically score each successful task with the default quality rubric and save to .cloop/evals/<task-id>.json (sequential only)")
 	rootCmd.AddCommand(runCmd)
 }

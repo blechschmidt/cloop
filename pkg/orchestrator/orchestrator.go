@@ -18,6 +18,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/consensus"
 	"github.com/blechschmidt/cloop/pkg/cost"
 	cloopenv "github.com/blechschmidt/cloop/pkg/env"
+	"github.com/blechschmidt/cloop/pkg/eval"
 	"github.com/blechschmidt/cloop/pkg/secret"
 	"github.com/blechschmidt/cloop/pkg/diagnosis"
 	cloopgit "github.com/blechschmidt/cloop/pkg/git"
@@ -290,6 +291,12 @@ type Config struct {
 	// normally runs before pm.Decompose() when stdin is a TTY. Set this to true
 	// for automation, CI, or when the goal is already fully specified.
 	SkipClarify bool
+
+	// AutoEval enables automatic AI quality scoring after each successful task
+	// in PM sequential mode. After TASK_DONE the orchestrator scores the task
+	// output against the default rubric and saves the result to
+	// .cloop/evals/<task-id>.json. The weighted average is printed to the terminal.
+	AutoEval bool
 }
 
 type Orchestrator struct {
@@ -1875,6 +1882,31 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 					}
 					pm.AddAnnotation(task, review.Author, fmt.Sprintf("[%s] %s", verdict, annotText))
 					s.Save()
+				}
+			}
+		}
+
+		// Auto-eval: score task output against default rubric after successful completion.
+		if o.config.AutoEval && task.Status == pm.TaskDone {
+			evalOutput := task.Result
+			if task.ArtifactPath != "" {
+				if data, readErr := os.ReadFile(task.ArtifactPath); readErr == nil {
+					evalOutput = string(data)
+				}
+			}
+			if evalOutput != "" {
+				dimColor.Printf("  Running post-task quality evaluation...\n")
+				evalResult, evalErr := eval.Evaluate(ctx, o.provider, s.Model, o.config.StepTimeout, o.config.WorkDir, task, evalOutput, eval.DefaultRubric())
+				if evalErr != nil {
+					dimColor.Printf("  eval error (ignored): %v\n", evalErr)
+				} else {
+					scoreColor := successColor
+					if evalResult.Weighted < 5 {
+						scoreColor = failColor
+					} else if evalResult.Weighted < 7 {
+						scoreColor = color.New(color.FgYellow, color.Bold)
+					}
+					scoreColor.Printf("  Eval score: %.2f/10 (saved to .cloop/evals/%d.json)\n", evalResult.Weighted, task.ID)
 				}
 			}
 		}
