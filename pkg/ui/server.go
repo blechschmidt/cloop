@@ -175,6 +175,7 @@ func (s *Server) Start() error {
 	// Multi-project dashboard
 	mux.HandleFunc("/api/projects", s.handleProjects)
 	mux.HandleFunc("/api/projects/events", s.handleProjectsEvents)
+	mux.HandleFunc("POST /api/projects/new", s.handleProjectNew)
 	mux.HandleFunc("POST /api/projects/{idx}/run", s.handleProjectRun)
 	mux.HandleFunc("POST /api/projects/{idx}/stop", s.handleProjectStop)
 
@@ -1713,6 +1714,106 @@ func (s *Server) handleProjectStop(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]interface{}{"ok": true, "project": entry.Name})
 }
 
+// handleProjectNew creates a new cloop project directory, initialises it, and
+// registers it in the multi-project registry so it appears in the dashboard.
+//
+// POST /api/projects/new
+// Body: { "dir": "/abs/or/relative/path", "goal": "...", "provider": "...",
+//         "model": "...", "pmMode": false, "autoRun": false }
+func (s *Server) handleProjectNew(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Dir      string `json:"dir"`
+		Goal     string `json:"goal"`
+		Provider string `json:"provider"`
+		Model    string `json:"model"`
+		PMMode   bool   `json:"pmMode"`
+		AutoRun  bool   `json:"autoRun"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonErr(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	req.Goal = strings.TrimSpace(req.Goal)
+	req.Dir = strings.TrimSpace(req.Dir)
+	if req.Goal == "" {
+		jsonErr(w, "goal is required", http.StatusBadRequest)
+		return
+	}
+	if req.Dir == "" {
+		jsonErr(w, "dir is required", http.StatusBadRequest)
+		return
+	}
+
+	// Resolve to absolute path.
+	abs, err := filepath.Abs(req.Dir)
+	if err != nil {
+		jsonErr(w, "invalid dir: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// Create the directory if it does not exist.
+	if err := os.MkdirAll(abs, 0o755); err != nil {
+		jsonErr(w, "cannot create dir: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Run `cloop init <goal>` in that directory.
+	exe, err := os.Executable()
+	if err != nil {
+		exe = "cloop"
+	}
+	args := []string{"init", req.Goal}
+	if req.Provider != "" {
+		args = append(args, "--provider", req.Provider)
+	}
+	if req.Model != "" {
+		args = append(args, "--model", req.Model)
+	}
+	if req.PMMode {
+		args = append(args, "--pm")
+	}
+	cmd := exec.Command(exe, args...)
+	cmd.Dir = abs
+	if out, initErr := cmd.CombinedOutput(); initErr != nil {
+		jsonErr(w, "cloop init failed: "+string(out), http.StatusInternalServerError)
+		return
+	}
+
+	// Register the new project in the multi-project registry.
+	if regErr := multiui.AddPaths([]string{abs}); regErr != nil {
+		// Non-fatal: project is created, just not registered.
+		_ = regErr
+	}
+
+	// Optionally start a run immediately.
+	if req.AutoRun {
+		runArgs := []string{"run"}
+		if req.PMMode {
+			runArgs = append(runArgs, "--pm")
+		}
+		runCmd := exec.Command(exe, runArgs...)
+		runCmd.Dir = abs
+		runCmd.Stdout = os.Stderr
+		runCmd.Stderr = os.Stderr
+		if startErr := runCmd.Start(); startErr == nil {
+			go func() { _ = runCmd.Wait() }()
+		}
+	}
+
+	// Refresh project cache and return updated project list.
+	s.refreshProjectStatuses()
+	entries := s.allProjectEntries()
+	newIdx := -1
+	for i, e := range entries {
+		if e.Path == abs {
+			newIdx = i
+			break
+		}
+	}
+
+	jsonOK(w, map[string]interface{}{"ok": true, "dir": abs, "project_idx": newIdx})
+}
+
 // handleTimeline returns timeline bar data derived from pkg/timeline for the
 // SVG Gantt chart in the web UI. Response JSON:
 //
@@ -2150,6 +2251,40 @@ const dashboardHTML = `<!DOCTYPE html>
   .login-error { font-size: 12px; color: var(--red); display: none; }
   .login-error.visible { display: block; }
 
+  /* ── Project selector (header, multi-project mode) ── */
+  .proj-selector-wrap {
+    display: none; position: relative; flex-shrink: 0;
+  }
+  .proj-selector-wrap.visible { display: flex; align-items: center; gap: 6px; }
+  .proj-selector-btn {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 5px 10px; border-radius: var(--radius);
+    border: 1px solid var(--border); background: var(--surface);
+    color: var(--text); font-size: 12px; font-weight: 500;
+    cursor: pointer; white-space: nowrap; max-width: 200px; overflow: hidden; text-overflow: ellipsis;
+  }
+  .proj-selector-btn:hover { border-color: var(--accent); }
+  .proj-selector-btn .arrow { font-size: 9px; color: var(--muted); margin-left: 2px; flex-shrink: 0; }
+  .proj-selector-dropdown {
+    display: none; position: absolute; top: calc(100% + 4px); left: 0;
+    min-width: 220px; max-width: 320px;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius); box-shadow: 0 8px 24px rgba(0,0,0,.4);
+    z-index: 50; overflow: hidden;
+  }
+  .proj-selector-dropdown.open { display: block; }
+  .proj-selector-item {
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 12px; font-size: 12px; cursor: pointer;
+    border-bottom: 1px solid var(--border);
+    overflow: hidden;
+  }
+  .proj-selector-item:last-child { border-bottom: none; }
+  .proj-selector-item:hover { background: rgba(88,166,255,.08); }
+  .proj-selector-item.active { background: rgba(88,166,255,.12); color: var(--accent); }
+  .proj-selector-item .pi-name { font-weight: 600; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .proj-selector-item .pi-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+
   /* ── Project cards (multi-project tab) ── */
   .proj-card {
     background: var(--surface);
@@ -2161,7 +2296,9 @@ const dashboardHTML = `<!DOCTYPE html>
     gap: 14px;
     flex-wrap: wrap;
   }
+  .proj-card { cursor: pointer; }
   .proj-card:hover { border-color: var(--accent); }
+  .proj-card.selected { border-color: var(--accent); background: rgba(88,166,255,.06); }
   .proj-health-dot {
     width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0;
   }
@@ -2398,7 +2535,18 @@ const dashboardHTML = `<!DOCTYPE html>
   <header>
     <h1>cloop <span>dashboard</span></h1>
     <div class="live-dot" id="liveDot"></div>
-    <!-- Project breadcrumb (shown in multi-project mode when a project is selected) -->
+    <!-- Project selector (shown in multi-project mode) -->
+    <div class="proj-selector-wrap" id="projSelectorWrap">
+      <button class="tab-btn" onclick="clearProjectSelection()" style="padding:4px 10px;font-size:12px" id="projBackBtn" title="Back to all projects">&#8592;</button>
+      <div style="position:relative">
+        <button class="proj-selector-btn" id="projSelectorBtn" onclick="toggleProjectSelector()" title="Switch project">
+          <span id="projSelectorLabel">All Projects</span>
+          <span class="arrow">&#9660;</span>
+        </button>
+        <div class="proj-selector-dropdown" id="projSelectorDropdown"></div>
+      </div>
+    </div>
+    <!-- Project breadcrumb (kept for compatibility; hidden since selector replaces it) -->
     <div id="projectBreadcrumb" style="display:none;align-items:center;gap:8px;flex-shrink:0">
       <button class="tab-btn" onclick="clearProjectSelection()" style="padding:4px 10px;font-size:12px">&#8592; Projects</button>
       <span id="breadcrumbName" style="font-weight:600;color:var(--accent);font-size:13px;white-space:nowrap"></span>
@@ -2860,6 +3008,7 @@ const dashboardHTML = `<!DOCTYPE html>
       <div class="section">
         <div class="section-title" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
           Projects
+          <button class="btn primary" style="padding:4px 10px;font-size:12px" onclick="openNewProjectModal()">+ New Project</button>
           <button id="toggleCompletedProjectsBtn" class="btn" style="margin-left:auto;padding:3px 10px;font-size:11px" onclick="toggleCompletedProjects()">Show completed</button>
         </div>
         <div id="projListEmpty" style="display:none;color:var(--muted);font-size:13px;padding:12px 0">
@@ -2871,6 +3020,46 @@ const dashboardHTML = `<!DOCTYPE html>
     </div>
 
   </main>
+</div>
+
+<!-- New Project modal -->
+<div id="new-project-overlay" onclick="if(event.target===this)closeNewProjectModal()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
+  <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;width:480px;max-width:95vw">
+    <h2 style="font-size:15px;font-weight:600;margin-bottom:16px">New Project</h2>
+    <div class="form-group">
+      <label class="form-label">Directory *</label>
+      <input class="form-input" id="npDir" placeholder="/path/to/new-project">
+    </div>
+    <div class="form-group">
+      <label class="form-label">Goal *</label>
+      <textarea class="form-textarea" id="npGoal" placeholder="What do you want to build?" style="min-height:70px"></textarea>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label class="form-label">Provider</label>
+        <select class="form-select" id="npProvider">
+          <option value="">default</option>
+          <option value="claudecode">claudecode</option>
+          <option value="anthropic">anthropic</option>
+          <option value="openai">openai</option>
+          <option value="ollama">ollama</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Model</label>
+        <input class="form-input" id="npModel" placeholder="leave blank for default">
+      </div>
+    </div>
+    <div class="adv-grid" style="margin-bottom:12px">
+      <label class="adv-label"><input type="checkbox" id="npPMMode"> PM mode</label>
+      <label class="adv-label"><input type="checkbox" id="npAutoRun"> Start run immediately</label>
+    </div>
+    <div id="npError" style="font-size:12px;color:var(--red);margin-bottom:8px;display:none"></div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeNewProjectModal()">Cancel</button>
+      <button class="btn primary" onclick="submitNewProject()">Create Project</button>
+    </div>
+  </div>
 </div>
 
 <!-- Delete confirmation modal -->
@@ -2997,16 +3186,27 @@ window.switchTab = function(name) {
   if (panel) panel.classList.add('active');
   if (btn)   btn.classList.add('active');
 
-  if (name === 'settings') loadConfig();
-  if (name === 'tasks' && appState) renderTasks(appState);
-  if (name === 'projects') loadProjects();
-  if (name === 'chat') loadChatHistory();
-  if (name === 'timeline') loadTimeline();
+  // In multi-project mode, re-fetch state for the selected project when
+  // switching to any project-scoped tab so the data is always current.
+  const projectScopedTabs = ['overview','tasks','timeline','chat','suggest'];
+  if (isMultiProject && selectedProjectIdx !== null && projectScopedTabs.includes(name)) {
+    api(pUrl('/api/state')).then(s => render(s)).catch(() => {
+      if (name === 'tasks' && appState) renderTasks(appState);
+    });
+    if (name === 'timeline') loadTimeline();
+    if (name === 'chat') loadChatHistory();
+  } else {
+    if (name === 'settings') loadConfig();
+    if (name === 'tasks' && appState) renderTasks(appState);
+    if (name === 'projects') loadProjects();
+    if (name === 'chat') loadChatHistory();
+    if (name === 'timeline') loadTimeline();
+  }
 
-  // In multi-project mode, show/hide breadcrumb and project-scoped tabs.
+  // In multi-project mode, show/hide breadcrumb and project selector.
   if (isMultiProject) {
     const bc = document.getElementById('projectBreadcrumb');
-    const projectScopedTabs = ['overview','tasks','timeline','chat','suggest'];
+    updateProjectSelector();
     if (name === 'projects' || name === 'settings') {
       // Global tabs: hide breadcrumb
       if (bc) bc.style.display = 'none';
@@ -3425,6 +3625,7 @@ function connectSSE() {
     try {
       const d = JSON.parse(e.data);
       renderProjects(d.projects || [], d.stats || {});
+      updateProjectSelector();
       // In multi-project mode, keep the selected project's state fresh.
       if (isMultiProject && selectedProjectIdx !== null) {
         api(pUrl('/api/state')).then(s => render(s)).catch(() => {});
@@ -3464,6 +3665,7 @@ function loadProjects() {
     const projects = d.projects || [];
     isMultiProject = d.multi_project === true || projects.length > 1;
     renderProjects(projects, d.stats || {});
+    updateProjectSelector();
   }).catch(() => {});
 }
 
@@ -3515,15 +3717,17 @@ function renderProjects(projects, stats) {
   }
 
   list.innerHTML = visibleI.map(({p, i: idx}) => {
-    const health = p.health || 'unknown';
-    const pct    = p.total_tasks > 0 ? Math.round(p.done_tasks / p.total_tasks * 100) : 0;
-    const goal   = p.goal ? esc(p.goal.substring(0, 80)) : '<em style="color:var(--muted)">no goal set</em>';
+    const health  = p.health || 'unknown';
+    const pct     = p.total_tasks > 0 ? Math.round(p.done_tasks / p.total_tasks * 100) : 0;
+    const goal    = p.goal ? esc(p.goal.substring(0, 80)) : '<em style="color:var(--muted)">no goal set</em>';
     const lastAct = p.last_activity ? relTime(new Date(p.last_activity)) : '—';
     const taskInfo = p.pm_mode
       ? p.done_tasks + '/' + p.total_tasks + ' tasks'
       : (p.total_steps ? p.total_steps + ' steps' : 'no steps');
+    const selCls  = (selectedProjectIdx === idx) ? ' selected' : '';
+    const nameSafe = JSON.stringify(p.name);
     return ` + "`" + `
-      <div class="proj-card">
+      <div class="proj-card${selCls}" onclick="openProject(${idx},${nameSafe})" title="Open project">
         <div class="proj-health-dot ${health}"></div>
         <div class="proj-name">${esc(p.name)}</div>
         <div class="proj-goal" title="${esc(p.goal || '')}">${goal}</div>
@@ -3534,8 +3738,7 @@ function renderProjects(projects, stats) {
           <span title="last activity">${lastAct}</span>
           ${p.provider ? ` + "`" + `<span>${esc(p.provider)}</span>` + "`" + ` : ''}
         </div>
-        <div class="proj-actions">
-          <button class="btn" onclick="openProject(${idx},${JSON.stringify(esc(p.name))})" title="View scoped tabs for this project">&#128269; Open</button>
+        <div class="proj-actions" onclick="event.stopPropagation()">
           <button class="btn success" onclick="projectRun(${idx},false)" title="Run">&#9654; Run</button>
           <button class="btn primary"  onclick="projectRun(${idx},true)"  title="Run PM">&#9654; PM</button>
           <button class="btn danger"   onclick="projectStop(${idx})"     title="Stop">&#9632; Stop</button>
@@ -3573,6 +3776,15 @@ window.openProject = function(idx, name) {
   if (bc) { bc.style.display = 'flex'; }
   const bn = document.getElementById('breadcrumbName');
   if (bn) bn.textContent = name;
+  // Update selector label immediately.
+  const label = document.getElementById('projSelectorLabel');
+  if (label) label.textContent = name;
+  const wrap = document.getElementById('projSelectorWrap');
+  if (wrap) wrap.classList.add('visible');
+  // Refresh project list highlight without changing tab.
+  if (window._lastProjectsData) {
+    renderProjects(window._lastProjectsData.projects, window._lastProjectsData.stats);
+  }
   switchTab('overview');
   api(pUrl('/api/state')).then(s => render(s)).catch(() => {});
 };
@@ -3584,7 +3796,109 @@ window.clearProjectSelection = function() {
   appState            = null;
   const bc = document.getElementById('projectBreadcrumb');
   if (bc) bc.style.display = 'none';
+  const sw = document.getElementById('projSelectorWrap');
+  if (sw) sw.classList.remove('visible');
   switchTab('projects');
+};
+
+// ── Project selector dropdown ─────────────────────────────────────────────────
+
+// Populates and shows/hides the project selector based on isMultiProject.
+function updateProjectSelector() {
+  const wrap = document.getElementById('projSelectorWrap');
+  const label = document.getElementById('projSelectorLabel');
+  if (!wrap) return;
+  if (!isMultiProject) { wrap.classList.remove('visible'); return; }
+  wrap.classList.add('visible');
+  if (label) label.textContent = selectedProjectIdx !== null ? selectedProjectName : 'All Projects';
+  // Populate dropdown items from cached project data.
+  const drop = document.getElementById('projSelectorDropdown');
+  if (!drop) return;
+  const projects = (window._lastProjectsData && window._lastProjectsData.projects) || [];
+  drop.innerHTML = projects.map((p, i) => {
+    const health = p.health || 'unknown';
+    const activeCls = selectedProjectIdx === i ? ' active' : '';
+    const dotStyle = 'background:' + healthColor(health);
+    return '<div class="proj-selector-item'+activeCls+'" onclick="selectProjectFromDropdown('+i+','+JSON.stringify(p.name)+')">' +
+      '<span class="pi-dot" style="'+dotStyle+'"></span>' +
+      '<span class="pi-name">'+esc(p.name)+'</span>' +
+      '<span style="font-size:10px;color:var(--muted)">'+health+'</span>' +
+      '</div>';
+  }).join('');
+}
+
+function healthColor(h) {
+  const map = {running:'var(--cyan)',complete:'var(--green)',failed:'var(--red)',stalled:'var(--yellow)',idle:'var(--muted)',unknown:'var(--border)'};
+  return map[h] || map.unknown;
+}
+
+window.toggleProjectSelector = function() {
+  const drop = document.getElementById('projSelectorDropdown');
+  if (!drop) return;
+  drop.classList.toggle('open');
+};
+
+// Close dropdown on outside click.
+document.addEventListener('click', function(e) {
+  const wrap = document.getElementById('projSelectorWrap');
+  if (wrap && !wrap.contains(e.target)) {
+    const drop = document.getElementById('projSelectorDropdown');
+    if (drop) drop.classList.remove('open');
+  }
+});
+
+window.selectProjectFromDropdown = function(idx, name) {
+  const drop = document.getElementById('projSelectorDropdown');
+  if (drop) drop.classList.remove('open');
+  if (selectedProjectIdx === idx) return; // already selected
+  openProject(idx, name);
+};
+
+// ── New Project modal ─────────────────────────────────────────────────────────
+
+window.openNewProjectModal = function() {
+  document.getElementById('npDir').value     = '';
+  document.getElementById('npGoal').value    = '';
+  document.getElementById('npModel').value   = '';
+  document.getElementById('npProvider').value = '';
+  document.getElementById('npPMMode').checked = false;
+  document.getElementById('npAutoRun').checked = false;
+  document.getElementById('npError').style.display = 'none';
+  const el = document.getElementById('new-project-overlay');
+  if (el) { el.style.display = 'flex'; }
+};
+
+window.closeNewProjectModal = function() {
+  const el = document.getElementById('new-project-overlay');
+  if (el) el.style.display = 'none';
+};
+
+window.submitNewProject = function() {
+  const dir      = document.getElementById('npDir').value.trim();
+  const goal     = document.getElementById('npGoal').value.trim();
+  const provider = document.getElementById('npProvider').value;
+  const model    = document.getElementById('npModel').value.trim();
+  const pmMode   = document.getElementById('npPMMode').checked;
+  const autoRun  = document.getElementById('npAutoRun').checked;
+  const errEl    = document.getElementById('npError');
+  if (!dir)  { errEl.textContent = 'Directory is required'; errEl.style.display = ''; return; }
+  if (!goal) { errEl.textContent = 'Goal is required'; errEl.style.display = ''; return; }
+  errEl.style.display = 'none';
+  api('/api/projects/new', {dir, goal, provider, model, pmMode, autoRun}).then(d => {
+    if (!d.ok) { errEl.textContent = d.error || 'Failed to create project'; errEl.style.display = ''; return; }
+    closeNewProjectModal();
+    toast('Project created: ' + dir, 'ok');
+    // Reload projects list and open the new project.
+    api('/api/projects').then(pd => {
+      const projects = pd.projects || [];
+      isMultiProject = pd.multi_project === true || projects.length > 1;
+      renderProjects(projects, pd.stats || {});
+      updateProjectSelector();
+      if (d.project_idx !== undefined && d.project_idx >= 0) {
+        openProject(d.project_idx, dir.split('/').pop());
+      }
+    }).catch(() => {});
+  }).catch(() => toast('Request failed', 'err'));
 };
 
 // ── Timeline (Gantt) tab ─────────────────────────────────────────────────────
@@ -4517,6 +4831,7 @@ function checkAuthAndInit() {
       if (isMultiProject) {
         // In multi-project mode, Projects list is the landing page.
         renderProjects(projects, pd.stats || {});
+        updateProjectSelector();
         switchTab('projects');
       } else {
         r.json().then(s => render(s)).catch(() => {});
