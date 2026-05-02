@@ -1,8 +1,11 @@
 package cmd
 
 import (
+	"encoding/csv"
+	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -12,14 +15,19 @@ import (
 )
 
 var exportOutput string
+var exportFormat string
 
 var exportCmd = &cobra.Command{
 	Use:   "export",
-	Short: "Export session as a markdown report",
-	Long: `Export the current cloop session as a markdown report.
+	Short: "Export session as a report (markdown, json, or csv)",
+	Long: `Export the current cloop session as a report.
 
-Includes the goal, status, token usage, step history, and task plan (in PM mode).
-Useful for documenting what the AI did or sharing results with teammates.`,
+Supported formats (--format):
+  markdown  Full session report with goal, tasks, step history (default)
+  json      Machine-readable full state dump
+  csv       Task list with id,title,status,priority,role columns
+
+Useful for documenting what the AI did, CI summaries, dashboards, and audit trails.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		workdir, _ := os.Getwd()
 		s, err := state.Load(workdir)
@@ -27,7 +35,25 @@ Useful for documenting what the AI did or sharing results with teammates.`,
 			return err
 		}
 
-		report := buildReport(s)
+		var report string
+		switch exportFormat {
+		case "json":
+			data, err := buildJSONReport(s)
+			if err != nil {
+				return err
+			}
+			report = string(data)
+		case "csv":
+			data, err := buildCSVReport(s)
+			if err != nil {
+				return err
+			}
+			report = data
+		case "markdown", "md", "":
+			report = buildReport(s)
+		default:
+			return fmt.Errorf("unknown format %q: supported formats are markdown, json, csv", exportFormat)
+		}
 
 		if exportOutput == "" || exportOutput == "-" {
 			fmt.Print(report)
@@ -149,6 +175,44 @@ func buildReport(s *state.ProjectState) string {
 	return b.String()
 }
 
+// buildJSONReport returns a JSON dump of the full state.
+func buildJSONReport(s *state.ProjectState) ([]byte, error) {
+	return json.MarshalIndent(s, "", "  ")
+}
+
+// buildCSVReport returns a CSV with columns: id,title,status,priority,role
+// Only meaningful in PM mode; falls back to a header-only CSV if no plan exists.
+func buildCSVReport(s *state.ProjectState) (string, error) {
+	var sb strings.Builder
+	w := csv.NewWriter(&sb)
+
+	header := []string{"id", "title", "status", "priority", "role"}
+	if err := w.Write(header); err != nil {
+		return "", fmt.Errorf("csv write: %w", err)
+	}
+
+	if s.Plan != nil {
+		for _, t := range s.Plan.Tasks {
+			row := []string{
+				strconv.Itoa(t.ID),
+				t.Title,
+				string(t.Status),
+				strconv.Itoa(t.Priority),
+				string(t.Role),
+			}
+			if err := w.Write(row); err != nil {
+				return "", fmt.Errorf("csv write row: %w", err)
+			}
+		}
+	}
+
+	w.Flush()
+	if err := w.Error(); err != nil {
+		return "", fmt.Errorf("csv flush: %w", err)
+	}
+	return sb.String(), nil
+}
+
 func taskStatusIcon(status pm.TaskStatus) string {
 	switch status {
 	case pm.TaskDone:
@@ -171,5 +235,6 @@ func escapeMD(s string) string {
 
 func init() {
 	exportCmd.Flags().StringVarP(&exportOutput, "output", "o", "", "Write report to file (default: stdout)")
+	exportCmd.Flags().StringVarP(&exportFormat, "format", "f", "markdown", "Output format: markdown, json, csv")
 	rootCmd.AddCommand(exportCmd)
 }
