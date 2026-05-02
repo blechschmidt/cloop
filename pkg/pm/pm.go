@@ -198,6 +198,12 @@ type Task struct {
 	// ChainInput holds the previous task's output when this task is part of a pipeline
 	// chain (tagged "chain:<uuid>"). It is runtime-only and never persisted.
 	ChainInput string `json:"-"`
+	// OnSuccess lists task IDs to activate (keep pending) when this task succeeds.
+	// Tasks in OnFailure are skipped when the success branch is taken.
+	OnSuccess []string `json:"on_success,omitempty"`
+	// OnFailure lists task IDs to activate (keep pending) when this task fails.
+	// Tasks in OnSuccess are skipped when the failure branch is taken.
+	OnFailure []string `json:"on_failure,omitempty"`
 }
 
 // Plan is the full task plan for a goal.

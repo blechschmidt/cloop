@@ -2208,6 +2208,18 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		// Alert rule evaluation: check thresholds after each task completion.
 		o.evaluateAlerts(s, task)
 
+		// Conditional branching: activate the matching branch, skip the other.
+		if activations := pm.ResolveBranch(s.Plan, task); len(activations) > 0 {
+			branchColor := color.New(color.FgCyan)
+			for _, a := range activations {
+				if a.Activated {
+					branchColor.Printf("  branch [%s] activated  -> task %d: %s\n", a.Branch, a.TaskID, a.Title)
+				} else {
+					color.New(color.Faint).Printf("  branch [%s] skipped    -> task %d: %s\n", a.Branch, a.TaskID, a.Title)
+				}
+			}
+		}
+
 		s.Save()
 
 		if o.config.StepDelay > 0 {
@@ -2802,6 +2814,18 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 
 			// Persist full AI response as a Markdown artifact file.
 			o.writeTaskArtifact(task, result.Output)
+
+			// Conditional branching: activate the matching branch, skip the other.
+			if activations := pm.ResolveBranch(s.Plan, task); len(activations) > 0 {
+				branchColor := color.New(color.FgCyan)
+				for _, a := range activations {
+					if a.Activated {
+						branchColor.Printf("  branch [%s] activated  -> task %d: %s\n", a.Branch, a.TaskID, a.Title)
+					} else {
+						color.New(color.Faint).Printf("  branch [%s] skipped    -> task %d: %s\n", a.Branch, a.TaskID, a.Title)
+					}
+				}
+			}
 
 			tooManyErrors := consecutiveErrors >= maxConsecutiveErrors
 			s.Save()
