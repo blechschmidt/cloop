@@ -9,6 +9,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/profile"
 	"github.com/blechschmidt/cloop/pkg/state"
 	clooptemplate "github.com/blechschmidt/cloop/pkg/template"
+	"github.com/blechschmidt/cloop/pkg/wizard"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 )
@@ -23,6 +24,7 @@ var (
 	initProfile     string
 	initMaxMinutes  int
 	initSkipClarify bool
+	initInteractive bool
 )
 
 var initCmd = &cobra.Command{
@@ -41,6 +43,67 @@ Examples:
 	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		workdir, _ := os.Getwd()
+
+		// ── Interactive wizard ────────────────────────────────────────────────
+		// Launch when -i/--interactive is set, OR when no args/flags that would
+		// define a goal are present and stdin is a TTY.
+		autoInteractive := len(args) == 0 && initTemplate == "" && !cmd.Flags().Changed("provider") && wizard.IsTTY()
+		if initInteractive || autoInteractive {
+			res, err := wizard.Run()
+			if err != nil {
+				return err
+			}
+			// Map wizard result back onto the flag variables so the rest of the
+			// function (profile, template, state init) works without changes.
+			if len(args) == 0 {
+				args = []string{res.Goal}
+			}
+			if res.Provider != "" && !cmd.Flags().Changed("provider") {
+				initProvider = res.Provider
+			}
+			if res.Model != "" && !cmd.Flags().Changed("model") {
+				model = res.Model
+			}
+			if res.MaxSteps > 0 && !cmd.Flags().Changed("max-steps") {
+				maxSteps = res.MaxSteps
+			}
+			if res.MaxParallel > 0 {
+				// Write max_parallel into config.yaml after init via a deferred action.
+				defer func(mp int) {
+					cfg, _ := config.Load(workdir)
+					if cfg == nil {
+						cfg = config.Default()
+					}
+					if cfg.MaxParallel == 0 {
+						cfg.MaxParallel = mp
+						_ = config.Save(workdir, cfg)
+					}
+				}(res.MaxParallel)
+			}
+			if res.PMMode && !cmd.Flags().Changed("pm") {
+				initPMMode = true
+			}
+			if res.APIKey != "" {
+				// Persist the API key into config.yaml.
+				defer func(provider, key string) {
+					cfg, _ := config.Load(workdir)
+					if cfg == nil {
+						cfg = config.Default()
+					}
+					switch provider {
+					case "anthropic":
+						if cfg.Anthropic.APIKey == "" {
+							cfg.Anthropic.APIKey = key
+						}
+					case "openai":
+						if cfg.OpenAI.APIKey == "" {
+							cfg.OpenAI.APIKey = key
+						}
+					}
+					_ = config.Save(workdir, cfg)
+				}(res.Provider, res.APIKey)
+			}
+		}
 
 		// Resolve template (if requested) before determining goal.
 		var tmpl *clooptemplate.Template
@@ -222,5 +285,6 @@ func init() {
 	initCmd.Flags().StringVar(&initProfile, "profile", "", "Named configuration profile to apply (overrides the active profile)")
 	initCmd.Flags().IntVar(&initMaxMinutes, "max-minutes", 0, "Default per-task execution time budget in minutes for this project (0 = no limit)")
 	initCmd.Flags().BoolVar(&initSkipClarify, "skip-clarify", false, "Skip the interactive goal clarification Q&A dialog when running 'cloop run --pm' for the first time")
+	initCmd.Flags().BoolVarP(&initInteractive, "interactive", "i", false, "Launch the step-by-step interactive setup wizard")
 	rootCmd.AddCommand(initCmd)
 }
