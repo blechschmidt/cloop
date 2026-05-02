@@ -27,6 +27,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/promptstats"
 	"github.com/blechschmidt/cloop/pkg/provider"
 	"github.com/blechschmidt/cloop/pkg/replay"
+	"github.com/blechschmidt/cloop/pkg/review"
 	"github.com/blechschmidt/cloop/pkg/router"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/verify"
@@ -217,6 +218,13 @@ type Config struct {
 	// (.cloop/tasks/<id>-<slug>-multiagent/{architect,coder,reviewer}.txt).
 	// The reviewer's verdict overrides the coder's task signal.
 	MultiAgent bool
+
+	// PostReview enables automatic AI code review after each successful task in PM
+	// mode (sequential only). After TASK_DONE the orchestrator runs `git diff HEAD~1`,
+	// calls the provider for a correctness/security/style review, and stores the
+	// result as a task annotation with author "ai-reviewer". The verdict (PASS/FAIL)
+	// is surfaced in `cloop status`.
+	PostReview bool
 }
 
 type Orchestrator struct {
@@ -1339,6 +1347,34 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 				// Return to original branch so the next task can start from it.
 				if checkoutErr := cloopgit.CheckoutBranch(o.config.WorkDir, gitOriginalBranch); checkoutErr != nil {
 					dimColor.Printf("  git checkout original branch error (ignored): %v\n", checkoutErr)
+				}
+			}
+		}
+
+		// Post-task AI code review: run on successful tasks when enabled.
+		if (o.config.PostReview || o.config.Hooks.PostTaskReview) && task.Status == pm.TaskDone {
+			reviewDiff, diffErr := review.GetDiff(o.config.WorkDir)
+			if diffErr != nil {
+				dimColor.Printf("  post-review: git diff error (ignored): %v\n", diffErr)
+			} else {
+				dimColor.Printf("  Running post-task AI code review...\n")
+				reviewText, reviewErr := review.ReviewDiff(ctx, o.provider, s.Model, o.config.StepTimeout, reviewDiff, task.Title)
+				if reviewErr != nil {
+					dimColor.Printf("  post-review error (ignored): %v\n", reviewErr)
+				} else {
+					verdict := review.ExtractVerdict(reviewText)
+					verdictColor := successColor
+					if verdict == review.VerdictFail {
+						verdictColor = failColor
+					}
+					verdictColor.Printf("  Code review verdict: %s\n", verdict)
+					// Truncate annotation text if very long.
+					annotText := reviewText
+					if len(annotText) > 2000 {
+						annotText = annotText[:2000] + "\n...(truncated)"
+					}
+					pm.AddAnnotation(task, review.Author, fmt.Sprintf("[%s] %s", verdict, annotText))
+					s.Save()
 				}
 			}
 		}

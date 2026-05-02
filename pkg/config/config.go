@@ -67,6 +67,9 @@ type HooksConfig struct {
 	// PostPlan runs once after the plan finishes.
 	// Env: CLOOP_PLAN_GOAL, CLOOP_PLAN_TOTAL, CLOOP_PLAN_DONE, CLOOP_PLAN_FAILED, CLOOP_PLAN_SKIPPED
 	PostPlan string `yaml:"post_plan,omitempty"`
+	// PostTaskReview enables AI code review annotations after each successful task.
+	// Equivalent to passing --post-review on the command line.
+	PostTaskReview bool `yaml:"post_task_review,omitempty"`
 }
 
 // RouterConfig maps AgentRole names to provider names.

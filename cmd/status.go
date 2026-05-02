@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strings"
 
 	"github.com/blechschmidt/cloop/pkg/cost"
 	"github.com/blechschmidt/cloop/pkg/milestone"
@@ -92,11 +93,32 @@ var statusCmd = &cobra.Command{
 					if t.FailCount > 0 {
 						failCountSuffix = fmt.Sprintf(" (failed %d×)", t.FailCount)
 					}
-					notesSuffix := ""
-					if len(t.Annotations) > 0 {
-						notesSuffix = fmt.Sprintf(" [%d notes]", len(t.Annotations))
+					// Surface ai-reviewer verdict separately from human notes.
+					reviewVerdict := ""
+					humanNotes := 0
+					for _, a := range t.Annotations {
+						if a.Author == "ai-reviewer" {
+							text := a.Text
+							if len(text) > 2 && text[0] == '[' {
+								if end := strings.Index(text, "]"); end > 0 {
+									reviewVerdict = text[1:end]
+								}
+							}
+						} else {
+							humanNotes++
+						}
 					}
-					fmt.Printf("          %s Task %d: %s%s%s\n", taskMarker(t.Status), t.ID, t.Title, failCountSuffix, notesSuffix)
+					notesSuffix := ""
+					if humanNotes > 0 {
+						notesSuffix = fmt.Sprintf(" [%d notes]", humanNotes)
+					}
+					reviewSuffix := ""
+					if reviewVerdict == "PASS" {
+						reviewSuffix = color.New(color.FgGreen).Sprint(" [review:PASS]")
+					} else if reviewVerdict == "FAIL" {
+						reviewSuffix = color.New(color.FgRed).Sprint(" [review:FAIL]")
+					}
+					fmt.Printf("          %s Task %d: %s%s%s%s\n", taskMarker(t.Status), t.ID, t.Title, failCountSuffix, notesSuffix, reviewSuffix)
 					if t.Status == pm.TaskFailed && t.FailureDiagnosis != "" {
 						diag := t.FailureDiagnosis
 						if len(diag) > 300 {

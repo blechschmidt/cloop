@@ -1,17 +1,117 @@
 // Package review provides AI-powered code review for git diffs.
 // It parses structured feedback from a provider and returns
 // categorized issues, quality scores, and actionable suggestions.
+// It also provides ReviewDiff for lightweight post-task annotation reviews.
 package review
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os/exec"
 	"strings"
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/provider"
 )
+
+// Author is the annotation author used for AI code review annotations.
+const Author = "ai-reviewer"
+
+// Verdict values for post-task reviews.
+const (
+	VerdictPass = "PASS"
+	VerdictFail = "FAIL"
+)
+
+// GetDiff runs `git diff HEAD~1` in workDir and returns the diff output.
+// Returns an empty string (no error) when there is no parent commit or no diff.
+func GetDiff(workDir string) (string, error) {
+	cmd := exec.Command("git", "diff", "HEAD~1")
+	cmd.Dir = workDir
+	out, err := cmd.Output()
+	if err != nil {
+		// No parent commit (initial commit) or not a git repo — non-fatal.
+		return "", nil
+	}
+	return string(out), nil
+}
+
+// ReviewDiff calls the provider with a structured code review prompt for the
+// given diff and task title. It returns the full review text (markdown) and
+// an error. The text ends with a "VERDICT: PASS" or "VERDICT: FAIL" line.
+// If the diff is empty the function returns a short note without calling the provider.
+func ReviewDiff(ctx context.Context, p provider.Provider, model string, timeout time.Duration, diff, taskTitle string) (string, error) {
+	if strings.TrimSpace(diff) == "" {
+		return "No git changes detected — nothing to review.\n\nVERDICT: PASS", nil
+	}
+
+	prompt := buildReviewDiffPrompt(diff, taskTitle)
+	res, err := p.Complete(ctx, prompt, provider.Options{
+		Model:   model,
+		Timeout: timeout,
+	})
+	if err != nil {
+		return "", fmt.Errorf("code review: %w", err)
+	}
+	return strings.TrimSpace(res.Output), nil
+}
+
+// ExtractVerdict scans review text for "VERDICT: PASS" or "VERDICT: FAIL".
+// Defaults to VerdictPass when no verdict line is found.
+func ExtractVerdict(text string) string {
+	for _, line := range strings.Split(text, "\n") {
+		upper := strings.ToUpper(strings.TrimSpace(line))
+		if strings.Contains(upper, "VERDICT: FAIL") {
+			return VerdictFail
+		}
+		if strings.Contains(upper, "VERDICT: PASS") {
+			return VerdictPass
+		}
+	}
+	return VerdictPass
+}
+
+// buildReviewDiffPrompt builds the post-task code review prompt.
+func buildReviewDiffPrompt(diff, taskTitle string) string {
+	var b strings.Builder
+	b.WriteString("You are an expert code reviewer performing an automated post-task review.\n")
+	b.WriteString("Review the git diff below and provide a concise structured report.\n\n")
+
+	b.WriteString("## COMPLETED TASK\n")
+	b.WriteString(taskTitle)
+	b.WriteString("\n\n")
+
+	b.WriteString("## GIT DIFF\n```diff\n")
+	// Truncate very large diffs to keep the prompt manageable.
+	const maxDiff = 8000
+	if len(diff) > maxDiff {
+		b.WriteString(diff[:maxDiff/2])
+		b.WriteString("\n... (diff truncated) ...\n")
+		b.WriteString(diff[len(diff)-maxDiff/2:])
+	} else {
+		b.WriteString(diff)
+	}
+	b.WriteString("\n```\n\n")
+
+	b.WriteString("## INSTRUCTIONS\n")
+	b.WriteString("Provide a review with exactly these four sections:\n\n")
+	b.WriteString("### Correctness\n")
+	b.WriteString("List any bugs, logic errors, incorrect assumptions, or broken edge cases. Write \"None found\" if clean.\n\n")
+	b.WriteString("### Security\n")
+	b.WriteString("List any security concerns: injection, improper input validation, exposed secrets, auth issues, etc. Write \"None found\" if clean.\n\n")
+	b.WriteString("### Style\n")
+	b.WriteString("Note any style, naming, or maintainability issues. Write \"None found\" if clean.\n\n")
+	b.WriteString("### Verdict\n")
+	b.WriteString("End with exactly one of these lines:\n")
+	b.WriteString("VERDICT: PASS\n")
+	b.WriteString("VERDICT: FAIL\n\n")
+	b.WriteString("Use FAIL only when there are correctness or security issues that should be fixed.\n")
+	b.WriteString("Style issues alone do not warrant FAIL.\n")
+	b.WriteString("Keep the full review under 400 words.\n")
+
+	return b.String()
+}
 
 // Severity levels for code review issues.
 const (

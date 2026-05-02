@@ -20,6 +20,10 @@ type Config struct {
 	PrePlan string `yaml:"pre_plan,omitempty"`
 	// PostPlan runs once after the plan finishes (all tasks done/failed/skipped).
 	PostPlan string `yaml:"post_plan,omitempty"`
+	// PostTaskReview enables AI code review annotations after each successful task.
+	// When true, the orchestrator runs git diff HEAD~1 after TASK_DONE and calls
+	// the provider for a correctness/security/style review stored as a task annotation.
+	PostTaskReview bool `yaml:"post_task_review,omitempty"`
 }
 
 // TaskContext carries task metadata exposed to hook commands as env vars.

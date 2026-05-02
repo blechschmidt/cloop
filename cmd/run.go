@@ -74,6 +74,7 @@ var (
 	autoSplit            bool
 	skipHealthCheck      bool
 	multiAgentMode       bool
+	postReview           bool
 )
 
 var runCmd = &cobra.Command{
@@ -221,13 +222,15 @@ Press Ctrl+C to pause gracefully.`,
 		orchCfg := orchestrator.Config{
 			SkipHealthCheck: skipHealthCheck,
 			MultiAgent:      multiAgentMode,
+			PostReview:      postReview,
 			SlackWebhookURL:   cfg.Notify.SlackWebhook,
 			DiscordWebhookURL: cfg.Notify.DiscordWebhook,
 			Hooks: hooks.Config{
-				PreTask:  cfg.Hooks.PreTask,
-				PostTask: cfg.Hooks.PostTask,
-				PrePlan:  cfg.Hooks.PrePlan,
-				PostPlan: cfg.Hooks.PostPlan,
+				PreTask:        cfg.Hooks.PreTask,
+				PostTask:       cfg.Hooks.PostTask,
+				PrePlan:        cfg.Hooks.PrePlan,
+				PostPlan:       cfg.Hooks.PostPlan,
+				PostTaskReview: cfg.Hooks.PostTaskReview,
 			},
 			WorkDir:          workdir,
 			Model:            model,
@@ -485,5 +488,6 @@ func init() {
 	runCmd.Flags().BoolVar(&autoSplit, "auto-split", false, "PM mode: automatically decompose a task into subtasks when it has failed 2+ times (sequential only)")
 	runCmd.Flags().BoolVar(&skipHealthCheck, "skip-health-check", false, "PM mode: skip the AI plan health evaluation that runs after decomposition")
 	runCmd.Flags().BoolVar(&multiAgentMode, "multi-agent", false, "PM mode: run each task through a three-pass specialist pipeline: architect→coder→reviewer (sequential only). Each pass uses a distinct system prompt; the reviewer's verdict overrides the coder's signal. Sub-agent outputs are stored as .cloop/tasks/<id>-<slug>-multiagent/{architect,coder,reviewer}.txt")
+	runCmd.Flags().BoolVar(&postReview, "post-review", false, "PM mode: after each TASK_DONE run an AI code review on `git diff HEAD~1` and store the verdict as a task annotation (sequential only). Can also be enabled via hooks.post_task_review in config.")
 	rootCmd.AddCommand(runCmd)
 }
