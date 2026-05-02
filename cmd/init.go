@@ -22,6 +22,7 @@ var (
 	initTemplate    string
 	initProfile     string
 	initMaxMinutes  int
+	initSkipClarify bool
 )
 
 var initCmd = &cobra.Command{
@@ -118,6 +119,9 @@ Examples:
 		}
 		if initMaxMinutes > 0 {
 			s.DefaultMaxMinutes = initMaxMinutes
+		}
+		if initSkipClarify {
+			s.SkipClarify = true
 		}
 		// Apply template: pre-populate the plan with template tasks, enabling
 		// PM mode automatically so 'cloop run' executes them directly without
@@ -217,5 +221,6 @@ func init() {
 	initCmd.Flags().StringVar(&initTemplate, "template", "", "Bootstrap from a built-in template ("+clooptemplate.NamesString()+")")
 	initCmd.Flags().StringVar(&initProfile, "profile", "", "Named configuration profile to apply (overrides the active profile)")
 	initCmd.Flags().IntVar(&initMaxMinutes, "max-minutes", 0, "Default per-task execution time budget in minutes for this project (0 = no limit)")
+	initCmd.Flags().BoolVar(&initSkipClarify, "skip-clarify", false, "Skip the interactive goal clarification Q&A dialog when running 'cloop run --pm' for the first time")
 	rootCmd.AddCommand(initCmd)
 }

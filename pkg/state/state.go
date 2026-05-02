@@ -58,6 +58,10 @@ type ProjectState struct {
 	// DefaultMaxMinutes is the project-level per-task execution time budget.
 	// When a task's own MaxMinutes is 0, this value is used. 0 = no limit.
 	DefaultMaxMinutes int `json:"default_max_minutes,omitempty"`
+
+	// SkipClarify persists the --skip-clarify flag from 'cloop init' so that
+	// subsequent 'cloop run' calls honour the preference without repeating the flag.
+	SkipClarify bool `json:"skip_clarify,omitempty"`
 }
 
 func StatePath(workdir string) string {

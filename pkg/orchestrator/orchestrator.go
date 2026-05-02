@@ -13,6 +13,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/approvalgate"
 	"github.com/blechschmidt/cloop/pkg/artifact"
 	"github.com/blechschmidt/cloop/pkg/checkpoint"
+	"github.com/blechschmidt/cloop/pkg/clarify"
 	"github.com/blechschmidt/cloop/pkg/condition"
 	"github.com/blechschmidt/cloop/pkg/consensus"
 	"github.com/blechschmidt/cloop/pkg/cost"
@@ -284,6 +285,11 @@ type Config struct {
 	// with [y/n/skip/edit]. Pre-approved tasks (task.Approved:true set via
 	// 'cloop task approve') bypass the interactive prompt automatically.
 	RequireApproval bool
+
+	// SkipClarify disables the interactive goal clarification Q&A dialog that
+	// normally runs before pm.Decompose() when stdin is a TTY. Set this to true
+	// for automation, CI, or when the goal is already fully specified.
+	SkipClarify bool
 }
 
 type Orchestrator struct {
@@ -709,8 +715,28 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 
 	// Phase 1: Decompose goal into tasks (if not already done)
 	if s.Plan == nil || len(s.Plan.Tasks) == 0 {
+		// Run interactive goal clarification when stdin is a TTY and not skipped.
+		// If clarification was already performed at 'cloop init' time, load from disk.
+		var clarifyCtx string
+		if !o.config.SkipClarify {
+			if existing, loadErr := clarify.Load(o.config.WorkDir); loadErr == nil && len(existing) > 0 {
+				// Re-use answers gathered at init time.
+				clarifyCtx = clarify.BuildContext(existing)
+				color.New(color.Faint).Printf("(Using goal clarification from previous session)\n\n")
+			} else if clarify.IsTTY() {
+				scanner := bufio.NewScanner(os.Stdin)
+				qas, clarifyErr := clarify.Run(ctx, o.provider, s.Model, o.config.StepTimeout, s.Goal, s.Instructions, o.config.WorkDir, scanner)
+				if clarifyErr != nil {
+					// Non-fatal: log and continue without clarification.
+					color.New(color.Faint).Printf("(Clarification skipped: %v)\n\n", clarifyErr)
+				} else {
+					clarifyCtx = clarify.BuildContext(qas)
+				}
+			}
+		}
+
 		pmColor.Printf("Decomposing goal into tasks...\n")
-		plan, err := pm.Decompose(ctx, o.provider, s.Goal, s.Instructions, s.Model, o.config.StepTimeout)
+		plan, err := pm.Decompose(ctx, o.provider, s.Goal, s.Instructions, s.Model, o.config.StepTimeout, clarifyCtx)
 		if err != nil {
 			failColor.Printf("x Failed to decompose goal: %v\n", err)
 			s.Status = "failed"
@@ -1952,8 +1978,26 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 	}
 
 	if s.Plan == nil || len(s.Plan.Tasks) == 0 {
+		// Run interactive goal clarification when stdin is a TTY and not skipped.
+		// If clarification was already performed at 'cloop init' time, load from disk.
+		var clarifyCtx string
+		if !o.config.SkipClarify {
+			if existing, loadErr := clarify.Load(o.config.WorkDir); loadErr == nil && len(existing) > 0 {
+				clarifyCtx = clarify.BuildContext(existing)
+				color.New(color.Faint).Printf("(Using goal clarification from previous session)\n\n")
+			} else if clarify.IsTTY() {
+				scanner := bufio.NewScanner(os.Stdin)
+				qas, clarifyErr := clarify.Run(ctx, o.provider, s.Model, o.config.StepTimeout, s.Goal, s.Instructions, o.config.WorkDir, scanner)
+				if clarifyErr != nil {
+					color.New(color.Faint).Printf("(Clarification skipped: %v)\n\n", clarifyErr)
+				} else {
+					clarifyCtx = clarify.BuildContext(qas)
+				}
+			}
+		}
+
 		pmColor.Printf("Decomposing goal into tasks...\n")
-		plan, err := pm.Decompose(ctx, o.provider, s.Goal, s.Instructions, s.Model, o.config.StepTimeout)
+		plan, err := pm.Decompose(ctx, o.provider, s.Goal, s.Instructions, s.Model, o.config.StepTimeout, clarifyCtx)
 		if err != nil {
 			failColor.Printf("x Failed to decompose goal: %v\n", err)
 			s.Status = "failed"

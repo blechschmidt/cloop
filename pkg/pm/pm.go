@@ -293,12 +293,18 @@ func (p *Plan) CountByStatus() (done, failed int) {
 }
 
 // DecomposePrompt builds the prompt for decomposing a goal into tasks.
-func DecomposePrompt(goal, instructions string) string {
+// clarifyContext is optional structured Q&A context from the goal clarification
+// step; pass "" to omit it.
+func DecomposePrompt(goal, instructions, clarifyContext string) string {
 	var b strings.Builder
 	b.WriteString("You are an AI product manager. Your job is to decompose a project goal into a prioritized list of concrete, executable tasks.\n\n")
 	b.WriteString(fmt.Sprintf("## PROJECT GOAL\n%s\n\n", goal))
 	if instructions != "" {
 		b.WriteString(fmt.Sprintf("## CONSTRAINTS\n%s\n\n", instructions))
+	}
+	if clarifyContext != "" {
+		b.WriteString(clarifyContext)
+		b.WriteString("\n")
 	}
 	b.WriteString("## INSTRUCTIONS\n")
 	b.WriteString("Analyze the goal and produce a JSON task plan. Each task must be:\n")
@@ -732,8 +738,10 @@ func AdaptiveReplan(ctx context.Context, p provider.Provider, goal, instructions
 }
 
 // Decompose calls the provider to decompose a goal into a task plan.
-func Decompose(ctx context.Context, p provider.Provider, goal, instructions, model string, timeout time.Duration) (*Plan, error) {
-	prompt := DecomposePrompt(goal, instructions)
+// clarifyContext is optional structured Q&A context from the clarification step;
+// pass "" to omit it.
+func Decompose(ctx context.Context, p provider.Provider, goal, instructions, model string, timeout time.Duration, clarifyContext string) (*Plan, error) {
+	prompt := DecomposePrompt(goal, instructions, clarifyContext)
 	result, err := p.Complete(ctx, prompt, provider.Options{
 		Model:   model,
 		Timeout: timeout,

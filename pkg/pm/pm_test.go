@@ -317,7 +317,7 @@ func TestTask_Timestamps(t *testing.T) {
 
 func TestDecomposePrompt_ContainsGoal(t *testing.T) {
 	goal := "Build a web scraper"
-	prompt := DecomposePrompt(goal, "")
+	prompt := DecomposePrompt(goal, "", "")
 	if !strings.Contains(prompt, goal) {
 		t.Errorf("prompt missing goal text")
 	}
@@ -327,14 +327,14 @@ func TestDecomposePrompt_ContainsGoal(t *testing.T) {
 }
 
 func TestDecomposePrompt_WithInstructions(t *testing.T) {
-	prompt := DecomposePrompt("goal", "Use Go only")
+	prompt := DecomposePrompt("goal", "Use Go only", "")
 	if !strings.Contains(prompt, "Use Go only") {
 		t.Errorf("prompt missing instructions")
 	}
 }
 
 func TestDecomposePrompt_NoInstructions(t *testing.T) {
-	prompt := DecomposePrompt("goal", "")
+	prompt := DecomposePrompt("goal", "", "")
 	if strings.Contains(prompt, "CONSTRAINTS") {
 		t.Errorf("prompt should not contain CONSTRAINTS section when instructions empty")
 	}
