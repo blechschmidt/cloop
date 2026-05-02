@@ -14,6 +14,58 @@ import (
 	"github.com/blechschmidt/cloop/pkg/pm"
 )
 
+// WriteExecArtifact persists the output of a 'cloop task exec' run under
+// .cloop/tasks/<id>-<slug>-exec-<ts>.md.
+// Returns the relative path (relative to workDir) of the artifact file.
+func WriteExecArtifact(workDir string, task *pm.Task, cmdArgs []string, exitCode int, elapsed time.Duration, output string) (string, error) {
+	dir := filepath.Join(workDir, ".cloop", "tasks")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", fmt.Errorf("create artifact dir: %w", err)
+	}
+
+	s := slug(task.Title, 40)
+	ts := time.Now().UTC().Format("20060102-150405")
+	filename := fmt.Sprintf("%d-%s-exec-%s.md", task.ID, s, ts)
+	absPath := filepath.Join(dir, filename)
+
+	var b strings.Builder
+
+	b.WriteString("---\n")
+	b.WriteString(fmt.Sprintf("id: %d\n", task.ID))
+	b.WriteString(fmt.Sprintf("title: %q\n", task.Title))
+	b.WriteString(fmt.Sprintf("status: %s\n", task.Status))
+	b.WriteString(fmt.Sprintf("event: exec\n"))
+	b.WriteString(fmt.Sprintf("command: %q\n", strings.Join(cmdArgs, " ")))
+	b.WriteString(fmt.Sprintf("exit_code: %d\n", exitCode))
+	b.WriteString(fmt.Sprintf("elapsed: %s\n", elapsed.Round(time.Millisecond)))
+	b.WriteString(fmt.Sprintf("recorded_at: %s\n", ts))
+	b.WriteString("---\n\n")
+
+	b.WriteString(fmt.Sprintf("## Command\n\n```\n%s\n```\n\n", strings.Join(cmdArgs, " ")))
+	b.WriteString(fmt.Sprintf("**Exit code:** %d | **Elapsed:** %s\n\n", exitCode, elapsed.Round(time.Millisecond)))
+
+	b.WriteString("## Output\n\n```\n")
+	if output != "" {
+		b.WriteString(output)
+		if !strings.HasSuffix(output, "\n") {
+			b.WriteByte('\n')
+		}
+	} else {
+		b.WriteString("(no output)\n")
+	}
+	b.WriteString("```\n")
+
+	if err := os.WriteFile(absPath, []byte(b.String()), 0o644); err != nil {
+		return "", fmt.Errorf("write exec artifact: %w", err)
+	}
+
+	rel, err := filepath.Rel(workDir, absPath)
+	if err != nil {
+		rel = absPath
+	}
+	return rel, nil
+}
+
 var nonSlugRe = regexp.MustCompile(`[^a-z0-9-]+`)
 
 // LiveArtifactDir returns the directory where live streaming artifacts are written.
