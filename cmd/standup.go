@@ -25,6 +25,7 @@ var (
 	standupProvider string
 	standupModel    string
 	standupHours    int
+	standupSince    string
 	standupFormat   string
 	standupPost     bool
 	standupSave     bool
@@ -68,6 +69,18 @@ Examples:
 		goodColor := color.New(color.FgGreen)
 		warnColor := color.New(color.FgYellow)
 		badColor := color.New(color.FgRed)
+
+		// Parse --since flag if provided (overrides --hours)
+		if standupSince != "" {
+			d, err := parseSinceDuration(standupSince)
+			if err != nil {
+				return fmt.Errorf("--since: %w", err)
+			}
+			standupHours = int(d.Hours())
+			if standupHours < 1 {
+				standupHours = 1
+			}
+		}
 
 		// Build the standup data (no AI needed for quick mode)
 		r := standup.Build(s, standupHours)
@@ -218,7 +231,12 @@ Examples:
 		// Save to file if requested
 		if standupSave {
 			filename := fmt.Sprintf(".cloop/standup-%s.md", time.Now().Format("2006-01-02"))
-			content := standup.FormatText(report, s.Goal, standupHours)
+			var content string
+			if standupFormat == "markdown" {
+				content = standup.FormatMarkdown(report, s.Goal, standupHours)
+			} else {
+				content = standup.FormatText(report, s.Goal, standupHours)
+			}
 			if err := os.WriteFile(filepath.Join(workdir, filename), []byte(content), 0o644); err != nil {
 				warnColor.Printf("Warning: could not save standup: %v\n", err)
 			} else {
@@ -237,6 +255,10 @@ Examples:
 			if strings.Contains(webhookURL, "hooks.slack.com") || standupFormat == "slack" {
 				slackText := standup.FormatSlack(report, s.Goal, standupHours)
 				b, _ := json.Marshal(map[string]string{"text": slackText})
+				body = string(b)
+			} else if standupFormat == "markdown" {
+				mdText := standup.FormatMarkdown(report, s.Goal, standupHours)
+				b, _ := json.Marshal(map[string]string{"text": mdText})
 				body = string(b)
 			} else {
 				b, _ := json.Marshal(map[string]interface{}{
@@ -285,11 +307,31 @@ Examples:
 	},
 }
 
+// parseSinceDuration parses a duration string for --since.
+// Supports standard Go durations (e.g. "24h", "1h30m") plus day shorthand ("7d", "2d").
+func parseSinceDuration(s string) (time.Duration, error) {
+	// Handle day shorthand: "7d" → 7*24h
+	if strings.HasSuffix(s, "d") {
+		numStr := strings.TrimSuffix(s, "d")
+		var days int
+		if _, err := fmt.Sscanf(numStr, "%d", &days); err != nil || days <= 0 {
+			return 0, fmt.Errorf("invalid day value %q (use e.g. 7d)", s)
+		}
+		return time.Duration(days) * 24 * time.Hour, nil
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return 0, fmt.Errorf("invalid duration %q (use e.g. 24h, 48h, 7d)", s)
+	}
+	return d, nil
+}
+
 func init() {
 	standupCmd.Flags().StringVar(&standupProvider, "provider", "", "AI provider")
 	standupCmd.Flags().StringVar(&standupModel, "model", "", "Model to use")
 	standupCmd.Flags().IntVar(&standupHours, "hours", 24, "Reporting window in hours")
-	standupCmd.Flags().StringVar(&standupFormat, "format", "text", "Output format: text, slack")
+	standupCmd.Flags().StringVar(&standupSince, "since", "", "Lookback window as duration (e.g. 24h, 48h, 7d); overrides --hours")
+	standupCmd.Flags().StringVar(&standupFormat, "format", "plain", "Output format: plain, markdown, slack")
 	standupCmd.Flags().BoolVar(&standupPost, "post", false, "Post to configured webhook/Slack")
 	standupCmd.Flags().BoolVar(&standupSave, "save", false, "Save to .cloop/standup-YYYYMMDD.md")
 	standupCmd.Flags().BoolVar(&standupQuick, "quick", false, "Show activity summary only, skip AI")
