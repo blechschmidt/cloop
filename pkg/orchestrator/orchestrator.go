@@ -168,6 +168,11 @@ type Config struct {
 	// AI to filter out candidates that duplicate existing (completed or pending) work.
 	// Set this to true to skip that check and inject all discovered tasks as-is.
 	NoDedup bool
+
+	// TagFilter restricts PM mode execution to tasks that have at least one matching tag.
+	// Tasks that do not match any tag in the filter are skipped for this run.
+	// An empty filter (default) executes all ready tasks regardless of tags.
+	TagFilter []string
 }
 
 type Orchestrator struct {
@@ -690,6 +695,14 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 				continue
 			}
 			break
+		}
+
+		// Tag filter: skip tasks that don't match any of the requested tags.
+		if len(o.config.TagFilter) > 0 && !pm.TaskMatchesTags(task, o.config.TagFilter) {
+			color.New(color.Faint).Printf("⊘ Task %d skipped (no matching tag): %s\n", task.ID, task.Title)
+			task.Status = pm.TaskSkipped
+			s.Save()
+			continue
 		}
 
 		// Check max steps limit
@@ -1318,6 +1331,26 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 		ready := s.Plan.ReadyTasks()
 		if len(ready) == 0 {
 			break
+		}
+
+		// Tag filter: skip tasks that don't match any of the requested tags.
+		if len(o.config.TagFilter) > 0 {
+			filtered := ready[:0]
+			for _, t := range ready {
+				if pm.TaskMatchesTags(t, o.config.TagFilter) {
+					filtered = append(filtered, t)
+				} else {
+					color.New(color.Faint).Printf("⊘ Task %d skipped (no matching tag): %s\n", t.ID, t.Title)
+					t.Status = pm.TaskSkipped
+				}
+			}
+			if len(ready) != len(filtered) {
+				s.Save()
+			}
+			ready = filtered
+			if len(ready) == 0 {
+				continue
+			}
 		}
 
 		// Apply worker pool limit: cap the batch to MaxParallel if set.

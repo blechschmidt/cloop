@@ -67,6 +67,7 @@ var (
 	optimizeInteractive  bool
 	metricsAddr          string
 	noDedup              bool
+	runTags              []string
 )
 
 var runCmd = &cobra.Command{
@@ -245,6 +246,7 @@ Press Ctrl+C to pause gracefully.`,
 			OptimizeInteractive: optimizeInteractive,
 			Metrics:             runMetrics,
 			NoDedup:             noDedup,
+			TagFilter:           runTags,
 		}
 
 		orc, err := orchestrator.New(orchCfg, prov)
@@ -451,5 +453,6 @@ func init() {
 	runCmd.Flags().BoolVar(&optimizeInteractive, "optimize-interactive", false, "PM mode: prompt before applying optimizer reordering (default: apply automatically)")
 	runCmd.Flags().StringVar(&metricsAddr, "metrics-addr", "", "Start a Prometheus /metrics HTTP server on this address (e.g. :9090); writes metrics.json to .cloop/ at plan completion")
 	runCmd.Flags().BoolVar(&noDedup, "no-dedup", false, "auto-evolve: disable semantic task deduplication (inject all discovered tasks without filtering duplicates)")
+	runCmd.Flags().StringSliceVar(&runTags, "tags", nil, "PM mode: restrict execution to tasks matching any of the given tags (comma-separated or repeated --tags flag)")
 	rootCmd.AddCommand(runCmd)
 }

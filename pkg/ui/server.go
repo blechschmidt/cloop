@@ -1219,6 +1219,8 @@ const dashboardHTML = `<!DOCTYPE html>
   .badge.unknown    { background:rgba(139,148,158,.15); color:var(--muted);  border:1px solid rgba(139,148,158,.3);}
   .badge-dot { width:5px; height:5px; border-radius:50%; background:currentColor; }
   .badge.running .badge-dot { animation: pulse 1.5s infinite; }
+  .task-tags { display:inline-flex; flex-wrap:wrap; gap:3px; margin-left:4px; }
+  .task-tag  { display:inline-block; padding:1px 6px; border-radius:10px; font-size:10px; font-weight:600; background:rgba(139,148,158,.15); color:var(--muted); border:1px solid rgba(139,148,158,.3); }
 
   /* ── Stats grid ── */
   .stats-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(140px,1fr)); gap:10px; }
@@ -2055,6 +2057,7 @@ function renderTasks(s) {
           '<span>'+esc(cls)+'</span>'+
           (t.role?'<span>'+esc(t.role)+'</span>':'')+
           (t.depends_on&&t.depends_on.length?'<span>deps: #'+t.depends_on.join(', #')+'</span>':'')+
+          (t.tags&&t.tags.length?'<span class="task-tags">'+t.tags.map(function(tg){return '<span class="task-tag">'+esc(tg)+'</span>';}).join('')+'</span>':'')+
           fmtTimeEstimate(t)+
         '</div>'+
       '</div>'+

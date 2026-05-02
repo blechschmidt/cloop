@@ -56,6 +56,9 @@ var (
 	editPriority int
 	editDeps     string
 	editRole     string // agent role for task edit
+
+	// filter flags
+	taskListTags []string // --tags filter for task list
 )
 
 var taskCmd = &cobra.Command{
@@ -75,11 +78,17 @@ Subcommands:
   edit <id>     Edit task title, description, priority, or deps
   remove <id>   Remove a task from the plan
   move <id> up|down  Reorder a task by swapping with adjacent priority
+  tag <id> <tag...>    Add one or more tags to a task
+  untag <id> <tag...>  Remove one or more tags from a task
 
 Task dependencies:
   Use --deps when adding or editing tasks to specify prerequisites.
   A task with unresolved dependencies will be skipped by the scheduler
-  until all dependencies are done or skipped.`,
+  until all dependencies are done or skipped.
+
+Task tags:
+  Use 'cloop task tag <id> <tag...>' to label tasks for filtering.
+  Use 'cloop run --tags <tag,...>' to restrict execution to matching tasks.`,
 }
 
 var taskListCmd = &cobra.Command{
@@ -96,14 +105,24 @@ var taskListCmd = &cobra.Command{
 			return fmt.Errorf("no task plan found — run 'cloop run --pm' to create one")
 		}
 		if taskListJSON {
-			fmt.Println(marshalTasksJSON(s.Plan.Tasks))
+			tasks := s.Plan.Tasks
+			if len(taskListTags) > 0 {
+				filtered := tasks[:0:0]
+				for _, t := range tasks {
+					if pm.TaskMatchesTags(t, taskListTags) {
+						filtered = append(filtered, t)
+					}
+				}
+				tasks = filtered
+			}
+			fmt.Println(marshalTasksJSON(tasks))
 			return nil
 		}
 		if taskListGraph {
 			printTaskGraph(s.Plan)
 			return nil
 		}
-		printTaskList(s.Plan)
+		printTaskListFiltered(s.Plan, taskListTags)
 		return nil
 	},
 }
@@ -241,6 +260,9 @@ var taskShowCmd = &cobra.Command{
 				depParts = append(depParts, fmt.Sprintf("#%d", depID))
 			}
 			fmt.Printf("Depends:  %s\n", strings.Join(depParts, ", "))
+		}
+		if len(task.Tags) > 0 {
+			fmt.Printf("Tags:     %s\n", strings.Join(task.Tags, ", "))
 		}
 		if task.Description != "" {
 			fmt.Printf("\nDescription:\n")
@@ -527,6 +549,136 @@ var taskAddCmd = &cobra.Command{
 	},
 }
 
+var taskTagCmd = &cobra.Command{
+	Use:   "tag <id> <tag...>",
+	Short: "Add tags to a task",
+	Long: `Add one or more tags to a task. Tags are persisted in state.json and
+can be used with 'cloop run --tags' to restrict execution to matching tasks.
+
+Example:
+  cloop task tag 3 backend api
+  cloop task tag 5 release-1.0`,
+	Args: cobra.MinimumNArgs(2),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		workdir, _ := os.Getwd()
+		s, err := state.Load(workdir)
+		if err != nil {
+			return err
+		}
+		if !s.PMMode || s.Plan == nil {
+			return fmt.Errorf("no task plan found — run 'cloop run --pm' to create one")
+		}
+
+		id, err := strconv.Atoi(args[0])
+		if err != nil {
+			return fmt.Errorf("invalid task ID %q: must be a number", args[0])
+		}
+
+		var task *pm.Task
+		for _, t := range s.Plan.Tasks {
+			if t.ID == id {
+				task = t
+				break
+			}
+		}
+		if task == nil {
+			return fmt.Errorf("task %d not found", id)
+		}
+
+		added := []string{}
+		for _, tag := range args[1:] {
+			tag = strings.TrimSpace(tag)
+			if tag == "" {
+				continue
+			}
+			// Deduplicate
+			found := false
+			for _, existing := range task.Tags {
+				if existing == tag {
+					found = true
+					break
+				}
+			}
+			if !found {
+				task.Tags = append(task.Tags, tag)
+				added = append(added, tag)
+			}
+		}
+
+		if err := s.Save(); err != nil {
+			return err
+		}
+
+		if len(added) == 0 {
+			fmt.Printf("Task %d: no new tags added (already present)\n", id)
+		} else {
+			color.New(color.FgGreen).Printf("Task %d tagged: %s\n", id, strings.Join(task.Tags, ", "))
+		}
+		return nil
+	},
+}
+
+var taskUntagCmd = &cobra.Command{
+	Use:   "untag <id> <tag...>",
+	Short: "Remove tags from a task",
+	Long: `Remove one or more tags from a task.
+
+Example:
+  cloop task untag 3 backend
+  cloop task untag 5 release-1.0`,
+	Args: cobra.MinimumNArgs(2),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		workdir, _ := os.Getwd()
+		s, err := state.Load(workdir)
+		if err != nil {
+			return err
+		}
+		if !s.PMMode || s.Plan == nil {
+			return fmt.Errorf("no task plan found — run 'cloop run --pm' to create one")
+		}
+
+		id, err := strconv.Atoi(args[0])
+		if err != nil {
+			return fmt.Errorf("invalid task ID %q: must be a number", args[0])
+		}
+
+		var task *pm.Task
+		for _, t := range s.Plan.Tasks {
+			if t.ID == id {
+				task = t
+				break
+			}
+		}
+		if task == nil {
+			return fmt.Errorf("task %d not found", id)
+		}
+
+		removeSet := make(map[string]bool, len(args)-1)
+		for _, tag := range args[1:] {
+			removeSet[strings.TrimSpace(tag)] = true
+		}
+
+		kept := task.Tags[:0]
+		for _, tag := range task.Tags {
+			if !removeSet[tag] {
+				kept = append(kept, tag)
+			}
+		}
+		task.Tags = kept
+
+		if err := s.Save(); err != nil {
+			return err
+		}
+
+		if len(task.Tags) == 0 {
+			color.New(color.FgYellow).Printf("Task %d: all tags removed\n", id)
+		} else {
+			color.New(color.FgGreen).Printf("Task %d tags: %s\n", id, strings.Join(task.Tags, ", "))
+		}
+		return nil
+	},
+}
+
 func setTaskStatus(idStr string, status pm.TaskStatus) error {
 	workdir, _ := os.Getwd()
 	s, err := state.Load(workdir)
@@ -570,6 +722,22 @@ func setTaskStatus(idStr string, status pm.TaskStatus) error {
 	fmt.Printf("Task %d: %s — %s", id, task.Title, verb)
 	dimColor.Printf(" (was: %s)\n", old)
 	return nil
+}
+
+func printTaskListFiltered(plan *pm.Plan, tagFilter []string) {
+	if len(tagFilter) == 0 {
+		printTaskList(plan)
+		return
+	}
+	// Build a filtered copy of the plan
+	filtered := &pm.Plan{Goal: plan.Goal, Tasks: make([]*pm.Task, 0), Version: plan.Version}
+	for _, t := range plan.Tasks {
+		if pm.TaskMatchesTags(t, tagFilter) {
+			filtered.Tasks = append(filtered.Tasks, t)
+		}
+	}
+	color.New(color.FgCyan).Printf("Filtered by tags: %s\n\n", strings.Join(tagFilter, ", "))
+	printTaskList(filtered)
 }
 
 func printTaskList(plan *pm.Plan) {
@@ -618,6 +786,9 @@ func printTaskList(plan *pm.Plan) {
 				depParts = append(depParts, fmt.Sprintf("#%d", depID))
 			}
 			dimColor.Printf("       depends on: %s\n", strings.Join(depParts, ", "))
+		}
+		if len(t.Tags) > 0 {
+			dimColor.Printf("       tags: %s\n", strings.Join(t.Tags, ", "))
 		}
 	}
 }
@@ -825,6 +996,8 @@ func init() {
 	taskEditCmd.Flags().StringVar(&editDeps, "depends-on", "", "Comma-separated IDs of tasks this task depends on (e.g. '1,2'); use '' to clear")
 	taskEditCmd.Flags().StringVar(&editRole, "role", "", "Agent role: backend, frontend, testing, security, devops, data, docs, review")
 
+	taskListCmd.Flags().StringSliceVar(&taskListTags, "tags", nil, "Filter listed tasks by tag (comma-separated or repeated --tags)")
+
 	taskCmd.AddCommand(taskListCmd)
 	taskCmd.AddCommand(taskShowCmd)
 	taskCmd.AddCommand(taskNextCmd)
@@ -836,5 +1009,7 @@ func init() {
 	taskCmd.AddCommand(taskEditCmd)
 	taskCmd.AddCommand(taskRemoveCmd)
 	taskCmd.AddCommand(taskMoveCmd)
+	taskCmd.AddCommand(taskTagCmd)
+	taskCmd.AddCommand(taskUntagCmd)
 	rootCmd.AddCommand(taskCmd)
 }

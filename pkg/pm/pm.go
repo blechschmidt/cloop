@@ -112,6 +112,7 @@ type Task struct {
 	ActualMinutes    int        `json:"actual_minutes,omitempty"`    // measured duration (set on completion)
 	ArtifactPath      string     `json:"artifact_path,omitempty"`       // path to the full AI response artifact file
 	FailureDiagnosis  string     `json:"failure_diagnosis,omitempty"`   // AI diagnosis of what went wrong on failure
+	Tags              []string   `json:"tags,omitempty"`                // user-defined labels for filtering
 }
 
 // Plan is the full task plan for a goal.
@@ -119,6 +120,23 @@ type Plan struct {
 	Goal    string  `json:"goal"`
 	Tasks   []*Task `json:"tasks"`
 	Version int     `json:"version"`
+}
+
+// TaskMatchesTags returns true when the task has at least one tag in filter,
+// or when filter is empty (no filter active). Always returns true if the task
+// has no tags and the filter is also empty.
+func TaskMatchesTags(task *Task, filter []string) bool {
+	if len(filter) == 0 {
+		return true
+	}
+	for _, f := range filter {
+		for _, t := range task.Tags {
+			if t == f {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // NewPlan creates an empty plan for a goal.

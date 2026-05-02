@@ -339,7 +339,11 @@ func (m Model) renderTaskPanel(w, h int) string {
 			badge := lipgloss.NewStyle().Foreground(col).Render(sym)
 			pri := priorityBadge(t.Priority)
 			title := truncate(t.Title, inner-8)
-			line := fmt.Sprintf("%s %s %s", badge, pri, title)
+			tagStr := ""
+			if len(t.Tags) > 0 {
+				tagStr = " [" + strings.Join(t.Tags, ",") + "]"
+			}
+			line := fmt.Sprintf("%s %s %s%s", badge, pri, title, tagStr)
 			if i == m.cursor {
 				line = styleTaskSelected.Width(inner).Render(line)
 			}
@@ -487,6 +491,9 @@ func (m Model) buildDetailText() string {
 			deps[i] = fmt.Sprintf("%d", d)
 		}
 		sb.WriteString(fmt.Sprintf("Depends on:  %s\n", strings.Join(deps, ", ")))
+	}
+	if len(t.Tags) > 0 {
+		sb.WriteString(fmt.Sprintf("Tags:        %s\n", strings.Join(t.Tags, ", ")))
 	}
 	if t.EstimatedMinutes > 0 {
 		sb.WriteString(fmt.Sprintf("Estimated:   %dm\n", t.EstimatedMinutes))
