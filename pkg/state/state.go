@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/health"
@@ -14,9 +15,44 @@ import (
 )
 
 const (
-	stateFile   = ".cloop/state.json" // legacy path; kept for migration detection
-	stateDBFile = ".cloop/state.db"   // current SQLite store
+	stateFile      = ".cloop/state.json" // legacy path; kept for migration detection
+	stateDBFile    = ".cloop/state.db"   // current SQLite store (default session)
+	activeFile     = ".cloop/active_session"
+	sessionMetaFile = "session.json"     // sentinel: presence means dir is a session dir
 )
+
+// ActiveDir resolves the effective working directory for state operations.
+// If a session is active (recorded in .cloop/active_session), it returns
+// the session's isolated directory; otherwise it returns workDir unchanged.
+func ActiveDir(workDir string) string {
+	data, err := os.ReadFile(filepath.Join(workDir, activeFile))
+	if err != nil {
+		return workDir
+	}
+	name := strings.TrimSpace(string(data))
+	if name == "" {
+		return workDir
+	}
+	return filepath.Join(workDir, ".cloop", "sessions", name)
+}
+
+// effectiveDBPath returns the state.db path for the given directory.
+// If dir is a session directory (contains session.json), the state.db lives
+// directly inside it rather than in a .cloop/ subdirectory.
+func effectiveDBPath(dir string) string {
+	if _, err := os.Stat(filepath.Join(dir, sessionMetaFile)); err == nil {
+		return filepath.Join(dir, "state.db")
+	}
+	return filepath.Join(dir, ".cloop", "state.db")
+}
+
+// effectiveLegacyPath mirrors effectiveDBPath but for the legacy state.json.
+func effectiveLegacyPath(dir string) string {
+	if _, err := os.Stat(filepath.Join(dir, sessionMetaFile)); err == nil {
+		return filepath.Join(dir, "state.json")
+	}
+	return filepath.Join(dir, ".cloop", "state.json")
+}
 
 type StepResult struct {
 	Step         int       `json:"step"`
@@ -70,26 +106,34 @@ func StatePath(workdir string) string {
 	return filepath.Join(workdir, stateFile)
 }
 
-// StateDBPath returns the SQLite database path.
+// StateDBPath returns the SQLite database path for the given workdir.
+// It does NOT resolve the active session; use Load for that.
 func StateDBPath(workdir string) string {
 	return filepath.Join(workdir, stateDBFile)
 }
 
-// Load reads project state, auto-migrating from state.json on first run.
+// Load reads project state, resolving the active session first.
+// Auto-migrates from state.json on first run.
 func Load(workdir string) (*ProjectState, error) {
-	dbPath := StateDBPath(workdir)
-	jsonPath := StatePath(workdir)
+	// Resolve the active session directory.
+	dir := ActiveDir(workdir)
+
+	dbPath := effectiveDBPath(dir)
+	jsonPath := effectiveLegacyPath(dir)
 
 	// If state.db doesn't exist but state.json does, run the migration.
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
 		if _, jsonErr := os.Stat(jsonPath); jsonErr == nil {
-			if migrateErr := migrateFromJSON(workdir, jsonPath, dbPath); migrateErr != nil {
+			if migrateErr := migrateFromJSON(dir, jsonPath, dbPath); migrateErr != nil {
 				return nil, fmt.Errorf("migrate state.json → state.db: %w", migrateErr)
 			}
 		}
 	}
 
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+		if dir != workdir {
+			return nil, fmt.Errorf("active session has no state (run 'cloop init' in this session)")
+		}
 		return nil, fmt.Errorf("no cloop project found (run 'cloop init' first)")
 	}
 
@@ -103,7 +147,38 @@ func Load(workdir string) (*ProjectState, error) {
 	if err != nil {
 		return nil, err
 	}
-	return fromRaw(raw), nil
+	s := fromRaw(raw)
+	// Ensure WorkDir is set to the resolved session dir so Save() writes back
+	// to the correct location.
+	if s.WorkDir == "" {
+		s.WorkDir = dir
+	}
+	return s, nil
+}
+
+// LoadFromDir loads state directly from a specific directory (e.g. a session
+// directory) without going through the active-session resolution in Load.
+// dir may be a session dir (state.db lives flat inside) or a regular workDir
+// (.cloop/state.db). Returns nil, nil if no state exists.
+func LoadFromDir(dir string) (*ProjectState, error) {
+	dbPath := effectiveDBPath(dir)
+	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+		return nil, nil
+	}
+	db, err := statedb.Open(dbPath)
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+	raw, err := db.LoadState()
+	if err != nil {
+		return nil, err
+	}
+	s := fromRaw(raw)
+	if s.WorkDir == "" {
+		s.WorkDir = dir
+	}
+	return s, nil
 }
 
 // Save writes the project state to the SQLite store.
@@ -113,12 +188,13 @@ func (s *ProjectState) Save() error {
 	// Merge externally-added tasks before persisting.
 	s.mergeExternalTasks()
 
-	dir := filepath.Join(s.WorkDir, ".cloop")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	// Ensure the parent directory of state.db exists.
+	dbPath := effectiveDBPath(s.WorkDir)
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
 		return err
 	}
 
-	db, err := statedb.Open(StateDBPath(s.WorkDir))
+	db, err := statedb.Open(dbPath)
 	if err != nil {
 		return err
 	}
@@ -311,7 +387,8 @@ type legacyState struct {
 	SkipClarify       bool                 `json:"skip_clarify,omitempty"`
 }
 
-func migrateFromJSON(workdir, jsonPath, dbPath string) error {
+func migrateFromJSON(dir, jsonPath, dbPath string) error {
+	workdir := dir
 	data, err := os.ReadFile(jsonPath)
 	if err != nil {
 		return err
