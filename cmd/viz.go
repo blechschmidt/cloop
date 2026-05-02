@@ -12,6 +12,7 @@ import (
 var vizFormat string
 var vizOutput string
 var vizHighlight int
+var vizLive bool
 
 var vizCmd = &cobra.Command{
 	Use:   "viz",
@@ -26,12 +27,19 @@ Supported formats (--format):
 
 Examples:
   cloop viz                          # ASCII graph in terminal
+  cloop viz --live                   # live animated graph (polls every 500ms)
   cloop viz --format mermaid         # Mermaid for GitHub markdown
   cloop viz --format dot             # DOT for Graphviz
   cloop viz --format dot -o graph.dot && dot -Tpng graph.dot -o graph.png
   cloop viz --highlight 5            # highlight task 5 and its dependency cone`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		workdir, _ := os.Getwd()
+
+		// Live mode: hand off to bubbletea TUI
+		if vizLive {
+			return viz.RunLive(workdir)
+		}
+
 		s, err := state.Load(workdir)
 		if err != nil {
 			return err
@@ -75,5 +83,6 @@ func init() {
 	vizCmd.Flags().StringVarP(&vizFormat, "format", "f", "ascii", "Output format: ascii, mermaid, or dot")
 	vizCmd.Flags().StringVarP(&vizOutput, "output", "o", "", "Write output to file instead of stdout")
 	vizCmd.Flags().IntVar(&vizHighlight, "highlight", 0, "Highlight a task and its dependency cone (ASCII format only)")
+	vizCmd.Flags().BoolVarP(&vizLive, "live", "l", false, "Live animated graph: polls state every 500ms with spinner for in-progress tasks")
 	rootCmd.AddCommand(vizCmd)
 }
