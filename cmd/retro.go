@@ -8,6 +8,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/cost"
+	"github.com/blechschmidt/cloop/pkg/journal"
 	"github.com/blechschmidt/cloop/pkg/memory"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/provider"
@@ -141,9 +142,12 @@ Examples:
 			plan = s.Plan
 		}
 
+		// Collect journal summaries for tasks that have entries.
+		journalSummaries := collectJournalSummaries(ctx, workdir, plan, prov, model)
+
 		switch retroFormat {
 		case "md", "markdown":
-			md := retro.FormatMarkdownFull(analysis, goal, plan, costSummary)
+			md := retro.FormatMarkdownFullWithJournal(analysis, goal, plan, costSummary, journalSummaries)
 			dest := retroOutput
 			if dest == "" && retroSave {
 				dest = fmt.Sprintf(".cloop/retro-%s.md", time.Now().Format("20060102-150405"))
@@ -158,7 +162,7 @@ Examples:
 			}
 		default:
 			// Terminal format: print markdown to stdout by default, optionally save.
-			md := retro.FormatMarkdownFull(analysis, goal, plan, costSummary)
+			md := retro.FormatMarkdownFullWithJournal(analysis, goal, plan, costSummary, journalSummaries)
 			printRetroTerminal(analysis, s)
 			if retroSave {
 				dest := fmt.Sprintf(".cloop/retro-%s.md", time.Now().Format("20060102-150405"))
@@ -336,6 +340,31 @@ func printRetroTerminal(a *retro.Analysis, s *state.ProjectState) {
 			fmt.Printf("\n")
 		}
 	}
+}
+
+// collectJournalSummaries fetches AI summaries for all tasks that have journal entries.
+// Tasks without entries are skipped. Errors per task are silently dropped.
+func collectJournalSummaries(ctx context.Context, workdir string, plan *pm.Plan, prov provider.Provider, model string) map[string]string {
+	if plan == nil {
+		return nil
+	}
+	summaries := make(map[string]string)
+	for _, t := range plan.Tasks {
+		taskID := fmt.Sprintf("%d", t.ID)
+		entries, err := journal.List(workdir, taskID)
+		if err != nil || len(entries) == 0 {
+			continue
+		}
+		summary, err := journal.Summarize(ctx, prov, model, entries)
+		if err != nil {
+			continue
+		}
+		summaries[taskID] = summary
+	}
+	if len(summaries) == 0 {
+		return nil
+	}
+	return summaries
 }
 
 func init() {

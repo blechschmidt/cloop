@@ -419,7 +419,14 @@ func FormatMarkdown(a *Analysis, s *state.ProjectState) string {
 }
 
 // FormatMarkdownFull is the full renderer used by both Analyze (state-based) and Generate (plan-based).
+// journalSummaries is an optional map of task ID string → AI-generated journal summary.
 func FormatMarkdownFull(a *Analysis, goal string, plan *pm.Plan, costSummary string) string {
+	return FormatMarkdownFullWithJournal(a, goal, plan, costSummary, nil)
+}
+
+// FormatMarkdownFullWithJournal is like FormatMarkdownFull but also renders per-task journal summaries.
+// journalSummaries maps task ID string → AI-generated narrative summary from the journal.
+func FormatMarkdownFullWithJournal(a *Analysis, goal string, plan *pm.Plan, costSummary string, journalSummaries map[string]string) string {
 	var b strings.Builder
 
 	b.WriteString("# Plan Retrospective\n\n")
@@ -503,6 +510,21 @@ func FormatMarkdownFull(a *Analysis, goal string, plan *pm.Plan, costSummary str
 					tc.TaskID, truncateMd(tc.Title, 40), tc.Status, estStr, actualStr, deltaStr))
 			}
 			b.WriteString("\n")
+		}
+	}
+
+	// Per-task journal summaries
+	if len(journalSummaries) > 0 && plan != nil {
+		b.WriteString("## Task Decision Journals\n\n")
+		for _, t := range plan.Tasks {
+			key := fmt.Sprintf("%d", t.ID)
+			summary, ok := journalSummaries[key]
+			if !ok || summary == "" || summary == "(no journal entries)" {
+				continue
+			}
+			b.WriteString(fmt.Sprintf("### Task %d: %s\n\n", t.ID, t.Title))
+			b.WriteString(summary)
+			b.WriteString("\n\n")
 		}
 	}
 
