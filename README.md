@@ -42,25 +42,101 @@ cloop log
 
 ## How It Works
 
-```
-┌─────────────┐     ┌─────────────┐     ┌──────────────┐
-│  cloop init  │────▶│  cloop run   │────▶│   Provider   │
-│  set goal    │     │  feed goal + │     │  execute step│
-│              │     │  context     │     │  return output│
-└─────────────┘     └──────┬───▲──┘     └──────────────┘
-                           │   │
-                    step   │   │  result
-                    output │   │  + context
-                           ▼   │
-                    ┌──────────┐
-                    │  .cloop/ │
-                    │  state   │
-                    └──────────┘
+The diagram below shows the complete cloop lifecycle — from goal setting through autonomous execution, auto-evolution, and continuous user interaction.
+
+```mermaid
+flowchart TD
+    %% ── Entry points ──────────────────────────────────────────────
+    A([User: cloop init &quot;goal&quot;]) --> B[(\.cloop/state\ngoal saved)]
+    B --> C[cloop run]
+
+    %% ── Run startup ───────────────────────────────────────────────
+    C --> D{PM mode?}
+    D -- No --> E[Simple loop:\nbuild prompt → call provider\n→ check GOAL_COMPLETE]
+    D -- Yes --> F[Decompose goal\ninto task plan via AI]
+
+    %% ── Simple loop path ──────────────────────────────────────────
+    E --> E1{GOAL_COMPLETE\nsignal?}
+    E1 -- No --> E2{Budget / Ctrl+C?}
+    E2 -- No --> E
+    E2 -- Yes --> Z([Loop ends])
+    E1 -- Yes --> AE
+
+    %% ── PM task loop ──────────────────────────────────────────────
+    F --> G[(Shared task queue\n.cloop/state.db)]
+
+    G --> H{Pending tasks\nin queue?}
+    H -- No --> AE[Auto-Evolve\n--auto-evolve flag]
+    H -- Yes --> I[Pick highest-priority\npending task\nrespecting deps]
+
+    I --> J{Condition\ncheck passes?}
+    J -- No / skip --> K[Mark task skipped]
+    K --> G
+
+    J -- Yes --> L{Approval gate?\ncritical task}
+    L -- Denied --> K
+    L -- Approved / n/a --> M[Execute task\nvia AI provider]
+
+    M --> N{Task signal?}
+    N -- TASK_DONE --> O[Mark done\nsave artifact\nrun post-hooks]
+    N -- TASK_FAILED --> P{Auto-heal\nattempts left?}
+    N -- TASK_SKIPPED --> K
+
+    P -- Yes --> Q[Mutate prompt\nheal attempt]
+    Q --> M
+    P -- No --> R[Mark failed\nrun diagnosis]
+    R --> G
+
+    O --> S[Post-task:\ncode review · verify script\nnotify · cost ledger]
+    S --> G
+
+    %% ── Auto-Evolve ───────────────────────────────────────────────
+    AE --> AE1{--innovate flag?}
+    AE1 -- Yes --> AE2[Innovation-mode\nevolve prompt\n7 categories]
+    AE1 -- No  --> AE3[Standard\nevolve prompt]
+    AE2 & AE3 --> AE4[AI discovers\n1–5 improvements]
+    AE4 --> AE5[Semantic dedup\nagainst existing tasks]
+    AE5 --> AE6[Inject new tasks\ninto shared queue]
+    AE6 --> G
+
+    %% ── User task input path (parallel) ──────────────────────────
+    subgraph USER ["User task inputs  (any time, run in parallel)"]
+        U1[cloop task add\n'description'] --> UA[AI structures task\nrefinement REPL]
+        U2[Web UI\nplan editor] --> UA
+        U3[cloop listen / voice\nSTT → NLP] --> UA
+        U4[cloop import\nJira · Linear · GitHub CSV] --> UA
+        UA --> UB[(Shared task queue)]
+    end
+    UB -.->|merged into| G
+
+    %% ── Loop termination ──────────────────────────────────────────
+    G --> TC{Ctrl+C\nor token budget?}
+    TC -- Yes --> Z
+    TC -- No --> H
+
+    %% ── Styles ────────────────────────────────────────────────────
+    classDef queue fill:#1e3a5f,stroke:#4a90d9,color:#e8f4fd
+    classDef decision fill:#2d4a1e,stroke:#6abf4b,color:#e8f8e8
+    classDef action fill:#2a2a2a,stroke:#888,color:#eee
+    classDef endpoint fill:#4a1e1e,stroke:#d94a4a,color:#fde8e8
+    classDef user fill:#3a2d1e,stroke:#d9944a,color:#fdf0e8
+
+    class G,B,UB queue
+    class D,H,J,L,N,P,E1,E2,AE1,TC decision
+    class F,I,M,O,S,AE,AE2,AE3,AE4,AE5,AE6,Q,R,K,E action
+    class A,Z endpoint
+    class U1,U2,U3,U4,UA user
 ```
 
-1. **`cloop init "goal"`** — saves the project goal to `.cloop/state.json`
-2. **`cloop run`** — enters a loop: builds a context-aware prompt, calls the AI provider, stores the output, checks for `GOAL_COMPLETE`, repeats until done (or Ctrl+C to pause)
-3. **Auto-Evolve** — after `GOAL_COMPLETE`, the AI independently adds features, tests, docs, and improvements
+**Key paths:**
+
+1. **`cloop init "goal"`** — saves the project goal to `.cloop/state.db`
+2. **`cloop run`** — decomposes the goal into a prioritised task plan (PM mode) or enters a simple goal loop
+3. **Task execution** — tasks are picked by priority, dependencies checked, approval gates enforced, then executed via the AI provider; auto-heal retries mutated prompts on failure
+4. **Post-task pipeline** — code review, verification script, desktop/Slack notifications, cost ledger entry
+5. **Auto-Evolve** — once the queue drains, the AI analyses the codebase and injects new improvement tasks; `--innovate` activates a richer 7-category discovery prompt
+6. **User inputs** — `cloop task add`, the Web UI plan editor, voice/STT (`cloop listen`), and CSV import all feed the same shared queue in parallel with the AI loop
+7. **Loop ends** — on Ctrl+C, token budget exhaustion, or when no more tasks remain and auto-evolve is off
 
 ## Providers
 
