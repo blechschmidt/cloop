@@ -22,6 +22,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/optimizer"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/provider"
+	"github.com/blechschmidt/cloop/pkg/replay"
 	"github.com/blechschmidt/cloop/pkg/router"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/verify"
@@ -891,7 +892,17 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		}
 		s.TotalInputTokens += result.InputTokens
 		s.TotalOutputTokens += result.OutputTokens
+		replayStep := s.CurrentStep
 		s.AddStep(stepResult)
+		if err := replay.Append(o.config.WorkDir, replay.Entry{
+			Ts:        time.Now(),
+			TaskID:    task.ID,
+			TaskTitle: task.Title,
+			Step:      replayStep,
+			Content:   result.Output,
+		}); err != nil {
+			dimColor.Printf("  replay log write error (ignored): %v\n", err)
+		}
 
 		// Record step tokens/cost into metrics.
 		if o.metrics != nil {
@@ -1529,8 +1540,18 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 			mu.Lock()
 			s.TotalInputTokens += result.InputTokens
 			s.TotalOutputTokens += result.OutputTokens
+			parallelReplayStep := s.CurrentStep
 			s.AddStep(stepResult)
 			mu.Unlock()
+			if err := replay.Append(o.config.WorkDir, replay.Entry{
+				Ts:        time.Now(),
+				TaskID:    task.ID,
+				TaskTitle: task.Title,
+				Step:      parallelReplayStep,
+				Content:   result.Output,
+			}); err != nil {
+				dimColor.Printf("  replay log write error (ignored): %v\n", err)
+			}
 
 			// Record step metrics.
 			if o.metrics != nil {
