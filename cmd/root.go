@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/blechschmidt/cloop/pkg/migrate"
 	"github.com/blechschmidt/cloop/pkg/workspace"
+	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 )
 
@@ -96,15 +98,27 @@ func init() {
 	rootCmd.PersistentFlags().BoolVar(&globalLogJSON, "log-json", false, "Emit structured NDJSON log lines for key events (task_start, task_done, step, etc.) instead of colored text. Enables piping to Datadog, Splunk, or jq.")
 	rootCmd.PersistentFlags().StringVar(&globalWorkspace, "workspace", "", "Named workspace to operate in (overrides cwd for all commands)")
 	rootCmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
-		if globalWorkspace == "" {
-			return nil
+		if globalWorkspace != "" {
+			// Resolve the workspace path and chdir so all commands transparently
+			// use the workspace directory when calling os.Getwd().
+			workDir, err := workspace.ResolveWorkDir(globalWorkspace)
+			if err != nil {
+				return fmt.Errorf("--workspace: %w", err)
+			}
+			if err := os.Chdir(workDir); err != nil {
+				return err
+			}
 		}
-		// Resolve the workspace path and chdir so all commands transparently
-		// use the workspace directory when calling os.Getwd().
-		workDir, err := workspace.ResolveWorkDir(globalWorkspace)
-		if err != nil {
-			return fmt.Errorf("--workspace: %w", err)
+
+		// Warn if the .cloop schema is behind the current version, unless the
+		// user is already running 'cloop migrate' (which would be redundant).
+		if cmd.Name() != "migrate" {
+			cwd, _ := os.Getwd()
+			if migrate.NeedsUpgrade(cwd) {
+				color.New(color.FgYellow).Fprintln(os.Stderr,
+					"warning: .cloop schema is out of date — run 'cloop migrate' to upgrade")
+			}
 		}
-		return os.Chdir(workDir)
+		return nil
 	}
 }
