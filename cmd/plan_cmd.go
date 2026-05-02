@@ -27,7 +27,8 @@ Subcommands:
   diff [v1] [v2]       Show a human-readable diff between two plan versions
   edit <instr>         Apply a natural-language instruction to mutate the plan
   export [--format]    Export plan to a portable YAML/JSON/TOML file
-  import <file>        Import a plan from a portable file (--merge or --replace)`,
+  import <file>        Import a plan from a portable file (--merge or --replace)
+  critique             AI adversarial plan review — devil's advocate pressure-test`,
 }
 
 var planHistoryCmd = &cobra.Command{
