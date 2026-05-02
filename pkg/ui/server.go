@@ -103,6 +103,9 @@ func (s *Server) Start() error {
 	// Live log
 	mux.HandleFunc("/api/livelog", s.handleLiveLog)
 
+	// Voice / STT
+	mux.HandleFunc("/api/voice", s.handleVoice)
+
 	// Init & reset
 	mux.HandleFunc("/api/init", s.handleInit)
 	mux.HandleFunc("/api/reset", s.handleReset)
@@ -1137,6 +1140,79 @@ func (s *Server) handleInit(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]interface{}{"ok": true, "goal": ps.Goal})
 }
 
+// handleVoice accepts a multipart audio upload, transcribes it with the local
+// cloop listen command, and returns the transcription + resolved action.
+// POST /api/voice   multipart field: "audio" (binary audio file)
+// Optional query params: stt_provider, whisper_model, groq_api_key, dry_run=true
+func (s *Server) handleVoice(w http.ResponseWriter, r *http.Request) {
+	if !requirePOST(w, r) {
+		return
+	}
+
+	// 32 MB max upload.
+	if err := r.ParseMultipartForm(32 << 20); err != nil {
+		jsonErr(w, "parse multipart: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	file, fh, err := r.FormFile("audio")
+	if err != nil {
+		jsonErr(w, "audio field required: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
+
+	// Write to a temp file.
+	tmp, err := os.CreateTemp("", "cloop-voice-*-"+fh.Filename)
+	if err != nil {
+		jsonErr(w, "tmpfile: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := io.Copy(tmp, file); err != nil {
+		tmp.Close()
+		jsonErr(w, "write tmpfile: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	tmp.Close()
+
+	// Build cloop listen args.
+	listenArgs := []string{"listen", "--file", tmp.Name(), "--dry-run"}
+
+	if v := r.FormValue("stt_provider"); v != "" {
+		listenArgs = append(listenArgs, "--stt-provider", v)
+	}
+	if v := r.FormValue("whisper_model"); v != "" {
+		listenArgs = append(listenArgs, "--whisper-model", v)
+	}
+	if v := r.FormValue("groq_api_key"); v != "" {
+		listenArgs = append(listenArgs, "--groq-api-key", v)
+	}
+
+	// Run cloop listen via the installed binary. We capture stdout.
+	exe, err := os.Executable()
+	if err != nil {
+		exe = "cloop"
+	}
+	out, cmdErr := exec.Command(exe, listenArgs...).CombinedOutput()
+	output := strings.TrimSpace(string(out))
+
+	if cmdErr != nil {
+		// Return a partial result with the output so the browser can display it.
+		jsonOK(w, map[string]interface{}{
+			"ok":     false,
+			"output": output,
+			"error":  cmdErr.Error(),
+		})
+		return
+	}
+
+	jsonOK(w, map[string]interface{}{
+		"ok":     true,
+		"output": output,
+	})
+}
+
 // handleReset resets the project state by running `cloop reset`.
 func (s *Server) handleReset(w http.ResponseWriter, r *http.Request) {
 	if !requirePOST(w, r) {
@@ -1289,6 +1365,18 @@ const dashboardHTML = `<!DOCTYPE html>
   .btn.warn:hover    { background:rgba(210,153,34,.1); border-color:var(--yellow); }
   .btn svg { width:13px; height:13px; }
   .btn:disabled { opacity:.4; cursor:not-allowed; }
+  .btn.mic { color:var(--purple); border-color:rgba(188,140,255,.4); }
+  .btn.mic:hover { background:rgba(188,140,255,.1); border-color:var(--purple); }
+  .btn.mic.recording { color:var(--red); border-color:rgba(248,81,73,.4); animation: pulse 1s infinite; }
+
+  /* ── Voice modal ── */
+  .voice-modal-backdrop { position:fixed; inset:0; background:rgba(0,0,0,.6); z-index:100; display:flex; align-items:center; justify-content:center; }
+  .voice-modal { background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); padding:24px; width:480px; max-width:95vw; }
+  .voice-modal h3 { margin-bottom:16px; font-size:15px; color:var(--accent); }
+  .voice-modal .voice-status { font-size:13px; color:var(--muted); margin-bottom:12px; min-height:20px; }
+  .voice-modal .voice-transcript { background:var(--bg); border:1px solid var(--border); border-radius:var(--radius); padding:10px; font-size:13px; min-height:40px; margin-bottom:12px; white-space:pre-wrap; }
+  .voice-modal .voice-output { background:var(--bg); border:1px solid var(--border); border-radius:var(--radius); padding:10px; font-size:12px; font-family:monospace; min-height:60px; max-height:200px; overflow-y:auto; margin-bottom:12px; white-space:pre-wrap; }
+  .voice-modal-btns { display:flex; gap:8px; justify-content:flex-end; }
 
   /* ── Advanced options (details) ── */
   details.advanced { margin-top:8px; }
@@ -1646,6 +1734,30 @@ const dashboardHTML = `<!DOCTYPE html>
               <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 0 1 .908-.417A6 6 0 1 1 8 2v1z"/><path d="M8 4.466V.534a.25.25 0 0 1 .41-.192l2.36 1.966c.12.1.12.284 0 .384L8.41 4.658A.25.25 0 0 1 8 4.466z"/></svg>
               Refresh
             </button>
+            <button class="btn mic" id="micBtn" onclick="openVoiceModal()" title="Voice command (cloop listen)">
+              <svg viewBox="0 0 16 16" fill="currentColor"><path d="M5 3a3 3 0 0 1 6 0v5a3 3 0 0 1-6 0V3z"/><path d="M3.5 6.5A.5.5 0 0 1 4 7v1a4 4 0 0 0 8 0V7a.5.5 0 0 1 1 0v1a5 5 0 0 1-4.5 4.975V15h2.5a.5.5 0 0 1 0 1h-6a.5.5 0 0 1 0-1H7.5v-2.025A5 5 0 0 1 3 8V7a.5.5 0 0 1 .5-.5z"/></svg>
+              Voice
+            </button>
+          </div>
+          <!-- Voice modal -->
+          <div id="voiceModalBackdrop" class="voice-modal-backdrop" style="display:none">
+            <div class="voice-modal">
+              <h3>Voice Command</h3>
+              <div class="voice-status" id="voiceStatus">Click Record to start recording...</div>
+              <div class="voice-transcript" id="voiceTranscript" style="color:var(--muted)">Transcription will appear here</div>
+              <div class="voice-output" id="voiceOutput" style="display:none"></div>
+              <div class="voice-modal-btns">
+                <button class="btn mic" id="voiceRecordBtn" onclick="toggleVoiceRecording()">
+                  <svg viewBox="0 0 16 16" fill="currentColor"><path d="M5 3a3 3 0 0 1 6 0v5a3 3 0 0 1-6 0V3z"/></svg>
+                  Record
+                </button>
+                <button class="btn primary" id="voiceSendBtn" onclick="sendVoiceAudio()" disabled>
+                  <svg viewBox="0 0 16 16" fill="currentColor"><path d="M15.854.146a.5.5 0 0 1 .11.54l-5.819 14.547a.75.75 0 0 1-1.329.124l-3.178-4.995L.643 7.184a.75.75 0 0 1 .124-1.33L15.314.037a.5.5 0 0 1 .54.11z"/></svg>
+                  Execute
+                </button>
+                <button class="btn" onclick="closeVoiceModal()">Cancel</button>
+              </div>
+            </div>
           </div>
           <details class="advanced">
             <summary>Advanced run options</summary>
@@ -2697,6 +2809,120 @@ window.confirmReset = function() {
     if (d.ok) { toast('Project reset', 'ok'); refreshState(); }
     else toast(d.error||'Reset failed', 'err');
   }).catch(() => toast('Request failed', 'err'));
+};
+
+// ── Voice / STT ───────────────────────────────────────────────────────────────
+
+let voiceMediaRecorder = null;
+let voiceChunks = [];
+let voiceRecording = false;
+let voiceBlob = null;
+
+window.openVoiceModal = function() {
+  document.getElementById('voiceModalBackdrop').style.display = 'flex';
+  document.getElementById('voiceStatus').textContent = 'Click Record to start recording...';
+  document.getElementById('voiceTranscript').textContent = 'Transcription will appear here';
+  document.getElementById('voiceTranscript').style.color = 'var(--muted)';
+  document.getElementById('voiceOutput').style.display = 'none';
+  document.getElementById('voiceOutput').textContent = '';
+  document.getElementById('voiceSendBtn').disabled = true;
+  voiceBlob = null; voiceChunks = [];
+};
+
+window.closeVoiceModal = function() {
+  if (voiceRecording) stopVoiceRecording();
+  document.getElementById('voiceModalBackdrop').style.display = 'none';
+};
+
+window.toggleVoiceRecording = async function() {
+  if (voiceRecording) { stopVoiceRecording(); return; }
+
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    voiceChunks = [];
+    voiceBlob = null;
+    document.getElementById('voiceSendBtn').disabled = true;
+    document.getElementById('voiceOutput').style.display = 'none';
+
+    // Prefer webm/opus; fallback to whatever the browser supports.
+    const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+      ? 'audio/webm;codecs=opus'
+      : (MediaRecorder.isTypeSupported('audio/ogg') ? 'audio/ogg' : '');
+    const options = mimeType ? { mimeType } : {};
+    voiceMediaRecorder = new MediaRecorder(stream, options);
+
+    voiceMediaRecorder.ondataavailable = e => { if (e.data.size > 0) voiceChunks.push(e.data); };
+    voiceMediaRecorder.onstop = () => {
+      stream.getTracks().forEach(t => t.stop());
+      const ext = (voiceMediaRecorder.mimeType || '').includes('ogg') ? 'ogg' : 'webm';
+      voiceBlob = new Blob(voiceChunks, { type: voiceMediaRecorder.mimeType || 'audio/webm' });
+      voiceBlob._ext = ext;
+      document.getElementById('voiceStatus').textContent = 'Recorded ' + (voiceBlob.size/1024).toFixed(1) + ' KB. Click Execute to transcribe and run.';
+      document.getElementById('voiceSendBtn').disabled = false;
+      document.getElementById('voiceRecordBtn').classList.remove('recording');
+      document.getElementById('voiceRecordBtn').innerHTML = '<svg viewBox="0 0 16 16" fill="currentColor"><path d="M5 3a3 3 0 0 1 6 0v5a3 3 0 0 1-6 0V3z"/></svg> Record';
+      voiceRecording = false;
+    };
+
+    voiceMediaRecorder.start(200);
+    voiceRecording = true;
+    document.getElementById('voiceStatus').textContent = 'Recording... click Stop to finish.';
+    document.getElementById('voiceRecordBtn').classList.add('recording');
+    document.getElementById('voiceRecordBtn').innerHTML = '<svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 0a8 8 0 1 1 0 16A8 8 0 0 1 8 0zM5.5 5.5h5v5h-5z"/></svg> Stop';
+  } catch (err) {
+    document.getElementById('voiceStatus').textContent = 'Microphone error: ' + err.message;
+  }
+};
+
+function stopVoiceRecording() {
+  if (voiceMediaRecorder && voiceMediaRecorder.state !== 'inactive') voiceMediaRecorder.stop();
+  voiceRecording = false;
+}
+
+window.sendVoiceAudio = async function() {
+  if (!voiceBlob) { toast('No recording yet', 'info'); return; }
+
+  document.getElementById('voiceStatus').textContent = 'Uploading and transcribing...';
+  document.getElementById('voiceSendBtn').disabled = true;
+
+  const ext = voiceBlob._ext || 'webm';
+  const formData = new FormData();
+  formData.append('audio', voiceBlob, 'recording.' + ext);
+
+  try {
+    const headers = authHeaders();
+    // FormData sets its own Content-Type; remove explicit header.
+    delete headers['Content-Type'];
+
+    const resp = await fetch('/api/voice', { method: 'POST', headers, body: formData });
+    const data = await resp.json();
+
+    document.getElementById('voiceOutput').style.display = 'block';
+    document.getElementById('voiceOutput').textContent = data.output || '';
+
+    // Extract transcription line from output for display.
+    const lines = (data.output || '').split('\n');
+    const tLine = lines.find(l => l.includes('Transcription:'));
+    const tVal  = lines.find(l => l.trim().startsWith('"') && l.trim().endsWith('"'));
+    if (tVal) {
+      document.getElementById('voiceTranscript').textContent = tVal.trim().replace(/^"|"$/g, '');
+      document.getElementById('voiceTranscript').style.color = 'var(--text)';
+    }
+
+    if (data.ok) {
+      document.getElementById('voiceStatus').textContent = 'Done! Check output below.';
+      toast('Voice command executed', 'ok');
+      refreshState();
+    } else {
+      document.getElementById('voiceStatus').textContent = 'Error: ' + (data.error || 'unknown');
+      toast('Voice command failed', 'err');
+    }
+    document.getElementById('voiceSendBtn').disabled = false;
+  } catch (err) {
+    document.getElementById('voiceStatus').textContent = 'Request failed: ' + err.message;
+    document.getElementById('voiceSendBtn').disabled = false;
+    toast('Voice request failed', 'err');
+  }
 };
 
 // ── Init ─────────────────────────────────────────────────────────────────────
