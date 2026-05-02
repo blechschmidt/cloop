@@ -5283,8 +5283,8 @@ function renderTasks(s) {
     container.innerHTML = '<div class="empty-state"><h3>No tasks yet</h3><p>Add a task above, or run <code>cloop run --pm</code> to generate a task plan.</p></div>';
     return;
   }
-  const byPriority = [...s.plan.tasks].sort((a,b) => a.priority - b.priority);
-  const sorted = [...byPriority.filter(t=>t.pinned), ...byPriority.filter(t=>!t.pinned)];
+  const byId = [...s.plan.tasks].sort((a,b) => a.id - b.id);
+  const sorted = [...byId.filter(t=>t.pinned), ...byId.filter(t=>!t.pinned)];
   const done    = sorted.filter(t => t.status==='done').length;
   const hidden  = ['done', 'skipped', 'failed', 'timed_out'];
 
