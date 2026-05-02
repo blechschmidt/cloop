@@ -81,6 +81,7 @@ var (
 	riskForce            bool
 	consensusN           int
 	noContextInject      bool
+	requireApproval      bool
 )
 
 var runCmd = &cobra.Command{
@@ -235,6 +236,7 @@ Press Ctrl+C to pause gracefully.`,
 			PostReview:          postReview,
 			ConsensusN:          consensusN,
 			NoCodeContextInject: noContextInject,
+			RequireApproval:     requireApproval,
 			SlackWebhookURL:   cfg.Notify.SlackWebhook,
 			DiscordWebhookURL: cfg.Notify.DiscordWebhook,
 			Hooks: hooks.Config{
@@ -511,5 +513,6 @@ func init() {
 	runCmd.Flags().BoolVar(&riskForce, "force", false, "PM mode: with --risk-check, execute tasks even when CRITICAL risk findings are present (prints a warning)")
 	runCmd.Flags().IntVar(&consensusN, "consensus", 0, "PM mode: for critical tasks (P0/P1 or tagged 'critical'), fan out to up to N providers in parallel and use an AI judge to select the best response (0 = disabled)")
 	runCmd.Flags().BoolVar(&noContextInject, "no-context-inject", false, "PM mode: disable automatic codebase context snippet injection in task prompts (keyword-matched source files are injected by default)")
+	runCmd.Flags().BoolVar(&requireApproval, "require-approval", false, "PM mode: require interactive approval (y/n/skip/edit) before executing P0/P1 tasks or tasks with requires_approval:true; pre-approved tasks (via 'cloop task approve') are not re-prompted")
 	rootCmd.AddCommand(runCmd)
 }

@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/approvalgate"
 	"github.com/blechschmidt/cloop/pkg/artifact"
 	"github.com/blechschmidt/cloop/pkg/checkpoint"
 	"github.com/blechschmidt/cloop/pkg/condition"
@@ -276,6 +277,13 @@ type Config struct {
 	// to ~2000 tokens of relevant snippets to each task prompt. Set this to true
 	// (via --no-context-inject) to disable the feature entirely.
 	NoCodeContextInject bool
+
+	// RequireApproval enables the human-in-the-loop approval gate for P0/P1 tasks
+	// in PM sequential mode. When true, any task with priority <= 1 OR
+	// RequiresApproval:true is paused before execution and the user is prompted
+	// with [y/n/skip/edit]. Pre-approved tasks (task.Approved:true set via
+	// 'cloop task approve') bypass the interactive prompt automatically.
+	RequireApproval bool
 }
 
 type Orchestrator struct {
@@ -960,6 +968,37 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 					s.Save()
 					continue
 				}
+			}
+		}
+
+		// Human-in-the-loop approval gate: fires when RequireApproval config is set
+		// (gates P0/P1 and tasks with RequiresApproval:true) or per-task flag.
+		needsGate := task.RequiresApproval ||
+			(o.config.RequireApproval && task.Priority <= 1)
+		if needsGate {
+			gate := approvalgate.New()
+			res := gate.Approve(task)
+			switch {
+			case res.Skipped:
+				task.Status = pm.TaskSkipped
+				dimColor.Printf("→ Task %d skipped at approval gate.\n\n", task.ID)
+				s.Save()
+				continue
+			case res.Paused:
+				s.Status = "paused"
+				s.Save()
+				color.New(color.FgYellow).Printf("⏸ Approval gate: execution declined. Run 'cloop run' to resume.\n")
+				return nil
+			default:
+				// Approved (possibly with edited description)
+				if res.EditedDesc != "" {
+					task.Description = res.EditedDesc
+					s.Save()
+					dimColor.Printf("  Task %d description updated via editor.\n", task.ID)
+				}
+				// Mark as approved so unattended reruns skip the gate.
+				task.Approved = true
+				s.Save()
 			}
 		}
 

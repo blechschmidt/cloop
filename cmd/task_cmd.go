@@ -86,6 +86,7 @@ Subcommands:
   notes <id>             List all annotations for a task
   query <question>       Answer a natural language question about the plan
   merge <id1> <id2>...   Merge multiple tasks into one AI-synthesised task
+  approve <id>           Pre-approve a task to bypass the --require-approval gate
 
 Task dependencies:
   Use --deps when adding or editing tasks to specify prerequisites.
@@ -1317,6 +1318,66 @@ Examples:
 	},
 }
 
+var taskApproveCmd = &cobra.Command{
+	Use:   "approve <id>",
+	Short: "Pre-approve a task so unattended runs skip the approval gate",
+	Long: `Mark a task as pre-approved in state.json. When a run uses --require-approval
+or the task has requires_approval:true, the interactive gate prompt is automatically
+bypassed for tasks that have been pre-approved via this command.
+
+This is useful for unattended CI runs where a human has already reviewed the task
+but the approval flag must still be satisfied.
+
+Example:
+  cloop task approve 3
+  cloop task approve 5 --revoke`,
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		workdir, _ := os.Getwd()
+		s, err := state.Load(workdir)
+		if err != nil {
+			return err
+		}
+		if !s.PMMode || s.Plan == nil {
+			return fmt.Errorf("no task plan found — run 'cloop run --pm' to create one")
+		}
+
+		id, err := strconv.Atoi(args[0])
+		if err != nil {
+			return fmt.Errorf("invalid task ID %q: must be a number", args[0])
+		}
+
+		var task *pm.Task
+		for _, t := range s.Plan.Tasks {
+			if t.ID == id {
+				task = t
+				break
+			}
+		}
+		if task == nil {
+			return fmt.Errorf("task %d not found", id)
+		}
+
+		revoke, _ := cmd.Flags().GetBool("revoke")
+		if revoke {
+			task.Approved = false
+			if err := s.Save(); err != nil {
+				return err
+			}
+			color.New(color.FgYellow).Printf("Task %d approval revoked: %s\n", task.ID, task.Title)
+			return nil
+		}
+
+		task.Approved = true
+		if err := s.Save(); err != nil {
+			return err
+		}
+		color.New(color.FgGreen).Printf("Task %d pre-approved: %s\n", task.ID, task.Title)
+		color.New(color.Faint).Printf("  This task will bypass the interactive approval gate on next run.\n")
+		return nil
+	},
+}
+
 var taskAnnotateCmd = &cobra.Command{
 	Use:   "annotate <id> <text>",
 	Short: "Append a user note to a task",
@@ -1465,6 +1526,8 @@ func init() {
 	taskCmd.AddCommand(taskUntagCmd)
 	taskCmd.AddCommand(taskSplitCmd)
 	taskCmd.AddCommand(taskMergeCmd)
+	taskApproveCmd.Flags().Bool("revoke", false, "Revoke a previously granted pre-approval")
+	taskCmd.AddCommand(taskApproveCmd)
 	taskCmd.AddCommand(taskAnnotateCmd)
 	taskCmd.AddCommand(taskNotesCmd)
 	rootCmd.AddCommand(taskCmd)

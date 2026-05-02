@@ -139,6 +139,8 @@ type Task struct {
 	Condition         string       `json:"condition,omitempty"`           // optional gate: "$cmd" = shell check, else AI yes/no prompt
 	Recurrence        string       `json:"recurrence,omitempty"`          // cron expression (5-field); auto-resets task when due
 	NextRunAt         *time.Time   `json:"next_run_at,omitempty"`         // computed next trigger time for recurring tasks
+	RequiresApproval  bool         `json:"requires_approval,omitempty"`   // task must be interactively approved before execution
+	Approved          bool         `json:"approved,omitempty"`            // pre-approved via 'cloop task approve'; bypasses interactive gate
 }
 
 // Plan is the full task plan for a goal.
