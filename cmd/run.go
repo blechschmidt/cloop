@@ -79,6 +79,7 @@ var (
 	noHeal               bool
 	riskCheck            bool
 	riskForce            bool
+	consensusN           int
 )
 
 var runCmd = &cobra.Command{
@@ -231,6 +232,7 @@ Press Ctrl+C to pause gracefully.`,
 			SkipHealthCheck: skipHealthCheck,
 			MultiAgent:      multiAgentMode,
 			PostReview:      postReview,
+			ConsensusN:      consensusN,
 			SlackWebhookURL:   cfg.Notify.SlackWebhook,
 			DiscordWebhookURL: cfg.Notify.DiscordWebhook,
 			Hooks: hooks.Config{
@@ -505,5 +507,6 @@ func init() {
 	runCmd.Flags().BoolVar(&noHeal, "no-heal", false, "PM mode: disable the auto-heal loop — TASK_FAILED immediately marks the task failed without any re-attempt")
 	runCmd.Flags().BoolVar(&riskCheck, "risk-check", false, "PM mode: run AI risk assessment before each task; abort tasks with CRITICAL findings (use --force to override)")
 	runCmd.Flags().BoolVar(&riskForce, "force", false, "PM mode: with --risk-check, execute tasks even when CRITICAL risk findings are present (prints a warning)")
+	runCmd.Flags().IntVar(&consensusN, "consensus", 0, "PM mode: for critical tasks (P0/P1 or tagged 'critical'), fan out to up to N providers in parallel and use an AI judge to select the best response (0 = disabled)")
 	rootCmd.AddCommand(runCmd)
 }

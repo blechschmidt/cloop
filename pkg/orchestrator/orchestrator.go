@@ -13,6 +13,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/artifact"
 	"github.com/blechschmidt/cloop/pkg/checkpoint"
 	"github.com/blechschmidt/cloop/pkg/condition"
+	"github.com/blechschmidt/cloop/pkg/consensus"
 	"github.com/blechschmidt/cloop/pkg/cost"
 	cloopenv "github.com/blechschmidt/cloop/pkg/env"
 	"github.com/blechschmidt/cloop/pkg/secret"
@@ -260,6 +261,14 @@ type Config struct {
 	// true, CRITICAL tasks are executed anyway with a prominent warning instead of
 	// being aborted. Has no effect when RiskCheck is false.
 	RiskForce bool
+
+	// ConsensusN, when > 0, enables multi-model consensus for critical tasks
+	// (priority P0/P1 or tagged "critical"). The task prompt is fanned out to up
+	// to N configured providers in parallel; an AI judge then scores each response
+	// on correctness, safety, and completeness, and the highest-scoring response
+	// is used. The judge call uses the primary provider. The consensus decision
+	// and runner-up scores are appended to the task artifact.
+	ConsensusN int
 }
 
 type Orchestrator struct {
@@ -1082,6 +1091,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		var taskOutput string
 		var taskInputTokens, taskOutputTokens int
 		var taskProviderName, taskModelName string
+		var consensusReport *consensus.Report // non-nil when consensus was used
 
 		if o.config.MultiAgent {
 			dimColor.Printf("→ Running multi-agent pipeline on task %d (architect→coder→reviewer)...\n", task.ID)
@@ -1128,33 +1138,72 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			taskModelName = s.Model
 		} else {
 			// ── Standard single-agent path ─────────────────────────────────
-			dimColor.Printf("→ Running %s on task %d...\n", taskProvider.Name(), task.ID)
 
-			opts, wasStreamed := o.makeOpts(s.Model, true)
-			result, err := taskProvider.Complete(ctx, prompt, opts)
-			if err != nil {
-				failColor.Printf("✗ Provider error: %v\n", err)
-				task.Status = pm.TaskFailed
-				consecutiveErrors++
-				s.Save()
-				if consecutiveErrors >= maxConsecutiveErrors {
-					s.Status = "failed"
+			// Consensus mode: fan out to multiple providers for critical tasks.
+			useConsensus := o.config.ConsensusN > 0 && consensus.IsCritical(task.Priority, task.Tags)
+			if useConsensus {
+				dimColor.Printf("→ Running consensus (n=%d) on critical task %d...\n", o.config.ConsensusN, task.ID)
+				consensusProviders := o.buildConsensusProviders(taskProvider)
+				opts, _ := o.makeOpts(s.Model, false) // no streaming in consensus mode
+				cOutput, cReport, cErr := consensus.RunConsensus(
+					ctx,
+					consensusProviders,
+					prompt,
+					opts,
+					taskProvider, // judge = primary provider
+					s.Model,
+					o.config.ConsensusN,
+					task.ID,
+					task.Title,
+				)
+				if cErr != nil {
+					failColor.Printf("✗ Consensus error: %v\n", cErr)
+					task.Status = pm.TaskFailed
+					consecutiveErrors++
 					s.Save()
-					return fmt.Errorf("%d consecutive errors", consecutiveErrors)
+					if consecutiveErrors >= maxConsecutiveErrors {
+						s.Status = "failed"
+						s.Save()
+						return fmt.Errorf("%d consecutive errors", consecutiveErrors)
+					}
+					continue
 				}
-				continue
-			}
-
-			taskOutput = result.Output
-			taskInputTokens = result.InputTokens
-			taskOutputTokens = result.OutputTokens
-			taskProviderName = result.Provider
-			taskModelName = result.Model
-
-			if wasStreamed() {
-				fmt.Println()
+				taskOutput = cOutput
+				taskProviderName = cReport.Winner
+				taskModelName = s.Model
+				printOutput(cOutput, dimColor, o.config.Verbose)
+				dimColor.Printf("  consensus winner: %s\n", cReport.Winner)
+				// Store the report for artifact appending after signal detection.
+				consensusReport = cReport
 			} else {
-				printOutput(result.Output, dimColor, o.config.Verbose)
+				dimColor.Printf("→ Running %s on task %d...\n", taskProvider.Name(), task.ID)
+
+				opts, wasStreamed := o.makeOpts(s.Model, true)
+				result, err := taskProvider.Complete(ctx, prompt, opts)
+				if err != nil {
+					failColor.Printf("✗ Provider error: %v\n", err)
+					task.Status = pm.TaskFailed
+					consecutiveErrors++
+					s.Save()
+					if consecutiveErrors >= maxConsecutiveErrors {
+						s.Status = "failed"
+						s.Save()
+						return fmt.Errorf("%d consecutive errors", consecutiveErrors)
+					}
+					continue
+				}
+
+				taskOutput = result.Output
+				taskInputTokens = result.InputTokens
+				taskOutputTokens = result.OutputTokens
+				taskProviderName = result.Provider
+				taskModelName = result.Model
+
+				if wasStreamed() {
+					fmt.Println()
+				} else {
+					printOutput(result.Output, dimColor, o.config.Verbose)
+				}
 			}
 		}
 
@@ -1589,6 +1638,10 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 
 		// Persist full AI response as a Markdown artifact file.
 		o.writeTaskArtifact(task, taskOutput)
+		// If consensus was used, append the decision report to the artifact.
+		if consensusReport != nil {
+			o.appendConsensusReport(task, consensusReport)
+		}
 
 		// Task completed (done/skipped/failed) — clear the mid-execution checkpoint.
 		if cpClearErr := checkpoint.Clear(o.config.WorkDir); cpClearErr != nil {
@@ -2209,6 +2262,59 @@ func (o *Orchestrator) writeTaskArtifact(task *pm.Task, output string) {
 		return
 	}
 	task.ArtifactPath = path
+}
+
+// appendConsensusReport appends a formatted consensus decision section to the
+// task's artifact file. Errors are non-fatal.
+func (o *Orchestrator) appendConsensusReport(task *pm.Task, report *consensus.Report) {
+	if report == nil || task.ArtifactPath == "" {
+		return
+	}
+	absPath := task.ArtifactPath
+	if !strings.HasPrefix(absPath, "/") {
+		absPath = strings.Join([]string{o.config.WorkDir, task.ArtifactPath}, "/")
+	}
+	f, err := os.OpenFile(absPath, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		color.New(color.Faint).Printf("  consensus artifact append error (ignored): %v\n", err)
+		return
+	}
+	defer f.Close()
+	if _, err := f.WriteString(consensus.FormatReport(report)); err != nil {
+		color.New(color.Faint).Printf("  consensus report write error (ignored): %v\n", err)
+	}
+}
+
+// buildConsensusProviders returns a deduplicated list of providers to use for
+// consensus voting. It always includes the given primary provider. Other
+// providers are built when their credentials are available.
+func (o *Orchestrator) buildConsensusProviders(primary provider.Provider) []provider.Provider {
+	ps := []provider.Provider{primary}
+	seen := map[string]bool{primary.Name(): true}
+
+	cfg := o.config.ProviderCfg
+	candidates := []provider.ProviderConfig{
+		{Name: "anthropic", AnthropicAPIKey: cfg.AnthropicAPIKey, AnthropicBaseURL: cfg.AnthropicBaseURL,
+			OpenAIAPIKey: cfg.OpenAIAPIKey, OpenAIBaseURL: cfg.OpenAIBaseURL, OllamaBaseURL: cfg.OllamaBaseURL},
+		{Name: "openai", AnthropicAPIKey: cfg.AnthropicAPIKey, AnthropicBaseURL: cfg.AnthropicBaseURL,
+			OpenAIAPIKey: cfg.OpenAIAPIKey, OpenAIBaseURL: cfg.OpenAIBaseURL, OllamaBaseURL: cfg.OllamaBaseURL},
+		{Name: "ollama", AnthropicAPIKey: cfg.AnthropicAPIKey, AnthropicBaseURL: cfg.AnthropicBaseURL,
+			OpenAIAPIKey: cfg.OpenAIAPIKey, OpenAIBaseURL: cfg.OpenAIBaseURL, OllamaBaseURL: cfg.OllamaBaseURL},
+		{Name: "claudecode", AnthropicAPIKey: cfg.AnthropicAPIKey, AnthropicBaseURL: cfg.AnthropicBaseURL,
+			OpenAIAPIKey: cfg.OpenAIAPIKey, OpenAIBaseURL: cfg.OpenAIBaseURL, OllamaBaseURL: cfg.OllamaBaseURL},
+	}
+	for _, c := range candidates {
+		if seen[c.Name] {
+			continue
+		}
+		p, err := provider.Build(c)
+		if err != nil {
+			continue
+		}
+		seen[c.Name] = true
+		ps = append(ps, p)
+	}
+	return ps
 }
 
 // makeOpts builds provider.Options for a completion call.
