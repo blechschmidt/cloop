@@ -2217,6 +2217,83 @@ const dashboardHTML = `<!DOCTYPE html>
 
   @media(max-width:600px){ main{padding:12px;} header{padding:8px 12px;} .stats-grid{grid-template-columns:repeat(2,1fr);} }
 
+  /* ── Keyboard shortcut footer ── */
+  #kb-footer {
+    position: fixed; bottom: 0; left: 0; right: 0;
+    background: var(--surface); border-top: 1px solid var(--border);
+    padding: 5px 16px; display: flex; align-items: center; gap: 14px;
+    font-size: 11px; color: var(--muted); z-index: 30; flex-wrap: wrap;
+    user-select: none;
+  }
+  #kb-footer kbd {
+    display: inline-block; padding: 1px 5px;
+    border: 1px solid var(--border); border-radius: 3px;
+    font-size: 10px; background: var(--bg); color: var(--text);
+    font-family: inherit; margin-right: 2px;
+  }
+  #kb-footer .kb-sep { color: var(--border); }
+  /* push main content up so footer doesn't overlap */
+  body { padding-bottom: 30px; }
+
+  /* ── Command palette ── */
+  #cmd-backdrop {
+    display: none; position: fixed; inset: 0;
+    background: rgba(0,0,0,.65); z-index: 200;
+    align-items: flex-start; justify-content: center;
+    padding-top: 15vh;
+  }
+  #cmd-backdrop.open { display: flex; }
+  #cmd-palette {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 10px; width: 520px; max-width: 95vw;
+    box-shadow: 0 16px 48px rgba(0,0,0,.6);
+    overflow: hidden;
+  }
+  #cmd-input-wrap {
+    display: flex; align-items: center; gap: 10px;
+    padding: 12px 16px; border-bottom: 1px solid var(--border);
+  }
+  #cmd-input-icon { font-size: 14px; color: var(--muted); flex-shrink: 0; }
+  #cmd-input {
+    flex: 1; background: none; border: none; outline: none;
+    color: var(--text); font-size: 14px; font-family: inherit;
+  }
+  #cmd-input::placeholder { color: var(--muted); }
+  #cmd-shortcut-hint {
+    font-size: 11px; color: var(--muted); flex-shrink: 0;
+  }
+  #cmd-results {
+    max-height: 340px; overflow-y: auto; padding: 6px 0;
+  }
+  .cmd-item {
+    display: flex; align-items: center; gap: 10px;
+    padding: 9px 16px; cursor: pointer; font-size: 13px;
+  }
+  .cmd-item:hover, .cmd-item.selected {
+    background: rgba(88,166,255,.1); color: var(--text);
+  }
+  .cmd-item-icon { font-size: 14px; flex-shrink: 0; width: 20px; text-align: center; }
+  .cmd-item-label { flex: 1; }
+  .cmd-item-shortcut { font-size: 11px; color: var(--muted); font-family: monospace; }
+  .cmd-item-match em { color: var(--accent); font-style: normal; font-weight: 600; }
+  .cmd-no-results { padding: 20px 16px; text-align: center; color: var(--muted); font-size: 13px; }
+  #cmd-footer {
+    padding: 6px 16px; border-top: 1px solid var(--border);
+    font-size: 11px; color: var(--muted); display: flex; gap: 12px;
+  }
+  #cmd-footer kbd {
+    display: inline-block; padding: 1px 4px;
+    border: 1px solid var(--border); border-radius: 3px;
+    font-size: 10px; background: var(--bg); color: var(--text);
+    font-family: inherit;
+  }
+
+  /* ── Task keyboard focus highlight ── */
+  .task-item.kb-focus {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+  }
+
   /* ── Login modal ── */
   #loginOverlay {
     display: none;
@@ -3102,6 +3179,40 @@ const dashboardHTML = `<!DOCTYPE html>
       <button class="btn primary" onclick="submitEditTask()">Save Changes</button>
     </div>
   </div>
+</div>
+
+<!-- ── Command Palette ─────────────────────────────────────────────────── -->
+<div id="cmd-backdrop" role="dialog" aria-modal="true" aria-label="Command palette">
+  <div id="cmd-palette">
+    <div id="cmd-input-wrap">
+      <span id="cmd-input-icon">⌘</span>
+      <input id="cmd-input" type="text" placeholder="Type a command or search…" autocomplete="off" spellcheck="false" aria-label="Command palette search">
+      <span id="cmd-shortcut-hint"><kbd>Esc</kbd> to close</span>
+    </div>
+    <div id="cmd-results" role="listbox"></div>
+    <div id="cmd-footer">
+      <span><kbd>↑</kbd><kbd>↓</kbd> navigate</span>
+      <span><kbd>Enter</kbd> select</span>
+      <span><kbd>Esc</kbd> close</span>
+    </div>
+  </div>
+</div>
+
+<!-- ── Keyboard shortcut footer ───────────────────────────────────────── -->
+<div id="kb-footer" role="complementary" aria-label="Keyboard shortcuts">
+  <span><kbd>⌘K</kbd> palette</span>
+  <span class="kb-sep">|</span>
+  <span><kbd>j</kbd><kbd>k</kbd> navigate tasks</span>
+  <span class="kb-sep">|</span>
+  <span><kbd>Enter</kbd> open task</span>
+  <span class="kb-sep">|</span>
+  <span><kbd>n</kbd> new task</span>
+  <span class="kb-sep">|</span>
+  <span><kbd>r</kbd> refresh</span>
+  <span class="kb-sep">|</span>
+  <span><kbd>1</kbd>-<kbd>4</kbd> tabs</span>
+  <span class="kb-sep">|</span>
+  <span><kbd>Esc</kbd> close</span>
 </div>
 
 <div id="toast"></div>
@@ -4812,6 +4923,229 @@ document.addEventListener('keyup', function(e) {
   spaceVoiceActive = false;
   if (chatVoiceRecording) stopChatVoice();
 });
+
+// ── Keyboard shortcuts & Command Palette ─────────────────────────────────────
+
+// Maps 1-7 to tab names in left-to-right order.
+const TAB_KEYS = ['overview','tasks','timeline','chat','projects','suggest','settings'];
+
+// All commands registered in the palette.
+const CMD_REGISTRY = [
+  { label:'Overview',        icon:'🏠', shortcut:'1', action:()=>switchTab('overview') },
+  { label:'Tasks',           icon:'📋', shortcut:'2', action:()=>switchTab('tasks') },
+  { label:'Timeline',        icon:'📅', shortcut:'3', action:()=>switchTab('timeline') },
+  { label:'Chat',            icon:'💬', shortcut:'4', action:()=>switchTab('chat') },
+  { label:'Projects',        icon:'📁', shortcut:'5', action:()=>switchTab('projects') },
+  { label:'Suggest',         icon:'💡', shortcut:'6', action:()=>switchTab('suggest') },
+  { label:'Settings',        icon:'⚙️', shortcut:'7', action:()=>switchTab('settings') },
+  { label:'Refresh state',   icon:'🔄', shortcut:'r',  action:()=>{ api(pUrl('/api/state')).then(s=>render(s)).catch(()=>{}); toast('Refreshed','ok'); } },
+  { label:'New task',        icon:'➕', shortcut:'n',  action:()=>{ switchTab('tasks'); setTimeout(()=>{ const el=document.getElementById('newTaskTitle'); if(el){el.focus();} },100); } },
+  { label:'Start run',       icon:'▶️', shortcut:'',   action:()=>submitRun() },
+  { label:'Stop run',        icon:'⏹', shortcut:'',   action:()=>submitStop() },
+  { label:'Show kanban',     icon:'🗂', shortcut:'',   action:()=>switchTab('tasks') },
+  { label:'Show timeline',   icon:'📊', shortcut:'',   action:()=>switchTab('timeline') },
+  { label:'Show chat',       icon:'🤖', shortcut:'',   action:()=>switchTab('chat') },
+  { label:'Add task',        icon:'✏️', shortcut:'',   action:()=>{ switchTab('tasks'); setTimeout(()=>{ const el=document.getElementById('newTaskTitle'); if(el){el.focus();} },100); } },
+  { label:'Run plan',        icon:'🚀', shortcut:'',   action:()=>submitRun() },
+  { label:'Reset session',   icon:'🗑', shortcut:'',   action:()=>submitReset() },
+];
+
+// ── Command palette state ────────────────────────────────────────────────────
+let cmdOpen = false;
+let cmdSelectedIdx = 0;
+let cmdFiltered = [...CMD_REGISTRY];
+
+function openCommandPalette() {
+  cmdOpen = true;
+  cmdSelectedIdx = 0;
+  cmdFiltered = [...CMD_REGISTRY];
+  document.getElementById('cmd-backdrop').classList.add('open');
+  const inp = document.getElementById('cmd-input');
+  inp.value = '';
+  renderCmdResults('');
+  setTimeout(() => inp.focus(), 30);
+}
+
+function closeCommandPalette() {
+  cmdOpen = false;
+  document.getElementById('cmd-backdrop').classList.remove('open');
+}
+
+function renderCmdResults(query) {
+  const q = query.trim().toLowerCase();
+  cmdFiltered = q
+    ? CMD_REGISTRY.filter(c => c.label.toLowerCase().includes(q))
+    : [...CMD_REGISTRY];
+  if (cmdSelectedIdx >= cmdFiltered.length) cmdSelectedIdx = 0;
+
+  const container = document.getElementById('cmd-results');
+  if (!cmdFiltered.length) {
+    container.innerHTML = '<div class="cmd-no-results">No matching commands</div>';
+    return;
+  }
+  container.innerHTML = cmdFiltered.map((c, i) => {
+    const labelHtml = q
+      ? esc(c.label).replace(new RegExp('('+escRe(q)+')', 'gi'), '<em>$1</em>')
+      : esc(c.label);
+    const sel = i === cmdSelectedIdx ? ' selected' : '';
+    return '<div class="cmd-item'+sel+'" role="option" aria-selected="'+(i===cmdSelectedIdx)+'" data-idx="'+i+'" onclick="cmdSelect('+i+')" onmouseenter="cmdHover('+i+')">'+
+      '<span class="cmd-item-icon">'+c.icon+'</span>'+
+      '<span class="cmd-item-label cmd-item-match">'+labelHtml+'</span>'+
+      (c.shortcut ? '<span class="cmd-item-shortcut"><kbd>'+esc(c.shortcut)+'</kbd></span>' : '')+
+    '</div>';
+  }).join('');
+  scrollCmdItemIntoView();
+}
+
+function escRe(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function scrollCmdItemIntoView() {
+  const container = document.getElementById('cmd-results');
+  const sel = container.querySelector('.cmd-item.selected');
+  if (sel) sel.scrollIntoView({ block: 'nearest' });
+}
+
+window.cmdSelect = function(idx) {
+  const cmd = cmdFiltered[idx];
+  if (!cmd) return;
+  closeCommandPalette();
+  cmd.action();
+};
+
+window.cmdHover = function(idx) {
+  cmdSelectedIdx = idx;
+  document.querySelectorAll('.cmd-item').forEach((el,i) => {
+    el.classList.toggle('selected', i === idx);
+    el.setAttribute('aria-selected', i === idx ? 'true' : 'false');
+  });
+};
+
+document.getElementById('cmd-input').addEventListener('input', function() {
+  renderCmdResults(this.value);
+});
+
+document.getElementById('cmd-input').addEventListener('keydown', function(e) {
+  if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    cmdSelectedIdx = Math.min(cmdSelectedIdx + 1, cmdFiltered.length - 1);
+    renderCmdResults(this.value);
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    cmdSelectedIdx = Math.max(cmdSelectedIdx - 1, 0);
+    renderCmdResults(this.value);
+  } else if (e.key === 'Enter') {
+    e.preventDefault();
+    cmdSelect(cmdSelectedIdx);
+  } else if (e.key === 'Escape') {
+    e.preventDefault();
+    closeCommandPalette();
+  }
+});
+
+// Close palette when clicking backdrop (not palette itself).
+document.getElementById('cmd-backdrop').addEventListener('click', function(e) {
+  if (e.target === this) closeCommandPalette();
+});
+
+// ── Task keyboard navigation state ───────────────────────────────────────────
+let kbTaskIdx = -1; // index into currently visible task list items
+
+function getTaskItems() {
+  return Array.from(document.querySelectorAll('#taskListFull .task-item'));
+}
+
+function kbFocusTask(idx) {
+  const items = getTaskItems();
+  if (!items.length) return;
+  idx = Math.max(0, Math.min(idx, items.length - 1));
+  kbTaskIdx = idx;
+  items.forEach((el, i) => el.classList.toggle('kb-focus', i === idx));
+  items[idx].scrollIntoView({ block: 'nearest' });
+}
+
+function kbClearFocus() {
+  kbTaskIdx = -1;
+  getTaskItems().forEach(el => el.classList.remove('kb-focus'));
+}
+
+// ── Global keyboard shortcut handler ─────────────────────────────────────────
+document.addEventListener('keydown', function(e) {
+  // Never intercept when typing in a real input/editable area.
+  const tag = ((e.target && e.target.tagName) || '').toUpperCase();
+  const inInput = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || e.target.isContentEditable;
+
+  // Cmd/Ctrl+K — open command palette (always, even in inputs).
+  if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+    e.preventDefault();
+    if (cmdOpen) { closeCommandPalette(); } else { openCommandPalette(); }
+    return;
+  }
+
+  // Escape — close any open modal / palette.
+  if (e.key === 'Escape') {
+    if (cmdOpen) { closeCommandPalette(); return; }
+    const modal = document.getElementById('modal-overlay');
+    if (modal && modal.classList.contains('open')) { closeModal(); return; }
+    const voice = document.querySelector('.voice-modal-backdrop');
+    if (voice) { voice.remove(); return; }
+    kbClearFocus();
+    return;
+  }
+
+  // All remaining shortcuts are blocked when typing in inputs.
+  if (inInput) return;
+  // Also block when palette is open.
+  if (cmdOpen) return;
+
+  // 1-7: switch to tab by number.
+  if (e.key >= '1' && e.key <= '7' && !e.metaKey && !e.ctrlKey && !e.altKey) {
+    const idx = parseInt(e.key, 10) - 1;
+    if (TAB_KEYS[idx]) { switchTab(TAB_KEYS[idx]); kbClearFocus(); }
+    return;
+  }
+
+  // r: refresh state.
+  if (e.key === 'r' && !e.metaKey && !e.ctrlKey && !e.altKey) {
+    api(pUrl('/api/state')).then(s => render(s)).catch(() => {});
+    toast('Refreshed', 'ok');
+    return;
+  }
+
+  // n: new task — switch to Tasks tab and focus the add-task input.
+  if (e.key === 'n' && !e.metaKey && !e.ctrlKey && !e.altKey) {
+    switchTab('tasks');
+    kbClearFocus();
+    setTimeout(() => { const el = document.getElementById('newTaskTitle'); if (el) el.focus(); }, 100);
+    return;
+  }
+
+  // j/k: move focus through task list (only on Tasks tab).
+  if ((e.key === 'j' || e.key === 'k') && activeTab === 'tasks') {
+    e.preventDefault();
+    const items = getTaskItems();
+    if (!items.length) return;
+    if (kbTaskIdx < 0) {
+      kbFocusTask(e.key === 'j' ? 0 : items.length - 1);
+    } else {
+      kbFocusTask(kbTaskIdx + (e.key === 'j' ? 1 : -1));
+    }
+    return;
+  }
+
+  // Enter: open edit modal for the focused task.
+  if (e.key === 'Enter' && activeTab === 'tasks' && kbTaskIdx >= 0) {
+    e.preventDefault();
+    const items = getTaskItems();
+    const item = items[kbTaskIdx];
+    if (item) {
+      const editBtn = item.querySelector('.act.edit');
+      if (editBtn) editBtn.click();
+    }
+    return;
+  }
+}, true); // use capture so we run before chat voice handler
 
 // ── Init ─────────────────────────────────────────────────────────────────────
 
