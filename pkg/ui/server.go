@@ -2592,6 +2592,238 @@ const dashboardHTML = `<!DOCTYPE html>
     border-radius: 2px;
     flex-shrink: 0;
   }
+
+  /* ══════════════════════════════════════════════════════════════
+     MOBILE RESPONSIVE — hamburger, FAB, breakpoints
+     ══════════════════════════════════════════════════════════════ */
+
+  /* ── Hamburger button (hidden on desktop) ── */
+  .hamburger-btn {
+    display: none;
+    background: none;
+    border: none;
+    color: var(--text);
+    cursor: pointer;
+    padding: 6px;
+    border-radius: 6px;
+    min-width: 44px;
+    min-height: 44px;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+  }
+  .hamburger-btn:hover { background: rgba(255,255,255,.08); }
+  .hamburger-btn svg { display: block; pointer-events: none; }
+
+  /* ── Mobile nav overlay + slide-in panel ── */
+  .mobile-nav-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,.6);
+    z-index: 90;
+  }
+  .mobile-nav-overlay.open { display: block; }
+  .mobile-nav-panel {
+    position: absolute;
+    top: 0; left: 0; bottom: 0;
+    width: 240px;
+    background: var(--surface);
+    border-right: 1px solid var(--border);
+    padding: 12px 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    transform: translateX(-100%);
+    transition: transform .2s ease;
+  }
+  .mobile-nav-overlay.open .mobile-nav-panel {
+    transform: translateX(0);
+  }
+  .mobile-nav-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 4px 8px 12px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 6px;
+  }
+  .mobile-nav-title {
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--accent);
+  }
+  .mobile-nav-close {
+    background: none;
+    border: none;
+    color: var(--muted);
+    cursor: pointer;
+    font-size: 18px;
+    min-width: 44px;
+    min-height: 44px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 6px;
+    line-height: 1;
+  }
+  .mobile-nav-close:hover { color: var(--text); background: rgba(255,255,255,.06); }
+  .mobile-nav-panel .m-tab-btn {
+    width: 100%;
+    text-align: left;
+    padding: 12px 14px;
+    font-size: 14px;
+    font-weight: 500;
+    border-radius: 8px;
+    min-height: 44px;
+    background: none;
+    border: 1px solid transparent;
+    color: var(--muted);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .mobile-nav-panel .m-tab-btn:hover { color: var(--text); background: rgba(255,255,255,.05); }
+  .mobile-nav-panel .m-tab-btn.active { color: var(--text); background: var(--bg); border-color: var(--border); }
+  .mobile-nav-panel .m-tab-btn .m-tab-icon { font-size: 16px; width: 20px; text-align: center; flex-shrink: 0; }
+
+  /* ── FAB (floating action button, shown on mobile) ── */
+  #fab-add-task {
+    display: none;
+    position: fixed;
+    bottom: 24px;
+    right: 20px;
+    width: 56px;
+    height: 56px;
+    border-radius: 50%;
+    background: var(--accent);
+    color: #000;
+    border: none;
+    font-size: 24px;
+    line-height: 1;
+    cursor: pointer;
+    box-shadow: 0 4px 16px rgba(0,0,0,.45);
+    align-items: center;
+    justify-content: center;
+    z-index: 80;
+    transition: background .15s, transform .1s;
+    font-weight: 700;
+  }
+  #fab-add-task:hover { background: #79bcff; transform: scale(1.05); }
+  #fab-add-task:active { transform: scale(.95); }
+
+  /* ══════════════════════════════════════════════════════════════
+     BREAKPOINT: ≤ 767px  (phones — iPhone SE and up)
+     ══════════════════════════════════════════════════════════════ */
+  @media (max-width: 767px) {
+    /* Show hamburger, hide desktop tab-nav */
+    .hamburger-btn { display: inline-flex; }
+    .tab-nav { display: none; }
+
+    /* Header: compact, no-wrap */
+    header { padding: 8px 12px; gap: 8px; }
+    header h1 { font-size: 14px; }
+    .updated-at { display: none; }
+
+    /* Keyboard shortcut footer: hide (no room on phone) */
+    #kb-footer { display: none; }
+    body { padding-bottom: 72px; } /* FAB + safe area */
+
+    /* Main */
+    main { padding: 12px; max-width: 100%; }
+
+    /* Stats grid: 2 columns */
+    .stats-grid { grid-template-columns: repeat(2, 1fr); gap: 8px; }
+    .stat-value { font-size: 18px; }
+
+    /* Task cards: wrap actions below body */
+    .task-item { flex-wrap: wrap; gap: 8px; }
+    .task-actions { max-width: 100%; width: 100%; flex-wrap: wrap; }
+    .task-desc { white-space: normal; }
+
+    /* Touch targets: min 44px */
+    .btn { min-height: 44px; padding: 10px 14px; }
+    .act { min-height: 44px; padding: 6px 10px; font-size: 12px; }
+
+    /* Add task bar: stack on mobile (FAB handles quick add) */
+    .add-task-bar { flex-direction: column; }
+    .add-task-bar input, .add-task-bar button { width: 100%; }
+
+    /* Form rows: stack */
+    .form-row { flex-direction: column; }
+    .adv-grid  { grid-template-columns: 1fr; }
+    .adv-row   { flex-direction: column; }
+
+    /* Timeline / Gantt: horizontal scroll on small screen */
+    .timeline-chart-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+    #timelineChart { min-width: 0; }
+    #timelineChart svg { min-width: 560px; }
+
+    /* Chat */
+    .chat-layout { height: calc(100vh - 160px); }
+    .chat-bubble { max-width: 88%; }
+
+    /* Controls strip */
+    .controls { gap: 6px; }
+    .controls .btn { flex: 1 1 auto; }
+
+    /* Project cards: stack */
+    .proj-card { flex-direction: column; align-items: flex-start; gap: 8px; }
+    .proj-goal { max-width: 100%; }
+    .proj-actions { width: 100%; }
+    .proj-actions .btn { flex: 1; justify-content: center; }
+
+    /* Toast: full-width */
+    #toast { right: 12px; left: 12px; max-width: none; bottom: 12px; }
+
+    /* Init panel */
+    .init-panel { padding: 16px; }
+
+    /* FAB: show only on tasks tab (controlled by JS), hidden by default */
+    #fab-add-task { display: flex; }
+
+    /* Project selector: constrain width */
+    .proj-selector-wrap { max-width: 160px; }
+    .proj-selector-btn  { max-width: 140px; }
+
+    /* Step meta: compact */
+    .step-meta > *:not(:first-child):not(:last-child) { display: none; }
+  }
+
+  /* ══════════════════════════════════════════════════════════════
+     BREAKPOINT: 480px–768px  (tablets — iPad portrait)
+     ══════════════════════════════════════════════════════════════ */
+  @media (min-width: 480px) and (max-width: 768px) {
+    /* Keep tab-nav visible but make it horizontally scrollable */
+    .tab-nav {
+      display: flex;
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+      scrollbar-width: none;
+      flex-wrap: nowrap;
+    }
+    .tab-nav::-webkit-scrollbar { display: none; }
+
+    /* Hide hamburger on tablet since nav is visible */
+    .hamburger-btn { display: none; }
+
+    /* FAB: hide on tablet */
+    #fab-add-task { display: none; }
+
+    /* Stats grid: 3 columns */
+    .stats-grid { grid-template-columns: repeat(3, 1fr); }
+
+    /* Main: modest padding */
+    main { padding: 16px; }
+
+    /* Touch targets */
+    .btn { min-height: 44px; }
+    .act { min-height: 36px; }
+
+    /* Timeline: horizontal scroll */
+    .timeline-chart-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  }
 </style>
 </head>
 <body>
@@ -2628,6 +2860,15 @@ const dashboardHTML = `<!DOCTYPE html>
       <button class="tab-btn" onclick="clearProjectSelection()" style="padding:4px 10px;font-size:12px">&#8592; Projects</button>
       <span id="breadcrumbName" style="font-weight:600;color:var(--accent);font-size:13px;white-space:nowrap"></span>
     </div>
+    <!-- Hamburger button (mobile only) -->
+    <button class="hamburger-btn" id="hamburgerBtn" onclick="openMobileNav()" aria-label="Open navigation menu" aria-expanded="false">
+      <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+        <line x1="3" y1="5"  x2="17" y2="5"/>
+        <line x1="3" y1="10" x2="17" y2="10"/>
+        <line x1="3" y1="15" x2="17" y2="15"/>
+      </svg>
+    </button>
+
     <div class="tab-nav" id="tabNav">
       <button class="tab-btn active" onclick="switchTab('overview')"  id="tbtn-overview">Overview</button>
       <button class="tab-btn"        onclick="switchTab('tasks')"     id="tbtn-tasks">Tasks</button>
@@ -2640,6 +2881,23 @@ const dashboardHTML = `<!DOCTYPE html>
     <div class="spacer"></div>
     <div class="updated-at" id="updatedAt"></div>
   </header>
+
+  <!-- ── Mobile navigation overlay ── -->
+  <div class="mobile-nav-overlay" id="mobileNavOverlay" onclick="if(event.target===this)closeMobileNav()" aria-hidden="true">
+    <nav class="mobile-nav-panel" role="navigation" aria-label="Main navigation">
+      <div class="mobile-nav-header">
+        <span class="mobile-nav-title">cloop</span>
+        <button class="mobile-nav-close" onclick="closeMobileNav()" aria-label="Close navigation">&#x2715;</button>
+      </div>
+      <button class="m-tab-btn" onclick="switchTab('overview')"  id="mtbtn-overview"><span class="m-tab-icon">&#128200;</span>Overview</button>
+      <button class="m-tab-btn" onclick="switchTab('tasks')"     id="mtbtn-tasks"><span class="m-tab-icon">&#10003;</span>Tasks</button>
+      <button class="m-tab-btn" onclick="switchTab('timeline')"  id="mtbtn-timeline"><span class="m-tab-icon">&#128197;</span>Timeline</button>
+      <button class="m-tab-btn" onclick="switchTab('chat')"      id="mtbtn-chat"><span class="m-tab-icon">&#128172;</span>Chat</button>
+      <button class="m-tab-btn" onclick="switchTab('projects')"  id="mtbtn-projects"><span class="m-tab-icon">&#128193;</span>Projects</button>
+      <button class="m-tab-btn" onclick="switchTab('suggest')"   id="mtbtn-suggest"><span class="m-tab-icon">&#128161;</span>Suggest</button>
+      <button class="m-tab-btn" onclick="switchTab('settings')"  id="mtbtn-settings"><span class="m-tab-icon">&#9881;</span>Settings</button>
+    </nav>
+  </div>
 
   <main>
     <!-- ═══════════════════════════════════════════════════════════ OVERVIEW -->
@@ -3097,6 +3355,10 @@ const dashboardHTML = `<!DOCTYPE html>
     </div>
 
   </main>
+
+  <!-- ── FAB: quick task add (mobile only) ── -->
+  <button id="fab-add-task" onclick="fabAddTask()" aria-label="Add task" title="Add task" style="display:none">+</button>
+
 </div>
 
 <!-- New Project modal -->
@@ -3292,10 +3554,20 @@ window.switchTab = function(name) {
   activeTab = name;
   document.querySelectorAll('.tab-panel').forEach(el => el.classList.remove('active'));
   document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
-  const panel = document.getElementById('tab-' + name);
-  const btn   = document.getElementById('tbtn-' + name);
+  document.querySelectorAll('.m-tab-btn').forEach(el => el.classList.remove('active'));
+  const panel  = document.getElementById('tab-'   + name);
+  const btn    = document.getElementById('tbtn-'  + name);
+  const mBtn   = document.getElementById('mtbtn-' + name);
   if (panel) panel.classList.add('active');
   if (btn)   btn.classList.add('active');
+  if (mBtn)  mBtn.classList.add('active');
+
+  // Close mobile nav when a tab is selected.
+  closeMobileNav();
+
+  // Show/hide FAB: only on tasks tab.
+  const fab = document.getElementById('fab-add-task');
+  if (fab) fab.style.display = (name === 'tasks') ? 'flex' : 'none';
 
   // In multi-project mode, re-fetch state for the selected project when
   // switching to any project-scoped tab so the data is always current.
@@ -5180,6 +5452,53 @@ function checkAuthAndInit() {
 }
 
 checkAuthAndInit();
+
+// ── Mobile nav helpers ─────────────────────────────────────────
+window.openMobileNav = function() {
+  const overlay = document.getElementById('mobileNavOverlay');
+  const btn     = document.getElementById('hamburgerBtn');
+  if (!overlay) return;
+  overlay.classList.add('open');
+  overlay.setAttribute('aria-hidden', 'false');
+  if (btn) btn.setAttribute('aria-expanded', 'true');
+  // Trap focus: first close button
+  const closeBtn = overlay.querySelector('.mobile-nav-close');
+  if (closeBtn) setTimeout(() => closeBtn.focus(), 50);
+};
+
+window.closeMobileNav = function() {
+  const overlay = document.getElementById('mobileNavOverlay');
+  const btn     = document.getElementById('hamburgerBtn');
+  if (!overlay) return;
+  overlay.classList.remove('open');
+  overlay.setAttribute('aria-hidden', 'true');
+  if (btn) btn.setAttribute('aria-expanded', 'false');
+};
+
+// Close mobile nav on Escape key.
+document.addEventListener('keydown', function(e) {
+  if (e.key === 'Escape') {
+    const overlay = document.getElementById('mobileNavOverlay');
+    if (overlay && overlay.classList.contains('open')) {
+      closeMobileNav();
+    }
+  }
+});
+
+// ── FAB: quick-add task on mobile ─────────────────────────────
+window.fabAddTask = function() {
+  // Switch to tasks tab if not there already.
+  if (activeTab !== 'tasks') {
+    switchTab('tasks');
+  }
+  // Scroll to add-task input and focus it.
+  const input = document.getElementById('newTaskTitle');
+  if (input) {
+    input.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    setTimeout(() => input.focus(), 150);
+  }
+};
+
 })();
 </script>
 </body>
