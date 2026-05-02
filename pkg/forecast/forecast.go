@@ -31,24 +31,41 @@ type BurnPoint struct {
 	Remaining int
 }
 
+// TaskWindow holds per-task schedule projection for the Gantt table.
+type TaskWindow struct {
+	TaskID           int       `json:"task_id"`
+	Title            string    `json:"title"`
+	Status           string    `json:"status"`
+	Priority         int       `json:"priority"`
+	EstimatedMinutes int       `json:"estimated_minutes"`
+	AdjustedMinutes  int       `json:"adjusted_minutes"` // estimated * VelocityRatio
+	ProjectedStart   time.Time `json:"projected_start"`
+	ProjectedEnd     time.Time `json:"projected_end"`
+}
+
 // Forecast holds the full forecasting output.
 type Forecast struct {
 	Goal        string
 	GeneratedAt time.Time
 
 	// Task counts
-	TotalTasks     int
-	DoneTasks      int
-	SkippedTasks   int
-	FailedTasks    int
-	PendingTasks   int
-	BlockedTasks   int
+	TotalTasks      int
+	DoneTasks       int
+	SkippedTasks    int
+	FailedTasks     int
+	PendingTasks    int
+	BlockedTasks    int
 	InProgressTasks int
 
-	// Velocity metrics
+	// Velocity metrics (time-based: tasks/day)
 	BaseVelocityPerDay float64 // tasks/day (baseline)
 	AvgTaskDuration    time.Duration
 	ProjectStartDate   time.Time
+
+	// Velocity metrics (minute-based: actual vs estimated)
+	VelocityRatio        float64 // sum(actual_minutes)/sum(estimated_minutes); 1.0 if no data
+	AvgEstimatedMinutes  float64 // average EstimatedMinutes across all tasks with estimates
+	MinuteDataPoints     int     // number of tasks with both estimated and actual minutes
 
 	// Scenarios
 	Optimistic  Scenario
@@ -58,6 +75,9 @@ type Forecast struct {
 	// Historical burn-down data (one point per completed task, chronological)
 	BurnPoints []BurnPoint
 
+	// Per-task schedule projections for remaining work
+	TaskWindows []TaskWindow
+
 	// AI-generated narrative
 	AIText string
 }
@@ -65,9 +85,10 @@ type Forecast struct {
 // Build computes a Forecast from the current project state. No AI call is made here.
 func Build(s *state.ProjectState) *Forecast {
 	f := &Forecast{
-		Goal:         s.Goal,
-		GeneratedAt:  time.Now(),
+		Goal:             s.Goal,
+		GeneratedAt:      time.Now(),
 		ProjectStartDate: s.CreatedAt,
+		VelocityRatio:    1.0,
 	}
 
 	if s.Plan == nil {
@@ -77,10 +98,14 @@ func Build(s *state.ProjectState) *Forecast {
 	// Count statuses and collect completion timestamps.
 	var completedTimes []time.Time
 	var durations []time.Duration
-	blockedSet := map[int]bool{}
+	var sumEstimated, sumActual float64
+	var estValues []float64
 
 	for _, t := range s.Plan.Tasks {
 		f.TotalTasks++
+		if t.EstimatedMinutes > 0 {
+			estValues = append(estValues, float64(t.EstimatedMinutes))
+		}
 		switch t.Status {
 		case pm.TaskDone:
 			f.DoneTasks++
@@ -89,6 +114,12 @@ func Build(s *state.ProjectState) *Forecast {
 			}
 			if t.StartedAt != nil && t.CompletedAt != nil {
 				durations = append(durations, t.CompletedAt.Sub(*t.StartedAt))
+			}
+			// Accumulate minute-based velocity data.
+			if t.EstimatedMinutes > 0 && t.ActualMinutes > 0 {
+				sumEstimated += float64(t.EstimatedMinutes)
+				sumActual += float64(t.ActualMinutes)
+				f.MinuteDataPoints++
 			}
 		case pm.TaskFailed:
 			f.FailedTasks++
@@ -99,13 +130,28 @@ func Build(s *state.ProjectState) *Forecast {
 		case pm.TaskPending:
 			f.PendingTasks++
 			if s.Plan.PermanentlyBlocked(t) {
-				blockedSet[t.ID] = true
 				f.BlockedTasks++
 			}
 		}
 	}
 
-	// Average task duration.
+	// Compute VelocityRatio (actual/estimated). 1.0 means estimates were perfect.
+	// > 1.0 means tasks took longer than estimated (pessimistic signal).
+	// < 1.0 means tasks were faster than estimated (optimistic signal).
+	if f.MinuteDataPoints > 0 && sumEstimated > 0 {
+		f.VelocityRatio = sumActual / sumEstimated
+	}
+
+	// Average estimated minutes across all tasks that have estimates.
+	if len(estValues) > 0 {
+		var total float64
+		for _, v := range estValues {
+			total += v
+		}
+		f.AvgEstimatedMinutes = total / float64(len(estValues))
+	}
+
+	// Average task duration from StartedAt/CompletedAt.
 	if len(durations) > 0 {
 		var total time.Duration
 		for _, d := range durations {
@@ -123,7 +169,6 @@ func Build(s *state.ProjectState) *Forecast {
 			f.BaseVelocityPerDay = float64(len(completedTimes)) / days
 		}
 	} else if len(completedTimes) == 1 {
-		// Single task done; use elapsed time as velocity baseline.
 		elapsed := time.Since(s.CreatedAt).Hours() / 24
 		if elapsed > 0 {
 			f.BaseVelocityPerDay = 1.0 / elapsed
@@ -132,10 +177,9 @@ func Build(s *state.ProjectState) *Forecast {
 		}
 	}
 
-	// Build burn-down history: reconstruct remaining tasks at each completion event.
+	// Build burn-down history.
 	if len(completedTimes) > 0 {
-		initial := f.TotalTasks
-		remaining := initial
+		remaining := f.TotalTasks
 		for _, t := range completedTimes {
 			remaining--
 			f.BurnPoints = append(f.BurnPoints, BurnPoint{Date: t, Remaining: remaining})
@@ -166,7 +210,6 @@ func Build(s *state.ProjectState) *Forecast {
 		return sc
 	}
 
-	// Confidence levels depend on data quantity.
 	var optConf, expConf, pessConf string
 	switch {
 	case len(completedTimes) >= 5:
@@ -181,7 +224,81 @@ func Build(s *state.ProjectState) *Forecast {
 	f.Expected = buildScenario("Expected", 1.0, expConf)
 	f.Pessimistic = buildScenario("Pessimistic", 0.5, pessConf)
 
+	// Build per-task windows (sequential schedule for pending/in_progress tasks).
+	f.TaskWindows = buildTaskWindows(s.Plan, f)
+
 	return f
+}
+
+// buildTaskWindows computes projected start/end times for remaining tasks.
+// Tasks are ordered by priority. The velocity ratio adjusts estimated durations.
+func buildTaskWindows(plan *pm.Plan, f *Forecast) []TaskWindow {
+	if plan == nil {
+		return nil
+	}
+
+	// Collect pending and in_progress tasks, sort by priority ascending (lower = higher priority).
+	var tasks []*pm.Task
+	for _, t := range plan.Tasks {
+		if t.Status == pm.TaskPending || t.Status == pm.TaskInProgress {
+			tasks = append(tasks, t)
+		}
+	}
+	sort.Slice(tasks, func(i, j int) bool {
+		return tasks[i].Priority < tasks[j].Priority
+	})
+
+	now := time.Now()
+	cursor := now
+	var windows []TaskWindow
+
+	// Fallback duration when no estimate is available: use AvgEstimatedMinutes, else 60m.
+	fallbackMins := f.AvgEstimatedMinutes
+	if fallbackMins <= 0 {
+		fallbackMins = 60
+	}
+
+	for _, t := range tasks {
+		est := float64(t.EstimatedMinutes)
+		if est <= 0 {
+			est = fallbackMins
+		}
+		// Adjust by velocity ratio (>1 = tasks take longer than estimated).
+		adjusted := est * f.VelocityRatio
+		if adjusted < 1 {
+			adjusted = 1
+		}
+
+		// For in_progress tasks with a StartedAt, start from now and reduce remaining.
+		start := cursor
+		if t.Status == pm.TaskInProgress && t.StartedAt != nil {
+			// Already started; project end based on remaining adjusted time.
+			elapsed := time.Since(*t.StartedAt).Minutes()
+			remaining := adjusted - elapsed
+			if remaining < 1 {
+				remaining = 1
+			}
+			start = now
+			adjusted = remaining
+		}
+
+		end := start.Add(time.Duration(adjusted) * time.Minute)
+
+		windows = append(windows, TaskWindow{
+			TaskID:           t.ID,
+			Title:            t.Title,
+			Status:           string(t.Status),
+			Priority:         t.Priority,
+			EstimatedMinutes: t.EstimatedMinutes,
+			AdjustedMinutes:  int(math.Round(adjusted)),
+			ProjectedStart:   start,
+			ProjectedEnd:     end,
+		})
+
+		cursor = end
+	}
+
+	return windows
 }
 
 // CompletionPct returns percent of tasks finished (done + skipped).
@@ -192,14 +309,125 @@ func (f *Forecast) CompletionPct() int {
 	return (f.DoneTasks + f.SkippedTasks) * 100 / f.TotalTasks
 }
 
+// GanttTable renders the per-task schedule projection as an ASCII table.
+func (f *Forecast) GanttTable() string {
+	if len(f.TaskWindows) == 0 {
+		return ""
+	}
+
+	const (
+		colID    = 4
+		colTitle = 32
+		colEst   = 7
+		colAdj   = 7
+		colStart = 16
+		colEnd   = 16
+		colBar   = 20
+	)
+
+	// Find the total span for the bar chart.
+	minStart := f.TaskWindows[0].ProjectedStart
+	maxEnd := f.TaskWindows[len(f.TaskWindows)-1].ProjectedEnd
+	totalSpan := maxEnd.Sub(minStart)
+	if totalSpan <= 0 {
+		totalSpan = time.Minute
+	}
+
+	header := fmt.Sprintf("%-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %s",
+		colID, "#",
+		colTitle, "Title",
+		colEst, "Est",
+		colAdj, "Adj",
+		colStart, "Projected Start",
+		colEnd, "Projected End",
+		"Timeline",
+	)
+	sep := strings.Repeat("─", len(header)+2)
+
+	var sb strings.Builder
+	sb.WriteString(header)
+	sb.WriteByte('\n')
+	sb.WriteString(sep)
+	sb.WriteByte('\n')
+
+	for _, w := range f.TaskWindows {
+		idStr := fmt.Sprintf("#%-*d", colID-1, w.TaskID)
+		title := w.Title
+		if len(title) > colTitle {
+			title = title[:colTitle-1] + "…"
+		}
+
+		estStr := formatMins(w.EstimatedMinutes)
+		adjStr := formatMins(w.AdjustedMinutes)
+
+		startStr := w.ProjectedStart.Format("Jan 02 15:04")
+		endStr := w.ProjectedEnd.Format("Jan 02 15:04")
+
+		// Bar: position within timeline.
+		barStart := int(w.ProjectedStart.Sub(minStart).Seconds() * float64(colBar) / totalSpan.Seconds())
+		barLen := int(w.ProjectedEnd.Sub(w.ProjectedStart).Seconds() * float64(colBar) / totalSpan.Seconds())
+		if barLen < 1 {
+			barLen = 1
+		}
+		if barStart < 0 {
+			barStart = 0
+		}
+		if barStart+barLen > colBar {
+			barLen = colBar - barStart
+		}
+		bar := strings.Repeat(" ", barStart) + strings.Repeat("█", barLen) + strings.Repeat(" ", colBar-barStart-barLen)
+
+		statusMark := " "
+		if w.Status == string(pm.TaskInProgress) {
+			statusMark = "▶"
+		}
+
+		sb.WriteString(fmt.Sprintf("%-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %s%s\n",
+			colID, idStr,
+			colTitle, title,
+			colEst, estStr,
+			colAdj, adjStr,
+			colStart, startStr,
+			colEnd, endStr,
+			statusMark,
+			bar,
+		))
+	}
+
+	// Footer: projected finish.
+	last := f.TaskWindows[len(f.TaskWindows)-1]
+	sb.WriteString(sep)
+	sb.WriteByte('\n')
+	sb.WriteString(fmt.Sprintf("  Projected finish: %s  (%d tasks remaining)\n",
+		last.ProjectedEnd.Format("Mon Jan 2, 2006 15:04"),
+		len(f.TaskWindows),
+	))
+
+	return sb.String()
+}
+
+// formatMins formats a minute count as "Xh Ym" or "Xm" or "—".
+func formatMins(mins int) string {
+	if mins <= 0 {
+		return "—"
+	}
+	if mins >= 60 {
+		h := mins / 60
+		m := mins % 60
+		if m == 0 {
+			return fmt.Sprintf("%dh", h)
+		}
+		return fmt.Sprintf("%dh%dm", h, m)
+	}
+	return fmt.Sprintf("%dm", mins)
+}
+
 // BurndownChart renders an ASCII burn-down chart (width × height characters).
-// It projects the expected completion date as a dotted line.
 func (f *Forecast) BurndownChart(width, height int) string {
 	if f.TotalTasks == 0 || len(f.BurnPoints) == 0 {
 		return ""
 	}
 
-	// Time range: project start → expected end (or now if no end estimate).
 	start := f.ProjectStartDate
 	var end time.Time
 	if f.Expected.DaysRemaining >= 0 {
@@ -215,7 +443,6 @@ func (f *Forecast) BurndownChart(width, height int) string {
 		return ""
 	}
 
-	// Build a 2D grid: rows = task count, cols = time.
 	grid := make([][]rune, height)
 	for i := range grid {
 		grid[i] = make([]rune, width)
@@ -224,21 +451,18 @@ func (f *Forecast) BurndownChart(width, height int) string {
 		}
 	}
 
-	// Helper: map time → column index.
 	timeToCol := func(t time.Time) int {
 		frac := t.Sub(start).Seconds() / totalSpan.Seconds()
 		col := int(frac * float64(width-1))
 		return clampInt(col, 0, width-1)
 	}
 
-	// Helper: map remaining count → row index (0 = top = max tasks).
 	countToRow := func(remaining int) int {
 		frac := 1.0 - float64(remaining)/float64(f.TotalTasks)
 		row := int(frac * float64(height-1))
 		return clampInt(row, 0, height-1)
 	}
 
-	// Draw the ideal burn-down as a dashed line from (start,total) to (end,0).
 	for col := 0; col < width; col++ {
 		frac := float64(col) / float64(width-1)
 		idealRemaining := int(math.Round(float64(f.TotalTasks) * (1.0 - frac)))
@@ -248,8 +472,6 @@ func (f *Forecast) BurndownChart(width, height int) string {
 		}
 	}
 
-	// Plot actual burn-down line through the historical points.
-	// Add a synthetic start point.
 	allPoints := append([]BurnPoint{{Date: start, Remaining: f.TotalTasks}}, f.BurnPoints...)
 	allPoints = append(allPoints, BurnPoint{Date: time.Now(), Remaining: f.TotalTasks - f.DoneTasks - f.SkippedTasks})
 
@@ -258,7 +480,6 @@ func (f *Forecast) BurndownChart(width, height int) string {
 		c0, c1 := timeToCol(p0.Date), timeToCol(p1.Date)
 		r0, r1 := countToRow(p0.Remaining), countToRow(p1.Remaining)
 
-		// Bresenham line between (c0,r0) and (c1,r1).
 		dx := abs(c1 - c0)
 		dy := abs(r1 - r0)
 		sx, sy := 1, 1
@@ -289,13 +510,10 @@ func (f *Forecast) BurndownChart(width, height int) string {
 		}
 	}
 
-	// Render: add Y-axis labels (task count) and X-axis.
 	var sb strings.Builder
 
-	// Y axis header
 	sb.WriteString(fmt.Sprintf("  %d tasks ┐\n", f.TotalTasks))
 	for row := 0; row < height; row++ {
-		// Y label every few rows
 		if row == height/2 {
 			remaining := int(math.Round(float64(f.TotalTasks) * 0.5))
 			sb.WriteString(fmt.Sprintf("  %3d    │", remaining))
@@ -308,12 +526,10 @@ func (f *Forecast) BurndownChart(width, height int) string {
 		sb.WriteByte('\n')
 	}
 
-	// X axis
 	sb.WriteString("         └")
 	sb.WriteString(strings.Repeat("─", width))
 	sb.WriteByte('\n')
 
-	// X labels
 	sb.WriteString("          ")
 	startLabel := start.Format("Jan 2")
 	endLabel := end.Format("Jan 2")
@@ -325,7 +541,6 @@ func (f *Forecast) BurndownChart(width, height int) string {
 	sb.WriteString(endLabel)
 	sb.WriteByte('\n')
 
-	// Legend
 	sb.WriteString("\n  ─── actual   ··· ideal\n")
 
 	return sb.String()
@@ -371,6 +586,18 @@ func ForecastPrompt(f *Forecast) string {
 	}
 	if f.AvgTaskDuration > 0 {
 		b.WriteString(fmt.Sprintf("- Average task duration: %s\n", f.AvgTaskDuration.Round(time.Minute)))
+	}
+
+	if f.MinuteDataPoints > 0 {
+		b.WriteString(fmt.Sprintf("- Estimation accuracy: %.0f%% (actual/estimated ratio: %.2f, from %d tasks)\n",
+			f.VelocityRatio*100, f.VelocityRatio, f.MinuteDataPoints))
+		if f.VelocityRatio > 1.1 {
+			b.WriteString("  → Tasks are taking longer than estimated (underestimation pattern)\n")
+		} else if f.VelocityRatio < 0.9 {
+			b.WriteString("  → Tasks are completing faster than estimated (overestimation pattern)\n")
+		} else {
+			b.WriteString("  → Estimates are accurate\n")
+		}
 	}
 
 	writeScenario := func(sc Scenario) {

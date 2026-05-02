@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/signal"
@@ -22,29 +23,41 @@ var (
 	forecastModel    string
 	forecastQuick    bool
 	forecastNoChart  bool
+	forecastNoGantt  bool
+	forecastFormat   string
 )
 
 var forecastCmd = &cobra.Command{
 	Use:   "forecast",
-	Short: "AI-powered completion forecast with confidence intervals",
-	Long: `Forecast analyzes your project velocity and predicts when every task
-will be done — with optimistic, expected, and pessimistic completion dates.
+	Short: "Velocity-based sprint timeline forecasting with Gantt view",
+	Long: `Forecast analyzes your project velocity (from estimated vs actual minutes)
+and projects when every pending task will complete — with optimistic, expected,
+and pessimistic completion dates.
 
-It renders an ASCII burn-down chart showing actual vs ideal progress,
-then streams an AI narrative that explains the delivery outlook, velocity
-trends, schedule risks, and concrete acceleration opportunities.
+It renders a per-task Gantt-style ASCII table with projected start/end windows,
+an ASCII burn-down chart, then streams an AI narrative explaining the delivery
+outlook, velocity trends, schedule risks, and acceleration opportunities.
 
 Examples:
-  cloop forecast                       # full forecast (chart + AI)
-  cloop forecast --quick               # metrics and chart only, no AI
-  cloop forecast --no-chart            # AI narrative without the chart
-  cloop forecast --provider anthropic  # use a specific provider`,
+  cloop forecast                        # full forecast (chart + Gantt + AI)
+  cloop forecast --quick                # metrics, chart, and Gantt only (no AI)
+  cloop forecast --no-chart             # skip burn-down chart
+  cloop forecast --no-gantt             # skip per-task Gantt table
+  cloop forecast --format json          # machine-readable JSON output
+  cloop forecast --provider anthropic   # use a specific provider`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		workdir, _ := os.Getwd()
 
 		s, err := state.Load(workdir)
 		if err != nil {
 			return err
+		}
+
+		f := forecast.Build(s)
+
+		// ── JSON output ──────────────────────────────────────────────────────
+		if forecastFormat == "json" {
+			return outputForecastJSON(f)
 		}
 
 		bold := color.New(color.Bold)
@@ -54,9 +67,6 @@ Examples:
 		yellow := color.New(color.FgYellow, color.Bold)
 		red := color.New(color.FgRed, color.Bold)
 		magenta := color.New(color.FgMagenta, color.Bold)
-
-		// Build the forecast data model.
-		f := forecast.Build(s)
 
 		// ── Header ──────────────────────────────────────────────────────────
 		cyan.Printf("━━━ cloop forecast ━━━\n\n")
@@ -89,6 +99,34 @@ Examples:
 			fmt.Println()
 		} else {
 			dim.Printf("  Not enough data yet (complete at least one task)\n")
+		}
+		// Estimation accuracy from minute-based data.
+		if f.MinuteDataPoints > 0 {
+			ratio := f.VelocityRatio
+			label := "on track"
+			var ratioColor *color.Color
+			switch {
+			case ratio > 1.2:
+				label = "tasks taking longer than estimated"
+				ratioColor = red
+			case ratio > 1.05:
+				label = "slightly over estimate"
+				ratioColor = yellow
+			case ratio < 0.8:
+				label = "tasks faster than estimated"
+				ratioColor = green
+			case ratio < 0.95:
+				label = "slightly under estimate"
+				ratioColor = green
+			default:
+				ratioColor = dim
+			}
+			fmt.Printf("  Estimation accuracy: ")
+			ratioColor.Printf("%.0f%% (actual/estimated = %.2f)  %s\n", ratio*100, ratio, label)
+			dim.Printf("  Based on %d completed task(s) with time tracking\n", f.MinuteDataPoints)
+		}
+		if f.AvgEstimatedMinutes > 0 {
+			dim.Printf("  Avg estimate: %.0f min/task\n", f.AvgEstimatedMinutes)
 		}
 		fmt.Println()
 
@@ -125,8 +163,18 @@ Examples:
 		printScenario(f.Pessimistic, red.Sprintf)
 		fmt.Println()
 
-		// Velocity-factor legend
 		dim.Printf("  Optimistic = 2× velocity  ·  Expected = current velocity  ·  Pessimistic = ½ velocity\n\n")
+
+		// ── Gantt table ───────────────────────────────────────────────────────
+		if !forecastNoGantt && len(f.TaskWindows) > 0 {
+			bold.Printf("Per-Task Schedule (Gantt)\n")
+			if f.VelocityRatio != 1.0 && f.MinuteDataPoints > 0 {
+				dim.Printf("  Adj = estimated × velocity ratio (%.2f)  ·  ▶ = in progress\n\n", f.VelocityRatio)
+			} else {
+				dim.Printf("  Adj = estimated (no actuals yet; ratio = 1.00)  ·  ▶ = in progress\n\n")
+			}
+			magenta.Printf("%s\n", f.GanttTable())
+		}
 
 		// ── Burn-down chart ───────────────────────────────────────────────────
 		if !forecastNoChart && f.TotalTasks > 0 {
@@ -218,6 +266,79 @@ Examples:
 	},
 }
 
+// outputForecastJSON serializes the forecast as machine-readable JSON to stdout.
+func outputForecastJSON(f *forecast.Forecast) error {
+	type scenarioJSON struct {
+		Label          string  `json:"label"`
+		VelocityFactor float64 `json:"velocity_factor"`
+		DaysRemaining  float64 `json:"days_remaining"`
+		CompletionDate string  `json:"completion_date,omitempty"`
+		Confidence     string  `json:"confidence"`
+	}
+
+	type outputJSON struct {
+		Goal        string `json:"goal"`
+		GeneratedAt string `json:"generated_at"`
+
+		TotalTasks      int `json:"total_tasks"`
+		DoneTasks       int `json:"done_tasks"`
+		SkippedTasks    int `json:"skipped_tasks"`
+		FailedTasks     int `json:"failed_tasks"`
+		PendingTasks    int `json:"pending_tasks"`
+		BlockedTasks    int `json:"blocked_tasks"`
+		InProgressTasks int `json:"in_progress_tasks"`
+		CompletionPct   int `json:"completion_pct"`
+
+		BaseVelocityPerDay  float64 `json:"base_velocity_per_day"`
+		VelocityRatio       float64 `json:"velocity_ratio"`
+		AvgEstimatedMinutes float64 `json:"avg_estimated_minutes"`
+		MinuteDataPoints    int     `json:"minute_data_points"`
+
+		Optimistic  scenarioJSON     `json:"optimistic"`
+		Expected    scenarioJSON     `json:"expected"`
+		Pessimistic scenarioJSON     `json:"pessimistic"`
+		TaskWindows []forecast.TaskWindow `json:"task_windows"`
+	}
+
+	toScenario := func(sc forecast.Scenario) scenarioJSON {
+		s := scenarioJSON{
+			Label:          sc.Label,
+			VelocityFactor: sc.VelocityFactor,
+			DaysRemaining:  sc.DaysRemaining,
+			Confidence:     sc.Confidence,
+		}
+		if sc.DaysRemaining >= 0 {
+			s.CompletionDate = sc.CompletionDate.Format(time.RFC3339)
+		}
+		return s
+	}
+
+	out := outputJSON{
+		Goal:                f.Goal,
+		GeneratedAt:         f.GeneratedAt.Format(time.RFC3339),
+		TotalTasks:          f.TotalTasks,
+		DoneTasks:           f.DoneTasks,
+		SkippedTasks:        f.SkippedTasks,
+		FailedTasks:         f.FailedTasks,
+		PendingTasks:        f.PendingTasks,
+		BlockedTasks:        f.BlockedTasks,
+		InProgressTasks:     f.InProgressTasks,
+		CompletionPct:       f.CompletionPct(),
+		BaseVelocityPerDay:  f.BaseVelocityPerDay,
+		VelocityRatio:       f.VelocityRatio,
+		AvgEstimatedMinutes: f.AvgEstimatedMinutes,
+		MinuteDataPoints:    f.MinuteDataPoints,
+		Optimistic:          toScenario(f.Optimistic),
+		Expected:            toScenario(f.Expected),
+		Pessimistic:         toScenario(f.Pessimistic),
+		TaskWindows:         f.TaskWindows,
+	}
+
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	return enc.Encode(out)
+}
+
 // progressBar renders a colored ASCII progress bar of the given width.
 func progressBar(pct, width int) string {
 	filled := pct * width / 100
@@ -238,7 +359,9 @@ func truncateForecast(s string, n int) string {
 func init() {
 	forecastCmd.Flags().StringVar(&forecastProvider, "provider", "", "AI provider (claudecode, anthropic, openai, ollama)")
 	forecastCmd.Flags().StringVar(&forecastModel, "model", "", "Model override")
-	forecastCmd.Flags().BoolVar(&forecastQuick, "quick", false, "Show metrics and chart only (no AI)")
+	forecastCmd.Flags().BoolVar(&forecastQuick, "quick", false, "Show metrics, chart, and Gantt only (no AI)")
 	forecastCmd.Flags().BoolVar(&forecastNoChart, "no-chart", false, "Skip the burn-down chart")
+	forecastCmd.Flags().BoolVar(&forecastNoGantt, "no-gantt", false, "Skip the per-task Gantt table")
+	forecastCmd.Flags().StringVar(&forecastFormat, "format", "text", "Output format: text or json")
 	rootCmd.AddCommand(forecastCmd)
 }
