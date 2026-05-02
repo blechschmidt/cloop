@@ -37,6 +37,9 @@ type Config struct {
 
 	// Notify configures Slack and Discord incoming webhook notifications.
 	Notify NotifyConfig `yaml:"notify,omitempty"`
+
+	// Sync configures git-based team plan sharing and merging.
+	Sync SyncConfig `yaml:"sync,omitempty"`
 }
 
 // WatchConfig configures file-triggered plan re-evaluation.
@@ -122,6 +125,14 @@ type NotifyConfig struct {
 	// DiscordWebhook is the Discord webhook URL.
 	// Format: https://discord.com/api/webhooks/...
 	DiscordWebhook string `yaml:"discord_webhook,omitempty"`
+}
+
+// SyncConfig configures git-based team plan sharing.
+type SyncConfig struct {
+	// Remote is the git remote name to sync with (default "origin").
+	Remote string `yaml:"remote,omitempty"`
+	// Branch is the branch name used to push/pull cloop state (default "cloop-state").
+	Branch string `yaml:"branch,omitempty"`
 }
 
 // GitHubConfig holds GitHub integration settings.
