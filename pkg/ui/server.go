@@ -119,10 +119,18 @@ func (s *Server) resolveWorkDir(r *http.Request) string {
 	return s.WorkDir
 }
 
-// Start begins listening on the configured port and broadcasting state updates.
-func (s *Server) Start() error {
+// Handler returns the HTTP handler for the server with all routes registered
+// and security/auth middleware applied.  It does NOT start background goroutines
+// (watchState, watchProjects); call Start() for the full lifecycle.
+// This method exists primarily to support httptest-based unit tests.
+func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+	s.registerRoutes(mux)
+	return securityHeaders(s.authMiddleware(mux))
+}
 
+// registerRoutes wires all API and UI routes onto mux.
+func (s *Server) registerRoutes(mux *http.ServeMux) {
 	// Dashboard SPA
 	mux.HandleFunc("/", s.handleDashboard)
 
@@ -178,6 +186,12 @@ func (s *Server) Start() error {
 	mux.HandleFunc("POST /api/projects/new", s.handleProjectNew)
 	mux.HandleFunc("POST /api/projects/{idx}/run", s.handleProjectRun)
 	mux.HandleFunc("POST /api/projects/{idx}/stop", s.handleProjectStop)
+}
+
+// Start begins listening on the configured port and broadcasting state updates.
+func (s *Server) Start() error {
+	mux := http.NewServeMux()
+	s.registerRoutes(mux)
 
 	go s.watchState()
 	go s.watchProjects()
