@@ -1,0 +1,16 @@
+```mermaid
+flowchart TD
+    classDef pending fill:#555,stroke:#999,color:#fff
+    classDef inprogress fill:#b8860b,stroke:#ffd700,color:#fff
+    classDef done fill:#2d6a4f,stroke:#52b788,color:#fff
+    classDef failed fill:#7f1d1d,stroke:#ef4444,color:#fff
+    classDef skipped fill:#374151,stroke:#6b7280,color:#aaa
+
+    T1["✓ #1: First task"]
+    T2["○ #2: Second task"]
+
+    T1 --> T2
+
+    class T1 done
+    class T2 pending
+```

@@ -25,7 +25,12 @@ jobs:
         run: go build ./...
 
       - name: Test with race detector and coverage
-        run: go test -race -coverprofile=coverage.out -covermode=atomic ./...
+        run: go test -race -coverprofile=coverage.out -covermode=atomic $(go list ./... | grep -v 'tests/e2e')
+
+      - name: End-to-end integration tests
+        run: |
+          go build -o cloop .
+          go test -v -timeout 120s ./tests/e2e/
 
       - name: Upload coverage report
         uses: actions/upload-artifact@v4

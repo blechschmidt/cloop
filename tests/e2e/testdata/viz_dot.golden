@@ -1,0 +1,9 @@
+digraph cloop {
+    rankdir=TD;
+    node [shape=box, style=filled, fontname="Helvetica"];
+
+    T1 [label="✓ #1\nFirst task", fillcolor="#2d6a4f", fontcolor="#ffffff"];
+    T2 [label="○ #2\nSecond task", fillcolor="#555555", fontcolor="#ffffff"];
+
+    T1 -> T2;
+}
