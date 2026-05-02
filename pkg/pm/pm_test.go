@@ -1,6 +1,7 @@
 package pm
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -423,5 +424,88 @@ func TestExecuteTaskPrompt_NoResultOmitsSummaryLine(t *testing.T) {
 	prompt := ExecuteTaskPrompt("goal", "", "", plan, current)
 	if strings.Contains(prompt, "Summary:") {
 		t.Errorf("prompt should not include 'Summary:' when result is empty")
+	}
+}
+
+// --- Annotation ---
+
+func TestAddAnnotation_AppendsToTask(t *testing.T) {
+	task := &Task{ID: 1, Title: "Test task", Status: TaskPending}
+	AddAnnotation(task, "user", "first note")
+	if len(task.Annotations) != 1 {
+		t.Fatalf("expected 1 annotation, got %d", len(task.Annotations))
+	}
+	if task.Annotations[0].Author != "user" {
+		t.Errorf("expected author 'user', got %q", task.Annotations[0].Author)
+	}
+	if task.Annotations[0].Text != "first note" {
+		t.Errorf("unexpected text: %q", task.Annotations[0].Text)
+	}
+	if task.Annotations[0].Timestamp.IsZero() {
+		t.Error("timestamp should not be zero")
+	}
+}
+
+func TestAddAnnotation_MultipleAnnotations(t *testing.T) {
+	task := &Task{ID: 1, Title: "Multi", Status: TaskPending}
+	AddAnnotation(task, "user", "note one")
+	AddAnnotation(task, "ai", "ai observation")
+	AddAnnotation(task, "user", "note two")
+	if len(task.Annotations) != 3 {
+		t.Fatalf("expected 3 annotations, got %d", len(task.Annotations))
+	}
+	if task.Annotations[1].Author != "ai" {
+		t.Errorf("expected second annotation author 'ai', got %q", task.Annotations[1].Author)
+	}
+}
+
+func TestAddAnnotation_TimestampOrder(t *testing.T) {
+	task := &Task{ID: 1, Title: "Timing", Status: TaskPending}
+	AddAnnotation(task, "user", "first")
+	time.Sleep(2 * time.Millisecond) // ensure measurable time gap
+	AddAnnotation(task, "user", "second")
+	if !task.Annotations[1].Timestamp.After(task.Annotations[0].Timestamp) {
+		t.Error("second annotation should have a later timestamp than first")
+	}
+}
+
+func TestAnnotation_JSONRoundTrip(t *testing.T) {
+	task := &Task{ID: 5, Title: "JSON task", Status: TaskDone}
+	AddAnnotation(task, "user", "user comment")
+	AddAnnotation(task, "ai", "ai summary")
+
+	data, err := json.Marshal(task)
+	if err != nil {
+		t.Fatalf("marshal error: %v", err)
+	}
+
+	var restored Task
+	if err := json.Unmarshal(data, &restored); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+
+	if len(restored.Annotations) != 2 {
+		t.Fatalf("expected 2 annotations after round-trip, got %d", len(restored.Annotations))
+	}
+	if restored.Annotations[0].Text != "user comment" {
+		t.Errorf("unexpected first annotation text: %q", restored.Annotations[0].Text)
+	}
+	if restored.Annotations[1].Author != "ai" {
+		t.Errorf("expected second annotation author 'ai', got %q", restored.Annotations[1].Author)
+	}
+	// Timestamps should survive round-trip
+	if restored.Annotations[0].Timestamp.IsZero() {
+		t.Error("timestamp should survive JSON round-trip")
+	}
+}
+
+func TestAnnotation_EmptyAnnotationsOmittedFromJSON(t *testing.T) {
+	task := &Task{ID: 7, Title: "No notes", Status: TaskPending}
+	data, err := json.Marshal(task)
+	if err != nil {
+		t.Fatalf("marshal error: %v", err)
+	}
+	if strings.Contains(string(data), "annotations") {
+		t.Errorf("empty annotations field should be omitted from JSON, got: %s", string(data))
 	}
 }

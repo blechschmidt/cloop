@@ -83,8 +83,10 @@ Subcommands:
   edit <id>     Edit task title, description, priority, or deps
   remove <id>   Remove a task from the plan
   move <id> up|down  Reorder a task by swapping with adjacent priority
-  tag <id> <tag...>    Add one or more tags to a task
-  untag <id> <tag...>  Remove one or more tags from a task
+  tag <id> <tag...>      Add one or more tags to a task
+  untag <id> <tag...>    Remove one or more tags from a task
+  annotate <id> <text>   Append a user note to a task
+  notes <id>             List all annotations for a task
 
 Task dependencies:
   Use --deps when adding or editing tasks to specify prerequisites.
@@ -1172,6 +1174,114 @@ Examples:
 	},
 }
 
+var taskAnnotateCmd = &cobra.Command{
+	Use:   "annotate <id> <text>",
+	Short: "Append a user note to a task",
+	Long: `Attach a timestamped note to a task. The note is persisted in state.json
+and is displayed by 'cloop task notes <id>' and 'cloop status'.
+
+Example:
+  cloop task annotate 3 "Decided to use PostgreSQL instead of SQLite"
+  cloop task annotate 5 "Blocked on deployment access — waiting for DevOps"`,
+	Args: cobra.MinimumNArgs(2),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		workdir, _ := os.Getwd()
+		s, err := state.Load(workdir)
+		if err != nil {
+			return err
+		}
+		if !s.PMMode || s.Plan == nil {
+			return fmt.Errorf("no task plan found — run 'cloop run --pm' to create one")
+		}
+
+		id, err := strconv.Atoi(args[0])
+		if err != nil {
+			return fmt.Errorf("invalid task ID %q: must be a number", args[0])
+		}
+
+		var task *pm.Task
+		for _, t := range s.Plan.Tasks {
+			if t.ID == id {
+				task = t
+				break
+			}
+		}
+		if task == nil {
+			return fmt.Errorf("task %d not found", id)
+		}
+
+		text := strings.Join(args[1:], " ")
+		pm.AddAnnotation(task, "user", text)
+
+		if err := s.Save(); err != nil {
+			return err
+		}
+
+		color.New(color.FgGreen).Printf("Annotation added to task %d [%d note(s) total]\n", id, len(task.Annotations))
+		return nil
+	},
+}
+
+var taskNotesCmd = &cobra.Command{
+	Use:   "notes <id>",
+	Short: "List all annotations for a task",
+	Long: `Show all timestamped notes (user and AI) attached to a task.
+
+Example:
+  cloop task notes 3`,
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		workdir, _ := os.Getwd()
+		s, err := state.Load(workdir)
+		if err != nil {
+			return err
+		}
+		if !s.PMMode || s.Plan == nil {
+			return fmt.Errorf("no task plan found — run 'cloop run --pm' to create one")
+		}
+
+		id, err := strconv.Atoi(args[0])
+		if err != nil {
+			return fmt.Errorf("invalid task ID %q: must be a number", args[0])
+		}
+
+		var task *pm.Task
+		for _, t := range s.Plan.Tasks {
+			if t.ID == id {
+				task = t
+				break
+			}
+		}
+		if task == nil {
+			return fmt.Errorf("task %d not found", id)
+		}
+
+		titleColor := color.New(color.FgWhite, color.Bold)
+		dimColor := color.New(color.Faint)
+		aiColor := color.New(color.FgCyan)
+		userColor := color.New(color.FgGreen)
+
+		titleColor.Printf("Task %d: %s — %d note(s)\n\n", task.ID, task.Title, len(task.Annotations))
+		if len(task.Annotations) == 0 {
+			dimColor.Printf("  No annotations yet. Use 'cloop task annotate %d <text>' to add one.\n", id)
+			return nil
+		}
+
+		for i, a := range task.Annotations {
+			ts := a.Timestamp.Format("2006-01-02 15:04:05")
+			authorLabel := fmt.Sprintf("[%s]", a.Author)
+			header := fmt.Sprintf("  #%d  %s  %s\n", i+1, ts, authorLabel)
+			if a.Author == "ai" {
+				aiColor.Print(header)
+			} else {
+				userColor.Print(header)
+			}
+			fmt.Printf("       %s\n\n", strings.ReplaceAll(a.Text, "\n", "\n       "))
+		}
+		return nil
+	},
+}
+
 func init() {
 	taskListCmd.Flags().BoolVar(&taskListJSON, "json", false, "Output tasks as JSON array")
 	taskListCmd.Flags().BoolVar(&taskListGraph, "graph", false, "Render tasks as a layered dependency graph")
@@ -1211,5 +1321,7 @@ func init() {
 	taskCmd.AddCommand(taskTagCmd)
 	taskCmd.AddCommand(taskUntagCmd)
 	taskCmd.AddCommand(taskSplitCmd)
+	taskCmd.AddCommand(taskAnnotateCmd)
+	taskCmd.AddCommand(taskNotesCmd)
 	rootCmd.AddCommand(taskCmd)
 }

@@ -95,6 +95,23 @@ func ValidRoles() []string {
 	}
 }
 
+// Annotation is a timestamped note attached to a task.
+// Author is either "user" (from CLI) or "ai" (added by the orchestrator).
+type Annotation struct {
+	Timestamp time.Time `json:"timestamp"`
+	Author    string    `json:"author"` // "user" or "ai"
+	Text      string    `json:"text"`
+}
+
+// AddAnnotation appends a new annotation to the task.
+func AddAnnotation(task *Task, author, text string) {
+	task.Annotations = append(task.Annotations, Annotation{
+		Timestamp: time.Now(),
+		Author:    author,
+		Text:      text,
+	})
+}
+
 // Task is a single unit of work derived from the project goal.
 type Task struct {
 	ID               int        `json:"id"`
@@ -111,10 +128,11 @@ type Task struct {
 	GitHubIssue      int        `json:"github_issue,omitempty"`      // linked GitHub issue number (0 = none)
 	EstimatedMinutes int        `json:"estimated_minutes,omitempty"` // AI-predicted duration
 	ActualMinutes    int        `json:"actual_minutes,omitempty"`    // measured duration (set on completion)
-	ArtifactPath      string     `json:"artifact_path,omitempty"`       // path to the full AI response artifact file
-	FailureDiagnosis  string     `json:"failure_diagnosis,omitempty"`   // AI diagnosis of what went wrong on failure
-	Tags              []string   `json:"tags,omitempty"`                // user-defined labels for filtering
-	FailCount         int        `json:"fail_count,omitempty"`          // number of times this task has been marked failed
+	ArtifactPath      string       `json:"artifact_path,omitempty"`       // path to the full AI response artifact file
+	FailureDiagnosis  string       `json:"failure_diagnosis,omitempty"`   // AI diagnosis of what went wrong on failure
+	Tags              []string     `json:"tags,omitempty"`                // user-defined labels for filtering
+	FailCount         int          `json:"fail_count,omitempty"`          // number of times this task has been marked failed
+	Annotations       []Annotation `json:"annotations,omitempty"`         // timestamped notes from user or AI
 }
 
 // Plan is the full task plan for a goal.

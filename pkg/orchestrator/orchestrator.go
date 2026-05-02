@@ -804,6 +804,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		now := time.Now()
 		task.Status = pm.TaskInProgress
 		task.StartedAt = &now
+		pm.AddAnnotation(task, "ai", fmt.Sprintf("Task started by executor (provider: %s)", o.provider.Name()))
 		s.Save()
 
 		if o.metrics != nil {
@@ -975,6 +976,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 				if !pass {
 					task.VerifyRetries++
 					if task.VerifyRetries <= maxRetries {
+						pm.AddAnnotation(task, "ai", fmt.Sprintf("AI verification failed — re-queuing (attempt %d/%d).", task.VerifyRetries, maxRetries))
 						failColor.Printf("✗ Verification FAILED for task %d (%s) — re-queuing (attempt %d/%d)\n\n", task.ID, task.Title, task.VerifyRetries, maxRetries)
 						task.Status = pm.TaskPending
 						s.Save()
@@ -1004,7 +1006,8 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 					}
 					continue
 				}
-				pmColor.Printf("✓ Verification PASSED for task %d: %s\n\n", task.ID, task.Title)
+				pm.AddAnnotation(task, "ai", "AI verification passed: task was genuinely completed.")
+			pmColor.Printf("✓ Verification PASSED for task %d: %s\n\n", task.ID, task.Title)
 			}
 
 			// Script-verify: generate and run a shell verification script to confirm
@@ -1038,6 +1041,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 								dimColor.Printf("  Diagnosis error (ignored): %v\n", diagErr)
 							} else if diag != "" {
 								task.FailureDiagnosis = diag
+								pm.AddAnnotation(task, "ai", fmt.Sprintf("Failure diagnosis: %s", diag))
 								dimColor.Printf("  Diagnosis: %s\n\n", diag)
 							}
 						}
@@ -1059,6 +1063,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 
 			if !scriptVerifyFailed {
 				task.Status = pm.TaskDone
+				pm.AddAnnotation(task, "ai", fmt.Sprintf("Task completed successfully in %s.", taskDur))
 				successColor.Printf("✓ Task %d complete: %s\n\n", task.ID, task.Title)
 				if o.config.Notify {
 					notify.Send("cloop: Task Done", task.Title)
@@ -1116,6 +1121,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 					dimColor.Printf("  Diagnosis error (ignored): %v\n", diagErr)
 				} else if diag != "" {
 					task.FailureDiagnosis = diag
+					pm.AddAnnotation(task, "ai", fmt.Sprintf("Failure diagnosis: %s", diag))
 					dimColor.Printf("  Diagnosis: %s\n\n", truncate(diag, 200))
 				}
 				s.Save()

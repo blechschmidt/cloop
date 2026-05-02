@@ -81,7 +81,11 @@ var statusCmd = &cobra.Command{
 					if t.FailCount > 0 {
 						failCountSuffix = fmt.Sprintf(" (failed %d×)", t.FailCount)
 					}
-					fmt.Printf("          %s Task %d: %s%s\n", taskMarker(t.Status), t.ID, t.Title, failCountSuffix)
+					notesSuffix := ""
+					if len(t.Annotations) > 0 {
+						notesSuffix = fmt.Sprintf(" [%d notes]", len(t.Annotations))
+					}
+					fmt.Printf("          %s Task %d: %s%s%s\n", taskMarker(t.Status), t.ID, t.Title, failCountSuffix, notesSuffix)
 					if t.Status == pm.TaskFailed && t.FailureDiagnosis != "" {
 						diag := t.FailureDiagnosis
 						if len(diag) > 300 {

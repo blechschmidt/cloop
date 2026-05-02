@@ -24,9 +24,10 @@ const pollInterval = 500 * time.Millisecond
 type viewMode int
 
 const (
-	viewMain   viewMode = iota
-	viewDetail          // task detail / artifact view
+	viewMain        viewMode = iota
+	viewDetail               // task detail / artifact view
 	viewAddTask
+	viewAnnotations          // annotations modal for selected task
 )
 
 // ---- styles ----------------------------------------------------------------
@@ -192,6 +193,19 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case viewAnnotations:
+		switch msg.String() {
+		case "q", "esc", "enter", "n":
+			m.mode = viewMain
+		case "up", "k":
+			if m.logOffset > 0 {
+				m.logOffset--
+			}
+		case "down", "j":
+			m.logOffset++
+		}
+		return m, nil
+
 	case viewAddTask:
 		switch msg.String() {
 		case "esc":
@@ -237,6 +251,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.mode = viewDetail
 			m.logOffset = 0
 			m.detailText = m.buildDetailText()
+		case "n":
+			m.mode = viewAnnotations
+			m.logOffset = 0
 		}
 	}
 	return m, nil
@@ -254,6 +271,8 @@ func (m Model) View() string {
 		return m.viewDetail()
 	case viewAddTask:
 		return m.viewAddTask()
+	case viewAnnotations:
+		return m.viewAnnotations()
 	default:
 		return m.viewMain()
 	}
@@ -280,7 +299,7 @@ func (m Model) viewMain() string {
 
 	header := m.renderHeader()
 	stats := m.renderStats()
-	help := styleHelp.Render("  r run  s stop  a add-task  ↑↓ navigate  enter detail  q quit")
+	help := styleHelp.Render("  r run  s stop  a add-task  ↑↓ navigate  enter detail  n notes  q quit")
 
 	return lipgloss.JoinVertical(lipgloss.Left, header, body, stats, help)
 }
@@ -343,7 +362,11 @@ func (m Model) renderTaskPanel(w, h int) string {
 			if len(t.Tags) > 0 {
 				tagStr = " [" + strings.Join(t.Tags, ",") + "]"
 			}
-			line := fmt.Sprintf("%s %s %s%s", badge, pri, title, tagStr)
+			notesStr := ""
+			if len(t.Annotations) > 0 {
+				notesStr = fmt.Sprintf(" ✎%d", len(t.Annotations))
+			}
+			line := fmt.Sprintf("%s %s %s%s%s", badge, pri, title, tagStr, notesStr)
 			if i == m.cursor {
 				line = styleTaskSelected.Width(inner).Render(line)
 			}
@@ -535,6 +558,51 @@ func (m Model) buildDetailText() string {
 		}
 	}
 	return sb.String()
+}
+
+func (m Model) viewAnnotations() string {
+	title := "Notes"
+	var annotations []pm.Annotation
+	if m.state != nil && m.state.Plan != nil && m.cursor < len(m.state.Plan.Tasks) {
+		t := m.state.Plan.Tasks[m.cursor]
+		title = fmt.Sprintf("Notes — Task %d: %s", t.ID, t.Title)
+		annotations = t.Annotations
+	}
+	header := styleHeader.Render(title) + "\n"
+	help := "\n" + styleHelp.Render("  ↑↓ scroll  n/q/esc close")
+
+	var sb strings.Builder
+	if len(annotations) == 0 {
+		sb.WriteString(styleHelp.Render("  No notes yet. Use 'cloop task annotate <id> <text>' to add one."))
+	} else {
+		for i, a := range annotations {
+			ts := a.Timestamp.Format("2006-01-02 15:04:05")
+			authorLabel := "[user]"
+			authorStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("82"))
+			if a.Author == "ai" {
+				authorLabel = "[ai]  "
+				authorStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("33"))
+			}
+			sb.WriteString(fmt.Sprintf("  #%d  %s  %s\n", i+1, ts, authorStyle.Render(authorLabel)))
+			sb.WriteString(fmt.Sprintf("       %s\n\n", strings.ReplaceAll(a.Text, "\n", "\n       ")))
+		}
+	}
+
+	lines := strings.Split(sb.String(), "\n")
+	visible := m.height - 4
+	if visible < 1 {
+		visible = 1
+	}
+	start := m.logOffset
+	if start >= len(lines) {
+		start = max(0, len(lines)-1)
+	}
+	end := start + visible
+	if end > len(lines) {
+		end = len(lines)
+	}
+	body := strings.Join(lines[start:end], "\n")
+	return header + body + help
 }
 
 func (m Model) viewAddTask() string {
