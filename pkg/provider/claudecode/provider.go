@@ -26,6 +26,27 @@ func New() *Provider { return &Provider{} }
 func (p *Provider) Name() string         { return ProviderName }
 func (p *Provider) DefaultModel() string { return "" }
 
+// findClaude locates the claude binary. It checks PATH first, then common
+// install locations that may not be in PATH when launched from a web server.
+func findClaude() string {
+	if p, err := exec.LookPath("claude"); err == nil {
+		return p
+	}
+	// Common install paths
+	home, _ := os.UserHomeDir()
+	candidates := []string{
+		filepath.Join(home, ".local", "bin", "claude"),
+		filepath.Join(home, ".npm-global", "bin", "claude"),
+		"/usr/local/bin/claude",
+	}
+	for _, c := range candidates {
+		if _, err := os.Stat(c); err == nil {
+			return c
+		}
+	}
+	return "claude" // fall back, will produce a clear error
+}
+
 func (p *Provider) Complete(ctx context.Context, prompt string, opts provider.Options) (*provider.Result, error) {
 	envOnce.Do(loadEnvFiles)
 
@@ -44,7 +65,8 @@ func (p *Provider) Complete(ctx context.Context, prompt string, opts provider.Op
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "claude", args...)
+	claudeBin := findClaude()
+	cmd := exec.CommandContext(ctx, claudeBin, args...)
 	if opts.WorkDir != "" {
 		cmd.Dir = opts.WorkDir
 	}
