@@ -415,6 +415,114 @@ func TestConcurrentUpsertTask(t *testing.T) {
 	}
 }
 
+// ── cost ledger ───────────────────────────────────────────────────────────────
+
+func TestAppendCost_And_ReadCosts(t *testing.T) {
+	db, _ := tempDB(t)
+
+	now := time.Now().Truncate(time.Second).UTC()
+	entries := []statedb.CostEntry{
+		{Timestamp: now, TaskID: 1, TaskTitle: "task one", Provider: "anthropic", Model: "claude-opus-4-6", InputTokens: 100, OutputTokens: 50, EstimatedUSD: 0.005},
+		{Timestamp: now.Add(time.Minute), TaskID: 2, TaskTitle: "task two", Provider: "openai", Model: "gpt-4o", InputTokens: 200, OutputTokens: 80, ThinkingTokens: 10, EstimatedUSD: 0.003},
+	}
+	for _, e := range entries {
+		if err := db.AppendCost(e); err != nil {
+			t.Fatalf("AppendCost: %v", err)
+		}
+	}
+
+	got, err := db.ReadCosts()
+	if err != nil {
+		t.Fatalf("ReadCosts: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("want 2 entries, got %d", len(got))
+	}
+	assertEqual(t, "Entry[0].TaskID", 1, got[0].TaskID)
+	assertEqual(t, "Entry[0].Provider", "anthropic", got[0].Provider)
+	assertEqual(t, "Entry[0].InputTokens", 100, got[0].InputTokens)
+	assertEqual(t, "Entry[0].EstimatedUSD", 0.005, got[0].EstimatedUSD)
+	assertEqual(t, "Entry[1].TaskTitle", "task two", got[1].TaskTitle)
+	assertEqual(t, "Entry[1].ThinkingTokens", 10, got[1].ThinkingTokens)
+}
+
+func TestReadCostsSince(t *testing.T) {
+	db, _ := tempDB(t)
+
+	base := time.Date(2025, 3, 1, 0, 0, 0, 0, time.UTC)
+	_ = db.AppendCost(statedb.CostEntry{Timestamp: base, TaskID: 1, EstimatedUSD: 0.01})
+	_ = db.AppendCost(statedb.CostEntry{Timestamp: base.Add(time.Hour), TaskID: 2, EstimatedUSD: 0.02})
+	_ = db.AppendCost(statedb.CostEntry{Timestamp: base.Add(2 * time.Hour), TaskID: 3, EstimatedUSD: 0.03})
+
+	got, err := db.ReadCostsSince(base.Add(30 * time.Minute))
+	if err != nil {
+		t.Fatalf("ReadCostsSince: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("want 2 entries since +30m, got %d", len(got))
+	}
+	assertEqual(t, "first entry after cutoff", 2, got[0].TaskID)
+}
+
+func TestMonthlyCosts(t *testing.T) {
+	db, _ := tempDB(t)
+
+	march := time.Date(2025, 3, 15, 12, 0, 0, 0, time.UTC)
+	april := time.Date(2025, 4, 5, 12, 0, 0, 0, time.UTC)
+	_ = db.AppendCost(statedb.CostEntry{Timestamp: march, TaskID: 1, EstimatedUSD: 1.00})
+	_ = db.AppendCost(statedb.CostEntry{Timestamp: march.Add(time.Hour), TaskID: 2, EstimatedUSD: 2.00})
+	_ = db.AppendCost(statedb.CostEntry{Timestamp: april, TaskID: 3, EstimatedUSD: 0.50})
+
+	marchRows, err := db.MonthlyCosts(2025, 3)
+	if err != nil {
+		t.Fatalf("MonthlyCosts(march): %v", err)
+	}
+	if len(marchRows) != 2 {
+		t.Fatalf("want 2 march entries, got %d", len(marchRows))
+	}
+	var marchTotal float64
+	for _, r := range marchRows {
+		marchTotal += r.EstimatedUSD
+	}
+	if marchTotal != 3.00 {
+		t.Errorf("march total: want 3.00, got %v", marchTotal)
+	}
+
+	aprilRows, err := db.MonthlyCosts(2025, 4)
+	if err != nil {
+		t.Fatalf("MonthlyCosts(april): %v", err)
+	}
+	if len(aprilRows) != 1 {
+		t.Fatalf("want 1 april entry, got %d", len(aprilRows))
+	}
+}
+
+func TestAppendCost_ZeroTimestamp(t *testing.T) {
+	db, _ := tempDB(t)
+
+	// Timestamp zero should be set to now automatically.
+	entry := statedb.CostEntry{TaskID: 1, TaskTitle: "auto-ts", EstimatedUSD: 0.001}
+	if err := db.AppendCost(entry); err != nil {
+		t.Fatalf("AppendCost: %v", err)
+	}
+	got, err := db.ReadCosts()
+	if err != nil {
+		t.Fatalf("ReadCosts: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("want 1 entry, got %d", len(got))
+	}
+	if got[0].Timestamp.IsZero() {
+		t.Error("expected non-zero timestamp after auto-fill")
+	}
+}
+
+// TestStoreInterface verifies that *DB satisfies the Store interface at compile time.
+func TestStoreInterface(t *testing.T) {
+	db, _ := tempDB(t)
+	var _ statedb.Store = db
+}
+
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 func assertEqual[T comparable](t *testing.T, name string, want, got T) {

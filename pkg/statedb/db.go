@@ -113,6 +113,22 @@ CREATE TABLE IF NOT EXISTS steps (
     input_tokens  INTEGER NOT NULL DEFAULT 0,
     output_tokens INTEGER NOT NULL DEFAULT 0
 );
+
+CREATE TABLE IF NOT EXISTS costs (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp       TEXT    NOT NULL DEFAULT '',
+    task_id         INTEGER NOT NULL DEFAULT 0,
+    task_title      TEXT    NOT NULL DEFAULT '',
+    provider        TEXT    NOT NULL DEFAULT '',
+    model           TEXT    NOT NULL DEFAULT '',
+    input_tokens    INTEGER NOT NULL DEFAULT 0,
+    output_tokens   INTEGER NOT NULL DEFAULT 0,
+    thinking_tokens INTEGER NOT NULL DEFAULT 0,
+    estimated_usd   REAL    NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS costs_timestamp ON costs(timestamp);
+CREATE INDEX IF NOT EXISTS costs_task_id ON costs(task_id);
 `
 
 // Open opens (or creates) the SQLite database at dbPath and applies the schema.
@@ -527,6 +543,113 @@ func loadSteps(conn *sql.DB) ([]StepRow, error) {
 		}
 		r.Time, _ = time.Parse(time.RFC3339Nano, ts)
 		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// ────────────────────────────────────────────────────────────
+// CostEntry represents one API call cost record.
+// ────────────────────────────────────────────────────────────
+
+// CostEntry records the cost of one task execution in the costs table.
+type CostEntry struct {
+	Timestamp      time.Time
+	TaskID         int
+	TaskTitle      string
+	Provider       string
+	Model          string
+	InputTokens    int
+	OutputTokens   int
+	ThinkingTokens int
+	EstimatedUSD   float64
+}
+
+// AppendCost inserts a cost entry into the costs table.
+func (d *DB) AppendCost(entry CostEntry) error {
+	if entry.Timestamp.IsZero() {
+		entry.Timestamp = time.Now().UTC()
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	_, err := d.conn.Exec(`
+		INSERT INTO costs(timestamp, task_id, task_title, provider, model,
+			input_tokens, output_tokens, thinking_tokens, estimated_usd)
+		VALUES(?,?,?,?,?,?,?,?,?)`,
+		entry.Timestamp.UTC().Format(time.RFC3339Nano),
+		entry.TaskID, entry.TaskTitle, entry.Provider, entry.Model,
+		entry.InputTokens, entry.OutputTokens, entry.ThinkingTokens,
+		entry.EstimatedUSD,
+	)
+	return err
+}
+
+// ReadCosts returns all cost entries ordered by timestamp ascending.
+func (d *DB) ReadCosts() ([]CostEntry, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	rows, err := d.conn.Query(`
+		SELECT timestamp, task_id, task_title, provider, model,
+			input_tokens, output_tokens, thinking_tokens, estimated_usd
+		FROM costs ORDER BY timestamp ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanCostRows(rows)
+}
+
+// ReadCostsSince returns cost entries with timestamp >= since, ordered ascending.
+func (d *DB) ReadCostsSince(since time.Time) ([]CostEntry, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	rows, err := d.conn.Query(`
+		SELECT timestamp, task_id, task_title, provider, model,
+			input_tokens, output_tokens, thinking_tokens, estimated_usd
+		FROM costs WHERE timestamp >= ? ORDER BY timestamp ASC`,
+		since.UTC().Format(time.RFC3339Nano),
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanCostRows(rows)
+}
+
+// MonthlyCosts returns cost entries for the given UTC year/month.
+func (d *DB) MonthlyCosts(year, month int) ([]CostEntry, error) {
+	// Build inclusive date range: YYYY-MM-01 00:00:00 → YYYY-MM-01 of next month.
+	start := time.Date(year, time.Month(month), 1, 0, 0, 0, 0, time.UTC)
+	end := start.AddDate(0, 1, 0)
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	rows, err := d.conn.Query(`
+		SELECT timestamp, task_id, task_title, provider, model,
+			input_tokens, output_tokens, thinking_tokens, estimated_usd
+		FROM costs WHERE timestamp >= ? AND timestamp < ? ORDER BY timestamp ASC`,
+		start.Format(time.RFC3339Nano), end.Format(time.RFC3339Nano),
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanCostRows(rows)
+}
+
+func scanCostRows(rows *sql.Rows) ([]CostEntry, error) {
+	var out []CostEntry
+	for rows.Next() {
+		var e CostEntry
+		var ts string
+		if err := rows.Scan(&ts, &e.TaskID, &e.TaskTitle, &e.Provider, &e.Model,
+			&e.InputTokens, &e.OutputTokens, &e.ThinkingTokens, &e.EstimatedUSD); err != nil {
+			return nil, err
+		}
+		e.Timestamp, _ = time.Parse(time.RFC3339Nano, ts)
+		out = append(out, e)
 	}
 	return out, rows.Err()
 }

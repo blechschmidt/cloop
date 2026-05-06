@@ -13,9 +13,11 @@ import (
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/globalbudget"
+	"github.com/blechschmidt/cloop/pkg/statedb"
 )
 
 const ledgerFile = ".cloop/costs.jsonl"
+const stateDBFile = ".cloop/state.db"
 
 // LedgerEntry records the cost of one task execution.
 type LedgerEntry struct {
@@ -30,13 +32,34 @@ type LedgerEntry struct {
 	EstimatedUSD   float64   `json:"estimated_usd"`
 }
 
-// AppendLedger appends a cost entry to .cloop/costs.jsonl, creating the file
-// if it does not exist. It also appends the entry to the global ledger at
-// ~/.config/cloop/costs.jsonl for cross-project budget tracking.
+// AppendLedger appends a cost entry to the project's SQLite database (primary)
+// and to .cloop/costs.jsonl (legacy fallback for backward compatibility).
+// It also mirrors to the global ledger at ~/.config/cloop/costs.jsonl.
 func AppendLedger(workDir string, entry LedgerEntry) error {
 	if entry.Timestamp.IsZero() {
 		entry.Timestamp = time.Now().UTC()
 	}
+
+	// ── Primary: write to SQLite state.db ──────────────────────────────
+	dbPath := filepath.Join(workDir, stateDBFile)
+	if _, err := os.Stat(dbPath); err == nil {
+		if db, err := statedb.Open(dbPath); err == nil {
+			_ = db.AppendCost(statedb.CostEntry{
+				Timestamp:      entry.Timestamp,
+				TaskID:         entry.TaskID,
+				TaskTitle:      entry.TaskTitle,
+				Provider:       entry.Provider,
+				Model:          entry.Model,
+				InputTokens:    entry.InputTokens,
+				OutputTokens:   entry.OutputTokens,
+				ThinkingTokens: entry.ThinkingTokens,
+				EstimatedUSD:   entry.EstimatedUSD,
+			})
+			db.Close()
+		}
+	}
+
+	// ── Legacy: also write to costs.jsonl for backward compatibility ───
 	path := filepath.Join(workDir, ledgerFile)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
@@ -49,7 +72,8 @@ func AppendLedger(workDir string, entry LedgerEntry) error {
 	if err := json.NewEncoder(f).Encode(entry); err != nil {
 		return err
 	}
-	// Mirror to global ledger (best-effort — errors are silently discarded).
+
+	// ── Mirror to global ledger (best-effort) ──────────────────────────
 	_ = globalbudget.AppendLedger(globalbudget.GlobalLedgerEntry{
 		Timestamp:      entry.Timestamp,
 		ProjectPath:    workDir,
@@ -65,16 +89,39 @@ func AppendLedger(workDir string, entry LedgerEntry) error {
 	return nil
 }
 
-// ReadLedger reads all entries from .cloop/costs.jsonl. Returns an empty slice
-// (not an error) when the file does not exist.
+// ReadLedger reads all cost entries. When a SQLite state.db exists it reads
+// from the costs table (primary). It then merges any JSONL-only entries that
+// are not yet in the database (legacy migration path). Returns an empty slice
+// (not an error) when neither source has data.
 func ReadLedger(workDir string) ([]LedgerEntry, error) {
+	dbPath := filepath.Join(workDir, stateDBFile)
+	if _, err := os.Stat(dbPath); err == nil {
+		db, err := statedb.Open(dbPath)
+		if err == nil {
+			defer db.Close()
+			rows, err := db.ReadCosts()
+			if err == nil {
+				// Also read the JSONL file and migrate any entries missing from DB.
+				jsonlEntries := readJSONLCosts(workDir)
+				migrated := migrateJSONLToDB(db, rows, jsonlEntries)
+				if migrated > 0 {
+					// Re-read after migration.
+					rows, _ = db.ReadCosts()
+				}
+				return dbRowsToEntries(rows), nil
+			}
+		}
+	}
+	// Fallback: read from JSONL only.
+	return readJSONLCosts(workDir), nil
+}
+
+// readJSONLCosts reads all entries from .cloop/costs.jsonl.
+func readJSONLCosts(workDir string) []LedgerEntry {
 	path := filepath.Join(workDir, ledgerFile)
 	f, err := os.Open(path)
-	if os.IsNotExist(err) {
-		return nil, nil
-	}
 	if err != nil {
-		return nil, err
+		return nil
 	}
 	defer f.Close()
 
@@ -88,21 +135,91 @@ func ReadLedger(workDir string) ([]LedgerEntry, error) {
 		}
 		var e LedgerEntry
 		if err := json.Unmarshal([]byte(line), &e); err != nil {
-			// Skip malformed lines
 			continue
 		}
 		entries = append(entries, e)
 	}
-	return entries, sc.Err()
+	return entries
+}
+
+// migrateJSONLToDB inserts JSONL entries that are not already in the DB
+// (matched by timestamp+task_id). Returns the number of entries inserted.
+func migrateJSONLToDB(db *statedb.DB, existing []statedb.CostEntry, jsonl []LedgerEntry) int {
+	if len(jsonl) == 0 {
+		return 0
+	}
+	// Build a set of existing (timestamp, task_id) pairs.
+	type key struct {
+		ts     string
+		taskID int
+	}
+	have := make(map[key]struct{}, len(existing))
+	for _, e := range existing {
+		have[key{e.Timestamp.UTC().Format(time.RFC3339), e.TaskID}] = struct{}{}
+	}
+	var inserted int
+	for _, e := range jsonl {
+		k := key{e.Timestamp.UTC().Format(time.RFC3339), e.TaskID}
+		if _, ok := have[k]; ok {
+			continue
+		}
+		_ = db.AppendCost(statedb.CostEntry{
+			Timestamp:      e.Timestamp,
+			TaskID:         e.TaskID,
+			TaskTitle:      e.TaskTitle,
+			Provider:       e.Provider,
+			Model:          e.Model,
+			InputTokens:    e.InputTokens,
+			OutputTokens:   e.OutputTokens,
+			ThinkingTokens: e.ThinkingTokens,
+			EstimatedUSD:   e.EstimatedUSD,
+		})
+		inserted++
+	}
+	return inserted
+}
+
+// dbRowsToEntries converts statedb.CostEntry slice to LedgerEntry slice.
+func dbRowsToEntries(rows []statedb.CostEntry) []LedgerEntry {
+	out := make([]LedgerEntry, len(rows))
+	for i, r := range rows {
+		out[i] = LedgerEntry{
+			Timestamp:      r.Timestamp,
+			TaskID:         r.TaskID,
+			TaskTitle:      r.TaskTitle,
+			Provider:       r.Provider,
+			Model:          r.Model,
+			InputTokens:    r.InputTokens,
+			OutputTokens:   r.OutputTokens,
+			ThinkingTokens: r.ThinkingTokens,
+			EstimatedUSD:   r.EstimatedUSD,
+		}
+	}
+	return out
 }
 
 // MonthlyTotal returns the total estimated USD spent in the current calendar month.
 func MonthlyTotal(workDir string) (float64, error) {
-	entries, err := ReadLedger(workDir)
-	if err != nil {
-		return 0, err
-	}
 	now := time.Now().UTC()
+
+	// Fast path: query SQLite directly for the current month.
+	dbPath := filepath.Join(workDir, stateDBFile)
+	if _, err := os.Stat(dbPath); err == nil {
+		if db, err := statedb.Open(dbPath); err == nil {
+			defer db.Close()
+			rows, err := db.MonthlyCosts(now.Year(), int(now.Month()))
+			if err == nil {
+				var total float64
+				for _, r := range rows {
+					total += r.EstimatedUSD
+				}
+				return total, nil
+			}
+		}
+	}
+
+	// Fallback: scan JSONL.
+	entries := readJSONLCosts(workDir)
 	var total float64
 	for _, e := range entries {
 		if e.Timestamp.Year() == now.Year() && e.Timestamp.Month() == now.Month() {
