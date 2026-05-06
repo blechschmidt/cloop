@@ -158,6 +158,7 @@ type ProjectStatus struct {
 	TotalSteps   int       `json:"total_steps"`
 	LastActivity time.Time `json:"last_activity"`
 	Provider     string    `json:"provider,omitempty"`
+	Model        string    `json:"model,omitempty"`
 	PMMode       bool      `json:"pm_mode"`
 	HasProject   bool      `json:"has_project"` // false if no state file found
 }
@@ -180,6 +181,7 @@ func GetStatus(entry ProjectEntry) ProjectStatus {
 	ps.Status = st.Status
 	ps.TotalSteps = len(st.Steps)
 	ps.Provider = st.Provider
+	ps.Model = st.Model
 	ps.PMMode = st.PMMode
 	ps.LastActivity = st.UpdatedAt
 

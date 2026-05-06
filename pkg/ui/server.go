@@ -6146,11 +6146,13 @@ function renderMultiProjectOverview() {
     const nameSafe = JSON.stringify(p.name).replace(/"/g, '&quot;');
     const valueStr = pct >= 0 ? pct + '% done' : (p.total_steps || 0) + ' steps';
     const subStr   = pct >= 0 ? done + '/' + total + ' tasks' : (p.status || '');
+    const modelStr = [p.provider, p.model].filter(Boolean).join(' / ');
     return '<div class="stat-card" style="cursor:pointer" onclick="openProject('+i+','+nameSafe+')" title="Open project">' +
       '<div class="stat-label" style="font-weight:600">' + esc(p.name) + '</div>' +
       '<div style="font-size:11px;margin:3px 0"><span style="color:' + hCol + '">&#9679;</span> ' + esc(health) + '</div>' +
       '<div class="stat-value" style="font-size:15px;margin-top:4px">' + esc(valueStr) + '</div>' +
       '<div class="stat-sub">' + esc(subStr) + '</div>' +
+      (modelStr ? '<div style="font-size:10px;color:var(--muted);margin-top:4px" title="Provider / Model">' + esc(modelStr) + '</div>' : '') +
     '</div>';
   }).join('');
 }
@@ -6978,7 +6980,7 @@ function renderProjects(projects, stats) {
           ${p.pm_mode ? ` + "`" + `<div class="proj-progress-wrap"><div class="proj-progress-bar"><div class="proj-progress-fill" style="width:${pct}%"></div></div><span>${pct}%</span></div>` + "`" + ` : ''}
           <span>${taskInfo}</span>
           <span title="last activity">${lastAct}</span>
-          ${p.provider ? ` + "`" + `<span>${esc(p.provider)}</span>` + "`" + ` : ''}
+          ${(p.provider || p.model) ? ` + "`" + `<span title="Provider / Model">${esc([p.provider, p.model].filter(Boolean).join(' / '))}</span>` + "`" + ` : ''}
         </div>
         <div class="proj-actions" onclick="event.stopPropagation()">
           <button class="btn success" onclick="projectRun(${idx},false)" title="Run">&#9654; Run</button>
