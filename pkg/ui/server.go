@@ -4923,14 +4923,14 @@ const dashboardHTML = `<!DOCTYPE html>
               <label class="adv-label"><input type="checkbox" id="optDryRun"> --dry-run</label>
             </div>
             <div class="adv-row">
-              <select class="form-select" id="optProvider" style="flex:1">
+              <select class="form-select" id="optProvider" style="flex:1" onchange="updateAdvModelDropdown()">
                 <option value="">Provider (from config)</option>
                 <option value="claudecode">claudecode</option>
                 <option value="anthropic">anthropic</option>
                 <option value="openai">openai</option>
                 <option value="ollama">ollama</option>
               </select>
-              <input class="form-input" id="optModel" placeholder="Model (optional)" style="flex:1">
+              <select class="form-select" id="optModel" style="flex:1"></select>
             </div>
             <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">
               <button id="ctrlRunAdv" class="btn success" onclick="apiRunAdv(false)">Run with options</button>
@@ -5943,6 +5943,39 @@ function updateModelDropdown() {
   sel.innerHTML = models.map(m => '<option value="'+m.value+'">'+m.label+'</option>').join('');
 }
 
+// Track current project's provider+model for pre-populating advanced run options
+let _currentProvider = '';
+let _currentModel = '';
+
+function updateAdvModelDropdown(preselect) {
+  const sel = document.getElementById('optModel');
+  if (!sel) return;
+  const provSel = document.getElementById('optProvider');
+  // Use selected provider, or fall back to current project's provider
+  const prov = (provSel && provSel.value) || _currentProvider || 'claudecode';
+  const models = providerModels[prov] || [{value:'', label:'(default)'}];
+  const target = preselect || '';
+  sel.innerHTML = models.map(m => 
+    '<option value="'+m.value+'"'+(m.value===target?' selected':'')+'>'+m.label+'</option>'
+  ).join('');
+}
+
+function prepopulateAdvancedRunOptions(s) {
+  _currentProvider = s.provider || '';
+  _currentModel = s.model || '';
+  const provSel = document.getElementById('optProvider');
+  if (provSel && _currentProvider) {
+    // Select matching provider option
+    for (let i = 0; i < provSel.options.length; i++) {
+      if (provSel.options[i].value === _currentProvider) {
+        provSel.selectedIndex = i;
+        break;
+      }
+    }
+  }
+  updateAdvModelDropdown(_currentModel);
+}
+
 function estimateCost(provider, model, inputTok, outputTok) {
   const p = (provider || '').toLowerCase();
   if (p === 'ollama') return 0;
@@ -6103,6 +6136,7 @@ function render(s) {
   document.getElementById('statStepsSub').textContent = s.max_steps > 0 ? 'of '+s.max_steps+' max' : 'unlimited';
   document.getElementById('statProvider').textContent = s.provider || 'claudecode';
   document.getElementById('statModel').textContent    = s.model || '';
+  prepopulateAdvancedRunOptions(s);
   document.getElementById('statMode').textContent     = s.pm_mode ? 'Product Manager' : 'Feedback Loop';
   document.getElementById('statCreated').textContent  = fmtDate(s.created_at);
   document.getElementById('statUpdated').textContent  = fmtDate(s.updated_at);
@@ -8081,7 +8115,7 @@ window.apiRunAdv = function(pm) {
     innovate:    document.getElementById('optInnovate').checked,
     dryRun:      document.getElementById('optDryRun').checked,
     provider:    document.getElementById('optProvider').value,
-    model:       document.getElementById('optModel').value.trim(),
+    model:       document.getElementById('optModel').value,
   };
   api(pUrl('/api/run'), opts).then(d => {
     if (d.ok) {
