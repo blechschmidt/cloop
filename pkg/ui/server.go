@@ -647,10 +647,29 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 
 // handleState returns the current project state as JSON.
 func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
-	ps, err := state.Load(s.resolveWorkDir(r))
+	workDir := s.resolveWorkDir(r)
+	ps, err := state.Load(workDir)
 	if err != nil {
 		jsonErr(w, "no cloop project found", http.StatusNotFound)
 		return
+	}
+	// Enrich model from config when state doesn't have one
+	if ps.Model == "" {
+		if cfg, cfgErr := config.Load(workDir); cfgErr == nil {
+			switch ps.Provider {
+			case "anthropic":
+				ps.Model = cfg.Anthropic.Model
+			case "openai":
+				ps.Model = cfg.OpenAI.Model
+			case "ollama":
+				ps.Model = cfg.Ollama.Model
+			case "claudecode":
+				ps.Model = cfg.ClaudeCode.Model
+				if ps.Model == "" {
+					ps.Model = "claude-sonnet-4-6"
+				}
+			}
+		}
 	}
 	jsonOK(w, ps)
 }
