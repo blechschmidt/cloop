@@ -4775,7 +4775,7 @@ const dashboardHTML = `<!DOCTYPE html>
           <div class="form-row">
             <div class="form-group">
               <label class="form-label">Provider</label>
-              <select class="form-select" id="initProvider">
+              <select class="form-select" id="initProvider" onchange="updateModelDropdown()">
                 <option value="claudecode">claudecode (default)</option>
                 <option value="anthropic">anthropic</option>
                 <option value="openai">openai</option>
@@ -4783,9 +4783,16 @@ const dashboardHTML = `<!DOCTYPE html>
               </select>
             </div>
             <div class="form-group">
+              <label class="form-label">Model</label>
+              <select class="form-select" id="initModel"></select>
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
               <label class="form-label">Max steps (0=unlimited)</label>
               <input class="form-input" id="initMaxSteps" type="number" min="0" value="0">
             </div>
+            <div class="form-group"></div>
           </div>
           <div class="form-group">
             <label class="form-label">Instructions / constraints (optional)</label>
@@ -5890,6 +5897,52 @@ window.switchTab = function(name) {
 
 // estimateCost returns estimated USD cost or null if the model is unknown.
 // Returns 0 for local (ollama) providers. Prices are per 1M tokens.
+// ── Provider → Model mapping for dropdowns ──
+const providerModels = {
+  claudecode: [
+    {value: '', label: '(default — claude-sonnet-4-6)'},
+    {value: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6'},
+    {value: 'claude-sonnet-4-5', label: 'Claude Sonnet 4.5'},
+    {value: 'claude-opus-4-6', label: 'Claude Opus 4.6'},
+    {value: 'claude-opus-4-5', label: 'Claude Opus 4.5'},
+    {value: 'claude-haiku-4-5', label: 'Claude Haiku 4.5'},
+  ],
+  anthropic: [
+    {value: '', label: '(default — claude-opus-4-6)'},
+    {value: 'claude-opus-4-6', label: 'Claude Opus 4.6'},
+    {value: 'claude-opus-4-5', label: 'Claude Opus 4.5'},
+    {value: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6'},
+    {value: 'claude-sonnet-4-5', label: 'Claude Sonnet 4.5'},
+    {value: 'claude-haiku-4-5', label: 'Claude Haiku 4.5'},
+  ],
+  openai: [
+    {value: '', label: '(default — gpt-4o)'},
+    {value: 'gpt-4o', label: 'GPT-4o'},
+    {value: 'gpt-4o-mini', label: 'GPT-4o Mini'},
+    {value: 'gpt-4-turbo', label: 'GPT-4 Turbo'},
+    {value: 'o1', label: 'o1'},
+    {value: 'o1-mini', label: 'o1-mini'},
+    {value: 'o3-mini', label: 'o3-mini'},
+  ],
+  ollama: [
+    {value: '', label: '(default — llama3.2)'},
+    {value: 'llama3.2', label: 'Llama 3.2'},
+    {value: 'llama3.1', label: 'Llama 3.1'},
+    {value: 'llama3', label: 'Llama 3'},
+    {value: 'mistral', label: 'Mistral'},
+    {value: 'mixtral', label: 'Mixtral'},
+    {value: 'phi3', label: 'Phi-3'},
+    {value: 'qwen', label: 'Qwen'},
+    {value: 'deepseek', label: 'DeepSeek'},
+  ],
+};
+function updateModelDropdown() {
+  const sel = document.getElementById('initModel');
+  const prov = document.getElementById('initProvider').value;
+  const models = providerModels[prov] || [{value:'', label:'(default)'}];
+  sel.innerHTML = models.map(m => '<option value="'+m.value+'">'+m.label+'</option>').join('');
+}
+
 function estimateCost(provider, model, inputTok, outputTok) {
   const p = (provider || '').toLowerCase();
   if (p === 'ollama') return 0;
@@ -6918,6 +6971,9 @@ function connectSSE() {
 
 // Track user scroll in live output to disable auto-scroll when they scroll up.
 document.addEventListener('DOMContentLoaded', () => {
+  // Initialize model dropdown based on default provider selection
+  if (document.getElementById('initProvider')) updateModelDropdown();
+
   const box = document.getElementById('liveOutputBox');
   if (box) {
     box.addEventListener('scroll', () => {
@@ -8056,6 +8112,7 @@ window.submitInit = function() {
   api(pUrl('/api/init'), {
     goal:         goal,
     provider:     document.getElementById('initProvider').value,
+    model:        document.getElementById('initModel').value,
     maxSteps:     parseInt(document.getElementById('initMaxSteps').value)||0,
     instructions: document.getElementById('initInstructions').value.trim(),
     pmMode:       document.getElementById('initPMMode').checked,

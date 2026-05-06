@@ -8,6 +8,7 @@ require (
 	github.com/fatih/color v1.18.0
 	github.com/spf13/cobra v1.9.1
 	gopkg.in/yaml.v3 v3.0.1
+	modernc.org/sqlite v1.50.0
 )
 
 require (
@@ -60,6 +61,5 @@ require (
 	modernc.org/libc v1.72.0 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
-	modernc.org/sqlite v1.50.0 // indirect
 	nhooyr.io/websocket v1.8.17 // indirect
 )
