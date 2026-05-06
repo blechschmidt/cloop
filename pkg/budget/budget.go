@@ -9,6 +9,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/cost"
+	"github.com/blechschmidt/cloop/pkg/globalbudget"
 	"github.com/blechschmidt/cloop/pkg/notify"
 )
 
@@ -123,31 +124,78 @@ func Check(workDir string, cfg config.BudgetConfig, notifyCfg config.NotifyConfi
 // Enforce checks the daily budget and returns a non-nil error if any limit is
 // exceeded, with a clear human-readable message. Use this before starting task
 // execution to abort early rather than spending tokens on a blocked run.
+//
+// Enforce also evaluates global (cross-project) budget limits and per-project
+// percentage caps derived from the global limits.
 func Enforce(workDir string, cfg config.BudgetConfig, notifyCfg config.NotifyConfig) error {
-	if cfg.DailyUSDLimit == 0 && cfg.DailyTokenLimit == 0 {
-		return nil // no limits configured
+	// Load global budget config (best-effort — errors mean no global limit).
+	globalCfg, _ := globalbudget.Load()
+
+	// Compute effective per-project limits from global percentages.
+	effectiveUSDLimit := cfg.DailyUSDLimit
+	effectiveTokenLimit := cfg.DailyTokenLimit
+
+	if pctLimit := globalbudget.EffectiveProjectUSDLimit(globalCfg, cfg.GlobalUSDPct); pctLimit > 0 {
+		if effectiveUSDLimit == 0 || pctLimit < effectiveUSDLimit {
+			effectiveUSDLimit = pctLimit
+		}
+	}
+	if pctLimit := globalbudget.EffectiveProjectTokenLimit(globalCfg, cfg.GlobalTokenPct); pctLimit > 0 {
+		if effectiveTokenLimit == 0 || pctLimit < effectiveTokenLimit {
+			effectiveTokenLimit = pctLimit
+		}
 	}
 
-	result, err := Check(workDir, cfg, notifyCfg)
-	if err != nil {
-		// Budget check errors are non-fatal: log them but don't block execution.
-		return nil
+	// Check per-project limits (with effective limits applied).
+	if effectiveUSDLimit > 0 || effectiveTokenLimit > 0 {
+		effectiveCfg := cfg
+		effectiveCfg.DailyUSDLimit = effectiveUSDLimit
+		effectiveCfg.DailyTokenLimit = effectiveTokenLimit
+
+		result, err := Check(workDir, effectiveCfg, notifyCfg)
+		if err == nil {
+			if result.USDExceeded {
+				suffix := ""
+				if cfg.GlobalUSDPct > 0 {
+					suffix = fmt.Sprintf(" (%.0f%% of global $%.4f limit)", cfg.GlobalUSDPct, globalCfg.DailyUSDLimit)
+				}
+				return fmt.Errorf(
+					"daily USD budget exceeded: spent $%.4f of $%.4f project limit%s — run 'cloop budget status' for details",
+					result.Stats.TotalUSD, effectiveUSDLimit, suffix,
+				)
+			}
+			if result.TokensExceeded {
+				suffix := ""
+				if cfg.GlobalTokenPct > 0 {
+					suffix = fmt.Sprintf(" (%.0f%% of global %d token limit)", cfg.GlobalTokenPct, globalCfg.DailyTokenLimit)
+				}
+				return fmt.Errorf(
+					"daily token budget exceeded: used %d of %d token project limit%s — run 'cloop budget status' for details",
+					result.Stats.TotalTokens, effectiveTokenLimit, suffix,
+				)
+			}
+		}
 	}
 
-	if result.USDExceeded {
-		return fmt.Errorf(
-			"daily USD budget exceeded: spent $%.4f of $%.4f limit — run 'cloop budget status' for details or increase the limit with 'cloop budget set --daily-usd <n>'",
-			result.Stats.TotalUSD,
-			cfg.DailyUSDLimit,
-		)
+	// Check global limits (total across all projects).
+	if globalCfg.DailyUSDLimit > 0 || globalCfg.DailyTokenLimit > 0 {
+		globalStats, err := globalbudget.DailyUsage()
+		if err == nil {
+			if globalCfg.DailyUSDLimit > 0 && globalStats.TotalUSD >= globalCfg.DailyUSDLimit {
+				return fmt.Errorf(
+					"global daily USD budget exceeded: $%.4f of $%.4f spent across all projects — run 'cloop budget status --global' for details",
+					globalStats.TotalUSD, globalCfg.DailyUSDLimit,
+				)
+			}
+			if globalCfg.DailyTokenLimit > 0 && globalStats.TotalTokens >= globalCfg.DailyTokenLimit {
+				return fmt.Errorf(
+					"global daily token budget exceeded: %d of %d tokens used across all projects — run 'cloop budget status --global' for details",
+					globalStats.TotalTokens, globalCfg.DailyTokenLimit,
+				)
+			}
+		}
 	}
-	if result.TokensExceeded {
-		return fmt.Errorf(
-			"daily token budget exceeded: used %d of %d token limit — run 'cloop budget status' for details or increase the limit with 'cloop budget set --daily-tokens <n>'",
-			result.Stats.TotalTokens,
-			cfg.DailyTokenLimit,
-		)
-	}
+
 	return nil
 }
 

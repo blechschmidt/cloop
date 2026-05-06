@@ -248,6 +248,17 @@ type BudgetConfig struct {
 	// AlertThresholdPct is the percentage of the daily budget at which cloop
 	// fires a desktop/webhook alert. Default 80 (80%).
 	AlertThresholdPct int `yaml:"alert_threshold_pct,omitempty"`
+
+	// GlobalUSDPct caps this project's daily USD spend to a percentage of the
+	// global daily USD limit defined in ~/.config/cloop/budget.yaml.
+	// E.g. 80 means this project may not exceed 80% of the global daily USD cap.
+	// 0 means no percentage cap.
+	GlobalUSDPct float64 `yaml:"global_usd_pct,omitempty"`
+
+	// GlobalTokenPct caps this project's daily token usage to a percentage of
+	// the global daily token limit defined in ~/.config/cloop/budget.yaml.
+	// 0 means no percentage cap.
+	GlobalTokenPct float64 `yaml:"global_token_pct,omitempty"`
 }
 
 // Default returns a Config with sensible defaults.

@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/blechschmidt/cloop/pkg/globalbudget"
 )
 
 const ledgerFile = ".cloop/costs.jsonl"
@@ -29,7 +31,8 @@ type LedgerEntry struct {
 }
 
 // AppendLedger appends a cost entry to .cloop/costs.jsonl, creating the file
-// if it does not exist.
+// if it does not exist. It also appends the entry to the global ledger at
+// ~/.config/cloop/costs.jsonl for cross-project budget tracking.
 func AppendLedger(workDir string, entry LedgerEntry) error {
 	if entry.Timestamp.IsZero() {
 		entry.Timestamp = time.Now().UTC()
@@ -43,8 +46,23 @@ func AppendLedger(workDir string, entry LedgerEntry) error {
 		return err
 	}
 	defer f.Close()
-	enc := json.NewEncoder(f)
-	return enc.Encode(entry)
+	if err := json.NewEncoder(f).Encode(entry); err != nil {
+		return err
+	}
+	// Mirror to global ledger (best-effort — errors are silently discarded).
+	_ = globalbudget.AppendLedger(globalbudget.GlobalLedgerEntry{
+		Timestamp:      entry.Timestamp,
+		ProjectPath:    workDir,
+		TaskID:         entry.TaskID,
+		TaskTitle:      entry.TaskTitle,
+		Provider:       entry.Provider,
+		Model:          entry.Model,
+		InputTokens:    entry.InputTokens,
+		OutputTokens:   entry.OutputTokens,
+		ThinkingTokens: entry.ThinkingTokens,
+		EstimatedUSD:   entry.EstimatedUSD,
+	})
+	return nil
 }
 
 // ReadLedger reads all entries from .cloop/costs.jsonl. Returns an empty slice
