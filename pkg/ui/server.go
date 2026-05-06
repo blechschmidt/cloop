@@ -1743,12 +1743,22 @@ func (s *Server) handleReorderTasks(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleLiveLog returns the current live log ring buffer and running status.
+// The running field reflects actual process state: it checks the in-memory
+// liveLogRunning flag (set when a run was started via this server) and also
+// probes /proc for any cloop process running in the project directory.
 func (s *Server) handleLiveLog(w http.ResponseWriter, r *http.Request) {
+	workDir := s.resolveWorkDir(r)
 	s.liveLogMu.Lock()
 	lines := make([]string, len(s.liveLogLines))
 	copy(lines, s.liveLogLines)
 	running := s.liveLogRunning
 	s.liveLogMu.Unlock()
+
+	// If not tracked in-memory, check whether a cloop process is actually
+	// running in the project directory (handles externally-started runs).
+	if !running {
+		running = multiui.IsCloopRunningInDir(workDir)
+	}
 
 	jsonOK(w, map[string]interface{}{
 		"running": running,
@@ -4836,15 +4846,15 @@ const dashboardHTML = `<!DOCTYPE html>
         <div class="section">
           <div class="section-title">Controls</div>
           <div class="controls">
-            <button class="btn success" onclick="apiRun({})">
+            <button id="ctrlRun" class="btn success" onclick="apiRun({})">
               <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 0a8 8 0 1 1 0 16A8 8 0 0 1 8 0zm3.5 7.5l-5-3a.5.5 0 0 0-.75.43v6a.5.5 0 0 0 .75.43l5-3a.5.5 0 0 0 0-.86z"/></svg>
               Run
             </button>
-            <button class="btn primary" onclick="apiRun({pm:true})">
+            <button id="ctrlRunPM" class="btn primary" onclick="apiRun({pm:true})">
               <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 0a8 8 0 1 1 0 16A8 8 0 0 1 8 0zm3.5 7.5l-5-3a.5.5 0 0 0-.75.43v6a.5.5 0 0 0 .75.43l5-3a.5.5 0 0 0 0-.86z"/></svg>
               Run PM
             </button>
-            <button class="btn danger" onclick="apiStop()">
+            <button id="ctrlStop" class="btn danger" onclick="apiStop()">
               <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 0a8 8 0 1 1 0 16A8 8 0 0 1 8 0zM5.5 5.5h5v5h-5z"/></svg>
               Pause / Stop
             </button>
@@ -4897,8 +4907,8 @@ const dashboardHTML = `<!DOCTYPE html>
               <input class="form-input" id="optModel" placeholder="Model (optional)" style="flex:1">
             </div>
             <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">
-              <button class="btn success" onclick="apiRunAdv(false)">Run with options</button>
-              <button class="btn primary" onclick="apiRunAdv(true)">Run PM with options</button>
+              <button id="ctrlRunAdv" class="btn success" onclick="apiRunAdv(false)">Run with options</button>
+              <button id="ctrlRunPMAdv" class="btn primary" onclick="apiRunAdv(true)">Run PM with options</button>
             </div>
           </details>
         </div>
@@ -6983,9 +6993,10 @@ function renderProjects(projects, stats) {
           ${(p.provider || p.model) ? ` + "`" + `<span title="Provider / Model">${esc([p.provider, p.model].filter(Boolean).join(' / '))}</span>` + "`" + ` : ''}
         </div>
         <div class="proj-actions" onclick="event.stopPropagation()">
-          <button class="btn success" onclick="projectRun(${idx},false)" title="Run">&#9654; Run</button>
-          <button class="btn primary"  onclick="projectRun(${idx},true)"  title="Run PM">&#9654; PM</button>
-          <button class="btn danger"   onclick="projectStop(${idx})"     title="Stop">&#9632; Stop</button>
+          ${p.running
+            ? '<button class="btn danger" onclick="projectStop('+idx+')" title="Stop">&#9632; Stop</button>'
+            : '<button class="btn success" onclick="projectRun('+idx+',false)" title="Run">&#9654; Run</button><button class="btn primary" onclick="projectRun('+idx+',true)" title="Run PM">&#9654; PM</button>'
+          }
         </div>
       </div>
     ` + "`" + `;
@@ -7958,10 +7969,31 @@ window.refreshState = function() {
   api(pUrl('/api/state')).then(s => { render(s); toast('Refreshed', 'ok'); }).catch(() => toast('Load failed', 'err'));
 };
 
+// updateRunButtonState shows Run buttons when not running, Stop when running.
+function updateRunButtonState(running) {
+  const showIds = running ? ['ctrlStop'] : ['ctrlRun', 'ctrlRunPM', 'ctrlRunAdv', 'ctrlRunPMAdv'];
+  const hideIds = running ? ['ctrlRun', 'ctrlRunPM', 'ctrlRunAdv', 'ctrlRunPMAdv'] : ['ctrlStop'];
+  showIds.forEach(id => { const el = document.getElementById(id); if (el) el.style.display = ''; });
+  hideIds.forEach(id => { const el = document.getElementById(id); if (el) el.style.display = 'none'; });
+}
+
+// Poll /api/livelog every 3 seconds to keep button state accurate.
+let _runStatePollTimer = null;
+function startRunStatePolling() {
+  if (_runStatePollTimer) return;
+  _runStatePollTimer = setInterval(() => {
+    api(pUrl('/api/livelog')).then(d => updateRunButtonState(!!d.running)).catch(() => {});
+  }, 3000);
+}
+
 window.apiRun = function(opts) {
   api(pUrl('/api/run'), opts).then(d => {
-    if (d.ok) toast('Started: '+d.command, 'ok');
-    else toast(d.error||'Failed to start', 'err');
+    if (d.ok) {
+      toast('Started: '+d.command, 'ok');
+      updateRunButtonState(true);
+    } else {
+      toast(d.error||'Failed to start', 'err');
+    }
   }).catch(() => toast('Request failed', 'err'));
 };
 
@@ -7977,14 +8009,23 @@ window.apiRunAdv = function(pm) {
     model:       document.getElementById('optModel').value.trim(),
   };
   api(pUrl('/api/run'), opts).then(d => {
-    if (d.ok) toast('Started: '+d.command, 'ok');
-    else toast(d.error||'Failed to start', 'err');
+    if (d.ok) {
+      toast('Started: '+d.command, 'ok');
+      updateRunButtonState(true);
+    } else {
+      toast(d.error||'Failed to start', 'err');
+    }
   }).catch(() => toast('Request failed', 'err'));
 };
 
 window.apiStop = function() {
   api('/api/stop', {}).then(d => {
     toast(d.message || (d.ok ? 'Pause signal sent' : 'Stop failed'), d.ok ? 'ok' : 'err');
+    if (d.ok) updateRunButtonState(false);
+    // Re-check actual state after a short delay since the process may take a moment to exit.
+    setTimeout(() => {
+      api(pUrl('/api/livelog')).then(dd => updateRunButtonState(!!dd.running)).catch(() => {});
+    }, 1500);
   }).catch(() => toast('Request failed', 'err'));
 };
 
@@ -9105,6 +9146,11 @@ function checkAuthAndInit() {
       connectWS();
       r.json().then(s => render(s)).catch(() => {});
     });
+    // Fetch initial run state and start polling to keep buttons accurate.
+    fetch(pUrl('/api/livelog'), {headers: authHeaders()}).then(lr => lr.json()).then(ld => {
+      updateRunButtonState(!!ld.running);
+    }).catch(() => {});
+    startRunStatePolling();
   }).catch(() => {
     connectWS();
   });

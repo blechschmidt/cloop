@@ -14,6 +14,49 @@ import (
 	"github.com/blechschmidt/cloop/pkg/state"
 )
 
+// IsCloopRunningInDir returns true if a "cloop run" process has its working
+// directory set to dir. It reads /proc/*/cwd symlinks (Linux only).
+func IsCloopRunningInDir(dir string) bool {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		pid := e.Name()
+		// Only numeric entries are PIDs.
+		allDigits := true
+		for _, c := range pid {
+			if c < '0' || c > '9' {
+				allDigits = false
+				break
+			}
+		}
+		if !allDigits {
+			continue
+		}
+		// Check executable name.
+		exePath, err := os.Readlink("/proc/" + pid + "/exe")
+		if err != nil {
+			continue
+		}
+		if !strings.HasSuffix(exePath, "/cloop") && !strings.HasSuffix(exePath, "cloop") {
+			continue
+		}
+		// Check working directory.
+		cwd, err := os.Readlink("/proc/" + pid + "/cwd")
+		if err != nil {
+			continue
+		}
+		if cwd == dir {
+			return true
+		}
+	}
+	return false
+}
+
 // ProjectEntry is a registered project in the multi-project registry.
 type ProjectEntry struct {
 	Name string `json:"name"`
@@ -161,6 +204,7 @@ type ProjectStatus struct {
 	Model        string    `json:"model,omitempty"`
 	PMMode       bool      `json:"pm_mode"`
 	HasProject   bool      `json:"has_project"` // false if no state file found
+	Running      bool      `json:"running"`     // true if cloop run is actually executing
 }
 
 // GetStatus loads the state for the project at path and returns a ProjectStatus.
@@ -200,6 +244,7 @@ func GetStatus(entry ProjectEntry) ProjectStatus {
 	}
 
 	ps.Health = computeHealth(st)
+	ps.Running = IsCloopRunningInDir(entry.Path)
 	return ps
 }
 
