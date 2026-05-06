@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/state"
 )
@@ -226,6 +227,24 @@ func GetStatus(entry ProjectEntry) ProjectStatus {
 	ps.TotalSteps = len(st.Steps)
 	ps.Provider = st.Provider
 	ps.Model = st.Model
+	// Fall back to config model when state doesn't have one
+	if ps.Model == "" {
+		if cfg, cfgErr := config.Load(entry.Path); cfgErr == nil {
+			switch ps.Provider {
+			case "anthropic":
+				ps.Model = cfg.Anthropic.Model
+			case "openai":
+				ps.Model = cfg.OpenAI.Model
+			case "ollama":
+				ps.Model = cfg.Ollama.Model
+			case "claudecode":
+				ps.Model = cfg.ClaudeCode.Model
+				if ps.Model == "" {
+					ps.Model = "claude-sonnet-4-6" // Claude Code default
+				}
+			}
+		}
+	}
 	ps.PMMode = st.PMMode
 	ps.LastActivity = st.UpdatedAt
 
