@@ -46,6 +46,22 @@ func IsCloopRunningInDir(dir string) bool {
 		if !strings.HasSuffix(exePath, "/cloop") && !strings.HasSuffix(exePath, "cloop") {
 			continue
 		}
+		// Check cmdline to ensure it's "cloop run", not "cloop ui" etc.
+		cmdline, err := os.ReadFile("/proc/" + pid + "/cmdline")
+		if err != nil {
+			continue
+		}
+		cmdParts := strings.Split(string(cmdline), "\x00")
+		isCloopRun := false
+		for _, part := range cmdParts {
+			if part == "run" {
+				isCloopRun = true
+				break
+			}
+		}
+		if !isCloopRun {
+			continue
+		}
 		// Check working directory.
 		cwd, err := os.Readlink("/proc/" + pid + "/cwd")
 		if err != nil {
