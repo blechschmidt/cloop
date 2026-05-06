@@ -50,13 +50,7 @@ func findClaude() string {
 func (p *Provider) Complete(ctx context.Context, prompt string, opts provider.Options) (*provider.Result, error) {
 	envOnce.Do(loadEnvFiles)
 
-	args := []string{"--print", "--output-format", "text"}
-	// Use --bare mode when authenticating via ANTHROPIC_AUTH_TOKEN (OAuth access token)
-	if os.Getenv("ANTHROPIC_AUTH_TOKEN") != "" {
-		args = append(args, "--bare")
-	} else {
-		args = append(args, "--permission-mode", "auto")
-	}
+	args := []string{"--print", "--output-format", "text", "--permission-mode", "auto"}
 	if opts.Model != "" {
 		args = append(args, "--model", opts.Model)
 	}
