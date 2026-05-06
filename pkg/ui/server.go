@@ -23,6 +23,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/cost"
 	"github.com/blechschmidt/cloop/pkg/epic"
+	"github.com/blechschmidt/cloop/pkg/globalbudget"
 	"github.com/blechschmidt/cloop/pkg/kb"
 	"github.com/blechschmidt/cloop/pkg/multiui"
 	"github.com/blechschmidt/cloop/pkg/pm"
@@ -316,6 +317,11 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	// Analytics dashboard
 	mux.HandleFunc("GET /api/analytics", s.handleAnalytics)
 	mux.HandleFunc("GET /api/epics", s.handleEpics)
+
+	// Budget management
+	mux.HandleFunc("GET /api/budget", s.handleBudgetGet)
+	mux.HandleFunc("PUT /api/budget/global", s.handleBudgetGlobalSave)
+	mux.HandleFunc("PUT /api/budget/project", s.handleBudgetProjectSave)
 
 	// Multi-project dashboard
 	mux.HandleFunc("/api/projects", s.handleProjects)
@@ -3121,6 +3127,115 @@ func (s *Server) handleEpics(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]interface{}{"epics": progress})
 }
 
+// ── budget handlers ───────────────────────────────────────────────────────────
+
+// handleBudgetGet returns the global budget config, today's usage, per-project
+// config, and effective resolved limits. GET /api/budget
+func (s *Server) handleBudgetGet(w http.ResponseWriter, r *http.Request) {
+	globalCfg, err := globalbudget.Load()
+	if err != nil {
+		jsonErr(w, "global budget load failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	usage, err := globalbudget.DailyUsage()
+	if err != nil {
+		usage = globalbudget.DailyStats{} // non-fatal — return zero values
+	}
+
+	// Per-project config.
+	workDir := s.resolveWorkDir(r)
+	projCfg, _ := config.Load(workDir)
+	var projBudget config.BudgetConfig
+	if projCfg != nil {
+		projBudget = projCfg.Budget
+	}
+
+	// Effective resolved limits.
+	effectiveUSD := globalbudget.EffectiveProjectUSDLimit(globalCfg, projBudget.GlobalUSDPct)
+	effectiveTokens := globalbudget.EffectiveProjectTokenLimit(globalCfg, projBudget.GlobalTokenPct)
+
+	jsonOK(w, map[string]interface{}{
+		"global": map[string]interface{}{
+			"daily_usd_limit":    globalCfg.DailyUSDLimit,
+			"daily_token_limit":  globalCfg.DailyTokenLimit,
+			"alert_threshold_pct": globalCfg.AlertThresholdPct,
+		},
+		"usage": map[string]interface{}{
+			"total_usd":    usage.TotalUSD,
+			"total_tokens": usage.TotalTokens,
+			"entry_count":  usage.EntryCount,
+		},
+		"project": map[string]interface{}{
+			"daily_usd_limit":   projBudget.DailyUSDLimit,
+			"daily_token_limit": projBudget.DailyTokenLimit,
+			"monthly_usd":       projBudget.MonthlyUSD,
+			"global_usd_pct":    projBudget.GlobalUSDPct,
+			"global_token_pct":  projBudget.GlobalTokenPct,
+			"alert_threshold_pct": projBudget.AlertThresholdPct,
+		},
+		"effective": map[string]interface{}{
+			"daily_usd_limit":   effectiveUSD,
+			"daily_token_limit": effectiveTokens,
+		},
+	})
+}
+
+// handleBudgetGlobalSave saves global budget limits. PUT /api/budget/global
+func (s *Server) handleBudgetGlobalSave(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		DailyUSDLimit    float64 `json:"daily_usd_limit"`
+		DailyTokenLimit  int     `json:"daily_token_limit"`
+		AlertThresholdPct int    `json:"alert_threshold_pct"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonErr(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	cfg := globalbudget.GlobalBudgetConfig{
+		DailyUSDLimit:    req.DailyUSDLimit,
+		DailyTokenLimit:  req.DailyTokenLimit,
+		AlertThresholdPct: req.AlertThresholdPct,
+	}
+	if err := globalbudget.Save(cfg); err != nil {
+		jsonErr(w, "save failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	jsonOK(w, map[string]bool{"ok": true})
+}
+
+// handleBudgetProjectSave saves per-project budget config. PUT /api/budget/project
+func (s *Server) handleBudgetProjectSave(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		DailyUSDLimit    float64 `json:"daily_usd_limit"`
+		DailyTokenLimit  int     `json:"daily_token_limit"`
+		MonthlyUSD       float64 `json:"monthly_usd"`
+		GlobalUSDPct     float64 `json:"global_usd_pct"`
+		GlobalTokenPct   float64 `json:"global_token_pct"`
+		AlertThresholdPct int    `json:"alert_threshold_pct"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonErr(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	workDir := s.resolveWorkDir(r)
+	cfg, err := config.Load(workDir)
+	if err != nil {
+		jsonErr(w, "config load failed", http.StatusInternalServerError)
+		return
+	}
+	cfg.Budget.DailyUSDLimit = req.DailyUSDLimit
+	cfg.Budget.DailyTokenLimit = req.DailyTokenLimit
+	cfg.Budget.MonthlyUSD = req.MonthlyUSD
+	cfg.Budget.GlobalUSDPct = req.GlobalUSDPct
+	cfg.Budget.GlobalTokenPct = req.GlobalTokenPct
+	cfg.Budget.AlertThresholdPct = req.AlertThresholdPct
+	if err := config.Save(workDir, cfg); err != nil {
+		jsonErr(w, "save failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	jsonOK(w, map[string]bool{"ok": true})
+}
+
 // ── dashboard HTML ────────────────────────────────────────────────────────────
 
 const dashboardHTML = `<!DOCTYPE html>
@@ -4519,6 +4634,7 @@ const dashboardHTML = `<!DOCTYPE html>
       <button class="tab-btn"        onclick="switchTab('assistant')" id="tbtn-assistant">Assistant</button>
       <button class="tab-btn"        onclick="switchTab('projects')"  id="tbtn-projects">Projects</button>
       <button class="tab-btn"        onclick="switchTab('suggest')"   id="tbtn-suggest">Suggest</button>
+      <button class="tab-btn"        onclick="switchTab('budget')"    id="tbtn-budget">Budget</button>
       <button class="tab-btn"        onclick="switchTab('settings')"  id="tbtn-settings">Settings</button>
     </div>
     <div class="spacer"></div>
@@ -4601,6 +4717,7 @@ const dashboardHTML = `<!DOCTYPE html>
       <button class="m-tab-btn" onclick="switchTab('assistant')" id="mtbtn-assistant"><span class="m-tab-icon">&#129302;</span>Assistant</button>
       <button class="m-tab-btn" onclick="switchTab('projects')"  id="mtbtn-projects"><span class="m-tab-icon">&#128193;</span>Projects</button>
       <button class="m-tab-btn" onclick="switchTab('suggest')"   id="mtbtn-suggest"><span class="m-tab-icon">&#128161;</span>Suggest</button>
+      <button class="m-tab-btn" onclick="switchTab('budget')"    id="mtbtn-budget"><span class="m-tab-icon">&#128178;</span>Budget</button>
       <button class="m-tab-btn" onclick="switchTab('settings')"  id="mtbtn-settings"><span class="m-tab-icon">&#9881;</span>Settings</button>
     </nav>
   </div>
@@ -5340,6 +5457,128 @@ const dashboardHTML = `<!DOCTYPE html>
       </div>
     </div>
 
+    <!-- ═══════════════════════════════════════════════════════════ BUDGET -->
+    <div id="tab-budget" class="tab-panel">
+
+      <!-- Global budget status -->
+      <div class="section">
+        <div class="section-title" style="display:flex;align-items:center;gap:12px">
+          Global Budget
+          <button class="btn" style="padding:4px 10px;font-size:12px;margin-left:auto" onclick="loadBudget()">&#8635; Refresh</button>
+        </div>
+
+        <!-- Usage bars -->
+        <div id="budgetUsageBars" style="margin-top:12px">
+          <div style="margin-bottom:14px">
+            <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px">
+              <span>Daily USD Spend</span>
+              <span id="budgetUSDLabel" style="color:var(--muted)">—</span>
+            </div>
+            <div style="height:10px;background:var(--border);border-radius:5px;overflow:hidden">
+              <div id="budgetUSDBar" style="height:100%;width:0%;background:var(--accent);border-radius:5px;transition:width .4s ease"></div>
+            </div>
+          </div>
+          <div>
+            <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px">
+              <span>Daily Token Usage</span>
+              <span id="budgetTokenLabel" style="color:var(--muted)">—</span>
+            </div>
+            <div style="height:10px;background:var(--border);border-radius:5px;overflow:hidden">
+              <div id="budgetTokenBar" style="height:100%;width:0%;background:var(--cyan);border-radius:5px;transition:width .4s ease"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Global limit config form -->
+        <div class="settings-section" style="margin-top:20px">
+          <h3>Global Limits (applied across all projects)</h3>
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label">Daily USD limit (0 = unlimited)</label>
+              <input class="form-input" id="bgDailyUSD" type="number" min="0" step="0.01" placeholder="e.g. 5.00">
+            </div>
+            <div class="form-group">
+              <label class="form-label">Daily token limit (0 = unlimited)</label>
+              <input class="form-input" id="bgDailyTokens" type="number" min="0" placeholder="e.g. 1000000">
+            </div>
+            <div class="form-group">
+              <label class="form-label">Alert threshold %</label>
+              <input class="form-input" id="bgAlertPct" type="number" min="1" max="100" placeholder="80">
+            </div>
+          </div>
+          <button class="btn primary" onclick="saveBudgetGlobal()">Save Global Limits</button>
+          <span id="budgetGlobalSaveMsg" style="font-size:12px;color:var(--green);margin-left:12px;display:none">Saved!</span>
+        </div>
+      </div>
+
+      <!-- Per-project caps -->
+      <div class="section">
+        <div class="section-title">Per-Project Caps</div>
+        <p style="font-size:12px;color:var(--muted);margin-bottom:12px">
+          Set percentage-based caps relative to the global limits, or absolute per-project limits.
+          Effective limits are resolved at runtime and shown below.
+        </p>
+
+        <div class="settings-section">
+          <h3>Percentage Caps (% of global limit)</h3>
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label">Global USD % (0 = no cap)</label>
+              <input class="form-input" id="bpGlobalUSDPct" type="number" min="0" max="100" step="0.1" placeholder="e.g. 50">
+            </div>
+            <div class="form-group">
+              <label class="form-label">Global Token % (0 = no cap)</label>
+              <input class="form-input" id="bpGlobalTokenPct" type="number" min="0" max="100" step="0.1" placeholder="e.g. 50">
+            </div>
+          </div>
+
+          <h3 style="margin-top:14px">Absolute Per-Project Limits</h3>
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label">Daily USD limit (0 = unlimited)</label>
+              <input class="form-input" id="bpDailyUSD" type="number" min="0" step="0.01" placeholder="e.g. 2.00">
+            </div>
+            <div class="form-group">
+              <label class="form-label">Daily token limit (0 = unlimited)</label>
+              <input class="form-input" id="bpDailyTokens" type="number" min="0" placeholder="e.g. 500000">
+            </div>
+            <div class="form-group">
+              <label class="form-label">Monthly USD limit (0 = unlimited)</label>
+              <input class="form-input" id="bpMonthlyUSD" type="number" min="0" step="0.01" placeholder="e.g. 50.00">
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label">Alert threshold % (0 = use global)</label>
+              <input class="form-input" id="bpAlertPct" type="number" min="0" max="100" placeholder="80">
+            </div>
+          </div>
+
+          <button class="btn primary" onclick="saveBudgetProject()">Save Project Limits</button>
+          <span id="budgetProjectSaveMsg" style="font-size:12px;color:var(--green);margin-left:12px;display:none">Saved!</span>
+        </div>
+
+        <!-- Effective limits display -->
+        <div class="settings-section" id="budgetEffectiveSection" style="display:none">
+          <h3>Effective Resolved Limits</h3>
+          <p style="font-size:12px;color:var(--muted);margin-bottom:8px">
+            These are the actual limits that will be enforced for this project today.
+          </p>
+          <table style="width:100%;font-size:13px;border-collapse:collapse">
+            <thead>
+              <tr style="border-bottom:1px solid var(--border)">
+                <th style="text-align:left;padding:6px 0;color:var(--muted);font-weight:500">Dimension</th>
+                <th style="text-align:right;padding:6px 0;color:var(--muted);font-weight:500">Effective Limit</th>
+                <th style="text-align:right;padding:6px 0;color:var(--muted);font-weight:500">Today's Usage</th>
+              </tr>
+            </thead>
+            <tbody id="budgetEffectiveBody"></tbody>
+          </table>
+        </div>
+      </div>
+
+    </div>
+
   </main>
 
   <!-- ── FAB: quick task add (mobile only) ── -->
@@ -5586,6 +5825,7 @@ window.switchTab = function(name) {
     if (name === 'deps') loadDeps();
     if (name === 'risk-matrix') loadRiskMatrix();
     if (name === 'analytics') loadAnalytics();
+    if (name === 'budget') loadBudget();
     if (name === 'chat') loadChatHistory();
     if (name === 'assistant') loadAssistantHistory();
   } else {
@@ -5600,6 +5840,7 @@ window.switchTab = function(name) {
     if (name === 'deps') loadDeps();
     if (name === 'risk-matrix') loadRiskMatrix();
     if (name === 'analytics') loadAnalytics();
+    if (name === 'budget') loadBudget();
   }
 
   // In multi-project mode, show/hide breadcrumb and project selector.
@@ -9204,6 +9445,166 @@ function _renderEpics(d) {
   list.innerHTML = html;
   card.style.display = '';
 }
+
+// ── Budget tab ─────────────────────────────────────────────────
+let _budgetData = null;
+
+window.loadBudget = function() {
+  api(pUrl('/api/budget')).then(d => {
+    _budgetData = d;
+    _renderBudget(d);
+  }).catch(err => {
+    console.warn('budget load error', err);
+  });
+};
+
+function _fmtUSD(v) {
+  if (!v && v !== 0) return '—';
+  return '$' + Number(v).toFixed(4);
+}
+function _fmtTokens(v) {
+  if (!v && v !== 0) return '—';
+  if (v >= 1e6) return (v / 1e6).toFixed(2) + 'M';
+  if (v >= 1e3) return (v / 1e3).toFixed(1) + 'K';
+  return String(v);
+}
+function _budgetBarPct(used, limit) {
+  if (!limit || limit <= 0) return 0;
+  return Math.min(100, Math.round(used * 100 / limit));
+}
+function _barColor(pct, alertPct) {
+  if (pct >= 100) return 'var(--red)';
+  if (pct >= (alertPct || 80)) return '#f0a500';
+  return null; // use default CSS var
+}
+
+function _renderBudget(d) {
+  if (!d) return;
+  const global  = d.global  || {};
+  const usage   = d.usage   || {};
+  const project = d.project || {};
+  const eff     = d.effective || {};
+
+  const alertPct = global.alert_threshold_pct || project.alert_threshold_pct || 80;
+
+  // ── USD bar ──
+  const usdLimit = global.daily_usd_limit || 0;
+  const usdUsed  = usage.total_usd || 0;
+  const usdPct   = _budgetBarPct(usdUsed, usdLimit);
+  const usdBar   = document.getElementById('budgetUSDBar');
+  const usdLabel = document.getElementById('budgetUSDLabel');
+  if (usdBar) {
+    usdBar.style.width = usdPct + '%';
+    const col = _barColor(usdPct, alertPct);
+    if (col) usdBar.style.background = col;
+  }
+  if (usdLabel) {
+    if (usdLimit > 0)
+      usdLabel.textContent = _fmtUSD(usdUsed) + ' / ' + _fmtUSD(usdLimit) + ' (' + usdPct + '%)';
+    else
+      usdLabel.textContent = _fmtUSD(usdUsed) + ' (no limit set)';
+  }
+
+  // ── Token bar ──
+  const tokLimit = global.daily_token_limit || 0;
+  const tokUsed  = usage.total_tokens || 0;
+  const tokPct   = _budgetBarPct(tokUsed, tokLimit);
+  const tokBar   = document.getElementById('budgetTokenBar');
+  const tokLabel = document.getElementById('budgetTokenLabel');
+  if (tokBar) {
+    tokBar.style.width = tokPct + '%';
+    const col = _barColor(tokPct, alertPct);
+    if (col) { tokBar.style.background = col; }
+  }
+  if (tokLabel) {
+    if (tokLimit > 0)
+      tokLabel.textContent = _fmtTokens(tokUsed) + ' / ' + _fmtTokens(tokLimit) + ' (' + tokPct + '%)';
+    else
+      tokLabel.textContent = _fmtTokens(tokUsed) + ' (no limit set)';
+  }
+
+  // ── Populate global config inputs ──
+  _setVal('bgDailyUSD',    global.daily_usd_limit   || '');
+  _setVal('bgDailyTokens', global.daily_token_limit || '');
+  _setVal('bgAlertPct',    global.alert_threshold_pct || '');
+
+  // ── Populate project config inputs ──
+  _setVal('bpGlobalUSDPct',   project.global_usd_pct    || '');
+  _setVal('bpGlobalTokenPct', project.global_token_pct  || '');
+  _setVal('bpDailyUSD',       project.daily_usd_limit   || '');
+  _setVal('bpDailyTokens',    project.daily_token_limit || '');
+  _setVal('bpMonthlyUSD',     project.monthly_usd       || '');
+  _setVal('bpAlertPct',       project.alert_threshold_pct || '');
+
+  // ── Effective limits table ──
+  const effSection = document.getElementById('budgetEffectiveSection');
+  const effBody    = document.getElementById('budgetEffectiveBody');
+  if (effBody) {
+    const rows = [
+      { label: 'Daily USD',    eff: eff.daily_usd_limit,   used: usdUsed },
+      { label: 'Daily Tokens', eff: eff.daily_token_limit, used: tokUsed },
+    ];
+    let html = '';
+    rows.forEach(row => {
+      const hasLimit = row.eff && row.eff > 0;
+      const effText  = hasLimit
+        ? (row.label.includes('USD') ? _fmtUSD(row.eff) : _fmtTokens(row.eff))
+        : '<span style="color:var(--muted)">no cap</span>';
+      const usedText = row.label.includes('USD') ? _fmtUSD(row.used) : _fmtTokens(row.used);
+      const pct2     = hasLimit ? _budgetBarPct(row.used, row.eff) : 0;
+      const pctText  = hasLimit ? ' (' + pct2 + '%)' : '';
+      html += '<tr style="border-bottom:1px solid var(--border)">';
+      html += '<td style="padding:6px 0;font-size:12px">' + row.label + '</td>';
+      html += '<td style="padding:6px 0;font-size:12px;text-align:right">' + effText + '</td>';
+      html += '<td style="padding:6px 0;font-size:12px;text-align:right">' + usedText + pctText + '</td>';
+      html += '</tr>';
+    });
+    effBody.innerHTML = html;
+    if (effSection) effSection.style.display = '';
+  }
+}
+
+function _setVal(id, v) {
+  const el = document.getElementById(id);
+  if (el) el.value = (v === null || v === undefined) ? '' : v;
+}
+
+window.saveBudgetGlobal = function() {
+  const payload = {
+    daily_usd_limit:    parseFloat(document.getElementById('bgDailyUSD').value)    || 0,
+    daily_token_limit:  parseInt(document.getElementById('bgDailyTokens').value)   || 0,
+    alert_threshold_pct: parseInt(document.getElementById('bgAlertPct').value)     || 0,
+  };
+  fetch(pUrl('/api/budget/global'), {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', ...(TOKEN ? { Authorization: 'Bearer ' + TOKEN } : {}) },
+    body: JSON.stringify(payload),
+  }).then(r => r.json()).then(() => {
+    const msg = document.getElementById('budgetGlobalSaveMsg');
+    if (msg) { msg.style.display = ''; setTimeout(() => msg.style.display = 'none', 2000); }
+    loadBudget();
+  }).catch(err => console.warn('budget global save error', err));
+};
+
+window.saveBudgetProject = function() {
+  const payload = {
+    global_usd_pct:    parseFloat(document.getElementById('bpGlobalUSDPct').value)   || 0,
+    global_token_pct:  parseFloat(document.getElementById('bpGlobalTokenPct').value) || 0,
+    daily_usd_limit:   parseFloat(document.getElementById('bpDailyUSD').value)       || 0,
+    daily_token_limit: parseInt(document.getElementById('bpDailyTokens').value)      || 0,
+    monthly_usd:       parseFloat(document.getElementById('bpMonthlyUSD').value)     || 0,
+    alert_threshold_pct: parseInt(document.getElementById('bpAlertPct').value)       || 0,
+  };
+  fetch(pUrl('/api/budget/project'), {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', ...(TOKEN ? { Authorization: 'Bearer ' + TOKEN } : {}) },
+    body: JSON.stringify(payload),
+  }).then(r => r.json()).then(() => {
+    const msg = document.getElementById('budgetProjectSaveMsg');
+    if (msg) { msg.style.display = ''; setTimeout(() => msg.style.display = 'none', 2000); }
+    loadBudget();
+  }).catch(err => console.warn('budget project save error', err));
+};
 
 // ── Mobile nav helpers ─────────────────────────────────────────
 window.openMobileNav = function() {
