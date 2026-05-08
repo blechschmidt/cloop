@@ -43,6 +43,9 @@ type State struct {
 	InnovateMode      bool
 	Parallel          bool
 	MaxParallel       int
+	PlanOnly          bool
+	RetryFailed       bool
+	DryRun            bool
 }
 
 // StepRow represents one recorded step result.
@@ -208,6 +211,9 @@ func (d *DB) SaveState(s *State) error {
 		"innovate_mode":       boolStr(s.InnovateMode),
 		"parallel":            boolStr(s.Parallel),
 		"max_parallel":        strconv.Itoa(s.MaxParallel),
+		"plan_only":           boolStr(s.PlanOnly),
+		"retry_failed":        boolStr(s.RetryFailed),
+		"dry_run":             boolStr(s.DryRun),
 		"created_at":          s.CreatedAt.Format(time.RFC3339Nano),
 		"updated_at":          s.UpdatedAt.Format(time.RFC3339Nano),
 	}
@@ -303,6 +309,9 @@ func (d *DB) LoadState() (*State, error) {
 	s.InnovateMode = metaMap["innovate_mode"] == "1"
 	s.Parallel = metaMap["parallel"] == "1"
 	s.MaxParallel = atoi(metaMap["max_parallel"])
+	s.PlanOnly = metaMap["plan_only"] == "1"
+	s.RetryFailed = metaMap["retry_failed"] == "1"
+	s.DryRun = metaMap["dry_run"] == "1"
 
 	if v := metaMap["created_at"]; v != "" {
 		s.CreatedAt, _ = time.Parse(time.RFC3339Nano, v)

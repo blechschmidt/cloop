@@ -1173,54 +1173,20 @@ func drainWS(ch chan wsMessage) {
 	}
 }
 
-// handleRun starts `cloop run` with optional flags from a JSON body.
+// handleRun starts `cloop run`. All run options (PM mode, auto-evolve, innovate,
+// plan-only, retry-failed, dry-run, parallel, etc.) are persisted in project
+// state and toggled via the Active Options badges in the UI; the request body
+// is intentionally empty. Provider/model also come from persisted state via
+// the Provider stat-card picker.
 func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 	if !requirePOST(w, r) {
 		return
 	}
-	var req struct {
-		PM          bool   `json:"pm"`
-		AutoEvolve  bool   `json:"autoEvolve"`
-		PlanOnly    bool   `json:"planOnly"`
-		RetryFailed bool   `json:"retryFailed"`
-		Innovate    bool   `json:"innovate"`
-		DryRun      bool   `json:"dryRun"`
-		Provider    string `json:"provider"`
-		Model       string `json:"model"`
-	}
-	ct := r.Header.Get("Content-Type")
-	if strings.Contains(ct, "application/json") {
-		_ = json.NewDecoder(r.Body).Decode(&req)
-	} else {
-		// Legacy query-param compat
-		req.PM = r.URL.Query().Get("pm") == "1"
-	}
+	// Body is ignored; all knobs come from persisted state. We still tolerate a
+	// JSON body so older clients don't error.
+	_, _ = io.Copy(io.Discard, r.Body)
 
 	args := []string{"run"}
-	if req.PM {
-		args = append(args, "--pm")
-	}
-	if req.AutoEvolve {
-		args = append(args, "--auto-evolve")
-	}
-	if req.PlanOnly {
-		args = append(args, "--plan-only")
-	}
-	if req.RetryFailed {
-		args = append(args, "--retry-failed")
-	}
-	if req.Innovate {
-		args = append(args, "--innovate")
-	}
-	if req.DryRun {
-		args = append(args, "--dry-run")
-	}
-	if req.Provider != "" {
-		args = append(args, "--provider", req.Provider)
-	}
-	if req.Model != "" {
-		args = append(args, "--model", req.Model)
-	}
 
 	exe, err := os.Executable()
 	if err != nil {
@@ -3903,7 +3869,7 @@ func (s *Server) handleClaudeCodeLimitsSave(w http.ResponseWriter, r *http.Reque
 // handleOptionsToggle flips a persistent CLI-mode flag in project state so that
 // the running orchestrator (which re-reads s.AutoEvolve / s.InnovateMode each
 // loop iteration) picks up the change, and so the next `cloop run` honors it.
-// POST /api/options/toggle  body: {"flag":"auto_evolve"|"innovate_mode"|"pm_mode"|"skip_clarify"|"parallel","value":bool}
+// POST /api/options/toggle  body: {"flag":"auto_evolve"|"innovate_mode"|"pm_mode"|"skip_clarify"|"parallel"|"plan_only"|"retry_failed"|"dry_run","value":bool}
 func (s *Server) handleOptionsToggle(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Flag  string `json:"flag"`
@@ -3934,6 +3900,16 @@ func (s *Server) handleOptionsToggle(w http.ResponseWriter, r *http.Request) {
 		if req.Value {
 			ps.PMMode = true
 		}
+	case "plan_only":
+		ps.PlanOnly = req.Value
+		// --plan-only implies PM mode.
+		if req.Value {
+			ps.PMMode = true
+		}
+	case "retry_failed":
+		ps.RetryFailed = req.Value
+	case "dry_run":
+		ps.DryRun = req.Value
 	default:
 		jsonErr(w, "unsupported flag: "+req.Flag, http.StatusBadRequest)
 		return
@@ -3953,6 +3929,9 @@ func (s *Server) handleOptionsToggle(w http.ResponseWriter, r *http.Request) {
 		"skip_clarify":  ps.SkipClarify,
 		"parallel":      ps.Parallel,
 		"max_parallel":  ps.MaxParallel,
+		"plan_only":     ps.PlanOnly,
+		"retry_failed":  ps.RetryFailed,
+		"dry_run":       ps.DryRun,
 	})
 }
 
@@ -5872,13 +5851,9 @@ const dashboardHTML = `<!DOCTYPE html>
         <div class="section">
           <div class="section-title">Controls</div>
           <div class="controls">
-            <button id="ctrlRun" class="btn success" onclick="apiRun({})">
+            <button id="ctrlRun" class="btn success" onclick="apiRun()" title="Start a run with the options enabled in Active Options above. Click any badge in Active Options to toggle the corresponding flag.">
               <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 0a8 8 0 1 1 0 16A8 8 0 0 1 8 0zm3.5 7.5l-5-3a.5.5 0 0 0-.75.43v6a.5.5 0 0 0 .75.43l5-3a.5.5 0 0 0 0-.86z"/></svg>
               Run
-            </button>
-            <button id="ctrlRunPM" class="btn primary" onclick="apiRun({pm:true})">
-              <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 0a8 8 0 1 1 0 16A8 8 0 0 1 8 0zm3.5 7.5l-5-3a.5.5 0 0 0-.75.43v6a.5.5 0 0 0 .75.43l5-3a.5.5 0 0 0 0-.86z"/></svg>
-              Run PM
             </button>
             <button id="ctrlStop" class="btn danger" onclick="apiStop()">
               <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 0a8 8 0 1 1 0 16A8 8 0 0 1 8 0zM5.5 5.5h5v5h-5z"/></svg>
@@ -5913,23 +5888,9 @@ const dashboardHTML = `<!DOCTYPE html>
               </div>
             </div>
           </div>
-          <details class="advanced">
-            <summary>Advanced run options</summary>
-            <p style="font-size:12px;color:var(--muted);margin:8px 0">
-              One-shot toggles for this run only. Persistent options (Evolve, Innovate, PM, Skip Clarify, Parallel) are controlled by clicking their badges in <strong>Active Options</strong> above. Provider and model are set by clicking the <strong>Provider</strong> card.
-            </p>
-            <div class="adv-grid">
-              <label class="adv-label"><input type="checkbox" id="optAutoEvolve"> --auto-evolve</label>
-              <label class="adv-label"><input type="checkbox" id="optPlanOnly"> --plan-only</label>
-              <label class="adv-label"><input type="checkbox" id="optRetryFailed"> --retry-failed</label>
-              <label class="adv-label"><input type="checkbox" id="optInnovate"> --innovate</label>
-              <label class="adv-label"><input type="checkbox" id="optDryRun"> --dry-run</label>
-            </div>
-            <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">
-              <button id="ctrlRunAdv" class="btn success" onclick="apiRunAdv(false)">Run with options</button>
-              <button id="ctrlRunPMAdv" class="btn primary" onclick="apiRunAdv(true)">Run PM with options</button>
-            </div>
-          </details>
+          <p style="font-size:12px;color:var(--muted);margin:10px 2px 0">
+            All run options (PM, Evolve, Innovate, Skip Clarify, Parallel, Plan Only, Retry Failed, Dry Run) are toggled by clicking their badges in <strong>Active Options</strong> above. Provider and model are set by clicking the <strong>Provider</strong> stat card.
+          </p>
         </div>
 
         <!-- Live Output panel -->
@@ -7089,6 +7050,9 @@ function renderActiveOptions(s) {
     [!!s.innovate_mode, '✨', 'Innovate Mode', '--innovate',     'Click to toggle. Creative/experimental feature exploration in evolve prompts', 'innovate_mode'],
     [!!s.skip_clarify,  '⏭️', 'Skip Clarify',  '--skip-clarify', 'Click to toggle. Bypass the interactive goal-clarification Q&A before plan decomposition (applies on next run)', 'skip_clarify'],
     [!!s.parallel,      '⚡', 'Parallel',      '--parallel',     'Click to toggle. Run dependency-ready tasks concurrently in PM mode (applies on next run; enabling auto-enables PM mode)', 'parallel'],
+    [!!s.plan_only,     '📝', 'Plan Only',     '--plan-only',    'Click to toggle. PM mode: decompose goal into tasks but do not execute (enabling auto-enables PM mode)', 'plan_only'],
+    [!!s.retry_failed,  '🔁', 'Retry Failed',  '--retry-failed', 'Click to toggle. Reset previously-failed tasks to pending before the next run', 'retry_failed'],
+    [!!s.dry_run,       '🧪', 'Dry Run',       '--dry-run',      'Click to toggle. Show prompts without invoking the provider (no API calls, no side effects)', 'dry_run'],
   ];
   const mp = parseInt(s.max_parallel, 10);
   const mpVal = (Number.isFinite(mp) && mp > 0) ? mp : 0;
@@ -7157,7 +7121,7 @@ function buildOptionBadges(opts) {
 function toggleOption(flag, value) {
   apiMethod('POST', pUrl('/api/options/toggle'), {flag: flag, value: value}).then(d => {
     if (d && d.ok) {
-      const labels = {auto_evolve: 'Evolve Mode', innovate_mode: 'Innovate Mode', pm_mode: 'PM Mode', skip_clarify: 'Skip Clarify', parallel: 'Parallel Mode'};
+      const labels = {auto_evolve: 'Evolve Mode', innovate_mode: 'Innovate Mode', pm_mode: 'PM Mode', skip_clarify: 'Skip Clarify', parallel: 'Parallel Mode', plan_only: 'Plan Only', retry_failed: 'Retry Failed', dry_run: 'Dry Run'};
       toast((labels[flag] || flag) + (value ? ' enabled' : ' disabled'), 'success');
       // Re-fetch state so badges (and any cached flags) reflect the new value.
       api(pUrl('/api/state')).then(s => render(s)).catch(() => {});
@@ -9432,10 +9396,10 @@ window.refreshState = function() {
   api(pUrl('/api/state')).then(s => { render(s); toast('Refreshed', 'ok'); }).catch(() => toast('Load failed', 'err'));
 };
 
-// updateRunButtonState shows Run buttons when not running, Stop when running.
+// updateRunButtonState shows the Run button when not running, Stop when running.
 function updateRunButtonState(running) {
-  const showIds = running ? ['ctrlStop'] : ['ctrlRun', 'ctrlRunPM', 'ctrlRunAdv', 'ctrlRunPMAdv'];
-  const hideIds = running ? ['ctrlRun', 'ctrlRunPM', 'ctrlRunAdv', 'ctrlRunPMAdv'] : ['ctrlStop'];
+  const showIds = running ? ['ctrlStop'] : ['ctrlRun'];
+  const hideIds = running ? ['ctrlRun'] : ['ctrlStop'];
   showIds.forEach(id => { const el = document.getElementById(id); if (el) el.style.display = ''; });
   hideIds.forEach(id => { const el = document.getElementById(id); if (el) el.style.display = 'none'; });
 }
@@ -9443,29 +9407,10 @@ function updateRunButtonState(running) {
 // Run-state changes are pushed by the server as 'run_state' WebSocket events
 // (see handleRealtimeMsg). No polling required.
 
-window.apiRun = function(opts) {
-  api(pUrl('/api/run'), opts).then(d => {
-    if (d.ok) {
-      toast('Started: '+d.command, 'ok');
-      updateRunButtonState(true);
-    } else {
-      toast(d.error||'Failed to start', 'err');
-    }
-  }).catch(() => toast('Request failed', 'err'));
-};
-
-window.apiRunAdv = function(pm) {
-  // Provider and model are persisted on the project via the Provider stat
-  // card; no per-run override here. Keeps the panel focused on one-shot flags.
-  const opts = {
-    pm:          pm,
-    autoEvolve:  document.getElementById('optAutoEvolve').checked,
-    planOnly:    document.getElementById('optPlanOnly').checked,
-    retryFailed: document.getElementById('optRetryFailed').checked,
-    innovate:    document.getElementById('optInnovate').checked,
-    dryRun:      document.getElementById('optDryRun').checked,
-  };
-  api(pUrl('/api/run'), opts).then(d => {
+// apiRun starts a run. All run options are read by the server from persisted
+// project state — toggle them via the Active Options badges or Provider card.
+window.apiRun = function() {
+  api(pUrl('/api/run'), {}).then(d => {
     if (d.ok) {
       toast('Started: '+d.command, 'ok');
       updateRunButtonState(true);

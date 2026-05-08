@@ -268,6 +268,34 @@ Press Ctrl+C to pause gracefully.`,
 			effectiveSkipClarify = true
 		}
 
+		// Merge persisted advanced run flags (set via the Web UI Active Options
+		// badges) so that a `cloop run` invocation honors them without needing
+		// the corresponding CLI flag.
+		effectiveAutoEvolve := autoEvolve
+		if !effectiveAutoEvolve && projectState != nil && projectState.AutoEvolve {
+			effectiveAutoEvolve = true
+		}
+		effectiveInnovate := innovateMode
+		if !effectiveInnovate && projectState != nil && projectState.InnovateMode {
+			effectiveInnovate = true
+		}
+		effectivePlanOnly := planOnly
+		if !effectivePlanOnly && projectState != nil && projectState.PlanOnly {
+			effectivePlanOnly = true
+		}
+		effectiveRetryFailed := retryFailed
+		if !effectiveRetryFailed && projectState != nil && projectState.RetryFailed {
+			effectiveRetryFailed = true
+		}
+		effectiveDryRun := dryRun
+		if !effectiveDryRun && projectState != nil && projectState.DryRun {
+			effectiveDryRun = true
+		}
+		// --plan-only implies PM mode.
+		if effectivePlanOnly {
+			effectivePMMode = true
+		}
+
 		// Webhook: flag overrides config file
 		effectiveWebhookURL := webhookURL
 		if effectiveWebhookURL == "" {
@@ -342,10 +370,10 @@ Press Ctrl+C to pause gracefully.`,
 			FrequencyPenalty: effectiveFreqPenalty,
 			StepTimeout:      timeout,
 			Verbose:          verbose,
-			DryRun:           dryRun,
+			DryRun:           effectiveDryRun,
 			PMMode:           effectivePMMode,
-			PlanOnly:         planOnly,
-			RetryFailed:      retryFailed,
+			PlanOnly:         effectivePlanOnly,
+			RetryFailed:      effectiveRetryFailed,
 			Replan:           replan,
 			MaxFailures:      maxFailures,
 			ContextSteps:     contextSteps,
@@ -355,7 +383,7 @@ Press Ctrl+C to pause gracefully.`,
 			ProviderCfg:      provCfg,
 			TokenBudget:      tokenBudget,
 			CostLimit:        costLimit,
-			InnovateMode:     innovateMode,
+			InnovateMode:     effectiveInnovate,
 			Parallel:         parallelMode,
 			MaxParallel:      effectiveMaxParallel,
 			InjectContext:    injectContext,
@@ -429,7 +457,7 @@ Press Ctrl+C to pause gracefully.`,
 		if continueSteps > 0 {
 			orc.AddSteps(continueSteps)
 		}
-		if autoEvolve {
+		if effectiveAutoEvolve {
 			orc.SetAutoEvolve(true)
 		}
 

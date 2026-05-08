@@ -105,6 +105,18 @@ type ProjectState struct {
 
 	// MaxParallel caps the worker pool when Parallel is true. 0 = unlimited.
 	MaxParallel int `json:"max_parallel,omitempty"`
+
+	// PlanOnly persists the --plan-only flag (PM mode: decompose goal into
+	// tasks but do not execute them).
+	PlanOnly bool `json:"plan_only,omitempty"`
+
+	// RetryFailed persists the --retry-failed flag (reset failed tasks to
+	// pending before running).
+	RetryFailed bool `json:"retry_failed,omitempty"`
+
+	// DryRun persists the --dry-run flag (show prompts without invoking the
+	// provider).
+	DryRun bool `json:"dry_run,omitempty"`
 }
 
 // StatePath returns the legacy JSON state file path (used for migration detection).
@@ -299,6 +311,9 @@ func (s *ProjectState) mergeExternalTasks() {
 	s.SkipClarify = disk.SkipClarify
 	s.Parallel = disk.Parallel
 	s.MaxParallel = disk.MaxParallel
+	s.PlanOnly = disk.PlanOnly
+	s.RetryFailed = disk.RetryFailed
+	s.DryRun = disk.DryRun
 }
 
 // Init creates a new project state and persists it.
@@ -358,6 +373,9 @@ func toRaw(s *ProjectState) *statedb.State {
 		InnovateMode:      s.InnovateMode,
 		Parallel:          s.Parallel,
 		MaxParallel:       s.MaxParallel,
+		PlanOnly:          s.PlanOnly,
+		RetryFailed:       s.RetryFailed,
+		DryRun:            s.DryRun,
 	}
 	r.Steps = make([]statedb.StepRow, len(s.Steps))
 	for i, sr := range s.Steps {
@@ -399,6 +417,9 @@ func fromRaw(r *statedb.State) *ProjectState {
 		InnovateMode:      r.InnovateMode,
 		Parallel:          r.Parallel,
 		MaxParallel:       r.MaxParallel,
+		PlanOnly:          r.PlanOnly,
+		RetryFailed:       r.RetryFailed,
+		DryRun:            r.DryRun,
 	}
 	s.Steps = make([]StepResult, len(r.Steps))
 	for i, row := range r.Steps {
@@ -446,6 +467,9 @@ type legacyState struct {
 	InnovateMode      bool                 `json:"innovate_mode,omitempty"`
 	Parallel          bool                 `json:"parallel,omitempty"`
 	MaxParallel       int                  `json:"max_parallel,omitempty"`
+	PlanOnly          bool                 `json:"plan_only,omitempty"`
+	RetryFailed       bool                 `json:"retry_failed,omitempty"`
+	DryRun            bool                 `json:"dry_run,omitempty"`
 }
 
 func migrateFromJSON(dir, jsonPath, dbPath string) error {
@@ -488,6 +512,9 @@ func migrateFromJSON(dir, jsonPath, dbPath string) error {
 		InnovateMode:      legacy.InnovateMode,
 		Parallel:          legacy.Parallel,
 		MaxParallel:       legacy.MaxParallel,
+		PlanOnly:          legacy.PlanOnly,
+		RetryFailed:       legacy.RetryFailed,
+		DryRun:            legacy.DryRun,
 	}
 
 	db, err := statedb.Open(dbPath)
