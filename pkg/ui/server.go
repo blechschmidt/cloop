@@ -4414,15 +4414,7 @@ const dashboardHTML = `<!DOCTYPE html>
   .voice-modal .voice-output { background:var(--bg); border:1px solid var(--border); border-radius:var(--radius); padding:10px; font-size:12px; font-family:monospace; min-height:60px; max-height:200px; overflow-y:auto; margin-bottom:12px; white-space:pre-wrap; }
   .voice-modal-btns { display:flex; gap:8px; justify-content:flex-end; }
 
-  /* ── Advanced options (details) ── */
-  details.advanced { margin-top:8px; }
-  details.advanced summary {
-    cursor:pointer; font-size:12px; color:var(--muted);
-    user-select:none; list-style:none; display:flex; align-items:center; gap:5px;
-  }
-  details.advanced summary::-webkit-details-marker { display:none; }
-  details.advanced summary::before { content:'▶'; font-size:9px; transition:transform .15s; }
-  details.advanced[open] summary::before { transform:rotate(90deg); }
+  /* ── Advanced grid (still used by the new-project modal) ── */
   .adv-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(180px,1fr)); gap:8px; margin-top:10px; }
   .adv-label { font-size:12px; color:var(--muted); display:flex; align-items:center; gap:6px; cursor:pointer; }
   .adv-label input[type=checkbox] { accent-color:var(--accent); }
