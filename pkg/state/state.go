@@ -287,6 +287,10 @@ func (s *ProjectState) mergeExternalTasks() {
 	if len(disk.Instructions) > len(s.Instructions) {
 		s.Instructions = disk.Instructions
 	}
+	// Pick up CLI-mode toggles (--auto-evolve, --innovate) so the running
+	// orchestrator honors UI-driven toggles without a restart.
+	s.AutoEvolve = disk.AutoEvolve
+	s.InnovateMode = disk.InnovateMode
 }
 
 // Init creates a new project state and persists it.

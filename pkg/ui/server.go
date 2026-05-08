@@ -328,6 +328,9 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/claudecode-limits", s.handleClaudeCodeLimitsGet)
 	mux.HandleFunc("PUT /api/claudecode-limits", s.handleClaudeCodeLimitsSave)
 
+	// Toggle persistent CLI options (--auto-evolve, --innovate, etc.)
+	mux.HandleFunc("POST /api/options/toggle", s.handleOptionsToggle)
+
 	// Multi-project dashboard
 	mux.HandleFunc("/api/projects", s.handleProjects)
 	mux.HandleFunc("/api/projects/events", s.handleProjectsEvents)
@@ -3429,6 +3432,48 @@ func (s *Server) handleClaudeCodeLimitsSave(w http.ResponseWriter, r *http.Reque
 	jsonOK(w, map[string]bool{"ok": true})
 }
 
+// handleOptionsToggle flips a persistent CLI-mode flag in project state so that
+// the running orchestrator (which re-reads s.AutoEvolve / s.InnovateMode each
+// loop iteration) picks up the change, and so the next `cloop run` honors it.
+// POST /api/options/toggle  body: {"flag":"auto_evolve"|"innovate_mode","value":bool}
+func (s *Server) handleOptionsToggle(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Flag  string `json:"flag"`
+		Value bool   `json:"value"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonErr(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	workDir := s.resolveWorkDir(r)
+	ps, err := state.Load(workDir)
+	if err != nil {
+		jsonErr(w, "no project found", http.StatusNotFound)
+		return
+	}
+	switch req.Flag {
+	case "auto_evolve":
+		ps.AutoEvolve = req.Value
+	case "innovate_mode":
+		ps.InnovateMode = req.Value
+	default:
+		jsonErr(w, "unsupported flag: "+req.Flag, http.StatusBadRequest)
+		return
+	}
+	if err := ps.SaveDirect(); err != nil {
+		jsonErr(w, "save failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if raw, err := json.Marshal(ps); err == nil {
+		s.broadcastToProject(workDir, wsMessage{Type: "task_update", Data: json.RawMessage(raw)})
+	}
+	jsonOK(w, map[string]interface{}{
+		"ok":            true,
+		"auto_evolve":   ps.AutoEvolve,
+		"innovate_mode": ps.InnovateMode,
+	})
+}
+
 // ── dashboard HTML ────────────────────────────────────────────────────────────
 
 const dashboardHTML = `<!DOCTYPE html>
@@ -3724,6 +3769,9 @@ const dashboardHTML = `<!DOCTYPE html>
   .option-badge.on .opt-flag { color:var(--accent); opacity:.85; }
   .option-badge.off { opacity:.55; }
   .option-badge.off .opt-icon { filter:grayscale(1); }
+  .option-badge.togglable { cursor:pointer; font-family:inherit; }
+  .option-badge.togglable:hover { opacity:1; transform:translateY(-1px); box-shadow:0 2px 6px rgba(0,0,0,.18); }
+  .option-badge.togglable:active { transform:translateY(0); }
   .options-empty { color:var(--muted); font-size:12px; font-style:italic; padding:8px 0; }
 
   /* ── Controls ── */
@@ -6230,11 +6278,12 @@ function prepopulateAdvancedRunOptions(s) {
 function renderActiveOptions(s) {
   const grid = document.getElementById('activeOptionsGrid');
   if (!grid) return;
-  // Each entry: [enabled, icon, label, flag, tooltip]
+  // Each entry: [enabled, icon, label, flag, tooltip, toggleKey]
+  // toggleKey (optional) makes the badge clickable and POSTs to /api/options/toggle.
   const opts = [
     [!!s.pm_mode,       '📋', 'PM Mode',       '--pm',           'Product Manager mode: AI decomposes goal into a task plan'],
-    [!!s.auto_evolve,   '🧬', 'Evolve Mode',   '--auto-evolve',  'Automatically discovers and adds new tasks after the plan completes'],
-    [!!s.innovate_mode, '✨', 'Innovate Mode', '--innovate',     'Creative/experimental feature exploration in evolve prompts'],
+    [!!s.auto_evolve,   '🧬', 'Evolve Mode',   '--auto-evolve',  'Click to toggle. Automatically discovers and adds new tasks after the plan completes', 'auto_evolve'],
+    [!!s.innovate_mode, '✨', 'Innovate Mode', '--innovate',     'Click to toggle. Creative/experimental feature exploration in evolve prompts', 'innovate_mode'],
     [!!s.skip_clarify,  '⏭️', 'Skip Clarify',  '--skip-clarify', 'Bypass the interactive goal-clarification Q&A before plan decomposition'],
   ];
   const enabledCount = opts.filter(o => o[0]).length;
@@ -6251,12 +6300,37 @@ function renderActiveOptions(s) {
 function buildOptionBadges(opts) {
   return opts.map(o => {
     const cls = o[0] ? 'on' : 'off';
+    const toggleKey = o[5];
+    if (toggleKey) {
+      return '<button class="option-badge ' + cls + ' togglable" type="button" ' +
+        'title="' + esc(o[4]) + '" ' +
+        'onclick="toggleOption(\'' + toggleKey + '\', ' + (o[0] ? 'false' : 'true') + ')">' +
+        '<span class="opt-icon">' + o[1] + '</span>' +
+        '<span>' + esc(o[2]) + '</span>' +
+        '<span class="opt-flag">' + esc(o[3]) + '</span>' +
+      '</button>';
+    }
     return '<span class="option-badge ' + cls + '" title="' + esc(o[4]) + '">' +
       '<span class="opt-icon">' + o[1] + '</span>' +
       '<span>' + esc(o[2]) + '</span>' +
       '<span class="opt-flag">' + esc(o[3]) + '</span>' +
     '</span>';
   }).join('');
+}
+
+function toggleOption(flag, value) {
+  apiMethod('POST', pUrl('/api/options/toggle'), {flag: flag, value: value}).then(d => {
+    if (d && d.ok) {
+      const labels = {auto_evolve: 'Evolve Mode', innovate_mode: 'Innovate Mode'};
+      toast((labels[flag] || flag) + (value ? ' enabled' : ' disabled'), 'success');
+      // Re-fetch state so badges (and any cached flags) reflect the new value.
+      api(pUrl('/api/state')).then(s => render(s)).catch(() => {});
+    } else {
+      toast('Toggle failed: ' + (d && d.error ? d.error : 'unknown error'), 'error');
+    }
+  }).catch(err => {
+    toast('Toggle failed: ' + err.message, 'error');
+  });
 }
 
 function estimateCost(provider, model, inputTok, outputTok) {

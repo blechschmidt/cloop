@@ -3293,7 +3293,7 @@ func (o *Orchestrator) evolvePM(ctx context.Context) (int, error) {
 	evolveColor.Printf("━━━ Evolve #%d — Discovering new tasks ━━━\n", s.EvolveStep)
 	dimColor.Printf("→ Asking AI for improvement ideas...\n")
 
-	prompt := pm.EvolveDiscoverPrompt(s.Goal, s.Instructions, s.Plan, s.EvolveStep, o.config.InnovateMode)
+	prompt := pm.EvolveDiscoverPrompt(s.Goal, s.Instructions, s.Plan, s.EvolveStep, s.InnovateMode)
 	opts, _ := o.makeOpts(s.Model, true)
 	result, err := o.provider.Complete(ctx, prompt, opts)
 	if err != nil {
@@ -3571,7 +3571,7 @@ func (o *Orchestrator) buildEvolvePrompt() string {
 	b.WriteString("5. Summarize what you added and why\n\n")
 	b.WriteString("Pick ONE focused improvement per iteration. Make it count.\n")
 
-	if o.config.InnovateMode {
+	if s.InnovateMode {
 		b.WriteString("\n## 🚀 INNOVATION MODE ACTIVE\n")
 		b.WriteString("Go beyond obvious improvements. Think creatively and unconventionally.\n")
 		b.WriteString("Explore ideas that could be genuinely novel or surprising:\n")
