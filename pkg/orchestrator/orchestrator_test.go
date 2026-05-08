@@ -2183,3 +2183,163 @@ func TestMockProvider_FullPMFlowWithDecompose(t *testing.T) {
 		}
 	}
 }
+
+// ────────────────────────────────────────────────────────────
+// Regression tests for Tasks 151, 197, 5000
+//
+// These integration tests exercise the orchestrator end-to-end with real
+// SQLite state files in t.TempDir() (per project convention). Each test
+// explicitly cites the bug it guards against.
+// ────────────────────────────────────────────────────────────
+
+// TestRegression_Task197_ExternalTaskAddedDuringRunSurvivesEvolve simulates
+// the reported scenario: while the orchestrator is mid-run, `cloop task add`
+// writes a new task to disk with an ID HIGHER than anything the orchestrator
+// has seen. A subsequent evolve cycle that returns conflicting IDs must
+// re-assign past the external task — not overwrite or drop it.
+func TestRegression_Task197_ExternalTaskAddedDuringRunSurvivesEvolve(t *testing.T) {
+	dir := t.TempDir()
+	s := initState(t, dir, "goal", 0)
+	s.PMMode = true
+	s.AutoEvolve = true
+	s.Plan = &pm.Plan{
+		Goal:  "goal",
+		Tasks: []*pm.Task{{ID: 1, Title: "first", Priority: 1, Status: pm.TaskPending}},
+	}
+	if err := s.Save(); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	// After task 1 finishes the orchestrator's after-callback writes an
+	// external task with ID=42 directly to disk (simulates `cloop task add`).
+	// Then evolve runs and returns a JSON with a colliding ID=1; the
+	// orchestrator's ParseEvolveTasks must bump it past 42.
+	evolvedJSON := `{"tasks":[{"id":1,"title":"Evolve","description":"new improvement","priority":1}]}`
+	dedupAllNovel := `{"novel":[0],"reason":"all novel"}`
+	prov := &sideEffectProvider{
+		name: "mock",
+		responses: []sideEffectResponse{
+			{
+				result: &provider.Result{Output: "done first\nTASK_DONE", Provider: "mock"},
+				after: func() {
+					disk, err := state.Load(dir)
+					if err != nil {
+						return
+					}
+					disk.Plan.Tasks = append(disk.Plan.Tasks, &pm.Task{
+						ID:       42,
+						Title:    "external high-id task",
+						Priority: 1,
+						Status:   pm.TaskPending,
+					})
+					_ = disk.SaveDirect()
+				},
+			},
+			{result: &provider.Result{Output: "done external\nTASK_DONE", Provider: "mock"}}, // execute external
+			{result: &provider.Result{Output: evolvedJSON, Provider: "mock"}},                // evolvePM
+			{result: &provider.Result{Output: dedupAllNovel, Provider: "mock"}},              // dedup
+			{result: &provider.Result{Output: "done evolve\nTASK_DONE", Provider: "mock"}},   // execute evolve task
+			{result: &provider.Result{Output: `{"tasks":[]}`, Provider: "mock"}},             // evolvePM empty
+		},
+	}
+
+	o := newOrchestrator(t, dir, Config{WorkDir: dir, PMMode: true, SkipHealthCheck: true}, prov)
+	if err := o.runPM(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Verify final plan: original (1), external (42), evolve (must be > 42).
+	final, err := state.Load(dir)
+	if err != nil {
+		t.Fatalf("final load: %v", err)
+	}
+
+	var external, evolved *pm.Task
+	for _, tt := range final.Plan.Tasks {
+		switch {
+		case tt.ID == 42:
+			external = tt
+		case tt.Title == "Evolve":
+			evolved = tt
+		}
+	}
+
+	if external == nil {
+		t.Fatal("Task 197 regression: external task (ID=42) was overwritten or lost")
+	}
+	if external.Title != "external high-id task" {
+		t.Errorf("external task corrupted: %q", external.Title)
+	}
+	if evolved == nil {
+		t.Fatal("Task 197 regression: evolve task missing from final plan")
+	}
+	if evolved.ID <= 42 {
+		t.Errorf("Task 151 regression: evolve task ID=%d collides with external task ID=42 — IDs reused", evolved.ID)
+	}
+}
+
+// TestRegression_Task5000_OrchestratorPicksUpExternalTaskAfterDiskWrite
+// is an integration-level guard: an external task written to the SQLite
+// state file mid-run is correctly observed by the orchestrator after its
+// next `state.SyncFromDisk()` call (which happens before each
+// IsComplete check in runPM*).
+func TestRegression_Task5000_OrchestratorPicksUpExternalTaskAfterDiskWrite(t *testing.T) {
+	dir := t.TempDir()
+	s := initState(t, dir, "goal", 0)
+	s.PMMode = true
+	s.Plan = &pm.Plan{
+		Goal:  "goal",
+		Tasks: []*pm.Task{{ID: 1, Title: "task one", Priority: 1, Status: pm.TaskPending}},
+	}
+	if err := s.Save(); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	prov := &sideEffectProvider{
+		name: "mock",
+		responses: []sideEffectResponse{
+			{
+				result: &provider.Result{Output: "done one\nTASK_DONE", Provider: "mock"},
+				after: func() {
+					disk, err := state.Load(dir)
+					if err != nil {
+						return
+					}
+					disk.Plan.Tasks = append(disk.Plan.Tasks, &pm.Task{
+						ID:       7,
+						Title:    "added by another process",
+						Priority: 1,
+						Status:   pm.TaskPending,
+					})
+					_ = disk.SaveDirect()
+				},
+			},
+			{result: &provider.Result{Output: "done external\nTASK_DONE", Provider: "mock"}},
+		},
+	}
+
+	o := newOrchestrator(t, dir, Config{WorkDir: dir, PMMode: true, SkipHealthCheck: true}, prov)
+	if err := o.runPM(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if prov.calls != 2 {
+		t.Errorf("expected 2 provider calls (orig + external), got %d", prov.calls)
+	}
+	final, err := state.Load(dir)
+	if err != nil {
+		t.Fatalf("final load: %v", err)
+	}
+	var ext *pm.Task
+	for _, tt := range final.Plan.Tasks {
+		if tt.ID == 7 {
+			ext = tt
+		}
+	}
+	if ext == nil {
+		t.Fatal("Task 5000 regression: external task (ID=7) not picked up by SyncFromDisk")
+	}
+	if ext.Status != pm.TaskDone {
+		t.Errorf("external task status: expected done, got %q", ext.Status)
+	}
+}

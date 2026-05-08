@@ -1781,6 +1781,43 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		}
 
 		taskDur := time.Since(*task.StartedAt).Round(time.Second).String()
+
+		// Auto-resolve clarification questions: when the LLM asked questions
+		// instead of completing the task, re-prompt it to use its best judgment.
+		if signal != pm.TaskDone && signal != pm.TaskSkipped && signal != pm.TaskFailed {
+			if looksLikeClarificationQuestion(taskOutput) {
+				const maxClarifyRetries = 2
+				for clarifyAttempt := 1; clarifyAttempt <= maxClarifyRetries; clarifyAttempt++ {
+					if !o.log.IsJSON() {
+						color.New(color.FgCyan).Printf("[AUTO-RESOLVE %d/%d] LLM asked questions instead of completing task %d — re-prompting to proceed autonomously\n", clarifyAttempt, maxClarifyRetries, task.ID)
+					}
+					clarifyPrompt := prompt + "\n\n" +
+						"--- PREVIOUS RESPONSE ---\n" + taskOutput + "\n--- END PREVIOUS RESPONSE ---\n\n" +
+						"You asked clarification questions instead of completing the task. " +
+						"Make your best judgment for ALL decisions and proceed to full completion. " +
+						"Do NOT ask for clarification or confirmation. Just do the work and finish with TASK_DONE."
+					clarifyOpts, clarifyWasStreamed := o.makeOpts(s.Model, true)
+					clarifyResult, clarifyErr := taskProvider.Complete(ctx, clarifyPrompt, clarifyOpts)
+					if clarifyErr != nil {
+						break
+					}
+					if clarifyWasStreamed() {
+						fmt.Println()
+					} else {
+						printOutput(clarifyResult.Output, dimColor, o.config.Verbose)
+					}
+					taskOutput = clarifyResult.Output
+					s.TotalInputTokens += clarifyResult.InputTokens
+					s.TotalOutputTokens += clarifyResult.OutputTokens
+					signal = pm.CheckTaskSignal(taskOutput)
+					if signal == pm.TaskDone || signal == pm.TaskFailed || signal == pm.TaskSkipped || !looksLikeClarificationQuestion(taskOutput) {
+						break
+					}
+				}
+				pm.AddAnnotation(task, "ai", "Auto-resolved clarification questions — LLM re-prompted to proceed autonomously.")
+			}
+		}
+
 		switch signal {
 		case pm.TaskDone:
 			// Optionally verify the task was genuinely completed before accepting it.
@@ -3551,6 +3588,40 @@ func printOutputTo(w io.Writer, output string, dimColor *color.Color, verbose bo
 			fmt.Fprintf(w, "  %s\n", line)
 		}
 	}
+}
+
+// looksLikeClarificationQuestion returns true if the output appears to contain
+// clarification questions rather than actual task completion work.
+func looksLikeClarificationQuestion(output string) bool {
+	lower := strings.ToLower(output)
+	patterns := []string{
+		"before i proceed",
+		"would you like me to",
+		"how would you like",
+		"should i ",
+		"could you clarify",
+		"do you want me to",
+		"which approach",
+		"please confirm",
+		"let me know if",
+		"would you prefer",
+		"i have a few questions",
+		"couple of questions",
+		"how should i",
+		"what would you",
+		"awaiting your",
+		"need your input",
+		"how do you want",
+	}
+	matches := 0
+	for _, p := range patterns {
+		if strings.Contains(lower, p) {
+			matches++
+		}
+	}
+	// Need at least one pattern match, and the output should have question marks
+	hasQuestions := strings.Count(output, "?") >= 1
+	return matches >= 1 && hasQuestions
 }
 
 func truncate(s string, n int) string {
