@@ -42,6 +42,32 @@ type sseEvent struct {
 	Data  string
 }
 
+// sseClient is a single SSE consumer with the same backpressure model as
+// hubClient: ch is a bounded outgoing buffer, and resync is a one-shot signal
+// that the writer should drain stale events and emit a single "resync" SSE
+// directive instead of silently dropping events under load.
+type sseClient struct {
+	ch     chan sseEvent
+	resync chan struct{}
+}
+
+// sseClientBufferSize mirrors hubClientBufferSize for SSE consumers.
+const sseClientBufferSize = 64
+
+// sendSSEOrLag is the SSE analogue of sendOrLag: non-blocking send, queue a
+// resync signal if the buffer is full.
+func (s *Server) sendSSEOrLag(c *sseClient, ev sseEvent) {
+	select {
+	case c.ch <- ev:
+		return
+	default:
+	}
+	select {
+	case c.resync <- struct{}{}:
+	default:
+	}
+}
+
 // wsMessage is a typed WebSocket message envelope.
 // Type values: "task_update", "step_output", "plan_complete", "projects", "error".
 type wsMessage struct {
@@ -50,11 +76,44 @@ type wsMessage struct {
 }
 
 // hubClient represents a single WebSocket connection with presence metadata.
+//
+// Backpressure model: ch is a bounded outgoing buffer. When a broadcaster
+// would block because the client is too slow to drain its messages, the
+// event is dropped and a single resync directive is queued on resync. The
+// writer goroutine (handleWS) drains any stale events still in ch, then
+// emits one wsMessage{Type:"resync"} so the client can re-fetch full state
+// via /api/state — guaranteeing the client never silently misses updates.
 type hubClient struct {
-	ch    chan wsMessage
-	id    string // unique per-connection identifier
-	name  string // display name (e.g. "Swift Panda")
-	color string // hex color code (e.g. "#58a6ff")
+	ch     chan wsMessage
+	resync chan struct{} // buffered (cap 1); signals the client must resync
+	id     string        // unique per-connection identifier
+	name   string        // display name (e.g. "Swift Panda")
+	color  string        // hex color code (e.g. "#58a6ff")
+}
+
+// hubClientBufferSize is the per-client outgoing buffer for WebSocket clients.
+// 64 is large enough to absorb routine bursts (e.g., parallel orchestrator
+// task updates) but small enough to surface real lag quickly so the resync
+// directive fires before the client is hopelessly behind.
+const hubClientBufferSize = 64
+
+// sendOrLag attempts a non-blocking send of msg to hc.ch. If the buffer is
+// full, the message is dropped and a resync directive is queued (idempotent
+// — at most one resync pending at a time). The writer goroutine in handleWS
+// will drain the channel and emit a single wsMessage{Type:"resync"} so the
+// client knows to re-fetch state. This replaces the prior pattern of silent
+// drops under load (Task 20040).
+func (s *Server) sendOrLag(hc *hubClient, msg wsMessage) {
+	select {
+	case hc.ch <- msg:
+		return
+	default:
+	}
+	// Buffer is full — signal resync (chan cap 1, so duplicates collapse).
+	select {
+	case hc.resync <- struct{}{}:
+	default:
+	}
 }
 
 // conflictEntry records the last editor of a specific task field.
@@ -110,7 +169,7 @@ type Server struct {
 	Burst int
 
 	mu      sync.Mutex
-	clients map[chan sseEvent]struct{}
+	clients map[*sseClient]struct{}
 	lastMod time.Time
 
 	// Hub registry: per-project WebSocket client presence tracking.
@@ -163,7 +222,7 @@ func New(workdir string, port int, token string) *Server {
 		WorkDir:         workdir,
 		Port:            port,
 		Token:           token,
-		clients:         make(map[chan sseEvent]struct{}),
+		clients:         make(map[*sseClient]struct{}),
 		hubClients:      make(map[string]map[*hubClient]struct{}),
 		conflictTracker: make(map[string]map[string]*conflictEntry),
 		authFails:       make(map[string]*authFailEntry),
@@ -491,13 +550,14 @@ func (s *Server) watchState() {
 // broadcast sends a state JSON payload to all connected SSE and WebSocket
 // clients across all projects. SSE clients receive a default "message" event;
 // WebSocket clients receive a "task_update" typed envelope.
+//
+// Slow consumers do NOT silently drop events: the WebSocket path uses
+// sendOrLag, which queues a resync directive when the per-client buffer is
+// full. SSE clients use the same model via the resync chan in sseClient.
 func (s *Server) broadcast(data string) {
 	s.mu.Lock()
-	for ch := range s.clients {
-		select {
-		case ch <- sseEvent{Data: data}:
-		default:
-		}
+	for c := range s.clients {
+		s.sendSSEOrLag(c, sseEvent{Data: data})
 	}
 	s.mu.Unlock()
 
@@ -506,26 +566,21 @@ func (s *Server) broadcast(data string) {
 	s.hubMu.Lock()
 	for _, clients := range s.hubClients {
 		for hc := range clients {
-			select {
-			case hc.ch <- msg:
-			default:
-			}
+			s.sendOrLag(hc, msg)
 		}
 	}
 	s.hubMu.Unlock()
 }
 
 // broadcastToProject sends a WebSocket message only to clients connected to
-// the given project (identified by its resolved workDir path).
+// the given project (identified by its resolved workDir path). Slow clients
+// receive a resync directive instead of silent event loss (see sendOrLag).
 func (s *Server) broadcastToProject(workDir string, msg wsMessage) {
 	s.hubMu.Lock()
 	clients := s.hubClients[workDir]
 	s.hubMu.Unlock()
 	for hc := range clients {
-		select {
-		case hc.ch <- msg:
-		default:
-		}
+		s.sendOrLag(hc, msg)
 	}
 }
 
@@ -604,21 +659,15 @@ func (s *Server) broadcastLog(chunk string) {
 	data, _ := json.Marshal(map[string]string{"chunk": chunk})
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for ch := range s.clients {
-		select {
-		case ch <- sseEvent{Event: "log", Data: string(data)}:
-		default:
-		}
+	for c := range s.clients {
+		s.sendSSEOrLag(c, sseEvent{Event: "log", Data: string(data)})
 	}
 	wsData := json.RawMessage(data)
 	logMsg := wsMessage{Type: "step_output", Data: wsData}
 	s.hubMu.Lock()
 	for _, clients := range s.hubClients {
 		for hc := range clients {
-			select {
-			case hc.ch <- logMsg:
-			default:
-			}
+			s.sendOrLag(hc, logMsg)
 		}
 	}
 	s.hubMu.Unlock()
@@ -774,13 +823,16 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 
-	ch := make(chan sseEvent, 8)
+	c := &sseClient{
+		ch:     make(chan sseEvent, sseClientBufferSize),
+		resync: make(chan struct{}, 1),
+	}
 	s.mu.Lock()
-	s.clients[ch] = struct{}{}
+	s.clients[c] = struct{}{}
 	s.mu.Unlock()
 	defer func() {
 		s.mu.Lock()
-		delete(s.clients, ch)
+		delete(s.clients, c)
 		s.mu.Unlock()
 	}()
 
@@ -807,16 +859,42 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 	for {
+		// Resync takes priority — drain stale events and emit a single
+		// "resync" SSE directive so the client knows to refetch /api/state.
+		select {
+		case <-c.resync:
+			drainSSE(c.ch)
+			fmt.Fprintf(w, "event: resync\ndata: {\"reason\":\"lagged\"}\n\n")
+			flusher.Flush()
+			continue
+		default:
+		}
 		select {
 		case <-ctx.Done():
 			return
-		case ev := <-ch:
+		case <-c.resync:
+			drainSSE(c.ch)
+			fmt.Fprintf(w, "event: resync\ndata: {\"reason\":\"lagged\"}\n\n")
+			flusher.Flush()
+		case ev := <-c.ch:
 			if ev.Event != "" {
 				fmt.Fprintf(w, "event: %s\ndata: %s\n\n", ev.Event, ev.Data)
 			} else {
 				fmt.Fprintf(w, "data: %s\n\n", ev.Data)
 			}
 			flusher.Flush()
+		}
+	}
+}
+
+// drainSSE empties any buffered sseEvents from ch without blocking. Used
+// when emitting a resync directive: stale events are superseded.
+func drainSSE(ch chan sseEvent) {
+	for {
+		select {
+		case <-ch:
+		default:
+			return
 		}
 	}
 }
@@ -854,10 +932,11 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		color = qc
 	}
 	hc := &hubClient{
-		ch:    make(chan wsMessage, 32),
-		id:    connID,
-		name:  name,
-		color: color,
+		ch:     make(chan wsMessage, hubClientBufferSize),
+		resync: make(chan struct{}, 1),
+		id:     connID,
+		name:   name,
+		color:  color,
 	}
 	if s.hubClients[workDir] == nil {
 		s.hubClients[workDir] = make(map[*hubClient]struct{})
@@ -920,11 +999,34 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
+	// Pre-marshal the resync directive once.
+	resyncBytes, _ := json.Marshal(wsMessage{
+		Type: "resync",
+		Data: json.RawMessage(`{"reason":"lagged"}`),
+	})
+
 	for {
+		// Resync takes priority: if the broadcaster signaled lag, drain any
+		// stale events and emit a single resync directive. The client will
+		// re-fetch /api/state to recover; subsequent events flow normally.
+		select {
+		case <-hc.resync:
+			drainWS(hc.ch)
+			if err := conn.Write(ctx, websocket.MessageText, resyncBytes); err != nil {
+				return
+			}
+			continue
+		default:
+		}
 		select {
 		case <-ctx.Done():
 			conn.Close(websocket.StatusNormalClosure, "") //nolint:errcheck
 			return
+		case <-hc.resync:
+			drainWS(hc.ch)
+			if err := conn.Write(ctx, websocket.MessageText, resyncBytes); err != nil {
+				return
+			}
 		case msg := <-hc.ch:
 			data, err := json.Marshal(msg)
 			if err != nil {
@@ -933,6 +1035,18 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 			if err := conn.Write(ctx, websocket.MessageText, data); err != nil {
 				return
 			}
+		}
+	}
+}
+
+// drainWS empties any buffered wsMessages from ch without blocking. Used
+// when emitting a resync directive: stale events are superseded.
+func drainWS(ch chan wsMessage) {
+	for {
+		select {
+		case <-ch:
+		default:
+			return
 		}
 	}
 }
@@ -2528,11 +2642,8 @@ func (s *Server) broadcastProjectsUpdate() {
 		return
 	}
 	s.mu.Lock()
-	for ch := range s.clients {
-		select {
-		case ch <- sseEvent{Event: "projects", Data: string(payload)}:
-		default:
-		}
+	for c := range s.clients {
+		s.sendSSEOrLag(c, sseEvent{Event: "projects", Data: string(payload)})
 	}
 	s.mu.Unlock()
 
@@ -2541,10 +2652,7 @@ func (s *Server) broadcastProjectsUpdate() {
 	s.hubMu.Lock()
 	for _, clients := range s.hubClients {
 		for hc := range clients {
-			select {
-			case hc.ch <- projMsg:
-			default:
-			}
+			s.sendOrLag(hc, projMsg)
 		}
 	}
 	s.hubMu.Unlock()
@@ -2578,13 +2686,16 @@ func (s *Server) handleProjectsEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 
-	ch := make(chan sseEvent, 8)
+	c := &sseClient{
+		ch:     make(chan sseEvent, sseClientBufferSize),
+		resync: make(chan struct{}, 1),
+	}
 	s.mu.Lock()
-	s.clients[ch] = struct{}{}
+	s.clients[c] = struct{}{}
 	s.mu.Unlock()
 	defer func() {
 		s.mu.Lock()
-		delete(s.clients, ch)
+		delete(s.clients, c)
 		s.mu.Unlock()
 	}()
 
@@ -2601,9 +2712,21 @@ func (s *Server) handleProjectsEvents(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	for {
 		select {
+		case <-c.resync:
+			drainSSE(c.ch)
+			fmt.Fprintf(w, "event: resync\ndata: {\"reason\":\"lagged\"}\n\n")
+			flusher.Flush()
+			continue
+		default:
+		}
+		select {
 		case <-ctx.Done():
 			return
-		case ev := <-ch:
+		case <-c.resync:
+			drainSSE(c.ch)
+			fmt.Fprintf(w, "event: resync\ndata: {\"reason\":\"lagged\"}\n\n")
+			flusher.Flush()
+		case ev := <-c.ch:
 			if ev.Event == "projects" {
 				fmt.Fprintf(w, "event: projects\ndata: %s\n\n", ev.Data)
 				flusher.Flush()
@@ -7144,21 +7267,34 @@ function renderTasks(s) {
   }
   const byId = [...s.plan.tasks].sort((a,b) => a.id - b.id);
   const hidden  = ['done', 'skipped', 'failed', 'timed_out'];
-  // When showing completed tasks, place the latest completed/in-progress tasks
-  // at the top (most recent first by completed_at or started_at), followed by
-  // pending tasks in id order. Pinned tasks always float to the very top.
+  // Non-completed tasks (pending + in_progress) are ordered: running first,
+  // highest priority first (lower priority value = higher priority), then
+  // add time ascending (id ascending). Pinned tasks always float above all.
+  const sortNonCompleted = (a, b) => {
+    const ar = a.status === 'in_progress' ? 0 : 1;
+    const br = b.status === 'in_progress' ? 0 : 1;
+    if (ar !== br) return ar - br;
+    const ap = (a.priority ?? 99);
+    const bp = (b.priority ?? 99);
+    if (ap !== bp) return ap - bp;
+    return a.id - b.id;
+  };
   let sorted;
   if (showCompletedTasks) {
+    // Show completed: latest completed/in-progress tasks at the top by
+    // completed_at/started_at, then truly pending tasks below sorted by the
+    // non-completed rule (running first — none here — then priority, add time).
     const ts = t => {
       const v = t.completed_at || t.started_at;
       return v ? new Date(v).getTime() : 0;
     };
     const isRecent = t => hidden.includes(t.status) || t.status === 'in_progress';
     const recent  = byId.filter(t => !t.pinned && isRecent(t)).sort((a,b) => ts(b) - ts(a));
-    const pending = byId.filter(t => !t.pinned && !isRecent(t));
+    const pending = byId.filter(t => !t.pinned && !isRecent(t)).sort(sortNonCompleted);
     sorted = [...byId.filter(t=>t.pinned), ...recent, ...pending];
   } else {
-    sorted = [...byId.filter(t=>t.pinned), ...byId.filter(t=>!t.pinned)];
+    const active = byId.filter(t => !t.pinned).sort(sortNonCompleted);
+    sorted = [...byId.filter(t=>t.pinned), ...active];
   }
   const done    = sorted.filter(t => t.status==='done').length;
 
@@ -7603,6 +7739,22 @@ function handleRealtimeMsg(type, data) {
         }
       } catch(_) {}
       break;
+    case 'resync':
+      // Server signalled that this client fell behind and dropped events.
+      // Re-fetch full state so the UI catches up. (See Task 20040.)
+      try {
+        const url = (typeof pUrl === 'function' && isMultiProject) ? pUrl('/api/state') : '/api/state';
+        api(url).then(s => { try { render(s); } catch(_) {} }).catch(() => {});
+        if (isMultiProject) {
+          api('/api/projects').then(d => {
+            try {
+              renderProjects(d.projects || [], d.stats || {});
+              updateProjectSelector();
+            } catch(_) {}
+          }).catch(() => {});
+        }
+      } catch(_) {}
+      break;
     case 'error':
       console.warn('cloop ws error:', data);
       break;
@@ -7698,6 +7850,9 @@ function connectSSE() {
   });
   evtSource.addEventListener('projects', (e) => {
     try { handleRealtimeMsg('projects', JSON.parse(e.data)); } catch(_) {}
+  });
+  evtSource.addEventListener('resync', (e) => {
+    try { handleRealtimeMsg('resync', JSON.parse(e.data)); } catch(_) {}
   });
   evtSource.onerror = () => {
     dot.classList.remove('connected');
