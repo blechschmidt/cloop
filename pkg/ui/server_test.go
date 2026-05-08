@@ -1611,3 +1611,115 @@ func TestStateEndpointSysmonTasksNotInCloopProject(t *testing.T) {
 		t.Errorf("cloop project state leaked sysmon task data")
 	}
 }
+
+// apiPUT performs a PUT request with a JSON body.
+func apiPUT(t *testing.T, ts *httptest.Server, path string, body interface{}) (int, map[string]interface{}) {
+	t.Helper()
+	data, _ := json.Marshal(body)
+	req, _ := http.NewRequest(http.MethodPut, ts.URL+path, bytes.NewReader(data))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("PUT %s: %v", path, err)
+	}
+	defer resp.Body.Close()
+	var out map[string]interface{}
+	_ = json.NewDecoder(resp.Body).Decode(&out)
+	return resp.StatusCode, out
+}
+
+// TestGoalEndpoint_Get verifies GET /api/goal returns the current project goal.
+func TestGoalEndpoint_Get(t *testing.T) {
+	dir := setupProjectDir(t, cloopGoal, nil)
+	ts := newTestServer(t, dir, nil)
+
+	body := apiGET(t, ts, "/api/goal")
+	goal, _ := body["goal"].(string)
+	if goal != cloopGoal {
+		t.Errorf("expected goal %q, got %q", cloopGoal, goal)
+	}
+}
+
+// TestGoalEndpoint_Update verifies PUT /api/goal updates the saved goal and
+// the change is visible via /api/state.
+func TestGoalEndpoint_Update(t *testing.T) {
+	dir := setupProjectDir(t, cloopGoal, nil)
+	ts := newTestServer(t, dir, nil)
+
+	newGoal := "Build a totally different system"
+	status, body := apiPUT(t, ts, "/api/goal", map[string]string{"goal": newGoal})
+	if status != http.StatusOK {
+		t.Fatalf("PUT /api/goal: HTTP %d, body=%v", status, body)
+	}
+	if body["goal"] != newGoal {
+		t.Errorf("response goal = %v, want %q", body["goal"], newGoal)
+	}
+	if body["previous"] != cloopGoal {
+		t.Errorf("response previous = %v, want %q", body["previous"], cloopGoal)
+	}
+
+	// Confirm via /api/state and reload the project state from disk.
+	stateBody := apiGET(t, ts, "/api/state")
+	if g, _ := stateBody["goal"].(string); g != newGoal {
+		t.Errorf("/api/state goal = %q, want %q", g, newGoal)
+	}
+	ps, err := state.Load(dir)
+	if err != nil {
+		t.Fatalf("state.Load: %v", err)
+	}
+	if ps.Goal != newGoal {
+		t.Errorf("disk state goal = %q, want %q", ps.Goal, newGoal)
+	}
+}
+
+// TestGoalEndpoint_EmptyRejected ensures an empty goal returns 400.
+func TestGoalEndpoint_EmptyRejected(t *testing.T) {
+	dir := setupProjectDir(t, cloopGoal, nil)
+	ts := newTestServer(t, dir, nil)
+
+	status, body := apiPUT(t, ts, "/api/goal", map[string]string{"goal": "   "})
+	if status != http.StatusBadRequest {
+		t.Errorf("expected HTTP 400, got %d (body=%v)", status, body)
+	}
+
+	// State must remain unchanged.
+	ps, err := state.Load(dir)
+	if err != nil {
+		t.Fatalf("state.Load: %v", err)
+	}
+	if ps.Goal != cloopGoal {
+		t.Errorf("goal mutated despite rejection: %q", ps.Goal)
+	}
+}
+
+// TestGoalEndpoint_PerProjectScoping verifies updates respect ?project_idx=N.
+func TestGoalEndpoint_PerProjectScoping(t *testing.T) {
+	cloopDir := setupProjectDir(t, cloopGoal, nil)
+	sysmonDir := setupProjectDir(t, sysmonGoal, nil)
+	ts := newTestServer(t, cloopDir, []string{sysmonDir})
+
+	// Update only the sysmon project.
+	newSysmonGoal := "Rewrite sysmon in Rust"
+	status, _ := apiPUT(t, ts, "/api/goal?project_idx=1", map[string]string{"goal": newSysmonGoal})
+	if status != http.StatusOK {
+		t.Fatalf("PUT /api/goal?project_idx=1: HTTP %d", status)
+	}
+
+	// cloop goal must be untouched.
+	cloopState, err := state.Load(cloopDir)
+	if err != nil {
+		t.Fatalf("load cloop: %v", err)
+	}
+	if cloopState.Goal != cloopGoal {
+		t.Errorf("cloop goal mutated: %q", cloopState.Goal)
+	}
+
+	// sysmon goal must be updated.
+	sysmonState, err := state.Load(sysmonDir)
+	if err != nil {
+		t.Fatalf("load sysmon: %v", err)
+	}
+	if sysmonState.Goal != newSysmonGoal {
+		t.Errorf("sysmon goal = %q, want %q", sysmonState.Goal, newSysmonGoal)
+	}
+}

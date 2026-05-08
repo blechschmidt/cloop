@@ -363,6 +363,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 
 	// Init & reset
 	mux.HandleFunc("/api/init", s.handleInit)
+	mux.HandleFunc("/api/goal", s.handleGoal)
 	mux.HandleFunc("/api/reset", s.handleReset)
 
 	// Knowledge Base
@@ -2186,6 +2187,55 @@ func (s *Server) handleInit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonOK(w, map[string]interface{}{"ok": true, "goal": ps.Goal})
+}
+
+// handleGoal returns or updates the project goal.
+//   GET  /api/goal  -> { "goal": "..." }
+//   PUT  /api/goal  -> body { "goal": "..." }; updates the saved project goal
+func (s *Server) handleGoal(w http.ResponseWriter, r *http.Request) {
+	workDir := s.resolveWorkDir(r)
+	switch r.Method {
+	case http.MethodGet:
+		ps, err := state.Load(workDir)
+		if err != nil {
+			jsonErr(w, "load failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		jsonOK(w, map[string]interface{}{"goal": ps.Goal})
+	case http.MethodPut, http.MethodPost:
+		var req struct {
+			Goal string `json:"goal"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			jsonErr(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+		req.Goal = strings.TrimSpace(req.Goal)
+		if req.Goal == "" {
+			jsonErr(w, "goal cannot be empty", http.StatusBadRequest)
+			return
+		}
+		ps, err := state.Load(workDir)
+		if err != nil {
+			jsonErr(w, "load failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		old := ps.Goal
+		ps.Goal = req.Goal
+		if ps.Plan != nil {
+			ps.Plan.Goal = req.Goal
+		}
+		if err := ps.SaveDirect(); err != nil {
+			jsonErr(w, "save failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if raw, err := json.Marshal(ps); err == nil {
+			s.broadcastToProject(workDir, wsMessage{Type: "task_update", Data: raw})
+		}
+		jsonOK(w, map[string]interface{}{"ok": true, "goal": ps.Goal, "previous": old})
+	default:
+		jsonErr(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
 }
 
 // handleVoice accepts a multipart audio upload, transcribes it with the local
@@ -5484,9 +5534,11 @@ const dashboardHTML = `<!DOCTYPE html>
             <div class="goal-text empty" id="goalText">Loading...</div>
             <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
               <div id="statusBadge"></div>
+              <button class="btn" id="goalEditBtn" onclick="openGoalEditModal()" title="Edit project goal" style="padding:4px 10px;font-size:12px">✎ Edit</button>
             </div>
           </div>
         </div>
+
 
         <!-- Stats -->
         <div class="section">
@@ -6395,6 +6447,23 @@ const dashboardHTML = `<!DOCTYPE html>
     <div class="modal-footer">
       <button class="btn" onclick="closeNewProjectModal()">Cancel</button>
       <button class="btn primary" onclick="submitNewProject()">Create Project</button>
+    </div>
+  </div>
+</div>
+
+<!-- Edit Goal modal -->
+<div id="goal-edit-overlay" onclick="if(event.target===this)closeGoalEditModal()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
+  <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;width:520px;max-width:95vw">
+    <h2 style="font-size:15px;font-weight:600;margin-bottom:16px">Edit Project Goal</h2>
+    <div class="form-group">
+      <label class="form-label">Goal *</label>
+      <textarea class="form-textarea" id="goalEditInput" placeholder="Project goal" style="min-height:90px"></textarea>
+    </div>
+    <p style="font-size:12px;color:var(--muted);margin-bottom:8px">Updates the project goal saved in state. Existing tasks and progress are preserved.</p>
+    <div id="goalEditError" style="display:none;color:var(--red);font-size:12px;margin-bottom:8px"></div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeGoalEditModal()">Cancel</button>
+      <button class="btn primary" onclick="saveGoalEdit()">Save Goal</button>
     </div>
   </div>
 </div>
@@ -8084,6 +8153,41 @@ window.selectProjectFromDropdown = function(idx, name) {
 };
 
 // ── New Project modal ─────────────────────────────────────────────────────────
+
+window.openGoalEditModal = function() {
+  const cur = (document.getElementById('goalText') || {}).textContent || '';
+  document.getElementById('goalEditInput').value = cur;
+  document.getElementById('goalEditError').style.display = 'none';
+  const el = document.getElementById('goal-edit-overlay');
+  if (el) el.style.display = 'flex';
+  setTimeout(() => { try { document.getElementById('goalEditInput').focus(); } catch(e) {} }, 0);
+};
+
+window.closeGoalEditModal = function() {
+  const el = document.getElementById('goal-edit-overlay');
+  if (el) el.style.display = 'none';
+};
+
+window.saveGoalEdit = function() {
+  const goal  = document.getElementById('goalEditInput').value.trim();
+  const errEl = document.getElementById('goalEditError');
+  if (!goal) { errEl.textContent = 'Goal cannot be empty'; errEl.style.display = ''; return; }
+  errEl.style.display = 'none';
+  apiMethod('PUT', pUrl('/api/goal'), {goal}).then(d => {
+    if (!d.ok) { errEl.textContent = d.error || 'Failed to update goal'; errEl.style.display = ''; return; }
+    closeGoalEditModal();
+    toast('Goal updated', 'ok');
+    const goalEl = document.getElementById('goalText');
+    if (goalEl) {
+      goalEl.textContent = d.goal;
+      goalEl.classList.toggle('empty', !d.goal);
+    }
+    if (typeof refreshState === 'function') refreshState();
+  }).catch(e => {
+    errEl.textContent = 'Request failed: ' + e.message;
+    errEl.style.display = '';
+  });
+};
 
 window.openNewProjectModal = function() {
   document.getElementById('npDir').value     = '';
