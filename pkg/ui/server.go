@@ -3335,21 +3335,24 @@ func (s *Server) handleRateLimits(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleClaudeUsage scrapes the Claude Code CLI /usage command and returns
-// subscription usage limits (percentage used, period, reset time).
+// handleClaudeUsage fetches Claude Code subscription usage limits from
+// the Anthropic OAuth usage API (5-hour, weekly, per-model breakdowns).
 // GET /api/claude-usage
 func (s *Server) handleClaudeUsage(w http.ResponseWriter, r *http.Request) {
-	// Return cached data if fresh (< 2 minutes old)
+	// Return cached data if fresh (< 3 minutes old)
 	cached := ratelimit.GetCachedUsage()
-	if cached != nil && time.Since(cached.FetchedAt) < 2*time.Minute {
+	if cached != nil && time.Since(cached.FetchedAt) < 3*time.Minute {
 		jsonOK(w, cached)
 		return
 	}
-	// Fetch fresh data
-	usage, err := ratelimit.FetchClaudeUsage()
+	// Try Anthropic OAuth usage API first, fall back to CLI scraping
+	usage, err := ratelimit.FetchClaudeUsage("")
+	if err != nil {
+		// API failed (likely missing user:profile scope), try CLI fallback
+		usage, err = ratelimit.FetchClaudeUsageFallback()
+	}
 	if err != nil {
 		if cached != nil {
-			// Return stale cache rather than error
 			jsonOK(w, cached)
 			return
 		}
@@ -9854,35 +9857,43 @@ function _setVal(id, v) {
 // ── Anthropic rate-limits panel ──────────────────────────────────────────────
 // ── Claude Code subscription usage ──────────────────────────────────────────
 window.loadClaudeUsage = function() {
-  const panel = document.getElementById('claudeUsagePanel');
+  var panel = document.getElementById('claudeUsagePanel');
   if (!panel) return;
-  panel.innerHTML = '<div style="font-size:13px;color:var(--muted)">Fetching usage from Claude Code CLI...</div>';
-  api(pUrl('/api/claude-usage')).then(d => {
+  panel.innerHTML = '<div style="font-size:13px;color:var(--muted)">Loading usage data...</div>';
+  api(pUrl('/api/claude-usage')).then(function(d) {
     if (d.error) {
       panel.innerHTML = '<div style="font-size:13px;color:var(--muted)">' + esc(d.error) + '</div>';
       return;
     }
-    const pct = d.percentage || 0;
-    const period = d.period || 'unknown';
-    const reset = d.reset_time || '';
-    const raw = d.raw_line || '';
-    const color = pct >= 90 ? 'var(--danger, #e74c3c)' : pct >= 70 ? 'var(--warning, #f39c12)' : 'var(--success, #27ae60)';
-    const fetched = d.fetched_at ? new Date(d.fetched_at).toLocaleTimeString() : '';
-    var h = '<div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">';
-    h += '<div style="flex:1;min-width:200px">';
-    h += '<div style="display:flex;justify-content:space-between;margin-bottom:4px">';
-    h += '<span style="font-size:14px;font-weight:600">' + esc(period) + ' limit</span>';
-    h += '<span style="font-size:14px;font-weight:700;color:' + color + '">' + pct + '%</span>';
+    var fetched = d.fetched_at ? new Date(d.fetched_at).toLocaleTimeString() : '';
+    var h = '<div style="display:flex;flex-direction:column;gap:12px">';
+    function addBar(label, win) {
+      if (!win) return;
+      var pct = Math.round(win.utilization || 0);
+      var color = pct >= 80 ? '#e74c3c' : pct >= 50 ? '#f39c12' : '#27ae60';
+      var resetStr = '';
+      if (win.resets_at) {
+        try { var rd = new Date(win.resets_at); resetStr = 'Resets ' + rd.toLocaleString(); } catch(e) {}
+      }
+      h += '<div>';
+      h += '<div style="display:flex;justify-content:space-between;margin-bottom:3px">';
+      h += '<span style="font-size:13px;font-weight:600">' + label + '</span>';
+      h += '<span style="font-size:13px;font-weight:700;color:' + color + '">' + pct + '%</span>';
+      h += '</div>';
+      h += '<div style="background:var(--border,#333);border-radius:4px;height:10px;overflow:hidden">';
+      h += '<div style="background:' + color + ';height:100%;width:' + pct + '%;border-radius:4px;transition:width 0.3s"></div>';
+      h += '</div>';
+      if (resetStr) h += '<div style="font-size:11px;color:var(--muted);margin-top:2px">' + esc(resetStr) + '</div>';
+      h += '</div>';
+    }
+    addBar('5-Hour Window', d.five_hour);
+    addBar('Weekly (All Models)', d.seven_day);
+    addBar('Weekly Opus', d.seven_day_opus);
+    addBar('Weekly Sonnet', d.seven_day_sonnet);
+    if (fetched) h += '<div style="font-size:11px;color:var(--muted);margin-top:4px">Updated ' + esc(fetched) + '</div>';
     h += '</div>';
-    h += '<div style="background:var(--border);border-radius:4px;height:12px;overflow:hidden">';
-    h += '<div style="background:' + color + ';height:100%;width:' + pct + '%;border-radius:4px;transition:width 0.3s"></div>';
-    h += '</div>';
-    h += '<div style="display:flex;justify-content:space-between;margin-top:4px">';
-    if (reset) h += '<span style="font-size:11px;color:var(--muted)">Resets ' + esc(reset) + '</span>';
-    if (fetched) h += '<span style="font-size:11px;color:var(--muted)">Updated ' + esc(fetched) + '</span>';
-    h += '</div></div></div>';
     panel.innerHTML = h;
-  }).catch(err => {
+  }).catch(function(err) {
     panel.innerHTML = '<div style="font-size:13px;color:var(--muted)">Failed to load usage data</div>';
   });
 };
