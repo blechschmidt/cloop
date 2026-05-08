@@ -324,6 +324,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("PUT /api/budget/global", s.handleBudgetGlobalSave)
 	mux.HandleFunc("PUT /api/budget/project", s.handleBudgetProjectSave)
 	mux.HandleFunc("GET /api/ratelimits", s.handleRateLimits)
+	mux.HandleFunc("GET /api/claude-usage", s.handleClaudeUsage)
 
 	// Multi-project dashboard
 	mux.HandleFunc("/api/projects", s.handleProjects)
@@ -3334,6 +3335,30 @@ func (s *Server) handleRateLimits(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleClaudeUsage scrapes the Claude Code CLI /usage command and returns
+// subscription usage limits (percentage used, period, reset time).
+// GET /api/claude-usage
+func (s *Server) handleClaudeUsage(w http.ResponseWriter, r *http.Request) {
+	// Return cached data if fresh (< 2 minutes old)
+	cached := ratelimit.GetCachedUsage()
+	if cached != nil && time.Since(cached.FetchedAt) < 2*time.Minute {
+		jsonOK(w, cached)
+		return
+	}
+	// Fetch fresh data
+	usage, err := ratelimit.FetchClaudeUsage()
+	if err != nil {
+		if cached != nil {
+			// Return stale cache rather than error
+			jsonOK(w, cached)
+			return
+		}
+		jsonOK(w, map[string]interface{}{"error": err.Error()})
+		return
+	}
+	jsonOK(w, usage)
+}
+
 // ── dashboard HTML ────────────────────────────────────────────────────────────
 
 const dashboardHTML = `<!DOCTYPE html>
@@ -5682,6 +5707,17 @@ const dashboardHTML = `<!DOCTYPE html>
         </div>
       </div>
 
+      <!-- Claude Code subscription usage -->
+      <div class="section">
+        <div class="section-title" style="display:flex;align-items:center;gap:12px">
+          Claude Code Subscription Usage
+          <button class="btn" style="padding:4px 10px;font-size:12px;margin-left:auto" onclick="loadClaudeUsage()">&#8635; Refresh</button>
+        </div>
+        <div id="claudeUsagePanel" style="margin-top:8px">
+          <div style="font-size:13px;color:var(--muted)">Loading...</div>
+        </div>
+      </div>
+
       <!-- Anthropic API rate-limits panel -->
       <div class="section">
         <div class="section-title" style="display:flex;align-items:center;gap:12px">
@@ -5947,7 +5983,7 @@ window.switchTab = function(name) {
     if (name === 'deps') loadDeps();
     if (name === 'risk-matrix') loadRiskMatrix();
     if (name === 'analytics') loadAnalytics();
-    if (name === 'budget') { loadBudget(); loadRateLimits(); }
+    if (name === 'budget') { loadBudget(); loadClaudeUsage(); loadRateLimits(); }
     if (name === 'chat') loadChatHistory();
     if (name === 'assistant') loadAssistantHistory();
   } else {
@@ -5962,7 +5998,7 @@ window.switchTab = function(name) {
     if (name === 'deps') loadDeps();
     if (name === 'risk-matrix') loadRiskMatrix();
     if (name === 'analytics') loadAnalytics();
-    if (name === 'budget') { loadBudget(); loadRateLimits(); }
+    if (name === 'budget') { loadBudget(); loadClaudeUsage(); loadRateLimits(); }
   }
 
   // In multi-project mode, show/hide breadcrumb and project selector.
@@ -9816,6 +9852,41 @@ function _setVal(id, v) {
 }
 
 // ── Anthropic rate-limits panel ──────────────────────────────────────────────
+// ── Claude Code subscription usage ──────────────────────────────────────────
+window.loadClaudeUsage = function() {
+  const panel = document.getElementById('claudeUsagePanel');
+  if (!panel) return;
+  panel.innerHTML = '<div style="font-size:13px;color:var(--muted)">Fetching usage from Claude Code CLI...</div>';
+  api(pUrl('/api/claude-usage')).then(d => {
+    if (d.error) {
+      panel.innerHTML = '<div style="font-size:13px;color:var(--muted)">' + esc(d.error) + '</div>';
+      return;
+    }
+    const pct = d.percentage || 0;
+    const period = d.period || 'unknown';
+    const reset = d.reset_time || '';
+    const raw = d.raw_line || '';
+    const color = pct >= 90 ? 'var(--danger, #e74c3c)' : pct >= 70 ? 'var(--warning, #f39c12)' : 'var(--success, #27ae60)';
+    const fetched = d.fetched_at ? new Date(d.fetched_at).toLocaleTimeString() : '';
+    var h = '<div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">';
+    h += '<div style="flex:1;min-width:200px">';
+    h += '<div style="display:flex;justify-content:space-between;margin-bottom:4px">';
+    h += '<span style="font-size:14px;font-weight:600">' + esc(period) + ' limit</span>';
+    h += '<span style="font-size:14px;font-weight:700;color:' + color + '">' + pct + '%</span>';
+    h += '</div>';
+    h += '<div style="background:var(--border);border-radius:4px;height:12px;overflow:hidden">';
+    h += '<div style="background:' + color + ';height:100%;width:' + pct + '%;border-radius:4px;transition:width 0.3s"></div>';
+    h += '</div>';
+    h += '<div style="display:flex;justify-content:space-between;margin-top:4px">';
+    if (reset) h += '<span style="font-size:11px;color:var(--muted)">Resets ' + esc(reset) + '</span>';
+    if (fetched) h += '<span style="font-size:11px;color:var(--muted)">Updated ' + esc(fetched) + '</span>';
+    h += '</div></div></div>';
+    panel.innerHTML = h;
+  }).catch(err => {
+    panel.innerHTML = '<div style="font-size:13px;color:var(--muted)">Failed to load usage data</div>';
+  });
+};
+
 window.loadRateLimits = function() {
   api(pUrl('/api/ratelimits')).then(d => {
     _renderRateLimits(d);

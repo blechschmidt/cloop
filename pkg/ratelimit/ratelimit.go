@@ -284,3 +284,50 @@ func Clear() {
 	models = map[string]*ModelLimits{}
 	_ = os.Remove(persistPath())
 }
+
+// Probe makes a lightweight Anthropic API call (1 token max) to capture
+// rate-limit headers for the given model. This is used when the claudecode
+// CLI provider is active and no headers are available from direct API calls.
+// apiKey can be an API key or OAuth token (sk-ant-oat01-*).
+func Probe(apiKey, model string) error {
+	if apiKey == "" || model == "" {
+		return nil
+	}
+
+	client := &http.Client{Timeout: 15 * time.Second}
+	body := `{"model":"` + model + `","max_tokens":1,"messages":[{"role":"user","content":"hi"}]}`
+	req, err := http.NewRequest("POST", "https://api.anthropic.com/v1/messages", strings.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("anthropic-version", "2023-06-01")
+	// Support both API keys and OAuth tokens
+	if strings.HasPrefix(apiKey, "sk-ant-oat") {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	} else {
+		req.Header.Set("x-api-key", apiKey)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	// Record headers regardless of status code — even 429s have rate-limit headers
+	Record(model, resp.Header)
+	return nil
+}
+
+// ProbeAll probes rate limits for common Anthropic models.
+func ProbeAll(apiKey string) {
+	for _, model := range []string{
+		"claude-sonnet-4-6",
+		"claude-opus-4-7",
+		"claude-opus-4-6",
+		"claude-haiku-4-5",
+	} {
+		_ = Probe(apiKey, model)
+	}
+}
