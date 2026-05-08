@@ -9886,6 +9886,23 @@ window.loadClaudeUsage = function() {
     addBar('Weekly (All Models)', d.seven_day);
     addBar('Weekly Opus', d.seven_day_opus);
     addBar('Weekly Sonnet', d.seven_day_sonnet);
+    if (d.extra_usage && d.extra_usage.is_enabled) {
+      var eu = d.extra_usage;
+      var euPct = Math.round(eu.utilization || 0);
+      var euColor = euPct >= 80 ? '#e74c3c' : euPct >= 50 ? '#f39c12' : '#27ae60';
+      var euLimit = (eu.monthly_limit || 0) / 100;
+      var euUsed = (eu.used_credits || 0) / 100;
+      var euCurrency = eu.currency || 'USD';
+      var sym = euCurrency === 'EUR' ? '\u20ac' : '$';
+      h += '<div>';
+      h += '<div style="display:flex;justify-content:space-between;margin-bottom:3px">';
+      h += '<span style="font-size:13px;font-weight:600">Extra Usage (Monthly)</span>';
+      h += '<span style="font-size:13px;font-weight:700;color:' + euColor + '">' + sym + euUsed.toFixed(2) + ' / ' + sym + euLimit.toFixed(2) + ' (' + euPct + '%)</span>';
+      h += '</div>';
+      h += '<div style="background:var(--border,#333);border-radius:4px;height:10px;overflow:hidden">';
+      h += '<div style="background:' + euColor + ';height:100%;width:' + euPct + '%;border-radius:4px;transition:width 0.3s"></div>';
+      h += '</div></div>';
+    }
     if (fetched) h += '<div style="font-size:11px;color:var(--muted);margin-top:4px">Updated ' + esc(fetched) + '</div>';
     h += '</div>';
     panel.innerHTML = h;
