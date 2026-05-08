@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/provider"
+	"github.com/blechschmidt/cloop/pkg/ratelimit"
 )
 
 const (
@@ -189,6 +190,9 @@ func (p *Provider) Complete(ctx context.Context, prompt string, opts provider.Op
 		}
 		defer resp.Body.Close()
 
+		// Capture anthropic-ratelimit-* headers regardless of status code.
+		ratelimit.Record(model, resp.Header)
+
 		respData, err := io.ReadAll(resp.Body)
 		if err != nil {
 			return resp.StatusCode, fmt.Errorf("anthropic: reading response: %w", err)
@@ -248,6 +252,9 @@ func (p *Provider) completeStreaming(ctx context.Context, url string, data []byt
 		return nil, fmt.Errorf("anthropic: request failed: %w", err)
 	}
 	defer resp.Body.Close()
+
+	// Capture anthropic-ratelimit-* headers regardless of status code.
+	ratelimit.Record(model, resp.Header)
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)

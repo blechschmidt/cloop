@@ -28,6 +28,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/multiui"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/provider"
+	"github.com/blechschmidt/cloop/pkg/ratelimit"
 	"github.com/blechschmidt/cloop/pkg/riskmatrix"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/timeline"
@@ -322,6 +323,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/budget", s.handleBudgetGet)
 	mux.HandleFunc("PUT /api/budget/global", s.handleBudgetGlobalSave)
 	mux.HandleFunc("PUT /api/budget/project", s.handleBudgetProjectSave)
+	mux.HandleFunc("GET /api/ratelimits", s.handleRateLimits)
 
 	// Multi-project dashboard
 	mux.HandleFunc("/api/projects", s.handleProjects)
@@ -3265,6 +3267,73 @@ func (s *Server) handleBudgetProjectSave(w http.ResponseWriter, r *http.Request)
 	jsonOK(w, map[string]bool{"ok": true})
 }
 
+// handleRateLimits returns the most recent Anthropic rate-limit snapshot per
+// model captured from anthropic-ratelimit-* response headers.
+// GET /api/ratelimits
+func (s *Server) handleRateLimits(w http.ResponseWriter, r *http.Request) {
+	snap := ratelimit.Snapshot()
+	models := make([]map[string]interface{}, 0, len(snap))
+	for _, m := range snap {
+		entry := map[string]interface{}{
+			"model":      m.Model,
+			"updated_at": m.UpdatedAt,
+			"tier":       m.Tier,
+			"requests": map[string]interface{}{
+				"limit":     m.Requests.Limit,
+				"remaining": m.Requests.Remaining,
+				"used":      m.Requests.Used(),
+				"pct":       m.Requests.PercentUsed(),
+				"reset":     m.Requests.Reset,
+			},
+			"input_tokens": map[string]interface{}{
+				"limit":     m.InputTokens.Limit,
+				"remaining": m.InputTokens.Remaining,
+				"used":      m.InputTokens.Used(),
+				"pct":       m.InputTokens.PercentUsed(),
+				"reset":     m.InputTokens.Reset,
+			},
+			"output_tokens": map[string]interface{}{
+				"limit":     m.OutputTokens.Limit,
+				"remaining": m.OutputTokens.Remaining,
+				"used":      m.OutputTokens.Used(),
+				"pct":       m.OutputTokens.PercentUsed(),
+				"reset":     m.OutputTokens.Reset,
+			},
+			"tokens": map[string]interface{}{
+				"limit":     m.Tokens.Limit,
+				"remaining": m.Tokens.Remaining,
+				"used":      m.Tokens.Used(),
+				"pct":       m.Tokens.PercentUsed(),
+				"reset":     m.Tokens.Reset,
+			},
+			"weekly": map[string]interface{}{
+				"limit":     m.Weekly.Limit,
+				"remaining": m.Weekly.Remaining,
+				"used":      m.Weekly.Used(),
+				"pct":       m.Weekly.PercentUsed(),
+				"reset":     m.Weekly.Reset,
+			},
+			"five_hour": map[string]interface{}{
+				"limit":     m.FiveHour.Limit,
+				"remaining": m.FiveHour.Remaining,
+				"used":      m.FiveHour.Used(),
+				"pct":       m.FiveHour.PercentUsed(),
+				"reset":     m.FiveHour.Reset,
+			},
+			"monthly_spend_usd": m.MonthlySpendUSD,
+		}
+		models = append(models, entry)
+	}
+	// Sort by model name for stable ordering.
+	sort.Slice(models, func(i, j int) bool {
+		return fmt.Sprint(models[i]["model"]) < fmt.Sprint(models[j]["model"])
+	})
+	jsonOK(w, map[string]interface{}{
+		"models": models,
+		"count":  len(models),
+	})
+}
+
 // ── dashboard HTML ────────────────────────────────────────────────────────────
 
 const dashboardHTML = `<!DOCTYPE html>
@@ -5613,6 +5682,23 @@ const dashboardHTML = `<!DOCTYPE html>
         </div>
       </div>
 
+      <!-- Anthropic API rate-limits panel -->
+      <div class="section">
+        <div class="section-title" style="display:flex;align-items:center;gap:12px">
+          Anthropic API Rate Limits
+          <button class="btn" style="padding:4px 10px;font-size:12px;margin-left:auto" onclick="loadRateLimits()">&#8635; Refresh</button>
+        </div>
+        <p style="font-size:12px;color:var(--muted);margin-top:6px;margin-bottom:12px">
+          Per-model limits captured from <code>anthropic-ratelimit-*</code> response headers.
+          Values update on every Anthropic API call. Tier and monthly spend limit (when exposed
+          by the API) are shown alongside per-model RPM, ITPM, OTPM, and any 5-hour / weekly windows.
+        </p>
+        <div id="rlEmpty" style="font-size:13px;color:var(--muted)">
+          No Anthropic rate-limit data captured yet. Make a call with the anthropic provider to populate this panel.
+        </div>
+        <div id="rlList"></div>
+      </div>
+
     </div>
 
   </main>
@@ -5861,7 +5947,7 @@ window.switchTab = function(name) {
     if (name === 'deps') loadDeps();
     if (name === 'risk-matrix') loadRiskMatrix();
     if (name === 'analytics') loadAnalytics();
-    if (name === 'budget') loadBudget();
+    if (name === 'budget') { loadBudget(); loadRateLimits(); }
     if (name === 'chat') loadChatHistory();
     if (name === 'assistant') loadAssistantHistory();
   } else {
@@ -5876,7 +5962,7 @@ window.switchTab = function(name) {
     if (name === 'deps') loadDeps();
     if (name === 'risk-matrix') loadRiskMatrix();
     if (name === 'analytics') loadAnalytics();
-    if (name === 'budget') loadBudget();
+    if (name === 'budget') { loadBudget(); loadRateLimits(); }
   }
 
   // In multi-project mode, show/hide breadcrumb and project selector.
@@ -9727,6 +9813,90 @@ function _renderBudget(d) {
 function _setVal(id, v) {
   const el = document.getElementById(id);
   if (el) el.value = (v === null || v === undefined) ? '' : v;
+}
+
+// ── Anthropic rate-limits panel ──────────────────────────────────────────────
+window.loadRateLimits = function() {
+  api(pUrl('/api/ratelimits')).then(d => {
+    _renderRateLimits(d);
+  }).catch(err => {
+    console.warn('ratelimits load error', err);
+  });
+};
+
+function _rlBar(used, limit, pct) {
+  const colour = pct >= 100 ? 'var(--red)' : (pct >= 80 ? '#f0a500' : 'var(--accent)');
+  return '<div style="height:8px;background:var(--border);border-radius:4px;overflow:hidden;margin-top:4px">'
+    +    '<div style="height:100%;width:' + pct + '%;background:' + colour + ';transition:width .4s ease"></div>'
+    +  '</div>';
+}
+
+function _rlRow(label, w, fmt) {
+  if (!w || !w.limit || w.limit <= 0) {
+    return '<div style="margin:6px 0;font-size:12px;color:var(--muted)">' + label + ': <em>not reported</em></div>';
+  }
+  const used = w.used || 0;
+  const lim  = w.limit;
+  const pct  = w.pct || 0;
+  const usedTxt = fmt ? fmt(used) : used;
+  const limTxt  = fmt ? fmt(lim) : lim;
+  let resetTxt = '';
+  if (w.reset) {
+    try {
+      const dt = new Date(w.reset);
+      if (!isNaN(dt.getTime())) {
+        const diff = Math.max(0, Math.round((dt.getTime() - Date.now()) / 1000));
+        if (diff > 0) {
+          const mins = Math.floor(diff / 60);
+          const secs = diff % 60;
+          resetTxt = ' &nbsp;<span style="color:var(--muted);font-size:11px">resets in '
+            + (mins > 0 ? (mins + 'm ') : '') + secs + 's</span>';
+        }
+      }
+    } catch(_) {}
+  }
+  return '<div style="margin:8px 0">'
+    +    '<div style="display:flex;justify-content:space-between;font-size:12px">'
+    +      '<span>' + label + '</span>'
+    +      '<span>' + usedTxt + ' / ' + limTxt + ' (' + pct + '%)' + resetTxt + '</span>'
+    +    '</div>'
+    +    _rlBar(used, lim, pct)
+    +  '</div>';
+}
+
+function _renderRateLimits(d) {
+  const empty = document.getElementById('rlEmpty');
+  const list  = document.getElementById('rlList');
+  if (!list) return;
+  const models = (d && d.models) || [];
+  if (models.length === 0) {
+    if (empty) empty.style.display = '';
+    list.innerHTML = '';
+    return;
+  }
+  if (empty) empty.style.display = 'none';
+
+  let html = '';
+  models.forEach(m => {
+    const updated = m.updated_at ? new Date(m.updated_at).toLocaleTimeString() : '—';
+    const tier    = m.tier ? '<span style="display:inline-block;padding:2px 8px;background:var(--border);border-radius:10px;font-size:11px;margin-left:8px">tier: ' + m.tier + '</span>' : '';
+    const spend   = (m.monthly_spend_usd && m.monthly_spend_usd > 0)
+      ? '<span style="display:inline-block;padding:2px 8px;background:var(--border);border-radius:10px;font-size:11px;margin-left:8px">monthly spend cap: $' + Number(m.monthly_spend_usd).toFixed(2) + '</span>'
+      : '';
+    html += '<div style="border:1px solid var(--border);border-radius:var(--radius);padding:14px;margin-top:12px">';
+    html += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">';
+    html += '<div style="font-weight:600;font-size:13px"><code>' + (m.model || '?') + '</code>' + tier + spend + '</div>';
+    html += '<div style="font-size:11px;color:var(--muted)">updated ' + updated + '</div>';
+    html += '</div>';
+    html += _rlRow('Requests / min (RPM)',         m.requests,      _fmtTokens);
+    html += _rlRow('Input tokens / min (ITPM)',    m.input_tokens,  _fmtTokens);
+    html += _rlRow('Output tokens / min (OTPM)',   m.output_tokens, _fmtTokens);
+    if (m.tokens && m.tokens.limit > 0)            html += _rlRow('Tokens / min (legacy)',      m.tokens,        _fmtTokens);
+    if (m.five_hour && m.five_hour.limit > 0)      html += _rlRow('5-hour rolling window',      m.five_hour,     _fmtTokens);
+    if (m.weekly && m.weekly.limit > 0)            html += _rlRow('Weekly window',              m.weekly,        _fmtTokens);
+    html += '</div>';
+  });
+  list.innerHTML = html;
 }
 
 window.saveBudgetGlobal = function() {
