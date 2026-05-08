@@ -99,6 +99,9 @@ type ProjectState struct {
 
 	// SkipClarify persists the --skip-clarify flag.
 	SkipClarify bool `json:"skip_clarify,omitempty"`
+
+	// InnovateMode persists the --innovate flag from the most recent run.
+	InnovateMode bool `json:"innovate_mode,omitempty"`
 }
 
 // StatePath returns the legacy JSON state file path (used for migration detection).
@@ -345,6 +348,7 @@ func toRaw(s *ProjectState) *statedb.State {
 		HealthReport:      s.HealthReport,
 		DefaultMaxMinutes: s.DefaultMaxMinutes,
 		SkipClarify:       s.SkipClarify,
+		InnovateMode:      s.InnovateMode,
 	}
 	r.Steps = make([]statedb.StepRow, len(s.Steps))
 	for i, sr := range s.Steps {
@@ -384,6 +388,7 @@ func fromRaw(r *statedb.State) *ProjectState {
 		HealthReport:      r.HealthReport,
 		DefaultMaxMinutes: r.DefaultMaxMinutes,
 		SkipClarify:       r.SkipClarify,
+		InnovateMode:      r.InnovateMode,
 	}
 	s.Steps = make([]StepResult, len(r.Steps))
 	for i, row := range r.Steps {
@@ -429,6 +434,7 @@ type legacyState struct {
 	HealthReport      *health.HealthReport `json:"health_report,omitempty"`
 	DefaultMaxMinutes int                  `json:"default_max_minutes,omitempty"`
 	SkipClarify       bool                 `json:"skip_clarify,omitempty"`
+	InnovateMode      bool                 `json:"innovate_mode,omitempty"`
 }
 
 func migrateFromJSON(dir, jsonPath, dbPath string) error {
@@ -469,6 +475,7 @@ func migrateFromJSON(dir, jsonPath, dbPath string) error {
 		HealthReport:      legacy.HealthReport,
 		DefaultMaxMinutes: legacy.DefaultMaxMinutes,
 		SkipClarify:       legacy.SkipClarify,
+		InnovateMode:      legacy.InnovateMode,
 	}
 
 	db, err := statedb.Open(dbPath)

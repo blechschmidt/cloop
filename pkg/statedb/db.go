@@ -42,6 +42,7 @@ type State struct {
 	HealthReport      *health.HealthReport
 	DefaultMaxMinutes int
 	SkipClarify       bool
+	InnovateMode      bool
 }
 
 // StepRow represents one recorded step result.
@@ -204,6 +205,7 @@ func (d *DB) SaveState(s *State) error {
 		"total_output_tokens": strconv.Itoa(s.TotalOutputTokens),
 		"default_max_minutes": strconv.Itoa(s.DefaultMaxMinutes),
 		"skip_clarify":        boolStr(s.SkipClarify),
+		"innovate_mode":       boolStr(s.InnovateMode),
 		"created_at":          s.CreatedAt.Format(time.RFC3339Nano),
 		"updated_at":          s.UpdatedAt.Format(time.RFC3339Nano),
 	}
@@ -302,6 +304,7 @@ func (d *DB) LoadState() (*State, error) {
 	s.TotalOutputTokens = atoi(metaMap["total_output_tokens"])
 	s.DefaultMaxMinutes = atoi(metaMap["default_max_minutes"])
 	s.SkipClarify = metaMap["skip_clarify"] == "1"
+	s.InnovateMode = metaMap["innovate_mode"] == "1"
 
 	if v := metaMap["created_at"]; v != "" {
 		s.CreatedAt, _ = time.Parse(time.RFC3339Nano, v)

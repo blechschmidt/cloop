@@ -392,6 +392,7 @@ func New(cfg Config, prov provider.Provider) (*Orchestrator, error) {
 	if cfg.PMMode {
 		s.PMMode = true
 	}
+	s.InnovateMode = cfg.InnovateMode
 	mem, _ := memory.Load(cfg.WorkDir)
 	if mem == nil {
 		mem = &memory.Memory{}

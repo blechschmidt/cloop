@@ -3638,6 +3638,23 @@ const dashboardHTML = `<!DOCTYPE html>
   .token-bar-track { height:3px; background:var(--border); border-radius:2px; overflow:hidden; }
   .token-bar-fill { height:100%; background:var(--accent); border-radius:2px; transition:width .5s; }
 
+  /* ── Active CLI options badges ── */
+  .options-grid { display:flex; flex-wrap:wrap; gap:8px; }
+  .option-badge {
+    display:inline-flex; align-items:center; gap:7px;
+    padding:6px 11px; border-radius:14px;
+    background:var(--surface); border:1px solid var(--border);
+    font-size:12px; font-weight:500; color:var(--text);
+    transition:all .15s;
+  }
+  .option-badge .opt-icon { font-size:15px; line-height:1; }
+  .option-badge .opt-flag { color:var(--muted); font-family:monospace; font-size:11px; }
+  .option-badge.on  { border-color:var(--accent); background:rgba(88,166,255,.10); color:var(--accent); }
+  .option-badge.on .opt-flag { color:var(--accent); opacity:.85; }
+  .option-badge.off { opacity:.55; }
+  .option-badge.off .opt-icon { filter:grayscale(1); }
+  .options-empty { color:var(--muted); font-size:12px; font-style:italic; padding:8px 0; }
+
   /* ── Controls ── */
   .controls { display:flex; gap:8px; flex-wrap:wrap; align-items:flex-start; }
   .btn {
@@ -4961,6 +4978,12 @@ const dashboardHTML = `<!DOCTYPE html>
           </div>
         </div>
 
+        <!-- Active CLI options -->
+        <div class="section">
+          <div class="section-title">Active Options</div>
+          <div class="options-grid" id="activeOptionsGrid"></div>
+        </div>
+
         <!-- Run controls -->
         <div class="section">
           <div class="section-title">Controls</div>
@@ -6099,6 +6122,42 @@ function prepopulateAdvancedRunOptions(s) {
   updateAdvModelDropdown(_currentModel);
 }
 
+// Render the "Active Options" badge grid showing which CLI flags are persistently
+// enabled for the current project (from state). Each badge has a unicode icon, a
+// human label, and the corresponding CLI flag name. Disabled options are shown
+// muted so the user can see which features are available but inactive.
+function renderActiveOptions(s) {
+  const grid = document.getElementById('activeOptionsGrid');
+  if (!grid) return;
+  // Each entry: [enabled, icon, label, flag, tooltip]
+  const opts = [
+    [!!s.pm_mode,       '📋', 'PM Mode',       '--pm',           'Product Manager mode: AI decomposes goal into a task plan'],
+    [!!s.auto_evolve,   '🧬', 'Evolve Mode',   '--auto-evolve',  'Automatically discovers and adds new tasks after the plan completes'],
+    [!!s.innovate_mode, '✨', 'Innovate Mode', '--innovate',     'Creative/experimental feature exploration in evolve prompts'],
+    [!!s.skip_clarify,  '⏭️', 'Skip Clarify',  '--skip-clarify', 'Bypass the interactive goal-clarification Q&A before plan decomposition'],
+  ];
+  const enabledCount = opts.filter(o => o[0]).length;
+  if (enabledCount === 0) {
+    grid.innerHTML =
+      '<div class="options-empty">No persistent CLI options are currently enabled. ' +
+      'Run with <code>--pm</code>, <code>--auto-evolve</code>, or <code>--innovate</code> to activate.</div>' +
+      buildOptionBadges(opts);
+    return;
+  }
+  grid.innerHTML = buildOptionBadges(opts);
+}
+
+function buildOptionBadges(opts) {
+  return opts.map(o => {
+    const cls = o[0] ? 'on' : 'off';
+    return '<span class="option-badge ' + cls + '" title="' + esc(o[4]) + '">' +
+      '<span class="opt-icon">' + o[1] + '</span>' +
+      '<span>' + esc(o[2]) + '</span>' +
+      '<span class="opt-flag">' + esc(o[3]) + '</span>' +
+    '</span>';
+  }).join('');
+}
+
 function estimateCost(provider, model, inputTok, outputTok) {
   const p = (provider || '').toLowerCase();
   if (p === 'ollama') return 0;
@@ -6260,6 +6319,7 @@ function render(s) {
   document.getElementById('statProvider').textContent = s.provider || 'claudecode';
   document.getElementById('statModel').textContent    = s.model || '';
   prepopulateAdvancedRunOptions(s);
+  renderActiveOptions(s);
   document.getElementById('statMode').textContent     = s.pm_mode ? 'Product Manager' : 'Feedback Loop';
   document.getElementById('statCreated').textContent  = fmtDate(s.created_at);
   document.getElementById('statUpdated').textContent  = fmtDate(s.updated_at);
