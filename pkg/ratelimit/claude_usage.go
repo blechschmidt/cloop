@@ -3,16 +3,11 @@
 package ratelimit
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
-	"regexp"
-	"strconv"
-	"strings"
 	"sync"
 	"time"
 )
@@ -180,84 +175,4 @@ func readCredentialsToken() string {
 	return creds.ClaudeAiOauth.AccessToken
 }
 
-// FetchClaudeUsageFallback runs the Claude CLI /usage command via script(1)
-// as a fallback when the API doesn't work (e.g. missing user:profile scope).
-func FetchClaudeUsageFallback() (*ClaudeUsage, error) {
-	claudeBin := findClaudeBin()
 
-	cmd := exec.Command("script", "-qec",
-		fmt.Sprintf("echo '/usage\n/exit' | %s", claudeBin),
-		"/dev/null")
-	cmd.Env = os.Environ()
-
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &out
-
-	done := make(chan error, 1)
-	go func() { done <- cmd.Run() }()
-
-	select {
-	case <-done:
-	case <-time.After(30 * time.Second):
-		if cmd.Process != nil {
-			cmd.Process.Kill()
-		}
-		return nil, fmt.Errorf("claude usage fetch timed out")
-	}
-
-	return parseUsageOutput(out.String())
-}
-
-var usageLineRegex = regexp.MustCompile(`(\d+)%\s+of\s+your\s+([\w-]+)\s+limit`)
-
-func parseUsageOutput(raw string) (*ClaudeUsage, error) {
-	ansiRegex := regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]|\x1b\][^\x1b]*\x1b\\|\x1b\[\[\?]?[0-9;]*[a-zA-Z]`)
-	clean := ansiRegex.ReplaceAllString(raw, "")
-	clean = strings.ReplaceAll(clean, "\r", "")
-
-	matches := usageLineRegex.FindStringSubmatch(clean)
-	if matches == nil {
-		return nil, fmt.Errorf("could not parse /usage output")
-	}
-
-	pct, _ := strconv.ParseFloat(matches[1], 64)
-	period := matches[2]
-
-	usage := &ClaudeUsage{FetchedAt: time.Now().UTC()}
-	detail := &UsageDetail{Utilization: pct}
-
-	switch period {
-	case "weekly":
-		usage.SevenDay = detail
-	case "5-hour":
-		usage.FiveHour = detail
-	default:
-		usage.SevenDay = detail
-	}
-
-	usageMu.Lock()
-	lastUsage = usage
-	usageMu.Unlock()
-
-	return usage, nil
-}
-
-// findClaudeBin locates the claude binary.
-func findClaudeBin() string {
-	if p, err := exec.LookPath("claude"); err == nil {
-		return p
-	}
-	home, _ := os.UserHomeDir()
-	candidates := []string{
-		home + "/.local/bin/claude",
-		home + "/.npm-global/bin/claude",
-		"/usr/local/bin/claude",
-	}
-	for _, c := range candidates {
-		if _, err := os.Stat(c); err == nil {
-			return c
-		}
-	}
-	return "claude"
-}

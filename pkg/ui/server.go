@@ -3345,12 +3345,8 @@ func (s *Server) handleClaudeUsage(w http.ResponseWriter, r *http.Request) {
 		jsonOK(w, cached)
 		return
 	}
-	// Try Anthropic OAuth usage API first, fall back to CLI scraping
+	// Try Anthropic OAuth usage API
 	usage, err := ratelimit.FetchClaudeUsage("")
-	if err != nil {
-		// API failed (likely missing user:profile scope), try CLI fallback
-		usage, err = ratelimit.FetchClaudeUsageFallback()
-	}
 	if err != nil {
 		if cached != nil {
 			jsonOK(w, cached)
