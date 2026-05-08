@@ -69,7 +69,9 @@ func (s *Server) sendSSEOrLag(c *sseClient, ev sseEvent) {
 }
 
 // wsMessage is a typed WebSocket message envelope.
-// Type values: "task_update", "step_output", "plan_complete", "projects", "error".
+// Type values: "task_update", "step_output", "plan_complete", "projects",
+// "run_state", "suggest_status", "presence", "task_added", "task_deleted",
+// "task_mutation", "resync", "error".
 type wsMessage struct {
 	Type string          `json:"type"`
 	Data json.RawMessage `json:"data"`
@@ -195,14 +197,23 @@ type Server struct {
 	liveLogLines   []string
 	liveLogRunning bool
 
+	// runStates tracks the last-broadcast running flag per project workDir so
+	// the watcher can emit `run_state` WS events only on transitions instead of
+	// requiring clients to poll /api/livelog.
+	runStateMu sync.Mutex
+	runStates  map[string]bool
+
 	// Suggest background job state. Suggestions are generated and held for the
 	// user to review individually; clients add either selected ones or all.
+	// suggestWorkDir remembers which project the active job was launched from
+	// so completion can be broadcast to that project's WS clients.
 	suggestMu          sync.Mutex
 	suggestRunning     bool
 	suggestDone        bool
 	suggestErr         string
 	suggestSummary     string
 	suggestSuggestions []*suggest.Suggestion
+	suggestWorkDir     string
 
 	// Multi-project state cache
 	projMu       sync.RWMutex
@@ -228,6 +239,7 @@ func New(workdir string, port int, token string) *Server {
 		authFails:       make(map[string]*authFailEntry),
 		rlBuckets:       make(map[string]*uiIPBucket),
 		chatHistories:   make(map[string][]ChatMessage),
+		runStates:       make(map[string]bool),
 	}
 }
 
@@ -642,6 +654,71 @@ var presenceColors = []string{
 }
 
 
+// broadcastRunState pushes the current run state for workDir to all WebSocket
+// clients connected to that project. The event is only emitted when the
+// running flag actually changes — repeat broadcasts of the same state are
+// suppressed so reconnect storms don't redundantly toggle button visibility.
+// If force is true the current value is sent regardless of cached state (used
+// for the initial WS handshake so a freshly connected client gets a baseline).
+//
+// SSE clients (used as a WebSocket fallback when proxies strip Upgrade) also
+// receive a typed "run_state" SSE event so polling is eliminated on that
+// path too.
+func (s *Server) broadcastRunState(workDir string, running, force bool) {
+	s.runStateMu.Lock()
+	prev, ok := s.runStates[workDir]
+	if !force && ok && prev == running {
+		s.runStateMu.Unlock()
+		return
+	}
+	s.runStates[workDir] = running
+	s.runStateMu.Unlock()
+
+	raw, err := json.Marshal(map[string]interface{}{"running": running})
+	if err != nil {
+		return
+	}
+	s.broadcastToProject(workDir, wsMessage{Type: "run_state", Data: raw})
+
+	// Mirror to SSE clients (fallback path).
+	s.mu.Lock()
+	for c := range s.clients {
+		s.sendSSEOrLag(c, sseEvent{Event: "run_state", Data: string(raw)})
+	}
+	s.mu.Unlock()
+}
+
+// broadcastSuggestStatus pushes the current suggest job status to all
+// WebSocket clients connected to workDir. Replaces the /api/suggest/status
+// polling client used to do.
+func (s *Server) broadcastSuggestStatus(workDir string) {
+	s.suggestMu.Lock()
+	payload := map[string]interface{}{
+		"running":     s.suggestRunning,
+		"done":        s.suggestDone,
+		"error":       s.suggestErr,
+		"summary":     s.suggestSummary,
+		"suggestions": append([]*suggest.Suggestion(nil), s.suggestSuggestions...),
+	}
+	s.suggestMu.Unlock()
+
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return
+	}
+	if workDir == "" {
+		return
+	}
+	s.broadcastToProject(workDir, wsMessage{Type: "suggest_status", Data: raw})
+
+	// Mirror to SSE clients (fallback path).
+	s.mu.Lock()
+	for c := range s.clients {
+		s.sendSSEOrLag(c, sseEvent{Event: "suggest_status", Data: string(raw)})
+	}
+	s.mu.Unlock()
+}
+
 // broadcastLog sends a log chunk to all connected SSE clients as a "log"
 // SSE event, and stores it in the ring buffer.
 func (s *Server) broadcastLog(chunk string) {
@@ -980,6 +1057,48 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		s.liveLogMu.Unlock()
 	}
 
+	// Send initial run state so the client can position the Run/Stop buttons
+	// without polling /api/livelog.
+	{
+		s.liveLogMu.Lock()
+		internalRunning := s.liveLogRunning
+		s.liveLogMu.Unlock()
+		running := internalRunning || multiui.IsCloopRunningInDir(workDir)
+		if raw, err := json.Marshal(map[string]interface{}{"running": running}); err == nil {
+			if msg, err := json.Marshal(wsMessage{Type: "run_state", Data: raw}); err == nil {
+				_ = conn.Write(ctx, websocket.MessageText, msg)
+			}
+		}
+		// Seed the cache so subsequent watcher ticks don't re-broadcast the
+		// same value to all peers when this client connects.
+		s.runStateMu.Lock()
+		s.runStates[workDir] = running
+		s.runStateMu.Unlock()
+	}
+
+	// Send initial suggest status if a job for this project is in flight or
+	// has results to display, so the suggestions panel can hydrate without
+	// polling /api/suggest/status.
+	{
+		s.suggestMu.Lock()
+		matches := s.suggestWorkDir == workDir && (s.suggestRunning || s.suggestDone)
+		payload := map[string]interface{}{
+			"running":     s.suggestRunning,
+			"done":        s.suggestDone,
+			"error":       s.suggestErr,
+			"summary":     s.suggestSummary,
+			"suggestions": append([]*suggest.Suggestion(nil), s.suggestSuggestions...),
+		}
+		s.suggestMu.Unlock()
+		if matches {
+			if raw, err := json.Marshal(payload); err == nil {
+				if msg, err := json.Marshal(wsMessage{Type: "suggest_status", Data: raw}); err == nil {
+					_ = conn.Write(ctx, websocket.MessageText, msg)
+				}
+			}
+		}
+	}
+
 	// Send initial presence list to this client, then announce to everyone.
 	if users := s.presenceUsers(workDir); len(users) > 0 {
 		if raw, err := json.Marshal(map[string]interface{}{"users": users, "you": connID}); err == nil {
@@ -1136,6 +1255,7 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 		s.liveLogLines = nil
 		s.liveLogRunning = true
 		s.liveLogMu.Unlock()
+		s.broadcastRunState(workDir, true, true)
 
 		pipeW.Close() // parent doesn't write; close its end so reader gets EOF when child exits.
 
@@ -1157,6 +1277,7 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 			s.liveLogMu.Lock()
 			s.liveLogRunning = false
 			s.liveLogMu.Unlock()
+			s.broadcastRunState(workDir, false, true)
 			// Broadcast updated state after run completes.
 			if ps, loadErr := state.Load(workDir); loadErr == nil {
 				if data, marshalErr := json.Marshal(ps); marshalErr == nil {
@@ -1931,6 +2052,8 @@ func (s *Server) handleSuggestGenerate(w http.ResponseWriter, r *http.Request) {
 		req.Count = 20
 	}
 
+	suggestWorkDir := s.resolveWorkDir(r)
+
 	s.suggestMu.Lock()
 	if s.suggestRunning {
 		s.suggestMu.Unlock()
@@ -1942,13 +2065,14 @@ func (s *Server) handleSuggestGenerate(w http.ResponseWriter, r *http.Request) {
 	s.suggestErr = ""
 	s.suggestSummary = ""
 	s.suggestSuggestions = nil
+	s.suggestWorkDir = suggestWorkDir
 	s.suggestMu.Unlock()
+	s.broadcastSuggestStatus(suggestWorkDir)
 
 	exe, err := os.Executable()
 	if err != nil {
 		exe = "cloop"
 	}
-	suggestWorkDir := s.resolveWorkDir(r)
 
 	go func() {
 		cmd := exec.Command(exe, "suggest", "--json", "--count", strconv.Itoa(req.Count))
@@ -1959,7 +2083,6 @@ func (s *Server) handleSuggestGenerate(w http.ResponseWriter, r *http.Request) {
 		runErr := cmd.Run()
 
 		s.suggestMu.Lock()
-		defer s.suggestMu.Unlock()
 		s.suggestRunning = false
 		s.suggestDone = true
 
@@ -1969,16 +2092,22 @@ func (s *Server) handleSuggestGenerate(w http.ResponseWriter, r *http.Request) {
 				msg = runErr.Error()
 			}
 			s.suggestErr = msg
+			s.suggestMu.Unlock()
+			s.broadcastSuggestStatus(suggestWorkDir)
 			return
 		}
 
 		var result suggest.Result
 		if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
 			s.suggestErr = "could not parse suggestions: " + err.Error()
+			s.suggestMu.Unlock()
+			s.broadcastSuggestStatus(suggestWorkDir)
 			return
 		}
 		s.suggestSummary = result.Summary
 		s.suggestSuggestions = result.Suggestions
+		s.suggestMu.Unlock()
+		s.broadcastSuggestStatus(suggestWorkDir)
 	}()
 
 	jsonOK(w, map[string]interface{}{"ok": true, "count": req.Count})
@@ -2674,6 +2803,15 @@ func (s *Server) watchProjects() {
 		if changed {
 			s.refreshProjectStatuses()
 			s.broadcastProjectsUpdate()
+		}
+
+		// Independently of state-file changes, sample running status for each
+		// project so externally-started cloop processes flip the Run/Stop
+		// buttons without the client having to poll /api/livelog. handleRun
+		// already pushes a forced run_state on internal start; this loop
+		// catches in-flight transitions and externally-started runs.
+		for _, e := range s.allProjectEntries() {
+			s.broadcastRunState(e.Path, multiui.IsCloopRunningInDir(e.Path), false)
 		}
 	}
 }
@@ -6619,7 +6757,6 @@ const dashboardHTML = `<!DOCTYPE html>
 
 let appState = null;
 let evtSource = null;
-let suggestPollTimer = null;
 let activeTab = 'overview';
 let showCompletedTasks    = false;
 let showCompletedProjects = false;
@@ -7923,6 +8060,21 @@ function handleRealtimeMsg(type, data) {
         }
       } catch(_) {}
       break;
+    case 'run_state':
+      // Server pushes this whenever the cloop process running flag flips
+      // for this project (start/stop/external-detect). Replaces the old
+      // /api/livelog poll loop.
+      try {
+        if (data && typeof data.running !== 'undefined') {
+          updateRunButtonState(!!data.running);
+        }
+      } catch(_) {}
+      break;
+    case 'suggest_status':
+      // Server pushes this on suggest job state changes. Replaces the old
+      // /api/suggest/status poll loop.
+      try { applySuggestStatus(data); } catch(_) {}
+      break;
     case 'resync':
       // Server signalled that this client fell behind and dropped events.
       // Re-fetch full state so the UI catches up. (See Task 20040.)
@@ -8034,6 +8186,12 @@ function connectSSE() {
   });
   evtSource.addEventListener('projects', (e) => {
     try { handleRealtimeMsg('projects', JSON.parse(e.data)); } catch(_) {}
+  });
+  evtSource.addEventListener('run_state', (e) => {
+    try { handleRealtimeMsg('run_state', JSON.parse(e.data)); } catch(_) {}
+  });
+  evtSource.addEventListener('suggest_status', (e) => {
+    try { handleRealtimeMsg('suggest_status', JSON.parse(e.data)); } catch(_) {}
   });
   evtSource.addEventListener('resync', (e) => {
     try { handleRealtimeMsg('resync', JSON.parse(e.data)); } catch(_) {}
@@ -9170,14 +9328,8 @@ function updateRunButtonState(running) {
   hideIds.forEach(id => { const el = document.getElementById(id); if (el) el.style.display = 'none'; });
 }
 
-// Poll /api/livelog every 3 seconds to keep button state accurate.
-let _runStatePollTimer = null;
-function startRunStatePolling() {
-  if (_runStatePollTimer) return;
-  _runStatePollTimer = setInterval(() => {
-    api(pUrl('/api/livelog')).then(d => updateRunButtonState(!!d.running)).catch(() => {});
-  }, 3000);
-}
+// Run-state changes are pushed by the server as 'run_state' WebSocket events
+// (see handleRealtimeMsg). No polling required.
 
 window.apiRun = function(opts) {
   api(pUrl('/api/run'), opts).then(d => {
@@ -9215,10 +9367,9 @@ window.apiStop = function() {
   api('/api/stop', {}).then(d => {
     toast(d.message || (d.ok ? 'Pause signal sent' : 'Stop failed'), d.ok ? 'ok' : 'err');
     if (d.ok) updateRunButtonState(false);
-    // Re-check actual state after a short delay since the process may take a moment to exit.
-    setTimeout(() => {
-      api(pUrl('/api/livelog')).then(dd => updateRunButtonState(!!dd.running)).catch(() => {});
-    }, 1500);
+    // Final running flag is pushed via the 'run_state' WS event when the
+    // child process actually exits or the projects watcher samples PID
+    // liveness; no client-side poll required.
   }).catch(() => toast('Request failed', 'err'));
 };
 
@@ -9418,53 +9569,56 @@ window.runSuggest = function() {
   document.getElementById('suggestAddAllBtn').style.display  = 'none';
   document.getElementById('suggestClearBtn').style.display   = 'none';
 
+  // Server pushes 'suggest_status' WS events on completion; no client polling.
   api(pUrl('/api/suggest/generate'), {count}).then(d => {
     if (!d.ok) {
-      stopSuggestPoll('Error: '+(d.error||'failed'));
-      return;
+      _suggestFail('Error: '+(d.error||'failed'));
     }
-    suggestPollTimer = setInterval(pollSuggestStatus, 1500);
-  }).catch(() => stopSuggestPoll('Request failed'));
+  }).catch(() => _suggestFail('Request failed'));
 };
 
-function pollSuggestStatus() {
-  api('/api/suggest/status').then(d => {
-    if (d.running) {
-      document.getElementById('suggestStatusText').textContent = 'Running... (this may take a minute)';
-      return;
-    }
-    clearInterval(suggestPollTimer);
-    suggestPollTimer = null;
-    document.getElementById('suggestBtn').disabled = false;
-    document.getElementById('suggestSpinner').style.display = 'none';
+// applySuggestStatus is called from the WebSocket 'suggest_status' event
+// handler with the latest job state. It updates the UI when the job finishes
+// or errors so the client never has to poll /api/suggest/status.
+function applySuggestStatus(d) {
+  if (!d) return;
+  if (d.running) {
+    document.getElementById('suggestBtn').disabled = true;
+    document.getElementById('suggestStatusLine').style.display = '';
+    document.getElementById('suggestSpinner').style.display    = '';
+    document.getElementById('suggestStatusText').textContent   = 'Running... (this may take a minute)';
+    return;
+  }
 
-    if (d.error) {
-      document.getElementById('suggestStatusText').textContent = 'Error: '+d.error;
-      toast('Suggest failed: '+d.error, 'err');
-      return;
-    }
+  document.getElementById('suggestBtn').disabled = false;
+  document.getElementById('suggestSpinner').style.display = 'none';
 
-    document.getElementById('suggestStatusLine').style.display = 'none';
-    currentSuggestions = (d.suggestions || []).slice();
-    if (d.summary) {
-      const sum = document.getElementById('suggestSummary');
-      sum.textContent = d.summary;
-      sum.style.display = '';
-    }
-    renderSuggestions();
-    if (currentSuggestions.length > 0) {
-      document.getElementById('suggestAddAllBtn').style.display = '';
-      document.getElementById('suggestClearBtn').style.display  = '';
-      toast('Generated '+currentSuggestions.length+' ideas — review below', 'ok');
-    } else {
-      toast('No suggestions returned', 'err');
-    }
-  }).catch(() => {});
+  if (d.error) {
+    document.getElementById('suggestStatusText').textContent = 'Error: '+d.error;
+    toast('Suggest failed: '+d.error, 'err');
+    return;
+  }
+
+  if (!d.done) return;
+
+  document.getElementById('suggestStatusLine').style.display = 'none';
+  currentSuggestions = (d.suggestions || []).slice();
+  if (d.summary) {
+    const sum = document.getElementById('suggestSummary');
+    sum.textContent = d.summary;
+    sum.style.display = '';
+  }
+  renderSuggestions();
+  if (currentSuggestions.length > 0) {
+    document.getElementById('suggestAddAllBtn').style.display = '';
+    document.getElementById('suggestClearBtn').style.display  = '';
+    toast('Generated '+currentSuggestions.length+' ideas — review below', 'ok');
+  } else {
+    toast('No suggestions returned', 'err');
+  }
 }
 
-function stopSuggestPoll(msg) {
-  clearInterval(suggestPollTimer);
-  suggestPollTimer = null;
+function _suggestFail(msg) {
   document.getElementById('suggestBtn').disabled = false;
   document.getElementById('suggestSpinner').style.display = 'none';
   document.getElementById('suggestStatusText').textContent = msg;
@@ -10644,11 +10798,9 @@ function checkAuthAndInit() {
       connectWS();
       r.json().then(s => render(s)).catch(() => {});
     });
-    // Fetch initial run state and start polling to keep buttons accurate.
-    fetch(pUrl('/api/livelog'), {headers: authHeaders()}).then(lr => lr.json()).then(ld => {
-      updateRunButtonState(!!ld.running);
-    }).catch(() => {});
-    startRunStatePolling();
+    // Initial run state arrives as a 'run_state' WebSocket event on connect
+    // (see handleWS), and subsequent transitions are pushed by the watcher
+    // and the run/stop handlers — no polling required.
   }).catch(() => {
     connectWS();
   });
