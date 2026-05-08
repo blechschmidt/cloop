@@ -407,6 +407,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	// Toggle persistent CLI options (--auto-evolve, --innovate, etc.)
 	mux.HandleFunc("POST /api/options/toggle", s.handleOptionsToggle)
 	mux.HandleFunc("POST /api/options/max-parallel", s.handleMaxParallelSet)
+	mux.HandleFunc("POST /api/options/provider", s.handleProviderModelSet)
 
 	// Multi-project dashboard
 	mux.HandleFunc("/api/projects", s.handleProjects)
@@ -3989,6 +3990,61 @@ func (s *Server) handleMaxParallelSet(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleProviderModelSet persists the provider and/or model on the project state
+// so that subsequent runs (including the persistent UI Run buttons) use it
+// without needing to be passed on every invocation. Empty values mean "leave
+// unchanged"; sending an empty string for both is a no-op.
+//
+// POST /api/options/provider  body: {"provider":"...","model":"..."}
+func (s *Server) handleProviderModelSet(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Provider string `json:"provider"`
+		Model    string `json:"model"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonErr(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	// Whitelist providers to prevent garbage in state.json.
+	if req.Provider != "" {
+		switch req.Provider {
+		case "claudecode", "anthropic", "openai", "ollama":
+		default:
+			jsonErr(w, "unsupported provider: "+req.Provider, http.StatusBadRequest)
+			return
+		}
+	}
+	workDir := s.resolveWorkDir(r)
+	ps, err := state.Load(workDir)
+	if err != nil {
+		jsonErr(w, "no project found", http.StatusNotFound)
+		return
+	}
+	if req.Provider != "" {
+		ps.Provider = req.Provider
+	}
+	// Model is allowed to be cleared explicitly via "" only when a provider was
+	// just changed (since the previous model may not apply to the new provider).
+	// Otherwise non-empty replaces, empty leaves untouched.
+	if req.Model != "" {
+		ps.Model = req.Model
+	} else if req.Provider != "" {
+		ps.Model = ""
+	}
+	if err := ps.SaveDirect(); err != nil {
+		jsonErr(w, "save failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if raw, err := json.Marshal(ps); err == nil {
+		s.broadcastToProject(workDir, wsMessage{Type: "task_update", Data: json.RawMessage(raw)})
+	}
+	jsonOK(w, map[string]interface{}{
+		"ok":       true,
+		"provider": ps.Provider,
+		"model":    ps.Model,
+	})
+}
+
 // ── dashboard HTML ────────────────────────────────────────────────────────────
 
 const dashboardHTML = `<!DOCTYPE html>
@@ -4316,6 +4372,8 @@ const dashboardHTML = `<!DOCTYPE html>
   /* ── Stats grid ── */
   .stats-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(140px,1fr)); gap:10px; }
   .stat-card { background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); padding:12px 14px; }
+  .stat-card-clickable { cursor:pointer; transition:border-color .15s, background .15s; }
+  .stat-card-clickable:hover, .stat-card-clickable:focus { border-color:var(--accent); background:var(--hover-bg, var(--surface)); outline:none; }
   .stat-label { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.5px; margin-bottom:2px; }
   .stat-value { font-size:20px; font-weight:700; }
   .stat-value.accent { color:var(--accent); }
@@ -5735,8 +5793,8 @@ const dashboardHTML = `<!DOCTYPE html>
               <div class="stat-value accent" id="statSteps">—</div>
               <div class="stat-sub" id="statStepsSub"></div>
             </div>
-            <div class="stat-card">
-              <div class="stat-label">Provider</div>
+            <div class="stat-card stat-card-clickable" id="providerCard" onclick="openProviderModelModal()" title="Click to change provider and model" tabindex="0" role="button" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();openProviderModelModal();}">
+              <div class="stat-label">Provider <span style="font-size:10px;opacity:.6;margin-left:4px">✎</span></div>
               <div class="stat-value" id="statProvider" style="font-size:13px;margin-top:4px">—</div>
               <div class="stat-sub" id="statModel"></div>
             </div>
@@ -5857,22 +5915,15 @@ const dashboardHTML = `<!DOCTYPE html>
           </div>
           <details class="advanced">
             <summary>Advanced run options</summary>
+            <p style="font-size:12px;color:var(--muted);margin:8px 0">
+              One-shot toggles for this run only. Persistent options (Evolve, Innovate, PM, Skip Clarify, Parallel) are controlled by clicking their badges in <strong>Active Options</strong> above. Provider and model are set by clicking the <strong>Provider</strong> card.
+            </p>
             <div class="adv-grid">
               <label class="adv-label"><input type="checkbox" id="optAutoEvolve"> --auto-evolve</label>
               <label class="adv-label"><input type="checkbox" id="optPlanOnly"> --plan-only</label>
               <label class="adv-label"><input type="checkbox" id="optRetryFailed"> --retry-failed</label>
               <label class="adv-label"><input type="checkbox" id="optInnovate"> --innovate</label>
               <label class="adv-label"><input type="checkbox" id="optDryRun"> --dry-run</label>
-            </div>
-            <div class="adv-row">
-              <select class="form-select" id="optProvider" style="flex:1" onchange="updateAdvModelDropdown()">
-                <option value="">Provider (from config)</option>
-                <option value="claudecode">claudecode</option>
-                <option value="anthropic">anthropic</option>
-                <option value="openai">openai</option>
-                <option value="ollama">ollama</option>
-              </select>
-              <select class="form-select" id="optModel" style="flex:1"></select>
             </div>
             <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">
               <button id="ctrlRunAdv" class="btn success" onclick="apiRunAdv(false)">Run with options</button>
@@ -6637,6 +6688,36 @@ const dashboardHTML = `<!DOCTYPE html>
   </div>
 </div>
 
+<!-- Provider / Model picker modal -->
+<div id="provider-model-overlay" onclick="if(event.target===this)closeProviderModelModal()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
+  <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;width:520px;max-width:95vw">
+    <h2 style="font-size:15px;font-weight:600;margin-bottom:16px">Provider &amp; Model</h2>
+    <div class="form-row">
+      <div class="form-group" style="flex:1">
+        <label class="form-label">Provider</label>
+        <select class="form-select" id="pmProvider" onchange="onPMProviderChange()">
+          <option value="claudecode">claudecode</option>
+          <option value="anthropic">anthropic</option>
+          <option value="openai">openai</option>
+          <option value="ollama">ollama</option>
+        </select>
+      </div>
+      <div class="form-group" style="flex:1">
+        <label class="form-label">Model</label>
+        <select class="form-select" id="pmModel"></select>
+      </div>
+    </div>
+    <p style="font-size:12px;color:var(--muted);margin-top:6px;margin-bottom:8px">
+      Saved on the project. Used by all subsequent runs (Run, Run PM, Run with options) until changed.
+    </p>
+    <div id="pmError" style="display:none;color:var(--red);font-size:12px;margin-bottom:8px"></div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeProviderModelModal()">Cancel</button>
+      <button class="btn primary" onclick="saveProviderModel()">Save</button>
+    </div>
+  </div>
+</div>
+
 <!-- Edit Goal modal -->
 <div id="goal-edit-overlay" onclick="if(event.target===this)closeGoalEditModal()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
   <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;width:520px;max-width:95vw">
@@ -6983,37 +7064,14 @@ function updateModelDropdown() {
   sel.innerHTML = models.map(m => '<option value="'+m.value+'">'+m.label+'</option>').join('');
 }
 
-// Track current project's provider+model for pre-populating advanced run options
+// Track current project's provider+model for pre-populating the
+// Provider/Model picker modal opened from the Provider stat card.
 let _currentProvider = '';
 let _currentModel = '';
 
-function updateAdvModelDropdown(preselect) {
-  const sel = document.getElementById('optModel');
-  if (!sel) return;
-  const provSel = document.getElementById('optProvider');
-  // Use selected provider, or fall back to current project's provider
-  const prov = (provSel && provSel.value) || _currentProvider || 'claudecode';
-  const models = providerModels[prov] || [{value:'', label:'(default)'}];
-  const target = preselect || '';
-  sel.innerHTML = models.map(m => 
-    '<option value="'+m.value+'"'+(m.value===target?' selected':'')+'>'+m.label+'</option>'
-  ).join('');
-}
-
 function prepopulateAdvancedRunOptions(s) {
   _currentProvider = s.provider || '';
-  _currentModel = s.model || '';
-  const provSel = document.getElementById('optProvider');
-  if (provSel && _currentProvider) {
-    // Select matching provider option
-    for (let i = 0; i < provSel.options.length; i++) {
-      if (provSel.options[i].value === _currentProvider) {
-        provSel.selectedIndex = i;
-        break;
-      }
-    }
-  }
-  updateAdvModelDropdown(_currentModel);
+  _currentModel    = s.model    || '';
 }
 
 // Render the "Active Options" badge grid showing which CLI flags are persistently
@@ -8425,6 +8483,60 @@ window.selectProjectFromDropdown = function(idx, name) {
   openProject(idx, name);
 };
 
+// ── Provider / Model picker modal ─────────────────────────────────────────────
+
+window.openProviderModelModal = function() {
+  const provSel  = document.getElementById('pmProvider');
+  const errEl    = document.getElementById('pmError');
+  if (errEl) errEl.style.display = 'none';
+  const curProv  = _currentProvider || 'claudecode';
+  if (provSel) {
+    for (let i = 0; i < provSel.options.length; i++) {
+      if (provSel.options[i].value === curProv) { provSel.selectedIndex = i; break; }
+    }
+  }
+  populatePMModelDropdown(_currentModel || '');
+  const el = document.getElementById('provider-model-overlay');
+  if (el) el.style.display = 'flex';
+};
+
+window.closeProviderModelModal = function() {
+  const el = document.getElementById('provider-model-overlay');
+  if (el) el.style.display = 'none';
+};
+
+window.onPMProviderChange = function() {
+  populatePMModelDropdown('');
+};
+
+function populatePMModelDropdown(preselect) {
+  const sel  = document.getElementById('pmModel');
+  if (!sel) return;
+  const prov = (document.getElementById('pmProvider') || {}).value || 'claudecode';
+  const models = providerModels[prov] || [{value:'', label:'(default)'}];
+  sel.innerHTML = models.map(m =>
+    '<option value="'+esc(m.value)+'"'+(m.value===preselect?' selected':'')+'>'+esc(m.label)+'</option>'
+  ).join('');
+}
+
+window.saveProviderModel = function() {
+  const provider = (document.getElementById('pmProvider') || {}).value || '';
+  const model    = (document.getElementById('pmModel')    || {}).value || '';
+  const errEl    = document.getElementById('pmError');
+  if (errEl) errEl.style.display = 'none';
+  apiMethod('POST', pUrl('/api/options/provider'), {provider, model}).then(d => {
+    if (!d || !d.ok) {
+      if (errEl) { errEl.textContent = (d && d.error) || 'Failed to save'; errEl.style.display = ''; }
+      return;
+    }
+    closeProviderModelModal();
+    toast('Provider saved: ' + (d.provider || provider) + (d.model ? ' / ' + d.model : ''), 'ok');
+    api(pUrl('/api/state')).then(s => render(s)).catch(() => {});
+  }).catch(e => {
+    if (errEl) { errEl.textContent = 'Request failed: ' + e.message; errEl.style.display = ''; }
+  });
+};
+
 // ── New Project modal ─────────────────────────────────────────────────────────
 
 window.openGoalEditModal = function() {
@@ -9343,6 +9455,8 @@ window.apiRun = function(opts) {
 };
 
 window.apiRunAdv = function(pm) {
+  // Provider and model are persisted on the project via the Provider stat
+  // card; no per-run override here. Keeps the panel focused on one-shot flags.
   const opts = {
     pm:          pm,
     autoEvolve:  document.getElementById('optAutoEvolve').checked,
@@ -9350,8 +9464,6 @@ window.apiRunAdv = function(pm) {
     retryFailed: document.getElementById('optRetryFailed').checked,
     innovate:    document.getElementById('optInnovate').checked,
     dryRun:      document.getElementById('optDryRun').checked,
-    provider:    document.getElementById('optProvider').value,
-    model:       document.getElementById('optModel').value,
   };
   api(pUrl('/api/run'), opts).then(d => {
     if (d.ok) {
