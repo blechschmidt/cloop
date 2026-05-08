@@ -3856,7 +3856,7 @@ const dashboardHTML = `<!DOCTYPE html>
   }
 
   /* ── Tabs ── */
-  .tab-nav { display: flex; gap: 2px; }
+  .tab-nav { display: flex; gap: 2px; align-items: center; }
   .tab-btn {
     padding: 6px 14px;
     background: none;
@@ -3870,6 +3870,61 @@ const dashboardHTML = `<!DOCTYPE html>
   }
   .tab-btn:hover { color: var(--text); border-color: var(--border); }
   .tab-btn.active { color: var(--text); background: var(--bg); border-color: var(--border); }
+
+  /* Tab grouping: distinguish per-project tabs from global tabs */
+  .tab-section-label {
+    font-size: 9px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--muted);
+    padding: 0 6px;
+    align-self: center;
+    user-select: none;
+    flex-shrink: 0;
+    opacity: 0.7;
+  }
+  .tab-divider {
+    width: 1px;
+    background: var(--border);
+    align-self: stretch;
+    margin: 4px 6px;
+    flex-shrink: 0;
+  }
+  .tab-btn.global-tab.active { background: rgba(188,140,255,.10); border-color: rgba(188,140,255,.35); color: var(--purple); }
+  .tab-btn.global-tab:hover  { color: var(--purple); border-color: rgba(188,140,255,.4); }
+
+  /* Scope hint badge (shown in header near project selector) */
+  .scope-hint {
+    display: none;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 9px;
+    border-radius: 12px;
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: .6px;
+    flex-shrink: 0;
+    white-space: nowrap;
+  }
+  .scope-hint.visible { display: inline-flex; }
+  .scope-hint.project { background: rgba(88,166,255,.12);  color: var(--accent); border: 1px solid rgba(88,166,255,.35); }
+  .scope-hint.global  { background: rgba(188,140,255,.12); color: var(--purple); border: 1px solid rgba(188,140,255,.35); }
+
+  /* Mobile nav section headers */
+  .mobile-nav-section-label {
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--muted);
+    padding: 12px 14px 4px;
+    margin-top: 4px;
+    border-top: 1px solid var(--border);
+    user-select: none;
+  }
+  .mobile-nav-section-label:first-of-type { border-top: none; margin-top: 0; padding-top: 8px; }
 
   /* ── Main ── */
   main { flex: 1; padding: 24px; max-width: 1100px; margin: 0 auto; width: 100%; }
@@ -5045,6 +5100,8 @@ const dashboardHTML = `<!DOCTYPE html>
       <button class="tab-btn" onclick="clearProjectSelection()" style="padding:4px 10px;font-size:12px">&#8592; Projects</button>
       <span id="breadcrumbName" style="font-weight:600;color:var(--accent);font-size:13px;white-space:nowrap"></span>
     </div>
+    <!-- Scope hint badge: indicates whether the active tab is project-scoped or global -->
+    <span id="scopeHint" class="scope-hint" aria-live="polite" title="Indicates whether the current tab shows data for a single project or applies globally"></span>
     <!-- Hamburger button (mobile only) -->
     <button class="hamburger-btn" id="hamburgerBtn" onclick="openMobileNav()" aria-label="Open navigation menu" aria-expanded="false">
       <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
@@ -5055,19 +5112,22 @@ const dashboardHTML = `<!DOCTYPE html>
     </button>
 
     <div class="tab-nav" id="tabNav">
-      <button class="tab-btn active" onclick="switchTab('overview')"  id="tbtn-overview">Overview</button>
-      <button class="tab-btn"        onclick="switchTab('tasks')"     id="tbtn-tasks">Tasks</button>
-      <button class="tab-btn"        onclick="switchTab('kanban')"    id="tbtn-kanban">Kanban</button>
-      <button class="tab-btn"        onclick="switchTab('timeline')"  id="tbtn-timeline">Timeline</button>
-      <button class="tab-btn"        onclick="switchTab('kb')"        id="tbtn-kb">Knowledge Base</button>
-      <button class="tab-btn"        onclick="switchTab('deps')"      id="tbtn-deps">Dependencies</button>
-      <button class="tab-btn"        onclick="switchTab('risk-matrix')" id="tbtn-risk-matrix">Risk Matrix</button>
-      <button class="tab-btn"        onclick="switchTab('analytics')" id="tbtn-analytics">Analytics</button>
-      <button class="tab-btn"        onclick="switchTab('chat')"      id="tbtn-chat">Chat</button>
-      <button class="tab-btn"        onclick="switchTab('assistant')" id="tbtn-assistant">Assistant</button>
-      <button class="tab-btn"        onclick="switchTab('projects')"  id="tbtn-projects">Projects</button>
-      <button class="tab-btn"        onclick="switchTab('budget')"    id="tbtn-budget">Budget</button>
-      <button class="tab-btn"        onclick="switchTab('settings')"  id="tbtn-settings">Settings</button>
+      <span class="tab-section-label" title="These tabs show data for the currently selected project">Project</span>
+      <button class="tab-btn active" onclick="switchTab('overview')"  id="tbtn-overview"   title="Project overview (per-project)">Overview</button>
+      <button class="tab-btn"        onclick="switchTab('tasks')"     id="tbtn-tasks"      title="Tasks (per-project)">Tasks</button>
+      <button class="tab-btn"        onclick="switchTab('kanban')"    id="tbtn-kanban"     title="Kanban board (per-project)">Kanban</button>
+      <button class="tab-btn"        onclick="switchTab('timeline')"  id="tbtn-timeline"   title="Timeline / Gantt (per-project)">Timeline</button>
+      <button class="tab-btn"        onclick="switchTab('kb')"        id="tbtn-kb"         title="Knowledge Base (per-project)">Knowledge Base</button>
+      <button class="tab-btn"        onclick="switchTab('deps')"      id="tbtn-deps"       title="Task dependency graph (per-project)">Dependencies</button>
+      <button class="tab-btn"        onclick="switchTab('risk-matrix')" id="tbtn-risk-matrix" title="Risk matrix (per-project)">Risk Matrix</button>
+      <button class="tab-btn"        onclick="switchTab('analytics')" id="tbtn-analytics"  title="Analytics dashboard (per-project)">Analytics</button>
+      <button class="tab-btn"        onclick="switchTab('chat')"      id="tbtn-chat"       title="AI chat (per-project)">Chat</button>
+      <button class="tab-btn"        onclick="switchTab('assistant')" id="tbtn-assistant"  title="Plan assistant (per-project)">Assistant</button>
+      <span class="tab-divider" aria-hidden="true"></span>
+      <span class="tab-section-label" title="These tabs apply across all projects (global configuration)">Global</span>
+      <button class="tab-btn global-tab" onclick="switchTab('projects')"  id="tbtn-projects" title="All projects list (global)">Projects</button>
+      <button class="tab-btn global-tab" onclick="switchTab('budget')"    id="tbtn-budget"   title="Budget &amp; rate limits (global, with per-project caps)">Budget</button>
+      <button class="tab-btn global-tab" onclick="switchTab('settings')"  id="tbtn-settings" title="Settings (global)">Settings</button>
     </div>
     <div class="spacer"></div>
     <button class="theme-toggle-btn" id="themeToggleBtn" onclick="toggleTheme()" aria-label="Toggle dark/light mode" title="Toggle theme">
@@ -5137,6 +5197,7 @@ const dashboardHTML = `<!DOCTYPE html>
         <span class="mobile-nav-title">cloop</span>
         <button class="mobile-nav-close" onclick="closeMobileNav()" aria-label="Close navigation">&#x2715;</button>
       </div>
+      <div class="mobile-nav-section-label">Project</div>
       <button class="m-tab-btn" onclick="switchTab('overview')"  id="mtbtn-overview"><span class="m-tab-icon">&#128200;</span>Overview</button>
       <button class="m-tab-btn" onclick="switchTab('tasks')"     id="mtbtn-tasks"><span class="m-tab-icon">&#10003;</span>Tasks</button>
       <button class="m-tab-btn" onclick="switchTab('kanban')"    id="mtbtn-kanban"><span class="m-tab-icon">&#9783;</span>Kanban</button>
@@ -5147,9 +5208,10 @@ const dashboardHTML = `<!DOCTYPE html>
       <button class="m-tab-btn" onclick="switchTab('analytics')" id="mtbtn-analytics"><span class="m-tab-icon">&#128200;</span>Analytics</button>
       <button class="m-tab-btn" onclick="switchTab('chat')"      id="mtbtn-chat"><span class="m-tab-icon">&#128172;</span>Chat</button>
       <button class="m-tab-btn" onclick="switchTab('assistant')" id="mtbtn-assistant"><span class="m-tab-icon">&#129302;</span>Assistant</button>
-      <button class="m-tab-btn" onclick="switchTab('projects')"  id="mtbtn-projects"><span class="m-tab-icon">&#128193;</span>Projects</button>
-      <button class="m-tab-btn" onclick="switchTab('budget')"    id="mtbtn-budget"><span class="m-tab-icon">&#128178;</span>Budget</button>
-      <button class="m-tab-btn" onclick="switchTab('settings')"  id="mtbtn-settings"><span class="m-tab-icon">&#9881;</span>Settings</button>
+      <div class="mobile-nav-section-label">Global</div>
+      <button class="m-tab-btn" onclick="switchTab('projects')"  id="mtbtn-projects"><span class="m-tab-icon">&#127760;</span>Projects</button>
+      <button class="m-tab-btn" onclick="switchTab('budget')"    id="mtbtn-budget"><span class="m-tab-icon">&#127760;</span>Budget</button>
+      <button class="m-tab-btn" onclick="switchTab('settings')"  id="mtbtn-settings"><span class="m-tab-icon">&#127760;</span>Settings</button>
     </nav>
   </div>
 
@@ -6354,7 +6416,7 @@ window.switchTab = function(name) {
   if (isMultiProject) {
     const bc = document.getElementById('projectBreadcrumb');
     updateProjectSelector();
-    if (name === 'projects' || name === 'settings') {
+    if (name === 'projects' || name === 'settings' || name === 'budget') {
       // Global tabs: hide breadcrumb
       if (bc) bc.style.display = 'none';
     } else {
@@ -6362,7 +6424,35 @@ window.switchTab = function(name) {
       if (bc) bc.style.display = selectedProjectIdx !== null ? 'flex' : 'none';
     }
   }
+
+  // Update scope hint badge in header to make project-vs-global clear.
+  updateScopeHint(name);
 };
+
+// updateScopeHint reflects whether the active tab is per-project or global.
+// In single-project mode the hint still appears so the distinction is clear.
+function updateScopeHint(name) {
+  const globalTabs = ['projects','budget','settings'];
+  const hint = document.getElementById('scopeHint');
+  if (!hint) return;
+  hint.classList.remove('visible','project','global');
+  if (globalTabs.includes(name)) {
+    hint.textContent = 'Global';
+    hint.classList.add('visible','global');
+    hint.title = 'This tab applies across all projects (global configuration).';
+  } else {
+    if (isMultiProject && selectedProjectIdx === null) {
+      hint.textContent = 'All projects';
+      hint.classList.add('visible','global');
+      hint.title = 'No project selected — choose one from the project selector to see project data.';
+    } else {
+      hint.textContent = 'Project';
+      hint.classList.add('visible','project');
+      const projHint = (isMultiProject && selectedProjectName) ? selectedProjectName : 'this project';
+      hint.title = 'This tab shows data for ' + projHint + '.';
+    }
+  }
+}
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -9879,6 +9969,8 @@ function checkAuthAndInit() {
         switchTab('projects');
       } else {
         r.json().then(s => render(s)).catch(() => {});
+        // Single-project mode: still show the "Project" scope hint for the default Overview tab.
+        updateScopeHint(activeTab || 'overview');
       }
     }).catch(() => {
       connectWS();
