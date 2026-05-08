@@ -67,6 +67,7 @@ func (p *Provider) Complete(ctx context.Context, prompt string, opts provider.Op
 
 	claudeBin := findClaude()
 	cmd := exec.CommandContext(ctx, claudeBin, args...)
+	cmd.Env = append(os.Environ(), "IS_SANDBOX=1")
 	if opts.WorkDir != "" {
 		cmd.Dir = opts.WorkDir
 	}
