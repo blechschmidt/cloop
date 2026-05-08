@@ -77,7 +77,6 @@ var (
 	scriptVerify         bool
 	runProfile           string
 	autoSplit            bool
-	skipHealthCheck      bool
 	multiAgentMode       bool
 	postReview           bool
 	healRetries          int
@@ -311,7 +310,6 @@ Press Ctrl+C to pause gracefully.`,
 
 		orchCfg := orchestrator.Config{
 			LogJSON:             effectiveLogJSON,
-			SkipHealthCheck:     skipHealthCheck,
 			MultiAgent:          multiAgentMode,
 			PostReview:          postReview,
 			ConsensusN:          consensusN,
@@ -637,7 +635,6 @@ func init() {
 	runCmd.Flags().BoolVar(&scriptVerify, "script-verify", false, "PM mode: after each TASK_DONE, generate and run an AI shell script that confirms the task was accomplished; marks task failed if the script exits non-zero")
 	runCmd.Flags().StringVar(&runProfile, "profile", "", "Named configuration profile to apply (overrides the active profile set by 'cloop profile use')")
 	runCmd.Flags().BoolVar(&autoSplit, "auto-split", false, "PM mode: automatically decompose a task into subtasks when it has failed 2+ times (sequential only)")
-	runCmd.Flags().BoolVar(&skipHealthCheck, "skip-health-check", false, "PM mode: skip the AI plan health evaluation that runs after decomposition")
 	runCmd.Flags().BoolVar(&multiAgentMode, "multi-agent", false, "PM mode: run each task through a three-pass specialist pipeline: architect→coder→reviewer (sequential only). Each pass uses a distinct system prompt; the reviewer's verdict overrides the coder's signal. Sub-agent outputs are stored as .cloop/tasks/<id>-<slug>-multiagent/{architect,coder,reviewer}.txt")
 	runCmd.Flags().BoolVar(&postReview, "post-review", false, "PM mode: after each TASK_DONE run an AI code review on `git diff HEAD~1` and store the verdict as a task annotation (sequential only). Can also be enabled via hooks.post_task_review in config.")
 	runCmd.Flags().IntVar(&healRetries, "heal-retries", 0, "PM mode: max auto-heal re-attempts after TASK_FAILED before permanently marking the task failed (0 = default 2); each attempt diagnoses the failure and retries with a modified prompt")

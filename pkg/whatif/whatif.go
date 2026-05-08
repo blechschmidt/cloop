@@ -1,7 +1,7 @@
 // Package whatif implements scenario-based what-if planning for cloop.
 // It applies a natural-language mutation to an in-memory copy of the plan,
-// re-runs velocity forecasting and health scoring, and feeds the before/after
-// diff to the AI to narrate timeline, risk, and mitigation consequences.
+// re-runs velocity forecasting, and feeds the before/after diff to the AI
+// to narrate timeline, risk, and mitigation consequences.
 package whatif
 
 import (
@@ -9,10 +9,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/blechschmidt/cloop/pkg/forecast"
-	"github.com/blechschmidt/cloop/pkg/health"
 	"github.com/blechschmidt/cloop/pkg/planedit"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/provider"
@@ -28,19 +26,17 @@ type TaskChange struct {
 	After     string `json:"after"`
 }
 
-// Report holds the full what-if analysis — before/after forecasts, health
-// scores, structural diff, and the AI narrative.
+// Report holds the full what-if analysis — before/after forecasts,
+// structural diff, and the AI narrative.
 type Report struct {
 	Scenario string `json:"scenario"`
 
 	// Before state
-	BeforeForecast *forecast.Forecast  `json:"before_forecast"`
-	BeforeHealth   health.HealthReport `json:"before_health"`
+	BeforeForecast *forecast.Forecast `json:"before_forecast"`
 
 	// After (mutated) state
-	MutatedPlan  *pm.Plan            `json:"mutated_plan"`
+	MutatedPlan   *pm.Plan           `json:"mutated_plan"`
 	AfterForecast *forecast.Forecast `json:"after_forecast"`
-	AfterHealth  health.HealthReport `json:"after_health"`
 
 	// Structural diff
 	TasksAdded   []*pm.Task   `json:"tasks_added,omitempty"`
@@ -203,12 +199,6 @@ func BuildNarrativePrompt(report *Report) string {
 		}
 	}
 
-	// Health scores
-	sb.WriteString(fmt.Sprintf("\n## HEALTH SCORE\n  Before: %d/100 (%s) — %s\n  After:  %d/100 (%s) — %s\n\n",
-		report.BeforeHealth.Score, report.BeforeHealth.Grade(), report.BeforeHealth.Summary,
-		report.AfterHealth.Score, report.AfterHealth.Grade(), report.AfterHealth.Summary,
-	))
-
 	// Newly blocked tasks
 	if report.AfterForecast != nil && report.BeforeForecast != nil {
 		newlyBlocked := report.AfterForecast.BlockedTasks - report.BeforeForecast.BlockedTasks
@@ -234,9 +224,8 @@ func BuildNarrativePrompt(report *Report) string {
 //  1. Clone plan.
 //  2. Apply mutation via AI (using planedit).
 //  3. Build before/after forecasts (no AI).
-//  4. Score before/after health (AI calls, run in parallel goroutines).
-//  5. Build diff.
-//  6. Generate AI narrative (streamed via streamFn).
+//  4. Build diff.
+//  5. Generate AI narrative (streamed via streamFn).
 func Run(ctx context.Context, prov provider.Provider, opts provider.Options, s *state.ProjectState, scenario string, streamFn func(string)) (*Report, error) {
 	if s.Plan == nil {
 		return nil, fmt.Errorf("whatif: no task plan found — run 'cloop run --pm' to create one")
@@ -263,56 +252,21 @@ func Run(ctx context.Context, prov provider.Provider, opts provider.Options, s *
 	beforeForecast := forecast.Build(beforeState)
 	afterForecast := forecast.Build(afterState)
 
-	// 4. Score health in parallel (two AI calls).
-	type healthResult struct {
-		report health.HealthReport
-		err    error
-	}
-	beforeCh := make(chan healthResult, 1)
-	afterCh := make(chan healthResult, 1)
-
-	healthTimeout := opts.Timeout
-	if healthTimeout <= 0 {
-		healthTimeout = 90 * time.Second
-	}
-
-	go func() {
-		hCtx, cancel := context.WithTimeout(ctx, healthTimeout)
-		defer cancel()
-		r, e := health.Score(hCtx, prov, opts.Model, healthTimeout, originalPlan)
-		beforeCh <- healthResult{r, e}
-	}()
-	go func() {
-		hCtx, cancel := context.WithTimeout(ctx, healthTimeout)
-		defer cancel()
-		r, e := health.Score(hCtx, prov, opts.Model, healthTimeout, mutatedPlan)
-		afterCh <- healthResult{r, e}
-	}()
-
-	bh := <-beforeCh
-	ah := <-afterCh
-
-	// Health errors are non-fatal: use degraded report.
-	beforeHealth := bh.report
-	afterHealth := ah.report
-
-	// 5. Diff.
+	// 4. Diff.
 	added, removed, changed := diffPlans(originalPlan, mutatedPlan)
 
 	report := &Report{
 		Scenario:            scenario,
 		BeforeForecast:      beforeForecast,
-		BeforeHealth:        beforeHealth,
 		MutatedPlan:         mutatedPlan,
 		AfterForecast:       afterForecast,
-		AfterHealth:         afterHealth,
 		TasksAdded:          added,
 		TasksRemoved:        removed,
 		TasksChanged:        changed,
 		RemovedTaskWarnings: editResult.RemovedTasks,
 	}
 
-	// 6. Generate AI narrative (streamed).
+	// 5. Generate AI narrative (streamed).
 	narrativePrompt := BuildNarrativePrompt(report)
 	narrativeOpts := opts
 	narrativeOpts.OnToken = streamFn
@@ -364,11 +318,7 @@ func FormatMarkdown(r *Report) string {
 		sb.WriteString(fmt.Sprintf("| Expected completion | %s | %s | — |\n", bETA, aETA))
 	}
 
-	sb.WriteString(fmt.Sprintf("| Health score | %d/100 (%s) | %d/100 (%s) | %+d |\n\n",
-		r.BeforeHealth.Score, r.BeforeHealth.Grade(),
-		r.AfterHealth.Score, r.AfterHealth.Grade(),
-		r.AfterHealth.Score-r.BeforeHealth.Score,
-	))
+	sb.WriteString("\n")
 
 	// Mutation summary
 	if len(r.TasksAdded)+len(r.TasksRemoved)+len(r.TasksChanged) > 0 {

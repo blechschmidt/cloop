@@ -13,7 +13,6 @@ import (
 
 	_ "modernc.org/sqlite" // pure-Go SQLite driver, no CGo
 
-	"github.com/blechschmidt/cloop/pkg/health"
 	"github.com/blechschmidt/cloop/pkg/milestone"
 	"github.com/blechschmidt/cloop/pkg/pm"
 )
@@ -39,7 +38,6 @@ type State struct {
 	Milestones        []*milestone.Milestone
 	TotalInputTokens  int
 	TotalOutputTokens int
-	HealthReport      *health.HealthReport
 	DefaultMaxMinutes int
 	SkipClarify       bool
 	InnovateMode      bool
@@ -220,12 +218,6 @@ func (d *DB) SaveState(s *State) error {
 	}
 
 	// JSON blob fields
-	if s.HealthReport != nil {
-		b, _ := json.Marshal(s.HealthReport)
-		meta["health_report"] = string(b)
-	} else {
-		meta["health_report"] = ""
-	}
 	if len(s.Milestones) > 0 {
 		b, _ := json.Marshal(s.Milestones)
 		meta["milestones"] = string(b)
@@ -313,12 +305,6 @@ func (d *DB) LoadState() (*State, error) {
 		s.UpdatedAt, _ = time.Parse(time.RFC3339Nano, v)
 	}
 
-	if v := metaMap["health_report"]; v != "" {
-		s.HealthReport = &health.HealthReport{}
-		if err := json.Unmarshal([]byte(v), s.HealthReport); err != nil {
-			s.HealthReport = nil
-		}
-	}
 	if v := metaMap["milestones"]; v != "" {
 		if err := json.Unmarshal([]byte(v), &s.Milestones); err != nil {
 			s.Milestones = nil

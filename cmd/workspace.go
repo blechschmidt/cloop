@@ -152,7 +152,6 @@ type WorkspaceStatusEntry struct {
 	PendingTasks int     `json:"pending_tasks"`
 	Velocity     float64 `json:"velocity_tasks_per_day"` // tasks completed per day
 	LastActivity string  `json:"last_activity"`
-	HealthScore  int     `json:"health_score"` // 0 if not available
 	Error        string  `json:"error,omitempty"`
 }
 
@@ -202,7 +201,7 @@ var workspaceStatusCmd = &cobra.Command{
 	Short: "Aggregate dashboard across all registered workspaces",
 	Long: `Display a unified status table for every registered workspace.
 
-Columns: NAME, TOTAL, DONE, IN-PROG, FAILED, VELOCITY (tasks/day), LAST ACTIVITY, HEALTH
+Columns: NAME, TOTAL, DONE, IN-PROG, FAILED, VELOCITY (tasks/day), LAST ACTIVITY
 
 Use --json for machine-readable output.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -246,9 +245,6 @@ Use --json for machine-readable output.`,
 					}
 					entry.Velocity = computeVelocity(s)
 				}
-				if s.HealthReport != nil {
-					entry.HealthScore = s.HealthReport.Score
-				}
 			}
 			entries = append(entries, entry)
 		}
@@ -261,7 +257,7 @@ Use --json for machine-readable output.`,
 
 		// Human-readable table.
 		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-		fmt.Fprintln(w, "  NAME\tTOTAL\tDONE\tIN-PROG\tFAILED\tVELOCITY\tLAST ACTIVITY\tHEALTH")
+		fmt.Fprintln(w, "  NAME\tTOTAL\tDONE\tIN-PROG\tFAILED\tVELOCITY\tLAST ACTIVITY")
 		for _, e := range entries {
 			marker := "  "
 			displayName := e.Name
@@ -275,7 +271,6 @@ Use --json for machine-readable output.`,
 			inProgStr := "-"
 			failedStr := "-"
 			velocityStr := "-"
-			healthStr := "-"
 
 			if e.Error == "" {
 				totalStr = fmt.Sprintf("%d", e.TotalTasks)
@@ -287,9 +282,6 @@ Use --json for machine-readable output.`,
 				} else {
 					velocityStr = "n/a"
 				}
-				if e.HealthScore > 0 {
-					healthStr = healthScoreStr(e.HealthScore)
-				}
 			}
 
 			lastActivity := e.LastActivity
@@ -300,10 +292,10 @@ Use --json for machine-readable output.`,
 				lastActivity = color.New(color.FgRed).Sprint(e.Error)
 			}
 
-			fmt.Fprintf(w, "%s%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			fmt.Fprintf(w, "%s%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 				marker, displayName,
 				totalStr, doneStr, inProgStr, failedStr,
-				velocityStr, lastActivity, healthStr)
+				velocityStr, lastActivity)
 		}
 		w.Flush()
 		return nil
@@ -315,17 +307,6 @@ func colorCount(n int, c color.Attribute) string {
 		return "0"
 	}
 	return color.New(c).Sprintf("%d", n)
-}
-
-func healthScoreStr(score int) string {
-	switch {
-	case score >= 80:
-		return color.New(color.FgGreen).Sprintf("%d", score)
-	case score >= 50:
-		return color.New(color.FgYellow).Sprintf("%d", score)
-	default:
-		return color.New(color.FgRed).Sprintf("%d", score)
-	}
 }
 
 // ---------- workspace run-all ----------

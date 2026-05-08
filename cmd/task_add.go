@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/config"
-	"github.com/blechschmidt/cloop/pkg/health"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/provider"
 	"github.com/blechschmidt/cloop/pkg/state"
@@ -31,7 +30,6 @@ var (
 	addProvider   string
 	addModel      string
 	addTimeout    string
-	addHealth     bool
 )
 
 var taskAddCmd = &cobra.Command{
@@ -232,36 +230,6 @@ Examples:
 
 		color.New(color.FgGreen).Printf("Added task %d: %s (priority %d)\n", task.ID, task.Title, task.Priority)
 
-		// Optional plan health re-score
-		if addHealth {
-			color.New(color.FgCyan).Printf("\nScoring plan health...\n")
-			report, herr := health.Score(ctx, prov, model, timeout, s.Plan)
-			if herr != nil {
-				color.New(color.FgYellow).Printf("Health check failed: %v\n", herr)
-			} else {
-				scoreColor := color.New(color.FgGreen)
-				if report.Score < 70 {
-					scoreColor = color.New(color.FgYellow)
-				}
-				if report.Score < 50 {
-					scoreColor = color.New(color.FgRed)
-				}
-				scoreColor.Printf("Plan health score: %d/100 — %s\n", report.Score, report.Summary)
-				if len(report.Issues) > 0 {
-					fmt.Println("Issues:")
-					for _, iss := range report.Issues {
-						fmt.Printf("  • %s\n", iss)
-					}
-				}
-				if len(report.Suggestions) > 0 {
-					fmt.Println("Suggestions:")
-					for _, sug := range report.Suggestions {
-						fmt.Printf("  → %s\n", sug)
-					}
-				}
-			}
-		}
-
 		return nil
 	},
 }
@@ -340,7 +308,6 @@ func init() {
 	taskAddCmd.Flags().StringVar(&addProvider, "provider", "", "AI provider to use (anthropic, openai, ollama, claudecode)")
 	taskAddCmd.Flags().StringVar(&addModel, "model", "", "Model override for the AI provider")
 	taskAddCmd.Flags().StringVar(&addTimeout, "timeout", "3m", "Timeout for the AI call (e.g. 2m, 300s)")
-	taskAddCmd.Flags().BoolVar(&addHealth, "health", false, "Re-score plan health after adding the task")
 
 	taskCmd.AddCommand(taskAddCmd)
 }

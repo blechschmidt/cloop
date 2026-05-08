@@ -252,14 +252,6 @@ func printWhatIfTable(r *whatif.Report) {
 		}
 	}
 
-	deltaHealth := r.AfterHealth.Score - r.BeforeHealth.Score
-	printRow("Health score",
-		fmt.Sprintf("%d/100 (%s)", r.BeforeHealth.Score, r.BeforeHealth.Grade()),
-		fmt.Sprintf("%d/100 (%s)", r.AfterHealth.Score, r.AfterHealth.Grade()),
-		fmt.Sprintf("%+d", deltaHealth),
-		deltaHealth >= 0,
-	)
-
 	fmt.Printf("  %s\n\n", strings.Repeat("─", 68))
 
 	if len(r.TasksAdded) > 0 {

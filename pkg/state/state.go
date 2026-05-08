@@ -8,7 +8,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/blechschmidt/cloop/pkg/health"
 	"github.com/blechschmidt/cloop/pkg/milestone"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/statedb"
@@ -90,9 +89,6 @@ type ProjectState struct {
 	// Cumulative token usage across all steps
 	TotalInputTokens  int `json:"total_input_tokens,omitempty"`
 	TotalOutputTokens int `json:"total_output_tokens,omitempty"`
-
-	// HealthReport is the most recent plan health evaluation result.
-	HealthReport *health.HealthReport `json:"health_report,omitempty"`
 
 	// DefaultMaxMinutes is the project-level per-task execution time budget.
 	DefaultMaxMinutes int `json:"default_max_minutes,omitempty"`
@@ -345,7 +341,6 @@ func toRaw(s *ProjectState) *statedb.State {
 		Milestones:        s.Milestones,
 		TotalInputTokens:  s.TotalInputTokens,
 		TotalOutputTokens: s.TotalOutputTokens,
-		HealthReport:      s.HealthReport,
 		DefaultMaxMinutes: s.DefaultMaxMinutes,
 		SkipClarify:       s.SkipClarify,
 		InnovateMode:      s.InnovateMode,
@@ -385,7 +380,6 @@ func fromRaw(r *statedb.State) *ProjectState {
 		Milestones:        r.Milestones,
 		TotalInputTokens:  r.TotalInputTokens,
 		TotalOutputTokens: r.TotalOutputTokens,
-		HealthReport:      r.HealthReport,
 		DefaultMaxMinutes: r.DefaultMaxMinutes,
 		SkipClarify:       r.SkipClarify,
 		InnovateMode:      r.InnovateMode,
@@ -431,7 +425,6 @@ type legacyState struct {
 	Milestones        []*milestone.Milestone `json:"milestones,omitempty"`
 	TotalInputTokens  int                  `json:"total_input_tokens,omitempty"`
 	TotalOutputTokens int                  `json:"total_output_tokens,omitempty"`
-	HealthReport      *health.HealthReport `json:"health_report,omitempty"`
 	DefaultMaxMinutes int                  `json:"default_max_minutes,omitempty"`
 	SkipClarify       bool                 `json:"skip_clarify,omitempty"`
 	InnovateMode      bool                 `json:"innovate_mode,omitempty"`
@@ -472,7 +465,6 @@ func migrateFromJSON(dir, jsonPath, dbPath string) error {
 		Milestones:        legacy.Milestones,
 		TotalInputTokens:  legacy.TotalInputTokens,
 		TotalOutputTokens: legacy.TotalOutputTokens,
-		HealthReport:      legacy.HealthReport,
 		DefaultMaxMinutes: legacy.DefaultMaxMinutes,
 		SkipClarify:       legacy.SkipClarify,
 		InnovateMode:      legacy.InnovateMode,
