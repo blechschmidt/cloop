@@ -7384,6 +7384,38 @@ function render(s) {
 
   // Update live output running indicator.
   renderLiveLog();
+
+  // Reflect the currently-running task in the browser tab title and
+  // sidebar tooltips. Driven entirely by the state already pushed via
+  // task_update / run_state events — no extra polling.
+  updateBrowserTitle();
+}
+
+// _runningTaskTitle holds the title of the in-progress task on the
+// currently-selected project (empty when nothing is running). Used by
+// updateBrowserTitle() and renderProjects() so the browser tab and the
+// sidebar tooltip stay in sync without re-fetching state.
+let _runningTaskTitle = '';
+
+function updateBrowserTitle() {
+  let title = '';
+  if (appState && appState.plan && Array.isArray(appState.plan.tasks)) {
+    const inProg = appState.plan.tasks.find(t => t && t.status === 'in_progress');
+    if (inProg) title = inProg.title || ('Task #' + inProg.id);
+  }
+  if (!title && appState && appState.status === 'running') {
+    title = 'Running…';
+  }
+  const prev = _runningTaskTitle;
+  _runningTaskTitle = title;
+  // Truncate so the OS tab doesn't overflow.
+  const display = title.length > 60 ? title.slice(0, 57) + '…' : title;
+  document.title = display ? '▶ ' + display + ' — cloop' : 'cloop';
+  // If the running title flipped, refresh the project sidebar so the
+  // tooltip on the selected project entry reflects the new task.
+  if (prev !== title && window._lastProjectsData) {
+    try { renderProjects(window._lastProjectsData.projects, window._lastProjectsData.stats); } catch(_) {}
+  }
 }
 
 // renderMultiProjectOverview shows a card grid summary of all projects on the
@@ -8081,6 +8113,13 @@ function handleRealtimeMsg(type, data) {
       try {
         if (data && typeof data.running !== 'undefined') {
           updateRunButtonState(!!data.running);
+          // When the run stops we may not get a final task_update flipping
+          // the in-progress task to done — refetch state so the tab title
+          // doesn't sit on a stale "▶ <task>" until the next mutation.
+          if (!data.running) {
+            const url = (typeof pUrl === 'function' && isMultiProject) ? pUrl('/api/state') : '/api/state';
+            api(url).then(s => { try { render(s); } catch(_) {} }).catch(() => {});
+          }
         }
       } catch(_) {}
       break;
@@ -8310,8 +8349,19 @@ function renderProjects(projects, stats) {
       : (p.total_steps ? p.total_steps + ' steps' : 'no steps');
     const selCls  = (selectedProjectIdx === idx) ? ' selected' : '';
     const nameSafe = JSON.stringify(p.name).replace(/"/g, '&quot;');
+    // Build a tooltip that surfaces the running task across projects.
+    // For the selected project we know the in-progress task title from
+    // appState (kept fresh by task_update events). For other projects we
+    // only know the running flag, so fall back to a generic label.
+    let _tip = 'Open project';
+    if (p.running) {
+      _tip = (selectedProjectIdx === idx && _runningTaskTitle)
+        ? 'Running: ' + _runningTaskTitle
+        : 'Currently running…';
+    }
+    const tipSafe = esc(_tip);
     return ` + "`" + `
-      <div class="proj-card${selCls}" onclick="openProject(${idx},${nameSafe})" title="Open project">
+      <div class="proj-card${selCls}" onclick="openProject(${idx},${nameSafe})" title="${tipSafe}">
         <div class="proj-health-dot ${health}"></div>
         <div class="proj-name">${esc(p.name)}</div>
         <div class="proj-goal" title="${esc(p.goal || '')}">${goal}</div>
@@ -8384,6 +8434,8 @@ window.clearProjectSelection = function() {
   const sw = document.getElementById('projSelectorWrap');
   if (sw) sw.classList.remove('visible');
   switchTab('projects');
+  // No project selected → no per-project running task to advertise.
+  updateBrowserTitle();
 };
 
 // ── Project selector dropdown ─────────────────────────────────────────────────
