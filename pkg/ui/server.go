@@ -6839,11 +6839,7 @@ function renderTasks(s) {
       '</div>'+
       '<div class="task-actions">'+
         statusActions+
-        '<button class="act edit"   title="Edit"   onclick="openEditModal('+tid+','+
-          JSON.stringify(t.title).replace(/</g,'\\u003c')+','+
-          JSON.stringify(t.description||'').replace(/</g,'\\u003c')+','+
-          t.priority+','+
-          JSON.stringify(t.depends_on||[]).replace(/</g,'\\u003c')+')">Edit</button>'+
+        '<button class="act edit"   title="Edit"   onclick="openEditModal('+tid+')">Edit</button>'+
         '<button class="act remove" title="Remove" onclick="removeTask('+tid+')">Remove</button>'+
         priorityBadge(t.priority)+
         '<span style="font-size:11px;color:var(--muted)">#'+tid+'</span>'+
@@ -8622,12 +8618,15 @@ window.onDragEnd = function(e) {
 
 // ── Edit modal ───────────────────────────────────────────────────────────────
 
-window.openEditModal = function(id, title, desc, priority, dependsOn) {
-  document.getElementById('modalTaskId').value   = id;
-  document.getElementById('modalTitle_').value   = title;
-  document.getElementById('modalDesc').value     = desc;
-  document.getElementById('modalPriority').value = priority;
-  document.getElementById('modalDeps').value     = (dependsOn && dependsOn.length) ? dependsOn.join(',') : '';
+window.openEditModal = function(id) {
+  const tasks = (appState && appState.plan && appState.plan.tasks) || [];
+  const t = tasks.find(x => x.id === id);
+  if (!t) { toast('Task #' + id + ' not found', 'err'); return; }
+  document.getElementById('modalTaskId').value   = t.id;
+  document.getElementById('modalTitle_').value   = t.title || '';
+  document.getElementById('modalDesc').value     = t.description || '';
+  document.getElementById('modalPriority').value = t.priority || 0;
+  document.getElementById('modalDeps').value     = (t.depends_on && t.depends_on.length) ? t.depends_on.join(',') : '';
   document.getElementById('modal-overlay').classList.add('open');
   document.getElementById('modalTitle_').focus();
 };
