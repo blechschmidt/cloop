@@ -31,6 +31,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/ratelimit"
 	"github.com/blechschmidt/cloop/pkg/riskmatrix"
 	"github.com/blechschmidt/cloop/pkg/state"
+	"github.com/blechschmidt/cloop/pkg/suggest"
 	"github.com/blechschmidt/cloop/pkg/timeline"
 )
 
@@ -135,12 +136,14 @@ type Server struct {
 	liveLogLines   []string
 	liveLogRunning bool
 
-	// Suggest background job state
-	suggestMu      sync.Mutex
-	suggestRunning bool
-	suggestLog     bytes.Buffer
-	suggestErr     string
-	suggestDone    bool
+	// Suggest background job state. Suggestions are generated and held for the
+	// user to review individually; clients add either selected ones or all.
+	suggestMu          sync.Mutex
+	suggestRunning     bool
+	suggestDone        bool
+	suggestErr         string
+	suggestSummary     string
+	suggestSuggestions []*suggest.Suggestion
 
 	// Multi-project state cache
 	projMu       sync.RWMutex
@@ -284,8 +287,9 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/config/set", s.handleConfigSet)
 
 	// Suggest
-	mux.HandleFunc("/api/suggest/run", s.handleSuggestRun)
+	mux.HandleFunc("/api/suggest/generate", s.handleSuggestGenerate)
 	mux.HandleFunc("/api/suggest/status", s.handleSuggestStatus)
+	mux.HandleFunc("/api/suggest/add", s.handleSuggestAdd)
 
 	// Live log
 	mux.HandleFunc("/api/livelog", s.handleLiveLog)
@@ -1793,8 +1797,10 @@ func (s *Server) handleLiveLog(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleSuggestRun triggers background suggest generation via `cloop suggest --yes`.
-func (s *Server) handleSuggestRun(w http.ResponseWriter, r *http.Request) {
+// handleSuggestGenerate runs `cloop suggest --json` in the background, parses
+// the resulting suggestions, and stores them for review. Clients then call
+// /api/suggest/status to retrieve them.
+func (s *Server) handleSuggestGenerate(w http.ResponseWriter, r *http.Request) {
 	if !requirePOST(w, r) {
 		return
 	}
@@ -1818,7 +1824,8 @@ func (s *Server) handleSuggestRun(w http.ResponseWriter, r *http.Request) {
 	s.suggestRunning = true
 	s.suggestDone = false
 	s.suggestErr = ""
-	s.suggestLog.Reset()
+	s.suggestSummary = ""
+	s.suggestSuggestions = nil
 	s.suggestMu.Unlock()
 
 	exe, err := os.Executable()
@@ -1828,48 +1835,196 @@ func (s *Server) handleSuggestRun(w http.ResponseWriter, r *http.Request) {
 	suggestWorkDir := s.resolveWorkDir(r)
 
 	go func() {
-		cmd := exec.Command(exe, "suggest", "--yes", "--count", strconv.Itoa(req.Count))
+		cmd := exec.Command(exe, "suggest", "--json", "--count", strconv.Itoa(req.Count))
 		cmd.Dir = suggestWorkDir
-		var buf bytes.Buffer
-		cmd.Stdout = &buf
-		cmd.Stderr = &buf
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
 		runErr := cmd.Run()
 
 		s.suggestMu.Lock()
+		defer s.suggestMu.Unlock()
 		s.suggestRunning = false
 		s.suggestDone = true
-		_, _ = s.suggestLog.Write(buf.Bytes())
-		if runErr != nil {
-			s.suggestErr = runErr.Error()
-		}
-		s.suggestMu.Unlock()
 
-		// Force SSE broadcast of updated state (new tasks were added).
-		if ps, loadErr := state.Load(suggestWorkDir); loadErr == nil {
-			if data, marshalErr := json.Marshal(ps); marshalErr == nil {
-				s.broadcast(string(data))
+		if runErr != nil {
+			msg := strings.TrimSpace(stderr.String())
+			if msg == "" {
+				msg = runErr.Error()
 			}
+			s.suggestErr = msg
+			return
 		}
+
+		var result suggest.Result
+		if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+			s.suggestErr = "could not parse suggestions: " + err.Error()
+			return
+		}
+		s.suggestSummary = result.Summary
+		s.suggestSuggestions = result.Suggestions
 	}()
 
 	jsonOK(w, map[string]interface{}{"ok": true, "count": req.Count})
 }
 
-// handleSuggestStatus returns the current suggest job status and output log.
+// handleSuggestStatus returns the current suggest job status and any generated suggestions.
 func (s *Server) handleSuggestStatus(w http.ResponseWriter, r *http.Request) {
 	s.suggestMu.Lock()
 	running := s.suggestRunning
 	done := s.suggestDone
 	errMsg := s.suggestErr
-	log := s.suggestLog.String()
+	summary := s.suggestSummary
+	suggestions := append([]*suggest.Suggestion(nil), s.suggestSuggestions...)
 	s.suggestMu.Unlock()
 
 	jsonOK(w, map[string]interface{}{
-		"running": running,
-		"done":    done,
-		"error":   errMsg,
-		"log":     log,
+		"running":     running,
+		"done":        done,
+		"error":       errMsg,
+		"summary":     summary,
+		"suggestions": suggestions,
 	})
+}
+
+// handleSuggestAdd injects one or more reviewed suggestions into the plan as PM tasks.
+// Accepts either a list of suggestion IDs (referring to the most recent generation)
+// or a list of full suggestion objects.
+func (s *Server) handleSuggestAdd(w http.ResponseWriter, r *http.Request) {
+	if !requirePOST(w, r) {
+		return
+	}
+	var req struct {
+		IDs         []int                 `json:"ids"`
+		Suggestions []*suggest.Suggestion `json:"suggestions"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonErr(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	picked := req.Suggestions
+	if len(picked) == 0 && len(req.IDs) > 0 {
+		s.suggestMu.Lock()
+		idx := make(map[int]*suggest.Suggestion, len(s.suggestSuggestions))
+		for _, sg := range s.suggestSuggestions {
+			idx[sg.ID] = sg
+		}
+		for _, id := range req.IDs {
+			if sg, ok := idx[id]; ok {
+				picked = append(picked, sg)
+			}
+		}
+		s.suggestMu.Unlock()
+	}
+
+	if len(picked) == 0 {
+		jsonErr(w, "no suggestions to add", http.StatusBadRequest)
+		return
+	}
+
+	workDir := s.resolveWorkDir(r)
+	ps, err := state.Load(workDir)
+	if err != nil {
+		jsonErr(w, "no project found — run cloop init first", http.StatusNotFound)
+		return
+	}
+	if ps.Plan == nil {
+		ps.Plan = pm.NewPlan(ps.Goal)
+	}
+	if !ps.PMMode {
+		ps.PMMode = true
+	}
+
+	maxID := 0
+	for _, t := range ps.Plan.Tasks {
+		if t.ID > maxID {
+			maxID = t.ID
+		}
+	}
+
+	added := make([]int, 0, len(picked))
+	for _, sg := range picked {
+		if sg == nil || strings.TrimSpace(sg.Title) == "" {
+			continue
+		}
+		maxID++
+		task := &pm.Task{
+			ID:          maxID,
+			Title:       sg.Title,
+			Description: sg.Description,
+			Priority:    suggestEffortToPriorityUI(sg.Effort),
+			Status:      pm.TaskPending,
+			Role:        suggestCategoryToRoleUI(sg.Category),
+		}
+		ps.Plan.Tasks = append(ps.Plan.Tasks, task)
+		added = append(added, task.ID)
+	}
+
+	if err := ps.SaveDirect(); err != nil {
+		jsonErr(w, "save failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Drop accepted suggestions from the in-memory list.
+	if len(added) > 0 {
+		acceptedTitles := make(map[string]bool, len(picked))
+		for _, sg := range picked {
+			if sg != nil {
+				acceptedTitles[sg.Title] = true
+			}
+		}
+		s.suggestMu.Lock()
+		remaining := s.suggestSuggestions[:0]
+		for _, sg := range s.suggestSuggestions {
+			if !acceptedTitles[sg.Title] {
+				remaining = append(remaining, sg)
+			}
+		}
+		s.suggestSuggestions = remaining
+		s.suggestMu.Unlock()
+	}
+
+	if raw, err := json.Marshal(ps); err == nil {
+		s.broadcastToProject(workDir, wsMessage{Type: "task_update", Data: raw})
+	}
+
+	jsonOK(w, map[string]interface{}{
+		"ok":    true,
+		"added": added,
+	})
+}
+
+// suggestCategoryToRoleUI mirrors cmd/suggest_cmd.go:suggestCategoryToRole.
+func suggestCategoryToRoleUI(c suggest.Category) pm.AgentRole {
+	switch c {
+	case suggest.CategoryFeature, suggest.CategoryPerformance, suggest.CategoryIntegration:
+		return pm.RoleBackend
+	case suggest.CategoryUX:
+		return pm.RoleFrontend
+	case suggest.CategorySecurity:
+		return pm.RoleSecurity
+	case suggest.CategoryDX:
+		return pm.RoleDevOps
+	case suggest.CategoryDocs:
+		return pm.RoleDocs
+	default:
+		return ""
+	}
+}
+
+// suggestEffortToPriorityUI mirrors cmd/suggest_cmd.go:suggestEffortToPriority.
+func suggestEffortToPriorityUI(e suggest.Effort) int {
+	switch e {
+	case suggest.EffortXS, suggest.EffortS:
+		return 3
+	case suggest.EffortM:
+		return 4
+	case suggest.EffortL, suggest.EffortXL:
+		return 5
+	default:
+		return 4
+	}
 }
 
 // handleInit initializes a new cloop project.
@@ -4021,6 +4176,20 @@ const dashboardHTML = `<!DOCTYPE html>
   .suggest-controls { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:12px; }
   .suggest-log { background:var(--code-bg); border:1px solid var(--border); border-radius:var(--radius); padding:12px; font-family:monospace; font-size:12px; white-space:pre-wrap; color:#adbac7; max-height:320px; overflow-y:auto; margin-top:10px; }
   .suggest-status { font-size:13px; color:var(--muted); display:flex; align-items:center; gap:8px; }
+  .suggest-summary { font-size:12px; color:var(--muted); font-style:italic; padding:0 4px 10px; }
+  .suggest-list { display:flex; flex-direction:column; gap:10px; }
+  .suggest-card { background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); padding:12px 14px; }
+  .suggest-card-head { display:flex; align-items:flex-start; gap:10px; flex-wrap:wrap; margin-bottom:6px; }
+  .suggest-card-title { font-weight:600; font-size:14px; flex:1; min-width:0; }
+  .suggest-card-tags { display:flex; gap:6px; flex-shrink:0; }
+  .suggest-tag { font-size:10px; padding:2px 8px; border-radius:10px; text-transform:uppercase; letter-spacing:0.4px; font-weight:600; }
+  .suggest-tag-cat { background:rgba(88,166,255,0.15); color:#58a6ff; }
+  .suggest-tag-eff { background:rgba(163,113,247,0.15); color:#a371f7; }
+  .suggest-card-desc, .suggest-card-why { font-size:12.5px; line-height:1.55; margin-top:4px; color:var(--text); }
+  .suggest-card-why { color:var(--muted); }
+  .suggest-card-label { font-weight:600; color:var(--muted); margin-right:4px; }
+  .suggest-card-actions { display:flex; gap:8px; margin-top:10px; }
+  .suggest-card-actions .btn { padding:4px 12px; font-size:12px; }
   .spinner { display:inline-block; width:12px; height:12px; border:2px solid var(--border); border-top-color:var(--accent); border-radius:50%; animation:spin .8s linear infinite; }
   @keyframes spin { to { transform:rotate(360deg); } }
 
@@ -4897,7 +5066,6 @@ const dashboardHTML = `<!DOCTYPE html>
       <button class="tab-btn"        onclick="switchTab('chat')"      id="tbtn-chat">Chat</button>
       <button class="tab-btn"        onclick="switchTab('assistant')" id="tbtn-assistant">Assistant</button>
       <button class="tab-btn"        onclick="switchTab('projects')"  id="tbtn-projects">Projects</button>
-      <button class="tab-btn"        onclick="switchTab('suggest')"   id="tbtn-suggest">Suggest</button>
       <button class="tab-btn"        onclick="switchTab('budget')"    id="tbtn-budget">Budget</button>
       <button class="tab-btn"        onclick="switchTab('settings')"  id="tbtn-settings">Settings</button>
     </div>
@@ -4980,7 +5148,6 @@ const dashboardHTML = `<!DOCTYPE html>
       <button class="m-tab-btn" onclick="switchTab('chat')"      id="mtbtn-chat"><span class="m-tab-icon">&#128172;</span>Chat</button>
       <button class="m-tab-btn" onclick="switchTab('assistant')" id="mtbtn-assistant"><span class="m-tab-icon">&#129302;</span>Assistant</button>
       <button class="m-tab-btn" onclick="switchTab('projects')"  id="mtbtn-projects"><span class="m-tab-icon">&#128193;</span>Projects</button>
-      <button class="m-tab-btn" onclick="switchTab('suggest')"   id="mtbtn-suggest"><span class="m-tab-icon">&#128161;</span>Suggest</button>
       <button class="m-tab-btn" onclick="switchTab('budget')"    id="mtbtn-budget"><span class="m-tab-icon">&#128178;</span>Budget</button>
       <button class="m-tab-btn" onclick="switchTab('settings')"  id="mtbtn-settings"><span class="m-tab-icon">&#9881;</span>Settings</button>
     </nav>
@@ -5241,6 +5408,37 @@ const dashboardHTML = `<!DOCTYPE html>
           <button class="btn primary" onclick="submitAddTask()">Add Task</button>
         </div>
       </div>
+
+      <!-- AI Feature Suggestions -->
+      <div class="section">
+        <div class="section-title" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          AI Feature Suggestions
+          <span id="suggestCountBadge" style="color:var(--muted);font-weight:400;text-transform:none;letter-spacing:0"></span>
+          <button id="suggestToggleBtn" class="btn" style="margin-left:auto;padding:3px 10px;font-size:11px" onclick="toggleSuggestPanel()">Brainstorm ideas</button>
+        </div>
+        <div id="suggestPanel" style="display:none">
+          <div class="card" style="margin-bottom:12px">
+            <p style="font-size:13px;color:var(--muted);margin-bottom:12px">Generate AI-brainstormed feature ideas tailored to your project goal. Review each one — add what you like, skip the rest, or accept them all.</p>
+            <div class="suggest-controls">
+              <label class="form-label" style="margin:0;white-space:nowrap">Ideas to generate:</label>
+              <input class="form-input" id="suggestCount" type="number" min="1" max="20" value="5" style="width:70px">
+              <button class="btn primary" id="suggestBtn" onclick="runSuggest()">
+                <svg viewBox="0 0 16 16" fill="currentColor" width="13" height="13"><path d="M8 1a.5.5 0 0 1 .5.5V6h4.5a.5.5 0 0 1 0 1H8.5v4.5a.5.5 0 0 1-1 0V7H3a.5.5 0 0 1 0-1h4.5V1.5A.5.5 0 0 1 8 1z"/></svg>
+                Generate
+              </button>
+              <button class="btn" id="suggestAddAllBtn" onclick="addAllSuggestions()" style="display:none">Add all</button>
+              <button class="btn" id="suggestClearBtn"  onclick="clearSuggestions()" style="display:none">Clear</button>
+            </div>
+            <div id="suggestStatusLine" style="display:none" class="suggest-status">
+              <span class="spinner" id="suggestSpinner"></span>
+              <span id="suggestStatusText">Running...</span>
+            </div>
+          </div>
+          <div id="suggestSummary" class="suggest-summary" style="display:none"></div>
+          <div id="suggestList" class="suggest-list"></div>
+        </div>
+      </div>
+
       <div class="section">
         <div class="section-title" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
           Tasks <span id="taskCountBadge" style="color:var(--muted);font-weight:400;text-transform:none;letter-spacing:0"></span>
@@ -5515,32 +5713,6 @@ const dashboardHTML = `<!DOCTYPE html>
             <svg viewBox="0 0 16 16" fill="currentColor" width="13" height="13"><path d="M15.854.146a.5.5 0 0 1 .11.54l-5.819 14.547a.75.75 0 0 1-1.329.124l-3.178-4.995L.643 7.184a.75.75 0 0 1 .124-1.33L15.314.037a.5.5 0 0 1 .54.11z"/></svg>
             Send
           </button>
-        </div>
-      </div>
-    </div>
-
-    <!-- ═══════════════════════════════════════════════════════════ SUGGEST -->
-    <div id="tab-suggest" class="tab-panel">
-      <div class="section">
-        <div class="section-title">AI Feature Suggestions</div>
-        <div class="card" style="margin-bottom:12px">
-          <p style="font-size:13px;color:var(--muted);margin-bottom:12px">Generate AI-brainstormed feature ideas tailored to your project goal. Accepted suggestions are added as PM tasks automatically.</p>
-          <div class="suggest-controls">
-            <label class="form-label" style="margin:0;white-space:nowrap">Ideas to generate:</label>
-            <input class="form-input" id="suggestCount" type="number" min="1" max="20" value="5" style="width:70px">
-            <button class="btn primary" id="suggestBtn" onclick="runSuggest()">
-              <svg viewBox="0 0 16 16" fill="currentColor" width="13" height="13"><path d="M8 1a.5.5 0 0 1 .5.5V6h4.5a.5.5 0 0 1 0 1H8.5v4.5a.5.5 0 0 1-1 0V7H3a.5.5 0 0 1 0-1h4.5V1.5A.5.5 0 0 1 8 1z"/></svg>
-              Generate &amp; Add All
-            </button>
-          </div>
-          <div id="suggestStatusLine" style="display:none" class="suggest-status">
-            <span class="spinner" id="suggestSpinner"></span>
-            <span id="suggestStatusText">Running...</span>
-          </div>
-        </div>
-        <div id="suggestLogWrap" style="display:none">
-          <div class="section-title">Output</div>
-          <div class="suggest-log" id="suggestLogEl"></div>
         </div>
       </div>
     </div>
@@ -6145,7 +6317,7 @@ window.switchTab = function(name) {
 
   // In multi-project mode, re-fetch state for the selected project when
   // switching to any project-scoped tab so the data is always current.
-  const projectScopedTabs = ['overview','tasks','kanban','timeline','kb','deps','risk-matrix','analytics','chat','assistant','suggest'];
+  const projectScopedTabs = ['overview','tasks','kanban','timeline','kb','deps','risk-matrix','analytics','chat','assistant'];
   if (isMultiProject && selectedProjectIdx === null && name === 'overview') {
     // No project selected: show the all-projects summary panel.
     // Always reload so the cards reflect the latest project statuses.
@@ -8661,21 +8833,34 @@ window.submitEditTask = function() {
 
 // ── Suggest ──────────────────────────────────────────────────────────────────
 
+let currentSuggestions = [];
+
+window.toggleSuggestPanel = function() {
+  const panel = document.getElementById('suggestPanel');
+  const btn   = document.getElementById('suggestToggleBtn');
+  const open  = panel.style.display === 'none' || panel.style.display === '';
+  panel.style.display = open ? '' : 'none';
+  btn.textContent = open ? 'Hide suggestions' : 'Brainstorm ideas';
+};
+
 window.runSuggest = function() {
   const count = parseInt(document.getElementById('suggestCount').value)||5;
   document.getElementById('suggestBtn').disabled = true;
   document.getElementById('suggestStatusLine').style.display = '';
   document.getElementById('suggestSpinner').style.display    = '';
   document.getElementById('suggestStatusText').textContent   = 'Generating '+count+' ideas with AI...';
-  document.getElementById('suggestLogWrap').style.display    = 'none';
+  document.getElementById('suggestList').innerHTML           = '';
+  document.getElementById('suggestSummary').style.display    = 'none';
+  document.getElementById('suggestAddAllBtn').style.display  = 'none';
+  document.getElementById('suggestClearBtn').style.display   = 'none';
 
-  api(pUrl('/api/suggest/run'), {count}).then(d => {
+  api(pUrl('/api/suggest/generate'), {count}).then(d => {
     if (!d.ok) {
       stopSuggestPoll('Error: '+(d.error||'failed'));
       return;
     }
     suggestPollTimer = setInterval(pollSuggestStatus, 1500);
-  }).catch(err => stopSuggestPoll('Request failed'));
+  }).catch(() => stopSuggestPoll('Request failed'));
 };
 
 function pollSuggestStatus() {
@@ -8684,7 +8869,6 @@ function pollSuggestStatus() {
       document.getElementById('suggestStatusText').textContent = 'Running... (this may take a minute)';
       return;
     }
-    // Done
     clearInterval(suggestPollTimer);
     suggestPollTimer = null;
     document.getElementById('suggestBtn').disabled = false;
@@ -8692,16 +8876,25 @@ function pollSuggestStatus() {
 
     if (d.error) {
       document.getElementById('suggestStatusText').textContent = 'Error: '+d.error;
-    } else {
-      document.getElementById('suggestStatusText').textContent = 'Done! New tasks added to plan.';
+      toast('Suggest failed: '+d.error, 'err');
+      return;
     }
 
-    if (d.log) {
-      document.getElementById('suggestLogWrap').style.display = '';
-      document.getElementById('suggestLogEl').textContent = d.log;
+    document.getElementById('suggestStatusLine').style.display = 'none';
+    currentSuggestions = (d.suggestions || []).slice();
+    if (d.summary) {
+      const sum = document.getElementById('suggestSummary');
+      sum.textContent = d.summary;
+      sum.style.display = '';
     }
-    refreshState();
-    if (!d.error) toast('Suggestions added to tasks!', 'ok');
+    renderSuggestions();
+    if (currentSuggestions.length > 0) {
+      document.getElementById('suggestAddAllBtn').style.display = '';
+      document.getElementById('suggestClearBtn').style.display  = '';
+      toast('Generated '+currentSuggestions.length+' ideas — review below', 'ok');
+    } else {
+      toast('No suggestions returned', 'err');
+    }
   }).catch(() => {});
 }
 
@@ -8713,6 +8906,90 @@ function stopSuggestPoll(msg) {
   document.getElementById('suggestStatusText').textContent = msg;
   toast(msg, 'err');
 }
+
+function renderSuggestions() {
+  const wrap = document.getElementById('suggestList');
+  const badge = document.getElementById('suggestCountBadge');
+  if (!currentSuggestions || currentSuggestions.length === 0) {
+    wrap.innerHTML = '';
+    badge.textContent = '';
+    return;
+  }
+  badge.textContent = '· '+currentSuggestions.length+' idea'+(currentSuggestions.length===1?'':'s')+' to review';
+  const cards = currentSuggestions.map((sg, i) => {
+    const cat    = (sg.category || '').toLowerCase();
+    const eff    = (sg.effort   || '').toUpperCase();
+    const title  = esc(sg.title || '(untitled)');
+    const desc   = esc(sg.description || '');
+    const why    = esc(sg.rationale   || '');
+    return ''+
+      '<div class="suggest-card" data-sg-idx="'+i+'">'+
+        '<div class="suggest-card-head">'+
+          '<div class="suggest-card-title">'+title+'</div>'+
+          '<div class="suggest-card-tags">'+
+            (cat ? '<span class="suggest-tag suggest-tag-cat">'+esc(cat)+'</span>' : '')+
+            (eff ? '<span class="suggest-tag suggest-tag-eff">'+esc(eff)+'</span>' : '')+
+          '</div>'+
+        '</div>'+
+        (desc ? '<div class="suggest-card-desc"><span class="suggest-card-label">What:</span> '+desc+'</div>' : '')+
+        (why  ? '<div class="suggest-card-why"><span class="suggest-card-label">Why:</span> '+why+'</div>' : '')+
+        '<div class="suggest-card-actions">'+
+          '<button class="btn primary" onclick="acceptSuggestion('+i+')">Add as task</button>'+
+          '<button class="btn"         onclick="rejectSuggestion('+i+')">Skip</button>'+
+        '</div>'+
+      '</div>';
+  });
+  wrap.innerHTML = cards.join('');
+}
+
+window.acceptSuggestion = function(idx) {
+  const sg = currentSuggestions[idx];
+  if (!sg) return;
+  api(pUrl('/api/suggest/add'), {suggestions:[sg]}).then(d => {
+    if (!d.ok) { toast(d.error||'Add failed', 'err'); return; }
+    currentSuggestions.splice(idx, 1);
+    renderSuggestions();
+    if (currentSuggestions.length === 0) {
+      document.getElementById('suggestAddAllBtn').style.display = 'none';
+      document.getElementById('suggestClearBtn').style.display  = 'none';
+    }
+    refreshState();
+    toast('Added "'+sg.title+'" as task', 'ok');
+  }).catch(() => toast('Request failed', 'err'));
+};
+
+window.rejectSuggestion = function(idx) {
+  if (!currentSuggestions[idx]) return;
+  currentSuggestions.splice(idx, 1);
+  renderSuggestions();
+  if (currentSuggestions.length === 0) {
+    document.getElementById('suggestAddAllBtn').style.display = 'none';
+    document.getElementById('suggestClearBtn').style.display  = 'none';
+  }
+};
+
+window.addAllSuggestions = function() {
+  if (!currentSuggestions.length) return;
+  const all = currentSuggestions.slice();
+  api(pUrl('/api/suggest/add'), {suggestions: all}).then(d => {
+    if (!d.ok) { toast(d.error||'Add failed', 'err'); return; }
+    const n = (d.added || []).length;
+    currentSuggestions = [];
+    renderSuggestions();
+    document.getElementById('suggestAddAllBtn').style.display = 'none';
+    document.getElementById('suggestClearBtn').style.display  = 'none';
+    refreshState();
+    toast('Added '+n+' suggestion'+(n===1?'':'s')+' as tasks', 'ok');
+  }).catch(() => toast('Request failed', 'err'));
+};
+
+window.clearSuggestions = function() {
+  currentSuggestions = [];
+  renderSuggestions();
+  document.getElementById('suggestSummary').style.display   = 'none';
+  document.getElementById('suggestAddAllBtn').style.display = 'none';
+  document.getElementById('suggestClearBtn').style.display  = 'none';
+};
 
 // ── Settings ─────────────────────────────────────────────────────────────────
 
@@ -9357,7 +9634,7 @@ document.addEventListener('keyup', function(e) {
 // ── Keyboard shortcuts & Command Palette ─────────────────────────────────────
 
 // Maps 1-8 to tab names in left-to-right order.
-const TAB_KEYS = ['overview','tasks','kanban','timeline','chat','assistant','projects','suggest','settings'];
+const TAB_KEYS = ['overview','tasks','kanban','timeline','chat','assistant','projects','settings'];
 
 // All commands registered in the palette.
 const CMD_REGISTRY = [
@@ -9368,8 +9645,8 @@ const CMD_REGISTRY = [
   { label:'Chat',            icon:'💬', shortcut:'5', action:()=>switchTab('chat') },
   { label:'Assistant',       icon:'🤖', shortcut:'6', action:()=>switchTab('assistant') },
   { label:'Projects',        icon:'📁', shortcut:'7', action:()=>switchTab('projects') },
-  { label:'Suggest',         icon:'💡', shortcut:'8', action:()=>switchTab('suggest') },
-  { label:'Settings',        icon:'⚙️', shortcut:'9', action:()=>switchTab('settings') },
+  { label:'Settings',        icon:'⚙️', shortcut:'8', action:()=>switchTab('settings') },
+  { label:'Brainstorm ideas',icon:'💡', shortcut:'',   action:()=>{ switchTab('tasks'); setTimeout(()=>{ const el=document.getElementById('suggestPanel'); if(el && el.style.display==='none'){ toggleSuggestPanel(); } },100); } },
   { label:'Refresh state',   icon:'🔄', shortcut:'r',  action:()=>{ api(pUrl('/api/state')).then(s=>render(s)).catch(()=>{}); toast('Refreshed','ok'); } },
   { label:'New task',        icon:'➕', shortcut:'n',  action:()=>{ switchTab('tasks'); setTimeout(()=>{ const el=document.getElementById('newTaskTitle'); if(el){el.focus();} },100); } },
   { label:'Start run',       icon:'▶️', shortcut:'',   action:()=>submitRun() },

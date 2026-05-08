@@ -3,6 +3,7 @@ package cmd
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -24,6 +25,7 @@ var (
 	suggestCount    int
 	suggestYes      bool
 	suggestDryRun   bool
+	suggestJSON     bool
 )
 
 var suggestCmd = &cobra.Command{
@@ -142,6 +144,17 @@ Examples:
 
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 		defer cancel()
+
+		if suggestJSON {
+			// Machine-readable mode for the Web UI: emit JSON, no decoration, no state mutation.
+			result, err := suggest.Generate(ctx, prov, prompt, model, 3*time.Minute)
+			if err != nil {
+				return fmt.Errorf("suggestion generation failed: %w", err)
+			}
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			return enc.Encode(result)
+		}
 
 		result, err := suggest.Generate(ctx, prov, prompt, model, 3*time.Minute)
 		if err != nil {
@@ -319,5 +332,6 @@ func init() {
 	suggestCmd.Flags().IntVar(&suggestCount, "count", 5, "Number of feature ideas to generate")
 	suggestCmd.Flags().BoolVar(&suggestYes, "yes", false, "Auto-accept all suggestions")
 	suggestCmd.Flags().BoolVar(&suggestDryRun, "dry-run", false, "Show suggestions without prompting or adding tasks")
+	suggestCmd.Flags().BoolVar(&suggestJSON, "json", false, "Output suggestions as JSON to stdout (no interactive prompt, no state mutation)")
 	rootCmd.AddCommand(suggestCmd)
 }
