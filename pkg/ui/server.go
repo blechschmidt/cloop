@@ -4365,6 +4365,11 @@ const dashboardHTML = `<!DOCTYPE html>
   .step-item.expanded .step-chevron { transform:rotate(90deg); }
   .step-output { display:none; background:var(--code-bg); border-top:1px solid var(--border); padding:10px 12px; font-family:monospace; font-size:11px; white-space:pre-wrap; word-break:break-all; max-height:360px; overflow-y:auto; color:#adbac7; }
   .step-item.expanded .step-output { display:block; }
+  .step-item.step-running { border-color:rgba(57,197,207,.55); box-shadow:0 0 0 1px rgba(57,197,207,.18); }
+  .step-item.step-running .step-header { background:rgba(57,197,207,.06); }
+  .step-running-dot { display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--cyan); animation:step-running-pulse 1.2s ease-in-out infinite; flex-shrink:0; }
+  .step-running-label { color:var(--cyan); font-weight:600; }
+  @keyframes step-running-pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
 
   /* ── Live output panel ── */
   .live-output-wrap { margin-bottom: 24px; }
@@ -7078,13 +7083,40 @@ function render(s) {
   // Steps
   const stepListEl = document.getElementById('stepList');
   const allSteps = s.steps || [];
-  if (!allSteps.length) {
+  const isRunning = s.status === 'running';
+  if (!allSteps.length && !isRunning) {
     stepListEl.innerHTML = '<div class="empty-state"><h3>No steps yet</h3><p>Start a run to see history here.</p></div>';
   } else {
     const expanded = {};
     stepListEl.querySelectorAll('.step-item.expanded').forEach(el => { expanded[el.dataset.idx] = true; });
+
+    let html = '';
+    if (isRunning) {
+      const runningExp = expanded['running'] ? ' expanded' : '';
+      const runningStepNum = (typeof s.current_step === 'number' ? s.current_step : allSteps.length) + 1;
+      let runningTitle = '';
+      if (s.pm_mode && s.plan && s.plan.tasks) {
+        const inProg = s.plan.tasks.find(t => t.status === 'in_progress');
+        if (inProg) runningTitle = '#' + inProg.id + ' ' + (inProg.title || '');
+      }
+      if (!runningTitle) runningTitle = 'Running…';
+      const runningOut = liveLogText ? liveLogText.slice(-4000) : '(awaiting output…)';
+      html += '<div class="step-item step-running'+runningExp+'" data-idx="running" onclick="toggleStep(this)">'+
+        '<div class="step-header">'+
+          '<span class="step-num">#'+runningStepNum+'</span>'+
+          '<span class="step-task">'+esc(runningTitle)+'</span>'+
+          '<div class="step-meta">'+
+            '<span class="step-running-dot" aria-hidden="true"></span>'+
+            '<span class="step-running-label">running</span>'+
+          '</div>'+
+          '<span class="step-chevron">&#9654;</span>'+
+        '</div>'+
+        '<div class="step-output" id="stepRunningOutput">'+esc(runningOut)+'</div>'+
+      '</div>';
+    }
+
     const reversed = [...allSteps].reverse();
-    stepListEl.innerHTML = reversed.map((st, i) => {
+    html += reversed.map((st, i) => {
       const idx = allSteps.length - 1 - i;
       const isExp = expanded[idx] ? ' expanded' : '';
       const exitCls = st.exit_code === 0 ? 'step-ok' : 'step-bad';
@@ -7102,6 +7134,7 @@ function render(s) {
         '<div class="step-output">'+esc(st.output||'')+'</div>'+
       '</div>';
     }).join('');
+    stepListEl.innerHTML = html;
   }
 
   // Rebuild filter dropdowns from current task list.
@@ -7664,6 +7697,12 @@ function renderLiveLog() {
   }
   if (liveLogAutoScroll) {
     box.scrollTop = box.scrollHeight;
+  }
+  // Mirror live output into the synthetic "current step" entry in Step History,
+  // so the running step shows up-to-date output without rebuilding the list.
+  const runningOut = document.getElementById('stepRunningOutput');
+  if (runningOut) {
+    runningOut.textContent = liveLogText ? liveLogText.slice(-4000) : '(awaiting output…)';
   }
 }
 
