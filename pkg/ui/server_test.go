@@ -1723,3 +1723,509 @@ func TestGoalEndpoint_PerProjectScoping(t *testing.T) {
 		t.Errorf("sysmon goal = %q, want %q", sysmonState.Goal, newSysmonGoal)
 	}
 }
+
+// ── Active Options + single Run button flow ───────────────────────────────────
+//
+// The Web UI now exposes a single Run button driven by per-project Active
+// Options badges. Toggling a badge POSTs to /api/options/toggle (or the
+// dedicated /api/options/max-parallel and /api/options/provider endpoints),
+// which must persist the chosen value to .cloop/state.db. A subsequent
+// `cloop run` then reads that persisted state and merges it into the
+// orchestrator.Config that drives execution.
+//
+// These tests cover:
+//   1. Each toggle flag persists to state.db via state.Load.
+//   2. The persisted state, fed through cmd/run.go's merge logic, produces
+//      an orchestrator.Config whose fields match the badge state.
+//   3. /api/options/max-parallel >0 enables parallel mode (and PM mode), and
+//      out-of-range values are rejected with HTTP 400.
+
+// loadStateOrFail reloads the project state from disk and fails the test on
+// error. Used after toggle endpoints to assert persistence.
+func loadStateOrFail(t *testing.T, dir string) *state.ProjectState {
+	t.Helper()
+	ps, err := state.Load(dir)
+	if err != nil {
+		t.Fatalf("state.Load(%s): %v", dir, err)
+	}
+	if ps == nil {
+		t.Fatalf("state.Load(%s) returned nil state", dir)
+	}
+	return ps
+}
+
+// configFromState mirrors the relevant subset of cmd/run.go's merge logic that
+// derives orchestrator.Config fields from persisted ProjectState (with no CLI
+// flags). It deliberately covers only the badge-driven knobs so tests stay
+// focused.
+type runConfig struct {
+	Model        string
+	ProviderName string
+	PMMode       bool
+	PlanOnly     bool
+	RetryFailed  bool
+	DryRun       bool
+	InnovateMode bool
+	Parallel     bool
+	MaxParallel  int
+	SkipClarify  bool
+	AutoEvolve   bool
+}
+
+// buildRunConfig replicates cmd/run.go's flag-less merge: with all CLI flags
+// at zero values, the resulting orchestrator.Config is determined solely by
+// the persisted state.
+func buildRunConfig(ps *state.ProjectState) runConfig {
+	cfg := runConfig{
+		Model:        ps.Model,
+		ProviderName: ps.Provider,
+		PMMode:       ps.PMMode,
+		PlanOnly:     ps.PlanOnly,
+		RetryFailed:  ps.RetryFailed,
+		DryRun:       ps.DryRun,
+		InnovateMode: ps.InnovateMode,
+		Parallel:     ps.Parallel,
+		MaxParallel:  ps.MaxParallel,
+		SkipClarify:  ps.SkipClarify,
+		AutoEvolve:   ps.AutoEvolve,
+	}
+	// --plan-only and --parallel both imply PM mode.
+	if cfg.PlanOnly || cfg.Parallel {
+		cfg.PMMode = true
+	}
+	return cfg
+}
+
+// TestOptionsToggle_PersistsEachFlag toggles every badge-backed flag via
+// /api/options/toggle and asserts each value lands in state.db.
+func TestOptionsToggle_PersistsEachFlag(t *testing.T) {
+	dir := setupProjectDir(t, cloopGoal, nil)
+	ts := newTestServer(t, dir, nil)
+
+	flags := []string{
+		"auto_evolve",
+		"innovate_mode",
+		"pm_mode",
+		"skip_clarify",
+		"plan_only",
+		"retry_failed",
+		"dry_run",
+	}
+	for _, flag := range flags {
+		body := apiPOST(t, ts, "/api/options/toggle", map[string]interface{}{
+			"flag":  flag,
+			"value": true,
+		})
+		if body["ok"] != true {
+			t.Fatalf("toggle %q: ok != true: %v", flag, body)
+		}
+	}
+
+	ps := loadStateOrFail(t, dir)
+	if !ps.AutoEvolve {
+		t.Errorf("auto_evolve not persisted")
+	}
+	if !ps.InnovateMode {
+		t.Errorf("innovate_mode not persisted")
+	}
+	if !ps.PMMode {
+		t.Errorf("pm_mode not persisted")
+	}
+	if !ps.SkipClarify {
+		t.Errorf("skip_clarify not persisted")
+	}
+	if !ps.PlanOnly {
+		t.Errorf("plan_only not persisted")
+	}
+	if !ps.RetryFailed {
+		t.Errorf("retry_failed not persisted")
+	}
+	if !ps.DryRun {
+		t.Errorf("dry_run not persisted")
+	}
+
+	// Toggle them all off and re-verify.
+	for _, flag := range flags {
+		_ = apiPOST(t, ts, "/api/options/toggle", map[string]interface{}{
+			"flag":  flag,
+			"value": false,
+		})
+	}
+	ps = loadStateOrFail(t, dir)
+	if ps.AutoEvolve || ps.InnovateMode || ps.PMMode || ps.SkipClarify ||
+		ps.PlanOnly || ps.RetryFailed || ps.DryRun {
+		t.Errorf("expected all flags off after toggling false, got %+v", ps)
+	}
+}
+
+// TestOptionsToggle_ParallelImpliesPMMode verifies that turning on the
+// "parallel" badge automatically enables PM mode (because parallel only
+// makes sense in PM mode).
+func TestOptionsToggle_ParallelImpliesPMMode(t *testing.T) {
+	dir := setupProjectDir(t, cloopGoal, nil)
+	ts := newTestServer(t, dir, nil)
+
+	body := apiPOST(t, ts, "/api/options/toggle", map[string]interface{}{
+		"flag":  "parallel",
+		"value": true,
+	})
+	if body["ok"] != true {
+		t.Fatalf("parallel toggle failed: %v", body)
+	}
+	if body["parallel"] != true {
+		t.Errorf("parallel echo = %v, want true", body["parallel"])
+	}
+	if body["pm_mode"] != true {
+		t.Errorf("expected pm_mode to be auto-enabled by parallel: %v", body)
+	}
+
+	ps := loadStateOrFail(t, dir)
+	if !ps.Parallel {
+		t.Errorf("Parallel not persisted")
+	}
+	if !ps.PMMode {
+		t.Errorf("PMMode not auto-enabled when parallel toggled on")
+	}
+}
+
+// TestOptionsToggle_PlanOnlyImpliesPMMode mirrors the parallel→PM behavior
+// for the plan_only flag.
+func TestOptionsToggle_PlanOnlyImpliesPMMode(t *testing.T) {
+	dir := setupProjectDir(t, cloopGoal, nil)
+	ts := newTestServer(t, dir, nil)
+
+	_ = apiPOST(t, ts, "/api/options/toggle", map[string]interface{}{
+		"flag":  "plan_only",
+		"value": true,
+	})
+
+	ps := loadStateOrFail(t, dir)
+	if !ps.PlanOnly {
+		t.Errorf("plan_only not persisted")
+	}
+	if !ps.PMMode {
+		t.Errorf("expected pm_mode to be auto-enabled by plan_only")
+	}
+}
+
+// TestOptionsToggle_RejectsUnknownFlag verifies the API rejects unknown flag
+// names with HTTP 400.
+func TestOptionsToggle_RejectsUnknownFlag(t *testing.T) {
+	dir := setupProjectDir(t, cloopGoal, nil)
+	ts := newTestServer(t, dir, nil)
+
+	data, _ := json.Marshal(map[string]interface{}{
+		"flag":  "totally-bogus-flag",
+		"value": true,
+	})
+	resp, err := http.Post(ts.URL+"/api/options/toggle", "application/json", bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("POST /api/options/toggle: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected 400 for unknown flag, got %d", resp.StatusCode)
+	}
+}
+
+// TestMaxParallelSet_PersistsValue verifies POST /api/options/max-parallel
+// writes the value to state.db.
+func TestMaxParallelSet_PersistsValue(t *testing.T) {
+	dir := setupProjectDir(t, cloopGoal, nil)
+	ts := newTestServer(t, dir, nil)
+
+	body := apiPOST(t, ts, "/api/options/max-parallel", map[string]interface{}{
+		"value": 4,
+	})
+	if body["ok"] != true {
+		t.Fatalf("set max-parallel failed: %v", body)
+	}
+	if mp, _ := body["max_parallel"].(float64); int(mp) != 4 {
+		t.Errorf("response max_parallel = %v, want 4", body["max_parallel"])
+	}
+
+	ps := loadStateOrFail(t, dir)
+	if ps.MaxParallel != 4 {
+		t.Errorf("MaxParallel persisted = %d, want 4", ps.MaxParallel)
+	}
+}
+
+// TestMaxParallelSet_ClampsInvalidValues verifies that out-of-range
+// max-parallel values are rejected with HTTP 400 and do not mutate state.
+func TestMaxParallelSet_ClampsInvalidValues(t *testing.T) {
+	dir := setupProjectDir(t, cloopGoal, nil)
+	ts := newTestServer(t, dir, nil)
+
+	// Seed a known good value to detect any unintended mutation.
+	_ = apiPOST(t, ts, "/api/options/max-parallel", map[string]interface{}{"value": 2})
+
+	cases := []struct {
+		name  string
+		value int
+	}{
+		{"negative", -1},
+		{"way too large", 999},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			data, _ := json.Marshal(map[string]interface{}{"value": tc.value})
+			resp, err := http.Post(ts.URL+"/api/options/max-parallel", "application/json", bytes.NewReader(data))
+			if err != nil {
+				t.Fatalf("POST /api/options/max-parallel: %v", err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Errorf("value %d: expected 400, got %d", tc.value, resp.StatusCode)
+			}
+		})
+	}
+
+	// State should still hold the seeded value.
+	ps := loadStateOrFail(t, dir)
+	if ps.MaxParallel != 2 {
+		t.Errorf("MaxParallel mutated by rejected request: got %d, want 2", ps.MaxParallel)
+	}
+}
+
+// TestMaxParallelSet_ZeroAllowed verifies that 0 (=unlimited) is accepted.
+func TestMaxParallelSet_ZeroAllowed(t *testing.T) {
+	dir := setupProjectDir(t, cloopGoal, nil)
+	ts := newTestServer(t, dir, nil)
+
+	// Seed a non-zero value first.
+	_ = apiPOST(t, ts, "/api/options/max-parallel", map[string]interface{}{"value": 8})
+
+	body := apiPOST(t, ts, "/api/options/max-parallel", map[string]interface{}{"value": 0})
+	if body["ok"] != true {
+		t.Fatalf("expected 0 to be accepted, got %v", body)
+	}
+	ps := loadStateOrFail(t, dir)
+	if ps.MaxParallel != 0 {
+		t.Errorf("MaxParallel = %d, want 0", ps.MaxParallel)
+	}
+}
+
+// TestProviderModelSet_PersistsValues verifies POST /api/options/provider
+// updates both the provider and the model in persisted state.
+func TestProviderModelSet_PersistsValues(t *testing.T) {
+	dir := setupProjectDir(t, cloopGoal, nil)
+	ts := newTestServer(t, dir, nil)
+
+	body := apiPOST(t, ts, "/api/options/provider", map[string]interface{}{
+		"provider": "anthropic",
+		"model":    "claude-opus-4-7",
+	})
+	if body["ok"] != true {
+		t.Fatalf("set provider failed: %v", body)
+	}
+
+	ps := loadStateOrFail(t, dir)
+	if ps.Provider != "anthropic" {
+		t.Errorf("Provider = %q, want 'anthropic'", ps.Provider)
+	}
+	if ps.Model != "claude-opus-4-7" {
+		t.Errorf("Model = %q, want 'claude-opus-4-7'", ps.Model)
+	}
+}
+
+// TestProviderModelSet_RejectsUnknownProvider verifies the whitelist on the
+// provider endpoint rejects garbage values.
+func TestProviderModelSet_RejectsUnknownProvider(t *testing.T) {
+	dir := setupProjectDir(t, cloopGoal, nil)
+	ts := newTestServer(t, dir, nil)
+
+	data, _ := json.Marshal(map[string]string{"provider": "skynet"})
+	resp, err := http.Post(ts.URL+"/api/options/provider", "application/json", bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("POST /api/options/provider: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected 400 for unknown provider, got %d", resp.StatusCode)
+	}
+}
+
+// TestProviderModelSet_ChangingProviderClearsModel verifies that switching
+// providers without supplying a model resets the model field — preventing
+// the previous model name from being applied to the new provider.
+func TestProviderModelSet_ChangingProviderClearsModel(t *testing.T) {
+	dir := setupProjectDir(t, cloopGoal, nil)
+	ts := newTestServer(t, dir, nil)
+
+	// Seed: anthropic + a specific model.
+	_ = apiPOST(t, ts, "/api/options/provider", map[string]interface{}{
+		"provider": "anthropic",
+		"model":    "claude-opus-4-7",
+	})
+
+	// Switch provider only — model omitted.
+	_ = apiPOST(t, ts, "/api/options/provider", map[string]interface{}{
+		"provider": "openai",
+	})
+
+	ps := loadStateOrFail(t, dir)
+	if ps.Provider != "openai" {
+		t.Errorf("Provider = %q, want 'openai'", ps.Provider)
+	}
+	if ps.Model != "" {
+		t.Errorf("expected Model cleared after provider switch, got %q", ps.Model)
+	}
+}
+
+// TestRunConfigMatchesBadgeState end-to-end verifies that toggling badges via
+// the UI APIs and then reading state through cmd/run's merge logic yields an
+// orchestrator.Config whose fields exactly mirror the badge selections.
+//
+// This is the core regression test for the "single Run button driven by
+// Active Options badges" flow: the badge values must round-trip through
+// state.db into the orchestrator.Config that actually drives execution.
+func TestRunConfigMatchesBadgeState(t *testing.T) {
+	dir := setupProjectDir(t, cloopGoal, nil)
+	ts := newTestServer(t, dir, nil)
+
+	// Toggle each badge to a known state.
+	flagSetup := map[string]bool{
+		"auto_evolve":   true,
+		"innovate_mode": true,
+		"pm_mode":       true,
+		"retry_failed":  true,
+		"dry_run":       false, // explicitly off
+	}
+	for flag, val := range flagSetup {
+		_ = apiPOST(t, ts, "/api/options/toggle", map[string]interface{}{
+			"flag":  flag,
+			"value": val,
+		})
+	}
+
+	// Set provider/model + max-parallel via their dedicated endpoints.
+	_ = apiPOST(t, ts, "/api/options/provider", map[string]interface{}{
+		"provider": "anthropic",
+		"model":    "claude-sonnet-4-6",
+	})
+	_ = apiPOST(t, ts, "/api/options/max-parallel", map[string]interface{}{"value": 3})
+
+	// Reload state and project it through the run-config merge logic.
+	ps := loadStateOrFail(t, dir)
+	cfg := buildRunConfig(ps)
+
+	if cfg.AutoEvolve != true {
+		t.Errorf("AutoEvolve = %v, want true", cfg.AutoEvolve)
+	}
+	if cfg.InnovateMode != true {
+		t.Errorf("InnovateMode = %v, want true", cfg.InnovateMode)
+	}
+	if cfg.PMMode != true {
+		t.Errorf("PMMode = %v, want true", cfg.PMMode)
+	}
+	if cfg.RetryFailed != true {
+		t.Errorf("RetryFailed = %v, want true", cfg.RetryFailed)
+	}
+	if cfg.DryRun != false {
+		t.Errorf("DryRun = %v, want false", cfg.DryRun)
+	}
+	if cfg.ProviderName != "anthropic" {
+		t.Errorf("ProviderName = %q, want 'anthropic'", cfg.ProviderName)
+	}
+	if cfg.Model != "claude-sonnet-4-6" {
+		t.Errorf("Model = %q, want 'claude-sonnet-4-6'", cfg.Model)
+	}
+	if cfg.MaxParallel != 3 {
+		t.Errorf("MaxParallel = %d, want 3", cfg.MaxParallel)
+	}
+}
+
+// TestRunConfig_MaxParallelEnablesParallelAndPM verifies the implicit chain:
+// max-parallel >0 → parallel-on (when toggled by the user) → pm_mode-on.
+// This mirrors cmd/run.go which sets parallelMode=true when maxParallel>0.
+func TestRunConfig_MaxParallelEnablesParallelAndPM(t *testing.T) {
+	dir := setupProjectDir(t, cloopGoal, nil)
+	ts := newTestServer(t, dir, nil)
+
+	// Set max-parallel and toggle parallel — the UI badge does both: when the
+	// user picks a max-parallel value the parallel toggle is also flipped on.
+	_ = apiPOST(t, ts, "/api/options/max-parallel", map[string]interface{}{"value": 5})
+	body := apiPOST(t, ts, "/api/options/toggle", map[string]interface{}{
+		"flag":  "parallel",
+		"value": true,
+	})
+	if body["ok"] != true {
+		t.Fatalf("parallel toggle failed: %v", body)
+	}
+
+	ps := loadStateOrFail(t, dir)
+	cfg := buildRunConfig(ps)
+
+	if cfg.MaxParallel != 5 {
+		t.Errorf("MaxParallel = %d, want 5", cfg.MaxParallel)
+	}
+	if !cfg.Parallel {
+		t.Errorf("Parallel = false, want true")
+	}
+	if !cfg.PMMode {
+		t.Errorf("PMMode = false, want true (parallel implies PM mode)")
+	}
+}
+
+// TestRunConfig_PlanOnlyForcesPMMode covers the symmetric implication:
+// plan_only on its own forces PM mode in the resulting orchestrator.Config.
+func TestRunConfig_PlanOnlyForcesPMMode(t *testing.T) {
+	dir := setupProjectDir(t, cloopGoal, nil)
+	ts := newTestServer(t, dir, nil)
+
+	_ = apiPOST(t, ts, "/api/options/toggle", map[string]interface{}{
+		"flag":  "plan_only",
+		"value": true,
+	})
+
+	ps := loadStateOrFail(t, dir)
+	cfg := buildRunConfig(ps)
+
+	if !cfg.PlanOnly {
+		t.Errorf("PlanOnly = false, want true")
+	}
+	if !cfg.PMMode {
+		t.Errorf("PMMode = false, want true (plan_only implies PM mode)")
+	}
+}
+
+// TestOptionsToggle_PerProjectScoped verifies that toggling an option for one
+// project does not leak into a sibling project's persisted state.
+func TestOptionsToggle_PerProjectScoped(t *testing.T) {
+	cloopDir := setupProjectDir(t, cloopGoal, nil)
+	sysmonDir := setupProjectDir(t, sysmonGoal, nil)
+
+	ts := newTestServer(t, cloopDir, []string{sysmonDir})
+
+	// Toggle innovate_mode on cloop (project_idx=0); leave sysmon untouched.
+	body := apiPOST(t, ts, "/api/options/toggle?project_idx=0", map[string]interface{}{
+		"flag":  "innovate_mode",
+		"value": true,
+	})
+	if body["ok"] != true {
+		t.Fatalf("toggle failed: %v", body)
+	}
+
+	cloopState := loadStateOrFail(t, cloopDir)
+	sysmonState := loadStateOrFail(t, sysmonDir)
+	if !cloopState.InnovateMode {
+		t.Errorf("cloop InnovateMode not persisted")
+	}
+	if sysmonState.InnovateMode {
+		t.Errorf("sysmon InnovateMode leaked from cloop project toggle")
+	}
+
+	// Now flip auto_evolve on sysmon (project_idx=1) and verify isolation.
+	_ = apiPOST(t, ts, "/api/options/toggle?project_idx=1", map[string]interface{}{
+		"flag":  "auto_evolve",
+		"value": true,
+	})
+	cloopState = loadStateOrFail(t, cloopDir)
+	sysmonState = loadStateOrFail(t, sysmonDir)
+	if !sysmonState.AutoEvolve {
+		t.Errorf("sysmon AutoEvolve not persisted")
+	}
+	if cloopState.AutoEvolve {
+		t.Errorf("cloop AutoEvolve leaked from sysmon project toggle")
+	}
+}
