@@ -4125,6 +4125,7 @@ const dashboardHTML = `<!DOCTYPE html>
   @keyframes kb-enter { from { opacity:0; transform:translateY(-6px); } to { opacity:1; transform:none; } }
   .kb-card:hover { box-shadow:0 2px 8px rgba(0,0,0,.35); border-color:var(--muted); }
   .kb-card.kb-dragging { opacity:.35; transform:scale(.97); cursor:grabbing; }
+  .kb-card.kb-focus { outline:2px solid var(--accent); outline-offset:-2px; }
   .kb-card.kb-compact .kb-card-desc,
   .kb-card.kb-compact .kb-card-tags,
   .kb-card.kb-compact .kb-card-meta { display:none; }
@@ -4365,6 +4366,83 @@ const dashboardHTML = `<!DOCTYPE html>
     font-size: 10px; background: var(--bg); color: var(--text);
     font-family: inherit;
   }
+
+  /* ── Help modal (keyboard shortcuts cheat sheet) ── */
+  #help-backdrop {
+    display: none; position: fixed; inset: 0;
+    background: rgba(0,0,0,.65); z-index: 220;
+    align-items: flex-start; justify-content: center;
+    padding-top: 10vh;
+  }
+  #help-backdrop.open { display: flex; }
+  #help-modal {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 10px; width: 640px; max-width: 95vw;
+    max-height: 80vh; display: flex; flex-direction: column;
+    box-shadow: 0 16px 48px rgba(0,0,0,.6);
+    overflow: hidden;
+  }
+  #help-modal-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 18px; border-bottom: 1px solid var(--border);
+  }
+  #help-modal-header h3 { font-size: 14px; font-weight: 600; color: var(--text); margin: 0; }
+  #help-modal-close {
+    background: none; border: none; color: var(--muted); font-size: 18px;
+    cursor: pointer; padding: 0 4px; line-height: 1;
+  }
+  #help-modal-close:hover { color: var(--text); }
+  #help-modal-body {
+    padding: 14px 18px; overflow-y: auto; flex: 1;
+  }
+  .help-category { margin-bottom: 18px; }
+  .help-category:last-child { margin-bottom: 0; }
+  .help-category h4 {
+    font-size: 11px; font-weight: 600; text-transform: uppercase;
+    letter-spacing: .06em; color: var(--accent); margin: 0 0 8px 0;
+  }
+  .help-row {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 6px 0; border-bottom: 1px dashed var(--border);
+    font-size: 13px;
+  }
+  .help-row:last-child { border-bottom: none; }
+  .help-row-desc { color: var(--text); flex: 1; padding-right: 10px; }
+  .help-row-keys { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
+  .help-row-keys kbd {
+    display: inline-block; padding: 2px 6px;
+    border: 1px solid var(--border); border-radius: 3px;
+    font-size: 11px; background: var(--bg); color: var(--text);
+    font-family: monospace; min-width: 16px; text-align: center;
+  }
+  .help-key-sep { color: var(--muted); font-size: 11px; padding: 0 1px; }
+  #help-modal-footer {
+    padding: 8px 18px; border-top: 1px solid var(--border);
+    font-size: 11px; color: var(--muted); display: flex; gap: 12px;
+  }
+  #help-modal-footer kbd {
+    display: inline-block; padding: 1px 4px;
+    border: 1px solid var(--border); border-radius: 3px;
+    font-size: 10px; background: var(--bg); color: var(--text);
+    font-family: inherit;
+  }
+  /* Header help button */
+  .help-toggle-btn {
+    background: none;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--muted);
+    cursor: pointer;
+    padding: 5px 9px;
+    font-size: 13px;
+    line-height: 1;
+    display: flex;
+    align-items: center;
+    flex-shrink: 0;
+    transition: all .15s;
+    font-weight: 600;
+  }
+  .help-toggle-btn:hover { color: var(--text); border-color: var(--muted); background: var(--hover-bg); }
 
   /* ── Task keyboard focus highlight ── */
   .task-item.kb-focus {
@@ -5130,7 +5208,10 @@ const dashboardHTML = `<!DOCTYPE html>
       <button class="tab-btn global-tab" onclick="switchTab('settings')"  id="tbtn-settings" title="Settings (global)">Settings</button>
     </div>
     <div class="spacer"></div>
-    <button class="theme-toggle-btn" id="themeToggleBtn" onclick="toggleTheme()" aria-label="Toggle dark/light mode" title="Toggle theme">
+    <button class="help-toggle-btn" id="helpToggleBtn" onclick="openHelpModal()" aria-label="Show keyboard shortcuts" title="Keyboard shortcuts (?)">
+      <span aria-hidden="true">?</span>
+    </button>
+    <button class="theme-toggle-btn" id="themeToggleBtn" onclick="toggleTheme()" aria-label="Toggle dark/light mode" title="Toggle theme (t)">
       <span id="themeToggleIcon">&#9788;</span>
     </button>
     <div class="updated-at" id="updatedAt"></div>
@@ -6254,19 +6335,38 @@ const dashboardHTML = `<!DOCTYPE html>
   </div>
 </div>
 
+<!-- ── Help modal (keyboard shortcuts cheat sheet) ─────────────────────── -->
+<div id="help-backdrop" role="dialog" aria-modal="true" aria-labelledby="help-modal-title">
+  <div id="help-modal">
+    <div id="help-modal-header">
+      <h3 id="help-modal-title">Keyboard Shortcuts</h3>
+      <button id="help-modal-close" onclick="closeHelpModal()" aria-label="Close help">&times;</button>
+    </div>
+    <div id="help-modal-body" role="document"></div>
+    <div id="help-modal-footer">
+      <span><kbd>Esc</kbd> close</span>
+      <span><kbd>?</kbd> open this dialog</span>
+    </div>
+  </div>
+</div>
+
 <!-- ── Keyboard shortcut footer ───────────────────────────────────────── -->
 <div id="kb-footer" role="complementary" aria-label="Keyboard shortcuts">
+  <span><kbd>?</kbd> help</span>
+  <span class="kb-sep">|</span>
   <span><kbd>⌘K</kbd> palette</span>
   <span class="kb-sep">|</span>
-  <span><kbd>j</kbd><kbd>k</kbd> navigate tasks</span>
+  <span><kbd>/</kbd> search</span>
   <span class="kb-sep">|</span>
-  <span><kbd>Enter</kbd> open task</span>
+  <span><kbd>j</kbd><kbd>k</kbd> navigate</span>
   <span class="kb-sep">|</span>
   <span><kbd>n</kbd> new task</span>
   <span class="kb-sep">|</span>
   <span><kbd>r</kbd> refresh</span>
   <span class="kb-sep">|</span>
-  <span><kbd>1</kbd>-<kbd>4</kbd> tabs</span>
+  <span><kbd>t</kbd> theme</span>
+  <span class="kb-sep">|</span>
+  <span><kbd>1</kbd>-<kbd>9</kbd> tabs</span>
   <span class="kb-sep">|</span>
   <span><kbd>Esc</kbd> close</span>
 </div>
@@ -9723,8 +9823,52 @@ document.addEventListener('keyup', function(e) {
 
 // ── Keyboard shortcuts & Command Palette ─────────────────────────────────────
 
-// Maps 1-8 to tab names in left-to-right order.
-const TAB_KEYS = ['overview','tasks','kanban','timeline','chat','assistant','projects','settings'];
+// Maps 1-9 to tab names in left-to-right order.
+const TAB_KEYS = ['overview','tasks','kanban','timeline','kb','deps','risk-matrix','analytics','chat'];
+
+// ── Single source of truth for all keyboard shortcuts ───────────────────────
+// The help modal, the command palette hints, and the global keydown handler
+// all derive from this object. Adding a new shortcut here keeps everything in
+// sync — never hard-code shortcut strings elsewhere.
+const KEYBOARD_SHORTCUTS = {
+  Navigation: [
+    { keys: ['1'], description: 'Go to Overview tab' },
+    { keys: ['2'], description: 'Go to Tasks tab' },
+    { keys: ['3'], description: 'Go to Kanban tab' },
+    { keys: ['4'], description: 'Go to Timeline tab' },
+    { keys: ['5'], description: 'Go to Knowledge Base tab' },
+    { keys: ['6'], description: 'Go to Dependencies tab' },
+    { keys: ['7'], description: 'Go to Risk Matrix tab' },
+    { keys: ['8'], description: 'Go to Analytics tab' },
+    { keys: ['9'], description: 'Go to Chat tab' },
+    { keys: ['Ctrl', 'K'], description: 'Open command palette' },
+    { keys: ['?'], description: 'Show this keyboard shortcut help' },
+    { keys: ['Esc'], description: 'Close modal / palette / clear focus' },
+  ],
+  'Task Actions': [
+    { keys: ['n'], description: 'New task (focus title field)' },
+    { keys: ['j'], description: 'Move focus down through tasks' },
+    { keys: ['k'], description: 'Move focus up through tasks' },
+    { keys: ['Enter'], description: 'Edit focused task' },
+    { keys: ['h'], description: 'Move focused kanban card to previous column' },
+    { keys: ['l'], description: 'Move focused kanban card to next column' },
+  ],
+  Project: [
+    { keys: ['r'], description: 'Refresh project state' },
+    { keys: ['t'], description: 'Toggle dark/light theme' },
+  ],
+  Search: [
+    { keys: ['/'], description: 'Focus search filter bar' },
+  ],
+};
+
+// Helper to render a single key combo (e.g. ['Ctrl','K']) as kbd elements.
+function _formatShortcutKeys(keys) {
+  return keys.map((k, i) => {
+    const sep = i > 0 ? '<span class="help-key-sep">+</span>' : '';
+    return sep + '<kbd>' + esc(k) + '</kbd>';
+  }).join('');
+}
 
 // All commands registered in the palette.
 const CMD_REGISTRY = [
@@ -9732,23 +9876,126 @@ const CMD_REGISTRY = [
   { label:'Tasks',           icon:'📋', shortcut:'2', action:()=>switchTab('tasks') },
   { label:'Kanban',          icon:'🗂', shortcut:'3', action:()=>switchTab('kanban') },
   { label:'Timeline',        icon:'📅', shortcut:'4', action:()=>switchTab('timeline') },
-  { label:'Chat',            icon:'💬', shortcut:'5', action:()=>switchTab('chat') },
-  { label:'Assistant',       icon:'🤖', shortcut:'6', action:()=>switchTab('assistant') },
-  { label:'Projects',        icon:'📁', shortcut:'7', action:()=>switchTab('projects') },
-  { label:'Settings',        icon:'⚙️', shortcut:'8', action:()=>switchTab('settings') },
+  { label:'Knowledge Base',  icon:'📚', shortcut:'5', action:()=>switchTab('kb') },
+  { label:'Dependencies',    icon:'🔗', shortcut:'6', action:()=>switchTab('deps') },
+  { label:'Risk Matrix',     icon:'⚠️', shortcut:'7', action:()=>switchTab('risk-matrix') },
+  { label:'Analytics',       icon:'📊', shortcut:'8', action:()=>switchTab('analytics') },
+  { label:'Chat',            icon:'💬', shortcut:'9', action:()=>switchTab('chat') },
+  { label:'Assistant',       icon:'🤖', shortcut:'',  action:()=>switchTab('assistant') },
+  { label:'Projects',        icon:'📁', shortcut:'',  action:()=>switchTab('projects') },
+  { label:'Settings',        icon:'⚙️', shortcut:'',  action:()=>switchTab('settings') },
+  { label:'Show keyboard shortcuts', icon:'⌨️', shortcut:'?',  action:()=>openHelpModal() },
+  { label:'Toggle dark/light theme', icon:'🌓', shortcut:'t',  action:()=>toggleTheme() },
+  { label:'Focus search filter',     icon:'🔍', shortcut:'/',  action:()=>focusSearchFilter() },
   { label:'Brainstorm ideas',icon:'💡', shortcut:'',   action:()=>{ switchTab('tasks'); setTimeout(()=>{ const el=document.getElementById('suggestPanel'); if(el && el.style.display==='none'){ toggleSuggestPanel(); } },100); } },
   { label:'Refresh state',   icon:'🔄', shortcut:'r',  action:()=>{ api(pUrl('/api/state')).then(s=>render(s)).catch(()=>{}); toast('Refreshed','ok'); } },
   { label:'New task',        icon:'➕', shortcut:'n',  action:()=>{ switchTab('tasks'); setTimeout(()=>{ const el=document.getElementById('newTaskTitle'); if(el){el.focus();} },100); } },
   { label:'Start run',       icon:'▶️', shortcut:'',   action:()=>submitRun() },
   { label:'Stop run',        icon:'⏹', shortcut:'',   action:()=>submitStop() },
-  { label:'Show kanban',     icon:'🗂', shortcut:'',   action:()=>switchTab('kanban') },
-  { label:'Show timeline',   icon:'📊', shortcut:'',   action:()=>switchTab('timeline') },
-  { label:'Show chat',       icon:'🤖', shortcut:'',   action:()=>switchTab('chat') },
-  { label:'Show assistant',  icon:'🤖', shortcut:'',   action:()=>switchTab('assistant') },
   { label:'Add task',        icon:'✏️', shortcut:'',   action:()=>{ switchTab('tasks'); setTimeout(()=>{ const el=document.getElementById('newTaskTitle'); if(el){el.focus();} },100); } },
   { label:'Run plan',        icon:'🚀', shortcut:'',   action:()=>submitRun() },
   { label:'Reset session',   icon:'🗑', shortcut:'',   action:()=>submitReset() },
 ];
+
+// ── Help modal (keyboard shortcuts cheat sheet) ─────────────────────────────
+let helpOpen = false;
+
+function _renderHelpModalBody() {
+  const body = document.getElementById('help-modal-body');
+  if (!body) return;
+  let html = '';
+  for (const [category, rows] of Object.entries(KEYBOARD_SHORTCUTS)) {
+    html += '<div class="help-category"><h4>' + esc(category) + '</h4>';
+    for (const r of rows) {
+      html += '<div class="help-row">' +
+        '<span class="help-row-desc">' + esc(r.description) + '</span>' +
+        '<span class="help-row-keys">' + _formatShortcutKeys(r.keys) + '</span>' +
+        '</div>';
+    }
+    html += '</div>';
+  }
+  body.innerHTML = html;
+}
+
+window.openHelpModal = function() {
+  if (helpOpen) return;
+  helpOpen = true;
+  _renderHelpModalBody();
+  document.getElementById('help-backdrop').classList.add('open');
+};
+
+window.closeHelpModal = function() {
+  helpOpen = false;
+  document.getElementById('help-backdrop').classList.remove('open');
+};
+
+// Close help modal when clicking backdrop (not modal itself).
+document.getElementById('help-backdrop').addEventListener('click', function(e) {
+  if (e.target === this) closeHelpModal();
+});
+
+// Focus the unified search filter input on the current tab, or the global
+// command palette as a fallback when no filter bar is visible.
+function focusSearchFilter() {
+  const fbar = document.getElementById('filterBar');
+  const fq   = document.getElementById('filterQ');
+  if (fbar && fbar.style.display !== 'none' && fq) {
+    fq.focus();
+    fq.select();
+    return;
+  }
+  // Fallback: open the command palette so users can search commands.
+  openCommandPalette();
+}
+
+// ── Kanban keyboard navigation state ────────────────────────────────────────
+const KANBAN_COLS = ['pending','in_progress','done','failed'];
+let kbKanbanIdx = -1; // index into the currently visible kanban-card list
+
+function getKanbanCards() {
+  return Array.from(document.querySelectorAll('#tab-kanban .kb-card'));
+}
+
+function kbFocusKanbanCard(idx) {
+  const cards = getKanbanCards();
+  if (!cards.length) { kbKanbanIdx = -1; return; }
+  idx = Math.max(0, Math.min(idx, cards.length - 1));
+  kbKanbanIdx = idx;
+  cards.forEach((el, i) => el.classList.toggle('kb-focus', i === idx));
+  cards[idx].scrollIntoView({ block: 'nearest' });
+}
+
+function kbClearKanbanFocus() {
+  kbKanbanIdx = -1;
+  getKanbanCards().forEach(el => el.classList.remove('kb-focus'));
+}
+
+// Move the currently focused kanban card to the previous (-1) or next (+1) column.
+function kbMoveFocusedKanbanCard(direction) {
+  const cards = getKanbanCards();
+  if (kbKanbanIdx < 0 || kbKanbanIdx >= cards.length) return;
+  const card = cards[kbKanbanIdx];
+  const idStr = card.getAttribute('data-task-id');
+  const id = parseInt(idStr, 10);
+  if (!id) return;
+  const task = appState && appState.plan && appState.plan.tasks
+    ? appState.plan.tasks.find(t => t.id === id) : null;
+  if (!task) return;
+  const currentCol = (typeof kbColFor === 'function') ? kbColFor(task.status) : task.status;
+  const ci = KANBAN_COLS.indexOf(currentCol);
+  if (ci < 0) return;
+  const ni = ci + direction;
+  if (ni < 0 || ni >= KANBAN_COLS.length) return;
+  const newStatus = KANBAN_COLS[ni];
+  apiMethod('PATCH', pUrl('/api/tasks/'+id), {status: newStatus}).then(d => {
+    if (d.ok) {
+      toast('Task #'+id+': moved to '+newStatus.replace('_',' '), 'ok');
+      refreshState();
+    } else {
+      toast(d.error || 'Update failed', 'err');
+    }
+  }).catch(() => toast('Request failed', 'err'));
+}
 
 // ── Command palette state ────────────────────────────────────────────────────
 let cmdOpen = false;
@@ -9885,24 +10132,40 @@ document.addEventListener('keydown', function(e) {
 
   // Escape — close any open modal / palette.
   if (e.key === 'Escape') {
+    if (helpOpen) { closeHelpModal(); return; }
     if (cmdOpen) { closeCommandPalette(); return; }
     const modal = document.getElementById('modal-overlay');
     if (modal && modal.classList.contains('open')) { closeModal(); return; }
     const voice = document.querySelector('.voice-modal-backdrop');
     if (voice) { voice.remove(); return; }
     kbClearFocus();
+    kbClearKanbanFocus();
     return;
   }
 
   // All remaining shortcuts are blocked when typing in inputs.
   if (inInput) return;
-  // Also block when palette is open.
-  if (cmdOpen) return;
+  // Also block when palette / help modal is open.
+  if (cmdOpen || helpOpen) return;
 
-  // 1-7: switch to tab by number.
-  if (e.key >= '1' && e.key <= '7' && !e.metaKey && !e.ctrlKey && !e.altKey) {
+  // ?: open keyboard shortcuts help modal (works without modifier — shift+/ produces this key).
+  if (e.key === '?' && !e.metaKey && !e.ctrlKey && !e.altKey) {
+    e.preventDefault();
+    openHelpModal();
+    return;
+  }
+
+  // /: focus the search filter bar (or open command palette as fallback).
+  if (e.key === '/' && !e.metaKey && !e.ctrlKey && !e.altKey) {
+    e.preventDefault();
+    focusSearchFilter();
+    return;
+  }
+
+  // 1-9: switch to tab by number.
+  if (e.key >= '1' && e.key <= '9' && !e.metaKey && !e.ctrlKey && !e.altKey) {
     const idx = parseInt(e.key, 10) - 1;
-    if (TAB_KEYS[idx]) { switchTab(TAB_KEYS[idx]); kbClearFocus(); }
+    if (TAB_KEYS[idx]) { switchTab(TAB_KEYS[idx]); kbClearFocus(); kbClearKanbanFocus(); }
     return;
   }
 
@@ -9910,6 +10173,12 @@ document.addEventListener('keydown', function(e) {
   if (e.key === 'r' && !e.metaKey && !e.ctrlKey && !e.altKey) {
     api(pUrl('/api/state')).then(s => render(s)).catch(() => {});
     toast('Refreshed', 'ok');
+    return;
+  }
+
+  // t: toggle dark/light theme.
+  if (e.key === 't' && !e.metaKey && !e.ctrlKey && !e.altKey) {
+    toggleTheme();
     return;
   }
 
@@ -9921,16 +10190,41 @@ document.addEventListener('keydown', function(e) {
     return;
   }
 
-  // j/k: move focus through task list (only on Tasks tab).
-  if ((e.key === 'j' || e.key === 'k') && activeTab === 'tasks') {
-    e.preventDefault();
-    const items = getTaskItems();
-    if (!items.length) return;
-    if (kbTaskIdx < 0) {
-      kbFocusTask(e.key === 'j' ? 0 : items.length - 1);
-    } else {
-      kbFocusTask(kbTaskIdx + (e.key === 'j' ? 1 : -1));
+  // j/k: move focus through task or kanban-card list (depending on active tab).
+  if ((e.key === 'j' || e.key === 'k') && !e.metaKey && !e.ctrlKey && !e.altKey) {
+    if (activeTab === 'tasks') {
+      e.preventDefault();
+      const items = getTaskItems();
+      if (!items.length) return;
+      if (kbTaskIdx < 0) {
+        kbFocusTask(e.key === 'j' ? 0 : items.length - 1);
+      } else {
+        kbFocusTask(kbTaskIdx + (e.key === 'j' ? 1 : -1));
+      }
+      return;
     }
+    if (activeTab === 'kanban') {
+      e.preventDefault();
+      const cards = getKanbanCards();
+      if (!cards.length) return;
+      if (kbKanbanIdx < 0) {
+        kbFocusKanbanCard(e.key === 'j' ? 0 : cards.length - 1);
+      } else {
+        kbFocusKanbanCard(kbKanbanIdx + (e.key === 'j' ? 1 : -1));
+      }
+      return;
+    }
+  }
+
+  // h/l: move focused kanban card to previous (h) or next (l) column.
+  if ((e.key === 'h' || e.key === 'l') && activeTab === 'kanban' && !e.metaKey && !e.ctrlKey && !e.altKey) {
+    e.preventDefault();
+    if (kbKanbanIdx < 0) {
+      const cards = getKanbanCards();
+      if (cards.length) kbFocusKanbanCard(0);
+      return;
+    }
+    kbMoveFocusedKanbanCard(e.key === 'l' ? 1 : -1);
     return;
   }
 
