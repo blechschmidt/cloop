@@ -441,7 +441,8 @@ func ExecuteTaskPrompt(goal, instructions, workDir string, plan *Plan, task *Tas
 	}
 
 	b.WriteString("You are an AI agent executing a task as part of a larger project goal.\n")
-	b.WriteString("You have full file system access and can run commands.\n\n")
+	b.WriteString("You have full file system access and can run commands.\n")
+	b.WriteString("IMPORTANT: Use your best judgment for all decisions. Do NOT ask for clarification or confirmation. Decide and execute autonomously.\n\n")
 
 	b.WriteString(fmt.Sprintf("## PROJECT GOAL\n%s\n\n", goal))
 	if instructions != "" {
