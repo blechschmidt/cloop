@@ -6701,9 +6701,24 @@ function renderTasks(s) {
     return;
   }
   const byId = [...s.plan.tasks].sort((a,b) => a.id - b.id);
-  const sorted = [...byId.filter(t=>t.pinned), ...byId.filter(t=>!t.pinned)];
-  const done    = sorted.filter(t => t.status==='done').length;
   const hidden  = ['done', 'skipped', 'failed', 'timed_out'];
+  // When showing completed tasks, place the latest completed/in-progress tasks
+  // at the top (most recent first by completed_at or started_at), followed by
+  // pending tasks in id order. Pinned tasks always float to the very top.
+  let sorted;
+  if (showCompletedTasks) {
+    const ts = t => {
+      const v = t.completed_at || t.started_at;
+      return v ? new Date(v).getTime() : 0;
+    };
+    const isRecent = t => hidden.includes(t.status) || t.status === 'in_progress';
+    const recent  = byId.filter(t => !t.pinned && isRecent(t)).sort((a,b) => ts(b) - ts(a));
+    const pending = byId.filter(t => !t.pinned && !isRecent(t));
+    sorted = [...byId.filter(t=>t.pinned), ...recent, ...pending];
+  } else {
+    sorted = [...byId.filter(t=>t.pinned), ...byId.filter(t=>!t.pinned)];
+  }
+  const done    = sorted.filter(t => t.status==='done').length;
 
   // Apply search/filter bar. When status filters are active they override the showCompleted toggle.
   let visible = applyFilters(sorted);
