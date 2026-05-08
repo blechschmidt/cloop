@@ -281,16 +281,15 @@ func (s *ProjectState) mergeExternalTasks() {
 			s.Plan.Tasks = append(s.Plan.Tasks, t)
 		}
 	}
-	if disk.PMMode {
-		s.PMMode = true
-	}
 	if len(disk.Instructions) > len(s.Instructions) {
 		s.Instructions = disk.Instructions
 	}
-	// Pick up CLI-mode toggles (--auto-evolve, --innovate) so the running
-	// orchestrator honors UI-driven toggles without a restart.
+	// Pick up CLI-mode toggles (--pm, --auto-evolve, --innovate, --skip-clarify)
+	// so the running orchestrator honors UI-driven toggles without a restart.
+	s.PMMode = disk.PMMode
 	s.AutoEvolve = disk.AutoEvolve
 	s.InnovateMode = disk.InnovateMode
+	s.SkipClarify = disk.SkipClarify
 }
 
 // Init creates a new project state and persists it.

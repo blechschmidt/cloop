@@ -3435,7 +3435,7 @@ func (s *Server) handleClaudeCodeLimitsSave(w http.ResponseWriter, r *http.Reque
 // handleOptionsToggle flips a persistent CLI-mode flag in project state so that
 // the running orchestrator (which re-reads s.AutoEvolve / s.InnovateMode each
 // loop iteration) picks up the change, and so the next `cloop run` honors it.
-// POST /api/options/toggle  body: {"flag":"auto_evolve"|"innovate_mode","value":bool}
+// POST /api/options/toggle  body: {"flag":"auto_evolve"|"innovate_mode"|"pm_mode"|"skip_clarify","value":bool}
 func (s *Server) handleOptionsToggle(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Flag  string `json:"flag"`
@@ -3456,6 +3456,10 @@ func (s *Server) handleOptionsToggle(w http.ResponseWriter, r *http.Request) {
 		ps.AutoEvolve = req.Value
 	case "innovate_mode":
 		ps.InnovateMode = req.Value
+	case "pm_mode":
+		ps.PMMode = req.Value
+	case "skip_clarify":
+		ps.SkipClarify = req.Value
 	default:
 		jsonErr(w, "unsupported flag: "+req.Flag, http.StatusBadRequest)
 		return
@@ -3471,6 +3475,8 @@ func (s *Server) handleOptionsToggle(w http.ResponseWriter, r *http.Request) {
 		"ok":            true,
 		"auto_evolve":   ps.AutoEvolve,
 		"innovate_mode": ps.InnovateMode,
+		"pm_mode":       ps.PMMode,
+		"skip_clarify":  ps.SkipClarify,
 	})
 }
 
@@ -6281,10 +6287,10 @@ function renderActiveOptions(s) {
   // Each entry: [enabled, icon, label, flag, tooltip, toggleKey]
   // toggleKey (optional) makes the badge clickable and POSTs to /api/options/toggle.
   const opts = [
-    [!!s.pm_mode,       '📋', 'PM Mode',       '--pm',           'Product Manager mode: AI decomposes goal into a task plan'],
+    [!!s.pm_mode,       '📋', 'PM Mode',       '--pm',           'Click to toggle. Product Manager mode: AI decomposes goal into a task plan (applies on next run)', 'pm_mode'],
     [!!s.auto_evolve,   '🧬', 'Evolve Mode',   '--auto-evolve',  'Click to toggle. Automatically discovers and adds new tasks after the plan completes', 'auto_evolve'],
     [!!s.innovate_mode, '✨', 'Innovate Mode', '--innovate',     'Click to toggle. Creative/experimental feature exploration in evolve prompts', 'innovate_mode'],
-    [!!s.skip_clarify,  '⏭️', 'Skip Clarify',  '--skip-clarify', 'Bypass the interactive goal-clarification Q&A before plan decomposition'],
+    [!!s.skip_clarify,  '⏭️', 'Skip Clarify',  '--skip-clarify', 'Click to toggle. Bypass the interactive goal-clarification Q&A before plan decomposition (applies on next run)', 'skip_clarify'],
   ];
   const enabledCount = opts.filter(o => o[0]).length;
   if (enabledCount === 0) {
@@ -6321,7 +6327,7 @@ function buildOptionBadges(opts) {
 function toggleOption(flag, value) {
   apiMethod('POST', pUrl('/api/options/toggle'), {flag: flag, value: value}).then(d => {
     if (d && d.ok) {
-      const labels = {auto_evolve: 'Evolve Mode', innovate_mode: 'Innovate Mode'};
+      const labels = {auto_evolve: 'Evolve Mode', innovate_mode: 'Innovate Mode', pm_mode: 'PM Mode', skip_clarify: 'Skip Clarify'};
       toast((labels[flag] || flag) + (value ? ' enabled' : ' disabled'), 'success');
       // Re-fetch state so badges (and any cached flags) reflect the new value.
       api(pUrl('/api/state')).then(s => render(s)).catch(() => {});
