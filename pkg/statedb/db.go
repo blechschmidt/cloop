@@ -41,6 +41,8 @@ type State struct {
 	DefaultMaxMinutes int
 	SkipClarify       bool
 	InnovateMode      bool
+	Parallel          bool
+	MaxParallel       int
 }
 
 // StepRow represents one recorded step result.
@@ -204,6 +206,8 @@ func (d *DB) SaveState(s *State) error {
 		"default_max_minutes": strconv.Itoa(s.DefaultMaxMinutes),
 		"skip_clarify":        boolStr(s.SkipClarify),
 		"innovate_mode":       boolStr(s.InnovateMode),
+		"parallel":            boolStr(s.Parallel),
+		"max_parallel":        strconv.Itoa(s.MaxParallel),
 		"created_at":          s.CreatedAt.Format(time.RFC3339Nano),
 		"updated_at":          s.UpdatedAt.Format(time.RFC3339Nano),
 	}
@@ -297,6 +301,8 @@ func (d *DB) LoadState() (*State, error) {
 	s.DefaultMaxMinutes = atoi(metaMap["default_max_minutes"])
 	s.SkipClarify = metaMap["skip_clarify"] == "1"
 	s.InnovateMode = metaMap["innovate_mode"] == "1"
+	s.Parallel = metaMap["parallel"] == "1"
+	s.MaxParallel = atoi(metaMap["max_parallel"])
 
 	if v := metaMap["created_at"]; v != "" {
 		s.CreatedAt, _ = time.Parse(time.RFC3339Nano, v)

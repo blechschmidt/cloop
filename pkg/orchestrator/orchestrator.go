@@ -394,6 +394,12 @@ func New(cfg Config, prov provider.Provider) (*Orchestrator, error) {
 		s.PMMode = true
 	}
 	s.InnovateMode = cfg.InnovateMode
+	if cfg.Parallel {
+		s.Parallel = true
+	}
+	if cfg.MaxParallel > 0 {
+		s.MaxParallel = cfg.MaxParallel
+	}
 	mem, _ := memory.Load(cfg.WorkDir)
 	if mem == nil {
 		mem = &memory.Memory{}

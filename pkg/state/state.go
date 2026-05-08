@@ -98,6 +98,13 @@ type ProjectState struct {
 
 	// InnovateMode persists the --innovate flag from the most recent run.
 	InnovateMode bool `json:"innovate_mode,omitempty"`
+
+	// Parallel persists the --parallel flag (PM mode runs dependency-ready
+	// tasks concurrently in each round). Read by cmd/run as a default.
+	Parallel bool `json:"parallel,omitempty"`
+
+	// MaxParallel caps the worker pool when Parallel is true. 0 = unlimited.
+	MaxParallel int `json:"max_parallel,omitempty"`
 }
 
 // StatePath returns the legacy JSON state file path (used for migration detection).
@@ -290,6 +297,8 @@ func (s *ProjectState) mergeExternalTasks() {
 	s.AutoEvolve = disk.AutoEvolve
 	s.InnovateMode = disk.InnovateMode
 	s.SkipClarify = disk.SkipClarify
+	s.Parallel = disk.Parallel
+	s.MaxParallel = disk.MaxParallel
 }
 
 // Init creates a new project state and persists it.
@@ -347,6 +356,8 @@ func toRaw(s *ProjectState) *statedb.State {
 		DefaultMaxMinutes: s.DefaultMaxMinutes,
 		SkipClarify:       s.SkipClarify,
 		InnovateMode:      s.InnovateMode,
+		Parallel:          s.Parallel,
+		MaxParallel:       s.MaxParallel,
 	}
 	r.Steps = make([]statedb.StepRow, len(s.Steps))
 	for i, sr := range s.Steps {
@@ -386,6 +397,8 @@ func fromRaw(r *statedb.State) *ProjectState {
 		DefaultMaxMinutes: r.DefaultMaxMinutes,
 		SkipClarify:       r.SkipClarify,
 		InnovateMode:      r.InnovateMode,
+		Parallel:          r.Parallel,
+		MaxParallel:       r.MaxParallel,
 	}
 	s.Steps = make([]StepResult, len(r.Steps))
 	for i, row := range r.Steps {
@@ -431,6 +444,8 @@ type legacyState struct {
 	DefaultMaxMinutes int                  `json:"default_max_minutes,omitempty"`
 	SkipClarify       bool                 `json:"skip_clarify,omitempty"`
 	InnovateMode      bool                 `json:"innovate_mode,omitempty"`
+	Parallel          bool                 `json:"parallel,omitempty"`
+	MaxParallel       int                  `json:"max_parallel,omitempty"`
 }
 
 func migrateFromJSON(dir, jsonPath, dbPath string) error {
@@ -471,6 +486,8 @@ func migrateFromJSON(dir, jsonPath, dbPath string) error {
 		DefaultMaxMinutes: legacy.DefaultMaxMinutes,
 		SkipClarify:       legacy.SkipClarify,
 		InnovateMode:      legacy.InnovateMode,
+		Parallel:          legacy.Parallel,
+		MaxParallel:       legacy.MaxParallel,
 	}
 
 	db, err := statedb.Open(dbPath)

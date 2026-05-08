@@ -394,6 +394,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 
 	// Toggle persistent CLI options (--auto-evolve, --innovate, etc.)
 	mux.HandleFunc("POST /api/options/toggle", s.handleOptionsToggle)
+	mux.HandleFunc("POST /api/options/max-parallel", s.handleMaxParallelSet)
 
 	// Multi-project dashboard
 	mux.HandleFunc("/api/projects", s.handleProjects)
@@ -3763,7 +3764,7 @@ func (s *Server) handleClaudeCodeLimitsSave(w http.ResponseWriter, r *http.Reque
 // handleOptionsToggle flips a persistent CLI-mode flag in project state so that
 // the running orchestrator (which re-reads s.AutoEvolve / s.InnovateMode each
 // loop iteration) picks up the change, and so the next `cloop run` honors it.
-// POST /api/options/toggle  body: {"flag":"auto_evolve"|"innovate_mode"|"pm_mode"|"skip_clarify","value":bool}
+// POST /api/options/toggle  body: {"flag":"auto_evolve"|"innovate_mode"|"pm_mode"|"skip_clarify"|"parallel","value":bool}
 func (s *Server) handleOptionsToggle(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Flag  string `json:"flag"`
@@ -3788,6 +3789,12 @@ func (s *Server) handleOptionsToggle(w http.ResponseWriter, r *http.Request) {
 		ps.PMMode = req.Value
 	case "skip_clarify":
 		ps.SkipClarify = req.Value
+	case "parallel":
+		ps.Parallel = req.Value
+		// Parallel mode requires PM mode; auto-enable when toggled on.
+		if req.Value {
+			ps.PMMode = true
+		}
 	default:
 		jsonErr(w, "unsupported flag: "+req.Flag, http.StatusBadRequest)
 		return
@@ -3805,6 +3812,42 @@ func (s *Server) handleOptionsToggle(w http.ResponseWriter, r *http.Request) {
 		"innovate_mode": ps.InnovateMode,
 		"pm_mode":       ps.PMMode,
 		"skip_clarify":  ps.SkipClarify,
+		"parallel":      ps.Parallel,
+		"max_parallel":  ps.MaxParallel,
+	})
+}
+
+// handleMaxParallelSet updates the per-project worker pool size used in parallel
+// PM mode. POST /api/options/max-parallel body: {"value":int}. 0 = unlimited.
+func (s *Server) handleMaxParallelSet(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Value int `json:"value"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonErr(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if req.Value < 0 || req.Value > 64 {
+		jsonErr(w, "max_parallel must be between 0 and 64", http.StatusBadRequest)
+		return
+	}
+	workDir := s.resolveWorkDir(r)
+	ps, err := state.Load(workDir)
+	if err != nil {
+		jsonErr(w, "no project found", http.StatusNotFound)
+		return
+	}
+	ps.MaxParallel = req.Value
+	if err := ps.SaveDirect(); err != nil {
+		jsonErr(w, "save failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if raw, err := json.Marshal(ps); err == nil {
+		s.broadcastToProject(workDir, wsMessage{Type: "task_update", Data: json.RawMessage(raw)})
+	}
+	jsonOK(w, map[string]interface{}{
+		"ok":           true,
+		"max_parallel": ps.MaxParallel,
 	})
 }
 
@@ -6850,16 +6893,49 @@ function renderActiveOptions(s) {
     [!!s.auto_evolve,   '🧬', 'Evolve Mode',   '--auto-evolve',  'Click to toggle. Automatically discovers and adds new tasks after the plan completes', 'auto_evolve'],
     [!!s.innovate_mode, '✨', 'Innovate Mode', '--innovate',     'Click to toggle. Creative/experimental feature exploration in evolve prompts', 'innovate_mode'],
     [!!s.skip_clarify,  '⏭️', 'Skip Clarify',  '--skip-clarify', 'Click to toggle. Bypass the interactive goal-clarification Q&A before plan decomposition (applies on next run)', 'skip_clarify'],
+    [!!s.parallel,      '⚡', 'Parallel',      '--parallel',     'Click to toggle. Run dependency-ready tasks concurrently in PM mode (applies on next run; enabling auto-enables PM mode)', 'parallel'],
   ];
+  const mp = parseInt(s.max_parallel, 10);
+  const mpVal = (Number.isFinite(mp) && mp > 0) ? mp : 0;
+  const mpDisplay = mpVal === 0 ? '∞' : String(mpVal);
+  const parallelControls =
+    '<div class="option-badge ' + (s.parallel ? 'on' : 'off') + ' option-config" ' +
+      'title="Worker pool cap when Parallel mode is on. 0 = unlimited (all dependency-ready tasks run at once).">' +
+      '<span class="opt-icon">🧵</span>' +
+      '<span>Max Parallel</span>' +
+      '<input type="number" id="maxParallelInput" min="0" max="64" step="1" value="' + mpVal + '" ' +
+        'style="width:56px;background:transparent;color:var(--text);border:1px solid var(--border);' +
+        'border-radius:4px;padding:2px 4px;font-family:inherit;font-size:inherit;text-align:right;" ' +
+        'onchange="setMaxParallel(this.value)" />' +
+      '<span class="opt-flag" title="Currently: ' + mpDisplay + ' worker(s)">-j ' + mpDisplay + '</span>' +
+    '</div>';
   const enabledCount = opts.filter(o => o[0]).length;
   if (enabledCount === 0) {
     grid.innerHTML =
       '<div class="options-empty">No persistent CLI options are currently enabled. ' +
       'Run with <code>--pm</code>, <code>--auto-evolve</code>, or <code>--innovate</code> to activate.</div>' +
-      buildOptionBadges(opts);
+      buildOptionBadges(opts) + parallelControls;
     return;
   }
-  grid.innerHTML = buildOptionBadges(opts);
+  grid.innerHTML = buildOptionBadges(opts) + parallelControls;
+}
+
+function setMaxParallel(raw) {
+  const n = parseInt(raw, 10);
+  if (!Number.isFinite(n) || n < 0 || n > 64) {
+    toast('Max Parallel must be 0–64 (0 = unlimited)', 'error');
+    return;
+  }
+  apiMethod('POST', pUrl('/api/options/max-parallel'), {value: n}).then(d => {
+    if (d && d.ok) {
+      toast('Max Parallel set to ' + (n === 0 ? 'unlimited' : n), 'success');
+      api(pUrl('/api/state')).then(s => render(s)).catch(() => {});
+    } else {
+      toast('Update failed: ' + (d && d.error ? d.error : 'unknown error'), 'error');
+    }
+  }).catch(err => {
+    toast('Update failed: ' + err.message, 'error');
+  });
 }
 
 function buildOptionBadges(opts) {
@@ -6886,7 +6962,7 @@ function buildOptionBadges(opts) {
 function toggleOption(flag, value) {
   apiMethod('POST', pUrl('/api/options/toggle'), {flag: flag, value: value}).then(d => {
     if (d && d.ok) {
-      const labels = {auto_evolve: 'Evolve Mode', innovate_mode: 'Innovate Mode', pm_mode: 'PM Mode', skip_clarify: 'Skip Clarify'};
+      const labels = {auto_evolve: 'Evolve Mode', innovate_mode: 'Innovate Mode', pm_mode: 'PM Mode', skip_clarify: 'Skip Clarify', parallel: 'Parallel Mode'};
       toast((labels[flag] || flag) + (value ? ' enabled' : ' disabled'), 'success');
       // Re-fetch state so badges (and any cached flags) reflect the new value.
       api(pUrl('/api/state')).then(s => render(s)).catch(() => {});

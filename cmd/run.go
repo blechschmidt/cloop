@@ -242,10 +242,18 @@ Press Ctrl+C to pause gracefully.`,
 		if maxParallel > 0 {
 			parallelMode = true
 		}
-		// Apply config-level MaxParallel as default when flag not set.
+		// Pick up persisted Parallel toggle (set via UI) when --parallel flag is off.
+		if !parallelMode && projectState != nil && projectState.Parallel {
+			parallelMode = true
+		}
+		// Apply config-level MaxParallel as default when flag not set,
+		// then fall back to persisted state.
 		effectiveMaxParallel := maxParallel
 		if effectiveMaxParallel == 0 {
 			effectiveMaxParallel = cfg.MaxParallel
+		}
+		if effectiveMaxParallel == 0 && projectState != nil {
+			effectiveMaxParallel = projectState.MaxParallel
 		}
 
 		// Merge PM mode: flag | plan-only | replan | parallel | persisted state
