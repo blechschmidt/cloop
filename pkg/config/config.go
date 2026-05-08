@@ -185,6 +185,25 @@ type OllamaConfig struct {
 
 type ClaudeCodeConfig struct {
 	Model string `yaml:"model"`
+
+	// MaxWeeklyPct, when > 0, blocks new runs once the global Anthropic weekly
+	// (7-day) utilization reported by the OAuth usage API reaches this percent.
+	// Example: 50 means "stop running this project once 50% of the weekly limit
+	// has been consumed across all your Claude usage" — useful to reserve
+	// headroom for other work.
+	MaxWeeklyPct float64 `yaml:"max_weekly_pct,omitempty"`
+
+	// MaxFiveHourPct, when > 0, blocks new runs once the global 5-hour window
+	// utilization reaches this percent.
+	MaxFiveHourPct float64 `yaml:"max_five_hour_pct,omitempty"`
+
+	// MaxWeeklyOpusPct, when > 0, blocks new runs once the weekly Opus
+	// utilization reaches this percent.
+	MaxWeeklyOpusPct float64 `yaml:"max_weekly_opus_pct,omitempty"`
+
+	// MaxWeeklySonnetPct, when > 0, blocks new runs once the weekly Sonnet
+	// utilization reaches this percent.
+	MaxWeeklySonnetPct float64 `yaml:"max_weekly_sonnet_pct,omitempty"`
 }
 
 // MockConfig holds settings for the deterministic offline mock provider.

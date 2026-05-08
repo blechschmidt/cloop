@@ -325,6 +325,8 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("PUT /api/budget/project", s.handleBudgetProjectSave)
 	mux.HandleFunc("GET /api/ratelimits", s.handleRateLimits)
 	mux.HandleFunc("GET /api/claude-usage", s.handleClaudeUsage)
+	mux.HandleFunc("GET /api/claudecode-limits", s.handleClaudeCodeLimitsGet)
+	mux.HandleFunc("PUT /api/claudecode-limits", s.handleClaudeCodeLimitsSave)
 
 	// Multi-project dashboard
 	mux.HandleFunc("/api/projects", s.handleProjects)
@@ -3358,6 +3360,75 @@ func (s *Server) handleClaudeUsage(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, usage)
 }
 
+// handleClaudeCodeLimitsGet returns the per-project claudecode subscription
+// caps along with the current global utilization snapshot. Used by the
+// project overview panel to render configurable limits.
+// GET /api/claudecode-limits
+func (s *Server) handleClaudeCodeLimitsGet(w http.ResponseWriter, r *http.Request) {
+	workDir := s.resolveWorkDir(r)
+	cfg, _ := config.Load(workDir)
+	var cc config.ClaudeCodeConfig
+	if cfg != nil {
+		cc = cfg.ClaudeCode
+	}
+	usage := ratelimit.GetCachedUsage()
+	if usage == nil {
+		// Best-effort fetch so the UI shows live numbers.
+		usage, _ = ratelimit.FetchClaudeUsage("")
+	}
+	violations := ratelimit.CheckClaudeCodeLimits(cc, usage)
+	violationStrs := make([]string, 0, len(violations))
+	for _, v := range violations {
+		violationStrs = append(violationStrs, v.Error())
+	}
+	jsonOK(w, map[string]interface{}{
+		"limits": map[string]interface{}{
+			"max_weekly_pct":        cc.MaxWeeklyPct,
+			"max_five_hour_pct":     cc.MaxFiveHourPct,
+			"max_weekly_opus_pct":   cc.MaxWeeklyOpusPct,
+			"max_weekly_sonnet_pct": cc.MaxWeeklySonnetPct,
+		},
+		"usage":      usage,
+		"violations": violationStrs,
+	})
+}
+
+// handleClaudeCodeLimitsSave updates the per-project claudecode subscription
+// caps in .cloop/config.yaml. PUT /api/claudecode-limits
+func (s *Server) handleClaudeCodeLimitsSave(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		MaxWeeklyPct       float64 `json:"max_weekly_pct"`
+		MaxFiveHourPct     float64 `json:"max_five_hour_pct"`
+		MaxWeeklyOpusPct   float64 `json:"max_weekly_opus_pct"`
+		MaxWeeklySonnetPct float64 `json:"max_weekly_sonnet_pct"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonErr(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	for _, v := range []float64{req.MaxWeeklyPct, req.MaxFiveHourPct, req.MaxWeeklyOpusPct, req.MaxWeeklySonnetPct} {
+		if v < 0 || v > 100 {
+			jsonErr(w, "percentage values must be between 0 and 100", http.StatusBadRequest)
+			return
+		}
+	}
+	workDir := s.resolveWorkDir(r)
+	cfg, err := config.Load(workDir)
+	if err != nil {
+		jsonErr(w, "config load failed", http.StatusInternalServerError)
+		return
+	}
+	cfg.ClaudeCode.MaxWeeklyPct = req.MaxWeeklyPct
+	cfg.ClaudeCode.MaxFiveHourPct = req.MaxFiveHourPct
+	cfg.ClaudeCode.MaxWeeklyOpusPct = req.MaxWeeklyOpusPct
+	cfg.ClaudeCode.MaxWeeklySonnetPct = req.MaxWeeklySonnetPct
+	if err := config.Save(workDir, cfg); err != nil {
+		jsonErr(w, "save failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	jsonOK(w, map[string]bool{"ok": true})
+}
+
 // ── dashboard HTML ────────────────────────────────────────────────────────────
 
 const dashboardHTML = `<!DOCTYPE html>
@@ -4978,6 +5049,42 @@ const dashboardHTML = `<!DOCTYPE html>
           <div class="options-grid" id="activeOptionsGrid"></div>
         </div>
 
+        <!-- Claude Code per-project usage caps (only when provider is claudecode) -->
+        <div class="section" id="ccLimitsSection" style="display:none">
+          <div class="section-title" style="display:flex;align-items:center;gap:12px">
+            Claude Code Subscription Caps
+            <button class="btn" style="padding:4px 10px;font-size:12px;margin-left:auto" onclick="loadCCLimits()" title="Refresh usage">&#8635;</button>
+          </div>
+          <p style="font-size:12px;color:var(--muted);margin-top:4px;margin-bottom:10px">
+            Block this project from running once your global Claude Code subscription utilization reaches the configured percentage.
+            Useful to reserve weekly budget headroom for other work. Leave a field at 0 to disable that cap.
+          </p>
+          <div id="ccLimitsUsage" style="display:flex;flex-direction:column;gap:6px;margin-bottom:12px"></div>
+          <div id="ccLimitsViolation" style="display:none;font-size:12px;padding:8px;border-radius:4px;background:rgba(248,81,73,0.12);border:1px solid var(--red);color:var(--red);margin-bottom:10px"></div>
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label">Max Weekly Util %</label>
+              <input class="form-input" id="ccMaxWeeklyPct" type="number" min="0" max="100" step="1" placeholder="e.g. 50">
+            </div>
+            <div class="form-group">
+              <label class="form-label">Max 5-Hour Util %</label>
+              <input class="form-input" id="ccMaxFiveHourPct" type="number" min="0" max="100" step="1" placeholder="e.g. 80">
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label">Max Weekly Opus %</label>
+              <input class="form-input" id="ccMaxWeeklyOpusPct" type="number" min="0" max="100" step="1" placeholder="e.g. 50">
+            </div>
+            <div class="form-group">
+              <label class="form-label">Max Weekly Sonnet %</label>
+              <input class="form-input" id="ccMaxWeeklySonnetPct" type="number" min="0" max="100" step="1" placeholder="e.g. 50">
+            </div>
+          </div>
+          <button class="btn primary" onclick="saveCCLimits()">Save Caps</button>
+          <span id="ccLimitsSaveMsg" style="font-size:12px;color:var(--green);margin-left:12px;display:none">Saved!</span>
+        </div>
+
         <!-- Run controls -->
         <div class="section">
           <div class="section-title">Controls</div>
@@ -6314,6 +6421,7 @@ function render(s) {
   document.getElementById('statModel').textContent    = s.model || '';
   prepopulateAdvancedRunOptions(s);
   renderActiveOptions(s);
+  if (typeof updateCCLimitsVisibility === 'function') updateCCLimitsVisibility(s.provider || 'claudecode');
   document.getElementById('statMode').textContent     = s.pm_mode ? 'Product Manager' : 'Feedback Loop';
   document.getElementById('statCreated').textContent  = fmtDate(s.created_at);
   document.getElementById('statUpdated').textContent  = fmtDate(s.updated_at);
@@ -9943,6 +10051,98 @@ window.loadRateLimits = function() {
   }).catch(err => {
     console.warn('ratelimits load error', err);
   });
+};
+
+// ── Claude Code per-project caps (overview panel) ──────────────────────────
+window.loadCCLimits = function() {
+  var section = document.getElementById('ccLimitsSection');
+  if (!section) return;
+  api(pUrl('/api/claudecode-limits')).then(function(d) {
+    var limits = d.limits || {};
+    _setVal('ccMaxWeeklyPct',       limits.max_weekly_pct        || '');
+    _setVal('ccMaxFiveHourPct',     limits.max_five_hour_pct     || '');
+    _setVal('ccMaxWeeklyOpusPct',   limits.max_weekly_opus_pct   || '');
+    _setVal('ccMaxWeeklySonnetPct', limits.max_weekly_sonnet_pct || '');
+
+    var usagePanel = document.getElementById('ccLimitsUsage');
+    if (usagePanel) {
+      var rows = '';
+      var u = d.usage || {};
+      function row(label, win, cap) {
+        if (!win) {
+          rows += '<div style="font-size:12px;color:var(--muted)">' + label + ': <em>not reported</em></div>';
+          return;
+        }
+        var pct = Math.round(win.utilization || 0);
+        var capN = parseFloat(cap) || 0;
+        var capped = capN > 0 && pct >= capN;
+        var color = capped ? 'var(--red)' : (pct >= 80 ? '#e74c3c' : pct >= 50 ? '#f39c12' : '#27ae60');
+        rows += '<div>';
+        rows += '<div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:2px">';
+        rows += '<span><strong>' + label + '</strong>' + (capN > 0 ? ' <span style="color:var(--muted)">(cap ' + capN + '%)</span>' : '') + '</span>';
+        rows += '<span style="color:' + color + ';font-weight:600">' + pct + '%</span>';
+        rows += '</div>';
+        rows += '<div style="background:var(--border);border-radius:4px;height:6px;overflow:hidden">';
+        rows += '<div style="background:' + color + ';height:100%;width:' + Math.min(pct, 100) + '%"></div>';
+        if (capN > 0 && capN <= 100) {
+          rows += '<div style="position:relative;height:0"><div style="position:absolute;top:-6px;left:' + capN + '%;width:2px;height:6px;background:var(--text);opacity:0.6"></div></div>';
+        }
+        rows += '</div></div>';
+      }
+      row('Weekly (all)', u.seven_day,        limits.max_weekly_pct);
+      row('5-Hour',       u.five_hour,        limits.max_five_hour_pct);
+      row('Weekly Opus',  u.seven_day_opus,   limits.max_weekly_opus_pct);
+      row('Weekly Sonnet',u.seven_day_sonnet, limits.max_weekly_sonnet_pct);
+      usagePanel.innerHTML = rows || '<div style="font-size:12px;color:var(--muted)">No usage data available — make sure ~/.claude/.credentials.json exists or set CLAUDE_CODE_OAUTH_TOKEN.</div>';
+    }
+
+    var violationBox = document.getElementById('ccLimitsViolation');
+    if (violationBox) {
+      var vs = d.violations || [];
+      if (vs.length > 0) {
+        violationBox.style.display = '';
+        violationBox.innerHTML = '<strong>Cap reached — runs blocked:</strong><br>' + vs.map(esc).join('<br>');
+      } else {
+        violationBox.style.display = 'none';
+      }
+    }
+  }).catch(function(err) {
+    console.warn('cc-limits load error', err);
+  });
+};
+
+window.saveCCLimits = function() {
+  var body = {
+    max_weekly_pct:        parseFloat(document.getElementById('ccMaxWeeklyPct').value)       || 0,
+    max_five_hour_pct:     parseFloat(document.getElementById('ccMaxFiveHourPct').value)     || 0,
+    max_weekly_opus_pct:   parseFloat(document.getElementById('ccMaxWeeklyOpusPct').value)   || 0,
+    max_weekly_sonnet_pct: parseFloat(document.getElementById('ccMaxWeeklySonnetPct').value) || 0,
+  };
+  fetch(pUrl('/api/claudecode-limits'), {
+    method: 'PUT',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(body),
+  }).then(function(resp) {
+    if (!resp.ok) { throw new Error('save failed'); }
+    var msg = document.getElementById('ccLimitsSaveMsg');
+    if (msg) {
+      msg.style.display = '';
+      setTimeout(function() { msg.style.display = 'none'; }, 2000);
+    }
+    loadCCLimits();
+  }).catch(function(err) { alert('Save failed: ' + err); });
+};
+
+// Show the cc-limits section only when active provider is claudecode.
+window.updateCCLimitsVisibility = function(provider) {
+  var section = document.getElementById('ccLimitsSection');
+  if (!section) return;
+  if ((provider || '').toLowerCase() === 'claudecode') {
+    section.style.display = '';
+    loadCCLimits();
+  } else {
+    section.style.display = 'none';
+  }
 };
 
 function _rlBar(used, limit, pct) {

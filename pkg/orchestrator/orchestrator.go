@@ -43,6 +43,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/promptopt"
 	"github.com/blechschmidt/cloop/pkg/promptstats"
 	"github.com/blechschmidt/cloop/pkg/provider"
+	"github.com/blechschmidt/cloop/pkg/ratelimit"
 	"github.com/blechschmidt/cloop/pkg/ctxedit"
 	"github.com/blechschmidt/cloop/pkg/replay"
 	"github.com/blechschmidt/cloop/pkg/review"
@@ -324,6 +325,13 @@ type Config struct {
 	// to send threshold alerts. It mirrors config.NotifyConfig.
 	NotifyCfg config.NotifyConfig
 
+	// ClaudeCode holds claudecode-specific configuration including per-project
+	// caps on the global Anthropic subscription utilization. When MaxWeeklyPct
+	// (or any of the other per-window caps) is > 0, the orchestrator queries
+	// the Anthropic OAuth usage API before each task and aborts when the cap
+	// has been reached. Only enforced when the active provider is "claudecode".
+	ClaudeCode config.ClaudeCodeConfig
+
 	// DocsUpdateOnComplete runs `cloop docs update --yes` after the plan
 	// finishes. When true, all tracked documentation files are AI-refreshed
 	// automatically at the end of a successful PM run.
@@ -584,6 +592,37 @@ func (o *Orchestrator) SetProvider(name string) {
 		o.state.Provider = name
 		o.state.Save()
 	}
+}
+
+// enforceClaudeCodeLimits checks the per-project claudecode subscription caps
+// against the latest cached usage data (refreshing from the OAuth API if no
+// cache is available). Returns nil when the active provider is not claudecode,
+// when no caps are configured, when usage data is unavailable, or when no cap
+// has been reached.
+func (o *Orchestrator) enforceClaudeCodeLimits() error {
+	cc := o.config.ClaudeCode
+	if cc.MaxWeeklyPct <= 0 && cc.MaxFiveHourPct <= 0 &&
+		cc.MaxWeeklyOpusPct <= 0 && cc.MaxWeeklySonnetPct <= 0 {
+		return nil
+	}
+	// Only enforce when the active provider is claudecode.
+	active := o.state.Provider
+	if active == "" {
+		active = o.config.ProviderName
+	}
+	if active != "claudecode" {
+		return nil
+	}
+	usage := ratelimit.GetCachedUsage()
+	if usage == nil {
+		// Best-effort fetch — if it fails we silently skip enforcement.
+		fetched, err := ratelimit.FetchClaudeUsage("")
+		if err != nil {
+			return nil
+		}
+		usage = fetched
+	}
+	return ratelimit.EnforceClaudeCodeLimits(cc, usage)
 }
 
 func (o *Orchestrator) Run(ctx context.Context) error {
@@ -1224,6 +1263,14 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			s.Status = "paused"
 			s.Save()
 			return budgetErr
+		}
+
+		// Per-project claudecode subscription cap enforcement.
+		if ccErr := o.enforceClaudeCodeLimits(); ccErr != nil {
+			failColor.Printf("\n✗ %v\n", ccErr)
+			s.Status = "paused"
+			s.Save()
+			return ccErr
 		}
 
 		if !o.log.IsJSON() {
@@ -2583,6 +2630,14 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 			s.Status = "paused"
 			s.Save()
 			return budgetErr
+		}
+
+		// Per-project claudecode subscription cap enforcement.
+		if ccErr := o.enforceClaudeCodeLimits(); ccErr != nil {
+			failColor.Printf("\n✗ %v\n", ccErr)
+			s.Status = "paused"
+			s.Save()
+			return ccErr
 		}
 
 		// Apply worker pool limit: cap the batch to MaxParallel if set.
