@@ -3198,3 +3198,175 @@ func TestRunPM_HealEmptyOutputDoesNotSilentlyPass(t *testing.T) {
 			pm.TaskFailed, got)
 	}
 }
+
+// TestRunPM_HealAnnotationOutcome locks in the audit-trail accuracy of the
+// heal-loop annotations. Before this contract was tested, the loop only
+// recorded annotations for two outcomes (diagnosis text, succeeded), and
+// silently dropped the rest:
+//
+//   - diagnosis error → break with no annotation
+//   - heal provider error → continue with no annotation
+//   - heal empty output → continue with no annotation
+//   - heal still failing → no annotation
+//   - loop exhausted → no summary annotation
+//
+// Operators inspecting task history in those four failure modes saw the
+// original failure annotation but no record of why heal stopped trying or
+// what the per-attempt outcome was — same audit-trail accuracy class as
+// the clarification auto-resolve fix in 0e8656c (locked under
+// TestRunPM_ClarificationAutoResolve_AnnotationOutcome).
+//
+// This test pins each branch's annotation so a future refactor that drops
+// one of them silently re-introduces an opaque-failure regression.
+func TestRunPM_HealAnnotationOutcome(t *testing.T) {
+	cases := []struct {
+		name           string
+		results        []*provider.Result
+		errs           []error
+		healRetries    int
+		expectStatus   pm.TaskStatus
+		expectContains []string // each substring must appear in some annotation
+	}{
+		{
+			// Sanity-check the pre-existing succeeded annotation so the
+			// test sweep covers all 5 branches end-to-end.
+			name: "succeeded on attempt 1",
+			results: []*provider.Result{
+				{Output: "fail\nTASK_FAILED", Provider: "mock"},
+				{Output: "diag text", Provider: "mock"},
+				{Output: "fixed\nTASK_DONE", Provider: "mock"},
+			},
+			healRetries:    2,
+			expectStatus:   pm.TaskDone,
+			expectContains: []string{"[HEAL 1/2] Succeeded"},
+		},
+		{
+			name: "diagnosis error aborts heal",
+			results: []*provider.Result{
+				{Output: "fail\nTASK_FAILED", Provider: "mock"},
+				nil, // diagnosis call slot for the err below
+			},
+			errs: []error{
+				nil,
+				errors.New("diag boom"),
+			},
+			healRetries:    2,
+			expectStatus:   pm.TaskFailed,
+			expectContains: []string{"[HEAL 1/2] Aborted — diagnosis error"},
+		},
+		{
+			name: "provider error per attempt is annotated",
+			results: []*provider.Result{
+				{Output: "fail\nTASK_FAILED", Provider: "mock"},
+				{Output: "diag1", Provider: "mock"},
+				nil, // heal exec 1
+				{Output: "diag2", Provider: "mock"},
+				nil, // heal exec 2
+			},
+			errs: []error{
+				nil,
+				nil,
+				errors.New("net err 1"),
+				nil,
+				errors.New("net err 2"),
+			},
+			healRetries:  2,
+			expectStatus: pm.TaskFailed,
+			expectContains: []string{
+				"[HEAL 1/2] Skipped — provider error: net err 1",
+				"[HEAL 2/2] Skipped — provider error: net err 2",
+			},
+		},
+		{
+			name: "empty output per attempt is annotated",
+			results: []*provider.Result{
+				{Output: "fail\nTASK_FAILED", Provider: "mock"},
+				{Output: "diag1", Provider: "mock"},
+				{Output: "", Provider: "mock"}, // heal exec 1 — empty
+				{Output: "diag2", Provider: "mock"},
+				{Output: "", Provider: "mock"}, // heal exec 2 — empty
+			},
+			healRetries:  2,
+			expectStatus: pm.TaskFailed,
+			expectContains: []string{
+				"[HEAL 1/2] Skipped — provider returned empty output",
+				"[HEAL 2/2] Skipped — provider returned empty output",
+			},
+		},
+		{
+			name: "exhausted with persistent TASK_FAILED",
+			results: []*provider.Result{
+				{Output: "fail\nTASK_FAILED", Provider: "mock"},
+				{Output: "diag1", Provider: "mock"},
+				{Output: "still bad\nTASK_FAILED", Provider: "mock"}, // heal 1 still fails
+				{Output: "diag2", Provider: "mock"},
+				{Output: "still bad\nTASK_FAILED", Provider: "mock"}, // heal 2 still fails
+			},
+			healRetries:  2,
+			expectStatus: pm.TaskFailed,
+			expectContains: []string{
+				"[HEAL 1/2] Still failing",
+				"[HEAL 2/2] Still failing",
+				"[HEAL] Exhausted after 2 attempts",
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := tempDir(t)
+			s := initState(t, dir, "goal", 0)
+			s.PMMode = true
+			s.Plan = &pm.Plan{
+				Goal:  "goal",
+				Tasks: []*pm.Task{{ID: 1, Title: "Task A", Priority: 1, Status: pm.TaskPending}},
+			}
+			s.Save()
+
+			prov := &mockProvider{
+				name:    "mock",
+				results: tc.results,
+				errs:    tc.errs,
+			}
+			// MaxFailures=5 keeps a single TaskFailed from aborting the loop —
+			// we want to inspect annotations, not the abort behavior.
+			o := newOrchestrator(t, dir, Config{
+				WorkDir:     dir,
+				PMMode:      true,
+				HealRetries: tc.healRetries,
+				MaxFailures: 5,
+			}, prov)
+			_ = o.runPM(context.Background())
+
+			task := o.state.Plan.Tasks[0]
+			if task.Status != tc.expectStatus {
+				t.Errorf("task status = %q, want %q", task.Status, tc.expectStatus)
+			}
+
+			// Collect all heal-related annotations for diagnostics.
+			var healAnns []string
+			for _, a := range task.Annotations {
+				if a.Author == "ai" && strings.Contains(a.Text, "[HEAL") {
+					healAnns = append(healAnns, a.Text)
+				}
+			}
+			if len(healAnns) == 0 {
+				t.Fatalf("no [HEAL ...] annotations found; got: %+v", task.Annotations)
+			}
+
+			for _, want := range tc.expectContains {
+				found := false
+				for _, ann := range healAnns {
+					if strings.Contains(ann, want) {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Errorf("missing heal annotation containing %q;\nactual heal annotations:\n  %s",
+						want, strings.Join(healAnns, "\n  "))
+				}
+			}
+		})
+	}
+}

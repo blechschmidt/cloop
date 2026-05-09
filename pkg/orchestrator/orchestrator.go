@@ -1839,6 +1839,12 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 				diag, diagErr := diagnosis.AnalyzeFailure(ctx, o.provider, s.Model, o.config.StepTimeout, task, taskOutput)
 				if diagErr != nil {
 					dimColor.Printf("  [HEAL] Diagnosis error — aborting heal: %v\n", diagErr)
+					// Audit-trail accuracy: without this annotation, operators
+					// see only the diagnosis stdout line — the task's history
+					// shows the original failure with no record of why heal
+					// stopped trying. Mirrors the clarify-loop annotation
+					// shape so log-grepping for "[HEAL" surfaces every outcome.
+					pm.AddAnnotation(task, "ai", fmt.Sprintf("[HEAL %d/%d] Aborted — diagnosis error: %v", healAttempt, maxHealRetries, diagErr))
 					break
 				}
 				task.FailureDiagnosis = diag
@@ -1866,6 +1872,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 				healResult, healErr := safeComplete(ctx, taskProvider, healPrompt, healOpts)
 				if healErr != nil {
 					healColor.Printf("[HEAL attempt %d/%d] Provider error: %v\n", healAttempt, maxHealRetries, healErr)
+					pm.AddAnnotation(task, "ai", fmt.Sprintf("[HEAL %d/%d] Skipped — provider error: %v", healAttempt, maxHealRetries, healErr))
 					continue
 				}
 				// Empty-output protection: when the heal provider returns
@@ -1878,6 +1885,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 				// empty/nil as the same kind of soft retry as healErr.
 				if healResult == nil || strings.TrimSpace(healResult.Output) == "" {
 					healColor.Printf("[HEAL attempt %d/%d] Provider returned empty output — treating as transient failure\n", healAttempt, maxHealRetries)
+					pm.AddAnnotation(task, "ai", fmt.Sprintf("[HEAL %d/%d] Skipped — provider returned empty output", healAttempt, maxHealRetries))
 					continue
 				}
 				if healWasStreamed() {
@@ -1896,8 +1904,17 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 					pm.AddAnnotation(task, "ai", fmt.Sprintf("[HEAL %d/%d] Succeeded — task signal: %s", healAttempt, maxHealRetries, signal))
 					healColor.Printf("[HEAL attempt %d/%d] ✓ Task %d healed successfully (signal: %s)\n\n", healAttempt, maxHealRetries, task.ID, signal)
 				} else {
+					pm.AddAnnotation(task, "ai", fmt.Sprintf("[HEAL %d/%d] Still failing — task emitted TASK_FAILED again", healAttempt, maxHealRetries))
 					healColor.Printf("[HEAL attempt %d/%d] Task %d still failing — %s\n\n", healAttempt, maxHealRetries, task.ID, truncate(taskOutput, 120))
 				}
+			}
+			// Heal exhaustion: when every attempt was made and the task is
+			// still TaskFailed, emit a single summary annotation so operators
+			// can grep for "Heal exhausted" without having to count per-attempt
+			// "Still failing" lines. Mirrors the clarify-loop's
+			// "Clarification auto-resolve exhausted" annotation.
+			if signal == pm.TaskFailed && task.HealAttempts >= maxHealRetries {
+				pm.AddAnnotation(task, "ai", fmt.Sprintf("[HEAL] Exhausted after %d attempts — task remains failed", maxHealRetries))
 			}
 		}
 
