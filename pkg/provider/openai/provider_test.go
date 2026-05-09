@@ -198,10 +198,14 @@ func TestComplete_ContextCancelled(t *testing.T) {
 // Regression guard: clicking Stop in the UI must immediately terminate
 // long-running provider HTTP calls.
 func TestComplete_ContextCancelDuringRequest(t *testing.T) {
+	// Handler sleeps long enough to distinguish honoring cancellation
+	// (Complete returns within ~100ms of cancel) from ignoring it (Complete
+	// blocks on the server response). Server cleanup waits for the handler
+	// to drain, so the sleep doubles as the test's wall-clock floor.
 	_, p := makeServer(t, func(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-r.Context().Done():
-		case <-time.After(5 * time.Second):
+		case <-time.After(2 * time.Second):
 		}
 	})
 
