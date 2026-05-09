@@ -1322,11 +1322,17 @@ func TestTimelineProjectScoped(t *testing.T) {
 	ts := newTestServer(t, cloopDir, []string{sysmonDir})
 
 	var body0, body1 map[string]interface{}
-	resp0, _ := http.Get(ts.URL + "/api/timeline?project_idx=0")
+	resp0, err0 := http.Get(ts.URL + "/api/timeline?project_idx=0")
+	if err0 != nil {
+		t.Fatalf("GET /api/timeline?project_idx=0: %v", err0)
+	}
 	defer resp0.Body.Close()
 	json.NewDecoder(resp0.Body).Decode(&body0) //nolint:errcheck
 
-	resp1, _ := http.Get(ts.URL + "/api/timeline?project_idx=1")
+	resp1, err1 := http.Get(ts.URL + "/api/timeline?project_idx=1")
+	if err1 != nil {
+		t.Fatalf("GET /api/timeline?project_idx=1: %v", err1)
+	}
 	defer resp1.Body.Close()
 	json.NewDecoder(resp1.Body).Decode(&body1) //nolint:errcheck
 

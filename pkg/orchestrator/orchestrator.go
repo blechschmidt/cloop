@@ -2390,6 +2390,39 @@ func reviewTask(task *pm.Task) string {
 	return "quit" // EOF or error
 }
 
+// recoverStaleTasks resets any tasks left in `in_progress` from a prior crashed
+// or killed run back to `pending` so they re-enter the scheduling pool. Without
+// this, NextTask() (which only returns pending tasks) would skip them forever
+// and any dependent tasks would stay blocked.
+//
+// Used by the parallel runner — the sequential runner does its own interactive
+// stale-checkpoint prompt earlier in runPMSequential.
+func (o *Orchestrator) recoverStaleTasks(s *state.ProjectState) {
+	if s == nil || s.Plan == nil {
+		return
+	}
+	recovered := 0
+	for _, t := range s.Plan.Tasks {
+		if t == nil {
+			continue
+		}
+		if t.Status == pm.TaskInProgress {
+			t.Status = pm.TaskPending
+			t.StartedAt = nil
+			recovered++
+		}
+	}
+	if recovered > 0 {
+		// Drop any stale checkpoint pointing at a task we just reset.
+		_ = checkpoint.Clear(o.config.WorkDir)
+		if err := s.Save(); err != nil {
+			color.New(color.Faint).Printf("(stale-task recovery save failed: %v)\n", err)
+			return
+		}
+		color.New(color.Faint).Printf("Recovered %d in-progress task(s) from prior run.\n", recovered)
+	}
+}
+
 // taskResult holds the output of a single parallel task execution.
 type taskResult struct {
 	task         *pm.Task

@@ -196,7 +196,7 @@ func printCoachingCard(s *coach.CoachingSession) {
 		bold.Printf("  DONE LOOKS LIKE\n\n")
 		for _, criterion := range s.SuccessCriteria {
 			green.Printf("  ✓ ")
-			lines := wrapText(criterion, 68)
+			lines := strings.Split(wrapText(criterion, 68), "\n")
 			for j, line := range lines {
 				if j == 0 {
 					fmt.Printf("%s\n", line)

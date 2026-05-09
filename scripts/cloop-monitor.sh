@@ -41,7 +41,7 @@ if [ -z "$CLOOP_PID" ]; then
     echo "$TS NOT_RUNNING weekly=${WEEKLY}% — restarting cloop run" >> "$LOG"
     
     cd "$CLOOP_DIR"
-    CLAUDE_CODE_OAUTH_TOKEN="$TOKEN" nohup ./cloop run --pm --auto-evolve --innovate >> "$RUN_LOG" 2>&1 &
+    CLAUDE_CODE_OAUTH_TOKEN="$TOKEN" nohup ./cloop run --pm --auto-evolve --innovate -j 3 >> "$RUN_LOG" 2>&1 &
     NEW_PID=$!
     echo "$TS RESTARTED pid=$NEW_PID" >> "$LOG"
 else
@@ -60,7 +60,7 @@ else
             sleep 2
             
             cd "$CLOOP_DIR"
-            CLAUDE_CODE_OAUTH_TOKEN="$TOKEN" nohup ./cloop run --pm --auto-evolve --innovate >> "$RUN_LOG" 2>&1 &
+            CLAUDE_CODE_OAUTH_TOKEN="$TOKEN" nohup ./cloop run --pm --auto-evolve --innovate -j 3 >> "$RUN_LOG" 2>&1 &
             echo "$TS RESTARTED pid=$!" >> "$LOG"
         else
             # 4. Check last few lines of log for errors
@@ -70,7 +70,7 @@ else
                 kill -9 "$CLOOP_PID" 2>/dev/null
                 sleep 2
                 cd "$CLOOP_DIR"
-                CLAUDE_CODE_OAUTH_TOKEN="$TOKEN" nohup ./cloop run --pm --auto-evolve --innovate >> "$RUN_LOG" 2>&1 &
+                CLAUDE_CODE_OAUTH_TOKEN="$TOKEN" nohup ./cloop run --pm --auto-evolve --innovate -j 3 >> "$RUN_LOG" 2>&1 &
                 echo "$TS RESTARTED pid=$!" >> "$LOG"
             else
                 echo "$TS HEALTHY pid=$CLOOP_PID state_age=${AGE}m weekly=${WEEKLY}%" >> "$LOG"

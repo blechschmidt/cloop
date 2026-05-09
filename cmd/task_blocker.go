@@ -306,7 +306,7 @@ func printBlockerReport(report *blocker.BlockerReport) {
 	// Root cause
 	bold.Printf("  ROOT CAUSE HYPOTHESIS\n\n")
 	red.Printf("  ⚠ ")
-	for i, line := range wrapText(report.RootCause, 68) {
+	for i, line := range strings.Split(wrapText(report.RootCause, 68), "\n") {
 		if i == 0 {
 			fmt.Printf("%s\n", line)
 		} else {
@@ -320,7 +320,7 @@ func printBlockerReport(report *blocker.BlockerReport) {
 	bold.Printf("  UNBLOCKING ACTIONS\n\n")
 	for i, action := range report.Actions {
 		yellow.Printf("  %d. ", i+1)
-		lines := wrapText(action, 66)
+		lines := strings.Split(wrapText(action, 66), "\n")
 		for j, line := range lines {
 			if j == 0 {
 				fmt.Printf("%s\n", line)

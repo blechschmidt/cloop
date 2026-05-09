@@ -755,7 +755,7 @@ func TestRunPM_MaxFailures_DefaultIsThree(t *testing.T) {
 			{Output: "fail\nTASK_FAILED", Provider: "mock"},
 		},
 	}
-	o := newOrchestrator(t, dir, Config{WorkDir: dir, PMMode: true}, prov)
+	o := newOrchestrator(t, dir, Config{WorkDir: dir, PMMode: true, NoHeal: true}, prov)
 	err := o.runPM(context.Background())
 	if err == nil {
 		t.Error("expected error after max consecutive failures")
@@ -789,7 +789,7 @@ func TestRunPM_MaxFailures_CustomValue(t *testing.T) {
 			{Output: "done\nTASK_DONE", Provider: "mock"},
 		},
 	}
-	o := newOrchestrator(t, dir, Config{WorkDir: dir, PMMode: true, MaxFailures: 1}, prov)
+	o := newOrchestrator(t, dir, Config{WorkDir: dir, PMMode: true, MaxFailures: 1, NoHeal: true}, prov)
 	err := o.runPM(context.Background())
 	if err == nil {
 		t.Error("expected error after 1 consecutive failure with MaxFailures=1")
@@ -1556,7 +1556,9 @@ func TestRunPM_AutoEvolve_DiscoversAndExecutesNewTasks(t *testing.T) {
 			{Output: evolvedJSON, Provider: "mock"},               // evolvePM → 1 new task
 			{Output: dedupAllNovel, Provider: "mock"},             // dedup → all novel
 			{Output: "done evolve\nTASK_DONE", Provider: "mock"},  // execute evolve task
-			{Output: `{"tasks":[]}`, Provider: "mock"},            // evolvePM → no new tasks
+			{Output: `{"tasks":[]}`, Provider: "mock"},            // evolvePM → no new tasks (1/3)
+			{Output: `{"tasks":[]}`, Provider: "mock"},            // evolvePM → no new tasks (2/3)
+			{Output: `{"tasks":[]}`, Provider: "mock"},            // evolvePM → no new tasks (3/3) → stop
 		},
 	}
 	o := newOrchestrator(t, dir, Config{WorkDir: dir, PMMode: true}, prov)
@@ -1564,9 +1566,9 @@ func TestRunPM_AutoEvolve_DiscoversAndExecutesNewTasks(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// 5 calls: execute task1 + evolvePM (new tasks) + dedup + execute evolve task + evolvePM (empty).
-	if prov.calls != 5 {
-		t.Errorf("expected 5 provider calls, got %d", prov.calls)
+	// 7 calls: execute task1 + evolvePM (new tasks) + dedup + execute evolve task + 3 empty evolves.
+	if prov.calls != 7 {
+		t.Errorf("expected 7 provider calls, got %d", prov.calls)
 	}
 	if o.state.Status != "complete" {
 		t.Errorf("expected status=complete, got %q", o.state.Status)
@@ -1583,7 +1585,8 @@ func TestRunPM_AutoEvolve_DiscoversAndExecutesNewTasks(t *testing.T) {
 }
 
 // TestRunPM_AutoEvolve_StopsWhenNoNewTasksDiscovered verifies that evolvePM returning
-// zero new tasks causes the orchestrator to finalize with status=complete and not loop.
+// zero new tasks for `maxEmptyEvolves` consecutive attempts causes the orchestrator
+// to finalize with status=complete and not loop forever.
 func TestRunPM_AutoEvolve_StopsWhenNoNewTasksDiscovered(t *testing.T) {
 	dir := tempDir(t)
 	s := initState(t, dir, "goal", 0)
@@ -1601,7 +1604,9 @@ func TestRunPM_AutoEvolve_StopsWhenNoNewTasksDiscovered(t *testing.T) {
 		name: "mock",
 		results: []*provider.Result{
 			{Output: "done\nTASK_DONE", Provider: "mock"}, // execute task 1
-			{Output: "no JSON here", Provider: "mock"},    // evolvePM → parse error → n=0
+			{Output: "no JSON here", Provider: "mock"},    // evolvePM #1 → parse error → n=0
+			{Output: "no JSON here", Provider: "mock"},    // evolvePM #2 → parse error → n=0
+			{Output: "no JSON here", Provider: "mock"},    // evolvePM #3 → parse error → n=0 → stop
 		},
 	}
 	o := newOrchestrator(t, dir, Config{WorkDir: dir, PMMode: true}, prov)
@@ -1609,9 +1614,9 @@ func TestRunPM_AutoEvolve_StopsWhenNoNewTasksDiscovered(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// 2 calls: execute + evolvePM (no new tasks).
-	if prov.calls != 2 {
-		t.Errorf("expected 2 provider calls (1 execute + 1 evolve), got %d", prov.calls)
+	// 4 calls: 1 execute + 3 empty evolves (maxEmptyEvolves safety net).
+	if prov.calls != 4 {
+		t.Errorf("expected 4 provider calls (1 execute + 3 empty evolves), got %d", prov.calls)
 	}
 	if o.state.Status != "complete" {
 		t.Errorf("expected status=complete, got %q", o.state.Status)
@@ -1647,7 +1652,9 @@ func TestRunPM_AutoEvolve_MultipleRounds(t *testing.T) {
 			{Output: round2JSON, Provider: "mock"},             // evolvePM round 2 → task 3
 			{Output: dedupAllNovel, Provider: "mock"},          // dedup round 2 → all novel
 			{Output: "done r2\nTASK_DONE", Provider: "mock"},   // execute task 3
-			{Output: `{"tasks":[]}`, Provider: "mock"},         // evolvePM round 3 → none
+			{Output: `{"tasks":[]}`, Provider: "mock"},         // evolvePM round 3 → none (1/3)
+			{Output: `{"tasks":[]}`, Provider: "mock"},         // evolvePM round 4 → none (2/3)
+			{Output: `{"tasks":[]}`, Provider: "mock"},         // evolvePM round 5 → none (3/3) → stop
 		},
 	}
 	o := newOrchestrator(t, dir, Config{WorkDir: dir, PMMode: true}, prov)
@@ -1655,8 +1662,9 @@ func TestRunPM_AutoEvolve_MultipleRounds(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if prov.calls != 8 {
-		t.Errorf("expected 8 provider calls, got %d", prov.calls)
+	// 7 successful work calls (3 execute + 2 evolve+dedup pairs) + 3 empty evolves before stopping.
+	if prov.calls != 10 {
+		t.Errorf("expected 10 provider calls, got %d", prov.calls)
 	}
 	if o.state.Status != "complete" {
 		t.Errorf("expected status=complete, got %q", o.state.Status)
