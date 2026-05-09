@@ -154,6 +154,14 @@ type hubClient struct {
 	id     string        // unique per-connection identifier
 	name   string        // display name (e.g. "Swift Panda")
 	color  string        // hex color code (e.g. "#58a6ff")
+
+	// conn is the underlying WebSocket connection. Set in handleWS so the
+	// server's graceful-shutdown path can iterate hubClients and send a
+	// code-1001 (going away) close frame to each peer before the
+	// http.Server.Shutdown() returns. Without this, peers see an abrupt
+	// TCP teardown via the deferred conn.CloseNow() and have no chance to
+	// distinguish "server going away" from a network blip.
+	conn *websocket.Conn
 }
 
 // hubClientBufferSize is the per-client outgoing buffer for WebSocket clients.
@@ -712,9 +720,14 @@ func (s *Server) Run(ctx context.Context) error {
 
 	select {
 	case <-ctx.Done():
+		fmt.Fprintln(os.Stderr, "cloop ui: shutting down")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		if err := srv.Shutdown(shutdownCtx); err != nil && !errors.Is(err, context.DeadlineExceeded) {
+		// s.Shutdown sends code-1001 close frames to every active
+		// WebSocket peer before invoking http.Server.Shutdown, so
+		// browsers learn the server is going away (and can choose to
+		// stop reconnecting) instead of seeing an abrupt TCP teardown.
+		if err := s.Shutdown(shutdownCtx); err != nil && !errors.Is(err, context.DeadlineExceeded) {
 			return fmt.Errorf("ui server shutdown: %w", err)
 		}
 		// Drain ListenAndServe — after Shutdown it returns http.ErrServerClosed.
@@ -740,7 +753,71 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	if srv == nil {
 		return nil
 	}
+	// Send a code 1001 (going away) close frame to every active WebSocket
+	// peer before draining HTTP handlers. Hijacked WebSocket connections
+	// are not tracked by http.Server.Shutdown's wait, so without this step
+	// peers would see an abrupt TCP close once the process exits.
+	s.closeAllWebSocketsForShutdown(2 * time.Second)
 	return srv.Shutdown(ctx)
+}
+
+// closeAllWebSocketsForShutdown sends a code-1001 (websocket.StatusGoingAway)
+// close frame to every registered WebSocket client and waits up to timeout
+// for the per-connection close handshakes to complete. Each Close call runs
+// in its own goroutine because nhooyr's Close blocks on the peer's close-ack
+// (capped at ~10s internally); a single wedged peer must not delay shutdown
+// for the rest. Once all goroutines return — or the timeout fires — the
+// caller proceeds with http.Server.Shutdown so any non-WebSocket handlers
+// still draining can finish on their own clock.
+//
+// hubMu is held only long enough to snapshot the connections, so concurrent
+// hubClient cleanup (which also takes hubMu) doesn't deadlock against the
+// slow close handshakes running outside the lock.
+func (s *Server) closeAllWebSocketsForShutdown(timeout time.Duration) {
+	s.hubMu.Lock()
+	conns := make([]*websocket.Conn, 0)
+	for _, clients := range s.hubClients {
+		for hc := range clients {
+			if hc.conn != nil {
+				conns = append(conns, hc.conn)
+			}
+		}
+	}
+	s.hubMu.Unlock()
+
+	if len(conns) == 0 {
+		return
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(len(conns))
+	for _, c := range conns {
+		go func(conn *websocket.Conn) {
+			defer wg.Done()
+			defer recoverGoroutine("closeAllWebSocketsForShutdown")
+			// nhooyr's Close sends the close frame and waits up to ~10s
+			// for the peer's ack; that's fine here because we cap the
+			// outer wait via the timeout select below. The error is
+			// ignored: on an already-closed conn it's a no-op, on a
+			// wedged peer the per-conn close just won't return before
+			// the outer timeout fires and shutdown proceeds anyway.
+			_ = conn.Close(websocket.StatusGoingAway, "server shutting down")
+		}(c)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(timeout):
+		// Slow peers will be forcibly torn down by the deferred
+		// conn.CloseNow in handleWS once http.Server.Shutdown returns
+		// — or, in the worst case, by process exit.
+	}
 }
 
 // newUIHTTPServer constructs the http.Server with timeouts tuned for the UI's
@@ -1537,6 +1614,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		id:     connID,
 		name:   name,
 		color:  color,
+		conn:   conn,
 	}
 	if s.hubClients[workDir] == nil {
 		s.hubClients[workDir] = make(map[*hubClient]struct{})

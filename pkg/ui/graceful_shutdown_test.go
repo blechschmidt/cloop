@@ -3,11 +3,14 @@ package ui
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"strconv"
 	"testing"
 	"time"
+
+	"nhooyr.io/websocket"
 )
 
 // TestServer_Run_GracefulShutdown_OnContextCancel verifies that cancelling the
@@ -164,6 +167,116 @@ func TestWatchProjects_StopsOnContextCancel(t *testing.T) {
 	case <-done:
 	case <-time.After(3 * time.Second):
 		t.Fatal("watchProjects did not return within 3s of ctx cancel")
+	}
+}
+
+// TestServer_GracefulShutdown_FullIntegration is the contract test for Task
+// 20083: it starts the server, opens a WebSocket connection, fires an HTTP
+// request, triggers shutdown via ctx cancel, and asserts the three required
+// invariants:
+//
+//	(a) the in-flight HTTP request completes successfully (not severed mid-
+//	    response by Shutdown);
+//	(b) Run returns within the 10s shutdown budget plus a small safety
+//	    margin (no goroutine leak holding ListenAndServe open);
+//	(c) the WebSocket client receives a close frame with code 1001
+//	    (websocket.StatusGoingAway) — not a bare TCP teardown — so browsers
+//	    can distinguish "server going away" from a network blip and act
+//	    accordingly (e.g. stop hammering reconnect attempts).
+//
+// Without this contract, `systemctl stop cloop-ui` would either drop active
+// websockets without notification (browsers retry immediately, hammering the
+// next process) or hang past the systemd stop timeout and get SIGKILLed,
+// risking partial state writes.
+func TestServer_GracefulShutdown_FullIntegration(t *testing.T) {
+	t.Parallel()
+
+	dir := setupProjectDir(t, cloopGoal, nil)
+	port := pickFreePort(t)
+	srv := New(dir, port, "")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	runDone := make(chan error, 1)
+	go func() { runDone <- srv.Run(ctx) }()
+
+	waitForServerReady(t, port, 2*time.Second)
+
+	// (c-prep) Open a WebSocket client and wait until the server has
+	// registered it in hubClients so the shutdown path actually has a
+	// peer to send the 1001 close frame to.
+	wsURL := fmt.Sprintf("ws://127.0.0.1:%d/api/ws", port)
+	dialCtx, dialCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer dialCancel()
+	conn, _, err := websocket.Dial(dialCtx, wsURL, nil)
+	if err != nil {
+		t.Fatalf("ws dial: %v", err)
+	}
+	// Defer CloseNow so the test cleans up even if assertions fail
+	// before the client finishes its read loop.
+	defer conn.CloseNow() //nolint:errcheck
+
+	if got := waitForHubClients(srv, 1, 2*time.Second); got != 1 {
+		t.Fatalf("server never registered the WebSocket client (got %d)", got)
+	}
+
+	// (a) Fire a real HTTP request — /api/state is light and exists on
+	// the UI mux. We synchronously check it completes with 200 so a
+	// future regression that races Shutdown ahead of the response gets
+	// caught here.
+	statusURL := fmt.Sprintf("http://127.0.0.1:%d/api/state", port)
+	httpClient := &http.Client{Timeout: 3 * time.Second}
+	resp, err := httpClient.Get(statusURL)
+	if err != nil {
+		t.Fatalf("GET /api/state: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /api/state: want 200, got %d", resp.StatusCode)
+	}
+
+	// Trigger graceful shutdown. Time the latency so a regression
+	// where Run blocks past the configured 10s budget surfaces clearly.
+	shutdownStart := time.Now()
+	cancel()
+
+	// (c) The client's next Read call should return a CloseError with
+	// code 1001. We give it a 5s budget — Close handshakes are quick on
+	// a localhost loopback. Without the shutdown path's explicit
+	// conn.Close(StatusGoingAway, ...) call, the client would observe
+	// io.EOF or a generic connection-reset error instead.
+	readCtx, readCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer readCancel()
+	for {
+		_, _, readErr := conn.Read(readCtx)
+		if readErr == nil {
+			// Server may push initial state frames before the
+			// close frame — keep reading until the connection
+			// terminates one way or another.
+			continue
+		}
+		status := websocket.CloseStatus(readErr)
+		if status == -1 {
+			t.Fatalf("ws Read returned non-CloseError after shutdown: %v (want CloseStatus=GoingAway)", readErr)
+		}
+		if status != websocket.StatusGoingAway {
+			t.Fatalf("ws close status: got %d (%v), want %d (GoingAway)", status, readErr, websocket.StatusGoingAway)
+		}
+		break
+	}
+
+	// (b) Run must return within the 10s shutdown budget plus a
+	// margin for the ListenAndServe drain. 12s is generous enough to
+	// avoid CI flakes but tight enough that a wedged shutdown trips
+	// the test.
+	select {
+	case err := <-runDone:
+		if err != nil {
+			t.Fatalf("Run returned error after shutdown: %v", err)
+		}
+	case <-time.After(12 * time.Second):
+		t.Fatalf("Run did not return within 12s of shutdown — graceful shutdown is hung (started %v ago)", time.Since(shutdownStart))
 	}
 }
 
