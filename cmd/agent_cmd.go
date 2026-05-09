@@ -14,6 +14,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/agent"
 	"github.com/blechschmidt/cloop/pkg/config"
+	"github.com/blechschmidt/cloop/pkg/logtail"
 	"github.com/blechschmidt/cloop/pkg/orchestrator"
 	"github.com/blechschmidt/cloop/pkg/provider"
 	"github.com/blechschmidt/cloop/pkg/state"
@@ -268,17 +269,10 @@ var agentStatusCmd = &cobra.Command{
 		// Show log tail
 		fmt.Println()
 		logPath := agent.LogPath(workdir)
-		if data, err := os.ReadFile(logPath); err == nil {
-			lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-			tail := 8
-			if len(lines) < tail {
-				tail = len(lines)
-			}
-			if tail > 0 {
-				cyan.Printf("━━━ Recent log ━━━\n")
-				for _, line := range lines[len(lines)-tail:] {
-					dim.Printf("  %s\n", line)
-				}
+		if lines, err := logtail.Tail(logPath, 8); err == nil && len(lines) > 0 {
+			cyan.Printf("━━━ Recent log ━━━\n")
+			for _, line := range lines {
+				dim.Printf("  %s\n", line)
 			}
 		}
 
@@ -299,21 +293,39 @@ var agentLogsCmd = &cobra.Command{
 		workdir, _ := os.Getwd()
 		logPath := agent.LogPath(workdir)
 
-		data, err := os.ReadFile(logPath)
+		if agentTail > 0 {
+			lines, err := logtail.Tail(logPath, agentTail)
+			if err != nil {
+				if os.IsNotExist(err) {
+					fmt.Println("No agent log found. Start the agent first: cloop agent start")
+					return nil
+				}
+				return fmt.Errorf("reading %s: %w", logPath, err)
+			}
+			for _, line := range lines {
+				fmt.Println(line)
+			}
+			return nil
+		}
+
+		// agentTail == 0 means "show everything" — stream line-by-line so we
+		// don't load an unbounded log into memory.
+		f, err := os.Open(logPath)
 		if err != nil {
 			if os.IsNotExist(err) {
 				fmt.Println("No agent log found. Start the agent first: cloop agent start")
 				return nil
 			}
-			return err
+			return fmt.Errorf("opening %s: %w", logPath, err)
 		}
-
-		lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-		if agentTail > 0 && len(lines) > agentTail {
-			lines = lines[len(lines)-agentTail:]
+		defer f.Close()
+		scanner := bufio.NewScanner(f)
+		scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+		for scanner.Scan() {
+			fmt.Println(scanner.Text())
 		}
-		for _, line := range lines {
-			fmt.Println(line)
+		if err := scanner.Err(); err != nil {
+			return fmt.Errorf("reading %s: %w", logPath, err)
 		}
 		return nil
 	},
@@ -363,9 +375,19 @@ var agentWorkerCmd = &cobra.Command{
 		}()
 
 		defer func() {
+			// On shutdown the Status="stopped" write happens exactly once;
+			// if the save silently fails (ENOSPC, removed workdir, perms),
+			// the on-disk state stays at the previous value forever and
+			// `cloop agent status` keeps reporting "running" after the
+			// process exits. Logging here surfaces the failure to the
+			// agent log so operators can spot the divergence.
 			s.Status = "stopped"
-			s.Save(workdir)
-			agent.RemovePID(workdir)
+			if err := s.Save(workdir); err != nil {
+				logf("ERROR saving final agent state on shutdown: %v", err)
+			}
+			if err := agent.RemovePID(workdir); err != nil && !os.IsNotExist(err) {
+				logf("ERROR removing agent PID file on shutdown: %v", err)
+			}
 			logf("Agent worker stopped")
 		}()
 
@@ -720,14 +742,12 @@ var agentFollowCmd = &cobra.Command{
 		cyan.Printf("Following agent log (Ctrl+C to stop)...\n\n")
 
 		// Print existing content first
-		if data, err := os.ReadFile(logPath); err == nil {
-			lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-			tail := agentLogLines
-			if tail <= 0 {
-				tail = 20
-			}
-			if len(lines) > tail {
-				lines = lines[len(lines)-tail:]
+		tail := agentLogLines
+		if tail <= 0 {
+			tail = 20
+		}
+		if lines, err := logtail.Tail(logPath, tail); err == nil && len(lines) > 0 {
+			if len(lines) >= tail {
 				dim.Printf("  ... (showing last %d lines) ...\n", tail)
 			}
 			for _, line := range lines {

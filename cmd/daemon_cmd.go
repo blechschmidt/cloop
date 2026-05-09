@@ -8,7 +8,6 @@ import (
 	"os/exec"
 	"os/signal"
 	"runtime/debug"
-	"strings"
 	"syscall"
 	"time"
 
@@ -16,6 +15,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/daemon"
 	"github.com/blechschmidt/cloop/pkg/filewatch"
 	"github.com/blechschmidt/cloop/pkg/hooks"
+	"github.com/blechschmidt/cloop/pkg/logtail"
 	"github.com/blechschmidt/cloop/pkg/notify"
 	"github.com/blechschmidt/cloop/pkg/orchestrator"
 	"github.com/blechschmidt/cloop/pkg/provider"
@@ -288,17 +288,10 @@ var daemonStatusCmd = &cobra.Command{
 		// Show recent log lines.
 		fmt.Println()
 		logPath := daemon.LogPath(workdir)
-		if data, err := os.ReadFile(logPath); err == nil {
-			lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-			tail := 8
-			if len(lines) < tail {
-				tail = len(lines)
-			}
-			if tail > 0 {
-				cyan.Printf("━━━ Recent log ━━━\n")
-				for _, line := range lines[len(lines)-tail:] {
-					dim.Printf("  %s\n", line)
-				}
+		if lines, err := logtail.Tail(logPath, 8); err == nil && len(lines) > 0 {
+			cyan.Printf("━━━ Recent log ━━━\n")
+			for _, line := range lines {
+				dim.Printf("  %s\n", line)
 			}
 		}
 
@@ -319,21 +312,39 @@ var daemonLogsCmd = &cobra.Command{
 		workdir, _ := os.Getwd()
 		logPath := daemon.LogPath(workdir)
 
-		data, err := os.ReadFile(logPath)
+		if daemonTailN > 0 {
+			lines, err := logtail.Tail(logPath, daemonTailN)
+			if err != nil {
+				if os.IsNotExist(err) {
+					fmt.Println("No daemon log found. Start the daemon first: cloop daemon start")
+					return nil
+				}
+				return fmt.Errorf("reading %s: %w", logPath, err)
+			}
+			for _, line := range lines {
+				fmt.Println(line)
+			}
+			return nil
+		}
+
+		// --tail 0 means "show everything" — stream line by line so we never
+		// load the whole log into memory (logs grow unbounded between rotations).
+		f, err := os.Open(logPath)
 		if err != nil {
 			if os.IsNotExist(err) {
 				fmt.Println("No daemon log found. Start the daemon first: cloop daemon start")
 				return nil
 			}
-			return err
+			return fmt.Errorf("opening %s: %w", logPath, err)
 		}
-
-		lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-		if daemonTailN > 0 && len(lines) > daemonTailN {
-			lines = lines[len(lines)-daemonTailN:]
+		defer f.Close()
+		scanner := bufio.NewScanner(f)
+		scanner.Buffer(make([]byte, 64*1024), 1024*1024) // allow up to 1 MiB lines
+		for scanner.Scan() {
+			fmt.Println(scanner.Text())
 		}
-		for _, line := range lines {
-			fmt.Println(line)
+		if err := scanner.Err(); err != nil {
+			return fmt.Errorf("reading %s: %w", logPath, err)
 		}
 		return nil
 	},
@@ -353,14 +364,12 @@ var daemonFollowCmd = &cobra.Command{
 		cyan.Printf("Following daemon log (Ctrl+C to stop)...\n\n")
 
 		// Print existing tail first.
-		if data, err := os.ReadFile(logPath); err == nil {
-			lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-			tail := daemonLogLines
-			if tail <= 0 {
-				tail = 20
-			}
-			if len(lines) > tail {
-				lines = lines[len(lines)-tail:]
+		tail := daemonLogLines
+		if tail <= 0 {
+			tail = 20
+		}
+		if lines, err := logtail.Tail(logPath, tail); err == nil && len(lines) > 0 {
+			if len(lines) >= tail {
 				dim.Printf("  ... (showing last %d lines) ...\n", tail)
 			}
 			for _, line := range lines {
@@ -451,9 +460,19 @@ var daemonWorkerCmd = &cobra.Command{
 		}()
 
 		defer func() {
+			// On shutdown the Status="stopped" write happens exactly once;
+			// if the save silently fails (ENOSPC, removed workdir, perms),
+			// the on-disk state stays at the previous value forever and
+			// `cloop daemon status` keeps reporting "running" after the
+			// process exits. Logging here surfaces the failure to the
+			// daemon log so operators can spot the divergence.
 			s.Status = "stopped"
-			_ = s.Save(workdir)
-			daemon.RemovePID(workdir)
+			if err := s.Save(workdir); err != nil {
+				logf("ERROR saving final daemon state on shutdown: %v", err)
+			}
+			if err := daemon.RemovePID(workdir); err != nil && !os.IsNotExist(err) {
+				logf("ERROR removing daemon PID file on shutdown: %v", err)
+			}
 			logf("Daemon worker stopped")
 		}()
 

@@ -231,7 +231,12 @@ func StopWithTimeout(workdir string, grace time.Duration) error {
 	return fmt.Errorf("daemon (pid %d) did not exit within %s; force-killed", pid, grace)
 }
 
-// RemovePID removes the PID file (called by worker on clean exit).
-func RemovePID(workdir string) {
-	os.Remove(PIDPath(workdir))
+// RemovePID removes the PID file (called by worker on clean exit). Returns
+// the underlying os.Remove error so callers can log a true failure (perms,
+// busy filesystem) — a stale PID file blocks the next `daemon start` because
+// IsRunning() will see it and assume the prior worker is alive. ENOENT is
+// expected when the file was already removed (e.g. by Stop) and is returned
+// untouched so callers can filter with os.IsNotExist.
+func RemovePID(workdir string) error {
+	return os.Remove(PIDPath(workdir))
 }
