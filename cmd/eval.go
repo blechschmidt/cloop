@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/boundedread"
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/eval"
 	"github.com/blechschmidt/cloop/pkg/pm"
@@ -174,7 +175,10 @@ func loadTaskOutput(workdir string, task *pm.Task) string {
 		if !isAbsPath(absPath) {
 			absPath = workdir + "/" + task.ArtifactPath
 		}
-		data, err := os.ReadFile(absPath)
+		// 5 MiB cap — beyond that the artifact is not a useful eval input
+		// (the LLM judge would refuse it and the read alone could OOM
+		// `cloop eval` if a user pointed at a multi-GB file).
+		data, err := boundedread.ReadFile(absPath, 5<<20)
 		if err == nil {
 			return stripFrontmatter(string(data))
 		}
@@ -213,7 +217,9 @@ func stripFrontmatter(s string) string {
 
 // loadRubricYAML parses a YAML rubric file into an eval.Rubric.
 func loadRubricYAML(path string) (eval.Rubric, error) {
-	data, err := os.ReadFile(path)
+	// 256 KiB cap — rubrics are tiny configs; anything bigger is a wrong
+	// path or a hostile input.
+	data, err := boundedread.ReadFile(path, 256<<10)
 	if err != nil {
 		return eval.Rubric{}, err
 	}

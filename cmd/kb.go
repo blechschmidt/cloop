@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/blechschmidt/cloop/pkg/boundedread"
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/kb"
 	"github.com/blechschmidt/cloop/pkg/provider"
@@ -42,7 +43,10 @@ var kbAddCmd = &cobra.Command{
 		tagsStr, _ := cmd.Flags().GetString("tags")
 
 		if filePath != "" {
-			data, err := os.ReadFile(filePath)
+			// 1 MiB cap — KB entries are knowledge nuggets injected into
+			// every prompt; anything larger blows the context window and
+			// likely indicates a wrong path.
+			data, err := boundedread.ReadFile(filePath, 1<<20)
 			if err != nil {
 				return fmt.Errorf("reading file: %w", err)
 			}

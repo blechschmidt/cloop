@@ -146,6 +146,17 @@ type ChatMessage struct {
 
 const liveLogMaxLines = 500
 
+// maxChatHistoryPerWorkDir caps each per-project chat conversation kept in
+// memory by the long-running UI daemon. Without this, every /api/chat POST
+// appends forever and the in-memory transcript grows unbounded for the
+// lifetime of the process — a slow leak proportional to user activity, not
+// project count. The cap keeps the most recent N (user+assistant) turns,
+// which is well past any realistic context window the chat handler itself
+// would replay back to the model. Trimming copies into a fresh slice so the
+// older messages' backing memory is released to the GC instead of being
+// kept alive by a re-slice over the same array.
+const maxChatHistoryPerWorkDir = 200
+
 // authFailEntry tracks failed authentication attempts for rate-limiting.
 type authFailEntry struct {
 	count       int
@@ -2659,6 +2670,23 @@ func (s *Server) handleVoice(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// appendChatMessage adds msg to the workDir's chat history under chatMu and
+// trims to the most recent maxChatHistoryPerWorkDir entries. The trim copies
+// into a fresh slice so the dropped messages' backing array is released to
+// the GC — a plain re-slice would keep the entire prior history pinned in
+// memory for the lifetime of the daemon.
+func (s *Server) appendChatMessage(workDir string, msg ChatMessage) {
+	s.chatMu.Lock()
+	defer s.chatMu.Unlock()
+	hist := append(s.chatHistories[workDir], msg)
+	if len(hist) > maxChatHistoryPerWorkDir {
+		keep := make([]ChatMessage, maxChatHistoryPerWorkDir)
+		copy(keep, hist[len(hist)-maxChatHistoryPerWorkDir:])
+		hist = keep
+	}
+	s.chatHistories[workDir] = hist
+}
+
 // handleChatHistory returns the full chat conversation history as JSON.
 // GET /api/chat/history
 func (s *Server) handleChatHistory(w http.ResponseWriter, r *http.Request) {
@@ -2691,13 +2719,11 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	chatWorkDir := s.resolveWorkDir(r)
 
 	// Store user message.
-	s.chatMu.Lock()
-	s.chatHistories[chatWorkDir] = append(s.chatHistories[chatWorkDir], ChatMessage{
+	s.appendChatMessage(chatWorkDir, ChatMessage{
 		Role:      "user",
 		Content:   msg,
 		Timestamp: time.Now(),
 	})
-	s.chatMu.Unlock()
 
 	// Run cloop do <message> to parse and execute the intent.
 	exe, err := os.Executable()
@@ -2720,13 +2746,11 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Store assistant message.
-	s.chatMu.Lock()
-	s.chatHistories[chatWorkDir] = append(s.chatHistories[chatWorkDir], ChatMessage{
+	s.appendChatMessage(chatWorkDir, ChatMessage{
 		Role:      "assistant",
 		Content:   response,
 		Timestamp: time.Now(),
 	})
-	s.chatMu.Unlock()
 
 	jsonOK(w, map[string]interface{}{
 		"ok":       ok,

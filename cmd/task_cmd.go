@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/boundedread"
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/provider"
@@ -305,11 +306,17 @@ var taskShowCmd = &cobra.Command{
 		if task.ArtifactPath != "" {
 			fmt.Printf("\nArtifact: %s\n", task.ArtifactPath)
 			if taskShowArtifact {
-				data, readErr := os.ReadFile(filepath.Join(workdir, task.ArtifactPath))
+				// 1 MiB cap — anything beyond that is unreadable in a
+				// terminal anyway. Truncate rather than fail so the
+				// user still sees the head of a large file.
+				data, truncated, readErr := boundedread.ReadFileTruncated(filepath.Join(workdir, task.ArtifactPath), 1<<20)
 				if readErr != nil {
 					fmt.Printf("  (could not read artifact: %v)\n", readErr)
 				} else {
 					fmt.Printf("\n%s\n", string(data))
+					if truncated {
+						color.New(color.Faint).Printf("\n[artifact truncated to first 1 MiB; use a pager to view in full]\n")
+					}
 				}
 			}
 		}
