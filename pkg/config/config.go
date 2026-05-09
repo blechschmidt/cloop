@@ -278,6 +278,15 @@ type BudgetConfig struct {
 	// the global daily token limit defined in ~/.config/cloop/budget.yaml.
 	// 0 means no percentage cap.
 	GlobalTokenPct float64 `yaml:"global_token_pct,omitempty"`
+
+	// MaxWeeklyUsagePct is the maximum Claude Code subscription weekly usage
+	// percentage (0-100) before cloop stops executing tasks. Checked via the
+	// Anthropic OAuth usage API. 0 means no limit.
+	MaxWeeklyUsagePct float64 `yaml:"max_weekly_usage_pct,omitempty"`
+
+	// MaxFiveHourUsagePct is the maximum Claude Code subscription 5-hour window
+	// usage percentage (0-100) before cloop stops executing tasks. 0 means no limit.
+	MaxFiveHourUsagePct float64 `yaml:"max_five_hour_usage_pct,omitempty"`
 }
 
 // Default returns a Config with sensible defaults.

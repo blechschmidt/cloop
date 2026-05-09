@@ -2500,6 +2500,10 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 		return nil
 	}
 
+	// Recover any tasks left in_progress from a prior crashed/killed run before
+	// scheduling work, so their slots in the dependency graph free up.
+	o.recoverStaleTasks(s)
+
 	consecutiveErrors := 0
 	maxConsecutiveErrors := o.config.MaxFailures
 	if maxConsecutiveErrors <= 0 {

@@ -11,6 +11,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/cost"
 	"github.com/blechschmidt/cloop/pkg/globalbudget"
 	"github.com/blechschmidt/cloop/pkg/notify"
+	"github.com/blechschmidt/cloop/pkg/ratelimit"
 )
 
 // DailyStats holds today's aggregated usage figures.
@@ -192,6 +193,29 @@ func Enforce(workDir string, cfg config.BudgetConfig, notifyCfg config.NotifyCon
 					"global daily token budget exceeded: %d of %d tokens used across all projects — run 'cloop budget status --global' for details",
 					globalStats.TotalTokens, globalCfg.DailyTokenLimit,
 				)
+			}
+		}
+	}
+
+	// Check Claude Code subscription usage limits (weekly / 5-hour windows).
+	if cfg.MaxWeeklyUsagePct > 0 || cfg.MaxFiveHourUsagePct > 0 {
+		usage, usageErr := ratelimit.FetchClaudeUsage("")
+		if usageErr == nil && usage != nil {
+			if cfg.MaxWeeklyUsagePct > 0 && usage.SevenDay != nil {
+				if usage.SevenDay.Utilization >= cfg.MaxWeeklyUsagePct {
+					return fmt.Errorf(
+						"Claude Code weekly subscription usage exceeded: %.0f%% used, cap set at %.0f%% — pause tasks until usage resets",
+						usage.SevenDay.Utilization, cfg.MaxWeeklyUsagePct,
+					)
+				}
+			}
+			if cfg.MaxFiveHourUsagePct > 0 && usage.FiveHour != nil {
+				if usage.FiveHour.Utilization >= cfg.MaxFiveHourUsagePct {
+					return fmt.Errorf(
+						"Claude Code 5-hour subscription usage exceeded: %.0f%% used, cap set at %.0f%% — pause tasks until window resets",
+						usage.FiveHour.Utilization, cfg.MaxFiveHourUsagePct,
+					)
+				}
 			}
 		}
 	}
