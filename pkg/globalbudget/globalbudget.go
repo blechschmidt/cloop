@@ -10,10 +10,23 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"gopkg.in/yaml.v3"
 )
+
+// saveMu serialises Save's read-modify-write so two concurrent in-process
+// callers can't both stage tmp files and race on the rename. The atomic write
+// itself protects against torn reads from another process; this mutex protects
+// against last-writer-wins within the same process.
+var saveMu sync.Mutex
+
+// ledgerMu serialises AppendLedger so two goroutines in the same process can't
+// interleave JSON object writes on the shared costs.jsonl file. Cross-process
+// concurrency is rare for the global ledger (one cloop daemon per host) and
+// not worth the OS-specific flock complexity.
+var ledgerMu sync.Mutex
 
 const (
 	configFileName = "budget.yaml"
@@ -106,8 +119,15 @@ func Load() (GlobalBudgetConfig, error) {
 }
 
 // Save writes the global budget config to ~/.config/cloop/budget.yaml,
-// creating the directory if needed.
+// creating the directory if needed. The write is atomic (tmp → fsync →
+// rename), so a crash, ENOSPC, or concurrent reader during the write can
+// never leave the file half-written or empty — readers see either the old
+// valid file or the new valid file. Concurrent in-process callers are
+// serialised via saveMu so two updates can't drop each other.
 func Save(cfg GlobalBudgetConfig) error {
+	saveMu.Lock()
+	defer saveMu.Unlock()
+
 	path, err := ConfigPath()
 	if err != nil {
 		return err
@@ -119,13 +139,50 @@ func Save(cfg GlobalBudgetConfig) error {
 	if err != nil {
 		return fmt.Errorf("globalbudget: marshaling config: %w", err)
 	}
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		return fmt.Errorf("globalbudget: writing config: %w", err)
+	return writeAtomic(path, data, 0o600)
+}
+
+// writeAtomic stages data to a sibling .tmp file in the same directory,
+// fsyncs it, then renames it over path. Rename within a directory is atomic
+// on POSIX/Linux, so any concurrent reader either sees the old file or the
+// new file — never a half-written one.
+func writeAtomic(path string, data []byte, mode os.FileMode) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".*.tmp")
+	if err != nil {
+		return fmt.Errorf("globalbudget: create tmp: %w", err)
+	}
+	tmpPath := tmp.Name()
+	defer func() {
+		if _, statErr := os.Stat(tmpPath); statErr == nil {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("globalbudget: write tmp: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("globalbudget: sync tmp: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("globalbudget: close tmp: %w", err)
+	}
+	if err := os.Chmod(tmpPath, mode); err != nil {
+		return fmt.Errorf("globalbudget: chmod tmp: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("globalbudget: rename tmp: %w", err)
 	}
 	return nil
 }
 
 // AppendLedger appends a global ledger entry to ~/.config/cloop/costs.jsonl.
+// Concurrent in-process callers are serialised via ledgerMu so JSON object
+// writes can't interleave on the shared file (json.Encoder issues separate
+// Write calls for the JSON body and the trailing newline). Cross-process
+// races aren't guarded — only one cloop daemon is expected per host.
 func AppendLedger(entry GlobalLedgerEntry) error {
 	if entry.Timestamp.IsZero() {
 		entry.Timestamp = time.Now().UTC()
@@ -137,6 +194,10 @@ func AppendLedger(entry GlobalLedgerEntry) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("globalbudget: creating ledger dir: %w", err)
 	}
+
+	ledgerMu.Lock()
+	defer ledgerMu.Unlock()
+
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		return fmt.Errorf("globalbudget: opening ledger: %w", err)
