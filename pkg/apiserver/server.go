@@ -40,6 +40,10 @@ const (
 	httpReadTimeout       = 60 * time.Second
 	httpWriteTimeout      = 120 * time.Second
 	httpIdleTimeout       = 120 * time.Second
+
+	// maxJSONBodyBytes caps JSON request bodies to prevent memory-DoS via
+	// slow-stream or oversized POST payloads on the long-running daemon.
+	maxJSONBodyBytes = 1 << 20 // 1 MiB
 )
 
 // ipBucket is a token-bucket state for one remote IP.
@@ -328,6 +332,7 @@ func (s *Server) handlePatchTask(w http.ResponseWriter, r *http.Request) {
 		Priority int      `json:"priority"`
 		Tags     []string `json:"tags"`
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxJSONBodyBytes)
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		jsonErr(w, "invalid JSON body", http.StatusBadRequest)
 		return
@@ -396,6 +401,7 @@ func (s *Server) handleRunStart(w http.ResponseWriter, r *http.Request) {
 		Provider    string `json:"provider"`
 		Model       string `json:"model"`
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxJSONBodyBytes)
 	_ = json.NewDecoder(r.Body).Decode(&req)
 
 	s.mu.Lock()

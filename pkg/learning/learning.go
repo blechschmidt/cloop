@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/pm"
@@ -17,6 +18,13 @@ import (
 )
 
 const memoryFile = ".cloop/memory.md"
+
+// saveMu serialises the read-modify-write inside SaveMemory. Two concurrent
+// callers without this lock would each load the same baseline, each append
+// their own session, and the second writer would silently overwrite the first
+// — losing accumulated history. Atomic writes guard against torn reads but
+// not against lost updates.
+var saveMu sync.Mutex
 
 // Distill asks the AI to summarise what worked, what failed, and any recurring
 // patterns from the just-completed PM plan. Returns a markdown document.
@@ -42,10 +50,19 @@ func Distill(ctx context.Context, p provider.Provider, model string, plan *pm.Pl
 
 // SaveMemory writes the distilled summary to .cloop/memory.md.
 // Each call appends a dated section so history accumulates over runs.
+//
+// The whole read-modify-write is serialised by saveMu — concurrent callers
+// would otherwise each load the same baseline and the second writer would
+// silently drop the first writer's session. The final write is atomic
+// (tmp → fsync → rename), so a crash mid-write can never leave a truncated
+// memory.md that destroys all accumulated history.
 func SaveMemory(workDir, summary string) error {
 	if strings.TrimSpace(summary) == "" {
 		return nil
 	}
+	saveMu.Lock()
+	defer saveMu.Unlock()
+
 	path := filepath.Join(workDir, memoryFile)
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return fmt.Errorf("save memory: %w", err)
@@ -71,7 +88,43 @@ func SaveMemory(workDir, summary string) error {
 	b.WriteString(summary)
 	b.WriteString("\n")
 
-	return os.WriteFile(path, []byte(b.String()), 0644)
+	return writeAtomic(path, []byte(b.String()), 0o644)
+}
+
+// writeAtomic stages data to a sibling .tmp file in the same directory, fsyncs
+// it, then renames it over path. Rename within a directory is atomic on
+// POSIX/Linux, so any concurrent reader either sees the old file or the new
+// file — never a half-written one.
+func writeAtomic(path string, data []byte, mode os.FileMode) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".*.tmp")
+	if err != nil {
+		return fmt.Errorf("learning: create tmp: %w", err)
+	}
+	tmpPath := tmp.Name()
+	defer func() {
+		if _, statErr := os.Stat(tmpPath); statErr == nil {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("learning: write tmp: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("learning: sync tmp: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("learning: close tmp: %w", err)
+	}
+	if err := os.Chmod(tmpPath, mode); err != nil {
+		return fmt.Errorf("learning: chmod tmp: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("learning: rename tmp: %w", err)
+	}
+	return nil
 }
 
 // LoadMemory reads the project memory from .cloop/memory.md.

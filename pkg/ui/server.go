@@ -814,6 +814,28 @@ func requirePOST(w http.ResponseWriter, r *http.Request) bool {
 	return true
 }
 
+// Maximum sizes for JSON request bodies. These bound peak memory per request
+// so a malicious or buggy client cannot OOM the long-running daemon by
+// streaming an enormous payload (or holding a slow-trickle connection open).
+const (
+	// maxJSONBodyBytes is the default cap for typical small JSON requests
+	// (config keys, task add/edit, suggestion IDs, toggle flags, etc.).
+	maxJSONBodyBytes = 1 << 20 // 1 MiB
+	// maxChatJSONBodyBytes is used for chat handlers that include a history
+	// array; legitimate transcripts can be larger.
+	maxChatJSONBodyBytes = 4 << 20 // 4 MiB
+)
+
+// limitJSONBody wraps r.Body with http.MaxBytesReader so a subsequent
+// json.NewDecoder().Decode() stops reading after maxBytes and returns
+// *http.MaxBytesError instead of streaming attacker-controlled data into
+// memory. Safe to call once per request before decoding.
+func limitJSONBody(w http.ResponseWriter, r *http.Request, maxBytes int64) {
+	if r != nil && r.Body != nil {
+		r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
+	}
+}
+
 // ── handlers ─────────────────────────────────────────────────────────────────
 
 // handleDashboard serves the single-page HTML dashboard.
@@ -1373,6 +1395,7 @@ func (s *Server) handleConfigSet(w http.ResponseWriter, r *http.Request) {
 		Key   string `json:"key"`
 		Value string `json:"value"`
 	}
+	limitJSONBody(w, r, maxJSONBodyBytes)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonErr(w, "invalid request body", http.StatusBadRequest)
 		return
@@ -1438,6 +1461,7 @@ func (s *Server) handleTaskAdd(w http.ResponseWriter, r *http.Request) {
 		Priority    int    `json:"priority"`
 		DependsOn   []int  `json:"depends_on"`
 	}
+	limitJSONBody(w, r, maxJSONBodyBytes)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonErr(w, "invalid request body", http.StatusBadRequest)
 		return
@@ -1509,6 +1533,7 @@ func (s *Server) handleTaskStatus(w http.ResponseWriter, r *http.Request) {
 		ID     int    `json:"id"`
 		Status string `json:"status"`
 	}
+	limitJSONBody(w, r, maxJSONBodyBytes)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonErr(w, "invalid request body", http.StatusBadRequest)
 		return
@@ -1565,6 +1590,7 @@ func (s *Server) handleTaskMove(w http.ResponseWriter, r *http.Request) {
 		ID        int    `json:"id"`
 		Direction string `json:"direction"`
 	}
+	limitJSONBody(w, r, maxJSONBodyBytes)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonErr(w, "invalid request body", http.StatusBadRequest)
 		return
@@ -1635,6 +1661,7 @@ func (s *Server) handleTaskEdit(w http.ResponseWriter, r *http.Request) {
 		Priority    int    `json:"priority"`
 		DependsOn   *[]int `json:"depends_on"` // nil = don't change; []int{} = clear; [1,2] = set
 	}
+	limitJSONBody(w, r, maxJSONBodyBytes)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonErr(w, "invalid request body", http.StatusBadRequest)
 		return
@@ -1690,6 +1717,7 @@ func (s *Server) handleTaskRemove(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		ID int `json:"id"`
 	}
+	limitJSONBody(w, r, maxJSONBodyBytes)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonErr(w, "invalid request body", http.StatusBadRequest)
 		return
@@ -1746,6 +1774,7 @@ func (s *Server) handlePutTask(w http.ResponseWriter, r *http.Request) {
 		Status      string `json:"status"`
 		DependsOn   *[]int `json:"depends_on"`
 	}
+	limitJSONBody(w, r, maxJSONBodyBytes)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonErr(w, "invalid request body", http.StatusBadRequest)
 		return
@@ -1991,6 +2020,7 @@ func (s *Server) handleReorderTasks(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		IDs []int `json:"ids"`
 	}
+	limitJSONBody(w, r, maxJSONBodyBytes)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonErr(w, "invalid request body", http.StatusBadRequest)
 		return
@@ -2061,6 +2091,7 @@ func (s *Server) handleSuggestGenerate(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Count int `json:"count"`
 	}
+	limitJSONBody(w, r, maxJSONBodyBytes)
 	_ = json.NewDecoder(r.Body).Decode(&req)
 	if req.Count <= 0 {
 		req.Count = 5
@@ -2172,6 +2203,7 @@ func (s *Server) handleSuggestAdd(w http.ResponseWriter, r *http.Request) {
 		IDs         []int                 `json:"ids"`
 		Suggestions []*suggest.Suggestion `json:"suggestions"`
 	}
+	limitJSONBody(w, r, maxJSONBodyBytes)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonErr(w, "invalid request body", http.StatusBadRequest)
 		return
@@ -2314,6 +2346,7 @@ func (s *Server) handleInit(w http.ResponseWriter, r *http.Request) {
 		MaxSteps     int    `json:"maxSteps"`
 		PMMode       bool   `json:"pmMode"`
 	}
+	limitJSONBody(w, r, maxJSONBodyBytes)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonErr(w, "invalid request body", http.StatusBadRequest)
 		return
@@ -2365,6 +2398,7 @@ func (s *Server) handleGoal(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			Goal string `json:"goal"`
 		}
+		limitJSONBody(w, r, maxJSONBodyBytes)
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			jsonErr(w, "invalid request body", http.StatusBadRequest)
 			return
@@ -2499,6 +2533,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Message string `json:"message"`
 	}
+	limitJSONBody(w, r, maxChatJSONBodyBytes)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Message) == "" {
 		jsonErr(w, "message required", http.StatusBadRequest)
 		return
@@ -2561,6 +2596,7 @@ func (s *Server) handlePlanChat(w http.ResponseWriter, r *http.Request) {
 			Content string `json:"content"`
 		} `json:"history"`
 	}
+	limitJSONBody(w, r, maxChatJSONBodyBytes)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Message) == "" {
 		jsonErr(w, "message required", http.StatusBadRequest)
 		return
@@ -2974,6 +3010,7 @@ func (s *Server) handleProjectRun(w http.ResponseWriter, r *http.Request) {
 		PM bool `json:"pm"`
 	}
 	if ct := r.Header.Get("Content-Type"); strings.Contains(ct, "application/json") {
+		limitJSONBody(w, r, maxJSONBodyBytes)
 		_ = json.NewDecoder(r.Body).Decode(&req)
 	}
 
@@ -3035,6 +3072,7 @@ func (s *Server) handleProjectNew(w http.ResponseWriter, r *http.Request) {
 		PMMode   bool   `json:"pmMode"`
 		AutoRun  bool   `json:"autoRun"`
 	}
+	limitJSONBody(w, r, maxJSONBodyBytes)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonErr(w, "invalid request body", http.StatusBadRequest)
 		return
@@ -3146,6 +3184,7 @@ func (s *Server) handleKBAdd(w http.ResponseWriter, r *http.Request) {
 		Body  string   `json:"body"`
 		Tags  []string `json:"tags"`
 	}
+	limitJSONBody(w, r, maxJSONBodyBytes)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
@@ -3723,6 +3762,7 @@ func (s *Server) handleBudgetGlobalSave(w http.ResponseWriter, r *http.Request) 
 		DailyTokenLimit  int     `json:"daily_token_limit"`
 		AlertThresholdPct int    `json:"alert_threshold_pct"`
 	}
+	limitJSONBody(w, r, maxJSONBodyBytes)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonErr(w, "invalid request body", http.StatusBadRequest)
 		return
@@ -3749,6 +3789,7 @@ func (s *Server) handleBudgetProjectSave(w http.ResponseWriter, r *http.Request)
 		GlobalTokenPct   float64 `json:"global_token_pct"`
 		AlertThresholdPct int    `json:"alert_threshold_pct"`
 	}
+	limitJSONBody(w, r, maxJSONBodyBytes)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonErr(w, "invalid request body", http.StatusBadRequest)
 		return
@@ -3904,6 +3945,7 @@ func (s *Server) handleClaudeCodeLimitsSave(w http.ResponseWriter, r *http.Reque
 		MaxWeeklyOpusPct   float64 `json:"max_weekly_opus_pct"`
 		MaxWeeklySonnetPct float64 `json:"max_weekly_sonnet_pct"`
 	}
+	limitJSONBody(w, r, maxJSONBodyBytes)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonErr(w, "invalid request body", http.StatusBadRequest)
 		return
@@ -3940,6 +3982,7 @@ func (s *Server) handleOptionsToggle(w http.ResponseWriter, r *http.Request) {
 		Flag  string `json:"flag"`
 		Value bool   `json:"value"`
 	}
+	limitJSONBody(w, r, maxJSONBodyBytes)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonErr(w, "invalid request body", http.StatusBadRequest)
 		return
@@ -4006,6 +4049,7 @@ func (s *Server) handleMaxParallelSet(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Value int `json:"value"`
 	}
+	limitJSONBody(w, r, maxJSONBodyBytes)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonErr(w, "invalid request body", http.StatusBadRequest)
 		return
@@ -4045,6 +4089,7 @@ func (s *Server) handleProviderModelSet(w http.ResponseWriter, r *http.Request) 
 		Provider string `json:"provider"`
 		Model    string `json:"model"`
 	}
+	limitJSONBody(w, r, maxJSONBodyBytes)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonErr(w, "invalid request body", http.StatusBadRequest)
 		return

@@ -11,12 +11,20 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/provider"
 )
 
 const memoryFile = ".cloop/memory.json"
+
+// saveMu serialises Save calls so concurrent writers can't both stage tmp files
+// over the same destination and race on the rename. Atomic writes already guard
+// against torn reads, but two concurrent saves with different in-memory copies
+// would still produce a last-writer-wins outcome — this mutex makes the
+// serialisation explicit.
+var saveMu sync.Mutex
 
 // Entry is a single learned fact stored across sessions.
 type Entry struct {
@@ -54,8 +62,15 @@ func Load(workDir string) (*Memory, error) {
 	return &m, nil
 }
 
-// Save persists memory to disk.
+// Save persists memory to disk atomically. A crash, ENOSPC, or concurrent
+// reader during the write will never leave a half-written or empty memory.json
+// — readers see either the previous valid file or the new valid file.
+// This is critical because a corrupted memory.json fails Load() with a parse
+// error, which silently drops every accumulated learning across all sessions.
 func (m *Memory) Save(workDir string) error {
+	saveMu.Lock()
+	defer saveMu.Unlock()
+
 	path := filepath.Join(workDir, memoryFile)
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return err
@@ -64,7 +79,43 @@ func (m *Memory) Save(workDir string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0644)
+	return writeAtomic(path, data, 0o644)
+}
+
+// writeAtomic stages data to a sibling .tmp file in the same directory, fsyncs
+// it, then renames it over path. Rename within a directory is atomic on
+// POSIX/Linux, so any concurrent reader either sees the old file or the new
+// file — never a half-written one.
+func writeAtomic(path string, data []byte, mode os.FileMode) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".*.tmp")
+	if err != nil {
+		return fmt.Errorf("memory: create tmp: %w", err)
+	}
+	tmpPath := tmp.Name()
+	defer func() {
+		if _, statErr := os.Stat(tmpPath); statErr == nil {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("memory: write tmp: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("memory: sync tmp: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("memory: close tmp: %w", err)
+	}
+	if err := os.Chmod(tmpPath, mode); err != nil {
+		return fmt.Errorf("memory: chmod tmp: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("memory: rename tmp: %w", err)
+	}
+	return nil
 }
 
 // Add appends a new entry to memory.
