@@ -1442,6 +1442,129 @@ func TestRunPM_AutoEvolve_StopsWhenNoNewTasksDiscovered(t *testing.T) {
 	}
 }
 
+// TestRunPM_AutoEvolve_NoBudget_StopsAtCompletion verifies that with auto-evolve
+// disabled, the loop stops as soon as all tasks are complete — no evolve attempts.
+func TestRunPM_AutoEvolve_Disabled_StopsAtCompletion(t *testing.T) {
+	dir := tempDir(t)
+	s := initState(t, dir, "goal", 0)
+	s.PMMode = true
+	s.AutoEvolve = false
+	s.Plan = &pm.Plan{
+		Goal: "goal",
+		Tasks: []*pm.Task{
+			{ID: 1, Title: "Only Task", Priority: 1, Status: pm.TaskPending},
+		},
+	}
+	s.Save()
+
+	prov := &mockProvider{
+		name: "mock",
+		results: []*provider.Result{
+			{Output: "done\nTASK_DONE", Provider: "mock"}, // execute task 1
+		},
+	}
+	o := newOrchestrator(t, dir, Config{WorkDir: dir, PMMode: true}, prov)
+	if err := o.runPM(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Exactly one provider call: execute the only task. No evolve attempts because
+	// AutoEvolve is false — the loop must terminate immediately on completion.
+	if prov.calls != 1 {
+		t.Errorf("expected 1 provider call (no evolve when AutoEvolve=false), got %d", prov.calls)
+	}
+	if o.state.Status != "complete" {
+		t.Errorf("expected status=complete, got %q", o.state.Status)
+	}
+}
+
+// TestRunPM_AutoEvolve_TokenBudget_ContinuesPastEmptyEvolveCap verifies that when
+// AutoEvolve is enabled AND a token budget is configured, the loop ignores the
+// 3-empty-evolve safety cap and instead keeps evolving until the budget trips.
+// This is the core behaviour described in Task 20066: "auto-evolve should add new
+// tasks and cloop should continue looping until some abort condition, such as
+// token limit reached, is met."
+func TestRunPM_AutoEvolve_TokenBudget_ContinuesPastEmptyEvolveCap(t *testing.T) {
+	dir := tempDir(t)
+	s := initState(t, dir, "goal", 0)
+	s.PMMode = true
+	s.AutoEvolve = true
+	s.Plan = &pm.Plan{
+		Goal: "goal",
+		Tasks: []*pm.Task{
+			{ID: 1, Title: "Task A", Priority: 1, Status: pm.TaskPending},
+		},
+	}
+	s.Save()
+
+	// Each evolvePM call returns 0 tasks but consumes 60 tokens. Without the
+	// budget we'd stop after 3 empty evolves; with TokenBudget=300 we expect
+	// the loop to keep going until cumulative tokens ≥ 300.
+	prov := &mockProvider{
+		name: "mock",
+		results: []*provider.Result{
+			{Output: "done\nTASK_DONE", Provider: "mock", InputTokens: 50, OutputTokens: 10}, // 60 → execute task 1
+			{Output: `{"tasks":[]}`, Provider: "mock", InputTokens: 50, OutputTokens: 10},    // 120 → empty evolve #1
+			{Output: `{"tasks":[]}`, Provider: "mock", InputTokens: 50, OutputTokens: 10},    // 180 → empty evolve #2
+			{Output: `{"tasks":[]}`, Provider: "mock", InputTokens: 50, OutputTokens: 10},    // 240 → empty evolve #3 — would have stopped here
+			{Output: `{"tasks":[]}`, Provider: "mock", InputTokens: 50, OutputTokens: 10},    // 300 → empty evolve #4 trips budget
+		},
+	}
+	o := newOrchestrator(t, dir, Config{WorkDir: dir, PMMode: true, TokenBudget: 300}, prov)
+	if err := o.runPM(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// We expect MORE than 4 calls (the old empty-evolve cap), demonstrating that
+	// the budget — not the cap — is what stops the loop.
+	if prov.calls <= 4 {
+		t.Errorf("expected >4 provider calls (budget should override empty-evolve cap), got %d", prov.calls)
+	}
+	if o.state.Status != "paused" {
+		t.Errorf("expected status=paused (token budget trip), got %q", o.state.Status)
+	}
+}
+
+// TestRunPM_AutoEvolve_StepsLimit_ContinuesPastEmptyEvolveCap is the steps-limit
+// counterpart of the token-budget test above.
+func TestRunPM_AutoEvolve_StepsLimit_ContinuesPastEmptyEvolveCap(t *testing.T) {
+	dir := tempDir(t)
+	s := initState(t, dir, "goal", 0)
+	s.PMMode = true
+	s.AutoEvolve = true
+	s.Plan = &pm.Plan{
+		Goal: "goal",
+		Tasks: []*pm.Task{
+			{ID: 1, Title: "Task A", Priority: 1, Status: pm.TaskPending},
+		},
+	}
+	s.Save()
+
+	// 5 empty evolves would be more than the legacy 3-cap. With StepsLimit=5
+	// the loop should run until 5 steps are recorded, NOT stop at 3.
+	prov := &mockProvider{
+		name: "mock",
+		results: []*provider.Result{
+			{Output: "done\nTASK_DONE", Provider: "mock"}, // execute task 1 — step 1
+			{Output: `{"tasks":[]}`, Provider: "mock"},    // empty evolve — step 2
+			{Output: `{"tasks":[]}`, Provider: "mock"},    // empty evolve — step 3
+			{Output: `{"tasks":[]}`, Provider: "mock"},    // empty evolve — step 4 (past legacy cap)
+			{Output: `{"tasks":[]}`, Provider: "mock"},    // empty evolve — step 5 trips StepsLimit
+		},
+	}
+	o := newOrchestrator(t, dir, Config{WorkDir: dir, PMMode: true, StepsLimit: 5}, prov)
+	if err := o.runPM(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if prov.calls <= 4 {
+		t.Errorf("expected >4 provider calls (steps limit should override empty-evolve cap), got %d", prov.calls)
+	}
+	if o.state.Status != "paused" {
+		t.Errorf("expected status=paused (steps limit trip), got %q", o.state.Status)
+	}
+}
+
 // TestRunPM_AutoEvolve_MultipleRounds tests multiple successive evolve rounds, each
 // discovering and executing one new task until finally no new tasks are returned.
 func TestRunPM_AutoEvolve_MultipleRounds(t *testing.T) {

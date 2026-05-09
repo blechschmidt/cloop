@@ -906,10 +906,12 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		maxConsecutiveErrors = 3
 	}
 
-	// Auto-evolve safety net: if N consecutive evolve attempts add no new tasks,
-	// stop rather than spin forever burning tokens. The primary abort conditions
-	// for an unbounded evolve loop are token/cost/step budgets — this is just a
-	// cheap fallback when no budget is configured.
+	// Auto-evolve safety net: if N consecutive evolve attempts add no new tasks
+	// AND no explicit abort condition (token/step budget) is configured, stop
+	// rather than spin forever burning tokens. When the user has set a budget,
+	// the budget itself is the abort condition and we keep evolving until it
+	// trips, regardless of how many empty evolves occur — that is the intended
+	// behaviour for long-running auto-evolve sessions.
 	consecutiveEmptyEvolves := 0
 	const maxEmptyEvolves = 3
 
@@ -948,7 +950,11 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		}
 		if s.Plan.IsComplete() {
 			if !o.log.IsJSON() {
-				successColor.Printf("🎉 All tasks complete! Goal achieved.\n")
+				if s.AutoEvolve {
+					successColor.Printf("🎉 All tasks complete! Auto-evolve enabled — discovering more work.\n")
+				} else {
+					successColor.Printf("🎉 All tasks complete! Goal achieved.\n")
+				}
 				successColor.Printf("   %s\n\n", s.Plan.Summary())
 			}
 			o.log.Info(logger.EventSessionDone, 0, "all tasks complete", map[string]interface{}{
@@ -988,13 +994,23 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 				}
 				if n == 0 {
 					consecutiveEmptyEvolves++
-					if consecutiveEmptyEvolves >= maxEmptyEvolves {
-						color.New(color.FgYellow).Printf("⏸ Auto-evolve found no new tasks in %d consecutive attempts. Stopping.\n", maxEmptyEvolves)
+					// When the user has configured a budget abort condition
+					// (token or step limit), keep evolving — that condition
+					// will eventually trip and terminate the loop. Without a
+					// budget, fall back to the empty-evolves cap so we don't
+					// spin forever burning tokens.
+					hasBudget := o.config.TokenBudget > 0 || o.config.StepsLimit > 0
+					if !hasBudget && consecutiveEmptyEvolves >= maxEmptyEvolves {
+						color.New(color.FgYellow).Printf("⏸ Auto-evolve found no new tasks in %d consecutive attempts and no token/step budget is set. Stopping.\n", maxEmptyEvolves)
 						s.Status = "complete"
 						s.Save()
 						return nil
 					}
-					dimColor.Printf("  Auto-evolve: 0 new tasks (%d/%d). Retrying...\n", consecutiveEmptyEvolves, maxEmptyEvolves)
+					if hasBudget {
+						dimColor.Printf("  Auto-evolve: 0 new tasks (attempt %d). Continuing — abort controlled by configured budget.\n", consecutiveEmptyEvolves)
+					} else {
+						dimColor.Printf("  Auto-evolve: 0 new tasks (%d/%d). Retrying...\n", consecutiveEmptyEvolves, maxEmptyEvolves)
+					}
 					s.Status = "running"
 					continue
 				}
@@ -2505,10 +2521,12 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 		maxConsecutiveErrors = 3
 	}
 
-	// Auto-evolve safety net: if N consecutive evolve attempts add no new tasks,
-	// stop rather than spin forever burning tokens. The primary abort conditions
-	// for an unbounded evolve loop are token/cost/step budgets — this is just a
-	// cheap fallback when no budget is configured.
+	// Auto-evolve safety net: if N consecutive evolve attempts add no new tasks
+	// AND no explicit abort condition (token/step budget) is configured, stop
+	// rather than spin forever burning tokens. When the user has set a budget,
+	// the budget itself is the abort condition and we keep evolving until it
+	// trips, regardless of how many empty evolves occur — that is the intended
+	// behaviour for long-running auto-evolve sessions.
 	consecutiveEmptyEvolves := 0
 	const maxEmptyEvolves = 3
 
@@ -2548,7 +2566,11 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 			}
 		}
 		if s.Plan.IsComplete() {
-			successColor.Printf("🎉 All tasks complete! Goal achieved.\n")
+			if s.AutoEvolve {
+				successColor.Printf("🎉 All tasks complete! Auto-evolve enabled — discovering more work.\n")
+			} else {
+				successColor.Printf("🎉 All tasks complete! Goal achieved.\n")
+			}
 			successColor.Printf("   %s\n\n", s.Plan.Summary())
 			if o.config.Notify {
 				notify.Send("cloop: All Tasks Complete", s.Goal)
@@ -2585,13 +2607,23 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 				}
 				if n == 0 {
 					consecutiveEmptyEvolves++
-					if consecutiveEmptyEvolves >= maxEmptyEvolves {
-						color.New(color.FgYellow).Printf("⏸ Auto-evolve found no new tasks in %d consecutive attempts. Stopping.\n", maxEmptyEvolves)
+					// When the user has configured a budget abort condition
+					// (token or step limit), keep evolving — that condition
+					// will eventually trip and terminate the loop. Without a
+					// budget, fall back to the empty-evolves cap so we don't
+					// spin forever burning tokens.
+					hasBudget := o.config.TokenBudget > 0 || o.config.StepsLimit > 0
+					if !hasBudget && consecutiveEmptyEvolves >= maxEmptyEvolves {
+						color.New(color.FgYellow).Printf("⏸ Auto-evolve found no new tasks in %d consecutive attempts and no token/step budget is set. Stopping.\n", maxEmptyEvolves)
 						s.Status = "complete"
 						s.Save()
 						return nil
 					}
-					dimColor.Printf("  Auto-evolve: 0 new tasks (%d/%d). Retrying...\n", consecutiveEmptyEvolves, maxEmptyEvolves)
+					if hasBudget {
+						dimColor.Printf("  Auto-evolve: 0 new tasks (attempt %d). Continuing — abort controlled by configured budget.\n", consecutiveEmptyEvolves)
+					} else {
+						dimColor.Printf("  Auto-evolve: 0 new tasks (%d/%d). Retrying...\n", consecutiveEmptyEvolves, maxEmptyEvolves)
+					}
 					s.Status = "running"
 					continue
 				}
