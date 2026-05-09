@@ -3,6 +3,7 @@ package ollama
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -208,6 +209,40 @@ func TestComplete_ContextCancelled(t *testing.T) {
 	_, err := p.Complete(ctx, "prompt", provider.Options{})
 	if err == nil {
 		t.Error("expected error for cancelled context")
+	}
+}
+
+// TestComplete_ContextCancelDuringRequest verifies that cancelling the parent
+// context while the HTTP request is in flight aborts the call promptly with
+// context.Canceled, rather than waiting for the slow server response.
+// Regression guard: clicking Stop in the UI must immediately terminate
+// long-running provider HTTP calls.
+func TestComplete_ContextCancelDuringRequest(t *testing.T) {
+	_, p := makeServer(t, func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-time.After(5 * time.Second):
+		}
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+
+	start := time.Now()
+	_, err := p.Complete(ctx, "prompt", provider.Options{})
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected error from cancelled context, got nil")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("expected error to wrap context.Canceled, got %v", err)
+	}
+	if elapsed > 500*time.Millisecond {
+		t.Errorf("expected Complete to return within ~100ms of cancellation, took %v", elapsed)
 	}
 }
 
