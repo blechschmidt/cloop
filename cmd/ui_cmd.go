@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"strconv"
 
+	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/multiui"
 	"github.com/blechschmidt/cloop/pkg/ui"
 	"github.com/spf13/cobra"
@@ -70,6 +71,17 @@ task list (PM mode), live progress via SSE, and run/stop controls.
 		srv.Projects = projectPaths
 		srv.RPS = uiRateLimit
 		srv.Burst = uiRateBurst
+
+		// Apply WebSocket connection caps from .cloop/config.yaml when present.
+		// Failure to load is non-fatal — the UI still starts with built-in
+		// defaults (256 total, 8 per IP).
+		if cfg, err := config.Load(workdir); err == nil && cfg != nil {
+			srv.MaxWebSocketConns = cfg.UI.MaxWebSocketConns
+			srv.MaxWebSocketConnsPerIP = cfg.UI.MaxWebSocketConnsPerIP
+		} else if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not load config: %v\n", err)
+		}
+
 		return srv.Start()
 	},
 }

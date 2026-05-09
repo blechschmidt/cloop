@@ -282,8 +282,29 @@ func applyConfigKey(cfg *config.Config, key, value string) error {
 		}
 		cfg.Budget.GlobalTokenPct = f
 
+	case "ui.max_websocket_conns":
+		n, err := strconv.Atoi(value)
+		if err != nil {
+			return fmt.Errorf("ui.max_websocket_conns: expected integer, got %q", value)
+		}
+		if n != 0 && (n < config.WebSocketConnsLower || n > config.WebSocketConnsUpper) {
+			return fmt.Errorf("ui.max_websocket_conns must be between %d and %d (or 0 to use the default %d) (got %d)",
+				config.WebSocketConnsLower, config.WebSocketConnsUpper, config.WebSocketConnsDefault, n)
+		}
+		cfg.UI.MaxWebSocketConns = n
+	case "ui.max_websocket_conns_per_ip":
+		n, err := strconv.Atoi(value)
+		if err != nil {
+			return fmt.Errorf("ui.max_websocket_conns_per_ip: expected integer, got %q", value)
+		}
+		if n != 0 && (n < config.WebSocketConnsPerIPLower || n > config.WebSocketConnsPerIPUpper) {
+			return fmt.Errorf("ui.max_websocket_conns_per_ip must be between %d and %d (or 0 to use the default %d) (got %d)",
+				config.WebSocketConnsPerIPLower, config.WebSocketConnsPerIPUpper, config.WebSocketConnsPerIPDefault, n)
+		}
+		cfg.UI.MaxWebSocketConnsPerIP = n
+
 	default:
-		return fmt.Errorf("unknown config key %q\n\nValid keys:\n  provider\n  anthropic.api_key, anthropic.model, anthropic.base_url\n  openai.api_key, openai.model, openai.base_url\n  ollama.base_url, ollama.model\n  claudecode.model\n  mock.responses_file, mock.default\n  webhook.url, webhook.events\n  notify.slack_webhook, notify.discord_webhook\n  github.token, github.repo, github.labels\n  sync.remote, sync.branch\n  tracing.enabled, tracing.endpoint, tracing.service_name\n  max_parallel\n  rate_limit.requests_per_second, rate_limit.burst\n  budget.monthly_usd, budget.daily_usd_limit, budget.daily_token_limit\n  budget.alert_threshold_pct, budget.global_usd_pct, budget.global_token_pct", key)
+		return fmt.Errorf("unknown config key %q\n\nValid keys:\n  provider\n  anthropic.api_key, anthropic.model, anthropic.base_url\n  openai.api_key, openai.model, openai.base_url\n  ollama.base_url, ollama.model\n  claudecode.model\n  mock.responses_file, mock.default\n  webhook.url, webhook.events\n  notify.slack_webhook, notify.discord_webhook\n  github.token, github.repo, github.labels\n  sync.remote, sync.branch\n  tracing.enabled, tracing.endpoint, tracing.service_name\n  max_parallel\n  rate_limit.requests_per_second, rate_limit.burst\n  budget.monthly_usd, budget.daily_usd_limit, budget.daily_token_limit\n  budget.alert_threshold_pct, budget.global_usd_pct, budget.global_token_pct\n  ui.max_websocket_conns, ui.max_websocket_conns_per_ip", key)
 	}
 	return nil
 }

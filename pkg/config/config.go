@@ -45,6 +45,25 @@ const (
 	// disables alerting; >100 is meaningless.
 	AlertThresholdMin = 0
 	AlertThresholdMax = 100
+
+	// WebSocket connection caps for the cloop ui server (Task 20090).
+	// Zero in YAML means "not set" — runtime substitutes the *Default*
+	// values below. Non-zero values outside the allowed band are clamped
+	// back to zero (validateAndClamp) and rejected by `cloop config set`
+	// (ValidateNumeric) to keep the goroutine pool bounded.
+	//
+	// Upper bounds are intentionally generous: 4096 total connections is
+	// far above any realistic single-tenant dashboard load (a browser
+	// opens at most a handful of WebSocket peers per tab) but below the
+	// default Linux open-file ulimit (1024 → 4096 with `ulimit -n`).
+	// Per-IP cap of 1024 is similarly headroom-laden but stops a single
+	// misbehaving client from monopolising the total budget.
+	WebSocketConnsLower      = 1
+	WebSocketConnsUpper      = 4096
+	WebSocketConnsPerIPLower = 1
+	WebSocketConnsPerIPUpper = 1024
+	WebSocketConnsDefault      = 256
+	WebSocketConnsPerIPDefault = 8
 )
 
 // permWarnedPaths tracks which config paths have already emitted the
@@ -122,6 +141,134 @@ type Config struct {
 	// per-call spans to the specified OTLP HTTP endpoint (e.g. Jaeger, Tempo,
 	// or an OTel Collector). Disabled by default (zero overhead when off).
 	Tracing TracingConfig `yaml:"tracing,omitempty"`
+
+	// Watchdog configures the stuck-task detector that runs alongside the
+	// PM orchestrator. See WatchdogConfig for individual knobs; defaults
+	// (Interval=30s, StuckThreshold=10m, ArtifactIdle=5m) are applied when
+	// the relevant fields are zero.
+	Watchdog WatchdogConfig `yaml:"watchdog,omitempty"`
+
+	// UI configures the cloop ui Web dashboard server. See UIConfig.
+	UI UIConfig `yaml:"ui,omitempty"`
+}
+
+// UIConfig holds settings for the cloop ui Web dashboard server.
+//
+// WebSocket caps (Task 20090) protect the server from goroutine exhaustion
+// caused by accidental browser tab storms or deliberate connection floods.
+// Each accepted upgrade spawns at least three goroutines (handler, drain,
+// writer-loop ticker) plus an entry in the per-project hub registry; without
+// caps a single client can register thousands of simultaneous peers.
+type UIConfig struct {
+	// MaxWebSocketConns caps the total number of concurrent WebSocket
+	// connections the UI server will accept across all remote IPs.
+	// Zero substitutes WebSocketConnsDefault (256).
+	// Validated to WebSocketConnsLower..WebSocketConnsUpper.
+	MaxWebSocketConns int `yaml:"max_websocket_conns,omitempty"`
+
+	// MaxWebSocketConnsPerIP caps the number of concurrent WebSocket
+	// connections accepted from any single remote IP. A breached cap
+	// returns HTTP 429 with a Retry-After header; the connection is
+	// rejected before nhooyr.Accept hijacks the request.
+	// Zero substitutes WebSocketConnsPerIPDefault (8).
+	// Validated to WebSocketConnsPerIPLower..WebSocketConnsPerIPUpper.
+	MaxWebSocketConnsPerIP int `yaml:"max_websocket_conns_per_ip,omitempty"`
+}
+
+// EffectiveMaxWebSocketConns returns the configured total cap, substituting
+// WebSocketConnsDefault when the field is zero (the YAML "not set" sentinel).
+func (u UIConfig) EffectiveMaxWebSocketConns() int {
+	if u.MaxWebSocketConns <= 0 {
+		return WebSocketConnsDefault
+	}
+	return u.MaxWebSocketConns
+}
+
+// EffectiveMaxWebSocketConnsPerIP returns the configured per-IP cap,
+// substituting WebSocketConnsPerIPDefault when the field is zero.
+func (u UIConfig) EffectiveMaxWebSocketConnsPerIP() int {
+	if u.MaxWebSocketConnsPerIP <= 0 {
+		return WebSocketConnsPerIPDefault
+	}
+	return u.MaxWebSocketConnsPerIP
+}
+
+// WatchdogConfig configures the in-flight task stuck detector (Task 20088).
+//
+// The watchdog inspects every in-flight task on each Interval tick. A task
+// is flagged as stuck when both:
+//   - it has been running for at least StuckThreshold, AND
+//   - its live artifact file has not been modified for at least ArtifactIdle.
+//
+// Suppressing the false-positive case where the artifact is actively
+// growing is intentional: a long-running task that is still producing
+// output is not stuck — it is merely slow.
+type WatchdogConfig struct {
+	// Enabled toggles the watchdog on/off. Default: true (zero value of
+	// the YAML key omits it; we treat unset as enabled to make detection
+	// the default safe behaviour for stability-focused PM runs).
+	// Set Enabled=false explicitly to disable.
+	Enabled *bool `yaml:"enabled,omitempty"`
+
+	// IntervalSeconds is how often the watchdog inspects in-flight tasks.
+	// Default: 30 seconds. Minimum enforced: 5 seconds (lower values
+	// would burn CPU on the SQLite hot path without surfacing meaningful
+	// signal — a stuck task does not become unstuck in 4 seconds).
+	IntervalSeconds int `yaml:"interval_seconds,omitempty"`
+
+	// StuckThresholdMinutes is the minimum task runtime before a task can
+	// be flagged stuck. Default: 10 minutes.
+	StuckThresholdMinutes int `yaml:"stuck_threshold_minutes,omitempty"`
+
+	// ArtifactIdleMinutes is the minimum artifact-file inactivity required
+	// to corroborate a stuck flag. A task whose artifact is still growing
+	// is not stuck, even if its runtime exceeds StuckThresholdMinutes.
+	// Default: 5 minutes.
+	ArtifactIdleMinutes int `yaml:"artifact_idle_minutes,omitempty"`
+
+	// AutoKillAfterMinutes, when > 0, cancels the task's context after
+	// the task has been continuously stuck for this many minutes. Disabled
+	// by default (0). Use sparingly: an aggressive auto-kill can mask
+	// legitimately slow provider responses on cold paths.
+	AutoKillAfterMinutes int `yaml:"auto_kill_after_minutes,omitempty"`
+}
+
+// WatchdogDefaults returns the effective watchdog configuration with all
+// zero-value fields filled in from defaults. Returns Enabled=true unless
+// the user explicitly set Enabled=false. Bounds:
+//   - Interval: clamped to >= 5s.
+//   - StuckThreshold: clamped to >= 1 minute (so misconfiguration does not
+//     produce a runaway stream of "stuck" events for normal-running tasks).
+//   - ArtifactIdle: clamped to >= 30 seconds.
+//   - AutoKillAfter: zero means "off"; any positive value passes through.
+func (w WatchdogConfig) WatchdogDefaults() WatchdogConfig {
+	out := w
+	if out.Enabled == nil {
+		t := true
+		out.Enabled = &t
+	}
+	if out.IntervalSeconds <= 0 {
+		out.IntervalSeconds = 30
+	}
+	if out.IntervalSeconds < 5 {
+		out.IntervalSeconds = 5
+	}
+	if out.StuckThresholdMinutes <= 0 {
+		out.StuckThresholdMinutes = 10
+	}
+	if out.StuckThresholdMinutes < 1 {
+		out.StuckThresholdMinutes = 1
+	}
+	if out.ArtifactIdleMinutes <= 0 {
+		out.ArtifactIdleMinutes = 5
+	}
+	if out.ArtifactIdleMinutes*60 < 30 {
+		out.ArtifactIdleMinutes = 1
+	}
+	if out.AutoKillAfterMinutes < 0 {
+		out.AutoKillAfterMinutes = 0
+	}
+	return out
 }
 
 // TracingConfig holds OpenTelemetry tracing settings.
@@ -552,6 +699,25 @@ func (c *Config) validateAndClamp(path string) {
 		warn("claudecode.max_weekly_sonnet_pct", fmt.Sprintf("value %.4f outside [0, 100]", c.ClaudeCode.MaxWeeklySonnetPct))
 		c.ClaudeCode.MaxWeeklySonnetPct = 0
 	}
+	// UI WebSocket caps: zero means "use default"; non-zero must lie inside
+	// the allowed band. Out-of-range values fall back to zero so the
+	// runtime substitutes the sane default rather than honouring a
+	// pathological "0 connections" or "10M per IP" hand-edit.
+	if c.UI.MaxWebSocketConns != 0 && (c.UI.MaxWebSocketConns < WebSocketConnsLower || c.UI.MaxWebSocketConns > WebSocketConnsUpper) {
+		warn("ui.max_websocket_conns", fmt.Sprintf("value %d outside [%d, %d]", c.UI.MaxWebSocketConns, WebSocketConnsLower, WebSocketConnsUpper))
+		c.UI.MaxWebSocketConns = 0
+	}
+	if c.UI.MaxWebSocketConnsPerIP != 0 && (c.UI.MaxWebSocketConnsPerIP < WebSocketConnsPerIPLower || c.UI.MaxWebSocketConnsPerIP > WebSocketConnsPerIPUpper) {
+		warn("ui.max_websocket_conns_per_ip", fmt.Sprintf("value %d outside [%d, %d]", c.UI.MaxWebSocketConnsPerIP, WebSocketConnsPerIPLower, WebSocketConnsPerIPUpper))
+		c.UI.MaxWebSocketConnsPerIP = 0
+	}
+	// A per-IP cap larger than the total cap is meaningless: a single IP
+	// could never reach it. Surface the misconfiguration and reset both
+	// to defaults so the operator notices.
+	if c.UI.MaxWebSocketConns != 0 && c.UI.MaxWebSocketConnsPerIP != 0 && c.UI.MaxWebSocketConnsPerIP > c.UI.MaxWebSocketConns {
+		warn("ui.max_websocket_conns_per_ip", fmt.Sprintf("value %d exceeds ui.max_websocket_conns %d", c.UI.MaxWebSocketConnsPerIP, c.UI.MaxWebSocketConns))
+		c.UI.MaxWebSocketConnsPerIP = 0
+	}
 }
 
 // ValidateNumeric returns a non-nil error describing the first numeric range
@@ -598,6 +764,18 @@ func (c *Config) ValidateNumeric() error {
 	}
 	if c.ClaudeCode.MaxWeeklySonnetPct < 0 || c.ClaudeCode.MaxWeeklySonnetPct > 100 {
 		return fmt.Errorf("claudecode.max_weekly_sonnet_pct must be between 0 and 100 (got %.4f)", c.ClaudeCode.MaxWeeklySonnetPct)
+	}
+	if c.UI.MaxWebSocketConns != 0 && (c.UI.MaxWebSocketConns < WebSocketConnsLower || c.UI.MaxWebSocketConns > WebSocketConnsUpper) {
+		return fmt.Errorf("ui.max_websocket_conns must be between %d and %d (or 0 for the default %d) (got %d)",
+			WebSocketConnsLower, WebSocketConnsUpper, WebSocketConnsDefault, c.UI.MaxWebSocketConns)
+	}
+	if c.UI.MaxWebSocketConnsPerIP != 0 && (c.UI.MaxWebSocketConnsPerIP < WebSocketConnsPerIPLower || c.UI.MaxWebSocketConnsPerIP > WebSocketConnsPerIPUpper) {
+		return fmt.Errorf("ui.max_websocket_conns_per_ip must be between %d and %d (or 0 for the default %d) (got %d)",
+			WebSocketConnsPerIPLower, WebSocketConnsPerIPUpper, WebSocketConnsPerIPDefault, c.UI.MaxWebSocketConnsPerIP)
+	}
+	if c.UI.MaxWebSocketConns != 0 && c.UI.MaxWebSocketConnsPerIP != 0 && c.UI.MaxWebSocketConnsPerIP > c.UI.MaxWebSocketConns {
+		return fmt.Errorf("ui.max_websocket_conns_per_ip (%d) must not exceed ui.max_websocket_conns (%d)",
+			c.UI.MaxWebSocketConnsPerIP, c.UI.MaxWebSocketConns)
 	}
 	return nil
 }

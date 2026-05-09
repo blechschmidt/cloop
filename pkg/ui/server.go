@@ -36,6 +36,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/ratelimit"
 	"github.com/blechschmidt/cloop/pkg/riskmatrix"
 	"github.com/blechschmidt/cloop/pkg/state"
+	"github.com/blechschmidt/cloop/pkg/statedb"
 	"github.com/blechschmidt/cloop/pkg/suggest"
 	"github.com/blechschmidt/cloop/pkg/taskqueue"
 	"github.com/blechschmidt/cloop/pkg/timeline"
@@ -134,7 +135,7 @@ func (s *Server) sendSSEOrLag(c *sseClient, ev sseEvent) {
 // wsMessage is a typed WebSocket message envelope.
 // Type values: "task_update", "step_output", "plan_complete", "projects",
 // "run_state", "suggest_status", "presence", "task_added", "task_deleted",
-// "task_mutation", "resync", "error".
+// "task_mutation", "task_stuck", "resync", "error".
 type wsMessage struct {
 	Type string          `json:"type"`
 	Data json.RawMessage `json:"data"`
@@ -356,6 +357,21 @@ type Server struct {
 	RPS   float64
 	Burst int
 
+	// MaxWebSocketConns caps the total number of concurrent WebSocket
+	// connections accepted across every remote IP. Zero substitutes
+	// config.WebSocketConnsDefault (256). Each accepted upgrade spawns
+	// at least three goroutines (handler, drain, ping ticker) plus a
+	// hubClient registry entry; without a cap a flood of upgrades can
+	// exhaust scheduler resources and the per-project broadcast budget.
+	MaxWebSocketConns int
+
+	// MaxWebSocketConnsPerIP caps the number of concurrent WebSocket
+	// connections any single remote IP may hold. Zero substitutes
+	// config.WebSocketConnsPerIPDefault (8). Reaching the cap causes
+	// new upgrades from that IP to be rejected with HTTP 429 and a
+	// Retry-After header before nhooyr.Accept hijacks the response.
+	MaxWebSocketConnsPerIP int
+
 	mu      sync.Mutex
 	clients map[*sseClient]struct{}
 	lastMod time.Time
@@ -364,6 +380,18 @@ type Server struct {
 	// Key is the resolved workDir path.
 	hubMu      sync.Mutex
 	hubClients map[string]map[*hubClient]struct{}
+
+	// WebSocket connection accounting for the upgrade-time caps
+	// (MaxWebSocketConns, MaxWebSocketConnsPerIP). Lock order: wsConnMu
+	// is a leaf lock — never call into hubMu, rlMu, or any other Server
+	// mutex while holding it. Per-IP counters live in wsConnPerIP and
+	// are decremented (and the entry removed when the count hits zero)
+	// in handleWS's deferred cleanup so the map stays bounded by the
+	// number of *currently connected* IPs rather than the lifetime
+	// distinct-IP set.
+	wsConnMu     sync.Mutex
+	wsConnTotal  int
+	wsConnPerIP  map[string]int
 
 	// Conflict tracker: per-project, per-task-field last-edit records.
 	// Outer key: workDir, inner key: "taskID:field".
@@ -410,6 +438,12 @@ type Server struct {
 	chatMu        sync.Mutex
 	chatHistories map[string][]ChatMessage
 
+	// stuckLastSeen tracks the most recent stuck-task row id observed per
+	// project workDir so the watcher only broadcasts new detections instead
+	// of flooding clients with a snapshot every tick. Task 20088.
+	stuckMu       sync.Mutex
+	stuckLastSeen map[string]int64
+
 	// Graceful shutdown plumbing. httpServer is set in Run after the
 	// http.Server is constructed so Shutdown can call its Shutdown method;
 	// shutdownMu guards access for the (rare) case where Shutdown races
@@ -429,11 +463,13 @@ func New(workdir string, port int, token string) *Server {
 		Token:           token,
 		clients:         make(map[*sseClient]struct{}),
 		hubClients:      make(map[string]map[*hubClient]struct{}),
+		wsConnPerIP:     make(map[string]int),
 		conflictTracker: make(map[string]map[string]*conflictEntry),
 		authFails:       make(map[string]*authFailEntry),
 		rlBuckets:       make(map[string]*uiIPBucket),
 		chatHistories:   make(map[string][]ChatMessage),
 		runStates:       make(map[string]bool),
+		stuckLastSeen:   make(map[string]int64),
 	}
 }
 
@@ -700,6 +736,7 @@ func (s *Server) Run(ctx context.Context) error {
 	defer cancelWatchers()
 	go s.watchState(watcherCtx)
 	go s.watchProjects(watcherCtx)
+	go s.watchStuckTasks(watcherCtx)
 
 	addr := ":" + strconv.Itoa(s.Port)
 	if s.Token != "" {
@@ -1566,11 +1603,102 @@ func drainSSE(ch chan sseEvent) {
 	}
 }
 
+// effectiveMaxWebSocketConns returns the active total cap, substituting
+// config.WebSocketConnsDefault when Server.MaxWebSocketConns is unset.
+func (s *Server) effectiveMaxWebSocketConns() int {
+	if s.MaxWebSocketConns <= 0 {
+		return config.WebSocketConnsDefault
+	}
+	return s.MaxWebSocketConns
+}
+
+// effectiveMaxWebSocketConnsPerIP returns the active per-IP cap.
+func (s *Server) effectiveMaxWebSocketConnsPerIP() int {
+	if s.MaxWebSocketConnsPerIP <= 0 {
+		return config.WebSocketConnsPerIPDefault
+	}
+	return s.MaxWebSocketConnsPerIP
+}
+
+// admitWebSocket atomically reserves a WebSocket connection slot for ip.
+// On success returns (true, "") — the caller MUST call releaseWebSocket(ip)
+// once the connection is closed (use defer). On rejection returns (false,
+// reason) and the caller should respond with HTTP 429 + Retry-After before
+// calling websocket.Accept (rejecting after Accept would leave the client
+// thinking the upgrade succeeded).
+//
+// The reservation is fully transactional: if either cap would be breached,
+// neither counter is incremented.
+func (s *Server) admitWebSocket(ip string) (bool, string) {
+	totalCap := s.effectiveMaxWebSocketConns()
+	perIPCap := s.effectiveMaxWebSocketConnsPerIP()
+	s.wsConnMu.Lock()
+	defer s.wsConnMu.Unlock()
+	if s.wsConnTotal >= totalCap {
+		return false, "total websocket connection limit reached"
+	}
+	if ip != "" && s.wsConnPerIP[ip] >= perIPCap {
+		return false, "per-IP websocket connection limit reached"
+	}
+	s.wsConnTotal++
+	if ip != "" {
+		s.wsConnPerIP[ip]++
+	}
+	return true, ""
+}
+
+// releaseWebSocket reverses a prior admitWebSocket(ip). Must be called
+// exactly once per successful admit. Removes the per-IP map entry when
+// its counter reaches zero so the map size is bounded by the number of
+// currently-connected IPs rather than the lifetime distinct-IP set.
+func (s *Server) releaseWebSocket(ip string) {
+	s.wsConnMu.Lock()
+	defer s.wsConnMu.Unlock()
+	if s.wsConnTotal > 0 {
+		s.wsConnTotal--
+	}
+	if ip == "" {
+		return
+	}
+	if n, ok := s.wsConnPerIP[ip]; ok {
+		if n <= 1 {
+			delete(s.wsConnPerIP, ip)
+		} else {
+			s.wsConnPerIP[ip] = n - 1
+		}
+	}
+}
+
+// wsRetryAfterSeconds is the Retry-After hint returned alongside an HTTP 429
+// when the WebSocket admission caps are breached. Five seconds is short
+// enough that a closing peer's slot becomes available within typical reload
+// latency, but long enough to discourage tight reconnect loops from a
+// misconfigured client. Declared as var so tests may shrink it.
+var wsRetryAfterSeconds = 5
+
 // handleWS upgrades the connection to a WebSocket and streams typed JSON
 // messages to the client. It also manages per-project presence tracking.
 // Clients that cannot upgrade (e.g., proxies that strip the Upgrade header)
 // should fall back to the /api/events SSE endpoint.
+//
+// Connection caps (Task 20090): the upgrade is rejected with HTTP 429 and a
+// Retry-After header when either MaxWebSocketConns (total) or
+// MaxWebSocketConnsPerIP would be exceeded. Defaults: 256 total, 8 per IP.
+// Configure via Config.UI.MaxWebSocketConns / MaxWebSocketConnsPerIP.
 func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
+	ip := clientIP(r)
+	if ok, reason := s.admitWebSocket(ip); !ok {
+		w.Header().Set("Retry-After", strconv.Itoa(wsRetryAfterSeconds))
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": reason})
+		return
+	}
+	// Reverse the admission once the handler exits, regardless of which
+	// path tears the connection down. Wrapped in a closure so the func
+	// captures the same ip used for admission even if r mutates.
+	defer s.releaseWebSocket(ip)
+
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 		InsecureSkipVerify: true, // local dashboard — origin check is unnecessary
 	})
@@ -3584,6 +3712,117 @@ func (s *Server) watchProjects(ctx context.Context) {
 			}
 		}()
 	}
+}
+
+// watchStuckTasks polls each project's stuck_tasks SQLite table on a slow
+// cadence (10s) and broadcasts any newly-recorded detections to that
+// project's WebSocket clients as `task_stuck` events. Returns when ctx is
+// cancelled. The orchestrator's pkg/watchdog appends to stuck_tasks; this
+// loop is a thin tail-and-fan-out so the UI can render a yellow banner
+// without spawning per-project file watchers (Task 20088).
+//
+// Polling (vs SQLite triggers / IPC) is intentional: cloop processes are
+// independent OS processes that don't share memory, the cadence required
+// for "yellow banner within ~10s of detection" is loose, and the table is
+// tiny (one row per detection per tick) so the SELECT cost is negligible.
+func (s *Server) watchStuckTasks(ctx context.Context) {
+	defer recoverGoroutine("watchStuckTasks")
+
+	const pollInterval = 10 * time.Second
+	ticker := time.NewTicker(pollInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+
+		func() {
+			defer recoverGoroutine("watchStuckTasks iteration")
+			for _, e := range s.allProjectEntries() {
+				s.pollStuckTasksForProject(e.Path)
+			}
+		}()
+	}
+}
+
+// pollStuckTasksForProject opens the project's state.db, reads stuck_tasks
+// rows newer than the last-seen id for this project, and broadcasts a
+// task_stuck event for each. Best-effort: any error is logged and skipped
+// so a single misbehaving project does not stall the watcher.
+func (s *Server) pollStuckTasksForProject(workDir string) {
+	dbPath := state.StateDBPath(workDir)
+	if _, err := os.Stat(dbPath); err != nil {
+		return
+	}
+	db, err := statedb.Open(dbPath)
+	if err != nil {
+		return
+	}
+	defer db.Close()
+
+	s.stuckMu.Lock()
+	lastSeen := s.stuckLastSeen[workDir]
+	s.stuckMu.Unlock()
+
+	// Cap the scan window so a fresh server doesn't replay weeks of stuck
+	// rows on first start. 1h is a generous yet bounded look-back.
+	since := time.Now().Add(-1 * time.Hour)
+	rows, err := db.ReadStuckSince(since)
+	if err != nil {
+		return
+	}
+	// rows are newest-first; iterate oldest-first so listeners see them in
+	// chronological order and lastSeen tracks the latest id.
+	maxID := lastSeen
+	for i := len(rows) - 1; i >= 0; i-- {
+		row := rows[i]
+		if row.ID <= lastSeen {
+			continue
+		}
+		if row.ID > maxID {
+			maxID = row.ID
+		}
+		s.broadcastTaskStuck(workDir, row)
+	}
+	if maxID > lastSeen {
+		s.stuckMu.Lock()
+		s.stuckLastSeen[workDir] = maxID
+		s.stuckMu.Unlock()
+	}
+}
+
+// broadcastTaskStuck sends a typed task_stuck WebSocket event so the Web UI
+// can render a yellow banner. Mirrored to SSE clients as well so legacy
+// fallback consumers receive it. Payload mirrors statedb.StuckEvent fields
+// the UI will care about.
+func (s *Server) broadcastTaskStuck(workDir string, ev statedb.StuckEvent) {
+	payload := map[string]interface{}{
+		"id":                 ev.ID,
+		"task_id":            ev.TaskID,
+		"task_title":         ev.TaskTitle,
+		"started_at":         ev.StartedAt.Format(time.RFC3339),
+		"detected_at":        ev.DetectedAt.Format(time.RFC3339),
+		"stuck_for_seconds":  ev.StuckForSeconds,
+		"artifact_idle_secs": ev.ArtifactIdleSecs,
+		"artifact_path":      ev.ArtifactPath,
+		"auto_killed":        ev.AutoKilled,
+		"note":               ev.Note,
+		"work_dir":           workDir,
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return
+	}
+	s.broadcastToProject(workDir, wsMessage{Type: "task_stuck", Data: raw})
+
+	s.mu.Lock()
+	for c := range s.clients {
+		s.sendSSEOrLag(c, sseEvent{Event: "task_stuck", Data: string(raw)})
+	}
+	s.mu.Unlock()
 }
 
 // broadcastProjectsUpdate sends the updated project statuses to SSE clients.
