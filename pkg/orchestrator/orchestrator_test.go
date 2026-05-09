@@ -397,6 +397,74 @@ func TestRunLoop_ProviderError_Fails(t *testing.T) {
 	}
 }
 
+// TestRunLoop_EmptyOutput_TripsWatchdog verifies that a provider returning
+// (*Result{Output:""}, nil) is treated as a soft failure that increments a
+// counter, and that N consecutive empty responses abort the session rather
+// than burning budget forever — the orchestrator-level companion to the
+// empty-output guards in pkg/provider/cached and pkg/provider/fallback.
+func TestRunLoop_EmptyOutput_TripsWatchdog(t *testing.T) {
+	dir := tempDir(t)
+	initState(t, dir, "goal", 0) // unlimited so only the watchdog can stop it
+
+	prov := &mockProvider{
+		name: "mock",
+		results: []*provider.Result{
+			{Output: "", Provider: "mock"},
+			{Output: "   \n\t  ", Provider: "mock"},
+			{Output: "", Provider: "mock"},
+		},
+	}
+	o := newOrchestrator(t, dir, Config{WorkDir: dir, MaxFailures: 3}, prov)
+
+	err := o.runLoop(context.Background())
+	if err == nil {
+		t.Fatal("expected error from empty-output watchdog")
+	}
+	if !strings.Contains(err.Error(), "consecutive empty") {
+		t.Errorf("expected error to mention 'consecutive empty', got %q", err.Error())
+	}
+	if o.state.Status != "failed" {
+		t.Errorf("expected status=failed, got %q", o.state.Status)
+	}
+	// Empty steps must NOT be appended to history — that's the whole point of
+	// the early `continue` guard. Otherwise replan/evolve prompts get poisoned
+	// with empty entries.
+	if len(o.state.Steps) != 0 {
+		t.Errorf("expected 0 steps recorded for empty outputs, got %d", len(o.state.Steps))
+	}
+	if prov.calls != 3 {
+		t.Errorf("expected provider called 3 times before tripping, got %d", prov.calls)
+	}
+}
+
+// TestRunLoop_EmptyOutput_ResetsOnSuccess verifies that a real (non-empty)
+// response between empties resets the counter, so transient empty hiccups
+// don't accumulate forever and erroneously abort a long-running session.
+func TestRunLoop_EmptyOutput_ResetsOnSuccess(t *testing.T) {
+	dir := tempDir(t)
+	initState(t, dir, "goal", 5)
+
+	prov := &mockProvider{
+		name: "mock",
+		results: []*provider.Result{
+			{Output: "", Provider: "mock"},                  // empty #1
+			{Output: "real progress", Provider: "mock"},     // resets counter
+			{Output: "", Provider: "mock"},                  // empty #1 (after reset)
+			{Output: "", Provider: "mock"},                  // empty #2
+			{Output: "done\nGOAL_COMPLETE", Provider: "mock"}, // resets, then completes
+		},
+	}
+	o := newOrchestrator(t, dir, Config{WorkDir: dir, MaxFailures: 3}, prov)
+
+	err := o.runLoop(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if o.state.Status != "complete" {
+		t.Errorf("expected status=complete, got %q", o.state.Status)
+	}
+}
+
 func TestRunLoop_TokenTracking(t *testing.T) {
 	dir := tempDir(t)
 	initState(t, dir, "goal", 2)

@@ -691,6 +691,17 @@ func (o *Orchestrator) runLoop(ctx context.Context) error {
 
 	o.webhook.Send(webhook.EventSessionStarted, webhook.Payload{Goal: s.Goal})
 
+	// Empty-output watchdog: a provider returning (*Result{Output:""}, nil) burns
+	// budget without making progress, since the goal-complete check can't match
+	// an empty string and runLoop has no err-counter to trip on. Mirrors the
+	// soft-fail treatment in pkg/provider/cached and pkg/provider/fallback so
+	// chains without those decorators still abort instead of looping forever.
+	consecutiveEmptyOutputs := 0
+	maxConsecutiveEmpty := o.config.MaxFailures
+	if maxConsecutiveEmpty <= 0 {
+		maxConsecutiveEmpty = 3
+	}
+
 	for s.MaxSteps == 0 || s.CurrentStep < s.MaxSteps {
 		if o.config.StepsLimit > 0 && s.CurrentStep >= startStep+o.config.StepsLimit {
 			color.New(color.FgYellow).Printf("⏸ Reached --steps limit (%d). Run 'cloop run' to continue.\n", o.config.StepsLimit)
@@ -736,6 +747,20 @@ func (o *Orchestrator) runLoop(ctx context.Context) error {
 			o.webhook.Send(webhook.EventSessionFailed, webhook.Payload{Goal: s.Goal})
 			return err
 		}
+
+		if result == nil || strings.TrimSpace(result.Output) == "" {
+			consecutiveEmptyOutputs++
+			failColor.Printf("✗ Provider returned empty output (consecutive empty: %d/%d)\n", consecutiveEmptyOutputs, maxConsecutiveEmpty)
+			if consecutiveEmptyOutputs >= maxConsecutiveEmpty {
+				s.Status = "failed"
+				s.Save()
+				o.webhook.Send(webhook.EventSessionFailed, webhook.Payload{Goal: s.Goal})
+				return fmt.Errorf("%d consecutive empty provider outputs", consecutiveEmptyOutputs)
+			}
+			s.Save()
+			continue
+		}
+		consecutiveEmptyOutputs = 0
 
 		duration := time.Since(start)
 
