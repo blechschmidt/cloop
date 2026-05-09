@@ -833,6 +833,51 @@ func TestRunPM_MaxFailures_ResetOnSuccess(t *testing.T) {
 	}
 }
 
+// TestRunPM_MaxFailures_TripsOnProviderErrors locks in the orchestrator-side
+// half of the auth-failure fix: when the provider keeps returning errors
+// (the shape claudecode's Complete now uses for fatal CLI auth/API failures),
+// runPM must trip MaxFailures and abort instead of looping forever. Without
+// this, a regression in either layer would resurrect the 1500-step burn loop.
+func TestRunPM_MaxFailures_TripsOnProviderErrors(t *testing.T) {
+	dir := tempDir(t)
+	s := initState(t, dir, "goal", 0)
+	s.PMMode = true
+	s.Plan = &pm.Plan{
+		Goal: "goal",
+		Tasks: []*pm.Task{
+			{ID: 1, Title: "Task A", Priority: 1, Status: pm.TaskPending},
+			{ID: 2, Title: "Task B", Priority: 2, Status: pm.TaskPending},
+			{ID: 3, Title: "Task C", Priority: 3, Status: pm.TaskPending},
+			{ID: 4, Title: "Task D", Priority: 4, Status: pm.TaskPending},
+		},
+	}
+	s.Save()
+
+	// Mirror the claudecode auth-failure error shape — the provider returns a
+	// real error (no result) on every call. With MaxFailures=2 the loop must
+	// abort after the second consecutive error rather than burning through
+	// every remaining task.
+	authErr := errors.New("claude CLI auth/API failure (exit 1): Failed to authenticate. API Error: 401 Invalid authentication credentials")
+	prov := &mockProvider{
+		name: "mock",
+		errs: []error{authErr, authErr, authErr, authErr},
+	}
+	o := newOrchestrator(t, dir, Config{WorkDir: dir, PMMode: true, MaxFailures: 2, NoHeal: true}, prov)
+	err := o.runPM(context.Background())
+	if err == nil {
+		t.Fatal("expected error after MaxFailures consecutive provider errors, got nil")
+	}
+	if !strings.Contains(err.Error(), "consecutive") {
+		t.Errorf("expected error to mention consecutive failures, got: %v", err)
+	}
+	if o.state.Status != "failed" {
+		t.Errorf("expected status=failed, got %q", o.state.Status)
+	}
+	if prov.calls != 2 {
+		t.Errorf("expected exactly 2 provider calls before abort (MaxFailures=2), got %d", prov.calls)
+	}
+}
+
 // --- ContextSteps ---
 
 func TestBuildPrompt_ContextSteps_Three(t *testing.T) {
