@@ -4056,3 +4056,68 @@ func TestRunPM_AISignal_Annotated(t *testing.T) {
 		}
 	})
 }
+
+// TestRecoverStaleTasks_Annotated locks in audit-trail accuracy of the
+// stale-task recovery path in runPMParallel. Before the fix, recoverStaleTasks
+// silently flipped TaskInProgress → TaskPending without recording why, so an
+// operator inspecting a task's history saw a status reversion with no
+// breadcrumb explaining that a prior run had been interrupted. Same
+// audit-trail accuracy class as the gate-skip, verify-errored, implicit-done,
+// provider-error, and AI-signal annotation fixes.
+func TestRecoverStaleTasks_Annotated(t *testing.T) {
+	dir := tempDir(t)
+	s := initState(t, dir, "goal", 0)
+	s.PMMode = true
+	now := time.Now()
+	s.Plan = &pm.Plan{
+		Goal: "goal",
+		Tasks: []*pm.Task{
+			{ID: 1, Title: "stuck A", Status: pm.TaskInProgress, StartedAt: &now},
+			{ID: 2, Title: "stuck B", Status: pm.TaskInProgress, StartedAt: &now},
+			{ID: 3, Title: "already done", Status: pm.TaskDone},
+			{ID: 4, Title: "still pending", Status: pm.TaskPending},
+		},
+	}
+	if err := s.Save(); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	o := newOrchestrator(t, dir, Config{WorkDir: dir, PMMode: true}, &mockProvider{name: "mock"})
+	o.recoverStaleTasks(s)
+
+	for _, id := range []int{1, 2} {
+		task := s.Plan.TaskByID(id)
+		if task == nil {
+			t.Fatalf("task %d missing after recovery", id)
+		}
+		if task.Status != pm.TaskPending {
+			t.Errorf("task %d status = %q, want %q", id, task.Status, pm.TaskPending)
+		}
+		if task.StartedAt != nil {
+			t.Errorf("task %d StartedAt should be cleared, got %v", id, task.StartedAt)
+		}
+		want := "previous run was interrupted"
+		found := false
+		for _, a := range task.Annotations {
+			if a.Author == "ai" && strings.Contains(a.Text, want) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("task %d missing stale-recovery annotation containing %q;\ngot annotations: %+v",
+				id, want, task.Annotations)
+		}
+	}
+
+	// Untouched tasks must not gain a recovery annotation.
+	for _, id := range []int{3, 4} {
+		task := s.Plan.TaskByID(id)
+		for _, a := range task.Annotations {
+			if a.Author == "ai" && strings.Contains(a.Text, "stale-task recovery") {
+				t.Errorf("task %d (%s) gained a recovery annotation but its status was %q",
+					id, task.Title, task.Status)
+			}
+		}
+	}
+}

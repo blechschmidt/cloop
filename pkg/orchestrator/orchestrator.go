@@ -2570,6 +2570,7 @@ func (o *Orchestrator) recoverStaleTasks(s *state.ProjectState) {
 		if t.Status == pm.TaskInProgress {
 			t.Status = pm.TaskPending
 			t.StartedAt = nil
+			pm.AddAnnotation(t, "ai", "Task reset to pending: previous run was interrupted while this task was in_progress (parallel-mode stale-task recovery).")
 			recovered++
 		}
 	}
