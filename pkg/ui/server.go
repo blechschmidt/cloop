@@ -78,6 +78,20 @@ const sseClientBufferSize = 64
 // callers should treat it as immutable.
 var sseWriteTimeout = 10 * time.Second
 
+// sseKeepaliveInterval is how often the long-lived SSE handlers
+// (handleEvents, handleProjectsEvents) emit an SSE comment frame
+// (": keepalive\n\n") on an otherwise quiet stream. SSE comments are
+// silently ignored by EventSource clients but force a TCP write — which,
+// combined with sseWriteTimeout, lets the server detect a dead peer
+// (laptop suspended, network partition, peer crashed without RST) within
+// roughly sseKeepaliveInterval+sseWriteTimeout instead of waiting for the
+// kernel TCP keepalive (default ~2 hours on Linux). 30s mirrors
+// wsPingInterval to keep the symmetry between the SSE and WebSocket paths.
+//
+// Declared as var (not const) so regression tests can shrink it; production
+// callers should treat it as immutable.
+var sseKeepaliveInterval = 30 * time.Second
+
 // writeSSE writes a single SSE frame and flushes, with a per-write deadline
 // armed via http.ResponseController. Returns the first error encountered;
 // callers should return from the SSE loop on any error — a wedged peer
@@ -1356,6 +1370,8 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
+	keepalive := time.NewTicker(sseKeepaliveInterval)
+	defer keepalive.Stop()
 	for {
 		// Resync takes priority — drain stale events and emit a single
 		// "resync" SSE directive so the client knows to refetch /api/state.
@@ -1374,6 +1390,14 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		case <-c.resync:
 			drainSSE(c.ch)
 			if werr := writeSSE(w, flusher, "event: resync\ndata: {\"reason\":\"lagged\"}\n\n"); werr != nil {
+				return
+			}
+		case <-keepalive.C:
+			// SSE comment frame — ignored by EventSource clients but
+			// forces a TCP write so a dead peer is detected within
+			// sseKeepaliveInterval+sseWriteTimeout (instead of the
+			// multi-hour kernel TCP keepalive).
+			if werr := writeSSE(w, flusher, ": keepalive\n\n"); werr != nil {
 				return
 			}
 		case ev := <-c.ch:
@@ -3453,6 +3477,8 @@ func (s *Server) handleProjectsEvents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
+	keepalive := time.NewTicker(sseKeepaliveInterval)
+	defer keepalive.Stop()
 	for {
 		select {
 		case <-c.resync:
@@ -3469,6 +3495,10 @@ func (s *Server) handleProjectsEvents(w http.ResponseWriter, r *http.Request) {
 		case <-c.resync:
 			drainSSE(c.ch)
 			if werr := writeSSE(w, flusher, "event: resync\ndata: {\"reason\":\"lagged\"}\n\n"); werr != nil {
+				return
+			}
+		case <-keepalive.C:
+			if werr := writeSSE(w, flusher, ": keepalive\n\n"); werr != nil {
 				return
 			}
 		case ev := <-c.ch:
