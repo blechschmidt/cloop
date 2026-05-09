@@ -1187,6 +1187,130 @@ func TestRunPM_ClarificationQuestions_DontSilentlyPass(t *testing.T) {
 	}
 }
 
+// TestRunPM_ClarificationAutoResolve_AnnotationOutcome locks in the audit-trail
+// accuracy of the clarification auto-resolve annotation in runPM. The original
+// implementation appended a single hard-coded "Auto-resolved clarification
+// questions — LLM re-prompted to proceed autonomously." line regardless of
+// whether the loop actually resolved, errored out on the provider call, got an
+// empty result, or exhausted retries with the LLM still asking. That meant a
+// task that ended up rerouted to TaskFailed (via the line-1968 fail-closed
+// reroute) carried a misleading "auto-resolved" line in its history — useless
+// for diagnosing real-world failures from logs.
+//
+// This test pins the fix: the annotation must accurately describe which of the
+// four outcomes actually occurred. A future refactor that collapses the four
+// branches back into a single string (or skips assignment in one of them)
+// would silently re-introduce the audit-trail accuracy bug.
+func TestRunPM_ClarificationAutoResolve_AnnotationOutcome(t *testing.T) {
+	// "before i proceed" + "should i " + `?` triggers the heuristic.
+	question := "Before I proceed, should I use option A or option B?"
+
+	cases := []struct {
+		name           string
+		results        []*provider.Result
+		errs           []error
+		expectStatus   pm.TaskStatus
+		expectContains string
+	}{
+		{
+			name: "resolved on attempt 1",
+			results: []*provider.Result{
+				{Output: question, Provider: "mock"},      // initial — clarification
+				{Output: "done\nTASK_DONE", Provider: "mock"}, // retry 1 — completes
+			},
+			expectStatus:   pm.TaskDone,
+			expectContains: "Clarification auto-resolved on attempt 1/2",
+		},
+		{
+			name: "resolved on attempt 2",
+			results: []*provider.Result{
+				{Output: question, Provider: "mock"},      // initial — clarification
+				{Output: question, Provider: "mock"},      // retry 1 — still clarification
+				{Output: "done\nTASK_DONE", Provider: "mock"}, // retry 2 — completes
+			},
+			expectStatus:   pm.TaskDone,
+			expectContains: "Clarification auto-resolved on attempt 2/2",
+		},
+		{
+			name: "exhausted after 2 retries",
+			results: []*provider.Result{
+				{Output: question, Provider: "mock"}, // initial
+				{Output: question, Provider: "mock"}, // retry 1
+				{Output: question, Provider: "mock"}, // retry 2
+			},
+			expectStatus:   pm.TaskFailed,
+			expectContains: "Clarification auto-resolve exhausted",
+		},
+		{
+			name: "aborted by empty result",
+			results: []*provider.Result{
+				{Output: question, Provider: "mock"}, // initial — clarification
+				{Output: "", Provider: "mock"},       // retry 1 — empty
+			},
+			expectStatus:   pm.TaskFailed,
+			expectContains: "Clarification auto-resolve aborted on attempt 1/2: provider returned empty output",
+		},
+		{
+			name: "aborted by provider error",
+			results: []*provider.Result{
+				{Output: question, Provider: "mock"}, // initial — clarification
+				nil, // retry 1 — slot for the err below
+			},
+			errs: []error{
+				nil,
+				errors.New("network blip"),
+			},
+			expectStatus:   pm.TaskFailed,
+			expectContains: "Clarification auto-resolve aborted on attempt 1/2: provider error: network blip",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := tempDir(t)
+			s := initState(t, dir, "goal", 0)
+			s.PMMode = true
+			s.Plan = &pm.Plan{
+				Goal:  "goal",
+				Tasks: []*pm.Task{{ID: 1, Title: "Task A", Priority: 1, Status: pm.TaskPending}},
+			}
+			s.Save()
+
+			prov := &mockProvider{
+				name:    "mock",
+				results: tc.results,
+				errs:    tc.errs,
+			}
+			// MaxFailures=5 keeps a single TaskFailed from aborting the loop —
+			// we want to inspect the annotation, not the abort behavior.
+			o := newOrchestrator(t, dir, Config{WorkDir: dir, PMMode: true, MaxFailures: 5, NoHeal: true}, prov)
+			_ = o.runPM(context.Background())
+
+			task := o.state.Plan.Tasks[0]
+			if task.Status != tc.expectStatus {
+				t.Errorf("task status = %q, want %q", task.Status, tc.expectStatus)
+			}
+
+			// Find the auto-resolve annotation. Other annotations may exist
+			// (e.g. from the failure-handling path), so scan for the one
+			// that mentions clarification.
+			var found string
+			for _, a := range task.Annotations {
+				if a.Author == "ai" && strings.Contains(a.Text, "Clarification") {
+					found = a.Text
+					break
+				}
+			}
+			if found == "" {
+				t.Fatalf("no clarification annotation found; got annotations: %+v", task.Annotations)
+			}
+			if !strings.Contains(found, tc.expectContains) {
+				t.Errorf("annotation = %q, want to contain %q", found, tc.expectContains)
+			}
+		})
+	}
+}
+
 // TestEvolve_EmptyOutput_TripsWatchdog locks in the auto-evolve companion to
 // TestRunLoop_EmptyOutput_TripsWatchdog and TestRunPM_EmptyOutput_TripsWatchdog:
 // when the provider returns (*Result{Output:""}, nil) on every call (transient

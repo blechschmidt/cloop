@@ -1915,6 +1915,11 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		if signal != pm.TaskDone && signal != pm.TaskSkipped && signal != pm.TaskFailed {
 			if looksLikeClarificationQuestion(taskOutput) {
 				const maxClarifyRetries = 2
+				// Track the actual outcome so the audit-trail annotation
+				// reflects what happened — not a generic "auto-resolved"
+				// claim that misleads when the loop errored, returned
+				// empty, or exhausted retries with the LLM still asking.
+				clarifyOutcome := fmt.Sprintf("Clarification auto-resolve exhausted: LLM still asked questions after %d attempts.", maxClarifyRetries)
 				for clarifyAttempt := 1; clarifyAttempt <= maxClarifyRetries; clarifyAttempt++ {
 					if !o.log.IsJSON() {
 						color.New(color.FgCyan).Printf("[AUTO-RESOLVE %d/%d] LLM asked questions instead of completing task %d — re-prompting to proceed autonomously\n", clarifyAttempt, maxClarifyRetries, task.ID)
@@ -1927,6 +1932,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 					clarifyOpts, clarifyWasStreamed := o.makeOpts(s.Model, true)
 					clarifyResult, clarifyErr := safeComplete(ctx, taskProvider, clarifyPrompt, clarifyOpts)
 					if clarifyErr != nil {
+						clarifyOutcome = fmt.Sprintf("Clarification auto-resolve aborted on attempt %d/%d: provider error: %v.", clarifyAttempt, maxClarifyRetries, clarifyErr)
 						break
 					}
 					// Empty-output protection: matches the heal-loop guard above.
@@ -1939,6 +1945,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 					// transient hiccup. Match the existing clarifyErr branch
 					// shape (break, preserve the prior taskOutput).
 					if clarifyResult == nil || strings.TrimSpace(clarifyResult.Output) == "" {
+						clarifyOutcome = fmt.Sprintf("Clarification auto-resolve aborted on attempt %d/%d: provider returned empty output.", clarifyAttempt, maxClarifyRetries)
 						break
 					}
 					if clarifyWasStreamed() {
@@ -1951,10 +1958,11 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 					s.TotalOutputTokens += clarifyResult.OutputTokens
 					signal = pm.CheckTaskSignal(taskOutput)
 					if signal == pm.TaskDone || signal == pm.TaskFailed || signal == pm.TaskSkipped || !looksLikeClarificationQuestion(taskOutput) {
+						clarifyOutcome = fmt.Sprintf("Clarification auto-resolved on attempt %d/%d — LLM proceeded autonomously.", clarifyAttempt, maxClarifyRetries)
 						break
 					}
 				}
-				pm.AddAnnotation(task, "ai", "Auto-resolved clarification questions — LLM re-prompted to proceed autonomously.")
+				pm.AddAnnotation(task, "ai", clarifyOutcome)
 			}
 		}
 
