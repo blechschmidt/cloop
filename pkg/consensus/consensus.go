@@ -96,6 +96,17 @@ func RunConsensus(
 		wg.Add(1)
 		go func(idx int, prov provider.Provider) {
 			defer wg.Done()
+			// Panic recovery: a panic inside a provider implementation would
+			// otherwise crash the entire orchestrator process, killing every
+			// peer fan-out goroutine. Convert it into a candidate-level error
+			// so consensus can continue with the surviving providers.
+			defer func() {
+				if r := recover(); r != nil {
+					candidates[idx].ProviderName = prov.Name()
+					candidates[idx].Model = prov.DefaultModel()
+					candidates[idx].Err = fmt.Errorf("provider panic: %v", r)
+				}
+			}()
 			start := time.Now()
 			res, err := prov.Complete(ctx, prompt, opts)
 			candidates[idx].ProviderName = prov.Name()

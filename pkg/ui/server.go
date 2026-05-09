@@ -590,11 +590,16 @@ func (s *Server) broadcast(data string) {
 // broadcastToProject sends a WebSocket message only to clients connected to
 // the given project (identified by its resolved workDir path). Slow clients
 // receive a resync directive instead of silent event loss (see sendOrLag).
+//
+// hubMu is held through the iteration to prevent a concurrent
+// `delete(s.hubClients[workDir], hc)` (the WebSocket disconnect cleanup at
+// the bottom of handleWS) from triggering Go's "concurrent map iteration
+// and map write" runtime panic. sendOrLag is non-blocking (select/default),
+// so holding the lock briefly here is safe.
 func (s *Server) broadcastToProject(workDir string, msg wsMessage) {
 	s.hubMu.Lock()
-	clients := s.hubClients[workDir]
-	s.hubMu.Unlock()
-	for hc := range clients {
+	defer s.hubMu.Unlock()
+	for hc := range s.hubClients[workDir] {
 		s.sendOrLag(hc, msg)
 	}
 }

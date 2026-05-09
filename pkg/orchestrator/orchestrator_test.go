@@ -2351,3 +2351,54 @@ func TestRegression_Task5000_OrchestratorPicksUpExternalTaskAfterDiskWrite(t *te
 		t.Errorf("external task status: expected done, got %q", ext.Status)
 	}
 }
+
+// panickingProvider is a thread-safe provider whose Complete() always panics.
+// Used to verify that the parallel-mode orchestrator survives a provider crash
+// instead of taking down the whole process (and every peer task in the round).
+type panickingProvider struct{}
+
+func (panickingProvider) Complete(_ context.Context, _ string, _ provider.Options) (*provider.Result, error) {
+	panic("simulated provider crash (e.g. nil deref in third-party SDK)")
+}
+func (panickingProvider) Name() string         { return "panicking" }
+func (panickingProvider) DefaultModel() string { return "panic-model" }
+
+// TestRunPMParallel_ProviderPanicDoesNotCrashOrchestrator verifies that a panic
+// inside a provider's Complete() in parallel mode is recovered, surfaced as a
+// task failure, and does NOT crash the orchestrator process. Without the
+// recover() in the parallel goroutine, this test would terminate the entire
+// test binary with a runtime panic.
+func TestRunPMParallel_ProviderPanicDoesNotCrashOrchestrator(t *testing.T) {
+	dir := tempDir(t)
+	s := initState(t, dir, "goal", 0)
+	s.PMMode = true
+	s.Plan = &pm.Plan{
+		Goal: "goal",
+		Tasks: []*pm.Task{
+			{ID: 1, Title: "A", Priority: 1, Status: pm.TaskPending},
+			{ID: 2, Title: "B", Priority: 2, Status: pm.TaskPending},
+		},
+	}
+	s.Save()
+
+	// MaxFailures=10 keeps the orchestrator from giving up early, so the test
+	// hinges on whether the panic was recovered (clean shutdown) vs whether it
+	// crashed the process.
+	cfg := Config{WorkDir: dir, PMMode: true, Parallel: true, MaxFailures: 10}
+	o := newOrchestrator(t, dir, cfg, panickingProvider{})
+
+	// The orchestrator may return a non-nil error (consecutive failures), but
+	// the critical contract is that Run() returns at all rather than crashing.
+	_ = o.Run(context.Background())
+
+	final, err := state.Load(dir)
+	if err != nil {
+		t.Fatalf("final load: %v", err)
+	}
+	for _, task := range final.Plan.Tasks {
+		if task.Status != pm.TaskFailed {
+			t.Errorf("task %d (%s): expected failed (panic recovered as task failure), got %s",
+				task.ID, task.Title, task.Status)
+		}
+	}
+}

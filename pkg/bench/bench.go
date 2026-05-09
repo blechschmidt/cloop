@@ -102,6 +102,19 @@ func Run(ctx context.Context, cfg RunConfig, providerBuilders map[string]provide
 		wg.Add(1)
 		go func(provName string, p provider.Provider, mdl string) {
 			defer wg.Done()
+			// Panic recovery: a panic inside any provider's Complete()
+			// would otherwise crash the whole bench run.
+			defer func() {
+				if rec := recover(); rec != nil {
+					mu.Lock()
+					report.Results = append(report.Results, &ProviderResult{
+						ProviderName: provName,
+						Model:        mdl,
+						Error:        fmt.Sprintf("provider panic: %v", rec),
+					})
+					mu.Unlock()
+				}
+			}()
 			r := benchmarkProvider(ctx, cfg, provName, p, mdl)
 			mu.Lock()
 			report.Results = append(report.Results, r)

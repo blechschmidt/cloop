@@ -316,6 +316,94 @@ collect:
 	}
 }
 
+// TestBroadcastToProject_RaceWithDisconnect is a regression test for a real
+// race condition in broadcastToProject: it used to read the per-project map
+// under hubMu, release the lock, then iterate. While iterating, a concurrent
+// disconnect (the `delete(s.hubClients[workDir], hc)` in handleWS's deferred
+// cleanup, executed under hubMu) would mutate the same underlying map, which
+// triggers Go's runtime fatal "concurrent map iteration and map write".
+//
+// The fix was to hold hubMu through the iteration. This test exercises the
+// pattern: many concurrent broadcasts vs. churn on the per-project client
+// set. Run with `go test -race ./pkg/ui/` to catch the bug; without the fix
+// the test reliably crashes the runner within a few iterations.
+func TestBroadcastToProject_RaceWithDisconnect(t *testing.T) {
+	dir := setupProjectDir(t, cloopGoal, nil)
+	srv := New(dir, 0, "")
+
+	// Seed a starter client so the project map exists.
+	srv.hubMu.Lock()
+	srv.hubClients[dir] = make(map[*hubClient]struct{})
+	srv.hubMu.Unlock()
+
+	stop := make(chan struct{})
+	done := make(chan struct{}, 3)
+
+	// Goroutine A: continuously broadcast.
+	go func() {
+		defer func() { done <- struct{}{} }()
+		msg := wsMessage{Type: "task_update", Data: json.RawMessage(`{}`)}
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			srv.broadcastToProject(dir, msg)
+		}
+	}()
+
+	// Goroutine B: register and delete clients (mimicking connect/disconnect).
+	go func() {
+		defer func() { done <- struct{}{} }()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			hc := &hubClient{
+				ch:     make(chan wsMessage, hubClientBufferSize),
+				resync: make(chan struct{}, 1),
+			}
+			srv.hubMu.Lock()
+			srv.hubClients[dir][hc] = struct{}{}
+			srv.hubMu.Unlock()
+			srv.hubMu.Lock()
+			delete(srv.hubClients[dir], hc)
+			srv.hubMu.Unlock()
+		}
+	}()
+
+	// Goroutine C: drains channels so sendOrLag never goes through the
+	// resync path (just to keep the test focused on the iteration race).
+	go func() {
+		defer func() { done <- struct{}{} }()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			srv.hubMu.Lock()
+			for hc := range srv.hubClients[dir] {
+				select {
+				case <-hc.ch:
+				default:
+				}
+			}
+			srv.hubMu.Unlock()
+		}
+	}()
+
+	time.Sleep(200 * time.Millisecond)
+	close(stop)
+	for i := 0; i < 3; i++ {
+		<-done
+	}
+	// Reaching here without a runtime fatal means the iteration is safe.
+}
+
 // TestSSE_LaggedClientReceivesResyncDirective is the SSE counterpart — the
 // fallback path also has the bounded-buffer + resync model.
 func TestSSE_LaggedClientReceivesResyncDirective(t *testing.T) {

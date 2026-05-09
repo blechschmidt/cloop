@@ -2774,6 +2774,20 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 			wg.Add(1)
 			go func(idx int, t *pm.Task) {
 				defer wg.Done()
+				// Panic recovery: a panic inside a provider implementation (e.g.
+				// nil-pointer in a third-party SDK, malformed JSON deref) would
+				// otherwise crash the entire orchestrator process, killing every
+				// peer task in the same parallel round. Convert it into a task
+				// failure so the caller can mark this single task failed and
+				// keep the loop alive.
+				defer func() {
+					if r := recover(); r != nil {
+						results[idx] = taskResult{
+							task: t,
+							err:  fmt.Errorf("provider panic on task %d: %v", t.ID, r),
+						}
+					}
+				}()
 				prompt := pm.ExecuteTaskPrompt(s.Goal, s.Instructions, o.config.WorkDir, parallelPromptPlan, t, o.config.NoCodeContextInject)
 				// Check for a user-edited context override.
 				if override, overrideErr := ctxedit.LoadOverride(o.config.WorkDir, t.ID); overrideErr == nil && override != "" {

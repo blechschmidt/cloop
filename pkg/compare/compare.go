@@ -45,6 +45,14 @@ func Run(ctx context.Context, prompt string, providers []provider.Provider, mode
 		go func(idx int, p provider.Provider) {
 			defer wg.Done()
 			entry := &Entry{ProviderName: p.Name()}
+			// Panic recovery: a provider implementation crashing must not
+			// take down the whole compare run.
+			defer func() {
+				if rec := recover(); rec != nil {
+					entry.Err = fmt.Errorf("provider panic: %v", rec)
+					results[idx] = entry
+				}
+			}()
 
 			m := model
 			if m == "" {
