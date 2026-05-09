@@ -161,8 +161,18 @@ func RunConsensus(
 	}
 
 	if len(valid) == 0 {
-		// All providers failed — return error from first candidate.
-		return "", nil, fmt.Errorf("consensus: all providers failed; first error: %v", candidates[0].Err)
+		// All providers failed — surface a representative cause. Prefer the first
+		// real error so the caller (and orchestrator MaxFailures gate) can see
+		// the underlying provider/network/auth failure rather than a misleading
+		// "<nil>". If every candidate returned nil-error but empty output (e.g.
+		// the model produced no content), report that distinct failure mode so
+		// it's not confused with an actual error.
+		for _, c := range candidates {
+			if c.Err != nil {
+				return "", nil, fmt.Errorf("consensus: all providers failed; first error from %q: %w", c.ProviderName, c.Err)
+			}
+		}
+		return "", nil, fmt.Errorf("consensus: all %d providers returned empty output", len(candidates))
 	}
 
 	if len(valid) == 1 {
