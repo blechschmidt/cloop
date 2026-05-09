@@ -432,7 +432,25 @@ func (s *Server) Start() error {
 	} else {
 		fmt.Printf("cloop dashboard running at http://localhost%s\n", addr)
 	}
-	return http.ListenAndServe(addr, s.uiRateLimitMiddleware(securityHeaders(s.authMiddleware(mux))))
+	srv := newUIHTTPServer(addr, s.uiRateLimitMiddleware(securityHeaders(s.authMiddleware(mux))))
+	return srv.ListenAndServe()
+}
+
+// newUIHTTPServer constructs the http.Server with timeouts tuned for the UI's
+// long-lived SSE and WebSocket endpoints. ReadHeaderTimeout defends against
+// slowloris (slow header read) without affecting streaming response bodies.
+// IdleTimeout closes idle keep-alive connections so a client that holds the
+// pool open without sending requests does not pin a goroutine indefinitely.
+// ReadTimeout / WriteTimeout are deliberately left unset because the UI serves
+// SSE (text/event-stream) and WebSocket frames that must remain open across
+// the lifetime of the user's session.
+func newUIHTTPServer(addr string, h http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           h,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
 }
 
 // securityHeaders adds hardening HTTP response headers to every response.

@@ -9,7 +9,15 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 )
+
+// regMu serializes load → mutate → save sequences against the global registry.
+// Without this, two concurrent Add/Remove/Switch calls each read the same
+// baseline, mutate independently, and the second saver silently overwrites the
+// first saver's changes (last-writer-wins). Same shape of bug as the one fixed
+// in pkg/multiui/registry.go's AddPaths.
+var regMu sync.Mutex
 
 // Workspace represents a registered cloop project.
 type Workspace struct {
@@ -73,7 +81,10 @@ func load() (*registry, error) {
 	return &reg, nil
 }
 
-// saveRegistry writes the registry to disk.
+// saveRegistry writes the registry to disk via an atomic tmp+fsync+rename so a
+// crash, ENOSPC, or concurrent reader during the write can't observe a
+// half-written or empty workspaces.json (which would silently unregister every
+// project across the user's machine).
 func saveRegistry(reg *registry) error {
 	dir, err := configDir()
 	if err != nil {
@@ -87,7 +98,44 @@ func saveRegistry(reg *registry) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, append(data, '\n'), 0o644)
+	return writeAtomic(path, append(data, '\n'), 0o644)
+}
+
+// writeAtomic stages data to a sibling .tmp file in the same directory, fsyncs
+// it, then renames it over path. Rename within a directory is atomic on
+// POSIX/Linux, so any concurrent reader either sees the old file or the new
+// file — never a half-written one.
+func writeAtomic(path string, data []byte, mode os.FileMode) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".*.tmp")
+	if err != nil {
+		return fmt.Errorf("workspace: create tmp: %w", err)
+	}
+	tmpPath := tmp.Name()
+	defer func() {
+		// Best-effort cleanup if rename never happened.
+		if _, statErr := os.Stat(tmpPath); statErr == nil {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("workspace: write tmp: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("workspace: sync tmp: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("workspace: close tmp: %w", err)
+	}
+	if err := os.Chmod(tmpPath, mode); err != nil {
+		return fmt.Errorf("workspace: chmod tmp: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("workspace: rename tmp: %w", err)
+	}
+	return nil
 }
 
 // List returns all registered workspaces.
@@ -110,6 +158,8 @@ func Add(name, path, description string) error {
 	if err != nil {
 		return fmt.Errorf("resolving path: %w", err)
 	}
+	regMu.Lock()
+	defer regMu.Unlock()
 	reg, err := load()
 	if err != nil {
 		return err
@@ -132,6 +182,8 @@ func Add(name, path, description string) error {
 // Remove unregisters the workspace with the given name.
 // Returns nil if the workspace does not exist (idempotent).
 func Remove(name string) error {
+	regMu.Lock()
+	defer regMu.Unlock()
 	reg, err := load()
 	if err != nil {
 		return err
@@ -143,9 +195,11 @@ func Remove(name string) error {
 		}
 	}
 	reg.Workspaces = filtered
-	// Clear active marker if it pointed to this workspace.
-	if GetActive() == name {
-		_ = SetActive("")
+	// Clear active marker if it pointed to this workspace. Read+write the
+	// active marker directly here — calling SetActive() would re-acquire
+	// regMu and deadlock.
+	if getActiveLocked() == name {
+		_ = setActiveLocked("")
 	}
 	return saveRegistry(reg)
 }
@@ -171,9 +225,11 @@ func Switch(name string) error {
 	if err != nil {
 		return err
 	}
-	// Write breadcrumb pointer file in the workspace directory.
+	// Write breadcrumb pointer file atomically — a half-written pointer
+	// (especially an empty one) silently re-routes future commands to the
+	// default workspace and the user's edits land in the wrong project.
 	pointerFile := filepath.Join(w.Path, ".cloop_workspace")
-	if err := os.WriteFile(pointerFile, []byte(name+"\n"), 0o644); err != nil {
+	if err := writeAtomic(pointerFile, []byte(name+"\n"), 0o644); err != nil {
 		return fmt.Errorf("writing workspace pointer: %w", err)
 	}
 	return SetActive(name)
@@ -181,6 +237,13 @@ func Switch(name string) error {
 
 // GetActive returns the currently active workspace name, or "" if none is set.
 func GetActive() string {
+	regMu.Lock()
+	defer regMu.Unlock()
+	return getActiveLocked()
+}
+
+// getActiveLocked reads the active marker assuming regMu is already held.
+func getActiveLocked() string {
 	path, err := activeWorkspacePath()
 	if err != nil {
 		return ""
@@ -194,6 +257,16 @@ func GetActive() string {
 
 // SetActive persists the active workspace name. Pass "" to clear.
 func SetActive(name string) error {
+	regMu.Lock()
+	defer regMu.Unlock()
+	return setActiveLocked(name)
+}
+
+// setActiveLocked writes the active marker assuming regMu is already held.
+// The marker is written atomically — a truncated or empty marker would
+// silently fall back to the default workspace and route subsequent commands
+// (and any edits/state writes they make) to the wrong project.
+func setActiveLocked(name string) error {
 	dir, err := configDir()
 	if err != nil {
 		return err
@@ -208,7 +281,7 @@ func SetActive(name string) error {
 		}
 		return nil
 	}
-	return os.WriteFile(path, []byte(name+"\n"), 0o644)
+	return writeAtomic(path, []byte(name+"\n"), 0o644)
 }
 
 // ResolveWorkDir returns the working directory for the given workspace name.

@@ -1,8 +1,10 @@
 package workspace_test
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/blechschmidt/cloop/pkg/workspace"
@@ -272,6 +274,110 @@ func TestResolveWorkDirEmpty(t *testing.T) {
 	if resolved != cwd {
 		t.Errorf("expected cwd %q, got %q", cwd, resolved)
 	}
+}
+
+// TestAddConcurrent_NoLostUpdates verifies that two goroutines each registering
+// a distinct workspace at the same time both end up persisted.
+//
+// Before the fix the two goroutines each loaded the same baseline registry,
+// appended their own entry, and saved — last writer wins, silently dropping the
+// other's workspace. Same shape as the multiui.AddPaths bug fixed in 57e66fb.
+//
+// Verified to fail against the unsynchronised version: typically only ~half of
+// the 32 workspaces survived. After the fix all 32 survive.
+func TestAddConcurrent_NoLostUpdates(t *testing.T) {
+	setConfigHome(t)
+	const n = 32
+	dirs := make([]string, n)
+	for i := 0; i < n; i++ {
+		dirs[i] = t.TempDir()
+	}
+
+	var wg sync.WaitGroup
+	errs := make([]error, n)
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func(i int) {
+			defer wg.Done()
+			name := "ws-" + filepath.Base(dirs[i])
+			errs[i] = workspace.Add(name, dirs[i], "")
+		}(i)
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("Add[%d] failed: %v", i, err)
+		}
+	}
+
+	got, err := workspace.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != n {
+		t.Fatalf("expected %d workspaces after concurrent Add, got %d (lost-update bug)", n, len(got))
+	}
+}
+
+// TestSaveRegistry_AtomicNoEmptyFile verifies the registry write is atomic:
+// a concurrent reader during a Save burst must never observe an empty
+// (zero-byte) or unparseable workspaces.json. Before the writeAtomic switch
+// a reader hitting the file mid-truncate would see {} or partial JSON.
+func TestSaveRegistry_AtomicNoEmptyFile(t *testing.T) {
+	setConfigHome(t)
+
+	// Pre-populate so subsequent updates do truncate-and-write.
+	projDir := t.TempDir()
+	if err := workspace.Add("seed", projDir, "seed"); err != nil {
+		t.Fatal(err)
+	}
+
+	regPath := filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "cloop", "workspaces.json")
+
+	stop := make(chan struct{})
+	var writerWG sync.WaitGroup
+
+	writerWG.Add(1)
+	go func() {
+		defer writerWG.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			_ = workspace.Add("seed", projDir, "rev")
+		}
+	}()
+
+	// Reader runs a fixed number of iterations and then exits. It must
+	// always observe a valid, non-empty registry — os.Rename is atomic on
+	// the inode swap, so an open()+read() should see either the old file
+	// or the new file in full, never a zero-byte truncate window.
+	for i := 0; i < 2000; i++ {
+		data, err := os.ReadFile(regPath)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			t.Fatalf("read registry: %v", err)
+		}
+		if len(data) == 0 {
+			t.Fatalf("read registry: observed empty file (atomic-write regression)")
+		}
+		var probe struct {
+			Workspaces []map[string]any `json:"workspaces"`
+		}
+		if err := json.Unmarshal(data, &probe); err != nil {
+			t.Fatalf("read registry: parse failed during concurrent write: %v", err)
+		}
+		if len(probe.Workspaces) == 0 {
+			t.Fatalf("read registry: observed empty workspaces array — concurrent write erased the seed entry")
+		}
+	}
+
+	close(stop)
+	writerWG.Wait()
 }
 
 func TestMultipleWorkspaces(t *testing.T) {

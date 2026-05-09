@@ -319,7 +319,14 @@ Press Ctrl+C to pause gracefully.`,
 				w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 				fmt.Fprint(w, runMetrics.Prometheus())
 			})
-			srv := &http.Server{Addr: metricsAddr, Handler: mux}
+			srv := &http.Server{
+				Addr:              metricsAddr,
+				Handler:           mux,
+				ReadHeaderTimeout: 10 * time.Second,
+				ReadTimeout:       30 * time.Second,
+				WriteTimeout:      30 * time.Second,
+				IdleTimeout:       60 * time.Second,
+			}
 			go func() {
 				if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 					fmt.Fprintf(os.Stderr, "metrics server: %v\n", err)
