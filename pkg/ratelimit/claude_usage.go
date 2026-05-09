@@ -5,8 +5,10 @@ package ratelimit
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -160,25 +162,136 @@ func parseWindow(w *UsageWindow) *UsageDetail {
 	return d
 }
 
-// readCredentialsToken reads the OAuth token from ~/.claude/.credentials.json
+const claudeOAuthClientID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+const claudeOAuthTokenURL = "https://platform.claude.com/v1/oauth/token"
+
+type claudeCredentials struct {
+	ClaudeAiOauth struct {
+		AccessToken  string   `json:"accessToken"`
+		RefreshToken string   `json:"refreshToken"`
+		ExpiresAt    int64    `json:"expiresAt"`
+		Scopes       []string `json:"scopes"`
+	} `json:"claudeAiOauth"`
+}
+
+func credentialsPath() string {
+	home, _ := os.UserHomeDir()
+	return home + "/.claude/.credentials.json"
+}
+
+// readCredentialsToken reads the OAuth token from ~/.claude/.credentials.json,
+// auto-refreshing it if expired.
 func readCredentialsToken() string {
-	home, err := os.UserHomeDir()
+	data, err := os.ReadFile(credentialsPath())
 	if err != nil {
 		return ""
 	}
-	data, err := os.ReadFile(home + "/.claude/.credentials.json")
-	if err != nil {
-		return ""
-	}
-	var creds struct {
-		ClaudeAiOauth struct {
-			AccessToken string `json:"accessToken"`
-		} `json:"claudeAiOauth"`
-	}
+	var creds claudeCredentials
 	if err := json.Unmarshal(data, &creds); err != nil {
 		return ""
 	}
+
+	// Check if token is expired (with 60s buffer)
+	nowMs := time.Now().UnixMilli()
+	if creds.ClaudeAiOauth.ExpiresAt > 0 && nowMs >= creds.ClaudeAiOauth.ExpiresAt-60000 {
+		// Try to refresh
+		if creds.ClaudeAiOauth.RefreshToken != "" {
+			if newToken, err := refreshOAuthToken(creds.ClaudeAiOauth.RefreshToken); err == nil {
+				return newToken
+			}
+		}
+		return "" // expired and can't refresh
+	}
+
 	return creds.ClaudeAiOauth.AccessToken
+}
+
+// refreshOAuthToken uses the refresh token to get a new access token and
+// updates the credentials file.
+func refreshOAuthToken(refreshToken string) (string, error) {
+	client := &http.Client{Timeout: 10 * time.Second}
+
+	formData := fmt.Sprintf(
+		"grant_type=refresh_token&refresh_token=%s&client_id=%s&redirect_uri=%s",
+		refreshToken,
+		claudeOAuthClientID,
+		"https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback",
+	)
+
+	req, err := http.NewRequest("POST", claudeOAuthTokenURL, strings.NewReader(formData))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("refresh request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("refresh failed with status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var tokenResp struct {
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+		ExpiresIn    int64  `json:"expires_in"`
+	}
+	if err := json.Unmarshal(body, &tokenResp); err != nil {
+		return "", fmt.Errorf("parsing refresh response: %w", err)
+	}
+
+	if tokenResp.AccessToken == "" {
+		return "", fmt.Errorf("no access_token in refresh response")
+	}
+
+	// Update credentials file
+	updateCredentialsFile(tokenResp.AccessToken, tokenResp.RefreshToken, tokenResp.ExpiresIn)
+
+	// Also update the env var for cloop's claudecode provider
+	os.Setenv("CLAUDE_CODE_OAUTH_TOKEN", tokenResp.AccessToken)
+
+	return tokenResp.AccessToken, nil
+}
+
+// updateCredentialsFile writes the new tokens back to ~/.claude/.credentials.json
+func updateCredentialsFile(accessToken, refreshToken string, expiresIn int64) {
+	path := credentialsPath()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+
+	var raw map[string]interface{}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return
+	}
+
+	oauth, ok := raw["claudeAiOauth"].(map[string]interface{})
+	if !ok {
+		return
+	}
+
+	oauth["accessToken"] = accessToken
+	if refreshToken != "" {
+		oauth["refreshToken"] = refreshToken
+	}
+	if expiresIn > 0 {
+		oauth["expiresAt"] = time.Now().UnixMilli() + expiresIn*1000
+	}
+
+	updated, err := json.MarshalIndent(raw, "", "  ")
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(path, updated, 0600)
 }
 
 
