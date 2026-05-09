@@ -76,6 +76,15 @@ type EvalResult struct {
 // Evaluate calls the AI provider to score each criterion in the rubric for the
 // given task and its output. Returns a populated EvalResult and saves it to
 // .cloop/evals/<task-id>.json under workDir.
+//
+// Two stability bounds protect long-running eval runs:
+//   - ctx.Err() is checked between criteria so a cancelled parent (Ctrl+C
+//     translated to cancel, or an enclosing watchdog firing) bails before
+//     the next per-criterion call instead of running the full rubric.
+//   - Each scoreOneCriterion call is wrapped in panic recovery so a panic
+//     inside a provider implementation (e.g. nil-pointer in a third-party
+//     SDK) becomes a returned error instead of crashing `cloop eval` and
+//     losing every score that completed earlier in the loop.
 func Evaluate(ctx context.Context, prov provider.Provider, model string, timeout time.Duration, workDir string, task *pm.Task, output string, rubric Rubric) (*EvalResult, error) {
 	if len(rubric.Criteria) == 0 {
 		rubric = DefaultRubric()
@@ -83,7 +92,10 @@ func Evaluate(ctx context.Context, prov provider.Provider, model string, timeout
 
 	scores := make([]Score, 0, len(rubric.Criteria))
 	for _, c := range rubric.Criteria {
-		s, err := scoreOneCriterion(ctx, prov, model, timeout, task, output, c)
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("eval cancelled before criterion %q: %w", c.Name, err)
+		}
+		s, err := scoreOneCriterionSafe(ctx, prov, model, timeout, task, output, c)
 		if err != nil {
 			return nil, fmt.Errorf("eval criterion %q: %w", c.Name, err)
 		}
@@ -181,6 +193,19 @@ func computeWeighted(scores []Score) float64 {
 type aiScore struct {
 	Score     int    `json:"score"`
 	Rationale string `json:"rationale"`
+}
+
+// scoreOneCriterionSafe wraps scoreOneCriterion with panic recovery so a
+// crashing provider implementation becomes a returned error rather than
+// taking down `cloop eval` mid-rubric.
+func scoreOneCriterionSafe(ctx context.Context, prov provider.Provider, model string, timeout time.Duration, task *pm.Task, output string, c Criterion) (s Score, err error) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			s = Score{}
+			err = fmt.Errorf("provider panic in %s: %v", prov.Name(), rec)
+		}
+	}()
+	return scoreOneCriterion(ctx, prov, model, timeout, task, output, c)
 }
 
 // scoreOneCriterion asks the AI to rate the task output on a single criterion.
