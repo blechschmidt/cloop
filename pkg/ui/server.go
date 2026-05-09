@@ -7071,7 +7071,10 @@ function renderActiveOptions(s) {
   grid.innerHTML = buildOptionBadges(opts) + parallelControls;
 }
 
-function setMaxParallel(raw) {
+// Exposed on window because the Active Options badges use inline onchange
+// handlers that resolve in the global scope, while this whole script is
+// wrapped in an IIFE.
+window.setMaxParallel = function(raw) {
   const n = parseInt(raw, 10);
   if (!Number.isFinite(n) || n < 0 || n > 64) {
     toast('Max Parallel must be 0–64 (0 = unlimited)', 'error');
@@ -7087,7 +7090,7 @@ function setMaxParallel(raw) {
   }).catch(err => {
     toast('Update failed: ' + err.message, 'error');
   });
-}
+};
 
 function buildOptionBadges(opts) {
   return opts.map(o => {
@@ -7110,7 +7113,10 @@ function buildOptionBadges(opts) {
   }).join('');
 }
 
-function toggleOption(flag, value) {
+// Exposed on window because the Active Options badges use inline onclick
+// handlers that resolve in the global scope, while this whole script is
+// wrapped in an IIFE.
+window.toggleOption = function(flag, value) {
   apiMethod('POST', pUrl('/api/options/toggle'), {flag: flag, value: value}).then(d => {
     if (d && d.ok) {
       const labels = {auto_evolve: 'Evolve Mode', innovate_mode: 'Innovate Mode', pm_mode: 'PM Mode', skip_clarify: 'Skip Clarify', parallel: 'Parallel Mode', plan_only: 'Plan Only', retry_failed: 'Retry Failed', dry_run: 'Dry Run'};
@@ -7123,7 +7129,7 @@ function toggleOption(flag, value) {
   }).catch(err => {
     toast('Toggle failed: ' + err.message, 'error');
   });
-}
+};
 
 function estimateCost(provider, model, inputTok, outputTok) {
   const p = (provider || '').toLowerCase();
