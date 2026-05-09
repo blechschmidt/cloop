@@ -1046,31 +1046,17 @@ func (s *Server) handleGetTasks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	q := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
-	statusCSV := r.URL.Query().Get("status")
-	tagsCSV := r.URL.Query().Get("tags")
-	assignee := r.URL.Query().Get("assignee")
-	priorityStr := r.URL.Query().Get("priority")
+	q := strings.ToLower(boundedQueryString(r.URL.Query().Get("q"), maxQueryStringLen))
+	assignee := boundedQueryString(r.URL.Query().Get("assignee"), maxQueryStringLen)
+	priority := parsePriorityFilter(r.URL.Query().Get("priority"))
 
 	statusSet := map[string]bool{}
-	if statusCSV != "" {
-		for _, sv := range strings.Split(statusCSV, ",") {
-			if sv = strings.TrimSpace(sv); sv != "" {
-				statusSet[sv] = true
-			}
-		}
+	for _, sv := range parseCSVList(r.URL.Query().Get("status"), maxCSVItems, maxCSVItemLen) {
+		statusSet[sv] = true
 	}
 	tagSet := map[string]bool{}
-	if tagsCSV != "" {
-		for _, tv := range strings.Split(tagsCSV, ",") {
-			if tv = strings.TrimSpace(tv); tv != "" {
-				tagSet[tv] = true
-			}
-		}
-	}
-	var priority int
-	if priorityStr != "" {
-		priority, _ = strconv.Atoi(priorityStr)
+	for _, tv := range parseCSVList(r.URL.Query().Get("tags"), maxCSVItems, maxCSVItemLen) {
+		tagSet[tv] = true
 	}
 
 	out := make([]*pm.Task, 0, len(ps.Plan.Tasks))
@@ -1227,10 +1213,13 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	name  := presenceNames[totalClients%len(presenceNames)]
 	color := presenceColors[totalClients%len(presenceColors)]
 	// Override with user-supplied name/color from query params if provided.
-	if qn := r.URL.Query().Get("name"); qn != "" {
+	// Both fields are echoed to every other connected client via the presence
+	// broadcast, so they're capped at maxPresenceFieldLen to prevent a single
+	// connector from amplifying a multi-megabyte payload across the hub.
+	if qn := boundedQueryString(r.URL.Query().Get("name"), maxPresenceFieldLen); qn != "" {
 		name = qn
 	}
-	if qc := r.URL.Query().Get("color"); qc != "" {
+	if qc := boundedQueryString(r.URL.Query().Get("color"), maxPresenceFieldLen); qc != "" {
 		color = qc
 	}
 	hc := &hubClient{
@@ -3374,9 +3363,8 @@ func (s *Server) handleKBAdd(w http.ResponseWriter, r *http.Request) {
 // handleKBDelete removes a KB entry by ID (DELETE /api/kb/{id}).
 func (s *Server) handleKBDelete(w http.ResponseWriter, r *http.Request) {
 	workDir := s.resolveWorkDir(r)
-	idStr := r.PathValue("id")
-	id, err := strconv.Atoi(idStr)
-	if err != nil {
+	id, ok := parsePositiveID(r.PathValue("id"))
+	if !ok {
 		http.Error(w, "invalid id", http.StatusBadRequest)
 		return
 	}
@@ -3391,7 +3379,7 @@ func (s *Server) handleKBDelete(w http.ResponseWriter, r *http.Request) {
 // query string (case-insensitive substring match). GET /api/kb/search?q=...
 func (s *Server) handleKBSearch(w http.ResponseWriter, r *http.Request) {
 	workDir := s.resolveWorkDir(r)
-	q := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
+	q := strings.ToLower(boundedQueryString(r.URL.Query().Get("q"), maxQueryStringLen))
 	store, err := kb.Load(workDir)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
