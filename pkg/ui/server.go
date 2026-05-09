@@ -6646,7 +6646,7 @@ const dashboardHTML = `<!DOCTYPE html>
               <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 0a8 8 0 1 1 0 16A8 8 0 0 1 8 0zm3.5 7.5l-5-3a.5.5 0 0 0-.75.43v6a.5.5 0 0 0 .75.43l5-3a.5.5 0 0 0 0-.86z"/></svg>
               Run
             </button>
-            <button id="ctrlStop" class="btn danger" onclick="apiStop()">
+            <button id="ctrlStop" class="btn danger" onclick="apiStop()" style="display:none">
               <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 0a8 8 0 1 1 0 16A8 8 0 0 1 8 0zM5.5 5.5h5v5h-5z"/></svg>
               Pause / Stop
             </button>
@@ -8145,6 +8145,12 @@ function render(s) {
 
   // Status badge
   document.getElementById('statusBadge').innerHTML = statusBadge(s.status);
+
+  // Sync Run/Stop button visibility from project status. Without this the
+  // buttons rely on WebSocket 'run_state' events, which may not have arrived
+  // yet on initial render, page refresh, or project tab switch — leaving
+  // both buttons visible (default HTML state).
+  updateRunButtonState(s.status === 'running');
 
   // Stats
   const steps = (s.steps || []).length;
