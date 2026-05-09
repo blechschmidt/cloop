@@ -18,6 +18,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/approvalgate"
 	clooptracing "github.com/blechschmidt/cloop/pkg/tracing"
 	"github.com/blechschmidt/cloop/pkg/artifact"
+	"github.com/blechschmidt/cloop/pkg/atomicfile"
 	"github.com/blechschmidt/cloop/pkg/budget"
 	"github.com/blechschmidt/cloop/pkg/checkpoint"
 	"github.com/blechschmidt/cloop/pkg/clarify"
@@ -1066,7 +1067,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 						dimColor.Printf("  docs update error (%s): %v\n", df.RelPath, refreshErr)
 						continue
 					}
-					if writeErr := os.WriteFile(df.AbsPath, []byte(updated), 0o644); writeErr != nil {
+					if writeErr := atomicfile.Write(df.AbsPath, []byte(updated), 0o644); writeErr != nil {
 						dimColor.Printf("  docs write error (%s): %v\n", df.RelPath, writeErr)
 						continue
 					}

@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/atomicfile"
 	"github.com/blechschmidt/cloop/pkg/cost"
 	"github.com/blechschmidt/cloop/pkg/provider"
 )
@@ -365,7 +366,7 @@ func SaveReport(workDir string, r *Report) (string, error) {
 	path := filepath.Join(dir, filename)
 
 	content := FormatMarkdownTable(r)
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+	if err := atomicfile.Write(path, []byte(content), 0o644); err != nil {
 		return "", fmt.Errorf("writing bench report: %w", err)
 	}
 	return path, nil

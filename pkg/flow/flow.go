@@ -12,8 +12,18 @@ import (
 	"strings"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/boundedread"
 	"gopkg.in/yaml.v3"
 )
+
+// maxFlowYAMLBytes caps how much we will load from a flow YAML file. Flows
+// are config (steps + args + a few env vars); the largest realistic file is
+// in the tens of KB. 1 MiB leaves orders-of-magnitude headroom while
+// preventing a runaway file under .cloop/flows/ — or a user pointing the
+// flow runner at a truly oversized YAML — from OOM-killing the process.
+// Declared as var so regression tests can shrink it; production callers
+// should treat it as immutable.
+var maxFlowYAMLBytes int64 = 1 << 20
 
 // OnFailurePolicy controls what happens when a step fails.
 type OnFailurePolicy string
@@ -89,9 +99,12 @@ type RunConfig struct {
 	Stderr *os.File
 }
 
-// Load reads and parses a Flow from the given YAML file path.
+// Load reads and parses a Flow from the given YAML file path. The read is
+// bounded by maxFlowYAMLBytes — a runaway file (e.g. a multi-GB blob in
+// .cloop/flows/, or a user-supplied path pointing at the wrong artifact) is
+// rejected with *boundedread.SizeError before any payload is loaded.
 func Load(path string) (*Flow, error) {
-	data, err := os.ReadFile(path)
+	data, err := boundedread.ReadFile(path, maxFlowYAMLBytes)
 	if err != nil {
 		return nil, fmt.Errorf("reading flow file: %w", err)
 	}

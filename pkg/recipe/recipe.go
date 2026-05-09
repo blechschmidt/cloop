@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/atomicfile"
+	"github.com/blechschmidt/cloop/pkg/boundedread"
 	"github.com/blechschmidt/cloop/pkg/env"
 	"github.com/blechschmidt/cloop/pkg/flow"
 	"github.com/blechschmidt/cloop/pkg/hooks"
@@ -26,11 +27,13 @@ import (
 
 const recipesDir = "recipes"
 
-// maxRecipeBytes caps a recipe YAML download. Recipes are config files —
-// the largest realistic recipe is in the tens of KB; 4 MiB is a generous
-// guard that prevents a malicious or misconfigured registry from streaming
-// gigabytes into memory.
-const maxRecipeBytes int64 = 4 << 20
+// maxRecipeBytes caps a recipe YAML download or local read. Recipes are config
+// files — the largest realistic recipe is in the tens of KB; 4 MiB is a
+// generous guard that prevents a malicious or misconfigured registry, or a
+// runaway file at the install source, from streaming gigabytes into memory.
+// Declared as var so regression tests can shrink it; production callers should
+// treat it as immutable.
+var maxRecipeBytes int64 = 4 << 20
 
 // Recipe is a named, shareable automation workflow that combines a flow
 // pipeline, a goal template, lifecycle hooks, and default environment
@@ -89,9 +92,12 @@ func recipePath(workDir, name string) string {
 }
 
 // Load reads and parses a recipe from .cloop/recipes/<name>.yaml.
+// The read is bounded by maxRecipeBytes — a runaway recipe file (e.g. a
+// multi-GB blob mistakenly written into the recipes dir) is rejected with
+// *boundedread.SizeError before any payload is loaded.
 func Load(workDir, name string) (*Recipe, error) {
 	path := recipePath(workDir, name)
-	data, err := os.ReadFile(path)
+	data, err := boundedread.ReadFile(path, maxRecipeBytes)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, fmt.Errorf("recipe %q not found (expected %s)", name, path)
@@ -173,7 +179,10 @@ func Install(workDir, source string) (*Recipe, error) {
 	return r, nil
 }
 
-// fetchSource reads raw bytes from a local path or an HTTP(S) URL.
+// fetchSource reads raw bytes from a local path or an HTTP(S) URL. Both
+// paths are bounded by maxRecipeBytes so an attacker-controlled --source
+// (a runaway local file, or a hostile registry serving an unbounded
+// payload) cannot OOM the process.
 func fetchSource(source string) ([]byte, error) {
 	u, err := url.Parse(source)
 	if err == nil && (u.Scheme == "http" || u.Scheme == "https") {
@@ -189,7 +198,7 @@ func fetchSource(source string) ([]byte, error) {
 		return provider.ReadResponseBody(resp.Body, maxRecipeBytes)
 	}
 	// Treat as a local file path.
-	return os.ReadFile(source)
+	return boundedread.ReadFile(source, maxRecipeBytes)
 }
 
 // Remove deletes the recipe file for the given name.
