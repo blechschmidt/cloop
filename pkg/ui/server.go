@@ -37,6 +37,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/riskmatrix"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/suggest"
+	"github.com/blechschmidt/cloop/pkg/taskqueue"
 	"github.com/blechschmidt/cloop/pkg/timeline"
 )
 
@@ -652,6 +653,10 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/options/toggle", s.handleOptionsToggle)
 	mux.HandleFunc("POST /api/options/max-parallel", s.handleMaxParallelSet)
 	mux.HandleFunc("POST /api/options/provider", s.handleProviderModelSet)
+
+	// Central work queue (every PM task, heal retry, evolve cycle, external merge)
+	mux.HandleFunc("GET /api/queue", s.handleQueue)
+	mux.HandleFunc("GET /api/queue/stats", s.handleQueueStats)
 
 	// Multi-project dashboard
 	mux.HandleFunc("/api/projects", s.handleProjects)
@@ -3481,6 +3486,94 @@ func (s *Server) broadcastProjectsUpdate() {
 	s.hubMu.Unlock()
 }
 
+// handleQueue returns recent entries from the central work queue scoped
+// to the resolved project workdir. Every PM task execution, auto-heal retry,
+// evolve discovery cycle, and externally-merged task is recorded here so the
+// UI can render a single auditable activity log.
+//
+// Query params:
+//   - project_idx: index into the multi-project registry (resolved by resolveWorkDir)
+//   - limit: max rows (default 200, hard cap 1000)
+//   - offset: pagination offset (default 0)
+//   - status: filter by lifecycle state (queued|running|done|failed|skipped)
+//   - kind:   filter by entry kind (task|heal|evolve|external|session)
+//   - task_id: filter rows tied to a specific plan task id
+func (s *Server) handleQueue(w http.ResponseWriter, r *http.Request) {
+	workDir := s.resolveWorkDir(r)
+	q, err := taskqueue.Open(workDir)
+	if err != nil {
+		jsonErr(w, "queue unavailable: "+err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	defer q.Close()
+
+	opts := taskqueue.ListOptions{}
+	qs := r.URL.Query()
+	if v := qs.Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			opts.Limit = n
+		}
+	}
+	if v := qs.Get("offset"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			opts.Offset = n
+		}
+	}
+	if v := qs.Get("status"); v != "" {
+		opts.Status = taskqueue.Status(v)
+	}
+	if v := qs.Get("kind"); v != "" {
+		opts.Kind = taskqueue.Kind(v)
+	}
+	if v := qs.Get("task_id"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			opts.TaskID = n
+		}
+	}
+
+	entries, err := q.List(opts)
+	if err != nil {
+		jsonErr(w, "queue list failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if entries == nil {
+		entries = []taskqueue.Entry{}
+	}
+	jsonOK(w, map[string]interface{}{
+		"entries": entries,
+		"limit":   opts.Limit,
+		"offset":  opts.Offset,
+	})
+}
+
+// handleQueueStats returns counts of queue rows grouped by lifecycle status
+// (queued/running/done/failed/skipped) for the resolved project workdir.
+// The Web UI uses this to render the queue header summary without fetching
+// the full entry list.
+func (s *Server) handleQueueStats(w http.ResponseWriter, r *http.Request) {
+	workDir := s.resolveWorkDir(r)
+	q, err := taskqueue.Open(workDir)
+	if err != nil {
+		jsonErr(w, "queue unavailable: "+err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	defer q.Close()
+
+	stats, err := q.Stats()
+	if err != nil {
+		jsonErr(w, "queue stats failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	out := map[string]int{
+		"queued": stats[taskqueue.StatusQueued],
+		"running": stats[taskqueue.StatusRunning],
+		"done": stats[taskqueue.StatusDone],
+		"failed": stats[taskqueue.StatusFailed],
+		"skipped": stats[taskqueue.StatusSkipped],
+	}
+	jsonOK(w, out)
+}
+
 // handleProjects returns all project statuses and aggregate stats.
 func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
 	s.refreshProjectStatuses()
@@ -6285,6 +6378,7 @@ const dashboardHTML = `<!DOCTYPE html>
       <span class="tab-section-label" title="These tabs show data for the currently selected project">Project</span>
       <button class="tab-btn active" onclick="switchTab('overview')"  id="tbtn-overview"   title="Project overview (per-project)">Overview</button>
       <button class="tab-btn"        onclick="switchTab('tasks')"     id="tbtn-tasks"      title="Tasks (per-project)">Tasks</button>
+      <button class="tab-btn"        onclick="switchTab('queue')"     id="tbtn-queue"      title="Central work queue: every PM task, heal retry, evolve cycle, external merge (per-project)">Activity Queue</button>
       <button class="tab-btn"        onclick="switchTab('kanban')"    id="tbtn-kanban"     title="Kanban board (per-project)">Kanban</button>
       <button class="tab-btn"        onclick="switchTab('timeline')"  id="tbtn-timeline"   title="Timeline / Gantt (per-project)">Timeline</button>
       <button class="tab-btn"        onclick="switchTab('kb')"        id="tbtn-kb"         title="Knowledge Base (per-project)">Knowledge Base</button>
@@ -6373,6 +6467,7 @@ const dashboardHTML = `<!DOCTYPE html>
       <div class="mobile-nav-section-label">Project</div>
       <button class="m-tab-btn" onclick="switchTab('overview')"  id="mtbtn-overview"><span class="m-tab-icon">&#128200;</span>Overview</button>
       <button class="m-tab-btn" onclick="switchTab('tasks')"     id="mtbtn-tasks"><span class="m-tab-icon">&#10003;</span>Tasks</button>
+      <button class="m-tab-btn" onclick="switchTab('queue')"     id="mtbtn-queue"><span class="m-tab-icon">&#128260;</span>Activity Queue</button>
       <button class="m-tab-btn" onclick="switchTab('kanban')"    id="mtbtn-kanban"><span class="m-tab-icon">&#9783;</span>Kanban</button>
       <button class="m-tab-btn" onclick="switchTab('timeline')"  id="mtbtn-timeline"><span class="m-tab-icon">&#128197;</span>Timeline</button>
       <button class="m-tab-btn" onclick="switchTab('kb')"        id="mtbtn-kb"><span class="m-tab-icon">&#128218;</span>Knowledge Base</button>
@@ -6659,6 +6754,54 @@ const dashboardHTML = `<!DOCTYPE html>
         <div class="task-list" id="taskListFull">
           <div class="empty-state"><h3>No tasks yet</h3><p>Add a task above, or run <code>cloop run --pm</code> to generate a task plan.</p></div>
         </div>
+      </div>
+    </div>
+
+    <!-- ══════════════════════════════════════════════════ ACTIVITY QUEUE -->
+    <div id="tab-queue" class="tab-panel">
+      <div class="kanban-toolbar">
+        <span class="section-title" style="margin:0">Activity Queue</span>
+        <span style="font-size:11px;color:var(--muted)">Every PM task, heal retry, evolve discovery, and external merge — the single source of truth for what cloop is doing.</span>
+        <span class="spacer"></span>
+        <select id="queueFilterKind" class="filter-select" style="padding:3px 6px;font-size:11px" onchange="loadQueue()" aria-label="Filter by kind">
+          <option value="">All kinds</option>
+          <option value="task">PM task</option>
+          <option value="heal">Auto-heal</option>
+          <option value="evolve">Evolve</option>
+          <option value="external">External</option>
+          <option value="session">Session</option>
+        </select>
+        <select id="queueFilterStatus" class="filter-select" style="padding:3px 6px;font-size:11px" onchange="loadQueue()" aria-label="Filter by status">
+          <option value="">All statuses</option>
+          <option value="queued">Queued</option>
+          <option value="running">Running</option>
+          <option value="done">Done</option>
+          <option value="failed">Failed</option>
+          <option value="skipped">Skipped</option>
+        </select>
+        <button class="btn" style="padding:3px 10px;font-size:11px" onclick="loadQueue()">Refresh</button>
+      </div>
+      <div id="queueStatsBar" class="stats-grid" style="margin-top:10px;margin-bottom:12px"></div>
+      <div id="queueEmpty" class="empty-state" style="display:none">
+        <h3>No activity yet</h3>
+        <p>Once cloop runs a task, heal retry, or evolve cycle, it will appear here.</p>
+      </div>
+      <div class="section" style="overflow-x:auto">
+        <table id="queueTable" style="display:none;border-collapse:collapse;width:100%;font-size:13px">
+          <thead>
+            <tr>
+              <th style="text-align:left;padding:6px 10px;background:var(--surface);color:var(--muted);font-weight:500;width:60px">ID</th>
+              <th style="text-align:left;padding:6px 10px;background:var(--surface);color:var(--muted);font-weight:500;width:90px">Kind</th>
+              <th style="text-align:left;padding:6px 10px;background:var(--surface);color:var(--muted);font-weight:500;width:100px">Status</th>
+              <th style="text-align:left;padding:6px 10px;background:var(--surface);color:var(--muted);font-weight:500;width:60px">Task</th>
+              <th style="text-align:left;padding:6px 10px;background:var(--surface);color:var(--muted);font-weight:500">Title</th>
+              <th style="text-align:left;padding:6px 10px;background:var(--surface);color:var(--muted);font-weight:500;width:140px">Started</th>
+              <th style="text-align:left;padding:6px 10px;background:var(--surface);color:var(--muted);font-weight:500;width:90px">Duration</th>
+              <th style="text-align:left;padding:6px 10px;background:var(--surface);color:var(--muted);font-weight:500">Result</th>
+            </tr>
+          </thead>
+          <tbody id="queueTbody"></tbody>
+        </table>
       </div>
     </div>
 
@@ -7606,7 +7749,7 @@ window.switchTab = function(name) {
 
   // In multi-project mode, re-fetch state for the selected project when
   // switching to any project-scoped tab so the data is always current.
-  const projectScopedTabs = ['overview','tasks','kanban','timeline','kb','deps','risk-matrix','analytics','chat','assistant'];
+  const projectScopedTabs = ['overview','tasks','queue','kanban','timeline','kb','deps','risk-matrix','analytics','chat','assistant'];
   if (isMultiProject && selectedProjectIdx === null && name === 'overview') {
     // No project selected: show the all-projects summary panel.
     // Always reload so the cards reflect the latest project statuses.
@@ -7621,6 +7764,7 @@ window.switchTab = function(name) {
     if (name === 'deps') loadDeps();
     if (name === 'risk-matrix') loadRiskMatrix();
     if (name === 'analytics') loadAnalytics();
+    if (name === 'queue') loadQueue();
     if (name === 'budget') { loadBudget(); loadClaudeUsage(); loadRateLimits(); }
     if (name === 'chat') loadChatHistory();
     if (name === 'assistant') loadAssistantHistory();
@@ -7636,6 +7780,7 @@ window.switchTab = function(name) {
     if (name === 'deps') loadDeps();
     if (name === 'risk-matrix') loadRiskMatrix();
     if (name === 'analytics') loadAnalytics();
+    if (name === 'queue') loadQueue();
     if (name === 'budget') { loadBudget(); loadClaudeUsage(); loadRateLimits(); }
   }
 
@@ -9575,6 +9720,131 @@ window.deleteKBEntry = function(id) {
     else toast(d.error || 'Delete failed', 'err');
   }).catch(() => toast('Delete failed', 'err'));
 };
+
+// ── Activity Queue tab ───────────────────────────────────────────────────────
+//
+// The queue surfaces every unit of work cloop performs (PM tasks, heal retries,
+// evolve discoveries, external merges). The view is read-only: rows are written
+// by the orchestrator and exposed via /api/queue.
+
+window.loadQueue = function() { loadQueue(); };
+
+function _queueKindBadge(kind) {
+  const map = {
+    task:     { label: 'PM task',  cls: 'running' },
+    heal:     { label: 'Heal',     cls: 'paused' },
+    evolve:   { label: 'Evolve',   cls: 'evolving' },
+    external: { label: 'External', cls: 'unknown' },
+    session:  { label: 'Session',  cls: 'unknown' },
+  };
+  const m = map[kind] || { label: kind || '?', cls: 'unknown' };
+  return '<span class="badge ' + m.cls + '">' + esc(m.label) + '</span>';
+}
+
+function _queueStatusBadge(status) {
+  const map = {
+    queued:  { label: 'Queued',  cls: 'unknown' },
+    running: { label: 'Running', cls: 'running' },
+    done:    { label: 'Done',    cls: 'complete' },
+    failed:  { label: 'Failed',  cls: 'failed' },
+    skipped: { label: 'Skipped', cls: 'unknown' },
+  };
+  const m = map[status] || { label: status || '?', cls: 'unknown' };
+  return '<span class="badge ' + m.cls + '"><span class="badge-dot"></span>' + esc(m.label) + '</span>';
+}
+
+function _queueDuration(e) {
+  if (!e.started_at) return '';
+  const start = new Date(e.started_at).getTime();
+  const end = e.completed_at ? new Date(e.completed_at).getTime() : Date.now();
+  const sec = Math.max(0, Math.floor((end - start) / 1000));
+  if (sec < 60) return sec + 's';
+  if (sec < 3600) return Math.floor(sec / 60) + 'm ' + (sec % 60) + 's';
+  return Math.floor(sec / 3600) + 'h ' + Math.floor((sec % 3600) / 60) + 'm';
+}
+
+function loadQueue() {
+  const kind = (document.getElementById('queueFilterKind') || {}).value || '';
+  const status = (document.getElementById('queueFilterStatus') || {}).value || '';
+  const params = new URLSearchParams();
+  if (kind) params.set('kind', kind);
+  if (status) params.set('status', status);
+  params.set('limit', '300');
+
+  const baseUrl = pUrl('/api/queue');
+  const url = baseUrl + (baseUrl.includes('?') ? '&' : '?') + params.toString();
+  api(url).then(data => {
+    renderQueue(data);
+  }).catch(err => {
+    const empty = document.getElementById('queueEmpty');
+    const tbl = document.getElementById('queueTable');
+    if (tbl) tbl.style.display = 'none';
+    if (empty) {
+      empty.style.display = '';
+      empty.innerHTML = '<h3>Queue unavailable</h3><p>' + esc(String(err && err.message || err || 'unknown error')) + '</p>';
+    }
+  });
+
+  // Stats bar.
+  const statsUrl = pUrl('/api/queue/stats');
+  api(statsUrl).then(stats => {
+    const bar = document.getElementById('queueStatsBar');
+    if (!bar) return;
+    const cards = [
+      { label: 'Running', value: stats.running || 0 },
+      { label: 'Queued',  value: stats.queued  || 0 },
+      { label: 'Done',    value: stats.done    || 0 },
+      { label: 'Failed',  value: stats.failed  || 0 },
+      { label: 'Skipped', value: stats.skipped || 0 },
+    ];
+    bar.innerHTML = cards.map(c =>
+      '<div class="stat-card"><div class="stat-value">' + c.value + '</div><div class="stat-label">' + esc(c.label) + '</div></div>'
+    ).join('');
+  }).catch(() => {});
+}
+
+function renderQueue(data) {
+  const entries = (data && data.entries) || [];
+  const tbody = document.getElementById('queueTbody');
+  const tbl = document.getElementById('queueTable');
+  const empty = document.getElementById('queueEmpty');
+  if (!tbody) return;
+  if (entries.length === 0) {
+    if (tbl) tbl.style.display = 'none';
+    if (empty) {
+      empty.style.display = '';
+      empty.innerHTML = '<h3>No activity yet</h3><p>Once cloop runs a task, heal retry, or evolve cycle, it will appear here.</p>';
+    }
+    return;
+  }
+  if (empty) empty.style.display = 'none';
+  if (tbl) tbl.style.display = '';
+
+  const cellStyle = 'padding:6px 10px;border-top:1px solid var(--border);vertical-align:top';
+  const muteStyle = cellStyle + ';font-size:11px;color:var(--muted)';
+  const rows = entries.map(e => {
+    const started = e.started_at ? new Date(e.started_at).toLocaleString() : '—';
+    const result = (e.status === 'failed' && e.error_message)
+      ? '<span style="color:var(--red)">' + esc(e.error_message) + '</span>'
+      : esc(e.output_summary || '');
+    const taskCell = e.task_id ? '#' + e.task_id : '—';
+    let title = esc(e.title || '');
+    if (e.attempt) {
+      title += ' <span style="font-size:11px;color:var(--muted)">(attempt ' + e.attempt + ')</span>';
+    }
+    return '<tr>' +
+      '<td style="' + cellStyle + ';font-family:var(--font-mono,monospace);font-size:11px">' + e.id + '</td>' +
+      '<td style="' + cellStyle + '">' + _queueKindBadge(e.kind) + '</td>' +
+      '<td style="' + cellStyle + '">' + _queueStatusBadge(e.status) + '</td>' +
+      '<td style="' + muteStyle + '">' + taskCell + '</td>' +
+      '<td style="' + cellStyle + '">' + title + '</td>' +
+      '<td style="' + muteStyle + '">' + esc(started) + '</td>' +
+      '<td style="' + muteStyle + '">' + esc(_queueDuration(e)) + '</td>' +
+      '<td style="' + cellStyle + ';font-size:12px">' + result + '</td>' +
+      '</tr>';
+  });
+  tbody.innerHTML = rows.join('');
+}
 
 // ── Dependency graph tab ─────────────────────────────────────────────────────
 

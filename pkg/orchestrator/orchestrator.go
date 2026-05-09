@@ -672,6 +672,12 @@ func (o *Orchestrator) enforceClaudeCodeLimits() error {
 }
 
 func (o *Orchestrator) Run(ctx context.Context) error {
+	// Close the central work queue on Run() exit so the underlying SQLite
+	// connection (and any goroutines it owns) is released. The orchestrator
+	// is a one-shot value — callers Build → Run → discard. Re-using the
+	// orchestrator after Run would already misbehave (state/plan are baked
+	// in at New time), so closing here is safe.
+	defer o.Close()
 	return o.runPM(ctx)
 }
 
