@@ -1009,6 +1009,98 @@ func TestRunPM_MaxFailures_TripsOnScriptVerifyFailures(t *testing.T) {
 	}
 }
 
+// TestRunPM_EmptyOutput_TripsWatchdog locks in the runPM companion to
+// TestRunLoop_EmptyOutput_TripsWatchdog: when the provider returns
+// (*Result{Output:""}, nil) on every call (transient hiccup, content-
+// filtered completion, partial response), runPM must trip MaxFailures
+// rather than silently marking each empty result as a successful task
+// done via the no-signal `default:` arm of the switch. Without this
+// guard, a single hiccupping provider would mark every task DONE and
+// declare goal complete with empty results.
+func TestRunPM_EmptyOutput_TripsWatchdog(t *testing.T) {
+	dir := tempDir(t)
+	s := initState(t, dir, "goal", 0)
+	s.PMMode = true
+	s.Plan = &pm.Plan{
+		Goal: "goal",
+		Tasks: []*pm.Task{
+			{ID: 1, Title: "Task A", Priority: 1, Status: pm.TaskPending},
+			{ID: 2, Title: "Task B", Priority: 2, Status: pm.TaskPending},
+			{ID: 3, Title: "Task C", Priority: 3, Status: pm.TaskPending},
+			{ID: 4, Title: "Task D", Priority: 4, Status: pm.TaskPending},
+		},
+	}
+	s.Save()
+
+	prov := &mockProvider{
+		name: "mock",
+		results: []*provider.Result{
+			{Output: "", Provider: "mock"},
+			{Output: "   \n\t  ", Provider: "mock"},
+			{Output: "", Provider: "mock"},
+		},
+	}
+	o := newOrchestrator(t, dir, Config{WorkDir: dir, PMMode: true, MaxFailures: 2, NoHeal: true}, prov)
+	err := o.runPM(context.Background())
+	if err == nil {
+		t.Fatal("expected error after MaxFailures consecutive empty outputs, got nil")
+	}
+	if !strings.Contains(err.Error(), "consecutive") {
+		t.Errorf("expected error to mention consecutive failures, got: %v", err)
+	}
+	if o.state.Status != "failed" {
+		t.Errorf("expected status=failed, got %q", o.state.Status)
+	}
+	// All tasks must remain pending — none should have been silently marked DONE.
+	for _, task := range o.state.Plan.Tasks {
+		if task.Status == pm.TaskDone {
+			t.Errorf("task %d was silently marked DONE despite empty output", task.ID)
+		}
+	}
+	if prov.calls != 2 {
+		t.Errorf("expected exactly 2 provider calls before abort (MaxFailures=2), got %d", prov.calls)
+	}
+}
+
+// TestRunPM_EmptyOutput_ResetsOnSuccess verifies that a real (non-empty)
+// task response resets the consecutiveErrors counter, so transient empty
+// hiccups don't accumulate forever and erroneously abort a long-running
+// session that is otherwise making progress.
+func TestRunPM_EmptyOutput_ResetsOnSuccess(t *testing.T) {
+	dir := tempDir(t)
+	s := initState(t, dir, "goal", 0)
+	s.PMMode = true
+	s.Plan = &pm.Plan{
+		Goal: "goal",
+		Tasks: []*pm.Task{
+			{ID: 1, Title: "Task A", Priority: 1, Status: pm.TaskPending},
+			{ID: 2, Title: "Task B", Priority: 2, Status: pm.TaskPending},
+		},
+	}
+	s.Save()
+
+	// Sequence: empty (re-queue task 1), real success (task 1 done, counter
+	// resets), empty (task 2 re-queue, counter=1), real success (task 2 done).
+	// Plan is now complete — no error, no abort.
+	prov := &mockProvider{
+		name: "mock",
+		results: []*provider.Result{
+			{Output: "", Provider: "mock"},
+			{Output: "done\nTASK_DONE", Provider: "mock"},
+			{Output: "", Provider: "mock"},
+			{Output: "done\nTASK_DONE", Provider: "mock"},
+		},
+	}
+	o := newOrchestrator(t, dir, Config{WorkDir: dir, PMMode: true, MaxFailures: 2, NoHeal: true}, prov)
+	err := o.runPM(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error (counter should reset on success): %v", err)
+	}
+	if o.state.Status != "complete" && o.state.Status != "paused" {
+		t.Errorf("unexpected status: %q", o.state.Status)
+	}
+}
+
 // --- ContextSteps ---
 
 func TestBuildPrompt_ContextSteps_Three(t *testing.T) {

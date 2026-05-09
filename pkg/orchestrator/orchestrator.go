@@ -1737,6 +1737,31 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			}
 		}
 
+		// Empty-output watchdog: a provider returning (Result{Output:""}, nil)
+		// produces no signal, so the switch below falls into `default:` and
+		// silently marks the task DONE — a single transient hiccup can then
+		// drain the entire plan in a tight loop. Mirror the runLoop guard
+		// (line ~751) and the decorator behaviour in pkg/provider/cached and
+		// pkg/provider/fallback: re-queue the task as pending, increment
+		// consecutiveErrors, and abort once the threshold trips.
+		if strings.TrimSpace(taskOutput) == "" {
+			consecutiveErrors++
+			failColor.Printf("✗ Task %d: provider returned empty output (consecutive errors: %d/%d)\n",
+				task.ID, consecutiveErrors, maxConsecutiveErrors)
+			task.Status = pm.TaskPending
+			s.Save()
+			if consecutiveErrors >= maxConsecutiveErrors {
+				s.Status = "failed"
+				s.Save()
+				o.webhook.Send(webhook.EventSessionFailed, webhook.Payload{
+					Goal:    s.Goal,
+					Session: &webhook.SessionInfo{InputTokens: s.TotalInputTokens, OutputTokens: s.TotalOutputTokens},
+				})
+				return fmt.Errorf("%d consecutive task failures (empty provider output)", consecutiveErrors)
+			}
+			continue
+		}
+
 		duration := time.Since(start)
 		stepResult := state.StepResult{
 			Task:         fmt.Sprintf("Task %d: %s", task.ID, task.Title),
@@ -2933,6 +2958,26 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 			}
 
 			result := res.result
+			// Empty-output watchdog: same companion to runPM/runLoop guards —
+			// a (*Result{Output:""}, nil) on the parallel path otherwise falls
+			// into the `default:` arm below and silently marks the task DONE,
+			// draining the whole plan when the provider is hiccupping (auth
+			// flaps, content-filtered completions, partial responses).
+			if result == nil || strings.TrimSpace(result.Output) == "" {
+				failColor.Printf("✗ Task %d: provider returned empty output\n", task.ID)
+				mu.Lock()
+				task.Status = pm.TaskPending
+				consecutiveErrors++
+				s.Save()
+				tooManyErrors := consecutiveErrors >= maxConsecutiveErrors
+				mu.Unlock()
+				if tooManyErrors {
+					s.Status = "failed"
+					s.Save()
+					return fmt.Errorf("%d consecutive task failures (empty provider output)", consecutiveErrors)
+				}
+				continue
+			}
 			stepResult := state.StepResult{
 				Task:         fmt.Sprintf("Task %d: %s", task.ID, task.Title),
 				Output:       result.Output,
