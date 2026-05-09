@@ -2343,6 +2343,111 @@ func TestRunConfig_PlanOnlyForcesPMMode(t *testing.T) {
 	}
 }
 
+// TestRunConfig_MaxParallelAlonePersistsToConfig verifies that setting
+// max-parallel via the dedicated endpoint — without separately toggling the
+// parallel badge — still flows through into orchestrator.Config.MaxParallel.
+//
+// This is the "user only configured the worker pool size" path: cmd/run.go
+// must pick up the persisted MaxParallel as a default and apply it even if
+// the parallel toggle is off (in which case parallel mode is off and the
+// value is simply available for when the user toggles parallel later).
+func TestRunConfig_MaxParallelAlonePersistsToConfig(t *testing.T) {
+	dir := setupProjectDir(t, cloopGoal, nil)
+	ts := newTestServer(t, dir, nil)
+
+	body := apiPOST(t, ts, "/api/options/max-parallel", map[string]interface{}{"value": 7})
+	if body["ok"] != true {
+		t.Fatalf("set max-parallel failed: %v", body)
+	}
+
+	ps := loadStateOrFail(t, dir)
+	cfg := buildRunConfig(ps)
+
+	if cfg.MaxParallel != 7 {
+		t.Errorf("cfg.MaxParallel = %d, want 7 (must flow through even without parallel toggle)", cfg.MaxParallel)
+	}
+	if cfg.Parallel {
+		t.Errorf("cfg.Parallel = true, want false (parallel toggle was never set)")
+	}
+}
+
+// TestRunConfig_AllBadgesOff_ProducesCleanConfig is the symmetric baseline:
+// a fresh project (no toggles flipped) must produce an orchestrator.Config
+// where every badge-driven flag is off and MaxParallel is 0. This guards
+// against accidental defaults bleeding through state.Init or the merge logic.
+func TestRunConfig_AllBadgesOff_ProducesCleanConfig(t *testing.T) {
+	dir := setupProjectDir(t, cloopGoal, nil)
+
+	ps := loadStateOrFail(t, dir)
+	cfg := buildRunConfig(ps)
+
+	if cfg.AutoEvolve {
+		t.Errorf("AutoEvolve = true, want false on fresh project")
+	}
+	if cfg.InnovateMode {
+		t.Errorf("InnovateMode = true, want false on fresh project")
+	}
+	if cfg.PlanOnly {
+		t.Errorf("PlanOnly = true, want false on fresh project")
+	}
+	if cfg.RetryFailed {
+		t.Errorf("RetryFailed = true, want false on fresh project")
+	}
+	if cfg.DryRun {
+		t.Errorf("DryRun = true, want false on fresh project")
+	}
+	if cfg.Parallel {
+		t.Errorf("Parallel = true, want false on fresh project")
+	}
+	if cfg.SkipClarify {
+		t.Errorf("SkipClarify = true, want false on fresh project")
+	}
+	if cfg.MaxParallel != 0 {
+		t.Errorf("MaxParallel = %d, want 0 on fresh project", cfg.MaxParallel)
+	}
+	// PMMode is always on after Task 20067 removed non-PM mode.
+	if !cfg.PMMode {
+		t.Errorf("PMMode = false, want true (always on after Task 20067)")
+	}
+}
+
+// TestRunStartEndpointAcceptsEmptyBody is a thin contract test: the run
+// endpoint takes no body (all knobs come from persisted state) but must
+// tolerate a stray JSON body from older clients without 4xx-ing. The
+// underlying subprocess is not exercised here — the goal is just to confirm
+// that the handler still routes correctly given the badge-driven design.
+//
+// We don't actually wait for the run; we just want to assert the handler
+// accepts a POST and reports success. The spawned subprocess will fail
+// quickly because the test environment's `cloop` binary isn't on PATH —
+// but that failure happens *after* the HTTP response, so the contract is
+// preserved.
+func TestRunStartEndpointAcceptsEmptyBody(t *testing.T) {
+	dir := setupProjectDir(t, cloopGoal, nil)
+	ts := newTestServer(t, dir, nil)
+
+	req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/run", strings.NewReader("{}"))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST /api/run: %v", err)
+	}
+	defer resp.Body.Close()
+
+	// The handler returns 200 OK on successful spawn. If the subprocess
+	// itself fails to exec, that's logged asynchronously — the HTTP layer
+	// has already replied. We tolerate either 200 or 500 (depending on
+	// whether the test env has a `cloop` binary on PATH); what we don't
+	// tolerate is 4xx, which would indicate the handler rejected the
+	// (empty) request body.
+	if resp.StatusCode >= 400 && resp.StatusCode < 500 {
+		t.Errorf("POST /api/run returned 4xx %d (handler must not reject empty body)", resp.StatusCode)
+	}
+}
+
 // TestOptionsToggle_PerProjectScoped verifies that toggling an option for one
 // project does not leak into a sibling project's persisted state.
 func TestOptionsToggle_PerProjectScoped(t *testing.T) {
