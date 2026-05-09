@@ -17,6 +17,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/blechschmidt/cloop/pkg/atomicfile"
 )
 
 // Window is a single rate-limit dimension snapshot.
@@ -114,6 +116,10 @@ func loadOnce() {
 }
 
 // persist writes the current snapshot map atomically to disk.
+//
+// Uses atomicfile.Write (fsync + rename + parent-dir fsync) instead of the
+// previous bare tmp-and-rename — the old path could lose the rename on power
+// loss, and on next startup the Web UI would surface stale rate-limit data.
 func persist() {
 	dir := configDir()
 	_ = os.MkdirAll(dir, 0o755)
@@ -121,11 +127,7 @@ func persist() {
 	if err != nil {
 		return
 	}
-	tmp := persistPath() + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return
-	}
-	_ = os.Rename(tmp, persistPath())
+	_ = atomicfile.Write(persistPath(), data, 0o600)
 }
 
 // parseInt is a tolerant int64 parser.

@@ -17,6 +17,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/blechschmidt/cloop/pkg/atomicfile"
 	"github.com/blechschmidt/cloop/pkg/config"
 )
 
@@ -258,7 +259,10 @@ func stripUnknownKeys(configPath string, data []byte) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(configPath, out, 0o600)
+	// Atomic write — config holds API keys, a torn write here silently loses
+	// credentials and the next provider call fails confusingly far from the
+	// cause.
+	return atomicfile.Write(configPath, out, 0o600)
 }
 
 func checkModelStrings(cfg *config.Config, add func(Finding)) {

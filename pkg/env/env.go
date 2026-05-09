@@ -11,6 +11,8 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/blechschmidt/cloop/pkg/atomicfile"
 )
 
 const (
@@ -70,7 +72,9 @@ func Save(workDir string, vars []Var) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("env: mkdir .cloop: %w", err)
 	}
-	if err := os.WriteFile(envPath(workDir), data, 0o600); err != nil {
+	// Atomic write — env.yaml carries secret material (base64-wrapped API
+	// keys, tokens). A torn write here loses credentials silently.
+	if err := atomicfile.Write(envPath(workDir), data, 0o600); err != nil {
 		return fmt.Errorf("env: write %s: %w", envFile, err)
 	}
 	return nil
