@@ -100,6 +100,15 @@ func init() {
 	rootCmd.PersistentFlags().BoolVar(&globalLogJSON, "log-json", false, "Emit structured NDJSON log lines for key events (task_start, task_done, step, etc.) instead of colored text. Enables piping to Datadog, Splunk, or jq.")
 	rootCmd.PersistentFlags().StringVar(&globalWorkspace, "workspace", "", "Named workspace to operate in (overrides cwd for all commands)")
 	rootCmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
+		// Silence usage output for any error returned from RunE. Cobra's default
+		// behavior is to dump the full --help text whenever RunE returns a non-nil
+		// error, which is noisy and misleading for runtime errors (network
+		// failures, missing files, AI provider errors). PersistentPreRunE runs
+		// only after flag parsing and Args validation have succeeded, so
+		// genuine CLI misuse (unknown flag, wrong arg count) still produces
+		// usage output — only post-validation runtime errors are silenced.
+		cmd.SilenceUsage = true
+
 		if globalWorkspace != "" {
 			// Resolve the workspace path and chdir so all commands transparently
 			// use the workspace directory when calling os.Getwd().
