@@ -175,3 +175,72 @@ func TestSave_AtomicNoTempFiles(t *testing.T) {
 		t.Errorf("loaded checkpoint mismatch: %+v", loaded)
 	}
 }
+
+// TestLoad_CorruptFileQuarantined ensures a malformed checkpoint.json no
+// longer hard-errors a fresh run. The previous behaviour returned
+// `parse checkpoint: ...` and the orchestrator refused to start until the
+// user manually deleted the file. After the fix Load quarantines the bad
+// bytes aside (preserved for forensics) and returns (nil, nil) so the run
+// can proceed from scratch.
+func TestLoad_CorruptFileQuarantined(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".cloop"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	path := Path(dir)
+	if err := os.WriteFile(path, []byte(`{"task_id":42, "task_title": INVALID`), 0o644); err != nil {
+		t.Fatalf("seed corrupt: %v", err)
+	}
+
+	got, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load on corrupt file should not return an error, got: %v", err)
+	}
+	if got != nil {
+		t.Errorf("Load on corrupt file should return nil checkpoint, got: %+v", got)
+	}
+
+	// Original path freed up; corrupt bytes preserved under .corrupt-* sibling.
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("expected corrupt %s to be moved aside, stat err = %v", path, err)
+	}
+	entries, err := os.ReadDir(filepath.Dir(path))
+	if err != nil {
+		t.Fatalf("read dir: %v", err)
+	}
+	found := false
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".corrupt-") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected a .corrupt-* sibling preserving the bad bytes, dir contents: %v", entries)
+	}
+}
+
+// TestLoad_ZeroByteFileQuarantined covers the most likely real-world cause of
+// corruption: a process killed between os.Create and the first write left a
+// 0-byte file behind. (atomicfile.Write avoids this on the happy path, but
+// pre-atomicfile binaries didn't, and a `truncate -s 0` from outside cloop
+// can produce the same shape.) An empty file fails json.Unmarshal with
+// "unexpected end of JSON input" and previously bricked Load.
+func TestLoad_ZeroByteFileQuarantined(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".cloop"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	path := Path(dir)
+	if err := os.WriteFile(path, []byte{}, 0o644); err != nil {
+		t.Fatalf("seed empty: %v", err)
+	}
+
+	got, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load on zero-byte file should not return an error, got: %v", err)
+	}
+	if got != nil {
+		t.Errorf("Load on zero-byte file should return nil, got: %+v", got)
+	}
+}

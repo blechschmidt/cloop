@@ -195,3 +195,73 @@ func TestSave_PermissionsAre0600(t *testing.T) {
 		t.Errorf("expected mode 0600, got %o", got)
 	}
 }
+
+// TestLoad_CorruptFileQuarantined ensures a malformed sprints.json no longer
+// hard-errors every `cloop sprint *` subcommand. Before the fix, one bad save
+// would propagate `sprint: parse sprints.json: ...` to list/show/burndown and
+// to PlanCommit (which Loads then mutates), leaving the user unable to
+// recover without manually deleting the file. After the fix Load quarantines
+// the corrupt bytes aside and returns an empty SprintFile so a fresh plan can
+// be created.
+func TestLoad_CorruptFileQuarantined(t *testing.T) {
+	work := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(work, ".cloop"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	path := filepath.Join(work, ".cloop", "sprints.json")
+	// Truncated mid-array — exactly the shape a torn pre-atomicfile write
+	// would have produced.
+	if err := os.WriteFile(path, []byte(`{"sprints":[{"id":1,"name":"S1"`), 0o600); err != nil {
+		t.Fatalf("seed corrupt: %v", err)
+	}
+
+	sf, err := sprint.Load(work)
+	if err != nil {
+		t.Fatalf("Load on corrupt file should not return an error, got: %v", err)
+	}
+	if sf == nil {
+		t.Fatalf("Load on corrupt file should return a non-nil empty SprintFile")
+	}
+	if len(sf.Sprints) != 0 {
+		t.Errorf("expected empty sprint list on corrupt file, got %d sprints", len(sf.Sprints))
+	}
+
+	// Original path freed up; corrupt bytes preserved under .corrupt-* sibling.
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("expected corrupt %s to be moved aside, stat err = %v", path, err)
+	}
+	entries, _ := os.ReadDir(filepath.Dir(path))
+	found := false
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".corrupt-") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected a .corrupt-* sibling preserving the bad bytes, dir contents: %v", entries)
+	}
+}
+
+// TestLoad_ZeroByteSprintsFile is the post-crash zero-byte case for sprints.
+// json.Unmarshal of "" fails with `unexpected end of JSON input`; previously
+// this poisoned every sprint command until the user nuked the file. Now Load
+// recovers transparently.
+func TestLoad_ZeroByteSprintsFile(t *testing.T) {
+	work := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(work, ".cloop"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	path := filepath.Join(work, ".cloop", "sprints.json")
+	if err := os.WriteFile(path, []byte{}, 0o600); err != nil {
+		t.Fatalf("seed empty: %v", err)
+	}
+
+	sf, err := sprint.Load(work)
+	if err != nil {
+		t.Fatalf("Load on zero-byte file should not return an error, got: %v", err)
+	}
+	if sf == nil || len(sf.Sprints) != 0 {
+		t.Errorf("expected empty SprintFile, got %+v", sf)
+	}
+}

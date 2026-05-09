@@ -162,8 +162,15 @@ func Save(workDir string, cp *Checkpoint) error {
 }
 
 // Load reads the checkpoint file. Returns (nil, nil) if no file exists.
+//
+// On parse failure (zero-byte file, schema drift from an older binary, manual
+// edit gone wrong) the corrupt file is quarantined aside as
+// checkpoint.json.corrupt-<unix> and (nil, nil) is returned. Losing the
+// in-progress checkpoint is preferable to refusing to start a new run — and
+// the user has the bytes preserved next to it for forensics.
 func Load(workDir string) (*Checkpoint, error) {
-	data, err := os.ReadFile(Path(workDir))
+	path := Path(workDir)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil
@@ -172,7 +179,13 @@ func Load(workDir string) (*Checkpoint, error) {
 	}
 	var cp Checkpoint
 	if err := json.Unmarshal(data, &cp); err != nil {
-		return nil, fmt.Errorf("parse checkpoint: %w", err)
+		qpath := atomicfile.QuarantineCorrupt(path)
+		if qpath != "" {
+			fmt.Fprintf(os.Stderr, "warning: checkpoint at %s was corrupt (%v); quarantined to %s, starting fresh\n", path, err, qpath)
+		} else {
+			fmt.Fprintf(os.Stderr, "warning: checkpoint at %s was corrupt (%v) and could not be quarantined; ignoring\n", path, err)
+		}
+		return nil, nil
 	}
 	return &cp, nil
 }

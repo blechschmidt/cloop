@@ -3,19 +3,23 @@ package ui
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"nhooyr.io/websocket"
@@ -244,6 +248,14 @@ type Server struct {
 	// Per-project chat conversation histories (keyed by resolved workDir path).
 	chatMu        sync.Mutex
 	chatHistories map[string][]ChatMessage
+
+	// Graceful shutdown plumbing. httpServer is set in Run after the
+	// http.Server is constructed so Shutdown can call its Shutdown method;
+	// shutdownMu guards access for the (rare) case where Shutdown races
+	// against Run-failure cleanup. Both are nil before Run and after the
+	// underlying server has been replaced.
+	shutdownMu sync.Mutex
+	httpServer *http.Server
 }
 
 // New creates a new UI server for the given working directory and port.
@@ -496,13 +508,31 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/projects/{idx}/stop", s.handleProjectStop)
 }
 
-// Start begins listening on the configured port and broadcasting state updates.
+// Start begins listening on the configured port and broadcasting state
+// updates. It installs SIGINT/SIGTERM handlers so the daemon shuts down
+// gracefully when supervised by systemd or interrupted from a TTY: in-flight
+// requests drain, watcher goroutines stop polling, and Start returns nil.
+// Production callers use this entrypoint; tests that need fine-grained
+// lifecycle control should call Run with their own context instead.
 func (s *Server) Start() error {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	return s.Run(ctx)
+}
+
+// Run is the lifecycle entrypoint without signal handling: it blocks until ctx
+// is cancelled or the underlying http.Server fails. On ctx cancellation it
+// triggers a bounded graceful shutdown (10s) and returns nil. On listener
+// failure it returns the underlying error. Calling Run more than once on the
+// same Server is not supported.
+func (s *Server) Run(ctx context.Context) error {
 	mux := http.NewServeMux()
 	s.registerRoutes(mux)
 
-	go s.watchState()
-	go s.watchProjects()
+	watcherCtx, cancelWatchers := context.WithCancel(context.Background())
+	defer cancelWatchers()
+	go s.watchState(watcherCtx)
+	go s.watchProjects(watcherCtx)
 
 	addr := ":" + strconv.Itoa(s.Port)
 	if s.Token != "" {
@@ -511,7 +541,47 @@ func (s *Server) Start() error {
 		fmt.Printf("cloop dashboard running at http://localhost%s\n", addr)
 	}
 	srv := newUIHTTPServer(addr, s.uiRateLimitMiddleware(securityHeaders(s.authMiddleware(mux))))
-	return srv.ListenAndServe()
+
+	s.shutdownMu.Lock()
+	s.httpServer = srv
+	s.shutdownMu.Unlock()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- srv.ListenAndServe()
+	}()
+
+	select {
+	case <-ctx.Done():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(shutdownCtx); err != nil && !errors.Is(err, context.DeadlineExceeded) {
+			return fmt.Errorf("ui server shutdown: %w", err)
+		}
+		// Drain ListenAndServe — after Shutdown it returns http.ErrServerClosed.
+		<-errCh
+		return nil
+	case err := <-errCh:
+		if errors.Is(err, http.ErrServerClosed) {
+			return nil
+		}
+		return err
+	}
+}
+
+// Shutdown initiates a graceful shutdown of a server started via Run. It is
+// safe to call from any goroutine; if the server has not started or has
+// already been shut down it is a no-op. The supplied ctx bounds how long
+// Shutdown will wait for in-flight requests to drain.
+func (s *Server) Shutdown(ctx context.Context) error {
+	s.shutdownMu.Lock()
+	srv := s.httpServer
+	s.httpServer = nil
+	s.shutdownMu.Unlock()
+	if srv == nil {
+		return nil
+	}
+	return srv.Shutdown(ctx)
 }
 
 // newUIHTTPServer constructs the http.Server with timeouts tuned for the UI's
@@ -654,11 +724,18 @@ func recoverGoroutine(name string) {
 	}
 }
 
-// watchState polls the state file every second and notifies SSE clients on change.
-func (s *Server) watchState() {
+// watchState polls the state file every second and notifies SSE clients on
+// change. It returns when ctx is cancelled so Run can shut down cleanly
+// instead of leaking a polling goroutine for the lifetime of the process.
+func (s *Server) watchState(ctx context.Context) {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
-	for range ticker.C {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
 		func() {
 			defer recoverGoroutine("watchState iteration")
 			statePath := state.StatePath(s.WorkDir)
@@ -2922,14 +2999,20 @@ func (s *Server) refreshProjectStatuses() {
 }
 
 // watchProjects polls state files for all registered projects and broadcasts
-// updates to SSE clients on change.
-func (s *Server) watchProjects() {
+// updates to SSE clients on change. It returns when ctx is cancelled so Run
+// can shut down cleanly instead of leaking the polling goroutine.
+func (s *Server) watchProjects(ctx context.Context) {
 	s.projLastMod = make(map[string]time.Time)
 	s.refreshProjectStatuses()
 
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
-	for range ticker.C {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
 		func() {
 			defer recoverGoroutine("watchProjects iteration")
 			changed := false

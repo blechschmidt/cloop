@@ -172,6 +172,98 @@ func TestWrite_ParentDirMissing(t *testing.T) {
 	}
 }
 
+// TestQuarantineCorrupt_RoundTrip pins the happy path: the corrupt file is
+// renamed aside under a discoverable suffix and the original path is freed up
+// so the caller's Load can fall back to a fresh store. The bytes must survive
+// for forensics — quarantine, not delete.
+func TestQuarantineCorrupt_RoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "store.json")
+
+	// Write deliberately invalid JSON — the same shape a Load would see on a
+	// torn pre-atomicfile write or a manual edit gone wrong.
+	corrupt := []byte(`{"truncated":`)
+	if err := os.WriteFile(path, corrupt, 0o644); err != nil {
+		t.Fatalf("seed corrupt: %v", err)
+	}
+
+	qpath := QuarantineCorrupt(path)
+	if qpath == "" {
+		t.Fatalf("QuarantineCorrupt returned empty path on writable tmpfs")
+	}
+	if !strings.Contains(qpath, ".corrupt-") {
+		t.Errorf("quarantine path %q missing .corrupt- marker", qpath)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("original path should be gone after quarantine, got err=%v", err)
+	}
+	got, err := os.ReadFile(qpath)
+	if err != nil {
+		t.Fatalf("read quarantined: %v", err)
+	}
+	if !bytes.Equal(got, corrupt) {
+		t.Errorf("quarantine clobbered content: got %q want %q", got, corrupt)
+	}
+}
+
+// TestQuarantineCorrupt_MissingFile mirrors a benign race: the Load path
+// observed a parse error, but by the time we tried to quarantine, another
+// process already moved the file away. We must return "" rather than panic
+// or pretend success — callers treat "" as "logged and moved on".
+func TestQuarantineCorrupt_MissingFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "never-existed.json")
+
+	if got := QuarantineCorrupt(path); got != "" {
+		t.Errorf("expected empty return on missing source, got %q", got)
+	}
+}
+
+// TestQuarantineCorrupt_SameSecondCollision drives two quarantines back-to-back
+// against the same target. The second call must NOT clobber the first one's
+// backup — both copies are evidence and we lose forensic value if the second
+// silently overwrites. The numeric suffix branch in QuarantineCorrupt exists
+// for exactly this case.
+func TestQuarantineCorrupt_SameSecondCollision(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "store.json")
+
+	if err := os.WriteFile(path, []byte("first-corrupt"), 0o644); err != nil {
+		t.Fatalf("seed first: %v", err)
+	}
+	q1 := QuarantineCorrupt(path)
+	if q1 == "" {
+		t.Fatalf("first quarantine failed")
+	}
+
+	if err := os.WriteFile(path, []byte("second-corrupt"), 0o644); err != nil {
+		t.Fatalf("seed second: %v", err)
+	}
+	q2 := QuarantineCorrupt(path)
+	if q2 == "" {
+		t.Fatalf("second quarantine failed")
+	}
+	if q1 == q2 {
+		t.Fatalf("second quarantine clobbered the first: both at %s", q1)
+	}
+
+	// Both backups must still hold their distinct contents.
+	got1, err := os.ReadFile(q1)
+	if err != nil {
+		t.Fatalf("read q1: %v", err)
+	}
+	if string(got1) != "first-corrupt" {
+		t.Errorf("q1 content lost: got %q", got1)
+	}
+	got2, err := os.ReadFile(q2)
+	if err != nil {
+		t.Fatalf("read q2: %v", err)
+	}
+	if string(got2) != "second-corrupt" {
+		t.Errorf("q2 content lost: got %q", got2)
+	}
+}
+
 // assertNoTmpLeftovers fails the test if any .tmp staging files remain in dir.
 // They indicate a bug in the cleanup defer that would slowly fill the user's
 // .cloop/ directory over time.
@@ -186,5 +278,86 @@ func assertNoTmpLeftovers(t *testing.T, dir string) {
 		if strings.HasSuffix(name, ".tmp") || strings.Contains(name, ".tmp.") {
 			t.Errorf("leftover tmp file %q in %s", name, dir)
 		}
+	}
+}
+
+// TestQuarantineCorrupt_RenamesAside verifies the happy path: a corrupt file
+// is moved to "<path>.corrupt-<unix>" and the original location is left
+// empty so the caller's Load can return (nil, nil) and start fresh.
+func TestQuarantineCorrupt_RenamesAside(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+	want := []byte("garbage{not json")
+	if err := os.WriteFile(path, want, 0o600); err != nil {
+		t.Fatalf("seed corrupt file: %v", err)
+	}
+
+	qpath := QuarantineCorrupt(path)
+	if qpath == "" {
+		t.Fatal("QuarantineCorrupt returned empty path on a writable directory")
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("original path still exists after quarantine: err=%v", err)
+	}
+	got, err := os.ReadFile(qpath)
+	if err != nil {
+		t.Fatalf("read quarantined file: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Errorf("quarantined content mismatch: got %q want %q", got, want)
+	}
+	if !strings.Contains(qpath, ".corrupt-") {
+		t.Errorf("quarantine path should contain .corrupt- marker; got %s", qpath)
+	}
+}
+
+// TestQuarantineCorrupt_DisambiguatesSameSecond verifies that two
+// quarantines within the same wall-clock second do not silently clobber each
+// other. The second call must pick a numeric suffix (.1, .2, ...) and
+// preserve both copies.
+func TestQuarantineCorrupt_DisambiguatesSameSecond(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+
+	if err := os.WriteFile(path, []byte("first"), 0o600); err != nil {
+		t.Fatalf("seed first: %v", err)
+	}
+	first := QuarantineCorrupt(path)
+	if first == "" {
+		t.Fatal("first quarantine failed")
+	}
+
+	if err := os.WriteFile(path, []byte("second"), 0o600); err != nil {
+		t.Fatalf("seed second: %v", err)
+	}
+	second := QuarantineCorrupt(path)
+	if second == "" {
+		t.Fatal("second quarantine failed")
+	}
+	if first == second {
+		t.Fatalf("same-second quarantines collided onto the same path: %s", first)
+	}
+
+	firstBytes, err := os.ReadFile(first)
+	if err != nil || !bytes.Equal(firstBytes, []byte("first")) {
+		t.Errorf("first quarantine content damaged: bytes=%q err=%v", firstBytes, err)
+	}
+	secondBytes, err := os.ReadFile(second)
+	if err != nil || !bytes.Equal(secondBytes, []byte("second")) {
+		t.Errorf("second quarantine content damaged: bytes=%q err=%v", secondBytes, err)
+	}
+}
+
+// TestQuarantineCorrupt_MissingSourceReturnsEmpty verifies the soft-failure
+// contract: when there's nothing to rename, the function returns "" rather
+// than panicking. Callers treat "" as "couldn't quarantine; ignore and move
+// on" so the recovery path can't add new failure modes to a Load that's
+// already trying to recover from corruption.
+func TestQuarantineCorrupt_MissingSourceReturnsEmpty(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "does-not-exist.json")
+
+	if got := QuarantineCorrupt(path); got != "" {
+		t.Errorf("expected empty string for missing source, got %q", got)
 	}
 }

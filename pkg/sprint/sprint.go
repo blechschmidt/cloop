@@ -66,6 +66,12 @@ func (s *Sprint) CompletionPct(plan *pm.Plan) int {
 
 // Load reads sprints from .cloop/sprints.json. Returns an empty SprintFile if the file
 // does not exist.
+//
+// On parse failure (zero-byte file, manual edit gone wrong, schema drift) the
+// corrupt file is quarantined aside as sprints.json.corrupt-<unix> and an
+// empty SprintFile is returned. The next `cloop sprint plan` will recreate
+// the file from current state — losing the planned sprints is preferable to
+// breaking every `cloop sprint *` subcommand because of one bad save.
 func Load(workDir string) (*SprintFile, error) {
 	path := filepath.Join(workDir, sprintsFile)
 	data, err := os.ReadFile(path)
@@ -77,7 +83,13 @@ func Load(workDir string) (*SprintFile, error) {
 	}
 	var sf SprintFile
 	if err := json.Unmarshal(data, &sf); err != nil {
-		return nil, fmt.Errorf("sprint: parse %s: %w", path, err)
+		qpath := atomicfile.QuarantineCorrupt(path)
+		if qpath != "" {
+			fmt.Fprintf(os.Stderr, "warning: sprint plan at %s was corrupt (%v); quarantined to %s, starting fresh\n", path, err, qpath)
+		} else {
+			fmt.Fprintf(os.Stderr, "warning: sprint plan at %s was corrupt (%v) and could not be quarantined; ignoring\n", path, err)
+		}
+		return &SprintFile{}, nil
 	}
 	return &sf, nil
 }

@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 // Write atomically writes data to path with the given file mode.
@@ -81,4 +82,42 @@ func Write(path string, data []byte, mode os.FileMode) error {
 		_ = d.Close()
 	}
 	return nil
+}
+
+// QuarantineCorrupt renames path aside as path + ".corrupt-<unix>" so a Load
+// callsite can recover from an unparseable file by treating it as absent and
+// initialising a fresh store. The original bytes are preserved next to the
+// original location for forensic inspection (a user can diff or restore them).
+//
+// Use this from Load functions whose parsers (json.Unmarshal, yaml.Unmarshal,
+// etc.) reject the file's contents — typically because:
+//   - a previous binary version wrote a different schema,
+//   - a power loss landed before pkg/atomicfile (or in a non-atomic legacy
+//     write path) and left a zero-byte/truncated file,
+//   - a user manually edited the file and saved invalid syntax.
+//
+// Returns the new path on success and "" if the rename failed (e.g. read-only
+// filesystem). Callers should treat a "" return as a soft failure: log it and
+// fall back to the in-memory zero value WITHOUT removing the original — the
+// next process restart can retry the quarantine. Never returns an error so the
+// recovery path itself can't add new failure modes to a Load that's already
+// trying to dig out of corruption.
+func QuarantineCorrupt(path string) string {
+	qpath := fmt.Sprintf("%s.corrupt-%d", path, time.Now().Unix())
+	// If a same-second quarantine already exists (test harness, fast restart),
+	// disambiguate with a numeric suffix so we never silently clobber a prior
+	// backup.
+	if _, err := os.Stat(qpath); err == nil {
+		for i := 1; i < 1000; i++ {
+			alt := fmt.Sprintf("%s.%d", qpath, i)
+			if _, err := os.Stat(alt); os.IsNotExist(err) {
+				qpath = alt
+				break
+			}
+		}
+	}
+	if err := os.Rename(path, qpath); err != nil {
+		return ""
+	}
+	return qpath
 }

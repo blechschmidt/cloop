@@ -4,16 +4,20 @@
 package apiserver
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/pm"
@@ -71,6 +75,12 @@ type Server struct {
 	// Per-IP rate-limit buckets.
 	rlMu      sync.Mutex
 	rlBuckets map[string]*ipBucket
+
+	// Graceful shutdown plumbing. httpServer is set in Run after the
+	// http.Server is constructed so Shutdown can call its Shutdown method.
+	// shutdownMu serialises Shutdown vs Run-failure cleanup.
+	shutdownMu sync.Mutex
+	httpServer *http.Server
 }
 
 // New creates a new API server.
@@ -186,8 +196,21 @@ func (s *Server) rateLimitMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// Start begins listening on the configured port.
+// Start begins listening on the configured port. It installs SIGINT/SIGTERM
+// handlers so the daemon shuts down gracefully when supervised by systemd or
+// interrupted from a TTY: in-flight requests drain (bounded to 10s) before
+// Start returns nil. Production callers use this; tests should call Run with
+// their own context for fine-grained lifecycle control.
 func (s *Server) Start() error {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	return s.Run(ctx)
+}
+
+// Run is the lifecycle entrypoint without signal handling: it blocks until
+// ctx is cancelled or the underlying http.Server fails. On ctx cancellation
+// it triggers a bounded graceful shutdown (10s) and returns nil.
+func (s *Server) Run(ctx context.Context) error {
 	mux := http.NewServeMux()
 
 	// OpenAPI spec — no auth required so tooling can discover it.
@@ -226,7 +249,46 @@ func (s *Server) Start() error {
 		WriteTimeout:      httpWriteTimeout,
 		IdleTimeout:       httpIdleTimeout,
 	}
-	return httpSrv.ListenAndServe()
+
+	s.shutdownMu.Lock()
+	s.httpServer = httpSrv
+	s.shutdownMu.Unlock()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- httpSrv.ListenAndServe()
+	}()
+
+	select {
+	case <-ctx.Done():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := httpSrv.Shutdown(shutdownCtx); err != nil && !errors.Is(err, context.DeadlineExceeded) {
+			return fmt.Errorf("api server shutdown: %w", err)
+		}
+		<-errCh
+		return nil
+	case err := <-errCh:
+		if errors.Is(err, http.ErrServerClosed) {
+			return nil
+		}
+		return err
+	}
+}
+
+// Shutdown initiates a graceful shutdown of a server started via Run. Safe to
+// call from any goroutine; if the server has not started or has already been
+// shut down it is a no-op. ctx bounds how long Shutdown will wait for
+// in-flight requests to drain.
+func (s *Server) Shutdown(ctx context.Context) error {
+	s.shutdownMu.Lock()
+	srv := s.httpServer
+	s.httpServer = nil
+	s.shutdownMu.Unlock()
+	if srv == nil {
+		return nil
+	}
+	return srv.Shutdown(ctx)
 }
 
 // authMiddleware enforces Bearer-token authentication on all routes when

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -179,5 +180,71 @@ func TestSave_FileIsValidYAML(t *testing.T) {
 	var raw map[string]any
 	if err := yaml.Unmarshal(data, &raw); err != nil {
 		t.Fatalf("invalid YAML: %v\n%s", err, data)
+	}
+}
+
+// TestLoad_CorruptYAMLQuarantined ensures a malformed alerts.yaml no longer
+// silently kills the alert subsystem. Previously a single bad edit returned
+// `parse alerts.yaml: ...` and any caller (orchestrator post-task hook,
+// `cloop alert list`) would receive that error and ignore alerts entirely.
+// Now Load quarantines the bad file and returns an empty rule list, so the
+// next `cloop alert add` re-creates a valid file from scratch.
+func TestLoad_CorruptYAMLQuarantined(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".cloop"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	path := filepath.Join(dir, ".cloop", "alerts.yaml")
+	// YAML's structural rule violation: tab character at indentation, plus
+	// unbalanced bracket. yaml.Unmarshal rejects this with a parse error.
+	if err := os.WriteFile(path, []byte("rules:\n\t- name: [unbalanced"), 0o644); err != nil {
+		t.Fatalf("seed corrupt: %v", err)
+	}
+
+	rules, err := alert.Load(dir)
+	if err != nil {
+		t.Fatalf("Load on corrupt YAML should not return an error, got: %v", err)
+	}
+	if len(rules) != 0 {
+		t.Errorf("expected empty rule list on corrupt file, got %d rules", len(rules))
+	}
+
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("expected corrupt %s to be moved aside, stat err = %v", path, err)
+	}
+	entries, _ := os.ReadDir(filepath.Dir(path))
+	found := false
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".corrupt-") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected a .corrupt-* sibling preserving the bad bytes, dir contents: %v", entries)
+	}
+}
+
+// TestLoad_ZeroByteAlertsRecovers covers the post-crash zero-byte case for
+// alerts.yaml. yaml.Unmarshal of empty input is technically valid (yields a
+// zero rulesFile), so this test pins that the empty-rules case stays
+// graceful — the regression risk is a future change adding strict-mode
+// parsing that rejects empty input. Either way, no error must reach callers.
+func TestLoad_ZeroByteAlertsRecovers(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".cloop"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	path := filepath.Join(dir, ".cloop", "alerts.yaml")
+	if err := os.WriteFile(path, []byte{}, 0o644); err != nil {
+		t.Fatalf("seed empty: %v", err)
+	}
+
+	rules, err := alert.Load(dir)
+	if err != nil {
+		t.Fatalf("Load on empty file should not return an error, got: %v", err)
+	}
+	if len(rules) != 0 {
+		t.Errorf("expected empty rule list, got %d rules", len(rules))
 	}
 }

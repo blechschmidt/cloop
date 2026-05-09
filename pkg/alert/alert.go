@@ -85,6 +85,12 @@ type rulesFile struct {
 
 // Load reads alert rules from .cloop/alerts.yaml in workDir.
 // Returns an empty slice (not an error) when the file does not exist.
+//
+// On parse failure (zero-byte file, manual edit gone wrong, schema drift), the
+// corrupt file is quarantined aside as alerts.yaml.corrupt-<unix> and an
+// empty rule set is returned. Silently disabling alerts is the wrong choice —
+// the warning to stderr ensures the user notices — but it's better than
+// refusing to start the run because a single rules file is malformed.
 func Load(workDir string) ([]Rule, error) {
 	path := filepath.Join(workDir, alertsFile)
 	data, err := os.ReadFile(path)
@@ -96,7 +102,13 @@ func Load(workDir string) ([]Rule, error) {
 	}
 	var rf rulesFile
 	if err := yaml.Unmarshal(data, &rf); err != nil {
-		return nil, fmt.Errorf("alert: parse %s: %w", path, err)
+		qpath := atomicfile.QuarantineCorrupt(path)
+		if qpath != "" {
+			fmt.Fprintf(os.Stderr, "warning: alert rules at %s were corrupt (%v); quarantined to %s, starting with no rules\n", path, err, qpath)
+		} else {
+			fmt.Fprintf(os.Stderr, "warning: alert rules at %s were corrupt (%v) and could not be quarantined; ignoring\n", path, err)
+		}
+		return nil, nil
 	}
 	return rf.Rules, nil
 }
