@@ -3036,10 +3036,24 @@ func TestRunPMParallel_ClarificationQuestions_DontSilentlyPass(t *testing.T) {
 	}
 	// Both tasks must be marked TaskFailed — NOT silently TaskDone via the
 	// no-signal default arm. This is the contract the reroute exists to enforce.
+	// Each must also carry an audit annotation explaining WHY it failed —
+	// without it, logs show "task failed" with no diagnostic breadcrumb,
+	// which is the audit-trail accuracy class fixed for sequential in 0e8656c.
 	for _, task := range final.Plan.Tasks {
 		if task.Status != pm.TaskFailed {
 			t.Errorf("task %d (%s): expected TaskFailed (not silently TaskDone), got %s",
 				task.ID, task.Title, task.Status)
+		}
+		foundAnnotation := false
+		for _, ann := range task.Annotations {
+			if strings.Contains(ann.Text, "clarification questions") && strings.Contains(ann.Text, "parallel mode") {
+				foundAnnotation = true
+				break
+			}
+		}
+		if !foundAnnotation {
+			t.Errorf("task %d (%s): missing clarification-reroute audit annotation; got annotations=%v",
+				task.ID, task.Title, task.Annotations)
 		}
 	}
 }
@@ -3101,7 +3115,10 @@ func TestEvolve_ClarificationQuestions_DontSilentlyPass(t *testing.T) {
 
 	// All three tasks must be marked TaskFailed. If any is TaskDone, the
 	// no-signal default arm silently passed clarification-only output —
-	// the exact regression this test exists to catch.
+	// the exact regression this test exists to catch. Each must also carry
+	// an audit annotation explaining WHY it failed; without it, the failure
+	// is opaque in logs (audit-trail accuracy class fixed for sequential
+	// in 0e8656c).
 	for _, task := range o.state.Plan.Tasks {
 		if task.Status == pm.TaskDone {
 			t.Errorf("task %d (%s) was silently marked TaskDone despite clarification-only output — fail-open regression",
@@ -3110,6 +3127,17 @@ func TestEvolve_ClarificationQuestions_DontSilentlyPass(t *testing.T) {
 		if task.Status != pm.TaskFailed {
 			t.Errorf("task %d (%s): expected TaskFailed (clarification reroute), got %q",
 				task.ID, task.Title, task.Status)
+		}
+		foundAnnotation := false
+		for _, ann := range task.Annotations {
+			if strings.Contains(ann.Text, "clarification questions") && strings.Contains(ann.Text, "evolve mode") {
+				foundAnnotation = true
+				break
+			}
+		}
+		if !foundAnnotation {
+			t.Errorf("task %d (%s): missing clarification-reroute audit annotation; got annotations=%v",
+				task.ID, task.Title, task.Annotations)
 		}
 	}
 	if prov.calls != 3 {

@@ -3077,8 +3077,10 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 			// path has no auto-resolve loop, so a TaskInProgress with
 			// clarification questions would otherwise fall into the `default:`
 			// arm of the switch below and be silently marked DONE.
+			clarificationReroute := false
 			if signal == pm.TaskInProgress && looksLikeClarificationQuestion(result.Output) {
 				signal = pm.TaskFailed
+				clarificationReroute = true
 			}
 			completedAt := time.Now()
 			task.CompletedAt = &completedAt
@@ -3089,6 +3091,9 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 
 			taskDur := res.duration.Round(time.Second).String()
 			mu.Lock()
+			if clarificationReroute {
+				pm.AddAnnotation(task, "ai", "Task failed: LLM asked clarification questions instead of completing the work (parallel mode has no auto-resolve loop).")
+			}
 			switch signal {
 			case pm.TaskDone:
 				task.Status = pm.TaskDone
@@ -3775,6 +3780,7 @@ func (o *Orchestrator) evolve(ctx context.Context) error {
 				// marked DONE.
 				if signal == pm.TaskInProgress && looksLikeClarificationQuestion(result.Output) {
 					signal = pm.TaskFailed
+					pm.AddAnnotation(nextTask, "ai", "Task failed: LLM asked clarification questions instead of completing the work (evolve mode has no auto-resolve loop).")
 				}
 				switch signal {
 				case pm.TaskDone:
