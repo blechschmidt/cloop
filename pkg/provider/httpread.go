@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
 	"io"
@@ -55,4 +56,24 @@ func ReadResponseBodyTruncated(r io.Reader, maxBytes int64) (data []byte, trunca
 		return buf[:maxBytes], true, nil
 	}
 	return buf, false, nil
+}
+
+// MaxStreamLineBytes caps a single line in a streamed response (SSE event
+// or NDJSON record). bufio.Scanner's default ceiling is 64 KiB; legitimate
+// provider events can exceed that — Anthropic occasionally emits a single
+// thinking_delta of several hundred KiB, and OpenAI's reasoning summaries
+// can do the same. 4 MiB leaves comfortable headroom while still bounding
+// the damage from a misbehaving server that emits one huge line.
+const MaxStreamLineBytes = 4 << 20
+
+// NewStreamScanner returns a *bufio.Scanner configured to read SSE / NDJSON
+// streamed responses. It uses a 64 KiB initial buffer (cheap) and grows up
+// to MaxStreamLineBytes per line. A line that exceeds the cap surfaces as
+// bufio.ErrTooLong via Scanner.Err() — callers should wrap that error with
+// provider context so users can tell streaming-cap-exceeded apart from a
+// transport failure.
+func NewStreamScanner(r io.Reader) *bufio.Scanner {
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 64<<10), MaxStreamLineBytes)
+	return scanner
 }

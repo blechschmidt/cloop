@@ -5,12 +5,18 @@ package ratelimit
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"sync"
 	"time"
+
+	"github.com/blechschmidt/cloop/pkg/provider"
 )
+
+// maxUsageResponseBytes caps the OAuth usage API JSON envelope. The real
+// response is a few hundred bytes; 1 MiB leaves generous headroom while
+// preventing a misbehaving proxy from OOMing the daemon.
+const maxUsageResponseBytes int64 = 1 << 20
 
 // UsageWindow represents a single usage limit window (5-hour or 7-day).
 type UsageWindow struct {
@@ -99,7 +105,7 @@ func FetchClaudeUsage(token string) (*ClaudeUsage, error) {
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := provider.ReadResponseBody(resp.Body, maxUsageResponseBytes)
 	if err != nil {
 		return nil, fmt.Errorf("reading usage response: %w", err)
 	}

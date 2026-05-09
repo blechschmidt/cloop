@@ -13,7 +13,15 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/blechschmidt/cloop/pkg/provider"
 )
+
+// maxTranscriptionBytes caps the Groq transcription response body. Groq's
+// JSON envelope wraps the transcript text plus a few metadata fields; even
+// a multi-hour audio transcript fits in a few MB. 16 MiB is generous while
+// still bounding memory if the API ever streams something pathological.
+const maxTranscriptionBytes int64 = 16 << 20
 
 // Provider selects the STT backend.
 type Provider string
@@ -158,7 +166,10 @@ func transcribeGroq(audioPath string, cfg Config) (string, error) {
 	}
 	defer resp.Body.Close()
 
-	respBody, _ := io.ReadAll(resp.Body)
+	respBody, err := provider.ReadResponseBody(resp.Body, maxTranscriptionBytes)
+	if err != nil {
+		return "", fmt.Errorf("read groq response (status %d): %w", resp.StatusCode, err)
+	}
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("groq API error %d: %s", resp.StatusCode, string(respBody))
 	}

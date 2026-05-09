@@ -16,7 +16,18 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/blechschmidt/cloop/pkg/provider"
 )
+
+// maxArchiveBytes caps a release tarball download. Cloop's binary is single-
+// digit MB; 256 MiB is far above any realistic GoReleaser archive but
+// prevents a hijacked download URL from streaming an unbounded payload.
+const maxArchiveBytes int64 = 256 << 20
+
+// maxChecksumsBytes caps the checksums.txt download. Real checksums files
+// are a few hundred bytes; 1 MiB leaves room for any legitimate growth.
+const maxChecksumsBytes int64 = 1 << 20
 
 const (
 	githubAPIBase = "https://api.github.com"
@@ -112,8 +123,10 @@ func findAsset(assets []Asset, needle string) *Asset {
 	return nil
 }
 
-// downloadBytes fetches a URL and returns the full body.
-func downloadBytes(url string) ([]byte, error) {
+// downloadBytes fetches a URL and returns the full body, refusing bodies
+// larger than maxBytes so a hijacked or misconfigured download endpoint
+// cannot OOM the upgrader.
+func downloadBytes(url string, maxBytes int64) ([]byte, error) {
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
@@ -126,7 +139,7 @@ func downloadBytes(url string) ([]byte, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("download returned HTTP %d", resp.StatusCode)
 	}
-	return io.ReadAll(resp.Body)
+	return provider.ReadResponseBody(resp.Body, maxBytes)
 }
 
 // parseChecksums parses a GNU-style SHA-256 checksums file (e.g., from GoReleaser)
@@ -250,7 +263,7 @@ func Upgrade(current string, progress func(msg string)) (string, error) {
 
 	// Download the binary archive.
 	progress(fmt.Sprintf("Downloading %s (%d bytes)...", binaryAsset.Name, binaryAsset.Size))
-	archiveData, err := downloadBytes(binaryAsset.BrowserDownloadURL)
+	archiveData, err := downloadBytes(binaryAsset.BrowserDownloadURL, maxArchiveBytes)
 	if err != nil {
 		return "", fmt.Errorf("downloading archive: %w", err)
 	}
@@ -258,7 +271,7 @@ func Upgrade(current string, progress func(msg string)) (string, error) {
 	// Verify checksum if available.
 	if checksumAsset != nil {
 		progress("Verifying SHA-256 checksum...")
-		checksumData, err := downloadBytes(checksumAsset.BrowserDownloadURL)
+		checksumData, err := downloadBytes(checksumAsset.BrowserDownloadURL, maxChecksumsBytes)
 		if err != nil {
 			return "", fmt.Errorf("downloading checksums: %w", err)
 		}

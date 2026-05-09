@@ -13,7 +13,15 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/blechschmidt/cloop/pkg/provider"
 )
+
+// maxGitHubResponseBytes caps a GitHub API response body. The largest realistic
+// payload here is a 100-issue page with bodies, well under a few MB; 32 MiB
+// is generous while preventing runaway memory use if the response is
+// hijacked or malformed (e.g., an enterprise proxy returning HTML).
+const maxGitHubResponseBytes int64 = 32 << 20
 
 // Issue represents a GitHub issue.
 type Issue struct {
@@ -142,7 +150,7 @@ func (c *Client) do(method, path string, body interface{}) ([]byte, int, error) 
 	}
 	defer resp.Body.Close()
 
-	data, err := io.ReadAll(resp.Body)
+	data, err := provider.ReadResponseBody(resp.Body, maxGitHubResponseBytes)
 	return data, resp.StatusCode, err
 }
 

@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -271,7 +272,7 @@ func (p *Provider) completeStreaming(ctx context.Context, url string, data []byt
 	// Blocks are indexed; we detect type from content_block_start events.
 	currentBlockIsThinking := false
 
-	scanner := bufio.NewScanner(resp.Body)
+	scanner := provider.NewStreamScanner(resp.Body)
 	for scanner.Scan() {
 		line := scanner.Text()
 		if !strings.HasPrefix(line, "data: ") {
@@ -326,6 +327,9 @@ func (p *Provider) completeStreaming(ctx context.Context, url string, data []byt
 	}
 
 	if err := scanner.Err(); err != nil {
+		if errors.Is(err, bufio.ErrTooLong) {
+			return nil, fmt.Errorf("anthropic: stream event exceeded %d-byte cap: %w", provider.MaxStreamLineBytes, err)
+		}
 		return nil, fmt.Errorf("anthropic: reading stream: %w", err)
 	}
 

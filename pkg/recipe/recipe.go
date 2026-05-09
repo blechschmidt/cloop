@@ -8,7 +8,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -20,10 +19,17 @@ import (
 	"github.com/blechschmidt/cloop/pkg/env"
 	"github.com/blechschmidt/cloop/pkg/flow"
 	"github.com/blechschmidt/cloop/pkg/hooks"
+	"github.com/blechschmidt/cloop/pkg/provider"
 	"gopkg.in/yaml.v3"
 )
 
 const recipesDir = "recipes"
+
+// maxRecipeBytes caps a recipe YAML download. Recipes are config files —
+// the largest realistic recipe is in the tens of KB; 4 MiB is a generous
+// guard that prevents a malicious or misconfigured registry from streaming
+// gigabytes into memory.
+const maxRecipeBytes int64 = 4 << 20
 
 // Recipe is a named, shareable automation workflow that combines a flow
 // pipeline, a goal template, lifecycle hooks, and default environment
@@ -179,7 +185,7 @@ func fetchSource(source string) ([]byte, error) {
 		if resp.StatusCode != http.StatusOK {
 			return nil, fmt.Errorf("HTTP %d fetching %s", resp.StatusCode, source)
 		}
-		return io.ReadAll(resp.Body)
+		return provider.ReadResponseBody(resp.Body, maxRecipeBytes)
 	}
 	// Treat as a local file path.
 	return os.ReadFile(source)

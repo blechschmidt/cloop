@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -181,7 +182,7 @@ func (p *Provider) completeStreaming(ctx context.Context, url string, data []byt
 	var sb strings.Builder
 	var inputTokens, outputTokens int
 
-	scanner := bufio.NewScanner(resp.Body)
+	scanner := provider.NewStreamScanner(resp.Body)
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		if len(line) == 0 {
@@ -211,6 +212,9 @@ func (p *Provider) completeStreaming(ctx context.Context, url string, data []byt
 	}
 
 	if err := scanner.Err(); err != nil {
+		if errors.Is(err, bufio.ErrTooLong) {
+			return nil, fmt.Errorf("ollama: stream event exceeded %d-byte cap: %w", provider.MaxStreamLineBytes, err)
+		}
 		return nil, fmt.Errorf("ollama: reading stream: %w", err)
 	}
 

@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"bufio"
 	"bytes"
 	"errors"
 	"io"
@@ -146,4 +147,71 @@ func (neverEOF) Read(p []byte) (int, error) {
 	}
 	p[0] = 'x'
 	return 1, nil
+}
+
+func TestNewStreamScanner_AcceptsLargeLine(t *testing.T) {
+	t.Parallel()
+	// 256 KiB single line — bigger than bufio's default 64 KiB ceiling but
+	// well below MaxStreamLineBytes. Default scanner would fail with
+	// bufio.ErrTooLong; the bounded scanner must accept it.
+	want := bytes.Repeat([]byte{'a'}, 256<<10)
+	body := append(append([]byte("data: "), want...), '\n')
+
+	scanner := NewStreamScanner(bytes.NewReader(body))
+	if !scanner.Scan() {
+		t.Fatalf("expected one line, got err: %v", scanner.Err())
+	}
+	got := scanner.Bytes()
+	if len(got) != len(want)+len("data: ") {
+		t.Fatalf("got len %d, want %d", len(got), len(want)+len("data: "))
+	}
+	if scanner.Scan() {
+		t.Fatalf("expected EOF, got another line: %q", scanner.Text())
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatalf("unexpected scanner error: %v", err)
+	}
+}
+
+func TestNewStreamScanner_RejectsLineOverCap(t *testing.T) {
+	t.Parallel()
+	// One line that exceeds the cap by a healthy margin. The scanner must
+	// surface bufio.ErrTooLong so callers can wrap it with a friendly
+	// message — silently truncating an SSE line would corrupt the JSON
+	// payload and trigger a downstream parse error that's harder to diagnose.
+	overLimit := bytes.Repeat([]byte{'x'}, MaxStreamLineBytes+1024)
+	body := append(overLimit, '\n')
+
+	scanner := NewStreamScanner(bytes.NewReader(body))
+	if scanner.Scan() {
+		t.Fatalf("expected Scan() to fail on oversize line")
+	}
+	if err := scanner.Err(); !errors.Is(err, bufio.ErrTooLong) {
+		t.Fatalf("want bufio.ErrTooLong, got %v", err)
+	}
+}
+
+func TestNewStreamScanner_HandlesShortLines(t *testing.T) {
+	t.Parallel()
+	// Confirm small-line behavior is unchanged from a default scanner —
+	// the larger Buffer ceiling only kicks in when needed.
+	body := "data: chunk1\ndata: chunk2\n\ndata: [DONE]\n"
+	scanner := NewStreamScanner(strings.NewReader(body))
+
+	var lines []string
+	for scanner.Scan() {
+		lines = append(lines, scanner.Text())
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := []string{"data: chunk1", "data: chunk2", "", "data: [DONE]"}
+	if len(lines) != len(want) {
+		t.Fatalf("got %d lines, want %d: %#v", len(lines), len(want), lines)
+	}
+	for i, line := range lines {
+		if line != want[i] {
+			t.Fatalf("line %d: got %q, want %q", i, line, want[i])
+		}
+	}
 }

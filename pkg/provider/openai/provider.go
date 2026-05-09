@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -263,7 +264,7 @@ func (p *Provider) completeStreaming(ctx context.Context, url string, data []byt
 	var sb strings.Builder
 	var inputTokens, outputTokens, reasoningTokens int
 
-	scanner := bufio.NewScanner(resp.Body)
+	scanner := provider.NewStreamScanner(resp.Body)
 	for scanner.Scan() {
 		line := scanner.Text()
 		if !strings.HasPrefix(line, "data: ") {
@@ -302,6 +303,9 @@ func (p *Provider) completeStreaming(ctx context.Context, url string, data []byt
 	}
 
 	if err := scanner.Err(); err != nil {
+		if errors.Is(err, bufio.ErrTooLong) {
+			return nil, fmt.Errorf("openai: stream event exceeded %d-byte cap: %w", provider.MaxStreamLineBytes, err)
+		}
 		return nil, fmt.Errorf("openai: reading stream: %w", err)
 	}
 
