@@ -107,6 +107,8 @@ var runCmd = &cobra.Command{
 the project goal step by step until completion or max steps.
 
 Press Ctrl+C to pause gracefully.`,
+	SilenceUsage:  true,
+	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		workdir, _ := os.Getwd()
 

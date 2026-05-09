@@ -4,6 +4,11 @@
       "Edit",
       "Write",
       "MultiEdit"
+    ],
+    "deny": [
+      "Bash(systemctl*)",
+      "Bash(*systemctl restart*)",
+      "Bash(*systemctl stop*)"
     ]
   }
 }
