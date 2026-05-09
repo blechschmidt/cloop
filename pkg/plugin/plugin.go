@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -130,6 +131,8 @@ func describe(pluginPath string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), describeTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, pluginPath, "describe")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = killPgroup(cmd)
 	cmd.WaitDelay = 2 * time.Second
 	var buf bytes.Buffer
 	cmd.Stdout = &buf
@@ -141,6 +144,20 @@ func describe(pluginPath string) (string, error) {
 		return "", fmt.Errorf("plugin describe failed: %w", err)
 	}
 	return strings.TrimSpace(buf.String()), nil
+}
+
+// killPgroup returns a Cmd.Cancel that SIGKILLs the entire process group of
+// the running command. Required when the plugin script forks long-running
+// children: killing only the script leaves the children running with
+// inherited fds, stalling Wait until they exit on their own.
+func killPgroup(cmd *exec.Cmd) func() error {
+	return func() error {
+		if cmd.Process == nil {
+			return os.ErrProcessDone
+		}
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		return os.ErrProcessDone
+	}
 }
 
 // Run executes a plugin by name with the given arguments and optional extra
@@ -168,6 +185,8 @@ func RunCtx(ctx context.Context, workDir, name string, args []string, extraEnv [
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = killPgroup(cmd)
 	cmd.WaitDelay = 2 * time.Second
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("plugin %s: %w", name, err)

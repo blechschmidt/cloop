@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/plugin"
@@ -175,6 +176,20 @@ func runHook(cmd string, extra []string, hookName string, timeout time.Duration)
 	c.Env = append(os.Environ(), extra...)
 	c.Stdout = os.Stdout
 	c.Stderr = os.Stderr
+	// Run the hook in its own process group so that on timeout we can SIGKILL
+	// the entire tree (sh + any backgrounded children) rather than just the sh
+	// shell — orphaned grandchildren keep inherited fds open and stall
+	// cmd.Wait() until they exit on their own.
+	c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	c.Cancel = func() error {
+		if c.Process == nil {
+			return os.ErrProcessDone
+		}
+		// Negative pid → kill the whole process group.
+		_ = syscall.Kill(-c.Process.Pid, syscall.SIGKILL)
+		return os.ErrProcessDone
+	}
+	c.WaitDelay = 2 * time.Second
 
 	err := c.Run()
 	if err != nil {

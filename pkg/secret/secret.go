@@ -190,8 +190,41 @@ func (s *Store) Save() error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("secret: mkdir .cloop: %w", err)
 	}
-	if err := os.WriteFile(secretsPath(s.workDir), out, 0o600); err != nil {
-		return fmt.Errorf("secret: write %s: %w", secretsFile, err)
+	return writeAtomic(secretsPath(s.workDir), out, 0o600)
+}
+
+// writeAtomic writes data to path via a sibling .tmp file, fsyncs, then renames.
+// A crash, ENOSPC, or any concurrent reader during the write can no longer leave
+// the destination half-written — the encrypted blob's salt+ciphertext header
+// must remain intact together or the entire store becomes undecryptable.
+func writeAtomic(path string, data []byte, mode os.FileMode) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".secrets.enc.*.tmp")
+	if err != nil {
+		return fmt.Errorf("secret: create tmp: %w", err)
+	}
+	tmpPath := tmp.Name()
+	defer func() {
+		if _, statErr := os.Stat(tmpPath); statErr == nil {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("secret: write tmp: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("secret: sync tmp: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("secret: close tmp: %w", err)
+	}
+	if err := os.Chmod(tmpPath, mode); err != nil {
+		return fmt.Errorf("secret: chmod tmp: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("secret: rename tmp: %w", err)
 	}
 	return nil
 }

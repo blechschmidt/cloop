@@ -148,6 +148,81 @@ func TestSave_WritesAllProviders(t *testing.T) {
 	}
 }
 
+func TestSave_NoLeftoverTmpFiles(t *testing.T) {
+	// Atomic-write regression: every Save() goes through a sibling .tmp file
+	// that must be renamed away before the function returns. If we ever
+	// accumulate orphan .tmp files (e.g. someone reverts to os.WriteFile or
+	// the cleanup defer breaks), this test catches it.
+	dir := tempDir(t)
+	cfg := Default()
+	for i := 0; i < 5; i++ {
+		cfg.Anthropic.APIKey = "key-iteration"
+		if err := Save(dir, cfg); err != nil {
+			t.Fatalf("save iter %d: %v", i, err)
+		}
+	}
+	entries, err := os.ReadDir(filepath.Join(dir, ".cloop"))
+	if err != nil {
+		t.Fatalf("readdir: %v", err)
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if name == "config.yaml" {
+			continue
+		}
+		t.Errorf("unexpected leftover file in .cloop/: %q (atomic-write tmp not cleaned up)", name)
+	}
+}
+
+func TestSave_ConcurrentReaderNeverSeesEmptyFile(t *testing.T) {
+	// Atomic-write guarantee: a reader that opens config.yaml at any moment
+	// during a Save() must see either the previous full content or the new
+	// full content — never an empty or half-written file. With os.WriteFile
+	// (truncate-then-write) a concurrent reader could observe a 0-byte file.
+	// With rename-from-tmp the destination inode is swapped atomically.
+	dir := tempDir(t)
+	cfg := Default()
+	cfg.Anthropic.APIKey = "initial"
+	if err := Save(dir, cfg); err != nil {
+		t.Fatalf("initial save: %v", err)
+	}
+
+	stop := make(chan struct{})
+	emptyObserved := make(chan struct{}, 1)
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			data, err := os.ReadFile(ConfigPath(dir))
+			if err == nil && len(data) == 0 {
+				select {
+				case emptyObserved <- struct{}{}:
+				default:
+				}
+				return
+			}
+		}
+	}()
+
+	for i := 0; i < 200; i++ {
+		cfg.Anthropic.APIKey = "iter"
+		if err := Save(dir, cfg); err != nil {
+			close(stop)
+			t.Fatalf("save iter %d: %v", i, err)
+		}
+	}
+	close(stop)
+
+	select {
+	case <-emptyObserved:
+		t.Fatal("reader observed empty config.yaml during Save() — write is not atomic")
+	default:
+	}
+}
+
 // --- WriteDefault ---
 
 func TestWriteDefault_CreatesFileIfAbsent(t *testing.T) {

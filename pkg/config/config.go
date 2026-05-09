@@ -375,6 +375,11 @@ func (c *Config) applyEnvVars() {
 }
 
 // Save writes the config to .cloop/config.yaml.
+//
+// The write is atomic — data is staged in a sibling .tmp file, fsynced, then
+// renamed into place. A crash, ENOSPC, or `cloop config set` racing with a
+// reader can no longer leave the file half-written and lose the user's API
+// keys / provider settings.
 func Save(workdir string, cfg *Config) error {
 	dir := filepath.Join(workdir, ".cloop")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -385,7 +390,35 @@ func Save(workdir string, cfg *Config) error {
 		return err
 	}
 	// 0o600: owner read/write only — the file may contain API keys.
-	return os.WriteFile(ConfigPath(workdir), data, 0o600)
+	path := ConfigPath(workdir)
+	tmp, err := os.CreateTemp(dir, ".config.yaml.*.tmp")
+	if err != nil {
+		return fmt.Errorf("config: create tmp: %w", err)
+	}
+	tmpPath := tmp.Name()
+	defer func() {
+		if _, statErr := os.Stat(tmpPath); statErr == nil {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("config: write tmp: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("config: sync tmp: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("config: close tmp: %w", err)
+	}
+	if err := os.Chmod(tmpPath, 0o600); err != nil {
+		return fmt.Errorf("config: chmod tmp: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("config: rename tmp: %w", err)
+	}
+	return nil
 }
 
 // WriteDefault creates a default config.yaml if one doesn't exist.
