@@ -144,13 +144,33 @@ const liveLogMaxLines = 500
 
 // authFailEntry tracks failed authentication attempts for rate-limiting.
 type authFailEntry struct {
-	count     int
+	count       int
 	lockedUntil time.Time
+	// lastSeen is updated on every access (success or failure) so the
+	// authFails map can be bounded with LRU/TTL eviction; without this, a
+	// flood of unique source IPs against /api/* would grow the map forever.
+	lastSeen time.Time
 }
 
 const (
-	authMaxFailures    = 5               // failures before lockout
-	authLockoutSeconds = 60              // lockout duration in seconds
+	authMaxFailures    = 5  // failures before lockout
+	authLockoutSeconds = 60 // lockout duration in seconds
+
+	// uiRLMaxBuckets caps the per-IP rate-limit map so a flood of unique IPs
+	// cannot grow it without bound. When the map exceeds this size, stale
+	// buckets are swept (and if still over, the least-recently-seen bucket
+	// is evicted) on each new IP insert.
+	uiRLMaxBuckets = 10000
+	// uiRLBucketIdleTTL is how long a bucket is kept after the last request
+	// from that IP. Anything older is eligible for sweep.
+	uiRLBucketIdleTTL = 1 * time.Hour
+
+	// uiAuthFailsMaxEntries caps the auth-fail tracker map analogously.
+	uiAuthFailsMaxEntries = 10000
+	// uiAuthFailsIdleTTL applies the same staleness threshold to auth-fail
+	// entries; an entry whose lastSeen is older than this is eligible for
+	// sweep before the next insert.
+	uiAuthFailsIdleTTL = 1 * time.Hour
 )
 
 // uiIPBucket is a token-bucket state for one remote IP in the UI server.
@@ -261,6 +281,12 @@ func (s *Server) uiAllow(ip string) bool {
 
 	b, ok := s.rlBuckets[ip]
 	if !ok {
+		// New IP. If we're at the cap, sweep stale buckets first; if still
+		// at the cap, evict the least-recently-seen one. Both branches keep
+		// the map size bounded by uiRLMaxBuckets.
+		if len(s.rlBuckets) >= uiRLMaxBuckets {
+			s.evictRLBucketsLocked(now)
+		}
 		b = &uiIPBucket{tokens: float64(burst), lastSeen: now}
 		s.rlBuckets[ip] = b
 	}
@@ -277,6 +303,58 @@ func (s *Server) uiAllow(ip string) bool {
 	}
 	b.tokens--
 	return true
+}
+
+// evictRLBucketsLocked removes stale rate-limit buckets to keep the map
+// bounded. The caller must hold s.rlMu. It first sweeps anything older than
+// uiRLBucketIdleTTL; if the map is still at the cap, it evicts the single
+// least-recently-seen bucket so the caller can safely insert a new entry.
+func (s *Server) evictRLBucketsLocked(now time.Time) {
+	for ip, b := range s.rlBuckets {
+		if now.Sub(b.lastSeen) > uiRLBucketIdleTTL {
+			delete(s.rlBuckets, ip)
+		}
+	}
+	if len(s.rlBuckets) < uiRLMaxBuckets {
+		return
+	}
+	var oldestIP string
+	var oldestSeen time.Time
+	for ip, b := range s.rlBuckets {
+		if oldestIP == "" || b.lastSeen.Before(oldestSeen) {
+			oldestIP = ip
+			oldestSeen = b.lastSeen
+		}
+	}
+	if oldestIP != "" {
+		delete(s.rlBuckets, oldestIP)
+	}
+}
+
+// evictAuthFailsLocked removes stale auth-fail entries to keep the map
+// bounded. The caller must hold s.authMu. Same eviction policy as
+// evictRLBucketsLocked: TTL sweep first, then a single oldest-entry evict
+// if the map is still at the cap.
+func (s *Server) evictAuthFailsLocked(now time.Time) {
+	for ip, e := range s.authFails {
+		if now.Sub(e.lastSeen) > uiAuthFailsIdleTTL {
+			delete(s.authFails, ip)
+		}
+	}
+	if len(s.authFails) < uiAuthFailsMaxEntries {
+		return
+	}
+	var oldestIP string
+	var oldestSeen time.Time
+	for ip, e := range s.authFails {
+		if oldestIP == "" || e.lastSeen.Before(oldestSeen) {
+			oldestIP = ip
+			oldestSeen = e.lastSeen
+		}
+	}
+	if oldestIP != "" {
+		delete(s.authFails, oldestIP)
+	}
 }
 
 // uiRateLimitMiddleware wraps next with per-IP token-bucket rate limiting.
@@ -508,13 +586,18 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 
 		// Check rate limit before evaluating the token.
 		if s.Token != "" {
+			now := time.Now()
 			s.authMu.Lock()
 			entry, ok := s.authFails[ip]
 			if !ok {
+				if len(s.authFails) >= uiAuthFailsMaxEntries {
+					s.evictAuthFailsLocked(now)
+				}
 				entry = &authFailEntry{}
 				s.authFails[ip] = entry
 			}
-			if entry.count >= authMaxFailures && time.Now().Before(entry.lockedUntil) {
+			entry.lastSeen = now
+			if entry.count >= authMaxFailures && now.Before(entry.lockedUntil) {
 				s.authMu.Unlock()
 				w.Header().Set("Content-Type", "application/json")
 				w.Header().Set("Retry-After", strconv.Itoa(authLockoutSeconds))
@@ -523,7 +606,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 				return
 			}
 			// Reset counter if lockout has expired.
-			if entry.count >= authMaxFailures && time.Now().After(entry.lockedUntil) {
+			if entry.count >= authMaxFailures && now.After(entry.lockedUntil) {
 				entry.count = 0
 			}
 			s.authMu.Unlock()

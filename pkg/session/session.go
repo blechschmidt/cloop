@@ -7,12 +7,13 @@ package session
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/blechschmidt/cloop/pkg/atomicfile"
 )
 
 const (
@@ -158,7 +159,7 @@ func Switch(workDir, name string) error {
 		}
 		return nil
 	}
-	return writeAtomic(dir, path, ".active_session.*.tmp", []byte(name+"\n"), 0o644)
+	return atomicfile.Write(path, []byte(name+"\n"), 0o644)
 }
 
 // Remove deletes a session. Returns an error if the session is currently active.
@@ -208,80 +209,21 @@ func writeMeta(dir string, sess *Session) error {
 	if err != nil {
 		return err
 	}
-	return writeAtomic(dir, filepath.Join(dir, sessionMetaFile), ".session.json.*.tmp", data, 0o644)
+	return atomicfile.Write(filepath.Join(dir, sessionMetaFile), data, 0o644)
 }
 
-// writeAtomic stages data in a sibling .tmp file under dir, fsyncs it, chmods,
-// then renames into path. POSIX rename is atomic for readers, so any concurrent
-// reader sees either the previous valid file or the new one — never a torn one.
-func writeAtomic(dir, path, tmpPattern string, data []byte, mode os.FileMode) error {
-	tmp, err := os.CreateTemp(dir, tmpPattern)
-	if err != nil {
-		return fmt.Errorf("session: create tmp: %w", err)
-	}
-	tmpPath := tmp.Name()
-	defer func() {
-		if _, statErr := os.Stat(tmpPath); statErr == nil {
-			_ = os.Remove(tmpPath)
-		}
-	}()
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("session: write tmp: %w", err)
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("session: sync tmp: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("session: close tmp: %w", err)
-	}
-	if err := os.Chmod(tmpPath, mode); err != nil {
-		return fmt.Errorf("session: chmod tmp: %w", err)
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		return fmt.Errorf("session: rename tmp: %w", err)
-	}
-	return nil
-}
-
-// atomicCopyFile streams src into a sibling .tmp under dst's directory then
-// atomically renames it into dst. Used by New() when seeding a session's
-// state.db from an existing project — a torn write would leave a half-copied
-// SQLite file that opens to garbage.
+// atomicCopyFile copies src to dst atomically. Used by New() when seeding a
+// session's state.db from an existing project — a torn write would leave a
+// half-copied SQLite file that opens to garbage. Reads src into memory then
+// delegates to atomicfile.Write for the durability guarantees (tmp + fsync +
+// rename + parent-dir fsync). State.db files are small (~MB), so the in-memory
+// buffer is fine.
 func atomicCopyFile(src, dst string, mode os.FileMode) error {
-	in, err := os.Open(src)
+	data, err := os.ReadFile(src)
 	if err != nil {
 		return err
 	}
-	defer in.Close()
-
-	dir := filepath.Dir(dst)
-	tmp, err := os.CreateTemp(dir, ".state.db.*.tmp")
-	if err != nil {
-		return err
-	}
-	tmpPath := tmp.Name()
-	defer func() {
-		if _, statErr := os.Stat(tmpPath); statErr == nil {
-			_ = os.Remove(tmpPath)
-		}
-	}()
-	if _, err := io.Copy(tmp, in); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Chmod(tmpPath, mode); err != nil {
-		return err
-	}
-	return os.Rename(tmpPath, dst)
+	return atomicfile.Write(dst, data, mode)
 }
 
 func validateName(name string) error {

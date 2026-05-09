@@ -8,6 +8,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/blechschmidt/cloop/pkg/atomicfile"
 )
 
 const (
@@ -88,7 +90,7 @@ func (s *State) Save(workdir string) error {
 	if err != nil {
 		return err
 	}
-	return writeAtomic(dir, StatePath(workdir), ".agent.json.*.tmp", data, 0o644)
+	return atomicfile.Write(StatePath(workdir), data, 0o644)
 }
 
 // WritePID writes the daemon PID to .cloop/agent.pid atomically. A partial
@@ -101,7 +103,7 @@ func WritePID(workdir string, pid int) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	return writeAtomic(dir, PIDPath(workdir), ".agent.pid.*.tmp", []byte(fmt.Sprintf("%d", pid)), 0o644)
+	return atomicfile.Write(PIDPath(workdir), []byte(fmt.Sprintf("%d", pid)), 0o644)
 }
 
 // ReadPID reads the daemon PID from .cloop/agent.pid; returns 0 if not found.
@@ -155,36 +157,3 @@ func RemovePID(workdir string) {
 	os.Remove(PIDPath(workdir))
 }
 
-// writeAtomic stages data in a sibling .tmp file in dir, fsyncs, chmods, then
-// renames into path. The rename is atomic on POSIX, so concurrent readers see
-// either the old file or the new — never a truncated one.
-func writeAtomic(dir, path, tmpPattern string, data []byte, mode os.FileMode) error {
-	tmp, err := os.CreateTemp(dir, tmpPattern)
-	if err != nil {
-		return fmt.Errorf("agent: create tmp: %w", err)
-	}
-	tmpPath := tmp.Name()
-	defer func() {
-		if _, statErr := os.Stat(tmpPath); statErr == nil {
-			_ = os.Remove(tmpPath)
-		}
-	}()
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("agent: write tmp: %w", err)
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("agent: sync tmp: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("agent: close tmp: %w", err)
-	}
-	if err := os.Chmod(tmpPath, mode); err != nil {
-		return fmt.Errorf("agent: chmod tmp: %w", err)
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		return fmt.Errorf("agent: rename tmp: %w", err)
-	}
-	return nil
-}
