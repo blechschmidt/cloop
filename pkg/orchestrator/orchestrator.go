@@ -1980,6 +1980,21 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 							})
 						}
 						consecutiveErrors++
+						s.Save()
+						// Mirror the verify-failure path above (line ~1923) and the
+						// task-failed path below (line ~2117): script-verify failures
+						// must also trip MaxFailures, otherwise consecutive flaky or
+						// genuinely-broken script-verify runs would burn budget without
+						// the loop ever aborting.
+						if consecutiveErrors >= maxConsecutiveErrors {
+							s.Status = "failed"
+							s.Save()
+							o.webhook.Send(webhook.EventSessionFailed, webhook.Payload{
+								Goal:    s.Goal,
+								Session: &webhook.SessionInfo{InputTokens: s.TotalInputTokens, OutputTokens: s.TotalOutputTokens},
+							})
+							return fmt.Errorf("%d consecutive task failures", consecutiveErrors)
+						}
 					} else {
 						pmColor.Printf("✓ Shell verification PASSED for task %d: %s\n\n", task.ID, task.Title)
 					}

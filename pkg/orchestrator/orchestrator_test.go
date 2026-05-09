@@ -878,6 +878,69 @@ func TestRunPM_MaxFailures_TripsOnProviderErrors(t *testing.T) {
 	}
 }
 
+// TestRunPM_MaxFailures_TripsOnScriptVerifyFailures locks in symmetry between
+// the verify-failure path (line ~1923) and the script-verify-failure path
+// (line ~1982). Before this fix, consecutive script-verify failures incremented
+// consecutiveErrors but never checked against maxConsecutiveErrors — so a
+// flaky or systematically-broken script-verify would burn through every
+// remaining task without the orchestrator ever aborting.
+func TestRunPM_MaxFailures_TripsOnScriptVerifyFailures(t *testing.T) {
+	dir := tempDir(t)
+	s := initState(t, dir, "goal", 0)
+	s.PMMode = true
+	s.Plan = &pm.Plan{
+		Goal: "goal",
+		Tasks: []*pm.Task{
+			{ID: 1, Title: "Task A", Priority: 1, Status: pm.TaskPending},
+			{ID: 2, Title: "Task B", Priority: 2, Status: pm.TaskPending},
+			{ID: 3, Title: "Task C", Priority: 3, Status: pm.TaskPending},
+			{ID: 4, Title: "Task D", Priority: 4, Status: pm.TaskPending},
+		},
+	}
+	s.Save()
+
+	// Each task requires two provider calls under ScriptVerify=true:
+	//   1. task execution → "TASK_DONE" signal
+	//   2. script generation → a bash script that always exits non-zero
+	// With MaxFailures=2 the loop must abort after the second consecutive
+	// script-verify failure (after 4 provider calls = 2 tasks × 2 calls each)
+	// rather than burning through tasks 3 and 4.
+	failingScript := "```bash\nexit 1\n```"
+	prov := &mockProvider{
+		name: "mock",
+		results: []*provider.Result{
+			{Output: "done\nTASK_DONE", Provider: "mock"}, // task 1 exec
+			{Output: failingScript, Provider: "mock"},     // task 1 script-gen
+			{Output: "done\nTASK_DONE", Provider: "mock"}, // task 2 exec
+			{Output: failingScript, Provider: "mock"},     // task 2 script-gen
+			{Output: "done\nTASK_DONE", Provider: "mock"}, // task 3 exec (should NOT happen)
+			{Output: failingScript, Provider: "mock"},     // task 3 script-gen (should NOT happen)
+		},
+	}
+	o := newOrchestrator(t, dir, Config{
+		WorkDir:      dir,
+		PMMode:       true,
+		MaxFailures:  2,
+		ScriptVerify: true,
+		NoHeal:       true,
+	}, prov)
+	err := o.runPM(context.Background())
+	if err == nil {
+		t.Fatal("expected error after MaxFailures consecutive script-verify failures, got nil")
+	}
+	if !strings.Contains(err.Error(), "consecutive") {
+		t.Errorf("expected error to mention consecutive failures, got: %v", err)
+	}
+	if o.state.Status != "failed" {
+		t.Errorf("expected status=failed, got %q", o.state.Status)
+	}
+	// Exactly 4 calls = 2 tasks × (1 exec + 1 script-gen). Task 3's exec must
+	// not have been issued, otherwise the MaxFailures check is missing.
+	if prov.calls != 4 {
+		t.Errorf("expected exactly 4 provider calls before abort (2 tasks × 2 calls, MaxFailures=2), got %d", prov.calls)
+	}
+}
+
 // --- ContextSteps ---
 
 func TestBuildPrompt_ContextSteps_Three(t *testing.T) {
