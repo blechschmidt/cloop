@@ -377,39 +377,27 @@ var daemonFollowCmd = &cobra.Command{
 			}
 		}
 
+		ctx, cancel := context.WithCancel(cmd.Context())
+		defer cancel()
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 		defer signal.Stop(sigCh)
-
-		f, err := os.Open(logPath)
-		if err != nil {
-			return fmt.Errorf("opening log: %w", err)
-		}
-		defer f.Close()
-
-		f.Seek(0, 2) // seek to end
-		reader := bufio.NewReader(f)
-
-		ticker := time.NewTicker(500 * time.Millisecond)
-		defer ticker.Stop()
-
-		for {
+		go func() {
 			select {
 			case <-sigCh:
-				fmt.Println()
-				return nil
-			case <-ticker.C:
-				for {
-					line, err := reader.ReadString('\n')
-					if len(line) > 0 {
-						fmt.Print(line)
-					}
-					if err != nil {
-						break
-					}
-				}
+				cancel()
+			case <-ctx.Done():
 			}
+		}()
+
+		// Stream new content via logtail.Follow, which tolerates the log
+		// being missing at start, replaced (rotation), or truncated, and
+		// applies capped exponential backoff with jitter while waiting.
+		if err := logtail.Follow(ctx, logPath, os.Stdout); err != nil {
+			return fmt.Errorf("follow log: %w", err)
 		}
+		fmt.Println()
+		return nil
 	},
 }
 
