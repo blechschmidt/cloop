@@ -110,16 +110,22 @@ func (p *Provider) Complete(ctx context.Context, prompt string, opts provider.Op
 }
 
 // isFatalCLIError returns true when the claude CLI's combined stdout/stderr
-// output indicates an authentication failure or a clear API-side error that
-// will not resolve by retrying with the same credentials. Conservative: only
-// matches phrases the CLI emits for these exact failure modes, plus the
-// distinct shape of an HTML error page (a misconfigured upstream/proxy
-// returning a 4xx page instead of JSON — observed alongside the 401 burst
-// that motivated the original fix).
+// output is a recognised API-side failure (auth, rate-limit, or server-side
+// error) and must therefore be surfaced as a Go error rather than swallowed as
+// step output. Conservative: only matches phrases the CLI emits for these
+// failure modes, plus the distinct shape of an HTML error page (a
+// misconfigured upstream/proxy returning a 4xx page instead of JSON — observed
+// alongside the 401 burst that motivated the original fix).
 //
-// Why no 5xx markers: 5xx responses are transient and worth retrying. They are
-// surfaced through the per-provider retry helper at the request layer, not
-// here.
+// Why 5xx/429 are also surfaced (not just 4xx auth): claudecode runs the CLI
+// as a subprocess and has no internal retry layer. If we swallow a 5xx as
+// "successful" output, the orchestrator's consecutiveErrors counter never
+// increments and a sustained upstream outage (observed: 10+ "API Error: 502
+// Bad Gateway" entries across one autonomous session) burns budget
+// indefinitely. Returning an error lets the orchestrator's MaxFailures gate
+// distinguish transient (1 failure → counter resets on next success) from
+// persistent (≥MaxFailures → abort). A single 502 therefore costs one step;
+// a 502 storm costs at most MaxFailures steps before the loop stops.
 func isFatalCLIError(output string) bool {
 	lower := strings.ToLower(output)
 	switch {
@@ -133,11 +139,35 @@ func isFatalCLIError(output string) bool {
 		return true
 	case strings.Contains(lower, "api error: 403"):
 		return true
+	case strings.Contains(lower, "api error: 429"):
+		return true
+	case hasAPIError5xx(lower):
+		return true
 	case isLikelyHTMLErrorPage(lower):
 		return true
 	}
 	return false
 }
+
+// hasAPIError5xx reports whether the (already lower-cased) output contains the
+// CLI's "API Error: 5xx ..." marker for any 5xx status. We intentionally avoid
+// matching bare "5xx" tokens elsewhere in the output to keep false positives
+// out of normal model responses that happen to mention a status code.
+func hasAPIError5xx(lowerOutput string) bool {
+	const prefix = "api error: 5"
+	idx := strings.Index(lowerOutput, prefix)
+	if idx < 0 {
+		return false
+	}
+	rest := lowerOutput[idx+len(prefix):]
+	if len(rest) < 2 {
+		return false
+	}
+	// Require two more digits so "api error: 5 servers tried" can't trip.
+	return isASCIIDigit(rest[0]) && isASCIIDigit(rest[1])
+}
+
+func isASCIIDigit(b byte) bool { return b >= '0' && b <= '9' }
 
 // isLikelyHTMLErrorPage detects output that is an HTML error page rather than
 // a model response. Signals: a doctype, or the combination of an opening and

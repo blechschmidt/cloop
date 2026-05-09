@@ -246,8 +246,17 @@ func TestIsFatalCLIError(t *testing.T) {
 		{"case-insensitive failed auth", "FAILED TO AUTHENTICATE: see logs", true},
 		{"bare API Error 401", "API Error: 401 Unauthorized", true},
 		{"bare API Error 403", "API Error: 403 Forbidden", true},
-		{"transient 5xx not fatal", "API Error: 502 Bad Gateway", false},
-		{"transient 429 not fatal", "API Error: 429 Too Many Requests", false},
+		// 5xx/429 are surfaced as errors so the orchestrator's MaxFailures
+		// counter can stop a sustained upstream outage (a single transient
+		// failure won't trip; consecutive ones will).
+		{"5xx 500 surfaced", "API Error: 500 Internal Server Error", true},
+		{"5xx 502 surfaced", "API Error: 502 Bad Gateway", true},
+		{"5xx 503 surfaced", "API Error: 503 Service Unavailable", true},
+		{"5xx 504 surfaced", "API Error: 504 Gateway Timeout", true},
+		{"5xx 529 surfaced", "API Error: 529 Overloaded", true},
+		{"429 rate-limit surfaced", "API Error: 429 Too Many Requests", true},
+		{"bare digit 5 not 5xx", "API Error: 5 retries exceeded", false},
+		{"unrelated 5xx-ish text", "function returned 502 results", false},
 		{"HTML error page with doctype", "<!DOCTYPE html><html><body>401 Unauthorized</body></html>", true},
 		{"HTML error page no doctype", "<html><head><title>Error</title></head><body>nope</body></html>", true},
 		{"plain text mentioning html tag", "the function emits an <html> snippet but is not an error", false},
