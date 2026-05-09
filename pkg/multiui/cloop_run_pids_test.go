@@ -1,16 +1,37 @@
 package multiui
 
 import (
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"sort"
 	"strconv"
 	"syscall"
 	"testing"
 	"time"
 )
+
+// fakeCloopEnv is a sentinel: when set, TestMain pretends to be a "cloop"
+// binary that sleeps until killed instead of running the test suite. Lets
+// the live-/proc test re-exec the test binary as a fake cloop without
+// shelling out to system tools that don't accept arbitrary argv.
+const fakeCloopEnv = "CLOOP_MULTIUI_FAKE_CLOOP"
+
+// TestMain enables the fake-cloop subprocess shim. When the env var is set
+// the binary blocks on stdin (or sleeps for 60s, whichever comes first) so
+// the parent can inspect its /proc entry. When unset it runs the normal
+// test suite.
+func TestMain(m *testing.M) {
+	if os.Getenv(fakeCloopEnv) != "" {
+		// Sleep up to 60s so parent can inspect /proc; parent always
+		// kills us via Process.Kill in cleanup, so 60s is just a safety
+		// upper bound to avoid leaking processes if a test panics.
+		time.Sleep(60 * time.Second)
+		os.Exit(0)
+	}
+	os.Exit(m.Run())
+}
 
 // TestCloopRunMatch covers the pure decision predicate that decides whether
 // a /proc entry represents a "cloop run" process whose cwd matches a given
@@ -178,14 +199,16 @@ func TestCloopRunPIDsInDir_LiveProc(t *testing.T) {
 	if _, err := os.Stat("/proc/self/cwd"); err != nil {
 		t.Skipf("/proc not accessible: %v", err)
 	}
-	sleepBin, err := exec.LookPath("sleep")
-	if err != nil {
-		t.Skipf("sleep binary not found: %v", err)
-	}
 
-	// Build a symlink named "cloop" pointing at /usr/bin/sleep so the
-	// /proc/PID/exe basename check accepts the child. We then invoke it
-	// via that symlink, which also makes argv[0] read "cloop".
+	// Copy the test binary itself into a file named "cloop" so
+	// /proc/PID/exe shows .../bin/cloop. We re-exec with fakeCloopEnv set
+	// so TestMain knows to act as the sleep shim instead of running the
+	// suite. A symlink would not work — the kernel resolves symlinks in
+	// /proc/PID/exe back to the real binary, defeating the basename check.
+	selfBin, err := os.Executable()
+	if err != nil {
+		t.Skipf("os.Executable: %v", err)
+	}
 	tmp := t.TempDir()
 	cwdDir := filepath.Join(tmp, "project")
 	otherDir := filepath.Join(tmp, "other")
@@ -196,13 +219,14 @@ func TestCloopRunPIDsInDir_LiveProc(t *testing.T) {
 		}
 	}
 	fakeCloop := filepath.Join(binDir, "cloop")
-	if err := os.Symlink(sleepBin, fakeCloop); err != nil {
-		t.Fatalf("symlink: %v", err)
+	if err := copyExecutable(selfBin, fakeCloop); err != nil {
+		t.Skipf("cannot stage fake cloop binary (skipping live-proc test): %v", err)
 	}
 
-	// Spawn ./cloop run 30 — argv contains "run" and the cwd is cwdDir.
-	cmd := exec.Command(fakeCloop, "run", "30")
+	// Spawn ./cloop run — argv contains "run" and the cwd is cwdDir.
+	cmd := exec.Command(fakeCloop, "run")
 	cmd.Dir = cwdDir
+	cmd.Env = append(os.Environ(), fakeCloopEnv+"=1")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start fake cloop: %v", err)
@@ -248,10 +272,6 @@ func TestCloopRunPIDsInDir_LiveProc(t *testing.T) {
 }
 
 func containsPID(list []int, pid int) bool {
-	i := sort.SearchInts(append([]int(nil), sortedCopy(list)...), pid)
-	if i < len(list) && sortedCopy(list)[i] == pid {
-		return true
-	}
 	for _, p := range list {
 		if p == pid {
 			return true
@@ -260,8 +280,23 @@ func containsPID(list []int, pid int) bool {
 	return false
 }
 
-func sortedCopy(in []int) []int {
-	out := append([]int(nil), in...)
-	sort.Ints(out)
-	return out
+// copyExecutable performs a byte-for-byte copy of src to dst and chmods dst
+// to 0o755 so the test child can exec it. Used in lieu of a symlink because
+// /proc/PID/exe resolves symlinks back to the real binary, which would
+// defeat the basename check the matcher relies on.
+func copyExecutable(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o755)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		return err
+	}
+	return out.Close()
 }
