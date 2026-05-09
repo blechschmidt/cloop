@@ -271,6 +271,64 @@ func TestIsFatalCLIError(t *testing.T) {
 	}
 }
 
+func TestComplete_ContextTimeoutSurfacedAsError(t *testing.T) {
+	// When the per-call context times out, the subprocess is killed by
+	// exec.CommandContext and cmd.Run returns a *exec.ExitError that looks
+	// indistinguishable from a benign non-zero exit. Without an explicit
+	// ctx.Err() check, the provider would swallow the cancellation and return
+	// the partial output as "successful" — letting a recurring timeout re-fire
+	// indefinitely without tripping the orchestrator's MaxFailures gate.
+	binDir := fakeClaudeScript(t,
+		"#!/bin/sh\n"+
+			"echo 'partial output before sleep'\n"+
+			"sleep 1\n",
+	)
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+
+	p := New()
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	result, err := p.Complete(ctx, "test", provider.Options{})
+	if err == nil {
+		t.Fatalf("expected error on context timeout, got result=%+v", result)
+	}
+	if !strings.Contains(err.Error(), "cancelled") && !strings.Contains(err.Error(), "deadline") {
+		t.Errorf("expected context cancellation in error, got: %v", err)
+	}
+	if result != nil {
+		t.Errorf("expected nil result on context cancellation, got %+v", result)
+	}
+}
+
+func TestComplete_ParentContextCancelSurfacedAsError(t *testing.T) {
+	// Same defense as the timeout case but for explicit parent cancellation:
+	// if the caller cancels mid-call, propagate the cancellation as an error
+	// rather than returning whatever partial output was captured.
+	binDir := fakeClaudeScript(t,
+		"#!/bin/sh\n"+
+			"echo 'partial'\n"+
+			"sleep 1\n",
+	)
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+
+	p := New()
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(150 * time.Millisecond)
+		cancel()
+	}()
+	defer cancel()
+
+	result, err := p.Complete(ctx, "test", provider.Options{})
+	if err == nil {
+		t.Fatalf("expected error on parent cancel, got result=%+v", result)
+	}
+	if result != nil {
+		t.Errorf("expected nil result on parent cancel, got %+v", result)
+	}
+}
+
 func TestComplete_OutputTrimmed(t *testing.T) {
 	// Provider trims whitespace from output.
 	binDir := fakeClaudeScript(t, "#!/bin/sh\nprintf '  trimmed output  '\n")

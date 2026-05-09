@@ -87,6 +87,16 @@ func (p *Provider) Complete(ctx context.Context, prompt string, opts provider.Op
 	}
 	output = strings.TrimSpace(output)
 
+	// Surface context cancellation/timeout as a real error rather than silently
+	// returning the partial output. Without this, exec.CommandContext kills the
+	// subprocess on timeout, cmd.Run returns a benign-looking *exec.ExitError,
+	// and the orchestrator records the truncated output as a "successful" step.
+	// A recurring timeout would then re-fire indefinitely without ever tripping
+	// the MaxFailures gate (same failure shape as the auth-loop incident).
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, fmt.Errorf("claude CLI cancelled: %w", ctxErr)
+	}
+
 	if err != nil {
 		exitErr, ok := err.(*exec.ExitError)
 		if !ok {
