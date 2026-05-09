@@ -56,16 +56,59 @@ func Load(workDir string) ([]QA, error) {
 }
 
 // save writes Q&A pairs to .cloop/clarification.json.
+//
+// The write is atomic: data is staged in a sibling .tmp file, fsynced, chmod'd,
+// then renamed into place. Without this, a crash mid-write — or ENOSPC during
+// `cloop init` — would leave clarification.json corrupted, and the next run
+// that calls Load() would error out on json.Unmarshal, breaking the
+// "remember-my-answers" UX for non-interactive sessions.
 func save(workDir string, qas []QA) error {
 	path := ClarificationPath(workDir)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
 	data, err := json.MarshalIndent(qas, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0o644)
+	return writeAtomic(dir, path, data, 0o644)
+}
+
+// writeAtomic stages data in a sibling .tmp file in dir, fsyncs, chmods, then
+// renames into path. POSIX rename is atomic with respect to readers, so
+// concurrent readers always observe either the previous valid file or the new
+// one — never a truncated one. The cleanup defer removes any leftover tmp
+// file on error, so a failed write leaves the original at path intact.
+func writeAtomic(dir, path string, data []byte, mode os.FileMode) error {
+	tmp, err := os.CreateTemp(dir, ".clarification.*.tmp")
+	if err != nil {
+		return fmt.Errorf("clarify: create tmp: %w", err)
+	}
+	tmpPath := tmp.Name()
+	defer func() {
+		if _, statErr := os.Stat(tmpPath); statErr == nil {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("clarify: write tmp: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("clarify: sync tmp: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("clarify: close tmp: %w", err)
+	}
+	if err := os.Chmod(tmpPath, mode); err != nil {
+		return fmt.Errorf("clarify: chmod tmp: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("clarify: rename tmp: %w", err)
+	}
+	return nil
 }
 
 // QuestionsPrompt builds the prompt asking the AI to generate clarifying questions.

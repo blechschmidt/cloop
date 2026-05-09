@@ -213,6 +213,12 @@ func Run(ctx context.Context, prov provider.Provider, model string, workDir stri
 }
 
 // WriteTraceJSON persists the trace map to .cloop/trace.json.
+//
+// The write is atomic: data is staged in a sibling .tmp file, fsynced, chmod'd,
+// then renamed into place. Without this, a crash mid-write or ENOSPC would
+// leave trace.json corrupted, which would silently break `cloop status` (which
+// calls LastLinkedCommit on every invocation) and any tooling that loads the
+// commit→task mapping.
 func WriteTraceJSON(workDir string, tm *TraceMap) error {
 	dir := filepath.Join(workDir, ".cloop")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -222,7 +228,43 @@ func WriteTraceJSON(workDir string, tm *TraceMap) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(dir, "trace.json"), data, 0o644)
+	return writeAtomic(dir, filepath.Join(dir, "trace.json"), data, 0o644)
+}
+
+// writeAtomic stages data in a sibling .tmp file in dir, fsyncs, chmods, then
+// renames into path. POSIX rename is atomic with respect to readers, so
+// concurrent readers always observe either the previous valid file or the new
+// one — never a truncated one. The cleanup defer removes any leftover tmp
+// file on error, so a failed write leaves the original at path intact.
+func writeAtomic(dir, path string, data []byte, mode os.FileMode) error {
+	tmp, err := os.CreateTemp(dir, ".trace.json.*.tmp")
+	if err != nil {
+		return fmt.Errorf("trace: create tmp: %w", err)
+	}
+	tmpPath := tmp.Name()
+	defer func() {
+		if _, statErr := os.Stat(tmpPath); statErr == nil {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("trace: write tmp: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("trace: sync tmp: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("trace: close tmp: %w", err)
+	}
+	if err := os.Chmod(tmpPath, mode); err != nil {
+		return fmt.Errorf("trace: chmod tmp: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("trace: rename tmp: %w", err)
+	}
+	return nil
 }
 
 // LoadTraceJSON reads the persisted trace map from .cloop/trace.json.

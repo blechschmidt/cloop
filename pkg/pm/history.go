@@ -133,8 +133,10 @@ func SaveSnapshot(workDir string, plan *Plan) error {
 
 	// Read the latest snapshot (if any) and skip if identical.
 	metas, _ := ListSnapshots(workDir)
+	var latestOnDisk int
 	if len(metas) > 0 {
 		latest := metas[len(metas)-1]
+		latestOnDisk = latest.Version
 		last, loadErr := LoadSnapshot(workDir, latest.Version)
 		if loadErr == nil {
 			lastFP, fpErr := planFingerprint(last.Plan)
@@ -144,8 +146,18 @@ func SaveSnapshot(workDir string, plan *Plan) error {
 		}
 	}
 
-	// Increment version.
-	plan.Version++
+	// Pick the next version. Bumping plan.Version alone is insufficient when
+	// distinct Plan instances share a history dir (e.g. cross-process callers,
+	// or two writers each starting from a freshly-loaded Plan): both could land
+	// on the same version and produce duplicate filenames where the rename
+	// silently clobbers the loser. Anchor the next version to whichever is
+	// greater — the caller's plan.Version+1 or the on-disk max+1 — so the
+	// version sequence is strictly monotonic across all writers.
+	next := plan.Version + 1
+	if latestOnDisk+1 > next {
+		next = latestOnDisk + 1
+	}
+	plan.Version = next
 
 	snap := Snapshot{
 		Version:   plan.Version,
