@@ -11,12 +11,21 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/provider"
 )
 
 const kbFile = ".cloop/kb.json"
+
+// kbMu serialises in-process mutations to .cloop/kb.json. Add and Remove do a
+// load → modify → save cycle, so two concurrent goroutines (e.g. a UI handler
+// and a background daemon both adding entries) without this mutex would clobber
+// each other's edits — a classic lost-update race. It pairs with the atomic
+// rename in Save: rename protects against torn writes (crash / ENOSPC mid-
+// write); the mutex closes the lost-update window for in-process callers.
+var kbMu sync.Mutex
 
 // Entry is a single knowledge base record.
 type Entry struct {
@@ -53,7 +62,20 @@ func Load(workDir string) (*KB, error) {
 }
 
 // Save writes the knowledge base to disk, creating the .cloop directory if needed.
+//
+// The write is atomic — data is staged in a sibling .tmp file, fsynced, then
+// renamed into place. A torn write (crash, ENOSPC, two writers racing across
+// processes) would otherwise leave the KB unparseable and silently break
+// context injection on the next run.
 func Save(workDir string, kb *KB) error {
+	kbMu.Lock()
+	defer kbMu.Unlock()
+	return saveLocked(workDir, kb)
+}
+
+// saveLocked is the unsynchronised body of Save. Callers that already hold
+// kbMu (Add, Remove) use this to avoid re-entrant locking.
+func saveLocked(workDir string, kb *KB) error {
 	dir := filepath.Join(workDir, ".cloop")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("kb: mkdir: %w", err)
@@ -62,7 +84,42 @@ func Save(workDir string, kb *KB) error {
 	if err != nil {
 		return fmt.Errorf("kb: marshal: %w", err)
 	}
-	return os.WriteFile(path(workDir), data, 0o644)
+	return writeAtomic(dir, path(workDir), ".kb.json.*.tmp", data, 0o644)
+}
+
+// writeAtomic stages data in a sibling .tmp file in dir, fsyncs it, then
+// renames into path. Rename on POSIX is atomic with respect to readers, so
+// concurrent readers always see either the previous version or the new one
+// — never a truncated one. A failed rename leaves the original file intact.
+func writeAtomic(dir, path, tmpPattern string, data []byte, mode os.FileMode) error {
+	tmp, err := os.CreateTemp(dir, tmpPattern)
+	if err != nil {
+		return fmt.Errorf("kb: create tmp: %w", err)
+	}
+	tmpPath := tmp.Name()
+	defer func() {
+		if _, statErr := os.Stat(tmpPath); statErr == nil {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("kb: write tmp: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("kb: sync tmp: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("kb: close tmp: %w", err)
+	}
+	if err := os.Chmod(tmpPath, mode); err != nil {
+		return fmt.Errorf("kb: chmod tmp: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("kb: rename tmp: %w", err)
+	}
+	return nil
 }
 
 // nextID returns 1 + the maximum existing entry ID (or 1 if the KB is empty).
@@ -77,7 +134,13 @@ func nextID(kb *KB) int {
 }
 
 // Add creates a new entry and appends it to the KB. Returns the new entry.
+//
+// Holds kbMu for the entire load → assign-ID → save cycle so two concurrent
+// Add calls cannot read the same nextID and produce duplicate IDs (or worse,
+// have one call's append clobber the other on save).
 func Add(workDir, title, content string, tags []string) (*Entry, error) {
+	kbMu.Lock()
+	defer kbMu.Unlock()
 	kb, err := Load(workDir)
 	if err != nil {
 		return nil, err
@@ -90,7 +153,7 @@ func Add(workDir, title, content string, tags []string) (*Entry, error) {
 		CreatedAt: time.Now(),
 	}
 	kb.Entries = append(kb.Entries, entry)
-	if err := Save(workDir, kb); err != nil {
+	if err := saveLocked(workDir, kb); err != nil {
 		return nil, err
 	}
 	return entry, nil
@@ -111,7 +174,12 @@ func Get(workDir string, id int) (*Entry, error) {
 }
 
 // Remove deletes the entry with the given ID. Returns an error if not found.
+//
+// Holds kbMu for the entire load → filter → save cycle so a concurrent Add
+// cannot have its appended entry silently dropped by Remove's stale snapshot.
 func Remove(workDir string, id int) error {
+	kbMu.Lock()
+	defer kbMu.Unlock()
 	kb, err := Load(workDir)
 	if err != nil {
 		return err
@@ -129,7 +197,7 @@ func Remove(workDir string, id int) error {
 		return fmt.Errorf("kb: entry %d not found", id)
 	}
 	kb.Entries = newEntries
-	return Save(workDir, kb)
+	return saveLocked(workDir, kb)
 }
 
 // KeywordScore returns a relevance score for an entry against a query string.

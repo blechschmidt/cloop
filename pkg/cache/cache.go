@@ -299,12 +299,46 @@ type persistedStats struct {
 	Misses int64 `json:"misses"`
 }
 
+// saveStats persists the hit/miss counters to stats.json.
+//
+// Writes go through an atomic tmp+rename. Without that a torn write
+// (process killed mid-flush, or two cloop runs in the same workspace
+// updating concurrently) would leave a partial JSON blob; loadStats would
+// then silently zero the counters on the next start, throwing away the
+// running cache hit-rate history. Callers must hold c.mu to keep the
+// counter snapshot consistent with the on-disk file.
 func (c *Cache) saveStats() {
 	data, err := json.Marshal(persistedStats{Hits: c.hits, Misses: c.misses})
 	if err != nil {
 		return
 	}
-	_ = os.WriteFile(filepath.Join(c.workDir, statsFile), data, 0o644)
+	path := filepath.Join(c.workDir, statsFile)
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return
+	}
+	tmp, err := os.CreateTemp(dir, ".stats.*.tmp")
+	if err != nil {
+		return
+	}
+	tmpPath := tmp.Name()
+	defer func() {
+		if _, statErr := os.Stat(tmpPath); statErr == nil {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return
+	}
+	if err := tmp.Close(); err != nil {
+		return
+	}
+	_ = os.Rename(tmpPath, path)
 }
 
 func (c *Cache) loadStats() {

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/cost"
@@ -15,6 +16,13 @@ import (
 )
 
 const alertsFile = ".cloop/alerts.yaml"
+
+// alertsMu serialises in-process mutations to .cloop/alerts.yaml. AddRule and
+// RemoveRule do a load → modify → save cycle; without this mutex two concurrent
+// calls would clobber each other's edits (lost-update race). It pairs with
+// the atomic-rename in Save: rename protects against torn writes (crash mid-
+// write), and the mutex prevents the same process from racing itself.
+var alertsMu sync.Mutex
 
 // Metric identifies which plan value to compare against a threshold.
 type Metric string
@@ -93,9 +101,22 @@ func Load(workDir string) ([]Rule, error) {
 }
 
 // Save writes alert rules to .cloop/alerts.yaml in workDir.
+//
+// The write is atomic — data is staged in a sibling .tmp file, fsynced, then
+// renamed. A torn write would otherwise leave the YAML unparseable and disable
+// every alert rule on the next run.
 func Save(workDir string, rules []Rule) error {
+	alertsMu.Lock()
+	defer alertsMu.Unlock()
+	return saveLocked(workDir, rules)
+}
+
+// saveLocked is the unsynchronised body of Save. Callers that already hold
+// alertsMu (AddRule, RemoveRule) use this to avoid re-entrant locking.
+func saveLocked(workDir string, rules []Rule) error {
+	dir := filepath.Join(workDir, ".cloop")
 	path := filepath.Join(workDir, alertsFile)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
 	rf := rulesFile{Rules: rules}
@@ -103,12 +124,52 @@ func Save(workDir string, rules []Rule) error {
 	if err != nil {
 		return fmt.Errorf("alert: marshal rules: %w", err)
 	}
-	return os.WriteFile(path, data, 0o644)
+	return writeAtomic(dir, path, ".alerts.yaml.*.tmp", data, 0o644)
+}
+
+// writeAtomic stages data in a sibling .tmp file in dir, fsyncs it, then
+// renames into path. Rename on POSIX is atomic w.r.t. readers, so concurrent
+// readers always see either the previous or new file — never a truncated one.
+func writeAtomic(dir, path, tmpPattern string, data []byte, mode os.FileMode) error {
+	tmp, err := os.CreateTemp(dir, tmpPattern)
+	if err != nil {
+		return fmt.Errorf("alert: create tmp: %w", err)
+	}
+	tmpPath := tmp.Name()
+	defer func() {
+		if _, statErr := os.Stat(tmpPath); statErr == nil {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("alert: write tmp: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("alert: sync tmp: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("alert: close tmp: %w", err)
+	}
+	if err := os.Chmod(tmpPath, mode); err != nil {
+		return fmt.Errorf("alert: chmod tmp: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("alert: rename tmp: %w", err)
+	}
+	return nil
 }
 
 // AddRule appends a rule to .cloop/alerts.yaml, replacing any existing rule
 // with the same name.
+//
+// Holds alertsMu for the entire load → modify → save cycle so two concurrent
+// AddRule calls cannot each overwrite the file with their own one-element
+// snapshot, losing the other's rule.
 func AddRule(workDir string, rule Rule) error {
+	alertsMu.Lock()
+	defer alertsMu.Unlock()
 	rules, err := Load(workDir)
 	if err != nil {
 		return err
@@ -117,16 +178,22 @@ func AddRule(workDir string, rule Rule) error {
 	for i, r := range rules {
 		if r.Name == rule.Name {
 			rules[i] = rule
-			return Save(workDir, rules)
+			return saveLocked(workDir, rules)
 		}
 	}
 	rules = append(rules, rule)
-	return Save(workDir, rules)
+	return saveLocked(workDir, rules)
 }
 
 // RemoveRule removes the rule with the given name from .cloop/alerts.yaml.
 // Returns an error if the rule does not exist.
+//
+// Holds alertsMu for the entire load → filter → save cycle so a concurrent
+// AddRule cannot have its appended rule silently dropped by RemoveRule's
+// stale snapshot.
 func RemoveRule(workDir string, name string) error {
+	alertsMu.Lock()
+	defer alertsMu.Unlock()
 	rules, err := Load(workDir)
 	if err != nil {
 		return err
@@ -143,7 +210,7 @@ func RemoveRule(workDir string, name string) error {
 	if !found {
 		return fmt.Errorf("alert: rule %q not found", name)
 	}
-	return Save(workDir, filtered)
+	return saveLocked(workDir, filtered)
 }
 
 // EvalContext holds the pre-computed metric values used for a single evaluation.

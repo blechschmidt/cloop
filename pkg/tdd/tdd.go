@@ -186,20 +186,60 @@ func GenerateCriteria(ctx context.Context, prov provider.Provider, opts provider
 
 // SaveCriteria writes the criteria.md and test.sh files to .cloop/tdd/<taskID>/.
 // The test script is made executable (0755).
+//
+// Both files are written atomically (tmp + fsync + rename) so a crash
+// mid-write cannot leave a half-truncated criteria.md (which RunTests would
+// happily exec, producing a misleading verification result) or a partial
+// test.sh that bash would refuse to parse on the next --verify run.
 func SaveCriteria(workDir string, taskID int, criteria, testScript string) error {
 	dir := TDDDir(workDir, taskID)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("create tdd dir: %w", err)
 	}
 
-	if err := os.WriteFile(CriteriaPath(workDir, taskID), []byte(criteria), 0o644); err != nil {
+	if err := writeAtomic(dir, CriteriaPath(workDir, taskID), ".criteria.*.tmp", []byte(criteria), 0o644); err != nil {
 		return fmt.Errorf("write criteria.md: %w", err)
 	}
 
-	if err := os.WriteFile(TestScriptPath(workDir, taskID), []byte(testScript), 0o755); err != nil {
+	if err := writeAtomic(dir, TestScriptPath(workDir, taskID), ".test.*.tmp", []byte(testScript), 0o755); err != nil {
 		return fmt.Errorf("write test.sh: %w", err)
 	}
 
+	return nil
+}
+
+// writeAtomic stages data in a sibling .tmp file in dir, fsyncs it, chmods
+// to mode, then renames into path. Rename on POSIX is atomic with respect
+// to readers, so they always observe the previous valid file or the new
+// valid file — never a truncated one.
+func writeAtomic(dir, path, tmpPattern string, data []byte, mode os.FileMode) error {
+	tmp, err := os.CreateTemp(dir, tmpPattern)
+	if err != nil {
+		return fmt.Errorf("tdd: create tmp: %w", err)
+	}
+	tmpPath := tmp.Name()
+	defer func() {
+		if _, statErr := os.Stat(tmpPath); statErr == nil {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("tdd: write tmp: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("tdd: sync tmp: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("tdd: close tmp: %w", err)
+	}
+	if err := os.Chmod(tmpPath, mode); err != nil {
+		return fmt.Errorf("tdd: chmod tmp: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("tdd: rename tmp: %w", err)
+	}
 	return nil
 }
 

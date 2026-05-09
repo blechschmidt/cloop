@@ -52,6 +52,11 @@ func historyDir(workDir string, taskID int) string {
 
 // SaveHistoryEntry appends a timestamped checkpoint entry for a task.
 // Files are named <unix-nano>.json inside .cloop/task-checkpoints/task-<id>/.
+//
+// The write is atomic — staged in a sibling .tmp file, fsynced, then renamed
+// into place. Without this, a crash mid-write would leave a truncated JSON
+// file that ListHistory silently skips on the next load, dropping the
+// progress record permanently.
 func SaveHistoryEntry(workDir string, cp *Checkpoint) error {
 	dir := historyDir(workDir, cp.TaskID)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -71,8 +76,43 @@ func SaveHistoryEntry(workDir string, cp *Checkpoint) error {
 	if err != nil {
 		return fmt.Errorf("marshal history entry: %w", err)
 	}
-	if err := os.WriteFile(path, data, 0o644); err != nil {
+	if err := writeAtomic(dir, path, ".history.*.tmp", data, 0o644); err != nil {
 		return fmt.Errorf("write history entry: %w", err)
+	}
+	return nil
+}
+
+// writeAtomic stages data in a sibling .tmp file in dir, fsyncs it, chmods to
+// mode, then renames into path. POSIX rename is atomic with respect to
+// concurrent readers, so they always observe either the previous valid file
+// or the new valid file — never a truncated one.
+func writeAtomic(dir, path, tmpPattern string, data []byte, mode os.FileMode) error {
+	tmp, err := os.CreateTemp(dir, tmpPattern)
+	if err != nil {
+		return fmt.Errorf("checkpoint: create tmp: %w", err)
+	}
+	tmpPath := tmp.Name()
+	defer func() {
+		if _, statErr := os.Stat(tmpPath); statErr == nil {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("checkpoint: write tmp: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("checkpoint: sync tmp: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("checkpoint: close tmp: %w", err)
+	}
+	if err := os.Chmod(tmpPath, mode); err != nil {
+		return fmt.Errorf("checkpoint: chmod tmp: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("checkpoint: rename tmp: %w", err)
 	}
 	return nil
 }
@@ -134,19 +174,22 @@ func Path(workDir string) string {
 	return filepath.Join(workDir, checkpointFile)
 }
 
-// Save writes the checkpoint atomically (write to .tmp then rename).
+// Save writes the checkpoint atomically (stage in a sibling .tmp file,
+// fsync, then rename into place). The fsync closes a window where a power
+// loss between WriteFile and Rename could leave the rename target pointing
+// at zero-length data on some filesystems.
 func Save(workDir string, cp *Checkpoint) error {
 	data, err := json.MarshalIndent(cp, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal checkpoint: %w", err)
 	}
 	path := Path(workDir)
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		return fmt.Errorf("write checkpoint: %w", err)
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("create checkpoint dir: %w", err)
 	}
-	if err := os.Rename(tmp, path); err != nil {
-		return fmt.Errorf("rename checkpoint: %w", err)
+	if err := writeAtomic(dir, path, ".checkpoint.*.tmp", data, 0o644); err != nil {
+		return fmt.Errorf("write checkpoint: %w", err)
 	}
 	return nil
 }
