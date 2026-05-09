@@ -8,12 +8,20 @@ import (
 	"strings"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/boundedread"
 	"github.com/blechschmidt/cloop/pkg/checkpoint"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 )
 
 const checkpointDir = ".cloop/checkpoints"
+
+// maxCheckpointStateBytes caps reads of state.json and *.json checkpoint
+// files. State files normally sit in the low-MiB range even with hundreds of
+// tasks; 64 MiB is a generous upper bound that keeps a runaway/corrupt file
+// from being loaded into memory in one go. Declared as a var so tests can
+// shrink the cap to validate enforcement without writing a 64 MiB fixture.
+var maxCheckpointStateBytes int64 = 64 << 20
 
 var checkpointCmd = &cobra.Command{
 	Use:   "checkpoint",
@@ -37,7 +45,7 @@ var checkpointSaveCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		workdir, _ := os.Getwd()
 		src := filepath.Join(workdir, ".cloop", "state.json")
-		data, err := os.ReadFile(src)
+		data, err := boundedread.ReadFile(src, maxCheckpointStateBytes)
 		if err != nil {
 			return fmt.Errorf("no cloop project state found: %w", err)
 		}
@@ -71,14 +79,14 @@ var checkpointRestoreCmd = &cobra.Command{
 		workdir, _ := os.Getwd()
 		name := sanitizeName(args[0])
 		src := filepath.Join(workdir, checkpointDir, name+".json")
-		data, err := os.ReadFile(src)
+		data, err := boundedread.ReadFile(src, maxCheckpointStateBytes)
 		if err != nil {
 			return fmt.Errorf("checkpoint %q not found: %w", name, err)
 		}
 
 		// Back up current state before overwriting
 		currentState := filepath.Join(workdir, ".cloop", "state.json")
-		if cur, readErr := os.ReadFile(currentState); readErr == nil {
+		if cur, readErr := boundedread.ReadFile(currentState, maxCheckpointStateBytes); readErr == nil {
 			backupDir := filepath.Join(workdir, checkpointDir)
 			backupName := "pre-restore-" + time.Now().Format("20060102-150405")
 			_ = os.WriteFile(filepath.Join(backupDir, backupName+".json"), cur, 0o644)

@@ -6,13 +6,27 @@ package notify
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os/exec"
 	"runtime"
 	"strings"
+	"time"
 )
+
+// webhookTimeout caps the total time spent dispatching a single webhook POST
+// (DNS, connect, TLS, write, server processing, response). A misconfigured or
+// hung webhook target must not pin the calling goroutine forever.
+const webhookTimeout = 10 * time.Second
+
+// webhookMaxBodyBytes caps how much of the webhook response body we drain.
+// Slack/Discord/custom hooks return tiny acknowledgements (typically "ok" or
+// JSON < 1 KiB); 64 KiB is generous defense-in-depth against a malicious
+// endpoint streaming gigabytes back at us.
+const webhookMaxBodyBytes int64 = 64 * 1024
 
 // Send fires a desktop notification with the given title and body.
 // Errors are silently swallowed — notifications are best-effort and must
@@ -70,11 +84,26 @@ func SendWebhook(webhookURL, title, body string) error {
 		return fmt.Errorf("notify: marshal payload: %w", err)
 	}
 
-	resp, err := http.Post(webhookURL, "application/json", bytes.NewReader(payload)) //nolint:noctx
+	ctx, cancel := context.WithTimeout(context.Background(), webhookTimeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, webhookURL, bytes.NewReader(payload))
+	if err != nil {
+		return fmt.Errorf("notify: build webhook request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", "cloop/1.0")
+
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("notify: POST webhook: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		// Drain (capped) so the connection can be reused by the keep-alive pool;
+		// a hostile endpoint cannot make us read more than webhookMaxBodyBytes.
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, webhookMaxBodyBytes))
+		_ = resp.Body.Close()
+	}()
 	if resp.StatusCode >= 300 {
 		return fmt.Errorf("notify: webhook returned HTTP %d", resp.StatusCode)
 	}

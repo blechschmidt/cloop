@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/blechschmidt/cloop/pkg/boundedread"
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/profile"
 	"github.com/blechschmidt/cloop/pkg/state"
@@ -257,7 +258,10 @@ Examples:
 // Creates the file if it does not exist.
 func ensureGitignore(workDir, entry string) {
 	giPath := workDir + "/.gitignore"
-	data, _ := os.ReadFile(giPath)
+	// 1 MiB cap — .gitignore is a tiny patterns file; if it's larger than
+	// that the file is suspect and we'd rather skip the dedupe scan than
+	// pull a huge buffer into memory.
+	data, _ := boundedread.ReadFile(giPath, 1<<20)
 	for _, line := range strings.Split(string(data), "\n") {
 		if strings.TrimSpace(line) == entry {
 			return // already present

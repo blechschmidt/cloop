@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/boundedread"
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/provider"
@@ -281,7 +282,9 @@ func resolveMoveDestination(to string) (string, error) {
 		return "", fmt.Errorf("could not determine home directory: %w", err)
 	}
 	wsFile := filepath.Join(homedir, ".cloop", "workspaces.json")
-	data, err := os.ReadFile(wsFile)
+	// 1 MiB cap — workspaces.json is a small registry of project paths;
+	// anything larger is corruption or a planted file.
+	data, err := boundedread.ReadFile(wsFile, 1<<20)
 	if err == nil {
 		// Simple JSON unmarshal: [{name, path}, ...]
 		type wsEntry struct {

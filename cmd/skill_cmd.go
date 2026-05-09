@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/blechschmidt/cloop/pkg/boundedread"
 	"github.com/blechschmidt/cloop/pkg/skill"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
@@ -161,8 +162,10 @@ Example:
 			return fmt.Errorf("editor exited with error: %w", err)
 		}
 
-		// Read back the edited content.
-		data, err := os.ReadFile(tmpPath)
+		// Read back the edited content. 5 MiB cap — skills are short
+		// markdown fragments; if the user accidentally pasted a large file
+		// (binary, log, etc.) better to refuse than load gigabytes.
+		data, err := boundedread.ReadFile(tmpPath, 5<<20)
 		if err != nil {
 			return fmt.Errorf("reading edited file: %w", err)
 		}
