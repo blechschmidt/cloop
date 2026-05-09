@@ -32,7 +32,7 @@ func New(baseURL string) *Provider {
 	}
 	return &Provider{
 		BaseURL: baseURL,
-		client:  &http.Client{},
+		client:  provider.NewHTTPClient(),
 	}
 }
 

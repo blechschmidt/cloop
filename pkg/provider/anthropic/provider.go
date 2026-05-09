@@ -40,7 +40,7 @@ func New(apiKey, baseURL string) *Provider {
 	return &Provider{
 		APIKey:  apiKey,
 		BaseURL: baseURL,
-		client:  &http.Client{},
+		client:  provider.NewHTTPClient(),
 	}
 }
 
