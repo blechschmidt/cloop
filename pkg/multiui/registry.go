@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/atomicfile"
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/state"
@@ -106,6 +107,15 @@ func registryPath() (string, error) {
 }
 
 // Load reads the registry from disk; returns an empty registry if file is absent.
+//
+// On parse failure (zero-byte file from a torn pre-atomicfile write, schema
+// drift, manual edit gone wrong) the corrupt projects.json is quarantined
+// aside as projects.json.corrupt-<unix> and (nil, nil) is returned. The
+// multi-project Web UI dashboard is the worst pre-fix case here: a bad save
+// in this global registry bricked every "cloop ui" multi-project listing
+// across all projects on the host. Returning empty is a recoverable state —
+// the user re-adds projects via `cloop ui add` — whereas a hard error
+// disabled the entire dashboard.
 func Load() ([]ProjectEntry, error) {
 	path, err := registryPath()
 	if err != nil {
@@ -120,7 +130,13 @@ func Load() ([]ProjectEntry, error) {
 	}
 	var reg registry
 	if err := json.Unmarshal(data, &reg); err != nil {
-		return nil, err
+		qpath := atomicfile.QuarantineCorrupt(path)
+		if qpath != "" {
+			fmt.Fprintf(os.Stderr, "warning: multi-project registry at %s was corrupt (%v); quarantined to %s, starting fresh\n", path, err, qpath)
+		} else {
+			fmt.Fprintf(os.Stderr, "warning: multi-project registry at %s was corrupt (%v) and could not be quarantined; ignoring\n", path, err)
+		}
+		return nil, nil
 	}
 	return reg.Projects, nil
 }

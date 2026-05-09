@@ -246,6 +246,13 @@ func Delete(name string) error {
 
 // loadProfilesLocked is the unsynchronised body of LoadProfiles for callers
 // that already hold profilesMu.
+//
+// On parse failure (zero-byte file from a torn pre-atomicfile write, schema
+// drift, manual edit gone wrong) the corrupt profiles.yaml is quarantined
+// aside as profiles.yaml.corrupt-<unix> and an empty slice is returned. A
+// hard error here would disable every profile-aware command (`cloop run
+// --profile`, `cloop profile list`, etc.) host-wide; an empty slice instead
+// surfaces "no profiles configured" so the user can re-add them.
 func loadProfilesLocked() ([]Profile, error) {
 	path, err := profilesPath()
 	if err != nil {
@@ -260,7 +267,13 @@ func loadProfilesLocked() ([]Profile, error) {
 	}
 	var pf profilesFile
 	if err := yaml.Unmarshal(data, &pf); err != nil {
-		return nil, err
+		qpath := atomicfile.QuarantineCorrupt(path)
+		if qpath != "" {
+			fmt.Fprintf(os.Stderr, "warning: profiles registry at %s was corrupt (%v); quarantined to %s, starting fresh\n", path, err, qpath)
+		} else {
+			fmt.Fprintf(os.Stderr, "warning: profiles registry at %s was corrupt (%v) and could not be quarantined; ignoring\n", path, err)
+		}
+		return []Profile{}, nil
 	}
 	return pf.Profiles, nil
 }

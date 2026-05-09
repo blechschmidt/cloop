@@ -47,8 +47,17 @@ func path(workDir string) string {
 }
 
 // Load reads the knowledge base from disk. Returns an empty KB if the file does not exist.
+//
+// On parse failure (zero-byte file from a torn pre-atomicfile write, schema
+// drift, manual edit gone wrong) the corrupt kb.json is quarantined aside as
+// kb.json.corrupt-<unix> and an empty KB is returned. Refusing the load
+// would silently break context injection on every subsequent task — `cloop
+// run` would run with the AI deprived of project knowledge instead of
+// surfacing the corruption — and the only fix would be a manual `rm`. The
+// quarantine surfaces the problem on stderr and lets work continue.
 func Load(workDir string) (*KB, error) {
-	data, err := os.ReadFile(path(workDir))
+	p := path(workDir)
+	data, err := os.ReadFile(p)
 	if os.IsNotExist(err) {
 		return &KB{}, nil
 	}
@@ -57,7 +66,13 @@ func Load(workDir string) (*KB, error) {
 	}
 	var kb KB
 	if err := json.Unmarshal(data, &kb); err != nil {
-		return nil, fmt.Errorf("kb: parse: %w", err)
+		qpath := atomicfile.QuarantineCorrupt(p)
+		if qpath != "" {
+			fmt.Fprintf(os.Stderr, "warning: knowledge base at %s was corrupt (%v); quarantined to %s, starting fresh\n", p, err, qpath)
+		} else {
+			fmt.Fprintf(os.Stderr, "warning: knowledge base at %s was corrupt (%v) and could not be quarantined; ignoring\n", p, err)
+		}
+		return &KB{}, nil
 	}
 	return &kb, nil
 }

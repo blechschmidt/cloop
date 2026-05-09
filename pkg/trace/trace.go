@@ -234,8 +234,17 @@ func WriteTraceJSON(workDir string, tm *TraceMap) error {
 
 // LoadTraceJSON reads the persisted trace map from .cloop/trace.json.
 // Returns nil without error when the file does not exist.
+//
+// On parse failure (zero-byte file from a torn pre-atomicfile write, schema
+// drift, manual edit gone wrong) the corrupt trace.json is quarantined
+// aside as trace.json.corrupt-<unix> and (nil, nil) is returned. The trace
+// map is a derived index of commit→task links; `cloop status`,
+// LastLinkedCommit, and similar callers all already handle the "no trace
+// data yet" case, so returning empty is strictly better than refusing every
+// status query until the user manually deletes the corrupt file.
 func LoadTraceJSON(workDir string) (*TraceMap, error) {
-	data, err := os.ReadFile(filepath.Join(workDir, ".cloop", "trace.json"))
+	path := filepath.Join(workDir, ".cloop", "trace.json")
+	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
 		return nil, nil
 	}
@@ -244,7 +253,13 @@ func LoadTraceJSON(workDir string) (*TraceMap, error) {
 	}
 	var tm TraceMap
 	if err := json.Unmarshal(data, &tm); err != nil {
-		return nil, err
+		qpath := atomicfile.QuarantineCorrupt(path)
+		if qpath != "" {
+			fmt.Fprintf(os.Stderr, "warning: commit→task trace at %s was corrupt (%v); quarantined to %s, starting fresh\n", path, err, qpath)
+		} else {
+			fmt.Fprintf(os.Stderr, "warning: commit→task trace at %s was corrupt (%v) and could not be quarantined; ignoring\n", path, err)
+		}
+		return nil, nil
 	}
 	return &tm, nil
 }

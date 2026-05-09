@@ -41,8 +41,17 @@ func ClarificationPath(workDir string) string {
 
 // Load reads previously saved clarification Q&A from disk.
 // Returns nil, nil when the file does not exist.
+//
+// On parse failure (zero-byte file from a torn pre-atomicfile write, schema
+// drift, manual edit gone wrong) the corrupt clarification.json is
+// quarantined aside as clarification.json.corrupt-<unix> and (nil, nil) is
+// returned. Refusing the load would block `cloop run --pm` from progressing
+// to decomposition; treating the file as absent re-prompts the user (or
+// proceeds without the audit when non-interactive), which is a recoverable
+// path.
 func Load(workDir string) ([]QA, error) {
-	data, err := os.ReadFile(ClarificationPath(workDir))
+	path := ClarificationPath(workDir)
+	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
 		return nil, nil
 	}
@@ -51,7 +60,13 @@ func Load(workDir string) ([]QA, error) {
 	}
 	var qas []QA
 	if err := json.Unmarshal(data, &qas); err != nil {
-		return nil, fmt.Errorf("clarification: parse: %w", err)
+		qpath := atomicfile.QuarantineCorrupt(path)
+		if qpath != "" {
+			fmt.Fprintf(os.Stderr, "warning: clarification audit at %s was corrupt (%v); quarantined to %s, starting fresh\n", path, err, qpath)
+		} else {
+			fmt.Fprintf(os.Stderr, "warning: clarification audit at %s was corrupt (%v) and could not be quarantined; ignoring\n", path, err)
+		}
+		return nil, nil
 	}
 	return qas, nil
 }

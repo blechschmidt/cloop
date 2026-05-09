@@ -101,6 +101,15 @@ func LedgerPath() (string, error) {
 
 // Load reads the global budget config. Returns an empty config (no limits) if
 // the file does not exist.
+//
+// On parse failure (zero-byte file from a torn pre-atomicfile write, schema
+// drift, manual edit gone wrong) the corrupt budget.yaml is quarantined
+// aside as budget.yaml.corrupt-<unix> and an empty config is returned. The
+// pre-fix behaviour was that every cloop invocation across the host bailed
+// out before doing real work because pre-task budget enforcement loaded
+// this file and returned the parse error. Empty config means "no limits"
+// which is the same as the file not existing — the worst case is the user
+// has to re-run `cloop budget set` to restore their cap.
 func Load() (GlobalBudgetConfig, error) {
 	path, err := ConfigPath()
 	if err != nil {
@@ -115,7 +124,13 @@ func Load() (GlobalBudgetConfig, error) {
 	}
 	var cfg GlobalBudgetConfig
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		return GlobalBudgetConfig{}, fmt.Errorf("globalbudget: parsing config: %w", err)
+		qpath := atomicfile.QuarantineCorrupt(path)
+		if qpath != "" {
+			fmt.Fprintf(os.Stderr, "warning: global budget config at %s was corrupt (%v); quarantined to %s, starting fresh\n", path, err, qpath)
+		} else {
+			fmt.Fprintf(os.Stderr, "warning: global budget config at %s was corrupt (%v) and could not be quarantined; ignoring\n", path, err)
+		}
+		return GlobalBudgetConfig{}, nil
 	}
 	return cfg, nil
 }
