@@ -621,6 +621,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	// Init & reset
 	mux.HandleFunc("/api/init", s.handleInit)
 	mux.HandleFunc("/api/goal", s.handleGoal)
+	mux.HandleFunc("/api/instructions", s.handleInstructions)
 	mux.HandleFunc("/api/reset", s.handleReset)
 
 	// Knowledge Base
@@ -2969,6 +2970,52 @@ func (s *Server) handleGoal(w http.ResponseWriter, r *http.Request) {
 			s.broadcastToProject(workDir, wsMessage{Type: "task_update", Data: raw})
 		}
 		jsonOK(w, map[string]interface{}{"ok": true, "goal": ps.Goal, "previous": old})
+	default:
+		jsonErr(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// handleInstructions returns or updates the project instructions/constraints.
+//   GET          /api/instructions -> { "instructions": "..." }
+//   PUT or POST  /api/instructions -> body { "instructions": "..." }
+//
+// Instructions are stored in ProjectState and prepended to every task prompt.
+// The empty string is allowed (clears the field).
+func (s *Server) handleInstructions(w http.ResponseWriter, r *http.Request) {
+	workDir := s.resolveWorkDir(r)
+	switch r.Method {
+	case http.MethodGet:
+		ps, err := state.Load(workDir)
+		if err != nil {
+			jsonErr(w, "load failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		jsonOK(w, map[string]interface{}{"instructions": ps.Instructions})
+	case http.MethodPut, http.MethodPost:
+		var req struct {
+			Instructions string `json:"instructions"`
+		}
+		limitJSONBody(w, r, maxJSONBodyBytes)
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			jsonErr(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+		req.Instructions = strings.TrimSpace(req.Instructions)
+		ps, err := state.Load(workDir)
+		if err != nil {
+			jsonErr(w, "load failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		old := ps.Instructions
+		ps.Instructions = req.Instructions
+		if err := ps.SaveDirect(); err != nil {
+			jsonErr(w, "save failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if raw, err := json.Marshal(ps); err == nil {
+			s.broadcastToProject(workDir, wsMessage{Type: "task_update", Data: raw})
+		}
+		jsonOK(w, map[string]interface{}{"ok": true, "instructions": ps.Instructions, "previous": old})
 	default:
 		jsonErr(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
@@ -6553,6 +6600,17 @@ const dashboardHTML = `<!DOCTYPE html>
           </div>
         </div>
 
+        <!-- Instructions -->
+        <div class="section">
+          <div class="section-title">Instructions / Constraints</div>
+          <div class="card goal-card">
+            <div class="goal-text empty" id="instructionsText" style="white-space:pre-wrap;font-size:13px;font-weight:400">No instructions set</div>
+            <div style="display:flex;align-items:flex-start;gap:12px;flex-wrap:wrap">
+              <button class="btn" id="instructionsEditBtn" onclick="openInstructionsEditModal()" title="Edit instructions / constraints" style="padding:4px 10px;font-size:12px">✎ Edit</button>
+            </div>
+          </div>
+        </div>
+
 
         <!-- Stats -->
         <div class="section">
@@ -7547,6 +7605,23 @@ const dashboardHTML = `<!DOCTYPE html>
   </div>
 </div>
 
+<!-- Edit Instructions modal -->
+<div id="instructions-edit-overlay" onclick="if(event.target===this)closeInstructionsEditModal()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
+  <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;width:620px;max-width:95vw">
+    <h2 style="font-size:15px;font-weight:600;margin-bottom:16px">Edit Instructions / Constraints</h2>
+    <div class="form-group">
+      <label class="form-label">Instructions</label>
+      <textarea class="form-textarea" id="instructionsEditInput" placeholder="e.g. Use Go, no external dependencies, prefer stdlib..." style="min-height:160px"></textarea>
+    </div>
+    <p style="font-size:12px;color:var(--muted);margin-bottom:8px">Persisted in state and prepended to every task prompt. Leave empty to clear.</p>
+    <div id="instructionsEditError" style="display:none;color:var(--red);font-size:12px;margin-bottom:8px"></div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeInstructionsEditModal()">Cancel</button>
+      <button class="btn primary" onclick="saveInstructionsEdit()">Save Instructions</button>
+    </div>
+  </div>
+</div>
+
 <!-- Delete confirmation modal -->
 <div id="delete-modal-overlay" onclick="if(event.target===this)closeDeleteModal()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
   <div id="delete-modal" style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;width:400px;max-width:92vw">
@@ -8166,6 +8241,14 @@ function render(s) {
   const goalEl = document.getElementById('goalText');
   goalEl.textContent = s.goal;
   goalEl.classList.toggle('empty', !s.goal);
+
+  // Instructions / constraints (persisted in state.json:instructions)
+  const instrEl = document.getElementById('instructionsText');
+  if (instrEl) {
+    const instr = (typeof s.instructions === 'string') ? s.instructions : '';
+    instrEl.textContent = instr || 'No instructions set';
+    instrEl.classList.toggle('empty', !instr);
+  }
 
   // Update the "Overview" section title to show the selected project name in multi-project mode.
   const overviewTitle = document.getElementById('overviewSectionTitle');
@@ -9619,6 +9702,48 @@ window.saveGoalEdit = function() {
     if (goalEl) {
       goalEl.textContent = d.goal;
       goalEl.classList.toggle('empty', !d.goal);
+    }
+    if (typeof refreshState === 'function') refreshState();
+  }).catch(e => {
+    errEl.textContent = 'Request failed: ' + e.message;
+    errEl.style.display = '';
+  });
+};
+
+// ── Instructions edit modal ──────────────────────────────────────────────────
+window.openInstructionsEditModal = function() {
+  const errEl = document.getElementById('instructionsEditError');
+  if (errEl) errEl.style.display = 'none';
+  const inputEl = document.getElementById('instructionsEditInput');
+  if (inputEl) inputEl.value = '';
+  // Fetch latest persisted value rather than scraping the rendered text,
+  // so a long/unwrapped value is round-tripped exactly.
+  api(pUrl('/api/instructions')).then(d => {
+    if (inputEl) inputEl.value = (d && typeof d.instructions === 'string') ? d.instructions : '';
+  }).catch(() => {});
+  const el = document.getElementById('instructions-edit-overlay');
+  if (el) el.style.display = 'flex';
+  setTimeout(() => { try { document.getElementById('instructionsEditInput').focus(); } catch(e) {} }, 0);
+};
+
+window.closeInstructionsEditModal = function() {
+  const el = document.getElementById('instructions-edit-overlay');
+  if (el) el.style.display = 'none';
+};
+
+window.saveInstructionsEdit = function() {
+  const instructions = document.getElementById('instructionsEditInput').value;
+  const errEl = document.getElementById('instructionsEditError');
+  errEl.style.display = 'none';
+  apiMethod('PUT', pUrl('/api/instructions'), {instructions}).then(d => {
+    if (!d.ok) { errEl.textContent = d.error || 'Failed to update instructions'; errEl.style.display = ''; return; }
+    closeInstructionsEditModal();
+    toast('Instructions updated', 'ok');
+    const el = document.getElementById('instructionsText');
+    if (el) {
+      const v = (typeof d.instructions === 'string') ? d.instructions : '';
+      el.textContent = v || 'No instructions set';
+      el.classList.toggle('empty', !v);
     }
     if (typeof refreshState === 'function') refreshState();
   }).catch(e => {
