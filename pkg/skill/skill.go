@@ -13,9 +13,16 @@ import (
 	"strings"
 
 	"github.com/blechschmidt/cloop/pkg/atomicfile"
+	"github.com/blechschmidt/cloop/pkg/boundedread"
 )
 
 const skillsDir = ".cloop/skills"
+
+// maxSkillBytes caps how much of a single skill markdown file we load into
+// memory. Skills are short prompt fragments (typically <10 KiB), so a 1 MiB
+// cap is far above the legitimate range while keeping a runaway file out of
+// memory. Declared as var so tests can shrink it.
+var maxSkillBytes int64 = 1 << 20
 
 // builtins maps skill name to content. These are always available and cannot
 // be deleted, but can be overridden by a user file with the same name.
@@ -113,7 +120,7 @@ func List(workDir string) ([]Skill, error) {
 			continue
 		}
 		name := strings.TrimSuffix(e.Name(), ".md")
-		data, readErr := os.ReadFile(filepath.Join(dir, e.Name()))
+		data, readErr := boundedread.ReadFile(filepath.Join(dir, e.Name()), maxSkillBytes)
 		if readErr != nil {
 			continue
 		}
@@ -140,7 +147,7 @@ func List(workDir string) ([]Skill, error) {
 func Get(workDir, name string) (Skill, error) {
 	// Check user file first.
 	path := userSkillPath(workDir, name)
-	data, err := os.ReadFile(path)
+	data, err := boundedread.ReadFile(path, maxSkillBytes)
 	if err == nil {
 		_, isBuiltin := builtins[name]
 		return Skill{Name: name, Content: string(data), Builtin: isBuiltin}, nil

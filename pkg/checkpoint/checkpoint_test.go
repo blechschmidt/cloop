@@ -244,3 +244,118 @@ func TestLoad_ZeroByteFileQuarantined(t *testing.T) {
 		t.Errorf("Load on zero-byte file should return nil, got: %+v", got)
 	}
 }
+
+// TestLoad_OversizeFileQuarantined verifies an unreasonably large checkpoint
+// file does not OOM the loader. The file is quarantined and Load returns
+// (nil, nil) so a fresh run can begin.
+func TestLoad_OversizeFileQuarantined(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".cloop"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	prev := maxCheckpointBytes
+	maxCheckpointBytes = 64
+	defer func() { maxCheckpointBytes = prev }()
+
+	path := Path(dir)
+	huge := make([]byte, 256)
+	for i := range huge {
+		huge[i] = 'x'
+	}
+	if err := os.WriteFile(path, huge, 0o644); err != nil {
+		t.Fatalf("seed huge: %v", err)
+	}
+
+	got, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load on oversize file should not return an error (quarantine path), got: %v", err)
+	}
+	if got != nil {
+		t.Errorf("Load on oversize file should return nil, got: %+v", got)
+	}
+	// Original path should be gone (quarantined aside).
+	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+		t.Errorf("expected oversize checkpoint to be quarantined away from %s, but it still exists", path)
+	}
+	// A .corrupt-* sibling should exist.
+	siblings, _ := os.ReadDir(filepath.Dir(path))
+	var found bool
+	for _, e := range siblings {
+		if strings.Contains(e.Name(), ".corrupt-") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected a .corrupt-* quarantine sibling next to %s", path)
+	}
+}
+
+// TestLoadHistoryEntry_OversizeRejected verifies a single history entry that
+// exceeds the cap is rejected with an error rather than loaded into memory.
+func TestLoadHistoryEntry_OversizeRejected(t *testing.T) {
+	dir := t.TempDir()
+	hd := historyDir(dir, 7)
+	if err := os.MkdirAll(hd, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	prev := maxCheckpointBytes
+	maxCheckpointBytes = 64
+	defer func() { maxCheckpointBytes = prev }()
+
+	path := filepath.Join(hd, "entry-oversize.json")
+	huge := make([]byte, 256)
+	for i := range huge {
+		huge[i] = 'x'
+	}
+	if err := os.WriteFile(path, huge, 0o644); err != nil {
+		t.Fatalf("seed huge: %v", err)
+	}
+
+	_, err := LoadHistoryEntry(dir, 7, "entry-oversize")
+	if err == nil {
+		t.Fatalf("LoadHistoryEntry should reject oversize file, got nil error")
+	}
+}
+
+// TestListHistory_OversizeEntrySkipped verifies that when iterating history
+// entries, a single oversize entry is skipped rather than aborting the whole
+// listing.
+func TestListHistory_OversizeEntrySkipped(t *testing.T) {
+	dir := t.TempDir()
+	hd := historyDir(dir, 9)
+	if err := os.MkdirAll(hd, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	prev := maxCheckpointBytes
+	maxCheckpointBytes = 256
+	defer func() { maxCheckpointBytes = prev }()
+
+	// Good entry (small JSON).
+	good := &Checkpoint{TaskID: 9, TaskTitle: "good", StepNumber: 1, Timestamp: time.Now()}
+	if err := SaveHistoryEntry(dir, good); err != nil {
+		t.Fatalf("SaveHistoryEntry good: %v", err)
+	}
+	// Oversize entry (raw write to bypass the writer's marshal+atomic path).
+	huge := make([]byte, 1024)
+	for i := range huge {
+		huge[i] = 'x'
+	}
+	if err := os.WriteFile(filepath.Join(hd, "huge.json"), huge, 0o644); err != nil {
+		t.Fatalf("seed huge: %v", err)
+	}
+
+	entries, err := ListHistory(dir, 9)
+	if err != nil {
+		t.Fatalf("LoadHistory: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected oversize entry to be skipped, got %d entries", len(entries))
+	}
+	if entries[0].Checkpoint.TaskTitle != "good" {
+		t.Errorf("expected the good entry to survive, got %+v", entries[0])
+	}
+}

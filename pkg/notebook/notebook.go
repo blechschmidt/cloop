@@ -12,14 +12,21 @@ package notebook
 import (
 	"fmt"
 	"html"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/boundedread"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/state"
 )
+
+// maxNotebookArtifactBytes caps how much of any single task artifact the
+// notebook builder will load into memory. Task artifact files live under
+// .cloop/ and are cloop-controlled, but a runaway provider that streamed
+// gigabytes into a single artifact would otherwise force the whole file
+// into RAM during notebook export. Declared as var so tests can shrink it.
+var maxNotebookArtifactBytes int64 = 8 << 20
 
 // Build generates the notebook document for the project rooted at workDir.
 // plan may be nil (in which case plan-specific sections are omitted).
@@ -162,7 +169,7 @@ func readArtifact(workDir string, t *pm.Task) string {
 		return ""
 	}
 	absPath := filepath.Join(workDir, t.ArtifactPath)
-	data, err := os.ReadFile(absPath)
+	data, err := boundedread.ReadFile(absPath, maxNotebookArtifactBytes)
 	if err != nil {
 		return ""
 	}

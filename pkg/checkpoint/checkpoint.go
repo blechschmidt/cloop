@@ -15,10 +15,18 @@ import (
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/atomicfile"
+	"github.com/blechschmidt/cloop/pkg/boundedread"
 )
 
 const checkpointFile = ".cloop/checkpoint.json"
 const historyBaseDir = ".cloop/task-checkpoints"
+
+// maxCheckpointBytes caps how much of a single checkpoint JSON we load into
+// memory. Checkpoints persist mid-run task state including streamed
+// AccumulatedOutput, so the cap is generous (8 MiB) but keeps a planted or
+// runaway file from OOMing the process. Declared as var so tests can shrink
+// it.
+var maxCheckpointBytes int64 = 8 << 20
 
 // Checkpoint holds the mid-execution state for a single in-progress task.
 type Checkpoint struct {
@@ -106,7 +114,7 @@ func ListHistory(workDir string, taskID int) ([]*HistoryEntry, error) {
 			continue
 		}
 		id := strings.TrimSuffix(e.Name(), ".json")
-		data, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		data, err := boundedread.ReadFile(filepath.Join(dir, e.Name()), maxCheckpointBytes)
 		if err != nil {
 			continue
 		}
@@ -125,7 +133,7 @@ func ListHistory(workDir string, taskID int) ([]*HistoryEntry, error) {
 // LoadHistoryEntry loads a single checkpoint history entry by its ID.
 func LoadHistoryEntry(workDir string, taskID int, id string) (*Checkpoint, error) {
 	path := filepath.Join(historyDir(workDir, taskID), id+".json")
-	data, err := os.ReadFile(path)
+	data, err := boundedread.ReadFile(path, maxCheckpointBytes)
 	if err != nil {
 		return nil, fmt.Errorf("read history entry %s: %w", id, err)
 	}
@@ -170,9 +178,16 @@ func Save(workDir string, cp *Checkpoint) error {
 // the user has the bytes preserved next to it for forensics.
 func Load(workDir string) (*Checkpoint, error) {
 	path := Path(workDir)
-	data, err := os.ReadFile(path)
+	data, err := boundedread.ReadFile(path, maxCheckpointBytes)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		if errors.Is(err, boundedread.ErrTooLarge) {
+			qpath := atomicfile.QuarantineCorrupt(path)
+			if qpath != "" {
+				fmt.Fprintf(os.Stderr, "warning: checkpoint at %s exceeded size limit (%v); quarantined to %s, starting fresh\n", path, err, qpath)
+			}
 			return nil, nil
 		}
 		return nil, fmt.Errorf("read checkpoint: %w", err)

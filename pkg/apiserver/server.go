@@ -20,6 +20,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/boundedread"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/state"
 )
@@ -48,6 +49,18 @@ const (
 	// maxJSONBodyBytes caps JSON request bodies to prevent memory-DoS via
 	// slow-stream or oversized POST payloads on the long-running daemon.
 	maxJSONBodyBytes = 1 << 20 // 1 MiB
+
+	// maxMetricsFileBytes caps the size of .cloop/metrics.json the API server
+	// will load and serve. A corrupted or runaway metrics file would otherwise
+	// be loaded fully into memory before the response is written, doubling
+	// allocation when re-encoded as a JSON-escaped string.
+	maxMetricsFileBytes int64 = 4 << 20 // 4 MiB
+
+	// maxArtifactFileBytes caps the size of a single task artifact .md file
+	// served via GET /artifacts/{taskId}. AI-generated artifacts are typically
+	// tens of KB; a 4 MiB cap covers very chatty runs while preventing a
+	// runaway artifact (or one tampered with on disk) from OOM-ing the server.
+	maxArtifactFileBytes int64 = 4 << 20 // 4 MiB
 )
 
 // ipBucket is a token-bucket state for one remote IP.
@@ -626,11 +639,15 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 // Use Accept: application/json to get JSON; default is Prometheus text format.
 func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	metricsPath := filepath.Join(s.WorkDir, ".cloop", "metrics.json")
-	data, err := os.ReadFile(metricsPath)
+	data, err := boundedread.ReadFile(metricsPath, maxMetricsFileBytes)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, os.ErrNotExist) {
 			// No metrics file yet — return empty metrics.
 			jsonOK(w, map[string]any{"error": "no metrics data yet"})
+			return
+		}
+		if errors.Is(err, boundedread.ErrTooLarge) {
+			jsonErr(w, "metrics file exceeds size limit", http.StatusRequestEntityTooLarge)
 			return
 		}
 		jsonErr(w, "failed to read metrics: "+err.Error(), http.StatusInternalServerError)
@@ -683,8 +700,12 @@ func (s *Server) handleArtifact(w http.ResponseWriter, r *http.Request) {
 		name := e.Name()
 		// Match <id>-<slug>.md but not the -verify.md variant.
 		if strings.HasPrefix(name, prefix) && strings.HasSuffix(name, ".md") && !strings.HasSuffix(name, "-verify.md") {
-			data, err := os.ReadFile(filepath.Join(dir, name))
+			data, err := boundedread.ReadFile(filepath.Join(dir, name), maxArtifactFileBytes)
 			if err != nil {
+				if errors.Is(err, boundedread.ErrTooLarge) {
+					jsonErr(w, "artifact exceeds size limit", http.StatusRequestEntityTooLarge)
+					return
+				}
 				jsonErr(w, "failed to read artifact: "+err.Error(), http.StatusInternalServerError)
 				return
 			}
