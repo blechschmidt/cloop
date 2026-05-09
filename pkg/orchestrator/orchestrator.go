@@ -1759,6 +1759,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			consecutiveErrors++
 			failColor.Printf("✗ Task %d: provider returned empty output (consecutive errors: %d/%d)\n",
 				task.ID, consecutiveErrors, maxConsecutiveErrors)
+			pm.AddAnnotation(task, "ai", fmt.Sprintf("Task re-queued: provider returned empty output (consecutive errors: %d/%d).", consecutiveErrors, maxConsecutiveErrors))
 			task.Status = pm.TaskPending
 			s.Save()
 			if consecutiveErrors >= maxConsecutiveErrors {
@@ -3062,6 +3063,7 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 			if result == nil || strings.TrimSpace(result.Output) == "" {
 				failColor.Printf("✗ Task %d: provider returned empty output\n", task.ID)
 				mu.Lock()
+				pm.AddAnnotation(task, "ai", fmt.Sprintf("Task re-queued: provider returned empty output (parallel mode, consecutive errors: %d/%d).", consecutiveErrors+1, maxConsecutiveErrors))
 				task.Status = pm.TaskPending
 				consecutiveErrors++
 				s.Save()
@@ -3797,6 +3799,7 @@ func (o *Orchestrator) evolve(ctx context.Context) error {
 				if result == nil || strings.TrimSpace(result.Output) == "" {
 					consecutiveEmptyOutputs++
 					failColor.Printf("✗ Provider returned empty output on task %d (consecutive empty: %d/%d)\n", nextTask.ID, consecutiveEmptyOutputs, maxConsecutiveEmpty)
+					pm.AddAnnotation(nextTask, "ai", fmt.Sprintf("Task re-queued: provider returned empty output (evolve mode, consecutive empty: %d/%d).", consecutiveEmptyOutputs, maxConsecutiveEmpty))
 					nextTask.Status = pm.TaskPending
 					nextTask.StartedAt = nil
 					if consecutiveEmptyOutputs >= maxConsecutiveEmpty {
