@@ -2920,6 +2920,79 @@ func TestRunPMParallel_ClarificationQuestions_DontSilentlyPass(t *testing.T) {
 	}
 }
 
+// TestEvolve_ClarificationQuestions_DontSilentlyPass locks in the fail-closed
+// reroute for unanswered clarification questions in the auto-evolve path
+// (commit be4d52b, pkg/orchestrator/orchestrator.go:3768). This is the third
+// and final site that uses looksLikeClarificationQuestion, completing the
+// regression triad: TestRunPM_ClarificationQuestions_DontSilentlyPass
+// (sequential runPM, line 1968), TestRunPMParallel_ClarificationQuestions_
+// DontSilentlyPass (parallel runPMParallel, line 3072), and this test
+// (auto-evolve task path, line 3768).
+//
+// Why this matters here even though evolve has no MaxFailures-on-clarification
+// counter: evolve has no auto-resolve loop either (unlike sequential runPM).
+// Without the reroute, a TaskInProgress with clarification questions falls into
+// the `default:` arm of the switch at orchestrator.go:3781 and is silently
+// marked DONE — the same fail-open class the reroute exists to close. The
+// reroute converts it to TaskFailed before the switch, surfacing the
+// "asked questions but did no work" condition honestly. Each task therefore
+// becomes a real failure that the operator can see in state, instead of being
+// laundered into "task complete with empty work".
+func TestEvolve_ClarificationQuestions_DontSilentlyPass(t *testing.T) {
+	dir := tempDir(t)
+	s := initState(t, dir, "goal", 0)
+	s.AutoEvolve = true
+	s.Plan = &pm.Plan{
+		Goal: "goal",
+		Tasks: []*pm.Task{
+			{ID: 1, Title: "Evolve A", Priority: 1, Status: pm.TaskPending},
+			{ID: 2, Title: "Evolve B", Priority: 2, Status: pm.TaskPending},
+			{ID: 3, Title: "Evolve C", Priority: 3, Status: pm.TaskPending},
+		},
+	}
+	s.Save()
+
+	// Match looksLikeClarificationQuestion: at least one pattern + a `?`.
+	// "before i proceed" + "should i " + `?` triggers the detector.
+	question := "Before I proceed, should I use option A or option B?"
+
+	// One clarification response per task = 3 calls total. After the third,
+	// afterExhaust cancels ctx so the otherwise-unbounded auto-evolve loop
+	// exits cleanly (after evolve marks task 3 failed and continues, the
+	// next iteration's ctx.Done() check returns "complete").
+	ctx, cancel := context.WithCancel(context.Background())
+	prov := &mockProvider{
+		name: "mock",
+		results: []*provider.Result{
+			{Output: question, Provider: "mock"},
+			{Output: question, Provider: "mock"},
+			{Output: question, Provider: "mock"},
+		},
+		afterExhaust: cancel,
+	}
+	o := newOrchestrator(t, dir, Config{WorkDir: dir, MaxFailures: 5}, prov)
+	if err := o.evolve(ctx); err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// All three tasks must be marked TaskFailed. If any is TaskDone, the
+	// no-signal default arm silently passed clarification-only output —
+	// the exact regression this test exists to catch.
+	for _, task := range o.state.Plan.Tasks {
+		if task.Status == pm.TaskDone {
+			t.Errorf("task %d (%s) was silently marked TaskDone despite clarification-only output — fail-open regression",
+				task.ID, task.Title)
+		}
+		if task.Status != pm.TaskFailed {
+			t.Errorf("task %d (%s): expected TaskFailed (clarification reroute), got %q",
+				task.ID, task.Title, task.Status)
+		}
+	}
+	if prov.calls != 3 {
+		t.Errorf("expected exactly 3 provider calls (one per task), got %d", prov.calls)
+	}
+}
+
 // TestRunPM_HealEmptyOutputDoesNotSilentlyPass locks down the heal-loop
 // empty-output guard added alongside the runLoop / runPM main-task / evolve
 // guards (commits 1d3c8a8, ceaf396, 9d94cad). Without it, a heal attempt
