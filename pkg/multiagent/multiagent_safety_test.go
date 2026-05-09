@@ -74,6 +74,95 @@ func TestRunTask_PanickingProviderIsRecovered(t *testing.T) {
 	}
 }
 
+// emptyOutputProvider returns (*Result{Output:""}, nil) on every Complete
+// call. Models a provider that's failing silently — a swallowed CLI error,
+// a transient hiccup that returned 200 with an empty body, or a third-party
+// SDK that mistakenly returns success on a bad response. Without the
+// empty-output guard in safeComplete, the architect pass would write "" into
+// res.ArchitectOutput and the coder would be asked to "implement the task
+// following the architect's design above" with an empty design block — and
+// the reviewer's default switch arm would silently vote TaskDone, masking
+// the upstream hiccup as a successful no-op task.
+type emptyOutputProvider struct{}
+
+func (emptyOutputProvider) Complete(_ context.Context, _ string, _ provider.Options) (*provider.Result, error) {
+	return &provider.Result{Output: "", Provider: "empty-ma", Model: "empty-model"}, nil
+}
+func (emptyOutputProvider) Name() string         { return "empty-ma" }
+func (emptyOutputProvider) DefaultModel() string { return "empty-model" }
+
+// nilResultProvider returns (nil, nil) on every Complete call. Models a
+// buggy provider that violates the (result, err) contract. WithPanicSafety
+// at the factory layer normally catches this, but safeComplete is called
+// with raw provider.Provider implementations in tests and as defense-in-depth
+// against direct mocks.
+type nilResultProvider struct{}
+
+func (nilResultProvider) Complete(_ context.Context, _ string, _ provider.Options) (*provider.Result, error) {
+	return nil, nil
+}
+func (nilResultProvider) Name() string         { return "nilresult-ma" }
+func (nilResultProvider) DefaultModel() string { return "nilresult-model" }
+
+// TestRunTask_EmptyOutputSurfacesAsError verifies that an empty-output
+// success from the architect pass is surfaced as an error instead of
+// flowing into res.ArchitectOutput="" and being fed to the coder. Without
+// this guard the pipeline would silently consume budget on a degenerate
+// run and end with a default-true reviewer verdict.
+func TestRunTask_EmptyOutputSurfacesAsError(t *testing.T) {
+	task := &pm.Task{ID: 3, Title: "empty task", Description: "do thing"}
+
+	_, err := RunTask(
+		context.Background(),
+		emptyOutputProvider{},
+		"some-model",
+		time.Second,
+		task,
+		"goal",
+		"instructions",
+		"",
+	)
+	if err == nil {
+		t.Fatalf("expected error from empty-output provider, got nil")
+	}
+	if !strings.Contains(err.Error(), "empty output") {
+		t.Fatalf("expected 'empty output' in error, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "empty-ma") {
+		t.Fatalf("expected provider name in error, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "architect pass") {
+		t.Fatalf("expected pass-name wrapper, got: %v", err)
+	}
+}
+
+// TestRunTask_NilResultSurfacesAsError verifies that a (nil, nil) return is
+// surfaced as an error rather than NPE'ing on the immediate
+// res.ArchitectOutput = archResult.Output dereference at multiagent.go:115.
+func TestRunTask_NilResultSurfacesAsError(t *testing.T) {
+	task := &pm.Task{ID: 4, Title: "nil result task", Description: "do thing"}
+
+	_, err := RunTask(
+		context.Background(),
+		nilResultProvider{},
+		"some-model",
+		time.Second,
+		task,
+		"goal",
+		"instructions",
+		"",
+	)
+	if err == nil {
+		t.Fatalf("expected error from nil-result provider, got nil")
+	}
+	if !strings.Contains(err.Error(), "empty output") {
+		t.Fatalf("expected 'empty output' in error, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "architect pass") {
+		t.Fatalf("expected pass-name wrapper, got: %v", err)
+	}
+}
+
 // TestRunTask_CancelledCtxBailsBeforeNextPass verifies that when the
 // caller's ctx is cancelled before the pipeline starts, RunTask returns at
 // the first guard rather than running every remaining pass. Without the
