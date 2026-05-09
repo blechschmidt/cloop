@@ -169,13 +169,13 @@ var daemonRestartCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		workdir, _ := os.Getwd()
 
-		// Stop if running (ignore "not running" errors).
+		// Stop if running. daemon.Stop blocks until the worker exits (or is
+		// force-killed), so the subsequent start sees a clean PID slot — no
+		// arbitrary sleep needed.
 		if running, _ := daemon.IsRunning(workdir); running {
 			if err := daemon.Stop(workdir); err != nil {
 				return fmt.Errorf("stopping daemon: %w", err)
 			}
-			// Give it a moment to terminate.
-			time.Sleep(500 * time.Millisecond)
 		}
 
 		// Delegate to the start logic.

@@ -5,6 +5,7 @@ package daemon
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -77,8 +78,15 @@ func LogPath(workdir string) string {
 }
 
 // Load reads the daemon state from disk; returns nil if not found.
+//
+// On parse failure (zero-byte file, schema drift, manual edit gone wrong) the
+// corrupt file is quarantined aside as daemon.json.corrupt-<unix> and
+// (nil, nil) is returned. Losing the daemon counters/last-error is preferable
+// to wedging `cloop daemon status` and the orchestrator's heartbeat reads —
+// the bytes are preserved next to the original location for forensics.
 func Load(workdir string) (*State, error) {
-	data, err := os.ReadFile(StatePath(workdir))
+	path := StatePath(workdir)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
@@ -87,7 +95,13 @@ func Load(workdir string) (*State, error) {
 	}
 	var s State
 	if err := json.Unmarshal(data, &s); err != nil {
-		return nil, fmt.Errorf("corrupt daemon state: %w", err)
+		qpath := atomicfile.QuarantineCorrupt(path)
+		if qpath != "" {
+			fmt.Fprintf(os.Stderr, "warning: daemon state at %s was corrupt (%v); quarantined to %s, starting fresh\n", path, err, qpath)
+		} else {
+			fmt.Fprintf(os.Stderr, "warning: daemon state at %s was corrupt (%v) and could not be quarantined; ignoring\n", path, err)
+		}
+		return nil, nil
 	}
 	return &s, nil
 }
@@ -152,8 +166,37 @@ func IsRunning(workdir string) (bool, int) {
 	return true, pid
 }
 
-// Stop sends SIGTERM to the daemon process.
+// stopGraceTimeout bounds how long Stop waits for the daemon worker to exit
+// after SIGTERM before escalating to SIGKILL. The worker may have HTTP servers
+// or running tasks to drain, so this is generous; tune via StopWithTimeout if
+// callers need a stricter bound.
+const stopGraceTimeout = 15 * time.Second
+
+// stopPollInterval is how often Stop polls Signal(0) to check whether the
+// worker has exited. Cheap because Signal(0) is a syscall that doesn't touch
+// the process — we just want to notice exit promptly without busy-looping.
+const stopPollInterval = 100 * time.Millisecond
+
+// Stop sends SIGTERM to the daemon worker and waits for it to exit, escalating
+// to SIGKILL if the worker doesn't terminate within stopGraceTimeout.
+//
+// Unlike a fire-and-forget signal + os.Remove(pidPath), this:
+//  1. Lets the worker run its own cleanup (PID-file removal, final state Save,
+//     HTTP-server graceful shutdown) before Stop returns. A subsequent
+//     `daemon start` therefore sees a clean slate instead of racing the
+//     drain.
+//  2. Forcibly cleans up if the worker is wedged, so a stuck daemon can
+//     always be replaced.
+//
+// Returns nil on clean exit; a wrapped error if SIGKILL was needed (the
+// daemon is gone, but the caller should know it didn't shut down cleanly).
 func Stop(workdir string) error {
+	return StopWithTimeout(workdir, stopGraceTimeout)
+}
+
+// StopWithTimeout is Stop with a caller-supplied grace period. Used by tests
+// to drive the SIGKILL escalation path without waiting the production default.
+func StopWithTimeout(workdir string, grace time.Duration) error {
 	running, pid := IsRunning(workdir)
 	if !running {
 		return fmt.Errorf("daemon is not running")
@@ -165,9 +208,27 @@ func Stop(workdir string) error {
 	if err := proc.Signal(syscall.SIGTERM); err != nil {
 		return fmt.Errorf("failed to stop daemon (pid %d): %w", pid, err)
 	}
-	// Remove PID file after signalling.
+
+	// Poll until the process exits or we hit the grace deadline. Signal(0)
+	// returns nil while the process is alive; once it's reaped or no longer
+	// exists, the syscall errors and we know the worker is gone.
+	deadline := time.Now().Add(grace)
+	for time.Now().Before(deadline) {
+		if err := proc.Signal(syscall.Signal(0)); err != nil {
+			return nil
+		}
+		time.Sleep(stopPollInterval)
+	}
+
+	// Worker didn't exit within grace — escalate. SIGKILL is uncatchable, so
+	// we also remove the PID file ourselves since the worker won't get the
+	// chance to clean up.
+	if killErr := proc.Signal(syscall.SIGKILL); killErr != nil && !errors.Is(killErr, os.ErrProcessDone) {
+		os.Remove(PIDPath(workdir))
+		return fmt.Errorf("daemon (pid %d) did not exit within %s and SIGKILL failed: %w", pid, grace, killErr)
+	}
 	os.Remove(PIDPath(workdir))
-	return nil
+	return fmt.Errorf("daemon (pid %d) did not exit within %s; force-killed", pid, grace)
 }
 
 // RemovePID removes the PID file (called by worker on clean exit).

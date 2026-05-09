@@ -63,7 +63,14 @@ func activeWorkspacePath() (string, error) {
 	return filepath.Join(dir, "active_workspace"), nil
 }
 
-// load reads the registry from disk; returns empty registry if file does not exist.
+// load reads the registry from disk; returns empty registry if file does not
+// exist. On parse failure the corrupt file is quarantined aside as
+// workspaces.json.corrupt-<unix> and an empty registry is returned. The
+// alternative — propagating the parse error — would brick every `cloop
+// workspace *` subcommand globally for the user until they manually deleted
+// the file, since the registry lives in the user's XDG config and isn't
+// project-scoped. Quarantining preserves the bad bytes for forensics; the
+// next `cloop workspace add` will write a fresh registry.
 func load() (*registry, error) {
 	path, err := registryPath()
 	if err != nil {
@@ -78,7 +85,13 @@ func load() (*registry, error) {
 	}
 	var reg registry
 	if err := json.Unmarshal(data, &reg); err != nil {
-		return nil, fmt.Errorf("parsing workspace registry: %w", err)
+		qpath := atomicfile.QuarantineCorrupt(path)
+		if qpath != "" {
+			fmt.Fprintf(os.Stderr, "warning: workspace registry at %s was corrupt (%v); quarantined to %s, starting fresh\n", path, err, qpath)
+		} else {
+			fmt.Fprintf(os.Stderr, "warning: workspace registry at %s was corrupt (%v) and could not be quarantined; ignoring\n", path, err)
+		}
+		return &registry{}, nil
 	}
 	return &reg, nil
 }

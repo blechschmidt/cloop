@@ -2,8 +2,11 @@ package daemon
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -137,5 +140,134 @@ func TestWritePID_Atomic(t *testing.T) {
 	got := ReadPID(dir)
 	if got < 1000 || got >= 1020 {
 		t.Fatalf("ReadPID returned %d, expected one of 1000..1019", got)
+	}
+}
+
+// TestStop_NoDaemonRunning verifies Stop returns a clear error when there's
+// nothing to stop (no PID file or stale PID).
+func TestStop_NoDaemonRunning(t *testing.T) {
+	dir := t.TempDir()
+	err := Stop(dir)
+	if err == nil {
+		t.Fatal("Stop on empty workdir: expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "not running") {
+		t.Errorf("Stop error should mention 'not running'; got %v", err)
+	}
+}
+
+// TestStop_BlocksUntilWorkerExits is the load-bearing regression test: Stop
+// must not return before the daemon worker has cleaned up (removed its PID
+// file, fsynced final state, etc.). Otherwise a `daemon stop && daemon start`
+// pair can race and spawn two workers.
+//
+// We simulate a worker by spawning `sleep`, writing its PID, and verifying
+// that Stop returns ~immediately after the process is gone (sleep exits on
+// SIGTERM ~instantly). A reaper goroutine calls Wait() so the child doesn't
+// linger as a zombie that Signal(0) would still see as "alive" — in
+// production the daemon worker is detached and reaped by init, so the same
+// concern doesn't apply there.
+func TestStop_BlocksUntilWorkerExits(t *testing.T) {
+	if _, err := exec.LookPath("sleep"); err != nil {
+		t.Skip("sleep not available")
+	}
+	dir := t.TempDir()
+
+	cmd := exec.Command("sleep", "30")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("spawning sleep: %v", err)
+	}
+	waited := make(chan struct{})
+	go func() {
+		_, _ = cmd.Process.Wait()
+		close(waited)
+	}()
+	defer func() {
+		_ = cmd.Process.Kill()
+		<-waited
+	}()
+
+	if err := WritePID(dir, cmd.Process.Pid); err != nil {
+		t.Fatalf("WritePID: %v", err)
+	}
+
+	// Stop should send SIGTERM, see the process die, and return cleanly.
+	start := time.Now()
+	if err := Stop(dir); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	elapsed := time.Since(start)
+
+	// sleep dies promptly on SIGTERM; we should observe that within a
+	// poll-interval or two. Anything close to the production grace timeout
+	// would mean Stop wasn't actually polling for exit.
+	if elapsed > 2*time.Second {
+		t.Errorf("Stop took %s — should have returned shortly after SIGTERM-induced exit", elapsed)
+	}
+
+	<-waited
+	// Process must really be gone.
+	if err := cmd.Process.Signal(syscall.Signal(0)); err == nil {
+		t.Error("sleep process is still alive after Stop returned")
+	}
+}
+
+// TestStopWithTimeout_EscalatesToSIGKILL covers the wedged-worker path: if
+// the daemon ignores SIGTERM (here, a subprocess that traps it), Stop must
+// escalate to SIGKILL within the grace window so a stuck daemon can always be
+// replaced. The PID file must be removed in that case since the killed
+// worker can't run its own cleanup.
+func TestStopWithTimeout_EscalatesToSIGKILL(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+	dir := t.TempDir()
+
+	// Trap SIGTERM and keep sleeping; only SIGKILL will reap this.
+	script := `trap '' TERM; while true; do sleep 1; done`
+	cmd := exec.Command("sh", "-c", script)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("spawning trap script: %v", err)
+	}
+	waited := make(chan struct{})
+	go func() {
+		_, _ = cmd.Process.Wait()
+		close(waited)
+	}()
+	defer func() {
+		_ = cmd.Process.Kill()
+		<-waited
+	}()
+
+	if err := WritePID(dir, cmd.Process.Pid); err != nil {
+		t.Fatalf("WritePID: %v", err)
+	}
+
+	// Use a short grace so the test isn't slow.
+	start := time.Now()
+	err := StopWithTimeout(dir, 300*time.Millisecond)
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("StopWithTimeout: expected escalation error, got nil")
+	}
+	if !strings.Contains(err.Error(), "force-killed") && !strings.Contains(err.Error(), "did not exit") {
+		t.Errorf("expected force-kill diagnostic; got %v", err)
+	}
+	if elapsed < 250*time.Millisecond {
+		t.Errorf("StopWithTimeout returned in %s — should have waited the full grace period before SIGKILL", elapsed)
+	}
+
+	// Wait for SIGKILL to actually reap the process before asserting.
+	select {
+	case <-waited:
+	case <-time.After(2 * time.Second):
+		t.Error("trap subprocess is still alive after force-kill path")
+	}
+
+	// PID file must be cleaned up since the killed worker couldn't.
+	if _, statErr := os.Stat(PIDPath(dir)); statErr == nil {
+		t.Error("PID file should be removed after SIGKILL escalation")
+	} else if !os.IsNotExist(statErr) {
+		t.Errorf("unexpected stat error: %v", statErr)
 	}
 }

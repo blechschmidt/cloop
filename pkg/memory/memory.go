@@ -44,6 +44,14 @@ type Memory struct {
 }
 
 // Load reads memory from disk. Returns empty memory if file doesn't exist.
+//
+// On parse failure (zero-byte file, schema drift, manual edit gone wrong) the
+// corrupt file is quarantined aside as memory.json.corrupt-<unix> and an
+// empty Memory is returned. The alternative — propagating a parse error —
+// would silently drop every accumulated learning across all sessions for the
+// rest of the run, since most callers ignore the error and treat memory as
+// empty anyway. Quarantining preserves the bad bytes for forensics and makes
+// the loss explicit via a stderr warning.
 func Load(workDir string) (*Memory, error) {
 	path := filepath.Join(workDir, memoryFile)
 	data, err := os.ReadFile(path)
@@ -55,7 +63,13 @@ func Load(workDir string) (*Memory, error) {
 	}
 	var m Memory
 	if err := json.Unmarshal(data, &m); err != nil {
-		return nil, fmt.Errorf("parse memory: %w", err)
+		qpath := atomicfile.QuarantineCorrupt(path)
+		if qpath != "" {
+			fmt.Fprintf(os.Stderr, "warning: memory at %s was corrupt (%v); quarantined to %s, starting fresh\n", path, err, qpath)
+		} else {
+			fmt.Fprintf(os.Stderr, "warning: memory at %s was corrupt (%v) and could not be quarantined; ignoring\n", path, err)
+		}
+		return &Memory{NextID: 1}, nil
 	}
 	if m.NextID == 0 {
 		m.NextID = len(m.Entries) + 1

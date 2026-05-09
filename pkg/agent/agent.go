@@ -57,8 +57,15 @@ func LogPath(workdir string) string {
 }
 
 // Load reads the agent state from disk; returns nil if not found.
+//
+// On parse failure (zero-byte file from a torn pre-atomicfile write, schema
+// drift, manual edit gone wrong) the corrupt file is quarantined aside as
+// agent.json.corrupt-<unix> and (nil, nil) is returned. Losing run counters
+// is preferable to refusing to start the daemon — and the user has the bytes
+// preserved next to the original location for forensics.
 func Load(workdir string) (*State, error) {
-	data, err := os.ReadFile(StatePath(workdir))
+	path := StatePath(workdir)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
@@ -67,7 +74,13 @@ func Load(workdir string) (*State, error) {
 	}
 	var s State
 	if err := json.Unmarshal(data, &s); err != nil {
-		return nil, fmt.Errorf("corrupt agent state: %w", err)
+		qpath := atomicfile.QuarantineCorrupt(path)
+		if qpath != "" {
+			fmt.Fprintf(os.Stderr, "warning: agent state at %s was corrupt (%v); quarantined to %s, starting fresh\n", path, err, qpath)
+		} else {
+			fmt.Fprintf(os.Stderr, "warning: agent state at %s was corrupt (%v) and could not be quarantined; ignoring\n", path, err)
+		}
+		return nil, nil
 	}
 	return &s, nil
 }
