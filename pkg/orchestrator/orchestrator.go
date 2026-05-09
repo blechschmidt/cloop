@@ -403,6 +403,11 @@ func New(cfg Config, prov provider.Provider) (*Orchestrator, error) {
 	if cfg.MaxParallel > 0 {
 		s.MaxParallel = cfg.MaxParallel
 	}
+	// Persist CLI-driven overrides so the running loop's SyncFromDisk reads them
+	// back instead of overwriting the in-memory values from a stale on-disk state
+	// (mergeExternalTasks copies disk → memory for these toggles, so without this
+	// SaveDirect the overrides would be silently clobbered on the first Save).
+	_ = s.SaveDirect()
 	mem, _ := memory.Load(cfg.WorkDir)
 	if mem == nil {
 		mem = &memory.Memory{}
@@ -2908,8 +2913,11 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 		}
 
 		// Apply worker pool limit: cap the batch to MaxParallel if set.
-		if o.config.MaxParallel > 0 && len(ready) > o.config.MaxParallel {
-			ready = ready[:o.config.MaxParallel]
+		// Read from live state (refreshed via SyncFromDisk above) so UI changes
+		// to max-parallel take effect on the next iteration without a restart.
+		maxParallel := s.MaxParallel
+		if maxParallel > 0 && len(ready) > maxParallel {
+			ready = ready[:maxParallel]
 		}
 
 		// Mark all ready tasks as in-progress before starting goroutines.

@@ -1902,6 +1902,95 @@ func TestRunPMParallel_MaxParallel_Zero_AllTasksRunAtOnce(t *testing.T) {
 	}
 }
 
+// liveCapProvider tracks per-round peak concurrency and, on its first call,
+// lowers the on-disk MaxParallel so subsequent rounds should pick up the new
+// cap via SyncFromDisk.
+type liveCapProvider struct {
+	mu               sync.Mutex
+	workDir          string
+	newCap           int
+	calls            int
+	concurrent       int
+	peakAfterChange  int
+	changed          bool
+}
+
+func (p *liveCapProvider) Complete(_ context.Context, _ string, _ provider.Options) (*provider.Result, error) {
+	p.mu.Lock()
+	p.calls++
+	p.concurrent++
+	if p.changed && p.concurrent > p.peakAfterChange {
+		p.peakAfterChange = p.concurrent
+	}
+	first := p.calls == 1
+	p.mu.Unlock()
+
+	if first && p.workDir != "" {
+		// Mutate disk MaxParallel synchronously before any other Complete()
+		// call lands, so the orchestrator's next-round SyncFromDisk reads it.
+		if disk, err := state.Load(p.workDir); err == nil {
+			disk.MaxParallel = p.newCap
+			_ = disk.SaveDirect()
+		}
+		p.mu.Lock()
+		p.changed = true
+		p.mu.Unlock()
+	}
+
+	time.Sleep(20 * time.Millisecond)
+
+	p.mu.Lock()
+	p.concurrent--
+	p.mu.Unlock()
+	return &provider.Result{Output: "done\nTASK_DONE", Provider: "live-cap-mock"}, nil
+}
+func (p *liveCapProvider) Name() string         { return "live-cap-mock" }
+func (p *liveCapProvider) DefaultModel() string { return "mock-model" }
+
+// TestRunPMParallel_MaxParallel_LiveUpdate verifies that when the on-disk
+// MaxParallel is mutated mid-run (e.g. via the Web UI), subsequent iterations
+// of the parallel loop honour the new cap without an orchestrator restart.
+//
+// Layout: task 1 is a fan-out gate; tasks 2..5 all depend on task 1. With
+// MaxParallel=4 round 1 runs only task 1 (its provider call lowers the cap to
+// 2). Round 2 has tasks 2..5 ready: with the live-cap fix only 2 may run
+// concurrently; without it, all 4 would run.
+func TestRunPMParallel_MaxParallel_LiveUpdate(t *testing.T) {
+	dir := tempDir(t)
+	s := initState(t, dir, "goal", 0)
+	s.PMMode = true
+	s.Plan = &pm.Plan{
+		Goal: "goal",
+		Tasks: []*pm.Task{
+			{ID: 1, Title: "Gate", Priority: 1, Status: pm.TaskPending},
+			{ID: 2, Title: "B", Priority: 1, Status: pm.TaskPending, DependsOn: []int{1}},
+			{ID: 3, Title: "C", Priority: 1, Status: pm.TaskPending, DependsOn: []int{1}},
+			{ID: 4, Title: "D", Priority: 1, Status: pm.TaskPending, DependsOn: []int{1}},
+			{ID: 5, Title: "E", Priority: 1, Status: pm.TaskPending, DependsOn: []int{1}},
+		},
+	}
+	s.Save()
+
+	prov := &liveCapProvider{workDir: dir, newCap: 2}
+	o := newOrchestrator(t, dir, Config{WorkDir: dir, PMMode: true, Parallel: true, MaxParallel: 4}, prov)
+
+	if err := o.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if prov.calls != 5 {
+		t.Errorf("expected 5 provider calls, got %d", prov.calls)
+	}
+	if prov.peakAfterChange > 2 {
+		t.Errorf("post-change peak concurrency should respect live cap=2, got %d", prov.peakAfterChange)
+	}
+	final, _ := state.Load(dir)
+	for _, task := range final.Plan.Tasks {
+		if task.Status != pm.TaskDone {
+			t.Errorf("task %d: expected done, got %s", task.ID, task.Status)
+		}
+	}
+}
+
 // TestRunPMParallel_DependencyBlocking ensures tasks with deps wait for prerequisites.
 func TestRunPMParallel_DependencyBlocking(t *testing.T) {
 	dir := tempDir(t)
