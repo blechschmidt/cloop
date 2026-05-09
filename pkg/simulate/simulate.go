@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/atomicfile"
+	"github.com/blechschmidt/cloop/pkg/boundedread"
 	"github.com/blechschmidt/cloop/pkg/insights"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/provider"
@@ -345,14 +346,20 @@ func gatherCodebaseContext(workDir string) string {
 }
 
 // readFileTruncated reads a file and truncates it to maxBytes.
+//
+// Uses boundedread.ReadFileTruncated so a runaway README/package.json/go.mod
+// (committed binary, accidental log dump) does not OOM the process — the
+// kernel only ever copies maxBytes+1 from disk, and we slice down before
+// converting to a string. The "..." marker is preserved so the AI prompt
+// rendering matches the previous behaviour exactly when truncation occurs.
 func readFileTruncated(path string, maxBytes int) (string, error) {
-	data, err := os.ReadFile(path)
+	data, truncated, err := boundedread.ReadFileTruncated(path, int64(maxBytes))
 	if err != nil {
 		return "", err
 	}
 	s := string(data)
-	if len(s) > maxBytes {
-		s = s[:maxBytes] + "..."
+	if truncated {
+		s += "..."
 	}
 	return s, nil
 }

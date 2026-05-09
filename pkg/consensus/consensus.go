@@ -176,8 +176,49 @@ func RunConsensus(
 		return valid[0].Output, report, nil
 	}
 
-	// Ask the judge to score each candidate.
-	scores, err := judge(ctx, judgeProvider, judgeModel, opts.Timeout, taskTitle, valid)
+	// Ask the judge to score each candidate. The judge call honours ctx, but
+	// a misbehaving judge provider that ignores cancellation would otherwise
+	// pin RunConsensus past the fan-out grace period. Wrap the call in a
+	// watchdog with the same shape as the worker wait above: on ctx.Done +
+	// grace-period exhaustion, return ctx.Err() instead of falling through
+	// to the success path. Leaked goroutine still writes to judgeCh; the
+	// buffered channel absorbs the send so it doesn't block forever.
+	type judgeOutcome struct {
+		scores []Score
+		err    error
+	}
+	judgeCh := make(chan judgeOutcome, 1)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				judgeCh <- judgeOutcome{err: fmt.Errorf("judge panic: %v", r)}
+			}
+		}()
+		sc, jerr := judge(ctx, judgeProvider, judgeModel, opts.Timeout, taskTitle, valid)
+		judgeCh <- judgeOutcome{scores: sc, err: jerr}
+	}()
+
+	var (
+		scores []Score
+		err    error
+	)
+	select {
+	case res := <-judgeCh:
+		scores = res.scores
+		err = res.err
+	case <-ctx.Done():
+		select {
+		case res := <-judgeCh:
+			scores = res.scores
+			err = res.err
+		case <-time.After(consensusShutdownGracePeriod):
+			// Judge hung past grace period. Caller cancelled ctx; surface
+			// cancellation rather than silently returning a non-judged
+			// fallback that the caller would treat as a successful consensus.
+			return "", nil, ctx.Err()
+		}
+	}
+
 	if err != nil {
 		// Fallback: return the first valid response without scoring.
 		report := &Report{

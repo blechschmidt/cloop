@@ -76,6 +76,88 @@ func TestRunConsensus_HungProvider_HonoursGracePeriod(t *testing.T) {
 	}
 }
 
+// hungJudgeProvider blocks indefinitely on every Complete call, ignoring its
+// ctx argument. Used as the judge in TestRunConsensus_HungJudge_* — workers
+// are separate fast providers so the fan-out completes successfully and
+// RunConsensus advances to the (hung) judge call.
+type hungJudgeProvider struct {
+	name  string
+	hard  time.Duration
+	block <-chan struct{}
+}
+
+func (h *hungJudgeProvider) Complete(_ context.Context, _ string, _ provider.Options) (*provider.Result, error) {
+	select {
+	case <-h.block:
+	case <-time.After(h.hard):
+	}
+	return &provider.Result{Output: "[]", Provider: h.name, Model: "judge-model"}, nil
+}
+func (h *hungJudgeProvider) Name() string         { return h.name }
+func (h *hungJudgeProvider) DefaultModel() string { return "judge-model" }
+
+// TestRunConsensus_HungJudge_HonoursGracePeriod verifies that when workers
+// complete successfully but the judge provider ignores ctx.Done() and the
+// parent ctx is cancelled, RunConsensus returns within the grace period
+// instead of pinning the orchestrator on the unresponsive judge call.
+//
+// Without the judge-call watchdog, this test would block until the test
+// timeout (or the judge's hard cap) — RunConsensus would observe both
+// workers complete, then hang on judge() forever despite ctx being cancelled.
+func TestRunConsensus_HungJudge_HonoursGracePeriod(t *testing.T) {
+	prev := consensusShutdownGracePeriod
+	consensusShutdownGracePeriod = 100 * time.Millisecond
+	t.Cleanup(func() { consensusShutdownGracePeriod = prev })
+
+	block := make(chan struct{})
+	t.Cleanup(func() { close(block) })
+
+	// Two distinct fast workers so judge() is reached (judge is skipped
+	// when only one valid candidate survives).
+	a := &staticProvider{name: "a", output: "response-a"}
+	b := &staticProvider{name: "b", output: "response-b"}
+
+	// Judge: hang ignoring ctx. Workers (a, b) are separate fast providers,
+	// so the fan-out completes and RunConsensus advances to the judge call.
+	judge := &hungJudgeProvider{
+		name:  "judge",
+		hard:  10 * time.Second,
+		block: block,
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	// Cancel after workers have completed but while judge is hung.
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+
+	start := time.Now()
+	out, rep, err := RunConsensus(
+		ctx,
+		[]provider.Provider{a, b},
+		"prompt",
+		provider.Options{Timeout: 5 * time.Second},
+		judge, "", 2, 1, "test task",
+	)
+	elapsed := time.Since(start)
+
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+	if out != "" {
+		t.Errorf("expected empty output on early-return path, got %q", out)
+	}
+	if rep != nil {
+		t.Errorf("expected nil report on early-return path, got %+v", rep)
+	}
+	// Generous slack: cancel delay (~50ms) + grace (100ms) + scheduler noise.
+	// If we exceed 5s the watchdog clearly didn't fire.
+	if elapsed > 5*time.Second {
+		t.Fatalf("RunConsensus blocked for %s — judge watchdog did not fire", elapsed)
+	}
+}
+
 // TestRunConsensus_NoCancellation_StillWaitsForCompletion verifies the
 // watchdog does NOT fire on the happy path: when the parent ctx is not
 // cancelled, RunConsensus waits for workers to complete normally even with

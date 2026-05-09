@@ -3,14 +3,23 @@
 package ctxedit
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/blechschmidt/cloop/pkg/atomicfile"
+	"github.com/blechschmidt/cloop/pkg/boundedread"
 	"github.com/blechschmidt/cloop/pkg/pm"
 )
+
+// maxOverrideBytes caps a single context-override read. Real overrides are at
+// most a few KB of human-edited text; >1 MiB indicates corruption or a stray
+// log redirect, and an unbounded read would otherwise be inflated into the
+// next AI prompt.
+const maxOverrideBytes int64 = 1 << 20
 
 // OverrideDir is the subdirectory under workDir where override files are stored.
 const OverrideDir = ".cloop"
@@ -121,10 +130,13 @@ func Annotate(prompt string) (annotated string, sections []Section) {
 
 // LoadOverride reads the context override file for taskID from workDir.
 // Returns ("", nil) if no override exists.
+//
+// Capped at maxOverrideBytes so a corrupt or runaway override file cannot OOM
+// the process or balloon the next AI prompt.
 func LoadOverride(workDir string, taskID int) (string, error) {
 	path := OverridePath(workDir, taskID)
-	data, err := os.ReadFile(path)
-	if os.IsNotExist(err) {
+	data, err := boundedread.ReadFile(path, maxOverrideBytes)
+	if errors.Is(err, fs.ErrNotExist) {
 		return "", nil
 	}
 	if err != nil {

@@ -5,16 +5,25 @@ package testgen
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 
 	"github.com/blechschmidt/cloop/pkg/atomicfile"
+	"github.com/blechschmidt/cloop/pkg/boundedread"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/provider"
 )
+
+// maxArtifactBytes caps the per-task artifact read in Generate. Real cloop
+// artifacts are short markdown/text summaries (KB range); a runaway artifact
+// (corrupt write, accidentally committed log) would otherwise be slurped fully
+// into memory and re-encoded into a multi-MB AI prompt.
+const maxArtifactBytes int64 = 4 << 20
 
 // Lang represents the detected project / task language.
 type Lang string
@@ -154,13 +163,21 @@ func extractCode(raw string) string {
 // Generate calls the AI provider to produce a test suite, writes it to
 // .cloop/tests/<task-id>_test.<ext>, and returns a Result.
 func Generate(ctx context.Context, prov provider.Provider, opts provider.Options, workDir string, task *pm.Task, lang Lang) (*Result, error) {
-	// Read artifact content if available.
+	// Read artifact content if available. Cap at 4 MiB — anything larger is
+	// treated like a missing artifact (the AI gets no context rather than
+	// being fed a megabyte of unrelated bytes). Missing files are silent
+	// (matches prior behaviour); any other read error gets logged.
 	var artifactContent string
 	if task.ArtifactPath != "" {
 		absArtifact := filepath.Join(workDir, task.ArtifactPath)
-		data, err := os.ReadFile(absArtifact)
-		if err == nil {
+		data, err := boundedread.ReadFile(absArtifact, maxArtifactBytes)
+		switch {
+		case err == nil:
 			artifactContent = string(data)
+		case errors.Is(err, fs.ErrNotExist):
+			// no artifact yet — fine
+		default:
+			fmt.Fprintf(os.Stderr, "testgen: skipping artifact %s: %v\n", absArtifact, err)
 		}
 	}
 
