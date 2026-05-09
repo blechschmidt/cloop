@@ -155,6 +155,55 @@ func TestNew_ConcurrentDistinctNamesAllSucceed(t *testing.T) {
 	}
 }
 
+// TestList_QuarantinesCorruptSessionMeta verifies that a torn or hand-edited
+// session.json no longer makes the session permanently un-loadable. The bad
+// bytes are renamed aside as a .corrupt-* sibling and List skips that session
+// in its return value (load() returns an error which List treats as "skip
+// this entry"). The state.db that lives next to session.json is left alone —
+// only the metadata file is quarantined, so the user's actual session data
+// remains recoverable.
+func TestList_QuarantinesCorruptSessionMeta(t *testing.T) {
+	work := t.TempDir()
+
+	if _, err := session.New(work, "good", ""); err != nil {
+		t.Fatalf("new good: %v", err)
+	}
+	if _, err := session.New(work, "broken", ""); err != nil {
+		t.Fatalf("new broken: %v", err)
+	}
+
+	brokenMeta := filepath.Join(work, ".cloop", "sessions", "broken", "session.json")
+	if err := os.WriteFile(brokenMeta, []byte("{not json"), 0o644); err != nil {
+		t.Fatalf("corrupt meta: %v", err)
+	}
+
+	got, err := session.List(work)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(got) != 1 || got[0].Name != "good" {
+		t.Fatalf("expected only 'good' session in list, got %+v", got)
+	}
+
+	if _, err := os.Stat(brokenMeta); !os.IsNotExist(err) {
+		t.Fatalf("corrupt session.json should have been renamed away (stat err: %v)", err)
+	}
+	entries, err := os.ReadDir(filepath.Dir(brokenMeta))
+	if err != nil {
+		t.Fatalf("readdir: %v", err)
+	}
+	foundCorrupt := false
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".corrupt-") {
+			foundCorrupt = true
+			break
+		}
+	}
+	if !foundCorrupt {
+		t.Fatalf("expected a .corrupt-* sibling preserving the bad bytes; entries=%v", entries)
+	}
+}
+
 // TestNew_ConcurrentSameNameOneWinsExclusively verifies the stat-then-mkdir
 // invariant: when N goroutines all try to create the same session name, only
 // one succeeds and the rest get "already exists" — no two ever return ok.

@@ -109,6 +109,12 @@ func Evaluate(ctx context.Context, prov provider.Provider, model string, timeout
 
 // Load reads a previously saved EvalResult for the given task ID.
 // Returns nil, nil if no result exists yet.
+//
+// A torn or hand-edited eval file used to abort `cloop eval show`, the auto-
+// promote heuristic, and any UI handler that lists per-task scores. The bad
+// bytes are now quarantined to a sibling .corrupt-* file and Load returns
+// (nil, nil) so the caller treats the task as un-evaluated. The next eval run
+// re-creates the file cleanly.
 func Load(workDir string, taskID int) (*EvalResult, error) {
 	path := evalPath(workDir, taskID)
 	data, err := os.ReadFile(path)
@@ -120,7 +126,13 @@ func Load(workDir string, taskID int) (*EvalResult, error) {
 	}
 	var r EvalResult
 	if err := json.Unmarshal(data, &r); err != nil {
-		return nil, fmt.Errorf("parse eval result: %w", err)
+		qpath := atomicfile.QuarantineCorrupt(path)
+		if qpath != "" {
+			fmt.Fprintf(os.Stderr, "warning: eval result at %s was corrupt (%v); quarantined to %s, treating task as un-evaluated\n", path, err, qpath)
+		} else {
+			fmt.Fprintf(os.Stderr, "warning: eval result at %s was corrupt (%v) and could not be quarantined; ignoring\n", path, err)
+		}
+		return nil, nil
 	}
 	return &r, nil
 }

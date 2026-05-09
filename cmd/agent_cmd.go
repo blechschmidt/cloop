@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"runtime/debug"
 	"strings"
 	"syscall"
 	"time"
@@ -372,7 +373,7 @@ var agentWorkerCmd = &cobra.Command{
 		defer ticker.Stop()
 
 		// Run immediately on start, then on each tick
-		runAgentCycle(ctx, workdir, s, logf)
+		runAgentCycleSafely(ctx, workdir, s, logf)
 
 		for {
 			s.NextRunAt = time.Now().Add(interval)
@@ -385,10 +386,36 @@ var agentWorkerCmd = &cobra.Command{
 				if ctx.Err() != nil {
 					return nil
 				}
-				runAgentCycle(ctx, workdir, s, logf)
+				runAgentCycleSafely(ctx, workdir, s, logf)
 			}
 		}
 	},
+}
+
+// runAgentCycleSafely wraps runAgentCycle with per-iteration panic recovery.
+// The agent worker is a long-running daemon that re-enters the cycle every
+// `interval`; without this wrapper, a single nil-deref or other panic in any
+// part of the cycle (provider call, state parse, task mutation) would tear
+// down the worker goroutine and the deferred Save would be the last write
+// before exit, leaving the user with no agent until manual restart. With
+// recovery, we record the panic to State.LastError + Status="error" so the
+// next status query surfaces it, and the loop continues to the next tick.
+func runAgentCycleSafely(ctx context.Context, workdir string, s *agent.State, logf func(string, ...interface{})) {
+	defer func() { recoverAgentCyclePanic(recover(), s, workdir, logf) }()
+	runAgentCycle(ctx, workdir, s, logf)
+}
+
+// recoverAgentCyclePanic is the recovery branch of runAgentCycleSafely,
+// extracted so it can be unit-tested without crafting a panicking cycle.
+// rec is the value returned by recover(); a nil value is a no-op.
+func recoverAgentCyclePanic(rec any, s *agent.State, workdir string, logf func(string, ...interface{})) {
+	if rec == nil {
+		return
+	}
+	logf("Cycle panic recovered: %v\n%s", rec, debug.Stack())
+	s.Status = "error"
+	s.LastError = fmt.Sprintf("cycle panic: %v", rec)
+	_ = s.Save(workdir)
 }
 
 // runAgentCycle executes one agent iteration: check for pending tasks and run them.

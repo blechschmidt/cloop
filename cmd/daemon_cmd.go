@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"runtime/debug"
 	"strings"
 	"syscall"
 	"time"
@@ -502,7 +503,7 @@ var daemonWorkerCmd = &cobra.Command{
 		defer ticker.Stop()
 
 		// Run once immediately on start.
-		runDaemonCycle(ctx, workdir, s, cfg, logf)
+		runDaemonCycleSafely(ctx, workdir, s, cfg, logf)
 
 		for {
 			s.NextRunAt = time.Now().Add(interval)
@@ -519,10 +520,34 @@ var daemonWorkerCmd = &cobra.Command{
 				if c, err2 := config.Load(workdir); err2 == nil {
 					cfg = c
 				}
-				runDaemonCycle(ctx, workdir, s, cfg, logf)
+				runDaemonCycleSafely(ctx, workdir, s, cfg, logf)
 			}
 		}
 	},
+}
+
+// runDaemonCycleSafely wraps runDaemonCycle with per-iteration panic recovery.
+// The daemon worker runs the cycle every `interval` for the lifetime of the
+// process; without this wrapper, a single panic anywhere in the cycle
+// (orchestrator, provider, hooks, webhook) takes the whole worker down and
+// the user has no daemon until manual restart. With recovery, the panic is
+// recorded to State.LastError + Status="error" and the loop continues.
+func runDaemonCycleSafely(ctx context.Context, workdir string, s *daemon.State, cfg *config.Config, logf func(string, ...interface{})) {
+	defer func() { recoverDaemonCyclePanic(recover(), s, workdir, logf) }()
+	runDaemonCycle(ctx, workdir, s, cfg, logf)
+}
+
+// recoverDaemonCyclePanic is the recovery branch of runDaemonCycleSafely,
+// extracted so it can be unit-tested without crafting a panicking cycle.
+// rec is the value returned by recover(); a nil value is a no-op.
+func recoverDaemonCyclePanic(rec any, s *daemon.State, workdir string, logf func(string, ...interface{})) {
+	if rec == nil {
+		return
+	}
+	logf("Cycle panic recovered: %v\n%s", rec, debug.Stack())
+	s.Status = "error"
+	s.LastError = fmt.Sprintf("cycle panic: %v", rec)
+	_ = s.Save(workdir)
 }
 
 // runDaemonCycle executes one daemon iteration: check for pending tasks and run them.

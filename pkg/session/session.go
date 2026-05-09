@@ -193,13 +193,25 @@ func currentActive(workDir string) string {
 
 func load(workDir, name string) (*Session, error) {
 	dir := Dir(workDir, name)
-	data, err := os.ReadFile(filepath.Join(dir, sessionMetaFile))
+	path := filepath.Join(dir, sessionMetaFile)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
 	var sess Session
 	if err := json.Unmarshal(data, &sess); err != nil {
-		return nil, err
+		// Quarantine the corrupt session.json so the user can repair the
+		// session by hand without losing the state.db that lives next to it.
+		// Returning the error keeps `cloop session switch <name>` honest —
+		// silently routing to a half-existent session would mask the problem
+		// and could surprise the user with the wrong working state.
+		qpath := atomicfile.QuarantineCorrupt(path)
+		if qpath != "" {
+			fmt.Fprintf(os.Stderr, "warning: session metadata at %s was corrupt (%v); quarantined to %s\n", path, err, qpath)
+		} else {
+			fmt.Fprintf(os.Stderr, "warning: session metadata at %s was corrupt (%v) and could not be quarantined\n", path, err)
+		}
+		return nil, fmt.Errorf("session %q metadata corrupt and quarantined: %w", name, err)
 	}
 	return &sess, nil
 }

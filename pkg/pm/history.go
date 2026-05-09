@@ -156,13 +156,25 @@ func LoadSnapshot(workDir string, version int) (*Snapshot, error) {
 			continue
 		}
 		if strings.HasSuffix(e.Name(), suffix) {
-			data, err := os.ReadFile(filepath.Join(dir, e.Name()))
+			path := filepath.Join(dir, e.Name())
+			data, err := os.ReadFile(path)
 			if err != nil {
 				return nil, fmt.Errorf("read snapshot %s: %w", e.Name(), err)
 			}
 			var snap Snapshot
 			if err := json.Unmarshal(data, &snap); err != nil {
-				return nil, fmt.Errorf("parse snapshot %s: %w", e.Name(), err)
+				// Quarantine the bad snapshot so subsequent snapshot/diff/restore
+				// commands stop tripping over it. The bytes are preserved as a
+				// .corrupt-<unix> sibling for forensic inspection. We surface the
+				// error so the user sees that *this specific version* is gone,
+				// but other versions remain loadable.
+				qpath := atomicfile.QuarantineCorrupt(path)
+				if qpath != "" {
+					fmt.Fprintf(os.Stderr, "warning: plan-history snapshot %s was corrupt (%v); quarantined to %s\n", path, err, qpath)
+				} else {
+					fmt.Fprintf(os.Stderr, "warning: plan-history snapshot %s was corrupt (%v) and could not be quarantined\n", path, err)
+				}
+				return nil, fmt.Errorf("snapshot v%d corrupt and quarantined: %w", version, err)
 			}
 			return &snap, nil
 		}
@@ -183,21 +195,42 @@ func ListSnapshots(workDir string) ([]*SnapshotMeta, error) {
 
 	var metas []*SnapshotMeta
 	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".json") {
 			continue
 		}
-		data, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		// Skip already-quarantined siblings (atomicfile.QuarantineCorrupt
+		// renames bad files to <name>.corrupt-<unix>) — they're forensic
+		// artefacts, not snapshots.
+		if strings.Contains(name, ".corrupt-") {
+			continue
+		}
+		path := filepath.Join(dir, name)
+		data, err := os.ReadFile(path)
 		if err != nil {
 			continue
 		}
 		var snap Snapshot
 		if err := json.Unmarshal(data, &snap); err != nil {
+			// Quarantine instead of silently re-skipping forever. Without this,
+			// a bad snapshot lingers and gets re-read on every `cloop snapshot
+			// list`, wasting I/O and masking real corruption from the user.
+			qpath := atomicfile.QuarantineCorrupt(path)
+			if qpath != "" {
+				fmt.Fprintf(os.Stderr, "warning: plan-history snapshot %s was corrupt (%v); quarantined to %s\n", path, err, qpath)
+			}
+			continue
+		}
+		// LoadSnapshot fingerprinting in SaveSnapshot dereferences snap.Plan; a
+		// nil plan in a partially-written file would panic this loop. Defensive
+		// nil-check costs nothing.
+		if snap.Plan == nil {
 			continue
 		}
 		metas = append(metas, &SnapshotMeta{
 			Version:   snap.Version,
 			Timestamp: snap.Timestamp,
-			Filename:  e.Name(),
+			Filename:  name,
 			TaskCount: len(snap.Plan.Tasks),
 			Summary:   snap.Plan.Summary(),
 		})

@@ -98,6 +98,53 @@ func TestSave_ReaderNeverSeesTornJSON(t *testing.T) {
 	wg.Wait()
 }
 
+// TestLoad_QuarantinesCorruptFile verifies that a hand-edited or torn-write
+// eval result is renamed aside (preserved as a .corrupt-* sibling) and Load
+// returns (nil, nil) so callers like `cloop eval show` and the auto-promote
+// heuristic can proceed instead of bailing on the whole project.
+func TestLoad_QuarantinesCorruptFile(t *testing.T) {
+	dir := t.TempDir()
+	const taskID = 7
+	if err := os.MkdirAll(filepath.Join(dir, ".cloop", "evals"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	path := evalPath(dir, taskID)
+	if err := os.WriteFile(path, []byte("{not valid json"), 0o644); err != nil {
+		t.Fatalf("seed corrupt file: %v", err)
+	}
+
+	r, err := Load(dir, taskID)
+	if err != nil {
+		t.Fatalf("Load returned error instead of recovering: %v", err)
+	}
+	if r != nil {
+		t.Fatalf("expected nil result for quarantined file, got %+v", r)
+	}
+
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("original corrupt file should have been renamed away (stat err: %v)", err)
+	}
+	entries, err := os.ReadDir(filepath.Dir(path))
+	if err != nil {
+		t.Fatalf("readdir: %v", err)
+	}
+	prefix := filepath.Base(path) + ".corrupt-"
+	found := false
+	for _, e := range entries {
+		if len(e.Name()) > len(prefix) && e.Name()[:len(prefix)] == prefix {
+			found = true
+			break
+		}
+	}
+	if !found {
+		names := make([]string, len(entries))
+		for i, e := range entries {
+			names[i] = e.Name()
+		}
+		t.Fatalf("expected a %s* sibling preserving the bad bytes; entries=%v", prefix, names)
+	}
+}
+
 // TestSave_FileIsValidJSON sanity-checks the format the atomic write produces.
 func TestSave_FileIsValidJSON(t *testing.T) {
 	dir := t.TempDir()
