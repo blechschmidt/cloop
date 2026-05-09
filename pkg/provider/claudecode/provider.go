@@ -81,23 +81,59 @@ func (p *Provider) Complete(ctx context.Context, prompt string, opts provider.Op
 	err := cmd.Run()
 	duration := time.Since(start)
 
-	if err != nil {
-		if _, ok := err.(*exec.ExitError); !ok {
-			return nil, fmt.Errorf("claude CLI error: %w", err)
-		}
-	}
-
 	output := stdout.String()
 	if output == "" && stderr.String() != "" {
 		output = stderr.String()
 	}
+	output = strings.TrimSpace(output)
+
+	if err != nil {
+		exitErr, ok := err.(*exec.ExitError)
+		if !ok {
+			return nil, fmt.Errorf("claude CLI error: %w", err)
+		}
+		// Distinguish fatal auth/API errors from benign non-zero exits.
+		// Without this, the orchestrator records the auth-failure message as a
+		// normal step output and re-runs forever (observed: 1500+ consecutive
+		// 401s in a single session).
+		if isFatalCLIError(output) {
+			return nil, fmt.Errorf("claude CLI auth/API failure (exit %d): %s", exitErr.ExitCode(), truncateForError(output))
+		}
+	}
 
 	return &provider.Result{
-		Output:   strings.TrimSpace(output),
+		Output:   output,
 		Duration: duration,
 		Provider: ProviderName,
 		Model:    opts.Model,
 	}, nil
+}
+
+// isFatalCLIError returns true when the claude CLI's combined stdout/stderr
+// output indicates an authentication failure or a clear API-side error that
+// will not resolve by retrying with the same credentials. Conservative: only
+// matches phrases the CLI emits for these exact failure modes.
+func isFatalCLIError(output string) bool {
+	lower := strings.ToLower(output)
+	switch {
+	case strings.Contains(lower, "failed to authenticate"):
+		return true
+	case strings.Contains(lower, "invalid authentication credentials"):
+		return true
+	case strings.Contains(lower, "authentication_error"):
+		return true
+	}
+	return false
+}
+
+// truncateForError caps an error's embedded output at a length useful for log
+// readability without flooding state.json or terminal scrollback.
+func truncateForError(s string) string {
+	const max = 512
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "...(truncated)"
 }
 
 func loadEnvFiles() {

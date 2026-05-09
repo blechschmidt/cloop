@@ -182,6 +182,78 @@ func TestComplete_PassesModelFlag(t *testing.T) {
 	}
 }
 
+func TestComplete_ReturnsErrorOnAuthFailure(t *testing.T) {
+	// When the CLI exits non-zero with an authentication error message, the
+	// provider must surface this as an error rather than silently returning the
+	// failure text as if it were a normal model response. Otherwise an
+	// autonomous loop will spin on the same auth failure indefinitely.
+	binDir := fakeClaudeScript(t,
+		"#!/bin/sh\n"+
+			"echo 'Failed to authenticate. API Error: 401 Invalid authentication credentials' >&2\n"+
+			"exit 1\n",
+	)
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+
+	p := New()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	result, err := p.Complete(ctx, "test", provider.Options{})
+	if err == nil {
+		t.Fatalf("expected error on CLI auth failure, got result=%+v", result)
+	}
+	if !strings.Contains(err.Error(), "401") || !strings.Contains(strings.ToLower(err.Error()), "authenticate") {
+		t.Errorf("error should mention the underlying auth failure, got: %v", err)
+	}
+}
+
+func TestComplete_NonZeroExitWithoutAuthSignalIsBenign(t *testing.T) {
+	// A non-zero exit without recognised auth/API markers must remain
+	// non-fatal so the orchestrator can keep running. (Existing behaviour
+	// callers depend on; the auth-error fix must not regress this.)
+	binDir := fakeClaudeScript(t,
+		"#!/bin/sh\n"+
+			"echo 'partial output before unrelated failure'\n"+
+			"exit 2\n",
+	)
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+
+	p := New()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	result, err := p.Complete(ctx, "test", provider.Options{})
+	if err != nil {
+		t.Fatalf("unexpected error on benign non-zero exit: %v", err)
+	}
+	if !strings.Contains(result.Output, "partial output") {
+		t.Errorf("expected partial output preserved, got %q", result.Output)
+	}
+}
+
+func TestIsFatalCLIError(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{"empty", "", false},
+		{"plain output", "Hello, this is a model response.", false},
+		{"failed to authenticate", "Failed to authenticate. API Error: 401 Invalid authentication credentials", true},
+		{"invalid auth credentials only", "API Error: 401 Invalid authentication credentials", true},
+		{"authentication_error in JSON", `{"type":"error","error":{"type":"authentication_error","message":"..."}}`, true},
+		{"unrelated 401-ish text", "the function returned 401 lines of output", false},
+		{"case-insensitive failed auth", "FAILED TO AUTHENTICATE: see logs", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isFatalCLIError(tc.in); got != tc.want {
+				t.Errorf("isFatalCLIError(%q) = %v, want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestComplete_OutputTrimmed(t *testing.T) {
 	// Provider trims whitespace from output.
 	binDir := fakeClaudeScript(t, "#!/bin/sh\nprintf '  trimmed output  '\n")
