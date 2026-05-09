@@ -55,6 +55,11 @@ func (f *Provider) DefaultModel() string {
 // Complete tries each provider in order, returning the first successful result.
 // If the context is cancelled, it stops immediately without trying further fallbacks.
 // On a provider error, it logs which provider failed and tries the next one.
+// A successful (err==nil) response with empty/whitespace-only output is treated
+// as a soft failure and falls through to the next provider — almost always a
+// transient hiccup rather than a legitimate empty answer, and serving it would
+// defeat the entire purpose of having fallbacks. Mirrors the empty-output skip
+// in pkg/provider/cached.
 // If all providers fail, it returns a combined error.
 func (f *Provider) Complete(ctx context.Context, prompt string, opts provider.Options) (*provider.Result, error) {
 	var errs []string
@@ -65,7 +70,7 @@ func (f *Provider) Complete(ctx context.Context, prompt string, opts provider.Op
 		}
 
 		result, err := p.Complete(ctx, prompt, opts)
-		if err == nil {
+		if err == nil && result != nil && strings.TrimSpace(result.Output) != "" {
 			if i > 0 {
 				// Annotate the result so callers know a fallback was used.
 				result.Provider = p.Name() + " (fallback)"
@@ -78,7 +83,14 @@ func (f *Provider) Complete(ctx context.Context, prompt string, opts provider.Op
 			return nil, ctx.Err()
 		}
 
-		errs = append(errs, fmt.Sprintf("%s: %v", p.Name(), err))
+		switch {
+		case err != nil:
+			errs = append(errs, fmt.Sprintf("%s: %v", p.Name(), err))
+		case result == nil:
+			errs = append(errs, fmt.Sprintf("%s: returned nil result without error", p.Name()))
+		default:
+			errs = append(errs, fmt.Sprintf("%s: returned empty output", p.Name()))
+		}
 	}
 	return nil, fmt.Errorf("all providers failed: %s", strings.Join(errs, "; "))
 }
