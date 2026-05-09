@@ -2258,6 +2258,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		default:
 			// No signal found — treat as done (AI finished without explicit signal)
 			task.Status = pm.TaskDone
+			pm.AddAnnotation(task, "ai", "Task implicitly completed: AI finished without an explicit TASK_DONE/TASK_FAILED/TASK_SKIPPED signal — treated as done.")
 			if !o.log.IsJSON() {
 				successColor.Printf("✓ Task %d complete (no explicit signal): %s\n\n", task.ID, task.Title)
 			}
@@ -3177,6 +3178,7 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 				consecutiveErrors++
 			default:
 				task.Status = pm.TaskDone
+				pm.AddAnnotation(task, "ai", "Task implicitly completed (parallel mode): AI finished without an explicit TASK_DONE/TASK_FAILED/TASK_SKIPPED signal — treated as done.")
 				if !o.log.IsJSON() {
 					successColor.Printf("✓ Task %d complete (no explicit signal): %s\n\n", task.ID, task.Title)
 				}
@@ -3818,6 +3820,7 @@ func (o *Orchestrator) evolve(ctx context.Context) error {
 					failColor.Printf("✗ Evolve task %d failed: %s\n\n", nextTask.ID, nextTask.Title)
 				default:
 					nextTask.Status = pm.TaskDone
+					pm.AddAnnotation(nextTask, "ai", "Task implicitly completed (evolve mode): AI finished without an explicit TASK_DONE/TASK_FAILED/TASK_SKIPPED signal — treated as done.")
 					successColor.Printf("✓ Evolve task %d complete (no signal): %s\n\n", nextTask.ID, nextTask.Title)
 				}
 				s.Save()

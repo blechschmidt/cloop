@@ -3529,3 +3529,116 @@ func TestRunPM_ScriptVerifyError_Annotated(t *testing.T) {
 			want, strings.Join(sverifyAnns, "\n  "))
 	}
 }
+
+// TestRunPM_ImplicitDone_Annotated locks in the audit-trail accuracy of the
+// implicit-done promotion in runPM. When the AI returns output without an
+// explicit TASK_DONE/TASK_FAILED/TASK_SKIPPED token, CheckTaskSignal yields
+// TaskInProgress and the trailing `switch signal { default: TaskDone }` arm
+// silently promotes the task to done. The console message says "(no explicit
+// signal)" but no annotation lands on the task — operators inspecting history
+// can't distinguish a task the AI explicitly completed from one that was
+// implicitly accepted because the AI rambled but never emitted a signal. That
+// matters because the two failure modes have different remediations: the
+// former is a successful run, the latter is a "task may not be done" risk
+// that should be visible in the audit trail.
+//
+// Same audit-trail accuracy class as the clarification fix
+// (TestRunPM_ClarificationAutoResolve_AnnotationOutcome), the heal-loop fix
+// (TestRunPM_HealAnnotationOutcome), and the verify-errored fixes
+// (TestRunPM_VerifyError_AnnotatesAsErrored, TestRunPM_ScriptVerifyError_Annotated).
+func TestRunPM_ImplicitDone_Annotated(t *testing.T) {
+	dir := tempDir(t)
+	s := initState(t, dir, "goal", 0)
+	s.PMMode = true
+	s.Plan = &pm.Plan{
+		Goal:  "goal",
+		Tasks: []*pm.Task{{ID: 1, Title: "Task A", Priority: 1, Status: pm.TaskPending}},
+	}
+	s.Save()
+
+	// Output with no TASK_DONE/TASK_FAILED/TASK_SKIPPED token -> hits the
+	// default arm.
+	prov := &mockProvider{
+		name: "mock",
+		results: []*provider.Result{
+			{Output: "I did some work but forgot to emit a signal.", Provider: "mock"},
+		},
+	}
+	o := newOrchestrator(t, dir, Config{
+		WorkDir: dir,
+		PMMode:  true,
+		NoHeal:  true,
+	}, prov)
+	_ = o.runPM(context.Background())
+
+	task := o.state.Plan.Tasks[0]
+	if task.Status != pm.TaskDone {
+		t.Errorf("task status = %q, want %q (implicit-done promotion)", task.Status, pm.TaskDone)
+	}
+
+	want := "Task implicitly completed"
+	found := false
+	for _, ann := range task.Annotations {
+		if ann.Author == "ai" && strings.Contains(ann.Text, want) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("missing implicit-done audit annotation containing %q;\ngot annotations: %+v",
+			want, task.Annotations)
+	}
+}
+
+// TestRunPMParallel_ImplicitDone_Annotated is the parallel-mode counterpart
+// of TestRunPM_ImplicitDone_Annotated. The runPMParallel loop has the same
+// `switch signal { default: TaskDone }` shape (no explicit TASK_* token =>
+// silent promotion), and operators need the same breadcrumb in history to
+// tell explicit completion apart from implicit promotion.
+func TestRunPMParallel_ImplicitDone_Annotated(t *testing.T) {
+	dir := tempDir(t)
+	s := initState(t, dir, "goal", 0)
+	s.PMMode = true
+	s.Plan = &pm.Plan{
+		Goal: "goal",
+		Tasks: []*pm.Task{
+			{ID: 1, Title: "Task A", Priority: 1, Status: pm.TaskPending},
+			{ID: 2, Title: "Task B", Priority: 2, Status: pm.TaskPending},
+		},
+	}
+	s.Save()
+
+	// safeProvider returns the same no-signal output for every concurrent call.
+	prov := &safeProvider{
+		name:   "mock",
+		output: "I did some work but forgot to emit a signal.",
+	}
+	cfg := Config{WorkDir: dir, PMMode: true, Parallel: true, NoHeal: true}
+	o := newOrchestrator(t, dir, cfg, prov)
+
+	if err := o.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	final, loadErr := state.Load(dir)
+	if loadErr != nil {
+		t.Fatalf("final load: %v", loadErr)
+	}
+	want := "Task implicitly completed (parallel mode)"
+	for _, task := range final.Plan.Tasks {
+		if task.Status != pm.TaskDone {
+			t.Errorf("task %d (%s): expected TaskDone, got %s", task.ID, task.Title, task.Status)
+		}
+		found := false
+		for _, ann := range task.Annotations {
+			if ann.Author == "ai" && strings.Contains(ann.Text, want) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("task %d (%s): missing implicit-done audit annotation containing %q;\ngot annotations: %+v",
+				task.ID, task.Title, want, task.Annotations)
+		}
+	}
+}
