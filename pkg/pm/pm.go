@@ -805,6 +805,11 @@ func ParseEvolveTasks(goal, output string, existing *Plan) ([]*Task, error) {
 
 // AdaptiveReplan calls the provider to re-plan remaining tasks after a failure.
 // It returns a new set of tasks to append/replace the pending tasks in the plan.
+//
+// An empty/whitespace provider response is surfaced as an error rather than
+// dropped into ParseTaskPlan, where it would produce an opaque
+// "no JSON found in response" message that hid the real (transient) cause —
+// matching the empty-output discipline applied across the orchestrator stack.
 func AdaptiveReplan(ctx context.Context, p provider.Provider, goal, instructions, model string, timeout time.Duration, plan *Plan, failedTask *Task, failureReason string) ([]*Task, error) {
 	prompt := AdaptiveReplanPrompt(goal, instructions, plan, failedTask, failureReason)
 	result, err := p.Complete(ctx, prompt, provider.Options{
@@ -813,6 +818,12 @@ func AdaptiveReplan(ctx context.Context, p provider.Provider, goal, instructions
 	})
 	if err != nil {
 		return nil, fmt.Errorf("adaptive replan: %w", err)
+	}
+	if result == nil {
+		return nil, fmt.Errorf("adaptive replan: provider returned nil result")
+	}
+	if strings.TrimSpace(result.Output) == "" {
+		return nil, fmt.Errorf("adaptive replan: provider returned empty response")
 	}
 
 	// Find the highest existing ID to validate new task IDs
@@ -861,6 +872,11 @@ func ApplyCalibrationFactor(plan *Plan, factor float64) {
 // Decompose calls the provider to decompose a goal into a task plan.
 // clarifyContext is optional structured Q&A context from the clarification step;
 // pass "" to omit it.
+//
+// An empty/whitespace provider response is surfaced as an error rather than
+// dropped into ParseTaskPlan, where it would produce an opaque
+// "no JSON found in response" message that hid the real (transient) cause —
+// matching the empty-output discipline applied across the orchestrator stack.
 func Decompose(ctx context.Context, p provider.Provider, goal, instructions, model string, timeout time.Duration, clarifyContext string) (*Plan, error) {
 	prompt := DecomposePrompt(goal, instructions, clarifyContext)
 	result, err := p.Complete(ctx, prompt, provider.Options{
@@ -869,6 +885,12 @@ func Decompose(ctx context.Context, p provider.Provider, goal, instructions, mod
 	})
 	if err != nil {
 		return nil, fmt.Errorf("decompose: %w", err)
+	}
+	if result == nil {
+		return nil, fmt.Errorf("decompose: provider returned nil result")
+	}
+	if strings.TrimSpace(result.Output) == "" {
+		return nil, fmt.Errorf("decompose: provider returned empty response")
 	}
 	return ParseTaskPlan(goal, result.Output)
 }
