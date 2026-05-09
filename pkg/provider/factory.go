@@ -36,13 +36,22 @@ func Register(name string, factory ProviderFactory) {
 }
 
 // Build creates a provider by name using the global registry.
+//
+// The returned provider is wrapped in WithPanicSafety so a panic inside the
+// underlying SDK becomes an ordinary error instead of crashing the process.
+// This is the single chokepoint every cloop command goes through, so wrapping
+// here gives panic safety to all 80+ Complete call sites without touching them.
 func Build(cfg ProviderConfig) (Provider, error) {
 	name := strings.ToLower(cfg.Name)
 	factory, ok := registry[name]
 	if !ok {
 		return nil, fmt.Errorf("unknown provider %q (available: %s)", cfg.Name, Available())
 	}
-	return factory(cfg)
+	p, err := factory(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return WithPanicSafety(p), nil
 }
 
 // Available returns a comma-separated list of registered providers.
