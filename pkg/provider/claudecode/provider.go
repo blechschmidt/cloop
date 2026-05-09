@@ -112,7 +112,14 @@ func (p *Provider) Complete(ctx context.Context, prompt string, opts provider.Op
 // isFatalCLIError returns true when the claude CLI's combined stdout/stderr
 // output indicates an authentication failure or a clear API-side error that
 // will not resolve by retrying with the same credentials. Conservative: only
-// matches phrases the CLI emits for these exact failure modes.
+// matches phrases the CLI emits for these exact failure modes, plus the
+// distinct shape of an HTML error page (a misconfigured upstream/proxy
+// returning a 4xx page instead of JSON — observed alongside the 401 burst
+// that motivated the original fix).
+//
+// Why no 5xx markers: 5xx responses are transient and worth retrying. They are
+// surfaced through the per-provider retry helper at the request layer, not
+// here.
 func isFatalCLIError(output string) bool {
 	lower := strings.ToLower(output)
 	switch {
@@ -121,6 +128,27 @@ func isFatalCLIError(output string) bool {
 	case strings.Contains(lower, "invalid authentication credentials"):
 		return true
 	case strings.Contains(lower, "authentication_error"):
+		return true
+	case strings.Contains(lower, "api error: 401"):
+		return true
+	case strings.Contains(lower, "api error: 403"):
+		return true
+	case isLikelyHTMLErrorPage(lower):
+		return true
+	}
+	return false
+}
+
+// isLikelyHTMLErrorPage detects output that is an HTML error page rather than
+// a model response. Signals: a doctype, or the combination of an opening and
+// closing <html> tag. Without this, an upstream proxy returning an auth/error
+// HTML page can leak through as "successful" step output (observed: stray
+// "</html>" entries in the autonomous loop alongside 401 bursts).
+func isLikelyHTMLErrorPage(lowerOutput string) bool {
+	if strings.Contains(lowerOutput, "<!doctype html") {
+		return true
+	}
+	if strings.Contains(lowerOutput, "<html") && strings.Contains(lowerOutput, "</html>") {
 		return true
 	}
 	return false

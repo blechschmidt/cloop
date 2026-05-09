@@ -244,6 +244,14 @@ func TestIsFatalCLIError(t *testing.T) {
 		{"authentication_error in JSON", `{"type":"error","error":{"type":"authentication_error","message":"..."}}`, true},
 		{"unrelated 401-ish text", "the function returned 401 lines of output", false},
 		{"case-insensitive failed auth", "FAILED TO AUTHENTICATE: see logs", true},
+		{"bare API Error 401", "API Error: 401 Unauthorized", true},
+		{"bare API Error 403", "API Error: 403 Forbidden", true},
+		{"transient 5xx not fatal", "API Error: 502 Bad Gateway", false},
+		{"transient 429 not fatal", "API Error: 429 Too Many Requests", false},
+		{"HTML error page with doctype", "<!DOCTYPE html><html><body>401 Unauthorized</body></html>", true},
+		{"HTML error page no doctype", "<html><head><title>Error</title></head><body>nope</body></html>", true},
+		{"plain text mentioning html tag", "the function emits an <html> snippet but is not an error", false},
+		{"truncated HTML tail only", "</html>", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
