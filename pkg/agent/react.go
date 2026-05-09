@@ -13,9 +13,15 @@ import (
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/atomicfile"
+	"github.com/blechschmidt/cloop/pkg/boundedread"
 	"github.com/blechschmidt/cloop/pkg/provider"
 	"github.com/fatih/color"
 )
+
+// readFileToolMaxBytes caps the read_file ReAct tool's read size. Any LLM that
+// hallucinates a path to a multi-gigabyte log/binary would otherwise OOM the
+// host process and dump megabytes back into the next prompt.
+const readFileToolMaxBytes int64 = 1 << 20
 
 // Tool is a capability the agent can invoke during its ReAct loop.
 type Tool interface {
@@ -327,9 +333,12 @@ func (t *readFileTool) Run(args map[string]string) (string, error) {
 	if path == "" {
 		return "", fmt.Errorf("missing required arg: path")
 	}
-	data, err := os.ReadFile(path)
+	data, truncated, err := boundedread.ReadFileTruncated(path, readFileToolMaxBytes)
 	if err != nil {
 		return "", err
+	}
+	if truncated {
+		return string(data) + fmt.Sprintf("\n\n[truncated: file exceeds %d bytes; only the first %d bytes are shown]", readFileToolMaxBytes, len(data)), nil
 	}
 	return string(data), nil
 }
