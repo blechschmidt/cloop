@@ -3642,3 +3642,99 @@ func TestRunPMParallel_ImplicitDone_Annotated(t *testing.T) {
 		}
 	}
 }
+
+// TestRunPM_GateSkip_Annotated locks in audit-trail accuracy for the
+// orchestrator-level gates that silently change a task's status before it
+// ever reaches the provider. Each gate used to mark the task
+// TaskSkipped/TaskFailed without adding any annotation, leaving operators
+// with no breadcrumb explaining *which* gate fired or *why* — same
+// audit-trail accuracy class as the clarification, heal-loop,
+// verify-errored, and implicit-done fixes.
+func TestRunPM_GateSkip_Annotated(t *testing.T) {
+	t.Run("sequential_tag_filter_skip", func(t *testing.T) {
+		dir := tempDir(t)
+		s := initState(t, dir, "goal", 0)
+		s.PMMode = true
+		s.Plan = &pm.Plan{
+			Goal: "goal",
+			Tasks: []*pm.Task{
+				{ID: 1, Title: "Frontend task", Priority: 1, Status: pm.TaskPending, Tags: []string{"frontend"}},
+			},
+		}
+		s.Save()
+
+		// No tasks match the "backend" filter, so the only task should be
+		// gate-skipped before any provider call.
+		prov := &mockProvider{name: "mock"}
+		o := newOrchestrator(t, dir, Config{
+			WorkDir:   dir,
+			PMMode:    true,
+			NoHeal:    true,
+			TagFilter: []string{"backend"},
+		}, prov)
+		_ = o.runPM(context.Background())
+
+		task := o.state.Plan.Tasks[0]
+		if task.Status != pm.TaskSkipped {
+			t.Fatalf("task status = %q, want %q (tag-filter skip)", task.Status, pm.TaskSkipped)
+		}
+		want := "did not match active tag filter"
+		found := false
+		for _, ann := range task.Annotations {
+			if ann.Author == "ai" && strings.Contains(ann.Text, want) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("missing tag-filter skip annotation containing %q;\ngot annotations: %+v",
+				want, task.Annotations)
+		}
+	})
+
+	t.Run("parallel_tag_filter_skip", func(t *testing.T) {
+		dir := tempDir(t)
+		s := initState(t, dir, "goal", 0)
+		s.PMMode = true
+		s.Plan = &pm.Plan{
+			Goal: "goal",
+			Tasks: []*pm.Task{
+				{ID: 1, Title: "Frontend task", Priority: 1, Status: pm.TaskPending, Tags: []string{"frontend"}},
+			},
+		}
+		s.Save()
+
+		prov := &safeProvider{name: "mock", output: "TASK_DONE"}
+		o := newOrchestrator(t, dir, Config{
+			WorkDir:   dir,
+			PMMode:    true,
+			Parallel:  true,
+			NoHeal:    true,
+			TagFilter: []string{"backend"},
+		}, prov)
+		if err := o.Run(context.Background()); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+
+		final, loadErr := state.Load(dir)
+		if loadErr != nil {
+			t.Fatalf("final load: %v", loadErr)
+		}
+		task := final.Plan.Tasks[0]
+		if task.Status != pm.TaskSkipped {
+			t.Fatalf("task status = %q, want %q (parallel tag-filter skip)", task.Status, pm.TaskSkipped)
+		}
+		want := "did not match active tag filter"
+		found := false
+		for _, ann := range task.Annotations {
+			if ann.Author == "ai" && strings.Contains(ann.Text, want) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("missing parallel tag-filter skip annotation containing %q;\ngot annotations: %+v",
+				want, task.Annotations)
+		}
+	})
+}

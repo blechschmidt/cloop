@@ -1020,6 +1020,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 				if answer == "s" || answer == "skip" {
 					staleTask.Status = pm.TaskSkipped
 					staleTask.StartedAt = nil
+					pm.AddAnnotation(staleTask, "ai", "Task skipped at stale-checkpoint recovery (user chose 'skip' after a previously interrupted run).")
 					s.Save()
 					_ = checkpoint.Clear(o.config.WorkDir)
 					dimColor.Printf("→ Task %d skipped.\n\n", staleTask.ID)
@@ -1267,6 +1268,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 				if t.Status == pm.TaskPending && s.Plan.PermanentlyBlocked(t) {
 					failColor.Printf("⊘ Task %d skipped (blocked by failed dependency): %s\n", t.ID, t.Title)
 					t.Status = pm.TaskSkipped
+					pm.AddAnnotation(t, "ai", "Task skipped: permanently blocked by failed dependency.")
 					skipped++
 				}
 			}
@@ -1281,6 +1283,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		if len(o.config.TagFilter) > 0 && !pm.TaskMatchesTags(task, o.config.TagFilter) {
 			color.New(color.Faint).Printf("⊘ Task %d skipped (no matching tag): %s\n", task.ID, task.Title)
 			task.Status = pm.TaskSkipped
+			pm.AddAnnotation(task, "ai", fmt.Sprintf("Task skipped: did not match active tag filter %v.", o.config.TagFilter))
 			s.Save()
 			continue
 		}
@@ -1299,6 +1302,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 				color.New(color.Faint).Printf("⊘ Task %d skipped (condition not met): %s\n  Condition: %s\n  Reason: %s\n",
 					task.ID, task.Title, task.Condition, res.Reason)
 				task.Status = pm.TaskSkipped
+				pm.AddAnnotation(task, "ai", fmt.Sprintf("Task skipped: condition gate %q not met. Reason: %s", task.Condition, res.Reason))
 				s.Save()
 				continue
 			}
@@ -1352,6 +1356,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 				if riskReport.HasCritical() && !o.config.RiskForce {
 					failColor.Printf("✗ Task %d aborted: CRITICAL risk finding(s). Use --force to override.\n\n", task.ID)
 					task.Status = pm.TaskFailed
+					pm.AddAnnotation(task, "ai", "Task failed: pre-execution risk assessment flagged CRITICAL finding(s); aborted before provider call. Use --force to override.")
 					s.Save()
 					continue
 				}
@@ -1368,6 +1373,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			switch {
 			case res.Skipped:
 				task.Status = pm.TaskSkipped
+				pm.AddAnnotation(task, "ai", "Task skipped at human approval gate (operator declined to approve before execution).")
 				dimColor.Printf("→ Task %d skipped at approval gate.\n\n", task.ID)
 				s.Save()
 				continue
@@ -1395,6 +1401,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			switch action {
 			case "skip":
 				task.Status = pm.TaskSkipped
+				pm.AddAnnotation(task, "ai", "Task skipped by user in interactive review mode.")
 				dimColor.Printf("→ Task %d skipped by user.\n\n", task.ID)
 				s.Save()
 				continue
@@ -1433,6 +1440,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		}, o.allEnvLines()...); hookErr != nil {
 			dimColor.Printf("⊘ pre_task hook failed for task %d (%s): %v — skipping task.\n", task.ID, task.Title, hookErr)
 			task.Status = pm.TaskSkipped
+			pm.AddAnnotation(task, "ai", fmt.Sprintf("Task skipped: pre_task hook exited non-zero: %v", hookErr))
 			s.Save()
 			continue
 		}
@@ -2795,6 +2803,7 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 			if t.Status == pm.TaskPending && s.Plan.PermanentlyBlocked(t) {
 				failColor.Printf("⊘ Task %d skipped (blocked by failed dependency): %s\n", t.ID, t.Title)
 				t.Status = pm.TaskSkipped
+				pm.AddAnnotation(t, "ai", "Task skipped: permanently blocked by failed dependency (parallel mode).")
 				skipped++
 			}
 		}
@@ -2817,6 +2826,7 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 				} else {
 					color.New(color.Faint).Printf("⊘ Task %d skipped (no matching tag): %s\n", t.ID, t.Title)
 					t.Status = pm.TaskSkipped
+					pm.AddAnnotation(t, "ai", fmt.Sprintf("Task skipped: did not match active tag filter %v (parallel mode).", o.config.TagFilter))
 				}
 			}
 			if len(ready) != len(filtered) {
@@ -2848,6 +2858,7 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 					color.New(color.Faint).Printf("⊘ Task %d skipped (condition not met): %s\n  Condition: %s\n  Reason: %s\n",
 						t.ID, t.Title, t.Condition, res.Reason)
 					t.Status = pm.TaskSkipped
+					pm.AddAnnotation(t, "ai", fmt.Sprintf("Task skipped: condition gate %q not met (parallel mode). Reason: %s", t.Condition, res.Reason))
 				} else {
 					dimColor.Printf("  Condition met for task %d: %s\n", t.ID, res.Reason)
 					gated = append(gated, t)
