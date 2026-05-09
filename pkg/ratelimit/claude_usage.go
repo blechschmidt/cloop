@@ -65,15 +65,60 @@ type UsageDetail struct {
 var (
 	usageMu   sync.RWMutex
 	lastUsage *ClaudeUsage
+
+	// usageFetchMu serializes concurrent FetchOrCachedUsage refreshes so a
+	// burst of callers (orchestrator + UI poller + limit check arriving in
+	// the same tick) coalesces into a single HTTP round-trip rather than N.
+	usageFetchMu sync.Mutex
 )
 
 const usageEndpoint = "https://api.anthropic.com/api/oauth/usage"
 
+// MinUsageCacheTTL is the floor on how long a fetched ClaudeUsage snapshot is
+// served without re-fetching. The OAuth usage API returns slowly-changing
+// utilization percentages and is itself rate-limited, so callers that ask
+// "may I make another claudecode call?" within this window receive the
+// cached snapshot without a network round-trip. Callers may pass a longer
+// TTL but anything shorter is rounded up to this value.
+const MinUsageCacheTTL = time.Minute
+
 // GetCachedUsage returns the last fetched usage, or nil if not available.
+// No freshness check — callers that need fresh data should use
+// FetchOrCachedUsage instead.
 func GetCachedUsage() *ClaudeUsage {
 	usageMu.RLock()
 	defer usageMu.RUnlock()
 	return lastUsage
+}
+
+// FetchOrCachedUsage returns the cached usage snapshot when it is fresher
+// than max(ttl, MinUsageCacheTTL), otherwise re-fetches from the OAuth usage
+// API. Concurrent callers coalesce on usageFetchMu so the API is hit once
+// per refresh window even under contention. On fetch error, a previously
+// cached snapshot (if any) is returned alongside the error so callers can
+// fall back to stale data instead of failing open.
+func FetchOrCachedUsage(token string, ttl time.Duration) (*ClaudeUsage, error) {
+	if ttl < MinUsageCacheTTL {
+		ttl = MinUsageCacheTTL
+	}
+	if u := GetCachedUsage(); u != nil && time.Since(u.FetchedAt) <= ttl {
+		return u, nil
+	}
+	usageFetchMu.Lock()
+	defer usageFetchMu.Unlock()
+	// Re-check after acquiring the lock — a sibling caller may have just
+	// refreshed the cache while we were waiting.
+	if u := GetCachedUsage(); u != nil && time.Since(u.FetchedAt) <= ttl {
+		return u, nil
+	}
+	fresh, err := FetchClaudeUsage(token)
+	if err != nil {
+		if u := GetCachedUsage(); u != nil {
+			return u, err
+		}
+		return nil, err
+	}
+	return fresh, nil
 }
 
 // FetchClaudeUsage calls the Anthropic OAuth usage API to get subscription

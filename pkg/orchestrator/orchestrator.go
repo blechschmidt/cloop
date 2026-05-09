@@ -663,14 +663,14 @@ func (o *Orchestrator) enforceClaudeCodeLimits() error {
 	if active != "claudecode" {
 		return nil
 	}
-	usage := ratelimit.GetCachedUsage()
-	if usage == nil {
-		// Best-effort fetch — if it fails we silently skip enforcement.
-		fetched, err := ratelimit.FetchClaudeUsage("")
-		if err != nil {
-			return nil
-		}
-		usage = fetched
+	// Coalesces concurrent fetches and serves the cached snapshot for at
+	// least ratelimit.MinUsageCacheTTL (currently one minute) — important
+	// because enforceClaudeCodeLimits runs before *every* task in a parallel
+	// PM plan and would otherwise hammer the OAuth usage API.
+	usage, err := ratelimit.FetchOrCachedUsage("", ratelimit.MinUsageCacheTTL)
+	if err != nil && usage == nil {
+		// Best-effort: when both fresh fetch and cache fail, skip enforcement.
+		return nil
 	}
 	return ratelimit.EnforceClaudeCodeLimits(cc, usage)
 }

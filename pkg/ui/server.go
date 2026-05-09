@@ -4587,19 +4587,11 @@ func (s *Server) handleRateLimits(w http.ResponseWriter, r *http.Request) {
 // the Anthropic OAuth usage API (5-hour, weekly, per-model breakdowns).
 // GET /api/claude-usage
 func (s *Server) handleClaudeUsage(w http.ResponseWriter, r *http.Request) {
-	// Return cached data if fresh (< 3 minutes old)
-	cached := ratelimit.GetCachedUsage()
-	if cached != nil && time.Since(cached.FetchedAt) < 3*time.Minute {
-		jsonOK(w, cached)
-		return
-	}
-	// Try Anthropic OAuth usage API
-	usage, err := ratelimit.FetchClaudeUsage("")
-	if err != nil {
-		if cached != nil {
-			jsonOK(w, cached)
-			return
-		}
+	// FetchOrCachedUsage enforces a >=1-minute TTL and coalesces concurrent
+	// callers, so a browser polling this endpoint plus the orchestrator's
+	// per-task limit check share one HTTP round-trip per refresh window.
+	usage, err := ratelimit.FetchOrCachedUsage("", 3*time.Minute)
+	if err != nil && usage == nil {
 		jsonOK(w, map[string]interface{}{"error": err.Error()})
 		return
 	}
@@ -4617,11 +4609,10 @@ func (s *Server) handleClaudeCodeLimitsGet(w http.ResponseWriter, r *http.Reques
 	if cfg != nil {
 		cc = cfg.ClaudeCode
 	}
-	usage := ratelimit.GetCachedUsage()
-	if usage == nil {
-		// Best-effort fetch so the UI shows live numbers.
-		usage, _ = ratelimit.FetchClaudeUsage("")
-	}
+	// Cached for at least 1 minute; ignores fetch errors and falls back to
+	// any stale snapshot so the panel still renders historical numbers when
+	// the OAuth usage endpoint is briefly unreachable.
+	usage, _ := ratelimit.FetchOrCachedUsage("", ratelimit.MinUsageCacheTTL)
 	violations := ratelimit.CheckClaudeCodeLimits(cc, usage)
 	violationStrs := make([]string, 0, len(violations))
 	for _, v := range violations {
