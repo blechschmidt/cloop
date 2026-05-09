@@ -355,13 +355,7 @@ Press Ctrl+C to pause gracefully.`,
 			AutoEval:            autoEvalRun,
 			SlackWebhookURL:   cfg.Notify.SlackWebhook,
 			DiscordWebhookURL: cfg.Notify.DiscordWebhook,
-			Hooks: hooks.Config{
-				PreTask:        cfg.Hooks.PreTask,
-				PostTask:       cfg.Hooks.PostTask,
-				PrePlan:        cfg.Hooks.PrePlan,
-				PostPlan:       cfg.Hooks.PostPlan,
-				PostTaskReview: cfg.Hooks.PostTaskReview,
-			},
+			Hooks: buildHooksConfig(cfg.Hooks),
 			WorkDir:          workdir,
 			Model:            model,
 			MaxTokens:        effectiveMaxTokens,
@@ -695,4 +689,23 @@ func init() {
 	runCmd.Flags().IntVar(&autoPromoteThresholdDays, "promote-threshold", 3, "PM mode: days-remaining window used by --auto-promote to trigger priority escalation (default 3)")
 	runCmd.Flags().BoolVar(&coachMode, "coach", false, "PM mode: before each task, run an AI coaching session with 3-5 actionable tips, a key clarifying question, and success criteria (sequential only)")
 	rootCmd.AddCommand(runCmd)
+}
+
+// buildHooksConfig converts a config.HooksConfig into the runtime hooks.Config
+// used by the orchestrator, parsing the timeout string and falling back to
+// hooks.DefaultTimeout when unset or malformed (with a warning to stderr).
+func buildHooksConfig(c config.HooksConfig) hooks.Config {
+	timeout, err := hooks.ParseTimeout(c.Timeout)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: %v; using default %s\n", err, hooks.DefaultTimeout)
+		timeout = 0
+	}
+	return hooks.Config{
+		PreTask:        c.PreTask,
+		PostTask:       c.PostTask,
+		PrePlan:        c.PrePlan,
+		PostPlan:       c.PostPlan,
+		PostTaskReview: c.PostTaskReview,
+		Timeout:        timeout,
+	}
 }

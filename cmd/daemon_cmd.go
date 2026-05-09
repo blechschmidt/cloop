@@ -632,7 +632,7 @@ func runDaemonCycle(ctx context.Context, workdir string, s *daemon.State, cfg *c
 			Goal:  plan.Goal,
 			Total: len(plan.Tasks),
 		}
-		if err := hooks.RunPrePlan(hooks.Config{PrePlan: cfg.Hooks.PrePlan}, hctx); err != nil {
+		if err := hooks.RunPrePlan(buildHooksConfig(cfg.Hooks), hctx); err != nil {
 			logf("pre_plan hook failed: %v", err)
 		}
 	}
@@ -710,7 +710,7 @@ func runDaemonCycle(ctx context.Context, workdir string, s *daemon.State, cfg *c
 					Failed:  failed2,
 					Skipped: skipped2,
 				}
-				if err := hooks.RunPostPlan(hooks.Config{PostPlan: cfg.Hooks.PostPlan}, hctx); err != nil {
+				if err := hooks.RunPostPlan(buildHooksConfig(cfg.Hooks), hctx); err != nil {
 					logf("post_plan hook failed: %v", err)
 				}
 			}

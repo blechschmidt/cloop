@@ -197,20 +197,49 @@ func (c *Cache) readEntry(key string) (*Entry, error) {
 	return &entry, nil
 }
 
-// writeEntry compresses and writes a cache entry to disk.
+// writeEntry compresses and writes a cache entry to disk atomically: encode
+// to a tmp file in the same directory, fsync, then rename into place. This
+// guarantees concurrent readers (and any reader after a process crash) see
+// either the previous valid entry or the new valid entry — never a truncated
+// or half-gzip-encoded blob that would permanently fail decode and force a
+// re-fetch from the upstream provider.
 func (c *Cache) writeEntry(entry *Entry) error {
 	path := c.entryPath(entry.Key)
-	f, err := os.Create(path)
-	if err != nil {
-		return fmt.Errorf("cache: create file: %w", err)
-	}
-	defer f.Close()
+	dir := filepath.Dir(path)
 
-	gz := gzip.NewWriter(f)
+	tmp, err := os.CreateTemp(dir, ".entry.*.tmp")
+	if err != nil {
+		return fmt.Errorf("cache: create tmp: %w", err)
+	}
+	tmpPath := tmp.Name()
+	// Best-effort cleanup of orphaned tmp files if any step below errors out.
+	defer func() {
+		if _, statErr := os.Stat(tmpPath); statErr == nil {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+
+	gz := gzip.NewWriter(tmp)
 	if err := json.NewEncoder(gz).Encode(entry); err != nil {
+		_ = gz.Close()
+		_ = tmp.Close()
 		return fmt.Errorf("cache: encode: %w", err)
 	}
-	return gz.Close()
+	if err := gz.Close(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("cache: gzip close: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("cache: sync tmp: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("cache: close tmp: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("cache: rename tmp: %w", err)
+	}
+	return nil
 }
 
 type entryMeta struct {

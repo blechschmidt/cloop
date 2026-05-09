@@ -6,6 +6,7 @@ package plugin
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -13,7 +14,17 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 )
+
+// describeTimeout caps the wall-clock duration of a single `<plugin> describe`
+// invocation. Plugin enumeration runs describe() against every executable in
+// the plugin directories, so a single hung script must not stall the whole
+// command (e.g. `cloop plugin list`). 10 seconds is generous for a one-line
+// description but tight enough to fail fast on a deadlocked script.
+//
+// Declared as a var (not const) so tests can shorten it.
+var describeTimeout = 10 * time.Second
 
 // Plugin describes a discovered plugin.
 type Plugin struct {
@@ -116,11 +127,17 @@ func Describe(pluginPath string) (string, error) {
 }
 
 func describe(pluginPath string) (string, error) {
-	cmd := exec.Command(pluginPath, "describe")
+	ctx, cancel := context.WithTimeout(context.Background(), describeTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, pluginPath, "describe")
+	cmd.WaitDelay = 2 * time.Second
 	var buf bytes.Buffer
 	cmd.Stdout = &buf
 	cmd.Stderr = nil
 	if err := cmd.Run(); err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return "", fmt.Errorf("plugin describe timed out after %s: %w", describeTimeout, err)
+		}
 		return "", fmt.Errorf("plugin describe failed: %w", err)
 	}
 	return strings.TrimSpace(buf.String()), nil
@@ -130,16 +147,28 @@ func describe(pluginPath string) (string, error) {
 // environment variables (KEY=value strings). The plugin process inherits the
 // current process's stdio. extraEnv values are appended to os.Environ().
 // workDir is used for discovery if the plugin is referenced by name (not path).
+//
+// Run uses a background context with no deadline; it is intended for
+// interactive `cloop plugin run` invocations where the user can Ctrl+C.
+// Non-interactive callers (e.g. orchestrator hooks) should use RunCtx with a
+// timeout-bounded context to prevent hung plugins from stalling execution.
 func Run(workDir, name string, args []string, extraEnv []string) error {
+	return RunCtx(context.Background(), workDir, name, args, extraEnv)
+}
+
+// RunCtx is the context-aware variant of Run. If ctx is cancelled or its
+// deadline expires, the plugin process is killed.
+func RunCtx(ctx context.Context, workDir, name string, args []string, extraEnv []string) error {
 	path, err := Resolve(workDir, name)
 	if err != nil {
 		return err
 	}
-	cmd := exec.Command(path, args...)
+	cmd := exec.CommandContext(ctx, path, args...)
 	cmd.Env = append(os.Environ(), extraEnv...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	cmd.WaitDelay = 2 * time.Second
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("plugin %s: %w", name, err)
 	}

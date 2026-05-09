@@ -1,9 +1,12 @@
 package multiui
 
 import (
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
+	"sync"
 	"testing"
 	"time"
 
@@ -298,6 +301,157 @@ func TestPerProjectTaskIsolation(t *testing.T) {
 		t.Errorf("agg counts: total=%d done=%d failed=%d; want 5/3/1",
 			agg.TotalTasks, agg.DoneTasks, agg.FailedTasks)
 	}
+}
+
+// TestRegistry_AddPathsConcurrent verifies that two in-process callers racing
+// to AddPaths the same registry never lose each other's writes. The previous
+// implementation did Load → mutate → Save with no synchronisation, so the
+// second saver could overwrite the first saver's addition with a stale baseline.
+func TestRegistry_AddPathsConcurrent(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	const goroutines = 16
+	const pathsPerGoroutine = 4
+
+	// Pre-create 64 distinct temp dirs (real directories so filepath.Abs +
+	// basename behave normally) and partition them across goroutines.
+	allDirs := make([]string, 0, goroutines*pathsPerGoroutine)
+	for i := 0; i < goroutines*pathsPerGoroutine; i++ {
+		allDirs = append(allDirs, t.TempDir())
+	}
+
+	var wg sync.WaitGroup
+	for g := 0; g < goroutines; g++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			start := idx * pathsPerGoroutine
+			batch := allDirs[start : start+pathsPerGoroutine]
+			if err := AddPaths(batch); err != nil {
+				t.Errorf("AddPaths goroutine %d: %v", idx, err)
+			}
+		}(g)
+	}
+	wg.Wait()
+
+	got, err := Load()
+	if err != nil {
+		t.Fatalf("Load after concurrent adds: %v", err)
+	}
+	gotPaths := make(map[string]bool, len(got))
+	for _, e := range got {
+		gotPaths[e.Path] = true
+	}
+	for _, want := range allDirs {
+		if !gotPaths[want] {
+			t.Errorf("path %q lost during concurrent AddPaths", want)
+		}
+	}
+	if len(got) != len(allDirs) {
+		t.Errorf("registry size = %d, want %d (entries possibly duplicated or lost)", len(got), len(allDirs))
+	}
+}
+
+// TestRegistry_SaveLeavesNoTempFile verifies that a successful Save leaves
+// only projects.json behind — no orphaned tmp file from the atomic-write
+// scheme. Catches regressions where the rename target is wrong or the cleanup
+// defer fires too aggressively and removes the destination file.
+func TestRegistry_SaveLeavesNoTempFile(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	if err := Save([]ProjectEntry{{Name: "demo", Path: t.TempDir()}}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	regPath, err := registryPath()
+	if err != nil {
+		t.Fatalf("registryPath: %v", err)
+	}
+	dir := filepath.Dir(regPath)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read registry dir: %v", err)
+	}
+	for _, e := range entries {
+		if e.Name() == filepath.Base(regPath) {
+			continue
+		}
+		t.Errorf("unexpected file left in registry dir after Save: %q", e.Name())
+	}
+	// Final file must contain a parseable registry — sanity-check the rename
+	// actually published the new content rather than leaving an empty file.
+	data, err := os.ReadFile(regPath)
+	if err != nil {
+		t.Fatalf("read registry: %v", err)
+	}
+	var parsed registry
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		t.Errorf("registry on disk is not valid JSON: %v", err)
+	}
+	if len(parsed.Projects) != 1 || parsed.Projects[0].Name != "demo" {
+		t.Errorf("registry payload = %+v, want one entry named demo", parsed.Projects)
+	}
+}
+
+// TestRegistry_SaveAtomic_NoPartialReadDuringConcurrentSaves runs many Saves
+// while a parallel reader hammers Load. Without the atomic rename, the reader
+// could observe an empty or truncated file and Load would either error or
+// return a partial slice. With the rename, every observed file must be a
+// fully-parseable registry.
+func TestRegistry_SaveAtomic_NoPartialReadDuringConcurrentSaves(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	// Seed the registry once so Load has something to read.
+	if err := Save([]ProjectEntry{{Name: "seed", Path: t.TempDir()}}); err != nil {
+		t.Fatalf("seed Save: %v", err)
+	}
+
+	stop := make(chan struct{})
+	writerDone := make(chan struct{})
+	readerDone := make(chan struct{})
+
+	// Writer: cycle the registry size up and down repeatedly until stop fires.
+	go func() {
+		defer close(writerDone)
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			n := (i % 8) + 1
+			projects := make([]ProjectEntry, n)
+			for j := 0; j < n; j++ {
+				projects[j] = ProjectEntry{
+					Name: fmt.Sprintf("p-%d-%d", i, j),
+					Path: fmt.Sprintf("/tmp/path-%d-%d", i, j),
+				}
+			}
+			if err := Save(projects); err != nil {
+				t.Errorf("Save iter %d: %v", i, err)
+				return
+			}
+		}
+	}()
+
+	// Reader: assert every observation parses cleanly.
+	go func() {
+		defer close(readerDone)
+		for i := 0; i < 500; i++ {
+			got, err := Load()
+			if err != nil {
+				t.Errorf("Load iter %d saw partial/corrupt registry: %v", i, err)
+				return
+			}
+			if len(got) == 0 {
+				t.Errorf("Load iter %d saw empty registry; expected at least one entry", i)
+				return
+			}
+		}
+	}()
+
+	// Wait for the reader to finish 500 iterations, then stop and join the writer.
+	<-readerDone
+	close(stop)
+	<-writerDone
 }
 
 // TestGetStatusMissingProject ensures GetStatus on a path with no state.db

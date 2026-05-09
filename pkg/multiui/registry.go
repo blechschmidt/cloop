@@ -5,15 +5,27 @@ package multiui
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/state"
 )
+
+// registryMu serializes the read-modify-write performed by AddPaths so that
+// concurrent UI-server handlers (or any other in-process callers) cannot lose
+// each other's writes when both load → mutate → save the same file.
+//
+// This is in-process only — multiple cloop CLI processes that race to write
+// the registry at the same moment can still drop updates, but Save's atomic
+// rename guarantees the file on disk is never observed truncated/corrupt
+// (last-writer-wins instead of partial-data-wins).
+var registryMu sync.Mutex
 
 // IsCloopRunningInDir returns true if a "cloop run" process has its working
 // directory set to dir. It reads /proc/*/cwd symlinks (Linux only).
@@ -113,24 +125,77 @@ func Load() ([]ProjectEntry, error) {
 	return reg.Projects, nil
 }
 
-// Save writes projects to the registry file.
+// Save writes projects to the registry file atomically: it serialises the JSON,
+// writes it to a sibling tmp file, fsyncs, and renames into place. A crash or
+// disk-full mid-write therefore leaves the previous registry intact instead of
+// a half-written / zero-byte projects.json that future loads would refuse.
 func Save(projects []ProjectEntry) error {
+	registryMu.Lock()
+	defer registryMu.Unlock()
+	return saveLocked(projects)
+}
+
+// saveLocked is the same as Save without acquiring registryMu. Callers that
+// already hold the lock (e.g. AddPaths' read-modify-write block) use this so
+// they don't deadlock against themselves.
+func saveLocked(projects []ProjectEntry) error {
 	path, err := registryPath()
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
 	data, err := json.MarshalIndent(registry{Projects: projects}, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0o600)
+
+	tmp, err := os.CreateTemp(dir, ".projects.json.*.tmp")
+	if err != nil {
+		return fmt.Errorf("multiui: create tmp: %w", err)
+	}
+	tmpPath := tmp.Name()
+	// Best-effort cleanup if anything below fails before the rename completes.
+	defer func() {
+		if _, statErr := os.Stat(tmpPath); statErr == nil {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("multiui: write tmp: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("multiui: sync tmp: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("multiui: close tmp: %w", err)
+	}
+	// Match the 0o600 the legacy WriteFile used; CreateTemp defaults to 0o600
+	// already on Unix, but be explicit so this survives platform changes.
+	if err := os.Chmod(tmpPath, 0o600); err != nil {
+		return fmt.Errorf("multiui: chmod tmp: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("multiui: rename tmp: %w", err)
+	}
+	return nil
 }
 
 // AddPaths appends new paths to the registry, avoiding duplicates, and saves.
+// The load-mutate-save sequence runs under registryMu so two concurrent
+// in-process callers cannot each load the same baseline and then race to
+// overwrite each other's additions.
 func AddPaths(paths []string) error {
+	registryMu.Lock()
+	defer registryMu.Unlock()
+
+	// Load does not take registryMu, so calling it while we hold the lock
+	// does not deadlock. Reads are safe even mid-Save because Save publishes
+	// the new file via atomic rename.
 	existing, err := Load()
 	if err != nil {
 		return err
@@ -151,7 +216,7 @@ func AddPaths(paths []string) error {
 		name := filepath.Base(abs)
 		existing = append(existing, ProjectEntry{Name: name, Path: abs})
 	}
-	return Save(existing)
+	return saveLocked(existing)
 }
 
 // Scan walks a parent directory one level deep and returns all subdirectories

@@ -121,6 +121,11 @@ type HooksConfig struct {
 	// PostTaskReview enables AI code review annotations after each successful task.
 	// Equivalent to passing --post-review on the command line.
 	PostTaskReview bool `yaml:"post_task_review,omitempty"`
+	// Timeout caps the wall-clock duration of every hook invocation, parsed via
+	// time.ParseDuration (e.g. "30s", "5m", "2h"). Empty defaults to 10 minutes.
+	// Use "-1s" (or any negative duration) to disable the timeout for hooks
+	// that legitimately exceed the default.
+	Timeout string `yaml:"timeout,omitempty"`
 }
 
 // RouterConfig maps AgentRole names to provider names.
