@@ -443,10 +443,14 @@ func New(cfg Config, prov provider.Provider) (*Orchestrator, error) {
 }
 
 // Close releases resources held by the orchestrator. Safe to call multiple times.
+// Any queue entries still in "running" are marked failed (interrupted) before
+// the database is closed.
 func (o *Orchestrator) Close() error {
 	if o == nil || o.queue == nil {
 		return nil
 	}
+	// Mark any entries we left running as interrupted.
+	o.recoverStaleQueueEntries()
 	err := o.queue.Close()
 	o.queue = nil
 	return err
@@ -701,6 +705,10 @@ func (o *Orchestrator) runPM(ctx context.Context) error {
 // runPMSequential runs PM tasks one at a time (original behaviour).
 func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 	s := o.state
+
+	// Recover stale tasks from prior interrupted runs.
+	o.recoverStaleTasks(s)
+
 	s.Status = "running"
 	if err := s.Save(); err != nil {
 		return err
@@ -2518,6 +2526,27 @@ func (o *Orchestrator) recoverStaleTasks(s *state.ProjectState) {
 			return
 		}
 		color.New(color.Faint).Printf("Recovered %d in-progress task(s) from prior run.\n", recovered)
+	}
+
+	// Also recover stale queue entries left in "running" from a prior crash.
+	o.recoverStaleQueueEntries()
+}
+
+// recoverStaleQueueEntries marks any queue entries stuck in "running" as failed,
+// since the process that was executing them no longer exists.
+func (o *Orchestrator) recoverStaleQueueEntries() {
+	if o == nil || o.queue == nil {
+		return
+	}
+	entries, err := o.queue.List(taskqueue.ListOptions{Status: taskqueue.StatusRunning, Limit: 500})
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		_ = o.queue.MarkFailed(e.ID, "interrupted: previous run was killed or crashed")
+	}
+	if len(entries) > 0 {
+		color.New(color.Faint).Printf("Recovered %d stale queue entries from prior run.\n", len(entries))
 	}
 }
 
