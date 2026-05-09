@@ -927,6 +927,12 @@ func VerifySignal(output string) (pass bool, found bool) {
 
 // VerifyTask calls the provider to verify whether a task was genuinely completed.
 // Returns (true, nil) for pass, (false, nil) for fail, (false, err) on provider error.
+//
+// An empty/whitespace verifier response is treated as a transient provider hiccup
+// and surfaced as an error rather than silently passing. The orchestrator's
+// verifyErr branch then logs the issue and falls back to "treat as pass" so a
+// flaky verifier never blocks a real completion — but the empty response is no
+// longer mis-attributed as a successful verification in the audit log.
 func VerifyTask(ctx context.Context, p provider.Provider, goal, instructions, model string, timeout time.Duration, task *Task, executorOutput string) (bool, error) {
 	prompt := VerifyTaskPrompt(goal, instructions, task, executorOutput)
 	result, err := p.Complete(ctx, prompt, provider.Options{
@@ -935,6 +941,12 @@ func VerifyTask(ctx context.Context, p provider.Provider, goal, instructions, mo
 	})
 	if err != nil {
 		return false, fmt.Errorf("verify task: %w", err)
+	}
+	if result == nil {
+		return false, fmt.Errorf("verify task: provider returned nil result")
+	}
+	if strings.TrimSpace(result.Output) == "" {
+		return false, fmt.Errorf("verify task: provider returned empty response")
 	}
 	pass, found := VerifySignal(result.Output)
 	if !found {
