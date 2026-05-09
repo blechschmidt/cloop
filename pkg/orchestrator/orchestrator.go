@@ -51,6 +51,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/risk"
 	"github.com/blechschmidt/cloop/pkg/router"
 	"github.com/blechschmidt/cloop/pkg/state"
+	"github.com/blechschmidt/cloop/pkg/taskqueue"
 	"github.com/blechschmidt/cloop/pkg/verify"
 	"github.com/blechschmidt/cloop/pkg/webhook"
 	"github.com/fatih/color"
@@ -381,6 +382,7 @@ type Orchestrator struct {
 	envVars     []cloopenv.Var
 	secretStore *secret.Store
 	log         logger.Logger
+	queue       *taskqueue.Queue // central work queue; nil-safe (Mark*/Enqueue tolerate nil)
 }
 
 func New(cfg Config, prov provider.Provider) (*Orchestrator, error) {
@@ -425,7 +427,44 @@ func New(cfg Config, prov provider.Provider) (*Orchestrator, error) {
 
 	r := router.New(prov)
 	log := logger.New(cfg.LogJSON)
-	return &Orchestrator{config: cfg, state: s, provider: prov, router: r, memory: mem, webhook: wh, metrics: cfg.Metrics, envVars: envVars, secretStore: secretStore, log: log}, nil
+
+	// Open the central work queue. All work cloop performs (task executions,
+	// heal retries, evolve discoveries, externally-merged tasks) is recorded
+	// here so the UI can render a single auditable activity log. If opening
+	// fails we log a warning and continue with queue=nil — every queue call
+	// is nil-safe so degraded operation is harmless.
+	queue, qErr := taskqueue.Open(s.WorkDir)
+	if qErr != nil {
+		log.Warn(logger.EventSessionStart, 0, fmt.Sprintf("task queue unavailable: %v", qErr), nil)
+		queue = nil
+	}
+
+	return &Orchestrator{config: cfg, state: s, provider: prov, router: r, memory: mem, webhook: wh, metrics: cfg.Metrics, envVars: envVars, secretStore: secretStore, log: log, queue: queue}, nil
+}
+
+// Close releases resources held by the orchestrator. Safe to call multiple times.
+func (o *Orchestrator) Close() error {
+	if o == nil || o.queue == nil {
+		return nil
+	}
+	err := o.queue.Close()
+	o.queue = nil
+	return err
+}
+
+// enqueueWork records a new work item in the central queue and returns its id.
+// Returns 0 (no-op) when the queue is unavailable so callers can pass the id
+// through unconditionally.
+func (o *Orchestrator) enqueueWork(e taskqueue.Entry) int64 {
+	if o == nil || o.queue == nil {
+		return 0
+	}
+	id, err := o.queue.Enqueue(e)
+	if err != nil {
+		o.log.Warn(logger.EventSessionStart, e.TaskID, fmt.Sprintf("queue enqueue failed: %v", err), nil)
+		return 0
+	}
+	return id
 }
 
 // taskContextWithTimeout returns a context (and cancel) scoped to the given task's
@@ -726,13 +765,22 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		}
 
 		pmColor.Printf("Decomposing goal into tasks...\n")
+		decomposeQueueID := o.enqueueWork(taskqueue.Entry{
+			Kind:        taskqueue.KindSession,
+			Title:       "Decompose goal into tasks",
+			Description: truncate(s.Goal, 300),
+			Source:      "orchestrator",
+		})
+		_ = o.queue.MarkRunning(decomposeQueueID)
 		plan, err := pm.Decompose(ctx, o.provider, s.Goal, s.Instructions, s.Model, o.config.StepTimeout, clarifyCtx)
 		if err != nil {
+			_ = o.queue.MarkFailed(decomposeQueueID, truncate(err.Error(), 200))
 			failColor.Printf("x Failed to decompose goal: %v\n", err)
 			s.Status = "failed"
 			s.Save()
 			return err
 		}
+		_ = o.queue.MarkDone(decomposeQueueID, fmt.Sprintf("decomposed into %d task(s)", len(plan.Tasks)))
 		if o.config.CalibrationFactor != 0 && o.config.CalibrationFactor != 1.0 {
 			pm.ApplyCalibrationFactor(plan, o.config.CalibrationFactor)
 		}
@@ -940,7 +988,28 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			return nil
 		}
 
+		// Snapshot in-memory task IDs before SyncFromDisk so we can detect any
+		// externally-added tasks that landed since the last iteration and record
+		// them as KindExternal queue entries — this is the only place an
+		// externally-added task gets surfaced into the central activity log.
+		preMergeIDs := make(map[int]struct{}, len(s.Plan.Tasks))
+		for _, t := range s.Plan.Tasks {
+			preMergeIDs[t.ID] = struct{}{}
+		}
 		s.SyncFromDisk()
+		for _, t := range s.Plan.Tasks {
+			if _, existed := preMergeIDs[t.ID]; existed {
+				continue
+			}
+			extID := o.enqueueWork(taskqueue.Entry{
+				Kind:        taskqueue.KindExternal,
+				TaskID:      t.ID,
+				Title:       fmt.Sprintf("External task added: %s", t.Title),
+				Description: truncate(t.Description, 300),
+				Source:      "external",
+			})
+			_ = o.queue.MarkDone(extID, fmt.Sprintf("merged from disk (status=%s)", t.Status))
+		}
 		// Reactivate recurring tasks whose schedule has fired.
 		for _, t := range s.Plan.Tasks {
 			if pm.ResetIfDue(t, time.Now()) {
@@ -1249,6 +1318,20 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		pm.AddAnnotation(task, "ai", fmt.Sprintf("Task started by executor (provider: %s)", o.provider.Name()))
 		s.Save()
 
+		// Central queue: record this task execution as a work item BEFORE the
+		// provider call. The id is carried forward so we can mark the entry
+		// done/failed/skipped after the call returns. Every work path in the
+		// orchestrator routes through the queue — the UI relies on it for
+		// full activity auditability.
+		queueID := o.enqueueWork(taskqueue.Entry{
+			Kind:        taskqueue.KindTask,
+			TaskID:      task.ID,
+			Title:       task.Title,
+			Description: task.Description,
+			Source:      "orchestrator",
+		})
+		_ = o.queue.MarkRunning(queueID)
+
 		if o.metrics != nil {
 			o.metrics.RecordTaskStarted()
 		}
@@ -1384,6 +1467,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 				if isTimeoutErr(taskCtx, maErr) {
 					color.New(color.FgYellow).Printf("⏱ Task %d timed out (%dm): %s\n", task.ID, task.MaxMinutes, task.Title)
 					o.handleTaskTimeout(ctx, s, task, "", dimColor)
+					_ = o.queue.MarkFailed(queueID, fmt.Sprintf("multi-agent timeout (%dm)", task.MaxMinutes))
 					consecutiveErrors++
 					s.Save()
 					if consecutiveErrors >= maxConsecutiveErrors {
@@ -1396,6 +1480,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 				failColor.Printf("✗ Multi-agent error: %v\n", maErr)
 				pm.AddAnnotation(task, "ai", fmt.Sprintf("Task failed: multi-agent pipeline error — %s", truncate(maErr.Error(), 200)))
 				task.Status = pm.TaskFailed
+				_ = o.queue.MarkFailed(queueID, truncate(maErr.Error(), 200))
 				consecutiveErrors++
 				s.Save()
 				if consecutiveErrors >= maxConsecutiveErrors {
@@ -1441,6 +1526,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 					if isTimeoutErr(taskCtx, cErr) {
 						color.New(color.FgYellow).Printf("⏱ Task %d timed out (%dm): %s\n", task.ID, task.MaxMinutes, task.Title)
 						o.handleTaskTimeout(ctx, s, task, "", dimColor)
+						_ = o.queue.MarkFailed(queueID, fmt.Sprintf("consensus timeout (%dm)", task.MaxMinutes))
 						consecutiveErrors++
 						s.Save()
 						if consecutiveErrors >= maxConsecutiveErrors {
@@ -1453,6 +1539,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 					failColor.Printf("✗ Consensus error: %v\n", cErr)
 					pm.AddAnnotation(task, "ai", fmt.Sprintf("Task failed: consensus error — %s", truncate(cErr.Error(), 200)))
 					task.Status = pm.TaskFailed
+					_ = o.queue.MarkFailed(queueID, truncate(cErr.Error(), 200))
 					consecutiveErrors++
 					s.Save()
 					if consecutiveErrors >= maxConsecutiveErrors {
@@ -1509,6 +1596,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 					if isTimeoutErr(taskCtx, err) {
 						color.New(color.FgYellow).Printf("⏱ Task %d timed out (%dm): %s\n", task.ID, task.MaxMinutes, task.Title)
 						o.handleTaskTimeout(ctx, s, task, "", dimColor)
+						_ = o.queue.MarkFailed(queueID, fmt.Sprintf("provider timeout (%dm)", task.MaxMinutes))
 						consecutiveErrors++
 						s.Save()
 						if consecutiveErrors >= maxConsecutiveErrors {
@@ -1521,6 +1609,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 					failColor.Printf("✗ Provider error: %v\n", err)
 					pm.AddAnnotation(task, "ai", fmt.Sprintf("Task failed: provider error — %s", truncate(err.Error(), 200)))
 					task.Status = pm.TaskFailed
+					_ = o.queue.MarkFailed(queueID, truncate(err.Error(), 200))
 					consecutiveErrors++
 					s.Save()
 					if consecutiveErrors >= maxConsecutiveErrors {
@@ -1559,6 +1648,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 				task.ID, consecutiveErrors, maxConsecutiveErrors)
 			pm.AddAnnotation(task, "ai", fmt.Sprintf("Task re-queued: provider returned empty output (consecutive errors: %d/%d).", consecutiveErrors, maxConsecutiveErrors))
 			task.Status = pm.TaskPending
+			_ = o.queue.MarkFailed(queueID, "provider returned empty output")
 			s.Save()
 			if consecutiveErrors >= maxConsecutiveErrors {
 				s.Status = "failed"
@@ -1643,6 +1733,19 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			currentHealVariant := activeVariant
 			for healAttempt := 1; healAttempt <= maxHealRetries && signal == pm.TaskFailed; healAttempt++ {
 				task.HealAttempts++
+				// Enqueue this heal attempt as its own queue entry so the UI shows
+				// every retry (not just the parent task) — heals are a distinct
+				// unit of work that consume tokens and can themselves succeed/fail.
+				healQueueID := o.enqueueWork(taskqueue.Entry{
+					Kind:        taskqueue.KindHeal,
+					TaskID:      task.ID,
+					Attempt:     healAttempt,
+					ParentID:    queueID,
+					Title:       fmt.Sprintf("Heal task %d (attempt %d/%d): %s", task.ID, healAttempt, maxHealRetries, task.Title),
+					Description: fmt.Sprintf("Auto-heal retry triggered by TASK_FAILED signal. Diagnosing and re-prompting with mutated prompt."),
+					Source:      "orchestrator",
+				})
+				_ = o.queue.MarkRunning(healQueueID)
 				if !o.log.IsJSON() {
 					healColor.Printf("[HEAL attempt %d/%d] Diagnosing failure for task %d: %s\n", healAttempt, maxHealRetries, task.ID, task.Title)
 				}
@@ -1650,6 +1753,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 
 				diag, diagErr := diagnosis.AnalyzeFailure(ctx, o.provider, s.Model, o.config.StepTimeout, task, taskOutput)
 				if diagErr != nil {
+					_ = o.queue.MarkFailed(healQueueID, fmt.Sprintf("diagnosis error: %v", diagErr))
 					dimColor.Printf("  [HEAL] Diagnosis error — aborting heal: %v\n", diagErr)
 					// Audit-trail accuracy: without this annotation, operators
 					// see only the diagnosis stdout line — the task's history
@@ -1683,6 +1787,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 				healOpts, healWasStreamed := o.makeOpts(s.Model, true)
 				healResult, healErr := safeComplete(ctx, taskProvider, healPrompt, healOpts)
 				if healErr != nil {
+					_ = o.queue.MarkFailed(healQueueID, truncate(healErr.Error(), 200))
 					healColor.Printf("[HEAL attempt %d/%d] Provider error: %v\n", healAttempt, maxHealRetries, healErr)
 					pm.AddAnnotation(task, "ai", fmt.Sprintf("[HEAL %d/%d] Skipped — provider error: %v", healAttempt, maxHealRetries, healErr))
 					continue
@@ -1696,6 +1801,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 				// task DONE with no audit trail of the empty hiccup. Treat
 				// empty/nil as the same kind of soft retry as healErr.
 				if healResult == nil || strings.TrimSpace(healResult.Output) == "" {
+					_ = o.queue.MarkFailed(healQueueID, "provider returned empty output")
 					healColor.Printf("[HEAL attempt %d/%d] Provider returned empty output — treating as transient failure\n", healAttempt, maxHealRetries)
 					pm.AddAnnotation(task, "ai", fmt.Sprintf("[HEAL %d/%d] Skipped — provider returned empty output", healAttempt, maxHealRetries))
 					continue
@@ -1713,9 +1819,11 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 
 				signal = pm.CheckTaskSignal(taskOutput)
 				if signal != pm.TaskFailed {
+					_ = o.queue.MarkDone(healQueueID, fmt.Sprintf("healed: signal=%s", signal))
 					pm.AddAnnotation(task, "ai", fmt.Sprintf("[HEAL %d/%d] Succeeded — task signal: %s", healAttempt, maxHealRetries, signal))
 					healColor.Printf("[HEAL attempt %d/%d] ✓ Task %d healed successfully (signal: %s)\n\n", healAttempt, maxHealRetries, task.ID, signal)
 				} else {
+					_ = o.queue.MarkFailed(healQueueID, "task still emitted TASK_FAILED")
 					pm.AddAnnotation(task, "ai", fmt.Sprintf("[HEAL %d/%d] Still failing — task emitted TASK_FAILED again", healAttempt, maxHealRetries))
 					healColor.Printf("[HEAL attempt %d/%d] Task %d still failing — %s\n\n", healAttempt, maxHealRetries, task.ID, truncate(taskOutput, 120))
 				}
@@ -2110,6 +2218,21 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 				})
 			}
 			consecutiveErrors = 0
+		}
+
+		// Central queue: mark this work item terminal. The status mirrors the
+		// pm.Task status so the queue stays consistent with the plan.
+		switch task.Status {
+		case pm.TaskDone:
+			_ = o.queue.MarkDone(queueID, stepSummaryLine(taskOutput, 200))
+		case pm.TaskFailed:
+			_ = o.queue.MarkFailed(queueID, stepSummaryLine(taskOutput, 200))
+		case pm.TaskSkipped:
+			_ = o.queue.MarkSkipped(queueID, "AI emitted TASK_SKIPPED")
+		default:
+			// Implicit-done / timed-out / other terminal states record as done
+			// to match the plan-task accounting above.
+			_ = o.queue.MarkDone(queueID, stepSummaryLine(taskOutput, 200))
 		}
 
 		// Record task outcome into metrics.
@@ -2557,7 +2680,28 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 			return nil
 		}
 
+		// Snapshot in-memory task IDs before SyncFromDisk so we can detect any
+		// externally-added tasks that landed since the last iteration and record
+		// them as KindExternal queue entries — this is the only place an
+		// externally-added task gets surfaced into the central activity log.
+		preMergeIDs := make(map[int]struct{}, len(s.Plan.Tasks))
+		for _, t := range s.Plan.Tasks {
+			preMergeIDs[t.ID] = struct{}{}
+		}
 		s.SyncFromDisk()
+		for _, t := range s.Plan.Tasks {
+			if _, existed := preMergeIDs[t.ID]; existed {
+				continue
+			}
+			extID := o.enqueueWork(taskqueue.Entry{
+				Kind:        taskqueue.KindExternal,
+				TaskID:      t.ID,
+				Title:       fmt.Sprintf("External task added: %s", t.Title),
+				Description: truncate(t.Description, 300),
+				Source:      "external",
+			})
+			_ = o.queue.MarkDone(extID, fmt.Sprintf("merged from disk (status=%s)", t.Status))
+		}
 		// Reactivate recurring tasks whose schedule has fired.
 		for _, t := range s.Plan.Tasks {
 			if pm.ResetIfDue(t, time.Now()) {
@@ -2734,10 +2878,22 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 		}
 
 		// Mark all ready tasks as in-progress before starting goroutines.
+		// Each ready task is also enqueued in the central queue so the UI shows
+		// a row per parallel task. queueIDs[i] is the id of ready[i] — we reuse
+		// the slice index when marking results below to avoid an extra map.
+		queueIDs := make([]int64, len(ready))
 		now := time.Now()
-		for _, t := range ready {
+		for i, t := range ready {
 			t.Status = pm.TaskInProgress
 			t.StartedAt = &now
+			queueIDs[i] = o.enqueueWork(taskqueue.Entry{
+				Kind:        taskqueue.KindTask,
+				TaskID:      t.ID,
+				Title:       t.Title,
+				Description: t.Description,
+				Source:      "orchestrator",
+			})
+			_ = o.queue.MarkRunning(queueIDs[i])
 			if o.metrics != nil {
 				o.metrics.RecordTaskStarted()
 			}
@@ -2842,12 +2998,17 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 		}
 
 		// Process results sequentially for clean output.
-		for _, res := range results {
+		for resIdx, res := range results {
 			task := res.task
+			parallelQueueID := int64(0)
+			if resIdx < len(queueIDs) {
+				parallelQueueID = queueIDs[resIdx]
+			}
 			if res.err != nil {
 				if res.timedOut {
 					color.New(color.FgYellow).Printf("⏱ Task %d timed out (%dm): %s\n", task.ID, task.MaxMinutes, task.Title)
 					o.handleTaskTimeout(ctx, s, task, res.partialOut, dimColor)
+					_ = o.queue.MarkFailed(parallelQueueID, fmt.Sprintf("timeout (%dm)", task.MaxMinutes))
 					mu.Lock()
 					consecutiveErrors++
 					s.Save()
@@ -2861,6 +3022,7 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 					continue
 				}
 				failColor.Printf("✗ Provider error on task %d: %v\n", task.ID, res.err)
+				_ = o.queue.MarkFailed(parallelQueueID, truncate(res.err.Error(), 200))
 				mu.Lock()
 				pm.AddAnnotation(task, "ai", fmt.Sprintf("Task failed: provider error (parallel mode) — %s", truncate(res.err.Error(), 200)))
 				task.Status = pm.TaskFailed
@@ -2884,6 +3046,7 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 			// flaps, content-filtered completions, partial responses).
 			if result == nil || strings.TrimSpace(result.Output) == "" {
 				failColor.Printf("✗ Task %d: provider returned empty output\n", task.ID)
+				_ = o.queue.MarkFailed(parallelQueueID, "provider returned empty output")
 				mu.Lock()
 				pm.AddAnnotation(task, "ai", fmt.Sprintf("Task re-queued: provider returned empty output (parallel mode, consecutive errors: %d/%d).", consecutiveErrors+1, maxConsecutiveErrors))
 				task.Status = pm.TaskPending
@@ -3061,6 +3224,18 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 					})
 				}
 				consecutiveErrors = 0
+			}
+
+			// Central queue: mark this parallel work item terminal.
+			switch task.Status {
+			case pm.TaskDone:
+				_ = o.queue.MarkDone(parallelQueueID, stepSummaryLine(result.Output, 200))
+			case pm.TaskFailed:
+				_ = o.queue.MarkFailed(parallelQueueID, stepSummaryLine(result.Output, 200))
+			case pm.TaskSkipped:
+				_ = o.queue.MarkSkipped(parallelQueueID, "AI emitted TASK_SKIPPED")
+			default:
+				_ = o.queue.MarkDone(parallelQueueID, stepSummaryLine(result.Output, 200))
 			}
 
 			// Record task outcome into metrics.
@@ -3369,10 +3544,23 @@ func (o *Orchestrator) evolvePM(ctx context.Context) (int, error) {
 	evolveColor.Printf("━━━ Evolve #%d — Discovering new tasks ━━━\n", s.EvolveStep)
 	dimColor.Printf("→ Asking AI for improvement ideas...\n")
 
+	// Central queue: every evolve cycle is recorded as work, even when it
+	// discovers zero new tasks. Failures in the discovery call still consume
+	// tokens and must be visible in the activity log.
+	evolveQueueID := o.enqueueWork(taskqueue.Entry{
+		Kind:        taskqueue.KindEvolve,
+		Attempt:     s.EvolveStep,
+		Title:       fmt.Sprintf("Evolve #%d: discover new tasks", s.EvolveStep),
+		Description: "AI is reviewing the plan to discover improvement tasks",
+		Source:      "evolve",
+	})
+	_ = o.queue.MarkRunning(evolveQueueID)
+
 	prompt := pm.EvolveDiscoverPrompt(s.Goal, s.Instructions, s.Plan, s.EvolveStep, s.InnovateMode)
 	opts, _ := o.makeOpts(s.Model, true)
 	result, err := safeComplete(ctx, o.provider, prompt, opts)
 	if err != nil {
+		_ = o.queue.MarkFailed(evolveQueueID, truncate(err.Error(), 200))
 		return 0, err
 	}
 
@@ -3393,11 +3581,13 @@ func (o *Orchestrator) evolvePM(ctx context.Context) (int, error) {
 	s.SyncFromDisk()
 	newTasks, err := pm.ParseEvolveTasks(s.Goal, result.Output, s.Plan)
 	if err != nil {
+		_ = o.queue.MarkFailed(evolveQueueID, fmt.Sprintf("parse error: %v", err))
 		dimColor.Printf("  Task discovery parse error: %v\n", err)
 		s.Save()
 		return 0, nil
 	}
 	if len(newTasks) == 0 {
+		_ = o.queue.MarkDone(evolveQueueID, "no new tasks discovered")
 		dimColor.Printf("  No new tasks discovered — project is fully evolved.\n")
 		s.Save()
 		return 0, nil
@@ -3419,6 +3609,7 @@ func (o *Orchestrator) evolvePM(ctx context.Context) (int, error) {
 	}
 
 	if len(newTasks) == 0 {
+		_ = o.queue.MarkDone(evolveQueueID, "all candidates were duplicates")
 		dimColor.Printf("  No novel tasks after deduplication — project is fully evolved.\n")
 		s.Save()
 		return 0, nil
@@ -3426,6 +3617,7 @@ func (o *Orchestrator) evolvePM(ctx context.Context) (int, error) {
 
 	s.Plan.Tasks = append(s.Plan.Tasks, newTasks...)
 	s.Save()
+	_ = o.queue.MarkDone(evolveQueueID, fmt.Sprintf("discovered %d new task(s)", len(newTasks)))
 
 	o.webhook.Send(webhook.EventEvolveDiscovered, webhook.Payload{
 		Goal: s.Goal,
