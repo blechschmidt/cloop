@@ -88,6 +88,36 @@ func TestWithPanicSafety_NilInput(t *testing.T) {
 	}
 }
 
+// fakeNilNilProvider returns (nil, nil) — a contract violation that would
+// crash any downstream caller dereferencing result.Output unconditionally.
+// Used to verify that WithPanicSafety surfaces the offender directly rather
+// than letting the NPE happen in unrelated code (where the recovery message
+// would mis-attribute blame).
+type fakeNilNilProvider struct{}
+
+func (fakeNilNilProvider) Name() string         { return "fake-nil-nil" }
+func (fakeNilNilProvider) DefaultModel() string { return "fake-model" }
+func (fakeNilNilProvider) Complete(ctx context.Context, prompt string, opts Options) (*Result, error) {
+	return nil, nil
+}
+
+func TestWithPanicSafety_NilNilContractViolationSurfacedHere(t *testing.T) {
+	wrapped := WithPanicSafety(fakeNilNilProvider{})
+	result, err := wrapped.Complete(context.Background(), "anything", Options{})
+	if result != nil {
+		t.Fatalf("expected nil result on contract violation, got %+v", result)
+	}
+	if err == nil {
+		t.Fatal("expected non-nil error when provider returns (nil, nil); without this guard, downstream callers crash with NPE on result.Output")
+	}
+	if !strings.Contains(err.Error(), "fake-nil-nil") {
+		t.Errorf("expected error to name the offending provider, got %q", err.Error())
+	}
+	if !strings.Contains(err.Error(), "(nil, nil)") {
+		t.Errorf("expected error to describe the contract violation, got %q", err.Error())
+	}
+}
+
 // TestBuild_AppliesPanicSafety ensures the factory wraps every provider it
 // returns. We register a panicking provider through the public Register API,
 // build it via Build, and assert that calling Complete returns an error

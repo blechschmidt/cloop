@@ -52,5 +52,16 @@ func (p *panicSafe) Complete(ctx context.Context, prompt string, opts Options) (
 			result = nil
 		}
 	}()
-	return p.inner.Complete(ctx, prompt, opts)
+	result, err = p.inner.Complete(ctx, prompt, opts)
+	// Contract enforcement: a Provider must return either a non-nil *Result or a
+	// non-nil error. A buggy provider returning (nil, nil) would otherwise crash
+	// downstream callers that dereference result.Output unconditionally after
+	// checking err — and the resulting nil-pointer panic would be caught by the
+	// recover above but mis-attributed to the next caller's defer (or, if the
+	// caller has none, take down the process). Surfacing it here gives a clean,
+	// actionable error pointing at the actual offender.
+	if err == nil && result == nil {
+		err = fmt.Errorf("provider %s violated contract: returned (nil, nil)", p.inner.Name())
+	}
+	return result, err
 }
