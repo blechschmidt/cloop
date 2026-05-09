@@ -2,7 +2,6 @@
 package ui
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -116,6 +115,33 @@ const hubClientBufferSize = 64
 // Declared as var (not const) so regression tests can shrink it; production
 // callers should treat it as immutable.
 var wsWriteTimeout = 10 * time.Second
+
+// wsReadFrameLimit caps the size of any single inbound WebSocket frame
+// processed by handleWS's drain goroutine. The drain does not parse
+// inbound payloads today (it is a bidirectional hook for future use), so
+// any client→server frame should be tiny; 4 KiB is generous headroom for
+// future ack/control messages while bounding accidental or malicious
+// jumbo frames. nhooyr's default is 32 KiB; setting this explicitly makes
+// the limit immune to upstream default changes and tightens it to a value
+// proportional to actual need. On overshoot, nhooyr closes the connection
+// with StatusMessageTooBig.
+//
+// Declared as var (not const) so regression tests can shrink it; production
+// callers should treat it as immutable.
+var wsReadFrameLimit int64 = 4 * 1024
+
+// wsMaxInboundMsgsPerSecond caps how many inbound frames the drain
+// goroutine accepts per 1-second sliding window. Without a rate cap, a
+// client streaming many tiny (sub-wsReadFrameLimit) frames as fast as the
+// link allows can keep the drain goroutine hot indefinitely — each Read
+// returns immediately and the loop never yields. 100 msg/s is two orders
+// of magnitude above any realistic bidirectional protocol the UI would
+// adopt; once exceeded the connection is closed with StatusPolicyViolation
+// and the goroutine exits cleanly.
+//
+// Declared as var (not const) so regression tests can shrink it; production
+// callers should treat it as immutable.
+var wsMaxInboundMsgsPerSecond = 100
 
 // wsWrite sends a single WebSocket text frame with a per-call deadline
 // derived from ctx. Returns whatever Write returns (deadline-exceeded shows
@@ -1273,7 +1299,14 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.CloseNow() //nolint:errcheck
 
-	ctx := r.Context()
+	// Use a cancellable derivative of the request context so the drain
+	// goroutine can wake the writer loop on read error or rate-limit
+	// violation. Without this, conn.Close() inside the drain only tears
+	// down the underlying TCP conn — the writer loop stays blocked on
+	// select{} until something tries to write or the request itself ends,
+	// leaving the hubClient registered for an extra watcher tick or two.
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
 	workDir := s.resolveWorkDir(r)
 
 	// Assign a unique id, color-coded name and accent color to this connection.
@@ -1395,12 +1428,50 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	// Broadcast to others that a new user joined.
 	go s.broadcastPresence(workDir)
 
-	// Drain incoming frames (bidirectional hook for future use).
+	// Drain incoming frames (bidirectional hook for future use). Two
+	// defensive bounds protect this goroutine from abuse:
+	//   - SetReadLimit(wsReadFrameLimit) caps any single frame, so an
+	//     oversized payload can't allocate unbounded memory before being
+	//     rejected (nhooyr closes with StatusMessageTooBig on overshoot).
+	//   - A 1-second sliding-window message counter caps the *rate* of
+	//     inbound frames; a client spamming many tiny frames would otherwise
+	//     keep this goroutine hot forever (each Read returns immediately,
+	//     the loop never yields). Exceeding the cap closes with
+	//     StatusPolicyViolation so the goroutine exits cleanly.
 	go func() {
 		defer recoverGoroutine("handleWS drain")
+		// Cancel the parent ctx on any exit path so the writer loop
+		// (blocked on select{}) wakes promptly and the deferred
+		// hubClient cleanup runs without waiting for the next watcher
+		// tick or write attempt.
+		defer cancel()
+		conn.SetReadLimit(wsReadFrameLimit)
+		var (
+			windowStart = time.Now()
+			windowCount int
+		)
 		for {
 			_, _, err := conn.Read(ctx)
 			if err != nil {
+				return
+			}
+			now := time.Now()
+			if now.Sub(windowStart) >= time.Second {
+				windowStart = now
+				windowCount = 1
+				continue
+			}
+			windowCount++
+			if windowCount > wsMaxInboundMsgsPerSecond {
+				// Send a polite close frame with a rationale, but
+				// don't block this goroutine waiting for the peer's
+				// ack — nhooyr.Close holds for up to ~10s for the
+				// handshake. The deferred conn.CloseNow in handleWS
+				// is the unconditional fallback once the writer loop
+				// exits via the cancel() above.
+				go func() {
+					_ = conn.Close(websocket.StatusPolicyViolation, "inbound rate exceeded")
+				}()
 				return
 			}
 		}
@@ -1427,7 +1498,15 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		}
 		select {
 		case <-ctx.Done():
-			conn.Close(websocket.StatusNormalClosure, "") //nolint:errcheck
+			// Don't call conn.Close here — it blocks for up to ~10s
+			// waiting for the peer's close-frame ack, which delays
+			// the deferred hubClient cleanup. The deferred
+			// conn.CloseNow in handleWS handles teardown without
+			// the handshake. (Polite normal-closure semantics matter
+			// less here because ctx is only cancelled when the
+			// handler is shutting down or the drain detected abuse,
+			// in which case the drain has already kicked off the
+			// status-coded close frame asynchronously.)
 			return
 		case <-hc.resync:
 			drainWS(hc.ch)
@@ -2357,19 +2436,19 @@ func (s *Server) handleSuggestGenerate(w http.ResponseWriter, r *http.Request) {
 				s.broadcastSuggestStatus(suggestWorkDir)
 			}
 		}()
-		cmd := exec.Command(exe, "suggest", "--json", "--count", strconv.Itoa(req.Count))
-		cmd.Dir = suggestWorkDir
-		var stdout, stderr bytes.Buffer
-		cmd.Stdout = &stdout
-		cmd.Stderr = &stderr
-		runErr := cmd.Run()
+		// Hard timeout: nothing else cancels this background goroutine, and a
+		// hung sub-binary would otherwise leave suggestRunning=true forever
+		// (every subsequent /api/suggest/start returns 409 Conflict until the
+		// UI server is restarted).
+		out, runErr := runCloopSubcommand(context.Background(), exe, suggestWorkDir, suggestSubprocessTimeout,
+			"suggest", "--json", "--count", strconv.Itoa(req.Count))
 
 		s.suggestMu.Lock()
 		s.suggestRunning = false
 		s.suggestDone = true
 
 		if runErr != nil {
-			msg := strings.TrimSpace(stderr.String())
+			msg := strings.TrimSpace(string(out))
 			if msg == "" {
 				msg = runErr.Error()
 			}
@@ -2380,7 +2459,7 @@ func (s *Server) handleSuggestGenerate(w http.ResponseWriter, r *http.Request) {
 		}
 
 		var result suggest.Result
-		if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		if err := json.Unmarshal(out, &result); err != nil {
 			s.suggestErr = "could not parse suggestions: " + err.Error()
 			s.suggestMu.Unlock()
 			s.broadcastSuggestStatus(suggestWorkDir)
@@ -2708,12 +2787,14 @@ func (s *Server) handleVoice(w http.ResponseWriter, r *http.Request) {
 		listenArgs = append(listenArgs, "--groq-api-key", v)
 	}
 
-	// Run cloop listen via the installed binary. We capture stdout.
+	// Run cloop listen via the installed binary. Bound by r.Context() so the
+	// upload handler doesn't keep the STT subprocess alive after the client
+	// gives up, plus a hard timeout in case the STT provider hangs.
 	exe, err := os.Executable()
 	if err != nil {
 		exe = "cloop"
 	}
-	out, cmdErr := exec.Command(exe, listenArgs...).CombinedOutput()
+	out, cmdErr := runCloopSubcommand(r.Context(), exe, "", voiceSubprocessTimeout, listenArgs...)
 	output := strings.TrimSpace(string(out))
 
 	if cmdErr != nil {
@@ -2787,14 +2868,14 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		Timestamp: time.Now(),
 	})
 
-	// Run cloop do <message> to parse and execute the intent.
+	// Run cloop do <message> to parse and execute the intent. The subprocess
+	// is bound by both r.Context() (browser tab close = SIGKILL the child) and
+	// a hard timeout so a wedged provider call can't pin this goroutine.
 	exe, err := os.Executable()
 	if err != nil {
 		exe = "cloop"
 	}
-	doCmd := exec.Command(exe, "do", msg)
-	doCmd.Dir = chatWorkDir
-	out, cmdErr := doCmd.CombinedOutput()
+	out, cmdErr := runCloopSubcommand(r.Context(), exe, chatWorkDir, chatSubprocessTimeout, "do", msg)
 	output := strings.TrimSpace(string(out))
 
 	ok := cmdErr == nil
@@ -2991,9 +3072,7 @@ func (s *Server) handleReset(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		exe = "cloop"
 	}
-	resetCmd := exec.Command(exe, "reset")
-	resetCmd.Dir = s.resolveWorkDir(r)
-	out, err := resetCmd.CombinedOutput()
+	out, err := runCloopSubcommand(r.Context(), exe, s.resolveWorkDir(r), resetSubprocessTimeout, "reset")
 	if err != nil {
 		msg := strings.TrimSpace(string(out))
 		if msg == "" {
