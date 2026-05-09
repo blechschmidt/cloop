@@ -2004,9 +2004,11 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 				}
 				dimColor.Printf("  Verifying task %d...\n", task.ID)
 				pass, verifyErr := pm.VerifyTask(ctx, o.provider, s.Goal, s.Instructions, s.Model, o.config.StepTimeout, task, taskOutput)
+				verifyErrored := false
 				if verifyErr != nil {
 					dimColor.Printf("  Verification error (treating as pass): %v\n", verifyErr)
 					pass = true
+					verifyErrored = true
 				}
 				if !pass {
 					task.VerifyRetries++
@@ -2041,8 +2043,12 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 					}
 					continue
 				}
-				pm.AddAnnotation(task, "ai", "AI verification passed: task was genuinely completed.")
-			pmColor.Printf("✓ Verification PASSED for task %d: %s\n\n", task.ID, task.Title)
+				if verifyErrored {
+					pm.AddAnnotation(task, "ai", fmt.Sprintf("AI verification errored — treated as pass: %v", verifyErr))
+				} else {
+					pm.AddAnnotation(task, "ai", "AI verification passed: task was genuinely completed.")
+				}
+				pmColor.Printf("✓ Verification PASSED for task %d: %s\n\n", task.ID, task.Title)
 			}
 
 			// Script-verify: generate and run a shell verification script to confirm
@@ -2053,6 +2059,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 				vr, svErr := verify.GenerateAndRun(ctx, o.provider, s.Model, o.config.StepTimeout, o.config.WorkDir, task, taskOutput)
 				if svErr != nil {
 					dimColor.Printf("  Script verification error (treating as pass): %v\n", svErr)
+					pm.AddAnnotation(task, "ai", fmt.Sprintf("Shell verification errored — treated as pass: %v", svErr))
 				} else {
 					// Persist script + result as artifact regardless of outcome.
 					if artPath, artErr := artifact.WriteVerificationArtifact(o.config.WorkDir, task, vr.Script, vr.Output, vr.Passed); artErr != nil {

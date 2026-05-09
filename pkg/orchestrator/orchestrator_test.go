@@ -3370,3 +3370,162 @@ func TestRunPM_HealAnnotationOutcome(t *testing.T) {
 		})
 	}
 }
+
+// TestRunPM_VerifyError_AnnotatesAsErrored locks in the audit-trail accuracy
+// of the AI-verify error path. Before this contract was tested, when
+// pm.VerifyTask returned a non-nil error, the loop printed a dim "treating as
+// pass" line, set pass=true, and then unconditionally appended
+// "AI verification passed: task was genuinely completed." to the task history.
+// That annotation is a lie — the verification didn't pass, it never even
+// produced a verdict — and it's exactly the wrong breadcrumb when an operator
+// is later trying to figure out from logs why a task that "passed verification"
+// was actually broken.
+//
+// This test pins the fix: when verify errors, the annotation must say so
+// (distinct text containing "errored — treated as pass") instead of falsely
+// claiming the verification passed. A future refactor that drops the
+// branching would silently re-introduce the audit-trail accuracy bug.
+//
+// Same audit-trail class as the clarification fix
+// (TestRunPM_ClarificationAutoResolve_AnnotationOutcome) and the heal-loop
+// fix (TestRunPM_HealAnnotationOutcome).
+func TestRunPM_VerifyError_AnnotatesAsErrored(t *testing.T) {
+	dir := tempDir(t)
+	s := initState(t, dir, "goal", 0)
+	s.PMMode = true
+	s.Plan = &pm.Plan{
+		Goal:  "goal",
+		Tasks: []*pm.Task{{ID: 1, Title: "Task A", Priority: 1, Status: pm.TaskPending}},
+	}
+	s.Save()
+
+	prov := &mockProvider{
+		name: "mock",
+		results: []*provider.Result{
+			{Output: "did the work\nTASK_DONE", Provider: "mock"}, // executor
+			nil, // verify slot — paired with err below
+		},
+		errs: []error{
+			nil,
+			errors.New("verify upstream 5xx"),
+		},
+	}
+	o := newOrchestrator(t, dir, Config{
+		WorkDir: dir,
+		PMMode:  true,
+		Verify:  true,
+		NoHeal:  true,
+	}, prov)
+	_ = o.runPM(context.Background())
+
+	task := o.state.Plan.Tasks[0]
+	// The errored verify is treated as pass, so the task should still be Done.
+	if task.Status != pm.TaskDone {
+		t.Errorf("task status = %q, want %q (errored verify is treated as pass)", task.Status, pm.TaskDone)
+	}
+
+	// Find any verification-related annotation.
+	var verifyAnns []string
+	for _, a := range task.Annotations {
+		if a.Author == "ai" && strings.Contains(a.Text, "verification") {
+			verifyAnns = append(verifyAnns, a.Text)
+		}
+	}
+	if len(verifyAnns) == 0 {
+		t.Fatalf("no verification annotation found; got annotations: %+v", task.Annotations)
+	}
+
+	// The annotation must accurately describe the errored outcome — not falsely
+	// claim "task was genuinely completed".
+	want := "AI verification errored — treated as pass"
+	dontWant := "AI verification passed: task was genuinely completed."
+	foundWanted := false
+	foundDontWant := false
+	for _, ann := range verifyAnns {
+		if strings.Contains(ann, want) {
+			foundWanted = true
+		}
+		if strings.Contains(ann, dontWant) {
+			foundDontWant = true
+		}
+	}
+	if !foundWanted {
+		t.Errorf("missing accurate verify-errored annotation containing %q;\nactual:\n  %s",
+			want, strings.Join(verifyAnns, "\n  "))
+	}
+	if foundDontWant {
+		t.Errorf("found misleading %q annotation — verify errored, it did not pass;\nactual:\n  %s",
+			dontWant, strings.Join(verifyAnns, "\n  "))
+	}
+}
+
+// TestRunPM_ScriptVerifyError_Annotated locks in the audit-trail accuracy of
+// the ScriptVerify error path. Before this contract was tested, when
+// verify.GenerateAndRun returned a non-nil error (e.g. provider hiccup
+// generating the script, temp-file errors, exec failure not caused by the
+// script's own non-zero exit), the loop printed a dim "treating as pass" line
+// and silently moved on to annotate "Task completed successfully." with no
+// record at all that script-verify even ran or errored. Operators later
+// trying to reconstruct what happened couldn't tell from history whether
+// script-verify was disabled, succeeded, or errored.
+//
+// This test pins the fix: when script-verify errors, an annotation must
+// record the error so the audit trail makes the silent "treat as pass"
+// behavior visible.
+func TestRunPM_ScriptVerifyError_Annotated(t *testing.T) {
+	dir := tempDir(t)
+	s := initState(t, dir, "goal", 0)
+	s.PMMode = true
+	s.Plan = &pm.Plan{
+		Goal:  "goal",
+		Tasks: []*pm.Task{{ID: 1, Title: "Task A", Priority: 1, Status: pm.TaskPending}},
+	}
+	s.Save()
+
+	prov := &mockProvider{
+		name: "mock",
+		results: []*provider.Result{
+			{Output: "did the work\nTASK_DONE", Provider: "mock"}, // executor
+			nil, // script-gen slot — paired with err below
+		},
+		errs: []error{
+			nil,
+			errors.New("script gen upstream 5xx"),
+		},
+	}
+	o := newOrchestrator(t, dir, Config{
+		WorkDir:      dir,
+		PMMode:       true,
+		ScriptVerify: true,
+		NoHeal:       true,
+	}, prov)
+	_ = o.runPM(context.Background())
+
+	task := o.state.Plan.Tasks[0]
+	if task.Status != pm.TaskDone {
+		t.Errorf("task status = %q, want %q (errored script-verify is treated as pass)", task.Status, pm.TaskDone)
+	}
+
+	var sverifyAnns []string
+	for _, a := range task.Annotations {
+		if a.Author == "ai" && strings.Contains(a.Text, "Shell verification") {
+			sverifyAnns = append(sverifyAnns, a.Text)
+		}
+	}
+	if len(sverifyAnns) == 0 {
+		t.Fatalf("no Shell verification annotation found; got annotations: %+v", task.Annotations)
+	}
+
+	want := "Shell verification errored — treated as pass"
+	found := false
+	for _, ann := range sverifyAnns {
+		if strings.Contains(ann, want) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("missing script-verify-errored annotation containing %q;\nactual:\n  %s",
+			want, strings.Join(sverifyAnns, "\n  "))
+	}
+}
