@@ -7,7 +7,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"strings"
@@ -193,7 +192,7 @@ func (p *Provider) Complete(ctx context.Context, prompt string, opts provider.Op
 		// Capture anthropic-ratelimit-* headers regardless of status code.
 		ratelimit.Record(model, resp.Header)
 
-		respData, err := io.ReadAll(resp.Body)
+		respData, err := provider.ReadResponseBody(resp.Body, provider.MaxResponseBytes)
 		if err != nil {
 			return resp.StatusCode, fmt.Errorf("anthropic: reading response: %w", err)
 		}
@@ -257,7 +256,7 @@ func (p *Provider) completeStreaming(ctx context.Context, url string, data []byt
 	ratelimit.Record(model, resp.Header)
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		body, _, _ := provider.ReadResponseBodyTruncated(resp.Body, provider.MaxErrorBodyBytes)
 		var errResp responseBody
 		if jsonErr := json.Unmarshal(body, &errResp); jsonErr == nil && errResp.Error != nil {
 			return nil, fmt.Errorf("anthropic API error (%s): %s", errResp.Error.Type, errResp.Error.Message)

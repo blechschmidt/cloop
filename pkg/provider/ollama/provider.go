@@ -7,7 +7,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -129,7 +128,7 @@ func (p *Provider) Complete(ctx context.Context, prompt string, opts provider.Op
 		}
 		defer resp.Body.Close()
 
-		respData, err := io.ReadAll(resp.Body)
+		respData, err := provider.ReadResponseBody(resp.Body, provider.MaxResponseBytes)
 		if err != nil {
 			return resp.StatusCode, fmt.Errorf("ollama: reading response: %w", err)
 		}
@@ -175,7 +174,7 @@ func (p *Provider) completeStreaming(ctx context.Context, url string, data []byt
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		body, _, _ := provider.ReadResponseBodyTruncated(resp.Body, provider.MaxErrorBodyBytes)
 		return nil, fmt.Errorf("ollama: HTTP %d: %s", resp.StatusCode, string(body))
 	}
 
