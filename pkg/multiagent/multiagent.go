@@ -49,6 +49,18 @@ func slug(title string, maxLen int) string {
 // architect's output as context, and the reviewer receives both prior outputs.
 // Sub-agent responses are stored as artifact files under
 // .cloop/tasks/<id>-<slug>-multiagent/{architect,coder,reviewer}.txt.
+//
+// Two stability bounds protect the pipeline:
+//   - ctx.Err() is checked between passes so a cancelled parent (Ctrl+C
+//     translated to cancel, or the orchestrator's per-task watchdog firing)
+//     bails before the next pass instead of running the full architect→coder
+//     →reviewer chain — each pass can run for many minutes, so an unbounded
+//     pipeline ignores cancellation for tens of minutes after the user asked
+//     it to stop.
+//   - Each prov.Complete call is wrapped in panic recovery so a panic inside
+//     a provider implementation (e.g. nil-pointer in a third-party SDK,
+//     malformed JSON deref) becomes a returned error instead of taking down
+//     the orchestrator and losing every other queued task.
 func RunTask(
 	ctx context.Context,
 	prov provider.Provider,
@@ -90,16 +102,22 @@ func RunTask(
 	}
 
 	// ── Pass 1: Architect ──────────────────────────────────────────────────
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("multiagent cancelled before architect pass: %w", err)
+	}
 	architectPrompt := baseContext + "\nDesign the technical approach for this task."
 	archOpts := opts
 	archOpts.SystemPrompt = ArchitectSystemPrompt
-	archResult, err := prov.Complete(ctx, architectPrompt, archOpts)
+	archResult, err := safeComplete(ctx, prov, architectPrompt, archOpts)
 	if err != nil {
 		return nil, fmt.Errorf("architect pass: %w", err)
 	}
 	res.ArchitectOutput = archResult.Output
 
 	// ── Pass 2: Coder ──────────────────────────────────────────────────────
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("multiagent cancelled before coder pass: %w", err)
+	}
 	var coderPrompt strings.Builder
 	coderPrompt.WriteString(baseContext)
 	coderPrompt.WriteString("\n## Architect's Design\n\n")
@@ -108,13 +126,16 @@ func RunTask(
 
 	coderOpts := opts
 	coderOpts.SystemPrompt = CoderSystemPrompt
-	coderResult, err := prov.Complete(ctx, coderPrompt.String(), coderOpts)
+	coderResult, err := safeComplete(ctx, prov, coderPrompt.String(), coderOpts)
 	if err != nil {
 		return nil, fmt.Errorf("coder pass: %w", err)
 	}
 	res.CoderOutput = coderResult.Output
 
 	// ── Pass 3: Reviewer ───────────────────────────────────────────────────
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("multiagent cancelled before reviewer pass: %w", err)
+	}
 	var reviewerPrompt strings.Builder
 	reviewerPrompt.WriteString(baseContext)
 	reviewerPrompt.WriteString("\n## Architect's Design\n\n")
@@ -125,7 +146,7 @@ func RunTask(
 
 	reviewerOpts := opts
 	reviewerOpts.SystemPrompt = ReviewerSystemPrompt
-	reviewerResult, err := prov.Complete(ctx, reviewerPrompt.String(), reviewerOpts)
+	reviewerResult, err := safeComplete(ctx, prov, reviewerPrompt.String(), reviewerOpts)
 	if err != nil {
 		return nil, fmt.Errorf("reviewer pass: %w", err)
 	}
