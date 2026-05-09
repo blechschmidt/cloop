@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/atomicfile"
 	"github.com/blechschmidt/cloop/pkg/boundedread"
 	"github.com/blechschmidt/cloop/pkg/checkpoint"
 	"github.com/fatih/color"
@@ -61,7 +62,7 @@ var checkpointSaveCmd = &cobra.Command{
 		}
 
 		dst := filepath.Join(dir, name+".json")
-		if err := os.WriteFile(dst, data, 0o644); err != nil {
+		if err := atomicfile.Write(dst, data, 0o644); err != nil {
 			return fmt.Errorf("saving checkpoint: %w", err)
 		}
 
@@ -88,12 +89,17 @@ var checkpointRestoreCmd = &cobra.Command{
 		currentState := filepath.Join(workdir, ".cloop", "state.json")
 		if cur, readErr := boundedread.ReadFile(currentState, maxCheckpointStateBytes); readErr == nil {
 			backupDir := filepath.Join(workdir, checkpointDir)
-			backupName := "pre-restore-" + time.Now().Format("20060102-150405")
-			_ = os.WriteFile(filepath.Join(backupDir, backupName+".json"), cur, 0o644)
-			color.New(color.Faint).Printf("  Current state backed up as: %s\n", backupName)
+			// Ensure backup directory exists; atomicfile.Write does not MkdirAll.
+			// If the user has only ever read state but never saved a checkpoint,
+			// .cloop/checkpoints/ may not yet exist.
+			if mkErr := os.MkdirAll(backupDir, 0o755); mkErr == nil {
+				backupName := "pre-restore-" + time.Now().Format("20060102-150405")
+				_ = atomicfile.Write(filepath.Join(backupDir, backupName+".json"), cur, 0o644)
+				color.New(color.Faint).Printf("  Current state backed up as: %s\n", backupName)
+			}
 		}
 
-		if err := os.WriteFile(currentState, data, 0o644); err != nil {
+		if err := atomicfile.Write(currentState, data, 0o644); err != nil {
 			return fmt.Errorf("restoring checkpoint: %w", err)
 		}
 

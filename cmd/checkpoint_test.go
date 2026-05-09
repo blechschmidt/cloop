@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/blechschmidt/cloop/pkg/boundedread"
@@ -106,5 +107,137 @@ func TestCheckpointRestore_RefusesOversizedCheckpoint(t *testing.T) {
 	}
 	if !errors.Is(err, boundedread.ErrTooLarge) {
 		t.Errorf("expected boundedread.ErrTooLarge, got %v", err)
+	}
+}
+
+// TestCheckpointSave_WritesAtomically pins the contract that a successful
+// checkpoint save lands the file via atomicfile.Write — i.e. the directory
+// contains exactly the renamed file and no leftover `.<name>.*.tmp` siblings.
+// Catches regressions where someone re-introduces a direct os.WriteFile on
+// the save path, which would (a) not flush the parent directory inode and
+// (b) expose a torn-write window where readers could observe a half-written
+// file via a partial fsync. The ".tmp" check is the externally observable
+// proxy for "atomicfile.Write was used."
+func TestCheckpointSave_WritesAtomically(t *testing.T) {
+	tmp := t.TempDir()
+	if err := os.Chdir(tmp); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(tmp, ".cloop"), 0o755); err != nil {
+		t.Fatalf("mkdir .cloop: %v", err)
+	}
+
+	body := []byte(`{"goal":"atomic-save","tasks":[]}`)
+	if err := os.WriteFile(filepath.Join(tmp, ".cloop", "state.json"), body, 0o644); err != nil {
+		t.Fatalf("write state.json: %v", err)
+	}
+
+	if err := checkpointSaveCmd.RunE(checkpointSaveCmd, []string{"atomic"}); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	dir := filepath.Join(tmp, checkpointDir)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read checkpoint dir: %v", err)
+	}
+	var sawTarget bool
+	for _, e := range entries {
+		name := e.Name()
+		if strings.HasSuffix(name, ".tmp") {
+			t.Errorf("leftover atomicfile staging file in %s: %s", dir, name)
+		}
+		if name == "atomic.json" {
+			sawTarget = true
+		}
+	}
+	if !sawTarget {
+		t.Fatalf("expected checkpoint atomic.json in %s, entries=%v", dir, entries)
+	}
+
+	got, err := os.ReadFile(filepath.Join(dir, "atomic.json"))
+	if err != nil {
+		t.Fatalf("read checkpoint: %v", err)
+	}
+	if string(got) != string(body) {
+		t.Errorf("checkpoint contents mismatch: got %q, want %q", got, body)
+	}
+}
+
+// TestCheckpointRestore_WritesAtomically verifies that restoring a checkpoint
+// (a) overwrites .cloop/state.json atomically and (b) writes the pre-restore
+// backup atomically — i.e. neither leaves a `.<name>.*.tmp` sibling in its
+// target directory. Restoring is the most failure-sensitive checkpoint path:
+// a torn write to state.json corrupts project state and a torn write to the
+// pre-restore backup defeats the safety net the user is relying on.
+func TestCheckpointRestore_WritesAtomically(t *testing.T) {
+	tmp := t.TempDir()
+	if err := os.Chdir(tmp); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	cloopDir := filepath.Join(tmp, ".cloop")
+	if err := os.MkdirAll(cloopDir, 0o755); err != nil {
+		t.Fatalf("mkdir .cloop: %v", err)
+	}
+	dir := filepath.Join(tmp, checkpointDir)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir checkpoints: %v", err)
+	}
+
+	current := []byte(`{"goal":"current"}`)
+	if err := os.WriteFile(filepath.Join(cloopDir, "state.json"), current, 0o644); err != nil {
+		t.Fatalf("write current state.json: %v", err)
+	}
+	saved := []byte(`{"goal":"restored","tasks":[]}`)
+	if err := os.WriteFile(filepath.Join(dir, "good.json"), saved, 0o644); err != nil {
+		t.Fatalf("seed checkpoint: %v", err)
+	}
+
+	if err := checkpointRestoreCmd.RunE(checkpointRestoreCmd, []string{"good"}); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+
+	// state.json now matches the checkpoint.
+	got, err := os.ReadFile(filepath.Join(cloopDir, "state.json"))
+	if err != nil {
+		t.Fatalf("read state.json: %v", err)
+	}
+	if string(got) != string(saved) {
+		t.Errorf("state.json after restore: got %q, want %q", got, saved)
+	}
+
+	// No .tmp leftovers in either target directory.
+	for _, d := range []string{cloopDir, dir} {
+		entries, err := os.ReadDir(d)
+		if err != nil {
+			t.Fatalf("read %s: %v", d, err)
+		}
+		for _, e := range entries {
+			if strings.HasSuffix(e.Name(), ".tmp") {
+				t.Errorf("leftover atomicfile staging file in %s: %s", d, e.Name())
+			}
+		}
+	}
+
+	// Pre-restore backup of the original state was created.
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read checkpoint dir: %v", err)
+	}
+	var foundBackup bool
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "pre-restore-") && strings.HasSuffix(e.Name(), ".json") {
+			b, err := os.ReadFile(filepath.Join(dir, e.Name()))
+			if err != nil {
+				t.Fatalf("read backup: %v", err)
+			}
+			if string(b) != string(current) {
+				t.Errorf("pre-restore backup mismatch: got %q, want %q", b, current)
+			}
+			foundBackup = true
+		}
+	}
+	if !foundBackup {
+		t.Errorf("expected a pre-restore-*.json backup in %s, entries=%v", dir, entries)
 	}
 }

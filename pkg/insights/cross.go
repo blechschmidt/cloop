@@ -11,11 +11,19 @@ import (
 	"strings"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/boundedread"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/provider"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/workspace"
 )
+
+// maxWorkspaceFileBytes caps the size of the user-supplied --workspace JSON
+// file that runCrossInsights ingests. Workspace registries are small (a few
+// KB even with 100 entries) so 1 MiB leaves orders-of-magnitude headroom
+// while preventing a stray --workspace path pointed at a runaway artifact
+// from OOM-killing the process. Declared as var so tests may shrink it.
+var maxWorkspaceFileBytes int64 = 1 << 20
 
 // ProjectSnapshot holds the metrics collected from a single project.
 type ProjectSnapshot struct {
@@ -260,8 +268,13 @@ func CollectFromWorkspaces(wsFile string) ([]*ProjectSnapshot, error) {
 // readLocalWorkspaceFile parses a workspace JSON file.
 // Supports both {"workspaces":[...]} (global registry format) and
 // a bare array [{"name":"","path":""}] (local format).
+//
+// The path is user-supplied (--workspace flag); reads are capped at
+// maxWorkspaceFileBytes to prevent a runaway file (huge log misnamed,
+// /dev/zero, etc.) from OOM-killing the process. errors.Is(err,
+// boundedread.ErrTooLarge) detects the size-limit case.
 func readLocalWorkspaceFile(path string) ([]wsEntry, error) {
-	data, err := os.ReadFile(path)
+	data, err := boundedread.ReadFile(path, maxWorkspaceFileBytes)
 	if err != nil {
 		return nil, err
 	}

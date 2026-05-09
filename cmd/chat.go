@@ -7,6 +7,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/blechschmidt/cloop/pkg/atomicfile"
 	"github.com/blechschmidt/cloop/pkg/chat"
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/memory"
@@ -419,7 +421,7 @@ func saveTranscript(lines []string, workdir string) string {
 	ts := time.Now().Format("20060102-150405")
 	path := fmt.Sprintf("%s/.cloop/chat-%s.txt", workdir, ts)
 	content := strings.Join(lines, "\n") + "\n"
-	_ = os.WriteFile(path, []byte(content), 0o644)
+	_ = atomicfile.Write(path, []byte(content), 0o644)
 	return path
 }
 

@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/atomicfile"
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/provider"
 	"github.com/blechschmidt/cloop/pkg/standup"
@@ -237,7 +238,7 @@ Examples:
 			} else {
 				content = standup.FormatText(report, s.Goal, standupHours)
 			}
-			if err := os.WriteFile(filepath.Join(workdir, filename), []byte(content), 0o644); err != nil {
+			if err := atomicfile.Write(filepath.Join(workdir, filename), []byte(content), 0o644); err != nil {
 				warnColor.Printf("Warning: could not save standup: %v\n", err)
 			} else {
 				goodColor.Printf("Saved to %s\n\n", filename)
