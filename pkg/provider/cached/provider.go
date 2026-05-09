@@ -4,6 +4,7 @@ package cached
 
 import (
 	"context"
+	"strings"
 
 	"github.com/blechschmidt/cloop/pkg/cache"
 	"github.com/blechschmidt/cloop/pkg/provider"
@@ -63,8 +64,17 @@ func (p *Provider) Complete(ctx context.Context, prompt string, opts provider.Op
 		return nil, err
 	}
 
-	// Store in cache (best-effort; cache errors don't fail the call).
-	_ = p.cache.Put(key, result.Output, p.inner.Name(), model)
+	// Skip caching empty/whitespace-only output. A successful (err==nil) response
+	// with no usable content is almost always a transient provider hiccup rather
+	// than a legitimate empty answer — caching it would silently serve the same
+	// useless string on every subsequent identical request, masking the real
+	// problem from the orchestrator's failure gate (which only observes errors,
+	// not output emptiness). Skipping the write makes the next identical call
+	// re-hit the inner provider so the issue surfaces or resolves naturally.
+	if strings.TrimSpace(result.Output) != "" {
+		// Store in cache (best-effort; cache errors don't fail the call).
+		_ = p.cache.Put(key, result.Output, p.inner.Name(), model)
+	}
 
 	return result, nil
 }
