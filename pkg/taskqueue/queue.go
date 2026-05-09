@@ -6,6 +6,10 @@
 //
 // The queue is intentionally append-mostly: rows are inserted when work begins
 // and updated only with terminal status. List() returns rows newest-first.
+//
+// As of Task 20079 the queue table lives inside the project state database
+// (.cloop/state.db) so a project has exactly one SQLite file. Existing
+// .cloop/queue.db files are migrated transparently on first Open and removed.
 package taskqueue
 
 import (
@@ -18,6 +22,12 @@ import (
 
 	_ "modernc.org/sqlite"
 )
+
+// sessionMetaFile is the sentinel that identifies a session directory. When
+// present in dir, state.db lives directly under dir (not under dir/.cloop/).
+// Mirrored from pkg/state to avoid the import cycle that would arise from
+// pulling pkg/state into a low-level storage package.
+const sessionMetaFile = "session.json"
 
 // Kind identifies what type of work the queue entry represents.
 type Kind string
@@ -92,21 +102,46 @@ CREATE INDEX IF NOT EXISTS queue_status ON queue(status);
 CREATE INDEX IF NOT EXISTS queue_created_at ON queue(created_at);
 `
 
-// QueuePath returns the queue.db path for a project working directory.
+// QueuePath returns the on-disk path of the database that backs the queue
+// for a project working directory. As of Task 20079 this is the project's
+// state.db — the queue table is co-located with project state so there is
+// exactly one SQLite file per project.
 func QueuePath(workDir string) string {
+	if workDir == "" {
+		return ""
+	}
+	if _, err := os.Stat(filepath.Join(workDir, sessionMetaFile)); err == nil {
+		// Session directories store state.db flat (no .cloop/ subdir).
+		return filepath.Join(workDir, "state.db")
+	}
+	return filepath.Join(workDir, ".cloop", "state.db")
+}
+
+// legacyQueuePath returns the historical .cloop/queue.db location used before
+// Task 20079. Migration on Open() reads from here and removes the file.
+func legacyQueuePath(workDir string) string {
+	if workDir == "" {
+		return ""
+	}
+	if _, err := os.Stat(filepath.Join(workDir, sessionMetaFile)); err == nil {
+		return filepath.Join(workDir, "queue.db")
+	}
 	return filepath.Join(workDir, ".cloop", "queue.db")
 }
 
 // Open opens (or creates) the queue database. The caller must Close() it.
+//
+// Storage is the project's state.db (the queue table is part of that file's
+// schema, see pkg/statedb). On first call, any rows in a legacy
+// .cloop/queue.db are migrated into state.db and the legacy file is removed.
 func Open(workDir string) (*Queue, error) {
 	if workDir == "" {
 		return nil, fmt.Errorf("taskqueue.Open: empty workDir")
 	}
-	dbDir := filepath.Join(workDir, ".cloop")
-	if err := os.MkdirAll(dbDir, 0o755); err != nil {
-		return nil, fmt.Errorf("taskqueue mkdir %s: %w", dbDir, err)
-	}
 	path := QueuePath(workDir)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return nil, fmt.Errorf("taskqueue mkdir %s: %w", filepath.Dir(path), err)
+	}
 	conn, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, fmt.Errorf("taskqueue open %s: %w", path, err)
@@ -116,7 +151,118 @@ func Open(workDir string) (*Queue, error) {
 		conn.Close()
 		return nil, fmt.Errorf("taskqueue schema: %w", err)
 	}
-	return &Queue{conn: conn, path: path}, nil
+
+	q := &Queue{conn: conn, path: path}
+
+	// Best-effort migration of any pre-Task-20079 .cloop/queue.db. Failures are
+	// logged via the returned error path only when the legacy file existed AND
+	// could not be merged; otherwise we silently continue with the new store.
+	if legacy := legacyQueuePath(workDir); legacy != "" && legacy != path {
+		if _, statErr := os.Stat(legacy); statErr == nil {
+			if migrateErr := migrateLegacyQueue(conn, legacy); migrateErr != nil {
+				conn.Close()
+				return nil, fmt.Errorf("taskqueue migrate %s: %w", legacy, migrateErr)
+			}
+		}
+	}
+
+	return q, nil
+}
+
+// migrateLegacyQueue copies all rows from the legacy queue.db into the
+// destination connection's queue table, preserving the original IDs, then
+// removes the legacy file (including its WAL/SHM siblings).
+func migrateLegacyQueue(dst *sql.DB, legacyPath string) error {
+	src, err := sql.Open("sqlite", legacyPath)
+	if err != nil {
+		return fmt.Errorf("open legacy: %w", err)
+	}
+	defer src.Close()
+	src.SetMaxOpenConns(1)
+
+	// Discover table existence — a torn or empty file might have no schema.
+	var tableName string
+	if err := src.QueryRow(
+		`SELECT name FROM sqlite_master WHERE type='table' AND name='queue'`,
+	).Scan(&tableName); err != nil {
+		if err == sql.ErrNoRows {
+			// Empty legacy file — nothing to migrate, just clean up.
+			return removeLegacyQueueFiles(legacyPath)
+		}
+		return fmt.Errorf("inspect legacy: %w", err)
+	}
+
+	rows, err := src.Query(`
+		SELECT id, kind, task_id, attempt, parent_id, title, description,
+		       status, source, created_at, started_at, completed_at,
+		       output_summary, error_message
+		FROM queue ORDER BY id`)
+	if err != nil {
+		return fmt.Errorf("read legacy rows: %w", err)
+	}
+	defer rows.Close()
+
+	tx, err := dst.Begin()
+	if err != nil {
+		return fmt.Errorf("dst begin: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	stmt, err := tx.Prepare(`
+		INSERT OR IGNORE INTO queue
+		(id, kind, task_id, attempt, parent_id, title, description, status,
+		 source, created_at, started_at, completed_at, output_summary, error_message)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+	if err != nil {
+		return fmt.Errorf("prepare insert: %w", err)
+	}
+	defer stmt.Close()
+
+	for rows.Next() {
+		var (
+			id, taskID, attempt, parentID                int64
+			kind, title, desc, status, source, createdAt string
+			outSummary, errMsg                           string
+			startedAt, completedAt                       sql.NullString
+		)
+		if err := rows.Scan(
+			&id, &kind, &taskID, &attempt, &parentID, &title, &desc,
+			&status, &source, &createdAt, &startedAt, &completedAt,
+			&outSummary, &errMsg,
+		); err != nil {
+			return fmt.Errorf("scan legacy row: %w", err)
+		}
+		if _, err := stmt.Exec(
+			id, kind, taskID, attempt, parentID, title, desc,
+			status, source, createdAt, startedAt, completedAt,
+			outSummary, errMsg,
+		); err != nil {
+			return fmt.Errorf("insert row %d: %w", id, err)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate legacy rows: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit migration: %w", err)
+	}
+	rows.Close()
+	src.Close()
+
+	return removeLegacyQueueFiles(legacyPath)
+}
+
+// removeLegacyQueueFiles deletes queue.db and its WAL/SHM siblings if present.
+// Errors on the WAL/SHM files are tolerated — they're checkpointed automatically
+// by SQLite and not removing them is harmless (just clutter).
+func removeLegacyQueueFiles(path string) error {
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove %s: %w", path, err)
+	}
+	for _, suffix := range []string{"-wal", "-shm"} {
+		_ = os.Remove(path + suffix)
+	}
+	return nil
 }
 
 // Close releases the queue database connection.

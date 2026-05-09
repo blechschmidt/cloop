@@ -133,6 +133,31 @@ CREATE TABLE IF NOT EXISTS costs (
 
 CREATE INDEX IF NOT EXISTS costs_timestamp ON costs(timestamp);
 CREATE INDEX IF NOT EXISTS costs_task_id ON costs(task_id);
+
+-- Activity queue: every unit of work cloop performs (PM task executions,
+-- auto-heal retries, evolve discovery cycles, externally-merged tasks,
+-- session-level work). Co-located with state in state.db so there is a
+-- single SQLite database per project (Task 20079: merge queue + state db).
+CREATE TABLE IF NOT EXISTS queue (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind            TEXT    NOT NULL DEFAULT 'task',
+    task_id         INTEGER NOT NULL DEFAULT 0,
+    attempt         INTEGER NOT NULL DEFAULT 0,
+    parent_id       INTEGER NOT NULL DEFAULT 0,
+    title           TEXT    NOT NULL DEFAULT '',
+    description     TEXT    NOT NULL DEFAULT '',
+    status          TEXT    NOT NULL DEFAULT 'queued',
+    source          TEXT    NOT NULL DEFAULT '',
+    created_at      TEXT    NOT NULL DEFAULT '',
+    started_at      TEXT,
+    completed_at    TEXT,
+    output_summary  TEXT    NOT NULL DEFAULT '',
+    error_message   TEXT    NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS queue_task_id ON queue(task_id);
+CREATE INDEX IF NOT EXISTS queue_status ON queue(status);
+CREATE INDEX IF NOT EXISTS queue_created_at ON queue(created_at);
 `
 
 // Open opens (or creates) the SQLite database at dbPath and applies the schema.

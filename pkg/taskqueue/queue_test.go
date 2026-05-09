@@ -1,8 +1,12 @@
 package taskqueue
 
 import (
+	"database/sql"
+	"os"
 	"path/filepath"
 	"testing"
+
+	_ "modernc.org/sqlite"
 )
 
 func TestEnqueueAndList(t *testing.T) {
@@ -156,9 +160,63 @@ func TestNilQueueSafe(t *testing.T) {
 	}
 }
 
+// TestLegacyQueueMigration writes a pre-Task-20079 queue.db file with a
+// queue row and checks that Open migrates it into state.db and removes
+// the legacy file.
+func TestLegacyQueueMigration(t *testing.T) {
+	dir := t.TempDir()
+	cloopDir := filepath.Join(dir, ".cloop")
+	if err := os.MkdirAll(cloopDir, 0o755); err != nil {
+		t.Fatalf("mkdir .cloop: %v", err)
+	}
+	legacy := filepath.Join(cloopDir, "queue.db")
+
+	// Build a minimal legacy queue.db.
+	src, err := sql.Open("sqlite", legacy)
+	if err != nil {
+		t.Fatalf("create legacy db: %v", err)
+	}
+	if _, err := src.Exec(schema); err != nil {
+		t.Fatalf("legacy schema: %v", err)
+	}
+	if _, err := src.Exec(
+		`INSERT INTO queue (id, kind, task_id, title, status, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		7, "task", 42, "legacy task", "done", "2026-05-09T00:00:00Z",
+	); err != nil {
+		t.Fatalf("legacy insert: %v", err)
+	}
+	if err := src.Close(); err != nil {
+		t.Fatalf("close legacy: %v", err)
+	}
+
+	q, err := Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer q.Close()
+
+	entries, err := q.List(ListOptions{})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 migrated entry, got %d", len(entries))
+	}
+	if entries[0].ID != 7 || entries[0].TaskID != 42 || entries[0].Title != "legacy task" {
+		t.Fatalf("migrated row mismatch: %+v", entries[0])
+	}
+
+	// Legacy file must be removed.
+	if _, err := os.Stat(legacy); !os.IsNotExist(err) {
+		t.Fatalf("legacy queue.db should have been removed, err=%v", err)
+	}
+}
+
 func TestQueuePathIsUnderCloop(t *testing.T) {
 	dir := t.TempDir()
-	want := filepath.Join(dir, ".cloop", "queue.db")
+	// Task 20079: queue lives in state.db, not a separate queue.db.
+	want := filepath.Join(dir, ".cloop", "state.db")
 	if got := QueuePath(dir); got != want {
 		t.Fatalf("QueuePath = %q, want %q", got, want)
 	}

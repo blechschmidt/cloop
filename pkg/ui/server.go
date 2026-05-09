@@ -6425,7 +6425,7 @@ const dashboardHTML = `<!DOCTYPE html>
       <span class="tab-section-label" title="These tabs show data for the currently selected project">Project</span>
       <button class="tab-btn active" onclick="switchTab('overview')"  id="tbtn-overview"   title="Project overview (per-project)">Overview</button>
       <button class="tab-btn"        onclick="switchTab('tasks')"     id="tbtn-tasks"      title="Tasks (per-project)">Tasks</button>
-      <button class="tab-btn"        onclick="switchTab('queue')"     id="tbtn-queue"      title="Central work queue: every PM task, heal retry, evolve cycle, external merge (per-project)">Activity Queue</button>
+      <button class="tab-btn"        onclick="switchTab('queue')"     id="tbtn-queue"      title="Per-task activity log: every execution, heal retry, evolve cycle, and external merge tied to its task (per-project)">Activity</button>
       <button class="tab-btn"        onclick="switchTab('kanban')"    id="tbtn-kanban"     title="Kanban board (per-project)">Kanban</button>
       <button class="tab-btn"        onclick="switchTab('timeline')"  id="tbtn-timeline"   title="Timeline / Gantt (per-project)">Timeline</button>
       <button class="tab-btn"        onclick="switchTab('kb')"        id="tbtn-kb"         title="Knowledge Base (per-project)">Knowledge Base</button>
@@ -6514,7 +6514,7 @@ const dashboardHTML = `<!DOCTYPE html>
       <div class="mobile-nav-section-label">Project</div>
       <button class="m-tab-btn" onclick="switchTab('overview')"  id="mtbtn-overview"><span class="m-tab-icon">&#128200;</span>Overview</button>
       <button class="m-tab-btn" onclick="switchTab('tasks')"     id="mtbtn-tasks"><span class="m-tab-icon">&#10003;</span>Tasks</button>
-      <button class="m-tab-btn" onclick="switchTab('queue')"     id="mtbtn-queue"><span class="m-tab-icon">&#128260;</span>Activity Queue</button>
+      <button class="m-tab-btn" onclick="switchTab('queue')"     id="mtbtn-queue"><span class="m-tab-icon">&#128260;</span>Activity</button>
       <button class="m-tab-btn" onclick="switchTab('kanban')"    id="mtbtn-kanban"><span class="m-tab-icon">&#9783;</span>Kanban</button>
       <button class="m-tab-btn" onclick="switchTab('timeline')"  id="mtbtn-timeline"><span class="m-tab-icon">&#128197;</span>Timeline</button>
       <button class="m-tab-btn" onclick="switchTab('kb')"        id="mtbtn-kb"><span class="m-tab-icon">&#128218;</span>Knowledge Base</button>
@@ -6815,11 +6815,11 @@ const dashboardHTML = `<!DOCTYPE html>
       </div>
     </div>
 
-    <!-- ══════════════════════════════════════════════════ ACTIVITY QUEUE -->
+    <!-- ══════════════════════════════════════════════════════════ ACTIVITY -->
     <div id="tab-queue" class="tab-panel">
       <div class="kanban-toolbar">
-        <span class="section-title" style="margin:0">Activity Queue</span>
-        <span style="font-size:11px;color:var(--muted)">Every PM task, heal retry, evolve discovery, and external merge — the single source of truth for what cloop is doing.</span>
+        <span class="section-title" style="margin:0">Task Activity</span>
+        <span style="font-size:11px;color:var(--muted)">Every execution, heal retry, evolve discovery, and external merge — tied to its task. The single source of truth for what cloop is doing.</span>
         <span class="spacer"></span>
         <select id="queueFilterKind" class="filter-select" style="padding:3px 6px;font-size:11px" onchange="loadQueue()" aria-label="Filter by kind">
           <option value="">All kinds</option>
@@ -9880,7 +9880,7 @@ window.deleteKBEntry = function(id) {
   }).catch(() => toast('Delete failed', 'err'));
 };
 
-// ── Activity Queue tab ───────────────────────────────────────────────────────
+// ── Activity tab (per-task work log) ─────────────────────────────────────────
 //
 // The queue surfaces every unit of work cloop performs (PM tasks, heal retries,
 // evolve discoveries, external merges). The view is read-only: rows are written
