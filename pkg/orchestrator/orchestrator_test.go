@@ -25,15 +25,30 @@ type mockProvider struct {
 	results []*provider.Result
 	errs    []error
 	calls   int
+	// afterExhaust, when non-nil, is invoked once after the final scripted
+	// result/err has been returned. Useful for unbounded loops (e.g. evolve())
+	// that would otherwise hit the `default output` fallback forever — the
+	// callback typically cancels the test's context to let the loop exit.
+	afterExhaust func()
 }
 
 func (m *mockProvider) Complete(_ context.Context, _ string, _ provider.Options) (*provider.Result, error) {
 	i := m.calls
 	m.calls++
+	scripted := i < len(m.errs) || i < len(m.results)
+	exhaustingNow := scripted && i+1 >= len(m.errs) && i+1 >= len(m.results)
 	if i < len(m.errs) && m.errs[i] != nil {
+		if exhaustingNow && m.afterExhaust != nil {
+			m.afterExhaust()
+			m.afterExhaust = nil
+		}
 		return nil, m.errs[i]
 	}
 	if i < len(m.results) {
+		if exhaustingNow && m.afterExhaust != nil {
+			m.afterExhaust()
+			m.afterExhaust = nil
+		}
 		return m.results[i], nil
 	}
 	return &provider.Result{Output: "default output", Provider: m.name}, nil
@@ -1098,6 +1113,105 @@ func TestRunPM_EmptyOutput_ResetsOnSuccess(t *testing.T) {
 	}
 	if o.state.Status != "complete" && o.state.Status != "paused" {
 		t.Errorf("unexpected status: %q", o.state.Status)
+	}
+}
+
+// TestEvolve_EmptyOutput_TripsWatchdog locks in the auto-evolve companion to
+// TestRunLoop_EmptyOutput_TripsWatchdog and TestRunPM_EmptyOutput_TripsWatchdog:
+// when the provider returns (*Result{Output:""}, nil) on every call (transient
+// auth flap, content-filtered completion, transient 5xx with empty body), the
+// auto-evolve loop must trip MaxFailures rather than silently marking each
+// pending task DONE via the no-signal `default:` arm of the switch (or worse,
+// burning the budget forever on free-form evolves where there is no MaxSteps
+// bound). Without this guard, a single hiccupping provider would drain the
+// entire budget in seconds — which is exactly the failure mode that Step
+// 936-2220 of cloop's own session history demonstrated.
+func TestEvolve_EmptyOutput_TripsWatchdog(t *testing.T) {
+	dir := tempDir(t)
+	s := initState(t, dir, "goal", 0)
+	s.AutoEvolve = true
+	s.Plan = &pm.Plan{
+		Goal: "goal",
+		Tasks: []*pm.Task{
+			{ID: 1, Title: "Evolve A", Priority: 1, Status: pm.TaskPending},
+			{ID: 2, Title: "Evolve B", Priority: 2, Status: pm.TaskPending},
+			{ID: 3, Title: "Evolve C", Priority: 3, Status: pm.TaskPending},
+		},
+	}
+	s.Save()
+
+	prov := &mockProvider{
+		name: "mock",
+		results: []*provider.Result{
+			{Output: "", Provider: "mock"},
+			{Output: "   \n\t  ", Provider: "mock"},
+			{Output: "", Provider: "mock"},
+		},
+	}
+	o := newOrchestrator(t, dir, Config{WorkDir: dir, MaxFailures: 2}, prov)
+	err := o.evolve(context.Background())
+	if err == nil {
+		t.Fatal("expected error after MaxFailures consecutive empty outputs, got nil")
+	}
+	if !strings.Contains(err.Error(), "consecutive") {
+		t.Errorf("expected error to mention consecutive failures, got: %v", err)
+	}
+	if o.state.Status != "failed" {
+		t.Errorf("expected status=failed, got %q", o.state.Status)
+	}
+	// Tasks must remain pending — no silent DONE despite empty output.
+	for _, task := range o.state.Plan.Tasks {
+		if task.Status == pm.TaskDone {
+			t.Errorf("task %d was silently marked DONE despite empty output", task.ID)
+		}
+	}
+	if prov.calls != 2 {
+		t.Errorf("expected exactly 2 provider calls before abort (MaxFailures=2), got %d", prov.calls)
+	}
+}
+
+// TestEvolve_EmptyOutput_ResetsOnSuccess verifies that a real (non-empty)
+// task response resets the consecutive-empty counter, so transient empty
+// hiccups during auto-evolve don't accumulate forever and erroneously abort
+// a long-running session that is otherwise making progress.
+func TestEvolve_EmptyOutput_ResetsOnSuccess(t *testing.T) {
+	dir := tempDir(t)
+	s := initState(t, dir, "goal", 0)
+	s.AutoEvolve = true
+	s.Plan = &pm.Plan{
+		Goal: "goal",
+		Tasks: []*pm.Task{
+			{ID: 1, Title: "Evolve A", Priority: 1, Status: pm.TaskPending},
+			{ID: 2, Title: "Evolve B", Priority: 2, Status: pm.TaskPending},
+		},
+	}
+	s.Save()
+
+	// empty (re-queue task 1, count=1) → done (counter resets) → empty (re-queue
+	// task 2, count=1) → done (task 2 done). Plan complete, but auto-evolve loops
+	// forever; cancel via ctx after consumed.
+	ctx, cancel := context.WithCancel(context.Background())
+	prov := &mockProvider{
+		name: "mock",
+		results: []*provider.Result{
+			{Output: "", Provider: "mock"},
+			{Output: "done\nTASK_DONE", Provider: "mock"},
+			{Output: "", Provider: "mock"},
+			{Output: "done\nTASK_DONE", Provider: "mock"},
+		},
+		// Once we exhaust the script, cancel ctx so evolve() exits cleanly.
+		afterExhaust: cancel,
+	}
+	o := newOrchestrator(t, dir, Config{WorkDir: dir, MaxFailures: 2}, prov)
+	err := o.evolve(ctx)
+	if err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("unexpected error (counter should reset on success): %v", err)
+	}
+	// Both tasks should be done — empty hiccups did not poison either.
+	for _, task := range o.state.Plan.Tasks {
+		if task.Status != pm.TaskDone {
+			t.Errorf("task %d (%s): expected done after successful retry, got %q", task.ID, task.Title, task.Status)
+		}
 	}
 }
 

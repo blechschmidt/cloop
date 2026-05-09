@@ -3612,6 +3612,19 @@ func (o *Orchestrator) evolve(ctx context.Context) error {
 	evolveColor.Printf("\n🧠 Auto-Evolve — Continuously improving the project\n")
 	fmt.Printf("   Press Ctrl+C to stop.\n\n")
 
+	// Empty-output watchdog: mirrors runLoop / runPM. A provider returning
+	// (*Result{Output:""}, nil) on the evolve task path would silently mark
+	// the task DONE via the no-signal `default:` arm of the switch; on the
+	// free-form path it would record an empty step and EvolveStep++ forever.
+	// Without this counter, a single hiccupping provider (auth flap, content-
+	// filtered completion, transient 5xx returning empty body) could drain
+	// the entire budget in seconds.
+	consecutiveEmptyOutputs := 0
+	maxConsecutiveEmpty := o.config.MaxFailures
+	if maxConsecutiveEmpty <= 0 {
+		maxConsecutiveEmpty = 3
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -3661,6 +3674,21 @@ func (o *Orchestrator) evolve(ctx context.Context) error {
 					s.Save()
 					return nil
 				}
+
+				if result == nil || strings.TrimSpace(result.Output) == "" {
+					consecutiveEmptyOutputs++
+					failColor.Printf("✗ Provider returned empty output on task %d (consecutive empty: %d/%d)\n", nextTask.ID, consecutiveEmptyOutputs, maxConsecutiveEmpty)
+					nextTask.Status = pm.TaskPending
+					nextTask.StartedAt = nil
+					if consecutiveEmptyOutputs >= maxConsecutiveEmpty {
+						s.Status = "failed"
+						s.Save()
+						return fmt.Errorf("%d consecutive empty provider outputs in auto-evolve", consecutiveEmptyOutputs)
+					}
+					s.Save()
+					continue
+				}
+				consecutiveEmptyOutputs = 0
 
 				duration := time.Since(start)
 				stepResult := state.StepResult{
@@ -3739,6 +3767,19 @@ func (o *Orchestrator) evolve(ctx context.Context) error {
 			s.Save()
 			return nil
 		}
+
+		if result == nil || strings.TrimSpace(result.Output) == "" {
+			consecutiveEmptyOutputs++
+			failColor.Printf("✗ Provider returned empty output on evolve #%d (consecutive empty: %d/%d)\n", s.EvolveStep, consecutiveEmptyOutputs, maxConsecutiveEmpty)
+			if consecutiveEmptyOutputs >= maxConsecutiveEmpty {
+				s.Status = "failed"
+				s.Save()
+				return fmt.Errorf("%d consecutive empty provider outputs in auto-evolve", consecutiveEmptyOutputs)
+			}
+			s.Save()
+			continue
+		}
+		consecutiveEmptyOutputs = 0
 
 		stepResult := state.StepResult{
 			Task:         fmt.Sprintf("Evolve #%d", s.EvolveStep),
