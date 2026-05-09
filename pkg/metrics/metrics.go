@@ -368,17 +368,69 @@ func (m *Metrics) Snapshot() Summary {
 // metricsFile is the path to the JSON summary relative to workDir.
 const metricsFile = ".cloop/metrics.json"
 
+// writeMu serialises in-process WriteJSON callers. Even if today only one
+// goroutine flushes metrics.json (orchestrator end-of-plan), the snapshot is
+// already concurrent with live counter updates, and we want to be safe if a
+// flush loop or a UI handler later triggers a parallel write — two writers
+// racing on a non-atomic write would interleave bytes.
+var writeMu sync.Mutex
+
 // WriteJSON saves the current metrics snapshot to .cloop/metrics.json.
+//
+// The write is atomic: data is staged in a sibling .tmp file, fsynced, chmod'd,
+// then renamed into place. POSIX rename is atomic with respect to readers, so
+// `cloop status` and other consumers always see either the previous valid
+// snapshot or the new one — never a half-written or zero-byte file produced by
+// a crash, ENOSPC, or two writers racing across processes.
 func (m *Metrics) WriteJSON(workDir string) error {
+	writeMu.Lock()
+	defer writeMu.Unlock()
+
 	path := filepath.Join(workDir, metricsFile)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
 	data, err := json.MarshalIndent(m.Snapshot(), "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0o644)
+	return writeAtomic(dir, path, data, 0o644)
+}
+
+// writeAtomic stages data in a sibling .tmp file in dir, fsyncs, chmods, then
+// renames into path. A failed Write/Sync/Close leaves the tmp file behind,
+// which the cleanup defer removes; the original file at path is never
+// touched until the rename succeeds.
+func writeAtomic(dir, path string, data []byte, mode os.FileMode) error {
+	tmp, err := os.CreateTemp(dir, ".metrics.json.*.tmp")
+	if err != nil {
+		return fmt.Errorf("metrics: create tmp: %w", err)
+	}
+	tmpPath := tmp.Name()
+	defer func() {
+		if _, statErr := os.Stat(tmpPath); statErr == nil {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("metrics: write tmp: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("metrics: sync tmp: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("metrics: close tmp: %w", err)
+	}
+	if err := os.Chmod(tmpPath, mode); err != nil {
+		return fmt.Errorf("metrics: chmod tmp: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("metrics: rename tmp: %w", err)
+	}
+	return nil
 }
 
 // LoadJSON loads a previously written metrics summary from .cloop/metrics.json.
