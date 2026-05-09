@@ -317,7 +317,9 @@ func TestTaskRemove_RemovesCorrectTask(t *testing.T) {
 		}
 	}
 	s.Plan.Tasks = append(s.Plan.Tasks[:idx], s.Plan.Tasks[idx+1:]...)
-	s.Save()
+	// SaveDirect (not Save) — Save merges externally-added tasks from disk and
+	// would silently undo the deletion. SaveDirect is the API task-remove uses.
+	s.SaveDirect()
 
 	loaded, _ := state.Load(dir)
 	if len(loaded.Plan.Tasks) != 2 {

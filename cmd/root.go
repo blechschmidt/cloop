@@ -7,6 +7,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/migrate"
 	"github.com/blechschmidt/cloop/pkg/workspace"
 	"github.com/fatih/color"
+	"github.com/mattn/go-isatty"
 	"github.com/spf13/cobra"
 )
 
@@ -112,7 +113,9 @@ func init() {
 
 		// Warn if the .cloop schema is behind the current version, unless the
 		// user is already running 'cloop migrate' (which would be redundant).
-		if cmd.Name() != "migrate" {
+		// Only emit the warning when stderr is an interactive terminal — otherwise
+		// it pollutes machine-readable output captured by tests/pipes/CI.
+		if cmd.Name() != "migrate" && isatty.IsTerminal(os.Stderr.Fd()) {
 			cwd, _ := os.Getwd()
 			if migrate.NeedsUpgrade(cwd) {
 				color.New(color.FgYellow).Fprintln(os.Stderr,

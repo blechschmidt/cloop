@@ -204,7 +204,10 @@ var taskRemoveCmd = &cobra.Command{
 
 		removed := s.Plan.Tasks[idx]
 		s.Plan.Tasks = append(s.Plan.Tasks[:idx], s.Plan.Tasks[idx+1:]...)
-		if err := s.Save(); err != nil {
+		// SaveDirect (not Save) — Save's mergeExternalTasks re-reads from disk and
+		// would re-append the just-deleted task because its ID is still on disk
+		// but no longer in memory.
+		if err := s.SaveDirect(); err != nil {
 			return err
 		}
 
