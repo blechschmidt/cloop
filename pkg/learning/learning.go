@@ -6,6 +6,7 @@ package learning
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,11 +15,27 @@ import (
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/atomicfile"
+	"github.com/blechschmidt/cloop/pkg/boundedread"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/provider"
 )
 
 const memoryFile = ".cloop/memory.md"
+
+// memoryFileMaxBytes caps how much of memory.md the load and read-modify-write
+// paths will pull into RAM. Memory is plain prose distilled by the AI at the
+// end of each PM run; in steady state the file stays well under 100 KiB. A cap
+// of 1 MiB tolerates many sessions of accumulation while preventing two
+// pathologies if the file ever bloats unexpectedly (provider hallucination,
+// disk-corruption replay, deliberate tampering): (1) FormatForPrompt would
+// inject the full bytes into every task prompt, blowing token budgets and
+// potentially triggering provider errors; (2) SaveMemory's read-modify-write
+// would slurp the bloated file into RAM, append, and write it back — so each
+// run would amplify the bloat instead of self-healing. With the cap, an
+// oversize file causes LoadMemory to return empty and SaveMemory to drop the
+// stale content (recreating a fresh memory.md with just the new session), so
+// the system recovers automatically on the next run instead of staying broken.
+const memoryFileMaxBytes int64 = 1 << 20
 
 // saveMu serialises the read-modify-write inside SaveMemory. Two concurrent
 // callers without this lock would each load the same baseline, each append
@@ -69,8 +86,20 @@ func SaveMemory(workDir, summary string) error {
 		return fmt.Errorf("save memory: %w", err)
 	}
 
-	// Load existing content to append.
-	existing, _ := os.ReadFile(path)
+	// Load existing content to append. A bounded read prevents this
+	// read-modify-write from amplifying a bloated memory.md every run — if
+	// the file ever exceeds memoryFileMaxBytes, treat existing as empty so
+	// the next write recreates the file cleanly with just the new session.
+	// errors.Is(err, fs.ErrNotExist) is the expected first-write path; any
+	// other error (perms, I/O) also degrades to empty so we don't lose the
+	// new session because of a transient read failure.
+	existing, readErr := boundedread.ReadFile(path, memoryFileMaxBytes)
+	if readErr != nil {
+		existing = nil
+		if errors.Is(readErr, boundedread.ErrTooLarge) {
+			fmt.Fprintf(os.Stderr, "[learning] memory.md exceeds %d bytes; resetting and starting fresh: %v\n", memoryFileMaxBytes, readErr)
+		}
+	}
 
 	var b strings.Builder
 	if len(existing) == 0 {
@@ -93,11 +122,18 @@ func SaveMemory(workDir, summary string) error {
 }
 
 // LoadMemory reads the project memory from .cloop/memory.md.
-// Returns empty string if no memory file exists yet.
+// Returns empty string if no memory file exists yet, or if the file exceeds
+// the in-prompt size cap (memoryFileMaxBytes) — in which case prompts run
+// without injected memory until the next SaveMemory call rewrites the file
+// at a healthy size, rather than risk blowing token budgets by injecting an
+// arbitrarily large blob into every task prompt.
 func LoadMemory(workDir string) string {
 	path := filepath.Join(workDir, memoryFile)
-	data, err := os.ReadFile(path)
+	data, err := boundedread.ReadFile(path, memoryFileMaxBytes)
 	if err != nil {
+		if errors.Is(err, boundedread.ErrTooLarge) {
+			fmt.Fprintf(os.Stderr, "[learning] memory.md exceeds %d bytes; skipping prompt injection until next SaveMemory: %v\n", memoryFileMaxBytes, err)
+		}
 		return ""
 	}
 	content := strings.TrimSpace(string(data))

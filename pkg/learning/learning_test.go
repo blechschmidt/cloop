@@ -174,3 +174,61 @@ func min(a, b int) int {
 	}
 	return b
 }
+
+// TestLoadMemory_OversizeFileReturnsEmpty verifies that a memory.md exceeding
+// memoryFileMaxBytes is NOT injected into prompts (LoadMemory returns ""),
+// preventing an unbounded blob from blowing every task's token budget.
+func TestLoadMemory_OversizeFileReturnsEmpty(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".cloop", "memory.md")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	// Write a payload larger than the cap.
+	payload := strings.Repeat("X", int(memoryFileMaxBytes)+1024)
+	if err := os.WriteFile(path, []byte(payload), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if got := LoadMemory(dir); got != "" {
+		t.Errorf("expected empty memory for oversize file, got %d bytes", len(got))
+	}
+}
+
+// TestSaveMemory_OversizeFileSelfHeals verifies that when memory.md is over
+// the cap, the next SaveMemory drops the bloated content and recreates a
+// healthy file with the new session — so the system recovers automatically
+// instead of amplifying the bloat by reading + appending + rewriting.
+func TestSaveMemory_OversizeFileSelfHeals(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".cloop", "memory.md")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	// Pre-populate with a payload over the cap, with a unique marker we can
+	// later assert was dropped.
+	bloated := "## OLD_BLOATED_SESSION\n" + strings.Repeat("X", int(memoryFileMaxBytes)+1024)
+	if err := os.WriteFile(path, []byte(bloated), 0o644); err != nil {
+		t.Fatalf("write bloated: %v", err)
+	}
+
+	if err := SaveMemory(dir, "fresh session after bloat"); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if int64(len(got)) >= memoryFileMaxBytes {
+		t.Errorf("expected file to shrink under cap after self-heal, got %d bytes", len(got))
+	}
+	if strings.Contains(string(got), "OLD_BLOATED_SESSION") {
+		t.Error("expected old bloated content to be dropped")
+	}
+	if !strings.Contains(string(got), "fresh session after bloat") {
+		t.Error("expected new session to be present in healed file")
+	}
+	if !strings.Contains(string(got), "# cloop Project Memory") {
+		t.Error("expected header to be re-emitted in healed file")
+	}
+}

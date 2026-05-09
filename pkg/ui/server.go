@@ -59,6 +59,49 @@ type sseClient struct {
 // sseClientBufferSize mirrors hubClientBufferSize for SSE consumers.
 const sseClientBufferSize = 64
 
+// sseWriteTimeout caps how long any single SSE write+flush may take. This is
+// the SSE analogue of wsWriteTimeout. Without a per-write deadline,
+// fmt.Fprintf to the http.ResponseWriter and the subsequent flusher.Flush()
+// block on the underlying TCP write until the OS-level send timeout —
+// typically minutes — when a slow or wedged client (TCP buffers full,
+// network stalled, half-open NAT entry) stops draining. With many such
+// peers, SSE writer goroutines pile up and the hub's broadcast loop slows
+// down for everyone. 10s mirrors wsWriteTimeout: generous for a slow link
+// burst while bounding per-frame stalls so the writer recovers quickly.
+//
+// Best-effort — if the underlying ResponseWriter doesn't expose a
+// SetWriteDeadline (e.g., an in-memory test recorder, or a wrapped writer
+// chain that hides it), the helper still propagates Write errors so the
+// loop can exit; only the proactive deadline arming is skipped.
+//
+// Declared as var (not const) so regression tests can shrink it; production
+// callers should treat it as immutable.
+var sseWriteTimeout = 10 * time.Second
+
+// writeSSE writes a single SSE frame and flushes, with a per-write deadline
+// armed via http.ResponseController. Returns the first error encountered;
+// callers should return from the SSE loop on any error — a wedged peer
+// would otherwise pin the goroutine until OS-level TCP timeout.
+//
+// Errors include net.Error timeouts (deadline exceeded — the peer is not
+// draining), io.ErrClosedPipe / "use of closed network connection" (peer
+// went away mid-frame), and broken-pipe variants.
+func writeSSE(w http.ResponseWriter, flusher http.Flusher, format string, args ...interface{}) error {
+	if rc := http.NewResponseController(w); rc != nil {
+		// SetWriteDeadline returns http.ErrNotSupported when the
+		// underlying ResponseWriter doesn't implement the interface
+		// (e.g., httptest.ResponseRecorder). That's a best-effort
+		// arming — drop the error and rely on Write-side error
+		// detection below.
+		_ = rc.SetWriteDeadline(time.Now().Add(sseWriteTimeout))
+	}
+	if _, err := fmt.Fprintf(w, format, args...); err != nil {
+		return err
+	}
+	flusher.Flush()
+	return nil
+}
+
 // sendSSEOrLag is the SSE analogue of sendOrLag: non-blocking send, queue a
 // resync signal if the buffer is full.
 func (s *Server) sendSSEOrLag(c *sseClient, ev sseEvent) {
@@ -1292,8 +1335,9 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	// Send current state immediately on connect.
 	if ps, err := state.Load(s.WorkDir); err == nil {
 		if data, err := json.Marshal(ps); err == nil {
-			fmt.Fprintf(w, "data: %s\n\n", data)
-			flusher.Flush()
+			if werr := writeSSE(w, flusher, "data: %s\n\n", data); werr != nil {
+				return
+			}
 		}
 	}
 
@@ -1303,8 +1347,9 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		buf := strings.Join(s.liveLogLines, "")
 		s.liveLogMu.Unlock()
 		if d, err := json.Marshal(map[string]string{"chunk": buf}); err == nil {
-			fmt.Fprintf(w, "event: log\ndata: %s\n\n", d)
-			flusher.Flush()
+			if werr := writeSSE(w, flusher, "event: log\ndata: %s\n\n", d); werr != nil {
+				return
+			}
 		}
 	} else {
 		s.liveLogMu.Unlock()
@@ -1317,8 +1362,9 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-c.resync:
 			drainSSE(c.ch)
-			fmt.Fprintf(w, "event: resync\ndata: {\"reason\":\"lagged\"}\n\n")
-			flusher.Flush()
+			if werr := writeSSE(w, flusher, "event: resync\ndata: {\"reason\":\"lagged\"}\n\n"); werr != nil {
+				return
+			}
 			continue
 		default:
 		}
@@ -1327,15 +1373,19 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 			return
 		case <-c.resync:
 			drainSSE(c.ch)
-			fmt.Fprintf(w, "event: resync\ndata: {\"reason\":\"lagged\"}\n\n")
-			flusher.Flush()
-		case ev := <-c.ch:
-			if ev.Event != "" {
-				fmt.Fprintf(w, "event: %s\ndata: %s\n\n", ev.Event, ev.Data)
-			} else {
-				fmt.Fprintf(w, "data: %s\n\n", ev.Data)
+			if werr := writeSSE(w, flusher, "event: resync\ndata: {\"reason\":\"lagged\"}\n\n"); werr != nil {
+				return
 			}
-			flusher.Flush()
+		case ev := <-c.ch:
+			var werr error
+			if ev.Event != "" {
+				werr = writeSSE(w, flusher, "event: %s\ndata: %s\n\n", ev.Event, ev.Data)
+			} else {
+				werr = writeSSE(w, flusher, "data: %s\n\n", ev.Data)
+			}
+			if werr != nil {
+				return
+			}
 		}
 	}
 }
@@ -3146,7 +3196,12 @@ func (s *Server) handlePlanChat(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Connection", "keep-alive")
 	flusher.Flush()
 
-	ctx := r.Context()
+	// Derive a cancellable ctx so a wedged-client write inside OnToken can
+	// short-circuit the in-flight provider call instead of letting the
+	// server keep streaming bytes nobody will ever read.
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+
 	opts := provider.Options{
 		Model:        model,
 		SystemPrompt: sysB.String(),
@@ -3154,19 +3209,23 @@ func (s *Server) handlePlanChat(w http.ResponseWriter, r *http.Request) {
 		Timeout:      2 * time.Minute,
 		OnToken: func(token string) {
 			d, _ := json.Marshal(map[string]string{"token": token})
-			fmt.Fprintf(w, "event: token\ndata: %s\n\n", d)
-			flusher.Flush()
+			// Per-token write with deadline (sseWriteTimeout). On
+			// failure (peer wedged, conn dropped), cancel the parent
+			// ctx so prov.Complete returns promptly and we don't
+			// continue serializing tokens to a dead connection.
+			if werr := writeSSE(w, flusher, "event: token\ndata: %s\n\n", d); werr != nil {
+				cancel()
+			}
 		},
 	}
 
 	_, callErr := prov.Complete(ctx, convB.String(), opts)
 	if callErr != nil {
 		d, _ := json.Marshal(map[string]string{"error": callErr.Error()})
-		fmt.Fprintf(w, "event: error\ndata: %s\n\n", d)
+		_ = writeSSE(w, flusher, "event: error\ndata: %s\n\n", d)
 	} else {
-		fmt.Fprintf(w, "event: done\ndata: {}\n\n")
+		_ = writeSSE(w, flusher, "event: done\ndata: {}\n\n")
 	}
-	flusher.Flush()
 }
 
 // handleReset resets the project state by running `cloop reset`.
@@ -3388,8 +3447,9 @@ func (s *Server) handleProjectsEvents(w http.ResponseWriter, r *http.Request) {
 	stats := multiui.Aggregate(statuses)
 	s.projMu.RUnlock()
 	if payload, err := json.Marshal(map[string]interface{}{"projects": statuses, "stats": stats}); err == nil {
-		fmt.Fprintf(w, "event: projects\ndata: %s\n\n", payload)
-		flusher.Flush()
+		if werr := writeSSE(w, flusher, "event: projects\ndata: %s\n\n", payload); werr != nil {
+			return
+		}
 	}
 
 	ctx := r.Context()
@@ -3397,8 +3457,9 @@ func (s *Server) handleProjectsEvents(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-c.resync:
 			drainSSE(c.ch)
-			fmt.Fprintf(w, "event: resync\ndata: {\"reason\":\"lagged\"}\n\n")
-			flusher.Flush()
+			if werr := writeSSE(w, flusher, "event: resync\ndata: {\"reason\":\"lagged\"}\n\n"); werr != nil {
+				return
+			}
 			continue
 		default:
 		}
@@ -3407,12 +3468,14 @@ func (s *Server) handleProjectsEvents(w http.ResponseWriter, r *http.Request) {
 			return
 		case <-c.resync:
 			drainSSE(c.ch)
-			fmt.Fprintf(w, "event: resync\ndata: {\"reason\":\"lagged\"}\n\n")
-			flusher.Flush()
+			if werr := writeSSE(w, flusher, "event: resync\ndata: {\"reason\":\"lagged\"}\n\n"); werr != nil {
+				return
+			}
 		case ev := <-c.ch:
 			if ev.Event == "projects" {
-				fmt.Fprintf(w, "event: projects\ndata: %s\n\n", ev.Data)
-				flusher.Flush()
+				if werr := writeSSE(w, flusher, "event: projects\ndata: %s\n\n", ev.Data); werr != nil {
+					return
+				}
 			}
 		}
 	}
