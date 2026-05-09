@@ -308,6 +308,111 @@ func setupProjectWithTasks(t *testing.T, goal string, tasks []*pm.Task) string {
 
 // ── Dashboard HTML ────────────────────────────────────────────────────────────
 
+// ── GET /api/steps (paginated step history) ───────────────────────────────────
+
+// seedSteps appends n synthetic steps to the project state and saves.
+func seedSteps(t *testing.T, dir string, n int) {
+	t.Helper()
+	ps, err := state.Load(dir)
+	if err != nil {
+		t.Fatalf("state.Load: %v", err)
+	}
+	for i := 0; i < n; i++ {
+		ps.AddStep(state.StepResult{
+			Step:     i,
+			Task:     fmt.Sprintf("step-%d", i),
+			Output:   fmt.Sprintf("out-%d", i),
+			ExitCode: 0,
+		})
+	}
+	if err := ps.Save(); err != nil {
+		t.Fatalf("state.Save: %v", err)
+	}
+}
+
+func TestStepsEndpointReturnsLatestFirstAndTotal(t *testing.T) {
+	dir := setupProjectDir(t, cloopGoal, nil)
+	seedSteps(t, dir, 120)
+	ts := newTestServer(t, dir, nil)
+
+	body := apiGET(t, ts, "/api/steps?offset=0&limit=50")
+	total, _ := body["total"].(float64)
+	if int(total) != 120 {
+		t.Errorf("expected total=120, got %v", body["total"])
+	}
+	stepsRaw, _ := body["steps"].([]interface{})
+	if len(stepsRaw) != 50 {
+		t.Fatalf("expected 50 steps, got %d", len(stepsRaw))
+	}
+	first, _ := stepsRaw[0].(map[string]interface{})
+	stepNum, _ := first["step"].(float64)
+	if int(stepNum) != 119 {
+		t.Errorf("expected first step=119 (latest first), got %v", stepNum)
+	}
+	last, _ := stepsRaw[49].(map[string]interface{})
+	stepNum2, _ := last["step"].(float64)
+	if int(stepNum2) != 70 {
+		t.Errorf("expected last of page step=70, got %v", stepNum2)
+	}
+}
+
+func TestStepsEndpointPaginationOffset(t *testing.T) {
+	dir := setupProjectDir(t, cloopGoal, nil)
+	seedSteps(t, dir, 120)
+	ts := newTestServer(t, dir, nil)
+
+	body := apiGET(t, ts, "/api/steps?offset=50&limit=50")
+	stepsRaw, _ := body["steps"].([]interface{})
+	if len(stepsRaw) != 50 {
+		t.Fatalf("expected 50 steps in second page, got %d", len(stepsRaw))
+	}
+	first, _ := stepsRaw[0].(map[string]interface{})
+	stepNum, _ := first["step"].(float64)
+	if int(stepNum) != 69 {
+		t.Errorf("expected first step=69 on offset=50 page, got %v", stepNum)
+	}
+}
+
+func TestStepsEndpointOffsetBeyondEndReturnsEmpty(t *testing.T) {
+	dir := setupProjectDir(t, cloopGoal, nil)
+	seedSteps(t, dir, 10)
+	ts := newTestServer(t, dir, nil)
+
+	body := apiGET(t, ts, "/api/steps?offset=500&limit=50")
+	stepsRaw, _ := body["steps"].([]interface{})
+	if len(stepsRaw) != 0 {
+		t.Errorf("expected empty steps slice past end, got %d", len(stepsRaw))
+	}
+	total, _ := body["total"].(float64)
+	if int(total) != 10 {
+		t.Errorf("expected total=10, got %v", body["total"])
+	}
+}
+
+func TestStepsEndpointDefaultsAndCap(t *testing.T) {
+	dir := setupProjectDir(t, cloopGoal, nil)
+	seedSteps(t, dir, 10)
+	ts := newTestServer(t, dir, nil)
+
+	// No params → default limit=50, offset=0.
+	body := apiGET(t, ts, "/api/steps")
+	stepsRaw, _ := body["steps"].([]interface{})
+	if len(stepsRaw) != 10 {
+		t.Errorf("expected 10 (all available) with default page, got %d", len(stepsRaw))
+	}
+	limit, _ := body["limit"].(float64)
+	if int(limit) != 50 {
+		t.Errorf("expected default limit=50, got %v", body["limit"])
+	}
+
+	// Limit clamped to maxLimit (500).
+	body2 := apiGET(t, ts, "/api/steps?limit=10000")
+	limit2, _ := body2["limit"].(float64)
+	if int(limit2) > 500 {
+		t.Errorf("expected limit clamped to <= 500, got %v", body2["limit"])
+	}
+}
+
 func TestDashboardHTML(t *testing.T) {
 	dir := setupProjectDir(t, cloopGoal, nil)
 	ts := newTestServer(t, dir, nil)

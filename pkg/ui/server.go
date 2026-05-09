@@ -573,6 +573,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 
 	// Read-only state, WebSocket, and SSE (SSE kept as fallback)
 	mux.HandleFunc("/api/state", s.handleState)
+	mux.HandleFunc("/api/steps", s.handleSteps)
 	mux.HandleFunc("/api/ws", s.handleWS)
 	mux.HandleFunc("/api/events", s.handleEvents)
 
@@ -1257,6 +1258,62 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	jsonOK(w, ps)
+}
+
+// handleSteps returns a paginated slice of step history, latest first.
+//
+// GET /api/steps?offset=0&limit=50 → {steps: [...], total: N, offset: O, limit: L}
+//
+// Used by the Web UI step-history panel for lazy loading. Without pagination,
+// projects with thousands of steps make /api/state payloads multi-megabyte and
+// freeze the renderer. Steps are returned in reverse-chronological order
+// (latest first) to match the panel's display order.
+func (s *Server) handleSteps(w http.ResponseWriter, r *http.Request) {
+	const (
+		defaultLimit = 50
+		maxLimit     = 500
+	)
+	ps, err := state.Load(s.resolveWorkDir(r))
+	if err != nil {
+		jsonErr(w, "no cloop project found", http.StatusNotFound)
+		return
+	}
+	q := r.URL.Query()
+	offset := 0
+	if v := q.Get("offset"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			offset = n
+		}
+	}
+	limit := defaultLimit
+	if v := q.Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	if limit > maxLimit {
+		limit = maxLimit
+	}
+	total := len(ps.Steps)
+	// Latest first: serve from the tail of ps.Steps backwards.
+	end := total - offset
+	if end < 0 {
+		end = 0
+	}
+	start := end - limit
+	if start < 0 {
+		start = 0
+	}
+	out := make([]state.StepResult, 0, end-start)
+	for i := end - 1; i >= start; i-- {
+		out = append(out, ps.Steps[i])
+	}
+	jsonOK(w, map[string]interface{}{
+		"steps":  out,
+		"total":  total,
+		"offset": offset,
+		"limit":  limit,
+	})
 }
 
 // handleGetTasks returns tasks filtered by query params: q, status (csv), tags (csv), assignee, priority (1-4).
@@ -5220,6 +5277,7 @@ const dashboardHTML = `<!DOCTYPE html>
   .step-running-dot { display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--cyan); animation:step-running-pulse 1.2s ease-in-out infinite; flex-shrink:0; }
   .step-running-label { color:var(--cyan); font-weight:600; }
   @keyframes step-running-pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
+  .step-load-more { padding:10px 12px; text-align:center; font-size:11px; color:var(--muted); border:1px dashed var(--border); border-radius:var(--radius); }
 
   /* ── Live output panel ── */
   .live-output-wrap { margin-bottom: 24px; }
@@ -7953,62 +8011,10 @@ function render(s) {
     costCard.style.display = 'none';
   }
 
-  // Steps
-  const stepListEl = document.getElementById('stepList');
-  const allSteps = s.steps || [];
-  const isRunning = s.status === 'running';
-  if (!allSteps.length && !isRunning) {
-    stepListEl.innerHTML = '<div class="empty-state"><h3>No steps yet</h3><p>Start a run to see history here.</p></div>';
-  } else {
-    const expanded = {};
-    stepListEl.querySelectorAll('.step-item.expanded').forEach(el => { expanded[el.dataset.idx] = true; });
-
-    let html = '';
-    if (isRunning) {
-      const runningExp = expanded['running'] ? ' expanded' : '';
-      const runningStepNum = (typeof s.current_step === 'number' ? s.current_step : allSteps.length) + 1;
-      let runningTitle = '';
-      if (s.pm_mode && s.plan && s.plan.tasks) {
-        const inProg = s.plan.tasks.find(t => t.status === 'in_progress');
-        if (inProg) runningTitle = '#' + inProg.id + ' ' + (inProg.title || '');
-      }
-      if (!runningTitle) runningTitle = 'Running…';
-      const runningOut = liveLogText ? liveLogText.slice(-4000) : '(awaiting output…)';
-      html += '<div class="step-item step-running'+runningExp+'" data-idx="running" onclick="toggleStep(this)">'+
-        '<div class="step-header">'+
-          '<span class="step-num">#'+runningStepNum+'</span>'+
-          '<span class="step-task">'+esc(runningTitle)+'</span>'+
-          '<div class="step-meta">'+
-            '<span class="step-running-dot" aria-hidden="true"></span>'+
-            '<span class="step-running-label">running</span>'+
-          '</div>'+
-          '<span class="step-chevron">&#9654;</span>'+
-        '</div>'+
-        '<div class="step-output" id="stepRunningOutput">'+esc(runningOut)+'</div>'+
-      '</div>';
-    }
-
-    const reversed = [...allSteps].reverse();
-    html += reversed.map((st, i) => {
-      const idx = allSteps.length - 1 - i;
-      const isExp = expanded[idx] ? ' expanded' : '';
-      const exitCls = st.exit_code === 0 ? 'step-ok' : 'step-bad';
-      return '<div class="step-item'+isExp+'" data-idx="'+idx+'" onclick="toggleStep(this)">'+
-        '<div class="step-header">'+
-          '<span class="step-num">#'+(st.step+1)+'</span>'+
-          '<span class="step-task">'+esc(st.task||'(no description)')+'</span>'+
-          '<div class="step-meta">'+
-            (st.duration?'<span>'+esc(st.duration)+'</span>':'')+
-            '<span class="'+exitCls+'">'+(st.exit_code===0?'OK':'exit '+st.exit_code)+'</span>'+
-            (st.output_tokens?'<span>'+fmtNum(st.output_tokens)+' tok</span>':'')+
-          '</div>'+
-          '<span class="step-chevron">&#9654;</span>'+
-        '</div>'+
-        '<div class="step-output">'+esc(st.output||'')+'</div>'+
-      '</div>';
-    }).join('');
-    stepListEl.innerHTML = html;
-  }
+  // Steps — lazy-loaded from /api/steps with infinite scroll. The state's
+  // s.steps.length tells us when new steps appear so we can refresh the top
+  // page; older steps stay loaded and scroll-position is preserved.
+  syncStepHistory(s);
 
   // Rebuild filter dropdowns from current task list.
   if (s.plan && s.plan.tasks) {
@@ -8103,6 +8109,202 @@ function renderMultiProjectOverview() {
 }
 
 window.toggleStep = function(el) { el.classList.toggle('expanded'); };
+
+// ── Step history lazy loading ────────────────────────────────────────────────
+//
+// The step history panel previously rendered every step inline from
+// /api/state — fine for short runs, terrible after 4000+ steps. We now fetch
+// pages from /api/steps (latest first) on demand, with infinite-scroll.
+
+const STEP_PAGE_SIZE = 50;
+
+let stepsState = {
+  loaded: [],     // step rows, latest-first
+  total: 0,       // total step count on the server
+  loading: false, // a fetch is in flight
+  hasMore: true,  // more pages may exist
+  scopeKey: '',   // identifies which project's steps are loaded
+};
+
+function _stepsScopeKey() {
+  return (isMultiProject ? ('p' + (selectedProjectIdx === null ? '-' : selectedProjectIdx)) : 'single');
+}
+
+function _resetStepsState() {
+  stepsState = { loaded: [], total: 0, loading: false, hasMore: true, scopeKey: _stepsScopeKey() };
+}
+
+async function _fetchStepsPage(offset, limit) {
+  return api(pUrl('/api/steps?offset=' + offset + '&limit=' + limit));
+}
+
+// syncStepHistory is called from render(s). It decides whether to reload the
+// top page (because new steps appeared, or the project changed) or just
+// re-render the panel (e.g. running-step indicator update).
+function syncStepHistory(s) {
+  const newScope = _stepsScopeKey();
+  if (newScope !== stepsState.scopeKey) {
+    _resetStepsState();
+    _loadInitialSteps();
+    return;
+  }
+  const newTotal = (s && Array.isArray(s.steps)) ? s.steps.length : stepsState.total;
+  if (newTotal !== stepsState.total || (newTotal > 0 && stepsState.loaded.length === 0)) {
+    // New steps appeared (or first load). Re-fetch enough rows to cover what
+    // the user already had visible, plus the newcomers.
+    const wanted = Math.max(STEP_PAGE_SIZE, stepsState.loaded.length);
+    _reloadStepsTopPage(wanted);
+    return;
+  }
+  renderStepListPanel();
+}
+
+async function _loadInitialSteps() {
+  await _reloadStepsTopPage(STEP_PAGE_SIZE);
+}
+
+async function _reloadStepsTopPage(limit) {
+  if (stepsState.loading) return;
+  stepsState.loading = true;
+  renderStepListPanel();
+  try {
+    const data = await _fetchStepsPage(0, limit);
+    if (data && Array.isArray(data.steps)) {
+      stepsState.loaded = data.steps;
+      stepsState.total  = (typeof data.total === 'number') ? data.total : data.steps.length;
+      stepsState.hasMore = stepsState.loaded.length < stepsState.total;
+    }
+  } catch (_) { /* leave previous loaded list intact */ }
+  stepsState.loading = false;
+  renderStepListPanel();
+}
+
+async function loadMoreSteps() {
+  if (stepsState.loading || !stepsState.hasMore) return;
+  stepsState.loading = true;
+  renderStepListPanel();
+  try {
+    const data = await _fetchStepsPage(stepsState.loaded.length, STEP_PAGE_SIZE);
+    if (data && Array.isArray(data.steps) && data.steps.length) {
+      // Server may have more steps now than when we started; keep total fresh.
+      stepsState.total = (typeof data.total === 'number') ? data.total : (stepsState.loaded.length + data.steps.length);
+      // Skip any rows we already have (rare race when a new step arrives mid-fetch).
+      const haveMin = stepsState.loaded.length ? stepsState.loaded[stepsState.loaded.length-1].step : Infinity;
+      for (const st of data.steps) {
+        if (st.step < haveMin) stepsState.loaded.push(st);
+      }
+      stepsState.hasMore = stepsState.loaded.length < stepsState.total;
+    } else if (data && typeof data.total === 'number') {
+      stepsState.total = data.total;
+      stepsState.hasMore = stepsState.loaded.length < stepsState.total;
+    }
+  } catch (_) { /* swallow; user can scroll again */ }
+  stepsState.loading = false;
+  renderStepListPanel();
+}
+
+function renderStepListPanel() {
+  const stepListEl = document.getElementById('stepList');
+  if (!stepListEl) return;
+  const s = appState || {};
+  const isRunning = s.status === 'running';
+
+  if (!stepsState.loaded.length && !isRunning && !stepsState.loading) {
+    stepListEl.innerHTML = '<div class="empty-state"><h3>No steps yet</h3><p>Start a run to see history here.</p></div>';
+    return;
+  }
+
+  // Preserve which step-items the user has expanded across re-renders.
+  const expanded = {};
+  stepListEl.querySelectorAll('.step-item.expanded').forEach(el => { expanded[el.dataset.idx] = true; });
+
+  let html = '';
+  if (isRunning) {
+    const runningExp = expanded['running'] ? ' expanded' : '';
+    const runningStepNum = (typeof s.current_step === 'number' ? s.current_step : stepsState.total) + 1;
+    let runningTitle = '';
+    if (s.pm_mode && s.plan && s.plan.tasks) {
+      const inProg = s.plan.tasks.find(t => t.status === 'in_progress');
+      if (inProg) runningTitle = '#' + inProg.id + ' ' + (inProg.title || '');
+    }
+    if (!runningTitle) runningTitle = 'Running…';
+    const runningOut = (typeof liveLogText !== 'undefined' && liveLogText) ? liveLogText.slice(-4000) : '(awaiting output…)';
+    html += '<div class="step-item step-running'+runningExp+'" data-idx="running" onclick="toggleStep(this)">'+
+      '<div class="step-header">'+
+        '<span class="step-num">#'+runningStepNum+'</span>'+
+        '<span class="step-task">'+esc(runningTitle)+'</span>'+
+        '<div class="step-meta">'+
+          '<span class="step-running-dot" aria-hidden="true"></span>'+
+          '<span class="step-running-label">running</span>'+
+        '</div>'+
+        '<span class="step-chevron">&#9654;</span>'+
+      '</div>'+
+      '<div class="step-output" id="stepRunningOutput">'+esc(runningOut)+'</div>'+
+    '</div>';
+  }
+
+  // stepsState.loaded is already latest-first.
+  html += stepsState.loaded.map((st) => {
+    const idx = st.step; // step number is a stable identifier across re-renders
+    const isExp = expanded[idx] ? ' expanded' : '';
+    const exitCls = st.exit_code === 0 ? 'step-ok' : 'step-bad';
+    return '<div class="step-item'+isExp+'" data-idx="'+idx+'" onclick="toggleStep(this)">'+
+      '<div class="step-header">'+
+        '<span class="step-num">#'+(st.step+1)+'</span>'+
+        '<span class="step-task">'+esc(st.task||'(no description)')+'</span>'+
+        '<div class="step-meta">'+
+          (st.duration?'<span>'+esc(st.duration)+'</span>':'')+
+          '<span class="'+exitCls+'">'+(st.exit_code===0?'OK':'exit '+st.exit_code)+'</span>'+
+          (st.output_tokens?'<span>'+fmtNum(st.output_tokens)+' tok</span>':'')+
+        '</div>'+
+        '<span class="step-chevron">&#9654;</span>'+
+      '</div>'+
+      '<div class="step-output">'+esc(st.output||'')+'</div>'+
+    '</div>';
+  }).join('');
+
+  // Footer: progress + sentinel for the IntersectionObserver.
+  if (stepsState.total > 0) {
+    if (stepsState.hasMore) {
+      const label = stepsState.loading
+        ? 'Loading more steps…'
+        : 'Showing ' + stepsState.loaded.length + ' of ' + stepsState.total + ' — scroll to load more';
+      html += '<div class="step-load-more" id="stepLoadMore">'+esc(label)+'</div>';
+    } else {
+      html += '<div class="step-load-more">All ' + stepsState.total + ' steps loaded</div>';
+    }
+  }
+
+  stepListEl.innerHTML = html;
+  _attachStepScrollObserver();
+}
+
+let _stepIO = null;
+function _attachStepScrollObserver() {
+  const sentinel = document.getElementById('stepLoadMore');
+  if (!sentinel) return;
+  if (!('IntersectionObserver' in window)) return; // fall back to scroll handler below
+  if (_stepIO) { try { _stepIO.disconnect(); } catch(_){} _stepIO = null; }
+  _stepIO = new IntersectionObserver(entries => {
+    for (const e of entries) {
+      if (e.isIntersecting && stepsState.hasMore && !stepsState.loading) {
+        loadMoreSteps();
+      }
+    }
+  }, { rootMargin: '300px' });
+  _stepIO.observe(sentinel);
+}
+
+// Defensive scroll fallback for browsers without IntersectionObserver, and to
+// catch the case where the sentinel is already in-viewport on render (rare).
+window.addEventListener('scroll', function() {
+  if (activeTab !== 'overview') return;
+  if (!stepsState.hasMore || stepsState.loading) return;
+  const sentinel = document.getElementById('stepLoadMore');
+  if (!sentinel) return;
+  const rect = sentinel.getBoundingClientRect();
+  if (rect.top < window.innerHeight + 300) loadMoreSteps();
+}, { passive: true });
 
 // ── Filter bar ───────────────────────────────────────────────────────────────
 

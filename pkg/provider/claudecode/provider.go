@@ -188,15 +188,26 @@ func hasAPIError5xx(lowerOutput string) bool {
 func isASCIIDigit(b byte) bool { return b >= '0' && b <= '9' }
 
 // isLikelyHTMLErrorPage detects output that is an HTML error page rather than
-// a model response. Signals: a doctype, or the combination of an opening and
-// closing <html> tag. Without this, an upstream proxy returning an auth/error
-// HTML page can leak through as "successful" step output (observed: stray
-// "</html>" entries in the autonomous loop alongside 401 bursts).
+// a model response. Signals: a doctype, the combination of an opening and
+// closing <html> tag, or — defense in depth — output that is *exactly* a bare
+// "</html>" after trimming. Without this, an upstream proxy returning an
+// auth/error HTML page can leak through as "successful" step output
+// (observed: stray "</html>" entries in the autonomous loop alongside 401
+// bursts; some appeared in isolation when the surrounding markup was stripped
+// by output buffering).
+//
+// The bare-tag check is intentionally strict (full-output equality, not
+// substring): a legitimate model response that happens to mention "</html>"
+// in code or examples must NOT trip this, only a response whose *entire*
+// content is the closing tag — which is never a real model answer.
 func isLikelyHTMLErrorPage(lowerOutput string) bool {
 	if strings.Contains(lowerOutput, "<!doctype html") {
 		return true
 	}
 	if strings.Contains(lowerOutput, "<html") && strings.Contains(lowerOutput, "</html>") {
+		return true
+	}
+	if strings.TrimSpace(lowerOutput) == "</html>" {
 		return true
 	}
 	return false

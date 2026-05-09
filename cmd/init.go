@@ -20,7 +20,6 @@ var (
 	instructions    string
 	model           string
 	initProvider    string
-	initPMMode      bool
 	initTemplate    string
 	initProfile     string
 	initMaxMinutes  int
@@ -80,9 +79,6 @@ Examples:
 						_ = config.Save(workdir, cfg)
 					}
 				}(res.MaxParallel)
-			}
-			if res.PMMode && !cmd.Flags().Changed("pm") {
-				initPMMode = true
 			}
 			if res.APIKey != "" {
 				// Persist the API key into config.yaml.
@@ -178,20 +174,18 @@ Examples:
 		if initProvider != "" {
 			s.Provider = initProvider
 		}
-		if initPMMode {
-			s.PMMode = true
-		}
+		// All projects use PM mode now (Task 20067 removed non-PM mode).
+		s.PMMode = true
 		if initMaxMinutes > 0 {
 			s.DefaultMaxMinutes = initMaxMinutes
 		}
 		if initSkipClarify {
 			s.SkipClarify = true
 		}
-		// Apply template: pre-populate the plan with template tasks, enabling
-		// PM mode automatically so 'cloop run' executes them directly without
-		// calling the AI decomposition step.
+		// Apply template: pre-populate the plan with template tasks so
+		// 'cloop run' executes them directly without calling the AI
+		// decomposition step.
 		if tmpl != nil {
-			s.PMMode = true
 			s.Plan = tmpl.ToPlan()
 			// Allow a custom goal to override the template default.
 			if len(args) == 1 {
@@ -243,12 +237,10 @@ Examples:
 			fmt.Printf("  Instructions: %s\n", instructions)
 		}
 		fmt.Printf("\nRun 'cloop run' to start.\n")
-		if s.PMMode && tmpl != nil {
-			fmt.Printf("PM mode enabled — pre-defined tasks loaded from template '%s'. Run 'cloop run' to execute them.\n", tmpl.Name)
-		} else if s.PMMode {
-			fmt.Printf("PM mode enabled — run 'cloop run' to decompose and execute tasks.\n")
+		if tmpl != nil {
+			fmt.Printf("Pre-defined tasks loaded from template '%s'. Run 'cloop run' to execute them.\n", tmpl.Name)
 		} else {
-			fmt.Printf("Use 'cloop run --pm' for product manager mode (task decomposition).\n")
+			fmt.Printf("Run 'cloop run' to decompose your goal into tasks and execute them.\n")
 		}
 		return nil
 	},
@@ -284,11 +276,10 @@ func init() {
 	initCmd.Flags().StringVar(&instructions, "instructions", "", "Additional instructions/constraints for the AI")
 	initCmd.Flags().StringVar(&model, "model", "", "Model to use (provider-specific)")
 	initCmd.Flags().StringVar(&initProvider, "provider", "", "AI provider: anthropic, openai, ollama, claudecode (default)")
-	initCmd.Flags().BoolVar(&initPMMode, "pm", false, "Enable product manager mode (task decomposition) by default for this project")
 	initCmd.Flags().StringVar(&initTemplate, "template", "", "Bootstrap from a built-in template ("+clooptemplate.NamesString()+")")
 	initCmd.Flags().StringVar(&initProfile, "profile", "", "Named configuration profile to apply (overrides the active profile)")
 	initCmd.Flags().IntVar(&initMaxMinutes, "max-minutes", 0, "Default per-task execution time budget in minutes for this project (0 = no limit)")
-	initCmd.Flags().BoolVar(&initSkipClarify, "skip-clarify", false, "Skip the interactive goal clarification Q&A dialog when running 'cloop run --pm' for the first time")
+	initCmd.Flags().BoolVar(&initSkipClarify, "skip-clarify", false, "Skip the interactive goal clarification Q&A dialog before plan decomposition")
 	initCmd.Flags().BoolVarP(&initInteractive, "interactive", "i", false, "Launch the step-by-step interactive setup wizard")
 	rootCmd.AddCommand(initCmd)
 }

@@ -16,8 +16,8 @@ import (
 //
 // The runPMParallel, consensus, and bench packages already protect their
 // fan-out goroutines individually. This helper exists for the main-goroutine
-// call sites (runLoop, runPMSequential heal/clarify retries, evolvePM,
-// auto-evolve free-form), where a crash would tear down the orchestrator.
+// call sites (runPMSequential heal/clarify retries, evolvePM), where a
+// crash would tear down the orchestrator.
 //
 // On panic, the stack trace is logged to stderr at the point of recovery so
 // debugging information is not lost; the returned error matches the shape

@@ -391,9 +391,9 @@ func New(cfg Config, prov provider.Provider) (*Orchestrator, error) {
 	if cfg.Model != "" {
 		s.Model = cfg.Model
 	}
-	if cfg.PMMode {
-		s.PMMode = true
-	}
+	// All work is tracked through the PM task pipeline; non-PM mode was removed
+	// in Task 20067 so every change is visible in the task list and auditable.
+	s.PMMode = true
 	s.InnovateMode = cfg.InnovateMode
 	if cfg.Parallel {
 		s.Parallel = true
@@ -633,225 +633,7 @@ func (o *Orchestrator) enforceClaudeCodeLimits() error {
 }
 
 func (o *Orchestrator) Run(ctx context.Context) error {
-	if o.state.PMMode {
-		return o.runPM(ctx)
-	}
-	return o.runLoop(ctx)
-}
-
-// runLoop is the original autonomous feedback loop.
-func (o *Orchestrator) runLoop(ctx context.Context) error {
-	s := o.state
-	s.Status = "running"
-	if err := s.Save(); err != nil {
-		return err
-	}
-
-	sessionStart := time.Now()
-	startStep := s.CurrentStep
-	defer func() {
-		newSteps := s.Steps
-		if startStep < len(newSteps) {
-			newSteps = newSteps[startStep:]
-		} else {
-			newSteps = nil
-		}
-		o.learnFromSession(ctx, newSteps)
-		printSessionSummary(sessionStart, startStep, s)
-	}()
-
-	header := color.New(color.FgCyan, color.Bold)
-	stepColor := color.New(color.FgYellow, color.Bold)
-	successColor := color.New(color.FgGreen, color.Bold)
-	failColor := color.New(color.FgRed, color.Bold)
-	dimColor := color.New(color.Faint)
-
-	if !o.log.IsJSON() {
-		header.Printf("\n🔄 cloop — Autonomous AI Feedback Loop\n")
-		fmt.Printf("   Provider: %s\n", o.provider.Name())
-		fmt.Printf("   Goal: %s\n", s.Goal)
-		if s.MaxSteps > 0 {
-			fmt.Printf("   Steps: %d/%d (completed/max)\n", s.CurrentStep, s.MaxSteps)
-		} else {
-			fmt.Printf("   Steps: %d (unlimited)\n", s.CurrentStep)
-		}
-		if o.config.StepsLimit > 0 {
-			fmt.Printf("   Session limit: %d step(s) this run\n", o.config.StepsLimit)
-		}
-		if s.Instructions != "" {
-			fmt.Printf("   Instructions: %s\n", s.Instructions)
-		}
-		fmt.Println()
-	}
-	o.log.Info(logger.EventSessionStart, 0, "session started", map[string]interface{}{
-		"provider":  o.provider.Name(),
-		"goal":      s.Goal,
-		"max_steps": s.MaxSteps,
-	})
-
-	o.webhook.Send(webhook.EventSessionStarted, webhook.Payload{Goal: s.Goal})
-
-	// Empty-output watchdog: a provider returning (*Result{Output:""}, nil) burns
-	// budget without making progress, since the goal-complete check can't match
-	// an empty string and runLoop has no err-counter to trip on. Mirrors the
-	// soft-fail treatment in pkg/provider/cached and pkg/provider/fallback so
-	// chains without those decorators still abort instead of looping forever.
-	consecutiveEmptyOutputs := 0
-	maxConsecutiveEmpty := o.config.MaxFailures
-	if maxConsecutiveEmpty <= 0 {
-		maxConsecutiveEmpty = 3
-	}
-
-	for s.MaxSteps == 0 || s.CurrentStep < s.MaxSteps {
-		if o.config.StepsLimit > 0 && s.CurrentStep >= startStep+o.config.StepsLimit {
-			color.New(color.FgYellow).Printf("⏸ Reached --steps limit (%d). Run 'cloop run' to continue.\n", o.config.StepsLimit)
-			s.Status = "paused"
-			s.Save()
-			return nil
-		}
-		select {
-		case <-ctx.Done():
-			s.Status = "paused"
-			s.Save()
-			return ctx.Err()
-		default:
-		}
-
-		step := s.CurrentStep + 1
-		if !o.log.IsJSON() {
-			if s.MaxSteps > 0 {
-				stepColor.Printf("━━━ Step %d/%d ━━━\n", step, s.MaxSteps)
-			} else {
-				stepColor.Printf("━━━ Step %d ━━━\n", step)
-			}
-		}
-		o.log.Info(logger.EventStep, 0, fmt.Sprintf("step %d", step), map[string]interface{}{"step": step})
-
-		prompt := o.buildPrompt()
-
-		if o.config.DryRun {
-			dimColor.Printf("[dry-run] Prompt:\n%s\n\n", prompt)
-			s.CurrentStep++
-			continue
-		}
-
-		dimColor.Printf("→ Running %s...\n", o.provider.Name())
-		start := time.Now()
-
-		opts, wasStreamed := o.makeOpts(s.Model, true)
-		result, err := safeComplete(ctx, o.provider, prompt, opts)
-		if err != nil {
-			failColor.Printf("✗ Provider error: %v\n", err)
-			s.Status = "failed"
-			s.Save()
-			o.webhook.Send(webhook.EventSessionFailed, webhook.Payload{Goal: s.Goal})
-			return err
-		}
-
-		if result == nil || strings.TrimSpace(result.Output) == "" {
-			consecutiveEmptyOutputs++
-			failColor.Printf("✗ Provider returned empty output (consecutive empty: %d/%d)\n", consecutiveEmptyOutputs, maxConsecutiveEmpty)
-			if consecutiveEmptyOutputs >= maxConsecutiveEmpty {
-				s.Status = "failed"
-				s.Save()
-				o.webhook.Send(webhook.EventSessionFailed, webhook.Payload{Goal: s.Goal})
-				return fmt.Errorf("%d consecutive empty provider outputs", consecutiveEmptyOutputs)
-			}
-			s.Save()
-			continue
-		}
-		consecutiveEmptyOutputs = 0
-
-		duration := time.Since(start)
-
-		stepResult := state.StepResult{
-			Task:         fmt.Sprintf("Step %d", step),
-			Output:       result.Output,
-			ExitCode:     0,
-			Duration:     duration.Round(time.Second).String(),
-			Time:         time.Now(),
-			InputTokens:  result.InputTokens,
-			OutputTokens: result.OutputTokens,
-		}
-		s.TotalInputTokens += result.InputTokens
-		s.TotalOutputTokens += result.OutputTokens
-		s.AddStep(stepResult)
-
-		// Record metrics for this step.
-		if o.metrics != nil {
-			o.metrics.RecordStep()
-			o.metrics.RecordTokens(result.Provider, result.Model, result.InputTokens, result.OutputTokens)
-			if usd, ok := cost.Estimate(strings.ToLower(result.Model), result.InputTokens, result.OutputTokens); ok {
-				o.metrics.RecordCost(result.Provider, result.Model, usd)
-			}
-		}
-
-		if wasStreamed() {
-			fmt.Println()
-		} else {
-			printOutput(result.Output, dimColor, o.config.Verbose)
-		}
-		dimColor.Printf("  [%s, provider: %s]\n\n", duration.Round(time.Second), result.Provider)
-
-		if o.config.TokenBudget > 0 && s.TotalInputTokens+s.TotalOutputTokens >= o.config.TokenBudget {
-			color.New(color.FgYellow).Printf("⏸ Token budget reached (%d tokens). Run 'cloop run' to continue.\n", o.config.TokenBudget)
-			s.Status = "paused"
-			s.Save()
-			return nil
-		}
-		if o.checkCostLimit(s) {
-			s.Status = "paused"
-			s.Save()
-			return nil
-		}
-
-		if o.isGoalComplete(result.Output) {
-			if !o.log.IsJSON() {
-				successColor.Printf("🎉 Goal complete after %d steps!\n\n", step)
-			}
-			o.log.Info(logger.EventSessionDone, 0, "goal complete", map[string]interface{}{
-				"steps":         step,
-				"input_tokens":  s.TotalInputTokens,
-				"output_tokens": s.TotalOutputTokens,
-			})
-			if o.config.Notify {
-				notify.Send("cloop: Goal Complete", s.Goal)
-			}
-			o.webhook.Send(webhook.EventSessionComplete, webhook.Payload{
-				Goal: s.Goal,
-				Session: &webhook.SessionInfo{
-					InputTokens:  s.TotalInputTokens,
-					OutputTokens: s.TotalOutputTokens,
-					Duration:     time.Since(sessionStart).Round(time.Second).String(),
-				},
-			})
-			if s.AutoEvolve {
-				s.Status = "evolving"
-				s.Save()
-				return o.evolve(ctx)
-			}
-			s.Status = "complete"
-			s.Save()
-			return nil
-		}
-
-		s.Save()
-
-		if o.config.StepDelay > 0 {
-			select {
-			case <-ctx.Done():
-				s.Status = "paused"
-				s.Save()
-				return ctx.Err()
-			case <-time.After(o.config.StepDelay):
-			}
-		}
-	}
-
-	color.New(color.FgYellow).Printf("⏸ Reached max steps (%d). Run 'cloop run' to continue or 'cloop run --add-steps N' to extend.\n", s.MaxSteps)
-	s.Status = "paused"
-	s.Save()
-	return nil
+	return o.runPM(ctx)
 }
 
 // runPM dispatches to sequential or parallel task execution based on config.
@@ -1751,10 +1533,10 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		// Empty-output watchdog: a provider returning (Result{Output:""}, nil)
 		// produces no signal, so the switch below falls into `default:` and
 		// silently marks the task DONE — a single transient hiccup can then
-		// drain the entire plan in a tight loop. Mirror the runLoop guard
-		// (line ~751) and the decorator behaviour in pkg/provider/cached and
-		// pkg/provider/fallback: re-queue the task as pending, increment
-		// consecutiveErrors, and abort once the threshold trips.
+		// drain the entire plan in a tight loop. Mirror the decorator
+		// behaviour in pkg/provider/cached and pkg/provider/fallback:
+		// re-queue the task as pending, increment consecutiveErrors, and
+		// abort once the threshold trips.
 		if strings.TrimSpace(taskOutput) == "" {
 			consecutiveErrors++
 			failColor.Printf("✗ Task %d: provider returned empty output (consecutive errors: %d/%d)\n",
@@ -1765,11 +1547,13 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			if consecutiveErrors >= maxConsecutiveErrors {
 				s.Status = "failed"
 				s.Save()
+				abortErr := fmt.Errorf("%d consecutive task failures (empty provider output)", consecutiveErrors)
 				o.webhook.Send(webhook.EventSessionFailed, webhook.Payload{
 					Goal:    s.Goal,
 					Session: &webhook.SessionInfo{InputTokens: s.TotalInputTokens, OutputTokens: s.TotalOutputTokens},
+					Error:   webhook.TruncateError(abortErr.Error()),
 				})
-				return fmt.Errorf("%d consecutive task failures (empty provider output)", consecutiveErrors)
+				return abortErr
 			}
 			continue
 		}
@@ -2050,11 +1834,13 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 					if consecutiveErrors >= maxConsecutiveErrors {
 						s.Status = "failed"
 						s.Save()
+						abortErr := fmt.Errorf("%d consecutive task failures", consecutiveErrors)
 						o.webhook.Send(webhook.EventSessionFailed, webhook.Payload{
 							Goal:    s.Goal,
 							Session: &webhook.SessionInfo{InputTokens: s.TotalInputTokens, OutputTokens: s.TotalOutputTokens},
+							Error:   webhook.TruncateError(abortErr.Error()),
 						})
-						return fmt.Errorf("%d consecutive task failures", consecutiveErrors)
+						return abortErr
 					}
 					continue
 				}
@@ -2122,11 +1908,13 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 						if consecutiveErrors >= maxConsecutiveErrors {
 							s.Status = "failed"
 							s.Save()
+							abortErr := fmt.Errorf("%d consecutive task failures", consecutiveErrors)
 							o.webhook.Send(webhook.EventSessionFailed, webhook.Payload{
 								Goal:    s.Goal,
 								Session: &webhook.SessionInfo{InputTokens: s.TotalInputTokens, OutputTokens: s.TotalOutputTokens},
+								Error:   webhook.TruncateError(abortErr.Error()),
 							})
-							return fmt.Errorf("%d consecutive task failures", consecutiveErrors)
+							return abortErr
 						}
 					} else {
 						pmColor.Printf("✓ Shell verification PASSED for task %d: %s\n\n", task.ID, task.Title)
@@ -2273,11 +2061,13 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			if consecutiveErrors >= maxConsecutiveErrors {
 				s.Status = "failed"
 				s.Save()
+				abortErr := fmt.Errorf("%d consecutive task failures", consecutiveErrors)
 				o.webhook.Send(webhook.EventSessionFailed, webhook.Payload{
 					Goal:    s.Goal,
 					Session: &webhook.SessionInfo{InputTokens: s.TotalInputTokens, OutputTokens: s.TotalOutputTokens},
+					Error:   webhook.TruncateError(abortErr.Error()),
 				})
-				return fmt.Errorf("%d consecutive task failures", consecutiveErrors)
+				return abortErr
 			}
 		default:
 			// No signal found — treat as done (AI finished without explicit signal)
@@ -3055,7 +2845,7 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 			}
 
 			result := res.result
-			// Empty-output watchdog: same companion to runPM/runLoop guards —
+			// Empty-output watchdog: same companion to runPMSequential's guard —
 			// a (*Result{Output:""}, nil) on the parallel path otherwise falls
 			// into the `default:` arm below and silently marks the task DONE,
 			// draining the whole plan when the provider is hiccupping (auth
@@ -3535,101 +3325,6 @@ func (o *Orchestrator) prunePlanForPrompt(plan *pm.Plan) (*pm.Plan, int, int) {
 	return &newPlan, len(pruned), total
 }
 
-func (o *Orchestrator) buildPrompt() string {
-	s := o.state
-	var b strings.Builder
-
-	b.WriteString("You are working towards a project goal in an autonomous feedback loop.\n")
-	b.WriteString("Each step you take should make meaningful progress towards the goal.\n")
-	b.WriteString("You have full file system access and can run commands.\n\n")
-
-	b.WriteString(fmt.Sprintf("## PROJECT GOAL\n%s\n\n", s.Goal))
-
-	// Inject memory if enabled
-	if o.config.UseMemory && o.memory != nil {
-		limit := o.config.MemoryLimit
-		if limit == 0 {
-			limit = 20
-		}
-		if mem := o.memory.FormatForPrompt(limit); mem != "" {
-			b.WriteString(mem)
-		}
-	}
-
-	if s.Instructions != "" {
-		b.WriteString(fmt.Sprintf("## ADDITIONAL INSTRUCTIONS\n%s\n\n", s.Instructions))
-	}
-
-	if s.MaxSteps > 0 {
-		b.WriteString(fmt.Sprintf("## PROGRESS\nStep %d of %d max.\n\n", s.CurrentStep+1, s.MaxSteps))
-	} else {
-		b.WriteString(fmt.Sprintf("## PROGRESS\nStep %d (no step limit).\n\n", s.CurrentStep+1))
-	}
-
-	contextSteps := o.config.ContextSteps
-	if contextSteps < 0 {
-		contextSteps = 3
-	}
-
-	// Apply token-budget pruning to the full step list before count-based slicing.
-	effectiveSteps := s.Steps
-	if len(s.Steps) > 0 {
-		pruned, origCount, keptCount := pruneStepHistory(s.Steps, o.tokenLimit())
-		if keptCount < origCount {
-			color.New(color.FgYellow).Printf("Context pruned: kept %d of %d steps to fit token budget\n", keptCount, origCount)
-			effectiveSteps = pruned
-		}
-	}
-
-	// Derive recent / older split from the (possibly pruned) step list.
-	var recent []state.StepResult
-	if contextSteps > 0 {
-		n := contextSteps
-		if n > len(effectiveSteps) {
-			n = len(effectiveSteps)
-		}
-		if n > 0 {
-			recent = effectiveSteps[len(effectiveSteps)-n:]
-		}
-	}
-
-	// For older steps beyond the recent window, include a brief one-line summary
-	// so the AI has a high-level view of overall session progress.
-	// When contextSteps==0 (context disabled), skip history entirely.
-	if contextSteps > 0 && len(effectiveSteps) > len(recent) {
-		older := effectiveSteps[:len(effectiveSteps)-len(recent)]
-		b.WriteString("## SESSION HISTORY (brief)\n")
-		for _, step := range older {
-			summary := stepSummaryLine(step.Output, 150)
-			b.WriteString(fmt.Sprintf("- Step %d (%s): %s\n", step.Step+1, step.Duration, summary))
-		}
-		b.WriteString("\n")
-	}
-
-	if len(recent) > 0 {
-		b.WriteString("## RECENT STEPS\n")
-		for _, step := range recent {
-			b.WriteString(fmt.Sprintf("### Step %d (%s)\n", step.Step+1, step.Duration))
-			output := step.Output
-			if len(output) > 2000 {
-				output = output[:1000] + "\n...(truncated)...\n" + output[len(output)-1000:]
-			}
-			b.WriteString(output)
-			b.WriteString("\n\n")
-		}
-	}
-
-	b.WriteString("## INSTRUCTIONS FOR THIS STEP\n")
-	b.WriteString("1. Assess current progress towards the goal\n")
-	b.WriteString("2. Determine the most impactful next action\n")
-	b.WriteString("3. Execute it (create/edit files, run commands, etc.)\n")
-	b.WriteString("4. Verify your work compiles/runs if applicable\n")
-	b.WriteString("5. Summarize what you did and what remains\n\n")
-	b.WriteString("If the project goal is FULLY COMPLETE, end your response with exactly:\nGOAL_COMPLETE\n")
-
-	return b.String()
-}
-
 // evolvePM discovers new tasks via AI and appends them to the plan.
 // Returns the number of tasks added. Called when AutoEvolve is set and the PM plan is complete.
 func (o *Orchestrator) evolvePM(ctx context.Context) (int, error) {
@@ -3718,306 +3413,6 @@ func (o *Orchestrator) evolvePM(ctx context.Context) (int, error) {
 	fmt.Println()
 
 	return len(newTasks), nil
-}
-
-func (o *Orchestrator) evolve(ctx context.Context) error {
-	s := o.state
-
-	evolveColor := color.New(color.FgMagenta, color.Bold)
-	stepColor := color.New(color.FgYellow, color.Bold)
-	successColor := color.New(color.FgGreen, color.Bold)
-	failColor := color.New(color.FgRed, color.Bold)
-	dimColor := color.New(color.Faint)
-
-	evolveColor.Printf("\n🧠 Auto-Evolve — Continuously improving the project\n")
-	fmt.Printf("   Press Ctrl+C to stop.\n\n")
-
-	// Empty-output watchdog: mirrors runLoop / runPM. A provider returning
-	// (*Result{Output:""}, nil) on the evolve task path would silently mark
-	// the task DONE via the no-signal `default:` arm of the switch; on the
-	// free-form path it would record an empty step and EvolveStep++ forever.
-	// Without this counter, a single hiccupping provider (auth flap, content-
-	// filtered completion, transient 5xx returning empty body) could drain
-	// the entire budget in seconds.
-	consecutiveEmptyOutputs := 0
-	maxConsecutiveEmpty := o.config.MaxFailures
-	if maxConsecutiveEmpty <= 0 {
-		maxConsecutiveEmpty = 3
-	}
-
-	for {
-		select {
-		case <-ctx.Done():
-			s.Status = "complete"
-			s.Save()
-			evolveColor.Printf("\n⏸ Auto-evolve stopped. Project is complete.\n")
-			return nil
-		default:
-		}
-
-		// Prefer pending tasks over random improvements.
-		// If the plan has pending tasks, execute the next one before discovering new ones.
-		if s.Plan != nil {
-			nextTask := s.Plan.NextTask()
-			if nextTask != nil {
-				stepColor.Printf("━━━ Evolve Task %d: %s ━━━\n", nextTask.ID, nextTask.Title)
-				dimColor.Printf("       %s\n\n", truncate(nextTask.Description, 150))
-
-				now := time.Now()
-				nextTask.Status = pm.TaskInProgress
-				nextTask.StartedAt = &now
-				s.Save()
-
-				evolvePrunedPlan, keptEv, totalEv := o.prunePlanForPrompt(s.Plan)
-				if keptEv < totalEv {
-					color.New(color.FgYellow).Printf("Context pruned: kept %d of %d steps to fit token budget\n", keptEv, totalEv)
-				}
-				prompt := pm.ExecuteTaskPrompt(s.Goal, s.Instructions, o.config.WorkDir, evolvePrunedPlan, nextTask, o.config.NoCodeContextInject)
-				// Check for a user-edited context override.
-				if override, overrideErr := ctxedit.LoadOverride(o.config.WorkDir, nextTask.ID); overrideErr == nil && override != "" {
-					color.New(color.FgYellow).Printf("  Using context override for task %d\n", nextTask.ID)
-					prompt = override
-				}
-				prompt = cloopenv.InjectIntoPrompt(prompt, o.envVars)
-		if o.secretStore != nil {
-			prompt = o.secretStore.InjectIntoPrompt(prompt)
-		}
-				dimColor.Printf("→ Executing task %d via %s...\n", nextTask.ID, o.provider.Name())
-				start := time.Now()
-
-				evoOpts, evoWasStreamed := o.makeOpts(s.Model, true)
-				result, err := safeComplete(ctx, o.provider, prompt, evoOpts)
-				if err != nil {
-					failColor.Printf("✗ Provider error on task %d: %v\n", nextTask.ID, err)
-					pm.AddAnnotation(nextTask, "ai", fmt.Sprintf("Task failed: provider error (evolve mode) — %s", truncate(err.Error(), 200)))
-					nextTask.Status = pm.TaskFailed
-					s.Status = "complete"
-					s.Save()
-					return nil
-				}
-
-				if result == nil || strings.TrimSpace(result.Output) == "" {
-					consecutiveEmptyOutputs++
-					failColor.Printf("✗ Provider returned empty output on task %d (consecutive empty: %d/%d)\n", nextTask.ID, consecutiveEmptyOutputs, maxConsecutiveEmpty)
-					pm.AddAnnotation(nextTask, "ai", fmt.Sprintf("Task re-queued: provider returned empty output (evolve mode, consecutive empty: %d/%d).", consecutiveEmptyOutputs, maxConsecutiveEmpty))
-					nextTask.Status = pm.TaskPending
-					nextTask.StartedAt = nil
-					if consecutiveEmptyOutputs >= maxConsecutiveEmpty {
-						s.Status = "failed"
-						s.Save()
-						return fmt.Errorf("%d consecutive empty provider outputs in auto-evolve", consecutiveEmptyOutputs)
-					}
-					s.Save()
-					continue
-				}
-				consecutiveEmptyOutputs = 0
-
-				duration := time.Since(start)
-				stepResult := state.StepResult{
-					Task:         fmt.Sprintf("Evolve Task %d: %s", nextTask.ID, nextTask.Title),
-					Output:       result.Output,
-					Duration:     duration.Round(time.Second).String(),
-					Time:         time.Now(),
-					InputTokens:  result.InputTokens,
-					OutputTokens: result.OutputTokens,
-				}
-				s.TotalInputTokens += result.InputTokens
-				s.TotalOutputTokens += result.OutputTokens
-				s.AddStep(stepResult)
-
-				if evoWasStreamed() {
-					fmt.Println()
-				} else {
-					printOutput(result.Output, dimColor, o.config.Verbose)
-				}
-				dimColor.Printf("  [%s, provider: %s]\n\n", duration.Round(time.Second), result.Provider)
-
-				completedAt := time.Now()
-				nextTask.CompletedAt = &completedAt
-				nextTask.Result = truncate(result.Output, 500)
-				if nextTask.StartedAt != nil {
-					nextTask.ActualMinutes = int(completedAt.Sub(*nextTask.StartedAt).Minutes())
-				}
-
-				signal := pm.CheckTaskSignal(result.Output)
-				// Fail-closed for unanswered clarification questions: evolve
-				// has no auto-resolve loop, so without this reroute a
-				// TaskInProgress with clarification questions would fall into
-				// the `default:` arm of the switch below and be silently
-				// marked DONE.
-				clarificationReroute := false
-				if signal == pm.TaskInProgress && looksLikeClarificationQuestion(result.Output) {
-					signal = pm.TaskFailed
-					clarificationReroute = true
-					pm.AddAnnotation(nextTask, "ai", "Task failed: LLM asked clarification questions instead of completing the work (evolve mode has no auto-resolve loop).")
-				}
-				evolveDur := duration.Round(time.Second).String()
-				switch signal {
-				case pm.TaskDone:
-					nextTask.Status = pm.TaskDone
-					pm.AddAnnotation(nextTask, "ai", fmt.Sprintf("Task completed successfully in %s.", evolveDur))
-					successColor.Printf("✓ Evolve task %d complete: %s\n\n", nextTask.ID, nextTask.Title)
-				case pm.TaskSkipped:
-					nextTask.Status = pm.TaskSkipped
-					pm.AddAnnotation(nextTask, "ai", fmt.Sprintf("Task skipped per AI TASK_SKIPPED signal after %s.", evolveDur))
-					dimColor.Printf("→ Evolve task %d skipped: %s\n\n", nextTask.ID, nextTask.Title)
-				case pm.TaskFailed:
-					nextTask.Status = pm.TaskFailed
-					// Skip the explicit-signal annotation when the failure came
-					// from the clarification reroute above — the reroute already
-					// added an accurate annotation, and claiming "per AI
-					// TASK_FAILED signal" would misattribute it.
-					if !clarificationReroute {
-						pm.AddAnnotation(nextTask, "ai", fmt.Sprintf("Task failed per AI TASK_FAILED signal after %s.", evolveDur))
-					}
-					failColor.Printf("✗ Evolve task %d failed: %s\n\n", nextTask.ID, nextTask.Title)
-				default:
-					nextTask.Status = pm.TaskDone
-					pm.AddAnnotation(nextTask, "ai", "Task implicitly completed (evolve mode): AI finished without an explicit TASK_DONE/TASK_FAILED/TASK_SKIPPED signal — treated as done.")
-					successColor.Printf("✓ Evolve task %d complete (no signal): %s\n\n", nextTask.ID, nextTask.Title)
-				}
-				s.Save()
-				continue
-			}
-
-			// All tasks done — discover new ones via AI before falling back to free-form.
-			s.SyncFromDisk()
-			if s.Plan.IsComplete() {
-				n, err := o.evolvePM(ctx)
-				if err != nil {
-					evolveColor.Printf("\n⏹ Evolve task discovery failed: %v\n", err)
-					s.Status = "complete"
-					s.Save()
-					return nil
-				}
-				if n > 0 {
-					continue // execute the newly discovered tasks
-				}
-				// No new tasks — fall through to free-form evolve below
-			}
-		}
-
-		s.EvolveStep++
-		stepColor.Printf("━━━ Evolve #%d ━━━\n", s.EvolveStep)
-
-		prompt := o.buildEvolvePrompt()
-		dimColor.Printf("→ Thinking of improvements...\n")
-
-		freeOpts, freeWasStreamed := o.makeOpts(s.Model, true)
-		result, err := safeComplete(ctx, o.provider, prompt, freeOpts)
-		if err != nil {
-			evolveColor.Printf("\n⏹ Auto-evolve ended: %v\n", err)
-			s.Status = "complete"
-			s.Save()
-			return nil
-		}
-
-		if result == nil || strings.TrimSpace(result.Output) == "" {
-			consecutiveEmptyOutputs++
-			failColor.Printf("✗ Provider returned empty output on evolve #%d (consecutive empty: %d/%d)\n", s.EvolveStep, consecutiveEmptyOutputs, maxConsecutiveEmpty)
-			if consecutiveEmptyOutputs >= maxConsecutiveEmpty {
-				s.Status = "failed"
-				s.Save()
-				return fmt.Errorf("%d consecutive empty provider outputs in auto-evolve", consecutiveEmptyOutputs)
-			}
-			s.Save()
-			continue
-		}
-		consecutiveEmptyOutputs = 0
-
-		stepResult := state.StepResult{
-			Task:         fmt.Sprintf("Evolve #%d", s.EvolveStep),
-			Output:       result.Output,
-			Duration:     result.Duration.Round(time.Second).String(),
-			Time:         time.Now(),
-			InputTokens:  result.InputTokens,
-			OutputTokens: result.OutputTokens,
-		}
-		s.TotalInputTokens += result.InputTokens
-		s.TotalOutputTokens += result.OutputTokens
-		s.AddStep(stepResult)
-
-		if freeWasStreamed() {
-			fmt.Println()
-		} else {
-			printOutput(result.Output, dimColor, o.config.Verbose)
-		}
-		dimColor.Printf("  [%s, provider: %s]\n\n", result.Duration.Round(time.Second), result.Provider)
-		s.Save()
-	}
-}
-
-func (o *Orchestrator) buildEvolvePrompt() string {
-	s := o.state
-	var b strings.Builder
-
-	b.WriteString("You are in AUTO-EVOLVE mode. The original project goal has been completed.\n")
-	b.WriteString("Now you should independently improve the project by adding useful features,\n")
-	b.WriteString("improving code quality, adding tests, fixing edge cases, improving docs, etc.\n\n")
-
-	b.WriteString(fmt.Sprintf("## ORIGINAL GOAL (completed)\n%s\n\n", s.Goal))
-
-	if s.Instructions != "" {
-		b.WriteString(fmt.Sprintf("## CONSTRAINTS\n%s\n\n", s.Instructions))
-	}
-
-	b.WriteString(fmt.Sprintf("## EVOLVE ITERATION\n#%d\n\n", s.EvolveStep))
-
-	recent := s.LastNSteps(2)
-	if len(recent) > 0 {
-		b.WriteString("## RECENT WORK\n")
-		for _, step := range recent {
-			b.WriteString(fmt.Sprintf("### %s (%s)\n", step.Task, step.Duration))
-			output := step.Output
-			if len(output) > 2000 {
-				output = output[:1000] + "\n...(truncated)...\n" + output[len(output)-1000:]
-			}
-			b.WriteString(output)
-			b.WriteString("\n\n")
-		}
-	}
-
-	b.WriteString("## INSTRUCTIONS\n")
-	b.WriteString("1. Explore the current codebase\n")
-	b.WriteString("2. Identify a meaningful improvement (feature, test, refactor, docs, perf)\n")
-	b.WriteString("3. Implement it\n")
-	b.WriteString("4. Verify it works\n")
-	b.WriteString("5. Summarize what you added and why\n\n")
-	b.WriteString("Pick ONE focused improvement per iteration. Make it count.\n")
-
-	if s.InnovateMode {
-		b.WriteString("\n## 🚀 INNOVATION MODE ACTIVE\n")
-		b.WriteString("Go beyond obvious improvements. Think creatively and unconventionally.\n")
-		b.WriteString("Explore ideas that could be genuinely novel or surprising:\n")
-		b.WriteString("- Cross-provider intelligence (use multiple providers together, consensus, fallback chains)\n")
-		b.WriteString("- Self-optimization (analyze own performance, tune prompts, learn from failures)\n")
-		b.WriteString("- Predictive capabilities (anticipate what the user needs next)\n")
-		b.WriteString("- Meta-learning (extract patterns from past iterations to improve future ones)\n")
-		b.WriteString("- Novel interaction patterns (watch mode enhancements, collaborative modes, branching)\n")
-		b.WriteString("- Emergent behaviors (let the system surprise you with useful capabilities)\n")
-		b.WriteString("- Integration points (webhooks, APIs, CI/CD, external tools)\n")
-		b.WriteString("\nDon't just add features — invent capabilities that don't exist in other tools.\n")
-		b.WriteString("Be bold. If it might not work, try it anyway and document what you learned.\n")
-	}
-
-	return b.String()
-}
-
-func (o *Orchestrator) isGoalComplete(output string) bool {
-	lines := strings.Split(strings.TrimSpace(output), "\n")
-	if len(lines) == 0 {
-		return false
-	}
-	check := lines
-	if len(check) > 5 {
-		check = check[len(check)-5:]
-	}
-	for _, line := range check {
-		if strings.TrimSpace(line) == "GOAL_COMPLETE" {
-			return true
-		}
-	}
-	return false
 }
 
 func printOutput(output string, dimColor *color.Color, verbose bool) {
@@ -4188,15 +3583,14 @@ func buildHealPrompt(originalPrompt, diagnosis string, attempt, maxAttempts int)
 }
 
 // stepSummaryLine returns a short one-line summary of a step's output.
-// It picks the last non-empty, non-signal line (avoiding GOAL_COMPLETE /
-// TASK_* markers) and truncates it to maxLen runes.
+// It picks the last non-empty, non-signal line (avoiding TASK_* markers)
+// and truncates it to maxLen runes.
 func stepSummaryLine(output string, maxLen int) string {
 	lines := strings.Split(strings.TrimSpace(output), "\n")
 	signals := map[string]bool{
-		"GOAL_COMPLETE": true,
-		"TASK_DONE":     true,
-		"TASK_SKIPPED":  true,
-		"TASK_FAILED":   true,
+		"TASK_DONE":    true,
+		"TASK_SKIPPED": true,
+		"TASK_FAILED":  true,
 	}
 	// Walk backwards to find the last meaningful line.
 	for i := len(lines) - 1; i >= 0; i-- {

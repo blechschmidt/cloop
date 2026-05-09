@@ -308,7 +308,14 @@ func TestIsFatalCLIError(t *testing.T) {
 		{"HTML error page with doctype", "<!DOCTYPE html><html><body>401 Unauthorized</body></html>", true},
 		{"HTML error page no doctype", "<html><head><title>Error</title></head><body>nope</body></html>", true},
 		{"plain text mentioning html tag", "the function emits an <html> snippet but is not an error", false},
-		{"truncated HTML tail only", "</html>", false},
+		// Bare "</html>" as the *entire* response (after trimming) is an error
+		// artifact — observed in autonomous loops as a residue of a stripped
+		// HTML error page. A real model answer is never just the closing tag.
+		{"truncated HTML tail only", "</html>", true},
+		{"truncated HTML tail with surrounding whitespace", "  \n</html>\n  ", true},
+		// Guard: the bare-tag rule must NOT fire when "</html>" is embedded in
+		// a longer legitimate response (e.g. code-snippet documentation).
+		{"plain text mentioning closing tag", "use </html> to close the document body", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

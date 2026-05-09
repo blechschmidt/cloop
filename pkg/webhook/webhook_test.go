@@ -284,6 +284,20 @@ func TestFormatSlackMessage(t *testing.T) {
 			contains: []string{"FAILED", "build app"},
 		},
 		{
+			// Lock in the new error-reason surfacing: operators receiving a
+			// failure alert in Slack must see the underlying reason inline so
+			// they can triage without grepping logs. (Motivated by the
+			// 4000-step auth-loop incident: the original payload only carried
+			// the goal, so the alert was silent on *why* the loop aborted.)
+			name: "session failed includes error reason",
+			payload: Payload{
+				Event: EventSessionFailed,
+				Goal:  "build app",
+				Error: "3 consecutive task failures",
+			},
+			contains: []string{"FAILED", "build app", "3 consecutive task failures"},
+		},
+		{
 			name: "task started with progress",
 			payload: Payload{
 				Event:    EventTaskStarted,
@@ -427,5 +441,33 @@ func TestSend_SlackFormat(t *testing.T) {
 	}
 	if !strings.Contains(text, "my goal") {
 		t.Errorf("Slack text %q does not contain goal", text)
+	}
+}
+
+// --- TruncateError ---
+
+func TestTruncateError(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"empty", "", ""},
+		{"short message preserved", "3 consecutive task failures", "3 consecutive task failures"},
+		{"exactly at cap preserved", strings.Repeat("a", 512), strings.Repeat("a", 512)},
+		// One past the cap must be truncated; the marker tells log readers
+		// the tail was lost rather than mistaking a clipped message for the
+		// whole story (matters when the underlying error wraps a multi-KB
+		// upstream HTML body — the case that motivated the cap).
+		{"over cap truncated with marker", strings.Repeat("a", 513), strings.Repeat("a", 512) + "...(truncated)"},
+		{"large blob truncated", strings.Repeat("x", 4096), strings.Repeat("x", 512) + "...(truncated)"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := TruncateError(tc.in); got != tc.want {
+				t.Errorf("TruncateError(len=%d) = %q (len=%d), want %q (len=%d)",
+					len(tc.in), got, len(got), tc.want, len(tc.want))
+			}
+		})
 	}
 }

@@ -193,6 +193,10 @@ func Load(workdir string) (*ProjectState, error) {
 	if s.WorkDir == "" {
 		s.WorkDir = dir
 	}
+	// Migrate older projects that ran before non-PM mode was removed in
+	// Task 20067. All work now flows through the PM task pipeline, so the
+	// flag must be true once a project is loaded by this binary.
+	s.PMMode = true
 	return s, nil
 }
 
@@ -218,6 +222,8 @@ func LoadFromDir(dir string) (*ProjectState, error) {
 	if s.WorkDir == "" {
 		s.WorkDir = dir
 	}
+	// See Load: every loaded project is PM-mode after Task 20067.
+	s.PMMode = true
 	return s, nil
 }
 
@@ -337,6 +343,9 @@ func Init(workdir, goal string, maxSteps int) (*ProjectState, error) {
 		Status:    "initialized",
 		Steps:     []StepResult{},
 		CreatedAt: time.Now(),
+		// All work is tracked through the PM task pipeline; non-PM mode was
+		// removed in Task 20067, so every new project starts in PM mode.
+		PMMode: true,
 	}
 	if err := s.Save(); err != nil {
 		return nil, err

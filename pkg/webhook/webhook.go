@@ -79,6 +79,24 @@ type Payload struct {
 	Task      *TaskInfo    `json:"task,omitempty"`
 	Progress  *Progress    `json:"progress,omitempty"`
 	Session   *SessionInfo `json:"session,omitempty"`
+	// Error is a short human-readable failure reason, populated for
+	// EventSessionFailed and EventTaskFailed so downstream consumers (Slack
+	// alerts, dashboards) can triage without grepping logs. Truncated by the
+	// orchestrator to keep payloads small.
+	Error string `json:"error,omitempty"`
+}
+
+// TruncateError caps an error message at maxPayloadErrorBytes so a verbose
+// underlying error (e.g. a multi-KB stream-truncated upstream response) doesn't
+// bloat the webhook payload or break Slack's character limit. Exported so
+// orchestrator call sites can use it inline when assembling Payload literals
+// that already need to set Session/Progress fields.
+func TruncateError(s string) string {
+	const max = 512
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "...(truncated)"
 }
 
 // Client sends webhook notifications.
@@ -209,6 +227,9 @@ func formatSlackMessage(p Payload) string {
 		}
 		return fmt.Sprintf("*cloop* — Session complete! | Goal: %s", p.Goal)
 	case EventSessionFailed:
+		if p.Error != "" {
+			return fmt.Sprintf("*cloop* — Session *FAILED* | Goal: %s | Error: %s", p.Goal, p.Error)
+		}
 		return fmt.Sprintf("*cloop* — Session *FAILED* | Goal: %s", p.Goal)
 	case EventPlanComplete:
 		if p.Session != nil {

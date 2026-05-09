@@ -39,7 +39,6 @@ var (
 	runStepsLimit   int
 	autoEvolve      bool
 	runProvider     string
-	pmMode          bool
 	planOnly        bool
 	retryFailed     bool
 	replan          bool
@@ -256,12 +255,6 @@ Press Ctrl+C to pause gracefully.`,
 			effectiveMaxParallel = projectState.MaxParallel
 		}
 
-		// Merge PM mode: flag | plan-only | replan | parallel | persisted state
-		effectivePMMode := pmMode || planOnly || replan || parallelMode
-		if !effectivePMMode && projectState != nil && projectState.PMMode {
-			effectivePMMode = true
-		}
-
 		// Merge skip-clarify: CLI flag | persisted state (set by 'cloop init --skip-clarify')
 		effectiveSkipClarify := skipClarify
 		if !effectiveSkipClarify && projectState != nil && projectState.SkipClarify {
@@ -290,10 +283,6 @@ Press Ctrl+C to pause gracefully.`,
 		effectiveDryRun := dryRun
 		if !effectiveDryRun && projectState != nil && projectState.DryRun {
 			effectiveDryRun = true
-		}
-		// --plan-only implies PM mode.
-		if effectivePlanOnly {
-			effectivePMMode = true
 		}
 
 		// Webhook: flag overrides config file
@@ -372,7 +361,6 @@ Press Ctrl+C to pause gracefully.`,
 			StepTimeout:      timeout,
 			Verbose:          verbose,
 			DryRun:           effectiveDryRun,
-			PMMode:           effectivePMMode,
 			PlanOnly:         effectivePlanOnly,
 			RetryFailed:      effectiveRetryFailed,
 			Replan:           replan,
@@ -635,10 +623,9 @@ func init() {
 	runCmd.Flags().IntVar(&runStepsLimit, "steps", 0, "Run at most N steps this session (not persisted; 0 = no session limit)")
 	runCmd.Flags().BoolVar(&autoEvolve, "auto-evolve", false, "After goal completion, keep improving the project autonomously")
 	runCmd.Flags().StringVar(&runProvider, "provider", "", "AI provider: anthropic, openai, ollama, claudecode")
-	runCmd.Flags().BoolVar(&pmMode, "pm", false, "Product manager mode: decompose goal into tasks and execute them")
-	runCmd.Flags().BoolVar(&planOnly, "plan-only", false, "PM mode: decompose goal into tasks but do not execute (implies --pm)")
-	runCmd.Flags().BoolVar(&retryFailed, "retry-failed", false, "PM mode: retry tasks that previously failed")
-	runCmd.Flags().BoolVar(&replan, "replan", false, "PM mode: discard existing plan and re-decompose the goal (implies --pm)")
+	runCmd.Flags().BoolVar(&planOnly, "plan-only", false, "Decompose goal into tasks but do not execute them")
+	runCmd.Flags().BoolVar(&retryFailed, "retry-failed", false, "Retry tasks that previously failed")
+	runCmd.Flags().BoolVar(&replan, "replan", false, "Discard the existing plan and re-decompose the goal")
 	runCmd.Flags().IntVar(&maxFailures, "max-failures", 3, "PM mode: consecutive task failures before stopping")
 	runCmd.Flags().IntVar(&contextSteps, "context-steps", 3, "Recent steps to include in prompts (0 = disable context)")
 	runCmd.Flags().StringVar(&stepDelay, "step-delay", "", "Delay between steps (e.g. 5s, 1m)")
