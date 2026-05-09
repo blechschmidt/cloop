@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -539,26 +540,42 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+// recoverGoroutine logs a panic + stack trace from a long-running goroutine
+// instead of letting it crash the entire daemon. Use as the body of a deferred
+// call: `defer recoverGoroutine("watchState")`. The caller continues normally
+// after recovery — for ticker loops this means the goroutine exits and the
+// watcher stops; for per-iteration recovery (the recommended pattern), wrap
+// the loop body in an immediately-invoked func and defer recoverGoroutine
+// inside it so the loop keeps running after a single bad iteration.
+func recoverGoroutine(name string) {
+	if r := recover(); r != nil {
+		fmt.Fprintf(os.Stderr, "[ui] panic in %s: %v\n%s\n", name, r, debug.Stack())
+	}
+}
+
 // watchState polls the state file every second and notifies SSE clients on change.
 func (s *Server) watchState() {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	for range ticker.C {
-		statePath := state.StatePath(s.WorkDir)
-		fi, err := os.Stat(statePath)
-		if err != nil {
-			continue
-		}
-		if fi.ModTime().Equal(s.lastMod) {
-			continue
-		}
-		s.lastMod = fi.ModTime()
+		func() {
+			defer recoverGoroutine("watchState iteration")
+			statePath := state.StatePath(s.WorkDir)
+			fi, err := os.Stat(statePath)
+			if err != nil {
+				return
+			}
+			if fi.ModTime().Equal(s.lastMod) {
+				return
+			}
+			s.lastMod = fi.ModTime()
 
-		data, err := os.ReadFile(statePath)
-		if err != nil {
-			continue
-		}
-		s.broadcast(string(data))
+			data, err := os.ReadFile(statePath)
+			if err != nil {
+				return
+			}
+			s.broadcast(string(data))
+		}()
 	}
 }
 
@@ -1118,6 +1135,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 
 	// Drain incoming frames (bidirectional hook for future use).
 	go func() {
+		defer recoverGoroutine("handleWS drain")
 		for {
 			_, _, err := conn.Read(ctx)
 			if err != nil {
@@ -1232,6 +1250,15 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 		pipeW.Close() // parent doesn't write; close its end so reader gets EOF when child exits.
 
 		go func() {
+			defer func() {
+				if rec := recover(); rec != nil {
+					fmt.Fprintf(os.Stderr, "ui: run output goroutine panic recovered: %v\n", rec)
+					// Best-effort cleanup so the UI doesn't think a run is still in progress.
+					s.liveLogMu.Lock()
+					s.liveLogRunning = false
+					s.liveLogMu.Unlock()
+				}
+			}()
 			buf := make([]byte, 4096)
 			for {
 				n, readErr := pipeR.Read(buf)
@@ -2047,6 +2074,18 @@ func (s *Server) handleSuggestGenerate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	go func() {
+		defer func() {
+			if rec := recover(); rec != nil {
+				fmt.Fprintf(os.Stderr, "ui: suggest goroutine panic recovered: %v\n", rec)
+				// Recover the running flag so the user can retry.
+				s.suggestMu.Lock()
+				s.suggestRunning = false
+				s.suggestDone = true
+				s.suggestErr = fmt.Sprintf("internal panic: %v", rec)
+				s.suggestMu.Unlock()
+				s.broadcastSuggestStatus(suggestWorkDir)
+			}
+		}()
 		cmd := exec.Command(exe, "suggest", "--json", "--count", strconv.Itoa(req.Count))
 		cmd.Dir = suggestWorkDir
 		var stdout, stderr bytes.Buffer
@@ -2754,37 +2793,40 @@ func (s *Server) watchProjects() {
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 	for range ticker.C {
-		changed := false
-		for _, e := range s.allProjectEntries() {
-			statePath := filepath.Join(e.Path, ".cloop", "state.json")
-			fi, err := os.Stat(statePath)
-			if err != nil {
-				// Also try state.db.
-				statePath = filepath.Join(e.Path, ".cloop", "state.db")
-				fi, err = os.Stat(statePath)
+		func() {
+			defer recoverGoroutine("watchProjects iteration")
+			changed := false
+			for _, e := range s.allProjectEntries() {
+				statePath := filepath.Join(e.Path, ".cloop", "state.json")
+				fi, err := os.Stat(statePath)
+				if err != nil {
+					// Also try state.db.
+					statePath = filepath.Join(e.Path, ".cloop", "state.db")
+					fi, err = os.Stat(statePath)
+				}
+				if err != nil {
+					continue
+				}
+				prev := s.projLastMod[e.Path]
+				if !fi.ModTime().Equal(prev) {
+					s.projLastMod[e.Path] = fi.ModTime()
+					changed = true
+				}
 			}
-			if err != nil {
-				continue
+			if changed {
+				s.refreshProjectStatuses()
+				s.broadcastProjectsUpdate()
 			}
-			prev := s.projLastMod[e.Path]
-			if !fi.ModTime().Equal(prev) {
-				s.projLastMod[e.Path] = fi.ModTime()
-				changed = true
-			}
-		}
-		if changed {
-			s.refreshProjectStatuses()
-			s.broadcastProjectsUpdate()
-		}
 
-		// Independently of state-file changes, sample running status for each
-		// project so externally-started cloop processes flip the Run/Stop
-		// buttons without the client having to poll /api/livelog. handleRun
-		// already pushes a forced run_state on internal start; this loop
-		// catches in-flight transitions and externally-started runs.
-		for _, e := range s.allProjectEntries() {
-			s.broadcastRunState(e.Path, multiui.IsCloopRunningInDir(e.Path), false)
-		}
+			// Independently of state-file changes, sample running status for each
+			// project so externally-started cloop processes flip the Run/Stop
+			// buttons without the client having to poll /api/livelog. handleRun
+			// already pushes a forced run_state on internal start; this loop
+			// catches in-flight transitions and externally-started runs.
+			for _, e := range s.allProjectEntries() {
+				s.broadcastRunState(e.Path, multiui.IsCloopRunningInDir(e.Path), false)
+			}
+		}()
 	}
 }
 

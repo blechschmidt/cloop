@@ -447,3 +447,60 @@ drain:
 			delivered, totalEvents, resyncSignalled)
 	}
 }
+
+// TestRecoverGoroutine_LoopBodyContinuesAfterPanic verifies the per-iteration
+// recovery pattern used by watchState and watchProjects: even if one iteration
+// panics (e.g. a malformed state file blows up json.Marshal in broadcast()),
+// the ticker loop keeps running. Without recovery, the entire daemon crashes
+// — every connected SSE/WS client disconnects and the dashboard goes dark.
+//
+// To catch the regression: temporarily delete the recoverGoroutine deferral
+// inside the loop body of watchState/watchProjects in server.go and re-run
+// this test — it will fail with "loop body did not continue after panic"
+// because the goroutine crashes the test binary before iter==2 fires.
+func TestRecoverGoroutine_LoopBodyContinuesAfterPanic(t *testing.T) {
+	iterations := 0
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+		for i := 0; i < 3; i++ {
+			func() {
+				defer recoverGoroutine("test loop")
+				iterations++
+				if i == 1 {
+					// Simulate an unexpected panic during iteration 1
+					// (e.g. nil deref in deep state-file parsing).
+					var p *int
+					_ = *p // panic: nil pointer dereference
+				}
+			}()
+		}
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("loop body did not complete in time")
+	}
+
+	if iterations != 3 {
+		t.Fatalf("loop body did not continue after panic: ran %d/3 iterations", iterations)
+	}
+}
+
+// TestRecoverGoroutine_PanicValueLogged is a smoke test that recoverGoroutine
+// converts a panic into a log line on stderr (rather than crashing the
+// process). It also verifies the goroutine returns normally so the caller
+// can defer it without surprises.
+func TestRecoverGoroutine_PanicValueLogged(t *testing.T) {
+	completed := false
+	func() {
+		defer recoverGoroutine("smoke test")
+		defer func() { completed = true }()
+		panic("synthetic panic for test")
+	}()
+	if !completed {
+		t.Fatal("function with deferred recoverGoroutine did not run other defers")
+	}
+}

@@ -470,8 +470,22 @@ var daemonWorkerCmd = &cobra.Command{
 				Debounce: debounce,
 			}
 			go func() {
+				defer func() {
+					if rec := recover(); rec != nil {
+						logf("File watcher goroutine panic recovered: %v", rec)
+						s.LastError = fmt.Sprintf("file watcher panic: %v", rec)
+						_ = s.Save(workdir)
+					}
+				}()
 				logf("File watcher started: %v", cfg.Watch.Globs)
 				watchErr := filewatch.Run(ctx, fwCfg, func(evt filewatch.ChangeEvent) {
+					defer func() {
+						if rec := recover(); rec != nil {
+							logf("File watcher callback panic recovered: %v", rec)
+							s.LastError = fmt.Sprintf("file watcher callback panic: %v", rec)
+							_ = s.Save(workdir)
+						}
+					}()
 					logf("File change detected: %s (%d tasks reset)", evt.Context, len(evt.ResetTaskIDs))
 					s.WatchTriggers++
 					_ = s.Save(workdir)
