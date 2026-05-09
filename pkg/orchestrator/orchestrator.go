@@ -1868,6 +1868,18 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 					healColor.Printf("[HEAL attempt %d/%d] Provider error: %v\n", healAttempt, maxHealRetries, healErr)
 					continue
 				}
+				// Empty-output protection: when the heal provider returns
+				// (*Result{Output:""}, nil), assigning it to taskOutput would
+				// reset signal to TaskInProgress, exit the heal loop (signal !=
+				// TaskFailed), skip the clarify check (looksLikeClarificationQuestion("")
+				// is false), and fall through to the `default:` arm of the
+				// signal switch below — silently marking the previously-failed
+				// task DONE with no audit trail of the empty hiccup. Treat
+				// empty/nil as the same kind of soft retry as healErr.
+				if healResult == nil || strings.TrimSpace(healResult.Output) == "" {
+					healColor.Printf("[HEAL attempt %d/%d] Provider returned empty output — treating as transient failure\n", healAttempt, maxHealRetries)
+					continue
+				}
 				if healWasStreamed() {
 					fmt.Println()
 				} else {
@@ -1915,6 +1927,18 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 					clarifyOpts, clarifyWasStreamed := o.makeOpts(s.Model, true)
 					clarifyResult, clarifyErr := safeComplete(ctx, taskProvider, clarifyPrompt, clarifyOpts)
 					if clarifyErr != nil {
+						break
+					}
+					// Empty-output protection: matches the heal-loop guard above.
+					// On (*Result{Output:""}, nil) we'd otherwise overwrite a
+					// real clarification-asking taskOutput with "", let
+					// CheckTaskSignal("") return TaskInProgress, exit this
+					// retry loop, and silently fall through to the switch's
+					// `default:` arm that marks the task DONE — laundering
+					// "the LLM asked questions" into "task complete" via a
+					// transient hiccup. Match the existing clarifyErr branch
+					// shape (break, preserve the prior taskOutput).
+					if clarifyResult == nil || strings.TrimSpace(clarifyResult.Output) == "" {
 						break
 					}
 					if clarifyWasStreamed() {

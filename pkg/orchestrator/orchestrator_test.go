@@ -2784,3 +2784,57 @@ func TestRunPMParallel_ProviderPanicDoesNotCrashOrchestrator(t *testing.T) {
 		}
 	}
 }
+
+// TestRunPM_HealEmptyOutputDoesNotSilentlyPass locks down the heal-loop
+// empty-output guard added alongside the runLoop / runPM main-task / evolve
+// guards (commits 1d3c8a8, ceaf396, 9d94cad). Without it, a heal attempt
+// returning (*Result{Output:""}, nil) would assign "" to taskOutput,
+// CheckTaskSignal would yield TaskInProgress (no TASK_DONE/TASK_FAILED token),
+// the heal loop would exit (signal != TaskFailed), and the trailing
+// `switch signal { default: TaskDone }` arm would silently mark the
+// previously-failed task done — a transient hiccup laundered into a pass.
+func TestRunPM_HealEmptyOutputDoesNotSilentlyPass(t *testing.T) {
+	dir := tempDir(t)
+	s := initState(t, dir, "goal", 0)
+	s.PMMode = true
+	s.Plan = &pm.Plan{
+		Goal: "goal",
+		Tasks: []*pm.Task{
+			{ID: 1, Title: "Task A", Priority: 1, Status: pm.TaskPending},
+		},
+	}
+	s.Save()
+
+	// Sequence: original task fails → diagnosis call returns text → heal exec
+	// returns empty output. With HealRetries=1 we get exactly 3 provider calls.
+	prov := &mockProvider{
+		name: "mock",
+		results: []*provider.Result{
+			{Output: "fail\nTASK_FAILED", Provider: "mock"},
+			{Output: "diagnosis: something went wrong", Provider: "mock"},
+			{Output: "", Provider: "mock"},
+		},
+	}
+	o := newOrchestrator(t, dir, Config{
+		WorkDir:     dir,
+		PMMode:      true,
+		HealRetries: 1,
+		MaxFailures: 5, // generous so single-task failure doesn't trip session-level abort
+	}, prov)
+	_ = o.runPM(context.Background())
+
+	if prov.calls != 3 {
+		t.Errorf("expected 3 provider calls (initial + diagnosis + 1 empty heal), got %d", prov.calls)
+	}
+	final, err := state.Load(dir)
+	if err != nil {
+		t.Fatalf("state.Load: %v", err)
+	}
+	if len(final.Plan.Tasks) != 1 {
+		t.Fatalf("expected 1 task, got %d", len(final.Plan.Tasks))
+	}
+	if got := final.Plan.Tasks[0].Status; got != pm.TaskFailed {
+		t.Errorf("task status: expected %s (heal returned empty, original signal preserved), got %s — silent PASS regression",
+			pm.TaskFailed, got)
+	}
+}
