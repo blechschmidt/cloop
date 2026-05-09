@@ -2028,6 +2028,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 						continue
 					}
 					failColor.Printf("✗ Verification failed %d time(s) for task %d — marking failed.\n\n", task.VerifyRetries, task.ID)
+					pm.AddAnnotation(task, "ai", fmt.Sprintf("AI verification failed %d time(s) — exceeded retry budget, marking task failed.", task.VerifyRetries))
 					task.Status = pm.TaskFailed
 					{
 						done, failed := s.Plan.CountByStatus()
@@ -2081,6 +2082,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 						if vr.Output != "" {
 							failColor.Printf("  Script output:\n%s\n\n", vr.Output)
 						}
+						pm.AddAnnotation(task, "ai", "Shell verification reported failure — marking task failed.")
 						task.Status = pm.TaskFailed
 						// Trigger failure diagnosis so retry prompts can learn from the failure.
 						if o.config.DiagnoseFailures {

@@ -3738,3 +3738,127 @@ func TestRunPM_GateSkip_Annotated(t *testing.T) {
 		}
 	})
 }
+
+// TestRunPM_VerifyExhausted_Annotated locks in the audit-trail accuracy of the
+// verify-exhausted path. When AI verification fails the maximum allowed number
+// of times, the loop transitions the task to TaskFailed but historically only
+// printed a console message — operators inspecting task history saw the status
+// change with no annotation explaining that the failure was caused by repeated
+// verify-fail signals (vs. the executor itself emitting TASK_FAILED, vs. a
+// script-verify-failed, vs. a heal-loop exhaustion). The four failure modes
+// have different remediations, so the audit trail must distinguish them.
+//
+// Same audit-trail accuracy class as TestRunPM_VerifyError_AnnotatesAsErrored,
+// TestRunPM_ScriptVerifyError_Annotated, and TestRunPM_ImplicitDone_Annotated.
+func TestRunPM_VerifyExhausted_Annotated(t *testing.T) {
+	dir := tempDir(t)
+	s := initState(t, dir, "goal", 0)
+	s.PMMode = true
+	s.Plan = &pm.Plan{
+		Goal:  "goal",
+		Tasks: []*pm.Task{{ID: 1, Title: "Task A", Priority: 1, Status: pm.TaskPending}},
+	}
+	s.Save()
+
+	// Default maxRetries is 2, so we need 3 cycles of (executor, verify) for
+	// the third verify to push VerifyRetries from 2 to 3 and trip the
+	// "exceeded retry budget" branch.
+	prov := &mockProvider{
+		name: "mock",
+		results: []*provider.Result{
+			{Output: "did the work\nTASK_DONE", Provider: "mock"},
+			{Output: "Files missing.\nVERIFY_FAIL", Provider: "mock"},
+			{Output: "did the work again\nTASK_DONE", Provider: "mock"},
+			{Output: "Still missing.\nVERIFY_FAIL", Provider: "mock"},
+			{Output: "did the work yet again\nTASK_DONE", Provider: "mock"},
+			{Output: "Nope.\nVERIFY_FAIL", Provider: "mock"},
+		},
+	}
+	o := newOrchestrator(t, dir, Config{
+		WorkDir:     dir,
+		PMMode:      true,
+		Verify:      true,
+		NoHeal:      true,
+		MaxFailures: 10,
+	}, prov)
+	_ = o.runPM(context.Background())
+
+	task := o.state.Plan.Tasks[0]
+	if task.Status != pm.TaskFailed {
+		t.Fatalf("task status = %q, want %q (verify exhausted)", task.Status, pm.TaskFailed)
+	}
+
+	want := "exceeded retry budget"
+	found := false
+	for _, a := range task.Annotations {
+		if a.Author == "ai" && strings.Contains(a.Text, want) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("missing verify-exhausted annotation containing %q;\ngot annotations: %+v",
+			want, task.Annotations)
+	}
+}
+
+// TestRunPM_ScriptVerifyFailed_Annotated locks in the audit-trail accuracy of
+// the script-verify-failed path. When verify.GenerateAndRun returns a result
+// with Passed=false (the AI-generated script ran successfully but exited
+// non-zero, indicating the task was not actually completed), the loop
+// transitions the task to TaskFailed but historically only printed a console
+// message — operators inspecting task history saw the status change with no
+// annotation distinguishing this script-verify failure from the four other
+// terminal-fail paths (AI verify exhausted, AI emitted TASK_FAILED, heal-loop
+// exhaustion, script-verify errored).
+//
+// Same audit-trail accuracy class as TestRunPM_VerifyError_AnnotatesAsErrored,
+// TestRunPM_ScriptVerifyError_Annotated, TestRunPM_ImplicitDone_Annotated, and
+// TestRunPM_VerifyExhausted_Annotated.
+func TestRunPM_ScriptVerifyFailed_Annotated(t *testing.T) {
+	dir := tempDir(t)
+	s := initState(t, dir, "goal", 0)
+	s.PMMode = true
+	s.Plan = &pm.Plan{
+		Goal:  "goal",
+		Tasks: []*pm.Task{{ID: 1, Title: "Task A", Priority: 1, Status: pm.TaskPending}},
+	}
+	s.Save()
+
+	// Mock AI returns a verification script that exits non-zero — the
+	// script runs successfully (no GenerateAndRun error) but reports
+	// vr.Passed=false, hitting the script-verify-failed branch.
+	prov := &mockProvider{
+		name: "mock",
+		results: []*provider.Result{
+			{Output: "did the work\nTASK_DONE", Provider: "mock"},
+			{Output: "```bash\nexit 1\n```", Provider: "mock"},
+		},
+	}
+	o := newOrchestrator(t, dir, Config{
+		WorkDir:      dir,
+		PMMode:       true,
+		ScriptVerify: true,
+		NoHeal:       true,
+		MaxFailures:  10,
+	}, prov)
+	_ = o.runPM(context.Background())
+
+	task := o.state.Plan.Tasks[0]
+	if task.Status != pm.TaskFailed {
+		t.Fatalf("task status = %q, want %q (script-verify failed)", task.Status, pm.TaskFailed)
+	}
+
+	want := "Shell verification reported failure"
+	found := false
+	for _, a := range task.Annotations {
+		if a.Author == "ai" && strings.Contains(a.Text, want) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("missing script-verify-failed annotation containing %q;\ngot annotations: %+v",
+			want, task.Annotations)
+	}
+}
