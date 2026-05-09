@@ -3845,19 +3845,30 @@ func (o *Orchestrator) distillLearnings(ctx context.Context, plan *pm.Plan) {
 	}
 	dimColor := color.New(color.Faint)
 	dimColor.Printf("  Distilling session into project memory...\n")
+	queueID := o.enqueueWork(taskqueue.Entry{
+		Kind:        taskqueue.KindSession,
+		Title:       "Distill session into project memory",
+		Description: fmt.Sprintf("plan with %d task(s)", len(plan.Tasks)),
+		Source:      "orchestrator",
+	})
+	_ = o.queue.MarkRunning(queueID)
 	summary, err := learning.Distill(ctx, o.provider, o.state.Model, plan)
 	if err != nil {
+		_ = o.queue.MarkFailed(queueID, truncate(err.Error(), 200))
 		dimColor.Printf("  Memory distillation failed (ignored): %v\n", err)
 		return
 	}
 	if summary == "" {
+		_ = o.queue.MarkDone(queueID, "no memory update needed")
 		dimColor.Printf("  No memory update needed.\n")
 		return
 	}
 	if err := learning.SaveMemory(o.config.WorkDir, summary); err != nil {
+		_ = o.queue.MarkFailed(queueID, fmt.Sprintf("save memory: %v", err))
 		dimColor.Printf("  Failed to save memory (ignored): %v\n", err)
 		return
 	}
+	_ = o.queue.MarkDone(queueID, "memory updated")
 	dimColor.Printf("  Project memory updated (.cloop/memory.md).\n")
 }
 
@@ -3880,19 +3891,31 @@ func (o *Orchestrator) learnFromSession(ctx context.Context, steps []state.StepR
 	dimColor := color.New(color.Faint)
 	dimColor.Printf("  Extracting session learnings...\n")
 
+	queueID := o.enqueueWork(taskqueue.Entry{
+		Kind:        taskqueue.KindSession,
+		Title:       "Extract session learnings",
+		Description: fmt.Sprintf("%d step(s)", len(steps)),
+		Source:      "orchestrator",
+	})
+	_ = o.queue.MarkRunning(queueID)
+
 	learnings, err := memory.ExtractLearnings(ctx, o.provider, o.state.Model, o.state.Goal, summary, o.memory)
 	if err != nil {
+		_ = o.queue.MarkFailed(queueID, truncate(err.Error(), 200))
 		dimColor.Printf("  Memory extraction failed: %v\n", err)
 		return
 	}
 	if len(learnings) == 0 {
+		_ = o.queue.MarkDone(queueID, "no new learnings extracted")
 		dimColor.Printf("  No new learnings extracted.\n")
 		return
 	}
 	if err := o.memory.Save(o.config.WorkDir); err != nil {
+		_ = o.queue.MarkFailed(queueID, fmt.Sprintf("save memory: %v", err))
 		dimColor.Printf("  Failed to save memory: %v\n", err)
 		return
 	}
+	_ = o.queue.MarkDone(queueID, fmt.Sprintf("saved %d learning(s)", len(learnings)))
 	dimColor.Printf("  Saved %d learning(s) to project memory.\n", len(learnings))
 }
 
@@ -3932,8 +3955,17 @@ func (o *Orchestrator) checkCostLimit(s *state.ProjectState) (stop bool) {
 func (o *Orchestrator) runOptimizer(ctx context.Context, s *state.ProjectState, pmColor, dimColor *color.Color) {
 	pmColor.Printf("Running AI plan optimizer...\n")
 
+	queueID := o.enqueueWork(taskqueue.Entry{
+		Kind:        taskqueue.KindSession,
+		Title:       "AI plan optimizer",
+		Description: fmt.Sprintf("optimize plan with %d task(s)", len(s.Plan.Tasks)),
+		Source:      "orchestrator",
+	})
+	_ = o.queue.MarkRunning(queueID)
+
 	result, err := optimizer.Optimize(ctx, o.provider, s.Model, o.config.StepTimeout, s.Plan)
 	if err != nil {
+		_ = o.queue.MarkFailed(queueID, truncate(err.Error(), 200))
 		fmt.Printf("  optimizer: %v (skipping)\n\n", err)
 		return
 	}
@@ -3986,6 +4018,7 @@ func (o *Orchestrator) runOptimizer(ctx context.Context, s *state.ProjectState, 
 	}
 
 	if len(result.ReorderedIDs) == 0 {
+		_ = o.queue.MarkDone(queueID, "no reordering suggested")
 		dimColor.Printf("  No reordering suggested.\n\n")
 		return
 	}
@@ -4024,8 +4057,10 @@ func (o *Orchestrator) runOptimizer(ctx context.Context, s *state.ProjectState, 
 			fmt.Printf("  %d. [P%d] %s\n", t.ID, t.Priority, t.Title)
 		}
 		fmt.Println()
+		_ = o.queue.MarkDone(queueID, fmt.Sprintf("reordered %d task(s)", len(result.ReorderedIDs)))
 	} else {
 		dimColor.Printf("  Reordering skipped.\n\n")
+		_ = o.queue.MarkSkipped(queueID, "user declined reordering")
 	}
 }
 
