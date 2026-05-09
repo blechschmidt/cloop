@@ -217,8 +217,13 @@ Initialize a new project with a goal.
 cloop init "Build a CLI tool that converts CSV to JSON"
 cloop init --max-steps 20 "Refactor to clean architecture"
 cloop init --model claude-opus-4-6 --instructions "Use Go, no external deps" "Build a web scraper"
-cloop init --pm "Build a full REST API"   # Product Manager mode
+cloop init "Build a full REST API"
 ```
+
+> Every project runs in Product Manager mode: cloop decomposes the goal into a
+> visible task plan and works through it. The legacy free-form feedback loop
+> (`--pm`/non-PM) was removed in Task 20067 so all changes flow through the task
+> pipeline and remain auditable in the UI.
 
 | Flag | Default | Description |
 |------|---------|-------------|
@@ -226,11 +231,10 @@ cloop init --pm "Build a full REST API"   # Product Manager mode
 | `--instructions` | | Additional constraints for the AI |
 | `--model` | | Model override |
 | `--provider` | | Provider override |
-| `--pm` | `false` | Enable Product Manager mode |
 
 ### `cloop run`
 
-Start or continue the autonomous loop.
+Start or continue the autonomous task pipeline.
 
 ```bash
 cloop run
@@ -239,27 +243,25 @@ cloop run --auto-evolve
 cloop run --model claude-opus-4-6 --step-timeout 15m
 cloop run --add-steps 10      # extend max if paused at limit
 cloop run --dry-run           # show prompts without executing
-cloop run --pm                # enable PM mode for this run
-cloop run --pm --plan-only    # decompose goal into tasks, then stop
-cloop run --pm --retry-failed # retry previously failed tasks
-cloop run --pm --replan       # discard plan and re-decompose
+cloop run --plan-only         # decompose goal into tasks, then stop
+cloop run --retry-failed      # retry previously failed tasks
+cloop run --replan            # discard plan and re-decompose
 ```
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--provider` | from config | AI provider to use |
 | `--model` | from config | Model override |
-| `--auto-evolve` | `false` | After goal completion, keep improving |
+| `--auto-evolve` | `false` | After goal completion, keep discovering new tasks |
 | `--innovate` | `false` | Innovation mode: push evolve toward novel capabilities |
 | `--step-timeout` | `10m` | Timeout per step |
 | `--max-tokens` | `0` | Max output tokens per step |
 | `--add-steps` | `0` | Add more steps to max before running |
 | `--steps` | `0` | Run at most N steps this session (not persisted) |
 | `--dry-run` | `false` | Show prompts without running |
-| `--pm` | `false` | Product Manager mode |
-| `--plan-only` | `false` | PM mode: decompose tasks but don't execute |
-| `--retry-failed` | `false` | PM mode: retry failed tasks |
-| `--replan` | `false` | PM mode: discard existing plan and re-decompose |
+| `--plan-only` | `false` | Decompose tasks but don't execute |
+| `--retry-failed` | `false` | Retry failed tasks |
+| `--replan` | `false` | Discard existing plan and re-decompose |
 | `--max-failures` | `3` | PM mode: consecutive task failures before stopping |
 | `--context-steps` | `3` | Recent steps to include in prompts (0 = none) |
 | `--step-delay` | | Delay between steps (e.g. `5s`, `1m`) |

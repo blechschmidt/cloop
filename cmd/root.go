@@ -20,20 +20,21 @@ var globalWorkspace string
 
 var rootCmd = &cobra.Command{
 	Use:   "cloop",
-	Short: "AI product manager and autonomous feedback loop",
-	Long: `cloop is a multi-provider AI product manager and feedback loop.
+	Short: "AI product manager and autonomous task pipeline",
+	Long: `cloop is a multi-provider AI product manager.
 
-Define a project goal and cloop drives an AI provider through it autonomously.
+Define a project goal and cloop drives an AI provider through it autonomously
+by decomposing the goal into a visible task plan and executing each task.
 Supports Anthropic (Claude API), OpenAI, Ollama (local), and Claude Code.
 
   cloop init "Build a REST API with user auth and CRUD endpoints"
   cloop init --provider anthropic "Add comprehensive tests"
   cloop init --provider ollama --model llama3.2 "Refactor this module"
   cloop init "Build a REST API with user auth and CRUD endpoints"
-  cloop scope "Build a REST API"  # AI scope analysis before you start
-  cloop run                       # feedback loop mode
-  cloop run --pm                  # product manager mode (task decomposition)
-  cloop run --pm --fallback anthropic,openai  # with provider fallback chain
+  cloop scope "Build a REST API"              # AI scope analysis before you start
+  cloop run                                   # decompose goal into tasks and execute
+  cloop run --auto-evolve                     # keep discovering new tasks after the plan completes
+  cloop run --fallback anthropic,openai       # with provider fallback chain
   cloop report                    # generate project progress report
   cloop retro                     # AI sprint retrospective
   cloop backlog                   # AI-generated prioritized product backlog

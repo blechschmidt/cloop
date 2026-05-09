@@ -1955,7 +1955,6 @@ func TestOptionsToggle_PersistsEachFlag(t *testing.T) {
 	flags := []string{
 		"auto_evolve",
 		"innovate_mode",
-		"pm_mode",
 		"skip_clarify",
 		"plan_only",
 		"retry_failed",
@@ -1979,7 +1978,7 @@ func TestOptionsToggle_PersistsEachFlag(t *testing.T) {
 		t.Errorf("innovate_mode not persisted")
 	}
 	if !ps.PMMode {
-		t.Errorf("pm_mode not persisted")
+		t.Errorf("pm_mode must always be on (Task 20067 removed non-PM mode)")
 	}
 	if !ps.SkipClarify {
 		t.Errorf("skip_clarify not persisted")
@@ -1994,7 +1993,8 @@ func TestOptionsToggle_PersistsEachFlag(t *testing.T) {
 		t.Errorf("dry_run not persisted")
 	}
 
-	// Toggle them all off and re-verify.
+	// Toggle them all off and re-verify. PMMode stays on — non-PM mode was
+	// removed in Task 20067 so the toggle handler force-trues it on every save.
 	for _, flag := range flags {
 		_ = apiPOST(t, ts, "/api/options/toggle", map[string]interface{}{
 			"flag":  flag,
@@ -2002,9 +2002,12 @@ func TestOptionsToggle_PersistsEachFlag(t *testing.T) {
 		})
 	}
 	ps = loadStateOrFail(t, dir)
-	if ps.AutoEvolve || ps.InnovateMode || ps.PMMode || ps.SkipClarify ||
+	if ps.AutoEvolve || ps.InnovateMode || ps.SkipClarify ||
 		ps.PlanOnly || ps.RetryFailed || ps.DryRun {
 		t.Errorf("expected all flags off after toggling false, got %+v", ps)
+	}
+	if !ps.PMMode {
+		t.Errorf("PMMode must remain on after toggling other flags off")
 	}
 }
 
@@ -2233,11 +2236,12 @@ func TestRunConfigMatchesBadgeState(t *testing.T) {
 	dir := setupProjectDir(t, cloopGoal, nil)
 	ts := newTestServer(t, dir, nil)
 
-	// Toggle each badge to a known state.
+	// Toggle each badge to a known state. PM mode is always on (Task 20067 removed
+	// non-PM mode); the toggle handler force-trues PMMode on every save, so we no
+	// longer toggle pm_mode explicitly.
 	flagSetup := map[string]bool{
 		"auto_evolve":   true,
 		"innovate_mode": true,
-		"pm_mode":       true,
 		"retry_failed":  true,
 		"dry_run":       false, // explicitly off
 	}

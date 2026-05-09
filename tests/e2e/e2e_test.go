@@ -83,8 +83,9 @@ func TestE2EInitWithProvider(t *testing.T) {
 
 func TestE2EInitPMMode(t *testing.T) {
 	dir := newWorkDir(t)
-	out := mustRun(t, dir, "init", "--pm", "Build with PM mode")
-	assertContains(t, out, "PM mode enabled")
+	// PM mode is the only mode now (Task 20067 removed non-PM mode); init always
+	// enables it without needing a flag.
+	mustRun(t, dir, "init", "Build with PM mode")
 
 	// Status should reflect PM mode.
 	statusOut := mustRun(t, dir, "status")
@@ -132,7 +133,7 @@ func TestE2EStatusJSON(t *testing.T) {
 
 func TestE2ETaskBulkDone(t *testing.T) {
 	dir := newWorkDir(t)
-	mustRun(t, dir, "init", "--pm", "Task bulk test")
+	mustRun(t, dir, "init", "Task bulk test")
 
 	// Inject a pre-built plan with 3 tasks via fixture state.
 	writeFixtureState(t, dir, pmFixtureState("Task bulk test"))

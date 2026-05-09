@@ -4662,7 +4662,7 @@ func (s *Server) handleClaudeCodeLimitsSave(w http.ResponseWriter, r *http.Reque
 // handleOptionsToggle flips a persistent CLI-mode flag in project state so that
 // the running orchestrator (which re-reads s.AutoEvolve / s.InnovateMode each
 // loop iteration) picks up the change, and so the next `cloop run` honors it.
-// POST /api/options/toggle  body: {"flag":"auto_evolve"|"innovate_mode"|"pm_mode"|"skip_clarify"|"parallel"|"plan_only"|"retry_failed"|"dry_run","value":bool}
+// POST /api/options/toggle  body: {"flag":"auto_evolve"|"innovate_mode"|"skip_clarify"|"parallel"|"plan_only"|"retry_failed"|"dry_run","value":bool}
 func (s *Server) handleOptionsToggle(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Flag  string `json:"flag"`
@@ -4679,27 +4679,19 @@ func (s *Server) handleOptionsToggle(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "no project found", http.StatusNotFound)
 		return
 	}
+	// PM mode is always on (Task 20067 removed non-PM mode); force-true on every save.
+	ps.PMMode = true
 	switch req.Flag {
 	case "auto_evolve":
 		ps.AutoEvolve = req.Value
 	case "innovate_mode":
 		ps.InnovateMode = req.Value
-	case "pm_mode":
-		ps.PMMode = req.Value
 	case "skip_clarify":
 		ps.SkipClarify = req.Value
 	case "parallel":
 		ps.Parallel = req.Value
-		// Parallel mode requires PM mode; auto-enable when toggled on.
-		if req.Value {
-			ps.PMMode = true
-		}
 	case "plan_only":
 		ps.PlanOnly = req.Value
-		// --plan-only implies PM mode.
-		if req.Value {
-			ps.PMMode = true
-		}
 	case "retry_failed":
 		ps.RetryFailed = req.Value
 	case "dry_run":
@@ -7898,12 +7890,11 @@ function renderActiveOptions(s) {
   // Each entry: [enabled, icon, label, flag, tooltip, toggleKey]
   // toggleKey (optional) makes the badge clickable and POSTs to /api/options/toggle.
   const opts = [
-    [!!s.pm_mode,       '📋', 'PM Mode',       '--pm',           'Click to toggle. Product Manager mode: AI decomposes goal into a task plan (applies on next run)', 'pm_mode'],
     [!!s.auto_evolve,   '🧬', 'Evolve Mode',   '--auto-evolve',  'Click to toggle. Automatically discovers and adds new tasks after the plan completes', 'auto_evolve'],
     [!!s.innovate_mode, '✨', 'Innovate Mode', '--innovate',     'Click to toggle. Creative/experimental feature exploration in evolve prompts', 'innovate_mode'],
     [!!s.skip_clarify,  '⏭️', 'Skip Clarify',  '--skip-clarify', 'Click to toggle. Bypass the interactive goal-clarification Q&A before plan decomposition (applies on next run)', 'skip_clarify'],
-    [!!s.parallel,      '⚡', 'Parallel',      '--parallel',     'Click to toggle. Run dependency-ready tasks concurrently in PM mode (applies on next run; enabling auto-enables PM mode)', 'parallel'],
-    [!!s.plan_only,     '📝', 'Plan Only',     '--plan-only',    'Click to toggle. PM mode: decompose goal into tasks but do not execute (enabling auto-enables PM mode)', 'plan_only'],
+    [!!s.parallel,      '⚡', 'Parallel',      '--parallel',     'Click to toggle. Run dependency-ready tasks concurrently (applies on next run)', 'parallel'],
+    [!!s.plan_only,     '📝', 'Plan Only',     '--plan-only',    'Click to toggle. Decompose goal into tasks but do not execute', 'plan_only'],
     [!!s.retry_failed,  '🔁', 'Retry Failed',  '--retry-failed', 'Click to toggle. Reset previously-failed tasks to pending before the next run', 'retry_failed'],
     [!!s.dry_run,       '🧪', 'Dry Run',       '--dry-run',      'Click to toggle. Show prompts without invoking the provider (no API calls, no side effects)', 'dry_run'],
   ];
@@ -7925,7 +7916,7 @@ function renderActiveOptions(s) {
   if (enabledCount === 0) {
     grid.innerHTML =
       '<div class="options-empty">No persistent CLI options are currently enabled. ' +
-      'Run with <code>--pm</code>, <code>--auto-evolve</code>, or <code>--innovate</code> to activate.</div>' +
+      'Run with <code>--auto-evolve</code> or <code>--innovate</code> to activate.</div>' +
       buildOptionBadges(opts) + parallelControls;
     return;
   }
@@ -7980,7 +7971,7 @@ function buildOptionBadges(opts) {
 window.toggleOption = function(flag, value) {
   apiMethod('POST', pUrl('/api/options/toggle'), {flag: flag, value: value}).then(d => {
     if (d && d.ok) {
-      const labels = {auto_evolve: 'Evolve Mode', innovate_mode: 'Innovate Mode', pm_mode: 'PM Mode', skip_clarify: 'Skip Clarify', parallel: 'Parallel Mode', plan_only: 'Plan Only', retry_failed: 'Retry Failed', dry_run: 'Dry Run'};
+      const labels = {auto_evolve: 'Evolve Mode', innovate_mode: 'Innovate Mode', skip_clarify: 'Skip Clarify', parallel: 'Parallel Mode', plan_only: 'Plan Only', retry_failed: 'Retry Failed', dry_run: 'Dry Run'};
       toast((labels[flag] || flag) + (value ? ' enabled' : ' disabled'), 'success');
       // Re-fetch state so badges (and any cached flags) reflect the new value.
       api(pUrl('/api/state')).then(s => render(s)).catch(() => {});
@@ -8161,7 +8152,7 @@ function render(s) {
   prepopulateAdvancedRunOptions(s);
   renderActiveOptions(s);
   if (typeof updateCCLimitsVisibility === 'function') updateCCLimitsVisibility(s.provider || 'claudecode');
-  document.getElementById('statMode').textContent     = s.pm_mode ? 'Product Manager' : 'Feedback Loop';
+  document.getElementById('statMode').textContent     = 'Product Manager';
   document.getElementById('statCreated').textContent  = fmtDate(s.created_at);
   document.getElementById('statUpdated').textContent  = fmtDate(s.updated_at);
 
@@ -8392,7 +8383,7 @@ function renderStepListPanel() {
     const runningExp = expanded['running'] ? ' expanded' : '';
     const runningStepNum = (typeof s.current_step === 'number' ? s.current_step : stepsState.total) + 1;
     let runningTitle = '';
-    if (s.pm_mode && s.plan && s.plan.tasks) {
+    if (s.plan && s.plan.tasks) {
       const inProg = s.plan.tasks.find(t => t.status === 'in_progress');
       if (inProg) runningTitle = '#' + inProg.id + ' ' + (inProg.title || '');
     }
@@ -9340,7 +9331,7 @@ function renderProjects(projects, stats) {
   empty.style.display = 'none';
 
   // Filter out fully-completed projects unless toggle is on; preserve original index for API calls.
-  const isCompleted = p => p.pm_mode && p.total_tasks > 0 && p.done_tasks >= p.total_tasks;
+  const isCompleted = p => p.total_tasks > 0 && p.done_tasks >= p.total_tasks;
   const indexed  = projects.map((p, i) => ({p, i}));
   const visibleI = showCompletedProjects ? indexed : indexed.filter(({p}) => !isCompleted(p));
   const hiddenCount = projects.length - visibleI.length;
@@ -9361,9 +9352,7 @@ function renderProjects(projects, stats) {
     const pct     = p.total_tasks > 0 ? Math.round(p.done_tasks / p.total_tasks * 100) : 0;
     const goal    = p.goal ? esc(p.goal.substring(0, 80)) : '<em style="color:var(--muted)">no goal set</em>';
     const lastAct = p.last_activity ? relTime(new Date(p.last_activity)) : '—';
-    const taskInfo = p.pm_mode
-      ? p.done_tasks + '/' + p.total_tasks + ' tasks'
-      : (p.total_steps ? p.total_steps + ' steps' : 'no steps');
+    const taskInfo = p.done_tasks + '/' + p.total_tasks + ' tasks';
     const selCls  = (selectedProjectIdx === idx) ? ' selected' : '';
     const nameSafe = JSON.stringify(p.name).replace(/"/g, '&quot;');
     // Build a tooltip that surfaces the running task across projects.
@@ -9384,7 +9373,7 @@ function renderProjects(projects, stats) {
         <div class="proj-goal" title="${esc(p.goal || '')}">${goal}</div>
         <div class="proj-meta">
           <span class="badge ${health}" style="font-size:10px">${health}</span>
-          ${p.pm_mode ? ` + "`" + `<div class="proj-progress-wrap"><div class="proj-progress-bar"><div class="proj-progress-fill" style="width:${pct}%"></div></div><span>${pct}%</span></div>` + "`" + ` : ''}
+          <div class="proj-progress-wrap"><div class="proj-progress-bar"><div class="proj-progress-fill" style="width:${pct}%"></div></div><span>${pct}%</span></div>
           <span>${taskInfo}</span>
           <span title="last activity">${lastAct}</span>
           ${(p.provider || p.model) ? ` + "`" + `<span title="Provider / Model">${esc([p.provider, p.model].filter(Boolean).join(' / '))}</span>` + "`" + ` : ''}

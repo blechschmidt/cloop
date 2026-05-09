@@ -25,14 +25,13 @@ var (
 
 // ScopeAnalysis holds the structured result of an AI scope analysis.
 type ScopeAnalysis struct {
-	TaskCount       int      `json:"task_count"`
-	Complexity      string   `json:"complexity"`      // low, medium, high, very_high
-	EstimatedSteps  int      `json:"estimated_steps"` // rough total AI calls
-	Risks           []string `json:"risks"`
-	Prerequisites   []string `json:"prerequisites"`
-	Assumptions     []string `json:"assumptions"`
-	RecommendedMode string   `json:"recommended_mode"` // loop, pm
-	Summary         string   `json:"summary"`
+	TaskCount      int      `json:"task_count"`
+	Complexity     string   `json:"complexity"`      // low, medium, high, very_high
+	EstimatedSteps int      `json:"estimated_steps"` // rough total AI calls
+	Risks          []string `json:"risks"`
+	Prerequisites  []string `json:"prerequisites"`
+	Assumptions    []string `json:"assumptions"`
+	Summary        string   `json:"summary"`
 }
 
 var scopeCmd = &cobra.Command{
@@ -159,10 +158,9 @@ func buildScopePrompt(goal, instructions string) string {
 	b.WriteString("- risks: list of 2-5 specific risks or blockers (strings)\n")
 	b.WriteString("- prerequisites: list of things that must exist before starting (tools, access, files)\n")
 	b.WriteString("- assumptions: key assumptions baked into this estimate\n")
-	b.WriteString("- recommended_mode: \"loop\" for simple linear tasks, \"pm\" for multi-task projects\n")
 	b.WriteString("- summary: 1-2 sentence plain-English scope summary\n\n")
 	b.WriteString("Output ONLY valid JSON, no markdown, no explanation:\n")
-	b.WriteString(`{"task_count":5,"complexity":"medium","estimated_steps":10,"risks":["risk1","risk2"],"prerequisites":["prereq1"],"assumptions":["assumption1"],"recommended_mode":"pm","summary":"Brief summary."}`)
+	b.WriteString(`{"task_count":5,"complexity":"medium","estimated_steps":10,"risks":["risk1","risk2"],"prerequisites":["prereq1"],"assumptions":["assumption1"],"summary":"Brief summary."}`)
 	return b.String()
 }
 
@@ -215,13 +213,6 @@ func printScopeAnalysis(goal string, a *ScopeAnalysis) {
 	labelColor.Printf("AI Steps:   ")
 	fmt.Printf("~%d estimated invocations\n", a.EstimatedSteps)
 
-	labelColor.Printf("Mode:       ")
-	if a.RecommendedMode == "pm" {
-		fmt.Printf("--pm (product manager mode recommended)\n")
-	} else {
-		fmt.Printf("loop mode (standard feedback loop)\n")
-	}
-
 	if len(a.Prerequisites) > 0 {
 		fmt.Println()
 		labelColor.Printf("Prerequisites:\n")
@@ -252,13 +243,8 @@ func printScopeAnalysis(goal string, a *ScopeAnalysis) {
 
 	// Suggest next steps
 	headerColor.Printf("  Suggested next steps:\n")
-	if a.RecommendedMode == "pm" {
-		fmt.Printf("  cloop init \"%s\"\n", truncateGoal(goal, 60))
-		fmt.Printf("  cloop run --pm --verify --inject-context\n")
-	} else {
-		fmt.Printf("  cloop init \"%s\"\n", truncateGoal(goal, 60))
-		fmt.Printf("  cloop run\n")
-	}
+	fmt.Printf("  cloop init \"%s\"\n", truncateGoal(goal, 60))
+	fmt.Printf("  cloop run --verify --inject-context\n")
 	fmt.Println(sep)
 	fmt.Println()
 }
