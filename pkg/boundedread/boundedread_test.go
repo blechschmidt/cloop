@@ -179,3 +179,70 @@ func TestReadFileTruncated_Directory(t *testing.T) {
 		t.Fatal("expected error reading directory")
 	}
 }
+
+// TestReadFile_TOCTOUGrowthBounded verifies the LimitReader guard: a file that
+// is small at stat time but grew before the read must not blow past the cap.
+// Without the guard, ReadFile would slurp the entire grown file (the historic
+// behaviour of os.ReadFile, which re-stats internally).
+func TestReadFile_TOCTOUGrowthBounded(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "growing.log")
+	// Initial file is well under the cap.
+	writeFile(t, path, bytes.Repeat([]byte{'a'}, 100))
+
+	const cap = 1024
+	// Hook fires between Stat and Open, growing the file to 10x the cap.
+	hookAfterStat = func() {
+		f, err := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0o600)
+		if err != nil {
+			t.Errorf("reopen for grow: %v", err)
+			return
+		}
+		if _, err := f.Write(bytes.Repeat([]byte{'b'}, 10*cap)); err != nil {
+			t.Errorf("write growth: %v", err)
+		}
+		f.Close()
+	}
+	t.Cleanup(func() { hookAfterStat = nil })
+
+	_, err := ReadFile(path, cap)
+	if err == nil {
+		t.Fatal("expected SizeError on TOCTOU growth, got nil")
+	}
+	if !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("expected errors.Is(err, ErrTooLarge); got %v", err)
+	}
+	var se *SizeError
+	if !errors.As(err, &se) {
+		t.Fatalf("expected *SizeError, got %T", err)
+	}
+	if se.Max != cap {
+		t.Fatalf("Max = %d, want %d", se.Max, cap)
+	}
+	if se.Size <= cap {
+		t.Fatalf("Size = %d should reflect overshoot detected at read time, want > %d", se.Size, cap)
+	}
+}
+
+// TestReadFile_TOCTOUNoGrowth verifies the hook plumbing doesn't interfere
+// with the normal "small file" path: hook fires but doesn't grow the file.
+func TestReadFile_TOCTOUNoGrowth(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "stable.txt")
+	writeFile(t, path, []byte("stable"))
+
+	called := false
+	hookAfterStat = func() { called = true }
+	t.Cleanup(func() { hookAfterStat = nil })
+
+	got, err := ReadFile(path, 1024)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if !called {
+		t.Fatal("hookAfterStat was not invoked")
+	}
+	if string(got) != "stable" {
+		t.Fatalf("got %q, want %q", got, "stable")
+	}
+}

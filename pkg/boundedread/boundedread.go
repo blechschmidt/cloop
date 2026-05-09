@@ -47,12 +47,21 @@ func (e *SizeError) Error() string {
 // Is lets errors.Is(err, ErrTooLarge) match a *SizeError.
 func (e *SizeError) Is(target error) bool { return target == ErrTooLarge }
 
+// hookAfterStat is a test-only hook fired after the initial Stat in ReadFile.
+// Tests use it to simulate a file that grows between the stat and the read so
+// the TOCTOU protection (LimitReader) is exercised deterministically.
+var hookAfterStat func()
+
 // ReadFile loads the file at path into memory, refusing to read anything
 // larger than maxBytes. Pass 0 for maxBytes to use DefaultMaxBytes.
 //
 // On size overrun ReadFile returns *SizeError without reading any data. On a
 // missing file it returns the underlying os.PathError so callers can still
 // match errors.Is(err, fs.ErrNotExist). Directories are rejected explicitly.
+//
+// The cap is enforced both at stat time (fast path) and again at read time via
+// io.LimitReader so a file that grew between the stat and the open (a live
+// log being appended to, a torrent in progress) cannot slip past the cap.
 func ReadFile(path string, maxBytes int64) ([]byte, error) {
 	if maxBytes <= 0 {
 		maxBytes = DefaultMaxBytes
@@ -67,7 +76,25 @@ func ReadFile(path string, maxBytes int64) ([]byte, error) {
 	if info.Size() > maxBytes {
 		return nil, &SizeError{Path: path, Size: info.Size(), Max: maxBytes}
 	}
-	return os.ReadFile(path)
+	if hookAfterStat != nil {
+		hookAfterStat()
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	// Read maxBytes+1 so a file that grew between Stat and Open gets caught
+	// rather than slipping through. Without this guard a slow-growing log
+	// could push the in-memory allocation arbitrarily large.
+	buf, err := io.ReadAll(io.LimitReader(f, maxBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("boundedread: read %s: %w", path, err)
+	}
+	if int64(len(buf)) > maxBytes {
+		return nil, &SizeError{Path: path, Size: int64(len(buf)), Max: maxBytes}
+	}
+	return buf, nil
 }
 
 // ReadFileTruncated reads up to maxBytes from path and reports whether the

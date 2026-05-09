@@ -24,6 +24,7 @@ import (
 	"nhooyr.io/websocket"
 
 	"github.com/blechschmidt/cloop/pkg/blocker"
+	"github.com/blechschmidt/cloop/pkg/boundedread"
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/cost"
 	"github.com/blechschmidt/cloop/pkg/epic"
@@ -873,8 +874,18 @@ func (s *Server) watchState(ctx context.Context) {
 			}
 			s.lastMod = fi.ModTime()
 
-			data, err := os.ReadFile(statePath)
+			// 32 MiB cap on state.json reads. State files in the wild are
+			// well under 1 MiB; a runaway / corrupt file at this path would
+			// otherwise be slurped into memory and fanned out to every
+			// connected SSE/WebSocket client. On overrun we skip the
+			// broadcast (partial JSON would corrupt clients) and log to
+			// stderr; the next tick will retry once the file is back in
+			// range.
+			data, err := boundedread.ReadFile(statePath, 32<<20)
 			if err != nil {
+				if errors.Is(err, boundedread.ErrTooLarge) {
+					fmt.Fprintf(os.Stderr, "[ui] watchState: skipping broadcast, state.json over cap: %v\n", err)
+				}
 				return
 			}
 			s.broadcast(string(data))
@@ -4017,7 +4028,12 @@ func (s *Server) handleAnalytics(w http.ResponseWriter, r *http.Request) {
 				if f.IsDir() || !strings.HasSuffix(f.Name(), ".json") {
 					continue
 				}
-				raw, err := os.ReadFile(filepath.Join(taskPath, f.Name()))
+				// Per-iteration checkpoint files are tiny JSON metadata
+				// (largest observed: a few KB). 1 MiB cap prevents a
+				// runaway/corrupt checkpoint from blowing this analytics
+				// scan out — silently skip on overrun rather than fail
+				// the whole histogram.
+				raw, err := boundedread.ReadFile(filepath.Join(taskPath, f.Name()), 1<<20)
 				if err != nil {
 					continue
 				}
