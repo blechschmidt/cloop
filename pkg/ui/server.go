@@ -104,6 +104,28 @@ type hubClient struct {
 // directive fires before the client is hopelessly behind.
 const hubClientBufferSize = 64
 
+// wsWriteTimeout caps how long any single WebSocket frame write may take.
+// Without a per-write deadline, the writer goroutine in handleWS uses the
+// long-lived request context, so a slow or wedged client (TCP buffers full,
+// network stalled, half-open NAT entry) will pin the goroutine until the
+// OS-level TCP timeout — typically minutes — letting an attacker exhaust
+// goroutines by opening many stalled connections. 10s is generous for a
+// burst on a slow link while still bounding each frame; on timeout, nhooyr's
+// timeoutLoop closes the underlying conn so the writer loop exits cleanly.
+//
+// Declared as var (not const) so regression tests can shrink it; production
+// callers should treat it as immutable.
+var wsWriteTimeout = 10 * time.Second
+
+// wsWrite sends a single WebSocket text frame with a per-call deadline
+// derived from ctx. Returns whatever Write returns (deadline-exceeded shows
+// up as ctx.Err on the wrapped error).
+func wsWrite(ctx context.Context, conn *websocket.Conn, data []byte) error {
+	wctx, cancel := context.WithTimeout(ctx, wsWriteTimeout)
+	defer cancel()
+	return conn.Write(wctx, websocket.MessageText, data)
+}
+
 // sendOrLag attempts a non-blocking send of msg to hc.ch. If the buffer is
 // full, the message is dropped and a resync directive is queued (idempotent
 // — at most one resync pending at a time). The writer goroutine in handleWS
@@ -128,6 +150,17 @@ type conflictEntry struct {
 	clientID string
 	editedAt time.Time
 }
+
+// conflictWindow is the period during which two clients editing the same
+// (taskID, field) are considered to be in conflict. Entries older than this
+// can no longer trigger a conflict and are eligible for sweeping.
+const conflictWindow = 2 * time.Second
+
+// maxConflictEntriesPerWorkDir is a defense-in-depth hard cap on the number of
+// per-workDir conflict entries. Reached only if the time-based sweep is
+// neutralised (e.g., the wall clock jumps backwards) — under normal operation
+// the inner map is bounded by edits within conflictWindow.
+const maxConflictEntriesPerWorkDir = 4096
 
 // presenceUser is the JSON representation of a connected user sent to clients.
 type presenceUser struct {
@@ -831,23 +864,52 @@ func (s *Server) broadcastPresence(workDir string) {
 
 // checkAndRecordEdit records that clientID edited the given fields of taskID in
 // workDir. Returns true if a conflict is detected (same field edited by a
-// different client within the last 2 seconds).
+// different client within the last conflictWindow).
+//
+// On every call the tracker sweeps stale entries across all workDirs (not just
+// the current one) — projects that stop being edited never trigger their own
+// sweep, so without a global pass their entries would persist for the daemon's
+// lifetime. Combined with the conflictWindow cutoff the tracker stays bounded
+// by current editing activity rather than session lifetime.
 func (s *Server) checkAndRecordEdit(workDir, clientID string, taskID int, fields []string) bool {
 	now := time.Now()
 	s.conflictMu.Lock()
 	defer s.conflictMu.Unlock()
-	if s.conflictTracker[workDir] == nil {
-		s.conflictTracker[workDir] = make(map[string]*conflictEntry)
+
+	for wd, m := range s.conflictTracker {
+		for k, e := range m {
+			if now.Sub(e.editedAt) >= conflictWindow {
+				delete(m, k)
+			}
+		}
+		if len(m) == 0 && wd != workDir {
+			delete(s.conflictTracker, wd)
+		}
+	}
+
+	inner := s.conflictTracker[workDir]
+	if inner == nil {
+		inner = make(map[string]*conflictEntry)
+		s.conflictTracker[workDir] = inner
 	}
 	conflict := false
 	for _, field := range fields {
 		key := fmt.Sprintf("%d:%s", taskID, field)
-		if prev, ok := s.conflictTracker[workDir][key]; ok {
-			if prev.clientID != clientID && now.Sub(prev.editedAt) < 2*time.Second {
+		if prev, ok := inner[key]; ok {
+			if prev.clientID != clientID && now.Sub(prev.editedAt) < conflictWindow {
 				conflict = true
 			}
 		}
-		s.conflictTracker[workDir][key] = &conflictEntry{clientID: clientID, editedAt: now}
+		inner[key] = &conflictEntry{clientID: clientID, editedAt: now}
+	}
+
+	for len(inner) > maxConflictEntriesPerWorkDir {
+		for k := range inner {
+			delete(inner, k)
+			if len(inner) <= maxConflictEntriesPerWorkDir {
+				break
+			}
+		}
 	}
 	return conflict
 }
@@ -1261,7 +1323,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	if ps, err := state.Load(workDir); err == nil {
 		if raw, err := json.Marshal(ps); err == nil {
 			if msg, err := json.Marshal(wsMessage{Type: "task_update", Data: raw}); err == nil {
-				_ = conn.Write(ctx, websocket.MessageText, msg)
+				_ = wsWrite(ctx, conn, msg)
 			}
 		}
 	}
@@ -1273,7 +1335,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		s.liveLogMu.Unlock()
 		if d, err := json.Marshal(map[string]string{"chunk": buf}); err == nil {
 			if msg, err := json.Marshal(wsMessage{Type: "step_output", Data: d}); err == nil {
-				_ = conn.Write(ctx, websocket.MessageText, msg)
+				_ = wsWrite(ctx, conn, msg)
 			}
 		}
 	} else {
@@ -1289,7 +1351,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		running := internalRunning || multiui.IsCloopRunningInDir(workDir)
 		if raw, err := json.Marshal(map[string]interface{}{"running": running}); err == nil {
 			if msg, err := json.Marshal(wsMessage{Type: "run_state", Data: raw}); err == nil {
-				_ = conn.Write(ctx, websocket.MessageText, msg)
+				_ = wsWrite(ctx, conn, msg)
 			}
 		}
 		// Seed the cache so subsequent watcher ticks don't re-broadcast the
@@ -1316,7 +1378,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		if matches {
 			if raw, err := json.Marshal(payload); err == nil {
 				if msg, err := json.Marshal(wsMessage{Type: "suggest_status", Data: raw}); err == nil {
-					_ = conn.Write(ctx, websocket.MessageText, msg)
+					_ = wsWrite(ctx, conn, msg)
 				}
 			}
 		}
@@ -1326,7 +1388,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	if users := s.presenceUsers(workDir); len(users) > 0 {
 		if raw, err := json.Marshal(map[string]interface{}{"users": users, "you": connID}); err == nil {
 			if msg, err := json.Marshal(wsMessage{Type: "presence", Data: raw}); err == nil {
-				_ = conn.Write(ctx, websocket.MessageText, msg)
+				_ = wsWrite(ctx, conn, msg)
 			}
 		}
 	}
@@ -1357,7 +1419,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-hc.resync:
 			drainWS(hc.ch)
-			if err := conn.Write(ctx, websocket.MessageText, resyncBytes); err != nil {
+			if err := wsWrite(ctx, conn, resyncBytes); err != nil {
 				return
 			}
 			continue
@@ -1369,7 +1431,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 			return
 		case <-hc.resync:
 			drainWS(hc.ch)
-			if err := conn.Write(ctx, websocket.MessageText, resyncBytes); err != nil {
+			if err := wsWrite(ctx, conn, resyncBytes); err != nil {
 				return
 			}
 		case msg := <-hc.ch:
@@ -1377,7 +1439,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				continue
 			}
-			if err := conn.Write(ctx, websocket.MessageText, data); err != nil {
+			if err := wsWrite(ctx, conn, data); err != nil {
 				return
 			}
 		}
