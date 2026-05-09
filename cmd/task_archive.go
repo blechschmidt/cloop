@@ -67,7 +67,9 @@ Examples:
 
 		archived := merged[len(existing):]
 
-		if err := s.Save(); err != nil {
+		// SaveDirect (not Save): Save merges externally-added tasks from disk,
+		// which would silently re-add the just-archived tasks back into the plan.
+		if err := s.SaveDirect(); err != nil {
 			return fmt.Errorf("saving plan: %w", err)
 		}
 		if err := archive.Save(workdir, merged); err != nil {

@@ -332,6 +332,44 @@ func TestTaskRemove_RemovesCorrectTask(t *testing.T) {
 	}
 }
 
+// TestTaskBulkDelete_RemovalPersisted verifies bulk-delete persists by exercising
+// the same in-memory removal + SaveDirect contract that cmd/task_bulk.go uses.
+// Regression: if it ever switches back to Save(), mergeExternalTasks() resurrects
+// the deleted tasks.
+func TestTaskBulkDelete_RemovalPersisted(t *testing.T) {
+	tasks := []*pm.Task{
+		{ID: 1, Title: "A", Priority: 1, Status: pm.TaskPending},
+		{ID: 2, Title: "B", Priority: 2, Status: pm.TaskPending},
+		{ID: 3, Title: "C", Priority: 3, Status: pm.TaskPending},
+		{ID: 4, Title: "D", Priority: 4, Status: pm.TaskPending},
+	}
+	_, dir := makePMState(t, tasks)
+
+	s, _ := state.Load(dir)
+	// Bulk-delete tasks 2 and 3 the same way cmd/task_bulk.go does.
+	removeSet := map[int]bool{2: true, 3: true}
+	remaining := make([]*pm.Task, 0, len(s.Plan.Tasks)-len(removeSet))
+	for _, t2 := range s.Plan.Tasks {
+		if !removeSet[t2.ID] {
+			remaining = append(remaining, t2)
+		}
+	}
+	s.Plan.Tasks = remaining
+	if err := s.SaveDirect(); err != nil {
+		t.Fatalf("SaveDirect: %v", err)
+	}
+
+	loaded, _ := state.Load(dir)
+	if len(loaded.Plan.Tasks) != 2 {
+		t.Fatalf("expected 2 tasks after bulk delete, got %d", len(loaded.Plan.Tasks))
+	}
+	for _, t2 := range loaded.Plan.Tasks {
+		if t2.ID == 2 || t2.ID == 3 {
+			t.Errorf("task %d should have been deleted", t2.ID)
+		}
+	}
+}
+
 // --- task edit logic ---
 
 func TestTaskEdit_UpdatesTitle(t *testing.T) {

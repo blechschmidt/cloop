@@ -1148,7 +1148,9 @@ Examples:
 		// planCopy already has the split applied — make it the active plan.
 		s.Plan = planCopy
 
-		if err := s.Save(); err != nil {
+		// SaveDirect (not Save): Save merges externally-added tasks from disk,
+		// which would silently re-add the original (just-split) task back into the plan.
+		if err := s.SaveDirect(); err != nil {
 			return fmt.Errorf("saving state: %w", err)
 		}
 

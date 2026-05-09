@@ -338,7 +338,9 @@ Example:
 		}
 		s.Plan.Tasks = remaining
 
-		if err := s.Save(); err != nil {
+		// SaveDirect (not Save): Save merges externally-added tasks from disk,
+		// which would silently re-add the just-deleted tasks back into the plan.
+		if err := s.SaveDirect(); err != nil {
 			return err
 		}
 
