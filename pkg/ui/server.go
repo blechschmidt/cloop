@@ -7949,14 +7949,27 @@ window.setMaxParallel = function(raw) {
     toast('Max Parallel must be 0–64 (0 = unlimited)', 'error');
     return;
   }
+  // Optimistic update so the badge label flips instantly; revert on failure.
+  const prev = appState ? appState.max_parallel : 0;
+  if (appState) {
+    appState.max_parallel = n;
+    try { renderActiveOptions(appState); } catch(_) {}
+  }
   apiMethod('POST', pUrl('/api/options/max-parallel'), {value: n}).then(d => {
     if (d && d.ok) {
       toast('Max Parallel set to ' + (n === 0 ? 'unlimited' : n), 'success');
-      api(pUrl('/api/state')).then(s => render(s)).catch(() => {});
     } else {
+      if (appState) {
+        appState.max_parallel = prev;
+        try { renderActiveOptions(appState); } catch(_) {}
+      }
       toast('Update failed: ' + (d && d.error ? d.error : 'unknown error'), 'error');
     }
   }).catch(err => {
+    if (appState) {
+      appState.max_parallel = prev;
+      try { renderActiveOptions(appState); } catch(_) {}
+    }
     toast('Update failed: ' + err.message, 'error');
   });
 };
@@ -7985,17 +7998,35 @@ function buildOptionBadges(opts) {
 // Exposed on window because the Active Options badges use inline onclick
 // handlers that resolve in the global scope, while this whole script is
 // wrapped in an IIFE.
+//
+// The badge is flipped optimistically in the DOM before the POST so the click
+// feels instant — without this, the user waits for one HTTP round-trip plus a
+// full render(s) (which re-fetches /api/steps) before seeing any visual
+// change. On HTTP error the optimistic update is reverted.
 window.toggleOption = function(flag, value) {
+  const prev = appState ? !!appState[flag] : !value;
+  if (appState) {
+    appState[flag] = value;
+    try { renderActiveOptions(appState); } catch(_) {}
+  }
   apiMethod('POST', pUrl('/api/options/toggle'), {flag: flag, value: value}).then(d => {
     if (d && d.ok) {
       const labels = {auto_evolve: 'Evolve Mode', innovate_mode: 'Innovate Mode', skip_clarify: 'Skip Clarify', parallel: 'Parallel Mode', plan_only: 'Plan Only', retry_failed: 'Retry Failed', dry_run: 'Dry Run'};
       toast((labels[flag] || flag) + (value ? ' enabled' : ' disabled'), 'success');
-      // Re-fetch state so badges (and any cached flags) reflect the new value.
-      api(pUrl('/api/state')).then(s => render(s)).catch(() => {});
+      // No explicit /api/state refetch — the backend's task_update WebSocket
+      // broadcast (or the next render trigger) carries authoritative state.
     } else {
+      if (appState) {
+        appState[flag] = prev;
+        try { renderActiveOptions(appState); } catch(_) {}
+      }
       toast('Toggle failed: ' + (d && d.error ? d.error : 'unknown error'), 'error');
     }
   }).catch(err => {
+    if (appState) {
+      appState[flag] = prev;
+      try { renderActiveOptions(appState); } catch(_) {}
+    }
     toast('Toggle failed: ' + err.message, 'error');
   });
 };
