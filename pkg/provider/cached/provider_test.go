@@ -91,6 +91,49 @@ func (p *countingProvider) Complete(ctx context.Context, prompt string, opts pro
 	return &provider.Result{Output: "real answer", Provider: p.Name(), Model: p.DefaultModel()}, nil
 }
 
+// A pre-existing cache entry on disk with empty/whitespace content (e.g. one
+// written before the skip-on-empty-write guard landed, or by an older cloop
+// version) must not be served as a hit. Otherwise, the orchestrator would
+// receive a useless empty response on every identical call until the entry
+// hit its TTL — exactly the silent-failure mode the write-side guard exists
+// to prevent. The wrapper falls through to the inner provider, which then
+// either succeeds and overwrites the bad entry or surfaces a real error to
+// the orchestrator's failure gate.
+func TestCached_StaleEmptyEntryTreatedAsMiss(t *testing.T) {
+	for _, badOut := range []string{"", "   ", "\n\t\n"} {
+		t.Run("bad_"+strings.ReplaceAll(strings.ReplaceAll(badOut, "\n", "_"), "\t", "_"), func(t *testing.T) {
+			dir := t.TempDir()
+			c, err := cache.New(dir, 0, 0)
+			if err != nil {
+				t.Fatalf("cache.New: %v", err)
+			}
+
+			inner := &countingProvider{}
+			cp := New(inner, c)
+
+			// Pre-populate the cache with an empty entry under the exact key
+			// the wrapper will compute for this prompt — simulating a stale
+			// entry from before the skip-on-write guard.
+			model := inner.DefaultModel()
+			key := cache.Key(inner.Name(), model, "same-prompt")
+			if err := c.Put(key, badOut, inner.Name(), model); err != nil {
+				t.Fatalf("seed cache: %v", err)
+			}
+
+			res, err := cp.Complete(context.Background(), "same-prompt", provider.Options{})
+			if err != nil {
+				t.Fatalf("Complete: %v", err)
+			}
+			if res.Output != "real answer" {
+				t.Errorf("stale empty entry was served as a hit; expected fall-through to inner. got output %q", res.Output)
+			}
+			if inner.calls != 1 {
+				t.Errorf("expected inner to be called exactly once after stale-empty miss, got %d", inner.calls)
+			}
+		})
+	}
+}
+
 // Companion test: non-empty output is still cached so we don't regress the
 // happy path while plugging the empty-output hole.
 func TestCached_NonEmptyOutputStillCached(t *testing.T) {

@@ -51,7 +51,12 @@ func (p *Provider) Complete(ctx context.Context, prompt string, opts provider.Op
 
 	key := cache.Key(p.inner.Name(), model, prompt)
 
-	if resp, ok := p.cache.Get(key); ok {
+	// Treat a hit on an empty/whitespace-only entry as a miss. The write path
+	// already refuses to cache such responses (see below), but pre-existing
+	// entries written before that guard landed could still live on disk for up
+	// to the cache TTL. Falling through to the inner provider re-fetches a
+	// real response and the next successful Put overwrites the bad entry.
+	if resp, ok := p.cache.Get(key); ok && strings.TrimSpace(resp) != "" {
 		return &provider.Result{
 			Output:   resp,
 			Provider: p.inner.Name(),
