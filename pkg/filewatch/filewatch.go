@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/pm"
@@ -75,20 +77,32 @@ func Run(ctx context.Context, cfg Config, onTrigger func(ChangeEvent)) error {
 	dim.Printf("  debounce: %s — press Ctrl+C to stop\n\n", cfg.Debounce)
 
 	// pending accumulates changed files until the debounce timer fires.
+	// time.AfterFunc invokes fireTrigger on its own goroutine, which races
+	// the main select loop's writes — pendingMu serializes both sides.
+	var pendingMu sync.Mutex
 	pending := map[string]struct{}{}
 	var debounceTimer *time.Timer
+	var fireWG sync.WaitGroup
 
 	fireTrigger := func() {
+		defer fireWG.Done()
+		defer func() {
+			if r := recover(); r != nil {
+				fmt.Fprintf(os.Stderr, "[watch] panic in trigger goroutine: %v\n%s\n", r, debug.Stack())
+			}
+		}()
+
+		pendingMu.Lock()
 		if len(pending) == 0 {
+			pendingMu.Unlock()
 			return
 		}
 		files := make([]string, 0, len(pending))
 		for f := range pending {
 			files = append(files, f)
 		}
-		for k := range pending {
-			delete(pending, k)
-		}
+		pending = make(map[string]struct{})
+		pendingMu.Unlock()
 
 		evt, err := applyReEvaluation(cfg.WorkDir, files)
 		if err != nil {
@@ -98,22 +112,45 @@ func Run(ctx context.Context, cfg Config, onTrigger func(ChangeEvent)) error {
 		onTrigger(evt)
 	}
 
+	// scheduleFire (re)arms the debounce timer. Only called from the main
+	// select loop, so reads/writes of debounceTimer don't need synchronization.
+	// fireWG balances each pending Add against either fireTrigger's Done
+	// (timer fired) or our manual Done after a successful Stop (cancelled).
+	scheduleFire := func() {
+		if debounceTimer != nil {
+			if debounceTimer.Stop() {
+				fireWG.Done()
+			}
+		}
+		fireWG.Add(1)
+		debounceTimer = time.AfterFunc(cfg.Debounce, fireTrigger)
+	}
+
+	shutdown := func() {
+		if debounceTimer != nil {
+			if debounceTimer.Stop() {
+				fireWG.Done()
+			}
+		}
+		fireWG.Wait()
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
-			if debounceTimer != nil {
-				debounceTimer.Stop()
-			}
+			shutdown()
 			return nil
 
 		case err, ok := <-watcher.Errors:
 			if !ok {
+				shutdown()
 				return nil
 			}
 			fmt.Fprintf(os.Stderr, "[watch] watcher error: %v\n", err)
 
 		case event, ok := <-watcher.Events:
 			if !ok {
+				shutdown()
 				return nil
 			}
 			if event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Rename) == 0 {
@@ -131,12 +168,11 @@ func Run(ctx context.Context, cfg Config, onTrigger func(ChangeEvent)) error {
 				continue
 			}
 
+			pendingMu.Lock()
 			pending[rel] = struct{}{}
+			pendingMu.Unlock()
 
-			if debounceTimer != nil {
-				debounceTimer.Stop()
-			}
-			debounceTimer = time.AfterFunc(cfg.Debounce, fireTrigger)
+			scheduleFire()
 		}
 	}
 }

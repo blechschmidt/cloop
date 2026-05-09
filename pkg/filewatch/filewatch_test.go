@@ -1,9 +1,16 @@
 package filewatch
 
 import (
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/blechschmidt/cloop/pkg/pm"
+	"github.com/blechschmidt/cloop/pkg/state"
 )
 
 func TestMatchGlob(t *testing.T) {
@@ -96,4 +103,92 @@ func assertContains(t *testing.T, ids []int, id int, msg string) {
 		}
 	}
 	t.Errorf("%s: ID %d not found in %v", msg, id, ids)
+}
+
+// TestRun_NoRaceOnConcurrentEvents exercises the debounce/pending logic under a
+// flood of file changes. Before the pendingMu fix, the main select loop wrote
+// to the `pending` map while the time.AfterFunc-spawned trigger goroutine
+// iterated and deleted from it — `go test -race` fatals with
+// "concurrent map iteration and map write" or reports a data race.
+func TestRun_NoRaceOnConcurrentEvents(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Create a minimal PM-mode state so applyReEvaluation has work to do
+	// (resetRelevantTasks runs against a real plan).
+	s, err := state.Init(tmpDir, "test", 10)
+	if err != nil {
+		t.Fatalf("state.Init: %v", err)
+	}
+	s.PMMode = true
+	s.Plan = &pm.Plan{
+		Goal: "test",
+		Tasks: []*pm.Task{
+			{ID: 1, Title: "fix file", Status: pm.TaskFailed},
+		},
+	}
+	if err := s.Save(); err != nil {
+		t.Fatalf("state.Save: %v", err)
+	}
+
+	// Pre-create a watched subdirectory so resolveWatchDirs picks it up.
+	subDir := filepath.Join(tmpDir, "src")
+	if err := os.MkdirAll(subDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	// Seed one file so the directory is recognized as containing matches.
+	if err := os.WriteFile(filepath.Join(subDir, "seed.go"), []byte("package src"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := Config{
+		WorkDir:  tmpDir,
+		Globs:    []string{"src/**/*.go"},
+		Debounce: 5 * time.Millisecond, // very tight to maximize concurrent fire/append
+	}
+
+	var triggerCount int32
+	onTrigger := func(evt ChangeEvent) {
+		atomic.AddInt32(&triggerCount, 1)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	runDone := make(chan error, 1)
+	go func() {
+		runDone <- Run(ctx, cfg, onTrigger)
+	}()
+
+	// Give the watcher a moment to start.
+	time.Sleep(80 * time.Millisecond)
+
+	// Hammer with file changes. Periodic small sleeps let the debounce timer
+	// fire mid-burst, so fireTrigger runs concurrently with the next batch's
+	// pending writes — that's the race we want the detector to catch.
+	for i := 0; i < 300; i++ {
+		path := filepath.Join(subDir, fmt.Sprintf("file%d.go", i))
+		if err := os.WriteFile(path, []byte("package src"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if i%15 == 0 {
+			time.Sleep(7 * time.Millisecond)
+		}
+	}
+
+	// Let any final debounced trigger fire.
+	time.Sleep(150 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-runDone:
+		if err != nil {
+			t.Fatalf("Run returned error: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run did not exit within 3s after cancel")
+	}
+
+	if atomic.LoadInt32(&triggerCount) == 0 {
+		t.Error("expected at least one trigger to fire from file changes")
+	}
 }
