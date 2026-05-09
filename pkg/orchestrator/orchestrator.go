@@ -1097,6 +1097,13 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		maxConsecutiveErrors = 3
 	}
 
+	// Auto-evolve safety net: if N consecutive evolve attempts add no new tasks,
+	// stop rather than spin forever burning tokens. The primary abort conditions
+	// for an unbounded evolve loop are token/cost/step budgets — this is just a
+	// cheap fallback when no budget is configured.
+	consecutiveEmptyEvolves := 0
+	const maxEmptyEvolves = 3
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -1108,6 +1115,15 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 
 		if o.config.StepsLimit > 0 && s.CurrentStep >= startStep+o.config.StepsLimit {
 			color.New(color.FgYellow).Printf("⏸ Reached --steps limit (%d). Run 'cloop run' to continue.\n", o.config.StepsLimit)
+			s.Status = "paused"
+			s.Save()
+			return nil
+		}
+
+		// Token budget check at the top of the loop so it fires during evolve cycles
+		// (where the work-execution path's check would otherwise be skipped).
+		if o.config.TokenBudget > 0 && s.TotalInputTokens+s.TotalOutputTokens >= o.config.TokenBudget {
+			color.New(color.FgYellow).Printf("⏸ Token budget reached (%d tokens). Run 'cloop run' to continue.\n", o.config.TokenBudget)
 			s.Status = "paused"
 			s.Save()
 			return nil
@@ -1162,10 +1178,18 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 					return nil
 				}
 				if n == 0 {
-					s.Status = "complete"
-					s.Save()
-					return nil
+					consecutiveEmptyEvolves++
+					if consecutiveEmptyEvolves >= maxEmptyEvolves {
+						color.New(color.FgYellow).Printf("⏸ Auto-evolve found no new tasks in %d consecutive attempts. Stopping.\n", maxEmptyEvolves)
+						s.Status = "complete"
+						s.Save()
+						return nil
+					}
+					dimColor.Printf("  Auto-evolve: 0 new tasks (%d/%d). Retrying...\n", consecutiveEmptyEvolves, maxEmptyEvolves)
+					s.Status = "running"
+					continue
 				}
+				consecutiveEmptyEvolves = 0
 				s.Status = "running"
 				continue
 			}
@@ -2482,6 +2506,13 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 		maxConsecutiveErrors = 3
 	}
 
+	// Auto-evolve safety net: if N consecutive evolve attempts add no new tasks,
+	// stop rather than spin forever burning tokens. The primary abort conditions
+	// for an unbounded evolve loop are token/cost/step budgets — this is just a
+	// cheap fallback when no budget is configured.
+	consecutiveEmptyEvolves := 0
+	const maxEmptyEvolves = 3
+
 	var mu sync.Mutex
 
 	for {
@@ -2495,6 +2526,15 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 
 		if o.config.StepsLimit > 0 && s.CurrentStep >= startStep+o.config.StepsLimit {
 			color.New(color.FgYellow).Printf("⏸ Reached --steps limit (%d). Run 'cloop run' to continue.\n", o.config.StepsLimit)
+			s.Status = "paused"
+			s.Save()
+			return nil
+		}
+
+		// Token budget check at the top of the loop so it fires during evolve cycles
+		// (where the work-execution path's check would otherwise be skipped).
+		if o.config.TokenBudget > 0 && s.TotalInputTokens+s.TotalOutputTokens >= o.config.TokenBudget {
+			color.New(color.FgYellow).Printf("⏸ Token budget reached (%d tokens). Run 'cloop run' to continue.\n", o.config.TokenBudget)
 			s.Status = "paused"
 			s.Save()
 			return nil
@@ -2545,10 +2585,18 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 					return nil
 				}
 				if n == 0 {
-					s.Status = "complete"
-					s.Save()
-					return nil
+					consecutiveEmptyEvolves++
+					if consecutiveEmptyEvolves >= maxEmptyEvolves {
+						color.New(color.FgYellow).Printf("⏸ Auto-evolve found no new tasks in %d consecutive attempts. Stopping.\n", maxEmptyEvolves)
+						s.Status = "complete"
+						s.Save()
+						return nil
+					}
+					dimColor.Printf("  Auto-evolve: 0 new tasks (%d/%d). Retrying...\n", consecutiveEmptyEvolves, maxEmptyEvolves)
+					s.Status = "running"
+					continue
 				}
+				consecutiveEmptyEvolves = 0
 				s.Status = "running"
 				continue
 			}
