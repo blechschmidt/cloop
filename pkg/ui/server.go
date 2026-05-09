@@ -1628,8 +1628,14 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	// Broadcast to others that a new user joined.
-	go s.broadcastPresence(workDir)
+	// Broadcast to others that a new user joined. Wrapped so a panic in the
+	// broadcast path (e.g. a downstream sendOrLag race) cannot tear down the
+	// whole UI process — every UI-spawned goroutine must terminate cleanly
+	// since they share the parent process with cloop run.
+	go func() {
+		defer recoverGoroutine("handleWS presence join")
+		s.broadcastPresence(workDir)
+	}()
 
 	// Drain incoming frames (bidirectional hook for future use). Two
 	// defensive bounds protect this goroutine from abuse:
