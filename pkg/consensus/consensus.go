@@ -15,6 +15,14 @@ import (
 	"github.com/blechschmidt/cloop/pkg/provider"
 )
 
+// consensusShutdownGracePeriod bounds how long RunConsensus will wait for
+// in-flight provider goroutines to honour ctx.Done() after the parent context
+// is cancelled. A misbehaving third-party provider that ignores cancellation
+// would otherwise pin the caller (and any goroutines awaiting consensus
+// completion) for the full provider timeout. Var (not const) so tests can
+// shrink it; production callers treat it as immutable.
+var consensusShutdownGracePeriod = 30 * time.Second
+
 // CandidateResponse holds a single provider's output and metadata.
 type CandidateResponse struct {
 	ProviderName string
@@ -120,7 +128,29 @@ func RunConsensus(
 			candidates[idx].Model = res.Model
 		}(i, p)
 	}
-	wg.Wait()
+	// Bounded wait: if the parent context is cancelled and a misbehaving
+	// provider ignores ctx, give workers up to the grace period to exit, then
+	// return ctx.Err() so the caller regains control. Leaked goroutines may
+	// still write to candidates[idx] afterward; that's safe because each
+	// writes to a unique index and we don't read on the early-return path.
+	waitDone := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(waitDone)
+	}()
+	select {
+	case <-waitDone:
+		// All providers exited; proceed to scoring.
+	case <-ctx.Done():
+		select {
+		case <-waitDone:
+			// Workers honored cancellation in time.
+		case <-time.After(consensusShutdownGracePeriod):
+			// Watchdog fired — return immediately rather than blocking on
+			// hung provider(s).
+		}
+		return "", nil, ctx.Err()
+	}
 
 	// Filter out errored responses.
 	var valid []CandidateResponse

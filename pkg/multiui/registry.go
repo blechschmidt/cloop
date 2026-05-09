@@ -31,60 +31,118 @@ var registryMu sync.Mutex
 // IsCloopRunningInDir returns true if a "cloop run" process has its working
 // directory set to dir. It reads /proc/*/cwd symlinks (Linux only).
 func IsCloopRunningInDir(dir string) bool {
+	return len(CloopRunPIDsInDir(dir)) > 0
+}
+
+// CloopRunPIDsInDir returns the PIDs of all "cloop run" processes whose
+// working directory equals dir. It reads /proc/*/cwd symlinks (Linux only)
+// and returns nil on non-Linux hosts or when /proc is unreadable.
+//
+// Used by the Web UI's per-project Stop button so that pressing stop on
+// project A signals only the cloop run for A, not every cloop run on the
+// host. The pre-fix handler shelled out to `pkill -f "cloop run"`, which
+// fired SIGINT at *every* cloop run process — a real correctness bug in
+// multi-project mode where a single user click would terminate unrelated
+// projects' runs.
+func CloopRunPIDsInDir(dir string) []int {
+	return cloopRunPIDs(func(cwd string) bool { return cwd == dir })
+}
+
+// AllCloopRunPIDs returns the PIDs of every "cloop run" process visible to
+// the current user via /proc. Linux-only; returns nil otherwise. Used by
+// the Web UI's global Stop control which intentionally signals every cloop
+// run on the host (single-project setups have only one).
+func AllCloopRunPIDs() []int {
+	return cloopRunPIDs(func(cwd string) bool { return true })
+}
+
+// cloopRunPIDs walks /proc and returns PIDs of "cloop run" processes whose
+// cwd satisfies the supplied predicate. It returns nil if /proc cannot be
+// read (e.g. non-Linux hosts) — callers treat nil and empty identically.
+func cloopRunPIDs(match func(cwd string) bool) []int {
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
-		return false
+		return nil
 	}
+	var pids []int
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
 		}
-		pid := e.Name()
-		// Only numeric entries are PIDs.
-		allDigits := true
-		for _, c := range pid {
-			if c < '0' || c > '9' {
-				allDigits = false
-				break
-			}
-		}
-		if !allDigits {
+		name := e.Name()
+		pidNum, ok := parseAllDigits(name)
+		if !ok {
 			continue
 		}
-		// Check executable name.
-		exePath, err := os.Readlink("/proc/" + pid + "/exe")
+		exePath, err := os.Readlink("/proc/" + name + "/exe")
 		if err != nil {
 			continue
 		}
-		if !strings.HasSuffix(exePath, "/cloop") && !strings.HasSuffix(exePath, "cloop") {
-			continue
-		}
-		// Check cmdline to ensure it's "cloop run", not "cloop ui" etc.
-		cmdline, err := os.ReadFile("/proc/" + pid + "/cmdline")
+		cmdline, err := os.ReadFile("/proc/" + name + "/cmdline")
 		if err != nil {
 			continue
 		}
-		cmdParts := strings.Split(string(cmdline), "\x00")
-		isCloopRun := false
-		for _, part := range cmdParts {
-			if part == "run" {
-				isCloopRun = true
-				break
-			}
-		}
-		if !isCloopRun {
-			continue
-		}
-		// Check working directory.
-		cwd, err := os.Readlink("/proc/" + pid + "/cwd")
+		cwd, err := os.Readlink("/proc/" + name + "/cwd")
 		if err != nil {
 			continue
 		}
-		if cwd == dir {
-			return true
+		if cloopRunMatch(exePath, splitCmdline(cmdline), cwd, match) {
+			pids = append(pids, pidNum)
 		}
 	}
-	return false
+	return pids
+}
+
+// cloopRunMatch is the pure decision function extracted from cloopRunPIDs so
+// the matching rules can be unit-tested without a live /proc filesystem.
+// It returns true when the process metadata identifies a "cloop run"
+// invocation (executable basename "cloop", at least one argv entry equal
+// to "run") whose working directory satisfies match.
+func cloopRunMatch(exePath string, cmdline []string, cwd string, match func(cwd string) bool) bool {
+	if !strings.HasSuffix(exePath, "/cloop") && exePath != "cloop" {
+		return false
+	}
+	hasRun := false
+	for _, part := range cmdline {
+		if part == "run" {
+			hasRun = true
+			break
+		}
+	}
+	if !hasRun {
+		return false
+	}
+	return match(cwd)
+}
+
+// splitCmdline returns the NUL-separated argv from a /proc/PID/cmdline read.
+// The kernel terminates the buffer with a trailing NUL, which yields a
+// trailing empty element after a naive Split — drop it so callers see only
+// real argv entries.
+func splitCmdline(raw []byte) []string {
+	parts := strings.Split(string(raw), "\x00")
+	if n := len(parts); n > 0 && parts[n-1] == "" {
+		parts = parts[:n-1]
+	}
+	return parts
+}
+
+// parseAllDigits returns (n, true) if s is a non-empty run of ASCII digits
+// fitting in an int; otherwise (0, false). Used to filter /proc entries
+// down to numeric PID directories without paying for strconv.Atoi's wider
+// surface (signs, whitespace, leading zeros are all rejected here).
+func parseAllDigits(s string) (int, bool) {
+	if s == "" {
+		return 0, false
+	}
+	n := 0
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return 0, false
+		}
+		n = n*10 + int(c-'0')
+	}
+	return n, true
 }
 
 // ProjectEntry is a registered project in the multi-project registry.

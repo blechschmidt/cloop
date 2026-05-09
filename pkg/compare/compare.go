@@ -13,6 +13,12 @@ import (
 	"github.com/blechschmidt/cloop/pkg/provider"
 )
 
+// compareShutdownGracePeriod bounds how long Run will wait for in-flight
+// provider goroutines to honour ctx.Done() after cancellation. A misbehaving
+// provider that ignores ctx would otherwise pin the caller for the full
+// per-provider timeout. Var (not const) so tests can shrink it.
+var compareShutdownGracePeriod = 30 * time.Second
+
 // Entry holds the result (or error) from a single provider.
 type Entry struct {
 	ProviderName string
@@ -85,7 +91,43 @@ func Run(ctx context.Context, prompt string, providers []provider.Provider, mode
 		}(i, prov)
 	}
 
-	wg.Wait()
+	// Bounded wait: if the parent ctx is cancelled and a misbehaving provider
+	// ignores it, give workers up to the grace period to exit, then return
+	// the partial results so the caller regains control. Any nil entries in
+	// the returned slice represent providers that were still in-flight when
+	// the watchdog fired; the caller can detect this by checking ctx.Err().
+	// Leaked goroutines may still populate results[idx] afterward; safe
+	// because each writes to a unique index and the caller has already
+	// returned from this function.
+	waitDone := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(waitDone)
+	}()
+	select {
+	case <-waitDone:
+		// All providers exited; return full results.
+	case <-ctx.Done():
+		select {
+		case <-waitDone:
+			// Workers honored cancellation in time.
+		case <-time.After(compareShutdownGracePeriod):
+			// Watchdog fired — fill in placeholders for any unfinished
+			// entries so callers can iterate the slice without nil checks.
+			for i, entry := range results {
+				if entry == nil {
+					name := ""
+					if i < len(providers) {
+						name = providers[i].Name()
+					}
+					results[i] = &Entry{
+						ProviderName: name,
+						Err:          ctx.Err(),
+					}
+				}
+			}
+		}
+	}
 	return results
 }
 

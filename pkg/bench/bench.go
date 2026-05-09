@@ -19,6 +19,12 @@ import (
 	"github.com/blechschmidt/cloop/pkg/provider"
 )
 
+// benchShutdownGracePeriod bounds how long Run will wait for in-flight
+// per-provider goroutines to honour ctx.Done() after the parent context is
+// cancelled. A misbehaving provider that ignores ctx would otherwise pin Run
+// for the full benchmarking timeout. Var (not const) so tests can shrink it.
+var benchShutdownGracePeriod = 30 * time.Second
+
 // RunConfig holds the configuration for a benchmark run.
 type RunConfig struct {
 	// Prompt is the text sent to all providers.
@@ -122,7 +128,45 @@ func Run(ctx context.Context, cfg RunConfig, providerBuilders map[string]provide
 		}(name, prov, model)
 	}
 
-	wg.Wait()
+	// Bounded wait: if the parent context is cancelled and a misbehaving
+	// provider ignores it, give workers up to the grace period to exit, then
+	// return the partial report so the caller regains control. Any provider
+	// that was still in-flight when the watchdog fired will be missing from
+	// report.Results; the caller can detect this by checking ctx.Err().
+	// Leaked goroutines may still append to report.Results afterward; the
+	// mutex makes that safe but the caller will already have returned.
+	waitDone := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(waitDone)
+	}()
+	select {
+	case <-waitDone:
+		// All providers exited normally.
+	case <-ctx.Done():
+		select {
+		case <-waitDone:
+			// Workers honored cancellation in time.
+		case <-time.After(benchShutdownGracePeriod):
+			// Watchdog fired — fill placeholder rows for missing providers
+			// so the caller still gets an entry per requested provider.
+			mu.Lock()
+			seen := make(map[string]bool, len(report.Results))
+			for _, r := range report.Results {
+				seen[r.ProviderName] = true
+			}
+			for _, name := range cfg.Providers {
+				if !seen[name] {
+					report.Results = append(report.Results, &ProviderResult{
+						ProviderName: name,
+						Model:        cfg.Models[name],
+						Error:        ctx.Err().Error(),
+					})
+				}
+			}
+			mu.Unlock()
+		}
+	}
 
 	// Preserve original order from cfg.Providers.
 	ordered := make([]*ProviderResult, 0, len(report.Results))

@@ -1632,21 +1632,43 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]interface{}{"ok": true, "command": "cloop " + strings.Join(args, " ")})
 }
 
-// handleStop sends SIGINT to any running `cloop run` processes.
+// handleStop sends SIGINT to every running "cloop run" process visible to
+// the current user. Uses a /proc walk (via multiui.AllCloopRunPIDs) so we
+// no longer depend on the external `pkill` binary, and so a hung pkill
+// child can never pin this request goroutine.
 func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 	if !requirePOST(w, r) {
 		return
 	}
-	out, err := exec.Command("pkill", "-SIGINT", "-f", "cloop run").CombinedOutput()
-	if err != nil {
-		msg := strings.TrimSpace(string(out))
-		if msg == "" {
-			msg = "no running cloop process found"
-		}
-		jsonOK(w, map[string]interface{}{"ok": false, "message": msg})
+	pids := multiui.AllCloopRunPIDs()
+	if len(pids) == 0 {
+		jsonOK(w, map[string]interface{}{"ok": false, "message": "no running cloop process found"})
 		return
 	}
-	jsonOK(w, map[string]interface{}{"ok": true, "message": "pause signal sent"})
+	signalled := signalPIDs(pids, syscall.SIGINT)
+	if signalled == 0 {
+		jsonOK(w, map[string]interface{}{"ok": false, "message": "found cloop processes but signalling failed (permission denied?)"})
+		return
+	}
+	jsonOK(w, map[string]interface{}{"ok": true, "message": "pause signal sent", "signalled": signalled})
+}
+
+// signalPIDs sends sig to each pid via os.FindProcess+Signal and returns the
+// number of successful deliveries. Errors (already-exited / EPERM) are
+// swallowed individually because the caller only needs to know whether
+// *any* process received the signal.
+func signalPIDs(pids []int, sig syscall.Signal) int {
+	n := 0
+	for _, pid := range pids {
+		proc, err := os.FindProcess(pid)
+		if err != nil {
+			continue
+		}
+		if err := proc.Signal(sig); err == nil {
+			n++
+		}
+	}
+	return n
 }
 
 // handleConfig returns the current configuration with secrets masked.
@@ -3367,14 +3389,21 @@ func (s *Server) handleProjectStop(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	entry := entries[idx]
-	// pkill processes running in that directory.
-	out, err := exec.Command("pkill", "-SIGINT", "-f", "cloop run").CombinedOutput()
-	_ = out
-	if err != nil {
+	// Project-scoped: only signal cloop run processes whose cwd matches
+	// entry.Path. The pre-fix implementation shelled out to
+	// `pkill -SIGINT -f "cloop run"`, which signalled *every* cloop run on
+	// the host — pressing stop on project A killed runs for B, C, etc.
+	pids := multiui.CloopRunPIDsInDir(entry.Path)
+	if len(pids) == 0 {
 		jsonOK(w, map[string]interface{}{"ok": false, "project": entry.Name, "message": "no running process found"})
 		return
 	}
-	jsonOK(w, map[string]interface{}{"ok": true, "project": entry.Name})
+	signalled := signalPIDs(pids, syscall.SIGINT)
+	if signalled == 0 {
+		jsonOK(w, map[string]interface{}{"ok": false, "project": entry.Name, "message": "found cloop processes but signalling failed (permission denied?)"})
+		return
+	}
+	jsonOK(w, map[string]interface{}{"ok": true, "project": entry.Name, "signalled": signalled})
 }
 
 // handleProjectNew creates a new cloop project directory, initialises it, and
