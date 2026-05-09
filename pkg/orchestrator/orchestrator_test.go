@@ -3643,6 +3643,57 @@ func TestRunPMParallel_ImplicitDone_Annotated(t *testing.T) {
 	}
 }
 
+// TestRunPM_ProviderError_Annotated locks in audit-trail accuracy of the
+// runPM provider-error path. When provider.Complete returns an error
+// (claudecode auth failure, network timeout, 5xx, etc.) the loop printed
+// a console line and silently set TaskFailed without leaving any breadcrumb
+// on the task itself. Operators inspecting task history could see a status
+// change but not the underlying cause — same audit-trail accuracy class as
+// the verify-errored, gate-skip, and implicit-done fixes.
+func TestRunPM_ProviderError_Annotated(t *testing.T) {
+	dir := tempDir(t)
+	s := initState(t, dir, "goal", 0)
+	s.PMMode = true
+	s.Plan = &pm.Plan{
+		Goal:  "goal",
+		Tasks: []*pm.Task{{ID: 1, Title: "Task A", Priority: 1, Status: pm.TaskPending}},
+	}
+	s.Save()
+
+	prov := &mockProvider{
+		name: "mock",
+		errs: []error{errors.New("upstream 5xx: connection refused")},
+	}
+	// MaxFailures=1 so the loop aborts after the single error rather than
+	// burning through retry budget; we only need to verify the annotation lands.
+	o := newOrchestrator(t, dir, Config{
+		WorkDir:     dir,
+		PMMode:      true,
+		MaxFailures: 1,
+		NoHeal:      true,
+	}, prov)
+	_ = o.runPM(context.Background())
+
+	task := o.state.Plan.Tasks[0]
+	if task.Status != pm.TaskFailed {
+		t.Errorf("task status = %q, want %q", task.Status, pm.TaskFailed)
+	}
+
+	want := "provider error"
+	wantErrFragment := "upstream 5xx"
+	var found bool
+	for _, ann := range task.Annotations {
+		if ann.Author == "ai" && strings.Contains(ann.Text, want) && strings.Contains(ann.Text, wantErrFragment) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("missing provider-error annotation containing %q + %q;\ngot annotations: %+v",
+			want, wantErrFragment, task.Annotations)
+	}
+}
+
 // TestRunPM_GateSkip_Annotated locks in audit-trail accuracy for the
 // orchestrator-level gates that silently change a task's status before it
 // ever reaches the provider. Each gate used to mark the task

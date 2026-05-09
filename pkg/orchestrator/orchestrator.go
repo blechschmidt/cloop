@@ -1596,6 +1596,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 					continue
 				}
 				failColor.Printf("✗ Multi-agent error: %v\n", maErr)
+				pm.AddAnnotation(task, "ai", fmt.Sprintf("Task failed: multi-agent pipeline error — %s", truncate(maErr.Error(), 200)))
 				task.Status = pm.TaskFailed
 				consecutiveErrors++
 				s.Save()
@@ -1652,6 +1653,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 						continue
 					}
 					failColor.Printf("✗ Consensus error: %v\n", cErr)
+					pm.AddAnnotation(task, "ai", fmt.Sprintf("Task failed: consensus error — %s", truncate(cErr.Error(), 200)))
 					task.Status = pm.TaskFailed
 					consecutiveErrors++
 					s.Save()
@@ -1719,6 +1721,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 						continue
 					}
 					failColor.Printf("✗ Provider error: %v\n", err)
+					pm.AddAnnotation(task, "ai", fmt.Sprintf("Task failed: provider error — %s", truncate(err.Error(), 200)))
 					task.Status = pm.TaskFailed
 					consecutiveErrors++
 					s.Save()
@@ -3025,6 +3028,7 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 				}
 				failColor.Printf("✗ Provider error on task %d: %v\n", task.ID, res.err)
 				mu.Lock()
+				pm.AddAnnotation(task, "ai", fmt.Sprintf("Task failed: provider error (parallel mode) — %s", truncate(res.err.Error(), 200)))
 				task.Status = pm.TaskFailed
 				consecutiveErrors++
 				s.Save()
@@ -3763,6 +3767,7 @@ func (o *Orchestrator) evolve(ctx context.Context) error {
 				result, err := safeComplete(ctx, o.provider, prompt, evoOpts)
 				if err != nil {
 					failColor.Printf("✗ Provider error on task %d: %v\n", nextTask.ID, err)
+					pm.AddAnnotation(nextTask, "ai", fmt.Sprintf("Task failed: provider error (evolve mode) — %s", truncate(err.Error(), 200)))
 					nextTask.Status = pm.TaskFailed
 					s.Status = "complete"
 					s.Save()
