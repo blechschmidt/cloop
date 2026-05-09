@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/atomicfile"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/provider"
 )
@@ -165,7 +166,7 @@ func WriteArtifacts(workDir string, task *pm.Task, res *Result) (string, error) 
 	}
 	for name, content := range files {
 		absPath := filepath.Join(absDir, name)
-		if err := os.WriteFile(absPath, []byte(content), 0o644); err != nil {
+		if err := atomicfile.Write(absPath, []byte(content), 0o644); err != nil {
 			return "", fmt.Errorf("write %s: %w", name, err)
 		}
 	}

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/atomicfile"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/provider"
 )
@@ -366,7 +367,7 @@ func SaveToFile(workDir, content, ext string) (string, error) {
 	ts := time.Now().UTC().Format("20060102-150405")
 	filename := fmt.Sprintf("%s.%s", ts, ext)
 	absPath := filepath.Join(dir, filename)
-	if err := os.WriteFile(absPath, []byte(content), 0o644); err != nil {
+	if err := atomicfile.Write(absPath, []byte(content), 0o644); err != nil {
 		return "", fmt.Errorf("write summary: %w", err)
 	}
 	return absPath, nil

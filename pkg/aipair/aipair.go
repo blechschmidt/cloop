@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/artifact"
+	"github.com/blechschmidt/cloop/pkg/atomicfile"
 	"github.com/blechschmidt/cloop/pkg/kb"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/provider"
@@ -513,7 +514,7 @@ func (sess *Session) saveSession() error {
 		}
 	}
 
-	return os.WriteFile(path, []byte(b.String()), 0o644)
+	return atomicfile.Write(path, []byte(b.String()), 0o644)
 }
 
 // printWelcome prints the startup banner.

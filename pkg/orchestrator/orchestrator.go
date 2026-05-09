@@ -2438,6 +2438,15 @@ type taskResult struct {
 	partialOut   string // partial output captured before timeout
 }
 
+// parallelShutdownGracePeriod bounds how long runPMParallel will wait for
+// in-flight task goroutines to exit after the parent context is cancelled.
+// Workers' per-task contexts are derived from the parent, so a well-behaved
+// provider should return promptly on cancellation. This watchdog defends
+// against a misbehaving provider that ignores ctx.Done() and would otherwise
+// block wg.Wait() (and thus the orchestrator) indefinitely. Declared as var
+// so tests can shrink it.
+var parallelShutdownGracePeriod = 30 * time.Second
+
 // runPMParallel runs all dependency-ready tasks concurrently in each round,
 // then waits for them to complete before starting the next round.
 func (o *Orchestrator) runPMParallel(ctx context.Context) error {
@@ -2821,7 +2830,32 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 				results[idx] = taskResult{task: t, result: result, err: err, duration: dur, timedOut: timedOut}
 			}(i, task)
 		}
-		wg.Wait()
+		// Bounded wait: if the parent context is cancelled and a misbehaving
+		// provider ignores the per-task ctx, give workers a grace period to
+		// exit, then return early so the caller regains control. Leaked
+		// goroutines may still write to results[idx] afterward; that's safe
+		// because each writes to a unique index and we don't read results on
+		// the early-return path.
+		waitDone := make(chan struct{})
+		go func() {
+			wg.Wait()
+			close(waitDone)
+		}()
+		select {
+		case <-waitDone:
+			// All workers exited; proceed to result processing.
+		case <-ctx.Done():
+			select {
+			case <-waitDone:
+				// Workers honored cancellation within the grace period
+				// implicitly (closed before we even started the timer).
+			case <-time.After(parallelShutdownGracePeriod):
+				color.New(color.FgYellow).Printf("⚠ %d task goroutine(s) did not exit within %s of cancellation; returning anyway\n", len(ready), parallelShutdownGracePeriod)
+			}
+			s.Status = "paused"
+			s.Save()
+			return ctx.Err()
+		}
 
 		// Process results sequentially for clean output.
 		for _, res := range results {

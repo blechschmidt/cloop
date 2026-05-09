@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/atomicfile"
 	"github.com/blechschmidt/cloop/pkg/pm"
 )
 
@@ -55,7 +56,7 @@ func WriteExecArtifact(workDir string, task *pm.Task, cmdArgs []string, exitCode
 	}
 	b.WriteString("```\n")
 
-	if err := os.WriteFile(absPath, []byte(b.String()), 0o644); err != nil {
+	if err := atomicfile.Write(absPath, []byte(b.String()), 0o644); err != nil {
 		return "", fmt.Errorf("write exec artifact: %w", err)
 	}
 
@@ -183,7 +184,7 @@ func WriteTaskArtifact(workDir string, task *pm.Task, fullOutput string) (string
 		b.WriteByte('\n')
 	}
 
-	if err := os.WriteFile(absPath, []byte(b.String()), 0o644); err != nil {
+	if err := atomicfile.Write(absPath, []byte(b.String()), 0o644); err != nil {
 		return "", fmt.Errorf("write artifact: %w", err)
 	}
 
@@ -247,7 +248,7 @@ func WriteVerificationArtifact(workDir string, task *pm.Task, script, scriptOutp
 
 	b.WriteString(fmt.Sprintf("**Verdict: %s**\n", verdict))
 
-	if err := os.WriteFile(absPath, []byte(b.String()), 0o644); err != nil {
+	if err := atomicfile.Write(absPath, []byte(b.String()), 0o644); err != nil {
 		return "", fmt.Errorf("write verification artifact: %w", err)
 	}
 

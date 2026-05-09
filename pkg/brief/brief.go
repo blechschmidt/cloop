@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/atomicfile"
 	"github.com/blechschmidt/cloop/pkg/forecast"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/provider"
@@ -311,7 +312,7 @@ func Save(workDir string, b *Brief) (string, error) {
 	filename := fmt.Sprintf("brief-%s.%s", ts, ext)
 	path := filepath.Join(dir, filename)
 
-	if err := os.WriteFile(path, []byte(b.Content), 0644); err != nil {
+	if err := atomicfile.Write(path, []byte(b.Content), 0o644); err != nil {
 		return "", fmt.Errorf("writing brief: %w", err)
 	}
 	return path, nil

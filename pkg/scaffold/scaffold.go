@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/atomicfile"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/provider"
 )
@@ -138,7 +139,7 @@ func Generate(ctx context.Context, prov provider.Provider, model string, plan *p
 		if err := os.MkdirAll(filepath.Dir(fullPath), 0o755); err != nil {
 			return nil, fmt.Errorf("creating parent dir for %s: %w", f.Path, err)
 		}
-		if err := os.WriteFile(fullPath, []byte(f.Content), 0o644); err != nil {
+		if err := atomicfile.Write(fullPath, []byte(f.Content), 0o644); err != nil {
 			return nil, fmt.Errorf("writing file %s: %w", f.Path, err)
 		}
 	}
