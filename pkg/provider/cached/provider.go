@@ -18,8 +18,14 @@ type Provider struct {
 }
 
 // New wraps inner with response caching using the provided cache.
+//
+// inner is re-wrapped in provider.WithPanicSafety as a defense in depth:
+// callers that obtain providers via provider.Build are already safe, but a
+// future caller that builds a raw provider and passes it here would lose
+// the safety net. WithPanicSafety is idempotent so this is harmless when
+// inner is already wrapped.
 func New(inner provider.Provider, c *cache.Cache) *Provider {
-	return &Provider{inner: inner, cache: c}
+	return &Provider{inner: provider.WithPanicSafety(inner), cache: c}
 }
 
 // Name delegates to the inner provider.

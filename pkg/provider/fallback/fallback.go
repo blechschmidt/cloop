@@ -19,11 +19,23 @@ type Provider struct {
 // New creates a fallback provider from an ordered list of providers.
 // The first provider in the list is the primary; subsequent providers are fallbacks.
 // Returns an error if the list is empty.
+//
+// Each input provider is wrapped in provider.WithPanicSafety as a defense in
+// depth: callers that obtain providers via provider.Build are already safe,
+// but a future caller that constructs raw providers and passes them here
+// would otherwise lose the safety net (a nil-pointer deref inside a third-
+// party SDK would crash the whole process during fan-out). Re-wrapping is
+// cheap and idempotent, so this is safe regardless of how the inputs were
+// produced.
 func New(providers []provider.Provider) (*Provider, error) {
 	if len(providers) == 0 {
 		return nil, fmt.Errorf("fallback provider requires at least one provider")
 	}
-	return &Provider{providers: providers}, nil
+	safe := make([]provider.Provider, len(providers))
+	for i, p := range providers {
+		safe[i] = provider.WithPanicSafety(p)
+	}
+	return &Provider{providers: safe}, nil
 }
 
 // Name returns a combined name showing the full fallback chain.
