@@ -727,7 +727,7 @@ func (o *Orchestrator) runLoop(ctx context.Context) error {
 		start := time.Now()
 
 		opts, wasStreamed := o.makeOpts(s.Model, true)
-		result, err := o.provider.Complete(ctx, prompt, opts)
+		result, err := safeComplete(ctx, o.provider, prompt, opts)
 		if err != nil {
 			failColor.Printf("✗ Provider error: %v\n", err)
 			s.Status = "failed"
@@ -1662,7 +1662,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 					goOtelAttr.Int("task.priority", task.Priority),
 					goOtelAttr.String("task.role", string(task.Role)),
 				)
-				result, err := taskProvider.Complete(taskExecCtx, prompt, opts)
+				result, err := safeComplete(taskExecCtx, taskProvider, prompt, opts)
 				taskExecSpan.End()
 				if liveFile != nil {
 					if err == nil && !wasStreamed() {
@@ -1812,7 +1812,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 				healColor.Printf("[HEAL attempt %d/%d] Re-attempting task %d (variant: %s)...\n", healAttempt, maxHealRetries, task.ID, currentHealVariant.ID)
 
 				healOpts, healWasStreamed := o.makeOpts(s.Model, true)
-				healResult, healErr := taskProvider.Complete(ctx, healPrompt, healOpts)
+				healResult, healErr := safeComplete(ctx, taskProvider, healPrompt, healOpts)
 				if healErr != nil {
 					healColor.Printf("[HEAL attempt %d/%d] Provider error: %v\n", healAttempt, maxHealRetries, healErr)
 					continue
@@ -1862,7 +1862,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 						"Make your best judgment for ALL decisions and proceed to full completion. " +
 						"Do NOT ask for clarification or confirmation. Just do the work and finish with TASK_DONE."
 					clarifyOpts, clarifyWasStreamed := o.makeOpts(s.Model, true)
-					clarifyResult, clarifyErr := taskProvider.Complete(ctx, clarifyPrompt, clarifyOpts)
+					clarifyResult, clarifyErr := safeComplete(ctx, taskProvider, clarifyPrompt, clarifyOpts)
 					if clarifyErr != nil {
 						break
 					}
@@ -2808,7 +2808,7 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 				// Apply per-task time budget in parallel mode.
 				tTaskCtx, tTaskCancel := o.taskContextWithTimeout(ctx, t)
 				defer tTaskCancel()
-				result, err := taskProvider.Complete(tTaskCtx, prompt, opts)
+				result, err := safeComplete(tTaskCtx, taskProvider, prompt, opts)
 				// Write live artifact for parallel task (non-streaming).
 				if err == nil {
 					if lf, lfErr := artifact.OpenLiveArtifact(o.config.WorkDir, t.ID); lfErr == nil {
@@ -3404,7 +3404,7 @@ func (o *Orchestrator) evolvePM(ctx context.Context) (int, error) {
 
 	prompt := pm.EvolveDiscoverPrompt(s.Goal, s.Instructions, s.Plan, s.EvolveStep, s.InnovateMode)
 	opts, _ := o.makeOpts(s.Model, true)
-	result, err := o.provider.Complete(ctx, prompt, opts)
+	result, err := safeComplete(ctx, o.provider, prompt, opts)
 	if err != nil {
 		return 0, err
 	}
@@ -3533,7 +3533,7 @@ func (o *Orchestrator) evolve(ctx context.Context) error {
 				start := time.Now()
 
 				evoOpts, evoWasStreamed := o.makeOpts(s.Model, true)
-				result, err := o.provider.Complete(ctx, prompt, evoOpts)
+				result, err := safeComplete(ctx, o.provider, prompt, evoOpts)
 				if err != nil {
 					failColor.Printf("✗ Provider error on task %d: %v\n", nextTask.ID, err)
 					nextTask.Status = pm.TaskFailed
@@ -3612,7 +3612,7 @@ func (o *Orchestrator) evolve(ctx context.Context) error {
 		dimColor.Printf("→ Thinking of improvements...\n")
 
 		freeOpts, freeWasStreamed := o.makeOpts(s.Model, true)
-		result, err := o.provider.Complete(ctx, prompt, freeOpts)
+		result, err := safeComplete(ctx, o.provider, prompt, freeOpts)
 		if err != nil {
 			evolveColor.Printf("\n⏹ Auto-evolve ended: %v\n", err)
 			s.Status = "complete"

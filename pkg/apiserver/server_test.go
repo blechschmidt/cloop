@@ -3,7 +3,9 @@ package apiserver
 import (
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
+	"time"
 )
 
 // newTestServer creates a Server with the given RPS and Burst for testing.
@@ -131,6 +133,77 @@ func TestRateLimiter_IndependentPerIP(t *testing.T) {
 		if rr.Code != http.StatusTooManyRequests {
 			t.Errorf("ip %s: expected 429 on 3rd request, got %d", ip, rr.Code)
 		}
+	}
+}
+
+// TestRateLimiter_BucketMapBoundedAtCap verifies that the per-IP bucket map
+// never grows beyond rlMaxBuckets, even under a flood of unique IPs. Without
+// this bound an attacker rotating source IPs would OOM the daemon.
+func TestRateLimiter_BucketMapBoundedAtCap(t *testing.T) {
+	s := newTestServer(10, 5)
+	h := s.rateLimitMiddleware(handler())
+
+	// Push more unique IPs than the cap. All should be served (each gets a
+	// fresh bucket with full burst), but the map size must never exceed the
+	// cap because evictRLBucketsLocked is invoked on each new insert.
+	const flood = rlMaxBuckets + 250
+	for i := 0; i < flood; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.RemoteAddr = "10.0." + strconv.Itoa(i/256) + "." + strconv.Itoa(i%256) + ":1"
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+	}
+
+	s.rlMu.Lock()
+	size := len(s.rlBuckets)
+	s.rlMu.Unlock()
+
+	if size > rlMaxBuckets {
+		t.Fatalf("bucket map exceeded cap: got %d entries, cap is %d", size, rlMaxBuckets)
+	}
+}
+
+// TestRateLimiter_StaleBucketsSwept verifies that buckets older than the idle
+// TTL are removed when a new IP needs to be inserted past the cap. Buckets
+// from active IPs are preserved.
+func TestRateLimiter_StaleBucketsSwept(t *testing.T) {
+	s := newTestServer(10, 5)
+
+	// Pre-fill the map to capacity. Half the buckets are "stale" (older
+	// than rlBucketIdleTTL) and half are "fresh".
+	now := time.Now()
+	stale := now.Add(-2 * rlBucketIdleTTL)
+	s.rlMu.Lock()
+	for i := 0; i < rlMaxBuckets; i++ {
+		ip := "fill-" + strconv.Itoa(i)
+		ts := now
+		if i%2 == 0 {
+			ts = stale
+		}
+		s.rlBuckets[ip] = &ipBucket{tokens: 5, lastSeen: ts}
+	}
+	s.rlMu.Unlock()
+
+	// Inserting a new IP should trigger sweep; all stale entries should
+	// be evicted, leaving fresh entries plus the new one.
+	h := s.rateLimitMiddleware(handler())
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "9.9.9.9:1"
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("new IP request should succeed, got %d", rr.Code)
+	}
+
+	s.rlMu.Lock()
+	defer s.rlMu.Unlock()
+	for ip, b := range s.rlBuckets {
+		if now.Sub(b.lastSeen) > rlBucketIdleTTL {
+			t.Errorf("stale bucket %s survived sweep (lastSeen %v)", ip, b.lastSeen)
+		}
+	}
+	if _, ok := s.rlBuckets["9.9.9.9"]; !ok {
+		t.Error("newly-inserted IP bucket missing after sweep")
 	}
 }
 

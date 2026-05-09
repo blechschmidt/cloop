@@ -23,6 +23,23 @@ import (
 const (
 	defaultRPS   = 20.0 // requests per second per IP
 	defaultBurst = 50   // bucket capacity per IP
+
+	// rlMaxBuckets caps the per-IP rate-limit map so a flood of unique IPs
+	// cannot grow it without bound. When the map exceeds this size, stale
+	// buckets are swept (and if still over, the least-recently-seen bucket
+	// is evicted) on each new IP insert.
+	rlMaxBuckets = 10000
+
+	// rlBucketIdleTTL is how long a bucket is kept after the last request
+	// from that IP. Anything older is eligible for sweep.
+	rlBucketIdleTTL = 1 * time.Hour
+
+	// HTTP server timeouts. ReadHeaderTimeout protects against slowloris;
+	// IdleTimeout closes idle keep-alive connections.
+	httpReadHeaderTimeout = 10 * time.Second
+	httpReadTimeout       = 60 * time.Second
+	httpWriteTimeout      = 120 * time.Second
+	httpIdleTimeout       = 120 * time.Second
 )
 
 // ipBucket is a token-bucket state for one remote IP.
@@ -42,12 +59,13 @@ type Server struct {
 	RPS   float64
 	Burst int
 
-	mu      sync.Mutex
-	runCmd  *exec.Cmd // currently-running `cloop run` subprocess, if any
-	runLog  strings.Builder
+	mu        sync.Mutex
+	runCmd    *exec.Cmd // currently-running `cloop run` subprocess, if any
+	runActive bool      // mutex-guarded liveness flag; avoids racing on cmd.ProcessState
+	runLog    strings.Builder
 
 	// Per-IP rate-limit buckets.
-	rlMu     sync.Mutex
+	rlMu      sync.Mutex
 	rlBuckets map[string]*ipBucket
 }
 
@@ -95,6 +113,12 @@ func (s *Server) allow(ip string) bool {
 
 	b, ok := s.rlBuckets[ip]
 	if !ok {
+		// New IP. If we're at the cap, sweep stale buckets first; if still
+		// at the cap, evict the least-recently-seen one. Both branches keep
+		// the map size bounded by rlMaxBuckets.
+		if len(s.rlBuckets) >= rlMaxBuckets {
+			s.evictRLBucketsLocked(now)
+		}
 		b = &ipBucket{tokens: float64(burst), lastSeen: now}
 		s.rlBuckets[ip] = b
 	}
@@ -112,6 +136,33 @@ func (s *Server) allow(ip string) bool {
 	}
 	b.tokens--
 	return true
+}
+
+// evictRLBucketsLocked removes stale rate-limit buckets to keep the map
+// bounded. The caller must hold s.rlMu. It first sweeps anything older than
+// rlBucketIdleTTL; if the map is still at the cap, it evicts the single
+// least-recently-seen bucket so the caller can safely insert a new entry.
+func (s *Server) evictRLBucketsLocked(now time.Time) {
+	for ip, b := range s.rlBuckets {
+		if now.Sub(b.lastSeen) > rlBucketIdleTTL {
+			delete(s.rlBuckets, ip)
+		}
+	}
+	if len(s.rlBuckets) < rlMaxBuckets {
+		return
+	}
+	// Still full of recent entries — evict the oldest one.
+	var oldestIP string
+	var oldestSeen time.Time
+	for ip, b := range s.rlBuckets {
+		if oldestIP == "" || b.lastSeen.Before(oldestSeen) {
+			oldestIP = ip
+			oldestSeen = b.lastSeen
+		}
+	}
+	if oldestIP != "" {
+		delete(s.rlBuckets, oldestIP)
+	}
 }
 
 // rateLimitMiddleware wraps next with per-IP token-bucket rate limiting.
@@ -162,7 +213,16 @@ func (s *Server) Start() error {
 		fmt.Printf("cloop API server running at http://localhost%s\n", addr)
 	}
 	fmt.Printf("OpenAPI spec: http://localhost%s/openapi.json\n", addr)
-	return http.ListenAndServe(addr, s.rateLimitMiddleware(s.authMiddleware(mux)))
+
+	httpSrv := &http.Server{
+		Addr:              addr,
+		Handler:           s.rateLimitMiddleware(s.authMiddleware(mux)),
+		ReadHeaderTimeout: httpReadHeaderTimeout,
+		ReadTimeout:       httpReadTimeout,
+		WriteTimeout:      httpWriteTimeout,
+		IdleTimeout:       httpIdleTimeout,
+	}
+	return httpSrv.ListenAndServe()
 }
 
 // authMiddleware enforces Bearer-token authentication on all routes when
@@ -339,7 +399,7 @@ func (s *Server) handleRunStart(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewDecoder(r.Body).Decode(&req)
 
 	s.mu.Lock()
-	if s.runCmd != nil && s.runCmd.ProcessState == nil {
+	if s.runActive {
 		s.mu.Unlock()
 		jsonErr(w, "a run is already in progress", http.StatusConflict)
 		return
@@ -383,10 +443,23 @@ func (s *Server) handleRunStart(w http.ResponseWriter, r *http.Request) {
 
 	s.mu.Lock()
 	s.runCmd = cmd
+	s.runActive = true
 	s.mu.Unlock()
 
-	// Reap the process in a goroutine.
-	go func() { _ = cmd.Wait() }()
+	// Reap the process in a goroutine. Recover from panics so a bug in the
+	// reaper cannot kill the API server, and always clear runActive so the
+	// caller can start another run after this one exits.
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				fmt.Fprintf(os.Stderr, "[apiserver] panic in run reaper: %v\n", r)
+			}
+			s.mu.Lock()
+			s.runActive = false
+			s.mu.Unlock()
+		}()
+		_ = cmd.Wait()
+	}()
 
 	jsonOK(w, map[string]any{
 		"started": true,
@@ -399,9 +472,10 @@ func (s *Server) handleRunStart(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleRunStop(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	cmd := s.runCmd
+	active := s.runActive
 	s.mu.Unlock()
 
-	if cmd == nil || cmd.ProcessState != nil {
+	if cmd == nil || !active {
 		jsonErr(w, "no run currently in progress", http.StatusConflict)
 		return
 	}
@@ -460,7 +534,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.mu.Lock()
-	resp.RunActive = s.runCmd != nil && s.runCmd.ProcessState == nil
+	resp.RunActive = s.runActive
 	s.mu.Unlock()
 
 	if ps.PMMode && ps.Plan != nil {
