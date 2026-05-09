@@ -162,7 +162,9 @@ Examples:
 		}
 
 		s.Plan = result.ModifiedPlan
-		if err := s.Save(); err != nil {
+		// SaveDirect: AI-edited plan may remove tasks (RemovedTasks); plain
+		// Save would re-merge them from disk and undo the edit.
+		if err := s.SaveDirect(); err != nil {
 			return fmt.Errorf("saving state: %w", err)
 		}
 

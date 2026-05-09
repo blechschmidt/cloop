@@ -96,7 +96,11 @@ func runRollbackRestore(workdir, snapshotID string) error {
 	}
 	s.Plan = plan
 	s.PMMode = true
-	if err := s.Save(); err != nil {
+	// SaveDirect: rollback intentionally replaces the entire plan with the
+	// snapshot. Plain Save would mergeExternalTasks() and re-add any task IDs
+	// from the current on-disk plan that are absent from the snapshot, partially
+	// undoing the rollback.
+	if err := s.SaveDirect(); err != nil {
 		return fmt.Errorf("save state: %w", err)
 	}
 

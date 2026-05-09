@@ -749,3 +749,50 @@ func TestRegression_Task5000_OlderStateJSONDoesNotOverwriteDB(t *testing.T) {
 		t.Errorf("stale state.json clobbered state.db: max_steps=%d", loaded.MaxSteps)
 	}
 }
+
+// TestSaveDirect_PlanShrinkPersists locks the contract that callers which
+// intentionally remove or replace tasks (rollback, AdaptiveReplan, AutoSplit,
+// plan import in replace mode, AI plan edit) must use SaveDirect — plain
+// Save would mergeExternalTasks() and re-introduce the just-removed tasks
+// from disk.
+func TestSaveDirect_PlanShrinkPersists(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Init(dir, "goal", 0)
+	if err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	s.PMMode = true
+	s.Plan = &pm.Plan{
+		Goal: "goal",
+		Tasks: []*pm.Task{
+			{ID: 1, Title: "kept", Status: pm.TaskDone},
+			{ID: 2, Title: "to be dropped", Status: pm.TaskPending},
+			{ID: 3, Title: "also dropped", Status: pm.TaskPending},
+		},
+	}
+	if err := s.Save(); err != nil {
+		t.Fatalf("seed save: %v", err)
+	}
+
+	// Simulate the rollback / AdaptiveReplan flow: drop tasks 2 and 3,
+	// keep only 1, persist with SaveDirect.
+	s.Plan.Tasks = []*pm.Task{s.Plan.Tasks[0]}
+	if err := s.SaveDirect(); err != nil {
+		t.Fatalf("SaveDirect: %v", err)
+	}
+
+	final, err := Load(dir)
+	if err != nil {
+		t.Fatalf("final load: %v", err)
+	}
+	if got := len(final.Plan.Tasks); got != 1 {
+		ids := make([]int, 0, got)
+		for _, tt := range final.Plan.Tasks {
+			ids = append(ids, tt.ID)
+		}
+		t.Fatalf("plan-shrink lost: expected 1 task after SaveDirect, got %d (IDs=%v) — Save would have resurrected dropped tasks", got, ids)
+	}
+	if final.Plan.Tasks[0].ID != 1 {
+		t.Errorf("expected surviving task ID=1, got %d", final.Plan.Tasks[0].ID)
+	}
+}

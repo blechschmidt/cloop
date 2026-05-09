@@ -107,7 +107,11 @@ Examples:
 		s.PMMode = true
 		s.Plan = result.Plan
 
-		if err := s.Save(); err != nil {
+		// In MergeReplace mode the imported plan replaces all tasks, so
+		// SaveDirect prevents mergeExternalTasks from re-introducing the old
+		// task IDs from disk. MergeMerge already preserves all original IDs in
+		// result.Plan, so SaveDirect is also safe (and a touch cheaper).
+		if err := s.SaveDirect(); err != nil {
 			return fmt.Errorf("saving state: %w", err)
 		}
 

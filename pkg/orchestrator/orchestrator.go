@@ -2079,7 +2079,9 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 				} else if len(subtasks) > 0 {
 					pmColor.Printf("  Split into %d subtasks. Continuing plan...\n\n", len(subtasks))
 					consecutiveErrors = 0
-					s.Save()
+					// SaveDirect: SplitTask removes the original task; plain Save would
+					// re-merge it from disk and undo the split.
+					s.SaveDirect()
 					continue
 				}
 			}
@@ -2102,7 +2104,9 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 					s.Plan.Tasks = append(kept, newTasks...)
 					pmColor.Printf("  Replanned: added %d revised task(s).\n\n", len(newTasks))
 					consecutiveErrors = 0 // reset after successful replan
-					s.Save()
+					// SaveDirect: AdaptiveReplan drops pending tasks and replaces them
+					// with new ones; plain Save would re-merge the dropped pendings from disk.
+					s.SaveDirect()
 					continue
 				} else {
 					pmColor.Printf("  Replan: no new tasks — plan is complete or blocked.\n\n")
