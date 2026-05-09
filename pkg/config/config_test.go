@@ -506,6 +506,274 @@ func TestLoad_PermWarning_SeparatePathsWarnIndependently(t *testing.T) {
 	}
 }
 
+// --- Numeric validation (Task 20082) ---
+//
+// These tests lock in the bounds enforced by validateAndClamp and
+// ValidateNumeric. Bad values reaching runtime have caused real damage in
+// the past — an absurd max_parallel spawns thousands of goroutines, a
+// negative budget cap silently disables enforcement, and a sub-1 rate-limit
+// burst makes every HTTP server reject the first request. The tests cover
+// each documented bound from both the warn-and-clamp side (Load()) and the
+// reject side (ValidateNumeric).
+
+// resetClampWarned clears the once-per-(path,field) dedup table so each
+// numeric-validation test can observe its own stderr cleanly.
+func resetClampWarned() {
+	clampWarnedMu.Lock()
+	clampWarnedPairs = map[string]struct{}{}
+	clampWarnedMu.Unlock()
+}
+
+func writeYAMLConfig(t *testing.T, dir, body string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(dir, ".cloop"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(ConfigPath(dir), []byte(body), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+}
+
+func TestLoad_ClampsAbsurdMaxParallel(t *testing.T) {
+	resetClampWarned()
+	dir := tempDir(t)
+	writeYAMLConfig(t, dir, "provider: claudecode\nmax_parallel: 5000\n")
+	var cfg *Config
+	out := captureStderr(t, func() {
+		var err error
+		cfg, err = Load(dir)
+		if err != nil {
+			t.Fatalf("load: %v", err)
+		}
+	})
+	if cfg.MaxParallel != 0 {
+		t.Errorf("expected max_parallel clamped to 0, got %d", cfg.MaxParallel)
+	}
+	if !strings.Contains(out, "max_parallel") {
+		t.Errorf("expected stderr warning about max_parallel, got: %q", out)
+	}
+}
+
+func TestLoad_ClampsNegativeMaxParallel(t *testing.T) {
+	resetClampWarned()
+	dir := tempDir(t)
+	writeYAMLConfig(t, dir, "provider: claudecode\nmax_parallel: -2\n")
+	cfg, err := Load(dir)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.MaxParallel != 0 {
+		t.Errorf("expected max_parallel clamped to 0, got %d", cfg.MaxParallel)
+	}
+}
+
+func TestLoad_AcceptsValidMaxParallel(t *testing.T) {
+	resetClampWarned()
+	dir := tempDir(t)
+	writeYAMLConfig(t, dir, "provider: claudecode\nmax_parallel: 8\n")
+	cfg, err := Load(dir)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.MaxParallel != 8 {
+		t.Errorf("expected max_parallel=8, got %d", cfg.MaxParallel)
+	}
+}
+
+func TestLoad_ClampsNegativeBudget(t *testing.T) {
+	resetClampWarned()
+	dir := tempDir(t)
+	writeYAMLConfig(t, dir, "provider: claudecode\nbudget:\n  monthly_usd: -10.0\n  daily_usd_limit: -5.0\n  daily_token_limit: -1\n")
+	cfg, err := Load(dir)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.Budget.MonthlyUSD != 0 {
+		t.Errorf("expected monthly_usd clamped to 0, got %f", cfg.Budget.MonthlyUSD)
+	}
+	if cfg.Budget.DailyUSDLimit != 0 {
+		t.Errorf("expected daily_usd_limit clamped to 0, got %f", cfg.Budget.DailyUSDLimit)
+	}
+	if cfg.Budget.DailyTokenLimit != 0 {
+		t.Errorf("expected daily_token_limit clamped to 0, got %d", cfg.Budget.DailyTokenLimit)
+	}
+}
+
+func TestLoad_ClampsBadAlertThreshold(t *testing.T) {
+	resetClampWarned()
+	dir := tempDir(t)
+	writeYAMLConfig(t, dir, "provider: claudecode\nbudget:\n  alert_threshold_pct: 150\n")
+	cfg, err := Load(dir)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.Budget.AlertThresholdPct != 0 {
+		t.Errorf("expected alert_threshold_pct clamped to 0, got %d", cfg.Budget.AlertThresholdPct)
+	}
+}
+
+func TestLoad_ClampsRateLimitBurst(t *testing.T) {
+	resetClampWarned()
+	dir := tempDir(t)
+	writeYAMLConfig(t, dir, "provider: claudecode\nrate_limit:\n  requests_per_second: -1\n  burst: -3\n")
+	cfg, err := Load(dir)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.RateLimit.RequestsPerSecond != 0 {
+		t.Errorf("expected rate_limit.requests_per_second clamped to 0, got %f", cfg.RateLimit.RequestsPerSecond)
+	}
+	if cfg.RateLimit.Burst != 0 {
+		t.Errorf("expected rate_limit.burst clamped to 0, got %d", cfg.RateLimit.Burst)
+	}
+}
+
+func TestLoad_ClampsBadClaudeCodePct(t *testing.T) {
+	resetClampWarned()
+	dir := tempDir(t)
+	writeYAMLConfig(t, dir, "provider: claudecode\nclaudecode:\n  max_weekly_pct: 200\n  max_five_hour_pct: -10\n")
+	cfg, err := Load(dir)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.ClaudeCode.MaxWeeklyPct != 0 {
+		t.Errorf("expected max_weekly_pct clamped to 0, got %f", cfg.ClaudeCode.MaxWeeklyPct)
+	}
+	if cfg.ClaudeCode.MaxFiveHourPct != 0 {
+		t.Errorf("expected max_five_hour_pct clamped to 0, got %f", cfg.ClaudeCode.MaxFiveHourPct)
+	}
+}
+
+func TestValidateNumeric_AcceptsZeroValues(t *testing.T) {
+	cfg := Default()
+	if err := cfg.ValidateNumeric(); err != nil {
+		t.Errorf("default config should validate, got %v", err)
+	}
+}
+
+func TestValidateNumeric_RejectsBadMaxParallel(t *testing.T) {
+	cases := []int{-1, 0 - 1, 65, 5000}
+	for _, v := range cases {
+		cfg := Default()
+		cfg.MaxParallel = v
+		if err := cfg.ValidateNumeric(); err == nil {
+			t.Errorf("expected error for max_parallel=%d", v)
+		}
+	}
+}
+
+func TestValidateNumeric_AcceptsValidMaxParallel(t *testing.T) {
+	for _, v := range []int{1, 8, 32, 64} {
+		cfg := Default()
+		cfg.MaxParallel = v
+		if err := cfg.ValidateNumeric(); err != nil {
+			t.Errorf("max_parallel=%d should be accepted, got %v", v, err)
+		}
+	}
+}
+
+func TestValidateNumeric_RejectsBadRateLimit(t *testing.T) {
+	cfg := Default()
+	cfg.RateLimit.RequestsPerSecond = -1
+	if err := cfg.ValidateNumeric(); err == nil {
+		t.Error("expected error for negative requests_per_second")
+	}
+	cfg = Default()
+	cfg.RateLimit.RequestsPerSecond = 0.5
+	if err := cfg.ValidateNumeric(); err == nil {
+		t.Error("expected error for sub-1 requests_per_second")
+	}
+	cfg = Default()
+	cfg.RateLimit.Burst = -5
+	if err := cfg.ValidateNumeric(); err == nil {
+		t.Error("expected error for negative burst")
+	}
+}
+
+func TestValidateNumeric_RejectsNegativeBudget(t *testing.T) {
+	cfg := Default()
+	cfg.Budget.MonthlyUSD = -1
+	if err := cfg.ValidateNumeric(); err == nil {
+		t.Error("expected error for negative monthly_usd")
+	}
+	cfg = Default()
+	cfg.Budget.DailyUSDLimit = -1
+	if err := cfg.ValidateNumeric(); err == nil {
+		t.Error("expected error for negative daily_usd_limit")
+	}
+	cfg = Default()
+	cfg.Budget.DailyTokenLimit = -1
+	if err := cfg.ValidateNumeric(); err == nil {
+		t.Error("expected error for negative daily_token_limit")
+	}
+}
+
+func TestValidateNumeric_RejectsBadAlertThreshold(t *testing.T) {
+	for _, v := range []int{-1, 101, 200} {
+		cfg := Default()
+		cfg.Budget.AlertThresholdPct = v
+		if err := cfg.ValidateNumeric(); err == nil {
+			t.Errorf("expected error for alert_threshold_pct=%d", v)
+		}
+	}
+}
+
+func TestValidateNumeric_RejectsBadGlobalPct(t *testing.T) {
+	for _, v := range []float64{-0.1, 100.1, 200} {
+		cfg := Default()
+		cfg.Budget.GlobalUSDPct = v
+		if err := cfg.ValidateNumeric(); err == nil {
+			t.Errorf("expected error for global_usd_pct=%v", v)
+		}
+		cfg = Default()
+		cfg.Budget.GlobalTokenPct = v
+		if err := cfg.ValidateNumeric(); err == nil {
+			t.Errorf("expected error for global_token_pct=%v", v)
+		}
+	}
+}
+
+func TestValidateNumeric_AcceptsZeroBudget(t *testing.T) {
+	// Zero is "no limit" for budget caps and must pass validation.
+	cfg := Default()
+	cfg.Budget.MonthlyUSD = 0
+	cfg.Budget.DailyUSDLimit = 0
+	cfg.Budget.DailyTokenLimit = 0
+	if err := cfg.ValidateNumeric(); err != nil {
+		t.Errorf("zero budget should be accepted, got %v", err)
+	}
+}
+
+func TestValidateNumeric_RejectsBadClaudeCodeCaps(t *testing.T) {
+	for _, v := range []float64{-1, 101, 9999} {
+		cfg := Default()
+		cfg.ClaudeCode.MaxWeeklyPct = v
+		if err := cfg.ValidateNumeric(); err == nil {
+			t.Errorf("expected error for claudecode.max_weekly_pct=%v", v)
+		}
+	}
+}
+
+func TestLoad_ClampWarning_DedupedAcrossCalls(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("clamp warning is Unix-only")
+	}
+	resetClampWarned()
+	dir := tempDir(t)
+	writeYAMLConfig(t, dir, "provider: claudecode\nmax_parallel: 5000\n")
+	out := captureStderr(t, func() {
+		for i := 0; i < 25; i++ {
+			if _, err := Load(dir); err != nil {
+				t.Fatalf("load %d: %v", i, err)
+			}
+		}
+	})
+	count := strings.Count(out, "max_parallel")
+	if count != 1 {
+		t.Errorf("expected exactly 1 clamp-warning across 25 Load() calls, got %d\nstderr:\n%s", count, out)
+	}
+}
+
 // TestLoad_PermWarning_ConcurrentLoadsDoNotRaceOrDuplicate proves the dedup
 // table is safe under concurrent Load() (the realistic UI scenario where
 // many handlers can race on the same project's config) and that the warning

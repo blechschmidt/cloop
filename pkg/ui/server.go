@@ -4508,6 +4508,22 @@ func (s *Server) handleBudgetGlobalSave(w http.ResponseWriter, r *http.Request) 
 		jsonErr(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
+	// Reject negative spend limits and out-of-range alert thresholds before
+	// they hit disk. Without this guard a hand-typed "-1" silently disables
+	// budget enforcement (because every comparison "spend < -1" is false) and
+	// an alert_threshold_pct of 200 fires nothing useful.
+	if req.DailyUSDLimit < 0 {
+		jsonErr(w, "daily_usd_limit must be >= 0", http.StatusBadRequest)
+		return
+	}
+	if req.DailyTokenLimit < 0 {
+		jsonErr(w, "daily_token_limit must be >= 0", http.StatusBadRequest)
+		return
+	}
+	if req.AlertThresholdPct < config.AlertThresholdMin || req.AlertThresholdPct > config.AlertThresholdMax {
+		jsonErr(w, fmt.Sprintf("alert_threshold_pct must be between %d and %d", config.AlertThresholdMin, config.AlertThresholdMax), http.StatusBadRequest)
+		return
+	}
 	cfg := globalbudget.GlobalBudgetConfig{
 		DailyUSDLimit:    req.DailyUSDLimit,
 		DailyTokenLimit:  req.DailyTokenLimit,
@@ -4542,11 +4558,30 @@ func (s *Server) handleBudgetProjectSave(w http.ResponseWriter, r *http.Request)
 		jsonErr(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
-	for _, v := range []float64{req.MaxWeeklyPct, req.MaxFiveHourPct} {
+	// All percentages: [0, 100].
+	for _, v := range []float64{req.MaxWeeklyPct, req.MaxFiveHourPct, req.GlobalUSDPct, req.GlobalTokenPct} {
 		if v < 0 || v > 100 {
 			jsonErr(w, "percentage values must be between 0 and 100", http.StatusBadRequest)
 			return
 		}
+	}
+	// All spend caps: must be >= 0. Zero is "no limit"; negative is meaningless
+	// and bypasses every comparison-based gate downstream.
+	if req.DailyUSDLimit < 0 {
+		jsonErr(w, "daily_usd_limit must be >= 0", http.StatusBadRequest)
+		return
+	}
+	if req.DailyTokenLimit < 0 {
+		jsonErr(w, "daily_token_limit must be >= 0", http.StatusBadRequest)
+		return
+	}
+	if req.MonthlyUSD < 0 {
+		jsonErr(w, "monthly_usd must be >= 0", http.StatusBadRequest)
+		return
+	}
+	if req.AlertThresholdPct < config.AlertThresholdMin || req.AlertThresholdPct > config.AlertThresholdMax {
+		jsonErr(w, fmt.Sprintf("alert_threshold_pct must be between %d and %d", config.AlertThresholdMin, config.AlertThresholdMax), http.StatusBadRequest)
+		return
 	}
 	workDir := s.resolveWorkDir(r)
 	cfg, err := config.Load(workDir)
@@ -4783,7 +4818,11 @@ func (s *Server) handleOptionsToggle(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleMaxParallelSet updates the per-project worker pool size used in parallel
-// PM mode. POST /api/options/max-parallel body: {"value":int}. 0 = unlimited.
+// PM mode. POST /api/options/max-parallel body: {"value":int}. The value must
+// be in [config.MaxParallelLower, config.MaxParallelUpper] (1..64); 0,
+// negatives, and absurdly large numbers are rejected with HTTP 400 because
+// they would either disable parallel dispatch or spawn pathological numbers
+// of goroutines per round (Task 20082).
 func (s *Server) handleMaxParallelSet(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Value int `json:"value"`
@@ -4793,8 +4832,13 @@ func (s *Server) handleMaxParallelSet(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
-	if req.Value < 0 || req.Value > 64 {
-		jsonErr(w, "max_parallel must be between 0 and 64", http.StatusBadRequest)
+	// Bound to [1, 64]: zero (or negative) would either disable parallel
+	// dispatch or, worse, allow unbounded goroutine fan-out; > 64 has never
+	// been useful in practice and risks exhausting file descriptors and
+	// upstream provider rate limits. See pkg/config bounds for the canonical
+	// constants used everywhere these values are validated.
+	if req.Value < config.MaxParallelLower || req.Value > config.MaxParallelUpper {
+		jsonErr(w, fmt.Sprintf("max_parallel must be between %d and %d", config.MaxParallelLower, config.MaxParallelUpper), http.StatusBadRequest)
 		return
 	}
 	workDir := s.resolveWorkDir(r)
@@ -7988,14 +8032,14 @@ function renderActiveOptions(s) {
     [!!s.dry_run,       '🧪', 'Dry Run',       '--dry-run',      'Click to toggle. Show prompts without invoking the provider (no API calls, no side effects)', 'dry_run'],
   ];
   const mp = parseInt(s.max_parallel, 10);
-  const mpVal = (Number.isFinite(mp) && mp > 0) ? mp : 0;
-  const mpDisplay = mpVal === 0 ? '∞' : String(mpVal);
+  const mpVal = (Number.isFinite(mp) && mp >= 1 && mp <= 64) ? mp : 1;
+  const mpDisplay = String(mpVal);
   const parallelControls =
     '<div class="option-badge ' + (s.parallel ? 'on' : 'off') + ' option-config" ' +
-      'title="Worker pool cap when Parallel mode is on. 0 = unlimited (all dependency-ready tasks run at once).">' +
+      'title="Worker pool cap when Parallel mode is on. Must be between 1 and 64.">' +
       '<span class="opt-icon">🧵</span>' +
       '<span>Max Parallel</span>' +
-      '<input type="number" id="maxParallelInput" min="0" max="64" step="1" value="' + mpVal + '" ' +
+      '<input type="number" id="maxParallelInput" min="1" max="64" step="1" value="' + mpVal + '" ' +
         'style="width:56px;background:transparent;color:var(--text);border:1px solid var(--border);' +
         'border-radius:4px;padding:2px 4px;font-family:inherit;font-size:inherit;text-align:right;" ' +
         'onchange="setMaxParallel(this.value)" />' +
@@ -8017,8 +8061,8 @@ function renderActiveOptions(s) {
 // wrapped in an IIFE.
 window.setMaxParallel = function(raw) {
   const n = parseInt(raw, 10);
-  if (!Number.isFinite(n) || n < 0 || n > 64) {
-    toast('Max Parallel must be 0–64 (0 = unlimited)', 'error');
+  if (!Number.isFinite(n) || n < 1 || n > 64) {
+    toast('Max Parallel must be between 1 and 64', 'error');
     return;
   }
   // Optimistic update so the badge label flips instantly; revert on failure.
@@ -8029,7 +8073,7 @@ window.setMaxParallel = function(raw) {
   }
   apiMethod('POST', pUrl('/api/options/max-parallel'), {value: n}).then(d => {
     if (d && d.ok) {
-      toast('Max Parallel set to ' + (n === 0 ? 'unlimited' : n), 'success');
+      toast('Max Parallel set to ' + n, 'success');
     } else {
       if (appState) {
         appState.max_parallel = prev;

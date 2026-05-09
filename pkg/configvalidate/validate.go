@@ -74,22 +74,25 @@ func (r *Report) Counts() (errors, warns, infos int) {
 // knownTopLevelKeys is the set of valid top-level keys in config.yaml.
 // These must match the yaml struct tags on config.Config.
 var knownTopLevelKeys = map[string]bool{
-	"provider":     true,
-	"anthropic":    true,
-	"openai":       true,
-	"ollama":       true,
-	"claudecode":   true,
-	"mock":         true,
-	"webhook":      true,
-	"github":       true,
-	"router":       true,
-	"hooks":        true,
-	"max_parallel": true,
-	"watch":        true,
-	"notify":       true,
-	"sync":         true,
-	"log_json":     true,
-	"budget":       true,
+	"provider":           true,
+	"anthropic":          true,
+	"openai":             true,
+	"ollama":             true,
+	"claudecode":         true,
+	"mock":               true,
+	"webhook":            true,
+	"github":             true,
+	"router":             true,
+	"hooks":              true,
+	"max_parallel":       true,
+	"watch":              true,
+	"notify":             true,
+	"sync":               true,
+	"log_json":           true,
+	"budget":             true,
+	"calibration_factor": true,
+	"rate_limit":         true,
+	"tracing":            true,
 }
 
 // registeredProviders is the set of provider names cloop knows about.
@@ -173,6 +176,20 @@ func Run(ctx context.Context, workdir string, opts ValidateOptions) (*Report, er
 		})
 		// Cannot continue without a valid config struct.
 	} else {
+		// rawCfg is what the user actually wrote on disk — Load() above runs
+		// validateAndClamp which silently rewrites pathological numeric values
+		// to their defaults. For the validator's bounds checks we want to
+		// surface those issues to the user, so we re-parse the file ourselves.
+		// Falls back to cfg when re-parsing fails (e.g. file missing) so the
+		// existing checks still run against a valid struct.
+		rawCfg := cfg
+		if len(rawData) > 0 {
+			parsed := config.Default()
+			if err := yaml.Unmarshal(rawData, parsed); err == nil {
+				rawCfg = parsed
+			}
+		}
+
 		// 2a. Provider reference
 		if cfg.Provider != "" && !registeredProviders[cfg.Provider] {
 			add(Finding{
@@ -199,8 +216,12 @@ func Run(ctx context.Context, workdir string, opts ValidateOptions) (*Report, er
 		// 2d. URL fields malformed
 		checkURLs(cfg, add)
 
-		// 2e. Budget values negative
-		checkBudgetValues(cfg, add)
+		// 2e. Budget values negative or out of range — use rawCfg so we see
+		// what the user actually wrote, not what Load() clamped it to.
+		checkBudgetValues(rawCfg, add)
+
+		// 2e'. Other numeric bounds (max_parallel, rate_limit, claudecode caps)
+		checkNumericBounds(rawCfg, add)
 
 		// 2f. Hooks referencing non-executable scripts
 		checkHookScripts(cfg, add)
@@ -343,12 +364,75 @@ func checkBudgetValues(cfg *config.Config, add func(Finding)) {
 			Message:  fmt.Sprintf("daily_token_limit is negative (%d) — must be 0 (unlimited) or positive", cfg.Budget.DailyTokenLimit),
 		})
 	}
-	if cfg.Budget.AlertThresholdPct < 0 || cfg.Budget.AlertThresholdPct > 100 {
+	if cfg.Budget.AlertThresholdPct < config.AlertThresholdMin || cfg.Budget.AlertThresholdPct > config.AlertThresholdMax {
 		add(Finding{
-			Severity: SeverityWarn,
+			Severity: SeverityError,
 			Field:    "config.budget.alert_threshold_pct",
-			Message:  fmt.Sprintf("alert_threshold_pct is %d — expected 0–100 (percent)", cfg.Budget.AlertThresholdPct),
+			Message:  fmt.Sprintf("alert_threshold_pct is %d — expected %d–%d (percent)", cfg.Budget.AlertThresholdPct, config.AlertThresholdMin, config.AlertThresholdMax),
 		})
+	}
+	if cfg.Budget.GlobalUSDPct < 0 || cfg.Budget.GlobalUSDPct > 100 {
+		add(Finding{
+			Severity: SeverityError,
+			Field:    "config.budget.global_usd_pct",
+			Message:  fmt.Sprintf("global_usd_pct is %.4f — expected 0–100 (percent)", cfg.Budget.GlobalUSDPct),
+		})
+	}
+	if cfg.Budget.GlobalTokenPct < 0 || cfg.Budget.GlobalTokenPct > 100 {
+		add(Finding{
+			Severity: SeverityError,
+			Field:    "config.budget.global_token_pct",
+			Message:  fmt.Sprintf("global_token_pct is %.4f — expected 0–100 (percent)", cfg.Budget.GlobalTokenPct),
+		})
+	}
+}
+
+// checkNumericBounds validates user-supplied numeric knobs that, if set
+// pathologically, would cause runtime damage (goroutine fan-out, broken
+// rate limiting). These mirror config.ValidateNumeric so the validator and
+// the live-config gate stay in lockstep.
+func checkNumericBounds(cfg *config.Config, add func(Finding)) {
+	// max_parallel: zero is "not set" (use runtime default); non-zero must be
+	// inside [MaxParallelLower, MaxParallelUpper]. Anything else is a bomb.
+	if cfg.MaxParallel != 0 && (cfg.MaxParallel < config.MaxParallelLower || cfg.MaxParallel > config.MaxParallelUpper) {
+		add(Finding{
+			Severity: SeverityError,
+			Field:    "config.max_parallel",
+			Message:  fmt.Sprintf("max_parallel is %d — must be 0 (default) or between %d and %d to avoid spawning unbounded goroutines", cfg.MaxParallel, config.MaxParallelLower, config.MaxParallelUpper),
+		})
+	}
+	// Rate limiter: zero = use HTTP server default; non-zero must be sane.
+	if cfg.RateLimit.RequestsPerSecond < 0 || (cfg.RateLimit.RequestsPerSecond > 0 && cfg.RateLimit.RequestsPerSecond < config.RateLimitRPSLower) {
+		add(Finding{
+			Severity: SeverityError,
+			Field:    "config.rate_limit.requests_per_second",
+			Message:  fmt.Sprintf("requests_per_second is %.4f — must be 0 (default) or >= %.0f", cfg.RateLimit.RequestsPerSecond, config.RateLimitRPSLower),
+		})
+	}
+	if cfg.RateLimit.Burst < 0 || (cfg.RateLimit.Burst > 0 && cfg.RateLimit.Burst < config.RateLimitBurstLower) {
+		add(Finding{
+			Severity: SeverityError,
+			Field:    "config.rate_limit.burst",
+			Message:  fmt.Sprintf("burst is %d — must be 0 (default) or >= %d", cfg.RateLimit.Burst, config.RateLimitBurstLower),
+		})
+	}
+	// Claude Code subscription caps are percentages.
+	for _, p := range []struct {
+		field string
+		val   float64
+	}{
+		{"config.claudecode.max_weekly_pct", cfg.ClaudeCode.MaxWeeklyPct},
+		{"config.claudecode.max_five_hour_pct", cfg.ClaudeCode.MaxFiveHourPct},
+		{"config.claudecode.max_weekly_opus_pct", cfg.ClaudeCode.MaxWeeklyOpusPct},
+		{"config.claudecode.max_weekly_sonnet_pct", cfg.ClaudeCode.MaxWeeklySonnetPct},
+	} {
+		if p.val < 0 || p.val > 100 {
+			add(Finding{
+				Severity: SeverityError,
+				Field:    p.field,
+				Message:  fmt.Sprintf("value %.4f outside 0–100 (percent)", p.val),
+			})
+		}
 	}
 }
 

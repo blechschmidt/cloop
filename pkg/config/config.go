@@ -23,6 +23,30 @@ import (
 
 const configFile = ".cloop/config.yaml"
 
+// Bounds for numeric config values. Centralised here so both Load()'s
+// warn-and-clamp path and `cloop config set`'s reject path agree on the
+// same limits, and so pkg/configvalidate can import them without hard-coding
+// constants in three places.
+const (
+	// MaxParallel: 1..MaxParallelUpper. Zero in YAML means "not set"
+	// (omitempty zero value) and stays untouched — runtime treats 0 as
+	// "use default". Anything else outside the range is pathological:
+	// negative spawns no workers; an absurdly large value would create
+	// thousands of goroutines per parallel tick.
+	MaxParallelLower = 1
+	MaxParallelUpper = 64
+
+	// Rate limiter: zero means "use HTTP server default", but if the user
+	// sets a value it must be a sane positive rate / burst.
+	RateLimitRPSLower   = 1.0
+	RateLimitBurstLower = 1
+
+	// Budget alert threshold percent must be 0..100. 0 is allowed and
+	// disables alerting; >100 is meaningless.
+	AlertThresholdMin = 0
+	AlertThresholdMax = 100
+)
+
 // permWarnedPaths tracks which config paths have already emitted the
 // "wide permissions" warning. Long-running processes (the Web UI, daemon,
 // auto-evolve loops) call Load() many times per second; without dedup the
@@ -31,6 +55,15 @@ const configFile = ".cloop/config.yaml"
 var (
 	permWarnedMu    sync.Mutex
 	permWarnedPaths = map[string]struct{}{}
+)
+
+// clampWarnedMu serialises the once-per-(path,field) clamp warnings emitted by
+// validateAndClamp. Same dedup rationale as permWarnedPaths: Load() runs hot
+// and we don't want to flood stderr with the same "max_parallel out of range"
+// line every second.
+var (
+	clampWarnedMu    sync.Mutex
+	clampWarnedPairs = map[string]struct{}{}
 )
 
 // Config is the project configuration loaded from .cloop/config.yaml.
@@ -404,6 +437,7 @@ func Load(workdir string) (*Config, error) {
 		// silently revert API keys and budget caps to defaults.
 		if blob := loadFromSQLite(workdir); blob != "" {
 			if err := yaml.Unmarshal([]byte(blob), cfg); err == nil {
+				cfg.validateAndClamp(path)
 				cfg.applyEnvVars()
 				return cfg, nil
 			}
@@ -436,8 +470,136 @@ func Load(workdir string) (*Config, error) {
 	if err := yaml.Unmarshal(data, cfg); err != nil {
 		return nil, err
 	}
+	cfg.validateAndClamp(path)
 	cfg.applyEnvVars()
 	return cfg, nil
+}
+
+// validateAndClamp inspects user-supplied numeric values, warns once per
+// (path, field) when a value is outside the safe range, and resets the field
+// to its zero value (= "use default") so the runtime cannot be steered into
+// pathological behaviour by a bad config. This is the *defensive* path —
+// `cloop config set` rejects bad values up front; this function exists so a
+// hand-edited or migrated YAML can never spawn 5000 goroutines, push
+// negative budgets, or emit nonsensical alert thresholds.
+func (c *Config) validateAndClamp(path string) {
+	warn := func(field, msg string) {
+		key := path + "::" + field
+		clampWarnedMu.Lock()
+		_, already := clampWarnedPairs[key]
+		if !already {
+			clampWarnedPairs[key] = struct{}{}
+		}
+		clampWarnedMu.Unlock()
+		if !already {
+			fmt.Fprintf(os.Stderr, "warning: config %s: %s — clamped to default\n", field, msg)
+		}
+	}
+	// max_parallel: zero is "not set"; non-zero must be in [1, 64].
+	if c.MaxParallel != 0 && (c.MaxParallel < MaxParallelLower || c.MaxParallel > MaxParallelUpper) {
+		warn("max_parallel", fmt.Sprintf("value %d outside [%d, %d]", c.MaxParallel, MaxParallelLower, MaxParallelUpper))
+		c.MaxParallel = 0
+	}
+	// rate_limit.requests_per_second: zero = use HTTP default; non-zero must be positive.
+	if c.RateLimit.RequestsPerSecond < 0 || (c.RateLimit.RequestsPerSecond > 0 && c.RateLimit.RequestsPerSecond < RateLimitRPSLower) {
+		warn("rate_limit.requests_per_second", fmt.Sprintf("value %.4f must be >= %.0f (or 0 for default)", c.RateLimit.RequestsPerSecond, RateLimitRPSLower))
+		c.RateLimit.RequestsPerSecond = 0
+	}
+	// rate_limit.burst: zero = use HTTP default; non-zero must be positive.
+	if c.RateLimit.Burst < 0 || (c.RateLimit.Burst > 0 && c.RateLimit.Burst < RateLimitBurstLower) {
+		warn("rate_limit.burst", fmt.Sprintf("value %d must be >= %d (or 0 for default)", c.RateLimit.Burst, RateLimitBurstLower))
+		c.RateLimit.Burst = 0
+	}
+	// Budget caps: must be >= 0. Zero means "no limit"; negative is meaningless.
+	if c.Budget.MonthlyUSD < 0 {
+		warn("budget.monthly_usd", fmt.Sprintf("value %.4f must be >= 0", c.Budget.MonthlyUSD))
+		c.Budget.MonthlyUSD = 0
+	}
+	if c.Budget.DailyUSDLimit < 0 {
+		warn("budget.daily_usd_limit", fmt.Sprintf("value %.4f must be >= 0", c.Budget.DailyUSDLimit))
+		c.Budget.DailyUSDLimit = 0
+	}
+	if c.Budget.DailyTokenLimit < 0 {
+		warn("budget.daily_token_limit", fmt.Sprintf("value %d must be >= 0", c.Budget.DailyTokenLimit))
+		c.Budget.DailyTokenLimit = 0
+	}
+	if c.Budget.AlertThresholdPct < AlertThresholdMin || c.Budget.AlertThresholdPct > AlertThresholdMax {
+		warn("budget.alert_threshold_pct", fmt.Sprintf("value %d outside [%d, %d]", c.Budget.AlertThresholdPct, AlertThresholdMin, AlertThresholdMax))
+		c.Budget.AlertThresholdPct = 0
+	}
+	if c.Budget.GlobalUSDPct < 0 || c.Budget.GlobalUSDPct > 100 {
+		warn("budget.global_usd_pct", fmt.Sprintf("value %.4f outside [0, 100]", c.Budget.GlobalUSDPct))
+		c.Budget.GlobalUSDPct = 0
+	}
+	if c.Budget.GlobalTokenPct < 0 || c.Budget.GlobalTokenPct > 100 {
+		warn("budget.global_token_pct", fmt.Sprintf("value %.4f outside [0, 100]", c.Budget.GlobalTokenPct))
+		c.Budget.GlobalTokenPct = 0
+	}
+	// Claude Code subscription caps: 0..100 percent.
+	if c.ClaudeCode.MaxWeeklyPct < 0 || c.ClaudeCode.MaxWeeklyPct > 100 {
+		warn("claudecode.max_weekly_pct", fmt.Sprintf("value %.4f outside [0, 100]", c.ClaudeCode.MaxWeeklyPct))
+		c.ClaudeCode.MaxWeeklyPct = 0
+	}
+	if c.ClaudeCode.MaxFiveHourPct < 0 || c.ClaudeCode.MaxFiveHourPct > 100 {
+		warn("claudecode.max_five_hour_pct", fmt.Sprintf("value %.4f outside [0, 100]", c.ClaudeCode.MaxFiveHourPct))
+		c.ClaudeCode.MaxFiveHourPct = 0
+	}
+	if c.ClaudeCode.MaxWeeklyOpusPct < 0 || c.ClaudeCode.MaxWeeklyOpusPct > 100 {
+		warn("claudecode.max_weekly_opus_pct", fmt.Sprintf("value %.4f outside [0, 100]", c.ClaudeCode.MaxWeeklyOpusPct))
+		c.ClaudeCode.MaxWeeklyOpusPct = 0
+	}
+	if c.ClaudeCode.MaxWeeklySonnetPct < 0 || c.ClaudeCode.MaxWeeklySonnetPct > 100 {
+		warn("claudecode.max_weekly_sonnet_pct", fmt.Sprintf("value %.4f outside [0, 100]", c.ClaudeCode.MaxWeeklySonnetPct))
+		c.ClaudeCode.MaxWeeklySonnetPct = 0
+	}
+}
+
+// ValidateNumeric returns a non-nil error describing the first numeric range
+// violation found in c, if any. Unlike validateAndClamp it does not mutate;
+// callers (`cloop config set`, the Web UI options endpoints) use it to reject
+// invalid inputs up front rather than silently clamping them. The returned
+// error message is suitable for showing to a user.
+func (c *Config) ValidateNumeric() error {
+	if c.MaxParallel != 0 && (c.MaxParallel < MaxParallelLower || c.MaxParallel > MaxParallelUpper) {
+		return fmt.Errorf("max_parallel must be between %d and %d (got %d)", MaxParallelLower, MaxParallelUpper, c.MaxParallel)
+	}
+	if c.RateLimit.RequestsPerSecond < 0 || (c.RateLimit.RequestsPerSecond > 0 && c.RateLimit.RequestsPerSecond < RateLimitRPSLower) {
+		return fmt.Errorf("rate_limit.requests_per_second must be >= %.0f or 0 to use the default (got %.4f)", RateLimitRPSLower, c.RateLimit.RequestsPerSecond)
+	}
+	if c.RateLimit.Burst < 0 || (c.RateLimit.Burst > 0 && c.RateLimit.Burst < RateLimitBurstLower) {
+		return fmt.Errorf("rate_limit.burst must be >= %d or 0 to use the default (got %d)", RateLimitBurstLower, c.RateLimit.Burst)
+	}
+	if c.Budget.MonthlyUSD < 0 {
+		return fmt.Errorf("budget.monthly_usd must be >= 0 (got %.4f)", c.Budget.MonthlyUSD)
+	}
+	if c.Budget.DailyUSDLimit < 0 {
+		return fmt.Errorf("budget.daily_usd_limit must be >= 0 (got %.4f)", c.Budget.DailyUSDLimit)
+	}
+	if c.Budget.DailyTokenLimit < 0 {
+		return fmt.Errorf("budget.daily_token_limit must be >= 0 (got %d)", c.Budget.DailyTokenLimit)
+	}
+	if c.Budget.AlertThresholdPct < AlertThresholdMin || c.Budget.AlertThresholdPct > AlertThresholdMax {
+		return fmt.Errorf("budget.alert_threshold_pct must be between %d and %d (got %d)", AlertThresholdMin, AlertThresholdMax, c.Budget.AlertThresholdPct)
+	}
+	if c.Budget.GlobalUSDPct < 0 || c.Budget.GlobalUSDPct > 100 {
+		return fmt.Errorf("budget.global_usd_pct must be between 0 and 100 (got %.4f)", c.Budget.GlobalUSDPct)
+	}
+	if c.Budget.GlobalTokenPct < 0 || c.Budget.GlobalTokenPct > 100 {
+		return fmt.Errorf("budget.global_token_pct must be between 0 and 100 (got %.4f)", c.Budget.GlobalTokenPct)
+	}
+	if c.ClaudeCode.MaxWeeklyPct < 0 || c.ClaudeCode.MaxWeeklyPct > 100 {
+		return fmt.Errorf("claudecode.max_weekly_pct must be between 0 and 100 (got %.4f)", c.ClaudeCode.MaxWeeklyPct)
+	}
+	if c.ClaudeCode.MaxFiveHourPct < 0 || c.ClaudeCode.MaxFiveHourPct > 100 {
+		return fmt.Errorf("claudecode.max_five_hour_pct must be between 0 and 100 (got %.4f)", c.ClaudeCode.MaxFiveHourPct)
+	}
+	if c.ClaudeCode.MaxWeeklyOpusPct < 0 || c.ClaudeCode.MaxWeeklyOpusPct > 100 {
+		return fmt.Errorf("claudecode.max_weekly_opus_pct must be between 0 and 100 (got %.4f)", c.ClaudeCode.MaxWeeklyOpusPct)
+	}
+	if c.ClaudeCode.MaxWeeklySonnetPct < 0 || c.ClaudeCode.MaxWeeklySonnetPct > 100 {
+		return fmt.Errorf("claudecode.max_weekly_sonnet_pct must be between 0 and 100 (got %.4f)", c.ClaudeCode.MaxWeeklySonnetPct)
+	}
+	return nil
 }
 
 // applyEnvVars overlays environment variable values onto config fields.

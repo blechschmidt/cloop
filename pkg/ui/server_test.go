@@ -2103,9 +2103,12 @@ func TestMaxParallelSet_PersistsValue(t *testing.T) {
 	}
 }
 
-// TestMaxParallelSet_ClampsInvalidValues verifies that out-of-range
-// max-parallel values are rejected with HTTP 400 and do not mutate state.
-func TestMaxParallelSet_ClampsInvalidValues(t *testing.T) {
+// TestMaxParallelSet_RejectsOutOfRangeValues verifies that out-of-range
+// max-parallel values — including 0 and negatives — are rejected with HTTP
+// 400 and do not mutate state. Task 20082 tightened the range from [0, 64]
+// (where 0 meant "unlimited") to [1, 64] so a value of 0 is no longer a
+// magic sentinel and explicit input must be a real worker-pool size.
+func TestMaxParallelSet_RejectsOutOfRangeValues(t *testing.T) {
 	dir := setupProjectDir(t, cloopGoal, nil)
 	ts := newTestServer(t, dir, nil)
 
@@ -2116,8 +2119,10 @@ func TestMaxParallelSet_ClampsInvalidValues(t *testing.T) {
 		name  string
 		value int
 	}{
+		{"zero", 0},
 		{"negative", -1},
 		{"way too large", 999},
+		{"just above upper bound", 65},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -2133,28 +2138,30 @@ func TestMaxParallelSet_ClampsInvalidValues(t *testing.T) {
 		})
 	}
 
-	// State should still hold the seeded value.
+	// State should still hold the seeded value — every rejected request must
+	// be a true no-op all the way to disk.
 	ps := loadStateOrFail(t, dir)
 	if ps.MaxParallel != 2 {
 		t.Errorf("MaxParallel mutated by rejected request: got %d, want 2", ps.MaxParallel)
 	}
 }
 
-// TestMaxParallelSet_ZeroAllowed verifies that 0 (=unlimited) is accepted.
-func TestMaxParallelSet_ZeroAllowed(t *testing.T) {
+// TestMaxParallelSet_AcceptsBoundaryValues verifies that the new lower (1)
+// and upper (64) inclusive bounds are accepted. Pinned because off-by-one
+// at either edge has been a recurring theme around this knob.
+func TestMaxParallelSet_AcceptsBoundaryValues(t *testing.T) {
 	dir := setupProjectDir(t, cloopGoal, nil)
 	ts := newTestServer(t, dir, nil)
 
-	// Seed a non-zero value first.
-	_ = apiPOST(t, ts, "/api/options/max-parallel", map[string]interface{}{"value": 8})
-
-	body := apiPOST(t, ts, "/api/options/max-parallel", map[string]interface{}{"value": 0})
-	if body["ok"] != true {
-		t.Fatalf("expected 0 to be accepted, got %v", body)
-	}
-	ps := loadStateOrFail(t, dir)
-	if ps.MaxParallel != 0 {
-		t.Errorf("MaxParallel = %d, want 0", ps.MaxParallel)
+	for _, v := range []int{1, 64} {
+		body := apiPOST(t, ts, "/api/options/max-parallel", map[string]interface{}{"value": v})
+		if body["ok"] != true {
+			t.Fatalf("value %d should be accepted: %v", v, body)
+		}
+		ps := loadStateOrFail(t, dir)
+		if ps.MaxParallel != v {
+			t.Errorf("MaxParallel after accepting %d = %d", v, ps.MaxParallel)
+		}
 	}
 }
 
