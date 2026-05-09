@@ -12,10 +12,19 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
 )
+
+// webhookMaxResponseBytes caps how much of the webhook response body we drain
+// before closing. Webhook acknowledgements are typically tiny (Slack returns
+// "ok", Discord returns 204 no-content); 64 KiB is generous defense-in-depth
+// against a malicious or misbehaving endpoint that streams unbounded data back
+// at us. We drain (rather than just close) so the underlying TCP connection
+// can return to the keep-alive pool.
+const webhookMaxResponseBytes int64 = 64 * 1024
 
 // EventType classifies a lifecycle notification.
 type EventType string
@@ -162,7 +171,10 @@ func (c *Client) send(payload Payload) {
 	if err != nil {
 		return
 	}
-	resp.Body.Close()
+	// Drain (capped) so the connection can be reused by the keep-alive pool;
+	// a hostile endpoint cannot make us read more than webhookMaxResponseBytes.
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, webhookMaxResponseBytes))
+	_ = resp.Body.Close()
 }
 
 // formatSlackMessage builds a human-readable string for Slack's {text: "..."} format.
