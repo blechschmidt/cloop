@@ -2856,6 +2856,70 @@ func TestRunPMParallel_ProviderPanicDoesNotCrashOrchestrator(t *testing.T) {
 	}
 }
 
+// TestRunPMParallel_ClarificationQuestions_DontSilentlyPass locks in the
+// fail-closed reroute for unanswered clarification questions in the parallel
+// path (commit be4d52b, pkg/orchestrator/orchestrator.go:3072). Mirrors
+// TestRunPM_ClarificationQuestions_DontSilentlyPass for the sequential path.
+//
+// Without the reroute, a parallel task whose output is "Before I proceed,
+// should I use option A or B?" produces signal=TaskInProgress (no TASK_*
+// token), which would fall into the `default:` arm of the parallel switch
+// (orchestrator.go:3141) and be silently marked TaskDone — laundering "the
+// LLM only asked questions" into "task complete". The reroute converts this
+// to TaskFailed before the switch, so consecutiveErrors increments and
+// MaxFailures eventually trips with status=failed instead.
+//
+// The parallel path has no auto-resolve loop (unlike sequential runPM), so
+// the reroute is the only protection — making this test the load-bearing
+// regression check for that wiring.
+func TestRunPMParallel_ClarificationQuestions_DontSilentlyPass(t *testing.T) {
+	dir := tempDir(t)
+	s := initState(t, dir, "goal", 0)
+	s.PMMode = true
+	// Two independent tasks, both will run concurrently in one parallel batch.
+	s.Plan = &pm.Plan{
+		Goal: "goal",
+		Tasks: []*pm.Task{
+			{ID: 1, Title: "Task A", Priority: 1, Status: pm.TaskPending},
+			{ID: 2, Title: "Task B", Priority: 2, Status: pm.TaskPending},
+		},
+	}
+	s.Save()
+
+	// safeProvider returns the same clarification-question output for every
+	// call. "before i proceed" + "should i " + `?` triggers the heuristic.
+	prov := &safeProvider{
+		name:   "mock",
+		output: "Before I proceed, should I use option A or option B?",
+	}
+	cfg := Config{WorkDir: dir, PMMode: true, Parallel: true, MaxFailures: 2}
+	o := newOrchestrator(t, dir, cfg, prov)
+
+	err := o.Run(context.Background())
+	if err == nil {
+		t.Fatal("expected error after MaxFailures clarification-only tasks in parallel, got nil")
+	}
+	if !strings.Contains(err.Error(), "consecutive") {
+		t.Errorf("expected error to mention consecutive failures, got: %v", err)
+	}
+
+	final, loadErr := state.Load(dir)
+	if loadErr != nil {
+		t.Fatalf("final load: %v", loadErr)
+	}
+	if final.Status != "failed" {
+		t.Errorf("expected status=failed, got %q", final.Status)
+	}
+	// Both tasks must be marked TaskFailed — NOT silently TaskDone via the
+	// no-signal default arm. This is the contract the reroute exists to enforce.
+	for _, task := range final.Plan.Tasks {
+		if task.Status != pm.TaskFailed {
+			t.Errorf("task %d (%s): expected TaskFailed (not silently TaskDone), got %s",
+				task.ID, task.Title, task.Status)
+		}
+	}
+}
+
 // TestRunPM_HealEmptyOutputDoesNotSilentlyPass locks down the heal-loop
 // empty-output guard added alongside the runLoop / runPM main-task / evolve
 // guards (commits 1d3c8a8, ceaf396, 9d94cad). Without it, a heal attempt
