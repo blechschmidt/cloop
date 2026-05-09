@@ -1,8 +1,11 @@
 package profile_test
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"sync"
 	"testing"
 
 	"github.com/blechschmidt/cloop/pkg/config"
@@ -203,6 +206,84 @@ func TestApply_Ollama(t *testing.T) {
 	}
 	if cfg.Ollama.BaseURL != "http://remote:11434" {
 		t.Errorf("unexpected base url: %s", cfg.Ollama.BaseURL)
+	}
+}
+
+// TestSetActive_AtomicWriteAndConcurrent exercises the active_profile write
+// path that was switched from os.WriteFile to writeAtomic + profilesMu. The
+// invariants:
+//
+//  1. Reader and writer race: a concurrent reader must always either see
+//     the previous value or the new one — never an empty string from a
+//     truncated/in-flight write.
+//  2. Permission is 0600 on POSIX (the file resolves which API key gets used,
+//     so it warrants the same posture as profiles.yaml).
+//  3. No leftover .tmp files after writes — confirms the rename succeeded
+//     and the cleanup defer fires.
+func TestSetActive_AtomicWriteAndConcurrent(t *testing.T) {
+	home := setHome(t)
+
+	// Seed a value so GetActive has something to read.
+	if err := profile.SetActive("seed"); err != nil {
+		t.Fatalf("seed SetActive: %v", err)
+	}
+
+	const iterations = 200
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	// Writer flips between two distinct names.
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			name := fmt.Sprintf("p-%d", i%2)
+			if err := profile.SetActive(name); err != nil {
+				t.Errorf("SetActive: %v", err)
+				return
+			}
+		}
+	}()
+
+	// Reader must never see "" while the writer is mid-flight (we only
+	// reach Clear after the writer is done).
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			got := profile.GetActive()
+			if got == "" {
+				t.Errorf("reader observed empty active profile during concurrent writes")
+				return
+			}
+		}
+	}()
+	wg.Wait()
+
+	// Permission check (POSIX only — the previous os.WriteFile used 0644).
+	if runtime.GOOS != "windows" {
+		info, err := os.Stat(filepath.Join(home, ".cloop", "active_profile"))
+		if err != nil {
+			t.Fatalf("stat active_profile: %v", err)
+		}
+		if got := info.Mode().Perm(); got != 0o600 {
+			t.Errorf("expected active_profile mode 0600, got %o", got)
+		}
+	}
+
+	// No leftover .tmp staging files.
+	entries, err := os.ReadDir(filepath.Join(home, ".cloop"))
+	if err != nil {
+		t.Fatalf("readdir: %v", err)
+	}
+	for _, e := range entries {
+		if filepath.Ext(e.Name()) == ".tmp" || (len(e.Name()) > 4 && e.Name()[:1] == "." && filepath.Ext(e.Name()) != ".yaml" && filepath.Ext(e.Name()) != "") {
+			// Be permissive: only fail on names matching our tmp pattern.
+			if matched, _ := filepath.Match(".active_profile.*.tmp", e.Name()); matched {
+				t.Errorf("leftover staging file: %s", e.Name())
+			}
+			if matched, _ := filepath.Match(".profiles.yaml.*.tmp", e.Name()); matched {
+				t.Errorf("leftover staging file: %s", e.Name())
+			}
+		}
 	}
 }
 
