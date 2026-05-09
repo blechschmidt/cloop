@@ -492,7 +492,10 @@ func TestTaskAddEmptyTitleRejected(t *testing.T) {
 	ts := newTestServer(t, dir, nil)
 
 	data, _ := json.Marshal(map[string]interface{}{"title": "  "})
-	resp, _ := http.Post(ts.URL+"/api/task/add", "application/json", bytes.NewReader(data))
+	resp, err := http.Post(ts.URL+"/api/task/add", "application/json", bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("POST /api/task/add: %v", err)
+	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("expected 400 for empty title, got %d", resp.StatusCode)
@@ -561,7 +564,10 @@ func TestTaskStatusInvalidRejected(t *testing.T) {
 	ts := newTestServer(t, dir, nil)
 
 	data, _ := json.Marshal(map[string]interface{}{"id": 1, "status": "invalid_status"})
-	resp, _ := http.Post(ts.URL+"/api/task/status", "application/json", bytes.NewReader(data))
+	resp, err := http.Post(ts.URL+"/api/task/status", "application/json", bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("POST /api/task/status: %v", err)
+	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("expected 400 for invalid status, got %d", resp.StatusCode)
@@ -574,7 +580,10 @@ func TestTaskStatusNotFound(t *testing.T) {
 	ts := newTestServer(t, dir, nil)
 
 	data, _ := json.Marshal(map[string]interface{}{"id": 999, "status": "done"})
-	resp, _ := http.Post(ts.URL+"/api/task/status", "application/json", bytes.NewReader(data))
+	resp, err := http.Post(ts.URL+"/api/task/status", "application/json", bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("POST /api/task/status: %v", err)
+	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("expected 404 for missing task, got %d", resp.StatusCode)
@@ -614,7 +623,10 @@ func TestTaskEditNotFound(t *testing.T) {
 	ts := newTestServer(t, dir, nil)
 
 	data, _ := json.Marshal(map[string]interface{}{"id": 999, "title": "X"})
-	resp, _ := http.Post(ts.URL+"/api/task/edit", "application/json", bytes.NewReader(data))
+	resp, err := http.Post(ts.URL+"/api/task/edit", "application/json", bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("POST /api/task/edit: %v", err)
+	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("expected 404, got %d", resp.StatusCode)
@@ -651,7 +663,10 @@ func TestTaskRemoveNotFound(t *testing.T) {
 	ts := newTestServer(t, dir, nil)
 
 	data, _ := json.Marshal(map[string]interface{}{"id": 999})
-	resp, _ := http.Post(ts.URL+"/api/task/remove", "application/json", bytes.NewReader(data))
+	resp, err := http.Post(ts.URL+"/api/task/remove", "application/json", bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("POST /api/task/remove: %v", err)
+	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("expected 404, got %d", resp.StatusCode)
@@ -683,7 +698,10 @@ func TestTaskMoveInvalidDirection(t *testing.T) {
 	ts := newTestServer(t, dir, nil)
 
 	data, _ := json.Marshal(map[string]interface{}{"id": 1, "direction": "sideways"})
-	resp, _ := http.Post(ts.URL+"/api/task/move", "application/json", bytes.NewReader(data))
+	resp, err := http.Post(ts.URL+"/api/task/move", "application/json", bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("POST /api/task/move: %v", err)
+	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("expected 400 for invalid direction, got %d", resp.StatusCode)
@@ -734,7 +752,10 @@ func TestPutTaskNotFound(t *testing.T) {
 	data, _ := json.Marshal(map[string]interface{}{"title": "X"})
 	req, _ := http.NewRequest(http.MethodPut, ts.URL+"/api/tasks/999", bytes.NewReader(data))
 	req.Header.Set("Content-Type", "application/json")
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("PUT /api/tasks/999: %v", err)
+	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("expected 404, got %d", resp.StatusCode)
@@ -792,7 +813,10 @@ func TestDeleteTaskInvalidID(t *testing.T) {
 	ts := newTestServer(t, dir, nil)
 
 	req, _ := http.NewRequest(http.MethodDelete, ts.URL+"/api/tasks/notanid", nil)
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("DELETE /api/tasks/notanid: %v", err)
+	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("expected 400 for non-numeric id, got %d", resp.StatusCode)
@@ -869,7 +893,10 @@ func TestTaskBlockerNotFound(t *testing.T) {
 	dir := setupProjectWithTasks(t, cloopGoal, tasks)
 	ts := newTestServer(t, dir, nil)
 
-	resp, _ := http.Get(ts.URL + "/api/tasks/999/blocker")
+	resp, err := http.Get(ts.URL + "/api/tasks/999/blocker")
+	if err != nil {
+		t.Fatalf("GET /api/tasks/999/blocker: %v", err)
+	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("expected 404 for missing task, got %d", resp.StatusCode)
@@ -896,7 +923,10 @@ func TestGetConfigMethodNotAllowed(t *testing.T) {
 	ts := newTestServer(t, dir, nil)
 
 	data, _ := json.Marshal(map[string]string{})
-	resp, _ := http.Post(ts.URL+"/api/config", "application/json", bytes.NewReader(data))
+	resp, err := http.Post(ts.URL+"/api/config", "application/json", bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("POST /api/config: %v", err)
+	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusMethodNotAllowed {
 		t.Errorf("expected 405 for POST /api/config, got %d", resp.StatusCode)
@@ -929,7 +959,10 @@ func TestConfigSetInvalidKey(t *testing.T) {
 	ts := newTestServer(t, dir, nil)
 
 	data, _ := json.Marshal(map[string]string{"key": "nonexistent.key", "value": "x"})
-	resp, _ := http.Post(ts.URL+"/api/config/set", "application/json", bytes.NewReader(data))
+	resp, err := http.Post(ts.URL+"/api/config/set", "application/json", bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("POST /api/config/set: %v", err)
+	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("expected 400 for unknown config key, got %d", resp.StatusCode)
@@ -941,7 +974,10 @@ func TestConfigSetInvalidProvider(t *testing.T) {
 	ts := newTestServer(t, dir, nil)
 
 	data, _ := json.Marshal(map[string]string{"key": "provider", "value": "unknown_provider"})
-	resp, _ := http.Post(ts.URL+"/api/config/set", "application/json", bytes.NewReader(data))
+	resp, err := http.Post(ts.URL+"/api/config/set", "application/json", bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("POST /api/config/set: %v", err)
+	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("expected 400 for unknown provider, got %d", resp.StatusCode)
@@ -975,7 +1011,10 @@ func TestInitEmptyGoalRejected(t *testing.T) {
 
 	ts := newTestServer(t, dir, nil)
 	data, _ := json.Marshal(map[string]string{"goal": ""})
-	resp, _ := http.Post(ts.URL+"/api/init", "application/json", bytes.NewReader(data))
+	resp, err := http.Post(ts.URL+"/api/init", "application/json", bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("POST /api/init: %v", err)
+	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("expected 400 for empty goal, got %d", resp.StatusCode)
