@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -68,8 +69,6 @@ type DB struct {
 }
 
 const schema = `
-PRAGMA journal_mode=WAL;
-PRAGMA busy_timeout=5000;
 PRAGMA foreign_keys=ON;
 
 CREATE TABLE IF NOT EXISTS metadata (
@@ -160,20 +159,65 @@ CREATE INDEX IF NOT EXISTS queue_status ON queue(status);
 CREATE INDEX IF NOT EXISTS queue_created_at ON queue(created_at);
 `
 
-// Open opens (or creates) the SQLite database at dbPath and applies the schema.
+// Open opens (or creates) the SQLite database at dbPath, applies tuning
+// pragmas, and creates the schema if necessary.
+//
+// Concurrency model: every cloop process (Web UI, orchestrator, CLI commands)
+// opens its own *DB handle pointing at the same .cloop/state.db file. WAL
+// mode + busy_timeout coordinate them at the SQLite file level, so writes
+// from one process do not return SQLITE_BUSY to readers in another.
 func Open(dbPath string) (*DB, error) {
 	conn, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("statedb open %s: %w", dbPath, err)
 	}
-	// Single writer connection; WAL mode allows concurrent readers.
+	// One physical connection per *DB handle. Within a single process this
+	// serialises all reads and writes through Go's connection pool so we
+	// never hit intra-process lock contention; cross-process contention is
+	// handled by the pragmas below. Bumping this above 1 is possible with
+	// WAL but would require re-applying connection-scoped pragmas
+	// (busy_timeout, synchronous) on every new connection.
 	conn.SetMaxOpenConns(1)
+
+	if err := applyPragmas(conn); err != nil {
+		conn.Close()
+		return nil, err
+	}
 
 	if _, err := conn.Exec(schema); err != nil {
 		conn.Close()
 		return nil, fmt.Errorf("statedb schema: %w", err)
 	}
 	return &DB{conn: conn}, nil
+}
+
+// applyPragmas configures the SQLite connection for safe multi-process use.
+//
+//   - journal_mode=WAL: persistent file-level setting. Lets one writer and
+//     many readers proceed without blocking each other. Required since
+//     state.db is now shared by the Web UI, orchestrator, and CLI commands
+//     (Task 20079 merged the queue and state DBs into a single file).
+//   - busy_timeout=5000: when a connection encounters a lock, retry for up
+//     to 5 seconds before returning SQLITE_BUSY. Prevents intermittent
+//     "database is locked" errors under realistic load (Task 20084).
+//   - synchronous=NORMAL: safe under WAL — a sudden power loss may lose
+//     the very last commit but cannot corrupt the database — and is
+//     several times faster than the FULL default for our write pattern.
+func applyPragmas(conn *sql.DB) error {
+	var mode string
+	if err := conn.QueryRow(`PRAGMA journal_mode=WAL`).Scan(&mode); err != nil {
+		return fmt.Errorf("statedb: enable WAL mode: %w", err)
+	}
+	if !strings.EqualFold(mode, "wal") {
+		return fmt.Errorf("statedb: WAL mode rejected (got journal_mode=%q); filesystem may not support it", mode)
+	}
+	if _, err := conn.Exec(`PRAGMA busy_timeout=5000`); err != nil {
+		return fmt.Errorf("statedb: set busy_timeout: %w", err)
+	}
+	if _, err := conn.Exec(`PRAGMA synchronous=NORMAL`); err != nil {
+		return fmt.Errorf("statedb: set synchronous=NORMAL: %w", err)
+	}
+	return nil
 }
 
 // Close releases the database connection.

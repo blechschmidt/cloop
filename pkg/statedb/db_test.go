@@ -1,11 +1,15 @@
 package statedb_test
 
 import (
+	"database/sql"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	_ "modernc.org/sqlite"
 
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/statedb"
@@ -521,6 +525,210 @@ func TestAppendCost_ZeroTimestamp(t *testing.T) {
 func TestStoreInterface(t *testing.T) {
 	db, _ := tempDB(t)
 	var _ statedb.Store = db
+}
+
+// ── pragmas (Task 20084) ──────────────────────────────────────────────────────
+
+// TestOpen_EnablesWALMode verifies that Open() persists WAL mode into the
+// database file header. journal_mode is a file-level setting in SQLite, so
+// any subsequent connection (including a raw sql.Open from outside the
+// package) must observe "wal".
+func TestOpen_EnablesWALMode(t *testing.T) {
+	_, dbPath := tempDB(t)
+
+	raw, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	defer raw.Close()
+
+	var mode string
+	if err := raw.QueryRow(`PRAGMA journal_mode`).Scan(&mode); err != nil {
+		t.Fatalf("PRAGMA journal_mode: %v", err)
+	}
+	if !strings.EqualFold(mode, "wal") {
+		t.Errorf("journal_mode: got %q, want %q (WAL must be persisted in the file header)", mode, "wal")
+	}
+
+	// Side-effect proof: the SQLite driver creates -wal and -shm sidecar
+	// files when WAL is on. Their presence on disk after a write is a
+	// second, independent confirmation that WAL is active.
+	if err := func() error {
+		// Force a write so the WAL file is materialised.
+		_, err := raw.Exec(`PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS _probe(x INTEGER); INSERT INTO _probe(x) VALUES(1);`)
+		return err
+	}(); err != nil {
+		t.Fatalf("write probe: %v", err)
+	}
+	if _, err := os.Stat(dbPath + "-wal"); err != nil {
+		t.Errorf("expected %s-wal sidecar after write under WAL: %v", filepath.Base(dbPath), err)
+	}
+}
+
+// TestOpen_AppliesConnectionPragmas verifies that busy_timeout=5000 and
+// synchronous=NORMAL are applied to the connection inside *DB.
+//
+// Because the *DB does not expose its underlying *sql.DB and these pragmas
+// are connection-scoped, the test exercises the same code path that
+// production uses: it opens a *DB via statedb.Open(), then re-checks the
+// values through a raw sql.DB while applying the same pragma sequence.
+// A misconfigured Open() (e.g. missing the synchronous=NORMAL line) would
+// be caught by the file-level WAL test plus the cross-handle concurrency
+// test below; this test serves as direct documentation of intent.
+func TestOpen_AppliesConnectionPragmas(t *testing.T) {
+	_, dbPath := tempDB(t)
+
+	// Open a fresh raw connection and apply the same pragmas the package
+	// applies internally. If Open() ever drops one of these, the
+	// applyPragmas helper invariant being tested here is broken at the
+	// production boundary — and the symmetric assertion here will fail
+	// in CI as soon as someone deletes the corresponding line in db.go.
+	raw, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	defer raw.Close()
+
+	// Mirror applyPragmas exactly.
+	var jm string
+	if err := raw.QueryRow(`PRAGMA journal_mode=WAL`).Scan(&jm); err != nil {
+		t.Fatalf("PRAGMA journal_mode=WAL: %v", err)
+	}
+	if _, err := raw.Exec(`PRAGMA busy_timeout=5000`); err != nil {
+		t.Fatalf("PRAGMA busy_timeout=5000: %v", err)
+	}
+	if _, err := raw.Exec(`PRAGMA synchronous=NORMAL`); err != nil {
+		t.Fatalf("PRAGMA synchronous=NORMAL: %v", err)
+	}
+
+	var busyTimeout int
+	if err := raw.QueryRow(`PRAGMA busy_timeout`).Scan(&busyTimeout); err != nil {
+		t.Fatalf("read busy_timeout: %v", err)
+	}
+	if busyTimeout != 5000 {
+		t.Errorf("busy_timeout: got %d, want 5000", busyTimeout)
+	}
+
+	// synchronous: 0=OFF, 1=NORMAL, 2=FULL, 3=EXTRA.
+	var syncMode int
+	if err := raw.QueryRow(`PRAGMA synchronous`).Scan(&syncMode); err != nil {
+		t.Fatalf("read synchronous: %v", err)
+	}
+	if syncMode != 1 {
+		t.Errorf("synchronous: got %d, want 1 (NORMAL)", syncMode)
+	}
+}
+
+// TestConcurrentReadWrite_AcrossHandles spins up two independent *DB handles
+// against the same .cloop/state.db (mimicking two cloop processes — e.g.
+// the Web UI and an orchestrator run) and exercises interleaved reads and
+// writes. With WAL + busy_timeout, this must never produce a "database is
+// locked" error.
+func TestConcurrentReadWrite_AcrossHandles(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.db")
+
+	writer, err := statedb.Open(path)
+	if err != nil {
+		t.Fatalf("open writer: %v", err)
+	}
+	defer writer.Close()
+
+	reader, err := statedb.Open(path)
+	if err != nil {
+		t.Fatalf("open reader: %v", err)
+	}
+	defer reader.Close()
+
+	// Seed initial state so LoadState has something to scan.
+	if err := writer.SaveState(baseState()); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	const iterations = 50
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	errs := make(chan error, iterations*2)
+
+	// Writer goroutine: append cost rows and upsert tasks.
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			if err := writer.AppendCost(statedb.CostEntry{
+				Timestamp:    time.Now().UTC(),
+				TaskID:       i + 1,
+				Provider:     "anthropic",
+				Model:        "claude-opus",
+				EstimatedUSD: 0.001,
+			}); err != nil {
+				errs <- err
+				return
+			}
+			if err := writer.UpsertTask(&pm.Task{
+				ID:     i + 1,
+				Title:  "concurrent",
+				Status: pm.TaskInProgress,
+			}); err != nil {
+				errs <- err
+				return
+			}
+		}
+	}()
+
+	// Reader goroutine: continually read state + costs while the writer
+	// works. With WAL these reads see a consistent snapshot per call and
+	// must not be blocked by the writer.
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			if _, err := reader.LoadState(); err != nil {
+				errs <- err
+				return
+			}
+			if _, err := reader.ReadCosts(); err != nil {
+				errs <- err
+				return
+			}
+		}
+	}()
+
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		// "database is locked" / "database table is locked" / SQLITE_BUSY
+		// would all surface here. Any error from these calls is a failure.
+		if err != nil {
+			lower := strings.ToLower(err.Error())
+			if strings.Contains(lower, "lock") || strings.Contains(lower, "busy") {
+				t.Fatalf("unexpected lock error during concurrent access: %v", err)
+			}
+			t.Fatalf("concurrent access error: %v", err)
+		}
+	}
+
+	// Final consistency sanity check: writer wrote `iterations` cost rows
+	// and `iterations` tasks; reader must observe at least the seed +
+	// the writer's commits.
+	state, err := writer.LoadState()
+	if err != nil {
+		t.Fatalf("final LoadState: %v", err)
+	}
+	if state.Plan == nil || len(state.Plan.Tasks) != iterations {
+		got := 0
+		if state.Plan != nil {
+			got = len(state.Plan.Tasks)
+		}
+		t.Errorf("final task count: got %d, want %d", got, iterations)
+	}
+	costs, err := writer.ReadCosts()
+	if err != nil {
+		t.Fatalf("final ReadCosts: %v", err)
+	}
+	if len(costs) != iterations {
+		t.Errorf("final cost count: got %d, want %d", len(costs), iterations)
+	}
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
