@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/atomicfile"
 	"github.com/blechschmidt/cloop/pkg/insights"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/provider"
@@ -456,5 +457,5 @@ func saveSimulationReport(workDir string, report *SimulationReport) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0o644)
+	return atomicfile.Write(path, data, 0o644)
 }

@@ -11,6 +11,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/blechschmidt/cloop/pkg/atomicfile"
 )
 
 const skillsDir = ".cloop/skills"
@@ -166,7 +168,7 @@ func Save(workDir, name, content string) error {
 		return fmt.Errorf("creating skills directory: %w", err)
 	}
 	path := userSkillPath(workDir, name)
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+	if err := atomicfile.Write(path, []byte(content), 0o644); err != nil {
 		return fmt.Errorf("writing skill file: %w", err)
 	}
 	return nil

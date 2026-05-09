@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/blechschmidt/cloop/pkg/atomicfile"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/provider"
 )
@@ -186,7 +187,7 @@ func Generate(ctx context.Context, prov provider.Provider, opts provider.Options
 	filename := fmt.Sprintf("%d_test.%s", task.ID, ext)
 	absPath := filepath.Join(testsDir, filename)
 
-	if err := os.WriteFile(absPath, []byte(code+"\n"), 0o644); err != nil {
+	if err := atomicfile.Write(absPath, []byte(code+"\n"), 0o644); err != nil {
 		return nil, fmt.Errorf("write test file: %w", err)
 	}
 

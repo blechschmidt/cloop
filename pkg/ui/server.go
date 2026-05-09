@@ -143,6 +143,30 @@ var wsReadFrameLimit int64 = 4 * 1024
 // callers should treat it as immutable.
 var wsMaxInboundMsgsPerSecond = 100
 
+// wsPingInterval is how often the writer loop sends a server-initiated
+// WebSocket ping to probe peer liveness. Without this, a silent client
+// (TCP-connected but unresponsive — laptop suspended, network partition,
+// peer crashed without RST) holds the goroutine pair alive until the OS-
+// level TCP keepalive fires (default ~2 hours on Linux). Pinging every 30s
+// detects dead peers within wsPingInterval+wsPingTimeout, an order of
+// magnitude faster than relying on TCP timeouts. nhooyr handles the pong
+// dispatch internally via the active drain Read; the writer's Ping call
+// blocks on the matching pong (or ctx) so concurrent operation is safe.
+//
+// Declared as var (not const) so regression tests can shrink it; production
+// callers should treat it as immutable.
+var wsPingInterval = 30 * time.Second
+
+// wsPingTimeout caps how long the writer loop waits for a pong to a single
+// ping. Exceeding this is treated as a dead connection and the writer exits;
+// the deferred conn.CloseNow + hubClient cleanup unwind the goroutine. 10s
+// is generous for a slow link round-trip but tight enough that a peer that
+// stops responding mid-session is detected quickly.
+//
+// Declared as var (not const) so regression tests can shrink it; production
+// callers should treat it as immutable.
+var wsPingTimeout = 10 * time.Second
+
 // wsWrite sends a single WebSocket text frame with a per-call deadline
 // derived from ctx. Returns whatever Write returns (deadline-exceeded shows
 // up as ctx.Err on the wrapped error).
@@ -1483,6 +1507,13 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		Data: json.RawMessage(`{"reason":"lagged"}`),
 	})
 
+	// Server-initiated keepalive ping. Detects dead/unresponsive peers
+	// faster than the OS-level TCP keepalive (~2h on Linux). nhooyr's
+	// pong dispatch happens via the active drain Read, so it is safe to
+	// call Ping here concurrently.
+	pingTicker := time.NewTicker(wsPingInterval)
+	defer pingTicker.Stop()
+
 	for {
 		// Resync takes priority: if the broadcaster signaled lag, drain any
 		// stale events and emit a single resync directive. The client will
@@ -1508,6 +1539,17 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 			// in which case the drain has already kicked off the
 			// status-coded close frame asynchronously.)
 			return
+		case <-pingTicker.C:
+			pctx, pcancel := context.WithTimeout(ctx, wsPingTimeout)
+			err := conn.Ping(pctx)
+			pcancel()
+			if err != nil {
+				// Dead/unresponsive peer (no pong inside the
+				// timeout, or the peer's TCP path broke). Exit
+				// the writer; deferred CloseNow + hubClient
+				// cleanup unwind the rest.
+				return
+			}
 		case <-hc.resync:
 			drainWS(hc.ch)
 			if err := wsWrite(ctx, conn, resyncBytes); err != nil {

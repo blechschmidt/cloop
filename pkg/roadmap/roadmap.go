@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/atomicfile"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/provider"
 )
@@ -173,7 +174,7 @@ func Save(workDir string, rm *Roadmap, format Format) (string, error) {
 		content = RenderASCII(rm)
 	}
 
-	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+	if err := atomicfile.Write(path, []byte(content), 0o644); err != nil {
 		return "", fmt.Errorf("writing roadmap: %w", err)
 	}
 	return path, nil

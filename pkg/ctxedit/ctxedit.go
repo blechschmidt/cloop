@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/blechschmidt/cloop/pkg/atomicfile"
 	"github.com/blechschmidt/cloop/pkg/pm"
 )
 
@@ -138,7 +139,7 @@ func SaveOverride(workDir string, taskID int, content string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	return os.WriteFile(path, []byte(content), 0o644)
+	return atomicfile.Write(path, []byte(content), 0o644)
 }
 
 // ClearOverride removes the context override for taskID.

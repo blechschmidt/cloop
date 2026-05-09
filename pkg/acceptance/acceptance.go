@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/artifact"
+	"github.com/blechschmidt/cloop/pkg/atomicfile"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/provider"
 	"github.com/blechschmidt/cloop/pkg/state"
@@ -171,7 +172,7 @@ func Apply(workDir string, s *ProjectState, task *pm.Task, result *Result) (stri
 	b.WriteString(result.Criteria)
 	b.WriteString("\n")
 
-	if err := os.WriteFile(absPath, []byte(b.String()), 0o644); err != nil {
+	if err := atomicfile.Write(absPath, []byte(b.String()), 0o644); err != nil {
 		return "", fmt.Errorf("write acceptance file: %w", err)
 	}
 

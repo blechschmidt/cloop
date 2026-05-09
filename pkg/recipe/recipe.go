@@ -16,6 +16,7 @@ import (
 	"text/template"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/atomicfile"
 	"github.com/blechschmidt/cloop/pkg/env"
 	"github.com/blechschmidt/cloop/pkg/flow"
 	"github.com/blechschmidt/cloop/pkg/hooks"
@@ -166,7 +167,7 @@ func Install(workDir, source string) (*Recipe, error) {
 	}
 
 	dest := recipePath(workDir, r.Name)
-	if err := os.WriteFile(dest, data, 0o644); err != nil {
+	if err := atomicfile.Write(dest, data, 0o644); err != nil {
 		return nil, fmt.Errorf("writing recipe %q: %w", r.Name, err)
 	}
 	return r, nil

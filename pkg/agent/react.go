@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/atomicfile"
 	"github.com/blechschmidt/cloop/pkg/provider"
 	"github.com/fatih/color"
 )
@@ -353,7 +354,7 @@ func (t *writeFileTool) Run(args map[string]string) (string, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return "", err
 	}
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+	if err := atomicfile.Write(path, []byte(content), 0o644); err != nil {
 		return "", err
 	}
 	return fmt.Sprintf("wrote %d bytes to %s", len(content), path), nil

@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/blechschmidt/cloop/pkg/atomicfile"
 	"github.com/blechschmidt/cloop/pkg/provider"
 )
 
@@ -542,7 +543,7 @@ func WriteReportArtifact(workDir string, taskID int, report *Report) (string, er
 		content += raw + "\n```\n"
 	}
 
-	if err := os.WriteFile(absPath, []byte(content), 0o644); err != nil {
+	if err := atomicfile.Write(absPath, []byte(content), 0o644); err != nil {
 		return "", fmt.Errorf("write report: %w", err)
 	}
 

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/atomicfile"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/state"
 )
@@ -279,7 +280,7 @@ func copyFile(src, dst string) error {
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return err
 	}
-	return os.WriteFile(dst, data, 0o644)
+	return atomicfile.Write(dst, data, 0o644)
 }
 
 // copyDir recursively copies all files from src to dst.
@@ -333,7 +334,7 @@ func pullPlanHistory(workDir, remote, branch, remoteRef string) error {
 		if err != nil {
 			continue
 		}
-		_ = os.WriteFile(localPath, []byte(content), 0o644)
+		_ = atomicfile.Write(localPath, []byte(content), 0o644)
 	}
 	_ = remote
 	_ = branch

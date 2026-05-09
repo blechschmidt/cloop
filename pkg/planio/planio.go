@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
+	"github.com/blechschmidt/cloop/pkg/atomicfile"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"gopkg.in/yaml.v3"
 )
@@ -115,7 +116,7 @@ func Export(plan *pm.Plan, format, outputPath string) error {
 		}
 	}
 
-	return os.WriteFile(outputPath, data, 0o644)
+	return atomicfile.Write(outputPath, data, 0o644)
 }
 
 // MergeMode controls how Import handles an existing plan.
