@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/boundedread"
 	"github.com/blechschmidt/cloop/pkg/milestone"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/statedb"
@@ -20,11 +21,22 @@ const (
 	sessionMetaFile = "session.json"     // sentinel: presence means dir is a session dir
 )
 
+// activeSessionFile holds a single session name (typically tens of bytes).
+// 4 KiB is plenty even for unusually long names; anything larger is corruption
+// or an attempt to make ActiveDir slurp a runaway file into memory.
+var maxActiveSessionBytes int64 = 4 * 1024
+
+// Legacy state.json files in long-running projects can grow large because each
+// StepResult embeds the full provider output, but 64 MiB still bounds the
+// migration path against torn writes, accidental log redirection into the
+// state file, or corruption that would otherwise OOM the process.
+var maxLegacyStateBytes int64 = 64 * 1024 * 1024
+
 // ActiveDir resolves the effective working directory for state operations.
 // If a session is active (recorded in .cloop/active_session), it returns
 // the session's isolated directory; otherwise it returns workDir unchanged.
 func ActiveDir(workDir string) string {
-	data, err := os.ReadFile(filepath.Join(workDir, activeFile))
+	data, err := boundedread.ReadFile(filepath.Join(workDir, activeFile), maxActiveSessionBytes)
 	if err != nil {
 		return workDir
 	}
@@ -474,7 +486,7 @@ type legacyState struct {
 
 func migrateFromJSON(dir, jsonPath, dbPath string) error {
 	workdir := dir
-	data, err := os.ReadFile(jsonPath)
+	data, err := boundedread.ReadFile(jsonPath, maxLegacyStateBytes)
 	if err != nil {
 		return err
 	}

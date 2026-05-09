@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/blechschmidt/cloop/pkg/atomicfile"
 	gh "github.com/blechschmidt/cloop/pkg/github"
 	"github.com/blechschmidt/cloop/pkg/pm"
 )
@@ -26,6 +27,15 @@ type Mapping struct {
 
 // LoadMapping reads the persisted mapping file. Returns an empty mapping when the
 // file does not exist yet.
+//
+// On parse failure (zero-byte file from a pre-atomicfile torn write, manual
+// edit gone wrong, schema drift) the corrupt file is quarantined aside as
+// github-sync.json.corrupt-<unix> and an empty mapping is returned. The next
+// `cloop sync github push|pull` will rebuild the mapping from the current plan
+// (and from any pre-existing Task.GitHubIssue links). Losing the mapping is
+// preferable to hard-failing every github sync subcommand on a single bad save
+// — a lost mapping just means duplicate-issue checks fall back to the legacy
+// Task.GitHubIssue field, which the codebase already reconciles.
 func LoadMapping(workDir string) (*Mapping, error) {
 	path := filepath.Join(workDir, mappingFile)
 	data, err := os.ReadFile(path)
@@ -40,7 +50,16 @@ func LoadMapping(workDir string) (*Mapping, error) {
 	}
 	var m Mapping
 	if err := json.Unmarshal(data, &m); err != nil {
-		return nil, fmt.Errorf("parsing %s: %w", mappingFile, err)
+		qpath := atomicfile.QuarantineCorrupt(path)
+		if qpath != "" {
+			fmt.Fprintf(os.Stderr, "warning: github sync mapping at %s was corrupt (%v); quarantined to %s, starting fresh\n", path, err, qpath)
+		} else {
+			fmt.Fprintf(os.Stderr, "warning: github sync mapping at %s was corrupt (%v) and could not be quarantined; ignoring\n", path, err)
+		}
+		return &Mapping{
+			TaskToIssue: make(map[int]int),
+			IssueToTask: make(map[int]int),
+		}, nil
 	}
 	if m.TaskToIssue == nil {
 		m.TaskToIssue = make(map[int]int)
@@ -56,7 +75,14 @@ func LoadMapping(workDir string) (*Mapping, error) {
 	return &m, nil
 }
 
-// Save writes the mapping to disk.
+// Save writes the mapping to disk atomically.
+//
+// A torn write (crash mid-write, ENOSPC, two `cloop sync github` runs racing)
+// would leave a 0-byte or truncated github-sync.json; the next LoadMapping
+// would lose every task↔issue link, causing the next push to recreate already-
+// linked issues as duplicates. The write is staged into a sibling .tmp file,
+// fsynced, then renamed into place; the parent directory is fsynced so the
+// dirent survives a power loss.
 func (m *Mapping) Save(workDir string) error {
 	path := filepath.Join(workDir, mappingFile)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -66,7 +92,7 @@ func (m *Mapping) Save(workDir string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0o644)
+	return atomicfile.Write(path, data, 0o600)
 }
 
 // Link records a task↔issue relationship in both maps.

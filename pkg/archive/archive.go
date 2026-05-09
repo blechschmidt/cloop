@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/atomicfile"
 	"github.com/blechschmidt/cloop/pkg/pm"
 )
 
@@ -23,6 +24,13 @@ type ArchivedTask struct {
 
 // Load reads the archive from disk. Returns an empty slice when the file does
 // not exist (normal for a new project).
+//
+// On parse failure (zero-byte file from a pre-atomicfile torn write, manual
+// edit gone wrong, schema drift) the corrupt file is quarantined aside as
+// archive.json.corrupt-<unix> and a nil slice is returned. The next archive
+// operation will reseed the file from scratch — losing the historical archive
+// is preferable to hard-failing `cloop task archive`, `cloop task unarchive`,
+// and any search/report path that calls Load (e.g. pkg/search/search.go).
 func Load(workDir string) ([]ArchivedTask, error) {
 	path := filepath.Join(workDir, archiveFile)
 	data, err := os.ReadFile(path)
@@ -34,12 +42,25 @@ func Load(workDir string) ([]ArchivedTask, error) {
 	}
 	var tasks []ArchivedTask
 	if err := json.Unmarshal(data, &tasks); err != nil {
-		return nil, fmt.Errorf("parsing archive: %w", err)
+		qpath := atomicfile.QuarantineCorrupt(path)
+		if qpath != "" {
+			fmt.Fprintf(os.Stderr, "warning: archive at %s was corrupt (%v); quarantined to %s, starting fresh\n", path, err, qpath)
+		} else {
+			fmt.Fprintf(os.Stderr, "warning: archive at %s was corrupt (%v) and could not be quarantined; ignoring\n", path, err)
+		}
+		return nil, nil
 	}
 	return tasks, nil
 }
 
-// Save persists the archive to disk atomically (write + rename).
+// Save persists the archive to disk atomically.
+//
+// The previous tmp+rename hand-roll skipped fsync of both the data file and
+// the parent directory; on power loss the rename could be lost (leaving the
+// previous file) or — worse — the new file could exist on disk but the dirent
+// could be missing, leaving neither the old nor the new archive visible.
+// atomicfile.Write fsyncs both the data file and the parent directory's
+// inode, so the rename survives a power loss.
 func Save(workDir string, tasks []ArchivedTask) error {
 	path := filepath.Join(workDir, archiveFile)
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
@@ -49,14 +70,7 @@ func Save(workDir string, tasks []ArchivedTask) error {
 	if err != nil {
 		return fmt.Errorf("encoding archive: %w", err)
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return fmt.Errorf("writing archive tmp: %w", err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		return fmt.Errorf("renaming archive: %w", err)
-	}
-	return nil
+	return atomicfile.Write(path, data, 0o600)
 }
 
 // isTerminal returns true for statuses that are considered "completed" and
