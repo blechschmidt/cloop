@@ -13,6 +13,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/blechschmidt/cloop/pkg/atomicfile"
 )
 
 // Dir is the relative path inside a project where ADR files live.
@@ -300,44 +302,7 @@ func (a *ADR) Save() error {
 	if !strings.HasSuffix(body, "\n") {
 		sb.WriteString("\n")
 	}
-	dir := filepath.Dir(a.Path)
-	return writeAtomic(dir, a.Path, []byte(sb.String()), 0o644)
-}
-
-// writeAtomic stages data in a sibling .tmp file in dir, fsyncs, chmods, then
-// renames into path. POSIX rename is atomic with respect to readers, so
-// concurrent readers always observe either the previous valid file or the new
-// one — never a truncated one. The cleanup defer removes any leftover tmp
-// file on error, so a failed write leaves the original at path intact.
-func writeAtomic(dir, path string, data []byte, mode os.FileMode) error {
-	tmp, err := os.CreateTemp(dir, ".adr.*.tmp")
-	if err != nil {
-		return fmt.Errorf("adr: create tmp: %w", err)
-	}
-	tmpPath := tmp.Name()
-	defer func() {
-		if _, statErr := os.Stat(tmpPath); statErr == nil {
-			_ = os.Remove(tmpPath)
-		}
-	}()
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("adr: write tmp: %w", err)
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("adr: sync tmp: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("adr: close tmp: %w", err)
-	}
-	if err := os.Chmod(tmpPath, mode); err != nil {
-		return fmt.Errorf("adr: chmod tmp: %w", err)
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		return fmt.Errorf("adr: rename tmp: %w", err)
-	}
-	return nil
+	return atomicfile.Write(a.Path, []byte(sb.String()), 0o644)
 }
 
 func joinQuoted(items []string) string {

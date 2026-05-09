@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+
+	"github.com/blechschmidt/cloop/pkg/atomicfile"
 )
 
 // regMu serializes load → mutate → save sequences against the global registry.
@@ -98,44 +100,7 @@ func saveRegistry(reg *registry) error {
 	if err != nil {
 		return err
 	}
-	return writeAtomic(path, append(data, '\n'), 0o644)
-}
-
-// writeAtomic stages data to a sibling .tmp file in the same directory, fsyncs
-// it, then renames it over path. Rename within a directory is atomic on
-// POSIX/Linux, so any concurrent reader either sees the old file or the new
-// file — never a half-written one.
-func writeAtomic(path string, data []byte, mode os.FileMode) error {
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".*.tmp")
-	if err != nil {
-		return fmt.Errorf("workspace: create tmp: %w", err)
-	}
-	tmpPath := tmp.Name()
-	defer func() {
-		// Best-effort cleanup if rename never happened.
-		if _, statErr := os.Stat(tmpPath); statErr == nil {
-			_ = os.Remove(tmpPath)
-		}
-	}()
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("workspace: write tmp: %w", err)
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("workspace: sync tmp: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("workspace: close tmp: %w", err)
-	}
-	if err := os.Chmod(tmpPath, mode); err != nil {
-		return fmt.Errorf("workspace: chmod tmp: %w", err)
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		return fmt.Errorf("workspace: rename tmp: %w", err)
-	}
-	return nil
+	return atomicfile.Write(path, append(data, '\n'), 0o644)
 }
 
 // List returns all registered workspaces.
@@ -229,7 +194,7 @@ func Switch(name string) error {
 	// (especially an empty one) silently re-routes future commands to the
 	// default workspace and the user's edits land in the wrong project.
 	pointerFile := filepath.Join(w.Path, ".cloop_workspace")
-	if err := writeAtomic(pointerFile, []byte(name+"\n"), 0o644); err != nil {
+	if err := atomicfile.Write(pointerFile, []byte(name+"\n"), 0o644); err != nil {
 		return fmt.Errorf("writing workspace pointer: %w", err)
 	}
 	return SetActive(name)
@@ -281,7 +246,7 @@ func setActiveLocked(name string) error {
 		}
 		return nil
 	}
-	return writeAtomic(path, []byte(name+"\n"), 0o644)
+	return atomicfile.Write(path, []byte(name+"\n"), 0o644)
 }
 
 // ResolveWorkDir returns the working directory for the given workspace name.

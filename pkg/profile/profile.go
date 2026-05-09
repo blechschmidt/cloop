@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/blechschmidt/cloop/pkg/atomicfile"
 	"github.com/blechschmidt/cloop/pkg/config"
 	"gopkg.in/yaml.v3"
 )
@@ -104,42 +105,7 @@ func saveProfilesLocked(profiles []Profile) error {
 		return err
 	}
 	// 0o600: owner read/write only — file may contain API keys.
-	return writeAtomic(dir, path, ".profiles.yaml.*.tmp", data, 0o600)
-}
-
-// writeAtomic stages data in a sibling .tmp file in dir, fsyncs it, chmods to
-// mode, then renames into path. Rename on POSIX is atomic with respect to
-// readers, so they always see either the old or the new file — never a
-// truncated one.
-func writeAtomic(dir, path, tmpPattern string, data []byte, mode os.FileMode) error {
-	tmp, err := os.CreateTemp(dir, tmpPattern)
-	if err != nil {
-		return fmt.Errorf("profile: create tmp: %w", err)
-	}
-	tmpPath := tmp.Name()
-	defer func() {
-		if _, statErr := os.Stat(tmpPath); statErr == nil {
-			_ = os.Remove(tmpPath)
-		}
-	}()
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("profile: write tmp: %w", err)
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("profile: sync tmp: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("profile: close tmp: %w", err)
-	}
-	if err := os.Chmod(tmpPath, mode); err != nil {
-		return fmt.Errorf("profile: chmod tmp: %w", err)
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		return fmt.Errorf("profile: rename tmp: %w", err)
-	}
-	return nil
+	return atomicfile.Write(path, data, 0o600)
 }
 
 // GetActive returns the name of the active profile, or "" if none is set.
@@ -179,7 +145,7 @@ func SetActive(name string) error {
 		}
 		return nil
 	}
-	return writeAtomic(dir, path, ".active_profile.*.tmp", []byte(name+"\n"), 0o600)
+	return atomicfile.Write(path, []byte(name+"\n"), 0o600)
 }
 
 // Get returns the named profile, or an error if it does not exist.

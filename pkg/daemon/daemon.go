@@ -11,6 +11,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/blechschmidt/cloop/pkg/atomicfile"
 )
 
 // saveMu serializes concurrent State.Save and WritePID calls per workdir to
@@ -106,7 +108,7 @@ func (s *State) Save(workdir string) error {
 	mu := lockForPath(path)
 	mu.Lock()
 	defer mu.Unlock()
-	return writeAtomic(path, data, 0o644)
+	return atomicfile.Write(path, data, 0o644)
 }
 
 // WritePID writes the daemon PID to .cloop/daemon.pid atomically.
@@ -119,44 +121,7 @@ func WritePID(workdir string, pid int) error {
 	mu := lockForPath(path)
 	mu.Lock()
 	defer mu.Unlock()
-	return writeAtomic(path, []byte(fmt.Sprintf("%d", pid)), 0o644)
-}
-
-// writeAtomic writes data to path via a sibling tmp file, fsyncs, then renames.
-// A crash, ENOSPC, or a concurrent reader during the write can no longer leave
-// the destination half-written — Load() previously failed with "corrupt daemon
-// state" when daemon.json was found in a torn state, breaking `cloop daemon
-// status` for the entire user.
-func writeAtomic(path string, data []byte, mode os.FileMode) error {
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".*.tmp")
-	if err != nil {
-		return fmt.Errorf("daemon: create tmp: %w", err)
-	}
-	tmpPath := tmp.Name()
-	defer func() {
-		if _, statErr := os.Stat(tmpPath); statErr == nil {
-			_ = os.Remove(tmpPath)
-		}
-	}()
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("daemon: write tmp: %w", err)
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("daemon: sync tmp: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("daemon: close tmp: %w", err)
-	}
-	if err := os.Chmod(tmpPath, mode); err != nil {
-		return fmt.Errorf("daemon: chmod tmp: %w", err)
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		return fmt.Errorf("daemon: rename tmp: %w", err)
-	}
-	return nil
+	return atomicfile.Write(path, []byte(fmt.Sprintf("%d", pid)), 0o644)
 }
 
 // ReadPID reads the daemon PID from .cloop/daemon.pid; returns 0 if not found.

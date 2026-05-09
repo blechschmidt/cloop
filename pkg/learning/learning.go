@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/atomicfile"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/provider"
 )
@@ -88,43 +89,7 @@ func SaveMemory(workDir, summary string) error {
 	b.WriteString(summary)
 	b.WriteString("\n")
 
-	return writeAtomic(path, []byte(b.String()), 0o644)
-}
-
-// writeAtomic stages data to a sibling .tmp file in the same directory, fsyncs
-// it, then renames it over path. Rename within a directory is atomic on
-// POSIX/Linux, so any concurrent reader either sees the old file or the new
-// file — never a half-written one.
-func writeAtomic(path string, data []byte, mode os.FileMode) error {
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".*.tmp")
-	if err != nil {
-		return fmt.Errorf("learning: create tmp: %w", err)
-	}
-	tmpPath := tmp.Name()
-	defer func() {
-		if _, statErr := os.Stat(tmpPath); statErr == nil {
-			_ = os.Remove(tmpPath)
-		}
-	}()
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("learning: write tmp: %w", err)
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("learning: sync tmp: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("learning: close tmp: %w", err)
-	}
-	if err := os.Chmod(tmpPath, mode); err != nil {
-		return fmt.Errorf("learning: chmod tmp: %w", err)
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		return fmt.Errorf("learning: rename tmp: %w", err)
-	}
-	return nil
+	return atomicfile.Write(path, []byte(b.String()), 0o644)
 }
 
 // LoadMemory reads the project memory from .cloop/memory.md.

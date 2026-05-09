@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/blechschmidt/cloop/pkg/atomicfile"
 )
 
 const historyDir = ".cloop/plan-history"
@@ -19,42 +21,6 @@ const historyDir = ".cloop/plan-history"
 // version N+1, and write two files at the same version — one clobbering the
 // other or producing duplicate-versioned snapshots.
 var historyMu sync.Mutex
-
-// writeAtomicHistory stages data in a sibling .tmp file in dir, fsyncs, chmods,
-// then renames into path. POSIX rename is atomic with respect to readers, so
-// concurrent or crash-time readers always observe either the previous valid
-// file or the new valid file — never a zero-byte or truncated snapshot that
-// ListSnapshots would silently drop on json.Unmarshal failure.
-func writeAtomicHistory(dir, path string, data []byte, mode os.FileMode) error {
-	tmp, err := os.CreateTemp(dir, ".snapshot.*.tmp")
-	if err != nil {
-		return fmt.Errorf("plan-history: create tmp: %w", err)
-	}
-	tmpPath := tmp.Name()
-	defer func() {
-		if _, statErr := os.Stat(tmpPath); statErr == nil {
-			_ = os.Remove(tmpPath)
-		}
-	}()
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("plan-history: write tmp: %w", err)
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("plan-history: sync tmp: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("plan-history: close tmp: %w", err)
-	}
-	if err := os.Chmod(tmpPath, mode); err != nil {
-		return fmt.Errorf("plan-history: chmod tmp: %w", err)
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		return fmt.Errorf("plan-history: rename tmp: %w", err)
-	}
-	return nil
-}
 
 // Snapshot is a versioned, timestamped copy of a Plan.
 type Snapshot struct {
@@ -172,7 +138,7 @@ func SaveSnapshot(workDir string, plan *Plan) error {
 
 	fname := snapshotFilename(snap.Timestamp, snap.Version)
 	path := filepath.Join(dir, fname)
-	return writeAtomicHistory(dir, path, data, 0o644)
+	return atomicfile.Write(path, data, 0o644)
 }
 
 // LoadSnapshot loads the snapshot with the given version number.

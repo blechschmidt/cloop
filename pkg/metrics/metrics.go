@@ -14,6 +14,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/blechschmidt/cloop/pkg/atomicfile"
 )
 
 // histBuckets are the upper bounds (in seconds) for task_duration_seconds histogram.
@@ -395,42 +397,7 @@ func (m *Metrics) WriteJSON(workDir string) error {
 	if err != nil {
 		return err
 	}
-	return writeAtomic(dir, path, data, 0o644)
-}
-
-// writeAtomic stages data in a sibling .tmp file in dir, fsyncs, chmods, then
-// renames into path. A failed Write/Sync/Close leaves the tmp file behind,
-// which the cleanup defer removes; the original file at path is never
-// touched until the rename succeeds.
-func writeAtomic(dir, path string, data []byte, mode os.FileMode) error {
-	tmp, err := os.CreateTemp(dir, ".metrics.json.*.tmp")
-	if err != nil {
-		return fmt.Errorf("metrics: create tmp: %w", err)
-	}
-	tmpPath := tmp.Name()
-	defer func() {
-		if _, statErr := os.Stat(tmpPath); statErr == nil {
-			_ = os.Remove(tmpPath)
-		}
-	}()
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("metrics: write tmp: %w", err)
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("metrics: sync tmp: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("metrics: close tmp: %w", err)
-	}
-	if err := os.Chmod(tmpPath, mode); err != nil {
-		return fmt.Errorf("metrics: chmod tmp: %w", err)
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		return fmt.Errorf("metrics: rename tmp: %w", err)
-	}
-	return nil
+	return atomicfile.Write(path, data, 0o644)
 }
 
 // LoadJSON loads a previously written metrics summary from .cloop/metrics.json.

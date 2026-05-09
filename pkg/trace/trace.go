@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/atomicfile"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/provider"
 )
@@ -228,43 +229,7 @@ func WriteTraceJSON(workDir string, tm *TraceMap) error {
 	if err != nil {
 		return err
 	}
-	return writeAtomic(dir, filepath.Join(dir, "trace.json"), data, 0o644)
-}
-
-// writeAtomic stages data in a sibling .tmp file in dir, fsyncs, chmods, then
-// renames into path. POSIX rename is atomic with respect to readers, so
-// concurrent readers always observe either the previous valid file or the new
-// one — never a truncated one. The cleanup defer removes any leftover tmp
-// file on error, so a failed write leaves the original at path intact.
-func writeAtomic(dir, path string, data []byte, mode os.FileMode) error {
-	tmp, err := os.CreateTemp(dir, ".trace.json.*.tmp")
-	if err != nil {
-		return fmt.Errorf("trace: create tmp: %w", err)
-	}
-	tmpPath := tmp.Name()
-	defer func() {
-		if _, statErr := os.Stat(tmpPath); statErr == nil {
-			_ = os.Remove(tmpPath)
-		}
-	}()
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("trace: write tmp: %w", err)
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("trace: sync tmp: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("trace: close tmp: %w", err)
-	}
-	if err := os.Chmod(tmpPath, mode); err != nil {
-		return fmt.Errorf("trace: chmod tmp: %w", err)
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		return fmt.Errorf("trace: rename tmp: %w", err)
-	}
-	return nil
+	return atomicfile.Write(filepath.Join(dir, "trace.json"), data, 0o644)
 }
 
 // LoadTraceJSON reads the persisted trace map from .cloop/trace.json.

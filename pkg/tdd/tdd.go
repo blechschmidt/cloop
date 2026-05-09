@@ -20,6 +20,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/atomicfile"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/provider"
 )
@@ -197,49 +198,14 @@ func SaveCriteria(workDir string, taskID int, criteria, testScript string) error
 		return fmt.Errorf("create tdd dir: %w", err)
 	}
 
-	if err := writeAtomic(dir, CriteriaPath(workDir, taskID), ".criteria.*.tmp", []byte(criteria), 0o644); err != nil {
+	if err := atomicfile.Write(CriteriaPath(workDir, taskID), []byte(criteria), 0o644); err != nil {
 		return fmt.Errorf("write criteria.md: %w", err)
 	}
 
-	if err := writeAtomic(dir, TestScriptPath(workDir, taskID), ".test.*.tmp", []byte(testScript), 0o755); err != nil {
+	if err := atomicfile.Write(TestScriptPath(workDir, taskID), []byte(testScript), 0o755); err != nil {
 		return fmt.Errorf("write test.sh: %w", err)
 	}
 
-	return nil
-}
-
-// writeAtomic stages data in a sibling .tmp file in dir, fsyncs it, chmods
-// to mode, then renames into path. Rename on POSIX is atomic with respect
-// to readers, so they always observe the previous valid file or the new
-// valid file — never a truncated one.
-func writeAtomic(dir, path, tmpPattern string, data []byte, mode os.FileMode) error {
-	tmp, err := os.CreateTemp(dir, tmpPattern)
-	if err != nil {
-		return fmt.Errorf("tdd: create tmp: %w", err)
-	}
-	tmpPath := tmp.Name()
-	defer func() {
-		if _, statErr := os.Stat(tmpPath); statErr == nil {
-			_ = os.Remove(tmpPath)
-		}
-	}()
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("tdd: write tmp: %w", err)
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("tdd: sync tmp: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("tdd: close tmp: %w", err)
-	}
-	if err := os.Chmod(tmpPath, mode); err != nil {
-		return fmt.Errorf("tdd: chmod tmp: %w", err)
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		return fmt.Errorf("tdd: rename tmp: %w", err)
-	}
 	return nil
 }
 

@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/forecast"
@@ -21,6 +22,13 @@ import (
 )
 
 const sprintsFile = ".cloop/sprints.json"
+
+// saveMu serialises in-process writes to .cloop/sprints.json. Save replaces
+// the entire file (the sprint plan is regenerated as a unit), so two
+// concurrent `cloop sprint plan` runs without this mutex could interleave
+// json.MarshalIndent buffers in flight to disk and produce malformed JSON
+// that Load then refuses to parse on the next read.
+var saveMu sync.Mutex
 
 // Sprint represents a time-boxed unit of work.
 type Sprint struct {
@@ -73,8 +81,18 @@ func Load(workDir string) (*SprintFile, error) {
 	return &sf, nil
 }
 
-// Save writes the SprintFile to .cloop/sprints.json.
+// Save writes the SprintFile to .cloop/sprints.json atomically.
+//
+// A torn write (crash mid-write, ENOSPC, two `sprint plan` runs racing)
+// would leave a 0-byte or truncated file; the next Load would fail to parse
+// and `cloop sprint list/show/burndown` would all silently lose the plan.
+// The write is staged into a sibling .tmp file, fsynced, then renamed into
+// place. The mutex serialises in-process writers; the rename serialises
+// across processes.
 func Save(workDir string, sf *SprintFile) error {
+	saveMu.Lock()
+	defer saveMu.Unlock()
+
 	sf.UpdatedAt = time.Now()
 	dir := filepath.Join(workDir, ".cloop")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -85,8 +103,40 @@ func Save(workDir string, sf *SprintFile) error {
 		return fmt.Errorf("sprint: marshal: %w", err)
 	}
 	path := filepath.Join(workDir, sprintsFile)
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		return fmt.Errorf("sprint: write: %w", err)
+	return writeAtomic(dir, path, ".sprints.json.*.tmp", data, 0o600)
+}
+
+// writeAtomic stages data in a sibling .tmp file in dir, fsyncs, chmods, then
+// renames into path. POSIX rename is atomic with respect to readers, so
+// concurrent readers always observe either the previous valid file or the
+// new one — never a truncated one. A failed rename leaves the original intact.
+func writeAtomic(dir, path, tmpPattern string, data []byte, mode os.FileMode) error {
+	tmp, err := os.CreateTemp(dir, tmpPattern)
+	if err != nil {
+		return fmt.Errorf("sprint: create tmp: %w", err)
+	}
+	tmpPath := tmp.Name()
+	defer func() {
+		if _, statErr := os.Stat(tmpPath); statErr == nil {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("sprint: write tmp: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("sprint: sync tmp: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("sprint: close tmp: %w", err)
+	}
+	if err := os.Chmod(tmpPath, mode); err != nil {
+		return fmt.Errorf("sprint: chmod tmp: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("sprint: rename tmp: %w", err)
 	}
 	return nil
 }

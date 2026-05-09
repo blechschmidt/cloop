@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/atomicfile"
 	"github.com/blechschmidt/cloop/pkg/cost"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"gopkg.in/yaml.v3"
@@ -124,41 +125,7 @@ func saveLocked(workDir string, rules []Rule) error {
 	if err != nil {
 		return fmt.Errorf("alert: marshal rules: %w", err)
 	}
-	return writeAtomic(dir, path, ".alerts.yaml.*.tmp", data, 0o644)
-}
-
-// writeAtomic stages data in a sibling .tmp file in dir, fsyncs it, then
-// renames into path. Rename on POSIX is atomic w.r.t. readers, so concurrent
-// readers always see either the previous or new file — never a truncated one.
-func writeAtomic(dir, path, tmpPattern string, data []byte, mode os.FileMode) error {
-	tmp, err := os.CreateTemp(dir, tmpPattern)
-	if err != nil {
-		return fmt.Errorf("alert: create tmp: %w", err)
-	}
-	tmpPath := tmp.Name()
-	defer func() {
-		if _, statErr := os.Stat(tmpPath); statErr == nil {
-			_ = os.Remove(tmpPath)
-		}
-	}()
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("alert: write tmp: %w", err)
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("alert: sync tmp: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("alert: close tmp: %w", err)
-	}
-	if err := os.Chmod(tmpPath, mode); err != nil {
-		return fmt.Errorf("alert: chmod tmp: %w", err)
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		return fmt.Errorf("alert: rename tmp: %w", err)
-	}
-	return nil
+	return atomicfile.Write(path, data, 0o644)
 }
 
 // AddRule appends a rule to .cloop/alerts.yaml, replacing any existing rule

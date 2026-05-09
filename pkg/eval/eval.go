@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/atomicfile"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/provider"
 )
@@ -145,42 +146,7 @@ func save(workDir string, r *EvalResult) error {
 	if err != nil {
 		return err
 	}
-	return writeAtomic(dir, evalPath(workDir, r.TaskID), data, 0o644)
-}
-
-// writeAtomic stages data in a sibling .tmp file in dir, fsyncs, chmods, then
-// renames into path. POSIX rename is atomic with respect to readers, so
-// concurrent readers always observe either the previous valid file or the new
-// one — never a truncated one. A failed rename leaves the original intact.
-func writeAtomic(dir, path string, data []byte, mode os.FileMode) error {
-	tmp, err := os.CreateTemp(dir, ".eval.json.*.tmp")
-	if err != nil {
-		return fmt.Errorf("eval: create tmp: %w", err)
-	}
-	tmpPath := tmp.Name()
-	defer func() {
-		if _, statErr := os.Stat(tmpPath); statErr == nil {
-			_ = os.Remove(tmpPath)
-		}
-	}()
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("eval: write tmp: %w", err)
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("eval: sync tmp: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("eval: close tmp: %w", err)
-	}
-	if err := os.Chmod(tmpPath, mode); err != nil {
-		return fmt.Errorf("eval: chmod tmp: %w", err)
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		return fmt.Errorf("eval: rename tmp: %w", err)
-	}
-	return nil
+	return atomicfile.Write(evalPath(workDir, r.TaskID), data, 0o644)
 }
 
 // computeWeighted computes the weighted average score normalising weights to 1.

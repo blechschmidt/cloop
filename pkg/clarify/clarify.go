@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/atomicfile"
 	"github.com/blechschmidt/cloop/pkg/provider"
 	"github.com/fatih/color"
 	"github.com/mattn/go-isatty"
@@ -72,43 +73,7 @@ func save(workDir string, qas []QA) error {
 	if err != nil {
 		return err
 	}
-	return writeAtomic(dir, path, data, 0o644)
-}
-
-// writeAtomic stages data in a sibling .tmp file in dir, fsyncs, chmods, then
-// renames into path. POSIX rename is atomic with respect to readers, so
-// concurrent readers always observe either the previous valid file or the new
-// one — never a truncated one. The cleanup defer removes any leftover tmp
-// file on error, so a failed write leaves the original at path intact.
-func writeAtomic(dir, path string, data []byte, mode os.FileMode) error {
-	tmp, err := os.CreateTemp(dir, ".clarification.*.tmp")
-	if err != nil {
-		return fmt.Errorf("clarify: create tmp: %w", err)
-	}
-	tmpPath := tmp.Name()
-	defer func() {
-		if _, statErr := os.Stat(tmpPath); statErr == nil {
-			_ = os.Remove(tmpPath)
-		}
-	}()
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("clarify: write tmp: %w", err)
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("clarify: sync tmp: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("clarify: close tmp: %w", err)
-	}
-	if err := os.Chmod(tmpPath, mode); err != nil {
-		return fmt.Errorf("clarify: chmod tmp: %w", err)
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		return fmt.Errorf("clarify: rename tmp: %w", err)
-	}
-	return nil
+	return atomicfile.Write(path, data, 0o644)
 }
 
 // QuestionsPrompt builds the prompt asking the AI to generate clarifying questions.

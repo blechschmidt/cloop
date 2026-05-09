@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/blechschmidt/cloop/pkg/atomicfile"
 )
 
 // saveMu serialises Save's read-modify-write so two concurrent in-process
@@ -139,43 +141,7 @@ func Save(cfg GlobalBudgetConfig) error {
 	if err != nil {
 		return fmt.Errorf("globalbudget: marshaling config: %w", err)
 	}
-	return writeAtomic(path, data, 0o600)
-}
-
-// writeAtomic stages data to a sibling .tmp file in the same directory,
-// fsyncs it, then renames it over path. Rename within a directory is atomic
-// on POSIX/Linux, so any concurrent reader either sees the old file or the
-// new file — never a half-written one.
-func writeAtomic(path string, data []byte, mode os.FileMode) error {
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".*.tmp")
-	if err != nil {
-		return fmt.Errorf("globalbudget: create tmp: %w", err)
-	}
-	tmpPath := tmp.Name()
-	defer func() {
-		if _, statErr := os.Stat(tmpPath); statErr == nil {
-			_ = os.Remove(tmpPath)
-		}
-	}()
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("globalbudget: write tmp: %w", err)
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("globalbudget: sync tmp: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("globalbudget: close tmp: %w", err)
-	}
-	if err := os.Chmod(tmpPath, mode); err != nil {
-		return fmt.Errorf("globalbudget: chmod tmp: %w", err)
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		return fmt.Errorf("globalbudget: rename tmp: %w", err)
-	}
-	return nil
+	return atomicfile.Write(path, data, 0o600)
 }
 
 // AppendLedger appends a global ledger entry to ~/.config/cloop/costs.jsonl.

@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/atomicfile"
 	"github.com/blechschmidt/cloop/pkg/provider"
 )
 
@@ -79,43 +80,7 @@ func (m *Memory) Save(workDir string) error {
 	if err != nil {
 		return err
 	}
-	return writeAtomic(path, data, 0o644)
-}
-
-// writeAtomic stages data to a sibling .tmp file in the same directory, fsyncs
-// it, then renames it over path. Rename within a directory is atomic on
-// POSIX/Linux, so any concurrent reader either sees the old file or the new
-// file — never a half-written one.
-func writeAtomic(path string, data []byte, mode os.FileMode) error {
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".*.tmp")
-	if err != nil {
-		return fmt.Errorf("memory: create tmp: %w", err)
-	}
-	tmpPath := tmp.Name()
-	defer func() {
-		if _, statErr := os.Stat(tmpPath); statErr == nil {
-			_ = os.Remove(tmpPath)
-		}
-	}()
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("memory: write tmp: %w", err)
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("memory: sync tmp: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("memory: close tmp: %w", err)
-	}
-	if err := os.Chmod(tmpPath, mode); err != nil {
-		return fmt.Errorf("memory: chmod tmp: %w", err)
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		return fmt.Errorf("memory: rename tmp: %w", err)
-	}
-	return nil
+	return atomicfile.Write(path, data, 0o644)
 }
 
 // Add appends a new entry to memory.

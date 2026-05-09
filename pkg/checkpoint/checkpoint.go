@@ -13,6 +13,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/blechschmidt/cloop/pkg/atomicfile"
 )
 
 const checkpointFile = ".cloop/checkpoint.json"
@@ -76,43 +78,8 @@ func SaveHistoryEntry(workDir string, cp *Checkpoint) error {
 	if err != nil {
 		return fmt.Errorf("marshal history entry: %w", err)
 	}
-	if err := writeAtomic(dir, path, ".history.*.tmp", data, 0o644); err != nil {
+	if err := atomicfile.Write(path, data, 0o644); err != nil {
 		return fmt.Errorf("write history entry: %w", err)
-	}
-	return nil
-}
-
-// writeAtomic stages data in a sibling .tmp file in dir, fsyncs it, chmods to
-// mode, then renames into path. POSIX rename is atomic with respect to
-// concurrent readers, so they always observe either the previous valid file
-// or the new valid file — never a truncated one.
-func writeAtomic(dir, path, tmpPattern string, data []byte, mode os.FileMode) error {
-	tmp, err := os.CreateTemp(dir, tmpPattern)
-	if err != nil {
-		return fmt.Errorf("checkpoint: create tmp: %w", err)
-	}
-	tmpPath := tmp.Name()
-	defer func() {
-		if _, statErr := os.Stat(tmpPath); statErr == nil {
-			_ = os.Remove(tmpPath)
-		}
-	}()
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("checkpoint: write tmp: %w", err)
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("checkpoint: sync tmp: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("checkpoint: close tmp: %w", err)
-	}
-	if err := os.Chmod(tmpPath, mode); err != nil {
-		return fmt.Errorf("checkpoint: chmod tmp: %w", err)
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		return fmt.Errorf("checkpoint: rename tmp: %w", err)
 	}
 	return nil
 }
@@ -188,7 +155,7 @@ func Save(workDir string, cp *Checkpoint) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("create checkpoint dir: %w", err)
 	}
-	if err := writeAtomic(dir, path, ".checkpoint.*.tmp", data, 0o644); err != nil {
+	if err := atomicfile.Write(path, data, 0o644); err != nil {
 		return fmt.Errorf("write checkpoint: %w", err)
 	}
 	return nil
