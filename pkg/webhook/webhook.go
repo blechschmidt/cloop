@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 )
@@ -129,7 +130,18 @@ func (c *Client) Send(event EventType, payload Payload) {
 	}
 	payload.Event = event
 	payload.Timestamp = time.Now()
-	go c.send(payload)
+	go func() {
+		// A panic inside c.send (nil-pointer deref in a future formatter,
+		// JSON encoder bug on an unusual payload, etc.) would otherwise
+		// kill the entire orchestrator process — webhooks are fired from
+		// hot paths in the main loop. Swallow it so the loop keeps running.
+		defer func() {
+			if r := recover(); r != nil {
+				fmt.Fprintf(os.Stderr, "[webhook] panic in send recovered: %v\n", r)
+			}
+		}()
+		c.send(payload)
+	}()
 }
 
 func (c *Client) send(payload Payload) {

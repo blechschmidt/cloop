@@ -505,7 +505,7 @@ func (s *Server) resolveWorkDir(r *http.Request) string {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	s.registerRoutes(mux)
-	return s.uiRateLimitMiddleware(securityHeaders(s.authMiddleware(mux)))
+	return panicRecoveryMiddleware(s.uiRateLimitMiddleware(securityHeaders(s.authMiddleware(mux))))
 }
 
 // registerRoutes wires all API and UI routes onto mux.
@@ -634,7 +634,7 @@ func (s *Server) Run(ctx context.Context) error {
 	} else {
 		fmt.Printf("cloop dashboard running at http://localhost%s\n", addr)
 	}
-	srv := newUIHTTPServer(addr, s.uiRateLimitMiddleware(securityHeaders(s.authMiddleware(mux))))
+	srv := newUIHTTPServer(addr, panicRecoveryMiddleware(s.uiRateLimitMiddleware(securityHeaders(s.authMiddleware(mux)))))
 
 	s.shutdownMu.Lock()
 	s.httpServer = srv
@@ -693,6 +693,37 @@ func newUIHTTPServer(addr string, h http.Handler) *http.Server {
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
+}
+
+// panicRecoveryMiddleware is the outermost HTTP layer: it recovers any panic
+// from a downstream handler (or middleware) and converts it into a clean 500
+// JSON response. net/http already recovers panics by default, but only logs
+// to stderr and aborts the connection — without this middleware the client
+// sees a half-written / dropped response. http.ErrAbortHandler is the
+// documented way for handlers to intentionally abort; we re-panic so net/http
+// observes it and applies the standard abort semantics.
+//
+// If the response is already a hijacked WebSocket or partial SSE/JSON write,
+// w.WriteHeader / w.Write become no-ops or log "superfluous WriteHeader" but
+// neither path crashes the goroutine — recovery still completes.
+func panicRecoveryMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			rec := recover()
+			if rec == nil {
+				return
+			}
+			if rec == http.ErrAbortHandler {
+				panic(rec)
+			}
+			fmt.Fprintf(os.Stderr, "[ui] panic in %s %s: %v\n%s\n",
+				r.Method, r.URL.Path, rec, debug.Stack())
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"error":"internal server error"}`))
+		}()
+		next.ServeHTTP(w, r)
+	})
 }
 
 // securityHeaders adds hardening HTTP response headers to every response.
