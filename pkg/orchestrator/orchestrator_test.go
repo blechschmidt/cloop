@@ -4121,3 +4121,125 @@ func TestRecoverStaleTasks_Annotated(t *testing.T) {
 		}
 	}
 }
+
+// TestEmptyOutputWatchdog_Annotated locks in audit-trail accuracy of the
+// empty-output watchdogs across runPM, runPMParallel, and runEvolve. Each
+// watchdog re-queues the task as TaskPending after a transient hiccup
+// (auth flap, content-filtered completion, partial 5xx body). Without the
+// annotation, an operator inspecting the task history saw a status reversion
+// (in_progress → pending) with no breadcrumb explaining why — same audit-trail
+// accuracy class as the verify-errored, gate-skip, provider-error, and
+// stale-task-recovery fixes.
+func TestEmptyOutputWatchdog_Annotated(t *testing.T) {
+	t.Run("runPM_sequential", func(t *testing.T) {
+		dir := tempDir(t)
+		s := initState(t, dir, "goal", 0)
+		s.PMMode = true
+		s.Plan = &pm.Plan{
+			Goal:  "goal",
+			Tasks: []*pm.Task{{ID: 1, Title: "Task A", Priority: 1, Status: pm.TaskPending}},
+		}
+		s.Save()
+
+		// MaxFailures=1 so the loop trips the watchdog after a single empty
+		// output and aborts; we only need to verify the annotation lands.
+		prov := &mockProvider{
+			name: "mock",
+			results: []*provider.Result{
+				{Output: "", Provider: "mock"},
+			},
+		}
+		o := newOrchestrator(t, dir, Config{WorkDir: dir, PMMode: true, MaxFailures: 1, NoHeal: true}, prov)
+		_ = o.runPM(context.Background())
+
+		task := o.state.Plan.Tasks[0]
+		want := "provider returned empty output"
+		found := false
+		for _, ann := range task.Annotations {
+			if ann.Author == "ai" && strings.Contains(ann.Text, want) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("missing empty-output annotation containing %q;\ngot annotations: %+v",
+				want, task.Annotations)
+		}
+	})
+
+	t.Run("runPMParallel", func(t *testing.T) {
+		dir := tempDir(t)
+		s := initState(t, dir, "goal", 0)
+		s.PMMode = true
+		s.Plan = &pm.Plan{
+			Goal:  "goal",
+			Tasks: []*pm.Task{{ID: 1, Title: "Task A", Priority: 1, Status: pm.TaskPending}},
+		}
+		s.Save()
+
+		prov := &mockProvider{
+			name: "mock",
+			results: []*provider.Result{
+				{Output: "", Provider: "mock"},
+			},
+		}
+		o := newOrchestrator(t, dir, Config{
+			WorkDir:     dir,
+			PMMode:      true,
+			Parallel:    true,
+			MaxFailures: 1,
+			NoHeal:      true,
+		}, prov)
+		_ = o.runPM(context.Background())
+
+		task := o.state.Plan.Tasks[0]
+		want := "provider returned empty output"
+		wantMode := "parallel mode"
+		found := false
+		for _, ann := range task.Annotations {
+			if ann.Author == "ai" && strings.Contains(ann.Text, want) && strings.Contains(ann.Text, wantMode) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("missing parallel-mode empty-output annotation containing %q + %q;\ngot annotations: %+v",
+				want, wantMode, task.Annotations)
+		}
+	})
+
+	t.Run("runEvolve", func(t *testing.T) {
+		dir := tempDir(t)
+		s := initState(t, dir, "goal", 0)
+		s.AutoEvolve = true
+		s.Plan = &pm.Plan{
+			Goal:  "goal",
+			Tasks: []*pm.Task{{ID: 1, Title: "Evolve A", Priority: 1, Status: pm.TaskPending}},
+		}
+		s.Save()
+
+		prov := &mockProvider{
+			name: "mock",
+			results: []*provider.Result{
+				{Output: "", Provider: "mock"},
+			},
+		}
+		o := newOrchestrator(t, dir, Config{WorkDir: dir, MaxFailures: 1}, prov)
+		_ = o.evolve(context.Background())
+
+		task := o.state.Plan.Tasks[0]
+		want := "provider returned empty output"
+		wantMode := "evolve mode"
+		found := false
+		for _, ann := range task.Annotations {
+			if ann.Author == "ai" && strings.Contains(ann.Text, want) && strings.Contains(ann.Text, wantMode) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("missing evolve-mode empty-output annotation containing %q + %q;\ngot annotations: %+v",
+				want, wantMode, task.Annotations)
+		}
+	})
+}
