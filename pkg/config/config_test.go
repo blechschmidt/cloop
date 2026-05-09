@@ -1,8 +1,13 @@
 package config
 
 import (
+	"bytes"
+	"io"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
+	"sync"
 	"testing"
 )
 
@@ -380,5 +385,161 @@ func TestLoad_EnvVar_EmptyDoesNotOverride(t *testing.T) {
 	}
 	if loaded.Anthropic.APIKey != "file-value" {
 		t.Errorf("expected file value to persist, got %q", loaded.Anthropic.APIKey)
+	}
+}
+
+// captureStderr swaps os.Stderr for a pipe, runs fn, restores os.Stderr,
+// and returns whatever fn wrote to stderr.
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	orig := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	os.Stderr = w
+	defer func() { os.Stderr = orig }()
+
+	done := make(chan []byte, 1)
+	go func() {
+		var buf bytes.Buffer
+		_, _ = io.Copy(&buf, r)
+		done <- buf.Bytes()
+	}()
+
+	fn()
+	w.Close()
+	return string(<-done)
+}
+
+// resetPermWarned clears the global dedup table so tests don't pollute one
+// another. Safe to call concurrently.
+func resetPermWarned() {
+	permWarnedMu.Lock()
+	permWarnedPaths = map[string]struct{}{}
+	permWarnedMu.Unlock()
+}
+
+// TestLoad_PermWarning_DedupedAcrossCalls locks in the fix for the
+// log-spam bug where long-running processes (UI, daemon, auto-evolve) flooded
+// stderr with the "permissions 644 — it may contain API keys" warning every
+// time Load() ran. The warning must fire exactly once per path per process.
+func TestLoad_PermWarning_DedupedAcrossCalls(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("permission warning is Unix-only")
+	}
+	resetPermWarned()
+
+	dir := tempDir(t)
+	if err := os.MkdirAll(filepath.Join(dir, ".cloop"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	path := ConfigPath(dir)
+	if err := os.WriteFile(path, []byte("provider: claudecode\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	output := captureStderr(t, func() {
+		for i := 0; i < 50; i++ {
+			if _, err := Load(dir); err != nil {
+				t.Fatalf("load %d: %v", i, err)
+			}
+		}
+	})
+
+	count := strings.Count(output, "it may contain API keys")
+	if count != 1 {
+		t.Errorf("expected exactly 1 perm-warning across 50 Load() calls, got %d\nstderr:\n%s", count, output)
+	}
+}
+
+// TestLoad_PermWarning_SeparatePathsWarnIndependently makes sure the dedup
+// is per-path: two different config files each get their own one-shot warning.
+func TestLoad_PermWarning_SeparatePathsWarnIndependently(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("permission warning is Unix-only")
+	}
+	resetPermWarned()
+
+	dirA := tempDir(t)
+	dirB := tempDir(t)
+	for _, d := range []string{dirA, dirB} {
+		if err := os.MkdirAll(filepath.Join(d, ".cloop"), 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(ConfigPath(d), []byte("provider: claudecode\n"), 0o644); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+	}
+
+	output := captureStderr(t, func() {
+		for i := 0; i < 5; i++ {
+			if _, err := Load(dirA); err != nil {
+				t.Fatalf("load A: %v", err)
+			}
+			if _, err := Load(dirB); err != nil {
+				t.Fatalf("load B: %v", err)
+			}
+		}
+	})
+
+	// The warning template prints the path twice ("warning: P ... chmod 600 P"),
+	// so a per-line count is the right unit. Each path should appear in exactly
+	// one stderr line.
+	linesA, linesB := 0, 0
+	for _, line := range strings.Split(output, "\n") {
+		if !strings.Contains(line, "it may contain API keys") {
+			continue
+		}
+		if strings.Contains(line, ConfigPath(dirA)) {
+			linesA++
+		}
+		if strings.Contains(line, ConfigPath(dirB)) {
+			linesB++
+		}
+	}
+	if linesA != 1 {
+		t.Errorf("expected 1 warning line for dirA, got %d\nstderr:\n%s", linesA, output)
+	}
+	if linesB != 1 {
+		t.Errorf("expected 1 warning line for dirB, got %d\nstderr:\n%s", linesB, output)
+	}
+}
+
+// TestLoad_PermWarning_ConcurrentLoadsDoNotRaceOrDuplicate proves the dedup
+// table is safe under concurrent Load() (the realistic UI scenario where
+// many handlers can race on the same project's config) and that the warning
+// still fires only once.
+func TestLoad_PermWarning_ConcurrentLoadsDoNotRaceOrDuplicate(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("permission warning is Unix-only")
+	}
+	resetPermWarned()
+
+	dir := tempDir(t)
+	if err := os.MkdirAll(filepath.Join(dir, ".cloop"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(ConfigPath(dir), []byte("provider: claudecode\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	output := captureStderr(t, func() {
+		var wg sync.WaitGroup
+		for i := 0; i < 32; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for j := 0; j < 10; j++ {
+					_, _ = Load(dir)
+				}
+			}()
+		}
+		wg.Wait()
+	})
+
+	count := strings.Count(output, "it may contain API keys")
+	if count != 1 {
+		t.Errorf("expected exactly 1 perm-warning across 320 concurrent Load() calls, got %d\nstderr:\n%s", count, output)
 	}
 }

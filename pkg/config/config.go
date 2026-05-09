@@ -6,11 +6,22 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
 
 	"gopkg.in/yaml.v3"
 )
 
 const configFile = ".cloop/config.yaml"
+
+// permWarnedPaths tracks which config paths have already emitted the
+// "wide permissions" warning. Long-running processes (the Web UI, daemon,
+// auto-evolve loops) call Load() many times per second; without dedup the
+// warning floods stderr and the journal. Each unique path warns at most once
+// per process lifetime.
+var (
+	permWarnedMu    sync.Mutex
+	permWarnedPaths = map[string]struct{}{}
+)
 
 // Config is the project configuration loaded from .cloop/config.yaml.
 type Config struct {
@@ -332,12 +343,22 @@ func Load(workdir string) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Warn on Unix if the config file is world- or group-readable.
+	// Warn on Unix if the config file is world- or group-readable. The warning
+	// fires once per path per process — Load() is hot in long-running processes
+	// (UI, daemon, auto-evolve) and an unconditional Fprintf would flood stderr.
 	if runtime.GOOS != "windows" {
 		if fi, statErr := os.Stat(path); statErr == nil {
 			if fi.Mode().Perm()&0o077 != 0 {
-				fmt.Fprintf(os.Stderr, "warning: %s has permissions %o — it may contain API keys. Run: chmod 600 %s\n",
-					path, fi.Mode().Perm(), path)
+				permWarnedMu.Lock()
+				_, already := permWarnedPaths[path]
+				if !already {
+					permWarnedPaths[path] = struct{}{}
+				}
+				permWarnedMu.Unlock()
+				if !already {
+					fmt.Fprintf(os.Stderr, "warning: %s has permissions %o — it may contain API keys. Run: chmod 600 %s\n",
+						path, fi.Mode().Perm(), path)
+				}
 			}
 		}
 	}
