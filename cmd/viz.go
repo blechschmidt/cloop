@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/blechschmidt/cloop/pkg/atomicfile"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/viz"
 	"github.com/spf13/cobra"
@@ -67,7 +68,7 @@ Examples:
 		}
 
 		if vizOutput != "" {
-			if err := os.WriteFile(vizOutput, []byte(output), 0644); err != nil {
+			if err := atomicfile.Write(vizOutput, []byte(output), 0644); err != nil {
 				return fmt.Errorf("write %s: %w", vizOutput, err)
 			}
 			fmt.Fprintf(os.Stderr, "wrote %s\n", vizOutput)

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/atomicfile"
 	"github.com/blechschmidt/cloop/pkg/flow"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
@@ -185,7 +186,7 @@ Examples:
 			if err := os.MkdirAll(filepath.Dir(outPath), 0o755); err != nil {
 				return fmt.Errorf("creating output directory: %w", err)
 			}
-			if err := os.WriteFile(outPath, data, 0o644); err != nil {
+			if err := atomicfile.Write(outPath, data, 0o644); err != nil {
 				return fmt.Errorf("writing flow file: %w", err)
 			}
 			color.New(color.FgGreen).Printf("Flow written to %s\n", outPath)

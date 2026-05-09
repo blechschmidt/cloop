@@ -5,6 +5,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/atomicfile"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/timeline"
 	"github.com/spf13/cobra"
@@ -81,7 +82,7 @@ Examples:
 		}
 
 		if timelineOutput != "" {
-			if err := os.WriteFile(timelineOutput, []byte(output), 0644); err != nil {
+			if err := atomicfile.Write(timelineOutput, []byte(output), 0644); err != nil {
 				return fmt.Errorf("write %s: %w", timelineOutput, err)
 			}
 			fmt.Fprintf(os.Stderr, "wrote %s\n", timelineOutput)

@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/blechschmidt/cloop/pkg/atomicfile"
 	"github.com/blechschmidt/cloop/pkg/contextgraph"
 	"github.com/spf13/cobra"
 )
@@ -73,7 +74,7 @@ func runContextGraph(_ *cobra.Command, _ []string) error {
 	}
 
 	if ctxGraphOutput != "" {
-		if err := os.WriteFile(ctxGraphOutput, []byte(output), 0o644); err != nil {
+		if err := atomicfile.Write(ctxGraphOutput, []byte(output), 0o644); err != nil {
 			return fmt.Errorf("write %s: %w", ctxGraphOutput, err)
 		}
 		fmt.Fprintf(os.Stderr, "wrote %s (%d nodes, %d edges)\n", ctxGraphOutput, len(g.Nodes), len(g.Edges))

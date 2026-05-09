@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/atomicfile"
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/docs"
 	"github.com/blechschmidt/cloop/pkg/provider"
@@ -218,7 +219,7 @@ var docsUpdateCmd = &cobra.Command{
 					color.New(color.FgRed).Printf("  mkdir error: %v\n", err)
 					continue
 				}
-				if err := os.WriteFile(df.AbsPath, []byte(updated), 0o644); err != nil {
+				if err := atomicfile.Write(df.AbsPath, []byte(updated), 0o644); err != nil {
 					color.New(color.FgRed).Printf("  write error: %v\n", err)
 					continue
 				}
@@ -312,7 +313,7 @@ Press Ctrl+C to stop.`,
 					color.New(color.FgRed).Printf("  Error refreshing %s: %v\n", df.RelPath, refreshErr)
 					continue
 				}
-				if err := os.WriteFile(df.AbsPath, []byte(updated), 0o644); err != nil {
+				if err := atomicfile.Write(df.AbsPath, []byte(updated), 0o644); err != nil {
 					color.New(color.FgRed).Printf("  Write error for %s: %v\n", df.RelPath, err)
 					continue
 				}

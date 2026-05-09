@@ -14,10 +14,21 @@ import (
 	"strings"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/boundedread"
 	"github.com/blechschmidt/cloop/pkg/eval"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/provider"
 )
+
+// maxFinetuneArtifactBytes caps how much we will load from a single task
+// artifact during fine-tune export. Streaming AI outputs accumulate into
+// `.cloop/artifacts/<id>_output.txt` (and the canonical `.cloop/tasks/...md`
+// artifact) and can legitimately reach several MiB for long, verbose tasks.
+// 8 MiB leaves headroom for those while still bounding the OOM blast radius
+// when an export iterates over hundreds of done tasks. Declared as var so
+// regression tests can shrink it; production callers should treat it as
+// immutable.
+var maxFinetuneArtifactBytes int64 = 8 << 20
 
 // Format is the JSONL serialization format for fine-tuning data.
 type Format string
@@ -188,7 +199,11 @@ func marshal(format Format, prompt, output string) ([]byte, error) {
 
 // loadOutput returns the full AI output for a done task.
 // It prefers the artifact file (stripping YAML frontmatter), then falls back
-// to the live streaming artifact, and finally to task.Result.
+// to the live streaming artifact, and finally to task.Result. Both file
+// reads are bounded by maxFinetuneArtifactBytes — a runaway streaming
+// artifact (e.g. an interrupted task whose output kept growing) will not
+// OOM the export. On overrun the read silently falls through to the next
+// fallback so the export can still emit a record from task.Result.
 func loadOutput(workDir string, task *pm.Task) string {
 	// 1. Artifact markdown file (.cloop/tasks/<id>-<slug>.md)
 	if task.ArtifactPath != "" {
@@ -196,14 +211,14 @@ func loadOutput(workDir string, task *pm.Task) string {
 		if !filepath.IsAbs(absPath) {
 			absPath = filepath.Join(workDir, absPath)
 		}
-		if data, err := os.ReadFile(absPath); err == nil {
+		if data, err := boundedread.ReadFile(absPath, maxFinetuneArtifactBytes); err == nil {
 			return stripFrontmatter(string(data))
 		}
 	}
 
 	// 2. Live streaming artifact (.cloop/artifacts/<id>_output.txt)
 	livePath := filepath.Join(workDir, ".cloop", "artifacts", fmt.Sprintf("%d_output.txt", task.ID))
-	if data, err := os.ReadFile(livePath); err == nil && len(data) > 0 {
+	if data, err := boundedread.ReadFile(livePath, maxFinetuneArtifactBytes); err == nil && len(data) > 0 {
 		return strings.TrimSpace(string(data))
 	}
 

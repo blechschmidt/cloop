@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/atomicfile"
 	"github.com/blechschmidt/cloop/pkg/plugin"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
@@ -60,7 +61,7 @@ Example:
 		}
 
 		destPath := filepath.Join(pluginDir, name)
-		if err := os.WriteFile(destPath, scriptBytes, 0o755); err != nil {
+		if err := atomicfile.Write(destPath, scriptBytes, 0o755); err != nil {
 			return fmt.Errorf("writing plugin file: %w", err)
 		}
 

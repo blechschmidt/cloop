@@ -6,6 +6,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/atomicfile"
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/cost"
 	"github.com/blechschmidt/cloop/pkg/journal"
@@ -153,7 +154,7 @@ Examples:
 				dest = fmt.Sprintf(".cloop/retro-%s.md", time.Now().Format("20060102-150405"))
 			}
 			if dest != "" {
-				if err := os.WriteFile(dest, []byte(md), 0o644); err != nil {
+				if err := atomicfile.Write(dest, []byte(md), 0o644); err != nil {
 					return fmt.Errorf("writing output: %w", err)
 				}
 				color.New(color.FgGreen).Printf("Retrospective saved to %s\n", dest)
@@ -166,7 +167,7 @@ Examples:
 			printRetroTerminal(analysis, s)
 			if retroSave {
 				dest := fmt.Sprintf(".cloop/retro-%s.md", time.Now().Format("20060102-150405"))
-				if err := os.WriteFile(dest, []byte(md), 0o644); err != nil {
+				if err := atomicfile.Write(dest, []byte(md), 0o644); err != nil {
 					dimColor.Printf("Warning: could not save retro file: %v\n", err)
 				} else {
 					color.New(color.FgGreen).Printf("\nRetrospective saved to %s\n", dest)

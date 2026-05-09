@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/atomicfile"
 	"github.com/blechschmidt/cloop/pkg/compare"
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/cost"
@@ -192,7 +193,7 @@ func runCompare(cmd *cobra.Command, args []string) error {
 
 	// Save to file if requested
 	if cmpOutput != "" {
-		if err := os.WriteFile(cmpOutput, []byte(output), 0o644); err != nil {
+		if err := atomicfile.Write(cmpOutput, []byte(output), 0o644); err != nil {
 			return fmt.Errorf("writing output: %w", err)
 		}
 		dimColor.Printf("\nSaved to %s\n", cmpOutput)

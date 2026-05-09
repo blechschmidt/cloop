@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/atomicfile"
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/provider"
@@ -179,7 +180,7 @@ Examples:
 			if outPath == "" {
 				outPath = "risk-matrix.html"
 			}
-			if writeErr := os.WriteFile(outPath, []byte(html), 0o644); writeErr != nil {
+			if writeErr := atomicfile.Write(outPath, []byte(html), 0o644); writeErr != nil {
 				return fmt.Errorf("writing HTML: %w", writeErr)
 			}
 			color.New(color.FgGreen).Printf("Risk matrix written to %s\n", outPath)

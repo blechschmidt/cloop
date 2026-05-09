@@ -6,6 +6,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/atomicfile"
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/onboard"
 	"github.com/blechschmidt/cloop/pkg/provider"
@@ -125,7 +126,7 @@ Examples:
 			return fmt.Errorf("generating guide: %w", err)
 		}
 
-		if err := os.WriteFile(outputFile, []byte(guide), 0o644); err != nil {
+		if err := atomicfile.Write(outputFile, []byte(guide), 0o644); err != nil {
 			return fmt.Errorf("writing %s: %w", outputFile, err)
 		}
 

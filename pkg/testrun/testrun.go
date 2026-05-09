@@ -14,8 +14,16 @@ import (
 	"strings"
 
 	"github.com/blechschmidt/cloop/pkg/atomicfile"
+	"github.com/blechschmidt/cloop/pkg/boundedread"
 	"github.com/blechschmidt/cloop/pkg/provider"
 )
+
+// maxPackageJSONBytes caps the package.json read used for Node test-framework
+// detection. A workspace-relative attacker-controlled file should not be able
+// to OOM the process via os.ReadFile; real package.json files are well under
+// 1 MiB even in large monorepos. Declared as var so regression tests can
+// shrink it; production callers should treat it as immutable.
+var maxPackageJSONBytes int64 = 1 << 20
 
 // Framework describes a detected test framework and how to run it.
 type Framework struct {
@@ -119,7 +127,7 @@ func hasPytest(workDir string) bool {
 
 // detectNodeFramework reads package.json and returns the appropriate Framework.
 func detectNodeFramework(workDir string) *Framework {
-	data, err := os.ReadFile(filepath.Join(workDir, "package.json"))
+	data, err := boundedread.ReadFile(filepath.Join(workDir, "package.json"), maxPackageJSONBytes)
 	if err != nil {
 		return nil
 	}

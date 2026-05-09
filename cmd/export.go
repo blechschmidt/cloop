@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/atomicfile"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/spf13/cobra"
@@ -60,7 +61,7 @@ Useful for documenting what the AI did, CI summaries, dashboards, and audit trai
 			return nil
 		}
 
-		if err := os.WriteFile(exportOutput, []byte(report), 0644); err != nil {
+		if err := atomicfile.Write(exportOutput, []byte(report), 0644); err != nil {
 			return fmt.Errorf("writing report: %w", err)
 		}
 		fmt.Printf("Report written to %s\n", exportOutput)

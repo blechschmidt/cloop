@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/blechschmidt/cloop/pkg/atomicfile"
 	"github.com/blechschmidt/cloop/pkg/ical"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/fatih/color"
@@ -52,7 +53,7 @@ Examples:
 			return nil
 		}
 
-		if err := os.WriteFile(icalOutput, []byte(cal), 0o644); err != nil {
+		if err := atomicfile.Write(icalOutput, []byte(cal), 0o644); err != nil {
 			return fmt.Errorf("writing iCalendar file: %w", err)
 		}
 

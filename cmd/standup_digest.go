@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/atomicfile"
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/provider"
 	"github.com/blechschmidt/cloop/pkg/standup"
@@ -192,7 +193,7 @@ Examples:
 				ext = "json"
 			}
 			filename := fmt.Sprintf(".cloop/digest-%s.%s", time.Now().Format("2006-01-02"), ext)
-			if writeErr := os.WriteFile(filename, []byte(output), 0o644); writeErr != nil {
+			if writeErr := atomicfile.Write(filename, []byte(output), 0o644); writeErr != nil {
 				warnColor.Printf("Warning: could not save digest: %v\n", writeErr)
 			} else {
 				goodColor.Printf("Saved to %s\n", filename)

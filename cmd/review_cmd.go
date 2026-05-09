@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/atomicfile"
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/provider"
 	"github.com/blechschmidt/cloop/pkg/review"
@@ -153,7 +154,7 @@ Examples:
 		case "md", "markdown":
 			md := review.FormatMarkdown(rev, diff, source)
 			if reviewOutput != "" {
-				if err := os.WriteFile(reviewOutput, []byte(md), 0o644); err != nil {
+				if err := atomicfile.Write(reviewOutput, []byte(md), 0o644); err != nil {
 					return fmt.Errorf("writing output: %w", err)
 				}
 				color.New(color.FgGreen).Printf("Review saved to %s\n", reviewOutput)

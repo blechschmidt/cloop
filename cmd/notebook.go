@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/blechschmidt/cloop/pkg/atomicfile"
 	"github.com/blechschmidt/cloop/pkg/notebook"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/spf13/cobra"
@@ -57,7 +58,7 @@ Examples:
 		}
 
 		if notebookOutput != "" {
-			if err := os.WriteFile(notebookOutput, []byte(doc), 0o644); err != nil {
+			if err := atomicfile.Write(notebookOutput, []byte(doc), 0o644); err != nil {
 				return fmt.Errorf("writing notebook: %w", err)
 			}
 			fmt.Printf("Notebook saved to %s\n", notebookOutput)

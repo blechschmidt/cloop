@@ -6,6 +6,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/atomicfile"
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/narrative"
 	"github.com/blechschmidt/cloop/pkg/provider"
@@ -134,7 +135,7 @@ Examples:
 
 		dest := narrativeOutput
 		if dest != "" {
-			if err := os.WriteFile(dest, []byte(output), 0o644); err != nil {
+			if err := atomicfile.Write(dest, []byte(output), 0o644); err != nil {
 				return fmt.Errorf("writing output file: %w", err)
 			}
 			color.New(color.FgGreen).Printf("Narrative saved to %s\n", dest)

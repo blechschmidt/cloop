@@ -6,6 +6,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/atomicfile"
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/provider"
 	"github.com/blechschmidt/cloop/pkg/state"
@@ -184,7 +185,7 @@ Examples:
 		// Write to explicit --output file if provided.
 		outputDest := summarizeOutput
 		if outputDest != "" {
-			if err := os.WriteFile(outputDest, []byte(content), 0o644); err != nil {
+			if err := atomicfile.Write(outputDest, []byte(content), 0o644); err != nil {
 				return fmt.Errorf("writing output: %w", err)
 			}
 		}

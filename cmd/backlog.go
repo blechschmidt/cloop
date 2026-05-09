@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/atomicfile"
 	"github.com/blechschmidt/cloop/pkg/backlog"
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/memory"
@@ -162,7 +163,7 @@ Examples:
 		case "md", "markdown":
 			md := analysis.FormatMarkdown()
 			if backlogOutput != "" {
-				if err := os.WriteFile(backlogOutput, []byte(md), 0644); err != nil {
+				if err := atomicfile.Write(backlogOutput, []byte(md), 0644); err != nil {
 					return fmt.Errorf("writing output file: %w", err)
 				}
 				dimColor.Printf("Backlog saved to %s\n", backlogOutput)

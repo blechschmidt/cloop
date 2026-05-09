@@ -11,9 +11,21 @@ import (
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/atomicfile"
+	"github.com/blechschmidt/cloop/pkg/boundedread"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/provider"
 )
+
+// maxProjectMetaFileBytes caps how much we will load from workspace-relative
+// project files (go.mod, package.json) discovered during tech-stack detection.
+// These files are typically a few KB; a hostile or accidentally-runaway file
+// (e.g. a multi-GB file mistakenly named go.mod) would otherwise be slurped
+// into memory by os.ReadFile. 1 MiB leaves orders-of-magnitude headroom for
+// real go.mod/package.json files (the largest in popular open-source repos
+// are well under 200 KB) while bounding the OOM blast radius. Declared as
+// var so regression tests can shrink it; production callers should treat it
+// as immutable.
+var maxProjectMetaFileBytes int64 = 1 << 20
 
 // Platform is the CI platform to generate a pipeline for.
 type Platform string
@@ -96,7 +108,7 @@ func Detect(dir string) TechStack {
 	// Go
 	if check("go.mod") {
 		s.HasGoMod = true
-		if data, err := os.ReadFile(filepath.Join(dir, "go.mod")); err == nil {
+		if data, err := boundedread.ReadFile(filepath.Join(dir, "go.mod"), maxProjectMetaFileBytes); err == nil {
 			for _, line := range strings.Split(string(data), "\n") {
 				line = strings.TrimSpace(line)
 				if strings.HasPrefix(line, "module ") {
@@ -112,7 +124,7 @@ func Detect(dir string) TechStack {
 	s.HasNodeModules = check("node_modules")
 	s.HasYarnLock = check("yarn.lock")
 	if s.HasPackageJSON {
-		if data, err := os.ReadFile(filepath.Join(dir, "package.json")); err == nil {
+		if data, err := boundedread.ReadFile(filepath.Join(dir, "package.json"), maxProjectMetaFileBytes); err == nil {
 			// Extract "name" field with a simple scan (avoid json import cycle)
 			for _, line := range strings.Split(string(data), "\n") {
 				line = strings.TrimSpace(line)
