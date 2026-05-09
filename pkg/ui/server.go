@@ -4401,8 +4401,10 @@ func (s *Server) handleBudgetGet(w http.ResponseWriter, r *http.Request) {
 	workDir := s.resolveWorkDir(r)
 	projCfg, _ := config.Load(workDir)
 	var projBudget config.BudgetConfig
+	var projCC config.ClaudeCodeConfig
 	if projCfg != nil {
 		projBudget = projCfg.Budget
+		projCC = projCfg.ClaudeCode
 	}
 
 	// Effective resolved limits.
@@ -4421,14 +4423,18 @@ func (s *Server) handleBudgetGet(w http.ResponseWriter, r *http.Request) {
 			"entry_count":  usage.EntryCount,
 		},
 		"project": map[string]interface{}{
-			"daily_usd_limit":          projBudget.DailyUSDLimit,
-			"daily_token_limit":        projBudget.DailyTokenLimit,
-			"monthly_usd":              projBudget.MonthlyUSD,
-			"global_usd_pct":           projBudget.GlobalUSDPct,
-			"global_token_pct":         projBudget.GlobalTokenPct,
-			"alert_threshold_pct":      projBudget.AlertThresholdPct,
-			"max_weekly_usage_pct":     projBudget.MaxWeeklyUsagePct,
-			"max_five_hour_usage_pct":  projBudget.MaxFiveHourUsagePct,
+			"daily_usd_limit":     projBudget.DailyUSDLimit,
+			"daily_token_limit":   projBudget.DailyTokenLimit,
+			"monthly_usd":         projBudget.MonthlyUSD,
+			"global_usd_pct":      projBudget.GlobalUSDPct,
+			"global_token_pct":    projBudget.GlobalTokenPct,
+			"alert_threshold_pct": projBudget.AlertThresholdPct,
+			// Claude Code subscription caps — single source of truth in
+			// cfg.ClaudeCode (also exposed by /api/claudecode-limits and the
+			// "Set Caps" modal on the project overview). Both UIs read/write
+			// the same fields. See Task 20074.
+			"max_weekly_pct":    projCC.MaxWeeklyPct,
+			"max_five_hour_pct": projCC.MaxFiveHourPct,
 		},
 		"effective": map[string]interface{}{
 			"daily_usd_limit":   effectiveUSD,
@@ -4463,20 +4469,31 @@ func (s *Server) handleBudgetGlobalSave(w http.ResponseWriter, r *http.Request) 
 
 // handleBudgetProjectSave saves per-project budget config. PUT /api/budget/project
 func (s *Server) handleBudgetProjectSave(w http.ResponseWriter, r *http.Request) {
+	// Claude Code subscription caps (max_weekly_pct / max_five_hour_pct) live in
+	// cfg.ClaudeCode — same fields that /api/claudecode-limits writes. Both UI
+	// forms (Budget tab and the "Set Caps" modal on the project overview) hit
+	// these fields, so a value entered in one form is immediately visible in
+	// the other. See Task 20074.
 	var req struct {
-		DailyUSDLimit        float64 `json:"daily_usd_limit"`
-		DailyTokenLimit      int     `json:"daily_token_limit"`
-		MonthlyUSD           float64 `json:"monthly_usd"`
-		GlobalUSDPct         float64 `json:"global_usd_pct"`
-		GlobalTokenPct       float64 `json:"global_token_pct"`
-		AlertThresholdPct    int     `json:"alert_threshold_pct"`
-		MaxWeeklyUsagePct    float64 `json:"max_weekly_usage_pct"`
-		MaxFiveHourUsagePct  float64 `json:"max_five_hour_usage_pct"`
+		DailyUSDLimit     float64 `json:"daily_usd_limit"`
+		DailyTokenLimit   int     `json:"daily_token_limit"`
+		MonthlyUSD        float64 `json:"monthly_usd"`
+		GlobalUSDPct      float64 `json:"global_usd_pct"`
+		GlobalTokenPct    float64 `json:"global_token_pct"`
+		AlertThresholdPct int     `json:"alert_threshold_pct"`
+		MaxWeeklyPct      float64 `json:"max_weekly_pct"`
+		MaxFiveHourPct    float64 `json:"max_five_hour_pct"`
 	}
 	limitJSONBody(w, r, maxJSONBodyBytes)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonErr(w, "invalid request body", http.StatusBadRequest)
 		return
+	}
+	for _, v := range []float64{req.MaxWeeklyPct, req.MaxFiveHourPct} {
+		if v < 0 || v > 100 {
+			jsonErr(w, "percentage values must be between 0 and 100", http.StatusBadRequest)
+			return
+		}
 	}
 	workDir := s.resolveWorkDir(r)
 	cfg, err := config.Load(workDir)
@@ -4490,8 +4507,8 @@ func (s *Server) handleBudgetProjectSave(w http.ResponseWriter, r *http.Request)
 	cfg.Budget.GlobalUSDPct = req.GlobalUSDPct
 	cfg.Budget.GlobalTokenPct = req.GlobalTokenPct
 	cfg.Budget.AlertThresholdPct = req.AlertThresholdPct
-	cfg.Budget.MaxWeeklyUsagePct = req.MaxWeeklyUsagePct
-	cfg.Budget.MaxFiveHourUsagePct = req.MaxFiveHourUsagePct
+	cfg.ClaudeCode.MaxWeeklyPct = req.MaxWeeklyPct
+	cfg.ClaudeCode.MaxFiveHourPct = req.MaxFiveHourPct
 	if err := config.Save(workDir, cfg); err != nil {
 		jsonErr(w, "save failed: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -7380,7 +7397,7 @@ const dashboardHTML = `<!DOCTYPE html>
             </div>
           </div>
           <h4 style="margin-top:16px;margin-bottom:8px">Claude Code Subscription Caps</h4>
-          <p style="font-size:12px;color:var(--muted);margin-bottom:8px">Stop task execution when Claude Code subscription usage exceeds these percentages.</p>
+          <p style="font-size:12px;color:var(--muted);margin-bottom:8px">Stop task execution when Claude Code subscription usage exceeds these percentages. Shared with the &quot;Set Caps&quot; modal on the project overview.</p>
           <div class="form-row">
             <div class="form-group">
               <label class="form-label">Max weekly usage % (0 = no cap)</label>
@@ -12465,8 +12482,8 @@ function _renderBudget(d) {
   _setVal('bpDailyTokens',    project.daily_token_limit || '');
   _setVal('bpMonthlyUSD',     project.monthly_usd       || '');
   _setVal('bpAlertPct',       project.alert_threshold_pct || '');
-  _setVal('bpMaxWeekly',      project.max_weekly_usage_pct || '');
-  _setVal('bpMaxFiveHour',    project.max_five_hour_usage_pct || '');
+  _setVal('bpMaxWeekly',      project.max_weekly_pct || '');
+  _setVal('bpMaxFiveHour',    project.max_five_hour_pct || '');
 
   // ── Effective limits table ──
   const effSection = document.getElementById('budgetEffectiveSection');
@@ -12762,8 +12779,8 @@ window.saveBudgetProject = function() {
     daily_token_limit: parseInt(document.getElementById('bpDailyTokens').value)      || 0,
     monthly_usd:       parseFloat(document.getElementById('bpMonthlyUSD').value)     || 0,
     alert_threshold_pct: parseInt(document.getElementById('bpAlertPct').value)       || 0,
-    max_weekly_usage_pct: parseFloat(document.getElementById('bpMaxWeekly').value)   || 0,
-    max_five_hour_usage_pct: parseFloat(document.getElementById('bpMaxFiveHour').value) || 0,
+    max_weekly_pct: parseFloat(document.getElementById('bpMaxWeekly').value)   || 0,
+    max_five_hour_pct: parseFloat(document.getElementById('bpMaxFiveHour').value) || 0,
   };
   fetch(pUrl('/api/budget/project'), {
     method: 'PUT',

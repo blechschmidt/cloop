@@ -11,7 +11,6 @@ import (
 	"github.com/blechschmidt/cloop/pkg/cost"
 	"github.com/blechschmidt/cloop/pkg/globalbudget"
 	"github.com/blechschmidt/cloop/pkg/notify"
-	"github.com/blechschmidt/cloop/pkg/ratelimit"
 )
 
 // DailyStats holds today's aggregated usage figures.
@@ -197,28 +196,12 @@ func Enforce(workDir string, cfg config.BudgetConfig, notifyCfg config.NotifyCon
 		}
 	}
 
-	// Check Claude Code subscription usage limits (weekly / 5-hour windows).
-	if cfg.MaxWeeklyUsagePct > 0 || cfg.MaxFiveHourUsagePct > 0 {
-		usage, usageErr := ratelimit.FetchClaudeUsage("")
-		if usageErr == nil && usage != nil {
-			if cfg.MaxWeeklyUsagePct > 0 && usage.SevenDay != nil {
-				if usage.SevenDay.Utilization >= cfg.MaxWeeklyUsagePct {
-					return fmt.Errorf(
-						"Claude Code weekly subscription usage exceeded: %.0f%% used, cap set at %.0f%% — pause tasks until usage resets",
-						usage.SevenDay.Utilization, cfg.MaxWeeklyUsagePct,
-					)
-				}
-			}
-			if cfg.MaxFiveHourUsagePct > 0 && usage.FiveHour != nil {
-				if usage.FiveHour.Utilization >= cfg.MaxFiveHourUsagePct {
-					return fmt.Errorf(
-						"Claude Code 5-hour subscription usage exceeded: %.0f%% used, cap set at %.0f%% — pause tasks until window resets",
-						usage.FiveHour.Utilization, cfg.MaxFiveHourUsagePct,
-					)
-				}
-			}
-		}
-	}
+	// Claude Code subscription usage caps live in cfg.ClaudeCode.Max*Pct and are
+	// enforced by orchestrator.enforceClaudeCodeLimits via
+	// ratelimit.EnforceClaudeCodeLimits. We deliberately do not duplicate that
+	// check here — having two parallel enforcement paths caused user confusion
+	// when caps configured in the Budget tab and the Claude Code 'Set Caps'
+	// modal shadowed each other. See Task 20074.
 
 	return nil
 }
