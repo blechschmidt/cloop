@@ -1116,6 +1116,77 @@ func TestRunPM_EmptyOutput_ResetsOnSuccess(t *testing.T) {
 	}
 }
 
+// TestRunPM_ClarificationQuestions_DontSilentlyPass locks in the fail-closed
+// reroute for unanswered clarification questions. When auto-resolve has
+// exhausted its retries (or never resolved), the task output still looks like
+// clarification questions, signal stays TaskInProgress, and the no-signal
+// `default:` arm of the switch would otherwise mark the task DONE — silently
+// laundering "the LLM only asked questions" into "task complete". The fix
+// reroutes signal=TaskInProgress + clarification-pattern output to
+// signal=TaskFailed before the switch, so MaxFailures trips on persistent
+// question-asking instead of marking every task DONE with empty work.
+func TestRunPM_ClarificationQuestions_DontSilentlyPass(t *testing.T) {
+	dir := tempDir(t)
+	s := initState(t, dir, "goal", 0)
+	s.PMMode = true
+	s.Plan = &pm.Plan{
+		Goal: "goal",
+		Tasks: []*pm.Task{
+			{ID: 1, Title: "Task A", Priority: 1, Status: pm.TaskPending},
+			{ID: 2, Title: "Task B", Priority: 2, Status: pm.TaskPending},
+			{ID: 3, Title: "Task C", Priority: 3, Status: pm.TaskPending},
+		},
+	}
+	s.Save()
+
+	// Match looksLikeClarificationQuestion: at least one pattern + a `?`.
+	// "before i proceed" + "should i " + `?` triggers the detector.
+	question := "Before I proceed, should I use option A or option B?"
+
+	// Each task: 1 initial question + 2 auto-resolve retries that also return
+	// questions = 3 calls per task. With MaxFailures=2, after task 1 and task 2
+	// both fail (consecutiveErrors hits 2), the loop must abort before reaching
+	// task 3. Total expected calls = 6.
+	prov := &mockProvider{
+		name: "mock",
+		results: []*provider.Result{
+			{Output: question, Provider: "mock"},
+			{Output: question, Provider: "mock"},
+			{Output: question, Provider: "mock"},
+			{Output: question, Provider: "mock"},
+			{Output: question, Provider: "mock"},
+			{Output: question, Provider: "mock"},
+			{Output: question, Provider: "mock"}, // safety: task 3 should NEVER reach this
+		},
+	}
+	o := newOrchestrator(t, dir, Config{WorkDir: dir, PMMode: true, MaxFailures: 2, NoHeal: true}, prov)
+	err := o.runPM(context.Background())
+	if err == nil {
+		t.Fatal("expected error after MaxFailures consecutive clarification-only tasks, got nil")
+	}
+	if !strings.Contains(err.Error(), "consecutive") {
+		t.Errorf("expected error to mention consecutive failures, got: %v", err)
+	}
+	if o.state.Status != "failed" {
+		t.Errorf("expected status=failed, got %q", o.state.Status)
+	}
+	// Tasks 1 and 2 must be marked TaskFailed (NOT TaskDone). Task 3 must
+	// remain TaskPending — the loop must abort before reaching it.
+	if got := o.state.Plan.Tasks[0].Status; got != pm.TaskFailed {
+		t.Errorf("task 1: expected TaskFailed (not silently TaskDone), got %q", got)
+	}
+	if got := o.state.Plan.Tasks[1].Status; got != pm.TaskFailed {
+		t.Errorf("task 2: expected TaskFailed (not silently TaskDone), got %q", got)
+	}
+	if got := o.state.Plan.Tasks[2].Status; got != pm.TaskPending {
+		t.Errorf("task 3: expected TaskPending (loop should have aborted before reaching it), got %q", got)
+	}
+	// 2 tasks × 3 calls each (initial + 2 auto-resolve retries) = 6 calls.
+	if prov.calls != 6 {
+		t.Errorf("expected exactly 6 provider calls (2 tasks × 3 calls before MaxFailures aborts), got %d", prov.calls)
+	}
+}
+
 // TestEvolve_EmptyOutput_TripsWatchdog locks in the auto-evolve companion to
 // TestRunLoop_EmptyOutput_TripsWatchdog and TestRunPM_EmptyOutput_TripsWatchdog:
 // when the provider returns (*Result{Output:""}, nil) on every call (transient

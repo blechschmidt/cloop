@@ -1958,6 +1958,17 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			}
 		}
 
+		// Fail-closed for unanswered clarification questions: if signal is
+		// still TaskInProgress (no TASK_* token) and the output still looks
+		// like clarification questions, the auto-resolve loop above either
+		// wasn't entered, exhausted its retries, or broke out early
+		// (clarifyErr / empty result). Without this reroute, the default arm
+		// of the switch below would silently mark the task DONE — laundering
+		// "the LLM only asked questions" into "task complete".
+		if signal == pm.TaskInProgress && looksLikeClarificationQuestion(taskOutput) {
+			signal = pm.TaskFailed
+		}
+
 		switch signal {
 		case pm.TaskDone:
 			// Optionally verify the task was genuinely completed before accepting it.
@@ -3054,6 +3065,13 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 			}
 
 			signal := pm.CheckTaskSignal(result.Output)
+			// Fail-closed for unanswered clarification questions: the parallel
+			// path has no auto-resolve loop, so a TaskInProgress with
+			// clarification questions would otherwise fall into the `default:`
+			// arm of the switch below and be silently marked DONE.
+			if signal == pm.TaskInProgress && looksLikeClarificationQuestion(result.Output) {
+				signal = pm.TaskFailed
+			}
 			completedAt := time.Now()
 			task.CompletedAt = &completedAt
 			task.Result = truncate(result.Output, 500)
@@ -3742,6 +3760,14 @@ func (o *Orchestrator) evolve(ctx context.Context) error {
 				}
 
 				signal := pm.CheckTaskSignal(result.Output)
+				// Fail-closed for unanswered clarification questions: evolve
+				// has no auto-resolve loop, so without this reroute a
+				// TaskInProgress with clarification questions would fall into
+				// the `default:` arm of the switch below and be silently
+				// marked DONE.
+				if signal == pm.TaskInProgress && looksLikeClarificationQuestion(result.Output) {
+					signal = pm.TaskFailed
+				}
 				switch signal {
 				case pm.TaskDone:
 					nextTask.Status = pm.TaskDone
