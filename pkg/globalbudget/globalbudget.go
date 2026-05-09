@@ -117,6 +117,17 @@ func Load() (GlobalBudgetConfig, error) {
 	}
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
+		// Recover from SQLite mirror (Task 20075). If a previous run wrote
+		// the mirror but the YAML file was deleted (rm, accidental cleanup,
+		// snapshot restore), rehydrate the limits from SQLite so budget
+		// enforcement keeps working without forcing the user to re-run
+		// `cloop budget set --global`.
+		if blob := loadFromSQLite(); blob != "" {
+			var cfg GlobalBudgetConfig
+			if err := yaml.Unmarshal([]byte(blob), &cfg); err == nil {
+				return cfg, nil
+			}
+		}
 		return GlobalBudgetConfig{}, nil
 	}
 	if err != nil {
@@ -156,7 +167,12 @@ func Save(cfg GlobalBudgetConfig) error {
 	if err != nil {
 		return fmt.Errorf("globalbudget: marshaling config: %w", err)
 	}
-	return atomicfile.Write(path, data, 0o600)
+	if err := atomicfile.Write(path, data, 0o600); err != nil {
+		return err
+	}
+	// Mirror into SQLite (Task 20075) — best-effort; YAML is canonical.
+	mirrorToSQLite(data)
+	return nil
 }
 
 // AppendLedger appends a global ledger entry to ~/.config/cloop/costs.jsonl.

@@ -1,4 +1,12 @@
 // Package config manages the .cloop/config.yaml project configuration file.
+//
+// Storage model (Task 20075): the canonical source remains the human-readable
+// .cloop/config.yaml file, but every Save() also mirrors the serialised YAML
+// into a metadata row of the project's SQLite state.db (when one exists).
+// This makes config queryable alongside cost and step data, and provides a
+// recovery fallback if the YAML file is lost or quarantined for corruption.
+// Load() prefers YAML when present; if YAML is missing, it transparently
+// rehydrates from the SQLite mirror so the project keeps working.
 package config
 
 import (
@@ -9,6 +17,8 @@ import (
 	"sync"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/blechschmidt/cloop/pkg/statedb"
 )
 
 const configFile = ".cloop/config.yaml"
@@ -318,16 +328,86 @@ func ConfigPath(workdir string) string {
 	return filepath.Join(workdir, configFile)
 }
 
+// stateDBPath returns the SQLite state database path for the given workdir.
+// Mirrors the location used by pkg/state.effectiveDBPath for the default
+// (non-session) case, which is sufficient for Save/Load mirroring: sessions
+// have their own state.db and load their own per-session config separately.
+func stateDBPath(workdir string) string {
+	return filepath.Join(workdir, ".cloop", "state.db")
+}
+
+// mirrorToSQLite stores the YAML-serialised config in the project's state.db.
+// Best-effort: if state.db doesn't exist or can't be opened, returns nil
+// silently — the YAML file is the authoritative store and the SQLite mirror
+// is an enhancement, not a requirement. We deliberately do NOT create
+// state.db here: that would make Save() a side-effecting init for every
+// directory the user happens to pass in.
+func mirrorToSQLite(workdir string, data []byte) {
+	dbPath := stateDBPath(workdir)
+	if _, err := os.Stat(dbPath); err != nil {
+		return
+	}
+	db, err := statedb.Open(dbPath)
+	if err != nil {
+		return
+	}
+	defer db.Close()
+	_ = db.SetConfigBlob(string(data))
+	// Tighten permissions defensively — config blob may include API keys.
+	// state.db is created with the umask default (often 0644); on Unix we
+	// shrink to 0600 once it carries credentials. Errors are ignored: this
+	// is a hardening pass, not a precondition.
+	if runtime.GOOS != "windows" {
+		_ = os.Chmod(dbPath, 0o600)
+	}
+}
+
+// loadFromSQLite returns the YAML-serialised config previously mirrored into
+// state.db, or "" if no mirror exists. Used by Load() as a fallback when the
+// .cloop/config.yaml file is missing — a config-set followed by a stray
+// `rm config.yaml` no longer wipes the user's API keys, model picks, and
+// budget caps. Errors are swallowed: the YAML-missing path must keep working
+// even if the SQLite mirror is unreadable.
+func loadFromSQLite(workdir string) string {
+	dbPath := stateDBPath(workdir)
+	if _, err := os.Stat(dbPath); err != nil {
+		return ""
+	}
+	db, err := statedb.Open(dbPath)
+	if err != nil {
+		return ""
+	}
+	defer db.Close()
+	blob, err := db.GetConfigBlob()
+	if err != nil {
+		return ""
+	}
+	return blob
+}
+
 // Load reads config from .cloop/config.yaml. Returns defaults if missing.
 // Environment variables override file values: ANTHROPIC_API_KEY, OPENAI_API_KEY,
 // ANTHROPIC_BASE_URL, OPENAI_BASE_URL, OLLAMA_BASE_URL, CLOOP_PROVIDER.
 // On Unix systems, Load prints a warning when the config file is world-readable
 // (permissions wider than 0600) because it may contain API keys.
+//
+// When the YAML file is missing, Load transparently falls back to the SQLite
+// mirror written by Save() (see stateDBPath / mirrorToSQLite). The SQLite
+// mirror is a recovery store, not the authoritative one — a present YAML
+// file always wins so manual edits keep the expected semantics.
 func Load(workdir string) (*Config, error) {
 	cfg := Default()
 	path := ConfigPath(workdir)
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
+		// Fall back to the SQLite mirror so a missing config.yaml doesn't
+		// silently revert API keys and budget caps to defaults.
+		if blob := loadFromSQLite(workdir); blob != "" {
+			if err := yaml.Unmarshal([]byte(blob), cfg); err == nil {
+				cfg.applyEnvVars()
+				return cfg, nil
+			}
+		}
 		cfg.applyEnvVars()
 		return cfg, nil
 	}
@@ -430,6 +510,9 @@ func Save(workdir string, cfg *Config) error {
 	if err := os.Rename(tmpPath, path); err != nil {
 		return fmt.Errorf("config: rename tmp: %w", err)
 	}
+	// Mirror into SQLite (best-effort). Failure here doesn't roll back the
+	// YAML write — YAML is the canonical store, SQLite is a queryable mirror.
+	mirrorToSQLite(workdir, data)
 	return nil
 }
 

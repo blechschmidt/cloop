@@ -370,6 +370,47 @@ func (d *DB) UpsertTask(t *pm.Task) error {
 	return tx.Commit()
 }
 
+// ────────────────────────────────────────────────────────────
+// Config blob storage (Task 20075)
+//
+// Per-project config (.cloop/config.yaml) is mirrored into the metadata
+// table under a single key. Keeping it as an opaque blob means future
+// Config field additions don't require schema migrations — and SQLite
+// remains the canonical queryable store next to state, costs, and steps.
+// ────────────────────────────────────────────────────────────
+
+const configMetaKey = "config_yaml"
+
+// SetConfigBlob persists the YAML-serialised project config into the metadata
+// table. The write is wrapped in a transaction so a crash mid-write leaves
+// either the previous value or the new one — never a partial row.
+func (d *DB) SetConfigBlob(yamlBlob string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	tx, err := d.conn.Begin()
+	if err != nil {
+		return fmt.Errorf("statedb: begin config tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	if err := d.setMeta(tx, configMetaKey, yamlBlob); err != nil {
+		return fmt.Errorf("statedb: set config blob: %w", err)
+	}
+	return tx.Commit()
+}
+
+// GetConfigBlob returns the YAML-serialised project config previously stored
+// via SetConfigBlob. Returns ("", nil) when no blob has been written yet
+// (fresh project, or DB created before this column existed).
+func (d *DB) GetConfigBlob() (string, error) {
+	v, err := d.getMeta(configMetaKey)
+	if err != nil {
+		return "", fmt.Errorf("statedb: get config blob: %w", err)
+	}
+	return v, nil
+}
+
 // AppendStep inserts a step row (idempotent on step number).
 func (d *DB) AppendStep(row StepRow) error {
 	d.mu.Lock()
