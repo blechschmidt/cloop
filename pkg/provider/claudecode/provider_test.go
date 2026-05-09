@@ -207,6 +207,54 @@ func TestComplete_ReturnsErrorOnAuthFailure(t *testing.T) {
 	}
 }
 
+func TestComplete_ReturnsErrorOnAuthFailureWithExitZero(t *testing.T) {
+	// In production the claude CLI has been observed exiting 0 while writing
+	// an auth failure to stdout. Without surfacing this as an error, the
+	// orchestrator records the failure text as "successful" output and the
+	// autonomous loop spins indefinitely (2000+ steps observed in one session).
+	binDir := fakeClaudeScript(t,
+		"#!/bin/sh\n"+
+			"echo 'Failed to authenticate. API Error: 401 Invalid authentication credentials'\n"+
+			"exit 0\n",
+	)
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+
+	p := New()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	result, err := p.Complete(ctx, "test", provider.Options{})
+	if err == nil {
+		t.Fatalf("expected error on CLI auth failure with exit 0, got result=%+v", result)
+	}
+	if !strings.Contains(err.Error(), "401") || !strings.Contains(strings.ToLower(err.Error()), "authenticate") {
+		t.Errorf("error should mention the underlying auth failure, got: %v", err)
+	}
+}
+
+func TestComplete_ZeroExitWithBenignOutputIsSuccess(t *testing.T) {
+	// Guard against false positives in the exit-0 fatal-error check: a normal
+	// successful response must still pass through unmodified.
+	binDir := fakeClaudeScript(t,
+		"#!/bin/sh\n"+
+			"echo 'Sure, here is the function you asked for.'\n"+
+			"exit 0\n",
+	)
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+
+	p := New()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	result, err := p.Complete(ctx, "test", provider.Options{})
+	if err != nil {
+		t.Fatalf("unexpected error on benign exit-0 output: %v", err)
+	}
+	if !strings.Contains(result.Output, "function you asked for") {
+		t.Errorf("expected benign output preserved, got %q", result.Output)
+	}
+}
+
 func TestComplete_NonZeroExitWithoutAuthSignalIsBenign(t *testing.T) {
 	// A non-zero exit without recognised auth/API markers must remain
 	// non-fatal so the orchestrator can keep running. (Existing behaviour

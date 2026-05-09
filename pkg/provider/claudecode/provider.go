@@ -109,6 +109,14 @@ func (p *Provider) Complete(ctx context.Context, prompt string, opts provider.Op
 		if isFatalCLIError(output) {
 			return nil, fmt.Errorf("claude CLI auth/API failure (exit %d): %s", exitErr.ExitCode(), truncateForError(output))
 		}
+	} else if isFatalCLIError(output) {
+		// In production the claude CLI sometimes exits 0 while writing an
+		// auth/API failure to stdout (observed: 2000+ consecutive 401-bearing
+		// steps in one session, all with exit 0). The exit-non-zero branch
+		// above never fired, so the failure leaked through as "successful"
+		// step output. Surface it as an error here too so the orchestrator's
+		// MaxFailures gate can stop the loop.
+		return nil, fmt.Errorf("claude CLI auth/API failure (exit 0): %s", truncateForError(output))
 	}
 
 	return &provider.Result{
