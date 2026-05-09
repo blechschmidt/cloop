@@ -252,9 +252,25 @@ func benchmarkProvider(ctx context.Context, cfg RunConfig, name string, p provid
 	return r
 }
 
+// judgeOutcome captures the result of a single judge.Complete call so it can
+// be bounded by a watchdog. A misbehaving judge that ignores ctx.Done() would
+// otherwise pin rateResponses for up to 30s per response × N providers; a
+// panicking judge would crash the whole bench run.
+type judgeOutcome struct {
+	result *provider.Result
+	err    error
+}
+
 // rateResponses asks the judge provider to score each successful response 1-10.
+// Bails early when ctx is already cancelled; wraps each judge call in a
+// goroutine + benchShutdownGracePeriod watchdog so a hung judge can't block
+// the bench return; panic-recovers a crashing judge so the rest of the report
+// still completes.
 func rateResponses(ctx context.Context, cfg RunConfig, judge provider.Provider, report *Report) {
 	for _, r := range report.Results {
+		if ctx.Err() != nil {
+			return
+		}
 		if r.SuccessfulRuns == 0 || r.LastResponse == "" {
 			continue
 		}
@@ -270,13 +286,43 @@ func rateResponses(ctx context.Context, cfg RunConfig, judge provider.Provider, 
 		)
 
 		rateCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-		result, err := judge.Complete(rateCtx, ratePrompt, provider.Options{
-			MaxTokens: 10,
-			Timeout:   30 * time.Second,
-		})
+		// Buffered cap 1: even a leaked goroutine after the watchdog fires
+		// can complete its send without blocking on a vanished receiver.
+		outCh := make(chan judgeOutcome, 1)
+		go func() {
+			defer func() {
+				if rec := recover(); rec != nil {
+					outCh <- judgeOutcome{err: fmt.Errorf("judge panic: %v", rec)}
+				}
+			}()
+			res, err := judge.Complete(rateCtx, ratePrompt, provider.Options{
+				MaxTokens: 10,
+				Timeout:   30 * time.Second,
+			})
+			outCh <- judgeOutcome{result: res, err: err}
+		}()
+
+		var (
+			result *provider.Result
+			err    error
+		)
+		select {
+		case out := <-outCh:
+			result, err = out.result, out.err
+		case <-ctx.Done():
+			select {
+			case out := <-outCh:
+				result, err = out.result, out.err
+			case <-time.After(benchShutdownGracePeriod):
+				// Hung judge past grace; cancel its ctx and bail without
+				// scoring remaining responses. Caller already cancelled.
+				cancel()
+				return
+			}
+		}
 		cancel()
 
-		if err != nil {
+		if err != nil || result == nil {
 			continue
 		}
 

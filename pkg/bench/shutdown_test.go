@@ -131,3 +131,109 @@ func TestRun_NoCancellation_StillWaitsForCompletion(t *testing.T) {
 		}
 	}
 }
+
+// hungJudge ignores ctx and blocks until block fires or hard expires. Models
+// a misbehaving judge SDK that doesn't honour cancellation — the failure mode
+// the rateResponses watchdog is meant to bound.
+type hungJudge struct {
+	block <-chan struct{}
+	hard  time.Duration
+}
+
+func (h hungJudge) Complete(_ context.Context, _ string, _ provider.Options) (*provider.Result, error) {
+	select {
+	case <-h.block:
+	case <-time.After(h.hard):
+	}
+	return &provider.Result{Output: "8", Provider: "judge", Model: "judge-model"}, nil
+}
+func (h hungJudge) Name() string         { return "judge" }
+func (h hungJudge) DefaultModel() string { return "judge-model" }
+
+// panickyJudge always panics. Used to verify rateResponses recovers and
+// continues without crashing the whole bench process.
+type panickyJudge struct{}
+
+func (p panickyJudge) Complete(_ context.Context, _ string, _ provider.Options) (*provider.Result, error) {
+	panic("judge boom")
+}
+func (p panickyJudge) Name() string         { return "judge" }
+func (p panickyJudge) DefaultModel() string { return "judge-model" }
+
+// TestRun_HungJudge_HonoursGracePeriod verifies that a judge provider that
+// ignores ctx.Done() can't pin Run past benchShutdownGracePeriod. The fan-out
+// fast-path completes normally, but the cancelled judge call must bail via
+// the inner watchdog instead of blocking the bench return.
+func TestRun_HungJudge_HonoursGracePeriod(t *testing.T) {
+	prev := benchShutdownGracePeriod
+	benchShutdownGracePeriod = 100 * time.Millisecond
+	t.Cleanup(func() { benchShutdownGracePeriod = prev })
+
+	block := make(chan struct{})
+	t.Cleanup(func() { close(block) })
+
+	builders := map[string]provider.Provider{
+		"a":     fastProvider{name: "a"},
+		"b":     fastProvider{name: "b"},
+		"judge": hungJudge{block: block, hard: 10 * time.Second},
+	}
+
+	cfg := RunConfig{
+		Prompt:        "prompt",
+		Providers:     []string{"a", "b"},
+		Runs:          1,
+		Timeout:       5 * time.Second,
+		JudgeProvider: "judge",
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	// Cancel after fan-out completes so judge call is the one to honour
+	// (and ignore) cancellation.
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+
+	start := time.Now()
+	rep, err := Run(ctx, cfg, builders)
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if rep == nil {
+		t.Fatal("expected non-nil report")
+	}
+	// Generous bound: cancellation delay (50ms) + fan-out + judge grace
+	// (100ms) + scheduler noise. Pre-fix this would have blocked ~30s.
+	if elapsed > 5*time.Second {
+		t.Fatalf("Run blocked for %s — judge watchdog did not bound rateResponses", elapsed)
+	}
+}
+
+// TestRateResponses_PanickingJudgeIsRecovered verifies that a panic inside
+// the judge provider doesn't crash the bench process. The function must
+// return normally and the affected response simply gets no QualityScore.
+func TestRateResponses_PanickingJudgeIsRecovered(t *testing.T) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			t.Fatalf("panic escaped rateResponses: %v", rec)
+		}
+	}()
+
+	report := &Report{
+		Results: []*ProviderResult{
+			{ProviderName: "a", SuccessfulRuns: 1, LastResponse: "hello"},
+			{ProviderName: "b", SuccessfulRuns: 1, LastResponse: "world"},
+		},
+	}
+
+	cfg := RunConfig{Prompt: "p"}
+	rateResponses(context.Background(), cfg, panickyJudge{}, report)
+
+	for _, r := range report.Results {
+		if r.QualityScore != 0 {
+			t.Errorf("result %s: expected QualityScore 0 after judge panic, got %v", r.ProviderName, r.QualityScore)
+		}
+	}
+}
