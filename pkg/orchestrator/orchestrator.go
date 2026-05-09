@@ -2001,8 +2001,10 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		// (clarifyErr / empty result). Without this reroute, the default arm
 		// of the switch below would silently mark the task DONE — laundering
 		// "the LLM only asked questions" into "task complete".
+		clarificationReroute := false
 		if signal == pm.TaskInProgress && looksLikeClarificationQuestion(taskOutput) {
 			signal = pm.TaskFailed
+			clarificationReroute = true
 		}
 
 		switch signal {
@@ -2157,6 +2159,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			}
 		case pm.TaskSkipped:
 			task.Status = pm.TaskSkipped
+			pm.AddAnnotation(task, "ai", fmt.Sprintf("Task skipped per AI TASK_SKIPPED signal after %s.", taskDur))
 			if !o.log.IsJSON() {
 				dimColor.Printf("→ Task %d skipped: %s\n\n", task.ID, task.Title)
 			}
@@ -2174,6 +2177,13 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		case pm.TaskFailed:
 			task.Status = pm.TaskFailed
 			task.FailCount++
+			// Skip the explicit-signal annotation when the failure came from the
+			// clarification reroute above — the auto-resolve loop's outcome
+			// annotation (line ~1993) already captures the real root cause, and
+			// claiming "per AI TASK_FAILED signal" would misattribute it.
+			if !clarificationReroute {
+				pm.AddAnnotation(task, "ai", fmt.Sprintf("Task failed per AI TASK_FAILED signal after %s.", taskDur))
+			}
 			if !o.log.IsJSON() {
 				failColor.Printf("✗ Task %d failed: %s\n\n", task.ID, task.Title)
 			}
@@ -3139,6 +3149,7 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 			switch signal {
 			case pm.TaskDone:
 				task.Status = pm.TaskDone
+				pm.AddAnnotation(task, "ai", fmt.Sprintf("Task completed successfully in %s.", taskDur))
 				if !o.log.IsJSON() {
 					successColor.Printf("✓ Task %d complete: %s\n\n", task.ID, task.Title)
 				}
@@ -3159,6 +3170,7 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 				consecutiveErrors = 0
 			case pm.TaskSkipped:
 				task.Status = pm.TaskSkipped
+				pm.AddAnnotation(task, "ai", fmt.Sprintf("Task skipped per AI TASK_SKIPPED signal after %s.", taskDur))
 				if !o.log.IsJSON() {
 					dimColor.Printf("→ Task %d skipped: %s\n\n", task.ID, task.Title)
 				}
@@ -3175,6 +3187,13 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 				consecutiveErrors = 0
 			case pm.TaskFailed:
 				task.Status = pm.TaskFailed
+				// Skip the explicit-signal annotation when the failure came from
+				// the clarification reroute above — the reroute already added an
+				// accurate annotation (line ~3137), and claiming "per AI
+				// TASK_FAILED signal" would misattribute it.
+				if !clarificationReroute {
+					pm.AddAnnotation(task, "ai", fmt.Sprintf("Task failed per AI TASK_FAILED signal after %s.", taskDur))
+				}
 				if !o.log.IsJSON() {
 					failColor.Printf("✗ Task %d failed: %s\n\n", task.ID, task.Title)
 				}
@@ -3822,19 +3841,31 @@ func (o *Orchestrator) evolve(ctx context.Context) error {
 				// TaskInProgress with clarification questions would fall into
 				// the `default:` arm of the switch below and be silently
 				// marked DONE.
+				clarificationReroute := false
 				if signal == pm.TaskInProgress && looksLikeClarificationQuestion(result.Output) {
 					signal = pm.TaskFailed
+					clarificationReroute = true
 					pm.AddAnnotation(nextTask, "ai", "Task failed: LLM asked clarification questions instead of completing the work (evolve mode has no auto-resolve loop).")
 				}
+				evolveDur := duration.Round(time.Second).String()
 				switch signal {
 				case pm.TaskDone:
 					nextTask.Status = pm.TaskDone
+					pm.AddAnnotation(nextTask, "ai", fmt.Sprintf("Task completed successfully in %s.", evolveDur))
 					successColor.Printf("✓ Evolve task %d complete: %s\n\n", nextTask.ID, nextTask.Title)
 				case pm.TaskSkipped:
 					nextTask.Status = pm.TaskSkipped
+					pm.AddAnnotation(nextTask, "ai", fmt.Sprintf("Task skipped per AI TASK_SKIPPED signal after %s.", evolveDur))
 					dimColor.Printf("→ Evolve task %d skipped: %s\n\n", nextTask.ID, nextTask.Title)
 				case pm.TaskFailed:
 					nextTask.Status = pm.TaskFailed
+					// Skip the explicit-signal annotation when the failure came
+					// from the clarification reroute above — the reroute already
+					// added an accurate annotation, and claiming "per AI
+					// TASK_FAILED signal" would misattribute it.
+					if !clarificationReroute {
+						pm.AddAnnotation(nextTask, "ai", fmt.Sprintf("Task failed per AI TASK_FAILED signal after %s.", evolveDur))
+					}
 					failColor.Printf("✗ Evolve task %d failed: %s\n\n", nextTask.ID, nextTask.Title)
 				default:
 					nextTask.Status = pm.TaskDone

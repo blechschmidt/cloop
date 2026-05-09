@@ -3913,3 +3913,146 @@ func TestRunPM_ScriptVerifyFailed_Annotated(t *testing.T) {
 			want, task.Annotations)
 	}
 }
+
+// TestRunPM_AISignal_Annotated locks in audit-trail accuracy of the explicit
+// AI-signal switch arms. When the AI emits TASK_DONE / TASK_SKIPPED /
+// TASK_FAILED, the loop transitions task.Status accordingly but historically
+// only printed a console line for the SKIPPED / FAILED arms (and TaskDone in
+// runPMParallel) — operators inspecting task history saw a status change with
+// no breadcrumb explaining whether the outcome came from an explicit AI
+// signal, an implicit fall-through, a gate, or a verify failure. Same
+// audit-trail accuracy class as the gate-skip, verify-errored, implicit-done,
+// and provider-error fixes.
+func TestRunPM_AISignal_Annotated(t *testing.T) {
+	t.Run("sequential_task_skipped", func(t *testing.T) {
+		dir := tempDir(t)
+		s := initState(t, dir, "goal", 0)
+		s.PMMode = true
+		s.Plan = &pm.Plan{
+			Goal:  "goal",
+			Tasks: []*pm.Task{{ID: 1, Title: "Task A", Priority: 1, Status: pm.TaskPending}},
+		}
+		s.Save()
+
+		prov := &mockProvider{
+			name: "mock",
+			results: []*provider.Result{
+				{Output: "decided this is unnecessary\nTASK_SKIPPED", Provider: "mock"},
+			},
+		}
+		o := newOrchestrator(t, dir, Config{
+			WorkDir: dir,
+			PMMode:  true,
+			NoHeal:  true,
+		}, prov)
+		_ = o.runPM(context.Background())
+
+		task := o.state.Plan.Tasks[0]
+		if task.Status != pm.TaskSkipped {
+			t.Fatalf("task status = %q, want %q", task.Status, pm.TaskSkipped)
+		}
+		want := "per AI TASK_SKIPPED signal"
+		found := false
+		for _, a := range task.Annotations {
+			if a.Author == "ai" && strings.Contains(a.Text, want) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("missing TASK_SKIPPED-signal annotation containing %q;\ngot annotations: %+v",
+				want, task.Annotations)
+		}
+	})
+
+	t.Run("sequential_task_failed", func(t *testing.T) {
+		dir := tempDir(t)
+		s := initState(t, dir, "goal", 0)
+		s.PMMode = true
+		s.Plan = &pm.Plan{
+			Goal:  "goal",
+			Tasks: []*pm.Task{{ID: 1, Title: "Task A", Priority: 1, Status: pm.TaskPending}},
+		}
+		s.Save()
+
+		// AI emits TASK_FAILED explicitly. Use MaxFailures=1 so the loop aborts
+		// after the single failure rather than retrying — we only need to verify
+		// the annotation lands.
+		prov := &mockProvider{
+			name: "mock",
+			results: []*provider.Result{
+				{Output: "ran into a problem\nTASK_FAILED", Provider: "mock"},
+			},
+		}
+		o := newOrchestrator(t, dir, Config{
+			WorkDir:     dir,
+			PMMode:      true,
+			MaxFailures: 1,
+			NoHeal:      true,
+		}, prov)
+		_ = o.runPM(context.Background())
+
+		task := o.state.Plan.Tasks[0]
+		if task.Status != pm.TaskFailed {
+			t.Fatalf("task status = %q, want %q", task.Status, pm.TaskFailed)
+		}
+		want := "per AI TASK_FAILED signal"
+		found := false
+		for _, a := range task.Annotations {
+			if a.Author == "ai" && strings.Contains(a.Text, want) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("missing TASK_FAILED-signal annotation containing %q;\ngot annotations: %+v",
+				want, task.Annotations)
+		}
+	})
+
+	t.Run("parallel_task_done", func(t *testing.T) {
+		dir := tempDir(t)
+		s := initState(t, dir, "goal", 0)
+		s.PMMode = true
+		s.Plan = &pm.Plan{
+			Goal:  "goal",
+			Tasks: []*pm.Task{{ID: 1, Title: "Task A", Priority: 1, Status: pm.TaskPending}},
+		}
+		s.Save()
+
+		// runPMParallel previously didn't annotate the TaskDone arm (asymmetric
+		// vs runPM, which has annotated it for some time). This test locks in
+		// the parity fix.
+		prov := &safeProvider{name: "mock", output: "all done\nTASK_DONE"}
+		o := newOrchestrator(t, dir, Config{
+			WorkDir:  dir,
+			PMMode:   true,
+			Parallel: true,
+			NoHeal:   true,
+		}, prov)
+		if err := o.Run(context.Background()); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+
+		final, loadErr := state.Load(dir)
+		if loadErr != nil {
+			t.Fatalf("final load: %v", loadErr)
+		}
+		task := final.Plan.Tasks[0]
+		if task.Status != pm.TaskDone {
+			t.Fatalf("task status = %q, want %q", task.Status, pm.TaskDone)
+		}
+		want := "completed successfully"
+		found := false
+		for _, a := range task.Annotations {
+			if a.Author == "ai" && strings.Contains(a.Text, want) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("missing parallel-mode TaskDone annotation containing %q;\ngot annotations: %+v",
+				want, task.Annotations)
+		}
+	})
+}
