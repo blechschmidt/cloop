@@ -1684,7 +1684,14 @@ func marshalStateForWire(ps *state.ProjectState) ([]byte, error) {
 	if ps == nil {
 		return []byte("null"), nil
 	}
+	// Prefer the explicit StepCount field — set by state.LoadLite where
+	// Steps is nil — and fall back to len(Steps) for full loads. Without
+	// this, lite-loaded states would always report steps_count:0 on the
+	// wire even when the underlying project has thousands of steps.
 	stepsCount := len(ps.Steps)
+	if stepsCount == 0 && ps.StepCount > 0 {
+		stepsCount = ps.StepCount
+	}
 	clone := *ps
 	clone.Steps = nil
 	raw, err := json.Marshal(&clone)
@@ -1715,7 +1722,10 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 // handleState returns the current project state as JSON.
 func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 	workDir := s.resolveWorkDir(r)
-	ps, err := state.Load(workDir)
+	// LoadLite skips reading per-step rows since marshalStateForWire
+	// throws them away anyway — saves ~1.5 MiB of allocation per request
+	// on a 5k-step project (Task 20125).
+	ps, err := state.LoadLite(workDir)
 	if err != nil {
 		jsonErr(w, "no cloop project found", http.StatusNotFound)
 		return
@@ -1860,17 +1870,21 @@ func (s *Server) handleEventHistory(w http.ResponseWriter, r *http.Request) {
 	}
 
 	type entry struct {
-		ID        int64       `json:"id"`
-		Kind      string      `json:"kind"`
-		Timestamp time.Time   `json:"timestamp"`
-		TaskID    int         `json:"task_id,omitempty"`
-		TaskTitle string      `json:"task_title,omitempty"`
-		Step      int         `json:"step,omitempty"`
-		Message   string      `json:"message,omitempty"`
-		Output    string      `json:"output,omitempty"`
-		ExitCode  int         `json:"exit_code,omitempty"`
-		Duration  string      `json:"duration,omitempty"`
-		Details   interface{} `json:"details,omitempty"`
+		ID        int64     `json:"id"`
+		Kind      string    `json:"kind"`
+		Timestamp time.Time `json:"timestamp"`
+		TaskID    int       `json:"task_id,omitempty"`
+		TaskTitle string    `json:"task_title,omitempty"`
+		// Step has no omitempty: step 0 is a real step number and events
+		// set Step=-1 explicitly when not step-bound — both must round-trip.
+		Step int `json:"step"`
+		// ExitCode has no omitempty: 0 is the success case for steps; the
+		// renderer keys off Kind=="step" to know whether ExitCode is meaningful.
+		ExitCode int         `json:"exit_code"`
+		Message  string      `json:"message,omitempty"`
+		Output   string      `json:"output,omitempty"`
+		Duration string      `json:"duration,omitempty"`
+		Details  interface{} `json:"details,omitempty"`
 	}
 
 	// Build the full merged sequence in memory, then page it. The two streams
@@ -2026,8 +2040,10 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		s.mu.Unlock()
 	}()
 
-	// Send current state immediately on connect.
-	if ps, err := state.Load(s.WorkDir); err == nil {
+	// Send current state immediately on connect. Lite-load: the SSE frame
+	// passes through marshalStateForWire which drops Steps anyway, so
+	// reading the per-step rows here is wasted work (Task 20125).
+	if ps, err := state.LoadLite(s.WorkDir); err == nil {
 		if data, err := marshalStateForWire(ps); err == nil {
 			if werr := writeSSE(w, flusher, "data: %s\n\n", data); werr != nil {
 				return
@@ -2264,8 +2280,10 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		s.broadcastPresence(workDir)
 	}()
 
-	// Send current state immediately.
-	if ps, err := state.Load(workDir); err == nil {
+	// Send current state immediately. Same lite-load reasoning as the SSE
+	// initial-state path: the frame is marshalStateForWire'd, so Steps are
+	// dropped before going on the wire (Task 20125).
+	if ps, err := state.LoadLite(workDir); err == nil {
 		if raw, err := marshalStateForWire(ps); err == nil {
 			if msg, err := json.Marshal(wsMessage{Type: "task_update", Data: raw}); err == nil {
 				_ = wsWrite(ctx, conn, msg)
@@ -2554,8 +2572,9 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 			s.liveLogRunning = false
 			s.liveLogMu.Unlock()
 			s.broadcastRunState(workDir, false, true)
-			// Broadcast updated state after run completes.
-			if ps, loadErr := state.Load(workDir); loadErr == nil {
+			// Broadcast updated state after run completes. Lite-load —
+			// marshalStateForWire drops Steps before broadcast (Task 20125).
+			if ps, loadErr := state.LoadLite(workDir); loadErr == nil {
 				if data, marshalErr := marshalStateForWire(ps); marshalErr == nil {
 					s.broadcast(string(data))
 				}
@@ -6689,6 +6708,30 @@ const dashboardHTML = `<!DOCTYPE html>
   @keyframes step-running-pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
   .step-load-more { padding:10px 12px; text-align:center; font-size:11px; color:var(--muted); border:1px dashed var(--border); border-radius:var(--radius); }
 
+  /* ── Event history non-step rows (Task 20118) ── */
+  .step-item.event-row { background:var(--bg); }
+  .step-item.event-row .step-header { background:transparent; cursor:default; padding:6px 12px; }
+  .step-item.event-row.expandable .step-header { cursor:pointer; }
+  .step-item.event-row .step-header:hover { background:var(--hover-bg); }
+  .step-item.event-row .step-num { display:none; }
+  .event-icon { display:inline-flex; align-items:center; justify-content:center; width:20px; height:20px; border-radius:50%; font-size:11px; font-weight:700; flex-shrink:0; color:#fff; line-height:1; }
+  .event-icon.ev-task-start  { background:var(--cyan); }
+  .event-icon.ev-task-done   { background:var(--green); }
+  .event-icon.ev-task-fail   { background:var(--red); }
+  .event-icon.ev-task-skip   { background:var(--muted); }
+  .event-icon.ev-task-kill   { background:#a23939; }
+  .event-icon.ev-task-heal   { background:#c98c2b; }
+  .event-icon.ev-task-add    { background:#5b8def; }
+  .event-icon.ev-task-del    { background:#888; }
+  .event-icon.ev-task-status { background:#7c5fb3; }
+  .event-icon.ev-evolve      { background:#39b58b; }
+  .event-icon.ev-plan        { background:var(--cyan); }
+  .event-icon.ev-session     { background:#444; }
+  .event-icon.ev-other       { background:var(--border); color:var(--text); }
+  .event-time { font-size:10px; color:var(--muted); flex-shrink:0; font-variant-numeric:tabular-nums; }
+  .event-msg  { flex:1; font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--text); }
+  .event-task-ref { font-size:11px; color:var(--muted); }
+
   /* ── Live output panel ── */
   .live-output-wrap { margin-bottom: 24px; }
   .live-output-header { display:flex; align-items:center; gap:8px; margin-bottom:8px; }
@@ -10093,20 +10136,24 @@ function renderMultiProjectOverview() {
 
 window.toggleStep = function(el) { el.classList.toggle('expanded'); };
 
-// ── Step history lazy loading ────────────────────────────────────────────────
+// ── Event history lazy loading (Task 20118) ─────────────────────────────────
 //
-// The step history panel previously rendered every step inline from
-// /api/state — fine for short runs, terrible after 4000+ steps. We now fetch
-// pages from /api/steps (latest first) on demand, with infinite-scroll.
+// The history panel was previously a step-only feed sourced from /api/steps.
+// Task 20118 replaced it with a unified event journal that merges step
+// results with task starts, completions, skips, kills, evolve rounds,
+// status changes, etc. Backend feed: GET /api/event-history.
+//
+// State variable names keep the "steps" prefix for git-blame readability —
+// they hold heterogeneous entries now (each has a .kind discriminator).
 
 const STEP_PAGE_SIZE = 50;
 
 let stepsState = {
-  loaded: [],     // step rows, latest-first
-  total: 0,       // total step count on the server
+  loaded: [],     // entries, latest-first (kind === "step" or event type)
+  total: 0,       // total entry count on the server (steps + events)
   loading: false, // a fetch is in flight
   hasMore: true,  // more pages may exist
-  scopeKey: '',   // identifies which project's steps are loaded
+  scopeKey: '',   // identifies which project's entries are loaded
 };
 
 function _stepsScopeKey() {
@@ -10118,12 +10165,22 @@ function _resetStepsState() {
 }
 
 async function _fetchStepsPage(offset, limit) {
-  return api(pUrl('/api/steps?offset=' + offset + '&limit=' + limit));
+  return api(pUrl('/api/event-history?offset=' + offset + '&limit=' + limit));
+}
+
+// _entryKey returns a stable identifier for an entry across re-renders so
+// the expand/collapse state survives re-fetches. Steps key on step number;
+// events key on the (negative) server id from the events table.
+function _entryKey(e) {
+  if (!e) return '';
+  if (e.kind === 'step') return 's' + (typeof e.step === 'number' ? e.step : e.id);
+  return 'e' + e.id;
 }
 
 // syncStepHistory is called from render(s). It decides whether to reload the
-// top page (because new steps appeared, or the project changed) or just
-// re-render the panel (e.g. running-step indicator update).
+// top page (because new entries appeared, or the project changed) or just
+// re-render the panel (e.g. running-step indicator update). Non-step events
+// are picked up via _scheduleEventHistoryRefresh() called from the WS handler.
 function syncStepHistory(s) {
   const newScope = _stepsScopeKey();
   if (newScope !== stepsState.scopeKey) {
@@ -10131,18 +10188,31 @@ function syncStepHistory(s) {
     _loadInitialSteps();
     return;
   }
-  // Task 20125: backend ships steps_count instead of steps[].
-  let newTotal = stepsState.total;
-  if (s && typeof s.steps_count === 'number') newTotal = s.steps_count;
-  else if (s && Array.isArray(s.steps))      newTotal = s.steps.length;
-  if (newTotal !== stepsState.total || (newTotal > 0 && stepsState.loaded.length === 0)) {
-    // New steps appeared (or first load). Re-fetch enough rows to cover what
-    // the user already had visible, plus the newcomers.
-    const wanted = Math.max(STEP_PAGE_SIZE, stepsState.loaded.length);
-    _reloadStepsTopPage(wanted);
+  // s.steps_count is a strict lower bound on the merged entry total — enough
+  // to detect new step writes from the orchestrator. Non-step events arrive
+  // via the WS-triggered refresh in handleRealtimeMsg.
+  let stepsCount = 0;
+  if (s && typeof s.steps_count === 'number') stepsCount = s.steps_count;
+  else if (s && Array.isArray(s.steps))       stepsCount = s.steps.length;
+  if (stepsCount > 0 && stepsState.loaded.length === 0) {
+    _reloadStepsTopPage(STEP_PAGE_SIZE);
     return;
   }
   renderStepListPanel();
+}
+
+// _scheduleEventHistoryRefresh debounces refetches of the top page after
+// WebSocket events that may have appended event rows (task starts, task
+// completions, evolves, etc.). Multiple rapid events collapse into a single
+// /api/event-history fetch.
+let _eventHistoryRefreshTimer = null;
+function _scheduleEventHistoryRefresh() {
+  if (_eventHistoryRefreshTimer) clearTimeout(_eventHistoryRefreshTimer);
+  _eventHistoryRefreshTimer = setTimeout(() => {
+    _eventHistoryRefreshTimer = null;
+    const wanted = Math.max(STEP_PAGE_SIZE, stepsState.loaded.length);
+    _reloadStepsTopPage(wanted);
+  }, 250);
 }
 
 async function _loadInitialSteps() {
@@ -10155,9 +10225,9 @@ async function _reloadStepsTopPage(limit) {
   renderStepListPanel();
   try {
     const data = await _fetchStepsPage(0, limit);
-    if (data && Array.isArray(data.steps)) {
-      stepsState.loaded = data.steps;
-      stepsState.total  = (typeof data.total === 'number') ? data.total : data.steps.length;
+    if (data && Array.isArray(data.entries)) {
+      stepsState.loaded = data.entries;
+      stepsState.total  = (typeof data.total === 'number') ? data.total : data.entries.length;
       stepsState.hasMore = stepsState.loaded.length < stepsState.total;
     }
   } catch (_) { /* leave previous loaded list intact */ }
@@ -10171,13 +10241,14 @@ async function loadMoreSteps() {
   renderStepListPanel();
   try {
     const data = await _fetchStepsPage(stepsState.loaded.length, STEP_PAGE_SIZE);
-    if (data && Array.isArray(data.steps) && data.steps.length) {
-      // Server may have more steps now than when we started; keep total fresh.
-      stepsState.total = (typeof data.total === 'number') ? data.total : (stepsState.loaded.length + data.steps.length);
-      // Skip any rows we already have (rare race when a new step arrives mid-fetch).
-      const haveMin = stepsState.loaded.length ? stepsState.loaded[stepsState.loaded.length-1].step : Infinity;
-      for (const st of data.steps) {
-        if (st.step < haveMin) stepsState.loaded.push(st);
+    if (data && Array.isArray(data.entries) && data.entries.length) {
+      // Server may have more entries now than when we started; keep total fresh.
+      stepsState.total = (typeof data.total === 'number') ? data.total : (stepsState.loaded.length + data.entries.length);
+      // Dedup by stable key (rare race when a new entry arrives mid-fetch).
+      const seen = new Set(stepsState.loaded.map(_entryKey));
+      for (const ent of data.entries) {
+        const k = _entryKey(ent);
+        if (!seen.has(k)) { stepsState.loaded.push(ent); seen.add(k); }
       }
       stepsState.hasMore = stepsState.loaded.length < stepsState.total;
     } else if (data && typeof data.total === 'number') {
@@ -10189,6 +10260,89 @@ async function loadMoreSteps() {
   renderStepListPanel();
 }
 
+// _eventVisuals maps an event kind to icon glyph + CSS class + short label.
+// Unknown kinds fall back to a neutral bullet so the row still renders.
+function _eventVisuals(kind) {
+  switch (kind) {
+    case 'task_started':        return { glyph:'▶', cls:'ev-task-start',  label:'started'   };
+    case 'task_done':           return { glyph:'✓', cls:'ev-task-done',   label:'done'      };
+    case 'task_failed':         return { glyph:'✗', cls:'ev-task-fail',   label:'failed'    };
+    case 'task_skipped':        return { glyph:'⊘', cls:'ev-task-skip',   label:'skipped'   };
+    case 'task_killed':         return { glyph:'☠', cls:'ev-task-kill',   label:'killed'    };
+    case 'task_heal':           return { glyph:'⚠', cls:'ev-task-heal',   label:'heal'      };
+    case 'task_added':          return { glyph:'+',      cls:'ev-task-add',    label:'added'     };
+    case 'task_added_external': return { glyph:'+',      cls:'ev-task-add',    label:'external'  };
+    case 'task_deleted':        return { glyph:'−', cls:'ev-task-del',    label:'deleted'   };
+    case 'task_status_change':  return { glyph:'⇄', cls:'ev-task-status', label:'status'    };
+    case 'evolve_round_start':  return { glyph:'↻', cls:'ev-evolve',      label:'evolve'    };
+    case 'evolve_discovered':   return { glyph:'✨', cls:'ev-evolve',      label:'discovered'};
+    case 'evolve_no_op':        return { glyph:'—', cls:'ev-evolve',      label:'no-op'     };
+    case 'plan_complete':       return { glyph:'★', cls:'ev-plan',        label:'plan done' };
+    case 'session_started':     return { glyph:'▷', cls:'ev-session',     label:'session'   };
+    case 'session_paused':      return { glyph:'⏸', cls:'ev-session',     label:'paused'    };
+    case 'session_failed':      return { glyph:'✗', cls:'ev-session',     label:'failed'    };
+    default:                    return { glyph:'•', cls:'ev-other',       label:kind || ''  };
+  }
+}
+
+function _formatEntryTime(ts) {
+  if (!ts) return '';
+  try {
+    const d = new Date(ts);
+    if (isNaN(d.getTime())) return '';
+    const hh = String(d.getHours()).padStart(2,'0');
+    const mm = String(d.getMinutes()).padStart(2,'0');
+    const ss = String(d.getSeconds()).padStart(2,'0');
+    return hh + ':' + mm + ':' + ss;
+  } catch(_) { return ''; }
+}
+
+function _renderStepRow(e, expanded) {
+  const idx = _entryKey(e);
+  const isExp = expanded[idx] ? ' expanded' : '';
+  const exitCls = e.exit_code === 0 ? 'step-ok' : 'step-bad';
+  return '<div class="step-item'+isExp+'" data-idx="'+idx+'" onclick="toggleStep(this)">'+
+    '<div class="step-header">'+
+      '<span class="step-num">#'+((e.step||0)+1)+'</span>'+
+      '<span class="step-task">'+esc(e.message||'(no description)')+'</span>'+
+      '<div class="step-meta">'+
+        (e.duration?'<span>'+esc(e.duration)+'</span>':'')+
+        '<span class="'+exitCls+'">'+(e.exit_code===0?'OK':'exit '+e.exit_code)+'</span>'+
+      '</div>'+
+      '<span class="step-chevron">&#9654;</span>'+
+    '</div>'+
+    '<div class="step-output">'+esc(e.output||'')+'</div>'+
+  '</div>';
+}
+
+function _renderEventRow(e, expanded) {
+  if (!e) return '';
+  const idx = _entryKey(e);
+  const isExp = expanded[idx] ? ' expanded' : '';
+  const v = _eventVisuals(e.kind);
+  const taskRef = e.task_id ? ('#' + e.task_id + (e.task_title ? ' ' + e.task_title : '')) : '';
+  const detailsTxt = (e.details && typeof e.details === 'object' && Object.keys(e.details).length)
+    ? JSON.stringify(e.details, null, 2) : '';
+  const expandable = !!detailsTxt;
+  const cls = 'step-item event-row' + (expandable ? ' expandable' : '') + isExp;
+  const onclick = expandable ? ' onclick="toggleStep(this)"' : '';
+  const chevron = expandable ? '<span class="step-chevron">&#9654;</span>' : '';
+  const msg = e.message || (taskRef ? (v.label + ' ' + taskRef) : v.label);
+  const showRef = taskRef && (!e.message || e.message.indexOf('#'+e.task_id) === -1);
+  return '<div class="'+cls+'" data-idx="'+idx+'"'+onclick+'>'+
+    '<div class="step-header">'+
+      '<span class="event-icon '+v.cls+'" title="'+esc(e.kind||'')+'">'+v.glyph+'</span>'+
+      '<span class="event-msg">'+esc(msg)+'</span>'+
+      '<div class="step-meta">'+
+        (showRef ? '<span class="event-task-ref">'+esc(taskRef)+'</span>' : '')+
+        '<span class="event-time">'+esc(_formatEntryTime(e.timestamp))+'</span>'+
+      '</div>'+
+      chevron+
+    '</div>'+
+    (expandable ? '<div class="step-output">'+esc(detailsTxt)+'</div>' : '')+
+  '</div>';
+}
+
 function renderStepListPanel() {
   const stepListEl = document.getElementById('stepList');
   if (!stepListEl) return;
@@ -10196,18 +10350,21 @@ function renderStepListPanel() {
   const isRunning = s.status === 'running';
 
   if (!stepsState.loaded.length && !isRunning && !stepsState.loading) {
-    stepListEl.innerHTML = '<div class="empty-state"><h3>No steps yet</h3><p>Start a run to see history here.</p></div>';
+    stepListEl.innerHTML = '<div class="empty-state"><h3>No events yet</h3><p>Start a run to see history here.</p></div>';
     return;
   }
 
-  // Preserve which step-items the user has expanded across re-renders.
+  // Preserve expand/collapse state across re-renders.
   const expanded = {};
   stepListEl.querySelectorAll('.step-item.expanded').forEach(el => { expanded[el.dataset.idx] = true; });
 
   let html = '';
   if (isRunning) {
     const runningExp = expanded['running'] ? ' expanded' : '';
-    const runningStepNum = (typeof s.current_step === 'number' ? s.current_step : stepsState.total) + 1;
+    // Use steps_count (not stepsState.total — which now counts events) as
+    // the running step number; the orchestrator increments per shell step.
+    const stepsTotal = (typeof s.steps_count === 'number') ? s.steps_count : 0;
+    const runningStepNum = (typeof s.current_step === 'number' ? s.current_step : stepsTotal) + 1;
     let runningTitle = '';
     if (s.plan && s.plan.tasks) {
       const inProg = s.plan.tasks.find(t => t.status === 'in_progress');
@@ -10229,35 +10386,24 @@ function renderStepListPanel() {
     '</div>';
   }
 
-  // stepsState.loaded is already latest-first.
-  html += stepsState.loaded.map((st) => {
-    const idx = st.step; // step number is a stable identifier across re-renders
-    const isExp = expanded[idx] ? ' expanded' : '';
-    const exitCls = st.exit_code === 0 ? 'step-ok' : 'step-bad';
-    return '<div class="step-item'+isExp+'" data-idx="'+idx+'" onclick="toggleStep(this)">'+
-      '<div class="step-header">'+
-        '<span class="step-num">#'+(st.step+1)+'</span>'+
-        '<span class="step-task">'+esc(st.task||'(no description)')+'</span>'+
-        '<div class="step-meta">'+
-          (st.duration?'<span>'+esc(st.duration)+'</span>':'')+
-          '<span class="'+exitCls+'">'+(st.exit_code===0?'OK':'exit '+st.exit_code)+'</span>'+
-          (st.output_tokens?'<span>'+fmtNum(st.output_tokens)+' tok</span>':'')+
-        '</div>'+
-        '<span class="step-chevron">&#9654;</span>'+
-      '</div>'+
-      '<div class="step-output">'+esc(st.output||'')+'</div>'+
-    '</div>';
+  // stepsState.loaded is already latest-first; entries are heterogeneous —
+  // step rows render in the original chrome, non-step events render compactly
+  // with a coloured icon + human-readable message (Task 20118).
+  html += stepsState.loaded.map((entry) => {
+    return (entry && entry.kind === 'step')
+      ? _renderStepRow(entry, expanded)
+      : _renderEventRow(entry, expanded);
   }).join('');
 
   // Footer: progress + sentinel for the IntersectionObserver.
   if (stepsState.total > 0) {
     if (stepsState.hasMore) {
       const label = stepsState.loading
-        ? 'Loading more steps…'
+        ? 'Loading more events…'
         : 'Showing ' + stepsState.loaded.length + ' of ' + stepsState.total + ' — scroll to load more';
       html += '<div class="step-load-more" id="stepLoadMore">'+esc(label)+'</div>';
     } else {
-      html += '<div class="step-load-more">All ' + stepsState.total + ' steps loaded</div>';
+      html += '<div class="step-load-more">All ' + stepsState.total + ' events loaded</div>';
     }
   }
 
@@ -10885,6 +11031,22 @@ if (!_clientID) {
 function handleRealtimeMsg(type, data) {
   const dot = document.getElementById('liveDot');
   if (dot) dot.classList.add('connected');
+
+  // Task 20118: every realtime kind below corresponds to one or more rows
+  // freshly written to the events journal (task_started, task_done,
+  // evolve_round_start, plan_complete, …). Schedule a debounced top-page
+  // reload so the Event History panel stays live without polling.
+  switch (type) {
+    case 'task_update':
+    case 'task_added':
+    case 'task_deleted':
+    case 'task_mutation':
+    case 'plan_complete':
+    case 'run_state':
+      try { _scheduleEventHistoryRefresh(); } catch(_) {}
+      break;
+  }
+
   switch (type) {
     case 'task_update':
     case 'plan_complete':
