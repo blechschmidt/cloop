@@ -418,6 +418,11 @@ type Orchestrator struct {
 	queue       *taskqueue.Queue   // central work queue; nil-safe (Mark*/Enqueue tolerate nil)
 	statedb     *statedb.DB        // shared SQLite handle for forensics (stuck_tasks); nil-safe
 	watchdog    *watchdog.Watchdog // stuck-task detector; nil if disabled or queue/db unavailable
+
+	// killWG tracks the goroutine that polls kill_requests for manual aborts
+	// (Task 20140). The orchestrator's Run() spawns it under the run context
+	// and waits on this group during Close so the loop exits cleanly.
+	killWG sync.WaitGroup
 }
 
 func New(cfg Config, prov provider.Provider) (*Orchestrator, error) {
@@ -545,6 +550,9 @@ func (o *Orchestrator) Close() error {
 	if o.watchdog != nil {
 		o.watchdog.Wait()
 	}
+	// Wait for the manual-abort poller to exit before tearing down statedb
+	// so a final tick cannot race the DB close (Task 20140).
+	o.killWG.Wait()
 	if o.statedb != nil {
 		_ = o.statedb.Close()
 		o.statedb = nil
@@ -938,6 +946,11 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	if o.watchdog != nil {
 		o.watchdog.Start(wdCtx)
 	}
+	// Manual-abort poller (Task 20140): polls kill_requests rows the UI
+	// inserts when an operator changes a running task's status, and fires
+	// the watchdog-registered cancel for that task. Bound to wdCtx so it
+	// dies with the watchdog on Close.
+	o.startKillPoller(wdCtx)
 	// Close the central work queue on Run() exit so the underlying SQLite
 	// connection (and any goroutines it owns) is released. The orchestrator
 	// is a one-shot value — callers Build → Run → discard. Re-using the

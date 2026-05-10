@@ -164,6 +164,30 @@ func (w *Watchdog) Unregister(taskID int) {
 	delete(w.flagged, taskID)
 }
 
+// Cancel fires the cancel function registered for taskID and removes the
+// entry from the registry. Returns true when a cancel was fired, false when
+// no cancel was registered (taskID unknown or already cleared). Used by the
+// kill-request poller (Task 20140) to abort a running task on operator
+// request, by the same code path the watchdog itself uses for AutoKillAfter.
+//
+// Safe to call from any goroutine and from outside the watchdog's tick.
+func (w *Watchdog) Cancel(taskID int) bool {
+	if w == nil {
+		return false
+	}
+	w.mu.Lock()
+	cancel, ok := w.cancels[taskID]
+	if ok {
+		delete(w.cancels, taskID)
+	}
+	w.mu.Unlock()
+	if !ok || cancel == nil {
+		return false
+	}
+	cancel()
+	return true
+}
+
 // Start launches the watchdog goroutine. Returns immediately. The goroutine
 // exits when ctx is cancelled; callers should wait via Wait before tearing
 // down dependent resources (DB handles, loggers).

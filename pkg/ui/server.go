@@ -2887,8 +2887,20 @@ func (s *Server) handleTaskStatus(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "save failed: "+err.Error(), statedb.HTTPStatus(err))
 		return
 	}
+	workDir := s.resolveWorkDir(r)
+	// Manual-abort hook (Task 20140): when an operator moves a task out of
+	// in_progress, request the orchestrator to cancel its in-flight provider
+	// call. The orchestrator's kill-poller picks this up within a second and
+	// fires the watchdog-registered cancel. Best-effort — a failure to record
+	// the request just means the task continues to run; the disk status is
+	// already correct so the UI reflects the operator's choice.
+	if oldStatus == string(pm.TaskInProgress) && newStatus != pm.TaskInProgress {
+		if killErr := state.RequestTaskKill(workDir, req.ID, req.Status, "ui"); killErr != nil {
+			fmt.Fprintf(os.Stderr, "[ui] task %d kill request: %v\n", req.ID, killErr)
+		}
+	}
 	if oldStatus != req.Status {
-		state.LogEventDetails(s.resolveWorkDir(r), state.EventRow{
+		state.LogEventDetails(workDir, state.EventRow{
 			Type:      state.EventTaskStatusChange,
 			TaskID:    req.ID,
 			TaskTitle: task.Title,
@@ -3106,6 +3118,10 @@ func (s *Server) handlePutTask(w http.ResponseWriter, r *http.Request) {
 	if req.DependsOn != nil {
 		task.DependsOn = *req.DependsOn
 	}
+	// Capture the prior status BEFORE the assignment so the manual-abort hook
+	// below can detect a transition out of in_progress (Task 20140).
+	priorStatus := task.Status
+	statusChanged := false
 	if req.Status != "" {
 		validStatuses := map[string]pm.TaskStatus{
 			"pending":     pm.TaskPending,
@@ -3116,12 +3132,23 @@ func (s *Server) handlePutTask(w http.ResponseWriter, r *http.Request) {
 		}
 		if ns, ok := validStatuses[req.Status]; ok {
 			task.Status = ns
+			statusChanged = ns != priorStatus
 		}
 	}
 
 	if err := ps.SaveDirect(); err != nil {
 		jsonErr(w, "save failed: "+err.Error(), statedb.HTTPStatus(err))
 		return
+	}
+
+	// Manual-abort hook (Task 20140): when this PUT moved the task out of
+	// in_progress, ask the orchestrator's kill-poller to cancel the in-flight
+	// provider call. Best-effort — kill_request failures are logged but do
+	// not fail the PUT (disk status already reflects the operator's choice).
+	if statusChanged && priorStatus == pm.TaskInProgress && task.Status != pm.TaskInProgress {
+		if killErr := state.RequestTaskKill(s.resolveWorkDir(r), id, req.Status, "ui"); killErr != nil {
+			fmt.Fprintf(os.Stderr, "[ui] task %d kill request: %v\n", id, killErr)
+		}
 	}
 
 	// Detect which fields were mutated and check for concurrent-edit conflicts.
