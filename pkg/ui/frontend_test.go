@@ -575,3 +575,152 @@ func TestDashboard_SingleMainIIFE(t *testing.T) {
 		t.Errorf("expected exactly one main `'use strict';` IIFE wrapper, found %d", count)
 	}
 }
+
+// TestDashboard_OrphanTabPanels is the reverse direction of
+// TestDashboard_SwitchTabExposedAndAllTargetsExist: every `<div id="tab-X">`
+// panel in the HTML must be reachable via at least one `switchTab('X')` call
+// somewhere. A panel with no entry point is dead UI — bytes shipped to every
+// client for nothing, and a strong signal that a tab was renamed (or its
+// nav-button removed) without cleaning up the corresponding panel. The
+// inverse of Tasks 20034/20127 (panels removed but JS still references them).
+func TestDashboard_OrphanTabPanels(t *testing.T) {
+	idRE := regexp.MustCompile(`\bid="tab-([a-zA-Z0-9_-]+)"`)
+	switchRE := regexp.MustCompile(`switchTab\(['"]([a-zA-Z0-9_-]+)['"]\)`)
+
+	panels := map[string]bool{}
+	for _, m := range idRE.FindAllStringSubmatch(dashboardHTML, -1) {
+		panels[m[1]] = true
+	}
+	switched := map[string]bool{}
+	for _, m := range switchRE.FindAllStringSubmatch(dashboardHTML, -1) {
+		switched[m[1]] = true
+	}
+
+	var orphans []string
+	for p := range panels {
+		if !switched[p] {
+			orphans = append(orphans, p)
+		}
+	}
+	sort.Strings(orphans)
+	if len(orphans) > 0 {
+		t.Errorf("found %d <div id=\"tab-X\"> panel(s) with no matching "+
+			"switchTab('X') call — dead UI shipped to every client:\n  %s\n"+
+			"Either wire a nav button that calls switchTab(...), or delete "+
+			"the orphaned panel.", len(orphans), strings.Join(orphans, "\n  "))
+	}
+}
+
+// TestDashboard_NoDuplicateWindowAssignments catches the silent-shadow bug
+// where the same global handler is assigned twice (e.g. an old definition
+// is left behind when a new one is added). The second assignment overrides
+// the first with no warning, which has historically caused "I just fixed
+// this, why isn't it working" sessions when the live function turns out to
+// be the wrong copy. A handful of intentional re-assignments live in DOM-
+// ready callbacks; those are filtered out by the allowlist below.
+func TestDashboard_NoDuplicateWindowAssignments(t *testing.T) {
+	// Match `window.foo = ...` only when the assignment is at the *start*
+	// of a statement (preceded by start-of-line or whitespace). This keeps
+	// us from matching `obj.window.foo = ...` (no such pattern in the file
+	// today, but defensive).
+	re := regexp.MustCompile(`(?m)^\s*window\.([a-zA-Z_$][a-zA-Z0-9_$]*)\s*=`)
+	counts := map[string]int{}
+	for _, m := range re.FindAllStringSubmatch(dashboardHTML, -1) {
+		counts[m[1]]++
+	}
+
+	// Allowlist for handlers that are intentionally reassigned (e.g. a
+	// no-op default replaced by a real implementation when a feature
+	// initialises). Add new entries deliberately, with a comment.
+	allow := map[string]bool{}
+
+	var dupes []string
+	for name, n := range counts {
+		if n > 1 && !allow[name] {
+			dupes = append(dupes, name)
+		}
+	}
+	sort.Strings(dupes)
+	if len(dupes) > 0 {
+		t.Errorf("found %d window.X handler(s) assigned more than once — the "+
+			"second assignment silently overrides the first, often with the "+
+			"wrong implementation:\n  %s\nIf the duplicate is intentional, "+
+			"add it to the allowlist in this test with a comment explaining "+
+			"why the reassignment is correct.",
+			len(dupes), strings.Join(dupes, "\n  "))
+	}
+}
+
+// TestDashboard_PostHandlersBoundJSONBody verifies the architectural
+// invariant from Task 20090: every POST/PUT/PATCH handler in the UI must
+// call limitJSONBody before reading the body, otherwise a malicious or
+// buggy client can OOM the daemon by streaming an unbounded payload.
+//
+// We can't enforce this with a vet check, so we grep the source: any
+// handler that reads `r.Body` (via json.Decode, ioutil.ReadAll, or
+// json.NewDecoder) must have a `limitJSONBody(` call earlier in the same
+// function. The check is conservative — it allows handlers that don't
+// touch r.Body at all, since those carry no risk.
+func TestDashboard_PostHandlersBoundJSONBody(t *testing.T) {
+	src := readServerSource(t)
+
+	// Split the file into top-level functions by scanning for
+	// `func (s *Server) handle...(` and tracking brace depth from the
+	// first `{` after the signature. This is good enough for the
+	// dashboard's hand-written handlers (no embedded structs with
+	// methods, no anonymous funcs at top level).
+	type fn struct {
+		name string
+		body string
+	}
+	var fns []fn
+	sig := regexp.MustCompile(`func \(s \*Server\) (handle[A-Za-z0-9_]+)\(`)
+	for _, idx := range sig.FindAllStringSubmatchIndex(src, -1) {
+		name := src[idx[2]:idx[3]]
+		// Find the opening brace after the signature.
+		open := strings.Index(src[idx[1]:], "{")
+		if open < 0 {
+			continue
+		}
+		start := idx[1] + open
+		depth := 0
+		end := start
+		for end < len(src) {
+			switch src[end] {
+			case '{':
+				depth++
+			case '}':
+				depth--
+				if depth == 0 {
+					end++
+					goto done
+				}
+			}
+			end++
+		}
+	done:
+		fns = append(fns, fn{name: name, body: src[start:end]})
+	}
+
+	// Detect handlers that read the body without first calling limitJSONBody.
+	bodyRead := regexp.MustCompile(`(json\.NewDecoder\(r\.Body\)|json\.Decode\(r\.Body|ioutil\.ReadAll\(r\.Body|io\.ReadAll\(r\.Body)`)
+	limit := "limitJSONBody("
+	var bad []string
+	for _, f := range fns {
+		if !bodyRead.MatchString(f.body) {
+			continue
+		}
+		if !strings.Contains(f.body, limit) {
+			bad = append(bad, f.name)
+		}
+	}
+	sort.Strings(bad)
+	if len(bad) > 0 {
+		t.Errorf("found %d handler(s) reading r.Body without calling "+
+			"limitJSONBody — a malicious client can OOM the daemon by "+
+			"streaming an unbounded payload:\n  %s\nAdd "+
+			"`limitJSONBody(w, r, maxJSONBodyBytes)` before any "+
+			"json.NewDecoder(r.Body) call.",
+			len(bad), strings.Join(bad, "\n  "))
+	}
+}

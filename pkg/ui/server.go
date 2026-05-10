@@ -4633,6 +4633,7 @@ func (s *Server) handleReplayRunGet(w http.ResponseWriter, r *http.Request) {
 // is 5 minutes by default).
 func (s *Server) handleReplayRunCreate(w http.ResponseWriter, r *http.Request) {
 	workDir := s.resolveWorkDir(r)
+	limitJSONBody(w, r, maxJSONBodyBytes)
 
 	var req struct {
 		TaskID    int    `json:"task_id"`
