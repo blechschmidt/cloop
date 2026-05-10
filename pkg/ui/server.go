@@ -139,9 +139,10 @@ func (s *Server) sendSSEOrLag(c *sseClient, ev sseEvent) {
 }
 
 // wsMessage is a typed WebSocket message envelope.
-// Type values: "task_update", "step_output", "plan_complete", "projects",
-// "run_state", "suggest_status", "presence", "task_added", "task_deleted",
-// "task_mutation", "task_stuck", "resync", "error".
+// Type values: "task_update", "step_output", "projects", "run_state",
+// "suggest_status", "presence", "task_added", "task_deleted",
+// "task_mutation", "task_stuck", "provider_call", "resync".
+// "error" is client-emitted only; the backend never sends it.
 type wsMessage struct {
 	Type string          `json:"type"`
 	Data json.RawMessage `json:"data"`
@@ -11041,15 +11042,18 @@ function handleRealtimeMsg(type, data) {
     case 'task_added':
     case 'task_deleted':
     case 'task_mutation':
-    case 'plan_complete':
     case 'run_state':
       try { _scheduleEventHistoryRefresh(); } catch(_) {}
       break;
   }
 
+  // Note: 'plan_complete' is *not* a WebSocket type — it lives only in
+  // the persisted event log and webhook channel. Plan completion arrives
+  // here as the final task_update flipping the last task to 'done', plus
+  // a 'run_state' event flipping running=false. See TestDashboard_NoDead-
+  // FrontendWSCases for the architectural invariant.
   switch (type) {
     case 'task_update':
-    case 'plan_complete':
       // In multi-project mode, only render when the primary project (idx=0)
       // is explicitly selected. Ignore when no project is selected (null) or
       // when a non-primary project is selected.
@@ -11185,7 +11189,7 @@ function connectWS() {
     sseUsed = false;
     if (dot) dot.classList.add('connected');
     // On reconnect also refresh the live log buffer in case we missed output.
-    api('/api/livelog').then(d => {
+    api(pUrl('/api/livelog')).then(d => {
       if (d.lines && d.lines.length) {
         liveLogText = d.lines.join('');
         renderLiveLog();
@@ -11241,7 +11245,7 @@ function connectSSE() {
   const dot = document.getElementById('liveDot');
   evtSource.onopen = () => {
     dot.classList.add('connected');
-    api('/api/livelog').then(d => {
+    api(pUrl('/api/livelog')).then(d => {
       if (d.lines && d.lines.length) {
         liveLogText = d.lines.join('');
         renderLiveLog();
@@ -11272,6 +11276,9 @@ function connectSSE() {
     dot.classList.remove('connected');
     evtSource.close();
     evtSource = null;
+    // SSE fallback reconnect probe — detect auth failures before reconnect.
+    // Intentionally global (no pUrl): selectedProjectIdx context is rebuilt
+    // by the projects payload that arrives after reconnect.
     fetch('/api/state', {headers: authHeaders()}).then(r => {
       if (r.status === 401) {
         showLoginModal();
@@ -13457,7 +13464,7 @@ window.clearSuggestions = function() {
 // ── Settings ─────────────────────────────────────────────────────────────────
 
 function loadConfig() {
-  api('/api/config').then(cfg => {
+  api(pUrl('/api/config')).then(cfg => {
     if (cfg.error) return;
     // Provider
     const provSel = document.getElementById('cfgProvider');
@@ -13486,7 +13493,7 @@ function loadConfig() {
 
 window.saveConfigField = function(key, value) {
   if (value === undefined || value === null) return;
-  api('/api/config/set', {key, value}).then(d => {
+  api(pUrl('/api/config/set'), {key, value}).then(d => {
     if (d.ok) { toast('Saved: '+key, 'ok'); loadConfig(); }
     else toast(d.error||'Save failed', 'err');
   }).catch(() => toast('Request failed', 'err'));
@@ -14521,6 +14528,8 @@ document.addEventListener('keydown', function(e) {
 // On page load, probe the server. If it returns 401 show the login modal,
 // otherwise detect multi-project mode and start WebSocket (SSE as fallback).
 function checkAuthAndInit() {
+  // First paint — runs before any project is selected, so pUrl would be
+  // a no-op. The per-project state is fetched after multi-project init.
   fetch('/api/state', {headers: authHeaders()}).then(r => {
     if (r.status === 401) {
       showLoginModal();

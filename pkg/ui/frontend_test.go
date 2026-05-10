@@ -18,6 +18,23 @@ import (
 //go:embed server.go
 var serverSource string
 
+// providerCallsSource is pkg/ui/provider_calls.go — separate from server.go
+// because Go's `embed` directive does not accept multiple paths. We need
+// it because the `provider_call` WebSocket broadcast lives in this file
+// (not server.go), and the architectural drift tests would otherwise miss
+// it as a "dead" frontend handler.
+//
+//go:embed provider_calls.go
+var providerCallsSource string
+
+// allUISources concatenates every Go source the architectural tests need
+// to scan for WebSocket broadcast sites. Adding a new file with a
+// `wsMessage{Type: ...}` site should mean adding it both here and as a
+// new //go:embed directive above.
+func allUISources() string {
+	return serverSource + "\n" + providerCallsSource
+}
+
 // The cloop dashboard is a single embedded HTML/CSS/JS string (`dashboardHTML`
 // in pkg/ui/server.go). Frontend behaviour is therefore impossible to assert
 // end-to-end from Go without a real browser, but the *structural* invariants
@@ -574,6 +591,338 @@ func TestDashboard_SingleMainIIFE(t *testing.T) {
 	if count != 1 {
 		t.Errorf("expected exactly one main `'use strict';` IIFE wrapper, found %d", count)
 	}
+}
+
+// extractSSEEventNames returns every literal `Event` field set in
+// `sseEvent{Event: "<name>", ...}` constructions in the source. Plain
+// `sseEvent{Data: ...}` (no Event field) maps to the default browser
+// "message" channel and is intentionally not surfaced as a typed event.
+func extractSSEEventNames(src string) map[string]struct{} {
+	re := regexp.MustCompile(`sseEvent\{\s*Event:\s*"([a-zA-Z0-9_]+)"`)
+	out := map[string]struct{}{}
+	for _, m := range re.FindAllStringSubmatch(src, -1) {
+		out[m[1]] = struct{}{}
+	}
+	return out
+}
+
+// extractHandleRealtimeMsgCases returns the set of `case '<name>':` labels
+// inside the *frontend* `handleRealtimeMsg` switch — the dispatcher that
+// receives WebSocket / SSE envelopes. Restricting the scan to that one
+// function avoids false positives from unrelated case-labels elsewhere
+// (event-log glyph maps, status-color switches, etc.) that share the
+// `case '...':` syntax but have nothing to do with realtime messaging.
+func extractHandleRealtimeMsgCases(src string) map[string]struct{} {
+	out := map[string]struct{}{}
+	const sig = "function handleRealtimeMsg("
+	start := strings.Index(src, sig)
+	if start < 0 {
+		return out
+	}
+	end := len(src)
+	if rel := strings.Index(src[start+len(sig):], "\nfunction "); rel >= 0 {
+		end = start + len(sig) + rel
+	}
+	body := src[start:end]
+	re := regexp.MustCompile(`case '([a-z_]+)':`)
+	for _, m := range re.FindAllStringSubmatch(body, -1) {
+		out[m[1]] = struct{}{}
+	}
+	return out
+}
+
+// TestDashboard_NoDeadFrontendWSCases is the *reverse* direction of
+// TestDashboard_WSBroadcastTypesHandled. It catches case labels in the
+// frontend's realtime switch that no broadcast site in the backend ever
+// emits — dead handlers that survive renames or speculative wiring.
+//
+// Caught the dead `case 'plan_complete':` on first run: the orchestrator
+// only ever emits `plan_complete` to the webhook channel and the persisted
+// event log, never as a `wsMessage{Type: "plan_complete"}`, so the case
+// branch in the frontend is unreachable.
+//
+// Allowed exceptions:
+//   - `error`: emitted client-side when the WS layer hands us a malformed
+//     message — there is no server-side broadcast to match against.
+//
+// The denylist mirrors the one in TestDashboard_WSBroadcastTypesHandled
+// (status-color/label switches that aren't event types).
+func TestDashboard_NoDeadFrontendWSCases(t *testing.T) {
+	src := readServerSource(t)
+	// allUISources includes provider_calls.go where the `provider_call`
+	// broadcast lives — without it that case would be flagged as dead.
+	allSrc := allUISources()
+	wsBroadcast := extractWSBroadcastTypes(allSrc)
+	sseBroadcast := extractSSEEventNames(allSrc)
+	// Restrict to cases inside handleRealtimeMsg so we don't flag the
+	// many unrelated `case '...':` labels in event-log glyph maps and
+	// status-color switches.
+	handled := extractHandleRealtimeMsgCases(src)
+	if len(handled) == 0 {
+		t.Fatal("extractHandleRealtimeMsgCases returned no cases — the " +
+			"function name or signature may have changed; update the regex " +
+			"in extractHandleRealtimeMsgCases.")
+	}
+
+	clientOnly := map[string]bool{
+		// Emitted client-side when the WS layer hands us a malformed
+		// message — there is no server-side broadcast to match against.
+		"error": true,
+	}
+
+	emitted := map[string]struct{}{}
+	for k := range wsBroadcast {
+		emitted[k] = struct{}{}
+	}
+	for k := range sseBroadcast {
+		emitted[k] = struct{}{}
+	}
+
+	var dead []string
+	for k := range handled {
+		if clientOnly[k] {
+			continue
+		}
+		if _, ok := emitted[k]; !ok {
+			dead = append(dead, k)
+		}
+	}
+	sort.Strings(dead)
+	if len(dead) > 0 {
+		t.Errorf("frontend handleRealtimeMsg handles %d case label(s) that "+
+			"no backend broadcast site emits — these branches are unreachable "+
+			"dead code:\n  %s\n"+
+			"Either: (a) delete the `case '<name>':` branch from "+
+			"handleRealtimeMsg, OR (b) add a `wsMessage{Type: \"<name>\", ...}` "+
+			"broadcast at the appropriate event site (e.g. plan completion).\n"+
+			"If the case label is intentionally client-only (like 'error'), "+
+			"add it to the clientOnly allowlist in this test.",
+			len(dead), strings.Join(dead, "\n  "))
+	}
+}
+
+// TestDashboard_NoEvalNoDocumentWrite catches three classes of footgun that
+// have no business in a defensively-rendered single-page dashboard:
+//
+//   - `eval(...)` / `new Function(...)` — arbitrary code execution from a
+//     string. Banned outright; the dashboard never needs them.
+//   - `document.write(...)` — destroys the document if invoked after load
+//     and is incompatible with our IIFE / addEventListener architecture.
+//
+// We grep dashboardHTML rather than serverSource because these patterns
+// only matter inside the embedded JS string, not in Go code that happens
+// to mention them.
+func TestDashboard_NoEvalNoDocumentWrite(t *testing.T) {
+	checks := []struct {
+		name string
+		re   *regexp.Regexp
+		why  string
+	}{
+		{
+			name: "eval(",
+			re:   regexp.MustCompile(`\beval\s*\(`),
+			why:  "eval executes arbitrary strings as code; never appropriate in the dashboard",
+		},
+		{
+			name: "new Function(",
+			re:   regexp.MustCompile(`\bnew\s+Function\s*\(`),
+			why:  "Function constructor is eval in disguise; same risk profile",
+		},
+		{
+			name: "document.write(",
+			re:   regexp.MustCompile(`\bdocument\.write\s*\(`),
+			why:  "document.write after page load wipes the document; incompatible with our SPA model",
+		},
+	}
+	for _, c := range checks {
+		if locs := c.re.FindAllStringIndex(dashboardHTML, -1); len(locs) > 0 {
+			first := locs[0][0]
+			line := strings.Count(dashboardHTML[:first], "\n") + 1
+			t.Errorf("dashboard JS contains forbidden pattern %q at line ~%d "+
+				"— %s. Found %d occurrence(s) total.",
+				c.name, line, c.why, len(locs))
+		}
+	}
+}
+
+// extractProjectScopedRoutes returns the set of `/api/...` route paths whose
+// HTTP handler resolves the working directory via `s.resolveWorkDir(r)` —
+// i.e. the routes that read or write the *currently selected project's*
+// state and therefore depend on the `?project_idx=N` query parameter to
+// target the right tenant in multi-project mode.
+//
+// Discovery proceeds in two passes:
+//  1. Build a path → handler-name map from `mux.HandleFunc("…", s.foo)`.
+//  2. For each handler, scan its function body (bounded by the next
+//     top-level `func ` declaration) for a literal `s.resolveWorkDir(r)`
+//     call. Handlers that do not reference resolveWorkDir are global.
+func extractProjectScopedRoutes(src string) map[string]struct{} {
+	routeRe := regexp.MustCompile(`mux\.HandleFunc\("(?:[A-Z]+\s+)?(/api/[^"]+)",\s*s\.([a-zA-Z]+)\)`)
+	pathToHandler := map[string]string{}
+	for _, m := range routeRe.FindAllStringSubmatch(src, -1) {
+		if _, exists := pathToHandler[m[1]]; !exists {
+			pathToHandler[m[1]] = m[2]
+		}
+	}
+
+	out := map[string]struct{}{}
+	for path, handler := range pathToHandler {
+		sig := "func (s *Server) " + handler + "("
+		idx := strings.Index(src, sig)
+		if idx < 0 {
+			continue
+		}
+		end := len(src)
+		if rel := strings.Index(src[idx+len(sig):], "\nfunc "); rel >= 0 {
+			end = idx + len(sig) + rel
+		}
+		body := src[idx:end]
+		if strings.Contains(body, "s.resolveWorkDir(r)") {
+			out[path] = struct{}{}
+		}
+	}
+	return out
+}
+
+// TestDashboard_ProjectScopedAPIs_UsePUrl enforces the architectural
+// invariant that every frontend call to a project-scoped backend route
+// wraps the URL in `pUrl(...)` so the `?project_idx=N` query parameter
+// rides along in multi-project mode. Skipping pUrl silently routes the
+// request to the default workspace — exactly the bug class behind Tasks
+// 150, 152, 163, 168, 8000, 20013, 20018.
+//
+// "Project-scoped" is determined statically by looking at which handlers
+// call `s.resolveWorkDir(r)`. The /api/state endpoint is the most common
+// offender and has a small allowlist of intentional global usages
+// (login probe, reconnect-time auth check, first-paint state load) — these
+// have to be re-fetched per-project after the project context is known.
+func TestDashboard_ProjectScopedAPIs_UsePUrl(t *testing.T) {
+	src := readServerSource(t)
+	projectScoped := extractProjectScopedRoutes(src)
+	if len(projectScoped) == 0 {
+		t.Fatal("extractProjectScopedRoutes returned no routes — the discovery " +
+			"heuristic broke. Check that handlers still call s.resolveWorkDir(r) " +
+			"and that mux.HandleFunc lines still match the regex.")
+	}
+
+	type allowed struct{ path, hint string }
+	allowlist := []allowed{
+		// Login probe — runs before any project is selected.
+		{path: "/api/state", hint: "Bearer ' + token"},
+		// WebSocket reconnect-time 401 probe; project state is refreshed
+		// via run_state / resync events that fire shortly after.
+		{path: "/api/state", hint: "detect auth failures"},
+		// SSE-fallback reconnect probe — variant of the above.
+		{path: "/api/state", hint: "SSE fallback reconnect probe"},
+		// Initial state load on first paint — runs before
+		// `selectedProjectIdx` has been chosen, so pUrl would be a no-op.
+		{path: "/api/state", hint: "First paint"},
+	}
+	allowedSite := func(path, line string) bool {
+		for _, a := range allowlist {
+			if a.path == path && strings.Contains(line, a.hint) {
+				return true
+			}
+		}
+		return false
+	}
+
+	type violation struct {
+		path string
+		line int
+		text string
+	}
+	var bad []violation
+	lines := strings.Split(dashboardHTML, "\n")
+	for path := range projectScoped {
+		callRe := regexp.MustCompile(
+			`(?:fetch|api|apiMethod)\([^)]*['"]` +
+				regexp.QuoteMeta(path) + `['"]`)
+		var dynRe *regexp.Regexp
+		if strings.Contains(path, "{") {
+			prefix := path[:strings.Index(path, "{")]
+			dynRe = regexp.MustCompile(
+				`(?:fetch|api|apiMethod)\([^)]*['"]` +
+					regexp.QuoteMeta(prefix) + `['"]\s*\+`)
+		}
+		// Track up to the last 4 non-empty lines so an allowlist hint
+		// placed anywhere within the immediately-preceding comment block
+		// matches (some sites have a 2-3 line comment explaining why the
+		// call is intentionally global).
+		const lookbackLines = 4
+		prev := make([]string, 0, lookbackLines)
+		pushPrev := func(s string) {
+			if strings.TrimSpace(s) == "" {
+				return
+			}
+			if len(prev) == lookbackLines {
+				prev = prev[1:]
+			}
+			prev = append(prev, s)
+		}
+		for i, line := range lines {
+			matches := callRe.MatchString(line)
+			if !matches && dynRe != nil {
+				matches = dynRe.MatchString(line)
+			}
+			if !matches {
+				pushPrev(line)
+				continue
+			}
+			if strings.Contains(line, "pUrl(") {
+				pushPrev(line)
+				continue
+			}
+			isAllowed := allowedSite(path, line)
+			for _, p := range prev {
+				if allowedSite(path, p) {
+					isAllowed = true
+					break
+				}
+			}
+			if isAllowed {
+				pushPrev(line)
+				continue
+			}
+			bad = append(bad, violation{path: path, line: i + 1, text: strings.TrimSpace(line)})
+			pushPrev(line)
+		}
+	}
+	if len(bad) > 0 {
+		sort.Slice(bad, func(i, j int) bool { return bad[i].line < bad[j].line })
+		var msgs []string
+		for _, v := range bad {
+			msgs = append(msgs, "line "+itoaArch(v.line)+" ("+v.path+"): "+v.text)
+		}
+		t.Errorf("found %d frontend call(s) to project-scoped /api routes that "+
+			"do not wrap the URL in pUrl(). In multi-project mode this routes "+
+			"the request to the *default* workspace instead of the selected "+
+			"project — the recurring root cause of Tasks 150/152/163/168/8000/"+
+			"20013/20018:\n  %s\n"+
+			"Fix: change `api('%s')` to `api(pUrl('%s'))`. If the call is "+
+			"intentionally global (e.g. login probe), add it to the "+
+			"allowlist in this test with a hint string from the call's line "+
+			"(or from the comment immediately above the call).",
+			len(bad), strings.Join(msgs, "\n  "), bad[0].path, bad[0].path)
+	}
+}
+
+// itoaArch is a tiny helper so this test file doesn't pull in fmt just
+// for %d formatting in TestDashboard_ProjectScopedAPIs_UsePUrl error
+// messages. Suffixed with `Arch` to avoid colliding with the `itoa`
+// already defined in ratelimit_test.go.
+func itoaArch(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	var b [20]byte
+	i := len(b)
+	for n > 0 {
+		i--
+		b[i] = byte('0' + n%10)
+		n /= 10
+	}
+	return string(b[i:])
 }
 
 // TestDashboard_OrphanTabPanels is the reverse direction of
