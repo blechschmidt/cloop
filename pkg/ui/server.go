@@ -13,7 +13,6 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"runtime"
 	"runtime/debug"
 	"sort"
 	"strconv"
@@ -38,7 +37,6 @@ import (
 	"github.com/blechschmidt/cloop/pkg/provider"
 	"github.com/blechschmidt/cloop/pkg/ratelimit"
 	"github.com/blechschmidt/cloop/pkg/reqid"
-	"github.com/blechschmidt/cloop/pkg/resources"
 	"github.com/blechschmidt/cloop/pkg/riskmatrix"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/statedb"
@@ -478,39 +476,8 @@ type Server struct {
 	// Nil means the package picks a sensible default at first use (text
 	// output to stdout, project bound).
 	Log logger.Logger
-
-	// Resource sampling state (Task 20116). One Sampler+History per project
-	// workDir so concurrent requests for different projects do not contend
-	// on a global lock. The Sampler holds the previous /proc/self/stat ticks
-	// needed to compute CPU%, so a per-project instance is required to
-	// avoid one project's CPU sample overwriting another's diff baseline.
-	//
-	// resCacheTTL bounds how often we re-sample: a snapshot newer than
-	// resCacheTTL is returned as-is, otherwise we resample and append. With
-	// resCacheTTL=5s and resHistoryCap=60, the History covers the last
-	// ~5 minutes of process activity which is what the UI sparklines show.
-	resMu      sync.Mutex
-	resTrack   map[string]*resTracker
 }
 
-// resTracker bundles the per-project resource sampler with its sliding-window
-// history and a tiny last-sampled wallclock cache so concurrent /api/resources
-// hits within resCacheTTL share a single underlying sample.
-type resTracker struct {
-	sampler  *resources.Sampler
-	history  *resources.History
-	lastTime time.Time
-}
-
-// resCacheTTL is the minimum interval between forced /proc/self/stat reads
-// for a single project. The 5s value matches the task spec's "sampling
-// every 5s" requirement and keeps the dashboard's per-card refresh light.
-const resCacheTTL = 5 * time.Second
-
-// resHistoryCap is the number of samples retained per project. With a 5s
-// TTL this is about five minutes of history — enough for a meaningful
-// sparkline without unbounded memory growth across long-running daemons.
-const resHistoryCap = 60
 
 // log returns s.Log, falling back to a default text logger if the field
 // was left zero. The fallback is initialised lazily so test servers that
@@ -541,7 +508,6 @@ func New(workdir string, port int, token string) *Server {
 		chatHistories:   make(map[string][]ChatMessage),
 		runStates:       make(map[string]bool),
 		stuckLastSeen:   make(map[string]int64),
-		resTrack:        make(map[string]*resTracker),
 		Log:             logger.New(false).With("project", workdir).With("component", "ui"),
 	}
 }
@@ -913,8 +879,6 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/provider-calls/{id}", s.handleProviderCallDetail)
 	mux.HandleFunc("POST /api/provider-calls/{id}/replay", s.handleProviderCallReplay)
 
-	// System-level resource usage (CPU, memory, disk, fds, goroutines)
-	mux.HandleFunc("GET /api/resources", s.handleResources)
 
 	// Client-side JS error reporting (window.onerror, unhandledrejection)
 	mux.HandleFunc("POST /api/client-error", s.handleClientError)
@@ -4766,60 +4730,6 @@ func splitProviderModelToken(s string) (string, string, bool) {
 	return s[:i], s[i+1:], true
 }
 
-// handleResources serves a resources.Snapshot for the resolved project plus
-// the recent history needed to render sparklines client-side. The Sampler
-// re-reads /proc/self/stat at most once per resCacheTTL per project: a hit
-// from a second client within the TTL receives the cached "latest" entry
-// without touching /proc again. This keeps the dashboard cheap to refresh
-// even when several browser tabs are open against the same daemon.
-//
-// Response shape:
-//
-//	{
-//	  "current": Snapshot,
-//	  "history": [Snapshot, ...],     // chronological, oldest first
-//	  "sample_interval_seconds": 5,
-//	  "history_capacity": 60,
-//	  "num_cpu": 8                    // converts CPU% from "of one core"
-//	}
-func (s *Server) handleResources(w http.ResponseWriter, r *http.Request) {
-	workDir := s.resolveWorkDir(r)
-
-	s.resMu.Lock()
-	tracker, ok := s.resTrack[workDir]
-	if !ok {
-		tracker = &resTracker{
-			sampler: resources.NewSampler(),
-			history: resources.NewHistory(resHistoryCap),
-		}
-		s.resTrack[workDir] = tracker
-	}
-
-	now := time.Now()
-	if now.Sub(tracker.lastTime) >= resCacheTTL {
-		snap := tracker.sampler.Sample(workDir)
-		tracker.history.Append(snap)
-		tracker.lastTime = now
-	}
-	current, has := tracker.history.Latest()
-	historyCopy := tracker.history.Snapshots()
-	s.resMu.Unlock()
-
-	if !has {
-		// Unreachable: we just appended a sample. Guarded so a future
-		// change to the History contract surfaces as an explicit 500.
-		jsonErr(w, "no resource sample available", http.StatusInternalServerError)
-		return
-	}
-
-	jsonOK(w, map[string]interface{}{
-		"current":                 current,
-		"history":                 historyCopy,
-		"sample_interval_seconds": int(resCacheTTL / time.Second),
-		"history_capacity":        resHistoryCap,
-		"num_cpu":                 runtime.NumCPU(),
-	})
-}
 
 // handleProjects returns all project statuses and aggregate stats.
 func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
@@ -7998,43 +7908,6 @@ const dashboardHTML = `<!DOCTYPE html>
           <div class="options-grid" id="activeOptionsGrid"></div>
         </div>
 
-        <!-- Resources: CPU / RAM / disk / fds / goroutines (Task 20116) -->
-        <div class="section">
-          <div class="section-title" style="display:flex;align-items:center;gap:12px">
-            Resources
-            <span id="resourcesUpdated" style="font-size:11px;color:var(--muted);font-weight:400;text-transform:none;letter-spacing:0"></span>
-            <button class="btn" style="padding:4px 10px;font-size:12px;margin-left:auto" onclick="loadResources()" title="Refresh resource sample">&#8635;</button>
-          </div>
-          <div class="resources-grid" id="resourcesGrid">
-            <div class="res-card">
-              <div class="res-label">CPU</div>
-              <div class="res-value accent" id="resCPU">—</div>
-              <div class="res-sub" id="resCPUSub"></div>
-              <svg class="res-spark" id="resCPUSpark" viewBox="0 0 100 24" preserveAspectRatio="none" aria-hidden="true"></svg>
-            </div>
-            <div class="res-card">
-              <div class="res-label">Memory (Sys)</div>
-              <div class="res-value accent" id="resMem">—</div>
-              <div class="res-sub" id="resMemSub"></div>
-              <svg class="res-spark" id="resMemSpark" viewBox="0 0 100 24" preserveAspectRatio="none" aria-hidden="true"></svg>
-            </div>
-            <div class="res-card">
-              <div class="res-label">Goroutines</div>
-              <div class="res-value" id="resGoroutines">—</div>
-              <div class="res-sub" id="resGoroutinesSub"></div>
-            </div>
-            <div class="res-card">
-              <div class="res-label">Open FDs</div>
-              <div class="res-value" id="resFDs">—</div>
-              <div class="res-sub" id="resFDsSub">&nbsp;</div>
-            </div>
-            <div class="res-card" style="grid-column:span 2">
-              <div class="res-label">.cloop disk usage</div>
-              <div class="res-value" id="resDiskTotal" style="font-size:18px">—</div>
-              <div class="res-disk-breakdown" id="resDiskBreakdown"></div>
-            </div>
-          </div>
-        </div>
 
         <!-- Claude Code per-project usage caps (only when provider is claudecode) -->
         <div class="section" id="ccLimitsSection" style="display:none">
@@ -14605,8 +14478,21 @@ checkAuthAndInit();
 let _chartDonut = null, _chartVelocity = null, _chartBurndown = null,
     _chartCost = null, _chartLatency = null;
 
-// 30-second auto-refresh timer (only fires when analytics tab is visible).
-let _analyticsTimer = null;
+// Debounce timer for WS-event-driven analytics refresh. The dashboard used
+// to poll /api/analytics every 30s; refreshes are now pushed by the server
+// via task_update / task_added / task_deleted / task_mutation / run_state /
+// step_output / provider_call events, coalesced through this debounce so a
+// burst of events makes at most one fetch (Task 20126).
+let _analyticsRefreshTimer = null;
+function _scheduleAnalyticsRefresh() {
+  if (typeof activeTab === 'undefined' || activeTab !== 'analytics') return;
+  if (_analyticsRefreshTimer) clearTimeout(_analyticsRefreshTimer);
+  _analyticsRefreshTimer = setTimeout(() => {
+    _analyticsRefreshTimer = null;
+    try { loadAnalytics(); } catch(_) {}
+  }, 500);
+}
+window._scheduleAnalyticsRefresh = _scheduleAnalyticsRefresh;
 
 // Palette for multi-provider datasets.
 const _paletteBg   = ['rgba(88,166,255,.7)','rgba(63,185,80,.7)','rgba(188,140,255,.7)','rgba(57,197,207,.7)','rgba(248,81,73,.7)','rgba(210,153,34,.7)'];
@@ -15354,22 +15240,6 @@ window.fabAddTask = function() {
   }
 };
 
-// ── Resources panel refresh (Task 20124) ──────────────────────────────────
-// The refresh button on the Resources section called loadResources() but no
-// such function was defined — clicking it threw ReferenceError. The
-// Resources panel itself is scheduled for removal (Task 20127), so this
-// stub just acknowledges the click and updates the "last refreshed" badge.
-window.loadResources = function() {
-  api(pUrl('/api/resources')).then(() => {
-    const badge = document.getElementById('resourcesUpdated');
-    if (badge) {
-      const now = new Date();
-      const pad = n => String(n).padStart(2, '0');
-      badge.textContent = 'updated ' + pad(now.getHours()) + ':' +
-        pad(now.getMinutes()) + ':' + pad(now.getSeconds());
-    }
-  }).catch(() => {});
-};
 
 // ── Replay tab handlers (Task 20124) ──────────────────────────────────────
 // The replay tab's HTML and the /api/replay-runs backend exist, but its JS
