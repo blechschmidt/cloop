@@ -1008,6 +1008,97 @@ func TestTaskBlockerNotFound(t *testing.T) {
 	}
 }
 
+// ── GET /api/tasks/{id}/details ──────────────────────────────────────────────
+
+func TestTaskDetailsReturnsResultAndStatus(t *testing.T) {
+	tasks := []*pm.Task{
+		{
+			ID:               1,
+			Title:            "Done task",
+			Description:      "Some work",
+			Status:           pm.TaskDone,
+			Result:           "Implemented foo and bar.",
+			FailureDiagnosis: "",
+			Tags:             []string{"backend"},
+			Priority:         2,
+		},
+		{
+			ID:               2,
+			Title:            "Failed task",
+			Status:           pm.TaskFailed,
+			Result:           "Build broke at step 3.",
+			FailureDiagnosis: "Missing import in foo.go.",
+		},
+		{
+			ID:     3,
+			Title:  "Skipped task",
+			Status: pm.TaskSkipped,
+			Result: "Skipped because dependency was already satisfied.",
+		},
+	}
+	dir := setupProjectWithTasks(t, cloopGoal, tasks)
+	ts := newTestServer(t, dir, nil)
+
+	cases := []struct {
+		id         int
+		wantResult string
+		wantStatus string
+	}{
+		{1, "Implemented foo and bar.", "done"},
+		{2, "Build broke at step 3.", "failed"},
+		{3, "Skipped because dependency was already satisfied.", "skipped"},
+	}
+	for _, c := range cases {
+		body := apiGET(t, ts, fmt.Sprintf("/api/tasks/%d/details", c.id))
+		task, ok := body["task"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("id=%d: expected 'task' object, got %v", c.id, body)
+		}
+		if got, _ := task["result"].(string); got != c.wantResult {
+			t.Errorf("id=%d: result = %q, want %q", c.id, got, c.wantResult)
+		}
+		if got, _ := task["status"].(string); got != c.wantStatus {
+			t.Errorf("id=%d: status = %q, want %q", c.id, got, c.wantStatus)
+		}
+	}
+
+	// Failure diagnosis should round-trip on the failed task.
+	body := apiGET(t, ts, "/api/tasks/2/details")
+	task := body["task"].(map[string]interface{})
+	if got, _ := task["failure_diagnosis"].(string); got != "Missing import in foo.go." {
+		t.Errorf("failure_diagnosis = %q, want %q", got, "Missing import in foo.go.")
+	}
+}
+
+func TestTaskDetailsNotFound(t *testing.T) {
+	tasks := []*pm.Task{{ID: 1, Title: "T", Status: pm.TaskPending}}
+	dir := setupProjectWithTasks(t, cloopGoal, tasks)
+	ts := newTestServer(t, dir, nil)
+
+	resp, err := http.Get(ts.URL + "/api/tasks/999/details")
+	if err != nil {
+		t.Fatalf("GET /api/tasks/999/details: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("expected 404 for missing task, got %d", resp.StatusCode)
+	}
+}
+
+func TestTaskDetailsBadID(t *testing.T) {
+	dir := setupProjectDir(t, cloopGoal, nil)
+	ts := newTestServer(t, dir, nil)
+
+	resp, err := http.Get(ts.URL + "/api/tasks/0/details")
+	if err != nil {
+		t.Fatalf("GET /api/tasks/0/details: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected 400 for invalid id, got %d", resp.StatusCode)
+	}
+}
+
 // ── GET /api/config ───────────────────────────────────────────────────────────
 
 func TestGetConfig(t *testing.T) {

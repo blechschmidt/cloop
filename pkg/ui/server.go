@@ -23,6 +23,7 @@ import (
 
 	"nhooyr.io/websocket"
 
+	"github.com/blechschmidt/cloop/pkg/artifact"
 	"github.com/blechschmidt/cloop/pkg/blocker"
 	"github.com/blechschmidt/cloop/pkg/boundedread"
 	"github.com/blechschmidt/cloop/pkg/config"
@@ -799,6 +800,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("PATCH /api/tasks/{id}", s.handlePutTask)
 	mux.HandleFunc("DELETE /api/tasks/{id}", s.handleDeleteTask)
 	mux.HandleFunc("GET /api/tasks/{id}/blocker", s.handleTaskBlocker)
+	mux.HandleFunc("GET /api/tasks/{id}/details", s.handleTaskDetails)
 
 	// Config
 	mux.HandleFunc("/api/config", s.handleConfig)
@@ -898,6 +900,7 @@ func (s *Server) Run(ctx context.Context) error {
 	go s.watchState(watcherCtx)
 	go s.watchProjects(watcherCtx)
 	go s.watchStuckTasks(watcherCtx)
+	go s.watchAutoBackup(watcherCtx)
 
 	addr := ":" + strconv.Itoa(s.Port)
 	if s.Token != "" {
@@ -2996,6 +2999,82 @@ func (s *Server) handleTaskBlocker(w http.ResponseWriter, r *http.Request) {
 	}
 
 	jsonOK(w, report)
+}
+
+// handleTaskDetails returns the full execution context of a task — the
+// Result summary, FailureDiagnosis, annotations, timing, and (when
+// available) the contents of the persisted output artifact and the live
+// streaming output. Used by the Web UI when the user clicks a task row to
+// inspect what already happened.
+//
+// GET /api/tasks/{id}/details
+func (s *Server) handleTaskDetails(w http.ResponseWriter, r *http.Request) {
+	idStr := r.PathValue("id")
+	id, err := strconv.Atoi(idStr)
+	if err != nil || id <= 0 {
+		jsonErr(w, "invalid task id", http.StatusBadRequest)
+		return
+	}
+
+	workDir := s.resolveWorkDir(r)
+	ps, err := state.Load(workDir)
+	if err != nil {
+		jsonErr(w, err.Error(), statedb.HTTPStatus(err))
+		return
+	}
+	task, err := ps.RequireTask(id)
+	if err != nil {
+		jsonErr(w, err.Error(), statedb.HTTPStatus(err))
+		return
+	}
+
+	// Cap returned bodies so a runaway artifact can't blow up the browser.
+	const maxBodyBytes = 256 * 1024 // 256 KB
+
+	clip := func(s string) (string, bool) {
+		if len(s) <= maxBodyBytes {
+			return s, false
+		}
+		// Keep the tail — that's where TASK_DONE/FAILED/SKIPPED signals live
+		// and what users are most likely looking for.
+		return "…[truncated " + strconv.Itoa(len(s)-maxBodyBytes) + " bytes]…\n" + s[len(s)-maxBodyBytes:], true
+	}
+
+	artifactBody := ""
+	artifactTruncated := false
+	artifactSourcePath := task.ArtifactPath
+	if task.ArtifactPath != "" {
+		full := artifact.ReadTaskOutput(workDir, task)
+		artifactBody, artifactTruncated = clip(full)
+	}
+
+	liveBody := ""
+	liveTruncated := false
+	livePath := ""
+	// In-progress tasks (or tasks that crashed mid-flight) may not have a
+	// finalized artifact but do have a live streaming file we can show.
+	if liveAbs := artifact.LiveArtifactPath(workDir, id); liveAbs != "" {
+		if data, err := os.ReadFile(liveAbs); err == nil && len(data) > 0 {
+			body, trunc := clip(string(data))
+			liveBody = body
+			liveTruncated = trunc
+			if rel, relErr := filepath.Rel(workDir, liveAbs); relErr == nil {
+				livePath = rel
+			} else {
+				livePath = liveAbs
+			}
+		}
+	}
+
+	jsonOK(w, map[string]interface{}{
+		"task":                task,
+		"artifact_body":       artifactBody,
+		"artifact_truncated":  artifactTruncated,
+		"artifact_path":       artifactSourcePath,
+		"live_body":           liveBody,
+		"live_truncated":      liveTruncated,
+		"live_path":           livePath,
+	})
 }
 
 // handleReorderTasks reassigns priorities from the given task ID order (POST /api/tasks/reorder).
@@ -6108,6 +6187,32 @@ const dashboardHTML = `<!DOCTYPE html>
   #modal h2 { font-size:15px; font-weight:600; margin-bottom:16px; }
   .modal-footer { display:flex; gap:8px; justify-content:flex-end; margin-top:16px; }
 
+  /* ── Task Details modal ── */
+  #td-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,.7); z-index:60; align-items:center; justify-content:center; }
+  #td-overlay.open { display:flex; }
+  #td-modal { background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); padding:0; width:760px; max-width:96vw; max-height:88vh; display:flex; flex-direction:column; }
+  #td-modal .td-header { display:flex; align-items:center; justify-content:space-between; padding:14px 18px; border-bottom:1px solid var(--border); }
+  #td-modal .td-header h2 { font-size:14px; font-weight:600; margin:0; }
+  #td-modal .td-close { background:none; border:0; color:var(--muted); font-size:22px; line-height:1; cursor:pointer; padding:0 4px; }
+  #td-modal .td-close:hover { color:var(--text); }
+  #td-modal .td-body { padding:16px 18px; overflow-y:auto; flex:1; min-height:0; }
+  #td-modal .modal-footer { padding:12px 18px; border-top:1px solid var(--border); margin-top:0; }
+  .td-meta { display:flex; flex-wrap:wrap; gap:6px 10px; margin-bottom:14px; font-size:12px; color:var(--muted); }
+  .td-meta .td-chip { background:var(--bg); border:1px solid var(--border); border-radius:10px; padding:2px 8px; }
+  .td-meta .td-chip strong { color:var(--text); font-weight:600; margin-left:4px; }
+  .td-section { margin-top:14px; }
+  .td-section h3 { font-size:12px; font-weight:600; text-transform:uppercase; letter-spacing:.6px; color:var(--muted); margin:0 0 6px; }
+  .td-section .td-text { font-size:13px; line-height:1.55; white-space:pre-wrap; word-wrap:break-word; }
+  .td-section.fail h3 { color:var(--red); }
+  .td-section.skip h3 { color:#d29922; }
+  .td-section.done h3 { color:var(--green); }
+  .td-pre { background:var(--bg); border:1px solid var(--border); border-radius:6px; padding:10px 12px; font-family:ui-monospace,Consolas,Menlo,monospace; font-size:12px; white-space:pre-wrap; word-wrap:break-word; max-height:340px; overflow:auto; }
+  .td-trunc-note { font-size:11px; color:var(--muted); margin-top:4px; }
+  .td-empty { font-size:12px; color:var(--muted); font-style:italic; }
+  .td-anno { background:var(--bg); border:1px solid var(--border); border-radius:6px; padding:8px 10px; margin-bottom:6px; font-size:12px; }
+  .td-anno-head { color:var(--muted); font-size:11px; margin-bottom:3px; }
+  .td-link-row a { color:var(--accent); }
+
   /* ── Toast ── */
   #toast { position:fixed; bottom:20px; right:20px; background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); padding:9px 14px; font-size:13px; opacity:0; transform:translateY(8px); transition:all .2s; pointer-events:none; z-index:100; max-width:300px; }
   #toast.show { opacity:1; transform:translateY(0); }
@@ -8283,6 +8388,21 @@ const dashboardHTML = `<!DOCTYPE html>
   </div>
 </div>
 
+<!-- Task details modal (read-only — execution result, failure diagnosis, output) -->
+<div id="td-overlay" onclick="if(event.target===this)closeTaskDetails()">
+  <div id="td-modal" role="dialog" aria-modal="true" aria-labelledby="td-title">
+    <div class="td-header">
+      <h2 id="td-title">Task Details</h2>
+      <button class="td-close" onclick="closeTaskDetails()" aria-label="Close">&times;</button>
+    </div>
+    <div id="td-body" class="td-body"></div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeTaskDetails()">Close</button>
+      <button class="btn primary" id="td-edit-btn" onclick="taskDetailsEditCurrent()">Edit task</button>
+    </div>
+  </div>
+</div>
+
 <!-- ── Command Palette ─────────────────────────────────────────────────── -->
 <div id="cmd-backdrop" role="dialog" aria-modal="true" aria-label="Command palette">
   <div id="cmd-palette">
@@ -9574,6 +9694,9 @@ function renderTasks(s) {
     const statusActions = buildStatusActions(t);
     const tid = t.id;
     return '<div class="task-item '+esc(cls)+'" draggable="true" data-task-id="'+tid+'" '+
+      'onclick="taskRowClick(event,'+tid+')" '+
+      'style="cursor:pointer" '+
+      'title="Click to view execution summary, output, and history" '+
       'ondragstart="onDragStart(event,'+tid+')" '+
       'ondragover="onDragOver(event,'+tid+')" '+
       'ondragleave="onDragLeave(event)" '+
@@ -9740,6 +9863,8 @@ function renderKanban(s) {
       const compact = kanbanCompact ? ' kb-compact' : '';
       return (
         '<div class="kb-card '+pc+compact+'" draggable="true" data-task-id="'+t.id+'" '+
+          'onclick="taskRowClick(event,'+t.id+')" '+
+          'title="Click to view execution summary, output, and history" '+
           'ondragstart="kbDragStart(event,'+t.id+')" '+
           'ondragend="kbDragEnd(event)">'+
           '<div class="kb-card-header">'+
@@ -11685,6 +11810,156 @@ window.closeModal = function() {
   document.getElementById('modal-overlay').classList.remove('open');
 };
 
+// ── Task details modal (read-only execution view) ──────────────────────────
+
+let _tdCurrentId = null;
+
+window.openTaskDetails = function(id) {
+  _tdCurrentId = id;
+  const overlay = document.getElementById('td-overlay');
+  const body    = document.getElementById('td-body');
+  if (!overlay || !body) return;
+  body.innerHTML = '<div class="td-empty">Loading…</div>';
+  overlay.classList.add('open');
+  fetch(pUrl('/api/tasks/'+id+'/details'), {credentials:'same-origin'})
+    .then(r => r.json())
+    .then(d => {
+      if (!d || !d.ok) { body.innerHTML = '<div class="td-empty">'+esc(d && d.error || 'Failed to load task details')+'</div>'; return; }
+      _renderTaskDetails(d);
+    })
+    .catch(() => { body.innerHTML = '<div class="td-empty">Request failed</div>'; });
+};
+
+window.closeTaskDetails = function() {
+  const overlay = document.getElementById('td-overlay');
+  if (overlay) overlay.classList.remove('open');
+  _tdCurrentId = null;
+};
+
+window.taskDetailsEditCurrent = function() {
+  const id = _tdCurrentId;
+  closeTaskDetails();
+  if (id) openEditModal(id);
+};
+
+function _fmtDateTime(s) {
+  if (!s) return '';
+  const d = new Date(s);
+  if (isNaN(d.getTime())) return s;
+  return d.toLocaleString();
+}
+
+function _fmtDuration(start, end) {
+  if (!start) return '';
+  const s = new Date(start).getTime();
+  const e = end ? new Date(end).getTime() : Date.now();
+  if (isNaN(s) || isNaN(e) || e < s) return '';
+  const ms = e - s;
+  const sec = Math.round(ms/1000);
+  if (sec < 60) return sec + 's';
+  const m = Math.floor(sec/60), rs = sec%60;
+  if (m < 60) return m + 'm ' + rs + 's';
+  const h = Math.floor(m/60), rm = m%60;
+  return h + 'h ' + rm + 'm';
+}
+
+function _resultSectionLabel(status) {
+  if (status === 'failed' || status === 'timed_out') return { cls:'fail', label:'Failure summary' };
+  if (status === 'skipped')                          return { cls:'skip', label:'Skip reason' };
+  if (status === 'done')                             return { cls:'done', label:'Execution summary' };
+  return { cls:'', label:'Latest result' };
+}
+
+function _renderTaskDetails(d) {
+  const t = d.task || {};
+  const body = document.getElementById('td-body');
+  document.getElementById('td-title').textContent = 'Task #'+t.id+': '+(t.title||'');
+
+  const status = t.status || 'pending';
+  const chips = [];
+  chips.push('<span class="td-chip">Status<strong>'+esc(status)+'</strong></span>');
+  if (t.priority) chips.push('<span class="td-chip">Priority<strong>P'+t.priority+'</strong></span>');
+  if (t.role)     chips.push('<span class="td-chip">Role<strong>'+esc(t.role)+'</strong></span>');
+  if (t.assignee) chips.push('<span class="td-chip">Assignee<strong>'+esc(t.assignee)+'</strong></span>');
+  if (t.depends_on && t.depends_on.length) chips.push('<span class="td-chip">Deps<strong>#'+t.depends_on.join(', #')+'</strong></span>');
+  if (t.tags && t.tags.length) chips.push('<span class="td-chip">Tags<strong>'+t.tags.map(esc).join(', ')+'</strong></span>');
+  if (t.estimated_minutes) chips.push('<span class="td-chip">Est<strong>'+t.estimated_minutes+'m</strong></span>');
+  if (t.actual_minutes)    chips.push('<span class="td-chip">Actual<strong>'+t.actual_minutes+'m</strong></span>');
+  if (t.fail_count)        chips.push('<span class="td-chip">Failures<strong>'+t.fail_count+'</strong></span>');
+  if (t.heal_attempts)     chips.push('<span class="td-chip">Heal attempts<strong>'+t.heal_attempts+'</strong></span>');
+  if (t.started_at)        chips.push('<span class="td-chip">Started<strong>'+esc(_fmtDateTime(t.started_at))+'</strong></span>');
+  if (t.completed_at)      chips.push('<span class="td-chip">Completed<strong>'+esc(_fmtDateTime(t.completed_at))+'</strong></span>');
+  const dur = _fmtDuration(t.started_at, t.completed_at);
+  if (dur) chips.push('<span class="td-chip">Duration<strong>'+esc(dur)+'</strong></span>');
+
+  let html = '<div class="td-meta">'+chips.join('')+'</div>';
+
+  if (t.description) {
+    html += '<div class="td-section"><h3>Description</h3>'+
+      '<div class="td-text">'+esc(t.description)+'</div></div>';
+  }
+
+  // Result / failure / skip section — driven by status.
+  const lbl = _resultSectionLabel(status);
+  if (t.result) {
+    html += '<div class="td-section '+lbl.cls+'"><h3>'+lbl.label+'</h3>'+
+      '<div class="td-text">'+esc(t.result)+'</div></div>';
+  } else if (status === 'pending' || status === 'in_progress') {
+    // No result yet — that's expected, not an error.
+  } else {
+    html += '<div class="td-section '+lbl.cls+'"><h3>'+lbl.label+'</h3>'+
+      '<div class="td-empty">No summary recorded for this task.</div></div>';
+  }
+
+  if (t.failure_diagnosis) {
+    html += '<div class="td-section fail"><h3>AI failure diagnosis</h3>'+
+      '<div class="td-text">'+esc(t.failure_diagnosis)+'</div></div>';
+  }
+
+  if (t.annotations && t.annotations.length) {
+    const annos = t.annotations.slice().reverse().map(a => {
+      const when = a.timestamp ? _fmtDateTime(a.timestamp) : '';
+      return '<div class="td-anno"><div class="td-anno-head">'+esc(a.author||'')+(when?' · '+esc(when):'')+'</div>'+
+        '<div>'+esc(a.text||'')+'</div></div>';
+    }).join('');
+    html += '<div class="td-section"><h3>Annotations ('+t.annotations.length+')</h3>'+annos+'</div>';
+  }
+
+  if (d.live_body) {
+    html += '<div class="td-section"><h3>Live output'+
+      (d.live_path ? ' <span class="td-trunc-note">'+esc(d.live_path)+'</span>' : '')+'</h3>'+
+      '<pre class="td-pre">'+esc(d.live_body)+'</pre>'+
+      (d.live_truncated ? '<div class="td-trunc-note">Output truncated; tail shown.</div>' : '')+'</div>';
+  }
+
+  if (d.artifact_body) {
+    html += '<div class="td-section"><h3>Output log'+
+      (d.artifact_path ? ' <span class="td-trunc-note">'+esc(d.artifact_path)+'</span>' : '')+'</h3>'+
+      '<pre class="td-pre">'+esc(d.artifact_body)+'</pre>'+
+      (d.artifact_truncated ? '<div class="td-trunc-note">Output truncated; tail shown.</div>' : '')+'</div>';
+  } else if (!d.live_body && (status === 'done' || status === 'failed' || status === 'timed_out')) {
+    html += '<div class="td-section"><h3>Output log</h3>'+
+      '<div class="td-empty">No persisted artifact for this task.</div></div>';
+  }
+
+  if (t.links && t.links.length) {
+    const items = t.links.map(l => '<div class="td-link-row">• <a href="'+esc(l.url)+'" target="_blank" rel="noopener">'+esc(l.label||l.url)+'</a> <span class="td-trunc-note">['+esc(l.kind||'link')+']</span></div>').join('');
+    html += '<div class="td-section"><h3>Links</h3>'+items+'</div>';
+  }
+
+  body.innerHTML = html;
+}
+
+// Triggered from the task list. Ignore clicks that originated on action
+// buttons or the drag handle so existing edit/remove/status flows still work.
+window.taskRowClick = function(e, id) {
+  const t = e && e.target;
+  if (t && t.closest) {
+    if (t.closest('.task-actions') || t.closest('.drag-handle') || t.closest('a') || t.closest('button')) return;
+  }
+  openTaskDetails(id);
+};
+
 window.submitEditTask = function() {
   const id       = parseInt(document.getElementById('modalTaskId').value);
   const title    = document.getElementById('modalTitle_').value.trim();
@@ -12819,6 +13094,8 @@ document.addEventListener('keydown', function(e) {
   if (e.key === 'Escape') {
     if (helpOpen) { closeHelpModal(); return; }
     if (cmdOpen) { closeCommandPalette(); return; }
+    const td = document.getElementById('td-overlay');
+    if (td && td.classList.contains('open')) { closeTaskDetails(); return; }
     const modal = document.getElementById('modal-overlay');
     if (modal && modal.classList.contains('open')) { closeModal(); return; }
     const voice = document.querySelector('.voice-modal-backdrop');
