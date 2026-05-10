@@ -92,6 +92,40 @@ produces a permanent regression test.
 /usr/local/go/bin/go test -run=FuzzXxx/<hash> ./pkg/<pkg>/
 ```
 
+## Goroutine-leak detection
+
+Critical long-lived subsystems ship a package-local `*_goroutine_leak_test.go`
+file that catches background-goroutine leaks before they reach production.
+The pattern is documented in detail at the top of
+[`pkg/watchdog/goroutine_leak_test.go`](pkg/watchdog/goroutine_leak_test.go) —
+read that file first when adding a new one.
+
+cloop intentionally does NOT depend on `go.uber.org/goleak`. Instead each
+test follows a three-piece shape:
+
+1. `const goroutineLeakSlack = 10` (or higher for SQLite-backed packages) —
+   absorbs runtime/scheduler/driver ambient flapping while staying well below
+   any real per-cycle leak at the chosen N.
+2. `settleGoroutineCount() int` — GC, yield, sleep briefly, GC again, then
+   sample `runtime.NumGoroutine`. Sleep window is per-package: 50-100ms
+   covers most teardown paths; SQLite needs ~200ms for finalisers to settle.
+3. `TestXxx_NoGoroutineLeak` — warm-up call → baseline → loop N happy-path
+   lifecycles → re-sample → assert delta ≤ slack.
+
+Why not `goleak`? Several driver dependencies (`modernc.org/sqlite`,
+`nhooyr.io/websocket`) keep ambient background goroutines that goleak's
+default-ignore allowlist does not cover, forcing a per-package
+`IgnoreCurrent`/`IgnoreTopFunction` list. The macroscopic delta-vs-baseline
+assertion is robust to those drivers without any allowlist maintenance — a
+real leak scales with N, ambient noise does not.
+
+Packages that currently ship a leak test: `pkg/orchestrator`, `pkg/ui`,
+`pkg/watchdog`, `pkg/statedb`, `pkg/filewatch`, `pkg/compare`,
+`pkg/consensus`, `pkg/bench`, `pkg/logtail`. When adding a long-lived
+goroutine to any subsystem, add a matching test in that package — copy
+the canonical reference file's shape and document the goroutine you're
+guarding.
+
 ## Committing
 
 After every change, run:
