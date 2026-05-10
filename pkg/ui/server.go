@@ -9968,6 +9968,11 @@ function priorityBadge(p) {
 function render(s) {
   appState = s;
 
+  // Sync Run/Stop button state from project status.
+  if (typeof updateRunButtonState === 'function') {
+    updateRunButtonState(s.status === 'running');
+  }
+
   // In multi-project mode with no project selected, don't overwrite the UI
   // with single-project data from WebSocket events or stale fetches.
   if (isMultiProject && selectedProjectIdx === null) return;
