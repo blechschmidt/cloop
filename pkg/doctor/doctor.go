@@ -16,6 +16,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/configvalidate"
 	"github.com/blechschmidt/cloop/pkg/dbverify"
 	"github.com/blechschmidt/cloop/pkg/provider"
+	"github.com/blechschmidt/cloop/pkg/statedb"
 )
 
 // Level indicates the severity of a diagnostic result.
@@ -78,6 +79,7 @@ func Run(ctx context.Context, workdir string, cfg *config.Config, testProviders 
 	checkDirStructure(workdir, add)
 	checkStateJSON(workdir, add)
 	checkStateDBIntegrity(workdir, add)
+	checkStateDBMaintenance(workdir, add)
 	checkGoBinary(add)
 	checkEnvVars(cfg, add)
 	if testProviders {
@@ -244,6 +246,139 @@ func checkStateDBIntegrity(workdir string, add addFn) {
 			Message: msg,
 			Fix:     "Run 'cloop db verify' for the full list; affected rows must be deleted or repaired manually",
 		})
+	}
+}
+
+// checkStateDBMaintenance surfaces DB file size + last-maintenance info so
+// operators can see at a glance whether `cloop db maintain` is overdue.
+//
+// Reports two distinct results:
+//
+//	".cloop/state.db size"        — current file size on disk; warns when
+//	                                the freelist would let VACUUM reclaim
+//	                                more than 25% of the total size.
+//	".cloop/state.db maintenance" — when the last vacuum ran and how much
+//	                                the DB has grown since.
+//
+// A missing state.db is silently skipped (uninitialised projects are
+// already flagged elsewhere).
+func checkStateDBMaintenance(workdir string, add addFn) {
+	dbPath := filepath.Join(workdir, ".cloop", "state.db")
+	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+		return
+	}
+
+	db, err := statedb.Open(dbPath)
+	if err != nil {
+		add(Result{
+			Name:    ".cloop/state.db size",
+			Level:   Warn,
+			Message: fmt.Sprintf("could not open DB to read size: %v", err),
+			Fix:     "Run 'cloop db verify' to inspect the database",
+		})
+		return
+	}
+	defer db.Close()
+
+	stats, err := db.SizeStats()
+	if err != nil {
+		add(Result{
+			Name:    ".cloop/state.db size",
+			Level:   Warn,
+			Message: fmt.Sprintf("could not read PRAGMA stats: %v", err),
+		})
+		return
+	}
+
+	freelistBytes := stats.FreelistBytes()
+	sizeMsg := fmt.Sprintf("%s on disk (%d pages, %s in freelist)",
+		humanBytes(stats.Bytes), stats.PageCount, humanBytes(freelistBytes))
+
+	// Warn when the freelist would reclaim >25% of the file. Below that we
+	// don't bother the user — VACUUM has overhead and small reclaim isn't
+	// worth surfacing as a doctor warning.
+	freelistFraction := 0.0
+	if stats.Bytes > 0 {
+		freelistFraction = float64(freelistBytes) / float64(stats.Bytes)
+	}
+	if freelistFraction > 0.25 {
+		add(Result{
+			Name:    ".cloop/state.db size",
+			Level:   Warn,
+			Message: sizeMsg + fmt.Sprintf(" (≈%.0f%% reclaimable)", freelistFraction*100),
+			Fix:     "Run: cloop db maintain  (or --dry-run to preview)",
+		})
+	} else {
+		add(Result{
+			Name:    ".cloop/state.db size",
+			Level:   Pass,
+			Message: sizeMsg,
+		})
+	}
+
+	last, err := db.LastMaintenanceLog()
+	if err != nil {
+		add(Result{
+			Name:    ".cloop/state.db maintenance",
+			Level:   Warn,
+			Message: fmt.Sprintf("could not read maintenance_log: %v", err),
+		})
+		return
+	}
+	if last == nil {
+		add(Result{
+			Name:    ".cloop/state.db maintenance",
+			Level:   Warn,
+			Message: "no maintenance has been recorded yet",
+			Fix:     "Run: cloop db maintain  (reclaims space and refreshes stats)",
+		})
+		return
+	}
+
+	elapsed := time.Since(last.CompletedAt).Round(time.Second)
+	growthPct := 0.0
+	if last.PageCountAfter > 0 {
+		growthPct = float64(stats.PageCount-last.PageCountAfter) / float64(last.PageCountAfter) * 100
+	}
+	msg := fmt.Sprintf("%s ago (%s, freed %s); DB has grown %.0f%% since",
+		elapsed, last.Operation, humanBytes(last.BytesFreed()), growthPct)
+
+	// Warn when growth since last vacuum would now trigger --auto: ≥20%.
+	switch {
+	case growthPct >= 20:
+		add(Result{
+			Name:    ".cloop/state.db maintenance",
+			Level:   Warn,
+			Message: msg,
+			Fix:     "Run: cloop db maintain  (DB has grown ≥20% since last vacuum)",
+		})
+	default:
+		add(Result{
+			Name:    ".cloop/state.db maintenance",
+			Level:   Pass,
+			Message: msg,
+		})
+	}
+}
+
+// humanBytes is a local copy of the byte-formatter used in cmd/db_cmd.go,
+// duplicated here to keep pkg/doctor free of cmd/* imports (which would
+// create a cycle: doctor is a leaf package).
+func humanBytes(n int64) string {
+	const (
+		KB = 1 << 10
+		MB = 1 << 20
+		GB = 1 << 30
+	)
+	switch {
+	case n < KB:
+		return fmt.Sprintf("%d B", n)
+	case n < MB:
+		return fmt.Sprintf("%.1f KB", float64(n)/KB)
+	case n < GB:
+		return fmt.Sprintf("%.1f MB", float64(n)/MB)
+	default:
+		return fmt.Sprintf("%.2f GB", float64(n)/GB)
 	}
 }
 
