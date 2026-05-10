@@ -103,6 +103,74 @@ func TestLoad_CorruptFile(t *testing.T) {
 	}
 }
 
+// --- LoadLite (Task 20125) ---
+
+// TestLoadLite_SkipsStepsButPopulatesCountAndLastTime verifies that the
+// metadata-only load path used by /api/state and multiui.GetStatus returns
+// nil Steps while still surfacing the step count and last-step timestamp
+// from cheap SQL aggregates. Without this, the lite path would either
+// silently drop count info (steps_count: 0 on the wire) or fall back to
+// loading every row.
+func TestLoadLite_SkipsStepsButPopulatesCountAndLastTime(t *testing.T) {
+	dir := tempDir(t)
+	s, err := Init(dir, "test goal", 0)
+	if err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	// Five steps spaced one second apart so LastStepTime has a stable
+	// "newest" value to assert against.
+	base := time.Now().UTC().Truncate(time.Second)
+	for i := 0; i < 5; i++ {
+		s.AddStep(StepResult{
+			Task:     "task",
+			Output:   "some output",
+			Duration: "1s",
+			Time:     base.Add(time.Duration(i) * time.Second),
+		})
+	}
+	if err := s.Save(); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	lite, err := LoadLite(dir)
+	if err != nil {
+		t.Fatalf("LoadLite: %v", err)
+	}
+	if lite.Steps != nil {
+		t.Errorf("expected nil Steps slice, got %d entries", len(lite.Steps))
+	}
+	if lite.StepCount != 5 {
+		t.Errorf("StepCount = %d, want 5", lite.StepCount)
+	}
+	wantLast := base.Add(4 * time.Second)
+	if !lite.LastStepTime.Equal(wantLast) {
+		t.Errorf("LastStepTime = %v, want %v", lite.LastStepTime, wantLast)
+	}
+	// Scalar metadata must still round-trip.
+	if lite.Goal != "test goal" {
+		t.Errorf("Goal = %q, want %q", lite.Goal, "test goal")
+	}
+}
+
+// TestLoadLite_EmptyProject covers the no-steps case: StepCount must be 0
+// and LastStepTime must be the zero value (not a parse-error garbage value).
+func TestLoadLite_EmptyProject(t *testing.T) {
+	dir := tempDir(t)
+	if _, err := Init(dir, "goal", 0); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	lite, err := LoadLite(dir)
+	if err != nil {
+		t.Fatalf("LoadLite: %v", err)
+	}
+	if lite.StepCount != 0 {
+		t.Errorf("StepCount = %d, want 0", lite.StepCount)
+	}
+	if !lite.LastStepTime.IsZero() {
+		t.Errorf("LastStepTime = %v, want zero", lite.LastStepTime)
+	}
+}
+
 // --- AddStep / LastNSteps ---
 
 func TestAddStep_IncrementsCurrentStep(t *testing.T) {

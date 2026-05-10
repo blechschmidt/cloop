@@ -370,7 +370,11 @@ func GetStatus(entry ProjectEntry) ProjectStatus {
 		Path:   entry.Path,
 		Health: HealthUnknown,
 	}
-	st, err := state.Load(entry.Path)
+	// Lite-load: this function only reads metadata, plan task counts, the
+	// step total, and the timestamp of the most recent step. Decoding every
+	// step's Output here was wasted work — handleProjects calls this for
+	// every registered project on a 2 s tick (Task 20125).
+	st, err := state.LoadLite(entry.Path)
 	if err != nil {
 		ps.HasProject = false
 		ps.Health = HealthUnknown
@@ -379,7 +383,7 @@ func GetStatus(entry ProjectEntry) ProjectStatus {
 	ps.HasProject = true
 	ps.Goal = st.Goal
 	ps.Status = st.Status
-	ps.TotalSteps = len(st.Steps)
+	ps.TotalSteps = st.StepCount
 	ps.Provider = st.Provider
 	ps.Model = st.Model
 	// Fall back to config model when state doesn't have one
@@ -430,12 +434,12 @@ func computeHealth(st *state.ProjectState) Health {
 		if !st.UpdatedAt.IsZero() && time.Since(st.UpdatedAt) <= 15*time.Minute {
 			return HealthRunning
 		}
-		// Check for stall: last step older than 15 minutes while status is running.
-		if len(st.Steps) > 0 {
-			last := st.Steps[len(st.Steps)-1].Time
-			if !last.IsZero() && time.Since(last) > 15*time.Minute {
-				return HealthStalled
-			}
+		// Check for stall: last step older than 15 minutes while status is
+		// running. Reads st.LastStepTime so this works under both Load and
+		// LoadLite (where st.Steps is nil but LastStepTime is populated
+		// from a cheap SQL aggregate — Task 20125).
+		if !st.LastStepTime.IsZero() && time.Since(st.LastStepTime) > 15*time.Minute {
+			return HealthStalled
 		}
 		// If we have no steps but UpdatedAt is older than 15 min, consider stalled.
 		if !st.UpdatedAt.IsZero() && time.Since(st.UpdatedAt) > 15*time.Minute {

@@ -136,6 +136,18 @@ type ProjectState struct {
 	// DryRun persists the --dry-run flag (show prompts without invoking the
 	// provider).
 	DryRun bool `json:"dry_run,omitempty"`
+
+	// StepCount is the total number of step rows in the database. Always
+	// populated: Load mirrors len(Steps); LoadLite fills it from a cheap
+	// SELECT COUNT(*) while Steps is nil. Read it instead of len(Steps)
+	// when working with lite-loaded state (Task 20125).
+	StepCount int `json:"-"`
+
+	// LastStepTime is the timestamp of the most recent step row. Same
+	// semantics as StepCount: set by both Load (last element) and LoadLite
+	// (cheap SELECT MAX(time)); used by health probes to detect stalled
+	// runs without scanning the Steps slice.
+	LastStepTime time.Time `json:"-"`
 }
 
 // StatePath returns the legacy JSON state file path (used for migration detection).
@@ -203,6 +215,60 @@ func Load(workdir string) (*ProjectState, error) {
 	// Migrate older projects that ran before non-PM mode was removed in
 	// Task 20067. All work now flows through the PM task pipeline, so the
 	// flag must be true once a project is loaded by this binary.
+	s.PMMode = true
+	return s, nil
+}
+
+// LoadLite is like Load but skips reading the per-step rows. The returned
+// ProjectState has Steps == nil while StepCount and LastStepTime are
+// populated from cheap SQL aggregates (Task 20125). Use it from handlers
+// that render counts or check last-activity but never touch step Output —
+// for a 5k-step project this saves ~1.5 MiB of allocation per call.
+func LoadLite(workdir string) (*ProjectState, error) {
+	dir := ActiveDir(workdir)
+
+	dbPath := effectiveDBPath(dir)
+	jsonPath := effectiveLegacyPath(dir)
+
+	// Mirror Load's migration triggers so a stale legacy file is upgraded
+	// even on lite reads.
+	if dbInfo, dbErr := os.Stat(dbPath); os.IsNotExist(dbErr) {
+		if _, jsonErr := os.Stat(jsonPath); jsonErr == nil {
+			if migrateErr := migrateFromJSON(dir, jsonPath, dbPath); migrateErr != nil {
+				return nil, fmt.Errorf("migrate state.json → state.db: %w", migrateErr)
+			}
+		}
+	} else if dbErr == nil {
+		if jsonInfo, jsonErr := os.Stat(jsonPath); jsonErr == nil {
+			if jsonInfo.ModTime().After(dbInfo.ModTime()) {
+				if migrateErr := migrateFromJSON(dir, jsonPath, dbPath); migrateErr != nil {
+					return nil, fmt.Errorf("re-migrate state.json → state.db: %w", migrateErr)
+				}
+			}
+		}
+	}
+
+	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+		if dir != workdir {
+			return nil, fmt.Errorf("active session has no state (run 'cloop init' in this session): %w", statedb.ErrProjectNotFound)
+		}
+		return nil, fmt.Errorf("no cloop project found (run 'cloop init' first): %w", statedb.ErrProjectNotFound)
+	}
+
+	db, err := statedb.Open(dbPath)
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+
+	raw, err := db.LoadStateLite()
+	if err != nil {
+		return nil, err
+	}
+	s := fromRaw(raw)
+	if s.WorkDir == "" {
+		s.WorkDir = dir
+	}
 	s.PMMode = true
 	return s, nil
 }
@@ -472,18 +538,25 @@ func fromRaw(r *statedb.State) *ProjectState {
 		PlanOnly:          r.PlanOnly,
 		RetryFailed:       r.RetryFailed,
 		DryRun:            r.DryRun,
+		StepCount:         r.StepCount,
+		LastStepTime:      r.LastStepTime,
 	}
-	s.Steps = make([]StepResult, len(r.Steps))
-	for i, row := range r.Steps {
-		s.Steps[i] = StepResult{
-			Step:         row.Step,
-			Task:         row.Task,
-			Output:       row.Output,
-			ExitCode:     row.ExitCode,
-			Duration:     row.Duration,
-			Time:         row.Time,
-			InputTokens:  row.InputTokens,
-			OutputTokens: row.OutputTokens,
+	// r.Steps is nil under LoadStateLite — keep s.Steps nil too so callers
+	// can tell the difference between "no steps recorded" and "lite load,
+	// did not read step rows" (the StepCount field carries the actual total).
+	if r.Steps != nil {
+		s.Steps = make([]StepResult, len(r.Steps))
+		for i, row := range r.Steps {
+			s.Steps[i] = StepResult{
+				Step:         row.Step,
+				Task:         row.Task,
+				Output:       row.Output,
+				ExitCode:     row.ExitCode,
+				Duration:     row.Duration,
+				Time:         row.Time,
+				InputTokens:  row.InputTokens,
+				OutputTokens: row.OutputTokens,
+			}
 		}
 	}
 	return s

@@ -28,6 +28,15 @@ type State struct {
 	CurrentStep       int
 	Status            string
 	Steps             []StepRow
+	// StepCount mirrors len(Steps) on full loads but is also populated by
+	// LoadStateLite — where Steps is nil — so callers that only need a
+	// count don't have to materialize every row's Output (Task 20125).
+	StepCount int
+	// LastStepTime is the timestamp of the newest step row. Populated by
+	// both LoadState (last element of Steps) and LoadStateLite (cheap
+	// SELECT MAX(time)); used by health probes to detect stalled runs
+	// without scanning the full Steps slice.
+	LastStepTime      time.Time
 	CreatedAt         time.Time
 	UpdatedAt         time.Time
 	Model             string
@@ -295,10 +304,48 @@ func (d *DB) saveStateLocked(s *State) error {
 func (d *DB) LoadState() (*State, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	s, err := d.loadStateMetaTx()
+	if err != nil {
+		return nil, err
+	}
+	s.Steps, err = loadSteps(d.conn)
+	if err != nil {
+		return nil, classifyDriverErr(err)
+	}
+	s.StepCount = len(s.Steps)
+	if n := len(s.Steps); n > 0 {
+		s.LastStepTime = s.Steps[n-1].Time
+	}
+	return s, nil
+}
 
+// LoadStateLite is like LoadState but skips loading the per-step rows
+// (which on long-running projects can be megabytes of Output strings). The
+// returned State has Steps == nil; StepCount and LastStepTime are filled
+// from cheap aggregate SQL so handlers that only render counts or check
+// last-activity for health don't pay for decoding every Output (Task 20125).
+func (d *DB) LoadStateLite() (*State, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	s, err := d.loadStateMetaTx()
+	if err != nil {
+		return nil, err
+	}
+	var ts string
+	if err := d.conn.QueryRow(`SELECT COUNT(*), IFNULL(MAX(time), '') FROM steps`).Scan(&s.StepCount, &ts); err != nil {
+		return nil, classifyDriverErr(err)
+	}
+	if ts != "" {
+		s.LastStepTime, _ = time.Parse(time.RFC3339Nano, ts)
+	}
+	return s, nil
+}
+
+// loadStateMetaTx loads metadata + plan tasks (never steps). Caller must
+// hold d.mu. Shared by LoadState and LoadStateLite.
+func (d *DB) loadStateMetaTx() (*State, error) {
 	s := &State{}
 
-	// ── scalar metadata ──
 	rows, err := d.conn.Query(`SELECT key, value FROM metadata`)
 	if err != nil {
 		return nil, classifyDriverErr(err)
@@ -351,7 +398,6 @@ func (d *DB) LoadState() (*State, error) {
 		}
 	}
 
-	// ── plan tasks ──
 	tasks, err := loadTasks(d.conn)
 	if err != nil {
 		return nil, classifyDriverErr(err)
@@ -364,12 +410,6 @@ func (d *DB) LoadState() (*State, error) {
 			Tasks:   tasks,
 			Version: planVersion,
 		}
-	}
-
-	// ── steps ──
-	s.Steps, err = loadSteps(d.conn)
-	if err != nil {
-		return nil, classifyDriverErr(err)
 	}
 
 	return s, nil
