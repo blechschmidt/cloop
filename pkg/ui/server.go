@@ -4291,7 +4291,7 @@ func (s *Server) watchProjects(ctx context.Context) {
 		}
 		func() {
 			defer recoverGoroutine("watchProjects iteration")
-			changed := false
+			var changedPaths []string
 			for _, e := range s.allProjectEntries() {
 				statePath := filepath.Join(e.Path, ".cloop", "state.json")
 				fi, err := os.Stat(statePath)
@@ -4306,12 +4306,35 @@ func (s *Server) watchProjects(ctx context.Context) {
 				prev := s.projLastMod[e.Path]
 				if !fi.ModTime().Equal(prev) {
 					s.projLastMod[e.Path] = fi.ModTime()
-					changed = true
+					changedPaths = append(changedPaths, e.Path)
 				}
 			}
-			if changed {
+			if len(changedPaths) > 0 {
 				s.refreshProjectStatuses()
 				s.broadcastProjectsUpdate()
+
+				// Task 20134: push a state_diff for every project whose state
+				// file changed so subscribers receive the delta over WebSocket
+				// without having to refetch /api/state. Primary project diffs
+				// are already handled by watchState (1s cadence); skipping it
+				// here avoids a duplicate cache lookup. Only load state for
+				// projects with active WebSocket subscribers to keep the
+				// secondary-project case zero-cost when nobody is watching.
+				primaryAbs, _ := filepath.Abs(s.WorkDir)
+				for _, path := range changedPaths {
+					if path == primaryAbs {
+						continue
+					}
+					s.hubMu.Lock()
+					hasSubs := len(s.hubClients[path]) > 0
+					s.hubMu.Unlock()
+					if !hasSubs {
+						continue
+					}
+					if ps, err := state.LoadLite(path); err == nil {
+						s.broadcastStateDiff(path, ps)
+					}
+				}
 			}
 
 			// Independently of state-file changes, sample running status for each
@@ -9600,10 +9623,14 @@ window.switchTab = function(name) {
     // Always reload so the cards reflect the latest project statuses.
     loadProjects();
   } else if (isMultiProject && selectedProjectIdx !== null && projectScopedTabs.includes(name)) {
-    api(pUrl('/api/state')).then(s => render(s)).catch(() => {
-      if (name === 'tasks'  && appState) renderTasks(appState);
-      if (name === 'kanban' && appState) renderKanban(appState);
-    });
+    // Task 20134: no /api/state refetch — appState is hydrated by the WS
+    // task_update on initial subscribe (openProject -> connectWS) and kept
+    // fresh by state_diff events. Re-render the affected panel directly from
+    // the cached state.
+    if (appState) {
+      if (name === 'tasks')  renderTasks(appState);
+      if (name === 'kanban') renderKanban(appState);
+    }
     if (name === 'timeline') loadTimeline();
     if (name === 'kb') loadKB();
     if (name === 'deps') loadDeps();
@@ -11221,10 +11248,12 @@ function handleRealtimeMsg(type, data) {
   // FrontendWSCases for the architectural invariant.
   switch (type) {
     case 'task_update':
-      // In multi-project mode, only render when the primary project (idx=0)
-      // is explicitly selected. Ignore when no project is selected (null) or
-      // when a non-primary project is selected.
-      if (isMultiProject && selectedProjectIdx !== 0) return;
+      // Task 20134: in multi-project mode the WebSocket subscribes to the
+      // currently-selected project (via project_idx in the WS URL), so any
+      // event we receive here is for the right project. Only skip when no
+      // project is selected (the all-projects landing view doesn't render
+      // per-project payloads).
+      if (isMultiProject && selectedProjectIdx === null) return;
       try { render(data); } catch(_) {}
       // Analytics refresh is scheduled by the dispatch switch above
       // (Task 20126) — no inline call here.
@@ -11232,9 +11261,9 @@ function handleRealtimeMsg(type, data) {
     case 'state_diff':
       // Task 20132: server ships only the delta against its cached snapshot
       // (tasks_added / tasks_removed / tasks_changed / state_changed). Apply
-      // to local appState and re-render. Same multi-project visibility rules
-      // as task_update — diffs are project-scoped at the broadcast level too.
-      if (isMultiProject && selectedProjectIdx !== 0) return;
+      // to local appState and re-render. Same multi-project visibility rule
+      // as task_update — the hub already filters by project subscription.
+      if (isMultiProject && selectedProjectIdx === null) return;
       try { applyStateDiff(data); } catch(_) {}
       break;
     case 'step_output':
@@ -11244,10 +11273,9 @@ function handleRealtimeMsg(type, data) {
       try {
         renderProjects(data.projects || [], data.stats || {});
         updateProjectSelector();
-        // Keep the selected project's state fresh in multi-project mode.
-        if (isMultiProject && selectedProjectIdx !== null) {
-          api(pUrl('/api/state')).then(s => render(s)).catch(() => {});
-        }
+        // Task 20134: no per-project /api/state refetch here. The selected
+        // project's state is kept fresh via the state_diff events delivered
+        // on the same WS subscription (see broadcastStateDiff in watchProjects).
         // Refresh the overview cards if on the overview tab with no project selected.
         if (isMultiProject && selectedProjectIdx === null && activeTab === 'overview') {
           renderMultiProjectOverview();
@@ -11267,7 +11295,9 @@ function handleRealtimeMsg(type, data) {
       try {
         if (data.state) {
           // Legacy server (pre Task 20132): payload still has full state.
-          if (!isMultiProject || selectedProjectIdx === 0) {
+          // Task 20134: hub already filters by project subscription, so render
+          // unless we're on the all-projects landing.
+          if (!isMultiProject || selectedProjectIdx !== null) {
             render(data.state);
           }
         }
@@ -11285,7 +11315,7 @@ function handleRealtimeMsg(type, data) {
       // compat with older daemons.
       try {
         if (data.state) {
-          if (!isMultiProject || selectedProjectIdx === 0) {
+          if (!isMultiProject || selectedProjectIdx !== null) {
             render(data.state);
           }
         }
@@ -11295,16 +11325,15 @@ function handleRealtimeMsg(type, data) {
       // Server pushes this whenever the cloop process running flag flips
       // for this project (start/stop/external-detect). Replaces the old
       // /api/livelog poll loop.
+      //
+      // Task 20134: no /api/state refetch when running flips to false — the
+      // server's watchProjects loop pushes a state_diff for any task whose
+      // status transitions, and the run-stop handlers in handleRun/handleStop
+      // also broadcast a fresh state_diff. The tab title (▶ <task>) clears
+      // naturally on the next state_diff.
       try {
         if (data && typeof data.running !== 'undefined') {
           updateRunButtonState(!!data.running);
-          // When the run stops we may not get a final task_update flipping
-          // the in-progress task to done — refetch state so the tab title
-          // doesn't sit on a stale "▶ <task>" until the next mutation.
-          if (!data.running) {
-            const url = (typeof pUrl === 'function' && isMultiProject) ? pUrl('/api/state') : '/api/state';
-            api(url).then(s => { try { render(s); } catch(_) {} }).catch(() => {});
-          }
         }
       } catch(_) {}
       break;
@@ -11353,11 +11382,31 @@ function handleRealtimeMsg(type, data) {
   }
 }
 
-function connectWS() {
-  if (wsConn) { wsConn.close(); wsConn = null; }
+// Builds the /api/ws URL with auth + project_idx params so the server-side
+// hub registers this connection under the currently-selected project. The
+// resulting subscription delivers task_update / state_diff events for that
+// project only, removing the need to refetch /api/state on project switch
+// (Task 20134).
+function _wsURL() {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const tok   = authToken ? '?token=' + encodeURIComponent(authToken) : '';
-  const url   = proto + '//' + location.host + '/api/ws' + tok;
+  const params = [];
+  if (authToken) params.push('token=' + encodeURIComponent(authToken));
+  if (isMultiProject && selectedProjectIdx !== null) {
+    params.push('project_idx=' + encodeURIComponent(selectedProjectIdx));
+  }
+  const qs = params.length ? '?' + params.join('&') : '';
+  return proto + '//' + location.host + '/api/ws' + qs;
+}
+
+function connectWS() {
+  if (wsConn) {
+    // Mark this close as intentional so onclose doesn't probe /api/state and
+    // schedule a backoff reconnect — the immediate new WebSocket() handles it.
+    wsConn._intentional = true;
+    wsConn.close();
+    wsConn = null;
+  }
+  const url   = _wsURL();
   const dot   = document.getElementById('liveDot');
 
   let ws;
@@ -11385,8 +11434,12 @@ function connectWS() {
   };
 
   ws.onclose = (ev) => {
+    const intentional = !!(ws && ws._intentional);
     wsConn = null;
     if (dot) dot.classList.remove('connected');
+    // Intentional close (project switch) is already followed by a new
+    // WebSocket() in the same call stack — don't probe or backoff.
+    if (intentional) return;
     // If the close was a normal shutdown or we haven't tried SSE yet on the
     // first connection, probe the state endpoint to detect auth failures.
     fetch('/api/state', {headers: authHeaders()}).then(r => {
@@ -11613,9 +11666,17 @@ window.projectStop = function(idx) {
 };
 
 // Opens a project in scoped-tabs mode: sets selectedProjectIdx and drills into Overview.
+//
+// Task 20134: the WebSocket is reconnected with the new project_idx so the
+// server-side hub registers this client under the new project's workDir and
+// pushes its initial task_update + future state_diff events automatically —
+// removing the per-switch /api/state polling cost.
 window.openProject = function(idx, name) {
   selectedProjectIdx  = idx;
   selectedProjectName = name;
+  // Drop stale per-project state so the new project's initial WS task_update
+  // is the first thing the renderer sees.
+  appState = null;
   const bc = document.getElementById('projectBreadcrumb');
   if (bc) { bc.style.display = 'flex'; }
   const bn = document.getElementById('breadcrumbName');
@@ -11630,7 +11691,9 @@ window.openProject = function(idx, name) {
     renderProjects(window._lastProjectsData.projects, window._lastProjectsData.stats);
   }
   switchTab('overview');
-  api(pUrl('/api/state')).then(s => render(s)).catch(() => {});
+  // Reconnect WS scoped to the new project — initial state arrives as a
+  // task_update event in the new hub subscription.
+  connectWS();
 };
 
 // Returns to the Projects landing page from a scoped project view.
@@ -11643,6 +11706,11 @@ window.clearProjectSelection = function() {
   const sw = document.getElementById('projSelectorWrap');
   if (sw) sw.classList.remove('visible');
   switchTab('projects');
+  // Reconnect WS without project_idx so the hub registration falls back to
+  // the primary project for global events (projects list, presence) — the
+  // landing view ignores any per-project event payloads via the guard in
+  // handleRealtimeMsg (selectedProjectIdx === null).
+  connectWS();
   // No project selected → no per-project running task to advertise.
   updateBrowserTitle();
 };
@@ -11748,7 +11816,9 @@ window.saveProviderModel = function() {
     }
     closeProviderModelModal();
     toast('Provider saved: ' + (d.provider || provider) + (d.model ? ' / ' + d.model : ''), 'ok');
-    api(pUrl('/api/state')).then(s => render(s)).catch(() => {});
+    // Task 20134: handleProviderModelSet (server) calls broadcastStateDiff
+    // after saving — the resulting state_diff WebSocket event keeps the UI
+    // in sync without a redundant /api/state refetch.
   }).catch(e => {
     if (errEl) { errEl.textContent = 'Request failed: ' + e.message; errEl.style.display = ''; }
   });
