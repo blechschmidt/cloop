@@ -14,6 +14,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/cost"
 	"github.com/blechschmidt/cloop/pkg/provider"
 	"github.com/blechschmidt/cloop/pkg/state"
+	"github.com/blechschmidt/cloop/pkg/statedb"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 )
@@ -126,7 +127,7 @@ func runCompare(cmd *cobra.Command, args []string) error {
 			}
 		}
 		if !found {
-			return fmt.Errorf("task #%d not found", cmpTask)
+			return fmt.Errorf("task #%d not found: %w", cmpTask, statedb.ErrTaskNotFound)
 		}
 	} else {
 		if len(args) == 0 {

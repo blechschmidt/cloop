@@ -10,6 +10,7 @@ import (
 	gh "github.com/blechschmidt/cloop/pkg/github"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/state"
+	"github.com/blechschmidt/cloop/pkg/statedb"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 )
@@ -528,7 +529,7 @@ func runGitHubLink(cmd *cobra.Command, args []string) error {
 		}
 	}
 	if target == nil {
-		return fmt.Errorf("task #%d not found", taskID)
+		return fmt.Errorf("task #%d not found: %w", taskID, statedb.ErrTaskNotFound)
 	}
 
 	target.GitHubIssue = issueNum
@@ -573,7 +574,7 @@ func runGitHubUnlink(cmd *cobra.Command, args []string) error {
 		}
 	}
 	if target == nil {
-		return fmt.Errorf("task #%d not found", taskID)
+		return fmt.Errorf("task #%d not found: %w", taskID, statedb.ErrTaskNotFound)
 	}
 
 	prev := target.GitHubIssue

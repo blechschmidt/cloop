@@ -10,6 +10,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/ctxedit"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/state"
+	"github.com/blechschmidt/cloop/pkg/statedb"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 )
@@ -256,7 +257,7 @@ func resolveTask(s *state.ProjectState, args []string) (*pm.Task, error) {
 				return t, nil
 			}
 		}
-		return nil, fmt.Errorf("task %d not found in plan", id)
+		return nil, fmt.Errorf("task %d not found in plan: %w", id, statedb.ErrTaskNotFound)
 	}
 	// Default: next pending task, or first task.
 	next := s.Plan.NextTask()

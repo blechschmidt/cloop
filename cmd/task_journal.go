@@ -11,6 +11,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/journal"
 	"github.com/blechschmidt/cloop/pkg/provider"
 	"github.com/blechschmidt/cloop/pkg/state"
+	"github.com/blechschmidt/cloop/pkg/statedb"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 )
@@ -65,7 +66,7 @@ Examples:
 				}
 			}
 			if !found {
-				return fmt.Errorf("task %s not found in plan", taskID)
+				return fmt.Errorf("task %s not found in plan: %w", taskID, statedb.ErrTaskNotFound)
 			}
 		}
 
