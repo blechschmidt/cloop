@@ -6039,6 +6039,9 @@ func (s *Server) handleClaudeCodeAuthLoginCode(w http.ResponseWriter, r *http.Re
 		jsonErr(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	// Reauthentication invalidates the cached Claude Code usage snapshot:
+	// the previous identity's window/extra-usage numbers no longer apply.
+	ratelimit.ClearUsageCache()
 	// Refresh status so the UI doesn't have to round-trip a second call.
 	resp := map[string]interface{}{"session": st}
 	if status, sErr := claudecodeauth.FetchStatus(r.Context()); sErr == nil {
@@ -6061,6 +6064,8 @@ func (s *Server) handleClaudeCodeAuthLogout(w http.ResponseWriter, r *http.Reque
 		jsonErr(w, err.Error(), http.StatusBadGateway)
 		return
 	}
+	// Discard cached usage — it belonged to the now-logged-out identity.
+	ratelimit.ClearUsageCache()
 	jsonOK(w, map[string]bool{"ok": true})
 }
 

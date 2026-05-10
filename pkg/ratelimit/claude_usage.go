@@ -91,6 +91,17 @@ func GetCachedUsage() *ClaudeUsage {
 	return lastUsage
 }
 
+// ClearUsageCache discards the in-memory ClaudeUsage snapshot so the next
+// FetchOrCachedUsage call goes back to the OAuth usage API. Call this on
+// reauthentication (login completes, logout) — the cached snapshot was tied
+// to the previous identity's account and would otherwise be served as stale
+// data for up to MinUsageCacheTTL.
+func ClearUsageCache() {
+	usageMu.Lock()
+	lastUsage = nil
+	usageMu.Unlock()
+}
+
 // FetchOrCachedUsage returns the cached usage snapshot when it is fresher
 // than max(ttl, MinUsageCacheTTL), otherwise re-fetches from the OAuth usage
 // API. Concurrent callers coalesce on usageFetchMu so the API is hit once

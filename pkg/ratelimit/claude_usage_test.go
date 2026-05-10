@@ -53,6 +53,24 @@ func TestFetchOrCachedUsage_TTLFloor(t *testing.T) {
 	}
 }
 
+func TestClearUsageCache(t *testing.T) {
+	resetUsageCache()
+	defer resetUsageCache()
+
+	seeded := &ClaudeUsage{FetchedAt: time.Now().UTC()}
+	usageMu.Lock()
+	lastUsage = seeded
+	usageMu.Unlock()
+
+	if GetCachedUsage() != seeded {
+		t.Fatalf("precondition: seeded cache should be readable")
+	}
+	ClearUsageCache()
+	if got := GetCachedUsage(); got != nil {
+		t.Fatalf("ClearUsageCache must drop the snapshot, got %p", got)
+	}
+}
+
 func TestFetchOrCachedUsage_StaleCacheTriggersRefresh(t *testing.T) {
 	resetUsageCache()
 	defer resetUsageCache()

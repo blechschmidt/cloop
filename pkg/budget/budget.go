@@ -210,7 +210,10 @@ func Enforce(workDir string, cfg config.BudgetConfig, notifyCfg config.NotifyCon
 	// preventing cloop from consuming it.
 	blockExtra := cfg.ShouldBlockExtraUsage()
 	if blockExtra {
-		usage, usageErr := ratelimit.FetchClaudeUsage("")
+		// Use the cached fetcher so the per-task budget gate doesn't hammer
+		// the OAuth usage API — the orchestrator calls Check before every
+		// task and a parallel plan can fire many concurrent checks.
+		usage, usageErr := ratelimit.FetchOrCachedUsage("", ratelimit.MinUsageCacheTTL)
 		if usageErr == nil && usage != nil {
 			if usage.FiveHour != nil && usage.FiveHour.Utilization >= 100 {
 				return fmt.Errorf(
