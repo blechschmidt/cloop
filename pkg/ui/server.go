@@ -483,6 +483,14 @@ type Server struct {
 	// /api/claudecode/auth/* call.
 	ccAuthMu sync.Mutex
 	ccAuth   *claudecodeauth.Manager
+
+	// diffCache holds the last ProjectState broadcast per workDir. The
+	// state_diff event ships only the delta against this snapshot — Task
+	// 20132. Cache is lazily populated on first broadcast; a missing entry
+	// produces a "full state" diff (every task in TasksAdded). Initial WS
+	// frame still sends the entire state so newly connected clients have
+	// something to diff against.
+	diffCache *stateCache
 }
 
 // log returns s.Log, falling back to a default text logger if the field
@@ -515,6 +523,7 @@ func New(workdir string, port int, token string) *Server {
 		runStates:       make(map[string]bool),
 		stuckLastSeen:   make(map[string]int64),
 		Log:             logger.New(false).With("project", workdir).With("component", "ui"),
+		diffCache:       newStateCache(),
 	}
 }
 
@@ -1260,34 +1269,74 @@ func (s *Server) watchState(ctx context.Context) {
 				}
 				return
 			}
+			// SSE consumers still get the full state — they are a fallback
+			// path and not the perf-critical one. WebSocket consumers get a
+			// state_diff event with only the changed fields (Task 20132).
 			s.broadcast(string(data))
+			if ps, loadErr := state.LoadLite(s.WorkDir); loadErr == nil {
+				s.broadcastStateDiff(s.WorkDir, ps)
+			}
 		}()
 	}
 }
 
-// broadcast sends a state JSON payload to all connected SSE and WebSocket
-// clients across all projects. SSE clients receive a default "message" event;
-// WebSocket clients receive a "task_update" typed envelope.
+// broadcast sends a full-state JSON payload to all connected SSE clients.
+// WebSocket clients are fanned out via broadcastStateDiff which ships only
+// the delta against the cached snapshot (Task 20132).
 //
-// Slow consumers do NOT silently drop events: the WebSocket path uses
-// sendOrLag, which queues a resync directive when the per-client buffer is
-// full. SSE clients use the same model via the resync chan in sseClient.
+// Slow consumers do NOT silently drop events: the SSE path uses
+// sendSSEOrLag, which queues a resync directive when the per-client buffer
+// is full.
 func (s *Server) broadcast(data string) {
 	s.mu.Lock()
 	for c := range s.clients {
 		s.sendSSEOrLag(c, sseEvent{Data: data})
 	}
 	s.mu.Unlock()
+}
 
-	wsData := json.RawMessage(data)
-	msg := wsMessage{Type: "task_update", Data: wsData}
-	s.hubMu.Lock()
-	for _, clients := range s.hubClients {
-		for hc := range clients {
-			s.sendOrLag(hc, msg)
-		}
+// broadcastStateDiff computes the delta between the cached snapshot for
+// workDir and curr, then ships only the changed bits as a "state_diff"
+// WebSocket event (Task 20132). The cache is always updated to curr so the
+// next call diffs against this version.
+//
+// First broadcast for a project (no cached prev) yields a full-state diff:
+// every task lands in tasks_added and every persisted top-level field lands
+// in state_changed. Subsequent broadcasts are typically a few hundred bytes
+// regardless of project size.
+//
+// No-op if curr is nil or the diff has no changes. SSE clients are unaffected
+// — they still receive the full-state frame via broadcast().
+func (s *Server) broadcastStateDiff(workDir string, curr *state.ProjectState) {
+	if curr == nil {
+		return
 	}
-	s.hubMu.Unlock()
+	cache := s.ensureDiffCache()
+	prev := cache.swap(workDir, curr)
+	diff := computeStateDiff(prev, curr)
+	if !diff.HasChanges {
+		return
+	}
+	raw, err := json.Marshal(diff)
+	if err != nil {
+		return
+	}
+	s.broadcastToProject(workDir, wsMessage{Type: "state_diff", Data: raw})
+}
+
+// resetStateDiffCache forgets the cached snapshot for workDir so the next
+// broadcast emits a full-state diff. Called from the WebSocket connect path
+// for the connecting client's project so a reconnecting tab catches up via
+// state_diff rather than waiting for the next mutation to ship a partial
+// delta against a state it never saw.
+//
+// Single-shot drop — does not coordinate with concurrent broadcasts. If a
+// broadcast races in between, the next one will simply re-establish the
+// cache (worst case: one redundant full-state diff to other clients).
+func (s *Server) resetStateDiffCache(workDir string) {
+	if s.diffCache != nil {
+		s.diffCache.drop(workDir)
+	}
 }
 
 // broadcastToProject sends a WebSocket message only to clients connected to
@@ -2550,10 +2599,13 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 			s.broadcastRunState(workDir, false, true)
 			// Broadcast updated state after run completes. Lite-load —
 			// marshalStateForWire drops Steps before broadcast (Task 20125).
+			// SSE consumers get the full state; WS clients get a state_diff
+			// against the cached snapshot (Task 20132).
 			if ps, loadErr := state.LoadLite(workDir); loadErr == nil {
 				if data, marshalErr := marshalStateForWire(ps); marshalErr == nil {
 					s.broadcast(string(data))
 				}
+				s.broadcastStateDiff(workDir, ps)
 			}
 		}()
 	} else {
@@ -2766,14 +2818,14 @@ func (s *Server) handleTaskAdd(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Broadcast the new task to all WebSocket clients watching this project.
+	// state_diff carries the new task (and any state changes) — task_added
+	// remains as a hint event for toasts but no longer embeds the full state.
 	addWorkDir := s.resolveWorkDir(r)
-	if raw, err := marshalStateForWire(ps); err == nil {
-		addRaw, _ := json.Marshal(map[string]interface{}{
-			"task":  task,
-			"state": json.RawMessage(raw),
-		})
-		s.broadcastToProject(addWorkDir, wsMessage{Type: "task_added", Data: addRaw})
-	}
+	s.broadcastStateDiff(addWorkDir, ps)
+	addRaw, _ := json.Marshal(map[string]interface{}{
+		"task": task,
+	})
+	s.broadcastToProject(addWorkDir, wsMessage{Type: "task_added", Data: addRaw})
 	// Unified event journal (Task 20118).
 	state.LogEvent(addWorkDir, state.EventRow{
 		Type:      state.EventTaskAdded,
@@ -3091,14 +3143,14 @@ func (s *Server) handlePutTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Broadcast the mutation to all WebSocket clients watching this project.
-	if raw, err := marshalStateForWire(ps); err == nil {
-		mutRaw, _ := json.Marshal(map[string]interface{}{
-			"task":     task,
-			"state":    json.RawMessage(raw),
-			"conflict": conflict,
-		})
-		s.broadcastToProject(workDir, wsMessage{Type: "task_mutation", Data: mutRaw})
-	}
+	// state_diff carries the changed fields; task_mutation now just carries
+	// the conflict flag + task summary for the toast UI (Task 20132).
+	s.broadcastStateDiff(workDir, ps)
+	mutRaw, _ := json.Marshal(map[string]interface{}{
+		"task":     task,
+		"conflict": conflict,
+	})
+	s.broadcastToProject(workDir, wsMessage{Type: "task_mutation", Data: mutRaw})
 
 	jsonOK(w, map[string]interface{}{"ok": true, "task": task, "conflict": conflict})
 }
@@ -3139,14 +3191,14 @@ func (s *Server) handleDeleteTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Broadcast deletion to all WebSocket clients watching this project.
+	// state_diff carries the removed task ID; task_deleted retains the same
+	// hint event without the embedded state payload (Task 20132).
 	workDir2 := s.resolveWorkDir(r)
-	if raw, err := marshalStateForWire(ps); err == nil {
-		delRaw, _ := json.Marshal(map[string]interface{}{
-			"deleted_id": id,
-			"state":      json.RawMessage(raw),
-		})
-		s.broadcastToProject(workDir2, wsMessage{Type: "task_deleted", Data: delRaw})
-	}
+	s.broadcastStateDiff(workDir2, ps)
+	delRaw, _ := json.Marshal(map[string]interface{}{
+		"deleted_id": id,
+	})
+	s.broadcastToProject(workDir2, wsMessage{Type: "task_deleted", Data: delRaw})
 	state.LogEvent(workDir2, state.EventRow{
 		Type:      state.EventTaskDeleted,
 		TaskID:    id,
@@ -3605,9 +3657,7 @@ func (s *Server) handleSuggestAdd(w http.ResponseWriter, r *http.Request) {
 		s.suggestMu.Unlock()
 	}
 
-	if raw, err := marshalStateForWire(ps); err == nil {
-		s.broadcastToProject(workDir, wsMessage{Type: "task_update", Data: raw})
-	}
+	s.broadcastStateDiff(workDir, ps)
 
 	jsonOK(w, map[string]interface{}{
 		"ok":    true,
@@ -3736,9 +3786,7 @@ func (s *Server) handleGoal(w http.ResponseWriter, r *http.Request) {
 			jsonErr(w, "save failed: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		if raw, err := marshalStateForWire(ps); err == nil {
-			s.broadcastToProject(workDir, wsMessage{Type: "task_update", Data: raw})
-		}
+		s.broadcastStateDiff(workDir, ps)
 		jsonOK(w, map[string]interface{}{"ok": true, "goal": ps.Goal, "previous": old})
 	default:
 		jsonErr(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -3782,9 +3830,7 @@ func (s *Server) handleInstructions(w http.ResponseWriter, r *http.Request) {
 			jsonErr(w, "save failed: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		if raw, err := marshalStateForWire(ps); err == nil {
-			s.broadcastToProject(workDir, wsMessage{Type: "task_update", Data: raw})
-		}
+		s.broadcastStateDiff(workDir, ps)
 		jsonOK(w, map[string]interface{}{"ok": true, "instructions": ps.Instructions, "previous": old})
 	default:
 		jsonErr(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -6040,9 +6086,7 @@ func (s *Server) handleOptionsToggle(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "save failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if raw, err := marshalStateForWire(ps); err == nil {
-		s.broadcastToProject(workDir, wsMessage{Type: "task_update", Data: json.RawMessage(raw)})
-	}
+	s.broadcastStateDiff(workDir, ps)
 	jsonOK(w, map[string]interface{}{
 		"ok":            true,
 		"auto_evolve":   ps.AutoEvolve,
@@ -6092,9 +6136,7 @@ func (s *Server) handleMaxParallelSet(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "save failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if raw, err := marshalStateForWire(ps); err == nil {
-		s.broadcastToProject(workDir, wsMessage{Type: "task_update", Data: json.RawMessage(raw)})
-	}
+	s.broadcastStateDiff(workDir, ps)
 	jsonOK(w, map[string]interface{}{
 		"ok":           true,
 		"max_parallel": ps.MaxParallel,
@@ -6182,9 +6224,7 @@ func (s *Server) handleProviderModelSet(w http.ResponseWriter, r *http.Request) 
 		jsonErr(w, "save failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if raw, err := marshalStateForWire(ps); err == nil {
-		s.broadcastToProject(workDir, wsMessage{Type: "task_update", Data: json.RawMessage(raw)})
-	}
+	s.broadcastStateDiff(workDir, ps)
 	jsonOK(w, map[string]interface{}{
 		"ok":       true,
 		"provider": ps.Provider,
@@ -9981,6 +10021,95 @@ function priorityBadge(p) {
 
 // ── Render overview ─────────────────────────────────────────────────────────
 
+// applyStateDiff merges a server-side state_diff envelope into the local
+// appState and then re-renders. The envelope shape (Task 20132):
+//
+//   {
+//     tasks_added:   [<full task obj>, ...],
+//     tasks_removed: [<id>, ...],
+//     tasks_changed: [{id, ...changed fields}, ...],
+//     state_changed: {<top-level field>: <value>, ...}
+//   }
+//
+// Applied idempotently: adding a task that already exists by ID is treated
+// as a field-merge; removing a task that's already gone is a no-op. This
+// keeps the client consistent if it receives a diff before its initial
+// /api/state response (race on first connect) or after a reconnect/resync.
+function applyStateDiff(diff) {
+  if (!diff || typeof diff !== 'object') return;
+  if (!appState) appState = {};
+  if (!appState.plan)       appState.plan       = {tasks: []};
+  if (!appState.plan.tasks) appState.plan.tasks = [];
+
+  // Top-level scalar fields (goal, status, model, etc.).
+  if (diff.state_changed && typeof diff.state_changed === 'object') {
+    for (const [k, v] of Object.entries(diff.state_changed)) {
+      if (k === 'plan') {
+        // Plan-level fields (goal, version). Tasks are handled separately.
+        if (v && typeof v === 'object') {
+          if (!appState.plan) appState.plan = {tasks: []};
+          for (const [pk, pv] of Object.entries(v)) {
+            if (pk === 'tasks') continue;
+            if (pv === null) delete appState.plan[pk];
+            else             appState.plan[pk] = pv;
+          }
+        } else if (v === null) {
+          appState.plan = {tasks: []};
+        }
+      } else if (v === null) {
+        delete appState[k];
+      } else {
+        appState[k] = v;
+      }
+    }
+  }
+
+  // Removed tasks.
+  if (Array.isArray(diff.tasks_removed) && diff.tasks_removed.length) {
+    const removed = new Set(diff.tasks_removed);
+    appState.plan.tasks = appState.plan.tasks.filter(t => !removed.has(t.id));
+  }
+
+  // Added tasks (idempotent: existing ID becomes a field merge).
+  if (Array.isArray(diff.tasks_added) && diff.tasks_added.length) {
+    const byId = new Map();
+    for (let i = 0; i < appState.plan.tasks.length; i++) {
+      const t = appState.plan.tasks[i];
+      if (t && typeof t.id === 'number') byId.set(t.id, i);
+    }
+    for (const t of diff.tasks_added) {
+      if (!t || typeof t.id !== 'number') continue;
+      if (byId.has(t.id)) {
+        appState.plan.tasks[byId.get(t.id)] = Object.assign({}, appState.plan.tasks[byId.get(t.id)], t);
+      } else {
+        appState.plan.tasks.push(t);
+      }
+    }
+  }
+
+  // Changed tasks — shallow field merge. Null values clear the field.
+  if (Array.isArray(diff.tasks_changed) && diff.tasks_changed.length) {
+    const byId = new Map();
+    for (let i = 0; i < appState.plan.tasks.length; i++) {
+      const t = appState.plan.tasks[i];
+      if (t && typeof t.id === 'number') byId.set(t.id, i);
+    }
+    for (const change of diff.tasks_changed) {
+      if (!change || typeof change.id !== 'number') continue;
+      const idx = byId.get(change.id);
+      if (idx === undefined) continue; // unknown ID — wait for tasks_added on next round
+      const target = appState.plan.tasks[idx];
+      for (const [k, v] of Object.entries(change)) {
+        if (k === 'id') continue;
+        if (v === null) delete target[k];
+        else            target[k] = v;
+      }
+    }
+  }
+
+  render(appState);
+}
+
 function render(s) {
   appState = s;
 
@@ -11060,6 +11189,7 @@ function handleRealtimeMsg(type, data) {
   // reload so the Event History panel stays live without polling.
   switch (type) {
     case 'task_update':
+    case 'state_diff':
     case 'task_added':
     case 'task_deleted':
     case 'task_mutation':
@@ -11073,6 +11203,7 @@ function handleRealtimeMsg(type, data) {
   // cheap no-op. Replaces the old 30s self-poll inside loadAnalytics.
   switch (type) {
     case 'task_update':
+    case 'state_diff':
     case 'task_added':
     case 'task_deleted':
     case 'task_mutation':
@@ -11097,6 +11228,14 @@ function handleRealtimeMsg(type, data) {
       try { render(data); } catch(_) {}
       // Analytics refresh is scheduled by the dispatch switch above
       // (Task 20126) — no inline call here.
+      break;
+    case 'state_diff':
+      // Task 20132: server ships only the delta against its cached snapshot
+      // (tasks_added / tasks_removed / tasks_changed / state_changed). Apply
+      // to local appState and re-render. Same multi-project visibility rules
+      // as task_update — diffs are project-scoped at the broadcast level too.
+      if (isMultiProject && selectedProjectIdx !== 0) return;
+      try { applyStateDiff(data); } catch(_) {}
       break;
     case 'step_output':
       try { if (data.chunk) appendLiveLog(data.chunk); } catch(_) {}
@@ -11123,9 +11262,11 @@ function handleRealtimeMsg(type, data) {
       } catch(_) {}
       break;
     case 'task_mutation':
-      // Re-render with latest state and show conflict toast if needed.
+      // Task 20132: the actual state change rides on a paired state_diff
+      // event. This handler only surfaces the conflict toast / hint UI.
       try {
         if (data.state) {
+          // Legacy server (pre Task 20132): payload still has full state.
           if (!isMultiProject || selectedProjectIdx === 0) {
             render(data.state);
           }
@@ -11138,7 +11279,10 @@ function handleRealtimeMsg(type, data) {
       break;
     case 'task_added':
     case 'task_deleted':
-      // Re-render with the updated state snapshot.
+      // Task 20132: state mutation is delivered as a separate state_diff
+      // event broadcast just before this one. Legacy server may still ship
+      // the full state in data.state — apply it if present for backwards
+      // compat with older daemons.
       try {
         if (data.state) {
           if (!isMultiProject || selectedProjectIdx === 0) {
