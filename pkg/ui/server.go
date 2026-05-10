@@ -1667,6 +1667,41 @@ func (s *Server) handleClientError(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// marshalStateForWire serialises a ProjectState for the browser without the
+// large Steps[] array (Task 20125). The UI only ever reads steps.length
+// from the wire — actual rows come from the paginated /api/steps and
+// /api/event-history endpoints. Shipping the slice in /api/state and in
+// every task_update / task_mutation / task_added / task_deleted broadcast
+// was wasting ~1.7 MiB per request on a 5k-step project (83% of payload)
+// and dominating perceived UI latency. We replace the array with a new
+// top-level "steps_count" field; the frontend prefers it when present and
+// falls back to (s.steps||[]).length for older clients.
+//
+// The caller's ProjectState is never mutated: we copy the struct (cheap,
+// ~200 bytes), nil out Steps on the copy, marshal, then splice
+// "steps_count":N before the closing brace.
+func marshalStateForWire(ps *state.ProjectState) ([]byte, error) {
+	if ps == nil {
+		return []byte("null"), nil
+	}
+	stepsCount := len(ps.Steps)
+	clone := *ps
+	clone.Steps = nil
+	raw, err := json.Marshal(&clone)
+	if err != nil {
+		return nil, err
+	}
+	if len(raw) >= 2 && raw[0] == '{' && raw[len(raw)-1] == '}' {
+		sep := ","
+		if len(raw) == 2 {
+			sep = ""
+		}
+		injected := fmt.Sprintf(`%s"steps_count":%d}`, sep, stepsCount)
+		return append(raw[:len(raw)-1:len(raw)-1], injected...), nil
+	}
+	return raw, nil
+}
+
 // handleDashboard serves the single-page HTML dashboard.
 func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" {
@@ -1705,16 +1740,23 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Build enriched response including config-only fields.
-	type stateWithConfig struct {
-		*state.ProjectState
-		StepTimeout string `json:"step_timeout,omitempty"`
+	// Marshal without the multi-MiB Steps slice (Task 20125). The browser
+	// reads only steps_count here; the paginated /api/steps and
+	// /api/event-history endpoints supply the actual rows.
+	raw, err := marshalStateForWire(ps)
+	if err != nil {
+		jsonErr(w, "encode failed", http.StatusInternalServerError)
+		return
 	}
-	resp := stateWithConfig{ProjectState: ps}
-	if cfgErr == nil {
-		resp.StepTimeout = cfg.StepTimeout
+	if cfgErr == nil && cfg.StepTimeout != "" {
+		if len(raw) >= 2 && raw[len(raw)-1] == '}' {
+			extra := fmt.Sprintf(`,"step_timeout":%q`, cfg.StepTimeout)
+			raw = append(raw[:len(raw)-1:len(raw)-1], extra...)
+			raw = append(raw, '}')
+		}
 	}
-	jsonOK(w, resp)
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(raw)
 }
 
 // handleSteps returns a paginated slice of step history, latest first.
@@ -1986,7 +2028,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 
 	// Send current state immediately on connect.
 	if ps, err := state.Load(s.WorkDir); err == nil {
-		if data, err := json.Marshal(ps); err == nil {
+		if data, err := marshalStateForWire(ps); err == nil {
 			if werr := writeSSE(w, flusher, "data: %s\n\n", data); werr != nil {
 				return
 			}
@@ -2224,7 +2266,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 
 	// Send current state immediately.
 	if ps, err := state.Load(workDir); err == nil {
-		if raw, err := json.Marshal(ps); err == nil {
+		if raw, err := marshalStateForWire(ps); err == nil {
 			if msg, err := json.Marshal(wsMessage{Type: "task_update", Data: raw}); err == nil {
 				_ = wsWrite(ctx, conn, msg)
 			}
@@ -2514,7 +2556,7 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 			s.broadcastRunState(workDir, false, true)
 			// Broadcast updated state after run completes.
 			if ps, loadErr := state.Load(workDir); loadErr == nil {
-				if data, marshalErr := json.Marshal(ps); marshalErr == nil {
+				if data, marshalErr := marshalStateForWire(ps); marshalErr == nil {
 					s.broadcast(string(data))
 				}
 			}
@@ -2730,7 +2772,7 @@ func (s *Server) handleTaskAdd(w http.ResponseWriter, r *http.Request) {
 
 	// Broadcast the new task to all WebSocket clients watching this project.
 	addWorkDir := s.resolveWorkDir(r)
-	if raw, err := json.Marshal(ps); err == nil {
+	if raw, err := marshalStateForWire(ps); err == nil {
 		addRaw, _ := json.Marshal(map[string]interface{}{
 			"task":  task,
 			"state": json.RawMessage(raw),
@@ -3054,7 +3096,7 @@ func (s *Server) handlePutTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Broadcast the mutation to all WebSocket clients watching this project.
-	if raw, err := json.Marshal(ps); err == nil {
+	if raw, err := marshalStateForWire(ps); err == nil {
 		mutRaw, _ := json.Marshal(map[string]interface{}{
 			"task":     task,
 			"state":    json.RawMessage(raw),
@@ -3103,7 +3145,7 @@ func (s *Server) handleDeleteTask(w http.ResponseWriter, r *http.Request) {
 
 	// Broadcast deletion to all WebSocket clients watching this project.
 	workDir2 := s.resolveWorkDir(r)
-	if raw, err := json.Marshal(ps); err == nil {
+	if raw, err := marshalStateForWire(ps); err == nil {
 		delRaw, _ := json.Marshal(map[string]interface{}{
 			"deleted_id": id,
 			"state":      json.RawMessage(raw),
@@ -3568,7 +3610,7 @@ func (s *Server) handleSuggestAdd(w http.ResponseWriter, r *http.Request) {
 		s.suggestMu.Unlock()
 	}
 
-	if raw, err := json.Marshal(ps); err == nil {
+	if raw, err := marshalStateForWire(ps); err == nil {
 		s.broadcastToProject(workDir, wsMessage{Type: "task_update", Data: raw})
 	}
 
@@ -3699,7 +3741,7 @@ func (s *Server) handleGoal(w http.ResponseWriter, r *http.Request) {
 			jsonErr(w, "save failed: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		if raw, err := json.Marshal(ps); err == nil {
+		if raw, err := marshalStateForWire(ps); err == nil {
 			s.broadcastToProject(workDir, wsMessage{Type: "task_update", Data: raw})
 		}
 		jsonOK(w, map[string]interface{}{"ok": true, "goal": ps.Goal, "previous": old})
@@ -3745,7 +3787,7 @@ func (s *Server) handleInstructions(w http.ResponseWriter, r *http.Request) {
 			jsonErr(w, "save failed: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		if raw, err := json.Marshal(ps); err == nil {
+		if raw, err := marshalStateForWire(ps); err == nil {
 			s.broadcastToProject(workDir, wsMessage{Type: "task_update", Data: raw})
 		}
 		jsonOK(w, map[string]interface{}{"ok": true, "instructions": ps.Instructions, "previous": old})
@@ -5936,7 +5978,7 @@ func (s *Server) handleOptionsToggle(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "save failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if raw, err := json.Marshal(ps); err == nil {
+	if raw, err := marshalStateForWire(ps); err == nil {
 		s.broadcastToProject(workDir, wsMessage{Type: "task_update", Data: json.RawMessage(raw)})
 	}
 	jsonOK(w, map[string]interface{}{
@@ -5988,7 +6030,7 @@ func (s *Server) handleMaxParallelSet(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "save failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if raw, err := json.Marshal(ps); err == nil {
+	if raw, err := marshalStateForWire(ps); err == nil {
 		s.broadcastToProject(workDir, wsMessage{Type: "task_update", Data: json.RawMessage(raw)})
 	}
 	jsonOK(w, map[string]interface{}{
@@ -6078,7 +6120,7 @@ func (s *Server) handleProviderModelSet(w http.ResponseWriter, r *http.Request) 
 		jsonErr(w, "save failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if raw, err := json.Marshal(ps); err == nil {
+	if raw, err := marshalStateForWire(ps); err == nil {
 		s.broadcastToProject(workDir, wsMessage{Type: "task_update", Data: json.RawMessage(raw)})
 	}
 	jsonOK(w, map[string]interface{}{
@@ -9922,7 +9964,9 @@ function render(s) {
   updateRunButtonState(s.status === 'running');
 
   // Stats
-  const steps = (s.steps || []).length;
+  // Task 20125: backend now ships steps_count instead of the full steps[]
+  // array. Fall back to steps.length for older payloads.
+  const steps = (typeof s.steps_count === 'number') ? s.steps_count : (s.steps || []).length;
   document.getElementById('statSteps').textContent    = steps;
   document.getElementById('statStepsSub').textContent = s.max_steps > 0 ? 'of '+s.max_steps+' max' : 'unlimited';
   document.getElementById('statProvider').textContent = s.provider || 'claudecode';
@@ -10086,7 +10130,10 @@ function syncStepHistory(s) {
     _loadInitialSteps();
     return;
   }
-  const newTotal = (s && Array.isArray(s.steps)) ? s.steps.length : stepsState.total;
+  // Task 20125: backend ships steps_count instead of steps[].
+  let newTotal = stepsState.total;
+  if (s && typeof s.steps_count === 'number') newTotal = s.steps_count;
+  else if (s && Array.isArray(s.steps))      newTotal = s.steps.length;
   if (newTotal !== stepsState.total || (newTotal > 0 && stepsState.loaded.length === 0)) {
     // New steps appeared (or first load). Re-fetch enough rows to cover what
     // the user already had visible, plus the newcomers.
@@ -10939,6 +10986,18 @@ function handleRealtimeMsg(type, data) {
             } catch(_) {}
           }).catch(() => {});
         }
+      } catch(_) {}
+      break;
+    case 'task_stuck':
+      // Backend's stuck-task watcher detected a task that hasn't made
+      // progress. Surface a toast so the user notices without a full
+      // re-render. Reuses the conflict-toast banner — it self-dismisses
+      // after a few seconds.
+      try {
+        const title  = (data && data.task_title) ? '"' + data.task_title + '"' : 'a task';
+        const secs   = (data && data.stuck_for_seconds) ? Math.round(data.stuck_for_seconds) + 's' : '';
+        const killed = (data && data.auto_killed) ? ' (auto-killed)' : '';
+        showConflictToast('Task ' + title + ' is stuck' + (secs ? ' for ' + secs : '') + killed + '.');
       } catch(_) {}
       break;
     case 'error':
@@ -14376,7 +14435,7 @@ let _analyticsTimer = null;
 const _paletteBg   = ['rgba(88,166,255,.7)','rgba(63,185,80,.7)','rgba(188,140,255,.7)','rgba(57,197,207,.7)','rgba(248,81,73,.7)','rgba(210,153,34,.7)'];
 const _paletteLine = ['#58a6ff','#3fb950','#bc8cff','#39c5cf','#f85149','#d29922'];
 
-function analyticsResetRange() {
+window.analyticsResetRange = function() {
   const to   = new Date();
   const from = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
   const fmt = d => d.toISOString().slice(0,10);
@@ -14385,7 +14444,7 @@ function analyticsResetRange() {
   if (fi) fi.value = fmt(from);
   if (ti) ti.value = fmt(to);
   loadAnalytics();
-}
+};
 
 window.loadAnalytics = function() {
   // Initialise date pickers if empty.
