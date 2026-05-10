@@ -125,6 +125,12 @@ type ProjectState struct {
 	// MaxParallel caps the worker pool when Parallel is true. 0 = unlimited.
 	MaxParallel int `json:"max_parallel,omitempty"`
 
+	// WorktreeParallel persists the --worktree-parallel flag. When true and the
+	// project is a git repo, parallel-mode tasks run inside dedicated git
+	// worktrees at .cloop/worktrees/task-<id>/ and their branches are drained
+	// back into the base branch through a serialized merge queue.
+	WorktreeParallel bool `json:"worktree_parallel,omitempty"`
+
 	// PlanOnly persists the --plan-only flag (PM mode: decompose goal into
 	// tasks but do not execute them).
 	PlanOnly bool `json:"plan_only,omitempty"`
@@ -426,6 +432,7 @@ func (s *ProjectState) mergeExternalTasks() {
 	s.SkipClarify = disk.SkipClarify
 	s.Parallel = disk.Parallel
 	s.MaxParallel = disk.MaxParallel
+	s.WorktreeParallel = disk.WorktreeParallel
 	s.PlanOnly = disk.PlanOnly
 	s.RetryFailed = disk.RetryFailed
 	s.DryRun = disk.DryRun
@@ -491,6 +498,7 @@ func toRaw(s *ProjectState) *statedb.State {
 		InnovateMode:      s.InnovateMode,
 		Parallel:          s.Parallel,
 		MaxParallel:       s.MaxParallel,
+		WorktreeParallel:  s.WorktreeParallel,
 		PlanOnly:          s.PlanOnly,
 		RetryFailed:       s.RetryFailed,
 		DryRun:            s.DryRun,
@@ -535,6 +543,7 @@ func fromRaw(r *statedb.State) *ProjectState {
 		InnovateMode:      r.InnovateMode,
 		Parallel:          r.Parallel,
 		MaxParallel:       r.MaxParallel,
+		WorktreeParallel:  r.WorktreeParallel,
 		PlanOnly:          r.PlanOnly,
 		RetryFailed:       r.RetryFailed,
 		DryRun:            r.DryRun,
@@ -592,6 +601,7 @@ type legacyState struct {
 	InnovateMode      bool                 `json:"innovate_mode,omitempty"`
 	Parallel          bool                 `json:"parallel,omitempty"`
 	MaxParallel       int                  `json:"max_parallel,omitempty"`
+	WorktreeParallel  bool                 `json:"worktree_parallel,omitempty"`
 	PlanOnly          bool                 `json:"plan_only,omitempty"`
 	RetryFailed       bool                 `json:"retry_failed,omitempty"`
 	DryRun            bool                 `json:"dry_run,omitempty"`
@@ -637,6 +647,7 @@ func migrateFromJSON(dir, jsonPath, dbPath string) error {
 		InnovateMode:      legacy.InnovateMode,
 		Parallel:          legacy.Parallel,
 		MaxParallel:       legacy.MaxParallel,
+		WorktreeParallel:  legacy.WorktreeParallel,
 		PlanOnly:          legacy.PlanOnly,
 		RetryFailed:       legacy.RetryFailed,
 		DryRun:            legacy.DryRun,

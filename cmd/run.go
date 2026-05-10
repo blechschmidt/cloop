@@ -27,72 +27,73 @@ import (
 )
 
 var (
-	runModel        string
-	stepTimeout     string
-	runTimeout      string
-	runMaxTokens    int
-	runTemperature  float64
-	runTopP         float64
-	verbose         bool
-	dryRun          bool
-	continueSteps   int
-	runStepsLimit   int
-	autoEvolve      bool
-	runProvider     string
-	planOnly        bool
-	retryFailed     bool
-	replan          bool
-	maxFailures     int
-	contextSteps    int
-	stepDelay       string
-	onComplete      string
-	tokenBudget     int
-	innovateMode    bool
-	parallelMode    bool
-	maxParallel     int
-	injectContext    bool
-	adaptiveReplan   bool
-	reviewMode       bool
-	verifyTasks      bool
-	maxVerifyRetries int
-	useMemory        bool
-	learn            bool
-	memoryLimit      int
-	webhookURL        string
-	webhookEvents     []string
-	webhookSecret     string
-	fallbackProviders []string
-	streamOutput      bool
-	notifyEnabled     bool
-	costLimit         float64
-	gitMode              bool
-	diagnoseFailures     bool
-	contextTokenLimit    int
-	optimizePlan         bool
-	optimizeInteractive  bool
-	metricsAddr          string
-	noDedup              bool
-	runTags              []string
-	scriptVerify         bool
-	runProfile           string
-	autoSplit            bool
-	multiAgentMode       bool
-	postReview           bool
-	healRetries          int
-	noHeal               bool
-	riskCheck            bool
-	riskForce            bool
-	consensusN           int
-	noContextInject      bool
-	requireApproval      bool
-	skipClarify          bool
-	autoEvalRun          bool
-	docsUpdateOnComplete bool
-	docsUpdateFile       string
-	noCache              bool
-	cacheTTL             string
-	cacheMaxSize         int
-	mockMode             bool
+	runModel                 string
+	stepTimeout              string
+	runTimeout               string
+	runMaxTokens             int
+	runTemperature           float64
+	runTopP                  float64
+	verbose                  bool
+	dryRun                   bool
+	continueSteps            int
+	runStepsLimit            int
+	autoEvolve               bool
+	runProvider              string
+	planOnly                 bool
+	retryFailed              bool
+	replan                   bool
+	maxFailures              int
+	contextSteps             int
+	stepDelay                string
+	onComplete               string
+	tokenBudget              int
+	innovateMode             bool
+	parallelMode             bool
+	maxParallel              int
+	injectContext            bool
+	adaptiveReplan           bool
+	reviewMode               bool
+	verifyTasks              bool
+	maxVerifyRetries         int
+	useMemory                bool
+	learn                    bool
+	memoryLimit              int
+	webhookURL               string
+	webhookEvents            []string
+	webhookSecret            string
+	fallbackProviders        []string
+	streamOutput             bool
+	notifyEnabled            bool
+	costLimit                float64
+	gitMode                  bool
+	worktreeParallel         bool
+	diagnoseFailures         bool
+	contextTokenLimit        int
+	optimizePlan             bool
+	optimizeInteractive      bool
+	metricsAddr              string
+	noDedup                  bool
+	runTags                  []string
+	scriptVerify             bool
+	runProfile               string
+	autoSplit                bool
+	multiAgentMode           bool
+	postReview               bool
+	healRetries              int
+	noHeal                   bool
+	riskCheck                bool
+	riskForce                bool
+	consensusN               int
+	noContextInject          bool
+	requireApproval          bool
+	skipClarify              bool
+	autoEvalRun              bool
+	docsUpdateOnComplete     bool
+	docsUpdateFile           string
+	noCache                  bool
+	cacheTTL                 string
+	cacheMaxSize             int
+	mockMode                 bool
 	extendedThinking         bool
 	thinkingBudget           int
 	autoPromote              bool
@@ -279,6 +280,12 @@ Press Ctrl+C to pause gracefully.`,
 			parallelMode = true
 		}
 
+		// Pick up persisted worktree-parallel toggle (set via UI) when the
+		// CLI flag is off.
+		if !worktreeParallel && projectState != nil && projectState.WorktreeParallel {
+			worktreeParallel = true
+		}
+
 		// Merge skip-clarify: CLI flag | persisted state (set by 'cloop init --skip-clarify')
 		effectiveSkipClarify := skipClarify
 		if !effectiveSkipClarify && projectState != nil && projectState.SkipClarify {
@@ -365,81 +372,82 @@ Press Ctrl+C to pause gracefully.`,
 		}
 
 		orchCfg := orchestrator.Config{
-			LogJSON:             effectiveLogJSON,
-			MultiAgent:          multiAgentMode,
-			PostReview:          postReview,
-			ConsensusN:          consensusN,
-			NoCodeContextInject: noContextInject,
-			RequireApproval:     requireApproval,
-			SkipClarify:         effectiveSkipClarify,
-			AutoEval:            autoEvalRun,
-			SlackWebhookURL:   cfg.Notify.SlackWebhook,
-			DiscordWebhookURL: cfg.Notify.DiscordWebhook,
-			Hooks: buildHooksConfig(cfg.Hooks),
-			WorkDir:          workdir,
-			Model:            model,
-			MaxTokens:        effectiveMaxTokens,
-			Temperature:      effectiveTemperature,
-			TopP:             effectiveTopP,
-			FrequencyPenalty: effectiveFreqPenalty,
-			StepTimeout:      timeout,
-			Verbose:          verbose,
-			DryRun:           effectiveDryRun,
-			PlanOnly:         effectivePlanOnly,
-			RetryFailed:      effectiveRetryFailed,
-			Replan:           replan,
-			MaxFailures:      maxFailures,
-			ContextSteps:     contextSteps,
-			StepDelay:        delay,
-			StepsLimit:       runStepsLimit,
-			ProviderName:     providerName,
-			ProviderCfg:      provCfg,
-			TokenBudget:      tokenBudget,
-			CostLimit:        costLimit,
-			InnovateMode:     effectiveInnovate,
-			Parallel:         parallelMode,
-			MaxParallel:      effectiveMaxParallel,
-			InjectContext:    injectContext,
-			AdaptiveReplan:   adaptiveReplan,
-			ReviewMode:       reviewMode,
-			Verify:           verifyTasks,
-			MaxVerifyRetries: maxVerifyRetries,
-			UseMemory:        useMemory,
-			Learn:            learn,
-			MemoryLimit:      memoryLimit,
-			WebhookURL:       effectiveWebhookURL,
-			WebhookEvents:    effectiveWebhookEvents,
-			WebhookSecret:    effectiveWebhookSecret,
-			Streaming:        streamOutput,
-			Notify:           notifyEnabled,
-			GitMode:             gitMode,
-			DiagnoseFailures:    diagnoseFailures,
-			ContextTokenLimit:   contextTokenLimit,
-			Optimize:            optimizePlan,
-			OptimizeInteractive: optimizeInteractive,
-			Metrics:             runMetrics,
-			NoDedup:             noDedup,
-			TagFilter:           runTags,
-			ScriptVerify:        scriptVerify,
-			AutoSplit:           autoSplit,
-			HealRetries:         healRetries,
-			NoHeal:              noHeal,
-			RiskCheck:           riskCheck,
-			RiskForce:           riskForce,
-			Budget:               cfg.Budget,
-			NotifyCfg:            cfg.Notify,
-			ClaudeCode:           cfg.ClaudeCode,
-			DocsUpdateOnComplete: docsUpdateOnComplete,
-			DocsUpdateFile:       docsUpdateFile,
-			CalibrationFactor:    cfg.CalibrationFactor,
-		ExtendedThinking:         extendedThinking,
-		ThinkingBudget:           thinkingBudget,
-		TracingEnabled:           cfg.Tracing.Enabled && cfg.Tracing.Endpoint != "",
-		AutoPromote:              autoPromote,
-		AutoPromoteThresholdDays: autoPromoteThresholdDays,
-		CoachMode:                coachMode,
-		Watchdog:                 cfg.Watchdog,
-		TaskTimeoutMinutes:       cfg.Orchestrator.TaskTimeoutMinutes,
+			LogJSON:                  effectiveLogJSON,
+			MultiAgent:               multiAgentMode,
+			PostReview:               postReview,
+			ConsensusN:               consensusN,
+			NoCodeContextInject:      noContextInject,
+			RequireApproval:          requireApproval,
+			SkipClarify:              effectiveSkipClarify,
+			AutoEval:                 autoEvalRun,
+			SlackWebhookURL:          cfg.Notify.SlackWebhook,
+			DiscordWebhookURL:        cfg.Notify.DiscordWebhook,
+			Hooks:                    buildHooksConfig(cfg.Hooks),
+			WorkDir:                  workdir,
+			Model:                    model,
+			MaxTokens:                effectiveMaxTokens,
+			Temperature:              effectiveTemperature,
+			TopP:                     effectiveTopP,
+			FrequencyPenalty:         effectiveFreqPenalty,
+			StepTimeout:              timeout,
+			Verbose:                  verbose,
+			DryRun:                   effectiveDryRun,
+			PlanOnly:                 effectivePlanOnly,
+			RetryFailed:              effectiveRetryFailed,
+			Replan:                   replan,
+			MaxFailures:              maxFailures,
+			ContextSteps:             contextSteps,
+			StepDelay:                delay,
+			StepsLimit:               runStepsLimit,
+			ProviderName:             providerName,
+			ProviderCfg:              provCfg,
+			TokenBudget:              tokenBudget,
+			CostLimit:                costLimit,
+			InnovateMode:             effectiveInnovate,
+			Parallel:                 parallelMode,
+			MaxParallel:              effectiveMaxParallel,
+			InjectContext:            injectContext,
+			AdaptiveReplan:           adaptiveReplan,
+			ReviewMode:               reviewMode,
+			Verify:                   verifyTasks,
+			MaxVerifyRetries:         maxVerifyRetries,
+			UseMemory:                useMemory,
+			Learn:                    learn,
+			MemoryLimit:              memoryLimit,
+			WebhookURL:               effectiveWebhookURL,
+			WebhookEvents:            effectiveWebhookEvents,
+			WebhookSecret:            effectiveWebhookSecret,
+			Streaming:                streamOutput,
+			Notify:                   notifyEnabled,
+			GitMode:                  gitMode,
+			WorktreeParallel:         worktreeParallel,
+			DiagnoseFailures:         diagnoseFailures,
+			ContextTokenLimit:        contextTokenLimit,
+			Optimize:                 optimizePlan,
+			OptimizeInteractive:      optimizeInteractive,
+			Metrics:                  runMetrics,
+			NoDedup:                  noDedup,
+			TagFilter:                runTags,
+			ScriptVerify:             scriptVerify,
+			AutoSplit:                autoSplit,
+			HealRetries:              healRetries,
+			NoHeal:                   noHeal,
+			RiskCheck:                riskCheck,
+			RiskForce:                riskForce,
+			Budget:                   cfg.Budget,
+			NotifyCfg:                cfg.Notify,
+			ClaudeCode:               cfg.ClaudeCode,
+			DocsUpdateOnComplete:     docsUpdateOnComplete,
+			DocsUpdateFile:           docsUpdateFile,
+			CalibrationFactor:        cfg.CalibrationFactor,
+			ExtendedThinking:         extendedThinking,
+			ThinkingBudget:           thinkingBudget,
+			TracingEnabled:           cfg.Tracing.Enabled && cfg.Tracing.Endpoint != "",
+			AutoPromote:              autoPromote,
+			AutoPromoteThresholdDays: autoPromoteThresholdDays,
+			CoachMode:                coachMode,
+			Watchdog:                 cfg.Watchdog,
+			TaskTimeoutMinutes:       cfg.Orchestrator.TaskTimeoutMinutes,
 		}
 
 		orc, err := orchestrator.New(orchCfg, prov)
@@ -534,12 +542,12 @@ func autoSelectProvider() string {
 // applyEnvOverrides applies CLOOP_* environment variables onto the config.
 // Env vars take precedence over config file values but are overridden by CLI flags.
 //
-//   CLOOP_PROVIDER            → config.Provider
-//   CLOOP_ANTHROPIC_API_KEY   → config.Anthropic.APIKey
-//   CLOOP_ANTHROPIC_BASE_URL  → config.Anthropic.BaseURL
-//   CLOOP_OPENAI_API_KEY      → config.OpenAI.APIKey
-//   CLOOP_OPENAI_BASE_URL     → config.OpenAI.BaseURL
-//   CLOOP_OLLAMA_BASE_URL     → config.Ollama.BaseURL
+//	CLOOP_PROVIDER            → config.Provider
+//	CLOOP_ANTHROPIC_API_KEY   → config.Anthropic.APIKey
+//	CLOOP_ANTHROPIC_BASE_URL  → config.Anthropic.BaseURL
+//	CLOOP_OPENAI_API_KEY      → config.OpenAI.APIKey
+//	CLOOP_OPENAI_BASE_URL     → config.OpenAI.BaseURL
+//	CLOOP_OLLAMA_BASE_URL     → config.Ollama.BaseURL
 func applyEnvOverrides(cfg *config.Config) {
 	if v := os.Getenv("CLOOP_PROVIDER"); v != "" {
 		cfg.Provider = v
@@ -676,6 +684,7 @@ func init() {
 	runCmd.Flags().BoolVar(&notifyEnabled, "notify", false, "Send OS desktop notifications on task done, task failed, and session complete (notify-send on Linux, osascript on macOS)")
 	runCmd.Flags().Float64Var(&costLimit, "cost-limit", 0, "Stop when estimated session cost reaches this USD amount (0 = unlimited); warns at 80%")
 	runCmd.Flags().BoolVar(&gitMode, "git", false, "PM mode: create a git branch per task, commit on done, leave branch on failure (sequential only)")
+	runCmd.Flags().BoolVar(&worktreeParallel, "worktree-parallel", false, "PM parallel mode: isolate each task in a git worktree under .cloop/worktrees/task-<id>/ and merge changes back via a serialized merge queue")
 	runCmd.Flags().BoolVar(&diagnoseFailures, "diagnose", false, "PM mode: run AI failure diagnosis on TASK_FAILED to analyze root cause and guide retries")
 	runCmd.Flags().IntVar(&contextTokenLimit, "context-tokens", 0, "Maximum estimated tokens for step/task-result history in prompts (0 = default 100000); prunes oldest entries when exceeded")
 	runCmd.Flags().BoolVar(&optimizePlan, "optimize", false, "PM mode: run AI plan optimizer before execution to suggest reordering, splits, merges, and flag issues")

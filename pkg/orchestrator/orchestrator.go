@@ -15,28 +15,28 @@ import (
 	goOtelAttr "go.opentelemetry.io/otel/attribute"
 
 	"github.com/blechschmidt/cloop/pkg/alert"
-	"github.com/blechschmidt/cloop/pkg/coach"
-	cloopdocs "github.com/blechschmidt/cloop/pkg/docs"
 	"github.com/blechschmidt/cloop/pkg/approvalgate"
-	clooptracing "github.com/blechschmidt/cloop/pkg/tracing"
 	"github.com/blechschmidt/cloop/pkg/artifact"
 	"github.com/blechschmidt/cloop/pkg/atomicfile"
 	"github.com/blechschmidt/cloop/pkg/budget"
 	"github.com/blechschmidt/cloop/pkg/checkpoint"
 	"github.com/blechschmidt/cloop/pkg/clarify"
+	"github.com/blechschmidt/cloop/pkg/coach"
 	"github.com/blechschmidt/cloop/pkg/condition"
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/consensus"
 	"github.com/blechschmidt/cloop/pkg/cost"
+	"github.com/blechschmidt/cloop/pkg/ctxedit"
+	"github.com/blechschmidt/cloop/pkg/diagnosis"
+	cloopdocs "github.com/blechschmidt/cloop/pkg/docs"
 	cloopenv "github.com/blechschmidt/cloop/pkg/env"
 	"github.com/blechschmidt/cloop/pkg/eval"
-	"github.com/blechschmidt/cloop/pkg/secret"
-	"github.com/blechschmidt/cloop/pkg/diagnosis"
 	cloopgit "github.com/blechschmidt/cloop/pkg/git"
 	"github.com/blechschmidt/cloop/pkg/hooks"
-	"github.com/blechschmidt/cloop/pkg/logger"
 	"github.com/blechschmidt/cloop/pkg/learning"
+	"github.com/blechschmidt/cloop/pkg/logger"
 	"github.com/blechschmidt/cloop/pkg/memory"
+	"github.com/blechschmidt/cloop/pkg/mergequeue"
 	"github.com/blechschmidt/cloop/pkg/metrics"
 	"github.com/blechschmidt/cloop/pkg/multiagent"
 	"github.com/blechschmidt/cloop/pkg/notify"
@@ -48,18 +48,20 @@ import (
 	"github.com/blechschmidt/cloop/pkg/provider"
 	"github.com/blechschmidt/cloop/pkg/provideraudit"
 	"github.com/blechschmidt/cloop/pkg/ratelimit"
-	"github.com/blechschmidt/cloop/pkg/reqid"
-	"github.com/blechschmidt/cloop/pkg/ctxedit"
 	"github.com/blechschmidt/cloop/pkg/replay"
+	"github.com/blechschmidt/cloop/pkg/reqid"
 	"github.com/blechschmidt/cloop/pkg/review"
 	"github.com/blechschmidt/cloop/pkg/risk"
 	"github.com/blechschmidt/cloop/pkg/router"
+	"github.com/blechschmidt/cloop/pkg/secret"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 	"github.com/blechschmidt/cloop/pkg/taskqueue"
+	clooptracing "github.com/blechschmidt/cloop/pkg/tracing"
 	"github.com/blechschmidt/cloop/pkg/verify"
 	"github.com/blechschmidt/cloop/pkg/watchdog"
 	"github.com/blechschmidt/cloop/pkg/webhook"
+	"github.com/blechschmidt/cloop/pkg/worktree"
 	"github.com/fatih/color"
 )
 
@@ -81,12 +83,12 @@ type Config struct {
 	// ThinkingBudget is the token budget for reasoning content (default 8000).
 	// See provider.Options.ThinkingBudget for per-provider semantics.
 	ThinkingBudget int
-	Verbose     bool
-	DryRun      bool
-	PMMode      bool
-	PlanOnly    bool // only decompose tasks, don't execute them
-	RetryFailed bool // retry failed tasks in PM mode
-	Replan      bool // force re-decompose goal (wipes existing plan, keeps history)
+	Verbose        bool
+	DryRun         bool
+	PMMode         bool
+	PlanOnly       bool // only decompose tasks, don't execute them
+	RetryFailed    bool // retry failed tasks in PM mode
+	Replan         bool // force re-decompose goal (wipes existing plan, keeps history)
 
 	// MaxFailures is the number of consecutive task failures before PM mode stops (0 = default 3).
 	MaxFailures int
@@ -187,6 +189,16 @@ type Config struct {
 	// On TASK_DONE the branch is committed and merged back to the original branch.
 	// On TASK_FAILED the branch is left open for inspection.
 	GitMode bool
+
+	// WorktreeParallel enables per-task git worktrees in PM parallel mode.
+	// When true and WorkDir is a git repo, each parallel task is executed in an
+	// isolated worktree at .cloop/worktrees/task-<id>/ on its own branch
+	// (cloop/task-<id>-<slug>). On TASK_DONE the worktree's changes are
+	// committed and a merge request is enqueued into a serialized merge queue
+	// that merges branches back into the original base branch one at a time,
+	// avoiding conflicts between concurrent tasks. On TASK_FAILED/skipped the
+	// worktree is removed but the branch is kept for inspection.
+	WorktreeParallel bool
 
 	// ContextTokenLimit is the maximum estimated token count for step/task-result history
 	// included in prompts. When the accumulated history exceeds this limit the orchestrator
@@ -393,18 +405,18 @@ type Config struct {
 }
 
 type Orchestrator struct {
-	config   Config
-	state    *state.ProjectState
-	provider provider.Provider
-	router   *router.Router // routes tasks to role-specific providers
-	memory   *memory.Memory
-	webhook  *webhook.Client
-	metrics  *metrics.Metrics
+	config      Config
+	state       *state.ProjectState
+	provider    provider.Provider
+	router      *router.Router // routes tasks to role-specific providers
+	memory      *memory.Memory
+	webhook     *webhook.Client
+	metrics     *metrics.Metrics
 	envVars     []cloopenv.Var
 	secretStore *secret.Store
 	log         logger.Logger
-	queue       *taskqueue.Queue // central work queue; nil-safe (Mark*/Enqueue tolerate nil)
-	statedb     *statedb.DB      // shared SQLite handle for forensics (stuck_tasks); nil-safe
+	queue       *taskqueue.Queue   // central work queue; nil-safe (Mark*/Enqueue tolerate nil)
+	statedb     *statedb.DB        // shared SQLite handle for forensics (stuck_tasks); nil-safe
 	watchdog    *watchdog.Watchdog // stuck-task detector; nil if disabled or queue/db unavailable
 }
 
@@ -432,6 +444,9 @@ func New(cfg Config, prov provider.Provider) (*Orchestrator, error) {
 	// and the cap is silently ignored.
 	if s.MaxParallel > 1 {
 		s.Parallel = true
+	}
+	if cfg.WorktreeParallel {
+		s.WorktreeParallel = true
 	}
 	// Persist CLI-driven overrides so the running loop's SyncFromDisk reads them
 	// back instead of overwriting the in-memory values from a stale on-disk state
@@ -1370,7 +1385,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			}
 			done, failed := s.Plan.CountByStatus()
 			o.webhook.Send(webhook.EventPlanComplete, webhook.Payload{
-				Goal: s.Goal,
+				Goal:     s.Goal,
 				Progress: &webhook.Progress{Done: done, Total: len(s.Plan.Tasks), Failed: failed},
 				Session: &webhook.SessionInfo{
 					TotalTasks:   len(s.Plan.Tasks),
@@ -1707,8 +1722,8 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		{
 			done, failed := s.Plan.CountByStatus()
 			o.webhook.Send(webhook.EventTaskStarted, webhook.Payload{
-				Goal: s.Goal,
-				Task: &webhook.TaskInfo{ID: task.ID, Title: task.Title, Description: task.Description, Status: "in_progress"},
+				Goal:     s.Goal,
+				Task:     &webhook.TaskInfo{ID: task.ID, Title: task.Title, Description: task.Description, Status: "in_progress"},
 				Progress: &webhook.Progress{Done: done, Total: len(s.Plan.Tasks), Failed: failed},
 				Session:  &webhook.SessionInfo{InputTokens: s.TotalInputTokens, OutputTokens: s.TotalOutputTokens},
 			})
@@ -2152,9 +2167,9 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 					Step:      s.CurrentStep,
 					Message:   fmt.Sprintf("Heal attempt %d/%d for task #%d", healAttempt, maxHealRetries, task.ID),
 				}, map[string]any{
-					"attempt":     healAttempt,
-					"max":         maxHealRetries,
-					"variant_id":  currentHealVariant.ID,
+					"attempt":    healAttempt,
+					"max":        maxHealRetries,
+					"variant_id": currentHealVariant.ID,
 				})
 
 				diag, diagErr := diagnosis.AnalyzeFailure(ctx, o.provider, s.Model, o.config.StepTimeout, task, taskOutput)
@@ -2951,13 +2966,13 @@ func (o *Orchestrator) recoverStaleQueueEntries() {
 
 // taskResult holds the output of a single parallel task execution.
 type taskResult struct {
-	task         *pm.Task
-	result       *provider.Result
-	err          error
-	duration     time.Duration
-	bufferedOut  string
-	timedOut     bool   // true when the task's per-task budget was exceeded
-	partialOut   string // partial output captured before timeout
+	task        *pm.Task
+	result      *provider.Result
+	err         error
+	duration    time.Duration
+	bufferedOut string
+	timedOut    bool   // true when the task's per-task budget was exceeded
+	partialOut  string // partial output captured before timeout
 }
 
 // parallelShutdownGracePeriod bounds how long runPMParallel will wait for
@@ -2993,6 +3008,46 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 	fmt.Printf("   Provider: %s\n", o.provider.Name())
 	fmt.Printf("   Goal: %s\n", s.Goal)
 	fmt.Println()
+
+	// Worktree-parallel mode: each task runs in an isolated git worktree under
+	// .cloop/worktrees/task-<id>/ and its changes are merged back to the base
+	// branch through a serialized merge queue. Disabled silently when WorkDir
+	// is not a git repo so non-git projects still work in parallel mode.
+	var (
+		mergeQ          *mergequeue.Queue
+		worktreeMode    bool
+		worktreeBase    string
+		activeWorktrees = map[int]*worktree.Worktree{}
+		worktreeMu      sync.Mutex
+	)
+	if o.config.WorktreeParallel {
+		if !worktree.IsGitRepo(o.config.WorkDir) {
+			dimColor.Printf("  worktree-parallel: %q is not a git repo — falling back to shared workdir.\n", o.config.WorkDir)
+		} else {
+			base, baseErr := cloopgit.CurrentBranch(o.config.WorkDir)
+			if baseErr != nil {
+				dimColor.Printf("  worktree-parallel: cannot resolve base branch (%v) — falling back to shared workdir.\n", baseErr)
+			} else {
+				worktreeMode = true
+				worktreeBase = base
+				mergeQ = mergequeue.New(o.config.WorkDir, worktreeBase)
+				mergeQ.Start(ctx)
+				dimColor.Printf("  worktree-parallel: ON (base=%s, merge queue running)\n", worktreeBase)
+				defer func() {
+					// Drain the merge queue before tearing down any remaining
+					// worktrees so in-flight merges always see their source
+					// branch's working dir on disk.
+					mergeQ.Stop()
+					worktreeMu.Lock()
+					for _, w := range activeWorktrees {
+						_ = w.Remove(o.config.WorkDir)
+					}
+					activeWorktrees = nil
+					worktreeMu.Unlock()
+				}()
+			}
+		}
+	}
 
 	// Replan / decompose phase (same as sequential).
 	if o.config.Replan && s.Plan != nil {
@@ -3172,7 +3227,7 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 				o.webhook.Send(webhook.EventPlanComplete, webhook.Payload{
 					Goal:     s.Goal,
 					Progress: &webhook.Progress{Done: done, Total: len(s.Plan.Tasks), Failed: failed},
-					Session:  &webhook.SessionInfo{
+					Session: &webhook.SessionInfo{
 						TotalTasks:   len(s.Plan.Tasks),
 						DoneTasks:    done,
 						FailedTasks:  failed,
@@ -3404,6 +3459,31 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 			prebuiltPrompts[i] = prompt
 		}
 
+		// Worktree-parallel: provision one isolated worktree per task before
+		// launching workers. Each task gets its own branch + filesystem path
+		// so concurrent edits do not overwrite each other. If creation fails
+		// for any task we skip worktree mode for that task only (the worker
+		// falls back to the shared WorkDir). taskWorkDirs[i] holds the path
+		// passed to the provider for ready[i].
+		taskWorkDirs := make([]string, len(ready))
+		for i := range ready {
+			taskWorkDirs[i] = o.config.WorkDir
+		}
+		if worktreeMode {
+			for i, t := range ready {
+				wt, wErr := worktree.Create(o.config.WorkDir, t)
+				if wErr != nil {
+					dimColor.Printf("  worktree create failed for task %d (%v) — using shared workdir\n", t.ID, wErr)
+					continue
+				}
+				taskWorkDirs[i] = wt.Path
+				worktreeMu.Lock()
+				activeWorktrees[t.ID] = wt
+				worktreeMu.Unlock()
+				dimColor.Printf("  worktree[task %d]: %s (branch %s)\n", t.ID, wt.Path, wt.Branch)
+			}
+		}
+
 		// Launch goroutines for each ready task and stream their results back
 		// through resultsCh as each one finishes (Task 20129) so a fast task's
 		// terminal status is persisted/broadcast immediately rather than after
@@ -3424,7 +3504,7 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 		var wg sync.WaitGroup
 		for i, task := range ready {
 			wg.Add(1)
-			go func(idx int, t *pm.Task, prompt string) {
+			go func(idx int, t *pm.Task, prompt string, workDir string) {
 				defer wg.Done()
 				// Send exactly one result whether the body completes normally
 				// or panics. The defer below runs in LIFO order before
@@ -3449,6 +3529,11 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 				// Use role-specific provider if configured.
 				taskProvider := o.router.For(t.Role)
 				opts, _ := o.makeOpts(s.Model, false) // no streaming in parallel
+				// Worktree-parallel: override the provider's working directory
+				// so file edits land in this task's isolated worktree instead
+				// of the shared project root. Falls through to o.config.WorkDir
+				// when worktree mode is off or creation failed for this task.
+				opts.WorkDir = workDir
 				// Apply per-task time budget in parallel mode.
 				tTaskCtx, tTaskCancel := o.taskContextWithTimeout(ctx, t)
 				defer tTaskCancel()
@@ -3470,7 +3555,7 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 				dur := time.Since(start)
 				timedOut := isTimeoutErr(tTaskCtx, err)
 				res = taskResult{task: t, result: result, err: err, duration: dur, timedOut: timedOut}
-			}(i, task, prebuiltPrompts[i])
+			}(i, task, prebuiltPrompts[i], taskWorkDirs[i])
 		}
 		// Closer: signal end-of-batch once every worker has emitted its
 		// result. Used by the cancellation path's grace-period drain.
@@ -3517,12 +3602,33 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 			if resIdx < len(queueIDs) {
 				parallelQueueID = queueIDs[resIdx]
 			}
+			// cleanupWorktree removes any active worktree for the given task
+			// without merging. Used on error/early-exit paths where the task
+			// did not produce a mergeable result. Branch ref is preserved so
+			// developers can still inspect partial work.
+			cleanupWorktree := func(taskID int) {
+				if !worktreeMode {
+					return
+				}
+				worktreeMu.Lock()
+				wt, ok := activeWorktrees[taskID]
+				if ok {
+					delete(activeWorktrees, taskID)
+				}
+				worktreeMu.Unlock()
+				if ok && wt != nil {
+					if rmErr := wt.Remove(o.config.WorkDir); rmErr != nil {
+						dimColor.Printf("  worktree remove task %d: %v\n", taskID, rmErr)
+					}
+				}
+			}
 			if res.err != nil {
 				if res.timedOut {
 					budgetMin := o.effectiveTaskBudgetMinutes(task)
 					color.New(color.FgYellow).Printf("⏱ Task %d timed out (%dm): %s\n", task.ID, budgetMin, task.Title)
 					o.handleTaskTimeout(ctx, s, task, res.partialOut, dimColor)
 					_ = o.queue.MarkFailed(parallelQueueID, fmt.Sprintf("timeout (%dm)", budgetMin))
+					cleanupWorktree(task.ID)
 					mu.Lock()
 					consecutiveErrors++
 					s.Save()
@@ -3538,6 +3644,7 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 				if provider.IsRetryBudgetExhausted(res.err) {
 					failColor.Printf("✗ Task %d: retry budget exhausted (parallel) — %v\n", task.ID, res.err)
 					_ = o.queue.MarkFailed(parallelQueueID, "retry budget exhausted")
+					cleanupWorktree(task.ID)
 					mu.Lock()
 					pm.AddAnnotation(task, "ai", fmt.Sprintf("Task failed: retry budget exhausted (parallel mode) — %s", truncate(res.err.Error(), 200)))
 					task.Status = pm.TaskFailed
@@ -3554,6 +3661,7 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 				}
 				failColor.Printf("✗ Provider error on task %d: %v\n", task.ID, res.err)
 				_ = o.queue.MarkFailed(parallelQueueID, truncate(res.err.Error(), 200))
+				cleanupWorktree(task.ID)
 				mu.Lock()
 				pm.AddAnnotation(task, "ai", fmt.Sprintf("Task failed: provider error (parallel mode) — %s", truncate(res.err.Error(), 200)))
 				task.Status = pm.TaskFailed
@@ -3578,6 +3686,7 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 			if result == nil || strings.TrimSpace(result.Output) == "" {
 				failColor.Printf("✗ Task %d: provider returned empty output\n", task.ID)
 				_ = o.queue.MarkFailed(parallelQueueID, "provider returned empty output")
+				cleanupWorktree(task.ID)
 				mu.Lock()
 				pm.AddAnnotation(task, "ai", fmt.Sprintf("Task re-queued: provider returned empty output (parallel mode, consecutive errors: %d/%d).", consecutiveErrors+1, maxConsecutiveErrors))
 				task.Status = pm.TaskPending
@@ -3768,6 +3877,48 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 				_ = o.queue.MarkSkipped(parallelQueueID, "AI emitted TASK_SKIPPED")
 			default:
 				_ = o.queue.MarkDone(parallelQueueID, stepSummaryLine(result.Output, 200))
+			}
+
+			// Worktree-parallel: commit changes and enqueue the merge for
+			// successful tasks; clean up worktree for any terminal status.
+			// The merge queue serializes merges so concurrent worktrees fan
+			// back into the base branch one at a time without races.
+			if worktreeMode {
+				worktreeMu.Lock()
+				wt, ok := activeWorktrees[task.ID]
+				worktreeMu.Unlock()
+				if ok && wt != nil {
+					switch task.Status {
+					case pm.TaskDone:
+						if _, cErr := wt.Commit(task); cErr != nil {
+							dimColor.Printf("  worktree commit task %d: %v\n", task.ID, cErr)
+						}
+						mr := mergeQ.Submit(mergequeue.Request{
+							Branch: wt.Branch,
+							TaskID: task.ID,
+							Title:  task.Title,
+						})
+						// Block on the merge so the next round's worktrees see
+						// the merged base. Submissions are FIFO inside the
+						// queue, so this preserves the requested ordering.
+						<-mr.Done
+						if mr.Err != nil {
+							dimColor.Printf("  worktree merge task %d: %v (branch %s left for manual resolution)\n", task.ID, mr.Err, wt.Branch)
+							pm.AddAnnotation(task, "ai", fmt.Sprintf("Worktree merge conflict: %s — branch %s preserved.", truncate(mr.Err.Error(), 200), wt.Branch))
+						} else {
+							dimColor.Printf("  worktree merged: %s → %s (task %d)\n", wt.Branch, worktreeBase, task.ID)
+						}
+					case pm.TaskFailed, pm.TaskSkipped:
+						dimColor.Printf("  worktree: keeping branch %s for inspection (task %s)\n", wt.Branch, task.Status)
+					}
+					// Always remove the on-disk worktree (branch ref survives).
+					if rmErr := wt.Remove(o.config.WorkDir); rmErr != nil {
+						dimColor.Printf("  worktree remove task %d: %v\n", task.ID, rmErr)
+					}
+					worktreeMu.Lock()
+					delete(activeWorktrees, task.ID)
+					worktreeMu.Unlock()
+				}
 			}
 
 			// Unified event journal — one terminal event per task outcome

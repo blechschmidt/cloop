@@ -54,6 +54,7 @@ type State struct {
 	InnovateMode      bool
 	Parallel          bool
 	MaxParallel       int
+	WorktreeParallel  bool
 	PlanOnly          bool
 	RetryFailed       bool
 	DryRun            bool
@@ -242,6 +243,7 @@ func (d *DB) saveStateLocked(s *State) error {
 		"innovate_mode":       boolStr(s.InnovateMode),
 		"parallel":            boolStr(s.Parallel),
 		"max_parallel":        strconv.Itoa(s.MaxParallel),
+		"worktree_parallel":   boolStr(s.WorktreeParallel),
 		"plan_only":           boolStr(s.PlanOnly),
 		"retry_failed":        boolStr(s.RetryFailed),
 		"dry_run":             boolStr(s.DryRun),
@@ -381,6 +383,7 @@ func (d *DB) loadStateMetaTx() (*State, error) {
 	s.InnovateMode = metaMap["innovate_mode"] == "1"
 	s.Parallel = metaMap["parallel"] == "1"
 	s.MaxParallel = atoi(metaMap["max_parallel"])
+	s.WorktreeParallel = metaMap["worktree_parallel"] == "1"
 	s.PlanOnly = metaMap["plan_only"] == "1"
 	s.RetryFailed = metaMap["retry_failed"] == "1"
 	s.DryRun = metaMap["dry_run"] == "1"
