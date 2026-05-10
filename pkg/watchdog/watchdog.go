@@ -360,6 +360,24 @@ func (w *Watchdog) handleStuck(now time.Time, t *pm.Task, artPath string, artMod
 			w.Logger.Warn(logger.EventTaskStuck, t.ID,
 				fmt.Sprintf("failed to persist stuck-task row: %v", err), nil)
 		}
+		// Record one row in the unified events journal too (Task 20118) so
+		// the Web UI's Event History panel surfaces stuck/killed tasks
+		// alongside other run events without having to merge stuck_tasks
+		// at read time.
+		evtMsg := fmt.Sprintf("Task #%d stuck for %s", t.ID, evt.StuckDuration)
+		evtType := statedb.EventType("task_stuck")
+		if willCancel {
+			evtType = statedb.EventTaskKilled
+			evtMsg = fmt.Sprintf("Task #%d killed by watchdog after %s", t.ID, evt.StuckDuration)
+		}
+		_ = w.DB.RecordEvent(statedb.EventRow{
+			Type:      evtType,
+			TaskID:    t.ID,
+			TaskTitle: t.Title,
+			Step:      -1,
+			Message:   evtMsg,
+			Details:   fmt.Sprintf(`{"stuck_for":%q,"auto_killed":%t,"artifact_idle_secs":%d}`, evt.StuckDuration, willCancel, idleSecs),
+		})
 	}
 
 	if w.OnStuck != nil {

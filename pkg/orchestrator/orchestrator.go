@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -45,6 +46,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/promptopt"
 	"github.com/blechschmidt/cloop/pkg/promptstats"
 	"github.com/blechschmidt/cloop/pkg/provider"
+	"github.com/blechschmidt/cloop/pkg/provideraudit"
 	"github.com/blechschmidt/cloop/pkg/ratelimit"
 	"github.com/blechschmidt/cloop/pkg/reqid"
 	"github.com/blechschmidt/cloop/pkg/ctxedit"
@@ -827,6 +829,48 @@ func (o *Orchestrator) AddSteps(n int) {
 	o.state.Save()
 }
 
+// logTaskOutcomeEvent appends one terminal event row to the events journal
+// reflecting the final task status. Best-effort: never returns an error.
+// Called from both the sequential and parallel PM loops (Task 20118).
+func (o *Orchestrator) logTaskOutcomeEvent(task *pm.Task, taskDur string, step int) {
+	if task == nil || o.config.WorkDir == "" {
+		return
+	}
+	var typ state.EventType
+	var msg string
+	switch task.Status {
+	case pm.TaskDone:
+		typ = state.EventTaskDone
+		msg = fmt.Sprintf("Task #%d completed in %s", task.ID, taskDur)
+	case pm.TaskFailed:
+		typ = state.EventTaskFailed
+		msg = fmt.Sprintf("Task #%d failed after %s", task.ID, taskDur)
+	case pm.TaskSkipped:
+		typ = state.EventTaskSkipped
+		msg = fmt.Sprintf("Task #%d skipped after %s", task.ID, taskDur)
+	case pm.TaskTimedOut:
+		typ = state.EventTaskKilled
+		msg = fmt.Sprintf("Task #%d timed out after %s", task.ID, taskDur)
+	default:
+		// Implicit-done and other terminal states use the done event.
+		typ = state.EventTaskDone
+		msg = fmt.Sprintf("Task #%d completed (implicit) in %s", task.ID, taskDur)
+	}
+	state.LogEventDetails(o.config.WorkDir, state.EventRow{
+		Type:      typ,
+		TaskID:    task.ID,
+		TaskTitle: task.Title,
+		Step:      step,
+		Message:   msg,
+	}, map[string]any{
+		"status":         string(task.Status),
+		"duration":       taskDur,
+		"heal_attempts":  task.HealAttempts,
+		"verify_retries": task.VerifyRetries,
+		"fail_count":     task.FailCount,
+	})
+}
+
 func (o *Orchestrator) SetAutoEvolve(enabled bool) {
 	o.state.AutoEvolve = enabled
 	o.state.Save()
@@ -889,7 +933,37 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	return o.runPM(ctx)
 }
 
-// runPM dispatches to sequential or parallel task execution based on config.
+// errSwitchMode is returned by the runPMSequential / runPMParallel loops when
+// a UI-driven mid-run toggle of the Parallel / MaxParallel state warrants
+// re-dispatching to the other execution mode. The dispatch loop in runPM
+// catches it and re-enters the appropriate handler without restarting cloop
+// (Task 20111: honour the parallelization setting at all times).
+var errSwitchMode = errors.New("orchestrator: switching execution mode")
+
+// wantParallel decides whether the PM loop should run in parallel mode based
+// on both the immutable CLI/config flag (o.config.Parallel) and the mutable
+// persisted state (s.Parallel / s.MaxParallel) that the Web UI updates. Either
+// signal is sufficient — once the user has expressed intent for concurrency,
+// either via flag or via UI toggle, the orchestrator obeys it.
+func (o *Orchestrator) wantParallel() bool {
+	if o.config.Parallel {
+		return true
+	}
+	if o.state == nil {
+		return false
+	}
+	if o.state.Parallel {
+		return true
+	}
+	// A configured cap > 1 is itself an unambiguous "I want parallel" signal —
+	// without this the dispatcher silently ignores a UI-set max-parallel of 4
+	// when the Parallel boolean was never flipped.
+	return o.state.MaxParallel > 1
+}
+
+// runPM dispatches to sequential or parallel task execution based on config
+// and state. It loops on errSwitchMode so a UI-driven toggle of the Parallel
+// flag mid-run triggers a re-dispatch instead of being silently ignored.
 func (o *Orchestrator) runPM(ctx context.Context) error {
 	// Root span for the entire PM run. All task_execute and provider_call spans
 	// are children of this span, providing causality and latency drill-down.
@@ -907,15 +981,22 @@ func (o *Orchestrator) runPM(ctx context.Context) error {
 		o.watchdog.Start(ctx)
 	}
 
-	var runErr error
-	if o.config.Parallel {
-		runErr = o.runPMParallel(ctx)
-	} else {
-		runErr = o.runPMSequential(ctx)
+	for {
+		var runErr error
+		if o.wantParallel() {
+			runErr = o.runPMParallel(ctx)
+		} else {
+			runErr = o.runPMSequential(ctx)
+		}
+		if errors.Is(runErr, errSwitchMode) {
+			color.New(color.FgMagenta, color.Bold).Printf("↻ Mode switch (parallel=%v, max_parallel=%d) — re-dispatching loop\n",
+				o.state.Parallel, o.state.MaxParallel)
+			continue
+		}
+		// Best-effort: surface any final stuck event count in the logs once the
+		// PM loop has unwound. Watchdog.Wait is invoked from Close().
+		return runErr
 	}
-	// Best-effort: surface any final stuck event count in the logs once the
-	// PM loop has unwound. Watchdog.Wait is invoked from Close().
-	return runErr
 }
 
 // runPMSequential runs PM tasks one at a time (original behaviour).
@@ -963,6 +1044,18 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 	})
 
 	o.webhook.Send(webhook.EventSessionStarted, webhook.Payload{Goal: s.Goal})
+	state.LogEventDetails(o.config.WorkDir, state.EventRow{
+		Type:    state.EventSessionStarted,
+		Message: "Run started",
+	}, map[string]any{
+		"goal":         s.Goal,
+		"provider":     o.provider.Name(),
+		"model":        s.Model,
+		"auto_evolve":  s.AutoEvolve,
+		"innovate":     s.InnovateMode,
+		"parallel":     s.Parallel,
+		"max_parallel": s.MaxParallel,
+	})
 
 	// If --replan requested, clear existing plan and force re-decomposition.
 	if o.config.Replan && s.Plan != nil {
@@ -1246,6 +1339,14 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 				s.Save()
 			}
 		}
+		// Mid-run mode switch: if the user enabled parallel mode (or set
+		// max_parallel > 1) via the Web UI while we were sequential, surrender
+		// so runPM can re-dispatch into runPMParallel without a process restart
+		// (Task 20111). We're at the top of the loop with no task in flight, so
+		// switching is safe — the next iteration starts fresh in the new mode.
+		if o.wantParallel() {
+			return errSwitchMode
+		}
 		if s.Plan.IsComplete() {
 			if !o.log.IsJSON() {
 				if s.AutoEvolve {
@@ -1279,6 +1380,15 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 					OutputTokens: s.TotalOutputTokens,
 					Duration:     time.Since(sessionStart).Round(time.Second).String(),
 				},
+			})
+			state.LogEventDetails(o.config.WorkDir, state.EventRow{
+				Type:    state.EventPlanComplete,
+				Message: fmt.Sprintf("All %d tasks complete", len(s.Plan.Tasks)),
+			}, map[string]any{
+				"total":    len(s.Plan.Tasks),
+				"done":     done,
+				"failed":   failed,
+				"duration": time.Since(sessionStart).Round(time.Second).String(),
 			})
 			if s.AutoEvolve {
 				s.Status = "evolving"
@@ -1603,6 +1713,16 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 				Session:  &webhook.SessionInfo{InputTokens: s.TotalInputTokens, OutputTokens: s.TotalOutputTokens},
 			})
 		}
+		state.LogEventDetails(o.config.WorkDir, state.EventRow{
+			Type:      state.EventTaskStarted,
+			TaskID:    task.ID,
+			TaskTitle: task.Title,
+			Step:      s.CurrentStep,
+			Message:   fmt.Sprintf("Task #%d started", task.ID),
+		}, map[string]any{
+			"priority": task.Priority,
+			"role":     task.Role,
+		})
 
 		// Build prompt with optional project context injection.
 		var projCtx *pm.ProjectContext
@@ -1832,7 +1952,10 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 					goOtelAttr.Int("task.priority", task.Priority),
 					goOtelAttr.String("task.role", string(task.Role)),
 				)
-				result, err := safeComplete(taskExecCtx, taskProvider, prompt, opts)
+				// Tag the call context with the active task so the provider
+				// audit log (Task 20105 / Task 20123) can correlate the row.
+				auditCtx := provideraudit.WithTaskContext(taskExecCtx, task.ID, task.Title)
+				result, err := safeComplete(auditCtx, taskProvider, prompt, opts)
 				taskExecSpan.End()
 				if liveFile != nil {
 					if err == nil && !wasStreamed() {
@@ -2021,6 +2144,17 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 				o.log.Warn(logger.EventHeal, task.ID, "heal attempt", map[string]interface{}{
 					"attempt": healAttempt,
 					"max":     maxHealRetries,
+				})
+				state.LogEventDetails(o.config.WorkDir, state.EventRow{
+					Type:      state.EventTaskHeal,
+					TaskID:    task.ID,
+					TaskTitle: task.Title,
+					Step:      s.CurrentStep,
+					Message:   fmt.Sprintf("Heal attempt %d/%d for task #%d", healAttempt, maxHealRetries, task.ID),
+				}, map[string]any{
+					"attempt":     healAttempt,
+					"max":         maxHealRetries,
+					"variant_id":  currentHealVariant.ID,
 				})
 
 				diag, diagErr := diagnosis.AnalyzeFailure(ctx, o.provider, s.Model, o.config.StepTimeout, task, taskOutput)
@@ -2510,6 +2644,9 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			// to match the plan-task accounting above.
 			_ = o.queue.MarkDone(queueID, stepSummaryLine(taskOutput, 200))
 		}
+
+		// Unified event journal — one terminal event per task outcome (Task 20118).
+		o.logTaskOutcomeEvent(task, taskDur, s.CurrentStep)
 
 		// Record task outcome into metrics.
 		if o.metrics != nil && task.StartedAt != nil {
@@ -3006,6 +3143,14 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 				s.Save()
 			}
 		}
+		// Mid-run mode switch: if the user disabled parallel mode (and lowered
+		// max_parallel back to ≤1) via the Web UI, surrender so runPM can
+		// re-dispatch into runPMSequential without a process restart
+		// (Task 20111). Safe at the top of the loop with no batch in flight.
+		// CLI flag wins — if --parallel was passed, stay parallel.
+		if !o.config.Parallel && !o.wantParallel() {
+			return errSwitchMode
+		}
 		if s.Plan.IsComplete() {
 			if s.AutoEvolve {
 				successColor.Printf("🎉 All tasks complete! Auto-evolve enabled — discovering more work.\n")
@@ -3172,6 +3317,9 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 		// Apply worker pool limit: cap the batch to MaxParallel if set.
 		// Read from live state (refreshed via SyncFromDisk above) so UI changes
 		// to max-parallel take effect on the next iteration without a restart.
+		// readyTotal is preserved for the launch-summary log so the operator
+		// can see how many tasks were eligible vs. actually launched.
+		readyTotal := len(ready)
 		maxParallel := s.MaxParallel
 		if maxParallel > 0 && len(ready) > maxParallel {
 			ready = ready[:maxParallel]
@@ -3197,13 +3345,31 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 			if o.metrics != nil {
 				o.metrics.RecordTaskStarted()
 			}
+			state.LogEventDetails(o.config.WorkDir, state.EventRow{
+				Type:      state.EventTaskStarted,
+				TaskID:    t.ID,
+				TaskTitle: t.Title,
+				Step:      s.CurrentStep,
+				Message:   fmt.Sprintf("Task #%d started (parallel)", t.ID),
+			}, map[string]any{
+				"priority": t.Priority,
+				"role":     t.Role,
+				"parallel": true,
+			})
 		}
 		s.Save()
 
 		if len(ready) == 1 {
-			stepColor.Printf("━━━ Task %d/%d: %s ━━━\n", ready[0].ID, len(s.Plan.Tasks), ready[0].Title)
+			// One ready task may mean a 1-deep chain or simply that no other
+			// tasks were unblocked. Surface readyTotal/cap so the operator can
+			// distinguish "parallelism not triggered" from "parallelism broken".
+			suffix := ""
+			if readyTotal > 1 || maxParallel > 0 {
+				suffix = fmt.Sprintf("  (ready=%d, cap=%d)", readyTotal, maxParallel)
+			}
+			stepColor.Printf("━━━ Task %d/%d: %s%s ━━━\n", ready[0].ID, len(s.Plan.Tasks), ready[0].Title, suffix)
 		} else {
-			stepColor.Printf("━━━ Running %d tasks in parallel ━━━\n", len(ready))
+			stepColor.Printf("━━━ Running %d tasks in parallel  (ready=%d, cap=%d) ━━━\n", len(ready), readyTotal, maxParallel)
 			for _, t := range ready {
 				dimColor.Printf("   • Task %d: %s\n", t.ID, t.Title)
 			}
@@ -3262,7 +3428,9 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 				// per-tick sweep drops cancels for tasks no longer
 				// in_progress, so no explicit Unregister is required here.
 				o.watchdog.Register(t.ID, tTaskCancel)
-				result, err := safeComplete(tTaskCtx, taskProvider, prompt, opts)
+				// Tag context for the audit log so the call lands against this task.
+				tAuditCtx := provideraudit.WithTaskContext(tTaskCtx, t.ID, t.Title)
+				result, err := safeComplete(tAuditCtx, taskProvider, prompt, opts)
 				// Write live artifact for parallel task (non-streaming).
 				if err == nil {
 					if lf, lfErr := artifact.OpenLiveArtifact(o.config.WorkDir, t.ID); lfErr == nil {
@@ -3561,6 +3729,12 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 			default:
 				_ = o.queue.MarkDone(parallelQueueID, stepSummaryLine(result.Output, 200))
 			}
+
+			// Unified event journal — one terminal event per task outcome (Task 20118).
+			mu.Lock()
+			parallelStep := s.CurrentStep
+			mu.Unlock()
+			o.logTaskOutcomeEvent(task, taskDur, parallelStep)
 
 			// Record task outcome into metrics.
 			if o.metrics != nil && task.StartedAt != nil {
@@ -3867,6 +4041,13 @@ func (o *Orchestrator) evolvePM(ctx context.Context) (int, error) {
 
 	evolveColor.Printf("━━━ Evolve #%d — Discovering new tasks ━━━\n", s.EvolveStep)
 	dimColor.Printf("→ Asking AI for improvement ideas...\n")
+	state.LogEventDetails(o.config.WorkDir, state.EventRow{
+		Type:    state.EventEvolveRoundStart,
+		Message: fmt.Sprintf("Evolve round #%d started", s.EvolveStep),
+	}, map[string]any{
+		"evolve_step": s.EvolveStep,
+		"innovate":    s.InnovateMode,
+	})
 
 	// Central queue: every evolve cycle is recorded as work, even when it
 	// discovers zero new tasks. Failures in the discovery call still consume
@@ -3913,6 +4094,10 @@ func (o *Orchestrator) evolvePM(ctx context.Context) (int, error) {
 	if len(newTasks) == 0 {
 		_ = o.queue.MarkDone(evolveQueueID, "no new tasks discovered")
 		dimColor.Printf("  No new tasks discovered — project is fully evolved.\n")
+		state.LogEventDetails(o.config.WorkDir, state.EventRow{
+			Type:    state.EventEvolveNoOp,
+			Message: fmt.Sprintf("Evolve round #%d found no new tasks", s.EvolveStep),
+		}, map[string]any{"evolve_step": s.EvolveStep})
 		s.Save()
 		return 0, nil
 	}
@@ -3935,6 +4120,10 @@ func (o *Orchestrator) evolvePM(ctx context.Context) (int, error) {
 	if len(newTasks) == 0 {
 		_ = o.queue.MarkDone(evolveQueueID, "all candidates were duplicates")
 		dimColor.Printf("  No novel tasks after deduplication — project is fully evolved.\n")
+		state.LogEventDetails(o.config.WorkDir, state.EventRow{
+			Type:    state.EventEvolveNoOp,
+			Message: fmt.Sprintf("Evolve round #%d: all candidates duplicates", s.EvolveStep),
+		}, map[string]any{"evolve_step": s.EvolveStep})
 		s.Save()
 		return 0, nil
 	}
@@ -3952,6 +4141,20 @@ func (o *Orchestrator) evolvePM(ctx context.Context) (int, error) {
 			OutputTokens:  s.TotalOutputTokens,
 		},
 	})
+	{
+		titles := make([]string, 0, len(newTasks))
+		for _, t := range newTasks {
+			titles = append(titles, fmt.Sprintf("#%d %s", t.ID, t.Title))
+		}
+		state.LogEventDetails(o.config.WorkDir, state.EventRow{
+			Type:    state.EventEvolveDiscovered,
+			Message: fmt.Sprintf("Evolve round #%d discovered %d new task(s)", s.EvolveStep, len(newTasks)),
+		}, map[string]any{
+			"evolve_step": s.EvolveStep,
+			"count":       len(newTasks),
+			"titles":      titles,
+		})
+	}
 
 	evolveColor.Printf("  Discovered %d new task(s):\n", len(newTasks))
 	for _, t := range newTasks {

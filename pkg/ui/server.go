@@ -44,6 +44,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/statedb"
 	"github.com/blechschmidt/cloop/pkg/suggest"
 	"github.com/blechschmidt/cloop/pkg/taskqueue"
+	"github.com/blechschmidt/cloop/pkg/taskreplay"
 	"github.com/blechschmidt/cloop/pkg/timeline"
 )
 
@@ -815,6 +816,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/steps", s.handleSteps)
 	mux.HandleFunc("/api/ws", s.handleWS)
 	mux.HandleFunc("/api/events", s.handleEvents)
+	mux.HandleFunc("/api/event-history", s.handleEventHistory)
 
 	// Run controls
 	mux.HandleFunc("/api/run", s.handleRun)
@@ -898,6 +900,11 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	// Central work queue (every PM task, heal retry, evolve cycle, external merge)
 	mux.HandleFunc("GET /api/queue", s.handleQueue)
 	mux.HandleFunc("GET /api/queue/stats", s.handleQueueStats)
+
+	// Task replay history (deterministic re-execution against alternate provider/model)
+	mux.HandleFunc("GET /api/replay-runs", s.handleReplayRunsList)
+	mux.HandleFunc("GET /api/replay-runs/{id}", s.handleReplayRunGet)
+	mux.HandleFunc("POST /api/replay-runs", s.handleReplayRunCreate)
 
 	// System-level resource usage (CPU, memory, disk, fds, goroutines)
 	mux.HandleFunc("GET /api/resources", s.handleResources)
@@ -1759,6 +1766,130 @@ func (s *Server) handleSteps(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleEventHistory returns the unified event journal (Task 20118) merged
+// with the steps table, latest-first, with pagination. Each entry has:
+//
+//	id          unique within the merged feed (positive = step, negative = event)
+//	kind        "step" | event_type ("task_started", "evolve_discovered", ...)
+//	timestamp   ISO-8601
+//	task_id     0 when not task-bound
+//	task_title  may be empty
+//	step        step number when kind="step"; -1 otherwise
+//	message     short, human-readable summary
+//	output      step output (kind="step" only)
+//	exit_code   step exit code (kind="step" only)
+//	duration    step duration (kind="step" only)
+//	details     JSON blob (event-only; may be empty)
+//
+// GET /api/event-history?offset=0&limit=50 → {entries:[...], total:N, offset:O, limit:L}
+func (s *Server) handleEventHistory(w http.ResponseWriter, r *http.Request) {
+	const (
+		defaultLimit = 50
+		maxLimit     = 500
+	)
+	workDir := s.resolveWorkDir(r)
+	ps, err := state.Load(workDir)
+	if err != nil {
+		jsonErr(w, "no cloop project found", http.StatusNotFound)
+		return
+	}
+	q := r.URL.Query()
+	offset := 0
+	if v := q.Get("offset"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			offset = n
+		}
+	}
+	limit := defaultLimit
+	if v := q.Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	if limit > maxLimit {
+		limit = maxLimit
+	}
+
+	type entry struct {
+		ID        int64       `json:"id"`
+		Kind      string      `json:"kind"`
+		Timestamp time.Time   `json:"timestamp"`
+		TaskID    int         `json:"task_id,omitempty"`
+		TaskTitle string      `json:"task_title,omitempty"`
+		Step      int         `json:"step,omitempty"`
+		Message   string      `json:"message,omitempty"`
+		Output    string      `json:"output,omitempty"`
+		ExitCode  int         `json:"exit_code,omitempty"`
+		Duration  string      `json:"duration,omitempty"`
+		Details   interface{} `json:"details,omitempty"`
+	}
+
+	// Build the full merged sequence in memory, then page it. The two streams
+	// are typically dwarfed by step count, so we walk both, sort by time desc,
+	// and slice. This keeps the SQLite queries simple and is fast enough for
+	// the projects we expect — under ~20k combined rows.
+	merged := make([]entry, 0, len(ps.Steps)+8)
+	for _, st := range ps.Steps {
+		merged = append(merged, entry{
+			// Step IDs are step+1 to keep them positive and stable across runs.
+			ID:        int64(st.Step) + 1,
+			Kind:      "step",
+			Timestamp: st.Time,
+			Step:      st.Step,
+			Message:   st.Task,
+			Output:    st.Output,
+			ExitCode:  st.ExitCode,
+			Duration:  st.Duration,
+		})
+	}
+	// Pull the entire events page; we already cap merged size by paging below.
+	// Pull at most a safe upper bound so we don't read a runaway row count.
+	const maxEventsRead = 5000
+	rows, _, evErr := state.ListEvents(workDir, 0, maxEventsRead)
+	if evErr == nil {
+		for _, ev := range rows {
+			var det interface{}
+			if ev.Details != "" {
+				_ = json.Unmarshal([]byte(ev.Details), &det)
+			}
+			merged = append(merged, entry{
+				// Event IDs are negated so they cannot collide with step IDs.
+				ID:        -ev.ID,
+				Kind:      string(ev.Type),
+				Timestamp: ev.Timestamp,
+				TaskID:    ev.TaskID,
+				TaskTitle: ev.TaskTitle,
+				Step:      ev.Step,
+				Message:   ev.Message,
+				Details:   det,
+			})
+		}
+	}
+
+	// Sort latest-first. Stable so that events with identical timestamps keep
+	// their relative insertion order (events table is monotonically inserted).
+	sort.SliceStable(merged, func(i, j int) bool {
+		return merged[i].Timestamp.After(merged[j].Timestamp)
+	})
+
+	total := len(merged)
+	start := offset
+	if start > total {
+		start = total
+	}
+	end := start + limit
+	if end > total {
+		end = total
+	}
+
+	jsonOK(w, map[string]interface{}{
+		"entries": merged[start:end],
+		"total":   total,
+		"offset":  offset,
+		"limit":   limit,
+	})
+}
+
 // handleGetTasks returns tasks filtered by query params: q, status (csv), tags (csv), assignee, priority (1-4).
 // GET /api/tasks?q=text&status=pending,in_progress&tags=backend&assignee=alice&priority=1
 func (s *Server) handleGetTasks(w http.ResponseWriter, r *http.Request) {
@@ -2599,6 +2730,13 @@ func (s *Server) handleTaskAdd(w http.ResponseWriter, r *http.Request) {
 		})
 		s.broadcastToProject(addWorkDir, wsMessage{Type: "task_added", Data: addRaw})
 	}
+	// Unified event journal (Task 20118).
+	state.LogEvent(addWorkDir, state.EventRow{
+		Type:      state.EventTaskAdded,
+		TaskID:    task.ID,
+		TaskTitle: task.Title,
+		Message:   fmt.Sprintf("Task #%d added via UI: %s", task.ID, task.Title),
+	})
 
 	jsonOK(w, map[string]interface{}{"ok": true, "task": task})
 }
@@ -2641,10 +2779,19 @@ func (s *Server) handleTaskStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	oldStatus := string(task.Status)
 	task.Status = newStatus
 	if err := ps.SaveDirect(); err != nil {
 		jsonErr(w, "save failed: "+err.Error(), statedb.HTTPStatus(err))
 		return
+	}
+	if oldStatus != req.Status {
+		state.LogEventDetails(s.resolveWorkDir(r), state.EventRow{
+			Type:      state.EventTaskStatusChange,
+			TaskID:    req.ID,
+			TaskTitle: task.Title,
+			Message:   fmt.Sprintf("Task #%d status changed: %s → %s (via UI)", req.ID, oldStatus, req.Status),
+		}, map[string]any{"old_status": oldStatus, "new_status": req.Status})
 	}
 	jsonOK(w, map[string]interface{}{"ok": true, "id": req.ID, "status": req.Status})
 }
@@ -2939,6 +3086,7 @@ func (s *Server) handleDeleteTask(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	// idx is guaranteed non-negative: RequireTask verified the task above.
+	deletedTitle := ps.Plan.Tasks[idx].Title
 
 	ps.Plan.Tasks = append(ps.Plan.Tasks[:idx], ps.Plan.Tasks[idx+1:]...)
 	if err := ps.SaveDirect(); err != nil {
@@ -2955,6 +3103,12 @@ func (s *Server) handleDeleteTask(w http.ResponseWriter, r *http.Request) {
 		})
 		s.broadcastToProject(workDir2, wsMessage{Type: "task_deleted", Data: delRaw})
 	}
+	state.LogEvent(workDir2, state.EventRow{
+		Type:      state.EventTaskDeleted,
+		TaskID:    id,
+		TaskTitle: deletedTitle,
+		Message:   fmt.Sprintf("Task #%d deleted via UI", id),
+	})
 
 	jsonOK(w, map[string]bool{"ok": true})
 }
@@ -3117,6 +3271,7 @@ func (s *Server) handleTaskDetails(w http.ResponseWriter, r *http.Request) {
 	}
 
 	jsonOK(w, map[string]interface{}{
+		"ok":                  true,
 		"task":                task,
 		"artifact_body":       artifactBody,
 		"artifact_truncated":  artifactTruncated,
@@ -4309,6 +4464,236 @@ func (s *Server) handleQueueStats(w http.ResponseWriter, r *http.Request) {
 		"skipped": stats[taskqueue.StatusSkipped],
 	}
 	jsonOK(w, out)
+}
+
+// replayRunSummary is the wire-format of one replay row in a list response.
+// Long fields (prompt, outputs) are omitted from the list to keep payloads
+// small; the detail endpoint returns the full row.
+type replayRunSummary struct {
+	ID                   int64   `json:"id"`
+	CreatedAt            string  `json:"created_at"`
+	TaskID               int     `json:"task_id"`
+	TaskTitle            string  `json:"task_title"`
+	OriginalProvider     string  `json:"original_provider"`
+	OriginalModel        string  `json:"original_model"`
+	TargetProvider       string  `json:"target_provider"`
+	TargetModel          string  `json:"target_model"`
+	SimilarityScore      float64 `json:"similarity_score"`
+	EquivalenceScore     int     `json:"equivalence_score"`
+	EquivalenceRationale string  `json:"equivalence_rationale,omitempty"`
+	DurationMS           int64   `json:"duration_ms"`
+	InputTokens          int     `json:"input_tokens"`
+	OutputTokens         int     `json:"output_tokens"`
+	Error                string  `json:"error,omitempty"`
+}
+
+// handleReplayRunsList returns the replay history for the project.
+// Optional ?task_id=N filters to one task; ?limit=N caps the result count
+// (default 100, max 500).
+func (s *Server) handleReplayRunsList(w http.ResponseWriter, r *http.Request) {
+	workDir := s.resolveWorkDir(r)
+
+	taskID := 0
+	if v := r.URL.Query().Get("task_id"); v != "" {
+		if id, err := strconv.Atoi(v); err == nil && id > 0 {
+			taskID = id
+		}
+	}
+	limit := 100
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			if n > 500 {
+				n = 500
+			}
+			limit = n
+		}
+	}
+
+	rows, err := taskreplay.ListRuns(workDir, taskID, limit)
+	if err != nil {
+		jsonErr(w, "list replay runs: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	out := make([]replayRunSummary, 0, len(rows))
+	for _, run := range rows {
+		out = append(out, replayRunSummary{
+			ID:                   run.ID,
+			CreatedAt:            run.CreatedAt.Format(time.RFC3339),
+			TaskID:               run.TaskID,
+			TaskTitle:            run.TaskTitle,
+			OriginalProvider:     run.OriginalProvider,
+			OriginalModel:        run.OriginalModel,
+			TargetProvider:       run.TargetProvider,
+			TargetModel:          run.TargetModel,
+			SimilarityScore:      run.SimilarityScore,
+			EquivalenceScore:     run.EquivalenceScore,
+			EquivalenceRationale: run.EquivalenceRationale,
+			DurationMS:           run.DurationMS,
+			InputTokens:          run.InputTokens,
+			OutputTokens:         run.OutputTokens,
+			Error:                run.Error,
+		})
+	}
+	jsonOK(w, map[string]interface{}{"runs": out, "count": len(out)})
+}
+
+// handleReplayRunGet returns a single replay row including the full prompt,
+// original output, and replayed output for the side-by-side diff view.
+func (s *Server) handleReplayRunGet(w http.ResponseWriter, r *http.Request) {
+	workDir := s.resolveWorkDir(r)
+	idStr := r.PathValue("id")
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil || id <= 0 {
+		jsonErr(w, "invalid replay id", http.StatusBadRequest)
+		return
+	}
+	run, err := taskreplay.GetRun(workDir, id)
+	if err != nil {
+		jsonErr(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	jsonOK(w, map[string]interface{}{
+		"id":                    run.ID,
+		"created_at":            run.CreatedAt.Format(time.RFC3339),
+		"task_id":               run.TaskID,
+		"task_title":            run.TaskTitle,
+		"original_provider":     run.OriginalProvider,
+		"original_model":        run.OriginalModel,
+		"target_provider":       run.TargetProvider,
+		"target_model":          run.TargetModel,
+		"prompt":                run.Prompt,
+		"original_output":       run.OriginalOutput,
+		"replayed_output":       run.ReplayedOutput,
+		"similarity_score":      run.SimilarityScore,
+		"equivalence_score":     run.EquivalenceScore,
+		"equivalence_rationale": run.EquivalenceRationale,
+		"duration_ms":           run.DurationMS,
+		"input_tokens":          run.InputTokens,
+		"output_tokens":         run.OutputTokens,
+		"error":                 run.Error,
+	})
+}
+
+// handleReplayRunCreate triggers a new replay and returns the result.
+// Body: {"task_id": 42, "provider": "anthropic", "model": "claude-opus-4-5",
+//        "judge": "anthropic:claude-opus-4-5"}
+//
+// The replay is performed synchronously: this can take minutes for slow
+// providers, so the request timeout should be generous (the per-call timeout
+// is 5 minutes by default).
+func (s *Server) handleReplayRunCreate(w http.ResponseWriter, r *http.Request) {
+	workDir := s.resolveWorkDir(r)
+
+	var req struct {
+		TaskID    int    `json:"task_id"`
+		Provider  string `json:"provider"`
+		Model     string `json:"model"`
+		Judge     string `json:"judge"`     // "<provider>:<model>" or empty
+		MaxTokens int    `json:"max_tokens"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonErr(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.TaskID <= 0 {
+		jsonErr(w, "task_id is required", http.StatusBadRequest)
+		return
+	}
+	if req.Provider == "" {
+		jsonErr(w, "provider is required", http.StatusBadRequest)
+		return
+	}
+
+	cfg, err := config.Load(workDir)
+	if err != nil {
+		jsonErr(w, "load config: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	target, err := buildReplayProvider(cfg, req.Provider)
+	if err != nil {
+		jsonErr(w, "build target provider: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	var (
+		judge      provider.Provider
+		judgeModel string
+	)
+	if req.Judge != "" {
+		jName, jModel, ok := splitProviderModelToken(req.Judge)
+		if !ok {
+			jsonErr(w, "judge must be 'provider:model'", http.StatusBadRequest)
+			return
+		}
+		judge, err = buildReplayProvider(cfg, jName)
+		if err != nil {
+			jsonErr(w, "build judge provider: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		judgeModel = jModel
+	}
+
+	// Generous timeout for the synchronous call; the underlying provider
+	// honours ctx, so request cancellation propagates naturally.
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
+	defer cancel()
+
+	res, err := taskreplay.ReplayTask(ctx, workDir, req.TaskID, taskreplay.Options{
+		Target:      target,
+		TargetName:  req.Provider,
+		TargetModel: req.Model,
+		MaxTokens:   req.MaxTokens,
+		Timeout:     5 * time.Minute,
+		Judge:       judge,
+		JudgeModel:  judgeModel,
+	})
+	if err != nil {
+		jsonErr(w, "replay: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	jsonOK(w, map[string]interface{}{
+		"task_id":               res.TaskID,
+		"task_title":            res.TaskTitle,
+		"original_provider":     res.OriginalProvider,
+		"original_model":        res.OriginalModel,
+		"target_provider":       res.TargetProvider,
+		"target_model":          res.TargetModel,
+		"similarity_score":      res.SimilarityScore,
+		"equivalence_score":     res.EquivalenceScore,
+		"equivalence_rationale": res.EquivalenceRationale,
+		"duration_ms":           res.Duration.Milliseconds(),
+		"input_tokens":          res.InputTokens,
+		"output_tokens":         res.OutputTokens,
+		"error":                 res.Err,
+	})
+}
+
+// buildReplayProvider mirrors cmd/task_replay.go's helper but lives in the
+// ui package to avoid an import cycle with cmd.
+func buildReplayProvider(cfg *config.Config, name string) (provider.Provider, error) {
+	if name == "" {
+		return nil, errors.New("provider name required")
+	}
+	provCfg := provider.ProviderConfig{
+		Name:             name,
+		AnthropicAPIKey:  cfg.Anthropic.APIKey,
+		AnthropicBaseURL: cfg.Anthropic.BaseURL,
+		OpenAIAPIKey:     cfg.OpenAI.APIKey,
+		OpenAIBaseURL:    cfg.OpenAI.BaseURL,
+		OllamaBaseURL:    cfg.Ollama.BaseURL,
+	}
+	return provider.Build(provCfg)
+}
+
+// splitProviderModelToken parses "<provider>:<model>" into its parts.
+func splitProviderModelToken(s string) (string, string, bool) {
+	i := strings.Index(s, ":")
+	if i <= 0 || i == len(s)-1 {
+		return "", "", false
+	}
+	return s[:i], s[i+1:], true
 }
 
 // handleResources serves a resources.Snapshot for the resolved project plus
@@ -7289,6 +7674,7 @@ const dashboardHTML = `<!DOCTYPE html>
       <button class="tab-btn"        onclick="switchTab('analytics')" id="tbtn-analytics"  title="Analytics dashboard (per-project)">Analytics</button>
       <button class="tab-btn"        onclick="switchTab('chat')"      id="tbtn-chat"       title="AI chat (per-project)">Chat</button>
       <button class="tab-btn"        onclick="switchTab('assistant')" id="tbtn-assistant"  title="Plan assistant (per-project)">Assistant</button>
+      <button class="tab-btn"        onclick="switchTab('replay')"    id="tbtn-replay"     title="Re-execute completed tasks against alternate provider/model and diff outputs (per-project)">Replay</button>
       <span class="tab-divider" aria-hidden="true"></span>
       <span class="tab-section-label" title="These tabs apply across all projects (global configuration)">Global</span>
       <button class="tab-btn global-tab" onclick="switchTab('projects')"  id="tbtn-projects" title="All projects list (global)">Projects</button>
@@ -7378,6 +7764,7 @@ const dashboardHTML = `<!DOCTYPE html>
       <button class="m-tab-btn" onclick="switchTab('analytics')" id="mtbtn-analytics"><span class="m-tab-icon">&#128200;</span>Analytics</button>
       <button class="m-tab-btn" onclick="switchTab('chat')"      id="mtbtn-chat"><span class="m-tab-icon">&#128172;</span>Chat</button>
       <button class="m-tab-btn" onclick="switchTab('assistant')" id="mtbtn-assistant"><span class="m-tab-icon">&#129302;</span>Assistant</button>
+      <button class="m-tab-btn" onclick="switchTab('replay')"    id="mtbtn-replay"><span class="m-tab-icon">&#9851;</span>Replay</button>
       <div class="mobile-nav-section-label">Global</div>
       <button class="m-tab-btn" onclick="switchTab('projects')"  id="mtbtn-projects"><span class="m-tab-icon">&#127760;</span>Projects</button>
       <button class="m-tab-btn" onclick="switchTab('budget')"    id="mtbtn-budget"><span class="m-tab-icon">&#127760;</span>Budget</button>
@@ -7644,11 +8031,14 @@ const dashboardHTML = `<!DOCTYPE html>
           <div class="live-output-box" id="liveOutputBox" role="log" aria-live="polite" aria-label="Live run output"></div>
         </div>
 
-        <!-- Step history -->
+        <!-- Event history (Task 20118): step results merged with task starts,
+             evolves, kills, skips, status changes, etc. The DOM id remains
+             "stepList" so existing CSS keeps working; the renderer now paints
+             both kinds of rows. -->
         <div class="section">
-          <div class="section-title">Step History</div>
+          <div class="section-title">Event History</div>
           <div class="step-list" id="stepList">
-            <div class="empty-state"><h3>No steps yet</h3><p>Start a run to see history here.</p></div>
+            <div class="empty-state"><h3>No events yet</h3><p>Start a run to see history here.</p></div>
           </div>
         </div>
       </div>
@@ -8019,6 +8409,62 @@ const dashboardHTML = `<!DOCTYPE html>
             <svg viewBox="0 0 16 16" fill="currentColor" width="13" height="13"><path d="M15.854.146a.5.5 0 0 1 .11.54l-5.819 14.547a.75.75 0 0 1-1.329.124l-3.178-4.995L.643 7.184a.75.75 0 0 1 .124-1.33L15.314.037a.5.5 0 0 1 .54.11z"/></svg>
             Send
           </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══════════════════════════════════════════════════════════ REPLAY -->
+    <div id="tab-replay" class="tab-panel">
+      <div class="section">
+        <div class="section-title">&#9851; Task Replay</div>
+        <div style="font-size:12px;color:var(--text-dim);margin-bottom:12px;">
+          Re-execute a completed task against a different provider/model and compare the output.
+          Useful for validating model upgrades, comparing providers, and A/B testing prompt changes.
+        </div>
+
+        <div style="display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap;align-items:center">
+          <select id="replayTaskSel" class="form-input" style="max-width:340px"></select>
+          <input id="replayProvider" class="form-input" placeholder="provider (e.g. anthropic)" style="max-width:170px"/>
+          <input id="replayModel" class="form-input" placeholder="model" style="max-width:240px"/>
+          <input id="replayJudge" class="form-input" placeholder="judge: provider:model (optional)" style="max-width:260px"/>
+          <button class="btn primary" onclick="submitReplay()">Run replay</button>
+          <button class="btn" onclick="loadReplayRuns()" title="Refresh">&#x21bb;</button>
+        </div>
+        <div id="replayStatus" style="font-size:12px;color:var(--text-dim);min-height:18px;margin-bottom:8px"></div>
+      </div>
+
+      <div class="section">
+        <div class="section-title" style="display:flex;align-items:center;gap:8px">
+          <span>Replay history</span>
+          <span id="replayCount" style="font-size:11px;color:var(--text-dim)"></span>
+        </div>
+        <div id="replayRuns" style="display:flex;flex-direction:column;gap:8px"></div>
+      </div>
+
+      <!-- side-by-side diff modal -->
+      <div id="replayDiffModal" class="modal-backdrop" style="display:none" onclick="if(event.target===this)closeReplayDiff()">
+        <div class="modal-card" style="max-width:1200px;width:96%;max-height:90vh;display:flex;flex-direction:column">
+          <div class="modal-header">
+            <span class="section-title" id="replayDiffTitle" style="margin:0">Replay diff</span>
+            <button class="btn" onclick="closeReplayDiff()">Close</button>
+          </div>
+          <div id="replayDiffMeta" style="font-size:12px;color:var(--text-dim);padding:6px 12px"></div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;padding:0 12px;flex:1;min-height:0">
+            <div style="display:flex;flex-direction:column;min-height:0">
+              <div style="font-size:11px;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.6px;padding:4px 0">Original</div>
+              <pre id="replayDiffOriginal" class="diff-pane" style="flex:1;overflow:auto;border:1px solid var(--border);padding:8px;font-size:12px;background:var(--bg-elev);border-radius:6px;white-space:pre-wrap;word-break:break-word"></pre>
+            </div>
+            <div style="display:flex;flex-direction:column;min-height:0">
+              <div style="font-size:11px;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.6px;padding:4px 0">Replayed</div>
+              <pre id="replayDiffReplayed" class="diff-pane" style="flex:1;overflow:auto;border:1px solid var(--border);padding:8px;font-size:12px;background:var(--bg-elev);border-radius:6px;white-space:pre-wrap;word-break:break-word"></pre>
+            </div>
+          </div>
+          <div style="padding:8px 12px 12px">
+            <details>
+              <summary style="cursor:pointer;font-size:12px;color:var(--text-dim)">Show prompt</summary>
+              <pre id="replayDiffPrompt" style="margin-top:6px;max-height:240px;overflow:auto;border:1px solid var(--border);padding:8px;font-size:11px;background:var(--bg-elev);border-radius:6px;white-space:pre-wrap;word-break:break-word"></pre>
+            </details>
+          </div>
         </div>
       </div>
     </div>
@@ -8883,7 +9329,7 @@ window.switchTab = function(name) {
 
   // In multi-project mode, re-fetch state for the selected project when
   // switching to any project-scoped tab so the data is always current.
-  const projectScopedTabs = ['overview','tasks','queue','kanban','timeline','kb','deps','risk-matrix','analytics','chat','assistant'];
+  const projectScopedTabs = ['overview','tasks','queue','kanban','timeline','kb','deps','risk-matrix','analytics','chat','assistant','replay'];
   if (isMultiProject && selectedProjectIdx === null && name === 'overview') {
     // No project selected: show the all-projects summary panel.
     // Always reload so the cards reflect the latest project statuses.
@@ -8902,6 +9348,7 @@ window.switchTab = function(name) {
     if (name === 'budget') { loadBudget(); loadClaudeUsage(); loadRateLimits(); }
     if (name === 'chat') loadChatHistory();
     if (name === 'assistant') loadAssistantHistory();
+    if (name === 'replay') loadReplayRuns();
   } else {
     if (name === 'settings') loadConfig();
     if (name === 'tasks'  && appState) renderTasks(appState);
@@ -8916,6 +9363,7 @@ window.switchTab = function(name) {
     if (name === 'analytics') loadAnalytics();
     if (name === 'queue') loadQueue();
     if (name === 'budget') { loadBudget(); loadClaudeUsage(); loadRateLimits(); }
+    if (name === 'replay') loadReplayRuns();
   }
 
   // In multi-project mode, show/hide breadcrumb and project selector.

@@ -47,6 +47,13 @@ func ActiveDir(workDir string) string {
 	return filepath.Join(workDir, ".cloop", "sessions", name)
 }
 
+// DBPath returns the path to the state.db for the given workdir, accounting
+// for active session directories. Other packages (e.g. pkg/eventlog) call
+// this so they don't need to duplicate the active-session resolution logic.
+func DBPath(workDir string) string {
+	return effectiveDBPath(ActiveDir(workDir))
+}
+
 // effectiveDBPath returns the state.db path for the given directory.
 // If dir is a session directory (contains session.json), the state.db lives
 // directly inside it rather than in a .cloop/ subdirectory.
@@ -331,6 +338,15 @@ func (s *ProjectState) mergeExternalTasks() {
 	for _, t := range disk.Plan.Tasks {
 		if _, exists := inMemIDs[t.ID]; !exists {
 			s.Plan.Tasks = append(s.Plan.Tasks, t)
+			// Record an event so the unified history shows externally-added
+			// tasks (Task 20118). Best-effort — never block the merge on
+			// observability failures.
+			LogEvent(s.WorkDir, EventRow{
+				Type:      EventTaskAddedExternal,
+				TaskID:    t.ID,
+				TaskTitle: t.Title,
+				Message:   fmt.Sprintf("Task #%d added externally: %s", t.ID, t.Title),
+			})
 		}
 	}
 	if len(disk.Instructions) > len(s.Instructions) {

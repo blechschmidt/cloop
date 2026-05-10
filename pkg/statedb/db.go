@@ -192,6 +192,18 @@ func (d *DB) getMeta(key string) (string, error) {
 // ────────────────────────────────────────────────────────────
 
 func (d *DB) SaveState(s *State) error {
+	if err := d.saveStateLocked(s); err != nil {
+		return err
+	}
+	// Audit emission must happen after the write commits and after the
+	// caller-facing mutex is released. We snapshot the relevant fields here
+	// so the audit row records the post-commit state.
+	auditStateSave(d, s)
+	auditPlanTasks(d, s)
+	return nil
+}
+
+func (d *DB) saveStateLocked(s *State) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
@@ -369,20 +381,25 @@ func (d *DB) LoadState() (*State, error) {
 
 func (d *DB) UpsertTask(t *pm.Task) error {
 	d.mu.Lock()
-	defer d.mu.Unlock()
-
 	tx, err := d.conn.Begin()
 	if err != nil {
+		d.mu.Unlock()
 		return classifyDriverErr(err)
 	}
-	defer tx.Rollback() //nolint:errcheck
-
 	if err := upsertTaskTx(tx, t); err != nil {
+		_ = tx.Rollback()
+		d.mu.Unlock()
 		return classifyDriverErr(err)
 	}
 	if err := tx.Commit(); err != nil {
+		d.mu.Unlock()
 		return classifyDriverErr(err)
 	}
+	d.mu.Unlock()
+
+	// Audit emission happens after commit so it cannot abort the user write.
+	// AppendAuditEvent re-acquires d.mu internally; we released it above.
+	auditTaskUpsert(d, t, "")
 	return nil
 }
 
@@ -402,18 +419,27 @@ const configMetaKey = "config_yaml"
 // either the previous value or the new one — never a partial row.
 func (d *DB) SetConfigBlob(yamlBlob string) error {
 	d.mu.Lock()
-	defer d.mu.Unlock()
-
 	tx, err := d.conn.Begin()
 	if err != nil {
+		d.mu.Unlock()
 		return fmt.Errorf("statedb: begin config tx: %w", err)
 	}
-	defer tx.Rollback() //nolint:errcheck
-
 	if err := d.setMeta(tx, configMetaKey, yamlBlob); err != nil {
+		_ = tx.Rollback()
+		d.mu.Unlock()
 		return fmt.Errorf("statedb: set config blob: %w", err)
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		d.mu.Unlock()
+		return err
+	}
+	d.mu.Unlock()
+
+	// Audit emission. We log the *YAML content* directly so replay can rewrite
+	// the config. Secrets in config.yaml are masked at the layer above (by
+	// pkg/config) before the blob ever reaches us, so this is safe.
+	auditConfigSet(d, yamlBlob, "")
+	return nil
 }
 
 // GetConfigBlob returns the YAML-serialised project config previously stored
@@ -496,23 +522,50 @@ func (d *DB) LoadTask(id int) (*pm.Task, error) {
 	return t, nil
 }
 
-// AppendStep inserts a step row (idempotent on step number).
-func (d *DB) AppendStep(row StepRow) error {
+// DeleteTask removes a single task by id. Returns nil even if the row did
+// not exist — the post-condition (task absent) is satisfied either way.
+func (d *DB) DeleteTask(id int) error {
 	d.mu.Lock()
-	defer d.mu.Unlock()
-
 	tx, err := d.conn.Begin()
 	if err != nil {
+		d.mu.Unlock()
 		return classifyDriverErr(err)
 	}
-	defer tx.Rollback() //nolint:errcheck
-
-	if err := upsertStep(tx, row); err != nil {
+	if _, err := tx.Exec(`DELETE FROM plan_tasks WHERE id = ?`, id); err != nil {
+		_ = tx.Rollback()
+		d.mu.Unlock()
 		return classifyDriverErr(err)
 	}
 	if err := tx.Commit(); err != nil {
+		d.mu.Unlock()
 		return classifyDriverErr(err)
 	}
+	d.mu.Unlock()
+
+	AuditTaskDelete(d, id, "")
+	return nil
+}
+
+// AppendStep inserts a step row (idempotent on step number).
+func (d *DB) AppendStep(row StepRow) error {
+	d.mu.Lock()
+	tx, err := d.conn.Begin()
+	if err != nil {
+		d.mu.Unlock()
+		return classifyDriverErr(err)
+	}
+	if err := upsertStep(tx, row); err != nil {
+		_ = tx.Rollback()
+		d.mu.Unlock()
+		return classifyDriverErr(err)
+	}
+	if err := tx.Commit(); err != nil {
+		d.mu.Unlock()
+		return classifyDriverErr(err)
+	}
+	d.mu.Unlock()
+
+	auditStepAppend(d, row, "")
 	return nil
 }
 

@@ -35,18 +35,41 @@ func Register(name string, factory ProviderFactory) {
 	registry[strings.ToLower(name)] = factory
 }
 
+// AuditDecorator, if non-nil, is applied as the outermost wrapper in
+// Build so every Provider.Complete call is recorded in the project's
+// audit log (Task 20105 / Task 20123). Set by pkg/provideraudit at init
+// time via RegisterAuditDecorator. Decoupled this way to avoid an import
+// cycle: pkg/provideraudit imports pkg/provider for the interface, and
+// pkg/provider needs to invoke audit logic without importing it.
+//
+// Concurrency: the variable is set exactly once at package init and read
+// from Build under no mutex. Init-order ordering is safe because
+// pkg/provideraudit's init runs before any cloop command can call Build.
+var auditDecorator func(Provider) Provider
+
+// RegisterAuditDecorator installs the audit-log wrapper used by Build.
+// Idempotent: calling it twice replaces the prior decorator. Pass nil to
+// disable audit logging (useful in tests that don't want a state.db).
+func RegisterAuditDecorator(d func(Provider) Provider) {
+	auditDecorator = d
+}
+
 // Build creates a provider by name using the global registry.
 //
-// The returned provider is wrapped in WithPanicSafety AND
-// WithRequestIDTracing so a panic inside the underlying SDK becomes an
-// ordinary error and every error returned to the caller is tagged with
-// the request ID carried in the call context. This is the single
-// chokepoint every cloop command goes through, so wrapping here gives
-// both behaviours to all 80+ Complete call sites without touching them.
+// The returned provider is wrapped (innermost → outermost) in:
 //
-// Layering: outermost is request-ID tagging, then panic safety, then the
-// real provider. That way a panic recovered by WithPanicSafety still
-// surfaces with a request_id tag attached by the outer layer.
+//	real provider → WithPanicSafety → WithRequestIDTracing → audit decorator
+//
+// so a panic inside the underlying SDK becomes an ordinary error, every
+// error returned to the caller is tagged with the request ID carried in
+// the call context, and every call (success or failure) lands in the
+// per-project audit log. This is the single chokepoint every cloop
+// command goes through, so wrapping here gives the behaviour to all 80+
+// Complete call sites without touching them.
+//
+// The audit decorator runs OUTSIDE request-ID tagging so it sees the
+// final tagged error message; that message is what ends up in the audit
+// row. The decorator is best-effort and can never block the call.
 func Build(cfg ProviderConfig) (Provider, error) {
 	name := strings.ToLower(cfg.Name)
 	factory, ok := registry[name]
@@ -57,7 +80,11 @@ func Build(cfg ProviderConfig) (Provider, error) {
 	if err != nil {
 		return nil, err
 	}
-	return WithRequestIDTracing(WithPanicSafety(p)), nil
+	wrapped := WithRequestIDTracing(WithPanicSafety(p))
+	if auditDecorator != nil {
+		wrapped = auditDecorator(wrapped)
+	}
+	return wrapped, nil
 }
 
 // Available returns a comma-separated list of registered providers.

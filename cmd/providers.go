@@ -10,9 +10,16 @@ import (
 	mockprovider "github.com/blechschmidt/cloop/pkg/provider/mock"
 	"github.com/blechschmidt/cloop/pkg/provider/ollama"
 	"github.com/blechschmidt/cloop/pkg/provider/openai"
+	"github.com/blechschmidt/cloop/pkg/provideraudit"
 )
 
 func init() {
+	// Wire the per-project audit log decorator into provider.Build so every
+	// Provider.Complete invocation across the codebase lands in state.db's
+	// provider_calls table (Task 20105 / Task 20123 — powers the Web UI's
+	// "Provider Calls" inspector panel).
+	provider.RegisterAuditDecorator(provideraudit.WithAudit)
+
 	provider.Register(claudecode.ProviderName, func(cfg provider.ProviderConfig) (provider.Provider, error) {
 		return claudecode.New(), nil
 	})

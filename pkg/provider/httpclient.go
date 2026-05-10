@@ -3,8 +3,36 @@ package provider
 import (
 	"net"
 	"net/http"
+	"sync/atomic"
 	"time"
 )
+
+// HTTPMiddleware optionally wraps the transport returned by NewHTTPClient
+// with a *cloop chaos*-style middleware. Stored as an atomic.Value so
+// installation from another goroutine is race-free, and reads on the hot
+// path (every Complete() call constructs a client) are a single atomic load.
+//
+// The chaos package installs a hook here at init time when its CLI command
+// is registered. We deliberately use a hook variable rather than a direct
+// import to keep pkg/provider free of dependencies on chaos — the package
+// graph stays the same in builds that strip the chaos command.
+var httpMiddleware atomic.Pointer[func(http.RoundTripper) http.RoundTripper]
+
+// SetHTTPMiddleware installs (or removes, when fn == nil) the wrapper applied
+// to every transport returned by NewHTTPClient. Returns the previous wrapper.
+//
+// Concurrency: SetHTTPMiddleware may be called at any time, including from
+// inside an init() before any provider is constructed. Already-built
+// http.Client instances are NOT retroactively wrapped — only future
+// NewHTTPClient calls pick up the change. In practice every provider builds
+// its client in NewProvider() at startup, after init() has run.
+func SetHTTPMiddleware(fn func(http.RoundTripper) http.RoundTripper) func(http.RoundTripper) http.RoundTripper {
+	prev := httpMiddleware.Swap(&fn)
+	if prev == nil {
+		return nil
+	}
+	return *prev
+}
 
 // NewHTTPClient returns an *http.Client tuned for long-lived AI provider calls.
 //
@@ -21,9 +49,14 @@ import (
 // matter: TCP connect hang, TLS handshake hang, server stalling before the
 // first response byte, and dead peers (via TCP keepalive).
 func NewHTTPClient() *http.Client {
-	return &http.Client{
-		Transport: NewHTTPTransport(),
+	tr := http.RoundTripper(NewHTTPTransport())
+	if mw := httpMiddleware.Load(); mw != nil && *mw != nil {
+		// Wrap with the installed middleware (chaos fault injection in
+		// practice). The middleware is fully transparent when no fault is
+		// active, so the wrap is safe to perform unconditionally.
+		tr = (*mw)(tr)
 	}
+	return &http.Client{Transport: tr}
 }
 
 // NewHTTPTransport returns an *http.Transport with the same timeout policy as
