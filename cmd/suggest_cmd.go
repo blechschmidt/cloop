@@ -132,6 +132,22 @@ Examples:
 			suggestCount,
 		)
 
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+		defer cancel()
+
+		if suggestJSON {
+			// Machine-readable mode for the Web UI: emit JSON only, no decoration,
+			// no state mutation. The Web UI captures stdout+stderr into a single
+			// buffer and json.Unmarshals it, so any stray write here breaks parsing.
+			result, err := suggest.Generate(ctx, prov, prompt, model, 3*time.Minute)
+			if err != nil {
+				return fmt.Errorf("suggestion generation failed: %w", err)
+			}
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			return enc.Encode(result)
+		}
+
 		headerColor := color.New(color.FgCyan, color.Bold)
 		dimColor := color.New(color.Faint)
 		boldColor := color.New(color.Bold)
@@ -141,20 +157,6 @@ Examples:
 
 		headerColor.Printf("\nBrainstorming %d feature ideas with %s...\n\n", suggestCount, prov.Name())
 		dimColor.Printf("Goal: %s\n\n", truncate(s.Goal, 80))
-
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
-		defer cancel()
-
-		if suggestJSON {
-			// Machine-readable mode for the Web UI: emit JSON, no decoration, no state mutation.
-			result, err := suggest.Generate(ctx, prov, prompt, model, 3*time.Minute)
-			if err != nil {
-				return fmt.Errorf("suggestion generation failed: %w", err)
-			}
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
-			return enc.Encode(result)
-		}
 
 		result, err := suggest.Generate(ctx, prov, prompt, model, 3*time.Minute)
 		if err != nil {
