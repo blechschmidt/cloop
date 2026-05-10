@@ -3381,41 +3381,70 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 			color.New(color.FgYellow).Printf("Context pruned: kept %d of %d steps to fit token budget\n", keptPar, totalPar)
 		}
 
-		// Launch goroutines for each ready task.
+		// Pre-build all prompts in the main goroutine (Task 20129) before
+		// launching workers. Otherwise workers would read plan task statuses
+		// (via pm.ExecuteTaskPrompt's "completed tasks for context" section)
+		// concurrently with the main goroutine's writes to task.Status as it
+		// processes results in completion order — a data race the race
+		// detector flags. Workers receive a fully-built prompt string and
+		// touch no shared plan state during the provider call.
+		prebuiltPrompts := make([]string, len(ready))
+		for i, t := range ready {
+			prompt := pm.ExecuteTaskPrompt(s.Goal, s.Instructions, o.config.WorkDir, parallelPromptPlan, t, o.config.NoCodeContextInject)
+			if override, overrideErr := ctxedit.LoadOverride(o.config.WorkDir, t.ID); overrideErr == nil && override != "" {
+				prompt = override
+			}
+			prompt = cloopenv.InjectIntoPrompt(prompt, o.envVars)
+			if o.secretStore != nil {
+				prompt = o.secretStore.InjectIntoPrompt(prompt)
+			}
+			if learningMem := learning.FormatForPrompt(o.config.WorkDir); learningMem != "" {
+				prompt = learningMem + prompt
+			}
+			prebuiltPrompts[i] = prompt
+		}
+
+		// Launch goroutines for each ready task and stream their results back
+		// through resultsCh as each one finishes (Task 20129) so a fast task's
+		// terminal status is persisted/broadcast immediately rather than after
+		// the slowest peer in the batch drains. Without this, the UI shows a
+		// completed task as still in_progress for as long as the slowest task
+		// in the round takes.
+		//
+		// Buffered to len(ready) so:
+		//   - a slow consumer never blocks a fast worker on send
+		//   - workers leaked past an early return (ctx cancelled, tooManyErrors)
+		//     can still complete their send and exit cleanly
 		// Streaming is disabled in parallel mode to avoid interleaved token output.
-		results := make([]taskResult, len(ready))
+		type indexedResult struct {
+			idx int
+			res taskResult
+		}
+		resultsCh := make(chan indexedResult, len(ready))
 		var wg sync.WaitGroup
 		for i, task := range ready {
 			wg.Add(1)
-			go func(idx int, t *pm.Task) {
+			go func(idx int, t *pm.Task, prompt string) {
 				defer wg.Done()
-				// Panic recovery: a panic inside a provider implementation (e.g.
-				// nil-pointer in a third-party SDK, malformed JSON deref) would
-				// otherwise crash the entire orchestrator process, killing every
-				// peer task in the same parallel round. Convert it into a task
-				// failure so the caller can mark this single task failed and
-				// keep the loop alive.
+				// Send exactly one result whether the body completes normally
+				// or panics. The defer below runs in LIFO order before
+				// wg.Done(), and recovers any panic from the provider call.
+				// Panic recovery: a panic inside a provider implementation
+				// (e.g. nil-pointer in a third-party SDK, malformed JSON
+				// deref) would otherwise crash the entire orchestrator
+				// process, killing every peer task in the same parallel
+				// round. Convert it into a task failure so the caller can
+				// mark this single task failed and keep the loop alive.
+				res := taskResult{task: t}
 				defer func() {
 					if r := recover(); r != nil {
-						results[idx] = taskResult{
+						res = taskResult{
 							task: t,
 							err:  fmt.Errorf("provider panic on task %d: %v", t.ID, r),
 						}
 					}
+					resultsCh <- indexedResult{idx: idx, res: res}
 				}()
-				prompt := pm.ExecuteTaskPrompt(s.Goal, s.Instructions, o.config.WorkDir, parallelPromptPlan, t, o.config.NoCodeContextInject)
-				// Check for a user-edited context override.
-				if override, overrideErr := ctxedit.LoadOverride(o.config.WorkDir, t.ID); overrideErr == nil && override != "" {
-					prompt = override
-				}
-				prompt = cloopenv.InjectIntoPrompt(prompt, o.envVars)
-				if o.secretStore != nil {
-					prompt = o.secretStore.InjectIntoPrompt(prompt)
-				}
-				// Always prepend cross-session narrative memory from .cloop/memory.md.
-				if learningMem := learning.FormatForPrompt(o.config.WorkDir); learningMem != "" {
-					prompt = learningMem + prompt
-				}
 				start := time.Now()
 				// Use role-specific provider if configured.
 				taskProvider := o.router.For(t.Role)
@@ -3440,38 +3469,49 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 				}
 				dur := time.Since(start)
 				timedOut := isTimeoutErr(tTaskCtx, err)
-				results[idx] = taskResult{task: t, result: result, err: err, duration: dur, timedOut: timedOut}
-			}(i, task)
+				res = taskResult{task: t, result: result, err: err, duration: dur, timedOut: timedOut}
+			}(i, task, prebuiltPrompts[i])
 		}
-		// Bounded wait: if the parent context is cancelled and a misbehaving
-		// provider ignores the per-task ctx, give workers a grace period to
-		// exit, then return early so the caller regains control. Leaked
-		// goroutines may still write to results[idx] afterward; that's safe
-		// because each writes to a unique index and we don't read results on
-		// the early-return path.
+		// Closer: signal end-of-batch once every worker has emitted its
+		// result. Used by the cancellation path's grace-period drain.
 		waitDone := make(chan struct{})
 		go func() {
 			wg.Wait()
 			close(waitDone)
 		}()
-		select {
-		case <-waitDone:
-			// All workers exited; proceed to result processing.
-		case <-ctx.Done():
-			select {
-			case <-waitDone:
-				// Workers honored cancellation within the grace period
-				// implicitly (closed before we even started the timer).
-			case <-time.After(parallelShutdownGracePeriod):
-				color.New(color.FgYellow).Printf("⚠ %d task goroutine(s) did not exit within %s of cancellation; returning anyway\n", len(ready), parallelShutdownGracePeriod)
-			}
-			s.Status = "paused"
-			s.Save()
-			return ctx.Err()
-		}
 
-		// Process results sequentially for clean output.
-		for resIdx, res := range results {
+		// Consume results in completion order so each task's terminal status
+		// is persisted (and pushed to the UI via WebSocket) the moment it
+		// finishes — fixes the "task still in_progress after completion" bug
+		// when running multiple tasks in parallel.
+		parallelTotal := len(ready)
+		parallelDone := 0
+		for parallelDone < parallelTotal {
+			var ir indexedResult
+			select {
+			case ir = <-resultsCh:
+				// fall through to per-result processing below
+			case <-ctx.Done():
+				// Bounded wait: if a misbehaving provider ignores the per-task
+				// ctx, give workers a grace period to exit, then return early
+				// so the caller regains control. Leaked goroutines may still
+				// send to resultsCh afterward; the channel is buffered to
+				// len(ready) so the send never blocks, and no one reads it
+				// after we return.
+				select {
+				case <-waitDone:
+					// Workers honored cancellation within the grace period
+					// implicitly (drained before we even started the timer).
+				case <-time.After(parallelShutdownGracePeriod):
+					color.New(color.FgYellow).Printf("⚠ %d task goroutine(s) did not exit within %s of cancellation; returning anyway\n", parallelTotal-parallelDone, parallelShutdownGracePeriod)
+				}
+				s.Status = "paused"
+				s.Save()
+				return ctx.Err()
+			}
+			parallelDone++
+			res := ir.res
+			resIdx := ir.idx
 			task := res.task
 			parallelQueueID := int64(0)
 			if resIdx < len(queueIDs) {
@@ -3730,10 +3770,11 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 				_ = o.queue.MarkDone(parallelQueueID, stepSummaryLine(result.Output, 200))
 			}
 
-			// Unified event journal — one terminal event per task outcome (Task 20118).
-			mu.Lock()
+			// Unified event journal — one terminal event per task outcome
+			// (Task 20118). mu is already held from the switch above, so
+			// re-acquiring it here would deadlock; just read s.CurrentStep
+			// under the existing lock.
 			parallelStep := s.CurrentStep
-			mu.Unlock()
 			o.logTaskOutcomeEvent(task, taskDur, parallelStep)
 
 			// Record task outcome into metrics.
