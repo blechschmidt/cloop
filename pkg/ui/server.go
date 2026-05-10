@@ -30,10 +30,12 @@ import (
 	"github.com/blechschmidt/cloop/pkg/epic"
 	"github.com/blechschmidt/cloop/pkg/globalbudget"
 	"github.com/blechschmidt/cloop/pkg/kb"
+	"github.com/blechschmidt/cloop/pkg/logger"
 	"github.com/blechschmidt/cloop/pkg/multiui"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/provider"
 	"github.com/blechschmidt/cloop/pkg/ratelimit"
+	"github.com/blechschmidt/cloop/pkg/reqid"
 	"github.com/blechschmidt/cloop/pkg/riskmatrix"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/statedb"
@@ -464,6 +466,25 @@ type Server struct {
 	// bounded by ctx). Tests use this field to simulate degraded states
 	// like "closed db handle" or "state store not initialized".
 	ReadyCheck func(ctx context.Context) error
+
+	// Log is the structured logger used for lifecycle / error messages
+	// emitted by the UI server itself (panics in HTTP middleware, client
+	// JavaScript errors POSTed to /api/client-error, watcher failures).
+	// Nil means the package picks a sensible default at first use (text
+	// output to stdout, project bound).
+	Log logger.Logger
+}
+
+// log returns s.Log, falling back to a default text logger if the field
+// was left zero. The fallback is initialised lazily so test servers that
+// construct Server{} directly (rather than via New) still get a usable
+// logger without explicit wiring.
+func (s *Server) log() logger.Logger {
+	if s.Log != nil {
+		return s.Log
+	}
+	s.Log = logger.New(false).With("project", s.WorkDir).With("component", "ui")
+	return s.Log
 }
 
 // New creates a new UI server for the given working directory and port.
@@ -483,6 +504,7 @@ func New(workdir string, port int, token string) *Server {
 		chatHistories:   make(map[string][]ChatMessage),
 		runStates:       make(map[string]bool),
 		stuckLastSeen:   make(map[string]int64),
+		Log:             logger.New(false).With("project", workdir).With("component", "ui"),
 	}
 }
 
@@ -631,9 +653,36 @@ func (s *Server) Handler() http.Handler {
 // recovery still wraps everything so a buggy probe handler cannot crash the
 // daemon, and the security headers layer is preserved for the probe responses
 // (it adds no auth, only hardening headers).
+//
+// requestIDMiddleware is the OUTERMOST middleware so the X-Request-ID header
+// is set even on rate-limited 429 responses, auth-rejected 401s, and panic
+// recovery's 500. The panic recovery layer itself sits below the request-ID
+// layer so a panic in the request-ID code path itself would still surface as
+// a clean 500 (panic recovery's stderr stack trace gives operators what they
+// need in that pathological case).
 func (s *Server) buildHandler(mux *http.ServeMux) http.Handler {
 	app := s.uiRateLimitMiddleware(securityHeaders(s.authMiddleware(mux)))
-	return panicRecoveryMiddleware(s.probeBypass(app))
+	return uiRequestIDMiddleware(panicRecoveryMiddleware(s.probeBypass(app)))
+}
+
+// uiRequestIDMiddleware threads a correlation ID through every Web UI
+// request. It mirrors the apiserver implementation: read X-Request-ID,
+// validate, fall back to a fresh ID, echo on the response, and bind to
+// r.Context() so downstream handlers can pull it via reqid.FromContext.
+//
+// The middleware is exposed as a standalone helper (not a Server method)
+// because Handler() builds its chain from buildHandler and tests rely on
+// being able to inspect/replay the chain without a Server receiver.
+func uiRequestIDMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		id, ok := reqid.FromRequest(r)
+		if !ok {
+			id = reqid.Generate()
+		}
+		w.Header().Set(reqid.HeaderName, id)
+		ctx := reqid.WithContext(r.Context(), id)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
 }
 
 // probeBypass routes /healthz and /readyz directly to their handlers,
@@ -811,6 +860,9 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	// Central work queue (every PM task, heal retry, evolve cycle, external merge)
 	mux.HandleFunc("GET /api/queue", s.handleQueue)
 	mux.HandleFunc("GET /api/queue/stats", s.handleQueueStats)
+
+	// Client-side JS error reporting (window.onerror, unhandledrejection)
+	mux.HandleFunc("POST /api/client-error", s.handleClientError)
 
 	// Multi-project dashboard
 	mux.HandleFunc("/api/projects", s.handleProjects)
@@ -1481,6 +1533,83 @@ func respondToBodyError(w http.ResponseWriter, err error) {
 }
 
 // ── handlers ─────────────────────────────────────────────────────────────────
+
+// clientErrorMaxField is the per-field byte cap applied to JSON sent to
+// /api/client-error. The server-side cap is enforced in addition to the
+// outer effectiveMaxBodyBytes() limit so a single oversize stack trace
+// can never blow up a log line. Picked at 8 KiB: comfortably larger than
+// any browser stack trace observed in practice while still small enough
+// that 100 errors/sec stays well below daily-log budgets.
+const clientErrorMaxField = 8 * 1024
+
+// truncate returns s clipped to at most max bytes, appending an ellipsis
+// marker when truncation occurred so log readers know the line is partial.
+func truncate(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	if max <= 3 {
+		return s[:max]
+	}
+	return s[:max-3] + "..."
+}
+
+// handleClientError accepts a JSON-encoded JavaScript error report from the
+// dashboard's window.onerror / unhandledrejection handlers and forwards it
+// to the structured logger. The wire body is:
+//
+//	{ "message": "...", "stack": "...", "url": "...", "userAgent": "...",
+//	  "tab": "tasks", "kind": "error" | "unhandledrejection",
+//	  "line": 123, "col": 45 }
+//
+// Every string field is byte-clipped to clientErrorMaxField so a runaway
+// stack trace cannot inflate a single log line. The handler always responds
+// with 204 No Content on success: the client never reads the body, and a
+// short response keeps overhead low under burst-error conditions.
+func (s *Server) handleClientError(w http.ResponseWriter, r *http.Request) {
+	if !requirePOST(w, r) {
+		return
+	}
+	limitJSONBody(w, r, s.effectiveMaxBodyBytes())
+	var req struct {
+		Message   string `json:"message"`
+		Stack     string `json:"stack"`
+		URL       string `json:"url"`
+		UserAgent string `json:"userAgent"`
+		Tab       string `json:"tab"`
+		Kind      string `json:"kind"`
+		Line      int    `json:"line"`
+		Col       int    `json:"col"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondToBodyError(w, err)
+		return
+	}
+	kind := req.Kind
+	if kind == "" {
+		kind = "error"
+	}
+	data := map[string]interface{}{
+		"kind":       kind,
+		"client_url": truncate(req.URL, clientErrorMaxField),
+		"user_agent": truncate(req.UserAgent, clientErrorMaxField),
+		"tab":        truncate(req.Tab, 64),
+		"client_ip":  clientIP(r),
+		"stack":      truncate(req.Stack, clientErrorMaxField),
+	}
+	if req.Line > 0 {
+		data["line"] = req.Line
+	}
+	if req.Col > 0 {
+		data["col"] = req.Col
+	}
+	msg := truncate(req.Message, clientErrorMaxField)
+	if msg == "" {
+		msg = "(no message)"
+	}
+	s.log().WithContext(r.Context()).Error("client_error", 0, msg, data)
+	w.WriteHeader(http.StatusNoContent)
+}
 
 // handleDashboard serves the single-page HTML dashboard.
 func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
@@ -8208,6 +8337,148 @@ const dashboardHTML = `<!DOCTYPE html>
 </div>
 
 <div id="toast"></div>
+
+<!-- ── JS error boundary toast + full-screen recovery banner ───────────── -->
+<div id="errboundary-toast" role="alert" aria-live="assertive" style="display:none;position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:var(--surface);border:1px solid rgba(248,81,73,.6);border-radius:var(--radius);padding:10px 14px;font-size:13px;z-index:120;box-shadow:0 4px 16px rgba(0,0,0,.35);max-width:min(440px,92vw);align-items:center;gap:10px;color:var(--text)">
+  <span aria-hidden="true" style="color:var(--red);font-size:15px">&#9888;</span>
+  <span id="errboundary-toast-text" style="flex:1">Something went wrong &mdash; click to reload.</span>
+  <button id="errboundary-toast-reload" type="button" class="btn" style="padding:4px 10px;font-size:12px" onclick="location.reload()">Reload</button>
+  <button id="errboundary-toast-close" type="button" aria-label="Dismiss" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:16px;line-height:1;padding:0 2px" onclick="document.getElementById('errboundary-toast').style.display='none'">&times;</button>
+</div>
+<div id="errboundary-banner" role="alertdialog" aria-modal="true" aria-labelledby="errboundary-banner-title" aria-describedby="errboundary-banner-desc" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:200;align-items:center;justify-content:center">
+  <div style="background:var(--surface);border:1px solid rgba(248,81,73,.5);border-radius:var(--radius);padding:24px;max-width:min(520px,92vw);text-align:center">
+    <div aria-hidden="true" style="font-size:36px;color:var(--red);margin-bottom:8px">&#9888;</div>
+    <h2 id="errboundary-banner-title" style="font-size:16px;font-weight:600;margin-bottom:8px">The dashboard is in a broken state</h2>
+    <p id="errboundary-banner-desc" style="font-size:13px;color:var(--muted);margin-bottom:16px">Several JavaScript errors have occurred in quick succession. Reloading the page usually clears the issue. The error details have been logged on the server.</p>
+    <div class="modal-footer" style="justify-content:center">
+      <button class="btn" type="button" onclick="document.getElementById('errboundary-banner').style.display='none'">Dismiss</button>
+      <button class="btn primary" type="button" onclick="location.reload()">Reload page</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ── Global JavaScript error boundary ─────────────────────────────────────
+// Installed BEFORE the main IIFE so that exceptions thrown during script
+// initialisation, in async callbacks (timers, fetch handlers), or from
+// inline event-handler attributes are all routed through the same
+// reporter. Three responsibilities:
+//   1. POST {message, stack, url, userAgent, tab} to /api/client-error so
+//      the structured server logger captures it alongside server errors.
+//   2. Show a non-blocking toast with a Reload button.
+//   3. After >3 errors in a 30-second window, escalate to a full-screen
+//      recovery banner so the user is not trapped in a loop of broken UI
+//      with only an unread toast.
+// All branches are individually try/catch-guarded: the boundary itself
+// must never throw, otherwise the browser falls back to its default
+// (silent) behaviour and the page truly becomes a dead-end.
+(function() {
+  if (window.__cloopErrBoundaryInstalled) return;
+  window.__cloopErrBoundaryInstalled = true;
+
+  var WINDOW_MS  = 30000;
+  var THRESHOLD  = 3;
+  var POST_LIMIT = 20;        // hard cap on POSTs per page load — defence
+                              //   in depth against an infinite-loop bug
+                              //   that would otherwise spam the server
+  var posted     = 0;
+  var recent     = [];        // timestamps of recent errors
+
+  function activeTabName() {
+    try {
+      var el = document.querySelector('.tab-panel.active');
+      if (el && el.id && el.id.indexOf('tab-') === 0) return el.id.slice(4);
+    } catch (_) {}
+    return '';
+  }
+
+  function postError(payload) {
+    if (posted >= POST_LIMIT) return;
+    posted++;
+    try {
+      var headers = {'Content-Type': 'application/json'};
+      try {
+        var t = sessionStorage.getItem('cloop_token');
+        if (t) headers['Authorization'] = 'Bearer ' + t;
+      } catch (_) {}
+      // keepalive lets the request complete even if the user navigates
+      // away or reloads immediately after the error fires.
+      fetch('/api/client-error', {
+        method:  'POST',
+        headers: headers,
+        body:    JSON.stringify(payload),
+        keepalive: true
+      }).catch(function() {}); // swallow — boundary must not throw
+    } catch (_) {}
+  }
+
+  function showToast() {
+    try {
+      var el = document.getElementById('errboundary-toast');
+      if (el) el.style.display = 'flex';
+    } catch (_) {}
+  }
+
+  function showBanner() {
+    try {
+      var el = document.getElementById('errboundary-banner');
+      if (el) el.style.display = 'flex';
+    } catch (_) {}
+  }
+
+  function record(payload) {
+    try {
+      postError(payload);
+      var now = Date.now();
+      recent.push(now);
+      // Drop timestamps outside the rolling window.
+      var cutoff = now - WINDOW_MS;
+      while (recent.length && recent[0] < cutoff) recent.shift();
+      showToast();
+      if (recent.length > THRESHOLD) showBanner();
+    } catch (_) {}
+  }
+
+  window.addEventListener('error', function(ev) {
+    try {
+      var msg = (ev && (ev.message || (ev.error && ev.error.message))) || 'Unknown error';
+      var stack = (ev && ev.error && ev.error.stack) || '';
+      record({
+        kind:      'error',
+        message:   String(msg),
+        stack:     String(stack),
+        url:       String((ev && ev.filename) || location.href),
+        userAgent: navigator.userAgent || '',
+        tab:       activeTabName(),
+        line:      (ev && ev.lineno) | 0,
+        col:       (ev && ev.colno)  | 0
+      });
+    } catch (_) {}
+  });
+
+  window.addEventListener('unhandledrejection', function(ev) {
+    try {
+      var reason = ev && ev.reason;
+      var msg = '';
+      var stack = '';
+      if (reason && typeof reason === 'object') {
+        msg   = reason.message || String(reason);
+        stack = reason.stack   || '';
+      } else {
+        msg = String(reason);
+      }
+      record({
+        kind:      'unhandledrejection',
+        message:   msg,
+        stack:     String(stack),
+        url:       location.href,
+        userAgent: navigator.userAgent || '',
+        tab:       activeTabName()
+      });
+    } catch (_) {}
+  });
+})();
+</script>
 
 <script>
 (function() {
