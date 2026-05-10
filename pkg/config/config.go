@@ -519,6 +519,20 @@ type BudgetConfig struct {
 	// the global daily token limit defined in ~/.config/cloop/budget.yaml.
 	// 0 means no percentage cap.
 	GlobalTokenPct float64 `yaml:"global_token_pct,omitempty"`
+
+	// BlockExtraUsage, when true (default), prevents cloop from running tasks
+	// when doing so would incur Claude Code extra usage (per-token billing
+	// beyond the subscription). Set to false to allow extra usage.
+	BlockExtraUsage *bool `yaml:"block_extra_usage,omitempty"`
+}
+
+// ShouldBlockExtraUsage returns true if extra usage should be blocked.
+// Defaults to true when not explicitly set.
+func (b BudgetConfig) ShouldBlockExtraUsage() bool {
+	if b.BlockExtraUsage == nil {
+		return true // default: block
+	}
+	return *b.BlockExtraUsage
 }
 
 // Default returns a Config with sensible defaults.

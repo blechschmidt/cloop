@@ -4914,6 +4914,7 @@ func (s *Server) handleBudgetGet(w http.ResponseWriter, r *http.Request) {
 			// the same fields. See Task 20074.
 			"max_weekly_pct":    projCC.MaxWeeklyPct,
 			"max_five_hour_pct": projCC.MaxFiveHourPct,
+			"block_extra_usage": projBudget.ShouldBlockExtraUsage(),
 		},
 		"effective": map[string]interface{}{
 			"daily_usd_limit":   effectiveUSD,
@@ -4978,6 +4979,7 @@ func (s *Server) handleBudgetProjectSave(w http.ResponseWriter, r *http.Request)
 		AlertThresholdPct int     `json:"alert_threshold_pct"`
 		MaxWeeklyPct      float64 `json:"max_weekly_pct"`
 		MaxFiveHourPct    float64 `json:"max_five_hour_pct"`
+		BlockExtraUsage   *bool   `json:"block_extra_usage,omitempty"`
 	}
 	limitJSONBody(w, r, maxJSONBodyBytes)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -5023,6 +5025,9 @@ func (s *Server) handleBudgetProjectSave(w http.ResponseWriter, r *http.Request)
 	cfg.Budget.AlertThresholdPct = req.AlertThresholdPct
 	cfg.ClaudeCode.MaxWeeklyPct = req.MaxWeeklyPct
 	cfg.ClaudeCode.MaxFiveHourPct = req.MaxFiveHourPct
+	if req.BlockExtraUsage != nil {
+		cfg.Budget.BlockExtraUsage = req.BlockExtraUsage
+	}
 	if err := config.Save(workDir, cfg); err != nil {
 		jsonErr(w, "save failed: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -7931,6 +7936,15 @@ const dashboardHTML = `<!DOCTYPE html>
             <div class="form-group">
               <label class="form-label">Max 5-hour usage % (0 = no cap)</label>
               <input class="form-input" id="bpMaxFiveHour" type="number" min="0" max="100" placeholder="e.g. 80">
+            </div>
+          </div>
+
+          <div class="form-row" style="margin-top:12px">
+            <div class="form-group">
+              <label class="form-label" style="display:flex;align-items:center;gap:8px">
+                <input type="checkbox" id="bpBlockExtraUsage" checked>
+                Block extra usage (prevent per-token billing beyond subscription)
+              </label>
             </div>
           </div>
 
@@ -13107,6 +13121,8 @@ function _renderBudget(d) {
   _setVal('bpAlertPct',       project.alert_threshold_pct || '');
   _setVal('bpMaxWeekly',      project.max_weekly_pct || '');
   _setVal('bpMaxFiveHour',    project.max_five_hour_pct || '');
+  const beuEl = document.getElementById('bpBlockExtraUsage');
+  if (beuEl) beuEl.checked = project.block_extra_usage !== false;
 
   // ── Effective limits table ──
   const effSection = document.getElementById('budgetEffectiveSection');
@@ -13404,6 +13420,7 @@ window.saveBudgetProject = function() {
     alert_threshold_pct: parseInt(document.getElementById('bpAlertPct').value)       || 0,
     max_weekly_pct: parseFloat(document.getElementById('bpMaxWeekly').value)   || 0,
     max_five_hour_pct: parseFloat(document.getElementById('bpMaxFiveHour').value) || 0,
+    block_extra_usage: document.getElementById('bpBlockExtraUsage').checked,
   };
   fetch(pUrl('/api/budget/project'), {
     method: 'PUT',

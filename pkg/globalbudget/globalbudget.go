@@ -48,6 +48,19 @@ type GlobalBudgetConfig struct {
 
 	// AlertThresholdPct is the percentage at which alerts fire. Default 80.
 	AlertThresholdPct int `yaml:"alert_threshold_pct,omitempty"`
+
+	// BlockExtraUsage, when true (default), prevents cloop from running tasks
+	// when doing so would incur Claude Code extra usage (per-token billing).
+	BlockExtraUsage *bool `yaml:"block_extra_usage,omitempty"`
+}
+
+// ShouldBlockExtraUsage returns true if extra usage should be blocked.
+// Defaults to true when not explicitly set.
+func (g GlobalBudgetConfig) ShouldBlockExtraUsage() bool {
+	if g.BlockExtraUsage == nil {
+		return true
+	}
+	return *g.BlockExtraUsage
 }
 
 // GlobalLedgerEntry mirrors cost.LedgerEntry but adds a project path field so
