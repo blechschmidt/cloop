@@ -59,11 +59,14 @@ func (p *Provider) Complete(ctx context.Context, prompt string, opts provider.Op
 	}
 
 	timeout := opts.Timeout
-	if timeout == 0 {
-		timeout = 10 * time.Minute
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
 	}
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
+	// When timeout == 0, no deadline is applied — the parent context
+	// controls cancellation. The process-exit watchdog below ensures
+	// we never hang on a dead child process.
 
 	claudeBin := findClaude()
 	cmd := exec.CommandContext(ctx, claudeBin, args...)
@@ -78,7 +81,28 @@ func (p *Provider) Complete(ctx context.Context, prompt string, opts provider.Op
 	cmd.Stderr = &stderr
 
 	start := time.Now()
-	err := cmd.Run()
+
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("claude CLI start error: %w", err)
+	}
+
+	// Wait for the process in a goroutine so we can detect context
+	// cancellation even if cmd.Wait blocks on inherited pipe readers
+	// (child processes that inherit stdout/stderr).
+	waitCh := make(chan error, 1)
+	go func() { waitCh <- cmd.Wait() }()
+
+	var err error
+	select {
+	case err = <-waitCh:
+		// Process exited normally.
+	case <-ctx.Done():
+		// Context cancelled or timed out. Kill the process.
+		_ = cmd.Process.Kill()
+		<-waitCh // reap
+		return nil, fmt.Errorf("claude CLI cancelled: %w", ctx.Err())
+	}
+
 	duration := time.Since(start)
 
 	output := stdout.String()
