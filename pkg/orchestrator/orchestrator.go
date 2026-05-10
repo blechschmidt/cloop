@@ -37,6 +37,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/logger"
 	"github.com/blechschmidt/cloop/pkg/memory"
 	"github.com/blechschmidt/cloop/pkg/mergequeue"
+	"github.com/blechschmidt/cloop/pkg/mergeresolve"
 	"github.com/blechschmidt/cloop/pkg/metrics"
 	"github.com/blechschmidt/cloop/pkg/multiagent"
 	"github.com/blechschmidt/cloop/pkg/notify"
@@ -3044,6 +3045,15 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 				worktreeMode = true
 				worktreeBase = base
 				mergeQ = mergequeue.New(o.config.WorkDir, worktreeBase)
+				// Install an AI-driven conflict resolver so merges that would
+				// otherwise leave a branch in manual-resolution limbo can
+				// proceed automatically. We use the orchestrator's main
+				// provider/model; the resolver itself imposes per-file caps
+				// and rejects unsafe AI output (Task 20141).
+				if o.provider != nil {
+					mergeQ.SetResolver(mergeresolve.New(o.provider, s.Model, 0))
+					dimColor.Printf("  worktree-parallel: AI conflict resolver enabled (%s)\n", o.provider.Name())
+				}
 				mergeQ.Start(ctx)
 				dimColor.Printf("  worktree-parallel: ON (base=%s, merge queue running)\n", worktreeBase)
 				defer func() {

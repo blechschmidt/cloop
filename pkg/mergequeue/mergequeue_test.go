@@ -179,6 +179,150 @@ func TestQueue_ConflictRecoversCleanWorkingTree(t *testing.T) {
 	}
 }
 
+// scriptedResolver implements Resolver by returning a canned content for each
+// requested file. Used to drive the auto-resolve path end-to-end in tests.
+type scriptedResolver struct {
+	files map[string]string
+	calls int
+	err   error
+}
+
+func (s *scriptedResolver) Resolve(ctx context.Context, info ResolveInfo, files []ConflictFile) ([]ResolvedFile, error) {
+	s.calls++
+	if s.err != nil {
+		return nil, s.err
+	}
+	out := make([]ResolvedFile, 0, len(files))
+	for _, f := range files {
+		body, ok := s.files[f.Path]
+		if !ok {
+			continue
+		}
+		out = append(out, ResolvedFile{Path: f.Path, Content: body})
+	}
+	return out, nil
+}
+
+// TestQueue_AutoResolverCommitsConflict proves that when a conflict is
+// produced by the second merge, an installed Resolver can rewrite the file,
+// stage it, and finish the merge so subsequent merges still see a clean base.
+func TestQueue_AutoResolverCommitsConflict(t *testing.T) {
+	if !gitAvailable() {
+		t.Skip("git not available")
+	}
+	repo := initRepo(t)
+
+	t1 := &pm.Task{ID: 1, Title: "Edit README A"}
+	t2 := &pm.Task{ID: 2, Title: "Edit README B"}
+	w1, err := worktree.Create(repo, t1)
+	if err != nil {
+		t.Fatalf("Create w1: %v", err)
+	}
+	w2, err := worktree.Create(repo, t2)
+	if err != nil {
+		t.Fatalf("Create w2: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(w1.Path, "README.md"), []byte("# A\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(w2.Path, "README.md"), []byte("# B\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w1.Commit(t1); err != nil {
+		t.Fatalf("Commit w1: %v", err)
+	}
+	if _, err := w2.Commit(t2); err != nil {
+		t.Fatalf("Commit w2: %v", err)
+	}
+
+	resolved := "# A and B merged\n"
+	resolver := &scriptedResolver{files: map[string]string{"README.md": resolved}}
+
+	q := New(repo, "main")
+	q.SetResolver(resolver)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	q.Start(ctx)
+	defer q.Stop()
+
+	r1 := q.Submit(Request{Branch: w1.Branch, TaskID: t1.ID})
+	<-r1.Done
+	if r1.Err != nil {
+		t.Fatalf("first merge unexpectedly failed: %v", r1.Err)
+	}
+
+	r2 := q.Submit(Request{Branch: w2.Branch, TaskID: t2.ID})
+	select {
+	case <-r2.Done:
+	case <-time.After(30 * time.Second):
+		t.Fatal("auto-resolve merge timed out")
+	}
+	if r2.Err != nil {
+		t.Fatalf("expected auto-resolve to succeed, got: %v", r2.Err)
+	}
+	if resolver.calls != 1 {
+		t.Errorf("expected resolver to be called once, got %d", resolver.calls)
+	}
+	// README on main must now reflect the resolution.
+	got, err := os.ReadFile(filepath.Join(repo, "README.md"))
+	if err != nil {
+		t.Fatalf("read README: %v", err)
+	}
+	if string(got) != resolved {
+		t.Errorf("README on main = %q, want %q", got, resolved)
+	}
+	// MERGE_HEAD must be gone; working tree clean.
+	if _, err := os.Stat(filepath.Join(repo, ".git", "MERGE_HEAD")); !os.IsNotExist(err) {
+		t.Errorf("MERGE_HEAD still exists after auto-resolve: %v", err)
+	}
+}
+
+// TestQueue_AutoResolverFailureFallsBackToAbort ensures that when the
+// resolver returns an error, the queue still aborts the merge so the working
+// tree is clean for the next job. The original conflict error is returned.
+func TestQueue_AutoResolverFailureFallsBackToAbort(t *testing.T) {
+	if !gitAvailable() {
+		t.Skip("git not available")
+	}
+	repo := initRepo(t)
+
+	t1 := &pm.Task{ID: 1, Title: "Edit README A"}
+	t2 := &pm.Task{ID: 2, Title: "Edit README B"}
+	w1, _ := worktree.Create(repo, t1)
+	w2, _ := worktree.Create(repo, t2)
+	_ = os.WriteFile(filepath.Join(w1.Path, "README.md"), []byte("# A\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(w2.Path, "README.md"), []byte("# B\n"), 0o644)
+	_, _ = w1.Commit(t1)
+	_, _ = w2.Commit(t2)
+
+	resolver := &scriptedResolver{err: errResolverGaveUp}
+
+	q := New(repo, "main")
+	q.SetResolver(resolver)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	q.Start(ctx)
+	defer q.Stop()
+
+	<-q.Submit(Request{Branch: w1.Branch, TaskID: t1.ID}).Done
+	r2 := q.Submit(Request{Branch: w2.Branch, TaskID: t2.ID})
+	<-r2.Done
+	if r2.Err == nil {
+		t.Fatal("expected merge to fail after resolver gave up")
+	}
+	if _, err := os.Stat(filepath.Join(repo, ".git", "MERGE_HEAD")); !os.IsNotExist(err) {
+		t.Errorf("MERGE_HEAD still exists after abort: %v", err)
+	}
+}
+
+// errResolverGaveUp is a sentinel for the failure test above; declared here
+// (not inline) so we can match on it later if we ever propagate it.
+var errResolverGaveUp = errResolverGaveUpType("resolver gave up")
+
+type errResolverGaveUpType string
+
+func (e errResolverGaveUpType) Error() string { return string(e) }
+
 // TestQueue_StopRejectsPending ensures that submissions made after Stop()
 // return a clean error rather than blocking.
 func TestQueue_StopRejectsPending(t *testing.T) {
