@@ -19,6 +19,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -84,6 +85,58 @@ func (d *DB) Analyze() error {
 	defer d.mu.Unlock()
 	if _, err := d.conn.Exec(`ANALYZE`); err != nil {
 		return fmt.Errorf("statedb: ANALYZE: %w", classifyDriverErr(err))
+	}
+	return nil
+}
+
+// WALCheckpointTruncate flushes the WAL into the main database file and
+// truncates the WAL to zero bytes. Used as the first step of a hot backup
+// (Task 20115) so VACUUM INTO produces a snapshot that includes every
+// committed transaction up to the moment of the backup, not just whatever
+// had previously been folded into the main file.
+//
+// PRAGMA wal_checkpoint returns three columns: busy (0 if checkpoint
+// completed without contention), log_size (frames in the WAL before the
+// checkpoint), and checkpointed (frames moved to the main DB). The string
+// returned summarises those values for logging; a non-zero busy column is
+// not an error per se — under heavy concurrent load the checkpoint can
+// only flush as many frames as it could acquire — but it is reported so an
+// operator can decide whether to retry.
+func (d *DB) WALCheckpointTruncate() (string, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	var busy, logSize, checkpointed int
+	row := d.conn.QueryRow(`PRAGMA wal_checkpoint(TRUNCATE)`)
+	if err := row.Scan(&busy, &logSize, &checkpointed); err != nil {
+		return "", fmt.Errorf("statedb: wal_checkpoint(TRUNCATE): %w", classifyDriverErr(err))
+	}
+	if busy != 0 {
+		return fmt.Sprintf("PARTIAL (busy=%d log_frames=%d checkpointed=%d)", busy, logSize, checkpointed), nil
+	}
+	return fmt.Sprintf("TRUNCATE log_frames=%d checkpointed=%d", logSize, checkpointed), nil
+}
+
+// VacuumInto produces a transactionally-consistent copy of the database at
+// outPath using SQLite's `VACUUM INTO 'path'` statement. The output is a
+// single self-contained file (no WAL/SHM sidecars) and is the recommended
+// hot-backup primitive when the C-level Online Backup API is not available.
+//
+// outPath must not already exist — VACUUM INTO refuses to overwrite. The
+// caller is responsible for clearing any stale destination first.
+//
+// The path is interpolated into a SQL string literal because VACUUM INTO
+// does not accept bound parameters. Single quotes in the path are escaped
+// by doubling, matching SQLite's quoting rules.
+func (d *DB) VacuumInto(outPath string) error {
+	if outPath == "" {
+		return fmt.Errorf("statedb: VACUUM INTO: empty output path")
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	escaped := strings.ReplaceAll(outPath, "'", "''")
+	stmt := fmt.Sprintf(`VACUUM INTO '%s'`, escaped)
+	if _, err := d.conn.Exec(stmt); err != nil {
+		return fmt.Errorf("statedb: VACUUM INTO %q: %w", outPath, classifyDriverErr(err))
 	}
 	return nil
 }

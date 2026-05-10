@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"runtime/debug"
 	"sort"
 	"strconv"
@@ -37,6 +38,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/provider"
 	"github.com/blechschmidt/cloop/pkg/ratelimit"
 	"github.com/blechschmidt/cloop/pkg/reqid"
+	"github.com/blechschmidt/cloop/pkg/resources"
 	"github.com/blechschmidt/cloop/pkg/riskmatrix"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/statedb"
@@ -474,7 +476,39 @@ type Server struct {
 	// Nil means the package picks a sensible default at first use (text
 	// output to stdout, project bound).
 	Log logger.Logger
+
+	// Resource sampling state (Task 20116). One Sampler+History per project
+	// workDir so concurrent requests for different projects do not contend
+	// on a global lock. The Sampler holds the previous /proc/self/stat ticks
+	// needed to compute CPU%, so a per-project instance is required to
+	// avoid one project's CPU sample overwriting another's diff baseline.
+	//
+	// resCacheTTL bounds how often we re-sample: a snapshot newer than
+	// resCacheTTL is returned as-is, otherwise we resample and append. With
+	// resCacheTTL=5s and resHistoryCap=60, the History covers the last
+	// ~5 minutes of process activity which is what the UI sparklines show.
+	resMu      sync.Mutex
+	resTrack   map[string]*resTracker
 }
+
+// resTracker bundles the per-project resource sampler with its sliding-window
+// history and a tiny last-sampled wallclock cache so concurrent /api/resources
+// hits within resCacheTTL share a single underlying sample.
+type resTracker struct {
+	sampler  *resources.Sampler
+	history  *resources.History
+	lastTime time.Time
+}
+
+// resCacheTTL is the minimum interval between forced /proc/self/stat reads
+// for a single project. The 5s value matches the task spec's "sampling
+// every 5s" requirement and keeps the dashboard's per-card refresh light.
+const resCacheTTL = 5 * time.Second
+
+// resHistoryCap is the number of samples retained per project. With a 5s
+// TTL this is about five minutes of history — enough for a meaningful
+// sparkline without unbounded memory growth across long-running daemons.
+const resHistoryCap = 60
 
 // log returns s.Log, falling back to a default text logger if the field
 // was left zero. The fallback is initialised lazily so test servers that
@@ -505,6 +539,7 @@ func New(workdir string, port int, token string) *Server {
 		chatHistories:   make(map[string][]ChatMessage),
 		runStates:       make(map[string]bool),
 		stuckLastSeen:   make(map[string]int64),
+		resTrack:        make(map[string]*resTracker),
 		Log:             logger.New(false).With("project", workdir).With("component", "ui"),
 	}
 }
@@ -857,11 +892,15 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	// Toggle persistent CLI options (--auto-evolve, --innovate, etc.)
 	mux.HandleFunc("POST /api/options/toggle", s.handleOptionsToggle)
 	mux.HandleFunc("POST /api/options/max-parallel", s.handleMaxParallelSet)
+	mux.HandleFunc("POST /api/options/step-timeout", s.handleStepTimeoutSet)
 	mux.HandleFunc("POST /api/options/provider", s.handleProviderModelSet)
 
 	// Central work queue (every PM task, heal retry, evolve cycle, external merge)
 	mux.HandleFunc("GET /api/queue", s.handleQueue)
 	mux.HandleFunc("GET /api/queue/stats", s.handleQueueStats)
+
+	// System-level resource usage (CPU, memory, disk, fds, goroutines)
+	mux.HandleFunc("GET /api/resources", s.handleResources)
 
 	// Client-side JS error reporting (window.onerror, unhandledrejection)
 	mux.HandleFunc("POST /api/client-error", s.handleClientError)
@@ -1632,9 +1671,10 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "no cloop project found", http.StatusNotFound)
 		return
 	}
-	// Enrich model from config when state doesn't have one
-	if ps.Model == "" {
-		if cfg, cfgErr := config.Load(workDir); cfgErr == nil {
+	// Enrich from config.
+	cfg, cfgErr := config.Load(workDir)
+	if cfgErr == nil {
+		if ps.Model == "" {
 			switch ps.Provider {
 			case "anthropic":
 				ps.Model = cfg.Anthropic.Model
@@ -1650,7 +1690,17 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	jsonOK(w, ps)
+
+	// Build enriched response including config-only fields.
+	type stateWithConfig struct {
+		*state.ProjectState
+		StepTimeout string `json:"step_timeout,omitempty"`
+	}
+	resp := stateWithConfig{ProjectState: ps}
+	if cfgErr == nil {
+		resp.StepTimeout = cfg.StepTimeout
+	}
+	jsonOK(w, resp)
 }
 
 // handleSteps returns a paginated slice of step history, latest first.
@@ -4261,6 +4311,61 @@ func (s *Server) handleQueueStats(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, out)
 }
 
+// handleResources serves a resources.Snapshot for the resolved project plus
+// the recent history needed to render sparklines client-side. The Sampler
+// re-reads /proc/self/stat at most once per resCacheTTL per project: a hit
+// from a second client within the TTL receives the cached "latest" entry
+// without touching /proc again. This keeps the dashboard cheap to refresh
+// even when several browser tabs are open against the same daemon.
+//
+// Response shape:
+//
+//	{
+//	  "current": Snapshot,
+//	  "history": [Snapshot, ...],     // chronological, oldest first
+//	  "sample_interval_seconds": 5,
+//	  "history_capacity": 60,
+//	  "num_cpu": 8                    // converts CPU% from "of one core"
+//	}
+func (s *Server) handleResources(w http.ResponseWriter, r *http.Request) {
+	workDir := s.resolveWorkDir(r)
+
+	s.resMu.Lock()
+	tracker, ok := s.resTrack[workDir]
+	if !ok {
+		tracker = &resTracker{
+			sampler: resources.NewSampler(),
+			history: resources.NewHistory(resHistoryCap),
+		}
+		s.resTrack[workDir] = tracker
+	}
+
+	now := time.Now()
+	if now.Sub(tracker.lastTime) >= resCacheTTL {
+		snap := tracker.sampler.Sample(workDir)
+		tracker.history.Append(snap)
+		tracker.lastTime = now
+	}
+	current, has := tracker.history.Latest()
+	historyCopy := tracker.history.Snapshots()
+	s.resMu.Unlock()
+
+	if !has {
+		// Unreachable: we just appended a sample. Guarded so a future
+		// change to the History contract surfaces as an explicit 500.
+		jsonErr(w, "no resource sample available", http.StatusInternalServerError)
+		return
+	}
+
+	jsonOK(w, map[string]interface{}{
+		"current":                 current,
+		"history":                 historyCopy,
+		"sample_interval_seconds": int(resCacheTTL / time.Second),
+		"history_capacity":        resHistoryCap,
+		"num_cpu":                 runtime.NumCPU(),
+	})
+}
+
 // handleProjects returns all project statuses and aggregate stats.
 func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
 	s.refreshProjectStatuses()
@@ -5497,6 +5602,41 @@ func (s *Server) handleMaxParallelSet(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]interface{}{
 		"ok":           true,
 		"max_parallel": ps.MaxParallel,
+	})
+}
+
+// handleStepTimeoutSet updates the per-project step timeout.
+// POST /api/options/step-timeout body: {"value":"10m"} or {"value":"0"} to disable.
+func (s *Server) handleStepTimeoutSet(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Value string `json:"value"`
+	}
+	limitJSONBody(w, r, maxJSONBodyBytes)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondToBodyError(w, err)
+		return
+	}
+	// Validate: must be "0", empty, or a valid Go duration.
+	if req.Value != "" && req.Value != "0" {
+		if _, err := time.ParseDuration(req.Value); err != nil {
+			jsonErr(w, "invalid duration format (examples: 10m, 30m, 1h, 0)", http.StatusBadRequest)
+			return
+		}
+	}
+	workDir := s.resolveWorkDir(r)
+	cfg, err := config.Load(workDir)
+	if err != nil {
+		jsonErr(w, "config load failed", http.StatusInternalServerError)
+		return
+	}
+	cfg.StepTimeout = req.Value
+	if err := config.Save(workDir, cfg); err != nil {
+		jsonErr(w, "save failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	jsonOK(w, map[string]interface{}{
+		"ok":           true,
+		"step_timeout": req.Value,
 	})
 }
 
@@ -7375,6 +7515,44 @@ const dashboardHTML = `<!DOCTYPE html>
           <div class="options-grid" id="activeOptionsGrid"></div>
         </div>
 
+        <!-- Resources: CPU / RAM / disk / fds / goroutines (Task 20116) -->
+        <div class="section">
+          <div class="section-title" style="display:flex;align-items:center;gap:12px">
+            Resources
+            <span id="resourcesUpdated" style="font-size:11px;color:var(--muted);font-weight:400;text-transform:none;letter-spacing:0"></span>
+            <button class="btn" style="padding:4px 10px;font-size:12px;margin-left:auto" onclick="loadResources()" title="Refresh resource sample">&#8635;</button>
+          </div>
+          <div class="resources-grid" id="resourcesGrid">
+            <div class="res-card">
+              <div class="res-label">CPU</div>
+              <div class="res-value accent" id="resCPU">—</div>
+              <div class="res-sub" id="resCPUSub"></div>
+              <svg class="res-spark" id="resCPUSpark" viewBox="0 0 100 24" preserveAspectRatio="none" aria-hidden="true"></svg>
+            </div>
+            <div class="res-card">
+              <div class="res-label">Memory (Sys)</div>
+              <div class="res-value accent" id="resMem">—</div>
+              <div class="res-sub" id="resMemSub"></div>
+              <svg class="res-spark" id="resMemSpark" viewBox="0 0 100 24" preserveAspectRatio="none" aria-hidden="true"></svg>
+            </div>
+            <div class="res-card">
+              <div class="res-label">Goroutines</div>
+              <div class="res-value" id="resGoroutines">—</div>
+              <div class="res-sub" id="resGoroutinesSub"></div>
+            </div>
+            <div class="res-card">
+              <div class="res-label">Open FDs</div>
+              <div class="res-value" id="resFDs">—</div>
+              <div class="res-sub" id="resFDsSub">&nbsp;</div>
+            </div>
+            <div class="res-card" style="grid-column:span 2">
+              <div class="res-label">.cloop disk usage</div>
+              <div class="res-value" id="resDiskTotal" style="font-size:18px">—</div>
+              <div class="res-disk-breakdown" id="resDiskBreakdown"></div>
+            </div>
+          </div>
+        </div>
+
         <!-- Claude Code per-project usage caps (only when provider is claudecode) -->
         <div class="section" id="ccLimitsSection" style="display:none">
           <div class="section-title" style="display:flex;align-items:center;gap:12px">
@@ -8876,15 +9054,27 @@ function renderActiveOptions(s) {
         'onchange="setMaxParallel(this.value)" />' +
       '<span class="opt-flag" title="Currently: ' + mpDisplay + ' worker(s)">-j ' + mpDisplay + '</span>' +
     '</div>';
+  // Step timeout control
+  const stVal = s.step_timeout || '10m';
+  const stepTimeoutControl =
+    '<div class="option-badge option-config" ' +
+      'title="Max duration per task step. Set to 0 to disable.">' +
+      '<span class="opt-icon">⏱</span>' +
+      '<span>Step Timeout</span>' +
+      '<input type="text" id="stepTimeoutInput" value="' + (stVal === '0' ? 'off' : stVal) + '" ' +
+        'style="width:56px;background:transparent;color:var(--text);border:1px solid var(--border);' +
+        'border-radius:4px;padding:2px 4px;font-family:inherit;font-size:inherit;text-align:right;" ' +
+        'onchange="setStepTimeout(this.value)" />' +
+    '</div>';
   const enabledCount = opts.filter(o => o[0]).length;
   if (enabledCount === 0) {
     grid.innerHTML =
       '<div class="options-empty">No persistent CLI options are currently enabled. ' +
       'Run with <code>--auto-evolve</code> or <code>--innovate</code> to activate.</div>' +
-      buildOptionBadges(opts) + parallelControls;
+      buildOptionBadges(opts) + parallelControls + stepTimeoutControl;
     return;
   }
-  grid.innerHTML = buildOptionBadges(opts) + parallelControls;
+  grid.innerHTML = buildOptionBadges(opts) + parallelControls + stepTimeoutControl;
 }
 
 // Exposed on window because the Active Options badges use inline onchange
@@ -8919,6 +9109,19 @@ window.setMaxParallel = function(raw) {
     }
     toast('Update failed: ' + err.message, 'error');
   });
+};
+
+window.setStepTimeout = function(raw) {
+  const val = raw.trim().toLowerCase();
+  const sendVal = (val === 'off' || val === '0' || val === '') ? '0' : val;
+  apiMethod('POST', pUrl('/api/options/step-timeout'), {value: sendVal}).then(d => {
+    if (d && d.ok) {
+      toast('Step timeout set to ' + (sendVal === '0' ? 'disabled' : sendVal), 'success');
+      if (appState) { appState.step_timeout = sendVal; }
+    } else {
+      toast('Update failed: ' + (d && d.error ? d.error : 'unknown error'), 'error');
+    }
+  }).catch(err => toast('Error: ' + err, 'error'));
 };
 
 function buildOptionBadges(opts) {

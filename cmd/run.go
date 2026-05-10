@@ -112,9 +112,23 @@ Press Ctrl+C to pause gracefully.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		workdir, _ := os.Getwd()
 
-		timeout, err := time.ParseDuration(stepTimeout)
-		if err != nil {
-			return fmt.Errorf("invalid step-timeout: %w", err)
+		// Use config step_timeout if CLI flag wasn't explicitly set.
+		effectiveTimeout := stepTimeout
+		if !cmd.Flags().Changed("step-timeout") {
+			if projCfg, cfgErr := config.Load(workdir); cfgErr == nil && projCfg.StepTimeout != "" {
+				effectiveTimeout = projCfg.StepTimeout
+			}
+		}
+
+		var timeout time.Duration
+		var err error
+		if effectiveTimeout == "0" || effectiveTimeout == "" {
+			timeout = 0 // no timeout
+		} else {
+			timeout, err = time.ParseDuration(effectiveTimeout)
+			if err != nil {
+				return fmt.Errorf("invalid step-timeout: %w", err)
+			}
 		}
 
 		var delay time.Duration

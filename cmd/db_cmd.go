@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/dbbackup"
 	"github.com/blechschmidt/cloop/pkg/dbmaintain"
 	"github.com/blechschmidt/cloop/pkg/dbverify"
 	"github.com/fatih/color"
@@ -220,11 +221,166 @@ func humanBytes(n int64) string {
 	}
 }
 
+var dbBackupCmd = &cobra.Command{
+	Use:   "backup",
+	Short: "Create a hot backup of .cloop/state.db (safe while cloop is running)",
+	Long: `Create a self-contained, transactionally-consistent copy of
+.cloop/state.db without stopping the running cloop daemon.
+
+How it works:
+  1. PRAGMA wal_checkpoint(TRUNCATE) flushes pending WAL frames into the
+     main database file so the snapshot is as current as possible.
+  2. VACUUM INTO '<output>' produces a single defragmented .db file at the
+     supplied path. SQLite guarantees the copy is consistent at the read
+     transaction's snapshot point — concurrent writes do not corrupt it.
+  3. A sidecar '<output>.meta.json' is written with SHA-256 checksum,
+     source path, size, schema version, and duration.
+
+The default output path is
+.cloop/backups/state-<UTC-timestamp>.db. Use --output to override it.
+
+Exit codes:
+  0  backup completed
+  1  backup failed
+  2  the backup command itself could not run (file missing, permission)`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		out, _ := cmd.Flags().GetString("output")
+
+		workdir, _ := os.Getwd()
+		dbPath := filepath.Join(workdir, ".cloop", "state.db")
+
+		header := color.New(color.FgCyan, color.Bold)
+		pass := color.New(color.FgGreen, color.Bold)
+		fail := color.New(color.FgRed, color.Bold)
+		dim := color.New(color.Faint)
+
+		if out == "" {
+			ts := time.Now().UTC().Format("20060102T150405Z")
+			out = filepath.Join(workdir, ".cloop", "backups", fmt.Sprintf("state-%s.db", ts))
+		}
+
+		header.Println("cloop db backup")
+		dim.Printf("  source: %s\n", dbPath)
+		dim.Printf("  output: %s\n\n", out)
+
+		if _, err := os.Stat(dbPath); err != nil {
+			fail.Printf("Backup could not run: %v\n", err)
+			os.Exit(2)
+		}
+
+		report, err := dbbackup.Backup(dbPath, out)
+		if err != nil {
+			fail.Printf("Backup failed: %v\n", err)
+			os.Exit(1)
+		}
+
+		fmt.Printf("  WAL checkpoint:  %s\n", report.WALCheckpoint)
+		fmt.Printf("  size:            %s\n", humanBytes(report.SizeBytes))
+		fmt.Printf("  duration:        %s\n", report.Duration.Round(time.Millisecond))
+		fmt.Printf("  sha256:          %s\n", report.SHA256)
+		fmt.Printf("  schema version:  %d\n", report.SchemaVersion)
+		fmt.Printf("  metadata:        %s\n\n", report.MetadataPath)
+		pass.Println("Backup complete.")
+		return nil
+	},
+}
+
+var dbRestoreCmd = &cobra.Command{
+	Use:   "restore <backup-path>",
+	Short: "Restore .cloop/state.db from a backup created by 'cloop db backup'",
+	Long: `Validate a backup and atomically swap it into .cloop/state.db.
+
+Validation steps:
+  1. PRAGMA integrity_check on the backup file (read-only handle).
+  2. SHA-256 verification against the sidecar metadata, if present.
+
+Refuses to overwrite an active database (when state.db, state.db-wal,
+or state.db-shm exist alongside it) without --force. With --force, the
+existing destination is moved to a sibling .pre-restore.<timestamp>
+file before the swap so a botched restore is recoverable.
+
+Exit codes:
+  0  restore completed
+  1  restore failed (backup invalid, refused without --force, etc.)
+  2  the restore command itself could not run (file missing, etc.)`,
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		backupPath := args[0]
+		force, _ := cmd.Flags().GetBool("force")
+		skipChecksum, _ := cmd.Flags().GetBool("skip-checksum")
+
+		workdir, _ := os.Getwd()
+		dstPath := filepath.Join(workdir, ".cloop", "state.db")
+
+		header := color.New(color.FgCyan, color.Bold)
+		pass := color.New(color.FgGreen, color.Bold)
+		warn := color.New(color.FgYellow, color.Bold)
+		fail := color.New(color.FgRed, color.Bold)
+		dim := color.New(color.Faint)
+
+		header.Println("cloop db restore")
+		dim.Printf("  backup:      %s\n", backupPath)
+		dim.Printf("  destination: %s\n\n", dstPath)
+
+		if _, err := os.Stat(backupPath); err != nil {
+			fail.Printf("Restore could not run: %v\n", err)
+			os.Exit(2)
+		}
+
+		// Surface metadata up front so the operator sees what they are
+		// restoring before any disk mutation happens.
+		if meta, err := dbbackup.LoadMetadata(backupPath); err == nil && meta != nil {
+			dim.Printf("  metadata: created %s, size %s, schema v%d, sha256=%s…\n\n",
+				meta.CreatedAt.Format(time.RFC3339),
+				humanBytes(meta.SizeBytes),
+				meta.SchemaVersion,
+				safePrefix(meta.SHA256, 12),
+			)
+		} else {
+			dim.Println("  metadata: (no sidecar found)")
+			fmt.Println()
+		}
+
+		report, err := dbbackup.Restore(backupPath, dstPath, dbbackup.RestoreOptions{
+			Force:        force,
+			SkipChecksum: skipChecksum,
+		})
+		if err != nil {
+			fail.Printf("Restore failed: %v\n", err)
+			os.Exit(1)
+		}
+
+		fmt.Printf("  size:        %s\n", humanBytes(report.SizeBytes))
+		fmt.Printf("  duration:    %s\n", report.Duration.Round(time.Millisecond))
+		if report.BackedUpPath != "" {
+			warn.Printf("  rolled-back snapshot saved to %s\n", report.BackedUpPath)
+			dim.Println("  (delete it once you have verified the restored DB.)")
+		}
+		fmt.Println()
+		pass.Println("Restore complete.")
+		return nil
+	},
+}
+
+// safePrefix returns s[:n] if len(s) >= n, otherwise s. Used for trimming
+// hash digests in human-readable output without panicking on short inputs.
+func safePrefix(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
+}
+
 func init() {
 	dbVerifyCmd.Flags().Bool("quick", false, "Use PRAGMA quick_check instead of integrity_check (faster, less thorough)")
 	dbMaintainCmd.Flags().Bool("dry-run", false, "Report DB size and reclaimable estimate without running VACUUM/ANALYZE")
 	dbMaintainCmd.Flags().Bool("auto", false, "Run only if DB has grown >20% since the last recorded vacuum")
+	dbBackupCmd.Flags().String("output", "", "Output path for the backup file (default: .cloop/backups/state-<UTC>.db)")
+	dbRestoreCmd.Flags().Bool("force", false, "Overwrite an active destination database; the previous file is preserved as .pre-restore.<timestamp>")
+	dbRestoreCmd.Flags().Bool("skip-checksum", false, "Skip SHA-256 verification against the sidecar metadata")
 	dbCmd.AddCommand(dbVerifyCmd)
 	dbCmd.AddCommand(dbMaintainCmd)
+	dbCmd.AddCommand(dbBackupCmd)
+	dbCmd.AddCommand(dbRestoreCmd)
 	rootCmd.AddCommand(dbCmd)
 }

@@ -137,6 +137,10 @@ type Config struct {
 	// Overridden by --max-parallel / -j on the command line.
 	MaxParallel int `yaml:"max_parallel,omitempty"`
 
+	// StepTimeout is the maximum duration per task step (e.g. "10m", "30m", "0").
+	// "0" or empty means no timeout. Overridden by --step-timeout on the command line.
+	StepTimeout string `yaml:"step_timeout,omitempty"`
+
 	// Watch configures the file-watch mode for `cloop watch --glob`.
 	Watch WatchConfig `yaml:"watch,omitempty"`
 
@@ -185,6 +189,60 @@ type Config struct {
 
 	// UI configures the cloop ui Web dashboard server. See UIConfig.
 	UI UIConfig `yaml:"ui,omitempty"`
+
+	// Backup configures hot backups of .cloop/state.db (Task 20115).
+	// When AutoBackup is true, the long-running cloop ui server runs a
+	// daily backup and prunes old files. Disabled by default.
+	Backup BackupConfig `yaml:"backup,omitempty"`
+}
+
+// BackupConfig configures hot backups of the SQLite state database.
+//
+// AutoBackup is opt-in: cloop never spawns a backup goroutine without
+// explicit consent because backups consume disk space and can occasionally
+// pause writers briefly during the WAL checkpoint. Operators who want
+// rolling daily snapshots set `backup.auto_backup: true` and (optionally)
+// `backup.dir` to relocate them off the project working directory.
+type BackupConfig struct {
+	// AutoBackup, when true, instructs the cloop ui server to run a daily
+	// backup of .cloop/state.db. Off by default.
+	AutoBackup bool `yaml:"auto_backup,omitempty"`
+
+	// Dir is the destination directory for automatic backups. When empty,
+	// "<workdir>/.cloop/backups" is used. May be absolute or relative;
+	// relative paths resolve against the project working directory.
+	Dir string `yaml:"dir,omitempty"`
+
+	// IntervalHours is the period between consecutive automatic backups.
+	// Zero substitutes 24 (daily). Minimum 1, capped at 168 (weekly) so a
+	// hand-edited config can't disable backups without setting AutoBackup
+	// to false.
+	IntervalHours int `yaml:"interval_hours,omitempty"`
+
+	// KeepCount is the number of automatic backup files to retain in Dir.
+	// Older files (matched by the "state-*.db" naming convention) are
+	// removed after each successful run. Zero substitutes 7. A value of
+	// -1 disables pruning entirely.
+	KeepCount int `yaml:"keep_count,omitempty"`
+}
+
+// EffectiveIntervalHours returns the configured interval, substituting 24
+// when zero. Out-of-range values fall back to the default so a corrupt
+// config can't accidentally suppress all automatic backups.
+func (b BackupConfig) EffectiveIntervalHours() int {
+	if b.IntervalHours <= 0 || b.IntervalHours > 168 {
+		return 24
+	}
+	return b.IntervalHours
+}
+
+// EffectiveKeepCount returns the configured retention count. -1 means
+// "keep everything"; zero substitutes 7.
+func (b BackupConfig) EffectiveKeepCount() int {
+	if b.KeepCount == 0 {
+		return 7
+	}
+	return b.KeepCount
 }
 
 // OrchestratorConfig holds wall-clock budgets and other knobs that bound the
