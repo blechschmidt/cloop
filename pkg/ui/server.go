@@ -2778,7 +2778,13 @@ func (s *Server) handleTaskAdd(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ps, err := state.Load(s.resolveWorkDir(r))
+	// LoadLite skips reading per-step rows — we only need plan/tasks to compute
+	// the next ID. SaveState upserts steps (never deletes), so writing back
+	// with Steps == nil preserves existing rows. On a project with thousands
+	// of steps this drops the handler's read cost from ~1.5 MiB to a few KiB,
+	// which is the second-biggest contributor to add-task latency after the
+	// frontend's redundant refetch.
+	ps, err := state.LoadLite(s.resolveWorkDir(r))
 	if err != nil {
 		jsonErr(w, "no project found — run cloop init first", http.StatusNotFound)
 		return
@@ -13275,7 +13281,14 @@ window.submitAddTask = function() {
       document.getElementById('newTaskPriority').value = '';
       document.getElementById('newTaskDeps').value     = '';
       toast('Task added: '+title, 'ok');
-      refreshState();
+      // Optimistically merge the returned task into appState so the row
+      // appears immediately, without waiting for the WS state_diff round-trip
+      // or a full /api/state refetch. The server still broadcasts a state_diff
+      // for this mutation; applyStateDiff is idempotent for adds (existing IDs
+      // become a field merge), so the dupe arrival is harmless.
+      if (d.task && typeof applyStateDiff === 'function') {
+        try { applyStateDiff({tasks_added: [d.task]}); } catch(_) {}
+      }
     } else toast(d.error||'Add failed', 'err');
   }).catch(() => toast('Request failed', 'err'));
 };
