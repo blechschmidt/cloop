@@ -13565,9 +13565,9 @@ let currentSuggestions = [];
 window.toggleSuggestPanel = function() {
   const panel = document.getElementById('suggestPanel');
   const btn   = document.getElementById('suggestToggleBtn');
-  const open  = panel.style.display === 'none' || panel.style.display === '';
-  panel.style.display = open ? '' : 'none';
-  btn.textContent = open ? 'Hide suggestions' : 'Brainstorm ideas';
+  const isHidden = panel.style.display === 'none';
+  panel.style.display = isHidden ? '' : 'none';
+  btn.textContent = isHidden ? 'Hide suggestions' : 'Brainstorm ideas';
 };
 
 window.runSuggest = function() {
