@@ -36,6 +36,8 @@ import (
 	"os"
 	"sync"
 	"time"
+
+	"github.com/blechschmidt/cloop/pkg/reqid"
 )
 
 // Level represents the severity of a log entry. The string values are the
@@ -118,11 +120,26 @@ type Logger interface {
 	// Typical use: log.With("project", workdir).With("provider", name).
 	With(key string, value any) Logger
 
+	// WithContext returns a Logger that automatically attaches a
+	// request_id attribute (sourced from pkg/reqid) to every entry, when
+	// such an ID is bound to ctx. When ctx carries no request ID the
+	// returned Logger is equivalent to the receiver. Use this at the
+	// boundary of a request-scoped goroutine so deeply nested call sites
+	// don't have to thread the ID through their data maps manually.
+	WithContext(ctx context.Context) Logger
+
 	// IsJSON reports whether this logger emits machine-parseable JSON
 	// output. Callers use this to suppress decorative color/banner text
 	// that would otherwise corrupt a JSON stream.
 	IsJSON() bool
 }
+
+// requestIDKey is the structured-log attribute name carrying a request ID.
+// Mirrors reqid.LogKey; duplicated to keep this package free of a pkg/reqid
+// import (logger is imported transitively by virtually every cloop package
+// — pulling in another internal dep here would force them all to recompile
+// on a reqid edit).
+const requestIDKey = "request_id"
 
 // slogLogger is the concrete Logger backed by slog.
 type slogLogger struct {
@@ -174,6 +191,18 @@ func (s *slogLogger) With(key string, value any) Logger {
 		handler: s.handler.WithAttrs([]slog.Attr{slog.Any(key, value)}),
 		json:    s.json,
 	}
+}
+
+// WithContext binds the request ID carried by ctx (if any) as a permanent
+// attr on the returned logger. When ctx carries no ID the receiver is
+// returned unchanged so callers can use this unconditionally at the entry
+// of any context-aware code path.
+func (s *slogLogger) WithContext(ctx context.Context) Logger {
+	id := reqid.FromContext(ctx)
+	if id == "" {
+		return s
+	}
+	return s.With(requestIDKey, id)
 }
 
 // Log emits an entry at the requested level with structured attrs. Entries

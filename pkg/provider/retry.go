@@ -6,6 +6,8 @@ import (
 	"math"
 	"math/rand"
 	"time"
+
+	"github.com/blechschmidt/cloop/pkg/reqid"
 )
 
 // RetryConfig controls retry behavior for provider HTTP requests.
@@ -54,6 +56,13 @@ func IsRetryableStatus(code int) bool {
 // backoff between attempts. fn returns the HTTP status code (0 for non-HTTP
 // errors) and an error. Retries stop when fn returns nil, the context is done,
 // or the error comes from a non-retryable HTTP status.
+//
+// When ctx carries a request ID (via pkg/reqid) it is included in the
+// returned error wrappers so a single failure can be traced from the
+// orchestrator log → provider error → HTTP-level audit trail without
+// having to correlate timestamps. Errors that already wrap the request ID
+// (the inner fn might do its own wrapping) are not double-tagged: only
+// the outermost retry/breaker error gets the prefix.
 func DoWithRetry(ctx context.Context, cfg RetryConfig, fn func() (statusCode int, err error)) error {
 	cfg = cfg.withDefaults()
 
@@ -62,15 +71,30 @@ func DoWithRetry(ctx context.Context, cfg RetryConfig, fn func() (statusCode int
 		breaker = GetBreaker(cfg.BreakerKey)
 	}
 
+	rid := reqid.FromContext(ctx)
+	budget := RetryBudgetFromContext(ctx)
+
 	var lastErr error
 	for attempt := 0; attempt < cfg.MaxAttempts; attempt++ {
 		if attempt > 0 {
 			delay := retryDelay(cfg.InitialDelay, cfg.MaxDelay, attempt)
 			select {
 			case <-ctx.Done():
-				return ctx.Err()
+				return wrapWithReqID(ctx.Err(), rid)
 			case <-time.After(delay):
 			}
+		}
+
+		// Per-task retry budget check: consumed BEFORE the breaker so
+		// an over-budget call neither hammers the upstream nor burns a
+		// half-open probe slot. When the budget is exhausted we surface
+		// ErrRetryBudgetExhausted directly; the orchestrator then
+		// declares the task failed instead of retrying further.
+		if err := budget.Take(); err != nil {
+			if lastErr != nil {
+				return wrapWithReqID(fmt.Errorf("%w: last error: %v", err, lastErr), rid)
+			}
+			return wrapWithReqID(err, rid)
 		}
 
 		// Check the breaker before each attempt. A retry that arrives
@@ -78,9 +102,9 @@ func DoWithRetry(ctx context.Context, cfg RetryConfig, fn func() (statusCode int
 		// short-circuited, not allowed to hammer the upstream further.
 		if breaker != nil && !breaker.Allow() {
 			if lastErr != nil {
-				return fmt.Errorf("%w: last error: %v", formatBreakerError(cfg.BreakerKey), lastErr)
+				return wrapWithReqID(fmt.Errorf("%w: last error: %v", formatBreakerError(cfg.BreakerKey), lastErr), rid)
 			}
-			return formatBreakerError(cfg.BreakerKey)
+			return wrapWithReqID(formatBreakerError(cfg.BreakerKey), rid)
 		}
 
 		status, err := fn()
@@ -100,7 +124,7 @@ func DoWithRetry(ctx context.Context, cfg RetryConfig, fn func() (statusCode int
 				// counting cancellation as a failure.
 				breaker.releaseProbe()
 			}
-			return err
+			return wrapWithReqID(err, rid)
 		}
 
 		// For HTTP errors, only retry on known-transient status codes.
@@ -112,7 +136,7 @@ func DoWithRetry(ctx context.Context, cfg RetryConfig, fn func() (statusCode int
 			if breaker != nil {
 				breaker.releaseProbe()
 			}
-			return err
+			return wrapWithReqID(err, rid)
 		}
 
 		if breaker != nil {
@@ -120,7 +144,33 @@ func DoWithRetry(ctx context.Context, cfg RetryConfig, fn func() (statusCode int
 		}
 		lastErr = err
 	}
-	return lastErr
+	return wrapWithReqID(lastErr, rid)
+}
+
+// wrapWithReqID prepends "[request_id=...] " to err's message so the ID
+// flows out alongside the underlying cause. Returns err unchanged when
+// rid is empty (no propagation in scope) or err is nil. Uses fmt.Errorf
+// with %w so errors.Is / errors.As keep working — the wrapper only adds
+// a tag, it does not introduce a new sentinel.
+func wrapWithReqID(err error, rid string) error {
+	if err == nil || rid == "" {
+		return err
+	}
+	return fmt.Errorf("[request_id=%s] %w", rid, err)
+}
+
+// WrapErrWithRequestID is the public helper for provider implementations
+// (anthropic, openai, ollama, claudecode) to tag a direct error with the
+// request ID carried by ctx. Streaming and one-shot paths that don't go
+// through DoWithRetry use this so every error returned to the caller is
+// traceable end-to-end.
+//
+// Returns err unchanged when ctx carries no ID or err is nil.
+func WrapErrWithRequestID(ctx context.Context, err error) error {
+	if err == nil {
+		return nil
+	}
+	return wrapWithReqID(err, reqid.FromContext(ctx))
 }
 
 // retryDelay calculates the delay for a given attempt (1-indexed) using

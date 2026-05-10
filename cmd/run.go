@@ -256,6 +256,14 @@ Press Ctrl+C to pause gracefully.`,
 		if effectiveMaxParallel == 0 && projectState != nil {
 			effectiveMaxParallel = projectState.MaxParallel
 		}
+		// Treat a configured cap > 1 as the canonical "I want parallel
+		// execution" signal (Task 20111). Without this, a user who sets
+		// MaxParallel=4 in the UI but never flips the Parallel badge ends up
+		// in runPMSequential and never sees concurrency, even though the
+		// intent is unambiguous from the cap value.
+		if effectiveMaxParallel > 1 {
+			parallelMode = true
+		}
 
 		// Merge skip-clarify: CLI flag | persisted state (set by 'cloop init --skip-clarify')
 		effectiveSkipClarify := skipClarify
@@ -417,6 +425,7 @@ Press Ctrl+C to pause gracefully.`,
 		AutoPromoteThresholdDays: autoPromoteThresholdDays,
 		CoachMode:                coachMode,
 		Watchdog:                 cfg.Watchdog,
+		TaskTimeoutMinutes:       cfg.Orchestrator.TaskTimeoutMinutes,
 		}
 
 		orc, err := orchestrator.New(orchCfg, prov)

@@ -25,6 +25,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/boundedread"
 	"github.com/blechschmidt/cloop/pkg/logger"
 	"github.com/blechschmidt/cloop/pkg/pm"
+	"github.com/blechschmidt/cloop/pkg/reqid"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 )
@@ -390,8 +391,41 @@ func (s *Server) Shutdown(ctx context.Context) error {
 // load balancers and Kubernetes-style probes can reach them without
 // credentials and without competing with user traffic for token-bucket
 // capacity.
+//
+// requestIDMiddleware wraps everything so the X-Request-ID header is
+// echoed and bound to ctx for *every* response — including 429s from the
+// rate limiter, 401s from auth, and the probe endpoints. That guarantees
+// any log line a downstream layer emits during a request can correlate
+// back to the same incoming call.
 func (s *Server) buildHandler(mux *http.ServeMux) http.Handler {
-	return s.probeBypass(s.rateLimitMiddleware(s.authMiddleware(mux)))
+	return requestIDMiddleware(s.probeBypass(s.rateLimitMiddleware(s.authMiddleware(mux))))
+}
+
+// requestIDMiddleware threads a correlation ID through every request.
+//
+// On entry: read the X-Request-ID header. If present and well-formed
+// (reqid.IsValid) we honour the caller-supplied ID so a multi-hop trace
+// stays stable; otherwise we mint a fresh one via reqid.Generate. The
+// chosen ID is then bound to r.Context() so downstream handlers, the
+// orchestrator, and any provider call started from this goroutine can
+// pull it back out via reqid.FromContext.
+//
+// On exit: the same ID is echoed on the response via the X-Request-ID
+// header. The header is set BEFORE the handler runs so it survives
+// arbitrary writes/streams (WriteHeader makes the header map immutable
+// from the response writer's perspective). Echoing unconditionally —
+// even on 4xx/5xx — gives operators a stable handle they can paste into
+// support tickets and grep against the server logs.
+func requestIDMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		id, ok := reqid.FromRequest(r)
+		if !ok {
+			id = reqid.Generate()
+		}
+		w.Header().Set(reqid.HeaderName, id)
+		ctx := reqid.WithContext(r.Context(), id)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
 }
 
 // probeBypass routes /healthz and /readyz directly to their handlers,
@@ -722,7 +756,7 @@ func (s *Server) handleRunStart(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if r := recover(); r != nil {
 				s.log().Error(logger.EventTaskFailed, 0, "panic in run reaper", map[string]interface{}{
-					"panic":       fmt.Sprintf("%v", r),
+					"panic":       r,
 					"duration_ms": time.Since(startedAt).Milliseconds(),
 				})
 			}

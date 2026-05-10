@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/atomicfile"
+	"github.com/blechschmidt/cloop/pkg/provider"
 )
 
 // histBuckets are the upper bounds (in seconds) for task_duration_seconds histogram.
@@ -265,6 +266,12 @@ func (m *Metrics) Prometheus() string {
 	writeCounter("cloop_tasks_failed_total", "Total number of tasks that failed.", atomic.LoadInt64(&m.tasksFailed))
 	writeCounter("cloop_tasks_skipped_total", "Total number of tasks skipped.", atomic.LoadInt64(&m.tasksSkipped))
 	writeCounter("cloop_steps_total", "Total number of steps (AI completions) executed.", atomic.LoadInt64(&m.stepsTotal))
+	// retry_budget_exhausted_total: process-wide counter sourced from
+	// pkg/provider so every DoWithRetry call site contributes without
+	// having to plumb a Metrics handle through the provider call stack.
+	writeCounter("cloop_retry_budget_exhausted_total",
+		"Total number of provider attempts rejected because the per-task retry budget was exhausted.",
+		provider.RetryBudgetExhaustedTotal())
 
 	// Histogram
 	sb.WriteString("# HELP cloop_task_duration_seconds Duration of individual tasks in seconds.\n")
@@ -313,18 +320,19 @@ func formatFloat(f float64) string {
 
 // Summary is a snapshot of all metrics for JSON serialization.
 type Summary struct {
-	Timestamp      time.Time          `json:"timestamp"`
-	Provider       string             `json:"provider"`
-	Model          string             `json:"model"`
-	DurationSecs   float64            `json:"duration_seconds"`
-	TasksTotal     int64              `json:"tasks_total"`
-	TasksCompleted int64              `json:"tasks_completed"`
-	TasksFailed    int64              `json:"tasks_failed"`
-	TasksSkipped   int64              `json:"tasks_skipped"`
-	StepsTotal     int64              `json:"steps_total"`
-	TaskDuration   DurationSummary    `json:"task_duration_seconds"`
-	TokensUsed     map[string]int64   `json:"tokens_used_total"`
-	CostUSD        map[string]float64 `json:"cost_usd_total"`
+	Timestamp             time.Time          `json:"timestamp"`
+	Provider              string             `json:"provider"`
+	Model                 string             `json:"model"`
+	DurationSecs          float64            `json:"duration_seconds"`
+	TasksTotal            int64              `json:"tasks_total"`
+	TasksCompleted        int64              `json:"tasks_completed"`
+	TasksFailed           int64              `json:"tasks_failed"`
+	TasksSkipped          int64              `json:"tasks_skipped"`
+	StepsTotal            int64              `json:"steps_total"`
+	TaskDuration          DurationSummary    `json:"task_duration_seconds"`
+	TokensUsed            map[string]int64   `json:"tokens_used_total"`
+	CostUSD               map[string]float64 `json:"cost_usd_total"`
+	RetryBudgetExhausted  int64              `json:"retry_budget_exhausted_total"`
 }
 
 // DurationSummary summarizes the task_duration_seconds histogram.
@@ -352,18 +360,19 @@ func (m *Metrics) Snapshot() Summary {
 	m.taskDuration.mu.Unlock()
 
 	return Summary{
-		Timestamp:      time.Now().UTC(),
-		Provider:       m.provider,
-		Model:          m.model,
-		DurationSecs:   time.Since(m.startTime).Seconds(),
-		TasksTotal:     atomic.LoadInt64(&m.tasksTotal),
-		TasksCompleted: atomic.LoadInt64(&m.tasksCompleted),
-		TasksFailed:    atomic.LoadInt64(&m.tasksFailed),
-		TasksSkipped:   atomic.LoadInt64(&m.tasksSkipped),
-		StepsTotal:     atomic.LoadInt64(&m.stepsTotal),
-		TaskDuration:   durSnap,
-		TokensUsed:     m.tokensTotal.snapshot(),
-		CostUSD:        m.costTotal.snapshot(),
+		Timestamp:            time.Now().UTC(),
+		Provider:             m.provider,
+		Model:                m.model,
+		DurationSecs:         time.Since(m.startTime).Seconds(),
+		TasksTotal:           atomic.LoadInt64(&m.tasksTotal),
+		TasksCompleted:       atomic.LoadInt64(&m.tasksCompleted),
+		TasksFailed:          atomic.LoadInt64(&m.tasksFailed),
+		TasksSkipped:         atomic.LoadInt64(&m.tasksSkipped),
+		StepsTotal:           atomic.LoadInt64(&m.stepsTotal),
+		TaskDuration:         durSnap,
+		TokensUsed:           m.tokensTotal.snapshot(),
+		CostUSD:              m.costTotal.snapshot(),
+		RetryBudgetExhausted: provider.RetryBudgetExhaustedTotal(),
 	}
 }
 

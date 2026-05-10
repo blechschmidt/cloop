@@ -117,8 +117,9 @@ func (c *captureLogger) Warn(e logger.Event, id int, m string, d map[string]inte
 func (c *captureLogger) Error(e logger.Event, id int, m string, d map[string]interface{}) {
 	c.Log(logger.LevelError, e, id, m, d)
 }
-func (c *captureLogger) With(_ string, _ any) logger.Logger { return c }
-func (c *captureLogger) IsJSON() bool                       { return false }
+func (c *captureLogger) With(_ string, _ any) logger.Logger          { return c }
+func (c *captureLogger) WithContext(_ context.Context) logger.Logger { return c }
+func (c *captureLogger) IsJSON() bool                                { return false }
 
 func (c *captureLogger) snapshot() []logEntry {
 	c.mu.Lock()

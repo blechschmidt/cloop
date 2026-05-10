@@ -46,6 +46,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/promptstats"
 	"github.com/blechschmidt/cloop/pkg/provider"
 	"github.com/blechschmidt/cloop/pkg/ratelimit"
+	"github.com/blechschmidt/cloop/pkg/reqid"
 	"github.com/blechschmidt/cloop/pkg/ctxedit"
 	"github.com/blechschmidt/cloop/pkg/replay"
 	"github.com/blechschmidt/cloop/pkg/review"
@@ -379,6 +380,14 @@ type Config struct {
 	// detector with sensible defaults (interval=30s, threshold=10min,
 	// artifact-quiet=5min, auto-kill disabled). See pkg/watchdog.
 	Watchdog config.WatchdogConfig
+
+	// TaskTimeoutMinutes is the process-wide default per-task wall-clock
+	// budget applied when neither Task.MaxMinutes nor state.DefaultMaxMinutes
+	// is set (Task 20108). Zero means "use OrchestratorTaskTimeoutMinutesDefault"
+	// (30 minutes), so every cloop run has a hard upper bound on how long a
+	// single hung provider call can pin a task. Sourced from
+	// config.Orchestrator.TaskTimeoutMinutes by cmd/run.go.
+	TaskTimeoutMinutes int
 }
 
 type Orchestrator struct {
@@ -414,6 +423,13 @@ func New(cfg Config, prov provider.Provider) (*Orchestrator, error) {
 	}
 	if cfg.MaxParallel > 0 {
 		s.MaxParallel = cfg.MaxParallel
+	}
+	// A configured cap > 1 is itself an "I want parallel" signal (Task 20111),
+	// so promote s.Parallel even if the caller forgot to set cfg.Parallel.
+	// Without this the dispatcher in runPM falls through to runPMSequential
+	// and the cap is silently ignored.
+	if s.MaxParallel > 1 {
+		s.Parallel = true
 	}
 	// Persist CLI-driven overrides so the running loop's SyncFromDisk reads them
 	// back instead of overwriting the in-memory values from a stale on-disk state
@@ -457,7 +473,9 @@ func New(cfg Config, prov provider.Provider) (*Orchestrator, error) {
 	// is nil-safe so degraded operation is harmless.
 	queue, qErr := taskqueue.Open(s.WorkDir)
 	if qErr != nil {
-		log.Warn(logger.EventSessionStart, 0, fmt.Sprintf("task queue unavailable: %v", qErr), nil)
+		log.Warn(logger.EventSessionStart, 0, "task queue unavailable", map[string]interface{}{
+			"error": qErr.Error(),
+		})
 		queue = nil
 	}
 
@@ -467,7 +485,10 @@ func New(cfg Config, prov provider.Provider) (*Orchestrator, error) {
 	stateDBPath := filepath.Join(s.WorkDir, ".cloop", "state.db")
 	sdb, dbErr := statedb.Open(stateDBPath)
 	if dbErr != nil {
-		log.Warn(logger.EventSessionStart, 0, fmt.Sprintf("statedb unavailable for watchdog: %v", dbErr), nil)
+		log.Warn(logger.EventSessionStart, 0, "statedb unavailable for watchdog", map[string]interface{}{
+			"error": dbErr.Error(),
+			"path":  stateDBPath,
+		})
 		sdb = nil
 	}
 
@@ -530,32 +551,96 @@ func (o *Orchestrator) enqueueWork(e taskqueue.Entry) int64 {
 	}
 	id, err := o.queue.Enqueue(e)
 	if err != nil {
-		o.log.Warn(logger.EventSessionStart, e.TaskID, fmt.Sprintf("queue enqueue failed: %v", err), nil)
+		o.log.Warn(logger.EventSessionStart, e.TaskID, "queue enqueue failed", map[string]interface{}{
+			"error": err.Error(),
+			"kind":  e.Kind,
+		})
 		return 0
 	}
 	return id
 }
 
+// taskTimeoutUnit is the wall-clock duration that one "minute" of task budget
+// resolves to when context.WithTimeout is built (Task 20108). Production code
+// always leaves this at time.Minute so the budget reads naturally in YAML
+// (orchestrator.task_timeout_minutes: 30 → 30 minutes). Tests override it via
+// withTaskTimeoutUnit() to compress full-minute budgets into milliseconds so
+// timeout assertions complete in well under a second instead of waiting on a
+// real wall clock. Variable instead of constant so the override pattern is
+// the same as parallelShutdownGracePeriod.
+var taskTimeoutUnit = time.Minute
+
+// withTaskTimeoutUnit installs unit as the per-task budget unit and returns a
+// restore function. Intended for tests only; the only caller of the restore
+// function should be t.Cleanup. Not safe for concurrent test use without
+// t.Parallel discipline (the variable is process-wide).
+func withTaskTimeoutUnit(unit time.Duration) func() {
+	prev := taskTimeoutUnit
+	taskTimeoutUnit = unit
+	return func() { taskTimeoutUnit = prev }
+}
+
+// effectiveTaskBudgetMinutes returns the per-task wall-clock budget that
+// taskContextWithTimeout will apply, in minutes. The lookup order is:
+//
+//  1. task.MaxMinutes (per-task override; Task 99)
+//  2. state.DefaultMaxMinutes (per-project default)
+//  3. config.Orchestrator.TaskTimeoutMinutes (process-wide default; Task 20108)
+//  4. config.OrchestratorTaskTimeoutMinutesDefault (30 minutes hard fallback)
+//
+// The first non-zero value wins. Zero or negative inputs at every layer
+// resolve to the hard default so a stuck provider can never pin a task
+// indefinitely. This helper is exported (lowercase but accessible from the
+// package) so handleTaskTimeout and the on-screen timeout banner can report
+// the same number that the deadline actually used.
+func (o *Orchestrator) effectiveTaskBudgetMinutes(task *pm.Task) int {
+	if task != nil && task.MaxMinutes > 0 {
+		return task.MaxMinutes
+	}
+	if o.state != nil && o.state.DefaultMaxMinutes > 0 {
+		return o.state.DefaultMaxMinutes
+	}
+	if o.config.TaskTimeoutMinutes > 0 {
+		// Defensively clamp to the same band the loader enforces so a hand-
+		// constructed Config{TaskTimeoutMinutes: -1} (in tests, callers that
+		// bypass cmd/run.go) doesn't degrade to a no-timeout context.
+		if o.config.TaskTimeoutMinutes >= config.OrchestratorTaskTimeoutMinutesLower &&
+			o.config.TaskTimeoutMinutes <= config.OrchestratorTaskTimeoutMinutesUpper {
+			return o.config.TaskTimeoutMinutes
+		}
+	}
+	return config.OrchestratorTaskTimeoutMinutesDefault
+}
+
 // taskContextWithTimeout returns a context (and cancel) scoped to the given task's
-// time budget. If the task has no MaxMinutes and the state has no DefaultMaxMinutes,
-// a plain cancellable context derived from ctx is returned (so the watchdog can
-// still cancel via AutoKillAfter on a stuck task). When a watchdog is active the
-// returned cancel is registered under task.ID and de-registered when invoked,
-// so the same cancel cannot accidentally fire twice.
+// time budget. The budget is resolved by effectiveTaskBudgetMinutes, which always
+// returns a positive value (Task 20108): no execution path produces an unbounded
+// context, so a hung provider HTTP call is guaranteed to be cancelled. When a
+// watchdog is active the returned cancel is registered under task.ID and
+// de-registered when invoked, so the same cancel cannot accidentally fire twice.
+//
+// A fresh request ID is bound to the returned context unless the parent ctx
+// already carries one (in which case the inherited ID is preserved so an
+// HTTP-initiated `cloop run` keeps a single trace identity all the way down
+// to the provider call). The ID is logged on task entry by the caller so
+// operators can grep server logs and orchestrator logs by the same key.
 func (o *Orchestrator) taskContextWithTimeout(ctx context.Context, task *pm.Task) (context.Context, context.CancelFunc) {
-	maxMin := task.MaxMinutes
-	if maxMin == 0 {
-		maxMin = o.state.DefaultMaxMinutes
+	ctx, _ = reqid.EnsureContext(ctx)
+
+	// Install a per-task retry budget so a runaway task cannot consume
+	// unbounded provider attempts. The budget is shared across every
+	// DoWithRetry call made under taskCtx (sub-agents, consensus, heal
+	// retries) — they all see the same *RetryBudget via context. The
+	// limit comes from task.RetryBudget when set, otherwise the
+	// provider default. taskCtx inherits this binding.
+	budgetLimit := provider.DefaultRetryBudget
+	if task != nil && task.RetryBudget > 0 {
+		budgetLimit = task.RetryBudget
 	}
-	var (
-		taskCtx    context.Context
-		taskCancel context.CancelFunc
-	)
-	if maxMin > 0 {
-		taskCtx, taskCancel = context.WithTimeout(ctx, time.Duration(maxMin)*time.Minute)
-	} else {
-		taskCtx, taskCancel = context.WithCancel(ctx)
-	}
+	ctx = provider.WithRetryBudget(ctx, provider.NewRetryBudget(budgetLimit))
+
+	maxMin := o.effectiveTaskBudgetMinutes(task)
+	taskCtx, taskCancel := context.WithTimeout(ctx, time.Duration(maxMin)*taskTimeoutUnit)
 	if o.watchdog != nil && task != nil {
 		o.watchdog.Register(task.ID, taskCancel)
 		taskID := task.ID
@@ -577,8 +662,15 @@ func isTimeoutErr(taskCtx context.Context, err error) bool {
 	return taskCtx.Err() == context.DeadlineExceeded
 }
 
-// handleTaskTimeout marks the task as timed_out, fires desktop and webhook notifications,
-// and persists any partial output as an artifact.
+// handleTaskTimeout marks the task as timed_out, fires desktop and webhook
+// notifications, and persists a final artifact line indicating the timeout
+// (Task 20108). Always writes an artifact entry even when the provider
+// returned no partial output, so post-mortem inspection always finds a
+// trace of the timeout. The effective budget is resolved via
+// effectiveTaskBudgetMinutes so the value reported to the user, the
+// annotation, and the webhook all match the deadline that actually fired —
+// task.MaxMinutes alone may be 0 when the cancellation was triggered by the
+// project-level or process-wide default.
 func (o *Orchestrator) handleTaskTimeout(_ context.Context, s *state.ProjectState, task *pm.Task, partialOutput string, dimColor *color.Color) {
 	task.Status = pm.TaskTimedOut
 	completedAt := time.Now()
@@ -586,26 +678,47 @@ func (o *Orchestrator) handleTaskTimeout(_ context.Context, s *state.ProjectStat
 	if task.StartedAt != nil {
 		task.ActualMinutes = int(completedAt.Sub(*task.StartedAt).Minutes())
 	}
-	pm.AddAnnotation(task, "ai", fmt.Sprintf("Task timed out after %d minute(s) budget", task.MaxMinutes))
 
-	// Record partial artifact if any output was captured.
+	budgetMin := o.effectiveTaskBudgetMinutes(task)
+	reasonMsg := fmt.Sprintf("Task timed out after %d minute(s) budget exceeded", budgetMin)
+	pm.AddAnnotation(task, "ai", reasonMsg)
+	// FailureDiagnosis is the canonical machine-readable failure reason field
+	// surfaced by `cloop status`, the Web UI, and webhook payloads. Populate
+	// it so operators can distinguish a timeout from a generic provider error
+	// without parsing annotations.
+	task.FailureDiagnosis = reasonMsg
+
+	// Always write a final artifact line indicating the timeout (Task 20108
+	// requirement (3)). When the provider produced partial output we prefix
+	// it with the timeout marker; when it produced nothing at all we still
+	// write a single-line marker so downstream tooling never has to guess
+	// whether the task ran. Errors are logged to the dim console only — they
+	// must not block the timeout-handling path.
+	artifactBody := fmt.Sprintf("[TIMEOUT — task exceeded %d minute(s) budget at %s]\n",
+		budgetMin, completedAt.UTC().Format(time.RFC3339))
 	if partialOutput != "" {
-		if ap, aErr := artifact.WriteTaskArtifact(o.config.WorkDir, task, "[PARTIAL — timed out]\n"+partialOutput); aErr != nil {
-			dimColor.Printf("  artifact write error (ignored): %v\n", aErr)
-		} else {
-			task.ArtifactPath = ap
+		artifactBody += partialOutput + "\n"
+	}
+	artifactBody += "TASK_FAILED (timeout)\n"
+	if ap, aErr := artifact.WriteTaskArtifact(o.config.WorkDir, task, artifactBody); aErr != nil {
+		dimColor.Printf("  artifact write error (ignored): %v\n", aErr)
+	} else {
+		task.ArtifactPath = ap
+		if partialOutput != "" {
 			dimColor.Printf("  partial artifact: %s\n", ap)
+		} else {
+			dimColor.Printf("  timeout marker artifact: %s\n", ap)
 		}
 	}
 
 	// Desktop notification.
 	if o.config.Notify {
-		notify.Send("cloop: Task Timed Out", fmt.Sprintf("%s (budget: %dm)", task.Title, task.MaxMinutes))
+		notify.Send("cloop: Task Timed Out", fmt.Sprintf("%s (budget: %dm)", task.Title, budgetMin))
 	}
 	// Slack/Discord webhook notifications.
 	o.notifyWebhooks(
 		"cloop: Task Timed Out",
-		fmt.Sprintf("Task #%d: %s\nGoal: %s\nBudget: %dm", task.ID, task.Title, s.Goal, task.MaxMinutes),
+		fmt.Sprintf("Task #%d: %s\nGoal: %s\nBudget: %dm", task.ID, task.Title, s.Goal, budgetMin),
 	)
 	// Structured event webhook.
 	done, failed := s.Plan.CountByStatus()
@@ -620,8 +733,8 @@ func (o *Orchestrator) handleTaskTimeout(_ context.Context, s *state.ProjectStat
 		Session:  &webhook.SessionInfo{InputTokens: s.TotalInputTokens, OutputTokens: s.TotalOutputTokens},
 	})
 	o.log.Error(logger.EventTaskFailed, task.ID, task.Title, map[string]interface{}{
-		"reason":            "timed_out",
-		"budget_minutes":    task.MaxMinutes,
+		"reason":         "timed_out",
+		"budget_minutes": budgetMin,
 	})
 }
 
@@ -759,10 +872,12 @@ func (o *Orchestrator) enforceClaudeCodeLimits() error {
 }
 
 func (o *Orchestrator) Run(ctx context.Context) error {
-	// Start the stuck-task watchdog (Task 20088). Bound to ctx so it exits
-	// when the run is cancelled. Wait() in Close() blocks on its goroutine.
+	// Start the stuck-task watchdog (Task 20088). Bound to a child context
+	// that we cancel before Close() so Watchdog.Wait() doesn't deadlock when
+	// the caller passed an unbounded ctx (e.g. context.Background() in tests).
+	wdCtx, wdCancel := context.WithCancel(ctx)
 	if o.watchdog != nil {
-		o.watchdog.Start(ctx)
+		o.watchdog.Start(wdCtx)
 	}
 	// Close the central work queue on Run() exit so the underlying SQLite
 	// connection (and any goroutines it owns) is released. The orchestrator
@@ -770,6 +885,7 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	// orchestrator after Run would already misbehave (state/plan are baked
 	// in at New time), so closing here is safe.
 	defer o.Close()
+	defer wdCancel()
 	return o.runPM(ctx)
 }
 
@@ -784,23 +900,10 @@ func (o *Orchestrator) runPM(ctx context.Context) error {
 	defer span.End()
 	ctx = spanCtx
 
-	// Start the stuck-task watchdog (Task 20088). Disabled when the user
-	// explicitly sets watchdog.enabled=false; otherwise runs with effective
-	// defaults from WatchdogDefaults(). The watchdog reads the live in-memory
-	// plan via GetPlan, persists detections to statedb, and (when AutoKillAfter
-	// > 0) cancels per-task contexts registered by the executor.
-	wdCfg := o.config.Watchdog.WatchdogDefaults()
-	if wdCfg.Enabled != nil && *wdCfg.Enabled {
-		o.watchdog = &watchdog.Watchdog{
-			WorkDir:        o.config.WorkDir,
-			GetPlan:        func() *pm.Plan { return o.state.Plan },
-			Interval:       time.Duration(wdCfg.IntervalSeconds) * time.Second,
-			StuckThreshold: time.Duration(wdCfg.StuckThresholdMinutes) * time.Minute,
-			ArtifactQuiet:  time.Duration(wdCfg.ArtifactIdleMinutes) * time.Minute,
-			AutoKillAfter:  time.Duration(wdCfg.AutoKillAfterMinutes) * time.Minute,
-			Logger:         o.log,
-			DB:             o.statedb,
-		}
+	// Start the stuck-task watchdog (Task 20088). Watchdog.Start is idempotent,
+	// so calling it here in addition to Run() is safe — this covers callers
+	// (notably tests) that invoke runPM directly without going through Run.
+	if o.watchdog != nil {
 		o.watchdog.Start(ctx)
 	}
 
@@ -1326,6 +1429,13 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			return ccErr
 		}
 
+		// Ensure a request ID is bound to ctx for this task iteration before
+		// the first log line is emitted. taskContextWithTimeout below derives
+		// from ctx (so it inherits the ID); the EnsureContext call returns
+		// the existing ID when the loop's parent context already carries one
+		// (e.g. invoked from the Web UI middleware) and mints a fresh one
+		// otherwise. Logs keyed off `request_id` can then be grouped per task.
+		ctx, taskRequestID := reqid.EnsureContext(ctx)
 		if !o.log.IsJSON() {
 			stepColor.Printf("━━━ Task %d/%d: %s ━━━\n", task.ID, len(s.Plan.Tasks), task.Title)
 			dimColor.Printf("       %s\n\n", truncate(task.Description, 150))
@@ -1335,6 +1445,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			"description": task.Description,
 			"role":        string(task.Role),
 			"trace_id":    clooptracing.TraceIDFromContext(ctx),
+			"request_id":  taskRequestID,
 		})
 
 		// Pre-execution risk assessment: evaluate risks and optionally abort on CRITICAL findings.
@@ -1601,9 +1712,10 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			)
 			if maErr != nil {
 				if isTimeoutErr(taskCtx, maErr) {
-					color.New(color.FgYellow).Printf("⏱ Task %d timed out (%dm): %s\n", task.ID, task.MaxMinutes, task.Title)
+					budgetMin := o.effectiveTaskBudgetMinutes(task)
+					color.New(color.FgYellow).Printf("⏱ Task %d timed out (%dm): %s\n", task.ID, budgetMin, task.Title)
 					o.handleTaskTimeout(ctx, s, task, "", dimColor)
-					_ = o.queue.MarkFailed(queueID, fmt.Sprintf("multi-agent timeout (%dm)", task.MaxMinutes))
+					_ = o.queue.MarkFailed(queueID, fmt.Sprintf("multi-agent timeout (%dm)", budgetMin))
 					consecutiveErrors++
 					s.Save()
 					if consecutiveErrors >= maxConsecutiveErrors {
@@ -1660,9 +1772,10 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 				)
 				if cErr != nil {
 					if isTimeoutErr(taskCtx, cErr) {
-						color.New(color.FgYellow).Printf("⏱ Task %d timed out (%dm): %s\n", task.ID, task.MaxMinutes, task.Title)
+						budgetMin := o.effectiveTaskBudgetMinutes(task)
+						color.New(color.FgYellow).Printf("⏱ Task %d timed out (%dm): %s\n", task.ID, budgetMin, task.Title)
 						o.handleTaskTimeout(ctx, s, task, "", dimColor)
-						_ = o.queue.MarkFailed(queueID, fmt.Sprintf("consensus timeout (%dm)", task.MaxMinutes))
+						_ = o.queue.MarkFailed(queueID, fmt.Sprintf("consensus timeout (%dm)", budgetMin))
 						consecutiveErrors++
 						s.Save()
 						if consecutiveErrors >= maxConsecutiveErrors {
@@ -1730,9 +1843,29 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 				}
 				if err != nil {
 					if isTimeoutErr(taskCtx, err) {
-						color.New(color.FgYellow).Printf("⏱ Task %d timed out (%dm): %s\n", task.ID, task.MaxMinutes, task.Title)
+						budgetMin := o.effectiveTaskBudgetMinutes(task)
+						color.New(color.FgYellow).Printf("⏱ Task %d timed out (%dm): %s\n", task.ID, budgetMin, task.Title)
 						o.handleTaskTimeout(ctx, s, task, "", dimColor)
-						_ = o.queue.MarkFailed(queueID, fmt.Sprintf("provider timeout (%dm)", task.MaxMinutes))
+						_ = o.queue.MarkFailed(queueID, fmt.Sprintf("provider timeout (%dm)", budgetMin))
+						consecutiveErrors++
+						s.Save()
+						if consecutiveErrors >= maxConsecutiveErrors {
+							s.Status = "failed"
+							s.Save()
+							return fmt.Errorf("%d consecutive errors", consecutiveErrors)
+						}
+						continue
+					}
+					if provider.IsRetryBudgetExhausted(err) {
+						// Per-task retry budget hit: surface as a distinct failure
+						// mode. We do not auto-heal because every heal would consume
+						// further attempts the budget already refused; instead the
+						// task is marked failed and the operator must raise
+						// task.RetryBudget or address the underlying flake.
+						failColor.Printf("✗ Task %d: retry budget exhausted — %v\n", task.ID, err)
+						pm.AddAnnotation(task, "ai", fmt.Sprintf("Task failed: retry budget exhausted (limit reached) — %s", truncate(err.Error(), 200)))
+						task.Status = pm.TaskFailed
+						_ = o.queue.MarkFailed(queueID, "retry budget exhausted")
 						consecutiveErrors++
 						s.Save()
 						if consecutiveErrors >= maxConsecutiveErrors {
@@ -1885,7 +2018,10 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 				if !o.log.IsJSON() {
 					healColor.Printf("[HEAL attempt %d/%d] Diagnosing failure for task %d: %s\n", healAttempt, maxHealRetries, task.ID, task.Title)
 				}
-				o.log.Warn(logger.EventHeal, task.ID, fmt.Sprintf("heal attempt %d/%d", healAttempt, maxHealRetries), map[string]interface{}{"attempt": healAttempt, "max": maxHealRetries})
+				o.log.Warn(logger.EventHeal, task.ID, "heal attempt", map[string]interface{}{
+					"attempt": healAttempt,
+					"max":     maxHealRetries,
+				})
 
 				diag, diagErr := diagnosis.AnalyzeFailure(ctx, o.provider, s.Model, o.config.StepTimeout, task, taskOutput)
 				if diagErr != nil {
@@ -2192,6 +2328,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 				}
 				o.log.Info(logger.EventTaskDone, task.ID, task.Title, map[string]interface{}{
 					"duration_ms": taskDurMs,
+					"request_id":  taskRequestID,
 				})
 				if o.config.Notify {
 					notify.Send("cloop: Task Done", task.Title)
@@ -2241,6 +2378,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			o.log.Error(logger.EventTaskFailed, task.ID, task.Title, map[string]interface{}{
 				"duration_ms": taskDurMs,
 				"fail_count":  task.FailCount,
+				"request_id":  taskRequestID,
 			})
 			{
 				done, failed := s.Plan.CountByStatus()
@@ -3173,10 +3311,28 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 			}
 			if res.err != nil {
 				if res.timedOut {
-					color.New(color.FgYellow).Printf("⏱ Task %d timed out (%dm): %s\n", task.ID, task.MaxMinutes, task.Title)
+					budgetMin := o.effectiveTaskBudgetMinutes(task)
+					color.New(color.FgYellow).Printf("⏱ Task %d timed out (%dm): %s\n", task.ID, budgetMin, task.Title)
 					o.handleTaskTimeout(ctx, s, task, res.partialOut, dimColor)
-					_ = o.queue.MarkFailed(parallelQueueID, fmt.Sprintf("timeout (%dm)", task.MaxMinutes))
+					_ = o.queue.MarkFailed(parallelQueueID, fmt.Sprintf("timeout (%dm)", budgetMin))
 					mu.Lock()
+					consecutiveErrors++
+					s.Save()
+					tooManyErrors := consecutiveErrors >= maxConsecutiveErrors
+					mu.Unlock()
+					if tooManyErrors {
+						s.Status = "failed"
+						s.Save()
+						return fmt.Errorf("%d consecutive errors", consecutiveErrors)
+					}
+					continue
+				}
+				if provider.IsRetryBudgetExhausted(res.err) {
+					failColor.Printf("✗ Task %d: retry budget exhausted (parallel) — %v\n", task.ID, res.err)
+					_ = o.queue.MarkFailed(parallelQueueID, "retry budget exhausted")
+					mu.Lock()
+					pm.AddAnnotation(task, "ai", fmt.Sprintf("Task failed: retry budget exhausted (parallel mode) — %s", truncate(res.err.Error(), 200)))
+					task.Status = pm.TaskFailed
 					consecutiveErrors++
 					s.Save()
 					tooManyErrors := consecutiveErrors >= maxConsecutiveErrors

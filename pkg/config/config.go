@@ -79,6 +79,20 @@ const (
 	MaxRequestBodyBytesLower   int64 = 1 << 10  // 1 KiB
 	MaxRequestBodyBytesUpper   int64 = 1 << 30  // 1 GiB
 	MaxRequestBodyBytesDefault int64 = 10 << 20 // 10 MiB
+
+	// Orchestrator per-task wall-clock timeout (Task 20108). Bounds the
+	// duration any single task may spend in the provider call before its
+	// context is cancelled and the task is marked timed_out. Zero in YAML
+	// means "use OrchestratorTaskTimeoutMinutesDefault" (30 minutes); a
+	// non-zero value outside [Lower, Upper] is clamped to the default.
+	//
+	// Lower bound is 1 minute: anything smaller would race the AI's first
+	// token on every call. Upper bound is one week (7*24*60), well above
+	// any legitimate single-task budget but a hard ceiling against an
+	// operator hand-editing nonsense like "1000000 minutes".
+	OrchestratorTaskTimeoutMinutesLower   = 1
+	OrchestratorTaskTimeoutMinutesUpper   = 7 * 24 * 60
+	OrchestratorTaskTimeoutMinutesDefault = 30
 )
 
 // permWarnedPaths tracks which config paths have already emitted the
@@ -163,8 +177,52 @@ type Config struct {
 	// the relevant fields are zero.
 	Watchdog WatchdogConfig `yaml:"watchdog,omitempty"`
 
+	// Orchestrator configures the PM orchestrator's wall-clock execution
+	// budgets. See OrchestratorConfig.TaskTimeoutMinutes for the default
+	// per-task timeout applied when neither the task nor the project state
+	// has a more specific budget set.
+	Orchestrator OrchestratorConfig `yaml:"orchestrator,omitempty"`
+
 	// UI configures the cloop ui Web dashboard server. See UIConfig.
 	UI UIConfig `yaml:"ui,omitempty"`
+}
+
+// OrchestratorConfig holds wall-clock budgets and other knobs that bound the
+// per-task execution of the PM orchestrator (Task 20108).
+//
+// The orchestrator already supported a per-task budget via Task.MaxMinutes
+// (Task 99) and a per-project default via state.DefaultMaxMinutes. This
+// config layer adds a process-wide default so operators get a safe upper
+// bound on every cloop run without having to set the field on every project
+// or task. The lookup order is:
+//
+//	task.MaxMinutes > state.DefaultMaxMinutes > config.Orchestrator.TaskTimeoutMinutes
+//
+// The first non-zero value wins; if all are zero the orchestrator falls back
+// to OrchestratorTaskTimeoutMinutesDefault (30 minutes). This guarantees no
+// task can run unbounded if the provider hangs or the LLM produces an
+// infinite output stream — the deadline cancels the per-task context, which
+// propagates into the provider HTTP call (Task 20081 made provider Complete()
+// implementations honor ctx) and the task is marked timed_out.
+type OrchestratorConfig struct {
+	// TaskTimeoutMinutes is the default wall-clock budget for a single task
+	// when neither Task.MaxMinutes nor state.DefaultMaxMinutes is set.
+	// Zero substitutes OrchestratorTaskTimeoutMinutesDefault (30). Validated
+	// to OrchestratorTaskTimeoutMinutesLower..OrchestratorTaskTimeoutMinutesUpper.
+	TaskTimeoutMinutes int `yaml:"task_timeout_minutes,omitempty"`
+}
+
+// EffectiveTaskTimeoutMinutes returns the configured task timeout, substituting
+// OrchestratorTaskTimeoutMinutesDefault when the field is zero. Out-of-band
+// values are also coerced to the default (validateAndClamp catches them on
+// load, but this call is the last line of defence for code paths that
+// construct OrchestratorConfig{} directly without going through Load()).
+func (o OrchestratorConfig) EffectiveTaskTimeoutMinutes() int {
+	if o.TaskTimeoutMinutes < OrchestratorTaskTimeoutMinutesLower ||
+		o.TaskTimeoutMinutes > OrchestratorTaskTimeoutMinutesUpper {
+		return OrchestratorTaskTimeoutMinutesDefault
+	}
+	return o.TaskTimeoutMinutes
 }
 
 // UIConfig holds settings for the cloop ui Web dashboard server.
@@ -775,6 +833,14 @@ func (c *Config) validateAndClamp(path string) {
 		warn("ui.max_request_body_bytes", fmt.Sprintf("value %d outside [%d, %d]", c.UI.MaxRequestBodyBytes, MaxRequestBodyBytesLower, MaxRequestBodyBytesUpper))
 		c.UI.MaxRequestBodyBytes = 0
 	}
+	// orchestrator.task_timeout_minutes: zero means "use default"; non-zero must
+	// be in [1, 7*24*60]. Out-of-range falls back to zero so the runtime
+	// substitutes OrchestratorTaskTimeoutMinutesDefault rather than honouring a
+	// pathological 0-second or week-spanning budget.
+	if c.Orchestrator.TaskTimeoutMinutes != 0 && (c.Orchestrator.TaskTimeoutMinutes < OrchestratorTaskTimeoutMinutesLower || c.Orchestrator.TaskTimeoutMinutes > OrchestratorTaskTimeoutMinutesUpper) {
+		warn("orchestrator.task_timeout_minutes", fmt.Sprintf("value %d outside [%d, %d]", c.Orchestrator.TaskTimeoutMinutes, OrchestratorTaskTimeoutMinutesLower, OrchestratorTaskTimeoutMinutesUpper))
+		c.Orchestrator.TaskTimeoutMinutes = 0
+	}
 }
 
 // ValidateNumeric returns a non-nil error describing the first numeric range
@@ -837,6 +903,10 @@ func (c *Config) ValidateNumeric() error {
 	if c.UI.MaxRequestBodyBytes != 0 && (c.UI.MaxRequestBodyBytes < MaxRequestBodyBytesLower || c.UI.MaxRequestBodyBytes > MaxRequestBodyBytesUpper) {
 		return fmt.Errorf("ui.max_request_body_bytes must be between %d and %d (or 0 for the default %d) (got %d)",
 			MaxRequestBodyBytesLower, MaxRequestBodyBytesUpper, MaxRequestBodyBytesDefault, c.UI.MaxRequestBodyBytes)
+	}
+	if c.Orchestrator.TaskTimeoutMinutes != 0 && (c.Orchestrator.TaskTimeoutMinutes < OrchestratorTaskTimeoutMinutesLower || c.Orchestrator.TaskTimeoutMinutes > OrchestratorTaskTimeoutMinutesUpper) {
+		return fmt.Errorf("orchestrator.task_timeout_minutes must be between %d and %d (or 0 for the default %d) (got %d)",
+			OrchestratorTaskTimeoutMinutesLower, OrchestratorTaskTimeoutMinutesUpper, OrchestratorTaskTimeoutMinutesDefault, c.Orchestrator.TaskTimeoutMinutes)
 	}
 	return nil
 }

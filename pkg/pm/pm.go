@@ -210,6 +210,12 @@ type Task struct {
 	RiskScore int `json:"risk_score,omitempty"`
 	// ImpactScore is the cached AI strategic impact score 1-10 (set by ai-risk-matrix or ai-impact).
 	ImpactScore int `json:"impact_score,omitempty"`
+	// RetryBudget caps the total number of provider attempts this task is
+	// allowed to consume across all DoWithRetry calls (Task 20114). Zero
+	// or unset means use provider.DefaultRetryBudget. Tasks known to be
+	// expensive or experimental can set a tighter cap to bound the blast
+	// radius of repeated provider failures.
+	RetryBudget int `json:"retry_budget,omitempty"`
 }
 
 // Plan is the full task plan for a goal.

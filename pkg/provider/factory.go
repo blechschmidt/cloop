@@ -37,10 +37,16 @@ func Register(name string, factory ProviderFactory) {
 
 // Build creates a provider by name using the global registry.
 //
-// The returned provider is wrapped in WithPanicSafety so a panic inside the
-// underlying SDK becomes an ordinary error instead of crashing the process.
-// This is the single chokepoint every cloop command goes through, so wrapping
-// here gives panic safety to all 80+ Complete call sites without touching them.
+// The returned provider is wrapped in WithPanicSafety AND
+// WithRequestIDTracing so a panic inside the underlying SDK becomes an
+// ordinary error and every error returned to the caller is tagged with
+// the request ID carried in the call context. This is the single
+// chokepoint every cloop command goes through, so wrapping here gives
+// both behaviours to all 80+ Complete call sites without touching them.
+//
+// Layering: outermost is request-ID tagging, then panic safety, then the
+// real provider. That way a panic recovered by WithPanicSafety still
+// surfaces with a request_id tag attached by the outer layer.
 func Build(cfg ProviderConfig) (Provider, error) {
 	name := strings.ToLower(cfg.Name)
 	factory, ok := registry[name]
@@ -51,7 +57,7 @@ func Build(cfg ProviderConfig) (Provider, error) {
 	if err != nil {
 		return nil, err
 	}
-	return WithPanicSafety(p), nil
+	return WithRequestIDTracing(WithPanicSafety(p)), nil
 }
 
 // Available returns a comma-separated list of registered providers.
