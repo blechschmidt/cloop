@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"math/rand"
 	"time"
@@ -12,6 +13,12 @@ type RetryConfig struct {
 	MaxAttempts  int           // total attempts including the first (default: 3)
 	InitialDelay time.Duration // base delay before the first retry (default: 1s)
 	MaxDelay     time.Duration // cap on delay between retries (default: 30s)
+
+	// BreakerKey, if non-empty, gates the call through a circuit breaker
+	// looked up from the global registry (or created with default config).
+	// When the breaker is open the call short-circuits with ErrCircuitOpen
+	// without consuming an attempt or contacting the upstream.
+	BreakerKey string
 }
 
 var defaultRetryConfig = RetryConfig{
@@ -50,6 +57,11 @@ func IsRetryableStatus(code int) bool {
 func DoWithRetry(ctx context.Context, cfg RetryConfig, fn func() (statusCode int, err error)) error {
 	cfg = cfg.withDefaults()
 
+	var breaker *CircuitBreaker
+	if cfg.BreakerKey != "" {
+		breaker = GetBreaker(cfg.BreakerKey)
+	}
+
 	var lastErr error
 	for attempt := 0; attempt < cfg.MaxAttempts; attempt++ {
 		if attempt > 0 {
@@ -61,22 +73,51 @@ func DoWithRetry(ctx context.Context, cfg RetryConfig, fn func() (statusCode int
 			}
 		}
 
+		// Check the breaker before each attempt. A retry that arrives
+		// after the breaker tripped on the previous attempt should be
+		// short-circuited, not allowed to hammer the upstream further.
+		if breaker != nil && !breaker.Allow() {
+			if lastErr != nil {
+				return fmt.Errorf("%w: last error: %v", formatBreakerError(cfg.BreakerKey), lastErr)
+			}
+			return formatBreakerError(cfg.BreakerKey)
+		}
+
 		status, err := fn()
 		if err == nil {
+			if breaker != nil {
+				breaker.RecordSuccess()
+			}
 			return nil
 		}
 
-		// Stop immediately if the parent context is cancelled.
+		// Stop immediately if the parent context is cancelled. Context
+		// cancellation is the caller's choice, not an upstream failure,
+		// so don't trip the breaker on it.
 		if ctx.Err() != nil {
+			if breaker != nil {
+				// Release the in-flight probe slot in half-open without
+				// counting cancellation as a failure.
+				breaker.releaseProbe()
+			}
 			return err
 		}
 
 		// For HTTP errors, only retry on known-transient status codes.
 		// A zero status means a network-level error — always retry those.
+		// Both kinds count as failures against the breaker; client errors
+		// (4xx other than 429) don't, since they signal a caller-side
+		// problem rather than upstream unavailability.
 		if status != 0 && !IsRetryableStatus(status) {
+			if breaker != nil {
+				breaker.releaseProbe()
+			}
 			return err
 		}
 
+		if breaker != nil {
+			breaker.RecordFailure(err)
+		}
 		lastErr = err
 	}
 	return lastErr
