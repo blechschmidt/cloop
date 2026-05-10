@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/config"
+	"github.com/blechschmidt/cloop/pkg/configdiff"
 	"github.com/blechschmidt/cloop/pkg/configvalidate"
 	"github.com/blechschmidt/cloop/pkg/dbverify"
 	"github.com/blechschmidt/cloop/pkg/provider"
@@ -90,6 +91,7 @@ func Run(ctx context.Context, workdir string, cfg *config.Config, testProviders 
 	checkHookScripts(cfg, add)
 	checkEnvYamlGitignored(workdir, add)
 	checkConfigValidate(ctx, workdir, add)
+	checkConfigDrift(workdir, add)
 	checkDiskUsage(workdir, add)
 
 	return rep
@@ -749,6 +751,44 @@ func checkConfigValidate(ctx context.Context, workdir string, add addFn) {
 			Fix:     fixHint,
 		})
 	}
+}
+
+// checkConfigDrift surfaces divergence between .cloop/config.yaml (the
+// canonical source) and the SQLite-mirrored copy in state.db (Task 20075).
+// Silent drift is a known source of "why did my change not take effect?"
+// confusion: Load() prefers YAML when present, but tools that query the
+// SQLite mirror (analytics dashboards, third-party scripts) see stale
+// values. Doctor reports drift as a Warn so it can't block other diagnostics
+// but is still impossible to overlook.
+func checkConfigDrift(workdir string, add addFn) {
+	rep, err := configdiff.Compute(workdir)
+	if err != nil {
+		add(Result{
+			Name:    "config drift (yaml vs sqlite mirror)",
+			Level:   Warn,
+			Message: fmt.Sprintf("could not compute drift: %v", err),
+		})
+		return
+	}
+	// No drift, and at least one of the stores is present — we have a clear
+	// "in sync" signal. If both are absent, doctor's other checks already
+	// surface the uninitialised-project state; skip this one quietly.
+	if !rep.HasDrift() {
+		if rep.YAMLPresent || rep.DBPresent {
+			add(Result{
+				Name:    "config drift (yaml vs sqlite mirror)",
+				Level:   Pass,
+				Message: "config.yaml and SQLite mirror agree",
+			})
+		}
+		return
+	}
+	add(Result{
+		Name:    "config drift (yaml vs sqlite mirror)",
+		Level:   Warn,
+		Message: rep.Summary(),
+		Fix:     "Run 'cloop config diff' for details, then 'cloop config sync' (or --from-db) to resolve",
+	})
 }
 
 // checkHookScripts verifies that configured hook script paths are executable.

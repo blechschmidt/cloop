@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/blechschmidt/cloop/pkg/config"
+	"github.com/blechschmidt/cloop/pkg/configdiff"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
@@ -323,8 +324,110 @@ func displayValue(key, value string) string {
 	return value
 }
 
+// configDiffCmd compares the canonical YAML against the SQLite mirror so the
+// operator can see exactly what's drifted before deciding which way to sync.
+//
+// Exit codes:
+//
+//	0 — sources are in sync (no drift).
+//	1 — drift detected (or unexpected error). See stderr/stdout for details.
+//
+// We return a non-zero exit specifically on drift so this command can be
+// used in CI / pre-commit hooks to fail-fast when an operator forgot to
+// commit a `cloop config set` change.
+var configDiffCmd = &cobra.Command{
+	Use:   "diff",
+	Short: "Compare .cloop/config.yaml against the SQLite-mirrored copy",
+	Long: `Show key-by-key differences between the canonical .cloop/config.yaml file
+and the copy stored in .cloop/state.db (written by every 'cloop config set'
+or programmatic config.Save). Drift here means a tool reading from one store
+will see different values than a tool reading from the other.
+
+Exit code is 0 when the two are in sync, 1 otherwise — suitable for CI gates.
+
+To resolve drift, run 'cloop config sync' (default --from-yaml) or
+'cloop config sync --from-db' to recover a missing or corrupted YAML.
+
+Sensitive values (api keys, tokens, webhook secrets) are masked in the output.`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		// This is not a CLI-usage error class — silence Cobra's auto-help
+		// dump on returned errors (matches the convention from Task 20076).
+		cmd.SilenceUsage = true
+
+		workdir, _ := os.Getwd()
+		rep, err := configdiff.Compute(workdir)
+		if err != nil {
+			return err
+		}
+		fmt.Print(configdiff.Render(rep))
+		if rep.HasDrift() {
+			os.Exit(1)
+		}
+		return nil
+	},
+}
+
+// configSyncCmd resolves drift by overwriting one source with the other.
+// Default direction is from-yaml because YAML is the canonical, human-edited
+// source — Load() already prefers it, so making the SQLite mirror agree is
+// the natural recovery path.
+var configSyncCmd = &cobra.Command{
+	Use:   "sync",
+	Short: "Resolve drift between .cloop/config.yaml and the SQLite mirror",
+	Long: `Resolve config drift by copying one source over the other.
+
+By default, --from-yaml is used: the YAML file is the canonical store and
+the SQLite mirror is rebuilt from it. Pass --from-db to recover the YAML
+from the SQLite copy — useful when config.yaml has been accidentally
+deleted or truncated.
+
+Either direction passes the rehydrated config through validateAndClamp
+before the destination store is rewritten, so a corrupt source can never
+propagate silently.`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		cmd.SilenceUsage = true
+
+		fromYAML, _ := cmd.Flags().GetBool("from-yaml")
+		fromDB, _ := cmd.Flags().GetBool("from-db")
+		if fromYAML && fromDB {
+			return fmt.Errorf("--from-yaml and --from-db are mutually exclusive")
+		}
+		dir := configdiff.FromYAML
+		if fromDB {
+			dir = configdiff.FromDB
+		}
+
+		workdir, _ := os.Getwd()
+		if err := configdiff.Sync(workdir, dir); err != nil {
+			return err
+		}
+
+		// Re-compute and report the post-sync state so the user can confirm
+		// the drift is gone. This costs one extra SQLite read but it's
+		// cheap and the operator-facing reassurance is worth it.
+		rep, err := configdiff.Compute(workdir)
+		if err != nil {
+			color.Yellow("Sync succeeded but post-check failed: %v", err)
+			return nil
+		}
+		if rep.HasDrift() {
+			color.Yellow("Sync ran but residual drift remains:")
+			fmt.Print(configdiff.Render(rep))
+			return nil
+		}
+		color.Green("Config is now in sync (%s).", dir)
+		return nil
+	},
+}
+
 func init() {
 	configCmd.AddCommand(configShowCmd)
 	configCmd.AddCommand(configSetCmd)
+	configCmd.AddCommand(configDiffCmd)
+	configCmd.AddCommand(configSyncCmd)
+
+	configSyncCmd.Flags().Bool("from-yaml", false, "overwrite SQLite mirror from .cloop/config.yaml (default)")
+	configSyncCmd.Flags().Bool("from-db", false, "overwrite .cloop/config.yaml from SQLite mirror")
+
 	rootCmd.AddCommand(configCmd)
 }
