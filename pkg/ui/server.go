@@ -26,6 +26,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/artifact"
 	"github.com/blechschmidt/cloop/pkg/blocker"
 	"github.com/blechschmidt/cloop/pkg/boundedread"
+	"github.com/blechschmidt/cloop/pkg/claudecodeauth"
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/cost"
 	"github.com/blechschmidt/cloop/pkg/epic"
@@ -476,6 +477,12 @@ type Server struct {
 	// Nil means the package picks a sensible default at first use (text
 	// output to stdout, project bound).
 	Log logger.Logger
+
+	// ccAuth tracks the in-flight `claude auth login` session driven from
+	// the UI. Nil until first use; lazily constructed on the first
+	// /api/claudecode/auth/* call.
+	ccAuthMu sync.Mutex
+	ccAuth   *claudecodeauth.Manager
 }
 
 // log returns s.Log, falling back to a default text logger if the field
@@ -857,6 +864,13 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/claude-usage", s.handleClaudeUsage)
 	mux.HandleFunc("GET /api/claudecode-limits", s.handleClaudeCodeLimitsGet)
 	mux.HandleFunc("PUT /api/claudecode-limits", s.handleClaudeCodeLimitsSave)
+
+	// Claude Code authentication (drives `claude auth login/logout/status`).
+	mux.HandleFunc("GET /api/claudecode/auth/status", s.handleClaudeCodeAuthStatus)
+	mux.HandleFunc("POST /api/claudecode/auth/login", s.handleClaudeCodeAuthLoginStart)
+	mux.HandleFunc("POST /api/claudecode/auth/login/code", s.handleClaudeCodeAuthLoginCode)
+	mux.HandleFunc("POST /api/claudecode/auth/login/cancel", s.handleClaudeCodeAuthLoginCancel)
+	mux.HandleFunc("POST /api/claudecode/auth/logout", s.handleClaudeCodeAuthLogout)
 
 	// Toggle persistent CLI options (--auto-evolve, --innovate, etc.)
 	mux.HandleFunc("POST /api/options/toggle", s.handleOptionsToggle)
@@ -5884,6 +5898,103 @@ func (s *Server) handleClaudeCodeLimitsSave(w http.ResponseWriter, r *http.Reque
 	jsonOK(w, map[string]bool{"ok": true})
 }
 
+// claudeAuthManager lazily allocates the single Manager that owns the
+// in-flight `claude auth login` subprocess. Allocated on first use so test
+// servers that construct Server{} directly still work without explicit wiring.
+func (s *Server) claudeAuthManager() *claudecodeauth.Manager {
+	s.ccAuthMu.Lock()
+	defer s.ccAuthMu.Unlock()
+	if s.ccAuth == nil {
+		s.ccAuth = claudecodeauth.NewManager()
+	}
+	return s.ccAuth
+}
+
+// handleClaudeCodeAuthStatus returns the current Claude Code login status
+// alongside any in-flight login session state. Used by the UI to render the
+// login panel.
+// GET /api/claudecode/auth/status
+func (s *Server) handleClaudeCodeAuthStatus(w http.ResponseWriter, r *http.Request) {
+	resp := map[string]interface{}{}
+	if st, err := claudecodeauth.FetchStatus(r.Context()); err != nil {
+		resp["status_error"] = err.Error()
+	} else {
+		resp["status"] = st
+	}
+	resp["session"] = s.claudeAuthManager().Snapshot()
+	jsonOK(w, resp)
+}
+
+// handleClaudeCodeAuthLoginStart kicks off `claude auth login` and returns
+// the OAuth URL the user must visit in their browser.
+// POST /api/claudecode/auth/login  body: {"console":bool,"email":string,"sso":bool}
+func (s *Server) handleClaudeCodeAuthLoginStart(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Console bool   `json:"console"`
+		Email   string `json:"email"`
+		SSO     bool   `json:"sso"`
+	}
+	limitJSONBody(w, r, maxJSONBodyBytes)
+	if r.ContentLength > 0 {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			respondToBodyError(w, err)
+			return
+		}
+	}
+	sess, err := s.claudeAuthManager().Start(r.Context(), claudecodeauth.LoginOptions{
+		Console: req.Console,
+		Email:   req.Email,
+		SSO:     req.SSO,
+	})
+	if err != nil {
+		jsonErr(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	jsonOK(w, map[string]interface{}{"session": sess.Snapshot()})
+}
+
+// handleClaudeCodeAuthLoginCode pipes the OAuth authorization code to the
+// in-flight login session and returns the final outcome.
+// POST /api/claudecode/auth/login/code  body: {"code":string}
+func (s *Server) handleClaudeCodeAuthLoginCode(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Code string `json:"code"`
+	}
+	limitJSONBody(w, r, maxJSONBodyBytes)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondToBodyError(w, err)
+		return
+	}
+	st, err := s.claudeAuthManager().SubmitCode(req.Code)
+	if err != nil {
+		jsonErr(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	// Refresh status so the UI doesn't have to round-trip a second call.
+	resp := map[string]interface{}{"session": st}
+	if status, sErr := claudecodeauth.FetchStatus(r.Context()); sErr == nil {
+		resp["status"] = status
+	}
+	jsonOK(w, resp)
+}
+
+// handleClaudeCodeAuthLoginCancel kills the current login session (if any).
+// POST /api/claudecode/auth/login/cancel
+func (s *Server) handleClaudeCodeAuthLoginCancel(w http.ResponseWriter, r *http.Request) {
+	s.claudeAuthManager().Cancel()
+	jsonOK(w, map[string]bool{"ok": true})
+}
+
+// handleClaudeCodeAuthLogout calls `claude auth logout`.
+// POST /api/claudecode/auth/logout
+func (s *Server) handleClaudeCodeAuthLogout(w http.ResponseWriter, r *http.Request) {
+	if err := claudecodeauth.Logout(r.Context()); err != nil {
+		jsonErr(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	jsonOK(w, map[string]bool{"ok": true})
+}
+
 // handleOptionsToggle flips a persistent CLI-mode flag in project state so that
 // the running orchestrator (which re-reads s.AutoEvolve / s.InnovateMode each
 // loop iteration) picks up the change, and so the next `cloop run` honors it.
@@ -8929,6 +9040,20 @@ const dashboardHTML = `<!DOCTYPE html>
         </div>
       </div>
 
+      <!-- Claude Code authentication -->
+      <div class="section">
+        <div class="section-title" style="display:flex;align-items:center;gap:12px">
+          Claude Code Authentication
+          <button class="btn" style="padding:4px 10px;font-size:12px;margin-left:auto" onclick="loadClaudeAuthStatus()">&#8635; Refresh</button>
+        </div>
+        <p style="font-size:12px;color:var(--muted);margin-top:6px;margin-bottom:12px">
+          Manage the local <code>claude</code> CLI login that the claudecode provider uses for task execution.
+        </p>
+        <div id="ccAuthPanel" style="margin-top:8px">
+          <div style="font-size:13px;color:var(--muted)">Loading...</div>
+        </div>
+      </div>
+
       <!-- Claude Code subscription usage -->
       <div class="section">
         <div class="section-title" style="display:flex;align-items:center;gap:12px">
@@ -9445,7 +9570,7 @@ window.switchTab = function(name) {
     if (name === 'risk-matrix') loadRiskMatrix();
     if (name === 'analytics') loadAnalytics();
     if (name === 'queue') loadQueue();
-    if (name === 'budget') { loadBudget(); loadClaudeUsage(); loadRateLimits(); }
+    if (name === 'budget') { loadBudget(); loadClaudeUsage(); loadRateLimits(); loadClaudeAuthStatus(); }
     if (name === 'chat') loadChatHistory();
     if (name === 'assistant') loadAssistantHistory();
     if (name === 'replay') { loadReplayRuns(); try { window._populateReplayTaskSelector && window._populateReplayTaskSelector(); } catch(_) {} }
@@ -9463,7 +9588,7 @@ window.switchTab = function(name) {
     if (name === 'risk-matrix') loadRiskMatrix();
     if (name === 'analytics') loadAnalytics();
     if (name === 'queue') loadQueue();
-    if (name === 'budget') { loadBudget(); loadClaudeUsage(); loadRateLimits(); }
+    if (name === 'budget') { loadBudget(); loadClaudeUsage(); loadRateLimits(); loadClaudeAuthStatus(); }
     if (name === 'replay') { loadReplayRuns(); try { window._populateReplayTaskSelector && window._populateReplayTaskSelector(); } catch(_) {} }
     if (name === 'provider-calls') loadProviderCalls();
   }
@@ -15019,6 +15144,174 @@ window.loadRateLimits = function() {
   }).catch(err => {
     console.warn('ratelimits load error', err);
   });
+};
+
+// ── Claude Code authentication panel ───────────────────────────────────────
+window.loadClaudeAuthStatus = function() {
+  var panel = document.getElementById('ccAuthPanel');
+  if (!panel) return;
+  panel.innerHTML = '<div style="font-size:13px;color:var(--muted)">Checking login status...</div>';
+  api('/api/claudecode/auth/status').then(function(d) {
+    _renderClaudeAuth(d);
+  }).catch(function(err) {
+    panel.innerHTML = '<div style="font-size:13px;color:var(--red,#e74c3c)">Failed to load auth status: ' + esc(err && err.message || String(err)) + '</div>';
+  });
+};
+
+function _renderClaudeAuth(d) {
+  var panel = document.getElementById('ccAuthPanel');
+  if (!panel) return;
+  d = d || {};
+  var status = d.status || {};
+  var sess = d.session || {};
+  var h = '';
+
+  if (d.status_error) {
+    h += '<div style="background:var(--surface-alt,#1a1a1a);border:1px solid var(--red,#e74c3c);border-radius:6px;padding:12px;margin-bottom:12px;font-size:12px;color:var(--red,#e74c3c)">';
+    h += 'Status check failed: ' + esc(d.status_error);
+    h += '</div>';
+  }
+
+  if (sess && sess.active && sess.url && !sess.done) {
+    // In-flight login session: show URL + code input.
+    h += '<div style="background:var(--surface-alt,#1a1a1a);border:1px solid var(--border);border-radius:6px;padding:14px;margin-bottom:12px">';
+    h += '<div style="font-size:13px;font-weight:600;margin-bottom:8px">Sign-in in progress</div>';
+    h += '<ol style="font-size:13px;color:var(--muted);margin:0 0 10px 18px;padding:0;line-height:1.7">';
+    h += '<li>Open this URL in your browser and sign in:</li>';
+    h += '</ol>';
+    h += '<div style="display:flex;gap:8px;margin-bottom:12px;align-items:center">';
+    h += '<a href="' + esc(sess.url) + '" target="_blank" rel="noopener" style="font-size:12px;word-break:break-all;color:var(--link,#3a8bdc);flex:1;padding:6px 8px;background:var(--bg,#0d0d0d);border-radius:4px;border:1px solid var(--border)">' + esc(sess.url) + '</a>';
+    h += '<button class="btn" type="button" onclick="copyClaudeAuthURL()" style="font-size:12px;padding:6px 10px">Copy</button>';
+    h += '</div>';
+    h += '<ol start="2" style="font-size:13px;color:var(--muted);margin:0 0 10px 18px;padding:0;line-height:1.7">';
+    h += '<li>Authorize the app, then paste the code shown:</li>';
+    h += '</ol>';
+    h += '<div style="display:flex;gap:8px;align-items:center">';
+    h += '<input id="ccAuthCode" class="form-input" type="text" placeholder="Paste authorization code" style="flex:1;font-family:monospace">';
+    h += '<button class="btn primary" type="button" onclick="submitClaudeAuthCode()" style="white-space:nowrap">Sign in</button>';
+    h += '<button class="btn" type="button" onclick="cancelClaudeAuthLogin()">Cancel</button>';
+    h += '</div>';
+    h += '<div id="ccAuthMsg" style="font-size:12px;color:var(--muted);margin-top:8px;min-height:16px"></div>';
+    h += '</div>';
+  } else if (status.loggedIn) {
+    // Already logged in: show identity + logout.
+    h += '<div style="background:var(--surface-alt,#1a1a1a);border:1px solid var(--border);border-radius:6px;padding:14px;margin-bottom:12px">';
+    h += '<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">';
+    h += '<span style="font-size:13px;font-weight:600;color:var(--green,#27ae60)">Signed in</span>';
+    if (status.subscriptionType) {
+      h += '<span style="font-size:11px;padding:2px 8px;border-radius:10px;background:var(--bg,#0d0d0d);border:1px solid var(--border);color:var(--muted)">' + esc(status.subscriptionType) + '</span>';
+    }
+    h += '</div>';
+    h += '<table style="font-size:12px;color:var(--muted);width:100%;border-collapse:collapse">';
+    function row(label, value) {
+      if (!value) return;
+      h += '<tr><td style="padding:2px 12px 2px 0;color:var(--muted)">' + esc(label) + '</td><td style="padding:2px 0;color:var(--fg,#eee);word-break:break-all">' + esc(value) + '</td></tr>';
+    }
+    row('Email', status.email);
+    row('Auth method', status.authMethod);
+    row('API provider', status.apiProvider);
+    row('Organization', status.orgName || status.orgId);
+    h += '</table>';
+    h += '<div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">';
+    h += '<button class="btn" type="button" onclick="startClaudeAuthLogin({})">Re-authenticate</button>';
+    h += '<button class="btn" type="button" onclick="logoutClaudeAuth()">Sign out</button>';
+    h += '</div>';
+    h += '</div>';
+  } else {
+    // Not logged in.
+    h += '<div style="background:var(--surface-alt,#1a1a1a);border:1px solid var(--border);border-radius:6px;padding:14px;margin-bottom:12px">';
+    h += '<div style="font-size:13px;color:var(--muted);margin-bottom:12px">Not signed in to Claude Code. Sign in to use the <code>claudecode</code> provider for task execution.</div>';
+    h += '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">';
+    h += '<button class="btn primary" type="button" onclick="startClaudeAuthLogin({})">Sign in with Claude.ai</button>';
+    h += '<button class="btn" type="button" onclick="startClaudeAuthLogin({console:true})">Sign in with Anthropic Console</button>';
+    h += '<button class="btn" type="button" onclick="startClaudeAuthLogin({sso:true})">SSO login</button>';
+    h += '</div>';
+    h += '</div>';
+  }
+
+  if (sess && sess.done && sess.error) {
+    h += '<div style="font-size:12px;color:var(--red,#e74c3c);margin-top:4px">Last attempt failed: ' + esc(sess.error) + '</div>';
+  }
+  panel.innerHTML = h;
+}
+
+window.startClaudeAuthLogin = function(opts) {
+  var panel = document.getElementById('ccAuthPanel');
+  if (panel) panel.innerHTML = '<div style="font-size:13px;color:var(--muted)">Launching <code>claude auth login</code>...</div>';
+  fetch('/api/claudecode/auth/login', {
+    method: 'POST',
+    headers: Object.assign({'Content-Type':'application/json'}, authHeaders()),
+    body: JSON.stringify(opts || {})
+  }).then(function(r) { return r.json(); }).then(function(d) {
+    if (d.error) {
+      panel.innerHTML = '<div style="font-size:13px;color:var(--red,#e74c3c)">' + esc(d.error) + '</div><div style="margin-top:8px"><button class="btn" type="button" onclick="loadClaudeAuthStatus()">Back</button></div>';
+      return;
+    }
+    _renderClaudeAuth({session: d.session});
+  }).catch(function(err) {
+    if (panel) panel.innerHTML = '<div style="font-size:13px;color:var(--red,#e74c3c)">' + esc(err && err.message || String(err)) + '</div>';
+  });
+};
+
+window.submitClaudeAuthCode = function() {
+  var input = document.getElementById('ccAuthCode');
+  var msg = document.getElementById('ccAuthMsg');
+  if (!input) return;
+  var code = (input.value || '').trim();
+  if (!code) {
+    if (msg) msg.textContent = 'Paste the authorization code first.';
+    return;
+  }
+  if (msg) msg.textContent = 'Submitting...';
+  fetch('/api/claudecode/auth/login/code', {
+    method: 'POST',
+    headers: Object.assign({'Content-Type':'application/json'}, authHeaders()),
+    body: JSON.stringify({code: code})
+  }).then(function(r) { return r.json(); }).then(function(d) {
+    if (d.error) {
+      if (msg) msg.textContent = d.error;
+      return;
+    }
+    _renderClaudeAuth(d);
+  }).catch(function(err) {
+    if (msg) msg.textContent = (err && err.message) || String(err);
+  });
+};
+
+window.cancelClaudeAuthLogin = function() {
+  fetch('/api/claudecode/auth/login/cancel', {
+    method: 'POST',
+    headers: authHeaders()
+  }).then(function() {
+    loadClaudeAuthStatus();
+  });
+};
+
+window.logoutClaudeAuth = function() {
+  if (!confirm('Sign out of Claude Code? You will need to sign in again to use the claudecode provider.')) return;
+  fetch('/api/claudecode/auth/logout', {
+    method: 'POST',
+    headers: authHeaders()
+  }).then(function(r) { return r.json(); }).then(function(d) {
+    if (d.error) alert('Logout failed: ' + d.error);
+    loadClaudeAuthStatus();
+  });
+};
+
+window.copyClaudeAuthURL = function() {
+  var link = document.querySelector('#ccAuthPanel a[target="_blank"]');
+  if (!link) return;
+  var url = link.href;
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(url);
+  } else {
+    var ta = document.createElement('textarea');
+    ta.value = url; document.body.appendChild(ta); ta.select();
+    try { document.execCommand('copy'); } catch(_) {}
+    document.body.removeChild(ta);
+  }
+  var msg = document.getElementById('ccAuthMsg');
+  if (msg) { msg.textContent = 'URL copied to clipboard.'; setTimeout(function(){ if(msg.textContent==='URL copied to clipboard.') msg.textContent=''; }, 2000); }
 };
 
 // ── Claude Code per-project caps (overview panel) ──────────────────────────
