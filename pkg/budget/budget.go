@@ -204,31 +204,30 @@ func Enforce(workDir string, cfg config.BudgetConfig, notifyCfg config.NotifyCon
 	// when caps configured in the Budget tab and the Claude Code 'Set Caps'
 	// modal shadowed each other. See Task 20074.
 
-	// Block when extra usage would be incurred, unless explicitly allowed.
-	// Extra usage means per-token billing beyond the subscription.
-	// Check both project config and global config — block if either says to block.
+	// Block when subscription windows are exhausted to prevent incurring
+	// extra usage (per-token billing). This allows extra usage to stay
+	// enabled globally on the Claude account for interactive use while
+	// preventing cloop from consuming it.
 	blockExtra := cfg.ShouldBlockExtraUsage()
 	if blockExtra {
 		usage, usageErr := ratelimit.FetchClaudeUsage("")
 		if usageErr == nil && usage != nil {
-			// Block if any window is at 100% (would trigger extra usage)
 			if usage.FiveHour != nil && usage.FiveHour.Utilization >= 100 {
 				return fmt.Errorf(
-					"Claude Code 5-hour window exhausted (%.0f%%) — pausing to avoid extra usage charges (set budget.block_extra_usage: false to allow)",
+					"Claude Code 5-hour window exhausted (%.0f%%) — pausing to avoid extra usage (set budget.block_extra_usage: false to allow)",
 					usage.FiveHour.Utilization,
 				)
 			}
 			if usage.SevenDay != nil && usage.SevenDay.Utilization >= 100 {
 				return fmt.Errorf(
-					"Claude Code weekly window exhausted (%.0f%%) — pausing to avoid extra usage charges (set budget.block_extra_usage: false to allow)",
+					"Claude Code weekly window exhausted (%.0f%%) — pausing to avoid extra usage (set budget.block_extra_usage: false to allow)",
 					usage.SevenDay.Utilization,
 				)
 			}
-			// Block if extra usage is already being incurred
-			if usage.ExtraUsage != nil && usage.ExtraUsage.UsedCredits != nil && *usage.ExtraUsage.UsedCredits > 0 {
+			if usage.SevenDaySonnet != nil && usage.SevenDaySonnet.Utilization >= 100 {
 				return fmt.Errorf(
-					"Claude Code extra usage detected ($%.2f) — pausing to avoid further charges (set budget.block_extra_usage: false to allow)",
-					*usage.ExtraUsage.UsedCredits/100,
+					"Claude Code weekly Sonnet window exhausted (%.0f%%) — pausing to avoid extra usage (set budget.block_extra_usage: false to allow)",
+					usage.SevenDaySonnet.Utilization,
 				)
 			}
 		}
