@@ -478,7 +478,6 @@ type Server struct {
 	Log logger.Logger
 }
 
-
 // log returns s.Log, falling back to a default text logger if the field
 // was left zero. The fallback is initialised lazily so test servers that
 // construct Server{} directly (rather than via New) still get a usable
@@ -878,7 +877,6 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/provider-calls", s.handleProviderCallsList)
 	mux.HandleFunc("GET /api/provider-calls/{id}", s.handleProviderCallDetail)
 	mux.HandleFunc("POST /api/provider-calls/{id}/replay", s.handleProviderCallReplay)
-
 
 	// Client-side JS error reporting (window.onerror, unhandledrejection)
 	mux.HandleFunc("POST /api/client-error", s.handleClientError)
@@ -1378,7 +1376,6 @@ var presenceColors = []string{
 	"#58a6ff", "#3fb950", "#bc8cff", "#39c5cf", "#f85149",
 	"#d29922", "#e3b341", "#ff7b72", "#79c0ff", "#56d364",
 }
-
 
 // broadcastRunState pushes the current run state for workDir to all WebSocket
 // clients connected to that project. The event is only emitted when the
@@ -4730,7 +4727,6 @@ func splitProviderModelToken(s string) (string, string, bool) {
 	return s[:i], s[i+1:], true
 }
 
-
 // handleProjects returns all project statuses and aggregate stats.
 func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
 	s.refreshProjectStatuses()
@@ -4857,6 +4853,13 @@ func (s *Server) handleProjectRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	go func() { _ = cmd.Wait() }()
+	// Push immediate run_state + projects events so the UI updates the
+	// Run/Stop button and project card without waiting for the 2s
+	// watchProjects ticker. Replaces the client-side setTimeout(loadProjects)
+	// pseudo-poll (Task 20126).
+	s.broadcastRunState(entry.Path, true, true)
+	s.refreshProjectStatuses()
+	s.broadcastProjectsUpdate()
 	jsonOK(w, map[string]interface{}{"ok": true, "project": entry.Name, "command": strings.Join(args, " ")})
 }
 
@@ -4887,6 +4890,23 @@ func (s *Server) handleProjectStop(w http.ResponseWriter, r *http.Request) {
 		jsonOK(w, map[string]interface{}{"ok": false, "project": entry.Name, "message": "found cloop processes but signalling failed (permission denied?)"})
 		return
 	}
+	// SIGINT was delivered but the child may take a moment to exit. Spawn a
+	// short observer that re-broadcasts run_state + projects once the PID
+	// disappears, so the UI reflects the stop without the client polling
+	// (Task 20126). Bounded ~5s so we never leak a goroutine.
+	go func(path string, pids []int) {
+		defer recoverGoroutine("handleProjectStop observer")
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			if !multiui.IsCloopRunningInDir(path) {
+				break
+			}
+			time.Sleep(150 * time.Millisecond)
+		}
+		s.broadcastRunState(path, multiui.IsCloopRunningInDir(path), true)
+		s.refreshProjectStatuses()
+		s.broadcastProjectsUpdate()
+	}(entry.Path, pids)
 	jsonOK(w, map[string]interface{}{"ok": true, "project": entry.Name, "signalled": signalled})
 }
 
@@ -7859,7 +7879,6 @@ const dashboardHTML = `<!DOCTYPE html>
           </div>
         </div>
 
-
         <!-- Stats -->
         <div class="section">
           <div class="section-title" id="overviewSectionTitle">Overview</div>
@@ -7907,7 +7926,6 @@ const dashboardHTML = `<!DOCTYPE html>
           <div class="section-title">Active Options</div>
           <div class="options-grid" id="activeOptionsGrid"></div>
         </div>
-
 
         <!-- Claude Code per-project usage caps (only when provider is claudecode) -->
         <div class="section" id="ccLimitsSection" style="display:none">
@@ -9430,7 +9448,7 @@ window.switchTab = function(name) {
     if (name === 'budget') { loadBudget(); loadClaudeUsage(); loadRateLimits(); }
     if (name === 'chat') loadChatHistory();
     if (name === 'assistant') loadAssistantHistory();
-    if (name === 'replay') loadReplayRuns();
+    if (name === 'replay') { loadReplayRuns(); try { window._populateReplayTaskSelector && window._populateReplayTaskSelector(); } catch(_) {} }
     if (name === 'provider-calls') loadProviderCalls();
   } else {
     if (name === 'settings') loadConfig();
@@ -9446,7 +9464,7 @@ window.switchTab = function(name) {
     if (name === 'analytics') loadAnalytics();
     if (name === 'queue') loadQueue();
     if (name === 'budget') { loadBudget(); loadClaudeUsage(); loadRateLimits(); }
-    if (name === 'replay') loadReplayRuns();
+    if (name === 'replay') { loadReplayRuns(); try { window._populateReplayTaskSelector && window._populateReplayTaskSelector(); } catch(_) {} }
     if (name === 'provider-calls') loadProviderCalls();
   }
 
@@ -10925,6 +10943,21 @@ function handleRealtimeMsg(type, data) {
       break;
   }
 
+  // Task 20126: any push that could change a chart triggers a debounced
+  // analytics refresh; if the analytics tab is hidden, the scheduler is a
+  // cheap no-op. Replaces the old 30s self-poll inside loadAnalytics.
+  switch (type) {
+    case 'task_update':
+    case 'task_added':
+    case 'task_deleted':
+    case 'task_mutation':
+    case 'run_state':
+    case 'step_output':
+    case 'provider_call':
+      try { _scheduleAnalyticsRefresh(); } catch(_) {}
+      break;
+  }
+
   // Note: 'plan_complete' is *not* a WebSocket type — it lives only in
   // the persisted event log and webhook channel. Plan completion arrives
   // here as the final task_update flipping the last task to 'done', plus
@@ -10937,8 +10970,8 @@ function handleRealtimeMsg(type, data) {
       // when a non-primary project is selected.
       if (isMultiProject && selectedProjectIdx !== 0) return;
       try { render(data); } catch(_) {}
-      // Refresh analytics if the analytics tab is active.
-      if (activeTab === 'analytics') { try { loadAnalytics(); } catch(_) {} }
+      // Analytics refresh is scheduled by the dispatch switch above
+      // (Task 20126) — no inline call here.
       break;
     case 'step_output':
       try { if (data.chunk) appendLiveLog(data.chunk); } catch(_) {}
@@ -11294,14 +11327,19 @@ function relTime(date) {
 }
 
 window.projectRun = function(idx, pm) {
+  // No client poll — the server pushes 'projects' + 'run_state' WS events
+  // immediately after the run starts so the card and Run/Stop button
+  // refresh on their own (Task 20126).
   api('/api/projects/' + idx + '/run', {method:'POST', body: JSON.stringify({pm})})
-    .then(() => { toast('Run started', 'ok'); setTimeout(loadProjects, 800); })
+    .then(() => { toast('Run started', 'ok'); })
     .catch(() => toast('Failed to start run', 'err'));
 };
 
 window.projectStop = function(idx) {
+  // No client poll — the server pushes 'projects' + 'run_state' WS events
+  // once the SIGINT'd process actually exits (handleProjectStop observer).
   api('/api/projects/' + idx + '/stop', {method:'POST'})
-    .then(d => { toast(d.ok ? 'Stopped' : 'Nothing running', d.ok ? 'ok' : 'err'); setTimeout(loadProjects, 800); })
+    .then(d => { toast(d.ok ? 'Stopped' : 'Nothing running', d.ok ? 'ok' : 'err'); })
     .catch(() => toast('Failed to stop', 'err'));
 };
 
@@ -14535,12 +14573,8 @@ window.loadAnalytics = function() {
   api(pUrl('/api/epics')).then(d => {
     _renderEpics(d);
   }).catch(() => {});
-
-  // Restart 30s auto-refresh timer.
-  if (_analyticsTimer) clearTimeout(_analyticsTimer);
-  _analyticsTimer = setTimeout(() => {
-    if (activeTab === 'analytics') loadAnalytics();
-  }, 30000);
+  // Task 20126: no client-side polling — refreshes arrive via WS events
+  // (see _scheduleAnalyticsRefresh in handleRealtimeMsg dispatch).
 };
 
 function _destroyChart(ch) {
@@ -15240,7 +15274,6 @@ window.fabAddTask = function() {
   }
 };
 
-
 // ── Replay tab handlers (Task 20124) ──────────────────────────────────────
 // The replay tab's HTML and the /api/replay-runs backend exist, but its JS
 // handlers were never wired up — clicks on Run replay / Refresh / Close
@@ -15356,8 +15389,10 @@ window.submitReplay = function() {
 };
 
 // Populate the replay task selector with completed tasks from current state
-// whenever the replay tab becomes active.
-function _populateReplayTaskSelector() {
+// whenever the replay tab becomes active. Exposed on window so switchTab
+// (which lives in the IIFE above) can call it without polling activeTab
+// (Task 20126 — replaces a 500ms setInterval that watched for tab changes).
+window._populateReplayTaskSelector = function _populateReplayTaskSelector() {
   const sel = document.getElementById('replayTaskSel');
   if (!sel || !appState || !appState.plan || !Array.isArray(appState.plan.tasks)) return;
   const opts = appState.plan.tasks
@@ -15365,16 +15400,7 @@ function _populateReplayTaskSelector() {
     .map(t => '<option value="' + t.id + '">#' + t.id + ' ' + esc(t.title || '') + '</option>')
     .join('');
   sel.innerHTML = '<option value="">— pick a completed task —</option>' + opts;
-}
-document.addEventListener('DOMContentLoaded', () => {
-  let lastTab = null;
-  setInterval(() => {
-    if (typeof activeTab !== 'undefined' && activeTab !== lastTab) {
-      lastTab = activeTab;
-      if (activeTab === 'replay') _populateReplayTaskSelector();
-    }
-  }, 500);
-});
+};
 
 })();
 </script>
