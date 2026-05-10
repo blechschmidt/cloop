@@ -14,6 +14,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/configvalidate"
+	"github.com/blechschmidt/cloop/pkg/dbverify"
 	"github.com/blechschmidt/cloop/pkg/provider"
 )
 
@@ -76,6 +77,7 @@ func Run(ctx context.Context, workdir string, cfg *config.Config, testProviders 
 
 	checkDirStructure(workdir, add)
 	checkStateJSON(workdir, add)
+	checkStateDBIntegrity(workdir, add)
 	checkGoBinary(add)
 	checkEnvVars(cfg, add)
 	if testProviders {
@@ -180,6 +182,69 @@ func checkStateJSON(workdir string, add addFn) {
 		Level:   Pass,
 		Message: "state.json is valid JSON",
 	})
+}
+
+// checkStateDBIntegrity runs PRAGMA quick_check + PRAGMA foreign_key_check
+// against .cloop/state.db. We use the faster quick_check variant here so the
+// doctor command stays snappy for large state databases; users who suspect
+// corruption can run the more thorough `cloop db verify` (without --quick)
+// for a full integrity_check.
+//
+// A missing state.db is downgraded to Pass — fresh projects haven't created
+// it yet — and not surfaced as a separate Warn because checkDirStructure /
+// checkStateJSON already flag uninitialised projects.
+func checkStateDBIntegrity(workdir string, add addFn) {
+	dbPath := filepath.Join(workdir, ".cloop", "state.db")
+	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+		// No SQLite store yet — nothing to verify, and other checks will
+		// already have surfaced the "uninitialised project" condition.
+		return
+	}
+
+	rep, err := dbverify.Verify(dbPath, true)
+	if err != nil {
+		add(Result{
+			Name:    ".cloop/state.db integrity",
+			Level:   Fail,
+			Message: fmt.Sprintf("could not run quick_check: %v", err),
+			Fix:     "Inspect file permissions; run 'cloop db verify' for details",
+		})
+		return
+	}
+
+	if rep.OK() {
+		add(Result{
+			Name:    ".cloop/state.db integrity",
+			Level:   Pass,
+			Message: "quick_check + foreign_key_check passed",
+		})
+		return
+	}
+
+	if n := len(rep.IntegrityIssues); n > 0 {
+		// Show the first issue inline; suggest db verify for the full list.
+		first := rep.IntegrityIssues[0]
+		msg := fmt.Sprintf("quick_check reported %d issue(s): %s", n, first)
+		if n > 1 {
+			msg += " (…)"
+		}
+		add(Result{
+			Name:    ".cloop/state.db integrity",
+			Level:   Fail,
+			Message: msg,
+			Fix:     "Run 'cloop db verify' for the full report; restore from a recent 'cloop snapshot' if corrupted",
+		})
+	}
+	if n := len(rep.ForeignKeyViolations); n > 0 {
+		v := rep.ForeignKeyViolations[0]
+		msg := fmt.Sprintf("foreign_key_check reported %d violation(s) (e.g. table=%s parent=%s)", n, v.Table, v.Parent)
+		add(Result{
+			Name:    ".cloop/state.db foreign keys",
+			Level:   Fail,
+			Message: msg,
+			Fix:     "Run 'cloop db verify' for the full list; affected rows must be deleted or repaired manually",
+		})
+	}
 }
 
 // checkGoBinary checks whether `go` is available and reports its version.
