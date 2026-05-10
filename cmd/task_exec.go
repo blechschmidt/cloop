@@ -12,6 +12,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/checkpoint"
 	"github.com/blechschmidt/cloop/pkg/env"
 	"github.com/blechschmidt/cloop/pkg/state"
+	"github.com/blechschmidt/cloop/pkg/statedb"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 )
@@ -69,7 +70,7 @@ Use '--' to separate cloop flags from the command and its own flags:
 			}
 		}
 		if !taskFound {
-			return fmt.Errorf("task %d not found", taskID)
+			return fmt.Errorf("task %d not found: %w", taskID, statedb.ErrTaskNotFound)
 		}
 
 		// Load .cloop/env.yaml secrets (non-fatal if missing).

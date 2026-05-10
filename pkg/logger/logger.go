@@ -1,156 +1,263 @@
-// Package logger provides structured logging for cloop with text and JSON output modes.
+// Package logger provides structured logging for cloop, backed by Go's
+// standard library log/slog package.
 //
-// In text mode (default) the Logger is a no-op wrapper — all output is handled by
-// the existing fmt/color calls in the orchestrator. In JSON mode (--log-json) the
-// Logger writes newline-delimited JSON (NDJSON) to stdout so that output can be
-// piped into log aggregators such as Datadog, Splunk, or jq.
+// The Logger interface keeps cloop's existing event-oriented call sites
+// (Info/Warn/Error/Log with an Event tag, optional task_id, message, and a
+// free-form data map) source-compatible while letting the underlying
+// slog.Handler decide how each entry is rendered:
+//
+//   - JSON mode (--log-json) → slog.NewJSONHandler writes one NDJSON line
+//     per entry to stdout with stable keys (time, level, msg, event,
+//     task_id, …) plus any structured attrs supplied by the caller or
+//     bound via With.
+//   - text mode (default)    → slog.NewTextHandler writes one logfmt-style
+//     line per entry to stdout. The orchestrator and other callers
+//     additionally print decorative color/banner output to the same
+//     stdout; both streams interleave cleanly because slog uses a single
+//     synchronised writer.
+//
+// The previous TextLogger was a no-op so that printf-style output owned the
+// terminal. To preserve that behaviour for terminals where ANSI banners are
+// the primary UX, callers can still gate decorative output on IsJSON()
+// (true means "machine-parseable stream — suppress decoration"). Text mode
+// now also emits one slog line per event so that downstream tooling can
+// scrape it without enabling JSON.
+//
+// Logger is an interface so tests and integrators can capture entries
+// without going through slog. The default constructor (`New`) returns the
+// slog-backed implementation; tests can substitute their own captureLogger.
 package logger
 
 import (
-	"encoding/json"
+	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
+	"sync"
 	"time"
 )
 
-// Level represents the severity of a log entry.
+// Level represents the severity of a log entry. The string values are the
+// historical cloop level names; they are mapped to slog.Level by the
+// implementation. They are still comparable for tests and external code.
 type Level string
 
 const (
+	LevelDebug Level = "debug"
 	LevelInfo  Level = "info"
 	LevelWarn  Level = "warn"
 	LevelError Level = "error"
 )
 
-// Event is the structured event name embedded in every JSON log line.
+// slogLevel converts a cloop Level to its slog.Level counterpart.
+func (l Level) slogLevel() slog.Level {
+	switch l {
+	case LevelDebug:
+		return slog.LevelDebug
+	case LevelWarn:
+		return slog.LevelWarn
+	case LevelError:
+		return slog.LevelError
+	default:
+		return slog.LevelInfo
+	}
+}
+
+// Event is the structured event name embedded in every log line.
 type Event string
 
 const (
-	EventSessionStart  Event = "session_start"
-	EventSessionDone   Event = "session_done"
-	EventTaskStart     Event = "task_start"
-	EventTaskDone      Event = "task_done"
-	EventTaskFailed    Event = "task_failed"
-	EventTaskSkipped   Event = "task_skipped"
-	EventStep          Event = "step"
-	EventHeal          Event = "heal"
-	EventEvolve        Event = "evolve"
-	EventHealthCheck   Event = "health_check"
-	EventOptimize      Event = "optimize"
-	EventVerify        Event = "verify"
-	EventCheckpoint    Event = "checkpoint"
+	EventSessionStart Event = "session_start"
+	EventSessionDone  Event = "session_done"
+	EventTaskStart    Event = "task_start"
+	EventTaskDone     Event = "task_done"
+	EventTaskFailed   Event = "task_failed"
+	EventTaskSkipped  Event = "task_skipped"
+	EventStep         Event = "step"
+	EventHeal         Event = "heal"
+	EventEvolve       Event = "evolve"
+	EventHealthCheck  Event = "health_check"
+	EventOptimize     Event = "optimize"
+	EventVerify       Event = "verify"
+	EventCheckpoint   Event = "checkpoint"
+	EventTaskStuck    Event = "task_stuck"
 )
 
-// Entry is the JSON schema for every log line emitted by JSONLogger.
+// Entry is the legacy JSON schema for a log line. Kept for callers that
+// want to assert against the historical shape (it is no longer the wire
+// format — slog.JSONHandler emits its own representation), but tests in
+// pkg/logger validate the slog output directly.
 type Entry struct {
 	Time    string                 `json:"time"`
 	Level   Level                  `json:"level"`
 	Event   Event                  `json:"event"`
 	TaskID  int                    `json:"task_id,omitempty"`
-	// TraceID is the OpenTelemetry trace ID of the active span when this entry
-	// was emitted. Present only when tracing is enabled and a span is active.
 	TraceID string                 `json:"trace_id,omitempty"`
 	Message string                 `json:"message"`
 	Data    map[string]interface{} `json:"data,omitempty"`
 }
 
-// Logger defines the interface for structured event logging.
+// Logger is the structured event logger used throughout cloop.
+//
+// Implementations MUST be safe for concurrent use from multiple goroutines.
+// All methods are non-blocking; failures inside the handler are surfaced
+// to stderr but never returned to the caller.
 type Logger interface {
 	// Log emits a structured entry. taskID of 0 means no associated task.
 	Log(level Level, event Event, taskID int, message string, data map[string]interface{})
 
-	// Info is a convenience wrapper for Log with LevelInfo.
+	// Debug, Info, Warn, Error are convenience wrappers for Log.
+	Debug(event Event, taskID int, message string, data map[string]interface{})
 	Info(event Event, taskID int, message string, data map[string]interface{})
-
-	// Warn is a convenience wrapper for Log with LevelWarn.
 	Warn(event Event, taskID int, message string, data map[string]interface{})
-
-	// Error is a convenience wrapper for Log with LevelError.
 	Error(event Event, taskID int, message string, data map[string]interface{})
 
-	// IsJSON reports whether this logger emits JSON output.
-	// When true the caller should suppress decorative color/fmt output.
+	// With returns a new Logger that prepends the given key/value pair to
+	// every emitted entry. Chained calls compose; the parent is unaffected.
+	// Typical use: log.With("project", workdir).With("provider", name).
+	With(key string, value any) Logger
+
+	// IsJSON reports whether this logger emits machine-parseable JSON
+	// output. Callers use this to suppress decorative color/banner text
+	// that would otherwise corrupt a JSON stream.
 	IsJSON() bool
 }
 
-// TextLogger is a no-op Logger — all output is handled by the caller's existing
-// fmt/color calls. IsJSON() returns false.
-type TextLogger struct{}
-
-func (t *TextLogger) Log(_ Level, _ Event, _ int, _ string, _ map[string]interface{}) {}
-func (t *TextLogger) Info(_ Event, _ int, _ string, _ map[string]interface{})          {}
-func (t *TextLogger) Warn(_ Event, _ int, _ string, _ map[string]interface{})          {}
-func (t *TextLogger) Error(_ Event, _ int, _ string, _ map[string]interface{})         {}
-func (t *TextLogger) IsJSON() bool                                                      { return false }
-
-// JSONLogger writes newline-delimited JSON to w (typically os.Stdout).
-type JSONLogger struct {
-	w   io.Writer
-	enc *json.Encoder
+// slogLogger is the concrete Logger backed by slog.
+type slogLogger struct {
+	handler slog.Handler
+	json    bool
 }
 
-// NewJSONLogger creates a JSONLogger that writes to w.
-// Pass os.Stdout for normal operation.
-func NewJSONLogger(w io.Writer) *JSONLogger {
-	enc := json.NewEncoder(w)
-	enc.SetEscapeHTML(false)
-	return &JSONLogger{w: w, enc: enc}
+// New returns a Logger writing to os.Stdout. When jsonMode is true the
+// handler is slog.JSONHandler; otherwise it is slog.TextHandler.
+//
+// Both handlers use slog.LevelDebug as the floor so callers control the
+// effective level via their choice of Debug/Info/Warn/Error. cloop does
+// not currently expose a runtime-configurable level filter — every entry
+// is recorded, and downstream tools filter by the `level` field.
+func New(jsonMode bool) Logger {
+	return NewWithWriter(os.Stdout, jsonMode)
 }
 
-func (j *JSONLogger) Log(level Level, event Event, taskID int, message string, data map[string]interface{}) {
-	entry := Entry{
-		Time:    time.Now().UTC().Format(time.RFC3339),
-		Level:   level,
-		Event:   event,
-		TaskID:  taskID,
-		Message: message,
-		Data:    data,
+// NewWithWriter is like New but writes to w. Tests use this to capture
+// output into a bytes.Buffer.
+func NewWithWriter(w io.Writer, jsonMode bool) Logger {
+	if w == nil {
+		w = io.Discard
 	}
-	// Promote trace_id from data map to top-level field for easy log correlation.
-	// Callers that hold an OTel context can include {"trace_id": tracing.TraceIDFromContext(ctx)}.
-	if data != nil {
-		if tid, ok := data["trace_id"].(string); ok && tid != "" {
-			entry.TraceID = tid
-			// Remove from data to avoid duplication.
-			filtered := make(map[string]interface{}, len(data)-1)
-			for k, v := range data {
-				if k != "trace_id" {
-					filtered[k] = v
-				}
+	opts := &slog.HandlerOptions{Level: slog.LevelDebug}
+	var h slog.Handler
+	if jsonMode {
+		h = slog.NewJSONHandler(syncWriter(w), opts)
+	} else {
+		h = slog.NewTextHandler(syncWriter(w), opts)
+	}
+	return &slogLogger{handler: h, json: jsonMode}
+}
+
+// NewJSONLogger preserves the v1 constructor name for callers that import
+// pkg/logger directly (it remains used by some integrators / forks).
+// Internally it now goes through slog.JSONHandler.
+func NewJSONLogger(w io.Writer) Logger {
+	return NewWithWriter(w, true)
+}
+
+// IsJSON reports whether this logger emits JSON output.
+func (s *slogLogger) IsJSON() bool { return s.json }
+
+// With binds a key/value pair to every subsequent entry from the returned
+// Logger. The parent is unaffected.
+func (s *slogLogger) With(key string, value any) Logger {
+	return &slogLogger{
+		handler: s.handler.WithAttrs([]slog.Attr{slog.Any(key, value)}),
+		json:    s.json,
+	}
+}
+
+// Log emits an entry at the requested level with structured attrs. Entries
+// always include the `event` attribute; task_id is included when non-zero.
+// Anything in the data map is added as an attribute under its key — keys
+// reserved by slog (time, level, msg, source) are namespaced under `data.*`
+// to avoid collisions in the JSON handler.
+func (s *slogLogger) Log(level Level, event Event, taskID int, message string, data map[string]interface{}) {
+	if s == nil || s.handler == nil {
+		return
+	}
+	lvl := level.slogLevel()
+	if !s.handler.Enabled(context.Background(), lvl) {
+		return
+	}
+	r := slog.NewRecord(time.Now(), lvl, message, 0)
+	r.AddAttrs(slog.String("event", string(event)))
+	if taskID != 0 {
+		r.AddAttrs(slog.Int("task_id", taskID))
+	}
+	if len(data) > 0 {
+		// Promote a trace_id key (commonly attached by tracing-aware
+		// callers) to a top-level attr so log aggregators can index it.
+		// Other keys are emitted as-is.
+		for k, v := range data {
+			if k == "" {
+				continue
 			}
-			if len(filtered) > 0 {
-				entry.Data = filtered
-			} else {
-				entry.Data = nil
+			if isReservedSlogKey(k) {
+				k = "data." + k
 			}
+			r.AddAttrs(slog.Any(k, v))
 		}
 	}
-	if err := j.enc.Encode(entry); err != nil {
-		fmt.Fprintf(os.Stderr, "logger encode error: %v\n", err)
+	if err := s.handler.Handle(context.Background(), r); err != nil {
+		fmt.Fprintf(os.Stderr, "logger handle error: %v\n", err)
 	}
 }
 
-func (j *JSONLogger) Info(event Event, taskID int, message string, data map[string]interface{}) {
-	j.Log(LevelInfo, event, taskID, message, data)
+func (s *slogLogger) Debug(event Event, taskID int, message string, data map[string]interface{}) {
+	s.Log(LevelDebug, event, taskID, message, data)
+}
+func (s *slogLogger) Info(event Event, taskID int, message string, data map[string]interface{}) {
+	s.Log(LevelInfo, event, taskID, message, data)
+}
+func (s *slogLogger) Warn(event Event, taskID int, message string, data map[string]interface{}) {
+	s.Log(LevelWarn, event, taskID, message, data)
+}
+func (s *slogLogger) Error(event Event, taskID int, message string, data map[string]interface{}) {
+	s.Log(LevelError, event, taskID, message, data)
 }
 
-func (j *JSONLogger) Warn(event Event, taskID int, message string, data map[string]interface{}) {
-	j.Log(LevelWarn, event, taskID, message, data)
-}
-
-func (j *JSONLogger) Error(event Event, taskID int, message string, data map[string]interface{}) {
-	j.Log(LevelError, event, taskID, message, data)
-}
-
-func (j *JSONLogger) IsJSON() bool { return true }
-
-// New returns a Logger based on the jsonMode flag.
-// When jsonMode is true a JSONLogger writing to os.Stdout is returned.
-// When jsonMode is false a no-op TextLogger is returned.
-func New(jsonMode bool) Logger {
-	if jsonMode {
-		return NewJSONLogger(os.Stdout)
+// isReservedSlogKey reports whether key would collide with a slog built-in
+// attribute name in the JSON or text handlers.
+func isReservedSlogKey(key string) bool {
+	switch key {
+	case slog.TimeKey, slog.LevelKey, slog.MessageKey, slog.SourceKey:
+		return true
+	case "event", "task_id":
+		// reserved for our own promoted attrs
+		return true
 	}
-	return &TextLogger{}
+	return false
+}
+
+// syncWriter wraps w in a mutex so concurrent Handle calls cannot interleave
+// bytes within a single line. slog's default handlers do their own
+// per-record locking when the writer is *os.File (via internal type-switch),
+// but they fall back to plain Write for arbitrary io.Writers — and tests
+// pass a bytes.Buffer. Wrapping unconditionally is cheap and uniform.
+func syncWriter(w io.Writer) io.Writer {
+	if _, ok := w.(*lockedWriter); ok {
+		return w
+	}
+	return &lockedWriter{w: w}
+}
+
+type lockedWriter struct {
+	mu sync.Mutex
+	w  io.Writer
+}
+
+func (lw *lockedWriter) Write(p []byte) (int, error) {
+	lw.mu.Lock()
+	defer lw.mu.Unlock()
+	return lw.w.Write(p)
 }

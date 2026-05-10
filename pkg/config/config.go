@@ -64,6 +64,21 @@ const (
 	WebSocketConnsPerIPUpper = 1024
 	WebSocketConnsDefault      = 256
 	WebSocketConnsPerIPDefault = 8
+
+	// HTTP request body cap for the cloop ui and cloop serve servers
+	// (Task 20102). The cap protects against memory-exhaustion DoS via
+	// oversized POST/PUT/PATCH payloads on the long-running daemon. Zero
+	// in YAML means "not set" — runtime substitutes MaxRequestBodyBytesDefault.
+	// Non-zero values outside the allowed band are clamped back to zero
+	// (validateAndClamp) and rejected by `cloop config set` (ValidateNumeric).
+	//
+	// Bounds: 1 KiB lower (anything smaller would reject normal task PATCHes)
+	// and 1 GiB upper (anything larger defeats the protection while being
+	// well above any legitimate JSON payload). Default 10 MiB covers chat
+	// transcripts and large bulk-edit JSON arrays with comfortable headroom.
+	MaxRequestBodyBytesLower   int64 = 1 << 10  // 1 KiB
+	MaxRequestBodyBytesUpper   int64 = 1 << 30  // 1 GiB
+	MaxRequestBodyBytesDefault int64 = 10 << 20 // 10 MiB
 )
 
 // permWarnedPaths tracks which config paths have already emitted the
@@ -173,6 +188,15 @@ type UIConfig struct {
 	// Zero substitutes WebSocketConnsPerIPDefault (8).
 	// Validated to WebSocketConnsPerIPLower..WebSocketConnsPerIPUpper.
 	MaxWebSocketConnsPerIP int `yaml:"max_websocket_conns_per_ip,omitempty"`
+
+	// MaxRequestBodyBytes caps the size of any incoming HTTP request body
+	// the UI server will accept (POST/PUT/PATCH on every /api/* endpoint).
+	// Zero substitutes MaxRequestBodyBytesDefault (10 MiB). Validated to
+	// MaxRequestBodyBytesLower..MaxRequestBodyBytesUpper. A breached cap
+	// returns HTTP 413 (Request Entity Too Large) before the handler runs,
+	// so a malicious or buggy client cannot OOM the daemon by streaming
+	// a multi-GB body. Applies to both cloop ui and cloop serve.
+	MaxRequestBodyBytes int64 `yaml:"max_request_body_bytes,omitempty"`
 }
 
 // EffectiveMaxWebSocketConns returns the configured total cap, substituting
@@ -191,6 +215,17 @@ func (u UIConfig) EffectiveMaxWebSocketConnsPerIP() int {
 		return WebSocketConnsPerIPDefault
 	}
 	return u.MaxWebSocketConnsPerIP
+}
+
+// EffectiveMaxRequestBodyBytes returns the configured request-body cap,
+// substituting MaxRequestBodyBytesDefault (10 MiB) when the field is zero.
+// Used by both pkg/ui and pkg/apiserver to size their http.MaxBytesReader
+// wrappers.
+func (u UIConfig) EffectiveMaxRequestBodyBytes() int64 {
+	if u.MaxRequestBodyBytes <= 0 {
+		return MaxRequestBodyBytesDefault
+	}
+	return u.MaxRequestBodyBytes
 }
 
 // WatchdogConfig configures the in-flight task stuck detector (Task 20088).
@@ -718,6 +753,14 @@ func (c *Config) validateAndClamp(path string) {
 		warn("ui.max_websocket_conns_per_ip", fmt.Sprintf("value %d exceeds ui.max_websocket_conns %d", c.UI.MaxWebSocketConnsPerIP, c.UI.MaxWebSocketConns))
 		c.UI.MaxWebSocketConnsPerIP = 0
 	}
+	// Request body cap: zero means default; out-of-range falls back to zero
+	// so the runtime substitutes MaxRequestBodyBytesDefault. Pathological
+	// values (negative, microscopically small, or absurdly large) are
+	// silently corrected rather than left in place.
+	if c.UI.MaxRequestBodyBytes != 0 && (c.UI.MaxRequestBodyBytes < MaxRequestBodyBytesLower || c.UI.MaxRequestBodyBytes > MaxRequestBodyBytesUpper) {
+		warn("ui.max_request_body_bytes", fmt.Sprintf("value %d outside [%d, %d]", c.UI.MaxRequestBodyBytes, MaxRequestBodyBytesLower, MaxRequestBodyBytesUpper))
+		c.UI.MaxRequestBodyBytes = 0
+	}
 }
 
 // ValidateNumeric returns a non-nil error describing the first numeric range
@@ -776,6 +819,10 @@ func (c *Config) ValidateNumeric() error {
 	if c.UI.MaxWebSocketConns != 0 && c.UI.MaxWebSocketConnsPerIP != 0 && c.UI.MaxWebSocketConnsPerIP > c.UI.MaxWebSocketConns {
 		return fmt.Errorf("ui.max_websocket_conns_per_ip (%d) must not exceed ui.max_websocket_conns (%d)",
 			c.UI.MaxWebSocketConnsPerIP, c.UI.MaxWebSocketConns)
+	}
+	if c.UI.MaxRequestBodyBytes != 0 && (c.UI.MaxRequestBodyBytes < MaxRequestBodyBytesLower || c.UI.MaxRequestBodyBytes > MaxRequestBodyBytesUpper) {
+		return fmt.Errorf("ui.max_request_body_bytes must be between %d and %d (or 0 for the default %d) (got %d)",
+			MaxRequestBodyBytesLower, MaxRequestBodyBytesUpper, MaxRequestBodyBytesDefault, c.UI.MaxRequestBodyBytes)
 	}
 	return nil
 }

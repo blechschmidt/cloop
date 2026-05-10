@@ -4,6 +4,7 @@
 package statedb
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -68,108 +69,21 @@ type DB struct {
 	conn *sql.DB
 }
 
-const schema = `
-PRAGMA foreign_keys=ON;
-
-CREATE TABLE IF NOT EXISTS metadata (
-    key   TEXT PRIMARY KEY,
-    value TEXT NOT NULL DEFAULT ''
-);
-
-CREATE TABLE IF NOT EXISTS plan_tasks (
-    id                INTEGER PRIMARY KEY,
-    title             TEXT    NOT NULL DEFAULT '',
-    description       TEXT    NOT NULL DEFAULT '',
-    priority          INTEGER NOT NULL DEFAULT 5,
-    status            TEXT    NOT NULL DEFAULT 'pending',
-    role              TEXT    NOT NULL DEFAULT '',
-    depends_on        TEXT    NOT NULL DEFAULT '[]',
-    result            TEXT    NOT NULL DEFAULT '',
-    started_at        TEXT,
-    completed_at      TEXT,
-    deadline          TEXT,
-    verify_retries    INTEGER NOT NULL DEFAULT 0,
-    github_issue      INTEGER NOT NULL DEFAULT 0,
-    estimated_minutes INTEGER NOT NULL DEFAULT 0,
-    actual_minutes    INTEGER NOT NULL DEFAULT 0,
-    artifact_path     TEXT    NOT NULL DEFAULT '',
-    failure_diagnosis TEXT    NOT NULL DEFAULT '',
-    tags              TEXT    NOT NULL DEFAULT '[]',
-    fail_count        INTEGER NOT NULL DEFAULT 0,
-    heal_attempts     INTEGER NOT NULL DEFAULT 0,
-    annotations       TEXT    NOT NULL DEFAULT '[]',
-    condition_expr    TEXT    NOT NULL DEFAULT '',
-    recurrence        TEXT    NOT NULL DEFAULT '',
-    next_run_at       TEXT,
-    requires_approval INTEGER NOT NULL DEFAULT 0,
-    approved          INTEGER NOT NULL DEFAULT 0,
-    max_minutes       INTEGER NOT NULL DEFAULT 0
-);
-
-CREATE TABLE IF NOT EXISTS steps (
-    step          INTEGER PRIMARY KEY,
-    task          TEXT    NOT NULL DEFAULT '',
-    output        TEXT    NOT NULL DEFAULT '',
-    exit_code     INTEGER NOT NULL DEFAULT 0,
-    duration      TEXT    NOT NULL DEFAULT '',
-    time          TEXT    NOT NULL DEFAULT '',
-    input_tokens  INTEGER NOT NULL DEFAULT 0,
-    output_tokens INTEGER NOT NULL DEFAULT 0
-);
-
-CREATE TABLE IF NOT EXISTS costs (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    timestamp       TEXT    NOT NULL DEFAULT '',
-    task_id         INTEGER NOT NULL DEFAULT 0,
-    task_title      TEXT    NOT NULL DEFAULT '',
-    provider        TEXT    NOT NULL DEFAULT '',
-    model           TEXT    NOT NULL DEFAULT '',
-    input_tokens    INTEGER NOT NULL DEFAULT 0,
-    output_tokens   INTEGER NOT NULL DEFAULT 0,
-    thinking_tokens INTEGER NOT NULL DEFAULT 0,
-    estimated_usd   REAL    NOT NULL DEFAULT 0
-);
-
-CREATE INDEX IF NOT EXISTS costs_timestamp ON costs(timestamp);
-CREATE INDEX IF NOT EXISTS costs_task_id ON costs(task_id);
-
--- Activity queue: every unit of work cloop performs (PM task executions,
--- auto-heal retries, evolve discovery cycles, externally-merged tasks,
--- session-level work). Co-located with state in state.db so there is a
--- single SQLite database per project (Task 20079: merge queue + state db).
-CREATE TABLE IF NOT EXISTS queue (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    kind            TEXT    NOT NULL DEFAULT 'task',
-    task_id         INTEGER NOT NULL DEFAULT 0,
-    attempt         INTEGER NOT NULL DEFAULT 0,
-    parent_id       INTEGER NOT NULL DEFAULT 0,
-    title           TEXT    NOT NULL DEFAULT '',
-    description     TEXT    NOT NULL DEFAULT '',
-    status          TEXT    NOT NULL DEFAULT 'queued',
-    source          TEXT    NOT NULL DEFAULT '',
-    created_at      TEXT    NOT NULL DEFAULT '',
-    started_at      TEXT,
-    completed_at    TEXT,
-    output_summary  TEXT    NOT NULL DEFAULT '',
-    error_message   TEXT    NOT NULL DEFAULT ''
-);
-
-CREATE INDEX IF NOT EXISTS queue_task_id ON queue(task_id);
-CREATE INDEX IF NOT EXISTS queue_status ON queue(status);
-CREATE INDEX IF NOT EXISTS queue_created_at ON queue(created_at);
-`
-
 // Open opens (or creates) the SQLite database at dbPath, applies tuning
-// pragmas, and creates the schema if necessary.
+// pragmas, and runs any pending schema migrations.
 //
 // Concurrency model: every cloop process (Web UI, orchestrator, CLI commands)
 // opens its own *DB handle pointing at the same .cloop/state.db file. WAL
 // mode + busy_timeout coordinate them at the SQLite file level, so writes
 // from one process do not return SQLITE_BUSY to readers in another.
+//
+// Errors returned by this function may wrap the typed sentinels
+// ErrDBLocked or ErrSchemaMismatch — callers should use errors.Is to
+// distinguish them from generic open failures.
 func Open(dbPath string) (*DB, error) {
 	conn, err := sql.Open("sqlite", dbPath)
 	if err != nil {
-		return nil, fmt.Errorf("statedb open %s: %w", dbPath, err)
+		return nil, fmt.Errorf("statedb open %s: %w", dbPath, classifyDriverErr(err))
 	}
 	// One physical connection per *DB handle. Within a single process this
 	// serialises all reads and writes through Go's connection pool so we
@@ -184,9 +98,9 @@ func Open(dbPath string) (*DB, error) {
 		return nil, err
 	}
 
-	if _, err := conn.Exec(schema); err != nil {
+	if _, err := Migrate(conn); err != nil {
 		conn.Close()
-		return nil, fmt.Errorf("statedb schema: %w", err)
+		return nil, fmt.Errorf("statedb migrate: %w", err)
 	}
 	return &DB{conn: conn}, nil
 }
@@ -217,12 +131,39 @@ func applyPragmas(conn *sql.DB) error {
 	if _, err := conn.Exec(`PRAGMA synchronous=NORMAL`); err != nil {
 		return fmt.Errorf("statedb: set synchronous=NORMAL: %w", err)
 	}
+	// Connection-scoped: must be re-issued on every open. Migration files
+	// can no longer rely on PRAGMA foreign_keys being part of their script
+	// because each migration runs once, then never again.
+	if _, err := conn.Exec(`PRAGMA foreign_keys=ON`); err != nil {
+		return fmt.Errorf("statedb: enable foreign_keys: %w", err)
+	}
 	return nil
 }
 
 // Close releases the database connection.
 func (d *DB) Close() error {
 	return d.conn.Close()
+}
+
+// PingContext runs a `SELECT 1` against the underlying connection, honouring
+// ctx for cancellation/deadline. Used by readiness probes (e.g. /readyz) to
+// verify the SQLite store is reachable.
+//
+// Intentionally does NOT acquire d.mu: *sql.DB is concurrency-safe, and the
+// mutex is reserved for transactional read-modify-write ops in this package.
+// Holding it here would block readiness on whichever long-running write
+// happens to own the lock — exactly what a probe must NOT do. The ctx
+// timeout bounds wait time on the single underlying connection (we set
+// MaxOpenConns(1)) when it is busy.
+func (d *DB) PingContext(ctx context.Context) error {
+	var one int
+	if err := d.conn.QueryRowContext(ctx, "SELECT 1").Scan(&one); err != nil {
+		return fmt.Errorf("statedb ping: %w", err)
+	}
+	if one != 1 {
+		return fmt.Errorf("statedb ping: unexpected result %d", one)
+	}
+	return nil
 }
 
 // ────────────────────────────────────────────────────────────
@@ -256,7 +197,7 @@ func (d *DB) SaveState(s *State) error {
 
 	tx, err := d.conn.Begin()
 	if err != nil {
-		return err
+		return classifyDriverErr(err)
 	}
 	defer tx.Rollback() //nolint:errcheck
 
@@ -306,18 +247,18 @@ func (d *DB) SaveState(s *State) error {
 
 	for k, v := range meta {
 		if err := d.setMeta(tx, k, v); err != nil {
-			return fmt.Errorf("set metadata %q: %w", k, err)
+			return fmt.Errorf("set metadata %q: %w", k, classifyDriverErr(err))
 		}
 	}
 
 	// ── plan tasks ──
 	if _, err := tx.Exec(`DELETE FROM plan_tasks`); err != nil {
-		return err
+		return classifyDriverErr(err)
 	}
 	if s.Plan != nil {
 		for _, t := range s.Plan.Tasks {
 			if err := insertTask(tx, t); err != nil {
-				return fmt.Errorf("insert task %d: %w", t.ID, err)
+				return fmt.Errorf("insert task %d: %w", t.ID, classifyDriverErr(err))
 			}
 		}
 	}
@@ -325,11 +266,14 @@ func (d *DB) SaveState(s *State) error {
 	// ── steps (upsert, never delete) ──
 	for _, row := range s.Steps {
 		if err := upsertStep(tx, row); err != nil {
-			return fmt.Errorf("upsert step %d: %w", row.Step, err)
+			return fmt.Errorf("upsert step %d: %w", row.Step, classifyDriverErr(err))
 		}
 	}
 
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return classifyDriverErr(err)
+	}
+	return nil
 }
 
 // ────────────────────────────────────────────────────────────
@@ -345,19 +289,19 @@ func (d *DB) LoadState() (*State, error) {
 	// ── scalar metadata ──
 	rows, err := d.conn.Query(`SELECT key, value FROM metadata`)
 	if err != nil {
-		return nil, err
+		return nil, classifyDriverErr(err)
 	}
 	defer rows.Close()
 	metaMap := make(map[string]string)
 	for rows.Next() {
 		var k, v string
 		if err := rows.Scan(&k, &v); err != nil {
-			return nil, err
+			return nil, classifyDriverErr(err)
 		}
 		metaMap[k] = v
 	}
 	if err := rows.Err(); err != nil {
-		return nil, err
+		return nil, classifyDriverErr(err)
 	}
 
 	s.Goal = metaMap["goal"]
@@ -398,7 +342,7 @@ func (d *DB) LoadState() (*State, error) {
 	// ── plan tasks ──
 	tasks, err := loadTasks(d.conn)
 	if err != nil {
-		return nil, err
+		return nil, classifyDriverErr(err)
 	}
 	planGoal := metaMap["plan_goal"]
 	planVersion := atoi(metaMap["plan_version"])
@@ -413,7 +357,7 @@ func (d *DB) LoadState() (*State, error) {
 	// ── steps ──
 	s.Steps, err = loadSteps(d.conn)
 	if err != nil {
-		return nil, err
+		return nil, classifyDriverErr(err)
 	}
 
 	return s, nil
@@ -429,14 +373,17 @@ func (d *DB) UpsertTask(t *pm.Task) error {
 
 	tx, err := d.conn.Begin()
 	if err != nil {
-		return err
+		return classifyDriverErr(err)
 	}
 	defer tx.Rollback() //nolint:errcheck
 
 	if err := upsertTaskTx(tx, t); err != nil {
-		return err
+		return classifyDriverErr(err)
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return classifyDriverErr(err)
+	}
+	return nil
 }
 
 // ────────────────────────────────────────────────────────────
@@ -480,6 +427,75 @@ func (d *DB) GetConfigBlob() (string, error) {
 	return v, nil
 }
 
+// LoadTask returns a single task by ID. Returns ErrTaskNotFound if the task
+// does not exist. Useful from HTTP handlers where the typical 404 path is
+// "the requested task does not exist".
+func (d *DB) LoadTask(id int) (*pm.Task, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	rows, err := d.conn.Query(`
+		SELECT id, title, description, priority, status, role, depends_on, result,
+			started_at, completed_at, deadline, verify_retries, github_issue,
+			estimated_minutes, actual_minutes, artifact_path, failure_diagnosis,
+			tags, fail_count, heal_attempts, annotations, condition_expr,
+			recurrence, next_run_at, requires_approval, approved, max_minutes
+		FROM plan_tasks WHERE id = ? LIMIT 1`, id)
+	if err != nil {
+		return nil, classifyDriverErr(err)
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return nil, classifyDriverErr(err)
+		}
+		return nil, fmt.Errorf("task %d: %w", id, ErrTaskNotFound)
+	}
+	t := &pm.Task{}
+	var (
+		status, role, depsJSON, tagsJSON, annJSON   string
+		startedAt, completedAt, deadline, nextRunAt sql.NullString
+		reqApproval, approved                       int
+	)
+	if err := rows.Scan(
+		&t.ID, &t.Title, &t.Description, &t.Priority, &status, &role,
+		&depsJSON, &t.Result,
+		&startedAt, &completedAt, &deadline,
+		&t.VerifyRetries, &t.GitHubIssue,
+		&t.EstimatedMinutes, &t.ActualMinutes,
+		&t.ArtifactPath, &t.FailureDiagnosis,
+		&tagsJSON, &t.FailCount, &t.HealAttempts,
+		&annJSON, &t.Condition, &t.Recurrence,
+		&nextRunAt, &reqApproval, &approved, &t.MaxMinutes,
+	); err != nil {
+		return nil, classifyDriverErr(err)
+	}
+	t.Status = pm.TaskStatus(status)
+	t.Role = pm.AgentRole(role)
+	_ = json.Unmarshal([]byte(depsJSON), &t.DependsOn)
+	_ = json.Unmarshal([]byte(tagsJSON), &t.Tags)
+	_ = json.Unmarshal([]byte(annJSON), &t.Annotations)
+	t.RequiresApproval = reqApproval == 1
+	t.Approved = approved == 1
+	if startedAt.Valid {
+		ts, _ := time.Parse(time.RFC3339Nano, startedAt.String)
+		t.StartedAt = &ts
+	}
+	if completedAt.Valid {
+		ts, _ := time.Parse(time.RFC3339Nano, completedAt.String)
+		t.CompletedAt = &ts
+	}
+	if deadline.Valid {
+		ts, _ := time.Parse(time.RFC3339Nano, deadline.String)
+		t.Deadline = &ts
+	}
+	if nextRunAt.Valid {
+		ts, _ := time.Parse(time.RFC3339Nano, nextRunAt.String)
+		t.NextRunAt = &ts
+	}
+	return t, nil
+}
+
 // AppendStep inserts a step row (idempotent on step number).
 func (d *DB) AppendStep(row StepRow) error {
 	d.mu.Lock()
@@ -487,14 +503,17 @@ func (d *DB) AppendStep(row StepRow) error {
 
 	tx, err := d.conn.Begin()
 	if err != nil {
-		return err
+		return classifyDriverErr(err)
 	}
 	defer tx.Rollback() //nolint:errcheck
 
 	if err := upsertStep(tx, row); err != nil {
-		return err
+		return classifyDriverErr(err)
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return classifyDriverErr(err)
+	}
+	return nil
 }
 
 // ────────────────────────────────────────────────────────────
@@ -695,7 +714,7 @@ func (d *DB) AppendCost(entry CostEntry) error {
 		entry.InputTokens, entry.OutputTokens, entry.ThinkingTokens,
 		entry.EstimatedUSD,
 	)
-	return err
+	return classifyDriverErr(err)
 }
 
 // ReadCosts returns all cost entries ordered by timestamp ascending.
@@ -763,6 +782,133 @@ func scanCostRows(rows *sql.Rows) ([]CostEntry, error) {
 			return nil, err
 		}
 		e.Timestamp, _ = time.Parse(time.RFC3339Nano, ts)
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+// ────────────────────────────────────────────────────────────
+// Stuck-task forensics (Task 20088)
+// ────────────────────────────────────────────────────────────
+
+// StuckEvent records one watchdog detection of a stuck in-flight task.
+type StuckEvent struct {
+	ID                int64
+	TaskID            int
+	TaskTitle         string
+	StartedAt         time.Time
+	DetectedAt        time.Time
+	StuckForSeconds   int
+	ArtifactIdleSecs  int
+	ArtifactPath      string
+	AutoKilled        bool
+	Note              string
+}
+
+// AppendStuck inserts a stuck-task event row. The watchdog calls this once
+// per detection per tick (a single task may produce many rows over its
+// stuck lifetime, by design).
+func (d *DB) AppendStuck(e StuckEvent) (int64, error) {
+	if e.DetectedAt.IsZero() {
+		e.DetectedAt = time.Now().UTC()
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	res, err := d.conn.Exec(`
+		INSERT INTO stuck_tasks(task_id, task_title, started_at, detected_at,
+			stuck_for_seconds, artifact_idle_secs, artifact_path,
+			auto_killed, note)
+		VALUES(?,?,?,?,?,?,?,?,?)`,
+		e.TaskID, e.TaskTitle,
+		e.StartedAt.UTC().Format(time.RFC3339Nano),
+		e.DetectedAt.UTC().Format(time.RFC3339Nano),
+		e.StuckForSeconds, e.ArtifactIdleSecs, e.ArtifactPath,
+		boolInt(e.AutoKilled), e.Note,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("statedb: append stuck event: %w", classifyDriverErr(err))
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return 0, fmt.Errorf("statedb: append stuck event: %w", classifyDriverErr(err))
+	}
+	return id, nil
+}
+
+// ReadStuck returns the most recent N stuck-task events, ordered most
+// recent first. Pass 0 for an unbounded read.
+func (d *DB) ReadStuck(limit int) ([]StuckEvent, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	q := `SELECT id, task_id, task_title, started_at, detected_at,
+		stuck_for_seconds, artifact_idle_secs, artifact_path,
+		auto_killed, note
+		FROM stuck_tasks ORDER BY detected_at DESC, id DESC`
+	if limit > 0 {
+		q += fmt.Sprintf(" LIMIT %d", limit)
+	}
+	rows, err := d.conn.Query(q)
+	if err != nil {
+		return nil, fmt.Errorf("statedb: read stuck events: %w", classifyDriverErr(err))
+	}
+	defer rows.Close()
+
+	var out []StuckEvent
+	for rows.Next() {
+		var e StuckEvent
+		var startedAt, detectedAt string
+		var autoKilled int
+		if err := rows.Scan(&e.ID, &e.TaskID, &e.TaskTitle,
+			&startedAt, &detectedAt,
+			&e.StuckForSeconds, &e.ArtifactIdleSecs, &e.ArtifactPath,
+			&autoKilled, &e.Note); err != nil {
+			return nil, classifyDriverErr(err)
+		}
+		e.StartedAt, _ = time.Parse(time.RFC3339Nano, startedAt)
+		e.DetectedAt, _ = time.Parse(time.RFC3339Nano, detectedAt)
+		e.AutoKilled = autoKilled == 1
+		out = append(out, e)
+	}
+	return out, classifyDriverErr(rows.Err())
+}
+
+// ReadStuckSince returns stuck events with detected_at >= since, ordered
+// most recent first. Used by the UI's poll loop to surface only events
+// the client has not yet seen.
+func (d *DB) ReadStuckSince(since time.Time) ([]StuckEvent, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	rows, err := d.conn.Query(`
+		SELECT id, task_id, task_title, started_at, detected_at,
+			stuck_for_seconds, artifact_idle_secs, artifact_path,
+			auto_killed, note
+		FROM stuck_tasks
+		WHERE detected_at >= ?
+		ORDER BY detected_at DESC, id DESC`,
+		since.UTC().Format(time.RFC3339Nano),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("statedb: read stuck events: %w", classifyDriverErr(err))
+	}
+	defer rows.Close()
+
+	var out []StuckEvent
+	for rows.Next() {
+		var e StuckEvent
+		var startedAt, detectedAt string
+		var autoKilled int
+		if err := rows.Scan(&e.ID, &e.TaskID, &e.TaskTitle,
+			&startedAt, &detectedAt,
+			&e.StuckForSeconds, &e.ArtifactIdleSecs, &e.ArtifactPath,
+			&autoKilled, &e.Note); err != nil {
+			return nil, err
+		}
+		e.StartedAt, _ = time.Parse(time.RFC3339Nano, startedAt)
+		e.DetectedAt, _ = time.Parse(time.RFC3339Nano, detectedAt)
+		e.AutoKilled = autoKilled == 1
 		out = append(out, e)
 	}
 	return out, rows.Err()

@@ -6,6 +6,7 @@ import (
 	"strconv"
 
 	"github.com/blechschmidt/cloop/pkg/state"
+	"github.com/blechschmidt/cloop/pkg/statedb"
 	"github.com/fatih/color"
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
@@ -48,7 +49,7 @@ Examples:
 				return fmt.Errorf("invalid task ID %q: must be a number", arg)
 			}
 			if s.Plan.TaskByID(id) == nil {
-				return fmt.Errorf("task %d not found", id)
+				return fmt.Errorf("task %d not found: %w", id, statedb.ErrTaskNotFound)
 			}
 			ids = append(ids, id)
 		}

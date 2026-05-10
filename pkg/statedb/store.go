@@ -4,6 +4,7 @@
 package statedb
 
 import (
+	"context"
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/pm"
@@ -31,6 +32,10 @@ type Store interface {
 	// status-only updates without a full SaveState round-trip.
 	UpsertTask(t *pm.Task) error
 
+	// LoadTask returns a single task by id. Returns ErrTaskNotFound when
+	// the row does not exist; callers should test with errors.Is.
+	LoadTask(id int) (*pm.Task, error)
+
 	// ── Steps ─────────────────────────────────────────────────────────────
 
 	// AppendStep inserts a step row. Idempotent on step number (upsert).
@@ -50,7 +55,25 @@ type Store interface {
 	// MonthlyCosts returns cost entries for the given UTC year/month.
 	MonthlyCosts(year, month int) ([]CostEntry, error)
 
+	// ── Stuck-task forensics (Task 20088) ──────────────────────────────────
+
+	// AppendStuck records one watchdog stuck-task detection. Returns the
+	// inserted row's auto-increment id.
+	AppendStuck(e StuckEvent) (int64, error)
+
+	// ReadStuck returns the most recent N stuck events, newest first. Pass
+	// 0 for unbounded.
+	ReadStuck(limit int) ([]StuckEvent, error)
+
+	// ReadStuckSince returns stuck events with detected_at >= since.
+	ReadStuckSince(since time.Time) ([]StuckEvent, error)
+
 	// ── Lifecycle ─────────────────────────────────────────────────────────
+
+	// PingContext verifies the underlying store is reachable by issuing a
+	// trivial query. Used by readiness probes; ctx bounds wait time on a
+	// busy connection.
+	PingContext(ctx context.Context) error
 
 	// Close releases the underlying connection.
 	Close() error

@@ -8,6 +8,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/state"
+	"github.com/blechschmidt/cloop/pkg/statedb"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 )
@@ -63,7 +64,7 @@ Examples:
 			}
 		}
 		if task == nil {
-			return fmt.Errorf("task %d not found", taskID)
+			return fmt.Errorf("task %d not found: %w", taskID, statedb.ErrTaskNotFound)
 		}
 
 		if branchClear {
@@ -136,7 +137,7 @@ func parseBranchIDs(raw string, plan *pm.Plan, selfID int) ([]string, error) {
 			return nil, fmt.Errorf("task cannot branch to itself (ID %d)", id)
 		}
 		if _, ok := byID[id]; !ok {
-			return nil, fmt.Errorf("task %d not found in plan", id)
+			return nil, fmt.Errorf("task %d not found in plan: %w", id, statedb.ErrTaskNotFound)
 		}
 		out = append(out, p)
 	}

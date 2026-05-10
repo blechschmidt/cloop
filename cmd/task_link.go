@@ -8,6 +8,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/state"
+	"github.com/blechschmidt/cloop/pkg/statedb"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 )
@@ -67,7 +68,7 @@ Examples:
 			}
 		}
 		if task == nil {
-			return fmt.Errorf("task %d not found", id)
+			return fmt.Errorf("task %d not found: %w", id, statedb.ErrTaskNotFound)
 		}
 
 		rawURL := strings.TrimSpace(args[1])
@@ -132,7 +133,7 @@ var taskLinkListCmd = &cobra.Command{
 			}
 		}
 		if task == nil {
-			return fmt.Errorf("task %d not found", id)
+			return fmt.Errorf("task %d not found: %w", id, statedb.ErrTaskNotFound)
 		}
 
 		titleColor := color.New(color.FgWhite, color.Bold)
@@ -192,7 +193,7 @@ var taskLinkRmCmd = &cobra.Command{
 			}
 		}
 		if task == nil {
-			return fmt.Errorf("task %d not found", taskID)
+			return fmt.Errorf("task %d not found: %w", taskID, statedb.ErrTaskNotFound)
 		}
 
 		if idx > len(task.Links) {

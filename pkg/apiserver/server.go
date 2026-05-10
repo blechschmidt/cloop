@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -20,9 +21,12 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/apierror"
 	"github.com/blechschmidt/cloop/pkg/boundedread"
+	"github.com/blechschmidt/cloop/pkg/logger"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/state"
+	"github.com/blechschmidt/cloop/pkg/statedb"
 )
 
 const (
@@ -48,7 +52,11 @@ const (
 
 	// maxJSONBodyBytes caps JSON request bodies to prevent memory-DoS via
 	// slow-stream or oversized POST payloads on the long-running daemon.
-	maxJSONBodyBytes = 1 << 20 // 1 MiB
+	// Used as the default when Server.MaxRequestBodyBytes is unset; the
+	// runtime cap is reported in the OpenAPI spec (Task 20102). Aligned
+	// with config.MaxRequestBodyBytesDefault so both servers behave the
+	// same out of the box.
+	maxJSONBodyBytes int64 = 10 << 20 // 10 MiB
 
 	// maxMetricsFileBytes caps the size of .cloop/metrics.json the API server
 	// will load and serve. A corrupted or runaway metrics file would otherwise
@@ -80,6 +88,13 @@ type Server struct {
 	RPS   float64
 	Burst int
 
+	// MaxRequestBodyBytes caps any incoming POST/PUT/PATCH request body
+	// the server will accept. Zero substitutes maxJSONBodyBytes (10 MiB).
+	// Oversize requests are rejected with HTTP 413. Set via
+	// config.UIConfig.MaxRequestBodyBytes when wired through cmd/serve.go.
+	// Task 20102.
+	MaxRequestBodyBytes int64
+
 	mu        sync.Mutex
 	runCmd    *exec.Cmd // currently-running `cloop run` subprocess, if any
 	runActive bool      // mutex-guarded liveness flag; avoids racing on cmd.ProcessState
@@ -94,6 +109,18 @@ type Server struct {
 	// shutdownMu serialises Shutdown vs Run-failure cleanup.
 	shutdownMu sync.Mutex
 	httpServer *http.Server
+
+	// ReadyCheck overrides the readiness check used by /readyz. nil means
+	// use defaultReadyCheck (stat state.db, open it, run SELECT 1 bounded
+	// by ctx). Tests override this field to simulate degraded states like
+	// "closed db handle" or "state store not initialized".
+	ReadyCheck func(ctx context.Context) error
+
+	// Log is the structured logger used for lifecycle / error messages
+	// emitted by the API server itself (startup, shutdown, panics in
+	// background goroutines). Nil means the package picks a sensible
+	// default at first-use (text output to stdout, project bound).
+	Log logger.Logger
 }
 
 // New creates a new API server.
@@ -103,7 +130,52 @@ func New(workdir string, port int, token string) *Server {
 		Port:      port,
 		Token:     token,
 		rlBuckets: make(map[string]*ipBucket),
+		Log:       logger.New(false).With("project", workdir).With("component", "apiserver"),
 	}
+}
+
+// log returns s.Log, falling back to a default logger if the field was
+// left zero by an external constructor.
+func (s *Server) log() logger.Logger {
+	if s.Log != nil {
+		return s.Log
+	}
+	s.Log = logger.New(false).With("project", s.WorkDir).With("component", "apiserver")
+	return s.Log
+}
+
+// effectiveMaxBodyBytes returns the configured request-body cap for this
+// server, falling back to maxJSONBodyBytes when MaxRequestBodyBytes is
+// unset or non-positive. Task 20102.
+func (s *Server) effectiveMaxBodyBytes() int64 {
+	if s != nil && s.MaxRequestBodyBytes > 0 {
+		return s.MaxRequestBodyBytes
+	}
+	return maxJSONBodyBytes
+}
+
+// limitJSONBody wraps r.Body with http.MaxBytesReader so a subsequent
+// json.NewDecoder().Decode() stops reading after maxBytes and returns
+// *http.MaxBytesError instead of streaming attacker-controlled data into
+// memory. Task 20102.
+func limitJSONBody(w http.ResponseWriter, r *http.Request, maxBytes int64) {
+	if r != nil && r.Body != nil {
+		r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
+	}
+}
+
+// respondToBodyError translates a JSON decode failure into the right HTTP
+// response: HTTP 413 (PAYLOAD_TOO_LARGE) if MaxBytesReader fired, HTTP 400
+// (INVALID_INPUT) otherwise. The helper centralises detection of
+// *http.MaxBytesError so each handler's decode-error path stays consistent.
+// Task 20102 / 20103.
+func respondToBodyError(w http.ResponseWriter, err error) {
+	var maxErr *http.MaxBytesError
+	if errors.As(err, &maxErr) {
+		apierror.Write(w, apierror.CodePayloadTooLarge, "request body too large")
+		return
+	}
+	apierror.Write(w, apierror.CodeInvalidInput, "invalid JSON body")
 }
 
 // remoteIP extracts the client IP from the request, honouring X-Forwarded-For
@@ -202,7 +274,8 @@ func (s *Server) rateLimitMiddleware(next http.Handler) http.Handler {
 			}
 			retryAfter := int(1.0/rps) + 1
 			w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
-			jsonErr(w, "rate limit exceeded", http.StatusTooManyRequests)
+			apierror.WriteError(w, apierror.New(apierror.CodeRateLimited, "rate limit exceeded").
+				WithDetails(map[string]any{"retry_after_seconds": retryAfter}))
 			return
 		}
 		next.ServeHTTP(w, r)
@@ -253,10 +326,15 @@ func (s *Server) Run(ctx context.Context) error {
 		fmt.Printf("cloop API server running at http://localhost%s\n", addr)
 	}
 	fmt.Printf("OpenAPI spec: http://localhost%s/openapi.json\n", addr)
+	s.log().Info(logger.EventSessionStart, 0, "cloop API server listening", map[string]interface{}{
+		"port":      s.Port,
+		"auth":      s.Token != "",
+		"workdir":   s.WorkDir,
+	})
 
 	httpSrv := &http.Server{
 		Addr:              addr,
-		Handler:           s.rateLimitMiddleware(s.authMiddleware(mux)),
+		Handler:           s.buildHandler(mux),
 		ReadHeaderTimeout: httpReadHeaderTimeout,
 		ReadTimeout:       httpReadTimeout,
 		WriteTimeout:      httpWriteTimeout,
@@ -274,7 +352,9 @@ func (s *Server) Run(ctx context.Context) error {
 
 	select {
 	case <-ctx.Done():
-		fmt.Fprintln(os.Stderr, "cloop serve: shutting down")
+		s.log().Info(logger.EventSessionDone, 0, "cloop serve: shutting down", map[string]interface{}{
+			"port": s.Port,
+		})
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if err := httpSrv.Shutdown(shutdownCtx); err != nil && !errors.Is(err, context.DeadlineExceeded) {
@@ -303,6 +383,94 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		return nil
 	}
 	return srv.Shutdown(ctx)
+}
+
+// buildHandler assembles the final HTTP handler chain. Probe endpoints
+// (/healthz, /readyz) are routed BEFORE rate-limit and auth middleware so
+// load balancers and Kubernetes-style probes can reach them without
+// credentials and without competing with user traffic for token-bucket
+// capacity.
+func (s *Server) buildHandler(mux *http.ServeMux) http.Handler {
+	return s.probeBypass(s.rateLimitMiddleware(s.authMiddleware(mux)))
+}
+
+// probeBypass routes /healthz and /readyz directly to their handlers,
+// skipping auth and rate-limit middleware. Every other request flows
+// through the supplied next handler unchanged.
+func (s *Server) probeBypass(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/healthz":
+			s.handleHealthz(w, r)
+			return
+		case "/readyz":
+			s.handleReadyz(w, r)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// readyCheckTimeout caps the readiness probe's view of the SQLite store.
+// Per Task 20092: "run a SELECT 1 with a 1s timeout."
+const readyCheckTimeout = 1 * time.Second
+
+// handleHealthz is the liveness probe. It returns 200 unconditionally as
+// long as the request goroutine is alive — i.e., the process is up and
+// the HTTP server is accepting connections. Liveness MUST NOT depend on
+// downstream services (DB, network), or a transient outage would cause
+// the orchestrator to kill an otherwise-recoverable process.
+func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(`{"status":"ok"}`))
+}
+
+// handleReadyz is the readiness probe. It returns 200 only when the
+// SQLite-backed state store is reachable AND has been initialized for
+// this work directory; any failure yields 503 with a JSON body that
+// names the failing check. The check is bounded by a 1s timeout so a
+// hung database cannot block the probe response.
+func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
+	check := s.ReadyCheck
+	if check == nil {
+		check = s.defaultReadyCheck
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), readyCheckTimeout)
+	defer cancel()
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := check(ctx); err != nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"status": "not_ready",
+			"check":  "sqlite",
+			"error":  err.Error(),
+		})
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(`{"status":"ready","check":"sqlite"}`))
+}
+
+// defaultReadyCheck verifies the state store is initialized at the server's
+// configured workdir and reachable. ctx bounds the entire check (file stat,
+// DB open, SELECT 1 ping) so a hung disk or wedged SQLite file cannot pin
+// the probe goroutine.
+func (s *Server) defaultReadyCheck(ctx context.Context) error {
+	dbPath := state.StateDBPath(s.WorkDir)
+	if _, err := os.Stat(dbPath); err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("state store not initialized at %s", dbPath)
+		}
+		return fmt.Errorf("state store stat: %w", err)
+	}
+	db, err := statedb.Open(dbPath)
+	if err != nil {
+		return fmt.Errorf("statedb open: %w", err)
+	}
+	defer db.Close()
+	return db.PingContext(ctx)
 }
 
 // authMiddleware enforces Bearer-token authentication on all routes when
@@ -342,7 +510,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		jsonErr(w, "unauthorized", http.StatusUnauthorized)
+		apierror.Write(w, apierror.CodeUnauthorized, "unauthorized")
 	})
 }
 
@@ -353,16 +521,32 @@ func jsonOK(w http.ResponseWriter, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
+// jsonErr is a thin shim that forwards to apierror.WriteStatus, mapping
+// the legacy `(message, status)` call shape to the structured wire
+// format. Kept for backwards compatibility with the many existing call
+// sites in this file; new code should call apierror.Write/WriteError
+// directly so the chosen Code is visible at the call site. Task 20103.
 func jsonErr(w http.ResponseWriter, msg string, code int) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
+	apierror.WriteStatus(w, msg, code)
 }
 
 func loadState(w http.ResponseWriter, workDir string) (*state.ProjectState, bool) {
 	ps, err := state.Load(workDir)
 	if err != nil {
-		jsonErr(w, "no cloop project found (run 'cloop init' first)", http.StatusNotFound)
+		// apierror.FromError maps statedb sentinels:
+		//   ErrProjectNotFound / ErrTaskNotFound → NOT_FOUND (404)
+		//   ErrStaleVersion                      → CONFLICT (409)
+		//   ErrDBLocked                          → UNAVAILABLE (503)
+		//   ErrSchemaMismatch                    → INTERNAL (500)
+		// Anything else falls through to INTERNAL (500). The flat-404
+		// behaviour from before Task 20103 was retired because a locked
+		// or corrupt database should not be reported as "no project
+		// found".
+		if errors.Is(err, statedb.ErrProjectNotFound) {
+			apierror.Write(w, apierror.CodeNotFound, "no cloop project found (run 'cloop init' first)")
+		} else {
+			apierror.WriteFromError(w, err)
+		}
 		return nil, false
 	}
 	return ps, true
@@ -398,7 +582,8 @@ func (s *Server) handlePatchTask(w http.ResponseWriter, r *http.Request) {
 	idStr := r.PathValue("id")
 	id, err := strconv.Atoi(idStr)
 	if err != nil || id < 1 {
-		jsonErr(w, "invalid task id", http.StatusBadRequest)
+		apierror.WriteError(w, apierror.New(apierror.CodeInvalidInput, "invalid task id").
+			WithDetails(map[string]any{"id": idStr}))
 		return
 	}
 
@@ -408,9 +593,9 @@ func (s *Server) handlePatchTask(w http.ResponseWriter, r *http.Request) {
 		Priority int      `json:"priority"`
 		Tags     []string `json:"tags"`
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, maxJSONBodyBytes)
+	limitJSONBody(w, r, s.effectiveMaxBodyBytes())
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		jsonErr(w, "invalid JSON body", http.StatusBadRequest)
+		respondToBodyError(w, err)
 		return
 	}
 
@@ -419,19 +604,13 @@ func (s *Server) handlePatchTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !ps.PMMode || ps.Plan == nil {
-		jsonErr(w, "PM mode not active", http.StatusConflict)
+		apierror.Write(w, apierror.CodeConflict, "PM mode not active")
 		return
 	}
 
-	var task *pm.Task
-	for _, t := range ps.Plan.Tasks {
-		if t.ID == id {
-			task = t
-			break
-		}
-	}
-	if task == nil {
-		jsonErr(w, fmt.Sprintf("task %d not found", id), http.StatusNotFound)
+	task, err := ps.RequireTask(id)
+	if err != nil {
+		apierror.WriteFromError(w, err)
 		return
 	}
 
@@ -441,7 +620,9 @@ func (s *Server) handlePatchTask(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.Status != "" {
 		if !validStatuses[body.Status] {
-			jsonErr(w, "invalid status; must be one of: pending, in_progress, done, skipped, failed", http.StatusBadRequest)
+			apierror.WriteError(w, apierror.New(apierror.CodeInvalidInput,
+				"invalid status; must be one of: pending, in_progress, done, skipped, failed").
+				WithDetails(map[string]any{"field": "status", "value": body.Status}))
 			return
 		}
 		task.Status = pm.TaskStatus(body.Status)
@@ -461,7 +642,7 @@ func (s *Server) handlePatchTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := ps.Save(); err != nil {
-		jsonErr(w, "failed to save state: "+err.Error(), http.StatusInternalServerError)
+		apierror.WriteFromError(w, fmt.Errorf("save state: %w", err))
 		return
 	}
 	jsonOK(w, task)
@@ -477,13 +658,16 @@ func (s *Server) handleRunStart(w http.ResponseWriter, r *http.Request) {
 		Provider    string `json:"provider"`
 		Model       string `json:"model"`
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, maxJSONBodyBytes)
-	_ = json.NewDecoder(r.Body).Decode(&req)
+	limitJSONBody(w, r, s.effectiveMaxBodyBytes())
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+		respondToBodyError(w, err)
+		return
+	}
 
 	s.mu.Lock()
 	if s.runActive {
 		s.mu.Unlock()
-		jsonErr(w, "a run is already in progress", http.StatusConflict)
+		apierror.Write(w, apierror.CodeConflict, "a run is already in progress")
 		return
 	}
 	s.runLog.Reset()
@@ -519,7 +703,9 @@ func (s *Server) handleRunStart(w http.ResponseWriter, r *http.Request) {
 	cmd.Stderr = os.Stderr
 
 	if err := cmd.Start(); err != nil {
-		jsonErr(w, "failed to start run: "+err.Error(), http.StatusInternalServerError)
+		apierror.WriteError(w, apierror.New(apierror.CodeInternal, "failed to start run").
+			WithCause(err).
+			WithDetails(map[string]any{"reason": err.Error()}))
 		return
 	}
 
@@ -532,15 +718,23 @@ func (s *Server) handleRunStart(w http.ResponseWriter, r *http.Request) {
 	// reaper cannot kill the API server, and always clear runActive so the
 	// caller can start another run after this one exits.
 	go func() {
+		startedAt := time.Now()
 		defer func() {
 			if r := recover(); r != nil {
-				fmt.Fprintf(os.Stderr, "[apiserver] panic in run reaper: %v\n", r)
+				s.log().Error(logger.EventTaskFailed, 0, "panic in run reaper", map[string]interface{}{
+					"panic":       fmt.Sprintf("%v", r),
+					"duration_ms": time.Since(startedAt).Milliseconds(),
+				})
 			}
 			s.mu.Lock()
 			s.runActive = false
 			s.mu.Unlock()
 		}()
 		_ = cmd.Wait()
+		s.log().Info(logger.EventSessionDone, 0, "run subprocess exited", map[string]interface{}{
+			"pid":         cmd.Process.Pid,
+			"duration_ms": time.Since(startedAt).Milliseconds(),
+		})
 	}()
 
 	jsonOK(w, map[string]any{

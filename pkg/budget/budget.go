@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/config"
+	"github.com/blechschmidt/cloop/pkg/ratelimit"
 	"github.com/blechschmidt/cloop/pkg/cost"
 	"github.com/blechschmidt/cloop/pkg/globalbudget"
 	"github.com/blechschmidt/cloop/pkg/notify"
@@ -202,6 +203,32 @@ func Enforce(workDir string, cfg config.BudgetConfig, notifyCfg config.NotifyCon
 	// check here — having two parallel enforcement paths caused user confusion
 	// when caps configured in the Budget tab and the Claude Code 'Set Caps'
 	// modal shadowed each other. See Task 20074.
+
+	// Always block when extra usage would be incurred. Extra usage means
+	// per-token billing beyond the subscription — never contribute to it.
+	usage, usageErr := ratelimit.FetchClaudeUsage("")
+	if usageErr == nil && usage != nil {
+		// Block if any window is at 100% (would trigger extra usage)
+		if usage.FiveHour != nil && usage.FiveHour.Utilization >= 100 {
+			return fmt.Errorf(
+				"Claude Code 5-hour window exhausted (%.0f%%) — pausing to avoid extra usage charges",
+				usage.FiveHour.Utilization,
+			)
+		}
+		if usage.SevenDay != nil && usage.SevenDay.Utilization >= 100 {
+			return fmt.Errorf(
+				"Claude Code weekly window exhausted (%.0f%%) — pausing to avoid extra usage charges",
+				usage.SevenDay.Utilization,
+			)
+		}
+		// Block if extra usage is already being incurred
+		if usage.ExtraUsage != nil && usage.ExtraUsage.UsedCredits != nil && *usage.ExtraUsage.UsedCredits > 0 {
+			return fmt.Errorf(
+				"Claude Code extra usage detected ($%.2f) — pausing to avoid further charges",
+				*usage.ExtraUsage.UsedCredits/100,
+			)
+		}
+	}
 
 	return nil
 }

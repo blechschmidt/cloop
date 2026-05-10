@@ -16,6 +16,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/provider"
 	"github.com/blechschmidt/cloop/pkg/state"
+	"github.com/blechschmidt/cloop/pkg/statedb"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 )
@@ -106,7 +107,7 @@ Examples:
 			}
 		}
 		if srcTask == nil {
-			return fmt.Errorf("task %d not found", taskID)
+			return fmt.Errorf("task %d not found: %w", taskID, statedb.ErrTaskNotFound)
 		}
 
 		// Build provider if --adapt was requested.

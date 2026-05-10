@@ -8,6 +8,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/state"
+	"github.com/blechschmidt/cloop/pkg/statedb"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 )
@@ -76,7 +77,7 @@ func resolveTargetTasks(plan *pm.Plan, ids []int, all bool, statusFilter string)
 	for _, id := range ids {
 		t, ok := byID[id]
 		if !ok {
-			return nil, fmt.Errorf("task %d not found", id)
+			return nil, fmt.Errorf("task %d not found: %w", id, statedb.ErrTaskNotFound)
 		}
 		targets = append(targets, t)
 	}

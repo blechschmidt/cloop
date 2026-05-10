@@ -17,6 +17,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/provider"
 	"github.com/blechschmidt/cloop/pkg/state"
+	"github.com/blechschmidt/cloop/pkg/statedb"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 )
@@ -200,7 +201,7 @@ var taskRemoveCmd = &cobra.Command{
 			}
 		}
 		if idx == -1 {
-			return fmt.Errorf("task %d not found", id)
+			return fmt.Errorf("task %d not found: %w", id, statedb.ErrTaskNotFound)
 		}
 
 		removed := s.Plan.Tasks[idx]
@@ -245,7 +246,7 @@ var taskShowCmd = &cobra.Command{
 			}
 		}
 		if task == nil {
-			return fmt.Errorf("task %d not found", id)
+			return fmt.Errorf("task %d not found: %w", id, statedb.ErrTaskNotFound)
 		}
 
 		if taskShowJSON {
@@ -352,7 +353,7 @@ var taskEditCmd = &cobra.Command{
 			}
 		}
 		if task == nil {
-			return fmt.Errorf("task %d not found", id)
+			return fmt.Errorf("task %d not found: %w", id, statedb.ErrTaskNotFound)
 		}
 
 		if !cmd.Flags().Changed("title") && !cmd.Flags().Changed("desc") && !cmd.Flags().Changed("priority") && !cmd.Flags().Changed("depends-on") && !cmd.Flags().Changed("role") && !cmd.Flags().Changed("deadline") {
@@ -489,7 +490,7 @@ Examples:
 			}
 		}
 		if idx == -1 {
-			return fmt.Errorf("task %d not found", id)
+			return fmt.Errorf("task %d not found: %w", id, statedb.ErrTaskNotFound)
 		}
 
 		var other *pm.Task
@@ -555,7 +556,7 @@ Example:
 			}
 		}
 		if task == nil {
-			return fmt.Errorf("task %d not found", id)
+			return fmt.Errorf("task %d not found: %w", id, statedb.ErrTaskNotFound)
 		}
 
 		added := []string{}
@@ -623,7 +624,7 @@ Example:
 			}
 		}
 		if task == nil {
-			return fmt.Errorf("task %d not found", id)
+			return fmt.Errorf("task %d not found: %w", id, statedb.ErrTaskNotFound)
 		}
 
 		removeSet := make(map[string]bool, len(args)-1)
@@ -675,7 +676,7 @@ func setTaskStatus(idStr string, status pm.TaskStatus) error {
 		}
 	}
 	if task == nil {
-		return fmt.Errorf("task %d not found", id)
+		return fmt.Errorf("task %d not found: %w", id, statedb.ErrTaskNotFound)
 	}
 
 	old := task.Status
@@ -1025,7 +1026,7 @@ Examples:
 			}
 		}
 		if task == nil {
-			return fmt.Errorf("task %d not found", taskID)
+			return fmt.Errorf("task %d not found: %w", taskID, statedb.ErrTaskNotFound)
 		}
 
 		// Build provider
@@ -1270,7 +1271,7 @@ Examples:
 				}
 			}
 			if t == nil {
-				return fmt.Errorf("task %d not found", id)
+				return fmt.Errorf("task %d not found: %w", id, statedb.ErrTaskNotFound)
 			}
 			rolePart := ""
 			if t.Role != "" {
@@ -1407,7 +1408,7 @@ Examples:
 			}
 		}
 		if original == nil {
-			return fmt.Errorf("task %d not found", taskID)
+			return fmt.Errorf("task %d not found: %w", taskID, statedb.ErrTaskNotFound)
 		}
 
 		headerColor := color.New(color.FgCyan, color.Bold)
@@ -1619,7 +1620,7 @@ Example:
 			}
 		}
 		if task == nil {
-			return fmt.Errorf("task %d not found", id)
+			return fmt.Errorf("task %d not found: %w", id, statedb.ErrTaskNotFound)
 		}
 
 		revoke, _ := cmd.Flags().GetBool("revoke")
@@ -1675,7 +1676,7 @@ Example:
 			}
 		}
 		if task == nil {
-			return fmt.Errorf("task %d not found", id)
+			return fmt.Errorf("task %d not found: %w", id, statedb.ErrTaskNotFound)
 		}
 
 		text := strings.Join(args[1:], " ")
@@ -1721,7 +1722,7 @@ Example:
 			}
 		}
 		if task == nil {
-			return fmt.Errorf("task %d not found", id)
+			return fmt.Errorf("task %d not found: %w", id, statedb.ErrTaskNotFound)
 		}
 
 		titleColor := color.New(color.FgWhite, color.Bold)

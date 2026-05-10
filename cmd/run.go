@@ -416,6 +416,7 @@ Press Ctrl+C to pause gracefully.`,
 		AutoPromote:              autoPromote,
 		AutoPromoteThresholdDays: autoPromoteThresholdDays,
 		CoachMode:                coachMode,
+		Watchdog:                 cfg.Watchdog,
 		}
 
 		orc, err := orchestrator.New(orchCfg, prov)

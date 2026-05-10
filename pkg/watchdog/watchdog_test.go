@@ -105,6 +105,9 @@ func (c *captureLogger) Log(l logger.Level, e logger.Event, id int, m string, d 
 	defer c.mu.Unlock()
 	c.entries = append(c.entries, logEntry{l, e, id, m, d})
 }
+func (c *captureLogger) Debug(e logger.Event, id int, m string, d map[string]interface{}) {
+	c.Log(logger.LevelDebug, e, id, m, d)
+}
 func (c *captureLogger) Info(e logger.Event, id int, m string, d map[string]interface{}) {
 	c.Log(logger.LevelInfo, e, id, m, d)
 }
@@ -114,7 +117,8 @@ func (c *captureLogger) Warn(e logger.Event, id int, m string, d map[string]inte
 func (c *captureLogger) Error(e logger.Event, id int, m string, d map[string]interface{}) {
 	c.Log(logger.LevelError, e, id, m, d)
 }
-func (c *captureLogger) IsJSON() bool { return false }
+func (c *captureLogger) With(_ string, _ any) logger.Logger { return c }
+func (c *captureLogger) IsJSON() bool                       { return false }
 
 func (c *captureLogger) snapshot() []logEntry {
 	c.mu.Lock()

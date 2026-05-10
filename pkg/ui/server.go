@@ -372,6 +372,13 @@ type Server struct {
 	// Retry-After header before nhooyr.Accept hijacks the response.
 	MaxWebSocketConnsPerIP int
 
+	// MaxRequestBodyBytes caps any incoming POST/PUT/PATCH request body
+	// the server will accept. Zero substitutes maxJSONBodyBytes (10 MiB).
+	// Oversize requests are rejected with HTTP 413 (Request Entity Too
+	// Large). Set via config.UIConfig.MaxRequestBodyBytes; bounded by
+	// config.MaxRequestBodyBytesLower / Upper. Task 20102.
+	MaxRequestBodyBytes int64
+
 	mu      sync.Mutex
 	clients map[*sseClient]struct{}
 	lastMod time.Time
@@ -451,6 +458,12 @@ type Server struct {
 	// underlying server has been replaced.
 	shutdownMu sync.Mutex
 	httpServer *http.Server
+
+	// ReadyCheck overrides the readiness check used by /readyz. nil
+	// means use defaultReadyCheck (stat state.db, open it, run SELECT 1
+	// bounded by ctx). Tests use this field to simulate degraded states
+	// like "closed db handle" or "state store not initialized".
+	ReadyCheck func(ctx context.Context) error
 }
 
 // New creates a new UI server for the given working directory and port.
@@ -608,7 +621,103 @@ func (s *Server) resolveWorkDir(r *http.Request) string {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	s.registerRoutes(mux)
-	return panicRecoveryMiddleware(s.uiRateLimitMiddleware(securityHeaders(s.authMiddleware(mux))))
+	return s.buildHandler(mux)
+}
+
+// buildHandler assembles the final HTTP handler chain. The probe endpoints
+// (/healthz, /readyz) are routed BEFORE auth and rate-limit middleware so
+// load balancers and Kubernetes-style probes can reach them without
+// credentials and without competing with user traffic for tokens. Panic
+// recovery still wraps everything so a buggy probe handler cannot crash the
+// daemon, and the security headers layer is preserved for the probe responses
+// (it adds no auth, only hardening headers).
+func (s *Server) buildHandler(mux *http.ServeMux) http.Handler {
+	app := s.uiRateLimitMiddleware(securityHeaders(s.authMiddleware(mux)))
+	return panicRecoveryMiddleware(s.probeBypass(app))
+}
+
+// probeBypass routes /healthz and /readyz directly to their handlers,
+// skipping auth and rate-limit middleware. Every other request flows
+// through the supplied next handler unchanged.
+func (s *Server) probeBypass(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/healthz":
+			s.handleHealthz(w, r)
+			return
+		case "/readyz":
+			s.handleReadyz(w, r)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// handleHealthz is the liveness probe. It returns 200 unconditionally as
+// long as the goroutine handling the request is alive — i.e., the process
+// is up and the HTTP server is accepting connections. Liveness MUST NOT
+// depend on downstream services (DB, network), or a transient outage will
+// cause the orchestrator to kill an otherwise-recoverable process.
+func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(`{"status":"ok"}`))
+}
+
+// handleReadyz is the readiness probe. It returns 200 only when the
+// SQLite-backed state store is reachable AND has been initialized for
+// this work directory; any failure yields 503 with a JSON body that
+// names the failing check. The check is bounded by a 1s timeout so a
+// hung database cannot block the probe response.
+//
+// The check function is overridable via Server.ReadyCheck for tests; the
+// default verifies (a) state.db exists at the resolved workdir, (b) a
+// fresh statedb handle opens against it, and (c) `SELECT 1` returns
+// within 1s.
+func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
+	check := s.ReadyCheck
+	if check == nil {
+		check = s.defaultReadyCheck
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), readyCheckTimeout)
+	defer cancel()
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := check(ctx); err != nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"status": "not_ready",
+			"check":  "sqlite",
+			"error":  err.Error(),
+		})
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(`{"status":"ready","check":"sqlite"}`))
+}
+
+// readyCheckTimeout caps the readiness probe's view of the SQLite store.
+// Per Task 20092: "run a SELECT 1 with a 1s timeout."
+const readyCheckTimeout = 1 * time.Second
+
+// defaultReadyCheck verifies the state store is initialized at the server's
+// configured workdir and reachable. ctx bounds the entire check (file stat,
+// DB open, ping), so a hung disk or a wedged SQLite file cannot pin the
+// probe goroutine.
+func (s *Server) defaultReadyCheck(ctx context.Context) error {
+	dbPath := state.StateDBPath(s.WorkDir)
+	if _, err := os.Stat(dbPath); err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("state store not initialized at %s", dbPath)
+		}
+		return fmt.Errorf("state store stat: %w", err)
+	}
+	db, err := statedb.Open(dbPath)
+	if err != nil {
+		return fmt.Errorf("statedb open: %w", err)
+	}
+	defer db.Close()
+	return db.PingContext(ctx)
 }
 
 // registerRoutes wires all API and UI routes onto mux.
@@ -744,7 +853,7 @@ func (s *Server) Run(ctx context.Context) error {
 	} else {
 		fmt.Printf("cloop dashboard running at http://localhost%s\n", addr)
 	}
-	srv := newUIHTTPServer(addr, panicRecoveryMiddleware(s.uiRateLimitMiddleware(securityHeaders(s.authMiddleware(mux)))))
+	srv := newUIHTTPServer(addr, s.buildHandler(mux))
 
 	s.shutdownMu.Lock()
 	s.httpServer = srv
@@ -1320,14 +1429,30 @@ func requirePOST(w http.ResponseWriter, r *http.Request) bool {
 // Maximum sizes for JSON request bodies. These bound peak memory per request
 // so a malicious or buggy client cannot OOM the long-running daemon by
 // streaming an enormous payload (or holding a slow-trickle connection open).
+//
+// The default (10 MiB) is generous enough for chat transcripts and bulk
+// task edits while sitting well below typical container memory limits.
+// Operators can override per-project via config.UIConfig.MaxRequestBodyBytes.
 const (
-	// maxJSONBodyBytes is the default cap for typical small JSON requests
-	// (config keys, task add/edit, suggestion IDs, toggle flags, etc.).
-	maxJSONBodyBytes = 1 << 20 // 1 MiB
-	// maxChatJSONBodyBytes is used for chat handlers that include a history
-	// array; legitimate transcripts can be larger.
-	maxChatJSONBodyBytes = 4 << 20 // 4 MiB
+	// maxJSONBodyBytes is the default cap for every POST/PUT/PATCH handler.
+	// Mirrors config.MaxRequestBodyBytesDefault so the constant is usable
+	// from contexts that haven't loaded config yet (tests, embedded calls).
+	maxJSONBodyBytes int64 = 10 << 20 // 10 MiB
+	// maxChatJSONBodyBytes is retained as an alias for callers that
+	// historically used a larger cap; with the default bumped to 10 MiB
+	// it now matches maxJSONBodyBytes.
+	maxChatJSONBodyBytes int64 = 10 << 20 // 10 MiB
 )
+
+// effectiveMaxBodyBytes returns the configured request-body cap for this
+// server, falling back to maxJSONBodyBytes when MaxRequestBodyBytes is unset
+// or non-positive.
+func (s *Server) effectiveMaxBodyBytes() int64 {
+	if s != nil && s.MaxRequestBodyBytes > 0 {
+		return s.MaxRequestBodyBytes
+	}
+	return maxJSONBodyBytes
+}
 
 // limitJSONBody wraps r.Body with http.MaxBytesReader so a subsequent
 // json.NewDecoder().Decode() stops reading after maxBytes and returns
@@ -1337,6 +1462,22 @@ func limitJSONBody(w http.ResponseWriter, r *http.Request, maxBytes int64) {
 	if r != nil && r.Body != nil {
 		r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
 	}
+}
+
+// respondToBodyError writes the right HTTP error response for a JSON
+// decode failure. *http.MaxBytesError (returned when MaxBytesReader's
+// limit is reached) yields HTTP 413 (Request Entity Too Large); every
+// other failure (malformed JSON, type mismatch, EOF) yields HTTP 400.
+// Centralising the translation here keeps every handler's decode error
+// path consistent and frees callers from importing net/http's error
+// type. Task 20102.
+func respondToBodyError(w http.ResponseWriter, err error) {
+	var maxErr *http.MaxBytesError
+	if errors.As(err, &maxErr) {
+		jsonErr(w, "request body too large", http.StatusRequestEntityTooLarge)
+		return
+	}
+	jsonErr(w, "invalid request body", http.StatusBadRequest)
 }
 
 // ── handlers ─────────────────────────────────────────────────────────────────
@@ -2153,7 +2294,7 @@ func (s *Server) handleConfigSet(w http.ResponseWriter, r *http.Request) {
 	}
 	limitJSONBody(w, r, maxJSONBodyBytes)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		jsonErr(w, "invalid request body", http.StatusBadRequest)
+		respondToBodyError(w, err)
 		return
 	}
 	workDir := s.resolveWorkDir(r)
@@ -2219,7 +2360,7 @@ func (s *Server) handleTaskAdd(w http.ResponseWriter, r *http.Request) {
 	}
 	limitJSONBody(w, r, maxJSONBodyBytes)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		jsonErr(w, "invalid request body", http.StatusBadRequest)
+		respondToBodyError(w, err)
 		return
 	}
 	req.Title = strings.TrimSpace(req.Title)
@@ -2291,7 +2432,7 @@ func (s *Server) handleTaskStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	limitJSONBody(w, r, maxJSONBodyBytes)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		jsonErr(w, "invalid request body", http.StatusBadRequest)
+		respondToBodyError(w, err)
 		return
 	}
 	validStatuses := map[string]pm.TaskStatus{
@@ -2309,29 +2450,18 @@ func (s *Server) handleTaskStatus(w http.ResponseWriter, r *http.Request) {
 
 	ps, err := state.Load(s.resolveWorkDir(r))
 	if err != nil {
-		jsonErr(w, "no project found", http.StatusNotFound)
+		jsonErr(w, err.Error(), statedb.HTTPStatus(err))
 		return
 	}
-	if ps.Plan == nil {
-		jsonErr(w, "no task plan", http.StatusNotFound)
-		return
-	}
-
-	var task *pm.Task
-	for _, t := range ps.Plan.Tasks {
-		if t.ID == req.ID {
-			task = t
-			break
-		}
-	}
-	if task == nil {
-		jsonErr(w, fmt.Sprintf("task %d not found", req.ID), http.StatusNotFound)
+	task, err := ps.RequireTask(req.ID)
+	if err != nil {
+		jsonErr(w, err.Error(), statedb.HTTPStatus(err))
 		return
 	}
 
 	task.Status = newStatus
 	if err := ps.SaveDirect(); err != nil {
-		jsonErr(w, "save failed: "+err.Error(), http.StatusInternalServerError)
+		jsonErr(w, "save failed: "+err.Error(), statedb.HTTPStatus(err))
 		return
 	}
 	jsonOK(w, map[string]interface{}{"ok": true, "id": req.ID, "status": req.Status})
@@ -2348,7 +2478,7 @@ func (s *Server) handleTaskMove(w http.ResponseWriter, r *http.Request) {
 	}
 	limitJSONBody(w, r, maxJSONBodyBytes)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		jsonErr(w, "invalid request body", http.StatusBadRequest)
+		respondToBodyError(w, err)
 		return
 	}
 	if req.Direction != "up" && req.Direction != "down" {
@@ -2358,11 +2488,11 @@ func (s *Server) handleTaskMove(w http.ResponseWriter, r *http.Request) {
 
 	ps, err := state.Load(s.resolveWorkDir(r))
 	if err != nil {
-		jsonErr(w, "no project found", http.StatusNotFound)
+		jsonErr(w, err.Error(), statedb.HTTPStatus(err))
 		return
 	}
-	if ps.Plan == nil || len(ps.Plan.Tasks) == 0 {
-		jsonErr(w, "no task plan", http.StatusNotFound)
+	if _, err := ps.RequireTask(req.ID); err != nil {
+		jsonErr(w, err.Error(), statedb.HTTPStatus(err))
 		return
 	}
 
@@ -2377,10 +2507,9 @@ func (s *Server) handleTaskMove(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 	}
-	if idx == -1 {
-		jsonErr(w, fmt.Sprintf("task %d not found", req.ID), http.StatusNotFound)
-		return
-	}
+	// idx != -1: RequireTask already verified the task exists; sorted holds
+	// the same task pointers in a different order, so the index lookup is
+	// always successful here.
 
 	var other *pm.Task
 	if req.Direction == "up" {
@@ -2399,7 +2528,7 @@ func (s *Server) handleTaskMove(w http.ResponseWriter, r *http.Request) {
 	sorted[idx].Priority, other.Priority = other.Priority, sorted[idx].Priority
 
 	if err := ps.SaveDirect(); err != nil {
-		jsonErr(w, "save failed: "+err.Error(), http.StatusInternalServerError)
+		jsonErr(w, "save failed: "+err.Error(), statedb.HTTPStatus(err))
 		return
 	}
 	jsonOK(w, map[string]interface{}{"ok": true, "id": req.ID})
@@ -2419,29 +2548,18 @@ func (s *Server) handleTaskEdit(w http.ResponseWriter, r *http.Request) {
 	}
 	limitJSONBody(w, r, maxJSONBodyBytes)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		jsonErr(w, "invalid request body", http.StatusBadRequest)
+		respondToBodyError(w, err)
 		return
 	}
 
 	ps, err := state.Load(s.resolveWorkDir(r))
 	if err != nil {
-		jsonErr(w, "no project found", http.StatusNotFound)
+		jsonErr(w, err.Error(), statedb.HTTPStatus(err))
 		return
 	}
-	if ps.Plan == nil {
-		jsonErr(w, "no task plan", http.StatusNotFound)
-		return
-	}
-
-	var task *pm.Task
-	for _, t := range ps.Plan.Tasks {
-		if t.ID == req.ID {
-			task = t
-			break
-		}
-	}
-	if task == nil {
-		jsonErr(w, fmt.Sprintf("task %d not found", req.ID), http.StatusNotFound)
+	task, err := ps.RequireTask(req.ID)
+	if err != nil {
+		jsonErr(w, err.Error(), statedb.HTTPStatus(err))
 		return
 	}
 
@@ -2459,7 +2577,7 @@ func (s *Server) handleTaskEdit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := ps.SaveDirect(); err != nil {
-		jsonErr(w, "save failed: "+err.Error(), http.StatusInternalServerError)
+		jsonErr(w, "save failed: "+err.Error(), statedb.HTTPStatus(err))
 		return
 	}
 	jsonOK(w, map[string]interface{}{"ok": true, "task": task})
@@ -2475,17 +2593,17 @@ func (s *Server) handleTaskRemove(w http.ResponseWriter, r *http.Request) {
 	}
 	limitJSONBody(w, r, maxJSONBodyBytes)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		jsonErr(w, "invalid request body", http.StatusBadRequest)
+		respondToBodyError(w, err)
 		return
 	}
 
 	ps, err := state.Load(s.resolveWorkDir(r))
 	if err != nil {
-		jsonErr(w, "no project found", http.StatusNotFound)
+		jsonErr(w, err.Error(), statedb.HTTPStatus(err))
 		return
 	}
-	if ps.Plan == nil {
-		jsonErr(w, "no task plan", http.StatusNotFound)
+	if _, err := ps.RequireTask(req.ID); err != nil {
+		jsonErr(w, err.Error(), statedb.HTTPStatus(err))
 		return
 	}
 
@@ -2496,14 +2614,12 @@ func (s *Server) handleTaskRemove(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 	}
-	if idx == -1 {
-		jsonErr(w, fmt.Sprintf("task %d not found", req.ID), http.StatusNotFound)
-		return
-	}
+	// idx is guaranteed non-negative here; RequireTask above proved the task
+	// exists, and ps.Plan.Tasks is not mutated between the two calls.
 
 	ps.Plan.Tasks = append(ps.Plan.Tasks[:idx], ps.Plan.Tasks[idx+1:]...)
 	if err := ps.SaveDirect(); err != nil {
-		jsonErr(w, "save failed: "+err.Error(), http.StatusInternalServerError)
+		jsonErr(w, "save failed: "+err.Error(), statedb.HTTPStatus(err))
 		return
 	}
 	jsonOK(w, map[string]bool{"ok": true})
@@ -2532,29 +2648,18 @@ func (s *Server) handlePutTask(w http.ResponseWriter, r *http.Request) {
 	}
 	limitJSONBody(w, r, maxJSONBodyBytes)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		jsonErr(w, "invalid request body", http.StatusBadRequest)
+		respondToBodyError(w, err)
 		return
 	}
 
 	ps, err := state.Load(s.resolveWorkDir(r))
 	if err != nil {
-		jsonErr(w, "no project found", http.StatusNotFound)
+		jsonErr(w, err.Error(), statedb.HTTPStatus(err))
 		return
 	}
-	if ps.Plan == nil {
-		jsonErr(w, "no task plan", http.StatusNotFound)
-		return
-	}
-
-	var task *pm.Task
-	for _, t := range ps.Plan.Tasks {
-		if t.ID == id {
-			task = t
-			break
-		}
-	}
-	if task == nil {
-		jsonErr(w, fmt.Sprintf("task %d not found", id), http.StatusNotFound)
+	task, err := ps.RequireTask(id)
+	if err != nil {
+		jsonErr(w, err.Error(), statedb.HTTPStatus(err))
 		return
 	}
 
@@ -2584,7 +2689,7 @@ func (s *Server) handlePutTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := ps.SaveDirect(); err != nil {
-		jsonErr(w, "save failed: "+err.Error(), http.StatusInternalServerError)
+		jsonErr(w, "save failed: "+err.Error(), statedb.HTTPStatus(err))
 		return
 	}
 
@@ -2636,11 +2741,11 @@ func (s *Server) handleDeleteTask(w http.ResponseWriter, r *http.Request) {
 
 	ps, err := state.Load(s.resolveWorkDir(r))
 	if err != nil {
-		jsonErr(w, "no project found", http.StatusNotFound)
+		jsonErr(w, err.Error(), statedb.HTTPStatus(err))
 		return
 	}
-	if ps.Plan == nil {
-		jsonErr(w, "no task plan", http.StatusNotFound)
+	if _, err := ps.RequireTask(id); err != nil {
+		jsonErr(w, err.Error(), statedb.HTTPStatus(err))
 		return
 	}
 
@@ -2651,14 +2756,11 @@ func (s *Server) handleDeleteTask(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 	}
-	if idx == -1 {
-		jsonErr(w, fmt.Sprintf("task %d not found", id), http.StatusNotFound)
-		return
-	}
+	// idx is guaranteed non-negative: RequireTask verified the task above.
 
 	ps.Plan.Tasks = append(ps.Plan.Tasks[:idx], ps.Plan.Tasks[idx+1:]...)
 	if err := ps.SaveDirect(); err != nil {
-		jsonErr(w, "save failed: "+err.Error(), http.StatusInternalServerError)
+		jsonErr(w, "save failed: "+err.Error(), statedb.HTTPStatus(err))
 		return
 	}
 
@@ -2691,14 +2793,13 @@ func (s *Server) handleTaskBlocker(w http.ResponseWriter, r *http.Request) {
 
 	workDir := s.resolveWorkDir(r)
 	ps, err := state.Load(workDir)
-	if err != nil || ps.Plan == nil {
-		jsonErr(w, "no task plan found", http.StatusNotFound)
+	if err != nil {
+		jsonErr(w, err.Error(), statedb.HTTPStatus(err))
 		return
 	}
-
-	task := ps.Plan.TaskByID(id)
-	if task == nil {
-		jsonErr(w, fmt.Sprintf("task %d not found", id), http.StatusNotFound)
+	task, err := ps.RequireTask(id)
+	if err != nil {
+		jsonErr(w, err.Error(), statedb.HTTPStatus(err))
 		return
 	}
 
@@ -2778,7 +2879,7 @@ func (s *Server) handleReorderTasks(w http.ResponseWriter, r *http.Request) {
 	}
 	limitJSONBody(w, r, maxJSONBodyBytes)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		jsonErr(w, "invalid request body", http.StatusBadRequest)
+		respondToBodyError(w, err)
 		return
 	}
 	if len(req.IDs) == 0 {
@@ -2961,7 +3062,7 @@ func (s *Server) handleSuggestAdd(w http.ResponseWriter, r *http.Request) {
 	}
 	limitJSONBody(w, r, maxJSONBodyBytes)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		jsonErr(w, "invalid request body", http.StatusBadRequest)
+		respondToBodyError(w, err)
 		return
 	}
 
@@ -3104,7 +3205,7 @@ func (s *Server) handleInit(w http.ResponseWriter, r *http.Request) {
 	}
 	limitJSONBody(w, r, maxJSONBodyBytes)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		jsonErr(w, "invalid request body", http.StatusBadRequest)
+		respondToBodyError(w, err)
 		return
 	}
 	req.Goal = strings.TrimSpace(req.Goal)
@@ -3156,7 +3257,7 @@ func (s *Server) handleGoal(w http.ResponseWriter, r *http.Request) {
 		}
 		limitJSONBody(w, r, maxJSONBodyBytes)
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			jsonErr(w, "invalid request body", http.StatusBadRequest)
+			respondToBodyError(w, err)
 			return
 		}
 		req.Goal = strings.TrimSpace(req.Goal)
@@ -3209,7 +3310,7 @@ func (s *Server) handleInstructions(w http.ResponseWriter, r *http.Request) {
 		}
 		limitJSONBody(w, r, maxJSONBodyBytes)
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			jsonErr(w, "invalid request body", http.StatusBadRequest)
+			respondToBodyError(w, err)
 			return
 		}
 		req.Instructions = strings.TrimSpace(req.Instructions)
@@ -3355,7 +3456,11 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		Message string `json:"message"`
 	}
 	limitJSONBody(w, r, maxChatJSONBodyBytes)
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Message) == "" {
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondToBodyError(w, err)
+		return
+	}
+	if strings.TrimSpace(req.Message) == "" {
 		jsonErr(w, "message required", http.StatusBadRequest)
 		return
 	}
@@ -3414,7 +3519,11 @@ func (s *Server) handlePlanChat(w http.ResponseWriter, r *http.Request) {
 		} `json:"history"`
 	}
 	limitJSONBody(w, r, maxChatJSONBodyBytes)
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Message) == "" {
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondToBodyError(w, err)
+		return
+	}
+	if strings.TrimSpace(req.Message) == "" {
 		jsonErr(w, "message required", http.StatusBadRequest)
 		return
 	}
@@ -4120,7 +4229,7 @@ func (s *Server) handleProjectNew(w http.ResponseWriter, r *http.Request) {
 	}
 	limitJSONBody(w, r, maxJSONBodyBytes)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		jsonErr(w, "invalid request body", http.StatusBadRequest)
+		respondToBodyError(w, err)
 		return
 	}
 	req.Goal = strings.TrimSpace(req.Goal)
@@ -4232,7 +4341,7 @@ func (s *Server) handleKBAdd(w http.ResponseWriter, r *http.Request) {
 	}
 	limitJSONBody(w, r, maxJSONBodyBytes)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
+		respondToBodyError(w, err)
 		return
 	}
 	req.Title = strings.TrimSpace(req.Title)
@@ -4822,7 +4931,7 @@ func (s *Server) handleBudgetGlobalSave(w http.ResponseWriter, r *http.Request) 
 	}
 	limitJSONBody(w, r, maxJSONBodyBytes)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		jsonErr(w, "invalid request body", http.StatusBadRequest)
+		respondToBodyError(w, err)
 		return
 	}
 	// Reject negative spend limits and out-of-range alert thresholds before
@@ -4872,7 +4981,7 @@ func (s *Server) handleBudgetProjectSave(w http.ResponseWriter, r *http.Request)
 	}
 	limitJSONBody(w, r, maxJSONBodyBytes)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		jsonErr(w, "invalid request body", http.StatusBadRequest)
+		respondToBodyError(w, err)
 		return
 	}
 	// All percentages: [0, 100].
@@ -5046,7 +5155,7 @@ func (s *Server) handleClaudeCodeLimitsSave(w http.ResponseWriter, r *http.Reque
 	}
 	limitJSONBody(w, r, maxJSONBodyBytes)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		jsonErr(w, "invalid request body", http.StatusBadRequest)
+		respondToBodyError(w, err)
 		return
 	}
 	for _, v := range []float64{req.MaxWeeklyPct, req.MaxFiveHourPct, req.MaxWeeklyOpusPct, req.MaxWeeklySonnetPct} {
@@ -5083,7 +5192,7 @@ func (s *Server) handleOptionsToggle(w http.ResponseWriter, r *http.Request) {
 	}
 	limitJSONBody(w, r, maxJSONBodyBytes)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		jsonErr(w, "invalid request body", http.StatusBadRequest)
+		respondToBodyError(w, err)
 		return
 	}
 	workDir := s.resolveWorkDir(r)
@@ -5146,7 +5255,7 @@ func (s *Server) handleMaxParallelSet(w http.ResponseWriter, r *http.Request) {
 	}
 	limitJSONBody(w, r, maxJSONBodyBytes)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		jsonErr(w, "invalid request body", http.StatusBadRequest)
+		respondToBodyError(w, err)
 		return
 	}
 	// Bound to [1, 64]: zero (or negative) would either disable parallel
@@ -5191,7 +5300,7 @@ func (s *Server) handleProviderModelSet(w http.ResponseWriter, r *http.Request) 
 	}
 	limitJSONBody(w, r, maxJSONBodyBytes)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		jsonErr(w, "invalid request body", http.StatusBadRequest)
+		respondToBodyError(w, err)
 		return
 	}
 	// Whitelist providers to prevent garbage in state.json.

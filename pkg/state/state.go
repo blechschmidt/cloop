@@ -172,9 +172,9 @@ func Load(workdir string) (*ProjectState, error) {
 
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
 		if dir != workdir {
-			return nil, fmt.Errorf("active session has no state (run 'cloop init' in this session)")
+			return nil, fmt.Errorf("active session has no state (run 'cloop init' in this session): %w", statedb.ErrProjectNotFound)
 		}
-		return nil, fmt.Errorf("no cloop project found (run 'cloop init' first)")
+		return nil, fmt.Errorf("no cloop project found (run 'cloop init' first): %w", statedb.ErrProjectNotFound)
 	}
 
 	db, err := statedb.Open(dbPath)
@@ -292,6 +292,21 @@ func (s *ProjectState) SaveDirect() error {
 // SyncFromDisk re-reads the on-disk state and merges externally-added tasks.
 func (s *ProjectState) SyncFromDisk() {
 	s.mergeExternalTasks()
+}
+
+// RequireTask returns the task with the given ID, wrapping
+// statedb.ErrTaskNotFound when the plan is missing or no task matches.
+// HTTP handlers should use errors.Is(err, statedb.ErrTaskNotFound) and
+// statedb.HTTPStatus(err) to map to the correct status code.
+func (s *ProjectState) RequireTask(id int) (*pm.Task, error) {
+	if s == nil || s.Plan == nil {
+		return nil, fmt.Errorf("task %d: %w", id, statedb.ErrTaskNotFound)
+	}
+	t := s.Plan.TaskByID(id)
+	if t == nil {
+		return nil, fmt.Errorf("task %d: %w", id, statedb.ErrTaskNotFound)
+	}
+	return t, nil
 }
 
 // mergeExternalTasks reads the current state from disk and merges tasks added

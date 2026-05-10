@@ -7,6 +7,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/state"
+	"github.com/blechschmidt/cloop/pkg/statedb"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 )
@@ -70,7 +71,7 @@ func setPinned(idStr string, pin bool) error {
 		}
 	}
 	if task == nil {
-		return fmt.Errorf("task %d not found", id)
+		return fmt.Errorf("task %d not found: %w", id, statedb.ErrTaskNotFound)
 	}
 
 	if pin && task.Pinned {

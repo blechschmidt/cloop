@@ -13,6 +13,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/provider"
 	"github.com/blechschmidt/cloop/pkg/state"
+	"github.com/blechschmidt/cloop/pkg/statedb"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
@@ -74,7 +75,7 @@ Examples:
 			}
 		}
 		if task == nil {
-			return fmt.Errorf("task %d not found in current plan", taskID)
+			return fmt.Errorf("task %d not found in current plan: %w", taskID, statedb.ErrTaskNotFound)
 		}
 		if task.Status != pm.TaskDone {
 			return fmt.Errorf("task %d is not done (status: %s) — only done tasks can be evaluated", taskID, task.Status)

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -51,8 +52,10 @@ import (
 	"github.com/blechschmidt/cloop/pkg/risk"
 	"github.com/blechschmidt/cloop/pkg/router"
 	"github.com/blechschmidt/cloop/pkg/state"
+	"github.com/blechschmidt/cloop/pkg/statedb"
 	"github.com/blechschmidt/cloop/pkg/taskqueue"
 	"github.com/blechschmidt/cloop/pkg/verify"
+	"github.com/blechschmidt/cloop/pkg/watchdog"
 	"github.com/blechschmidt/cloop/pkg/webhook"
 	"github.com/fatih/color"
 )
@@ -369,6 +372,13 @@ type Config struct {
 	// 3-5 concrete, actionable tips specific to the task: how to approach it
 	// well, what to watch out for, and what done looks like.
 	CoachMode bool
+
+	// Watchdog configures the in-flight stuck-task detector that runs as a
+	// background goroutine alongside runPM/runPMParallel. The orchestrator
+	// applies WatchdogDefaults() at start time, so a zero value enables the
+	// detector with sensible defaults (interval=30s, threshold=10min,
+	// artifact-quiet=5min, auto-kill disabled). See pkg/watchdog.
+	Watchdog config.WatchdogConfig
 }
 
 type Orchestrator struct {
@@ -383,6 +393,8 @@ type Orchestrator struct {
 	secretStore *secret.Store
 	log         logger.Logger
 	queue       *taskqueue.Queue // central work queue; nil-safe (Mark*/Enqueue tolerate nil)
+	statedb     *statedb.DB      // shared SQLite handle for forensics (stuck_tasks); nil-safe
+	watchdog    *watchdog.Watchdog // stuck-task detector; nil if disabled or queue/db unavailable
 }
 
 func New(cfg Config, prov provider.Provider) (*Orchestrator, error) {
@@ -431,7 +443,12 @@ func New(cfg Config, prov provider.Provider) (*Orchestrator, error) {
 	}
 
 	r := router.New(prov)
-	log := logger.New(cfg.LogJSON)
+	// Bind project + provider as default attributes on every emitted entry so
+	// downstream tooling can filter logs per project/provider without each
+	// call site having to thread them through the data map.
+	log := logger.New(cfg.LogJSON).
+		With("project", s.WorkDir).
+		With("provider", prov.Name())
 
 	// Open the central work queue. All work cloop performs (task executions,
 	// heal retries, evolve discoveries, externally-merged tasks) is recorded
@@ -444,14 +461,57 @@ func New(cfg Config, prov provider.Provider) (*Orchestrator, error) {
 		queue = nil
 	}
 
-	return &Orchestrator{config: cfg, state: s, provider: prov, router: r, memory: mem, webhook: wh, metrics: cfg.Metrics, envVars: envVars, secretStore: secretStore, log: log, queue: queue}, nil
+	// Open the shared state DB for stuck-task forensics (Task 20088). The
+	// watchdog appends rows here; readers (Web UI) use the same path. Open
+	// failure is non-fatal — the watchdog is still useful with logging only.
+	stateDBPath := filepath.Join(s.WorkDir, ".cloop", "state.db")
+	sdb, dbErr := statedb.Open(stateDBPath)
+	if dbErr != nil {
+		log.Warn(logger.EventSessionStart, 0, fmt.Sprintf("statedb unavailable for watchdog: %v", dbErr), nil)
+		sdb = nil
+	}
+
+	o := &Orchestrator{config: cfg, state: s, provider: prov, router: r, memory: mem, webhook: wh, metrics: cfg.Metrics, envVars: envVars, secretStore: secretStore, log: log, queue: queue, statedb: sdb}
+
+	// Build (but do NOT start) the stuck-task watchdog (Task 20088). Run()
+	// starts it so its goroutine is bound to the run context and exits on
+	// cancellation. Passing GetPlan over the in-memory plan is much cheaper
+	// than re-reading state.db every tick.
+	wdCfg := cfg.Watchdog.WatchdogDefaults()
+	if wdCfg.Enabled != nil && *wdCfg.Enabled {
+		o.watchdog = &watchdog.Watchdog{
+			WorkDir:        s.WorkDir,
+			Interval:       time.Duration(wdCfg.IntervalSeconds) * time.Second,
+			StuckThreshold: time.Duration(wdCfg.StuckThresholdMinutes) * time.Minute,
+			ArtifactQuiet:  time.Duration(wdCfg.ArtifactIdleMinutes) * time.Minute,
+			AutoKillAfter:  time.Duration(wdCfg.AutoKillAfterMinutes) * time.Minute,
+			Logger:         log,
+			DB:             sdb,
+			GetPlan:        func() *pm.Plan { return o.state.Plan },
+		}
+	}
+
+	return o, nil
 }
 
 // Close releases resources held by the orchestrator. Safe to call multiple times.
 // Any queue entries still in "running" are marked failed (interrupted) before
 // the database is closed.
 func (o *Orchestrator) Close() error {
-	if o == nil || o.queue == nil {
+	if o == nil {
+		return nil
+	}
+	// Stop the watchdog before tearing down its DB handle so an in-flight
+	// AppendStuck cannot race a Close. Watchdog.Stop is idempotent and waits
+	// for the loop goroutine to exit (Task 20088).
+	if o.watchdog != nil {
+		o.watchdog.Wait()
+	}
+	if o.statedb != nil {
+		_ = o.statedb.Close()
+		o.statedb = nil
+	}
+	if o.queue == nil {
 		return nil
 	}
 	// Mark any entries we left running as interrupted.
@@ -478,16 +538,34 @@ func (o *Orchestrator) enqueueWork(e taskqueue.Entry) int64 {
 
 // taskContextWithTimeout returns a context (and cancel) scoped to the given task's
 // time budget. If the task has no MaxMinutes and the state has no DefaultMaxMinutes,
-// the parent ctx is returned unchanged with a no-op cancel.
+// a plain cancellable context derived from ctx is returned (so the watchdog can
+// still cancel via AutoKillAfter on a stuck task). When a watchdog is active the
+// returned cancel is registered under task.ID and de-registered when invoked,
+// so the same cancel cannot accidentally fire twice.
 func (o *Orchestrator) taskContextWithTimeout(ctx context.Context, task *pm.Task) (context.Context, context.CancelFunc) {
 	maxMin := task.MaxMinutes
 	if maxMin == 0 {
 		maxMin = o.state.DefaultMaxMinutes
 	}
+	var (
+		taskCtx    context.Context
+		taskCancel context.CancelFunc
+	)
 	if maxMin > 0 {
-		return context.WithTimeout(ctx, time.Duration(maxMin)*time.Minute)
+		taskCtx, taskCancel = context.WithTimeout(ctx, time.Duration(maxMin)*time.Minute)
+	} else {
+		taskCtx, taskCancel = context.WithCancel(ctx)
 	}
-	return ctx, func() {}
+	if o.watchdog != nil && task != nil {
+		o.watchdog.Register(task.ID, taskCancel)
+		taskID := task.ID
+		wrapped := func() {
+			o.watchdog.Unregister(taskID)
+			taskCancel()
+		}
+		return taskCtx, wrapped
+	}
+	return taskCtx, taskCancel
 }
 
 // isTimeoutErr returns true when err is a context deadline-exceeded error and
@@ -542,8 +620,8 @@ func (o *Orchestrator) handleTaskTimeout(_ context.Context, s *state.ProjectStat
 		Session:  &webhook.SessionInfo{InputTokens: s.TotalInputTokens, OutputTokens: s.TotalOutputTokens},
 	})
 	o.log.Error(logger.EventTaskFailed, task.ID, task.Title, map[string]interface{}{
-		"reason": "timed_out",
-		"budget": task.MaxMinutes,
+		"reason":            "timed_out",
+		"budget_minutes":    task.MaxMinutes,
 	})
 }
 
@@ -681,6 +759,11 @@ func (o *Orchestrator) enforceClaudeCodeLimits() error {
 }
 
 func (o *Orchestrator) Run(ctx context.Context) error {
+	// Start the stuck-task watchdog (Task 20088). Bound to ctx so it exits
+	// when the run is cancelled. Wait() in Close() blocks on its goroutine.
+	if o.watchdog != nil {
+		o.watchdog.Start(ctx)
+	}
 	// Close the central work queue on Run() exit so the underlying SQLite
 	// connection (and any goroutines it owns) is released. The orchestrator
 	// is a one-shot value — callers Build → Run → discard. Re-using the
@@ -701,10 +784,35 @@ func (o *Orchestrator) runPM(ctx context.Context) error {
 	defer span.End()
 	ctx = spanCtx
 
-	if o.config.Parallel {
-		return o.runPMParallel(ctx)
+	// Start the stuck-task watchdog (Task 20088). Disabled when the user
+	// explicitly sets watchdog.enabled=false; otherwise runs with effective
+	// defaults from WatchdogDefaults(). The watchdog reads the live in-memory
+	// plan via GetPlan, persists detections to statedb, and (when AutoKillAfter
+	// > 0) cancels per-task contexts registered by the executor.
+	wdCfg := o.config.Watchdog.WatchdogDefaults()
+	if wdCfg.Enabled != nil && *wdCfg.Enabled {
+		o.watchdog = &watchdog.Watchdog{
+			WorkDir:        o.config.WorkDir,
+			GetPlan:        func() *pm.Plan { return o.state.Plan },
+			Interval:       time.Duration(wdCfg.IntervalSeconds) * time.Second,
+			StuckThreshold: time.Duration(wdCfg.StuckThresholdMinutes) * time.Minute,
+			ArtifactQuiet:  time.Duration(wdCfg.ArtifactIdleMinutes) * time.Minute,
+			AutoKillAfter:  time.Duration(wdCfg.AutoKillAfterMinutes) * time.Minute,
+			Logger:         o.log,
+			DB:             o.statedb,
+		}
+		o.watchdog.Start(ctx)
 	}
-	return o.runPMSequential(ctx)
+
+	var runErr error
+	if o.config.Parallel {
+		runErr = o.runPMParallel(ctx)
+	} else {
+		runErr = o.runPMSequential(ctx)
+	}
+	// Best-effort: surface any final stuck event count in the logs once the
+	// PM loop has unwound. Watchdog.Wait is invoked from Close().
+	return runErr
 }
 
 // runPMSequential runs PM tasks one at a time (original behaviour).
@@ -746,7 +854,6 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		fmt.Println()
 	}
 	o.log.Info(logger.EventSessionStart, 0, "session started", map[string]interface{}{
-		"provider": o.provider.Name(),
 		"goal":     s.Goal,
 		"mode":     "pm",
 		"trace_id": clooptracing.TraceIDFromContext(ctx),
@@ -1454,6 +1561,16 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		taskCtx, taskCancel := o.taskContextWithTimeout(ctx, task)
 		defer taskCancel()
 
+		// Register the per-task cancel with the watchdog (Task 20088). When
+		// AutoKillAfter is configured, this lets the watchdog cancel a wedged
+		// provider call. Unregister fires before the next iteration via the
+		// inner-loop continue/break paths since `defer` runs on function
+		// return; for tasks-loop iterations we still rely on the watchdog
+		// dropping flagged-state once Status leaves in_progress (handled in
+		// watchdog.tick). This is intentional — Register/Unregister is for
+		// the cancel registry, not flagged-state lifecycle.
+		o.watchdog.Register(task.ID, taskCancel)
+
 		// ── Multi-agent path ───────────────────────────────────────────────
 		// When --multi-agent is set, run the three-pass pipeline instead of a
 		// single provider call. The combined reviewer output becomes the task
@@ -1864,7 +1981,9 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			task.ActualMinutes = int(completedAt.Sub(*task.StartedAt).Minutes())
 		}
 
-		taskDur := time.Since(*task.StartedAt).Round(time.Second).String()
+		taskDuration := time.Since(*task.StartedAt)
+		taskDur := taskDuration.Round(time.Second).String()
+		taskDurMs := taskDuration.Milliseconds()
 
 		// Auto-resolve clarification questions: when the LLM asked questions
 		// instead of completing the task, re-prompt it to use its best judgment.
@@ -2072,7 +2191,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 					successColor.Printf("✓ Task %d complete: %s\n\n", task.ID, task.Title)
 				}
 				o.log.Info(logger.EventTaskDone, task.ID, task.Title, map[string]interface{}{
-					"duration": taskDur,
+					"duration_ms": taskDurMs,
 				})
 				if o.config.Notify {
 					notify.Send("cloop: Task Done", task.Title)
@@ -2120,8 +2239,8 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 				failColor.Printf("✗ Task %d failed: %s\n\n", task.ID, task.Title)
 			}
 			o.log.Error(logger.EventTaskFailed, task.ID, task.Title, map[string]interface{}{
-				"duration": taskDur,
-				"fail_count": task.FailCount,
+				"duration_ms": taskDurMs,
+				"fail_count":  task.FailCount,
 			})
 			{
 				done, failed := s.Plan.CountByStatus()
@@ -2220,8 +2339,8 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 				successColor.Printf("✓ Task %d complete (no explicit signal): %s\n\n", task.ID, task.Title)
 			}
 			o.log.Info(logger.EventTaskDone, task.ID, task.Title, map[string]interface{}{
-				"duration": taskDur,
-				"implicit": true,
+				"duration_ms": taskDurMs,
+				"implicit":    true,
 			})
 			if o.config.Notify {
 				notify.Send("cloop: Task Done", task.Title)
@@ -3000,6 +3119,11 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 				// Apply per-task time budget in parallel mode.
 				tTaskCtx, tTaskCancel := o.taskContextWithTimeout(ctx, t)
 				defer tTaskCancel()
+				// Register the cancel with the watchdog so AutoKillAfter can
+				// fire on a wedged provider call (Task 20088). The watchdog's
+				// per-tick sweep drops cancels for tasks no longer
+				// in_progress, so no explicit Unregister is required here.
+				o.watchdog.Register(t.ID, tTaskCancel)
 				result, err := safeComplete(tTaskCtx, taskProvider, prompt, opts)
 				// Write live artifact for parallel task (non-streaming).
 				if err == nil {
@@ -3173,6 +3297,7 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 			}
 
 			taskDur := res.duration.Round(time.Second).String()
+			taskDurMs := res.duration.Milliseconds()
 			mu.Lock()
 			if clarificationReroute {
 				pm.AddAnnotation(task, "ai", "Task failed: LLM asked clarification questions instead of completing the work (parallel mode has no auto-resolve loop).")
@@ -3184,7 +3309,7 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 				if !o.log.IsJSON() {
 					successColor.Printf("✓ Task %d complete: %s\n\n", task.ID, task.Title)
 				}
-				o.log.Info(logger.EventTaskDone, task.ID, task.Title, map[string]interface{}{"duration": taskDur})
+				o.log.Info(logger.EventTaskDone, task.ID, task.Title, map[string]interface{}{"duration_ms": taskDurMs})
 				if o.config.Notify {
 					notify.Send("cloop: Task Done", task.Title)
 				}
@@ -3228,7 +3353,7 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 				if !o.log.IsJSON() {
 					failColor.Printf("✗ Task %d failed: %s\n\n", task.ID, task.Title)
 				}
-				o.log.Error(logger.EventTaskFailed, task.ID, task.Title, map[string]interface{}{"duration": taskDur})
+				o.log.Error(logger.EventTaskFailed, task.ID, task.Title, map[string]interface{}{"duration_ms": taskDurMs})
 				if o.config.Notify {
 					notify.Send("cloop: Task Failed", task.Title)
 				}
@@ -3250,8 +3375,8 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 					successColor.Printf("✓ Task %d complete (no explicit signal): %s\n\n", task.ID, task.Title)
 				}
 				o.log.Info(logger.EventTaskDone, task.ID, task.Title, map[string]interface{}{
-					"duration": taskDur,
-					"implicit": true,
+					"duration_ms": taskDurMs,
+					"implicit":    true,
 				})
 				if o.config.Notify {
 					notify.Send("cloop: Task Done", task.Title)

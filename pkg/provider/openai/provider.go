@@ -183,7 +183,7 @@ func (p *Provider) Complete(ctx context.Context, prompt string, opts provider.Op
 
 	var result *provider.Result
 
-	retryErr := provider.DoWithRetry(ctx, provider.RetryConfig{}, func() (int, error) {
+	retryErr := provider.DoWithRetry(ctx, provider.RetryConfig{BreakerKey: ProviderName}, func() (int, error) {
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(data))
 		if err != nil {
 			return 0, err

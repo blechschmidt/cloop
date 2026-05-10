@@ -13,6 +13,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/provider"
 	"github.com/blechschmidt/cloop/pkg/state"
+	"github.com/blechschmidt/cloop/pkg/statedb"
 	"github.com/blechschmidt/cloop/pkg/testgen"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
@@ -64,7 +65,7 @@ Examples:
 
 		var task = s.Plan.TaskByID(taskID)
 		if task == nil {
-			return fmt.Errorf("task %d not found", taskID)
+			return fmt.Errorf("task %d not found: %w", taskID, statedb.ErrTaskNotFound)
 		}
 
 		// Build provider
