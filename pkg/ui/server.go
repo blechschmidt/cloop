@@ -6299,7 +6299,7 @@ const dashboardHTML = `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>cloop dashboard</title>
 <script>(function(){var t=localStorage.getItem('cloop-theme')||(window.matchMedia('(prefers-color-scheme: light)').matches?'light':'dark');document.documentElement.setAttribute('data-theme',t);})();</script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js" crossorigin="anonymous"></script>
@@ -6581,6 +6581,7 @@ const dashboardHTML = `<!DOCTYPE html>
     margin-top: 4px;
     border-top: 1px solid var(--border);
     user-select: none;
+    flex-shrink: 0;
   }
   .mobile-nav-section-label:first-of-type { border-top: none; margin-top: 0; padding-top: 8px; }
 
@@ -7645,23 +7646,34 @@ const dashboardHTML = `<!DOCTYPE html>
   .mobile-nav-overlay {
     display: none;
     position: fixed;
-    inset: 0;
+    top: 0; left: 0;
+    width: 100vw;
+    height: 100vh;       /* fallback for older browsers */
+    height: 100dvh;      /* respects mobile browser chrome */
     background: rgba(0,0,0,.6);
     z-index: 90;
   }
   .mobile-nav-overlay.open { display: block; }
   .mobile-nav-panel {
     position: absolute;
-    top: 0; left: 0; bottom: 0;
-    width: 240px;
+    top: 0; left: 0;
+    width: min(240px, 85vw);
+    max-width: 100vw;
+    height: 100vh;       /* fallback */
+    height: 100dvh;      /* dynamic viewport — accounts for URL bar */
     background: var(--surface);
     border-right: 1px solid var(--border);
-    padding: 12px 8px;
+    padding: calc(12px + env(safe-area-inset-top)) 8px calc(12px + env(safe-area-inset-bottom)) calc(8px + env(safe-area-inset-left));
     display: flex;
     flex-direction: column;
     gap: 2px;
+    overflow-y: auto;
+    overflow-x: hidden;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
     transform: translateX(-100%);
     transition: transform .2s ease;
+    box-sizing: border-box;
   }
   .mobile-nav-overlay.open .mobile-nav-panel {
     transform: translateX(0);
@@ -7673,6 +7685,7 @@ const dashboardHTML = `<!DOCTYPE html>
     padding: 4px 8px 12px;
     border-bottom: 1px solid var(--border);
     margin-bottom: 6px;
+    flex-shrink: 0;
   }
   .mobile-nav-title {
     font-size: 13px;
@@ -7709,6 +7722,7 @@ const dashboardHTML = `<!DOCTYPE html>
     display: flex;
     align-items: center;
     gap: 10px;
+    flex-shrink: 0;
   }
   .mobile-nav-panel .m-tab-btn:hover { color: var(--text); background: var(--hover-bg); }
   .mobile-nav-panel .m-tab-btn.active { color: var(--text); background: var(--bg); border-color: var(--border); }
