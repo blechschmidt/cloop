@@ -436,6 +436,10 @@ func (s *ProjectState) mergeExternalTasks() {
 	s.PlanOnly = disk.PlanOnly
 	s.RetryFailed = disk.RetryFailed
 	s.DryRun = disk.DryRun
+	// Task 20143: pick up UI-driven changes to the per-project default task
+	// timeout so the orchestrator's live budget poller sees the new value
+	// without a restart.
+	s.DefaultMaxMinutes = disk.DefaultMaxMinutes
 }
 
 // Init creates a new project state and persists it.

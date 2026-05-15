@@ -885,6 +885,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/options/toggle", s.handleOptionsToggle)
 	mux.HandleFunc("POST /api/options/max-parallel", s.handleMaxParallelSet)
 	mux.HandleFunc("POST /api/options/step-timeout", s.handleStepTimeoutSet)
+	mux.HandleFunc("POST /api/options/task-timeout", s.handleTaskTimeoutSet)
 	mux.HandleFunc("POST /api/options/provider", s.handleProviderModelSet)
 
 	// Central work queue (every PM task, heal retry, evolve cycle, external merge)
@@ -2988,11 +2989,24 @@ func (s *Server) handleTaskEdit(w http.ResponseWriter, r *http.Request) {
 		Description string `json:"description"`
 		Priority    int    `json:"priority"`
 		DependsOn   *[]int `json:"depends_on"` // nil = don't change; []int{} = clear; [1,2] = set
+		// MaxMinutes is the per-task wall-clock budget override. Pointer so
+		// the absent field is distinguishable from explicit 0 (which means
+		// "inherit project default"). See Task 20143.
+		MaxMinutes *int `json:"max_minutes"`
 	}
 	limitJSONBody(w, r, maxJSONBodyBytes)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		respondToBodyError(w, err)
 		return
+	}
+	if req.MaxMinutes != nil {
+		v := *req.MaxMinutes
+		if v != 0 && (v < config.OrchestratorTaskTimeoutMinutesLower || v > config.OrchestratorTaskTimeoutMinutesUpper) {
+			jsonErr(w, fmt.Sprintf("max_minutes must be 0 or between %d and %d",
+				config.OrchestratorTaskTimeoutMinutesLower, config.OrchestratorTaskTimeoutMinutesUpper),
+				http.StatusBadRequest)
+			return
+		}
 	}
 
 	ps, err := state.Load(s.resolveWorkDir(r))
@@ -3017,6 +3031,9 @@ func (s *Server) handleTaskEdit(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.DependsOn != nil {
 		task.DependsOn = *req.DependsOn
+	}
+	if req.MaxMinutes != nil {
+		task.MaxMinutes = *req.MaxMinutes
 	}
 
 	if err := ps.SaveDirect(); err != nil {
@@ -3088,11 +3105,27 @@ func (s *Server) handlePutTask(w http.ResponseWriter, r *http.Request) {
 		Priority    int    `json:"priority"`
 		Status      string `json:"status"`
 		DependsOn   *[]int `json:"depends_on"`
+		// MaxMinutes is the per-task wall-clock budget override (Task 20143).
+		// Pointer so the absent field is distinguishable from an explicit 0
+		// (which means "fall back to the project / process-wide default").
+		MaxMinutes *int `json:"max_minutes"`
 	}
 	limitJSONBody(w, r, maxJSONBodyBytes)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		respondToBodyError(w, err)
 		return
+	}
+	// Validate the per-task timeout against the same bounds the orchestrator
+	// enforces, so a value that the daemon would silently coerce to the default
+	// is rejected up-front with a clear error instead.
+	if req.MaxMinutes != nil {
+		v := *req.MaxMinutes
+		if v != 0 && (v < config.OrchestratorTaskTimeoutMinutesLower || v > config.OrchestratorTaskTimeoutMinutesUpper) {
+			jsonErr(w, fmt.Sprintf("max_minutes must be 0 or between %d and %d",
+				config.OrchestratorTaskTimeoutMinutesLower, config.OrchestratorTaskTimeoutMinutesUpper),
+				http.StatusBadRequest)
+			return
+		}
 	}
 
 	ps, err := state.Load(s.resolveWorkDir(r))
@@ -3117,6 +3150,9 @@ func (s *Server) handlePutTask(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.DependsOn != nil {
 		task.DependsOn = *req.DependsOn
+	}
+	if req.MaxMinutes != nil {
+		task.MaxMinutes = *req.MaxMinutes
 	}
 	// Capture the prior status BEFORE the assignment so the manual-abort hook
 	// below can detect a transition out of in_progress (Task 20140).
@@ -3164,6 +3200,9 @@ func (s *Server) handlePutTask(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Status != "" {
 		mutatedFields = append(mutatedFields, "status")
+	}
+	if req.MaxMinutes != nil {
+		mutatedFields = append(mutatedFields, "max_minutes")
 	}
 	workDir := s.resolveWorkDir(r)
 	clientID := r.Header.Get("X-Client-ID")
@@ -6236,6 +6275,48 @@ func (s *Server) handleStepTimeoutSet(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]interface{}{
 		"ok":           true,
 		"step_timeout": req.Value,
+	})
+}
+
+// handleTaskTimeoutSet updates the per-project default per-task wall-clock
+// budget (state.DefaultMaxMinutes). The value is applied to currently-running
+// tasks within ~3 seconds via the orchestrator's live-deadline poller
+// (Task 20143). 0 means "use the process-wide default"; out-of-band values
+// are rejected with HTTP 400 to match the bounds the orchestrator enforces.
+//
+// POST /api/options/task-timeout  body: {"value":<minutes>}
+func (s *Server) handleTaskTimeoutSet(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Value int `json:"value"`
+	}
+	limitJSONBody(w, r, maxJSONBodyBytes)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondToBodyError(w, err)
+		return
+	}
+	// 0 is the sentinel for "use the process-wide default"; everything else
+	// must fall inside the same [Lower, Upper] band that pkg/config enforces.
+	if req.Value != 0 && (req.Value < config.OrchestratorTaskTimeoutMinutesLower || req.Value > config.OrchestratorTaskTimeoutMinutesUpper) {
+		jsonErr(w, fmt.Sprintf("task_timeout_minutes must be 0 or between %d and %d",
+			config.OrchestratorTaskTimeoutMinutesLower, config.OrchestratorTaskTimeoutMinutesUpper),
+			http.StatusBadRequest)
+		return
+	}
+	workDir := s.resolveWorkDir(r)
+	ps, err := state.Load(workDir)
+	if err != nil {
+		jsonErr(w, err.Error(), statedb.HTTPStatus(err))
+		return
+	}
+	ps.DefaultMaxMinutes = req.Value
+	if err := ps.SaveDirect(); err != nil {
+		jsonErr(w, "save failed: "+err.Error(), statedb.HTTPStatus(err))
+		return
+	}
+	s.broadcastStateDiff(workDir, ps)
+	jsonOK(w, map[string]interface{}{
+		"ok":                   true,
+		"default_max_minutes":  ps.DefaultMaxMinutes,
 	})
 }
 
@@ -9344,6 +9425,10 @@ const dashboardHTML = `<!DOCTYPE html>
         <input class="form-input" id="modalDeps" placeholder="e.g. 1,2 or leave blank">
       </div>
     </div>
+    <div class="form-group">
+      <label class="form-label">Max minutes (0 = use project default; applies live)</label>
+      <input class="form-input" id="modalMaxMinutes" type="number" min="0" max="10080" placeholder="0 = inherit project default">
+    </div>
     <input type="hidden" id="modalTaskId">
     <div class="modal-footer">
       <button class="btn" onclick="closeModal()">Cancel</button>
@@ -9860,15 +9945,33 @@ function renderActiveOptions(s) {
         'border-radius:4px;padding:2px 4px;font-family:inherit;font-size:inherit;text-align:right;" ' +
         'onchange="setStepTimeout(this.value)" />' +
     '</div>';
+  // Per-task default wall-clock budget (Task 20143). 0 = "use the
+  // process-wide default" (30 minutes). Changes here take effect on all
+  // currently-running tasks within a few seconds via the orchestrator's
+  // live-deadline poller, not just future tasks.
+  const ttRaw = parseInt(s.default_max_minutes, 10);
+  const ttVal = (Number.isFinite(ttRaw) && ttRaw > 0) ? ttRaw : 0;
+  const ttDisplay = ttVal === 0 ? 'auto' : String(ttVal);
+  const taskTimeoutControl =
+    '<div class="option-badge option-config" ' +
+      'title="Default wall-clock budget per task (minutes). 0 means use the process default (30m). Applies immediately to running tasks.">' +
+      '<span class="opt-icon">⏲</span>' +
+      '<span>Task Timeout</span>' +
+      '<input type="number" id="taskTimeoutInput" min="0" max="10080" step="1" value="' + ttVal + '" ' +
+        'style="width:64px;background:transparent;color:var(--text);border:1px solid var(--border);' +
+        'border-radius:4px;padding:2px 4px;font-family:inherit;font-size:inherit;text-align:right;" ' +
+        'onchange="setTaskTimeout(this.value)" />' +
+      '<span class="opt-flag" title="0 = use process default (30m)">' + ttDisplay + 'm</span>' +
+    '</div>';
   const enabledCount = opts.filter(o => o[0]).length;
   if (enabledCount === 0) {
     grid.innerHTML =
       '<div class="options-empty">No persistent CLI options are currently enabled. ' +
       'Run with <code>--auto-evolve</code> or <code>--innovate</code> to activate.</div>' +
-      buildOptionBadges(opts) + parallelControls + stepTimeoutControl;
+      buildOptionBadges(opts) + parallelControls + stepTimeoutControl + taskTimeoutControl;
     return;
   }
-  grid.innerHTML = buildOptionBadges(opts) + parallelControls + stepTimeoutControl;
+  grid.innerHTML = buildOptionBadges(opts) + parallelControls + stepTimeoutControl + taskTimeoutControl;
 }
 
 // Exposed on window because the Active Options badges use inline onchange
@@ -9899,6 +10002,40 @@ window.setMaxParallel = function(raw) {
   }).catch(err => {
     if (appState) {
       appState.max_parallel = prev;
+      try { renderActiveOptions(appState); } catch(_) {}
+    }
+    toast('Update failed: ' + err.message, 'error');
+  });
+};
+
+// setTaskTimeout updates the project-level default wall-clock budget per
+// task (Task 20143). Submitting 0 reverts to the process-wide default.
+// Affects currently-running tasks within ~3 seconds via the orchestrator's
+// live-deadline poller.
+window.setTaskTimeout = function(raw) {
+  const n = parseInt(raw, 10);
+  if (!Number.isFinite(n) || n < 0 || n > 10080) {
+    toast('Task Timeout must be 0 (default) or 1..10080 minutes', 'error');
+    return;
+  }
+  const prev = appState ? appState.default_max_minutes : 0;
+  if (appState) {
+    appState.default_max_minutes = n;
+    try { renderActiveOptions(appState); } catch(_) {}
+  }
+  apiMethod('POST', pUrl('/api/options/task-timeout'), {value: n}).then(d => {
+    if (d && d.ok) {
+      toast('Task Timeout set to ' + (n === 0 ? 'process default' : n + 'm'), 'success');
+    } else {
+      if (appState) {
+        appState.default_max_minutes = prev;
+        try { renderActiveOptions(appState); } catch(_) {}
+      }
+      toast('Update failed: ' + (d && d.error ? d.error : 'unknown error'), 'error');
+    }
+  }).catch(err => {
+    if (appState) {
+      appState.default_max_minutes = prev;
       try { renderActiveOptions(appState); } catch(_) {}
     }
     toast('Update failed: ' + err.message, 'error');
@@ -13436,6 +13573,8 @@ window.openEditModal = function(id) {
   document.getElementById('modalDesc').value     = t.description || '';
   document.getElementById('modalPriority').value = t.priority || 0;
   document.getElementById('modalDeps').value     = (t.depends_on && t.depends_on.length) ? t.depends_on.join(',') : '';
+  const mmEl = document.getElementById('modalMaxMinutes');
+  if (mmEl) mmEl.value = t.max_minutes || 0;
   document.getElementById('modal-overlay').classList.add('open');
   document.getElementById('modalTitle_').focus();
 };
@@ -13519,6 +13658,7 @@ function _renderTaskDetails(d) {
   if (t.tags && t.tags.length) chips.push('<span class="td-chip">Tags<strong>'+t.tags.map(esc).join(', ')+'</strong></span>');
   if (t.estimated_minutes) chips.push('<span class="td-chip">Est<strong>'+t.estimated_minutes+'m</strong></span>');
   if (t.actual_minutes)    chips.push('<span class="td-chip">Actual<strong>'+t.actual_minutes+'m</strong></span>');
+  if (t.max_minutes)       chips.push('<span class="td-chip" title="Per-task timeout override. 0 = inherits project default.">Timeout<strong>'+t.max_minutes+'m</strong></span>');
   if (t.fail_count)        chips.push('<span class="td-chip">Failures<strong>'+t.fail_count+'</strong></span>');
   if (t.heal_attempts)     chips.push('<span class="td-chip">Heal attempts<strong>'+t.heal_attempts+'</strong></span>');
   if (t.started_at)        chips.push('<span class="td-chip">Started<strong>'+esc(_fmtDateTime(t.started_at))+'</strong></span>');
@@ -13600,13 +13740,22 @@ window.submitEditTask = function() {
   const desc     = document.getElementById('modalDesc').value.trim();
   const priority = parseInt(document.getElementById('modalPriority').value)||0;
   if (!title) { toast('Title is required', 'err'); return; }
-  api(pUrl('/api/task/edit'), {
+  // Per-task max_minutes. 0 means "inherit project default" — send it through
+  // so the server clears any prior override. Negative/NaN inputs are coerced
+  // to 0 (the safest default) rather than being sent as garbage.
+  const mmRaw  = document.getElementById('modalMaxMinutes');
+  const mmVal  = mmRaw ? parseInt(mmRaw.value, 10) : NaN;
+  const payload = {
     id,
     title,
     description: desc,
     priority,
     depends_on: parseDepsInput(document.getElementById('modalDeps').value),
-  }).then(d => {
+  };
+  if (Number.isFinite(mmVal) && mmVal >= 0) {
+    payload.max_minutes = mmVal;
+  }
+  api(pUrl('/api/task/edit'), payload).then(d => {
     if (d.ok) { closeModal(); toast('Task updated', 'ok'); refreshState(); }
     else toast(d.error||'Edit failed', 'err');
   }).catch(() => toast('Request failed', 'err'));

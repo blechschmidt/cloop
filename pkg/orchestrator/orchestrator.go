@@ -424,6 +424,12 @@ type Orchestrator struct {
 	// (Task 20140). The orchestrator's Run() spawns it under the run context
 	// and waits on this group during Close so the loop exits cleanly.
 	killWG sync.WaitGroup
+
+	// liveDeadlines tracks per-task cancellable budgets so changes to
+	// task.MaxMinutes / state.DefaultMaxMinutes made via the Web UI take
+	// effect on the currently-running task within a few seconds rather
+	// than only on the next one (Task 20143).
+	liveDeadlines *liveDeadlineRegistry
 }
 
 func New(cfg Config, prov provider.Provider) (*Orchestrator, error) {
@@ -515,7 +521,7 @@ func New(cfg Config, prov provider.Provider) (*Orchestrator, error) {
 		sdb = nil
 	}
 
-	o := &Orchestrator{config: cfg, state: s, provider: prov, router: r, memory: mem, webhook: wh, metrics: cfg.Metrics, envVars: envVars, secretStore: secretStore, log: log, queue: queue, statedb: sdb}
+	o := &Orchestrator{config: cfg, state: s, provider: prov, router: r, memory: mem, webhook: wh, metrics: cfg.Metrics, envVars: envVars, secretStore: secretStore, log: log, queue: queue, statedb: sdb, liveDeadlines: newLiveDeadlineRegistry()}
 
 	// Build (but do NOT start) the stuck-task watchdog (Task 20088). Run()
 	// starts it so its goroutine is bound to the run context and exits on
@@ -666,7 +672,20 @@ func (o *Orchestrator) taskContextWithTimeout(ctx context.Context, task *pm.Task
 	ctx = provider.WithRetryBudget(ctx, provider.NewRetryBudget(budgetLimit))
 
 	maxMin := o.effectiveTaskBudgetMinutes(task)
-	taskCtx, taskCancel := context.WithTimeout(ctx, time.Duration(maxMin)*taskTimeoutUnit)
+	var (
+		taskCtx    context.Context
+		taskCancel context.CancelFunc
+	)
+	// When a task ID is available we route through liveDeadlines so the
+	// background poller can resize the deadline mid-flight (Task 20143).
+	// Tasks without a usable ID (e.g. evolve discovery, plan compaction)
+	// fall back to a vanilla context.WithTimeout — no UI ever points at
+	// them, so a live deadline registry entry would just be dead weight.
+	if task != nil && task.ID > 0 && o.liveDeadlines != nil {
+		taskCtx, taskCancel = o.liveDeadlines.startTaskDeadline(ctx, task.ID, maxMin, taskTimeoutUnit)
+	} else {
+		taskCtx, taskCancel = context.WithTimeout(ctx, time.Duration(maxMin)*taskTimeoutUnit)
+	}
 	if o.watchdog != nil && task != nil {
 		o.watchdog.Register(task.ID, taskCancel)
 		taskID := task.ID
@@ -680,12 +699,20 @@ func (o *Orchestrator) taskContextWithTimeout(ctx context.Context, task *pm.Task
 }
 
 // isTimeoutErr returns true when err is a context deadline-exceeded error and
-// the per-task context (not the parent session context) was the one that expired.
+// the per-task context (not the parent session context) was the one that
+// expired. The liveDeadlines path (Task 20143) uses context.WithCancelCause
+// rather than context.WithTimeout so that mid-flight budget adjustments can
+// shorten/extend the deadline; in that case taskCtx.Err() is context.Canceled,
+// but context.Cause(taskCtx) carries the original DeadlineExceeded sentinel.
+// Check both so timeouts are recognised on either code path.
 func isTimeoutErr(taskCtx context.Context, err error) bool {
 	if err == nil {
 		return false
 	}
-	return taskCtx.Err() == context.DeadlineExceeded
+	if taskCtx.Err() == context.DeadlineExceeded {
+		return true
+	}
+	return errors.Is(context.Cause(taskCtx), context.DeadlineExceeded)
 }
 
 // handleTaskTimeout marks the task as timed_out, fires desktop and webhook
@@ -952,6 +979,11 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	// the watchdog-registered cancel for that task. Bound to wdCtx so it
 	// dies with the watchdog on Close.
 	o.startKillPoller(wdCtx)
+	// Live-deadline poller (Task 20143): re-reads per-task / per-project
+	// task-timeout values from disk every few seconds and adjusts the
+	// timer on any in-flight task whose budget changed. Bound to wdCtx so
+	// it tears down on the same path as the watchdog.
+	o.startDeadlinePoller(wdCtx)
 	// Close the central work queue on Run() exit so the underlying SQLite
 	// connection (and any goroutines it owns) is released. The orchestrator
 	// is a one-shot value — callers Build → Run → discard. Re-using the
