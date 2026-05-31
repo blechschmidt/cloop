@@ -5114,15 +5114,12 @@ func (s *Server) handleProjectNew(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		exe = "cloop"
 	}
-	args := []string{"init", req.Goal}
+	args := []string{"init", req.Goal, "--skip-clarify"}
 	if req.Provider != "" {
 		args = append(args, "--provider", req.Provider)
 	}
 	if req.Model != "" {
 		args = append(args, "--model", req.Model)
-	}
-	if req.PMMode {
-		args = append(args, "--pm")
 	}
 	cmd := exec.Command(exe, args...)
 	cmd.Dir = abs
