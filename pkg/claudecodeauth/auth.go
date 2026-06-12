@@ -68,22 +68,33 @@ func FetchStatus(ctx context.Context) (*Status, error) {
 	}
 	cmd := exec.CommandContext(ctx, findClaude(), "auth", "status", "--json")
 	out, err := cmd.Output()
+	// The CLI exits 1 when logged out but still returns valid JSON with
+	// loggedIn=false. Try to parse the output first; only treat as error
+	// if parsing fails (binary missing, garbled output, etc.).
+	if len(out) > 0 {
+		var s Status
+		if jsonErr := json.Unmarshal(out, &s); jsonErr == nil {
+			return &s, nil
+		}
+	}
 	if err != nil {
-		// Surface stderr so a missing CLI or a version that doesn't know the
-		// status subcommand is debuggable from the UI.
 		var stderr string
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
 			stderr = strings.TrimSpace(string(exitErr.Stderr))
+			// Also try stdout from ExitError
+			if stderr == "" {
+				stderr = strings.TrimSpace(string(out))
+			}
 		}
 		if stderr != "" {
-			return nil, fmt.Errorf("claude auth status: %w: %s", err, stderr)
+			return nil, fmt.Errorf("claude auth status failed: %s", stderr)
 		}
 		return nil, fmt.Errorf("claude auth status: %w", err)
 	}
 	var s Status
 	if err := json.Unmarshal(out, &s); err != nil {
-		return nil, fmt.Errorf("parse claude auth status output: %w", err)
+		return nil, fmt.Errorf("parse claude auth status: %w (output: %s)", err, strings.TrimSpace(string(out)))
 	}
 	return &s, nil
 }
@@ -158,7 +169,14 @@ func (s *Session) Snapshot() State {
 		st.Done = true
 		st.Active = false
 		if s.exitErr != nil {
-			st.Error = s.exitErr.Error()
+			// Include CLI output so the UI shows what actually went wrong,
+			// not just "exit status 1".
+			out := strings.TrimSpace(s.output)
+			if out != "" {
+				st.Error = out
+			} else {
+				st.Error = s.exitErr.Error()
+			}
 		} else {
 			st.Success = true
 		}
