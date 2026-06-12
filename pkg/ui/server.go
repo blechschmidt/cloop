@@ -9844,18 +9844,22 @@ function updateScopeHint(name) {
 const providerModels = {
   claudecode: [
     {value: '', label: '(default — claude-sonnet-4-6)'},
+    {value: 'claude-opus-4-8', label: 'Claude Opus 4.8'},
     {value: 'claude-opus-4-7', label: 'Claude Opus 4.7'},
     {value: 'claude-opus-4-6', label: 'Claude Opus 4.6'},
     {value: 'claude-opus-4-5', label: 'Claude Opus 4.5'},
+    {value: 'claude-fable-4-8', label: 'Claude Fable 4.8'},
     {value: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6'},
     {value: 'claude-sonnet-4-5', label: 'Claude Sonnet 4.5'},
     {value: 'claude-haiku-4-5', label: 'Claude Haiku 4.5'},
   ],
   anthropic: [
     {value: '', label: '(default — claude-opus-4-6)'},
+    {value: 'claude-opus-4-8', label: 'Claude Opus 4.8'},
     {value: 'claude-opus-4-7', label: 'Claude Opus 4.7'},
     {value: 'claude-opus-4-6', label: 'Claude Opus 4.6'},
     {value: 'claude-opus-4-5', label: 'Claude Opus 4.5'},
+    {value: 'claude-fable-4-8', label: 'Claude Fable 4.8'},
     {value: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6'},
     {value: 'claude-sonnet-4-5', label: 'Claude Sonnet 4.5'},
     {value: 'claude-haiku-4-5', label: 'Claude Haiku 4.5'},
@@ -10115,8 +10119,12 @@ function estimateCost(provider, model, inputTok, outputTok) {
   const m = (model || '').toLowerCase();
   // Pricing table: [inputPerM, outputPerM] in USD
   const prices = {
+    'claude-opus-4-8':            [5.00,  25.00],
+    'claude-opus-4-7':            [5.00,  25.00],
     'claude-opus-4-6':            [15.00, 75.00],
     'claude-opus-4-5':            [15.00, 75.00],
+    'claude-fable-4-8':           [5.00,  25.00],
+    'claude-fable':               [5.00,  25.00],
     'claude-sonnet-4-6':          [3.00,  15.00],
     'claude-sonnet-4-5':          [3.00,  15.00],
     'claude-haiku-4-5':           [0.80,  4.00],

@@ -239,12 +239,15 @@ type ModelPricing struct {
 // Keys are lowercase model IDs. Partial prefix matches are tried on miss.
 var prices = map[string]ModelPricing{
 	// Anthropic Claude 4.x
+	"claude-opus-4-8":          {InputPerM: 5.00, OutputPerM: 25.00},
 	"claude-opus-4-7":          {InputPerM: 5.00, OutputPerM: 25.00},
 	"claude-opus-4-6":          {InputPerM: 15.00, OutputPerM: 75.00},
 	"claude-opus-4-5":          {InputPerM: 15.00, OutputPerM: 75.00},
 	"claude-sonnet-4-6":        {InputPerM: 3.00, OutputPerM: 15.00},
 	"claude-sonnet-4-5":        {InputPerM: 3.00, OutputPerM: 15.00},
 	"claude-haiku-4-5":         {InputPerM: 0.80, OutputPerM: 4.00},
+	"claude-fable-4-8":         {InputPerM: 5.00, OutputPerM: 25.00},
+	"claude-fable":             {InputPerM: 5.00, OutputPerM: 25.00},
 	// Anthropic Claude 3.x
 	"claude-3-opus-20240229":   {InputPerM: 15.00, OutputPerM: 75.00},
 	"claude-3-5-sonnet-20241022": {InputPerM: 3.00, OutputPerM: 15.00},

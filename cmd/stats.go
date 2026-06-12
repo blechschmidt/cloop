@@ -169,10 +169,14 @@ func estimateCost(s *state.ProjectState) (float64, bool) {
 	// Values approximate as of 2025.
 	type pricing struct{ inPer1M, outPer1M float64 }
 	prices := map[string]pricing{
+		"claude-opus-4-8":        {5.0, 25.0},
+		"claude-opus-4-7":        {5.0, 25.0},
 		"claude-opus-4-6":        {15.0, 75.0},
 		"claude-sonnet-4-6":      {3.0, 15.0},
 		"claude-haiku-4-5":       {0.8, 4.0},
 		"claude-opus-4-5":        {15.0, 75.0},
+		"claude-fable-4-8":       {5.0, 25.0},
+		"claude-fable":           {5.0, 25.0},
 		"claude-sonnet-3-7":      {3.0, 15.0},
 		"claude-3-haiku-20240307": {0.25, 1.25},
 		"gpt-4o":                  {2.5, 10.0},

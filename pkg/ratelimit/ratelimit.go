@@ -326,8 +326,10 @@ func Probe(apiKey, model string) error {
 func ProbeAll(apiKey string) {
 	for _, model := range []string{
 		"claude-sonnet-4-6",
+		"claude-opus-4-8",
 		"claude-opus-4-7",
 		"claude-opus-4-6",
+		"claude-fable-4-8",
 		"claude-haiku-4-5",
 	} {
 		_ = Probe(apiKey, model)
