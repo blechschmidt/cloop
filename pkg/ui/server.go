@@ -9309,7 +9309,7 @@ const dashboardHTML = `<!DOCTYPE html>
       </div>
       <div class="form-group">
         <label class="form-label">Model</label>
-        <input class="form-input" id="npModel" placeholder="leave blank for default">
+        <select class="form-select" id="npModel"></select>
       </div>
     </div>
     <div class="adv-grid" style="margin-bottom:12px">
@@ -12097,11 +12097,31 @@ window.saveInstructionsEdit = function() {
   });
 };
 
+// Populate the model dropdown based on the selected provider.
+function _npUpdateModels() {
+  var prov = document.getElementById('npProvider').value || 'claudecode';
+  var sel  = document.getElementById('npModel');
+  if (!sel) return;
+  var models = (typeof providerModels !== 'undefined' && providerModels[prov]) || [{value:'', label:'(default)'}];
+  sel.innerHTML = '';
+  models.forEach(function(m) {
+    var opt = document.createElement('option');
+    opt.value = m.value;
+    opt.textContent = m.label;
+    sel.appendChild(opt);
+  });
+}
+// Wire up provider change to update models.
+(function() {
+  var np = document.getElementById('npProvider');
+  if (np) np.addEventListener('change', _npUpdateModels);
+})();
+
 window.openNewProjectModal = function() {
   document.getElementById('npDir').value     = '';
   document.getElementById('npGoal').value    = '';
-  document.getElementById('npModel').value   = '';
   document.getElementById('npProvider').value = '';
+  _npUpdateModels();
   document.getElementById('npPMMode').checked = false;
   document.getElementById('npAutoRun').checked = false;
   document.getElementById('npError').style.display = 'none';
