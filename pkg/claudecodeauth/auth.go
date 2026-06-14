@@ -332,6 +332,10 @@ func (m *Manager) SubmitCode(code string) (State, error) {
 	if _, err := io.WriteString(stdin, code+"\n"); err != nil {
 		return State{}, fmt.Errorf("write code to claude CLI: %w", err)
 	}
+	// Close stdin so the CLI knows no more input is coming and proceeds
+	// with the PKCE token exchange immediately. Without EOF the CLI may
+	// loop waiting for a retry code instead of exchanging the current one.
+	_ = stdin.Close()
 
 	// Don't hold m.mu while waiting — let other handlers read status.
 	select {
