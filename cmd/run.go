@@ -646,7 +646,7 @@ func buildProviderWithFallback(primaryName string, primaryCfg provider.ProviderC
 
 func init() {
 	runCmd.Flags().StringVar(&runModel, "model", "", "Override model for this run")
-	runCmd.Flags().StringVar(&stepTimeout, "step-timeout", "10m", "Timeout per step")
+	runCmd.Flags().StringVar(&stepTimeout, "step-timeout", "0", "Timeout per step (e.g. 10m, 30m); 0 = disabled (default)")
 	runCmd.Flags().StringVar(&runTimeout, "timeout", "", "Total session timeout (e.g. 30m, 2h); 0 = no limit")
 	runCmd.Flags().IntVar(&runMaxTokens, "max-tokens", 0, "Max output tokens per step (overrides config provider.max_tokens)")
 	runCmd.Flags().Float64Var(&runTemperature, "temperature", -1, "Sampling temperature override (0–1 for Anthropic/Ollama, 0–2 for OpenAI; -1 = use config/provider default)")

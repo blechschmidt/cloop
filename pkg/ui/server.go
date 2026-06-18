@@ -1730,7 +1730,24 @@ func marshalStateForWire(ps *state.ProjectState) ([]byte, error) {
 		if len(raw) == 2 {
 			sep = ""
 		}
-		injected := fmt.Sprintf(`%s"steps_count":%d}`, sep, stepsCount)
+		// Always surface the per-project step timeout on the wire (Task 20147).
+		// step_timeout lives in config.yaml, not ProjectState, so before this
+		// it was present only in the /api/state HTTP response. Every WebSocket
+		// task_update ships a full state via this function and the frontend's
+		// `render(data)` replaces appState wholesale — so the first task_update
+		// after a run started dropped step_timeout and the Active Options panel
+		// snapped back to its "10m" placeholder, looking like the value had
+		// been reset. Injecting it here keeps the value stable across both the
+		// full-state and the diff (which merges, never clears) code paths.
+		// "" (unset) is normalised to "0" (disabled) so the default reads as
+		// "off" rather than the misleading "10m".
+		stepTimeout := "0"
+		if ps.WorkDir != "" {
+			if cfg, err := config.Load(ps.WorkDir); err == nil && cfg.StepTimeout != "" {
+				stepTimeout = cfg.StepTimeout
+			}
+		}
+		injected := fmt.Sprintf(`%s"steps_count":%d,"step_timeout":%q}`, sep, stepsCount, stepTimeout)
 		return append(raw[:len(raw)-1:len(raw)-1], injected...), nil
 	}
 	return raw, nil
@@ -1780,17 +1797,13 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 	// Marshal without the multi-MiB Steps slice (Task 20125). The browser
 	// reads only steps_count here; the paginated /api/steps and
 	// /api/event-history endpoints supply the actual rows.
+	// step_timeout is injected by marshalStateForWire (Task 20147) so it is
+	// present consistently on both the HTTP /api/state response and every
+	// WebSocket full-state broadcast.
 	raw, err := marshalStateForWire(ps)
 	if err != nil {
 		jsonErr(w, "encode failed", http.StatusInternalServerError)
 		return
-	}
-	if cfgErr == nil && cfg.StepTimeout != "" {
-		if len(raw) >= 2 && raw[len(raw)-1] == '}' {
-			extra := fmt.Sprintf(`,"step_timeout":%q`, cfg.StepTimeout)
-			raw = append(raw[:len(raw)-1:len(raw)-1], extra...)
-			raw = append(raw, '}')
-		}
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write(raw)
@@ -10099,11 +10112,14 @@ function renderActiveOptions(s) {
         'onchange="setMaxParallel(this.value)" />' +
       '<span class="opt-flag" title="Currently: ' + mpDisplay + ' worker(s)">-j ' + mpDisplay + '</span>' +
     '</div>';
-  // Step timeout control
-  const stVal = s.step_timeout || '10m';
+  // Step timeout control. Disabled by default (Task 20147): an unset/empty
+  // value means "no timeout", so it renders as "off" rather than implying a
+  // 10m default that was never actually applied.
+  const stRaw = s.step_timeout;
+  const stVal = (stRaw === undefined || stRaw === null || stRaw === '') ? '0' : stRaw;
   const stepTimeoutControl =
     '<div class="option-badge option-config" ' +
-      'title="Max duration per task step. Set to 0 to disable.">' +
+      'title="Max duration per task step. Set to 0 (or off) to disable. Disabled by default.">' +
       '<span class="opt-icon">⏱</span>' +
       '<span>Step Timeout</span>' +
       '<input type="text" id="stepTimeoutInput" value="' + (stVal === '0' ? 'off' : stVal) + '" ' +

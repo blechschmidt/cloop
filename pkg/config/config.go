@@ -665,6 +665,11 @@ func Default() *Config {
 			BaseURL: "http://localhost:11434",
 			Model:   "llama3.2",
 		},
+		// Step timeout is disabled by default (Task 20147): a long task step
+		// (e.g. a slow provider call or a large refactor) should not be killed
+		// by an arbitrary wall-clock cap unless the user opts in. "0" means
+		// "no per-step timeout"; cmd/run treats "0" and "" identically.
+		StepTimeout: "0",
 	}
 }
 
