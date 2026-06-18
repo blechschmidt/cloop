@@ -190,6 +190,54 @@ func TestRegistryAddListRemove(t *testing.T) {
 	}
 }
 
+// TestRemovePath verifies RemovePath drops the matching entry, is idempotent
+// for unknown paths, and preserves the rest of the registry untouched.
+func TestRemovePath(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	a := t.TempDir()
+	b := t.TempDir()
+	c := t.TempDir()
+	if err := AddPaths([]string{a, b, c}); err != nil {
+		t.Fatalf("AddPaths: %v", err)
+	}
+
+	// Remove the middle entry.
+	if err := RemovePath(b); err != nil {
+		t.Fatalf("RemovePath: %v", err)
+	}
+	list, _ := Load()
+	if len(list) != 2 {
+		t.Fatalf("expected 2 entries after RemovePath, got %d", len(list))
+	}
+	for _, e := range list {
+		if e.Path == b {
+			t.Errorf("path %q should have been removed", b)
+		}
+	}
+
+	// Removing an unknown path is a no-op without error.
+	if err := RemovePath(t.TempDir()); err != nil {
+		t.Errorf("RemovePath unknown path: %v", err)
+	}
+	list, _ = Load()
+	if len(list) != 2 {
+		t.Errorf("unknown-path remove disturbed registry: got %d entries", len(list))
+	}
+
+	// Remove the remaining entries.
+	if err := RemovePath(a); err != nil {
+		t.Fatalf("RemovePath a: %v", err)
+	}
+	if err := RemovePath(c); err != nil {
+		t.Fatalf("RemovePath c: %v", err)
+	}
+	list, _ = Load()
+	if len(list) != 0 {
+		t.Errorf("expected empty registry, got %d entries", len(list))
+	}
+}
+
 // TestPerProjectTaskIsolation verifies that GetStatus for two registered
 // projects with distinct state.db files returns isolated task counts and
 // metadata — no cross-contamination between projects.

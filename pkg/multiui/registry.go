@@ -293,6 +293,32 @@ func AddPaths(paths []string) error {
 	return saveLocked(existing)
 }
 
+// RemovePath drops the entry with the given absolute path from the registry
+// and saves. Removal is by path (not by index) so a concurrent re-order or
+// addition does not cause the wrong project to be deleted. Unknown paths are
+// silently ignored — the registry is the source of truth and a successful
+// no-op delete is the desired outcome when the entry is already gone.
+func RemovePath(path string) error {
+	registryMu.Lock()
+	defer registryMu.Unlock()
+
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return err
+	}
+	existing, err := Load()
+	if err != nil {
+		return err
+	}
+	filtered := existing[:0]
+	for _, e := range existing {
+		if e.Path != abs {
+			filtered = append(filtered, e)
+		}
+	}
+	return saveLocked(filtered)
+}
+
 // Scan walks a parent directory one level deep and returns all subdirectories
 // (including the directory itself) that contain a .cloop/ folder.
 func Scan(dir string) ([]string, error) {

@@ -1618,6 +1618,125 @@ func TestProjectsContainGoals(t *testing.T) {
 	}
 }
 
+// ── Project delete (Task 20146) ─────────────────────────────────────────────
+
+// TestProjectDelete_RemovesRegistryEntryOnly verifies DELETE /api/projects/{idx}
+// drops the project from the registry but leaves its files on disk by default.
+func TestProjectDelete_RemovesRegistryEntryOnly(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	cloopDir := setupProjectDir(t, cloopGoal, nil)
+	sysmonDir := setupProjectDir(t, sysmonGoal, nil)
+	ts := newTestServer(t, cloopDir, []string{sysmonDir})
+
+	// Delete the secondary project (index 1) without delete_root.
+	req, _ := http.NewRequest("DELETE", ts.URL+"/api/projects/1", strings.NewReader(`{"delete_root":false}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("DELETE: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	var out map[string]interface{}
+	_ = json.NewDecoder(resp.Body).Decode(&out)
+	if rd, _ := out["root_deleted"].(bool); rd {
+		t.Errorf("expected root_deleted=false, got true")
+	}
+
+	// Project files must still exist on disk.
+	if _, err := os.Stat(sysmonDir); err != nil {
+		t.Errorf("expected project dir to still exist; got %v", err)
+	}
+
+	// Subsequent listing should not contain the deleted secondary project.
+	body := apiGET(t, ts, "/api/projects")
+	projects, _ := body["projects"].([]interface{})
+	for _, p := range projects {
+		pm, _ := p.(map[string]interface{})
+		if path, _ := pm["path"].(string); path == sysmonDir {
+			t.Errorf("deleted project still in list: %s", path)
+		}
+	}
+}
+
+// TestProjectDelete_DeleteRootRemovesFiles verifies that delete_root=true
+// recursively removes the project root directory.
+func TestProjectDelete_DeleteRootRemovesFiles(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	cloopDir := setupProjectDir(t, cloopGoal, nil)
+	sysmonDir := setupProjectDir(t, sysmonGoal, nil)
+	ts := newTestServer(t, cloopDir, []string{sysmonDir})
+
+	req, _ := http.NewRequest("DELETE", ts.URL+"/api/projects/1", strings.NewReader(`{"delete_root":true}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("DELETE: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d; body=%s", resp.StatusCode, readBody(resp))
+	}
+	var out map[string]interface{}
+	_ = json.NewDecoder(resp.Body).Decode(&out)
+	if rd, _ := out["root_deleted"].(bool); !rd {
+		t.Errorf("expected root_deleted=true, got false")
+	}
+
+	if _, err := os.Stat(sysmonDir); !os.IsNotExist(err) {
+		t.Errorf("expected project dir to be removed; stat err=%v", err)
+	}
+}
+
+// TestProjectDelete_RefusesPrimaryWorkDir guards against deleting the project
+// the UI server was launched from — would break the running server.
+func TestProjectDelete_RefusesPrimaryWorkDir(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	cloopDir := setupProjectDir(t, cloopGoal, nil)
+	ts := newTestServer(t, cloopDir, nil)
+
+	req, _ := http.NewRequest("DELETE", ts.URL+"/api/projects/0", strings.NewReader(`{"delete_root":false}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("DELETE: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected 400 refusal for primary WorkDir, got %d", resp.StatusCode)
+	}
+	if _, err := os.Stat(cloopDir); err != nil {
+		t.Errorf("primary project dir was disturbed: %v", err)
+	}
+}
+
+// TestProjectDelete_OutOfRange returns 400 for an invalid index.
+func TestProjectDelete_OutOfRange(t *testing.T) {
+	dir := setupProjectDir(t, cloopGoal, nil)
+	ts := newTestServer(t, dir, nil)
+
+	req, _ := http.NewRequest("DELETE", ts.URL+"/api/projects/999", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("DELETE: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected 400 for out-of-range idx, got %d", resp.StatusCode)
+	}
+}
+
+func readBody(resp *http.Response) string {
+	var b bytes.Buffer
+	_, _ = b.ReadFrom(resp.Body)
+	return b.String()
+}
+
 // ── Authentication ────────────────────────────────────────────────────────────
 
 func TestAuthTokenRequired(t *testing.T) {

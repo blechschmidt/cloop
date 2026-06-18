@@ -907,10 +907,11 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 
 	// Multi-project dashboard
 	mux.HandleFunc("/api/projects", s.handleProjects)
-	mux.HandleFunc("/api/projects/events", s.handleProjectsEvents)
+	mux.HandleFunc("GET /api/projects/events", s.handleProjectsEvents)
 	mux.HandleFunc("POST /api/projects/new", s.handleProjectNew)
 	mux.HandleFunc("POST /api/projects/{idx}/run", s.handleProjectRun)
 	mux.HandleFunc("POST /api/projects/{idx}/stop", s.handleProjectStop)
+	mux.HandleFunc("DELETE /api/projects/{idx}", s.handleProjectDelete)
 }
 
 // Start begins listening on the configured port and broadcasting state
@@ -5161,6 +5162,141 @@ func (s *Server) handleProjectNew(w http.ResponseWriter, r *http.Request) {
 	}
 
 	jsonOK(w, map[string]interface{}{"ok": true, "dir": abs, "project_idx": newIdx})
+}
+
+// handleProjectDelete removes a project from the multi-project registry. When
+// ?delete_root=true is supplied (or {"delete_root": true} in the JSON body),
+// the project's root directory is also removed from disk after the registry
+// entry is dropped — destructive, so the Web UI confirms before sending it.
+//
+// DELETE /api/projects/{idx}[?delete_root=true]
+//
+// Refusals:
+//   - the project at idx is the UI server's own WorkDir (would break the
+//     running server),
+//   - a cloop run process is currently executing in the project directory
+//     (the user must stop it first to avoid a half-deleted-mid-run state).
+func (s *Server) handleProjectDelete(w http.ResponseWriter, r *http.Request) {
+	idx, err := strconv.Atoi(r.PathValue("idx"))
+	if err != nil {
+		jsonErr(w, "invalid project index", http.StatusBadRequest)
+		return
+	}
+	entries := s.allProjectEntries()
+	if idx < 0 || idx >= len(entries) {
+		jsonErr(w, "project index out of range", http.StatusBadRequest)
+		return
+	}
+	entry := entries[idx]
+
+	// Parse delete_root from either query string or JSON body so the same
+	// endpoint serves both URL-style callers and the UI's fetch wrapper.
+	deleteRoot := r.URL.Query().Get("delete_root") == "true"
+	if ct := r.Header.Get("Content-Type"); strings.Contains(ct, "application/json") {
+		var req struct {
+			DeleteRoot bool `json:"delete_root"`
+		}
+		limitJSONBody(w, r, maxJSONBodyBytes)
+		if err := json.NewDecoder(r.Body).Decode(&req); err == nil {
+			deleteRoot = deleteRoot || req.DeleteRoot
+		}
+	}
+
+	// Safety: refuse to delete the UI server's own working directory.
+	if s.WorkDir != "" {
+		absWork, _ := filepath.Abs(s.WorkDir)
+		if entry.Path == absWork {
+			jsonErr(w, "cannot delete the project the UI server was launched from", http.StatusBadRequest)
+			return
+		}
+	}
+
+	// Safety: refuse to delete a project with an active cloop run.
+	if multiui.IsCloopRunningInDir(entry.Path) {
+		jsonErr(w, "project has an active cloop run — stop it first", http.StatusConflict)
+		return
+	}
+
+	// Remove from the persistent registry. This is a no-op for entries that
+	// only live in the in-process Projects slice or are derived from
+	// s.WorkDir, but we already refused the latter above.
+	if err := multiui.RemovePath(entry.Path); err != nil {
+		jsonErr(w, "failed to update registry: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Drop the in-memory --projects flag entry (if any) so the next
+	// allProjectEntries() call doesn't resurrect this project until the
+	// server restarts.
+	s.removeProjectsFlag(entry.Path)
+
+	rootDeleted := false
+	if deleteRoot {
+		// Defensive path validation: refuse to recursively delete obviously
+		// dangerous targets (filesystem root, $HOME, an empty/relative path)
+		// even though the registry should only contain absolute project dirs.
+		if !isSafeProjectRoot(entry.Path) {
+			jsonErr(w, "refusing to delete unsafe path: "+entry.Path, http.StatusBadRequest)
+			return
+		}
+		if err := os.RemoveAll(entry.Path); err != nil {
+			// Registry entry is already gone; surface the disk error to the
+			// caller so they see why the dir is still on disk.
+			jsonErr(w, "registry entry removed, but failed to delete dir: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		rootDeleted = true
+	}
+
+	// Notify all connected clients so the projects list refreshes.
+	s.refreshProjectStatuses()
+	s.broadcastProjectsUpdate()
+
+	jsonOK(w, map[string]interface{}{
+		"ok":           true,
+		"project":      entry.Name,
+		"path":         entry.Path,
+		"root_deleted": rootDeleted,
+	})
+}
+
+// removeProjectsFlag drops the given absolute path from the in-memory
+// s.Projects slice (the --projects/--scan CLI flag list). Called after a
+// delete so the path doesn't reappear on the next allProjectEntries() rebuild.
+// No-op when the path was not present.
+func (s *Server) removeProjectsFlag(absPath string) {
+	if len(s.Projects) == 0 {
+		return
+	}
+	filtered := s.Projects[:0]
+	for _, p := range s.Projects {
+		abs, err := filepath.Abs(p)
+		if err == nil && abs == absPath {
+			continue
+		}
+		filtered = append(filtered, p)
+	}
+	s.Projects = filtered
+}
+
+// isSafeProjectRoot returns false when path is an obviously unsafe target for
+// recursive deletion (empty, relative, the filesystem root, $HOME itself, or
+// the running user's CWD-equivalent). It is a defence-in-depth check on top
+// of the registry contract; the UI already requires explicit confirmation.
+func isSafeProjectRoot(path string) bool {
+	if path == "" || !filepath.IsAbs(path) {
+		return false
+	}
+	clean := filepath.Clean(path)
+	if clean == "/" || clean == "." {
+		return false
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		if cleanHome := filepath.Clean(home); cleanHome != "" && clean == cleanHome {
+			return false
+		}
+	}
+	return true
 }
 
 // ── Knowledge Base handlers ──────────────────────────────────────────────────
@@ -9449,6 +9585,35 @@ const dashboardHTML = `<!DOCTYPE html>
   </div>
 </div>
 
+<!-- ── Delete project confirmation modal ───────────────────────────────── -->
+<div id="delproj-overlay" onclick="if(event.target===this)closeDeleteProjectModal()" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,.7); z-index:90; align-items:center; justify-content:center;">
+  <div id="delproj-modal" style="background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); padding:24px; width:520px; max-width:92vw;">
+    <h2 style="font-size:15px; font-weight:600; margin-bottom:12px; color:var(--danger,#e55);">Delete project</h2>
+    <p style="font-size:13px; color:var(--muted); margin-bottom:14px;">
+      Remove <strong id="delproj-name">project</strong> from the cloop registry.
+      This stops it from appearing in the dashboard. The project's files are kept
+      on disk unless you check the box below.
+    </p>
+    <div style="font-size:12px; color:var(--muted); margin-bottom:12px;">
+      Path: <code id="delproj-path" style="background:var(--bg); padding:2px 6px; border-radius:4px; word-break:break-all;"></code>
+    </div>
+    <label style="display:flex; align-items:flex-start; gap:8px; padding:10px; background:var(--bg); border:1px solid var(--border); border-radius:var(--radius); cursor:pointer;">
+      <input type="checkbox" id="delproj-deleteRoot" style="margin-top:3px;">
+      <span style="font-size:13px;">
+        <strong style="color:var(--danger,#e55);">Also delete the project root directory</strong>
+        <span style="display:block; color:var(--muted); font-size:12px; margin-top:2px;">
+          Permanently removes every file under the path above (rm -rf). This cannot be undone.
+        </span>
+      </span>
+    </label>
+    <input type="hidden" id="delproj-idx">
+    <div class="modal-footer">
+      <button class="btn" onclick="closeDeleteProjectModal()">Cancel</button>
+      <button class="btn danger" onclick="submitDeleteProject()">Delete</button>
+    </div>
+  </div>
+</div>
+
 <!-- ── Command Palette ─────────────────────────────────────────────────── -->
 <div id="cmd-backdrop" role="dialog" aria-modal="true" aria-label="Command palette">
   <div id="cmd-palette">
@@ -11811,6 +11976,7 @@ function renderProjects(projects, stats) {
         : 'Currently running…';
     }
     const tipSafe = esc(_tip);
+    const pathSafe = JSON.stringify(p.path || '').replace(/"/g, '&quot;');
     return ` + "`" + `
       <div class="proj-card${selCls}" onclick="openProject(${idx},${nameSafe})" title="${tipSafe}">
         <div class="proj-health-dot ${health}"></div>
@@ -11828,6 +11994,7 @@ function renderProjects(projects, stats) {
             ? '<button class="btn danger" onclick="projectStop('+idx+')" title="Stop">&#9632; Stop</button>'
             : '<button class="btn success" onclick="projectRun('+idx+',false)" title="Run">&#9654; Run</button><button class="btn primary" onclick="projectRun('+idx+',true)" title="Run PM">&#9654; PM</button>'
           }
+          <button class="btn danger" onclick="projectDelete(${idx},${nameSafe},${pathSafe})" title="Remove project">&#10005; Delete</button>
         </div>
       </div>
     ` + "`" + `;
@@ -11857,6 +12024,51 @@ window.projectStop = function(idx) {
   api('/api/projects/' + idx + '/stop', {method:'POST'})
     .then(d => { toast(d.ok ? 'Stopped' : 'Nothing running', d.ok ? 'ok' : 'err'); })
     .catch(() => toast('Failed to stop', 'err'));
+};
+
+// projectDelete opens the confirmation modal for removing a project from the
+// registry. The user can optionally check "also delete the project root dir"
+// before confirming — the actual DELETE request is sent by submitDeleteProject.
+window.projectDelete = function(idx, name, path) {
+  const overlay = document.getElementById('delproj-overlay');
+  if (!overlay) return;
+  document.getElementById('delproj-name').textContent = name || ('project #' + idx);
+  document.getElementById('delproj-path').textContent = path || '';
+  document.getElementById('delproj-idx').value = String(idx);
+  document.getElementById('delproj-deleteRoot').checked = false;
+  overlay.style.display = 'flex';
+};
+
+window.closeDeleteProjectModal = function() {
+  const overlay = document.getElementById('delproj-overlay');
+  if (overlay) overlay.style.display = 'none';
+};
+
+window.submitDeleteProject = function() {
+  const idx = parseInt(document.getElementById('delproj-idx').value, 10);
+  if (isNaN(idx)) { closeDeleteProjectModal(); return; }
+  const deleteRoot = document.getElementById('delproj-deleteRoot').checked;
+  // If the user is currently viewing the project that's about to disappear,
+  // bounce them back to the projects landing page so they don't end up on a
+  // ghost overview after the WS 'projects' broadcast.
+  const wasViewingDeleted = (selectedProjectIdx === idx);
+  apiMethod('DELETE', '/api/projects/' + idx, {delete_root: deleteRoot}).then(d => {
+    closeDeleteProjectModal();
+    if (d && d.ok) {
+      toast(d.root_deleted ? 'Project and root dir deleted' : 'Project removed', 'ok');
+      if (wasViewingDeleted && typeof window.clearProjectSelection === 'function') {
+        window.clearProjectSelection();
+      }
+      // The server pushes a 'projects' WS event so the list refreshes on its
+      // own, but call loadProjects() to cover the SSE-disconnected case.
+      if (typeof loadProjects === 'function') loadProjects();
+    } else {
+      toast((d && d.error) || 'Failed to delete project', 'err');
+    }
+  }).catch(err => {
+    closeDeleteProjectModal();
+    toast('Failed to delete project: ' + (err && err.message ? err.message : 'error'), 'err');
+  });
 };
 
 // Opens a project in scoped-tabs mode: sets selectedProjectIdx and drills into Overview.
