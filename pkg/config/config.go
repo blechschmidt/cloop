@@ -80,11 +80,11 @@ const (
 	MaxRequestBodyBytesUpper   int64 = 1 << 30  // 1 GiB
 	MaxRequestBodyBytesDefault int64 = 10 << 20 // 10 MiB
 
-	// Orchestrator per-task wall-clock timeout (Task 20108). Bounds the
-	// duration any single task may spend in the provider call before its
-	// context is cancelled and the task is marked timed_out. Zero in YAML
-	// means "use OrchestratorTaskTimeoutMinutesDefault" (30 minutes); a
-	// non-zero value outside [Lower, Upper] is clamped to the default.
+	// Orchestrator per-task wall-clock timeout bounds. Zero in YAML means no
+	// task timeout (Task 20148); a positive value is an explicit opt-in that
+	// must fall within [Lower, Upper] (otherwise it is treated as 0 / no
+	// timeout). OrchestratorTaskTimeoutMinutesDefault is retained only for
+	// validation error messages and is no longer applied as a fallback.
 	//
 	// Lower bound is 1 minute: anything smaller would race the AI's first
 	// token on every call. Upper bound is one week (7*24*60), well above
@@ -250,35 +250,33 @@ func (b BackupConfig) EffectiveKeepCount() int {
 //
 // The orchestrator already supported a per-task budget via Task.MaxMinutes
 // (Task 99) and a per-project default via state.DefaultMaxMinutes. This
-// config layer adds a process-wide default so operators get a safe upper
-// bound on every cloop run without having to set the field on every project
-// or task. The lookup order is:
+// config layer adds an optional process-wide default. The lookup order is:
 //
 //	task.MaxMinutes > state.DefaultMaxMinutes > config.Orchestrator.TaskTimeoutMinutes
 //
-// The first non-zero value wins; if all are zero the orchestrator falls back
-// to OrchestratorTaskTimeoutMinutesDefault (30 minutes). This guarantees no
-// task can run unbounded if the provider hangs or the LLM produces an
-// infinite output stream — the deadline cancels the per-task context, which
-// propagates into the provider HTTP call (Task 20081 made provider Complete()
-// implementations honor ctx) and the task is marked timed_out.
+// The first positive value wins; if all are zero there is NO task timeout
+// (Task 20148): by default tasks run until they finish, are killed manually,
+// or the parent run is cancelled. A positive value is an explicit opt-in that
+// caps how long a single task may run; the deadline cancels the per-task
+// context, which propagates into the provider HTTP call (Task 20081 made
+// provider Complete() implementations honor ctx) and the task is marked
+// timed_out.
 type OrchestratorConfig struct {
-	// TaskTimeoutMinutes is the default wall-clock budget for a single task
-	// when neither Task.MaxMinutes nor state.DefaultMaxMinutes is set.
-	// Zero substitutes OrchestratorTaskTimeoutMinutesDefault (30). Validated
-	// to OrchestratorTaskTimeoutMinutesLower..OrchestratorTaskTimeoutMinutesUpper.
+	// TaskTimeoutMinutes is an optional process-wide wall-clock budget for a
+	// single task, used when neither Task.MaxMinutes nor state.DefaultMaxMinutes
+	// is set. Zero means no task timeout (Task 20148). A positive value is
+	// validated to OrchestratorTaskTimeoutMinutesLower..OrchestratorTaskTimeoutMinutesUpper.
 	TaskTimeoutMinutes int `yaml:"task_timeout_minutes,omitempty"`
 }
 
-// EffectiveTaskTimeoutMinutes returns the configured task timeout, substituting
-// OrchestratorTaskTimeoutMinutesDefault when the field is zero. Out-of-band
-// values are also coerced to the default (validateAndClamp catches them on
-// load, but this call is the last line of defence for code paths that
-// construct OrchestratorConfig{} directly without going through Load()).
+// EffectiveTaskTimeoutMinutes returns the configured task timeout. Zero (the
+// default) means no timeout (Task 20148). Out-of-band positive values are
+// coerced to 0 (no timeout) rather than honoured, matching the orchestrator's
+// effectiveTaskBudgetMinutes resolution.
 func (o OrchestratorConfig) EffectiveTaskTimeoutMinutes() int {
 	if o.TaskTimeoutMinutes < OrchestratorTaskTimeoutMinutesLower ||
 		o.TaskTimeoutMinutes > OrchestratorTaskTimeoutMinutesUpper {
-		return OrchestratorTaskTimeoutMinutesDefault
+		return 0
 	}
 	return o.TaskTimeoutMinutes
 }

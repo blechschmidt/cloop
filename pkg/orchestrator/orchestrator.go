@@ -398,10 +398,10 @@ type Config struct {
 
 	// TaskTimeoutMinutes is the process-wide default per-task wall-clock
 	// budget applied when neither Task.MaxMinutes nor state.DefaultMaxMinutes
-	// is set (Task 20108). Zero means "use OrchestratorTaskTimeoutMinutesDefault"
-	// (30 minutes), so every cloop run has a hard upper bound on how long a
-	// single hung provider call can pin a task. Sourced from
-	// config.Orchestrator.TaskTimeoutMinutes by cmd/run.go.
+	// is set. Zero means "no task timeout" (Task 20148): by default tasks run
+	// without any wall-clock deadline. A positive value is an explicit opt-in,
+	// validated to [OrchestratorTaskTimeoutMinutesLower, ...Upper]. Sourced
+	// from config.Orchestrator.TaskTimeoutMinutes by cmd/run.go.
 	TaskTimeoutMinutes int
 }
 
@@ -617,13 +617,14 @@ func withTaskTimeoutUnit(unit time.Duration) func() {
 //
 //  1. task.MaxMinutes (per-task override; Task 99)
 //  2. state.DefaultMaxMinutes (per-project default)
-//  3. config.Orchestrator.TaskTimeoutMinutes (process-wide default; Task 20108)
-//  4. config.OrchestratorTaskTimeoutMinutesDefault (30 minutes hard fallback)
+//  3. config.Orchestrator.TaskTimeoutMinutes (process-wide opt-in)
 //
-// The first non-zero value wins. Zero or negative inputs at every layer
-// resolve to the hard default so a stuck provider can never pin a task
-// indefinitely. This helper is exported (lowercase but accessible from the
-// package) so handleTaskTimeout and the on-screen timeout banner can report
+// The first positive value wins. When none is set the function returns 0,
+// meaning "no task timeout" (Task 20148): by default tasks run without any
+// wall-clock deadline, so a long-running task is never killed simply for
+// taking a while. A timeout only applies when an operator explicitly opts in
+// via one of the three layers above. This helper is accessible from the
+// package so handleTaskTimeout and the on-screen timeout banner can report
 // the same number that the deadline actually used.
 func (o *Orchestrator) effectiveTaskBudgetMinutes(task *pm.Task) int {
 	if task != nil && task.MaxMinutes > 0 {
@@ -635,21 +636,24 @@ func (o *Orchestrator) effectiveTaskBudgetMinutes(task *pm.Task) int {
 	if o.config.TaskTimeoutMinutes > 0 {
 		// Defensively clamp to the same band the loader enforces so a hand-
 		// constructed Config{TaskTimeoutMinutes: -1} (in tests, callers that
-		// bypass cmd/run.go) doesn't degrade to a no-timeout context.
+		// bypass cmd/run.go) doesn't arm a bogus deadline.
 		if o.config.TaskTimeoutMinutes >= config.OrchestratorTaskTimeoutMinutesLower &&
 			o.config.TaskTimeoutMinutes <= config.OrchestratorTaskTimeoutMinutesUpper {
 			return o.config.TaskTimeoutMinutes
 		}
 	}
-	return config.OrchestratorTaskTimeoutMinutesDefault
+	// No explicit budget configured anywhere → no task timeout.
+	return 0
 }
 
 // taskContextWithTimeout returns a context (and cancel) scoped to the given task's
-// time budget. The budget is resolved by effectiveTaskBudgetMinutes, which always
-// returns a positive value (Task 20108): no execution path produces an unbounded
-// context, so a hung provider HTTP call is guaranteed to be cancelled. When a
-// watchdog is active the returned cancel is registered under task.ID and
-// de-registered when invoked, so the same cancel cannot accidentally fire twice.
+// time budget. The budget is resolved by effectiveTaskBudgetMinutes. When that
+// returns 0 (the default after Task 20148: tasks have no timeout), the returned
+// context carries no wall-clock deadline — it is only cancelled by the parent
+// context, a manual kill, or the watchdog. A positive budget arms a deadline as
+// before (the explicit opt-in path). When a watchdog is active the returned
+// cancel is registered under task.ID and de-registered when invoked, so the same
+// cancel cannot accidentally fire twice.
 //
 // A fresh request ID is bound to the returned context unless the parent ctx
 // already carries one (in which case the inherited ID is preserved so an
@@ -676,14 +680,27 @@ func (o *Orchestrator) taskContextWithTimeout(ctx context.Context, task *pm.Task
 		taskCtx    context.Context
 		taskCancel context.CancelFunc
 	)
-	// When a task ID is available we route through liveDeadlines so the
-	// background poller can resize the deadline mid-flight (Task 20143).
-	// Tasks without a usable ID (e.g. evolve discovery, plan compaction)
-	// fall back to a vanilla context.WithTimeout — no UI ever points at
-	// them, so a live deadline registry entry would just be dead weight.
-	if task != nil && task.ID > 0 && o.liveDeadlines != nil {
+	switch {
+	case maxMin <= 0:
+		// No timeout configured (the default; Task 20148). Inherit the parent
+		// context with a plain cancel — the task runs until it finishes, the
+		// parent is cancelled, or it is killed manually/by the watchdog. We
+		// still route ID-bearing tasks through liveDeadlines so an operator who
+		// later opts a running task into a budget via the UI is picked up by the
+		// poller (which arms a timer on the first positive budget it sees).
+		if task != nil && task.ID > 0 && o.liveDeadlines != nil {
+			taskCtx, taskCancel = o.liveDeadlines.startTaskDeadline(ctx, task.ID, 0, taskTimeoutUnit)
+		} else {
+			taskCtx, taskCancel = context.WithCancel(ctx)
+		}
+	case task != nil && task.ID > 0 && o.liveDeadlines != nil:
+		// When a task ID is available we route through liveDeadlines so the
+		// background poller can resize the deadline mid-flight (Task 20143).
 		taskCtx, taskCancel = o.liveDeadlines.startTaskDeadline(ctx, task.ID, maxMin, taskTimeoutUnit)
-	} else {
+	default:
+		// Tasks without a usable ID (e.g. evolve discovery, plan compaction)
+		// fall back to a vanilla context.WithTimeout — no UI ever points at
+		// them, so a live deadline registry entry would just be dead weight.
 		taskCtx, taskCancel = context.WithTimeout(ctx, time.Duration(maxMin)*taskTimeoutUnit)
 	}
 	if o.watchdog != nil && task != nil {

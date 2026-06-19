@@ -73,8 +73,12 @@ func newLiveDeadlineRegistry() *liveDeadlineRegistry {
 // fires first. The returned cancel also removes the entry from the registry
 // and stops the timer, so it is always safe to defer.
 //
-// budgetMin must be > 0; callers (taskContextWithTimeout) resolve the budget
-// via effectiveTaskBudgetMinutes which guarantees that.
+// budgetMin may be 0, meaning "no timeout" (Task 20148): the entry is still
+// registered (so the live poller can later arm a timer if an operator opts the
+// running task into a budget via the UI), but no initial timer is armed, so the
+// context is never cancelled by a deadline — only by the parent, a manual
+// release, or a poller-driven adjustment. A positive budgetMin arms a timer as
+// before.
 func (r *liveDeadlineRegistry) startTaskDeadline(parent context.Context, taskID int, budgetMin int, unit time.Duration) (context.Context, context.CancelFunc) {
 	ctx, cancel := context.WithCancelCause(parent)
 	now := time.Now()
@@ -84,12 +88,15 @@ func (r *liveDeadlineRegistry) startTaskDeadline(parent context.Context, taskID 
 		currentMin: budgetMin,
 		cancel:     cancel,
 	}
-	// Arm the initial timer. If the parent context is already cancelled the
-	// goroutine spawned by AfterFunc still runs but no-ops: cancel() is
-	// idempotent and the registry lookup will simply find no entry.
-	entry.timer = time.AfterFunc(time.Duration(budgetMin)*unit, func() {
-		r.fire(taskID)
-	})
+	// Arm the initial timer only when a positive budget is set. If the parent
+	// context is already cancelled the goroutine spawned by AfterFunc still
+	// runs but no-ops: cancel() is idempotent and the registry lookup will
+	// simply find no entry.
+	if budgetMin > 0 {
+		entry.timer = time.AfterFunc(time.Duration(budgetMin)*unit, func() {
+			r.fire(taskID)
+		})
+	}
 
 	r.mu.Lock()
 	// If a stale entry is still registered for this taskID (e.g. a previous
@@ -201,6 +208,15 @@ func (r *liveDeadlineRegistry) adjust(taskID int, newMin int, unit time.Duration
 		// don't (AfterFunc has no channel). The behaviour we want is "the
 		// callback fires after `remaining` from now"; Reset gives us that.
 		timer.Reset(remaining)
+	} else {
+		// The task started with no timeout (no timer armed; Task 20148) and an
+		// operator has now opted it into a budget via the UI. Arm a fresh
+		// timer so the newly-set deadline actually fires.
+		r.mu.Lock()
+		if e, ok := r.entries[taskID]; ok && e != nil && !e.fired {
+			e.timer = time.AfterFunc(remaining, func() { r.fire(taskID) })
+		}
+		r.mu.Unlock()
 	}
 	return true
 }
@@ -285,7 +301,8 @@ func (o *Orchestrator) refreshLiveDeadlines() {
 // resolveEffectiveBudget mirrors effectiveTaskBudgetMinutes but takes the
 // inputs as plain values so it can be called against freshly-loaded disk
 // state without mutating o.state. Keeps the priority order identical:
-// task > project > process-wide config > hard default.
+// task > project > process-wide config. Returns 0 when no explicit budget is
+// set anywhere (the default; Task 20148: tasks have no timeout).
 func resolveEffectiveBudget(taskMaxMin, projectDefault, processDefault int) int {
 	if taskMaxMin > 0 {
 		return taskMaxMin
@@ -297,5 +314,5 @@ func resolveEffectiveBudget(taskMaxMin, projectDefault, processDefault int) int 
 		processDefault <= config.OrchestratorTaskTimeoutMinutesUpper {
 		return processDefault
 	}
-	return config.OrchestratorTaskTimeoutMinutesDefault
+	return 0
 }

@@ -10127,23 +10127,23 @@ function renderActiveOptions(s) {
         'border-radius:4px;padding:2px 4px;font-family:inherit;font-size:inherit;text-align:right;" ' +
         'onchange="setStepTimeout(this.value)" />' +
     '</div>';
-  // Per-task default wall-clock budget (Task 20143). 0 = "use the
-  // process-wide default" (30 minutes). Changes here take effect on all
-  // currently-running tasks within a few seconds via the orchestrator's
+  // Per-task default wall-clock budget (Task 20143). 0 = "no timeout"
+  // (Task 20148: tasks have no timeout by default). Changes here take effect
+  // on all currently-running tasks within a few seconds via the orchestrator's
   // live-deadline poller, not just future tasks.
   const ttRaw = parseInt(s.default_max_minutes, 10);
   const ttVal = (Number.isFinite(ttRaw) && ttRaw > 0) ? ttRaw : 0;
-  const ttDisplay = ttVal === 0 ? 'auto' : String(ttVal);
+  const ttDisplay = ttVal === 0 ? 'off' : (String(ttVal) + 'm');
   const taskTimeoutControl =
     '<div class="option-badge option-config" ' +
-      'title="Default wall-clock budget per task (minutes). 0 means use the process default (30m). Applies immediately to running tasks.">' +
+      'title="Default wall-clock budget per task (minutes). 0 means no timeout — tasks run until they finish. Applies immediately to running tasks.">' +
       '<span class="opt-icon">⏲</span>' +
       '<span>Task Timeout</span>' +
       '<input type="number" id="taskTimeoutInput" min="0" max="10080" step="1" value="' + ttVal + '" ' +
         'style="width:64px;background:transparent;color:var(--text);border:1px solid var(--border);' +
         'border-radius:4px;padding:2px 4px;font-family:inherit;font-size:inherit;text-align:right;" ' +
         'onchange="setTaskTimeout(this.value)" />' +
-      '<span class="opt-flag" title="0 = use process default (30m)">' + ttDisplay + 'm</span>' +
+      '<span class="opt-flag" title="0 = no timeout">' + ttDisplay + '</span>' +
     '</div>';
   const enabledCount = opts.filter(o => o[0]).length;
   if (enabledCount === 0) {
@@ -10191,13 +10191,13 @@ window.setMaxParallel = function(raw) {
 };
 
 // setTaskTimeout updates the project-level default wall-clock budget per
-// task (Task 20143). Submitting 0 reverts to the process-wide default.
-// Affects currently-running tasks within ~3 seconds via the orchestrator's
-// live-deadline poller.
+// task (Task 20143). Submitting 0 means no timeout (Task 20148) — tasks run
+// until they finish. Affects currently-running tasks within ~3 seconds via
+// the orchestrator's live-deadline poller.
 window.setTaskTimeout = function(raw) {
   const n = parseInt(raw, 10);
   if (!Number.isFinite(n) || n < 0 || n > 10080) {
-    toast('Task Timeout must be 0 (default) or 1..10080 minutes', 'error');
+    toast('Task Timeout must be 0 (off) or 1..10080 minutes', 'error');
     return;
   }
   const prev = appState ? appState.default_max_minutes : 0;
@@ -10207,7 +10207,7 @@ window.setTaskTimeout = function(raw) {
   }
   apiMethod('POST', pUrl('/api/options/task-timeout'), {value: n}).then(d => {
     if (d && d.ok) {
-      toast('Task Timeout set to ' + (n === 0 ? 'process default' : n + 'm'), 'success');
+      toast('Task Timeout set to ' + (n === 0 ? 'off (no timeout)' : n + 'm'), 'success');
     } else {
       if (appState) {
         appState.default_max_minutes = prev;

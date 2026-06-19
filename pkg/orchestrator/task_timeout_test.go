@@ -272,21 +272,99 @@ func TestEffectiveTaskBudgetMinutes(t *testing.T) {
 	if got != 7 {
 		t.Errorf("config layer: expected 7, got %d", got)
 	}
-	// All zero → hard default.
+	// All zero → no timeout (Task 20148: tasks have no default timeout).
 	o.config.TaskTimeoutMinutes = 0
 	got = o.effectiveTaskBudgetMinutes(&pm.Task{MaxMinutes: 0})
-	if got != 30 {
-		t.Errorf("hard default: expected 30, got %d", got)
+	if got != 0 {
+		t.Errorf("no budget set: expected 0 (no timeout), got %d", got)
 	}
-	// Out-of-band config value (negative or > 1 week) defensively coerces
-	// to the hard default rather than producing a no-timeout context.
+	// Out-of-band config value (negative or > 1 week) is ignored and, with no
+	// other layer set, also resolves to no timeout rather than arming a bogus
+	// deadline.
 	o.config.TaskTimeoutMinutes = -5
-	if got := o.effectiveTaskBudgetMinutes(&pm.Task{MaxMinutes: 0}); got != 30 {
-		t.Errorf("out-of-band negative: expected 30, got %d", got)
+	if got := o.effectiveTaskBudgetMinutes(&pm.Task{MaxMinutes: 0}); got != 0 {
+		t.Errorf("out-of-band negative: expected 0 (no timeout), got %d", got)
 	}
 	o.config.TaskTimeoutMinutes = 99_999_999
-	if got := o.effectiveTaskBudgetMinutes(&pm.Task{MaxMinutes: 0}); got != 30 {
-		t.Errorf("out-of-band huge: expected 30, got %d", got)
+	if got := o.effectiveTaskBudgetMinutes(&pm.Task{MaxMinutes: 0}); got != 0 {
+		t.Errorf("out-of-band huge: expected 0 (no timeout), got %d", got)
+	}
+}
+
+// TestTaskContextWithTimeout_NoBudgetHasNoDeadline is the regression for
+// Task 20148: with no explicit per-task / per-project / process budget set,
+// taskContextWithTimeout must return a context with NO wall-clock deadline so
+// a long-running task is never killed for taking a while. An explicit
+// per-task budget must still arm a deadline (the opt-in path).
+//
+// Uses task.ID == 0 so the context routes through the plain
+// context.WithCancel / context.WithTimeout branches (not liveDeadlines, which
+// uses an external timer + WithCancelCause and so never reports a Deadline()).
+func TestTaskContextWithTimeout_NoBudgetHasNoDeadline(t *testing.T) {
+	dir := tempDir(t)
+	s := initState(t, dir, "goal", 0)
+	s.Plan = &pm.Plan{Goal: "goal"}
+	if err := s.Save(); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	// No TaskTimeoutMinutes, no DefaultMaxMinutes → no timeout.
+	o := newOrchestrator(t, dir, Config{WorkDir: dir}, &mockProvider{name: "m"})
+
+	ctx := context.Background()
+	taskCtx, cancel := o.taskContextWithTimeout(ctx, &pm.Task{ID: 0, Title: "t"})
+	defer cancel()
+	if dl, ok := taskCtx.Deadline(); ok {
+		t.Fatalf("expected no deadline with no budget set, got deadline %s", dl)
+	}
+
+	// Explicit per-task budget still arms a deadline.
+	taskCtx2, cancel2 := o.taskContextWithTimeout(ctx, &pm.Task{ID: 0, Title: "t2", MaxMinutes: 30})
+	defer cancel2()
+	if _, ok := taskCtx2.Deadline(); !ok {
+		t.Fatalf("expected a deadline when MaxMinutes is set, got none")
+	}
+}
+
+// TestStartTaskDeadline_ZeroBudgetArmsNoTimer verifies that the live-deadline
+// registry registers a zero-budget entry without arming a timer (Task 20148),
+// so the returned context is never cancelled by a deadline — only by release
+// or a later poller-driven adjust that opts the task into a budget.
+func TestStartTaskDeadline_ZeroBudgetArmsNoTimer(t *testing.T) {
+	r := newLiveDeadlineRegistry()
+	ctx, cancel := r.startTaskDeadline(context.Background(), 7, 0, time.Millisecond)
+	defer cancel()
+
+	r.mu.Lock()
+	entry := r.entries[7]
+	r.mu.Unlock()
+	if entry == nil {
+		t.Fatalf("expected entry to be registered even with zero budget")
+	}
+	if entry.timer != nil {
+		t.Fatalf("expected no timer armed for a zero budget")
+	}
+
+	// Context must not be cancelled by a deadline. Give the (absent) timer
+	// ample time to (not) fire.
+	select {
+	case <-ctx.Done():
+		t.Fatalf("context cancelled despite no timeout: %v", context.Cause(ctx))
+	case <-time.After(20 * time.Millisecond):
+		// Expected: still running.
+	}
+
+	// A later adjust() to a positive budget must arm a timer and eventually
+	// cancel the context with DeadlineExceeded.
+	if !r.adjust(7, 1, time.Millisecond) {
+		t.Fatalf("expected adjust to apply a positive budget")
+	}
+	select {
+	case <-ctx.Done():
+		if !errors.Is(context.Cause(ctx), context.DeadlineExceeded) {
+			t.Fatalf("expected DeadlineExceeded cause, got %v", context.Cause(ctx))
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("expected context to fire after adjust armed a budget")
 	}
 }
 
