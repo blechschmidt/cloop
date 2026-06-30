@@ -8,8 +8,10 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/provider"
@@ -36,12 +38,12 @@ type ExtraUsage struct {
 
 // ClaudeUsageResponse is the raw API response from /api/oauth/usage.
 type ClaudeUsageResponse struct {
-	FiveHour      *UsageWindow `json:"five_hour"`
-	SevenDay      *UsageWindow `json:"seven_day"`
-	SevenDayOpus  *UsageWindow `json:"seven_day_opus"`
+	FiveHour       *UsageWindow `json:"five_hour"`
+	SevenDay       *UsageWindow `json:"seven_day"`
+	SevenDayOpus   *UsageWindow `json:"seven_day_opus"`
 	SevenDaySonnet *UsageWindow `json:"seven_day_sonnet"`
-	ExtraUsage    *ExtraUsage  `json:"extra_usage"`
-	Error         *struct {
+	ExtraUsage     *ExtraUsage  `json:"extra_usage"`
+	Error          *struct {
 		Message string `json:"message"`
 	} `json:"error,omitempty"`
 }
@@ -70,6 +72,18 @@ var (
 	// burst of callers (orchestrator + UI poller + limit check arriving in
 	// the same tick) coalesces into a single HTTP round-trip rather than N.
 	usageFetchMu sync.Mutex
+
+	// oauthRefreshMu serializes OAuth token refreshes *within this process*.
+	// Claude.ai refresh tokens are single-use and rotate on every exchange:
+	// the first refresh consumes the refresh token and the server hands back a
+	// new one. If two goroutines refresh concurrently they each POST the same
+	// refresh token; the first wins, the second gets HTTP 400/401 invalid_grant
+	// and (worse) can clobber ~/.claude/.credentials.json with a failed/partial
+	// write — after which even the `claude` CLI subprocess reads broken
+	// credentials and every task step returns "401 Invalid authentication
+	// credentials". This mutex + the cross-process flock in refreshOAuthToken
+	// guarantee exactly one refresh at a time, process-wide and machine-wide.
+	oauthRefreshMu sync.Mutex
 )
 
 const usageEndpoint = "https://api.anthropic.com/api/oauth/usage"
@@ -136,22 +150,63 @@ func FetchOrCachedUsage(token string, ttl time.Duration) (*ClaudeUsage, error) {
 // limits (5-hour window, weekly window, per-model breakdowns).
 // The token should be a Claude Code OAuth access token (sk-ant-oat01-*).
 func FetchClaudeUsage(token string) (*ClaudeUsage, error) {
+	explicit := token != ""
 	if token == "" {
-		// Try to get from environment
-		token = os.Getenv("CLAUDE_CODE_OAUTH_TOKEN")
+		// Prefer the credentials file (which validates expiry and refreshes
+		// under lock) over the CLAUDE_CODE_OAUTH_TOKEN env var. The env var is
+		// only a cache populated by a previous refresh and is never re-checked
+		// for expiry, so trusting it first meant a stale token kept producing
+		// 401s with no refresh. readCredentialsToken returns the env token
+		// implicitly only when it is still the freshest source.
+		token = readCredentialsToken()
 	}
 	if token == "" {
-		// Try to read from credentials file
-		token = readCredentialsToken()
+		token = os.Getenv("CLAUDE_CODE_OAUTH_TOKEN")
 	}
 	if token == "" {
 		return nil, fmt.Errorf("no OAuth token available")
 	}
 
+	usage, status, err := fetchUsageWithToken(token)
+	// On 401 with a non-explicit token, the token went stale between our
+	// freshness check and the request (or the env var was used). Force a
+	// refresh once and retry, instead of surfacing a spurious auth failure.
+	if status == http.StatusUnauthorized && !explicit {
+		if fresh := forceRefreshToken(); fresh != "" && fresh != token {
+			usage, _, err = fetchUsageWithToken(fresh)
+		}
+	}
+	return usage, err
+}
+
+// forceRefreshToken refreshes the OAuth token regardless of the cached
+// freshness check, serialized through the same locks as the normal path. Used
+// to recover from a 401 caused by a token that expired mid-flight.
+func forceRefreshToken() string {
+	oauthRefreshMu.Lock()
+	defer oauthRefreshMu.Unlock()
+	creds, ok := loadCredentials()
+	if !ok || creds.ClaudeAiOauth.RefreshToken == "" {
+		return ""
+	}
+	// If another goroutine already refreshed while we waited, use that.
+	if tokenIsFresh(creds) {
+		return creds.ClaudeAiOauth.AccessToken
+	}
+	if tok, err := refreshOAuthToken(creds.ClaudeAiOauth.RefreshToken); err == nil {
+		return tok
+	}
+	return ""
+}
+
+// fetchUsageWithToken performs a single usage-API request with the given
+// bearer token. It returns the parsed usage (on success), the HTTP status
+// code (0 if the request never completed), and any error.
+func fetchUsageWithToken(token string) (*ClaudeUsage, int, error) {
 	client := &http.Client{Timeout: 10 * time.Second}
 	req, err := http.NewRequest("GET", usageEndpoint, nil)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("anthropic-beta", "oauth-2025-04-20")
@@ -159,22 +214,28 @@ func FetchClaudeUsage(token string) (*ClaudeUsage, error) {
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("usage API request failed: %w", err)
+		return nil, 0, fmt.Errorf("usage API request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	body, err := provider.ReadResponseBody(resp.Body, maxUsageResponseBytes)
 	if err != nil {
-		return nil, fmt.Errorf("reading usage response: %w", err)
+		return nil, resp.StatusCode, fmt.Errorf("reading usage response: %w", err)
 	}
 
 	var raw ClaudeUsageResponse
 	if err := json.Unmarshal(body, &raw); err != nil {
-		return nil, fmt.Errorf("parsing usage response: %w", err)
+		return nil, resp.StatusCode, fmt.Errorf("parsing usage response: %w", err)
 	}
 
 	if raw.Error != nil {
-		return nil, fmt.Errorf("usage API error: %s", raw.Error.Message)
+		return nil, resp.StatusCode, fmt.Errorf("usage API error: %s", raw.Error.Message)
+	}
+
+	// A non-2xx status with no structured error (e.g. a bare 401 from a
+	// proxy) must still be reported so the caller can trigger a refresh.
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, resp.StatusCode, fmt.Errorf("usage API returned status %d", resp.StatusCode)
 	}
 
 	usage := &ClaudeUsage{
@@ -199,7 +260,7 @@ func FetchClaudeUsage(token string) (*ClaudeUsage, error) {
 	lastUsage = usage
 	usageMu.Unlock()
 
-	return usage, nil
+	return usage, resp.StatusCode, nil
 }
 
 func parseWindow(w *UsageWindow) *UsageDetail {
@@ -219,7 +280,11 @@ func parseWindow(w *UsageWindow) *UsageDetail {
 }
 
 const claudeOAuthClientID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
-const claudeOAuthTokenURL = "https://platform.claude.com/v1/oauth/token"
+
+// claudeOAuthTokenURL is the Claude Code OAuth token endpoint (same endpoint
+// the claude CLI itself uses). A var, not a const, so tests can point it at a
+// mock server.
+var claudeOAuthTokenURL = "https://platform.claude.com/v1/oauth/token"
 
 type claudeCredentials struct {
 	ClaudeAiOauth struct {
@@ -235,35 +300,120 @@ func credentialsPath() string {
 	return home + "/.claude/.credentials.json"
 }
 
-// readCredentialsToken reads the OAuth token from ~/.claude/.credentials.json,
-// auto-refreshing it if expired.
-func readCredentialsToken() string {
+// tokenExpiryBufferMs is how far ahead of the real expiry we treat a token as
+// stale. The CLI uses a similar margin; 60s is enough to cover clock skew plus
+// the round-trip of an in-flight request that started just before expiry.
+const tokenExpiryBufferMs int64 = 60000
+
+// loadCredentials reads and parses ~/.claude/.credentials.json. Returns the
+// parsed struct and whether parsing succeeded.
+func loadCredentials() (claudeCredentials, bool) {
 	data, err := os.ReadFile(credentialsPath())
 	if err != nil {
-		return ""
+		return claudeCredentials{}, false
 	}
 	var creds claudeCredentials
 	if err := json.Unmarshal(data, &creds); err != nil {
+		return claudeCredentials{}, false
+	}
+	return creds, true
+}
+
+// tokenIsFresh reports whether the access token is present and not within the
+// expiry buffer of its deadline.
+func tokenIsFresh(c claudeCredentials) bool {
+	if c.ClaudeAiOauth.AccessToken == "" {
+		return false
+	}
+	if c.ClaudeAiOauth.ExpiresAt <= 0 {
+		// No expiry recorded: trust the access token as-is rather than
+		// forcing a refresh loop.
+		return true
+	}
+	return time.Now().UnixMilli() < c.ClaudeAiOauth.ExpiresAt-tokenExpiryBufferMs
+}
+
+// readCredentialsToken reads the OAuth token from ~/.claude/.credentials.json,
+// auto-refreshing it if expired.
+//
+// Refresh is serialized through oauthRefreshMu (process-wide) plus a
+// cross-process flock inside refreshOAuthToken (machine-wide). After taking the
+// lock we re-read the credentials file and re-check freshness: if another
+// goroutine/process already refreshed while we were blocked, we return the
+// freshly written token instead of POSTing the now-consumed refresh token a
+// second time (which is what produced the recurring 401 burst). This is the
+// classic single-flight pattern for rotating refresh tokens.
+func readCredentialsToken() string {
+	creds, ok := loadCredentials()
+	if !ok {
 		return ""
 	}
 
-	// Check if token is expired (with 60s buffer)
-	nowMs := time.Now().UnixMilli()
-	if creds.ClaudeAiOauth.ExpiresAt > 0 && nowMs >= creds.ClaudeAiOauth.ExpiresAt-60000 {
-		// Try to refresh
-		if creds.ClaudeAiOauth.RefreshToken != "" {
-			if newToken, err := refreshOAuthToken(creds.ClaudeAiOauth.RefreshToken); err == nil {
-				return newToken
-			}
-		}
-		return "" // expired and can't refresh
+	// Fast path: token still fresh, no lock needed.
+	if tokenIsFresh(creds) {
+		return creds.ClaudeAiOauth.AccessToken
 	}
 
-	return creds.ClaudeAiOauth.AccessToken
+	// Slow path: needs refresh. Serialize so only one refresh happens.
+	oauthRefreshMu.Lock()
+	defer oauthRefreshMu.Unlock()
+
+	// Double-check after acquiring the lock: a concurrent caller may have
+	// refreshed the file while we waited.
+	if creds2, ok := loadCredentials(); ok && tokenIsFresh(creds2) {
+		return creds2.ClaudeAiOauth.AccessToken
+	} else if ok {
+		creds = creds2 // use the most recent refresh token on disk
+	}
+
+	if creds.ClaudeAiOauth.RefreshToken == "" {
+		return "" // expired and can't refresh
+	}
+	if newToken, err := refreshOAuthToken(creds.ClaudeAiOauth.RefreshToken); err == nil {
+		return newToken
+	}
+	return "" // expired and refresh failed
+}
+
+// credentialsLockPath is the advisory lock file guarding refresh+write of the
+// credentials file across processes (cloop instances and, defensively, the
+// claude CLI run by this host). We lock a sidecar file rather than the
+// credentials file itself so an flock failure can never leave the real
+// credentials truncated.
+func credentialsLockPath() string {
+	return credentialsPath() + ".lock"
+}
+
+// withCredentialsFileLock runs fn while holding an exclusive cross-process
+// flock on the credentials lock file. If the lock can't be acquired it still
+// runs fn (best-effort) rather than failing the refresh outright — the
+// in-process mutex already prevents the common self-race; the flock is defense
+// against multiple cloop processes / the CLI.
+func withCredentialsFileLock(fn func()) {
+	lockPath := credentialsLockPath()
+	if err := os.MkdirAll(filepath.Dir(lockPath), 0700); err != nil {
+		fn()
+		return
+	}
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		fn()
+		return
+	}
+	defer f.Close()
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		fn()
+		return
+	}
+	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	fn()
 }
 
 // refreshOAuthToken uses the refresh token to get a new access token and
-// updates the credentials file.
+// updates the credentials file. Callers MUST hold oauthRefreshMu. The whole
+// HTTP-exchange + file-write happens under a cross-process flock so a
+// concurrent cloop process (or the claude CLI) can't interleave its own
+// refresh and double-consume the rotating refresh token.
 func refreshOAuthToken(refreshToken string) (string, error) {
 	client := &http.Client{Timeout: 10 * time.Second}
 
@@ -274,50 +424,90 @@ func refreshOAuthToken(refreshToken string) (string, error) {
 		"https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback",
 	)
 
-	req, err := http.NewRequest("POST", claudeOAuthTokenURL, strings.NewReader(formData))
-	if err != nil {
-		return "", err
+	var (
+		accessToken string
+		refreshErr  error
+	)
+	withCredentialsFileLock(func() {
+		// Re-check under the cross-process lock: another process may have
+		// just refreshed. If so, adopt its fresh token and skip the exchange
+		// so we never POST an already-consumed refresh token.
+		if creds, ok := loadCredentials(); ok && tokenIsFresh(creds) {
+			accessToken = creds.ClaudeAiOauth.AccessToken
+			os.Setenv("CLAUDE_CODE_OAUTH_TOKEN", accessToken)
+			return
+		} else if ok && creds.ClaudeAiOauth.RefreshToken != "" {
+			// Use the newest refresh token on disk, not the (possibly stale)
+			// one captured by the caller before it blocked on the lock.
+			formData = fmt.Sprintf(
+				"grant_type=refresh_token&refresh_token=%s&client_id=%s&redirect_uri=%s",
+				creds.ClaudeAiOauth.RefreshToken,
+				claudeOAuthClientID,
+				"https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback",
+			)
+		}
+
+		req, err := http.NewRequest("POST", claudeOAuthTokenURL, strings.NewReader(formData))
+		if err != nil {
+			refreshErr = err
+			return
+		}
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+		resp, err := client.Do(req)
+		if err != nil {
+			refreshErr = fmt.Errorf("refresh request failed: %w", err)
+			return
+		}
+		defer resp.Body.Close()
+
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			refreshErr = err
+			return
+		}
+
+		if resp.StatusCode != 200 {
+			refreshErr = fmt.Errorf("refresh failed with status %d: %s", resp.StatusCode, string(body))
+			return
+		}
+
+		var tokenResp struct {
+			AccessToken  string `json:"access_token"`
+			RefreshToken string `json:"refresh_token"`
+			ExpiresIn    int64  `json:"expires_in"`
+		}
+		if err := json.Unmarshal(body, &tokenResp); err != nil {
+			refreshErr = fmt.Errorf("parsing refresh response: %w", err)
+			return
+		}
+
+		if tokenResp.AccessToken == "" {
+			refreshErr = fmt.Errorf("no access_token in refresh response")
+			return
+		}
+
+		// Persist atomically while still holding the flock.
+		updateCredentialsFile(tokenResp.AccessToken, tokenResp.RefreshToken, tokenResp.ExpiresIn)
+		os.Setenv("CLAUDE_CODE_OAUTH_TOKEN", tokenResp.AccessToken)
+		accessToken = tokenResp.AccessToken
+	})
+
+	if refreshErr != nil {
+		return "", refreshErr
 	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("refresh request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", err
-	}
-
-	if resp.StatusCode != 200 {
-		return "", fmt.Errorf("refresh failed with status %d: %s", resp.StatusCode, string(body))
-	}
-
-	var tokenResp struct {
-		AccessToken  string `json:"access_token"`
-		RefreshToken string `json:"refresh_token"`
-		ExpiresIn    int64  `json:"expires_in"`
-	}
-	if err := json.Unmarshal(body, &tokenResp); err != nil {
-		return "", fmt.Errorf("parsing refresh response: %w", err)
-	}
-
-	if tokenResp.AccessToken == "" {
-		return "", fmt.Errorf("no access_token in refresh response")
-	}
-
-	// Update credentials file
-	updateCredentialsFile(tokenResp.AccessToken, tokenResp.RefreshToken, tokenResp.ExpiresIn)
-
-	// Also update the env var for cloop's claudecode provider
-	os.Setenv("CLAUDE_CODE_OAUTH_TOKEN", tokenResp.AccessToken)
-
-	return tokenResp.AccessToken, nil
+	return accessToken, nil
 }
 
-// updateCredentialsFile writes the new tokens back to ~/.claude/.credentials.json
+// updateCredentialsFile writes the new tokens back to ~/.claude/.credentials.json.
+//
+// The write is ATOMIC (write temp + fsync + rename): a crash or concurrent
+// reader can never observe a half-written credentials file. Previously this
+// used a plain os.WriteFile, so an interrupted/concurrent write could leave
+// truncated JSON — which the claude CLI then read as broken credentials and
+// returned "401 Invalid authentication credentials" on every subsequent step.
+//
+// Callers should hold the cross-process flock (see withCredentialsFileLock).
 func updateCredentialsFile(accessToken, refreshToken string, expiresIn int64) {
 	path := credentialsPath()
 	data, err := os.ReadFile(path)
@@ -347,7 +537,36 @@ func updateCredentialsFile(accessToken, refreshToken string, expiresIn int64) {
 	if err != nil {
 		return
 	}
-	_ = os.WriteFile(path, updated, 0600)
+	writeFileAtomic(path, updated, 0600)
 }
 
+// writeFileAtomic writes data to path via a temp file in the same directory
+// followed by an atomic rename, so readers never see a partial file.
+func writeFileAtomic(path string, data []byte, perm os.FileMode) {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".credentials-*.tmp")
+	if err != nil {
+		// Fall back to a best-effort direct write rather than dropping the
+		// refreshed token entirely.
+		_ = os.WriteFile(path, data, perm)
+		return
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName) // no-op if the rename below succeeded
 
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return
+	}
+	if err := tmp.Close(); err != nil {
+		return
+	}
+	if err := os.Chmod(tmpName, perm); err != nil {
+		return
+	}
+	_ = os.Rename(tmpName, path)
+}
