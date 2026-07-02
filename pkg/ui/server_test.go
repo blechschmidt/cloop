@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -81,6 +82,46 @@ func apiGET(t *testing.T, ts *httptest.Server, path string) map[string]interface
 		t.Fatalf("decode response from %s: %v", path, err)
 	}
 	return out
+}
+
+// TestChartJSServedLocally verifies the Chart.js bundle is served from the
+// same origin (so the strict script-src 'self' CSP doesn't block it) and that
+// the dashboard references the local asset rather than the jsdelivr CDN.
+func TestChartJSServedLocally(t *testing.T) {
+	dir := setupProjectDir(t, cloopGoal, nil)
+	ts := newTestServer(t, dir, nil)
+
+	// The asset must be served with a JS content type and non-empty body.
+	resp, err := http.Get(ts.URL + "/assets/chart.umd.min.js")
+	if err != nil {
+		t.Fatalf("GET chart.js: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("chart.js returned HTTP %d", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); !strings.Contains(ct, "javascript") {
+		t.Errorf("chart.js Content-Type = %q, want javascript", ct)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if len(body) < 10000 || !bytes.Contains(body, []byte("Chart")) {
+		t.Fatalf("chart.js body looks wrong: %d bytes", len(body))
+	}
+
+	// The dashboard HTML must load the local asset, never the CDN, so the
+	// script-src 'self' CSP keeps charts working.
+	dashResp, err := http.Get(ts.URL + "/")
+	if err != nil {
+		t.Fatalf("GET dashboard: %v", err)
+	}
+	defer dashResp.Body.Close()
+	dash, _ := io.ReadAll(dashResp.Body)
+	if !bytes.Contains(dash, []byte("/assets/chart.umd.min.js")) {
+		t.Error("dashboard does not reference the local /assets/chart.umd.min.js")
+	}
+	if bytes.Contains(dash, []byte("cdn.jsdelivr.net")) {
+		t.Error("dashboard still references the jsdelivr CDN (blocked by CSP)")
+	}
 }
 
 // TestPerProjectTabSwitching verifies all four API-level scoping cases.

@@ -4,6 +4,7 @@ package ui
 import (
 	"context"
 	"crypto/subtle"
+	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -48,6 +49,14 @@ import (
 	"github.com/blechschmidt/cloop/pkg/taskreplay"
 	"github.com/blechschmidt/cloop/pkg/timeline"
 )
+
+// chartJS is the Chart.js UMD bundle vendored locally so the dashboard can
+// load it from the same origin. The dashboard's Content-Security-Policy
+// restricts script-src to 'self', which blocks the jsdelivr CDN; serving the
+// library from /assets keeps charts working without weakening the CSP.
+//
+//go:embed assets/chart.umd.min.js
+var chartJS []byte
 
 // sseEvent is a typed SSE message. If Event is empty the browser receives a
 // default "message" event; otherwise the named event type is sent.
@@ -794,6 +803,10 @@ func (s *Server) defaultReadyCheck(ctx context.Context) error {
 func (s *Server) registerRoutes(mux *http.ServeMux) {
 	// Dashboard SPA
 	mux.HandleFunc("/", s.handleDashboard)
+
+	// Locally-vendored static assets (e.g. Chart.js). Served from the same
+	// origin so the strict script-src 'self' CSP doesn't block them.
+	mux.HandleFunc("/assets/chart.umd.min.js", s.handleChartJS)
 
 	// Read-only state, WebSocket, and SSE (SSE kept as fallback)
 	mux.HandleFunc("/api/state", s.handleState)
@@ -1782,6 +1795,15 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	io.WriteString(w, dashboardHTML) //nolint:errcheck
+}
+
+// handleChartJS serves the locally-vendored Chart.js UMD bundle. Charts on the
+// Analytics tab need this library; loading it from the jsdelivr CDN is blocked
+// by the dashboard's script-src 'self' CSP, so we serve our own copy.
+func (s *Server) handleChartJS(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	w.Write(chartJS) //nolint:errcheck
 }
 
 // handleState returns the current project state as JSON.
@@ -6499,7 +6521,7 @@ const dashboardHTML = `<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>cloop dashboard</title>
 <script>(function(){var t=localStorage.getItem('cloop-theme')||(window.matchMedia('(prefers-color-scheme: light)').matches?'light':'dark');document.documentElement.setAttribute('data-theme',t);})();</script>
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js" crossorigin="anonymous"></script>
+<script src="/assets/chart.umd.min.js"></script>
 <style>
   :root {
     --bg:          #0d1117;
