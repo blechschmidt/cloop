@@ -142,7 +142,7 @@ func (s *Server) sendSSEOrLag(c *sseClient, ev sseEvent) {
 // wsMessage is a typed WebSocket message envelope.
 // Type values: "task_update", "step_output", "projects", "run_state",
 // "suggest_status", "presence", "task_added", "task_deleted",
-// "task_mutation", "task_stuck", "provider_call", "resync".
+// "task_mutation", "provider_call", "resync".
 // "error" is client-emitted only; the backend never sends it.
 type wsMessage struct {
 	Type string          `json:"type"`
@@ -392,7 +392,7 @@ type Server struct {
 	lastMod time.Time
 
 	// projectsMu guards Projects after startup: removeProjectsFlag compacts
-	// the slice while watcher goroutines (watchProjects, watchStuckTasks,
+	// the slice while watcher goroutines (watchProjects,
 	// autobackup) and request handlers iterate it concurrently. Readers use
 	// projectsSnapshot; writers hold the write lock.
 	projectsMu sync.RWMutex
@@ -459,12 +459,6 @@ type Server struct {
 	chatMu        sync.Mutex
 	chatHistories map[string][]ChatMessage
 
-	// stuckLastSeen tracks the most recent stuck-task row id observed per
-	// project workDir so the watcher only broadcasts new detections instead
-	// of flooding clients with a snapshot every tick. Task 20088.
-	stuckMu       sync.Mutex
-	stuckLastSeen map[string]int64
-
 	// Graceful shutdown plumbing. httpServer is set in Run after the
 	// http.Server is constructed so Shutdown can call its Shutdown method;
 	// shutdownMu guards access for the (rare) case where Shutdown races
@@ -529,7 +523,6 @@ func New(workdir string, port int, token string) *Server {
 		rlBuckets:       make(map[string]*uiIPBucket),
 		chatHistories:   make(map[string][]ChatMessage),
 		runStates:       make(map[string]bool),
-		stuckLastSeen:   make(map[string]int64),
 		Log:             logger.New(false).With("project", workdir).With("component", "ui"),
 		diffCache:       newStateCache(),
 	}
@@ -948,7 +941,6 @@ func (s *Server) Run(ctx context.Context) error {
 	defer cancelWatchers()
 	go s.watchState(watcherCtx)
 	go s.watchProjects(watcherCtx)
-	go s.watchStuckTasks(watcherCtx)
 	go s.watchAutoBackup(watcherCtx)
 
 	addr := ":" + strconv.Itoa(s.Port)
@@ -4499,117 +4491,6 @@ func (s *Server) watchProjects(ctx context.Context) {
 			}
 		}()
 	}
-}
-
-// watchStuckTasks polls each project's stuck_tasks SQLite table on a slow
-// cadence (10s) and broadcasts any newly-recorded detections to that
-// project's WebSocket clients as `task_stuck` events. Returns when ctx is
-// cancelled. The orchestrator's pkg/watchdog appends to stuck_tasks; this
-// loop is a thin tail-and-fan-out so the UI can render a yellow banner
-// without spawning per-project file watchers (Task 20088).
-//
-// Polling (vs SQLite triggers / IPC) is intentional: cloop processes are
-// independent OS processes that don't share memory, the cadence required
-// for "yellow banner within ~10s of detection" is loose, and the table is
-// tiny (one row per detection per tick) so the SELECT cost is negligible.
-func (s *Server) watchStuckTasks(ctx context.Context) {
-	defer recoverGoroutine("watchStuckTasks")
-
-	const pollInterval = 10 * time.Second
-	ticker := time.NewTicker(pollInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-		}
-
-		func() {
-			defer recoverGoroutine("watchStuckTasks iteration")
-			for _, e := range s.allProjectEntries() {
-				s.pollStuckTasksForProject(e.Path)
-			}
-		}()
-	}
-}
-
-// pollStuckTasksForProject opens the project's state.db, reads stuck_tasks
-// rows newer than the last-seen id for this project, and broadcasts a
-// task_stuck event for each. Best-effort: any error is logged and skipped
-// so a single misbehaving project does not stall the watcher.
-func (s *Server) pollStuckTasksForProject(workDir string) {
-	dbPath := state.StateDBPath(workDir)
-	if _, err := os.Stat(dbPath); err != nil {
-		return
-	}
-	db, err := statedb.Open(dbPath)
-	if err != nil {
-		return
-	}
-	defer db.Close()
-
-	s.stuckMu.Lock()
-	lastSeen := s.stuckLastSeen[workDir]
-	s.stuckMu.Unlock()
-
-	// Cap the scan window so a fresh server doesn't replay weeks of stuck
-	// rows on first start. 1h is a generous yet bounded look-back.
-	since := time.Now().Add(-1 * time.Hour)
-	rows, err := db.ReadStuckSince(since)
-	if err != nil {
-		return
-	}
-	// rows are newest-first; iterate oldest-first so listeners see them in
-	// chronological order and lastSeen tracks the latest id.
-	maxID := lastSeen
-	for i := len(rows) - 1; i >= 0; i-- {
-		row := rows[i]
-		if row.ID <= lastSeen {
-			continue
-		}
-		if row.ID > maxID {
-			maxID = row.ID
-		}
-		s.broadcastTaskStuck(workDir, row)
-	}
-	if maxID > lastSeen {
-		s.stuckMu.Lock()
-		s.stuckLastSeen[workDir] = maxID
-		s.stuckMu.Unlock()
-	}
-}
-
-// broadcastTaskStuck sends a typed task_stuck WebSocket event so the Web UI
-// can render a yellow banner. Mirrored to SSE clients as well so legacy
-// fallback consumers receive it. Payload mirrors statedb.StuckEvent fields
-// the UI will care about.
-func (s *Server) broadcastTaskStuck(workDir string, ev statedb.StuckEvent) {
-	payload := map[string]interface{}{
-		"id":                 ev.ID,
-		"task_id":            ev.TaskID,
-		"task_title":         ev.TaskTitle,
-		"started_at":         ev.StartedAt.Format(time.RFC3339),
-		"detected_at":        ev.DetectedAt.Format(time.RFC3339),
-		"stuck_for_seconds":  ev.StuckForSeconds,
-		"artifact_idle_secs": ev.ArtifactIdleSecs,
-		"artifact_path":      ev.ArtifactPath,
-		"auto_killed":        ev.AutoKilled,
-		"note":               ev.Note,
-		"work_dir":           workDir,
-	}
-	raw, err := json.Marshal(payload)
-	if err != nil {
-		return
-	}
-	s.broadcastToProject(workDir, wsMessage{Type: "task_stuck", Data: raw})
-
-	s.mu.Lock()
-	for c := range s.clients {
-		s.sendSSEOrLag(c, sseEvent{Event: "task_stuck", Data: string(raw)})
-	}
-	s.mu.Unlock()
 }
 
 // broadcastProjectsUpdate sends the updated project statuses to SSE clients.
@@ -11867,18 +11748,6 @@ function handleRealtimeMsg(type, data) {
             } catch(_) {}
           }).catch(() => {});
         }
-      } catch(_) {}
-      break;
-    case 'task_stuck':
-      // Backend's stuck-task watcher detected a task that hasn't made
-      // progress. Surface a toast so the user notices without a full
-      // re-render. Reuses the conflict-toast banner — it self-dismisses
-      // after a few seconds.
-      try {
-        const title  = (data && data.task_title) ? '"' + data.task_title + '"' : 'a task';
-        const secs   = (data && data.stuck_for_seconds) ? Math.round(data.stuck_for_seconds) + 's' : '';
-        const killed = (data && data.auto_killed) ? ' (auto-killed)' : '';
-        showConflictToast('Task ' + title + ' is stuck' + (secs ? ' for ' + secs : '') + killed + '.');
       } catch(_) {}
       break;
     case 'error':

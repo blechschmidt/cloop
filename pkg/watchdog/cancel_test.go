@@ -60,3 +60,22 @@ func TestCancel_PropagatesToContext(t *testing.T) {
 		t.Error("ctx.Done() not closed after Cancel; cancel func did not propagate")
 	}
 }
+
+func TestUnregister_ClearsCancel(t *testing.T) {
+	w := &Watchdog{}
+	var called int
+	w.Register(5, func() { called++ })
+	w.Unregister(5)
+
+	if fired := w.Cancel(5); fired {
+		t.Error("Cancel after Unregister = true, want false")
+	}
+	if called != 0 {
+		t.Errorf("cancel called %d times after Unregister, want 0", called)
+	}
+	// Unregister on unknown IDs and nil receivers must not panic.
+	w.Unregister(99)
+	var nilW *Watchdog
+	nilW.Unregister(1)
+	nilW.Register(1, func() {})
+}

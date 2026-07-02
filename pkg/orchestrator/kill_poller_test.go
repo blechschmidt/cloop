@@ -38,7 +38,7 @@ func newTestOrchestrator(t *testing.T) *Orchestrator {
 	o := &Orchestrator{
 		state:    ps,
 		statedb:  db,
-		watchdog: &watchdog.Watchdog{WorkDir: dir},
+		watchdog: &watchdog.Watchdog{},
 		log:      logger.NewWithWriter(nil, false),
 		config:   Config{WorkDir: dir},
 	}

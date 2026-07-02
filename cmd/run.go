@@ -464,7 +464,6 @@ Press Ctrl+C to pause gracefully.`,
 			AutoPromote:              autoPromote,
 			AutoPromoteThresholdDays: autoPromoteThresholdDays,
 			CoachMode:                coachMode,
-			Watchdog:                 cfg.Watchdog,
 			TaskTimeoutMinutes:       cfg.Orchestrator.TaskTimeoutMinutes,
 		}
 

@@ -175,12 +175,6 @@ type Config struct {
 	// or an OTel Collector). Disabled by default (zero overhead when off).
 	Tracing TracingConfig `yaml:"tracing,omitempty"`
 
-	// Watchdog configures the stuck-task detector that runs alongside the
-	// PM orchestrator. See WatchdogConfig for individual knobs; defaults
-	// (Interval=30s, StuckThreshold=10m, ArtifactIdle=5m) are applied when
-	// the relevant fields are zero.
-	Watchdog WatchdogConfig `yaml:"watchdog,omitempty"`
-
 	// Orchestrator configures the PM orchestrator's wall-clock execution
 	// budgets. See OrchestratorConfig.TaskTimeoutMinutes for the default
 	// per-task timeout applied when neither the task nor the project state
@@ -340,84 +334,6 @@ func (u UIConfig) EffectiveMaxRequestBodyBytes() int64 {
 		return MaxRequestBodyBytesDefault
 	}
 	return u.MaxRequestBodyBytes
-}
-
-// WatchdogConfig configures the in-flight task stuck detector (Task 20088).
-//
-// The watchdog inspects every in-flight task on each Interval tick. A task
-// is flagged as stuck when both:
-//   - it has been running for at least StuckThreshold, AND
-//   - its live artifact file has not been modified for at least ArtifactIdle.
-//
-// Suppressing the false-positive case where the artifact is actively
-// growing is intentional: a long-running task that is still producing
-// output is not stuck — it is merely slow.
-type WatchdogConfig struct {
-	// Enabled toggles the watchdog on/off. Default: true (zero value of
-	// the YAML key omits it; we treat unset as enabled to make detection
-	// the default safe behaviour for stability-focused PM runs).
-	// Set Enabled=false explicitly to disable.
-	Enabled *bool `yaml:"enabled,omitempty"`
-
-	// IntervalSeconds is how often the watchdog inspects in-flight tasks.
-	// Default: 30 seconds. Minimum enforced: 5 seconds (lower values
-	// would burn CPU on the SQLite hot path without surfacing meaningful
-	// signal — a stuck task does not become unstuck in 4 seconds).
-	IntervalSeconds int `yaml:"interval_seconds,omitempty"`
-
-	// StuckThresholdMinutes is the minimum task runtime before a task can
-	// be flagged stuck. Default: 10 minutes.
-	StuckThresholdMinutes int `yaml:"stuck_threshold_minutes,omitempty"`
-
-	// ArtifactIdleMinutes is the minimum artifact-file inactivity required
-	// to corroborate a stuck flag. A task whose artifact is still growing
-	// is not stuck, even if its runtime exceeds StuckThresholdMinutes.
-	// Default: 5 minutes.
-	ArtifactIdleMinutes int `yaml:"artifact_idle_minutes,omitempty"`
-
-	// AutoKillAfterMinutes, when > 0, cancels the task's context after
-	// the task has been continuously stuck for this many minutes. Disabled
-	// by default (0). Use sparingly: an aggressive auto-kill can mask
-	// legitimately slow provider responses on cold paths.
-	AutoKillAfterMinutes int `yaml:"auto_kill_after_minutes,omitempty"`
-}
-
-// WatchdogDefaults returns the effective watchdog configuration with all
-// zero-value fields filled in from defaults. Returns Enabled=true unless
-// the user explicitly set Enabled=false. Bounds:
-//   - Interval: clamped to >= 5s.
-//   - StuckThreshold: clamped to >= 1 minute (so misconfiguration does not
-//     produce a runaway stream of "stuck" events for normal-running tasks).
-//   - ArtifactIdle: clamped to >= 30 seconds.
-//   - AutoKillAfter: zero means "off"; any positive value passes through.
-func (w WatchdogConfig) WatchdogDefaults() WatchdogConfig {
-	out := w
-	if out.Enabled == nil {
-		t := true
-		out.Enabled = &t
-	}
-	if out.IntervalSeconds <= 0 {
-		out.IntervalSeconds = 30
-	}
-	if out.IntervalSeconds < 5 {
-		out.IntervalSeconds = 5
-	}
-	if out.StuckThresholdMinutes <= 0 {
-		out.StuckThresholdMinutes = 10
-	}
-	if out.StuckThresholdMinutes < 1 {
-		out.StuckThresholdMinutes = 1
-	}
-	if out.ArtifactIdleMinutes <= 0 {
-		out.ArtifactIdleMinutes = 5
-	}
-	if out.ArtifactIdleMinutes*60 < 30 {
-		out.ArtifactIdleMinutes = 1
-	}
-	if out.AutoKillAfterMinutes < 0 {
-		out.AutoKillAfterMinutes = 0
-	}
-	return out
 }
 
 // TracingConfig holds OpenTelemetry tracing settings.

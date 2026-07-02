@@ -55,19 +55,6 @@ type Store interface {
 	// MonthlyCosts returns cost entries for the given UTC year/month.
 	MonthlyCosts(year, month int) ([]CostEntry, error)
 
-	// ── Stuck-task forensics (Task 20088) ──────────────────────────────────
-
-	// AppendStuck records one watchdog stuck-task detection. Returns the
-	// inserted row's auto-increment id.
-	AppendStuck(e StuckEvent) (int64, error)
-
-	// ReadStuck returns the most recent N stuck events, newest first. Pass
-	// 0 for unbounded.
-	ReadStuck(limit int) ([]StuckEvent, error)
-
-	// ReadStuckSince returns stuck events with detected_at >= since.
-	ReadStuckSince(since time.Time) ([]StuckEvent, error)
-
 	// ── Lifecycle ─────────────────────────────────────────────────────────
 
 	// PingContext verifies the underlying store is reachable by issuing a

@@ -395,13 +395,6 @@ type Config struct {
 	// well, what to watch out for, and what done looks like.
 	CoachMode bool
 
-	// Watchdog configures the in-flight stuck-task detector that runs as a
-	// background goroutine alongside runPM/runPMParallel. The orchestrator
-	// applies WatchdogDefaults() at start time, so a zero value enables the
-	// detector with sensible defaults (interval=30s, threshold=10min,
-	// artifact-quiet=5min, auto-kill disabled). See pkg/watchdog.
-	Watchdog config.WatchdogConfig
-
 	// TaskTimeoutMinutes is the process-wide default per-task wall-clock
 	// budget applied when neither Task.MaxMinutes nor state.DefaultMaxMinutes
 	// is set. Zero means "no task timeout" (Task 20148): by default tasks run
@@ -423,8 +416,8 @@ type Orchestrator struct {
 	secretStore *secret.Store
 	log         logger.Logger
 	queue       *taskqueue.Queue   // central work queue; nil-safe (Mark*/Enqueue tolerate nil)
-	statedb     *statedb.DB        // shared SQLite handle for forensics (stuck_tasks); nil-safe
-	watchdog    *watchdog.Watchdog // stuck-task detector; nil if disabled or queue/db unavailable
+	statedb     *statedb.DB        // shared SQLite handle (kill_requests, events journal); nil-safe
+	watchdog    *watchdog.Watchdog // per-task cancel registry for manual aborts (Task 20140); nil-safe
 
 	// killWG tracks the goroutine that polls kill_requests for manual aborts
 	// (Task 20140). The orchestrator's Run() spawns it under the run context
@@ -517,38 +510,24 @@ func New(cfg Config, prov provider.Provider) (*Orchestrator, error) {
 		queue = nil
 	}
 
-	// Open the shared state DB for stuck-task forensics (Task 20088). The
-	// watchdog appends rows here; readers (Web UI) use the same path. Open
-	// failure is non-fatal — the watchdog is still useful with logging only.
+	// Open the shared state DB for the kill-request poller (Task 20140) and
+	// the events journal. Open failure is non-fatal — every consumer is
+	// nil-safe, so degraded operation just loses manual aborts and journal
+	// rows for this run.
 	stateDBPath := filepath.Join(s.WorkDir, ".cloop", "state.db")
 	sdb, dbErr := statedb.Open(stateDBPath)
 	if dbErr != nil {
-		log.Warn(logger.EventSessionStart, 0, "statedb unavailable for watchdog", map[string]interface{}{
+		log.Warn(logger.EventSessionStart, 0, "statedb unavailable", map[string]interface{}{
 			"error": dbErr.Error(),
 			"path":  stateDBPath,
 		})
 		sdb = nil
 	}
 
-	o := &Orchestrator{config: cfg, state: s, provider: prov, router: r, memory: mem, webhook: wh, metrics: cfg.Metrics, envVars: envVars, secretStore: secretStore, log: log, queue: queue, statedb: sdb, liveDeadlines: newLiveDeadlineRegistry()}
-
-	// Build (but do NOT start) the stuck-task watchdog (Task 20088). Run()
-	// starts it so its goroutine is bound to the run context and exits on
-	// cancellation. Passing GetPlan over the in-memory plan is much cheaper
-	// than re-reading state.db every tick.
-	wdCfg := cfg.Watchdog.WatchdogDefaults()
-	if wdCfg.Enabled != nil && *wdCfg.Enabled {
-		o.watchdog = &watchdog.Watchdog{
-			WorkDir:        s.WorkDir,
-			Interval:       time.Duration(wdCfg.IntervalSeconds) * time.Second,
-			StuckThreshold: time.Duration(wdCfg.StuckThresholdMinutes) * time.Minute,
-			ArtifactQuiet:  time.Duration(wdCfg.ArtifactIdleMinutes) * time.Minute,
-			AutoKillAfter:  time.Duration(wdCfg.AutoKillAfterMinutes) * time.Minute,
-			Logger:         log,
-			DB:             sdb,
-			GetPlan:        func() *pm.Plan { return o.state.Plan },
-		}
-	}
+	// The watchdog is a plain per-task cancel registry: the kill-request
+	// poller fires the registered cancel when an operator aborts a running
+	// task from the UI (Task 20140).
+	o := &Orchestrator{config: cfg, state: s, provider: prov, router: r, memory: mem, webhook: wh, metrics: cfg.Metrics, envVars: envVars, secretStore: secretStore, log: log, queue: queue, statedb: sdb, watchdog: &watchdog.Watchdog{}, liveDeadlines: newLiveDeadlineRegistry()}
 
 	return o, nil
 }
@@ -559,12 +538,6 @@ func New(cfg Config, prov provider.Provider) (*Orchestrator, error) {
 func (o *Orchestrator) Close() error {
 	if o == nil {
 		return nil
-	}
-	// Stop the watchdog before tearing down its DB handle so an in-flight
-	// AppendStuck cannot race a Close. Watchdog.Stop is idempotent and waits
-	// for the loop goroutine to exit (Task 20088).
-	if o.watchdog != nil {
-		o.watchdog.Wait()
 	}
 	// Wait for the manual-abort poller to exit before tearing down statedb
 	// so a final tick cannot race the DB close (Task 20140).
@@ -663,10 +636,11 @@ func (o *Orchestrator) effectiveTaskBudgetMinutes(task *pm.Task) int {
 // time budget. The budget is resolved by effectiveTaskBudgetMinutes. When that
 // returns 0 (the default after Task 20148: tasks have no timeout), the returned
 // context carries no wall-clock deadline — it is only cancelled by the parent
-// context, a manual kill, or the watchdog. A positive budget arms a deadline as
-// before (the explicit opt-in path). When a watchdog is active the returned
-// cancel is registered under task.ID and de-registered when invoked, so the same
-// cancel cannot accidentally fire twice.
+// context or a manual kill. A positive budget arms a deadline as before (the
+// explicit opt-in path). The returned cancel is registered under task.ID in
+// the watchdog cancel registry (for manual aborts, Task 20140) and
+// de-registered when invoked, so the same cancel cannot accidentally fire
+// twice.
 //
 // A fresh request ID is bound to the returned context unless the parent ctx
 // already carries one (in which case the inherited ID is preserved so an
@@ -697,7 +671,7 @@ func (o *Orchestrator) taskContextWithTimeout(ctx context.Context, task *pm.Task
 	case maxMin <= 0:
 		// No timeout configured (the default; Task 20148). Inherit the parent
 		// context with a plain cancel — the task runs until it finishes, the
-		// parent is cancelled, or it is killed manually/by the watchdog. We
+		// parent is cancelled, or it is killed manually. We
 		// still route ID-bearing tasks through liveDeadlines so an operator who
 		// later opts a running task into a budget via the UI is picked up by the
 		// poller (which arms a timer on the first positive budget it sees).
@@ -997,30 +971,25 @@ func (o *Orchestrator) enforceClaudeCodeLimits() error {
 }
 
 func (o *Orchestrator) Run(ctx context.Context) error {
-	// Start the stuck-task watchdog (Task 20088). Bound to a child context
-	// that we cancel before Close() so Watchdog.Wait() doesn't deadlock when
-	// the caller passed an unbounded ctx (e.g. context.Background() in tests).
-	wdCtx, wdCancel := context.WithCancel(ctx)
-	if o.watchdog != nil {
-		o.watchdog.Start(wdCtx)
-	}
+	// Background pollers run under a child context that we cancel before
+	// Close() so their goroutines exit even when the caller passed an
+	// unbounded ctx (e.g. context.Background() in tests).
+	pollCtx, pollCancel := context.WithCancel(ctx)
 	// Manual-abort poller (Task 20140): polls kill_requests rows the UI
 	// inserts when an operator changes a running task's status, and fires
-	// the watchdog-registered cancel for that task. Bound to wdCtx so it
-	// dies with the watchdog on Close.
-	o.startKillPoller(wdCtx)
+	// the watchdog-registered cancel for that task.
+	o.startKillPoller(pollCtx)
 	// Live-deadline poller (Task 20143): re-reads per-task / per-project
 	// task-timeout values from disk every few seconds and adjusts the
-	// timer on any in-flight task whose budget changed. Bound to wdCtx so
-	// it tears down on the same path as the watchdog.
-	o.startDeadlinePoller(wdCtx)
+	// timer on any in-flight task whose budget changed.
+	o.startDeadlinePoller(pollCtx)
 	// Close the central work queue on Run() exit so the underlying SQLite
 	// connection (and any goroutines it owns) is released. The orchestrator
 	// is a one-shot value — callers Build → Run → discard. Re-using the
 	// orchestrator after Run would already misbehave (state/plan are baked
 	// in at New time), so closing here is safe.
 	defer o.Close()
-	defer wdCancel()
+	defer pollCancel()
 	return o.runPM(ctx)
 }
 
@@ -1065,13 +1034,6 @@ func (o *Orchestrator) runPM(ctx context.Context) error {
 	defer span.End()
 	ctx = spanCtx
 
-	// Start the stuck-task watchdog (Task 20088). Watchdog.Start is idempotent,
-	// so calling it here in addition to Run() is safe — this covers callers
-	// (notably tests) that invoke runPM directly without going through Run.
-	if o.watchdog != nil {
-		o.watchdog.Start(ctx)
-	}
-
 	for {
 		var runErr error
 		if o.wantParallel() {
@@ -1084,8 +1046,6 @@ func (o *Orchestrator) runPM(ctx context.Context) error {
 				o.state.Parallel, o.state.LiveMaxParallel())
 			continue
 		}
-		// Best-effort: surface any final stuck event count in the logs once the
-		// PM loop has unwound. Watchdog.Wait is invoked from Close().
 		return runErr
 	}
 }
@@ -1920,14 +1880,8 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		// accumulate across the unbounded loop.
 		taskCtx, taskCancel = o.taskContextWithTimeout(ctx, task)
 
-		// Register the per-task cancel with the watchdog (Task 20088). When
-		// AutoKillAfter is configured, this lets the watchdog cancel a wedged
-		// provider call. Unregister fires before the next iteration via the
-		// inner-loop continue/break paths since `defer` runs on function
-		// return; for tasks-loop iterations we still rely on the watchdog
-		// dropping flagged-state once Status leaves in_progress (handled in
-		// watchdog.tick). This is intentional — Register/Unregister is for
-		// the cancel registry, not flagged-state lifecycle.
+		// Register the per-task cancel with the watchdog registry so a manual
+		// abort from the UI (Task 20140) can cancel a wedged provider call.
 		o.watchdog.Register(task.ID, taskCancel)
 
 		// ── Multi-agent path ───────────────────────────────────────────────
@@ -3670,10 +3624,11 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 				// Apply per-task time budget in parallel mode.
 				tTaskCtx, tTaskCancel := o.taskContextWithTimeout(ctx, t)
 				defer tTaskCancel()
-				// Register the cancel with the watchdog so AutoKillAfter can
-				// fire on a wedged provider call (Task 20088). The watchdog's
-				// per-tick sweep drops cancels for tasks no longer
-				// in_progress, so no explicit Unregister is required here.
+				// Register the cancel with the watchdog registry so a manual
+				// abort from the UI (Task 20140) can cancel a wedged provider
+				// call. tTaskCancel is the wrapped cancel returned by
+				// taskContextWithTimeout, which unregisters itself when the
+				// deferred cancel fires — no explicit Unregister needed here.
 				o.watchdog.Register(t.ID, tTaskCancel)
 				// Tag context for the audit log so the call lands against this task.
 				tAuditCtx := provideraudit.WithTaskContext(tTaskCtx, t.ID, t.Title)

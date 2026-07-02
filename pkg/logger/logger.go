@@ -83,7 +83,6 @@ const (
 	EventOptimize     Event = "optimize"
 	EventVerify       Event = "verify"
 	EventCheckpoint   Event = "checkpoint"
-	EventTaskStuck    Event = "task_stuck"
 )
 
 // Entry is the legacy JSON schema for a log line. Kept for callers that
