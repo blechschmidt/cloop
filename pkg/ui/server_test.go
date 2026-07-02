@@ -84,6 +84,43 @@ func apiGET(t *testing.T, ts *httptest.Server, path string) map[string]interface
 	return out
 }
 
+// TestWSOriginAllowed verifies the WebSocket origin gate: loopback and
+// same-origin (Origin host == request Host) requests are accepted so the
+// dashboard works behind a reverse proxy on a public hostname, while
+// genuinely cross-origin browser requests are rejected (anti-CSWSH).
+func TestWSOriginAllowed(t *testing.T) {
+	s := &Server{AllowedWSOrigins: []string{"configured.example.com"}}
+	cases := []struct {
+		name   string
+		host   string // request Host
+		origin string // Origin header ("" = absent)
+		want   bool
+	}{
+		{"no origin (CLI)", "aiden.example.com:1234", "", true},
+		{"loopback", "localhost:8080", "http://localhost:8080", true},
+		{"loopback ip", "127.0.0.1:8080", "http://127.0.0.1:9999", true},
+		{"same-origin host:port", "aiden.example.com:1234", "https://aiden.example.com:1234", true},
+		{"same-origin host only", "aiden.example.com", "https://aiden.example.com", true},
+		{"same host, proxy dropped port", "aiden.example.com", "https://aiden.example.com:1234", true},
+		{"configured extra origin", "internal:8080", "https://configured.example.com", true},
+		{"cross-origin attacker", "aiden.example.com:1234", "https://evil.com", false},
+		{"look-alike subdomain", "aiden.example.com:1234", "https://aiden.example.com.evil.com", false},
+		{"malformed origin", "aiden.example.com:1234", "://:::", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodGet, "/api/ws", nil)
+			r.Host = c.host
+			if c.origin != "" {
+				r.Header.Set("Origin", c.origin)
+			}
+			if got := s.wsOriginAllowed(r); got != c.want {
+				t.Errorf("wsOriginAllowed(host=%q, origin=%q) = %v, want %v", c.host, c.origin, got, c.want)
+			}
+		})
+	}
+}
+
 // TestChartJSServedLocally verifies the Chart.js bundle is served from the
 // same origin (so the strict script-src 'self' CSP doesn't block it) and that
 // the dashboard references the local asset rather than the jsdelivr CDN.

@@ -78,6 +78,7 @@ task list (PM mode), live progress via SSE, and run/stop controls.
 		if cfg, err := config.Load(workdir); err == nil && cfg != nil {
 			srv.MaxWebSocketConns = cfg.UI.MaxWebSocketConns
 			srv.MaxWebSocketConnsPerIP = cfg.UI.MaxWebSocketConnsPerIP
+			srv.AllowedWSOrigins = cfg.UI.AllowedWSOrigins
 		} else if err != nil {
 			fmt.Fprintf(os.Stderr, "warning: could not load config: %v\n", err)
 		}

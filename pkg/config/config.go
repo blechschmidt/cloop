@@ -305,6 +305,17 @@ type UIConfig struct {
 	// so a malicious or buggy client cannot OOM the daemon by streaming
 	// a multi-GB body. Applies to both cloop ui and cloop serve.
 	MaxRequestBodyBytes int64 `yaml:"max_request_body_bytes,omitempty"`
+
+	// AllowedWSOrigins lists additional Origin hosts permitted to open a
+	// WebSocket to the dashboard, on top of the always-allowed loopback
+	// origins and same-origin requests (where the Origin host matches the
+	// request Host). This is required when the dashboard is served behind a
+	// reverse proxy on a public hostname AND the browser's Origin differs
+	// from the Host the server sees (e.g. proxy rewrites Host). Each entry
+	// is a host or host:port pattern accepted by the websocket library,
+	// e.g. "aiden.example.com" or "aiden.example.com:1234". Same-origin
+	// requests already work without listing anything here.
+	AllowedWSOrigins []string `yaml:"allowed_ws_origins,omitempty"`
 }
 
 // EffectiveMaxWebSocketConns returns the configured total cap, substituting

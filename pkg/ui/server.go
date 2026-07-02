@@ -396,6 +396,13 @@ type Server struct {
 	// config.MaxRequestBodyBytesLower / Upper. Task 20102.
 	MaxRequestBodyBytes int64
 
+	// AllowedWSOrigins lists extra Origin hosts (host or host:port) that may
+	// open a WebSocket, in addition to the always-allowed loopback origins
+	// and same-origin requests. Needed only when the dashboard sits behind a
+	// reverse proxy that rewrites Host so same-origin detection can't see the
+	// public hostname. Populated from config.UIConfig.AllowedWSOrigins.
+	AllowedWSOrigins []string
+
 	mu      sync.Mutex
 	clients map[*sseClient]struct{}
 	lastMod time.Time
@@ -2287,6 +2294,62 @@ var wsRetryAfterSeconds = 5
 // Retry-After header when either MaxWebSocketConns (total) or
 // MaxWebSocketConnsPerIP would be exceeded. Defaults: 256 total, 8 per IP.
 // Configure via Config.UI.MaxWebSocketConns / MaxWebSocketConnsPerIP.
+// wsOriginAllowed reports whether the WebSocket upgrade request may be
+// accepted based on its Origin header. It allows:
+//   - requests with no Origin header (non-browser clients: CLI, tests);
+//   - loopback origins (localhost / 127.0.0.1 / ::1, any port);
+//   - same-origin requests, where the Origin host matches the request Host
+//     (the page and the socket are served by the same server — safe even
+//     behind a reverse proxy on a public hostname);
+//   - any host listed in s.AllowedWSOrigins (for proxies that rewrite Host).
+//
+// A malformed or genuinely cross-origin browser Origin is rejected, which
+// blocks cross-site WebSocket hijacking.
+func (s *Server) wsOriginAllowed(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return true // non-browser client; no CSWSH risk
+	}
+	u, err := url.Parse(origin)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	originHost := u.Hostname()
+
+	// Loopback is always allowed (local dashboard use).
+	switch originHost {
+	case "localhost", "127.0.0.1", "::1":
+		return true
+	}
+
+	// Same-origin: Origin host[:port] matches the Host the server sees.
+	// Compare both the full host:port and the bare hostname so a proxy that
+	// forwards the original Host (with or without an explicit port) matches.
+	if r.Host != "" {
+		if strings.EqualFold(u.Host, r.Host) {
+			return true
+		}
+		reqHost := r.Host
+		if h, _, err := net.SplitHostPort(reqHost); err == nil {
+			reqHost = h
+		}
+		if strings.EqualFold(originHost, reqHost) {
+			return true
+		}
+	}
+
+	// Operator-configured extra origins (host or host:port).
+	for _, allowed := range s.AllowedWSOrigins {
+		if allowed == "" {
+			continue
+		}
+		if strings.EqualFold(allowed, u.Host) || strings.EqualFold(allowed, originHost) {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	ip := clientIP(r)
 	if ok, reason := s.admitWebSocket(ip); !ok {
@@ -2301,11 +2364,20 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	// captures the same ip used for admission even if r mutates.
 	defer s.releaseWebSocket(ip)
 
+	// Origin enforcement: we do our own check (InsecureSkipVerify tells the
+	// websocket lib to skip its OriginPatterns matching) so we can accept
+	// same-origin requests behind a reverse proxy on any hostname, not just
+	// loopback. wsOriginAllowed permits: no Origin header (CLI/tests),
+	// loopback origins, the request's own Host (same-origin — the page and
+	// the socket come from the same server, which is inherently safe), and
+	// any operator-configured AllowedWSOrigins. Cross-origin browser
+	// requests are still rejected, preventing cross-site WebSocket hijacking.
+	if !s.wsOriginAllowed(r) {
+		http.Error(w, "forbidden origin", http.StatusForbidden)
+		return
+	}
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
-		// Local dashboard: only browser pages served from loopback may
-		// open a WebSocket. Requests without an Origin header (CLI
-		// clients, tests) are always allowed by Accept.
-		OriginPatterns: []string{"localhost:*", "127.0.0.1:*", "[::1]:*"},
+		InsecureSkipVerify: true, // origin already validated by wsOriginAllowed
 	})
 	if err != nil {
 		return
