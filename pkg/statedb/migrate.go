@@ -229,6 +229,11 @@ func recordVersion(db *sql.DB, version int, name string) error {
 		version, time.Now().UTC().Format(time.RFC3339Nano), name,
 	)
 	if err != nil {
+		// A concurrent process may have recorded the same baseline version
+		// first (two first-opens racing); that's success, not failure.
+		if isUniqueConstraintErr(err) {
+			return nil
+		}
 		return fmt.Errorf("record migration %d: %w", version, err)
 	}
 	return nil
@@ -250,6 +255,19 @@ func applyOne(db *sql.DB, m migration) error {
 	}
 	defer tx.Rollback() //nolint:errcheck — ignored if Commit succeeds
 
+	// Concurrent first-open protection: another process may have applied this
+	// migration between our currentVersion read and this transaction. Check
+	// inside the tx and treat "already recorded" as success (the deferred
+	// rollback discards our no-op transaction).
+	var one int
+	checkErr := tx.QueryRow(`SELECT 1 FROM schema_migrations WHERE version = ?`, m.Version).Scan(&one)
+	if checkErr == nil {
+		return nil
+	}
+	if !errors.Is(checkErr, sql.ErrNoRows) {
+		return fmt.Errorf("check schema_migrations: %w", checkErr)
+	}
+
 	stmts := splitStatements(m.SQL)
 	for i, stmt := range stmts {
 		if _, err := tx.Exec(stmt); err != nil {
@@ -261,6 +279,11 @@ func applyOne(db *sql.DB, m migration) error {
 		`INSERT INTO schema_migrations(version, applied_at, name) VALUES (?, ?, ?)`,
 		m.Version, time.Now().UTC().Format(time.RFC3339Nano), m.Name,
 	); err != nil {
+		// A unique-constraint failure means a concurrent process won the race
+		// and recorded this version first — already applied, not an error.
+		if isUniqueConstraintErr(err) {
+			return nil
+		}
 		return fmt.Errorf("record schema_migrations: %w", err)
 	}
 
@@ -268,6 +291,16 @@ func applyOne(db *sql.DB, m migration) error {
 		return fmt.Errorf("commit: %w", err)
 	}
 	return nil
+}
+
+// isUniqueConstraintErr reports whether err is a SQLite unique/primary-key
+// constraint violation. String matching is unavoidable — modernc.org/sqlite
+// does not expose stable error-code constants (see classifyDriverErr).
+func isUniqueConstraintErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "unique constraint")
 }
 
 // splitStatements splits a SQL script on `;` boundaries while respecting

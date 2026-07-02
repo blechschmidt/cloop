@@ -199,12 +199,12 @@ func (p *Provider) Complete(ctx context.Context, prompt string, opts provider.Op
 
 		respData, err := provider.ReadResponseBody(resp.Body, provider.MaxResponseBytes)
 		if err != nil {
-			return resp.StatusCode, fmt.Errorf("openai: reading response: %w", err)
+			return provider.BodyErrorStatus(resp.StatusCode), fmt.Errorf("openai: reading response: %w", err)
 		}
 
 		var body responseBody
 		if err := json.Unmarshal(respData, &body); err != nil {
-			return resp.StatusCode, fmt.Errorf("openai: parsing response: %w", err)
+			return provider.BodyErrorStatus(resp.StatusCode), fmt.Errorf("openai: parsing response: %w", err)
 		}
 
 		if body.Error != nil {

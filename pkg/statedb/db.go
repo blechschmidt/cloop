@@ -34,8 +34,8 @@ type State struct {
 	StepCount int
 	// LastStepTime is the timestamp of the newest step row. Populated by
 	// both LoadState (last element of Steps) and LoadStateLite (cheap
-	// SELECT MAX(time)); used by health probes to detect stalled runs
-	// without scanning the full Steps slice.
+	// lookup of the highest step number); used by health probes to detect
+	// stalled runs without scanning the full Steps slice.
 	LastStepTime      time.Time
 	CreatedAt         time.Time
 	UpdatedAt         time.Time
@@ -253,13 +253,14 @@ func (d *DB) saveStateLocked(s *State) error {
 		"updated_at":          s.UpdatedAt.Format(time.RFC3339Nano),
 	}
 
-	// plan-level fields
+	// plan-level fields. A nil Plan means "no plan loaded" (e.g. saving
+	// before decomposition), NOT "plan intentionally emptied" — leave the
+	// stored plan metadata untouched so externally-added tasks and their
+	// goal survive. An intentionally emptied plan is a non-nil Plan with
+	// zero tasks, which still replaces the stored rows below.
 	if s.Plan != nil {
 		meta["plan_goal"] = s.Plan.Goal
 		meta["plan_version"] = strconv.Itoa(s.Plan.Version)
-	} else {
-		meta["plan_goal"] = ""
-		meta["plan_version"] = "0"
 	}
 
 	// JSON blob fields
@@ -277,10 +278,14 @@ func (d *DB) saveStateLocked(s *State) error {
 	}
 
 	// ── plan tasks ──
-	if _, err := tx.Exec(`DELETE FROM plan_tasks`); err != nil {
-		return classifyDriverErr(err)
-	}
+	// Only replace the stored task rows when the incoming state actually
+	// carries a plan. When s.Plan is nil the caller never loaded (or never
+	// had) a plan, and deleting here would destroy tasks added externally
+	// (e.g. via the UI) before decomposition ran.
 	if s.Plan != nil {
+		if _, err := tx.Exec(`DELETE FROM plan_tasks`); err != nil {
+			return classifyDriverErr(err)
+		}
 		for _, t := range s.Plan.Tasks {
 			if err := insertTask(tx, t); err != nil {
 				return fmt.Errorf("insert task %d: %w", t.ID, classifyDriverErr(err))
@@ -335,8 +340,14 @@ func (d *DB) LoadStateLite() (*State, error) {
 	if err != nil {
 		return nil, err
 	}
+	// The newest step is the one with the highest step number (the monotonic
+	// primary key) — NOT MAX(time), which compares RFC3339 strings
+	// lexicographically and breaks across timezone offsets and trimmed
+	// trailing zeros.
 	var ts string
-	if err := d.conn.QueryRow(`SELECT COUNT(*), IFNULL(MAX(time), '') FROM steps`).Scan(&s.StepCount, &ts); err != nil {
+	if err := d.conn.QueryRow(
+		`SELECT COUNT(*), IFNULL((SELECT time FROM steps ORDER BY step DESC LIMIT 1), '') FROM steps`,
+	).Scan(&s.StepCount, &ts); err != nil {
 		return nil, classifyDriverErr(err)
 	}
 	if ts != "" {
@@ -753,7 +764,7 @@ func upsertStep(tx *sql.Tx, row StepRow) error {
 			duration=excluded.duration, time=excluded.time,
 			input_tokens=excluded.input_tokens, output_tokens=excluded.output_tokens`,
 		row.Step, row.Task, row.Output, row.ExitCode, row.Duration,
-		row.Time.Format(time.RFC3339Nano),
+		row.Time.UTC().Format(time.RFC3339Nano),
 		row.InputTokens, row.OutputTokens,
 	)
 	return err

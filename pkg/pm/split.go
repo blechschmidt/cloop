@@ -97,6 +97,9 @@ func ParseSplitResponse(response string, parentTask *Task, nextID int) ([]*Task,
 		}
 		tasks = append(tasks, t)
 	}
+	if len(tasks) == 0 {
+		return nil, fmt.Errorf("split produced no usable subtasks (all items had empty titles)")
+	}
 
 	return tasks, nil
 }
@@ -138,6 +141,12 @@ func SplitTask(ctx context.Context, p provider.Provider, opts provider.Options, 
 	result, err := p.Complete(ctx, prompt, opts)
 	if err != nil {
 		return nil, fmt.Errorf("split: provider error: %w", err)
+	}
+	if result == nil {
+		return nil, fmt.Errorf("split: provider returned nil result")
+	}
+	if strings.TrimSpace(result.Output) == "" {
+		return nil, fmt.Errorf("split: provider returned empty response")
 	}
 
 	subtasks, err := ParseSplitResponse(result.Output, task, nextID)

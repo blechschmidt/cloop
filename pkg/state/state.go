@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/boundedread"
@@ -157,9 +158,40 @@ type ProjectState struct {
 
 	// LastStepTime is the timestamp of the most recent step row. Same
 	// semantics as StepCount: set by both Load (last element) and LoadLite
-	// (cheap SELECT MAX(time)); used by health probes to detect stalled
+	// (cheap lookup of the newest step row); used by health probes to detect stalled
 	// runs without scanning the Steps slice.
 	LastStepTime time.Time `json:"-"`
+}
+
+// liveMu serializes Save/SaveDirect/SyncFromDisk (whose merge step rewrites
+// the live-toggle fields from disk) against the Live* accessors used by
+// orchestrator goroutines that run concurrently with a save — the kill
+// poller and parallel task workers both trigger saves while workers read
+// Effort/DefaultMaxMinutes/MaxParallel. Package-level (not a struct field)
+// so ProjectState stays freely copyable for the snapshot/clone patterns in
+// pkg/ui; saves are seconds apart, so cross-instance serialization is cheap.
+var liveMu sync.RWMutex
+
+// LiveEffort returns Effort under the live-toggle lock. Use from goroutines
+// that can run concurrently with Save/SyncFromDisk (parallel workers, pollers).
+func (s *ProjectState) LiveEffort() string {
+	liveMu.RLock()
+	defer liveMu.RUnlock()
+	return s.Effort
+}
+
+// LiveDefaultMaxMinutes returns DefaultMaxMinutes under the live-toggle lock.
+func (s *ProjectState) LiveDefaultMaxMinutes() int {
+	liveMu.RLock()
+	defer liveMu.RUnlock()
+	return s.DefaultMaxMinutes
+}
+
+// LiveMaxParallel returns MaxParallel under the live-toggle lock.
+func (s *ProjectState) LiveMaxParallel() int {
+	liveMu.RLock()
+	defer liveMu.RUnlock()
+	return s.MaxParallel
 }
 
 // StatePath returns the legacy JSON state file path (used for migration detection).
@@ -318,6 +350,11 @@ func LoadFromDir(dir string) (*ProjectState, error) {
 // UI handlers that intentionally mutate (add/edit/delete) tasks should use
 // SaveDirect to avoid the merge re-adding deleted tasks.
 func (s *ProjectState) Save() error {
+	// Serialize concurrent saves (main loop + kill poller) and make the
+	// merge's live-toggle rewrites visible to Live* readers atomically.
+	liveMu.Lock()
+	defer liveMu.Unlock()
+
 	s.UpdatedAt = time.Now()
 
 	// Merge externally-added tasks before persisting.
@@ -339,9 +376,12 @@ func (s *ProjectState) Save() error {
 		return err
 	}
 
-	// Append a plan history snapshot whenever the plan changes.
+	// Append a plan history snapshot whenever the plan changes. Best-effort:
+	// snapshot failures are reported to stderr but never fail the save.
 	if s.PMMode && s.Plan != nil {
-		_ = pm.SaveSnapshot(s.WorkDir, s.Plan)
+		if err := pm.SaveSnapshot(s.WorkDir, s.Plan); err != nil {
+			fmt.Fprintf(os.Stderr, "[state] plan snapshot: %v\n", err)
+		}
 	}
 	return nil
 }
@@ -351,6 +391,9 @@ func (s *ProjectState) Save() error {
 // delete tasks) where the caller has already loaded the latest state and
 // does not want deleted tasks re-added from disk.
 func (s *ProjectState) SaveDirect() error {
+	liveMu.Lock()
+	defer liveMu.Unlock()
+
 	s.UpdatedAt = time.Now()
 
 	dbPath := effectiveDBPath(s.WorkDir)
@@ -368,14 +411,19 @@ func (s *ProjectState) SaveDirect() error {
 		return err
 	}
 
+	// Best-effort snapshot; see Save.
 	if s.PMMode && s.Plan != nil {
-		_ = pm.SaveSnapshot(s.WorkDir, s.Plan)
+		if err := pm.SaveSnapshot(s.WorkDir, s.Plan); err != nil {
+			fmt.Fprintf(os.Stderr, "[state] plan snapshot: %v\n", err)
+		}
 	}
 	return nil
 }
 
 // SyncFromDisk re-reads the on-disk state and merges externally-added tasks.
 func (s *ProjectState) SyncFromDisk() {
+	liveMu.Lock()
+	defer liveMu.Unlock()
 	s.mergeExternalTasks()
 }
 
@@ -400,7 +448,11 @@ func (s *ProjectState) RequireTask(id int) (*pm.Task, error) {
 // content. This is an ID-set merge — it does NOT rely on maxInMemID comparisons,
 // so externally-added tasks are never silently dropped due to ID ordering.
 func (s *ProjectState) mergeExternalTasks() {
-	disk, err := Load(s.WorkDir)
+	// Read via LoadFromDir so the merge reads the exact same database Save
+	// writes (effectiveDBPath(s.WorkDir)). Going through Load would resolve
+	// .cloop/active_session, so a session activated mid-run would merge tasks
+	// from a different project into this one.
+	disk, err := LoadFromDir(s.WorkDir)
 	if err != nil || disk == nil || disk.Plan == nil || len(disk.Plan.Tasks) == 0 {
 		return
 	}
@@ -423,6 +475,7 @@ func (s *ProjectState) mergeExternalTasks() {
 				Type:      EventTaskAddedExternal,
 				TaskID:    t.ID,
 				TaskTitle: t.Title,
+				Step:      NoStep,
 				Message:   fmt.Sprintf("Task #%d added externally: %s", t.ID, t.Title),
 			})
 		}

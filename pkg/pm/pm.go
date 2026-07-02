@@ -781,16 +781,6 @@ func EvolveDiscoverPrompt(goal, instructions string, plan *Plan, evolveStep int,
 // ParseEvolveTasks parses newly discovered tasks from evolve mode output,
 // ensuring IDs don't conflict with existing plan tasks.
 func ParseEvolveTasks(goal, output string, existing *Plan) ([]*Task, error) {
-	// Find highest existing ID to avoid collisions
-	maxID := 0
-	if existing != nil {
-		for _, t := range existing.Tasks {
-			if t.ID > maxID {
-				maxID = t.ID
-			}
-		}
-	}
-
 	newPlan, err := ParseTaskPlan(goal, output)
 	if err != nil {
 		return nil, err
@@ -800,13 +790,53 @@ func ParseEvolveTasks(goal, output string, existing *Plan) ([]*Task, error) {
 	}
 
 	// Re-assign IDs to avoid collisions with existing tasks
-	for i, t := range newPlan.Tasks {
-		if t.ID <= maxID {
-			t.ID = maxID + i + 1
+	var existingTasks []*Task
+	if existing != nil {
+		existingTasks = existing.Tasks
+	}
+	resolveIDCollisions(newPlan.Tasks, existingTasks)
+
+	return newPlan.Tasks, nil
+}
+
+// resolveIDCollisions re-assigns the IDs of newly parsed batch tasks that
+// collide with an existing plan task's ID (or with an ID already claimed
+// earlier in the same batch), giving each conflicting task the next unused ID.
+// DependsOn references within the batch that pointed at a re-assigned ID are
+// remapped so sibling dependencies survive the renumbering. Shared by
+// ParseEvolveTasks and AdaptiveReplan.
+func resolveIDCollisions(batch []*Task, existing []*Task) {
+	used := make(map[int]bool, len(existing)+len(batch))
+	maxID := 0
+	for _, t := range existing {
+		used[t.ID] = true
+		if t.ID > maxID {
+			maxID = t.ID
 		}
 	}
 
-	return newPlan.Tasks, nil
+	next := maxID + 1
+	remap := make(map[int]int)
+	for _, t := range batch {
+		if t.ID <= 0 || used[t.ID] {
+			for used[next] {
+				next++
+			}
+			remap[t.ID] = next
+			t.ID = next
+		}
+		used[t.ID] = true
+	}
+	if len(remap) == 0 {
+		return
+	}
+	for _, t := range batch {
+		for i, dep := range t.DependsOn {
+			if newID, ok := remap[dep]; ok {
+				t.DependsOn[i] = newID
+			}
+		}
+	}
 }
 
 // AdaptiveReplan calls the provider to re-plan remaining tasks after a failure.
@@ -832,25 +862,13 @@ func AdaptiveReplan(ctx context.Context, p provider.Provider, goal, instructions
 		return nil, fmt.Errorf("adaptive replan: provider returned empty response")
 	}
 
-	// Find the highest existing ID to validate new task IDs
-	maxID := 0
-	for _, t := range plan.Tasks {
-		if t.ID > maxID {
-			maxID = t.ID
-		}
-	}
-
 	newPlan, err := ParseTaskPlan(goal, result.Output)
 	if err != nil {
 		return nil, fmt.Errorf("parse replan: %w", err)
 	}
 
-	// Re-assign IDs to avoid collisions (ensure they start after maxID)
-	for i, t := range newPlan.Tasks {
-		if t.ID <= maxID {
-			t.ID = maxID + i + 1
-		}
-	}
+	// Re-assign IDs to avoid collisions with existing tasks
+	resolveIDCollisions(newPlan.Tasks, plan.Tasks)
 
 	return newPlan.Tasks, nil
 }

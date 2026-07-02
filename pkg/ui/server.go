@@ -3,12 +3,14 @@ package ui
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -388,6 +390,12 @@ type Server struct {
 	mu      sync.Mutex
 	clients map[*sseClient]struct{}
 	lastMod time.Time
+
+	// projectsMu guards Projects after startup: removeProjectsFlag compacts
+	// the slice while watcher goroutines (watchProjects, watchStuckTasks,
+	// autobackup) and request handlers iterate it concurrently. Readers use
+	// projectsSnapshot; writers hold the write lock.
+	projectsMu sync.RWMutex
 
 	// Hub registry: per-project WebSocket client presence tracking.
 	// Key is the resolved workDir path.
@@ -1123,30 +1131,39 @@ func securityHeaders(next http.Handler) http.Handler {
 			"default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'")
 		// Disable the Referrer header for privacy.
 		w.Header().Set("Referrer-Policy", "no-referrer")
-		// Restrict CORS to localhost only (not wildcard).
-		origin := r.Header.Get("Origin")
-		if origin != "" {
-			if strings.HasPrefix(origin, "http://localhost") || strings.HasPrefix(origin, "http://127.0.0.1") {
-				w.Header().Set("Access-Control-Allow-Origin", origin)
+		// Restrict CORS to localhost only (not wildcard). Parse the Origin
+		// and compare the hostname exactly — a prefix match would also
+		// accept e.g. http://localhost.evil.com.
+		w.Header().Set("Vary", "Origin")
+		if origin := r.Header.Get("Origin"); origin != "" {
+			if u, err := url.Parse(origin); err == nil {
+				switch u.Hostname() {
+				case "localhost", "127.0.0.1", "::1":
+					w.Header().Set("Access-Control-Allow-Origin", origin)
+				}
 			}
 		}
 		next.ServeHTTP(w, r)
 	})
 }
 
-// clientIP extracts the real client IP, preferring X-Forwarded-For when running
-// behind a reverse proxy on localhost.
+// clientIP extracts the real client IP. X-Forwarded-For is only honoured
+// when the direct peer is a loopback address (i.e. a reverse proxy running
+// on this host); otherwise any remote client could spoof the header to
+// bypass per-IP rate limits, auth lockout, and WebSocket connection caps.
 func clientIP(r *http.Request) string {
-	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
-		// Take first address only.
-		if idx := strings.Index(fwd, ","); idx != -1 {
-			return strings.TrimSpace(fwd[:idx])
-		}
-		return strings.TrimSpace(fwd)
-	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
-		return r.RemoteAddr
+		host = r.RemoteAddr
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
+			// Take first address only.
+			if idx := strings.Index(fwd, ","); idx != -1 {
+				return strings.TrimSpace(fwd[:idx])
+			}
+			return strings.TrimSpace(fwd)
+		}
 	}
 	return host
 }
@@ -1191,23 +1208,30 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			s.authMu.Unlock()
 		}
 
-		// Check Authorization: Bearer <token> header.
+		// Check Authorization: Bearer <token> header. Constant-time compare
+		// so response timing leaks nothing about how many token bytes match.
 		if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
-			if strings.TrimPrefix(auth, "Bearer ") == s.Token {
+			if subtle.ConstantTimeCompare([]byte(strings.TrimPrefix(auth, "Bearer ")), []byte(s.Token)) == 1 {
 				next.ServeHTTP(w, r)
 				return
 			}
 		}
 		// Fallback: ?token=<token> query param (needed for EventSource which
 		// cannot send custom headers).
-		if r.URL.Query().Get("token") == s.Token {
+		if subtle.ConstantTimeCompare([]byte(r.URL.Query().Get("token")), []byte(s.Token)) == 1 {
 			next.ServeHTTP(w, r)
 			return
 		}
 
-		// Auth failed — increment failure counter.
+		// Auth failed — increment failure counter. The entry created above
+		// may have been evicted by a concurrent request between the two
+		// critical sections, so re-check and recreate rather than deref nil.
 		s.authMu.Lock()
 		entry := s.authFails[ip]
+		if entry == nil {
+			entry = &authFailEntry{lastSeen: time.Now()}
+			s.authFails[ip] = entry
+		}
 		entry.count++
 		if entry.count >= authMaxFailures {
 			entry.lockedUntil = time.Now().Add(authLockoutSeconds * time.Second)
@@ -1247,37 +1271,42 @@ func (s *Server) watchState(ctx context.Context) {
 		}
 		func() {
 			defer recoverGoroutine("watchState iteration")
-			statePath := state.StatePath(s.WorkDir)
-			fi, err := os.Stat(statePath)
+			// State lives in state.db (SQLite); state.json is the legacy
+			// pre-migration format kept only as a stat fallback so the
+			// watcher still fires for projects that were never migrated.
+			dbPath := state.StateDBPath(s.WorkDir)
+			fi, err := os.Stat(dbPath)
+			if err != nil {
+				fi, err = os.Stat(state.StatePath(s.WorkDir))
+			}
 			if err != nil {
 				return
 			}
-			if fi.ModTime().Equal(s.lastMod) {
+			mod := fi.ModTime()
+			// Under WAL journaling, writes land in state.db-wal first and
+			// the main db file's mtime can lag behind; take the newest of
+			// the two so changes are noticed on the next tick.
+			if wfi, werr := os.Stat(dbPath + "-wal"); werr == nil && wfi.ModTime().After(mod) {
+				mod = wfi.ModTime()
+			}
+			if mod.Equal(s.lastMod) {
 				return
 			}
-			s.lastMod = fi.ModTime()
+			s.lastMod = mod
 
-			// 32 MiB cap on state.json reads. State files in the wild are
-			// well under 1 MiB; a runaway / corrupt file at this path would
-			// otherwise be slurped into memory and fanned out to every
-			// connected SSE/WebSocket client. On overrun we skip the
-			// broadcast (partial JSON would corrupt clients) and log to
-			// stderr; the next tick will retry once the file is back in
-			// range.
-			data, err := boundedread.ReadFile(statePath, 32<<20)
+			ps, err := state.LoadLite(s.WorkDir)
 			if err != nil {
-				if errors.Is(err, boundedread.ErrTooLarge) {
-					fmt.Fprintf(os.Stderr, "[ui] watchState: skipping broadcast, state.json over cap: %v\n", err)
-				}
+				return
+			}
+			data, err := marshalStateForWire(ps)
+			if err != nil {
 				return
 			}
 			// SSE consumers still get the full state — they are a fallback
 			// path and not the perf-critical one. WebSocket consumers get a
 			// state_diff event with only the changed fields (Task 20132).
 			s.broadcast(string(data))
-			if ps, loadErr := state.LoadLite(s.WorkDir); loadErr == nil {
-				s.broadcastStateDiff(s.WorkDir, ps)
-			}
+			s.broadcastStateDiff(s.WorkDir, ps)
 		}()
 	}
 }
@@ -2259,7 +2288,10 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	defer s.releaseWebSocket(ip)
 
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
-		InsecureSkipVerify: true, // local dashboard — origin check is unnecessary
+		// Local dashboard: only browser pages served from loopback may
+		// open a WebSocket. Requests without an Origin header (CLI
+		// clients, tests) are always allowed by Accept.
+		OriginPatterns: []string{"localhost:*", "127.0.0.1:*", "[::1]:*"},
 	})
 	if err != nil {
 		return
@@ -2858,6 +2890,7 @@ func (s *Server) handleTaskAdd(w http.ResponseWriter, r *http.Request) {
 		Type:      state.EventTaskAdded,
 		TaskID:    task.ID,
 		TaskTitle: task.Title,
+		Step:      state.NoStep,
 		Message:   fmt.Sprintf("Task #%d added via UI: %s", task.ID, task.Title),
 	})
 
@@ -2925,6 +2958,7 @@ func (s *Server) handleTaskStatus(w http.ResponseWriter, r *http.Request) {
 			Type:      state.EventTaskStatusChange,
 			TaskID:    req.ID,
 			TaskTitle: task.Title,
+			Step:      state.NoStep,
 			Message:   fmt.Sprintf("Task #%d status changed: %s → %s (via UI)", req.ID, oldStatus, req.Status),
 		}, map[string]any{"old_status": oldStatus, "new_status": req.Status})
 	}
@@ -3295,6 +3329,7 @@ func (s *Server) handleDeleteTask(w http.ResponseWriter, r *http.Request) {
 		Type:      state.EventTaskDeleted,
 		TaskID:    id,
 		TaskTitle: deletedTitle,
+		Step:      state.NoStep,
 		Message:   fmt.Sprintf("Task #%d deleted via UI", id),
 	})
 
@@ -3948,9 +3983,15 @@ func (s *Server) handleVoice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Cap the total request body so a client can't spool unbounded data to
+	// disk: ParseMultipartForm's argument only bounds the in-memory portion,
+	// not the overall upload size. 64 MiB leaves headroom over the 32 MiB
+	// memory budget for multipart framing and form fields.
+	r.Body = http.MaxBytesReader(w, r.Body, 64<<20)
+
 	// 32 MB max upload.
 	if err := r.ParseMultipartForm(32 << 20); err != nil {
-		jsonErr(w, "parse multipart: "+err.Error(), http.StatusBadRequest)
+		respondToBodyError(w, err)
 		return
 	}
 
@@ -4310,6 +4351,15 @@ func (s *Server) handleReset(w http.ResponseWriter, r *http.Request) {
 
 // ── multi-project handlers ────────────────────────────────────────────────────
 
+// projectsSnapshot returns a copy of s.Projects that is safe to range over
+// without holding projectsMu, so readers never observe removeProjectsFlag's
+// in-place compaction mid-iteration.
+func (s *Server) projectsSnapshot() []string {
+	s.projectsMu.RLock()
+	defer s.projectsMu.RUnlock()
+	return append([]string(nil), s.Projects...)
+}
+
 // allProjectEntries returns the union of Projects flag paths + registry.
 func (s *Server) allProjectEntries() []multiui.ProjectEntry {
 	seen := make(map[string]bool)
@@ -4328,7 +4378,7 @@ func (s *Server) allProjectEntries() []multiui.ProjectEntry {
 	}
 
 	// Paths from --projects / --scan flags.
-	for _, p := range s.Projects {
+	for _, p := range s.projectsSnapshot() {
 		abs, err := filepath.Abs(p)
 		if err != nil {
 			continue
@@ -4922,7 +4972,7 @@ func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
 	s.projMu.RUnlock()
 	// multi_project is true when there are multiple registered projects so the
 	// frontend can enable the scoped-tabs experience.
-	multiProject := len(statuses) > 1 || len(s.Projects) > 0
+	multiProject := len(statuses) > 1 || len(s.projectsSnapshot()) > 0
 	jsonOK(w, map[string]interface{}{
 		"projects":      statuses,
 		"stats":         stats,
@@ -5304,6 +5354,8 @@ func (s *Server) handleProjectDelete(w http.ResponseWriter, r *http.Request) {
 // delete so the path doesn't reappear on the next allProjectEntries() rebuild.
 // No-op when the path was not present.
 func (s *Server) removeProjectsFlag(absPath string) {
+	s.projectsMu.Lock()
+	defer s.projectsMu.Unlock()
 	if len(s.Projects) == 0 {
 		return
 	}

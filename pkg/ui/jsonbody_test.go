@@ -20,8 +20,8 @@ import (
 	"testing"
 )
 
-// TestJSONBody_RejectsOversize_ConfigSet sends a 2 MiB JSON body to the
-// /api/config/set handler (default 1 MiB cap) and expects a 4xx response
+// TestJSONBody_RejectsOversize_ConfigSet sends a JSON body just above the
+// default cap to the /api/config/set handler and expects a 4xx response
 // rather than the daemon attempting to read the entire payload into memory.
 func TestJSONBody_RejectsOversize_ConfigSet(t *testing.T) {
 	dir := setupProjectDir(t, cloopGoal, nil)
@@ -29,11 +29,11 @@ func TestJSONBody_RejectsOversize_ConfigSet(t *testing.T) {
 
 	// Build a JSON object with a single oversized "value" string. The leading
 	// `{"key":"x","value":"` plus the trailing `"}` puts the payload above
-	// the 1 MiB cap once the 2 MiB filler is included.
-	const filler = 2 << 20 // 2 MiB
+	// maxJSONBodyBytes once the filler is included.
+	const filler = maxJSONBodyBytes + (1 << 20) // 1 MiB over the cap
 	var buf bytes.Buffer
 	buf.WriteString(`{"key":"anthropic.api_key","value":"`)
-	buf.Write(bytes.Repeat([]byte("a"), filler))
+	buf.Write(bytes.Repeat([]byte("a"), int(filler)))
 	buf.WriteString(`"}`)
 
 	resp, err := http.Post(ts.URL+"/api/config/set", "application/json", &buf)
@@ -74,30 +74,30 @@ func TestJSONBody_AcceptsUnderLimit(t *testing.T) {
 }
 
 // TestJSONBody_ChatLimitHigherThanDefault verifies the chat handler accepts
-// a body larger than the default 1 MiB cap (it uses maxChatJSONBodyBytes,
-// 4 MiB, because legitimate transcripts can be large).
+// a large transcript body: bigger than the historical 1 MiB small-request
+// cap, but under maxChatJSONBodyBytes. Since the unified 10 MiB cap the chat
+// limit equals the default limit; the invariant that must hold is that chat
+// never gets a *smaller* cap than ordinary handlers.
 func TestJSONBody_ChatLimitHigherThanDefault(t *testing.T) {
-	if maxChatJSONBodyBytes <= maxJSONBodyBytes {
-		t.Fatalf("test premise broken: maxChatJSONBodyBytes (%d) must exceed maxJSONBodyBytes (%d)",
+	if maxChatJSONBodyBytes < maxJSONBodyBytes {
+		t.Fatalf("test premise broken: maxChatJSONBodyBytes (%d) must be at least maxJSONBodyBytes (%d)",
 			maxChatJSONBodyBytes, maxJSONBodyBytes)
 	}
 
 	dir := setupProjectDir(t, cloopGoal, nil)
 	ts := newTestServer(t, dir, nil)
 
-	// Build a chat body just above 1 MiB but well under 4 MiB. We expect the
-	// handler to NOT reject on size grounds. Whether the chat backend then
-	// succeeds is irrelevant — we only assert the response is not 413/400-
-	// because-of-size. A 200 or any backend failure code is acceptable.
+	// Build a chat body above the historical 1 MiB small-request cap but
+	// under the chat cap. We expect the handler to NOT reject on size
+	// grounds. Whether the chat backend then succeeds is irrelevant — we
+	// only assert the response is not 413. A 200 or any backend failure
+	// code is acceptable.
 	const fill = (1 << 20) + (256 << 10) // 1.25 MiB filler
 	var buf bytes.Buffer
 	buf.WriteString(`{"message":"`)
 	buf.Write(bytes.Repeat([]byte("h"), fill))
 	buf.WriteString(`"}`)
 	bodyLen := buf.Len()
-	if int64(bodyLen) <= maxJSONBodyBytes {
-		t.Fatalf("test setup error: body (%d) must exceed default cap (%d)", bodyLen, maxJSONBodyBytes)
-	}
 	if int64(bodyLen) >= maxChatJSONBodyBytes {
 		t.Fatalf("test setup error: body (%d) must be under chat cap (%d)", bodyLen, maxChatJSONBodyBytes)
 	}

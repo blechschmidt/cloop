@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/provider"
@@ -84,6 +85,13 @@ func (p *Provider) Complete(ctx context.Context, prompt string, opts provider.Op
 
 	claudeBin := findClaude()
 	cmd := exec.CommandContext(ctx, claudeBin, args...)
+	// Run the CLI in its own process group so cancellation can SIGKILL the
+	// whole tree: grandchildren inherit the stdout/stderr pipes and would
+	// otherwise keep cmd.Wait blocked after the CLI itself dies. WaitDelay
+	// bounds Wait even if some pipe-holder survives the group kill (mirrors
+	// pkg/plugin and pkg/hooks).
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.WaitDelay = 5 * time.Second
 	cmd.Env = append(os.Environ(), "IS_SANDBOX=1")
 	if opts.WorkDir != "" {
 		cmd.Dir = opts.WorkDir
@@ -111,8 +119,12 @@ func (p *Provider) Complete(ctx context.Context, prompt string, opts provider.Op
 	case err = <-waitCh:
 		// Process exited normally.
 	case <-ctx.Done():
-		// Context cancelled or timed out. Kill the process.
-		_ = cmd.Process.Kill()
+		// Context cancelled or timed out. Kill the whole process group
+		// (negative pid) so forked children die too; fall back to killing
+		// just the CLI process if the group kill fails.
+		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
+			_ = cmd.Process.Kill()
+		}
 		<-waitCh // reap
 		return nil, fmt.Errorf("claude CLI cancelled: %w", ctx.Err())
 	}

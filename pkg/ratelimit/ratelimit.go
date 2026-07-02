@@ -9,6 +9,7 @@
 package ratelimit
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"os"
@@ -297,8 +298,15 @@ func Probe(apiKey, model string) error {
 	}
 
 	client := &http.Client{Timeout: 15 * time.Second}
-	body := `{"model":"` + model + `","max_tokens":1,"messages":[{"role":"user","content":"hi"}]}`
-	req, err := http.NewRequest("POST", "https://api.anthropic.com/v1/messages", strings.NewReader(body))
+	body, err := json.Marshal(map[string]any{
+		"model":      model,
+		"max_tokens": 1,
+		"messages":   []map[string]string{{"role": "user", "content": "hi"}},
+	})
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequest("POST", "https://api.anthropic.com/v1/messages", bytes.NewReader(body))
 	if err != nil {
 		return err
 	}

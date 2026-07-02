@@ -80,6 +80,11 @@ func DoWithRetry(ctx context.Context, cfg RetryConfig, fn func() (statusCode int
 			delay := retryDelay(cfg.InitialDelay, cfg.MaxDelay, attempt)
 			select {
 			case <-ctx.Done():
+				// Preserve the last provider error: a bare ctx.Err()
+				// would hide why we were retrying in the first place.
+				if lastErr != nil {
+					return wrapWithReqID(fmt.Errorf("%w (last provider error: %v)", ctx.Err(), lastErr), rid)
+				}
 				return wrapWithReqID(ctx.Err(), rid)
 			case <-time.After(delay):
 			}
@@ -107,7 +112,7 @@ func DoWithRetry(ctx context.Context, cfg RetryConfig, fn func() (statusCode int
 			return wrapWithReqID(formatBreakerError(cfg.BreakerKey), rid)
 		}
 
-		status, err := fn()
+		status, err := callWithProbeGuard(breaker, fn)
 		if err == nil {
 			if breaker != nil {
 				breaker.RecordSuccess()
@@ -145,6 +150,22 @@ func DoWithRetry(ctx context.Context, cfg RetryConfig, fn func() (statusCode int
 		lastErr = err
 	}
 	return wrapWithReqID(lastErr, rid)
+}
+
+// callWithProbeGuard invokes fn, releasing the breaker's half-open probe
+// slot if fn panics. The panic is recovered layers above DoWithRetry, so
+// without this a panicking fn would leave probeInFlight set forever and
+// permanently disable the provider.
+func callWithProbeGuard(breaker *CircuitBreaker, fn func() (int, error)) (int, error) {
+	defer func() {
+		if r := recover(); r != nil {
+			if breaker != nil {
+				breaker.releaseProbe()
+			}
+			panic(r)
+		}
+	}()
+	return fn()
 }
 
 // wrapWithReqID prepends "[request_id=...] " to err's message so the ID

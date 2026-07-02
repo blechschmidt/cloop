@@ -24,6 +24,11 @@ type EventRow = statedb.EventRow
 // EventType is re-exported for the same reason.
 type EventType = statedb.EventType
 
+// NoStep is the EventRow.Step value for events not bound to any step.
+// Steps are 0-based, so 0 is a real step number — callers must set Step to
+// NoStep explicitly when an event has no associated step.
+const NoStep = statedb.NoStep
+
 // Re-exported event-type constants. Keep this list in sync with
 // pkg/statedb/events.go.
 const (
@@ -52,7 +57,8 @@ const (
 //
 // Pass workDir as the project root (or a session dir); it is resolved through
 // the same effectiveDBPath the rest of the package uses. The Timestamp field
-// of row will be set to time.Now() if zero.
+// of row will be set to time.Now() if zero. Events without an associated step
+// must set row.Step to NoStep — steps are 0-based, so 0 is a real step number.
 func LogEvent(workDir string, row EventRow) {
 	if workDir == "" {
 		return
@@ -72,11 +78,6 @@ func LogEvent(workDir string, row EventRow) {
 	defer db.Close()
 	if row.Timestamp.IsZero() {
 		row.Timestamp = time.Now()
-	}
-	if row.Step == 0 {
-		// Treat zero as "no associated step" rather than step #0 by default;
-		// the orchestrator passes an explicit step value for step-bound events.
-		row.Step = -1
 	}
 	if err := db.RecordEvent(row); err != nil {
 		fmt.Fprintf(os.Stderr, "[events] record %s: %v\n", row.Type, err)

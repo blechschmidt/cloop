@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -417,12 +418,7 @@ func withCredentialsFileLock(fn func()) {
 func refreshOAuthToken(refreshToken string) (string, error) {
 	client := &http.Client{Timeout: 10 * time.Second}
 
-	formData := fmt.Sprintf(
-		"grant_type=refresh_token&refresh_token=%s&client_id=%s&redirect_uri=%s",
-		refreshToken,
-		claudeOAuthClientID,
-		"https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback",
-	)
+	formData := oauthRefreshForm(refreshToken)
 
 	var (
 		accessToken string
@@ -439,12 +435,7 @@ func refreshOAuthToken(refreshToken string) (string, error) {
 		} else if ok && creds.ClaudeAiOauth.RefreshToken != "" {
 			// Use the newest refresh token on disk, not the (possibly stale)
 			// one captured by the caller before it blocked on the lock.
-			formData = fmt.Sprintf(
-				"grant_type=refresh_token&refresh_token=%s&client_id=%s&redirect_uri=%s",
-				creds.ClaudeAiOauth.RefreshToken,
-				claudeOAuthClientID,
-				"https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback",
-			)
+			formData = oauthRefreshForm(creds.ClaudeAiOauth.RefreshToken)
 		}
 
 		req, err := http.NewRequest("POST", claudeOAuthTokenURL, strings.NewReader(formData))
@@ -487,8 +478,14 @@ func refreshOAuthToken(refreshToken string) (string, error) {
 			return
 		}
 
-		// Persist atomically while still holding the flock.
-		updateCredentialsFile(tokenResp.AccessToken, tokenResp.RefreshToken, tokenResp.ExpiresIn)
+		// Persist atomically while still holding the flock. A persist
+		// failure must not fail the refresh (the in-memory token is still
+		// usable), but it must be loud: the refresh token is single-use,
+		// so if the rotated one isn't on disk, every other consumer of the
+		// credentials file is now holding a dead token.
+		if err := updateCredentialsFile(tokenResp.AccessToken, tokenResp.RefreshToken, tokenResp.ExpiresIn); err != nil {
+			fmt.Fprintf(os.Stderr, "cloop: WARNING: failed to persist refreshed OAuth credentials to %s: %v (the rotated refresh token only exists in this process; other claude/cloop processes may fail to authenticate)\n", credentialsPath(), err)
+		}
 		os.Setenv("CLAUDE_CODE_OAUTH_TOKEN", tokenResp.AccessToken)
 		accessToken = tokenResp.AccessToken
 	})
@@ -497,6 +494,18 @@ func refreshOAuthToken(refreshToken string) (string, error) {
 		return "", refreshErr
 	}
 	return accessToken, nil
+}
+
+// oauthRefreshForm builds the x-www-form-urlencoded body for a refresh-token
+// exchange. url.Values handles escaping, so a token containing reserved
+// characters can never corrupt the form encoding.
+func oauthRefreshForm(refreshToken string) string {
+	return url.Values{
+		"grant_type":    {"refresh_token"},
+		"refresh_token": {refreshToken},
+		"client_id":     {claudeOAuthClientID},
+		"redirect_uri":  {"https://platform.claude.com/oauth/code/callback"},
+	}.Encode()
 }
 
 // updateCredentialsFile writes the new tokens back to ~/.claude/.credentials.json.
@@ -508,21 +517,21 @@ func refreshOAuthToken(refreshToken string) (string, error) {
 // returned "401 Invalid authentication credentials" on every subsequent step.
 //
 // Callers should hold the cross-process flock (see withCredentialsFileLock).
-func updateCredentialsFile(accessToken, refreshToken string, expiresIn int64) {
+func updateCredentialsFile(accessToken, refreshToken string, expiresIn int64) error {
 	path := credentialsPath()
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return
+		return fmt.Errorf("reading credentials file: %w", err)
 	}
 
 	var raw map[string]interface{}
 	if err := json.Unmarshal(data, &raw); err != nil {
-		return
+		return fmt.Errorf("parsing credentials file: %w", err)
 	}
 
 	oauth, ok := raw["claudeAiOauth"].(map[string]interface{})
 	if !ok {
-		return
+		return fmt.Errorf("credentials file has no claudeAiOauth object")
 	}
 
 	oauth["accessToken"] = accessToken
@@ -535,38 +544,48 @@ func updateCredentialsFile(accessToken, refreshToken string, expiresIn int64) {
 
 	updated, err := json.MarshalIndent(raw, "", "  ")
 	if err != nil {
-		return
+		return fmt.Errorf("marshaling credentials: %w", err)
 	}
-	writeFileAtomic(path, updated, 0600)
+	return writeFileAtomic(path, updated, 0600)
 }
 
 // writeFileAtomic writes data to path via a temp file in the same directory
 // followed by an atomic rename, so readers never see a partial file.
-func writeFileAtomic(path string, data []byte, perm os.FileMode) {
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, ".credentials-*.tmp")
-	if err != nil {
-		// Fall back to a best-effort direct write rather than dropping the
-		// refreshed token entirely.
-		_ = os.WriteFile(path, data, perm)
-		return
-	}
-	tmpName := tmp.Name()
-	defer os.Remove(tmpName) // no-op if the rename below succeeded
+//
+// If ANY temp-file step fails it falls back to a direct (non-atomic)
+// os.WriteFile: the data may contain a freshly rotated single-use refresh
+// token, so dropping the write entirely is far worse than losing atomicity.
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	tmpErr := func() error {
+		dir := filepath.Dir(path)
+		tmp, err := os.CreateTemp(dir, ".credentials-*.tmp")
+		if err != nil {
+			return err
+		}
+		tmpName := tmp.Name()
+		defer os.Remove(tmpName) // no-op if the rename below succeeded
 
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		return
+		if _, err := tmp.Write(data); err != nil {
+			tmp.Close()
+			return err
+		}
+		if err := tmp.Sync(); err != nil {
+			tmp.Close()
+			return err
+		}
+		if err := tmp.Close(); err != nil {
+			return err
+		}
+		if err := os.Chmod(tmpName, perm); err != nil {
+			return err
+		}
+		return os.Rename(tmpName, path)
+	}()
+	if tmpErr == nil {
+		return nil
 	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		return
+	if err := os.WriteFile(path, data, perm); err != nil {
+		return fmt.Errorf("atomic write failed (%v) and direct write failed: %w", tmpErr, err)
 	}
-	if err := tmp.Close(); err != nil {
-		return
-	}
-	if err := os.Chmod(tmpName, perm); err != nil {
-		return
-	}
-	_ = os.Rename(tmpName, path)
+	return nil
 }

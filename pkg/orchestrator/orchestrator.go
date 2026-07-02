@@ -639,8 +639,12 @@ func (o *Orchestrator) effectiveTaskBudgetMinutes(task *pm.Task) int {
 	if task != nil && task.MaxMinutes > 0 {
 		return task.MaxMinutes
 	}
-	if o.state != nil && o.state.DefaultMaxMinutes > 0 {
-		return o.state.DefaultMaxMinutes
+	if o.state != nil {
+		// Locked read: parallel workers call this while the kill poller's
+		// Save can rewrite DefaultMaxMinutes from a UI toggle.
+		if def := o.state.LiveDefaultMaxMinutes(); def > 0 {
+			return def
+		}
 	}
 	if o.config.TaskTimeoutMinutes > 0 {
 		// Defensively clamp to the same band the loader enforces so a hand-
@@ -1045,7 +1049,7 @@ func (o *Orchestrator) wantParallel() bool {
 	// A configured cap > 1 is itself an unambiguous "I want parallel" signal —
 	// without this the dispatcher silently ignores a UI-set max-parallel of 4
 	// when the Parallel boolean was never flipped.
-	return o.state.MaxParallel > 1
+	return o.state.LiveMaxParallel() > 1
 }
 
 // runPM dispatches to sequential or parallel task execution based on config
@@ -1077,7 +1081,7 @@ func (o *Orchestrator) runPM(ctx context.Context) error {
 		}
 		if errors.Is(runErr, errSwitchMode) {
 			color.New(color.FgMagenta, color.Bold).Printf("↻ Mode switch (parallel=%v, max_parallel=%d) — re-dispatching loop\n",
-				o.state.Parallel, o.state.MaxParallel)
+				o.state.Parallel, o.state.LiveMaxParallel())
 			continue
 		}
 		// Best-effort: surface any final stuck event count in the logs once the
@@ -1133,6 +1137,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 	o.webhook.Send(webhook.EventSessionStarted, webhook.Payload{Goal: s.Goal})
 	state.LogEventDetails(o.config.WorkDir, state.EventRow{
 		Type:    state.EventSessionStarted,
+		Step:    state.NoStep,
 		Message: "Run started",
 	}, map[string]any{
 		"goal":         s.Goal,
@@ -1372,7 +1377,30 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 	consecutiveEmptyEvolves := 0
 	const maxEmptyEvolves = 3
 
+	// Per-task context bookkeeping. The cancel for each iteration is invoked
+	// at the top of the next iteration (or by the deferred call on return)
+	// rather than via a loop-local `defer` — a defer inside this unbounded
+	// loop would accumulate cancels/timers/liveDeadline registry entries for
+	// the whole run. All uses of taskCtx happen within a single iteration, so
+	// releasing it once the next iteration begins is safe.
+	var (
+		taskCtx    context.Context
+		taskCancel context.CancelFunc
+	)
+	defer func() {
+		if taskCancel != nil {
+			taskCancel()
+		}
+	}()
+
 	for {
+		// Release the previous iteration's per-task context before starting
+		// a new one (see the declaration above for why this is not a defer).
+		if taskCancel != nil {
+			taskCancel()
+			taskCancel = nil
+		}
+
 		select {
 		case <-ctx.Done():
 			s.Status = "paused"
@@ -1470,6 +1498,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			})
 			state.LogEventDetails(o.config.WorkDir, state.EventRow{
 				Type:    state.EventPlanComplete,
+				Step:    state.NoStep,
 				Message: fmt.Sprintf("All %d tasks complete", len(s.Plan.Tasks)),
 			}, map[string]any{
 				"total":    len(s.Plan.Tasks),
@@ -1482,6 +1511,17 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 				s.Save()
 				n, err := o.evolvePM(ctx)
 				if err != nil {
+					// Cancellation (Ctrl-C, deadline) is an interruption, not a
+					// completed session — pause so the next run resumes evolving.
+					if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || ctx.Err() != nil {
+						color.New(color.FgMagenta, color.Bold).Printf("\n⏹ Evolve interrupted: %v\n", err)
+						s.Status = "paused"
+						s.Save()
+						if ctxErr := ctx.Err(); ctxErr != nil {
+							return ctxErr
+						}
+						return err
+					}
 					color.New(color.FgMagenta, color.Bold).Printf("\n⏹ Evolve stopped: %v\n", err)
 					s.Status = "complete"
 					s.Save()
@@ -1875,9 +1915,10 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		taskProvider := o.router.For(task.Role)
 		start := time.Now()
 
-		// Apply per-task time budget.
-		taskCtx, taskCancel := o.taskContextWithTimeout(ctx, task)
-		defer taskCancel()
+		// Apply per-task time budget. The cancel is released at the top of the
+		// next iteration (or by the function-level defer) so contexts don't
+		// accumulate across the unbounded loop.
+		taskCtx, taskCancel = o.taskContextWithTimeout(ctx, task)
 
 		// Register the per-task cancel with the watchdog (Task 20088). When
 		// AutoKillAfter is configured, this lets the watchdog cancel a wedged
@@ -1965,7 +2006,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			if useConsensus {
 				dimColor.Printf("→ Running consensus (n=%d) on critical task %d...\n", o.config.ConsensusN, task.ID)
 				consensusProviders := o.buildConsensusProviders(taskProvider)
-				opts, _ := o.makeOpts(s.Model, s.Effort, false) // no streaming in consensus mode
+				opts, _ := o.makeOpts(s.Model, s.LiveEffort(), false) // no streaming in consensus mode
 				cOutput, cReport, cErr := consensus.RunConsensus(
 					taskCtx,
 					consensusProviders,
@@ -2015,7 +2056,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			} else {
 				dimColor.Printf("→ Running %s on task %d...\n", taskProvider.Name(), task.ID)
 
-				opts, wasStreamed := o.makeOpts(s.Model, s.Effort, true)
+				opts, wasStreamed := o.makeOpts(s.Model, s.LiveEffort(), true)
 				// Open live artifact file so `cloop task watch` can tail output.
 				liveFile, liveErr := artifact.OpenLiveArtifact(o.config.WorkDir, task.ID)
 				if liveErr != nil {
@@ -2244,7 +2285,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 					"variant_id": currentHealVariant.ID,
 				})
 
-				diag, diagErr := diagnosis.AnalyzeFailure(ctx, o.provider, s.Model, o.config.StepTimeout, task, taskOutput)
+				diag, diagErr := diagnosis.AnalyzeFailure(taskCtx, o.provider, s.Model, o.config.StepTimeout, task, taskOutput)
 				if diagErr != nil {
 					_ = o.queue.MarkFailed(healQueueID, fmt.Sprintf("diagnosis error: %v", diagErr))
 					dimColor.Printf("  [HEAL] Diagnosis error — aborting heal: %v\n", diagErr)
@@ -2277,8 +2318,8 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 				healPrompt := buildHealPrompt(healBasePrompt, diag, healAttempt, maxHealRetries)
 				healColor.Printf("[HEAL attempt %d/%d] Re-attempting task %d (variant: %s)...\n", healAttempt, maxHealRetries, task.ID, currentHealVariant.ID)
 
-				healOpts, healWasStreamed := o.makeOpts(s.Model, s.Effort, true)
-				healResult, healErr := safeComplete(ctx, taskProvider, healPrompt, healOpts)
+				healOpts, healWasStreamed := o.makeOpts(s.Model, s.LiveEffort(), true)
+				healResult, healErr := safeComplete(taskCtx, taskProvider, healPrompt, healOpts)
 				if healErr != nil {
 					_ = o.queue.MarkFailed(healQueueID, truncate(healErr.Error(), 200))
 					healColor.Printf("[HEAL attempt %d/%d] Provider error: %v\n", healAttempt, maxHealRetries, healErr)
@@ -2361,8 +2402,8 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 						"You asked clarification questions instead of completing the task. " +
 						"Make your best judgment for ALL decisions and proceed to full completion. " +
 						"Do NOT ask for clarification or confirmation. Just do the work and finish with TASK_DONE."
-					clarifyOpts, clarifyWasStreamed := o.makeOpts(s.Model, s.Effort, true)
-					clarifyResult, clarifyErr := safeComplete(ctx, taskProvider, clarifyPrompt, clarifyOpts)
+					clarifyOpts, clarifyWasStreamed := o.makeOpts(s.Model, s.LiveEffort(), true)
+					clarifyResult, clarifyErr := safeComplete(taskCtx, taskProvider, clarifyPrompt, clarifyOpts)
 					if clarifyErr != nil {
 						clarifyOutcome = fmt.Sprintf("Clarification auto-resolve aborted on attempt %d/%d: provider error: %v.", clarifyAttempt, maxClarifyRetries, clarifyErr)
 						break
@@ -2620,7 +2661,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			// This runs before adaptive replan so the diagnosis can inform replanning too.
 			if o.config.DiagnoseFailures {
 				dimColor.Printf("  Diagnosing failure for task %d...\n", task.ID)
-				diag, diagErr := diagnosis.AnalyzeFailure(ctx, o.provider, s.Model, o.config.StepTimeout, task, taskOutput)
+				diag, diagErr := diagnosis.AnalyzeFailure(taskCtx, o.provider, s.Model, o.config.StepTimeout, task, taskOutput)
 				if diagErr != nil {
 					dimColor.Printf("  Diagnosis error (ignored): %v\n", diagErr)
 				} else if diag != "" {
@@ -3322,6 +3363,17 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 				s.Save()
 				n, err := o.evolvePM(ctx)
 				if err != nil {
+					// Cancellation (Ctrl-C, deadline) is an interruption, not a
+					// completed session — pause so the next run resumes evolving.
+					if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || ctx.Err() != nil {
+						color.New(color.FgMagenta, color.Bold).Printf("\n⏹ Evolve interrupted: %v\n", err)
+						s.Status = "paused"
+						s.Save()
+						if ctxErr := ctx.Err(); ctxErr != nil {
+							return ctxErr
+						}
+						return err
+					}
 					color.New(color.FgMagenta, color.Bold).Printf("\n⏹ Evolve stopped: %v\n", err)
 					s.Status = "complete"
 					s.Save()
@@ -3456,7 +3508,7 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 		// readyTotal is preserved for the launch-summary log so the operator
 		// can see how many tasks were eligible vs. actually launched.
 		readyTotal := len(ready)
-		maxParallel := s.MaxParallel
+		maxParallel := s.LiveMaxParallel()
 		if maxParallel > 0 && len(ready) > maxParallel {
 			ready = ready[:maxParallel]
 		}
@@ -3609,7 +3661,7 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 				start := time.Now()
 				// Use role-specific provider if configured.
 				taskProvider := o.router.For(t.Role)
-				opts, _ := o.makeOpts(s.Model, s.Effort, false) // no streaming in parallel
+				opts, _ := o.makeOpts(s.Model, s.LiveEffort(), false) // no streaming in parallel
 				// Worktree-parallel: override the provider's working directory
 				// so file edits land in this task's isolated worktree instead
 				// of the shared project root. Falls through to o.config.WorkDir
@@ -3897,6 +3949,7 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 				consecutiveErrors = 0
 			case pm.TaskFailed:
 				task.Status = pm.TaskFailed
+				task.FailCount++
 				// Skip the explicit-signal annotation when the failure came from
 				// the clarification reroute above — the reroute already added an
 				// accurate annotation (line ~3137), and claiming "per AI
@@ -3982,12 +4035,23 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 						// Block on the merge so the next round's worktrees see
 						// the merged base. Submissions are FIFO inside the
 						// queue, so this preserves the requested ordering.
-						<-mr.Done
-						if mr.Err != nil {
-							dimColor.Printf("  worktree merge task %d: %v (branch %s left for manual resolution)\n", task.ID, mr.Err, wt.Branch)
-							pm.AddAnnotation(task, "ai", fmt.Sprintf("Worktree merge conflict: %s — branch %s preserved.", truncate(mr.Err.Error(), 200), wt.Branch))
-						} else {
-							dimColor.Printf("  worktree merged: %s → %s (task %d)\n", wt.Branch, worktreeBase, task.ID)
+						// Also select on ctx: the mergequeue worker exits on
+						// cancellation, so a Submit that landed in the buffered
+						// channel after the worker stopped is never processed
+						// and mr.Done would block forever.
+						select {
+						case <-mr.Done:
+							if mr.Err != nil {
+								dimColor.Printf("  worktree merge task %d: %v (branch %s left for manual resolution)\n", task.ID, mr.Err, wt.Branch)
+								pm.AddAnnotation(task, "ai", fmt.Sprintf("Worktree merge conflict: %s — branch %s preserved.", truncate(mr.Err.Error(), 200), wt.Branch))
+							} else {
+								dimColor.Printf("  worktree merged: %s → %s (task %d)\n", wt.Branch, worktreeBase, task.ID)
+							}
+						case <-ctx.Done():
+							// Treat as merge not performed — leave the branch for
+							// manual resolution, mirroring the merge-error path.
+							dimColor.Printf("  worktree merge task %d: skipped (run cancelled) — branch %s left for manual resolution\n", task.ID, wt.Branch)
+							pm.AddAnnotation(task, "ai", fmt.Sprintf("Worktree merge skipped: run cancelled before merge completed — branch %s preserved.", wt.Branch))
 						}
 					case pm.TaskFailed, pm.TaskSkipped:
 						dimColor.Printf("  worktree: keeping branch %s for inspection (task %s)\n", wt.Branch, task.Status)
@@ -4317,6 +4381,7 @@ func (o *Orchestrator) evolvePM(ctx context.Context) (int, error) {
 	dimColor.Printf("→ Asking AI for improvement ideas...\n")
 	state.LogEventDetails(o.config.WorkDir, state.EventRow{
 		Type:    state.EventEvolveRoundStart,
+		Step:    state.NoStep,
 		Message: fmt.Sprintf("Evolve round #%d started", s.EvolveStep),
 	}, map[string]any{
 		"evolve_step": s.EvolveStep,
@@ -4336,7 +4401,7 @@ func (o *Orchestrator) evolvePM(ctx context.Context) (int, error) {
 	_ = o.queue.MarkRunning(evolveQueueID)
 
 	prompt := pm.EvolveDiscoverPrompt(s.Goal, s.Instructions, s.Plan, s.EvolveStep, s.InnovateMode)
-	opts, _ := o.makeOpts(s.Model, s.Effort, true)
+	opts, _ := o.makeOpts(s.Model, s.LiveEffort(), true)
 	result, err := safeComplete(ctx, o.provider, prompt, opts)
 	if err != nil {
 		_ = o.queue.MarkFailed(evolveQueueID, truncate(err.Error(), 200))
@@ -4370,6 +4435,7 @@ func (o *Orchestrator) evolvePM(ctx context.Context) (int, error) {
 		dimColor.Printf("  No new tasks discovered — project is fully evolved.\n")
 		state.LogEventDetails(o.config.WorkDir, state.EventRow{
 			Type:    state.EventEvolveNoOp,
+			Step:    state.NoStep,
 			Message: fmt.Sprintf("Evolve round #%d found no new tasks", s.EvolveStep),
 		}, map[string]any{"evolve_step": s.EvolveStep})
 		s.Save()
@@ -4378,7 +4444,7 @@ func (o *Orchestrator) evolvePM(ctx context.Context) (int, error) {
 
 	// Semantic deduplication: filter out candidates that duplicate existing work.
 	if !o.config.NoDedup {
-		dedupOpts, _ := o.makeOpts(s.Model, s.Effort, false)
+		dedupOpts, _ := o.makeOpts(s.Model, s.LiveEffort(), false)
 		deduped, dedupErr := pm.DeduplicateTasks(ctx, o.provider, dedupOpts, s.Plan.Tasks, newTasks)
 		if dedupErr != nil {
 			dimColor.Printf("  Dedup warning: %v\n", dedupErr)
@@ -4396,6 +4462,7 @@ func (o *Orchestrator) evolvePM(ctx context.Context) (int, error) {
 		dimColor.Printf("  No novel tasks after deduplication — project is fully evolved.\n")
 		state.LogEventDetails(o.config.WorkDir, state.EventRow{
 			Type:    state.EventEvolveNoOp,
+			Step:    state.NoStep,
 			Message: fmt.Sprintf("Evolve round #%d: all candidates duplicates", s.EvolveStep),
 		}, map[string]any{"evolve_step": s.EvolveStep})
 		s.Save()
@@ -4422,6 +4489,7 @@ func (o *Orchestrator) evolvePM(ctx context.Context) (int, error) {
 		}
 		state.LogEventDetails(o.config.WorkDir, state.EventRow{
 			Type:    state.EventEvolveDiscovered,
+			Step:    state.NoStep,
 			Message: fmt.Sprintf("Evolve round #%d discovered %d new task(s)", s.EvolveStep, len(newTasks)),
 		}, map[string]any{
 			"evolve_step": s.EvolveStep,

@@ -58,6 +58,18 @@ func ReadResponseBodyTruncated(r io.Reader, maxBytes int64) (data []byte, trunca
 	return buf, false, nil
 }
 
+// BodyErrorStatus maps an HTTP status to the status a DoWithRetry closure
+// should report when reading or parsing the response body fails. A 2xx
+// status would be classified as a non-retryable client success, but a body
+// failure after a 2xx is a network-level transport error — report 0 so it
+// is retried and counted against the circuit breaker.
+func BodyErrorStatus(code int) int {
+	if code >= 200 && code < 300 {
+		return 0
+	}
+	return code
+}
+
 // MaxStreamLineBytes caps a single line in a streamed response (SSE event
 // or NDJSON record). bufio.Scanner's default ceiling is 64 KiB; legitimate
 // provider events can exceed that — Anthropic occasionally emits a single

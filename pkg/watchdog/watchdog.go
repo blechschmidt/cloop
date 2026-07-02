@@ -264,13 +264,20 @@ func (w *Watchdog) tick() {
 	// way a re-run of the same ID starts fresh.
 	seen := make(map[int]struct{})
 	for _, t := range plan.Tasks {
-		if t == nil || t.Status != pm.TaskInProgress || t.StartedAt == nil {
+		if t == nil || t.Status != pm.TaskInProgress {
+			continue
+		}
+		// Copy the pointer once: another goroutine can reset t.StartedAt to
+		// nil between a nil check and a deref, so all reads below go through
+		// the local copy.
+		started := t.StartedAt
+		if started == nil {
 			continue
 		}
 		seen[t.ID] = struct{}{}
 
 		// Has the task been running long enough to be eligible?
-		if now.Sub(*t.StartedAt) < stuckThreshold {
+		if now.Sub(*started) < stuckThreshold {
 			continue
 		}
 
@@ -294,7 +301,7 @@ func (w *Watchdog) tick() {
 		// — a task that never produced any output but has been in_progress
 		// for >StuckThreshold is the most suspicious case of all.
 
-		w.handleStuck(now, t, artPath, artModTime)
+		w.handleStuck(now, t, *started, artPath, artModTime)
 	}
 
 	// Drop flagged entries — and stale cancel registrations — for tasks
@@ -317,8 +324,10 @@ func (w *Watchdog) tick() {
 }
 
 // handleStuck records a stuck-task detection and optionally cancels the task.
-// Called once per detected task per tick.
-func (w *Watchdog) handleStuck(now time.Time, t *pm.Task, artPath string, artModTime time.Time) {
+// Called once per detected task per tick. startedAt is passed by value (the
+// caller's snapshot of t.StartedAt) so a concurrent reset of the field to nil
+// cannot cause a nil deref here.
+func (w *Watchdog) handleStuck(now time.Time, t *pm.Task, startedAt time.Time, artPath string, artModTime time.Time) {
 	w.mu.Lock()
 	// Lazy init so tick() (exposed for tests) is safe to call without Start.
 	if w.flagged == nil {
@@ -338,7 +347,7 @@ func (w *Watchdog) handleStuck(now time.Time, t *pm.Task, artPath string, artMod
 	evt := StuckEvent{
 		TaskID:          t.ID,
 		TaskTitle:       t.Title,
-		StartedAt:       *t.StartedAt,
+		StartedAt:       startedAt,
 		StuckSince:      first,
 		ArtifactPath:    artPath,
 		ArtifactModTime: artModTime,
@@ -352,7 +361,7 @@ func (w *Watchdog) handleStuck(now time.Time, t *pm.Task, artPath string, artMod
 		data := map[string]interface{}{
 			"task_id":         t.ID,
 			"task_title":      t.Title,
-			"started_at":      t.StartedAt.UTC().Format(time.RFC3339),
+			"started_at":      startedAt.UTC().Format(time.RFC3339),
 			"stuck_since":     first.UTC().Format(time.RFC3339),
 			"stuck_duration":  evt.StuckDuration,
 			"artifact_quiet":  artifactQuietString(now, artModTime),
@@ -373,7 +382,7 @@ func (w *Watchdog) handleStuck(now time.Time, t *pm.Task, artPath string, artMod
 		if _, err := w.DB.AppendStuck(statedb.StuckEvent{
 			TaskID:           t.ID,
 			TaskTitle:        t.Title,
-			StartedAt:        *t.StartedAt,
+			StartedAt:        startedAt,
 			DetectedAt:       now,
 			StuckForSeconds:  int(stuckDur / time.Second),
 			ArtifactIdleSecs: idleSecs,

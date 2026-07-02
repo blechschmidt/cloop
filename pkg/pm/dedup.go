@@ -59,6 +59,10 @@ func DeduplicateTasks(ctx context.Context, p provider.Provider, opts provider.Op
 		// Fail open: return all candidates so novel tasks are not dropped.
 		return candidates, fmt.Errorf("dedup provider call failed (returning all candidates): %w", err)
 	}
+	if result == nil {
+		// Fail open.
+		return candidates, fmt.Errorf("dedup provider returned nil result (returning all candidates)")
+	}
 
 	novelIndices, reason, parseErr := parseDedupResponse(result.Output)
 	if parseErr != nil {

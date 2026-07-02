@@ -40,6 +40,11 @@ const (
 	EventEvolveNoOp        EventType = "evolve_no_op"
 )
 
+// NoStep is the EventRow.Step value for events that are not bound to any
+// step. Steps are 0-based, so 0 is a real step number — callers recording a
+// non-step-bound event must set Step to NoStep explicitly.
+const NoStep = -1
+
 // EventRow is one row in the events table.
 type EventRow struct {
 	ID        int64     // primary key, assigned on insert (zero on the way in)
@@ -47,7 +52,7 @@ type EventRow struct {
 	Type      EventType
 	TaskID    int    // 0 when not task-bound
 	TaskTitle string // empty when not task-bound
-	Step      int    // -1 when not step-bound
+	Step      int    // NoStep (-1) when not step-bound; 0 is a real step
 	Message   string // short, human-readable summary
 	Details   string // free-form JSON blob (may be empty)
 }
@@ -64,13 +69,6 @@ func (d *DB) RecordEvent(row EventRow) error {
 	if row.Timestamp.IsZero() {
 		row.Timestamp = time.Now()
 	}
-	if row.Step == 0 && row.Type != "" {
-		// step==0 is a real step number for new projects. Distinguish "no step"
-		// by storing -1; callers that genuinely mean step 0 must set Step
-		// explicitly (already true throughout the orchestrator).
-		// No-op: the caller controls Step. Documented for clarity.
-	}
-
 	_, err := d.conn.Exec(
 		`INSERT INTO events(timestamp, type, task_id, task_title, step, message, details)
 		 VALUES(?,?,?,?,?,?,?)`,
