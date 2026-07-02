@@ -58,10 +58,10 @@ const (
 	// default Linux open-file ulimit (1024 → 4096 with `ulimit -n`).
 	// Per-IP cap of 1024 is similarly headroom-laden but stops a single
 	// misbehaving client from monopolising the total budget.
-	WebSocketConnsLower      = 1
-	WebSocketConnsUpper      = 4096
-	WebSocketConnsPerIPLower = 1
-	WebSocketConnsPerIPUpper = 1024
+	WebSocketConnsLower        = 1
+	WebSocketConnsUpper        = 4096
+	WebSocketConnsPerIPLower   = 1
+	WebSocketConnsPerIPUpper   = 1024
 	WebSocketConnsDefault      = 256
 	WebSocketConnsPerIPDefault = 8
 
@@ -516,8 +516,8 @@ type AnthropicConfig struct {
 
 type OpenAIConfig struct {
 	// API key (falls back to OPENAI_API_KEY env var)
-	APIKey  string `yaml:"api_key"`
-	Model   string `yaml:"model"`
+	APIKey string `yaml:"api_key"`
+	Model  string `yaml:"model"`
 	// Optional: set for Azure OpenAI or OpenAI-compatible servers
 	BaseURL string `yaml:"base_url"`
 
@@ -540,6 +540,12 @@ type OllamaConfig struct {
 
 type ClaudeCodeConfig struct {
 	Model string `yaml:"model"`
+
+	// Effort is the default reasoning-effort level passed to the claude CLI
+	// as --effort. Valid: low, medium, high, xhigh, max; empty = CLI default.
+	// The per-project effort persisted in project state (set via the Web UI,
+	// cloop init --effort, or cloop run --effort) takes precedence.
+	Effort string `yaml:"effort,omitempty"`
 
 	// MaxWeeklyPct, when > 0, blocks new runs once the global Anthropic weekly
 	// (7-day) utilization reported by the OAuth usage API reaches this percent.

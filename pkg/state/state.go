@@ -15,10 +15,10 @@ import (
 )
 
 const (
-	stateFile      = ".cloop/state.json" // legacy path; kept for migration detection
-	stateDBFile    = ".cloop/state.db"   // current SQLite store (default session)
-	activeFile     = ".cloop/active_session"
-	sessionMetaFile = "session.json"     // sentinel: presence means dir is a session dir
+	stateFile       = ".cloop/state.json" // legacy path; kept for migration detection
+	stateDBFile     = ".cloop/state.db"   // current SQLite store (default session)
+	activeFile      = ".cloop/active_session"
+	sessionMetaFile = "session.json" // sentinel: presence means dir is a session dir
 )
 
 // activeSessionFile holds a single session name (typically tens of bytes).
@@ -84,21 +84,27 @@ type StepResult struct {
 }
 
 type ProjectState struct {
-	Goal           string       `json:"goal"`
-	WorkDir        string       `json:"workdir"`
-	MaxSteps       int          `json:"max_steps"`
-	CurrentStep    int          `json:"current_step"`
-	Status         string       `json:"status"` // running, complete, failed, paused, evolving
-	Steps          []StepResult `json:"steps"`
-	CreatedAt      time.Time    `json:"created_at"`
-	UpdatedAt      time.Time    `json:"updated_at"`
-	Model          string       `json:"model,omitempty"`
-	Instructions   string       `json:"instructions,omitempty"`
-	AutoEvolve     bool         `json:"auto_evolve"`
-	EvolveStep     int          `json:"evolve_step"`
+	Goal         string       `json:"goal"`
+	WorkDir      string       `json:"workdir"`
+	MaxSteps     int          `json:"max_steps"`
+	CurrentStep  int          `json:"current_step"`
+	Status       string       `json:"status"` // running, complete, failed, paused, evolving
+	Steps        []StepResult `json:"steps"`
+	CreatedAt    time.Time    `json:"created_at"`
+	UpdatedAt    time.Time    `json:"updated_at"`
+	Model        string       `json:"model,omitempty"`
+	Instructions string       `json:"instructions,omitempty"`
+	AutoEvolve   bool         `json:"auto_evolve"`
+	EvolveStep   int          `json:"evolve_step"`
 
 	// Provider settings
 	Provider string `json:"provider,omitempty"`
+
+	// Effort is the persisted model reasoning-effort level (low, medium,
+	// high, xhigh, max; empty = provider default). Set at init time or from
+	// the Web UI's Provider & Model picker; honored by providers that
+	// support it (currently claudecode via the claude CLI --effort flag).
+	Effort string `json:"effort,omitempty"`
 
 	// Product manager mode
 	PMMode     bool                   `json:"pm_mode,omitempty"`
@@ -440,6 +446,9 @@ func (s *ProjectState) mergeExternalTasks() {
 	// timeout so the orchestrator's live budget poller sees the new value
 	// without a restart.
 	s.DefaultMaxMinutes = disk.DefaultMaxMinutes
+	// Task 20149: pick up UI-driven effort changes so subsequent provider
+	// calls in a running session use the new level without a restart.
+	s.Effort = disk.Effort
 }
 
 // Init creates a new project state and persists it.
@@ -492,6 +501,7 @@ func toRaw(s *ProjectState) *statedb.State {
 		AutoEvolve:        s.AutoEvolve,
 		EvolveStep:        s.EvolveStep,
 		Provider:          s.Provider,
+		Effort:            s.Effort,
 		PMMode:            s.PMMode,
 		Plan:              s.Plan,
 		Milestones:        s.Milestones,
@@ -537,6 +547,7 @@ func fromRaw(r *statedb.State) *ProjectState {
 		AutoEvolve:        r.AutoEvolve,
 		EvolveStep:        r.EvolveStep,
 		Provider:          r.Provider,
+		Effort:            r.Effort,
 		PMMode:            r.PMMode,
 		Plan:              r.Plan,
 		Milestones:        r.Milestones,
@@ -582,33 +593,33 @@ func fromRaw(r *statedb.State) *ProjectState {
 // legacyState mirrors ProjectState for JSON decoding (avoids the import of
 // newer packages that might not exist in old JSON files).
 type legacyState struct {
-	Goal              string               `json:"goal"`
-	WorkDir           string               `json:"workdir"`
-	MaxSteps          int                  `json:"max_steps"`
-	CurrentStep       int                  `json:"current_step"`
-	Status            string               `json:"status"`
-	Steps             []StepResult         `json:"steps"`
-	CreatedAt         time.Time            `json:"created_at"`
-	UpdatedAt         time.Time            `json:"updated_at"`
-	Model             string               `json:"model,omitempty"`
-	Instructions      string               `json:"instructions,omitempty"`
-	AutoEvolve        bool                 `json:"auto_evolve"`
-	EvolveStep        int                  `json:"evolve_step"`
-	Provider          string               `json:"provider,omitempty"`
-	PMMode            bool                 `json:"pm_mode,omitempty"`
-	Plan              *pm.Plan             `json:"plan,omitempty"`
+	Goal              string                 `json:"goal"`
+	WorkDir           string                 `json:"workdir"`
+	MaxSteps          int                    `json:"max_steps"`
+	CurrentStep       int                    `json:"current_step"`
+	Status            string                 `json:"status"`
+	Steps             []StepResult           `json:"steps"`
+	CreatedAt         time.Time              `json:"created_at"`
+	UpdatedAt         time.Time              `json:"updated_at"`
+	Model             string                 `json:"model,omitempty"`
+	Instructions      string                 `json:"instructions,omitempty"`
+	AutoEvolve        bool                   `json:"auto_evolve"`
+	EvolveStep        int                    `json:"evolve_step"`
+	Provider          string                 `json:"provider,omitempty"`
+	PMMode            bool                   `json:"pm_mode,omitempty"`
+	Plan              *pm.Plan               `json:"plan,omitempty"`
 	Milestones        []*milestone.Milestone `json:"milestones,omitempty"`
-	TotalInputTokens  int                  `json:"total_input_tokens,omitempty"`
-	TotalOutputTokens int                  `json:"total_output_tokens,omitempty"`
-	DefaultMaxMinutes int                  `json:"default_max_minutes,omitempty"`
-	SkipClarify       bool                 `json:"skip_clarify,omitempty"`
-	InnovateMode      bool                 `json:"innovate_mode,omitempty"`
-	Parallel          bool                 `json:"parallel,omitempty"`
-	MaxParallel       int                  `json:"max_parallel,omitempty"`
-	WorktreeParallel  bool                 `json:"worktree_parallel,omitempty"`
-	PlanOnly          bool                 `json:"plan_only,omitempty"`
-	RetryFailed       bool                 `json:"retry_failed,omitempty"`
-	DryRun            bool                 `json:"dry_run,omitempty"`
+	TotalInputTokens  int                    `json:"total_input_tokens,omitempty"`
+	TotalOutputTokens int                    `json:"total_output_tokens,omitempty"`
+	DefaultMaxMinutes int                    `json:"default_max_minutes,omitempty"`
+	SkipClarify       bool                   `json:"skip_clarify,omitempty"`
+	InnovateMode      bool                   `json:"innovate_mode,omitempty"`
+	Parallel          bool                   `json:"parallel,omitempty"`
+	MaxParallel       int                    `json:"max_parallel,omitempty"`
+	WorktreeParallel  bool                   `json:"worktree_parallel,omitempty"`
+	PlanOnly          bool                   `json:"plan_only,omitempty"`
+	RetryFailed       bool                   `json:"retry_failed,omitempty"`
+	DryRun            bool                   `json:"dry_run,omitempty"`
 }
 
 func migrateFromJSON(dir, jsonPath, dbPath string) error {

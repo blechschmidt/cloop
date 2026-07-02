@@ -8,6 +8,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/boundedread"
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/profile"
+	"github.com/blechschmidt/cloop/pkg/provider"
 	"github.com/blechschmidt/cloop/pkg/state"
 	clooptemplate "github.com/blechschmidt/cloop/pkg/template"
 	"github.com/blechschmidt/cloop/pkg/wizard"
@@ -19,6 +20,7 @@ var (
 	maxSteps        int
 	instructions    string
 	model           string
+	initEffort      string
 	initProvider    string
 	initTemplate    string
 	initProfile     string
@@ -171,6 +173,12 @@ Examples:
 		if model != "" {
 			s.Model = model
 		}
+		if initEffort != "" {
+			if !provider.ValidEffort(initEffort) {
+				return fmt.Errorf("invalid --effort %q — valid: %s", initEffort, strings.Join(provider.EffortLevels, ", "))
+			}
+			s.Effort = initEffort
+		}
 		if initProvider != "" {
 			s.Provider = initProvider
 		}
@@ -233,6 +241,9 @@ Examples:
 		if model != "" {
 			fmt.Printf("  Model: %s\n", model)
 		}
+		if initEffort != "" {
+			fmt.Printf("  Effort: %s\n", initEffort)
+		}
 		if instructions != "" {
 			fmt.Printf("  Instructions: %s\n", instructions)
 		}
@@ -275,6 +286,7 @@ func init() {
 	initCmd.Flags().IntVar(&maxSteps, "max-steps", 0, "Maximum number of autonomous steps (0 = unlimited)")
 	initCmd.Flags().StringVar(&instructions, "instructions", "", "Additional instructions/constraints for the AI")
 	initCmd.Flags().StringVar(&model, "model", "", "Model to use (provider-specific)")
+	initCmd.Flags().StringVar(&initEffort, "effort", "", "Model reasoning-effort level: low, medium, high, xhigh, max (claudecode only; empty = provider default)")
 	initCmd.Flags().StringVar(&initProvider, "provider", "", "AI provider: anthropic, openai, ollama, claudecode (default)")
 	initCmd.Flags().StringVar(&initTemplate, "template", "", "Bootstrap from a built-in template ("+clooptemplate.NamesString()+")")
 	initCmd.Flags().StringVar(&initProfile, "profile", "", "Named configuration profile to apply (overrides the active profile)")

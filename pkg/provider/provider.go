@@ -34,6 +34,31 @@ type Options struct {
 	// Anthropic: budget_tokens for the thinking block (default 8000).
 	// OpenAI: maps to reasoning_effort ("low"/<4000, "medium"/<12000, "high"/>=12000).
 	ThinkingBudget int
+
+	// Effort is the model reasoning-effort level for providers that support
+	// it. Valid values: "low", "medium", "high", "xhigh", "max"; empty means
+	// provider default. Currently honored by claudecode (passed as the claude
+	// CLI's --effort flag); other providers ignore it.
+	Effort string
+}
+
+// EffortLevels are the valid reasoning-effort levels accepted by
+// Options.Effort, ordered from least to most effort. They mirror the claude
+// CLI's --effort flag values.
+var EffortLevels = []string{"low", "medium", "high", "xhigh", "max"}
+
+// ValidEffort reports whether v is a valid Options.Effort value. The empty
+// string is valid and means "provider default".
+func ValidEffort(v string) bool {
+	if v == "" {
+		return true
+	}
+	for _, l := range EffortLevels {
+		if v == l {
+			return true
+		}
+	}
+	return false
 }
 
 // Result from a completion request.

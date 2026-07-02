@@ -230,6 +230,7 @@ cloop init "Build a full REST API"
 | `--max-steps` | `0` (unlimited) | Max autonomous steps |
 | `--instructions` | | Additional constraints for the AI |
 | `--model` | | Model override |
+| `--effort` | | Model reasoning-effort level: `low`, `medium`, `high`, `xhigh`, `max` (claudecode only) |
 | `--provider` | | Provider override |
 
 ### `cloop run`
@@ -252,6 +253,7 @@ cloop run --replan            # discard plan and re-decompose
 |------|---------|-------------|
 | `--provider` | from config | AI provider to use |
 | `--model` | from config | Model override |
+| `--effort` | from state/config | Model reasoning-effort level: `low`, `medium`, `high`, `xhigh`, `max` (claudecode only) |
 | `--auto-evolve` | `false` | After goal completion, keep discovering new tasks |
 | `--innovate` | `false` | Innovation mode: push evolve toward novel capabilities |
 | `--step-timeout` | `10m` | Timeout per step |

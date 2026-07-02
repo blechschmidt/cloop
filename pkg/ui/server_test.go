@@ -463,9 +463,9 @@ func TestGetTasksEmpty(t *testing.T) {
 
 func TestGetTasksWithPlan(t *testing.T) {
 	tasks := []*pm.Task{
-		{ID: 3, Title: "Third task",  Status: pm.TaskPending, Priority: 3},
-		{ID: 1, Title: "First task",  Status: pm.TaskPending, Priority: 1},
-		{ID: 2, Title: "Second task", Status: pm.TaskDone,    Priority: 2},
+		{ID: 3, Title: "Third task", Status: pm.TaskPending, Priority: 3},
+		{ID: 1, Title: "First task", Status: pm.TaskPending, Priority: 1},
+		{ID: 2, Title: "Second task", Status: pm.TaskDone, Priority: 2},
 	}
 	dir := setupProjectWithTasks(t, cloopGoal, tasks)
 	ts := newTestServer(t, dir, nil)
@@ -494,9 +494,9 @@ func TestGetTasksWithPlan(t *testing.T) {
 
 func TestGetTasksFilterByStatus(t *testing.T) {
 	tasks := []*pm.Task{
-		{ID: 1, Title: "Pending task",  Status: pm.TaskPending},
-		{ID: 2, Title: "Done task",     Status: pm.TaskDone},
-		{ID: 3, Title: "Failed task",   Status: pm.TaskFailed},
+		{ID: 1, Title: "Pending task", Status: pm.TaskPending},
+		{ID: 2, Title: "Done task", Status: pm.TaskDone},
+		{ID: 3, Title: "Failed task", Status: pm.TaskFailed},
 	}
 	dir := setupProjectWithTasks(t, cloopGoal, tasks)
 	ts := newTestServer(t, dir, nil)
@@ -515,9 +515,9 @@ func TestGetTasksFilterByStatus(t *testing.T) {
 
 func TestGetTasksFilterByTextSearch(t *testing.T) {
 	tasks := []*pm.Task{
-		{ID: 1, Title: "Add authentication",  Status: pm.TaskPending},
-		{ID: 2, Title: "Fix database bug",    Status: pm.TaskPending},
-		{ID: 3, Title: "Deploy to staging",   Status: pm.TaskPending},
+		{ID: 1, Title: "Add authentication", Status: pm.TaskPending},
+		{ID: 2, Title: "Fix database bug", Status: pm.TaskPending},
+		{ID: 3, Title: "Deploy to staging", Status: pm.TaskPending},
 	}
 	dir := setupProjectWithTasks(t, cloopGoal, tasks)
 	ts := newTestServer(t, dir, nil)
@@ -743,7 +743,7 @@ func TestTaskEditNotFound(t *testing.T) {
 func TestTaskRemove(t *testing.T) {
 	tasks := []*pm.Task{
 		{ID: 1, Title: "To remove", Status: pm.TaskPending},
-		{ID: 2, Title: "To keep",   Status: pm.TaskPending},
+		{ID: 2, Title: "To keep", Status: pm.TaskPending},
 	}
 	dir := setupProjectWithTasks(t, cloopGoal, tasks)
 	ts := newTestServer(t, dir, nil)
@@ -782,7 +782,7 @@ func TestTaskRemoveNotFound(t *testing.T) {
 
 func TestTaskMoveDown(t *testing.T) {
 	tasks := []*pm.Task{
-		{ID: 1, Title: "First",  Status: pm.TaskPending, Priority: 1},
+		{ID: 1, Title: "First", Status: pm.TaskPending, Priority: 1},
 		{ID: 2, Title: "Second", Status: pm.TaskPending, Priority: 2},
 	}
 	dir := setupProjectWithTasks(t, cloopGoal, tasks)
@@ -883,7 +883,7 @@ func TestPatchTaskAlias(t *testing.T) {
 func TestDeleteTask(t *testing.T) {
 	tasks := []*pm.Task{
 		{ID: 1, Title: "Delete me", Status: pm.TaskPending},
-		{ID: 2, Title: "Keep me",   Status: pm.TaskPending},
+		{ID: 2, Title: "Keep me", Status: pm.TaskPending},
 	}
 	dir := setupProjectWithTasks(t, cloopGoal, tasks)
 	ts := newTestServer(t, dir, nil)
@@ -1252,8 +1252,8 @@ func TestDepsEmpty(t *testing.T) {
 
 func TestDepsWithTasks(t *testing.T) {
 	tasks := []*pm.Task{
-		{ID: 1, Title: "Root task",     Status: pm.TaskPending},
-		{ID: 2, Title: "Depends on 1",  Status: pm.TaskPending, DependsOn: []int{1}},
+		{ID: 1, Title: "Root task", Status: pm.TaskPending},
+		{ID: 2, Title: "Depends on 1", Status: pm.TaskPending, DependsOn: []int{1}},
 		{ID: 3, Title: "Depends on 1,2", Status: pm.TaskPending, DependsOn: []int{1, 2}},
 	}
 	dir := setupProjectWithTasks(t, cloopGoal, tasks)
@@ -1459,7 +1459,7 @@ func TestKBSearch(t *testing.T) {
 	dir := setupProjectDir(t, cloopGoal, nil)
 	ts := newTestServer(t, dir, nil)
 
-	apiPOST(t, ts, "/api/kb", map[string]interface{}{"title": "Go patterns",  "body": "Use interfaces for testability"})
+	apiPOST(t, ts, "/api/kb", map[string]interface{}{"title": "Go patterns", "body": "Use interfaces for testability"})
 	apiPOST(t, ts, "/api/kb", map[string]interface{}{"title": "Python tricks", "body": "List comprehensions are fast"})
 
 	body := apiGET(t, ts, "/api/kb/search?q=interface")
@@ -1851,7 +1851,7 @@ func TestGetTasksSortedAfterAdd(t *testing.T) {
 	// add via API to get lower IDs and verify sort order.
 	tasks := []*pm.Task{
 		{ID: 10, Title: "High ID first", Status: pm.TaskPending, Priority: 1},
-		{ID: 5,  Title: "Mid ID",        Status: pm.TaskPending, Priority: 2},
+		{ID: 5, Title: "Mid ID", Status: pm.TaskPending, Priority: 2},
 	}
 	dir := setupProjectWithTasks(t, cloopGoal, tasks)
 	ts := newTestServer(t, dir, nil)
@@ -2395,6 +2395,54 @@ func TestProviderModelSet_PersistsValues(t *testing.T) {
 	}
 	if ps.Model != "claude-opus-4-7" {
 		t.Errorf("Model = %q, want 'claude-opus-4-7'", ps.Model)
+	}
+}
+
+// TestProviderModelSet_EffortRoundTrip verifies POST /api/options/provider
+// persists the effort level, leaves it unchanged when the field is omitted,
+// clears it on an explicit empty string, and rejects invalid values (Task 20149).
+func TestProviderModelSet_EffortRoundTrip(t *testing.T) {
+	dir := setupProjectDir(t, cloopGoal, nil)
+	ts := newTestServer(t, dir, nil)
+
+	// Set effort alongside provider/model.
+	body := apiPOST(t, ts, "/api/options/provider", map[string]interface{}{
+		"provider": "claudecode",
+		"effort":   "high",
+	})
+	if body["ok"] != true {
+		t.Fatalf("set effort failed: %v", body)
+	}
+	if ps := loadStateOrFail(t, dir); ps.Effort != "high" {
+		t.Errorf("Effort = %q, want 'high'", ps.Effort)
+	}
+
+	// Omitting the effort field must leave the stored value unchanged
+	// (older clients don't send it).
+	_ = apiPOST(t, ts, "/api/options/provider", map[string]interface{}{
+		"model": "claude-sonnet-4-6",
+	})
+	if ps := loadStateOrFail(t, dir); ps.Effort != "high" {
+		t.Errorf("Effort after omitted field = %q, want 'high' (unchanged)", ps.Effort)
+	}
+
+	// An explicit empty string clears it back to the provider default.
+	_ = apiPOST(t, ts, "/api/options/provider", map[string]interface{}{
+		"effort": "",
+	})
+	if ps := loadStateOrFail(t, dir); ps.Effort != "" {
+		t.Errorf("Effort after explicit clear = %q, want empty", ps.Effort)
+	}
+
+	// Invalid levels are rejected with 400 and do not touch state.
+	data, _ := json.Marshal(map[string]string{"effort": "turbo"})
+	resp, err := http.Post(ts.URL+"/api/options/provider", "application/json", bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("POST /api/options/provider: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected 400 for invalid effort, got %d", resp.StatusCode)
 	}
 }
 

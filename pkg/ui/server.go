@@ -295,7 +295,7 @@ type presenceUser struct {
 
 // ChatMessage is a single turn in the chat conversation history.
 type ChatMessage struct {
-	Role      string    `json:"role"`            // "user" or "assistant"
+	Role      string    `json:"role"` // "user" or "assistant"
 	Content   string    `json:"content"`
 	Timestamp time.Time `json:"timestamp"`
 	Action    string    `json:"action,omitempty"` // resolved cloop command, if any
@@ -402,9 +402,9 @@ type Server struct {
 	// in handleWS's deferred cleanup so the map stays bounded by the
 	// number of *currently connected* IPs rather than the lifetime
 	// distinct-IP set.
-	wsConnMu     sync.Mutex
-	wsConnTotal  int
-	wsConnPerIP  map[string]int
+	wsConnMu    sync.Mutex
+	wsConnTotal int
+	wsConnPerIP map[string]int
 
 	// Conflict tracker: per-project, per-task-field last-edit records.
 	// Outer key: workDir, inner key: "taskID:field".
@@ -412,7 +412,7 @@ type Server struct {
 	conflictTracker map[string]map[string]*conflictEntry
 
 	// Rate limiting: tracks per-IP auth failure counts.
-	authMu   sync.Mutex
+	authMu    sync.Mutex
 	authFails map[string]*authFailEntry
 
 	// Per-IP request rate-limit buckets.
@@ -2283,7 +2283,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	for _, cl := range s.hubClients {
 		totalClients += len(cl)
 	}
-	name  := presenceNames[totalClients%len(presenceNames)]
+	name := presenceNames[totalClients%len(presenceNames)]
 	color := presenceColors[totalClients%len(presenceColors)]
 	// Override with user-supplied name/color from query params if provided.
 	// Both fields are echoed to every other connected client via the presence
@@ -2702,7 +2702,8 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 			"model":    cfg.Ollama.Model,
 		},
 		"claudecode": map[string]string{
-			"model": cfg.ClaudeCode.Model,
+			"model":  cfg.ClaudeCode.Model,
+			"effort": cfg.ClaudeCode.Effort,
 		},
 	})
 }
@@ -2765,6 +2766,11 @@ func applyUIConfigKey(cfg *config.Config, key, value string) error {
 		cfg.Ollama.Model = value
 	case "claudecode.model":
 		cfg.ClaudeCode.Model = value
+	case "claudecode.effort":
+		if !provider.ValidEffort(value) {
+			return fmt.Errorf("invalid effort %q — valid: %s (or empty to clear)", value, strings.Join(provider.EffortLevels, ", "))
+		}
+		cfg.ClaudeCode.Effort = value
 	default:
 		return fmt.Errorf("unknown config key %q", key)
 	}
@@ -3453,14 +3459,14 @@ func (s *Server) handleTaskDetails(w http.ResponseWriter, r *http.Request) {
 	}
 
 	jsonOK(w, map[string]interface{}{
-		"ok":                  true,
-		"task":                task,
-		"artifact_body":       artifactBody,
-		"artifact_truncated":  artifactTruncated,
-		"artifact_path":       artifactSourcePath,
-		"live_body":           liveBody,
-		"live_truncated":      liveTruncated,
-		"live_path":           livePath,
+		"ok":                 true,
+		"task":               task,
+		"artifact_body":      artifactBody,
+		"artifact_truncated": artifactTruncated,
+		"artifact_path":      artifactSourcePath,
+		"live_body":          liveBody,
+		"live_truncated":     liveTruncated,
+		"live_path":          livePath,
 	})
 }
 
@@ -3792,6 +3798,7 @@ func (s *Server) handleInit(w http.ResponseWriter, r *http.Request) {
 		Goal         string `json:"goal"`
 		Provider     string `json:"provider"`
 		Model        string `json:"model"`
+		Effort       string `json:"effort"`
 		Instructions string `json:"instructions"`
 		MaxSteps     int    `json:"maxSteps"`
 		PMMode       bool   `json:"pmMode"`
@@ -3806,6 +3813,10 @@ func (s *Server) handleInit(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "goal is required", http.StatusBadRequest)
 		return
 	}
+	if !provider.ValidEffort(req.Effort) {
+		jsonErr(w, "invalid effort "+strconv.Quote(req.Effort)+" — valid: "+strings.Join(provider.EffortLevels, ", "), http.StatusBadRequest)
+		return
+	}
 
 	ps, err := state.Init(s.resolveWorkDir(r), req.Goal, req.MaxSteps)
 	if err != nil {
@@ -3817,6 +3828,9 @@ func (s *Server) handleInit(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Model != "" {
 		ps.Model = req.Model
+	}
+	if req.Effort != "" {
+		ps.Effort = req.Effort
 	}
 	if req.Provider != "" {
 		ps.Provider = req.Provider
@@ -3832,8 +3846,9 @@ func (s *Server) handleInit(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleGoal returns or updates the project goal.
-//   GET  /api/goal  -> { "goal": "..." }
-//   PUT  /api/goal  -> body { "goal": "..." }; updates the saved project goal
+//
+//	GET  /api/goal  -> { "goal": "..." }
+//	PUT  /api/goal  -> body { "goal": "..." }; updates the saved project goal
 func (s *Server) handleGoal(w http.ResponseWriter, r *http.Request) {
 	workDir := s.resolveWorkDir(r)
 	switch r.Method {
@@ -3880,8 +3895,9 @@ func (s *Server) handleGoal(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleInstructions returns or updates the project instructions/constraints.
-//   GET          /api/instructions -> { "instructions": "..." }
-//   PUT or POST  /api/instructions -> body { "instructions": "..." }
+//
+//	GET          /api/instructions -> { "instructions": "..." }
+//	PUT or POST  /api/instructions -> body { "instructions": "..." }
 //
 // Instructions are stored in ProjectState and prepended to every task prompt.
 // The empty string is allowed (clears the field).
@@ -4656,10 +4672,10 @@ func (s *Server) handleQueueStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out := map[string]int{
-		"queued": stats[taskqueue.StatusQueued],
+		"queued":  stats[taskqueue.StatusQueued],
 		"running": stats[taskqueue.StatusRunning],
-		"done": stats[taskqueue.StatusDone],
-		"failed": stats[taskqueue.StatusFailed],
+		"done":    stats[taskqueue.StatusDone],
+		"failed":  stats[taskqueue.StatusFailed],
 		"skipped": stats[taskqueue.StatusSkipped],
 	}
 	jsonOK(w, out)
@@ -4776,7 +4792,8 @@ func (s *Server) handleReplayRunGet(w http.ResponseWriter, r *http.Request) {
 
 // handleReplayRunCreate triggers a new replay and returns the result.
 // Body: {"task_id": 42, "provider": "anthropic", "model": "claude-opus-4-5",
-//        "judge": "anthropic:claude-opus-4-5"}
+//
+//	"judge": "anthropic:claude-opus-4-5"}
 //
 // The replay is performed synchronously: this can take minutes for slow
 // providers, so the request timeout should be generous (the per-call timeout
@@ -4789,7 +4806,7 @@ func (s *Server) handleReplayRunCreate(w http.ResponseWriter, r *http.Request) {
 		TaskID    int    `json:"task_id"`
 		Provider  string `json:"provider"`
 		Model     string `json:"model"`
-		Judge     string `json:"judge"`     // "<provider>:<model>" or empty
+		Judge     string `json:"judge"` // "<provider>:<model>" or empty
 		MaxTokens int    `json:"max_tokens"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -5084,13 +5101,15 @@ func (s *Server) handleProjectStop(w http.ResponseWriter, r *http.Request) {
 //
 // POST /api/projects/new
 // Body: { "dir": "/abs/or/relative/path", "goal": "...", "provider": "...",
-//         "model": "...", "pmMode": false, "autoRun": false }
+//
+//	"model": "...", "pmMode": false, "autoRun": false }
 func (s *Server) handleProjectNew(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Dir      string `json:"dir"`
 		Goal     string `json:"goal"`
 		Provider string `json:"provider"`
 		Model    string `json:"model"`
+		Effort   string `json:"effort"`
 		PMMode   bool   `json:"pmMode"`
 		AutoRun  bool   `json:"autoRun"`
 	}
@@ -5107,6 +5126,10 @@ func (s *Server) handleProjectNew(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Dir == "" {
 		jsonErr(w, "dir is required", http.StatusBadRequest)
+		return
+	}
+	if !provider.ValidEffort(req.Effort) {
+		jsonErr(w, "invalid effort "+strconv.Quote(req.Effort)+" — valid: "+strings.Join(provider.EffortLevels, ", "), http.StatusBadRequest)
 		return
 	}
 
@@ -5134,6 +5157,9 @@ func (s *Server) handleProjectNew(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Model != "" {
 		args = append(args, "--model", req.Model)
+	}
+	if req.Effort != "" {
+		args = append(args, "--effort", req.Effort)
 	}
 	cmd := exec.Command(exe, args...)
 	cmd.Dir = abs
@@ -5446,7 +5472,7 @@ func (s *Server) handleTimeline(w http.ResponseWriter, r *http.Request) {
 
 	// Build enriched response bars with extra fields for the UI tooltip.
 	type TimelineBar struct {
-		TaskID           int   `json:"taskId"`
+		TaskID           int    `json:"taskId"`
 		Title            string `json:"title"`
 		Start            string `json:"start"`
 		End              string `json:"end"`
@@ -5759,10 +5785,10 @@ func (s *Server) handleAnalytics(w http.ResponseWriter, r *http.Request) {
 					continue
 				}
 				var cp struct {
-					Event     string    `json:"event"`
-					Provider  string    `json:"provider"`
-					ElapsedSec float64  `json:"elapsed_sec"`
-					Timestamp time.Time `json:"timestamp"`
+					Event      string    `json:"event"`
+					Provider   string    `json:"provider"`
+					ElapsedSec float64   `json:"elapsed_sec"`
+					Timestamp  time.Time `json:"timestamp"`
 				}
 				if err := json.Unmarshal(raw, &cp); err != nil {
 					continue
@@ -5891,8 +5917,8 @@ func (s *Server) handleBudgetGet(w http.ResponseWriter, r *http.Request) {
 
 	jsonOK(w, map[string]interface{}{
 		"global": map[string]interface{}{
-			"daily_usd_limit":    globalCfg.DailyUSDLimit,
-			"daily_token_limit":  globalCfg.DailyTokenLimit,
+			"daily_usd_limit":     globalCfg.DailyUSDLimit,
+			"daily_token_limit":   globalCfg.DailyTokenLimit,
 			"alert_threshold_pct": globalCfg.AlertThresholdPct,
 		},
 		"usage": map[string]interface{}{
@@ -5925,9 +5951,9 @@ func (s *Server) handleBudgetGet(w http.ResponseWriter, r *http.Request) {
 // handleBudgetGlobalSave saves global budget limits. PUT /api/budget/global
 func (s *Server) handleBudgetGlobalSave(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		DailyUSDLimit    float64 `json:"daily_usd_limit"`
-		DailyTokenLimit  int     `json:"daily_token_limit"`
-		AlertThresholdPct int    `json:"alert_threshold_pct"`
+		DailyUSDLimit     float64 `json:"daily_usd_limit"`
+		DailyTokenLimit   int     `json:"daily_token_limit"`
+		AlertThresholdPct int     `json:"alert_threshold_pct"`
 	}
 	limitJSONBody(w, r, maxJSONBodyBytes)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -5951,8 +5977,8 @@ func (s *Server) handleBudgetGlobalSave(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	cfg := globalbudget.GlobalBudgetConfig{
-		DailyUSDLimit:    req.DailyUSDLimit,
-		DailyTokenLimit:  req.DailyTokenLimit,
+		DailyUSDLimit:     req.DailyUSDLimit,
+		DailyTokenLimit:   req.DailyTokenLimit,
 		AlertThresholdPct: req.AlertThresholdPct,
 	}
 	if err := globalbudget.Save(cfg); err != nil {
@@ -6461,21 +6487,24 @@ func (s *Server) handleTaskTimeoutSet(w http.ResponseWriter, r *http.Request) {
 	}
 	s.broadcastStateDiff(workDir, ps)
 	jsonOK(w, map[string]interface{}{
-		"ok":                   true,
-		"default_max_minutes":  ps.DefaultMaxMinutes,
+		"ok":                  true,
+		"default_max_minutes": ps.DefaultMaxMinutes,
 	})
 }
 
-// handleProviderModelSet persists the provider and/or model on the project state
-// so that subsequent runs (including the persistent UI Run buttons) use it
-// without needing to be passed on every invocation. Empty values mean "leave
-// unchanged"; sending an empty string for both is a no-op.
+// handleProviderModelSet persists the provider, model and/or effort on the
+// project state so that subsequent runs (including the persistent UI Run
+// buttons) use them without needing to be passed on every invocation. Empty
+// provider/model mean "leave unchanged"; effort is a pointer so an omitted
+// field leaves it unchanged while an explicit "" clears it back to the
+// provider default.
 //
-// POST /api/options/provider  body: {"provider":"...","model":"..."}
+// POST /api/options/provider  body: {"provider":"...","model":"...","effort":"..."}
 func (s *Server) handleProviderModelSet(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Provider string `json:"provider"`
-		Model    string `json:"model"`
+		Provider string  `json:"provider"`
+		Model    string  `json:"model"`
+		Effort   *string `json:"effort"`
 	}
 	limitJSONBody(w, r, maxJSONBodyBytes)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -6490,6 +6519,10 @@ func (s *Server) handleProviderModelSet(w http.ResponseWriter, r *http.Request) 
 			jsonErr(w, "unsupported provider: "+req.Provider, http.StatusBadRequest)
 			return
 		}
+	}
+	if req.Effort != nil && !provider.ValidEffort(*req.Effort) {
+		jsonErr(w, "invalid effort "+strconv.Quote(*req.Effort)+" — valid: "+strings.Join(provider.EffortLevels, ", "), http.StatusBadRequest)
+		return
 	}
 	workDir := s.resolveWorkDir(r)
 	ps, err := state.Load(workDir)
@@ -6508,6 +6541,9 @@ func (s *Server) handleProviderModelSet(w http.ResponseWriter, r *http.Request) 
 	} else if req.Provider != "" {
 		ps.Model = ""
 	}
+	if req.Effort != nil {
+		ps.Effort = *req.Effort
+	}
 	if err := ps.SaveDirect(); err != nil {
 		jsonErr(w, "save failed: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -6517,6 +6553,7 @@ func (s *Server) handleProviderModelSet(w http.ResponseWriter, r *http.Request) 
 		"ok":       true,
 		"provider": ps.Provider,
 		"model":    ps.Model,
+		"effort":   ps.Effort,
 	})
 }
 
@@ -8292,7 +8329,17 @@ const dashboardHTML = `<!DOCTYPE html>
               <label class="form-label">Max steps (0=unlimited)</label>
               <input class="form-input" id="initMaxSteps" type="number" min="0" value="0">
             </div>
-            <div class="form-group"></div>
+            <div class="form-group">
+              <label class="form-label">Effort (claudecode)</label>
+              <select class="form-select" id="initEffort">
+                <option value="">(default)</option>
+                <option value="low">low</option>
+                <option value="medium">medium</option>
+                <option value="high">high</option>
+                <option value="xhigh">xhigh</option>
+                <option value="max">max</option>
+              </select>
+            </div>
           </div>
           <div class="form-group">
             <label class="form-label">Instructions / constraints (optional)</label>
@@ -9461,6 +9508,20 @@ const dashboardHTML = `<!DOCTYPE html>
         <select class="form-select" id="npModel"></select>
       </div>
     </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label class="form-label">Effort (claudecode)</label>
+        <select class="form-select" id="npEffort">
+          <option value="">(default)</option>
+          <option value="low">low</option>
+          <option value="medium">medium</option>
+          <option value="high">high</option>
+          <option value="xhigh">xhigh</option>
+          <option value="max">max</option>
+        </select>
+      </div>
+      <div class="form-group"></div>
+    </div>
     <div class="adv-grid" style="margin-bottom:12px">
       <label class="adv-label"><input type="checkbox" id="npPMMode"> PM mode</label>
       <label class="adv-label"><input type="checkbox" id="npAutoRun"> Start run immediately</label>
@@ -9492,6 +9553,21 @@ const dashboardHTML = `<!DOCTYPE html>
         <select class="form-select" id="pmModel"></select>
       </div>
     </div>
+    <div class="form-row">
+      <div class="form-group" style="flex:1">
+        <label class="form-label">Effort</label>
+        <select class="form-select" id="pmEffort">
+          <option value="">(default)</option>
+          <option value="low">low</option>
+          <option value="medium">medium</option>
+          <option value="high">high</option>
+          <option value="xhigh">xhigh</option>
+          <option value="max">max</option>
+        </select>
+      </div>
+      <div class="form-group" style="flex:1"></div>
+    </div>
+    <p id="pmEffortHint" style="display:none;font-size:11px;color:var(--muted);margin-top:-6px;margin-bottom:6px">Effort applies to the claudecode provider only.</p>
     <p style="font-size:12px;color:var(--muted);margin-top:6px;margin-bottom:8px">
       Saved on the project. Used by all subsequent runs (Run, Run PM, Run with options) until changed.
     </p>
@@ -10070,14 +10146,16 @@ function updateModelDropdown() {
   sel.innerHTML = models.map(m => '<option value="'+m.value+'">'+m.label+'</option>').join('');
 }
 
-// Track current project's provider+model for pre-populating the
+// Track current project's provider+model+effort for pre-populating the
 // Provider/Model picker modal opened from the Provider stat card.
 let _currentProvider = '';
 let _currentModel = '';
+let _currentEffort = '';
 
 function prepopulateAdvancedRunOptions(s) {
   _currentProvider = s.provider || '';
   _currentModel    = s.model    || '';
+  _currentEffort   = s.effort   || '';
 }
 
 // Render the "Active Options" badge grid showing which CLI flags are persistently
@@ -10567,7 +10645,7 @@ function render(s) {
   document.getElementById('statSteps').textContent    = steps;
   document.getElementById('statStepsSub').textContent = s.max_steps > 0 ? 'of '+s.max_steps+' max' : 'unlimited';
   document.getElementById('statProvider').textContent = s.provider || 'claudecode';
-  document.getElementById('statModel').textContent    = s.model || '';
+  document.getElementById('statModel').textContent    = (s.model || '') + (s.effort ? ' @ ' + s.effort : '');
   prepopulateAdvancedRunOptions(s);
   renderActiveOptions(s);
   if (typeof updateCCLimitsVisibility === 'function') updateCCLimitsVisibility(s.provider || 'claudecode');
@@ -12203,9 +12281,23 @@ window.openProviderModelModal = function() {
     }
   }
   populatePMModelDropdown(_currentModel || '');
+  const effSel = document.getElementById('pmEffort');
+  if (effSel) effSel.value = _currentEffort || '';
+  updatePMEffortAvailability();
   const el = document.getElementById('provider-model-overlay');
   if (el) el.style.display = 'flex';
 };
+
+// Effort is only honored by the claudecode provider — gray it out (but keep
+// the saved value) for the others so the modal doesn't imply support.
+function updatePMEffortAvailability() {
+  const prov   = (document.getElementById('pmProvider') || {}).value || 'claudecode';
+  const effSel = document.getElementById('pmEffort');
+  const hint   = document.getElementById('pmEffortHint');
+  const isCC   = prov === 'claudecode';
+  if (effSel) effSel.disabled = !isCC;
+  if (hint) hint.style.display = isCC ? 'none' : '';
+}
 
 window.closeProviderModelModal = function() {
   const el = document.getElementById('provider-model-overlay');
@@ -12214,6 +12306,7 @@ window.closeProviderModelModal = function() {
 
 window.onPMProviderChange = function() {
   populatePMModelDropdown('');
+  updatePMEffortAvailability();
 };
 
 function populatePMModelDropdown(preselect) {
@@ -12229,15 +12322,16 @@ function populatePMModelDropdown(preselect) {
 window.saveProviderModel = function() {
   const provider = (document.getElementById('pmProvider') || {}).value || '';
   const model    = (document.getElementById('pmModel')    || {}).value || '';
+  const effort   = (document.getElementById('pmEffort')   || {}).value || '';
   const errEl    = document.getElementById('pmError');
   if (errEl) errEl.style.display = 'none';
-  apiMethod('POST', pUrl('/api/options/provider'), {provider, model}).then(d => {
+  apiMethod('POST', pUrl('/api/options/provider'), {provider, model, effort}).then(d => {
     if (!d || !d.ok) {
       if (errEl) { errEl.textContent = (d && d.error) || 'Failed to save'; errEl.style.display = ''; }
       return;
     }
     closeProviderModelModal();
-    toast('Provider saved: ' + (d.provider || provider) + (d.model ? ' / ' + d.model : ''), 'ok');
+    toast('Provider saved: ' + (d.provider || provider) + (d.model ? ' / ' + d.model : '') + (d.effort ? ' @ ' + d.effort : ''), 'ok');
     // Task 20134: handleProviderModelSet (server) calls broadcastStateDiff
     // after saving — the resulting state_diff WebSocket event keeps the UI
     // in sync without a redundant /api/state refetch.
@@ -12350,6 +12444,8 @@ window.openNewProjectModal = function() {
   document.getElementById('npGoal').value    = '';
   document.getElementById('npProvider').value = '';
   _npUpdateModels();
+  const npEff = document.getElementById('npEffort');
+  if (npEff) npEff.value = '';
   document.getElementById('npPMMode').checked = false;
   document.getElementById('npAutoRun').checked = false;
   document.getElementById('npError').style.display = 'none';
@@ -12367,13 +12463,14 @@ window.submitNewProject = function() {
   const goal     = document.getElementById('npGoal').value.trim();
   const provider = document.getElementById('npProvider').value;
   const model    = document.getElementById('npModel').value.trim();
+  const effort   = (document.getElementById('npEffort') || {}).value || '';
   const pmMode   = document.getElementById('npPMMode').checked;
   const autoRun  = document.getElementById('npAutoRun').checked;
   const errEl    = document.getElementById('npError');
   if (!dir)  { errEl.textContent = 'Directory is required'; errEl.style.display = ''; return; }
   if (!goal) { errEl.textContent = 'Goal is required'; errEl.style.display = ''; return; }
   errEl.style.display = 'none';
-  api('/api/projects/new', {dir, goal, provider, model, pmMode, autoRun}).then(d => {
+  api('/api/projects/new', {dir, goal, provider, model, effort, pmMode, autoRun}).then(d => {
     if (!d.ok) { errEl.textContent = d.error || 'Failed to create project'; errEl.style.display = ''; return; }
     closeNewProjectModal();
     toast('Project created: ' + dir, 'ok');
@@ -13681,6 +13778,7 @@ window.submitInit = function() {
     goal:         goal,
     provider:     document.getElementById('initProvider').value,
     model:        document.getElementById('initModel').value,
+    effort:       (document.getElementById('initEffort') || {}).value || '',
     maxSteps:     parseInt(document.getElementById('initMaxSteps').value)||0,
     instructions: document.getElementById('initInstructions').value.trim(),
     pmMode:       document.getElementById('initPMMode').checked,

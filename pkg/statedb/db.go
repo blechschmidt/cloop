@@ -22,12 +22,12 @@ import (
 // State mirrors pkg/state.ProjectState but is owned by this package to avoid
 // import cycles. pkg/state converts between the two representations.
 type State struct {
-	Goal              string
-	WorkDir           string
-	MaxSteps          int
-	CurrentStep       int
-	Status            string
-	Steps             []StepRow
+	Goal        string
+	WorkDir     string
+	MaxSteps    int
+	CurrentStep int
+	Status      string
+	Steps       []StepRow
 	// StepCount mirrors len(Steps) on full loads but is also populated by
 	// LoadStateLite — where Steps is nil — so callers that only need a
 	// count don't have to materialize every row's Output (Task 20125).
@@ -44,6 +44,7 @@ type State struct {
 	AutoEvolve        bool
 	EvolveStep        int
 	Provider          string
+	Effort            string
 	PMMode            bool
 	Plan              *pm.Plan
 	Milestones        []*milestone.Milestone
@@ -235,6 +236,7 @@ func (d *DB) saveStateLocked(s *State) error {
 		"auto_evolve":         boolStr(s.AutoEvolve),
 		"evolve_step":         strconv.Itoa(s.EvolveStep),
 		"provider":            s.Provider,
+		"effort":              s.Effort,
 		"pm_mode":             boolStr(s.PMMode),
 		"total_input_tokens":  strconv.Itoa(s.TotalInputTokens),
 		"total_output_tokens": strconv.Itoa(s.TotalOutputTokens),
@@ -375,6 +377,7 @@ func (d *DB) loadStateMetaTx() (*State, error) {
 	s.AutoEvolve = metaMap["auto_evolve"] == "1"
 	s.EvolveStep = atoi(metaMap["evolve_step"])
 	s.Provider = metaMap["provider"]
+	s.Effort = metaMap["effort"]
 	s.PMMode = metaMap["pm_mode"] == "1"
 	s.TotalInputTokens = atoi(metaMap["total_input_tokens"])
 	s.TotalOutputTokens = atoi(metaMap["total_output_tokens"])
@@ -696,9 +699,9 @@ func loadTasks(conn *sql.DB) ([]*pm.Task, error) {
 	for rows.Next() {
 		t := &pm.Task{}
 		var (
-			status, role, depsJSON, tagsJSON, annJSON string
+			status, role, depsJSON, tagsJSON, annJSON   string
 			startedAt, completedAt, deadline, nextRunAt sql.NullString
-			reqApproval, approved                     int
+			reqApproval, approved                       int
 		)
 		if err := rows.Scan(
 			&t.ID, &t.Title, &t.Description, &t.Priority, &status, &role,
@@ -889,16 +892,16 @@ func scanCostRows(rows *sql.Rows) ([]CostEntry, error) {
 
 // StuckEvent records one watchdog detection of a stuck in-flight task.
 type StuckEvent struct {
-	ID                int64
-	TaskID            int
-	TaskTitle         string
-	StartedAt         time.Time
-	DetectedAt        time.Time
-	StuckForSeconds   int
-	ArtifactIdleSecs  int
-	ArtifactPath      string
-	AutoKilled        bool
-	Note              string
+	ID               int64
+	TaskID           int
+	TaskTitle        string
+	StartedAt        time.Time
+	DetectedAt       time.Time
+	StuckForSeconds  int
+	ArtifactIdleSecs int
+	ArtifactPath     string
+	AutoKilled       bool
+	Note             string
 }
 
 // AppendStuck inserts a stuck-task event row. The watchdog calls this once

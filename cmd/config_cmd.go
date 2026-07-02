@@ -8,6 +8,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/configdiff"
+	"github.com/blechschmidt/cloop/pkg/provider"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
@@ -134,6 +135,11 @@ func applyConfigKey(cfg *config.Config, key, value string) error {
 
 	case "claudecode.model":
 		cfg.ClaudeCode.Model = value
+	case "claudecode.effort":
+		if !provider.ValidEffort(value) {
+			return fmt.Errorf("invalid effort %q — valid: %s (or empty to clear)", value, strings.Join(provider.EffortLevels, ", "))
+		}
+		cfg.ClaudeCode.Effort = value
 
 	case "notify.slack_webhook":
 		cfg.Notify.SlackWebhook = value
@@ -305,7 +311,7 @@ func applyConfigKey(cfg *config.Config, key, value string) error {
 		cfg.UI.MaxWebSocketConnsPerIP = n
 
 	default:
-		return fmt.Errorf("unknown config key %q\n\nValid keys:\n  provider\n  anthropic.api_key, anthropic.model, anthropic.base_url\n  openai.api_key, openai.model, openai.base_url\n  ollama.base_url, ollama.model\n  claudecode.model\n  mock.responses_file, mock.default\n  webhook.url, webhook.events\n  notify.slack_webhook, notify.discord_webhook\n  github.token, github.repo, github.labels\n  sync.remote, sync.branch\n  tracing.enabled, tracing.endpoint, tracing.service_name\n  max_parallel\n  rate_limit.requests_per_second, rate_limit.burst\n  budget.monthly_usd, budget.daily_usd_limit, budget.daily_token_limit\n  budget.alert_threshold_pct, budget.global_usd_pct, budget.global_token_pct\n  ui.max_websocket_conns, ui.max_websocket_conns_per_ip", key)
+		return fmt.Errorf("unknown config key %q\n\nValid keys:\n  provider\n  anthropic.api_key, anthropic.model, anthropic.base_url\n  openai.api_key, openai.model, openai.base_url\n  ollama.base_url, ollama.model\n  claudecode.model, claudecode.effort\n  mock.responses_file, mock.default\n  webhook.url, webhook.events\n  notify.slack_webhook, notify.discord_webhook\n  github.token, github.repo, github.labels\n  sync.remote, sync.branch\n  tracing.enabled, tracing.endpoint, tracing.service_name\n  max_parallel\n  rate_limit.requests_per_second, rate_limit.burst\n  budget.monthly_usd, budget.daily_usd_limit, budget.daily_token_limit\n  budget.alert_threshold_pct, budget.global_usd_pct, budget.global_token_pct\n  ui.max_websocket_conns, ui.max_websocket_conns_per_ip", key)
 	}
 	return nil
 }

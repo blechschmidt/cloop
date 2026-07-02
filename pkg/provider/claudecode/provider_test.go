@@ -425,3 +425,38 @@ func fakeClaudeScript(t *testing.T, script string) string {
 	}
 	return dir
 }
+
+// --- buildArgs ---
+
+func TestBuildArgs_Effort(t *testing.T) {
+	base := []string{"--print", "--output-format", "text", "--permission-mode", "bypassPermissions"}
+
+	// Valid effort levels are passed through as --effort <level>.
+	for _, lvl := range provider.EffortLevels {
+		args := buildArgs(provider.Options{Effort: lvl})
+		want := append(append([]string{}, base...), "--effort", lvl)
+		if strings.Join(args, " ") != strings.Join(want, " ") {
+			t.Errorf("effort %q: args = %v, want %v", lvl, args, want)
+		}
+	}
+
+	// Empty effort adds no flag.
+	if args := buildArgs(provider.Options{}); strings.Contains(strings.Join(args, " "), "--effort") {
+		t.Errorf("empty effort must not add --effort, got %v", args)
+	}
+
+	// Invalid effort (e.g. corrupted state) is dropped rather than passed to the CLI.
+	if args := buildArgs(provider.Options{Effort: "turbo"}); strings.Contains(strings.Join(args, " "), "--effort") {
+		t.Errorf("invalid effort must not add --effort, got %v", args)
+	}
+}
+
+func TestBuildArgs_ModelAndMaxTokens(t *testing.T) {
+	args := buildArgs(provider.Options{Model: "claude-sonnet-4-6", MaxTokens: 500, Effort: "high"})
+	joined := strings.Join(args, " ")
+	for _, want := range []string{"--model claude-sonnet-4-6", "--max-tokens 500", "--effort high"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("args missing %q: %v", want, args)
+		}
+	}
+}

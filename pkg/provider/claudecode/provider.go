@@ -47,9 +47,10 @@ func findClaude() string {
 	return "claude" // fall back, will produce a clear error
 }
 
-func (p *Provider) Complete(ctx context.Context, prompt string, opts provider.Options) (*provider.Result, error) {
-	envOnce.Do(loadEnvFiles)
-
+// buildArgs assembles the claude CLI argument list for a completion call.
+// Split out from Complete so the flag mapping is unit-testable without
+// spawning the real binary.
+func buildArgs(opts provider.Options) []string {
 	args := []string{"--print", "--output-format", "text", "--permission-mode", "bypassPermissions"}
 	if opts.Model != "" {
 		args = append(args, "--model", opts.Model)
@@ -57,6 +58,19 @@ func (p *Provider) Complete(ctx context.Context, prompt string, opts provider.Op
 	if opts.MaxTokens > 0 {
 		args = append(args, "--max-tokens", fmt.Sprintf("%d", opts.MaxTokens))
 	}
+	// Reasoning-effort level (low/medium/high/xhigh/max). Guarded by
+	// ValidEffort so a corrupted state value can never inject an unknown
+	// flag value that would make every CLI invocation fail.
+	if opts.Effort != "" && provider.ValidEffort(opts.Effort) {
+		args = append(args, "--effort", opts.Effort)
+	}
+	return args
+}
+
+func (p *Provider) Complete(ctx context.Context, prompt string, opts provider.Options) (*provider.Result, error) {
+	envOnce.Do(loadEnvFiles)
+
+	args := buildArgs(opts)
 
 	timeout := opts.Timeout
 	if timeout > 0 {

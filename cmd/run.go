@@ -28,6 +28,7 @@ import (
 
 var (
 	runModel                 string
+	runEffort                string
 	stepTimeout              string
 	runTimeout               string
 	runMaxTokens             int
@@ -209,6 +210,22 @@ Press Ctrl+C to pause gracefully.`,
 				model = cfg.Ollama.Model
 			case "claudecode":
 				model = cfg.ClaudeCode.Model
+			}
+		}
+
+		// Effort: flag > config default. Empty leaves the effort persisted in
+		// project state (set at init or via the Web UI) untouched — the
+		// orchestrator only overrides state when this resolves non-empty,
+		// mirroring model resolution above.
+		effort := runEffort
+		if !provider.ValidEffort(effort) {
+			return fmt.Errorf("invalid --effort %q — valid: %s (or empty for provider default)", effort, strings.Join(provider.EffortLevels, ", "))
+		}
+		if effort == "" && providerName == "claudecode" {
+			effort = cfg.ClaudeCode.Effort
+			if !provider.ValidEffort(effort) {
+				fmt.Fprintf(os.Stderr, "warning: ignoring invalid claudecode.effort %q in config — valid: %s\n", effort, strings.Join(provider.EffortLevels, ", "))
+				effort = ""
 			}
 		}
 
@@ -442,6 +459,7 @@ Press Ctrl+C to pause gracefully.`,
 			CalibrationFactor:        cfg.CalibrationFactor,
 			ExtendedThinking:         extendedThinking,
 			ThinkingBudget:           thinkingBudget,
+			Effort:                   effort,
 			TracingEnabled:           cfg.Tracing.Enabled && cfg.Tracing.Endpoint != "",
 			AutoPromote:              autoPromote,
 			AutoPromoteThresholdDays: autoPromoteThresholdDays,
@@ -646,6 +664,7 @@ func buildProviderWithFallback(primaryName string, primaryCfg provider.ProviderC
 
 func init() {
 	runCmd.Flags().StringVar(&runModel, "model", "", "Override model for this run")
+	runCmd.Flags().StringVar(&runEffort, "effort", "", "Model reasoning-effort level: low, medium, high, xhigh, max (claudecode only; empty = provider default)")
 	runCmd.Flags().StringVar(&stepTimeout, "step-timeout", "0", "Timeout per step (e.g. 10m, 30m); 0 = disabled (default)")
 	runCmd.Flags().StringVar(&runTimeout, "timeout", "", "Total session timeout (e.g. 30m, 2h); 0 = no limit")
 	runCmd.Flags().IntVar(&runMaxTokens, "max-tokens", 0, "Max output tokens per step (overrides config provider.max_tokens)")

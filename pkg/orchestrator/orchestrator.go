@@ -84,12 +84,18 @@ type Config struct {
 	// ThinkingBudget is the token budget for reasoning content (default 8000).
 	// See provider.Options.ThinkingBudget for per-provider semantics.
 	ThinkingBudget int
-	Verbose        bool
-	DryRun         bool
-	PMMode         bool
-	PlanOnly       bool // only decompose tasks, don't execute them
-	RetryFailed    bool // retry failed tasks in PM mode
-	Replan         bool // force re-decompose goal (wipes existing plan, keeps history)
+
+	// Effort is the reasoning-effort level (low/medium/high/xhigh/max; empty =
+	// provider default). Non-empty overrides the effort persisted in project
+	// state, mirroring how Model overrides state.Model.
+	Effort string
+
+	Verbose     bool
+	DryRun      bool
+	PMMode      bool
+	PlanOnly    bool // only decompose tasks, don't execute them
+	RetryFailed bool // retry failed tasks in PM mode
+	Replan      bool // force re-decompose goal (wipes existing plan, keeps history)
 
 	// MaxFailures is the number of consecutive task failures before PM mode stops (0 = default 3).
 	MaxFailures int
@@ -439,6 +445,9 @@ func New(cfg Config, prov provider.Provider) (*Orchestrator, error) {
 	}
 	if cfg.Model != "" {
 		s.Model = cfg.Model
+	}
+	if cfg.Effort != "" {
+		s.Effort = cfg.Effort
 	}
 	// All work is tracked through the PM task pipeline; non-PM mode was removed
 	// in Task 20067 so every change is visible in the task list and auditable.
@@ -1956,7 +1965,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			if useConsensus {
 				dimColor.Printf("→ Running consensus (n=%d) on critical task %d...\n", o.config.ConsensusN, task.ID)
 				consensusProviders := o.buildConsensusProviders(taskProvider)
-				opts, _ := o.makeOpts(s.Model, false) // no streaming in consensus mode
+				opts, _ := o.makeOpts(s.Model, s.Effort, false) // no streaming in consensus mode
 				cOutput, cReport, cErr := consensus.RunConsensus(
 					taskCtx,
 					consensusProviders,
@@ -2006,7 +2015,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			} else {
 				dimColor.Printf("→ Running %s on task %d...\n", taskProvider.Name(), task.ID)
 
-				opts, wasStreamed := o.makeOpts(s.Model, true)
+				opts, wasStreamed := o.makeOpts(s.Model, s.Effort, true)
 				// Open live artifact file so `cloop task watch` can tail output.
 				liveFile, liveErr := artifact.OpenLiveArtifact(o.config.WorkDir, task.ID)
 				if liveErr != nil {
@@ -2268,7 +2277,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 				healPrompt := buildHealPrompt(healBasePrompt, diag, healAttempt, maxHealRetries)
 				healColor.Printf("[HEAL attempt %d/%d] Re-attempting task %d (variant: %s)...\n", healAttempt, maxHealRetries, task.ID, currentHealVariant.ID)
 
-				healOpts, healWasStreamed := o.makeOpts(s.Model, true)
+				healOpts, healWasStreamed := o.makeOpts(s.Model, s.Effort, true)
 				healResult, healErr := safeComplete(ctx, taskProvider, healPrompt, healOpts)
 				if healErr != nil {
 					_ = o.queue.MarkFailed(healQueueID, truncate(healErr.Error(), 200))
@@ -2352,7 +2361,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 						"You asked clarification questions instead of completing the task. " +
 						"Make your best judgment for ALL decisions and proceed to full completion. " +
 						"Do NOT ask for clarification or confirmation. Just do the work and finish with TASK_DONE."
-					clarifyOpts, clarifyWasStreamed := o.makeOpts(s.Model, true)
+					clarifyOpts, clarifyWasStreamed := o.makeOpts(s.Model, s.Effort, true)
 					clarifyResult, clarifyErr := safeComplete(ctx, taskProvider, clarifyPrompt, clarifyOpts)
 					if clarifyErr != nil {
 						clarifyOutcome = fmt.Sprintf("Clarification auto-resolve aborted on attempt %d/%d: provider error: %v.", clarifyAttempt, maxClarifyRetries, clarifyErr)
@@ -3600,7 +3609,7 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 				start := time.Now()
 				// Use role-specific provider if configured.
 				taskProvider := o.router.For(t.Role)
-				opts, _ := o.makeOpts(s.Model, false) // no streaming in parallel
+				opts, _ := o.makeOpts(s.Model, s.Effort, false) // no streaming in parallel
 				// Worktree-parallel: override the provider's working directory
 				// so file edits land in this task's isolated worktree instead
 				// of the shared project root. Falls through to o.config.WorkDir
@@ -4179,7 +4188,7 @@ func (o *Orchestrator) buildConsensusProviders(primary provider.Provider) []prov
 // token was received that way.  Callers should call printOutput() only when
 // wasStreamed() is false to avoid double-printing.
 // For parallel execution pass streaming=false to avoid interleaved output.
-func (o *Orchestrator) makeOpts(model string, streaming bool) (provider.Options, func() bool) {
+func (o *Orchestrator) makeOpts(model, effort string, streaming bool) (provider.Options, func() bool) {
 	var streamed bool
 	opts := provider.Options{
 		Model:            model,
@@ -4191,6 +4200,7 @@ func (o *Orchestrator) makeOpts(model string, streaming bool) (provider.Options,
 		FrequencyPenalty: o.config.FrequencyPenalty,
 		ExtendedThinking: o.config.ExtendedThinking,
 		ThinkingBudget:   o.config.ThinkingBudget,
+		Effort:           effort,
 	}
 	if streaming && o.config.Streaming {
 		opts.OnToken = func(token string) {
@@ -4326,7 +4336,7 @@ func (o *Orchestrator) evolvePM(ctx context.Context) (int, error) {
 	_ = o.queue.MarkRunning(evolveQueueID)
 
 	prompt := pm.EvolveDiscoverPrompt(s.Goal, s.Instructions, s.Plan, s.EvolveStep, s.InnovateMode)
-	opts, _ := o.makeOpts(s.Model, true)
+	opts, _ := o.makeOpts(s.Model, s.Effort, true)
 	result, err := safeComplete(ctx, o.provider, prompt, opts)
 	if err != nil {
 		_ = o.queue.MarkFailed(evolveQueueID, truncate(err.Error(), 200))
@@ -4368,7 +4378,7 @@ func (o *Orchestrator) evolvePM(ctx context.Context) (int, error) {
 
 	// Semantic deduplication: filter out candidates that duplicate existing work.
 	if !o.config.NoDedup {
-		dedupOpts, _ := o.makeOpts(s.Model, false)
+		dedupOpts, _ := o.makeOpts(s.Model, s.Effort, false)
 		deduped, dedupErr := pm.DeduplicateTasks(ctx, o.provider, dedupOpts, s.Plan.Tasks, newTasks)
 		if dedupErr != nil {
 			dimColor.Printf("  Dedup warning: %v\n", dedupErr)
