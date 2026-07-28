@@ -6,9 +6,11 @@ import (
 	"os/exec"
 	"runtime"
 	"strconv"
+	"time"
 
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/multiui"
+	"github.com/blechschmidt/cloop/pkg/oidcauth"
 	"github.com/blechschmidt/cloop/pkg/ui"
 	"github.com/spf13/cobra"
 )
@@ -79,6 +81,29 @@ task list (PM mode), live progress via SSE, and run/stop controls.
 			srv.MaxWebSocketConns = cfg.UI.MaxWebSocketConns
 			srv.MaxWebSocketConnsPerIP = cfg.UI.MaxWebSocketConnsPerIP
 			srv.AllowedWSOrigins = cfg.UI.AllowedWSOrigins
+
+			// Optional OIDC single sign-on (ui.oidc.* — Task 20152). Unlike
+			// the caps above this is fail-closed: a dashboard configured to
+			// require SSO must not silently start wide open, so an invalid
+			// OIDC config aborts startup with a descriptive error.
+			if cfg.UI.OIDC.Enabled {
+				auth, oidcErr := oidcauth.New(oidcauth.Config{
+					Enabled:      true,
+					Issuer:       cfg.UI.OIDC.Issuer,
+					ClientID:     cfg.UI.OIDC.ClientID,
+					ClientSecret: cfg.UI.OIDC.ClientSecret,
+					RedirectURL:  cfg.UI.OIDC.RedirectURL,
+					Scopes:       cfg.UI.OIDC.Scopes,
+					AdminEmails:  cfg.UI.OIDC.AdminEmails,
+					SessionTTL:   time.Duration(cfg.UI.OIDC.EffectiveSessionTTLHours()) * time.Hour,
+					CookieSecure: cfg.UI.OIDC.CookieSecure,
+				})
+				if oidcErr != nil {
+					return fmt.Errorf("ui.oidc is enabled but invalid: %w", oidcErr)
+				}
+				srv.OIDC = auth
+				fmt.Printf("OIDC authentication enabled (issuer: %s)\n", cfg.UI.OIDC.Issuer)
+			}
 		} else if err != nil {
 			fmt.Fprintf(os.Stderr, "warning: could not load config: %v\n", err)
 		}

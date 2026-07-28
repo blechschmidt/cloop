@@ -37,6 +37,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/kb"
 	"github.com/blechschmidt/cloop/pkg/logger"
 	"github.com/blechschmidt/cloop/pkg/multiui"
+	"github.com/blechschmidt/cloop/pkg/oidcauth"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/provider"
 	"github.com/blechschmidt/cloop/pkg/ratelimit"
@@ -72,6 +73,11 @@ type sseEvent struct {
 type sseClient struct {
 	ch     chan sseEvent
 	resync chan struct{}
+
+	// user is the OIDC identity bound to this stream at connect time; nil
+	// when OIDC is disabled or the client authenticated via bearer token.
+	// Broadcasters use it to send per-user filtered "projects" payloads.
+	user *oidcauth.Identity
 }
 
 // sseClientBufferSize mirrors hubClientBufferSize for SSE consumers.
@@ -180,6 +186,12 @@ type hubClient struct {
 	// TCP teardown via the deferred conn.CloseNow() and have no chance to
 	// distinguish "server going away" from a network blip.
 	conn *websocket.Conn
+
+	// user is the OIDC identity bound to this connection at upgrade time;
+	// nil when OIDC is disabled or the client authenticated via bearer
+	// token. Broadcasters use it to send per-user filtered "projects"
+	// payloads.
+	user *oidcauth.Identity
 }
 
 // hubClientBufferSize is the per-client outgoing buffer for WebSocket clients.
@@ -509,6 +521,14 @@ type Server struct {
 	// frame still sends the entire state so newly connected clients have
 	// something to diff against.
 	diffCache *stateCache
+
+	// OIDC is the optional OpenID Connect authenticator (Task 20152). Nil
+	// (the default) means OIDC is disabled and the dashboard behaves
+	// exactly as before: token auth if Token is set, otherwise open. Set
+	// from ui.oidc.* in .cloop/config.yaml by cmd/ui_cmd.go; when active it
+	// gates every route behind an IdP session and scopes the multi-project
+	// registry per user (see pkg/ui/oidc.go).
+	OIDC *oidcauth.Authenticator
 }
 
 // log returns s.Log, falling back to a default text logger if the field
@@ -659,11 +679,14 @@ func (s *Server) uiRateLimitMiddleware(next http.Handler) http.Handler {
 // resolveWorkDir returns the effective working directory for a request.
 // In multi-project mode the caller may supply ?project_idx=N to scope the
 // request to a registered project's directory instead of the server's WorkDir.
+// With OIDC enabled the index space is the requesting user's visible project
+// list (see visibleProjectEntries), so a user can never address another
+// user's project by index.
 func (s *Server) resolveWorkDir(r *http.Request) string {
 	if idx := r.URL.Query().Get("project_idx"); idx != "" {
 		i, err := strconv.Atoi(idx)
 		if err == nil {
-			entries := s.allProjectEntries()
+			entries := s.visibleProjectEntries(r)
 			if i >= 0 && i < len(entries) {
 				return entries[i].Path
 			}
@@ -814,6 +837,14 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	// Locally-vendored static assets (e.g. Chart.js). Served from the same
 	// origin so the strict script-src 'self' CSP doesn't block them.
 	mux.HandleFunc("/assets/chart.umd.min.js", s.handleChartJS)
+
+	// OIDC single sign-on (Task 20152). The /auth/* routes return 404 when
+	// OIDC is not enabled; /api/me instead reports oidc_enabled=false so
+	// the frontend knows not to render the user chip.
+	mux.HandleFunc("GET /auth/login", s.handleOIDCLogin)
+	mux.HandleFunc("GET /auth/callback", s.handleOIDCCallback)
+	mux.HandleFunc("POST /auth/logout", s.handleOIDCLogout)
+	mux.HandleFunc("GET /api/me", s.handleMe)
 
 	// Read-only state, WebSocket, and SSE (SSE kept as fallback)
 	mux.HandleFunc("/api/state", s.handleState)
@@ -1180,11 +1211,19 @@ func clientIP(r *http.Request) string {
 	return host
 }
 
-// authMiddleware enforces Bearer-token authentication on all /api/* routes when
-// s.Token is set. The root path "/" is always served without auth so the login
-// page can be loaded in the browser. Failed attempts are rate-limited per IP.
+// authMiddleware enforces authentication. With OIDC enabled (Server.OIDC
+// set) every route is gated behind an IdP session, with the static bearer
+// token still accepted for automation — see oidcGate in oidc.go. Otherwise
+// the original token-only behavior applies: Bearer-token auth on all /api/*
+// routes when s.Token is set; the root path "/" is always served without
+// auth so the login page can be loaded in the browser. Failed attempts are
+// rate-limited per IP in both modes.
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.oidcEnabled() {
+			s.oidcGate(next, w, r)
+			return
+		}
 		if s.Token == "" || r.URL.Path == "/" {
 			next.ServeHTTP(w, r)
 			return
@@ -1192,32 +1231,13 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 
 		ip := clientIP(r)
 
-		// Check rate limit before evaluating the token.
-		if s.Token != "" {
-			now := time.Now()
-			s.authMu.Lock()
-			entry, ok := s.authFails[ip]
-			if !ok {
-				if len(s.authFails) >= uiAuthFailsMaxEntries {
-					s.evictAuthFailsLocked(now)
-				}
-				entry = &authFailEntry{}
-				s.authFails[ip] = entry
-			}
-			entry.lastSeen = now
-			if entry.count >= authMaxFailures && now.Before(entry.lockedUntil) {
-				s.authMu.Unlock()
-				w.Header().Set("Content-Type", "application/json")
-				w.Header().Set("Retry-After", strconv.Itoa(authLockoutSeconds))
-				w.WriteHeader(http.StatusTooManyRequests)
-				json.NewEncoder(w).Encode(map[string]string{"error": "too many failed attempts, try again later"}) //nolint:errcheck
-				return
-			}
-			// Reset counter if lockout has expired.
-			if entry.count >= authMaxFailures && now.After(entry.lockedUntil) {
-				entry.count = 0
-			}
-			s.authMu.Unlock()
+		// Check the per-IP failure lockout before evaluating the token.
+		if s.authLockoutActive(ip) {
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Retry-After", strconv.Itoa(authLockoutSeconds))
+			w.WriteHeader(http.StatusTooManyRequests)
+			json.NewEncoder(w).Encode(map[string]string{"error": "too many failed attempts, try again later"}) //nolint:errcheck
+			return
 		}
 
 		// Check Authorization: Bearer <token> header. Constant-time compare
@@ -1235,25 +1255,57 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// Auth failed — increment failure counter. The entry created above
-		// may have been evicted by a concurrent request between the two
-		// critical sections, so re-check and recreate rather than deref nil.
-		s.authMu.Lock()
-		entry := s.authFails[ip]
-		if entry == nil {
-			entry = &authFailEntry{lastSeen: time.Now()}
-			s.authFails[ip] = entry
-		}
-		entry.count++
-		if entry.count >= authMaxFailures {
-			entry.lockedUntil = time.Now().Add(authLockoutSeconds * time.Second)
-		}
-		s.authMu.Unlock()
+		s.recordAuthFailure(ip)
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusUnauthorized)
 		json.NewEncoder(w).Encode(map[string]string{"error": "unauthorized"}) //nolint:errcheck
 	})
+}
+
+// authLockoutActive reports whether ip is currently locked out from
+// authenticating. As a side effect it refreshes the entry's lastSeen and
+// resets the failure counter once an expired lockout window has passed
+// (preserving the pre-extraction inline semantics).
+func (s *Server) authLockoutActive(ip string) bool {
+	now := time.Now()
+	s.authMu.Lock()
+	defer s.authMu.Unlock()
+	entry, ok := s.authFails[ip]
+	if !ok {
+		if len(s.authFails) >= uiAuthFailsMaxEntries {
+			s.evictAuthFailsLocked(now)
+		}
+		entry = &authFailEntry{}
+		s.authFails[ip] = entry
+	}
+	entry.lastSeen = now
+	if entry.count >= authMaxFailures && now.Before(entry.lockedUntil) {
+		return true
+	}
+	// Reset counter if lockout has expired.
+	if entry.count >= authMaxFailures && now.After(entry.lockedUntil) {
+		entry.count = 0
+	}
+	return false
+}
+
+// recordAuthFailure increments ip's auth failure counter and arms the
+// lockout once the threshold is crossed. The entry created by
+// authLockoutActive may have been evicted by a concurrent request between
+// the two critical sections, so re-check and recreate rather than deref nil.
+func (s *Server) recordAuthFailure(ip string) {
+	s.authMu.Lock()
+	entry := s.authFails[ip]
+	if entry == nil {
+		entry = &authFailEntry{lastSeen: time.Now()}
+		s.authFails[ip] = entry
+	}
+	entry.count++
+	if entry.count >= authMaxFailures {
+		entry.lockedUntil = time.Now().Add(authLockoutSeconds * time.Second)
+	}
+	s.authMu.Unlock()
 }
 
 // recoverGoroutine logs a panic + stack trace from a long-running goroutine
@@ -2120,6 +2172,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	c := &sseClient{
 		ch:     make(chan sseEvent, sseClientBufferSize),
 		resync: make(chan struct{}, 1),
+		user:   s.sessionIdentity(r),
 	}
 	s.mu.Lock()
 	s.clients[c] = struct{}{}
@@ -2393,6 +2446,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 	workDir := s.resolveWorkDir(r)
+	user := s.sessionIdentity(r)
 
 	// Assign a unique id, color-coded name and accent color to this connection.
 	connID := fmt.Sprintf("%x", time.Now().UnixNano())
@@ -2403,6 +2457,11 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	}
 	name := presenceNames[totalClients%len(presenceNames)]
 	color := presenceColors[totalClients%len(presenceColors)]
+	// With OIDC enabled, present the real signed-in user instead of a random
+	// animal name so collaborators see who is actually connected.
+	if user != nil {
+		name = boundedQueryString(user.DisplayName(), maxPresenceFieldLen)
+	}
 	// Override with user-supplied name/color from query params if provided.
 	// Both fields are echoed to every other connected client via the presence
 	// broadcast, so they're capped at maxPresenceFieldLen to prevent a single
@@ -2420,6 +2479,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		name:   name,
 		color:  color,
 		conn:   conn,
+		user:   user,
 	}
 	if s.hubClients[workDir] == nil {
 		s.hubClients[workDir] = make(map[*hubClient]struct{})
@@ -4494,7 +4554,7 @@ func (s *Server) allProjectEntries() []multiui.ProjectEntry {
 		if name == "" {
 			name = filepath.Base(abs)
 		}
-		entries = append(entries, multiui.ProjectEntry{Name: name, Path: abs})
+		entries = append(entries, multiui.ProjectEntry{Name: name, Path: abs, Owner: e.Owner})
 	}
 
 	return entries
@@ -4587,32 +4647,57 @@ func (s *Server) watchProjects(ctx context.Context) {
 	}
 }
 
-// broadcastProjectsUpdate sends the updated project statuses to SSE clients.
+// broadcastProjectsUpdate sends the updated project statuses to SSE and
+// WebSocket clients. With OIDC enabled each client receives the list
+// filtered to what its session user may see; payloads are marshalled once
+// per distinct visibility (not once per client). With OIDC disabled every
+// client shares the unfiltered payload, exactly as before.
 func (s *Server) broadcastProjectsUpdate() {
 	s.projMu.RLock()
 	statuses := s.projStatuses
-	stats := multiui.Aggregate(statuses)
 	s.projMu.RUnlock()
 
-	payload, err := json.Marshal(map[string]interface{}{
-		"projects": statuses,
-		"stats":    stats,
-	})
-	if err != nil {
+	var entries []multiui.ProjectEntry
+	if s.oidcEnabled() {
+		entries = s.allProjectEntries()
+	}
+	payloads := make(map[string][]byte, 1)
+	payloadFor := func(user *oidcauth.Identity) []byte {
+		key := s.visibilityKey(user)
+		if p, ok := payloads[key]; ok {
+			return p
+		}
+		visible, stats := s.filterStatusesForIdentity(user, entries, statuses)
+		p, err := json.Marshal(map[string]interface{}{
+			"projects": visible,
+			"stats":    stats,
+		})
+		if err != nil {
+			p = nil
+		}
+		payloads[key] = p
+		return p
+	}
+	// Pre-warm the unfiltered payload outside the client locks — it serves
+	// every client when OIDC is off (and all token/admin clients otherwise).
+	if payloadFor(nil) == nil && !s.oidcEnabled() {
 		return
 	}
+
 	s.mu.Lock()
 	for c := range s.clients {
-		s.sendSSEOrLag(c, sseEvent{Event: "projects", Data: string(payload)})
+		if p := payloadFor(c.user); p != nil {
+			s.sendSSEOrLag(c, sseEvent{Event: "projects", Data: string(p)})
+		}
 	}
 	s.mu.Unlock()
 
-	wsData := json.RawMessage(payload)
-	projMsg := wsMessage{Type: "projects", Data: wsData}
 	s.hubMu.Lock()
 	for _, clients := range s.hubClients {
 		for hc := range clients {
-			s.sendOrLag(hc, projMsg)
+			if p := payloadFor(hc.user); p != nil {
+				s.sendOrLag(hc, wsMessage{Type: "projects", Data: json.RawMessage(p)})
+			}
 		}
 	}
 	s.hubMu.Unlock()
@@ -4943,8 +5028,15 @@ func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
 	s.refreshProjectStatuses()
 	s.projMu.RLock()
 	statuses := s.projStatuses
-	stats := multiui.Aggregate(statuses)
 	s.projMu.RUnlock()
+	// With OIDC enabled, scope the list (and the aggregate stats) to the
+	// projects the session user may see. Entries are only needed for their
+	// ownership metadata, so skip the registry read entirely when OIDC is off.
+	var entries []multiui.ProjectEntry
+	if s.oidcEnabled() {
+		entries = s.allProjectEntries()
+	}
+	statuses, stats := s.filterStatusesForIdentity(s.sessionIdentity(r), entries, statuses)
 	// multi_project is true when there are multiple registered projects so the
 	// frontend can enable the scoped-tabs experience.
 	multiProject := len(statuses) > 1 || len(s.projectsSnapshot()) > 0
@@ -4969,6 +5061,7 @@ func (s *Server) handleProjectsEvents(w http.ResponseWriter, r *http.Request) {
 	c := &sseClient{
 		ch:     make(chan sseEvent, sseClientBufferSize),
 		resync: make(chan struct{}, 1),
+		user:   s.sessionIdentity(r),
 	}
 	s.mu.Lock()
 	s.clients[c] = struct{}{}
@@ -4979,11 +5072,16 @@ func (s *Server) handleProjectsEvents(w http.ResponseWriter, r *http.Request) {
 		s.mu.Unlock()
 	}()
 
-	// Send current snapshot immediately.
+	// Send current snapshot immediately, scoped to the session user when
+	// OIDC is enabled.
 	s.projMu.RLock()
 	statuses := s.projStatuses
-	stats := multiui.Aggregate(statuses)
 	s.projMu.RUnlock()
+	var entries []multiui.ProjectEntry
+	if s.oidcEnabled() {
+		entries = s.allProjectEntries()
+	}
+	statuses, stats := s.filterStatusesForIdentity(c.user, entries, statuses)
 	if payload, err := json.Marshal(map[string]interface{}{"projects": statuses, "stats": stats}); err == nil {
 		if werr := writeSSE(w, flusher, "event: projects\ndata: %s\n\n", payload); werr != nil {
 			return
@@ -5032,7 +5130,7 @@ func (s *Server) handleProjectRun(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "invalid project index", http.StatusBadRequest)
 		return
 	}
-	entries := s.allProjectEntries()
+	entries := s.visibleProjectEntries(r)
 	if idx < 0 || idx >= len(entries) {
 		jsonErr(w, "project index out of range", http.StatusBadRequest)
 		return
@@ -5081,7 +5179,7 @@ func (s *Server) handleProjectStop(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "invalid project index", http.StatusBadRequest)
 		return
 	}
-	entries := s.allProjectEntries()
+	entries := s.visibleProjectEntries(r)
 	if idx < 0 || idx >= len(entries) {
 		jsonErr(w, "project index out of range", http.StatusBadRequest)
 		return
@@ -5193,8 +5291,11 @@ func (s *Server) handleProjectNew(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Register the new project in the multi-project registry.
-	if regErr := multiui.AddPaths([]string{abs}); regErr != nil {
+	// Register the new project in the multi-project registry. With OIDC
+	// enabled the entry is stamped with the creating user's identity, making
+	// the project private to that user (plus admins); without OIDC the owner
+	// is empty and the project is shared, as before.
+	if regErr := multiui.AddPathsOwned([]string{abs}, s.sessionIdentity(r).OwnerKey()); regErr != nil {
 		// Non-fatal: project is created, just not registered.
 		_ = regErr
 	}
@@ -5214,9 +5315,11 @@ func (s *Server) handleProjectNew(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Refresh project cache and return updated project list.
+	// Refresh project cache and return updated project list. The index is
+	// resolved against the creator's visible list so it matches what their
+	// frontend will render.
 	s.refreshProjectStatuses()
-	entries := s.allProjectEntries()
+	entries := s.visibleProjectEntries(r)
 	newIdx := -1
 	for i, e := range entries {
 		if e.Path == abs {
@@ -5246,7 +5349,7 @@ func (s *Server) handleProjectDelete(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "invalid project index", http.StatusBadRequest)
 		return
 	}
-	entries := s.allProjectEntries()
+	entries := s.visibleProjectEntries(r)
 	if idx < 0 || idx >= len(entries) {
 		jsonErr(w, "project index out of range", http.StatusBadRequest)
 		return
@@ -7279,6 +7382,22 @@ const dashboardHTML = `<!DOCTYPE html>
 
   @media(max-width:600px){ main{padding:12px;} header{padding:8px 12px;} .stats-grid{grid-template-columns:repeat(2,1fr);} }
 
+  /* ── Signed-in user chip (OIDC mode only) ── */
+  .user-chip {
+    display: none;
+    align-items: center;
+    max-width: 180px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    padding: 4px 10px;
+    font-size: 12px;
+    color: var(--muted);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    flex-shrink: 0;
+  }
+
   /* ── Theme toggle button ── */
   .theme-toggle-btn {
     background: none;
@@ -8229,6 +8348,11 @@ const dashboardHTML = `<!DOCTYPE html>
     </button>
     <button class="theme-toggle-btn" id="themeToggleBtn" onclick="toggleTheme()" aria-label="Toggle dark/light mode" title="Toggle theme (t)">
       <span id="themeToggleIcon">&#9788;</span>
+    </button>
+    <!-- Signed-in user + sign-out (rendered only when OIDC auth is enabled) -->
+    <span class="user-chip" id="userChip"></span>
+    <button class="theme-toggle-btn" id="logoutBtn" style="display:none" aria-label="Sign out" title="Sign out">
+      <span aria-hidden="true">&#8998;</span>
     </button>
     <div class="updated-at" id="updatedAt"></div>
   </header>
@@ -11990,9 +12114,36 @@ function connectSSE() {
 }
 
 // Track user scroll in live output to disable auto-scroll when they scroll up.
+// ── OIDC session UI ──────────────────────────────────────────────────────────
+// When the server runs with OIDC single sign-on enabled, /api/me reports the
+// signed-in user; render a user chip + sign-out button in the header. With
+// OIDC disabled the endpoint reports oidc_enabled=false and nothing changes.
+function initAuthUI() {
+  fetch('/api/me').then(r => r.ok ? r.json() : null).then(me => {
+    if (!me || !me.oidc_enabled || !me.authenticated) return;
+    const chip = document.getElementById('userChip');
+    if (chip) {
+      chip.textContent = me.name || me.email || 'signed in';
+      chip.title = (me.email || '') + (me.admin ? ' (admin)' : '');
+      chip.style.display = 'flex';
+    }
+    const btn = document.getElementById('logoutBtn');
+    if (btn) {
+      btn.style.display = '';
+      btn.addEventListener('click', () => {
+        fetch('/auth/logout', {method: 'POST'})
+          .catch(() => {})
+          .finally(() => { window.location.href = '/auth/login'; });
+      });
+    }
+  }).catch(() => {});
+}
+
 document.addEventListener('DOMContentLoaded', () => {
   // Initialize model dropdown based on default provider selection
   if (document.getElementById('initProvider')) updateModelDropdown();
+
+  initAuthUI();
 
   const box = document.getElementById('liveOutputBox');
   if (box) {

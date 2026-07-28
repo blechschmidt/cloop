@@ -149,6 +149,14 @@ func parseAllDigits(s string) (int, bool) {
 type ProjectEntry struct {
 	Name string `json:"name"`
 	Path string `json:"path"`
+
+	// Owner records which dashboard user created/owns this project when the
+	// Web UI runs with OIDC authentication enabled. The value is the
+	// oidcauth.Identity.OwnerKey() — lowercased email, or "sub:<subject>"
+	// when the IdP supplies no email. Empty means unowned/shared: the
+	// project is visible to every authenticated user. The field is ignored
+	// entirely when OIDC is disabled.
+	Owner string `json:"owner,omitempty"`
 }
 
 type registry struct {
@@ -264,6 +272,14 @@ func saveLocked(projects []ProjectEntry) error {
 // in-process callers cannot each load the same baseline and then race to
 // overwrite each other's additions.
 func AddPaths(paths []string) error {
+	return AddPathsOwned(paths, "")
+}
+
+// AddPathsOwned is AddPaths with an ownership stamp: entries created by this
+// call record owner (an oidcauth OwnerKey; "" = unowned/shared). Existing
+// entries keep their current owner — registering an already-known path never
+// re-assigns it.
+func AddPathsOwned(paths []string, owner string) error {
 	registryMu.Lock()
 	defer registryMu.Unlock()
 
@@ -288,7 +304,7 @@ func AddPaths(paths []string) error {
 		}
 		seen[abs] = true
 		name := filepath.Base(abs)
-		existing = append(existing, ProjectEntry{Name: name, Path: abs})
+		existing = append(existing, ProjectEntry{Name: name, Path: abs, Owner: owner})
 	}
 	return saveLocked(existing)
 }

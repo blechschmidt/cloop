@@ -56,6 +56,9 @@ var configShowCmd = &cobra.Command{
 		if displayCfg.GitHub.Token != "" {
 			displayCfg.GitHub.Token = maskSecret(displayCfg.GitHub.Token)
 		}
+		if displayCfg.UI.OIDC.ClientSecret != "" {
+			displayCfg.UI.OIDC.ClientSecret = maskSecret(displayCfg.UI.OIDC.ClientSecret)
+		}
 
 		data, err := yaml.Marshal(&displayCfg)
 		if err != nil {
@@ -310,8 +313,56 @@ func applyConfigKey(cfg *config.Config, key, value string) error {
 		}
 		cfg.UI.MaxWebSocketConnsPerIP = n
 
+	case "ui.oidc.enabled":
+		switch strings.ToLower(value) {
+		case "true", "1", "yes", "on":
+			cfg.UI.OIDC.Enabled = true
+		case "false", "0", "no", "off":
+			cfg.UI.OIDC.Enabled = false
+		default:
+			return fmt.Errorf("ui.oidc.enabled: expected true/false, got %q", value)
+		}
+	case "ui.oidc.issuer":
+		cfg.UI.OIDC.Issuer = value
+	case "ui.oidc.client_id":
+		cfg.UI.OIDC.ClientID = value
+	case "ui.oidc.client_secret":
+		cfg.UI.OIDC.ClientSecret = value
+	case "ui.oidc.redirect_url":
+		cfg.UI.OIDC.RedirectURL = value
+	case "ui.oidc.admin_emails":
+		if value == "" {
+			cfg.UI.OIDC.AdminEmails = nil
+		} else {
+			parts := strings.Split(value, ",")
+			emails := make([]string, 0, len(parts))
+			for _, p := range parts {
+				if e := strings.TrimSpace(p); e != "" {
+					emails = append(emails, e)
+				}
+			}
+			cfg.UI.OIDC.AdminEmails = emails
+		}
+	case "ui.oidc.session_ttl_hours":
+		n, err := strconv.Atoi(value)
+		if err != nil {
+			return fmt.Errorf("ui.oidc.session_ttl_hours: expected integer, got %q", value)
+		}
+		if n != 0 && (n < config.OIDCSessionTTLHoursLower || n > config.OIDCSessionTTLHoursUpper) {
+			return fmt.Errorf("ui.oidc.session_ttl_hours must be between %d and %d (or 0 to use the default %d) (got %d)",
+				config.OIDCSessionTTLHoursLower, config.OIDCSessionTTLHoursUpper, config.OIDCSessionTTLHoursDefault, n)
+		}
+		cfg.UI.OIDC.SessionTTLHours = n
+	case "ui.oidc.cookie_secure":
+		switch value {
+		case "", "auto", "always", "never":
+			cfg.UI.OIDC.CookieSecure = value
+		default:
+			return fmt.Errorf("ui.oidc.cookie_secure must be auto, always, or never (got %q)", value)
+		}
+
 	default:
-		return fmt.Errorf("unknown config key %q\n\nValid keys:\n  provider\n  anthropic.api_key, anthropic.model, anthropic.base_url\n  openai.api_key, openai.model, openai.base_url\n  ollama.base_url, ollama.model\n  claudecode.model, claudecode.effort\n  mock.responses_file, mock.default\n  webhook.url, webhook.events\n  notify.slack_webhook, notify.discord_webhook\n  github.token, github.repo, github.labels\n  sync.remote, sync.branch\n  tracing.enabled, tracing.endpoint, tracing.service_name\n  max_parallel\n  rate_limit.requests_per_second, rate_limit.burst\n  budget.monthly_usd, budget.daily_usd_limit, budget.daily_token_limit\n  budget.alert_threshold_pct, budget.global_usd_pct, budget.global_token_pct\n  ui.max_websocket_conns, ui.max_websocket_conns_per_ip", key)
+		return fmt.Errorf("unknown config key %q\n\nValid keys:\n  provider\n  anthropic.api_key, anthropic.model, anthropic.base_url\n  openai.api_key, openai.model, openai.base_url\n  ollama.base_url, ollama.model\n  claudecode.model, claudecode.effort\n  mock.responses_file, mock.default\n  webhook.url, webhook.events\n  notify.slack_webhook, notify.discord_webhook\n  github.token, github.repo, github.labels\n  sync.remote, sync.branch\n  tracing.enabled, tracing.endpoint, tracing.service_name\n  max_parallel\n  rate_limit.requests_per_second, rate_limit.burst\n  budget.monthly_usd, budget.daily_usd_limit, budget.daily_token_limit\n  budget.alert_threshold_pct, budget.global_usd_pct, budget.global_token_pct\n  ui.max_websocket_conns, ui.max_websocket_conns_per_ip\n  ui.oidc.enabled, ui.oidc.issuer, ui.oidc.client_id, ui.oidc.client_secret\n  ui.oidc.redirect_url, ui.oidc.admin_emails, ui.oidc.session_ttl_hours, ui.oidc.cookie_secure", key)
 	}
 	return nil
 }
@@ -324,7 +375,7 @@ func maskSecret(s string) string {
 }
 
 func displayValue(key, value string) string {
-	if strings.Contains(key, "api_key") || key == "github.token" {
+	if strings.Contains(key, "api_key") || strings.Contains(key, "client_secret") || key == "github.token" {
 		return maskSecret(value)
 	}
 	return value

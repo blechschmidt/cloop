@@ -948,6 +948,49 @@ The dashboard shows: project goal, status, step history with outputs, task list 
 | `--port` | `8080` | Port to listen on |
 | `--no-browser` | `false` | Do not open the browser automatically |
 
+### OIDC single sign-on (optional)
+
+The dashboard can authenticate users against any OpenID Connect provider
+(Keycloak, Dex, Authentik, Auth0, Okta, Google, Azure AD, …). It is
+**disabled by default** — nothing changes unless you opt in via
+`.cloop/config.yaml` in the directory `cloop ui` runs from:
+
+```yaml
+ui:
+  oidc:
+    enabled: true
+    issuer: https://auth.example.com/realms/main
+    client_id: cloop-dashboard
+    client_secret: "..."
+    redirect_url: https://cloop.example.com/auth/callback
+    admin_emails: [ops@example.com]   # optional: these users see all projects
+    # scopes: [openid, profile, email]  # default
+    # session_ttl_hours: 24             # default; 1..720
+    # cookie_secure: auto               # auto | always | never
+```
+
+Register cloop at your IdP as a **confidential client** with the
+authorization-code flow and the redirect URL above (PKCE is used
+automatically). All four required fields must be set or `cloop ui` refuses
+to start — the server fails closed rather than silently serving without
+authentication. The same keys are settable via `cloop config set
+ui.oidc.<key> <value>`.
+
+When enabled:
+
+- Every browser request needs an IdP session; unauthenticated visitors are
+  redirected to the sign-in flow at `/auth/login`. A signed-in user chip and
+  sign-out button appear in the header.
+- **Per-user projects**: projects created through the UI are owned by the
+  creating user and are visible only to them (and to `admin_emails`).
+  Pre-existing/CLI-registered projects have no owner and stay visible to
+  every authenticated user. Ownership is recorded in the multi-project
+  registry (`~/.cloop/projects.json`, `owner` field).
+- The static bearer token (`--token` / `CLOOP_UI_TOKEN`) keeps working for
+  API automation and sees all projects.
+- Sessions live in memory: restarting the dashboard signs everyone out
+  (they are silently re-authenticated by the IdP on the next navigation).
+
 ---
 
 ## Auto-Evolve

@@ -316,6 +316,76 @@ type UIConfig struct {
 	// e.g. "aiden.example.com" or "aiden.example.com:1234". Same-origin
 	// requests already work without listing anything here.
 	AllowedWSOrigins []string `yaml:"allowed_ws_origins,omitempty"`
+
+	// OIDC configures optional OpenID Connect single sign-on for the web
+	// dashboard. Disabled by default; see OIDCConfig.
+	OIDC OIDCConfig `yaml:"oidc,omitempty"`
+}
+
+// OIDCConfig configures optional OpenID Connect single sign-on for the web
+// dashboard (cloop ui). When Enabled, every browser request must carry a
+// session established via the IdP authorization-code flow; the static
+// bearer token (--token / CLOOP_UI_TOKEN) keeps working for API automation.
+// Projects created through the UI are stamped with the signed-in user's
+// identity and are only visible to that user (and admins); projects without
+// an owner remain shared. Disabled by default — enabling requires issuer,
+// client_id, client_secret, and redirect_url to all be set, otherwise
+// `cloop ui` refuses to start (fail closed).
+type OIDCConfig struct {
+	// Enabled turns OIDC authentication on. Default false.
+	Enabled bool `yaml:"enabled,omitempty"`
+
+	// Issuer is the IdP base URL, e.g. https://auth.example.com/realms/main.
+	// Discovery is performed at <issuer>/.well-known/openid-configuration.
+	// Plain http is only accepted for localhost development IdPs.
+	Issuer string `yaml:"issuer,omitempty"`
+
+	// ClientID / ClientSecret identify cloop as a confidential client.
+	ClientID     string `yaml:"client_id,omitempty"`
+	ClientSecret string `yaml:"client_secret,omitempty"`
+
+	// RedirectURL is the externally reachable callback,
+	// e.g. https://cloop.example.com/auth/callback.
+	RedirectURL string `yaml:"redirect_url,omitempty"`
+
+	// Scopes requested from the IdP. Default: openid profile email.
+	// "openid" is always included.
+	Scopes []string `yaml:"scopes,omitempty"`
+
+	// AdminEmails lists users who see and manage every project regardless
+	// of per-project ownership. Matched case-insensitively against the
+	// email claim.
+	AdminEmails []string `yaml:"admin_emails,omitempty"`
+
+	// SessionTTLHours is the lifetime of a dashboard session. Zero uses
+	// the default (24); values are clamped to 1..720 (30 days).
+	SessionTTLHours int `yaml:"session_ttl_hours,omitempty"`
+
+	// CookieSecure controls the session cookie's Secure flag:
+	// "auto" (default — set when the request arrived over TLS or with
+	// X-Forwarded-Proto: https), "always", or "never".
+	CookieSecure string `yaml:"cookie_secure,omitempty"`
+}
+
+// OIDC session TTL bounds (hours).
+const (
+	OIDCSessionTTLHoursDefault = 24
+	OIDCSessionTTLHoursLower   = 1
+	OIDCSessionTTLHoursUpper   = 720
+)
+
+// EffectiveSessionTTLHours returns the configured session lifetime with the
+// zero-default substituted and out-of-band values clamped.
+func (o OIDCConfig) EffectiveSessionTTLHours() int {
+	switch {
+	case o.SessionTTLHours <= 0:
+		return OIDCSessionTTLHoursDefault
+	case o.SessionTTLHours < OIDCSessionTTLHoursLower:
+		return OIDCSessionTTLHoursLower
+	case o.SessionTTLHours > OIDCSessionTTLHoursUpper:
+		return OIDCSessionTTLHoursUpper
+	}
+	return o.SessionTTLHours
 }
 
 // EffectiveMaxWebSocketConns returns the configured total cap, substituting
