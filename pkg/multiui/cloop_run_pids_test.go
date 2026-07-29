@@ -100,6 +100,44 @@ func TestCloopRunMatch(t *testing.T) {
 			want:    false,
 		},
 		{
+			// Regression (Task 20153): the binary on disk was replaced after
+			// the run started; the kernel reports the exe symlink target
+			// with a " (deleted)" marker. Such a run is alive and must stay
+			// stoppable from the UI.
+			name:    "replaced binary with kernel deleted marker matches",
+			exePath: "/usr/local/bin/cloop (deleted)",
+			cmdline: []string{"/usr/local/bin/cloop", "run"},
+			cwd:     "/work/proj",
+			match:   always,
+			want:    true,
+		},
+		{
+			// Regression (Task 20153): runs launched via a renamed copy such
+			// as cloop-stable are legitimate cloop runs.
+			name:    "cloop-stable variant matches",
+			exePath: "/usr/local/bin/cloop-stable",
+			cmdline: []string{"/usr/local/bin/cloop-stable", "run", "--auto-evolve"},
+			cwd:     "/work/proj",
+			match:   always,
+			want:    true,
+		},
+		{
+			name:    "cloop-stable with deleted marker matches",
+			exePath: "/usr/local/bin/cloop-stable (deleted)",
+			cmdline: []string{"cloop-stable", "run"},
+			cwd:     "/work/proj",
+			match:   always,
+			want:    true,
+		},
+		{
+			name:    "cloopy prefix collision rejected",
+			exePath: "/usr/local/bin/cloopy",
+			cmdline: []string{"cloopy", "run"},
+			cwd:     "/work/proj",
+			match:   always,
+			want:    false,
+		},
+		{
 			name:    "matching cwd accepted",
 			exePath: "/usr/local/bin/cloop",
 			cmdline: []string{"cloop", "run", "--pm"},

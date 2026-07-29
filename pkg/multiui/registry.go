@@ -35,8 +35,9 @@ func IsCloopRunningInDir(dir string) bool {
 }
 
 // CloopRunPIDsInDir returns the PIDs of all "cloop run" processes whose
-// working directory equals dir. It reads /proc/*/cwd symlinks (Linux only)
-// and returns nil on non-Linux hosts or when /proc is unreadable.
+// working directory is dir or a subdirectory of dir. It reads /proc/*/cwd
+// symlinks (Linux only) and returns nil on non-Linux hosts or when /proc is
+// unreadable.
 //
 // Used by the Web UI's per-project Stop button so that pressing stop on
 // project A signals only the cloop run for A, not every cloop run on the
@@ -45,7 +46,31 @@ func IsCloopRunningInDir(dir string) bool {
 // multi-project mode where a single user click would terminate unrelated
 // projects' runs.
 func CloopRunPIDsInDir(dir string) []int {
-	return cloopRunPIDs(func(cwd string) bool { return cwd == dir })
+	return cloopRunPIDs(dirScopeMatch(dir))
+}
+
+// dirScopeMatch returns a cwd predicate that accepts dir itself and any
+// path below it. Subdirectories count because a run can execute inside the
+// project tree (e.g. parallel tasks in .cloop/worktrees/<task>) — a stop
+// for the project must reach those too. dir is symlink-resolved because
+// /proc/PID/cwd is always the kernel-canonical path, so a registry entry
+// reached via a symlink would otherwise never compare equal (Task 20153).
+func dirScopeMatch(dir string) func(cwd string) bool {
+	dir = canonicalDir(dir)
+	prefix := dir + string(os.PathSeparator)
+	return func(cwd string) bool {
+		return cwd == dir || strings.HasPrefix(cwd, prefix)
+	}
+}
+
+// canonicalDir resolves symlinks in dir for comparison against
+// kernel-resolved /proc paths, falling back to a cleaned path when
+// resolution fails (directory deleted, permission denied).
+func canonicalDir(dir string) string {
+	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+		return resolved
+	}
+	return filepath.Clean(dir)
 }
 
 // AllCloopRunPIDs returns the PIDs of every "cloop run" process visible to
@@ -96,10 +121,10 @@ func cloopRunPIDs(match func(cwd string) bool) []int {
 // cloopRunMatch is the pure decision function extracted from cloopRunPIDs so
 // the matching rules can be unit-tested without a live /proc filesystem.
 // It returns true when the process metadata identifies a "cloop run"
-// invocation (executable basename "cloop", at least one argv entry equal
-// to "run") whose working directory satisfies match.
+// invocation (executable basename "cloop" or a "cloop-*" variant, at least
+// one argv entry equal to "run") whose working directory satisfies match.
 func cloopRunMatch(exePath string, cmdline []string, cwd string, match func(cwd string) bool) bool {
-	if !strings.HasSuffix(exePath, "/cloop") && exePath != "cloop" {
+	if !isCloopExe(exePath) {
 		return false
 	}
 	hasRun := false
@@ -113,6 +138,27 @@ func cloopRunMatch(exePath string, cmdline []string, cwd string, match func(cwd 
 		return false
 	}
 	return match(cwd)
+}
+
+// isCloopExe reports whether a /proc/PID/exe symlink target identifies a
+// cloop binary. Two real-world deployments defeated the previous exact
+// "/cloop" suffix check and made *live* runs invisible to the Stop button
+// ("no running cloop process found" while the run kept executing):
+//
+//   - The binary on disk was replaced after the run started (redeploy of
+//     /usr/local/bin/cloop). The kernel then reports the exe target as
+//     "/usr/local/bin/cloop (deleted)".
+//   - The run was launched via a renamed copy such as
+//     /usr/local/bin/cloop-stable.
+//
+// A trailing kernel " (deleted)" marker is therefore stripped before the
+// basename check, and "cloop-*" basenames are accepted alongside "cloop".
+// Unrelated binaries that merely contain the substring (e.g. "cloopy",
+// "not-cloop") remain rejected.
+func isCloopExe(exePath string) bool {
+	exePath = strings.TrimSuffix(exePath, " (deleted)")
+	base := filepath.Base(exePath)
+	return base == "cloop" || strings.HasPrefix(base, "cloop-")
 }
 
 // splitCmdline returns the NUL-separated argv from a /proc/PID/cmdline read.

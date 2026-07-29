@@ -2808,16 +2808,29 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]interface{}{"ok": true, "command": "cloop " + strings.Join(args, " ")})
 }
 
-// handleStop sends SIGINT to every running "cloop run" process visible to
-// the current user. Uses a /proc walk (via multiui.AllCloopRunPIDs) so we
-// no longer depend on the external `pkill` binary, and so a hung pkill
-// child can never pin this request goroutine.
+// handleStop sends SIGINT to the "cloop run" processes of the requested
+// project (?project_idx=N, falling back to the server's WorkDir). It is
+// project-scoped via a /proc cwd walk — the pre-fix handler signalled
+// *every* cloop run on the host, so pressing Stop on one project's page
+// terminated unrelated projects' runs (Task 20153).
+//
+// When no live process exists but persisted state still says the project is
+// running (the run was SIGKILLed, OOM-killed, or the host rebooted before
+// the orchestrator could write a terminal status), the handler reconciles
+// the stale status instead of erroring. Pre-fix this was a UX deadlock: the
+// Run/Stop button renders from persisted status, so the UI showed Stop
+// forever while /api/stop kept answering "no running cloop process found".
 func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 	if !requirePOST(w, r) {
 		return
 	}
-	pids := multiui.AllCloopRunPIDs()
+	workDir := s.resolveWorkDir(r)
+	pids := multiui.CloopRunPIDsInDir(workDir)
 	if len(pids) == 0 {
+		if s.reconcileStaleRunState(workDir) {
+			jsonOK(w, map[string]interface{}{"ok": true, "message": "no running process found — cleared stale running status"})
+			return
+		}
 		jsonOK(w, map[string]interface{}{"ok": false, "message": "no running cloop process found"})
 		return
 	}
@@ -2826,7 +2839,56 @@ func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 		jsonOK(w, map[string]interface{}{"ok": false, "message": "found cloop processes but signalling failed (permission denied?)"})
 		return
 	}
+	s.observeRunExit(workDir)
 	jsonOK(w, map[string]interface{}{"ok": true, "message": "pause signal sent", "signalled": signalled})
+}
+
+// reconcileStaleRunState clears a persisted "running"/"evolving" project
+// status that no longer has a live cloop run process behind it. Returns true
+// when stale state was found and cleared. The status is set to "paused" —
+// the same terminal the orchestrator writes on a graceful SIGINT — so
+// health, status filters, and the Run/Stop button all recover. Broadcasts
+// the corrected run_state and a state diff so open dashboards flip from
+// Stop to Run without a reload.
+func (s *Server) reconcileStaleRunState(workDir string) bool {
+	ps, err := state.Load(workDir)
+	if err != nil || ps == nil {
+		return false
+	}
+	if ps.Status != "running" && ps.Status != "evolving" {
+		return false
+	}
+	ps.Status = "paused"
+	if err := ps.SaveDirect(); err != nil {
+		fmt.Fprintf(os.Stderr, "ui: reconcile stale run state for %s: %v\n", workDir, err)
+		return false
+	}
+	s.broadcastRunState(workDir, false, true)
+	s.broadcastStateDiff(workDir, ps)
+	s.refreshProjectStatuses()
+	s.broadcastProjectsUpdate()
+	return true
+}
+
+// observeRunExit watches for the signalled run to actually exit and then
+// pushes refreshed run_state + project events, so the UI reflects the stop
+// without client-side polling. Bounded to ~5s so the goroutine never leaks
+// when a run ignores SIGINT (it finishes its in-flight step first — the
+// watcher's periodic tick eventually reports the exit instead).
+func (s *Server) observeRunExit(workDir string) {
+	go func() {
+		defer recoverGoroutine("handleStop observer")
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			if !multiui.IsCloopRunningInDir(workDir) {
+				break
+			}
+			time.Sleep(150 * time.Millisecond)
+		}
+		s.broadcastRunState(workDir, multiui.IsCloopRunningInDir(workDir), true)
+		s.refreshProjectStatuses()
+		s.broadcastProjectsUpdate()
+	}()
 }
 
 // signalPIDs sends sig to each pid via os.FindProcess+Signal and returns the
@@ -5191,6 +5253,13 @@ func (s *Server) handleProjectStop(w http.ResponseWriter, r *http.Request) {
 	// the host — pressing stop on project A killed runs for B, C, etc.
 	pids := multiui.CloopRunPIDsInDir(entry.Path)
 	if len(pids) == 0 {
+		// No live process: if state still claims the project is running (the
+		// run died without writing a terminal status), clear it so the card
+		// stops offering a Stop button that can never succeed (Task 20153).
+		if s.reconcileStaleRunState(entry.Path) {
+			jsonOK(w, map[string]interface{}{"ok": true, "project": entry.Name, "message": "no running process found — cleared stale running status"})
+			return
+		}
 		jsonOK(w, map[string]interface{}{"ok": false, "project": entry.Name, "message": "no running process found"})
 		return
 	}
@@ -5199,23 +5268,10 @@ func (s *Server) handleProjectStop(w http.ResponseWriter, r *http.Request) {
 		jsonOK(w, map[string]interface{}{"ok": false, "project": entry.Name, "message": "found cloop processes but signalling failed (permission denied?)"})
 		return
 	}
-	// SIGINT was delivered but the child may take a moment to exit. Spawn a
-	// short observer that re-broadcasts run_state + projects once the PID
-	// disappears, so the UI reflects the stop without the client polling
-	// (Task 20126). Bounded ~5s so we never leak a goroutine.
-	go func(path string, pids []int) {
-		defer recoverGoroutine("handleProjectStop observer")
-		deadline := time.Now().Add(5 * time.Second)
-		for time.Now().Before(deadline) {
-			if !multiui.IsCloopRunningInDir(path) {
-				break
-			}
-			time.Sleep(150 * time.Millisecond)
-		}
-		s.broadcastRunState(path, multiui.IsCloopRunningInDir(path), true)
-		s.refreshProjectStatuses()
-		s.broadcastProjectsUpdate()
-	}(entry.Path, pids)
+	// SIGINT was delivered but the child may take a moment to exit. Watch for
+	// the exit and re-broadcast run_state + projects so the UI reflects the
+	// stop without client polling (Task 20126).
+	s.observeRunExit(entry.Path)
 	jsonOK(w, map[string]interface{}{"ok": true, "project": entry.Name, "signalled": signalled})
 }
 
@@ -13925,7 +13981,10 @@ window.apiRun = function() {
 };
 
 window.apiStop = function() {
-  api('/api/stop', {}).then(d => {
+  // pUrl scopes the stop to the selected project (?project_idx=N) — without
+  // it the server falls back to its own WorkDir, so pressing Stop on any
+  // other project's page could never find that project's run (Task 20153).
+  api(pUrl('/api/stop'), {}).then(d => {
     toast(d.message || (d.ok ? 'Pause signal sent' : 'Stop failed'), d.ok ? 'ok' : 'err');
     if (d.ok) updateRunButtonState(false);
     // Final running flag is pushed via the 'run_state' WS event when the
