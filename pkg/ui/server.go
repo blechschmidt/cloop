@@ -32,6 +32,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/claudecodeauth"
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/cost"
+	"github.com/blechschmidt/cloop/pkg/decompose"
 	"github.com/blechschmidt/cloop/pkg/epic"
 	"github.com/blechschmidt/cloop/pkg/globalbudget"
 	"github.com/blechschmidt/cloop/pkg/kb"
@@ -873,6 +874,8 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /api/tasks/{id}", s.handleDeleteTask)
 	mux.HandleFunc("GET /api/tasks/{id}/blocker", s.handleTaskBlocker)
 	mux.HandleFunc("GET /api/tasks/{id}/details", s.handleTaskDetails)
+	mux.HandleFunc("POST /api/tasks/{id}/decompose", s.handleTaskDecompose)
+	mux.HandleFunc("POST /api/tasks/{id}/decompose/apply", s.handleTaskDecomposeApply)
 
 	// Config
 	mux.HandleFunc("/api/config", s.handleConfig)
@@ -3103,6 +3106,270 @@ func (s *Server) handleTaskAdd(w http.ResponseWriter, r *http.Request) {
 	})
 
 	jsonOK(w, map[string]interface{}{"ok": true, "task": task})
+}
+
+// decomposeSubtaskWire is the JSON shape of a proposed sub-task exchanged with
+// the decompose modal. IDs and dependency wiring are assigned server-side at
+// apply time, so the wire form carries only the AI-proposed fields.
+type decomposeSubtaskWire struct {
+	Title            string `json:"title"`
+	Description      string `json:"description"`
+	Role             string `json:"role,omitempty"`
+	EstimatedMinutes int    `json:"estimated_minutes,omitempty"`
+}
+
+// decomposePreviewTimeout bounds the synchronous decompose preview call.
+// Decompose makes up to two provider round-trips (expansion + semantic
+// dedup), so this is deliberately generous; the client shows a spinner.
+const decomposePreviewTimeout = 8 * time.Minute
+
+// decomposeMaxSubtasks caps how many sub-tasks a single apply may inject.
+// The AI proposes at most 7; the cap only guards against hand-crafted
+// requests flooding the plan.
+const decomposeMaxSubtasks = 20
+
+// checkDecomposable rejects parents whose status makes decomposition
+// destructive: running tasks would race the orchestrator, and done tasks
+// would silently lose their completion (apply marks the parent skipped).
+func checkDecomposable(t *pm.Task) error {
+	switch t.Status {
+	case pm.TaskInProgress:
+		return fmt.Errorf("task %d is currently running — stop it before decomposing", t.ID)
+	case pm.TaskDone:
+		return fmt.Errorf("task %d is already done — decomposing would discard its completion", t.ID)
+	}
+	return nil
+}
+
+// buildProjectProvider builds the AI provider and model configured for the
+// project at workDir, mirroring the CLI resolution order: config.yaml
+// provider > state provider > claudecode default; per-provider config model
+// > state model.
+func buildProjectProvider(workDir string, ps *state.ProjectState) (provider.Provider, string, error) {
+	cfg, err := config.Load(workDir)
+	if err != nil {
+		return nil, "", fmt.Errorf("loading config: %w", err)
+	}
+	pName := cfg.Provider
+	if pName == "" && ps != nil {
+		pName = ps.Provider
+	}
+	if pName == "" {
+		pName = "claudecode"
+	}
+	prov, err := provider.Build(provider.ProviderConfig{
+		Name:             pName,
+		AnthropicAPIKey:  cfg.Anthropic.APIKey,
+		AnthropicBaseURL: cfg.Anthropic.BaseURL,
+		OpenAIAPIKey:     cfg.OpenAI.APIKey,
+		OpenAIBaseURL:    cfg.OpenAI.BaseURL,
+		OllamaBaseURL:    cfg.Ollama.BaseURL,
+	})
+	if err != nil {
+		return nil, "", err
+	}
+	model := ""
+	switch pName {
+	case "anthropic":
+		model = cfg.Anthropic.Model
+	case "openai":
+		model = cfg.OpenAI.Model
+	case "ollama":
+		model = cfg.Ollama.Model
+	case "claudecode":
+		model = cfg.ClaudeCode.Model
+	}
+	if model == "" && ps != nil {
+		model = ps.Model
+	}
+	return prov, model, nil
+}
+
+// handleTaskDecompose asks the AI to break a task into 3-7 sub-tasks and
+// returns the proposal WITHOUT mutating the plan
+// (POST /api/tasks/{id}/decompose). The client reviews the proposal and
+// applies a possibly filtered subset via /api/tasks/{id}/decompose/apply.
+func (s *Server) handleTaskDecompose(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.Atoi(r.PathValue("id"))
+	if err != nil || id <= 0 {
+		jsonErr(w, "invalid task id", http.StatusBadRequest)
+		return
+	}
+	workDir := s.resolveWorkDir(r)
+	ps, err := state.Load(workDir)
+	if err != nil {
+		jsonErr(w, err.Error(), statedb.HTTPStatus(err))
+		return
+	}
+	if ps.Plan == nil || len(ps.Plan.Tasks) == 0 {
+		jsonErr(w, "no task plan found — run cloop init first", http.StatusNotFound)
+		return
+	}
+	task, err := ps.RequireTask(id)
+	if err != nil {
+		jsonErr(w, err.Error(), statedb.HTTPStatus(err))
+		return
+	}
+	if err := checkDecomposable(task); err != nil {
+		jsonErr(w, err.Error(), http.StatusConflict)
+		return
+	}
+
+	prov, model, err := buildProjectProvider(workDir, ps)
+	if err != nil {
+		jsonErr(w, "provider: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), decomposePreviewTimeout)
+	defer cancel()
+	opts := provider.Options{
+		Model:   model,
+		WorkDir: workDir,
+		Timeout: 4 * time.Minute,
+	}
+	res, err := decompose.Decompose(ctx, prov, opts, ps.Plan, id)
+	if err != nil {
+		jsonErr(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+
+	subs := make([]decomposeSubtaskWire, 0, len(res.SubTasks))
+	for _, st := range res.SubTasks {
+		subs = append(subs, decomposeSubtaskWire{
+			Title:            st.Title,
+			Description:      st.Description,
+			Role:             string(st.Role),
+			EstimatedMinutes: st.EstimatedMinutes,
+		})
+	}
+	jsonOK(w, map[string]interface{}{
+		"ok":           true,
+		"parent_id":    res.Parent.ID,
+		"parent_title": res.Parent.Title,
+		"subtasks":     subs,
+	})
+}
+
+// handleTaskDecomposeApply injects reviewed sub-tasks into the plan
+// (POST /api/tasks/{id}/decompose/apply). Semantics match
+// `cloop task decompose`: the parent is marked skipped with an annotation,
+// the first sub-task depends on the parent, and each subsequent sub-task
+// depends on the previous one.
+func (s *Server) handleTaskDecomposeApply(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.Atoi(r.PathValue("id"))
+	if err != nil || id <= 0 {
+		jsonErr(w, "invalid task id", http.StatusBadRequest)
+		return
+	}
+	var req struct {
+		SubTasks []decomposeSubtaskWire `json:"subtasks"`
+	}
+	limitJSONBody(w, r, maxJSONBodyBytes)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondToBodyError(w, err)
+		return
+	}
+
+	validRoles := make(map[string]bool, len(pm.ValidRoles()))
+	for _, role := range pm.ValidRoles() {
+		validRoles[role] = true
+	}
+	kept := make([]decomposeSubtaskWire, 0, len(req.SubTasks))
+	for _, st := range req.SubTasks {
+		st.Title = strings.TrimSpace(st.Title)
+		if st.Title == "" {
+			continue
+		}
+		if !validRoles[st.Role] {
+			st.Role = ""
+		}
+		if st.EstimatedMinutes < 0 {
+			st.EstimatedMinutes = 0
+		}
+		kept = append(kept, st)
+	}
+	if len(kept) == 0 {
+		jsonErr(w, "no sub-tasks to add", http.StatusBadRequest)
+		return
+	}
+	if len(kept) > decomposeMaxSubtasks {
+		jsonErr(w, fmt.Sprintf("too many sub-tasks (max %d)", decomposeMaxSubtasks), http.StatusBadRequest)
+		return
+	}
+
+	workDir := s.resolveWorkDir(r)
+	ps, err := state.Load(workDir)
+	if err != nil {
+		jsonErr(w, err.Error(), statedb.HTTPStatus(err))
+		return
+	}
+	if ps.Plan == nil {
+		jsonErr(w, "no task plan found — run cloop init first", http.StatusNotFound)
+		return
+	}
+	parent, err := ps.RequireTask(id)
+	if err != nil {
+		jsonErr(w, err.Error(), statedb.HTTPStatus(err))
+		return
+	}
+	if err := checkDecomposable(parent); err != nil {
+		jsonErr(w, err.Error(), http.StatusConflict)
+		return
+	}
+
+	// Rebuild pm.Tasks from the reviewed wire proposals, inheriting parent
+	// tags/assignee exactly like decompose.ParseSubTasks does.
+	subTasks := make([]*pm.Task, 0, len(kept))
+	for i, st := range kept {
+		var tags []string
+		if len(parent.Tags) > 0 {
+			tags = append([]string{}, parent.Tags...)
+		}
+		t := &pm.Task{
+			Title:            st.Title,
+			Description:      st.Description,
+			Priority:         parent.Priority,
+			Role:             pm.AgentRole(st.Role),
+			Status:           pm.TaskPending,
+			Tags:             tags,
+			Assignee:         parent.Assignee,
+			EstimatedMinutes: st.EstimatedMinutes,
+		}
+		if i == 0 {
+			t.DependsOn = []int{parent.ID}
+		}
+		subTasks = append(subTasks, t)
+	}
+
+	added := decompose.InjectSubTasks(ps.Plan, &decompose.DecomposeResult{Parent: parent, SubTasks: subTasks})
+	if err := ps.SaveDirect(); err != nil {
+		jsonErr(w, "save failed: "+err.Error(), statedb.HTTPStatus(err))
+		return
+	}
+
+	s.broadcastStateDiff(workDir, ps)
+
+	ids := make([]int, 0, len(added))
+	idStrs := make([]string, 0, len(added))
+	for _, t := range added {
+		ids = append(ids, t.ID)
+		idStrs = append(idStrs, "#"+strconv.Itoa(t.ID))
+	}
+	state.LogEvent(workDir, state.EventRow{
+		Type:      state.EventTaskAdded,
+		TaskID:    parent.ID,
+		TaskTitle: parent.Title,
+		Step:      state.NoStep,
+		Message: fmt.Sprintf("Task #%d decomposed into %d sub-tasks via UI: %s",
+			parent.ID, len(added), strings.Join(idStrs, ", ")),
+	})
+
+	jsonOK(w, map[string]interface{}{
+		"ok":        true,
+		"parent_id": parent.ID,
+		"added":     ids,
+	})
 }
 
 // handleTaskStatus changes a task's status.
@@ -7169,6 +7436,7 @@ const dashboardHTML = `<!DOCTYPE html>
   .act.reset:hover  { color:var(--accent); border-color:var(--accent); }
   .act.remove:hover { color:var(--red);    border-color:var(--red); }
   .act.edit:hover   { color:var(--accent); border-color:var(--accent); }
+  .act.split:hover  { color:var(--accent); border-color:var(--accent); }
 
   /* ── Drag-and-drop ── */
   .task-item[draggable] { cursor: grab; }
@@ -7424,6 +7692,26 @@ const dashboardHTML = `<!DOCTYPE html>
   .td-anno { background:var(--bg); border:1px solid var(--border); border-radius:6px; padding:8px 10px; margin-bottom:6px; font-size:12px; }
   .td-anno-head { color:var(--muted); font-size:11px; margin-bottom:3px; }
   .td-link-row a { color:var(--accent); }
+
+  /* ── Decompose modal (AI task splitting) ── */
+  #dc-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,.7); z-index:60; align-items:center; justify-content:center; }
+  #dc-overlay.open { display:flex; }
+  #dc-modal { background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); padding:0; width:680px; max-width:96vw; max-height:88vh; display:flex; flex-direction:column; }
+  #dc-modal .dc-header { display:flex; align-items:center; justify-content:space-between; padding:14px 18px; border-bottom:1px solid var(--border); }
+  #dc-modal .dc-header h2 { font-size:14px; font-weight:600; margin:0; }
+  #dc-modal .dc-close { background:none; border:0; color:var(--muted); font-size:22px; line-height:1; cursor:pointer; padding:0 4px; }
+  #dc-modal .dc-close:hover { color:var(--text); }
+  #dc-modal .dc-body { padding:16px 18px; overflow-y:auto; flex:1; min-height:0; }
+  #dc-modal .modal-footer { padding:12px 18px; border-top:1px solid var(--border); margin-top:0; align-items:center; }
+  .dc-hint { font-size:12px; color:var(--muted); margin-bottom:10px; line-height:1.5; }
+  .dc-sub { display:flex; gap:10px; align-items:flex-start; background:var(--bg); border:1px solid var(--border); border-radius:var(--radius); padding:10px 12px; margin-bottom:8px; cursor:pointer; }
+  .dc-sub input[type=checkbox] { margin-top:3px; flex-shrink:0; }
+  .dc-sub.off { opacity:.45; }
+  .dc-sub-title { font-weight:600; font-size:13px; }
+  .dc-sub-desc { font-size:12px; color:var(--muted); margin-top:3px; line-height:1.45; white-space:pre-wrap; word-wrap:break-word; }
+  .dc-sub-meta { display:flex; gap:6px; margin-top:5px; font-size:11px; color:var(--muted); flex-wrap:wrap; }
+  .dc-sub-meta span { background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:1px 7px; }
+  .dc-spin { display:flex; align-items:center; gap:10px; padding:22px 4px; color:var(--muted); font-size:13px; }
 
   /* ── Toast ── */
   #toast { position:fixed; bottom:20px; right:20px; background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); padding:9px 14px; font-size:13px; opacity:0; transform:translateY(8px); transition:all .2s; pointer-events:none; z-index:100; max-width:300px; }
@@ -9881,6 +10169,22 @@ const dashboardHTML = `<!DOCTYPE html>
   </div>
 </div>
 
+<!-- Decompose modal (AI splits a task into sub-tasks; user reviews before applying) -->
+<div id="dc-overlay" onclick="if(event.target===this)closeDecomposeModal()">
+  <div id="dc-modal" role="dialog" aria-modal="true" aria-labelledby="dc-title">
+    <div class="dc-header">
+      <h2 id="dc-title">Decompose Task</h2>
+      <button class="dc-close" onclick="closeDecomposeModal()" aria-label="Close">&times;</button>
+    </div>
+    <div id="dc-body" class="dc-body"></div>
+    <div class="modal-footer">
+      <span id="dc-count" style="margin-right:auto;font-size:12px;color:var(--muted)"></span>
+      <button class="btn" onclick="closeDecomposeModal()">Cancel</button>
+      <button class="btn primary" id="dc-apply-btn" onclick="applyDecompose()" style="display:none">Add sub-tasks</button>
+    </div>
+  </div>
+</div>
+
 <!-- ── Delete project confirmation modal ───────────────────────────────── -->
 <div id="delproj-overlay" onclick="if(event.target===this)closeDeleteProjectModal()" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,.7); z-index:90; align-items:center; justify-content:center;">
   <div id="delproj-modal" style="background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); padding:24px; width:520px; max-width:92vw;">
@@ -10306,10 +10610,12 @@ const providerModels = {
   claudecode: [
     {value: '', label: '(default — claude-sonnet-4-6)'},
     {value: 'claude-fable-5', label: 'Claude Fable 5'},
+    {value: 'claude-opus-5', label: 'Claude Opus 5'},
     {value: 'claude-opus-4-8', label: 'Claude Opus 4.8'},
     {value: 'claude-opus-4-7', label: 'Claude Opus 4.7'},
     {value: 'claude-opus-4-6', label: 'Claude Opus 4.6'},
     {value: 'claude-opus-4-5', label: 'Claude Opus 4.5'},
+    {value: 'claude-sonnet-5', label: 'Claude Sonnet 5'},
     {value: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6'},
     {value: 'claude-sonnet-4-5', label: 'Claude Sonnet 4.5'},
     {value: 'claude-haiku-4-5', label: 'Claude Haiku 4.5'},
@@ -10317,10 +10623,12 @@ const providerModels = {
   anthropic: [
     {value: '', label: '(default — claude-opus-4-6)'},
     {value: 'claude-fable-5', label: 'Claude Fable 5'},
+    {value: 'claude-opus-5', label: 'Claude Opus 5'},
     {value: 'claude-opus-4-8', label: 'Claude Opus 4.8'},
     {value: 'claude-opus-4-7', label: 'Claude Opus 4.7'},
     {value: 'claude-opus-4-6', label: 'Claude Opus 4.6'},
     {value: 'claude-opus-4-5', label: 'Claude Opus 4.5'},
+    {value: 'claude-sonnet-5', label: 'Claude Sonnet 5'},
     {value: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6'},
     {value: 'claude-sonnet-4-5', label: 'Claude Sonnet 4.5'},
     {value: 'claude-haiku-4-5', label: 'Claude Haiku 4.5'},
@@ -10586,6 +10894,8 @@ function estimateCost(provider, model, inputTok, outputTok) {
   // Pricing table: [inputPerM, outputPerM] in USD
   const prices = {
     'claude-fable-5':             [10.00, 50.00],
+    'claude-opus-5':              [5.00,  25.00],
+    'claude-sonnet-5':            [3.00,  15.00],
     'claude-opus-4-8':            [5.00,  25.00],
     'claude-opus-4-7':            [5.00,  25.00],
     'claude-opus-4-6':            [15.00, 75.00],
@@ -11524,6 +11834,8 @@ function renderTasks(s) {
       '</div>'+
       '<div class="task-actions">'+
         statusActions+
+        (cls !== 'done' && cls !== 'in_progress'
+          ? '<button class="act split"  title="AI-decompose into sub-tasks" onclick="openDecomposeModal('+tid+')">Split</button>' : '')+
         '<button class="act edit"   title="Edit"   onclick="openEditModal('+tid+')">Edit</button>'+
         '<button class="act remove" title="Remove" onclick="removeTask('+tid+')">Remove</button>'+
         priorityBadge(t.priority)+
@@ -14499,6 +14811,122 @@ window.clearSuggestions = function() {
   document.getElementById('suggestClearBtn').style.display  = 'none';
 };
 
+// ── Decompose (AI splits one task into a plan of sub-tasks) ──────────────────
+
+let dcTaskId   = 0;     // parent task being decomposed (0 = modal closed)
+let dcSubtasks = [];    // proposed sub-tasks, each with a _keep selection flag
+let dcBusy     = false; // an AI preview or apply request is in flight
+
+window.openDecomposeModal = function(id) {
+  const tasks = (appState && appState.plan && appState.plan.tasks) || [];
+  const t = tasks.find(x => x.id === id);
+  dcTaskId   = id;
+  dcSubtasks = [];
+  dcBusy     = true;
+  document.getElementById('dc-title').textContent = 'Decompose Task #'+id+(t && t.title ? ' — '+t.title : '');
+  document.getElementById('dc-apply-btn').style.display = 'none';
+  document.getElementById('dc-count').textContent = '';
+  document.getElementById('dc-body').innerHTML =
+    '<div class="dc-spin"><span class="spinner"></span>'+
+    '<span>Asking the AI to break this task into smaller sub-tasks… this can take a minute.</span></div>';
+  document.getElementById('dc-overlay').classList.add('open');
+
+  api(pUrl('/api/tasks/'+id+'/decompose'), {}).then(d => {
+    dcBusy = false;
+    if (dcTaskId !== id) return; // modal was closed or reopened for another task
+    if (!d.ok) {
+      document.getElementById('dc-body').innerHTML =
+        '<div class="empty-state"><h3>Decompose failed</h3><p>'+esc(d.error||'unknown error')+'</p></div>';
+      return;
+    }
+    dcSubtasks = (d.subtasks || []).map(st => Object.assign({_keep: true}, st));
+    renderDecomposeList();
+  }).catch(() => {
+    dcBusy = false;
+    if (dcTaskId !== id) return;
+    document.getElementById('dc-body').innerHTML =
+      '<div class="empty-state"><h3>Request failed</h3><p>Could not reach the server.</p></div>';
+  });
+};
+
+window.closeDecomposeModal = function() {
+  document.getElementById('dc-overlay').classList.remove('open');
+  dcTaskId = 0; dcSubtasks = []; dcBusy = false;
+};
+
+function renderDecomposeList() {
+  const body = document.getElementById('dc-body');
+  if (!dcSubtasks.length) {
+    body.innerHTML = '<div class="empty-state"><h3>No sub-tasks proposed</h3>'+
+      '<p>The AI did not propose any sub-tasks — possibly they all duplicate existing tasks.</p></div>';
+    updateDecomposeFooter();
+    return;
+  }
+  body.innerHTML =
+    '<div class="dc-hint">Review the proposed sub-tasks. Applying adds the selected ones in sequence '+
+    '(each depending on the previous) and marks the parent task as <strong>skipped</strong>.</div>'+
+    dcSubtasks.map((st, i) =>
+      '<label class="dc-sub'+(st._keep?'':' off')+'">'+
+        '<input type="checkbox" '+(st._keep?'checked':'')+' onchange="toggleDecomposeSub('+i+')">'+
+        '<div style="flex:1;min-width:0">'+
+          '<div class="dc-sub-title">'+(i+1)+'. '+esc(st.title||'')+'</div>'+
+          (st.description ? '<div class="dc-sub-desc">'+esc(st.description)+'</div>' : '')+
+          ((st.role || st.estimated_minutes) ?
+            '<div class="dc-sub-meta">'+
+              (st.role ? '<span>'+esc(st.role)+'</span>' : '')+
+              (st.estimated_minutes ? '<span>est: '+st.estimated_minutes+'m</span>' : '')+
+            '</div>' : '')+
+        '</div>'+
+      '</label>'
+    ).join('');
+  updateDecomposeFooter();
+}
+
+window.toggleDecomposeSub = function(i) {
+  if (!dcSubtasks[i]) return;
+  dcSubtasks[i]._keep = !dcSubtasks[i]._keep;
+  renderDecomposeList();
+};
+
+function updateDecomposeFooter() {
+  const kept = dcSubtasks.filter(st => st._keep).length;
+  const btn = document.getElementById('dc-apply-btn');
+  btn.style.display = dcSubtasks.length ? '' : 'none';
+  btn.disabled = kept === 0 || dcBusy;
+  btn.textContent = kept ? 'Add '+kept+' sub-task'+(kept===1?'':'s') : 'Add sub-tasks';
+  document.getElementById('dc-count').textContent =
+    dcSubtasks.length ? kept+'/'+dcSubtasks.length+' selected' : '';
+}
+
+window.applyDecompose = function() {
+  if (dcBusy || !dcTaskId) return;
+  const id = dcTaskId;
+  const kept = dcSubtasks.filter(st => st._keep).map(st => ({
+    title: st.title || '',
+    description: st.description || '',
+    role: st.role || '',
+    estimated_minutes: st.estimated_minutes || 0
+  }));
+  if (!kept.length) return;
+  dcBusy = true;
+  updateDecomposeFooter();
+  api(pUrl('/api/tasks/'+id+'/decompose/apply'), {subtasks: kept}).then(d => {
+    dcBusy = false;
+    if (!d.ok) {
+      updateDecomposeFooter();
+      toast(d.error||'Apply failed', 'err');
+      return;
+    }
+    closeDecomposeModal();
+    toast('Task #'+d.parent_id+' decomposed into '+(d.added||[]).length+' sub-task'+((d.added||[]).length===1?'':'s'), 'ok');
+    refreshState();
+  }).catch(() => {
+    dcBusy = false;
+    updateDecomposeFooter();
+    toast('Request failed', 'err');
+  });
+};
+
 // ── Settings ─────────────────────────────────────────────────────────────────
 
 function loadConfig() {
@@ -15454,6 +15882,8 @@ document.addEventListener('keydown', function(e) {
     if (cmdOpen) { closeCommandPalette(); return; }
     const td = document.getElementById('td-overlay');
     if (td && td.classList.contains('open')) { closeTaskDetails(); return; }
+    const dc = document.getElementById('dc-overlay');
+    if (dc && dc.classList.contains('open')) { closeDecomposeModal(); return; }
     const modal = document.getElementById('modal-overlay');
     if (modal && modal.classList.contains('open')) { closeModal(); return; }
     const voice = document.querySelector('.voice-modal-backdrop');
