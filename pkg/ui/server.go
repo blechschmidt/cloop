@@ -14858,7 +14858,7 @@ function renderDecomposeList() {
   const body = document.getElementById('dc-body');
   if (!dcSubtasks.length) {
     body.innerHTML = '<div class="empty-state"><h3>No sub-tasks proposed</h3>'+
-      '<p>The AI did not propose any sub-tasks — possibly they all duplicate existing tasks.</p></div>';
+      '<p>The AI did not propose any sub-tasks for this task. Close the dialog and try again.</p></div>';
     updateDecomposeFooter();
     return;
   }

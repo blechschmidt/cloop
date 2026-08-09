@@ -43,7 +43,7 @@ func DecomposePrompt(task *pm.Task, depth int) string {
 	if depth > 1 {
 		b.WriteString(fmt.Sprintf("- At a granularity appropriate for %d more levels of decomposition\n", depth-1))
 	}
-	b.WriteString("\nOutput ONLY valid JSON array (no explanation, no markdown fences):\n")
+	b.WriteString("\nOutput ONLY a valid JSON array of at least 3 sub-task objects (no explanation, no markdown fences):\n")
 	b.WriteString(`[{"title":"short title","description":"detailed description","priority":1,"role":"backend","estimated_minutes":30},`)
 	b.WriteString(`{"title":"another sub-task","description":"details","priority":2,"role":"testing","estimated_minutes":20}]`)
 	b.WriteString("\n\nFor role, choose one of: backend, frontend, testing, security, devops, data, docs, review, or empty string.\n")
@@ -51,6 +51,13 @@ func DecomposePrompt(task *pm.Task, depth int) string {
 	b.WriteString("estimated_minutes is your best estimate of how long the sub-task will take.")
 	return b.String()
 }
+
+// retryInstruction is appended to the prompt when a first attempt produced an
+// unusable or degenerate answer (nothing parseable, or fewer than 2 sub-tasks).
+const retryInstruction = "\n\nIMPORTANT: A previous attempt did not produce a usable answer. " +
+	"You MUST respond with ONLY a JSON array of 3 to 7 sub-task objects in the exact format shown above. " +
+	"Splitting into a single sub-task is not acceptable. " +
+	"Your entire response must start with '[' and end with ']' — no prose, no markdown."
 
 // decomposeItem is the raw JSON structure returned by the AI for a single sub-task.
 type decomposeItem struct {
@@ -61,26 +68,47 @@ type decomposeItem struct {
 	EstimatedMinutes int          `json:"estimated_minutes"`
 }
 
+// extractSubtaskItems finds the first parseable JSON array of sub-task objects
+// in an AI response. Models frequently surround the JSON with narration,
+// markdown fences, or wrap it in an envelope object, so a naive
+// first-'['-to-last-']' substring is not reliable: any '[' in the preamble
+// (e.g. "[analysis]") corrupts it. Instead, every '[' position is tried with a
+// json.Decoder, which reads exactly one complete JSON value and ignores
+// trailing text. As a last resort a lone sub-task object is accepted.
+func extractSubtaskItems(response string) ([]decomposeItem, error) {
+	for i := 0; i < len(response); i++ {
+		if response[i] != '[' {
+			continue
+		}
+		dec := json.NewDecoder(strings.NewReader(response[i:]))
+		var items []decomposeItem
+		if err := dec.Decode(&items); err == nil && len(items) > 0 {
+			return items, nil
+		}
+	}
+	// Fallback: a single object without array brackets.
+	for i := 0; i < len(response); i++ {
+		if response[i] != '{' {
+			continue
+		}
+		dec := json.NewDecoder(strings.NewReader(response[i:]))
+		var item decomposeItem
+		if err := dec.Decode(&item); err == nil && item.Title != "" {
+			return []decomposeItem{item}, nil
+		}
+	}
+	return nil, fmt.Errorf("no JSON sub-task array found in decompose response")
+}
+
 // ParseSubTasks parses the AI's JSON response into sub-tasks.
 // The returned tasks have no IDs set (caller assigns IDs).
 // Tags and Assignee from the parent are inherited by all sub-tasks.
 // The first sub-task's DependsOn is set to []int{parentID}.
 // Subsequent sub-tasks depend on the previous sub-task sequentially.
 func ParseSubTasks(response string, parent *pm.Task) ([]*pm.Task, error) {
-	// Find JSON array in the response.
-	start := strings.Index(response, "[")
-	end := strings.LastIndex(response, "]")
-	if start == -1 || end == -1 || end <= start {
-		return nil, fmt.Errorf("no JSON array found in decompose response")
-	}
-	jsonStr := response[start : end+1]
-
-	var items []decomposeItem
-	if err := json.Unmarshal([]byte(jsonStr), &items); err != nil {
-		return nil, fmt.Errorf("parsing decompose response: %w", err)
-	}
-	if len(items) == 0 {
-		return nil, fmt.Errorf("decompose produced no sub-tasks")
+	items, err := extractSubtaskItems(response)
+	if err != nil {
+		return nil, err
 	}
 	// Clamp to max 7.
 	if len(items) > 7 {
@@ -88,13 +116,9 @@ func ParseSubTasks(response string, parent *pm.Task) ([]*pm.Task, error) {
 	}
 
 	tasks := make([]*pm.Task, 0, len(items))
-	for i, item := range items {
-		if item.Title == "" {
+	for _, item := range items {
+		if strings.TrimSpace(item.Title) == "" {
 			continue
-		}
-		priority := item.Priority
-		if priority == 0 {
-			priority = i + 1
 		}
 
 		// Inherit parent tags (defensive copy).
@@ -104,7 +128,7 @@ func ParseSubTasks(response string, parent *pm.Task) ([]*pm.Task, error) {
 		}
 
 		t := &pm.Task{
-			// ID is left as zero — caller assigns IDs after dedup.
+			// ID is left as zero — caller assigns IDs.
 			Title:            item.Title,
 			Description:      item.Description,
 			Priority:         parent.Priority,
@@ -115,13 +139,12 @@ func ParseSubTasks(response string, parent *pm.Task) ([]*pm.Task, error) {
 			EstimatedMinutes: item.EstimatedMinutes,
 		}
 
-		// First sub-task depends on the parent (which will be marked skipped).
-		// Subsequent sub-tasks depend on the previous one.
-		if i == 0 {
+		// First kept sub-task depends on the parent (which will be marked
+		// skipped). Sequential dep wiring for the rest (sub[i] depends on
+		// sub[i-1]) is applied by the caller after IDs are assigned.
+		if len(tasks) == 0 {
 			t.DependsOn = []int{parent.ID}
 		}
-		// Note: sequential dep wiring (sub[i] depends on sub[i-1]) is applied
-		// by the caller after IDs are assigned so we can use real IDs.
 
 		tasks = append(tasks, t)
 	}
@@ -138,9 +161,21 @@ type DecomposeResult struct {
 	SubTasks []*pm.Task
 }
 
-// Decompose calls the AI to break a single task into sub-tasks, deduplicates
-// against existing plan tasks, and returns the result without modifying the plan.
-// Callers must assign IDs and inject into the plan themselves.
+// Decompose calls the AI to break a single task into sub-tasks and returns the
+// result without modifying the plan. Callers must assign IDs and inject into
+// the plan themselves (see InjectSubTasks).
+//
+// The proposed sub-tasks are deliberately NOT semantically deduplicated
+// against the plan: sub-tasks are a refinement of the parent and by
+// construction cover the same work, so dedup against a plan that contains the
+// parent classifies them all as duplicates and silently discards them. Since
+// applying a decomposition marks the parent skipped, any dropped sub-task
+// would be silently lost work. Both consumers (UI modal, CLI preview) have a
+// human review step instead.
+//
+// A degenerate first answer (unparseable, or fewer than 2 sub-tasks) gets one
+// retry with a firmer instruction; provider transport errors are returned
+// immediately.
 func Decompose(ctx context.Context, p provider.Provider, opts provider.Options, plan *pm.Plan, taskID int) (*DecomposeResult, error) {
 	var task *pm.Task
 	for _, t := range plan.Tasks {
@@ -159,15 +194,25 @@ func Decompose(ctx context.Context, p provider.Provider, opts provider.Options, 
 		return nil, fmt.Errorf("decompose: provider error: %w", err)
 	}
 
-	subTasks, err := ParseSubTasks(result.Output, task)
-	if err != nil {
-		return nil, fmt.Errorf("decompose: parse error: %w", err)
+	subTasks, parseErr := ParseSubTasks(result.Output, task)
+	if parseErr != nil || len(subTasks) < 2 {
+		retryResult, retryErr := p.Complete(ctx, prompt+retryInstruction, opts)
+		if retryErr == nil {
+			retryTasks, retryParseErr := ParseSubTasks(retryResult.Output, task)
+			if retryParseErr == nil && len(retryTasks) > len(subTasks) {
+				subTasks = retryTasks
+				parseErr = nil
+			}
+		}
+		if len(subTasks) == 0 {
+			if parseErr != nil {
+				return nil, fmt.Errorf("decompose: parse error: %w", parseErr)
+			}
+			return nil, fmt.Errorf("decompose produced no sub-tasks")
+		}
 	}
 
-	// Deduplicate against existing plan tasks (fail-open).
-	filtered, _ := pm.DeduplicateTasks(ctx, p, opts, plan.Tasks, subTasks)
-
-	return &DecomposeResult{Parent: task, SubTasks: filtered}, nil
+	return &DecomposeResult{Parent: task, SubTasks: subTasks}, nil
 }
 
 // InjectSubTasks applies a DecomposeResult to the plan:

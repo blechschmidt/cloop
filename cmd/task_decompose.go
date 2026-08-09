@@ -38,7 +38,6 @@ Sub-tasks:
   - Are wired sequentially: sub-task N+1 depends on sub-task N
   - The first sub-task depends on the (now skipped) parent
   - The parent task is marked 'skipped' with annotation 'Decomposed into sub-tasks'
-  - Duplicates are filtered via AI semantic deduplication before injection
 
 Use --depth 2 to recursively decompose each generated sub-task one more level.
 Use --dry-run to preview the proposed sub-tasks without modifying state.
@@ -192,7 +191,7 @@ Examples:
 			}
 
 			if len(res.SubTasks) == 0 {
-				warnColor.Printf("  No novel sub-tasks produced for task %d (all filtered as duplicates).\n\n", item.taskID)
+				warnColor.Printf("  No sub-tasks produced for task %d.\n\n", item.taskID)
 				continue
 			}
 
