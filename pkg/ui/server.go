@@ -724,8 +724,12 @@ func (s *Server) Handler() http.Handler {
 // layer so a panic in the request-ID code path itself would still surface as
 // a clean 500 (panic recovery's stderr stack trace gives operators what they
 // need in that pathological case).
+// The remote-executor connect endpoint is routed around authMiddleware but
+// kept behind the rate limiter and every hardening layer: agents are not
+// dashboard users and authenticate with their own credentials, which the hub
+// verifies itself (Task 20158). See pkg/ui/executor_agents.go.
 func (s *Server) buildHandler(mux *http.ServeMux) http.Handler {
-	app := s.uiRateLimitMiddleware(securityHeaders(s.authMiddleware(mux)))
+	app := s.uiRateLimitMiddleware(securityHeaders(s.executorConnectBypass(s.authMiddleware(mux))))
 	return uiRequestIDMiddleware(panicRecoveryMiddleware(s.probeBypass(app)))
 }
 
