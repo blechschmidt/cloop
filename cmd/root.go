@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/migrate"
 	"github.com/blechschmidt/cloop/pkg/workspace"
 	"github.com/fatih/color"
@@ -92,7 +93,7 @@ Supports Anthropic (Claude API), OpenAI, Ollama (local), and Claude Code.
 func Execute() {
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+		os.Exit(exitCodeFor(err))
 	}
 }
 
@@ -118,6 +119,18 @@ func init() {
 			}
 			if err := os.Chdir(workDir); err != nil {
 				return err
+			}
+		}
+
+		// Register the execution backends this project configures. Done here
+		// rather than in an init() because it needs the project config, and
+		// therefore the final working directory — which --workspace may have
+		// just changed. The host driver is registered by executors.go's
+		// init() and always remains the default; this only adds isolated
+		// backends the operator opted into.
+		if cwd, err := os.Getwd(); err == nil {
+			if cfg, cfgErr := config.Load(cwd); cfgErr == nil {
+				registerContainerExecutor(cfg)
 			}
 		}
 

@@ -361,8 +361,115 @@ func applyConfigKey(cfg *config.Config, key, value string) error {
 			return fmt.Errorf("ui.oidc.cookie_secure must be auto, always, or never (got %q)", value)
 		}
 
+	// Container executor (Task 20157). Each case assigns into a copy that is
+	// validated as a whole before being committed, because these fields
+	// constrain each other — allow_hosts is only meaningful with a network,
+	// and a memory floor depends on the parsed unit. Validating the field in
+	// isolation would accept combinations the driver then rejects at run
+	// time, which is exactly the "config said yes, runtime says no" gap this
+	// command exists to close.
+	case "executors.container.enabled",
+		"executors.container.id",
+		"executors.container.runtime",
+		"executors.container.image",
+		"executors.container.cpus",
+		"executors.container.memory",
+		"executors.container.pids_limit",
+		"executors.container.network",
+		"executors.container.allow_hosts",
+		"executors.container.extra_args",
+		"executors.container.selinux_label":
+		next := cfg.Executors.Container
+		if err := applyContainerExecutorKey(&next, key, value); err != nil {
+			return err
+		}
+		if err := config.ValidateContainerExecutor(next); err != nil {
+			return err
+		}
+		cfg.Executors.Container = next
+
 	default:
-		return fmt.Errorf("unknown config key %q\n\nValid keys:\n  provider\n  anthropic.api_key, anthropic.model, anthropic.base_url\n  openai.api_key, openai.model, openai.base_url\n  ollama.base_url, ollama.model\n  claudecode.model, claudecode.effort\n  mock.responses_file, mock.default\n  webhook.url, webhook.events\n  notify.slack_webhook, notify.discord_webhook\n  github.token, github.repo, github.labels\n  sync.remote, sync.branch\n  tracing.enabled, tracing.endpoint, tracing.service_name\n  max_parallel\n  rate_limit.requests_per_second, rate_limit.burst\n  budget.monthly_usd, budget.daily_usd_limit, budget.daily_token_limit\n  budget.alert_threshold_pct, budget.global_usd_pct, budget.global_token_pct\n  ui.max_websocket_conns, ui.max_websocket_conns_per_ip\n  ui.oidc.enabled, ui.oidc.issuer, ui.oidc.client_id, ui.oidc.client_secret\n  ui.oidc.redirect_url, ui.oidc.admin_emails, ui.oidc.session_ttl_hours, ui.oidc.cookie_secure", key)
+		return fmt.Errorf("unknown config key %q\n\nValid keys:\n  provider\n  anthropic.api_key, anthropic.model, anthropic.base_url\n  openai.api_key, openai.model, openai.base_url\n  ollama.base_url, ollama.model\n  claudecode.model, claudecode.effort\n  mock.responses_file, mock.default\n  webhook.url, webhook.events\n  notify.slack_webhook, notify.discord_webhook\n  github.token, github.repo, github.labels\n  sync.remote, sync.branch\n  tracing.enabled, tracing.endpoint, tracing.service_name\n  max_parallel\n  rate_limit.requests_per_second, rate_limit.burst\n  budget.monthly_usd, budget.daily_usd_limit, budget.daily_token_limit\n  budget.alert_threshold_pct, budget.global_usd_pct, budget.global_token_pct\n  ui.max_websocket_conns, ui.max_websocket_conns_per_ip\n  ui.oidc.enabled, ui.oidc.issuer, ui.oidc.client_id, ui.oidc.client_secret\n  ui.oidc.redirect_url, ui.oidc.admin_emails, ui.oidc.session_ttl_hours, ui.oidc.cookie_secure\n  executors.container.enabled, executors.container.id, executors.container.runtime\n  executors.container.image, executors.container.cpus, executors.container.memory\n  executors.container.pids_limit, executors.container.network, executors.container.allow_hosts\n  executors.container.extra_args, executors.container.selinux_label", key)
+	}
+	return nil
+}
+
+// applyContainerExecutorKey assigns one executors.container.* key into c.
+// Parsing only — the cross-field validation happens in the caller against the
+// resulting struct.
+//
+// The list-valued keys (allow_hosts, extra_args) take a comma-separated
+// value, matching github.labels and webhook.events. An empty value clears the
+// list, which is how an operator removes a setting without hand-editing YAML.
+func applyContainerExecutorKey(c *config.ContainerExecutorConfig, key, value string) error {
+	parseList := func(v string) []string {
+		v = strings.TrimSpace(v)
+		if v == "" {
+			return nil
+		}
+		parts := strings.Split(v, ",")
+		out := make([]string, 0, len(parts))
+		for _, p := range parts {
+			if t := strings.TrimSpace(p); t != "" {
+				out = append(out, t)
+			}
+		}
+		return out
+	}
+
+	switch key {
+	case "executors.container.enabled":
+		switch strings.ToLower(strings.TrimSpace(value)) {
+		case "true", "1", "yes", "on":
+			c.Enabled = true
+		case "false", "0", "no", "off":
+			c.Enabled = false
+		default:
+			return fmt.Errorf("executors.container.enabled must be true or false (got %q)", value)
+		}
+	case "executors.container.id":
+		c.ID = strings.TrimSpace(value)
+	case "executors.container.runtime":
+		c.Runtime = strings.TrimSpace(value)
+	case "executors.container.image":
+		c.Image = strings.TrimSpace(value)
+	case "executors.container.cpus":
+		if strings.TrimSpace(value) == "" {
+			c.CPUs = 0
+			return nil
+		}
+		f, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
+		if err != nil {
+			return fmt.Errorf("executors.container.cpus must be a number such as 1.5 (got %q)", value)
+		}
+		c.CPUs = f
+	case "executors.container.memory":
+		// Parsed here too so a bad unit is reported as a memory problem
+		// rather than as the downstream constraint it would otherwise trip.
+		if _, err := config.ParseMemoryMB(value); err != nil {
+			return fmt.Errorf("executors.container.%w", err)
+		}
+		c.Memory = strings.TrimSpace(value)
+	case "executors.container.pids_limit":
+		if strings.TrimSpace(value) == "" {
+			c.PIDsLimit = 0
+			return nil
+		}
+		n, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil {
+			return fmt.Errorf("executors.container.pids_limit must be an integer (got %q)", value)
+		}
+		c.PIDsLimit = n
+	case "executors.container.network":
+		c.Network = strings.TrimSpace(value)
+	case "executors.container.allow_hosts":
+		c.AllowHosts = parseList(value)
+	case "executors.container.extra_args":
+		c.ExtraArgs = parseList(value)
+	case "executors.container.selinux_label":
+		c.SELinuxLabel = strings.TrimSpace(value)
+	default:
+		return fmt.Errorf("unhandled container executor key %q", key)
 	}
 	return nil
 }

@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 
 	"gopkg.in/yaml.v3"
@@ -93,6 +94,24 @@ const (
 	OrchestratorTaskTimeoutMinutesLower   = 1
 	OrchestratorTaskTimeoutMinutesUpper   = 7 * 24 * 60
 	OrchestratorTaskTimeoutMinutesDefault = 30
+
+	// Container executor limits (Task 20157). Zero means "no limit
+	// requested" for every one of these; a non-zero value must be usable.
+	//
+	// The upper bounds are not a guess at what a host has — they are a
+	// guard against a typo becoming a silent non-limit. A container asked
+	// for 100000 CPUs does not get them; the runtime clamps or errors, and
+	// the operator believes a cap is in force that is not. Refusing the
+	// value is the only outcome that keeps config honest.
+	ContainerCPUsUpper = 1024.0
+	// Memory floor: below ~64 MiB a Go binary cannot even start, so a
+	// smaller cap would make every run fail with an unrelated-looking OOM.
+	ContainerMemoryMBLower = 64
+	ContainerMemoryMBUpper = 1 << 20 // 1 TiB
+	// PID cap: 1 is enough for a single process; the ceiling is well above
+	// any build's fan-out but below the kernel's default pid_max.
+	ContainerPIDsLower = 1
+	ContainerPIDsUpper = 1 << 16
 )
 
 // permWarnedPaths tracks which config paths have already emitted the
@@ -188,6 +207,89 @@ type Config struct {
 	// When AutoBackup is true, the long-running cloop ui server runs a
 	// daily backup and prunes old files. Disabled by default.
 	Backup BackupConfig `yaml:"backup,omitempty"`
+
+	// Executors configures the pluggable execution backends (Task 20156+).
+	// Absent means "host process only", which is the zero-configuration
+	// single-machine default.
+	Executors ExecutorsConfig `yaml:"executors,omitempty"`
+}
+
+// ExecutorsConfig groups the execution backends a control plane offers.
+//
+// Each sub-struct configures one driver. A driver is registered only when its
+// section is present and enabled, so adding a backend is an explicit
+// operator decision rather than something that materialises because a binary
+// happened to be on PATH.
+type ExecutorsConfig struct {
+	// Container configures the Docker/Podman sandbox executor.
+	Container ContainerExecutorConfig `yaml:"container,omitempty"`
+}
+
+// ContainerExecutorConfig configures the container sandbox executor
+// (pkg/executor/container).
+//
+// Every field here narrows what a workload can do, so a malformed value must
+// never widen it. That is why parsing is strict — an unparsable memory limit
+// is an error, not a silently-dropped limit — while the *absence* of a value
+// falls back to the driver's own conservative defaults (no network, all
+// capabilities dropped, a process cap).
+type ContainerExecutorConfig struct {
+	// Enabled registers the container executor at startup. Off by default:
+	// a control plane should not gain a new way to execute code because a
+	// container runtime appeared on the host.
+	Enabled bool `yaml:"enabled,omitempty"`
+
+	// ID is the executor's registry identifier, used by `cloop executor
+	// test <id>` and by project bindings. Empty means "container".
+	ID string `yaml:"id,omitempty"`
+
+	// Runtime pins the container runtime: "podman" or "docker". Empty
+	// auto-detects, preferring podman (rootless podman confines a workload
+	// with a user namespace as well as with flags).
+	Runtime string `yaml:"runtime,omitempty"`
+
+	// Image is the sandbox image reference. Empty uses the driver's
+	// documented default; see container.DefaultImage for the contract an
+	// image must satisfy.
+	Image string `yaml:"image,omitempty"`
+
+	// CPUs is the default core allowance per workload (1.5 = one and a half
+	// cores). Zero means unlimited. Bounded by ContainerCPUsUpper.
+	CPUs float64 `yaml:"cpus,omitempty"`
+
+	// Memory is the default memory ceiling per workload, as a size string:
+	// "512m", "2g", "1024k". A bare integer is read as megabytes. Empty
+	// means unlimited. Swap is pinned to the same value, so a workload
+	// cannot page past its ceiling.
+	Memory string `yaml:"memory,omitempty"`
+
+	// PIDsLimit caps processes and threads per workload. Zero uses the
+	// driver default (1024); -1 disables the cap.
+	PIDsLimit int `yaml:"pids_limit,omitempty"`
+
+	// Network is "none" (default), "bridge", or an operator-defined network
+	// name. "host" is rejected: it removes network isolation entirely and
+	// exposes services bound to the host loopback, including the control
+	// plane's own API.
+	//
+	// cloop does not filter egress itself. Anything other than "none" grants
+	// unrestricted outbound access unless the named network carries its own
+	// policy (a podman --internal network, a CNI plugin, an egress proxy).
+	Network string `yaml:"network,omitempty"`
+
+	// AllowHosts pins name resolution inside the sandbox as "host:address"
+	// entries. Only valid when Network is not "none".
+	AllowHosts []string `yaml:"allow_hosts,omitempty"`
+
+	// ExtraArgs are additional runtime flags. Each must be a flag in
+	// --flag=value form, and flags that would dismantle the sandbox
+	// (--privileged, --cap-add, --volume, --network, ...) are rejected.
+	ExtraArgs []string `yaml:"extra_args,omitempty"`
+
+	// SELinuxLabel is the relabel option applied to bind mounts on SELinux
+	// hosts: "z" (shared) or "Z" (private). Required for the workspace to be
+	// readable inside the container when SELinux is enforcing.
+	SELinuxLabel string `yaml:"selinux_label,omitempty"`
 }
 
 // BackupConfig configures hot backups of the SQLite state database.
@@ -905,6 +1007,17 @@ func (c *Config) validateAndClamp(path string) {
 		warn("orchestrator.task_timeout_minutes", fmt.Sprintf("value %d outside [%d, %d]", c.Orchestrator.TaskTimeoutMinutes, OrchestratorTaskTimeoutMinutesLower, OrchestratorTaskTimeoutMinutesUpper))
 		c.Orchestrator.TaskTimeoutMinutes = 0
 	}
+	// Container executor: every repair resets to the driver's default, which
+	// is always the more confined choice, so a bad value can never widen the
+	// sandbox. The field name is included in the warning key so each distinct
+	// problem is reported once rather than the section as a whole.
+	for _, msg := range clampContainerExecutor(&c.Executors.Container) {
+		field, detail, found := strings.Cut(msg, ": ")
+		if !found {
+			field, detail = "executors.container", msg
+		}
+		warn(field, detail)
+	}
 }
 
 // ValidateNumeric returns a non-nil error describing the first numeric range
@@ -971,6 +1084,9 @@ func (c *Config) ValidateNumeric() error {
 	if c.Orchestrator.TaskTimeoutMinutes != 0 && (c.Orchestrator.TaskTimeoutMinutes < OrchestratorTaskTimeoutMinutesLower || c.Orchestrator.TaskTimeoutMinutes > OrchestratorTaskTimeoutMinutesUpper) {
 		return fmt.Errorf("orchestrator.task_timeout_minutes must be between %d and %d (or 0 for the default %d) (got %d)",
 			OrchestratorTaskTimeoutMinutesLower, OrchestratorTaskTimeoutMinutesUpper, OrchestratorTaskTimeoutMinutesDefault, c.Orchestrator.TaskTimeoutMinutes)
+	}
+	if err := ValidateContainerExecutor(c.Executors.Container); err != nil {
+		return err
 	}
 	return nil
 }

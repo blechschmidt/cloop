@@ -1255,6 +1255,109 @@ Invoke-Expression (&cloop completion powershell)
 | `cloop task merge <id…>` | All task IDs for multi-ID arguments |
 | Subcommands | All registered subcommands with descriptions |
 
+## Execution Backends (Executors)
+
+An **executor** decides *where* a cloop workload actually runs. By default it is
+a child process on the same host as cloop itself, with the same user, the same
+filesystem, and the same network. That is fine on a laptop. It is not fine for a
+hosted deployment where the agent executes model-authored code on someone else's
+behalf.
+
+Projects are pinned to an executor. A project bound to an executor that is not
+available **fails** rather than silently falling back to host execution — an
+isolation boundary you opted into is never downgraded because the backend
+happened to be unreachable.
+
+| Kind | Isolation | Notes |
+|------|-----------|-------|
+| `localprocess` | none | Default. Zero-config, no sandbox. |
+| `container` | container | Docker/Podman sandbox on the control-plane host. |
+
+```bash
+cloop executor list              # what is registered, and what it isolates
+cloop executor test <id>         # preflight + run `cloop version` inside it
+cloop executor reap <id>         # remove containers left by a killed control plane
+```
+
+### Container sandbox
+
+Enable it in `.cloop/config.yaml`:
+
+```yaml
+executors:
+  container:
+    enabled: true
+    runtime: podman          # or docker; empty auto-detects (podman preferred)
+    image: ghcr.io/blechschmidt/cloop-harness:latest
+    cpus: 2                  # core allowance per workload
+    memory: 2g               # 512m / 2g / 1024k; a bare integer means MB
+    pids_limit: 1024         # process cap; -1 disables
+    network: none            # none (default) | bridge | <named network>
+    extra_args: []           # additional runtime flags, --flag=value form only
+    selinux_label: ""        # "z" or "Z" — required when SELinux is enforcing
+```
+
+or with `cloop config set executors.container.<key> <value>`.
+
+Every container is started with:
+
+- **only the project directory** bind-mounted, at the fixed path `/workspace`.
+  Nothing else of the host is visible.
+- a **non-root UID** taken from the project directory's owner, so files the
+  workload creates are owned correctly on the host and an escape lands on an
+  unprivileged user. Under rootless podman the same is achieved with
+  `--userns=keep-id`.
+- **`--network=none`** by default. Egress is opt-in, per executor.
+- **all Linux capabilities dropped** and `no-new-privileges` set, so a setuid
+  binary in the image cannot undo the UID choice.
+- **`--cpus` / `--memory` / `--pids-limit`**, with swap pinned to the memory
+  ceiling so paging cannot evade it.
+- a deterministic name, `cloop-<project>-<runID>`, so orphans stay reapable.
+
+**Secrets** (provider API keys, brokered credentials) are injected as
+environment at start using the bare `--env NAME` form: the runtime reads each
+value from its own environment, so no secret ever appears in the host's process
+table. Nothing is baked into an image and nothing is written to the mounted
+workdir.
+
+Unlike host execution, a container workload does **not** inherit the control
+plane's environment. Forwarding it would hand the sandbox every credential the
+server holds, so variables are passed explicitly or not at all.
+
+### What the container sandbox does not do
+
+- **It does not filter egress.** Anything other than `network: none` grants
+  unrestricted outbound access unless the named network carries its own policy
+  (a `--internal` podman network, a CNI plugin, an egress proxy). `cloop
+  executor test` says so explicitly rather than implying a guarantee.
+- **It does not pull images.** Runs use `--pull=never` so a cold image cache
+  fails immediately with an actionable error instead of turning a UI click into
+  a multi-minute hang. Preflight tells you what to pull.
+- **It does not enforce disk quotas.** A `DiskMB` request is refused rather
+  than accepted and ignored, because writable-layer quotas only work on a
+  minority of storage-driver configurations.
+
+`extra_args` is validated: flags that would dismantle the sandbox
+(`--privileged`, `--cap-add`, `--volume`, `--network`, `--user`, `--entrypoint`,
+`--env`, …) are rejected, and every entry must be a flag in `--flag=value` form
+so a bare value cannot be consumed as the image reference.
+
+### Sandbox image contract
+
+`executors.container.image` must provide:
+
+- the cloop binary at `/usr/local/bin/cloop`;
+- the agent harness the project's provider needs (for the default `claudecode`
+  provider, the `claude` CLI on `PATH`);
+- `git` and a CA bundle;
+- a non-root user, since the workload runs as the project directory's owner UID.
+
+`cloop executor test` bind-mounts the control plane's *own* binary read-only at
+`/usr/local/bin/cloop`, so the smoke test is meaningful even against an image
+that does not yet ship cloop.
+
+---
+
 ## Security Model
 
 ### What data leaves the machine
