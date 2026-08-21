@@ -13,7 +13,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime/debug"
@@ -548,6 +547,10 @@ func (s *Server) log() logger.Logger {
 // token is optional; if non-empty every API request must supply it via
 // "Authorization: Bearer <token>" header or "?token=<token>" query param.
 func New(workdir string, port int, token string) *Server {
+	// Register the built-in execution drivers and point the registry at
+	// this control plane's persisted project→executor bindings, so every
+	// handler can call executor.Resolve (Task 20156).
+	bootstrapExecutors(workdir)
 	return &Server{
 		WorkDir:         workdir,
 		Port:            port,
@@ -2732,81 +2735,71 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 		exe = "cloop"
 	}
 	workDir := s.resolveWorkDir(r)
-	cmd := exec.Command(exe, args...)
-	cmd.Dir = workDir
 
-	// Pipe combined output so we can stream it to the live log panel.
-	pipeR, pipeW, pipeErr := os.Pipe()
-	if pipeErr != nil {
-		// Fall back to inheriting stderr if pipe creation fails.
-		cmd.Stdout = os.Stderr
-		cmd.Stderr = os.Stderr
-	} else {
-		cmd.Stdout = pipeW
-		cmd.Stderr = pipeW
-	}
-
-	if err := cmd.Start(); err != nil {
-		if pipeR != nil {
-			pipeR.Close()
-			pipeW.Close()
-		}
+	// The harness is never forked here. It is handed to whichever executor
+	// this project is bound to — the local host by default, a container or
+	// a remote edge agent when configured (Task 20156).
+	ex, handle, err := startWorkload(workDir, append([]string{exe}, args...), map[string]string{"handler": "run"})
+	if err != nil {
 		jsonErr(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	if pipeErr == nil {
-		// Clear old log and mark running.
+	// Clear old log and mark running.
+	s.liveLogMu.Lock()
+	s.liveLogLines = nil
+	s.liveLogRunning = true
+	s.liveLogMu.Unlock()
+	s.broadcastRunState(workDir, true, true)
+
+	lines, streamErr := ex.Stream(context.Background(), handle.ID)
+	if streamErr != nil {
+		// We can no longer observe the run, so we cannot tell when it ends.
+		// Clear the running flag rather than leaving the UI wedged showing a
+		// run in progress forever.
+		fmt.Fprintf(os.Stderr, "ui: cannot stream run output: %v\n", streamErr)
 		s.liveLogMu.Lock()
-		s.liveLogLines = nil
-		s.liveLogRunning = true
+		s.liveLogRunning = false
 		s.liveLogMu.Unlock()
-		s.broadcastRunState(workDir, true, true)
+		s.broadcastRunState(workDir, false, true)
+		jsonOK(w, map[string]interface{}{"ok": true, "command": "cloop " + strings.Join(args, " ")})
+		return
+	}
 
-		pipeW.Close() // parent doesn't write; close its end so reader gets EOF when child exits.
-
-		go func() {
-			defer func() {
-				if rec := recover(); rec != nil {
-					fmt.Fprintf(os.Stderr, "ui: run output goroutine panic recovered: %v\n", rec)
-					// Best-effort cleanup so the UI doesn't think a run is still in progress.
-					s.liveLogMu.Lock()
-					s.liveLogRunning = false
-					s.liveLogMu.Unlock()
-				}
-			}()
-			buf := make([]byte, 4096)
-			for {
-				n, readErr := pipeR.Read(buf)
-				if n > 0 {
-					chunk := string(buf[:n])
-					os.Stderr.WriteString(chunk) // also echo to server's stderr
-					s.broadcastLog(chunk)
-				}
-				if readErr != nil {
-					break
-				}
-			}
-			pipeR.Close()
-			_ = cmd.Wait()
-			s.liveLogMu.Lock()
-			s.liveLogRunning = false
-			s.liveLogMu.Unlock()
-			s.broadcastRunState(workDir, false, true)
-			// Broadcast updated state after run completes. Lite-load —
-			// marshalStateForWire drops Steps before broadcast (Task 20125).
-			// SSE consumers get the full state; WS clients get a state_diff
-			// against the cached snapshot (Task 20132).
-			if ps, loadErr := state.LoadLite(workDir); loadErr == nil {
-				if data, marshalErr := marshalStateForWire(ps); marshalErr == nil {
-					s.broadcast(string(data))
-				}
-				s.broadcastStateDiff(workDir, ps)
+	go func() {
+		defer func() {
+			if rec := recover(); rec != nil {
+				fmt.Fprintf(os.Stderr, "ui: run output goroutine panic recovered: %v\n", rec)
+				// Best-effort cleanup so the UI doesn't think a run is still in progress.
+				s.liveLogMu.Lock()
+				s.liveLogRunning = false
+				s.liveLogMu.Unlock()
 			}
 		}()
-	} else {
-		go func() { _ = cmd.Wait() }()
-	}
+		// The driver closes the channel only after the workload has been
+		// reaped, so falling out of this loop means the run is over.
+		for line := range lines {
+			if line.Text == "" {
+				continue
+			}
+			os.Stderr.WriteString(line.Text) // also echo to server's stderr
+			s.broadcastLog(line.Text)
+		}
+		s.liveLogMu.Lock()
+		s.liveLogRunning = false
+		s.liveLogMu.Unlock()
+		s.broadcastRunState(workDir, false, true)
+		// Broadcast updated state after run completes. Lite-load —
+		// marshalStateForWire drops Steps before broadcast (Task 20125).
+		// SSE consumers get the full state; WS clients get a state_diff
+		// against the cached snapshot (Task 20132).
+		if ps, loadErr := state.LoadLite(workDir); loadErr == nil {
+			if data, marshalErr := marshalStateForWire(ps); marshalErr == nil {
+				s.broadcast(string(data))
+			}
+			s.broadcastStateDiff(workDir, ps)
+		}
+	}()
 
 	jsonOK(w, map[string]interface{}{"ok": true, "command": "cloop " + strings.Join(args, " ")})
 }
@@ -5482,15 +5475,19 @@ func (s *Server) handleProjectRun(w http.ResponseWriter, r *http.Request) {
 	if req.PM {
 		args = append(args, "--pm")
 	}
-	cmd := exec.Command(exe, args...)
-	cmd.Dir = entry.Path
-	cmd.Stdout = os.Stderr
-	cmd.Stderr = os.Stderr
-	if err := cmd.Start(); err != nil {
+	// Dispatched to the project's bound executor rather than forked here
+	// (Task 20156).
+	ex, handle, err := startWorkload(entry.Path, append([]string{exe}, args...),
+		map[string]string{"handler": "project-run", "project_name": entry.Name})
+	if err != nil {
 		jsonErr(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	go func() { _ = cmd.Wait() }()
+	// Echo the run's output into the server log, which is what
+	// cmd.Stdout = os.Stderr used to do.
+	if lines, streamErr := ex.Stream(context.Background(), handle.ID); streamErr == nil {
+		go drainToStderr(lines, "project-run "+entry.Name)
+	}
 	// Push immediate run_state + projects events so the UI updates the
 	// Run/Stop button and project card without waiting for the 2s
 	// watchProjects ticker. Replaces the client-side setTimeout(loadProjects)
@@ -5607,10 +5604,22 @@ func (s *Server) handleProjectNew(w http.ResponseWriter, r *http.Request) {
 	if req.Effort != "" {
 		args = append(args, "--effort", req.Effort)
 	}
-	cmd := exec.Command(exe, args...)
-	cmd.Dir = abs
-	if out, initErr := cmd.CombinedOutput(); initErr != nil {
-		jsonErr(w, "cloop init failed: "+string(out), http.StatusInternalServerError)
+	// `cloop init` is synchronous: the caller needs its output to report a
+	// failure, and the project must exist before it can be registered.
+	//
+	// Deliberately detached from r.Context(): a client that navigates away
+	// mid-init must not leave a half-initialised project behind. The
+	// timeout still bounds it, which the pre-executor CombinedOutput() call
+	// did not.
+	initCtx, cancelInit := context.WithTimeout(context.WithoutCancel(r.Context()), initSubprocessTimeout)
+	defer cancelInit()
+	if out, initErr := runWorkload(initCtx, abs, append([]string{exe}, args...),
+		map[string]string{"handler": "project-new"}); initErr != nil {
+		msg := strings.TrimSpace(string(out))
+		if msg == "" {
+			msg = initErr.Error()
+		}
+		jsonErr(w, "cloop init failed: "+msg, http.StatusInternalServerError)
 		return
 	}
 
@@ -5629,12 +5638,15 @@ func (s *Server) handleProjectNew(w http.ResponseWriter, r *http.Request) {
 		if req.PMMode {
 			runArgs = append(runArgs, "--pm")
 		}
-		runCmd := exec.Command(exe, runArgs...)
-		runCmd.Dir = abs
-		runCmd.Stdout = os.Stderr
-		runCmd.Stderr = os.Stderr
-		if startErr := runCmd.Start(); startErr == nil {
-			go func() { _ = runCmd.Wait() }()
+		runEx, runHandle, startErr := startWorkload(abs, append([]string{exe}, runArgs...),
+			map[string]string{"handler": "project-new-autorun"})
+		if startErr != nil {
+			// Non-fatal: the project was created successfully, only the
+			// optional immediate run failed. Surfacing it in the server log
+			// beats silently swallowing it as the pre-executor code did.
+			fmt.Fprintf(os.Stderr, "ui: auto-run for new project %s failed to start: %v\n", abs, startErr)
+		} else if lines, streamErr := runEx.Stream(context.Background(), runHandle.ID); streamErr == nil {
+			go drainToStderr(lines, "auto-run "+abs)
 		}
 	}
 

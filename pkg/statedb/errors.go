@@ -48,6 +48,12 @@ var (
 	// expects (corruption, partial migration, or a future binary's database
 	// opened by an older one). Manual intervention is usually required.
 	ErrSchemaMismatch = errors.New("statedb: schema mismatch")
+
+	// ErrExecutorNotFound indicates the requested execution backend is not
+	// registered in the executors table. Callers must treat this as fatal
+	// for the operation rather than falling back to host execution — see
+	// pkg/executor's fail-closed resolution policy.
+	ErrExecutorNotFound = errors.New("statedb: executor not found")
 )
 
 // classifyDriverErr inspects a raw error returned by the modernc.org/sqlite
@@ -68,7 +74,8 @@ func classifyDriverErr(err error) error {
 		errors.Is(err, ErrSchemaMismatch) ||
 		errors.Is(err, ErrTaskNotFound) ||
 		errors.Is(err, ErrProjectNotFound) ||
-		errors.Is(err, ErrStaleVersion) {
+		errors.Is(err, ErrStaleVersion) ||
+		errors.Is(err, ErrExecutorNotFound) {
 		return err
 	}
 	lower := strings.ToLower(err.Error())
@@ -116,7 +123,8 @@ func HTTPStatus(err error) int {
 	switch {
 	case err == nil:
 		return http.StatusOK
-	case errors.Is(err, ErrTaskNotFound), errors.Is(err, ErrProjectNotFound):
+	case errors.Is(err, ErrTaskNotFound), errors.Is(err, ErrProjectNotFound),
+		errors.Is(err, ErrExecutorNotFound):
 		return http.StatusNotFound
 	case errors.Is(err, ErrStaleVersion):
 		return http.StatusConflict
