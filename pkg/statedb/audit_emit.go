@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/blechschmidt/cloop/pkg/pm"
 )
@@ -167,6 +168,43 @@ func auditStateSave(d *DB, s *State) {
 			"parallel":            s.Parallel,
 			"max_parallel":        s.MaxParallel,
 		}),
+	})
+}
+
+// SecretAuditInput carries one secret-broker decision to the audit log
+// (Task 20159). It exists so pkg/secretstore does not have to construct an
+// AuditEvent — and, more to the point, so the entity_type is set in exactly
+// one place and every broker row is filterable as entity_type='secret'.
+type SecretAuditInput struct {
+	Actor     string
+	EventType string // "secret.lease", "secret.grant", "secret.revoke", ...
+	EntityID  string // secret ID, or grant ID when no secret is involved
+	Timestamp time.Time
+	// Payload is the decision's metadata. Callers are responsible for
+	// redacting it; pkg/secretbroker.Redact runs over every event before it
+	// reaches here, and again inside the secretstore auditor.
+	Payload map[string]any
+}
+
+// AuditSecretDecision records a secret-broker mint, grant, lease, renew,
+// revoke, or denial. Best-effort, like every other emitter in this file: an
+// unavailable audit log must not stop an executor from receiving the
+// credentials it was granted.
+func AuditSecretDecision(d *DB, in SecretAuditInput) {
+	if in.EventType == "" {
+		return
+	}
+	actor := in.Actor
+	if actor == "" {
+		actor = "secretbroker"
+	}
+	emit(d, &AuditEvent{
+		Timestamp:  in.Timestamp,
+		Actor:      actor,
+		EventType:  in.EventType,
+		EntityType: "secret",
+		EntityID:   in.EntityID,
+		Payload:    MarshalAuditPayload(in.Payload),
 	})
 }
 

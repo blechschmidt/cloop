@@ -25,6 +25,7 @@ import (
 	"io"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/localprocess"
@@ -33,6 +34,26 @@ import (
 )
 
 var builtinExecutorsOnce sync.Once
+
+// controlPlaneDirMu guards controlPlaneDirValue, which bootstrapExecutors
+// records so the package-level workload helpers can find the control plane's
+// database. startWorkload and runWorkload have no Server receiver — they are
+// called from handlers that only know a project path — and the alternative,
+// re-deriving the control plane directory from each project, is exactly the
+// confusion between "the tenant's database" and "the operator's database"
+// that secret grants must not have.
+var (
+	controlPlaneDirMu    sync.RWMutex
+	controlPlaneDirValue string
+)
+
+// controlPlaneDir returns the directory holding the control plane's own
+// state database, or "" before bootstrap.
+func controlPlaneDir() string {
+	controlPlaneDirMu.RLock()
+	defer controlPlaneDirMu.RUnlock()
+	return controlPlaneDirValue
+}
 
 // registerBuiltinExecutors registers the drivers that ship in-process. It is
 // idempotent and is called from both Server construction and every workload
@@ -53,10 +74,13 @@ func registerBuiltinExecutors() {
 
 // bootstrapExecutors registers the built-in drivers and points the registry
 // at this control plane's persisted project→executor bindings.
-func bootstrapExecutors(controlPlaneDir string) {
+func bootstrapExecutors(dir string) {
 	registerBuiltinExecutors()
+	controlPlaneDirMu.Lock()
+	controlPlaneDirValue = dir
+	controlPlaneDirMu.Unlock()
 	executor.SetBindingLookup(func(projectPath string) (string, bool) {
-		return lookupProjectExecutor(controlPlaneDir, projectPath)
+		return lookupProjectExecutor(dir, projectPath)
 	})
 }
 
@@ -119,11 +143,63 @@ func startWorkload(workDir string, argv []string, labels map[string]string) (exe
 	if err != nil {
 		return nil, executor.Handle{}, fmt.Errorf("no executor available for %s: %w", workDir, err)
 	}
-	handle, err := ex.Start(context.Background(), uiSpec(workDir, argv, labels))
+
+	// The lease outlives this call because the workload does. Wiping it here
+	// would pull the credential files out from under a process that has not
+	// read them yet, so cleanup is deferred to a watcher that waits for the
+	// handle to reach a terminal state.
+	lease := acquireSecretLease(controlPlaneDir(), workDir, ex.ID())
+	spec := applyLease(uiSpec(workDir, argv, labels), lease)
+
+	handle, err := ex.Start(context.Background(), spec)
 	if err != nil {
+		lease.Close()
 		return nil, executor.Handle{}, err
 	}
+	go wipeLeaseOnExit(ex, handle.ID, lease)
 	return ex, handle, nil
+}
+
+// wipeLeaseOnExit closes a lease once its workload reaches a terminal state.
+//
+// Streaming is the signal rather than polling Status: the driver closes the
+// output channel when the workload is finished and its output drained, which
+// is precisely the moment the credentials stop being needed. A driver that
+// cannot stream falls back to polling, and either way the wipe is bounded by
+// maxLeaseWatch so a lost workload cannot strand a credential directory for
+// the lifetime of the server.
+func wipeLeaseOnExit(ex executor.Executor, handleID string, lease *secretLease) {
+	defer recoverGoroutine("secret lease wipe: " + handleID)
+	if lease == nil {
+		return
+	}
+	defer lease.Close()
+
+	const maxLeaseWatch = 24 * time.Hour
+	ctx, cancel := context.WithTimeout(context.Background(), maxLeaseWatch)
+	defer cancel()
+
+	if lines, err := ex.Stream(ctx, handleID); err == nil {
+		for range lines {
+			// Drain without buffering: another subscriber (drainToStderr,
+			// the live log panel) is the one that cares about the content.
+		}
+		return
+	}
+
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			st, err := ex.Status(ctx, handleID)
+			if err != nil || st.State.Terminal() {
+				return
+			}
+		}
+	}
 }
 
 // runWorkload resolves the executor bound to workDir and runs argv to
@@ -136,7 +212,11 @@ func runWorkload(ctx context.Context, workDir string, argv []string, labels map[
 	if err != nil {
 		return nil, fmt.Errorf("no executor available for %s: %w", workDir, err)
 	}
-	res, runErr := executor.Run(ctx, ex, uiSpec(workDir, argv, labels))
+	// Run is synchronous, so the lease's lifetime is exactly this call's.
+	lease := acquireSecretLease(controlPlaneDir(), workDir, ex.ID())
+	defer lease.Close()
+
+	res, runErr := executor.Run(ctx, ex, applyLease(uiSpec(workDir, argv, labels), lease))
 	return res.Output, runErr
 }
 

@@ -54,6 +54,16 @@ var (
 	// for the operation rather than falling back to host execution — see
 	// pkg/executor's fail-closed resolution policy.
 	ErrExecutorNotFound = errors.New("statedb: executor not found")
+
+	// ErrBrokerSecretNotFound indicates no broker_secrets row has the
+	// requested ID. Like ErrExecutorNotFound this is fatal for the
+	// operation: a caller must never substitute a different credential for
+	// one it could not find.
+	ErrBrokerSecretNotFound = errors.New("statedb: broker secret not found")
+
+	// ErrBrokerGrantNotFound indicates no broker_grants row has the
+	// requested ID.
+	ErrBrokerGrantNotFound = errors.New("statedb: broker grant not found")
 )
 
 // classifyDriverErr inspects a raw error returned by the modernc.org/sqlite
