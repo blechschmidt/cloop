@@ -34,6 +34,44 @@ func (a *audClaim) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// stringListClaim tolerates the shapes IdPs actually emit for group and
+// role claims: a JSON array of strings, or a single string holding one or
+// more comma- or space-separated values. Anything else (a number, an
+// object) yields an empty list rather than an error — a malformed optional
+// claim must not reject an otherwise valid token, it must simply grant
+// nothing.
+type stringListClaim []string
+
+func (c *stringListClaim) UnmarshalJSON(data []byte) error {
+	var many []string
+	if err := json.Unmarshal(data, &many); err == nil {
+		*c = stringListClaim(many)
+		return nil
+	}
+	var one string
+	if err := json.Unmarshal(data, &one); err == nil {
+		*c = stringListClaim(splitClaimList(one))
+		return nil
+	}
+	*c = nil
+	return nil
+}
+
+// splitClaimList breaks a single-string group/role claim on commas and
+// whitespace, dropping empties.
+func splitClaimList(s string) []string {
+	fields := strings.FieldsFunc(s, func(r rune) bool {
+		return r == ',' || r == ' ' || r == '\t' || r == '\n'
+	})
+	out := make([]string, 0, len(fields))
+	for _, f := range fields {
+		if f = strings.TrimSpace(f); f != "" {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
 type idClaims struct {
 	Iss               string   `json:"iss"`
 	Sub               string   `json:"sub"`
@@ -45,6 +83,65 @@ type idClaims struct {
 	Email             string   `json:"email"`
 	Name              string   `json:"name"`
 	PreferredUsername string   `json:"preferred_username"`
+
+	// Group and role claims drive pkg/authz role mappings. Several
+	// spellings are read because there is no interoperable standard:
+	// `groups` is the de-facto convention, Okta and Auth0 also emit
+	// `roles`, and Keycloak nests roles under realm_access/resource_access.
+	Groups stringListClaim `json:"groups"`
+	Roles  stringListClaim `json:"roles"`
+
+	RealmAccess struct {
+		Roles stringListClaim `json:"roles"`
+	} `json:"realm_access"`
+
+	ResourceAccess map[string]struct {
+		Roles stringListClaim `json:"roles"`
+	} `json:"resource_access"`
+}
+
+// groupValues returns the flattened, de-duplicated group claim values.
+func (c *idClaims) groupValues() []string {
+	return dedupeFold(c.Groups)
+}
+
+// roleValues returns the flattened, de-duplicated role claim values across
+// every spelling, including Keycloak's realm roles and the roles this
+// client was granted under resource_access.
+func (c *idClaims) roleValues(clientID string) []string {
+	all := make([]string, 0, len(c.Roles)+len(c.RealmAccess.Roles))
+	all = append(all, c.Roles...)
+	all = append(all, c.RealmAccess.Roles...)
+	if ra, ok := c.ResourceAccess[clientID]; ok {
+		all = append(all, ra.Roles...)
+	}
+	return dedupeFold(all)
+}
+
+// dedupeFold removes case-insensitive duplicates and empties, preserving
+// first-seen order so the list is stable across token refreshes.
+func dedupeFold(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, v := range values {
+		v = strings.TrimSpace(v)
+		if v == "" {
+			continue
+		}
+		key := strings.ToLower(strings.TrimPrefix(v, "/"))
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, v)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // verifyIDToken parses the compact JWS, verifies its signature against the
@@ -146,9 +243,11 @@ func (a *Authenticator) verifyIDToken(ctx context.Context, raw, nonce string) (*
 		name = claims.PreferredUsername
 	}
 	return &Identity{
-		Sub:   claims.Sub,
-		Email: strings.ToLower(claims.Email),
-		Name:  name,
+		Sub:    claims.Sub,
+		Email:  strings.ToLower(claims.Email),
+		Name:   name,
+		Groups: claims.groupValues(),
+		Roles:  claims.roleValues(a.cfg.ClientID),
 	}, nil
 }
 

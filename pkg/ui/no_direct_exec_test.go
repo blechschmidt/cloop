@@ -24,6 +24,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -39,12 +40,23 @@ const forbiddenExecPkg = "os/exec"
 // through executor.Resolve(projectPath).Start(...) (see executor.go for the
 // startWorkload / runWorkload helpers).
 func TestNoDirectProcessSpawning(t *testing.T) {
-	files, err := filepath.Glob("*.go")
+	// Resolve the package directory from this file's own compile-time path
+	// rather than the working directory. Other tests in this package call
+	// t.Chdir into temp dirs, and when one of those overlaps this test a
+	// cwd-relative glob finds nothing — which is precisely the "guard
+	// silently passes" failure this test is meant to prevent.
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller could not locate this test file")
+	}
+	pkgDir := filepath.Dir(thisFile)
+
+	files, err := filepath.Glob(filepath.Join(pkgDir, "*.go"))
 	if err != nil {
 		t.Fatalf("glob package sources: %v", err)
 	}
 	if len(files) == 0 {
-		t.Fatal("no Go sources found — the guard would silently pass")
+		t.Fatalf("no Go sources found in %s — the guard would silently pass", pkgDir)
 	}
 
 	fset := token.NewFileSet()

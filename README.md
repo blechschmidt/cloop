@@ -991,6 +991,65 @@ When enabled:
 - Sessions live in memory: restarting the dashboard signs everyone out
   (they are silently re-authenticated by the IdP on the next navigation).
 
+### Role-based access control
+
+Map OIDC claims to roles under `ui.oidc.role_mappings`. Each mapping binds a
+claim value to a role, optionally narrowed to one project or one executor:
+
+```yaml
+ui:
+  oidc:
+    enabled: true
+    # ...
+    default_role: none          # role for users matching no mapping
+    role_mappings:
+      - {claim: group, value: cloop-admins,  role: admin}
+      - {claim: group, value: engineering,   role: operator}
+      - {claim: role,  value: sre,           role: maintainer}
+      # Narrower scopes override broader ones — in both directions:
+      - {claim: group, value: engineering, role: maintainer, project: payments}
+      - {claim: group, value: engineering, role: viewer,     project: infra}
+      - {claim: email, value: dana@example.com, role: admin, executor: edge-1}
+```
+
+`claim` is `group`, `role`, `email`, or `sub`. Group and role values match
+case-insensitively and ignore a leading `/`, so Keycloak's `/cloop-admins`
+path form works as written. Group claims are read from `groups`; role claims
+from `roles`, Keycloak's `realm_access.roles`, and this client's entry under
+`resource_access`. `project` matches either a project's registry name or its
+filesystem path.
+
+**Roles** form a ladder, each holding everything below it plus more:
+
+| Role | Adds |
+| --- | --- |
+| `viewer` | `project.read`, `executor.read` |
+| `operator` | `run.start`, `run.stop`, `task.mutate` |
+| `maintainer` | `project.write`, `config.write`, `secret.grant`, `secret.revoke` |
+| `admin` | `executor.manage`, `user.manage` |
+
+**Precedence.** Only mappings whose scope the request satisfies apply. Those
+are ranked by specificity — project+executor, then executor, then project,
+then unscoped — and the most specific tier wins outright; within a tier the
+strongest role wins. A more specific mapping therefore *overrides* a broader
+one instead of merging with it, which is what lets you both promote a global
+viewer on one project and hold a global maintainer down to viewer on a
+sensitive one. `admin_emails` participates as an unscoped `admin` mapping, so
+it keeps working and can still be narrowed per project.
+
+Anything not granted is denied. Denials return `403` with the required
+permission named; scopes you cannot read return `404` instead, so error codes
+never reveal whether a project exists. Every denial and every privileged
+action is appended to the audit log (`cloop events`) with the acting subject.
+The dashboard hides or disables controls your role cannot use.
+
+**Enabling RBAC is opt-in.** With no `role_mappings` and no `default_role`,
+authorization behaves exactly as it did before — every authenticated user has
+full access — so turning on SSO does not lock out a deployment that has not
+written a policy yet. Writing a single mapping (or setting `default_role`,
+including to `none`) switches the deployment to deny-by-default. An invalid
+role or claim name aborts startup rather than silently never matching.
+
 ---
 
 ## Auto-Evolve

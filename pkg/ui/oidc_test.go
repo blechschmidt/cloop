@@ -20,6 +20,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -39,15 +40,39 @@ type uiFakeIdP struct {
 	sub   string
 	name  string
 
+	// groups and roles are released as ID-token claims when non-empty,
+	// driving the pkg/authz role mappings (Task 20164).
+	groups []string
+	roles  []string
+
 	lastNonce string
+}
+
+// testIdPKey is generated once per test binary and shared by every fake IdP.
+// Nothing under test depends on the keys being distinct, and 2048-bit RSA
+// keygen is slow enough under -race that generating one per test measurably
+// loads the machine — enough to flake the package's wall-clock deadline
+// tests (WebSocket write timeouts, watcher shutdown).
+var (
+	testIdPKeyOnce sync.Once
+	testIdPKey     *rsa.PrivateKey
+	testIdPKeyErr  error
+)
+
+func sharedTestIdPKey(t *testing.T) *rsa.PrivateKey {
+	t.Helper()
+	testIdPKeyOnce.Do(func() {
+		testIdPKey, testIdPKeyErr = rsa.GenerateKey(rand.Reader, 2048)
+	})
+	if testIdPKeyErr != nil {
+		t.Fatalf("rsa key: %v", testIdPKeyErr)
+	}
+	return testIdPKey
 }
 
 func newUIFakeIdP(t *testing.T) *uiFakeIdP {
 	t.Helper()
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatalf("rsa key: %v", err)
-	}
+	key := sharedTestIdPKey(t)
 	idp := &uiFakeIdP{t: t, key: key, email: "alice@example.com", sub: "sub-alice", name: "Alice"}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, r *http.Request) {
@@ -81,7 +106,7 @@ func newUIFakeIdP(t *testing.T) *uiFakeIdP {
 	mux.HandleFunc("/token", func(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
 		header, _ := json.Marshal(map[string]string{"alg": "RS256", "kid": "k1"})
-		payload, _ := json.Marshal(map[string]any{
+		claims := map[string]any{
 			"iss":   idp.server.URL,
 			"sub":   idp.sub,
 			"aud":   "cloop-dashboard",
@@ -90,7 +115,16 @@ func newUIFakeIdP(t *testing.T) *uiFakeIdP {
 			"nonce": idp.lastNonce,
 			"email": idp.email,
 			"name":  idp.name,
-		})
+		}
+		// Omit empty claims entirely: an IdP that releases no groups must
+		// be indistinguishable from one that releases an empty list.
+		if len(idp.groups) > 0 {
+			claims["groups"] = idp.groups
+		}
+		if len(idp.roles) > 0 {
+			claims["roles"] = idp.roles
+		}
+		payload, _ := json.Marshal(claims)
 		input := base64.RawURLEncoding.EncodeToString(header) + "." + base64.RawURLEncoding.EncodeToString(payload)
 		digest := sha256.Sum256([]byte(input))
 		sig, err := rsa.SignPKCS1v15(rand.Reader, idp.key, crypto.SHA256, digest[:])

@@ -34,6 +34,14 @@ var providerCallsSource string
 //go:embed executors_api.go
 var executorsAPISource string
 
+// routesSource is pkg/ui/routes.go, which holds the declarative route table
+// (Task 20164). Routes moved out of server.go when registration started
+// carrying a required permission, so the architectural tests that scan for
+// registered endpoints read them from here.
+//
+//go:embed routes.go
+var routesSource string
+
 // allUISources concatenates every Go source the architectural tests need
 // to scan for WebSocket broadcast sites. Adding a new file with a
 // `wsMessage{Type: ...}` site should mean adding it both here and as a
@@ -450,13 +458,20 @@ func TestDashboard_WSBroadcastTypesHandled(t *testing.T) {
 	}
 }
 
-// extractRegisteredRoutes returns every URL literal passed to mux.HandleFunc.
-// Method prefixes ("GET ", "POST ", ...) are stripped so the returned set
-// contains canonical paths like "/api/tasks" or "/api/tasks/{id}".
+// routeTablePatternRe matches the Pattern field of a routeSpec literal in
+// routes.go, capturing the path with any method prefix stripped.
+var routeTablePatternRe = regexp.MustCompile(`Pattern:\s*"(?:[A-Z]+\s+)?(/[^"]+)"`)
+
+// extractRegisteredRoutes returns every URL literal declared in the route
+// table. Method prefixes ("GET ", "POST ", ...) are stripped so the returned
+// set contains canonical paths like "/api/tasks" or "/api/tasks/{id}".
+//
+// src is accepted (rather than reading routesSource directly) so callers can
+// keep passing a concatenation of sources; the pattern regex only matches
+// routes.go's table syntax either way.
 func extractRegisteredRoutes(src string) map[string]struct{} {
-	re := regexp.MustCompile(`mux\.HandleFunc\("(?:[A-Z]+\s+)?(/[^"]+)"`)
 	out := map[string]struct{}{}
-	for _, m := range re.FindAllStringSubmatch(src, -1) {
+	for _, m := range routeTablePatternRe.FindAllStringSubmatch(src+"\n"+routesSource, -1) {
 		out[m[1]] = struct{}{}
 	}
 	return out
@@ -759,14 +774,19 @@ func TestDashboard_NoEvalNoDocumentWrite(t *testing.T) {
 // target the right tenant in multi-project mode.
 //
 // Discovery proceeds in two passes:
-//  1. Build a path → handler-name map from `mux.HandleFunc("…", s.foo)`.
+//  1. Build a path → handler-name map from the route table in routes.go.
 //  2. For each handler, scan its function body (bounded by the next
 //     top-level `func ` declaration) for a literal `s.resolveWorkDir(r)`
 //     call. Handlers that do not reference resolveWorkDir are global.
+//
+// The scope is inferred from the handler body rather than read from the
+// table's Scope field on purpose: the two are independent signals, and a
+// route whose declared scope disagrees with what its handler actually reads
+// is exactly the drift this test should surface.
 func extractProjectScopedRoutes(src string) map[string]struct{} {
-	routeRe := regexp.MustCompile(`mux\.HandleFunc\("(?:[A-Z]+\s+)?(/api/[^"]+)",\s*s\.([a-zA-Z]+)\)`)
+	routeRe := regexp.MustCompile(`Pattern:\s*"(?:[A-Z]+\s+)?(/api/[^"]+)",\s*Handler:\s*s\.([a-zA-Z]+),`)
 	pathToHandler := map[string]string{}
-	for _, m := range routeRe.FindAllStringSubmatch(src, -1) {
+	for _, m := range routeRe.FindAllStringSubmatch(routesSource, -1) {
 		if _, exists := pathToHandler[m[1]]; !exists {
 			pathToHandler[m[1]] = m[2]
 		}

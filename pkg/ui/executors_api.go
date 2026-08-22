@@ -1151,6 +1151,13 @@ func (s *Server) requireExecutorAdmin(w http.ResponseWriter, r *http.Request) bo
 	if !s.oidcEnabled() {
 		return true
 	}
+	// With RBAC configured, the route gate already required
+	// executor.manage — a richer decision than the admin_emails list, and
+	// one an operator can grant by group. Re-checking admin_emails here
+	// would silently override the configured policy.
+	if s.authzActive() {
+		return true
+	}
 	id := s.sessionIdentity(r)
 	if id == nil {
 		// Authenticated via the static bearer token, which is an operator

@@ -26,6 +26,7 @@ import (
 	"nhooyr.io/websocket"
 
 	"github.com/blechschmidt/cloop/pkg/artifact"
+	"github.com/blechschmidt/cloop/pkg/authz"
 	"github.com/blechschmidt/cloop/pkg/blocker"
 	"github.com/blechschmidt/cloop/pkg/boundedread"
 	"github.com/blechschmidt/cloop/pkg/claudecodeauth"
@@ -530,6 +531,14 @@ type Server struct {
 	// gates every route behind an IdP session and scopes the multi-project
 	// registry per user (see pkg/ui/oidc.go).
 	OIDC *oidcauth.Authenticator
+
+	// Authz resolves OIDC claims to roles and permissions (Task 20164).
+	// Nil means "no role mappings configured": every session identity then
+	// falls back to the resolver's deny-by-default, which is why
+	// authzActive() also requires OIDC to be enabled. With OIDC disabled
+	// this field is ignored entirely and every request is granted
+	// everything, preserving single-tenant local behavior.
+	Authz *authz.Resolver
 }
 
 // log returns s.Log, falling back to a default text logger if the field
@@ -729,8 +738,11 @@ func (s *Server) Handler() http.Handler {
 // kept behind the rate limiter and every hardening layer: agents are not
 // dashboard users and authenticate with their own credentials, which the hub
 // verifies itself (Task 20158). See pkg/ui/executor_agents.go.
+// authzMiddleware sits directly below authMiddleware: by then the caller is
+// authenticated, so the identity it resolves into a permission set is the one
+// the route gates will enforce (Task 20164).
 func (s *Server) buildHandler(mux *http.ServeMux) http.Handler {
-	app := s.uiRateLimitMiddleware(securityHeaders(s.executorConnectBypass(s.authMiddleware(mux))))
+	app := s.uiRateLimitMiddleware(securityHeaders(s.executorConnectBypass(s.authMiddleware(s.authzMiddleware(mux)))))
 	return uiRequestIDMiddleware(panicRecoveryMiddleware(s.probeBypass(app)))
 }
 
@@ -836,161 +848,6 @@ func (s *Server) defaultReadyCheck(ctx context.Context) error {
 	}
 	defer db.Close()
 	return db.PingContext(ctx)
-}
-
-// registerRoutes wires all API and UI routes onto mux.
-func (s *Server) registerRoutes(mux *http.ServeMux) {
-	// Dashboard SPA
-	mux.HandleFunc("/", s.handleDashboard)
-
-	// Locally-vendored static assets (e.g. Chart.js). Served from the same
-	// origin so the strict script-src 'self' CSP doesn't block them.
-	mux.HandleFunc("/assets/chart.umd.min.js", s.handleChartJS)
-
-	// OIDC single sign-on (Task 20152). The /auth/* routes return 404 when
-	// OIDC is not enabled; /api/me instead reports oidc_enabled=false so
-	// the frontend knows not to render the user chip.
-	mux.HandleFunc("GET /auth/login", s.handleOIDCLogin)
-	mux.HandleFunc("GET /auth/callback", s.handleOIDCCallback)
-	mux.HandleFunc("POST /auth/logout", s.handleOIDCLogout)
-	mux.HandleFunc("GET /api/me", s.handleMe)
-
-	// Read-only state, WebSocket, and SSE (SSE kept as fallback)
-	mux.HandleFunc("/api/state", s.handleState)
-	mux.HandleFunc("/api/steps", s.handleSteps)
-	mux.HandleFunc("/api/ws", s.handleWS)
-	mux.HandleFunc("/api/events", s.handleEvents)
-	mux.HandleFunc("/api/event-history", s.handleEventHistory)
-
-	// Run controls
-	mux.HandleFunc("/api/run", s.handleRun)
-	mux.HandleFunc("/api/stop", s.handleStop)
-
-	// Task management (legacy endpoints)
-	mux.HandleFunc("/api/task/add", s.handleTaskAdd)
-	mux.HandleFunc("/api/task/status", s.handleTaskStatus)
-	mux.HandleFunc("/api/task/move", s.handleTaskMove)
-	mux.HandleFunc("/api/task/edit", s.handleTaskEdit)
-	mux.HandleFunc("/api/task/remove", s.handleTaskRemove)
-
-	// RESTful task endpoints (Go 1.22+ method+path routing)
-	mux.HandleFunc("GET /api/tasks", s.handleGetTasks)
-	mux.HandleFunc("POST /api/tasks", s.handlePostTasks)
-	mux.HandleFunc("POST /api/tasks/reorder", s.handleReorderTasks)
-	mux.HandleFunc("PUT /api/tasks/{id}", s.handlePutTask)
-	mux.HandleFunc("PATCH /api/tasks/{id}", s.handlePutTask)
-	mux.HandleFunc("DELETE /api/tasks/{id}", s.handleDeleteTask)
-	mux.HandleFunc("GET /api/tasks/{id}/blocker", s.handleTaskBlocker)
-	mux.HandleFunc("GET /api/tasks/{id}/details", s.handleTaskDetails)
-	mux.HandleFunc("POST /api/tasks/{id}/decompose", s.handleTaskDecompose)
-	mux.HandleFunc("POST /api/tasks/{id}/decompose/apply", s.handleTaskDecomposeApply)
-
-	// Config
-	mux.HandleFunc("/api/config", s.handleConfig)
-	mux.HandleFunc("/api/config/set", s.handleConfigSet)
-
-	// Suggest
-	mux.HandleFunc("/api/suggest/generate", s.handleSuggestGenerate)
-	mux.HandleFunc("/api/suggest/status", s.handleSuggestStatus)
-	mux.HandleFunc("/api/suggest/add", s.handleSuggestAdd)
-
-	// Live log
-	mux.HandleFunc("/api/livelog", s.handleLiveLog)
-
-	// Voice / STT
-	mux.HandleFunc("/api/voice", s.handleVoice)
-
-	// Chat
-	mux.HandleFunc("/api/chat", s.handleChat)
-	mux.HandleFunc("/api/chat/history", s.handleChatHistory)
-	mux.HandleFunc("POST /api/chat/plan", s.handlePlanChat)
-
-	// Init & reset
-	mux.HandleFunc("/api/init", s.handleInit)
-	mux.HandleFunc("/api/goal", s.handleGoal)
-	mux.HandleFunc("/api/instructions", s.handleInstructions)
-	mux.HandleFunc("/api/reset", s.handleReset)
-
-	// Knowledge Base
-	mux.HandleFunc("GET /api/kb", s.handleKBList)
-	mux.HandleFunc("POST /api/kb", s.handleKBAdd)
-	mux.HandleFunc("DELETE /api/kb/{id}", s.handleKBDelete)
-	mux.HandleFunc("GET /api/kb/search", s.handleKBSearch)
-
-	// Timeline
-	mux.HandleFunc("/api/timeline", s.handleTimeline)
-
-	// Dependency graph
-	mux.HandleFunc("GET /api/deps", s.handleDeps)
-	mux.HandleFunc("GET /api/risk-matrix", s.handleRiskMatrix)
-
-	// Analytics dashboard
-	mux.HandleFunc("GET /api/analytics", s.handleAnalytics)
-	mux.HandleFunc("GET /api/epics", s.handleEpics)
-
-	// Budget management
-	mux.HandleFunc("GET /api/budget", s.handleBudgetGet)
-	mux.HandleFunc("PUT /api/budget/global", s.handleBudgetGlobalSave)
-	mux.HandleFunc("PUT /api/budget/project", s.handleBudgetProjectSave)
-	mux.HandleFunc("GET /api/ratelimits", s.handleRateLimits)
-	mux.HandleFunc("GET /api/claude-usage", s.handleClaudeUsage)
-	mux.HandleFunc("GET /api/claudecode-limits", s.handleClaudeCodeLimitsGet)
-	mux.HandleFunc("PUT /api/claudecode-limits", s.handleClaudeCodeLimitsSave)
-
-	// Claude Code authentication (drives `claude auth login/logout/status`).
-	mux.HandleFunc("GET /api/claudecode/auth/status", s.handleClaudeCodeAuthStatus)
-	mux.HandleFunc("POST /api/claudecode/auth/login", s.handleClaudeCodeAuthLoginStart)
-	mux.HandleFunc("POST /api/claudecode/auth/login/code", s.handleClaudeCodeAuthLoginCode)
-	mux.HandleFunc("POST /api/claudecode/auth/login/cancel", s.handleClaudeCodeAuthLoginCancel)
-	mux.HandleFunc("POST /api/claudecode/auth/logout", s.handleClaudeCodeAuthLogout)
-
-	// Toggle persistent CLI options (--auto-evolve, --innovate, etc.)
-	mux.HandleFunc("POST /api/options/toggle", s.handleOptionsToggle)
-	mux.HandleFunc("POST /api/options/max-parallel", s.handleMaxParallelSet)
-	mux.HandleFunc("POST /api/options/step-timeout", s.handleStepTimeoutSet)
-	mux.HandleFunc("POST /api/options/task-timeout", s.handleTaskTimeoutSet)
-	mux.HandleFunc("POST /api/options/provider", s.handleProviderModelSet)
-
-	// Central work queue (every PM task, heal retry, evolve cycle, external merge)
-	mux.HandleFunc("GET /api/queue", s.handleQueue)
-	mux.HandleFunc("GET /api/queue/stats", s.handleQueueStats)
-
-	// Task replay history (deterministic re-execution against alternate provider/model)
-	mux.HandleFunc("GET /api/replay-runs", s.handleReplayRunsList)
-	mux.HandleFunc("GET /api/replay-runs/{id}", s.handleReplayRunGet)
-	mux.HandleFunc("POST /api/replay-runs", s.handleReplayRunCreate)
-
-	// Provider call inspector (Task 20105 / Task 20123)
-	mux.HandleFunc("GET /api/provider-calls", s.handleProviderCallsList)
-	mux.HandleFunc("GET /api/provider-calls/{id}", s.handleProviderCallDetail)
-	mux.HandleFunc("POST /api/provider-calls/{id}/replay", s.handleProviderCallReplay)
-
-	// Client-side JS error reporting (window.onerror, unhandledrejection)
-	mux.HandleFunc("POST /api/client-error", s.handleClientError)
-
-	// Multi-project dashboard
-	mux.HandleFunc("/api/projects", s.handleProjects)
-	mux.HandleFunc("GET /api/projects/events", s.handleProjectsEvents)
-	mux.HandleFunc("POST /api/projects/new", s.handleProjectNew)
-	mux.HandleFunc("POST /api/projects/{idx}/run", s.handleProjectRun)
-	mux.HandleFunc("POST /api/projects/{idx}/stop", s.handleProjectStop)
-	mux.HandleFunc("DELETE /api/projects/{idx}", s.handleProjectDelete)
-	mux.HandleFunc("POST /api/projects/{idx}/executor", s.handleProjectExecutorBind)
-
-	// Executors (global): the fleet of execution backends and the
-	// host-execution policy that governs them (Task 20160).
-	// Registered without a method prefix so the handler's own method check is
-	// reachable: with `GET /api/executors`, any other verb falls through to
-	// the "/" dashboard route and answers a JSON client with a 404 HTML page.
-	mux.HandleFunc("/api/executors", s.handleExecutorsList)
-	mux.HandleFunc("POST /api/executors/enroll", s.handleExecutorEnroll)
-	mux.HandleFunc("DELETE /api/executors/{id}", s.handleExecutorDelete)
-	// Scheduling state (Task 20162): take a node out of rotation without
-	// destroying it. Separate from DELETE on purpose — revoking kills the work
-	// an executor is running, cordoning leaves it alone.
-	mux.HandleFunc("POST /api/executors/{id}/cordon", s.handleExecutorCordon)
-	mux.HandleFunc("POST /api/executors/{id}/uncordon", s.handleExecutorUncordon)
-	mux.HandleFunc("POST /api/executors/{id}/drain", s.handleExecutorDrain)
 }
 
 // Start begins listening on the configured port and broadcasting state
@@ -7496,6 +7353,10 @@ const dashboardHTML = `<!DOCTYPE html>
   .btn.warn:hover    { background:rgba(210,153,34,.1); border-color:var(--yellow); }
   .btn svg { width:13px; height:13px; }
   .btn:disabled { opacity:.4; cursor:not-allowed; }
+  /* Controls the signed-in role may not use (Task 20164). Styled like a
+     disabled button so the layout stays stable and the reason surfaces in
+     the element's title attribute. */
+  .perm-denied { opacity:.4; cursor:not-allowed; pointer-events:none; }
   .btn.mic { color:var(--purple); border-color:rgba(188,140,255,.4); }
   .btn.mic:hover { background:rgba(188,140,255,.1); border-color:var(--purple); }
   .btn.mic.recording { color:var(--red); border-color:rgba(248,81,73,.4); animation: pulse 1s infinite; }
@@ -8968,7 +8829,7 @@ const dashboardHTML = `<!DOCTYPE html>
             <div class="goal-text empty" id="goalText">Loading...</div>
             <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
               <div id="statusBadge"></div>
-              <button class="btn" id="goalEditBtn" onclick="openGoalEditModal()" title="Edit project goal" style="padding:4px 10px;font-size:12px">✎ Edit</button>
+              <button class="btn" id="goalEditBtn" data-perm="project.write" onclick="openGoalEditModal()" title="Edit project goal" style="padding:4px 10px;font-size:12px">✎ Edit</button>
             </div>
           </div>
         </div>
@@ -8979,7 +8840,7 @@ const dashboardHTML = `<!DOCTYPE html>
           <div class="card goal-card">
             <div class="goal-text empty" id="instructionsText" style="white-space:pre-wrap;font-size:13px;font-weight:400">No instructions set</div>
             <div style="display:flex;align-items:flex-start;gap:12px;flex-wrap:wrap">
-              <button class="btn" id="instructionsEditBtn" onclick="openInstructionsEditModal()" title="Edit instructions / constraints" style="padding:4px 10px;font-size:12px">✎ Edit</button>
+              <button class="btn" id="instructionsEditBtn" data-perm="project.write" onclick="openInstructionsEditModal()" title="Edit instructions / constraints" style="padding:4px 10px;font-size:12px">✎ Edit</button>
             </div>
           </div>
         </div>
@@ -9077,11 +8938,11 @@ const dashboardHTML = `<!DOCTYPE html>
         <div class="section">
           <div class="section-title">Controls</div>
           <div class="controls">
-            <button id="ctrlRun" class="btn success" onclick="apiRun()" title="Start a run with the options enabled in Active Options above. Click any badge in Active Options to toggle the corresponding flag.">
+            <button id="ctrlRun" class="btn success" data-perm="run.start" onclick="apiRun()" title="Start a run with the options enabled in Active Options above. Click any badge in Active Options to toggle the corresponding flag.">
               <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 0a8 8 0 1 1 0 16A8 8 0 0 1 8 0zm3.5 7.5l-5-3a.5.5 0 0 0-.75.43v6a.5.5 0 0 0 .75.43l5-3a.5.5 0 0 0 0-.86z"/></svg>
               Run
             </button>
-            <button id="ctrlStop" class="btn danger" onclick="apiStop()" style="display:none">
+            <button id="ctrlStop" class="btn danger" data-perm="run.stop" onclick="apiStop()" style="display:none">
               <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 0a8 8 0 1 1 0 16A8 8 0 0 1 8 0zM5.5 5.5h5v5h-5z"/></svg>
               Pause / Stop
             </button>
@@ -9150,7 +9011,7 @@ const dashboardHTML = `<!DOCTYPE html>
           <input class="form-input" id="newTaskDesc"  placeholder="Description (optional)" style="flex:2;min-width:160px">
           <input class="form-input" id="newTaskPriority" placeholder="Priority (1=high)" type="number" min="1" style="flex:0 0 140px">
           <input class="form-input" id="newTaskDeps" placeholder="Depends on (IDs, e.g. 1,2)" style="flex:1;min-width:160px">
-          <button class="btn primary" onclick="submitAddTask()">Add Task</button>
+          <button class="btn primary" data-perm="task.mutate" onclick="submitAddTask()">Add Task</button>
         </div>
       </div>
 
@@ -9159,7 +9020,7 @@ const dashboardHTML = `<!DOCTYPE html>
         <div class="section-title" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
           AI Feature Suggestions
           <span id="suggestCountBadge" style="color:var(--muted);font-weight:400;text-transform:none;letter-spacing:0"></span>
-          <button id="suggestToggleBtn" class="btn" style="margin-left:auto;padding:3px 10px;font-size:11px" onclick="toggleSuggestPanel()">Brainstorm ideas</button>
+          <button id="suggestToggleBtn" class="btn" data-perm="task.mutate" style="margin-left:auto;padding:3px 10px;font-size:11px" onclick="toggleSuggestPanel()">Brainstorm ideas</button>
         </div>
         <div id="suggestPanel" style="display:none">
           <div class="card" style="margin-bottom:12px">
@@ -9167,11 +9028,11 @@ const dashboardHTML = `<!DOCTYPE html>
             <div class="suggest-controls">
               <label class="form-label" style="margin:0;white-space:nowrap">Ideas to generate:</label>
               <input class="form-input" id="suggestCount" type="number" min="1" max="20" value="5" style="width:70px">
-              <button class="btn primary" id="suggestBtn" onclick="runSuggest()">
+              <button class="btn primary" id="suggestBtn" data-perm="task.mutate" onclick="runSuggest()">
                 <svg viewBox="0 0 16 16" fill="currentColor" width="13" height="13"><path d="M8 1a.5.5 0 0 1 .5.5V6h4.5a.5.5 0 0 1 0 1H8.5v4.5a.5.5 0 0 1-1 0V7H3a.5.5 0 0 1 0-1h4.5V1.5A.5.5 0 0 1 8 1z"/></svg>
                 Generate
               </button>
-              <button class="btn" id="suggestAddAllBtn" onclick="addAllSuggestions()" style="display:none">Add all</button>
+              <button class="btn" id="suggestAddAllBtn" data-perm="task.mutate" onclick="addAllSuggestions()" style="display:none">Add all</button>
               <button class="btn" id="suggestClearBtn"  onclick="clearSuggestions()" style="display:none">Clear</button>
             </div>
             <div id="suggestStatusLine" style="display:none" class="suggest-status">
@@ -9320,7 +9181,7 @@ const dashboardHTML = `<!DOCTYPE html>
         <div class="kb-search-wrap">
           <input class="form-input kb-search-input" id="kbSearchInput" placeholder="Search entries..." oninput="filterKBCards(this.value)">
         </div>
-        <button class="btn primary" style="padding:4px 12px;font-size:12px" onclick="toggleKBAddForm()">+ Add Entry</button>
+        <button class="btn primary" data-perm="task.mutate" style="padding:4px 12px;font-size:12px" onclick="toggleKBAddForm()">+ Add Entry</button>
         <button class="btn" style="padding:4px 10px;font-size:12px" onclick="loadKB()">Refresh</button>
       </div>
 
@@ -9340,7 +9201,7 @@ const dashboardHTML = `<!DOCTYPE html>
           <input class="form-input" id="kbNewTags" placeholder="Comma-separated tags, e.g. api,auth" style="flex:1">
         </div>
         <div style="display:flex;gap:8px;margin-top:6px">
-          <button class="btn primary" onclick="submitKBAdd()">Save Entry</button>
+          <button class="btn primary" data-perm="task.mutate" onclick="submitKBAdd()">Save Entry</button>
           <button class="btn" onclick="toggleKBAddForm()">Cancel</button>
         </div>
       </div>
@@ -10090,7 +9951,7 @@ const dashboardHTML = `<!DOCTYPE html>
           Executors
           <span style="font-size:11px;font-weight:400;color:var(--muted)">global &mdash; shared by every project</span>
           <button class="btn" style="padding:4px 10px;font-size:12px;margin-left:auto" onclick="loadExecutors()" title="Refresh executor list">&#8635; Refresh</button>
-          <button class="btn primary" style="padding:4px 10px;font-size:12px" onclick="openEnrollModal()" title="Mint an enrollment token for a remote device">+ Enroll device</button>
+          <button class="btn primary" data-global-perm="executor.manage" style="padding:4px 10px;font-size:12px" onclick="openEnrollModal()" title="Mint an enrollment token for a remote device">+ Enroll device</button>
         </div>
         <p style="font-size:12px;color:var(--muted);margin-top:4px;margin-bottom:12px">
           An executor is where a harness actually runs. <strong>Host</strong> forks a child process of this
@@ -10196,7 +10057,7 @@ const dashboardHTML = `<!DOCTYPE html>
       <div id="enrollError" style="font-size:12px;color:var(--red);margin-bottom:8px;display:none"></div>
       <div class="modal-footer">
         <button class="btn" onclick="closeEnrollModal()">Cancel</button>
-        <button class="btn primary" id="enrollSubmitBtn" onclick="submitEnroll()">Mint token</button>
+        <button class="btn primary" id="enrollSubmitBtn" data-global-perm="executor.manage" onclick="submitEnroll()">Mint token</button>
       </div>
     </div>
     <div id="enrollResult" style="display:none">
@@ -11191,15 +11052,96 @@ function toast(msg, type) {
   el._t = setTimeout(() => { el.className = ''; }, 3000);
 }
 
+// ── Permissions (Task 20164) ─────────────────────────────────────────────────
+// myPerms/myGlobalPerms mirror what /api/me reports for the selected project
+// and for fleet-wide actions. With OIDC disabled the server reports every
+// permission, so the same gating code runs unchanged in single-tenant use.
+// Until /api/me answers we assume full access: the alternative — starting
+// locked down — makes the dashboard flicker every control on first paint.
+let myPerms = null;
+let myGlobalPerms = null;
+let myRole = '';
+
+function can(perm) {
+  return myPerms === null || myPerms.indexOf(perm) !== -1;
+}
+function canGlobal(perm) {
+  return myGlobalPerms === null || myGlobalPerms.indexOf(perm) !== -1;
+}
+
+// applyPermissionGating hides or disables every element that declares a
+// required permission via data-perm / data-global-perm. Elements marked
+// data-perm-hide are removed from the layout entirely; the rest are disabled
+// in place with an explanatory title, which is friendlier for controls whose
+// absence would make a panel look broken.
+function applyPermissionGating(root) {
+  const scope = root || document;
+  scope.querySelectorAll('[data-perm],[data-global-perm]').forEach(el => {
+    const need = el.getAttribute('data-perm');
+    const needGlobal = el.getAttribute('data-global-perm');
+    const ok = (!need || can(need)) && (!needGlobal || canGlobal(needGlobal));
+    if (el.hasAttribute('data-perm-hide')) {
+      el.style.display = ok ? '' : 'none';
+      return;
+    }
+    el.disabled = !ok;
+    el.classList.toggle('perm-denied', !ok);
+    if (!ok) {
+      el.title = 'Your role (' + (myRole || 'none') + ') does not permit this action';
+    } else if (el.title && el.title.indexOf('does not permit') !== -1) {
+      el.title = '';
+    }
+  });
+}
+
+// refreshPermissions re-reads /api/me for the currently selected project and
+// re-applies gating. Called on load and whenever the project changes, since
+// a user may hold different roles on different projects.
+function refreshPermissions() {
+  return fetch(pUrl('/api/me'), {headers: authHeaders()})
+    .then(r => r.ok ? r.json() : null)
+    .then(me => {
+      if (!me) return null;
+      myPerms = Array.isArray(me.permissions) ? me.permissions : null;
+      myGlobalPerms = Array.isArray(me.global_permissions) ? me.global_permissions : null;
+      myRole = me.role || '';
+      applyPermissionGating();
+      return me;
+    })
+    .catch(() => null);
+}
+
+// handleForbidden renders a 403/404-from-authorization as an explanation
+// rather than letting the caller fail silently or show a raw error. The
+// permission set is refreshed afterwards because a 403 means the client's
+// view of what it may do is stale — the operator may have just changed it.
+function handleForbidden(r, payload) {
+  const err = (payload && payload.error) || {};
+  const need = (err.details && err.details.required_permission) || '';
+  toast(need
+    ? 'Not permitted: this action needs "' + need + '"'
+    : 'Not permitted by your role', 'error');
+  refreshPermissions();
+  return Promise.reject(new Error(err.code || 'FORBIDDEN'));
+}
+
+// parseAPIResponse centralises the auth/authorization outcomes so every
+// caller degrades the same way: 401 re-opens the login modal, 403 explains
+// the denial, and everything else resolves to the decoded body.
+function parseAPIResponse(r) {
+  if (r.status === 401) { showLoginModal(); return Promise.reject(new Error('401')); }
+  if (r.status === 403) {
+    return r.json().catch(() => null).then(body => handleForbidden(r, body));
+  }
+  return r.json();
+}
+
 function api(url, body) {
   const ah = authHeaders();
   const opts = body !== undefined
     ? { method: 'POST', headers: Object.assign({'Content-Type':'application/json'}, ah), body: JSON.stringify(body) }
     : { method: 'GET',  headers: ah };
-  return fetch(url, opts).then(r => {
-    if (r.status === 401) { showLoginModal(); return Promise.reject(new Error('401')); }
-    return r.json();
-  });
+  return fetch(url, opts).then(parseAPIResponse);
 }
 
 function apiMethod(method, url, body) {
@@ -11208,10 +11150,7 @@ function apiMethod(method, url, body) {
     opts.headers['Content-Type'] = 'application/json';
     opts.body = JSON.stringify(body);
   }
-  return fetch(url, opts).then(r => {
-    if (r.status === 401) { showLoginModal(); return Promise.reject(new Error('401')); }
-    return r.json();
-  });
+  return fetch(url, opts).then(parseAPIResponse);
 }
 
 function statusBadge(status) {
@@ -11431,6 +11370,12 @@ function render(s) {
   // sidebar tooltips. Driven entirely by the state already pushed via
   // task_update / run_state events — no extra polling.
   updateBrowserTitle();
+
+  // Re-gate after every render: panels rebuild their controls from scratch,
+  // so a control created by this pass has not been through
+  // applyPermissionGating yet. Cheap — one querySelectorAll over the
+  // elements that opt in via data-perm.
+  applyPermissionGating();
 }
 
 // _runningTaskTitle holds the title of the in-progress task on the
@@ -12715,12 +12660,18 @@ function connectSSE() {
 // signed-in user; render a user chip + sign-out button in the header. With
 // OIDC disabled the endpoint reports oidc_enabled=false and nothing changes.
 function initAuthUI() {
-  fetch('/api/me').then(r => r.ok ? r.json() : null).then(me => {
+  // refreshPermissions performs the /api/me fetch and applies gating; reuse
+  // its result so the chip and the permission set come from one round-trip
+  // and can never disagree.
+  refreshPermissions().then(me => {
     if (!me || !me.oidc_enabled || !me.authenticated) return;
     const chip = document.getElementById('userChip');
     if (chip) {
       chip.textContent = me.name || me.email || 'signed in';
-      chip.title = (me.email || '') + (me.admin ? ' (admin)' : '');
+      // Surfacing the role makes "why is this button greyed out?"
+      // answerable without reading the server config.
+      const roleLabel = me.role && me.role !== 'none' ? me.role : 'no role';
+      chip.title = (me.email || '') + ' — ' + roleLabel;
       chip.style.display = 'flex';
     }
     const btn = document.getElementById('logoutBtn');
@@ -12952,6 +12903,9 @@ window.openProject = function(idx, name) {
     renderProjects(window._lastProjectsData.projects, window._lastProjectsData.stats);
   }
   switchTab('overview');
+  // Roles are per-project, so the permission set must be re-resolved for the
+  // project just opened before its controls render.
+  refreshPermissions();
   // Reconnect WS scoped to the new project — initial state arrives as a
   // task_update event in the new hub subscription.
   connectWS();
@@ -12966,6 +12920,8 @@ window.clearProjectSelection = function() {
   if (bc) bc.style.display = 'none';
   const sw = document.getElementById('projSelectorWrap');
   if (sw) sw.classList.remove('visible');
+  // Back to the global view: re-resolve against the unscoped permission set.
+  refreshPermissions();
   switchTab('projects');
   // Reconnect WS without project_idx so the hub registration falls back to
   // the primary project for global events (projects list, presence) — the

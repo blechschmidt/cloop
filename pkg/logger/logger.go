@@ -83,6 +83,12 @@ const (
 	EventOptimize     Event = "optimize"
 	EventVerify       Event = "verify"
 	EventCheckpoint   Event = "checkpoint"
+
+	// EventAuthz tags access-control decisions and failures of the
+	// authorization machinery itself (Task 20164). Decisions are also
+	// written to the tamper-evident audit log; these entries exist so an
+	// operator tailing logs sees them without querying the database.
+	EventAuthz Event = "authz"
 )
 
 // Entry is the legacy JSON schema for a log line. Kept for callers that

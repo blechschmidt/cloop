@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/blechschmidt/cloop/pkg/authz"
 	"github.com/blechschmidt/cloop/pkg/multiui"
 	"github.com/blechschmidt/cloop/pkg/oidcauth"
 )
@@ -116,28 +117,54 @@ func (s *Server) handleOIDCLogout(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]interface{}{"ok": true})
 }
 
-// handleMe reports the caller's authentication status so the frontend can
-// decide whether to render the user chip + sign-out button. With OIDC
-// disabled it reports oidc_enabled=false and the frontend renders nothing.
+// handleMe reports the caller's authentication status and effective
+// permissions so the frontend can decide what to render. With OIDC disabled
+// it reports oidc_enabled=false and a full permission set, so the UI gates
+// on the same field in every deployment instead of special-casing.
+//
+// Permissions are resolved for the scope the request names (?project_idx=N)
+// so a user who is maintainer on one project and viewer on another sees the
+// right controls as they switch tabs.
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
+	scope := s.projectScope(r)
+	decision := s.permissionsFor(r, scope)
+	body := map[string]interface{}{
+		"oidc_enabled": s.oidcEnabled(),
+		"role":         string(decision.Role),
+		"permissions":  permissionStrings(decision.Permissions()),
+		// Global permissions gate the fleet-wide tabs (executors, global
+		// budget), which are not about the selected project.
+		"global_permissions": permissionStrings(s.permissionsFor(r, authz.GlobalScope).Permissions()),
+	}
 	if !s.oidcEnabled() {
-		jsonOK(w, map[string]interface{}{"oidc_enabled": false, "authenticated": true})
+		body["authenticated"] = true
+		jsonOK(w, body)
 		return
 	}
 	id := s.sessionIdentity(r)
 	if id == nil {
 		// Reached with the static bearer token (automation clients).
-		jsonOK(w, map[string]interface{}{"oidc_enabled": true, "authenticated": false})
+		body["authenticated"] = false
+		jsonOK(w, body)
 		return
 	}
-	jsonOK(w, map[string]interface{}{
-		"oidc_enabled":  true,
-		"authenticated": true,
-		"sub":           id.Sub,
-		"email":         id.Email,
-		"name":          id.Name,
-		"admin":         s.OIDC.IsAdmin(id),
-	})
+	body["authenticated"] = true
+	body["sub"] = id.Sub
+	body["email"] = id.Email
+	body["name"] = id.Name
+	body["admin"] = s.OIDC.IsAdmin(id)
+	jsonOK(w, body)
+}
+
+// permissionStrings renders a permission slice for JSON. It returns an empty
+// (non-nil) slice for the deny case so the frontend always receives an array
+// and can call .includes() without a null guard.
+func permissionStrings(perms []authz.Permission) []string {
+	out := make([]string, 0, len(perms))
+	for _, p := range perms {
+		out = append(out, string(p))
+	}
+	return out
 }
 
 // ── Per-user project scoping ────────────────────────────────────────────────

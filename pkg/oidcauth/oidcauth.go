@@ -88,6 +88,13 @@ type Identity struct {
 	Sub   string `json:"sub"`
 	Email string `json:"email,omitempty"`
 	Name  string `json:"name,omitempty"`
+
+	// Groups and Roles carry the group/role claims the IdP released,
+	// flattened from whatever shape it used. They are the input to
+	// pkg/authz role mappings; an IdP that releases neither leaves both
+	// empty and every identity falls back to oidc.default_role.
+	Groups []string `json:"groups,omitempty"`
+	Roles  []string `json:"roles,omitempty"`
 }
 
 // OwnerKey returns the stable string used to record project ownership:

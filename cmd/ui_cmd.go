@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/authz"
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/multiui"
 	"github.com/blechschmidt/cloop/pkg/oidcauth"
@@ -102,7 +103,25 @@ task list (PM mode), live progress via SSE, and run/stop controls.
 					return fmt.Errorf("ui.oidc is enabled but invalid: %w", oidcErr)
 				}
 				srv.OIDC = auth
+
+				// Claim-based RBAC (ui.oidc.role_mappings — Task 20164).
+				// Fail-closed for the same reason: a typo in a role name
+				// must not silently degrade to a binding that never
+				// matches (and therefore a user who is denied everything,
+				// or worse, a default_role that was meant to be narrower).
+				resolver, authzErr := authz.New(authz.Config{
+					DefaultRole: authz.Role(cfg.UI.OIDC.DefaultRole),
+					Bindings:    roleMappingsToBindings(cfg.UI.OIDC.RoleMappings),
+					AdminEmails: cfg.UI.OIDC.AdminEmails,
+				})
+				if authzErr != nil {
+					return fmt.Errorf("ui.oidc role mappings are invalid: %w", authzErr)
+				}
+				srv.Authz = resolver
+
 				fmt.Printf("OIDC authentication enabled (issuer: %s)\n", cfg.UI.OIDC.Issuer)
+				fmt.Printf("RBAC: %d role mapping(s), default role %q\n",
+					len(cfg.UI.OIDC.RoleMappings), effectiveDefaultRole(cfg.UI.OIDC.DefaultRole))
 			}
 		} else if err != nil {
 			fmt.Fprintf(os.Stderr, "warning: could not load config: %v\n", err)
@@ -110,6 +129,35 @@ task list (PM mode), live progress via SSE, and run/stop controls.
 
 		return srv.Start()
 	},
+}
+
+// roleMappingsToBindings converts the YAML shape into the authz model.
+// Validation (unknown roles, unknown claim kinds, empty values) happens in
+// authz.New so there is exactly one place that decides what is well-formed.
+func roleMappingsToBindings(mappings []config.RoleMapping) []authz.Binding {
+	if len(mappings) == 0 {
+		return nil
+	}
+	bindings := make([]authz.Binding, 0, len(mappings))
+	for _, m := range mappings {
+		bindings = append(bindings, authz.Binding{
+			Claim:    authz.ClaimKind(m.Claim),
+			Value:    m.Value,
+			Role:     authz.Role(m.Role),
+			Project:  m.Project,
+			Executor: m.Executor,
+		})
+	}
+	return bindings
+}
+
+// effectiveDefaultRole renders the configured default for the startup
+// banner, substituting the deny-by-default that an empty setting means.
+func effectiveDefaultRole(configured string) string {
+	if configured == "" {
+		return string(authz.RoleNone)
+	}
+	return configured
 }
 
 // openBrowser opens the given URL in the default system browser.

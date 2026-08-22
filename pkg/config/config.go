@@ -680,8 +680,34 @@ type OIDCConfig struct {
 
 	// AdminEmails lists users who see and manage every project regardless
 	// of per-project ownership. Matched case-insensitively against the
-	// email claim.
+	// email claim. Equivalent to a role_mappings entry with
+	// claim: email, role: admin and no scope.
 	AdminEmails []string `yaml:"admin_emails,omitempty"`
+
+	// DefaultRole is the role granted to an authenticated identity that
+	// matches no entry in RoleMappings. Empty (the default) means "none":
+	// deny by default. Set to "viewer" for a read-only-by-default
+	// deployment. Valid: none, viewer, operator, maintainer, admin.
+	DefaultRole string `yaml:"default_role,omitempty"`
+
+	// RoleMappings maps OIDC claim values to cloop roles, optionally
+	// scoped to a single project or executor. See pkg/authz for the
+	// permission ladder and the precedence rules.
+	//
+	//	oidc:
+	//	  default_role: none
+	//	  role_mappings:
+	//	    - claim: group
+	//	      value: cloop-admins
+	//	      role: admin
+	//	    - claim: group
+	//	      value: engineering
+	//	      role: operator
+	//	    - claim: email          # narrower scope overrides the broader
+	//	      value: dana@example.com
+	//	      role: maintainer
+	//	      project: payments
+	RoleMappings []RoleMapping `yaml:"role_mappings,omitempty"`
 
 	// SessionTTLHours is the lifetime of a dashboard session. Zero uses
 	// the default (24); values are clamped to 1..720 (30 days).
@@ -691,6 +717,33 @@ type OIDCConfig struct {
 	// "auto" (default — set when the request arrived over TLS or with
 	// X-Forwarded-Proto: https), "always", or "never".
 	CookieSecure string `yaml:"cookie_secure,omitempty"`
+}
+
+// RoleMapping is one claim→role binding in oidc.role_mappings. It mirrors
+// authz.Binding; pkg/ui converts between the two so pkg/config stays free of
+// authorization logic and pkg/authz stays free of YAML.
+type RoleMapping struct {
+	// Claim selects what Value is compared against: group, role, email,
+	// or sub.
+	Claim string `yaml:"claim"`
+
+	// Value is the claim value to match. Group and role values are
+	// compared case-insensitively; a leading "/" is ignored so Keycloak's
+	// "/cloop-admins" group-path form works as written.
+	Value string `yaml:"value"`
+
+	// Role is granted to matching identities: viewer, operator,
+	// maintainer, or admin (or none, to explicitly deny within a scope).
+	Role string `yaml:"role"`
+
+	// Project narrows the binding to one project, matched against either
+	// the project's registry name or its filesystem path. Empty means
+	// every project.
+	Project string `yaml:"project,omitempty"`
+
+	// Executor narrows the binding to one executor ID. Empty means every
+	// executor.
+	Executor string `yaml:"executor,omitempty"`
 }
 
 // OIDC session TTL bounds (hours).
