@@ -742,3 +742,74 @@ func TestHandlesListing(t *testing.T) {
 		t.Fatalf("Handles() = %v, missing %q", ids, handle.ID)
 	}
 }
+
+// TestStart_RefusesUnderStrictMode covers the driver-side backstop for strict
+// no-host-execution mode (Task 20160).
+//
+// Registry.Resolve already refuses to hand this driver out, and does it with a
+// better message. This check exists for the path that skips the registry
+// entirely — Shared(), a direct New(), a future call site that resolves once
+// and caches the executor — because a policy enforced in only one of two
+// reachable paths is not a policy.
+func TestStart_RefusesUnderStrictMode(t *testing.T) {
+	prev := executor.SetAllowHostExecution(false)
+	t.Cleanup(func() { executor.SetAllowHostExecution(prev) })
+
+	e := New("policy-test")
+	_, err := e.Start(context.Background(), fixtureSpec(t, modeEcho, t.TempDir()))
+	if err == nil {
+		t.Fatal("Start forked a host process while host execution was denied")
+	}
+	if !errors.Is(err, executor.ErrHostExecutionDenied) {
+		t.Fatalf("Start error = %v, want it to wrap ErrHostExecutionDenied", err)
+	}
+	// Nothing may have been recorded: a refused start is not a handle.
+	if h := e.Handles(); len(h) != 0 {
+		t.Errorf("refused start left %d handle(s) behind: %v", len(h), h)
+	}
+}
+
+// TestHandleStatuses_ReportsRunningWork backs the Executors panel's load
+// column. It has to distinguish running from finished, because "3 handles" and
+// "3 running workloads" are different numbers and only the second is useful.
+func TestHandleStatuses_ReportsRunningWork(t *testing.T) {
+	e := New("lister-test")
+	got, err := e.HandleStatuses(context.Background())
+	if err != nil {
+		t.Fatalf("HandleStatuses on an idle executor: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("idle executor reports %d handles", len(got))
+	}
+
+	h, err := e.Start(context.Background(), fixtureSpec(t, modeSleep, t.TempDir()))
+	if err != nil {
+		t.Fatalf("start fixture workload: %v", err)
+	}
+	t.Cleanup(func() { _ = e.Signal(context.Background(), h.ID, executor.SignalKill) })
+
+	live, ok := executor.LiveHandles(context.Background(), e)
+	if !ok {
+		t.Fatal("localprocess must satisfy executor.Lister so the panel can show real load")
+	}
+	if len(live) != 1 {
+		t.Fatalf("LiveHandles = %d, want 1 while a workload is running", len(live))
+	}
+	if live[0].HandleID != h.ID {
+		t.Errorf("LiveHandles reported %q, want %q", live[0].HandleID, h.ID)
+	}
+
+	if err := e.Signal(context.Background(), h.ID, executor.SignalKill); err != nil {
+		t.Fatalf("Signal: %v", err)
+	}
+	// Poll rather than sleep a fixed amount: reaping is asynchronous.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if live, _ := executor.LiveHandles(context.Background(), e); len(live) == 0 {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Error("a killed workload is still counted as running — the panel would show " +
+		"permanent phantom load")
+}

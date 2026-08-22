@@ -24,8 +24,10 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/blechschmidt/cloop/pkg/executor/container"
+	"github.com/blechschmidt/cloop/pkg/executor/kubernetes"
 )
 
 // ParseMemoryMB converts a size string to megabytes.
@@ -93,6 +95,64 @@ func ParseMemoryMB(s string) (int, error) {
 		mb = 1
 	}
 	return int(mb), nil
+}
+
+// ValidateExecutors checks the whole executors section.
+//
+// Strict no-host-execution mode with nothing else configured is deliberately
+// NOT an error. It is a legitimate and even expected intermediate state: an
+// operator hardens the control plane first, then enrolls edge devices, and
+// remote executors arrive at runtime over an outbound connection rather than
+// through this file. Making it fatal would mean a hardened control plane
+// refuses to boot until a device happens to be online — precisely backwards
+// for a security control. ExecutorWarnings surfaces it as advice instead, and
+// the Executors tab shows it as a banner.
+func ValidateExecutors(e ExecutorsConfig) error {
+	if err := ValidateContainerExecutor(e.Container); err != nil {
+		return err
+	}
+	return ValidateKubernetesExecutor(e.Kubernetes)
+}
+
+// ExecutorWarnings returns advisory messages about a valid-but-questionable
+// executors section: configurations that will load and run, but that an
+// operator probably did not intend.
+func ExecutorWarnings(e ExecutorsConfig) []string {
+	var out []string
+	isolated := e.Container.Enabled || e.Kubernetes.Enabled
+	if !e.HostProcessAllowed() && !isolated {
+		out = append(out, "executors.allow_host_process is false and no isolated executor is "+
+			"enabled — no executor is configured in this file. Projects will only run once a "+
+			"remote agent enrolls (`cloop executor enroll`); until then every run is refused.")
+	}
+	if e.HostProcessAllowed() && !e.HostProcessExplicit() && isolated {
+		out = append(out, "an isolated executor is enabled but executors.allow_host_process is "+
+			"unset, so it still defaults to true and unbound projects run on the host. Set it "+
+			"to false to enforce sandboxed execution.")
+	}
+	if e.Kubernetes.Enabled {
+		// Warn about the image that will actually run, not the one that was
+		// typed: an empty value means the driver's placeholder default, and
+		// staying quiet about that is how an operator discovers the image
+		// does not contain cloop at the first task instead of at config time.
+		image := strings.TrimSpace(e.Kubernetes.Image)
+		if image == "" {
+			image = kubernetes.DefaultImage
+		}
+		for _, w := range kubernetes.ImageWarnings(image) {
+			out = append(out, "executors.kubernetes."+w)
+		}
+		if strings.TrimSpace(e.Kubernetes.Namespace) == "" {
+			out = append(out, "executors.kubernetes.namespace is unset, so Pods land in the "+
+				"namespace the brokered kubeconfig happens to name (or \"cloop\"). Set it "+
+				"explicitly — the namespace is the blast radius.")
+		}
+		if e.Kubernetes.MemoryLimit == "" && e.Kubernetes.CPULimit == "" {
+			out = append(out, "executors.kubernetes sets no cpu_limit or memory_limit, so a "+
+				"workload is bounded only by the namespace's LimitRange (if one exists).")
+		}
+	}
+	return out
 }
 
 // ValidateContainerExecutor returns a non-nil error describing the first
@@ -174,6 +234,185 @@ func (c ContainerExecutorConfig) DriverOptions() (container.Options, error) {
 		SELinuxLabel: c.SELinuxLabel,
 	}
 	return opts.Normalize()
+}
+
+// ValidateKubernetesExecutor returns a non-nil error describing the first
+// problem found in k. It does not mutate.
+//
+// Like the container validator it runs even when the executor is disabled, so
+// a broken section is reported when it is written rather than at the moment
+// someone flips enabled to true.
+//
+// Note what is *not* validated here: there is no kubeconfig path to check,
+// because this executor has no such setting. Credentials are leased from the
+// secret broker at run time, so the only thing config can say about them is
+// which secret to prefer.
+func ValidateKubernetesExecutor(k KubernetesExecutorConfig) error {
+	for field, v := range map[string]int64{
+		"active_deadline_seconds":          k.ActiveDeadlineSeconds,
+		"termination_grace_period_seconds": k.TerminationGracePeriodSeconds,
+		"kill_grace_period_seconds":        k.KillGracePeriodSeconds,
+		"orphan_grace_period_seconds":      k.OrphanGracePeriodSeconds,
+	} {
+		if v < 0 {
+			return fmt.Errorf("executors.kubernetes.%s must be >= 0 (got %d)", field, v)
+		}
+		if v > KubernetesSecondsUpper {
+			return fmt.Errorf("executors.kubernetes.%s must be <= %d (got %d)",
+				field, KubernetesSecondsUpper, v)
+		}
+	}
+	if k.MaxConcurrent < 0 || k.MaxConcurrent > KubernetesMaxConcurrentUpper {
+		return fmt.Errorf("executors.kubernetes.max_concurrent must be between 0 and %d (got %d)",
+			KubernetesMaxConcurrentUpper, k.MaxConcurrent)
+	}
+	// UID 0 is the one value this executor can never honour: it always sets
+	// runAsNonRoot, and the kubelet resolves the contradiction by refusing to
+	// start the Pod with an error that reads like an image problem.
+	if k.RunAsUser < 0 || k.RunAsGroup < 0 {
+		return fmt.Errorf("executors.kubernetes.run_as_user and run_as_group must be >= 0")
+	}
+
+	// Delegated to the driver so the Pod-critical checks (namespace, image
+	// reference, quantities, tolerations) have a single definition.
+	if _, err := k.DriverOptions(); err != nil {
+		return fmt.Errorf("executors.kubernetes: %w", err)
+	}
+	return nil
+}
+
+// DriverOptions converts the config section into driver options, applying the
+// driver's own normalisation and validation.
+//
+// Credentials is deliberately left nil: only a caller holding a secret broker
+// can fill it in, and that is the wiring in cmd/executor_cmd.go. A config
+// validator asking "is this section well-formed" must not need a decryption
+// key to answer.
+func (k KubernetesExecutorConfig) DriverOptions() (kubernetes.Options, error) {
+	opts := kubernetes.Options{
+		ID:                    strings.TrimSpace(k.ID),
+		Namespace:             strings.TrimSpace(k.Namespace),
+		Image:                 strings.TrimSpace(k.Image),
+		ImagePullPolicy:       strings.TrimSpace(k.ImagePullPolicy),
+		ImagePullSecrets:      k.ImagePullSecrets,
+		ServiceAccountName:    strings.TrimSpace(k.ServiceAccount),
+		CPURequest:            strings.TrimSpace(k.CPURequest),
+		CPULimit:              strings.TrimSpace(k.CPULimit),
+		MemoryRequest:         strings.TrimSpace(k.MemoryRequest),
+		MemoryLimit:           strings.TrimSpace(k.MemoryLimit),
+		EphemeralStorageLimit: strings.TrimSpace(k.EphemeralStorageLimit),
+		WorkspaceSizeLimit:    strings.TrimSpace(k.WorkspaceSizeLimit),
+		NodeSelector:          k.NodeSelector,
+		Tolerations:           k.Tolerations,
+		ActiveDeadlineSeconds: k.ActiveDeadlineSeconds,
+		RunAsUser:             k.RunAsUser,
+		RunAsGroup:            k.RunAsGroup,
+		KeepCompletedPods:     k.KeepCompletedPods,
+		MaxConcurrent:         k.MaxConcurrent,
+	}
+	if k.TerminationGracePeriodSeconds > 0 {
+		opts.TerminationGracePeriod = time.Duration(k.TerminationGracePeriodSeconds) * time.Second
+	}
+	if k.KillGracePeriodSeconds > 0 {
+		opts.KillGracePeriod = time.Duration(k.KillGracePeriodSeconds) * time.Second
+	}
+	if k.OrphanGracePeriodSeconds > 0 {
+		opts.OrphanGracePeriod = time.Duration(k.OrphanGracePeriodSeconds) * time.Second
+	}
+	return opts.Normalize()
+}
+
+// clampKubernetesExecutor repairs out-of-range values in place and reports
+// what it changed, so Load can warn once per field.
+//
+// Every repair resets to the zero value, which the driver reads as "use my
+// default", and every driver default is the confining one — the built-in
+// non-root UID, a 30-second grace period, the reserved-namespace check. A
+// clamp can therefore only tighten, never loosen. The one field that is
+// *disabled* rather than reset is Enabled itself, for the case where the
+// section is broken badly enough that registering it would produce a
+// half-configured cluster backend.
+func clampKubernetesExecutor(k *KubernetesExecutorConfig) []string {
+	var changed []string
+
+	clampSeconds := func(name string, v *int64) {
+		if *v < 0 || *v > KubernetesSecondsUpper {
+			changed = append(changed, fmt.Sprintf("executors.kubernetes.%s: value %d outside [0, %d]",
+				name, *v, KubernetesSecondsUpper))
+			*v = 0
+		}
+	}
+	clampSeconds("active_deadline_seconds", &k.ActiveDeadlineSeconds)
+	clampSeconds("termination_grace_period_seconds", &k.TerminationGracePeriodSeconds)
+	clampSeconds("kill_grace_period_seconds", &k.KillGracePeriodSeconds)
+	clampSeconds("orphan_grace_period_seconds", &k.OrphanGracePeriodSeconds)
+
+	if k.MaxConcurrent < 0 || k.MaxConcurrent > KubernetesMaxConcurrentUpper {
+		changed = append(changed, fmt.Sprintf("executors.kubernetes.max_concurrent: value %d outside [0, %d]",
+			k.MaxConcurrent, KubernetesMaxConcurrentUpper))
+		k.MaxConcurrent = 0
+	}
+	if k.RunAsUser < 0 {
+		changed = append(changed, fmt.Sprintf("executors.kubernetes.run_as_user: %d is negative", k.RunAsUser))
+		k.RunAsUser = 0
+	}
+	if k.RunAsGroup < 0 {
+		changed = append(changed, fmt.Sprintf("executors.kubernetes.run_as_group: %d is negative", k.RunAsGroup))
+		k.RunAsGroup = 0
+	}
+	if k.Namespace != "" {
+		if err := kubernetes.ValidateNamespace(k.Namespace); err != nil {
+			changed = append(changed, fmt.Sprintf("executors.kubernetes.namespace: %v", err))
+			k.Namespace = ""
+		}
+	}
+	if k.Image != "" {
+		if err := kubernetes.ValidateImageRef(k.Image); err != nil {
+			changed = append(changed, fmt.Sprintf("executors.kubernetes.image: %v", err))
+			k.Image = ""
+		}
+	}
+	switch k.ImagePullPolicy {
+	case "", "Always", "IfNotPresent", "Never":
+	default:
+		changed = append(changed, fmt.Sprintf("executors.kubernetes.image_pull_policy: %q is not a pull policy",
+			k.ImagePullPolicy))
+		k.ImagePullPolicy = ""
+	}
+	for name, q := range map[string]*string{
+		"cpu_request":             &k.CPURequest,
+		"cpu_limit":               &k.CPULimit,
+		"memory_request":          &k.MemoryRequest,
+		"memory_limit":            &k.MemoryLimit,
+		"ephemeral_storage_limit": &k.EphemeralStorageLimit,
+		"workspace_size_limit":    &k.WorkspaceSizeLimit,
+	} {
+		if err := kubernetes.ValidateQuantity(*q); err != nil {
+			changed = append(changed, fmt.Sprintf("executors.kubernetes.%s: %v", name, err))
+			*q = ""
+		}
+	}
+	for i, t := range k.Tolerations {
+		if err := t.Validate(); err != nil {
+			// Dropping the whole list rather than the offending entry: a
+			// partial toleration set schedules Pods onto a node pool the
+			// operator did not choose, which is worse than not scheduling.
+			changed = append(changed, fmt.Sprintf("executors.kubernetes.tolerations[%d]: %v", i, err))
+			k.Tolerations = nil
+			break
+		}
+	}
+	// A section that still cannot produce driver options is not salvageable
+	// field-by-field; refuse to register it rather than register something
+	// whose confinement nobody chose.
+	if k.Enabled {
+		if _, err := k.DriverOptions(); err != nil {
+			changed = append(changed, fmt.Sprintf(
+				"executors.kubernetes: disabled because the section is unusable: %v", err))
+			k.Enabled = false
+		}
+	}
+	return changed
 }
 
 // clampContainerExecutor repairs out-of-range values in place and reports

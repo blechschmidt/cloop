@@ -59,9 +59,12 @@ func (s *Server) remoteHub() (*remote.Hub, error) {
 		}
 		hub, err := remote.NewHub(remote.HubOptions{
 			Store:          store,
-			Registry:       executor.DefaultRegistry,
-			OnStatusChange: makeExecutorStatusMirror(db),
-			OnEnroll:       makeExecutorEnrollRecorder(db),
+			Registry: executor.DefaultRegistry,
+			// Mirror into storage, then push the change to open dashboards
+			// so the Executors panel's status dot is event-driven rather
+			// than polled (Tasks 20126/20134, 20160).
+			OnStatusChange: s.makeExecutorStatusBroadcaster(makeExecutorStatusMirror(db)),
+			OnEnroll:       s.makeExecutorEnrollBroadcaster(makeExecutorEnrollRecorder(db)),
 			Logf: func(format string, args ...any) {
 				fmt.Fprintf(os.Stderr, format+"\n", args...)
 			},

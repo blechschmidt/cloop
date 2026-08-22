@@ -19,6 +19,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/blechschmidt/cloop/pkg/executor/kubernetes"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 )
 
@@ -112,6 +113,19 @@ const (
 	// any build's fan-out but below the kernel's default pid_max.
 	ContainerPIDsLower = 1
 	ContainerPIDsUpper = 1 << 16
+
+	// Kubernetes executor bounds (Task 20161).
+	//
+	// One week, matching OrchestratorTaskTimeoutMinutesUpper. Every duration
+	// in the section is a deadline or a grace period, and none of them has a
+	// legitimate value beyond that; a larger number is a units mistake
+	// (milliseconds typed into a seconds field) that would otherwise become
+	// an effectively-unbounded Pod.
+	KubernetesSecondsUpper = 7 * 24 * 60 * 60
+	// Concurrency ceiling. Not a claim about cluster capacity — the
+	// namespace's ResourceQuota is that — but a guard against a runaway loop
+	// asking for a Pod count no operator typed on purpose.
+	KubernetesMaxConcurrentUpper = 1024
 )
 
 // permWarnedPaths tracks which config paths have already emitted the
@@ -221,8 +235,49 @@ type Config struct {
 // operator decision rather than something that materialises because a binary
 // happened to be on PATH.
 type ExecutorsConfig struct {
+	// AllowHostProcess permits the localprocess driver — running agent
+	// workloads as child processes of the control plane, with its user, its
+	// filesystem, and its network. Absent means true, so an existing
+	// single-machine install keeps working across an upgrade.
+	//
+	// This is the one setting an enterprise deployment must flip. With it
+	// false, cloop enters strict no-host-execution mode: the localprocess
+	// driver refuses to Start, executor.Resolve refuses to hand it out, and
+	// every Web UI path that would have spawned a harness returns 409 naming
+	// the configured alternatives. That is what turns "the web UI never
+	// directly spawns a harness on the host" from a convention into an
+	// enforced invariant.
+	//
+	// It is a *bool rather than a bool because all three states are
+	// distinguishable and matter: absent (legacy default, permissive),
+	// explicitly true (an operator decided), explicitly false (hardened). A
+	// plain bool with omitempty would drop an explicit false on the next
+	// Save, silently re-opening host execution.
+	AllowHostProcess *bool `yaml:"allow_host_process,omitempty"`
+
 	// Container configures the Docker/Podman sandbox executor.
 	Container ContainerExecutorConfig `yaml:"container,omitempty"`
+
+	// Kubernetes configures the ephemeral-Pod executor.
+	Kubernetes KubernetesExecutorConfig `yaml:"kubernetes,omitempty"`
+}
+
+// HostProcessAllowed reports the effective policy, applying the
+// permissive-by-default rule for an absent setting.
+func (e ExecutorsConfig) HostProcessAllowed() bool {
+	return e.AllowHostProcess == nil || *e.AllowHostProcess
+}
+
+// HostProcessExplicit reports whether an operator stated the policy, as
+// opposed to inheriting the back-compat default. The UI banner uses it to
+// distinguish "permissive because nobody has decided yet" from "permissive on
+// purpose".
+func (e ExecutorsConfig) HostProcessExplicit() bool { return e.AllowHostProcess != nil }
+
+// SetHostProcessAllowed records an explicit policy decision.
+func (e *ExecutorsConfig) SetHostProcessAllowed(allowed bool) {
+	v := allowed
+	e.AllowHostProcess = &v
 }
 
 // ContainerExecutorConfig configures the container sandbox executor
@@ -290,6 +345,108 @@ type ContainerExecutorConfig struct {
 	// hosts: "z" (shared) or "Z" (private). Required for the workspace to be
 	// readable inside the container when SELinux is enforcing.
 	SELinuxLabel string `yaml:"selinux_label,omitempty"`
+}
+
+// KubernetesExecutorConfig configures the ephemeral-Pod executor
+// (pkg/executor/kubernetes).
+//
+// One field is unlike anything in the container section: KubeconfigSecret
+// names a *secret-broker reference*, not a path. This executor has no
+// "kubeconfig file" setting and never will — the credential is leased from
+// pkg/secretbroker for the duration of a run and consumed in memory, so that
+// a control-plane host compromise does not hand over standing cluster access.
+// An operator mints it with `cloop secret mint --kind kubeconfig` and grants
+// it with `cloop secret grant ... --to executor:<id>`.
+type KubernetesExecutorConfig struct {
+	// Enabled registers the executor at startup. Off by default.
+	Enabled bool `yaml:"enabled,omitempty"`
+
+	// ID is the executor's registry identifier, used by `cloop executor
+	// test <id>`, by grants (`--to executor:<id>`) and by project bindings.
+	// Empty means "kubernetes".
+	ID string `yaml:"id,omitempty"`
+
+	// KubeconfigSecret names the brokered kubeconfig secret, by name or ID.
+	// Empty accepts the first kubeconfig grant issued to this executor,
+	// which is the common single-cluster case.
+	KubeconfigSecret string `yaml:"kubeconfig_secret,omitempty"`
+
+	// Context selects a kubeconfig context. Empty uses current-context.
+	// Rarely needed: the broker already minimizes a kubeconfig to the
+	// contexts a grant permits, usually leaving exactly one.
+	Context string `yaml:"context,omitempty"`
+
+	// Namespace is where Pods are created. Empty falls back to the grant's
+	// pinned namespace, then the kubeconfig context's, then "cloop".
+	Namespace string `yaml:"namespace,omitempty"`
+
+	// Image is the harness image. Unlike the container executor there is no
+	// bind-mounted host binary to fall back on, so this image must contain
+	// cloop. Pin it by digest.
+	Image string `yaml:"image,omitempty"`
+
+	// ImagePullPolicy is "Always", "IfNotPresent" or "Never". Empty uses the
+	// cluster default.
+	ImagePullPolicy string `yaml:"image_pull_policy,omitempty"`
+
+	// ImagePullSecrets names Secrets in Namespace holding registry auth.
+	ImagePullSecrets []string `yaml:"image_pull_secrets,omitempty"`
+
+	// ServiceAccount runs Pods under a named ServiceAccount. Its token is
+	// still never mounted — automountServiceAccountToken is forced false —
+	// so this is for image-pull secrets and Pod Security admission, not for
+	// granting the workload cluster access.
+	ServiceAccount string `yaml:"service_account,omitempty"`
+
+	// CPURequest/CPULimit/MemoryRequest/MemoryLimit are Kubernetes quantity
+	// strings: "500m", "2", "512Mi", "4Gi".
+	CPURequest    string `yaml:"cpu_request,omitempty"`
+	CPULimit      string `yaml:"cpu_limit,omitempty"`
+	MemoryRequest string `yaml:"memory_request,omitempty"`
+	MemoryLimit   string `yaml:"memory_limit,omitempty"`
+
+	// EphemeralStorageLimit bounds writable scratch and logs ("10Gi").
+	EphemeralStorageLimit string `yaml:"ephemeral_storage_limit,omitempty"`
+	// WorkspaceSizeLimit bounds the workspace emptyDir specifically.
+	WorkspaceSizeLimit string `yaml:"workspace_size_limit,omitempty"`
+
+	// NodeSelector pins scheduling to labelled nodes.
+	NodeSelector map[string]string `yaml:"node_selector,omitempty"`
+
+	// Tolerations lets Pods schedule onto tainted nodes — the usual way to
+	// reach a dedicated, untrusted-workload node pool.
+	Tolerations []kubernetes.Toleration `yaml:"tolerations,omitempty"`
+
+	// ActiveDeadlineSeconds is the server-side wall-clock ceiling applied
+	// when a run requests no timeout of its own. Zero means unbounded,
+	// matching cloop's project-wide decision that runs are long-lived.
+	// Enforced by the API server, so it survives a control-plane restart.
+	ActiveDeadlineSeconds int64 `yaml:"active_deadline_seconds,omitempty"`
+
+	// TerminationGracePeriodSeconds is how long a Pod gets between SIGTERM
+	// and SIGKILL on a graceful stop. Zero means 30.
+	TerminationGracePeriodSeconds int64 `yaml:"termination_grace_period_seconds,omitempty"`
+
+	// KillGracePeriodSeconds is used for a hard stop. Zero means 5.
+	KillGracePeriodSeconds int64 `yaml:"kill_grace_period_seconds,omitempty"`
+
+	// RunAsUser/RunAsGroup override the non-root UID/GID the harness runs
+	// as. Zero uses the distroless "nonroot" defaults (65532). Zero is not
+	// an accepted *value*: this executor always sets runAsNonRoot.
+	RunAsUser  int64 `yaml:"run_as_user,omitempty"`
+	RunAsGroup int64 `yaml:"run_as_group,omitempty"`
+
+	// KeepCompletedPods leaves finished Pods in the cluster for debugging
+	// instead of deleting them once their logs and status are captured.
+	KeepCompletedPods bool `yaml:"keep_completed_pods,omitempty"`
+
+	// OrphanGracePeriodSeconds protects a young Pod from the startup
+	// reconcile sweep. Zero means 600.
+	OrphanGracePeriodSeconds int64 `yaml:"orphan_grace_period_seconds,omitempty"`
+
+	// MaxConcurrent caps simultaneously-running Pods. Zero means unbounded;
+	// the namespace's ResourceQuota is the real ceiling.
+	MaxConcurrent int `yaml:"max_concurrent,omitempty"`
 }
 
 // BackupConfig configures hot backups of the SQLite state database.
@@ -1018,6 +1175,15 @@ func (c *Config) validateAndClamp(path string) {
 		}
 		warn(field, detail)
 	}
+	// Kubernetes executor: same rule, same reason — a repaired field falls
+	// back to the driver's confining default rather than being honoured.
+	for _, msg := range clampKubernetesExecutor(&c.Executors.Kubernetes) {
+		field, detail, found := strings.Cut(msg, ": ")
+		if !found {
+			field, detail = "executors.kubernetes", msg
+		}
+		warn(field, detail)
+	}
 }
 
 // ValidateNumeric returns a non-nil error describing the first numeric range
@@ -1085,7 +1251,7 @@ func (c *Config) ValidateNumeric() error {
 		return fmt.Errorf("orchestrator.task_timeout_minutes must be between %d and %d (or 0 for the default %d) (got %d)",
 			OrchestratorTaskTimeoutMinutesLower, OrchestratorTaskTimeoutMinutesUpper, OrchestratorTaskTimeoutMinutesDefault, c.Orchestrator.TaskTimeoutMinutes)
 	}
-	if err := ValidateContainerExecutor(c.Executors.Container); err != nil {
+	if err := ValidateExecutors(c.Executors); err != nil {
 		return err
 	}
 	return nil

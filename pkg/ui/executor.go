@@ -24,9 +24,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/localprocess"
 	"github.com/blechschmidt/cloop/pkg/state"
@@ -72,8 +74,10 @@ func registerBuiltinExecutors() {
 	})
 }
 
-// bootstrapExecutors registers the built-in drivers and points the registry
-// at this control plane's persisted project→executor bindings.
+// bootstrapExecutors registers the built-in drivers, applies the host-execution
+// policy, points the registry at this control plane's persisted
+// project→executor bindings, and records a row for every backend that can run
+// work.
 func bootstrapExecutors(dir string) {
 	registerBuiltinExecutors()
 	controlPlaneDirMu.Lock()
@@ -82,6 +86,39 @@ func bootstrapExecutors(dir string) {
 	executor.SetBindingLookup(func(projectPath string) (string, bool) {
 		return lookupProjectExecutor(dir, projectPath)
 	})
+	applyHostExecutionPolicy(dir)
+	syncRegistryToStore(dir)
+	startExecutorSupervisor(dir)
+}
+
+// applyHostExecutionPolicy reads executors.allow_host_process and installs it
+// on the process-wide switch that executor.Resolve and the localprocess driver
+// both consult (Task 20160).
+//
+// The `cloop ui` command reaches here through cmd/root.go's PersistentPreRunE,
+// which has already applied the same setting. Doing it again is deliberate:
+// pkg/ui is also constructed directly by tests and by embedders, and a
+// hardened deployment must not depend on which entry point happened to build
+// the Server.
+//
+// It goes through ApplyHostExecutionPolicy rather than the raw switch so the
+// policy can only tighten. That matters most here: a Server is constructed per
+// dashboard instance and the dir it reads is a *project* directory in
+// single-project mode, so a symmetric apply would let a managed project's own
+// config.yaml re-enable host execution for the whole control plane.
+//
+// A config that cannot be read leaves the switch untouched — the setting lives
+// in that file, so an unreadable one means "no policy stated here", not
+// "policy withdrawn".
+func applyHostExecutionPolicy(dir string) {
+	if strings.TrimSpace(dir) == "" {
+		return
+	}
+	cfg, err := config.Load(dir)
+	if err != nil || cfg == nil {
+		return
+	}
+	executor.ApplyHostExecutionPolicy(cfg.Executors.HostProcessAllowed())
 }
 
 // lookupProjectExecutor reads the persisted project→executor binding from
@@ -157,6 +194,13 @@ func startWorkload(workDir string, argv []string, labels map[string]string) (exe
 		return nil, executor.Handle{}, err
 	}
 	go wipeLeaseOnExit(ex, handle.ID, lease)
+
+	// Record the dispatch so the supervisor can fail it over if this executor
+	// dies holding it. Best-effort: a session that cannot be recorded yields
+	// an empty ID and the run proceeds untracked rather than not at all.
+	if sessionID := openSessionFor(controlPlaneDir(), ex, handle, spec); sessionID != "" {
+		go watchSessionExit(controlPlaneDir(), ex, handle.ID, sessionID)
+	}
 	return ex, handle, nil
 }
 

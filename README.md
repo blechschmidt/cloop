@@ -1268,16 +1268,39 @@ available **fails** rather than silently falling back to host execution — an
 isolation boundary you opted into is never downgraded because the backend
 happened to be unreachable.
 
-| Kind | Isolation | Notes |
-|------|-----------|-------|
-| `localprocess` | none | Default. Zero-config, no sandbox. |
-| `container` | container | Docker/Podman sandbox on the control-plane host. |
+| Kind | Isolation | Where it runs | Notes |
+|------|-----------|---------------|-------|
+| `localprocess` | none | this host | Default. Zero-config, no sandbox. |
+| `container` | container | this host | Docker/Podman sandbox. Opt-in via config. |
+| `remote` | remote | an enrolled device | Edge box that dialled out to the control plane. |
 
 ```bash
 cloop executor list              # what is registered, and what it isolates
+cloop executor ls                # fleet health: state, in-flight work, last seen
 cloop executor test <id>         # preflight + run `cloop version` inside it
 cloop executor reap <id>         # remove containers left by a killed control plane
+cloop executor cordon <id>       # stop new placement; in-flight work continues
+cloop executor uncordon <id>     # back in rotation, at the health its probes justify
+cloop executor drain <id>        # stop placement, wait for in-flight to reach zero
+cloop executor enroll            # mint a token for a remote device
+cloop executor agent --server …  # run *on* the device
+cloop executor revoke <id>       # kill a leaked token or a decommissioned device
 ```
+
+### The Executors panel
+
+The web dashboard has a global **Executors** tab: one card per backend with a
+live status dot, a kind badge (host / container / remote), capability chips,
+current load, and enroll/revoke actions. Status changes arrive over the same
+WebSocket the rest of the dashboard uses — nothing polls.
+
+Each project's execution target is a one-click setting: the **Executor** card on
+the project Overview page, next to the provider card. Changing it takes effect
+on the next run; work already in flight stays on the executor that started it.
+
+The tab's banner always states the effective host-execution mode, so "can this
+server still fork a harness next to itself" is never something you have to infer
+from a config file.
 
 ### Container sandbox
 
@@ -1355,6 +1378,78 @@ so a bare value cannot be consumed as the image reference.
 `cloop executor test` bind-mounts the control plane's *own* binary read-only at
 `/usr/local/bin/cloop`, so the smoke test is meaningful even against an image
 that does not yet ship cloop.
+
+### Remote executors (edge devices)
+
+A remote executor runs work on a machine the control plane **cannot dial** —
+an edge device behind NAT, a build box on an office network, a laptop on hotel
+wifi. The connection is inverted: the device dials out and holds one multiplexed
+WebSocket open, so there is no inbound port to forward, no VPN, and no firewall
+rule.
+
+Enrollment is therefore a two-step, out-of-band flow. On the control plane
+(or in the Executors tab, **+ Enroll device**):
+
+```bash
+cloop executor enroll --name edge-1 --ttl 15m
+```
+
+It prints a single-use, expiring token and the exact command to paste on the
+device:
+
+```bash
+cloop executor agent --server wss://cloop.example.com/api/executors/connect --token <token>
+```
+
+The token is **shown once** — only its hash is stored, so it cannot be
+recovered. On first connect the device redeems it for a long-lived credential,
+persists that 0600 at `~/.cloop/agent.json`, and reconnects with it from then
+on. If a token leaks, `cloop executor revoke <id>` (or **Revoke** on the card)
+kills it; if it was already redeemed, that revokes the resulting credential too,
+drops the device's session, and unbinds every project that pointed at it.
+
+The agent endpoint deliberately sits outside the dashboard's token/OIDC auth.
+Agents are not users: they carry their own scoped, individually revocable
+credential rather than one that would grant full UI access. It stays behind the
+rate limiter, which is what absorbs an unauthenticated flood of connect
+attempts.
+
+### Hardened (enterprise) configuration
+
+By default cloop may run workloads as child processes of the control plane. To
+guarantee that the web UI **never** spawns a harness on the host, turn host
+execution off:
+
+```yaml
+executors:
+  allow_host_process: false   # strict no-host-execution mode
+  container:
+    enabled: true             # …and give it somewhere else to run
+```
+
+or `cloop config set executors.allow_host_process false`.
+
+This is the one setting a hosted deployment must flip. Absent means `true`, so
+existing single-machine installs keep working across an upgrade.
+
+With it `false`:
+
+- the `localprocess` driver refuses to start anything;
+- `executor.Resolve` refuses to hand that driver out, so background paths are
+  covered too, not just the ones with an explicit check;
+- every Web UI path that would have dispatched work returns **HTTP 409** with a
+  machine-readable `code: host_execution_denied` and a `remediation` string
+  naming the executors that *are* available; and
+- the Executors tab shows the mode as a banner.
+
+Hardening before any device has enrolled is a supported intermediate state —
+remote executors arrive at runtime, not through this file — so the config still
+loads and warns rather than refusing to boot.
+
+The policy is a **ratchet**: it can only tighten at runtime. A control plane
+manages many projects, each with its own `config.yaml`, and applying them
+symmetrically would let a tenant re-enable host execution by editing a file they
+control. Loosening requires a restart with a permissive config.
 
 ---
 

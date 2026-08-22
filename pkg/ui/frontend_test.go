@@ -27,12 +27,19 @@ var serverSource string
 //go:embed provider_calls.go
 var providerCallsSource string
 
+// executorsAPISource is pkg/ui/executors_api.go, for the same reason: the
+// `executor_update` broadcast (Task 20160) lives there, and without it the
+// drift tests would call the frontend's handler dead code.
+//
+//go:embed executors_api.go
+var executorsAPISource string
+
 // allUISources concatenates every Go source the architectural tests need
 // to scan for WebSocket broadcast sites. Adding a new file with a
 // `wsMessage{Type: ...}` site should mean adding it both here and as a
 // new //go:embed directive above.
 func allUISources() string {
-	return serverSource + "\n" + providerCallsSource
+	return serverSource + "\n" + providerCallsSource + "\n" + executorsAPISource
 }
 
 // The cloop dashboard is a single embedded HTML/CSS/JS string (`dashboardHTML`
@@ -1071,5 +1078,93 @@ func TestDashboard_PostHandlersBoundJSONBody(t *testing.T) {
 			"`limitJSONBody(w, r, maxJSONBodyBytes)` before any "+
 			"json.NewDecoder(r.Body) call.",
 			len(bad), strings.Join(bad, "\n  "))
+	}
+}
+
+// TestDashboard_ExecutorsPanelWired is the structural check for the Executors
+// tab (Task 20160). The generic architectural tests above already cover
+// reachability and ID existence; what they cannot express is that this
+// particular feature is actually *assembled* — a nav button with no panel, or
+// a panel whose loader is never called, passes every one of them.
+//
+// The pieces asserted here are the ones that would each silently disable the
+// feature on their own:
+//
+//	nav button → panel → loader wired into switchTab → the three endpoints
+//	the loader and its actions call → the WS event that keeps it live.
+func TestDashboard_ExecutorsPanelWired(t *testing.T) {
+	required := []struct {
+		needle string
+		why    string
+	}{
+		{`id="tab-executors"`, "the Executors tab panel is missing"},
+		{`id="tbtn-executors"`, "the desktop nav button is missing"},
+		{`id="mtbtn-executors"`, "the mobile nav button is missing"},
+		{`id="execList"`, "the executor card container is missing"},
+		{`id="execPolicyBanner"`, "the effective-mode banner is missing — the whole point " +
+			"of the tab is that the host-execution mode is visible"},
+		{`window.loadExecutors = function`, "the panel loader is not exposed on window"},
+		{`if (name === 'executors') loadExecutors();`, "switchTab never loads the Executors panel"},
+		{`case 'executor_update':`, "the WS event that keeps the panel live is not handled"},
+		{`'/api/executors'`, "the panel never calls its list endpoint"},
+		{`'/api/executors/enroll'`, "the enroll action never calls its endpoint"},
+		{`'/api/executors/'`, "the revoke action never calls the delete endpoint"},
+	}
+	for _, r := range required {
+		if !strings.Contains(dashboardHTML, r.needle) {
+			t.Errorf("%s (no %q in the dashboard)", r.why, r.needle)
+		}
+	}
+
+	// The Executors tab is global; Task 20037's convention is that global tabs
+	// are marked as such in the nav and excluded from the breadcrumb.
+	if !strings.Contains(dashboardHTML, `class="tab-btn global-tab" onclick="switchTab('executors')"`) {
+		t.Error("the Executors nav button is not marked global-tab — it would render in " +
+			"the per-project section and imply project scope it does not have")
+	}
+	if !strings.Contains(dashboardHTML, `const globalTabs = ['projects','budget','settings','executors'];`) {
+		t.Error("'executors' is missing from updateScopeHint's globalTabs — the header " +
+			"scope badge would claim the tab shows project data")
+	}
+}
+
+// TestDashboard_ExecutorSelectorWired asserts the per-project half: the
+// Overview page's execution target is a first-class, one-click setting rather
+// than something an operator has to know a CLI command for.
+func TestDashboard_ExecutorSelectorWired(t *testing.T) {
+	required := []struct {
+		needle string
+		why    string
+	}{
+		{`id="executorCard"`, "the Overview executor card is missing"},
+		{`id="statExecutor"`, "the executor card has no value element to render into"},
+		{`onclick="openExecutorPickerModal()"`, "the executor card is not clickable"},
+		{`window.openExecutorPickerModal = function`, "the picker opener is not exposed on window"},
+		{`window.submitExecutorBind = function`, "the picker has no save handler"},
+		{`id="executor-picker-overlay"`, "the picker modal is missing"},
+		{`id="epExecutor"`, "the picker has no executor <select>"},
+		{`'/api/projects/' + idx + '/executor'`, "saving the picker never calls the bind endpoint"},
+	}
+	for _, r := range required {
+		if !strings.Contains(dashboardHTML, r.needle) {
+			t.Errorf("%s (no %q in the dashboard)", r.why, r.needle)
+		}
+	}
+
+	// The card sits next to the provider card: both are stat cards on the
+	// Overview grid, and the executor one must come after it so "what model"
+	// and "where it runs" read as a pair.
+	provider := strings.Index(dashboardHTML, `id="providerCard"`)
+	exec := strings.Index(dashboardHTML, `id="executorCard"`)
+	if provider < 0 || exec < 0 || exec < provider {
+		t.Errorf("the executor card is not positioned next to the provider card "+
+			"(providerCard at %d, executorCard at %d)", provider, exec)
+	}
+
+	// The Overview card's data does not ride the state diff — bindings live in
+	// the control plane's database, not in project state — so the tab switch
+	// has to fetch it explicitly or the card renders an em dash forever.
+	if !strings.Contains(dashboardHTML, `if (name === 'overview') loadExecutors();`) {
+		t.Error("switchTab does not refresh the Overview executor card")
 	}
 }

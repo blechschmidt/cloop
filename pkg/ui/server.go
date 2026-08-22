@@ -33,6 +33,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/cost"
 	"github.com/blechschmidt/cloop/pkg/decompose"
 	"github.com/blechschmidt/cloop/pkg/epic"
+	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/globalbudget"
 	"github.com/blechschmidt/cloop/pkg/kb"
 	"github.com/blechschmidt/cloop/pkg/logger"
@@ -974,6 +975,22 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/projects/{idx}/run", s.handleProjectRun)
 	mux.HandleFunc("POST /api/projects/{idx}/stop", s.handleProjectStop)
 	mux.HandleFunc("DELETE /api/projects/{idx}", s.handleProjectDelete)
+	mux.HandleFunc("POST /api/projects/{idx}/executor", s.handleProjectExecutorBind)
+
+	// Executors (global): the fleet of execution backends and the
+	// host-execution policy that governs them (Task 20160).
+	// Registered without a method prefix so the handler's own method check is
+	// reachable: with `GET /api/executors`, any other verb falls through to
+	// the "/" dashboard route and answers a JSON client with a 404 HTML page.
+	mux.HandleFunc("/api/executors", s.handleExecutorsList)
+	mux.HandleFunc("POST /api/executors/enroll", s.handleExecutorEnroll)
+	mux.HandleFunc("DELETE /api/executors/{id}", s.handleExecutorDelete)
+	// Scheduling state (Task 20162): take a node out of rotation without
+	// destroying it. Separate from DELETE on purpose — revoking kills the work
+	// an executor is running, cordoning leaves it alone.
+	mux.HandleFunc("POST /api/executors/{id}/cordon", s.handleExecutorCordon)
+	mux.HandleFunc("POST /api/executors/{id}/uncordon", s.handleExecutorUncordon)
+	mux.HandleFunc("POST /api/executors/{id}/drain", s.handleExecutorDrain)
 }
 
 // Start begins listening on the configured port and broadcasting state
@@ -1061,6 +1078,10 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	// are not tracked by http.Server.Shutdown's wait, so without this step
 	// peers would see an abrupt TCP close once the process exits.
 	s.closeAllWebSocketsForShutdown(2 * time.Second)
+	// Stop probing before the process goes away, so a probe goroutine is not
+	// still writing health rows into a database handle that is about to be
+	// closed under it.
+	stopExecutorSupervisor()
 	return srv.Shutdown(ctx)
 }
 
@@ -2745,7 +2766,10 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 	// a remote edge agent when configured (Task 20156).
 	ex, handle, err := startWorkload(workDir, append([]string{exe}, args...), map[string]string{"handler": "run"})
 	if err != nil {
-		jsonErr(w, err.Error(), http.StatusInternalServerError)
+		// 409 when strict no-host-execution mode refused the dispatch, so
+		// the browser can show the remediation instead of a generic 500
+		// (Task 20160).
+		jsonWorkloadErr(w, err)
 		return
 	}
 
@@ -5484,7 +5508,7 @@ func (s *Server) handleProjectRun(w http.ResponseWriter, r *http.Request) {
 	ex, handle, err := startWorkload(entry.Path, append([]string{exe}, args...),
 		map[string]string{"handler": "project-run", "project_name": entry.Name})
 	if err != nil {
-		jsonErr(w, err.Error(), http.StatusInternalServerError)
+		jsonWorkloadErr(w, err)
 		return
 	}
 	// Echo the run's output into the server log, which is what
@@ -5619,6 +5643,10 @@ func (s *Server) handleProjectNew(w http.ResponseWriter, r *http.Request) {
 	defer cancelInit()
 	if out, initErr := runWorkload(initCtx, abs, append([]string{exe}, args...),
 		map[string]string{"handler": "project-new"}); initErr != nil {
+		if errors.Is(initErr, executor.ErrHostExecutionDenied) {
+			jsonWorkloadErr(w, initErr)
+			return
+		}
 		msg := strings.TrimSpace(string(out))
 		if msg == "" {
 			msg = initErr.Error()
@@ -7384,6 +7412,70 @@ const dashboardHTML = `<!DOCTYPE html>
   .option-badge.togglable:active { transform:translateY(0); }
   .options-empty { color:var(--muted); font-size:12px; font-style:italic; padding:8px 0; }
 
+  /* ── Executors panel (Task 20160) ── */
+  .exec-banner {
+    display:flex; align-items:flex-start; gap:10px; padding:10px 12px; margin-bottom:14px;
+    border-radius:var(--radius); font-size:12.5px; line-height:1.5; border:1px solid var(--border);
+  }
+  .exec-banner .exec-banner-icon { font-size:15px; line-height:1.3; flex-shrink:0; }
+  .exec-banner.ok   { border-color:var(--green); background:rgba(63,185,80,.10); color:var(--green); }
+  .exec-banner.warn { border-color:var(--yellow, #d29922); background:rgba(210,153,34,.12); color:var(--yellow, #d29922); }
+  .exec-banner.info { border-color:var(--border); background:var(--surface); color:var(--muted); }
+  .exec-warning {
+    font-size:12px; padding:8px 10px; margin-bottom:6px; border-radius:var(--radius);
+    border:1px solid var(--yellow, #d29922); background:rgba(210,153,34,.08); color:var(--yellow, #d29922);
+  }
+  .exec-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(320px, 1fr)); gap:12px; }
+  .exec-card {
+    border:1px solid var(--border); border-radius:var(--radius); background:var(--surface);
+    padding:14px; display:flex; flex-direction:column; gap:8px;
+  }
+  .exec-card.blocked { border-color:var(--red); }
+  .exec-card-head { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+  .exec-name { font-size:14px; font-weight:600; }
+  .exec-dot { width:9px; height:9px; border-radius:50%; flex-shrink:0; background:var(--muted); }
+  .exec-dot.online   { background:var(--green); box-shadow:0 0 0 3px rgba(63,185,80,.18); }
+  .exec-dot.offline  { background:var(--muted); }
+  .exec-dot.degraded { background:var(--yellow, #d29922); box-shadow:0 0 0 3px rgba(210,153,34,.18); }
+  .exec-dot.unknown  { background:var(--red); }
+  .exec-kind {
+    font-size:10px; text-transform:uppercase; letter-spacing:.5px; font-weight:600;
+    padding:2px 7px; border-radius:10px; border:1px solid var(--border); color:var(--muted);
+  }
+  .exec-kind.host      { border-color:var(--yellow, #d29922); color:var(--yellow, #d29922); }
+  .exec-kind.container { border-color:var(--cyan, #39c5cf); color:var(--cyan, #39c5cf); }
+  .exec-kind.remote    { border-color:var(--accent); color:var(--accent); }
+  /* Scheduling state (Task 20162). The dot above says whether the device is
+     connected; this badge says whether the scheduler will place work there,
+     which is a different question the moment an operator cordons a node that
+     is perfectly healthy. Colours follow "cloop executor ls": green fine,
+     yellow watching, red broken, cyan a deliberate human decision. */
+  .exec-state {
+    font-size:10px; text-transform:uppercase; letter-spacing:.5px; font-weight:600;
+    padding:2px 7px; border-radius:10px; border:1px solid var(--border); color:var(--muted);
+  }
+  .exec-state.ready       { border-color:var(--green); color:var(--green); }
+  .exec-state.degraded    { border-color:var(--yellow, #d29922); color:var(--yellow, #d29922); }
+  .exec-state.unreachable { border-color:var(--red); color:var(--red); }
+  .exec-state.cordoned    { border-color:var(--cyan, #39c5cf); color:var(--cyan, #39c5cf); }
+  .exec-state.draining    { border-color:var(--cyan, #39c5cf); color:var(--cyan, #39c5cf); }
+  .exec-sched-note { font-size:11.5px; color:var(--cyan, #39c5cf); line-height:1.45; }
+  .exec-id { font-family:monospace; font-size:11px; color:var(--muted); }
+  .exec-chips { display:flex; flex-wrap:wrap; gap:5px; }
+  .exec-chip {
+    font-size:10.5px; padding:2px 7px; border-radius:10px;
+    border:1px solid var(--border); color:var(--muted); background:var(--bg, transparent);
+  }
+  .exec-chip.pos { border-color:var(--green); color:var(--green); }
+  .exec-chip.neg { opacity:.6; }
+  .exec-meta { font-size:11.5px; color:var(--muted); display:flex; flex-direction:column; gap:2px; }
+  .exec-blocked-note { font-size:11.5px; color:var(--red); line-height:1.45; }
+  .exec-actions { display:flex; gap:6px; margin-top:2px; flex-wrap:wrap; }
+  .exec-token {
+    font-family:monospace; font-size:12px; word-break:break-all; user-select:all;
+    padding:10px; border-radius:var(--radius); border:1px solid var(--border); background:var(--bg, var(--surface));
+  }
+
   /* ── Controls ── */
   .controls { display:flex; gap:8px; flex-wrap:wrap; align-items:flex-start; }
   .btn {
@@ -8700,6 +8792,7 @@ const dashboardHTML = `<!DOCTYPE html>
       <span class="tab-section-label" title="These tabs apply across all projects (global configuration)">Global</span>
       <button class="tab-btn global-tab" onclick="switchTab('projects')"  id="tbtn-projects" title="All projects list (global)">Projects</button>
       <button class="tab-btn global-tab" onclick="switchTab('budget')"    id="tbtn-budget"   title="Budget &amp; rate limits (global, with per-project caps)">Budget</button>
+      <button class="tab-btn global-tab" onclick="switchTab('executors')" id="tbtn-executors" title="Execution backends: host, container sandbox, and enrolled remote devices (global)">Executors</button>
       <button class="tab-btn global-tab" onclick="switchTab('settings')"  id="tbtn-settings" title="Settings (global)">Settings</button>
     </div>
     <div class="spacer"></div>
@@ -8795,6 +8888,7 @@ const dashboardHTML = `<!DOCTYPE html>
       <div class="mobile-nav-section-label">Global</div>
       <button class="m-tab-btn" onclick="switchTab('projects')"  id="mtbtn-projects"><span class="m-tab-icon">&#127760;</span>Projects</button>
       <button class="m-tab-btn" onclick="switchTab('budget')"    id="mtbtn-budget"><span class="m-tab-icon">&#127760;</span>Budget</button>
+      <button class="m-tab-btn" onclick="switchTab('executors')" id="mtbtn-executors"><span class="m-tab-icon">&#127760;</span>Executors</button>
       <button class="m-tab-btn" onclick="switchTab('settings')"  id="mtbtn-settings"><span class="m-tab-icon">&#127760;</span>Settings</button>
     </nav>
   </div>
@@ -8903,6 +8997,11 @@ const dashboardHTML = `<!DOCTYPE html>
               <div class="stat-label">Provider <span style="font-size:10px;opacity:.6;margin-left:4px">✎</span></div>
               <div class="stat-value" id="statProvider" style="font-size:13px;margin-top:4px">—</div>
               <div class="stat-sub" id="statModel"></div>
+            </div>
+            <div class="stat-card stat-card-clickable" id="executorCard" onclick="openExecutorPickerModal()" title="Click to change where this project's harness runs" tabindex="0" role="button" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();openExecutorPickerModal();}">
+              <div class="stat-label">Executor <span style="font-size:10px;opacity:.6;margin-left:4px">✎</span></div>
+              <div class="stat-value" id="statExecutor" style="font-size:13px;margin-top:4px">—</div>
+              <div class="stat-sub" id="statExecutorSub"></div>
             </div>
             <div class="stat-card">
               <div class="stat-label">Mode</div>
@@ -9984,6 +10083,32 @@ const dashboardHTML = `<!DOCTYPE html>
 
     </div>
 
+    <!-- ════════════════════════════════════════════════════════ EXECUTORS -->
+    <div id="tab-executors" class="tab-panel">
+      <div class="section">
+        <div class="section-title" style="display:flex;align-items:center;gap:12px">
+          Executors
+          <span style="font-size:11px;font-weight:400;color:var(--muted)">global &mdash; shared by every project</span>
+          <button class="btn" style="padding:4px 10px;font-size:12px;margin-left:auto" onclick="loadExecutors()" title="Refresh executor list">&#8635; Refresh</button>
+          <button class="btn primary" style="padding:4px 10px;font-size:12px" onclick="openEnrollModal()" title="Mint an enrollment token for a remote device">+ Enroll device</button>
+        </div>
+        <p style="font-size:12px;color:var(--muted);margin-top:4px;margin-bottom:12px">
+          An executor is where a harness actually runs. <strong>Host</strong> forks a child process of this
+          server with its user, filesystem, and network &mdash; no isolation. <strong>Container</strong> runs
+          the workload in a Docker/Podman sandbox on this machine. <strong>Remote</strong> dispatches it to an
+          enrolled edge device that dialled out to this control plane. Bind a project to one from its Overview tab.
+        </p>
+
+        <div id="execPolicyBanner" class="exec-banner" style="display:none"></div>
+        <div id="execWarnings" style="display:none;margin-bottom:12px"></div>
+
+        <div id="execEmpty" style="display:none;font-size:13px;color:var(--muted);padding:16px 0;text-align:center">
+          No executors registered. That should not happen &mdash; the host driver is built in.
+        </div>
+        <div id="execList" class="exec-grid"></div>
+      </div>
+    </div>
+
   </main>
 
   <!-- ── FAB: quick task add (mobile only) ── -->
@@ -10041,6 +10166,74 @@ const dashboardHTML = `<!DOCTYPE html>
     <div class="modal-footer">
       <button class="btn" onclick="closeNewProjectModal()">Cancel</button>
       <button class="btn primary" onclick="submitNewProject()">Create Project</button>
+    </div>
+  </div>
+</div>
+
+<!-- Executor enrollment modal (global; token shown once) -->
+<div id="enroll-overlay" onclick="if(event.target===this)closeEnrollModal()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
+  <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;width:640px;max-width:95vw;max-height:90vh;overflow:auto">
+    <h2 style="font-size:15px;font-weight:600;margin-bottom:6px">Enroll a remote executor</h2>
+    <p style="font-size:12px;color:var(--muted);margin-bottom:16px;line-height:1.5">
+      The device dials <em>out</em> to this control plane, so it works behind NAT with no inbound firewall rule.
+      This mints a single-use token and prints the command to run there &mdash; nothing is contacted from here.
+    </p>
+    <div id="enrollForm">
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Device name</label>
+          <input class="form-input" id="enrollName" placeholder="e.g. edge-1">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Token lifetime (minutes)</label>
+          <input class="form-input" id="enrollTTL" type="number" min="1" max="1440" placeholder="15">
+        </div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Workspace root on the device (optional)</label>
+        <input class="form-input" id="enrollRoot" placeholder="/var/lib/cloop/workspaces">
+      </div>
+      <div id="enrollError" style="font-size:12px;color:var(--red);margin-bottom:8px;display:none"></div>
+      <div class="modal-footer">
+        <button class="btn" onclick="closeEnrollModal()">Cancel</button>
+        <button class="btn primary" id="enrollSubmitBtn" onclick="submitEnroll()">Mint token</button>
+      </div>
+    </div>
+    <div id="enrollResult" style="display:none">
+      <div class="exec-banner warn" style="margin-bottom:12px">
+        <span class="exec-banner-icon">&#9888;</span>
+        <span id="enrollNotice"></span>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Run this on the device</label>
+        <div class="exec-token" id="enrollCommand"></div>
+      </div>
+      <div style="font-size:11.5px;color:var(--muted);margin-bottom:12px" id="enrollExpiry"></div>
+      <div class="modal-footer">
+        <button class="btn" onclick="copyEnrollCommand()">Copy command</button>
+        <button class="btn primary" onclick="closeEnrollModal()">Done</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Executor picker modal (per-project: where this project's harness runs) -->
+<div id="executor-picker-overlay" onclick="if(event.target===this)closeExecutorPickerModal()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
+  <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;width:560px;max-width:95vw;max-height:90vh;overflow:auto">
+    <h2 style="font-size:15px;font-weight:600;margin-bottom:6px">Execution target</h2>
+    <p style="font-size:12px;color:var(--muted);margin-bottom:16px;line-height:1.5">
+      Where this project's harness runs. Changing it takes effect on the next run; work already in flight
+      stays on the executor that started it.
+    </p>
+    <div class="form-group">
+      <label class="form-label">Executor</label>
+      <select class="form-select" id="epExecutor"></select>
+    </div>
+    <div id="epHint" style="font-size:11.5px;color:var(--muted);margin-bottom:12px;line-height:1.5"></div>
+    <div id="epError" style="font-size:12px;color:var(--red);margin-bottom:8px;display:none"></div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeExecutorPickerModal()">Cancel</button>
+      <button class="btn primary" id="epSaveBtn" onclick="submitExecutorBind()">Save</button>
     </div>
   </div>
 </div>
@@ -10553,12 +10746,19 @@ window.switchTab = function(name) {
     if (name === 'analytics') loadAnalytics();
     if (name === 'queue') loadQueue();
     if (name === 'budget') { loadBudget(); loadClaudeUsage(); loadRateLimits(); loadClaudeAuthStatus(); }
+    if (name === 'executors') loadExecutors();
+    // The Overview's Executor card needs the same payload; it is the only
+    // per-project field on that page the state diff does not carry, because
+    // bindings live in the control plane's database rather than in project
+    // state.
+    if (name === 'overview') loadExecutors();
     if (name === 'chat') loadChatHistory();
     if (name === 'assistant') loadAssistantHistory();
     if (name === 'replay') { loadReplayRuns(); try { window._populateReplayTaskSelector && window._populateReplayTaskSelector(); } catch(_) {} }
     if (name === 'provider-calls') loadProviderCalls();
   } else {
     if (name === 'settings') loadConfig();
+    if (name === 'overview') loadExecutors();
     if (name === 'tasks'  && appState) renderTasks(appState);
     if (name === 'kanban' && appState) renderKanban(appState);
     if (name === 'projects') loadProjects();
@@ -10571,6 +10771,7 @@ window.switchTab = function(name) {
     if (name === 'analytics') loadAnalytics();
     if (name === 'queue') loadQueue();
     if (name === 'budget') { loadBudget(); loadClaudeUsage(); loadRateLimits(); loadClaudeAuthStatus(); }
+    if (name === 'executors') loadExecutors();
     if (name === 'replay') { loadReplayRuns(); try { window._populateReplayTaskSelector && window._populateReplayTaskSelector(); } catch(_) {} }
     if (name === 'provider-calls') loadProviderCalls();
   }
@@ -10579,7 +10780,7 @@ window.switchTab = function(name) {
   if (isMultiProject) {
     const bc = document.getElementById('projectBreadcrumb');
     updateProjectSelector();
-    if (name === 'projects' || name === 'settings' || name === 'budget') {
+    if (name === 'projects' || name === 'settings' || name === 'budget' || name === 'executors') {
       // Global tabs: hide breadcrumb
       if (bc) bc.style.display = 'none';
     } else {
@@ -10595,7 +10796,7 @@ window.switchTab = function(name) {
 // updateScopeHint reflects whether the active tab is per-project or global.
 // In single-project mode the hint still appears so the distinction is clear.
 function updateScopeHint(name) {
-  const globalTabs = ['projects','budget','settings'];
+  const globalTabs = ['projects','budget','settings','executors'];
   const hint = document.getElementById('scopeHint');
   if (!hint) return;
   hint.classList.remove('visible','project','global');
@@ -12334,6 +12535,17 @@ function handleRealtimeMsg(type, data) {
       // summary fields (no prompt/response — those come from the detail
       // endpoint when the user opens the modal). Append to the live list.
       try { _pcAppendLive(data); } catch(_) {}
+      break;
+    case 'executor_update':
+      // A device enrolled, went online/offline, was revoked, or a project
+      // was re-pointed (Task 20160). The envelope carries only the event
+      // name and executor ID; the join of registry + storage + bindings
+      // lives in one place, so we re-read it rather than patching a local
+      // mirror that would drift from it. Cheap: this fires on fleet
+      // transitions, not on a timer.
+      try {
+        if (activeTab === 'executors' || activeTab === 'overview') { loadExecutors(); }
+      } catch(_) {}
       break;
     case 'resync':
       // Server signalled that this client fell behind and dropped events.
@@ -15645,6 +15857,7 @@ const CMD_REGISTRY = [
   { label:'Chat',            icon:'💬', shortcut:'9', action:()=>switchTab('chat') },
   { label:'Assistant',       icon:'🤖', shortcut:'',  action:()=>switchTab('assistant') },
   { label:'Projects',        icon:'📁', shortcut:'',  action:()=>switchTab('projects') },
+  { label:'Executors',       icon:'🖥', shortcut:'',  action:()=>switchTab('executors') },
   { label:'Settings',        icon:'⚙️', shortcut:'',  action:()=>switchTab('settings') },
   { label:'Show keyboard shortcuts', icon:'⌨️', shortcut:'?',  action:()=>openHelpModal() },
   { label:'Toggle dark/light theme', icon:'🌓', shortcut:'t',  action:()=>toggleTheme() },
@@ -16033,6 +16246,9 @@ function checkAuthAndInit() {
         r.json().then(s => render(s)).catch(() => {});
         // Single-project mode: still show the "Project" scope hint for the default Overview tab.
         updateScopeHint(activeTab || 'overview');
+        // Overview is the landing tab here, so its Executor card needs its
+        // one non-state-diff field (Task 20160).
+        loadExecutors();
       }
     }).catch(() => {
       connectWS();
@@ -16586,6 +16802,476 @@ window.loadRateLimits = function() {
     _renderRateLimits(d);
   }).catch(err => {
     console.warn('ratelimits load error', err);
+  });
+};
+
+// ── Executors panel (Task 20160) ────────────────────────────────────────────
+//
+// The panel is global: executors are shared infrastructure, not project state.
+// It still calls pUrl() because the backend enriches the response with the
+// *selected* project's binding, which is what powers the Overview card and
+// the picker's "currently bound" preselection.
+let execData = null;
+
+window.loadExecutors = function() {
+  return api(pUrl('/api/executors')).then(d => {
+    execData = d || {};
+    _renderExecutors(execData);
+    _renderExecutorCard(execData);
+    return execData;
+  }).catch(err => {
+    console.warn('executors load error', err);
+    const list = document.getElementById('execList');
+    if (list) {
+      list.innerHTML = '<div style="font-size:13px;color:var(--red)">Failed to load executors: '
+        + esc(err && err.message || String(err)) + '</div>';
+    }
+  });
+};
+
+function _execDotClass(status) {
+  if (status === 'online' || status === 'offline' || status === 'degraded') return status;
+  return 'unknown';
+}
+
+function _execKindLabel(kind) {
+  if (kind === 'localprocess') return 'host';
+  if (kind === 'container') return 'container';
+  if (kind === 'remote') return 'remote';
+  return kind || 'unknown';
+}
+
+// _execStateClass maps a scheduling state onto its badge class. An unknown
+// value yields '' and the badge is skipped rather than defaulting to 'ready':
+// painting an unrecognised state green would be an outright lie about whether
+// the node takes work.
+function _execStateClass(state) {
+  const known = ['ready','degraded','unreachable','cordoned','draining'];
+  return known.indexOf(state) >= 0 ? state : '';
+}
+
+// _execStateTitle explains the badge on hover, in terms of the only thing the
+// state is for: whether new work lands here.
+function _execStateTitle(ex) {
+  if (ex.admin_held) {
+    return 'Held by an operator. No probe result will lift it; in-flight work continues.';
+  }
+  return ex.schedulable
+    ? 'The scheduler will place new work here.'
+    : 'The scheduler will not place new work here.';
+}
+
+// _execCapChips renders the capability flags as chips. A capability the
+// executor lacks is shown greyed rather than hidden: "this backend cannot
+// stream output" is information an operator needs before binding to it, and
+// an absent chip reads as an oversight rather than as a "no".
+function _execCapChips(ex) {
+  const caps = ex.capabilities || {};
+  const chips = [];
+  if (ex.isolation) {
+    const isolated = ex.isolation !== 'none';
+    chips.push('<span class="exec-chip ' + (isolated ? 'pos' : 'neg') + '">isolation: '
+      + esc(ex.isolation) + '</span>');
+  }
+  const flags = [
+    ['stream',   caps.supports_stream],
+    ['signal',   caps.supports_signal],
+    ['limits',   caps.supports_resource_limits],
+    ['egress',   caps.network_egress],
+  ];
+  flags.forEach(f => {
+    chips.push('<span class="exec-chip ' + (f[1] ? 'pos' : 'neg') + '">'
+      + (f[1] ? '' : 'no ') + esc(f[0]) + '</span>');
+  });
+  if (caps.shares_host_filesystem) {
+    chips.push('<span class="exec-chip neg">host fs</span>');
+  }
+  if (caps.platform) {
+    chips.push('<span class="exec-chip">' + esc(caps.platform)
+      + (caps.arch ? '/' + esc(caps.arch) : '') + '</span>');
+  }
+  if (caps.max_concurrent) {
+    chips.push('<span class="exec-chip">max ' + esc(caps.max_concurrent) + '</span>');
+  }
+  return chips.join('');
+}
+
+function _renderExecutors(d) {
+  const banner = document.getElementById('execPolicyBanner');
+  const warnBox = document.getElementById('execWarnings');
+  const list = document.getElementById('execList');
+  const empty = document.getElementById('execEmpty');
+  if (!list) return;
+
+  const policy = (d && d.policy) || {};
+  if (banner) {
+    if (policy.banner) {
+      const icon = policy.severity === 'ok' ? '&#128274;'
+                 : policy.severity === 'warn' ? '&#9888;' : '&#8505;';
+      banner.className = 'exec-banner ' + (policy.severity || 'info');
+      banner.innerHTML = '<span class="exec-banner-icon">' + icon + '</span><span>'
+        + esc(policy.banner) + '</span>';
+      banner.style.display = 'flex';
+    } else {
+      banner.style.display = 'none';
+    }
+  }
+  if (warnBox) {
+    const warnings = policy.warnings || [];
+    if (warnings.length) {
+      warnBox.innerHTML = warnings.map(wtext =>
+        '<div class="exec-warning">' + esc(wtext) + '</div>').join('');
+      warnBox.style.display = 'block';
+    } else {
+      warnBox.style.display = 'none';
+    }
+  }
+
+  const execs = (d && d.executors) || [];
+  if (empty) empty.style.display = execs.length ? 'none' : 'block';
+
+  list.innerHTML = execs.map((ex, i) => {
+    const kind = _execKindLabel(ex.kind);
+    let h = '<div class="exec-card' + (ex.blocked ? ' blocked' : '') + '">';
+    h += '<div class="exec-card-head">';
+    h += '<span class="exec-dot ' + _execDotClass(ex.status) + '" title="' + esc(ex.status || 'unknown') + '"></span>';
+    h += '<span class="exec-name">' + esc(ex.name || ex.id) + '</span>';
+    h += '<span class="exec-kind ' + esc(kind) + '">' + esc(kind) + '</span>';
+    const sched = _execStateClass(ex.sched_state);
+    if (sched) {
+      h += '<span class="exec-state ' + sched + '" title="' + esc(_execStateTitle(ex)) + '">'
+        + esc(ex.sched_state) + '</span>';
+    }
+    if (ex.default) h += '<span class="exec-chip">default</span>';
+    h += '</div>';
+    h += '<div class="exec-id">' + esc(ex.id) + '</div>';
+    h += '<div class="exec-chips">' + _execCapChips(ex) + '</div>';
+
+    h += '<div class="exec-meta">';
+    h += '<span>Load: ' + (ex.running_known ? esc(ex.running) + ' running' : 'unknown') + '</span>';
+    // The scheduler's own count, which is not the driver's handle count above:
+    // an unreadable one renders as an em dash, because claiming a node is idle
+    // when it may be saturated is the worse of the two wrong answers.
+    h += '<span>In flight: '
+      + (ex.in_flight_known ? esc(ex.in_flight) + ' running' : '&mdash;') + '</span>';
+    if (ex.last_seen) {
+      h += '<span>Last seen: ' + esc(relTime(new Date(ex.last_seen))) + '</span>';
+    }
+    if (ex.last_heartbeat) {
+      h += '<span>Last heartbeat: ' + esc(relTime(new Date(ex.last_heartbeat))) + '</span>';
+    }
+    if (ex.projects && ex.projects.length) {
+      h += '<span>Projects: ' + esc(ex.projects.length) + ' bound</span>';
+    }
+    if (ex.health) {
+      h += '<span style="color:var(--yellow,#d29922)">' + esc(ex.health) + '</span>';
+    }
+    h += '</div>';
+
+    if (ex.sched_reason) {
+      h += '<div class="exec-sched-note">' + esc(ex.sched_reason) + '</div>';
+    }
+    if (ex.blocked && ex.blocked_reason) {
+      h += '<div class="exec-blocked-note">&#9888; Blocked by policy. ' + esc(ex.blocked_reason) + '</div>';
+    }
+
+    h += '<div class="exec-actions">';
+    // Index-based dispatch, never an interpolated string: an executor name
+    // with a quote in it is exactly how Tasks 163/20033 broke.
+    if (ex.admin_held) {
+      h += '<button class="btn" style="padding:3px 9px;font-size:11.5px" onclick="uncordonExecutor(' + i + ')">Uncordon</button>';
+    } else {
+      h += '<button class="btn" style="padding:3px 9px;font-size:11.5px" onclick="cordonExecutor(' + i + ')">Cordon</button>';
+      h += '<button class="btn" style="padding:3px 9px;font-size:11.5px" onclick="drainExecutor(' + i + ')">Drain</button>';
+    }
+    if (ex.enrolled && ex.kind === 'remote') {
+      h += '<button class="btn danger" style="padding:3px 9px;font-size:11.5px" onclick="revokeExecutor(' + i + ')">Revoke</button>';
+    } else {
+      h += '<span style="font-size:11px;color:var(--muted)">Configured in .cloop/config.yaml</span>';
+    }
+    h += '</div>';
+    h += '</div>';
+    return h;
+  }).join('');
+}
+
+window.revokeExecutor = function(idx) {
+  const ex = execData && execData.executors && execData.executors[idx];
+  if (!ex) return;
+  if (!confirm('Revoke ' + ex.name + '?\n\nIts credential stops working immediately, its session is '
+      + 'closed, and every project bound to it is unbound. The device must be re-enrolled to come back.')) {
+    return;
+  }
+  apiMethod('DELETE', '/api/executors/' + encodeURIComponent(ex.id))
+    .then(d => {
+      if (d && d.error) { toast(d.error, 'err'); return; }
+      toast('Executor revoked', 'ok');
+      loadExecutors();
+    })
+    .catch(() => toast('Failed to revoke executor', 'err'));
+};
+
+// ── Scheduling actions (Task 20162) ─────────────────────────────────────────
+//
+// Cordon/drain/uncordon are the non-destructive half of executor management:
+// they change where the scheduler places work without touching what is already
+// running there, which is what revoking cannot do.
+//
+// All three take an *index* and look the executor up in execData for the same
+// reason revokeExecutor does — an executor name, or an operator-typed reason,
+// interpolated into an onclick attribute is the bug class of Tasks 163/20033.
+
+// _execAt resolves a card index to its executor, or null.
+function _execAt(idx) {
+  return (execData && execData.executors && execData.executors[idx]) || null;
+}
+
+window.cordonExecutor = function(idx) {
+  const ex = _execAt(idx);
+  if (!ex) return;
+  const reason = prompt('Cordon ' + ex.name + '?\n\nNew work goes elsewhere; whatever it is '
+    + 'running now continues untouched. Optional reason:', '');
+  if (reason === null) return;
+  apiMethod('POST', '/api/executors/' + encodeURIComponent(ex.id) + '/cordon', {reason: reason})
+    .then(d => {
+      if (!d || d.error) { toast((d && d.error) || 'Failed to cordon', 'err'); return; }
+      toast(ex.name + ' is ' + (d.state || 'cordoned'), 'ok');
+      loadExecutors();
+    })
+    .catch(() => toast('Failed to cordon executor', 'err'));
+};
+
+window.uncordonExecutor = function(idx) {
+  const ex = _execAt(idx);
+  if (!ex) return;
+  apiMethod('POST', '/api/executors/' + encodeURIComponent(ex.id) + '/uncordon')
+    .then(d => {
+      if (!d || d.error) { toast((d && d.error) || 'Failed to uncordon', 'err'); return; }
+      // Uncordon returns a node to the state its probes justify, not
+      // unconditionally to ready. Reporting the state it actually came back in
+      // is the difference between "uncordon is broken" and "it is still sick".
+      const state = d.state || 'ready';
+      let msg = ex.name + ' is ' + state;
+      if (state !== 'ready' && d.reason) msg += ' — ' + d.reason;
+      toast(msg, d.schedulable ? 'ok' : 'err');
+      loadExecutors();
+    })
+    .catch(() => toast('Failed to uncordon executor', 'err'));
+};
+
+window.drainExecutor = function(idx) {
+  const ex = _execAt(idx);
+  if (!ex) return;
+  const reason = prompt('Drain ' + ex.name + '?\n\nIt stops taking new work immediately; work '
+    + 'already running finishes. Put it back with Uncordon. Optional reason:', '');
+  if (reason === null) return;
+  // No timeout_seconds: the drain takes effect at once and the request must not
+  // hang the dashboard waiting on a task that may run for an hour.
+  apiMethod('POST', '/api/executors/' + encodeURIComponent(ex.id) + '/drain', {reason: reason})
+    .then(d => {
+      if (!d || d.error) { toast((d && d.error) || 'Failed to drain', 'err'); return; }
+      if (d.drained) {
+        toast(ex.name + ' is drained — nothing in flight', 'ok');
+      } else if (d.in_flight_known) {
+        toast(ex.name + ' is draining — ' + d.in_flight + ' session(s) still running', 'ok');
+      } else {
+        toast(ex.name + ' is draining', 'ok');
+      }
+      loadExecutors();
+    })
+    .catch(() => toast('Failed to drain executor', 'err'));
+};
+
+// ── Enrollment ──────────────────────────────────────────────────────────────
+window.openEnrollModal = function() {
+  const form = document.getElementById('enrollForm');
+  const result = document.getElementById('enrollResult');
+  const err = document.getElementById('enrollError');
+  if (form) form.style.display = 'block';
+  if (result) result.style.display = 'none';
+  if (err) err.style.display = 'none';
+  const name = document.getElementById('enrollName');
+  if (name) name.value = '';
+  const ttl = document.getElementById('enrollTTL');
+  if (ttl) ttl.value = '';
+  const root = document.getElementById('enrollRoot');
+  if (root) root.value = '';
+  const ov = document.getElementById('enroll-overlay');
+  if (ov) ov.style.display = 'flex';
+  setTimeout(() => { if (name) name.focus(); }, 50);
+};
+
+window.closeEnrollModal = function() {
+  const ov = document.getElementById('enroll-overlay');
+  if (ov) ov.style.display = 'none';
+  // Refresh on close so a token minted moments ago is reflected even before
+  // the device redeems it.
+  loadExecutors();
+};
+
+window.submitEnroll = function() {
+  const errEl = document.getElementById('enrollError');
+  const btn = document.getElementById('enrollSubmitBtn');
+  const body = {
+    name: (document.getElementById('enrollName') || {}).value || '',
+    workdir_root: (document.getElementById('enrollRoot') || {}).value || ''
+  };
+  const ttlRaw = (document.getElementById('enrollTTL') || {}).value;
+  if (ttlRaw) body.ttl_minutes = parseInt(ttlRaw, 10);
+  if (errEl) errEl.style.display = 'none';
+  if (btn) btn.disabled = true;
+
+  api('/api/executors/enroll', body).then(d => {
+    if (btn) btn.disabled = false;
+    if (!d || d.error) {
+      if (errEl) { errEl.textContent = (d && d.error) || 'Enrollment failed'; errEl.style.display = 'block'; }
+      return;
+    }
+    const form = document.getElementById('enrollForm');
+    const result = document.getElementById('enrollResult');
+    if (form) form.style.display = 'none';
+    if (result) result.style.display = 'block';
+    const cmd = document.getElementById('enrollCommand');
+    if (cmd) cmd.textContent = d.command || '';
+    const notice = document.getElementById('enrollNotice');
+    if (notice) notice.textContent = d.notice || '';
+    const exp = document.getElementById('enrollExpiry');
+    if (exp) {
+      exp.textContent = 'Token ' + (d.id || '') + ' expires '
+        + (d.expires_at ? new Date(d.expires_at).toLocaleString() : 'soon') + '.';
+    }
+  }).catch(err => {
+    if (btn) btn.disabled = false;
+    if (errEl) {
+      errEl.textContent = 'Enrollment failed: ' + (err && err.message || String(err));
+      errEl.style.display = 'block';
+    }
+  });
+};
+
+window.copyEnrollCommand = function() {
+  const cmd = document.getElementById('enrollCommand');
+  if (!cmd) return;
+  const text = cmd.textContent || '';
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text)
+      .then(() => toast('Command copied', 'ok'))
+      .catch(() => toast('Copy failed — select the text manually', 'err'));
+  } else {
+    toast('Clipboard unavailable — select the text manually', 'err');
+  }
+};
+
+// ── Per-project executor selection ──────────────────────────────────────────
+function _renderExecutorCard(d) {
+  const valueEl = document.getElementById('statExecutor');
+  const subEl = document.getElementById('statExecutorSub');
+  const card = document.getElementById('executorCard');
+  if (!valueEl || !subEl) return;
+
+  const proj = (d && d.project) || null;
+  if (!proj) {
+    valueEl.textContent = '—';
+    subEl.textContent = '';
+    return;
+  }
+  const id = proj.effective_id || proj.executor_id || '';
+  const byId = {};
+  ((d && d.executors) || []).forEach(ex => { byId[ex.id] = ex; });
+  const ex = byId[id];
+
+  valueEl.textContent = ex ? (ex.name || id) : (id || 'none');
+  if (proj.blocked) {
+    valueEl.style.color = 'var(--red)';
+    subEl.textContent = 'blocked by policy';
+  } else {
+    valueEl.style.color = '';
+    const kind = ex ? _execKindLabel(ex.kind) : '';
+    subEl.textContent = (proj.bound ? 'pinned' : 'default') + (kind ? ' · ' + kind : '');
+  }
+  if (card) {
+    card.title = proj.blocked
+      ? (proj.blocked_reason || 'This project cannot run: its executor is blocked by policy.')
+      : 'Click to change where this project’s harness runs';
+  }
+}
+
+window.openExecutorPickerModal = function() {
+  const sel = document.getElementById('epExecutor');
+  const err = document.getElementById('epError');
+  if (err) err.style.display = 'none';
+  const ov = document.getElementById('executor-picker-overlay');
+  if (ov) ov.style.display = 'flex';
+  if (sel) sel.innerHTML = '<option value="">Loading…</option>';
+  // Always refetch: an executor may have gone offline, or the policy may
+  // have changed, since the tab was last painted.
+  loadExecutors().then(d => _populateExecutorPicker(d));
+};
+
+function _populateExecutorPicker(d) {
+  const sel = document.getElementById('epExecutor');
+  if (!sel) return;
+  d = d || {};
+  const proj = d.project || {};
+  const execs = d.executors || [];
+  let h = '<option value="">Registry default'
+    + (d.default_id ? ' (' + esc(d.default_id) + ')' : '') + '</option>';
+  execs.forEach(ex => {
+    const label = (ex.name || ex.id) + ' · ' + _execKindLabel(ex.kind)
+      + (ex.status ? ' · ' + ex.status : '')
+      + (ex.blocked ? ' · blocked by policy' : '');
+    h += '<option value="' + esc(ex.id) + '"' + (ex.blocked ? ' disabled' : '')
+      + (proj.executor_id === ex.id ? ' selected' : '') + '>' + esc(label) + '</option>';
+  });
+  sel.innerHTML = h;
+  const hint = document.getElementById('epHint');
+  if (hint) {
+    hint.textContent = proj.bound
+      ? 'Currently pinned to ' + proj.executor_id + '.'
+      : 'Currently inheriting the registry default'
+        + (proj.effective_id ? ' (' + proj.effective_id + ')' : '') + '.';
+  }
+}
+
+window.closeExecutorPickerModal = function() {
+  const ov = document.getElementById('executor-picker-overlay');
+  if (ov) ov.style.display = 'none';
+};
+
+window.submitExecutorBind = function() {
+  const sel = document.getElementById('epExecutor');
+  const errEl = document.getElementById('epError');
+  const btn = document.getElementById('epSaveBtn');
+  if (!sel) return;
+  if (selectedProjectIdx === null && isMultiProject) {
+    if (errEl) { errEl.textContent = 'Select a project first.'; errEl.style.display = 'block'; }
+    return;
+  }
+  const idx = selectedProjectIdx === null ? 0 : selectedProjectIdx;
+  if (errEl) errEl.style.display = 'none';
+  if (btn) btn.disabled = true;
+
+  api('/api/projects/' + idx + '/executor', {executor_id: sel.value}).then(d => {
+    if (btn) btn.disabled = false;
+    if (!d || d.error) {
+      if (errEl) {
+        // A 409 body carries a remediation sentence naming the alternatives;
+        // showing it verbatim is the whole point of returning it.
+        errEl.textContent = ((d && d.error) || 'Failed to set executor')
+          + (d && d.remediation ? ' — ' + d.remediation : '');
+        errEl.style.display = 'block';
+      }
+      return;
+    }
+    toast('Execution target updated', 'ok');
+    closeExecutorPickerModal();
+    loadExecutors();
+  }).catch(err => {
+    if (btn) btn.disabled = false;
+    if (errEl) {
+      errEl.textContent = 'Failed to set executor: ' + (err && err.message || String(err));
+      errEl.style.display = 'block';
+    }
   });
 };
 

@@ -144,6 +144,21 @@ func applyConfigKey(cfg *config.Config, key, value string) error {
 		}
 		cfg.ClaudeCode.Effort = value
 
+	case "executors.allow_host_process":
+		// Strict no-host-execution mode (Task 20160). Parsed strictly rather
+		// than "anything that isn't true means false": a typo in a security
+		// control must not silently pick the permissive side, and it must not
+		// silently pick the restrictive side either — both are surprises an
+		// operator should be told about at the point they typed it.
+		switch strings.ToLower(strings.TrimSpace(value)) {
+		case "true", "1", "yes", "on":
+			cfg.Executors.SetHostProcessAllowed(true)
+		case "false", "0", "no", "off":
+			cfg.Executors.SetHostProcessAllowed(false)
+		default:
+			return fmt.Errorf("executors.allow_host_process must be true or false (got %q)", value)
+		}
+
 	case "notify.slack_webhook":
 		cfg.Notify.SlackWebhook = value
 	case "notify.discord_webhook":
@@ -389,7 +404,7 @@ func applyConfigKey(cfg *config.Config, key, value string) error {
 		cfg.Executors.Container = next
 
 	default:
-		return fmt.Errorf("unknown config key %q\n\nValid keys:\n  provider\n  anthropic.api_key, anthropic.model, anthropic.base_url\n  openai.api_key, openai.model, openai.base_url\n  ollama.base_url, ollama.model\n  claudecode.model, claudecode.effort\n  mock.responses_file, mock.default\n  webhook.url, webhook.events\n  notify.slack_webhook, notify.discord_webhook\n  github.token, github.repo, github.labels\n  sync.remote, sync.branch\n  tracing.enabled, tracing.endpoint, tracing.service_name\n  max_parallel\n  rate_limit.requests_per_second, rate_limit.burst\n  budget.monthly_usd, budget.daily_usd_limit, budget.daily_token_limit\n  budget.alert_threshold_pct, budget.global_usd_pct, budget.global_token_pct\n  ui.max_websocket_conns, ui.max_websocket_conns_per_ip\n  ui.oidc.enabled, ui.oidc.issuer, ui.oidc.client_id, ui.oidc.client_secret\n  ui.oidc.redirect_url, ui.oidc.admin_emails, ui.oidc.session_ttl_hours, ui.oidc.cookie_secure\n  executors.container.enabled, executors.container.id, executors.container.runtime\n  executors.container.image, executors.container.cpus, executors.container.memory\n  executors.container.pids_limit, executors.container.network, executors.container.allow_hosts\n  executors.container.extra_args, executors.container.selinux_label", key)
+		return fmt.Errorf("unknown config key %q\n\nValid keys:\n  provider\n  anthropic.api_key, anthropic.model, anthropic.base_url\n  openai.api_key, openai.model, openai.base_url\n  ollama.base_url, ollama.model\n  claudecode.model, claudecode.effort\n  mock.responses_file, mock.default\n  webhook.url, webhook.events\n  notify.slack_webhook, notify.discord_webhook\n  github.token, github.repo, github.labels\n  sync.remote, sync.branch\n  tracing.enabled, tracing.endpoint, tracing.service_name\n  max_parallel\n  rate_limit.requests_per_second, rate_limit.burst\n  budget.monthly_usd, budget.daily_usd_limit, budget.daily_token_limit\n  budget.alert_threshold_pct, budget.global_usd_pct, budget.global_token_pct\n  ui.max_websocket_conns, ui.max_websocket_conns_per_ip\n  ui.oidc.enabled, ui.oidc.issuer, ui.oidc.client_id, ui.oidc.client_secret\n  ui.oidc.redirect_url, ui.oidc.admin_emails, ui.oidc.session_ttl_hours, ui.oidc.cookie_secure\n  executors.allow_host_process\n  executors.container.enabled, executors.container.id, executors.container.runtime\n  executors.container.image, executors.container.cpus, executors.container.memory\n  executors.container.pids_limit, executors.container.network, executors.container.allow_hosts\n  executors.container.extra_args, executors.container.selinux_label", key)
 	}
 	return nil
 }

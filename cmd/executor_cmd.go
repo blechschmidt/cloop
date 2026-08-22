@@ -25,6 +25,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/container"
+	"github.com/blechschmidt/cloop/pkg/executor/kubernetes"
 )
 
 var executorCmd = &cobra.Command{
@@ -129,31 +130,34 @@ Exit codes:
 
 		// --- phase 1: preflight ---------------------------------------
 		cex, isContainer := ex.(*container.Executor)
-		if isContainer && !skipPreflight {
+		kex, isKubernetes := ex.(*kubernetes.Executor)
+		switch {
+		case skipPreflight:
+			dim.Printf("Skipping preflight.\n\n")
+
+		case isContainer:
 			report := cex.Preflight(ctx, workdir)
-			header.Println("Preflight")
-			for _, f := range report.Findings {
-				switch f.Level {
-				case container.LevelOK:
-					pass.Printf("  ok   ")
-				case container.LevelWarn:
-					warn.Printf("  warn ")
-				default:
-					fail.Printf("  FAIL ")
-				}
-				fmt.Printf("%-12s %s\n", f.Name, f.Message)
-				if f.Fix != "" {
-					dim.Printf("       %-12s fix: %s\n", "", f.Fix)
-				}
-			}
-			fmt.Println()
+			printPreflight(header, pass, warn, fail, dim, toFindings(report.Findings))
 			if !report.OK() {
 				fail.Println("Preflight failed; not attempting to run a workload.")
 				dim.Println("Re-run with --skip-preflight to try anyway.")
 				return errExit{code: 2, err: report.Err()}
 			}
-		} else if !isContainer {
-			dim.Printf("Preflight is container-specific; running the smoke test directly.\n\n")
+
+		case isKubernetes:
+			report := kex.Preflight(ctx)
+			printPreflight(header, pass, warn, fail, dim, toKubeFindings(report.Findings))
+			if !report.OK() {
+				fail.Println("Preflight failed; not attempting to run a workload.")
+				dim.Println("Re-run with --skip-preflight to try anyway.")
+				return errExit{code: 2, err: report.Err()}
+			}
+			dim.Printf("  server:    %s\n", report.Server)
+			dim.Printf("  namespace: %s\n", report.Namespace)
+			dim.Printf("  image:     %s\n\n", report.Image)
+
+		default:
+			dim.Printf("This executor has no preflight; running the smoke test directly.\n\n")
 		}
 
 		// --- phase 2: smoke test --------------------------------------
@@ -187,10 +191,19 @@ Exit codes:
 		if workdir == "" {
 			workdir, _ = os.Getwd()
 		}
+		if isKubernetes {
+			// A Pod has no host filesystem and no bind-mounted binary, so
+			// the harness image is what supplies cloop. Naming the absolute
+			// path of *this* binary would resolve inside the container to
+			// something that almost certainly is not there.
+			self = "cloop"
+			dim.Printf("Running `cloop version` inside a Pod. The harness image must contain the\n")
+			dim.Printf("cloop binary on PATH; there is no host binary to bind-mount.\n\n")
+		}
 		res, runErr := executor.Run(ctx, ex, executor.Spec{
 			WorkDir: workdir,
 			Argv:    []string{self, "version"},
-			Labels:  map[string]string{"component": "smoke-test"},
+			Labels:  map[string]string{"component": "smoke-test", "task_id": "smoke"},
 		})
 		printSmokeOutput(strings.TrimSpace(string(res.Output)))
 		if runErr != nil {
@@ -204,40 +217,104 @@ Exit codes:
 
 var executorReapCmd = &cobra.Command{
 	Use:   "reap <executor-id>",
-	Short: "Remove exited sandbox containers left behind by earlier runs",
-	Long: `Remove containers this control plane created but no longer tracks — the
+	Short: "Remove sandbox containers or Pods left behind by earlier runs",
+	Long: `Remove workloads this control plane created but no longer tracks — the
 residue of a control plane that was killed mid-run.
 
-Running containers are never touched: they may belong to another live control
-plane sharing the same runtime.`,
+For a container executor, only exited containers are removed: a running one
+may belong to another live control plane sharing the same runtime.
+
+For a Kubernetes executor, terminated Pods are removed immediately and running
+Pods once they are older than executors.kubernetes.orphan_grace_period_seconds
+(default 10 minutes). A running orphan is the case that matters — it keeps
+consuming a node's CPU and a ResourceQuota slot with nobody reading its
+output.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		ex, err := executor.Get(args[0])
 		if err != nil {
 			return err
 		}
-		cex, ok := ex.(*container.Executor)
-		if !ok {
-			return fmt.Errorf("executor %q is a %s executor; reaping applies to container executors",
-				ex.ID(), ex.Kind())
-		}
 		ctx, cancel := context.WithTimeout(cmd.Context(), 2*time.Minute)
 		defer cancel()
 
-		removed, err := cex.ReapOrphans(ctx)
+		var (
+			removed []string
+			noun    string
+		)
+		switch typed := ex.(type) {
+		case *container.Executor:
+			noun = "container"
+			removed, err = typed.ReapOrphans(ctx)
+		case *kubernetes.Executor:
+			noun = "Pod"
+			removed, err = typed.ReconcileOrphans(ctx)
+		default:
+			return fmt.Errorf("executor %q is a %s executor; reaping applies to container and kubernetes executors",
+				ex.ID(), ex.Kind())
+		}
 		if err != nil {
 			return err
 		}
 		if len(removed) == 0 {
-			fmt.Println("No orphaned containers found.")
+			fmt.Printf("No orphaned %ss found.\n", noun)
 			return nil
 		}
 		for _, name := range removed {
 			fmt.Printf("removed %s\n", name)
 		}
-		color.New(color.FgGreen).Printf("\nReaped %d orphaned container(s).\n", len(removed))
+		color.New(color.FgGreen).Printf("\nReaped %d orphaned %s(s).\n", len(removed), noun)
 		return nil
 	},
+}
+
+// preflightFinding is the driver-independent shape `cloop executor test`
+// renders. The two drivers keep their own Finding types — each is part of
+// that package's public API — and this is the narrow seam between them, so
+// adding a third driver means adding a converter, not a third print loop.
+type preflightFinding struct {
+	Name    string
+	Level   string
+	Message string
+	Fix     string
+}
+
+func toFindings(in []container.Finding) []preflightFinding {
+	out := make([]preflightFinding, 0, len(in))
+	for _, f := range in {
+		out = append(out, preflightFinding{Name: f.Name, Level: f.Level, Message: f.Message, Fix: f.Fix})
+	}
+	return out
+}
+
+func toKubeFindings(in []kubernetes.Finding) []preflightFinding {
+	out := make([]preflightFinding, 0, len(in))
+	for _, f := range in {
+		out = append(out, preflightFinding{Name: f.Name, Level: f.Level, Message: f.Message, Fix: f.Fix})
+	}
+	return out
+}
+
+// printPreflight renders a report as a checklist. Both drivers use the same
+// level vocabulary ("ok"/"warn"/"fail"), which is what lets one function
+// print either.
+func printPreflight(header, pass, warn, fail, dim *color.Color, findings []preflightFinding) {
+	header.Println("Preflight")
+	for _, f := range findings {
+		switch f.Level {
+		case container.LevelOK:
+			pass.Printf("  ok   ")
+		case container.LevelWarn:
+			warn.Printf("  warn ")
+		default:
+			fail.Printf("  FAIL ")
+		}
+		fmt.Printf("%-12s %s\n", f.Name, f.Message)
+		if f.Fix != "" {
+			dim.Printf("       %-12s fix: %s\n", "", f.Fix)
+		}
+	}
+	fmt.Println()
 }
 
 // printSmokeOutput renders the workload's output indented, so it is visually
@@ -299,6 +376,92 @@ func registerContainerExecutor(cfg *config.Config) {
 		fmt.Fprintf(os.Stderr, "warning: container executor %q could not be registered: %v\n", opts.ID, err)
 		fmt.Fprintf(os.Stderr, "         projects bound to it will fail rather than run on this host.\n")
 	}
+}
+
+// registerKubernetesExecutor builds and registers the Kubernetes executor
+// from the project config, when enabled.
+//
+// Unlike the container driver this one cannot be constructed from config
+// alone: its credentials come from the secret broker, so registration needs
+// an open state database and a decryption key. A missing key is the ordinary
+// "not adopted yet" state and is reported once, not treated as fatal — cloop
+// has dozens of subcommands that never execute a workload, and refusing to
+// run `cloop status` because CLOOP_SECRET_KEY is unset would be absurd.
+//
+// The database handle is deliberately not closed: the executor holds the
+// broker for the process's lifetime and needs it on every Start. For a
+// short-lived CLI invocation the process exit closes it; for the UI server
+// the handle is meant to live as long as the server does.
+//
+// reconcile asks for the startup orphan sweep. It is passed rather than
+// assumed because the sweep costs API calls, and paying them on every
+// `cloop status` would be a poor trade for a cleanup that only matters after
+// a control plane died mid-run.
+func registerKubernetesExecutor(cfg *config.Config, reconcile bool) {
+	if cfg == nil || !cfg.Executors.Kubernetes.Enabled {
+		return
+	}
+	opts, err := cfg.Executors.Kubernetes.DriverOptions()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: executors.kubernetes is enabled but invalid: %v\n", err)
+		return
+	}
+
+	broker, _, err := openBroker()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: kubernetes executor %q needs a secret broker for its kubeconfig: %v\n",
+			opts.ID, err)
+		fmt.Fprintf(os.Stderr, "         set CLOOP_SECRET_KEY and grant a kubeconfig with "+
+			"`cloop secret grant <secret> --to executor:%s`.\n", opts.ID)
+		return
+	}
+	source, err := kubernetes.NewBrokerSource(broker, opts.ID,
+		cfg.Executors.Kubernetes.KubeconfigSecret, cfg.Executors.Kubernetes.Context)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: kubernetes executor %q: %v\n", opts.ID, err)
+		return
+	}
+	opts.Credentials = source
+
+	kex, err := kubernetes.Ensure(executor.DefaultRegistry, opts)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: kubernetes executor %q could not be registered: %v\n", opts.ID, err)
+		fmt.Fprintf(os.Stderr, "         projects bound to it will fail rather than run on this host.\n")
+		return
+	}
+
+	if !reconcile {
+		return
+	}
+	// Detached and bounded: a cluster that is slow to answer must not delay
+	// the command the operator actually ran, and a sweep that cannot finish
+	// in a minute is one the next startup can finish instead.
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+		removed, err := kex.ReconcileOrphans(ctx)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: kubernetes executor %q could not reconcile orphaned Pods: %v\n",
+				opts.ID, err)
+			return
+		}
+		if len(removed) > 0 {
+			fmt.Fprintf(os.Stderr, "kubernetes: garbage-collected %d orphaned Pod(s) from a previous run: %s\n",
+				len(removed), strings.Join(removed, ", "))
+		}
+	}()
+}
+
+// wantsPodReconcile reports whether a command is long-running enough to be
+// worth paying the startup orphan sweep for. These are the entry points a
+// control plane actually restarts as; everything else is a short CLI call
+// that would only add latency and API traffic.
+func wantsPodReconcile(cmdName string) bool {
+	switch cmdName {
+	case "ui", "serve", "daemon", "run", "agent":
+		return true
+	}
+	return false
 }
 
 func init() {

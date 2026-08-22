@@ -221,13 +221,53 @@ func (r *Registry) SetBindingLookup(fn func(projectPath string) (string, bool)) 
 	r.lookup = fn
 }
 
+// IsolatedIDs returns the IDs of registered executors that put some boundary
+// between a workload and the control-plane host, ordered by ID.
+//
+// It exists so a host-execution refusal can name concrete alternatives rather
+// than telling the operator to go read the docs.
+func (r *Registry) IsolatedIDs() []string {
+	var out []string
+	for _, ex := range r.List() {
+		if isolatesFromHost(ex) {
+			out = append(out, ex.ID())
+		}
+	}
+	return out
+}
+
 // Resolve returns the executor that should run work for projectPath.
 //
-// It fails closed: if the project is bound to an executor that is not
-// registered, the error is ErrExecutorNotFound. Downgrading such a project
-// to the default (typically the local host) would defeat the entire point
-// of binding it to an isolated backend.
+// It fails closed in two ways:
+//
+//   - if the project is bound to an executor that is not registered, the
+//     error is ErrExecutorNotFound. Downgrading such a project to the default
+//     (typically the local host) would defeat the entire point of binding it
+//     to an isolated backend; and
+//   - if strict no-host-execution mode is on and the resolved executor offers
+//     no isolation, the error is *HostExecutionDeniedError. Resolve is the
+//     chokepoint every UI code path funnels through, which is what lets one
+//     config flag turn "the UI may not spawn harnesses on the host" from a
+//     convention into an invariant.
 func (r *Registry) Resolve(projectPath string) (Executor, error) {
+	ex, err := r.resolveBinding(projectPath)
+	if err != nil {
+		return nil, err
+	}
+	if !HostExecutionAllowed() && !isolatesFromHost(ex) {
+		return nil, &HostExecutionDeniedError{
+			ExecutorID:   ex.ID(),
+			ProjectPath:  projectPath,
+			Alternatives: r.IsolatedIDs(),
+		}
+	}
+	return ex, nil
+}
+
+// resolveBinding is Resolve without the host-execution policy check, so
+// callers that only want to know *which* executor a project points at (the
+// Executors panel, `cloop executor list`) are not told it is forbidden.
+func (r *Registry) resolveBinding(projectPath string) (Executor, error) {
 	if id, ok := r.Binding(projectPath); ok {
 		ex, err := r.Get(id)
 		if err != nil {
@@ -273,6 +313,17 @@ func List() []Executor { return DefaultRegistry.List() }
 // Resolve returns the executor bound to projectPath in the default
 // registry, falling back to the default executor.
 func Resolve(projectPath string) (Executor, error) { return DefaultRegistry.Resolve(projectPath) }
+
+// ResolveBinding is Resolve without the host-execution policy check: it
+// answers "which executor is this project pointing at", which the Executors
+// panel needs even for a binding that policy currently forbids running.
+func ResolveBinding(projectPath string) (Executor, error) {
+	return DefaultRegistry.resolveBinding(projectPath)
+}
+
+// IsolatedIDs returns the isolating executors registered in the default
+// registry.
+func IsolatedIDs() []string { return DefaultRegistry.IsolatedIDs() }
 
 // Bind pins projectPath to executorID in the default registry.
 func Bind(projectPath, executorID string) error { return DefaultRegistry.Bind(projectPath, executorID) }

@@ -5,8 +5,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/blechschmidt/cloop/pkg/executor/container"
+	"github.com/blechschmidt/cloop/pkg/executor/kubernetes"
 )
 
 func TestParseMemoryMB(t *testing.T) {
@@ -62,16 +64,16 @@ func TestParseMemoryMB(t *testing.T) {
 
 func TestValidateContainerExecutor(t *testing.T) {
 	valid := map[string]ContainerExecutorConfig{
-		"empty":         {},
-		"podman":        {Runtime: "podman"},
-		"docker":        {Runtime: "docker"},
-		"limits":        {CPUs: 2, Memory: "1g", PIDsLimit: 512},
+		"empty":          {},
+		"podman":         {Runtime: "podman"},
+		"docker":         {Runtime: "docker"},
+		"limits":         {CPUs: 2, Memory: "1g", PIDsLimit: 512},
 		"unlimited pids": {PIDsLimit: -1},
-		"bridge":        {Network: "bridge"},
-		"named network": {Network: "cloop-egress", AllowHosts: []string{"api.example.com:10.0.0.5"}},
-		"selinux":       {SELinuxLabel: "z"},
-		"extra args":    {ExtraArgs: []string{"--dns=10.0.0.53"}},
-		"custom image":  {Image: "ghcr.io/example/harness:v1"},
+		"bridge":         {Network: "bridge"},
+		"named network":  {Network: "cloop-egress", AllowHosts: []string{"api.example.com:10.0.0.5"}},
+		"selinux":        {SELinuxLabel: "z"},
+		"extra args":     {ExtraArgs: []string{"--dns=10.0.0.53"}},
+		"custom image":   {Image: "ghcr.io/example/harness:v1"},
 	}
 	for name, cfg := range valid {
 		t.Run(name, func(t *testing.T) {
@@ -335,5 +337,420 @@ func TestValidateNumericIncludesContainerExecutor(t *testing.T) {
 	cfg.Executors.Container.ExtraArgs = []string{"--privileged"}
 	if err := cfg.ValidateNumeric(); err == nil {
 		t.Fatal("ValidateNumeric must reject a dangerous container extra_arg")
+	}
+}
+
+// ── executors.allow_host_process (Task 20160) ───────────────────────────────
+
+// TestHostProcessAllowed_DefaultsPermissive pins the back-compat contract: an
+// existing single-machine install that upgrades into a cloop with this setting
+// must keep running, so absent means allowed.
+func TestHostProcessAllowed_DefaultsPermissive(t *testing.T) {
+	var e ExecutorsConfig
+	if !e.HostProcessAllowed() {
+		t.Error("an absent executors.allow_host_process must default to true — " +
+			"otherwise upgrading breaks every existing install")
+	}
+	if e.HostProcessExplicit() {
+		t.Error("an absent setting must not report as an explicit operator decision")
+	}
+}
+
+func TestHostProcessAllowed_ExplicitValues(t *testing.T) {
+	for _, want := range []bool{true, false} {
+		var e ExecutorsConfig
+		e.SetHostProcessAllowed(want)
+		if got := e.HostProcessAllowed(); got != want {
+			t.Errorf("HostProcessAllowed after Set(%v) = %v", want, got)
+		}
+		if !e.HostProcessExplicit() {
+			t.Errorf("Set(%v) must record the decision as explicit", want)
+		}
+	}
+}
+
+// TestHostProcessAllowed_ExplicitFalseSurvivesSave is the reason the field is a
+// *bool. With a plain `bool` and `omitempty`, an explicit false marshals to
+// nothing and the next Load reads it back as the permissive default — silently
+// re-enabling host execution on a hardened deployment the first time anything
+// writes the config.
+func TestHostProcessAllowed_ExplicitFalseSurvivesSave(t *testing.T) {
+	dir := t.TempDir()
+	cfg := Default()
+	cfg.Executors.SetHostProcessAllowed(false)
+	if err := Save(dir, cfg); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	raw, err := os.ReadFile(filepath.Join(dir, ".cloop", "config.yaml"))
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	if !strings.Contains(string(raw), "allow_host_process: false") {
+		t.Fatalf("explicit false was not written to disk:\n%s", raw)
+	}
+
+	reloaded, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if reloaded.Executors.HostProcessAllowed() {
+		t.Error("executors.allow_host_process: false did not survive a Save/Load round trip — " +
+			"a hardened control plane would silently re-open host execution")
+	}
+	if !reloaded.Executors.HostProcessExplicit() {
+		t.Error("the explicit decision was lost across a round trip")
+	}
+}
+
+func TestHostProcessAllowed_ExplicitTrueSurvivesSave(t *testing.T) {
+	dir := t.TempDir()
+	cfg := Default()
+	cfg.Executors.SetHostProcessAllowed(true)
+	if err := Save(dir, cfg); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	reloaded, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !reloaded.Executors.HostProcessExplicit() {
+		t.Error("an explicit true must round-trip as explicit, not collapse into the default — " +
+			"the UI banner distinguishes 'decided' from 'nobody has decided'")
+	}
+}
+
+// TestValidateExecutors_StrictModeWithNoAlternativesIsNotFatal locks in a
+// deliberate choice: hardening the control plane before any device has
+// enrolled is a legitimate intermediate state, and making it a fatal config
+// error would mean a hardened deployment refuses to boot until a device
+// happens to be online — backwards for a security control.
+func TestValidateExecutors_StrictModeWithNoAlternativesIsNotFatal(t *testing.T) {
+	var e ExecutorsConfig
+	e.SetHostProcessAllowed(false)
+	if err := ValidateExecutors(e); err != nil {
+		t.Fatalf("ValidateExecutors = %v, want nil: strict mode before enrollment must load", err)
+	}
+	warnings := ExecutorWarnings(e)
+	if len(warnings) == 0 {
+		t.Fatal("strict mode with no configured executor produces no warning — " +
+			"the operator gets no signal that nothing can run")
+	}
+	if !strings.Contains(warnings[0], "allow_host_process") {
+		t.Errorf("warning %q does not name the setting responsible", warnings[0])
+	}
+}
+
+// TestValidateExecutors_StillCatchesContainerProblems: the new field must not
+// have shadowed the existing container validation.
+func TestValidateExecutors_StillCatchesContainerProblems(t *testing.T) {
+	e := ExecutorsConfig{Container: ContainerExecutorConfig{ExtraArgs: []string{"--privileged"}}}
+	e.SetHostProcessAllowed(false)
+	if err := ValidateExecutors(e); err == nil {
+		t.Fatal("ValidateExecutors accepted a container section with --privileged")
+	}
+}
+
+func TestExecutorWarnings_QuietWhenCoherent(t *testing.T) {
+	// Strict mode with a container executor configured: nothing to warn about.
+	strictAndSandboxed := ExecutorsConfig{Container: ContainerExecutorConfig{Enabled: true}}
+	strictAndSandboxed.SetHostProcessAllowed(false)
+	if w := ExecutorWarnings(strictAndSandboxed); len(w) != 0 {
+		t.Errorf("a coherent hardened config produced warnings: %v", w)
+	}
+
+	// Plain single-machine default: also nothing to warn about. Nagging the
+	// laptop case would train operators to ignore the warnings that matter.
+	if w := ExecutorWarnings(ExecutorsConfig{}); len(w) != 0 {
+		t.Errorf("the zero-config default produced warnings: %v", w)
+	}
+}
+
+// TestExecutorWarnings_SandboxConfiguredButNotEnforced catches the
+// half-hardened config: an operator who enabled the container executor but
+// never flipped allow_host_process still runs unbound projects on the host,
+// which is exactly the state they believed they had left.
+func TestExecutorWarnings_SandboxConfiguredButNotEnforced(t *testing.T) {
+	e := ExecutorsConfig{Container: ContainerExecutorConfig{Enabled: true}}
+	w := ExecutorWarnings(e)
+	if len(w) == 0 {
+		t.Fatal("a container executor with host execution still permitted produced no warning")
+	}
+	if !strings.Contains(w[0], "allow_host_process") {
+		t.Errorf("warning %q does not name the setting to flip", w[0])
+	}
+}
+
+// --- kubernetes executor (Task 20161) ---------------------------------
+
+func TestValidateKubernetesExecutor(t *testing.T) {
+	valid := map[string]KubernetesExecutorConfig{
+		"empty":       {},
+		"namespace":   {Namespace: "cloop-jobs"},
+		"quantities":  {CPURequest: "250m", CPULimit: "2", MemoryRequest: "512Mi", MemoryLimit: "4Gi"},
+		"scheduling":  {NodeSelector: map[string]string{"pool": "untrusted"}, Tolerations: []kubernetes.Toleration{{Key: "k", Operator: "Exists"}}},
+		"deadlines":   {ActiveDeadlineSeconds: 3600, TerminationGracePeriodSeconds: 45, KillGracePeriodSeconds: 5},
+		"pull config": {ImagePullPolicy: "IfNotPresent", ImagePullSecrets: []string{"ghcr-auth"}},
+		"identity":    {ServiceAccount: "cloop-runner", RunAsUser: 1000, RunAsGroup: 1000},
+		"concurrency": {MaxConcurrent: 8},
+		"secret ref":  {KubeconfigSecret: "prod-kubeconfig", Context: "prod"},
+	}
+	for name, cfg := range valid {
+		t.Run(name, func(t *testing.T) {
+			if err := ValidateKubernetesExecutor(cfg); err != nil {
+				t.Fatalf("ValidateKubernetesExecutor(%+v) = %v, want nil", cfg, err)
+			}
+		})
+	}
+
+	invalid := map[string]struct {
+		cfg  KubernetesExecutorConfig
+		want string
+	}{
+		"reserved namespace":   {KubernetesExecutorConfig{Namespace: "kube-system"}, "reserved"},
+		"bad namespace":        {KubernetesExecutorConfig{Namespace: "Prod Cluster"}, "RFC 1123"},
+		"bad image":            {KubernetesExecutorConfig{Image: "-rm"}, "must not begin with '-'"},
+		"bad pull policy":      {KubernetesExecutorConfig{ImagePullPolicy: "whenever"}, "image_pull_policy"},
+		"bad quantity":         {KubernetesExecutorConfig{MemoryLimit: "4 gigs"}, "memory_limit"},
+		"zero quantity":        {KubernetesExecutorConfig{CPULimit: "0"}, "greater than zero"},
+		"negative deadline":    {KubernetesExecutorConfig{ActiveDeadlineSeconds: -1}, "active_deadline_seconds"},
+		"absurd deadline":      {KubernetesExecutorConfig{ActiveDeadlineSeconds: 1 << 40}, "active_deadline_seconds"},
+		"negative grace":       {KubernetesExecutorConfig{KillGracePeriodSeconds: -5}, "kill_grace_period_seconds"},
+		"negative uid":         {KubernetesExecutorConfig{RunAsUser: -1}, "run_as_user"},
+		"absurd concurrency":   {KubernetesExecutorConfig{MaxConcurrent: 1 << 20}, "max_concurrent"},
+		"negative concurrency": {KubernetesExecutorConfig{MaxConcurrent: -1}, "max_concurrent"},
+		"bad toleration":       {KubernetesExecutorConfig{Tolerations: []kubernetes.Toleration{{Operator: "Matches"}}}, "tolerations[0]"},
+		"bad pull secret":      {KubernetesExecutorConfig{ImagePullSecrets: []string{"Bad Name"}}, "image_pull_secrets"},
+	}
+	for name, tc := range invalid {
+		t.Run(name, func(t *testing.T) {
+			err := ValidateKubernetesExecutor(tc.cfg)
+			if err == nil {
+				t.Fatalf("ValidateKubernetesExecutor(%+v) = nil, want an error", tc.cfg)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error %q does not mention %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// TestValidateKubernetesExecutor_RunsWhenDisabled: same rule as the container
+// section — a disabled-but-broken config is reported when it is written.
+func TestValidateKubernetesExecutor_RunsWhenDisabled(t *testing.T) {
+	cfg := KubernetesExecutorConfig{Enabled: false, Namespace: "kube-system"}
+	if err := ValidateKubernetesExecutor(cfg); err == nil {
+		t.Fatal("a disabled executor pointed at kube-system must still be rejected")
+	}
+}
+
+func TestKubernetesDriverOptions(t *testing.T) {
+	cfg := KubernetesExecutorConfig{
+		ID:                            "prod-k8s",
+		Namespace:                     "cloop-jobs",
+		Image:                         "ghcr.io/example/harness:v1",
+		ImagePullPolicy:               "IfNotPresent",
+		ImagePullSecrets:              []string{"ghcr-auth"},
+		ServiceAccount:                "cloop-runner",
+		CPURequest:                    "250m",
+		CPULimit:                      "2",
+		MemoryRequest:                 "512Mi",
+		MemoryLimit:                   "4Gi",
+		EphemeralStorageLimit:         "10Gi",
+		WorkspaceSizeLimit:            "5Gi",
+		NodeSelector:                  map[string]string{"cloop.dev/pool": "untrusted"},
+		Tolerations:                   []kubernetes.Toleration{{Key: "cloop.dev/untrusted", Operator: "Exists", Effect: "NoSchedule"}},
+		ActiveDeadlineSeconds:         3600,
+		TerminationGracePeriodSeconds: 45,
+		KillGracePeriodSeconds:        3,
+		OrphanGracePeriodSeconds:      120,
+		RunAsUser:                     1000,
+		RunAsGroup:                    1000,
+		KeepCompletedPods:             true,
+		MaxConcurrent:                 8,
+	}
+	opts, err := cfg.DriverOptions()
+	if err != nil {
+		t.Fatalf("DriverOptions: %v", err)
+	}
+	if opts.ID != "prod-k8s" || opts.Namespace != "cloop-jobs" || opts.Image != "ghcr.io/example/harness:v1" {
+		t.Fatalf("identity fields not carried through: %+v", opts)
+	}
+	if opts.CPULimit != "2" || opts.MemoryLimit != "4Gi" || opts.EphemeralStorageLimit != "10Gi" {
+		t.Fatalf("limits not carried through: %+v", opts)
+	}
+	if opts.ActiveDeadlineSeconds != 3600 {
+		t.Fatalf("active_deadline_seconds = %d", opts.ActiveDeadlineSeconds)
+	}
+	if opts.TerminationGracePeriod != 45*time.Second || opts.KillGracePeriod != 3*time.Second ||
+		opts.OrphanGracePeriod != 120*time.Second {
+		t.Fatalf("durations not converted: %+v", opts)
+	}
+	if opts.MaxConcurrent != 8 || !opts.KeepCompletedPods {
+		t.Fatalf("flags not carried through: %+v", opts)
+	}
+	if len(opts.Tolerations) != 1 || opts.Tolerations[0].Key != "cloop.dev/untrusted" {
+		t.Fatalf("tolerations not carried through: %+v", opts.Tolerations)
+	}
+	// Credentials must be nil: only a caller holding a broker can supply
+	// them, and a config validator must not need a decryption key.
+	if opts.Credentials != nil {
+		t.Fatal("DriverOptions supplied a credential source; that is the CLI's job, not config's")
+	}
+}
+
+func TestKubernetesDriverOptions_DefaultsAreConfined(t *testing.T) {
+	opts, err := KubernetesExecutorConfig{}.DriverOptions()
+	if err != nil {
+		t.Fatalf("DriverOptions: %v", err)
+	}
+	if opts.ID != kubernetes.DefaultID || opts.Image != kubernetes.DefaultImage {
+		t.Errorf("defaults = %s/%s", opts.ID, opts.Image)
+	}
+	if opts.TerminationGracePeriod != kubernetes.DefaultTerminationGracePeriod {
+		t.Errorf("termination grace = %v", opts.TerminationGracePeriod)
+	}
+	if opts.KillGracePeriod != kubernetes.DefaultKillGracePeriod {
+		t.Errorf("kill grace = %v", opts.KillGracePeriod)
+	}
+	if opts.OrphanGracePeriod != kubernetes.DefaultOrphanGracePeriod {
+		t.Errorf("orphan grace = %v", opts.OrphanGracePeriod)
+	}
+	// Unbounded by default: cloop runs are long-lived by design (Task 20148).
+	if opts.ActiveDeadlineSeconds != 0 {
+		t.Errorf("active_deadline_seconds defaulted to %d, want unbounded", opts.ActiveDeadlineSeconds)
+	}
+}
+
+// TestClampKubernetesExecutor is the defensive Load() path: a hand-edited
+// YAML must be repaired to the driver's conservative defaults rather than
+// honoured or fatal.
+func TestClampKubernetesExecutor(t *testing.T) {
+	cases := []struct {
+		name   string
+		in     KubernetesExecutorConfig
+		verify func(*testing.T, KubernetesExecutorConfig)
+	}{
+		{
+			name: "reserved namespace is cleared, not honoured",
+			in:   KubernetesExecutorConfig{Namespace: "kube-system"},
+			verify: func(t *testing.T, c KubernetesExecutorConfig) {
+				if c.Namespace != "" {
+					t.Errorf("Namespace = %q, want cleared so the driver default applies", c.Namespace)
+				}
+			},
+		},
+		{
+			name: "out-of-range deadline is cleared",
+			in:   KubernetesExecutorConfig{ActiveDeadlineSeconds: 1 << 40},
+			verify: func(t *testing.T, c KubernetesExecutorConfig) {
+				if c.ActiveDeadlineSeconds != 0 {
+					t.Errorf("ActiveDeadlineSeconds = %d, want 0", c.ActiveDeadlineSeconds)
+				}
+			},
+		},
+		{
+			name: "unparsable quantity is cleared",
+			in:   KubernetesExecutorConfig{MemoryLimit: "four gigs"},
+			verify: func(t *testing.T, c KubernetesExecutorConfig) {
+				if c.MemoryLimit != "" {
+					t.Errorf("MemoryLimit = %q, want cleared", c.MemoryLimit)
+				}
+			},
+		},
+		{
+			name: "bad image is cleared",
+			in:   KubernetesExecutorConfig{Image: "-rm"},
+			verify: func(t *testing.T, c KubernetesExecutorConfig) {
+				if c.Image != "" {
+					t.Errorf("Image = %q, want cleared", c.Image)
+				}
+			},
+		},
+		{
+			name: "bad pull policy is cleared",
+			in:   KubernetesExecutorConfig{ImagePullPolicy: "whenever"},
+			verify: func(t *testing.T, c KubernetesExecutorConfig) {
+				if c.ImagePullPolicy != "" {
+					t.Errorf("ImagePullPolicy = %q, want cleared", c.ImagePullPolicy)
+				}
+			},
+		},
+		{
+			name: "bad tolerations are dropped wholesale",
+			in: KubernetesExecutorConfig{Tolerations: []kubernetes.Toleration{
+				{Key: "good", Operator: "Exists"},
+				{Operator: "Matches"},
+			}},
+			verify: func(t *testing.T, c KubernetesExecutorConfig) {
+				if len(c.Tolerations) != 0 {
+					t.Errorf("Tolerations = %v, want empty — a half-applied toleration set schedules "+
+						"onto a node pool nobody chose", c.Tolerations)
+				}
+			},
+		},
+		{
+			name: "negative uid is cleared to the non-root default",
+			in:   KubernetesExecutorConfig{RunAsUser: -5},
+			verify: func(t *testing.T, c KubernetesExecutorConfig) {
+				if c.RunAsUser != 0 {
+					t.Errorf("RunAsUser = %d, want 0 so the driver's non-root default applies", c.RunAsUser)
+				}
+			},
+		},
+		{
+			name: "a good config is untouched",
+			in: KubernetesExecutorConfig{
+				Enabled: true, Namespace: "cloop-jobs", CPULimit: "2", MemoryLimit: "4Gi",
+			},
+			verify: func(t *testing.T, c KubernetesExecutorConfig) {
+				if !c.Enabled || c.Namespace != "cloop-jobs" || c.CPULimit != "2" || c.MemoryLimit != "4Gi" {
+					t.Errorf("a valid config was modified: %+v", c)
+				}
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := tc.in
+			changed := clampKubernetesExecutor(&cfg)
+			if tc.name != "a good config is untouched" && len(changed) == 0 {
+				t.Fatalf("clampKubernetesExecutor(%+v) reported no changes", tc.in)
+			}
+			tc.verify(t, cfg)
+			// Whatever survives clamping must validate, or Load would produce
+			// a config that `cloop config set` would reject.
+			if err := ValidateKubernetesExecutor(cfg); err != nil {
+				t.Errorf("clamped config still fails validation: %v", err)
+			}
+		})
+	}
+}
+
+// TestExecutorWarnings_Kubernetes: an isolated executor being enabled must
+// count toward "some executor exists", and the advisory notes must fire.
+func TestExecutorWarnings_Kubernetes(t *testing.T) {
+	hardened := ExecutorsConfig{Kubernetes: KubernetesExecutorConfig{Enabled: true, Namespace: "cloop-jobs",
+		Image: "ghcr.io/x/y@sha256:" + strings.Repeat("a", 64), CPULimit: "2", MemoryLimit: "4Gi"}}
+	hardened.SetHostProcessAllowed(false)
+	if got := ExecutorWarnings(hardened); len(got) != 0 {
+		t.Errorf("a fully-configured kubernetes executor warned: %v", got)
+	}
+
+	bare := ExecutorsConfig{Kubernetes: KubernetesExecutorConfig{Enabled: true}}
+	bare.SetHostProcessAllowed(false)
+	joined := strings.Join(ExecutorWarnings(bare), " | ")
+	for _, want := range []string{"namespace is unset", "cpu_limit", "built-in default"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("warnings %q are missing %q", joined, want)
+		}
+	}
+
+	// Enabling an isolated executor while host process is still implicitly
+	// allowed is the trap the warning exists for.
+	permissive := ExecutorsConfig{Kubernetes: KubernetesExecutorConfig{Enabled: true, Namespace: "cloop-jobs"}}
+	joined = strings.Join(ExecutorWarnings(permissive), " | ")
+	if !strings.Contains(joined, "allow_host_process") {
+		t.Errorf("warnings %q do not flag that unbound projects still run on the host", joined)
 	}
 }

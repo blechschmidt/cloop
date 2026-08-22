@@ -823,6 +823,43 @@ func (e *Executor) Status(ctx context.Context, handleID string) (executor.Status
 	}, nil
 }
 
+// HandleStatuses implements executor.Lister from the driver's own bookkeeping. It
+// deliberately does not shell out to `podman ps`: the Executors panel reads
+// this for every card it renders, and a wedged runtime socket would turn a
+// status column into a page-load stall. Containers this process did not start
+// are not ours to report on anyway.
+func (e *Executor) HandleStatuses(ctx context.Context) ([]executor.Status, error) {
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+	}
+	e.mu.Lock()
+	recs := make([]*record, 0, len(e.handles))
+	for _, rec := range e.handles {
+		recs = append(recs, rec)
+	}
+	e.mu.Unlock()
+
+	// Per-record locks are taken outside e.mu, matching the lock order the
+	// log pump uses.
+	out := make([]executor.Status, 0, len(recs))
+	for _, rec := range recs {
+		rec.mu.Lock()
+		out = append(out, executor.Status{
+			HandleID:   rec.id,
+			ExecutorID: e.id,
+			State:      rec.state,
+			ExitCode:   rec.exitCode,
+			StartedAt:  rec.startedAt,
+			FinishedAt: rec.finishedAt,
+			Error:      rec.errMsg,
+		})
+		rec.mu.Unlock()
+	}
+	return out, nil
+}
+
 // Stream implements executor.Executor.
 func (e *Executor) Stream(ctx context.Context, handleID string) (<-chan executor.LogLine, error) {
 	if ctx == nil {

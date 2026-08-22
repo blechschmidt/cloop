@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -41,6 +42,40 @@ type loopback struct {
 	cancel   context.CancelFunc
 }
 
+// detachableLogf returns a t.Logf wrapper that goes silent once the test ends.
+//
+// The hub and the agent both log from goroutines that outlive the test body: a
+// hijacked WebSocket connection is not tracked by httptest.Server.Close, so a
+// disconnect message can land after tRunner has already marked the test done.
+// Calling t.Logf at that point is a data race on testing.common (and, in newer
+// Go, a panic), which made this suite fail under -race roughly two runs in
+// five.
+//
+// The disable is registered as the first cleanup so it runs *last*, after the
+// server is closed and the agent cancelled. Any straggler that logs after that
+// takes the mutex, sees detached, and returns without touching t at all —
+// which is what makes this airtight regardless of how long a goroutine lingers.
+func detachableLogf(t *testing.T) func(string, ...any) {
+	t.Helper()
+	var (
+		mu       sync.Mutex
+		detached bool
+	)
+	t.Cleanup(func() {
+		mu.Lock()
+		detached = true
+		mu.Unlock()
+	})
+	return func(format string, args ...any) {
+		mu.Lock()
+		defer mu.Unlock()
+		if detached {
+			return
+		}
+		t.Logf(format, args...)
+	}
+}
+
 // newLoopback enrolls an agent against a live control plane and waits for it
 // to connect.
 func newLoopback(t *testing.T) *loopback {
@@ -55,10 +90,12 @@ func newLoopback(t *testing.T) *loopback {
 	// across tests.
 	reg := executor.NewRegistry()
 
+	logf := detachableLogf(t)
+
 	hub, err := remote.NewHub(remote.HubOptions{
 		Store:    store,
 		Registry: reg,
-		Logf:     func(format string, args ...any) { t.Logf("hub: "+format, args...) },
+		Logf:     func(format string, args ...any) { logf("hub: "+format, args...) },
 	})
 	if err != nil {
 		t.Fatalf("NewHub: %v", err)
@@ -83,7 +120,7 @@ func newLoopback(t *testing.T) *loopback {
 		Token:          token,
 		CredentialPath: credPath,
 		WorkDirRoot:    root,
-		Logf:           func(format string, args ...any) { t.Logf("agent: "+format, args...) },
+		Logf:           func(format string, args ...any) { logf("agent: "+format, args...) },
 	})
 	if err != nil {
 		t.Fatalf("agent.New: %v", err)
@@ -92,8 +129,11 @@ func newLoopback(t *testing.T) *loopback {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	go func() {
+		// logf, not t.Logf: a.Run commonly returns *after* the test body has
+		// finished, which is the same post-completion logging race the
+		// detachable wrapper exists to close.
 		if err := a.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
-			t.Logf("agent.Run returned: %v", err)
+			logf("agent.Run returned: %v", err)
 		}
 	}()
 

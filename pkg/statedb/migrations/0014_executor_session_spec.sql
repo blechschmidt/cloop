@@ -1,0 +1,31 @@
+-- 0014_executor_session_spec: record the workload a session was dispatched
+-- with, so failover can actually re-dispatch it (Task 20162).
+--
+-- 0013 created executor_sessions knowing *that* work was in flight on a node
+-- but not *what* the work was. That is enough to detect a stranded session and
+-- not enough to move it: when a node goes unreachable, the supervisor needs the
+-- original argv, workdir, env, and resource limits to start the replacement.
+--
+-- The obvious alternative — keeping the spec in a map in the process that
+-- dispatched it — fails in precisely the case this feature exists for. A
+-- control plane that restarts loses that map, and the sessions most in need of
+-- requeueing are exactly the ones whose dispatcher is no longer around. So the
+-- spec is persisted, as the JSON encoding of executor.Spec.
+--
+-- This is a separate migration rather than an extra column in 0013 because 0013
+-- had already been applied to live databases by the time the gap was found.
+-- Editing an applied migration is silent corruption: schema_migrations already
+-- records the version, so the amended file never runs again, and every
+-- deployment that migrated before the edit keeps a table that the code now
+-- believes has a column it does not. Adding a migration is the only edit to a
+-- shipped schema that is safe by construction.
+--
+-- Columns:
+--   spec_json  JSON-encoded executor.Spec, or '' for sessions opened before
+--              this migration (and for any session whose spec would not
+--              marshal). Failover treats an unmarshalable or empty spec as
+--              "not re-dispatchable" and reports that, rather than starting an
+--              empty workload — executor.Spec.Validate rejects an empty Argv,
+--              so the failure is loud rather than silently starting nothing.
+
+ALTER TABLE executor_sessions ADD COLUMN spec_json TEXT NOT NULL DEFAULT '';

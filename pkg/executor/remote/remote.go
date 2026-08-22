@@ -285,6 +285,35 @@ func (e *Executor) Start(ctx context.Context, spec executor.Spec) (executor.Hand
 	}, nil
 }
 
+// HandleStatuses implements executor.Lister from the control plane's last-known view
+// of the agent, without dialling the device.
+//
+// Not round-tripping is the point: this feeds the Executors panel's load
+// column, and an offline agent behind NAT would otherwise make that column
+// block until the request timed out. The cached view is refreshed by the
+// status frames the agent pushes as work progresses, so it is current for a
+// connected agent and honestly stale for a disconnected one — which is what
+// the card's status dot is already telling the operator.
+func (e *Executor) HandleStatuses(ctx context.Context) ([]executor.Status, error) {
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+	}
+	e.mu.RLock()
+	states := make([]*handleState, 0, len(e.handles))
+	for _, hs := range e.handles {
+		states = append(states, hs)
+	}
+	e.mu.RUnlock()
+
+	out := make([]executor.Status, 0, len(states))
+	for _, hs := range states {
+		out = append(out, hs.snapshotStatus())
+	}
+	return out, nil
+}
+
 // Signal implements executor.Executor.
 //
 // Signalling a handle the control plane has already seen terminate returns nil

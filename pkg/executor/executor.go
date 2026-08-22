@@ -52,6 +52,11 @@ const (
 	// KindRemoteAgent runs workloads on a remote cloop executor agent that
 	// enrolled itself with this control plane over an outbound connection.
 	KindRemoteAgent = "remote"
+
+	// KindKubernetes runs each workload as an ephemeral Pod in a Kubernetes
+	// cluster, using a kubeconfig brokered as a short-lived lease rather than
+	// a file on the control-plane host.
+	KindKubernetes = "kubernetes"
 )
 
 // Isolation describes how strongly a driver separates a workload from the
@@ -340,6 +345,46 @@ type Executor interface {
 	HealthCheck(ctx context.Context) error
 }
 
+// Lister is an optional interface for drivers that can enumerate the handles
+// they currently know about.
+//
+// It is separate from Executor because not every driver can answer cheaply —
+// a remote agent would have to round-trip to a device that may be offline — and
+// a UI panel refreshing a load column must never be the reason a page hangs.
+// Callers use LiveHandles, which degrades to "unknown" rather than to an error.
+type Lister interface {
+	// HandleStatuses returns a status snapshot per handle the driver
+	// retains, including recently-finished ones. Ordering is unspecified.
+	//
+	// It is not called Handles because the drivers already expose a
+	// diagnostic Handles() []string, and one method name meaning two
+	// different things across the same types is how a caller ends up
+	// counting strings and believing it counted running workloads.
+	HandleStatuses(ctx context.Context) ([]Status, error)
+}
+
+// LiveHandles returns the currently-running handles on ex and whether ex could
+// report at all. A false second return means "this driver does not enumerate",
+// which a UI should render as "—", not as zero: showing an idle executor when
+// it is actually saturated is worse than admitting ignorance.
+func LiveHandles(ctx context.Context, ex Executor) ([]Status, bool) {
+	lister, ok := ex.(Lister)
+	if !ok {
+		return nil, false
+	}
+	all, err := lister.HandleStatuses(ctx)
+	if err != nil {
+		return nil, false
+	}
+	out := make([]Status, 0, len(all))
+	for _, st := range all {
+		if !st.State.Terminal() {
+			out = append(out, st)
+		}
+	}
+	return out, true
+}
+
 // Sentinel errors. Callers use errors.Is against these; drivers wrap them
 // with %w and add detail.
 var (
@@ -361,6 +406,17 @@ var (
 	// ErrHostExecutionDenied: policy forbids running this workload on the
 	// control-plane host. Reserved for strict no-host-execution mode.
 	ErrHostExecutionDenied = errors.New("executor: host execution denied by policy")
+	// ErrNoPlacement: no registered executor satisfies the task's
+	// requirements. Always carried by a *PlacementError, which names the
+	// unsatisfied constraint; match the sentinel, read the typed error.
+	ErrNoPlacement = errors.New("executor: no executor satisfies placement requirements")
+	// ErrSessionClaimLost: a session was requeued by someone else first.
+	// This is the exactly-once latch reporting that it worked, not a
+	// failure — a supervisor that sees it must do nothing further.
+	ErrSessionClaimLost = errors.New("executor: session claim lost to another requeue")
+	// ErrDrainTimeout: a drain did not reach zero in-flight sessions before
+	// its deadline.
+	ErrDrainTimeout = errors.New("executor: drain timed out with sessions still in flight")
 )
 
 // RunResult is the outcome of a synchronous Run.

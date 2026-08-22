@@ -64,6 +64,23 @@ var (
 	// ErrBrokerGrantNotFound indicates no broker_grants row has the
 	// requested ID.
 	ErrBrokerGrantNotFound = errors.New("statedb: broker grant not found")
+
+	// ErrExecutorHealthNotFound indicates the executor has no health record:
+	// the scheduler has never probed it. Callers must not read this as
+	// "healthy" — an unobserved executor is unknown, not ready.
+	ErrExecutorHealthNotFound = errors.New("statedb: executor health not found")
+
+	// ErrExecutorSessionNotFound indicates no executor_sessions row has the
+	// requested ID.
+	ErrExecutorSessionNotFound = errors.New("statedb: executor session not found")
+
+	// ErrExecutorSessionClaimLost indicates a conditional requeue matched no
+	// row: another supervisor already claimed the session, or it is no longer
+	// running. This is the exactly-once signal, and it is a distinct error
+	// because "someone else is failing this over" must never be retried as if
+	// it were a transient fault — doing so is how the same work ends up
+	// running twice.
+	ErrExecutorSessionClaimLost = errors.New("statedb: executor session claim lost")
 )
 
 // classifyDriverErr inspects a raw error returned by the modernc.org/sqlite

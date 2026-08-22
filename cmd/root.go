@@ -5,6 +5,7 @@ import (
 	"os"
 
 	"github.com/blechschmidt/cloop/pkg/config"
+	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/migrate"
 	"github.com/blechschmidt/cloop/pkg/workspace"
 	"github.com/fatih/color"
@@ -131,6 +132,12 @@ func init() {
 		if cwd, err := os.Getwd(); err == nil {
 			if cfg, cfgErr := config.Load(cwd); cfgErr == nil {
 				registerContainerExecutor(cfg)
+				registerKubernetesExecutor(cfg, wantsPodReconcile(cmd.Name()))
+				// Strict no-host-execution mode (Task 20160). Applied after
+				// the isolated backends are registered so a refusal can name
+				// them as alternatives instead of claiming none exist. The
+				// policy is a ratchet — see executor.ApplyHostExecutionPolicy.
+				executor.ApplyHostExecutionPolicy(cfg.Executors.HostProcessAllowed())
 			}
 		}
 

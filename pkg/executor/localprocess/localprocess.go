@@ -223,6 +223,20 @@ func (e *Executor) Start(ctx context.Context, spec executor.Spec) (executor.Hand
 			return executor.Handle{}, err
 		}
 	}
+	// Strict no-host-execution mode (Task 20160). Registry.Resolve already
+	// refuses to hand this driver out when the policy is off, and produces a
+	// better message because it knows the project and the alternatives. This
+	// check is the backstop for the other path: a caller holding a direct
+	// *localprocess.Executor reference — Shared(), a test, a future
+	// code path that skips Resolve — must not be able to fork on the host
+	// just because it never asked the registry.
+	if !executor.HostExecutionAllowed() {
+		return executor.Handle{}, &executor.HostExecutionDeniedError{
+			ExecutorID:   e.id,
+			ProjectPath:  spec.WorkDir,
+			Alternatives: executor.IsolatedIDs(),
+		}
+	}
 	if err := spec.Validate(); err != nil {
 		return executor.Handle{}, err
 	}
@@ -412,6 +426,43 @@ func (e *Executor) Status(ctx context.Context, handleID string) (executor.Status
 		FinishedAt: rec.finishedAt,
 		Error:      rec.errMsg,
 	}, nil
+}
+
+// HandleStatuses implements executor.Lister: a snapshot of every retained handle,
+// running or recently finished. The Executors panel derives its "current
+// load" column from this.
+func (e *Executor) HandleStatuses(ctx context.Context) ([]executor.Status, error) {
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+	}
+	e.mu.Lock()
+	recs := make([]*record, 0, len(e.handles))
+	for _, rec := range e.handles {
+		recs = append(recs, rec)
+	}
+	e.mu.Unlock()
+
+	// Per-record locks are taken outside e.mu: the pump goroutine holds a
+	// record lock while it appends output, and grabbing e.mu underneath it
+	// would invert the driver's lock order.
+	out := make([]executor.Status, 0, len(recs))
+	for _, rec := range recs {
+		rec.mu.Lock()
+		out = append(out, executor.Status{
+			HandleID:   rec.id,
+			ExecutorID: e.id,
+			State:      rec.state,
+			PID:        rec.pid,
+			ExitCode:   rec.exitCode,
+			StartedAt:  rec.startedAt,
+			FinishedAt: rec.finishedAt,
+			Error:      rec.errMsg,
+		})
+		rec.mu.Unlock()
+	}
+	return out, nil
 }
 
 // Stream implements executor.Executor. The returned channel first replays

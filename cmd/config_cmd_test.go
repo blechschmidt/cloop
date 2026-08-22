@@ -217,3 +217,44 @@ func TestDisplayValue_OpenAIAPIKey_Masked(t *testing.T) {
 		t.Error("expected openai API key to be masked")
 	}
 }
+
+// TestApplyConfigKey_AllowHostProcess covers the one setting an enterprise
+// deployment has to flip (Task 20160). It is parsed strictly: a typo in a
+// security control must not silently land on either side.
+func TestApplyConfigKey_AllowHostProcess(t *testing.T) {
+	truthy := []string{"true", "1", "yes", "on", "TRUE", " on "}
+	for _, v := range truthy {
+		cfg := config.Default()
+		if err := applyConfigKey(cfg, "executors.allow_host_process", v); err != nil {
+			t.Fatalf("applyConfigKey(%q): %v", v, err)
+		}
+		if !cfg.Executors.HostProcessAllowed() {
+			t.Errorf("%q did not enable host execution", v)
+		}
+		if !cfg.Executors.HostProcessExplicit() {
+			t.Errorf("%q did not record an explicit decision", v)
+		}
+	}
+
+	falsy := []string{"false", "0", "no", "off", "FALSE", " off "}
+	for _, v := range falsy {
+		cfg := config.Default()
+		if err := applyConfigKey(cfg, "executors.allow_host_process", v); err != nil {
+			t.Fatalf("applyConfigKey(%q): %v", v, err)
+		}
+		if cfg.Executors.HostProcessAllowed() {
+			t.Errorf("%q did not disable host execution", v)
+		}
+	}
+
+	// Anything else is rejected rather than guessed at. "disabled" quietly
+	// meaning "true" is how a control plane ends up permissive while its
+	// operator believes it is hardened.
+	for _, v := range []string{"", "disabled", "maybe", "2"} {
+		cfg := config.Default()
+		if err := applyConfigKey(cfg, "executors.allow_host_process", v); err == nil {
+			t.Errorf("applyConfigKey accepted %q as a boolean (result: %v)",
+				v, cfg.Executors.HostProcessAllowed())
+		}
+	}
+}
