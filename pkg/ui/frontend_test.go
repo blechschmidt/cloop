@@ -46,6 +46,14 @@ var auditAPISource string
 //go:embed secrets_api.go
 var secretsAPISource string
 
+// installScriptSource is pkg/ui/install_script.go (Task 20172). Unlike the
+// files above it carries no broadcast — it is embedded because /install.sh is
+// registered without a method prefix, so TestMutatingRoutesRequireMutating-
+// Permissions has to read the handler body to learn which verbs it accepts.
+//
+//go:embed install_script.go
+var installScriptSource string
+
 // routesSource is pkg/ui/routes.go, which holds the declarative route table
 // (Task 20164). Routes moved out of server.go when registration started
 // carrying a required permission, so the architectural tests that scan for
@@ -60,7 +68,7 @@ var routesSource string
 // new //go:embed directive above.
 func allUISources() string {
 	return serverSource + "\n" + providerCallsSource + "\n" + executorsAPISource +
-		"\n" + auditAPISource + "\n" + secretsAPISource
+		"\n" + auditAPISource + "\n" + secretsAPISource + "\n" + installScriptSource
 }
 
 // The cloop dashboard is a single embedded HTML/CSS/JS string (`dashboardHTML`

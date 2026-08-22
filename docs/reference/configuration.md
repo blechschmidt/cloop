@@ -167,6 +167,26 @@ on. If a token leaks, `cloop executor revoke <id>` (or **Revoke** on the card)
 kills it; if it was already redeemed, that revokes the resulting credential too,
 drops the device's session, and unbinds every project that pointed at it.
 
+That command runs the agent in the *foreground* and installs nothing. For a
+device you intend to keep, install it as a supervised service instead:
+
+```bash
+CLOOP_ENROLL_BUNDLE='cloopenroll1.…' sudo -E cloop executor agent install
+```
+
+This writes a hardened systemd unit with `Restart=always` and the certificate
+pin baked in, creates a dedicated non-login system user, and stores the token in
+a `0600` file that the unit references by path — never on the command line,
+where `systemctl show` and `ps` would print it. `--output docker` and
+`--output shell` cover devices without systemd, `--dry-run` shows the unit
+without writing it, and `--uninstall` reverses it idempotently. See
+[Installing the agent as a service](../architecture/executors.md#installing-the-agent-as-a-service).
+
+The Executors panel shows a one-command form of the same thing, backed by
+`GET /install.sh` on the hub. That route is gated on `executor.manage` and
+refuses to answer over plaintext HTTP: its body is piped into a root shell on a
+device that does not yet know which control plane to trust.
+
 #### Transport security
 
 A token proves the *device* is authorised. It says nothing about whether the

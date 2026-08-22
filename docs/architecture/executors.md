@@ -463,6 +463,66 @@ never gives up on its own; only operator cancellation or a hub-side revocation
 
 Transport is covered in [the security model](../security/model.md#2-hub--remote-agent).
 
+### Installing the agent as a service
+
+`cloop executor agent --bundle …` runs in the foreground and installs nothing.
+For a device you intend to keep, `cloop executor agent install` materialises the
+whole deployment instead:
+
+```bash
+# On the device, as root. The bundle rides in the environment, not in argv.
+CLOOP_ENROLL_BUNDLE='cloopenroll1.…' sudo -E cloop executor agent install
+
+# Or fetch the bootstrap script from the hub (HTTPS only — see below).
+CLOOP_ENROLL_BUNDLE='cloopenroll1.…' sh -c "$(curl -fsSL https://hub.example.com/install.sh)"
+```
+
+It writes two files and nothing else:
+
+| Path | Mode | Contents |
+| --- | --- | --- |
+| `/etc/systemd/system/cloop-executor.service` | `0644` | the unit — **no credential** |
+| `/var/lib/cloop-executor/enrollment` | `0600` | the enrollment bundle, owned by the service user |
+
+The split is the point. A unit file is world-readable and `systemctl show`
+prints `ExecStart` to any local user, so the token reaches the agent as a *path*
+(`--token-file`) rather than as an argument. The agent deletes that file once
+the token has been redeemed, after the long-lived credential is safely on disk —
+a single-use secret should not survive into every later backup of the device.
+
+The generated unit runs as a dedicated non-login system user with
+`Restart=always`, `NoNewPrivileges=yes`, `ProtectSystem=strict`, `ProtectHome`,
+`PrivateTmp`, `PrivateDevices`, `ProtectProc=invisible`, an empty
+`CapabilityBoundingSet`, `RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX`,
+`SystemCallFilter=@system-service` and `UMask=0077`, with the hub's SPKI pin
+baked into `ExecStart`. `StateDirectory=` gives it exactly one writable
+directory. A device that runs *container* workloads through the agent must drop
+`PrivateDevices=` and `RestrictNamespaces=`; the unit says so in a comment where
+the operator will find it.
+
+Other outputs and flags:
+
+| Flag | Effect |
+| --- | --- |
+| `--output docker` | a `podman run` command and a compose fragment with the equivalent confinement (`--cap-drop ALL`, `--read-only`, `--security-opt no-new-privileges`); the credential is a read-only bind mount, never `-e` |
+| `--output shell` | a POSIX init script with a supervision loop, for devices with no systemd |
+| `--dry-run` | prints the unit and the file list; writes nothing |
+| `--uninstall` | reverses the install; idempotent, and verifies afterwards that no unit or credential survives |
+| `--purge` | with `--uninstall`, also removes the agent's identity and workspaces |
+| `--root <dir>` | stages the files for a golden image instead of installing them |
+| `--no-start` | installs and enables without starting, for first-boot enrollment |
+
+**`GET /install.sh`** serves the bootstrap script. It is gated on
+`executor.manage` — the same permission as minting a token, since it discloses
+the hub's URL and pin — and it **refuses to answer over plaintext HTTP** with a
+`403`, no loopback exemption and no redirect. Its body is piped into a root
+shell on a device that has not yet decided whom to trust, so anyone able to
+rewrite it in flight owns the device. The URL and pin are rendered from the
+request (honouring `X-Forwarded-Proto` / `X-Forwarded-Host`), because a hosted
+hub's configured name is frequently not the one the operator reached. The script
+carries no credential: it locates a `cloop` binary and hands off to
+`cloop executor agent install`, where the hardening above actually lives.
+
 ---
 
 ## See also

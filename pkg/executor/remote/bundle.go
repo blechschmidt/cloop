@@ -21,6 +21,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 )
@@ -94,6 +95,69 @@ func DecodeBundle(s string) (Bundle, error) {
 		return Bundle{}, err
 	}
 	return b, nil
+}
+
+// TokenFileMode is the permission an enrollment file must carry. It is the
+// same 0600 the agent's long-lived credential uses, for the same reason: the
+// contents are a bearer credential for as long as they are unredeemed.
+const TokenFileMode os.FileMode = 0o600
+
+// ReadTokenFile loads enrollment material from a file, accepting either a
+// bundle or a bare token.
+//
+// This is what lets an installed service keep the token out of its command
+// line (see pkg/executor/install): a unit file is world-readable and
+// `systemctl show` prints ExecStart to anyone, so the credential travels as a
+// path and is read here instead.
+//
+// Accepting both forms is not laxity — an operator with a bare token from an
+// older hub, and a provisioning system writing the bundle the dashboard
+// displays, should both work without the operator having to know which one
+// they hold. The prefix makes the two unambiguous.
+//
+// warning is non-empty when the file is readable by anyone but its owner. It
+// is a warning rather than a refusal for the reason set out in the agent's
+// credential loader: bricking a fleet because a provisioning script ran with
+// the wrong umask is a worse outcome than the exposure, and the operator can
+// act on a warning by revoking the token.
+func ReadTokenFile(path string) (b Bundle, warning string, err error) {
+	clean := strings.TrimSpace(path)
+	if clean == "" {
+		return Bundle{}, "", fmt.Errorf("remote: no enrollment file path given")
+	}
+	info, err := os.Stat(clean)
+	if err != nil {
+		return Bundle{}, "", fmt.Errorf("remote: read enrollment file %s: %w", clean, err)
+	}
+	if perm := info.Mode().Perm(); perm&0o077 != 0 {
+		warning = fmt.Sprintf(
+			"enrollment file %s is mode %04o; it should be %04o — treat the token as exposed and revoke it after enrolling",
+			clean, perm, TokenFileMode)
+	}
+	raw, err := os.ReadFile(clean)
+	if err != nil {
+		return Bundle{}, warning, fmt.Errorf("remote: read enrollment file %s: %w", clean, err)
+	}
+	body := strings.TrimSpace(string(raw))
+	if body == "" {
+		return Bundle{}, warning, fmt.Errorf("remote: enrollment file %s is empty", clean)
+	}
+	if strings.HasPrefix(body, bundlePrefix) {
+		bundle, decErr := DecodeBundle(body)
+		if decErr != nil {
+			return Bundle{}, warning, decErr
+		}
+		return bundle, warning, nil
+	}
+	// A bare token carries no server or pin; the caller supplies those from
+	// its own flags. Validate is deliberately not called here for that
+	// reason — a token-only file is a legitimate input, not an invalid
+	// bundle.
+	if strings.ContainsAny(body, " \t\n") {
+		return Bundle{}, warning, fmt.Errorf(
+			"remote: enrollment file %s does not look like a token or a %s… bundle", clean, bundlePrefix)
+	}
+	return Bundle{Token: body}, warning, nil
 }
 
 // Command renders the copy-pasteable device command for this bundle.

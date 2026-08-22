@@ -682,6 +682,22 @@ type enrollResponse struct {
 	ExpiresAt   time.Time         `json:"expires_at"`
 	WorkDirRoot string            `json:"workdir_root,omitempty"`
 	Labels      map[string]string `json:"labels,omitempty"`
+
+	// Bundle packs the server URL, the token and the pin into one blob, so
+	// the three cannot be pasted out of step with each other.
+	Bundle string `json:"bundle,omitempty"`
+	// Pin is the hub's SPKI fingerprint, or "" when it has no certificate
+	// configured. Surfaced separately from Bundle so the panel can say when
+	// there is none rather than leaving the operator to notice its absence.
+	Pin string `json:"pin,omitempty"`
+	// InstallCommand is the one-command onboarding snippet: fetch
+	// /install.sh and run it with the bundle in the environment. Empty when
+	// the dashboard is being served over plaintext HTTP, since /install.sh
+	// refuses to answer such a request and offering the command anyway would
+	// send the operator to a device to watch it fail.
+	InstallCommand string `json:"install_command,omitempty"`
+	// InstallUnavailable explains an empty InstallCommand.
+	InstallUnavailable string `json:"install_unavailable,omitempty"`
 	// Notice is shown next to the token. It is part of the payload rather
 	// than hard-coded in the frontend so the CLI and the UI cannot drift on
 	// what they promise about recoverability.
@@ -742,29 +758,50 @@ func (s *Server) handleExecutorEnroll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	token, rec, err := remote.Mint(store, remote.MintOptions{
+	// MintBundle rather than Mint: the bundle carries the server URL and the
+	// hub's certificate pin alongside the token, which is what lets the
+	// panel offer a one-command install (Task 20172) and what stops a device
+	// from trusting whichever server answers at that hostname.
+	serverURL := agentConnectURL(r)
+	pin := s.transportPin()
+	bundle, rec, err := remote.MintBundle(store, remote.MintOptions{
 		Name:        strings.TrimSpace(req.Name),
 		TTL:         ttl,
 		WorkDirRoot: strings.TrimSpace(req.WorkDirRoot),
 		Labels:      req.Labels,
+		Server:      serverURL,
+		Pin:         pin,
 	})
 	if err != nil {
 		jsonErr(w, "mint enrollment token: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	encoded, err := bundle.Encode()
+	if err != nil {
+		jsonErr(w, "encode enrollment bundle: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
 
-	serverURL := agentConnectURL(r)
 	resp := enrollResponse{
 		ID:          rec.ID,
 		Name:        rec.Name,
-		Token:       token,
+		Token:       bundle.Token,
 		ServerURL:   serverURL,
-		Command:     fmt.Sprintf("cloop executor agent --server %s --token %s", serverURL, token),
+		Command:     bundle.Command(),
 		ExpiresAt:   rec.ExpiresAt,
 		WorkDirRoot: rec.WorkDirRoot,
 		Labels:      rec.Labels,
+		Bundle:      encoded,
+		Pin:         pin,
 		Notice: "This token is shown once and cannot be recovered — only its hash is stored. " +
 			"It is single-use and expires at the time above. If it leaks, revoke it from this panel.",
+	}
+	if requestIsTLS(r) {
+		resp.InstallCommand = installCommandFor(r, encoded)
+	} else {
+		resp.InstallUnavailable = "The one-command installer is served only over HTTPS, because it is piped " +
+			"into a root shell on a device that does not yet know which control plane to trust. " +
+			"Use the command above, or serve this hub over TLS."
 	}
 	// The ID and name are logged; the token deliberately is not, not even at
 	// debug level. A token in a log file is a token that outlives its single

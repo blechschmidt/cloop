@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -202,7 +203,35 @@ func (a *Agent) persistCredential(w remote.WelcomePayload) error {
 	}
 	a.cred = cred
 	a.mu.Unlock()
-	return SaveCredential(a.cfg.CredentialPath, cred)
+	if err := SaveCredential(a.cfg.CredentialPath, cred); err != nil {
+		return err
+	}
+	a.retireTokenFile()
+	return nil
+}
+
+// retireTokenFile deletes the spent enrollment token.
+//
+// Ordering is deliberate: this runs only after the durable credential is
+// safely on disk. Deleting first would turn a failed credential write into an
+// unrecoverable device — the token spent on the control plane, and the only
+// copy of it gone from the device too.
+//
+// Failure is logged, not returned. The token is already single-use and already
+// redeemed, so a file that cannot be removed is untidy rather than dangerous,
+// and it is not worth failing an otherwise successful enrollment over.
+func (a *Agent) retireTokenFile() {
+	path := strings.TrimSpace(a.cfg.TokenFile)
+	if path == "" {
+		return
+	}
+	if err := os.Remove(path); err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			a.cfg.logf("note: could not remove the spent enrollment file %s: %v", path, err)
+		}
+		return
+	}
+	a.cfg.logf("removed the spent enrollment file %s", path)
 }
 
 // resumeOffers lists workloads still running, with how much output each has

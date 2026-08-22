@@ -278,6 +278,23 @@ and the hub sends `bye` with `reconnect=false` so the agent stops rather than
 retrying. Enrollment tokens expire on their own (15 min default, 24 h max);
 **agent credentials do not expire** — revocation is the only way to end one.
 
+On a device running the installed service, re-enrolling means replacing the
+credential file rather than editing the unit:
+
+```console
+# on the device, as root
+$ install -m 0600 /dev/null /var/lib/cloop-executor/enrollment
+$ printf '%s\n' "$CLOOP_ENROLL_BUNDLE" > /var/lib/cloop-executor/enrollment
+$ rm -f /var/lib/cloop-executor/agent.json      # drop the revoked identity
+$ systemctl restart cloop-executor
+```
+
+The agent removes the enrollment file once it has redeemed the token, so an
+empty `/var/lib/cloop-executor/enrollment` on a healthy device is expected, not
+a fault. To remove the device entirely, `cloop executor agent install
+--uninstall --purge` — idempotent, and it verifies afterwards that no unit,
+credential or state directory survives.
+
 ### Secret sealing key (`CLOOP_SECRET_KEY`) — no rotation path
 
 > **Changing this key makes every stored secret permanently unopenable.** There

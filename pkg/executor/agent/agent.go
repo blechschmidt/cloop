@@ -45,6 +45,17 @@ type Config struct {
 	Server string
 	// Token is an enrollment token, used only until a credential is issued.
 	Token string
+	// TokenFile is the file Token was read from, when it came from one.
+	//
+	// The agent deletes it once the token has been redeemed. An enrollment
+	// token is single-use, so after redemption the file holds a dead secret
+	// that still looks live: it would be carried into every backup and disk
+	// image of the device, and an operator finding it later cannot tell
+	// whether it is spent. Removing it makes the credential's lifetime match
+	// its usefulness. Set by `cloop executor agent --token-file`, which is
+	// how the installed service receives its token without it appearing in
+	// ExecStart.
+	TokenFile string
 	// CredentialPath is where the long-lived credential is persisted.
 	// Empty uses DefaultCredentialPath().
 	CredentialPath string

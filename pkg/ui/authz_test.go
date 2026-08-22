@@ -129,7 +129,8 @@ func TestMutatingRoutesRequireMutatingPermissions(t *testing.T) {
 	t.Parallel()
 
 	srv := &Server{WorkDir: t.TempDir()}
-	sources := serverSource + "\n" + providerCallsSource + "\n" + executorsAPISource + "\n" + routesSource
+	sources := serverSource + "\n" + providerCallsSource + "\n" + executorsAPISource +
+		"\n" + routesSource + "\n" + installScriptSource
 	handlerNames := handlerNamesByPattern()
 
 	for _, rs := range srv.routeTable() {

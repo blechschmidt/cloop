@@ -382,6 +382,17 @@ func (s *Server) routeTable() []routeSpec {
 		// falls through to "/" and answers a JSON client with an HTML page.
 		{Pattern: "/api/executors", Handler: s.handleExecutorsList, Perm: execRead, Scope: scopeGlobal},
 		{Pattern: "POST /api/executors/enroll", Handler: s.handleExecutorEnroll, Perm: execMgmt, Scope: scopeGlobal},
+		// The edge-device bootstrap script (Task 20172). Same permission as
+		// minting a token, because it is the other half of the same action:
+		// it discloses the hub's URL and certificate pin, and it is useful
+		// only to someone who can also mint the token that goes with it.
+		// The handler additionally refuses to answer over plaintext HTTP.
+		//
+		// Written as a literal, like every other row: the table is also read
+		// by the authz drift tests, which parse it as source. The literal is
+		// checked against installScriptPath by
+		// TestInstallScriptRouteMatchesTheConstant.
+		{Pattern: "/install.sh", Handler: s.handleInstallScript, Perm: execMgmt, Scope: scopeGlobal},
 		{Pattern: "DELETE /api/executors/{id}", Handler: s.handleExecutorDelete, Perm: execMgmt, Scope: scopeExecutor},
 		{Pattern: "POST /api/executors/{id}/cordon", Handler: s.handleExecutorCordon, Perm: execMgmt, Scope: scopeExecutor},
 		{Pattern: "POST /api/executors/{id}/uncordon", Handler: s.handleExecutorUncordon, Perm: execMgmt, Scope: scopeExecutor},

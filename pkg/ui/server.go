@@ -10486,10 +10486,34 @@ const dashboardHTML = `<!DOCTYPE html>
         <span class="exec-banner-icon">&#9888;</span>
         <span id="enrollNotice"></span>
       </div>
-      <div class="form-group">
-        <label class="form-label">Run this on the device</label>
-        <div class="exec-token" id="enrollCommand"></div>
+      <!-- One-command onboarding (Task 20172). Shown first because it is the
+           path that also installs a hardened service unit, a dedicated user
+           and a 0600 credential — the manual command below installs nothing. -->
+      <div class="form-group" id="enrollInstallGroup" style="display:none">
+        <label class="form-label">Install as a service (recommended)</label>
+        <div class="exec-token" id="enrollInstallCommand"></div>
+        <div style="font-size:11.5px;color:var(--muted);margin-top:6px">
+          Fetches <code>/install.sh</code> from this hub and installs a systemd service with
+          <code>Restart=always</code>, a dedicated non-login user, and the token stored at mode 0600 &mdash;
+          never on the command line. Requires root on the device.
+        </div>
+        <div style="margin-top:8px">
+          <button class="btn" onclick="copyEnrollInstall()">Copy install command</button>
+        </div>
       </div>
+      <div class="exec-banner warn" id="enrollInstallNote" style="display:none;margin-bottom:12px">
+        <span class="exec-banner-icon">&#9888;</span>
+        <span id="enrollInstallNoteText"></span>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Or run the agent in the foreground</label>
+        <div class="exec-token" id="enrollCommand"></div>
+        <div style="font-size:11.5px;color:var(--muted);margin-top:6px">
+          Nothing is installed and nothing restarts after a reboot. Good for a first check;
+          use the installer above for a device you intend to keep.
+        </div>
+      </div>
+      <div style="font-size:11.5px;color:var(--muted);margin-bottom:4px" id="enrollPin"></div>
       <div style="font-size:11.5px;color:var(--muted);margin-bottom:12px" id="enrollExpiry"></div>
       <div class="modal-footer">
         <button class="btn" onclick="copyEnrollCommand()">Copy command</button>
@@ -18639,6 +18663,31 @@ window.submitEnroll = function() {
     if (cmd) cmd.textContent = d.command || '';
     const notice = document.getElementById('enrollNotice');
     if (notice) notice.textContent = d.notice || '';
+
+    // The installer snippet is present only when the hub is served over
+    // HTTPS: /install.sh refuses plaintext, so showing the command anyway
+    // would send the operator to a device to watch curl fail.
+    const installGroup = document.getElementById('enrollInstallGroup');
+    const installCmd = document.getElementById('enrollInstallCommand');
+    const installNote = document.getElementById('enrollInstallNote');
+    const installNoteText = document.getElementById('enrollInstallNoteText');
+    if (installCmd) installCmd.textContent = d.install_command || '';
+    if (installGroup) installGroup.style.display = d.install_command ? 'block' : 'none';
+    if (installNoteText) installNoteText.textContent = d.install_unavailable || '';
+    if (installNote) installNote.style.display = d.install_unavailable ? 'flex' : 'none';
+
+    // Say plainly when there is no pin. An unpinned enrollment trusts
+    // whichever server answers at that hostname, and its absence is not
+    // something an operator will notice on their own.
+    const pin = document.getElementById('enrollPin');
+    if (pin) {
+      pin.textContent = d.pin
+        ? 'Pinned to this hub’s key: ' + d.pin
+        : 'No certificate pin — this hub has no ui.tls certificate, so the device will trust '
+          + 'the system store only.';
+      pin.style.color = d.pin ? 'var(--muted)' : 'var(--red)';
+    }
+
     const exp = document.getElementById('enrollExpiry');
     if (exp) {
       exp.textContent = 'Token ' + (d.id || '') + ' expires '
@@ -18653,17 +18702,28 @@ window.submitEnroll = function() {
   });
 };
 
-window.copyEnrollCommand = function() {
-  const cmd = document.getElementById('enrollCommand');
-  if (!cmd) return;
-  const text = cmd.textContent || '';
+// _copyFromElement is shared by both copy buttons in the enroll dialog. The
+// clipboard API is unavailable on a page served over plaintext HTTP, so the
+// fallback has to say something useful rather than silently doing nothing.
+function _copyFromElement(id, label) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  const text = el.textContent || '';
   if (navigator.clipboard && navigator.clipboard.writeText) {
     navigator.clipboard.writeText(text)
-      .then(() => toast('Command copied', 'ok'))
+      .then(() => toast(label + ' copied', 'ok'))
       .catch(() => toast('Copy failed — select the text manually', 'err'));
   } else {
     toast('Clipboard unavailable — select the text manually', 'err');
   }
+}
+
+window.copyEnrollCommand = function() {
+  _copyFromElement('enrollCommand', 'Command');
+};
+
+window.copyEnrollInstall = function() {
+  _copyFromElement('enrollInstallCommand', 'Install command');
 };
 
 // ── Per-project executor selection ──────────────────────────────────────────

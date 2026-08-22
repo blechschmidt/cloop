@@ -266,6 +266,7 @@ or when the control plane revokes its credential.`,
 		caFile, _ := cmd.Flags().GetString("ca-file")
 		insecure, _ := cmd.Flags().GetBool("insecure-transport")
 		bundleStr, _ := cmd.Flags().GetString("bundle")
+		tokenFile, _ := cmd.Flags().GetString("token-file")
 
 		// A bundle carries server, token and pin together, which is the
 		// point: those three have to agree, and three separately-pasted
@@ -276,18 +277,22 @@ or when the control plane revokes its credential.`,
 			if err != nil {
 				return err
 			}
-			if strings.TrimSpace(server) == "" {
-				server = b.Server
+			applyBundleDefaults(b, &server, &token, &pin, &root)
+		}
+
+		// --token-file is how an installed service receives its enrollment
+		// material: the file is 0600 and the unit carries only its path, so
+		// the token never appears in ExecStart, in `ps`, or in the shell
+		// history of whoever provisioned the device.
+		if strings.TrimSpace(tokenFile) != "" {
+			b, warning, err := remote.ReadTokenFile(tokenFile)
+			if err != nil {
+				return err
 			}
-			if strings.TrimSpace(token) == "" {
-				token = b.Token
+			if warning != "" {
+				color.New(color.FgYellow, color.Bold).Fprintf(os.Stderr, "warning: %s\n", warning)
 			}
-			if strings.TrimSpace(pin) == "" {
-				pin = b.Pin
-			}
-			if strings.TrimSpace(root) == "" {
-				root = b.WorkDirRoot
-			}
+			applyBundleDefaults(b, &server, &token, &pin, &root)
 		}
 
 		labels, err := parseLabelPairs(labelPairs)
@@ -299,6 +304,7 @@ or when the control plane revokes its credential.`,
 		a, err := agent.New(agent.Config{
 			Server:            server,
 			Token:             token,
+			TokenFile:         strings.TrimSpace(tokenFile),
 			CredentialPath:    credPath,
 			WorkDirRoot:       root,
 			MaxConcurrent:     maxConc,
@@ -454,6 +460,27 @@ var executorAgentsCmd = &cobra.Command{
 	},
 }
 
+// applyBundleDefaults fills any of server/token/pin/root the operator did not
+// set explicitly from a decoded bundle.
+//
+// Explicit flags win throughout, so an operator staging a certificate rotation
+// can override the pin without re-minting the bundle, and one moving a device
+// to a new hub can override the server.
+func applyBundleDefaults(b remote.Bundle, server, token, pin, root *string) {
+	if strings.TrimSpace(*server) == "" {
+		*server = b.Server
+	}
+	if strings.TrimSpace(*token) == "" {
+		*token = b.Token
+	}
+	if strings.TrimSpace(*pin) == "" {
+		*pin = b.Pin
+	}
+	if strings.TrimSpace(*root) == "" {
+		*root = b.WorkDirRoot
+	}
+}
+
 // parseLabelPairs converts repeated --label k=v flags into a map.
 func parseLabelPairs(pairs []string) (map[string]string, error) {
 	if len(pairs) == 0 {
@@ -485,6 +512,9 @@ func init() {
 	executorAgentCmd.Flags().String("server", "",
 		"control-plane WebSocket URL (default: from the saved credential)")
 	executorAgentCmd.Flags().String("token", "", "enrollment token (first run only)")
+	executorAgentCmd.Flags().String("token-file", "",
+		"read the enrollment token or bundle from this 0600 file instead of the command line, "+
+			"so it never appears in `ps` or in a unit file; the file is deleted once the token is redeemed")
 	executorAgentCmd.Flags().String("credential", "",
 		"path to the agent credential file (default: ~/.cloop/agent.json)")
 	executorAgentCmd.Flags().String("workdir-root", "",
