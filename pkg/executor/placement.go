@@ -60,6 +60,7 @@ const (
 	ConstraintSandboxBuild     Constraint = "sandbox_build"
 	ConstraintSandboxMounts    Constraint = "sandbox_mounts"
 	ConstraintWorkspace        Constraint = "workspace"
+	ConstraintWriteBack        Constraint = "write_back"
 )
 
 // Candidate is one executor offered to the scheduler, together with everything
@@ -166,6 +167,16 @@ type Requirements struct {
 	// path on the control-plane host, because the workload was dispatched with
 	// Workspace.Kind "bind" — i.e. with the tree assumed to be there already.
 	RequireHostFilesystemWorkspace bool
+	// RequireWriteBack demands a node that can return the files the workload
+	// changes, because this one's tree does not survive the run.
+	//
+	// It is the workspace constraint's mirror image, and its failure is the
+	// worse of the two. An executor that cannot fetch produces a harness that
+	// reports on a repository it never saw; one that cannot write back produces
+	// a harness that reports, accurately, on work that is then discarded with
+	// the sandbox. The first is confusing on arrival, the second is invisible
+	// until someone goes looking for the commit.
+	RequireWriteBack bool
 	// RequireStream and RequireSignal demand live output and the ability to
 	// stop a workload — the two capabilities the Web UI's run panel needs.
 	RequireStream bool
@@ -308,7 +319,7 @@ func CheckSandboxSupport(ex Executor, req Requirements, projectPath string) erro
 	switch rej.Constraint {
 	case ConstraintHostPolicy, ConstraintIsolation:
 		return hostDenied(ex, projectPath)
-	case ConstraintWorkspace:
+	case ConstraintWorkspace, ConstraintWriteBack:
 		// Never folded into hostDenied. "Bind this project to a sandbox" is
 		// the opposite of the fix here: the bound executor is *already*
 		// isolated and that is precisely why it cannot see the tree. The
@@ -433,6 +444,10 @@ func reject(c Candidate, req Requirements) (Rejection, bool) {
 	if req.RequireHostFilesystemWorkspace && !caps.SharesHostFilesystem {
 		return no(ConstraintWorkspace, "does not share the control-plane filesystem, so "+
 			"a bind workspace would be an empty directory there")
+	}
+	if req.RequireWriteBack && !caps.SupportsWriteBack {
+		return no(ConstraintWriteBack, "cannot return the files a task changes, so the work "+
+			"would be discarded with the sandbox when the run ends")
 	}
 	if req.RequireStream && !caps.SupportsStream {
 		return no(ConstraintStream, "cannot stream output")

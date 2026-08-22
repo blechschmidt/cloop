@@ -222,6 +222,8 @@ function _renderTaskDetails(d) {
   if (t.max_minutes)       chips.push('<span class="td-chip" title="Per-task timeout override. 0 = inherits project default.">Timeout<strong>'+t.max_minutes+'m</strong></span>');
   if (t.fail_count)        chips.push('<span class="td-chip">Failures<strong>'+t.fail_count+'</strong></span>');
   if (t.heal_attempts)     chips.push('<span class="td-chip">Heal attempts<strong>'+t.heal_attempts+'</strong></span>');
+  if (t.write_back_branch) chips.push('<span class="td-chip" title="Branch an isolated executor left this task\'s work on. Local runs commit into the working tree and have no branch.">Branch<strong>'+esc(t.write_back_branch)+'</strong></span>');
+  if (t.write_back_commit) chips.push('<span class="td-chip" title="'+esc(t.write_back_commit)+'">Commit<strong>'+esc(t.write_back_commit.slice(0,12))+'</strong></span>');
   if (t.started_at)        chips.push('<span class="td-chip">Started<strong>'+esc(_fmtDateTime(t.started_at))+'</strong></span>');
   if (t.completed_at)      chips.push('<span class="td-chip">Completed<strong>'+esc(_fmtDateTime(t.completed_at))+'</strong></span>');
   const dur = _fmtDuration(t.started_at, t.completed_at);

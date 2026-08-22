@@ -71,6 +71,12 @@ func Detect(opts DetectOptions) remote.AgentCapabilities {
 	// decision rather than a confusing transcript.
 	if _, err := lookPath("git"); err == nil {
 		caps.WorkspaceProvisioning = true
+		// The same binary answers both questions, and the two failures are the
+		// same shape at opposite ends of a run: without git this device can
+		// neither fetch the tree nor give the work back, and in each case it
+		// would otherwise accept the start and produce a transcript that looks
+		// exactly like a run that worked.
+		caps.WriteBack = true
 	}
 
 	switch {

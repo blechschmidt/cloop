@@ -118,6 +118,17 @@ type Capabilities struct {
 	// placement time. Drivers that share the host filesystem report false and
 	// are given Kind "bind" instead, because their tree is already there.
 	SupportsWorkspaceProvisioning bool `json:"supports_workspace_provisioning"`
+	// SupportsWriteBack reports whether this driver can return the files a
+	// workload changed (Spec.WriteBack).
+	//
+	// Separate from SupportsWorkspaceProvisioning even though the same drivers
+	// implement both, because they are two different halves of the run and a
+	// driver can genuinely have one without the other — an executor that
+	// shares the host filesystem needs neither, and one whose transport cannot
+	// carry bytes back can fetch but not return. Every field a driver can
+	// quietly drop needs a flag that says so, and this is the one whose
+	// omission costs work rather than confusion.
+	SupportsWriteBack bool `json:"supports_write_back"`
 	// SupportsSandboxMounts reports whether Spec.Mounts is honoured.
 	//
 	// It is tracked separately from SupportsImageOverride even though the same
@@ -240,6 +251,14 @@ type Spec struct {
 	// workspace.go. The zero value is "unspecified", which leaves a driver's
 	// pre-existing behaviour alone.
 	Workspace Workspace `json:"workspace,omitempty"`
+
+	// WriteBack says how the file changes the workload produces get back to
+	// the hub. It carries no credential either — a push reuses the grant
+	// Workspace named — for the reasons set out in writeback.go. The zero
+	// value means nothing is returned, which is correct for a driver that
+	// shares the hub's filesystem and wrong for every other one; the caller
+	// that builds the Spec is responsible for saying so.
+	WriteBack WriteBack `json:"write_back,omitempty"`
 }
 
 // SecretBinding says which parts of a Spec came from one secret lease.
@@ -354,6 +373,50 @@ func (s Spec) Validate() error {
 			"network egress disabled; either pre-populate the tree or grant egress "+
 			"(.cloop/sandbox.yaml capabilities.network)", ErrInvalidSpec, s.Workspace.Host())
 	}
+	if err := s.WriteBack.Validate(); err != nil {
+		return err
+	}
+	// The same contradiction as above, in the other direction, and it has to be
+	// caught here because it is silent otherwise: a push that cannot reach the
+	// network fails *after* the harness has run, so the work is already done
+	// and about to be discarded. Mode bundle is the answer for an egress-less
+	// sandbox and exists precisely so this is a choice rather than a loss.
+	if s.WriteBack.Mode == WriteBackPush && s.DisableNetwork {
+		return fmt.Errorf("%w: write_back mode push has to reach the origin, but this workload "+
+			"has network egress disabled; use mode bundle for a sandbox with no egress",
+			ErrInvalidSpec)
+	}
+	// A push has nowhere to go unless the tree came from somewhere. Bind
+	// workspaces are exempt: they share the hub's filesystem, so their changes
+	// are already where the hub can see them and a write-back is redundant
+	// rather than impossible — but that redundancy is also a bug worth naming.
+	if s.WriteBack.Enabled() {
+		switch s.Workspace.Kind {
+		case WorkspaceGit:
+			// The tree has to be pinned to an exact commit, not to a branch.
+			//
+			// Everything downstream is measured against the commit the sandbox
+			// started from: the range it bundles, the ancestry check, the set
+			// of paths the hub inspects. A branch name does not identify one —
+			// the remote tip can move between the hub deciding to dispatch and
+			// the sandbox fetching — and a base the hub guessed wrong is not a
+			// slightly-off range, it is a range the hub does not hold the other
+			// end of. Pinning makes "what did this task change" answerable by
+			// construction rather than by assumption.
+			if err := ValidateCommitSHA(s.Workspace.Ref); err != nil {
+				return fmt.Errorf("%w: write_back needs the workspace pinned to an exact "+
+					"commit so the returned changes can be measured against it, but the ref is "+
+					"%q: %v", ErrInvalidSpec, s.Workspace.Ref, err)
+			}
+		case WorkspaceBind:
+			return fmt.Errorf("%w: write_back is set on a bind workspace, whose changes are "+
+				"already on the control plane's filesystem", ErrInvalidSpec)
+		default:
+			return fmt.Errorf("%w: write_back mode %q needs a git workspace to have a branch "+
+				"and an origin, but the workspace kind is %q", ErrInvalidSpec, s.WriteBack.Mode,
+				s.Workspace.Kind)
+		}
+	}
 	return s.ResourceLimits.Validate()
 }
 
@@ -372,6 +435,7 @@ func (s Spec) SandboxRequirements() Requirements {
 		RequireResourceLimits:          !s.ResourceLimits.IsZero(),
 		RequireWorkspaceProvisioning:   s.Workspace.NeedsProvisioning(),
 		RequireHostFilesystemWorkspace: s.Workspace.Kind == WorkspaceBind,
+		RequireWriteBack:               s.WriteBack.Enabled(),
 	}
 }
 
@@ -441,6 +505,12 @@ type Status struct {
 	// a string rather than an error so Status stays serializable across
 	// the remote-executor boundary.
 	Error string `json:"error,omitempty"`
+	// WriteBack reports what the driver recovered of the workload's file
+	// changes, once the workload is terminal. Nil means the driver returned
+	// nothing — either the Spec asked for no write-back, or the workload is
+	// still running. It is metadata only; the bundle bytes, when there are
+	// any, are collected through WriteBackFetcher.
+	WriteBack *WriteBackResult `json:"write_back,omitempty"`
 }
 
 // StreamName identifies which output stream a LogLine came from.
@@ -617,6 +687,13 @@ type RunResult struct {
 	// Dropped is true when the consumer fell behind and chunks were
 	// discarded, so Output is incomplete. Detected via LogLine.Seq gaps.
 	Dropped bool
+	// WriteBack is what the driver recovered of the workload's file changes,
+	// copied from the terminal Status. Nil when the Spec asked for none.
+	WriteBack *WriteBackResult
+	// Bundle is the git bundle the driver received, for a bundle-mode
+	// write-back. Empty for every other mode — a push leaves the objects at
+	// the origin, so there is nothing for the hub to carry.
+	Bundle []byte
 }
 
 // runOutputCap bounds how much output Run buffers in memory. A misbehaving
@@ -720,6 +797,26 @@ collect:
 	defer cancel()
 	if st, statusErr := ex.Status(statusCtx, handle.ID); statusErr == nil {
 		result.Status = st
+		result.WriteBack = st.WriteBack
+	}
+
+	// The bundle is collected only when the driver says one arrived, so a
+	// driver that implements the interface is not asked for bytes on every
+	// run. A fetch failure is recorded on the result rather than returned:
+	// the workload's own outcome is what the caller asked for, and losing the
+	// work product is a separate, additive failure that must not mask a
+	// successful — or an already-failing — run.
+	if result.WriteBack != nil && result.WriteBack.Mode == WriteBackBundle && result.WriteBack.Delivered() {
+		if fetcher, ok := ex.(WriteBackFetcher); ok {
+			bundle, fetchErr := fetcher.WriteBackBundle(handle.ID)
+			if fetchErr != nil {
+				wb := *result.WriteBack
+				wb.Err = fmt.Sprintf("bundle was reported but could not be collected: %v", fetchErr)
+				result.WriteBack = &wb
+			} else {
+				result.Bundle = bundle
+			}
+		}
 	}
 
 	switch {

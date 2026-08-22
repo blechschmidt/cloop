@@ -748,6 +748,7 @@
   .event-icon.ev-task-del    { background:#888; }
   .event-icon.ev-task-status { background:#7c5fb3; }
   .event-icon.ev-evolve      { background:#39b58b; }
+  .event-icon.ev-writeback   { background:#2f7fa8; }
   .event-icon.ev-plan        { background:var(--cyan); }
   .event-icon.ev-session     { background:#444; }
   .event-icon.ev-other       { background:var(--border); color:var(--text); }

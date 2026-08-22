@@ -254,9 +254,16 @@ var transportVars = []string{
 	"SSL_CERT_FILE", "SSL_CERT_DIR",
 }
 
-// transportEnv reads the machine's transport settings, skipping anything unset
+// TransportEnv reads the machine's transport settings, skipping anything unset
 // or empty (an empty proxy variable means something different from an absent one
 // to libcurl).
+//
+// It is exported because the write-back engine (pkg/executor/gitwriteback) has
+// to reach the same remote through the same proxy a moment later. Two
+// allowlists would drift, and the drift would show up as a clone that works and
+// a push that hangs on a machine nobody can reproduce.
+func TransportEnv() []string { return transportEnv() }
+
 func transportEnv() []string {
 	out := make([]string, 0, len(transportVars))
 	for _, name := range transportVars {

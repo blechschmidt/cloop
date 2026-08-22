@@ -14,6 +14,8 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/blechschmidt/cloop/pkg/executor"
 )
 
 // LogAckBytes is how much output may accumulate before the control plane
@@ -344,6 +346,47 @@ func (s *Session) handleFrame(ctx context.Context, f Frame) (stop bool) {
 		// it exited.
 		s.trackHandle(f.Handle)
 		s.maybeAck(ctx, f.Handle, offset)
+		return false
+
+	case TypeResultChunk:
+		chunk, err := DecodeResultChunk(f)
+		if err != nil {
+			// The frame itself was malformed or over a bound. Say so: unlike a
+			// log chunk, silently dropping this one produces a bundle the
+			// agent believes it delivered whole.
+			writeError(ctx, s.conn, f.ID, CodeProtocol, err.Error())
+			return false
+		}
+		if _, err := s.ex.appendResultChunk(f.Handle, chunk); err != nil {
+			code := CodeWriteBackFailed
+			if errors.Is(err, executor.ErrHandleNotFound) {
+				code = CodeUnknownHandle
+			}
+			writeError(ctx, s.conn, f.ID, code, err.Error())
+			return false
+		}
+		s.trackHandle(f.Handle)
+		return false
+
+	case TypeResult:
+		payload, err := DecodeResult(f)
+		if err != nil {
+			writeError(ctx, s.conn, f.ID, CodeProtocol, err.Error())
+			return false
+		}
+		if err := s.ex.applyResult(f.Handle, payload); err != nil {
+			// Reported to the agent so a device that can retry knows the
+			// delivery did not land, and recorded on the handle so the run's
+			// own consumer sees the same reason rather than an absent result.
+			code := CodeWriteBackFailed
+			if errors.Is(err, executor.ErrHandleNotFound) {
+				code = CodeUnknownHandle
+			}
+			writeError(ctx, s.conn, f.ID, code, err.Error())
+			return false
+		}
+		s.trackHandle(f.Handle)
+		s.deliver(f)
 		return false
 
 	case TypeStatus:

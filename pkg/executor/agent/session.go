@@ -487,6 +487,24 @@ func (a *Agent) handleStart(ctx context.Context, sess *deviceSession, frame remo
 		})
 		return
 	}
+	// Remember how to give the work back, before the Spec is rewritten below
+	// and before the harness is allowed to touch the tree. Both orderings are
+	// load-bearing: provisionedWorkspace is about to replace the git workspace
+	// with a bind one, which has no Repo to push to, and the base commit read
+	// after the harness ran would be whatever HEAD the harness left behind.
+	if plan, err := a.planWriteBack(ctx, spec, payload.GitCredential()); err != nil {
+		a.forget(handleID)
+		a.reply(ctx, sess, remote.TypeStarted, frame.ID, handleID, remote.StartedPayload{
+			HandleID: handleID,
+			Error:    err.Error(),
+		})
+		return
+	} else if plan != nil {
+		wl.mu.Lock()
+		wl.plan = plan
+		wl.mu.Unlock()
+	}
+
 	// The fetch is this device's job and it is done; the harness runs through
 	// an inner driver that shares this filesystem, so what it is handed must
 	// say the tree is already in place. See provisionedWorkspace.
@@ -625,6 +643,17 @@ func (a *Agent) pumpOutput(wl *workload) {
 	// and the log tail — the control plane would later see the handle vanish
 	// from a heartbeat and mis-resolve a clean exit as a failure. Keeping it
 	// lets the next session deliver the truth.
+	// The work product comes back before the terminal status does. The status
+	// frame closes the hub's log stream and executor.Run reads the status the
+	// instant that stream closes, so a result sent afterwards would land on a
+	// handle whose consumer had already returned empty-handed.
+	if sess := a.currentSession(); sess != nil {
+		a.flush(ctx, sess, wl)
+		a.performWriteBack(ctx, wl, sess)
+	}
+
+	// Re-read the session: producing a write-back can take minutes, and the
+	// link the workload started on may be gone by now.
 	if sess := a.currentSession(); sess != nil {
 		a.flush(ctx, sess, wl)
 		a.deliverFinal(ctx, sess, wl)
@@ -664,6 +693,13 @@ func (a *Agent) flushAll(ctx context.Context, sess *deviceSession) {
 
 	for _, wl := range workloads {
 		a.flush(ctx, sess, wl)
+		// A workload that finished while the link was down still owes its work
+		// product. performWriteBack is a no-op once the result has been
+		// delivered, so a reconnect that races the output pump cannot commit
+		// the tree twice; what it does cover is the case the pump could not —
+		// the harness exited, there was no session to report on, and the plan
+		// has been waiting here since.
+		a.performWriteBack(ctx, wl, sess)
 		a.deliverFinal(ctx, sess, wl)
 	}
 }

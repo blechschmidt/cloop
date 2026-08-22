@@ -207,6 +207,78 @@ func TestUpsertTask(t *testing.T) {
 	assertEqual(t, "UpsertTask status", pm.TaskDone, got.Plan.Tasks[0].Status)
 }
 
+// TestSaveAndLoad_WriteBackFields pins the write-back columns (Task 20180) to
+// both task loaders. A task's branch and commit are the only record of where an
+// isolated executor left its work, so dropping them on read is not a cosmetic
+// loss — the diff becomes unreachable while the task still reports done.
+//
+// Both LoadState (bulk loader) and LoadTask (single-row loader) are exercised
+// because they carry independent SELECT column lists and independent Scan
+// argument lists: a column added to one and forgotten in the other fails
+// silently, returning a zero-valued string rather than an error.
+func TestSaveAndLoad_WriteBackFields(t *testing.T) {
+	db, _ := tempDB(t)
+	s := baseState()
+	s.PMMode = true
+
+	const (
+		wantBranch = "cloop/task-42-executor-write-back"
+		wantCommit = "9f1c0de2ab34567890abcdef1234567890abcdef"
+	)
+	s.Plan = &pm.Plan{
+		Goal: "isolated execution",
+		Tasks: []*pm.Task{
+			{
+				ID:              42,
+				Title:           "ran on a remote executor",
+				Status:          pm.TaskDone,
+				WriteBackBranch: wantBranch,
+				WriteBackCommit: wantCommit,
+			},
+			// A locally-executed task: empty is the correct value, not a
+			// missing one, and must not be confused with a dropped column.
+			{ID: 43, Title: "ran on the hub", Status: pm.TaskDone},
+		},
+	}
+	if err := db.SaveState(s); err != nil {
+		t.Fatalf("SaveState: %v", err)
+	}
+
+	got, err := db.LoadState()
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	if got.Plan == nil || len(got.Plan.Tasks) != 2 {
+		t.Fatalf("want 2 tasks, got %+v", got.Plan)
+	}
+	assertEqual(t, "LoadState Task[0].WriteBackBranch", wantBranch, got.Plan.Tasks[0].WriteBackBranch)
+	assertEqual(t, "LoadState Task[0].WriteBackCommit", wantCommit, got.Plan.Tasks[0].WriteBackCommit)
+	assertEqual(t, "LoadState Task[1].WriteBackBranch", "", got.Plan.Tasks[1].WriteBackBranch)
+	assertEqual(t, "LoadState Task[1].WriteBackCommit", "", got.Plan.Tasks[1].WriteBackCommit)
+
+	one, err := db.LoadTask(42)
+	if err != nil {
+		t.Fatalf("LoadTask(42): %v", err)
+	}
+	assertEqual(t, "LoadTask WriteBackBranch", wantBranch, one.WriteBackBranch)
+	assertEqual(t, "LoadTask WriteBackCommit", wantCommit, one.WriteBackCommit)
+
+	// UpsertTask writes through the same statement as SaveState but is the
+	// path the executor result write-back actually uses, so it gets its own
+	// assertion rather than trusting the shared helper.
+	one.WriteBackBranch = "cloop/task-42-retry"
+	one.WriteBackCommit = "0123456789abcdef0123456789abcdef01234567"
+	if err := db.UpsertTask(one); err != nil {
+		t.Fatalf("UpsertTask: %v", err)
+	}
+	again, err := db.LoadTask(42)
+	if err != nil {
+		t.Fatalf("LoadTask(42) after upsert: %v", err)
+	}
+	assertEqual(t, "upserted WriteBackBranch", one.WriteBackBranch, again.WriteBackBranch)
+	assertEqual(t, "upserted WriteBackCommit", one.WriteBackCommit, again.WriteBackCommit)
+}
+
 func TestAppendStep(t *testing.T) {
 	db, _ := tempDB(t)
 	s := baseState()

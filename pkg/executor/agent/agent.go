@@ -163,6 +163,55 @@ type workload struct {
 	// would be lost and the control plane would eventually mis-resolve it as
 	// failed.
 	reported bool
+	// plan is what this workload needs in order to write its work product back
+	// once the harness exits: the mode, the branch, the origin, and the commit
+	// the tree started at. Nil when the Spec asked for no write-back. See
+	// writeback.go for why it is remembered rather than re-derived.
+	plan *writeBackPlan
+	// wroteBack records that the result frame reached the control plane, so a
+	// reconnect that races the output pump cannot deliver two results — and,
+	// more to the point, cannot commit the tree twice.
+	wroteBack bool
+}
+
+// writeBackSpec returns the workload's write-back plan, or false when there is
+// nothing left to do.
+func (w *workload) writeBackSpec() (writeBackPlan, bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.plan == nil || w.wroteBack {
+		return writeBackPlan{}, false
+	}
+	return *w.plan, true
+}
+
+// exitCode reports the harness's exit status, which is what decides whether a
+// write-back happens at all.
+//
+// Anything that is not a clean exit reports -1 rather than its own code: a
+// killed workload can report ExitCode 0, and "the tree was left mid-edit" is
+// the question being asked, not "what number did it end with".
+func (w *workload) exitCode() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.status.State != executor.StateExited {
+		return -1
+	}
+	return w.status.ExitCode
+}
+
+// isFinished reports whether the harness has exited and its status recorded.
+func (w *workload) isFinished() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.finished
+}
+
+// markWrittenBack records that the result reached the control plane.
+func (w *workload) markWrittenBack() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.wroteBack = true
 }
 
 // New builds an agent. It does not connect; call Run.

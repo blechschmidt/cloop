@@ -413,6 +413,10 @@ function _eventVisuals(kind) {
     case 'evolve_round_start':  return { glyph:'↻', cls:'ev-evolve',      label:'evolve'    };
     case 'evolve_discovered':   return { glyph:'✨', cls:'ev-evolve',      label:'discovered'};
     case 'evolve_no_op':        return { glyph:'—', cls:'ev-evolve',      label:'no-op'     };
+    // What an isolated executor returned of a task's work. Its own row rather
+    // than a note on task_done: a task can succeed and its work still fail to
+    // come back, and that run has to be visible as its own line.
+    case 'write_back':          return { glyph:'⎇', cls:'ev-writeback',   label:'write-back'};
     case 'plan_complete':       return { glyph:'★', cls:'ev-plan',        label:'plan done' };
     case 'session_started':     return { glyph:'▷', cls:'ev-session',     label:'session'   };
     case 'session_paused':      return { glyph:'⏸', cls:'ev-session',     label:'paused'    };

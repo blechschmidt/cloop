@@ -1,0 +1,31 @@
+-- 0018_task_write_back: record where an isolated executor left a task's work
+-- (Task 20180).
+--
+-- A task that runs on the hub mutates the working tree the hub is already
+-- looking at, so "where is the result" has never needed an answer: it is on
+-- disk. A task dispatched to a remote or containerised executor does not share
+-- that filesystem. Its output exists only as a commit on a branch in the
+-- executor's clone, and unless the task row names that branch, the work is
+-- unreachable from the UI, from review, and from any later task that wanted to
+-- build on it — the run reports success and the diff is nowhere.
+--
+-- Columns:
+--
+--   write_back_branch  the branch the executor pushed the task's work to, or ''
+--                      for a task that ran locally. Empty is the correct value
+--                      for the local case rather than a NULL or a placeholder:
+--                      "there is no branch" and "the changes are already in the
+--                      tree" are the same statement, and the UI simply omits the
+--                      chip when the string is empty.
+--
+--   write_back_commit  the full SHA the branch pointed at when the executor
+--                      finished. Stored full rather than abbreviated because an
+--                      abbreviation is only unambiguous in the repository state
+--                      that produced it; the display layer shortens it.
+--
+-- NOT NULL DEFAULT '' means every row that predates this migration — and every
+-- locally-executed task written after it — reads back as the empty string, so
+-- the loaders need no NULL handling and no backfill pass runs.
+
+ALTER TABLE plan_tasks ADD COLUMN write_back_branch TEXT NOT NULL DEFAULT '';
+ALTER TABLE plan_tasks ADD COLUMN write_back_commit TEXT NOT NULL DEFAULT '';

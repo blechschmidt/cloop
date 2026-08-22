@@ -522,7 +522,8 @@ func (d *DB) LoadTask(id int) (*pm.Task, error) {
 			started_at, completed_at, deadline, verify_retries, github_issue,
 			estimated_minutes, actual_minutes, artifact_path, failure_diagnosis,
 			tags, fail_count, heal_attempts, annotations, condition_expr,
-			recurrence, next_run_at, requires_approval, approved, max_minutes
+			recurrence, next_run_at, requires_approval, approved, max_minutes,
+			write_back_branch, write_back_commit
 		FROM plan_tasks WHERE id = ? LIMIT 1`, id)
 	if err != nil {
 		return nil, classifyDriverErr(err)
@@ -550,6 +551,7 @@ func (d *DB) LoadTask(id int) (*pm.Task, error) {
 		&tagsJSON, &t.FailCount, &t.HealAttempts,
 		&annJSON, &t.Condition, &t.Recurrence,
 		&nextRunAt, &reqApproval, &approved, &t.MaxMinutes,
+		&t.WriteBackBranch, &t.WriteBackCommit,
 	); err != nil {
 		return nil, classifyDriverErr(err)
 	}
@@ -659,8 +661,9 @@ func upsertTaskTx(tx *sql.Tx, t *pm.Task) error {
 			started_at, completed_at, deadline, verify_retries, github_issue,
 			estimated_minutes, actual_minutes, artifact_path, failure_diagnosis,
 			tags, fail_count, heal_attempts, annotations, condition_expr,
-			recurrence, next_run_at, requires_approval, approved, max_minutes
-		) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+			recurrence, next_run_at, requires_approval, approved, max_minutes,
+			write_back_branch, write_back_commit
+		) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(id) DO UPDATE SET
 			title=excluded.title, description=excluded.description,
 			priority=excluded.priority, status=excluded.status, role=excluded.role,
@@ -677,7 +680,9 @@ func upsertTaskTx(tx *sql.Tx, t *pm.Task) error {
 			condition_expr=excluded.condition_expr, recurrence=excluded.recurrence,
 			next_run_at=excluded.next_run_at,
 			requires_approval=excluded.requires_approval,
-			approved=excluded.approved, max_minutes=excluded.max_minutes`,
+			approved=excluded.approved, max_minutes=excluded.max_minutes,
+			write_back_branch=excluded.write_back_branch,
+			write_back_commit=excluded.write_back_commit`,
 		t.ID, t.Title, t.Description, t.Priority, string(t.Status), string(t.Role),
 		string(depsJSON), t.Result,
 		startedAt, completedAt, deadline,
@@ -689,6 +694,7 @@ func upsertTaskTx(tx *sql.Tx, t *pm.Task) error {
 		nextRunAt,
 		boolInt(t.RequiresApproval), boolInt(t.Approved),
 		t.MaxMinutes,
+		t.WriteBackBranch, t.WriteBackCommit,
 	)
 	return err
 }
@@ -699,7 +705,8 @@ func loadTasks(conn *sql.DB) ([]*pm.Task, error) {
 			started_at, completed_at, deadline, verify_retries, github_issue,
 			estimated_minutes, actual_minutes, artifact_path, failure_diagnosis,
 			tags, fail_count, heal_attempts, annotations, condition_expr,
-			recurrence, next_run_at, requires_approval, approved, max_minutes
+			recurrence, next_run_at, requires_approval, approved, max_minutes,
+			write_back_branch, write_back_commit
 		FROM plan_tasks ORDER BY id`)
 	if err != nil {
 		return nil, err
@@ -724,6 +731,7 @@ func loadTasks(conn *sql.DB) ([]*pm.Task, error) {
 			&tagsJSON, &t.FailCount, &t.HealAttempts,
 			&annJSON, &t.Condition, &t.Recurrence,
 			&nextRunAt, &reqApproval, &approved, &t.MaxMinutes,
+			&t.WriteBackBranch, &t.WriteBackCommit,
 		); err != nil {
 			return nil, err
 		}

@@ -57,6 +57,9 @@ type handleState struct {
 	// rather than silently showing a truncated run.
 	gapped bool
 	closed bool
+	// writeBack is the in-flight assembly of this workload's work product.
+	// Nil until the device sends its first result frame; see writeback.go.
+	writeBack *writeBackState
 }
 
 // snapshotStatus returns the last known status under lock.
@@ -181,8 +184,18 @@ func (e *Executor) AgentCapabilities() AgentCapabilities {
 // provision a workspace".
 func (e *Executor) Capabilities() executor.Capabilities {
 	caps := e.AgentCapabilities().Executor()
-	if sess := e.currentSession(); sess != nil && !SupportsWorkspaceProvisioning(sess.Version()) {
-		caps.SupportsWorkspaceProvisioning = false
+	if sess := e.currentSession(); sess != nil {
+		// The device may be able to do it; the session may not be able to
+		// carry it. Both narrowings are applied here rather than in
+		// AgentCapabilities.Executor because that method has no session to
+		// consult, and a capability that is true of the device and false of
+		// the link would place work that then has nowhere to go.
+		if !SupportsWorkspaceProvisioning(sess.Version()) {
+			caps.SupportsWorkspaceProvisioning = false
+		}
+		if !SupportsWriteBack(sess.Version()) {
+			caps.SupportsWriteBack = false
+		}
 	}
 	return caps
 }
@@ -784,6 +797,15 @@ func (e *Executor) applyStatus(handleID string, p StatusPayload) {
 		st.StartedAt = hs.startedAt
 	} else if st.StartedAt.IsZero() {
 		st.StartedAt = hs.status.StartedAt
+	}
+	// The write-back is attached to the status rather than reported alongside
+	// it because this is the status a consumer reads the instant the log stream
+	// closes, and the agent's frame order — chunks, result, then status —
+	// guarantees the result has already arrived. A terminal status carrying
+	// nothing while a result frame sits on the same handle would make the
+	// delivery invisible to executor.Run.
+	if hs.writeBack != nil && hs.writeBack.result != nil {
+		st.WriteBack = hs.writeBack.result
 	}
 	hs.status = st
 	shouldClose := st.State.Terminal() && !hs.closed

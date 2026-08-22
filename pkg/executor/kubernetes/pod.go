@@ -492,6 +492,11 @@ type podRequest struct {
 	// never holds a credential — only the name of a grant — so it is safe to
 	// keep in a struct that ends up in an annotation and a log line.
 	Workspace executor.Workspace
+	// WriteBack says how the files the harness changes get back to the hub.
+	// The commit the returned range is measured against is Workspace.Ref,
+	// which Spec.Validate requires to be an exact SHA whenever a write-back is
+	// asked for. See buildWriteBackArgv.
+	WriteBack executor.WriteBack
 	// WorkspaceSecretName is the Secret the caller has already created holding
 	// the leased credential, or "" for an unauthenticated fetch. buildPod does
 	// not create it and cannot: it is pure. It only wires the reference.
@@ -685,12 +690,31 @@ func buildPod(req podRequest) (*pod, error) {
 		annotations[AnnotationSandboxHash] = sanitizeLabelValue(h)
 	}
 
+	// The harness argv, possibly wrapped so the work it produces survives the
+	// Pod. See buildWriteBackArgv for why a wrapper is the only place a
+	// Kubernetes Pod can run anything after its main container.
+	harnessArgv, err := buildWriteBackArgv(req, workDir)
+	if err != nil {
+		return nil, err
+	}
+	// The write-back's credential goes to the harness container, because that
+	// is where the push runs — but it reaches `cloop workspace writeback`
+	// before the harness is spawned and is removed from the environment there,
+	// so the harness itself never sees it. See cmd/workspace_writeback_cmd.go.
+	if req.WriteBack.Mode == executor.WriteBackPush {
+		wbEnv, err := workspaceCredentialEnv(req)
+		if err != nil {
+			return nil, err
+		}
+		env = append(env, wbEnv...)
+	}
+
 	spec.Containers = []container{{
 		Name:            ContainerName,
 		Image:           strings.TrimSpace(req.Image),
 		ImagePullPolicy: strings.TrimSpace(req.ImagePullPolicy),
-		Command:         []string{req.Argv[0]},
-		Args:            append([]string(nil), req.Argv[1:]...),
+		Command:         []string{harnessArgv[0]},
+		Args:            append([]string(nil), harnessArgv[1:]...),
 		WorkingDir:      workDir,
 		Env:             env,
 		Resources:       res,
@@ -799,18 +823,9 @@ func buildWorkspaceInitContainer(req podRequest, workDir string, runAsUser, runA
 		argv = append(argv, "--size-limit-mb", strconv.Itoa(w.SizeLimitMB))
 	}
 
-	env := []envVar{{Name: EnvWorkspaceUser, Value: defaultWorkspaceUser}}
-	if name := strings.TrimSpace(req.WorkspaceSecretName); name != "" {
-		if err := validateDNSSubdomain(name, "workspace secret"); err != nil {
-			return nil, fmt.Errorf("%w: %v", executor.ErrInvalidSpec, err)
-		}
-		env = append(env, envVar{
-			Name: EnvWorkspaceToken,
-			ValueFrom: &envVarSource{SecretKeyRef: &secretKeySelector{
-				Name: name,
-				Key:  EnvWorkspaceToken,
-			}},
-		})
+	env, err := workspaceCredentialEnv(req)
+	if err != nil {
+		return nil, err
 	}
 
 	return &container{
@@ -857,6 +872,111 @@ func workspaceCommand(argv []string) string {
 		return first
 	}
 	return cloopCommand
+}
+
+// workspaceCredentialEnv renders the environment carrying the brokered git
+// credential into a container.
+//
+// One function for both the provisioner and the harness wrapper, because they
+// need the identical thing: the fetch and the push authenticate against the
+// same host with the same grant. The credential itself never appears in the
+// object this file builds — only a secretKeyRef — which is a property asserted
+// directly against the marshalled JSON in workspace_test.go.
+func workspaceCredentialEnv(req podRequest) ([]envVar, error) {
+	env := []envVar{{Name: EnvWorkspaceUser, Value: defaultWorkspaceUser}}
+	name := strings.TrimSpace(req.WorkspaceSecretName)
+	if name == "" {
+		return env, nil
+	}
+	if err := validateDNSSubdomain(name, "workspace secret"); err != nil {
+		return nil, fmt.Errorf("%w: %v", executor.ErrInvalidSpec, err)
+	}
+	return append(env, envVar{
+		Name: EnvWorkspaceToken,
+		ValueFrom: &envVarSource{SecretKeyRef: &secretKeySelector{
+			Name: name,
+			Key:  EnvWorkspaceToken,
+		}},
+	}), nil
+}
+
+// buildWriteBackArgv returns the harness container's command, wrapped when the
+// Spec asks for the work to be returned.
+//
+// # Why a wrapper
+//
+// Kubernetes gives a Pod no place to run anything after its main container.
+// restartPolicy is Never, init containers run strictly before, a sidecar cannot
+// observe another container's exit, and a second Pod cannot see the emptyDir
+// that dies with the first. The only moment between "the harness has stopped
+// writing" and "the workspace volume no longer exists" is inside the harness
+// container itself — so when a write-back is asked for, `cloop workspace
+// writeback` becomes the entry point and the real command follows a "--".
+//
+// The wrapper runs the harness, forwards its output and its signals, waits,
+// commits, pushes, and exits with the harness's own status. Three properties
+// are preserved deliberately, because each one silently breaking would be worse
+// than not wrapping at all:
+//
+//   - the exit code, which is how the hub decides whether the task failed;
+//   - SIGTERM delivery, so the kubelet's shutdown reaches the harness rather
+//     than only the wrapper, and the tree is settled before the write-back;
+//   - AnnotationArgv, which keeps naming the *real* command, so an operator
+//     reading `kubectl describe pod` sees what they dispatched.
+//
+// The wrapper's own binary comes from the same image and the same argv[0]
+// inference the init container uses, so nothing extra has to be installed or
+// configured — see workspaceCommand.
+func buildWriteBackArgv(req podRequest, workDir string) ([]string, error) {
+	original := append([]string(nil), req.Argv...)
+	wb := req.WriteBack
+	if !wb.Enabled() {
+		return original, nil
+	}
+	if err := wb.Validate(); err != nil {
+		return nil, err
+	}
+	if wb.Mode != executor.WriteBackPush {
+		// A bundle would be written to a file inside a Pod that is about to
+		// stop existing, and this driver has no way to read it back — its only
+		// channel out of a finished Pod is the log stream. Refusing at build
+		// time keeps that from becoming a run that reports a bundle nobody can
+		// collect.
+		return nil, fmt.Errorf("%w: this executor can only write back by pushing; mode %q needs "+
+			"a transport that can carry bytes back from the sandbox, which a Pod's log stream "+
+			"is not", executor.ErrInvalidSpec, wb.Mode)
+	}
+	if req.Workspace.Kind != executor.WorkspaceGit {
+		return nil, fmt.Errorf("%w: a write-back needs a git workspace to have a branch and an "+
+			"origin, and this workload's workspace is %q", executor.ErrInvalidSpec,
+			req.Workspace.Kind)
+	}
+	// The base is the commit the init container checks out, which is exactly
+	// Workspace.Ref: Spec.Validate refuses a write-back whose workspace is
+	// pinned to anything less precise, so the two sides cannot disagree about
+	// what "the changes this task made" is measured against.
+	base := strings.TrimSpace(req.Workspace.Ref)
+	if err := executor.ValidateCommitSHA(base); err != nil {
+		return nil, fmt.Errorf("%w: a write-back needs the workspace pinned to an exact commit, "+
+			"and this one's ref is %q: %v", executor.ErrInvalidSpec, req.Workspace.Ref, err)
+	}
+
+	argv := []string{
+		workspaceCommand(req.Argv), "workspace", "writeback",
+		"--dir", workDir,
+		"--repo", strings.TrimSpace(req.Workspace.Repo),
+		"--branch", strings.TrimSpace(wb.Branch),
+		"--base", base,
+		"--push",
+	}
+	if msg := strings.TrimSpace(wb.Message); msg != "" {
+		argv = append(argv, "--message", msg)
+	}
+	// "--" so nothing in the harness's own command line can be read as a flag
+	// of the wrapper. Without it a harness invoked as `claude --push …` would
+	// be parsed partly by cobra.
+	argv = append(argv, "--")
+	return append(argv, original...), nil
 }
 
 func (r *resourceRequirements) ensureRequests() resourceList {

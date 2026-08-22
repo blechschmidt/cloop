@@ -38,6 +38,16 @@ const (
 	EventEvolveRoundStart  EventType = "evolve_round_start"
 	EventEvolveDiscovered  EventType = "evolve_discovered"
 	EventEvolveNoOp        EventType = "evolve_no_op"
+	// EventWriteBack records what an isolated executor returned of a task's
+	// work: the branch, the commit, and whether it merged.
+	//
+	// Its own type rather than a field on task_done, because the two answer
+	// different questions and are allowed to disagree. A task can succeed and
+	// have its work fail to come back — the harness ran, the push did not —
+	// and a journal that folded the second into the first would have no way to
+	// show an operator the run whose transcript was right and whose code was
+	// lost. Making exactly that case visible is why this subsystem exists.
+	EventWriteBack EventType = "write_back"
 )
 
 // NoStep is the EventRow.Step value for events that are not bound to any

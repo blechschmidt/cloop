@@ -69,7 +69,12 @@ const (
 	// device the short-lived material for one authenticated git fetch, so an
 	// agent can materialise a private source tree before the harness starts
 	// instead of running it against an empty directory.
-	ProtocolVersion = 3
+	//
+	// v4 added the result frames (see TypeResultChunk and TypeResult): the
+	// device sends back the work product — a branch and commit SHA, and for a
+	// device with no egress the git bundle itself — so a task's edits survive
+	// the workload that made them.
+	ProtocolVersion = 4
 	// MinProtocolVersion is the oldest version this build still accepts.
 	MinProtocolVersion = 1
 	// MinRevocationVersion is the first version whose agents understand the
@@ -93,6 +98,18 @@ const (
 	// failure the workspace contract exists to remove. So the hub refuses to
 	// dispatch such a workload rather than trusting the device to complain.
 	MinWorkspaceVersion = 3
+	// MinWriteBackVersion is the first version whose agents return the work
+	// product after a task finishes.
+	//
+	// A placement rule again, and for the sharpest version of the same reason.
+	// An older agent ignores Spec.WriteBack exactly as it would ignore any
+	// unknown field: it runs the harness, streams a transcript describing the
+	// files it edited, reports success — and then the device's tree, the only
+	// copy of that work, stays on the device. The run is indistinguishable from
+	// one that delivered. So the hub refuses to dispatch a workload that asks
+	// for a write-back to a device that cannot make one, rather than
+	// discovering the loss after the work is gone.
+	MinWriteBackVersion = 4
 )
 
 // SupportsRevocation reports whether an agent speaking this protocol version
@@ -102,6 +119,10 @@ func SupportsRevocation(version int) bool { return version >= MinRevocationVersi
 // SupportsWorkspaceProvisioning reports whether an agent speaking this protocol
 // version materialises a git workspace before starting the harness.
 func SupportsWorkspaceProvisioning(version int) bool { return version >= MinWorkspaceVersion }
+
+// SupportsWriteBack reports whether an agent speaking this protocol version
+// returns the work product after a task finishes.
+func SupportsWriteBack(version int) bool { return version >= MinWriteBackVersion }
 
 // Timing constants. These are protocol-level agreements, not tunables: both
 // sides must derive their timeouts from the same numbers or a healthy agent
@@ -191,6 +212,35 @@ const (
 	// TypeStatus (agent → control plane) reports a handle's state; sent both
 	// on request and unsolicited when a workload terminates.
 	TypeStatus FrameType = "status"
+
+	// TypeResultChunk (agent → control plane) carries a slice of the git
+	// bundle holding a finished task's work product, with the byte offset it
+	// starts at. Added in protocol v4.
+	//
+	// It is a separate frame from TypeLogChunk rather than a stream flag on it
+	// because the two have opposite requirements. Log output is lossy on
+	// purpose — a subscriber that falls behind has chunks dropped so the
+	// workload is never blocked — while a bundle with a hole in it is not a
+	// smaller bundle, it is not a bundle. So this one is offset-checked,
+	// size-capped and digest-verified end to end, and a gap fails the
+	// write-back instead of being tolerated.
+	TypeResultChunk FrameType = "result_chunk"
+	// TypeResult (agent → control plane) closes a write-back: the branch, the
+	// commit SHA, the bundle's length and digest, or the reason there is
+	// nothing to send. Added in protocol v4.
+	//
+	// It is what the hub waits for — chunk delivery alone can never signal
+	// completeness, since "no more chunks" and "the link dropped" look
+	// identical from the receiving end.
+	//
+	// The frame order for a finished workload is fixed and load-bearing:
+	// result chunks, then this frame, then the terminal TypeStatus. The status
+	// frame is what closes the log stream, and executor.Run reads Status the
+	// instant that stream closes — so a write-back arriving after it would be
+	// recorded on a handle whose consumer had already returned. Sending it
+	// before means the ordering is a property of the agent's control flow
+	// rather than of a flag both sides have to agree about.
+	TypeResult FrameType = "result"
 
 	// TypeRevoke (control plane → agent) takes one secret lease back from a
 	// running task. Added in protocol v2.
@@ -379,6 +429,12 @@ type AgentCapabilities struct {
 	// silent: a device without git would answer the start frame and run the
 	// harness against an empty tree.
 	WorkspaceProvisioning bool `json:"workspace_provisioning,omitempty"`
+	// WriteBack reports that this device can return a finished task's work
+	// product — it has git and a build that knows how to commit and bundle.
+	// Advertised for the same reason WorkspaceProvisioning is, and against the
+	// same silent failure at the other end of the run: a device that cannot
+	// write back does not say so, it just keeps the work.
+	WriteBack bool `json:"write_back,omitempty"`
 	// MaxConcurrent is the agent's ceiling on simultaneous workloads.
 	MaxConcurrent int `json:"max_concurrent,omitempty"`
 	// Labels are free-form selectors (region, site, gpu) set by the operator.
@@ -408,6 +464,10 @@ func (c AgentCapabilities) Executor() executor.Capabilities {
 		// Executor.Capabilities — because a device that can clone is no use if
 		// the session cannot deliver the credential.
 		SupportsWorkspaceProvisioning: c.WorkspaceProvisioning,
+		// The device advertised it; the hub narrows it further by protocol
+		// version in Executor.Capabilities, because a device that can commit
+		// and bundle is no use if the session cannot carry the result frames.
+		SupportsWriteBack: c.WriteBack,
 		MaxConcurrent:                 c.MaxConcurrent,
 		Platform:                      c.OS,
 		Arch:                          c.Arch,
@@ -600,6 +660,37 @@ type StatusPayload struct {
 	FinalOffset int64 `json:"final_offset,omitempty"`
 }
 
+// MaxResultChunkBytes bounds one bundle slice.
+//
+// Larger than a log chunk because a bundle is a bulk transfer with no latency
+// requirement — nobody is watching it scroll — and well under MaxFrameBytes so
+// base64's 4/3 expansion plus the envelope still fits with room to spare.
+const MaxResultChunkBytes = 256 << 10 // 256 KiB
+
+// ResultChunkPayload carries a slice of the work product's git bundle.
+type ResultChunkPayload struct {
+	// Offset is the byte position of Data's first byte within the bundle.
+	// Unlike a log chunk's offset this is not merely an acknowledgement
+	// token: the hub refuses a chunk that does not start exactly where the
+	// previous one ended, because a bundle assembled out of order or with a
+	// hole is corrupt in a way git will report as something else entirely.
+	Offset int64 `json:"offset"`
+	// Data is the raw slice. A []byte marshals to base64 in JSON, so no
+	// encoding decision is made here.
+	Data []byte `json:"data"`
+}
+
+// End returns the offset just past this chunk, i.e. the next expected offset.
+func (p ResultChunkPayload) End() int64 { return p.Offset + int64(len(p.Data)) }
+
+// ResultPayload closes a write-back.
+type ResultPayload struct {
+	// Result is the metadata: mode, branch, commit, digest, or the failure.
+	// It never contains bundle bytes — those arrived as chunks — for the same
+	// reason executor.Status does not: this struct is logged and persisted.
+	Result executor.WriteBackResult `json:"result"`
+}
+
 // RevokeAction is what the agent should do about a workload still using the
 // material being taken away.
 type RevokeAction string
@@ -720,6 +811,11 @@ const (
 	// revoke frame. Distinct from CodeProtocol so the hub can report
 	// "upgrade this device" rather than "the device is broken".
 	CodeRevokeUnsupported = "revoke_unsupported"
+	// CodeWriteBackFailed: the work product could not be returned. Distinct
+	// from CodeStartFailed because the workload ran — the operator's problem
+	// is a delivery one, and the transcript they are about to read describes
+	// edits that did not arrive.
+	CodeWriteBackFailed = "write_back_failed"
 )
 
 // Decode helpers. Each returns a typed payload or a wrapped ErrProtocol, so
@@ -782,6 +878,49 @@ func DecodeLogChunk(f Frame) (LogChunkPayload, error) {
 	}
 	if len(p.Text) > MaxLogChunkBytes {
 		return p, fmt.Errorf("%w: log chunk %d bytes exceeds %d", ErrProtocol, len(p.Text), MaxLogChunkBytes)
+	}
+	return p, nil
+}
+
+// DecodeResultChunk decodes a bundle slice, refusing one that could not have
+// come from a well-behaved agent.
+//
+// The bounds are enforced at decode rather than at assembly so a malformed
+// frame is rejected before its contents are ever appended to anything. An empty
+// chunk is refused too: it advances nothing and would let a peer hold a
+// write-back open indefinitely at no cost to itself.
+func DecodeResultChunk(f Frame) (ResultChunkPayload, error) {
+	var p ResultChunkPayload
+	if err := decodePayload(f, &p); err != nil {
+		return p, err
+	}
+	switch {
+	case p.Offset < 0:
+		return p, fmt.Errorf("%w: negative result offset %d", ErrProtocol, p.Offset)
+	case len(p.Data) == 0:
+		return p, fmt.Errorf("%w: result chunk carries no data", ErrProtocol)
+	case len(p.Data) > MaxResultChunkBytes:
+		return p, fmt.Errorf("%w: result chunk %d bytes exceeds %d",
+			ErrProtocol, len(p.Data), MaxResultChunkBytes)
+	case p.End() > executor.MaxWriteBackBundleBytes:
+		return p, fmt.Errorf("%w: result chunk ends at %d, past the %d-byte write-back ceiling",
+			ErrProtocol, p.End(), executor.MaxWriteBackBundleBytes)
+	}
+	return p, nil
+}
+
+// DecodeResult decodes the frame that closes a write-back.
+func DecodeResult(f Frame) (ResultPayload, error) {
+	var p ResultPayload
+	if err := decodePayload(f, &p); err != nil {
+		return p, err
+	}
+	if p.Result.BundleBytes < 0 {
+		return p, fmt.Errorf("%w: negative bundle length %d", ErrProtocol, p.Result.BundleBytes)
+	}
+	if p.Result.BundleBytes > executor.MaxWriteBackBundleBytes {
+		return p, fmt.Errorf("%w: reported bundle of %d bytes exceeds the %d-byte ceiling",
+			ErrProtocol, p.Result.BundleBytes, executor.MaxWriteBackBundleBytes)
 	}
 	return p, nil
 }

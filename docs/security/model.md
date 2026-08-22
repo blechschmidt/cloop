@@ -889,6 +889,47 @@ where `git` or `git-http-backend` is not installed.
 | A workspace no grant authorises is refused with a typed `*WorkspaceGrantError` naming the grant, the repository and a remediation naming both the repository and the executor | `TestMissingGrantIsRefusedByName` |
 | An executor that cannot fetch is refused at placement on `ConstraintWorkspace`, and on the binding path too — no credential involved, whatever the repository's visibility | `TestExecutorThatCannotFetchIsRefusedAtPlacement` |
 
+### Result write-back — `writeback_bundle_test.go`
+
+The return leg of the guarantee above, and the only channel in cloop that runs
+*from* a sandbox *into* the hub's own repository. A commit range carries more
+than files: a git tree can name a path inside `.git`, where a blob is not data
+but the configuration of the next checkout, and it can name a symlink, where the
+escape is not the path that was written but every path written through it
+afterwards. The failure is quiet — a write-back carrying
+`.git/hooks/post-checkout` merges cleanly, reads as a one-file diff, and
+executes on the control plane at the next checkout of the branch.
+
+The rows split into the rules (a table over `ValidateWriteBackPath`,
+`ValidateBundleEntry` and `InspectWriteBack`, which is the only way to cover
+every case-folding and NTFS spelling at once) and the same rules reached through
+real git — a real hostile commit built with `git mktree`, a real bundle, a real
+fetch, a real `writeback.Apply`. A rule that is correct and never called is not a
+defence. The end-to-end rows skip where `git` is not installed.
+
+| Guarantee | Test |
+| --- | --- |
+| A write-back path cannot traverse out of the project root, be absolute, or arrive in a non-clean spelling (`a//b`, `a/./b`) that a later checker would not recognise | `TestWriteBackPathCannotEscapeTheProjectRoot` |
+| A write-back cannot write into `.git` under any spelling a case-insensitive or NTFS filesystem folds back to it (`.GIT`, `.git.`, `.git `, `.git~1`, `git~1`), at any depth — and `.github` is not `.git` | `TestWriteBackPathCannotReachTheGitDirectory`, `TestWriteBackAcceptsOrdinaryContent` |
+| A symlink whose target leaves the project root, or resolves into `.git`, is refused — while a contained relative link is still accepted, so the rule is a rule and not a blanket refusal | `TestWriteBackSymlinkCannotLeaveTheProjectRoot` |
+| A submodule (gitlink) entry, which names a repository URL rather than content, is refused; so is any mode outside the closed set git trees can hold | `TestWriteBackRefusesSubmodulesAndUnknownModes` |
+| A change set over `MaxWriteBackFiles` is refused before the inspection walks it, and exactly the limit is still admitted | `TestWriteBackRefusesAnOversizeChangeSet` |
+| End-to-end: a real commit carrying `.git/hooks/post-checkout` never becomes a branch on the hub, over **both** transports — bundle and push | `TestWriteBackBundleCannotDeliverAGitHook` |
+| End-to-end: a real symlink out of the tree round-trips into a bundle and is still refused on arrival, naming both the link and its target | `TestWriteBackBundleCannotDeliverAnEscapingSymlink` |
+| A bundle over `MaxWriteBackBundleBytes` is refused before git is invoked | `TestWriteBackBundleCannotExceedTheHardByteCeiling` |
+| The control: ordinary work — including a contained symlink — genuinely lands, so the rows above are not passing because everything is rejected | `TestWriteBackBundleDeliversOrdinaryWork`, `TestWriteBackAcceptsOrdinaryContent` |
+| A rejection leaves nothing behind: no `refs/heads` branch, and no surviving quarantine ref for a later checkout to find | asserted in every refusal row above |
+
+One asymmetry is pinned rather than smoothed over. Which layer refuses a `.git`
+tree depends on the transport: git's `fetch.fsckObjects`/`hasDotgit` check runs
+only when the objects arrive as a pack, so on the bundle path
+`executor.InspectWriteBack` is the sole defence, while on the push path git
+refuses first — and `pkg/writeback` reports git's refusal through
+`ErrWriteBackUnavailable`, the sentinel meaning *"infrastructure problem"*,
+rather than `ErrWriteBackRejected`. The commit does not land either way, but a
+caller that retries on `ErrWriteBackUnavailable` would retry a hostile
+write-back. See the note on `assertGitHookNeverLands`.
+
 ### Agent protocol and transport — `framing_test.go`, `transport_test.go`
 
 The remote agent is the only boundary where the peer is not ours, so its

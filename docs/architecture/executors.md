@@ -244,8 +244,9 @@ Ranking, applied as a stable sort:
 named: `no_candidates`, `executor_id`, `health`, `host_execution_policy`,
 `isolation`, `labels`, `platform`, `arch`, `harness`, `container_runtime`,
 `network_egress`, `resource_limits`, `stream`, `signal`, `memory`, `capacity`,
-`image_override`, `sandbox_build`, `sandbox_mounts`, `workspace`. An operator
-asking "why did nothing schedule?" gets a per-node answer, not a shrug.
+`image_override`, `sandbox_build`, `sandbox_mounts`, `workspace`, `write_back`.
+An operator asking "why did nothing schedule?" gets a per-node answer, not a
+shrug.
 
 Two of those names describe the request rather than any node. `no_candidates`
 means the registry was empty — nothing was rejected because there was nothing to

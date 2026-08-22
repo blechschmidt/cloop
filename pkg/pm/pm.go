@@ -216,6 +216,15 @@ type Task struct {
 	// expensive or experimental can set a tighter cap to bound the blast
 	// radius of repeated provider failures.
 	RetryBudget int `json:"retry_budget,omitempty"`
+	// WriteBackBranch and WriteBackCommit record where an isolated executor
+	// left this task's work (Task 20180). They are set only for a task that
+	// ran somewhere the hub does not share a filesystem with: a local run's
+	// changes are already in the working tree, so there is no branch to name
+	// and nothing to point a reviewer at. When they are empty, the result was
+	// produced in place; when they are set, the work is only reachable by
+	// fetching the named branch.
+	WriteBackBranch string `json:"write_back_branch,omitempty"`
+	WriteBackCommit string `json:"write_back_commit,omitempty"`
 }
 
 // Plan is the full task plan for a goal.

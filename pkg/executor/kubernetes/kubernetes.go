@@ -417,6 +417,16 @@ type record struct {
 	// tree. It is what lets the watcher drop the credential Secret the moment
 	// the init container finishes. See workspace.go.
 	ws *workspaceState
+	// wantWriteBack is the write-back this workload was dispatched with, so a
+	// Pod that produced no report can be told apart from one that was never
+	// asked for anything. Outside the mutex because it is written once, before
+	// the Pod exists, and only read afterwards.
+	wantWriteBack executor.WriteBack
+	// writeBack scans the Pod's output for the wrapper's report. It has its
+	// own lock: the log pump feeds it on a different goroutine from the one
+	// that reads a snapshot, and folding it under rec.mu would put a hot
+	// per-chunk write behind the mutex the watcher holds.
+	writeBack sentinelScanner
 }
 
 // New returns a Kubernetes executor. It performs no I/O: an unreachable
@@ -512,8 +522,20 @@ func (e *Executor) Capabilities() executor.Capabilities {
 		// prints the command that fixes it — not a placement message about a
 		// capability.
 		SupportsWorkspaceProvisioning: true,
-		MaxConcurrent:                 e.opts.MaxConcurrent,
-		Platform:                      "linux",
+		// True for the same reason and with the same shape: the driver wraps
+		// the harness so `cloop workspace writeback` runs after it, inside the
+		// Pod, while the workspace volume still exists. A Pod has no other
+		// moment — restartPolicy is Never, init containers run before, and the
+		// emptyDir is destroyed with the Pod — so without the wrapper every
+		// file the harness wrote would be discarded on exit.
+		//
+		// Only push mode is reachable here. A bundle has to travel back over
+		// the executor's own transport, and this driver's transport out of a
+		// finished Pod is its log stream; buildPod refuses a bundle spec rather
+		// than running one and dropping the bytes.
+		SupportsWriteBack: true,
+		MaxConcurrent:     e.opts.MaxConcurrent,
+		Platform:          "linux",
 		Arch:                          e.opts.NodeSelector["kubernetes.io/arch"],
 	}
 }
@@ -697,6 +719,8 @@ func (e *Executor) Start(ctx context.Context, spec executor.Spec) (executor.Hand
 		leaseID:   creds.LeaseID,
 		leaseExp:  creds.ExpiresAt,
 		ws:        ws,
+
+		wantWriteBack: spec.WriteBack,
 	}
 	rec.bus = logbus.New(rec.id, executor.StreamCombined, logbus.Options{})
 
@@ -873,6 +897,7 @@ func (e *Executor) buildPodFor(ctx context.Context, spec executor.Spec, handleID
 		SandboxHash:           spec.SandboxHash,
 		DisableNetwork:        spec.DisableNetwork,
 		Workspace:             spec.Workspace,
+		WriteBack:             spec.WriteBack,
 		WorkspaceSecretName:   workspaceSecret,
 
 		ActiveDeadlineSeconds:         e.opts.ActiveDeadlineSeconds,
@@ -1318,7 +1343,13 @@ func (e *Executor) streamLogs(ctx context.Context, rec *record) {
 		for {
 			n, readErr := body.Read(buf)
 			if n > 0 {
-				rec.bus.Emit(string(buf[:n]))
+				chunk := string(buf[:n])
+				// Scanned before it is fanned out, so the write-back is
+				// recorded even when nobody is subscribed to the log — an
+				// unwatched run's work product must not depend on someone
+				// having been watching. See writeback.go.
+				rec.writeBack.observe(chunk)
+				rec.bus.Emit(chunk)
 			}
 			if readErr != nil {
 				break
@@ -1917,9 +1948,13 @@ func (r *record) leaseIDValue() string {
 }
 
 func (r *record) snapshot(executorID string) executor.Status {
+	// Read before r.mu is taken: the scanner has its own lock and nesting the
+	// two would create an ordering the log pump could deadlock against.
+	wb := r.writeBack.snapshot()
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return executor.Status{
+	st := executor.Status{
 		HandleID:   r.id,
 		ExecutorID: executorID,
 		State:      r.state,
@@ -1928,6 +1963,16 @@ func (r *record) snapshot(executorID string) executor.Status {
 		FinishedAt: r.finishedAt,
 		Error:      r.errMsg,
 	}
+	switch {
+	case wb != nil:
+		st.WriteBack = wb
+	case r.wantWriteBack.Enabled() && r.state.Terminal():
+		// Asked for, finished, and nothing came back. Reported as a failed
+		// write-back rather than as no write-back, because those look the same
+		// to a caller and mean opposite things — see missingWriteBack.
+		st.WriteBack = missingWriteBack(r.wantWriteBack)
+	}
+	return st
 }
 
 // renewInterval is half the remaining lease TTL, clamped. Halving leaves room
