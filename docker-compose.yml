@@ -108,6 +108,9 @@ services:
     volumes:
       - ./deploy/eval/nginx.conf:/etc/nginx/conf.d/default.conf:ro
       - certs:/etc/nginx/certs:ro
+      # Read-only git origins served at /git/. Empty until `make e2e-stack`
+      # seeds one; a plain `docker compose up` just gets 404s there.
+      - gitrepos:/srv/git:ro
     ports:
       - "8443:8443"
     networks:
@@ -149,6 +152,8 @@ services:
 
       # Evaluation-only key. A real deployment generates this with
       # `cloop hub bootstrap` and never writes it into a committed file.
+      # `cloop hub doctor` reports this exact string as a placeholder, which
+      # is intentional: the eval stack should fail that check.
       CLOOP_SECRET_KEY: eval-only-not-a-real-key-change-me
 
       # Trust the proxy's self-signed certificate for the server-side half of
@@ -191,6 +196,94 @@ services:
       - /tmp:rw,noexec,nosuid,size=64m
     restart: unless-stopped
 
+  # ── Enrollment one-shot ───────────────────────────────────────────────────
+  # Mints a single-use enrollment token in the hub's database and writes the
+  # bundle where the executor can read it.
+  #
+  # It is a separate service from the executor on purpose. The executor must
+  # NOT have the hub's state volume — a device that can read the control
+  # plane's database is not a remote device, it is the control plane, and a
+  # stack that blurred that would be demonstrating the wrong architecture. So
+  # the split here is the real one: minting happens where the database is,
+  # redeeming happens where the work runs, and the only thing that crosses is
+  # a token that expires.
+  #
+  # It writes into the hub's live database while the hub is running. That is
+  # safe because state.db is opened WAL with a busy_timeout — and it is also
+  # exactly what an operator does when they run `cloop executor enroll` on a
+  # hub that is already serving.
+  enroll:
+    build:
+      context: .
+      args:
+        VERSION: eval
+    image: cloop-hub:eval
+    depends_on:
+      cloop:
+        # Liveness, not readiness. /readyz is red until an isolating executor
+        # exists, and this service is how one comes to exist — gating on it
+        # would deadlock the stack against itself.
+        condition: service_healthy
+    environment:
+      HOME: /var/lib/cloop
+    command:
+      - executor
+      - enroll
+      - --name=eval-executor
+      - --ttl=1h
+      - --workdir-root=/var/lib/cloop-agent/work
+      - --label=eval=true
+      - --bundle-file=/run/enroll/bundle
+    volumes:
+      - state:/var/lib/cloop
+      - ./deploy/eval/cloop-config.yaml:/var/lib/cloop/.cloop/config.yaml:ro
+      - enroll:/run/enroll
+    restart: "no"
+
+  # ── The executor ──────────────────────────────────────────────────────────
+  # A stand-in for an edge device: a machine that runs harnesses and is not
+  # the hub. It has git (the hub image deliberately does not), no access to
+  # the hub's database, and it dials *outward* — nothing in this stack
+  # connects to it.
+  executor:
+    build:
+      context: .
+      target: executor
+      args:
+        VERSION: eval
+    image: cloop-executor:eval
+    depends_on:
+      enroll:
+        condition: service_completed_successfully
+    command:
+      - executor
+      - agent
+      - --token-file=/run/enroll/bundle
+      # The proxy's certificate. git needs it too, via GIT_SSL_CAINFO below:
+      # the agent fetches the project over the same HTTPS origin, and git
+      # uses OpenSSL rather than Go's trust store, so one is not the other.
+      - --ca-file=/etc/cloop/trust/cert.pem
+      - --workdir-root=/var/lib/cloop-agent/work
+      - --max-concurrent=2
+    environment:
+      GIT_SSL_CAINFO: /etc/cloop/trust/cert.pem
+    volumes:
+      # Read-write, not read-only: the agent deletes the enrollment file once
+      # it has redeemed it. A single-use token that stays on disk after use is
+      # a credential lying around for no reason.
+      - enroll:/run/enroll
+      - certs:/etc/cloop/trust:ro
+      - agentstate:/var/lib/cloop-agent
+    # No network config needed: the enrollment bundle carries
+    # wss://cloop.localtest.me:8443/…, and the proxy already publishes that
+    # name as an alias on the default network, so Docker's embedded DNS
+    # resolves it here exactly as it does for the hub. An IP would fail
+    # hostname verification against the certificate.
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
 volumes:
   # The hub's entire writable state: state.db, artifacts, the multi-project
   # registry. `docker compose down -v` resets the evaluation to zero.
@@ -198,3 +291,13 @@ volumes:
   # Shared between the generator, the proxy that serves the certificate and
   # the hub that has to trust it.
   certs:
+  # Carries one enrollment bundle from the minting one-shot to the executor.
+  # Deliberately tiny and deliberately not the state volume.
+  enroll:
+  # The executor's own writable state: its redeemed credential and the
+  # workspaces it materialises. Separate from the hub's, because they are
+  # separate machines in every deployment this stands in for.
+  agentstate:
+  # Bare git repositories the proxy serves read-only at /git/, so a project
+  # has an https origin both the hub and the executor can fetch from.
+  gitrepos:

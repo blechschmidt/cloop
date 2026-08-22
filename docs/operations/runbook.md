@@ -82,6 +82,40 @@ The image is distroless — no shell, no `curl` — so this command *is* the
 container's `HEALTHCHECK` and the Kubernetes exec probe. Options: `--timeout`
 (default 3 s), `--ca-file` for a private CA. Exit 0 healthy, 1 not.
 
+### Configuration health: `cloop hub doctor`
+
+`healthcheck` answers "is it up". `doctor` answers "is it configured such that
+it will keep working", which is a different question with a different failure
+mode: a hub whose certificate expires next week, whose issuer moved, or under
+whose RBAC policy nobody is an admin is green on both probes and broken.
+
+```console
+$ cloop hub doctor                    # in the hub's directory
+$ cloop hub doctor --json | jq '.findings[] | select(.severity=="fail")'
+$ cloop hub doctor --offline          # config only; contacts nothing
+```
+
+What it checks, and what each one catches that nothing else does:
+
+| Group | Checks |
+| --- | --- |
+| `policy` | whether `executors.allow_host_process` was *decided* or merely defaulted |
+| `oidc` | issuer discovery, the document's own issuer name, JWKS keys cloop can actually verify with, redirect URI origin and path against `ui.external_url`, client secret from the environment rather than the committed config |
+| `tls` | cert and key are a matching pair, chain ordering, expiry (warns 30 days out), SANs cover the external hostname, key permissions, and the proxy-termination case |
+| `secret_key` | `CLOOP_SECRET_KEY` present, and generated key material rather than a passphrase or a placeholder out of the docs |
+| `rbac` | the mappings parse, the default role's blast radius, group bindings with no `groups` scope, and **whether anybody maps to admin** |
+| `images` | policy validity, digest pinning, cosign actually installed when `require_signature` is on, the hub's own executor images against its own policy, and registry reachability |
+| `executors` | reconciliation diagnostics, the strict-mode gate, and a liveness probe plus capability report per executor |
+| `storage` | `quick_check`, and the schema version against this binary's — the rollback case |
+| `quotas`, `budget` | policy validity, limits set to `0` (which means *none allowed*, not unlimited), and unbounded spend on a multi-tenant hub |
+
+Exit is 1 on any failure and 0 with only warnings, so it is usable as a
+deployment gate. `--strict` fails on warnings too. Every non-pass finding
+carries a one-line remediation; the `check` ids in `--json` are stable.
+
+Run it twice: once before the first `helm install` or `docker compose up`, and
+once in CI against the config repo. `--offline` makes the second cheap.
+
 ---
 
 ## Backup and restore

@@ -1,4 +1,4 @@
-.PHONY: build test test-unit test-e2e test-e2e-update fuzz clean
+.PHONY: build test test-unit test-e2e test-e2e-update e2e-stack fuzz clean
 
 BINARY := cloop
 GO := /usr/local/go/bin/go
@@ -26,6 +26,20 @@ test-e2e: build
 ## test-e2e-update: regenerate golden files from current binary output
 test-e2e-update: build
 	$(GO) test -v -timeout 120s ./tests/e2e/ -update
+
+## e2e-stack: bring up the docker-compose evaluation stack, run one real task
+##            through a remote executor, and tear it down.
+##
+## This is the test the unit suite cannot be: it boots the hub, the identity
+## provider, the TLS proxy and an executor as separate containers, and proves
+## the thing they exist for end to end — the readiness gate goes red with
+## nothing to dispatch to, an executor enrolls itself with a bootstrap token,
+## and a task runs on it against a source tree it fetched over https.
+##
+## Needs docker with the compose plugin. KEEP=1 leaves the stack up for
+## poking at afterwards.
+e2e-stack:
+	./deploy/eval/e2e.sh
 
 ## fuzz: run each fuzz target for $(FUZZTIME) (default 30s) — see CONTRIBUTING.md
 ##       targets: pkg/config, pkg/planio (yaml/json/toml), pkg/state, pkg/pm,

@@ -767,6 +767,29 @@ never gives up on its own; only operator cancellation or a hub-side revocation
 (`bye` with `reconnect=false`) ends the loop. Workloads confined beneath
 `--workdir-root` survive reconnects.
 
+**Paths do not cross the wire.** The hub's `Spec.WorkDir` is a directory on the
+*hub*; an agent confines every workload beneath its own root and refuses an
+absolute path from outside it, treating a workload's path as attacker-controlled
+input from a control plane that might be compromised. So the caller that builds
+the spec rewrites it — `executor.DeviceWorkDir` turns
+`/var/lib/cloop/projects/api` into `api-9aef699b`, derived from the full path so
+that two projects sharing a base name cannot collide on one device, and stable
+across runs so the device keeps its clone instead of re-fetching every time. The
+rewrite is on the hub side, next to the `SharesHostFilesystem` test that makes
+the same judgement, and not in the driver: a driver that quietly remapped an
+absolute path would also remap one a compromised hub aimed at `/etc`, turning
+the agent's refusal into a silent redirect.
+
+**Automated enrollment.** `cloop executor enroll --bundle-file <path>` writes the
+bundle to a 0600 file instead of leaving it only in the printed command, for the
+case where the same automation mints the token and starts the device — a compose
+one-shot, cloud-init, an Ansible play. The agent reads it with `--token-file` and
+deletes it once redeemed. `docker-compose.yml` does exactly this, and
+`make e2e-stack` runs the result end to end: the hub comes up with nothing to
+dispatch to and `/readyz` is red, the executor enrolls itself and it goes green,
+then a real task runs on the device against a tree it fetched over HTTPS. See
+[deploy/README.md](../../deploy/README.md).
+
 Transport is covered in [the security model](../security/model.md#2-hub--remote-agent).
 
 ### Installing the agent as a service

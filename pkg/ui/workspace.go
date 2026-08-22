@@ -92,6 +92,20 @@ func applyWorkspace(spec executor.Spec, ex executor.Executor, workDir string) (e
 		return spec, nil
 	}
 
+	// Past this point the executor does not share our filesystem, so our paths
+	// mean nothing to it. Spec.WorkDir is currently the hub's own project
+	// directory, and a remote agent confines workloads beneath its configured
+	// root and refuses an absolute path from outside it — so dispatching it
+	// unchanged fails every run to a device enrolled with a --workdir-root with
+	// an error about escaping a root nobody asked to escape.
+	//
+	// The rewrite belongs here rather than in the driver, next to the
+	// SharesHostFilesystem test that made the same judgement one line up: a
+	// driver that silently rewrote an absolute path would also rewrite one a
+	// compromised control plane aimed at /etc, turning the agent's refusal into
+	// a quiet remap. See executor.DeviceWorkDir.
+	spec.WorkDir = executor.DeviceWorkDir(spec.WorkDir)
+
 	if strings.TrimSpace(workDir) == "" {
 		// Not project-scoped: the voice handler runs `cloop listen --file …`
 		// with no project at all (see uiSpec, which deliberately omits the

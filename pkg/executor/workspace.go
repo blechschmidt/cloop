@@ -42,10 +42,13 @@ package executor
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/url"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -724,4 +727,69 @@ func validateGitRef(ref string) error {
 		return fmt.Errorf("ref %q is not a refname", ref)
 	}
 	return nil
+}
+
+// DeviceWorkDir maps a control-plane path onto a directory name an executor
+// that does not share the hub's filesystem can place beneath its own root.
+//
+// The two sides mean different things by a path. The hub's Spec.WorkDir is a
+// real directory on the hub — /var/lib/cloop/projects/api — while a remote
+// agent treats a workload's WorkDir as attacker-controlled input from a control
+// plane that might be compromised: it confines every workload beneath its
+// configured root and refuses an absolute path from outside it. Dispatching the
+// hub's own path unchanged therefore fails every real run to a device enrolled
+// with a --workdir-root, which is the enrollment operators are told to use, and
+// fails with an error about escaping a root nobody asked to escape.
+//
+// So the caller that builds the spec sends a *relative* name and lets the
+// device decide where it lands. That is the same decision applyWorkspace
+// already makes from SharesHostFilesystem — "my paths mean nothing to you" —
+// and it belongs on the same side of the wire, not in a driver: a driver that
+// silently rewrote an absolute path would also rewrite one a compromised hub
+// aimed at /etc, turning the agent's refusal into a quiet remap.
+//
+// The name is derived rather than random for one reason: it has to be the same
+// next time. A device given a fresh directory per run re-clones the repository
+// every run, which on a large project over a slow link is the difference
+// between an incremental fetch and a full one. The hash covers the whole path
+// because two projects can share a base name — "api" under two different roots
+// must not collide on the device and pull each other's history.
+//
+// A relative path is returned unchanged: it is already device-relative. An
+// empty one stays empty and lands on the executor's root.
+func DeviceWorkDir(workDir string) string {
+	workDir = strings.TrimSpace(workDir)
+	if workDir == "" || !filepath.IsAbs(workDir) {
+		return workDir
+	}
+	clean := filepath.Clean(workDir)
+	sum := sha256.Sum256([]byte(clean))
+	base := sanitizeWorkDirName(filepath.Base(clean))
+	if base == "" {
+		base = "project"
+	}
+	return base + "-" + hex.EncodeToString(sum[:4])
+}
+
+// sanitizeWorkDirName reduces a path element to characters that are safe as a
+// single directory name on any device, and bounds its length. It cannot emit a
+// separator or a dot, so the result is always exactly one component and can
+// never be ".." — a traversal the agent would refuse anyway, but one that
+// should not be constructible here in the first place.
+func sanitizeWorkDirName(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '-' || r == '_':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('-')
+		}
+		if b.Len() >= 48 {
+			break
+		}
+	}
+	return strings.Trim(b.String(), "-")
 }

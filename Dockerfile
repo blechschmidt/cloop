@@ -79,8 +79,64 @@ RUN if [ -z "$TARGETARCH" ] || [ "$TARGETARCH" = "$BUILDARCH" ]; then \
 # the symptom is a permission error from SQLite, several layers away from the
 # cause.
 RUN mkdir -p /skel/.cloop
+# A drop directory for `cloop executor enroll --bundle-file`, owned by the
+# unprivileged user the runtime stage runs as.
+#
+# It is here rather than in the compose file because of how Docker seeds a
+# named volume: a fresh volume mounted at a path that exists in the image
+# inherits that path's ownership, and one mounted at a path that does not is
+# created owned by root — which the non-root hub then cannot write to. Handing
+# a bundle from the container that mints it to the container that redeems it is
+# the ordinary shape of automated enrollment (compose, cloud-init, Ansible), so
+# the image provides somewhere for it to land.
+RUN mkdir -p /skel-run/enroll
 
-# ── Stage 2: runtime ────────────────────────────────────────────────────────
+# ── Stage 2: executor agent ─────────────────────────────────────────────────
+# A *different* base from the hub, and deliberately so.
+#
+# The hub image is distroless because a control plane that promises never to
+# run a harness on its own host should contain no way to execute one. An
+# executor agent's entire job is the opposite: it materialises a source tree
+# with git and runs a harness in it. It needs git on PATH, and the write-back
+# path needs it again to commit and bundle what the harness produced — so the
+# distroless image is not merely inconvenient here, it cannot do the work.
+#
+# Keeping them as two images is what makes that difference visible in the
+# artifact rather than in a comment. The hub cannot exec anything; the agent
+# can, on a machine that is not the hub. That is the whole architecture.
+#
+# It is declared BEFORE the runtime stage so `runtime` remains the last one and
+# therefore the default target: a plain `docker build .` must keep producing
+# the hub, not this.
+FROM alpine:3.20 AS executor
+
+RUN apk add --no-cache git ca-certificates openssh-client tini \
+ && adduser -D -u 65532 -h /var/lib/cloop-agent cloop \
+ && mkdir -p /var/lib/cloop-agent/work /srv/git \
+ && chown -R 65532:65532 /var/lib/cloop-agent /srv/git
+
+COPY --from=build /out/cloop /usr/local/bin/cloop
+
+# The agent persists its long-lived credential under $HOME after redeeming the
+# single-use enrollment token, so HOME must be on a writable volume or every
+# restart re-enrolls (and burns a token that is, by design, single-use).
+WORKDIR /var/lib/cloop-agent
+ENV HOME=/var/lib/cloop-agent
+USER 65532:65532
+
+# /srv/git exists and is owned by the agent user so that a named volume
+# mounted there is seeded with that ownership. It is what lets `make e2e-stack`
+# build a git origin from this image without running as root — which matters
+# because the service drops every capability, so a root process could not write
+# into a directory it does not own anyway.
+
+# tini reaps the harness processes the agent forks. Without a reaper at PID 1
+# a long-running agent accumulates zombies until it hits the container's PID
+# limit, which presents as workloads that will not start for no visible reason.
+ENTRYPOINT ["/sbin/tini", "--", "/usr/local/bin/cloop"]
+CMD ["executor", "agent"]
+
+# ── Stage 3: runtime ────────────────────────────────────────────────────────
 FROM gcr.io/distroless/static-debian12:nonroot AS runtime
 
 ARG VERSION=dev
@@ -111,6 +167,7 @@ COPY --from=build /out/cloop /usr/local/bin/cloop
 # register a project. One volume holds all persistent state, which is also
 # what makes "back up the hub" a single instruction.
 COPY --from=build --chown=65532:65532 /skel /var/lib/cloop
+COPY --from=build --chown=65532:65532 /skel-run /run
 
 WORKDIR /var/lib/cloop
 ENV HOME=/var/lib/cloop

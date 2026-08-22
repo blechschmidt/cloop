@@ -22,6 +22,7 @@ import (
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 
+	"github.com/blechschmidt/cloop/pkg/atomicfile"
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/executor/agent"
 	"github.com/blechschmidt/cloop/pkg/executor/remote"
@@ -79,6 +80,7 @@ Once redeemed the device receives a long-lived credential, persists it 0600 at
 		server, _ := cmd.Flags().GetString("server")
 		pin, _ := cmd.Flags().GetString("pin")
 		labelPairs, _ := cmd.Flags().GetStringSlice("label")
+		bundleFile, _ := cmd.Flags().GetString("bundle-file")
 
 		labels, err := parseLabelPairs(labelPairs)
 		if err != nil {
@@ -116,6 +118,27 @@ Once redeemed the device receives a long-lived credential, persists it 0600 at
 		})
 		if err != nil {
 			return err
+		}
+
+		// --bundle-file exists for provisioning, where the device is started
+		// by the same automation that mints the token and there is no human to
+		// copy a command: a compose one-shot, an Ansible play, a cloud-init
+		// script. Scraping the pretty output for the bundle is the alternative
+		// and it is a bad one — the format is for people, and a parser of it
+		// would break the first time a warning line moved.
+		//
+		// The file is written 0600 through cloop's atomic-write path, so a
+		// single-use credential is never briefly world-readable and a crash
+		// mid-write cannot leave a truncated bundle that fails at the device
+		// with a decode error instead of at the hub.
+		if path := strings.TrimSpace(bundleFile); path != "" {
+			encoded, encErr := bundle.Encode()
+			if encErr != nil {
+				return fmt.Errorf("encode enrollment bundle: %w", encErr)
+			}
+			if writeErr := atomicfile.Write(path, []byte(encoded+"\n"), 0o600); writeErr != nil {
+				return fmt.Errorf("write bundle to %s: %w", path, writeErr)
+			}
 		}
 
 		header := color.New(color.FgCyan, color.Bold)
@@ -532,6 +555,9 @@ func init() {
 	executorAgentCmd.Flags().String("bundle", "",
 		"enrollment bundle from `cloop executor enroll` (supplies --server, --token and --pin together)")
 
+	executorEnrollCmd.Flags().String("bundle-file", "",
+		"also write the enrollment bundle to this file (mode 0600), for provisioning that "+
+			"starts the device without a human to copy the printed command")
 	executorEnrollCmd.Flags().String("pin", "",
 		"SPKI pin to record in the bundle (default: derived from ui.tls.cert_file)")
 

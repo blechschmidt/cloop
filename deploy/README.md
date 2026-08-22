@@ -97,9 +97,60 @@ called out here and in the compose file.
   secrets at all (they arrive as environment variables), so it is world-readable
   on purpose.
 - **`register local executor: host execution is disabled by policy`**. Also
-  expected — that is strict mode refusing to register the host executor. Runs
-  will be refused until you enable an isolated executor. Try
-  `POST /api/run` and read the error; it names the alternatives.
+  expected — that is strict mode refusing to register the host executor. The
+  stack's `executor` service enrolls itself moments later and becomes the thing
+  runs are dispatched to; until it connects, `/readyz` answers 503 and names
+  executors as the reason. That sequence is deliberate and is what
+  `make e2e-stack` asserts.
+
+### Checking the configuration
+
+```bash
+docker compose run --rm --no-deps --entrypoint /usr/local/bin/cloop cloop hub doctor
+```
+
+`cloop hub doctor` diagnoses the things that only exist once cloop is hosted —
+issuer discovery, the redirect URI against the external URL, TLS material, the
+sealing key, whether anybody maps to admin, image trust, executor reachability,
+storage integrity and quotas. On this stack it should report two failures on
+purpose: the `CLOOP_SECRET_KEY` here is the placeholder from this file, and
+`--offline` aside, a hub with no enrolled executor has nothing to dispatch to.
+`--json` emits the same report with stable check ids for CI.
+
+### The executor
+
+```
+enroll (one-shot) ──mints a token──> enroll volume ──> executor ──dials out──> hub
+```
+
+The `enroll` service runs `cloop executor enroll --bundle-file` in the hub's
+state volume and exits; the `executor` service redeems that single-use bundle on
+boot, deletes it, and connects *outward* over `wss://`. Nothing in the stack
+dials the executor, and the executor has no access to the hub's database or
+filesystem — which is the whole point, and is asserted by `make e2e-stack`.
+
+It runs a different image from the hub (`--target executor`): Alpine with git,
+because materialising a source tree and committing what a task changed both need
+it. The hub image is distroless and has neither, deliberately.
+
+## `make e2e-stack`
+
+```bash
+make e2e-stack          # brings the stack up, runs one task, tears it down
+KEEP=1 make e2e-stack    # leave it running afterwards
+```
+
+Boots the stack, asserts `/readyz` is red with nothing to dispatch to, enrolls
+the executor and waits for it to go green, seeds a project with an https git
+origin served by the same proxy, dispatches a real `cloop run` to the device
+with a scoped API token, and asserts that the executor fetched the tree and that
+the harness's output came back to the hub. The task is driven by the mock
+provider, so it needs no API key and no network beyond the image pulls.
+
+What it does not assert: that the *files* the task changed came back. That is a
+separate mechanism (a git bundle produced on the device and applied by
+`pkg/writeback`), and a run dispatched from `POST /api/run` does not currently
+request one.
 
 ### Not a production template
 
