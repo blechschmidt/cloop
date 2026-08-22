@@ -33,6 +33,11 @@ type SmokeTestResult struct {
 	Image string `json:"image"`
 	// Runtime describes the container runtime used.
 	Runtime string `json:"runtime"`
+	// OCIRuntime is the low-level runtime the CLI delegated to, empty when
+	// the CLI's default was used. When this names a Kata runtime, a
+	// successful smoke test is the proof that a VM actually booted — which
+	// no amount of preflight can establish.
+	OCIRuntime string `json:"oci_runtime,omitempty"`
 	// ContainerName is the deterministic name that was used, so an operator
 	// can correlate with runtime logs.
 	ContainerName string `json:"container_name"`
@@ -70,7 +75,7 @@ func (e *Executor) SmokeTest(ctx context.Context, workDir string) (SmokeTestResu
 	ctx, cancel := context.WithTimeout(ctx, smokeTestTimeout)
 	defer cancel()
 
-	result := SmokeTestResult{Image: e.opts.Image, Runtime: e.rt.String()}
+	result := SmokeTestResult{Image: e.opts.Image, Runtime: e.rt.String(), OCIRuntime: e.opts.OCIRuntime}
 
 	if workDir == "" {
 		tmp, err := os.MkdirTemp("", "cloop-smoke-*")

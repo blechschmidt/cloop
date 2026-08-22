@@ -143,6 +143,19 @@ type Capabilities struct {
 	// for this project and be active. Empty forces the workload off the network
 	// entirely, whatever the executor's default is.
 	Network string `yaml:"network"`
+	// Virtualized demands an executor whose workloads run behind a hypervisor —
+	// a Kata sandbox, locally or on a remote cluster. It becomes a placement
+	// requirement, so a project that sets it can never be dispatched to an
+	// executor that shares the executing machine's kernel.
+	//
+	// A bool is the right shape here where it was the wrong one for Network,
+	// and the difference is direction. Network asks to *lift* a confinement, so
+	// it must name a grant an operator issued; there is no answer to "please
+	// turn the network on" that a repo-committed file is entitled to receive.
+	// This asks for a boundary stronger than the executor would otherwise
+	// provide, which needs nobody's permission — the worst a repo can do with
+	// it is refuse to run anywhere, and it refuses loudly.
+	Virtualized bool `yaml:"virtualized"`
 }
 
 // Mount is the YAML shape of executor.SpecMount.

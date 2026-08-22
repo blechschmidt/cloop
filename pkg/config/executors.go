@@ -455,6 +455,7 @@ func (c ContainerExecutorConfig) DriverOptions() (container.Options, error) {
 	opts := container.Options{
 		ID:            strings.TrimSpace(c.ID),
 		Runtime:       strings.TrimSpace(c.Runtime),
+		OCIRuntime:    strings.TrimSpace(c.OCIRuntime),
 		Image:         strings.TrimSpace(c.Image),
 		CPUs:          c.CPUs,
 		MemoryMB:      mb,
@@ -545,6 +546,7 @@ func (k KubernetesExecutorConfig) DriverOptions() (kubernetes.Options, error) {
 		WorkspaceSizeLimit:    strings.TrimSpace(k.WorkspaceSizeLimit),
 		NodeSelector:          k.NodeSelector,
 		Tolerations:           k.Tolerations,
+		RuntimeClass:          strings.TrimSpace(k.RuntimeClass),
 		ActiveDeadlineSeconds: k.ActiveDeadlineSeconds,
 		RunAsUser:             k.RunAsUser,
 		RunAsGroup:            k.RunAsGroup,
@@ -716,6 +718,22 @@ func clampContainerExecutor(c *ContainerExecutorConfig) []string {
 			changed = append(changed, fmt.Sprintf("executors.container.image: %v", err))
 			c.Image = ""
 		}
+	}
+	// oci_runtime is the one field here that must not be reset to its zero
+	// value, because for this field the zero value is *weaker*. Every other
+	// clamp above falls back to a driver default that confines at least as
+	// much as the rejected setting; blanking a Kata runtime falls back to
+	// runc, which silently turns the VM sandbox the operator asked for into a
+	// container one — while the executor keeps running and reporting success.
+	//
+	// So a malformed value disables the executor instead. A hub that comes up
+	// with one fewer executor is a visible, diagnosable failure; a hub that
+	// comes up with a sandbox weaker than its config describes is not.
+	if err := container.ValidateOCIRuntime(c.OCIRuntime); err != nil {
+		changed = append(changed, fmt.Sprintf(
+			"executors.container.oci_runtime: %v — executor disabled rather than silently "+
+				"falling back to the default runtime, which would be a weaker sandbox than configured", err))
+		c.Enabled = false
 	}
 	return changed
 }

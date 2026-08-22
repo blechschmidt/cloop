@@ -66,6 +66,15 @@ function _execCapChips(ex) {
     chips.push('<span class="exec-chip ' + (isolated ? 'pos' : 'neg') + '">isolation: '
       + esc(ex.isolation) + '</span>');
   }
+  // Shown only when true, unlike the flags below. Virtualization is not a
+  // capability an executor is expected to have — the great majority of
+  // correctly-configured backends share a kernel — so a "no kata" chip on
+  // every row would read as a deficiency rather than as the norm.
+  if (caps.virtualized) {
+    chips.push('<span class="exec-chip pos" title="Workloads run in a VM with '
+      + 'their own kernel (Kata Containers), so a kernel exploit reaches the '
+      + 'guest rather than the executing host.">kata / VM</span>');
+  }
   const flags = [
     ['stream',   caps.supports_stream],
     ['signal',   caps.supports_signal],

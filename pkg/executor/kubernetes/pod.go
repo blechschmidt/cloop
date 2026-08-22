@@ -223,6 +223,10 @@ type podSpec struct {
 	TerminationGracePeriodSeconds *int64              `json:"terminationGracePeriodSeconds,omitempty"`
 	NodeSelector                  map[string]string   `json:"nodeSelector,omitempty"`
 	Tolerations                   []toleration        `json:"tolerations,omitempty"`
+	// RuntimeClassName selects a node-level RuntimeClass — the Kubernetes
+	// spelling of "run this Pod under Kata rather than runc". Omitted when
+	// empty so the cluster's default handler stays in effect.
+	RuntimeClassName string `json:"runtimeClassName,omitempty"`
 	ImagePullSecrets              []localObjectRef    `json:"imagePullSecrets,omitempty"`
 	SecurityContext               *podSecurityContext `json:"securityContext,omitempty"`
 	// InitContainers run to completion, in order, before Containers start.
@@ -456,6 +460,9 @@ type podRequest struct {
 	ImagePullSecrets   []string
 	NodeSelector       map[string]string
 	Tolerations        []Toleration
+	// RuntimeClass names a RuntimeClass to run the Pod under. Empty leaves
+	// the cluster default. A Kata class here is what makes the Pod a VM.
+	RuntimeClass string
 
 	Argv    []string
 	Env     []string
@@ -608,6 +615,7 @@ func buildPod(req podRequest) (*pod, error) {
 		EnableServiceLinks: falsePtr,
 		HostNetwork:        falsePtr,
 		NodeSelector:       copyStringMap(req.NodeSelector),
+		RuntimeClassName:   strings.TrimSpace(req.RuntimeClass),
 		SecurityContext: &podSecurityContext{
 			RunAsNonRoot:   truePtr,
 			RunAsUser:      &runAsUser,

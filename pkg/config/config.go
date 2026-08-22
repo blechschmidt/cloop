@@ -391,6 +391,22 @@ type ContainerExecutorConfig struct {
 	// with a user namespace as well as with flags).
 	Runtime string `yaml:"runtime,omitempty"`
 
+	// OCIRuntime pins the low-level runtime that Runtime delegates to, as a
+	// name that runtime already knows: "kata", "kata-qemu", "crun". Empty
+	// leaves the CLI's default (runc or crun).
+	//
+	// A Kata name here is how a *local* Kata sandbox is configured: each
+	// workload boots in a lightweight VM with its own kernel, so a kernel
+	// exploit reaches the guest rather than the host. The executor then
+	// reports isolation "vm" and is eligible for projects that require a
+	// virtualized sandbox.
+	//
+	// It must be a registered runtime name and never a path — docker resolves
+	// it against /etc/docker/daemon.json and podman against containers.conf,
+	// both root-owned. Kata also needs /dev/kvm on the host, which `cloop
+	// executor test <id>` checks.
+	OCIRuntime string `yaml:"oci_runtime,omitempty"`
+
 	// Image is the sandbox image reference. Empty uses the driver's
 	// documented default; see container.DefaultImage for the contract an
 	// image must satisfy.
@@ -527,6 +543,19 @@ type KubernetesExecutorConfig struct {
 	// Tolerations lets Pods schedule onto tainted nodes — the usual way to
 	// reach a dedicated, untrusted-workload node pool.
 	Tolerations []kubernetes.Toleration `yaml:"tolerations,omitempty"`
+
+	// RuntimeClass names a RuntimeClass for every Pod, e.g. "kata",
+	// "kata-qemu" or "kata-clh". Empty leaves the cluster default (runc).
+	//
+	// This is how a *remote* Kata sandbox is configured: kube-scheduler places
+	// the Pod on a node advertising that handler and the workload boots in a
+	// VM with its own kernel, on a machine that is not the control plane's.
+	// The executor then reports virtualized: true.
+	//
+	// Kata node pools are conventionally tainted, so this usually appears
+	// alongside tolerations and node_selector. The class must already exist in
+	// the cluster; cloop does not create it.
+	RuntimeClass string `yaml:"runtime_class,omitempty"`
 
 	// ActiveDeadlineSeconds is the server-side wall-clock ceiling applied
 	// when a run requests no timeout of its own. Zero means unbounded,

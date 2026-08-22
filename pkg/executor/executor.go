@@ -83,6 +83,21 @@ const (
 type Capabilities struct {
 	// Isolation is the strength of the boundary between workload and host.
 	Isolation Isolation `json:"isolation"`
+	// Virtualized reports whether the workload runs behind a hypervisor — a
+	// VM or microVM with a kernel of its own — rather than sharing the
+	// executing machine's kernel.
+	//
+	// It is a separate field rather than a reading of Isolation because the
+	// two answer different questions and a driver can need both. A Kata pod
+	// on a remote cluster is IsolationRemote (the machine is not ours) *and*
+	// virtualized (the kernel is not the node's); collapsing that into one
+	// enum value would force every such driver to drop one of the two facts,
+	// and Isolation is explicitly not a total order (see placement.go).
+	//
+	// It stays false unless the driver is certain. A requirement to run
+	// virtualized is checked against this field, so a false positive places a
+	// workload that must be behind a hypervisor onto one that is not.
+	Virtualized bool `json:"virtualized,omitempty"`
 	// SupportsStream reports whether Stream returns live output. Drivers
 	// that only persist output post-hoc set this false.
 	SupportsStream bool `json:"supports_stream"`

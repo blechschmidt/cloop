@@ -207,6 +207,18 @@ type Options struct {
 	NodeSelector map[string]string
 	// Tolerations lets Pods schedule onto tainted nodes.
 	Tolerations []Toleration
+	// RuntimeClass names a RuntimeClass for every Pod this executor creates.
+	// Empty leaves the cluster's default handler (runc) in place.
+	//
+	// A Kata class ("kata", "kata-qemu", "kata-clh") is how a remote Kata
+	// sandbox is requested: kube-scheduler places the Pod on a node whose
+	// RuntimeClass advertises the handler, and the workload boots in a VM
+	// with its own kernel. Capabilities reports Virtualized accordingly.
+	//
+	// Kata nodes are usually tainted so that ordinary workloads do not land
+	// on them, so this is normally set together with Tolerations and often
+	// NodeSelector.
+	RuntimeClass string
 
 	// ActiveDeadlineSeconds is the server-side wall-clock ceiling applied
 	// when a Spec requests no timeout. Zero means unbounded, matching the
@@ -342,6 +354,10 @@ func (o Options) Normalize() (Options, error) {
 		if err := t.Validate(); err != nil {
 			return o, fmt.Errorf("kubernetes: tolerations[%d]: %w", i, err)
 		}
+	}
+	o.RuntimeClass = strings.TrimSpace(o.RuntimeClass)
+	if err := ValidateRuntimeClass(o.RuntimeClass); err != nil {
+		return o, fmt.Errorf("kubernetes: %w", err)
 	}
 	if o.ActiveDeadlineSeconds < 0 {
 		return o, fmt.Errorf("kubernetes: active_deadline_seconds must be >= 0 (got %d)", o.ActiveDeadlineSeconds)
@@ -483,6 +499,13 @@ func (e *Executor) Image() string { return e.opts.Image }
 // grant or kubeconfig supplies it per-run.
 func (e *Executor) Namespace() string { return e.opts.Namespace }
 
+// RuntimeClass reports the RuntimeClass every Pod is created with, empty when
+// the cluster default is in use.
+func (e *Executor) RuntimeClass() string { return e.opts.RuntimeClass }
+
+// Virtualized reports whether Pods run behind a hypervisor.
+func (e *Executor) Virtualized() bool { return executor.IsVirtualizedRuntime(e.opts.RuntimeClass) }
+
 // Capabilities implements executor.Executor.
 //
 // Isolation is IsolationRemote rather than IsolationContainer: kube-scheduler
@@ -498,9 +521,16 @@ func (e *Executor) Namespace() string { return e.opts.Namespace }
 // NetworkEgress is true because a Pod joins the cluster network. Constraining
 // that is a NetworkPolicy the cluster owns; reporting false would be claiming
 // an isolation cloop does not enforce.
+//
+// Virtualized is set from the configured RuntimeClass, and it is why that is a
+// field of its own rather than another Isolation value. A Kata Pod is remote
+// *and* virtualized: the machine is not the control plane's and the kernel is
+// not the node's. Isolation can carry only one of those, so it keeps the one
+// this driver always has and Virtualized carries the one it sometimes adds.
 func (e *Executor) Capabilities() executor.Capabilities {
 	return executor.Capabilities{
 		Isolation:              executor.IsolationRemote,
+		Virtualized:            e.Virtualized(),
 		SupportsStream:         true,
 		SupportsSignal:         true,
 		SupportsResourceLimits: true,
@@ -881,6 +911,7 @@ func (e *Executor) buildPodFor(ctx context.Context, spec executor.Spec, handleID
 		ImagePullSecrets:      e.opts.ImagePullSecrets,
 		NodeSelector:          e.opts.NodeSelector,
 		Tolerations:           e.opts.Tolerations,
+		RuntimeClass:          e.opts.RuntimeClass,
 		Argv:                  spec.Argv,
 		Env:                   spec.Env,
 		WorkDir:               podWorkDir(spec.WorkDir),

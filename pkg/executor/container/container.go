@@ -111,6 +111,14 @@ type Options struct {
 	// Runtime pins the container runtime ("podman" or "docker"). Empty
 	// auto-detects, preferring rootless podman.
 	Runtime string
+	// OCIRuntime pins the low-level runtime that Runtime delegates to
+	// ("kata", "kata-qemu", "crun", ...). Empty leaves the CLI's default,
+	// which is what every deployment predating this field gets.
+	//
+	// A Kata name here is what makes this executor a VM sandbox rather than a
+	// container one, and Capabilities says so. See ociruntime.go for why it
+	// must be a registered name and never a path.
+	OCIRuntime string
 	// Image is the sandbox image reference. Empty means DefaultImage.
 	Image string
 	// CPUs is the default core allowance when a Spec requests none.
@@ -169,10 +177,14 @@ func (o Options) Normalize() (Options, error) {
 	if o.PIDsLimit == 0 {
 		o.PIDsLimit = defaultPIDsLimit
 	}
+	o.OCIRuntime = strings.TrimSpace(o.OCIRuntime)
 	if err := ValidateImageRef(o.Image); err != nil {
 		return o, err
 	}
 	if err := ValidateNetwork(o.Network); err != nil {
+		return o, err
+	}
+	if err := ValidateOCIRuntime(o.OCIRuntime); err != nil {
 		return o, err
 	}
 	if o.CPUs < 0 {
@@ -301,6 +313,13 @@ func (e *Executor) Runtime() Runtime { return e.rt }
 // Image reports the sandbox image this executor runs.
 func (e *Executor) Image() string { return e.opts.Image }
 
+// OCIRuntime reports the configured low-level runtime, empty when the CLI's
+// default is in use.
+func (e *Executor) OCIRuntime() string { return e.opts.OCIRuntime }
+
+// Virtualized reports whether workloads run behind a hypervisor.
+func (e *Executor) Virtualized() bool { return IsVirtualizedOCIRuntime(e.opts.OCIRuntime) }
+
 // Capabilities implements executor.Executor.
 //
 // SharesHostFilesystem is true because the project directory really is a bind
@@ -311,9 +330,21 @@ func (e *Executor) Image() string { return e.opts.Image }
 // SupportsWorkspaceProvisioning is false, and that is the answer rather than a
 // gap. See buildRequest: this driver's whole model is that WorkDir is the
 // operator's own checkout, mounted in. There is no tree for it to fetch.
+//
+// Isolation is IsolationVM rather than IsolationContainer when the executor is
+// configured with a Kata OCI runtime, because that is literally what the enum
+// means: the workload runs in a VM with a kernel of its own. The claim is made
+// from the configured runtime name and nothing else — whether kata can
+// actually start is Preflight's question, and answering it here would mean
+// probing the host on every call to a method callers treat as free.
 func (e *Executor) Capabilities() executor.Capabilities {
+	isolation := executor.IsolationContainer
+	if e.Virtualized() {
+		isolation = executor.IsolationVM
+	}
 	return executor.Capabilities{
-		Isolation:              executor.IsolationContainer,
+		Isolation:              isolation,
+		Virtualized:            e.Virtualized(),
 		SupportsStream:         true,
 		SupportsSignal:         true,
 		SupportsResourceLimits: true,
@@ -582,9 +613,10 @@ func (e *Executor) buildRequest(spec executor.Spec, workDir string, extraMounts 
 	name := ContainerName(workDir, handleID)
 
 	req := runRequest{
-		Runtime: e.rt,
-		Image:   e.opts.Image,
-		Name:    name,
+		Runtime:    e.rt,
+		OCIRuntime: e.opts.OCIRuntime,
+		Image:      e.opts.Image,
+		Name:       name,
 		Workspace: mount{
 			HostPath:     workDir,
 			TargetPath:   ContainerWorkspace,

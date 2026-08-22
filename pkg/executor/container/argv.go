@@ -108,8 +108,12 @@ func (m mount) String() string {
 // renders and re-checks the invariants it can see.
 type runRequest struct {
 	Runtime Runtime
-	Image   string
-	Name    string
+	// OCIRuntime is the low-level runtime the CLI delegates to (`--runtime`).
+	// Empty leaves the CLI's default — runc or crun — in place. A Kata name
+	// here is what turns the sandbox into a VM; see ociruntime.go.
+	OCIRuntime string
+	Image      string
+	Name       string
 
 	// Workspace is the project bind mount. Its TargetPath is always
 	// ContainerWorkspace.
@@ -223,6 +227,17 @@ func buildRunArgs(req runRequest) (builtCommand, error) {
 	args = append(args, "--name", req.Name)
 
 	// --- Isolation ---------------------------------------------------
+	// The OCI runtime comes first because it decides what every flag below
+	// is enforced *by*: under runc they are host kernel features, under kata
+	// they are the guest's, applied inside a VM the host kernel never sees
+	// into. Emitted only when configured, so the overwhelmingly common
+	// runc/crun deployment produces a byte-identical command line to before.
+	if ocirt := strings.TrimSpace(req.OCIRuntime); ocirt != "" {
+		if err := ValidateOCIRuntime(ocirt); err != nil {
+			return builtCommand{}, err
+		}
+		args = append(args, "--runtime", ocirt)
+	}
 	// Capabilities: drop everything. A harness compiles code and runs
 	// tests; it never needs CAP_NET_RAW or CAP_SYS_ADMIN, and keeping the
 	// default set is what turns a container escape from hard into routine.

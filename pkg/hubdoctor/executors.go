@@ -147,6 +147,7 @@ func executorFinding(ctx context.Context, ex executor.Executor, opts Options) Fi
 	details := map[string]any{
 		"kind":            ex.Kind(),
 		"isolation":       string(caps.Isolation),
+		"virtualized":     caps.Virtualized,
 		"workspace":       caps.SupportsWorkspaceProvisioning,
 		"write_back":      caps.SupportsWriteBack,
 		"network_egress":  caps.NetworkEgress,

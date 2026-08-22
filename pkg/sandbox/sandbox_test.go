@@ -308,6 +308,35 @@ func TestRequirements(t *testing.T) {
 				}
 			},
 		},
+		"virtualized capability demands a hypervisor": {
+			"capabilities:\n  virtualized: true\n",
+			func(t *testing.T, r executor.Requirements) {
+				if !r.RequireVirtualization {
+					t.Error("RequireVirtualization not set — the project would be dispatched " +
+						"to an executor that shares the executing machine's kernel")
+				}
+			},
+		},
+		// The one capability that asks for *more* confinement, so unlike
+		// network it needs no grant. Absent must still mean "no opinion":
+		// defaulting it on would refuse every project on every hub that has no
+		// Kata executor.
+		"no virtualized capability demands nothing": {
+			"capabilities:\n  git: true\n",
+			func(t *testing.T, r executor.Requirements) {
+				if r.RequireVirtualization {
+					t.Error("a spec that did not ask for virtualization must not require it")
+				}
+			},
+		},
+		"virtualized false is not a demand": {
+			"capabilities:\n  virtualized: false\n",
+			func(t *testing.T, r executor.Requirements) {
+				if r.RequireVirtualization {
+					t.Error("an explicit false must be honoured as false")
+				}
+			},
+		},
 		// The workspace kind is the hub's decision. A repo-committed file that
 		// could imply one would be a file that arranges to be cloned from a URL
 		// in the same pull request.

@@ -38,6 +38,10 @@ secret kind, or a new RBAC role ships without appearing here — see
   a running task, and for the workspace fetch that happens before one), a
   kubeconfig, a registry login, environment variables, and an Internet egress
   lease, with TTLs, constraints, and real command output.
+- **[Kata Containers](guides/kata.md)** — giving a sandbox its own kernel:
+  installing Kata, registering it with docker or podman, the `/dev/kvm` and
+  nested-virtualization prerequisite, the Kubernetes RuntimeClass path, and how
+  to tell whether a workload is really running in a VM.
 
 ## Operations
 

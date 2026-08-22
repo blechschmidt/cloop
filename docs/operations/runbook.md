@@ -524,6 +524,12 @@ $ cloop executor ls                      # health, in-flight work, last contact
 $ cloop executor test container          # preflight: run `cloop version` inside it
 ```
 
+`list` states the sandbox type per executor, including `hypervisor-backed` for
+one configured with a Kata runtime. `test` is what proves it: on a Kata executor
+it additionally checks that the runtime name is registered with the CLI and that
+`/dev/kvm` opens, then boots a real workload — see
+[the Kata guide](../guides/kata.md#verifying-it).
+
 Taking a node out of service:
 
 ```console
@@ -613,4 +619,5 @@ the message go away.
 - [Security model](../security/model.md) — what the boundaries authenticate with
 - [Threat model](../security/threat-model.md) — deployment-level threats
 - [Secret and egress grants](../guides/secrets.md) — grant and revoke procedures
+- [Kata Containers](../guides/kata.md) — VM-isolated sandboxes: setup and verification
 - `deploy/README.md` — image, compose stack and Helm chart specifics

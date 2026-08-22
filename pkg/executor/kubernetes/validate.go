@@ -68,6 +68,21 @@ func validateDNSSubdomain(s, field string) error {
 	return nil
 }
 
+// ValidateRuntimeClass checks a RuntimeClass name. Empty is valid and means
+// "the cluster default".
+//
+// A RuntimeClass is a cluster-scoped object whose name is an RFC 1123
+// subdomain, so the namespace grammar applies unchanged. Checking it here
+// rather than letting the API server reject the Pod turns a per-run 422 into a
+// startup error against the config line that caused it.
+func ValidateRuntimeClass(name string) error {
+	n := strings.TrimSpace(name)
+	if n == "" {
+		return nil
+	}
+	return validateDNSSubdomain(n, "runtime_class")
+}
+
 // ValidateImageRef rejects image references that are not usable as one.
 //
 // It is deliberately shallow: full reference grammar lives in the registry

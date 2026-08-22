@@ -66,7 +66,17 @@ var executorListCmd = &cobra.Command{
 				notes = append(notes, "default")
 			}
 			if c, ok := ex.(*container.Executor); ok {
-				notes = append(notes, c.Runtime().String(), c.Image())
+				rt := c.Runtime().String()
+				// "podman via kata-qemu" — the CLI alone does not say whether
+				// the sandbox is a container or a VM, and that is the single
+				// most consequential thing about this executor.
+				if ocirt := c.OCIRuntime(); ocirt != "" {
+					rt += " via " + ocirt
+				}
+				notes = append(notes, rt, c.Image())
+			}
+			if caps.Virtualized {
+				notes = append(notes, "hypervisor-backed")
 			}
 			if caps.Isolation == executor.IsolationNone {
 				notes = append(notes, "no isolation")

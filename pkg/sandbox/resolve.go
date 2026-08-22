@@ -187,6 +187,15 @@ func (r *Resolved) Requirements() executor.Requirements {
 	if s.Capabilities.Git {
 		req.Harnesses = append(req.Harnesses, "git")
 	}
+	if s.Capabilities.Virtualized {
+		// One of the few requirements that asks for *more* confinement than the
+		// executor would otherwise apply, which is why it needs no grant. If no
+		// bound executor is hypervisor-backed the project does not run, and
+		// that refusal is the feature: a repo that declares it must not share a
+		// kernel with the host has said something placement can honour exactly
+		// or not at all.
+		req.RequireVirtualization = true
+	}
 	// Deliberately absent: RequireWorkspaceProvisioning, even though
 	// resources.disk feeds Workspace.SizeLimitMB.
 	//

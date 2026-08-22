@@ -45,6 +45,7 @@ const (
 	ConstraintHealth           Constraint = "health"
 	ConstraintHostPolicy       Constraint = "host_execution_policy"
 	ConstraintIsolation        Constraint = "isolation"
+	ConstraintVirtualization   Constraint = "virtualization"
 	ConstraintLabels           Constraint = "labels"
 	ConstraintPlatform         Constraint = "platform"
 	ConstraintArch             Constraint = "arch"
@@ -132,6 +133,15 @@ type Requirements struct {
 	// remote device are differently, not more or less, isolated), so this is
 	// a set rather than a minimum.
 	AllowedIsolations []Isolation
+	// RequireVirtualization demands a node whose workloads run behind a
+	// hypervisor — a Kata sandbox, locally or on a remote cluster.
+	//
+	// Separate from AllowedIsolations because it cuts across it: both a local
+	// Kata container (IsolationVM) and a Kata Pod on a remote cluster
+	// (IsolationRemote) satisfy it, and no set of Isolation values selects
+	// exactly those two without also admitting the non-Kata remote executors
+	// that share their isolation value.
+	RequireVirtualization bool
 	// RequireContainerRuntime demands a node that can drive containers.
 	RequireContainerRuntime bool
 	// RequireNetworkEgress demands a node whose workloads can reach the
@@ -326,7 +336,7 @@ func CheckSandboxSupport(ex Executor, req Requirements, projectPath string) erro
 		// constraint-specific message names the real remedy.
 		return &PlacementError{Constraint: rej.Constraint, Rejections: []Rejection{rej}, Considered: 1}
 	case ConstraintImageOverride, ConstraintSandboxBuild, ConstraintSandboxMounts,
-		ConstraintNetworkEgress, ConstraintResourceLimits:
+		ConstraintNetworkEgress, ConstraintResourceLimits, ConstraintVirtualization:
 		// These are capability gaps, not policy ones — but on an un-isolated
 		// executor the remedy is identical to the policy case ("bind this
 		// project to a sandbox"), and it is the remedy, not the taxonomy, that
@@ -392,6 +402,11 @@ func reject(c Candidate, req Requirements) (Rejection, bool) {
 	if len(req.AllowedIsolations) > 0 && !containsIsolation(req.AllowedIsolations, caps.Isolation) {
 		return no(ConstraintIsolation, "has isolation %q, want one of %s",
 			caps.Isolation, joinIsolations(req.AllowedIsolations))
+	}
+	if req.RequireVirtualization && !caps.Virtualized {
+		return no(ConstraintVirtualization,
+			"shares the executing machine's kernel; this workload requires a hypervisor-backed "+
+				"sandbox (set executors.container.oci_runtime or executors.kubernetes.runtime_class to a Kata runtime)")
 	}
 
 	for k, want := range req.Labels {

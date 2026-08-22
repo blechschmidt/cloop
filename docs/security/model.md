@@ -126,7 +126,7 @@ Because `buildRunArgs` is a pure function, these flags are checked exhaustively
 against every option combination without needing a runtime present, and a
 denylist rejects operator `ExtraArgs` such as `--privileged`, `--net=host`,
 `--cap-add`, `--device`, `--pid=host` or a mounted runtime socket
-(`pkg/executor/container/argv.go:371-393`).
+(`deniedExtraArgs` in `pkg/executor/container/argv.go`).
 
 ### ④ Hub ↔ Kubernetes cluster
 
@@ -154,6 +154,59 @@ decorative — still cannot. Nor does it widen the namespace's blast radius:
 `pods: create` plus `pods/log: get`, which this identity already held, is enough
 to read any Secret in the namespace by mounting it into a Pod and printing it.
 The namespace has always been the boundary. Run workloads in one of their own.
+
+### The kernel underneath the sandbox
+
+Boundaries ③ and ④ both end at a workload that shares the **executing machine's
+kernel**: a container on the hub's host, a Pod on a node. The hardening above is
+namespaces, cgroups, seccomp and capabilities, all of which are host-kernel
+features enforced by the same kernel the workload is running on. A local
+privilege escalation in that kernel is therefore a *host* compromise, not a
+sandbox one, and it is the residual risk both boundaries carry.
+
+Configuring a Kata runtime —
+[`executors.container.oci_runtime`](../reference/configuration.md#vm-isolated-sandboxes-kata-containers)
+locally, `executors.kubernetes.runtime_class` on a cluster — moves that
+particular risk. Each workload boots in a lightweight VM with a kernel of its
+own, so the same flags are now enforced by the *guest* kernel, inside a machine
+the host kernel does not see into. What used to be one kernel bug becomes a
+guest-kernel bug **plus** a hypervisor escape, and the executor advertises the
+difference as `Capabilities().Virtualized`, which placement can require.
+
+Four things it deliberately does not change, because a boundary that is
+misdescribed is worse than one that is merely weaker:
+
+- **The `Virtualized` claim is trusted, not verified.** It is derived from the
+  configured runtime *name* (`kata`, `kata-qemu`, a `kata-*` RuntimeClass) and
+  nothing else, because a name is all the OCI and RuntimeClass APIs expose to a
+  client. Anyone who can write the hub's config can register runc under the name
+  `kata` and be believed by every consumer of that flag, placement included.
+  Preflight's `/dev/kvm` check is evidence, not a retraction: `Capabilities()` is
+  computed from the name alone, so a container executor whose KVM check *failed*
+  still advertises `Virtualized` and still takes work — it is `degraded`, and
+  degraded nodes are schedulable. Only the smoke test ever boots a VM. Config is
+  already trusted input here — `allow_host_process` sits in the same file — so
+  this widens no boundary, but it does mean the flag describes an *intent* the
+  operator expressed, and `cloop executor test` is what turns it into a fact.
+- **Egress is unchanged.** A VM has the same network the container would have
+  had. `network: none` and a `NetworkPolicy` remain the only things that
+  constrain outbound traffic, and a Kata sandbox on a bridge network reaches the
+  Internet exactly as a container on one does.
+- **The workspace bind mount is still shared.** The container driver still
+  mounts the project directory into the sandbox — through virtio-fs rather than
+  a bind, but the host directory is the same directory. `SharesHostFilesystem`
+  stays true, the workspace kind stays `bind`, and a workload that writes there
+  writes to the operator's own checkout. A hypervisor between the two does not
+  make a deliberately shared directory unshared.
+- **Everything the workload was given, it still has.** Secrets arrive in the
+  guest's environment and filesystem on the same terms as before, so the
+  [revocation guarantee](#the-lease-revocation-guarantee) and its weak row are
+  unchanged, and a workload can still disclose its own credentials.
+
+There is no row for this in the [guarantee → test table](#the-guarantee--test-table)
+and that is not an oversight: nothing in `tests/security/` proves a VM booted,
+and a test that asserted the flag against the name it was derived from would
+assert only that the matcher matches.
 
 ---
 
@@ -1188,6 +1241,15 @@ and verify upstream.
 **The container runtime socket is trusted implicitly.** Anyone who can reach the
 Docker/Podman socket the hub uses is root-equivalent on that host. Isolation is
 protecting the host from workloads, not the socket from the hub.
+
+**A workload shares the executing machine's kernel unless you configure Kata.**
+The default sandbox is namespaces and seccomp on the host kernel, so a kernel LPE
+is a host compromise. `executors.container.oci_runtime` and
+`executors.kubernetes.runtime_class` change that; the
+[section above](#the-kernel-underneath-the-sandbox) is explicit about what they buy and
+what they leave exactly where it was — including that `Virtualized` is derived
+from a runtime *name* and is therefore a claim cloop trusts rather than one it
+verifies.
 
 **Rotation is partly manual.** See [key rotation](../operations/runbook.md#key-rotation)
 for what rotates automatically and what does not.

@@ -26,8 +26,9 @@ happened to be unreachable.
 | Kind | Isolation | Where it runs | Notes |
 |------|-----------|---------------|-------|
 | `localprocess` | none | this host | Default. Zero-config, no sandbox. |
-| `container` | container | this host | Docker/Podman sandbox. Opt-in via config. |
+| `container` | container, or `vm` | this host | Docker/Podman sandbox. Opt-in via config. `vm` with a Kata [`oci_runtime`](#vm-isolated-sandboxes-kata-containers). |
 | `remote` | remote | an enrolled device | Edge box that dialled out to the control plane. |
+| `kubernetes` | remote | an ephemeral Pod | One Pod per workload. Also VM-backed with a Kata [`runtime_class`](#vm-isolated-sandboxes-kata-containers). |
 
 ```bash
 cloop executor list              # what is registered, and what it isolates
@@ -66,6 +67,7 @@ executors:
   container:
     enabled: true
     runtime: podman          # or docker; empty auto-detects (podman preferred)
+    oci_runtime: ""          # low-level runtime the CLI delegates to; empty = runc/crun
     image: ghcr.io/blechschmidt/cloop-harness:latest
     cpus: 2                  # core allowance per workload
     memory: 2g               # 512m / 2g / 1024k; a bare integer means MB
@@ -75,7 +77,8 @@ executors:
     selinux_label: ""        # "z" or "Z" — required when SELinux is enforcing
 ```
 
-or with `cloop config set executors.container.<key> <value>`.
+or with `cloop config set executors.container.<key> <value>`. `oci_runtime` is
+the exception: the setter's key list does not cover it, so it is edited here.
 
 Every container is started with:
 
@@ -121,6 +124,99 @@ server holds, so variables are passed explicitly or not at all.
 (`--privileged`, `--cap-add`, `--volume`, `--network`, `--user`, `--entrypoint`,
 `--env`, …) are rejected, and every entry must be a flag in `--flag=value` form
 so a bare value cannot be consumed as the image reference.
+
+### VM-isolated sandboxes: Kata Containers
+
+Everything above confines a workload with namespaces, cgroups and seccomp, on
+the **host's kernel**. A kernel bug is therefore a host bug. Two keys move the
+boundary up a level by running each workload inside a lightweight VM with a
+kernel of its own — [Kata Containers](https://katacontainers.io) — so an escape
+reaches the guest kernel and the host's sits behind a hypervisor. Neither key is
+set by default, and an empty value is exactly the behaviour every deployment had
+before they existed.
+
+**Locally — `executors.container.oci_runtime`.** `runtime:` above picks the CLI;
+this picks what that CLI hands each container to, passed through as
+`--runtime <name>`:
+
+```yaml
+executors:
+  container:
+    enabled: true
+    runtime: docker          # or podman
+    oci_runtime: kata-qemu   # kata | kata-qemu | kata-clh | kata-runtime
+    image: ghcr.io/blechschmidt/cloop-harness:latest
+    cpus: 2
+    memory: 2g
+    network: none
+```
+
+It must be a **registered runtime name, never a path**. docker resolves it
+against `/etc/docker/daemon.json` and podman against `containers.conf`, both
+root-owned files you already control, so the name is a lookup in a trusted table
+rather than a binary the daemon is told to execute as root. Names are validated
+for shape only — letters, digits, `.`, `_`, `-`, no path separator, no leading
+dash — because operators legitimately register Kata under many names and a fixed
+allow-list would reject working hosts.
+
+A value that fails that check **disables the container executor**. It is the one
+key here that is not clamped back to its default, because for this field the
+default is *weaker*: falling back to runc would turn the VM sandbox you asked
+for into a container one while the executor kept running and reporting success.
+A hub that starts with one fewer executor is a failure you can see.
+
+Kata needs `/dev/kvm`, and needs it openable by the user cloop runs as.
+`cloop executor test <id>` checks both, plus that the CLI actually knows the
+name — see [the Kata guide](../guides/kata.md) for installation, the
+nested-virtualization prerequisite, and what the checks print.
+
+**On Kubernetes — `executors.kubernetes.runtime_class`.** This sets
+`runtimeClassName` on every workload Pod, so kube-scheduler places it on a node
+advertising that handler:
+
+```yaml
+executors:
+  kubernetes:
+    enabled: true
+    namespace: cloop-workloads
+    image: ghcr.io/acme/cloop-harness@sha256:…
+    runtime_class: kata          # must already exist in the cluster
+    node_selector:
+      katacontainers.io/kata-runtime: "true"
+    tolerations:
+      - key: kata
+        operator: Exists
+        effect: NoSchedule
+```
+
+The three keys travel together in practice. A RuntimeClass names a handler; it
+does not by itself keep ordinary workloads off the Kata pool, so those nodes are
+conventionally **tainted** — which means Pods need a matching `toleration` to
+land there at all, and a `node_selector` to be steered there rather than merely
+permitted. Set only `runtime_class` on a tainted pool and Pods stay unscheduled.
+
+cloop does not create the RuntimeClass. It is a cluster-scoped object installed
+with the Kata node pool, and the hub deliberately holds no cluster-scoped
+authority — so it also cannot preflight it. The name is checked as an RFC 1123
+subdomain at startup, which catches a typo against the config line rather than at
+someone's first run; a *valid* name for a class that does not exist surfaces at
+dispatch, as a Pod that never runs.
+
+The Helm chart's ConfigMap does not render `runtime_class`, `node_selector` or
+`tolerations` yet, so a chart-based install sets them in the hub's
+`config.yaml` directly.
+
+Only the keys above change; credentials, resources and deadlines are whatever the
+executor already had.
+
+In both cases the executor reports the change rather than leaving you to infer
+it: `cloop executor list` appends `hypervisor-backed` (and, for the container
+driver, names the pair as `docker via kata-qemu`), the Executors tab grows a
+**kata / VM** chip, and `cloop hub doctor` reports `virtualized` per executor.
+Placement can also *require* it: a workload that does is refused a candidate
+sharing the executing machine's kernel, under the constraint `virtualization`,
+rather than run on a weaker sandbox than it asked for — see
+[Placement](../architecture/executors.md#placement).
 
 ### Sandbox image contract
 

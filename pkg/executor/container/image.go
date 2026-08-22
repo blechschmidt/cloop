@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -184,6 +185,14 @@ func (e *Executor) Preflight(ctx context.Context, workDir string) PreflightRepor
 			"run the control plane as an unprivileged user with podman for a second isolation layer")
 	}
 
+	// --- 3b. OCI runtime ------------------------------------------------
+	// Only when one is configured: a deployment on the CLI's default runtime
+	// has nothing here to get wrong, and adding an always-OK finding to every
+	// report would bury the ones that matter.
+	if e.opts.OCIRuntime != "" {
+		e.preflightOCIRuntime(ctx, add)
+	}
+
 	// --- 4. image ------------------------------------------------------
 	imgRes, err := runCLITimeout(ctx, e.rt, preflightCmdTimeout, "image", "inspect", e.opts.Image)
 	switch {
@@ -232,6 +241,59 @@ func (e *Executor) Preflight(ctx context.Context, workDir string) PreflightRepor
 	}
 
 	return report
+}
+
+// preflightOCIRuntime checks the two things a Kata sandbox needs that a runc
+// one does not: the runtime has to be registered with the CLI that resolves
+// `--runtime`, and the host has to be able to start a VM.
+//
+// Both fail late and obscurely otherwise. An unregistered name surfaces as
+// docker's "unknown or invalid runtime name" on the operator's first task; a
+// missing /dev/kvm surfaces as a qemu error in the container's stderr, minutes
+// into a run, with nothing pointing at nested virtualization. Preflight is
+// where an operator is already looking, so both are answered there.
+func (e *Executor) preflightOCIRuntime(ctx context.Context, add func(name, level, msg, fix string)) {
+	name := e.opts.OCIRuntime
+
+	// Registration. registeredOCIRuntimes reports ok=false when the CLI
+	// cannot be enumerated (podman), and an unenumerable runtime must not be
+	// called absent — that would fail a working deployment at startup.
+	if registered, ok := registeredOCIRuntimes(ctx, e.rt); ok {
+		if registered[name] {
+			add("oci-runtime", LevelOK,
+				fmt.Sprintf("%s is registered with %s", name, e.rt.Name), "")
+		} else {
+			known := make([]string, 0, len(registered))
+			for r := range registered {
+				known = append(known, r)
+			}
+			sort.Strings(known)
+			add("oci-runtime", LevelFail,
+				fmt.Sprintf("%s does not know a runtime named %q (it has: %s)",
+					e.rt.Name, name, strings.Join(known, ", ")),
+				ociRuntimeFix(e.rt, name))
+		}
+	} else {
+		add("oci-runtime", LevelWarn,
+			fmt.Sprintf("cannot enumerate %s's runtimes, so %q is unverified until the first run",
+				e.rt.Name, name),
+			ociRuntimeFix(e.rt, name))
+	}
+
+	// Virtualization. Only asked of a runtime that needs it: crun and runsc
+	// have no use for /dev/kvm and reporting on it would be noise.
+	if !IsVirtualizedOCIRuntime(name) {
+		return
+	}
+	switch st := checkKVM(); {
+	case st.Usable:
+		add("kvm", LevelOK,
+			fmt.Sprintf("%s is usable; %s workloads run in a VM with their own kernel", KVMDevice, name), "")
+	default:
+		add("kvm", LevelFail,
+			fmt.Sprintf("%s is not usable (%v), so %s cannot start a VM", KVMDevice, st.Err, name),
+			kvmFix(st))
+	}
 }
 
 // preflightWorkDir checks that the project directory can be bind-mounted and

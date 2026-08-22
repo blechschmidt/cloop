@@ -84,9 +84,56 @@ security-relevant declaration, not a hint:
 | Isolation | Meaning | Reported by |
 | --- | --- | --- |
 | `none` | shares the host's filesystem, network and user | `localprocess` |
-| `container` | own filesystem and network namespace | `container` |
-| `vm` | virtual machine or microVM | *(no backend yet)* |
+| `container` | own filesystem and network namespace, **host kernel** | `container` on the CLI's default runtime (runc/crun) |
+| `vm` | a virtual machine or microVM with **a kernel of its own** | `container` configured with a Kata `oci_runtime` |
 | `remote` | a different machine entirely | `remote`, `kubernetes` |
+
+### Virtualization is a second axis, not a fifth value
+
+`Capabilities` carries a separate boolean, `Virtualized`, and the reason it is
+not simply another `Isolation` value is the last row of that table. A Kata Pod
+on a cluster is *both* remote — the machine is not the hub's — and virtualized —
+the kernel is not the node's. `Isolation` is one enum field and can carry only
+one of those two facts, and it is deliberately **not a total order** (a
+container on this host and a process on a remote device are *differently*, not
+more or less, isolated), so no single value could mean both without misstating
+one of them. `Isolation` therefore keeps the fact a driver always has, and
+`Virtualized` carries the one it sometimes adds:
+
+| Driver | `Isolation` | `Virtualized` | Turned on by |
+| --- | --- | --- | --- |
+| `localprocess` | `none` | ❌ | — |
+| `container`, default runtime | `container` | ❌ | — |
+| `container`, Kata runtime | `vm` | ✅ | [`executors.container.oci_runtime`](../reference/configuration.md#vm-isolated-sandboxes-kata-containers) |
+| `remote` | `remote` | ❌ | — |
+| `kubernetes`, default class | `remote` | ❌ | — |
+| `kubernetes`, Kata RuntimeClass | `remote` | ✅ | [`executors.kubernetes.runtime_class`](../reference/configuration.md#vm-isolated-sandboxes-kata-containers) |
+
+Both drivers decide it from the configured runtime **name**, through one shared
+matcher — `executor.IsVirtualizedRuntime` (`pkg/executor/virtualization.go`).
+One definition rather than two because the two drivers are naming the same
+technology in different vocabularies (an OCI runtime passed to `--runtime`, a
+Kubernetes RuntimeClass), and a second copy would be a second chance for the
+same sandbox to be described one way by the container driver and another by the
+Kubernetes one.
+
+The matcher is deliberately narrow: `kata`, `katacontainers`, any `kata-*` /
+`kata.*` name, and the containerd shim spelling `io.containerd.kata.v2`.
+Everything else is false. Being wrong here is asymmetric. A **false negative**
+under-describes a sandbox — a Kata executor registered under an unrecognised
+name is called a container, a project requiring virtualization is refused
+placement on something that would have satisfied it, and the operator sees a
+refusal they can fix by renaming. A **false positive** tells an operator a
+workload runs behind a hypervisor when it shares the host kernel, and *places*
+work that was required to be virtualized onto something that is not. So gVisor's
+`runsc` reports false even though it is a genuinely stronger boundary than runc:
+it is a userspace kernel, not a virtual machine, and calling it one would
+misstate what an escape reaches.
+
+The name is all either API exposes, which is a real limit — an operator can
+register runc under the name `kata` and be believed. That is not a gap a name
+matcher can close, and it is why the container driver's [preflight](#container--kind-container-isolation-container-or-vm)
+separately proves the host can start a VM at all.
 
 ---
 
@@ -104,7 +151,7 @@ This is the backend that [strict mode](../security/model.md#the-no-host-executio
 exists to forbid. It remains the default for single-user local development,
 where the hub and the workload are the same trust domain by definition.
 
-### `container` — Kind `container`, isolation `container`
+### `container` — Kind `container`, isolation `container` or `vm`
 
 Shells out to the Docker or Podman CLI. The argv is built by a pure function,
 `buildRunArgs` (`container/argv.go`), which is why the sandbox flags can be
@@ -124,8 +171,70 @@ Only the project directory is mounted. `--pull=never` means a cold image fails
 immediately and loudly rather than pulling something unexpected at task time —
 pre-pulling is the operator's job. Secrets are forwarded as bare `--env NAME`,
 so the runtime reads the value from its own environment and it never appears in
-the host process table. A denylist (`argv.go:371-393`) rejects operator-supplied
+the host process table. A denylist (`deniedExtraArgs` in `argv.go`) rejects operator-supplied
 `ExtraArgs` that would undo any of this.
+
+**Two runtime axes.** `executors.container.runtime` picks the *CLI* — podman or
+docker. `executors.container.oci_runtime` picks what that CLI hands each
+container to, emitted as `--runtime <name>` at the top of the Isolation section
+of the argv. Empty means the CLI's own default (runc or crun) and no flag is
+emitted at all, so the overwhelmingly common deployment produces a
+byte-identical command line to before this field existed.
+
+Naming a Kata runtime (`kata`, `kata-qemu`, `kata-clh`, `kata-runtime`) is what
+makes this executor a **VM sandbox**: every container boots inside a lightweight
+VM with its own kernel, so a kernel exploit reaches the guest and the host kernel
+sits behind a hypervisor. It also changes what the flags *below* the `--runtime`
+line are enforced by — under runc they are host-kernel features, under Kata they
+are the guest's, applied inside a VM the host kernel never sees into. The
+executor then reports `Isolation: vm` and `Virtualized: true`. Setup and
+prerequisites: **[the Kata guide](../guides/kata.md)**.
+
+The value is a **name and never a path**. A path here would be a path to a binary
+that docker's daemon runs as root, so config that could name an arbitrary
+executable would be config that executes arbitrary code as root — the same reason
+the CLI itself is allow-listed. A bare name cannot do that: docker resolves it
+only against `/etc/docker/daemon.json` and podman only against
+`containers.conf`, both root-owned files the operator already controls, so the
+name is an indirection through a trusted table rather than a target.
+`ValidateOCIRuntime` therefore checks only the *shape* — no path separators, no
+leading dash, letters/digits/`.`/`_`/`-`, at most 64 characters — because the set
+of legitimate names is open (operators register Kata under whatever name they
+like, and clusters do) and a fixed allow-list would reject working deployments.
+The narrow judgement is reserved for the VM *claim*, above.
+
+A malformed `oci_runtime` **disables the executor** rather than being cleared to
+empty, and it is the only container key that behaves that way. Every other clamp
+falls back to a driver default that confines at least as much as the rejected
+setting; blanking a Kata runtime falls back to runc, which silently turns the VM
+sandbox the operator asked for into a container one while the executor keeps
+running and reporting success. A hub that comes up with one fewer executor is a
+visible, diagnosable failure; a hub that comes up with a sandbox weaker than its
+config describes is not (`clampContainerExecutor`, `pkg/config/executors.go`).
+
+Preflight gains two checks when — and only when — an `oci_runtime` is set, since
+a deployment on the CLI's default has nothing here to get wrong and an
+always-green finding on every report buries the ones that matter:
+
+| Check | Asks | On failure |
+| --- | --- | --- |
+| `oci-runtime` | is the name registered with the CLI that has to resolve it? | `fail` on docker, listing the runtimes it *does* have; `warn` on podman, which cannot be asked |
+| `kvm` | does `/dev/kvm` exist **and open read-write**? (Kata runtimes only) | `fail`, pointing at nested virtualization or `kvm` group membership |
+
+Only docker can answer the first: `docker info` carries the daemon's Runtimes
+table, which is exactly the set `--runtime` resolves against. Podman resolves
+against `containers.conf` and exposes only the *active* runtime, with no way to
+enumerate the rest — so on podman the finding is a **warning** that the name is
+unverified until the first run, never a failure. A probe that cannot distinguish
+"absent" from "unenumerable" must not report "absent", because that turns a
+working Kata deployment into a startup failure.
+
+The KVM check opens the device rather than stat-ing it. `/dev/kvm` is mode 0660
+`root:kvm` on most distributions, so a stat succeeds for a user who cannot use
+it, and the failure that actually happens — a rootless podman user outside the
+`kvm` group — is invisible to a stat and immediate on an open. Neither check can
+prove a VM will boot; the smoke test that follows is what does, and it records
+the `oci_runtime` it ran under in its result.
 
 ### `remote` — Kind `remote`, isolation `remote`
 
@@ -165,6 +274,25 @@ arrives by way of a `workspace` init container — see
 [Workspace provisioning](#workspace-provisioning). Anything that reads a
 container status by name must therefore keep selecting `harness` rather than
 "the only one".
+
+`executors.kubernetes.runtime_class` sets `runtimeClassName` on every Pod, and
+is how a **remote Kata sandbox** is requested: kube-scheduler places the Pod on
+a node advertising that handler and the workload boots in a VM with a kernel of
+its own, on a machine that is not the control plane's. Isolation stays `remote`
+— that fact has not changed — and `Virtualized` becomes true alongside it. The
+class must already exist in the cluster; cloop does not create one, and it is a
+cluster-scoped object an operator installs with the Kata node pool. Because
+those pools are conventionally tainted, this key normally appears with
+`tolerations` and `node_selector`. The name is validated as an RFC 1123
+subdomain at startup rather than at dispatch, so a typo is an error against the
+config line that caused it instead of a 422 on somebody's first run
+(`ValidateRuntimeClass`, `kubernetes/validate.go`).
+
+Unlike the container driver there is **no preflight check** for it. A
+RuntimeClass is a cluster-scoped object, and the hub holds a namespaced Role in
+the workload namespace and nothing else — it cannot read one, by design. A
+mis-set class therefore surfaces at dispatch, as a Pod that never runs and a
+rejection naming the class it asked for.
 
 ---
 
@@ -207,10 +335,19 @@ A `Candidate` carries the executor plus its scheduling context: `Health`,
 operator `Labels`, detected `Harnesses`, `ContainerRuntimes`, `MemoryMB`, and
 in-flight count. `Requirements` can pin `ExecutorID`, demand `Labels`,
 `Harnesses`, `Platform`/`Arch`, `MinMemoryMB`, `RequireIsolation`,
-`AllowedIsolations`, and capability flags (`RequireStream`, `RequireSignal`,
-`RequireContainerRuntime`, `RequireNetworkEgress`, `RequireResourceLimits`,
-`RequireImageOverride`, `RequireSandboxBuild`, `RequireSandboxMounts`,
-`RequireWorkspaceProvisioning`, `RequireHostFilesystemWorkspace`).
+`AllowedIsolations`, `RequireVirtualization`, and capability flags
+(`RequireStream`, `RequireSignal`, `RequireContainerRuntime`,
+`RequireNetworkEgress`, `RequireResourceLimits`, `RequireImageOverride`,
+`RequireSandboxBuild`, `RequireSandboxMounts`, `RequireWorkspaceProvisioning`,
+`RequireHostFilesystemWorkspace`).
+
+`RequireVirtualization` is separate from `AllowedIsolations` because it cuts
+across it. Both a local Kata container (`vm`) and a Kata Pod on a cluster
+(`remote`) satisfy it, and no set of `Isolation` values selects exactly those
+two without also admitting every non-Kata remote executor that shares the second
+one's value. It is checked against `Capabilities().Virtualized`, which is why
+that field is false unless the driver is certain: a workload that must be behind
+a hypervisor lands on one that is not the moment something claims otherwise.
 
 `RequireImageOverride`, `RequireSandboxBuild` and `RequireSandboxMounts` come
 from a project's
@@ -242,11 +379,17 @@ Ranking, applied as a stable sort:
 `*PlacementError` carrying the headline `Constraint`, a per-candidate
 `Rejection` list, and how many candidates were considered. Constraints are
 named: `no_candidates`, `executor_id`, `health`, `host_execution_policy`,
-`isolation`, `labels`, `platform`, `arch`, `harness`, `container_runtime`,
-`network_egress`, `resource_limits`, `stream`, `signal`, `memory`, `capacity`,
-`image_override`, `sandbox_build`, `sandbox_mounts`, `workspace`, `write_back`.
-An operator asking "why did nothing schedule?" gets a per-node answer, not a
-shrug.
+`isolation`, `virtualization`, `labels`, `platform`, `arch`, `harness`,
+`container_runtime`, `network_egress`, `resource_limits`, `stream`, `signal`,
+`memory`, `capacity`, `image_override`, `sandbox_build`, `sandbox_mounts`,
+`workspace`, `write_back`. An operator asking "why did nothing schedule?" gets a
+per-node answer, not a shrug.
+
+`virtualization` is the one whose message names the two config keys that fix it,
+because the candidate is otherwise healthy and correct: it "shares the executing
+machine's kernel", which is the normal state of a container or a plain Pod, and
+the remedy is a line of hub configuration rather than anything about the node's
+health, labels or capacity.
 
 Two of those names describe the request rather than any node. `no_candidates`
 means the registry was empty — nothing was rejected because there was nothing to
@@ -601,14 +744,14 @@ flowchart TB
 
     subgraph backends["Executor backends"]
         LP["localprocess<br/>isolation: none"]
-        CT["container<br/>isolation: container"]
+        CT["container<br/>isolation: container / vm"]
         RM["remote<br/>isolation: remote"]
         K8["kubernetes<br/>isolation: remote"]
     end
 
     subgraph sandboxes["Where work actually runs"]
         PROC["child process<br/>(host)"]
-        DOCK["Docker/Podman<br/>--read-only --cap-drop=ALL<br/>--network=none"]
+        DOCK["Docker/Podman<br/>--read-only --cap-drop=ALL<br/>--network=none<br/>--runtime kata → own kernel"]
         EDGE["edge device<br/>agent dials OUT"]
         POD["ephemeral Pod<br/>runAsNonRoot, RO rootfs"]
     end
@@ -859,4 +1002,5 @@ carries no credential: it locates a `cloop` binary and hands off to
 - [Security model](../security/model.md) — what each boundary authenticates with
 - [Threat model](../security/threat-model.md) — STRIDE per boundary
 - [Secret and egress grants](../guides/secrets.md) — what a sandbox is given
+- [Kata Containers](../guides/kata.md) — installing and verifying a VM sandbox
 - [Operator runbook](../operations/runbook.md) — backup, rotation, upgrade
