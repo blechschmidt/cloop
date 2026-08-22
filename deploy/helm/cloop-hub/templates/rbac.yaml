@@ -1,0 +1,77 @@
+{{- if .Values.serviceAccount.create }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "cloop-hub.serviceAccountName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "cloop-hub.labels" . | nindent 4 }}
+  {{- with .Values.serviceAccount.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
+{{- end }}
+
+{{- if and .Values.executor.kubernetes.enabled .Values.executor.kubernetes.rbac.create }}
+{{- $ns := include "cloop-hub.workloadNamespace" . }}
+---
+# The authority the hub runs workloads with, in the workload namespace only.
+#
+# These six rules are not a starting point to be widened — they are the exact
+# set of calls pkg/executor/kubernetes issues, enumerated from the call sites:
+#
+#   pods    create   client.go createPod    — start a run
+#   pods    get      client.go getPod       — poll one workload
+#   pods    list     client.go listPods     — orphan reconciliation on startup
+#   pods    watch    client.go watchPod     — stream phase transitions
+#   pods    delete   client.go deletePod    — stop, kill, and cleanup
+#   pods/log get     client.go followLogs   — stream task output
+#
+# Two absences are deliberate. There is no `update` or `patch`: the driver
+# never mutates a Pod after creating it, so a compromised hub cannot rewrite a
+# running workload's spec. And there is no `secrets` rule at all: an executor
+# that could read Secrets in its own namespace would make the secret broker
+# decorative, since every brokered credential could be fetched directly.
+#
+# `/version` is also called (preflight). It needs no rule here: Kubernetes
+# grants it to system:authenticated through the built-in
+# system:public-info-viewer ClusterRole.
+#
+# A Role and not a ClusterRole. The namespace is the blast radius, and a
+# cluster-scoped grant would make "which namespace can this hub write to" a
+# question with no answer.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "cloop-hub.fullname" . }}-executor
+  namespace: {{ $ns }}
+  labels:
+    {{- include "cloop-hub.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "cloop-hub.fullname" . }}-executor
+  namespace: {{ $ns }}
+  labels:
+    {{- include "cloop-hub.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "cloop-hub.fullname" . }}-executor
+subjects:
+  # The subject lives in the release namespace while the binding lives in the
+  # workload namespace. That cross-namespace shape is the whole design: the
+  # hub is over there, its authority is scoped to here.
+  - kind: ServiceAccount
+    name: {{ include "cloop-hub.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

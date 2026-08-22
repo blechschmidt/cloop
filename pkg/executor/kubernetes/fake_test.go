@@ -220,9 +220,15 @@ func (f *fakeAPI) handleCreate(w http.ResponseWriter, r *http.Request) {
 	stored := in
 	f.pods[in.Metadata.Name] = &stored
 	f.logs[in.Metadata.Name] = newLogStream()
+	// Serialise the response from an independent copy, not from `stored`.
+	// The map holds &stored, so the driver's Start can return, the test can
+	// call setPhase, and the kubelet-simulating mutation lands on the very
+	// bytes writeJSON is reading — a race in the fixture that reads like a
+	// race in the driver.
+	respond := stored
 	f.mu.Unlock()
 
-	writeJSON(w, 201, stored)
+	writeJSON(w, 201, respond)
 }
 
 func (f *fakeAPI) handleGet(w http.ResponseWriter, name string) {

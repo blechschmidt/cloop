@@ -1,0 +1,69 @@
+# dex — the mock identity provider for the evaluation stack.
+#
+# Its whole job is to let `docker compose up` produce a working SSO login
+# without anyone registering an OAuth client at a real IdP. Nothing here is
+# production-shaped: storage is in memory (every restart invalidates every
+# session), the client secret is committed, and the passwords are "password".
+#
+# The issuer is the *proxy's* URL, not dex's own listener. That is not a
+# stylistic choice — see the hostname note in docker-compose.yml. An OIDC
+# issuer has to resolve to the same provider from the browser (which follows
+# the redirect) and from the hub (which fetches discovery and exchanges the
+# code), and only the proxy's name does that from both sides.
+issuer: https://cloop.localtest.me:8443/dex
+
+storage:
+  type: memory
+
+web:
+  http: 0.0.0.0:5556
+
+telemetry:
+  # Separate listener so the compose healthcheck can ask "is dex up" without
+  # going through the OIDC endpoints, which answer later.
+  http: 0.0.0.0:5558
+
+oauth2:
+  # Skip the "grant access?" interstitial. It teaches nothing about cloop and
+  # adds a click to every login during evaluation.
+  skipApprovalScreen: true
+
+staticClients:
+  - id: cloop-hub
+    name: cloop hub
+    # Matches CLOOP_OIDC_CLIENT_SECRET in docker-compose.yml. In a real
+    # deployment this is a Secret ref on both sides and appears in neither
+    # file.
+    secret: cloop-eval-client-secret
+    redirectURIs:
+      - https://cloop.localtest.me:8443/auth/callback
+
+enablePasswordDB: true
+
+# Three users, chosen to demonstrate the three outcomes of cloop's RBAC rather
+# than to be a realistic directory. All passwords are "password".
+#
+#   admin@example.com     listed in ui.oidc.admin_emails  → admin
+#   operator@example.com  matched by a role_mapping       → operator
+#   nobody@example.com    matched by nothing              → none
+#
+# The third is the one worth logging in as. It authenticates successfully —
+# dex issues a valid ID token, cloop creates a session — and the user still
+# sees nothing, because default_role is none. That is deny-by-default working,
+# and it is invisible unless you try it.
+staticPasswords:
+  - email: admin@example.com
+    username: admin
+    userID: "6bd0d5f4-1f7f-4d3a-9d6f-2f0d2a1f0001"
+    # bcrypt("password")
+    hash: "$2a$10$YBwieeclcD5CkmXl0AU1puZoKutF91v9UiNOtaSFjZedAODTZtFha"
+
+  - email: operator@example.com
+    username: operator
+    userID: "6bd0d5f4-1f7f-4d3a-9d6f-2f0d2a1f0002"
+    hash: "$2a$10$YBwieeclcD5CkmXl0AU1puZoKutF91v9UiNOtaSFjZedAODTZtFha"
+
+  - email: nobody@example.com
+    username: nobody
+    userID: "6bd0d5f4-1f7f-4d3a-9d6f-2f0d2a1f0003"
+    hash: "$2a$10$YBwieeclcD5CkmXl0AU1puZoKutF91v9UiNOtaSFjZedAODTZtFha"

@@ -1,0 +1,27 @@
+# Keep the build context small and, more importantly, free of state.
+#
+# .cloop is the one that matters: it holds state.db, config.yaml and hub.env
+# for whatever project the image is being built from. Copying it into a layer
+# would bake a developer's secret-broker key into a published image.
+.cloop/
+**/.cloop/
+.git/
+.github/
+
+# Build outputs — the image builds its own binary; a host-built one is the
+# wrong architecture as often as not.
+cloop
+cloop.exe
+*.test
+*.out
+coverage.out
+
+# Deployment artifacts are not inputs to the image.
+deploy/
+docker-compose.yml
+Dockerfile
+*.md
+docs/
+
+.DS_Store
+Thumbs.db

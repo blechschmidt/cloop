@@ -1,0 +1,200 @@
+# cloop hub — local evaluation stack.
+#
+#   docker compose up --build
+#   open https://cloop.localtest.me:8443/   (accept the self-signed warning)
+#   sign in as  admin@example.com / password
+#
+# What this is for: evaluating the *hosted* posture — SSO, deny-by-default
+# RBAC, TLS, no host execution — without registering an OIDC client at a real
+# identity provider or terminating TLS with a real certificate. Three services:
+#
+#   proxy   nginx, terminates TLS and is the single origin the browser sees
+#   dex     a mock OIDC provider with one static user, no external IdP needed
+#   cloop   the hub, plain HTTP inside the network, never published to the host
+#
+# ── The hostname is load-bearing ────────────────────────────────────────────
+#
+# OIDC has a requirement that trips every local setup: the issuer URL must
+# resolve to the same identity provider from *two different vantage points* —
+# the browser, which follows the authorization redirect, and the hub, which
+# fetches discovery documents and exchanges the code server-side. "localhost"
+# cannot do this: inside the cloop container it means the cloop container.
+#
+# So the stack uses one name, cloop.localtest.me, that resolves correctly from
+# both. Public DNS points *.localtest.me at 127.0.0.1, which is what the
+# browser needs. Inside the compose network, the network alias below makes
+# Docker's embedded DNS answer with the proxy's address instead, which is what
+# the hub needs. One issuer URL, https://cloop.localtest.me:8443/dex, is
+# reachable and identical from both sides.
+#
+# ── NOT a production template ───────────────────────────────────────────────
+#
+# Static passwords, a self-signed certificate, a fixed client secret and a
+# fixed CLOOP_SECRET_KEY are all in this file in plaintext. Every one of them
+# is here so `docker compose up` needs no arguments. For a real deployment
+# start from `cloop hub bootstrap` or deploy/helm/cloop-hub.
+
+name: cloop-eval
+
+services:
+  # ── TLS bootstrap ─────────────────────────────────────────────────────────
+  # Generates the self-signed certificate the proxy serves, using cloop's own
+  # `hub tls-init` rather than an openssl one-liner in a shell — the runtime
+  # image has no shell, and reusing the real code path means the eval stack
+  # exercises the same certificate generation an operator would.
+  #
+  # --if-missing is what makes a second `docker compose up` work. Without it
+  # tls-init refuses to overwrite existing key material and exits non-zero;
+  # both the proxy and the hub gate on this service completing successfully,
+  # so the whole stack would fail to start and the only recovery would be
+  # `down -v`, which also destroys the evaluation state you were keeping.
+  certs:
+    build:
+      context: .
+      args:
+        VERSION: eval
+    image: cloop-hub:eval
+    user: "0:0"          # writes into a fresh named volume the hub then reads
+    entrypoint: ["/usr/local/bin/cloop"]
+    command:
+      - hub
+      - tls-init
+      - --if-missing
+      - --dir=/certs
+      - --host=cloop.localtest.me
+      - --host=localhost
+      - --host=127.0.0.1
+    volumes:
+      - certs:/certs
+    restart: "no"
+
+  # ── Mock identity provider ────────────────────────────────────────────────
+  # dex with a single static user and a single static client. The issuer is
+  # the *proxy's* URL, not dex's own, so the browser and the hub agree on it;
+  # see the hostname note above.
+  dex:
+    image: ghcr.io/dexidp/dex:v2.41.1
+    command: ["dex", "serve", "/etc/dex/config.yaml"]
+    volumes:
+      - ./deploy/eval/dex.yaml:/etc/dex/config.yaml:ro
+    expose:
+      - "5556"
+    healthcheck:
+      # dex's own healthz listener, not the OIDC endpoint: it answers before
+      # the connector finishes warming up, which is what "started" means here.
+      test: ["CMD", "wget", "-q", "-O-", "http://127.0.0.1:5558/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  # ── TLS-terminating reverse proxy ─────────────────────────────────────────
+  # The only service published to the host. Routes /dex/* to the identity
+  # provider and everything else to the hub, so both live behind one origin
+  # and one certificate.
+  proxy:
+    image: nginx:1.27-alpine
+    depends_on:
+      certs:
+        condition: service_completed_successfully
+      dex:
+        condition: service_healthy
+      # nginx resolves `proxy_pass http://cloop:8080` at config-parse time, so
+      # winning the start race against the hub is a hard "host not found in
+      # upstream" exit rather than a retry. restart: unless-stopped papers
+      # over it, at the cost of an alarming error on first boot.
+      cloop:
+        condition: service_started
+    volumes:
+      - ./deploy/eval/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - certs:/etc/nginx/certs:ro
+    ports:
+      - "8443:8443"
+    networks:
+      default:
+        aliases:
+          # This is what makes the issuer URL resolve to the proxy from
+          # inside the network while public DNS resolves it to 127.0.0.1 for
+          # the browser. Removing it breaks the login with a discovery error.
+          - cloop.localtest.me
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--no-check-certificate", "-O-", "https://127.0.0.1:8443/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  # ── The hub ───────────────────────────────────────────────────────────────
+  cloop:
+    build:
+      context: .
+      args:
+        VERSION: eval
+    image: cloop-hub:eval
+    depends_on:
+      certs:
+        condition: service_completed_successfully
+      dex:
+        condition: service_healthy
+    command: ["ui", "--port", "8080", "--no-browser"]
+    environment:
+      # Deny-by-default RBAC, no host execution, TLS at the proxy: the same
+      # posture `cloop hub bootstrap` writes, expressed as a mounted config.
+      HOME: /var/lib/cloop
+
+      # The client secret arrives from the environment, never from the
+      # committed config.yaml. In Kubernetes this is a Secret ref; here it is
+      # a literal because the whole point is that `up` needs no setup.
+      CLOOP_OIDC_CLIENT_SECRET: cloop-eval-client-secret
+
+      # Evaluation-only key. A real deployment generates this with
+      # `cloop hub bootstrap` and never writes it into a committed file.
+      CLOOP_SECRET_KEY: eval-only-not-a-real-key-change-me
+
+      # Trust the proxy's self-signed certificate for the server-side half of
+      # the OIDC flow (discovery, JWKS, token exchange).
+      #
+      # SSL_CERT_DIR and not SSL_CERT_FILE: Go replaces the *file* list when
+      # SSL_CERT_FILE is set, which would drop the system roots and break
+      # every outbound provider call. Overriding only the directory list
+      # leaves /etc/ssl/certs/ca-certificates.crt in place, so this adds the
+      # dev CA to the system roots instead of replacing them.
+      SSL_CERT_DIR: /etc/cloop/trust
+    volumes:
+      # The state volume covers the whole working directory, because that is
+      # what `cloop ui` resolves .cloop against. It seeds from the image, so
+      # .cloop already exists and is owned by 65532 — mount it anywhere else
+      # and the hub gets a root-owned directory it cannot write a database to.
+      - state:/var/lib/cloop
+      # Nested inside that volume, read-only: the config is the operator's,
+      # not the container's, and nothing in the hub should be able to rewrite
+      # its own execution policy.
+      - ./deploy/eval/cloop-config.yaml:/var/lib/cloop/.cloop/config.yaml:ro
+      # The proxy's self-signed certificate, added to the trust store via
+      # SSL_CERT_DIR above. Read-only, and the key alongside it is mode 0600
+      # and unreadable by this user — Go's directory scan skips what it
+      # cannot read, so only the certificate is picked up.
+      - certs:/etc/cloop/trust:ro
+    # Not published to the host: reaching the hub means going through the
+    # proxy, which is the topology a real deployment has.
+    expose:
+      - "8080"
+
+    # The hardening the Dockerfile makes possible, actually switched on. If
+    # any of these break the hub, that is a bug worth knowing about here
+    # rather than in production.
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    restart: unless-stopped
+
+volumes:
+  # The hub's entire writable state: state.db, artifacts, the multi-project
+  # registry. `docker compose down -v` resets the evaluation to zero.
+  state:
+  # Shared between the generator, the proxy that serves the certificate and
+  # the hub that has to trust it.
+  certs:

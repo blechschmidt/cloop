@@ -1,0 +1,37 @@
+{{- if .Values.ingress.enabled }}
+{{- if ne .Values.ingress.host (regexReplaceAll "^https?://([^/:]+).*$" .Values.config.externalURL "${1}") }}
+{{- fail (printf "ingress.host (%s) does not match the hostname in config.externalURL (%s).\nThe hub builds its OIDC redirect from externalURL, so a mismatch produces a login that returns to the sign-in page with no error." .Values.ingress.host .Values.config.externalURL) }}
+{{- end }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "cloop-hub.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "cloop-hub.labels" . | nindent 4 }}
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  {{- if .Values.ingress.tls.enabled }}
+  tls:
+    - hosts:
+        - {{ .Values.ingress.host | quote }}
+      secretName: {{ .Values.ingress.tls.secretName | default (printf "%s-tls" (include "cloop-hub.fullname" .)) | quote }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.ingress.host | quote }}
+      http:
+        paths:
+          - path: {{ .Values.ingress.path }}
+            pathType: {{ .Values.ingress.pathType }}
+            backend:
+              service:
+                name: {{ include "cloop-hub.fullname" . }}
+                port:
+                  number: {{ .Values.service.port }}
+{{- end }}

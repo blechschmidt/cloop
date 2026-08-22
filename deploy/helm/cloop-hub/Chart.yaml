@@ -1,0 +1,25 @@
+apiVersion: v2
+name: cloop-hub
+description: cloop control plane — dashboard, REST API and remote executor endpoint
+type: application
+
+# Chart version tracks the chart's own shape. appVersion follows the cloop
+# release the default image tag points at; overriding image.tag without
+# overriding this is fine and expected.
+version: 0.1.0
+appVersion: "dev"
+
+home: https://github.com/blechschmidt/cloop
+sources:
+  - https://github.com/blechschmidt/cloop
+keywords:
+  - cloop
+  - ai
+  - agents
+  - control-plane
+
+annotations:
+  # A single replica is not a placeholder to raise later. The hub's state is a
+  # SQLite database on a ReadWriteOnce volume, and two replicas would race on
+  # it. Scaling out is a change to the storage layer, not to replicaCount.
+  cloop.dev/single-replica: "SQLite state; see deploy/README.md"

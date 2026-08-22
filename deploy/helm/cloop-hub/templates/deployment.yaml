@@ -1,0 +1,146 @@
+{{- include "cloop-hub.validate" . -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "cloop-hub.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "cloop-hub.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  strategy:
+    # Recreate, not RollingUpdate. The state is SQLite on a ReadWriteOnce
+    # volume: a rolling update would schedule the new Pod before the old one
+    # released the volume, which either deadlocks the rollout or — on a
+    # storage class that permits it — runs two writers against one database.
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "cloop-hub.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "cloop-hub.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- if or .Values.config.fromConfigMap .Values.podAnnotations }}
+      annotations:
+        {{- if .Values.config.fromConfigMap }}
+        # Roll the Pod when the config changes. Without this a `helm upgrade`
+        # that tightens the execution policy updates the ConfigMap and leaves
+        # the old policy running, which is the worst possible outcome for a
+        # security setting.
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "cloop-hub.serviceAccountName" . }}
+      # The in-cluster executor authenticates with this token. When the
+      # Kubernetes executor is off there is nothing for it to do, and not
+      # mounting it means a compromised hub has no cluster credential at all.
+      automountServiceAccountToken: {{ and .Values.serviceAccount.automountServiceAccountToken .Values.executor.kubernetes.enabled }}
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      containers:
+        - name: hub
+          image: {{ include "cloop-hub.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["ui", "--port", "8080", "--no-browser"]
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          env:
+            # `cloop ui` resolves .cloop against the process working
+            # directory and the project registry against $HOME. Both point at
+            # /var/lib/cloop so one volume holds all persistent state.
+            - name: HOME
+              value: /var/lib/cloop
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          envFrom:
+            - secretRef:
+                name: {{ include "cloop-hub.secretName" . }}
+            {{- with .Values.secrets.extraEnvFrom }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          volumeMounts:
+            # The state directory itself, not its parent: the parent comes
+            # from the image and stays read-only, so the only writable path
+            # in the container is the one holding state.
+            - name: state
+              mountPath: /var/lib/cloop/.cloop
+            {{- if .Values.config.fromConfigMap }}
+            # Nested inside that mount, read-only. Kubernetes orders mounts
+            # by path depth, so the volume is in place before this lands on
+            # top of it.
+            - name: config
+              mountPath: /var/lib/cloop/.cloop/config.yaml
+              subPath: config.yaml
+              readOnly: true
+            {{- end }}
+            # readOnlyRootFilesystem leaves no writable temp dir; Go's
+            # os.CreateTemp and anything shelling out needs one.
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          {{- with .Values.livenessProbe }}
+          livenessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.readinessProbe }}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.startupProbe }}
+          startupProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        - name: state
+          {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ .Values.persistence.existingClaim | default (printf "%s-state" (include "cloop-hub.fullname" .)) }}
+          {{- else }}
+          # No PVC: every restart starts from an empty database. Fine for a
+          # smoke test, silently destructive for anything else.
+          emptyDir: {}
+          {{- end }}
+        {{- if .Values.config.fromConfigMap }}
+        - name: config
+          configMap:
+            name: {{ include "cloop-hub.fullname" . }}-config
+            defaultMode: 0444
+        {{- end }}
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Mi
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

@@ -407,16 +407,7 @@ func registerKubernetesExecutor(cfg *config.Config, reconcile bool) {
 		return
 	}
 
-	broker, _, err := openBroker()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "warning: kubernetes executor %q needs a secret broker for its kubeconfig: %v\n",
-			opts.ID, err)
-		fmt.Fprintf(os.Stderr, "         set CLOOP_SECRET_KEY and grant a kubeconfig with "+
-			"`cloop secret grant <secret> --to executor:%s`.\n", opts.ID)
-		return
-	}
-	source, err := kubernetes.NewBrokerSource(broker, opts.ID,
-		cfg.Executors.Kubernetes.KubeconfigSecret, cfg.Executors.Kubernetes.Context)
+	source, err := kubernetesCredentialSource(cfg, opts.ID)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning: kubernetes executor %q: %v\n", opts.ID, err)
 		return
@@ -450,6 +441,32 @@ func registerKubernetesExecutor(cfg *config.Config, reconcile bool) {
 				len(removed), strings.Join(removed, ", "))
 		}
 	}()
+}
+
+// kubernetesCredentialSource picks the identity the Kubernetes executor will
+// authenticate with. There are exactly two, and config decides which — never
+// a fallback from one to the other, because an executor that quietly used a
+// different identity than the operator configured is an audit trail that
+// lies.
+func kubernetesCredentialSource(cfg *config.Config, execID string) (kubernetes.CredentialSource, error) {
+	k := cfg.Executors.Kubernetes
+	if k.InCluster {
+		src, err := kubernetes.NewInClusterSource(k.Namespace)
+		if err != nil {
+			return nil, fmt.Errorf("in_cluster is set but the ServiceAccount is unusable: %w", err)
+		}
+		return src, nil
+	}
+
+	broker, _, err := openBroker()
+	if err != nil {
+		return nil, fmt.Errorf("needs a secret broker for its kubeconfig: %w.\n"+
+			"         Set CLOOP_SECRET_KEY and grant a kubeconfig with "+
+			"`cloop secret grant <secret> --to executor:%s`, or set "+
+			"executors.kubernetes.in_cluster when the hub runs inside the target cluster",
+			err, execID)
+	}
+	return kubernetes.NewBrokerSource(broker, execID, k.KubeconfigSecret, k.Context)
 }
 
 // wantsPodReconcile reports whether a command is long-running enough to be

@@ -1,0 +1,288 @@
+# Default values for cloop-hub.
+#
+# The defaults here are the hardened ones. Where a setting exists only because
+# some cluster needs an escape hatch, the comment says which cluster and what
+# you give up — a value you can flip without knowing the cost is a value that
+# gets flipped.
+
+image:
+  repository: ghcr.io/blechschmidt/cloop
+  # Pin by digest in production. A floating tag means the thing that runs your
+  # agents can change without a deploy, which is a supply-chain decision made
+  # by whoever last pushed to the registry.
+  tag: ""            # defaults to .Chart.AppVersion
+  pullPolicy: IfNotPresent
+  # Pulls the *hub's* image, so these are Secrets in the release namespace.
+  # Standard Kubernetes form — a list of {name: …}, not bare strings.
+  # Workload Pods live in another namespace and need their own list; see
+  # executor.kubernetes.imagePullSecrets.
+  pullSecrets: []
+  #  - name: ghcr-auth
+
+nameOverride: ""
+fullnameOverride: ""
+
+# One replica, deliberately. The hub's state is SQLite on a ReadWriteOnce
+# volume; a second replica would corrupt it rather than share the load. The
+# Deployment uses Recreate for the same reason — a rolling update would run
+# two Pods against one volume during the handover.
+replicaCount: 1
+
+# ── HTTP ────────────────────────────────────────────────────────────────────
+service:
+  type: ClusterIP
+  port: 8080
+  annotations: {}
+
+ingress:
+  enabled: false
+  # Empty means "use the cluster's default IngressClass". Check that one
+  # exists: ingress-nginx v1+ ignores class-less Ingresses unless it was
+  # started with --watch-ingress-without-class, and the failure is silent —
+  # the object is created, `helm install --wait` succeeds, and the hub is
+  # simply unreachable.
+  #   kubectl get ingressclass
+  className: ""
+  # The hub must be reachable at exactly this host: it is what ui.external_url
+  # and the OIDC redirect are built from, and a mismatch presents as a login
+  # that loops back to the sign-in page.
+  host: cloop.example.com
+  path: /
+  pathType: Prefix
+  annotations:
+    # cloop is WebSocket-first. Without a long read timeout the dashboard
+    # loads and then silently stops updating, which reads as a cloop bug.
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    # Match ui.max_request_body_bytes. ingress-nginx defaults to 1m, so
+    # without this a request between 1 and 10 MiB is rejected by the proxy
+    # with a 413 the hub never sees and never records.
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+  tls:
+    enabled: true
+    # Empty derives <fullname>-tls, so two releases in one namespace do not
+    # collide on the same Secret.
+    secretName: ""
+
+# ── Configuration ───────────────────────────────────────────────────────────
+config:
+  # Render .cloop/config.yaml from this chart into a ConfigMap and mount it
+  # read-only. This is the GitOps path: the hub's execution policy lives in
+  # your values file and cannot be edited from inside the running Pod.
+  #
+  # Setting this false does NOT mean "same hub, editable config". It means
+  # the hub starts with no config file at all, so every value below —
+  # allowHostProcess, externalURL, allowed_ws_origins, the whole oidc block —
+  # simply does not reach it, and cloop's own permissive defaults apply:
+  # host execution ALLOWED, no origin pinning, no SSO. The chart refuses the
+  # oidc.enabled combination outright for that reason, and NOTES.txt says so
+  # for the rest.
+  #
+  # Use it only if you intend to write a config into the hub's volume
+  # yourself. The trade-off it is usually reached for — the dashboard's
+  # config-write actions failing against a read-only mount — is not worth
+  # this.
+  fromConfigMap: true
+
+  # The URL browsers use. Must match the Ingress host and the redirect
+  # registered at your identity provider.
+  externalURL: https://cloop.example.com
+
+  # false means no run can ever fork a harness on the hub Pod. Leave it.
+  # The hub becomes useful by having an executor (below), not by being
+  # allowed to execute.
+  allowHostProcess: false
+
+  # Verbatim extra YAML merged into the generated config.yaml at the top
+  # level. For settings the chart does not model — budgets, webhooks,
+  # provider tuning.
+  extra: {}
+
+oidc:
+  enabled: false
+  issuer: ""                       # https://idp.example.com/realms/main
+  clientID: cloop-hub
+  # clientSecret is NOT set here. It comes from the Secret referenced under
+  # .secrets — putting it in values.yaml puts it in your git history and in
+  # `helm get values` for anyone who can read the release.
+  scopes: [openid, profile, email, groups]
+  adminEmails: []
+  # Deny-by-default: an authenticated user matching no binding gets nothing.
+  # "viewer" would put your entire directory inside the hub the moment SSO is
+  # switched on.
+  defaultRole: none
+  roleMappings: []
+  #  - {claim: group, value: platform-admins, role: admin}
+  #  - {claim: group, value: engineering,     role: operator}
+  sessionTTLHours: 12
+
+# ── Secrets ─────────────────────────────────────────────────────────────────
+secrets:
+  # Reference a Secret you created out-of-band. This is the production path:
+  #
+  #   kubectl create secret generic cloop-hub-secrets \
+  #     --from-literal=CLOOP_SECRET_KEY="$(head -c32 /dev/urandom | base64 | tr -d =)" \
+  #     --from-literal=CLOOP_UI_TOKEN="$(head -c32 /dev/urandom | base64 | tr -d =)" \
+  #     --from-literal=CLOOP_OIDC_CLIENT_SECRET=…
+  #
+  # CLOOP_SECRET_KEY is the master key for the secret broker: every brokered
+  # kubeconfig, PAT and egress credential is sealed with it. Losing it makes
+  # them permanently unopenable — there is no escrow. Back it up wherever you
+  # keep root credentials, and never let Helm generate it for a cluster you
+  # care about.
+  existingSecret: ""
+
+  # Chart-managed Secret. For evaluation only: the values land in your
+  # values file, in the release's stored manifest and in `helm get manifest`.
+  create: false
+  secretKey: ""              # CLOOP_SECRET_KEY
+  uiToken: ""                # CLOOP_UI_TOKEN
+  oidcClientSecret: ""       # CLOOP_OIDC_CLIENT_SECRET
+
+  # Additional environment variables from other Secrets — provider API keys
+  # in particular (ANTHROPIC_API_KEY, OPENAI_API_KEY).
+  extraEnvFrom: []
+  #  - secretRef:
+  #      name: cloop-provider-keys
+
+# ── Storage ─────────────────────────────────────────────────────────────────
+persistence:
+  enabled: true
+  # Mounted at /var/lib/cloop/.cloop — the state directory itself, not its
+  # parent. That keeps the image-provided parent read-only while the SQLite
+  # database, artifacts and the project registry all land on the volume.
+  size: 10Gi
+  storageClass: ""
+  # ReadWriteOnce is not a limitation to work around. SQLite over a shared
+  # filesystem with two writers corrupts; the single replica above is the
+  # other half of the same constraint.
+  accessMode: ReadWriteOnce
+  existingClaim: ""
+
+# ── In-cluster executor ─────────────────────────────────────────────────────
+# When enabled, the hub schedules each run as an ephemeral Pod and
+# authenticates as its own ServiceAccount rather than a brokered kubeconfig.
+# The chart installs a Role granting exactly the verbs
+# pkg/executor/kubernetes/pod.go issues — nothing wider.
+executor:
+  kubernetes:
+    enabled: false
+
+    # Where workload Pods are created. Default is a namespace *other* than
+    # the hub's, and that is the point: a workload in the hub's namespace can
+    # see the hub's Secrets and its ServiceAccount token, which defeats the
+    # isolation the executor exists to provide.
+    #
+    # The namespace must already exist and the RoleBinding below is created
+    # in it, so the installing principal needs RBAC write access there.
+    namespace: cloop-workloads
+
+    # Harness image. Must contain the cloop binary — there is no bind-mounted
+    # host binary to fall back on in a cluster.
+    #
+    # Empty falls back to the hub image, which is enough to prove the executor
+    # works (`cloop executor test kubernetes` runs `cloop version` in a Pod)
+    # and is NOT enough to run a real task. The hub image is distroless: no
+    # shell, no git, no language toolchains, no coding agent. A harness that
+    # has to clone a repository and run a build needs an image you built for
+    # that, with cloop on PATH.
+    image: ""
+
+    # Secrets in the WORKLOAD namespace holding registry auth for the image
+    # above. Separate from image.pullSecrets because imagePullSecrets are
+    # namespaced and the two namespaces differ. Bare strings here, which is
+    # what cloop's config schema takes.
+    imagePullSecrets: []
+    #  - ghcr-auth
+
+    # Bound every workload. Without limits a run is constrained only by the
+    # namespace's LimitRange, if one exists.
+    cpuRequest: 250m
+    cpuLimit: "2"
+    memoryRequest: 512Mi
+    memoryLimit: 4Gi
+    ephemeralStorageLimit: 8Gi
+
+    # Wall-clock ceiling enforced by the kubelet rather than by cloop, so it
+    # survives a control-plane restart. 0 disables it.
+    activeDeadlineSeconds: 7200
+
+    # 0 is unbounded. Set it to whatever your namespace quota can absorb.
+    maxConcurrent: 0
+
+    # Install the ServiceAccount, Role and RoleBinding. Turn this off only if
+    # your platform manages RBAC separately — the executor still needs the
+    # same verbs, granted by someone.
+    rbac:
+      create: true
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+  # The whole in-cluster mode depends on this token existing.
+  automountServiceAccountToken: true
+
+# ── Pod security ────────────────────────────────────────────────────────────
+# These satisfy the "restricted" Pod Security Standard. They are defaults
+# rather than hard-coded so an unusual cluster can adjust — but every one of
+# them is load-bearing, and the image is built to need none of what they
+# remove.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  # Makes the PVC group-writable by the Pod's group. Without it the hub gets
+  # a root-owned volume and fails on the first database write.
+  fsGroup: 65532
+  fsGroupChangePolicy: OnRootMismatch
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: [ALL]
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: "2"
+    memory: 2Gi
+
+# Liveness asks "is this process alive" and nothing else, so a slow database
+# never triggers a restart. Readiness pings SQLite, so a hub with unavailable
+# storage leaves the Service's endpoints instead of serving errors.
+livenessProbe:
+  httpGet: {path: /healthz, port: http}
+  initialDelaySeconds: 5
+  periodSeconds: 20
+  timeoutSeconds: 3
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet: {path: /readyz, port: http}
+  initialDelaySeconds: 3
+  periodSeconds: 10
+  timeoutSeconds: 3
+  failureThreshold: 3
+
+startupProbe:
+  httpGet: {path: /healthz, port: http}
+  periodSeconds: 3
+  failureThreshold: 40
+
+podAnnotations: {}
+podLabels: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+priorityClassName: ""
+terminationGracePeriodSeconds: 30
+
+extraEnv: []
+#  - name: ANTHROPIC_BASE_URL
+#    value: https://gateway.internal/anthropic

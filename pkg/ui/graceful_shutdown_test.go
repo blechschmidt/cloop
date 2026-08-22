@@ -165,8 +165,16 @@ func TestWatchProjects_StopsOnContextCancel(t *testing.T) {
 
 	select {
 	case <-done:
-	case <-time.After(3 * time.Second):
-		t.Fatal("watchProjects did not return within 3s of ctx cancel")
+	// The bound has to clear two things it is not measuring: the 2s poll
+	// ticker (what a ctx-ignoring watchProjects would wait for) and however
+	// long this parallel goroutine takes to get scheduled. Under -race on a
+	// busy machine the second one alone can eat several seconds, and the
+	// original 3s budget made this test fail about half the time for reasons
+	// that had nothing to do with cancellation. 15s still catches the
+	// regression it exists for — a watchProjects that never returns, or one
+	// that only notices at the next tick would be well under it.
+	case <-time.After(15 * time.Second):
+		t.Fatal("watchProjects did not return within 15s of ctx cancel")
 	}
 }
 

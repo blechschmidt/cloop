@@ -481,6 +481,37 @@ func TestExecutorWarnings_SandboxConfiguredButNotEnforced(t *testing.T) {
 	}
 }
 
+// TestExecutorWarnings_InClusterWithoutANamespace: the in-cluster fallback is
+// the *hub's own* namespace, which puts model-authored workloads next to the
+// control plane's Secrets and its ServiceAccount token. That is a materially
+// worse default than the brokered-kubeconfig one, so it gets its own warning
+// rather than sharing the generic "namespace is unset" text.
+func TestExecutorWarnings_InClusterWithoutANamespace(t *testing.T) {
+	e := ExecutorsConfig{Kubernetes: KubernetesExecutorConfig{Enabled: true, InCluster: true}}
+	e.SetHostProcessAllowed(false)
+
+	var found string
+	for _, w := range ExecutorWarnings(e) {
+		if strings.Contains(w, "in_cluster") {
+			found = w
+		}
+	}
+	if found == "" {
+		t.Fatalf("in-cluster mode with no namespace produced no warning: %v", ExecutorWarnings(e))
+	}
+	if !strings.Contains(found, "own namespace") {
+		t.Errorf("warning %q does not say where the Pods actually land", found)
+	}
+
+	// With a namespace set, the warning goes away.
+	e.Kubernetes.Namespace = "cloop-workloads"
+	for _, w := range ExecutorWarnings(e) {
+		if strings.Contains(w, "in_cluster") {
+			t.Errorf("still warned after a namespace was set: %q", w)
+		}
+	}
+}
+
 // --- kubernetes executor (Task 20161) ---------------------------------
 
 func TestValidateKubernetesExecutor(t *testing.T) {
@@ -494,6 +525,7 @@ func TestValidateKubernetesExecutor(t *testing.T) {
 		"identity":    {ServiceAccount: "cloop-runner", RunAsUser: 1000, RunAsGroup: 1000},
 		"concurrency": {MaxConcurrent: 8},
 		"secret ref":  {KubeconfigSecret: "prod-kubeconfig", Context: "prod"},
+		"in cluster":  {InCluster: true, Namespace: "cloop-workloads"},
 	}
 	for name, cfg := range valid {
 		t.Run(name, func(t *testing.T) {
@@ -521,6 +553,12 @@ func TestValidateKubernetesExecutor(t *testing.T) {
 		"negative concurrency": {KubernetesExecutorConfig{MaxConcurrent: -1}, "max_concurrent"},
 		"bad toleration":       {KubernetesExecutorConfig{Tolerations: []kubernetes.Toleration{{Operator: "Matches"}}}, "tolerations[0]"},
 		"bad pull secret":      {KubernetesExecutorConfig{ImagePullSecrets: []string{"Bad Name"}}, "image_pull_secrets"},
+		// Two credential sources is an ambiguity about which identity ran a
+		// workload, and that question has to have one answer in an audit log.
+		"two credential sources": {
+			KubernetesExecutorConfig{InCluster: true, KubeconfigSecret: "prod-kubeconfig"},
+			"mutually exclusive",
+		},
 	}
 	for name, tc := range invalid {
 		t.Run(name, func(t *testing.T) {

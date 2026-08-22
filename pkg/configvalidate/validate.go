@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"time"
 
@@ -71,28 +72,42 @@ func (r *Report) Counts() (errors, warns, infos int) {
 	return
 }
 
-// knownTopLevelKeys is the set of valid top-level keys in config.yaml.
-// These must match the yaml struct tags on config.Config.
-var knownTopLevelKeys = map[string]bool{
-	"provider":           true,
-	"anthropic":          true,
-	"openai":             true,
-	"ollama":             true,
-	"claudecode":         true,
-	"mock":               true,
-	"webhook":            true,
-	"github":             true,
-	"router":             true,
-	"hooks":              true,
-	"max_parallel":       true,
-	"watch":              true,
-	"notify":             true,
-	"sync":               true,
-	"log_json":           true,
-	"budget":             true,
-	"calibration_factor": true,
-	"rate_limit":         true,
-	"tracing":            true,
+// knownTopLevelKeys is the set of valid top-level keys in config.yaml,
+// derived from config.Config's own yaml tags.
+//
+// It used to be a hand-written literal, and it drifted: `ui`, `executors`,
+// `orchestrator`, `backup` and `step_timeout` were all added to the struct
+// and never added here. The consequence was not cosmetic. `cloop config
+// validate` reported them as "unknown top-level key — will be ignored by
+// cloop" (they are not; they parse fine) and offered `--fix`, which strips
+// unknown keys — so running the tool's own suggested repair on a hardened
+// config would delete the entire execution policy and OIDC block and leave a
+// hub that silently reverted to permissive defaults.
+//
+// Reflection removes the failure mode rather than patching this instance of
+// it: a new section in config.Config is known here the moment it exists.
+var knownTopLevelKeys = topLevelYAMLKeys(reflect.TypeOf(config.Config{}))
+
+// topLevelYAMLKeys reads the yaml tag off each exported field of a struct.
+// Fields tagged "-" are skipped; an untagged field falls back to the
+// lowercased field name, which is what gopkg.in/yaml.v3 itself does.
+func topLevelYAMLKeys(t reflect.Type) map[string]bool {
+	keys := make(map[string]bool, t.NumField())
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		if f.PkgPath != "" { // unexported
+			continue
+		}
+		name, _, _ := strings.Cut(f.Tag.Get("yaml"), ",")
+		switch name {
+		case "-":
+			continue
+		case "":
+			name = strings.ToLower(f.Name)
+		}
+		keys[name] = true
+	}
+	return keys
 }
 
 // registeredProviders is the set of provider names cloop knows about.

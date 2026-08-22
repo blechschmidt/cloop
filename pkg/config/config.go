@@ -449,6 +449,18 @@ type KubernetesExecutorConfig struct {
 	// which is the common single-cluster case.
 	KubeconfigSecret string `yaml:"kubeconfig_secret,omitempty"`
 
+	// InCluster authenticates as the hub Pod's own ServiceAccount instead of
+	// leasing a kubeconfig from the broker. Only meaningful when the hub is
+	// itself running in the cluster it schedules into, which is what the
+	// Helm chart in deploy/helm/cloop-hub sets up.
+	//
+	// It is not a weaker boundary than a brokered kubeconfig, it is a
+	// different one: what the executor may do is a Role in the cluster,
+	// enforced by the API server, rather than a grant in cloop's database
+	// enforced by cloop. Mutually exclusive with KubeconfigSecret, because
+	// "which identity is this executor using" must have one answer.
+	InCluster bool `yaml:"in_cluster,omitempty"`
+
 	// Context selects a kubeconfig context. Empty uses current-context.
 	// Rarely needed: the broker already minimizes a kubeconfig to the
 	// contexts a grant permits, usually leaving exactly one.
@@ -1196,7 +1208,8 @@ func loadFromSQLite(workdir string) string {
 
 // Load reads config from .cloop/config.yaml. Returns defaults if missing.
 // Environment variables override file values: ANTHROPIC_API_KEY, OPENAI_API_KEY,
-// ANTHROPIC_BASE_URL, OPENAI_BASE_URL, OLLAMA_BASE_URL, CLOOP_PROVIDER.
+// ANTHROPIC_BASE_URL, OPENAI_BASE_URL, OLLAMA_BASE_URL, CLOOP_PROVIDER,
+// GITHUB_TOKEN, CLOOP_OIDC_CLIENT_SECRET.
 // On Unix systems, Load prints a warning when the config file is world-readable
 // (permissions wider than 0600) because it may contain API keys.
 //
@@ -1490,6 +1503,15 @@ func (c *Config) applyEnvVars() {
 	}
 	if v := os.Getenv("GITHUB_TOKEN"); v != "" {
 		c.GitHub.Token = v
+	}
+	// The OIDC client secret is the one credential a *hosted* deployment
+	// cannot keep in this file. config.yaml is the thing an operator templates
+	// into a ConfigMap, commits to a config repo and diffs in a pull request;
+	// the client secret is the thing that must arrive from a Kubernetes Secret
+	// or a systemd EnvironmentFile. Without this override the two requirements
+	// are in direct conflict and the secret ends up committed.
+	if v := os.Getenv("CLOOP_OIDC_CLIENT_SECRET"); v != "" {
+		c.UI.OIDC.ClientSecret = v
 	}
 }
 

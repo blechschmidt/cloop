@@ -148,9 +148,20 @@ func ExecutorWarnings(e ExecutorsConfig) []string {
 			out = append(out, "executors.kubernetes."+w)
 		}
 		if strings.TrimSpace(e.Kubernetes.Namespace) == "" {
-			out = append(out, "executors.kubernetes.namespace is unset, so Pods land in the "+
-				"namespace the brokered kubeconfig happens to name (or \"cloop\"). Set it "+
-				"explicitly — the namespace is the blast radius.")
+			if e.Kubernetes.InCluster {
+				// The in-cluster fallback is the *hub's own* namespace, which
+				// puts model-authored workloads next to the control plane's
+				// Secrets and its ServiceAccount token. That is a materially
+				// different default from "some namespace a kubeconfig named",
+				// so it gets its own sentence.
+				out = append(out, "executors.kubernetes.in_cluster is set with no namespace, so "+
+					"workload Pods are created in the hub's own namespace, alongside its Secrets "+
+					"and ServiceAccount. Set namespace to a dedicated one and scope the Role to it.")
+			} else {
+				out = append(out, "executors.kubernetes.namespace is unset, so Pods land in the "+
+					"namespace the brokered kubeconfig happens to name (or \"cloop\"). Set it "+
+					"explicitly — the namespace is the blast radius.")
+			}
 		}
 		if e.Kubernetes.MemoryLimit == "" && e.Kubernetes.CPULimit == "" {
 			out = append(out, "executors.kubernetes sets no cpu_limit or memory_limit, so a "+
@@ -407,6 +418,15 @@ func ValidateKubernetesExecutor(k KubernetesExecutorConfig) error {
 	// start the Pod with an error that reads like an image problem.
 	if k.RunAsUser < 0 || k.RunAsGroup < 0 {
 		return fmt.Errorf("executors.kubernetes.run_as_user and run_as_group must be >= 0")
+	}
+
+	// Two credential sources is not a fallback chain, it is an ambiguity.
+	// Refuse it here rather than picking one and leaving the operator to
+	// discover from an audit log which identity actually ran their workload.
+	if k.InCluster && strings.TrimSpace(k.KubeconfigSecret) != "" {
+		return fmt.Errorf("executors.kubernetes: in_cluster and kubeconfig_secret are mutually exclusive — " +
+			"in_cluster authenticates as the hub Pod's ServiceAccount, kubeconfig_secret leases a " +
+			"credential from the secret broker; pick one")
 	}
 
 	// Delegated to the driver so the Pod-critical checks (namespace, image

@@ -1,0 +1,75 @@
+cloop hub {{ .Chart.AppVersion }} installed as {{ .Release.Name }} in {{ .Release.Namespace }}.
+
+Reach it:
+{{- if .Values.ingress.enabled }}
+  {{ .Values.config.externalURL }}
+{{- else }}
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "cloop-hub.fullname" . }} 8080:{{ .Values.service.port }}
+  http://127.0.0.1:8080
+{{- end }}
+
+Authenticate:
+{{- if and .Values.oidc.enabled (not .Values.config.fromConfigMap) }}
+  ⚠ oidc.enabled is set but no config reached the hub, so SSO is NOT active.
+{{- else if .Values.oidc.enabled }}
+  Single sign-on against {{ .Values.oidc.issuer }}.
+  default_role is "{{ .Values.oidc.defaultRole }}", so a user who matches no
+  binding can see nothing. If everyone lands on an empty dashboard, that is
+  this setting doing its job — add a role_mapping, do not lower the default.
+{{- else }}
+  Bearer token only. Read it with:
+    kubectl -n {{ .Release.Namespace }} get secret {{ include "cloop-hub.secretName" . }} \
+      -o jsonpath='{.data.CLOOP_UI_TOKEN}' | base64 -d
+  One shared token means no per-user identity and therefore no usable audit
+  trail. Set oidc.enabled before this hub has more than one user.
+{{- end }}
+
+Execution policy:
+{{- if not .Values.config.fromConfigMap }}
+  ⚠ config.fromConfigMap is false, so NO config reached the hub and cloop's
+    own defaults apply — which means host execution is ALLOWED. Runs can fork
+    a harness inside the hub Pod, next to its Secrets and its ServiceAccount
+    token. Nothing under `config:` or `oidc:` in your values took effect.
+    Set config.fromConfigMap=true, or write a config into the hub's volume.
+{{- else if .Values.config.allowHostProcess }}
+  ⚠ config.allowHostProcess is TRUE. Runs can fork a harness inside the hub
+    Pod — the same Pod holding your ServiceAccount token and every brokered
+    credential. Set it back to false unless you know exactly why you changed it.
+{{- else }}
+  ✔ Host execution disabled. Nothing can fork a harness in the hub Pod.
+{{- end }}
+{{- if .Values.executor.kubernetes.enabled }}
+  ✔ Kubernetes executor: ephemeral Pods in namespace "{{ include "cloop-hub.workloadNamespace" . }}",
+    authenticating as this release's ServiceAccount.
+{{- if not .Values.executor.kubernetes.image }}
+
+  ⚠ executor.kubernetes.image is unset, so workloads run the hub's own
+    distroless image. That has no shell, no git and no toolchain — enough for
+    `cloop executor test kubernetes` to pass, not enough to run a real task.
+    Point it at an image built for your harness, with cloop on PATH.
+{{- end }}
+{{- if eq (include "cloop-hub.workloadNamespace" .) .Release.Namespace }}
+
+  ⚠ Workloads run in the hub's OWN namespace. A workload Pod there can reach
+    the hub's Secrets and its ServiceAccount token, which is most of what the
+    executor isolation exists to prevent. Set executor.kubernetes.namespace to
+    a dedicated namespace.
+{{- end }}
+{{- else if not .Values.config.allowHostProcess }}
+
+  ⚠ No executor is configured, so every run will be refused. Either enable
+    executor.kubernetes.enabled, or enroll a remote agent from the Executors
+    tab (`cloop executor enroll`).
+{{- end }}
+{{- if not .Values.persistence.enabled }}
+
+  ⚠ persistence.enabled is false: the state directory is an emptyDir, so every
+    restart discards all projects, tasks and sealed secrets.
+{{- end }}
+
+Verify:
+  kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ include "cloop-hub.fullname" . }}
+  kubectl -n {{ .Release.Namespace }} exec deploy/{{ include "cloop-hub.fullname" . }} -- \
+    cloop hub healthcheck --endpoint readyz
+
+Full documentation: https://github.com/blechschmidt/cloop/blob/main/deploy/README.md

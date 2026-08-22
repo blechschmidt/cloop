@@ -300,6 +300,37 @@ func TestLoad_EnvVar_AnthropicBaseURL(t *testing.T) {
 	}
 }
 
+// The OIDC client secret is the one credential a hosted deployment cannot
+// keep in config.yaml: that file is what gets templated into a ConfigMap and
+// committed to a config repo. Without this override, "GitOps the hub's config"
+// and "do not commit the client secret" are in direct conflict.
+func TestLoad_EnvVar_OIDCClientSecret(t *testing.T) {
+	setenv(t, "CLOOP_OIDC_CLIENT_SECRET", "from-kubernetes-secret")
+	dir := tempDir(t)
+
+	// A config that names the client but not its secret — the shape both the
+	// Helm chart's ConfigMap and `cloop hub bootstrap` produce.
+	if err := os.MkdirAll(filepath.Dir(ConfigPath(dir)), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(ConfigPath(dir), []byte(
+		"ui:\n  oidc:\n    enabled: true\n    issuer: https://idp.example.com\n    client_id: cloop-hub\n",
+	), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(dir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.UI.OIDC.ClientSecret != "from-kubernetes-secret" {
+		t.Errorf("client_secret = %q, want the environment value", cfg.UI.OIDC.ClientSecret)
+	}
+	if cfg.UI.OIDC.ClientID != "cloop-hub" {
+		t.Errorf("client_id = %q, want the file value to survive", cfg.UI.OIDC.ClientID)
+	}
+}
+
 func TestLoad_EnvVar_OpenAIAPIKey(t *testing.T) {
 	setenv(t, "OPENAI_API_KEY", "env-openai-key")
 	dir := tempDir(t)

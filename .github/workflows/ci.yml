@@ -84,3 +84,273 @@ jobs:
           path: tests/security/testdata/fuzz/
           retention-days: 30
           if-no-files-found: ignore
+
+  deploy-artifacts:
+    name: Deployment artifacts
+    runs-on: ubuntu-latest
+    # The deployment artifacts are the only part of this repository that
+    # `go build` cannot check. A Dockerfile that produces an image which
+    # cannot start, a chart that renders manifests the API server rejects, or
+    # a securityContext the container cannot actually run under are all
+    # invisible to every other job here — and all of them surface for the
+    # first time in front of an operator. So this job boots the things.
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build the hub image
+        # Plain docker build, loaded into the local daemon: the steps below
+        # need to run it, not push it.
+        run: |
+          docker build \
+            --build-arg VERSION=ci-${GITHUB_SHA::7} \
+            --build-arg REVISION=${GITHUB_SHA} \
+            --build-arg CREATED=$(date -u +%Y-%m-%dT%H:%M:%SZ) \
+            -t cloop-hub:ci .
+
+      - name: Assert the image is what the chart assumes
+        # Every one of these is depended on somewhere else: the chart's
+        # runAsNonRoot fails a root image, the compose stack's HEALTHCHECK
+        # needs the label-documented entrypoint, and deploy/README.md tells
+        # operators the image runs as 65532.
+        run: |
+          set -euo pipefail
+          user=$(docker inspect cloop-hub:ci --format '{{.Config.User}}')
+          [ "$user" = "65532:65532" ] || { echo "image runs as '$user', expected 65532:65532"; exit 1; }
+          for label in title source version revision licenses; do
+            v=$(docker inspect cloop-hub:ci --format "{{index .Config.Labels \"org.opencontainers.image.$label\"}}")
+            [ -n "$v" ] || { echo "missing OCI label: $label"; exit 1; }
+          done
+          echo "image OK: user=$user size=$(docker image inspect cloop-hub:ci --format '{{.Size}}')"
+
+      - name: Boot the container hardened and probe it
+        # The hardening flags are the assertion. A build that quietly needs a
+        # writable rootfs, a capability, or root passes `docker run` and fails
+        # here, which is where it should fail.
+        run: |
+          set -euo pipefail
+          docker run -d --name hub -p 18080:8080 \
+            --read-only --cap-drop ALL --security-opt no-new-privileges \
+            --tmpfs /tmp:rw,noexec,nosuid,size=64m \
+            -v hub-state:/var/lib/cloop \
+            -e CLOOP_UI_TOKEN=ci-token \
+            cloop-hub:ci
+
+          for i in $(seq 1 30); do
+            if curl -fsS -o /dev/null http://127.0.0.1:18080/healthz; then break; fi
+            [ "$i" = 30 ] && { docker logs hub; echo "hub never became reachable"; exit 1; }
+            sleep 1
+          done
+
+          for ep in healthz readyz; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:18080/$ep")
+            [ "$code" = 200 ] || { docker logs hub; echo "/$ep returned $code, expected 200"; exit 1; }
+            echo "/$ep -> 200"
+          done
+
+          # The dashboard must not be open. A regression that drops the auth
+          # middleware would still pass the probes above.
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18080/api/state)
+          [ "$code" = 401 ] || { echo "unauthenticated /api/state returned $code, expected 401"; exit 1; }
+
+          # The in-image probe the Dockerfile's HEALTHCHECK relies on. There
+          # is no curl in the image, so if this breaks the HEALTHCHECK breaks
+          # silently and the container reports healthy forever.
+          docker exec hub /usr/local/bin/cloop hub healthcheck --endpoint readyz
+
+          docker rm -f hub >/dev/null
+
+      - name: Bootstrap generates a config the binary accepts
+        # `cloop hub bootstrap` renders commented YAML from a template rather
+        # than marshalling a struct, so a field rename in pkg/config can leave
+        # it emitting a config that no longer parses. It self-checks by
+        # loading the result — this asserts the self-check is reached and that
+        # the security-relevant lines are actually in the output.
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/bootstrap && cd /tmp/bootstrap
+          # --user matters: bootstrap writes 0600 files, so running the
+          # container as root would leave a .cloop the runner user (uid 1001)
+          # cannot read, and every assertion below would fail on permissions
+          # rather than on content.
+          docker run --rm -v /tmp/bootstrap:/w -w /w --user "$(id -u):$(id -g)" cloop-hub:ci \
+            hub bootstrap --behind-proxy \
+              --external-url https://hub.example.com \
+              --oidc-issuer https://idp.example.com \
+              --oidc-client-id cloop-hub > out.txt
+          grep -q 'allow_host_process: false' .cloop/config.yaml
+          grep -q 'default_role: none'        .cloop/config.yaml
+          grep -q 'CLOOP_SECRET_KEY='         .cloop/hub.env
+          [ "$(stat -c %a .cloop/hub.env)" = 600 ] || { echo "hub.env is not 0600"; exit 1; }
+          grep -q 'ProtectSystem=strict'      out.txt   # the printed systemd unit
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.16.3
+
+      - name: helm lint
+        # Three value sets, because the interesting templates are the
+        # conditional ones: nothing enabled, everything enabled, and the
+        # in-cluster executor that adds RBAC in a second namespace.
+        run: |
+          set -euo pipefail
+          helm lint deploy/helm/cloop-hub \
+            --set secrets.create=true --set secrets.secretKey=lint --set secrets.uiToken=lint
+          helm lint deploy/helm/cloop-hub \
+            --set secrets.existingSecret=external \
+            --set executor.kubernetes.enabled=true \
+            --set oidc.enabled=true --set oidc.issuer=https://idp.example.com \
+            --set ingress.enabled=true
+          helm lint deploy/helm/cloop-hub \
+            --set secrets.existingSecret=external \
+            --set persistence.enabled=false
+
+      - name: Chart guard rails refuse what they should
+        # These fail() calls are load-bearing — one of them is the only thing
+        # stopping a hub from installing with no CLOOP_SECRET_KEY at all. A
+        # template refactor that drops a guard makes the chart *more*
+        # permissive, which no positive test would notice.
+        run: |
+          set -euo pipefail
+          refuses() {
+            local why="$1"; shift
+            if helm template guard deploy/helm/cloop-hub "$@" >/dev/null 2>&1; then
+              echo "chart accepted what it must refuse: $why"; exit 1
+            fi
+            echo "refused: $why"
+          }
+          refuses "no secret source"
+          refuses "both secret sources" --set secrets.create=true --set secrets.existingSecret=x
+          refuses "secrets.create with no master key" --set secrets.create=true
+          # No OIDC and no token is a hub with authentication switched off,
+          # which is the single worst thing this chart could quietly install.
+          refuses "a generated Secret with neither SSO nor a dashboard token" \
+            --set secrets.create=true --set secrets.secretKey=k
+          refuses "oidc enabled with no issuer" \
+            --set secrets.existingSecret=x --set oidc.enabled=true
+          # SSO "on" while no config reaches the hub renders a release that
+          # reports single sign-on and serves token auth.
+          refuses "oidc enabled with no config delivered" \
+            --set secrets.existingSecret=x --set oidc.enabled=true \
+            --set oidc.issuer=https://idp.example.com --set config.fromConfigMap=false
+          # Would bind Pod create/delete to the namespace's default SA.
+          refuses "executor RBAC with no named ServiceAccount" \
+            --set secrets.existingSecret=x --set executor.kubernetes.enabled=true \
+            --set serviceAccount.create=false
+          refuses "an existingClaim that persistence.enabled would discard" \
+            --set secrets.existingSecret=x --set persistence.enabled=false \
+            --set persistence.existingClaim=precious
+          refuses "ingress host disagreeing with externalURL" \
+            --set secrets.existingSecret=x --set ingress.enabled=true \
+            --set ingress.host=other.example.com
+
+      - name: Create a kind cluster
+        # kubectl needs a cluster even for --dry-run=client: it resolves REST
+        # mappings from the discovery API before it can validate anything.
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: cloop-ci
+
+      - name: helm template | kubectl apply --dry-run
+        run: |
+          set -euo pipefail
+          kubectl create namespace cloop
+          kubectl create namespace cloop-workloads
+
+          render() {
+            helm template cloop deploy/helm/cloop-hub --namespace cloop \
+              --set image.repository=cloop-hub --set image.tag=ci \
+              --set secrets.create=true --set secrets.secretKey=ci-key \
+              --set secrets.uiToken=ci-token \
+              --set executor.kubernetes.enabled=true \
+              --set oidc.enabled=true --set oidc.issuer=https://idp.example.com \
+              --set ingress.enabled=true "$@"
+          }
+          render | kubectl apply --dry-run=client -f -
+          # Server-side too: client-side never sees the API server's schema, so
+          # a misspelled securityContext field passes it happily.
+          render | kubectl apply --dry-run=server -f -
+
+      - name: Install the chart and wait for the hub to be ready
+        # The strongest check here. --wait only returns once the readiness
+        # probe passes, which means the PVC mounted, the ConfigMap landed
+        # inside it, fsGroup made it writable, and SQLite opened — under
+        # readOnlyRootFilesystem, runAsNonRoot and capabilities dropped.
+        run: |
+          set -euo pipefail
+          kind load docker-image cloop-hub:ci --name cloop-ci
+          helm install cloop deploy/helm/cloop-hub --namespace cloop \
+            --set image.repository=cloop-hub --set image.tag=ci --set image.pullPolicy=Never \
+            --set secrets.create=true --set secrets.secretKey=ci-key \
+            --set secrets.uiToken=ci-token \
+            --set executor.kubernetes.enabled=true \
+            --wait --timeout 5m
+
+      - name: Assert the installed hub answers both probes
+        run: |
+          set -euo pipefail
+          kubectl -n cloop exec deploy/cloop-cloop-hub -- \
+            /usr/local/bin/cloop hub healthcheck --endpoint healthz
+          kubectl -n cloop exec deploy/cloop-cloop-hub -- \
+            /usr/local/bin/cloop hub healthcheck --endpoint readyz
+
+      - name: Assert the executor Role grants exactly the Pod verbs
+        # The Role is the boundary the in-cluster executor runs inside, so
+        # widening it is a security change. Asserting both directions means a
+        # copy-pasted `"*"` fails here instead of shipping.
+        run: |
+          set -euo pipefail
+          SA=system:serviceaccount:cloop:cloop-cloop-hub
+
+          # `kubectl auth can-i` exits 1 when the answer is "no", which under
+          # `set -e` would abort on the very checks that are supposed to see a
+          # denial. Read the word, ignore the status.
+          can() {
+            kubectl auth can-i "$1" "$2" -n "$3" --as "$SA" 2>/dev/null || true
+          }
+          grants() {
+            [ "$(can "$1" "$2" "$3")" = yes ] \
+              || { echo "executor cannot $1 $2 in $3 — the driver needs it"; exit 1; }
+            echo "  grants: $1 $2 in $3"
+          }
+          denies() {
+            [ "$(can "$1" "$2" "$3")" = no ] \
+              || { echo "executor Role is too wide: it grants $1 $2 in $3"; exit 1; }
+            echo "  denies: $1 $2 in $3"
+          }
+
+          for v in create get list watch delete; do grants "$v" pods cloop-workloads; done
+          grants get pods/log cloop-workloads
+
+          # And nothing else. The driver never mutates a Pod after creating
+          # it, and an executor that could read Secrets would make the secret
+          # broker decorative.
+          denies update pods    cloop-workloads
+          denies patch  pods    cloop-workloads
+          denies get    secrets cloop-workloads
+          denies list   secrets cloop-workloads
+
+          # The hub's own namespace holds its Secrets and its ServiceAccount
+          # token; the Role is bound in the workload namespace only.
+          denies create pods    cloop
+          denies get    secrets cloop
+
+      - name: Run a workload through the in-cluster executor
+        # End-to-end: the Pod's own ServiceAccount token is read from its
+        # projected volume, used to authenticate to the API server, and a real
+        # workload Pod is created, watched, streamed and deleted. This is the
+        # only check that exercises pkg/executor/kubernetes against a live API
+        # server rather than a fake.
+        run: |
+          kubectl -n cloop exec deploy/cloop-cloop-hub -- \
+            /usr/local/bin/cloop executor test kubernetes
+
+      - name: Hub diagnostics on failure
+        if: failure()
+        run: |
+          kubectl -n cloop get pods -o wide || true
+          kubectl -n cloop describe pods || true
+          kubectl -n cloop logs deploy/cloop-cloop-hub --tail=200 || true
+          kubectl -n cloop-workloads get pods -o wide || true

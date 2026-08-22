@@ -60,6 +60,12 @@ mid-write cannot leave a certificate that does not match its key.`,
 		hosts, _ := cmd.Flags().GetStringSlice("host")
 		days, _ := cmd.Flags().GetInt("days")
 		force, _ := cmd.Flags().GetBool("force")
+		ifMissing, _ := cmd.Flags().GetBool("if-missing")
+
+		if force && ifMissing {
+			return fmt.Errorf("--force and --if-missing contradict each other: " +
+				"one regenerates key material unconditionally, the other never touches it")
+		}
 
 		workdir, err := os.Getwd()
 		if err != nil {
@@ -70,6 +76,31 @@ mid-write cannot leave a certificate that does not match its key.`,
 		}
 		certPath := filepath.Join(dir, "cert.pem")
 		keyPath := filepath.Join(dir, "key.pem")
+
+		// --if-missing makes this a provisioning step: succeed and change
+		// nothing when the pair already exists. Without it, any idempotent
+		// caller — a compose one-shot service, an init container, a
+		// configuration-management run — has to distinguish "refused because
+		// it is already done" from a real failure, and the usual way that
+		// gets handled is `|| true`, which also swallows the real ones.
+		if ifMissing {
+			_, certErr := os.Stat(certPath)
+			_, keyErr := os.Stat(keyPath)
+			if certErr == nil && keyErr == nil {
+				pin, err := tlsconf.PinFromCertFile(certPath)
+				if err != nil {
+					return fmt.Errorf("%s already exists but is unreadable as a certificate: %w", certPath, err)
+				}
+				fmt.Printf("Keeping the existing certificate at %s (pin: %s)\n", certPath, pin)
+				return nil
+			}
+			// Exactly one of the two present is not "already provisioned", it
+			// is a half-written state that would produce a certificate not
+			// matching its key. Fall through so it is regenerated.
+			if certErr == nil || keyErr == nil {
+				force = true
+			}
+		}
 
 		// Refuse to clobber. Overwriting the key silently invalidates every
 		// pin already distributed to a device, and the failure surfaces later
@@ -208,6 +239,8 @@ func init() {
 	hubTLSInitCmd.Flags().Int("days", 365, "certificate lifetime in days")
 	hubTLSInitCmd.Flags().Bool("force", false,
 		"overwrite existing key material (invalidates pins already distributed to devices)")
+	hubTLSInitCmd.Flags().Bool("if-missing", false,
+		"succeed without changing anything when a certificate already exists (for idempotent provisioning)")
 
 	hubPinCmd.Flags().String("cert", "",
 		"certificate to read (default: ui.tls.cert_file from .cloop/config.yaml)")
