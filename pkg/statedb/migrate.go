@@ -363,3 +363,22 @@ func (d *DB) CurrentSchemaVersion() (int, error) {
 	defer d.mu.Unlock()
 	return currentVersion(d.conn)
 }
+
+// LatestSchemaVersion returns the highest migration version this *binary*
+// carries, which is what a database will be at once Migrate has run.
+//
+// It exists so a diagnostic can compare the two numbers. On its own,
+// CurrentSchemaVersion answers "what has been applied" and cannot distinguish a
+// fully-migrated database from one an older binary left behind — and the second
+// is the interesting case, because a hub rolled back to a previous image runs
+// against a schema from the future and fails on whichever column it does not
+// know about.
+func LatestSchemaVersion() (int, error) {
+	migrations, err := loadMigrations()
+	if err != nil {
+		return 0, err
+	}
+	// loadMigrations returns them sorted by version, and errors rather than
+	// returning an empty slice.
+	return migrations[len(migrations)-1].Version, nil
+}

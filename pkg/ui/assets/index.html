@@ -1392,8 +1392,42 @@
         <div id="execPolicyBanner" class="exec-banner" style="display:none"></div>
         <div id="execWarnings" style="display:none;margin-bottom:12px"></div>
 
-        <div id="execEmpty" style="display:none;font-size:13px;color:var(--muted);padding:16px 0;text-align:center">
-          No executors registered. That should not happen &mdash; the host driver is built in.
+        <!--
+          The empty state used to read "That should not happen — the host driver
+          is built in", which contradicted the paragraph above it: on a hub with
+          executors.allow_host_process: false the host driver is refused on
+          purpose, so zero executors is the *expected* first state of a hardened
+          deployment and the operator was being told it was a bug. It is now the
+          onboarding step it should always have been — the two commands that add
+          the first executor, and where to read about the alternatives.
+        -->
+        <div id="execEmpty" class="empty-state" style="display:none;text-align:left;max-width:720px;margin:0 auto">
+          <h3 style="text-align:center">No executors yet</h3>
+          <p style="text-align:center;margin-bottom:16px">
+            Expected on a hardened hub: with <code>executors.allow_host_process: false</code> the built-in
+            host driver is refused, so the first executor is one you add. Runs are refused until then.
+          </p>
+
+          <p style="margin-bottom:6px"><strong>1.</strong> Mint a single-use enrollment token on this hub:</p>
+          <div class="exec-token" style="margin-bottom:12px">cloop executor enroll --name edge-1</div>
+
+          <p style="margin-bottom:6px"><strong>2.</strong> Run the printed command on the device. It dials
+            <em>outward</em>, so the device needs no inbound port and may sit behind NAT:</p>
+          <div class="exec-token" style="margin-bottom:16px">cloop executor agent --bundle &lt;bundle-from-step-1&gt;</div>
+
+          <p style="text-align:center;margin-bottom:16px">
+            <button class="btn primary" data-global-perm="executor.manage"
+                    style="padding:6px 14px;font-size:13px" onclick="openEnrollModal()">+ Enroll a device</button>
+          </p>
+
+          <p style="text-align:center">
+            A container or Kubernetes executor needs no enrollment &mdash; enable one under
+            <code>executors:</code> in <code>.cloop/config.yaml</code>. Run <code>cloop hub doctor</code>
+            to check the whole configuration, and see
+            <a href="https://github.com/blechschmidt/cloop/blob/main/docs/architecture/executors.md"
+               target="_blank" rel="noopener noreferrer">docs/architecture/executors.md</a>
+            for what each backend isolates.
+          </p>
         </div>
         <div id="execList" class="exec-grid"></div>
       </div>

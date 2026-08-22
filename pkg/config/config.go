@@ -829,6 +829,15 @@ func (t TLSConfig) Validate() error {
 	return nil
 }
 
+// EnvOIDCClientSecret is the environment variable that supplies the OIDC
+// client secret, overriding ui.oidc.client_secret.
+//
+// Named rather than repeated because two things have to agree about it: Load,
+// which applies the override, and `cloop hub doctor`, which reports a hub whose
+// secret came from the config file instead — and the whole point of the
+// override is that config.yaml is the file an operator commits.
+const EnvOIDCClientSecret = "CLOOP_OIDC_CLIENT_SECRET"
+
 // OIDCConfig configures optional OpenID Connect single sign-on for the web
 // dashboard (cloop ui). When Enabled, every browser request must carry a
 // session established via the IdP authorization-code flow; the static
@@ -1686,7 +1695,7 @@ func (c *Config) applyEnvVars() {
 	// the client secret is the thing that must arrive from a Kubernetes Secret
 	// or a systemd EnvironmentFile. Without this override the two requirements
 	// are in direct conflict and the secret ends up committed.
-	if v := os.Getenv("CLOOP_OIDC_CLIENT_SECRET"); v != "" {
+	if v := os.Getenv(EnvOIDCClientSecret); v != "" {
 		c.UI.OIDC.ClientSecret = v
 	}
 }
