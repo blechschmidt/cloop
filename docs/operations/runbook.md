@@ -233,8 +233,9 @@ including one that scans *every* row rendering rather than a sample.
 
 ## Key rotation
 
-Be clear-eyed about this section: **cloop has no automated rotation for the
-sealing key.** What follows is what exists and what you must do by hand.
+Three different keys, three different procedures. The sealing key rotates
+online with `cloop hub key rotate`; the TLS key rotates in a staged overlap; the
+dashboard token rotates by replacement and causes a logout.
 
 ### TLS certificate and agent pins — supported, staged
 
@@ -295,13 +296,82 @@ a fault. To remove the device entirely, `cloop executor agent install
 --uninstall --purge` — idempotent, and it verifies afterwards that no unit,
 credential or state directory survives.
 
-### Secret sealing key (`CLOOP_SECRET_KEY`) — no rotation path
+### Sealing keys — online, resumable, no credential re-minting
 
-> **Changing this key makes every stored secret permanently unopenable.** There
-> is no re-encryption tool. `cloop hub bootstrap --force` regenerates it, and its
-> help says so.
+Stored credentials are not encrypted under `CLOOP_SECRET_KEY` directly. Each row
+gets its own random **data-encryption key** (DEK) which seals the payload; only
+the DEK is sealed under a **key-encryption key** (KEK) derived from the
+passphrase. Rotating therefore rewraps sixty bytes per row and never decrypts a
+payload, which is what makes it safe to run against a serving hub.
 
-To move to a new key you re-mint, which is a full credential rotation anyway:
+Several KEKs can be openable at once. Rows move to the new one individually and
+reads keep succeeding against whichever key each row still names, so there is no
+window in which anything is unreadable.
+
+```console
+$ cloop hub key status                   # which key is sealing what
+$ cloop hub key rotate --dry-run         # count what would move
+$ cloop hub key rotate                   # mint a new KEK and rewrap onto it
+$ cloop hub key list                     # keys, and whether each is still openable
+```
+
+`rotate` covers **both** populations of long-lived sealed material — brokered
+secrets and session refresh tokens — because they share one registry. Enrollment
+tokens and agent credentials are not covered and do not need to be: they are
+stored as SHA-256 hashes, never sealed, so no key can be rotated out from under
+them (see [enrollment tokens](#enrollment-tokens-and-agent-credentials--revoke-and-re-enrol)).
+
+**Interruption is safe.** Ctrl-C, a restart, a SIGKILL mid-write — the row in
+flight is transactional and everything else is untouched, because rotation
+retires nothing and the old key stays openable. There is no cursor to corrupt:
+the work remaining is defined as "every row not yet under the target key", so
+resuming is just running it again.
+
+```console
+$ cloop hub key rotate --continue        # resume onto the current primary
+```
+
+**Concurrent writes are not lost.** Each rewrap is a compare-and-swap against
+the exact ciphertext that was read. A credential re-minted, or a session
+refreshed, while a rotation is running is left alone and counted as *skipped*;
+run `--continue` once afterwards to sweep those up.
+
+**Run one rotation at a time.** Two concurrent runs each promote their own key
+and pull rows back and forth. cloop detects this — a row that keeps returning is
+reported and the run exits incomplete rather than looping forever — but the work
+is wasted. If you see `still not under ... after 5 attempts`, check for a second
+`cloop hub key rotate`, then `--continue`.
+
+A hub that is *serving* while you rotate needs no coordination: it re-reads the
+current primary before every seal, so new material lands under the new key from
+the moment it is promoted, and it adopts that key on first use.
+
+#### Retiring the old key — a deliberate second step
+
+Rotation never destroys a key. Retirement does, and it is irreversible: it
+blanks the KEK's salt so the key cannot be derived from `CLOOP_SECRET_KEY`
+again, at all. Anything still sealed under it is then unrecoverable, which is
+why retirement **refuses** while any row references the key.
+
+```console
+$ cloop hub key status                   # must report zero unrotated rows
+$ cloop hub key retire <old-key-id> --yes
+```
+
+After retirement, a read of material still naming that key fails loudly and
+specifically — `sealing key retired`, naming the key and when — rather than as a
+generic decryption error. That distinction is the point: it tells you to
+re-mint the credential rather than to go hunting for a passphrase problem.
+
+#### Changing `CLOOP_SECRET_KEY` itself
+
+Rotating the KEK does **not** change the passphrase — every KEK is derived from
+it. Changing the passphrase is still a re-mint, and cloop now refuses to paper
+over it: a hub started with a passphrase that cannot derive its live keys fails
+to start, naming them, rather than minting a fresh key and quietly forking the
+registry.
+
+If you must change the passphrase:
 
 1. `cloop secret grants --all > grants.txt` — record what exists (never the values)
 2. `cloop db backup` and copy the **old** `hub.env` somewhere safe
@@ -311,8 +381,25 @@ To move to a new key you re-mint, which is a full credential rotation anyway:
 6. `cloop secret grant` to reconstruct the grants from `grants.txt`
 7. `cloop secret lease --project <p>` to confirm delivery
 
-Because step 3 is required regardless, treat sealing-key rotation as *credential*
-rotation and schedule it the same way.
+Because step 3 is required regardless, treat *passphrase* rotation as credential
+rotation. For everything short of that — a scheduled key roll, a suspected key
+exposure, an audit requirement — `cloop hub key rotate` is the procedure, and it
+needs none of the above.
+
+#### Upgrading a hub that predates envelope encryption
+
+Migration `0019_envelope_encryption.sql` stamps every pre-existing row
+`legacy` and adds the columns; it cannot re-encrypt anything, because SQL cannot
+decrypt. Those rows keep opening under the old construction until the first
+rotation converts them:
+
+```console
+$ cloop hub key status                   # shows N rows as "pre-envelope"
+$ cloop hub key rotate                   # upgrades them, once, permanently
+```
+
+Nothing breaks if you never run it. But until you do, those rows are outside the
+rotation guarantee, and `status` will keep saying so.
 
 ### Grants — rotate by expiry, not by procedure
 
@@ -324,7 +411,7 @@ Short TTLs mean grants rotate themselves. See
 ## Upgrade
 
 Schema migrations live in `pkg/statedb/migrations/` (`0001_init.sql` through
-`0015_egress_broker.sql`), are embedded in the binary, and are applied
+`0019_envelope_encryption.sql`), are embedded in the binary, and are applied
 automatically by `statedb.Open()` on every start. Each runs in a transaction and
 records itself in `schema_migrations`, so a crash mid-migration rolls back
 cleanly and the next start retries.

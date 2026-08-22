@@ -764,6 +764,40 @@ connecting until it is re-pinned. See [TLS](#tls) for the serving configuration
 and [Remote executors](#remote-executors-edge-devices) for how the pin reaches
 a device.
 
+### `cloop hub key`
+
+Sealing-key inspection and online rotation. Stored credentials are sealed under
+a per-row data key (DEK); only the DEK is sealed under a key-encryption key
+(KEK) derived from `CLOOP_SECRET_KEY`, so rotating rewraps sixty bytes per row
+and never decrypts a payload.
+
+```bash
+cloop hub key status                       # which key seals what, and rotation progress
+cloop hub key list                         # keys, and whether each is still openable
+cloop hub key rotate --dry-run             # count what would move, write nothing
+cloop hub key rotate                       # mint a new KEK and rewrap onto it
+cloop hub key rotate --continue            # resume onto the current primary
+cloop hub key retire <key-id> --yes        # destroy an old key's salt (irreversible)
+```
+
+| Flag | Applies to | Default | Description |
+|------|-----------|---------|-------------|
+| `--workdir` | all | current directory | Hub directory holding `.cloop/state.db` |
+| `--json` | `list`, `status`, `rotate` | `false` | Machine-readable output |
+| `--dry-run` | `rotate` | `false` | Report what would be rewrapped without writing |
+| `--continue` | `rotate` | `false` | Resume onto the current primary instead of minting a new key |
+| `--batch` | `rotate` | `128` | Rows read per round |
+| `--yes` | `retire` | `false` | Confirm irreversible destruction of the key's salt |
+
+Rotation is safe to interrupt and safe to run against a serving hub; `retire` is
+a deliberate second step and refuses while any row still references the key. The
+full procedure, including upgrading a hub that predates envelope encryption, is
+in the [runbook](../operations/runbook.md#key-rotation).
+
+These subcommands write to the state database directly rather than through the
+HTTP API, so they require filesystem access to it — the same root-shell caveat
+as `cloop hub token`.
+
 ---
 
 ## Executor internals

@@ -55,6 +55,25 @@ func NewCipher(store Store) (*Cipher, error) {
 	return &Cipher{key: deriveKey(pass, salt)}, nil
 }
 
+// NewLegacyCipher rebuilds the pre-envelope cipher from a passphrase and the
+// store-wide salt.
+//
+// It is exported for exactly two callers: the tests that verify pre-envelope
+// rows still open after migration 0019, and any recovery tooling that has to
+// read a database whose broker_meta salt survived but whose registry did not.
+// Nothing on the serving path uses it — the Keyring loads the legacy cipher
+// itself, and only when a salt is already present.
+func NewLegacyCipher(passphrase string, salt []byte) (*Cipher, error) {
+	if passphrase == "" {
+		return nil, fmt.Errorf("%w: legacy cipher needs a passphrase", ErrNoKey)
+	}
+	if len(salt) != saltSize {
+		return nil, fmt.Errorf("%w: legacy salt must be %d bytes, got %d",
+			ErrSealFailed, saltSize, len(salt))
+	}
+	return &Cipher{key: deriveKey(passphrase, salt)}, nil
+}
+
 // NewCipherWithKey builds a Cipher from a raw 32-byte key. Used by tests and
 // by callers that manage key material themselves.
 func NewCipherWithKey(key []byte) (*Cipher, error) {

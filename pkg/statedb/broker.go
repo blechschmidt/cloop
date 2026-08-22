@@ -25,7 +25,12 @@ type BrokerSecretRow struct {
 	ID           string
 	Kind         string
 	Name         string
-	Payload      []byte // sealed; never plaintext
+	Payload      []byte // ciphertext under this row's DEK; never plaintext
+	// KeyID names the KEK that WrappedDEK is sealed under, or "legacy" for
+	// rows predating envelope encryption (Task 20181). WrappedDEK is the
+	// row's data key, itself sealed. Neither is key material on its own.
+	KeyID        string
+	WrappedDEK   []byte
 	MetadataJSON string
 	CreatedAt    string
 	CreatedBy    string
@@ -61,13 +66,16 @@ func (d *DB) PutBrokerSecret(row BrokerSecretRow) error {
 	defer d.mu.Unlock()
 
 	if _, err := d.conn.Exec(
-		`INSERT INTO broker_secrets(id, kind, name, payload, metadata_json, created_at, created_by)
-		 VALUES (?,?,?,?,?,?,?)
+		`INSERT INTO broker_secrets(id, kind, name, payload, key_id, wrapped_dek,
+		                            metadata_json, created_at, created_by)
+		 VALUES (?,?,?,?,?,?,?,?,?)
 		 ON CONFLICT(id) DO UPDATE SET
 		   kind=excluded.kind, name=excluded.name, payload=excluded.payload,
+		   key_id=excluded.key_id, wrapped_dek=excluded.wrapped_dek,
 		   metadata_json=excluded.metadata_json, created_at=excluded.created_at,
 		   created_by=excluded.created_by`,
 		row.ID, row.Kind, row.Name, row.Payload,
+		defaultString(row.KeyID, "legacy"), row.WrappedDEK,
 		defaultJSON(row.MetadataJSON), row.CreatedAt, row.CreatedBy,
 	); err != nil {
 		return fmt.Errorf("statedb: put broker secret %s: %w", row.ID, classifyDriverErr(err))
@@ -82,9 +90,9 @@ func (d *DB) GetBrokerSecret(id string) (BrokerSecretRow, error) {
 
 	var row BrokerSecretRow
 	err := d.conn.QueryRow(
-		`SELECT id, kind, name, payload, metadata_json, created_at, created_by
+		`SELECT id, kind, name, payload, key_id, wrapped_dek, metadata_json, created_at, created_by
 		 FROM broker_secrets WHERE id = ?`, id,
-	).Scan(&row.ID, &row.Kind, &row.Name, &row.Payload,
+	).Scan(&row.ID, &row.Kind, &row.Name, &row.Payload, &row.KeyID, &row.WrappedDEK,
 		&row.MetadataJSON, &row.CreatedAt, &row.CreatedBy)
 	if err == sql.ErrNoRows {
 		return BrokerSecretRow{}, fmt.Errorf("%w: broker secret %q", ErrBrokerSecretNotFound, id)
@@ -101,7 +109,7 @@ func (d *DB) ListBrokerSecrets() ([]BrokerSecretRow, error) {
 	defer d.mu.Unlock()
 
 	rows, err := d.conn.Query(
-		`SELECT id, kind, name, payload, metadata_json, created_at, created_by
+		`SELECT id, kind, name, payload, key_id, wrapped_dek, metadata_json, created_at, created_by
 		 FROM broker_secrets ORDER BY name ASC`)
 	if err != nil {
 		return nil, fmt.Errorf("statedb: list broker secrets: %w", classifyDriverErr(err))
@@ -111,7 +119,7 @@ func (d *DB) ListBrokerSecrets() ([]BrokerSecretRow, error) {
 	var out []BrokerSecretRow
 	for rows.Next() {
 		var row BrokerSecretRow
-		if err := rows.Scan(&row.ID, &row.Kind, &row.Name, &row.Payload,
+		if err := rows.Scan(&row.ID, &row.Kind, &row.Name, &row.Payload, &row.KeyID, &row.WrappedDEK,
 			&row.MetadataJSON, &row.CreatedAt, &row.CreatedBy); err != nil {
 			return nil, fmt.Errorf("statedb: scan broker secret: %w", classifyDriverErr(err))
 		}

@@ -49,6 +49,8 @@ func (s *Store) PutSecret(sec secretbroker.Secret) error {
 		Kind:         string(sec.Kind),
 		Name:         sec.Name,
 		Payload:      sec.Sealed,
+		KeyID:        sec.KeyID,
+		WrappedDEK:   sec.WrappedDEK,
 		MetadataJSON: string(meta),
 		CreatedAt:    formatTime(sec.CreatedAt),
 		CreatedBy:    sec.CreatedBy,
@@ -160,13 +162,15 @@ func toSecret(row statedb.BrokerSecretRow) secretbroker.Secret {
 		_ = json.Unmarshal([]byte(row.MetadataJSON), &meta)
 	}
 	return secretbroker.Secret{
-		ID:        row.ID,
-		Kind:      secretbroker.Kind(row.Kind),
-		Name:      row.Name,
-		Sealed:    row.Payload,
-		Metadata:  meta,
-		CreatedAt: parseTime(row.CreatedAt),
-		CreatedBy: row.CreatedBy,
+		ID:         row.ID,
+		Kind:       secretbroker.Kind(row.Kind),
+		Name:       row.Name,
+		Sealed:     row.Payload,
+		KeyID:      row.KeyID,
+		WrappedDEK: row.WrappedDEK,
+		Metadata:   meta,
+		CreatedAt:  parseTime(row.CreatedAt),
+		CreatedBy:  row.CreatedBy,
 	}
 }
 
@@ -235,6 +239,9 @@ func parseTime(s string) time.Time {
 	}
 	return t.UTC()
 }
+
+// isErr is errors.Is, named locally so the key adapter reads the same way.
+func isErr(err, target error) bool { return errors.Is(err, target) }
 
 // translateErr maps storage sentinels onto broker sentinels so callers match
 // against one set.

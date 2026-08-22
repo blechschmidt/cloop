@@ -125,14 +125,40 @@ type Secret struct {
 	// Name is a human-facing unique handle ("prod-deploy-pat"). Grants are
 	// created against it from the CLI.
 	Name string `json:"name"`
-	// Sealed is the AES-256-GCM envelope of the payload. Never logged.
+	// Sealed is the AES-256-GCM ciphertext of the payload, encrypted under
+	// this secret's own data key (see WrappedDEK). Never logged.
 	Sealed []byte `json:"-"`
+	// KeyID names the KEK that WrappedDEK is sealed under. LegacyKeyID means
+	// the pre-envelope construction: WrappedDEK is empty and Sealed is
+	// encrypted directly under the passphrase-derived key (Task 20181).
+	//
+	// It is exported because storage must persist it, and json:"-" because a
+	// key ID in an API response tells a caller nothing they can act on while
+	// telling an attacker which rows a stolen key still opens.
+	KeyID string `json:"-"`
+	// WrappedDEK is this secret's data key, sealed under KeyID. Rotation
+	// rewrites this field and leaves Sealed untouched.
+	WrappedDEK []byte `json:"-"`
 	// Metadata is non-sensitive descriptive data (owner, rotation date).
 	// It is included in audit payloads, so callers must not put credential
 	// material here.
 	Metadata  map[string]string `json:"metadata,omitempty"`
 	CreatedAt time.Time         `json:"created_at"`
 	CreatedBy string            `json:"created_by,omitempty"`
+}
+
+// Envelope returns the secret's sealed material in the form the keyring
+// understands.
+func (s Secret) Envelope() Envelope {
+	return Envelope{KeyID: s.KeyID, WrappedDEK: s.WrappedDEK, Ciphertext: s.Sealed}
+}
+
+// WithEnvelope returns a copy of the secret carrying env's sealed material.
+func (s Secret) WithEnvelope(env Envelope) Secret {
+	s.KeyID = env.KeyID
+	s.WrappedDEK = env.WrappedDEK
+	s.Sealed = env.Ciphertext
+	return s
 }
 
 // Validate checks a Secret's structural invariants before it is stored.

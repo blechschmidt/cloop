@@ -207,11 +207,16 @@ secrets:
   #     --from-literal=CLOOP_UI_TOKEN="$(head -c32 /dev/urandom | base64 | tr -d =)" \
   #     --from-literal=CLOOP_OIDC_CLIENT_SECRET=…
   #
-  # CLOOP_SECRET_KEY is the master key for the secret broker: every brokered
-  # kubeconfig, PAT and egress credential is sealed with it. Losing it makes
-  # them permanently unopenable — there is no escrow. Back it up wherever you
-  # keep root credentials, and never let Helm generate it for a cluster you
+  # CLOOP_SECRET_KEY is the master passphrase for the secret broker: every
+  # key-encryption key is derived from it, and those keys seal the data keys
+  # that seal each brokered kubeconfig, PAT and egress credential. Losing it
+  # makes them permanently unopenable — there is no escrow. Back it up wherever
+  # you keep root credentials, and never let Helm generate it for a cluster you
   # care about.
+  #
+  # Rolling the sealing keys does NOT require changing this value: run
+  # "cloop hub key rotate" against the hub. It rewraps every data key onto a
+  # fresh key-encryption key while the hub keeps serving, and re-mints nothing.
   existingSecret: ""
 
   # Chart-managed Secret. For evaluation only: the values land in your

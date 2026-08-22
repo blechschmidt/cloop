@@ -459,9 +459,9 @@ write shortens the idle window by up to a minute, which is the safe direction.
 **IdP-side revocation.** Disabling a user at the identity provider changes
 nothing the hub can observe on its own: the cookie is still valid and the
 claims in it were valid when issued. cloop closes that gap by keeping the
-refresh token issued at sign-in — sealed with AES-256-GCM under
-`CLOOP_SECRET_KEY`, exactly like a brokered credential — and redeeming it on an
-interval. The failure taxonomy is the mechanism:
+refresh token issued at sign-in — sealed with AES-256-GCM under its own data
+key, exactly like a brokered credential, and bound to its session row so a
+transplanted token decrypts for nobody — and redeeming it on an interval. The failure taxonomy is the mechanism:
 
 - `invalid_grant` (a disabled user, withdrawn consent, a forced sign-out, or a
   refresh token already rotated away) **terminates the session immediately** and
@@ -930,6 +930,62 @@ rather than `ErrWriteBackRejected`. The commit does not land either way, but a
 caller that retries on `ErrWriteBackUnavailable` would retry a hostile
 write-back. See the note on `assertGitHookNeverLands`.
 
+### Sealing keys and rotation — `keyrotation_test.go`
+
+Stored credentials are sealed under a per-row **data-encryption key** (DEK);
+only the DEK is sealed under a **key-encryption key** (KEK) derived from
+`CLOOP_SECRET_KEY`. That indirection buys rotation — rewrapping a DEK never
+touches a payload, so `cloop hub key rotate` runs against a serving hub — and it
+concentrates the risk: a leaked DEK decrypts its row forever, and unlike a
+credential there is nobody to rotate it at.
+
+Both halves of the envelope carry GCM associated data binding them to the
+*population and row* they belong to — `secrets\0sec_…`, `sessions\0sess_…`.
+Row ids alone are not enough, because whoever writes a row chooses its id:
+without the population prefix, an attacker with database write access could
+insert a session whose id equals a secret's, copy the secret's envelope into the
+refresh-token columns, and have the hub present a kubeconfig to the identity
+provider as a refresh token — sealed material leaving the store over the network
+with every check upstream still passing.
+
+| Guarantee | Test |
+| --- | --- |
+| A plaintext DEK never reaches the database file, the WAL, the audit trail, or any operator-facing rendering | `TestPlaintextDataKeysNeverReachDiskOrLogs` |
+| The `wrapped_dek` column really is wrapped — right size, and never contains the raw key | `TestWrappedDataKeysOnDiskAreNotThePlaintextOnes` |
+| Failed opens name the key, never quote its contents or the payload | `TestOpenFailuresDoNotEchoKeyMaterial` |
+| An envelope opens only under the row it was sealed for | `TestEnvelopeIsBoundToItsRow`, `TestSessionTokenIsBoundToItsSessionRow` |
+| A wrapped DEK cannot be transplanted between rows | `TestWrappedDEKCannotBeSwappedBetweenRows` |
+| Every row gets a distinct data key | `TestEveryRowGetsADistinctDataKey` |
+| Rotation rewraps without decrypting: payload ciphertext is byte-identical afterwards | `TestRotationRewrapsWithoutChangingCiphertext` |
+| An interrupted rotation leaves every row readable and resumes to completion | `TestInterruptedRotationResumesToCompletion`, `TestInterruptedRotationSurvivesAProcessRestart` |
+| Rotation never reverts a concurrent write, and no row is unreadable while it runs | `TestRotationUnderConcurrentReadWriteLoad`, `TestRotationUnderConcurrentDatabaseLoad` |
+| The compare-and-swap compares the ciphertext, not just the key id | `TestCompareAndSwapRefusesAStaleRewrap` |
+| Retirement is refused in SQL, inside the transaction, while any row references the key | `TestRetireRefusesWhileRowsReferenceTheKey`, `TestRetirementIsRefusedInSQLNotOnlyInGo` |
+| Reads under a retired key fail with `ErrKeyRetired` naming the key, not a generic decrypt error | `TestReadsFailLoudlyOnceAKEKIsRetired`, `TestReadsFailLoudlyAfterRetirementInSQLite` |
+| An envelope from one sealed set never opens as another's, even at the same row id | `TestEnvelopesDoNotCrossSealedSets`, `TestSecretEnvelopeCannotBeReadAsASessionToken` |
+| A seal confirms the current primary first, so a process that missed a rotation cannot write under a key about to be retired | `TestSealNeverUsesAStalePrimary` |
+| A registry that cannot be read stops seals rather than proceeding on a cached key | `TestSealFailsClosedWhenTheRegistryCannotBeRead` |
+| A keyring adopts keys another process minted, and drops ones it retired | `TestKeyringAdoptsKeysMintedByAnotherProcess`, `TestReloadDropsRetiredKeys` |
+| A wrong passphrase refuses to start rather than forking the registry | `TestWrongPassphraseRefusesRatherThanForkingTheRegistry` |
+| A live KEK with no check value is treated as underivable, so NULLing the column is not a way past that refusal | `TestKEKWithoutACheckValueIsNotDerivable` |
+| Retirement survives an ordinary upsert — a shred cannot be undone by a write | `TestRetirementIsTerminal` |
+| Exactly one primary exists however many promotions race | `TestOnlyOnePrimaryKEKCanExist` |
+| The compare-and-swap is a byte comparison over BLOBs, including embedded NULs | `TestSealedCompareAndSwapComparesBytes` |
+| Concurrent rotations terminate and report incomplete rather than livelocking | `TestConcurrentRotationsDoNotLivelock` |
+| `--dry-run` counts every row a real run would move, not one batch of them | `TestDryRunCountsEveryRowNotOneBatch` |
+| `cloop hub key list` neither mints nor promotes — a diagnostic does not modify what it reports | `TestReadOnlyKeyringDoesNotMint`, `TestReadOnlyOpenDoesNotPromote` |
+| Every set registered for rotation is also counted by retirement | `TestRetirementChecksEverySetThatRotates` |
+| Migration 0019 stamps pre-existing rows `legacy`; the first rotation upgrades them in place | `TestMigration0019StampsAndUpgradesPreExistingRows` |
+| Session refresh tokens rotate alongside secrets rather than being silently skipped | `TestSessionRefreshTokensRotateAlongsideSecrets` |
+
+`TestPlaintextDataKeysNeverReachDiskOrLogs` cannot grep for a canary the way the
+other disclosure tests do — a DEK is unpredictable random bytes with no shape.
+It instead wraps `crypto/rand.Reader` in a recorder that still returns real
+entropy, so the DEKs become known to the test and to nobody else. Salts are
+subtracted (they are stored hex-encoded by design), and the test fails if the
+recorder saw fewer keys than the run should have produced, so it cannot pass by
+scanning nothing.
+
 ### Agent protocol and transport — `framing_test.go`, `transport_test.go`
 
 The remote agent is the only boundary where the peer is not ours, so its
@@ -963,6 +1019,19 @@ that a deliberate act.
 ## What is not mitigated
 
 Stated plainly, because a security document that only lists wins is marketing.
+
+**Key rotation does not rotate the passphrase.** Every KEK is derived from
+`CLOOP_SECRET_KEY`, so `cloop hub key rotate` limits the lifetime of a *key*,
+not of the secret the key comes from. Someone who has read `hub.env` can still
+derive every non-retired KEK. Changing the passphrase remains a re-mint, and the
+[runbook](../operations/runbook.md#changing-cloop_secret_key-itself) says so
+plainly rather than letting the new command imply otherwise.
+
+**DEKs live in process memory.** The suite asserts that a plaintext DEK never
+reaches disk or a log. It cannot assert that the kernel never paged one out of
+the heap, and does not try — that is a deployment property (encrypted swap,
+memory limits, no core dumps), not something a test in this repository can
+reach.
 
 **A workload can disclose its own credentials.** The suite asserts non-disclosure
 by *cloop's* surfaces. It cannot assert that a workload never prints its own

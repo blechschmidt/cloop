@@ -62,4 +62,30 @@ var (
 	// ErrSealFailed: encryption or decryption failed (wrong key, or a
 	// corrupt/tampered envelope — AES-GCM cannot tell you which).
 	ErrSealFailed = errors.New("secretbroker: seal/unseal failed")
+
+	// Sealing-key registry errors (Task 20181).
+	//
+	// These are separate from ErrSealFailed because each calls for a
+	// different operator response, and a hub that reports only "decryption
+	// failed" makes an operator guess between "the key is gone", "the
+	// passphrase is wrong" and "the ciphertext is corrupt" during an
+	// incident. They are what makes a read against a retired key fail
+	// *loudly* rather than merely fail.
+
+	// ErrKeyRetired: the material names a KEK whose salt was destroyed. The
+	// material is unrecoverable and the credential must be re-minted.
+	ErrKeyRetired = errors.New("secretbroker: sealing key retired")
+	// ErrKeyUnavailable: the KEK exists but cannot be derived from the
+	// current CLOOP_SECRET_KEY. The material is intact; the passphrase is
+	// wrong.
+	ErrKeyUnavailable = errors.New("secretbroker: sealing key unavailable")
+	// ErrKeyUnknown: the material names a KEK this hub has no record of —
+	// a database from another hub, or a partially restored backup.
+	ErrKeyUnknown = errors.New("secretbroker: unknown sealing key")
+	// ErrKeyInUse: the KEK cannot be retired because sealed material still
+	// references it, or because it is the primary.
+	ErrKeyInUse = errors.New("secretbroker: sealing key still in use")
+	// ErrRotationFailed: a rotation could not rewrap every row. Rotation is
+	// resumable, so this means "run it again", not "start over".
+	ErrRotationFailed = errors.New("secretbroker: key rotation incomplete")
 )

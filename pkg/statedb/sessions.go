@@ -34,12 +34,18 @@ type SessionRow struct {
 	LastSeen         time.Time
 	ExpiresAt        time.Time
 	RefreshSealed    []byte
+	// RefreshKeyID and RefreshWrappedDEK are the envelope this row's sealed
+	// refresh token belongs to (Task 20181). "legacy" means the token is
+	// sealed directly under the passphrase-derived key, with no wrapped DEK.
+	RefreshKeyID      string
+	RefreshWrappedDEK []byte
 	RefreshCheckedAt time.Time
 }
 
 const sessionColumns = `id, subject, issuer, email, display_name, owner_key,
 	groups_json, roles_json, ip, user_agent,
-	issued_at, last_seen, expires_at, refresh_sealed, refresh_checked_at`
+	issued_at, last_seen, expires_at, refresh_sealed, refresh_checked_at,
+	refresh_key_id, refresh_wrapped_dek`
 
 // PutSession inserts a session row.
 //
@@ -68,7 +74,7 @@ func (d *DB) PutSession(row SessionRow) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	_, err = d.conn.Exec(
-		`INSERT INTO sessions(`+sessionColumns+`) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		`INSERT INTO sessions(`+sessionColumns+`) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		row.ID, row.Subject, row.Issuer, row.Email, row.DisplayName, row.OwnerKey,
 		groups, roles, row.IP, row.UserAgent,
 		row.IssuedAt.UTC().Format(time.RFC3339Nano),
@@ -76,6 +82,8 @@ func (d *DB) PutSession(row SessionRow) error {
 		formatOptionalTime(row.ExpiresAt),
 		row.RefreshSealed,
 		formatOptionalTime(row.RefreshCheckedAt),
+		defaultString(row.RefreshKeyID, "legacy"),
+		row.RefreshWrappedDEK,
 	)
 	if err != nil {
 		return fmt.Errorf("statedb: insert session: %w", classifyDriverErr(err))
@@ -138,12 +146,21 @@ func (d *DB) TouchSession(id string, t time.Time) error {
 // UpdateSessionRefresh stores a rotated refresh token and stamps the check
 // time. A nil sealed value clears the stored token, which is how a session
 // that can no longer be revalidated stops being retried.
-func (d *DB) UpdateSessionRefresh(id string, sealed []byte, checkedAt time.Time) error {
+//
+// Clearing also blanks the key id. Leaving a stale one behind would make the
+// row look, to the rotator and to `cloop hub key retire`, like material still
+// sealed under a key that in fact protects nothing — which is exactly the kind
+// of phantom reference that makes an operator conclude retirement is broken.
+func (d *DB) UpdateSessionRefresh(id, keyID string, wrappedDEK, sealed []byte, checkedAt time.Time) error {
+	if len(sealed) == 0 {
+		keyID, wrappedDEK = "", nil
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	res, err := d.conn.Exec(
-		`UPDATE sessions SET refresh_sealed = ?, refresh_checked_at = ? WHERE id = ?`,
-		sealed, formatOptionalTime(checkedAt), id,
+		`UPDATE sessions SET refresh_sealed = ?, refresh_key_id = ?, refresh_wrapped_dek = ?,
+		        refresh_checked_at = ? WHERE id = ?`,
+		sealed, keyID, wrappedDEK, formatOptionalTime(checkedAt), id,
 	)
 	if err != nil {
 		return fmt.Errorf("statedb: update session refresh: %w", classifyDriverErr(err))
@@ -297,6 +314,7 @@ func scanSessionRow(sc rowScanner) (SessionRow, error) {
 		&out.ID, &out.Subject, &out.Issuer, &out.Email, &out.DisplayName, &out.OwnerKey,
 		&groups, &roles, &out.IP, &out.UserAgent,
 		&issued, &lastSeen, &expires, &sealed, &chkd,
+		&out.RefreshKeyID, &out.RefreshWrappedDEK,
 	); err != nil {
 		return SessionRow{}, err
 	}

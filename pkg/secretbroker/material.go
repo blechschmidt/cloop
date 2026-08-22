@@ -14,9 +14,15 @@ import (
 // thing, KindEnv with no key filter, is narrow already because an env
 // secret's keys are its whole scope.
 func (b *Broker) materialFor(s Secret, g Grant) (Material, error) {
-	plaintext, err := b.cipher.Unseal(s.Sealed)
+	plaintext, err := b.seal.OpenEnvelope(AADFor(SetSecrets, s.ID), s.Envelope())
 	if err != nil {
-		return Material{}, wrapf(ErrSealFailed, "open payload for %s", s.Name)
+		// Both sentinels are chained. Callers that only know about
+		// ErrSealFailed keep matching, while an operator-facing path can ask
+		// specifically whether the key was *retired* — which is the
+		// difference between "re-mint this credential" and "fix your
+		// passphrase". The keyring's message names no credential material,
+		// only key IDs, so it is safe to carry through verbatim.
+		return Material{}, fmt.Errorf("%w: open payload for %s: %w", ErrSealFailed, s.Name, err)
 	}
 	// The plaintext is copied into the returned Material's fields; wipe the
 	// buffer once we are done building from it.

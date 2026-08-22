@@ -31,8 +31,12 @@ const DefaultGrantTTL = 24 * time.Hour
 //
 // Safe for concurrent use.
 type Broker struct {
-	store   Store
-	cipher  *Cipher
+	store Store
+	// seal is the key source. A *Keyring when the store can hold a KEK
+	// registry (every production hub, via pkg/secretstore), a *Cipher for
+	// stores that cannot — see the sealer doc comment in envelope.go.
+	seal    sealer
+	keyring *Keyring
 	auditor Auditor
 
 	mu     sync.Mutex
@@ -86,10 +90,27 @@ func WithMaxLeaseTTL(d time.Duration) Option {
 }
 
 // WithCipher supplies a pre-built Cipher, bypassing CLOOP_SECRET_KEY.
+//
+// A Cipher has no key registry, so a broker built this way seals in the
+// legacy single-key shape and cannot rotate. That is right for a test double
+// and wrong for a hub; prefer WithKeyring where rotation matters.
 func WithCipher(c *Cipher) Option {
 	return func(b *Broker) {
 		if c != nil {
-			b.cipher = c
+			b.seal = c
+			b.keyring = nil
+		}
+	}
+}
+
+// WithKeyring supplies a pre-opened Keyring, so a caller that already built
+// one (the hub, which shares it with the session store) does not pay the KDF
+// cost a second time.
+func WithKeyring(kr *Keyring) Option {
+	return func(b *Broker) {
+		if kr != nil {
+			b.seal = kr
+			b.keyring = kr
 		}
 	}
 }
@@ -112,15 +133,32 @@ func New(store Store, opts ...Option) (*Broker, error) {
 	for _, opt := range opts {
 		opt(b)
 	}
-	if b.cipher == nil {
-		c, err := NewCipher(store)
-		if err != nil {
-			return nil, err
+	if b.seal == nil {
+		// A store that can hold a KEK registry gets envelope encryption and
+		// online rotation; one that cannot keeps the single-key behaviour.
+		// The distinction is made here, once, rather than by every call site
+		// having to know which kind of store it handed over.
+		if ks, ok := store.(KeyStore); ok {
+			kr, err := OpenKeyring(ks)
+			if err != nil {
+				return nil, err
+			}
+			b.seal, b.keyring = kr, kr
+		} else {
+			c, err := NewCipher(store)
+			if err != nil {
+				return nil, err
+			}
+			b.seal = c
 		}
-		b.cipher = c
 	}
 	return b, nil
 }
+
+// Keyring returns the broker's key registry, or nil when it was built over a
+// store with no registry. Callers that rotate must handle nil rather than
+// assume every broker can.
+func (b *Broker) Keyring() *Keyring { return b.keyring }
 
 func (b *Broker) now() time.Time { return b.clock().UTC() }
 
@@ -161,24 +199,31 @@ func (b *Broker) Mint(ctx context.Context, req MintRequest) (Secret, error) {
 		return Secret{}, b.denyf(ev, ErrDuplicateName, "a secret named %q already exists", req.Name)
 	}
 
-	sealed, err := b.cipher.Seal(req.Payload)
+	// The ID is minted before the payload is sealed because it *is* the
+	// envelope's associated data: binding the ciphertext to the row it lives
+	// in is what stops an attacker with database write access from moving a
+	// secret they minted into a row that trusted grants point at.
+	id, err := newID("sec")
+	if err != nil {
+		zero(req.Payload)
+		return Secret{}, err
+	}
+	env, err := b.seal.SealFor(AADFor(SetSecrets, id), req.Payload)
 	zero(req.Payload)
 	if err != nil {
 		return Secret{}, b.denyf(ev, ErrSealFailed, "seal payload: %v", err)
 	}
-	id, err := newID("sec")
-	if err != nil {
-		return Secret{}, err
-	}
 
 	s := Secret{
-		ID:        id,
-		Kind:      req.Kind,
-		Name:      req.Name,
-		Sealed:    sealed,
-		Metadata:  req.Metadata,
-		CreatedAt: b.now(),
-		CreatedBy: req.Actor,
+		ID:         id,
+		Kind:       req.Kind,
+		Name:       req.Name,
+		Sealed:     env.Ciphertext,
+		KeyID:      env.KeyID,
+		WrappedDEK: env.WrappedDEK,
+		Metadata:   req.Metadata,
+		CreatedAt:  b.now(),
+		CreatedBy:  req.Actor,
 	}
 	if err := s.Validate(); err != nil {
 		return Secret{}, b.denyf(ev, ErrInvalidSecret, "%v", err)

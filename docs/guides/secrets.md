@@ -26,7 +26,7 @@ Three nouns, and the distinction between them is the whole design:
 
 | | What it is | Lifetime |
 | --- | --- | --- |
-| **Secret** | the credential itself, sealed with AES-256-GCM. Never leaves the broker in plaintext except inside a Material | until deleted |
+| **Secret** | the credential itself, sealed with AES-256-GCM under its own per-row data key. Never leaves the broker in plaintext except inside a Material | until deleted |
 | **Grant** | who may use it, narrowed by kind-specific constraints, until when | `--ttl`, default 24 h |
 | **Lease** | a short-lived, *minimised* materialisation of every grant matching one (executor, project) | ≤ 15 min |
 
@@ -631,4 +631,4 @@ zeroed and removed when the workload exits.
 - [Security model](../security/model.md) — what each guarantee is worth
 - [Threat model](../security/threat-model.md) — SSRF, exfiltration, revocation lag
 - [Executor architecture](../architecture/executors.md) — where a lease is applied
-- [Operator runbook](../operations/runbook.md) — rotating the sealing key
+- [Operator runbook](../operations/runbook.md#key-rotation) — rotating the sealing key online with `cloop hub key rotate`
