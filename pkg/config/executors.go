@@ -22,10 +22,12 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/egressbroker"
 	"github.com/blechschmidt/cloop/pkg/executor/container"
 	"github.com/blechschmidt/cloop/pkg/executor/kubernetes"
 )
@@ -111,7 +113,10 @@ func ValidateExecutors(e ExecutorsConfig) error {
 	if err := ValidateContainerExecutor(e.Container); err != nil {
 		return err
 	}
-	return ValidateKubernetesExecutor(e.Kubernetes)
+	if err := ValidateKubernetesExecutor(e.Kubernetes); err != nil {
+		return err
+	}
+	return ValidateEgressConfig(e.Egress)
 }
 
 // ExecutorWarnings returns advisory messages about a valid-but-questionable
@@ -152,7 +157,137 @@ func ExecutorWarnings(e ExecutorsConfig) []string {
 				"workload is bounded only by the namespace's LimitRange (if one exists).")
 		}
 	}
+	if e.Egress.Enabled {
+		// A loopback bind is the default and is right for host-process and
+		// host-network executors; it is silently wrong for a bridged
+		// container, which cannot route to the host's 127.0.0.1 and will
+		// simply time out on every request. Saying so at config time is much
+		// cheaper than discovering it as "the sandbox has no network".
+		addr := strings.TrimSpace(e.Egress.ListenAddr)
+		if (addr == "" || strings.HasPrefix(addr, "127.") || strings.HasPrefix(addr, "localhost")) &&
+			strings.TrimSpace(e.Egress.AdvertiseAddr) == "" && e.Container.Enabled {
+			out = append(out, "executors.egress binds loopback but the container executor is "+
+				"enabled — a bridged sandbox cannot reach the host's 127.0.0.1. Set "+
+				"executors.egress.advertise_addr (host.containers.internal / "+
+				"host.docker.internal) or bind an address the sandbox can route to.")
+		}
+		if e.Egress.DefaultMaxBytesUp == "" && e.Egress.DefaultMaxBytesDown == "" {
+			out = append(out, "executors.egress sets no default transfer quota, so a grant "+
+				"created without --max-up/--max-down can move unlimited data. Set "+
+				"default_max_bytes_up/down to bound it.")
+		}
+	} else if e.Container.Enabled && strings.TrimSpace(e.Container.Network) == container.NetworkNone {
+		out = append(out, "the container executor runs with network \"none\" and "+
+			"executors.egress is disabled, so sandboxed workloads have no route out at all. "+
+			"Enable executors.egress and grant hosts with `cloop egress grant` if they need one.")
+	}
 	return out
+}
+
+// ValidateEgressConfig returns a non-nil error describing the first problem
+// found in e. It does not mutate.
+//
+// Like the other executor validators it runs even when the section is
+// disabled, so a broken value is reported when it is written rather than
+// discovered at the moment someone flips enabled to true.
+func ValidateEgressConfig(e EgressConfig) error {
+	if e.MaxSessionMinutes < 0 || e.MaxSessionMinutes > EgressMaxSessionMinutesUpper {
+		return fmt.Errorf("executors.egress.max_session_minutes must be between 0 and %d (got %d)",
+			EgressMaxSessionMinutesUpper, e.MaxSessionMinutes)
+	}
+	if e.DialTimeoutSeconds < 0 || e.DialTimeoutSeconds > EgressDialTimeoutSecondsUpper {
+		return fmt.Errorf("executors.egress.dial_timeout_seconds must be between 0 and %d (got %d)",
+			EgressDialTimeoutSecondsUpper, e.DialTimeoutSeconds)
+	}
+	if err := validateEgressAddr("listen_addr", e.ListenAddr, true); err != nil {
+		return err
+	}
+	if err := validateEgressAddr("advertise_addr", e.AdvertiseAddr, false); err != nil {
+		return err
+	}
+	for field, v := range map[string]string{
+		"default_max_bytes_up":   e.DefaultMaxBytesUp,
+		"default_max_bytes_down": e.DefaultMaxBytesDown,
+	} {
+		if _, err := egressbroker.ParseBytes(v); err != nil {
+			return fmt.Errorf("executors.egress.%s: %w", field, err)
+		}
+	}
+	return nil
+}
+
+// validateEgressAddr checks a host:port. requirePort distinguishes the bind
+// address, where net.Listen needs one, from the advertised address, where a
+// bare host is legitimate (the port is appended from the listener).
+func validateEgressAddr(field, addr string, requirePort bool) error {
+	a := strings.TrimSpace(addr)
+	if a == "" {
+		return nil
+	}
+	if strings.Contains(a, "://") || strings.ContainsAny(a, "/?#@ \t") {
+		return fmt.Errorf("executors.egress.%s must be host:port, not a URL (got %q)", field, a)
+	}
+	host, port, err := net.SplitHostPort(a)
+	if err != nil {
+		if requirePort {
+			return fmt.Errorf("executors.egress.%s must be host:port (got %q)", field, a)
+		}
+		return nil
+	}
+	_ = host
+	n, err := strconv.Atoi(port)
+	if err != nil || n < 0 || n > 65535 {
+		return fmt.Errorf("executors.egress.%s port must be between 0 and 65535 (got %q)", field, port)
+	}
+	return nil
+}
+
+// clampEgressConfig repairs out-of-range values in place and reports what it
+// changed, so Load can warn once per field.
+//
+// Every repair resets to the zero value, which the broker reads as "use my
+// default", and every broker default is the tighter one: a shorter session, a
+// shorter dial, a loopback bind. The one field that is *disabled* rather than
+// reset is Enabled itself, for a listen address so broken that starting the
+// proxy would mean binding somewhere nobody chose — the analogue of
+// clampKubernetesExecutor refusing to register an unusable cluster backend.
+func clampEgressConfig(e *EgressConfig) []string {
+	var changed []string
+
+	if e.MaxSessionMinutes < 0 || e.MaxSessionMinutes > EgressMaxSessionMinutesUpper {
+		changed = append(changed, fmt.Sprintf("executors.egress.max_session_minutes: value %d outside [0, %d]",
+			e.MaxSessionMinutes, EgressMaxSessionMinutesUpper))
+		e.MaxSessionMinutes = 0
+	}
+	if e.DialTimeoutSeconds < 0 || e.DialTimeoutSeconds > EgressDialTimeoutSecondsUpper {
+		changed = append(changed, fmt.Sprintf("executors.egress.dial_timeout_seconds: value %d outside [0, %d]",
+			e.DialTimeoutSeconds, EgressDialTimeoutSecondsUpper))
+		e.DialTimeoutSeconds = 0
+	}
+	for field, v := range map[string]*string{
+		"default_max_bytes_up":   &e.DefaultMaxBytesUp,
+		"default_max_bytes_down": &e.DefaultMaxBytesDown,
+	} {
+		if _, err := egressbroker.ParseBytes(*v); err != nil {
+			changed = append(changed, fmt.Sprintf("executors.egress.%s: %v", field, err))
+			*v = ""
+		}
+	}
+	if err := validateEgressAddr("advertise_addr", e.AdvertiseAddr, false); err != nil {
+		changed = append(changed, fmt.Sprintf("executors.egress.advertise_addr: %v", err))
+		e.AdvertiseAddr = ""
+	}
+	if err := validateEgressAddr("listen_addr", e.ListenAddr, true); err != nil {
+		// Resetting to "" would bind an ephemeral loopback port, which is
+		// safe but silently not what the operator asked for. Disabling the
+		// proxy instead makes the misconfiguration visible as "egress is
+		// off" rather than as "egress is on but nothing can reach it".
+		changed = append(changed, fmt.Sprintf(
+			"executors.egress: disabled because listen_addr is unusable: %v", err))
+		e.ListenAddr = ""
+		e.Enabled = false
+	}
+	return changed
 }
 
 // ValidateContainerExecutor returns a non-nil error describing the first

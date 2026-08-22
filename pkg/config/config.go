@@ -126,6 +126,19 @@ const (
 	// namespace's ResourceQuota is that — but a guard against a runaway loop
 	// asking for a Pod count no operator typed on purpose.
 	KubernetesMaxConcurrentUpper = 1024
+
+	// Egress broker bounds (Task 20163).
+	//
+	// A proxy session is a live credential, so its ceiling is the security
+	// control and not a convenience. Four hours is already generous for
+	// something whose whole point is to be short-lived; beyond that the value
+	// is not a lease, it is a configuration, and the broker's own
+	// MaxSessionTTLCeiling refuses it a second time.
+	EgressMaxSessionMinutesUpper = 4 * 60
+	// Dial ceiling. A destination that has not answered in five minutes is
+	// not going to, and a larger value only holds a sandbox's request open
+	// while it waits to fail.
+	EgressDialTimeoutSecondsUpper = 300
 )
 
 // permWarnedPaths tracks which config paths have already emitted the
@@ -260,6 +273,60 @@ type ExecutorsConfig struct {
 
 	// Kubernetes configures the ephemeral-Pod executor.
 	Kubernetes KubernetesExecutorConfig `yaml:"kubernetes,omitempty"`
+
+	// Egress configures the scoped forward proxy that lends the control
+	// plane's Internet connection to isolated sandboxes.
+	Egress EgressConfig `yaml:"egress,omitempty"`
+}
+
+// EgressConfig configures the egress broker's forward proxy.
+//
+// The proxy is what makes network-isolated execution usable rather than
+// merely safe. A container started with network "none" cannot fetch a
+// dependency, and the usual alternative is to give the sandbox a real network
+// and hope; with this enabled it reaches exactly the hosts an egress grant
+// names, brokered per connection by the control plane.
+type EgressConfig struct {
+	// Enabled starts the proxy with the control plane. Off by default: a
+	// control plane should not acquire a new outbound path because a config
+	// file grew a section.
+	Enabled bool `yaml:"enabled,omitempty"`
+
+	// ListenAddr is the proxy's bind address. Empty binds an ephemeral
+	// loopback port.
+	//
+	// Loopback is the safe default and frequently an unusable one: a
+	// container on a bridge network cannot reach the host's 127.0.0.1, so an
+	// operator running sandboxes sets an address the sandbox can route to —
+	// at which point the proxy is reachable by everything else on that
+	// network, and the per-session credential is what holds. Bind as
+	// narrowly as the sandbox network allows.
+	ListenAddr string `yaml:"listen_addr,omitempty"`
+
+	// AdvertiseAddr is what goes into the sandbox's HTTPS_PROXY. Empty uses
+	// the bound address.
+	//
+	// It exists because the two are routinely different: podman reaches the
+	// host at host.containers.internal, docker at host.docker.internal, and
+	// a remote edge executor at whatever address the control plane has on
+	// the network between them. Getting it wrong produces a sandbox whose
+	// every outbound request times out, which is a slow thing to diagnose.
+	AdvertiseAddr string `yaml:"advertise_addr,omitempty"`
+
+	// MaxSessionMinutes bounds one redemption regardless of what a grant
+	// asks for. Zero uses the broker's 15-minute default; values outside
+	// [1, EgressMaxSessionMinutesUpper] are clamped.
+	MaxSessionMinutes int `yaml:"max_session_minutes,omitempty"`
+
+	// DialTimeoutSeconds bounds the connection to an authorised origin.
+	// Zero uses the broker's default.
+	DialTimeoutSeconds int `yaml:"dial_timeout_seconds,omitempty"`
+
+	// DefaultMaxBytesUp and DefaultMaxBytesDown are the per-session transfer
+	// quotas applied to a grant created without explicit ones, as size
+	// strings ("100m", "2g"). Empty means unlimited.
+	DefaultMaxBytesUp   string `yaml:"default_max_bytes_up,omitempty"`
+	DefaultMaxBytesDown string `yaml:"default_max_bytes_down,omitempty"`
 }
 
 // HostProcessAllowed reports the effective policy, applying the
@@ -1181,6 +1248,17 @@ func (c *Config) validateAndClamp(path string) {
 		field, detail, found := strings.Cut(msg, ": ")
 		if !found {
 			field, detail = "executors.kubernetes", msg
+		}
+		warn(field, detail)
+	}
+	// Egress broker: same rule again. Every repair resets to the broker's
+	// default, and every broker default is the tighter one — a shorter
+	// session, a shorter dial, an unusable listen address disabling the proxy
+	// rather than binding somewhere nobody chose.
+	for _, msg := range clampEgressConfig(&c.Executors.Egress) {
+		field, detail, found := strings.Cut(msg, ": ")
+		if !found {
+			field, detail = "executors.egress", msg
 		}
 		warn(field, detail)
 	}

@@ -1349,10 +1349,12 @@ server holds, so variables are passed explicitly or not at all.
 
 ### What the container sandbox does not do
 
-- **It does not filter egress.** Anything other than `network: none` grants
-  unrestricted outbound access unless the named network carries its own policy
-  (a `--internal` podman network, a CNI plugin, an egress proxy). `cloop
-  executor test` says so explicitly rather than implying a guarantee.
+- **It does not filter egress itself.** Anything other than `network: none`
+  grants unrestricted outbound access unless the named network carries its own
+  policy. `cloop executor test` says so explicitly rather than implying a
+  guarantee. The supported way to give a sandbox *scoped* network access is to
+  leave it on `network: none` and grant it egress through the broker — see
+  [Scoped network egress](#scoped-network-egress) below.
 - **It does not pull images.** Runs use `--pull=never` so a cold image cache
   fails immediately with an actionable error instead of turning a UI click into
   a multi-minute hang. Preflight tells you what to pull.
@@ -1413,6 +1415,81 @@ Agents are not users: they carry their own scoped, individually revocable
 credential rather than one that would grant full UI access. It stays behind the
 rate limiter, which is what absorbs an unauthenticated flood of connect
 attempts.
+
+### Scoped network egress
+
+A sandbox with `network: none` is safe and, on its own, not very useful: it
+cannot fetch a dependency, clone a repo, or call an API. The usual escape is to
+give it a real network and hope. `cloop egress` is the alternative — the
+control plane lends its own connection, one destination at a time.
+
+The sandbox keeps no route of its own. It reaches the outside world only
+through an authenticated forward proxy hosted by the control plane, which
+decides per connection:
+
+```bash
+cloop egress grant --to project:/srv/app \
+    --hosts 'api.github.com,*.githubusercontent.com' --ports 443 \
+    --max-down 500m --ttl 8h
+
+cloop egress list                                  # who may reach what, until when
+cloop egress test https://api.github.com/rate_limit  # ...and does it actually work?
+cloop egress revoke egress_2f1c…                   # withdraw, closing live tunnels
+```
+
+Turn the proxy on under `executors.egress`:
+
+```yaml
+executors:
+  egress:
+    enabled: true
+    listen_addr: "10.88.0.1:8899"                      # reachable from the sandbox
+    advertise_addr: "host.containers.internal:8899"    # what goes into HTTPS_PROXY
+    max_session_minutes: 15
+    default_max_bytes_down: 1g
+```
+
+A grant carries hosts, CIDRs, ports, methods, byte quotas, and a TTL, targeted
+with the same `--to` syntax as `cloop secret grant`. Redeeming one mints a
+**single-use, per-session credential** — 256 random bits, compared in constant
+time, stored only as a SHA-256 — which the workload receives as
+`HTTPS_PROXY` / `HTTP_PROXY` / `NO_PROXY`. It never sees the grant itself.
+
+What the proxy enforces:
+
+- **Host, port, and method** are checked before a byte leaves. Methods gate
+  plain HTTP only; a CONNECT tunnel's method lives inside TLS and is not
+  observable (see below).
+- **Resolve-once pinning.** The destination name is resolved exactly once,
+  *every* returned address must pass policy, and the dial goes to the resolved
+  literal. There is no second lookup for a hostile DNS server to answer
+  differently, so rebinding has nowhere to put the second answer.
+- **SSRF hard-block.** Loopback, RFC1918, CGNAT, link-local — which is where
+  the cloud metadata service at `169.254.169.254` lives — multicast, and
+  unspecified addresses are refused *even under `--hosts '*'`*. Reaching one
+  requires naming its range in `--cidrs`, so an internal destination is always
+  a sentence somebody wrote on purpose. The v4-in-v6 encodings
+  (`::ffff:127.0.0.1`, NAT64, `::127.0.0.1`) are unwrapped before the check.
+- **Quotas, mid-stream.** An over-budget transfer is cut while it is in
+  flight, not flagged after it finishes.
+- **TTL, mid-tunnel.** An open tunnel does not outlive its session, including
+  when idle.
+
+Every decision — allow and deny — lands in the same hash-chained audit log as
+the credential broker, with the identity, task, host, port, byte counts, and
+verdict, and no credential material.
+
+**The tunnel is CA-free.** cloop does not terminate, inspect, or re-sign TLS,
+and installs no certificate in the sandbox: the workload validates the origin's
+certificate itself, exactly as it would without a proxy. That costs visibility
+into tunnelled requests, deliberately — a proxy that could read every sandbox's
+traffic would be a far more valuable thing to compromise than the credentials
+it protects.
+
+Revocation is immediate rather than TTL-bounded, which is the payoff for
+brokering a *capability* instead of handing over a token: a leaked PAT cannot
+be recalled from a running container, but a proxy session is torn down at the
+proxy, mid-tunnel, by the control plane that holds it.
 
 ### Hardened (enterprise) configuration
 

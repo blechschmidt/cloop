@@ -65,6 +65,12 @@ var (
 	// requested ID.
 	ErrBrokerGrantNotFound = errors.New("statedb: broker grant not found")
 
+	// ErrEgressGrantNotFound indicates no egress_grants row has the
+	// requested ID. Like the broker sentinels this is fatal for the
+	// operation: a caller must never fall back to a different egress policy
+	// than the one it asked for.
+	ErrEgressGrantNotFound = errors.New("statedb: egress grant not found")
+
 	// ErrExecutorHealthNotFound indicates the executor has no health record:
 	// the scheduler has never probed it. Callers must not read this as
 	// "healthy" — an unobserved executor is unknown, not ready.

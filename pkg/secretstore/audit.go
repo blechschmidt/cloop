@@ -73,6 +73,17 @@ func (a *Auditor) Audit(ev secretbroker.Event) {
 	put("project_id", ev.ProjectID)
 	put("constraints", ev.Constraints)
 	put("reason", ev.Reason)
+	put("task_id", ev.TaskID)
+	put("host", ev.Host)
+	if ev.Port != 0 {
+		payload["port"] = ev.Port
+	}
+	if ev.BytesUp != 0 {
+		payload["bytes_up"] = ev.BytesUp
+	}
+	if ev.BytesDown != 0 {
+		payload["bytes_down"] = ev.BytesDown
+	}
 	if !ev.ExpiresAt.IsZero() {
 		payload["expires_at"] = ev.ExpiresAt.UTC()
 	}

@@ -3,6 +3,7 @@ package secretbroker
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -30,6 +31,21 @@ const (
 	ActionRenew       Action = "secret.renew"
 	ActionRelease     Action = "secret.release"
 	ActionAccessCheck Action = "secret.access_check"
+
+	// Egress actions come from pkg/egressbroker, which brokers the hub's
+	// Internet connection as a fourth grantable resource alongside GitHub
+	// repositories, PATs, and Kubernetes clusters.
+	//
+	// They share this audit trail rather than opening a second one on
+	// purpose: "what did this executor reach, and with whose authority" is
+	// one question, and answering it from two hash chains that can disagree
+	// about ordering would be strictly worse than answering it from one.
+	ActionEgressGrant   Action = "egress.grant"
+	ActionEgressRevoke  Action = "egress.revoke"
+	ActionEgressRedeem  Action = "egress.redeem"
+	ActionEgressConnect Action = "egress.connect"
+	ActionEgressRequest Action = "egress.request"
+	ActionEgressClose   Action = "egress.close"
 )
 
 // Event is one audit record. Every field on it is metadata about a
@@ -64,6 +80,21 @@ type Event struct {
 	ExpiresAt time.Time `json:"expires_at,omitempty"`
 	// Reason explains a denial, or annotates an allow ("2 grants matched").
 	Reason string `json:"reason,omitempty"`
+
+	// TaskID is the unit of work the decision was made for. Populated by
+	// the egress broker, which knows it; the secret broker's leases are
+	// per-executor rather than per-task and leave it empty.
+	TaskID string `json:"task_id,omitempty"`
+	// Host and Port name an egress destination. They are a hostname and a
+	// port and nothing else — deliberately not a URL, because a URL has a
+	// path and a query, and those are request contents rather than access
+	// metadata.
+	Host string `json:"host,omitempty"`
+	Port int    `json:"port,omitempty"`
+	// BytesUp and BytesDown are the session's transfer totals at the time of
+	// the decision, from the workload's point of view.
+	BytesUp   int64 `json:"bytes_up,omitempty"`
+	BytesDown int64 `json:"bytes_down,omitempty"`
 }
 
 // Auditor receives brokered-operation events. Implementations must not block
@@ -253,6 +284,17 @@ func (ev Event) Fields() string {
 	put("project", ev.ProjectID)
 	put("constraints", ev.Constraints)
 	put("reason", ev.Reason)
+	put("task", ev.TaskID)
+	put("host", ev.Host)
+	if ev.Port != 0 {
+		kv["port"] = strconv.Itoa(ev.Port)
+	}
+	if ev.BytesUp != 0 {
+		kv["bytes_up"] = strconv.FormatInt(ev.BytesUp, 10)
+	}
+	if ev.BytesDown != 0 {
+		kv["bytes_down"] = strconv.FormatInt(ev.BytesDown, 10)
+	}
 	if !ev.ExpiresAt.IsZero() {
 		kv["expires_at"] = ev.ExpiresAt.UTC().Format(time.RFC3339)
 	}
