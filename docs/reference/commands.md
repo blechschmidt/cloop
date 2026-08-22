@@ -800,6 +800,180 @@ as `cloop hub token`.
 
 ---
 
+## Network egress
+
+`cloop egress grant / list / test / revoke` issue and inspect the leases that
+let an isolated sandbox reach the outside world through the control plane's
+proxy — see [the secrets guide](../guides/secrets.md#egress-leases). The
+subcommand below is about the other enforcement point.
+
+### `cloop egress firewall`
+
+Render the packet filter an egress authorisation compiles to, or ask what it
+would do to one address.
+
+The two enforcement points answer different questions and an operator has to be
+able to see both. `cloop egress test` asks the *proxy* "may I connect to this
+URL", which is the layer-7 answer and depends on the workload choosing to use
+the proxy. This asks the *packet filter* "would this packet leave", which is the
+answer that binds a workload that does not.
+
+The rendered output is the same text the driver installs, so it can be diffed
+against `nft list table inet cloop_sbx_<id>` on a host or
+`kubectl get netpol -o yaml` in a cluster. Nothing here touches the host: it
+compiles and prints.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--grant` | | Compile a stored grant by ID instead of using the flags below |
+| `--cidrs` | | Address ranges the sandbox may reach directly |
+| `--ports` | | Destination ports; required whenever a destination is allowed |
+| `--internet` | `false` | Allow every public address on `--ports` |
+| `--broker` | | Egress proxy endpoint the sandbox may reach (`address:port`) |
+| `--resolver` | | DNS server it may query directly (address, or `address:port`) |
+| `--format` | `rules` | `rules`, `nft`, `nft-bridge` or `networkpolicy` |
+| `--table` | `cloop_sbx_preview` | nft table / NetworkPolicy name |
+| `--bridge` | | Host interface to filter; required by `--format nft-bridge` |
+| `--check` | | Report the verdict for one `address:port` and exit 1 if dropped |
+
+`--format nft` renders the in-namespace form (output, input and forward chains,
+all defaulting to drop); `nft-bridge` renders the host-side form that filters
+one bridge. `--check` accepts an optional `/tcp` or `/udp` suffix and defaults
+to TCP.
+
+**Previewing a configuration before writing it.** The rules are printed in
+evaluation order, first match wins, with the reason that will appear in the
+ruleset and in the audit trail:
+
+```console
+$ cloop egress firewall --cidrs 10.8.0.0/24 --ports 6443 --format rules
+IP-layer egress filter  mode filtered, 22 rules, from flags
+
+  allow  127.0.0.0/8                any          sandbox-local loopback [namespace-local]
+  allow  ::1/128                    any          sandbox-local loopback [namespace-local]
+  allow  10.8.0.0/24            tcp 6443         granted CIDR (waives private (RFC1918/ULA))
+  drop   169.254.169.254/32         any          cloud metadata service (169.254.169.254)
+  drop   0.0.0.0/32                 any          unspecified address
+  drop   127.0.0.0/8                any          loopback
+  drop   224.0.0.0/4                any          multicast
+  drop   169.254.0.0/16             any          link-local
+  drop   10.0.0.0/8                 any          private (RFC1918/ULA)
+  drop   172.16.0.0/12              any          private (RFC1918/ULA)
+  drop   192.168.0.0/16             any          private (RFC1918/ULA)
+  drop   100.64.0.0/10              any          carrier-grade NAT (RFC6598)
+  drop   ::/128                     any          unspecified address
+  drop   ::1/128                    any          loopback
+  drop   ff00::/8                   any          multicast
+  drop   fe80::/10                  any          link-local
+  drop   fc00::/7                   any          private (RFC1918/ULA)
+  drop   64:ff9b::/96               any          NAT64 translation prefix
+  drop   64:ff9b:1::/48             any          NAT64 translation prefix (RFC 8215)
+  drop   ::ffff:0:0:0/96            any          IPv4-translatable prefix
+  drop   2002::/16                  any          6to4 translation prefix
+  drop   ::/96                      any          IPv4-compatible prefix (deprecated)
+  drop   everything else                         default deny
+```
+
+The granted `10.8.0.0/24` is allowed *before* `10.0.0.0/8` is dropped: that
+ordering is the waiver rule, and it is why the grant buys that prefix on that
+port and nothing else. The last five drops are the IPv6 encodings that carry an
+IPv4 address; a packet filter cannot unwrap one, so it drops the prefix whole.
+
+**Seeing what a hostname allowlist became.** The warning is the point of the
+command, not decoration — it appears in every format, including the nft
+comments:
+
+```console
+$ cloop egress firewall --internet --ports 443 --format rules
+IP-layer egress filter  mode filtered, 23 rules, from flags
+
+warning: every public address is reachable on port 443; only the private, loopback, link-local, CGNAT and metadata ranges are filtered
+
+warning: no resolver is allowed, so DNS will fail: name lookups leave the sandbox on UDP/53 and this policy drops them. Pass the sandbox's resolvers, or use the broker, which resolves on its behalf.
+```
+
+With `--grant <id>`, a grant whose allowlist is hostnames produces a warning
+naming those hostnames and the port they widened to, because that is the single
+most useful thing this command reports.
+
+**Asking about one address — `--check`.** The verdict is on stdout and *also*
+in the exit status: **0** when the packet would leave, **1** when it would be
+dropped. An operator automating "is this sandbox still confined" should not
+have to parse prose.
+
+```console
+$ cloop egress firewall --internet --ports 443 --check 169.254.169.254:80
+DROP  169.254.169.254 169.254.169.254:80/tcp — cloud metadata service (169.254.169.254)
+$ echo $?
+1
+
+$ cloop egress firewall --cidrs 10.8.0.0/24 --ports 6443 --check 10.8.0.5:6443
+ALLOW 10.8.0.5 10.8.0.5:6443/tcp — granted CIDR (waives private (RFC1918/ULA))
+$ echo $?
+0
+
+$ cloop egress firewall --cidrs 10.8.0.0/24 --ports 6443 --check 10.8.0.5:22
+DROP  10.8.0.5 10.8.0.5:22/tcp — private (RFC1918/ULA)
+$ echo $?
+1
+```
+
+The third is the useful one: the address is inside the granted range, and it is
+dropped anyway, because the waiver covers the prefix *on its ports*. The reason
+names the rule that decided, so "why can my sandbox not reach this" has an
+answer rather than a guess.
+
+**Rendering what a host would run.** `nft-bridge` is the form the container
+driver installs, and both hooks carry the same rules — `forward` for
+destinations the host routes onward, `input` for destinations that belong to
+the host itself:
+
+```console
+$ cloop egress firewall --cidrs 10.8.0.0/24 --ports 6443 --resolver 10.88.0.1 \
+    --format nft-bridge --bridge br-8e9671342cdf --table cloop_sbx_container
+# cloop sandbox egress filter — mode filtered
+# Generated by pkg/netfilter. Edits are lost on the next task.
+
+add table inet cloop_sbx_container
+delete table inet cloop_sbx_container
+table inet cloop_sbx_container {
+	chain forward {
+		type filter hook forward priority 0; policy accept;
+		iifname != "br-8e9671342cdf" return comment "not this sandbox"
+		ct state established,related counter accept
+		ct state invalid counter drop
+		ip daddr 10.8.0.0/24 tcp dport 6443 counter accept comment "granted CIDR (waives private (RFC1918/ULA))"
+		ip daddr 10.88.0.1/32 udp dport 53 counter accept comment "DNS resolver"
+		ip daddr 10.88.0.1/32 tcp dport 53 counter accept comment "DNS resolver (truncated answers retry over TCP)"
+		ip daddr 169.254.169.254/32 counter drop comment "cloud metadata service (169.254.169.254)"
+		…
+		counter drop comment "default deny"
+	}
+
+	chain input {
+		type filter hook input priority 0; policy accept;
+		…
+	}
+}
+```
+
+The chain policy is `accept` and the drop is explicit, because base chains on
+the same hook all run: a `policy drop` here would take down every other
+container on the host. Each chain returns immediately for traffic that is not
+from this sandbox's bridge. The `add table` / `delete table` / `table` preamble
+makes a re-apply replace rather than accumulate — `add` is a no-op on an
+existing table, which is what makes the `delete` safe on a first run — and
+`nft -f` commits the whole thing as one transaction. Every rule carries a
+`counter`, which is what makes
+`nft list table inet …` useful when a sandbox cannot reach something — see the
+[runbook](../operations/runbook.md#incident-playbooks).
+
+Full context: [IP-layer egress filtering](configuration.md#ip-layer-egress-filtering)
+for the config keys, and [the security model](../security/model.md#the-network-the-sandbox-sits-on)
+for what each layer does and does not bind.
+
+---
+
 ## Executor internals
 
 Commands an executor runs on your behalf. They are documented because you will

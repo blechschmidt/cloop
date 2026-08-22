@@ -460,6 +460,83 @@ type ContainerExecutorConfig struct {
 	// better fix is almost always to chown the project directory to an
 	// unprivileged user.
 	AllowRootUser bool `yaml:"allow_root_user,omitempty"`
+
+	// EgressFilter bounds what a sandbox on this executor can reach, at the
+	// IP layer. Disabled means the configured Network is used as-is, with
+	// whatever egress it happens to provide.
+	EgressFilter ContainerEgressFilterConfig `yaml:"egress_filter,omitempty"`
+}
+
+// ContainerEgressFilterConfig turns a sandbox's outbound access into an
+// enforced allowlist rather than an advisory one.
+//
+// The distinction is the whole point. The egress broker
+// (executors.egress / `cloop egress grant`) is an HTTP proxy: it enforces
+// hostnames, methods and byte quotas, and it only sees traffic a workload
+// chose to send through $HTTP_PROXY. A harness that opens a raw socket walks
+// past all of it. This section is what binds that harness.
+//
+// The recommended shape is two lines:
+//
+//	egress_filter:
+//	  enabled: true
+//	  internal: true
+//
+// which puts sandboxes on a runtime network with no route off the host. The
+// broker then becomes the only way out, which is what makes its host
+// allowlist meaningful — and it needs no host privileges. Everything else
+// here describes *direct* egress, needs nft(8) and CAP_NET_ADMIN, and is for
+// destinations a sandbox must dial itself: a Kubernetes API server, an
+// internal registry.
+type ContainerEgressFilterConfig struct {
+	// Enabled turns the filter on. Default false, deliberately: switching it
+	// on under a running deployment is a change an operator makes, not one
+	// an upgrade makes for them — the symptom would be a sandbox that can no
+	// longer reach anything, which reads as a network outage.
+	Enabled bool `yaml:"enabled,omitempty"`
+
+	// Internal routes sandboxes onto a network with no route off the host.
+	Internal bool `yaml:"internal,omitempty"`
+
+	// AllowCIDRs are address ranges a sandbox may dial directly. This is the
+	// only setting that opens private space, and it opens exactly what it
+	// names: listing 10.8.0.0/24 does not lift the block on the rest of
+	// 10.0.0.0/8, and no entry may cover the cloud metadata service without
+	// naming its address outright.
+	AllowCIDRs []string `yaml:"allow_cidrs,omitempty"`
+
+	// AllowPorts bounds every allowed destination. Required whenever
+	// AllowCIDRs or AllowPublicInternet is set: an allow rule with no port
+	// restriction is a hole, and defaulting to 80 and 443 would be this file
+	// guessing at a security boundary.
+	AllowPorts []int `yaml:"allow_ports,omitempty"`
+
+	// AllowPublicInternet opens every address outside the blocked ranges on
+	// AllowPorts. It is what a hostname allowlist necessarily becomes at
+	// layer 3, and it is spelled out here rather than inferred so that
+	// widening a sandbox to the whole Internet is written down.
+	AllowPublicInternet bool `yaml:"allow_public_internet,omitempty"`
+
+	// Resolvers are DNS servers a sandbox may query directly, as address
+	// literals ("10.7.0.10" or "10.7.0.10:53"). Without one, a direct-egress
+	// filter drops UDP/53 and every name lookup fails — which is the single
+	// most common way this section gets misconfigured.
+	Resolvers []string `yaml:"resolvers,omitempty"`
+
+	// Broker is the egress proxy endpoint, as an address:port literal. Only
+	// needed alongside direct egress; on an internal network the broker is
+	// reachable because it shares the bridge.
+	//
+	// Names are not accepted. A packet filter matches addresses, so a name
+	// here would be resolved once at configuration time and pinned silently,
+	// which is the DNS rebinding hazard the broker's own resolve-once
+	// discipline exists to prevent.
+	Broker string `yaml:"broker,omitempty"`
+
+	// HostPatterns records the L7 allowlist this filter cannot enforce, so
+	// that the rendered ruleset and the preflight report can say which
+	// allowlist was widened into "the public Internet".
+	HostPatterns []string `yaml:"host_patterns,omitempty"`
 }
 
 // KubernetesExecutorConfig configures the ephemeral-Pod executor
@@ -587,6 +664,76 @@ type KubernetesExecutorConfig struct {
 	// MaxConcurrent caps simultaneously-running Pods. Zero means unbounded;
 	// the namespace's ResourceQuota is the real ceiling.
 	MaxConcurrent int `yaml:"max_concurrent,omitempty"`
+
+	// EgressFilter enforces an egress allowlist with a NetworkPolicy per Pod.
+	// Absent means no policy is created and Pods keep the cluster's default
+	// egress, which is what an upgrade must not change under an operator.
+	EgressFilter KubernetesEgressFilterConfig `yaml:"egress_filter,omitempty"`
+}
+
+// KubernetesEgressFilterConfig turns a Pod's cluster egress into an enforced
+// allowlist.
+//
+// It exists because the label was not enough. This executor has always set
+// cloop.dev/egress on its Pods to say whether the workload was supposed to
+// reach the network, and has always admitted that the label enforced nothing: a
+// Pod joins the pod network, and no field in a Pod spec takes that away.
+// Everything a sandbox could reach — other tenants' Pods, the node's kubelet,
+// an internal service that trusts its network position, the Internet — it
+// reached, whatever .cloop/sandbox.yaml asked for.
+//
+// The section is off by default and that default is load-bearing: an existing
+// deployment upgrading into this code must not have its workloads firewalled by
+// a field nobody set, and a security control that arrives switched on without
+// being asked for is one operators learn to switch off. Enabling it is a
+// decision, made once, in a file.
+//
+// The allowlist compiles to the same pkg/netfilter policy the container
+// executor's nftables ruleset compiles from, so "allowed" means the same thing
+// on both backends rather than being two rule sets that agree until they do
+// not. What it cannot promise is enforcement: a NetworkPolicy is applied by the
+// cluster's CNI, and `cloop executor test` warns that cloop cannot tell from
+// the API whether yours implements one.
+type KubernetesEgressFilterConfig struct {
+	// Enabled creates a NetworkPolicy alongside every Pod. Off means no policy
+	// object at all, not an empty one — an empty one denies everything.
+	Enabled bool `yaml:"enabled,omitempty"`
+
+	// CIDRs are the destination ranges a workload may reach ("10.8.0.0/24").
+	//
+	// They are also the only thing that waives the hard-block set — loopback,
+	// RFC1918, link-local, CGNAT, multicast and the cloud metadata endpoint —
+	// exactly as in the egress proxy: naming a private range explicitly buys
+	// that range and nothing else. A /0 is refused; see allow_public_internet,
+	// which says the same thing and attaches a warning to it.
+	CIDRs []string `yaml:"cidrs,omitempty"`
+
+	// Ports bound every destination allow, as destination port numbers.
+	// Naming destinations without ports is an error rather than a guess: an
+	// allow rule with no port restriction is a hole, and "they probably meant
+	// 443" is not a decision a firewall compiler should make on an operator's
+	// behalf.
+	Ports []int `yaml:"ports,omitempty"`
+
+	// AllowPublicInternet opens every address outside the block set, on Ports.
+	//
+	// It is the only way to express a hostname allowlist at layer 3, because
+	// hostnames do not exist there — "*.github.com" resolves to addresses a
+	// packet filter cannot enumerate. Setting it states that the sandbox may
+	// dial the Internet directly; the narrow alternative is to route it through
+	// the egress broker, which enforces hosts where they can be enforced.
+	AllowPublicInternet bool `yaml:"allow_public_internet,omitempty"`
+
+	// Resolvers are DNS servers the sandbox may query directly, as
+	// "10.96.0.10" or "10.96.0.10:53". Needed only when the workload resolves
+	// somewhere other than cluster DNS.
+	Resolvers []string `yaml:"resolvers,omitempty"`
+
+	// AllowClusterDNS opens UDP and TCP 53 to the kube-system namespace.
+	// Unset means true, which is why it is a pointer: a default-deny egress
+	// policy without it breaks name resolution, and that failure reads to
+	// everyone involved as "the network is broken" rather than "DNS is denied".
+	AllowClusterDNS *bool `yaml:"allow_cluster_dns,omitempty"`
 }
 
 // BackupConfig configures hot backups of the SQLite state database.

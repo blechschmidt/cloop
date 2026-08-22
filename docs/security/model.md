@@ -128,6 +128,11 @@ denylist rejects operator `ExtraArgs` such as `--privileged`, `--net=host`,
 `--cap-add`, `--device`, `--pid=host` or a mounted runtime socket
 (`deniedExtraArgs` in `pkg/executor/container/argv.go`).
 
+One control is not in the argv, because it cannot be: what a sandbox with a
+network may *reach* is a kernel ruleset on the host, installed on the sandbox
+bridge before any container can join it. See
+[the network the sandbox sits on](#the-network-the-sandbox-sits-on).
+
 ### ④ Hub ↔ Kubernetes cluster
 
 Credentials arrive as a [brokered kubeconfig lease](../guides/secrets.md#kubeconfig)
@@ -207,6 +212,109 @@ There is no row for this in the [guarantee → test table](#the-guarantee--test-
 and that is not an oversight: nothing in `tests/security/` proves a VM booted,
 and a test that asserted the flag against the name it was derived from would
 assert only that the matcher matches.
+
+### The network the sandbox sits on
+
+Boundaries ③ and ④ end at a network as well as at a kernel. Two things guard
+it, they answer different questions, and neither substitutes for the other.
+
+**The egress broker enforces layer 7.** `pkg/egressbroker` is an authenticated
+forward proxy, and everything in the
+[egress lease](../guides/secrets.md#egress-leases) is checked there: hosts,
+ports, HTTP methods, per-session byte quotas, TTL mid-tunnel, resolve-once DNS
+pinning, and an SSRF block set that refuses loopback, RFC1918, CGNAT,
+link-local — where the cloud metadata service lives — multicast and the
+unspecified address *even under `--hosts '*'`*. Every one of those checks is
+real. Every one of them applies only to traffic the workload chose to hand the
+proxy. `$HTTP_PROXY` is a convention, not a boundary: a harness that opens a
+raw socket, runs `curl --noproxy '*'`, resolves over DoH, or speaks SSH, QUIC
+or anything that is not HTTP was covered by none of it. The container driver's
+own package comment used to say so — *"it does not filter egress"* — and the
+Kubernetes driver said the same about its `cloop.dev/egress` label.
+
+**The IP-layer filter enforces layer 3.** `pkg/netfilter` compiles the same
+authorisation into an ordered, first-match-wins rule list ending in an implicit
+drop, and renders that one policy as an nftables ruleset on the sandbox bridge
+(container driver) or as a `NetworkPolicy` (Kubernetes driver). The default
+verdict is not a field: there is no authorisation the compiler can be handed
+that would justify a firewall an operator could misconfigure into allowing
+everything. It binds a workload that does not cooperate, because it is the
+kernel rather than an environment variable, and it covers ICMP and everything
+else that is neither TCP nor UDP, because an exfiltration channel over ICMP is
+still an exfiltration channel. Drops are silent rather than rejected: a sandbox
+probing for reachable networks learns nothing from a timeout, whereas an ICMP
+unreachable confirms something is listening.
+
+The filter reproduces the proxy's block set prefix for prefix, and reproduces
+its waiver rule as *ordering* — the allow for an explicitly granted CIDR is
+emitted ahead of the drop that would otherwise cover it, so a grant buys that
+prefix on those ports and nothing else. The two implementations have to be
+separate code (one produces prefixes for a packet filter, the other evaluates
+predicates against one address), so they are checked against each other
+address by address, in both directions, by
+[`pkg/netfilter/agreement_test.go`](../../pkg/netfilter/agreement_test.go).
+
+| Question a grant answers | Broker (L7) | IP filter (L3) |
+| --- | --- | --- |
+| Which hosts? | enforced | **not expressible** — becomes every public address |
+| Which ports? | enforced | enforced |
+| Which address ranges? | enforced | enforced |
+| Which HTTP methods? | enforced, for plain HTTP | not expressible |
+| How many bytes, for how long? | enforced mid-stream | not expressible |
+| SSH, QUIC, DNS, a raw socket | invisible to it | enforced |
+| A workload that ignores `$HTTP_PROXY` | not bound by it | bound |
+
+**A hostname allowlist cannot be enforced at layer 3.** This is the caveat that
+matters most, so it comes before the good news rather than after it.
+`*.github.com` is a name; names do not exist at layer 3, where a packet carries
+an address. A policy compiled for *direct* egress from a host-pattern grant is
+therefore **"every public address on these ports"**, and no arrangement of
+rules makes it narrower. What the compiler can do is refuse to arrive there
+quietly, and it does: opening direct egress for a host-pattern grant requires
+the caller to set `AllowPublicInternet` explicitly, and the compiled policy
+carries a warning naming the patterns and what they became. That warning is
+rendered into the nft script as a comment, into the NetworkPolicy as an
+annotation, into `cloop egress firewall` output, and into `cloop executor test`
+as a separate `egress-scope` finding — separate because burying it inside an
+`ok` line would hide the finding an operator most needs to see.
+
+**So the brokered posture is the recommended one**, and not for tidiness: it is
+the single configuration where the two layers describe the same set. With
+[`egress_filter`](../reference/configuration.md#ip-layer-egress-filtering)
+in `internal` mode the sandbox joins a runtime network the runtime installs no
+route off, the egress proxy shares that network, and the proxy is the only
+address on it the sandbox can reach. The host allowlist is then enforced by the
+only reachable destination. It needs no `nft`, no `CAP_NET_ADMIN` and no host
+privileges at all, and `TestBrokeredPolicyIsNarrowerThanAnyGrant` is the
+argument stated as a test: whatever the grant's hosts say, a brokered policy
+opens one endpoint.
+
+**One deliberate disagreement with the proxy.** The proxy normalises the IPv6
+encodings that carry an IPv4 address and judges the address inside. A packet
+filter cannot do arithmetic on an embedded address, so the filter drops those
+prefixes whole — NAT64 (`64:ff9b::/96`, `64:ff9b:1::/48`), 6to4 (`2002::/16`),
+IPv4-translatable (`::ffff:0:0:0/96`) and the deprecated IPv4-compatible
+(`::/96`). That is *stricter* than the proxy: `64:ff9b::8.8.8.8` is a public
+address the proxy allows and the filter drops. Strictness is the safe direction
+here, and no sandbox needs to address a translation prefix itself — that is a
+gateway's job. The agreement test permits exactly this class of disagreement
+and fails on any other, in either direction. (The v4-*mapped* form,
+`::ffff:127.0.0.1`, is a different thing: both layers unwrap it and judge
+`127.0.0.1`.)
+
+Two limits of the layer-3 filter, stated rather than discovered:
+
+- **The container driver's filtered network is per executor, not per task.**
+  The network name is derived from the executor id, so every sandbox that
+  executor starts joins the same bridge under the same ruleset. Deriving it
+  rather than accepting one is deliberate — it stops two differently-filtered
+  executors from sharing a bridge, where the second apply would silently
+  replace the first's rules — but it does mean the policy is executor-wide.
+- **A `NetworkPolicy` is enforced by the cluster's CNI, not by cloop.** flannel
+  does not implement one and the API server stores the object regardless, so a
+  cluster with the wrong CNI looks identical to a working one from the hub's
+  side. `cloop executor test` reports this as a standing `egress-enforcement`
+  warning rather than claiming an enforcement it cannot check.
 
 ---
 
@@ -966,6 +1074,37 @@ a reconstruction, so this row set spans three packages.
 | Operator `ExtraArgs` cannot re-open the sandbox | `TestContainerRejectsSandboxEscapingExtraArgs` |
 | Secret values never enter the argv — they are forwarded as bare `--env NAME` | `TestContainerSecretsNeverEnterArgv` |
 
+### Sandbox egress filtering — `netfilter_test.go` and the package suites
+
+The properties in [the network section](#the-network-the-sandbox-sits-on),
+driven through the real compiler and the real renderers so they hold wherever
+the policy is enforced. Two rows are the shape of a bug that was actually
+present; the [threat model](threat-model.md#two-vulnerabilities-found-while-building-this)
+describes both.
+
+| Guarantee | Test |
+| --- | --- |
+| No authorisation cloop can compile reaches blocked space unless a CIDR names it | `TestNoCompiledPolicyReachesBlockedSpaceByAccident` |
+| The waiver is narrow — an explicit CIDR opens that prefix on those ports and nothing else | `TestOnlyAnExplicitCIDRWaivesTheBlockSet` |
+| A grant that would remove the block set wholesale (`--cidrs 0.0.0.0/0`, `169.254.0.0/16`) is refused by the broker **and** by the compiler | `TestGrantsThatWouldRemoveTheBlockSetAreRefused` |
+| The host-side ruleset covers destinations that belong to the host itself, not only forwarded ones | `TestHostSideFilterCoversHostBoundServices` |
+| nftables and `NetworkPolicy` refuse the same destinations — one compiler, two renderers | `TestBothBackendsRefuseTheSameDestinations` |
+| A container egress filter cannot be configured into a hole: a `/0`, destinations with no ports, an enabled filter allowing nothing, a broker named by hostname | `TestContainerEgressFilterCannotBeEnabledIntoAHole` |
+| `.cloop/sandbox.yaml` cannot reach the filter — no repo-committed field turns it off | `TestSandboxSpecCannotTurnTheFilterOff` |
+| The packet filter and the proxy agree on every named boundary of every block-set range, including v4-in-v6 spellings | `pkg/netfilter: TestFilterAgreesWithBrokerOnNamedAddresses` |
+| …and on a fixed-seed 40 000-address sweep, with the IPv6 translation prefixes as the only permitted disagreement | `pkg/netfilter: TestFilterAgreesWithBrokerOnASweep` |
+| An explicit CIDR waives the same space in both implementations | `pkg/netfilter: TestWaiverAgrees` |
+| Both implementations allow the same ports, sampled across the whole port range | `pkg/netfilter: TestPortAgreement` |
+| A brokered policy is narrower than any grant: whatever the hosts say, one endpoint is reachable | `pkg/netfilter: TestBrokeredPolicyIsNarrowerThanAnyGrant` |
+| The host-side ruleset filters the `forward` **and** the `input` hook, with the same rules on both | `pkg/netfilter: TestBridgeFormFiltersBothHooks` |
+| A wide CIDR cannot bypass the block set at grant time | `pkg/egressbroker: TestWideCIDRsCannotBypassTheBlockSet` |
+| The metadata endpoint stays blocked under every grant the broker *does* accept | `pkg/egressbroker: TestMetadataStaysBlockedUnderAnAcceptedGrant` |
+| A rule comment built from operator input cannot escape the string and inject a rule into the host's firewall | `pkg/netfilter: TestCommentInjectionCannotEscapeTheString` |
+
+What none of this checks is whether the kernel or the CNI honours what was
+installed. `nft -f` either commits the whole ruleset or fails, so the container
+path is verifiable from the exit status; a `NetworkPolicy` is not.
+
 ### Per-project sandbox specs — `sandbox_test.go`
 
 [`.cloop/sandbox.yaml`](../reference/sandbox.md) is the input with the least
@@ -1193,8 +1332,25 @@ narrower credential cannot be widened by its holder. `egress_proxy` is different
 the allowlist travels to the executor and the enforcement point is the network
 policy there (`pkg/secretbroker/model.go`). The
 [egress broker's proxy](../guides/secrets.md#egress-leases) does enforce it for
-traffic that goes through it; a workload with an unrelated route out is not
-covered by that grant.
+traffic that goes through it; a workload with an unrelated route out is bound
+only by whatever the executor's
+[IP-layer filter](#the-network-the-sandbox-sits-on) allows, and by nothing at
+all if that filter is not configured.
+
+**A host allowlist cannot be enforced by a packet filter.** `--hosts
+'*.github.com'` compiles to *"every public address on port 443"* at layer 3,
+because layer 3 has no hostnames. cloop refuses to reach that quietly — the
+widening is opt-in and every rendering of the policy carries a warning naming
+what it widened — but it is a fact about IP, not a gap that a later release
+closes. Route the sandbox through the broker if the host allowlist is the
+control you are relying on.
+
+**The egress filter is off unless configured.** Both `egress_filter` sections
+default to disabled, so an upgrade never firewalls a running deployment. An
+unconfigured hub with a networked executor has exactly the unrestricted
+outbound access it had before the filter existed. Preflight says so as a
+warning rather than staying silent, because a driver that says nothing about
+egress reads as one that constrains it.
 
 **`github_pat` is enforced at the point of use, not by construction.** GitHub has
 no API to narrow an already-issued PAT, so the broker ships a git credential

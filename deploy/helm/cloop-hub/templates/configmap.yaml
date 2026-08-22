@@ -74,6 +74,30 @@ data:
         ephemeral_storage_limit: {{ .Values.executor.kubernetes.ephemeralStorageLimit | quote }}
         active_deadline_seconds: {{ .Values.executor.kubernetes.activeDeadlineSeconds }}
         max_concurrent: {{ .Values.executor.kubernetes.maxConcurrent }}
+      {{- if .Values.executor.kubernetes.egressFilter.enabled }}
+        # One NetworkPolicy per Pod, created before the Pod and deleted with it,
+        # selecting that Pod alone. Off unless asked for: turning it on without
+        # being asked would firewall an existing deployment's workloads on an
+        # upgrade. The Role above carries the networkpolicies rule it needs.
+        #
+        # A NetworkPolicy is applied by the cluster's CNI. If yours does not
+        # implement one (flannel does not), the object is stored and enforces
+        # nothing — `cloop executor test kubernetes` says so, because cloop
+        # cannot tell from the API which CNI is running.
+        egress_filter:
+          enabled: true
+          allow_public_internet: {{ .Values.executor.kubernetes.egressFilter.allowPublicInternet }}
+          allow_cluster_dns: {{ .Values.executor.kubernetes.egressFilter.allowClusterDNS }}
+          {{- with .Values.executor.kubernetes.egressFilter.cidrs }}
+          cidrs: {{ toJson . }}
+          {{- end }}
+          {{- with .Values.executor.kubernetes.egressFilter.ports }}
+          ports: {{ toJson . }}
+          {{- end }}
+          {{- with .Values.executor.kubernetes.egressFilter.resolvers }}
+          resolvers: {{ toJson . }}
+          {{- end }}
+      {{- end }}
     {{- end }}
 
     # Which images a project's own .cloop/sandbox.yaml may name. Deny by

@@ -599,6 +599,88 @@ do. The usual causes, in order of frequency:
 Do **not** set `allow_host_process: true` to clear this. That does make the
 probe pass, by removing the isolation boundary the gate exists to enforce.
 
+**A sandbox cannot reach something it should.**
+Work down the layers; each step rules one out.
+
+1. **Ask the filter.** `--check` reports the verdict and the rule that decided
+   it, and puts the verdict in the exit status (0 allow, 1 drop) so it composes
+   into a script. Give it the *address*, not a name — a packet filter matches
+   addresses:
+
+   ```console
+   $ cloop egress firewall --cidrs 10.8.0.0/24 --ports 6443 --check 10.8.0.5:22
+   DROP  10.8.0.5 10.8.0.5:22/tcp — private (RFC1918/ULA)
+   ```
+
+   Reading the reason matters: `private (RFC1918/ULA)` means the address was
+   inside the granted range but the *port* was not, so the waiver did not apply
+   and the block set caught it. `default deny` means nothing matched at all.
+   Use the same flags the executor is configured with, or `--grant <id>` to
+   compile a stored grant. See
+   [`cloop egress firewall`](../reference/commands.md#cloop-egress-firewall).
+
+2. **Check that DNS is allowed — this is the most common cause by a wide
+   margin.** A `filtered` policy with no `resolvers` drops UDP/53 along with
+   everything else it does not name, and the symptom is not "DNS is denied", it
+   is every connection failing at name resolution, which reads exactly like a
+   network outage. The compiler warns about it at compile time:
+
+   ```console
+   $ cloop egress firewall --internet --ports 443 --format rules | grep -m1 resolver
+   warning: no resolver is allowed, so DNS will fail: name lookups leave the sandbox on UDP/53 and this policy drops them. Pass the sandbox's resolvers, or use the broker, which resolves on its behalf.
+   ```
+
+   The fix is to name the sandbox's resolvers in
+   `executors.container.egress_filter.resolvers`, or to route the sandbox
+   through the broker, which resolves on its behalf. On Kubernetes, check that
+   `allow_cluster_dns` has not been set to `false`. Resolvers are opened on TCP
+   as well as UDP, because a truncated answer retries over TCP and a
+   UDP-only resolver fails on large responses in a way that looks like a
+   different bug.
+
+3. **Look at the counters on the host.** Every rule carries one, so the ruleset
+   shows what is actually being dropped rather than what should be:
+
+   ```bash
+   nft list table inet cloop_sbx_<executor-id>
+   ```
+
+   The table name is `cloop_sbx_` plus the executor id lower-cased, with every
+   character outside `[a-z0-9]` replaced by `_`. A non-zero counter on a `drop`
+   rule names the destination range and the reason; a zero counter on the
+   `default deny` line means the traffic never arrived, which points upstream —
+   at routing, at the image, or at the workload not trying.
+
+   There is **no table for an `internal: true` filter**, and that is not a
+   fault: that form installs no rules at all, because the runtime puts no route
+   off the bridge in the first place. If `nft list table` says the table does
+   not exist, check which form the executor is configured with before
+   concluding the filter failed to install — and note that a failed install
+   fails the `Start`, so a running sandbox is never one whose rules went
+   missing.
+
+4. **Re-run preflight.** `cloop executor test <executor-id>` is the command
+   that surfaces the driver's `egress` finding — what the filter will enforce,
+   or that it is not filtering at all — plus a separate `egress-scope` finding
+   for anything the filter is wider than its grant. Exit 2 means preflight
+   found a fatal problem and no workload was attempted; the usual ones are
+   `nft(8)` missing or the control plane lacking `CAP_NET_ADMIN`, both `fail`,
+   both with the fix in the message, and both avoidable by switching the filter
+   to `internal: true`, which needs neither. `cloop hub doctor` does not repeat
+   these findings — its `executors` group reports reconciliation, the
+   strict-mode gate and a liveness probe.
+
+5. **On Kubernetes, confirm the CNI implements NetworkPolicy.** cloop creates
+   the object and the API server stores it whether or not anything enforces it,
+   so a cluster running flannel looks identical to a working one from the hub's
+   side — and the failure is the opposite of this playbook's: traffic that
+   should be *blocked* is not. `kubectl get netpol -n <ns> -o yaml` shows what
+   was created; only the CNI's own documentation says whether it is honoured.
+
+If the destination is one the sandbox should reach through the **proxy** rather
+than directly, this is the wrong tool: `cloop egress test <url>` asks the
+layer-7 question, and a host allowlist is only ever enforced there.
+
 **"database is locked".**
 WAL and `busy_timeout` are already configured, so this points at a second writer.
 Check for a stray `cloop` process on the same `.cloop` directory, or a shared

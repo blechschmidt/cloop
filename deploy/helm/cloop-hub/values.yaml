@@ -297,6 +297,47 @@ executor:
     # 0 is unbounded. Set it to whatever your namespace quota can absorb.
     maxConcurrent: 0
 
+    # Enforce an egress allowlist with a NetworkPolicy per workload Pod.
+    #
+    # Off by default, and the default is deliberate twice over: enabling it on
+    # an upgrade would firewall workloads nobody asked to firewall, and an empty
+    # allowlist denies everything — including whatever your harness clones from.
+    # Turning it on is a decision about what the sandbox may reach, so it wants
+    # cidrs/ports or allowPublicInternet set alongside it.
+    #
+    # It is enforced by the cluster's CNI, not by cloop. flannel does not
+    # implement NetworkPolicy; Calico, Cilium, Antrea and most managed CNIs do.
+    # `cloop executor test kubernetes` warns about this, because which CNI is
+    # running is a fact about your cluster that cloop cannot read from the API.
+    egressFilter:
+      enabled: false
+
+      # Destination ranges the sandbox may reach. These are also the only thing
+      # that waives the hard-block set (RFC1918, link-local, CGNAT, multicast,
+      # 169.254.169.254): naming a private range explicitly buys that range and
+      # nothing else. A /0 is refused — use allowPublicInternet.
+      cidrs: []
+      #  - 10.8.0.0/24
+
+      # Destination ports every allow above is bounded by. Naming destinations
+      # without ports is a config error here, not a wildcard.
+      ports: []
+      #  - 443
+
+      # Open every address outside the block set, on the ports above. This is
+      # what a hostname allowlist becomes at layer 3, because hostnames do not
+      # exist there — set it knowing that "*.github.com" means "the Internet".
+      allowPublicInternet: false
+
+      # DNS servers the sandbox may query directly ("10.96.0.10", or with a
+      # port). Only needed when the workload does not use cluster DNS.
+      resolvers: []
+
+      # UDP and TCP 53 to kube-system. Leave this on: without it a default-deny
+      # egress policy breaks name resolution, and the failure reads as "the
+      # network is broken" rather than "DNS is denied".
+      allowClusterDNS: true
+
     # Install the ServiceAccount, Role and RoleBinding. Turn this off only if
     # your platform manages RBAC separately — the executor still needs the
     # same verbs, granted by someone.

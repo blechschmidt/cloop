@@ -296,6 +296,166 @@ rejection naming the class it asked for.
 
 ---
 
+## Sandbox network isolation
+
+Two backends run workloads that have a network, and until recently neither
+constrained what that network reached. The container driver's package comment
+said *"it does not filter egress"* and meant it: `Network` was either `none` —
+no interfaces at all — or a runtime network with unrestricted outbound access.
+The Kubernetes driver set a `cloop.dev/egress` label and admitted beside it that
+the label was documentation, because a Pod joins the pod network and no field in
+a Pod spec takes that away. The
+[egress broker](../reference/configuration.md#scoped-network-egress) bound a
+workload that honoured `$HTTP_PROXY` and nothing else.
+
+`pkg/netfilter` closes that with **one compiler and several renderers**.
+`Compile` turns an authorisation into an ordered, first-match-wins `Policy`
+ending in an implicit drop; the backends render that same `Policy` as an
+`nft(8)` script or as a Kubernetes `NetworkPolicy`. `Evaluate` answers "what
+would this policy do to that packet" with no backend at all, which is what lets
+a test compare the filter against the proxy address-by-address rather than
+trusting that two hand-written rule sets agree. The package depends on nothing
+but the standard library, so every driver can reach it without dragging the
+broker's storage and crypto along.
+
+### `Capabilities.FilteredEgress`
+
+```go
+NetworkEgress  bool // can workloads reach the network at all?
+FilteredEgress bool // is what they reach bounded by a policy cloop installs?
+```
+
+They are two fields because they answer two questions and conflating them loses
+both. `NetworkEgress` says whether the workload has an interface, which is what
+[placement](#placement) needs — `RequireNetworkEgress` and the `network_egress`
+rejection reason read it. `FilteredEgress` says whether what it reaches through
+that interface is constrained, which is what an operator auditing a fleet needs.
+A sandbox can have the first without the second, and that combination is exactly
+the thing worth being able to find.
+
+`false` does not mean "nothing filters this". A cluster may run its own
+`NetworkPolicy` and an operator may firewall the host; it means *cloop* is not
+the thing doing it and will not claim credit for it. Both drivers report it from
+their `egress_filter.enabled`.
+
+What it does **not** report is whether the filter is effective. On Kubernetes a
+`NetworkPolicy` is applied by the CNI, and whether the cluster runs one that
+implements it is not something the API answers — so the field says what cloop
+installed, and the preflight `egress` finding carries the caveat. Nothing in
+placement requires the field; it is a report, not a constraint.
+
+### The container driver: two mechanisms
+
+Which one applies is decided by the *shape* of the authorisation rather than by
+a separate switch. An `egress_filter` that names only `internal` gets the first;
+one that names CIDRs, resolvers, a broker endpoint or the public Internet gets
+both.
+
+**An `--internal` runtime network.** The runtime installs no route off the
+bridge, so nothing on it reaches the Internet at all. Put the egress broker on
+the same network and it becomes the only way out — which is what turns the
+broker's host allowlist from advisory into enforceable. This needs no
+privileges, no `nft` and no `CAP_NET_ADMIN`, and it is the strongest option
+because the layer-3 filter and the layer-7 allowlist then describe the same set.
+
+**A host-side nftables ruleset scoped to the sandbox bridge**, for the case
+where the authorisation names addresses the sandbox must dial directly — a
+Kubernetes API server, an internal registry. The table is `inet` rather than a
+separate `ip` and `ip6` pair, because two families mean two rulesets that can
+drift and a v6 ruleset an operator forgot is the whole firewall bypassed by a
+AAAA record. The script is fed to `nft -f -` on stdin, which nft commits as one
+transaction: either the sandbox is filtered by the entire policy or the start
+fails. `add table` / `delete table` / `table` makes a re-apply replace rather
+than accumulate, which is the property a reconcile loop needs. Teardown of a
+table that is already gone is success.
+
+Two things about the bridge form are worth knowing before reading one:
+
+- **Both the `forward` and the `input` hook carry the rules.** The routing
+  decision picks the hook — destinations the host forwards on take `forward`,
+  destinations belonging to the host itself take `input` — so a ruleset with
+  only a `forward` chain filters the Internet and leaves the host wide open.
+  See the [threat model](../security/threat-model.md#two-vulnerabilities-found-while-building-this).
+- **The chain policy is `accept`, not `drop`.** Base chains on the same hook all
+  run and a drop in any of them kills the packet, so a `policy drop` chain here
+  would take down every other container on the host. Each chain instead returns
+  immediately for traffic whose `iifname` is not this sandbox's bridge, and ends
+  with an explicit `drop` that only packets from that bridge can reach.
+
+**Why the filter is installed host-side rather than inside the namespace.** A
+workload that starts before its filter exists has a window of unrestricted
+egress. The obvious approach — start the container, find its PID, `nsenter` into
+its namespace, install rules — has no ordering guarantee at all. Filtering on
+the host side removes the window structurally: the bridge exists from the moment
+the network is created, and network creation is strictly before any container
+can join it, so the rules are always in place first. `installFirewall` runs
+before the image is even resolved, and its failure fails the `Start` — producing
+a working sandbox with none of the requested filtering, silently, is worse than
+refusing to run.
+
+The network is derived from the executor id (`cloop-sbx-<id>`), not accepted
+from config, which stops two differently-filtered executors from pointing at one
+bridge where the second apply would silently replace the first's rules. It also
+means the policy is per executor: every sandbox that executor starts joins the
+same bridge under the same ruleset. Enabling the filter makes the driver stop
+using the configured `Network`, because an operator-named network could be
+shared with workloads this executor does not manage and a default-deny ruleset
+on their bridge would firewall them too.
+
+### The Kubernetes driver: a NetworkPolicy per Pod
+
+`RenderNetworkPolicy` translates the same compiled `Policy`, and the translation
+is not mechanical, because the two models differ where it matters. A `Policy` is
+ordered and has both verdicts; a `NetworkPolicy` is an unordered union of allows
+with no deny rule at all. So the drops become `ipBlock.except` entries and the
+ordering becomes set arithmetic: "allow the public Internet" becomes `0.0.0.0/0`
+with every blocked prefix excepted, and "a granted CIDR waives the block that
+covers it" becomes a second peer for that CIDR — peers are a union, so the
+granted prefix is allowed even though the Internet peer excepts the range
+containing it. Peers are grouped by port signature rather than emitted one per
+rule, because within a single egress rule peers and ports form a cross product
+and a granted CIDR on 6443 alongside the Internet on 443 would otherwise each
+acquire the other's ports.
+
+Three details follow from the object model rather than from the policy:
+
+- The `podSelector` must match exactly the Pod it governs — an empty selector in
+  Kubernetes means *every* Pod in the namespace — so the driver selects by the
+  unique handle-id label and the renderer refuses an empty selector outright.
+- `policyTypes` names `Ingress` with no ingress rules. Omitting the type would
+  leave inbound ungoverned; naming it with no rules is what denies it.
+- Cluster DNS is opened as a `namespaceSelector` on `kube-system`, not as an
+  address. The Service ClusterIP is in private space and which side of the
+  policy the CNI applies its DNAT on varies by CNI, so the selector is the form
+  that works everywhere. It is on by default, because a default-deny egress
+  policy without it breaks name resolution and that failure reads as "the
+  network is broken" rather than "DNS is denied".
+
+The namespace-local rules — the sandbox's own loopback — are dropped by this
+renderer rather than emitted as a meaningless `127.0.0.0/8` peer, since a
+`NetworkPolicy` never sees traffic that does not reach a wire.
+
+What this renderer cannot promise is enforcement. A `NetworkPolicy` is inert
+unless the cluster runs a CNI that implements it; flannel does not, and the API
+server accepts the object regardless. That is a fact about the cluster which
+cloop cannot read out of the API, so it is a standing `egress-enforcement`
+preflight warning rather than a claim. Managing the objects also needs
+`networkpolicies: [create delete list]` on the executor's Role, and preflight
+lists them to prove the leased identity really has it — a `403` there is a
+`fail`, because every `Start` will refuse rather than run a Pod with unfiltered
+egress.
+
+### Seeing what a policy compiles to
+
+`cloop egress firewall` renders the policy without touching a host, in the same
+text the driver installs — see
+[the command reference](../reference/commands.md#cloop-egress-firewall). An
+operator can diff it against `nft list table inet cloop_sbx_<id>` on the host or
+`kubectl get netpol -o yaml` in a cluster, and `--check <addr:port>` answers the
+one-address question with the verdict in the exit status.
+
+---
+
 ## Registry and binding
 
 `pkg/executor/registry.go` answers one question: *which executor runs work for

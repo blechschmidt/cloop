@@ -1,9 +1,10 @@
 package kubernetes
 
-// client.go is a hand-rolled Kubernetes API client covering exactly the eight
+// client.go is a hand-rolled Kubernetes API client covering exactly the eleven
 // calls this driver makes: create a Pod, get a Pod, watch a Pod, follow its
-// logs, delete it, list Pods by label for garbage collection, and create and
-// delete the one Secret a workspace fetch's credential travels in.
+// logs, delete it, list Pods by label for garbage collection, create and
+// delete the one Secret a workspace fetch's credential travels in, and create,
+// list and delete the NetworkPolicy that confines a Pod's egress.
 //
 // Not using client-go is a deliberate size decision. client-go plus its
 // api/apimachinery dependencies add roughly 40 MB to a binary that operators
@@ -31,6 +32,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/blechschmidt/cloop/pkg/netfilter"
 )
 
 const (
@@ -241,6 +244,12 @@ func (e *APIError) hint() string {
 		return "the kubeconfig's identity may not manage Secrets in the target namespace, which a git " +
 			"workspace needs: add `- apiGroups: [\"\"] resources: [\"secrets\"] verbs: [\"create\", \"delete\"]` " +
 			"to its Role. create and delete only — the driver never reads a Secret back"
+	case e.Code == http.StatusForbidden && strings.Contains(e.Path, "/networkpolicies"):
+		return "the kubeconfig's identity may not manage NetworkPolicies in the target namespace, which " +
+			"the egress filter needs: add `- apiGroups: [\"networking.k8s.io\"] resources: " +
+			"[\"networkpolicies\"] verbs: [\"create\", \"delete\", \"list\"]` to its Role. Without it the " +
+			"driver cannot enforce the egress allowlist, so it refuses to start the Pod rather than " +
+			"running it unfiltered"
 	case e.Code == http.StatusForbidden:
 		return "the kubeconfig's identity lacks RBAC for this call. It needs a Role in the target " +
 			"namespace granting pods: create, get, list, watch, delete; pods/log: get; and " +
@@ -467,6 +476,102 @@ func (c *client) deleteSecret(ctx context.Context, namespace, name string) error
 		PropagationPolicy: "Background",
 	}
 	err := c.doJSON(ctx, http.MethodDelete, secretPath(namespace, name), nil, body, nil)
+	if ae, ok := asAPIError(err); ok && ae.NotFound() {
+		return nil
+	}
+	return err
+}
+
+// --- network policies -------------------------------------------------
+//
+// The NetworkPolicy is the only object this driver touches outside the core
+// group, so it needs a path prefix of its own: networking.k8s.io does not live
+// under /api/v1, and a path built from apiPrefix would 404 in a way that reads
+// like a missing namespace rather than a wrong URL.
+//
+// Three verbs, matching the Secret rule's discipline: create, delete and list.
+// There is no get — the driver already knows what it wrote — and above all no
+// update or patch. A policy is written once, before the Pod it governs exists,
+// and an identity that could rewrite it afterwards could widen a running
+// sandbox's egress, which is exactly the authority a firewall must not hand
+// out. list is here because the orphan sweep has to find the policies a killed
+// control plane left behind, the same way it finds their Pods.
+
+// networkingAPIPrefix is the group NetworkPolicy objects live under.
+const networkingAPIPrefix = "/apis/networking.k8s.io/v1"
+
+func networkPoliciesPath(namespace string) string {
+	return networkingAPIPrefix + "/namespaces/" + url.PathEscape(namespace) + "/networkpolicies"
+}
+
+func networkPolicyPath(namespace, name string) string {
+	return networkPoliciesPath(namespace) + "/" + url.PathEscape(name)
+}
+
+// networkPolicyList is what a list decodes into.
+//
+// Only metadata is modelled, and deliberately not netfilter's own
+// NetworkPolicy: the sweep needs the name, the labels and the
+// creationTimestamp that protects a policy created seconds ago by a Start still
+// in flight, and none of those are in the rendering type. Decoding the spec as
+// well would mean maintaining a reader for peer shapes this driver never
+// inspects.
+type networkPolicyList struct {
+	Metadata struct {
+		ResourceVersion string `json:"resourceVersion,omitempty"`
+	} `json:"metadata"`
+	Items []networkPolicyItem `json:"items"`
+}
+
+// networkPolicyItem is one listed policy, metadata only.
+type networkPolicyItem struct {
+	Metadata objectMeta `json:"metadata"`
+}
+
+// createNetworkPolicy POSTs np.
+//
+// It decodes nothing back, unlike createPod and createSecret. Both of those
+// need the server's view because the server chose something — a
+// generateName-derived name, a UID. Here the driver chose the name itself, from
+// the handle ID, precisely so that a cleanup path in another process can
+// reconstruct it; there is nothing in the response the caller does not already
+// have.
+func (c *client) createNetworkPolicy(ctx context.Context, namespace string, np *netfilter.NetworkPolicy) error {
+	if np == nil {
+		return fmt.Errorf("kubernetes: nil NetworkPolicy")
+	}
+	return c.doJSON(ctx, http.MethodPost, networkPoliciesPath(namespace), nil, np, nil)
+}
+
+// listNetworkPolicies returns the policies matching labelSelector.
+//
+// Used by the orphan sweep, and by preflight to prove the executor's identity
+// can reach the endpoint at all before an operator discovers it cannot from a
+// refused run.
+func (c *client) listNetworkPolicies(ctx context.Context, namespace, labelSelector string) (*networkPolicyList, error) {
+	q := url.Values{}
+	if labelSelector != "" {
+		q.Set("labelSelector", labelSelector)
+	}
+	var out networkPolicyList
+	if err := c.doJSON(ctx, http.MethodGet, networkPoliciesPath(namespace), q, nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// deleteNetworkPolicy removes a policy. As with deletePod and deleteSecret, an
+// already-absent object is success: the caller asked for it to be gone and it
+// is gone.
+func (c *client) deleteNetworkPolicy(ctx context.Context, namespace, name string) error {
+	body := deleteOptions{
+		APIVersion: "v1",
+		Kind:       "DeleteOptions",
+		// No grace period: a policy has no process to wind down, and the Pod it
+		// governed is already finished by the time anything deletes it.
+		PropagationPolicy: "Background",
+	}
+	err := c.doJSON(ctx, http.MethodDelete, networkPolicyPath(namespace, name), nil, body, nil)
 	if ae, ok := asAPIError(err); ok && ae.NotFound() {
 		return nil
 	}

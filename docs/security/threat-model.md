@@ -70,7 +70,7 @@ is.
 | **I**nformation disclosure | Workload reads host filesystem | Mount namespace with a single bind mount | A container escape defeats this. Namespaces are not a VM; set [`executors.container.oci_runtime`](../guides/kata.md) to a Kata runtime for genuinely untrusted code — noting that the project bind mount is shared into the guest either way |
 | **D**enial of service | Workload exhausts host CPU/RAM/PIDs | `--cpus`, `--memory`, `--pids-limit`, and `--memory-swap` pinned to the memory ceiling so swap cannot be used to exceed it | Disk is not capped by the driver; a workload can fill the project volume |
 | **E**levation of privilege | Workload becomes root on the host | Non-root uid derived from the project directory owner (`TestContainerRefusesRootUser`, `TestValidateNonRootUserRejectsRootSpellings`); `--cap-drop=ALL`; `no-new-privileges` blocks setuid escalation | A kernel vulnerability defeats a namespace boundary. A Kata `oci_runtime` moves it to a guest kernel behind a hypervisor; nothing removes it |
-| **E**levation of privilege | Workload reaches the host network or another container | `--network=none` by default; host-network spellings rejected (`TestContainerRejectsHostNetworkSpellings`); reaching the Internet requires an [egress lease](../guides/secrets.md#egress-leases) | Enabling a bridge network for a project trades this away; the egress broker's proxy is the narrower alternative |
+| **E**levation of privilege | Workload reaches the host network or another container | `--network=none` by default; host-network spellings rejected (`TestContainerRejectsHostNetworkSpellings`). `executors.container.egress_filter` adds one of two mechanisms: `internal: true` puts the sandbox on a network with no route off the host, or a direct-egress filter installs a default-deny nftables ruleset on the sandbox bridge covering **both** the `forward` and `input` hooks, so destinations belonging to the host are filtered too (`TestHostSideFilterCoversHostBoundServices`) | The filter is **off unless configured**: a bridge network on an unconfigured hub still has unrestricted outbound access, and preflight warns rather than refuses. The network is per executor, so every sandbox that executor starts shares one bridge and one ruleset |
 | **E**levation of privilege | Project names a malicious image in `.cloop/sandbox.yaml` | `sandbox.image_policy` — registry/repo allowlist matched on the **parsed** reference, so `evil.example/ghcr.io/x` and `ghcr.io.evil.example/x` are refused; non-ASCII refused as malformed, removing homographs in one rule; optional cosign verification. Denials are audited as `sandbox.image_denied` (`TestProjectSpecCannotEscapeTheImageAllowlist`) | The policy is **off unless configured** — an unconfigured hub allows any image. The shipped Helm chart configures it; a hand-written `config.yaml` must too |
 | **E**levation of privilege | Allowed tag repointed between check and pull (TOCTOU) | An accepted tag is resolved to a digest and the digest is what runs; the tag does not survive past the policy check (`TestSandboxImage_PinsTheOverride`, `TestAuthorizePinsAnAcceptedTag`) | An image with no registry digest — built locally, loaded from a tarball — cannot be pinned. It is refused under `require_signature` and warned about otherwise |
 | **E**levation of privilege | Signature verification silently skipped | A missing `cosign` binary is a **denial** with an installation diagnostic, never a pass (`TestSignatureRequirementNeverDegradesToASkip`, `TestCosignMissingFailsClosed`) | Verification trusts the cosign binary on the hub's PATH and the keys the operator configured |
@@ -90,7 +90,74 @@ is.
 | **D**enial of service | Workload never terminates | `activeDeadlineSeconds` (default 7200) plus CPU/memory requests and limits | A tight scheduling loop can still exhaust namespace quota; set a `ResourceQuota` |
 | **E**levation of privilege | Workload escapes the Pod | `runAsNonRoot`, read-only rootfs, all capabilities dropped, `seccompProfile: RuntimeDefault`; `executors.kubernetes.runtime_class` puts every Pod on a [Kata node pool](../guides/kata.md#kubernetes) when the cluster has one | Standard container isolation caveats apply to the default runtime. cloop names a RuntimeClass; whether that class is really Kata, and whether the node enforces it, is the cluster's to answer |
 | **E**levation of privilege | Project names a malicious image, or a tag a node resolves later | The same `sandbox.image_policy` governs the Pod builder, and the digest is what lands in the container spec (`TestPinnedDigestLandsInTheContainerSpec`, `TestPolicyReachesTheExecutorThatRunsTheImage`) | The control plane cannot read a cluster's image store, so a tag **cannot** be pinned here — only required to arrive pinned. Without `require_digest: true` a kubelet resolves the tag whenever it schedules, and the artifact that runs is not the one anything evaluated. The chart sets it |
-| **E**levation of privilege | Workload reaches other cluster services | Pod network; the driver reports `NetworkEgress: true` and does not restrict it | **Not enforced by cloop.** The cluster owns this — apply a default-deny `NetworkPolicy` in the workload namespace |
+| **E**levation of privilege | Workload reaches other cluster services | With `executors.kubernetes.egress_filter` enabled, a `NetworkPolicy` per Pod selecting that Pod alone by its handle-id label, compiled from the same policy the container driver's ruleset is (`TestBothBackendsRefuseTheSameDestinations`); `policyTypes` names `Ingress` with no ingress rules, so inbound is denied too | Off by default, so an unconfigured hub is unchanged: the Pod joins the cluster network and cloud owns the restriction. Even enabled, a `NetworkPolicy` is inert unless the CNI implements one — flannel does not, and the API server stores the object regardless. Reported as a standing `egress-enforcement` preflight warning |
+
+---
+
+## Cross-cutting: the sandbox's network position
+
+The hub's reachability into private networks is on the asset list at the top of
+this document, and until recently the only thing guarding it was an HTTP proxy.
+That was honest but narrow: `pkg/egressbroker` checks hosts, ports, methods,
+quotas and the SSRF block set beautifully, and it only ever sees traffic a
+workload chose to send it. **A harness that opened a raw socket, ran
+`curl --noproxy '*'`, resolved over DoH or spoke anything that was not HTTP
+walked past every one of those checks** — not around them, past them; the
+allowlist was never consulted. Both drivers said as much in their own comments
+(*"it does not filter egress"*), and both left the sandbox with unrestricted
+outbound access the moment an operator turned the network on. Given the
+standing assumption above — the workload is an LLM running attacker-influenced
+code out of a git repository — this was the widest gap in the model.
+
+What binds it now is a filter at the IP layer, compiled from the same
+authorisation by `pkg/netfilter` and enforced by the kernel or the CNI rather
+than by the workload's cooperation. What it cannot do is enforce a *hostname*
+allowlist, and that limit is structural.
+
+| STRIDE | Threat | Mitigation | Residual risk |
+| --- | --- | --- | --- |
+| **I**nformation disclosure / **E**levation of privilege | A compromised harness exfiltrates data or moves laterally, ignoring `$HTTP_PROXY` | An IP-layer filter compiled by `pkg/netfilter` from the same authorisation the proxy enforces, installed as nftables on the sandbox bridge or as a per-Pod `NetworkPolicy`. Default deny, no configurable default verdict, `ProtoAny` on every drop so ICMP and SCTP are covered, silent drops so a probe learns nothing (`TestNoCompiledPolicyReachesBlockedSpaceByAccident`) | It binds *addresses*. A host allowlist becomes "every public address on these ports" — see the row below. And it is **off unless configured** |
+| **E**levation of privilege | A host allowlist is relied on for a workload that dials directly | The widening is opt-in (`allow_public_internet`), never inferred from the presence of host patterns, and every rendering of the policy carries a warning naming the patterns and what they became — an nft comment, a `NetworkPolicy` annotation, an `egress-scope` preflight finding | **Unfixable at layer 3.** `*.github.com` is a name and a packet carries an address. The narrow configuration is `internal` mode, where the proxy is the only reachable destination and the host allowlist is enforced inside it |
+| **E**levation of privilege | A sandbox reaches the cloud metadata service | `169.254.169.254/32` is dropped by prefix in both the proxy's block set and the compiled filter, ahead of the link-local drop that contains it so the *reason* reaching the audit trail is the specific one. Only a CIDR that names the address exactly waives it (`TestMetadataStaysBlockedUnderAnAcceptedGrant`) | A grant of `169.254.169.254/32` is a real hole by intent, and is meant to be a sentence somebody wrote |
+| **S**poofing | A blocked address written in a form the filter does not recognise | Both layers see through the v4-in-v6 spellings; the filter drops the NAT64, 6to4, IPv4-translatable and IPv4-compatible prefixes wholesale because a packet filter cannot unwrap an embedded address (`TestFilterAgreesWithBrokerOnNamedAddresses`, `TestFilterAgreesWithBrokerOnASweep`) | The wholesale drop is stricter than the proxy: `64:ff9b::8.8.8.8` is a public address the proxy allows and the filter refuses |
+| **T**ampering | Operator input injects a rule into the host's firewall | Table, chain and interface names are validated against a grammar narrower than nft's; rule comments — built partly from operator-supplied CIDRs — have every character that could end the string or the line replaced, and are truncated on a rune boundary (`TestCommentInjectionCannotEscapeTheString`, `TestRenderNftablesRefusesUnsafeNames`) | The ruleset is applied by shelling out to `nft(8)`, so it inherits whatever that binary on the hub's `PATH` is. The path is resolved once at construction, not per apply |
+| **D**enial of service | The filter fails to install and the sandbox starts anyway | A failed install fails the `Start`. Producing a working sandbox with none of the requested filtering, silently, is the one outcome worse than refusing to run | An `nft` that is missing, or a control plane without `CAP_NET_ADMIN`, therefore stops `filtered` sandboxes from starting at all. Preflight reports it as `fail` with the two fixes (install nftables and grant the capability, or switch to `internal` mode, which needs neither) |
+| **E**levation of privilege | The workload starts before its filter does | The ruleset attaches to the *bridge*, from the host side, and the bridge exists from the moment the runtime creates the network — strictly before any container can join it. The alternative (start it, find its PID, `nsenter`) has a window and is not what the driver does | Applies to the container driver. In Kubernetes the `NetworkPolicy` is created alongside the Pod and the CNI programs it on its own schedule |
+
+---
+
+## Two vulnerabilities found while building this
+
+Recorded because a threat model that lists only theoretical threats is less
+useful than one that lists the threats that were actually present. Both are
+fixed and both have a regression test.
+
+**`--cidrs 0.0.0.0/0` waived the entire SSRF block set.** An explicit CIDR is
+what waives the block set — that is the design, and it is why there is no
+blanket `allow_private` flag and why reaching the metadata service is meant to
+be a sentence an operator writes out as `169.254.169.254/32`. A `/0` was that
+blanket flag spelled differently: one grant flag turned off cloud metadata,
+loopback, and the operator's entire internal network at once. So was any prefix
+merely *containing* `169.254.169.254` without naming it — `169.254.0.0/16`
+reaches the credentials of the host the hub runs on, which on a cloud instance
+is the whole account. Fixed in `egressbroker.validateAllowPrefix`, at grant
+time where the operator sees the message, with `pkg/netfilter` refusing the same
+shapes so the two layers cannot disagree about it
+(`TestWideCIDRsCannotBypassTheBlockSet`,
+`TestGrantsThatWouldRemoveTheBlockSetAreRefused`).
+
+**The host-side ruleset filtered the Internet and left the host open.** The
+first version had a `forward` chain and nothing else. But the routing decision
+picks the hook: destinations the host forwards on reach the `forward` hook,
+while destinations that belong to the host itself — the bridge gateway, any
+address bound on any of its interfaces — reach the `input` hook instead. So a
+sandbox under a policy that dropped `172.16.0.0/12` could still open a
+connection to a service on the host's own `172.x` bridge address, which is
+precisely the lateral movement the block set exists to refuse. Found by testing
+against a real container, not by reading the rules. Fixed by rendering both
+hooks with the same rules, since which hook a destination takes is a fact about
+the host's routing table and not a security boundary
+(`TestHostSideFilterCoversHostBoundServices`, `TestBridgeFormFiltersBothHooks`).
 
 ---
 
@@ -103,7 +170,7 @@ is.
 | **R**epudiation | Who granted this access | Every grant, revoke and lease decision is audited with actor, subject, constraints and reason (`TestSecretBrokerDecisionsNeverCarryMaterial`) | — |
 | **I**nformation disclosure | Material lands on disk or in logs | Sealed at rest (AES-256-GCM); materialised into a 0700 tmpfs dir (`/dev/shm` where available); zeroed and removed on exit; never in `Error()` strings or audit rows | Where `/dev/shm` is unavailable the fallback is `os.TempDir()`, which may be disk-backed — hence the explicit zeroing |
 | **D**enial of service | Revocation does not take effect | Leases are short (15 min max) and revalidate every grant on renewal; egress revocation tears down **live sessions** immediately | A secret already materialised survives until its lease expires — up to 15 minutes. To cut access instantly, revoke *and* stop the workload |
-| **E**levation of privilege | SSRF into the hub's private network | Loopback, RFC1918 and link-local are blocked unless explicitly listed in `--cidrs`; cloud metadata (`169.254.169.254`) requires an explicit CIDR grant | Granting a private CIDR is a real hole by intent — grant the narrowest prefix and port |
+| **E**levation of privilege | SSRF into the hub's private network | Loopback, RFC1918 and link-local are blocked unless explicitly listed in `--cidrs`; cloud metadata (`169.254.169.254`) requires a CIDR that names it exactly; a `/0`, and any prefix containing the metadata address without naming it, are refused at grant time (`TestWideCIDRsCannotBypassTheBlockSet`) | Granting a private CIDR is a real hole by intent — grant the narrowest prefix and port |
 | **E**levation of privilege | DNS rebinding between check and dial | Resolve-once pinning: the name is resolved once, every resolved address is policy-checked, and the dial goes to the checked literal | — |
 | **E**levation of privilege | Exfiltration through an allowed host | Per-session byte quotas (`--max-up`, `--max-down`), enforced mid-stream | CONNECT tunnels are opaque — cloop holds no key for the origin, so it sees bytes, not content. `--methods` gates plain HTTP only |
 
@@ -136,6 +203,18 @@ is.
 - **Physical and supply-chain compromise** of the hub host or the images.
 - **What the workload does with credentials it legitimately holds.** Grants
   bound the blast radius; they do not constrain intent.
+- **Content sent to a destination the policy allows.** The filter decides
+  whether a packet leaves, not what is in it, and the proxy does not terminate
+  TLS. A sandbox permitted to reach `api.github.com` can push whatever it likes
+  there. Byte quotas bound the volume; nothing bounds the meaning.
+- **Whether the kernel or the CNI honours the policy that was installed.**
+  `nft -f` commits or fails, so the container path is verifiable from an exit
+  status. A `NetworkPolicy` is not: cloop cannot tell from the API whether the
+  cluster's CNI implements one.
+- **Layer 2 and the physical network.** The filter matches destination
+  addresses. ARP, DHCP and anything else that never acquires an IP destination
+  are outside what it expresses, as is a network the operator attached the host
+  to.
 
 ---
 

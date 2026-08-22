@@ -193,6 +193,9 @@ func (e *Executor) Preflight(ctx context.Context, workDir string) PreflightRepor
 		e.preflightOCIRuntime(ctx, add)
 	}
 
+	// --- 3c. egress filter ----------------------------------------------
+	e.preflightEgressFilter(ctx, add)
+
 	// --- 4. image ------------------------------------------------------
 	imgRes, err := runCLITimeout(ctx, e.rt, preflightCmdTimeout, "image", "inspect", e.opts.Image)
 	switch {

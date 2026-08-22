@@ -765,6 +765,158 @@ func TestClampKubernetesExecutor(t *testing.T) {
 	}
 }
 
+// TestKubernetesEgressFilter_Validation: the filter is compiled at validation
+// time by the same function that renders the NetworkPolicy at Start, so a
+// section that loads is one that can actually produce a firewall.
+func TestKubernetesEgressFilter_Validation(t *testing.T) {
+	valid := map[string]KubernetesEgressFilterConfig{
+		"absent":          {},
+		"cidrs and ports": {Enabled: true, CIDRs: []string{"10.8.0.0/24"}, Ports: []int{443, 6443}},
+		"public internet": {Enabled: true, AllowPublicInternet: true, Ports: []int{443}},
+		"resolvers":       {Enabled: true, Resolvers: []string{"10.96.0.10", "10.96.0.11:53"}},
+		// Enabled with nothing allowed is a legitimate configuration: it denies
+		// every packet, which is what a hub running untrusted code that needs no
+		// network wants.
+		"deny all": {Enabled: true},
+	}
+	for name, filter := range valid {
+		t.Run(name, func(t *testing.T) {
+			cfg := KubernetesExecutorConfig{Namespace: "cloop-jobs", EgressFilter: filter}
+			if err := ValidateKubernetesExecutor(cfg); err != nil {
+				t.Fatalf("ValidateKubernetesExecutor(%+v) = %v, want nil", filter, err)
+			}
+		})
+	}
+
+	invalid := map[string]struct {
+		filter KubernetesEgressFilterConfig
+		want   string
+	}{
+		"bad cidr":  {KubernetesEgressFilterConfig{Enabled: true, CIDRs: []string{"10.8.0.0"}, Ports: []int{443}}, "cidrs[0]"},
+		"bad port":  {KubernetesEgressFilterConfig{Enabled: true, CIDRs: []string{"10.8.0.0/24"}, Ports: []int{0}}, "ports[0]"},
+		"no ports":  {KubernetesEgressFilterConfig{Enabled: true, CIDRs: []string{"10.8.0.0/24"}}, "no ports"},
+		"resolver":  {KubernetesEgressFilterConfig{Enabled: true, Resolvers: []string{"dns.example.com"}}, "resolvers[0]"},
+		"full zero": {KubernetesEgressFilterConfig{Enabled: true, CIDRs: []string{"0.0.0.0/0"}, Ports: []int{443}}, "not an allowlist entry"},
+	}
+	for name, tc := range invalid {
+		t.Run(name, func(t *testing.T) {
+			cfg := KubernetesExecutorConfig{Namespace: "cloop-jobs", EgressFilter: tc.filter}
+			err := ValidateKubernetesExecutor(cfg)
+			if err == nil {
+				t.Fatalf("ValidateKubernetesExecutor(%+v) = nil, want an error", tc.filter)
+			}
+			if !strings.Contains(err.Error(), "egress_filter") || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error %q does not name executors.kubernetes.egress_filter and %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// TestKubernetesEgressFilter_DriverOptions: the section reaches the driver
+// intact. A field dropped here is a filter the operator wrote and the cluster
+// never sees.
+func TestKubernetesEgressFilter_DriverOptions(t *testing.T) {
+	off := false
+	cfg := KubernetesExecutorConfig{
+		Namespace: "cloop-jobs",
+		EgressFilter: KubernetesEgressFilterConfig{
+			Enabled:             true,
+			CIDRs:               []string{"10.8.0.0/24"},
+			Ports:               []int{443},
+			AllowPublicInternet: true,
+			Resolvers:           []string{"10.96.0.10"},
+			AllowClusterDNS:     &off,
+		},
+	}
+	opts, err := cfg.DriverOptions()
+	if err != nil {
+		t.Fatalf("DriverOptions: %v", err)
+	}
+	f := opts.EgressFilter
+	if !f.Enabled || !f.AllowPublicInternet || len(f.CIDRs) != 1 || len(f.Ports) != 1 || len(f.Resolvers) != 1 {
+		t.Fatalf("egress filter not carried through: %+v", f)
+	}
+	if f.ClusterDNSAllowed() {
+		t.Error("allow_cluster_dns=false did not survive; the pointer's tri-state is the point of it")
+	}
+
+	// Absent means no filtering at all, which is what keeps an upgrade from
+	// firewalling a deployment that never asked for it.
+	plain, err := KubernetesExecutorConfig{}.DriverOptions()
+	if err != nil {
+		t.Fatalf("DriverOptions: %v", err)
+	}
+	if plain.EgressFilter.Enabled {
+		t.Error("an absent egress_filter section enabled filtering")
+	}
+	if !plain.EgressFilter.ClusterDNSAllowed() {
+		t.Error("an unset allow_cluster_dns must read as true, or a default-deny policy breaks DNS")
+	}
+}
+
+// TestKubernetesEgressFilter_YAMLKeys pins the key names an operator writes and
+// the Helm chart renders. A struct tag renamed without the chart is a config
+// file that loads with the filter silently off.
+func TestKubernetesEgressFilter_YAMLKeys(t *testing.T) {
+	const doc = `
+executors:
+  kubernetes:
+    enabled: true
+    namespace: cloop-jobs
+    egress_filter:
+      enabled: true
+      cidrs: ["10.8.0.0/24"]
+      ports: [443]
+      allow_public_internet: true
+      resolvers: ["10.96.0.10:53"]
+      allow_cluster_dns: false
+`
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".cloop"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".cloop", "config.yaml"), []byte(doc), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	f := cfg.Executors.Kubernetes.EgressFilter
+	if !f.Enabled || !f.AllowPublicInternet {
+		t.Fatalf("egress_filter did not parse: %+v", f)
+	}
+	if len(f.CIDRs) != 1 || f.CIDRs[0] != "10.8.0.0/24" || len(f.Ports) != 1 || f.Ports[0] != 443 {
+		t.Fatalf("allowlist did not parse: %+v", f)
+	}
+	if len(f.Resolvers) != 1 || f.AllowClusterDNS == nil || *f.AllowClusterDNS {
+		t.Fatalf("resolvers/allow_cluster_dns did not parse: %+v", f)
+	}
+}
+
+// TestClampKubernetesExecutor_BrokenEgressFilterDisablesTheExecutor: the clamp
+// will not repair this section field-by-field. Dropping the CIDR an operator
+// mistyped leaves a filter narrower than they wrote — a total outage — and
+// dropping the filter leaves one wider, which is a security control vanishing
+// because of a typo. Neither is a repair.
+func TestClampKubernetesExecutor_BrokenEgressFilterDisablesTheExecutor(t *testing.T) {
+	cfg := KubernetesExecutorConfig{
+		Enabled:      true,
+		Namespace:    "cloop-jobs",
+		EgressFilter: KubernetesEgressFilterConfig{Enabled: true, CIDRs: []string{"not-a-cidr"}, Ports: []int{443}},
+	}
+	changed := clampKubernetesExecutor(&cfg)
+	if cfg.Enabled {
+		t.Error("an executor with an uncompilable egress filter was left registered")
+	}
+	if !cfg.EgressFilter.Enabled || len(cfg.EgressFilter.CIDRs) != 1 {
+		t.Errorf("the filter was silently rewritten: %+v", cfg.EgressFilter)
+	}
+	if len(changed) == 0 || !strings.Contains(strings.Join(changed, " | "), "egress_filter") {
+		t.Errorf("clamp report %v does not name egress_filter", changed)
+	}
+}
+
 // TestExecutorWarnings_Kubernetes: an isolated executor being enabled must
 // count toward "some executor exists", and the advisory notes must fire.
 func TestExecutorWarnings_Kubernetes(t *testing.T) {

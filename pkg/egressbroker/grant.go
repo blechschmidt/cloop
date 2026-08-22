@@ -246,9 +246,13 @@ func (g *Grant) Validate() error {
 	}
 
 	for _, c := range g.CIDRs {
-		if _, err := netip.ParsePrefix(c); err != nil {
+		p, err := netip.ParsePrefix(c)
+		if err != nil {
 			return fmt.Errorf("%w: %q is not a CIDR prefix (want 10.0.0.0/8 or 2001:db8::/32)",
 				ErrInvalidGrant, c)
+		}
+		if err := validateAllowPrefix(p); err != nil {
+			return fmt.Errorf("%w: %v", ErrInvalidGrant, err)
 		}
 	}
 	for _, m := range g.Methods {
@@ -261,6 +265,41 @@ func (g *Grant) Validate() error {
 	}
 	if !g.ExpiresAt.IsZero() && !g.CreatedAt.IsZero() && !g.ExpiresAt.After(g.CreatedAt) {
 		return fmt.Errorf("%w: grant %s expires at or before its creation time", ErrInvalidGrant, g.ID)
+	}
+	return nil
+}
+
+// validateAllowPrefix refuses the two CIDR shapes that turn the allow list
+// into a bypass of the hard-block set.
+//
+// CheckAddr lets an explicit CIDR waive the block set, and the field's own
+// documentation explains why that is safe: waiving "for that prefix and
+// nothing else" is why there is no blanket allow_private flag, and why
+// reaching the metadata service is meant to be a sentence an operator writes
+// out as 169.254.169.254/32. Two prefixes break that promise:
+//
+//   - 0.0.0.0/0 and ::/0 waive every blocked range at once. That is the
+//     blanket flag, spelled differently.
+//   - any prefix that merely *contains* 169.254.169.254 — 169.254.0.0/16,
+//     say — reaches the credentials of the host the hub runs on without ever
+//     naming it. On a cloud instance that is the whole account.
+//
+// Refusing them here rather than at CheckAddr keeps the rejection where an
+// operator sees it, at grant time, with a message that says what to write
+// instead. pkg/netfilter refuses the same shapes for the same reason, which
+// is what lets the packet filter and the proxy stay in agreement.
+func validateAllowPrefix(p netip.Prefix) error {
+	if p.Bits() == 0 {
+		return fmt.Errorf(
+			"CIDR %s is not an allowlist entry — it waives every blocked range, including the "+
+				"cloud metadata service. Pass --hosts '*' to allow the public Internet, or name "+
+				"the prefixes the sandbox actually needs", p)
+	}
+	if p.Contains(MetadataIPv4) && p.Bits() != p.Addr().BitLen() {
+		return fmt.Errorf(
+			"CIDR %s contains the cloud metadata service (%s) without naming it. Write "+
+				"%s/32 if that is the intent, or choose a prefix that excludes it",
+			p, MetadataIPv4, MetadataIPv4)
 	}
 	return nil
 }

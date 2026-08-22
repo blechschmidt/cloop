@@ -113,6 +113,20 @@ type Capabilities struct {
 	SharesHostFilesystem bool `json:"shares_host_filesystem"`
 	// NetworkEgress reports whether workloads can reach the network.
 	NetworkEgress bool `json:"network_egress"`
+	// FilteredEgress reports whether that reach is bounded at the IP layer
+	// by a policy cloop installs — an nftables ruleset on the sandbox
+	// bridge, an --internal runtime network, or a Kubernetes NetworkPolicy.
+	//
+	// It is separate from NetworkEgress because the two answer different
+	// questions, and conflating them loses both. NetworkEgress says whether
+	// the workload has an interface at all, which is what placement needs;
+	// this says whether what it reaches through that interface is
+	// constrained, which is what an operator auditing the fleet needs.
+	//
+	// False does not mean "nothing filters this" — a cluster may run its own
+	// NetworkPolicy, an operator may firewall the host — it means cloop is
+	// not the thing doing it and will not claim credit for it.
+	FilteredEgress bool `json:"filtered_egress"`
 	// SupportsImageOverride reports whether Spec.Image is honoured. It is
 	// false for drivers with no image concept at all (localprocess) and for
 	// drivers whose image is fixed by the operator, and it is what lets a

@@ -185,9 +185,9 @@ func (e *Executor) Preflight(ctx context.Context) PreflightReport {
 		case isAPI && ae.Code == http.StatusForbidden:
 			add("rbac", LevelFail,
 				fmt.Sprintf("the leased identity may not list Pods in %q: %s", namespace, ae.Message),
-				rbacFix(namespace))
+				rbacFix(namespace, e.opts.EgressFilter.Enabled))
 		default:
-			add("namespace", LevelFail, err.Error(), rbacFix(namespace))
+			add("namespace", LevelFail, err.Error(), rbacFix(namespace, e.opts.EgressFilter.Enabled))
 		}
 		return report
 	}
@@ -207,11 +207,64 @@ func (e *Executor) Preflight(ctx context.Context) PreflightReport {
 		add("limits", LevelOK,
 			fmt.Sprintf("cpu_limit=%s memory_limit=%s", orNone(e.opts.CPULimit), orNone(e.opts.MemoryLimit)), "")
 	}
-	// Egress is the one guarantee this driver cannot make, so it is stated
-	// rather than implied by omission.
-	add("egress", LevelWarn,
-		"Pods join the cluster network with unrestricted egress; cloop does not filter it",
-		fmt.Sprintf("apply a default-deny NetworkPolicy to namespace %q and allow only what the harness needs", namespace))
+
+	// --- 5a. egress -------------------------------------------------------
+	//
+	// Two different honest answers, depending on configuration, and the
+	// difference matters more than either message: with no filter configured
+	// this driver genuinely does not restrict egress, and with one configured
+	// the restriction is only as real as the executor's RBAC and the cluster's
+	// CNI. Both are checked here rather than assumed, because "the operator
+	// enabled the filter" and "the filter is enforced" are separated by two
+	// things cloop does not control.
+	if !e.opts.EgressFilter.Enabled {
+		add("egress", LevelWarn,
+			"Pods join the cluster network with unrestricted egress; cloop does not filter it",
+			fmt.Sprintf("apply a default-deny NetworkPolicy to namespace %q and allow only what the harness needs", namespace))
+	} else {
+		// The same call the sweep makes, for the same reason the Pod list above
+		// is the one ReconcileOrphans makes: a preflight that passes has proved
+		// the credential can actually reach the endpoint, rather than proving
+		// that the config file parses.
+		npCtx, cancelNP := context.WithTimeout(ctx, requestTimeout)
+		policies, nperr := cli.listNetworkPolicies(npCtx, namespace, executorLabelSelector(e.id))
+		cancelNP()
+		switch ae, isAPI := asAPIError(nperr); {
+		case nperr == nil:
+			add("egress", LevelOK,
+				fmt.Sprintf("egress is filtered by a per-Pod NetworkPolicy (%s), and the leased identity "+
+					"can manage NetworkPolicies in %q (%d cloop policy/policies currently present)",
+					e.opts.EgressFilter.Describe(), namespace, len(policies.Items)),
+				"")
+		case isAPI && ae.Code == http.StatusForbidden:
+			add("egress", LevelFail,
+				fmt.Sprintf("the egress filter is enabled but the leased identity may not manage "+
+					"NetworkPolicies in %q: %s — every Start will be refused rather than run a Pod "+
+					"with unfiltered egress", namespace, ae.Message),
+				"add `- apiGroups: [\"networking.k8s.io\"] resources: [\"networkpolicies\"] "+
+					"verbs: [\"create\", \"delete\", \"list\"]` to the executor's Role")
+		default:
+			add("egress", LevelFail,
+				fmt.Sprintf("the egress filter is enabled but its NetworkPolicies cannot be listed in %q: %v",
+					namespace, nperr),
+				"check that the cluster serves networking.k8s.io/v1 and that the executor's Role covers "+
+					"networkpolicies: [create delete list]")
+		}
+
+		// Stated separately, and always, because it is the one part of this
+		// that cloop cannot check. Creating the object proves the API server
+		// stored it, not that anything enforces it: a NetworkPolicy is inert
+		// unless the cluster's CNI implements it, and flannel — still a common
+		// default — does not. The API server accepts the object regardless and
+		// reports nothing, so a cluster with the wrong CNI looks exactly like a
+		// working one from here.
+		add("egress-enforcement", LevelWarn,
+			"a NetworkPolicy is enforced by the cluster's CNI, not by cloop, and cloop cannot tell "+
+				"from the API whether yours implements one (flannel does not; Calico, Cilium, "+
+				"Antrea and most managed CNIs do)",
+			"confirm your CNI supports NetworkPolicy, then verify from inside a sandbox that a denied "+
+				"destination actually times out")
+	}
 
 	// --- 6. workspace -----------------------------------------------------
 	//
@@ -241,8 +294,16 @@ func (e *Executor) Preflight(ctx context.Context) PreflightReport {
 // rbacFix is the Role the executor's identity needs, as something an operator
 // can paste. Naming the exact verbs is the difference between a two-minute
 // fix and an afternoon.
-func rbacFix(namespace string) string {
-	return fmt.Sprintf("grant a Role in %q with pods: [create get list watch delete], pods/log: [get] and "+
-		"secrets: [create delete], then bind it to the ServiceAccount whose token the kubeconfig carries",
-		namespace)
+//
+// egress adds the networkpolicies rule. It is conditional because the rule is:
+// an executor that does not filter egress creates no NetworkPolicies and should
+// not be told to grant itself authority over them.
+func rbacFix(namespace string, egress bool) string {
+	rules := "pods: [create get list watch delete], pods/log: [get] and secrets: [create delete]"
+	if egress {
+		rules = "pods: [create get list watch delete], pods/log: [get], secrets: [create delete] and " +
+			"networking.k8s.io networkpolicies: [create delete list]"
+	}
+	return fmt.Sprintf("grant a Role in %q with %s, then bind it to the ServiceAccount whose token "+
+		"the kubeconfig carries", namespace, rules)
 }

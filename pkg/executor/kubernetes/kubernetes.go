@@ -53,11 +53,18 @@
 // automountServiceAccountToken false so no in-cluster API credential is
 // handed to model-authored code. Those are not configurable.
 //
-// What this driver does not do is filter egress. A Pod gets the cluster's
-// pod network, which by default can reach every other Pod and the internet.
-// Restricting that is a NetworkPolicy — an object the cluster owns and cloop
-// would be lying about if it claimed to enforce. Capabilities().NetworkEgress
-// reports true accordingly.
+// Egress is filtered when — and only when — an operator configures it. With
+// executors.kubernetes.egress_filter.enabled set, every Pod gets a companion
+// NetworkPolicy created before it and deleted with it, selecting that Pod alone
+// and compiled from the same pkg/netfilter policy the container driver's
+// nftables ruleset comes from; see networkpolicy.go. Without it a Pod gets the
+// cluster's pod network, which by default reaches every other Pod and the
+// Internet, and this driver says so rather than implying otherwise.
+//
+// Even with the filter on, one claim stays outside cloop's reach: a
+// NetworkPolicy is inert unless the cluster's CNI implements it, and the API
+// server accepts the object either way. Preflight reports that as a warning
+// because it is a fact about the cluster, not about the driver.
 //
 // Nor does it hide the workload's environment. Spec.Env lands in the Pod
 // object, readable by anyone with `get pods` in the namespace. That is why a
@@ -253,6 +260,13 @@ type Options struct {
 	// (the cluster's ResourceQuota is the real ceiling).
 	MaxConcurrent int
 
+	// EgressFilter turns the Pod's cluster egress into an enforced allowlist by
+	// creating a NetworkPolicy alongside each Pod. The zero value creates no
+	// policy and leaves egress exactly as the cluster grants it, which is what
+	// keeps an upgrade from silently firewalling a running deployment. See
+	// networkpolicy.go.
+	EgressFilter EgressFilter
+
 	// Credentials supplies the kubeconfig lease. Required.
 	Credentials CredentialSource
 
@@ -368,6 +382,15 @@ func (o Options) Normalize() (Options, error) {
 	if o.MaxConcurrent < 0 {
 		return o, fmt.Errorf("kubernetes: max_concurrent must be >= 0 (got %d)", o.MaxConcurrent)
 	}
+	// Compiled here, at construction, rather than at Start. A firewall that
+	// fails to compile is a run that never happens, and the operator who has to
+	// fix it should hear about the CIDR they mistyped when they write it — not
+	// from a Pod-create error hours later.
+	egress, err := o.EgressFilter.Normalize()
+	if err != nil {
+		return o, fmt.Errorf("kubernetes: egress_filter: %w", err)
+	}
+	o.EgressFilter = egress
 
 	if o.TerminationGracePeriod == 0 {
 		o.TerminationGracePeriod = DefaultTerminationGracePeriod
@@ -410,6 +433,12 @@ type record struct {
 	// namespace and podName are fixed once the Pod is created.
 	namespace string
 	podName   string
+	// networkPolicyName is the egress NetworkPolicy created for this Pod, or ""
+	// when this executor is not filtering egress. Written once, before the
+	// record is shared, and only read afterwards — like wantWriteBack — so it
+	// needs no lock. Cleanup needs it: without a name recorded here the policy
+	// outlives its Pod until the next orphan sweep.
+	networkPolicyName string
 
 	// cancelPump stops the watcher, the log follower and the lease renewer.
 	cancelPump context.CancelFunc
@@ -518,9 +547,12 @@ func (e *Executor) Virtualized() bool { return executor.IsVirtualizedRuntime(e.o
 // the container driver: there is no bind mount, so Spec.WorkDir names a path
 // *inside* the Pod and the control plane cannot read what the workload wrote.
 //
-// NetworkEgress is true because a Pod joins the cluster network. Constraining
-// that is a NetworkPolicy the cluster owns; reporting false would be claiming
-// an isolation cloop does not enforce.
+// NetworkEgress follows the configured egress filter. With no filter a Pod
+// joins the cluster network and can reach it, so it is true — reporting false
+// would claim an isolation cloop does not enforce. With a filter that names no
+// destination it is false, because nothing is reachable, and a project that
+// requires the network is better refused at placement than scheduled into a Pod
+// whose every packet is dropped.
 //
 // Virtualized is set from the configured RuntimeClass, and it is why that is a
 // field of its own rather than another Isolation value. A Kata Pod is remote
@@ -535,7 +567,13 @@ func (e *Executor) Capabilities() executor.Capabilities {
 		SupportsSignal:         true,
 		SupportsResourceLimits: true,
 		SharesHostFilesystem:   false,
-		NetworkEgress:          true,
+		NetworkEgress:          e.opts.EgressFilter.AllowsEgress(),
+		// FilteredEgress reports that cloop installs a policy, not that the
+		// cluster honours it. A NetworkPolicy is applied by the CNI, and
+		// flannel does not implement one — which is a fact about the cluster
+		// that no API call reveals, so Preflight warns about it and this
+		// field stays a statement about what cloop did.
+		FilteredEgress: e.opts.EgressFilter.Enabled,
 		// A per-project image is just the Pod's image field. Building one is
 		// not: there is no builder here, so a spec with setup: is refused at
 		// placement rather than silently degraded (see buildPodFor).
@@ -699,20 +737,25 @@ func (e *Executor) Start(ctx context.Context, spec executor.Spec) (executor.Hand
 	}
 
 	// From here every failure path must release the lease, drop any workspace
-	// credential already written into the cluster, and close the client — or a
-	// refused Start leaks a credential the broker still thinks is held, or a
-	// Secret nothing will ever consume. ws is assigned below and read through
-	// the closure, so the same release() is correct before and after it exists.
-	var ws *workspaceState
+	// credential already written into the cluster, remove any NetworkPolicy it
+	// created, and close the client — or a refused Start leaks a credential the
+	// broker still thinks is held, a Secret nothing will ever consume, or a
+	// policy no Pod will ever be governed by. ws and policyName are assigned
+	// below and read through the closure, so the same release() is correct
+	// before and after either exists.
+	var (
+		ws         *workspaceState
+		policyName string
+	)
+	handleID := newHandleID()
+	namespace := e.namespaceFor(creds)
 	release := func() {
 		e.discardWorkspaceSecret(ws, cli,
 			"the workload was never started, so the tree was never fetched")
+		e.deleteNetworkPolicyDetached(cli, namespace, policyName)
 		cli.close()
 		e.opts.Credentials.Release(creds.LeaseID)
 	}
-
-	handleID := newHandleID()
-	namespace := e.namespaceFor(creds)
 
 	// Before the Pod, not after. An init container whose secretKeyRef names a
 	// Secret that does not exist yet does not wait for it — the kubelet parks
@@ -725,10 +768,48 @@ func (e *Executor) Start(ctx context.Context, spec executor.Spec) (executor.Hand
 		return executor.Handle{}, err
 	}
 
-	desired, err := e.buildPodFor(ctx, spec, handleID, namespace, ws.secret())
+	// One request builds both objects, so the label the policy selects on and
+	// the label the Pod carries cannot drift apart.
+	req, err := e.podRequestFor(ctx, spec, handleID, namespace, ws.secret())
 	if err != nil {
 		release()
 		return executor.Handle{}, err
+	}
+	desired, err := buildPod(req)
+	if err != nil {
+		release()
+		return executor.Handle{}, err
+	}
+
+	// Before the Pod, and fatal if it fails. A Pod that starts before its
+	// policy exists has a window — however short — of unrestricted egress, and
+	// a window is all an exfiltration needs. Falling through to an unfiltered
+	// Pod on a failed create would turn the operator's egress allowlist into a
+	// suggestion honoured only when RBAC happens to be right.
+	np, err := buildNetworkPolicy(req, e.opts.EgressFilter)
+	if err != nil {
+		release()
+		return executor.Handle{}, err
+	}
+	if np != nil {
+		npCtx, cancelNP := context.WithTimeout(context.WithoutCancel(ctx), requestTimeout)
+		err = cli.createNetworkPolicy(npCtx, namespace, np)
+		cancelNP()
+		if err != nil {
+			// A create that failed may still have landed. A 4xx is the API server
+			// stating it did not — a rejection, a conflict, an authorization
+			// failure — so there is nothing to clean up and arming the delete
+			// would only produce a second confusing 403 in the log. Anything else
+			// (a timeout, a 5xx, a connection dropped after the request was
+			// written) leaves the question open, and the same reasoning the
+			// workspace Secret uses applies: attempt the delete.
+			if ae, ok := asAPIError(err); !ok || ae.Code >= 500 {
+				policyName = np.Metadata.Name
+			}
+			release()
+			return executor.Handle{}, explainNetworkPolicyFailure(namespace, np.Metadata.Name, err)
+		}
+		policyName = np.Metadata.Name
 	}
 
 	createCtx, cancelCreate := context.WithTimeout(context.WithoutCancel(ctx), requestTimeout)
@@ -740,15 +821,16 @@ func (e *Executor) Start(ctx context.Context, spec executor.Spec) (executor.Hand
 	}
 
 	rec := &record{
-		id:        handleID,
-		startedAt: e.opts.now(),
-		namespace: namespace,
-		podName:   created.Metadata.Name,
-		state:     executor.StatePending,
-		cli:       cli,
-		leaseID:   creds.LeaseID,
-		leaseExp:  creds.ExpiresAt,
-		ws:        ws,
+		id:                handleID,
+		startedAt:         e.opts.now(),
+		namespace:         namespace,
+		podName:           created.Metadata.Name,
+		networkPolicyName: policyName,
+		state:             executor.StatePending,
+		cli:               cli,
+		leaseID:           creds.LeaseID,
+		leaseExp:          creds.ExpiresAt,
+		ws:                ws,
 
 		wantWriteBack: spec.WriteBack,
 	}
@@ -854,18 +936,35 @@ func classifyImageDenial(err error) error {
 }
 
 // buildPodFor turns a Spec plus this executor's options into a Pod object.
+func (e *Executor) buildPodFor(ctx context.Context, spec executor.Spec, handleID, namespace,
+	workspaceSecret string) (*pod, error) {
+	req, err := e.podRequestFor(ctx, spec, handleID, namespace, workspaceSecret)
+	if err != nil {
+		return nil, err
+	}
+	return buildPod(req)
+}
+
+// podRequestFor assembles the request both objects a run needs are built from:
+// the Pod, and the NetworkPolicy that confines its egress.
+//
+// It is separate from buildPodFor so that Start can build the two from one
+// request. That is not a tidiness argument: the policy selects the Pod by its
+// handle-id label, so a request that produced the Pod and a second request that
+// produced the policy could disagree about that label and leave a Pod nothing
+// governs — which would look exactly like a working, filtered run.
 //
 // workspaceSecret names the Secret holding the leased fetch credential, or is
 // empty when there is none. It is a parameter rather than a field on Options or
 // Spec because it is per-run state that exists for the length of one Pod, and
 // the two structs it could have gone on are both persisted.
-func (e *Executor) buildPodFor(ctx context.Context, spec executor.Spec, handleID, namespace,
-	workspaceSecret string) (*pod, error) {
+func (e *Executor) podRequestFor(ctx context.Context, spec executor.Spec, handleID, namespace,
+	workspaceSecret string) (podRequest, error) {
 	if spec.ResourceLimits.PIDs > 0 {
 		// A Pod cannot express a PID cap: podPidsLimit is a kubelet flag,
 		// set per node by the cluster operator. Accepting the number and not
 		// enforcing it would be worse than saying so.
-		return nil, fmt.Errorf("%w: a Pod cannot carry a PID limit — it is the kubelet's "+
+		return podRequest{}, fmt.Errorf("%w: a Pod cannot carry a PID limit — it is the kubelet's "+
 			"podPidsLimit, configured per node by the cluster operator", executor.ErrUnsupported)
 	}
 	if len(spec.SetupCommands) > 0 {
@@ -874,7 +973,7 @@ func (e *Executor) buildPodFor(ctx context.Context, spec executor.Spec, handleID
 		// prelude would look equivalent and would not be: they would re-run on
 		// every task instead of once per sandbox, and their result would be
 		// discarded with the Pod. Refusing names the alternative.
-		return nil, fmt.Errorf("%w: the Kubernetes executor cannot build a sandbox image; "+
+		return podRequest{}, fmt.Errorf("%w: the Kubernetes executor cannot build a sandbox image; "+
 			"build the setup: steps into an image, publish it, and reference it as "+
 			"image: in .cloop/sandbox.yaml", executor.ErrUnsupported)
 	}
@@ -893,10 +992,10 @@ func (e *Executor) buildPodFor(ctx context.Context, spec executor.Spec, handleID
 	if override := strings.TrimSpace(spec.Image); override != "" {
 		authorized, err := e.authorizeImage(ctx, override)
 		if err != nil {
-			return nil, err
+			return podRequest{}, err
 		}
 		if err := ValidateImageRef(authorized); err != nil {
-			return nil, fmt.Errorf("%w: sandbox image: %w", executor.ErrInvalidSpec, err)
+			return podRequest{}, fmt.Errorf("%w: sandbox image: %w", executor.ErrInvalidSpec, err)
 		}
 		image = authorized
 	}
@@ -953,7 +1052,7 @@ func (e *Executor) buildPodFor(ctx context.Context, spec executor.Spec, handleID
 		req.ActiveDeadlineSeconds = int64(d / time.Second)
 	}
 
-	return buildPod(req)
+	return req, nil
 }
 
 // podWorkDir maps a Spec's WorkDir onto a path inside the Pod.
@@ -1654,6 +1753,27 @@ func (e *Executor) deletePodDetached(rec *record, grace time.Duration) {
 	rec.interruptWatch()
 }
 
+// deleteNetworkPolicyDetached removes an egress policy on a context of its own.
+//
+// Detached for the same reason discardWorkspaceSecret is: this runs on cleanup
+// paths whose caller has usually been cancelled already. Failure is logged and
+// not propagated — the run's result is the thing worth keeping, and a leaked
+// policy is collected by ReconcileOrphans. It is safe with an empty name and a
+// nil client, so every cleanup path can call it without first working out which
+// of those it is looking at.
+func (e *Executor) deleteNetworkPolicyDetached(cli *client, namespace, name string) {
+	if cli == nil || strings.TrimSpace(name) == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
+	defer cancel()
+	if err := cli.deleteNetworkPolicy(ctx, namespace, name); err != nil {
+		fmt.Fprintf(os.Stderr, "kubernetes: could not delete egress NetworkPolicy %s/%s: %v — "+
+			"it governs a Pod that no longer exists and will be collected by the next orphan sweep\n",
+			namespace, name, err)
+	}
+}
+
 // Status implements executor.Executor.
 func (e *Executor) Status(ctx context.Context, handleID string) (executor.Status, error) {
 	if ctx != nil {
@@ -1788,8 +1908,77 @@ func (e *Executor) ReconcileOrphans(ctx context.Context) ([]string, error) {
 		}
 		removed = append(removed, namespace+"/"+p.Metadata.Name)
 	}
+	removed = append(removed, e.reconcileNetworkPolicies(ctx, cli, namespace, cutoff)...)
 	sort.Strings(removed)
 	return removed, nil
+}
+
+// reconcileNetworkPolicies deletes egress policies this executor owns but no
+// longer tracks, and returns what it removed.
+//
+// It runs after the Pod sweep and applies the same grace period, for a reason
+// worth stating: the dangerous mistake here is the opposite of the Pod sweep's.
+// Deleting a Pod too eagerly kills a run; deleting a *policy* too eagerly
+// unfilters one — the Pod keeps running with its egress restriction quietly
+// gone. The grace period is what covers the window in Start between creating
+// the policy and creating the Pod that makes it visible to trackedPolicyNames.
+//
+// A failure to list is not fatal to the sweep as a whole. The Pods have already
+// been collected by the time this runs, and an operator whose RBAC lacks the
+// networkpolicies rule should hear about it from preflight, not by losing the
+// Pod reconciliation they actually needed.
+func (e *Executor) reconcileNetworkPolicies(ctx context.Context, cli *client, namespace string,
+	cutoff time.Time) []string {
+
+	if !e.opts.EgressFilter.Enabled {
+		// This executor creates no policies, and its identity has no reason to
+		// hold the RBAC that would let it list them. Sweeping anyway would put a
+		// 403 in the log of every deployment that does not use the filter, which
+		// is how operators learn to ignore logs. An executor whose filter was
+		// turned *off* leaves its last policies behind; they govern Pods that no
+		// longer exist, and `kubectl delete netpol -l cloop.dev/managed=true`
+		// removes them.
+		return nil
+	}
+
+	listCtx, cancel := context.WithTimeout(ctx, requestTimeout)
+	list, err := cli.listNetworkPolicies(listCtx, namespace, executorLabelSelector(e.id))
+	cancel()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "kubernetes: could not list egress NetworkPolicies for reconciliation in %s: %v\n",
+			namespace, err)
+		return nil
+	}
+
+	tracked := e.trackedPolicyNames()
+	var removed []string
+	for i := range list.Items {
+		meta := list.Items[i].Metadata
+		if _, ours := tracked[meta.Name]; ours {
+			continue
+		}
+		if meta.DeletionTimestamp != "" {
+			continue
+		}
+		// An unparsable or absent creationTimestamp is treated as young. The
+		// safe direction for a firewall is to leave it in place: a stale policy
+		// governs a Pod that no longer exists and costs nothing, while a deleted
+		// one may be governing a Pod that does.
+		created, perr := time.Parse(time.RFC3339, meta.CreationTimestamp)
+		if perr != nil || created.After(cutoff) {
+			continue
+		}
+		delCtx, delCancel := context.WithTimeout(ctx, cleanupTimeout)
+		derr := cli.deleteNetworkPolicy(delCtx, namespace, meta.Name)
+		delCancel()
+		if derr != nil {
+			fmt.Fprintf(os.Stderr, "kubernetes: could not reap orphan egress NetworkPolicy %s/%s: %v\n",
+				namespace, meta.Name, derr)
+			continue
+		}
+		removed = append(removed, namespace+"/networkpolicy/"+meta.Name)
+	}
+	return removed
 }
 
 // trackedPodNames is the set of Pod names this executor is actively running,
@@ -1802,6 +1991,23 @@ func (e *Executor) trackedPodNames() map[string]struct{} {
 		rec.mu.Lock()
 		if !rec.done {
 			names[rec.podName] = struct{}{}
+		}
+		rec.mu.Unlock()
+	}
+	return names
+}
+
+// trackedPolicyNames is the set of egress policies belonging to handles this
+// executor still has live, so reconciliation never removes the firewall from
+// underneath a running Pod.
+func (e *Executor) trackedPolicyNames() map[string]struct{} {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	names := make(map[string]struct{}, len(e.handles))
+	for _, rec := range e.handles {
+		rec.mu.Lock()
+		if !rec.done && rec.networkPolicyName != "" {
+			names[rec.networkPolicyName] = struct{}{}
 		}
 		rec.mu.Unlock()
 	}
@@ -1898,6 +2104,12 @@ func (e *Executor) pruneLocked() {
 // terminated. What this catches is every run that never got there — a Pod
 // deleted before it scheduled, a watch that lost the transition, a control
 // plane shutting down mid-fetch.
+//
+// The egress NetworkPolicy goes at the same point and never earlier. It is the
+// one cleanup that must not be eager: a policy removed while its Pod is still
+// terminating would hand a workload in its grace period the unrestricted egress
+// the filter exists to deny, and a SIGTERM handler is exactly where a
+// compromised harness would put its last outbound call.
 func (e *Executor) finish(rec *record, state executor.State, exitCode int, errMsg string) {
 	rec.mu.Lock()
 	if rec.done {
@@ -1922,10 +2134,22 @@ func (e *Executor) finish(rec *record, state executor.State, exitCode int, errMs
 	leaseID := rec.leaseID
 	rec.leaseID = ""
 	ws := rec.ws
+	// The egress policy is dropped only when the workload actually stopped.
+	// Close finishes every live handle with StateUnknown and deliberately
+	// leaves its Pods running, so a hub restarting for an upgrade would
+	// otherwise strip the firewall off every workload in flight — the precise
+	// hole this feature exists to close. Those policies are left behind and
+	// collected by ReconcileOrphans on the way back up, after it has collected
+	// the Pods they governed.
+	policyName := ""
+	if state.Terminal() {
+		policyName = rec.networkPolicyName
+	}
 	rec.mu.Unlock()
 
-	// Before cli.close(): the delete needs the client this record owns.
+	// Before cli.close(): the deletes need the client this record owns.
 	e.discardWorkspaceSecret(ws, cli, "")
+	e.deleteNetworkPolicyDetached(cli, rec.namespace, policyName)
 	if leaseID != "" && e.opts.Credentials != nil {
 		e.opts.Credentials.Release(leaseID)
 	}

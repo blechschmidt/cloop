@@ -18,17 +18,20 @@ automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountT
 ---
 # The authority the hub runs workloads with, in the workload namespace only.
 #
-# These eight rules are not a starting point to be widened — they are the exact
+# These eleven rules are not a starting point to be widened — they are the exact
 # set of calls pkg/executor/kubernetes issues, enumerated from the call sites:
 #
-#   pods    create   client.go createPod    — start a run
-#   pods    get      client.go getPod       — poll one workload
-#   pods    list     client.go listPods     — orphan reconciliation on startup
-#   pods    watch    client.go watchPod     — stream phase transitions
-#   pods    delete   client.go deletePod    — stop, kill, and cleanup
-#   pods/log get     client.go followLogs   — stream task output
-#   secrets create   client.go createSecret — hand one workspace fetch its credential
-#   secrets delete   client.go deleteSecret — take it back when the fetch is done
+#   pods            create client.go createPod           — start a run
+#   pods            get    client.go getPod              — poll one workload
+#   pods            list   client.go listPods            — orphan reconciliation on startup
+#   pods            watch  client.go watchPod            — stream phase transitions
+#   pods            delete client.go deletePod           — stop, kill, and cleanup
+#   pods/log        get    client.go followLogs          — stream task output
+#   secrets         create client.go createSecret        — hand one workspace fetch its credential
+#   secrets         delete client.go deleteSecret        — take it back when the fetch is done
+#   networkpolicies create client.go createNetworkPolicy — the Pod's egress allowlist, before the Pod
+#   networkpolicies delete client.go deleteNetworkPolicy — remove it when the Pod is gone
+#   networkpolicies list   client.go listNetworkPolicies — orphan sweep, and the preflight check
 #
 # ## The secrets rule
 #
@@ -57,9 +60,36 @@ automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountT
 # server's audit log. With it, the Pod carries a reference and the material
 # lives for the length of one git fetch.
 #
+# ## The networkpolicies rule
+#
+# create, delete and list, in the networking.k8s.io group. This is what makes
+# executors.kubernetes.egress_filter real: without it the driver can only label
+# a Pod with its egress intent, and the Pod reaches whatever the cluster's pod
+# network reaches. The driver creates one policy per Pod — selecting that Pod
+# alone by its cloop.dev/handle-id label — before the Pod exists, and deletes it
+# when the Pod is finished.
+#
+# list is here because the orphan sweep needs it, and only because of that. A
+# control plane killed mid-run leaves the policy behind along with the Pod, and
+# the sweep that collects orphaned Pods by label has to be able to find their
+# policies by the same label. Nothing else in the driver reads a policy back.
+#
+# There is deliberately no update or patch, here or anywhere else in this Role.
+# A policy is written once, before the workload it governs starts; an identity
+# that could rewrite it afterwards could widen a running sandbox's egress
+# without touching the sandbox — which is precisely the authority a firewall
+# must not hand out. Replacing a policy means deleting it, which means the Pod
+# it selected is already gone.
+#
+# The rule can be omitted for a deployment that does not filter egress: the
+# driver only creates, lists or deletes NetworkPolicies when the filter is
+# enabled, and `cloop executor test` reports a missing rule as a fatal finding
+# rather than silently running Pods unfiltered.
+#
 # There is still no `update` or `patch` on anything: the driver never mutates
 # an object after creating it, so a compromised hub cannot rewrite a running
-# workload's spec or swap a credential under a Pod that already started.
+# workload's spec, swap a credential under a Pod that already started, or
+# loosen the egress policy of one that is running.
 #
 # `/version` is also called (preflight). It needs no rule here: Kubernetes
 # grants it to system:authenticated through the built-in
@@ -86,6 +116,11 @@ rules:
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["create", "delete"]
+  # The per-Pod egress allowlist. list is for the orphan sweep; there is no
+  # update, so a running Pod's firewall cannot be widened. See the note above.
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["create", "delete", "list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

@@ -267,3 +267,75 @@ func TestParseBytesRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+// TestWideCIDRsCannotBypassTheBlockSet: CheckAddr lets an explicit CIDR waive
+// the hard-block set, so an entry broad enough to cover everything — or to
+// cover the metadata endpoint without naming it — would be the blanket
+// allow_private flag the field's documentation says does not exist.
+//
+// pkg/netfilter refuses the same shapes; agreement between the packet filter
+// and the proxy depends on both refusing them.
+func TestWideCIDRsCannotBypassTheBlockSet(t *testing.T) {
+	cases := []struct {
+		cidr   string
+		reject bool
+		why    string
+	}{
+		{"0.0.0.0/0", true, "waives every blocked v4 range at once"},
+		{"::/0", true, "waives every blocked v6 range at once"},
+		{"169.254.0.0/16", true, "contains the metadata service without naming it"},
+		{"169.254.128.0/17", true, "still contains the metadata service"},
+		{"169.254.169.254/32", false, "names the metadata service explicitly"},
+		{"169.254.0.0/17", false, "link-local below the metadata address"},
+		{"10.0.0.0/8", false, "one named private range, which is the supported shape"},
+		{"10.8.0.0/24", false, "a narrow private range"},
+		{"2001:db8::/32", false, "an ordinary v6 prefix"},
+	}
+	for _, c := range cases {
+		g := Grant{
+			ID:      "egress_test",
+			Subject: secretbroker.Subject{Type: secretbroker.SubjectProject, Value: "p"},
+			CIDRs:   []string{c.cidr},
+			Ports:   []int{443},
+		}
+		err := g.Validate()
+		if c.reject && err == nil {
+			t.Errorf("Validate accepted --cidrs %s — it %s", c.cidr, c.why)
+		}
+		if !c.reject && err != nil {
+			t.Errorf("Validate rejected --cidrs %s (%s): %v", c.cidr, c.why, err)
+		}
+		if c.reject && err != nil && !errors.Is(err, ErrInvalidGrant) {
+			t.Errorf("--cidrs %s: error is not ErrInvalidGrant: %v", c.cidr, err)
+		}
+	}
+}
+
+// TestMetadataStaysBlockedUnderAnAcceptedGrant closes the loop: with the wide
+// shapes refused, no grant the broker will accept reaches the metadata
+// service except one that spells the address out.
+func TestMetadataStaysBlockedUnderAnAcceptedGrant(t *testing.T) {
+	accepted := func(cidrs ...string) *Grant {
+		t.Helper()
+		g := &Grant{
+			ID:      "egress_test",
+			Subject: secretbroker.Subject{Type: secretbroker.SubjectProject, Value: "p"},
+			Hosts:   []string{"*"},
+			CIDRs:   cidrs,
+			Ports:   []int{443},
+		}
+		if err := g.Validate(); err != nil {
+			t.Fatalf("Validate(%v): %v", cidrs, err)
+		}
+		return g
+	}
+	if err := accepted().CheckAddr(MetadataIPv4, true); err == nil {
+		t.Error("--hosts '*' reached the metadata service")
+	}
+	if err := accepted("10.0.0.0/8").CheckAddr(MetadataIPv4, true); err == nil {
+		t.Error("an unrelated private CIDR reached the metadata service")
+	}
+	if err := accepted("169.254.169.254/32").CheckAddr(MetadataIPv4, false); err != nil {
+		t.Errorf("an explicit /32 for the metadata service was refused: %v", err)
+	}
+}

@@ -641,11 +641,39 @@ func TestCapabilities(t *testing.T) {
 		t.Errorf("capabilities understate the driver: %+v", caps)
 	}
 	if !caps.NetworkEgress {
-		t.Error("NetworkEgress must be true: cloop does not enforce a NetworkPolicy, and claiming " +
-			"an isolation it does not provide is the failure mode that matters")
+		t.Error("NetworkEgress must be true with no egress filter configured: the Pod joins the " +
+			"cluster network and cloop creates no NetworkPolicy, and claiming an isolation it does " +
+			"not provide is the failure mode that matters")
 	}
 	if ex.Kind() != executor.KindKubernetes {
 		t.Errorf("Kind = %q, want %q", ex.Kind(), executor.KindKubernetes)
+	}
+}
+
+// TestCapabilities_FollowsTheEgressFilter: once the driver actually enforces
+// egress, the honest answer changes with the configuration.
+//
+// A filter with an allowance still has egress — a narrower one, but the
+// placement question "can a workload here reach the network" is still yes. A
+// filter that names no destination has none, and reporting yes would place a
+// project that requires the network into a Pod whose every packet is dropped:
+// a run that fails minutes later with a connection timeout, rather than a
+// placement refusal that names the executor and the constraint.
+func TestCapabilities_FollowsTheEgressFilter(t *testing.T) {
+	allowing, _, _ := newTestExecutor(t, func(o *Options) {
+		o.EgressFilter = EgressFilter{Enabled: true, CIDRs: []string{"10.8.0.0/24"}, Ports: []int{443}}
+	})
+	if !allowing.Capabilities().NetworkEgress {
+		t.Error("NetworkEgress must stay true for a filter that allows destinations")
+	}
+
+	denying, _, _ := newTestExecutor(t, func(o *Options) {
+		o.EgressFilter = EgressFilter{Enabled: true}
+	})
+	if denying.Capabilities().NetworkEgress {
+		t.Error("NetworkEgress must be false for a filter that allows nothing: a project requiring " +
+			"the network should be refused at placement, not scheduled into a sandbox that drops " +
+			"every packet")
 	}
 }
 

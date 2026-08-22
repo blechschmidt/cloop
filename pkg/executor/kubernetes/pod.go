@@ -78,12 +78,17 @@ const (
 // otherwise.
 //
 // It is a *label*, unlike the sandbox hash, precisely so a NetworkPolicy can
-// select on it — and that is also the honest limit of what this driver can do.
-// A Pod spec has no field that turns egress off; only a NetworkPolicy does, and
-// that is a namespace-scoped object owned by the cluster operator. So the
-// driver states the intent in the one place the enforcement mechanism can read
-// it, and the operator installs the companion default-deny policy (see
-// docs/executors.md). Without that policy the label is documentation.
+// select on it. A Pod spec has no field that turns egress off; only a
+// NetworkPolicy does, so the driver states the intent in the one place an
+// enforcement mechanism can read it.
+//
+// What enforces it depends on configuration, and the difference is worth being
+// exact about. With executors.kubernetes.egress_filter enabled, this driver
+// creates the policy itself — one per Pod, selecting that Pod by its handle-id
+// label, denying everything when this label reads "deny" (see
+// networkpolicy.go). Without it, nothing here enforces anything: the label is
+// documentation for an operator's own namespace-wide default-deny policy, and a
+// namespace without one leaves every Pod with the cluster's full egress.
 //
 // The alternative was to refuse every sandbox spec that omits
 // capabilities.network on Kubernetes, which is nearly all of them — a

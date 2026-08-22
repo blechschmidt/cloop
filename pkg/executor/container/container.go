@@ -19,7 +19,8 @@
 //     workload creates are owned correctly on the host and a container escape
 //     lands on an unprivileged user. (Under rootless podman the same is
 //     achieved with --userns=keep-id.)
-//   - --network=none by default. Egress is opt-in per executor.
+//   - --network=none by default. Egress is opt-in per executor, and when it
+//     is opted into it can be filtered at the IP layer — see Egress below.
 //   - all Linux capabilities dropped and no-new-privileges set, so a setuid
 //     binary inside the image cannot undo the UID choice.
 //   - --cpus / --memory / --pids-limit from the Spec's ResourceLimits, with
@@ -29,12 +30,28 @@
 // and exhaustively unit-tested. That file is the security boundary; this one
 // is lifecycle plumbing around it.
 //
-// # What it deliberately does not do
+// # Egress
 //
-// It does not filter egress. When an operator opts into a network, cloop
-// attaches the container to it and says so in preflight; per-destination
-// policy belongs to the network (a --internal podman network, an egress
-// proxy, a CNI plugin), not to a flag we could pretend to enforce.
+// It used to say here that this driver does not filter egress, and that
+// per-destination policy belonged to somebody else. That was true and it was
+// a hole: an operator who opted into a network got unrestricted outbound
+// access, and the egress broker's allowlist bound only a workload that chose
+// to honour $HTTP_PROXY. A harness opening a raw socket ignored all of it.
+//
+// firewall.go closes that. With executors.container.egress_filter enabled the
+// executor provisions a network of its own and either makes it --internal —
+// no route off the host, so the broker is the only way out — or installs an
+// nftables ruleset on the sandbox bridge compiled by pkg/netfilter from the
+// same authorisation the broker enforces. The filter is off by default,
+// because switching it on under a running deployment would look like a
+// network outage rather than a policy.
+//
+// What it still cannot do is enforce a hostname allowlist, because hostnames
+// do not exist at layer 3; that compiles to "the public Internet on these
+// ports" and the compiled policy carries a warning saying so. Preflight
+// reports both the filter's presence and its scope.
+//
+// # What it deliberately does not do
 //
 // It does not pull images. Start passes --pull=never so a cold image cache
 // fails immediately with an actionable error instead of turning a UI click
@@ -150,6 +167,17 @@ type Options struct {
 	// that says how to fix it.
 	AllowRootUser bool
 
+	// EgressFilter is the IP-layer egress policy applied to every sandbox
+	// this executor starts. The zero value filters nothing, which is what
+	// every deployment predating it gets. See firewall.go.
+	//
+	// When it is enabled the executor stops using Network above and runs
+	// sandboxes on a network of its own, because the filter and the network
+	// are one decision: an operator-named network could be shared with
+	// workloads this executor does not manage, and installing a default-deny
+	// ruleset on their bridge would firewall them too.
+	EgressFilter EgressFilter
+
 	// ImagePolicy constrains the images a *project* may name in its
 	// .cloop/sandbox.yaml (Task 20177). The zero value constrains nothing.
 	//
@@ -197,6 +225,14 @@ func (o Options) Normalize() (Options, error) {
 	case "", "z", "Z":
 	default:
 		return o, fmt.Errorf("container: selinux_label must be empty, \"z\", or \"Z\", got %q", o.SELinuxLabel)
+	}
+	if err := o.EgressFilter.Validate(); err != nil {
+		return o, err
+	}
+	if o.EgressFilter.Enabled && o.Network == NetworkNone {
+		return o, fmt.Errorf("container: egress filter is enabled but network is \"none\" — " +
+			"a workload with no interfaces has nothing to filter; set network to \"bridge\" to " +
+			"let the executor manage a filtered network of its own, or drop the filter")
 	}
 	if o.Network == NetworkNone && len(o.AllowHosts) > 0 {
 		return o, fmt.Errorf("container: allow_hosts is set but network is \"none\" — " +
@@ -349,7 +385,13 @@ func (e *Executor) Capabilities() executor.Capabilities {
 		SupportsSignal:         true,
 		SupportsResourceLimits: true,
 		SharesHostFilesystem:   true,
-		NetworkEgress:          e.opts.Network != NetworkNone,
+		// NetworkEgress reports reachability, not permission: a filtered
+		// sandbox still has an interface and still reaches whatever the
+		// policy allows, so claiming false would misroute placement away
+		// from an executor that can do the work. FilteredEgress below is
+		// the field that says the reach is bounded.
+		NetworkEgress:  e.opts.Network != NetworkNone,
+		FilteredEgress: e.opts.EgressFilter.Enabled,
 		// Stated explicitly rather than left to the zero value: a driver that
 		// bind-mounts the host path has already answered the workspace
 		// question, and a reader of this struct should not have to infer that
@@ -410,6 +452,23 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, extraMounts []
 	req, err := e.buildRequest(spec, workDir, extraMounts)
 	if err != nil {
 		return executor.Handle{}, err
+	}
+
+	// Provision and filter the network before anything can run on it. The
+	// bridge exists from the moment the runtime creates the network, which
+	// is strictly before a container can join, so there is no window in
+	// which the sandbox is up and unfiltered — see firewall.go.
+	//
+	// A sandbox spec that took the network away is left alone: DisableNetwork
+	// has already set req.Network to "none", which is narrower than anything
+	// the filter would install, and provisioning a bridge for a workload
+	// that will have no interfaces is pure cost.
+	if e.opts.EgressFilter.Enabled && req.Network != NetworkNone {
+		network, ferr := e.installFirewall(ctx)
+		if ferr != nil {
+			return executor.Handle{}, ferr
+		}
+		req.Network = network
 	}
 
 	// Resolve the image last, because it is the only step that can be slow:

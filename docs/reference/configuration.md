@@ -107,12 +107,15 @@ server holds, so variables are passed explicitly or not at all.
 
 ### What the container sandbox does not do
 
-- **It does not filter egress itself.** Anything other than `network: none`
-  grants unrestricted outbound access unless the named network carries its own
-  policy. `cloop executor test` says so explicitly rather than implying a
-  guarantee. The supported way to give a sandbox *scoped* network access is to
-  leave it on `network: none` and grant it egress through the broker — see
-  [Scoped network egress](#scoped-network-egress) below.
+- **It does not filter egress unless you configure it to.** Anything other than
+  `network: none` grants unrestricted outbound access unless the named network
+  carries its own policy, and `cloop executor test` warns rather than implying a
+  guarantee. Two supported ways to give a sandbox *scoped* network access:
+  leave it on `network: none` and grant egress through the broker
+  ([Scoped network egress](#scoped-network-egress)), or turn on
+  [`egress_filter`](#ip-layer-egress-filtering), which enforces the same
+  allowlist at the IP layer. They compose, and the second is what binds a
+  workload that ignores the first.
 - **It does not pull images.** Runs use `--pull=never` so a cold image cache
   fails immediately with an actionable error instead of turning a UI click into
   a multi-minute hang. Preflight tells you what to pull.
@@ -124,6 +127,162 @@ server holds, so variables are passed explicitly or not at all.
 (`--privileged`, `--cap-add`, `--volume`, `--network`, `--user`, `--entrypoint`,
 `--env`, …) are rejected, and every entry must be a flag in `--flag=value` form
 so a bare value cannot be consumed as the image reference.
+
+### IP-layer egress filtering
+
+[Scoped network egress](#scoped-network-egress) below is an HTTP proxy: it
+enforces hosts, methods and quotas, and it only ever sees traffic the workload
+chose to send it. A harness that opens a raw socket, or runs
+`curl --noproxy '*'`, or speaks anything that is not HTTP, walks past all of it.
+`egress_filter` is what binds that harness — a packet filter compiled from the
+same allowlist, enforced by the kernel rather than by the workload's
+cooperation.
+
+The recommended configuration is two lines:
+
+```yaml
+executors:
+  container:
+    enabled: true
+    network: bridge
+    egress_filter:
+      enabled: true
+      internal: true
+```
+
+`internal: true` puts sandboxes on a runtime network the runtime installs no
+route off. Nothing on it reaches the Internet at all, so put the egress broker
+on the host and it becomes the only way out — which is what makes the broker's
+*host* allowlist meaningful rather than advisory. It needs no `nft`, no
+`CAP_NET_ADMIN` and no host privileges of any kind.
+
+Everything else in the section describes **direct** egress, for destinations a
+sandbox must dial itself — a Kubernetes API server, an internal registry. That
+form installs an nftables ruleset on the sandbox bridge from the host side, so
+it needs `nft(8)` on the host and `CAP_NET_ADMIN` in the control plane.
+
+```yaml
+executors:
+  container:
+    network: bridge
+    egress_filter:
+      enabled: false               # default; see "off by default", below
+      internal: false              # route sandboxes through the broker only
+      allow_cidrs: []              # ranges a sandbox may dial directly
+      allow_ports: []              # required whenever a destination is allowed
+      allow_public_internet: false # every address outside the block set
+      resolvers: []                # DNS servers it may query directly
+      broker: ""                   # egress proxy endpoint, address:port literal
+      host_patterns: []            # the L7 allowlist this filter cannot enforce
+```
+
+| Key | Meaning |
+| --- | --- |
+| `enabled` | Turns the filter on. With it off the configured `network` is used as-is and the remaining keys are inert |
+| `internal` | Sandboxes join a network with no route off the host. Needs no privileges |
+| `allow_cidrs` | Address ranges a sandbox may dial directly (`10.8.0.0/24`). The **only** setting that opens private space, and it opens exactly what it names |
+| `allow_ports` | Destination ports every allow above is bounded by. **Required** whenever `allow_cidrs` or `allow_public_internet` is set |
+| `allow_public_internet` | Every address outside the block set, on `allow_ports`. This is what a hostname allowlist becomes at layer 3 |
+| `resolvers` | DNS servers the sandbox may query directly, as address literals (`10.7.0.10`, or with a port). Opened on UDP *and* TCP |
+| `broker` | The egress proxy endpoint, as an `address:port` literal. Only needed alongside direct egress — on an internal network the broker shares the bridge |
+| `host_patterns` | Records the L7 allowlist this filter cannot enforce, so the rendered ruleset and the preflight report can name what was widened |
+
+**Off by default, and the default is load-bearing.** Silently firewalling an
+existing deployment on upgrade would break it in a way that looks like a network
+outage, and a security control that arrives switched on without being asked for
+is one operators learn to switch off. Enabling it is a decision, made once, in a
+file. Preflight reports the unconfigured case as a *warning* rather than staying
+silent, because a driver that says nothing about egress reads as one that
+constrains it.
+
+Four rules the section is validated against, all of them refusals rather than
+guesses:
+
+- **`allow_cidrs` opens exactly what it names.** Listing `10.8.0.0/24` does not
+  lift the block on the rest of `10.0.0.0/8`. A `/0` is refused outright — it is
+  not an allowlist entry, it is the removal of the block set — and so is any
+  prefix that covers `169.254.169.254` without naming the address exactly.
+- **Destinations without ports are an error.** An allow rule with no port
+  restriction is a hole, and "they probably meant 80 and 443" is not a decision
+  a firewall compiler makes on an operator's behalf.
+- **`broker` and `resolvers` take address literals, never names.** A packet
+  filter matches addresses, so a name here would be resolved once at
+  configuration time and pinned silently — the DNS rebinding hazard the broker's
+  own resolve-once discipline exists to prevent.
+- **`enabled: true` with `network: none` is refused**, because a workload with
+  no interfaces has nothing to filter, and the refusal says which of the two to
+  change.
+
+**`host_patterns` cannot be enforced and says so.** `*.github.com` is a name;
+names do not exist at layer 3. Direct egress compiled from a host allowlist is
+"every public address on `allow_ports`" and nothing narrower is possible. Listing
+the patterns here does not enforce them — it makes the compiled policy carry a
+warning naming them and what they became, which lands in the nft ruleset as a
+comment and in `cloop executor test` as an `egress-scope` finding. If the host
+allowlist is the control you are relying on, use `internal: true`.
+
+#### On Kubernetes: a NetworkPolicy per Pod
+
+`executors.kubernetes.egress_filter` compiles the same allowlist into a
+`NetworkPolicy` created alongside each Pod and selecting that Pod alone. The
+keys differ slightly from the container section — there is no `internal` and no
+`broker`, because a Pod's network is the cluster's — and one is new:
+
+```yaml
+executors:
+  kubernetes:
+    enabled: true
+    egress_filter:
+      enabled: false               # default
+      cidrs: []                    # destination ranges (note: not allow_cidrs)
+      ports: []                    # required whenever a destination is allowed
+      allow_public_internet: false
+      resolvers: []                # only when not using cluster DNS
+      allow_cluster_dns: true      # UDP and TCP 53 to kube-system; unset means true
+```
+
+`allow_cluster_dns` is on unless you set it to `false`, and should stay on: a
+default-deny egress policy without it breaks name resolution, and that failure
+reads to everyone involved as "the network is broken" rather than "DNS is
+denied". It is expressed as a `namespaceSelector` on `kube-system` rather than
+an address, because cluster DNS lives on a Service ClusterIP in private space
+and which side of the policy the CNI applies its DNAT on varies by CNI.
+
+Off by default for the same reason as the container section, plus one more: an
+empty allowlist denies everything, including whatever your harness clones from.
+Turning it on wants `cidrs`/`ports` or `allow_public_internet` set alongside it.
+
+Two things it needs from the cluster, neither of which cloop can supply:
+
+- **RBAC.** The executor's identity needs
+  `networkpolicies: [create delete list]` in the workload namespace. Preflight
+  lists them to prove the leased identity actually has it; a `403` is a `fail`,
+  because every `Start` will then refuse rather than run a Pod with unfiltered
+  egress. The Helm chart's `executor.kubernetes.rbac.create` grants them.
+- **A CNI that implements NetworkPolicy.** flannel does not; Calico, Cilium,
+  Antrea and most managed CNIs do. The API server stores the object either way,
+  so a cluster with the wrong CNI looks identical to a working one from the
+  hub's side. `cloop executor test kubernetes` carries this as a standing
+  `egress-enforcement` warning.
+
+A malformed `egress_filter` **disables the Kubernetes executor** rather than
+being cleared to a default, with a message naming what would not compile. The
+container section is validated the same way but through its driver options, so
+a bad value there is a refusal to build the executor rather than a silent
+fallback. In the chart, the same settings are
+`executor.kubernetes.egressFilter.{enabled,cidrs,ports,allowPublicInternet,resolvers,allowClusterDNS}`.
+
+Preview any of this before writing it, without touching the host:
+
+```bash
+cloop egress firewall --cidrs 10.8.0.0/24 --ports 6443 --format rules
+cloop egress firewall --internet --ports 443 --check 169.254.169.254:80
+```
+
+See [`cloop egress firewall`](commands.md#cloop-egress-firewall) for the full
+command, and [the executor architecture](../architecture/executors.md#sandbox-network-isolation)
+for how the two mechanisms are chosen and why the ruleset is installed on the
+host side.
 
 ### VM-isolated sandboxes: Kata Containers
 
@@ -445,6 +604,13 @@ Revocation is immediate rather than TTL-bounded, which is the payoff for
 brokering a *capability* instead of handing over a token: a leaked PAT cannot
 be recalled from a running container, but a proxy session is torn down at the
 proxy, mid-tunnel, by the control plane that holds it.
+
+**What the proxy cannot do is bind a workload that does not use it.** Every
+check above applies to traffic the harness chose to send through `$HTTP_PROXY`.
+Pair it with [`egress_filter`](#ip-layer-egress-filtering) — ideally
+`internal: true`, where the proxy is the only address the sandbox can reach at
+all — so that the allowlist above is enforced on everything rather than on the
+cooperative case.
 
 ### Hardened (enterprise) configuration
 

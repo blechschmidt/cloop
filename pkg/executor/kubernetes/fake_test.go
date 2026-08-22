@@ -19,11 +19,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/blechschmidt/cloop/pkg/netfilter"
 )
 
 // fakeAPI is a minimal Kubernetes API server.
@@ -42,6 +45,16 @@ type fakeAPI struct {
 	// handlers and every assertion about them are in workspace_test.go.
 	secrets       map[string]*secret
 	secretDeletes []string
+	// policies holds the egress NetworkPolicies the driver creates, keyed by
+	// name, and policyDeletes records every delete. The routing that fills them
+	// is here; the assertions are in networkpolicy_test.go.
+	policies      map[string]*netfilter.NetworkPolicy
+	policyDeletes []string
+	// createOrder records the kind of every object create, in arrival order, so
+	// a test can prove the policy landed before the Pod it governs. A Pod that
+	// starts first has a window of unfiltered egress, and a window is all an
+	// exfiltration needs.
+	createOrder []string
 	// history is the per-Pod event log a watch replays from. A real API
 	// server keeps one so a client that reconnects with a resourceVersion
 	// does not miss what happened while it was away; without it here, every
@@ -116,6 +129,7 @@ func newFakeAPI(t *testing.T) *fakeAPI {
 		history:  make(map[string][]versionedEvent),
 		failures: make(map[string]apiFailure),
 		secrets:  make(map[string]*secret),
+		policies: make(map[string]*netfilter.NetworkPolicy),
 	}
 	f.srv = httptest.NewTLSServer(http.HandlerFunc(f.route))
 	t.Cleanup(f.srv.Close)
@@ -166,6 +180,9 @@ func (f *fakeAPI) route(w http.ResponseWriter, r *http.Request) {
 	case strings.Contains(r.URL.Path, "/secrets"):
 		f.routeSecret(w, r)
 
+	case strings.Contains(r.URL.Path, "/networkpolicies"):
+		f.routeNetworkPolicy(w, r)
+
 	case strings.HasSuffix(r.URL.Path, "/log"):
 		f.handleLog(w, r)
 
@@ -209,6 +226,137 @@ func path4(p string) string {
 	return ""
 }
 
+// routeNetworkPolicy serves the three NetworkPolicy calls this driver makes.
+//
+// It serves the collection GET the orphan sweep and preflight need, and
+// deliberately nothing else: no single-object GET, no PUT and no PATCH. The
+// driver has neither read-back nor update authority, and a fake that answered
+// either would let a regression that widened a running Pod's firewall pass.
+func (f *fakeAPI) routeNetworkPolicy(w http.ResponseWriter, r *http.Request) {
+	name := pathAfter(r.URL.Path, "networkpolicies")
+	switch {
+	case r.Method == http.MethodPost && name == "":
+		var in netfilter.NetworkPolicy
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			writeStatus(w, 400, "BadRequest", "undecodable body: "+err.Error())
+			return
+		}
+		if in.Metadata.Name == "" {
+			writeStatus(w, 422, "Invalid", "metadata.name is required")
+			return
+		}
+		f.mu.Lock()
+		_, exists := f.policies[in.Metadata.Name]
+		if !exists {
+			stored := in
+			f.policies[in.Metadata.Name] = &stored
+			f.createOrder = append(f.createOrder, "networkpolicy")
+		}
+		f.mu.Unlock()
+		if exists {
+			writeStatus(w, 409, "AlreadyExists", fmt.Sprintf("networkpolicies %q already exists", in.Metadata.Name))
+			return
+		}
+		writeJSON(w, 201, in)
+
+	case r.Method == http.MethodGet && name == "":
+		selector := r.URL.Query().Get("labelSelector")
+		f.mu.Lock()
+		out := networkPolicyList{}
+		out.Metadata.ResourceVersion = "1"
+		for policyName, np := range f.policies {
+			if !matchesSelector(np.Metadata.Labels, selector) {
+				continue
+			}
+			out.Items = append(out.Items, networkPolicyItem{Metadata: objectMeta{
+				Name:              policyName,
+				Namespace:         np.Metadata.Namespace,
+				Labels:            np.Metadata.Labels,
+				CreationTimestamp: f.policyCreatedLocked(policyName),
+			}})
+		}
+		f.mu.Unlock()
+		writeJSON(w, 200, out)
+
+	case r.Method == http.MethodDelete && name != "":
+		f.mu.Lock()
+		_, ok := f.policies[name]
+		delete(f.policies, name)
+		f.policyDeletes = append(f.policyDeletes, name)
+		f.mu.Unlock()
+		if !ok {
+			writeStatus(w, 404, "NotFound", fmt.Sprintf("networkpolicies %q not found", name))
+			return
+		}
+		writeJSON(w, 200, map[string]string{"kind": "Status", "status": "Success"})
+
+	default:
+		writeStatus(w, 405, "MethodNotAllowed", r.Method+" "+r.URL.Path)
+	}
+}
+
+// policyCreatedLocked reports the creationTimestamp a listed policy carries.
+// Seeded policies record their own in an annotation so an orphan-sweep test can
+// age one past the grace period; anything else is brand new. Caller holds f.mu.
+func (f *fakeAPI) policyCreatedLocked(name string) string {
+	if np := f.policies[name]; np != nil {
+		if ts := np.Metadata.Annotations[fakeCreatedAnnotation]; ts != "" {
+			return ts
+		}
+	}
+	return time.Now().UTC().Format(time.RFC3339)
+}
+
+// fakeCreatedAnnotation carries a seeded policy's age. It is a fixture detail:
+// netfilter.NetworkPolicyMeta models no creationTimestamp, because nothing in
+// the driver *writes* one — the API server does.
+const fakeCreatedAnnotation = "fake.cloop.dev/created-at"
+
+// seedNetworkPolicy inserts a policy directly, bypassing create — used to
+// simulate what a killed control plane leaves behind.
+func (f *fakeAPI) seedNetworkPolicy(name string, labels map[string]string, age time.Duration) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.policies[name] = &netfilter.NetworkPolicy{
+		Metadata: netfilter.NetworkPolicyMeta{
+			Name:        name,
+			Namespace:   "cloop",
+			Labels:      labels,
+			Annotations: map[string]string{fakeCreatedAnnotation: time.Now().Add(-age).UTC().Format(time.RFC3339)},
+		},
+	}
+}
+
+func (f *fakeAPI) policyNames() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]string, 0, len(f.policies))
+	for name := range f.policies {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func (f *fakeAPI) policy(name string) *netfilter.NetworkPolicy {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.policies[name]
+}
+
+// creates returns the kinds created so far, in order.
+func (f *fakeAPI) creates() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.createOrder...)
+}
+
+func (f *fakeAPI) policyDeleteNames() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.policyDeletes...)
+}
+
 func (f *fakeAPI) handleCreate(w http.ResponseWriter, r *http.Request) {
 	var in pod
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
@@ -230,6 +378,7 @@ func (f *fakeAPI) handleCreate(w http.ResponseWriter, r *http.Request) {
 	stored := in
 	f.pods[in.Metadata.Name] = &stored
 	f.logs[in.Metadata.Name] = newLogStream()
+	f.createOrder = append(f.createOrder, "pod")
 	// Serialise the response from an independent copy, not from `stored`.
 	// The map holds &stored, so the driver's Start can return, the test can
 	// call setPhase, and the kubelet-simulating mutation lands on the very

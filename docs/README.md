@@ -11,8 +11,11 @@ secret kind, or a new RBAC role ships without appearing here — see
   orchestrator to a sandbox and back. The `Executor` interface, the four
   backends (`localprocess`, `container`, `remote`, `kubernetes`), registry and
   binding, capability-aware placement, workspace provisioning, health
-  supervision, and exactly-once failover. Includes the outbound agent enrollment
-  flow for NAT'd edge devices.
+  supervision, and exactly-once failover. Includes
+  [sandbox network isolation](architecture/executors.md#sandbox-network-isolation)
+  — the `--internal` network, the host-side nftables ruleset, the per-Pod
+  `NetworkPolicy` and why the filter is installed before the workload — and the
+  outbound agent enrollment flow for NAT'd edge devices.
 
 ## Reference
 
@@ -21,6 +24,15 @@ secret kind, or a new RBAC role ships without appearing here — see
   capabilities and mounts one project's tasks run under. What a spec can narrow
   and what it can never widen, which executor honours which field, and the
   digest pin that keeps a run reproducible after the tag moves.
+- **[Configuration](reference/configuration.md)** — executors, sandbox images,
+  transport security, SSO and TLS, including
+  [IP-layer egress filtering](reference/configuration.md#ip-layer-egress-filtering):
+  the `egress_filter` keys for both the container and Kubernetes backends, why
+  they are off by default, and what a hostname allowlist compiles to at layer 3.
+- **[Commands](reference/commands.md)** — every CLI subcommand, including
+  [`cloop egress firewall`](reference/commands.md#cloop-egress-firewall), which
+  renders the packet filter an authorisation compiles to and answers
+  "would this address get out" with the verdict in its exit status.
 
 ## Security
 
@@ -28,9 +40,13 @@ secret kind, or a new RBAC role ships without appearing here — see
   each authenticates with, the strict no-host-execution guarantee, lease
   revocation, how a workspace credential reaches one process and nothing else,
   roles and permissions, and a table mapping every stated guarantee to the test
-  in `tests/security/` that machine-checks it.
+  in `tests/security/` that machine-checks it. Read
+  [the network the sandbox sits on](security/model.md#the-network-the-sandbox-sits-on)
+  for what the HTTP proxy binds, what the packet filter binds, and the one thing
+  neither can do.
 - **[Threat model](security/threat-model.md)** — STRIDE per boundary, with the
-  concrete mitigation that exists and an honest residual-risk column.
+  concrete mitigation that exists and an honest residual-risk column, plus the
+  [two vulnerabilities found while building the egress filter](security/threat-model.md#two-vulnerabilities-found-while-building-this).
 
 ## Guides
 

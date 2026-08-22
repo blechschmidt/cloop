@@ -441,6 +441,22 @@ func ValidateContainerExecutor(c ContainerExecutorConfig) error {
 	return nil
 }
 
+// driverFilter converts the egress-filter section into the driver's own
+// type. It lives here rather than beside the struct because config.go models
+// the YAML and this file is where the driver packages are imported.
+func (c ContainerEgressFilterConfig) driverFilter() container.EgressFilter {
+	return container.EgressFilter{
+		Enabled:             c.Enabled,
+		Internal:            c.Internal,
+		AllowCIDRs:          c.AllowCIDRs,
+		AllowPorts:          c.AllowPorts,
+		AllowPublicInternet: c.AllowPublicInternet,
+		Resolvers:           c.Resolvers,
+		Broker:              strings.TrimSpace(c.Broker),
+		HostPatterns:        c.HostPatterns,
+	}
+}
+
 // DriverOptions converts the config section into driver options, applying the
 // driver's own normalisation and validation.
 //
@@ -465,6 +481,7 @@ func (c ContainerExecutorConfig) DriverOptions() (container.Options, error) {
 		ExtraArgs:     c.ExtraArgs,
 		SELinuxLabel:  c.SELinuxLabel,
 		AllowRootUser: c.AllowRootUser,
+		EgressFilter:  c.EgressFilter.driverFilter(),
 	}
 	return opts.Normalize()
 }
@@ -515,12 +532,39 @@ func ValidateKubernetesExecutor(k KubernetesExecutorConfig) error {
 			"credential from the secret broker; pick one")
 	}
 
+	// The egress filter is compiled, not pattern-matched. netfilter.Compile is
+	// the same function that renders the NetworkPolicy at Start, so anything it
+	// refuses here — an unparsable CIDR, a destination with no ports, a /0 that
+	// would waive the metadata endpoint — is refused for the reason it will be
+	// refused later, in the operator's own vocabulary and while they still have
+	// the file open. The alternative is a config that loads and an executor
+	// whose every Start fails at three in the morning.
+	if _, err := k.EgressFilter.driverFilter().Compile(); err != nil {
+		return fmt.Errorf("executors.kubernetes.egress_filter: %w", err)
+	}
+
 	// Delegated to the driver so the Pod-critical checks (namespace, image
 	// reference, quantities, tolerations) have a single definition.
 	if _, err := k.DriverOptions(); err != nil {
 		return fmt.Errorf("executors.kubernetes: %w", err)
 	}
 	return nil
+}
+
+// driverFilter maps the config section onto the driver's own type.
+//
+// A plain projection with no validation of its own: what a CIDR means is the
+// driver's and pkg/netfilter's business, and a second opinion here would be a
+// second place for the two to disagree about what a sandbox may reach.
+func (e KubernetesEgressFilterConfig) driverFilter() kubernetes.EgressFilter {
+	return kubernetes.EgressFilter{
+		Enabled:             e.Enabled,
+		CIDRs:               e.CIDRs,
+		Ports:               e.Ports,
+		AllowPublicInternet: e.AllowPublicInternet,
+		Resolvers:           e.Resolvers,
+		AllowClusterDNS:     e.AllowClusterDNS,
+	}
 }
 
 // DriverOptions converts the config section into driver options, applying the
@@ -552,6 +596,7 @@ func (k KubernetesExecutorConfig) DriverOptions() (kubernetes.Options, error) {
 		RunAsGroup:            k.RunAsGroup,
 		KeepCompletedPods:     k.KeepCompletedPods,
 		MaxConcurrent:         k.MaxConcurrent,
+		EgressFilter:          k.EgressFilter.driverFilter(),
 	}
 	if k.TerminationGracePeriodSeconds > 0 {
 		opts.TerminationGracePeriod = time.Duration(k.TerminationGracePeriodSeconds) * time.Second
@@ -643,6 +688,19 @@ func clampKubernetesExecutor(k *KubernetesExecutorConfig) []string {
 			changed = append(changed, fmt.Sprintf("executors.kubernetes.tolerations[%d]: %v", i, err))
 			k.Tolerations = nil
 			break
+		}
+	}
+	// A broken egress filter is the one field this function will not repair.
+	// Dropping the CIDR an operator mistyped would leave a filter narrower than
+	// they wrote — a total outage they did not ask for — and dropping the filter
+	// would leave one wider, which is a security control disappearing because of
+	// a typo. Neither is a repair, so the executor is not registered and the
+	// message names the section.
+	if k.Enabled {
+		if _, err := k.EgressFilter.driverFilter().Compile(); err != nil {
+			changed = append(changed, fmt.Sprintf(
+				"executors.kubernetes: disabled because egress_filter is unusable: %v", err))
+			k.Enabled = false
 		}
 	}
 	// A section that still cannot produce driver options is not salvageable
