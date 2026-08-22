@@ -960,6 +960,11 @@ func (s *Server) Run(ctx context.Context) error {
 	go s.watchProjects(watcherCtx)
 	go s.watchAutoBackup(watcherCtx)
 	s.startSessionJanitor(watcherCtx)
+	// Sweeps lapsed secret leases off live agents. Without it a lease TTL
+	// binds only the hub: an executor handed a fifteen-minute credential
+	// keeps it for as long as its task runs. See secrets_revoke.go.
+	s.StartLeaseJanitor(watcherCtx)
+	defer s.StopLeaseJanitor()
 
 	addr := ":" + strconv.Itoa(s.Port)
 	srv := newUIHTTPServer(addr, s.buildHandler(mux))

@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -78,6 +79,12 @@ type Options struct {
 	// between online/offline/unreachable. The hub uses it to mirror status
 	// into statedb without this package importing storage.
 	OnStatusChange func(executorID, status string, at time.Time)
+	// OnRevokeAck, when set, is called when an agent acknowledges a lease
+	// revocation. It is a callback for the same reason OnStatusChange is:
+	// the audit trail lives in storage and this package must not depend on
+	// it. Replayed revocations report through here too, which is the only
+	// way an operator learns that a queued revocation finally landed.
+	OnRevokeAck func(executorID, leaseID string, ack RevokedPayload)
 	// Now overrides the clock for tests.
 	Now func() time.Time
 }
@@ -100,6 +107,15 @@ type Executor struct {
 	session *Session
 	handles map[string]*handleState
 	status  string
+	// leaseHandles maps a secret lease ID to the handles started with its
+	// material, so a revocation knows which tasks to kill and whether this
+	// executor is holding the credential at all.
+	leaseHandles map[string]map[string]struct{}
+
+	// revocations is the log of leases this executor has been told to give
+	// back, retained across disconnects so they can be replayed. See
+	// revoke.go.
+	revocations *revocationLog
 }
 
 // NewExecutor builds a remote executor for an enrolled agent. It starts
@@ -110,12 +126,14 @@ func NewExecutor(opts Options) (*Executor, error) {
 		return nil, fmt.Errorf("%w: remote executor ID is blank", executor.ErrInvalidSpec)
 	}
 	return &Executor{
-		id:      opts.ID,
-		name:    opts.Name,
-		opts:    opts,
-		caps:    opts.Capabilities,
-		handles: make(map[string]*handleState),
-		status:  StatusOffline,
+		id:           opts.ID,
+		name:         opts.Name,
+		opts:         opts,
+		caps:         opts.Capabilities,
+		handles:      make(map[string]*handleState),
+		leaseHandles: make(map[string]map[string]struct{}),
+		revocations:  newRevocationLog(),
+		status:       StatusOffline,
 	}, nil
 }
 
@@ -212,6 +230,23 @@ func (e *Executor) Start(ctx context.Context, spec executor.Spec) (executor.Hand
 			ErrAgentUnreachable, e.id, e.name)
 	}
 
+	// A workload carrying revocable credentials may not be placed on an agent
+	// that cannot give them back. Refusing here — rather than running it and
+	// hoping nobody revokes — is what keeps "revoking a lease takes the
+	// credential away" a property of the system instead of a property of which
+	// devices happen to be up to date. The diagnostic names the device and the
+	// fix, because the operator's next question is always "which one, and what
+	// do I do about it".
+	revocable := spec.RevocableSecrets()
+	if len(revocable) > 0 && !SupportsRevocation(sess.Version()) {
+		return executor.Handle{}, fmt.Errorf(
+			"%w: agent %s (%s) speaks protocol v%d but this workload carries %s, which the control "+
+				"plane must be able to revoke mid-run (needs v%d); upgrade the agent with "+
+				"`cloop executor agent install --upgrade`, or remove the grant from this project",
+			ErrRevocationUnsupported, e.id, e.name, sess.Version(),
+			describeBindings(revocable), MinRevocationVersion)
+	}
+
 	// The control plane names the handle, not the agent. If the start
 	// response is lost to a disconnect the workload is still addressable: we
 	// can ask about the ID we chose, and a repeated start for a known ID is a
@@ -238,7 +273,7 @@ func (e *Executor) Start(ctx context.Context, spec executor.Spec) (executor.Hand
 	e.pruneLocked()
 	e.mu.Unlock()
 
-	frame, err := NewFrame(TypeStart, newCorrelationID(), handleID, StartPayload{
+	frame, err := sess.frame(TypeStart, newCorrelationID(), handleID, StartPayload{
 		Spec:     spec,
 		HandleID: handleID,
 	})
@@ -272,6 +307,12 @@ func (e *Executor) Start(ctx context.Context, spec executor.Spec) (executor.Hand
 	hs.status.PID = started.PID
 	hs.status.StartedAt = startedAt
 	hs.mu.Unlock()
+
+	// Recorded only after the agent confirmed the start: a binding for a
+	// workload that never ran would make the executor claim to hold a
+	// credential it was never given, and a revocation would then wait for an
+	// ack that has no reason to exist.
+	e.bindLease(handleID, bindingsOf(spec))
 
 	return executor.Handle{
 		ID:         handleID,
@@ -338,7 +379,7 @@ func (e *Executor) Signal(ctx context.Context, handleID string, sig executor.Sig
 		return fmt.Errorf("%w: cannot signal %s: agent %s is not connected",
 			ErrAgentUnreachable, handleID, e.id)
 	}
-	frame, err := NewFrame(TypeSignal, newCorrelationID(), handleID, SignalPayload{Signal: sig})
+	frame, err := sess.frame(TypeSignal, newCorrelationID(), handleID, SignalPayload{Signal: sig})
 	if err != nil {
 		return err
 	}
@@ -377,7 +418,7 @@ func (e *Executor) Status(ctx context.Context, handleID string) (executor.Status
 		last.Error = fmt.Sprintf("agent %s is not connected", e.id)
 		return last, nil
 	}
-	frame, err := NewFrame(TypeStatusReq, newCorrelationID(), handleID, StatusReqPayload{})
+	frame, err := sess.frame(TypeStatusReq, newCorrelationID(), handleID, StatusReqPayload{})
 	if err != nil {
 		return executor.Status{}, err
 	}
@@ -468,6 +509,7 @@ func (e *Executor) pruneLocked() {
 
 // dropHandle removes a handle that never successfully started.
 func (e *Executor) dropHandle(handleID string) {
+	e.releaseLeases(handleID)
 	e.mu.Lock()
 	hs := e.handles[handleID]
 	delete(e.handles, handleID)
@@ -506,6 +548,20 @@ func (e *Executor) attach(sess *Session) {
 		prev.closeWithReason("superseded by a newer session")
 	}
 	e.setStatus(StatusOnline)
+
+	// Anything revoked while this agent was offline is owed to it now. Done
+	// on its own goroutine because attach runs on the handshake path, which
+	// must not block on a round trip to the device it is still setting up.
+	go func() {
+		defer func() {
+			// A panic here must not take the control plane down with it: the
+			// handshake that spawned this goroutine has already returned.
+			if r := recover(); r != nil {
+				_ = r
+			}
+		}()
+		e.replayRevocations(sess)
+	}()
 }
 
 // detach unbinds sess if it is still the current session. The guard matters:
@@ -666,6 +722,11 @@ func (e *Executor) applyStatus(handleID string, p StatusPayload) {
 
 	if shouldClose {
 		hs.bus.Close()
+		// The workload is over, so whatever material it held is no longer in
+		// use. Dropping the binding keeps a revocation from targeting a
+		// finished task and reporting "unreachable" for a credential that is
+		// already gone with the process that held it.
+		e.releaseLeases(handleID)
 	}
 }
 
@@ -709,6 +770,44 @@ func (e *Executor) failAllHandles(reason string) {
 		hs.mu.Unlock()
 		hs.bus.Close()
 	}
+}
+
+// bindingsOf projects a spec's secret bindings onto the compact form the
+// executor tracks. Only revocable bindings are recorded: a binding that
+// delivered nothing has nothing to take back.
+func bindingsOf(spec executor.Spec) []leaseBinding {
+	revocable := spec.RevocableSecrets()
+	if len(revocable) == 0 {
+		return nil
+	}
+	out := make([]leaseBinding, 0, len(revocable))
+	for _, b := range revocable {
+		out = append(out, leaseBinding{leaseID: b.LeaseID, grantID: b.GrantID})
+	}
+	return out
+}
+
+// describeBindings names the credentials in a refusal, so the operator reads
+// "the GitHub PAT github-ci" rather than "a secret".
+func describeBindings(bindings []executor.SecretBinding) string {
+	names := make([]string, 0, len(bindings))
+	for _, b := range bindings {
+		switch {
+		case b.SecretName != "" && b.Kind != "":
+			names = append(names, fmt.Sprintf("%s (%s)", b.SecretName, b.Kind))
+		case b.SecretName != "":
+			names = append(names, b.SecretName)
+		case b.Kind != "":
+			names = append(names, b.Kind)
+		default:
+			names = append(names, b.LeaseID)
+		}
+	}
+	sort.Strings(names)
+	if len(names) == 1 {
+		return "the brokered credential " + names[0]
+	}
+	return "brokered credentials " + strings.Join(names, ", ")
 }
 
 // newCorrelationID returns an ID for matching a response to its request.

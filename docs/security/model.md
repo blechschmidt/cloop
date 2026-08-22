@@ -96,6 +96,18 @@ Revocation cascades: `cloop executor revoke <id>` marks both the enrollment
 record and the derived agent credential revoked, and the hub sends `bye` with
 `reconnect=false` so the agent stops rather than backing off and retrying.
 
+**Protocol versioning.** Frames carry a version; the hub accepts
+`[MinProtocolVersion, ProtocolVersion]` = `[1, 2]` and stamps every outbound
+frame with the version the session negotiated, not with its own maximum — a v1
+agent rejects a v2 envelope as out of range, so stamping the maximum would make
+negotiation decorative (`TestSessionStampsNegotiatedVersionOnOutboundFrames`).
+v2 added the `revoke` frame. A v1 agent still connects and still runs ordinary
+work; what it cannot receive is a workload carrying revocable secret material,
+because it has no frame with which to give it back. The hub refuses that
+*placement* with a diagnostic naming the device, the credential and the upgrade
+command, rather than refusing the device
+(`TestOldAgentIsRefusedRevocableWorkload`).
+
 ### ③ Hub ↔ container runtime
 
 The hub talks to a local Docker/Podman socket, which is **unauthenticated by
@@ -173,6 +185,85 @@ start, login code, logout) and replay-run creation. They are not exempt: they ar
 it is allowed to exist. `TestGatedListsAgree` fails if that list and the list of
 gated HTTP routes ever diverge, so a new gated handler cannot be added on one
 side only.
+
+---
+
+## The lease-revocation guarantee
+
+Secret grants are TTL-leased so that a compromised executor's window is bounded
+by the lease rather than by the grant. That bound is only real if something can
+take the material back mid-run — otherwise a fifteen-minute lease handed to a
+three-hour task is a fifteen-minute *label* on three hours of access.
+
+The `revoke` frame (protocol v2) is what makes it real. `POST
+/api/leases/{id}/revoke` wipes the hub's own copy and pushes a scrub to every
+executor holding the lease; a TTL janitor sweeps live agent sessions once a
+minute; and cordon/drain scrubs everything the device is holding. All three go
+through one path, so they cannot drift apart.
+
+### What it is worth, per material
+
+| Material | Scrub | Worth |
+| --- | --- | --- |
+| Credential **files** | zeroed, then unlinked on the device | **Strong.** The next read fails |
+| **Egress** allowlist entries | dropped at the proxy and on the agent | **Strong.** The next connection is refused |
+| Environment **variables** | dropped from the agent's retained copies (`exec.Cmd.Env` and the recorded `Spec`), so they are never re-injected on restart, resume or failover | **Weak.** The running child has its own copy |
+
+The weak row is a property of POSIX, not of this implementation. A process
+receives its environment from the kernel at `exec` time; no API takes it back.
+This is why `github_pat` delivery ships a credential *helper* reading a token
+*file* instead of exporting a bare `GITHUB_TOKEN` — it moves the PAT into the
+row that can actually be revoked. When the credential itself is compromised,
+`{"action":"kill"}` scrubs and then terminates every holder (`SIGTERM`, then
+`SIGKILL` after five seconds), which is the only thing that stops a process
+using what it already has.
+
+Go strings are immutable, so the env scrub replaces the slice entry rather than
+overwriting the bytes: the value becomes unreachable and is collected, but a
+memory dump taken in that window can still contain it. Files, which are
+mutable, *are* zeroed before being unlinked.
+
+### What it is worth when the agent is unreachable
+
+**Nothing, until the agent comes back.** The credential is on a machine the hub
+cannot talk to, and no protocol fixes that. The system's obligation is therefore
+to say so rather than to claim success:
+
+- Per-lease ack state is tracked as `revoked` / `revoke_pending` / `unreachable`
+  / `failed`, and the aggregate across holders is the **worst** of them. Three
+  devices out of four is not a revocation.
+- The revocation is retained and **replayed on reconnect**
+  (`TestRevocationIsReplayedOnReconnect`), so a device unplugged mid-revocation
+  does not return holding a credential that was already withdrawn. The action
+  survives the queue: an escalation to `kill` does not quietly demote itself to
+  a scrub because the device happened to be offline.
+- An agent that reconnects *downgraded* below v2 fails the replay with a version
+  diagnostic rather than silently succeeding
+  (`TestReplayRefusedOnDowngradedAgent`).
+
+If a holder is `unreachable` and the credential is compromised, rotate it at the
+source. That is the only action that does not depend on a machine you cannot
+reach.
+
+### The frame is not a filesystem primitive
+
+`revoke` names file paths, and the control plane is a party this model treats as
+potentially compromised (see boundary ②). Honouring those paths literally would
+be an arbitrary-unlink primitive on every enrolled device. The agent therefore
+removes a path only when its containing directory is named `cloop-lease-*` —
+the prefix `secretbroker.Materialize` uses — and never follows a symlink through
+to its target. Refusals are reported in the ack rather than silently skipped,
+because "I did not delete your credential file" is something the operator has to
+be told (`TestVaultRefusesPathsOutsideALeaseDirectory`,
+`TestVaultDoesNotFollowSymlinks`,
+`TestLoopbackRevokeRefusesPathsOutsideALeaseDirectory`).
+
+### Audit
+
+`lease.revoke_sent` is written *before* the fan-out, so the trail records the
+intent even if the process dies mid-revocation; `lease.revoke_acked` or
+`lease.revoke_failed` follows per executor, with the lease and executor IDs and
+how long the ack took. Env variable *names* appear; values never do.
 
 ---
 
@@ -526,6 +617,23 @@ what it is looking for.
 | Those responses emit a closed, reviewed set of JSON keys, so a new struct field cannot start being serialised by accident | `TestSecretsAPIViewStructsCarryNoMaterialField` |
 | `GET /api/leases` renders a genuinely materialised lease without its credentials (in `pkg/ui`, which can issue one) | `TestSecretsAPINeverDisclosesLeaseMaterial` |
 
+### Lease revocation — `revocation_test.go`
+
+| Guarantee | Test |
+| --- | --- |
+| A dispatched spec never persists leased credentials into `executor_sessions`, where no revoke frame could reach them | `TestDispatchedSpecNeverPersistsLeasedCredentials` |
+| Redaction is scoped to the lease's own keys, so failover still reproduces the operator's environment | `TestDispatchedSpecNeverPersistsLeasedCredentials` |
+| `SecretBinding` — serialised into start frames, session rows and audit rows at once — emits a closed, reviewed set of JSON keys and no value-shaped field | `TestSecretBindingCarriesNoMaterial` |
+| `revoked` / `revoke_pending` / `unreachable` / `failed` stay distinct, and only `revoked` is terminal | `TestRevocationStatesAreDistinct` |
+| A binding that delivered nothing, or names no lease, does not count as revocable | `TestRevocableMaterialRequiresARevocableAgent` |
+| An agent below `MinRevocationVersion` is refused placement for revocable material, with a diagnostic naming the device and the fix | `TestOldAgentIsRefusedRevocableWorkload` (`pkg/executor/remote`) |
+| A revocation issued while an agent was offline is replayed on reconnect, action intact | `TestRevocationIsReplayedOnReconnect` (`pkg/executor/remote`) |
+| A revoke mid-run really removes the credential: the running workload observes its token file disappear | `TestLoopbackRevokeScrubsMaterialMidRun` (`pkg/executor/remote`) |
+| `action=kill` terminates every holder, escalating to `SIGKILL` | `TestLoopbackRevokeKillTerminatesHolder` (`pkg/executor/remote`) |
+| The revoke frame is not an arbitrary-unlink primitive: paths outside a `cloop-lease-*` directory are refused and reported | `TestVaultRefusesPathsOutsideALeaseDirectory`, `TestLoopbackRevokeRefusesPathsOutsideALeaseDirectory` |
+| A symlink planted in a lease directory does not redirect the wipe onto its target | `TestVaultDoesNotFollowSymlinks` (`pkg/executor/agent`) |
+| Scrubbing is race-safe against a task concurrently reading the credential | `TestVaultConcurrentReadAndScrub`, `TestScrubEnvConcurrentWithStatusAndSignal` |
+
 ### Lease and token invariants — `leases_test.go`
 
 | Guarantee | Test |
@@ -687,6 +795,15 @@ helper that releases the token only for allowlisted paths. That binds `git`. It
 does not bind a workload that reads the token file and calls the REST API
 directly. A bare `GITHUB_TOKEN` is exported only when the allowlist is explicitly
 `*`.
+
+**A revoked environment variable stays in the running process.** Scrubbing
+removes the agent's copies; the child keeps its own, because nothing can reach
+into another process's memory. Files and egress are genuinely revoked; env is
+not. Use `action=kill`, and prefer credential delivery that lands in a file.
+
+**A revocation cannot reach an offline agent.** It is queued and replayed on
+reconnect, and reported as `unreachable` in the meantime — but the material is
+on that machine until it returns. Rotate at the source when it matters.
 
 **Pod environment is readable in-namespace.** `Spec.Env` lands in the Pod object,
 so anyone with `get pods` in the workload namespace can read it. Run workloads in

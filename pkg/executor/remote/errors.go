@@ -57,4 +57,16 @@ var (
 
 	// ErrAgentNotFound: no agent with the requested ID is enrolled.
 	ErrAgentNotFound = errors.New("remote: agent not enrolled")
+
+	// ErrRevocationUnsupported: the agent speaks a protocol version older
+	// than MinRevocationVersion, so material handed to it could never be
+	// taken back mid-run. Placing a workload that carries revocable secrets
+	// fails with this rather than proceeding without the guarantee.
+	ErrRevocationUnsupported = errors.New("remote: agent does not support lease revocation")
+
+	// ErrLeaseNotHeld: the agent was asked to revoke a lease it is not
+	// holding. It is reported, not raised — "the material is not here" is
+	// the end state a revocation wants — so callers treat it as success
+	// with a note rather than as something to retry.
+	ErrLeaseNotHeld = errors.New("remote: agent is not holding this lease")
 )

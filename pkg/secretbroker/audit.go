@@ -32,6 +32,21 @@ const (
 	ActionRelease     Action = "secret.release"
 	ActionAccessCheck Action = "secret.access_check"
 
+	// Lease revocation actions (Task 20178). These are separate from
+	// ActionRelease because releasing a lease and revoking one answer
+	// different questions. A release is the ordinary end of a workload's
+	// credential lifetime; a revocation is somebody deciding, mid-run, that
+	// an executor may no longer hold something it already has.
+	//
+	// All three exist because a revocation is not one event. It is sent,
+	// and then it either lands or it does not, possibly minutes later when
+	// an offline device reconnects. Collapsing them into one row would make
+	// the trail claim a credential was withdrawn at a moment when it
+	// demonstrably still worked.
+	ActionLeaseRevokeSent   Action = "lease.revoke_sent"
+	ActionLeaseRevokeAcked  Action = "lease.revoke_acked"
+	ActionLeaseRevokeFailed Action = "lease.revoke_failed"
+
 	// Egress actions come from pkg/egressbroker, which brokers the hub's
 	// Internet connection as a fourth grantable resource alongside GitHub
 	// repositories, PATs, and Kubernetes clusters.

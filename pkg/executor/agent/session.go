@@ -26,11 +26,23 @@ import (
 // deviceSession is the agent's view of one live connection.
 type deviceSession struct {
 	conn remote.Conn
+	// version is what the handshake settled on. Every frame this session
+	// sends is stamped with it rather than with this build's maximum, so a
+	// newer agent talking to an older control plane does not emit envelopes
+	// the peer rejects as out of range.
+	version int
 	// writeMu serialises frame writes: the heartbeat ticker, the frame loop,
 	// and every workload's output pump all write to the same connection.
 	writeMu sync.Mutex
 	closed  chan struct{}
 	once    sync.Once
+}
+
+// frame builds a frame at the version this session negotiated. Before the
+// welcome arrives version is 0, which NewFrameAt clamps to this build's
+// maximum — correct for the hello, which is the frame that advertises it.
+func (s *deviceSession) frame(t remote.FrameType, id, handle string, payload any) (remote.Frame, error) {
+	return remote.NewFrameAt(s.version, t, id, handle, payload)
 }
 
 func (s *deviceSession) write(ctx context.Context, f remote.Frame) error {
@@ -65,6 +77,7 @@ func (a *Agent) runOnce(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	sess.version = welcome.ProtocolVersion
 
 	a.mu.Lock()
 	a.connected = true
@@ -317,7 +330,7 @@ func (a *Agent) heartbeatLoop(ctx context.Context, sess *deviceSession) {
 		}
 		a.mu.Unlock()
 
-		frame, err := remote.NewFrame(remote.TypeHeartbeat, fmt.Sprintf("hb-%d", seq), "",
+		frame, err := sess.frame(remote.TypeHeartbeat, fmt.Sprintf("hb-%d", seq), "",
 			remote.HeartbeatPayload{Seq: seq, ActiveHandles: active})
 		if err != nil {
 			continue
@@ -366,6 +379,12 @@ func (a *Agent) frameLoop(ctx context.Context, sess *deviceSession) error {
 
 		case remote.TypeLogAck:
 			a.handleLogAck(frame)
+
+		case remote.TypeRevoke:
+			// Its own goroutine, like start: a scrub unlinks files and may
+			// signal a workload, and blocking the frame loop on it would
+			// stall heartbeat acks and every other handle's control traffic.
+			go a.handleRevoke(ctx, sess, frame)
 
 		case remote.TypeHeartbeatAck:
 			// Liveness confirmed; nothing to do. Its value is in arriving.
@@ -441,6 +460,12 @@ func (a *Agent) handleStart(ctx context.Context, sess *deviceSession, frame remo
 	}
 
 	spec := payload.Spec
+	// Index the lease material before anything can run with it. A revoke that
+	// arrives between here and the launch finds the binding and scrubs it;
+	// binding afterwards would leave a window in which the credential is live
+	// on the device and invisible to revocation.
+	a.vault.bind(handleID, spec.Secrets)
+
 	workDir, err := a.resolveWorkDir(spec.WorkDir)
 	if err != nil {
 		a.forget(handleID)
@@ -640,7 +665,7 @@ func (a *Agent) flush(ctx context.Context, sess *deviceSession, wl *workload) {
 		if len(chunk) > remote.MaxLogChunkBytes {
 			chunk = chunk[:remote.MaxLogChunkBytes]
 		}
-		frame, err := remote.NewFrame(remote.TypeLogChunk, "", wl.handleID, remote.LogChunkPayload{
+		frame, err := sess.frame(remote.TypeLogChunk, "", wl.handleID, remote.LogChunkPayload{
 			Stream: executor.StreamCombined,
 			// `at`, not wl.sentOffset: eviction may have advanced the start
 			// of the retained window past what we asked for, and mislabelling
@@ -809,6 +834,10 @@ func (a *Agent) forget(handleID string) {
 	a.mu.Lock()
 	delete(a.workloads, handleID)
 	a.mu.Unlock()
+	// The material went with the process. Dropping the binding keeps the
+	// vault from reporting a lease as held by a workload that is gone, which
+	// would make a revocation wait for an ack about nothing.
+	a.vault.release(handleID)
 }
 
 func (w *workload) snapshot() executor.Status {
@@ -853,7 +882,7 @@ func (w *workload) local() (localID string, startedAt time.Time) {
 
 // reply sends a typed response frame, best-effort.
 func (a *Agent) reply(ctx context.Context, sess *deviceSession, t remote.FrameType, id, handle string, payload any) {
-	frame, err := remote.NewFrame(t, id, handle, payload)
+	frame, err := sess.frame(t, id, handle, payload)
 	if err != nil {
 		a.cfg.logf("encode %s reply: %v", t, err)
 		return

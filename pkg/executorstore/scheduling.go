@@ -27,6 +27,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/executor"
@@ -314,11 +315,67 @@ func marshalSpec(spec executor.Spec) string {
 	if len(spec.Argv) == 0 {
 		return ""
 	}
-	encoded, err := json.Marshal(spec)
+	encoded, err := json.Marshal(redactLeasedEnv(spec))
 	if err != nil {
 		return ""
 	}
 	return string(encoded)
+}
+
+// redactedEnvValue replaces a brokered credential in the stored spec.
+const redactedEnvValue = "<redacted:leased>"
+
+// redactLeasedEnv removes brokered credential values before a spec is written
+// to the database.
+//
+// A dispatched spec carries the secrets the broker leased to that workload, in
+// plaintext, in Env. Persisting them verbatim undoes the point of TTL-leasing:
+// a fifteen-minute credential written into executor_sessions outlives its
+// lease, survives the revocation that was supposed to take it away, and is
+// copied into every backup of the control-plane database. There is no revoke
+// frame that can reach a row in SQLite.
+//
+// Only the variables the lease itself contributed are touched — Spec.Secrets
+// names them — so the operator's own environment, which is not the broker's to
+// redact, is stored unchanged and failover still reproduces it.
+//
+// A failover re-dispatch therefore starts without the leased credentials. That
+// is the correct outcome rather than a regression: by the time a session is
+// failed over its lease has almost certainly lapsed, so re-injecting the stored
+// copy would hand the replacement executor a credential the broker already
+// considers dead. A run that needs it fails loudly and is re-leased on the next
+// start.
+func redactLeasedEnv(spec executor.Spec) executor.Spec {
+	if len(spec.Env) == 0 || len(spec.Secrets) == 0 {
+		return spec
+	}
+	leased := make(map[string]struct{})
+	for _, b := range spec.Secrets {
+		for _, k := range b.EnvKeys {
+			if k = strings.TrimSpace(k); k != "" {
+				leased[k] = struct{}{}
+			}
+		}
+	}
+	if len(leased) == 0 {
+		return spec
+	}
+	// Copy rather than rewrite in place: the caller's spec is the live one the
+	// workload was started with, and mutating it here would scrub a running
+	// task's environment as a side effect of recording it.
+	env := make([]string, len(spec.Env))
+	copy(env, spec.Env)
+	for i, kv := range env {
+		key, _, ok := strings.Cut(kv, "=")
+		if !ok {
+			continue
+		}
+		if _, hit := leased[key]; hit {
+			env[i] = key + "=" + redactedEnvValue
+		}
+	}
+	spec.Env = env
+	return spec
 }
 
 // unmarshalSpec restores a dispatched workload, yielding the zero Spec when the

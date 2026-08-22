@@ -219,6 +219,72 @@ type Spec struct {
 	// for the audit trail. Drivers surface it as a label; it never affects
 	// execution.
 	SandboxHash string `json:"sandbox_hash,omitempty"`
+
+	// Secrets attributes parts of Env and the filesystem to the secret
+	// leases that produced them, so a driver can take an individual
+	// credential back mid-run. See SecretBinding.
+	Secrets []SecretBinding `json:"secrets,omitempty"`
+}
+
+// SecretBinding says which parts of a Spec came from one secret lease.
+//
+// It carries no credential material — only the *names* of the environment
+// variables and the *paths* of the files a lease contributed. The material
+// itself is already in Env and on disk; duplicating it here would put
+// plaintext into a struct that gets persisted (executorstore records the
+// dispatched spec) and logged.
+//
+// The binding exists because revocation needs attribution. Without it an
+// executor holding GITHUB_TOKEN has no way to know that variable came from
+// lease_abc rather than from the operator's own environment, so "revoke
+// lease_abc" could only be honoured by killing the whole workload or by
+// doing nothing. With it, a driver scrubs exactly what that lease delivered
+// and leaves everything else alone.
+type SecretBinding struct {
+	// LeaseID is the broker lease this material was issued under.
+	LeaseID string `json:"lease_id"`
+	// GrantID is the specific grant within the lease, when the binding
+	// describes one grant rather than every material in the lease.
+	GrantID string `json:"grant_id,omitempty"`
+	// SecretName is the operator-facing name, for diagnostics.
+	SecretName string `json:"secret_name,omitempty"`
+	// Kind is the credential kind ("github_pat", "kubeconfig", "egress", …).
+	Kind string `json:"kind,omitempty"`
+	// EnvKeys names the environment variables this lease contributed. Keys
+	// only, never "K=V" — a value here would defeat the whole point.
+	EnvKeys []string `json:"env_keys,omitempty"`
+	// Files are the credential file paths as the *executor* sees them.
+	Files []string `json:"files,omitempty"`
+	// Dir is the lease directory holding Files.
+	Dir string `json:"dir,omitempty"`
+	// Egress marks a binding that also opened a network path (an egress
+	// proxy session), so revoking it must drop the allowlist entry and not
+	// only the credential.
+	Egress bool `json:"egress,omitempty"`
+	// ExpiresAt is the lease TTL, so a driver can expire material locally
+	// even while it cannot reach the control plane.
+	ExpiresAt time.Time `json:"expires_at,omitempty"`
+}
+
+// Revocable reports whether this binding describes material that can
+// meaningfully be taken back mid-run: it must name a lease and something
+// that lease actually delivered.
+func (b SecretBinding) Revocable() bool {
+	return strings.TrimSpace(b.LeaseID) != "" &&
+		(len(b.EnvKeys) > 0 || len(b.Files) > 0 || b.Egress)
+}
+
+// RevocableSecrets returns the bindings in this spec that carry revocable
+// material. A driver that cannot honour revocation must refuse such a spec
+// rather than run it and silently drop the guarantee.
+func (s Spec) RevocableSecrets() []SecretBinding {
+	var out []SecretBinding
+	for _, b := range s.Secrets {
+		if b.Revocable() {
+			out = append(out, b)
+		}
+	}
+	return out
 }
 
 // Timeout returns the spec's wall-clock ceiling as a duration, or 0 when

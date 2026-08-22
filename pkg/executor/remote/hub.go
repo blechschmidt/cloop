@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -41,6 +42,11 @@ type HubOptions struct {
 	// OnEnroll is called after a device successfully redeems an enrollment
 	// token, so the caller can write an executors-table row for it.
 	OnEnroll func(agent AgentRecord, caps AgentCapabilities)
+	// OnRevokeAck receives an agent's acknowledgement of a lease revocation,
+	// so the caller can write the audit row. It fires for replayed
+	// revocations too — the ones delivered long after the operator pressed
+	// the button — which is the only signal that a queued revocation landed.
+	OnRevokeAck func(executorID, leaseID string, ack RevokedPayload)
 	// ExternalURL is what this deployment calls itself, e.g.
 	// https://cloop.example.com. Its host is always an accepted WebSocket
 	// Origin, which is what makes the Executors panel work when a reverse
@@ -156,6 +162,7 @@ func (h *Hub) executorFor(agent AgentRecord, caps AgentCapabilities) (*Executor,
 		Name:           agent.Name,
 		Capabilities:   caps,
 		OnStatusChange: h.opts.OnStatusChange,
+		OnRevokeAck:    h.opts.OnRevokeAck,
 		Now:            h.opts.Now,
 	})
 	if err != nil {
@@ -197,6 +204,220 @@ func (h *Hub) Revoke(agentID string) error {
 	ex.failAllHandles("agent credential was revoked")
 	ex.setStatus(StatusOffline)
 	return nil
+}
+
+// RevokeLease takes one secret lease back from every agent holding it.
+//
+// The fan-out is over executors that actually hold the lease rather than over
+// all of them: a revoke frame to a device that was never given the credential
+// is noise on someone's LTE uplink, and its "not known here" ack would clutter
+// the panel with rows that mean nothing.
+//
+// An empty result is not an error. It means no connected agent was holding
+// the lease — the ordinary case for a hub-local executor, whose material the
+// caller wipes directly. The caller decides what to say about that; this
+// method's job is to report exactly what the remote fleet did.
+func (h *Hub) RevokeLease(ctx context.Context, p RevokePayload) []RevokeResult {
+	leaseID := strings.TrimSpace(p.LeaseID)
+	if leaseID == "" {
+		return nil
+	}
+	holders := make([]*Executor, 0, 4)
+	for _, ex := range h.Executors() {
+		if ex.HoldsLease(leaseID) {
+			holders = append(holders, ex)
+		}
+	}
+	if len(holders) == 0 {
+		return nil
+	}
+
+	// Concurrent because each is a round trip to a different device, and an
+	// operator revoking across a fleet should wait for the slowest link, not
+	// for their sum.
+	results := make([]RevokeResult, len(holders))
+	var wg sync.WaitGroup
+	for i, ex := range holders {
+		wg.Add(1)
+		go func(i int, ex *Executor) {
+			defer wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					results[i] = RevokeResult{
+						LeaseID: leaseID, GrantID: p.GrantID, ExecutorID: ex.ID(),
+						State: RevokeStateFailed, SentAt: h.opts.now(),
+						Error: fmt.Sprintf("panic revoking lease: %v", r),
+					}
+				}
+			}()
+			results[i] = ex.RevokeLease(ctx, p)
+		}(i, ex)
+	}
+	wg.Wait()
+
+	for _, res := range results {
+		h.opts.logf("remote: revoke lease %s on %s: %s%s",
+			res.LeaseID, res.ExecutorID, res.State, errSuffix(res.Error))
+	}
+	return results
+}
+
+// RevokeExecutorLeases takes back every lease an executor is holding.
+//
+// This is the cordon/drain trigger. Taking a device out of rotation is an
+// operator saying "I no longer trust this to be running my work" — most often
+// because it is being decommissioned, has misbehaved, or is suspected
+// compromised. Leaving it holding live credentials until its in-flight tasks
+// happen to finish would answer that with "in a few hours".
+func (h *Hub) RevokeExecutorLeases(ctx context.Context, executorID, reason string, action RevokeAction) []RevokeResult {
+	ex, ok := h.Executor(strings.TrimSpace(executorID))
+	if !ok {
+		return nil
+	}
+	leases := ex.Leases()
+	out := make([]RevokeResult, 0, len(leases))
+	for _, leaseID := range leases {
+		out = append(out, ex.RevokeLease(ctx, RevokePayload{
+			LeaseID: leaseID,
+			Reason:  reason,
+			Action:  action,
+		}))
+	}
+	return out
+}
+
+// LeaseHolders reports which connected agents hold a lease, so a caller can
+// tell "nobody has this" apart from "three devices have it and two are
+// offline" before deciding what to promise the operator.
+func (h *Hub) LeaseHolders(leaseID string) []string {
+	id := strings.TrimSpace(leaseID)
+	if id == "" {
+		return nil
+	}
+	var out []string
+	for _, ex := range h.Executors() {
+		if ex.HoldsLease(id) {
+			out = append(out, ex.ID())
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// Revocations reports the whole fleet's revocation log for the Secrets panel.
+func (h *Hub) Revocations() []RevokeResult {
+	var out []RevokeResult
+	for _, ex := range h.Executors() {
+		out = append(out, ex.Revocations()...)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].SentAt.After(out[j].SentAt) })
+	return out
+}
+
+// ExpiredLeaseSweeper is the callback a janitor uses to find leases whose TTL
+// has run out. It returns the lease IDs that should be taken back, along with
+// a human-readable reason for the audit trail.
+//
+// It is a callback rather than a lease store because leases are minted by
+// whoever is spawning work (pkg/ui), not by this package: the hub knows which
+// agent holds which lease, and the caller knows when each lease expires.
+// Neither half can sweep alone.
+type ExpiredLeaseSweeper func(now time.Time) []ExpiredLease
+
+// ExpiredLease is one lapsed lease the janitor should take back.
+type ExpiredLease struct {
+	LeaseID string
+	Reason  string
+}
+
+// StartLeaseJanitor sweeps expired leases off live agents until ctx is done.
+//
+// This is the second of the three revocation triggers, and it is the one that
+// makes a TTL mean anything. Before it, Lease.Expired was consulted only by
+// the caller that minted the lease: an executor handed the material simply
+// kept it, so a fifteen-minute TTL bounded nothing for a task that ran for
+// three hours. Sweeping *live sessions* rather than re-checking at mint time
+// is the whole difference.
+//
+// It returns a stop function so a caller that owns the hub's lifetime can shut
+// the janitor down deterministically instead of leaking a ticker goroutine per
+// server restart in tests.
+func (h *Hub) StartLeaseJanitor(ctx context.Context, interval time.Duration, sweep ExpiredLeaseSweeper) (stop func()) {
+	if sweep == nil {
+		return func() {}
+	}
+	if interval <= 0 {
+		interval = DefaultLeaseJanitorInterval
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+		defer func() {
+			if r := recover(); r != nil {
+				h.opts.logf("remote: lease janitor panicked and stopped: %v", r)
+			}
+		}()
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				h.sweepExpiredLeases(ctx, sweep)
+			}
+		}
+	}()
+
+	return func() {
+		cancel()
+		<-done
+	}
+}
+
+// DefaultLeaseJanitorInterval is how often expired leases are swept off live
+// agents. It is a fraction of DefaultMaxLeaseTTL (15 minutes in
+// pkg/secretbroker) so a lapsed credential is taken back within a minute of
+// lapsing rather than at the end of the following lease period.
+const DefaultLeaseJanitorInterval = time.Minute
+
+// sweepExpiredLeases revokes every lease the sweeper reports as lapsed.
+func (h *Hub) sweepExpiredLeases(ctx context.Context, sweep ExpiredLeaseSweeper) {
+	defer func() {
+		// One bad sweep must not kill the janitor: the next tick is the only
+		// thing standing between an expired credential and an agent that will
+		// keep using it.
+		if r := recover(); r != nil {
+			h.opts.logf("remote: lease sweep failed: %v", r)
+		}
+	}()
+	for _, expired := range sweep(h.opts.now()) {
+		if strings.TrimSpace(expired.LeaseID) == "" {
+			continue
+		}
+		reason := expired.Reason
+		if reason == "" {
+			reason = "lease TTL expired"
+		}
+		// Scrub, never kill. An expiring lease is routine — it happens every
+		// fifteen minutes to every long run — and terminating tasks on a timer
+		// would make the TTL a self-inflicted outage. A task that still needs
+		// the credential renews; one that does not carries on.
+		h.RevokeLease(ctx, RevokePayload{
+			LeaseID: expired.LeaseID,
+			Reason:  reason,
+			Action:  RevokeScrub,
+		})
+	}
+}
+
+func errSuffix(msg string) string {
+	if msg == "" {
+		return ""
+	}
+	return ": " + msg
 }
 
 // Deregister removes an agent's executor from the registry entirely.
@@ -337,7 +558,7 @@ func writeHTTPError(w http.ResponseWriter, code int, msg string) {
 // Best-effort: the link may already be gone, which is why every caller closes
 // the session immediately afterwards regardless of the outcome.
 func (s *Session) sendBye(reason string, reconnect bool) {
-	frame, err := NewFrame(TypeBye, "", "", ByePayload{Reason: reason, Reconnect: reconnect})
+	frame, err := s.frame(TypeBye, "", "", ByePayload{Reason: reason, Reconnect: reconnect})
 	if err != nil {
 		return
 	}

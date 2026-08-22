@@ -112,10 +112,38 @@ type Mount struct {
 	// available.
 	Dir string
 
-	mu     sync.Mutex
-	env    []string
-	files  []string
-	closed bool
+	mu       sync.Mutex
+	env      []string
+	files    []string
+	bindings []LeaseBinding
+	closed   bool
+}
+
+// LeaseBinding attributes part of a materialised lease to the grant that
+// produced it: which environment variables it set, and which files it wrote.
+//
+// It carries names and paths, never values. The point is revocation — an
+// executor holding GITHUB_TOKEN cannot otherwise tell that the variable came
+// from a grant an operator has just withdrawn, so "revoke this lease" could
+// only be honoured by killing the whole workload. With the attribution, a
+// driver scrubs exactly what the lease delivered and leaves the rest alone.
+//
+// See pkg/executor.SecretBinding, the driver-facing shape this maps onto, and
+// pkg/executor/remote/revoke.go for what a driver does with it.
+type LeaseBinding struct {
+	// GrantID is the grant this material came from.
+	GrantID string
+	// SecretID and SecretName identify the stored secret, for diagnostics.
+	SecretID   string
+	SecretName string
+	// Kind is the credential kind.
+	Kind Kind
+	// EnvKeys are the variables this grant contributed, by name.
+	EnvKeys []string
+	// Files are the absolute paths written for this grant.
+	Files []string
+	// Dir is the lease directory holding Files.
+	Dir string
 }
 
 // tmpfsCandidates are checked in order for a memory-backed directory to hold
@@ -180,8 +208,16 @@ func (l *Lease) Materialize(baseDir string) (*Mount, error) {
 	envMap := make(map[string]string)
 
 	for _, mat := range l.Materials {
+		binding := LeaseBinding{
+			GrantID:    mat.GrantID,
+			SecretID:   mat.SecretID,
+			SecretName: mat.SecretName,
+			Kind:       mat.Kind,
+			Dir:        dir,
+		}
 		for k, v := range mat.Env {
 			envMap[k] = v
+			binding.EnvKeys = append(binding.EnvKeys, k)
 		}
 		for _, f := range mat.Files {
 			path, werr := m.writeFile(f)
@@ -189,14 +225,21 @@ func (l *Lease) Materialize(baseDir string) (*Mount, error) {
 				_ = m.Close()
 				return nil, werr
 			}
+			binding.Files = append(binding.Files, path)
 			if f.EnvVar != "" {
 				if f.EnvIsDir {
 					envMap[f.EnvVar] = filepath.Dir(path)
 				} else {
 					envMap[f.EnvVar] = path
 				}
+				binding.EnvKeys = append(binding.EnvKeys, f.EnvVar)
 			}
 		}
+		// Sorted so the binding — which ends up in an audit row and in a
+		// revoke frame — is stable across runs rather than reflecting Go's
+		// randomised map order.
+		sort.Strings(binding.EnvKeys)
+		m.bindings = append(m.bindings, binding)
 	}
 
 	// CLOOP_LEASE_DIR lets a workload find its own credential directory
@@ -261,6 +304,31 @@ func (m *Mount) writeFile(f File) (string, error) {
 	return path, nil
 }
 
+// Bindings returns the per-grant attribution for this mount: which variables
+// and files each grant contributed. Names and paths only — no values.
+//
+// A driver uses it to build executor.SecretBinding, which is what makes a
+// mid-run revocation targetable at one credential instead of at the whole
+// workload.
+func (m *Mount) Bindings() []LeaseBinding {
+	if m == nil {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]LeaseBinding, len(m.bindings))
+	for i, b := range m.bindings {
+		// Deep-copy the slices: a caller that appends to the returned
+		// binding's EnvKeys must not mutate the mount's own record of what
+		// it wrote, which is what Close reads to clean up.
+		copied := b
+		copied.EnvKeys = append([]string(nil), b.EnvKeys...)
+		copied.Files = append([]string(nil), b.Files...)
+		out[i] = copied
+	}
+	return out
+}
+
 // Env returns the environment additions in "K=V" form, sorted, ready to
 // append to an executor.Spec's Env.
 func (m *Mount) Env() []string {
@@ -300,6 +368,7 @@ func (m *Mount) Close() error {
 	}
 	m.files = nil
 	m.env = nil
+	m.bindings = nil
 	if m.Dir != "" {
 		if err := os.RemoveAll(m.Dir); err != nil && firstErr == nil {
 			firstErr = err

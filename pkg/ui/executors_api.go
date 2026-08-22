@@ -113,6 +113,22 @@ type executorView struct {
 	Blocked       bool   `json:"blocked"`
 	BlockedReason string `json:"blocked_reason,omitempty"`
 
+	// ---- protocol capability (Task 20178) ----------------------------------
+	//
+	// ProtocolVersion is the version the live agent session negotiated, or 0
+	// when the device is not connected. SupportsRevocation is whether it
+	// honours the revoke frame — that is, whether a secret lease placed here
+	// can be taken back mid-run.
+	//
+	// It is surfaced because the alternative is finding out at dispatch time.
+	// The hub refuses to place a workload carrying revocable credentials on an
+	// agent too old to give them back, so without this the first symptom of a
+	// half-upgraded fleet is a run that will not start, and the operator has to
+	// read an error to learn something the panel could simply have shown.
+	ProtocolVersion    int    `json:"protocol_version,omitempty"`
+	SupportsRevocation bool   `json:"supports_revocation"`
+	RevocationNote     string `json:"revocation_note,omitempty"`
+
 	// ---- scheduling state (Task 20162) -------------------------------------
 	//
 	// Status above is about the *device* ("is it connected"); the fields below
@@ -522,7 +538,36 @@ func (s *Server) buildExecutorView(
 	}
 
 	view.Blocked, view.BlockedReason = blockedFor(ex)
+	s.annotateRevocation(&view, ex)
 	return view
+}
+
+// annotateRevocation records whether secret leases placed on this executor can
+// be taken back while a task is still running.
+//
+// Non-remote drivers are unconditionally revocable: their material is a tmpfs
+// directory this process owns, so wiping it needs no cooperation from anyone.
+// A remote agent has to be asked, and one speaking a protocol older than v2
+// has no frame with which to answer.
+func (s *Server) annotateRevocation(view *executorView, ex executor.Executor) {
+	remoteEx, ok := ex.(*remote.Executor)
+	if !ok {
+		view.SupportsRevocation = true
+		return
+	}
+	view.ProtocolVersion = remoteEx.ProtocolVersion()
+	view.SupportsRevocation = remoteEx.SupportsRevocation()
+	switch {
+	case view.SupportsRevocation:
+		return
+	case view.ProtocolVersion == 0:
+		view.RevocationNote = "Offline — a secret lease already on this device cannot be revoked until it reconnects."
+	default:
+		view.RevocationNote = fmt.Sprintf(
+			"Speaks protocol v%d; lease revocation needs v%d. cloop will refuse to place a workload "+
+				"carrying brokered credentials here. Upgrade with `cloop executor agent install --upgrade`.",
+			view.ProtocolVersion, remote.MinRevocationVersion)
+	}
 }
 
 // projectExecutorView describes where workDir's next workload would run.
@@ -1092,6 +1137,12 @@ func (s *Server) handleExecutorCordon(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(os.Stderr, "ui: cordoned executor %s (%s)\n", id, h.Reason)
 	s.auditExecutorAction(r, "cordon", id, map[string]any{"reason": h.Reason, "state": string(h.State)})
 	s.broadcastExecutorUpdate("cordoned", id)
+	// Take back whatever credentials this device is still holding. Cordoning
+	// is an operator saying they no longer want work here — most often
+	// because the machine is being decommissioned or is under suspicion — and
+	// leaving it holding live secrets until its in-flight tasks happen to
+	// finish answers that with "in a few hours".
+	s.revokeLeasesForExecutor(id, "executor cordoned: "+h.Reason, s.auditActor(r))
 	jsonOK(w, newExecutorSchedResponse(h))
 }
 
@@ -1149,6 +1200,7 @@ func (s *Server) handleExecutorDrain(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(os.Stderr, "ui: draining executor %s (%s)\n", id, h.Reason)
 	s.auditExecutorAction(r, "drain", id, map[string]any{"reason": h.Reason, "state": string(h.State)})
 	s.broadcastExecutorUpdate("draining", id)
+	s.revokeLeasesForExecutor(id, "executor draining: "+h.Reason, s.auditActor(r))
 
 	resp := executorDrainResponse{executorSchedResponse: newExecutorSchedResponse(h)}
 

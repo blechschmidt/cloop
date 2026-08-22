@@ -60,10 +60,28 @@ import (
 // dropped, since doing so strands every deployed device until it is upgraded.
 const (
 	// ProtocolVersion is the newest version this build speaks.
-	ProtocolVersion = 1
+	//
+	// v2 added the revoke frame (see TypeRevoke): the control plane can take
+	// one secret lease back from a task that is already running, rather than
+	// waiting for the task to exit.
+	ProtocolVersion = 2
 	// MinProtocolVersion is the oldest version this build still accepts.
 	MinProtocolVersion = 1
+	// MinRevocationVersion is the first version whose agents understand the
+	// revoke frame. A v1 agent connects and runs work perfectly well; it just
+	// cannot be trusted with material that must be revocable, so the hub
+	// refuses to place such a workload there (see Executor.Start).
+	//
+	// This is a placement rule, not a connectivity rule. Refusing the *device*
+	// would strand a fleet mid-upgrade over a capability most of its work does
+	// not need; refusing the *workload that depends on it* fails exactly the
+	// runs whose guarantee could not be met, and names the reason.
+	MinRevocationVersion = 2
 )
+
+// SupportsRevocation reports whether an agent speaking this protocol version
+// honours the revoke frame.
+func SupportsRevocation(version int) bool { return version >= MinRevocationVersion }
 
 // Timing constants. These are protocol-level agreements, not tunables: both
 // sides must derive their timeouts from the same numbers or a healthy agent
@@ -154,6 +172,15 @@ const (
 	// on request and unsolicited when a workload terminates.
 	TypeStatus FrameType = "status"
 
+	// TypeRevoke (control plane → agent) takes one secret lease back from a
+	// running task. Added in protocol v2.
+	TypeRevoke FrameType = "revoke"
+	// TypeRevoked (agent → control plane) acknowledges a revoke, reporting
+	// what was actually scrubbed. The ack is what lets the UI distinguish
+	// "revoked" from "revoke pending" from "unreachable" — a fire-and-forget
+	// revoke could only ever claim the first.
+	TypeRevoked FrameType = "revoked"
+
 	// TypeBye (either direction) announces an orderly shutdown, so the peer
 	// can distinguish a planned disconnect from a dropped link.
 	TypeBye FrameType = "bye"
@@ -182,7 +209,23 @@ type Frame struct {
 // marshalled. A payload that cannot be marshalled is a programming error in
 // the caller, so it is returned rather than silently dropped.
 func NewFrame(t FrameType, id, handle string, payload any) (Frame, error) {
-	f := Frame{V: ProtocolVersion, Type: t, ID: id, Handle: handle}
+	return NewFrameAt(ProtocolVersion, t, id, handle, payload)
+}
+
+// NewFrameAt builds a frame stamped with an explicit protocol version.
+//
+// Once a session has negotiated a version, every frame it sends must carry
+// that version and not this build's maximum. The receiver validates the
+// envelope version against its own supported range, so a v2 control plane
+// that stamped v2 onto a frame for a v1 agent would have every frame
+// rejected as out of range — the negotiation would be decorative. Versions
+// above the negotiated one are clamped rather than trusted, so a caller
+// cannot accidentally widen a session past what the peer agreed to.
+func NewFrameAt(version int, t FrameType, id, handle string, payload any) (Frame, error) {
+	if version < MinProtocolVersion || version > ProtocolVersion {
+		version = ProtocolVersion
+	}
+	f := Frame{V: version, Type: t, ID: id, Handle: handle}
 	if payload == nil {
 		return f, nil
 	}
@@ -443,6 +486,90 @@ type StatusPayload struct {
 	FinalOffset int64 `json:"final_offset,omitempty"`
 }
 
+// RevokeAction is what the agent should do about a workload still using the
+// material being taken away.
+type RevokeAction string
+
+const (
+	// RevokeScrub invalidates the material and lets the task keep running.
+	// It will fail naturally the next time it reaches for the credential.
+	//
+	// This is the default because a long autonomous run is usually doing
+	// many things, only one of which needed the revoked credential. Killing
+	// it to revoke a kubeconfig it used an hour ago throws away hours of
+	// work to close a window that scrubbing already closes.
+	RevokeScrub RevokeAction = "scrub"
+	// RevokeKill scrubs and then terminates every task holding the lease.
+	//
+	// It exists because scrubbing has one hard limit: a credential handed to
+	// a process as an environment variable is in that process's own memory,
+	// and no control plane can reach into another process's heap. When the
+	// credential itself is compromised rather than merely over-granted,
+	// killing the task is the only thing that actually stops its use.
+	RevokeKill RevokeAction = "kill"
+)
+
+// Valid reports whether the action is one the agent knows.
+func (a RevokeAction) Valid() bool {
+	return a == RevokeScrub || a == RevokeKill
+}
+
+// RevokePayload takes one lease's material back from a running agent.
+type RevokePayload struct {
+	// LeaseID is the lease being revoked. Required.
+	LeaseID string `json:"lease_id"`
+	// GrantID narrows the revocation to one grant within the lease. Empty
+	// revokes everything the lease delivered.
+	GrantID string `json:"grant_id,omitempty"`
+	// Reason is operator-facing text carried into the agent's log and the
+	// audit trail, so "why did my run lose its token" has an answer on both
+	// sides of the link.
+	Reason string `json:"reason,omitempty"`
+	// Action is scrub or kill. An empty or unknown action is treated as
+	// scrub: the conservative reading of a frame from a possibly-newer
+	// control plane is the one that does not destroy work.
+	Action RevokeAction `json:"action,omitempty"`
+}
+
+// Effective returns the action to apply, defaulting an absent or unknown
+// value to RevokeScrub.
+func (p RevokePayload) Effective() RevokeAction {
+	if p.Action.Valid() {
+		return p.Action
+	}
+	return RevokeScrub
+}
+
+// RevokedPayload acknowledges a revoke and reports what was actually done.
+//
+// It is deliberately specific rather than a bare "ok". An operator revoking
+// a kubeconfig needs to know whether the file is gone or whether the agent
+// merely forgot about it, and an ack that cannot distinguish the two would
+// let a UI claim a guarantee the system did not deliver.
+type RevokedPayload struct {
+	LeaseID string       `json:"lease_id"`
+	GrantID string       `json:"grant_id,omitempty"`
+	Action  RevokeAction `json:"action,omitempty"`
+	// Known reports whether the agent was holding this lease at all. False
+	// is a success, not a failure: the material is not here, which is the
+	// end state the revoke asked for.
+	Known bool `json:"known"`
+	// EnvScrubbed names the variables whose values the agent dropped. Names
+	// only — echoing a revoked credential back to the control plane would
+	// be a fine way to write it into a log.
+	EnvScrubbed []string `json:"env_scrubbed,omitempty"`
+	// FilesRemoved counts credential files wiped from the device.
+	FilesRemoved int `json:"files_removed,omitempty"`
+	// EgressDropped reports that the lease's network allowlist entry is gone.
+	EgressDropped bool `json:"egress_dropped,omitempty"`
+	// Killed lists the handles terminated, for RevokeKill.
+	Killed []string `json:"killed,omitempty"`
+	// Error is non-empty when part of the scrub failed. The ack is still
+	// sent: "I tried and this is what went wrong" is far more actionable
+	// than silence, which the hub can only read as unreachable.
+	Error string `json:"error,omitempty"`
+}
+
 // ByePayload announces an orderly shutdown.
 type ByePayload struct {
 	Reason string `json:"reason,omitempty"`
@@ -475,6 +602,10 @@ const (
 	CodeProtocol = "protocol"
 	// CodeBusy: the agent is at its concurrency ceiling.
 	CodeBusy = "busy"
+	// CodeRevokeUnsupported: the agent's protocol version predates the
+	// revoke frame. Distinct from CodeProtocol so the hub can report
+	// "upgrade this device" rather than "the device is broken".
+	CodeRevokeUnsupported = "revoke_unsupported"
 )
 
 // Decode helpers. Each returns a typed payload or a wrapped ErrProtocol, so
@@ -554,6 +685,27 @@ func DecodeLogAck(f Frame) (LogAckPayload, error) {
 
 func DecodeStatus(f Frame) (StatusPayload, error) {
 	var p StatusPayload
+	err := decodePayload(f, &p)
+	return p, err
+}
+
+// DecodeRevoke decodes a revoke frame. A revoke with no lease ID is rejected
+// rather than treated as "revoke everything": a wildcard revocation is not a
+// thing this protocol offers, and silently inventing one from a malformed
+// frame would let a truncated write take a whole device's credentials away.
+func DecodeRevoke(f Frame) (RevokePayload, error) {
+	var p RevokePayload
+	if err := decodePayload(f, &p); err != nil {
+		return p, err
+	}
+	if strings.TrimSpace(p.LeaseID) == "" {
+		return p, fmt.Errorf("%w: revoke frame has no lease_id", ErrProtocol)
+	}
+	return p, nil
+}
+
+func DecodeRevoked(f Frame) (RevokedPayload, error) {
+	var p RevokedPayload
 	err := decodePayload(f, &p)
 	return p, err
 }

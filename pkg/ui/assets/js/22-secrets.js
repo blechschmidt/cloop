@@ -295,17 +295,74 @@ function _secRenderLeases() {
       '<td class="audit-entity">' + esc(l.project_name || l.project_path || '—') + '</td>' +
       '<td>' + (mats || '<span class="sec-count">none</span>') + '</td>' +
       '<td class="' + _secTTLClass(remaining) + '">' + esc(_secFmtDuration(remaining)) + '</td>' +
+      '<td>' + _secRevocationCell(l) + '</td>' +
       '<td class="audit-time sec-hide-sm">' + esc(_secFmtTime(l.issued_at)) + '</td>' +
       '<td><div class="sec-actions">' +
         '<button class="btn" data-global-perm="secret.revoke" data-lease-revoke="' + esc(l.id) + '">Revoke</button>' +
+        '<button class="btn danger" data-global-perm="secret.revoke" data-lease-kill="' + esc(l.id) + '">Revoke &amp; kill</button>' +
       '</div></td>' +
     '</tr>';
   }).join('');
 
   body.querySelectorAll('[data-lease-revoke]').forEach(btn => {
-    btn.addEventListener('click', () => revokeLease(btn.getAttribute('data-lease-revoke')));
+    btn.addEventListener('click', () => revokeLease(btn.getAttribute('data-lease-revoke'), 'scrub'));
+  });
+  body.querySelectorAll('[data-lease-kill]').forEach(btn => {
+    btn.addEventListener('click', () => revokeLease(btn.getAttribute('data-lease-kill'), 'kill'));
   });
   _secApplyGating();
+}
+
+// _secRevocationCell renders how far a lease's revocation has actually got.
+//
+// The three states are kept distinct rather than collapsed into "revoked"
+// because they are three different security postures. Only "revoked" means an
+// agent confirmed it scrubbed the material; "revoke pending" means the frame
+// is in flight; "unreachable" means the credential is still sitting on a
+// machine the hub cannot talk to. A panel that showed the last of those as a
+// success would let an operator close an incident on a live credential.
+function _secRevocationCell(lease) {
+  const revs = lease.revocations || [];
+  if (!revs.length) {
+    // Never revoked. Say whether it *could* be, because an agent too old to
+    // honour the frame is something to find out before the incident, not
+    // during it.
+    if (lease.revocable === false) {
+      return '<span class="sec-chip warn" title="At least one agent holding this lease speaks a protocol ' +
+        'older than v2 and cannot scrub material on request. Upgrade it: cloop executor agent install --upgrade">' +
+        'not revocable</span>';
+    }
+    return '<span class="sec-count">—</span>';
+  }
+
+  // Worst state wins, for the same reason the server aggregates that way.
+  const rank = { revoked: 0, revoke_pending: 1, failed: 2, unreachable: 3 };
+  let worst = revs[0];
+  revs.forEach(r => { if ((rank[r.state] || 0) > (rank[worst.state] || 0)) worst = r; });
+
+  const label = {
+    revoked: 'revoked',
+    revoke_pending: 'revoke pending',
+    unreachable: 'unreachable',
+    failed: 'failed'
+  }[worst.state] || worst.state;
+
+  const cls = worst.state === 'revoked' ? 'ok'
+    : worst.state === 'revoke_pending' ? 'kind'
+    : 'warn';
+
+  const detail = [];
+  if (worst.executor_id) detail.push('executor ' + worst.executor_id);
+  if (worst.files_removed) detail.push(worst.files_removed + ' file(s) removed');
+  if (worst.env_scrubbed && worst.env_scrubbed.length) {
+    detail.push('env dropped: ' + worst.env_scrubbed.join(', '));
+  }
+  if (worst.egress_dropped) detail.push('egress allowlist dropped');
+  if (worst.killed && worst.killed.length) detail.push('killed ' + worst.killed.length + ' task(s)');
+  if (worst.error) detail.push(worst.error);
+  if (revs.length > 1) detail.push(revs.length + ' holders');
+
+  return '<span class="sec-chip ' + cls + '" title="' + esc(detail.join(' · ')) + '">' + esc(label) + '</span>';
 }
 
 function _secApplyGating() {
@@ -369,10 +426,27 @@ window.revokeGrant = function(id) {
   }).catch(err => toast('Revoke failed: ' + ((err && err.message) || String(err)), 'err'));
 };
 
-window.revokeLease = function(id) {
-  if (!confirm('Revoke lease ' + id + '?\n\nThe credential directory is wiped now. A process that has already read a file keeps what it read, so revoke the grant as well if the credential itself is compromised.')) return;
-  api('/api/leases/' + encodeURIComponent(id) + '/revoke', {}).then(() => {
-    toast('Lease revoked and credentials wiped', 'ok');
+window.revokeLease = function(id, action) {
+  const kill = action === 'kill';
+  const prompt = kill
+    ? 'Revoke lease ' + id + ' and kill the tasks holding it?\n\n' +
+      'Credential files are wiped, egress is dropped, and every task still using this lease is ' +
+      'terminated (SIGTERM, then SIGKILL after 5s). Use this when the credential itself is ' +
+      'compromised — an environment variable already handed to a running process cannot be taken ' +
+      'back any other way.'
+    : 'Revoke lease ' + id + '?\n\n' +
+      'Credential files are wiped and egress allowlist entries are dropped on every executor holding ' +
+      'this lease, now rather than at exit. The task keeps running and fails naturally on its next use. ' +
+      'A variable already in a running process\'s own environment stays there — use "Revoke & kill" for that.';
+  if (!confirm(prompt)) return;
+
+  api('/api/leases/' + encodeURIComponent(id) + '/revoke', { action: kill ? 'kill' : 'scrub' }).then(d => {
+    // The server\'s note is the honest description of what landed, including
+    // the partial cases. Preferring it over a fixed string is what keeps the
+    // toast from claiming a guarantee an unreachable agent did not deliver.
+    const state = (d && d.state) || 'revoked';
+    toast((d && d.note) || 'Lease revoked and credentials wiped',
+      state === 'revoked' ? 'ok' : 'warn');
     loadLeases();
   }).catch(err => toast('Revoke failed: ' + ((err && err.message) || String(err)), 'err'));
 };

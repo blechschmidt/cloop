@@ -58,6 +58,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/apierror"
 	"github.com/blechschmidt/cloop/pkg/egressbroker"
+	"github.com/blechschmidt/cloop/pkg/executor/remote"
 	"github.com/blechschmidt/cloop/pkg/logger"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
 	"github.com/blechschmidt/cloop/pkg/secretstore"
@@ -209,6 +210,18 @@ type leaseView struct {
 	RemainingSeconds int64               `json:"remaining_seconds"`
 	Expired          bool                `json:"expired"`
 	Materials        []leaseMaterialView `json:"materials"`
+
+	// Revocations is what each remote agent holding this lease reported
+	// when it was asked to give the credential back. Empty for a lease that
+	// has never been revoked, or one held only by a hub-local executor.
+	Revocations []revocationView `json:"revocations,omitempty"`
+	// Revocable reports whether every executor holding this lease speaks a
+	// protocol new enough to honour a revoke frame. False means a revocation
+	// can wipe the hub's copy but cannot reach the device, which the panel
+	// has to say out loud rather than offering a button that half works.
+	Revocable bool `json:"revocable"`
+	// Holders lists the remote executors currently holding this lease.
+	Holders []string `json:"holders,omitempty"`
 }
 
 // brokerStatusView tells the panel whether the secret store is usable, and
@@ -929,6 +942,11 @@ func (s *Server) handleLeasesList(w http.ResponseWriter, r *http.Request) {
 	resp.Broker.SecretsAvailable = true
 	resp.Broker.EgressAvailable = true
 
+	// Indexed once for the whole table rather than per row: the fleet log is
+	// a single in-memory snapshot, and asking the hub per lease would turn an
+	// O(1) read into O(leases × executors).
+	revocations := s.fleetRevocations()
+
 	for _, sl := range liveLeases.snapshot() {
 		l := sl.lease
 		if l == nil {
@@ -945,6 +963,8 @@ func (s *Server) handleLeasesList(w http.ResponseWriter, r *http.Request) {
 			Materials:   []leaseMaterialView{},
 		}
 		view.RemainingSeconds = int64(l.TTL(now) / time.Second)
+		view.Revocations = revocations[l.ID]
+		view.Holders, view.Revocable = s.leaseHolders(l.ID)
 		for _, m := range l.Materials {
 			// Material.Env and Material.Files carry the plaintext and are
 			// json:"-"; only these five metadata fields are copied, so the
@@ -981,10 +1001,43 @@ func (s *Server) handleLeaseRevoke(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sl, ok := liveLeases.revoke(id)
-	if !ok {
+	var req leaseRevokeRequest
+	// An absent body is fine here, unlike everywhere else in this file: the
+	// panel's ordinary Revoke button sends none, and the default (scrub, no
+	// reason) is the conservative action rather than a guess about intent.
+	if r.ContentLength > 0 && !decodeSecretsBody(w, r, &req) {
+		return
+	}
+	action, err := parseRevokeAction(req.Action)
+	if err != nil {
+		apierror.WriteError(w, apierror.New(apierror.CodeInvalidInput, err.Error()))
+		return
+	}
+
+	// Snapshot before the revocation: revokeLeaseEverywhere removes the lease
+	// from the registry, and these fields are what the response and the audit
+	// row are built from.
+	executorID, projectID, secretNames := "", "", []string(nil)
+	for _, sl := range liveLeases.snapshot() {
+		if sl.lease != nil && sl.lease.ID == id {
+			executorID, projectID = sl.lease.ExecutorID, sl.lease.ProjectID
+			secretNames = sl.lease.SecretNames()
+			break
+		}
+	}
+	holders, _ := s.leaseHolders(id)
+
+	reason := strings.TrimSpace(req.Reason)
+	if reason == "" {
+		reason = "revoked from the Secrets panel"
+	}
+	result := s.revokeLeaseEverywhere(r.Context(), id, strings.TrimSpace(req.GrantID),
+		reason, action, s.auditActor(r))
+
+	if !result.WipedLocally && len(result.Remote) == 0 {
 		apierror.WriteError(w, apierror.New(apierror.CodeNotFound,
-			"no lease with that id is open on this hub — it may have already expired or been wiped"))
+			"no lease with that id is open on this hub and no connected agent is holding it — "+
+				"it may have already expired, been wiped, or been revoked"))
 		return
 	}
 
@@ -992,18 +1045,85 @@ func (s *Server) handleLeaseRevoke(w http.ResponseWriter, r *http.Request) {
 	// second row naming the human who pressed the button: "who took this
 	// credential away" is the question the trail is for, and the executor's
 	// ID does not answer it.
-	executorID, projectID, secretNames := "", "", []string(nil)
-	if sl.lease != nil {
-		executorID, projectID = sl.lease.ExecutorID, sl.lease.ProjectID
-		secretNames = sl.lease.SecretNames()
-	}
 	s.auditLeaseRevoke(r, id, executorID, projectID, secretNames)
 	s.broadcastSecretsUpdate("lease_revoked", id)
 	jsonOK(w, map[string]any{
 		"ok": true, "id": id, "revoked": true,
-		"executor_id": executorID,
-		"secrets":     secretNames,
+		"executor_id":   executorID,
+		"secrets":       secretNames,
+		"action":        string(action),
+		"state":         string(result.State),
+		"wiped_locally": result.WipedLocally,
+		"holders":       holders,
+		"remote":        result.Remote,
+		"note":          revokeNote(result),
 	})
+}
+
+// leaseRevokeRequest is the optional body of POST /api/leases/{id}/revoke.
+type leaseRevokeRequest struct {
+	// Action is "scrub" (default) or "kill".
+	Action string `json:"action"`
+	// GrantID narrows the revocation to one grant within the lease.
+	GrantID string `json:"grant_id"`
+	// Reason is carried to the device and into the audit trail.
+	Reason string `json:"reason"`
+}
+
+// leaseHolders reports which remote executors hold a lease and whether every
+// one of them can honour a revoke frame.
+//
+// The second value is what stops the panel promising more than the fleet can
+// deliver: an agent too old to understand the frame will never be sent a
+// revocable workload in the first place (remote.Executor.Start refuses it),
+// but a device downgraded after a placement, or one enrolled before the
+// binding existed, can still turn up here.
+func (s *Server) leaseHolders(leaseID string) (holders []string, revocable bool) {
+	hub, err := s.remoteHub()
+	if err != nil || hub == nil {
+		// No remote fleet. The hub's own mount is the only copy, and wiping
+		// it is unconditionally within this process's power.
+		return nil, true
+	}
+	holders = hub.LeaseHolders(leaseID)
+	revocable = true
+	for _, id := range holders {
+		ex, ok := hub.Executor(id)
+		if !ok || !ex.SupportsRevocation() {
+			revocable = false
+		}
+	}
+	return holders, revocable
+}
+
+// revokeNote states, in the operator's terms, what the revocation achieved —
+// and what it did not.
+//
+// The distinction it draws is the one the whole feature turns on. Scrubbing
+// removes files and allowlist entries for good, but an environment variable
+// already handed to a running process cannot be taken out of that process's
+// memory by anyone. Saying "revoked" without that caveat would let an operator
+// close an incident believing a token is dead when the task holding it is
+// still using it.
+func revokeNote(result leaseRevocation) string {
+	switch result.State {
+	case remote.RevokeStateUnreachable:
+		return "The hub's copy is wiped, but at least one agent holding this lease is offline. " +
+			"The revocation is queued and will be delivered the moment it reconnects — until then, " +
+			"treat the credential as live and revoke the grant itself if it is compromised."
+	case remote.RevokeStateFailed:
+		return "At least one agent could not complete the scrub. Check the per-executor detail; " +
+			"treat the credential as live until it reports revoked."
+	case remote.RevokeStatePending:
+		return "Sent; waiting for the agent to acknowledge."
+	default:
+		if len(result.Remote) == 0 {
+			return "Credential files wiped. A process that already read one keeps what it read."
+		}
+		return "Credential files removed and egress allowlist entries dropped on every holder. " +
+			"Environment variables were dropped from each agent's memory, but a running task that " +
+			"already has one in its own environment keeps it — revoke with action=kill to stop those tasks."
+	}
 }
 
 // auditLeaseRevoke records an operator-initiated lease revocation.

@@ -443,6 +443,11 @@
     color:var(--muted); white-space:nowrap; margin:1px 3px 1px 0;
   }
   .sec-chip.kind { border-color:var(--accent); color:var(--accent); }
+  /* Revocation state. "ok" is the only one that means the credential is
+     actually gone from the executor; "warn" covers unreachable, failed, and
+     not-revocable, all of which mean it may still be live out there. */
+  .sec-chip.ok   { border-color:var(--green); color:var(--green); }
+  .sec-chip.warn { border-color:var(--red); color:var(--red); }
   .sec-status {
     font-size:11px; padding:1px 7px; border-radius:9px; border:1px solid var(--border);
     white-space:nowrap;

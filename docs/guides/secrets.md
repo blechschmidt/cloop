@@ -345,14 +345,102 @@ $ cloop egress list --all
 The two differ, and the difference matters during an incident:
 
 - **Secret grants** stop being honoured at the next lease or renewal. Material
-  already materialised survives until its lease expires — **up to 15 minutes**.
-  To cut access immediately, revoke *and* stop the workload.
+  already materialised is taken back by revoking the *lease* (below), not the
+  grant.
 - **Egress grants** are cut immediately: every live session under the grant is
   closed at the proxy, mid-tunnel.
 
 Revoking an already-revoked grant succeeds. Every grant, revoke and lease
 decision is audited with actor, subject, constraints and reason — and never with
 material ([`TestSecretBrokerDecisionsNeverCarryMaterial`](../security/model.md#the-guarantee--test-table)).
+
+---
+
+## Revoking a lease from a running task
+
+Revoking a *grant* changes what the next lease will contain. Revoking a *lease*
+takes material back from a task that is already running:
+
+```console
+$ curl -X POST https://cloop.example.com/api/leases/lease_8ce0add1/revoke \
+    -H "Authorization: Bearer $CLOOP_TOKEN" \
+    -d '{"action":"scrub","reason":"PAT rotated"}'
+```
+
+or press **Revoke** in the Secrets panel's *Live leases* table. The hub wipes
+its own copy and pushes a `revoke` frame to every executor holding the lease;
+each one scrubs the material and acknowledges.
+
+### What a scrub actually reaches
+
+This is the part to read before an incident rather than during one. A scrub is
+three different guarantees with three different strengths, and the API reports
+which one you got rather than flattening them into "revoked":
+
+| Material | Effect of a scrub | Strength |
+| --- | --- | --- |
+| Credential **files** (kubeconfig, the git credential helper's token file, registry auth) | zeroed and unlinked on the device | **Strong** — the next read fails |
+| **Egress** allowlist entries | dropped at the proxy and on the agent | **Strong** — the next connection is refused |
+| Environment **variables** | dropped from the agent's memory, so they are never re-injected on a restart, resume, or failover | **Weak** — the running process already has its own copy |
+
+The weak case is not a bug that can be fixed. A process is handed its
+environment by the kernel at `exec` time; nothing outside it can reach into
+that memory afterwards. This is why cloop's GitHub delivery uses a credential
+*helper* reading a token *file* rather than exporting a bare `GITHUB_TOKEN`
+(see [What the sandbox actually gets](#what-the-sandbox-actually-gets)) — it
+puts the PAT in the column that can actually be revoked.
+
+When the credential itself is compromised rather than merely over-granted, use
+`{"action":"kill"}`. The agent scrubs and then terminates every task holding
+the lease: `SIGTERM`, then `SIGKILL` five seconds later so a harness that traps
+the signal cannot outlive the revocation.
+
+### When the agent is unreachable
+
+**A revocation reaches a device only if the device is reachable.** The response
+and the panel report one of four states, and only the first means the material
+is gone:
+
+| State | Meaning |
+| --- | --- |
+| `revoked` | every holder acknowledged; the scrub is done |
+| `revoke_pending` | the frame is in flight |
+| `unreachable` | at least one holder is offline. **The credential is still on that machine.** The revocation is queued and replayed the moment it reconnects |
+| `failed` | a holder answered with an error; read the per-executor detail |
+
+The aggregate state is the *worst* holder's, not the best. Three devices out of
+four is not a revocation.
+
+If you see `unreachable` and the credential is compromised, revoke it at the
+source — rotate the PAT at GitHub, rotate the kubeconfig's credentials — because
+that is the only action that does not depend on a machine you cannot talk to.
+
+`not revocable` in the panel means a holder is running an agent older than
+protocol v2 and has no `revoke` frame to honour. The hub refuses to *place* new
+revocable material on such an agent, so this only appears for a device
+downgraded after a placement. Fix it with
+`cloop executor agent install --upgrade`.
+
+### The three triggers
+
+Revocation is driven from three places, all through the same path:
+
+1. **Explicit** — the Secrets panel or `POST /api/leases/{id}/revoke`.
+2. **TTL expiry** — a janitor sweeps live agent sessions once a minute and
+   scrubs leases whose TTL has lapsed. Before this existed, `Lease.Expired` was
+   consulted only by the caller that *minted* the lease, so a fifteen-minute
+   credential handed to a three-hour task simply stayed there for three hours.
+3. **Cordon and drain** — taking a device out of rotation scrubs everything it
+   is holding. It scrubs rather than kills, because draining explicitly waits
+   for in-flight work to finish and killing it would contradict the operation
+   you asked for.
+
+Each step is audited as `lease.revoke_sent`, then `lease.revoke_acked` or
+`lease.revoke_failed`, with the lease and executor IDs and how long the ack
+took. All three exist because a revocation is not one event: it is sent, and
+then it either lands or it does not — possibly minutes later, when an offline
+device reconnects. Collapsing them into one row would make the trail claim a
+credential was withdrawn at a moment when it demonstrably still worked.
 
 ---
 
@@ -426,13 +514,18 @@ the executor, which does not answer "who took this away".
 | | Default | Ceiling | Guidance |
 | --- | --- | --- | --- |
 | Secret grant `--ttl` | 24 h | — | match the work, not the calendar. A one-off migration is `--ttl 2h` |
-| Lease | 15 min | 15 min | not configurable per grant; this is the revocation window |
+| Lease | 15 min | 15 min | not configurable per grant; swept off live agents within a minute of lapsing |
 | Egress grant `--ttl` | 24 h | — | as above |
 | Egress `--session-ttl` | 15 min | 4 h | longer sessions mean revocation lands later |
 | Enrollment token `--ttl` | 15 min | 24 h | it is a bearer secret in transit — keep it short |
 
-The lease TTL is the number to reason about during an incident: it is the
-maximum time between "I revoked that" and "it stopped working".
+The lease TTL is the number to reason about when nobody is watching: an
+executor holding a lapsed lease has it swept within a minute of expiry, so the
+TTL plus the janitor interval bounds how long unattended material stays live.
+When someone *is* watching, revoke the lease directly — that lands in one round
+trip rather than at the end of the TTL. Either way, an unreachable agent is
+bounded by neither; see
+[When the agent is unreachable](#when-the-agent-is-unreachable).
 
 Materials are written into a 0700 tmpfs directory (`/dev/shm` where available),
 zeroed and removed when the workload exits.

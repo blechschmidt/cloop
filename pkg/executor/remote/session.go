@@ -168,7 +168,7 @@ func Accept(ctx context.Context, conn Conn, opts AcceptOptions) (*Session, error
 	// answer, and the agent blocks on it before resending anything.
 	acks := opts.Executor.reconcileResume(hello.Resume)
 
-	welcome, err := NewFrame(TypeWelcome, frame.ID, "", WelcomePayload{
+	welcome, err := NewFrameAt(version, TypeWelcome, frame.ID, "", WelcomePayload{
 		ProtocolVersion:  version,
 		ExecutorID:       opts.Executor.ID(),
 		Credential:       opts.IssuedCredential,
@@ -188,6 +188,16 @@ func Accept(ctx context.Context, conn Conn, opts AcceptOptions) (*Session, error
 	go sess.serve()
 	go sess.watchHeartbeat()
 	return sess, nil
+}
+
+// frame builds a frame stamped with the version this session negotiated.
+//
+// Every outbound frame goes through here rather than through NewFrame. A v2
+// control plane talking to a v1 agent must speak v1 on the wire, or the
+// agent's envelope check rejects every frame as out of range and the
+// negotiation the handshake performed becomes decorative.
+func (s *Session) frame(t FrameType, id, handle string, payload any) (Frame, error) {
+	return NewFrameAt(s.version, t, id, handle, payload)
 }
 
 // Capabilities returns what the agent advertised at hello.
@@ -305,7 +315,7 @@ func (s *Session) handleFrame(ctx context.Context, f Frame) (stop bool) {
 		// that a process died with its machine.
 		s.ex.reconcileActive(hb.ActiveHandles)
 		s.flushAcks(ctx)
-		ack, err := NewFrame(TypeHeartbeatAck, f.ID, "", HeartbeatAckPayload{
+		ack, err := s.frame(TypeHeartbeatAck, f.ID, "", HeartbeatAckPayload{
 			Seq:        hb.Seq,
 			ServerTime: s.nowFn(),
 		})
@@ -348,7 +358,7 @@ func (s *Session) handleFrame(ctx context.Context, f Frame) (stop bool) {
 		s.deliver(f)
 		return false
 
-	case TypeStarted, TypeError:
+	case TypeStarted, TypeRevoked, TypeError:
 		s.deliver(f)
 		return false
 
@@ -486,7 +496,7 @@ func (s *Session) flushAcks(ctx context.Context) {
 }
 
 func (s *Session) sendAck(ctx context.Context, handleID string, offset int64) {
-	frame, err := NewFrame(TypeLogAck, "", handleID, LogAckPayload{Offset: offset})
+	frame, err := s.frame(TypeLogAck, "", handleID, LogAckPayload{Offset: offset})
 	if err != nil {
 		return
 	}
@@ -617,8 +627,15 @@ func errorFromPayload(p ErrorPayload) error {
 
 // writeError sends an error frame on a best-effort basis. Failures are ignored
 // because every caller is already on a path that closes the connection.
+//
+// It is stamped at MinProtocolVersion rather than at this build's maximum
+// because every caller is on a pre-negotiation or failed-negotiation path: an
+// error frame's entire job is to be legible to the peer that could not agree
+// with us, and a peer stuck at the floor rejects anything above it as an
+// out-of-range envelope. Reporting "unsupported version" in a frame the peer
+// cannot parse would tell it only that the link broke.
 func writeError(ctx context.Context, conn Conn, id, code, msg string) {
-	frame, err := NewFrame(TypeError, id, "", ErrorPayload{Code: code, Message: msg})
+	frame, err := NewFrameAt(MinProtocolVersion, TypeError, id, "", ErrorPayload{Code: code, Message: msg})
 	if err != nil {
 		return
 	}

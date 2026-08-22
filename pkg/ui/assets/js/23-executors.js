@@ -171,6 +171,13 @@ function _renderExecutors(d) {
     if (ex.sched_reason) {
       h += '<div class="exec-sched-note">' + esc(ex.sched_reason) + '</div>';
     }
+    // A device that cannot honour a revoke frame is shown before it matters,
+    // not at dispatch time. The hub refuses to place brokered credentials on
+    // such an agent, so without this the first symptom of a half-upgraded
+    // fleet is a run that will not start.
+    if (ex.revocation_note) {
+      h += '<div class="exec-blocked-note">&#9888; ' + esc(ex.revocation_note) + '</div>';
+    }
     if (ex.blocked && ex.blocked_reason) {
       h += '<div class="exec-blocked-note">&#9888; Blocked by policy. ' + esc(ex.blocked_reason) + '</div>';
     }

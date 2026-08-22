@@ -135,6 +135,44 @@ func (sl *secretLease) Env() []string {
 	return sl.mount.Env()
 }
 
+// Bindings projects the mount's per-grant attribution onto the driver-facing
+// executor.SecretBinding, so the executor that receives this spec can take one
+// credential back mid-run instead of only at exit.
+//
+// The TTL rides along. A driver that loses contact with the control plane can
+// then expire the material locally rather than holding it indefinitely, which
+// is the difference between a lease TTL that binds the whole system and one
+// that binds only the hub.
+func (sl *secretLease) Bindings() []executor.SecretBinding {
+	if sl == nil || sl.lease == nil || sl.mount == nil {
+		return nil
+	}
+	raw := sl.mount.Bindings()
+	out := make([]executor.SecretBinding, 0, len(raw))
+	for _, b := range raw {
+		out = append(out, executor.SecretBinding{
+			LeaseID:    sl.lease.ID,
+			GrantID:    b.GrantID,
+			SecretName: b.SecretName,
+			Kind:       string(b.Kind),
+			EnvKeys:    b.EnvKeys,
+			Files:      b.Files,
+			Dir:        b.Dir,
+			Egress:     b.Kind == secretbroker.KindEgressProxy,
+			ExpiresAt:  sl.lease.ExpiresAt,
+		})
+	}
+	return out
+}
+
+// ExecutorID returns the executor this lease was issued to, or "".
+func (sl *secretLease) ExecutorID() string {
+	if sl == nil || sl.lease == nil {
+		return ""
+	}
+	return sl.lease.ExecutorID
+}
+
 // Close wipes the credential directory and releases the lease. Idempotent,
 // so it is safe both in a defer and on an explicit early return.
 func (sl *secretLease) Close() {
@@ -265,6 +303,11 @@ func applyLease(spec executor.Spec, sl *secretLease) executor.Spec {
 	if len(env) == 0 {
 		return spec
 	}
+	// Attribution travels with the material. Without it the executor sees an
+	// environment it cannot take anything back out of, and a revocation could
+	// only ever kill the workload — see pkg/executor.SecretBinding.
+	spec.Secrets = append(spec.Secrets, sl.Bindings()...)
+
 	base := spec.Env
 	if base == nil {
 		base = os.Environ()

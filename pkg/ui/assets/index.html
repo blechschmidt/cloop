@@ -1550,8 +1550,15 @@
           <div class="sec-subtitle">Live leases <span class="sec-count" id="secLeasesCount"></span></div>
           <p class="sec-hint">
             Credentials materialised into a running workload's memory-backed directory. Revoking wipes that
-            directory now, rather than waiting for the lease to lapse &mdash; a process that has already read a
-            file keeps what it read, so revoke the grant too if the credential itself is compromised.
+            directory now and pushes a scrub to every executor already holding the credential, rather than
+            waiting for the task to exit.
+          </p>
+          <p class="sec-hint">
+            <strong>What a scrub reaches:</strong> credential files are wiped and egress allowlist entries are
+            dropped, so the next read or connection fails. An environment variable is dropped from the agent's
+            memory, but a task that already has it in its own environment keeps it &mdash; no control plane can
+            reach into another process. Use <em>Revoke &amp; kill</em> when the credential itself is compromised.
+            A lease held by an offline agent shows <em>unreachable</em> and is replayed when it reconnects.
           </p>
           <div id="secLeasesEmpty" class="audit-empty" style="display:none">
             No leases outstanding. Nothing on this hub is holding a brokered credential.
@@ -1564,8 +1571,9 @@
                   <th style="width:180px">Project</th>
                   <th>Credentials</th>
                   <th style="width:120px">Time left</th>
+                  <th style="width:150px">Revocation</th>
                   <th style="width:170px" class="sec-hide-sm">Issued</th>
-                  <th style="width:170px"></th>
+                  <th style="width:230px"></th>
                 </tr>
               </thead>
               <tbody id="secLeasesBody"></tbody>

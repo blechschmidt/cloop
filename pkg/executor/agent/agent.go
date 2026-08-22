@@ -118,6 +118,13 @@ type Agent struct {
 	pinDescription  string
 	insecureWarning string
 
+	// vault indexes the brokered credentials this device is holding, by
+	// lease, so a revoke frame can take one back without walking every
+	// workload's environment. It has its own lock: a scrub holds it across
+	// file unlinks, and blocking every other agent operation behind that
+	// would stall heartbeats.
+	vault *vault
+
 	mu        sync.Mutex
 	cred      Credential
 	workloads map[string]*workload
@@ -167,6 +174,7 @@ func New(cfg Config) (*Agent, error) {
 		cfg:       cfg,
 		local:     localprocess.New("agent-local"),
 		workloads: make(map[string]*workload),
+		vault:     newVault(),
 	}
 
 	// A stored credential supplies defaults for anything the operator did not
