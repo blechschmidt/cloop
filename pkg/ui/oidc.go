@@ -119,13 +119,25 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 	s.OIDC.HandleCallback(w, r)
 }
 
+// handleOIDCLogout ends the caller's session here and tells the browser where
+// to finish the job at the identity provider.
+//
+// Returning a redirect target rather than issuing a 302 keeps this callable
+// from fetch(): the frontend clears its own state and then navigates. An empty
+// "redirect" means the provider advertises no end_session_endpoint, in which
+// case the browser's session at the IdP outlives cloop's — the next sign-in
+// completes without a prompt, which is worth knowing but is the provider's
+// behaviour to change, not something the hub can paper over.
 func (s *Server) handleOIDCLogout(w http.ResponseWriter, r *http.Request) {
 	if !s.oidcEnabled() {
 		jsonErr(w, "OIDC authentication is not enabled on this server", http.StatusNotFound)
 		return
 	}
 	s.OIDC.Logout(w, r)
-	jsonOK(w, map[string]interface{}{"ok": true})
+	jsonOK(w, map[string]interface{}{
+		"ok":       true,
+		"redirect": s.OIDC.EndSessionURL(),
+	})
 }
 
 // handleMe reports the caller's authentication status and effective

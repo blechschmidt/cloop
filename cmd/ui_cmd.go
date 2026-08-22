@@ -115,16 +115,30 @@ but not for anything reachable from a network.`,
 			// require SSO must not silently start wide open, so an invalid
 			// OIDC config aborts startup with a descriptive error.
 			if cfg.UI.OIDC.Enabled {
+				// Durable sessions (Task 20176). A failure to open the store is
+				// reported and degraded to process-local sessions rather than
+				// aborted: a hub that cannot reach its session table should
+				// still let people in, it should just be honest that a restart
+				// will sign them out again.
+				store, storeWarn := srv.OpenSessionStore()
+				if storeWarn != nil {
+					fmt.Printf("warning: sessions are process-local (%v) — a restart will sign every user out\n", storeWarn)
+				}
+				refreshMinutes := cfg.UI.OIDC.EffectiveRefreshIntervalMinutes()
 				auth, oidcErr := oidcauth.New(oidcauth.Config{
-					Enabled:      true,
-					Issuer:       cfg.UI.OIDC.Issuer,
-					ClientID:     cfg.UI.OIDC.ClientID,
-					ClientSecret: cfg.UI.OIDC.ClientSecret,
-					RedirectURL:  cfg.UI.OIDC.RedirectURL,
-					Scopes:       cfg.UI.OIDC.Scopes,
-					AdminEmails:  cfg.UI.OIDC.AdminEmails,
-					SessionTTL:   time.Duration(cfg.UI.OIDC.EffectiveSessionTTLHours()) * time.Hour,
-					CookieSecure: cfg.UI.OIDC.CookieSecure,
+					Enabled:         true,
+					Issuer:          cfg.UI.OIDC.Issuer,
+					ClientID:        cfg.UI.OIDC.ClientID,
+					ClientSecret:    cfg.UI.OIDC.ClientSecret,
+					RedirectURL:     cfg.UI.OIDC.RedirectURL,
+					Scopes:          cfg.UI.OIDC.Scopes,
+					AdminEmails:     cfg.UI.OIDC.AdminEmails,
+					SessionTTL:      time.Duration(cfg.UI.OIDC.EffectiveSessionTTLHours()) * time.Hour,
+					IdleTimeout:     time.Duration(cfg.UI.OIDC.EffectiveIdleTimeoutHours()) * time.Hour,
+					RefreshInterval: time.Duration(refreshMinutes) * time.Minute,
+					CookieSecure:    cfg.UI.OIDC.CookieSecure,
+					Store:           store,
+					Audit:           srv.SessionAuditSink(),
 				})
 				if oidcErr != nil {
 					return fmt.Errorf("ui.oidc is enabled but invalid: %w", oidcErr)
@@ -149,6 +163,10 @@ but not for anything reachable from a network.`,
 				fmt.Printf("OIDC authentication enabled (issuer: %s)\n", cfg.UI.OIDC.Issuer)
 				fmt.Printf("RBAC: %d role mapping(s), default role %q\n",
 					len(cfg.UI.OIDC.RoleMappings), effectiveDefaultRole(cfg.UI.OIDC.DefaultRole))
+				fmt.Printf("Sessions: %s absolute / %s idle, %s\n",
+					time.Duration(cfg.UI.OIDC.EffectiveSessionTTLHours())*time.Hour,
+					time.Duration(cfg.UI.OIDC.EffectiveIdleTimeoutHours())*time.Hour,
+					describeRevalidation(refreshMinutes, srv.SessionStoreSealsRefreshTokens()))
 			}
 		}
 
@@ -198,6 +216,24 @@ func effectiveDefaultRole(configured string) string {
 		return string(authz.RoleNone)
 	}
 	return configured
+}
+
+// describeRevalidation renders the IdP-revocation state for the startup
+// banner.
+//
+// It is spelled out rather than left implicit because the difference matters
+// operationally and is otherwise invisible: on a hub with no CLOOP_SECRET_KEY
+// there is no refresh token to redeem, so disabling a user at the identity
+// provider does not end their cloop session until a timeout does. An operator
+// should learn that at startup, not during an incident.
+func describeRevalidation(refreshMinutes int, sealsRefreshTokens bool) string {
+	if refreshMinutes < 0 {
+		return "IdP revalidation disabled by config (refresh_interval_minutes: -1)"
+	}
+	if !sealsRefreshTokens {
+		return "IdP revalidation unavailable (no CLOOP_SECRET_KEY — refresh tokens are not retained)"
+	}
+	return fmt.Sprintf("IdP revalidation every %s", time.Duration(refreshMinutes)*time.Minute)
 }
 
 // openBrowser opens the given URL in the default system browser.

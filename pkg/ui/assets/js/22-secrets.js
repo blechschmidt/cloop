@@ -27,6 +27,12 @@ window.loadSecretsPanel = function() {
   if (typeof canGlobal !== 'function' || canGlobal('token.admin')) {
     loads.push(loadTokens());
   }
+  // Same rule for the sessions table (Task 20176): hidden below session.admin,
+  // so a maintainer opening this tab should not fire a request whose only
+  // outcome is a 403 and an audit row recording their own denial.
+  if (typeof canGlobal !== 'function' || canGlobal('session.admin')) {
+    loads.push(loadSessions());
+  }
   return Promise.all(loads).then(() => { _secStartTicker(); });
 };
 

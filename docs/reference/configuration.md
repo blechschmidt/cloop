@@ -432,6 +432,51 @@ API additionally refuses to issue a token stronger or wider than its creator.
 Creation, revocation, and every failed authentication are recorded in the audit
 trail (`cloop events`).
 
+### Interactive access: single sign-on and sessions
+
+`ui.oidc.*` configures OpenID Connect for the dashboard. The full setup is in
+[the security model](../security/model.md#configuring-oidc-single-sign-on);
+these are the keys that govern how long a session lives and how quickly it can
+be taken away.
+
+```yaml
+ui:
+  oidc:
+    session_ttl_hours: 24          # absolute ceiling, set at sign-in
+    idle_timeout_hours: 8          # ends an unused session sooner
+    refresh_interval_minutes: 15   # how often the IdP is re-asked
+```
+
+| Key | Default | Range | What it bounds |
+| --- | --- | --- | --- |
+| `session_ttl_hours` | `24` | `1`–`720` | The hard ceiling. No amount of activity extends it; when it lapses the user signs in again. |
+| `idle_timeout_hours` | `8` | `1`–`720`, and never above `session_ttl_hours` | How long a session may go unused. This is the clock that bounds an unattended browser, and usually the one to tighten first — shortening it costs a re-login after a long meeting, while shortening the ceiling interrupts people mid-task. |
+| `refresh_interval_minutes` | `15` | `1`–`1440`, or `-1` to disable | Worst-case lag between the identity provider disabling a user and their cloop session ending. Requires `CLOOP_SECRET_KEY`. |
+
+Out-of-range values are clamped rather than rejected, and an
+`idle_timeout_hours` larger than `session_ttl_hours` is held down to it — an
+idle clock that can never fire would silently remove the protection you
+believe is on.
+
+Sessions are stored in the hub's own `state.db` and survive a restart or a
+rolling upgrade. The refresh token used for revalidation is sealed with
+AES-256-GCM under **`CLOOP_SECRET_KEY`** — the same variable
+[`cloop secret`](../guides/secrets.md) uses. Without it cloop does not retain
+refresh tokens at all (rather than storing a live credential in plaintext), so
+`refresh_interval_minutes` has no effect and IdP-side revocation is
+unavailable. `cloop ui` says so at startup and the **Active sessions** panel
+shows a banner.
+
+Operators with the `session.admin` permission get an Active sessions table in
+the Secrets tab — subject, IP, device, sign-in time, idle time, and a
+Terminate button — backed by `GET /api/sessions` and
+`DELETE /api/sessions/{id}`. Any signed-in user can end their other sessions
+from the header (`POST /api/session/logout-all`). Signing out also redirects to
+the provider's `end_session_endpoint` when it advertises one, so the browser's
+session at the IdP ends too. Revocation semantics, including what happens when
+the IdP is unreachable, are in
+[Session lifecycle and revocation](../security/model.md#session-lifecycle-and-revocation).
+
 ### Web UI (`cloop ui`)
 
 The web dashboard binds to **localhost only** by default.

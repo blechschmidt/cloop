@@ -86,6 +86,10 @@
     </button>
     <!-- Signed-in user + sign-out (rendered only when OIDC auth is enabled) -->
     <span class="user-chip" id="userChip"></span>
+    <button class="theme-toggle-btn" id="logoutAllBtn" style="display:none" onclick="signOutEverywhere()"
+            aria-label="Sign out everywhere" title="Sign out of every other session (lost or shared device)">
+      <span aria-hidden="true">&#8635;</span>
+    </button>
     <button class="theme-toggle-btn" id="logoutBtn" style="display:none" aria-label="Sign out" title="Sign out">
       <span aria-hidden="true">&#8998;</span>
     </button>
@@ -1607,6 +1611,41 @@
                 </tr>
               </thead>
               <tbody id="secTokensBody"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- ── Active sessions (Task 20176) ──
+             Hidden below session.admin for the same reason as API tokens: the
+             roles that cannot terminate a session have no action here, and the
+             list of who is signed in from where is itself reconnaissance. -->
+        <div class="sec-sub" data-global-perm="session.admin" data-perm-hide>
+          <div class="sec-subtitle" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+            Active sessions <span class="sec-count" id="secSessionsCount"></span>
+            <span style="font-size:11px;font-weight:400;color:var(--muted)">admin only &mdash; <code>session.admin</code></span>
+            <button class="btn" style="padding:3px 9px;font-size:12px;margin-left:auto"
+                    onclick="loadSessions()" title="Reload the session list">Refresh</button>
+          </div>
+          <p class="sec-hint" id="secSessionsPolicy"></p>
+          <div id="secSessionsBanner" class="sec-banner" style="display:none"></div>
+          <div id="secSessionsEmpty" class="audit-empty" style="display:none">
+            Nobody is signed in right now.
+          </div>
+          <div style="overflow-x:auto">
+            <table class="audit-table" id="secSessionsTable" style="display:none">
+              <thead>
+                <tr>
+                  <th>User</th>
+                  <th style="width:130px">IP</th>
+                  <th class="sec-hide-sm">Device</th>
+                  <th style="width:120px" class="sec-hide-sm">Signed in</th>
+                  <th style="width:110px">Idle</th>
+                  <th style="width:110px">Expires in</th>
+                  <th style="width:120px" class="sec-hide-sm">IdP checked</th>
+                  <th style="width:130px"></th>
+                </tr>
+              </thead>
+              <tbody id="secSessionsBody"></tbody>
             </table>
           </div>
         </div>

@@ -96,6 +96,15 @@ var (
 	// caller must not be able to use the difference to learn which token ids
 	// exist.
 	ErrAPITokenNotFound = errors.New("statedb: api token not found")
+
+	// ErrSessionNotFound indicates no sessions row has the requested id.
+	//
+	// Like ErrAPITokenNotFound this is an ordinary outcome on the
+	// authentication path, not a fault: it is what a forged cookie, a cookie
+	// from before a restart that wiped the database, and a session an
+	// administrator just terminated all look like. All three must produce the
+	// same answer to the caller.
+	ErrSessionNotFound = errors.New("statedb: session not found")
 )
 
 // classifyDriverErr inspects a raw error returned by the modernc.org/sqlite

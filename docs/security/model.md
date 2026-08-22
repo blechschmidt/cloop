@@ -14,6 +14,7 @@ So every guarantee below ends in a row of the
 - [Trust boundaries](#trust-boundaries)
 - [The no-host-execution guarantee](#the-no-host-execution-guarantee)
 - [Identity, roles and permissions](#identity-roles-and-permissions)
+- [Session lifecycle and revocation](#session-lifecycle-and-revocation)
 - [The guarantee → test table](#the-guarantee--test-table)
 - [What is not mitigated](#what-is-not-mitigated)
 
@@ -188,19 +189,119 @@ which `cloop hub bootstrap` writes as `none`.
 | `viewer` | `project.read`, `executor.read` |
 | `operator` | `run.start`, `run.stop`, `task.mutate` |
 | `maintainer` | `project.write`, `config.write`, `secret.grant`, `secret.revoke` |
-| `admin` | everything, including `executor.manage`, `audit.read`, `user.manage`, `token.admin` |
+| `admin` | everything, including `executor.manage`, `audit.read`, `user.manage`, `token.admin`, `session.admin` |
 
 **Permissions** (`AllPermissions`): `project.read`, `project.write`, `run.start`,
 `run.stop`, `task.mutate`, `executor.read`, `executor.manage`, `secret.grant`,
-`secret.revoke`, `config.write`, `audit.read`, `user.manage`, `token.admin`.
+`secret.revoke`, `config.write`, `audit.read`, `user.manage`, `token.admin`,
+`session.admin`.
 Plus `public`, an explicit escape hatch used only by unguarded routes (the
-dashboard shell, the OIDC login endpoints, `/api/me`, `/healthz`, `/readyz`).
+dashboard shell, the OIDC login endpoints, `/api/me`, `/api/session/logout-all`,
+`/healthz`, `/readyz`).
 
 Roles are granted by matching a claim from the ID token — `group`, `role`,
 `email` or `sub` — optionally scoped to a project. A static bearer token
 authenticates as `admin` with source `static_token`, which is why it belongs
 only in deployments that have no SSO. Every privileged decision, allow or deny,
 is written to the audit trail (`pkg/ui/authz.go:294`).
+
+### Session lifecycle and revocation
+
+A dashboard session is a `Secure` `HttpOnly` `SameSite=Strict` cookie holding
+256 bits of CSPRNG output. The hub stores its SHA-256, never the value — a
+stolen copy of `state.db` yields no usable cookie, the same property API tokens
+have. That digest is also the session's public id, so it can appear in the
+Active Sessions table and in `DELETE /api/sessions/{id}` without being a
+credential.
+
+Sessions live in the hub's own control-plane database and survive a restart or
+a rolling upgrade. A read-through cache keeps authentication off the disk on
+the hot path; entries are re-read at least every 30 seconds, which is what
+bounds how long a session revoked on one replica keeps working on another.
+
+**A session ends for exactly four reasons, and the audit trail distinguishes
+them:**
+
+| Cause | Audit event | Bound |
+| --- | --- | --- |
+| Absolute lifetime reached | `session.expired` (`absolute_ttl`) | `session_ttl_hours`, default 24h |
+| Unused too long | `session.expired` (`idle_timeout`) | `idle_timeout_hours`, default 8h |
+| Signed out, or terminated by an operator | `session.revoked` | immediate |
+| The identity provider refused to renew it | `session.idp_revoked` | `refresh_interval_minutes`, default 15m |
+
+Sign-in emits `session.created`. Every one of these is appended to the
+hash-chained trail, so "why is this person signed out" and "who signed them
+out" are answerable after the fact and cannot be edited away.
+
+Both clocks are enforced **on the read path**, not only by the background
+sweep: a session past either bound is refused by the very next request whether
+or not anything has removed the row yet. A stopped janitor therefore costs
+storage hygiene and revocation latency, never authorization. The idle clock is
+refreshed by authenticated requests but persisted at most once per session per
+minute, so an open dashboard does not turn every read into a write; a lost
+write shortens the idle window by up to a minute, which is the safe direction.
+
+**IdP-side revocation.** Disabling a user at the identity provider changes
+nothing the hub can observe on its own: the cookie is still valid and the
+claims in it were valid when issued. cloop closes that gap by keeping the
+refresh token issued at sign-in — sealed with AES-256-GCM under
+`CLOOP_SECRET_KEY`, exactly like a brokered credential — and redeeming it on an
+interval. The failure taxonomy is the mechanism:
+
+- `invalid_grant` (a disabled user, withdrawn consent, a forced sign-out, or a
+  refresh token already rotated away) **terminates the session immediately** and
+  writes `session.idp_revoked` with the provider's own error code.
+- A network failure, timeout, or `5xx` **leaves the session alone** and retries
+  on the next interval. Failing closed here would turn an IdP outage into a
+  fleet-wide sign-out — a dependency problem escalated into an availability
+  incident.
+- `invalid_client` — the IdP rejecting *cloop's* credentials — also leaves the
+  session alone. That is a misconfiguration on this side, and nobody's access
+  should end because an operator rotated a client secret.
+
+A rotated refresh token is stored before the next check, since failing to
+persist the replacement would make the following check look like a revocation
+and sign the user out for no reason.
+
+**Without `CLOOP_SECRET_KEY` there is no IdP-side revocation.** Refresh tokens
+are not retained rather than being written in plaintext, so disabling a user at
+the provider does not end their cloop session until a timeout does, or until an
+operator terminates it. This is stated at startup and in the Active Sessions
+panel rather than left to be discovered during an incident.
+
+**Operator and self-service controls.**
+
+| Action | Route | Gate |
+| --- | --- | --- |
+| List every session | `GET /api/sessions` | `session.admin` |
+| Terminate one | `DELETE /api/sessions/{id}` | `session.admin` |
+| End my other sessions | `POST /api/session/logout-all` | authenticated, ungated |
+| Sign out | `POST /auth/logout` | public |
+
+`session.admin` is deliberately separate from `user.manage`. Terminating a
+session is containment — the thing an on-call operator does when a laptop goes
+missing — and it changes nobody's standing rights, so it should not require the
+ability to rewrite role bindings. Reading the list is gated at the same level as
+revoking, because who is signed in, from where, and on what is reconnaissance
+for anyone who should not have it.
+
+`logout-all` is ungated because ending one's own sessions can never be an
+escalation. It takes no id and is scoped to the calling session's subject, so
+there is no parameter that could reach anyone else's, and it spares the caller's
+own session so an operator is not thrown out of the page they clicked it from.
+
+Signing out also sends the browser to the provider's `end_session_endpoint`
+when discovery advertises one. Without that second hop the provider's cookie
+outlives cloop's, the next sign-in completes with no prompt, and the button
+looks like it did nothing — worst precisely where it matters most, on a shared
+machine. The request carries `client_id` and `post_logout_redirect_uri` rather
+than `id_token_hint`, which would mean retaining a second credential at rest for
+the life of the session.
+
+The IP and User-Agent shown in the panel are labels for an operator to
+recognise a session by. Neither is an input to any decision: both are
+attacker-supplied, and pinning a session to either breaks users behind mobile
+networks far more often than it stops a thief.
 
 ### API tokens for non-interactive callers
 
@@ -294,6 +395,8 @@ ui:
     admin_emails: [ops@example.com]   # optional: these users see all projects
     # scopes: [openid, profile, email]  # default
     # session_ttl_hours: 24             # default; 1..720
+    # idle_timeout_hours: 8             # default; 1..720, clamped to session_ttl_hours
+    # refresh_interval_minutes: 15      # default; 1..1440, or -1 to disable IdP revalidation
     # cookie_secure: auto               # auto | always | never
 ```
 
@@ -316,8 +419,10 @@ When enabled:
   registry (`~/.cloop/projects.json`, `owner` field).
 - The static bearer token (`--token` / `CLOOP_UI_TOKEN`) keeps working for
   API automation and sees all projects.
-- Sessions live in memory: restarting the dashboard signs everyone out
-  (they are silently re-authenticated by the IdP on the next navigation).
+- Sessions are persisted in the hub's control-plane database and survive a
+  restart. Set `CLOOP_SECRET_KEY` to arm IdP-side revocation — without it,
+  refresh tokens are not retained. See
+  [Session lifecycle and revocation](#session-lifecycle-and-revocation).
 
 ### Configuring role mappings
 
@@ -447,6 +552,28 @@ what it is looking for.
 | A project-scoped token holds nothing on an out-of-scope project, at every role | `TestScopedTokenIsDeniedOutOfScopeProjectsRegardlessOfRole` |
 | A revoked or expired token resolves to an empty permission set, not just a failed login | `TestRevokedOrExpiredTokenHoldsNothing` |
 | `token.admin` is held by `admin` alone | `TestTokenAdminIsAdminOnly` |
+
+### Sessions — `sessions_test.go` and the package suites
+
+Session guarantees are asserted where the real thing lives rather than against
+a reconstruction, so this row set spans three packages.
+
+| Guarantee | Test |
+| --- | --- |
+| `session.admin` is held by `admin` alone | `tests/security: TestSessionAdminIsAdminOnly` |
+| `session.admin` has not collapsed back into `user.manage` | `tests/security: TestSessionAdminIsDistinctFromUserManage` |
+| The stored id cannot be replayed as a cookie | `pkg/oidcauth: TestOnlyTheHashIsStored` |
+| The refresh token is not readable in the database file | `pkg/sessionstore: TestRefreshTokenIsEncryptedAtRest` |
+| With no encryption key the token is dropped, never written in the clear | `pkg/sessionstore: TestNoKeyDropsRefreshToken` |
+| A key rotation does not sign existing sessions out | `pkg/sessionstore: TestWrongKeyDoesNotBreakAuthentication` |
+| Both clocks are enforced on the read path, with no sweep having run | `pkg/oidcauth: TestIdleTimeoutEndsSession`, `TestAbsoluteExpiryEndsSession` |
+| A revoked session is refused on its next HTTP request, against a warm cache | `pkg/ui: TestRevokedSessionIsRefusedOnNextRequest` |
+| Below `admin`, the session list and terminate are refused | `pkg/ui: TestSessionsListRequiresSessionAdmin` |
+| `logout-all` ends only the caller's own other sessions | `pkg/ui: TestLogoutAllEndsOnlyTheCallersOtherSessions` |
+| An IdP refusal ends the session; an IdP outage does not | `pkg/oidcauth: TestRefreshRejectionTerminatesSession`, `TestRefreshOutageKeepsSession` |
+| A rotated refresh token is stored, so the next check is not a false revocation | `pkg/oidcauth: TestRefreshRotationStoresNewToken` |
+| A session survives a process restart with its claims intact | `pkg/sessionstore: TestSessionSurvivesProcessRestart` |
+| Concurrent requests cannot walk `last_seen` backwards or defeat the write throttle | `pkg/oidcauth: TestConcurrentRequestsDoNotCorruptLastSeen` |
 
 ### Container sandbox — `container_test.go`
 

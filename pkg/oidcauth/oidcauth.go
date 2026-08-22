@@ -6,9 +6,34 @@
 // The package is intentionally dependency-free (stdlib only). Only the parts
 // of OIDC that cloop needs are implemented: provider discovery, the code
 // flow, RS256/ES256 signature verification, and iss/aud/exp/nonce claim
-// validation. Sessions live in process memory — restarting the dashboard
-// logs everyone out, which is an acceptable trade for having no session
-// store to secure at rest.
+// validation.
+//
+// # Session lifecycle
+//
+// A session ends for one of four reasons, and the hub can tell them apart:
+//
+//	the user signed out            session.revoked
+//	an operator terminated it      session.revoked
+//	a clock ran out                session.expired
+//	the IdP refused to renew it    session.idp_revoked
+//
+// Two clocks run concurrently. The absolute ceiling is set at login and cannot
+// be extended; the idle clock is refreshed by authenticated requests and is
+// what bounds an unattended browser. Both are enforced on the read path — so a
+// session is dead the moment either lapses, whether or not the janitor has got
+// to the row yet — and swept off it, so the table does not accumulate corpses.
+//
+// The fourth reason is the one that needs a mechanism rather than a timer. If
+// the identity provider disables a user, nothing about the cookie changes, so
+// a hub that never asks again keeps honouring it until the ceiling lapses.
+// Storing the refresh token (sealed, see SessionStore) and redeeming it on an
+// interval turns "the IdP says no" into a session that ends in minutes rather
+// than hours. That check runs in the background, never on the request path: an
+// unreachable IdP must make the dashboard slow to *revoke*, not slow to serve.
+//
+// Sessions are held by a SessionStore. The default is process-local and dies
+// with the hub; pkg/sessionstore persists them so a restart or a rolling
+// upgrade does not sign everyone out.
 package oidcauth
 
 import (
@@ -67,6 +92,50 @@ const (
 
 	// maxSessionTTL caps configured session lifetimes.
 	maxSessionTTL = 30 * 24 * time.Hour
+
+	// DefaultIdleTimeout is used when Config.IdleTimeout is zero. Eight hours
+	// is one working day: a browser left open over lunch stays signed in, one
+	// left open overnight does not.
+	DefaultIdleTimeout = 8 * time.Hour
+
+	// DefaultRefreshInterval is used when Config.RefreshInterval is zero. It
+	// is the worst-case delay between the IdP disabling a user and their cloop
+	// session ending, so it is short — but not so short that a hub with a
+	// thousand sessions turns into a load generator against the token
+	// endpoint.
+	DefaultRefreshInterval = 15 * time.Minute
+
+	// sessionCacheTTL bounds how long a cached session is trusted without
+	// re-reading the store.
+	//
+	// This is what makes revocation propagate. Within one process a
+	// termination evicts the cache entry immediately, but a second hub replica
+	// sharing the database has no such signal, so a cached entry must expire
+	// on its own or "revoked" would mean "revoked on whichever replica handled
+	// the DELETE". Thirty seconds bounds that window while still absorbing the
+	// overwhelming majority of reads — a session used once a second costs two
+	// database reads a minute rather than sixty.
+	sessionCacheTTL = 30 * time.Second
+
+	// lastSeenWriteInterval throttles idle-clock persistence.
+	//
+	// Without it, every authenticated read becomes a write on the state DB —
+	// a dashboard with a WebSocket and a few polling panels would generate
+	// more session writes than the whole rest of cloop combined. The cost of
+	// throttling is that a crash can lose up to a minute of "was recently
+	// used", which shortens the idle window by up to a minute. That is the
+	// safe direction to be wrong in.
+	lastSeenWriteInterval = time.Minute
+
+	// janitorInterval is how often expired sessions are swept and IdP
+	// revalidation is attempted.
+	janitorInterval = time.Minute
+
+	// refreshBatchSize bounds how many sessions one revalidation pass may
+	// check, so a hub where everything comes due at once spreads its token
+	// endpoint calls over several ticks instead of opening hundreds of
+	// connections to the IdP in one burst.
+	refreshBatchSize = 25
 )
 
 // Config holds the relying-party settings, typically mapped from
@@ -81,6 +150,34 @@ type Config struct {
 	AdminEmails  []string // users who see every project regardless of owner
 	SessionTTL   time.Duration
 	CookieSecure string // "auto" (default), "always", "never"
+
+	// IdleTimeout ends a session that has gone unused for this long, even
+	// though its absolute ceiling has not been reached. Zero uses
+	// DefaultIdleTimeout; negative disables the idle clock entirely, which is
+	// only appropriate on a single-operator loopback deployment.
+	IdleTimeout time.Duration
+
+	// RefreshInterval is how often a session is revalidated against the IdP
+	// using its stored refresh token. Zero uses DefaultRefreshInterval;
+	// negative disables the check, which also disables IdP-side revocation —
+	// the two timeouts then become the only way a session ends.
+	RefreshInterval time.Duration
+
+	// Store persists sessions. Nil installs a process-local store, which is
+	// the pre-Task-20176 behaviour: a restart signs everyone out.
+	Store SessionStore
+
+	// Audit receives every session lifecycle event. Nil discards them.
+	//
+	// A callback rather than a direct write to the trail because this package
+	// is stdlib-only by design and the trail lives in SQLite. pkg/ui supplies
+	// the sink. Implementations must not block: they are called while a
+	// request or the janitor is waiting.
+	Audit func(SessionAudit)
+
+	// Clock supplies the current time. Nil means time.Now. It exists so the
+	// two expiry clocks can be tested without sleeping through them.
+	Clock func() time.Time
 }
 
 // Identity is the authenticated user extracted from a validated ID token.
@@ -130,10 +227,16 @@ type pendingLogin struct {
 	created  time.Time
 }
 
-type session struct {
-	identity Identity
-	created  time.Time
-	expires  time.Time
+// cachedSession is one entry of the read-through session cache.
+//
+// fetchedAt bounds how long the copy is trusted (see sessionCacheTTL);
+// lastPersisted is the throttle for idle-clock writes. Both are held here
+// rather than on SessionRecord because they describe this process's knowledge
+// of the session, not the session.
+type cachedSession struct {
+	rec           SessionRecord
+	fetchedAt     time.Time
+	lastPersisted time.Time
 }
 
 // Authenticator is the OIDC relying party. The zero value is not usable;
@@ -150,9 +253,15 @@ type Authenticator struct {
 	jwksKeys    map[string]any // kid -> *rsa.PublicKey | *ecdsa.PublicKey
 	jwksFetched time.Time
 
-	mu       sync.Mutex
-	pending  map[string]*pendingLogin
-	sessions map[string]*session
+	store SessionStore
+
+	// mu guards pending and cache. It is deliberately not held across a store
+	// call: the store has its own synchronisation, and holding a process-wide
+	// mutex across SQLite would serialise every authenticated request behind
+	// the slowest one.
+	mu      sync.Mutex
+	pending map[string]*pendingLogin
+	cache   map[string]*cachedSession
 }
 
 // New validates cfg and returns a ready Authenticator. It is an error to
@@ -201,13 +310,67 @@ func New(cfg Config) (*Authenticator, error) {
 	if cfg.SessionTTL > maxSessionTTL {
 		cfg.SessionTTL = maxSessionTTL
 	}
+	if cfg.IdleTimeout == 0 {
+		cfg.IdleTimeout = DefaultIdleTimeout
+	}
+	// An idle window longer than the absolute ceiling can never fire, so it is
+	// not a configuration this can honour. Clamping rather than erroring keeps
+	// "I lowered session_ttl_hours" from refusing to start the hub.
+	if cfg.IdleTimeout > cfg.SessionTTL {
+		cfg.IdleTimeout = cfg.SessionTTL
+	}
+	if cfg.RefreshInterval == 0 {
+		cfg.RefreshInterval = DefaultRefreshInterval
+	}
+	store := cfg.Store
+	if store == nil {
+		store = NewMemorySessionStore(maxSessions)
+	}
 	return &Authenticator{
 		cfg:      cfg,
 		client:   &http.Client{Timeout: httpTimeout},
 		jwksKeys: map[string]any{},
 		pending:  map[string]*pendingLogin{},
-		sessions: map[string]*session{},
+		cache:    map[string]*cachedSession{},
+		store:    store,
 	}, nil
+}
+
+// now returns the authenticator's clock.
+func (a *Authenticator) now() time.Time {
+	if a != nil && a.cfg.Clock != nil {
+		return a.cfg.Clock()
+	}
+	return time.Now()
+}
+
+// IdleTimeout returns the configured idle window (zero or less means the idle
+// clock is off).
+func (a *Authenticator) IdleTimeout() time.Duration {
+	if a == nil {
+		return 0
+	}
+	return a.cfg.IdleTimeout
+}
+
+// SessionTTL returns the absolute session ceiling.
+func (a *Authenticator) SessionTTL() time.Duration {
+	if a == nil {
+		return 0
+	}
+	return a.cfg.SessionTTL
+}
+
+// audit emits one lifecycle event, filling in the timestamp. Never fatal: a
+// wedged audit sink must not be able to prevent a sign-in or a revocation.
+func (a *Authenticator) audit(ev SessionAudit) {
+	if a == nil || a.cfg.Audit == nil {
+		return
+	}
+	if ev.At.IsZero() {
+		ev.At = a.now()
+	}
+	a.cfg.Audit(ev)
 }
 
 // Enabled reports whether OIDC authentication is active. Safe on nil.
@@ -316,7 +479,7 @@ func (a *Authenticator) HandleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sid, err := a.createSession(*id)
+	sid, err := a.createSession(*id, r, tok.RefreshToken)
 	if err != nil {
 		a.errorPage(w, http.StatusInternalServerError, "Could not create a session.", err)
 		return
@@ -367,67 +530,6 @@ const loginLandingHTML = `<!DOCTYPE html>
 </body></html>
 `
 
-// Logout deletes the caller's session (if any) and clears the cookie.
-func (a *Authenticator) Logout(w http.ResponseWriter, r *http.Request) {
-	if c, err := r.Cookie(SessionCookieName); err == nil && c.Value != "" {
-		a.mu.Lock()
-		delete(a.sessions, c.Value)
-		a.mu.Unlock()
-	}
-	http.SetCookie(w, a.sessionCookie(r, "", -1))
-}
-
-// IdentityFromRequest returns the authenticated user for r's session
-// cookie, or nil when there is no valid session. Safe on nil receiver.
-func (a *Authenticator) IdentityFromRequest(r *http.Request) *Identity {
-	if !a.Enabled() {
-		return nil
-	}
-	c, err := r.Cookie(SessionCookieName)
-	if err != nil || c.Value == "" {
-		return nil
-	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	s := a.sessions[c.Value]
-	if s == nil {
-		return nil
-	}
-	if time.Now().After(s.expires) {
-		delete(a.sessions, c.Value)
-		return nil
-	}
-	id := s.identity // copy so callers cannot mutate the stored session
-	return &id
-}
-
-// SessionCount returns the number of live sessions (expired-but-unpurged
-// entries included). Used by tests and /api/me diagnostics.
-func (a *Authenticator) SessionCount() int {
-	if a == nil {
-		return 0
-	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return len(a.sessions)
-}
-
-func (a *Authenticator) createSession(id Identity) (string, error) {
-	sid, err := randToken()
-	if err != nil {
-		return "", err
-	}
-	now := time.Now()
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.purgeSessionsLocked(now)
-	for len(a.sessions) >= maxSessions {
-		a.evictOldestSessionLocked()
-	}
-	a.sessions[sid] = &session{identity: id, created: now, expires: now.Add(a.cfg.SessionTTL)}
-	return sid, nil
-}
-
 // purgePendingLocked drops expired login attempts and, if the map is still
 // at capacity, evicts oldest-first. Caller holds a.mu.
 func (a *Authenticator) purgePendingLocked(now time.Time) {
@@ -448,30 +550,6 @@ func (a *Authenticator) purgePendingLocked(now time.Time) {
 			return
 		}
 		delete(a.pending, oldest)
-	}
-}
-
-// purgeSessionsLocked drops expired sessions. Caller holds a.mu.
-func (a *Authenticator) purgeSessionsLocked(now time.Time) {
-	for sid, s := range a.sessions {
-		if now.After(s.expires) {
-			delete(a.sessions, sid)
-		}
-	}
-}
-
-// evictOldestSessionLocked removes the single oldest session. Caller holds
-// a.mu and has already purged expired entries.
-func (a *Authenticator) evictOldestSessionLocked() {
-	var oldest string
-	var oldestAt time.Time
-	for sid, s := range a.sessions {
-		if oldest == "" || s.created.Before(oldestAt) {
-			oldest, oldestAt = sid, s.created
-		}
-	}
-	if oldest != "" {
-		delete(a.sessions, oldest)
 	}
 }
 
@@ -636,6 +714,13 @@ type tokenResponse struct {
 	IDToken     string `json:"id_token"`
 	TokenType   string `json:"token_type"`
 	ExpiresIn   int    `json:"expires_in"`
+
+	// RefreshToken is retained — sealed by the session store — solely so the
+	// hub can ask the IdP "is this person still allowed in" on an interval.
+	// It is never used to obtain an access token for calling anything, and it
+	// is never returned to the browser: the cookie is the only credential the
+	// client holds.
+	RefreshToken string `json:"refresh_token"`
 }
 
 // exchangeCode redeems the authorization code at the token endpoint. Client
@@ -655,7 +740,7 @@ func (a *Authenticator) exchangeCode(ctx context.Context, code, verifier string)
 	form.Set("code_verifier", verifier)
 
 	tok, status, err := a.postToken(ctx, disc.TokenEndpoint, form, true)
-	if err != nil && (status == http.StatusUnauthorized || strings.Contains(err.Error(), "invalid_client")) {
+	if err != nil && (status == http.StatusUnauthorized || isOAuthCode(err, "invalid_client")) {
 		// Retry once with credentials in the form body.
 		tok, _, err = a.postToken(ctx, disc.TokenEndpoint, form, false)
 	}
@@ -699,13 +784,59 @@ func (a *Authenticator) postToken(ctx context.Context, endpoint string, form url
 		return nil, resp.StatusCode, fmt.Errorf("oidcauth: token endpoint read: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, resp.StatusCode, fmt.Errorf("oidcauth: token endpoint status %d: %s", resp.StatusCode, truncate(string(body), 300))
+		return nil, resp.StatusCode, newOAuthError(resp.StatusCode, body)
 	}
 	var tok tokenResponse
 	if err := json.Unmarshal(body, &tok); err != nil {
 		return nil, resp.StatusCode, fmt.Errorf("oidcauth: token response parse: %w", err)
 	}
 	return &tok, resp.StatusCode, nil
+}
+
+// oauthError is a token-endpoint refusal, parsed into its RFC 6749 §5.2 parts.
+//
+// It is a type rather than a formatted string because one of these codes —
+// invalid_grant — is the signal that a user's access has been withdrawn at the
+// provider, and deciding to end someone's session by substring-matching an
+// error message is exactly the kind of thing that silently stops working when
+// a provider rewords its response.
+type oauthError struct {
+	Status      int
+	Code        string
+	Description string
+	Body        string
+}
+
+func (e *oauthError) Error() string {
+	if e.Code == "" {
+		return fmt.Sprintf("oidcauth: token endpoint status %d: %s", e.Status, truncate(e.Body, 300))
+	}
+	msg := fmt.Sprintf("oidcauth: token endpoint status %d: %s", e.Status, e.Code)
+	if e.Description != "" {
+		msg += ": " + e.Description
+	}
+	return msg
+}
+
+// newOAuthError parses an error response body, falling back to the raw text
+// when it is not the JSON the spec calls for.
+func newOAuthError(status int, body []byte) *oauthError {
+	e := &oauthError{Status: status, Body: string(body)}
+	var parsed struct {
+		Error       string `json:"error"`
+		Description string `json:"error_description"`
+	}
+	if err := json.Unmarshal(body, &parsed); err == nil {
+		e.Code = parsed.Error
+		e.Description = truncate(parsed.Description, 200)
+	}
+	return e
+}
+
+// isOAuthCode reports whether err is a token-endpoint refusal carrying code.
+func isOAuthCode(err error, code string) bool {
+	var oe *oauthError
+	return errors.As(err, &oe) && oe.Code == code
 }
 
 func truncate(s string, n int) string {

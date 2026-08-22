@@ -35,6 +35,18 @@ type fakeIdP struct {
 	sawBasicAuth  bool
 	tokenRequests int
 	rejectBasic   bool // force fallback to client_secret_post
+
+	// refresh-grant knobs (Task 20176). refreshStatus/refreshBody, when set,
+	// are returned verbatim for a grant_type=refresh_token request, which is
+	// how the tests drive each branch of the failure taxonomy: an
+	// invalid_grant must end the session, a 503 must not.
+	refreshStatus    int
+	refreshBody      string
+	refreshRequests  int
+	lastRefreshToken string
+	nextRefreshToken string // rotation: what the IdP hands back
+	issueRefresh     string // refresh_token in the authorization_code response
+	endSession       string // advertised end_session_endpoint ("" = none)
 }
 
 func newFakeIdP(t *testing.T) *fakeIdP {
@@ -46,12 +58,16 @@ func newFakeIdP(t *testing.T) *fakeIdP {
 	idp := &fakeIdP{t: t, key: key, expOffset: time.Hour}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]string{
+		doc := map[string]string{
 			"issuer":                 idp.server.URL,
 			"authorization_endpoint": idp.server.URL + "/authorize",
 			"token_endpoint":         idp.server.URL + "/token",
 			"jwks_uri":               idp.server.URL + "/jwks",
-		})
+		}
+		if idp.endSession != "" {
+			doc["end_session_endpoint"] = idp.endSession
+		}
+		_ = json.NewEncoder(w).Encode(doc)
 	})
 	mux.HandleFunc("/jwks", func(w http.ResponseWriter, r *http.Request) {
 		pub := &idp.key.PublicKey
@@ -76,6 +92,22 @@ func newFakeIdP(t *testing.T) *fakeIdP {
 				_, _ = w.Write([]byte(`{"error":"invalid_client"}`))
 				return
 			}
+		}
+		if r.PostForm.Get("grant_type") == "refresh_token" {
+			idp.refreshRequests++
+			idp.lastRefreshToken = r.PostForm.Get("refresh_token")
+			if idp.refreshStatus != 0 {
+				w.WriteHeader(idp.refreshStatus)
+				_, _ = w.Write([]byte(idp.refreshBody))
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"access_token":  "at-refreshed",
+				"token_type":    "Bearer",
+				"expires_in":    3600,
+				"refresh_token": idp.nextRefreshToken,
+			})
+			return
 		}
 		if r.PostForm.Get("grant_type") != "authorization_code" || r.PostForm.Get("code") == "" {
 			http.Error(w, "bad grant", http.StatusBadRequest)
@@ -105,6 +137,7 @@ func newFakeIdP(t *testing.T) *fakeIdP {
 		})
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"access_token": "at-abc", "id_token": idToken, "token_type": "Bearer", "expires_in": 3600,
+			"refresh_token": idp.issueRefresh,
 		})
 	})
 	idp.server = httptest.NewServer(mux)
@@ -347,7 +380,7 @@ func TestSessionExpiry(t *testing.T) {
 	a := newTestAuthenticator(t, idp)
 	a.cfg.SessionTTL = 10 * time.Millisecond
 
-	sid, err := a.createSession(Identity{Sub: "u1"})
+	sid, err := a.createSession(Identity{Sub: "u1"}, httptest.NewRequest(http.MethodGet, "/", nil), "")
 	if err != nil {
 		t.Fatal(err)
 	}

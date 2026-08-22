@@ -148,6 +148,14 @@ func dedupeFold(values []string) []string {
 // issuer's JWKS (RS256/ES256), and validates iss/aud/azp/exp/iat/nonce.
 // nonce must match the value bound to this login attempt — it ties the
 // token to the browser session that initiated the flow.
+//
+// An empty nonce skips only the nonce binding, and exists for exactly one
+// caller: the refresh-token grant (Task 20176), whose response is not the
+// answer to any authorization request and therefore carries no nonce to bind
+// to. Every other check still applies. The login path can never reach this
+// branch by accident — BeginLogin always generates one, so p.nonce is never
+// empty there — and a *present* nonce that does not match is still rejected
+// below, so an IdP echoing someone else's nonce does not slip through.
 func (a *Authenticator) verifyIDToken(ctx context.Context, raw, nonce string) (*Identity, error) {
 	parts := strings.Split(raw, ".")
 	if len(parts) != 3 {
@@ -231,7 +239,7 @@ func (a *Authenticator) verifyIDToken(ctx context.Context, raw, nonce string) (*
 	if claims.Iat != 0 && time.Unix(claims.Iat, 0).After(now.Add(clockSkew)) {
 		return nil, errors.New("oidcauth: id_token issued in the future (clock skew too large?)")
 	}
-	if claims.Nonce == "" || claims.Nonce != nonce {
+	if nonce != "" && claims.Nonce != nonce {
 		return nil, errors.New("oidcauth: id_token nonce does not match this login attempt")
 	}
 	if claims.Sub == "" {

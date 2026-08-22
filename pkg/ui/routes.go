@@ -227,6 +227,7 @@ func (s *Server) routeTable() []routeSpec {
 		secGrant   = authz.PermSecretGrant
 		secRevoke  = authz.PermSecretRevoke
 		tokenAdmin = authz.PermTokenAdmin
+		sessAdmin  = authz.PermSessionAdmin
 		public     = authz.PermPublic
 	)
 
@@ -246,6 +247,14 @@ func (s *Server) routeTable() []routeSpec {
 		{Pattern: "GET /auth/login", Handler: s.handleOIDCLogin, Perm: public},
 		{Pattern: "GET /auth/callback", Handler: s.handleOIDCCallback, Perm: public},
 		{Pattern: "POST /auth/logout", Handler: s.handleOIDCLogout, Perm: public},
+
+		// Self-service "sign out everywhere" (Task 20176). Ungated on
+		// purpose: the handler scopes the deletion to the caller's own
+		// subject and takes no id, so there is nothing here that could end
+		// somebody else's session. Requiring a permission would put an
+		// operator in the path of the one action a user should be able to
+		// take immediately after losing a laptop.
+		{Pattern: "POST /api/session/logout-all", Handler: s.handleLogoutAll, Perm: public},
 
 		// Reports the caller's own identity and permission set; the
 		// frontend cannot decide what to render without it.
@@ -445,5 +454,15 @@ func (s *Server) routeTable() []routeSpec {
 		{Pattern: "GET /api/tokens", Handler: s.handleTokensList, Perm: tokenAdmin, Scope: scopeGlobal},
 		{Pattern: "POST /api/tokens", Handler: s.handleTokenCreate, Perm: tokenAdmin, Scope: scopeGlobal},
 		{Pattern: "DELETE /api/tokens/{id}", Handler: s.handleTokenRevoke, Perm: tokenAdmin, Scope: scopeGlobal},
+
+		// ── Active sessions ──────────────────────────────────────────
+		// Global, and gated on session.admin rather than user.manage:
+		// terminating a session is containment and changes nobody's
+		// standing rights, so the on-call operator who needs it should
+		// not also need the ability to rewrite role bindings. Reading is
+		// gated at the same level as revoking because the list itself —
+		// who is signed in, from where, on what — is reconnaissance.
+		{Pattern: "GET /api/sessions", Handler: s.handleSessionsList, Perm: sessAdmin, Scope: scopeGlobal},
+		{Pattern: "DELETE /api/sessions/{id}", Handler: s.handleSessionRevoke, Perm: sessAdmin, Scope: scopeGlobal},
 	}
 }

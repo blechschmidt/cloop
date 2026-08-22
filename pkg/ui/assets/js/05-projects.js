@@ -20,12 +20,10 @@ function initAuthUI() {
     const btn = document.getElementById('logoutBtn');
     if (btn) {
       btn.style.display = '';
-      btn.addEventListener('click', () => {
-        fetch('/auth/logout', {method: 'POST'})
-          .catch(() => {})
-          .finally(() => { window.location.href = '/auth/login'; });
-      });
+      btn.addEventListener('click', () => { signOut(); });
     }
+    const allBtn = document.getElementById('logoutAllBtn');
+    if (allBtn) allBtn.style.display = '';
   }).catch(() => {});
 }
 

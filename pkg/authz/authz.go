@@ -131,6 +131,26 @@ const (
 	// escalate it. See pkg/ui/tokens_api.go.
 	PermTokenAdmin Permission = "token.admin"
 
+	// PermSessionAdmin is the right to list every signed-in session and to
+	// terminate one (Task 20176).
+	//
+	// Deliberately separate from PermUserManage, which grants authority over
+	// role bindings and the identity integration. Ending a session is a
+	// containment action — the thing an on-call operator does at 3am when a
+	// laptop goes missing — and it changes nobody's standing rights, so it
+	// should not require the ability to rewrite who is an admin. The narrower
+	// grant is the one that will actually be used in an incident.
+	//
+	// It is still an oversight-grade permission: the session list names who is
+	// signed in, from where, and on what, which is reconnaissance for anyone
+	// who should not have it. Admin-only in the default ladder; a deployment
+	// that wants an operator-on-call role binds it explicitly.
+	//
+	// Ending one's *own* sessions needs nothing: POST /api/session/logout-all
+	// is authenticated but ungated, because a user closing their own sessions
+	// is never an escalation.
+	PermSessionAdmin Permission = "session.admin"
+
 	// PermPublic is not a permission. It is the explicit marker a route
 	// declares when it must stay reachable before authorization can even be
 	// evaluated — the login machinery, the SPA shell, static assets, and
@@ -156,6 +176,7 @@ var AllPermissions = []Permission{
 	PermAuditRead,
 	PermUserManage,
 	PermTokenAdmin,
+	PermSessionAdmin,
 }
 
 // Valid reports whether p is a known permission. PermPublic is not a

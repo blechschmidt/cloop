@@ -67,6 +67,10 @@ var publicRouteAllowlist = map[string]string{
 	"GET /auth/login":        "login machinery — gating it would require being signed in to sign in",
 	"GET /auth/callback":     "login machinery",
 	"POST /auth/logout":      "signing out must always be possible",
+	"POST /api/session/logout-all": "ends only the caller's own sessions, scoped to their session's subject " +
+		"and taking no id — there is no parameter that could reach someone else's, and requiring a " +
+		"permission would put an operator in the path of the one action a user must be able to take " +
+		"immediately after losing a device",
 	"GET /api/me":            "reports the caller's own permissions; the UI cannot render without it",
 	"POST /api/client-error": "browser error reports; writes no state and must work for a user with no role",
 }

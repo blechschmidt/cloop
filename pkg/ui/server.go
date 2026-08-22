@@ -579,6 +579,12 @@ type Server struct {
 	tokenMu sync.Mutex
 	tokens  *apitoken.Manager
 	tokenDB *statedb.DB
+
+	// sessions holds the durable session store and its database handle
+	// (Task 20176). Opened by OpenSessionStore before OIDC is constructed, so
+	// unlike tokens it is not lazily built on the request path. Zero value
+	// means process-local sessions.
+	sessions sessionStoreState
 }
 
 // log returns s.Log, falling back to a default text logger if the field
@@ -953,6 +959,7 @@ func (s *Server) Run(ctx context.Context) error {
 	go s.watchState(watcherCtx)
 	go s.watchProjects(watcherCtx)
 	go s.watchAutoBackup(watcherCtx)
+	s.startSessionJanitor(watcherCtx)
 
 	addr := ":" + strconv.Itoa(s.Port)
 	srv := newUIHTTPServer(addr, s.buildHandler(mux))
@@ -1042,6 +1049,9 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	// path, so a hub restarted in-process (tests, `cloop hub bootstrap`) does
 	// not leak a connection per lifecycle.
 	s.closeTokenManager()
+	// Same for the session store: the janitor stopped with the watcher context
+	// above, so nothing is still reading through this handle.
+	s.closeSessionStore()
 	return srv.Shutdown(ctx)
 }
 

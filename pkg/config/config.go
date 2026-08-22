@@ -800,9 +800,34 @@ type OIDCConfig struct {
 	//	      project: payments
 	RoleMappings []RoleMapping `yaml:"role_mappings,omitempty"`
 
-	// SessionTTLHours is the lifetime of a dashboard session. Zero uses
+	// SessionTTLHours is the absolute lifetime of a dashboard session — the
+	// ceiling set at sign-in, which no amount of activity extends. Zero uses
 	// the default (24); values are clamped to 1..720 (30 days).
 	SessionTTLHours int `yaml:"session_ttl_hours,omitempty"`
+
+	// IdleTimeoutHours ends a session that has gone unused for this long,
+	// even though its absolute ceiling has not been reached. Zero uses the
+	// default (8); values are clamped to 1..720 and additionally to
+	// SessionTTLHours, since an idle window longer than the ceiling could
+	// never fire.
+	//
+	// This is the clock that bounds an unattended browser, and it is the one
+	// most deployments should tighten first: shortening it costs a re-login
+	// after a long meeting, while shortening SessionTTLHours interrupts people
+	// mid-task.
+	IdleTimeoutHours int `yaml:"idle_timeout_hours,omitempty"`
+
+	// RefreshIntervalMinutes is how often cloop re-checks a session against
+	// the identity provider using the refresh token issued at sign-in. Zero
+	// uses the default (15); values are clamped to 1..1440.
+	//
+	// It is the worst-case delay between the IdP disabling a user and their
+	// cloop session ending, so it is the knob to turn when that lag matters.
+	// Set it to -1 to disable the check entirely, which also disables
+	// IdP-initiated revocation: the two timeouts then become the only way a
+	// session ends. Requires CLOOP_SECRET_KEY, without which refresh tokens
+	// are not retained — see docs/security/model.md.
+	RefreshIntervalMinutes int `yaml:"refresh_interval_minutes,omitempty"`
 
 	// CookieSecure controls the session cookie's Secure flag:
 	// "auto" (default — set when the request arrived over TLS or with
@@ -844,6 +869,26 @@ const (
 	OIDCSessionTTLHoursUpper   = 720
 )
 
+// OIDC idle-timeout bounds (hours). The upper bound matches the absolute TTL's
+// because the effective value is clamped to it anyway.
+const (
+	OIDCIdleTimeoutHoursDefault = 8
+	OIDCIdleTimeoutHoursLower   = 1
+	OIDCIdleTimeoutHoursUpper   = 720
+)
+
+// OIDC IdP-revalidation bounds (minutes).
+//
+// The lower bound is one minute rather than zero seconds: a hub that asked the
+// provider about every session every few seconds would be indistinguishable
+// from a denial-of-service against its own IdP. The upper bound is a day,
+// beyond which the check no longer meaningfully bounds revocation lag.
+const (
+	OIDCRefreshIntervalMinutesDefault = 15
+	OIDCRefreshIntervalMinutesLower   = 1
+	OIDCRefreshIntervalMinutesUpper   = 1440
+)
+
 // EffectiveSessionTTLHours returns the configured session lifetime with the
 // zero-default substituted and out-of-band values clamped.
 func (o OIDCConfig) EffectiveSessionTTLHours() int {
@@ -856,6 +901,47 @@ func (o OIDCConfig) EffectiveSessionTTLHours() int {
 		return OIDCSessionTTLHoursUpper
 	}
 	return o.SessionTTLHours
+}
+
+// EffectiveIdleTimeoutHours returns the configured idle window with the
+// zero-default substituted, out-of-band values clamped, and the result held
+// down to the absolute TTL.
+//
+// The final clamp is what keeps a half-edited config coherent: lowering
+// session_ttl_hours below idle_timeout_hours would otherwise leave an idle
+// clock that can never fire, silently removing the protection the operator
+// most likely believes is on.
+func (o OIDCConfig) EffectiveIdleTimeoutHours() int {
+	h := o.IdleTimeoutHours
+	switch {
+	case h <= 0:
+		h = OIDCIdleTimeoutHoursDefault
+	case h < OIDCIdleTimeoutHoursLower:
+		h = OIDCIdleTimeoutHoursLower
+	case h > OIDCIdleTimeoutHoursUpper:
+		h = OIDCIdleTimeoutHoursUpper
+	}
+	if ttl := o.EffectiveSessionTTLHours(); h > ttl {
+		h = ttl
+	}
+	return h
+}
+
+// EffectiveRefreshIntervalMinutes returns how often a session is revalidated
+// against the IdP. A negative configured value is passed through as -1, the
+// explicit "never re-check" opt-out; every other out-of-band value is clamped.
+func (o OIDCConfig) EffectiveRefreshIntervalMinutes() int {
+	switch {
+	case o.RefreshIntervalMinutes < 0:
+		return -1
+	case o.RefreshIntervalMinutes == 0:
+		return OIDCRefreshIntervalMinutesDefault
+	case o.RefreshIntervalMinutes < OIDCRefreshIntervalMinutesLower:
+		return OIDCRefreshIntervalMinutesLower
+	case o.RefreshIntervalMinutes > OIDCRefreshIntervalMinutesUpper:
+		return OIDCRefreshIntervalMinutesUpper
+	}
+	return o.RefreshIntervalMinutes
 }
 
 // EffectiveMaxWebSocketConns returns the configured total cap, substituting

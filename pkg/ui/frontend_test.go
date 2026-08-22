@@ -62,6 +62,14 @@ var installScriptSource string
 //go:embed tokens_api.go
 var tokensAPISource string
 
+// sessionsAPISource is pkg/ui/sessions_api.go (Task 20176). Embedded for the
+// same reason as tokens_api.go: it carries no broadcast, but its handlers are
+// registered routes whose accepted verbs the route-drift tests read out of the
+// handler bodies.
+//
+//go:embed sessions_api.go
+var sessionsAPISource string
+
 // routesSource is pkg/ui/routes.go, which holds the declarative route table
 // (Task 20164). Routes moved out of server.go when registration started
 // carrying a required permission, so the architectural tests that scan for
@@ -77,7 +85,7 @@ var routesSource string
 func allUISources() string {
 	return serverSource + "\n" + providerCallsSource + "\n" + executorsAPISource +
 		"\n" + auditAPISource + "\n" + secretsAPISource + "\n" + installScriptSource +
-		"\n" + tokensAPISource
+		"\n" + tokensAPISource + "\n" + sessionsAPISource
 }
 
 // dashboardSource is the whole dashboard front end — the rendered index.html

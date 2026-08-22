@@ -52,7 +52,7 @@ var assetFS embed.FS
 // bundleFiles is the concatenation order of the main IIFE. The order is
 // explicit rather than implied by directory listing so that it is reviewable
 // in a diff: 00-core.js opens the IIFE and defines the shared state and
-// helpers every later fragment closes over, and 25-replay.js closes it.
+// helpers every later fragment closes over, and the last entry closes it.
 //
 // The numeric prefixes keep the on-disk order identical to this list.
 var bundleFiles = []string{
@@ -82,6 +82,10 @@ var bundleFiles = []string{
 	"assets/js/23-executors.js",
 	"assets/js/24-mobile-nav.js",
 	"assets/js/25-replay.js",
+	// Loads after 22-secrets.js: the sessions panel reuses that file's
+	// formatting helpers (_secFmtDuration, _secTTLClass, _secApplyGating) and
+	// renders into the same Secrets tab.
+	"assets/js/26-sessions.js",
 }
 
 // Cache-Control values. Hashed asset URLs change whenever their bytes change,
