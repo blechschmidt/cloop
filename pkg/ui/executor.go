@@ -301,12 +301,23 @@ func startWorkload(workDir string, argv []string, labels map[string]string) (exe
 	lease := acquireSecretLease(controlPlaneDir(), workDir, ex.ID())
 	spec := applyLease(uiSpec(workDir, argv, labels), lease)
 
+	// The project's .cloop/sandbox.yaml, if it has one. It is applied after
+	// the lease so its env allowlist can narrow the leased secrets, and it is
+	// refused rather than partially honoured when the bound executor cannot
+	// provide what it asks for.
+	spec, sandboxSpec, err := applySandbox(spec, ex, workDir)
+	if err != nil {
+		lease.Close()
+		return nil, executor.Handle{}, err
+	}
+
 	handle, err := ex.Start(context.Background(), spec)
 	if err != nil {
 		lease.Close()
 		return nil, executor.Handle{}, err
 	}
 	go wipeLeaseOnExit(ex, handle.ID, lease)
+	recordSandboxProvenance(workDir, sandboxSpec, ex, handle)
 
 	// Record the dispatch so the supervisor can fail it over if this executor
 	// dies holding it. Best-effort: a session that cannot be recorded yields
@@ -373,7 +384,11 @@ func runWorkload(ctx context.Context, workDir string, argv []string, labels map[
 	lease := acquireSecretLease(controlPlaneDir(), workDir, ex.ID())
 	defer lease.Close()
 
-	res, runErr := executor.Run(ctx, ex, applyLease(uiSpec(workDir, argv, labels), lease))
+	spec, _, err := applySandbox(applyLease(uiSpec(workDir, argv, labels), lease), ex, workDir)
+	if err != nil {
+		return nil, err
+	}
+	res, runErr := executor.Run(ctx, ex, spec)
 	return res.Output, runErr
 }
 

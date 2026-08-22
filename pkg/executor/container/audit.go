@@ -64,3 +64,22 @@ func AuditRunArgv(opts Options, rt AuditRuntime, workDir string, spec executor.S
 	}
 	return built.Args, nil
 }
+
+// AuditBuildNetwork returns the network a derived-image build would run with
+// for spec.
+//
+// It is exposed for the same reason AuditRunArgv is. `setup:` executes
+// repo-authored commands, so the build's network posture is a security
+// boundary — a build with unconditional egress would let a pull request reach
+// the Internet from a deployment configured to forbid it. That posture is
+// decided inside ensureDerivedImage, behind a real image store and a real
+// builder, and a property only reachable on a machine with podman installed is
+// a property CI does not check.
+func AuditBuildNetwork(opts Options, spec executor.Spec) (string, error) {
+	norm, err := opts.Normalize()
+	if err != nil {
+		return "", fmt.Errorf("normalize options: %w", err)
+	}
+	e := &Executor{id: norm.ID, opts: norm, handles: map[string]*record{}}
+	return e.buildNetwork(spec), nil
+}

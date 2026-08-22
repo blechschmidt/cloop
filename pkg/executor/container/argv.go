@@ -47,6 +47,10 @@ const (
 	LabelHandle = "cloop.handle"
 	// LabelProject records the host project directory.
 	LabelProject = "cloop.project"
+	// LabelSandboxHash records the .cloop/sandbox.yaml content hash the
+	// container was shaped by, so a running container can be tied back to the
+	// spec that produced it even after the file has been edited.
+	LabelSandboxHash = "cloop.sandbox"
 )
 
 // Network modes.

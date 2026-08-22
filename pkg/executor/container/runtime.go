@@ -3,6 +3,8 @@ package container
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -165,6 +167,61 @@ func runCLI(ctx context.Context, rt Runtime, env []string, args ...string) (cliR
 		return res, fmt.Errorf("container: invoke %s %s: %w", rt.Name, args[0], err)
 	}
 	return res, nil
+}
+
+// runCLIStdin is runCLI with stdin fed from a string, for `build --file -`.
+//
+// Piping the Dockerfile rather than writing it into the build context is the
+// point: a Dockerfile on disk inside the context directory is itself part of
+// the context, and a build that ships a file the operator never reviewed to a
+// daemon is exactly the shape this driver exists to avoid.
+//
+// The environment is deliberately not overridable. Unlike `run`, a build has no
+// `--env NAME` passthrough to satisfy, so there is nothing legitimate to give
+// it — and a build that inherited the control plane's environment would put
+// every provider API key one `RUN env` away from a repo-supplied command.
+func runCLIStdin(ctx context.Context, rt Runtime, stdin string, args ...string) (cliResult, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	cmd := exec.CommandContext(ctx, rt.Path, args...)
+	cmd.Stdin = strings.NewReader(stdin)
+	cmd.Env = []string{
+		"PATH=" + os.Getenv("PATH"),
+		"HOME=" + os.Getenv("HOME"),
+	}
+	// Rootless podman resolves its storage and runtime dirs from these; without
+	// them a build under a systemd unit fails with an unrelated-looking
+	// "cannot find UID/GID" rather than building.
+	for _, k := range []string{"XDG_RUNTIME_DIR", "XDG_DATA_HOME", "XDG_CONFIG_HOME", "CONTAINERS_STORAGE_CONF", "DOCKER_HOST"} {
+		if v, ok := os.LookupEnv(k); ok {
+			cmd.Env = append(cmd.Env, k+"="+v)
+		}
+	}
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	res := cliResult{Stdout: stdout.String(), Stderr: stderr.String()}
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			res.ExitCode = exitErr.ExitCode()
+			return res, nil
+		}
+		return res, fmt.Errorf("container: invoke %s %s: %w", rt.Name, args[0], err)
+	}
+	return res, nil
+}
+
+// shortHash returns a 16-hex-character digest of s, used to content-address
+// derived sandbox images. Truncated deliberately: it is a cache key, and a
+// 64-character image tag is unreadable in `podman images` output.
+func shortHash(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:8])
 }
 
 // commandContext builds a runtime CLI command whose lifetime is bound to

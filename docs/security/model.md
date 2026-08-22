@@ -373,6 +373,28 @@ what it is looking for.
 | Operator `ExtraArgs` cannot re-open the sandbox | `TestContainerRejectsSandboxEscapingExtraArgs` |
 | Secret values never enter the argv — they are forwarded as bare `--env NAME` | `TestContainerSecretsNeverEnterArgv` |
 
+### Per-project sandbox specs — `sandbox_test.go`
+
+[`.cloop/sandbox.yaml`](../reference/sandbox.md) is the input with the least
+friction in front of it: a grant is issued by an operator and a config change is
+made on the hub, but a sandbox spec arrives by `git pull`. Anyone who can open a
+pull request can propose one, and it describes the *environment* a workload runs
+in — precisely the set of knobs an attacker would want. The property is
+therefore one-directional: a spec may make a run more confined and can never
+make it less.
+
+| Guarantee | Test |
+| --- | --- |
+| A spec with no egress grant loses the network even on a networked executor, and one naming a grant cannot exceed what the executor has | `TestSandboxSpecCannotWidenTheNetwork` |
+| A spec naming a grant the project does not hold refuses the run rather than proceeding without it | `TestSandboxSpecCannotWidenTheNetwork/an_unheld_grant_refuses_the_run` |
+| Mount sources cannot escape the workspace — `..`, absolute paths, `-v` option injection, and a symlink resolving outside are all refused | `TestSandboxSpecCannotEscapeTheWorkspace` |
+| `env` carries names only; a `NAME=value` entry is rejected, and the allowlist can only remove | `TestSandboxSpecCannotSmuggleSecretValues` |
+| No field of the schema renders into a sandbox-escaping runtime flag, checked against the rendered argv rather than the schema | `TestSandboxSpecCannotReachTheExtraArgsDenylist` |
+| A spec cannot waive the process cap (`pids: -1`) | `TestSandboxSpecCannotWaiveTheProcessCap` |
+| Strict no-host-execution mode is enforced on this path too, with remediation | `TestSandboxSpecIsRefusedUnderStrictMode` |
+| A `setup:` image build inherits the run's network posture, so repo-authored commands cannot reach the Internet from a deployment that forbids it | `TestSandboxBuildInheritsTheRunsNetwork` |
+| The parser never panics, and everything it accepts is genuinely confined (invariants re-derived independently of the validators) | `FuzzParse` in `pkg/sandbox` |
+
 ### Agent protocol and transport — `framing_test.go`, `transport_test.go`
 
 The remote agent is the only boundary where the peer is not ours, so its

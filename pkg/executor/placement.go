@@ -56,6 +56,9 @@ const (
 	ConstraintSignal           Constraint = "signal"
 	ConstraintMemory           Constraint = "memory"
 	ConstraintCapacity         Constraint = "capacity"
+	ConstraintImageOverride    Constraint = "image_override"
+	ConstraintSandboxBuild     Constraint = "sandbox_build"
+	ConstraintSandboxMounts    Constraint = "sandbox_mounts"
 )
 
 // Candidate is one executor offered to the scheduler, together with everything
@@ -135,6 +138,21 @@ type Requirements struct {
 	// RequireResourceLimits demands a node that actually enforces
 	// Spec.ResourceLimits rather than ignoring them.
 	RequireResourceLimits bool
+	// RequireImageOverride demands a node that honours Spec.Image, i.e. that
+	// a per-project sandbox can choose its own toolchain there.
+	//
+	// This is the constraint that makes per-project sandboxes honest. Without
+	// it a project pinning `image: rust:1.79` placed on the host driver would
+	// run against whatever toolchain the control plane happens to have, get a
+	// plausible-looking build failure, and send its author hunting through
+	// their own code. Refusing placement and naming the reason is the only
+	// outcome that points at the deployment instead.
+	RequireImageOverride bool
+	// RequireSandboxBuild demands a node that can bake Spec.SetupCommands
+	// into a derived image.
+	RequireSandboxBuild bool
+	// RequireSandboxMounts demands a node that honours Spec.Mounts.
+	RequireSandboxMounts bool
 	// RequireStream and RequireSignal demand live output and the ability to
 	// stop a workload — the two capabilities the Web UI's run panel needs.
 	RequireStream bool
@@ -242,6 +260,70 @@ func Select(candidates []Candidate, req Requirements) (Candidate, error) {
 	return eligible[0], nil
 }
 
+// CheckSandboxSupport verifies that the executor a project is *already bound
+// to* can honour req, and returns a typed error naming the gap if it cannot.
+//
+// Binding and placement are different questions — Registry.Resolve answers
+// "which executor is this project pointed at", not "which executor should run
+// this" — but they must not answer the capability question differently. So this
+// runs the bound executor through the same reject() the scheduler uses, as a
+// candidate list of one. A constraint added to Select is therefore enforced on
+// the binding path for free, which is the opposite of how the two usually drift.
+//
+// The error type is chosen by what the operator has to *do*:
+//
+//   - a gap that is really "this workload cannot run beside the control plane"
+//     becomes *HostExecutionDeniedError, whose Remediation() already names the
+//     isolated executors to bind to instead. The UI renders that verbatim.
+//   - anything else becomes the *PlacementError from reject(), which names the
+//     single constraint the bound executor failed.
+//
+// A nil executor, or a req nothing rejects, returns nil.
+func CheckSandboxSupport(ex Executor, req Requirements, projectPath string) error {
+	if ex == nil {
+		return fmt.Errorf("%w: nil executor", ErrExecutorNotFound)
+	}
+	// IgnoreCapacity: this is a support question, not a scheduling one. A busy
+	// executor is still the one the project is bound to, and reporting "at
+	// capacity" as if it were a sandbox incompatibility would send the reader
+	// to edit their sandbox.yaml over a transient load spike.
+	req.IgnoreCapacity = true
+	rej, rejected := reject(Candidate{Executor: ex, Health: Health{State: NodeReady}}, req)
+	if !rejected {
+		return nil
+	}
+	switch rej.Constraint {
+	case ConstraintHostPolicy, ConstraintIsolation:
+		return hostDenied(ex, projectPath)
+	case ConstraintImageOverride, ConstraintSandboxBuild, ConstraintSandboxMounts,
+		ConstraintNetworkEgress, ConstraintResourceLimits:
+		// These are capability gaps, not policy ones — but on an un-isolated
+		// executor the remedy is identical to the policy case ("bind this
+		// project to a sandbox"), and it is the remedy, not the taxonomy, that
+		// the person reading the 409 needs. An isolated executor that merely
+		// lacks the capability gets the constraint-specific error instead,
+		// because there "use a sandbox" would be advice it has already taken.
+		if !isolatesFromHost(ex) {
+			return hostDenied(ex, projectPath)
+		}
+	}
+	return &PlacementError{
+		Constraint: rej.Constraint,
+		Rejections: []Rejection{rej},
+		Considered: 1,
+	}
+}
+
+// hostDenied builds the shared "run this somewhere else" error, complete with
+// the currently-registered isolated executors to name as alternatives.
+func hostDenied(ex Executor, projectPath string) *HostExecutionDeniedError {
+	return &HostExecutionDeniedError{
+		ExecutorID:   ex.ID(),
+		ProjectPath:  projectPath,
+		Alternatives: DefaultRegistry.IsolatedIDs(),
+	}
+}
+
 // reject evaluates one candidate against req, returning the first unsatisfied
 // constraint. Order matters for the quality of the message: health and policy
 // are checked first because "the node is down" or "policy forbids it" explains
@@ -312,6 +394,18 @@ func reject(c Candidate, req Requirements) (Rejection, bool) {
 	}
 	if req.RequireResourceLimits && !caps.SupportsResourceLimits {
 		return no(ConstraintResourceLimits, "does not enforce resource limits")
+	}
+	if req.RequireImageOverride && !caps.SupportsImageOverride {
+		return no(ConstraintImageOverride, "cannot run a per-project sandbox image "+
+			"(.cloop/sandbox.yaml sets image:)")
+	}
+	if req.RequireSandboxBuild && !caps.SupportsSandboxBuild {
+		return no(ConstraintSandboxBuild, "cannot build a sandbox image "+
+			"(.cloop/sandbox.yaml sets setup:); pre-build it and reference it as image: instead")
+	}
+	if req.RequireSandboxMounts && !caps.SupportsSandboxMounts {
+		return no(ConstraintSandboxMounts, "cannot apply per-project mounts "+
+			"(.cloop/sandbox.yaml sets mounts:)")
 	}
 	if req.RequireStream && !caps.SupportsStream {
 		return no(ConstraintStream, "cannot stream output")

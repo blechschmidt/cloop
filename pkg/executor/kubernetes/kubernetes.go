@@ -441,9 +441,15 @@ func (e *Executor) Capabilities() executor.Capabilities {
 		SupportsResourceLimits: true,
 		SharesHostFilesystem:   false,
 		NetworkEgress:          true,
-		MaxConcurrent:          e.opts.MaxConcurrent,
-		Platform:               "linux",
-		Arch:                   e.opts.NodeSelector["kubernetes.io/arch"],
+		// A per-project image is just the Pod's image field. Building one is
+		// not: there is no builder here, so a spec with setup: is refused at
+		// placement rather than silently degraded (see buildPodFor).
+		SupportsImageOverride: true,
+		SupportsSandboxBuild:  false,
+		SupportsSandboxMounts: true,
+		MaxConcurrent:         e.opts.MaxConcurrent,
+		Platform:              "linux",
+		Arch:                  e.opts.NodeSelector["kubernetes.io/arch"],
 	}
 }
 
@@ -642,7 +648,29 @@ func (e *Executor) Start(ctx context.Context, spec executor.Spec) (executor.Hand
 		// a node this process cannot see, and host-side tooling that
 		// signals PIDs directly must go through Signal instead.
 		StartedAt: rec.startedAt,
+		// The reference as scheduled. Unlike the container driver there is no
+		// local store to resolve a tag against, so this is digest-pinned only
+		// when the spec pinned it; ImageWarnings() is what nudges an author
+		// toward doing so.
+		Image: podImage(created, desired),
 	}, nil
+}
+
+// podImage reports the image the API server accepted, falling back to the one
+// that was requested. They differ only if an admission webhook rewrote it —
+// which is exactly the case where echoing the request would be a lie.
+func podImage(created, desired *pod) string {
+	for _, p := range []*pod{created, desired} {
+		if p == nil {
+			continue
+		}
+		for _, c := range p.Spec.Containers {
+			if c.Name == ContainerName && strings.TrimSpace(c.Image) != "" {
+				return c.Image
+			}
+		}
+	}
+	return ""
 }
 
 // buildPodFor turns a Spec plus this executor's options into a Pod object.
@@ -654,12 +682,33 @@ func (e *Executor) buildPodFor(spec executor.Spec, handleID, namespace string) (
 		return nil, fmt.Errorf("%w: a Pod cannot carry a PID limit — it is the kubelet's "+
 			"podPidsLimit, configured per node by the cluster operator", executor.ErrUnsupported)
 	}
+	if len(spec.SetupCommands) > 0 {
+		// There is no builder in a cluster the way there is a local image
+		// store beside a container runtime. Running the commands as a Pod
+		// prelude would look equivalent and would not be: they would re-run on
+		// every task instead of once per sandbox, and their result would be
+		// discarded with the Pod. Refusing names the alternative.
+		return nil, fmt.Errorf("%w: the Kubernetes executor cannot build a sandbox image; "+
+			"build the setup: steps into an image, publish it, and reference it as "+
+			"image: in .cloop/sandbox.yaml", executor.ErrUnsupported)
+	}
+
+	// A per-project image replaces the executor's configured one. It has
+	// already been through container.ValidateImageRef in the parser, and goes
+	// through this package's ValidateImageRef below on the way into the Pod.
+	image := e.opts.Image
+	if override := strings.TrimSpace(spec.Image); override != "" {
+		if err := ValidateImageRef(override); err != nil {
+			return nil, fmt.Errorf("%w: sandbox image: %w", executor.ErrInvalidSpec, err)
+		}
+		image = override
+	}
 
 	req := podRequest{
 		ExecutorID:            e.id,
 		HandleID:              handleID,
 		Namespace:             namespace,
-		Image:                 e.opts.Image,
+		Image:                 image,
 		ImagePullPolicy:       e.opts.ImagePullPolicy,
 		ServiceAccountName:    e.opts.ServiceAccountName,
 		ImagePullSecrets:      e.opts.ImagePullSecrets,
@@ -677,6 +726,9 @@ func (e *Executor) buildPodFor(spec executor.Spec, handleID, namespace string) (
 		WorkspaceSizeLimit:    e.opts.WorkspaceSizeLimit,
 		RunAsUser:             e.opts.RunAsUser,
 		RunAsGroup:            e.opts.RunAsGroup,
+		SandboxMounts:         spec.Mounts,
+		SandboxHash:           spec.SandboxHash,
+		DisableNetwork:        spec.DisableNetwork,
 
 		ActiveDeadlineSeconds:         e.opts.ActiveDeadlineSeconds,
 		TerminationGracePeriodSeconds: int64(e.opts.TerminationGracePeriod / time.Second),

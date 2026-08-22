@@ -289,8 +289,14 @@ func (e *Executor) Capabilities() executor.Capabilities {
 		SupportsResourceLimits: true,
 		SharesHostFilesystem:   true,
 		NetworkEgress:          e.opts.Network != NetworkNone,
-		Platform:               runtime.GOOS,
-		Arch:                   runtime.GOARCH,
+		// A per-project sandbox spec can pick its own image and bake its own
+		// setup: this driver has both a local image store to resolve against
+		// and a builder to derive from.
+		SupportsImageOverride: true,
+		SupportsSandboxBuild:  true,
+		SupportsSandboxMounts: true,
+		Platform:              runtime.GOOS,
+		Arch:                  runtime.GOARCH,
 	}
 }
 
@@ -339,6 +345,20 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, extraMounts []
 	if err != nil {
 		return executor.Handle{}, err
 	}
+
+	// Resolve the image last, because it is the only step that can be slow:
+	// on a cache miss with setup commands this builds a derived image. Doing
+	// it after the cheap validation means a malformed spec fails immediately
+	// instead of after a multi-minute `pip install`.
+	image, err := e.sandboxImage(ctx, spec)
+	if err != nil {
+		return executor.Handle{}, err
+	}
+	// The digest-pinned form, not the tag: between resolving and running, a
+	// concurrent `podman pull` could repoint the tag, and the whole point of
+	// pinning is that the artifact names what actually executed.
+	req.Image = image.Pinned()
+
 	built, err := buildRunArgs(req)
 	if err != nil {
 		return executor.Handle{}, err
@@ -371,7 +391,7 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, extraMounts []
 		if !isNameCollision(res.Stderr) {
 			e.removeContainer(context.WithoutCancel(ctx), req.Name)
 		}
-		return executor.Handle{}, explainRunFailure(e.rt, e.opts.Image, res)
+		return executor.Handle{}, explainRunFailure(e.rt, req.Image, res)
 	}
 
 	// Deliberately not retaining spec: Spec.Env holds the caller's secret
@@ -416,6 +436,7 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, extraMounts []
 		// button) must go through Signal instead so the runtime stays the
 		// single point of control.
 		StartedAt: rec.startedAt,
+		Image:     req.Image,
 	}, nil
 }
 
@@ -446,6 +467,46 @@ func (e *Executor) resolveWorkDir(dir string) (string, error) {
 		return "", fmt.Errorf("%w: work_dir %q is not a directory", executor.ErrInvalidSpec, dir)
 	}
 	return abs, nil
+}
+
+// sandboxMounts converts a Spec's workspace-relative mounts into binds.
+//
+// The source is resolved against the already-canonicalised workDir and then
+// re-checked for containment. executor.SpecMount.Validate has already refused
+// "..", but re-deriving the containment here is not redundant: workDir has been
+// through EvalSymlinks and the join has not, so a symlink *inside* the project
+// tree pointing at /etc is a path this check catches and the syntactic one
+// cannot.
+func sandboxMounts(spec executor.Spec, workDir, selinuxLabel string) ([]mount, error) {
+	if len(spec.Mounts) == 0 {
+		return nil, nil
+	}
+	out := make([]mount, 0, len(spec.Mounts))
+	for i, m := range spec.Mounts {
+		if err := m.Validate(); err != nil {
+			return nil, fmt.Errorf("container: mount[%d]: %w", i, err)
+		}
+		host := filepath.Join(workDir, filepath.FromSlash(m.Source))
+		if resolved, err := filepath.EvalSymlinks(host); err == nil {
+			host = resolved
+		}
+		// filepath.Rel is the containment test rather than a string prefix
+		// check, which would accept "/workspace-evil" as being inside
+		// "/workspace".
+		rel, err := filepath.Rel(workDir, host)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return nil, fmt.Errorf(
+				"%w: mount source %q resolves to %s, which is outside the project workspace",
+				executor.ErrInvalidSpec, m.Source, host)
+		}
+		out = append(out, mount{
+			HostPath:     host,
+			TargetPath:   m.Target,
+			ReadOnly:     m.ReadOnly,
+			SELinuxLabel: selinuxLabel,
+		})
+	}
+	return out, nil
 }
 
 // buildRequest turns a Spec plus this executor's options into a runRequest.
@@ -489,6 +550,23 @@ func (e *Executor) buildRequest(spec executor.Spec, workDir string, extraMounts 
 			m.SELinuxLabel = e.opts.SELinuxLabel
 		}
 		req.ExtraMounts = append(req.ExtraMounts, m)
+	}
+	specMounts, err := sandboxMounts(spec, workDir, e.opts.SELinuxLabel)
+	if err != nil {
+		return runRequest{}, err
+	}
+	req.ExtraMounts = append(req.ExtraMounts, specMounts...)
+
+	// A sandbox spec may take the network away and may never add one, so this
+	// is an assignment in one direction only. See executor.Spec.DisableNetwork.
+	if spec.DisableNetwork {
+		req.Network = NetworkNone
+		// --add-host entries are name pins for a network that no longer
+		// exists; both runtimes reject them alongside --network=none.
+		req.AddHosts = nil
+	}
+	if spec.SandboxHash != "" {
+		req.Labels[LabelSandboxHash] = spec.SandboxHash
 	}
 
 	// Spec limits override the executor's configured defaults: the per-run

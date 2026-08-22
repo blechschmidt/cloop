@@ -58,7 +58,29 @@ const (
 	// AnnotationArgv records the command, for an operator reading
 	// `kubectl describe pod`.
 	AnnotationArgv = "cloop.dev/argv"
+	// AnnotationSandboxHash records the .cloop/sandbox.yaml content hash the
+	// Pod was shaped by. An annotation rather than a label: it is for reading,
+	// not selecting, and a 64-character hash exceeds the label value cap.
+	AnnotationSandboxHash = "cloop.dev/sandbox-hash"
 )
+
+// LabelEgress declares whether this workload is supposed to reach the network:
+// "deny" when the project's sandbox spec asked for no egress, "allow"
+// otherwise.
+//
+// It is a *label*, unlike the sandbox hash, precisely so a NetworkPolicy can
+// select on it — and that is also the honest limit of what this driver can do.
+// A Pod spec has no field that turns egress off; only a NetworkPolicy does, and
+// that is a namespace-scoped object owned by the cluster operator. So the
+// driver states the intent in the one place the enforcement mechanism can read
+// it, and the operator installs the companion default-deny policy (see
+// docs/executors.md). Without that policy the label is documentation.
+//
+// The alternative was to refuse every sandbox spec that omits
+// capabilities.network on Kubernetes, which is nearly all of them — a
+// guarantee bought by making the executor unusable is not a trade worth making
+// silently either.
+const LabelEgress = "cloop.dev/egress"
 
 const (
 	// ContainerName is the harness container's name. Fixed, because the log
@@ -203,6 +225,12 @@ type volumeMount struct {
 	Name      string `json:"name"`
 	MountPath string `json:"mountPath"`
 	ReadOnly  bool   `json:"readOnly,omitempty"`
+	// SubPath mounts one directory *within* the volume at MountPath. It is
+	// how a per-project sandbox's workspace-relative mount is expressed here:
+	// the container driver binds <workdir>/<source>, and the kubelet mounts
+	// the same sub-path of the workspace volume, so one spec means the same
+	// thing on both.
+	SubPath string `json:"subPath,omitempty"`
 }
 
 type emptyDirSource struct {
@@ -342,6 +370,24 @@ type podRequest struct {
 
 	RunAsUser  int64
 	RunAsGroup int64
+
+	// SandboxMounts re-expose sub-paths of the workspace volume elsewhere in
+	// the container, from the project's .cloop/sandbox.yaml.
+	SandboxMounts []executor.SpecMount
+	// SandboxHash is the spec's content hash, recorded as an annotation so a
+	// Pod can be traced back to the file that shaped it.
+	SandboxHash string
+	// DisableNetwork marks the Pod as one that should not reach the network.
+	// See LabelEgress for what this driver can and cannot enforce.
+	DisableNetwork bool
+}
+
+// egressLabelValue renders DisableNetwork for LabelEgress.
+func egressLabelValue(disabled bool) string {
+	if disabled {
+		return "deny"
+	}
+	return "allow"
 }
 
 // buildPod assembles the Pod object. It never returns a partially-confined
@@ -392,6 +438,7 @@ func buildPod(req podRequest) (*pod, error) {
 		LabelHandleID:   sanitizeLabelValue(req.HandleID),
 		LabelTaskID:     sanitizeLabelValue(taskIDFrom(req.Labels)),
 		LabelProject:    sanitizeLabelValue(projectSlug(req.Labels["project"])),
+		LabelEgress:     egressLabelValue(req.DisableNetwork),
 	}
 	annotations := map[string]string{
 		AnnotationArgv: firstLine(strings.Join(req.Argv, " ")),
@@ -470,6 +517,30 @@ func buildPod(req podRequest) (*pod, error) {
 		return nil, fmt.Errorf("%w: work_dir %q is outside the writable workspace at %s — "+
 			"the Pod's root filesystem is read-only, so nothing else is writable",
 			executor.ErrInvalidSpec, workDir, PodWorkspace)
+	}
+
+	// Per-project sandbox mounts. Each becomes a subPath on the workspace
+	// volume, which is precisely the containment executor.SpecMount promises:
+	// the kubelet resolves the sub-path inside the volume, so a source that
+	// somehow escaped validation still cannot name anything outside it.
+	if err := executor.ValidateSpecMounts(req.SandboxMounts); err != nil {
+		return nil, err
+	}
+	for _, m := range req.SandboxMounts {
+		target := strings.TrimSpace(m.Target)
+		if target == PodWorkspace || target == "/tmp" {
+			return nil, fmt.Errorf("%w: sandbox mount target %q would shadow the %s volume",
+				executor.ErrInvalidSpec, target, target)
+		}
+		mounts = append(mounts, volumeMount{
+			Name:      workspaceVolume,
+			MountPath: target,
+			SubPath:   strings.TrimSpace(m.Source),
+			ReadOnly:  m.ReadOnly,
+		})
+	}
+	if h := strings.TrimSpace(req.SandboxHash); h != "" {
+		annotations[AnnotationSandboxHash] = sanitizeLabelValue(h)
 	}
 
 	spec.Containers = []container{{

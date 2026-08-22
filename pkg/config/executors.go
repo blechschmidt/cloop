@@ -21,7 +21,9 @@ package config
 // belongs next to the argv builder it protects.
 
 import (
+	"errors"
 	"fmt"
+	"math"
 	"net"
 	"strconv"
 	"strings"
@@ -31,6 +33,12 @@ import (
 	"github.com/blechschmidt/cloop/pkg/executor/container"
 	"github.com/blechschmidt/cloop/pkg/executor/kubernetes"
 )
+
+// ErrMemoryTooLarge is returned when a size parses but exceeds
+// ContainerMemoryMBUpper. It is a sentinel so ClampMemoryMB can tell "too big"
+// from "malformed" without matching on message text — the two need opposite
+// treatments, and a refactor of the wording must not silently swap them.
+var ErrMemoryTooLarge = errors.New("config: memory size exceeds the maximum")
 
 // ParseMemoryMB converts a size string to megabytes.
 //
@@ -87,16 +95,51 @@ func ParseMemoryMB(s string) (int, error) {
 		// which would read as "no limit".
 		kb = (n + 1023) / 1024
 	} else {
-		kb = n * int64(multiplierKB)
+		// Overflow-checked. Without this, "99999999999999999t" wraps int64 to
+		// a small positive number, sails past the ceiling check below, and the
+		// bound this function exists to enforce is simply gone. The input is
+		// reachable from a repo-committed .cloop/sandbox.yaml, so the guard is
+		// not theoretical.
+		m := int64(multiplierKB)
+		if n > math.MaxInt64/m {
+			return 0, fmt.Errorf("%w: memory %q exceeds the maximum of %d MB",
+				ErrMemoryTooLarge, s, ContainerMemoryMBUpper)
+		}
+		kb = n * m
 	}
 	mb := (kb + 1023) / 1024
 	if mb > int64(ContainerMemoryMBUpper) {
-		return 0, fmt.Errorf("memory %q exceeds the maximum of %d MB", s, ContainerMemoryMBUpper)
+		return 0, fmt.Errorf("%w: memory %q exceeds the maximum of %d MB",
+			ErrMemoryTooLarge, s, ContainerMemoryMBUpper)
 	}
 	if n > 0 && mb == 0 {
 		mb = 1
 	}
 	return int(mb), nil
+}
+
+// ClampMemoryMB parses a memory size and pins it to the supported range,
+// reporting whether it had to.
+//
+// It exists for repo-committed input (.cloop/sandbox.yaml), where the author
+// does not know the hub's ceiling and should not have to. ParseMemoryMB errors
+// above the ceiling, which is right for an operator editing the hub's own
+// config — they chose the number and can choose another. It is wrong for a
+// tenant, whose run would simply not start until they guessed a value the
+// deployment happens to accept.
+//
+// Only the over-ceiling case is clamped. A malformed size is still an error:
+// "2gb" is a typo, not an ambitious request, and quietly substituting a number
+// for it would run the sandbox with a limit nobody wrote.
+func ClampMemoryMB(s string) (mb int, clamped bool, err error) {
+	mb, err = ParseMemoryMB(s)
+	if err == nil {
+		return mb, false, nil
+	}
+	if errors.Is(err, ErrMemoryTooLarge) {
+		return ContainerMemoryMBUpper, true, nil
+	}
+	return 0, false, err
 }
 
 // ValidateExecutors checks the whole executors section.

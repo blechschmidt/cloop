@@ -13,6 +13,14 @@ secret kind, or a new RBAC role ships without appearing here — see
   binding, capability-aware placement, health supervision, and exactly-once
   failover. Includes the outbound agent enrollment flow for NAT'd edge devices.
 
+## Reference
+
+- **[Per-project sandbox](reference/sandbox.md)** — `.cloop/sandbox.yaml`: the
+  repo-committed image, setup steps, environment allowlist, resource ceilings,
+  capabilities and mounts one project's tasks run under. What a spec can narrow
+  and what it can never widen, which executor honours which field, and the
+  digest pin that keeps a run reproducible after the tag moves.
+
 ## Security
 
 - **[Security model](security/model.md)** — the four trust boundaries and what

@@ -43,6 +43,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/executor/reconcile"
 	"github.com/blechschmidt/cloop/pkg/executor/remote"
 	"github.com/blechschmidt/cloop/pkg/executorstore"
+	"github.com/blechschmidt/cloop/pkg/sandbox"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 )
@@ -1424,7 +1425,49 @@ func jsonWorkloadErr(w http.ResponseWriter, err error) {
 		}, "")
 		return
 	}
+
+	// A project's .cloop/sandbox.yaml asked for something the deployment does
+	// not offer. These are 409s for the same reason the policy refusal is: the
+	// request was well-formed, and what conflicts is the repo's spec with the
+	// hub's configuration. A 500 would send the operator looking for a fault
+	// where there is only a disagreement.
+	var grantDenied *sandbox.GrantDeniedError
+	if errors.As(err, &grantDenied) {
+		writeSandboxDenied(w, "sandbox_grant_denied", grantDenied.Error(), grantDenied.Remediation(), nil)
+		return
+	}
+	var placement *executor.PlacementError
+	if errors.As(err, &placement) {
+		writeSandboxDenied(w, "sandbox_unsupported", placement.Error(),
+			fmt.Sprintf("Bind this project to an executor that supports %s, or remove the "+
+				"requirement from %s.", placement.Constraint, sandbox.FileName),
+			executor.IsolatedIDs())
+		return
+	}
+	if errors.Is(err, sandbox.ErrInvalidSpec) {
+		// The file itself is wrong. 400: the author can fix it by editing the
+		// repo, without anything on the hub changing.
+		jsonErr(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	jsonErr(w, err.Error(), http.StatusInternalServerError)
+}
+
+// writeSandboxDenied writes a 409 for a sandbox spec the deployment cannot
+// honour, in the same envelope as writeHostExecutionDenied so the frontend has
+// one shape to render rather than two.
+func writeSandboxDenied(w http.ResponseWriter, code, message, remediation string, alternatives []string) {
+	body := map[string]any{
+		"error":       message,
+		"code":        code,
+		"remediation": remediation,
+	}
+	if len(alternatives) > 0 {
+		body["alternatives"] = alternatives
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusConflict)
+	_ = json.NewEncoder(w).Encode(body)
 }
 
 // broadcastExecutorUpdate pushes an executor_update event to every connected

@@ -268,8 +268,17 @@ type brokerSet struct {
 // Grants live in the control plane's own database rather than in a managed
 // project's, for the same reason executor bindings do: a tenant must not be
 // able to grant itself credentials by writing to a database it owns.
-func (s *Server) openBrokers() (*brokerSet, error) {
-	dbPath := state.DBPath(s.WorkDir)
+func (s *Server) openBrokers() (*brokerSet, error) { return openBrokersAt(s.WorkDir) }
+
+// openBrokersAt is openBrokers without a Server, for the workload-start path.
+//
+// That path is package-level (startWorkload/runWorkload are functions, not
+// methods) because a workload outlives the request that started it and must
+// not capture the Server that handled it. Splitting the constructor is cheaper
+// than threading a Server through, and keeps one implementation of the rule
+// that grants live in the control plane's database.
+func openBrokersAt(controlPlaneWorkDir string) (*brokerSet, error) {
+	dbPath := state.DBPath(controlPlaneWorkDir)
 	if _, err := os.Stat(dbPath); err != nil {
 		return nil, fmt.Errorf("the control plane has no state database at %s yet", dbPath)
 	}

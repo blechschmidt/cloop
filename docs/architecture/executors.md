@@ -179,7 +179,21 @@ operator `Labels`, detected `Harnesses`, `ContainerRuntimes`, `MemoryMB`, and
 in-flight count. `Requirements` can pin `ExecutorID`, demand `Labels`,
 `Harnesses`, `Platform`/`Arch`, `MinMemoryMB`, `RequireIsolation`,
 `AllowedIsolations`, and capability flags (`RequireStream`, `RequireSignal`,
-`RequireContainerRuntime`, `RequireNetworkEgress`, `RequireResourceLimits`).
+`RequireContainerRuntime`, `RequireNetworkEgress`, `RequireResourceLimits`,
+`RequireImageOverride`, `RequireSandboxBuild`, `RequireSandboxMounts`).
+
+The last three come from a project's
+[`.cloop/sandbox.yaml`](../reference/sandbox.md). They exist so that a
+per-project sandbox spec cannot be *silently* ignored: a project pinning
+`image: rust:1.79` placed on a driver with no image concept would run against
+whatever toolchain the host happens to have, produce a plausible-looking build
+failure, and send its author hunting through their own code. Refusing placement
+and naming the constraint points at the deployment instead. Every field a driver
+can quietly drop has a flag that says whether it does.
+
+`CheckSandboxSupport(ex, req, projectPath)` runs the *bound* executor through
+this same `reject()` as a candidate list of one, so a constraint added to
+`Select` is enforced on the binding path for free rather than drifting from it.
 
 Ranking, applied as a stable sort:
 
@@ -193,8 +207,9 @@ Ranking, applied as a stable sort:
 `Rejection` list, and how many candidates were considered. Constraints are
 named: `health`, `host_policy`, `isolation`, `labels`, `platform`, `arch`,
 `harness`, `container_runtime`, `network_egress`, `resource_limits`, `stream`,
-`signal`, `memory`, `capacity`. An operator asking "why did nothing schedule?"
-gets a per-node answer, not a shrug.
+`signal`, `memory`, `capacity`, `image_override`, `sandbox_build`,
+`sandbox_mounts`. An operator asking "why did nothing schedule?" gets a per-node
+answer, not a shrug.
 
 One subtlety worth knowing: a node that advertises *no* harnesses passes the
 harness requirement. Empty means "detection failed", not "has none" — treating

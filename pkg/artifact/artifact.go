@@ -176,6 +176,13 @@ func WriteTaskArtifact(workDir string, task *pm.Task, fullOutput string) (string
 	if task.ActualMinutes > 0 {
 		b.WriteString(fmt.Sprintf("actual_minutes: %d\n", task.ActualMinutes))
 	}
+	// The sandbox this run executed in, when the control plane recorded one.
+	// See sandbox.go for why it arrives via a file: the project directory is
+	// the only thing the control plane (which resolved the image digest) and
+	// this code (which runs inside the sandbox) both see.
+	if rec, ok := LoadSandboxRun(workDir); ok {
+		b.WriteString(rec.frontmatter())
+	}
 	b.WriteString("---\n\n")
 
 	// Full AI response body

@@ -136,6 +136,30 @@ so a bare value cannot be consumed as the image reference.
 `/usr/local/bin/cloop`, so the smoke test is meaningful even against an image
 that does not yet ship cloop.
 
+### Per-project images: `.cloop/sandbox.yaml`
+
+`executors.container.image` is one image for every project on the hub. A project
+needing a different toolchain overrides it from its own repository, without an
+operator editing this file:
+
+```yaml
+# <project>/.cloop/sandbox.yaml
+image: ghcr.io/acme/rust-toolchain:1.79
+resources:
+  cpu: 4
+  memory: 8g
+```
+
+The spec is repo-committed and therefore untrusted: it is schema-validated,
+every number is clamped to the same bounds as the keys above, and it can only
+make a run *more* confined than this file allows — omitting
+`capabilities.network` takes the network away, and there is no field that adds
+it. A spec asking for something the bound executor cannot do is refused before
+the run, with the constraint named.
+
+Full schema, the narrowing rules, per-executor support, and the digest pinning
+that keeps a run reproducible: **[Per-project sandbox](sandbox.md)**.
+
 ### Remote executors (edge devices)
 
 A remote executor runs work on a machine the control plane **cannot dial** —

@@ -98,6 +98,24 @@ type Capabilities struct {
 	SharesHostFilesystem bool `json:"shares_host_filesystem"`
 	// NetworkEgress reports whether workloads can reach the network.
 	NetworkEgress bool `json:"network_egress"`
+	// SupportsImageOverride reports whether Spec.Image is honoured. It is
+	// false for drivers with no image concept at all (localprocess) and for
+	// drivers whose image is fixed by the operator, and it is what lets a
+	// project carrying a .cloop/sandbox.yaml be refused *before* it runs
+	// with the wrong toolchain rather than after.
+	SupportsImageOverride bool `json:"supports_image_override"`
+	// SupportsSandboxBuild reports whether Spec.SetupCommands can be baked
+	// into a derived image. Building needs a builder on the executor, which
+	// a driver that only schedules pre-built images does not have.
+	SupportsSandboxBuild bool `json:"supports_sandbox_build"`
+	// SupportsSandboxMounts reports whether Spec.Mounts is honoured.
+	//
+	// It is tracked separately from SupportsImageOverride even though the same
+	// two drivers implement both, because the failure mode of getting it wrong
+	// is silent: a driver that ignores Mounts produces a sandbox that starts,
+	// runs, and cannot find the cache directory the project told it to expect.
+	// Every field a driver can quietly drop needs a flag that says so.
+	SupportsSandboxMounts bool `json:"supports_sandbox_mounts"`
 	// MaxConcurrent is the advertised ceiling on simultaneously running
 	// handles; 0 means unbounded/unknown.
 	MaxConcurrent int `json:"max_concurrent,omitempty"`
@@ -164,6 +182,43 @@ type Spec struct {
 	// timeout — cloop runs are long-lived by design (Task 20148 removed the
 	// implicit task timeout), so this must stay opt-in.
 	TimeoutMinutes int `json:"timeout_minutes,omitempty"`
+
+	// --- per-project sandbox (Task 20173) --------------------------------
+	//
+	// These fields carry a project's .cloop/sandbox.yaml down to a driver.
+	// They are primitives rather than a nested spec type on purpose: pkg/config
+	// already imports the container and Kubernetes drivers, so the package that
+	// parses the YAML (pkg/sandbox, which needs config's clamping bounds) can
+	// never be imported *by* a driver without an import cycle. Keeping the wire
+	// shape primitive means the drivers depend on the contract, not the parser —
+	// which is also what lets a remote agent receive one over JSON.
+
+	// Image overrides the executor's configured sandbox image for this run.
+	// Empty means "use the executor's image". A driver that does not
+	// advertise SupportsImageOverride must reject a non-empty value rather
+	// than run the wrong toolchain silently.
+	Image string `json:"image,omitempty"`
+	// SetupCommands are shell commands baked into a derived image once per
+	// unique (base image, command list) pair — not re-run per workload.
+	// Requires SupportsSandboxBuild.
+	SetupCommands []string `json:"setup_commands,omitempty"`
+	// Mounts re-expose sub-paths of WorkDir elsewhere in the sandbox. See
+	// SpecMount: sources are workspace-relative and cannot escape it.
+	Mounts []SpecMount `json:"mounts,omitempty"`
+	// DisableNetwork forces this workload off the network regardless of how
+	// the executor is configured.
+	//
+	// It is deliberately one-directional. A sandbox spec is repo-committed
+	// input, so it may *narrow* what the operator granted and may never widen
+	// it; there is no corresponding EnableNetwork field, and a spec that wants
+	// egress gets it only by the executor already having it (see
+	// Requirements.RequireNetworkEgress, which refuses placement instead of
+	// quietly turning the network on).
+	DisableNetwork bool `json:"disable_network,omitempty"`
+	// SandboxHash identifies the sandbox spec this workload was built from,
+	// for the audit trail. Drivers surface it as a label; it never affects
+	// execution.
+	SandboxHash string `json:"sandbox_hash,omitempty"`
 }
 
 // Timeout returns the spec's wall-clock ceiling as a duration, or 0 when
@@ -192,7 +247,36 @@ func (s Spec) Validate() error {
 			return fmt.Errorf("%w: env[%d] %q is not in K=V form", ErrInvalidSpec, i, kv)
 		}
 	}
+	for i, cmd := range s.SetupCommands {
+		// A newline would end the RUN instruction the command is rendered
+		// into and start an attacker-chosen one.
+		if strings.ContainsAny(cmd, "\n\r") {
+			return fmt.Errorf("%w: setup_commands[%d] spans multiple lines", ErrInvalidSpec, i)
+		}
+		if strings.TrimSpace(cmd) == "" {
+			return fmt.Errorf("%w: setup_commands[%d] is blank", ErrInvalidSpec, i)
+		}
+	}
+	if err := ValidateSpecMounts(s.Mounts); err != nil {
+		return err
+	}
 	return s.ResourceLimits.Validate()
+}
+
+// SandboxRequirements returns the placement constraints implied by the
+// sandbox-shaped fields of this Spec.
+//
+// It exists so the one mapping from "what the spec asks for" to "what an
+// executor must therefore support" lives beside the fields themselves, instead
+// of being re-derived (and eventually re-derived differently) at each of the
+// several call sites that place work.
+func (s Spec) SandboxRequirements() Requirements {
+	return Requirements{
+		RequireImageOverride:  strings.TrimSpace(s.Image) != "",
+		RequireSandboxBuild:   len(s.SetupCommands) > 0,
+		RequireSandboxMounts:  len(s.Mounts) > 0,
+		RequireResourceLimits: !s.ResourceLimits.IsZero(),
+	}
 }
 
 // Handle identifies one started workload. It is the token every subsequent
@@ -210,6 +294,15 @@ type Handle struct {
 	PID int `json:"pid,omitempty"`
 	// StartedAt is when the workload began, in the control plane's clock.
 	StartedAt time.Time `json:"started_at"`
+	// Image is the fully-resolved image reference the workload actually ran
+	// from — digest-pinned where the driver could resolve one, so the run
+	// stays reproducible after the tag moves. Empty for drivers with no image.
+	//
+	// It is reported here rather than echoed from Spec.Image because the two
+	// differ in exactly the case that matters: the spec asks for `python:3.12`
+	// and the handle records `python@sha256:…`, which is the only one of the
+	// two that will still mean the same thing next month.
+	Image string `json:"image,omitempty"`
 }
 
 // State is the lifecycle phase of a handle.
