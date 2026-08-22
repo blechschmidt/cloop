@@ -270,6 +270,16 @@ type AuditVerifyReport struct {
 	OK        bool   // true when every link verified
 	BreakAtID int64  // first row whose hash did not match (0 if OK)
 	Reason    string // human-readable description of the break
+
+	// ExpectedHash and ActualHash carry the two hashes the break compared,
+	// in full rather than the abbreviated form embedded in Reason. Reason is
+	// for a human reading a terminal; these are for a UI that wants to show
+	// them side by side, and for a report that gets pasted into a ticket
+	// where a 12-character prefix is not enough to reason about. Both are
+	// empty for an id-gap break, where no hash was compared, and for a
+	// clean run.
+	ExpectedHash string
+	ActualHash   string
 }
 
 // VerifyAuditChain walks audit_events in id order and recomputes each row's
@@ -321,19 +331,23 @@ func (d *DB) VerifyAuditChain() (AuditVerifyReport, error) {
 
 		if ev.PrevHash != expectedPrev {
 			return AuditVerifyReport{
-				Total:     report.Total,
-				OK:        false,
-				BreakAtID: ev.ID,
-				Reason:    fmt.Sprintf("prev_hash mismatch at id %d: stored=%s expected=%s", ev.ID, short(ev.PrevHash), short(expectedPrev)),
+				Total:        report.Total,
+				OK:           false,
+				BreakAtID:    ev.ID,
+				Reason:       fmt.Sprintf("prev_hash mismatch at id %d: stored=%s expected=%s", ev.ID, short(ev.PrevHash), short(expectedPrev)),
+				ExpectedHash: expectedPrev,
+				ActualHash:   ev.PrevHash,
 			}, nil
 		}
 		want := computeRowHash(ev)
 		if want != ev.RowHash {
 			return AuditVerifyReport{
-				Total:     report.Total,
-				OK:        false,
-				BreakAtID: ev.ID,
-				Reason:    fmt.Sprintf("row_hash mismatch at id %d: stored=%s recomputed=%s", ev.ID, short(ev.RowHash), short(want)),
+				Total:        report.Total,
+				OK:           false,
+				BreakAtID:    ev.ID,
+				Reason:       fmt.Sprintf("row_hash mismatch at id %d: stored=%s recomputed=%s", ev.ID, short(ev.RowHash), short(want)),
+				ExpectedHash: want,
+				ActualHash:   ev.RowHash,
 			}, nil
 		}
 		expectedPrev = ev.RowHash
@@ -373,6 +387,12 @@ func (d *DB) MaxAuditID() (int64, error) {
 // callers that want a non-empty payload but don't want to import encoding/json
 // at every call site. Returns "" on marshal failure rather than aborting the
 // caller's flow — the audit row still records the mutation type.
+//
+// Every payload is passed through redaction on the way out (see
+// audit_redact.go), so no emitter can write credential material into the
+// chain even by accident. Doing it here rather than at each call site is the
+// point: the audit table is append-only and hash-chained, so a leaked secret
+// cannot be edited out afterwards without breaking the chain.
 func MarshalAuditPayload(v any) string {
 	if v == nil {
 		return ""
@@ -381,7 +401,7 @@ func MarshalAuditPayload(v any) string {
 	if err != nil {
 		return ""
 	}
-	return string(b)
+	return redactJSONBlob(string(b))
 }
 
 // AuditDistinctActors returns the set of distinct actor values across the

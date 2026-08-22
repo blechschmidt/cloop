@@ -269,9 +269,17 @@ func (s *Server) requireVisibleProject(w http.ResponseWriter, r *http.Request) b
 // Reads are excluded: every dashboard poll would otherwise append a row and
 // bury the events an auditor actually cares about. Denials are always
 // recorded regardless of permission.
+//
+// PermAuditRead is excluded for a sharper version of the same reason. It is a
+// read, but it is also a read *of this table*, so recording it makes the
+// Audit panel feed itself: opening the tab appends a row, the WebSocket
+// refresh re-reads and appends another, and an auditor's own browsing becomes
+// the bulk of the trail they are trying to read. Denied attempts to read it
+// are still recorded — an unauthorized reach for the audit log is exactly the
+// event worth keeping.
 func isPrivileged(perm authz.Permission) bool {
 	switch perm {
-	case authz.PermProjectRead, authz.PermExecutorRead, authz.PermPublic:
+	case authz.PermProjectRead, authz.PermExecutorRead, authz.PermAuditRead, authz.PermPublic:
 		return false
 	}
 	return true

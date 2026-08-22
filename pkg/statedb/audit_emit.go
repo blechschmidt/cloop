@@ -126,6 +126,15 @@ func auditStepAppend(d *DB, row StepRow, actor string) {
 	})
 }
 
+// auditConfigSet records a config write.
+//
+// The blob is the entire serialised .cloop/config.yaml, which carries
+// provider API keys — pkg/config.Save hands SetConfigBlob the same bytes it
+// writes to disk. Storing it verbatim would put every API key the deployment
+// has ever configured into an append-only table that an operator is expected
+// to export to a SIEM. The YAML pass redacts the values of credential-bearing
+// keys while preserving structure, so the row still answers "what did the
+// config look like when this changed" without answering "what is the key".
 func auditConfigSet(d *DB, yamlBlob, actor string) {
 	if actor == "" {
 		actor = "system"
@@ -135,7 +144,64 @@ func auditConfigSet(d *DB, yamlBlob, actor string) {
 		EventType:  "config.set",
 		EntityType: "config",
 		EntityID:   "",
-		Payload:    MarshalAuditPayload(map[string]any{"yaml": yamlBlob}),
+		Payload:    MarshalAuditPayload(map[string]any{"yaml": redactYAMLSecrets(yamlBlob)}),
+	})
+}
+
+// ExecutorAuditInput carries one executor-fleet decision to the audit log
+// (Task 20167).
+//
+// Executor lifecycle was the gap in the trail: enrolling a device grants an
+// arbitrary machine the right to run project workloads and to request
+// brokered credentials, and revoking, cordoning, draining, or re-binding one
+// changes where a project's code executes. Those are exactly the events an
+// operator needs to reconstruct — "who attached this machine, and when" —
+// and none of them were recorded before.
+type ExecutorAuditInput struct {
+	// Action is the lifecycle verb: "enroll", "revoke", "cordon",
+	// "uncordon", "drain", "bind", "unbind". It becomes the suffix of the
+	// event type, so the whole family is filterable as event_type LIKE
+	// 'executor.%' and each verb individually by exact match.
+	Action string
+
+	// ExecutorID is the fleet identifier the action targeted. Empty is
+	// legitimate for "unbind", which names a project rather than a device.
+	ExecutorID string
+
+	// Actor is the acting identity, normally the OIDC subject label.
+	Actor string
+
+	// Detail is optional context: the device name, the cordon reason, the
+	// project path a binding points at. Never credentials — the enrollment
+	// token in particular must not appear here, and the central redaction
+	// in MarshalAuditPayload enforces that even if a caller tries.
+	Detail map[string]any
+}
+
+// AuditExecutorLifecycle records an executor-fleet mutation. Best-effort,
+// like every other emitter in this file: a wedged audit log must not stop an
+// operator from cordoning a misbehaving node.
+func AuditExecutorLifecycle(d *DB, in ExecutorAuditInput) {
+	if in.Action == "" {
+		return
+	}
+	actor := in.Actor
+	if actor == "" {
+		actor = "system"
+	}
+	payload := map[string]any{"action": in.Action}
+	if in.ExecutorID != "" {
+		payload["executor_id"] = in.ExecutorID
+	}
+	for k, v := range in.Detail {
+		payload[k] = v
+	}
+	emit(d, &AuditEvent{
+		Actor:      actor,
+		EventType:  "executor." + in.Action,
+		EntityType: "executor",
+		EntityID:   in.ExecutorID,
+		Payload:    MarshalAuditPayload(payload),
 	})
 }
 

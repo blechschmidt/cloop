@@ -99,6 +99,19 @@ const (
 	// budgets, rate limits, timeouts, and the persistent run options.
 	PermConfigWrite Permission = "config.write"
 
+	// PermAuditRead is the right to read the tamper-evident audit trail and
+	// to verify its hash chain.
+	//
+	// Deliberately not granted to maintainer. The trail records who leased
+	// which credential to which executor, who was denied what, and every
+	// privileged grant across the fleet — including the actions of people
+	// more privileged than the reader. Handing it to the same role that
+	// brokers credentials would also let an operator watch their own
+	// oversight. It is granted to admin alone, which is what makes "a plain
+	// member cannot read the trail" a property of the role ladder rather
+	// than of any one route's wiring.
+	PermAuditRead Permission = "audit.read"
+
 	// PermUserManage is the right to administer access itself: role
 	// bindings, sessions, and the identity integration.
 	PermUserManage Permission = "user.manage"
@@ -125,6 +138,7 @@ var AllPermissions = []Permission{
 	PermSecretGrant,
 	PermSecretRevoke,
 	PermConfigWrite,
+	PermAuditRead,
 	PermUserManage,
 }
 

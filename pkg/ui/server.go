@@ -7378,6 +7378,71 @@ const dashboardHTML = `<!DOCTYPE html>
     border:1px solid var(--yellow, #d29922); background:rgba(210,153,34,.08); color:var(--yellow, #d29922);
   }
   .exec-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(320px, 1fr)); gap:12px; }
+
+  /* ── Audit trail (Task 20167) ───────────────────────────────────────── */
+  /* The integrity badge is the first thing an auditor looks at, so it is
+     sized and coloured to be readable across the room rather than as a
+     subtle status hint. */
+  .audit-integrity {
+    display:inline-flex; align-items:center; gap:8px; padding:6px 12px;
+    border-radius:var(--radius); border:1px solid var(--border);
+    font-size:12px; font-weight:600; letter-spacing:.3px;
+  }
+  .audit-integrity.ok      { border-color:var(--green); background:rgba(63,185,80,.10); color:var(--green); }
+  .audit-integrity.broken  { border-color:var(--red);   background:rgba(248,81,73,.10); color:var(--red); }
+  .audit-integrity.unknown { color:var(--muted); }
+  .audit-integrity-dot { width:9px; height:9px; border-radius:50%; background:currentColor; flex-shrink:0; }
+
+  .audit-filters {
+    display:flex; flex-wrap:wrap; gap:8px; align-items:flex-end;
+    padding:12px; margin-bottom:12px;
+    border:1px solid var(--border); border-radius:var(--radius); background:var(--surface);
+  }
+  .audit-filters .form-label { margin-bottom:3px; }
+  .audit-filters .audit-field { display:flex; flex-direction:column; min-width:130px; flex:1 1 130px; }
+  .audit-filters .audit-field.wide { flex:2 1 220px; }
+  .audit-filters .form-input, .audit-filters .form-select { font-size:12px; padding:5px 8px; }
+
+  .audit-table { width:100%; border-collapse:collapse; font-size:12.5px; }
+  .audit-table th {
+    text-align:left; font-weight:600; color:var(--muted); font-size:11px;
+    text-transform:uppercase; letter-spacing:.5px;
+    padding:8px 10px; border-bottom:1px solid var(--border); white-space:nowrap;
+  }
+  .audit-table td { padding:7px 10px; border-bottom:1px solid var(--border); vertical-align:top; }
+  .audit-row { cursor:pointer; }
+  .audit-row:hover { background:var(--hover-bg); }
+  .audit-row.expanded { background:var(--hover-bg); }
+  .audit-id { font-family:var(--mono, monospace); color:var(--muted); white-space:nowrap; }
+  .audit-time { white-space:nowrap; color:var(--muted); font-variant-numeric:tabular-nums; }
+  .audit-actor { color:var(--accent); word-break:break-word; }
+  .audit-type {
+    font-family:var(--mono, monospace); font-size:11.5px;
+    padding:1px 6px; border-radius:9px; border:1px solid var(--border); color:var(--muted);
+    white-space:nowrap;
+  }
+  /* Severity colouring mirrors the CEF severity map in pkg/auditexport, so a
+     row that pages someone in the SIEM also stands out here. */
+  .audit-type.sev-high { border-color:var(--red);   color:var(--red); }
+  .audit-type.sev-mid  { border-color:var(--yellow, #d29922); color:var(--yellow, #d29922); }
+  .audit-type.sev-low  { border-color:var(--border); color:var(--muted); }
+  .audit-entity { color:var(--muted); word-break:break-all; }
+  .audit-detail td { background:var(--bg); padding:0; }
+  .audit-detail-inner { padding:12px 14px; display:flex; flex-direction:column; gap:10px; }
+  .audit-detail-inner pre {
+    margin:0; padding:10px; border-radius:var(--radius);
+    background:var(--surface); border:1px solid var(--border);
+    font-size:11.5px; line-height:1.5; overflow-x:auto; white-space:pre-wrap; word-break:break-word;
+    max-height:340px; overflow-y:auto;
+  }
+  .audit-hashes { display:flex; flex-wrap:wrap; gap:14px; font-size:11px; color:var(--muted); }
+  .audit-hashes code { font-size:10.5px; word-break:break-all; }
+  .audit-empty { font-size:13px; color:var(--muted); padding:24px 0; text-align:center; }
+  @media (max-width:767px) {
+    /* Hashes and entity ids are the first things to go on a phone: the
+       question there is "what happened", not "prove it". */
+    .audit-table th.audit-hide-sm, .audit-table td.audit-hide-sm { display:none; }
+  }
   .exec-card {
     border:1px solid var(--border); border-radius:var(--radius); background:var(--surface);
     padding:14px; display:flex; flex-direction:column; gap:8px;
@@ -8749,6 +8814,7 @@ const dashboardHTML = `<!DOCTYPE html>
       <button class="tab-btn global-tab" onclick="switchTab('projects')"  id="tbtn-projects" title="All projects list (global)">Projects</button>
       <button class="tab-btn global-tab" onclick="switchTab('budget')"    id="tbtn-budget"   title="Budget &amp; rate limits (global, with per-project caps)">Budget</button>
       <button class="tab-btn global-tab" onclick="switchTab('executors')" id="tbtn-executors" title="Execution backends: host, container sandbox, and enrolled remote devices (global)">Executors</button>
+      <button class="tab-btn global-tab" data-global-perm="audit.read" data-perm-hide onclick="switchTab('audit')" id="tbtn-audit" title="Tamper-evident compliance trail: who granted which credential to which executor, and when (global, admin only)">Audit</button>
       <button class="tab-btn global-tab" onclick="switchTab('settings')"  id="tbtn-settings" title="Settings (global)">Settings</button>
     </div>
     <div class="spacer"></div>
@@ -8845,6 +8911,7 @@ const dashboardHTML = `<!DOCTYPE html>
       <button class="m-tab-btn" onclick="switchTab('projects')"  id="mtbtn-projects"><span class="m-tab-icon">&#127760;</span>Projects</button>
       <button class="m-tab-btn" onclick="switchTab('budget')"    id="mtbtn-budget"><span class="m-tab-icon">&#127760;</span>Budget</button>
       <button class="m-tab-btn" onclick="switchTab('executors')" id="mtbtn-executors"><span class="m-tab-icon">&#127760;</span>Executors</button>
+      <button class="m-tab-btn" data-global-perm="audit.read" data-perm-hide onclick="switchTab('audit')" id="mtbtn-audit"><span class="m-tab-icon">&#128209;</span>Audit</button>
       <button class="m-tab-btn" onclick="switchTab('settings')"  id="mtbtn-settings"><span class="m-tab-icon">&#127760;</span>Settings</button>
     </nav>
   </div>
@@ -10065,6 +10132,84 @@ const dashboardHTML = `<!DOCTYPE html>
       </div>
     </div>
 
+    <!-- ════════════════════════════════════════════════════════════ AUDIT -->
+    <div id="tab-audit" class="tab-panel">
+      <div class="section">
+        <div class="section-title" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+          Audit trail
+          <span style="font-size:11px;font-weight:400;color:var(--muted)">global &mdash; admin only</span>
+          <span id="auditIntegrity" class="audit-integrity unknown" title="Hash-chain integrity">
+            <span class="audit-integrity-dot"></span><span id="auditIntegrityText">checking&hellip;</span>
+          </span>
+          <button class="btn" style="padding:4px 10px;font-size:12px;margin-left:auto" onclick="verifyAuditChain()" title="Recompute the SHA-256 chain from the genesis row">&#128274; Verify chain</button>
+          <button class="btn" style="padding:4px 10px;font-size:12px" onclick="copyAuditAsJSON()" title="Copy the rows currently shown as JSON">&#128203; Copy as JSON</button>
+          <button class="btn" style="padding:4px 10px;font-size:12px" onclick="loadAudit()" title="Reload the trail">&#8635; Refresh</button>
+        </div>
+        <p style="font-size:12px;color:var(--muted);margin-top:4px;margin-bottom:12px">
+          Append-only, hash-chained record of every state mutation: task changes, config writes,
+          authorization decisions, credential leases, egress grants, and executor fleet changes.
+          Each row's hash covers the one before it, so any edit, deletion, or insertion made behind
+          cloop's back breaks the chain and is reported above. Export the same data with
+          <code>cloop audit-log export --format jsonl|csv|cef</code>.
+        </p>
+
+        <div class="audit-filters">
+          <div class="audit-field">
+            <label class="form-label" for="auditFilterActor">Actor</label>
+            <select id="auditFilterActor" class="form-select" onchange="applyAuditFilters()"><option value="">Any</option></select>
+          </div>
+          <div class="audit-field">
+            <label class="form-label" for="auditFilterEntityType">Entity type</label>
+            <select id="auditFilterEntityType" class="form-select" onchange="applyAuditFilters()"><option value="">Any</option></select>
+          </div>
+          <div class="audit-field">
+            <label class="form-label" for="auditFilterEntityID">Entity ID</label>
+            <input id="auditFilterEntityID" class="form-input" type="text" placeholder="e.g. 42" onchange="applyAuditFilters()">
+          </div>
+          <div class="audit-field">
+            <label class="form-label" for="auditFilterEventType">Event type</label>
+            <input id="auditFilterEventType" class="form-input" type="text" placeholder="e.g. secret.lease" onchange="applyAuditFilters()">
+          </div>
+          <div class="audit-field">
+            <label class="form-label" for="auditFilterSince">Since</label>
+            <input id="auditFilterSince" class="form-input" type="text" placeholder="24h, 7d, 2026-01-31" onchange="applyAuditFilters()">
+          </div>
+          <div class="audit-field">
+            <label class="form-label" for="auditFilterUntil">Until</label>
+            <input id="auditFilterUntil" class="form-input" type="text" placeholder="1h, 2026-02-01" onchange="applyAuditFilters()">
+          </div>
+          <div class="audit-field wide">
+            <label class="form-label" for="auditFilterSearch">Payload contains</label>
+            <input id="auditFilterSearch" class="form-input" type="text" placeholder="substring match" onchange="applyAuditFilters()">
+          </div>
+          <div class="audit-field" style="flex:0 0 auto;min-width:0">
+            <label class="form-label">&nbsp;</label>
+            <button class="btn" style="padding:5px 12px;font-size:12px" onclick="resetAuditFilters()">Clear</button>
+          </div>
+        </div>
+
+        <div id="auditSummary" style="font-size:11.5px;color:var(--muted);margin-bottom:8px"></div>
+        <div id="auditEmpty" class="audit-empty" style="display:none">No audit events match these filters.</div>
+        <div style="overflow-x:auto">
+          <table class="audit-table" id="auditTable" style="display:none">
+            <thead>
+              <tr>
+                <th style="width:60px">ID</th>
+                <th style="width:170px">Time (UTC)</th>
+                <th style="width:180px">Actor</th>
+                <th style="width:170px">Event</th>
+                <th class="audit-hide-sm">Entity</th>
+              </tr>
+            </thead>
+            <tbody id="auditBody"></tbody>
+          </table>
+        </div>
+        <div id="auditMore" style="display:none;text-align:center;padding:12px 0">
+          <button class="btn" style="padding:5px 14px;font-size:12px" onclick="loadMoreAudit()">Load more</button>
+        </div>
+      </div>
+    </div>
+
   </main>
 
   <!-- ── FAB: quick task add (mobile only) ── -->
@@ -10703,6 +10848,7 @@ window.switchTab = function(name) {
     if (name === 'queue') loadQueue();
     if (name === 'budget') { loadBudget(); loadClaudeUsage(); loadRateLimits(); loadClaudeAuthStatus(); }
     if (name === 'executors') loadExecutors();
+    if (name === 'audit') { loadAudit(); verifyAuditChain(); }
     // The Overview's Executor card needs the same payload; it is the only
     // per-project field on that page the state diff does not carry, because
     // bindings live in the control plane's database rather than in project
@@ -10728,6 +10874,7 @@ window.switchTab = function(name) {
     if (name === 'queue') loadQueue();
     if (name === 'budget') { loadBudget(); loadClaudeUsage(); loadRateLimits(); loadClaudeAuthStatus(); }
     if (name === 'executors') loadExecutors();
+    if (name === 'audit') { loadAudit(); verifyAuditChain(); }
     if (name === 'replay') { loadReplayRuns(); try { window._populateReplayTaskSelector && window._populateReplayTaskSelector(); } catch(_) {} }
     if (name === 'provider-calls') loadProviderCalls();
   }
@@ -10736,7 +10883,7 @@ window.switchTab = function(name) {
   if (isMultiProject) {
     const bc = document.getElementById('projectBreadcrumb');
     updateProjectSelector();
-    if (name === 'projects' || name === 'settings' || name === 'budget' || name === 'executors') {
+    if (name === 'projects' || name === 'settings' || name === 'budget' || name === 'executors' || name === 'audit') {
       // Global tabs: hide breadcrumb
       if (bc) bc.style.display = 'none';
     } else {
@@ -10752,7 +10899,7 @@ window.switchTab = function(name) {
 // updateScopeHint reflects whether the active tab is per-project or global.
 // In single-project mode the hint still appears so the distinction is clear.
 function updateScopeHint(name) {
-  const globalTabs = ['projects','budget','settings','executors'];
+  const globalTabs = ['projects','budget','settings','executors','audit'];
   const hint = document.getElementById('scopeHint');
   if (!hint) return;
   hint.classList.remove('visible','project','global');
@@ -12585,6 +12732,21 @@ function handleRealtimeMsg(type, data) {
       // transitions, not on a timer.
       try {
         if (activeTab === 'executors' || activeTab === 'overview') { loadExecutors(); }
+        // A fleet change is an audited event, so the trail grew too.
+        if (activeTab === 'audit') { loadAudit(); }
+      } catch(_) {}
+      break;
+    case 'audit_append':
+      // The trail grew (Task 20167). The envelope carries only the action
+      // name, never row contents: this fans out to every connected client
+      // regardless of role, and the trail is admin-only. Clients re-read
+      // GET /api/audit, where the permission is actually enforced — so a
+      // viewer receiving this message learns nothing and their refetch is
+      // refused. Only refresh when the panel is open and the user is on
+      // page one; paging back to the top under someone reading page 4
+      // would be worse than a slightly stale view.
+      try {
+        if (activeTab === 'audit' && auditState.offset === 0) { loadAudit(); }
       } catch(_) {}
       break;
     case 'resync':
@@ -16853,6 +17015,274 @@ window.loadRateLimits = function() {
     _renderRateLimits(d);
   }).catch(err => {
     console.warn('ratelimits load error', err);
+  });
+};
+
+// ── Audit panel (Task 20167) ────────────────────────────────────────────────
+//
+// Global and admin-only. Every filter is applied server-side in SQLite: the
+// trail is unbounded, so filtering in the browser would work in development
+// and fail on the deployments that actually need an audit panel.
+//
+// Rows accumulate across pages rather than being replaced, so "Load more"
+// extends the view the way a log reader expects. auditState.offset is the
+// paging cursor; it doubles as the "am I on page one" test the WebSocket
+// handler uses before auto-refreshing under the reader.
+const auditState = {
+  rows: [],
+  offset: 0,
+  total: 0,
+  limit: 100,
+  expanded: null,   // id of the row whose detail is open, or null
+  loading: false,
+};
+
+window.loadAudit = function(opts) {
+  const append = !!(opts && opts.append);
+  if (auditState.loading) return Promise.resolve();
+  auditState.loading = true;
+
+  if (!append) {
+    auditState.offset = 0;
+    auditState.expanded = null;
+  }
+
+  const params = new URLSearchParams();
+  const actor      = _auditFieldValue('auditFilterActor');
+  const entityType = _auditFieldValue('auditFilterEntityType');
+  const entityID   = _auditFieldValue('auditFilterEntityID');
+  const eventType  = _auditFieldValue('auditFilterEventType');
+  const since      = _auditFieldValue('auditFilterSince');
+  const until      = _auditFieldValue('auditFilterUntil');
+  const search     = _auditFieldValue('auditFilterSearch');
+  if (actor)      params.set('actor', actor);
+  if (entityType) params.set('entity_type', entityType);
+  if (entityID)   params.set('entity_id', entityID);
+  if (eventType)  params.set('event_type', eventType);
+  if (since)      params.set('since', since);
+  if (until)      params.set('until', until);
+  if (search)     params.set('q', search);
+  params.set('limit', String(auditState.limit));
+  params.set('offset', String(append ? auditState.offset : 0));
+
+  const base = pUrl('/api/audit');
+  return api(base + (base.indexOf('?') === -1 ? '?' : '&') + params.toString())
+    .then(d => {
+      d = d || {};
+      const events = Array.isArray(d.events) ? d.events : [];
+      auditState.rows   = append ? auditState.rows.concat(events) : events;
+      auditState.offset = (append ? auditState.offset : 0) + events.length;
+      auditState.total  = typeof d.total === 'number' ? d.total : auditState.rows.length;
+      _auditPopulateFacets(d);
+      _renderAudit(d);
+      return d;
+    })
+    .catch(err => {
+      console.warn('audit load error', err);
+      const body = document.getElementById('auditBody');
+      const table = document.getElementById('auditTable');
+      const empty = document.getElementById('auditEmpty');
+      if (table) table.style.display = 'none';
+      if (empty) {
+        empty.style.display = '';
+        // 403/404 here is the expected answer for a non-admin, not a fault:
+        // say so plainly rather than showing a scary failure.
+        const msg = (err && err.message) ? String(err.message) : String(err);
+        empty.innerHTML = /forbidden|not permit|403|404|not exist/i.test(msg)
+          ? 'Your role does not permit reading the audit trail.'
+          : 'Failed to load the audit trail: ' + esc(msg);
+      }
+      if (body) body.innerHTML = '';
+    })
+    .finally(() => { auditState.loading = false; });
+};
+
+window.loadMoreAudit = function() { return loadAudit({append: true}); };
+
+window.applyAuditFilters = function() { return loadAudit(); };
+
+window.resetAuditFilters = function() {
+  ['auditFilterActor','auditFilterEntityType','auditFilterEntityID',
+   'auditFilterEventType','auditFilterSince','auditFilterUntil','auditFilterSearch']
+    .forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; });
+  return loadAudit();
+};
+
+function _auditFieldValue(id) {
+  const el = document.getElementById(id);
+  return el && el.value ? String(el.value).trim() : '';
+}
+
+// _auditPopulateFacets refills the actor and entity-type dropdowns from the
+// values the server actually saw, preserving the current selection so a
+// refresh does not silently drop the filter the user is reading under.
+function _auditPopulateFacets(d) {
+  _auditFillSelect('auditFilterActor', d.actors);
+  _auditFillSelect('auditFilterEntityType', d.entity_types);
+}
+
+function _auditFillSelect(id, values) {
+  const sel = document.getElementById(id);
+  if (!sel || !Array.isArray(values)) return;
+  const current = sel.value;
+  const opts = ['<option value="">Any</option>'];
+  values.forEach(v => {
+    opts.push('<option value="' + esc(v) + '">' + esc(v) + '</option>');
+  });
+  sel.innerHTML = opts.join('');
+  // Keep a selection the server no longer lists: it is still a valid filter
+  // and clearing it under the user would silently widen their view.
+  if (current) {
+    if (values.indexOf(current) === -1) {
+      sel.insertAdjacentHTML('beforeend', '<option value="' + esc(current) + '">' + esc(current) + '</option>');
+    }
+    sel.value = current;
+  }
+}
+
+// _auditSeverityClass mirrors severityFor() in pkg/auditexport so a row that
+// would page someone in the SIEM is also the row that stands out here.
+function _auditSeverityClass(eventType) {
+  const t = String(eventType || '');
+  if (/^authz\.denied/.test(t) || /\.den(y|ied)$/.test(t)) return 'sev-high';
+  if (/^(secret|egress)\./.test(t)) return 'sev-high';
+  if (/^executor\./.test(t) || /^config\./.test(t) || t === 'task.delete') return 'sev-mid';
+  return 'sev-low';
+}
+
+function _renderAudit(d) {
+  const body    = document.getElementById('auditBody');
+  const table   = document.getElementById('auditTable');
+  const empty   = document.getElementById('auditEmpty');
+  const more    = document.getElementById('auditMore');
+  const summary = document.getElementById('auditSummary');
+  if (!body) return;
+
+  const rows = auditState.rows;
+  if (!rows.length) {
+    if (table) table.style.display = 'none';
+    if (more)  more.style.display = 'none';
+    if (empty) { empty.style.display = ''; empty.textContent = 'No audit events match these filters.'; }
+    if (summary) summary.textContent = '';
+    body.innerHTML = '';
+    return;
+  }
+  if (empty) empty.style.display = 'none';
+  if (table) table.style.display = '';
+
+  const html = [];
+  rows.forEach(ev => {
+    const open = auditState.expanded === ev.id;
+    const ts = String(ev.timestamp || '').replace('T', ' ').replace(/\.\d+Z?$/, '').replace('Z', '');
+    html.push(
+      '<tr class="audit-row' + (open ? ' expanded' : '') + '" data-audit-id="' + esc(String(ev.id)) + '">' +
+        '<td class="audit-id">#' + esc(String(ev.id)) + '</td>' +
+        '<td class="audit-time">' + esc(ts) + '</td>' +
+        '<td class="audit-actor">' + esc(ev.actor || '—') + '</td>' +
+        '<td><span class="audit-type ' + _auditSeverityClass(ev.event_type) + '">' + esc(ev.event_type || '—') + '</span></td>' +
+        '<td class="audit-entity audit-hide-sm">' + esc(ev.entity_type || '') +
+          (ev.entity_id ? ' / ' + esc(ev.entity_id) : '') + '</td>' +
+      '</tr>'
+    );
+    if (open) {
+      html.push(
+        '<tr class="audit-detail"><td colspan="5"><div class="audit-detail-inner">' +
+          '<div class="audit-hashes">' +
+            '<span>row_hash <code>' + esc(ev.row_hash || '') + '</code></span>' +
+            '<span>prev_hash <code>' + esc(ev.prev_hash || '') + '</code></span>' +
+          '</div>' +
+          '<pre>' + esc(_auditPrettyPayload(ev.payload)) + '</pre>' +
+          '<div style="display:flex;gap:8px">' +
+            '<button class="btn" style="padding:4px 10px;font-size:11.5px" data-audit-copy="' + esc(String(ev.id)) + '">Copy this row as JSON</button>' +
+          '</div>' +
+        '</div></td></tr>'
+      );
+    }
+  });
+  body.innerHTML = html.join('');
+
+  // Listeners rather than inline onclick: the ids are numeric here, but the
+  // panel renders actor strings and payloads that would need escaping twice
+  // to survive an HTML attribute, and that is the bug this codebase keeps
+  // rediscovering. See the note on data-* dispatch in renderProjects.
+  body.querySelectorAll('.audit-row').forEach(tr => {
+    tr.addEventListener('click', () => {
+      const id = Number(tr.getAttribute('data-audit-id'));
+      auditState.expanded = (auditState.expanded === id) ? null : id;
+      _renderAudit(d);
+    });
+  });
+  body.querySelectorAll('[data-audit-copy]').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      const id = Number(btn.getAttribute('data-audit-copy'));
+      const row = auditState.rows.filter(r => r.id === id)[0];
+      if (row) _auditCopy(JSON.stringify(row, null, 2), 'Row copied as JSON');
+    });
+  });
+
+  if (summary) {
+    const shown = rows.length;
+    const total = auditState.total;
+    summary.textContent = 'Showing ' + shown + ' of ' + total + ' matching event' +
+      (total === 1 ? '' : 's') +
+      (typeof d.all === 'number' && d.all !== total ? ' (' + d.all + ' in the trail)' : '');
+  }
+  if (more) more.style.display = (rows.length < auditState.total) ? '' : 'none';
+}
+
+// _auditPrettyPayload re-indents the payload when it is JSON, which it is for
+// every emitter in pkg/statedb. Non-JSON is shown verbatim rather than
+// hidden: a row that does not parse is exactly the row worth looking at.
+function _auditPrettyPayload(payload) {
+  const raw = payload == null ? '' : String(payload);
+  if (!raw) return '(no payload)';
+  try { return JSON.stringify(JSON.parse(raw), null, 2); } catch(_) { return raw; }
+}
+
+window.copyAuditAsJSON = function() {
+  if (!auditState.rows.length) { toast('Nothing to copy', 'err'); return; }
+  _auditCopy(JSON.stringify(auditState.rows, null, 2),
+    auditState.rows.length + ' events copied as JSON');
+};
+
+function _auditCopy(text, okMsg) {
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text)
+      .then(() => toast(okMsg, 'ok'))
+      .catch(() => toast('Copy failed — select the text manually', 'err'));
+  } else {
+    toast('Clipboard unavailable — select the text manually', 'err');
+  }
+}
+
+window.verifyAuditChain = function() {
+  const badge = document.getElementById('auditIntegrity');
+  const text  = document.getElementById('auditIntegrityText');
+  if (badge) { badge.className = 'audit-integrity unknown'; }
+  if (text)  { text.textContent = 'verifying…'; }
+
+  return api(pUrl('/api/audit/verify')).then(d => {
+    d = d || {};
+    if (!badge || !text) return d;
+    if (d.ok) {
+      badge.className = 'audit-integrity ok';
+      text.textContent = 'Chain intact — ' + (d.total || 0) + ' event' + (d.total === 1 ? '' : 's') + ' verified';
+      badge.title = 'Every row hash was recomputed from the genesis row and matched. Checked at ' + (d.checked_at || '');
+    } else {
+      badge.className = 'audit-integrity broken';
+      text.textContent = 'CHAIN BROKEN at #' + (d.break_at_id || '?');
+      // The full hashes go in the tooltip: they are the evidence, and
+      // truncating them would leave an operator unable to act on the finding.
+      badge.title = (d.reason || 'chain verification failed') +
+        (d.expected_hash ? '\nexpected: ' + d.expected_hash : '') +
+        (d.actual_hash   ? '\nactual:   ' + d.actual_hash   : '');
+    }
+    return d;
+  }).catch(err => {
+    if (badge) badge.className = 'audit-integrity unknown';
+    if (text)  text.textContent = 'integrity unknown';
+    if (badge) badge.title = 'Could not verify: ' + ((err && err.message) || String(err));
   });
 };
 

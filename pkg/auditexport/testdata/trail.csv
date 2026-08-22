@@ -1,0 +1,6 @@
+id,timestamp,actor,event_type,entity_type,entity_id,payload,prev_hash,row_hash
+1,2026-03-01T12:00:00Z,system,state.save,plan,,"{""goal"":""ship the thing"",""task_count"":3}",0000000000000000000000000000000000000000000000000000000000000000,aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+2,2026-03-01T12:01:30Z,alice@example.com,task.delete,task,42,"{""id"":42}",aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+3,2026-03-01T12:05:00Z,alice@example.com,executor.enroll,executor,edge-1,"{""name"":""edge one"",""workdir_root"":""/srv/work""}",bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb,cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+4,2026-03-01T12:06:00Z,bob@example.com,authz.denied,permission,run.start,"{""outcome"":""denied"",""role"":""viewer""}",cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc,dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+5,2026-03-01T12:07:00Z,weird|user=name,config.set,config,,"{""note"":""a|b=c\\d\ne\""f""}",dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd,eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee

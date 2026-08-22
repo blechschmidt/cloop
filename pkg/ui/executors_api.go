@@ -642,6 +642,22 @@ func (s *Server) handleExecutorEnroll(w http.ResponseWriter, r *http.Request) {
 	// debug level. A token in a log file is a token that outlives its single
 	// use and its expiry.
 	fmt.Fprintf(os.Stderr, "ui: minted executor enrollment token %s (%s)\n", rec.ID, rec.Name)
+	// The token is deliberately absent from the audit row for the same
+	// reason it is absent from the log line above: the trail outlives the
+	// token's single use, and a credential in an append-only table cannot be
+	// removed later without breaking the hash chain.
+	statedb.AuditExecutorLifecycle(db, statedb.ExecutorAuditInput{
+		Action:     "enroll",
+		ExecutorID: rec.ID,
+		Actor:      s.auditActor(r),
+		Detail: map[string]any{
+			"name":         rec.Name,
+			"expires_at":   rec.ExpiresAt.UTC().Format(time.RFC3339),
+			"workdir_root": rec.WorkDirRoot,
+			"labels":       rec.Labels,
+		},
+	})
+	s.broadcastAuditAppend("enroll")
 	s.broadcastExecutorUpdate("enrolled", rec.ID)
 	jsonOK(w, resp)
 }
@@ -749,6 +765,13 @@ func (s *Server) handleExecutorDelete(w http.ResponseWriter, r *http.Request) {
 	executor.DefaultRegistry.Unregister(id)
 
 	fmt.Fprintf(os.Stderr, "ui: revoked executor %s (%s)\n", id, row.Name)
+	statedb.AuditExecutorLifecycle(db, statedb.ExecutorAuditInput{
+		Action:     "revoke",
+		ExecutorID: id,
+		Actor:      s.auditActor(r),
+		Detail:     map[string]any{"name": row.Name, "kind": string(row.Kind)},
+	})
+	s.broadcastAuditAppend("revoke")
 	s.broadcastExecutorUpdate("revoked", id)
 	jsonOK(w, map[string]any{"ok": true, "id": id, "revoked": true})
 }
@@ -900,6 +923,7 @@ func (s *Server) handleExecutorCordon(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	fmt.Fprintf(os.Stderr, "ui: cordoned executor %s (%s)\n", id, h.Reason)
+	s.auditExecutorAction(r, "cordon", id, map[string]any{"reason": h.Reason, "state": string(h.State)})
 	s.broadcastExecutorUpdate("cordoned", id)
 	jsonOK(w, newExecutorSchedResponse(h))
 }
@@ -920,6 +944,7 @@ func (s *Server) handleExecutorUncordon(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	fmt.Fprintf(os.Stderr, "ui: uncordoned executor %s (now %s)\n", id, h.State)
+	s.auditExecutorAction(r, "uncordon", id, map[string]any{"state": string(h.State)})
 	s.broadcastExecutorUpdate("uncordoned", id)
 	jsonOK(w, newExecutorSchedResponse(h))
 }
@@ -955,6 +980,7 @@ func (s *Server) handleExecutorDrain(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	fmt.Fprintf(os.Stderr, "ui: draining executor %s (%s)\n", id, h.Reason)
+	s.auditExecutorAction(r, "drain", id, map[string]any{"reason": h.Reason, "state": string(h.State)})
 	s.broadcastExecutorUpdate("draining", id)
 
 	resp := executorDrainResponse{executorSchedResponse: newExecutorSchedResponse(h)}
@@ -1063,6 +1089,12 @@ func (s *Server) handleProjectExecutorBind(w http.ResponseWriter, r *http.Reques
 			return
 		}
 		executor.DefaultRegistry.Unbind(entry.Path)
+		statedb.AuditExecutorLifecycle(db, statedb.ExecutorAuditInput{
+			Action: "unbind",
+			Actor:  s.auditActor(r),
+			Detail: map[string]any{"project": entry.Name, "project_path": entry.Path},
+		})
+		s.broadcastAuditAppend("unbind")
 		s.broadcastExecutorUpdate("unbound", "")
 		jsonOK(w, map[string]any{"ok": true, "project": entry.Name, "executor_id": ""})
 		return
@@ -1107,6 +1139,21 @@ func (s *Server) handleProjectExecutorBind(w http.ResponseWriter, r *http.Reques
 	}
 
 	fmt.Fprintf(os.Stderr, "ui: project %s bound to executor %s\n", entry.Path, id)
+	// Where a project's code runs is the single most consequential setting
+	// on this hub — it decides which machine sees the repository and which
+	// credentials get brokered to it — so the binding is recorded with both
+	// the project and the target.
+	statedb.AuditExecutorLifecycle(db, statedb.ExecutorAuditInput{
+		Action:     "bind",
+		ExecutorID: id,
+		Actor:      s.auditActor(r),
+		Detail: map[string]any{
+			"project":      entry.Name,
+			"project_path": entry.Path,
+			"kind":         string(ex.Kind()),
+		},
+	})
+	s.broadcastAuditAppend("bind")
 	s.broadcastExecutorUpdate("bound", id)
 	jsonOK(w, map[string]any{"ok": true, "project": entry.Name, "executor_id": id})
 }

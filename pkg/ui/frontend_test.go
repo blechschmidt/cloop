@@ -34,6 +34,12 @@ var providerCallsSource string
 //go:embed executors_api.go
 var executorsAPISource string
 
+// auditAPISource is pkg/ui/audit_api.go, for the same reason again: the
+// `audit_append` broadcast (Task 20167) lives there.
+//
+//go:embed audit_api.go
+var auditAPISource string
+
 // routesSource is pkg/ui/routes.go, which holds the declarative route table
 // (Task 20164). Routes moved out of server.go when registration started
 // carrying a required permission, so the architectural tests that scan for
@@ -47,7 +53,8 @@ var routesSource string
 // `wsMessage{Type: ...}` site should mean adding it both here and as a
 // new //go:embed directive above.
 func allUISources() string {
-	return serverSource + "\n" + providerCallsSource + "\n" + executorsAPISource
+	return serverSource + "\n" + providerCallsSource + "\n" + executorsAPISource +
+		"\n" + auditAPISource
 }
 
 // The cloop dashboard is a single embedded HTML/CSS/JS string (`dashboardHTML`
@@ -1142,10 +1149,30 @@ func TestDashboard_ExecutorsPanelWired(t *testing.T) {
 		t.Error("the Executors nav button is not marked global-tab — it would render in " +
 			"the per-project section and imply project scope it does not have")
 	}
-	if !strings.Contains(dashboardHTML, `const globalTabs = ['projects','budget','settings','executors'];`) {
+	// Membership rather than an exact-literal match on the whole array: the
+	// assertion is about 'executors' being global, and pinning the entire
+	// list makes every future tab addition fail this test for a reason that
+	// has nothing to do with executors.
+	if !globalTabsInclude(dashboardHTML, "executors") {
 		t.Error("'executors' is missing from updateScopeHint's globalTabs — the header " +
 			"scope badge would claim the tab shows project data")
 	}
+}
+
+// globalTabsInclude reports whether updateScopeHint's globalTabs array lists
+// tab. Returns false when the declaration cannot be found at all, so a
+// rename of the variable fails the callers rather than silently passing.
+func globalTabsInclude(html, tab string) bool {
+	m := regexp.MustCompile(`const globalTabs = \[([^\]]*)\];`).FindStringSubmatch(html)
+	if len(m) != 2 {
+		return false
+	}
+	for _, raw := range strings.Split(m[1], ",") {
+		if strings.Trim(strings.TrimSpace(raw), `'"`) == tab {
+			return true
+		}
+	}
+	return false
 }
 
 // TestDashboard_ExecutorSelectorWired asserts the per-project half: the

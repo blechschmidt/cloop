@@ -211,15 +211,16 @@ func (s *Server) routeTable() []routeSpec {
 	// Shorthands keep the table scannable: the permission and scope of
 	// each row should be readable at a glance.
 	const (
-		read     = authz.PermProjectRead
-		write    = authz.PermProjectWrite
-		task     = authz.PermTaskMutate
-		start    = authz.PermRunStart
-		stop     = authz.PermRunStop
-		cfgWrite = authz.PermConfigWrite
-		execRead = authz.PermExecutorRead
-		execMgmt = authz.PermExecutorManage
-		public   = authz.PermPublic
+		read      = authz.PermProjectRead
+		write     = authz.PermProjectWrite
+		task      = authz.PermTaskMutate
+		start     = authz.PermRunStart
+		stop      = authz.PermRunStop
+		cfgWrite  = authz.PermConfigWrite
+		execRead  = authz.PermExecutorRead
+		execMgmt  = authz.PermExecutorManage
+		auditRead = authz.PermAuditRead
+		public    = authz.PermPublic
 	)
 
 	return []routeSpec{
@@ -383,5 +384,12 @@ func (s *Server) routeTable() []routeSpec {
 		{Pattern: "POST /api/executors/{id}/cordon", Handler: s.handleExecutorCordon, Perm: execMgmt, Scope: scopeExecutor},
 		{Pattern: "POST /api/executors/{id}/uncordon", Handler: s.handleExecutorUncordon, Perm: execMgmt, Scope: scopeExecutor},
 		{Pattern: "POST /api/executors/{id}/drain", Handler: s.handleExecutorDrain, Perm: execMgmt, Scope: scopeExecutor},
+
+		// ── Compliance audit trail ───────────────────────────────────
+		// Admin-only, and global: the trail records the actions of every
+		// role including those above the reader, so it is not something a
+		// project-scoped grant should ever confer. See authz.PermAuditRead.
+		{Pattern: "GET /api/audit", Handler: s.handleAuditList, Perm: auditRead, Scope: scopeGlobal},
+		{Pattern: "GET /api/audit/verify", Handler: s.handleAuditVerify, Perm: auditRead, Scope: scopeGlobal},
 	}
 }
