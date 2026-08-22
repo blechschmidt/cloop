@@ -9,6 +9,7 @@ package container
 // rendered flag is the only place the answer is observable.
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -221,6 +222,36 @@ func TestOptionsNormalizeOCIRuntime(t *testing.T) {
 			t.Errorf("OCIRuntime = %q, want empty — the zero value must remain 'CLI default'", got.OCIRuntime)
 		}
 	})
+}
+
+// TestSandboxSupportHonoursVirtualization closes the loop from driver config
+// to placement decision: a project whose sandbox spec demands a hypervisor
+// must be refused on a runc executor and accepted on a Kata one.
+//
+// The two halves are asserted separately elsewhere — the capability in
+// TestCapabilitiesIsolationFollowsOCIRuntime, the constraint in
+// pkg/executor/placement_virtualization_test.go — and both could pass while
+// the driver's advertisement failed to satisfy the constraint it feeds.
+func TestSandboxSupportHonoursVirtualization(t *testing.T) {
+	req := executor.Requirements{RequireVirtualization: true}
+
+	runc := &Executor{id: "plain", opts: Options{Network: NetworkNone}}
+	err := executor.CheckSandboxSupport(runc, req, "/srv/proj")
+	if err == nil {
+		t.Fatal("a project requiring a hypervisor was accepted on a runc container executor")
+	}
+	var pe *executor.PlacementError
+	if !errors.As(err, &pe) {
+		t.Fatalf("refusal is %T, want *executor.PlacementError", err)
+	}
+	if pe.Constraint != executor.ConstraintVirtualization {
+		t.Errorf("constraint = %q, want %q", pe.Constraint, executor.ConstraintVirtualization)
+	}
+
+	kata := &Executor{id: "kata", opts: Options{OCIRuntime: "kata-qemu", Network: NetworkNone}}
+	if err := executor.CheckSandboxSupport(kata, req, "/srv/proj"); err != nil {
+		t.Errorf("a kata executor was refused a project that requires virtualization: %v", err)
+	}
 }
 
 // TestCapabilitiesIsolationFollowsOCIRuntime is the claim the placement layer

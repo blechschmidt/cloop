@@ -1494,9 +1494,20 @@ func (c *Config) validateAndClamp(path string) {
 			clampWarnedPairs[key] = struct{}{}
 		}
 		clampWarnedMu.Unlock()
-		if !already {
-			fmt.Fprintf(os.Stderr, "warning: config %s: %s — clamped to default\n", field, msg)
+		if already {
+			return
 		}
+		// "clamped to default" is the outcome for almost every repair here, but
+		// not all: a few sections disable themselves instead, because for them
+		// the default is *weaker* than the value being rejected (an executor
+		// whose oci_runtime is malformed must not fall back to runc). Those
+		// messages state their own outcome, and appending the generic one would
+		// contradict it in the same sentence.
+		if strings.Contains(msg, "disabled") {
+			fmt.Fprintf(os.Stderr, "warning: config %s: %s\n", field, msg)
+			return
+		}
+		fmt.Fprintf(os.Stderr, "warning: config %s: %s — clamped to default\n", field, msg)
 	}
 	// max_parallel: zero is "not set"; non-zero must be in [1, 64].
 	if c.MaxParallel != 0 && (c.MaxParallel < MaxParallelLower || c.MaxParallel > MaxParallelUpper) {
