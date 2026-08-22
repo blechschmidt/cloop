@@ -5,6 +5,7 @@ package apiserver
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -560,15 +561,21 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
+		// Both comparisons are constant-time. A plain == returns at the first
+		// differing byte, so an attacker who can measure response latency
+		// recovers the token one byte at a time — roughly 256 requests per
+		// byte instead of the 256^n a blind guess would need. pkg/ui has
+		// always done this; the API server had not.
+
 		// Authorization: Bearer <token>
 		if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
-			if strings.TrimPrefix(auth, "Bearer ") == s.Token {
+			if subtle.ConstantTimeCompare([]byte(strings.TrimPrefix(auth, "Bearer ")), []byte(s.Token)) == 1 {
 				next.ServeHTTP(w, r)
 				return
 			}
 		}
 		// Fallback: ?token=<token>
-		if r.URL.Query().Get("token") == s.Token {
+		if subtle.ConstantTimeCompare([]byte(r.URL.Query().Get("token")), []byte(s.Token)) == 1 {
 			next.ServeHTTP(w, r)
 			return
 		}

@@ -357,16 +357,17 @@ func (c ContainerExecutorConfig) DriverOptions() (container.Options, error) {
 		return container.Options{}, err
 	}
 	opts := container.Options{
-		ID:           strings.TrimSpace(c.ID),
-		Runtime:      strings.TrimSpace(c.Runtime),
-		Image:        strings.TrimSpace(c.Image),
-		CPUs:         c.CPUs,
-		MemoryMB:     mb,
-		PIDsLimit:    c.PIDsLimit,
-		Network:      strings.TrimSpace(c.Network),
-		AllowHosts:   c.AllowHosts,
-		ExtraArgs:    c.ExtraArgs,
-		SELinuxLabel: c.SELinuxLabel,
+		ID:            strings.TrimSpace(c.ID),
+		Runtime:       strings.TrimSpace(c.Runtime),
+		Image:         strings.TrimSpace(c.Image),
+		CPUs:          c.CPUs,
+		MemoryMB:      mb,
+		PIDsLimit:     c.PIDsLimit,
+		Network:       strings.TrimSpace(c.Network),
+		AllowHosts:    c.AllowHosts,
+		ExtraArgs:     c.ExtraArgs,
+		SELinuxLabel:  c.SELinuxLabel,
+		AllowRootUser: c.AllowRootUser,
 	}
 	return opts.Normalize()
 }

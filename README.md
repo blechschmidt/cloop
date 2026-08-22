@@ -1145,6 +1145,161 @@ Status values: `initialized`, `running`, `complete`, `failed`, `paused`, `evolvi
 
 ---
 
+## Security Conformance Suite
+
+cloop's security model is spread across packages that do not import each
+other — `pkg/executor` (host-execution policy), `pkg/secretbroker` (scoped
+credential grants), `pkg/executorstore` (enrollment tokens), `pkg/ui` and
+`pkg/apiserver` (the control plane). Nothing in that arrangement fails loudly
+when a refactor quietly reconnects the UI to `os/exec`, widens a container's
+privileges, or lets an expired lease redeem.
+
+`tests/security/` is an executable specification of the threat model. Every
+check asserts a property whose absence is **invisible at runtime**: the feature
+still works, the logs look normal, and only an attacker notices the difference.
+
+```bash
+# The whole suite. -race matters: the single-use token check races eight
+# concurrent redemptions, which is what a non-atomic guard fails.
+go test -race ./tests/security/
+
+# One guarantee at a time
+go test ./tests/security/ -run TestNoHandlerReachesProcessExecution -v
+
+# Fuzz the remote agent protocol (the only boundary where the peer isn't ours)
+go test ./tests/security/ -run XXX -fuzz FuzzFrameDecoding -fuzztime 5m
+```
+
+It runs as a **required CI job** (`security-conformance` in
+`.github/workflows/ci.yml`), separate from the main test job so a failure reads
+as "a security guarantee broke", not "a test broke".
+
+### The six guarantees
+
+**1. No host execution from HTTP** — `callgraph_test.go`
+
+Type-checks the whole module with `golang.org/x/tools/go/packages` and walks
+outward from every `net/http` handler in `pkg/ui` and `pkg/apiserver`, looking
+for a path to `exec.Command`, `syscall.Exec`, or any other process spawn.
+Packages under `pkg/executor` stop the search — that is the sanctioned door.
+Anything else that reaches a spawn is a violation, and the failure prints the
+call chain.
+
+*Why transitive:* `pkg/ui` already forbids importing `os/exec` directly. That
+is necessary and not sufficient — a handler calling a helper that shells out to
+`git` is exactly as much host execution and passes a per-package import check
+without complaint.
+
+A short list of endpoints legitimately run a program on the control plane
+(`claude auth login` writes the server's own credentials; inline task replay
+reads git history). They are enumerated in `gatedHostExecution` with a reason,
+each is gated on the host-execution policy, and
+`TestGatedHandlersRefuseUnderStrictMode` proves each one refuses under strict
+mode. The two lists are checked against each other, so an endpoint cannot be
+exempted from the static check without also being proved to refuse — and a
+stale exemption fails the build, so the list can only shrink.
+
+**2. Strict mode is enforced, with typed errors** — `strictmode_test.go`
+
+With `executors.allow_host_process: false`, an executor offering no isolation
+is refused at **registration**, at **`Resolve`**, and at the driver's own
+**`Start`**. Refusing at registration is what makes an unbound project fail
+closed rather than falling back to the host.
+
+The refusal must be a `*executor.HostExecutionDeniedError` wrapping
+`ErrHostExecutionDenied` — matchable with both `errors.Is` and `errors.As`, and
+carrying remediation naming the isolated executors available. A refusal that is
+only a log line cannot be turned into a 409 with a fix in it.
+
+The policy is a **ratchet**: it only ever tightens. A permissive `config.yaml`
+cannot re-open host execution, because in a multi-tenant deployment that file
+is tenant-controlled and would otherwise be a privilege escalation.
+
+**3. Brokered credentials are never disclosed** — `secrets_test.go`
+
+Table-driven over GitHub PATs (classic and fine-grained), kubeconfigs, registry
+credentials, and env secrets. Each runs the full mint → grant → lease
+lifecycle, then checks every surface that *describes* the credential: the
+sealed record at rest, JSON serialization (the `/api` response shape), `%+v`
+rendering (what a text logger writes — a `json:"-"` tag hides a field from one
+and not the other), audit events, list APIs, and error strings.
+
+Every check looks for **base64 (three variants), hex, URL-encoded, and
+JSON-escaped forms** as well as raw. A leak that survives one encoding
+round-trip is still a leak, and encoding is the form a credential usually takes
+on its way into a log line.
+
+*Scope, stated honestly:* this asserts non-disclosure by *cloop's* surfaces. It
+cannot assert that a workload never prints its own credential — the workload
+holds the plaintext by design. That is why material is delivered as files and
+named environment variables rather than argv, which guarantee 5 checks.
+
+**4. Leases expire and tokens are single-use** — `leases_test.go`
+
+Expiry is enforced on redemption *and* mid-session: renewing a lease re-reads
+its grant, so revoking a credential reaches workloads already running. Tested
+with an injected clock, because the interesting case is a one-hour TTL that
+must be refused at hour one, and no suite can wait for that.
+
+Enrollment tokens cannot be replayed — including under **eight concurrent
+redemptions**, which is the shape that defeats a check-then-write guard and
+passes a sequential test.
+
+A static scan flags any `==` between two credential-shaped values, which leaks
+the secret through response timing one byte at a time. Comparisons against
+constants are ignored, as are secret *names* and *IDs* — those are printed in
+list APIs by design.
+
+**5. The container never breaks its own sandbox** — `container_test.go`
+
+Across the whole operator-settable option surface, the generated runtime
+command line must never contain `--privileged`, host networking, host
+PID/IPC/UTS namespaces, `--cap-add`, a runtime socket mount, or a bind mount of
+`/`, `/etc`, `/root`, `/proc`, or `/sys`. It must always contain
+`--cap-drop=ALL`, `--security-opt=no-new-privileges`, `--read-only`, and a
+non-root user.
+
+Root in a container defeats `--cap-drop=ALL` and turns a runtime escape into
+host root. Because the UID is derived from the project directory's owner, a
+control plane running as root over a root-owned project used to produce a root
+sandbox silently; that is now refused unless
+`executors.container.allow_root_user` is set — an explicit decision, never a
+default.
+
+Assertions run against the real argv builder via `container.AuditRunArgv`, with
+no container runtime required, so they run everywhere CI does.
+
+**6. The agent protocol survives a hostile peer** — `framing_test.go`
+
+The remote executor link is the one boundary where the code on the other end
+is not cloop's. Fuzz targets cover frame decoding, truncation at every offset,
+oversized payloads, and every exported payload decoder called against every
+frame type — because a hostile peer picks the type byte, so "decode a start
+frame that claims to be a heartbeat" is a reachable state.
+
+The `MaxFrameBytes` cap is asserted to stay within a sane range: raised to
+1 GiB "to fix a truncation bug", it would silently reintroduce the
+memory-exhaustion vector it exists to close, and no functional test would
+notice.
+
+### When a check fails
+
+The failure message names the fix. Do not add an exemption:
+
+- **Guarantee 1** — route the call through
+  `executor.Resolve(projectPath).Start(...)` (see `startWorkload` /
+  `runWorkload` in `pkg/ui/executor.go`, or `pkg/apiserver.startRun`). If the
+  program genuinely must run on the control plane, gate it with
+  `denyHostSideEffect` and add it to *both* `gatedHostExecution` and
+  `gatedEndpoints`.
+- **Guarantee 3** — the credential reached a descriptive surface. Add a
+  `json:"-"` tag *and* keep it out of the `%+v` path, or run it through
+  `secretbroker.RedactString` / `SafeRef`.
+- **Guarantee 5** — the flag belongs in `deniedExtraArgs` if config introduced
+  it, or in `buildRunArgs` if the driver stopped emitting it.
+
+---
+
 ## Error Handling
 
 - **Provider error (regular mode)** → stops immediately

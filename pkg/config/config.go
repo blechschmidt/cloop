@@ -412,6 +412,17 @@ type ContainerExecutorConfig struct {
 	// hosts: "z" (shared) or "Z" (private). Required for the workspace to be
 	// readable inside the container when SELinux is enforcing.
 	SELinuxLabel string `yaml:"selinux_label,omitempty"`
+
+	// AllowRootUser permits the sandbox to run as uid 0. Default false.
+	//
+	// The workload's UID is derived from the project directory's owner, so a
+	// control plane running as root over a root-owned project would otherwise
+	// get a root sandbox without anyone having chosen one. Root in a container
+	// defeats --cap-drop=ALL and turns a runtime escape into host root, so
+	// that configuration is refused unless this is set deliberately. The
+	// better fix is almost always to chown the project directory to an
+	// unprivileged user.
+	AllowRootUser bool `yaml:"allow_root_user,omitempty"`
 }
 
 // KubernetesExecutorConfig configures the ephemeral-Pod executor

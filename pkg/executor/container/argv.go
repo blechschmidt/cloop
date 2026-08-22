@@ -370,6 +370,11 @@ func formatCPUs(c float64) string {
 var deniedExtraArgs = map[string]string{
 	"--privileged":    "grants the workload full host capabilities and device access",
 	"--cap-add":       "re-adds capabilities this driver deliberately drops",
+	// Both spellings of the rootfs flag. The runtime takes the last
+	// occurrence, so an operator appending `--read-only=false` would silently
+	// undo the driver's own `--read-only` and get a writable image layer back.
+	"--read-only": "the driver always mounts the root filesystem read-only",
+	"--rootfs":    "replacing the rootfs bypasses the image and its read-only mount",
 	"--security-opt":  "can disable seccomp/apparmor or undo no-new-privileges",
 	"--device":        "exposes host devices to the workload",
 	"--userns":        "the driver selects the user namespace strategy",

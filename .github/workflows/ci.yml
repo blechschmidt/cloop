@@ -18,7 +18,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.24'
+          go-version: '1.25'
           cache: true
 
       - name: Build
@@ -38,3 +38,49 @@ jobs:
           name: coverage-report
           path: coverage.out
           retention-days: 7
+
+  security-conformance:
+    name: Security Conformance
+    runs-on: ubuntu-latest
+    # A required job, not an advisory one. Every check in tests/security
+    # asserts a property whose absence is invisible at runtime: an HTTP
+    # handler that can fork, a container that runs as root, a lease that
+    # outlives its grant. None of those break a feature test, so if this job
+    # is allowed to fail the guarantees are documentation again.
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: true
+
+      - name: Threat-model conformance suite
+        # -race because the single-use enrollment token check races eight
+        # concurrent redemptions against each other, and a non-atomic guard
+        # is exactly what it is looking for.
+        run: go test -race -v -timeout 15m ./tests/security/
+
+      - name: Fuzz the remote agent protocol framing
+        # A short smoke fuzz on every push: long enough to catch a decoder
+        # that a refactor made panic, short enough not to gate a PR on luck.
+        # The corpus persists in the Go build cache across runs, so coverage
+        # accumulates rather than restarting from the seeds each time.
+        run: |
+          go test ./tests/security/ -run XXX -fuzz FuzzFrameDecoding   -fuzztime 60s
+          go test ./tests/security/ -run XXX -fuzz FuzzFrameTruncation -fuzztime 60s
+          go test ./tests/security/ -run XXX -fuzz FuzzRedactStringNeverEmitsACredentialBody -fuzztime 60s
+
+      - name: Upload fuzz failure corpus
+        # A crash writes its reproducer into testdata/fuzz/. Without this it
+        # lives only on the runner and is gone before anyone can look.
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-corpus
+          path: tests/security/testdata/fuzz/
+          retention-days: 30
+          if-no-files-found: ignore

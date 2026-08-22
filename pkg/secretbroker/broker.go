@@ -213,7 +213,7 @@ func (b *Broker) DeleteSecret(ctx context.Context, ref, actor string) error {
 	ev := Event{Action: ActionDeleteSec, Actor: actor}
 	s, err := resolveSecret(b.store, ref)
 	if err != nil {
-		return b.denyf(ev, ErrSecretNotFound, "resolve %q: %v", ref, err)
+		return b.denyf(ev, ErrSecretNotFound, "resolve %q: %v", SafeRef(ref), err)
 	}
 	ev.SecretID, ev.SecretName, ev.Kind = s.ID, s.Name, s.Kind
 
@@ -273,7 +273,7 @@ func (b *Broker) Grant(ctx context.Context, req GrantRequest) (Grant, error) {
 
 	s, err := resolveSecret(b.store, req.SecretRef)
 	if err != nil {
-		return Grant{}, b.denyf(ev, ErrSecretNotFound, "resolve %q: %v", req.SecretRef, err)
+		return Grant{}, b.denyf(ev, ErrSecretNotFound, "resolve %q: %v", SafeRef(req.SecretRef), err)
 	}
 	ev.SecretID, ev.SecretName, ev.Kind = s.ID, s.Name, s.Kind
 

@@ -3,6 +3,7 @@
 package ratelimit
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -173,7 +174,11 @@ func FetchClaudeUsage(token string) (*ClaudeUsage, error) {
 	// freshness check and the request (or the env var was used). Force a
 	// refresh once and retry, instead of surfacing a spurious auth failure.
 	if status == http.StatusUnauthorized && !explicit {
-		if fresh := forceRefreshToken(); fresh != "" && fresh != token {
+		// Constant-time even though both values are local: this is a
+		// "did the token change" check, and comparing credential bytes with
+		// == is the habit worth not having. tests/security enforces it.
+		if fresh := forceRefreshToken(); fresh != "" &&
+			subtle.ConstantTimeCompare([]byte(fresh), []byte(token)) != 1 {
 			usage, _, err = fetchUsageWithToken(fresh)
 		}
 	}

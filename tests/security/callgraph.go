@@ -61,18 +61,18 @@ var AuditedRoots = []string{
 // `exec` is defeated by `import shell "os/exec"`, a check on the resolved
 // object is not.
 var spawnFuncs = map[string]string{
-	"os/exec.Command":                  "os/exec.Command",
-	"os/exec.CommandContext":           "os/exec.CommandContext",
-	"(*os/exec.Cmd).Start":             "(*exec.Cmd).Start",
-	"(*os/exec.Cmd).Run":               "(*exec.Cmd).Run",
-	"(*os/exec.Cmd).Output":            "(*exec.Cmd).Output",
-	"(*os/exec.Cmd).CombinedOutput":    "(*exec.Cmd).CombinedOutput",
-	"syscall.Exec":                     "syscall.Exec",
-	"syscall.ForkExec":                 "syscall.ForkExec",
-	"syscall.StartProcess":             "syscall.StartProcess",
-	"os.StartProcess":                  "os.StartProcess",
-	"golang.org/x/sys/unix.Exec":       "unix.Exec",
-	"golang.org/x/sys/unix.ForkExec":   "unix.ForkExec",
+	"os/exec.Command":                "os/exec.Command",
+	"os/exec.CommandContext":         "os/exec.CommandContext",
+	"(*os/exec.Cmd).Start":           "(*exec.Cmd).Start",
+	"(*os/exec.Cmd).Run":             "(*exec.Cmd).Run",
+	"(*os/exec.Cmd).Output":          "(*exec.Cmd).Output",
+	"(*os/exec.Cmd).CombinedOutput":  "(*exec.Cmd).CombinedOutput",
+	"syscall.Exec":                   "syscall.Exec",
+	"syscall.ForkExec":               "syscall.ForkExec",
+	"syscall.StartProcess":           "syscall.StartProcess",
+	"os.StartProcess":                "os.StartProcess",
+	"golang.org/x/sys/unix.Exec":     "unix.Exec",
+	"golang.org/x/sys/unix.ForkExec": "unix.ForkExec",
 }
 
 // node is one function in the reference graph.

@@ -63,7 +63,34 @@ func findSecretByName(store Store, name string) (Secret, error) {
 			return s, nil
 		}
 	}
-	return Secret{}, wrapf(ErrSecretNotFound, "no secret named %q", name)
+	return Secret{}, wrapf(ErrSecretNotFound, "no secret named %q", SafeRef(name))
+}
+
+// safeRefKeep is how much of an unresolvable reference is echoed back. Enough
+// to recognise a typo in your own secret name, too little to be a usable
+// credential.
+const safeRefKeep = 12
+
+// SafeRef renders a secret reference for an error message or an audit record
+// without republishing it.
+//
+// A "no such secret" error is one of the few places a user-supplied string is
+// echoed verbatim, and the single most common way to reach it is to paste the
+// credential where its *name* belongs. That mistake is silent — the operator
+// sees a not-found error, retries correctly, and never learns that the first
+// attempt wrote the live token into the audit log, which is then shipped
+// off-box and retained for a year.
+//
+// Redaction alone is not enough: it recognises known token prefixes, and a
+// kubeconfig token or a registry auth blob has no prefix to recognise. So the
+// reference is also truncated, which is the part that generalises to
+// credential shapes nobody has enumerated yet.
+func SafeRef(ref string) string {
+	ref = RedactString(strings.TrimSpace(ref))
+	if len(ref) <= safeRefKeep {
+		return ref
+	}
+	return ref[:safeRefKeep] + "…"
 }
 
 // resolveSecret accepts either a secret ID or a name, preferring an exact ID
