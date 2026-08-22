@@ -30,6 +30,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/reqid"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/statedb"
+	"github.com/blechschmidt/cloop/pkg/tlsconf"
 )
 
 const (
@@ -102,6 +103,15 @@ type Server struct {
 	// config.UIConfig.MaxRequestBodyBytes when wired through cmd/serve.go.
 	// Task 20102.
 	MaxRequestBodyBytes int64
+
+	// TLSCertFile / TLSKeyFile enable native HTTPS. Both must be set or
+	// neither; Run refuses to start on a half-configuration rather than
+	// silently serving the bearer token over plaintext. TLSMinVersion is
+	// "1.2" (default) or "1.3". Set from --tls-cert / --tls-key, or from
+	// ui.tls.* in .cloop/config.yaml.
+	TLSCertFile   string
+	TLSKeyFile    string
+	TLSMinVersion string
 
 	mu sync.Mutex
 	// runExec and runHandle identify the in-flight run. The server holds the
@@ -351,16 +361,32 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("GET /artifacts/{taskId}", s.handleArtifact)
 
 	addr := ":" + strconv.Itoa(s.Port)
-	if s.Token != "" {
-		fmt.Printf("cloop API server running at http://localhost%s (token auth enabled)\n", addr)
-	} else {
-		fmt.Printf("cloop API server running at http://localhost%s\n", addr)
+
+	// Settle TLS before announcing anything. A broken or half-finished
+	// certificate must stop startup rather than degrade to plaintext — this
+	// endpoint carries the bearer token that can start runs — and the banner
+	// has to name the scheme the server will actually speak, or an operator
+	// reading "http://" in the log has been told the opposite of the truth.
+	tlsCfg, err := s.serverTLSConfig()
+	if err != nil {
+		return err
 	}
-	fmt.Printf("OpenAPI spec: http://localhost%s/openapi.json\n", addr)
+	scheme := "http"
+	if tlsCfg != nil {
+		scheme = "https"
+	}
+
+	auth := ""
+	if s.Token != "" {
+		auth = " (token auth enabled)"
+	}
+	fmt.Printf("cloop API server running at %s://localhost%s%s\n", scheme, addr, auth)
+	fmt.Printf("OpenAPI spec: %s://localhost%s/openapi.json\n", scheme, addr)
 	s.log().Info(logger.EventSessionStart, 0, "cloop API server listening", map[string]interface{}{
-		"port":      s.Port,
-		"auth":      s.Token != "",
-		"workdir":   s.WorkDir,
+		"port":    s.Port,
+		"auth":    s.Token != "",
+		"workdir": s.WorkDir,
+		"tls":     tlsCfg != nil,
 	})
 
 	httpSrv := &http.Server{
@@ -371,6 +397,13 @@ func (s *Server) Run(ctx context.Context) error {
 		WriteTimeout:      httpWriteTimeout,
 		IdleTimeout:       httpIdleTimeout,
 	}
+	if tlsCfg != nil {
+		httpSrv.TLSConfig = tlsCfg
+		s.log().Info(logger.EventSessionStart, 0, "cloop API server TLS enabled", map[string]interface{}{
+			"min_version": tlsconf.VersionName(tlsCfg.MinVersion),
+			"cert_file":   s.TLSCertFile,
+		})
+	}
 
 	s.shutdownMu.Lock()
 	s.httpServer = httpSrv
@@ -378,6 +411,11 @@ func (s *Server) Run(ctx context.Context) error {
 
 	errCh := make(chan error, 1)
 	go func() {
+		if tlsCfg != nil {
+			// Empty paths: the key pair is already in TLSConfig.
+			errCh <- httpSrv.ListenAndServeTLS("", "")
+			return
+		}
 		errCh <- httpSrv.ListenAndServe()
 	}()
 
@@ -428,7 +466,12 @@ func (s *Server) Shutdown(ctx context.Context) error {
 // any log line a downstream layer emits during a request can correlate
 // back to the same incoming call.
 func (s *Server) buildHandler(mux *http.ServeMux) http.Handler {
-	return requestIDMiddleware(s.probeBypass(s.rateLimitMiddleware(s.authMiddleware(mux))))
+	// securityHeadersMiddleware sits outside probeBypass so nosniff and HSTS
+	// reach every response, probes included — an HSTS header that is absent
+	// on the one endpoint a load balancer hits most often is a gap a browser
+	// following a redirect can fall into.
+	return requestIDMiddleware(s.securityHeadersMiddleware(
+		s.probeBypass(s.rateLimitMiddleware(s.authMiddleware(mux)))))
 }
 
 // requestIDMiddleware threads a correlation ID through every request.

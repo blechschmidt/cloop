@@ -181,6 +181,14 @@ type MintOptions struct {
 	Labels map[string]string
 	// CreatedBy identifies the minting operator (OIDC subject, or "" local).
 	CreatedBy string
+	// Server is the control-plane WebSocket URL to record in the enrollment
+	// bundle. Not persisted: it is what the operator carries to the device,
+	// not something the control plane needs to remember.
+	Server string
+	// Pin is the hub's SPKI fingerprint ("sha256:<base64>") to record in the
+	// bundle, so the device can tell its control plane apart from anything
+	// else that answers the same hostname. Also not persisted.
+	Pin string
 	// Now overrides the clock for tests.
 	Now func() time.Time
 }

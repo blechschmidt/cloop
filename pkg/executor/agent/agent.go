@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
+	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -55,6 +56,22 @@ type Config struct {
 	Labels map[string]string
 	// RetainBytes overrides DefaultRetainBytes per workload.
 	RetainBytes int
+	// Pin is the control plane's expected SPKI fingerprint,
+	// "sha256:<base64>". Several may be given comma-separated so a key
+	// rotation can be staged. Empty means ordinary PKI verification only.
+	// Taken from the stored credential when the flag is not passed.
+	Pin string
+	// RootCAFile adds a PEM bundle to the trusted roots, for a control plane
+	// whose certificate the system store does not know — a private CA, or a
+	// `cloop hub tls-init` development certificate. This is the supported way
+	// to reach such a server; there is deliberately no way to disable
+	// verification instead.
+	RootCAFile string
+	// InsecureTransport permits plaintext ws:// to a non-loopback host.
+	// It exists for links already protected some other way (an established
+	// mTLS tunnel, a lab with no network). Every connection attempt logs a
+	// warning while it is on.
+	InsecureTransport bool
 	// Logf receives operational messages. Nil discards them.
 	Logf func(format string, args ...any)
 	// Now overrides the clock for tests.
@@ -83,6 +100,13 @@ type Agent struct {
 	local *localprocess.Executor
 	root  string
 
+	// Transport settings resolved once in New and read-only thereafter, so
+	// the reconnect loop never re-derives them and cannot drift mid-life.
+	httpClient      *http.Client
+	pinned          bool
+	pinDescription  string
+	insecureWarning string
+
 	mu        sync.Mutex
 	cred      Credential
 	workloads map[string]*workload
@@ -96,10 +120,10 @@ type Agent struct {
 
 // workload is one running task on this device.
 type workload struct {
-	handleID string // assigned by the control plane
-	localID  string // localprocess handle
+	handleID  string // assigned by the control plane
+	localID   string // localprocess handle
 	startedAt time.Time
-	buf      *retainBuffer
+	buf       *retainBuffer
 
 	// sendMu serialises flushes so two goroutines (the output pump and a
 	// reconnect resume) cannot interleave chunks and produce out-of-order
@@ -144,6 +168,11 @@ func New(cfg Config) (*Agent, error) {
 		if strings.TrimSpace(cfg.WorkDirRoot) == "" {
 			a.cfg.WorkDirRoot = cred.WorkDirRoot
 		}
+		// An explicit --pin wins, so an operator can re-pin a device after a
+		// key rotation without deleting and re-enrolling it.
+		if strings.TrimSpace(cfg.Pin) == "" {
+			a.cfg.Pin = cred.Pin
+		}
 		if warn := CheckCredentialPermissions(cfg.CredentialPath); warn != "" {
 			a.cfg.logf("warning: %s", warn)
 		}
@@ -157,8 +186,33 @@ func New(cfg Config) (*Agent, error) {
 	}
 	if !a.cred.Valid() && strings.TrimSpace(cfg.Token) == "" {
 		return nil, fmt.Errorf(
-			"agent: this device is not enrolled and no --token was given.\n"+
+			"agent: this device is not enrolled and no --token was given.\n" +
 				"Run `cloop executor enroll --name <name>` on the control plane, then re-run with --token <token>")
+	}
+
+	// Settle transport security before anything is dialled. Failing here
+	// costs the operator one error message; failing later, mid-handshake,
+	// costs them a spent enrollment token and a credential on the wire.
+	if err := a.resolveTransport(); err != nil {
+		return nil, err
+	}
+
+	// Persist a pin supplied by flag on an already-enrolled device.
+	//
+	// persistCredential only runs at enrollment, so without this a re-pin after
+	// a key rotation would apply to this process and vanish on restart — the
+	// agent would come back unpinned and say so cheerfully in its banner. It
+	// also gives devices enrolled before pinning existed a way to acquire one
+	// without being torn down and re-enrolled. Placed after resolveTransport so
+	// only a pin that parsed, and is compatible with the endpoint, is written.
+	if a.cred.Valid() && strings.TrimSpace(a.cfg.Pin) != strings.TrimSpace(a.cred.Pin) {
+		a.cred.Pin = a.cfg.Pin
+		if err := SaveCredential(a.cfg.CredentialPath, a.cred); err != nil {
+			// Non-fatal: the pin is in effect for this process either way, and
+			// refusing to start would be a worse outcome than a warning.
+			a.cfg.logf("warning: could not persist the updated pin to %s: %v",
+				a.cfg.CredentialPath, err)
+		}
 	}
 
 	// Normalise the concurrency ceiling once, here, so the value advertised

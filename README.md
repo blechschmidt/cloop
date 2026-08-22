@@ -948,6 +948,23 @@ The dashboard shows: project goal, status, step history with outputs, task list 
 | `--port` | `8080` | Port to listen on |
 | `--no-browser` | `false` | Do not open the browser automatically |
 
+### `cloop hub`
+
+Control-plane transport security.
+
+```bash
+cloop hub tls-init               # self-signed cert+key for development (0600 key)
+cloop hub tls-init --host cloop.example.com --days 90
+cloop hub pin                    # SPKI pin of the configured certificate
+cloop hub pin --cert /path/to/fullchain.pem
+```
+
+`tls-init` refuses to overwrite existing key material without `--force`:
+regenerating changes the hub's key, and every agent pinned to the old one stops
+connecting until it is re-pinned. See [TLS](#tls) for the serving configuration
+and [Remote executors](#remote-executors-edge-devices) for how the pin reaches
+a device.
+
 ### OIDC single sign-on (optional)
 
 The dashboard can authenticate users against any OpenID Connect provider
@@ -1611,10 +1628,12 @@ cloop executor enroll --name edge-1 --ttl 15m
 ```
 
 It prints a single-use, expiring token and the exact command to paste on the
-device:
+device — including the control plane's certificate pin, derived automatically
+from `ui.tls.cert_file`:
 
 ```bash
-cloop executor agent --server wss://cloop.example.com/api/executors/connect --token <token>
+cloop executor agent --server wss://cloop.example.com/api/executors/connect \
+  --token <token> --pin sha256:<base64>
 ```
 
 The token is **shown once** — only its hash is stored, so it cannot be
@@ -1623,6 +1642,34 @@ persists that 0600 at `~/.cloop/agent.json`, and reconnects with it from then
 on. If a token leaks, `cloop executor revoke <id>` (or **Revoke** on the card)
 kills it; if it was already redeemed, that revokes the resulting credential too,
 drops the device's session, and unbinds every project that pointed at it.
+
+#### Transport security
+
+A token proves the *device* is authorised. It says nothing about whether the
+server that answered is the control plane — so the agent verifies that
+independently, before it sends anything:
+
+- **Plaintext is refused.** `ws://` to a non-loopback host fails at startup,
+  because the enrollment token and the long-lived credential would both travel
+  in the clear and an agent retries forever, making one interception permanent.
+  `--insecure-transport` overrides it for links already protected some other
+  way, and logs a warning on every connection attempt while it is on.
+- **`--pin sha256:<base64>`** requires the server's public key to be exactly the
+  expected one, *in addition to* normal certificate-chain verification — never
+  instead of it. cloop sets `InsecureSkipVerify` on no outbound dial, and
+  `tests/security/transport_test.go` machine-checks that across the agent's
+  whole import closure.
+- The pin is over the **SPKI** (public key), not the certificate, so a routine
+  renewal that reuses the key does not break the fleet. Rotating onto a new key
+  does, deliberately — stage it by passing both pins comma-separated until every
+  device has crossed over.
+- The pin is stored in `~/.cloop/agent.json`, so every reconnect for the life of
+  the device is pinned, not just the first one.
+- **`--ca-file`** adds a PEM bundle to the trusted roots — the supported way to
+  reach a private CA or a `cloop hub tls-init` certificate. There is
+  deliberately no flag that disables verification instead.
+
+Read the current pin at any time with `cloop hub pin`.
 
 The agent endpoint deliberately sits outside the dashboard's token/OIDC auth.
 Agents are not users: they carry their own scoped, individually revocable
@@ -1800,11 +1847,68 @@ set:
   - `Referrer-Policy: no-referrer`
 - CORS is restricted to `localhost` / `127.0.0.1` origins only (no wildcard).
 
-### TLS / provider communication
+### TLS
 
-All three remote providers (Anthropic, OpenAI, custom OpenAI-compatible) use
-Go's default `http.Client` which validates TLS certificates against the system
-CA pool. There is **no `InsecureSkipVerify` option** in cloop.
+**Serving.** `cloop ui` and `cloop serve` can terminate TLS themselves, or sit
+behind a proxy that does. Both are supported; a *half*-configuration is not —
+a certificate without a key (or the reverse) fails at startup rather than
+falling back to plaintext, because a server that quietly serves HTTP after
+being asked for HTTPS is discovered from a packet capture, if at all.
+
+```yaml
+ui:
+  external_url: https://cloop.example.com   # also an accepted WebSocket Origin
+  allowed_origins: [ops.example.com]        # deployment-wide (dashboard + agents)
+  allowed_ws_origins: [legacy.example.com]  # dashboard socket only
+  tls:
+    cert_file: /etc/cloop/tls/fullchain.pem
+    key_file:  /etc/cloop/tls/privkey.pem   # mode 0600
+    min_version: "1.2"                      # or "1.3"; 1.0/1.1 are rejected
+```
+
+Or per-invocation: `cloop ui --tls-cert <pem> --tls-key <pem>` (the flags
+override the config block, as a pair). Only AEAD cipher suites with forward
+secrecy are offered — no CBC, no static RSA. For local development,
+`cloop hub tls-init` generates a self-signed pair (key written 0600 through
+`pkg/atomicfile`, never briefly world-readable) and prints the pin to give
+devices.
+
+**HSTS and cookies.** Responses delivered over TLS carry
+`Strict-Transport-Security: max-age=31536000; includeSubDomains`, and the OIDC
+session cookie becomes `Secure` + `SameSite=Strict`. Both are keyed off the
+request's real scheme, so they are also correct behind a TLS-terminating
+reverse proxy (`X-Forwarded-Proto`, trusted only from a loopback peer). Neither
+is applied on plaintext: HSTS on `http://localhost` would pin a developer's
+browser to HTTPS for a year and break every other local project on that
+hostname.
+
+**WebSocket origins.** Both the dashboard socket and the executor-agent
+endpoint accept an upgrade only from a recognised `Origin` — loopback,
+same-origin, `ui.external_url`, or `ui.allowed_origins`. A request with *no*
+`Origin` is allowed, because that is what every non-browser agent sends and a
+browser cannot suppress the header. A cross-origin upgrade gets 403 with the
+reason, before any token is examined — so it cannot burn a single-use
+enrollment token on the way to being refused.
+
+The two allowlists differ in blast radius and are deliberately not merged:
+`allowed_origins` is deployment-wide and reaches `/api/executors/connect`,
+where an entry can open an agent connection; `allowed_ws_origins` is scoped to
+the dashboard socket only. Prefer setting `external_url` — it covers the
+reverse-proxy case without either list.
+
+Note that same-origin matching falls back to comparing hostnames when the
+`Origin` and `Host` ports differ, which is what makes a proxy that rewrites
+`Host` work. The consequence is that another *port* on the same hostname counts
+as same-origin. If something you do not control is served from the hub's
+hostname, set `external_url` and treat that hostname as part of the trust
+boundary.
+
+**Outbound.** All three remote providers (Anthropic, OpenAI, custom
+OpenAI-compatible) and the executor agent validate certificates against the
+system CA pool. There is **no `InsecureSkipVerify` option** in cloop, and
+`tests/security/transport_test.go` fails the build if one appears on the
+agent's dial path. Reaching a server with a private CA is done by *adding* a
+root (`--ca-file`), not by removing verification.
 
 For self-hosted models on plain HTTP (Ollama), set `ollama.base_url` to the
 local endpoint. Outbound traffic to Anthropic/OpenAI is always TLS.

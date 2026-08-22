@@ -63,6 +63,16 @@ type Credential struct {
 	Credential string `json:"credential"`
 	// WorkDirRoot is the filesystem root every workload is confined beneath.
 	WorkDirRoot string `json:"workdir_root,omitempty"`
+	// Pin is the control plane's SPKI fingerprint ("sha256:<base64>"), or
+	// "" when the device was enrolled without one.
+	//
+	// It is persisted alongside the secret because pinning that only applied
+	// to the enrollment connection would protect the least valuable moment
+	// and leave every subsequent one — thousands of reconnects carrying a
+	// long-lived credential, over years, from a device nobody visits —
+	// trusting whatever answers DNS. Storing it makes the pin a property of
+	// the device's identity rather than of one command line.
+	Pin string `json:"pin,omitempty"`
 	// EnrolledAt records when the credential was issued.
 	EnrolledAt time.Time `json:"enrolled_at"`
 }

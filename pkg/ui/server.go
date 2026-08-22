@@ -51,6 +51,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/taskqueue"
 	"github.com/blechschmidt/cloop/pkg/taskreplay"
 	"github.com/blechschmidt/cloop/pkg/timeline"
+	"github.com/blechschmidt/cloop/pkg/tlsconf"
 )
 
 // chartJS is the Chart.js UMD bundle vendored locally so the dashboard can
@@ -417,6 +418,30 @@ type Server struct {
 	// public hostname. Populated from config.UIConfig.AllowedWSOrigins.
 	AllowedWSOrigins []string
 
+	// AllowedOrigins is the deployment-wide origin allowlist: it applies to
+	// the dashboard socket AND to the executor-agent endpoint. Populated from
+	// config.UIConfig.AllowedOrigins.
+	//
+	// It is separate from AllowedWSOrigins because the two have different
+	// blast radii. An entry here can open an agent connection; an entry in
+	// AllowedWSOrigins cannot. Merging them would silently promote every
+	// dashboard-scoped origin to the agent endpoint.
+	AllowedOrigins []string
+
+	// ExternalURL is what this deployment calls itself, e.g.
+	// https://cloop.example.com. Its host is an accepted WebSocket Origin for
+	// both the dashboard and the executor-agent endpoint. Populated from
+	// config.UIConfig.ExternalURL.
+	ExternalURL string
+
+	// TLSCertFile / TLSKeyFile enable native HTTPS. Both must be set or
+	// neither; Run refuses to start on a half-configuration rather than
+	// silently falling back to plaintext. TLSMinVersion is "1.2" (default)
+	// or "1.3". Populated from config.UIConfig.TLS or --tls-cert/--tls-key.
+	TLSCertFile   string
+	TLSKeyFile    string
+	TLSMinVersion string
+
 	mu      sync.Mutex
 	clients map[*sseClient]struct{}
 	lastMod time.Time
@@ -742,7 +767,7 @@ func (s *Server) Handler() http.Handler {
 // authenticated, so the identity it resolves into a permission set is the one
 // the route gates will enforce (Task 20164).
 func (s *Server) buildHandler(mux *http.ServeMux) http.Handler {
-	app := s.uiRateLimitMiddleware(securityHeaders(s.executorConnectBypass(s.authMiddleware(s.authzMiddleware(mux)))))
+	app := s.uiRateLimitMiddleware(s.securityHeaders(s.executorConnectBypass(s.authMiddleware(s.authzMiddleware(mux)))))
 	return uiRequestIDMiddleware(panicRecoveryMiddleware(s.probeBypass(app)))
 }
 
@@ -879,12 +904,29 @@ func (s *Server) Run(ctx context.Context) error {
 	go s.watchAutoBackup(watcherCtx)
 
 	addr := ":" + strconv.Itoa(s.Port)
-	if s.Token != "" {
-		fmt.Printf("cloop dashboard running at http://localhost%s (token auth enabled)\n", addr)
-	} else {
-		fmt.Printf("cloop dashboard running at http://localhost%s\n", addr)
-	}
 	srv := newUIHTTPServer(addr, s.buildHandler(mux))
+
+	// Resolve TLS before announcing anything, so a broken certificate is an
+	// error at startup rather than a dashboard that printed "https" and is
+	// serving plaintext.
+	tlsCfg, err := s.serverTLSConfig()
+	if err != nil {
+		return err
+	}
+	scheme := "http"
+	if tlsCfg != nil {
+		srv.TLSConfig = tlsCfg
+		scheme = "https"
+	}
+	auth := ""
+	if s.Token != "" {
+		auth = " (token auth enabled)"
+	}
+	fmt.Printf("cloop dashboard running at %s://localhost%s%s\n", scheme, addr, auth)
+	if tlsCfg != nil {
+		fmt.Printf("TLS enabled (minimum %s, certificate %s)\n",
+			tlsconf.VersionName(tlsCfg.MinVersion), s.TLSCertFile)
+	}
 
 	s.shutdownMu.Lock()
 	s.httpServer = srv
@@ -892,6 +934,12 @@ func (s *Server) Run(ctx context.Context) error {
 
 	errCh := make(chan error, 1)
 	go func() {
+		if tlsCfg != nil {
+			// Empty paths: the certificate is already loaded into TLSConfig,
+			// so this does not re-read (and cannot disagree with) the files.
+			errCh <- srv.ListenAndServeTLS("", "")
+			return
+		}
 		errCh <- srv.ListenAndServe()
 	}()
 
@@ -1050,7 +1098,11 @@ func panicRecoveryMiddleware(next http.Handler) http.Handler {
 }
 
 // securityHeaders adds hardening HTTP response headers to every response.
-func securityHeaders(next http.Handler) http.Handler {
+//
+// It is a method rather than a package function because the HSTS decision
+// needs ui.external_url: see Server.requestIsTLS for why a proxy on another
+// host cannot be recognised without it.
+func (s *Server) securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Prevent MIME-type sniffing.
 		w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -1062,6 +1114,14 @@ func securityHeaders(next http.Handler) http.Handler {
 			"default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'")
 		// Disable the Referrer header for privacy.
 		w.Header().Set("Referrer-Policy", "no-referrer")
+		// HSTS, but only on responses the client received over TLS. Sending
+		// it over plaintext is both ignored by browsers (RFC 6797 §8.1) and
+		// actively harmful on a loopback dev server, where it would pin
+		// localhost to https in the operator's browser for a year and break
+		// every other local project on that hostname.
+		if s.requestIsTLS(r) {
+			w.Header().Set("Strict-Transport-Security", hstsValue)
+		}
 		// Restrict CORS to localhost only (not wildcard). Parse the Origin
 		// and compare the hostname exactly — a prefix match would also
 		// accept e.g. http://localhost.evil.com.
@@ -2242,10 +2302,13 @@ var wsRetryAfterSeconds = 5
 //   - same-origin requests, where the Origin host matches the request Host
 //     (the page and the socket are served by the same server — safe even
 //     behind a reverse proxy on a public hostname);
+//   - the host of s.ExternalURL, i.e. what this deployment calls itself;
 //   - any host listed in s.AllowedWSOrigins (for proxies that rewrite Host).
 //
 // A malformed or genuinely cross-origin browser Origin is rejected, which
-// blocks cross-site WebSocket hijacking.
+// blocks cross-site WebSocket hijacking. The executor-agent endpoint applies
+// the same policy through remote.Hub.checkOrigin, fed from the same two
+// config values — see pkg/executor/remote/origin.go.
 func (s *Server) wsOriginAllowed(r *http.Request) bool {
 	origin := r.Header.Get("Origin")
 	if origin == "" {
@@ -2257,9 +2320,10 @@ func (s *Server) wsOriginAllowed(r *http.Request) bool {
 	}
 	originHost := u.Hostname()
 
-	// Loopback is always allowed (local dashboard use).
-	switch originHost {
-	case "localhost", "127.0.0.1", "::1":
+	// Loopback is always allowed (local dashboard use). Shared with the
+	// executor-agent endpoint via tlsconf so one server cannot give two
+	// different answers to "is this origin loopback".
+	if tlsconf.IsLoopbackHost(originHost) {
 		return true
 	}
 
@@ -2279,9 +2343,22 @@ func (s *Server) wsOriginAllowed(r *http.Request) bool {
 		}
 	}
 
-	// Operator-configured extra origins (host or host:port).
-	for _, allowed := range s.AllowedWSOrigins {
-		if allowed == "" {
+	// The deployment's own external URL, which is the common case behind a
+	// proxy that rewrites Host: the operator has already told us what this
+	// server is called, so requiring them to repeat it in allowed_origins
+	// would be a second chance to get it wrong.
+	if ext := strings.TrimSpace(s.ExternalURL); ext != "" {
+		if u2, err := url.Parse(ext); err == nil && u2.Host != "" {
+			if strings.EqualFold(u2.Host, u.Host) || strings.EqualFold(u2.Hostname(), originHost) {
+				return true
+			}
+		}
+	}
+
+	// Operator-configured extra origins (host or host:port). The dashboard
+	// honours both lists; the agent endpoint honours only AllowedOrigins.
+	for _, allowed := range append(append([]string(nil), s.AllowedWSOrigins...), s.AllowedOrigins...) {
+		if strings.TrimSpace(allowed) == "" {
 			continue
 		}
 		if strings.EqualFold(allowed, u.Host) || strings.EqualFold(allowed, originHost) {

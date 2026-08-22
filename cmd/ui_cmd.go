@@ -17,13 +17,15 @@ import (
 )
 
 var (
-	uiPort        int
-	uiNoBrowser   bool
-	uiToken       string
-	uiProjects    []string
-	uiScan        string
-	uiRateLimit   float64
-	uiRateBurst   int
+	uiPort      int
+	uiNoBrowser bool
+	uiToken     string
+	uiProjects  []string
+	uiScan      string
+	uiRateLimit float64
+	uiRateBurst int
+	uiTLSCert   string
+	uiTLSKey    string
 )
 
 var uiCmd = &cobra.Command{
@@ -38,7 +40,14 @@ task list (PM mode), live progress via SSE, and run/stop controls.
   cloop ui --port 9090                # use a custom port
   cloop ui --no-browser               # don't open the browser automatically
   cloop ui --projects /a /b /c        # multi-project overview dashboard
-  cloop ui --scan /root/Projects      # auto-discover cloop projects under dir`,
+  cloop ui --scan /root/Projects      # auto-discover cloop projects under dir
+  cloop ui --tls-cert c.pem --tls-key k.pem   # serve HTTPS directly
+
+TLS may also be configured under ui.tls in .cloop/config.yaml; the flags win
+when both are present. Run ` + "`cloop hub tls-init`" + ` for a development
+certificate. Without either, the dashboard serves plaintext, which is correct
+for loopback use and for a deployment that terminates TLS in a reverse proxy —
+but not for anything reachable from a network.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		workdir, _ := os.Getwd()
 
@@ -66,22 +75,36 @@ task list (PM mode), live progress via SSE, and run/stop controls.
 			}
 		}
 
-		if !uiNoBrowser {
-			go openBrowser("http://localhost:" + strconv.Itoa(uiPort))
-		}
-
 		srv := ui.New(workdir, uiPort, token)
 		srv.Projects = projectPaths
 		srv.RPS = uiRateLimit
 		srv.Burst = uiRateBurst
 
-		// Apply WebSocket connection caps from .cloop/config.yaml when present.
-		// Failure to load is non-fatal — the UI still starts with built-in
-		// defaults (256 total, 8 per IP).
-		if cfg, err := config.Load(workdir); err == nil && cfg != nil {
+		// Load .cloop/config.yaml. A parse failure is fatal, not a warning:
+		// every security-relevant setting the dashboard has — TLS, the origin
+		// allowlist, the WebSocket caps, and OIDC itself — lives in this file,
+		// so a one-character YAML typo would otherwise start a hardened
+		// deployment in plaintext with no authentication and only a line on
+		// stderr to say so. Load returns defaults with a nil error when the
+		// file is absent, so the no-config case is unaffected.
+		cfg, err := config.Load(workdir)
+		if err != nil {
+			return fmt.Errorf("could not load %s: %w", config.ConfigPath(workdir), err)
+		}
+		if cfg != nil {
 			srv.MaxWebSocketConns = cfg.UI.MaxWebSocketConns
 			srv.MaxWebSocketConnsPerIP = cfg.UI.MaxWebSocketConnsPerIP
 			srv.AllowedWSOrigins = cfg.UI.AllowedWSOrigins
+			srv.AllowedOrigins = cfg.UI.AllowedOrigins
+			srv.ExternalURL = cfg.UI.ExternalURL
+			// TLS: flags override config so an operator can point a running
+			// deployment at a renewed certificate without editing YAML.
+			if err := cfg.UI.TLS.Validate(); err != nil {
+				return err
+			}
+			srv.TLSCertFile = cfg.UI.TLS.CertFile
+			srv.TLSKeyFile = cfg.UI.TLS.KeyFile
+			srv.TLSMinVersion = cfg.UI.TLS.MinVersion
 
 			// Optional OIDC single sign-on (ui.oidc.* — Task 20152). Unlike
 			// the caps above this is fail-closed: a dashboard configured to
@@ -123,8 +146,21 @@ task list (PM mode), live progress via SSE, and run/stop controls.
 				fmt.Printf("RBAC: %d role mapping(s), default role %q\n",
 					len(cfg.UI.OIDC.RoleMappings), effectiveDefaultRole(cfg.UI.OIDC.DefaultRole))
 			}
-		} else if err != nil {
-			fmt.Fprintf(os.Stderr, "warning: could not load config: %v\n", err)
+		}
+
+		if uiTLSCert != "" || uiTLSKey != "" {
+			srv.TLSCertFile, srv.TLSKeyFile = uiTLSCert, uiTLSKey
+		}
+
+		// Open the browser only after the scheme is settled, so the URL
+		// matches what the server will actually speak. Opening http:// against
+		// an HTTPS listener produces an empty tab and a confusing bug report.
+		if !uiNoBrowser {
+			scheme := "http"
+			if srv.TLSEnabled() {
+				scheme = "https"
+			}
+			go openBrowser(scheme + "://localhost:" + strconv.Itoa(uiPort))
 		}
 
 		return srv.Start()
@@ -184,5 +220,7 @@ func init() {
 	uiCmd.Flags().StringVar(&uiScan, "scan", "", "Scan this directory for cloop projects and add them to the dashboard")
 	uiCmd.Flags().Float64Var(&uiRateLimit, "rate-limit", 0, "Requests per second per IP (default 20; 0 = use default)")
 	uiCmd.Flags().IntVar(&uiRateBurst, "rate-burst", 0, "Burst size per IP for rate limiter (default 50; 0 = use default)")
+	uiCmd.Flags().StringVar(&uiTLSCert, "tls-cert", "", "PEM certificate chain to serve HTTPS with (overrides ui.tls.cert_file)")
+	uiCmd.Flags().StringVar(&uiTLSKey, "tls-key", "", "PEM private key matching --tls-cert (overrides ui.tls.key_file)")
 	rootCmd.AddCommand(uiCmd)
 }

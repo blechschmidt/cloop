@@ -12,14 +12,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
-
-	"nhooyr.io/websocket"
 
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/remote"
@@ -118,31 +115,8 @@ func (a *Agent) authToken() (token string, isEnrollment bool) {
 	return strings.TrimSpace(a.cfg.Token), true
 }
 
-// dial opens the transport.
-func (a *Agent) dial(ctx context.Context, token string) (remote.Conn, error) {
-	if a.cfg.Dial != nil {
-		return a.cfg.Dial(ctx, a.cfg.Server, token)
-	}
-	// Bound the dial: a control plane whose TCP accepts but never completes
-	// the upgrade would otherwise hold this goroutine indefinitely and the
-	// agent would never fall through to its reconnect backoff.
-	dialCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-
-	conn, resp, err := websocket.Dial(dialCtx, a.cfg.Server, &websocket.DialOptions{
-		HTTPHeader: http.Header{"Authorization": []string{"Bearer " + token}},
-	})
-	if err != nil {
-		// A 401 is worth distinguishing: it means the credential is bad, and
-		// retrying with the same one will fail identically forever.
-		if resp != nil && resp.StatusCode == http.StatusUnauthorized {
-			return nil, fmt.Errorf("%w: control plane rejected the credential (HTTP 401)",
-				remote.ErrCredentialInvalid)
-		}
-		return nil, err
-	}
-	return remote.NewWSConn(conn), nil
-}
+// dial lives in transport.go, alongside the pinning and plaintext policy it
+// applies.
 
 // handshake sends hello and processes welcome.
 func (a *Agent) handshake(ctx context.Context, sess *deviceSession, isEnrollment bool) (remote.WelcomePayload, error) {
@@ -223,6 +197,7 @@ func (a *Agent) persistCredential(w remote.WelcomePayload) error {
 		Name:        a.cred.Name,
 		Credential:  w.Credential,
 		WorkDirRoot: a.root,
+		Pin:         a.cfg.Pin,
 		EnrolledAt:  a.cfg.now(),
 	}
 	a.cred = cred

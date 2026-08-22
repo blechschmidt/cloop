@@ -41,6 +41,15 @@ type HubOptions struct {
 	// OnEnroll is called after a device successfully redeems an enrollment
 	// token, so the caller can write an executors-table row for it.
 	OnEnroll func(agent AgentRecord, caps AgentCapabilities)
+	// ExternalURL is what this deployment calls itself, e.g.
+	// https://cloop.example.com. Its host is always an accepted WebSocket
+	// Origin, which is what makes the Executors panel work when a reverse
+	// proxy rewrites Host so the same-origin check cannot fire.
+	ExternalURL string
+	// AllowedOrigins lists additional browser Origins permitted to open an
+	// agent WebSocket, on top of loopback, same-origin, and ExternalURL.
+	// Entries may be full origins, host:port, or bare hosts.
+	AllowedOrigins []string
 	// Logf receives operational messages. Nil discards them.
 	Logf func(format string, args ...any)
 	// Now overrides the clock for tests.
@@ -220,7 +229,19 @@ func (h *Hub) Deregister(agentID string) {
 // error frame carries a usable message once the connection is up, but an
 // unauthenticated caller probing this endpoint learns nothing about whether a
 // token exists, is expired, or was already redeemed.
+//
+// The Origin check runs first, ahead of any token handling. That ordering is
+// load-bearing, not tidiness: redemption is single-use and destructive, so a
+// cross-origin request that reached Redeem would consume the operator's
+// enrollment token — turning a refused connection into a token that must be
+// re-minted. Checking origin first means a rejected request changes no state.
 func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if d := h.checkOrigin(r); !d.allowed {
+		h.opts.logf("remote: connect refused from %s: %s", r.RemoteAddr, d.reason)
+		writeHTTPError(w, http.StatusForbidden, d.reason)
+		return
+	}
+
 	token := bearerToken(r)
 	if token == "" {
 		writeHTTPError(w, http.StatusUnauthorized, "missing bearer token")
@@ -257,11 +278,13 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Origin checking is deliberately skipped: the peer is a headless agent
-	// authenticated by bearer token, not a browser, so there is no ambient
-	// credential for a cross-site request to abuse. The token is the whole
-	// authentication story here.
-	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
+	// InsecureSkipVerify tells the websocket library to skip *its* built-in
+	// OriginPatterns matching, which cannot express "no Origin header is
+	// fine, and this proxy's hostname is fine". checkOrigin above is the
+	// replacement, and it already ran — see its file header for the policy.
+	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
+		InsecureSkipVerify: true, // origin already validated by checkOrigin
+	})
 	if err != nil {
 		h.opts.logf("remote: websocket upgrade for %s: %v", agent.AgentID, err)
 		return

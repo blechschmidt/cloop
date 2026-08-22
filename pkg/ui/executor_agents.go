@@ -58,8 +58,17 @@ func (s *Server) remoteHub() (*remote.Hub, error) {
 			return
 		}
 		hub, err := remote.NewHub(remote.HubOptions{
-			Store:          store,
+			Store:    store,
 			Registry: executor.DefaultRegistry,
+			// Agents send no Origin, so these only ever affect browsers.
+			//
+			// The hub gets AllowedOrigins but NOT AllowedWSOrigins: an entry
+			// in the latter is scoped to the dashboard socket, and forwarding
+			// it here would silently grant every such origin the ability to
+			// open an agent connection. ExternalURL is shared because it is
+			// the one name the whole deployment answers to.
+			ExternalURL:    s.ExternalURL,
+			AllowedOrigins: s.AllowedOrigins,
 			// Mirror into storage, then push the change to open dashboards
 			// so the Executors panel's status dot is event-driven rather
 			// than polled (Tasks 20126/20134, 20160).

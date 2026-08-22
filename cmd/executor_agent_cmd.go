@@ -12,6 +12,7 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -21,11 +22,13 @@ import (
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 
+	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/executor/agent"
 	"github.com/blechschmidt/cloop/pkg/executor/remote"
 	"github.com/blechschmidt/cloop/pkg/executorstore"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/statedb"
+	"github.com/blechschmidt/cloop/pkg/tlsconf"
 )
 
 // openExecutorStore opens the control plane's enrollment storage for the
@@ -74,9 +77,25 @@ Once redeemed the device receives a long-lived credential, persists it 0600 at
 		ttl, _ := cmd.Flags().GetDuration("ttl")
 		root, _ := cmd.Flags().GetString("workdir-root")
 		server, _ := cmd.Flags().GetString("server")
+		pin, _ := cmd.Flags().GetString("pin")
 		labelPairs, _ := cmd.Flags().GetStringSlice("label")
 
 		labels, err := parseLabelPairs(labelPairs)
+		if err != nil {
+			return err
+		}
+
+		// Fill the server URL and the pin from this hub's own configuration
+		// when the operator did not override them. Deriving the pin here is
+		// the whole point: an operator who has to run a second command and
+		// paste a fingerprint by hand will, sooner or later, not — and an
+		// enrollment without a pin is an enrollment that trusts DNS.
+		//
+		// A certificate that is configured but unreadable is an error, not a
+		// silent unpinned enrollment: the device would be handed a bundle that
+		// looks complete, and the operator would never learn the pin was
+		// dropped.
+		server, pin, err = resolveEnrollTransport(server, pin)
 		if err != nil {
 			return err
 		}
@@ -87,11 +106,13 @@ Once redeemed the device receives a long-lived credential, persists it 0600 at
 		}
 		defer db.Close()
 
-		token, rec, err := remote.Mint(store, remote.MintOptions{
+		bundle, rec, err := remote.MintBundle(store, remote.MintOptions{
 			Name:        name,
 			TTL:         ttl,
 			WorkDirRoot: root,
 			Labels:      labels,
+			Server:      server,
+			Pin:         pin,
 		})
 		if err != nil {
 			return err
@@ -108,14 +129,95 @@ Once redeemed the device receives a long-lived credential, persists it 0600 at
 		if rec.WorkDirRoot != "" {
 			fmt.Printf("  root:    %s\n", rec.WorkDirRoot)
 		}
+		if bundle.Pin != "" {
+			fmt.Printf("  pin:     %s\n", bundle.Pin)
+		}
 		fmt.Println()
 
 		warn.Println("This token is shown once and cannot be recovered. Run on the device:")
-		fmt.Printf("\n  cloop executor agent --server %s --token %s\n\n", displayServer(server), token)
+		display := bundle
+		if strings.TrimSpace(display.Server) == "" {
+			display.Server = displayServer("")
+		}
+		fmt.Printf("\n  %s\n\n", display.Command())
+
+		if bundle.Pin == "" {
+			warn.Println("No certificate pin: this hub has no ui.tls certificate configured.")
+			dim.Println("  The device will verify the hub against the system trust store only, and will")
+			dim.Println("  refuse plaintext ws:// to a non-loopback host. Run `cloop hub tls-init` (dev)")
+			dim.Println("  or point ui.tls at a real certificate to pin enrollments.")
+			fmt.Println()
+		}
 		dim.Printf("Revoke with: cloop executor revoke %s\n", rec.ID)
 		return nil
 	},
 }
+
+// resolveEnrollTransport fills an unset --server / --pin from this control
+// plane's own config: ui.external_url for the URL, and the SPKI of
+// ui.tls.cert_file for the pin.
+//
+// Both stay best-effort. `cloop executor enroll` must keep working on a hub
+// with no config file — printing a placeholder command the operator edits is a
+// worse outcome than an error only in the sense that it is a smaller one.
+func resolveEnrollTransport(server, pin string) (string, string, error) {
+	if strings.TrimSpace(server) != "" && strings.TrimSpace(pin) != "" {
+		return server, pin, nil
+	}
+	workdir, err := os.Getwd()
+	if err != nil {
+		return server, pin, nil
+	}
+	cfg, err := config.Load(workdir)
+	if err != nil || cfg == nil {
+		// Best-effort: `cloop executor enroll` must keep working on a hub with
+		// no config file, where it prints a placeholder command the operator
+		// completes by hand.
+		return server, pin, nil
+	}
+	if strings.TrimSpace(server) == "" {
+		if ext := strings.TrimSpace(cfg.UI.ExternalURL); ext != "" {
+			server = wsEndpointFor(ext)
+		}
+	}
+	if strings.TrimSpace(pin) == "" {
+		if cert := strings.TrimSpace(cfg.UI.TLS.CertFile); cert != "" {
+			p, pinErr := tlsconf.PinFromCertFile(cert)
+			if pinErr != nil {
+				return "", "", fmt.Errorf(
+					"could not derive the pin from ui.tls.cert_file (%s): %w\n"+
+						"Fix the certificate, or pass --pin explicitly to enroll without it",
+					cert, pinErr)
+			}
+			pin = p
+		}
+	}
+	return server, pin, nil
+}
+
+// wsEndpointFor turns a hub's external URL into the agent connect URL,
+// mapping https→wss and http→ws so the operator configures one value and
+// both the browser and the device get a working address from it.
+func wsEndpointFor(external string) string {
+	u, err := url.Parse(strings.TrimSpace(external))
+	if err != nil || u.Host == "" {
+		return ""
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "https", "wss":
+		u.Scheme = "wss"
+	default:
+		u.Scheme = "ws"
+	}
+	u.Path = executorConnectPath
+	u.RawQuery, u.Fragment = "", ""
+	return u.String()
+}
+
+// executorConnectPath mirrors pkg/ui's constant. It is repeated rather than
+// exported because cmd importing pkg/ui for one string would drag the whole
+// dashboard into every command's link graph.
+const executorConnectPath = "/api/executors/connect"
 
 // displayServer renders the --server value for the printed command, falling
 // back to an obvious placeholder so a copied command fails loudly at the
@@ -160,6 +262,33 @@ or when the control plane revokes its credential.`,
 		root, _ := cmd.Flags().GetString("workdir-root")
 		maxConc, _ := cmd.Flags().GetInt("max-concurrent")
 		labelPairs, _ := cmd.Flags().GetStringSlice("label")
+		pin, _ := cmd.Flags().GetString("pin")
+		caFile, _ := cmd.Flags().GetString("ca-file")
+		insecure, _ := cmd.Flags().GetBool("insecure-transport")
+		bundleStr, _ := cmd.Flags().GetString("bundle")
+
+		// A bundle carries server, token and pin together, which is the
+		// point: those three have to agree, and three separately-pasted
+		// flags are three chances for them not to. Explicit flags still win,
+		// so an operator can override one field without unpacking the blob.
+		if strings.TrimSpace(bundleStr) != "" {
+			b, err := remote.DecodeBundle(bundleStr)
+			if err != nil {
+				return err
+			}
+			if strings.TrimSpace(server) == "" {
+				server = b.Server
+			}
+			if strings.TrimSpace(token) == "" {
+				token = b.Token
+			}
+			if strings.TrimSpace(pin) == "" {
+				pin = b.Pin
+			}
+			if strings.TrimSpace(root) == "" {
+				root = b.WorkDirRoot
+			}
+		}
 
 		labels, err := parseLabelPairs(labelPairs)
 		if err != nil {
@@ -168,12 +297,15 @@ or when the control plane revokes its credential.`,
 
 		dim := color.New(color.Faint)
 		a, err := agent.New(agent.Config{
-			Server:         server,
-			Token:          token,
-			CredentialPath: credPath,
-			WorkDirRoot:    root,
-			MaxConcurrent:  maxConc,
-			Labels:         labels,
+			Server:            server,
+			Token:             token,
+			CredentialPath:    credPath,
+			WorkDirRoot:       root,
+			MaxConcurrent:     maxConc,
+			Labels:            labels,
+			Pin:               pin,
+			RootCAFile:        caFile,
+			InsecureTransport: insecure,
 			Logf: func(format string, args ...any) {
 				dim.Fprintf(os.Stderr, "[agent] "+format+"\n", args...)
 			},
@@ -185,6 +317,7 @@ or when the control plane revokes its credential.`,
 		header := color.New(color.FgCyan, color.Bold)
 		header.Printf("cloop executor agent\n")
 		fmt.Printf("  root:    %s\n", a.WorkDirRoot())
+		fmt.Printf("  link:    %s\n", a.TransportSummary())
 		caps := a.Capabilities()
 		fmt.Printf("  host:    %s/%s, %d CPU", caps.OS, caps.Arch, caps.CPUs)
 		if caps.MemoryMB > 0 {
@@ -360,6 +493,17 @@ func init() {
 		"maximum simultaneous workloads (default: number of CPUs)")
 	executorAgentCmd.Flags().StringSlice("label", nil,
 		"scheduler selector as key=value (repeatable)")
+	executorAgentCmd.Flags().String("pin", "",
+		"expected control-plane SPKI fingerprint, sha256:<base64> (comma-separate several to stage a key rotation)")
+	executorAgentCmd.Flags().String("ca-file", "",
+		"PEM bundle to trust in addition to the system store, for a private CA or a `cloop hub tls-init` certificate")
+	executorAgentCmd.Flags().Bool("insecure-transport", false,
+		"permit plaintext ws:// to a non-loopback host — credentials travel in the clear")
+	executorAgentCmd.Flags().String("bundle", "",
+		"enrollment bundle from `cloop executor enroll` (supplies --server, --token and --pin together)")
+
+	executorEnrollCmd.Flags().String("pin", "",
+		"SPKI pin to record in the bundle (default: derived from ui.tls.cert_file)")
 
 	executorCmd.AddCommand(executorEnrollCmd)
 	executorCmd.AddCommand(executorAgentCmd)

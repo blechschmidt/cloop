@@ -654,9 +654,77 @@ type UIConfig struct {
 	// requests already work without listing anything here.
 	AllowedWSOrigins []string `yaml:"allowed_ws_origins,omitempty"`
 
+	// AllowedOrigins lists browser Origins permitted to open a WebSocket to
+	// *any* endpoint of this hub, including the executor-agent endpoint at
+	// /api/executors/connect. It is the deployment-wide setting;
+	// AllowedWSOrigins remains the dashboard-only one and both are honoured
+	// for the dashboard. Entries may be full origins
+	// ("https://cloop.example.com"), host:port, or bare hosts.
+	//
+	// Loopback and same-origin requests are always allowed and need no entry
+	// here — this exists for the reverse-proxy case where the browser's
+	// Origin and the Host the server sees genuinely differ.
+	AllowedOrigins []string `yaml:"allowed_origins,omitempty"`
+
+	// ExternalURL is what this deployment calls itself, e.g.
+	// https://cloop.example.com. Its host is always an accepted Origin, so a
+	// correctly-set external URL usually makes allowed_origins unnecessary.
+	// It is also what `cloop executor enroll` puts in enrollment bundles when
+	// --server is not passed.
+	ExternalURL string `yaml:"external_url,omitempty"`
+
+	// TLS configures native HTTPS for `cloop ui` and `cloop serve`.
+	// Disabled (plaintext) when cert_file and key_file are unset, which is
+	// correct for loopback development and for a deployment that terminates
+	// TLS in a reverse proxy.
+	TLS TLSConfig `yaml:"tls,omitempty"`
+
 	// OIDC configures optional OpenID Connect single sign-on for the web
 	// dashboard. Disabled by default; see OIDCConfig.
 	OIDC OIDCConfig `yaml:"oidc,omitempty"`
+}
+
+// TLSConfig configures native TLS termination for cloop's HTTP servers.
+//
+// cloop can serve HTTPS itself, or sit behind a proxy that does. Both are
+// supported; what is not supported is a half-configuration. Setting exactly
+// one of cert_file/key_file is an error at startup rather than a silent
+// fallback to plaintext, because "the operator asked for TLS and got HTTP
+// without being told" is precisely the failure this exists to prevent.
+type TLSConfig struct {
+	// CertFile is the PEM certificate chain, leaf first.
+	CertFile string `yaml:"cert_file,omitempty"`
+
+	// KeyFile is the PEM private key. It should be mode 0600; a
+	// world-readable server key is a complete impersonation of the control
+	// plane, so cloop warns loudly (but still starts) when it is not.
+	KeyFile string `yaml:"key_file,omitempty"`
+
+	// MinVersion is the TLS floor: "1.2" (default) or "1.3". TLS 1.0 and 1.1
+	// are rejected — they have no safe configuration left.
+	MinVersion string `yaml:"min_version,omitempty"`
+}
+
+// Enabled reports whether native TLS is configured.
+func (t TLSConfig) Enabled() bool {
+	return strings.TrimSpace(t.CertFile) != "" || strings.TrimSpace(t.KeyFile) != ""
+}
+
+// Validate rejects a half-configured TLS block. Called by the ui/serve
+// commands before binding a listener.
+func (t TLSConfig) Validate() error {
+	cert, key := strings.TrimSpace(t.CertFile), strings.TrimSpace(t.KeyFile)
+	switch {
+	case cert == "" && key == "":
+		return nil
+	case cert == "":
+		return fmt.Errorf("ui.tls.key_file is set but ui.tls.cert_file is not; " +
+			"both are required to serve HTTPS")
+	case key == "":
+		return fmt.Errorf("ui.tls.cert_file is set but ui.tls.key_file is not; " +
+			"both are required to serve HTTPS")
+	}
+	return nil
 }
 
 // OIDCConfig configures optional OpenID Connect single sign-on for the web

@@ -322,8 +322,50 @@ func (a *Authenticator) HandleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.SetCookie(w, a.sessionCookie(r, sid, int(a.cfg.SessionTTL.Seconds())))
-	http.Redirect(w, r, "/", http.StatusFound)
+	a.completeLogin(w, r)
 }
+
+// completeLogin sends the browser to the dashboard after a successful sign-in.
+//
+// A 302 would be the obvious thing, and it is wrong here. The navigation that
+// arrives at /auth/callback was initiated by the identity provider, so the
+// whole redirect chain — including a Location we emit — is cross-site as far
+// as the browser is concerned. A SameSite=Strict cookie set on this response
+// is therefore *not* sent on the immediately following request to "/", the
+// dashboard sees an anonymous visitor, bounces back to /auth/login, and the
+// user is in a redirect loop that only reproduces under Strict and only in
+// some browsers.
+//
+// A client-initiated navigation has no such ambiguity: it originates from a
+// page already on our own origin, so it is same-site and the cookie rides
+// along. Hence the tiny landing page. The meta refresh covers script being
+// blocked; the link covers both being blocked, in which case one click
+// finishes the job instead of a dead end.
+func (a *Authenticator) completeLogin(w http.ResponseWriter, r *http.Request) {
+	if !a.cookieSecure(r) {
+		// Lax cookie: the plain redirect works and is one round trip cheaper.
+		http.Redirect(w, r, "/", http.StatusFound)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.WriteString(w, loginLandingHTML)
+}
+
+// loginLandingHTML is served once, immediately after sign-in. It is inline
+// rather than a redirect for the reason documented on completeLogin.
+const loginLandingHTML = `<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta http-equiv="refresh" content="0; url=/">
+<title>Signing in…</title>
+<style>body{font:14px system-ui,sans-serif;margin:4rem auto;max-width:28rem;text-align:center;color:#333}</style>
+</head><body>
+<p>Signed in. Opening the dashboard…</p>
+<p><a href="/">Continue</a></p>
+<script>location.replace("/");</script>
+</body></html>
+`
 
 // Logout deletes the caller's session (if any) and clears the cookie.
 func (a *Authenticator) Logout(w http.ResponseWriter, r *http.Request) {
@@ -436,15 +478,23 @@ func (a *Authenticator) evictOldestSessionLocked() {
 // sessionCookie builds the session cookie with the Secure flag resolved
 // per config ("auto" inspects the request: direct TLS or an https
 // X-Forwarded-Proto from a reverse proxy).
+//
+// SameSite follows Secure: Strict when the connection is TLS, Lax otherwise.
+// Strict withholds the cookie from every cross-site request including
+// top-level navigations, so a link planted elsewhere cannot carry the
+// operator's session into a state-changing request — CSRF against the
+// dashboard stops being expressible rather than merely being defended against.
+//
+// Lax is retained on plaintext because that is the loopback development case,
+// where Strict's one real cost (the navigation immediately after the IdP
+// callback — see completeLogin) is friction with no attacker to justify it.
+// Over TLS that cost is paid properly, by the landing page, not by weakening
+// the cookie.
 func (a *Authenticator) sessionCookie(r *http.Request, value string, maxAge int) *http.Cookie {
-	secure := false
-	switch a.cfg.CookieSecure {
-	case "always":
-		secure = true
-	case "never":
-		secure = false
-	default: // "auto" / ""
-		secure = r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
+	secure := a.cookieSecure(r)
+	sameSite := http.SameSiteLaxMode
+	if secure {
+		sameSite = http.SameSiteStrictMode
 	}
 	return &http.Cookie{
 		Name:     SessionCookieName,
@@ -452,8 +502,20 @@ func (a *Authenticator) sessionCookie(r *http.Request, value string, maxAge int)
 		Path:     "/",
 		MaxAge:   maxAge,
 		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
+		SameSite: sameSite,
 		Secure:   secure,
+	}
+}
+
+// cookieSecure resolves the Secure flag from config and the request.
+func (a *Authenticator) cookieSecure(r *http.Request) bool {
+	switch a.cfg.CookieSecure {
+	case "always":
+		return true
+	case "never":
+		return false
+	default: // "auto" / ""
+		return r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
 	}
 }
 
