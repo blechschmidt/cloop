@@ -71,8 +71,22 @@ func allUISources() string {
 		"\n" + auditAPISource + "\n" + secretsAPISource + "\n" + installScriptSource
 }
 
-// The cloop dashboard is a single embedded HTML/CSS/JS string (`dashboardHTML`
-// in pkg/ui/server.go). Frontend behaviour is therefore impossible to assert
+// dashboardSource is the whole dashboard front end — the rendered index.html
+// shell, app.css, the error boundary, and every panel JS fragment — joined in
+// the order the browser sees them.
+//
+// Before Task 20174 this was a single `dashboardHTML` string constant in
+// server.go, and these tests grepped it directly. The front end now lives in
+// pkg/ui/assets/ as separate files (see static.go), so the tests reassemble it:
+// every invariant below is a property of the front end as a whole, not of any
+// one file, and splitting the assertions per-file would let a handler move
+// between fragments and silently escape the check.
+var dashboardSource = func() string {
+	a := loadAssets()
+	return a.page.contents + "\n" + a.css + "\n" + a.boundary + "\n" + a.bundle
+}()
+
+// Frontend behaviour is impossible to assert
 // end-to-end from Go without a real browser, but the *structural* invariants
 // that matter most (and that have regressed repeatedly — Tasks 163, 168,
 // 20033, 20065) can be checked by parsing the embedded source:
@@ -138,7 +152,7 @@ func extractWindowExposures(js string) map[string]struct{} {
 }
 
 // findIIFEBoundsForMainScript returns the [start, end) byte offsets of the
-// main `(function() { 'use strict'; ... })();` wrapper inside dashboardHTML.
+// main `(function() { 'use strict'; ... })();` wrapper inside the bundle.
 // Functions defined *inside* this range with bare `function fn(...)` syntax
 // are NOT visible to inline onclick handlers; they must be exposed on
 // `window.fn`.
@@ -177,7 +191,7 @@ func findIIFEBoundsForMainScript(html string) (int, int, bool) {
 // HTML — DOCTYPE, balanced top-level tags, and the major panel containers
 // that the JS unconditionally pokes into.
 func TestDashboard_BasicWellFormedness(t *testing.T) {
-	if !strings.HasPrefix(dashboardHTML, "<!DOCTYPE html>") {
+	if !strings.HasPrefix(dashboardSource, "<!DOCTYPE html>") {
 		t.Fatal("dashboard must start with <!DOCTYPE html>")
 	}
 	pairs := []struct{ open, close string }{
@@ -186,14 +200,14 @@ func TestDashboard_BasicWellFormedness(t *testing.T) {
 		{"<body>", "</body>"},
 	}
 	for _, p := range pairs {
-		o := strings.Count(dashboardHTML, p.open)
-		c := strings.Count(dashboardHTML, p.close)
+		o := strings.Count(dashboardSource, p.open)
+		c := strings.Count(dashboardSource, p.close)
 		if o != c {
 			t.Errorf("unbalanced %s/%s: open=%d close=%d", p.open, p.close, o, c)
 		}
 	}
-	openScript := strings.Count(dashboardHTML, "<script")
-	closeScript := strings.Count(dashboardHTML, "</script>")
+	openScript := strings.Count(dashboardSource, "<script")
+	closeScript := strings.Count(dashboardSource, "</script>")
 	if openScript != closeScript {
 		t.Errorf("unbalanced <script> tags: open=%d close=%d", openScript, closeScript)
 	}
@@ -202,7 +216,7 @@ func TestDashboard_BasicWellFormedness(t *testing.T) {
 		"tab-provider-calls", "tab-analytics", "tab-deps",
 	}
 	for _, id := range requiredIDs {
-		if !strings.Contains(dashboardHTML, `id="`+id+`"`) {
+		if !strings.Contains(dashboardSource, `id="`+id+`"`) {
 			t.Errorf("dashboard missing required tab id=%q", id)
 		}
 	}
@@ -219,8 +233,8 @@ func TestDashboard_BasicWellFormedness(t *testing.T) {
 // `onclick=` and silently breaks the button. Catches regressions like
 // Tasks 20033 and 20065.
 func TestDashboard_OnclickHandlers_AllReachable(t *testing.T) {
-	handlers := extractOnclickHandlers(dashboardHTML)
-	exposed := extractWindowExposures(dashboardHTML)
+	handlers := extractOnclickHandlers(dashboardSource)
+	exposed := extractWindowExposures(dashboardSource)
 
 	legitGlobals := map[string]bool{
 		"alert": true,
@@ -269,7 +283,7 @@ func TestDashboard_NoJSONStringifyInQuotedOnclick(t *testing.T) {
 	var bad []string
 	idx := 0
 	for {
-		i := strings.Index(dashboardHTML[idx:], `onclick=`)
+		i := strings.Index(dashboardSource[idx:], `onclick=`)
 		if i < 0 {
 			break
 		}
@@ -277,10 +291,10 @@ func TestDashboard_NoJSONStringifyInQuotedOnclick(t *testing.T) {
 		// Look at a 300-char window after the onclick=. Big enough to span
 		// any reasonable inline handler.
 		end := start + 300
-		if end > len(dashboardHTML) {
-			end = len(dashboardHTML)
+		if end > len(dashboardSource) {
+			end = len(dashboardSource)
 		}
-		window := dashboardHTML[start:end]
+		window := dashboardSource[start:end]
 		idx = start + 1
 		// Stop at the first `'` or `\\` that closes the JS string concat —
 		// actually, since we live inside a Go string literal that builds
@@ -314,15 +328,15 @@ func TestDashboard_GetElementById_AllIDsExist(t *testing.T) {
 	dynID := regexp.MustCompile(`\.id\s*=\s*['"]([a-zA-Z0-9_-]+)['"]`)
 
 	defined := map[string]bool{}
-	for _, m := range idAttr.FindAllStringSubmatch(dashboardHTML, -1) {
+	for _, m := range idAttr.FindAllStringSubmatch(dashboardSource, -1) {
 		defined[m[1]] = true
 	}
-	for _, m := range dynID.FindAllStringSubmatch(dashboardHTML, -1) {
+	for _, m := range dynID.FindAllStringSubmatch(dashboardSource, -1) {
 		defined[m[1]] = true
 	}
 
 	missing := map[string]bool{}
-	for _, m := range gei.FindAllStringSubmatch(dashboardHTML, -1) {
+	for _, m := range gei.FindAllStringSubmatch(dashboardSource, -1) {
 		if !defined[m[1]] {
 			missing[m[1]] = true
 		}
@@ -346,16 +360,16 @@ func TestDashboard_GetElementById_AllIDsExist(t *testing.T) {
 // onclick. A renamed tab without a corresponding panel rename produces a
 // silent no-op when clicked.
 func TestDashboard_SwitchTabExposedAndAllTargetsExist(t *testing.T) {
-	if !strings.Contains(dashboardHTML, `window.switchTab = function`) {
+	if !strings.Contains(dashboardSource, `window.switchTab = function`) {
 		t.Fatal("window.switchTab is not assigned — inline tab clicks will throw")
 	}
 	re := regexp.MustCompile(`switchTab\(['"]([a-zA-Z0-9_-]+)['"]\)`)
 	tabs := map[string]struct{}{}
-	for _, m := range re.FindAllStringSubmatch(dashboardHTML, -1) {
+	for _, m := range re.FindAllStringSubmatch(dashboardSource, -1) {
 		tabs[m[1]] = struct{}{}
 	}
 	for tab := range tabs {
-		if !strings.Contains(dashboardHTML, `id="tab-`+tab+`"`) {
+		if !strings.Contains(dashboardSource, `id="tab-`+tab+`"`) {
 			t.Errorf("switchTab(%q) called but no <div id=\"tab-%s\"> exists "+
 				"— tab click will appear as a no-op", tab, tab)
 		}
@@ -391,7 +405,7 @@ func TestDashboard_ServedAtRoot(t *testing.T) {
 // This pins the assumption explicitly so the architectural test stays
 // load-bearing.
 func TestDashboard_MainIIFEHasUseStrict(t *testing.T) {
-	_, _, ok := findIIFEBoundsForMainScript(dashboardHTML)
+	_, _, ok := findIIFEBoundsForMainScript(dashboardSource)
 	if !ok {
 		t.Fatalf("main script IIFE (anchored on `'use strict';`) not found — " +
 			"if you intentionally removed the IIFE wrapper, delete this test " +
@@ -401,7 +415,7 @@ func TestDashboard_MainIIFEHasUseStrict(t *testing.T) {
 
 // readServerSource returns the embedded pkg/ui/server.go source so tests can
 // grep the Go side (the wsMessage{Type:…} broadcaster sites and
-// mux.HandleFunc routes) alongside the embedded dashboardHTML.
+// mux.HandleFunc routes) alongside the front-end sources.
 func readServerSource(t *testing.T) string {
 	t.Helper()
 	if serverSource == "" {
@@ -442,9 +456,13 @@ func extractRealtimeCaseHandlers(src string) map[string]struct{} {
 // is published, every client receives it, and the switch falls through with
 // no action. Caught the missing `task_stuck` handler on first run.
 func TestDashboard_WSBroadcastTypesHandled(t *testing.T) {
-	src := readServerSource(t)
-	broadcast := extractWSBroadcastTypes(src)
-	handled := extractRealtimeCaseHandlers(src)
+	broadcast := extractWSBroadcastTypes(readServerSource(t))
+	handled := extractRealtimeCaseHandlers(dashboardSource)
+	if len(handled) == 0 {
+		t.Fatal("no `case '…':` labels found in the front end — dashboardSource " +
+			"is not picking up the JS fragments, which would make this test pass " +
+			"vacuously")
+	}
 
 	// Status strings and other case-labels that aren't realtime event types.
 	// These appear in render() helpers (status colors, label maps, format
@@ -452,9 +470,9 @@ func TestDashboard_WSBroadcastTypesHandled(t *testing.T) {
 	denylist := map[string]bool{
 		"done": true, "in_progress": true, "failed": true, "skipped": true,
 		"timed_out": true, "pending": true,
-		"pass":      true, "warn": true, "fail": true,
+		"pass": true, "warn": true, "fail": true,
 		"feature": true, "bug": true, "refactor": true, "doc": true, "infra": true,
-		"low":      true, "medium": true, "high": true,
+		"low": true, "medium": true, "high": true,
 		"ticket": true, "pr": true, "issue": true, "other": true,
 	}
 	filteredHandled := map[string]struct{}{}
@@ -555,9 +573,13 @@ func routeMatches(call, route string) bool {
 // asserted: many endpoints are only invoked from optional flows or from
 // sub-paths the regex can't catch.
 func TestDashboard_APIEndpoints_AllRegistered(t *testing.T) {
-	src := readServerSource(t)
-	routes := extractRegisteredRoutes(src)
-	calls := extractFrontendAPICalls(src)
+	routes := extractRegisteredRoutes(readServerSource(t))
+	calls := extractFrontendAPICalls(dashboardSource)
+	if len(calls) == 0 {
+		t.Fatal("no /api/… call sites found in the front end — dashboardSource " +
+			"is not picking up the JS fragments, which would make this test pass " +
+			"vacuously")
+	}
 
 	// Endpoints called as `'/api/foo/' + id + '/bar'` — these come out of
 	// the extractor as "/api/foo/{id}" but the trailing segment is lost.
@@ -613,7 +635,7 @@ func TestDashboard_APIEndpoints_AllRegistered(t *testing.T) {
 func TestDashboard_NoDuplicateTabIDs(t *testing.T) {
 	re := regexp.MustCompile(`\bid="(tab-[a-zA-Z0-9_-]+)"`)
 	seen := map[string]int{}
-	for _, m := range re.FindAllStringSubmatch(dashboardHTML, -1) {
+	for _, m := range re.FindAllStringSubmatch(dashboardSource, -1) {
 		seen[m[1]]++
 	}
 	var dupes []string
@@ -634,7 +656,7 @@ func TestDashboard_NoDuplicateTabIDs(t *testing.T) {
 // the reachability test silently splits its coverage in half because each
 // IIFE has its own scope.
 func TestDashboard_SingleMainIIFE(t *testing.T) {
-	count := strings.Count(dashboardHTML, "(function() {\n'use strict';")
+	count := strings.Count(dashboardSource, "(function() {\n'use strict';")
 	if count != 1 {
 		t.Errorf("expected exactly one main `'use strict';` IIFE wrapper, found %d", count)
 	}
@@ -695,7 +717,6 @@ func extractHandleRealtimeMsgCases(src string) map[string]struct{} {
 // The denylist mirrors the one in TestDashboard_WSBroadcastTypesHandled
 // (status-color/label switches that aren't event types).
 func TestDashboard_NoDeadFrontendWSCases(t *testing.T) {
-	src := readServerSource(t)
 	// allUISources includes provider_calls.go where the `provider_call`
 	// broadcast lives — without it that case would be flagged as dead.
 	allSrc := allUISources()
@@ -704,7 +725,7 @@ func TestDashboard_NoDeadFrontendWSCases(t *testing.T) {
 	// Restrict to cases inside handleRealtimeMsg so we don't flag the
 	// many unrelated `case '...':` labels in event-log glyph maps and
 	// status-color switches.
-	handled := extractHandleRealtimeMsgCases(src)
+	handled := extractHandleRealtimeMsgCases(dashboardSource)
 	if len(handled) == 0 {
 		t.Fatal("extractHandleRealtimeMsgCases returned no cases — the " +
 			"function name or signature may have changed; update the regex " +
@@ -756,8 +777,8 @@ func TestDashboard_NoDeadFrontendWSCases(t *testing.T) {
 //   - `document.write(...)` — destroys the document if invoked after load
 //     and is incompatible with our IIFE / addEventListener architecture.
 //
-// We grep dashboardHTML rather than serverSource because these patterns
-// only matter inside the embedded JS string, not in Go code that happens
+// We grep the front-end sources rather than serverSource because these
+// patterns only matter inside the dashboard JS, not in Go code that happens
 // to mention them.
 func TestDashboard_NoEvalNoDocumentWrite(t *testing.T) {
 	checks := []struct {
@@ -782,9 +803,9 @@ func TestDashboard_NoEvalNoDocumentWrite(t *testing.T) {
 		},
 	}
 	for _, c := range checks {
-		if locs := c.re.FindAllStringIndex(dashboardHTML, -1); len(locs) > 0 {
+		if locs := c.re.FindAllStringIndex(dashboardSource, -1); len(locs) > 0 {
 			first := locs[0][0]
-			line := strings.Count(dashboardHTML[:first], "\n") + 1
+			line := strings.Count(dashboardSource[:first], "\n") + 1
 			t.Errorf("dashboard JS contains forbidden pattern %q at line ~%d "+
 				"— %s. Found %d occurrence(s) total.",
 				c.name, line, c.why, len(locs))
@@ -849,8 +870,7 @@ func extractProjectScopedRoutes(src string) map[string]struct{} {
 // (login probe, reconnect-time auth check, first-paint state load) — these
 // have to be re-fetched per-project after the project context is known.
 func TestDashboard_ProjectScopedAPIs_UsePUrl(t *testing.T) {
-	src := readServerSource(t)
-	projectScoped := extractProjectScopedRoutes(src)
+	projectScoped := extractProjectScopedRoutes(readServerSource(t))
 	if len(projectScoped) == 0 {
 		t.Fatal("extractProjectScopedRoutes returned no routes — the discovery " +
 			"heuristic broke. Check that handlers still call s.resolveWorkDir(r) " +
@@ -885,7 +905,7 @@ func TestDashboard_ProjectScopedAPIs_UsePUrl(t *testing.T) {
 		text string
 	}
 	var bad []violation
-	lines := strings.Split(dashboardHTML, "\n")
+	lines := strings.Split(dashboardSource, "\n")
 	for path := range projectScoped {
 		callRe := regexp.MustCompile(
 			`(?:fetch|api|apiMethod)\([^)]*['"]` +
@@ -989,11 +1009,11 @@ func TestDashboard_OrphanTabPanels(t *testing.T) {
 	switchRE := regexp.MustCompile(`switchTab\(['"]([a-zA-Z0-9_-]+)['"]\)`)
 
 	panels := map[string]bool{}
-	for _, m := range idRE.FindAllStringSubmatch(dashboardHTML, -1) {
+	for _, m := range idRE.FindAllStringSubmatch(dashboardSource, -1) {
 		panels[m[1]] = true
 	}
 	switched := map[string]bool{}
-	for _, m := range switchRE.FindAllStringSubmatch(dashboardHTML, -1) {
+	for _, m := range switchRE.FindAllStringSubmatch(dashboardSource, -1) {
 		switched[m[1]] = true
 	}
 
@@ -1026,7 +1046,7 @@ func TestDashboard_NoDuplicateWindowAssignments(t *testing.T) {
 	// today, but defensive).
 	re := regexp.MustCompile(`(?m)^\s*window\.([a-zA-Z_$][a-zA-Z0-9_$]*)\s*=`)
 	counts := map[string]int{}
-	for _, m := range re.FindAllStringSubmatch(dashboardHTML, -1) {
+	for _, m := range re.FindAllStringSubmatch(dashboardSource, -1) {
 		counts[m[1]]++
 	}
 
@@ -1156,14 +1176,14 @@ func TestDashboard_ExecutorsPanelWired(t *testing.T) {
 		{`'/api/executors/'`, "the revoke action never calls the delete endpoint"},
 	}
 	for _, r := range required {
-		if !strings.Contains(dashboardHTML, r.needle) {
+		if !strings.Contains(dashboardSource, r.needle) {
 			t.Errorf("%s (no %q in the dashboard)", r.why, r.needle)
 		}
 	}
 
 	// The Executors tab is global; Task 20037's convention is that global tabs
 	// are marked as such in the nav and excluded from the breadcrumb.
-	if !strings.Contains(dashboardHTML, `class="tab-btn global-tab" onclick="switchTab('executors')"`) {
+	if !strings.Contains(dashboardSource, `class="tab-btn global-tab" onclick="switchTab('executors')"`) {
 		t.Error("the Executors nav button is not marked global-tab — it would render in " +
 			"the per-project section and imply project scope it does not have")
 	}
@@ -1171,7 +1191,7 @@ func TestDashboard_ExecutorsPanelWired(t *testing.T) {
 	// assertion is about 'executors' being global, and pinning the entire
 	// list makes every future tab addition fail this test for a reason that
 	// has nothing to do with executors.
-	if !globalTabsInclude(dashboardHTML, "executors") {
+	if !globalTabsInclude(dashboardSource, "executors") {
 		t.Error("'executors' is missing from updateScopeHint's globalTabs — the header " +
 			"scope badge would claim the tab shows project data")
 	}
@@ -1211,7 +1231,7 @@ func TestDashboard_ExecutorSelectorWired(t *testing.T) {
 		{`'/api/projects/' + idx + '/executor'`, "saving the picker never calls the bind endpoint"},
 	}
 	for _, r := range required {
-		if !strings.Contains(dashboardHTML, r.needle) {
+		if !strings.Contains(dashboardSource, r.needle) {
 			t.Errorf("%s (no %q in the dashboard)", r.why, r.needle)
 		}
 	}
@@ -1219,8 +1239,8 @@ func TestDashboard_ExecutorSelectorWired(t *testing.T) {
 	// The card sits next to the provider card: both are stat cards on the
 	// Overview grid, and the executor one must come after it so "what model"
 	// and "where it runs" read as a pair.
-	provider := strings.Index(dashboardHTML, `id="providerCard"`)
-	exec := strings.Index(dashboardHTML, `id="executorCard"`)
+	provider := strings.Index(dashboardSource, `id="providerCard"`)
+	exec := strings.Index(dashboardSource, `id="executorCard"`)
 	if provider < 0 || exec < 0 || exec < provider {
 		t.Errorf("the executor card is not positioned next to the provider card "+
 			"(providerCard at %d, executorCard at %d)", provider, exec)
@@ -1229,7 +1249,7 @@ func TestDashboard_ExecutorSelectorWired(t *testing.T) {
 	// The Overview card's data does not ride the state diff — bindings live in
 	// the control plane's database, not in project state — so the tab switch
 	// has to fetch it explicitly or the card renders an em dash forever.
-	if !strings.Contains(dashboardHTML, `if (name === 'overview') loadExecutors();`) {
+	if !strings.Contains(dashboardSource, `if (name === 'overview') loadExecutors();`) {
 		t.Error("switchTab does not refresh the Overview executor card")
 	}
 }

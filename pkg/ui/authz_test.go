@@ -62,13 +62,13 @@ func splitPattern(pattern string) (method, path string) {
 // requires editing this list — a new unguarded route cannot appear by
 // accident or by copy-paste.
 var publicRouteAllowlist = map[string]string{
-	"/":                        "the SPA shell; authMiddleware already gated whether this caller may load it",
-	"/assets/chart.umd.min.js": "static asset served same-origin for the CSP",
-	"GET /auth/login":          "login machinery — gating it would require being signed in to sign in",
-	"GET /auth/callback":       "login machinery",
-	"POST /auth/logout":        "signing out must always be possible",
-	"GET /api/me":              "reports the caller's own permissions; the UI cannot render without it",
-	"POST /api/client-error":   "browser error reports; writes no state and must work for a user with no role",
+	"/":                      "the SPA shell; authMiddleware already gated whether this caller may load it",
+	"/assets/":               "content-hashed CSS/JS served same-origin for the CSP",
+	"GET /auth/login":        "login machinery — gating it would require being signed in to sign in",
+	"GET /auth/callback":     "login machinery",
+	"POST /auth/logout":      "signing out must always be possible",
+	"GET /api/me":            "reports the caller's own permissions; the UI cannot render without it",
+	"POST /api/client-error": "browser error reports; writes no state and must work for a user with no role",
 }
 
 // TestEveryRouteDeclaresAPermission is the route-coverage check: every entry
@@ -711,7 +711,7 @@ func TestFrontendPermissionAttributesAreValid(t *testing.T) {
 	}
 
 	re := regexp.MustCompile(`data-(?:global-)?perm="([^"]+)"`)
-	matches := re.FindAllStringSubmatch(dashboardHTML, -1)
+	matches := re.FindAllStringSubmatch(dashboardSource, -1)
 	if len(matches) == 0 {
 		t.Fatal("no data-perm attributes found — the frontend does not gate any control on permissions")
 	}
@@ -740,17 +740,17 @@ func TestFrontendGatesTheHighRiskControls(t *testing.T) {
 	}
 	for _, r := range required {
 		t.Run(r.perm+" on "+r.marker, func(t *testing.T) {
-			i := strings.Index(dashboardHTML, r.marker)
+			i := strings.Index(dashboardSource, r.marker)
 			if i < 0 {
 				t.Fatalf("control %s no longer exists in the dashboard — update this test", r.marker)
 			}
 			// Scan the enclosing tag for the permission attribute.
-			start := strings.LastIndex(dashboardHTML[:i], "<")
-			end := strings.Index(dashboardHTML[i:], ">")
+			start := strings.LastIndex(dashboardSource[:i], "<")
+			end := strings.Index(dashboardSource[i:], ">")
 			if start < 0 || end < 0 {
 				t.Fatalf("could not isolate the tag around %s", r.marker)
 			}
-			tag := dashboardHTML[start : i+end]
+			tag := dashboardSource[start : i+end]
 			if !strings.Contains(tag, `data-perm="`+r.perm+`"`) &&
 				!strings.Contains(tag, `data-global-perm="`+r.perm+`"`) {
 				t.Errorf("control %s is not gated on %q (%s).\nTag: %s",
@@ -777,14 +777,14 @@ func TestFrontendHandles403Gracefully(t *testing.T) {
 		{"return fetch(url, opts).then(parseAPIResponse);", "api() must use the shared parser"},
 	}
 	for _, r := range required {
-		if !strings.Contains(dashboardHTML, r.snippet) {
+		if !strings.Contains(dashboardSource, r.snippet) {
 			t.Errorf("dashboard is missing %q — %s", r.snippet, r.why)
 		}
 	}
 
 	// Neither helper may keep its own 401-only handling, which would let a
 	// 403 fall through to .json() and surface as an unexplained failure.
-	if strings.Count(dashboardHTML, "if (r.status === 401) { showLoginModal(); return Promise.reject(new Error('401')); }") > 1 {
+	if strings.Count(dashboardSource, "if (r.status === 401) { showLoginModal(); return Promise.reject(new Error('401')); }") > 1 {
 		t.Error("more than one inline 401 handler remains — every API helper should " +
 			"route through parseAPIResponse so 403s are handled uniformly")
 	}

@@ -1,0 +1,2214 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>cloop dashboard</title>
+<script>(function(){var t=localStorage.getItem('cloop-theme')||(window.matchMedia('(prefers-color-scheme: light)').matches?'light':'dark');document.documentElement.setAttribute('data-theme',t);})();</script>
+<link rel="stylesheet" href="{{asset:app.css}}">
+<script src="{{asset:chart.js}}"></script>
+</head>
+<body>
+
+<!-- ── Login overlay ── -->
+<div id="loginOverlay">
+  <div class="login-box">
+    <h2>cloop dashboard</h2>
+    <p>This dashboard is protected. Enter the access token to continue.</p>
+    <input type="password" id="loginTokenInput" placeholder="Access token" autocomplete="off"
+           onkeydown="if(event.key==='Enter')submitLogin()">
+    <div class="login-error" id="loginError">Invalid token. Please try again.</div>
+    <button onclick="submitLogin()">Unlock</button>
+  </div>
+</div>
+
+<div class="layout">
+  <header>
+    <h1>cloop <span>dashboard</span></h1>
+    <div class="live-dot" id="liveDot"></div>
+    <!-- Project selector (shown in multi-project mode) -->
+    <div class="proj-selector-wrap" id="projSelectorWrap">
+      <button class="tab-btn" onclick="clearProjectSelection()" style="padding:4px 10px;font-size:12px" id="projBackBtn" title="Back to all projects">&#8592;</button>
+      <div style="position:relative">
+        <button class="proj-selector-btn" id="projSelectorBtn" onclick="toggleProjectSelector()" title="Switch project">
+          <span id="projSelectorLabel">All Projects</span>
+          <span class="arrow">&#9660;</span>
+        </button>
+        <div class="proj-selector-dropdown" id="projSelectorDropdown"></div>
+      </div>
+    </div>
+    <!-- Project breadcrumb (kept for compatibility; hidden since selector replaces it) -->
+    <div id="projectBreadcrumb" style="display:none;align-items:center;gap:8px;flex-shrink:0">
+      <button class="tab-btn" onclick="clearProjectSelection()" style="padding:4px 10px;font-size:12px">&#8592; Projects</button>
+      <span id="breadcrumbName" style="font-weight:600;color:var(--accent);font-size:13px;white-space:nowrap"></span>
+    </div>
+    <!-- Scope hint badge: indicates whether the active tab is project-scoped or global -->
+    <span id="scopeHint" class="scope-hint" aria-live="polite" title="Indicates whether the current tab shows data for a single project or applies globally"></span>
+    <!-- Hamburger button (mobile only) -->
+    <button class="hamburger-btn" id="hamburgerBtn" onclick="openMobileNav()" aria-label="Open navigation menu" aria-expanded="false">
+      <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+        <line x1="3" y1="5"  x2="17" y2="5"/>
+        <line x1="3" y1="10" x2="17" y2="10"/>
+        <line x1="3" y1="15" x2="17" y2="15"/>
+      </svg>
+    </button>
+
+    <div class="tab-nav" id="tabNav">
+      <span class="tab-section-label" title="These tabs show data for the currently selected project">Project</span>
+      <button class="tab-btn active" onclick="switchTab('overview')"  id="tbtn-overview"   title="Project overview (per-project)">Overview</button>
+      <button class="tab-btn"        onclick="switchTab('tasks')"     id="tbtn-tasks"      title="Tasks (per-project)">Tasks</button>
+      <button class="tab-btn"        onclick="switchTab('queue')"     id="tbtn-queue"      title="Per-task activity log: every execution, heal retry, evolve cycle, and external merge tied to its task (per-project)">Activity</button>
+      <button class="tab-btn"        onclick="switchTab('kanban')"    id="tbtn-kanban"     title="Kanban board (per-project)">Kanban</button>
+      <button class="tab-btn"        onclick="switchTab('timeline')"  id="tbtn-timeline"   title="Timeline / Gantt (per-project)">Timeline</button>
+      <button class="tab-btn"        onclick="switchTab('kb')"        id="tbtn-kb"         title="Knowledge Base (per-project)">Knowledge Base</button>
+      <button class="tab-btn"        onclick="switchTab('deps')"      id="tbtn-deps"       title="Task dependency graph (per-project)">Dependencies</button>
+      <button class="tab-btn"        onclick="switchTab('risk-matrix')" id="tbtn-risk-matrix" title="Risk matrix (per-project)">Risk Matrix</button>
+      <button class="tab-btn"        onclick="switchTab('analytics')" id="tbtn-analytics"  title="Analytics dashboard (per-project)">Analytics</button>
+      <button class="tab-btn"        onclick="switchTab('chat')"      id="tbtn-chat"       title="AI chat (per-project)">Chat</button>
+      <button class="tab-btn"        onclick="switchTab('assistant')" id="tbtn-assistant"  title="Plan assistant (per-project)">Assistant</button>
+      <button class="tab-btn"        onclick="switchTab('replay')"    id="tbtn-replay"     title="Re-execute completed tasks against alternate provider/model and diff outputs (per-project)">Replay</button>
+      <button class="tab-btn"        onclick="switchTab('provider-calls')" id="tbtn-provider-calls" title="Live provider HTTP call inspector: prompts, responses, headers, replay (per-project)">Provider Calls</button>
+      <span class="tab-divider" aria-hidden="true"></span>
+      <span class="tab-section-label" title="These tabs apply across all projects (global configuration)">Global</span>
+      <button class="tab-btn global-tab" onclick="switchTab('projects')"  id="tbtn-projects" title="All projects list (global)">Projects</button>
+      <button class="tab-btn global-tab" onclick="switchTab('budget')"    id="tbtn-budget"   title="Budget &amp; rate limits (global, with per-project caps)">Budget</button>
+      <button class="tab-btn global-tab" onclick="switchTab('executors')" id="tbtn-executors" title="Execution backends: host, container sandbox, and enrolled remote devices (global)">Executors</button>
+      <button class="tab-btn global-tab" data-global-perm="secret.grant" data-perm-hide onclick="switchTab('secrets')" id="tbtn-secrets" title="Credentials an executor may hold: GitHub repos and PATs, kubeconfigs, and Internet egress — with TTL grants and live leases (global, maintainer and above)">Secrets</button>
+      <button class="tab-btn global-tab" data-global-perm="audit.read" data-perm-hide onclick="switchTab('audit')" id="tbtn-audit" title="Tamper-evident compliance trail: who granted which credential to which executor, and when (global, admin only)">Audit</button>
+      <button class="tab-btn global-tab" onclick="switchTab('settings')"  id="tbtn-settings" title="Settings (global)">Settings</button>
+    </div>
+    <div class="spacer"></div>
+    <button class="help-toggle-btn" id="helpToggleBtn" onclick="openHelpModal()" aria-label="Show keyboard shortcuts" title="Keyboard shortcuts (?)">
+      <span aria-hidden="true">?</span>
+    </button>
+    <button class="theme-toggle-btn" id="themeToggleBtn" onclick="toggleTheme()" aria-label="Toggle dark/light mode" title="Toggle theme (t)">
+      <span id="themeToggleIcon">&#9788;</span>
+    </button>
+    <!-- Signed-in user + sign-out (rendered only when OIDC auth is enabled) -->
+    <span class="user-chip" id="userChip"></span>
+    <button class="theme-toggle-btn" id="logoutBtn" style="display:none" aria-label="Sign out" title="Sign out">
+      <span aria-hidden="true">&#8998;</span>
+    </button>
+    <div class="updated-at" id="updatedAt"></div>
+  </header>
+
+  <!-- ── Presence bar ── -->
+  <div id="presenceBar" role="status" aria-live="polite" aria-label="Connected collaborators"></div>
+
+  <!-- ── Conflict toast ── -->
+  <div id="conflictToast" role="alert" aria-live="assertive" onclick="dismissConflictToast()">
+    <span class="conflict-icon">&#x26A0;&#xFE0F;</span>
+    <div class="conflict-body">
+      <div class="conflict-title">Edit conflict detected</div>
+      <div class="conflict-msg" id="conflictMsg">Another user edited this task recently.</div>
+    </div>
+    <span class="conflict-dismiss" aria-label="Dismiss">&#x2715;</span>
+  </div>
+
+  <!-- ── Unified search / filter bar ── -->
+  <div id="filterBar" class="filter-bar" style="display:none" role="search" aria-label="Filter tasks">
+    <div class="filter-bar-inner">
+      <input type="search" id="filterQ" class="filter-search-input" placeholder="&#x1F50D;&#xFE0E; Search title &amp; description…" aria-label="Search tasks" oninput="onFilterChange()">
+      <div class="filter-group filter-status-group">
+        <span class="filter-label">Status:</span>
+        <label class="filter-check"><input type="checkbox" class="filter-status-cb" value="pending" onchange="onFilterChange()"> Pending</label>
+        <label class="filter-check"><input type="checkbox" class="filter-status-cb" value="in_progress" onchange="onFilterChange()"> In Progress</label>
+        <label class="filter-check"><input type="checkbox" class="filter-status-cb" value="done" onchange="onFilterChange()"> Done</label>
+        <label class="filter-check"><input type="checkbox" class="filter-status-cb" value="failed" onchange="onFilterChange()"> Failed</label>
+      </div>
+      <div class="filter-group">
+        <span class="filter-label">Priority:</span>
+        <select id="filterPriority" class="filter-select" aria-label="Filter by priority" onchange="onFilterChange()">
+          <option value="">Any</option>
+          <option value="1">P1 Critical</option>
+          <option value="2">P2 High</option>
+          <option value="3">P3 Medium</option>
+          <option value="4">P4 Low</option>
+        </select>
+      </div>
+      <div class="filter-group">
+        <span class="filter-label">Assignee:</span>
+        <select id="filterAssignee" class="filter-select" aria-label="Filter by assignee" onchange="onFilterChange()">
+          <option value="">Any</option>
+        </select>
+      </div>
+      <div class="filter-group">
+        <span class="filter-label">Tags:</span>
+        <div class="filter-tags-wrap" id="filterTagsWrap">
+          <button type="button" class="filter-tag-toggle" id="filterTagToggle" onclick="toggleTagDropdown(event)" aria-haspopup="listbox" aria-expanded="false">
+            Tags <span id="filterTagCount"></span>&#9662;
+          </button>
+          <div class="filter-tags-panel" id="filterTagsPanel" role="listbox" aria-label="Tag filter"></div>
+        </div>
+      </div>
+      <button class="btn filter-clear-btn" id="filterClearBtn" onclick="clearFilters()" style="display:none" title="Clear all filters">Clear filters</button>
+      <span class="filter-badge" id="filterBadge" aria-live="polite"></span>
+    </div>
+  </div>
+
+  <!-- ── Mobile navigation overlay ── -->
+  <div class="mobile-nav-overlay" id="mobileNavOverlay" onclick="if(event.target===this)closeMobileNav()" aria-hidden="true">
+    <nav class="mobile-nav-panel" role="navigation" aria-label="Main navigation">
+      <div class="mobile-nav-header">
+        <span class="mobile-nav-title">cloop</span>
+        <button class="mobile-nav-close" onclick="closeMobileNav()" aria-label="Close navigation">&#x2715;</button>
+      </div>
+      <div class="mobile-nav-section-label">Project</div>
+      <button class="m-tab-btn" onclick="switchTab('overview')"  id="mtbtn-overview"><span class="m-tab-icon">&#128200;</span>Overview</button>
+      <button class="m-tab-btn" onclick="switchTab('tasks')"     id="mtbtn-tasks"><span class="m-tab-icon">&#10003;</span>Tasks</button>
+      <button class="m-tab-btn" onclick="switchTab('queue')"     id="mtbtn-queue"><span class="m-tab-icon">&#128260;</span>Activity</button>
+      <button class="m-tab-btn" onclick="switchTab('kanban')"    id="mtbtn-kanban"><span class="m-tab-icon">&#9783;</span>Kanban</button>
+      <button class="m-tab-btn" onclick="switchTab('timeline')"  id="mtbtn-timeline"><span class="m-tab-icon">&#128197;</span>Timeline</button>
+      <button class="m-tab-btn" onclick="switchTab('kb')"        id="mtbtn-kb"><span class="m-tab-icon">&#128218;</span>Knowledge Base</button>
+      <button class="m-tab-btn" onclick="switchTab('deps')"      id="mtbtn-deps"><span class="m-tab-icon">&#128279;</span>Dependencies</button>
+      <button class="m-tab-btn" onclick="switchTab('risk-matrix')" id="mtbtn-risk-matrix"><span class="m-tab-icon">&#9888;</span>Risk Matrix</button>
+      <button class="m-tab-btn" onclick="switchTab('analytics')" id="mtbtn-analytics"><span class="m-tab-icon">&#128200;</span>Analytics</button>
+      <button class="m-tab-btn" onclick="switchTab('chat')"      id="mtbtn-chat"><span class="m-tab-icon">&#128172;</span>Chat</button>
+      <button class="m-tab-btn" onclick="switchTab('assistant')" id="mtbtn-assistant"><span class="m-tab-icon">&#129302;</span>Assistant</button>
+      <button class="m-tab-btn" onclick="switchTab('replay')"    id="mtbtn-replay"><span class="m-tab-icon">&#9851;</span>Replay</button>
+      <button class="m-tab-btn" onclick="switchTab('provider-calls')" id="mtbtn-provider-calls"><span class="m-tab-icon">&#128268;</span>Provider Calls</button>
+      <div class="mobile-nav-section-label">Global</div>
+      <button class="m-tab-btn" onclick="switchTab('projects')"  id="mtbtn-projects"><span class="m-tab-icon">&#127760;</span>Projects</button>
+      <button class="m-tab-btn" onclick="switchTab('budget')"    id="mtbtn-budget"><span class="m-tab-icon">&#127760;</span>Budget</button>
+      <button class="m-tab-btn" onclick="switchTab('executors')" id="mtbtn-executors"><span class="m-tab-icon">&#127760;</span>Executors</button>
+      <button class="m-tab-btn" data-global-perm="secret.grant" data-perm-hide onclick="switchTab('secrets')" id="mtbtn-secrets"><span class="m-tab-icon">&#128273;</span>Secrets</button>
+      <button class="m-tab-btn" data-global-perm="audit.read" data-perm-hide onclick="switchTab('audit')" id="mtbtn-audit"><span class="m-tab-icon">&#128209;</span>Audit</button>
+      <button class="m-tab-btn" onclick="switchTab('settings')"  id="mtbtn-settings"><span class="m-tab-icon">&#127760;</span>Settings</button>
+    </nav>
+  </div>
+
+  <main>
+    <!-- ═══════════════════════════════════════════════════════════ OVERVIEW -->
+    <div id="tab-overview" class="tab-panel active">
+
+      <!-- Multi-project summary (shown in multi-project mode when no project is selected) -->
+      <div id="multiProjectOverview" style="display:none">
+        <div class="section">
+          <div class="section-title">All Projects — Overview</div>
+          <div id="multiProjectCards" class="stats-grid" style="margin-top:12px"></div>
+        </div>
+      </div>
+
+      <!-- No-project init panel -->
+      <div id="initPanel" style="display:none">
+        <div class="init-panel">
+          <h2>Initialize a project</h2>
+          <p>No cloop project found in this directory. Create one to get started.</p>
+          <div class="form-group">
+            <label class="form-label">Project goal *</label>
+            <input class="form-input" id="initGoal" placeholder="e.g. Build a REST API with auth and user CRUD">
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label">Provider</label>
+              <select class="form-select" id="initProvider" onchange="updateModelDropdown()">
+                <option value="claudecode">claudecode (default)</option>
+                <option value="anthropic">anthropic</option>
+                <option value="openai">openai</option>
+                <option value="ollama">ollama</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label class="form-label">Model</label>
+              <select class="form-select" id="initModel"></select>
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label">Max steps (0=unlimited)</label>
+              <input class="form-input" id="initMaxSteps" type="number" min="0" value="0">
+            </div>
+            <div class="form-group">
+              <label class="form-label">Effort (claudecode)</label>
+              <select class="form-select" id="initEffort">
+                <option value="">(default)</option>
+                <option value="low">low</option>
+                <option value="medium">medium</option>
+                <option value="high">high</option>
+                <option value="xhigh">xhigh</option>
+                <option value="max">max</option>
+              </select>
+            </div>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Instructions / constraints (optional)</label>
+            <textarea class="form-textarea" id="initInstructions" placeholder="e.g. Use Go, no external dependencies..."></textarea>
+          </div>
+          <label class="adv-label" style="margin-bottom:12px">
+            <input type="checkbox" id="initPMMode"> Start in PM mode (decompose goal into tasks)
+          </label>
+          <br>
+          <button class="btn primary" onclick="submitInit()">Initialize Project</button>
+        </div>
+      </div>
+
+      <!-- Project overview -->
+      <div id="projectPanel" style="display:none">
+
+        <!-- Goal + status -->
+        <div class="section">
+          <div class="section-title">Project Goal</div>
+          <div class="card goal-card">
+            <div class="goal-text empty" id="goalText">Loading...</div>
+            <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+              <div id="statusBadge"></div>
+              <button class="btn" id="goalEditBtn" data-perm="project.write" onclick="openGoalEditModal()" title="Edit project goal" style="padding:4px 10px;font-size:12px">✎ Edit</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Instructions -->
+        <div class="section">
+          <div class="section-title">Instructions / Constraints</div>
+          <div class="card goal-card">
+            <div class="goal-text empty" id="instructionsText" style="white-space:pre-wrap;font-size:13px;font-weight:400">No instructions set</div>
+            <div style="display:flex;align-items:flex-start;gap:12px;flex-wrap:wrap">
+              <button class="btn" id="instructionsEditBtn" data-perm="project.write" onclick="openInstructionsEditModal()" title="Edit instructions / constraints" style="padding:4px 10px;font-size:12px">✎ Edit</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Stats -->
+        <div class="section">
+          <div class="section-title" id="overviewSectionTitle">Overview</div>
+          <div class="stats-grid">
+            <div class="stat-card">
+              <div class="stat-label">Steps</div>
+              <div class="stat-value accent" id="statSteps">—</div>
+              <div class="stat-sub" id="statStepsSub"></div>
+            </div>
+            <div class="stat-card stat-card-clickable" id="providerCard" onclick="openProviderModelModal()" title="Click to change provider and model" tabindex="0" role="button" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();openProviderModelModal();}">
+              <div class="stat-label">Provider <span style="font-size:10px;opacity:.6;margin-left:4px">✎</span></div>
+              <div class="stat-value" id="statProvider" style="font-size:13px;margin-top:4px">—</div>
+              <div class="stat-sub" id="statModel"></div>
+            </div>
+            <div class="stat-card stat-card-clickable" id="executorCard" onclick="openExecutorPickerModal()" title="Click to change where this project's harness runs" tabindex="0" role="button" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();openExecutorPickerModal();}">
+              <div class="stat-label">Executor <span style="font-size:10px;opacity:.6;margin-left:4px">✎</span></div>
+              <div class="stat-value" id="statExecutor" style="font-size:13px;margin-top:4px">—</div>
+              <div class="stat-sub" id="statExecutorSub"></div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-label">Mode</div>
+              <div class="stat-value" id="statMode" style="font-size:13px;margin-top:4px">—</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-label">Tokens</div>
+              <div class="stat-value accent" id="statTokens">0</div>
+              <div class="stat-sub" id="statTokensSub"></div>
+              <div class="token-bar" id="tokenBarWrap" style="display:none">
+                <div class="token-bar-track"><div class="token-bar-fill" id="tokenBarFill" style="width:0%"></div></div>
+              </div>
+            </div>
+            <div class="stat-card" id="statCostCard" style="display:none">
+              <div class="stat-label">Est. Cost</div>
+              <div class="stat-value" id="statCost" style="font-size:16px;margin-top:4px">—</div>
+              <div class="stat-sub" id="statCostSub"></div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-label">Created</div>
+              <div class="stat-value" id="statCreated" style="font-size:12px;margin-top:4px">—</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-label">Updated</div>
+              <div class="stat-value" id="statUpdated" style="font-size:12px;margin-top:4px">—</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Active CLI options -->
+        <div class="section">
+          <div class="section-title">Active Options</div>
+          <div class="options-grid" id="activeOptionsGrid"></div>
+        </div>
+
+        <!-- Claude Code per-project usage caps (only when provider is claudecode) -->
+        <div class="section" id="ccLimitsSection" style="display:none">
+          <div class="section-title" style="display:flex;align-items:center;gap:12px">
+            Claude Code Subscription Caps
+            <button class="btn" style="padding:4px 10px;font-size:12px;margin-left:auto" onclick="loadCCLimits()" title="Refresh usage">&#8635;</button>
+          </div>
+          <p style="font-size:12px;color:var(--muted);margin-top:4px;margin-bottom:10px">
+            Block this project from running once your global Claude Code subscription utilization reaches the configured percentage.
+            Useful to reserve weekly budget headroom for other work. Leave a field at 0 to disable that cap.
+          </p>
+          <div id="ccLimitsUsage" style="display:flex;flex-direction:column;gap:6px;margin-bottom:12px"></div>
+          <div id="ccLimitsViolation" style="display:none;font-size:12px;padding:8px;border-radius:4px;background:rgba(248,81,73,0.12);border:1px solid var(--red);color:var(--red);margin-bottom:10px"></div>
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label">Max Weekly Util %</label>
+              <input class="form-input" id="ccMaxWeeklyPct" type="number" min="0" max="100" step="1" placeholder="e.g. 50">
+            </div>
+            <div class="form-group">
+              <label class="form-label">Max 5-Hour Util %</label>
+              <input class="form-input" id="ccMaxFiveHourPct" type="number" min="0" max="100" step="1" placeholder="e.g. 80">
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label">Max Weekly Opus %</label>
+              <input class="form-input" id="ccMaxWeeklyOpusPct" type="number" min="0" max="100" step="1" placeholder="e.g. 50">
+            </div>
+            <div class="form-group">
+              <label class="form-label">Max Weekly Sonnet %</label>
+              <input class="form-input" id="ccMaxWeeklySonnetPct" type="number" min="0" max="100" step="1" placeholder="e.g. 50">
+            </div>
+          </div>
+          <button class="btn primary" onclick="saveCCLimits()">Save Caps</button>
+          <span id="ccLimitsSaveMsg" style="font-size:12px;color:var(--green);margin-left:12px;display:none">Saved!</span>
+        </div>
+
+        <!-- Run controls -->
+        <div class="section">
+          <div class="section-title">Controls</div>
+          <div class="controls">
+            <button id="ctrlRun" class="btn success" data-perm="run.start" onclick="apiRun()" title="Start a run with the options enabled in Active Options above. Click any badge in Active Options to toggle the corresponding flag.">
+              <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 0a8 8 0 1 1 0 16A8 8 0 0 1 8 0zm3.5 7.5l-5-3a.5.5 0 0 0-.75.43v6a.5.5 0 0 0 .75.43l5-3a.5.5 0 0 0 0-.86z"/></svg>
+              Run
+            </button>
+            <button id="ctrlStop" class="btn danger" data-perm="run.stop" onclick="apiStop()" style="display:none">
+              <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 0a8 8 0 1 1 0 16A8 8 0 0 1 8 0zM5.5 5.5h5v5h-5z"/></svg>
+              Pause / Stop
+            </button>
+            <button class="btn" onclick="refreshState()">
+              <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 0 1 .908-.417A6 6 0 1 1 8 2v1z"/><path d="M8 4.466V.534a.25.25 0 0 1 .41-.192l2.36 1.966c.12.1.12.284 0 .384L8.41 4.658A.25.25 0 0 1 8 4.466z"/></svg>
+              Refresh
+            </button>
+            <button class="btn mic" id="micBtn" onclick="openVoiceModal()" title="Voice command (cloop listen)">
+              <svg viewBox="0 0 16 16" fill="currentColor"><path d="M5 3a3 3 0 0 1 6 0v5a3 3 0 0 1-6 0V3z"/><path d="M3.5 6.5A.5.5 0 0 1 4 7v1a4 4 0 0 0 8 0V7a.5.5 0 0 1 1 0v1a5 5 0 0 1-4.5 4.975V15h2.5a.5.5 0 0 1 0 1h-6a.5.5 0 0 1 0-1H7.5v-2.025A5 5 0 0 1 3 8V7a.5.5 0 0 1 .5-.5z"/></svg>
+              Voice
+            </button>
+          </div>
+          <!-- Voice modal -->
+          <div id="voiceModalBackdrop" class="voice-modal-backdrop" style="display:none">
+            <div class="voice-modal">
+              <h3>Voice Command</h3>
+              <div class="voice-status" id="voiceStatus">Click Record to start recording...</div>
+              <div class="voice-transcript" id="voiceTranscript" style="color:var(--muted)">Transcription will appear here</div>
+              <div class="voice-output" id="voiceOutput" style="display:none"></div>
+              <div class="voice-modal-btns">
+                <button class="btn mic" id="voiceRecordBtn" onclick="toggleVoiceRecording()">
+                  <svg viewBox="0 0 16 16" fill="currentColor"><path d="M5 3a3 3 0 0 1 6 0v5a3 3 0 0 1-6 0V3z"/></svg>
+                  Record
+                </button>
+                <button class="btn primary" id="voiceSendBtn" onclick="sendVoiceAudio()" disabled>
+                  <svg viewBox="0 0 16 16" fill="currentColor"><path d="M15.854.146a.5.5 0 0 1 .11.54l-5.819 14.547a.75.75 0 0 1-1.329.124l-3.178-4.995L.643 7.184a.75.75 0 0 1 .124-1.33L15.314.037a.5.5 0 0 1 .54.11z"/></svg>
+                  Execute
+                </button>
+                <button class="btn" onclick="closeVoiceModal()">Cancel</button>
+              </div>
+            </div>
+          </div>
+          <p style="font-size:12px;color:var(--muted);margin:10px 2px 0">
+            All run options (PM, Evolve, Innovate, Skip Clarify, Parallel, Plan Only, Retry Failed, Dry Run) are toggled by clicking their badges in <strong>Active Options</strong> above. Provider and model are set by clicking the <strong>Provider</strong> stat card.
+          </p>
+        </div>
+
+        <!-- Live Output panel -->
+        <div class="live-output-wrap" id="liveOutputWrap">
+          <div class="live-output-header">
+            <div class="section-title">Live Output</div>
+            <button class="live-output-clear" onclick="clearLiveLog()" title="Clear output">Clear</button>
+          </div>
+          <div class="live-output-box" id="liveOutputBox" role="log" aria-live="polite" aria-label="Live run output"></div>
+        </div>
+
+        <!-- Event history (Task 20118): step results merged with task starts,
+             evolves, kills, skips, status changes, etc. The DOM id remains
+             "stepList" so existing CSS keeps working; the renderer now paints
+             both kinds of rows. -->
+        <div class="section">
+          <div class="section-title">Event History</div>
+          <div class="step-list" id="stepList">
+            <div class="empty-state"><h3>No events yet</h3><p>Start a run to see history here.</p></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ════════════════════════════════════════════════════════════ TASKS -->
+    <div id="tab-tasks" class="tab-panel">
+      <div class="section">
+        <div class="section-title">Add Task</div>
+        <div class="add-task-bar">
+          <input class="form-input" id="newTaskTitle" placeholder="Task title..." style="flex:2;min-width:200px" onkeydown="if(event.key==='Enter')submitAddTask()">
+          <input class="form-input" id="newTaskDesc"  placeholder="Description (optional)" style="flex:2;min-width:160px">
+          <input class="form-input" id="newTaskPriority" placeholder="Priority (1=high)" type="number" min="1" style="flex:0 0 140px">
+          <input class="form-input" id="newTaskDeps" placeholder="Depends on (IDs, e.g. 1,2)" style="flex:1;min-width:160px">
+          <button class="btn primary" data-perm="task.mutate" onclick="submitAddTask()">Add Task</button>
+        </div>
+      </div>
+
+      <!-- AI Feature Suggestions -->
+      <div class="section">
+        <div class="section-title" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          AI Feature Suggestions
+          <span id="suggestCountBadge" style="color:var(--muted);font-weight:400;text-transform:none;letter-spacing:0"></span>
+          <button id="suggestToggleBtn" class="btn" data-perm="task.mutate" style="margin-left:auto;padding:3px 10px;font-size:11px" onclick="toggleSuggestPanel()">Brainstorm ideas</button>
+        </div>
+        <div id="suggestPanel" style="display:none">
+          <div class="card" style="margin-bottom:12px">
+            <p style="font-size:13px;color:var(--muted);margin-bottom:12px">Generate AI-brainstormed feature ideas tailored to your project goal. Review each one — add what you like, skip the rest, or accept them all.</p>
+            <div class="suggest-controls">
+              <label class="form-label" style="margin:0;white-space:nowrap">Ideas to generate:</label>
+              <input class="form-input" id="suggestCount" type="number" min="1" max="20" value="5" style="width:70px">
+              <button class="btn primary" id="suggestBtn" data-perm="task.mutate" onclick="runSuggest()">
+                <svg viewBox="0 0 16 16" fill="currentColor" width="13" height="13"><path d="M8 1a.5.5 0 0 1 .5.5V6h4.5a.5.5 0 0 1 0 1H8.5v4.5a.5.5 0 0 1-1 0V7H3a.5.5 0 0 1 0-1h4.5V1.5A.5.5 0 0 1 8 1z"/></svg>
+                Generate
+              </button>
+              <button class="btn" id="suggestAddAllBtn" data-perm="task.mutate" onclick="addAllSuggestions()" style="display:none">Add all</button>
+              <button class="btn" id="suggestClearBtn"  onclick="clearSuggestions()" style="display:none">Clear</button>
+            </div>
+            <div id="suggestStatusLine" style="display:none" class="suggest-status">
+              <span class="spinner" id="suggestSpinner"></span>
+              <span id="suggestStatusText">Running...</span>
+            </div>
+          </div>
+          <div id="suggestSummary" class="suggest-summary" style="display:none"></div>
+          <div id="suggestList" class="suggest-list"></div>
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="section-title" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          Tasks <span id="taskCountBadge" style="color:var(--muted);font-weight:400;text-transform:none;letter-spacing:0"></span>
+          <button id="toggleCompletedBtn" class="btn" style="margin-left:auto;padding:3px 10px;font-size:11px" onclick="toggleCompletedTasks()">Show completed</button>
+        </div>
+        <div class="task-list" id="taskListFull">
+          <div class="empty-state"><h3>No tasks yet</h3><p>Add a task above, or run <code>cloop run --pm</code> to generate a task plan.</p></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══════════════════════════════════════════════════════════ ACTIVITY -->
+    <div id="tab-queue" class="tab-panel">
+      <div class="kanban-toolbar">
+        <span class="section-title" style="margin:0">Task Activity</span>
+        <span style="font-size:11px;color:var(--muted)">Every execution, heal retry, evolve discovery, and external merge — tied to its task. The single source of truth for what cloop is doing.</span>
+        <span class="spacer"></span>
+        <select id="queueFilterKind" class="filter-select" style="padding:3px 6px;font-size:11px" onchange="loadQueue()" aria-label="Filter by kind">
+          <option value="">All kinds</option>
+          <option value="task">PM task</option>
+          <option value="heal">Auto-heal</option>
+          <option value="evolve">Evolve</option>
+          <option value="external">External</option>
+          <option value="session">Session</option>
+        </select>
+        <select id="queueFilterStatus" class="filter-select" style="padding:3px 6px;font-size:11px" onchange="loadQueue()" aria-label="Filter by status">
+          <option value="">All statuses</option>
+          <option value="queued">Queued</option>
+          <option value="running">Running</option>
+          <option value="done">Done</option>
+          <option value="failed">Failed</option>
+          <option value="skipped">Skipped</option>
+        </select>
+        <button class="btn" style="padding:3px 10px;font-size:11px" onclick="loadQueue()">Refresh</button>
+      </div>
+      <div id="queueStatsBar" class="stats-grid" style="margin-top:10px;margin-bottom:12px"></div>
+      <div id="queueEmpty" class="empty-state" style="display:none">
+        <h3>No activity yet</h3>
+        <p>Once cloop runs a task, heal retry, or evolve cycle, it will appear here.</p>
+      </div>
+      <div class="section" style="overflow-x:auto">
+        <table id="queueTable" style="display:none;border-collapse:collapse;width:100%;font-size:13px">
+          <thead>
+            <tr>
+              <th style="text-align:left;padding:6px 10px;background:var(--surface);color:var(--muted);font-weight:500;width:60px">ID</th>
+              <th style="text-align:left;padding:6px 10px;background:var(--surface);color:var(--muted);font-weight:500;width:90px">Kind</th>
+              <th style="text-align:left;padding:6px 10px;background:var(--surface);color:var(--muted);font-weight:500;width:100px">Status</th>
+              <th style="text-align:left;padding:6px 10px;background:var(--surface);color:var(--muted);font-weight:500;width:60px">Task</th>
+              <th style="text-align:left;padding:6px 10px;background:var(--surface);color:var(--muted);font-weight:500">Title</th>
+              <th style="text-align:left;padding:6px 10px;background:var(--surface);color:var(--muted);font-weight:500;width:140px">Started</th>
+              <th style="text-align:left;padding:6px 10px;background:var(--surface);color:var(--muted);font-weight:500;width:90px">Duration</th>
+              <th style="text-align:left;padding:6px 10px;background:var(--surface);color:var(--muted);font-weight:500">Result</th>
+            </tr>
+          </thead>
+          <tbody id="queueTbody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ══════════════════════════════════════════════════════════ KANBAN -->
+    <div id="tab-kanban" class="tab-panel">
+      <div class="kanban-toolbar">
+        <span class="section-title" style="margin:0">Kanban Board</span>
+        <button class="btn" id="kanbanCompactBtn" style="padding:3px 10px;font-size:11px" onclick="toggleKanbanCompact()">Compact</button>
+        <button class="btn" style="padding:3px 10px;font-size:11px" onclick="refreshState()">Refresh</button>
+      </div>
+      <div id="kanbanBoard" class="kanban-board">
+        <div class="kanban-col" id="kb-col-pending"     data-status="pending">
+          <div class="kanban-col-header"><span class="kanban-col-title">Pending</span><span class="kanban-col-count" id="kb-cnt-pending">0</span></div>
+          <div class="kanban-col-body" id="kb-body-pending"
+               ondragover="kanbanColDragOver(event,'pending')"
+               ondragleave="kanbanColDragLeave(event,'pending')"
+               ondrop="kanbanColDrop(event,'pending')">
+          </div>
+        </div>
+        <div class="kanban-col" id="kb-col-in_progress" data-status="in_progress">
+          <div class="kanban-col-header"><span class="kanban-col-title">In Progress</span><span class="kanban-col-count" id="kb-cnt-in_progress">0</span></div>
+          <div class="kanban-col-body" id="kb-body-in_progress"
+               ondragover="kanbanColDragOver(event,'in_progress')"
+               ondragleave="kanbanColDragLeave(event,'in_progress')"
+               ondrop="kanbanColDrop(event,'in_progress')">
+          </div>
+        </div>
+        <div class="kanban-col" id="kb-col-done"        data-status="done">
+          <div class="kanban-col-header"><span class="kanban-col-title">Done</span><span class="kanban-col-count" id="kb-cnt-done">0</span></div>
+          <div class="kanban-col-body" id="kb-body-done"
+               ondragover="kanbanColDragOver(event,'done')"
+               ondragleave="kanbanColDragLeave(event,'done')"
+               ondrop="kanbanColDrop(event,'done')">
+          </div>
+        </div>
+        <div class="kanban-col" id="kb-col-failed"      data-status="failed">
+          <div class="kanban-col-header"><span class="kanban-col-title">Failed / Skipped</span><span class="kanban-col-count" id="kb-cnt-failed">0</span></div>
+          <div class="kanban-col-body" id="kb-body-failed"
+               ondragover="kanbanColDragOver(event,'failed')"
+               ondragleave="kanbanColDragLeave(event,'failed')"
+               ondrop="kanbanColDrop(event,'failed')">
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══════════════════════════════════════════════════════════ TIMELINE -->
+    <div id="tab-timeline" class="tab-panel">
+      <div class="timeline-toolbar">
+        <span class="section-title" style="margin:0">Gantt Chart</span>
+        <button class="btn" style="padding:3px 10px;font-size:11px" onclick="loadTimeline()">Refresh</button>
+        <span id="timelineStatus" style="font-size:11px;color:var(--muted)"></span>
+      </div>
+      <div id="timelineEmpty" class="empty-state" style="display:none">
+        <h3>No tasks yet</h3>
+        <p>Run <code>cloop run --pm</code> to generate a task plan, then return here to see the Gantt chart.</p>
+      </div>
+      <div id="timelineChart" class="timeline-chart-wrap">
+        <div style="color:var(--muted);font-size:12px;padding:20px 0">Loading timeline...</div>
+      </div>
+      <div class="timeline-legend" id="timelineLegend" style="display:none">
+        <div class="tl-legend-item"><div class="tl-legend-dot" style="background:#22c55e"></div>Done</div>
+        <div class="tl-legend-item"><div class="tl-legend-dot" style="background:#3b82f6"></div>In Progress</div>
+        <div class="tl-legend-item"><div class="tl-legend-dot" style="background:#9ca3af"></div>Pending</div>
+        <div class="tl-legend-item"><div class="tl-legend-dot" style="background:#ef4444"></div>Failed</div>
+        <div class="tl-legend-item"><div class="tl-legend-dot" style="background:#f97316"></div>Timed Out</div>
+        <div class="tl-legend-item"><div class="tl-legend-dot" style="background:#6b7280"></div>Skipped</div>
+        <div class="tl-legend-item"><div class="tl-legend-dot" style="background:#f87171;width:2px;height:14px;border-radius:1px"></div>Now</div>
+      </div>
+      <!-- Tooltip -->
+      <div id="tlTooltip" class="tl-tooltip"></div>
+    </div>
+
+    <!-- ══════════════════════════════════════════════ KNOWLEDGE BASE -->
+    <div id="tab-kb" class="tab-panel">
+      <div class="kb-tab-toolbar">
+        <span class="section-title" style="margin:0">Knowledge Base</span>
+        <div class="kb-search-wrap">
+          <input class="form-input kb-search-input" id="kbSearchInput" placeholder="Search entries..." oninput="filterKBCards(this.value)">
+        </div>
+        <button class="btn primary" data-perm="task.mutate" style="padding:4px 12px;font-size:12px" onclick="toggleKBAddForm()">+ Add Entry</button>
+        <button class="btn" style="padding:4px 10px;font-size:12px" onclick="loadKB()">Refresh</button>
+      </div>
+
+      <!-- Add Entry form (hidden by default) -->
+      <div id="kbAddForm" class="kb-add-form" style="display:none">
+        <div class="section-title">New Entry</div>
+        <div class="kb-form-row">
+          <label class="form-label">Title</label>
+          <input class="form-input" id="kbNewTitle" placeholder="Entry title..." style="flex:1">
+        </div>
+        <div class="kb-form-row">
+          <label class="form-label">Body</label>
+          <textarea class="form-input kb-new-body" id="kbNewBody" placeholder="Entry content..." rows="4"></textarea>
+        </div>
+        <div class="kb-form-row">
+          <label class="form-label">Tags</label>
+          <input class="form-input" id="kbNewTags" placeholder="Comma-separated tags, e.g. api,auth" style="flex:1">
+        </div>
+        <div style="display:flex;gap:8px;margin-top:6px">
+          <button class="btn primary" data-perm="task.mutate" onclick="submitKBAdd()">Save Entry</button>
+          <button class="btn" onclick="toggleKBAddForm()">Cancel</button>
+        </div>
+      </div>
+
+      <div id="kbEmpty" class="empty-state" style="display:none">
+        <h3>No entries yet</h3>
+        <p>Click <strong>+ Add Entry</strong> to add your first knowledge base entry.</p>
+      </div>
+      <div id="kbGrid" class="kb-grid"></div>
+    </div>
+
+    <!-- ══════════════════════════════════════════════ DEPENDENCIES -->
+    <div id="tab-deps" class="tab-panel">
+      <div class="deps-toolbar">
+        <span class="section-title" style="margin:0">Task Dependency Graph</span>
+        <button class="btn" style="padding:3px 10px;font-size:11px" onclick="loadDeps()">Refresh</button>
+        <label style="font-size:12px;color:var(--muted);display:flex;align-items:center;gap:4px;margin-left:8px">
+          <input type="checkbox" id="depsShowAll" onchange="loadDeps()"> Show all tasks
+        </label>
+      </div>
+      <div id="depsEmpty" class="deps-empty" style="display:none">
+        <div style="font-size:32px;margin-bottom:12px">&#128279;</div>
+        <div style="font-size:15px;font-weight:600;margin-bottom:6px">No dependencies defined</div>
+        <div style="font-size:13px;color:var(--muted)">Use <code>cloop task deps</code> to add dependencies between tasks.</div>
+      </div>
+      <div class="deps-legend">
+        <span class="deps-legend-item"><span class="deps-legend-dot" style="background:#6b7280"></span>Pending</span>
+        <span class="deps-legend-item"><span class="deps-legend-dot" style="background:#3b82f6"></span>In Progress</span>
+        <span class="deps-legend-item"><span class="deps-legend-dot" style="background:#22c55e"></span>Done</span>
+        <span class="deps-legend-item"><span class="deps-legend-dot" style="background:#ef4444"></span>Failed</span>
+        <span class="deps-legend-item"><span class="deps-legend-dot" style="background:#a855f7"></span>Skipped</span>
+        <span class="deps-legend-item"><span class="deps-legend-dot" style="background:#f97316"></span>Timed Out</span>
+      </div>
+      <div id="depsContainer" class="deps-container">
+        <svg id="depsSvg" class="deps-svg"></svg>
+      </div>
+      <!-- Detail sidebar -->
+      <div id="depsSidebar" class="deps-sidebar" style="display:none">
+        <div class="deps-sidebar-header">
+          <span id="depsSidebarTitle" class="deps-sidebar-title"></span>
+          <button class="deps-sidebar-close" onclick="closeDepsDetail()" aria-label="Close">&#x2715;</button>
+        </div>
+        <div id="depsSidebarBody" class="deps-sidebar-body"></div>
+      </div>
+    </div>
+
+    <!-- ══════════════════════════════════════════════ RISK MATRIX -->
+    <div id="tab-risk-matrix" class="tab-panel">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap">
+        <span class="section-title" style="margin:0">Risk Matrix</span>
+        <button class="btn" style="padding:3px 10px;font-size:11px" onclick="loadRiskMatrix()">Refresh</button>
+        <span id="rmStatus" style="font-size:11px;color:var(--muted)"></span>
+      </div>
+      <div id="rmEmpty" class="empty-state" style="display:none">
+        <h3>No cached scores</h3>
+        <p>Run <code>cloop task ai-risk-matrix --apply</code> to score and cache risk/impact data, then refresh.</p>
+      </div>
+      <div id="rmNoTasks" class="empty-state" style="display:none">
+        <h3>No active tasks</h3>
+        <p>All tasks are complete or no plan has been created yet.</p>
+      </div>
+      <!-- Canvas chart -->
+      <div id="rmChartWrap" style="display:none">
+        <canvas id="rmCanvas" style="border-radius:8px;display:block;max-width:100%"></canvas>
+        <div style="display:flex;gap:14px;margin-top:10px;flex-wrap:wrap" id="rmLegend">
+          <div style="display:flex;align-items:center;gap:5px;font-size:12px;color:var(--muted)"><div style="width:12px;height:12px;border-radius:3px;background:rgba(239,68,68,0.25);border:1px solid #ef4444"></div>Critical</div>
+          <div style="display:flex;align-items:center;gap:5px;font-size:12px;color:var(--muted)"><div style="width:12px;height:12px;border-radius:3px;background:rgba(249,115,22,0.25);border:1px solid #f97316"></div>Mitigate</div>
+          <div style="display:flex;align-items:center;gap:5px;font-size:12px;color:var(--muted)"><div style="width:12px;height:12px;border-radius:3px;background:rgba(34,197,94,0.25);border:1px solid #22c55e"></div>Leverage</div>
+          <div style="display:flex;align-items:center;gap:5px;font-size:12px;color:var(--muted)"><div style="width:12px;height:12px;border-radius:3px;background:rgba(107,114,128,0.25);border:1px solid #6b7280"></div>Defer</div>
+        </div>
+        <p style="font-size:11px;color:var(--muted);margin-top:8px">Tip: Run <code>cloop task ai-risk-matrix --apply</code> to refresh scores.</p>
+      </div>
+      <!-- Table -->
+      <div id="rmTable" style="display:none;margin-top:18px;overflow-x:auto">
+        <table style="border-collapse:collapse;width:100%;font-size:13px">
+          <thead>
+            <tr>
+              <th style="text-align:left;padding:6px 10px;background:var(--surface);color:var(--muted);font-weight:500">#</th>
+              <th style="text-align:left;padding:6px 10px;background:var(--surface);color:var(--muted);font-weight:500">Task</th>
+              <th style="text-align:center;padding:6px 10px;background:var(--surface);color:var(--muted);font-weight:500">Risk</th>
+              <th style="text-align:center;padding:6px 10px;background:var(--surface);color:var(--muted);font-weight:500">Impact</th>
+              <th style="text-align:left;padding:6px 10px;background:var(--surface);color:var(--muted);font-weight:500">Quadrant</th>
+            </tr>
+          </thead>
+          <tbody id="rmTableBody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ════════════════════════════════════════════════════════════ CHAT -->
+    <div id="tab-chat" class="tab-panel">
+      <div class="chat-layout">
+        <div class="chat-header">
+          <span class="section-title" style="margin:0">AI Chat</span>
+          <span class="chat-hint">Type a command or question — or hold <kbd>Space</kbd> to talk</span>
+          <div style="display:flex;gap:6px;align-items:center;margin-left:auto">
+            <label class="chat-tts-label" title="Read responses aloud">
+              <input type="checkbox" id="chatTtsToggle" onchange="toggleTTS(this.checked)"> TTS
+            </label>
+            <button class="btn" style="padding:4px 10px;font-size:12px" onclick="clearChatHistory()">Clear</button>
+          </div>
+        </div>
+        <div class="chat-messages" id="chatMessages">
+          <div class="chat-welcome">
+            <div class="chat-welcome-icon">💬</div>
+            <div class="chat-welcome-title">Chat with cloop</div>
+            <div class="chat-welcome-text">Type a natural language command to control your project.<br>
+            Examples: <em>"add a task to fix the login bug"</em>, <em>"start the run"</em>, <em>"show me task 3"</em>, <em>"pause"</em></div>
+          </div>
+        </div>
+        <div class="chat-input-bar">
+          <button class="btn mic chat-mic-btn" id="chatMicBtn" onclick="toggleChatVoice()" title="Hold Space or click to record voice command">
+            <svg viewBox="0 0 16 16" fill="currentColor" width="14" height="14"><path d="M5 3a3 3 0 0 1 6 0v5a3 3 0 0 1-6 0V3z"/><path d="M3.5 6.5A.5.5 0 0 1 4 7v1a4 4 0 0 0 8 0V7a.5.5 0 0 1 1 0v1a5 5 0 0 1-4.5 4.975V15h2.5a.5.5 0 0 1 0 1h-6a.5.5 0 0 1 0-1H7.5v-2.025A5 5 0 0 1 3 8V7a.5.5 0 0 1 .5-.5z"/></svg>
+          </button>
+          <input class="form-input chat-input" id="chatInput" placeholder="Ask anything or give a command..."
+                 onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();submitChat();}">
+          <button class="btn primary" onclick="submitChat()" style="flex-shrink:0">
+            <svg viewBox="0 0 16 16" fill="currentColor" width="13" height="13"><path d="M15.854.146a.5.5 0 0 1 .11.54l-5.819 14.547a.75.75 0 0 1-1.329.124l-3.178-4.995L.643 7.184a.75.75 0 0 1 .124-1.33L15.314.037a.5.5 0 0 1 .54.11z"/></svg>
+            Send
+          </button>
+        </div>
+        <div class="chat-voice-bar" id="chatVoiceBar" style="display:none">
+          <span class="chat-voice-indicator">
+            <span class="live-dot connected" style="width:6px;height:6px"></span>
+            Recording...
+          </span>
+          <button class="btn danger" style="padding:4px 10px;font-size:12px" onclick="stopChatVoice()">Stop &amp; Send</button>
+          <button class="btn" style="padding:4px 10px;font-size:12px" onclick="cancelChatVoice()">Cancel</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══════════════════════════════════════════════════════ ASSISTANT -->
+    <div id="tab-assistant" class="tab-panel">
+      <div class="chat-layout">
+        <div class="chat-header">
+          <span class="section-title" style="margin:0">&#129302; Plan Assistant</span>
+          <span class="chat-hint">Ask questions about your plan — the AI has full task context</span>
+          <button class="btn" style="padding:4px 10px;font-size:12px;margin-left:auto" onclick="clearAssistantPanel()">Clear</button>
+        </div>
+        <div class="assistant-chips" id="assistantChips">
+          <span class="chip-label">Try asking:</span>
+          <button class="assist-chip" onclick="assistantChipAsk('What tasks are blocked?')">What tasks are blocked?</button>
+          <button class="assist-chip" onclick="assistantChipAsk('What should I work on next?')">What should I work on next?</button>
+          <button class="assist-chip" onclick="assistantChipAsk('Summarise progress for stakeholders')">Summarise progress for stakeholders</button>
+          <button class="assist-chip" onclick="assistantChipAsk('Which tasks are overdue or at risk?')">Which tasks are overdue or at risk?</button>
+          <button class="assist-chip" onclick="assistantChipAsk('Give me a risk assessment of the current plan')">Risk assessment</button>
+        </div>
+        <div class="chat-messages" id="assistantMessages">
+          <div class="chat-welcome" id="assistantWelcome">
+            <div class="chat-welcome-icon">&#129302;</div>
+            <div class="chat-welcome-title">Plan-Aware Assistant</div>
+            <div class="chat-welcome-text">I have full knowledge of your plan — tasks, statuses, priorities, and annotations.<br>
+            Ask me anything about your project or click a suggested question above.</div>
+          </div>
+        </div>
+        <div class="chat-input-bar">
+          <textarea class="form-input chat-input assistant-textarea" id="assistantInput"
+                    rows="1" placeholder="Ask about your plan..."
+                    onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();submitAssistantChat();}
+                               autoGrowTextarea(this);"></textarea>
+          <button class="btn primary" onclick="submitAssistantChat()" style="flex-shrink:0">
+            <svg viewBox="0 0 16 16" fill="currentColor" width="13" height="13"><path d="M15.854.146a.5.5 0 0 1 .11.54l-5.819 14.547a.75.75 0 0 1-1.329.124l-3.178-4.995L.643 7.184a.75.75 0 0 1 .124-1.33L15.314.037a.5.5 0 0 1 .54.11z"/></svg>
+            Send
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══════════════════════════════════════════════════════════ REPLAY -->
+    <div id="tab-replay" class="tab-panel">
+      <div class="section">
+        <div class="section-title">&#9851; Task Replay</div>
+        <div style="font-size:12px;color:var(--text-dim);margin-bottom:12px;">
+          Re-execute a completed task against a different provider/model and compare the output.
+          Useful for validating model upgrades, comparing providers, and A/B testing prompt changes.
+        </div>
+
+        <div style="display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap;align-items:center">
+          <select id="replayTaskSel" class="form-input" style="max-width:340px"></select>
+          <input id="replayProvider" class="form-input" placeholder="provider (e.g. anthropic)" style="max-width:170px"/>
+          <input id="replayModel" class="form-input" placeholder="model" style="max-width:240px"/>
+          <input id="replayJudge" class="form-input" placeholder="judge: provider:model (optional)" style="max-width:260px"/>
+          <button class="btn primary" onclick="submitReplay()">Run replay</button>
+          <button class="btn" onclick="loadReplayRuns()" title="Refresh">&#x21bb;</button>
+        </div>
+        <div id="replayStatus" style="font-size:12px;color:var(--text-dim);min-height:18px;margin-bottom:8px"></div>
+      </div>
+
+      <div class="section">
+        <div class="section-title" style="display:flex;align-items:center;gap:8px">
+          <span>Replay history</span>
+          <span id="replayCount" style="font-size:11px;color:var(--text-dim)"></span>
+        </div>
+        <div id="replayRuns" style="display:flex;flex-direction:column;gap:8px"></div>
+      </div>
+
+      <!-- side-by-side diff modal -->
+      <div id="replayDiffModal" class="modal-backdrop" style="display:none" onclick="if(event.target===this)closeReplayDiff()">
+        <div class="modal-card" style="max-width:1200px;width:96%;max-height:90vh;display:flex;flex-direction:column">
+          <div class="modal-header">
+            <span class="section-title" id="replayDiffTitle" style="margin:0">Replay diff</span>
+            <button class="btn" onclick="closeReplayDiff()">Close</button>
+          </div>
+          <div id="replayDiffMeta" style="font-size:12px;color:var(--text-dim);padding:6px 12px"></div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;padding:0 12px;flex:1;min-height:0">
+            <div style="display:flex;flex-direction:column;min-height:0">
+              <div style="font-size:11px;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.6px;padding:4px 0">Original</div>
+              <pre id="replayDiffOriginal" class="diff-pane" style="flex:1;overflow:auto;border:1px solid var(--border);padding:8px;font-size:12px;background:var(--bg-elev);border-radius:6px;white-space:pre-wrap;word-break:break-word"></pre>
+            </div>
+            <div style="display:flex;flex-direction:column;min-height:0">
+              <div style="font-size:11px;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.6px;padding:4px 0">Replayed</div>
+              <pre id="replayDiffReplayed" class="diff-pane" style="flex:1;overflow:auto;border:1px solid var(--border);padding:8px;font-size:12px;background:var(--bg-elev);border-radius:6px;white-space:pre-wrap;word-break:break-word"></pre>
+            </div>
+          </div>
+          <div style="padding:8px 12px 12px">
+            <details>
+              <summary style="cursor:pointer;font-size:12px;color:var(--text-dim)">Show prompt</summary>
+              <pre id="replayDiffPrompt" style="margin-top:6px;max-height:240px;overflow:auto;border:1px solid var(--border);padding:8px;font-size:11px;background:var(--bg-elev);border-radius:6px;white-space:pre-wrap;word-break:break-word"></pre>
+            </details>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ═════════════════════════════════════════════════════ PROVIDER CALLS -->
+    <div id="tab-provider-calls" class="tab-panel">
+      <div class="section">
+        <div class="section-title" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          <span>&#128268; Provider Call Inspector</span>
+          <span id="pcLiveDot" class="badge" style="font-size:11px;background:var(--green,#22c55e);color:white">LIVE</span>
+          <span id="pcCount" style="font-size:11px;color:var(--text-dim)"></span>
+          <div style="margin-left:auto;display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+            <select id="pcFilterProvider" class="filter-select" style="padding:3px 6px;font-size:11px" onchange="loadProviderCalls()" aria-label="Filter by provider">
+              <option value="">All providers</option>
+              <option value="anthropic">anthropic</option>
+              <option value="openai">openai</option>
+              <option value="ollama">ollama</option>
+              <option value="claudecode">claudecode</option>
+              <option value="mock">mock</option>
+            </select>
+            <input id="pcFilterTaskID" class="form-input" type="number" min="0" placeholder="task id" style="max-width:90px;padding:3px 6px;font-size:11px" oninput="_pcDebouncedReload()" aria-label="Filter by task id">
+            <label class="filter-check" style="font-size:11px"><input type="checkbox" id="pcAutoFollow" checked onchange="_pcAutoFollowChange()"> Auto-follow</label>
+            <button class="btn" style="padding:3px 10px;font-size:11px" onclick="loadProviderCalls()" title="Refresh">&#x21bb; Refresh</button>
+          </div>
+        </div>
+        <div style="font-size:12px;color:var(--text-dim);margin-bottom:8px">
+          Every Provider.Complete invocation is recorded with full prompt, response, and synthetic headers (secrets redacted). Click any row to inspect or replay.
+        </div>
+        <div id="pcEmpty" style="display:none;color:var(--muted);font-size:13px;padding:18px 0;text-align:center">
+          <h3>No provider calls yet</h3>
+          <p>Trigger a task or use any AI command. Calls appear here in real time.</p>
+        </div>
+        <div id="pcTableWrap" style="overflow:auto;max-height:70vh;border:1px solid var(--border);border-radius:6px">
+          <table id="pcTable" style="width:100%;border-collapse:collapse;font-size:12px">
+            <thead style="position:sticky;top:0;background:var(--bg-elev);z-index:1">
+              <tr>
+                <th style="padding:6px 10px;text-align:left;border-bottom:1px solid var(--border);font-weight:600">Time</th>
+                <th style="padding:6px 10px;text-align:left;border-bottom:1px solid var(--border);font-weight:600">Status</th>
+                <th style="padding:6px 10px;text-align:left;border-bottom:1px solid var(--border);font-weight:600">Provider</th>
+                <th style="padding:6px 10px;text-align:left;border-bottom:1px solid var(--border);font-weight:600">Model</th>
+                <th style="padding:6px 10px;text-align:left;border-bottom:1px solid var(--border);font-weight:600">Task</th>
+                <th style="padding:6px 10px;text-align:right;border-bottom:1px solid var(--border);font-weight:600">In tok</th>
+                <th style="padding:6px 10px;text-align:right;border-bottom:1px solid var(--border);font-weight:600">Out tok</th>
+                <th style="padding:6px 10px;text-align:right;border-bottom:1px solid var(--border);font-weight:600">Latency</th>
+              </tr>
+            </thead>
+            <tbody id="pcTbody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Provider call detail / replay modal -->
+      <div id="pcModal" class="modal-backdrop" style="display:none" onclick="if(event.target===this)closeProviderCallModal()">
+        <div class="modal-card" style="max-width:1280px;width:97%;max-height:92vh;display:flex;flex-direction:column">
+          <div class="modal-header">
+            <span class="section-title" id="pcModalTitle" style="margin:0">Provider call</span>
+            <button class="btn" onclick="closeProviderCallModal()" aria-label="Close">Close</button>
+          </div>
+
+          <div id="pcModalMeta" style="font-size:12px;color:var(--text-dim);padding:6px 14px;display:flex;flex-wrap:wrap;gap:14px"></div>
+
+          <div style="padding:0 14px;display:flex;gap:8px;border-bottom:1px solid var(--border)" role="tablist">
+            <button class="tab-btn pc-subtab active" data-pc-sub="prompt"   onclick="pcSwitchSub('prompt')">Prompt</button>
+            <button class="tab-btn pc-subtab"        data-pc-sub="response" onclick="pcSwitchSub('response')">Response</button>
+            <button class="tab-btn pc-subtab"        data-pc-sub="headers"  onclick="pcSwitchSub('headers')">Headers</button>
+            <button class="tab-btn pc-subtab"        data-pc-sub="replay"   onclick="pcSwitchSub('replay')">Replay</button>
+          </div>
+
+          <div style="flex:1;min-height:0;overflow:auto;padding:10px 14px">
+            <div id="pcSub-prompt" class="pc-subpanel" style="display:block">
+              <div style="font-size:11px;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.6px;margin-bottom:4px">System prompt</div>
+              <pre id="pcSystemPrompt" class="pc-pre" style="border:1px solid var(--border);padding:8px;font-size:12px;background:var(--bg-elev);border-radius:6px;white-space:pre-wrap;word-break:break-word;max-height:200px;overflow:auto;margin-bottom:10px"></pre>
+              <div style="font-size:11px;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.6px;margin-bottom:4px">User prompt</div>
+              <pre id="pcPrompt" class="pc-pre" style="border:1px solid var(--border);padding:8px;font-size:12px;background:var(--bg-elev);border-radius:6px;white-space:pre-wrap;word-break:break-word"></pre>
+            </div>
+
+            <div id="pcSub-response" class="pc-subpanel" style="display:none">
+              <div id="pcResponseError" style="display:none;color:var(--red);font-size:12px;border:1px solid var(--red);padding:8px;border-radius:6px;background:rgba(239,68,68,0.08);margin-bottom:8px"></div>
+              <pre id="pcResponse" class="pc-pre" style="border:1px solid var(--border);padding:8px;font-size:12px;background:var(--bg-elev);border-radius:6px;white-space:pre-wrap;word-break:break-word"></pre>
+            </div>
+
+            <div id="pcSub-headers" class="pc-subpanel" style="display:none">
+              <div style="font-size:12px;color:var(--text-dim);margin-bottom:6px">Synthetic request headers (secrets redacted before persistence).</div>
+              <pre id="pcHeaders" class="pc-pre" style="border:1px solid var(--border);padding:8px;font-size:12px;background:var(--bg-elev);border-radius:6px;white-space:pre-wrap;word-break:break-word"></pre>
+            </div>
+
+            <div id="pcSub-replay" class="pc-subpanel" style="display:none">
+              <div style="font-size:12px;color:var(--text-dim);margin-bottom:8px">Re-run this call against the project's current provider config. Edits below are applied; leave fields blank to replay verbatim.</div>
+              <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">
+                <input id="pcReplayModel" class="form-input" placeholder="Model (e.g. claude-opus-4-7)" style="flex:1;min-width:220px"/>
+                <button class="btn primary" id="pcReplayRun" onclick="submitProviderCallReplay()">&#9851; Run replay</button>
+                <button class="btn" onclick="pcResetReplayPrompt()" title="Reset edits to the original prompt">Reset</button>
+              </div>
+              <div style="font-size:11px;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.6px;margin-bottom:4px">System prompt (editable)</div>
+              <textarea id="pcReplaySystem" class="form-input" rows="3" style="width:100%;font-family:monospace;font-size:12px;margin-bottom:8px"></textarea>
+              <div style="font-size:11px;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.6px;margin-bottom:4px">User prompt (editable)</div>
+              <textarea id="pcReplayPrompt" class="form-input" rows="10" style="width:100%;font-family:monospace;font-size:12px"></textarea>
+
+              <div id="pcReplayResult" style="margin-top:14px;display:none">
+                <div id="pcReplayMeta" style="font-size:12px;color:var(--text-dim);margin-bottom:6px"></div>
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;min-height:280px">
+                  <div style="display:flex;flex-direction:column;min-height:0">
+                    <div style="font-size:11px;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.6px;padding:4px 0">Original</div>
+                    <pre id="pcReplayOriginal" class="diff-pane" style="flex:1;overflow:auto;border:1px solid var(--border);padding:8px;font-size:12px;background:var(--bg-elev);border-radius:6px;white-space:pre-wrap;word-break:break-word;min-height:240px"></pre>
+                  </div>
+                  <div style="display:flex;flex-direction:column;min-height:0">
+                    <div style="font-size:11px;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.6px;padding:4px 0">Replayed</div>
+                    <pre id="pcReplayNew" class="diff-pane" style="flex:1;overflow:auto;border:1px solid var(--border);padding:8px;font-size:12px;background:var(--bg-elev);border-radius:6px;white-space:pre-wrap;word-break:break-word;min-height:240px"></pre>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══════════════════════════════════════════════════════════ SETTINGS -->
+    <div id="tab-settings" class="tab-panel">
+      <div class="section">
+        <div class="section-title">Configuration</div>
+
+        <!-- Provider -->
+        <div class="settings-section">
+          <h3>Default Provider</h3>
+          <div class="form-group">
+            <label class="form-label">Active provider</label>
+            <select class="form-select" id="cfgProvider">
+              <option value="claudecode">claudecode</option>
+              <option value="anthropic">anthropic</option>
+              <option value="openai">openai</option>
+              <option value="ollama">ollama</option>
+            </select>
+          </div>
+          <button class="btn" onclick="saveConfigField('provider', document.getElementById('cfgProvider').value)">Save Provider</button>
+        </div>
+
+        <!-- ClaudeCode -->
+        <div class="settings-section">
+          <h3>ClaudeCode</h3>
+          <div class="form-group">
+            <label class="form-label">Model</label>
+            <input class="form-input" id="cfgCCModel" placeholder="e.g. claude-opus-4-6">
+          </div>
+          <button class="btn settings-save" onclick="saveConfigField('claudecode.model', document.getElementById('cfgCCModel').value)">Save</button>
+        </div>
+
+        <!-- Anthropic -->
+        <div class="settings-section">
+          <h3>Anthropic <span id="anthropicKeyStatus"></span></h3>
+          <div class="form-group">
+            <label class="form-label">API Key (leave blank to keep existing)</label>
+            <input class="form-input" id="cfgAnthropicKey" type="password" placeholder="sk-ant-...">
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label">Model</label>
+              <input class="form-input" id="cfgAnthropicModel" placeholder="e.g. claude-opus-4-6">
+            </div>
+            <div class="form-group">
+              <label class="form-label">Base URL (optional)</label>
+              <input class="form-input" id="cfgAnthropicBase" placeholder="https://api.anthropic.com">
+            </div>
+          </div>
+          <button class="btn settings-save" onclick="saveAnthropicCfg()">Save</button>
+        </div>
+
+        <!-- OpenAI -->
+        <div class="settings-section">
+          <h3>OpenAI <span id="openaiKeyStatus"></span></h3>
+          <div class="form-group">
+            <label class="form-label">API Key (leave blank to keep existing)</label>
+            <input class="form-input" id="cfgOpenAIKey" type="password" placeholder="sk-...">
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label">Model</label>
+              <input class="form-input" id="cfgOpenAIModel" placeholder="e.g. gpt-4o">
+            </div>
+            <div class="form-group">
+              <label class="form-label">Base URL (optional)</label>
+              <input class="form-input" id="cfgOpenAIBase" placeholder="https://api.openai.com/v1">
+            </div>
+          </div>
+          <button class="btn settings-save" onclick="saveOpenAICfg()">Save</button>
+        </div>
+
+        <!-- Ollama -->
+        <div class="settings-section">
+          <h3>Ollama</h3>
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label">Base URL</label>
+              <input class="form-input" id="cfgOllamaBase" placeholder="http://localhost:11434">
+            </div>
+            <div class="form-group">
+              <label class="form-label">Model</label>
+              <input class="form-input" id="cfgOllamaModel" placeholder="e.g. llama3.2">
+            </div>
+          </div>
+          <button class="btn settings-save" onclick="saveOllamaCfg()">Save</button>
+        </div>
+
+        <!-- Danger zone -->
+        <div class="settings-section danger-zone">
+          <h3>Danger Zone</h3>
+          <p style="font-size:12px;color:var(--muted);margin-bottom:12px">Reset clears all step history and resets the project status. The goal and config are preserved.</p>
+          <button class="btn danger" onclick="confirmReset()">Reset Project State</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══════════════════════════════════════════════════════════ PROJECTS -->
+    <div id="tab-projects" class="tab-panel">
+
+      <!-- Aggregate stats bar -->
+      <div class="section">
+        <div class="section-title">All Projects</div>
+        <div class="stats-grid" id="projAggStats">
+          <div class="stat-card">
+            <div class="stat-label">Projects</div>
+            <div class="stat-value accent" id="paTotal">—</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Active Runs</div>
+            <div class="stat-value" id="paActive" style="color:var(--cyan)">—</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Total Tasks</div>
+            <div class="stat-value" id="paTasks">—</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Done Tasks</div>
+            <div class="stat-value" id="paDone" style="color:var(--green)">—</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Failed Tasks</div>
+            <div class="stat-value" id="paFailed" style="color:var(--red)">—</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Total Steps</div>
+            <div class="stat-value" id="paSteps">—</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Project list -->
+      <div class="section">
+        <div class="section-title" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          Projects
+          <button class="btn primary" style="padding:4px 10px;font-size:12px" onclick="openNewProjectModal()">+ New Project</button>
+          <button id="toggleCompletedProjectsBtn" class="btn" style="margin-left:auto;padding:3px 10px;font-size:11px" onclick="toggleCompletedProjects()">Show completed</button>
+        </div>
+        <div id="projListEmpty" style="display:none;color:var(--muted);font-size:13px;padding:12px 0">
+          No projects loaded. Use <code>cloop ui --projects /path/a /path/b</code> or <code>--scan /root/Projects</code>.
+        </div>
+        <div id="projList" style="display:flex;flex-direction:column;gap:10px"></div>
+      </div>
+
+    </div>
+
+    <!-- ═══════════════════════════════════════════════════════ ANALYTICS -->
+    <div id="tab-analytics" class="tab-panel">
+      <div class="section">
+        <div class="section-title" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+          Analytics
+          <div style="display:flex;align-items:center;gap:8px;margin-left:auto;flex-wrap:wrap">
+            <label style="font-size:12px;color:var(--muted)">From:</label>
+            <input type="date" id="analyticsFrom" class="form-input" style="width:140px;padding:4px 8px;font-size:12px" onchange="loadAnalytics()">
+            <label style="font-size:12px;color:var(--muted)">To:</label>
+            <input type="date" id="analyticsTo" class="form-input" style="width:140px;padding:4px 8px;font-size:12px" onchange="loadAnalytics()">
+            <button class="btn" style="padding:4px 10px;font-size:12px" onclick="analyticsResetRange()">Last 30d</button>
+            <button class="btn" style="padding:4px 10px;font-size:12px" onclick="loadAnalytics()">&#8635; Refresh</button>
+          </div>
+        </div>
+
+        <!-- Row 1: Donut + Velocity -->
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px" class="analytics-grid">
+          <div class="analytics-card">
+            <div class="analytics-card-title">Task Status</div>
+            <div style="position:relative;height:220px;display:flex;align-items:center;justify-content:center">
+              <canvas id="chartStatusDonut" aria-label="Task status donut chart" role="img"></canvas>
+            </div>
+          </div>
+          <div class="analytics-card">
+            <div class="analytics-card-title">Velocity — Tasks/Day (last 14 days)</div>
+            <div style="position:relative;height:220px">
+              <canvas id="chartVelocity" aria-label="Velocity sparkline chart" role="img"></canvas>
+            </div>
+          </div>
+        </div>
+
+        <!-- Row 2: Burndown -->
+        <div style="margin-top:16px">
+          <div class="analytics-card">
+            <div class="analytics-card-title">Task Burn-Down</div>
+            <div style="position:relative;height:240px">
+              <canvas id="chartBurndown" aria-label="Task burndown chart" role="img"></canvas>
+            </div>
+          </div>
+        </div>
+
+        <!-- Row 3: Cost trend + Latency -->
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px" class="analytics-grid">
+          <div class="analytics-card">
+            <div class="analytics-card-title">Provider Cost Trend (USD/day)</div>
+            <div style="position:relative;height:240px">
+              <canvas id="chartCostTrend" aria-label="Provider cost trend chart" role="img"></canvas>
+            </div>
+          </div>
+          <div class="analytics-card">
+            <div class="analytics-card-title">Per-Provider Latency Histogram</div>
+            <div style="position:relative;height:240px">
+              <canvas id="chartLatency" aria-label="Per-provider latency histogram" role="img"></canvas>
+            </div>
+            <div id="analyticsLatencyEmpty" style="display:none;color:var(--muted);font-size:12px;text-align:center;padding:8px 0">
+              No latency data yet — run tasks to populate.
+            </div>
+          </div>
+        </div>
+
+        <!-- Row 4: Epics progress -->
+        <div style="margin-top:16px">
+          <div class="analytics-card" id="epicsCard" style="display:none">
+            <div class="analytics-card-title">Epic Progress</div>
+            <div id="epicsList" style="padding:4px 0"></div>
+          </div>
+        </div>
+
+        <div id="analyticsEmpty" style="display:none;color:var(--muted);font-size:13px;padding:16px 0;text-align:center">
+          No data yet for the selected date range. Run some tasks to see analytics.
+        </div>
+        <div style="color:var(--muted);font-size:11px;margin-top:10px;text-align:right" id="analyticsLastRefresh"></div>
+      </div>
+    </div>
+
+    <!-- ═══════════════════════════════════════════════════════════ BUDGET -->
+    <div id="tab-budget" class="tab-panel">
+
+      <!-- Global budget status -->
+      <div class="section">
+        <div class="section-title" style="display:flex;align-items:center;gap:12px">
+          Global Budget
+          <button class="btn" style="padding:4px 10px;font-size:12px;margin-left:auto" onclick="loadBudget()">&#8635; Refresh</button>
+        </div>
+
+        <!-- Usage bars -->
+        <div id="budgetUsageBars" style="margin-top:12px">
+          <div style="margin-bottom:14px">
+            <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px">
+              <span>Daily USD Spend</span>
+              <span id="budgetUSDLabel" style="color:var(--muted)">—</span>
+            </div>
+            <div style="height:10px;background:var(--border);border-radius:5px;overflow:hidden">
+              <div id="budgetUSDBar" style="height:100%;width:0%;background:var(--accent);border-radius:5px;transition:width .4s ease"></div>
+            </div>
+          </div>
+          <div>
+            <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px">
+              <span>Daily Token Usage</span>
+              <span id="budgetTokenLabel" style="color:var(--muted)">—</span>
+            </div>
+            <div style="height:10px;background:var(--border);border-radius:5px;overflow:hidden">
+              <div id="budgetTokenBar" style="height:100%;width:0%;background:var(--cyan);border-radius:5px;transition:width .4s ease"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Global limit config form -->
+        <div class="settings-section" style="margin-top:20px">
+          <h3>Global Limits (applied across all projects)</h3>
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label">Daily USD limit (0 = unlimited)</label>
+              <input class="form-input" id="bgDailyUSD" type="number" min="0" step="0.01" placeholder="e.g. 5.00">
+            </div>
+            <div class="form-group">
+              <label class="form-label">Daily token limit (0 = unlimited)</label>
+              <input class="form-input" id="bgDailyTokens" type="number" min="0" placeholder="e.g. 1000000">
+            </div>
+            <div class="form-group">
+              <label class="form-label">Alert threshold %</label>
+              <input class="form-input" id="bgAlertPct" type="number" min="1" max="100" placeholder="80">
+            </div>
+          </div>
+          <button class="btn primary" onclick="saveBudgetGlobal()">Save Global Limits</button>
+          <span id="budgetGlobalSaveMsg" style="font-size:12px;color:var(--green);margin-left:12px;display:none">Saved!</span>
+        </div>
+      </div>
+
+      <!-- Per-project caps -->
+      <div class="section">
+        <div class="section-title">Per-Project Caps</div>
+        <p style="font-size:12px;color:var(--muted);margin-bottom:12px">
+          Set percentage-based caps relative to the global limits, or absolute per-project limits.
+          Effective limits are resolved at runtime and shown below.
+        </p>
+
+        <div class="settings-section">
+          <h3>Percentage Caps (% of global limit)</h3>
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label">Global USD % (0 = no cap)</label>
+              <input class="form-input" id="bpGlobalUSDPct" type="number" min="0" max="100" step="0.1" placeholder="e.g. 50">
+            </div>
+            <div class="form-group">
+              <label class="form-label">Global Token % (0 = no cap)</label>
+              <input class="form-input" id="bpGlobalTokenPct" type="number" min="0" max="100" step="0.1" placeholder="e.g. 50">
+            </div>
+          </div>
+
+          <h3 style="margin-top:14px">Absolute Per-Project Limits</h3>
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label">Daily USD limit (0 = unlimited)</label>
+              <input class="form-input" id="bpDailyUSD" type="number" min="0" step="0.01" placeholder="e.g. 2.00">
+            </div>
+            <div class="form-group">
+              <label class="form-label">Daily token limit (0 = unlimited)</label>
+              <input class="form-input" id="bpDailyTokens" type="number" min="0" placeholder="e.g. 500000">
+            </div>
+            <div class="form-group">
+              <label class="form-label">Monthly USD limit (0 = unlimited)</label>
+              <input class="form-input" id="bpMonthlyUSD" type="number" min="0" step="0.01" placeholder="e.g. 50.00">
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label">Alert threshold % (0 = use global)</label>
+              <input class="form-input" id="bpAlertPct" type="number" min="0" max="100" placeholder="80">
+            </div>
+          </div>
+          <h4 style="margin-top:16px;margin-bottom:8px">Claude Code Subscription Caps</h4>
+          <p style="font-size:12px;color:var(--muted);margin-bottom:8px">Stop task execution when Claude Code subscription usage exceeds these percentages. Shared with the &quot;Set Caps&quot; modal on the project overview.</p>
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label">Max weekly usage % (0 = no cap)</label>
+              <input class="form-input" id="bpMaxWeekly" type="number" min="0" max="100" placeholder="e.g. 30">
+            </div>
+            <div class="form-group">
+              <label class="form-label">Max 5-hour usage % (0 = no cap)</label>
+              <input class="form-input" id="bpMaxFiveHour" type="number" min="0" max="100" placeholder="e.g. 80">
+            </div>
+          </div>
+
+          <div class="form-row" style="margin-top:12px">
+            <div class="form-group">
+              <label class="form-label" style="display:flex;align-items:center;gap:8px">
+                <input type="checkbox" id="bpBlockExtraUsage" checked>
+                Block extra usage (prevent per-token billing beyond subscription)
+              </label>
+            </div>
+          </div>
+
+          <button class="btn primary" onclick="saveBudgetProject()">Save Project Limits</button>
+          <span id="budgetProjectSaveMsg" style="font-size:12px;color:var(--green);margin-left:12px;display:none">Saved!</span>
+        </div>
+
+        <!-- Effective limits display -->
+        <div class="settings-section" id="budgetEffectiveSection" style="display:none">
+          <h3>Effective Resolved Limits</h3>
+          <p style="font-size:12px;color:var(--muted);margin-bottom:8px">
+            These are the actual limits that will be enforced for this project today.
+          </p>
+          <table style="width:100%;font-size:13px;border-collapse:collapse">
+            <thead>
+              <tr style="border-bottom:1px solid var(--border)">
+                <th style="text-align:left;padding:6px 0;color:var(--muted);font-weight:500">Dimension</th>
+                <th style="text-align:right;padding:6px 0;color:var(--muted);font-weight:500">Effective Limit</th>
+                <th style="text-align:right;padding:6px 0;color:var(--muted);font-weight:500">Today's Usage</th>
+              </tr>
+            </thead>
+            <tbody id="budgetEffectiveBody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Claude Code authentication -->
+      <div class="section">
+        <div class="section-title" style="display:flex;align-items:center;gap:12px">
+          Claude Code Authentication
+          <button class="btn" style="padding:4px 10px;font-size:12px;margin-left:auto" onclick="loadClaudeAuthStatus()">&#8635; Refresh</button>
+        </div>
+        <p style="font-size:12px;color:var(--muted);margin-top:6px;margin-bottom:12px">
+          Manage the local <code>claude</code> CLI login that the claudecode provider uses for task execution.
+        </p>
+        <div id="ccAuthPanel" style="margin-top:8px">
+          <div style="font-size:13px;color:var(--muted)">Loading...</div>
+        </div>
+      </div>
+
+      <!-- Claude Code subscription usage -->
+      <div class="section">
+        <div class="section-title" style="display:flex;align-items:center;gap:12px">
+          Claude Code Subscription Usage
+          <button class="btn" style="padding:4px 10px;font-size:12px;margin-left:auto" onclick="loadClaudeUsage()">&#8635; Refresh</button>
+        </div>
+        <div id="claudeUsagePanel" style="margin-top:8px">
+          <div style="font-size:13px;color:var(--muted)">Loading...</div>
+        </div>
+      </div>
+
+      <!-- Anthropic API rate-limits panel -->
+      <div class="section">
+        <div class="section-title" style="display:flex;align-items:center;gap:12px">
+          Anthropic API Rate Limits
+          <button class="btn" style="padding:4px 10px;font-size:12px;margin-left:auto" onclick="loadRateLimits()">&#8635; Refresh</button>
+        </div>
+        <p style="font-size:12px;color:var(--muted);margin-top:6px;margin-bottom:12px">
+          Per-model limits captured from <code>anthropic-ratelimit-*</code> response headers.
+          Values update on every Anthropic API call. Tier and monthly spend limit (when exposed
+          by the API) are shown alongside per-model RPM, ITPM, OTPM, and any 5-hour / weekly windows.
+        </p>
+        <div id="rlEmpty" style="font-size:13px;color:var(--muted)">
+          No Anthropic rate-limit data captured yet. Make a call with the anthropic provider to populate this panel.
+        </div>
+        <div id="rlList"></div>
+      </div>
+
+    </div>
+
+    <!-- ════════════════════════════════════════════════════════ EXECUTORS -->
+    <div id="tab-executors" class="tab-panel">
+      <div class="section">
+        <div class="section-title" style="display:flex;align-items:center;gap:12px">
+          Executors
+          <span style="font-size:11px;font-weight:400;color:var(--muted)">global &mdash; shared by every project</span>
+          <button class="btn" style="padding:4px 10px;font-size:12px;margin-left:auto" onclick="loadExecutors()" title="Refresh executor list">&#8635; Refresh</button>
+          <button class="btn primary" data-global-perm="executor.manage" style="padding:4px 10px;font-size:12px" onclick="openEnrollModal()" title="Mint an enrollment token for a remote device">+ Enroll device</button>
+        </div>
+        <p style="font-size:12px;color:var(--muted);margin-top:4px;margin-bottom:12px">
+          An executor is where a harness actually runs. <strong>Host</strong> forks a child process of this
+          server with its user, filesystem, and network &mdash; no isolation. <strong>Container</strong> runs
+          the workload in a Docker/Podman sandbox on this machine. <strong>Remote</strong> dispatches it to an
+          enrolled edge device that dialled out to this control plane. Bind a project to one from its Overview tab.
+        </p>
+
+        <div id="execPolicyBanner" class="exec-banner" style="display:none"></div>
+        <div id="execWarnings" style="display:none;margin-bottom:12px"></div>
+
+        <div id="execEmpty" style="display:none;font-size:13px;color:var(--muted);padding:16px 0;text-align:center">
+          No executors registered. That should not happen &mdash; the host driver is built in.
+        </div>
+        <div id="execList" class="exec-grid"></div>
+      </div>
+    </div>
+
+    <!-- ════════════════════════════════════════════════════════════ AUDIT -->
+    <div id="tab-audit" class="tab-panel">
+      <div class="section">
+        <div class="section-title" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+          Audit trail
+          <span style="font-size:11px;font-weight:400;color:var(--muted)">global &mdash; admin only</span>
+          <span id="auditIntegrity" class="audit-integrity unknown" title="Hash-chain integrity">
+            <span class="audit-integrity-dot"></span><span id="auditIntegrityText">checking&hellip;</span>
+          </span>
+          <button class="btn" style="padding:4px 10px;font-size:12px;margin-left:auto" onclick="verifyAuditChain()" title="Recompute the SHA-256 chain from the genesis row">&#128274; Verify chain</button>
+          <button class="btn" style="padding:4px 10px;font-size:12px" onclick="copyAuditAsJSON()" title="Copy the rows currently shown as JSON">&#128203; Copy as JSON</button>
+          <button class="btn" style="padding:4px 10px;font-size:12px" onclick="loadAudit()" title="Reload the trail">&#8635; Refresh</button>
+        </div>
+        <p style="font-size:12px;color:var(--muted);margin-top:4px;margin-bottom:12px">
+          Append-only, hash-chained record of every state mutation: task changes, config writes,
+          authorization decisions, credential leases, egress grants, and executor fleet changes.
+          Each row's hash covers the one before it, so any edit, deletion, or insertion made behind
+          cloop's back breaks the chain and is reported above. Export the same data with
+          <code>cloop audit-log export --format jsonl|csv|cef</code>.
+        </p>
+
+        <div class="audit-filters">
+          <div class="audit-field">
+            <label class="form-label" for="auditFilterActor">Actor</label>
+            <select id="auditFilterActor" class="form-select" onchange="applyAuditFilters()"><option value="">Any</option></select>
+          </div>
+          <div class="audit-field">
+            <label class="form-label" for="auditFilterEntityType">Entity type</label>
+            <select id="auditFilterEntityType" class="form-select" onchange="applyAuditFilters()"><option value="">Any</option></select>
+          </div>
+          <div class="audit-field">
+            <label class="form-label" for="auditFilterEntityID">Entity ID</label>
+            <input id="auditFilterEntityID" class="form-input" type="text" placeholder="e.g. 42" onchange="applyAuditFilters()">
+          </div>
+          <div class="audit-field">
+            <label class="form-label" for="auditFilterEventType">Event type</label>
+            <input id="auditFilterEventType" class="form-input" type="text" placeholder="e.g. secret.lease" onchange="applyAuditFilters()">
+          </div>
+          <div class="audit-field">
+            <label class="form-label" for="auditFilterSince">Since</label>
+            <input id="auditFilterSince" class="form-input" type="text" placeholder="24h, 7d, 2026-01-31" onchange="applyAuditFilters()">
+          </div>
+          <div class="audit-field">
+            <label class="form-label" for="auditFilterUntil">Until</label>
+            <input id="auditFilterUntil" class="form-input" type="text" placeholder="1h, 2026-02-01" onchange="applyAuditFilters()">
+          </div>
+          <div class="audit-field wide">
+            <label class="form-label" for="auditFilterSearch">Payload contains</label>
+            <input id="auditFilterSearch" class="form-input" type="text" placeholder="substring match" onchange="applyAuditFilters()">
+          </div>
+          <div class="audit-field" style="flex:0 0 auto;min-width:0">
+            <label class="form-label">&nbsp;</label>
+            <button class="btn" style="padding:5px 12px;font-size:12px" onclick="resetAuditFilters()">Clear</button>
+          </div>
+        </div>
+
+        <div id="auditSummary" style="font-size:11.5px;color:var(--muted);margin-bottom:8px"></div>
+        <div id="auditEmpty" class="audit-empty" style="display:none">No audit events match these filters.</div>
+        <div style="overflow-x:auto">
+          <table class="audit-table" id="auditTable" style="display:none">
+            <thead>
+              <tr>
+                <th style="width:60px">ID</th>
+                <th style="width:170px">Time (UTC)</th>
+                <th style="width:180px">Actor</th>
+                <th style="width:170px">Event</th>
+                <th class="audit-hide-sm">Entity</th>
+              </tr>
+            </thead>
+            <tbody id="auditBody"></tbody>
+          </table>
+        </div>
+        <div id="auditMore" style="display:none;text-align:center;padding:12px 0">
+          <button class="btn" style="padding:5px 14px;font-size:12px" onclick="loadMoreAudit()">Load more</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══════════════════════════════════════════════════════════ SECRETS -->
+    <div id="tab-secrets" class="tab-panel">
+      <div class="section">
+        <div class="section-title" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+          Secrets &amp; grants
+          <span style="font-size:11px;font-weight:400;color:var(--muted)">global &mdash; maintainer and above</span>
+          <button class="btn" style="padding:4px 10px;font-size:12px;margin-left:auto" onclick="loadSecretsPanel()" title="Reload secrets, grants and leases">&#8635; Refresh</button>
+          <button class="btn" data-global-perm="secret.grant" style="padding:4px 10px;font-size:12px" onclick="openSecretModal()" title="Store a new sealed credential">+ Secret</button>
+          <button class="btn primary" data-global-perm="secret.grant" style="padding:4px 10px;font-size:12px" onclick="openGrantModal()" title="Authorise a subject to use a resource, with a TTL">+ Grant</button>
+        </div>
+        <p style="font-size:12px;color:var(--muted);margin-top:4px;margin-bottom:12px">
+          A <strong>secret</strong> is a sealed credential at rest. A <strong>grant</strong> says which executor or
+          project may use one, under which allowlist, until when. A <strong>lease</strong> is what an executor is
+          actually holding right now &mdash; minutes, not days &mdash; and is the only thing here that puts a
+          credential on a disk. cloop never returns secret material through this panel: rows carry a fingerprint
+          of the sealed record, never the value.
+        </p>
+
+        <div id="secBrokerBanner" class="sec-banner" style="display:none"></div>
+
+        <!-- ── Secrets ── -->
+        <div class="sec-sub">
+          <div class="sec-subtitle">Stored secrets <span class="sec-count" id="secSecretsCount"></span></div>
+          <div id="secSecretsEmpty" class="audit-empty" style="display:none">
+            No secrets stored. Add one, then grant it to a project or executor.
+          </div>
+          <div style="overflow-x:auto">
+            <table class="audit-table" id="secSecretsTable" style="display:none">
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th style="width:130px">Kind</th>
+                  <th style="width:200px" class="sec-hide-sm">Fingerprint</th>
+                  <th style="width:90px">Grants</th>
+                  <th style="width:170px" class="sec-hide-sm">Created</th>
+                  <th style="width:170px"></th>
+                </tr>
+              </thead>
+              <tbody id="secSecretsBody"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- ── Grants ── -->
+        <div class="sec-sub">
+          <div class="sec-subtitle">
+            Grants <span class="sec-count" id="secGrantsCount"></span>
+            <label class="filter-check" style="font-weight:400;font-size:11.5px;margin-left:auto">
+              <input type="checkbox" id="secGrantsActiveOnly" onchange="loadGrants()"> Active only
+            </label>
+          </div>
+          <div id="secGrantsEmpty" class="audit-empty" style="display:none">No grants.</div>
+          <div style="overflow-x:auto">
+            <table class="audit-table" id="secGrantsTable" style="display:none">
+              <thead>
+                <tr>
+                  <th style="width:130px">Kind</th>
+                  <th>Resource</th>
+                  <th style="width:190px">Subject</th>
+                  <th class="sec-hide-sm">Constraints</th>
+                  <th style="width:100px">Status</th>
+                  <th style="width:110px">Expires in</th>
+                  <th style="width:180px"></th>
+                </tr>
+              </thead>
+              <tbody id="secGrantsBody"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- ── Leases ── -->
+        <div class="sec-sub">
+          <div class="sec-subtitle">Live leases <span class="sec-count" id="secLeasesCount"></span></div>
+          <p class="sec-hint">
+            Credentials materialised into a running workload's memory-backed directory. Revoking wipes that
+            directory now, rather than waiting for the lease to lapse &mdash; a process that has already read a
+            file keeps what it read, so revoke the grant too if the credential itself is compromised.
+          </p>
+          <div id="secLeasesEmpty" class="audit-empty" style="display:none">
+            No leases outstanding. Nothing on this hub is holding a brokered credential.
+          </div>
+          <div style="overflow-x:auto">
+            <table class="audit-table" id="secLeasesTable" style="display:none">
+              <thead>
+                <tr>
+                  <th style="width:170px">Executor</th>
+                  <th style="width:180px">Project</th>
+                  <th>Credentials</th>
+                  <th style="width:120px">Time left</th>
+                  <th style="width:170px" class="sec-hide-sm">Issued</th>
+                  <th style="width:170px"></th>
+                </tr>
+              </thead>
+              <tbody id="secLeasesBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </main>
+
+  <!-- ── FAB: quick task add (mobile only) ── -->
+  <button id="fab-add-task" onclick="fabAddTask()" aria-label="Add task" title="Add task" style="display:none">+</button>
+
+</div>
+
+<!-- New Project modal -->
+<div id="new-project-overlay" onclick="if(event.target===this)closeNewProjectModal()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
+  <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;width:480px;max-width:95vw">
+    <h2 style="font-size:15px;font-weight:600;margin-bottom:16px">New Project</h2>
+    <div class="form-group">
+      <label class="form-label">Directory *</label>
+      <input class="form-input" id="npDir" placeholder="/path/to/new-project">
+    </div>
+    <div class="form-group">
+      <label class="form-label">Goal *</label>
+      <textarea class="form-textarea" id="npGoal" placeholder="What do you want to build?" style="min-height:70px"></textarea>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label class="form-label">Provider</label>
+        <select class="form-select" id="npProvider">
+          <option value="">default</option>
+          <option value="claudecode">claudecode</option>
+          <option value="anthropic">anthropic</option>
+          <option value="openai">openai</option>
+          <option value="ollama">ollama</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Model</label>
+        <select class="form-select" id="npModel"></select>
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label class="form-label">Effort (claudecode)</label>
+        <select class="form-select" id="npEffort">
+          <option value="">(default)</option>
+          <option value="low">low</option>
+          <option value="medium">medium</option>
+          <option value="high">high</option>
+          <option value="xhigh">xhigh</option>
+          <option value="max">max</option>
+        </select>
+      </div>
+      <div class="form-group"></div>
+    </div>
+    <div class="adv-grid" style="margin-bottom:12px">
+      <label class="adv-label"><input type="checkbox" id="npPMMode"> PM mode</label>
+      <label class="adv-label"><input type="checkbox" id="npAutoRun"> Start run immediately</label>
+    </div>
+    <div id="npError" style="font-size:12px;color:var(--red);margin-bottom:8px;display:none"></div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeNewProjectModal()">Cancel</button>
+      <button class="btn primary" onclick="submitNewProject()">Create Project</button>
+    </div>
+  </div>
+</div>
+
+<!-- Executor enrollment modal (global; token shown once) -->
+<div id="enroll-overlay" onclick="if(event.target===this)closeEnrollModal()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
+  <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;width:640px;max-width:95vw;max-height:90vh;overflow:auto">
+    <h2 style="font-size:15px;font-weight:600;margin-bottom:6px">Enroll a remote executor</h2>
+    <p style="font-size:12px;color:var(--muted);margin-bottom:16px;line-height:1.5">
+      The device dials <em>out</em> to this control plane, so it works behind NAT with no inbound firewall rule.
+      This mints a single-use token and prints the command to run there &mdash; nothing is contacted from here.
+    </p>
+    <div id="enrollForm">
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Device name</label>
+          <input class="form-input" id="enrollName" placeholder="e.g. edge-1">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Token lifetime (minutes)</label>
+          <input class="form-input" id="enrollTTL" type="number" min="1" max="1440" placeholder="15">
+        </div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Workspace root on the device (optional)</label>
+        <input class="form-input" id="enrollRoot" placeholder="/var/lib/cloop/workspaces">
+      </div>
+      <div id="enrollError" style="font-size:12px;color:var(--red);margin-bottom:8px;display:none"></div>
+      <div class="modal-footer">
+        <button class="btn" onclick="closeEnrollModal()">Cancel</button>
+        <button class="btn primary" id="enrollSubmitBtn" data-global-perm="executor.manage" onclick="submitEnroll()">Mint token</button>
+      </div>
+    </div>
+    <div id="enrollResult" style="display:none">
+      <div class="exec-banner warn" style="margin-bottom:12px">
+        <span class="exec-banner-icon">&#9888;</span>
+        <span id="enrollNotice"></span>
+      </div>
+      <!-- One-command onboarding (Task 20172). Shown first because it is the
+           path that also installs a hardened service unit, a dedicated user
+           and a 0600 credential — the manual command below installs nothing. -->
+      <div class="form-group" id="enrollInstallGroup" style="display:none">
+        <label class="form-label">Install as a service (recommended)</label>
+        <div class="exec-token" id="enrollInstallCommand"></div>
+        <div style="font-size:11.5px;color:var(--muted);margin-top:6px">
+          Fetches <code>/install.sh</code> from this hub and installs a systemd service with
+          <code>Restart=always</code>, a dedicated non-login user, and the token stored at mode 0600 &mdash;
+          never on the command line. Requires root on the device.
+        </div>
+        <div style="margin-top:8px">
+          <button class="btn" onclick="copyEnrollInstall()">Copy install command</button>
+        </div>
+      </div>
+      <div class="exec-banner warn" id="enrollInstallNote" style="display:none;margin-bottom:12px">
+        <span class="exec-banner-icon">&#9888;</span>
+        <span id="enrollInstallNoteText"></span>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Or run the agent in the foreground</label>
+        <div class="exec-token" id="enrollCommand"></div>
+        <div style="font-size:11.5px;color:var(--muted);margin-top:6px">
+          Nothing is installed and nothing restarts after a reboot. Good for a first check;
+          use the installer above for a device you intend to keep.
+        </div>
+      </div>
+      <div style="font-size:11.5px;color:var(--muted);margin-bottom:4px" id="enrollPin"></div>
+      <div style="font-size:11.5px;color:var(--muted);margin-bottom:12px" id="enrollExpiry"></div>
+      <div class="modal-footer">
+        <button class="btn" onclick="copyEnrollCommand()">Copy command</button>
+        <button class="btn primary" onclick="closeEnrollModal()">Done</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Add-secret modal (Task 20171) -->
+<div id="secret-overlay" onclick="if(event.target===this)closeSecretModal()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
+  <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;width:640px;max-width:95vw;max-height:90vh;overflow:auto">
+    <h2 style="font-size:15px;font-weight:600;margin-bottom:6px">Store a secret</h2>
+    <p style="font-size:12px;color:var(--muted);margin-bottom:16px;line-height:1.5">
+      The payload is sealed with the hub's <code>CLOOP_SECRET_KEY</code> on arrival and is never returned by any
+      endpoint &mdash; not to this panel, not to the API, not to the audit log. Storing it grants nothing on its
+      own; add a grant afterwards to say who may use it.
+    </p>
+    <div class="form-row">
+      <div class="form-group">
+        <label class="form-label" for="secretName">Name</label>
+        <input class="form-input" id="secretName" placeholder="prod-deploy-pat">
+      </div>
+      <div class="form-group">
+        <label class="form-label" for="secretKind">Kind</label>
+        <select class="form-select" id="secretKind" onchange="onSecretKindChange()"></select>
+      </div>
+    </div>
+    <div class="form-group">
+      <label class="form-label" for="secretPayload">Payload</label>
+      <textarea class="form-input" id="secretPayload" rows="6" spellcheck="false" autocomplete="off"
+                style="font-family:var(--mono, monospace);font-size:12px" placeholder="ghp_…"></textarea>
+      <div class="sec-hint" id="secretPayloadHint" style="margin-top:6px"></div>
+    </div>
+    <div id="secretError" style="font-size:12px;color:var(--red);margin-bottom:8px;display:none"></div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeSecretModal()">Cancel</button>
+      <button class="btn primary" id="secretSubmitBtn" data-global-perm="secret.grant" onclick="submitSecret()">Store secret</button>
+    </div>
+  </div>
+</div>
+
+<!-- New-grant wizard (Task 20171) -->
+<div id="grant-overlay" onclick="if(event.target===this)closeGrantModal()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
+  <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;width:700px;max-width:95vw;max-height:90vh;overflow:auto">
+    <h2 style="font-size:15px;font-weight:600;margin-bottom:6px">New grant</h2>
+    <p style="font-size:12px;color:var(--muted);margin-bottom:16px;line-height:1.5">
+      A grant is scoped in three dimensions: <strong>who</strong> (a project, an executor, or a label selector),
+      <strong>what</strong> (the allowlist below, which differs per kind), and <strong>how long</strong>. There is
+      no "allow everything" default &mdash; an empty allowlist is rejected rather than read as unrestricted.
+    </p>
+
+    <div class="form-group">
+      <label class="form-label" for="grantKind">Resource kind</label>
+      <select class="form-select" id="grantKind" onchange="onGrantKindChange()">
+        <option value="github_pat">GitHub PAT &mdash; repository allowlist + permission subset</option>
+        <option value="github_app">GitHub App &mdash; repository allowlist + permission subset</option>
+        <option value="kubeconfig">Kubernetes &mdash; kubeconfig context + namespace</option>
+        <option value="egress">Internet egress &mdash; host allowlist + byte quota</option>
+        <option value="registry">Container registry &mdash; registry allowlist</option>
+        <option value="env">Environment variables &mdash; key allowlist</option>
+        <option value="egress_proxy">External egress proxy secret &mdash; host allowlist</option>
+      </select>
+    </div>
+
+    <div class="form-group" id="grantSecretGroup">
+      <label class="form-label" for="grantSecret">Secret</label>
+      <select class="form-select" id="grantSecret"></select>
+      <div class="sec-hint" id="grantSecretHint" style="margin-top:6px"></div>
+    </div>
+
+    <div class="form-row">
+      <div class="form-group">
+        <label class="form-label" for="grantSubject">Subject (who may use it)</label>
+        <input class="form-input" id="grantSubject" placeholder="project:/srv/app">
+        <div class="sec-hint" style="margin-top:6px">
+          <code>project:/srv/app</code>, <code>executor:edge-01</code>, <code>label:region=eu,gpu=true</code>,
+          or <code>any</code>. Matching is exact &mdash; no prefix fuzziness.
+        </div>
+      </div>
+      <div class="form-group">
+        <label class="form-label" for="grantTTL">Grant lifetime</label>
+        <select class="form-select" id="grantTTL">
+          <option value="60">1 hour</option>
+          <option value="480">8 hours</option>
+          <option value="1440" selected>24 hours (default)</option>
+          <option value="10080">7 days</option>
+          <option value="43200">30 days</option>
+          <option value="129600">90 days (maximum)</option>
+        </select>
+        <div class="sec-hint" style="margin-top:6px">
+          A lease lasts 15 minutes regardless and is renewed while work continues, so a revocation lands within
+          one lease period rather than at the end of this.
+        </div>
+      </div>
+    </div>
+
+    <!-- github_pat / github_app -->
+    <div class="sec-kindset" id="grantSet-github">
+      <div class="form-group">
+        <label class="form-label" for="grantRepos">Repository allowlist</label>
+        <input class="form-input" id="grantRepos" placeholder="acme/*, acme/widgets">
+        <div class="sec-hint" style="margin-top:6px">
+          Comma-separated <code>owner/repo</code> globs; <code>*</code> does not cross the slash, so
+          <code>acme/*</code> covers <code>acme/widgets</code> only. Use <code>*</code> alone to allow every
+          repository &mdash; which is also the only case where a bare <code>GITHUB_TOKEN</code> is exported.
+          Narrower grants are delivered as a git credential helper that releases the token per-repository.
+        </div>
+      </div>
+      <div class="form-group">
+        <label class="form-label" for="grantPermissions">Permission subset</label>
+        <input class="form-input" id="grantPermissions" placeholder="contents:read, pull_requests:write">
+        <div class="sec-hint" style="margin-top:6px">
+          Enforced at cloop's own GitHub call sites. GitHub has no API to narrow an already-issued PAT, so this
+          constrains what cloop will do with the token &mdash; not what the token is capable of. Mint the PAT
+          with the narrowest scopes GitHub offers as well.
+        </div>
+      </div>
+    </div>
+
+    <!-- kubeconfig -->
+    <div class="sec-kindset" id="grantSet-kubeconfig">
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label" for="grantContexts">Context allowlist</label>
+          <input class="form-input" id="grantContexts" placeholder="prod-eu, staging">
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="grantNamespaces">Namespace allowlist</label>
+          <input class="form-input" id="grantNamespaces" placeholder="team-a, team-a-ci">
+        </div>
+      </div>
+      <div class="sec-hint">
+        At least one of the two is required. The delivered kubeconfig is <em>rewritten</em> to contain only the
+        allowed contexts with an allowed namespace pinned on each, so this is enforced by construction rather
+        than by convention. Verb-level restriction is not cloop's to give: which verbs the kubeconfig's user may
+        use is decided by the cluster's own RBAC, so bind that user to a Role that permits only what this grant
+        is for.
+      </div>
+    </div>
+
+    <!-- egress (the hub's own connection) -->
+    <div class="sec-kindset" id="grantSet-egress">
+      <div class="form-group">
+        <label class="form-label" for="grantHosts">Destination host allowlist</label>
+        <input class="form-input" id="grantHosts" placeholder="api.github.com, *.npmjs.org">
+        <div class="sec-hint" style="margin-top:6px">
+          <code>*.example.com</code> matches subdomains only, not the apex &mdash; list the bare domain
+          separately if you mean both.
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label" for="grantPorts">Ports</label>
+          <input class="form-input" id="grantPorts" placeholder="80, 443">
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="grantSessionTTL">Session lifetime (minutes)</label>
+          <input class="form-input" id="grantSessionTTL" type="number" min="1" max="1440" placeholder="15">
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label" for="grantMaxUp">Upload quota per session</label>
+          <input class="form-input" id="grantMaxUp" placeholder="100m">
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="grantMaxDown">Download quota per session</label>
+          <input class="form-input" id="grantMaxDown" placeholder="2g">
+        </div>
+      </div>
+      <div class="form-group">
+        <label class="form-label" for="grantCIDRs">Address allowlist (optional)</label>
+        <input class="form-input" id="grantCIDRs" placeholder="10.0.0.0/8">
+        <div class="sec-hint" style="margin-top:6px">
+          The only way to reach a private address: cloop blocks loopback, private, and link-local destinations
+          unless a prefix here covers them. Writing <code>169.254.169.254/32</code> out in full is deliberate
+          &mdash; "let this sandbox reach the metadata service" should not be a checkbox.
+        </div>
+      </div>
+    </div>
+
+    <!-- registry -->
+    <div class="sec-kindset" id="grantSet-registry">
+      <div class="form-group">
+        <label class="form-label" for="grantRegistries">Registry allowlist</label>
+        <input class="form-input" id="grantRegistries" placeholder="ghcr.io, *.jfrog.io">
+        <div class="sec-hint" style="margin-top:6px">
+          The delivered docker config is filtered to these registries, so credentials for the others never
+          reach the workload.
+        </div>
+      </div>
+    </div>
+
+    <!-- env -->
+    <div class="sec-kindset" id="grantSet-env">
+      <div class="form-group">
+        <label class="form-label" for="grantEnvKeys">Key allowlist (optional)</label>
+        <input class="form-input" id="grantEnvKeys" placeholder="NPM_TOKEN, SENTRY_DSN">
+        <div class="sec-hint" style="margin-top:6px">
+          Leave empty to deliver every key the secret holds &mdash; safe here because an env secret's own keys
+          are its scope, unlike the other kinds where an empty list is rejected.
+        </div>
+      </div>
+    </div>
+
+    <!-- egress_proxy secret (an external proxy's credentials, not the hub's connection) -->
+    <div class="sec-kindset" id="grantSet-egressproxy">
+      <div class="form-group">
+        <label class="form-label" for="grantProxyHosts">Allowed host list</label>
+        <input class="form-input" id="grantProxyHosts" placeholder="api.github.com, *.npmjs.org">
+        <div class="sec-hint" style="margin-top:6px">
+          This kind carries its allowlist <em>to</em> the executor, whose network policy is the enforcement
+          point. For an allowlist cloop itself enforces, use <strong>Internet egress</strong> above instead.
+        </div>
+      </div>
+    </div>
+
+    <div class="form-group">
+      <label class="form-label" for="grantScope">Label (optional)</label>
+      <input class="form-input" id="grantScope" placeholder="ci">
+      <div class="sec-hint" style="margin-top:6px">
+        A free-form tag for grouping. It carries no authorisation weight, so editing it cannot widen the grant.
+      </div>
+    </div>
+
+    <div id="grantError" style="font-size:12px;color:var(--red);margin-bottom:8px;display:none;white-space:pre-wrap"></div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeGrantModal()">Cancel</button>
+      <button class="btn primary" id="grantSubmitBtn" data-global-perm="secret.grant" onclick="submitGrant()">Create grant</button>
+    </div>
+  </div>
+</div>
+
+<!-- Executor picker modal (per-project: where this project's harness runs) -->
+<div id="executor-picker-overlay" onclick="if(event.target===this)closeExecutorPickerModal()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
+  <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;width:560px;max-width:95vw;max-height:90vh;overflow:auto">
+    <h2 style="font-size:15px;font-weight:600;margin-bottom:6px">Execution target</h2>
+    <p style="font-size:12px;color:var(--muted);margin-bottom:16px;line-height:1.5">
+      Where this project's harness runs. Changing it takes effect on the next run; work already in flight
+      stays on the executor that started it.
+    </p>
+    <div class="form-group">
+      <label class="form-label">Executor</label>
+      <select class="form-select" id="epExecutor"></select>
+    </div>
+    <div id="epHint" style="font-size:11.5px;color:var(--muted);margin-bottom:12px;line-height:1.5"></div>
+    <div id="epError" style="font-size:12px;color:var(--red);margin-bottom:8px;display:none"></div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeExecutorPickerModal()">Cancel</button>
+      <button class="btn primary" id="epSaveBtn" onclick="submitExecutorBind()">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- Provider / Model picker modal -->
+<div id="provider-model-overlay" onclick="if(event.target===this)closeProviderModelModal()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
+  <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;width:520px;max-width:95vw">
+    <h2 style="font-size:15px;font-weight:600;margin-bottom:16px">Provider &amp; Model</h2>
+    <div class="form-row">
+      <div class="form-group" style="flex:1">
+        <label class="form-label">Provider</label>
+        <select class="form-select" id="pmProvider" onchange="onPMProviderChange()">
+          <option value="claudecode">claudecode</option>
+          <option value="anthropic">anthropic</option>
+          <option value="openai">openai</option>
+          <option value="ollama">ollama</option>
+        </select>
+      </div>
+      <div class="form-group" style="flex:1">
+        <label class="form-label">Model</label>
+        <select class="form-select" id="pmModel"></select>
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group" style="flex:1">
+        <label class="form-label">Effort</label>
+        <select class="form-select" id="pmEffort">
+          <option value="">(default)</option>
+          <option value="low">low</option>
+          <option value="medium">medium</option>
+          <option value="high">high</option>
+          <option value="xhigh">xhigh</option>
+          <option value="max">max</option>
+        </select>
+      </div>
+      <div class="form-group" style="flex:1"></div>
+    </div>
+    <p id="pmEffortHint" style="display:none;font-size:11px;color:var(--muted);margin-top:-6px;margin-bottom:6px">Effort applies to the claudecode provider only.</p>
+    <p style="font-size:12px;color:var(--muted);margin-top:6px;margin-bottom:8px">
+      Saved on the project. Used by all subsequent runs (Run, Run PM, Run with options) until changed.
+    </p>
+    <div id="pmError" style="display:none;color:var(--red);font-size:12px;margin-bottom:8px"></div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeProviderModelModal()">Cancel</button>
+      <button class="btn primary" onclick="saveProviderModel()">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- Edit Goal modal -->
+<div id="goal-edit-overlay" onclick="if(event.target===this)closeGoalEditModal()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
+  <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;width:520px;max-width:95vw">
+    <h2 style="font-size:15px;font-weight:600;margin-bottom:16px">Edit Project Goal</h2>
+    <div class="form-group">
+      <label class="form-label">Goal *</label>
+      <textarea class="form-textarea" id="goalEditInput" placeholder="Project goal" style="min-height:90px"></textarea>
+    </div>
+    <p style="font-size:12px;color:var(--muted);margin-bottom:8px">Updates the project goal saved in state. Existing tasks and progress are preserved.</p>
+    <div id="goalEditError" style="display:none;color:var(--red);font-size:12px;margin-bottom:8px"></div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeGoalEditModal()">Cancel</button>
+      <button class="btn primary" onclick="saveGoalEdit()">Save Goal</button>
+    </div>
+  </div>
+</div>
+
+<!-- Edit Instructions modal -->
+<div id="instructions-edit-overlay" onclick="if(event.target===this)closeInstructionsEditModal()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
+  <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;width:620px;max-width:95vw">
+    <h2 style="font-size:15px;font-weight:600;margin-bottom:16px">Edit Instructions / Constraints</h2>
+    <div class="form-group">
+      <label class="form-label">Instructions</label>
+      <textarea class="form-textarea" id="instructionsEditInput" placeholder="e.g. Use Go, no external dependencies, prefer stdlib..." style="min-height:160px"></textarea>
+    </div>
+    <p style="font-size:12px;color:var(--muted);margin-bottom:8px">Persisted in state and prepended to every task prompt. Leave empty to clear.</p>
+    <div id="instructionsEditError" style="display:none;color:var(--red);font-size:12px;margin-bottom:8px"></div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeInstructionsEditModal()">Cancel</button>
+      <button class="btn primary" onclick="saveInstructionsEdit()">Save Instructions</button>
+    </div>
+  </div>
+</div>
+
+<!-- Delete confirmation modal -->
+<div id="delete-modal-overlay" onclick="if(event.target===this)closeDeleteModal()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
+  <div id="delete-modal" style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;width:400px;max-width:92vw">
+    <h2 style="font-size:15px;font-weight:600;margin-bottom:10px;color:var(--red)">Delete Task</h2>
+    <p id="deleteModalMsg" style="font-size:13px;color:var(--muted);margin-bottom:16px"></p>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeDeleteModal()">Cancel</button>
+      <button class="btn danger" onclick="executeDeleteTask()">Delete</button>
+    </div>
+  </div>
+</div>
+
+<!-- Edit task modal -->
+<div id="modal-overlay" onclick="if(event.target===this)closeModal()">
+  <div id="modal">
+    <h2 id="modalTitle">Edit Task</h2>
+    <div class="form-group">
+      <label class="form-label">Title *</label>
+      <input class="form-input" id="modalTitle_" placeholder="Task title">
+    </div>
+    <div class="form-group">
+      <label class="form-label">Description</label>
+      <textarea class="form-textarea" id="modalDesc" placeholder="Optional description"></textarea>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label class="form-label">Priority (1 = highest)</label>
+        <input class="form-input" id="modalPriority" type="number" min="1">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Depends on (task IDs, e.g. 1,2)</label>
+        <input class="form-input" id="modalDeps" placeholder="e.g. 1,2 or leave blank">
+      </div>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Max minutes (0 = use project default; applies live)</label>
+      <input class="form-input" id="modalMaxMinutes" type="number" min="0" max="10080" placeholder="0 = inherit project default">
+    </div>
+    <input type="hidden" id="modalTaskId">
+    <div class="modal-footer">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn primary" onclick="submitEditTask()">Save Changes</button>
+    </div>
+  </div>
+</div>
+
+<!-- Task details modal (read-only — execution result, failure diagnosis, output) -->
+<div id="td-overlay" onclick="if(event.target===this)closeTaskDetails()">
+  <div id="td-modal" role="dialog" aria-modal="true" aria-labelledby="td-title">
+    <div class="td-header">
+      <h2 id="td-title">Task Details</h2>
+      <button class="td-close" onclick="closeTaskDetails()" aria-label="Close">&times;</button>
+    </div>
+    <div id="td-body" class="td-body"></div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeTaskDetails()">Close</button>
+      <button class="btn primary" id="td-edit-btn" onclick="taskDetailsEditCurrent()">Edit task</button>
+    </div>
+  </div>
+</div>
+
+<!-- Decompose modal (AI splits a task into sub-tasks; user reviews before applying) -->
+<div id="dc-overlay" onclick="if(event.target===this)closeDecomposeModal()">
+  <div id="dc-modal" role="dialog" aria-modal="true" aria-labelledby="dc-title">
+    <div class="dc-header">
+      <h2 id="dc-title">Decompose Task</h2>
+      <button class="dc-close" onclick="closeDecomposeModal()" aria-label="Close">&times;</button>
+    </div>
+    <div id="dc-body" class="dc-body"></div>
+    <div class="modal-footer">
+      <span id="dc-count" style="margin-right:auto;font-size:12px;color:var(--muted)"></span>
+      <button class="btn" onclick="closeDecomposeModal()">Cancel</button>
+      <button class="btn primary" id="dc-apply-btn" onclick="applyDecompose()" style="display:none">Add sub-tasks</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Delete project confirmation modal ───────────────────────────────── -->
+<div id="delproj-overlay" onclick="if(event.target===this)closeDeleteProjectModal()" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,.7); z-index:90; align-items:center; justify-content:center;">
+  <div id="delproj-modal" style="background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); padding:24px; width:520px; max-width:92vw;">
+    <h2 style="font-size:15px; font-weight:600; margin-bottom:12px; color:var(--danger,#e55);">Delete project</h2>
+    <p style="font-size:13px; color:var(--muted); margin-bottom:14px;">
+      Remove <strong id="delproj-name">project</strong> from the cloop registry.
+      This stops it from appearing in the dashboard. The project's files are kept
+      on disk unless you check the box below.
+    </p>
+    <div style="font-size:12px; color:var(--muted); margin-bottom:12px;">
+      Path: <code id="delproj-path" style="background:var(--bg); padding:2px 6px; border-radius:4px; word-break:break-all;"></code>
+    </div>
+    <label style="display:flex; align-items:flex-start; gap:8px; padding:10px; background:var(--bg); border:1px solid var(--border); border-radius:var(--radius); cursor:pointer;">
+      <input type="checkbox" id="delproj-deleteRoot" style="margin-top:3px;">
+      <span style="font-size:13px;">
+        <strong style="color:var(--danger,#e55);">Also delete the project root directory</strong>
+        <span style="display:block; color:var(--muted); font-size:12px; margin-top:2px;">
+          Permanently removes every file under the path above (rm -rf). This cannot be undone.
+        </span>
+      </span>
+    </label>
+    <input type="hidden" id="delproj-idx">
+    <div class="modal-footer">
+      <button class="btn" onclick="closeDeleteProjectModal()">Cancel</button>
+      <button class="btn danger" onclick="submitDeleteProject()">Delete</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Command Palette ─────────────────────────────────────────────────── -->
+<div id="cmd-backdrop" role="dialog" aria-modal="true" aria-label="Command palette">
+  <div id="cmd-palette">
+    <div id="cmd-input-wrap">
+      <span id="cmd-input-icon">⌘</span>
+      <input id="cmd-input" type="text" placeholder="Type a command or search…" autocomplete="off" spellcheck="false" aria-label="Command palette search">
+      <span id="cmd-shortcut-hint"><kbd>Esc</kbd> to close</span>
+    </div>
+    <div id="cmd-results" role="listbox"></div>
+    <div id="cmd-footer">
+      <span><kbd>↑</kbd><kbd>↓</kbd> navigate</span>
+      <span><kbd>Enter</kbd> select</span>
+      <span><kbd>Esc</kbd> close</span>
+    </div>
+  </div>
+</div>
+
+<!-- ── Help modal (keyboard shortcuts cheat sheet) ─────────────────────── -->
+<div id="help-backdrop" role="dialog" aria-modal="true" aria-labelledby="help-modal-title">
+  <div id="help-modal">
+    <div id="help-modal-header">
+      <h3 id="help-modal-title">Keyboard Shortcuts</h3>
+      <button id="help-modal-close" onclick="closeHelpModal()" aria-label="Close help">&times;</button>
+    </div>
+    <div id="help-modal-body" role="document"></div>
+    <div id="help-modal-footer">
+      <span><kbd>Esc</kbd> close</span>
+      <span><kbd>?</kbd> open this dialog</span>
+    </div>
+  </div>
+</div>
+
+<!-- ── Keyboard shortcut footer ───────────────────────────────────────── -->
+<div id="kb-footer" role="complementary" aria-label="Keyboard shortcuts">
+  <span><kbd>?</kbd> help</span>
+  <span class="kb-sep">|</span>
+  <span><kbd>⌘K</kbd> palette</span>
+  <span class="kb-sep">|</span>
+  <span><kbd>/</kbd> search</span>
+  <span class="kb-sep">|</span>
+  <span><kbd>j</kbd><kbd>k</kbd> navigate</span>
+  <span class="kb-sep">|</span>
+  <span><kbd>n</kbd> new task</span>
+  <span class="kb-sep">|</span>
+  <span><kbd>r</kbd> refresh</span>
+  <span class="kb-sep">|</span>
+  <span><kbd>t</kbd> theme</span>
+  <span class="kb-sep">|</span>
+  <span><kbd>1</kbd>-<kbd>9</kbd> tabs</span>
+  <span class="kb-sep">|</span>
+  <span><kbd>Esc</kbd> close</span>
+</div>
+
+<div id="toast"></div>
+
+<!-- ── JS error boundary toast + full-screen recovery banner ───────────── -->
+<div id="errboundary-toast" role="alert" aria-live="assertive" style="display:none;position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:var(--surface);border:1px solid rgba(248,81,73,.6);border-radius:var(--radius);padding:10px 14px;font-size:13px;z-index:120;box-shadow:0 4px 16px rgba(0,0,0,.35);max-width:min(440px,92vw);align-items:center;gap:10px;color:var(--text)">
+  <span aria-hidden="true" style="color:var(--red);font-size:15px">&#9888;</span>
+  <span id="errboundary-toast-text" style="flex:1">Something went wrong &mdash; click to reload.</span>
+  <button id="errboundary-toast-reload" type="button" class="btn" style="padding:4px 10px;font-size:12px" onclick="location.reload()">Reload</button>
+  <button id="errboundary-toast-close" type="button" aria-label="Dismiss" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:16px;line-height:1;padding:0 2px" onclick="document.getElementById('errboundary-toast').style.display='none'">&times;</button>
+</div>
+<div id="errboundary-banner" role="alertdialog" aria-modal="true" aria-labelledby="errboundary-banner-title" aria-describedby="errboundary-banner-desc" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:200;align-items:center;justify-content:center">
+  <div style="background:var(--surface);border:1px solid rgba(248,81,73,.5);border-radius:var(--radius);padding:24px;max-width:min(520px,92vw);text-align:center">
+    <div aria-hidden="true" style="font-size:36px;color:var(--red);margin-bottom:8px">&#9888;</div>
+    <h2 id="errboundary-banner-title" style="font-size:16px;font-weight:600;margin-bottom:8px">The dashboard is in a broken state</h2>
+    <p id="errboundary-banner-desc" style="font-size:13px;color:var(--muted);margin-bottom:16px">Several JavaScript errors have occurred in quick succession. Reloading the page usually clears the issue. The error details have been logged on the server.</p>
+    <div class="modal-footer" style="justify-content:center">
+      <button class="btn" type="button" onclick="document.getElementById('errboundary-banner').style.display='none'">Dismiss</button>
+      <button class="btn primary" type="button" onclick="location.reload()">Reload page</button>
+    </div>
+  </div>
+</div>
+
+<script src="{{asset:errboundary.js}}"></script>
+<script src="{{asset:app.js}}"></script>
+</body>
+</html>

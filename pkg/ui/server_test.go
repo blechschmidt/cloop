@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -124,12 +125,31 @@ func TestWSOriginAllowed(t *testing.T) {
 // TestChartJSServedLocally verifies the Chart.js bundle is served from the
 // same origin (so the strict script-src 'self' CSP doesn't block it) and that
 // the dashboard references the local asset rather than the jsdelivr CDN.
+//
+// Since Task 20174 the asset is addressed by content hash, so the URL is
+// discovered from the served page rather than hard-coded — which also proves
+// the page and the handler agree on it.
 func TestChartJSServedLocally(t *testing.T) {
 	dir := setupProjectDir(t, cloopGoal, nil)
 	ts := newTestServer(t, dir, nil)
 
+	dashResp, err := http.Get(ts.URL + "/")
+	if err != nil {
+		t.Fatalf("GET dashboard: %v", err)
+	}
+	defer dashResp.Body.Close()
+	dash, _ := io.ReadAll(dashResp.Body)
+
+	if bytes.Contains(dash, []byte("cdn.jsdelivr.net")) {
+		t.Error("dashboard still references the jsdelivr CDN (blocked by CSP)")
+	}
+	m := regexp.MustCompile(`<script src="(/assets/chart\.[0-9a-f]+\.js)">`).FindSubmatch(dash)
+	if m == nil {
+		t.Fatal("dashboard does not reference a same-origin /assets/chart.<hash>.js")
+	}
+
 	// The asset must be served with a JS content type and non-empty body.
-	resp, err := http.Get(ts.URL + "/assets/chart.umd.min.js")
+	resp, err := http.Get(ts.URL + string(m[1]))
 	if err != nil {
 		t.Fatalf("GET chart.js: %v", err)
 	}
@@ -143,21 +163,6 @@ func TestChartJSServedLocally(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	if len(body) < 10000 || !bytes.Contains(body, []byte("Chart")) {
 		t.Fatalf("chart.js body looks wrong: %d bytes", len(body))
-	}
-
-	// The dashboard HTML must load the local asset, never the CDN, so the
-	// script-src 'self' CSP keeps charts working.
-	dashResp, err := http.Get(ts.URL + "/")
-	if err != nil {
-		t.Fatalf("GET dashboard: %v", err)
-	}
-	defer dashResp.Body.Close()
-	dash, _ := io.ReadAll(dashResp.Body)
-	if !bytes.Contains(dash, []byte("/assets/chart.umd.min.js")) {
-		t.Error("dashboard does not reference the local /assets/chart.umd.min.js")
-	}
-	if bytes.Contains(dash, []byte("cdn.jsdelivr.net")) {
-		t.Error("dashboard still references the jsdelivr CDN (blocked by CSP)")
 	}
 }
 

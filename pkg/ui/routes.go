@@ -231,7 +231,10 @@ func (s *Server) routeTable() []routeSpec {
 		// whether this caller may load the dashboard at all, and the app
 		// renders only what /api/me says the user can do.
 		{Pattern: "/", Handler: s.handleDashboard, Perm: public},
-		{Pattern: "/assets/chart.umd.min.js", Handler: s.handleChartJS, Perm: public},
+		// The dashboard's CSS, JS and vendored Chart.js, addressed by
+		// content hash. A subtree pattern rather than one route per file
+		// because the paths change with their contents (see static.go).
+		{Pattern: "/assets/", Handler: s.handleAsset, Perm: public},
 
 		// OIDC login machinery. Gating these on a permission would make
 		// signing in require being signed in.
