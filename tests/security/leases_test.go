@@ -563,6 +563,7 @@ func TestKnownSecretComparisonsUseSubtle(t *testing.T) {
 		ModulePath + "/pkg/executor/remote", // enrollment token MAC + secret hash
 		ModulePath + "/pkg/egressbroker",    // proxy session token
 		ModulePath + "/pkg/ui",              // dashboard bearer token
+		ModulePath + "/pkg/apitoken",        // scoped API token secret hash
 	} {
 		if sites[want] == 0 {
 			t.Errorf("%s performs no constant-time comparison. It authenticates "+

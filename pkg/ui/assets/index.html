@@ -1568,6 +1568,48 @@
             </table>
           </div>
         </div>
+
+        <!-- ── API tokens (Task 20175) ──
+             The whole sub-section is hidden below token.admin rather than
+             rendered empty: the roles that can broker credentials but not mint
+             tokens have no action here, and an always-visible "you may not do
+             this" panel reads as a broken feature. -->
+        <div class="sec-sub" data-global-perm="token.admin" data-perm-hide>
+          <div class="sec-subtitle" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+            API tokens <span class="sec-count" id="secTokensCount"></span>
+            <span style="font-size:11px;font-weight:400;color:var(--muted)">admin only &mdash; <code>token.admin</code></span>
+            <button class="btn" data-global-perm="token.admin" data-perm-hide
+                    style="padding:3px 9px;font-size:12px;margin-left:auto"
+                    onclick="openTokenModal()" title="Mint a scoped token for CI, a script, or an edge device">+ Token</button>
+          </div>
+          <p class="sec-hint">
+            A token authenticates a caller that has no browser: CI, a deploy script, an edge device. Unlike the
+            static <code>--token</code> it is <strong>not</strong> an authorization bypass &mdash; it carries roles,
+            can be limited to specific projects, expires, and is revocable on its own. cloop stores a salted hash,
+            so a token value is shown exactly once and can never be read back.
+          </p>
+          <div id="secTokensBanner" class="sec-banner" style="display:none"></div>
+          <div id="secTokensEmpty" class="audit-empty" style="display:none">
+            No API tokens. Mint one to give CI or an edge device a credential narrower than the whole hub.
+          </div>
+          <div style="overflow-x:auto">
+            <table class="audit-table" id="secTokensTable" style="display:none">
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th style="width:190px" class="sec-hide-sm">Prefix</th>
+                  <th style="width:150px">Roles</th>
+                  <th style="width:160px">Projects</th>
+                  <th style="width:90px">Status</th>
+                  <th style="width:120px">Expires</th>
+                  <th style="width:120px" class="sec-hide-sm">Last used</th>
+                  <th style="width:150px"></th>
+                </tr>
+              </thead>
+              <tbody id="secTokensBody"></tbody>
+            </table>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -1733,6 +1775,81 @@
       <button class="btn" onclick="closeSecretModal()">Cancel</button>
       <button class="btn primary" id="secretSubmitBtn" data-global-perm="secret.grant" onclick="submitSecret()">Store secret</button>
     </div>
+  </div>
+</div>
+
+<!-- Mint-an-API-token modal (Task 20175) -->
+<div id="token-overlay" onclick="if(event.target===this)closeTokenModal()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
+  <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;width:640px;max-width:95vw;max-height:90vh;overflow:auto">
+
+    <!-- Step 1: the form -->
+    <div id="tokenFormStep">
+      <h2 style="font-size:15px;font-weight:600;margin-bottom:6px">New API token</h2>
+      <p style="font-size:12px;color:var(--muted);margin-bottom:16px;line-height:1.5">
+        The token acts with the roles you pick and nothing more. You can only grant roles you hold yourself &mdash;
+        the list below is already filtered to those. Leave the project list empty to allow every project your roles
+        permit, or pick specific ones to pin it down.
+      </p>
+      <div class="form-group">
+        <label class="form-label" for="tokenName">Name</label>
+        <input class="form-input" id="tokenName" placeholder="github-actions — payments deploy" autocomplete="off">
+        <div class="sec-hint" style="margin-top:6px">Describe what uses it, so a future you can decide whether to revoke it.</div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label" for="tokenRoles">Roles</label>
+          <select class="form-select" id="tokenRoles" multiple size="4" style="height:auto"></select>
+          <div class="sec-hint" style="margin-top:6px">Ctrl/Cmd-click for more than one.</div>
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="tokenExpiry">Expires in</label>
+          <select class="form-select" id="tokenExpiry">
+            <option value="7">7 days</option>
+            <option value="30">30 days</option>
+            <option value="90" selected>90 days</option>
+            <option value="365">1 year</option>
+            <option value="0">Never</option>
+          </select>
+          <div class="sec-hint" style="margin-top:6px">A token that never expires is one nobody remembers to retire.</div>
+        </div>
+      </div>
+      <div class="form-group">
+        <label class="form-label" for="tokenProjects">Projects</label>
+        <select class="form-select" id="tokenProjects" multiple size="5" style="height:auto"></select>
+        <div class="sec-hint" style="margin-top:6px">
+          Nothing selected means every project. A scoped token cannot read or change a project outside this list &mdash;
+          it is told the project does not exist.
+        </div>
+      </div>
+      <div id="tokenError" style="font-size:12px;color:var(--red);margin-bottom:8px;display:none"></div>
+      <div class="modal-footer">
+        <button class="btn" onclick="closeTokenModal()">Cancel</button>
+        <button class="btn primary" id="tokenSubmitBtn" data-global-perm="token.admin" onclick="submitToken()">Create token</button>
+      </div>
+    </div>
+
+    <!-- Step 2: copy-once. Replaces the form rather than appearing beside it,
+         so the value is on screen alone and cannot be missed. -->
+    <div id="tokenResultStep" style="display:none">
+      <h2 style="font-size:15px;font-weight:600;margin-bottom:6px">Copy your token now</h2>
+      <p style="font-size:12px;color:var(--muted);margin-bottom:14px;line-height:1.5">
+        This is the only time cloop will show it. Only a salted hash is stored, so the value cannot be recovered &mdash;
+        if you lose it, revoke this token and mint another.
+      </p>
+      <div style="display:flex;gap:8px;align-items:stretch;margin-bottom:12px">
+        <input class="form-input" id="tokenPlaintext" readonly spellcheck="false"
+               style="font-family:var(--mono, monospace);font-size:12px;flex:1" onclick="this.select()">
+        <button class="btn primary" id="tokenCopyBtn" onclick="copyTokenPlaintext()" style="white-space:nowrap">Copy</button>
+      </div>
+      <div class="sec-hint" style="margin-bottom:14px">
+        Use it as <code>Authorization: Bearer &lt;token&gt;</code>.
+      </div>
+      <div id="tokenResultMeta" style="font-size:12px;color:var(--muted);line-height:1.6"></div>
+      <div class="modal-footer">
+        <button class="btn primary" onclick="closeTokenModal()">Done &mdash; I've stored it</button>
+      </div>
+    </div>
+
   </div>
 </div>
 

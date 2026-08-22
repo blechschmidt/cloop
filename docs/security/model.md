@@ -188,19 +188,92 @@ which `cloop hub bootstrap` writes as `none`.
 | `viewer` | `project.read`, `executor.read` |
 | `operator` | `run.start`, `run.stop`, `task.mutate` |
 | `maintainer` | `project.write`, `config.write`, `secret.grant`, `secret.revoke` |
-| `admin` | everything, including `executor.manage`, `audit.read`, `user.manage` |
+| `admin` | everything, including `executor.manage`, `audit.read`, `user.manage`, `token.admin` |
 
 **Permissions** (`AllPermissions`): `project.read`, `project.write`, `run.start`,
 `run.stop`, `task.mutate`, `executor.read`, `executor.manage`, `secret.grant`,
-`secret.revoke`, `config.write`, `audit.read`, `user.manage`. Plus `public`, an
-explicit escape hatch used only by unguarded routes (the dashboard shell, the
-OIDC login endpoints, `/api/me`, `/healthz`, `/readyz`).
+`secret.revoke`, `config.write`, `audit.read`, `user.manage`, `token.admin`.
+Plus `public`, an explicit escape hatch used only by unguarded routes (the
+dashboard shell, the OIDC login endpoints, `/api/me`, `/healthz`, `/readyz`).
 
 Roles are granted by matching a claim from the ID token — `group`, `role`,
 `email` or `sub` — optionally scoped to a project. A static bearer token
 authenticates as `admin` with source `static_token`, which is why it belongs
 only in deployments that have no SSO. Every privileged decision, allow or deny,
 is written to the audit trail (`pkg/ui/authz.go:294`).
+
+### API tokens for non-interactive callers
+
+A CI job cannot complete an OIDC redirect. Scoped API tokens
+(`pkg/apitoken`) are the credential for callers with no browser: CI, deploy
+scripts, and edge devices.
+
+```bash
+cloop hub token create ci-payments --role operator --project payments --expires-in 30d
+```
+
+A token is minted as `cloop_pat_<id>_<secret>` — 64 bits of public id and 256
+bits of secret. cloop stores only `<alg>$<salt>$<digest>` over the secret half
+plus a display prefix, so a stolen database file yields no usable credential
+and the value is shown exactly once. Verification is one indexed read and a
+constant-time comparison; expired and revoked tokens are refused.
+
+**A token is not a bypass.** Unlike `--token`, it resolves to an ordinary
+`authz.Decision` built from the roles stamped into it, so every permission
+check in the route table applies to it unchanged and deny-by-default is
+inherited rather than reimplemented. This holds even on a hub with OIDC
+disabled, where the RBAC layer would otherwise short-circuit — presenting a
+token switches enforcement on for that request.
+
+Three containment properties, each machine-checked:
+
+1. **Roles cannot exceed the minter's.** Creating a token requires
+   `token.admin`, and the handler additionally refuses to issue any role
+   granting a permission the caller does not already hold. `token.admin`
+   therefore confers the ability to *delegate* authority, never to invent it —
+   and because each generation is bounded by the last, no chain of delegations
+   ends up stronger than the human at the start of it.
+2. **Project scope cannot be widened.** A token's `ProjectScope` filters
+   `visibleProjectEntries`, which is the same list `resolveWorkDir` maps
+   `?project_idx` through. An out-of-scope project has no index the token can
+   name, and a direct hit resolves to a scope its decision denies — reported as
+   `404`, not `403`, so the token cannot use error codes to learn the project
+   exists. A scoped token also cannot mint an unscoped one.
+3. **The plaintext exists once.** It is returned by the create call and never
+   stored, logged, or re-derivable. Audit records carry the public prefix only.
+
+`last_used_at` is written off the verification path and coalesced to at most
+one write per token per minute, so an authenticated read never waits on a
+write. Creation, revocation, and every failed authentication are appended to
+the hash-chained trail; failures record *why* (expired, revoked, bad secret)
+while the caller receives an identical `401` in every case.
+
+### Migrating off the static token
+
+`--token` / `CLOOP_UI_TOKEN` still works, and will keep working — a hub that
+goes dark because its one credential was retired under it is a worse outcome
+than a shared secret. But it is worse than a PAT in three ways:
+
+| | static `--token` | API token |
+| --- | --- | --- |
+| Authorization | bypasses RBAC (`admin`, source `static_token`) | carries roles; every check applies |
+| Project reach | every project on the hub | optionally pinned to specific projects |
+| Expiry | never | optional, enforced at verification |
+| Revocation | rotate the secret, break every caller | revoke one, others unaffected |
+| Attribution | one identity for everyone | one per caller, named in the audit trail |
+
+To migrate:
+
+1. Mint one token per caller with the narrowest role that works:
+   `cloop hub token create <name> --role <role> [--project <p>] --expires-in 90d`.
+2. Replace the static value in each caller's configuration. The header is the
+   same, so only the value changes.
+3. Confirm from `cloop hub token list` that each token shows a recent
+   **LAST USED** — that is how you know nothing is still on the old credential.
+4. Remove `--token` and `CLOOP_UI_TOKEN` and restart the hub.
+
+While the static token is configured, `cloop ui` warns at startup and the
+Tokens panel shows a banner. Both disappear once it is gone.
 
 
 ### Configuring OIDC single sign-on
@@ -361,6 +434,19 @@ what it is looking for.
 | A token with a bad MAC is rejected before any storage access | `TestTamperedEnrollmentTokenIsRejected` |
 | Secret comparisons are constant-time | `TestSecretComparisonsAreConstantTime` |
 | *Statically*: every known secret-hash comparison goes through `crypto/subtle` | `TestKnownSecretComparisonsUseSubtle` |
+
+### API tokens — `apitoken_test.go`
+
+| Guarantee | Test |
+| --- | --- |
+| A token's permission set is exactly its roles' — checked for every role in the ladder | `TestTokenPermissionsAreExactlyItsRoles` |
+| A token never inherits the allow-all decision a hub with RBAC inactive hands everyone else | `TestTokenNeverInheritsAllowAll` |
+| A token cannot mint roles its holder lacks — every (minter, requested) pair, as a permission-subset check | `TestTokenCannotMintBeyondItsOwnRoles` |
+| A forbidden role cannot be smuggled in alongside a permitted one | `TestTokenCannotSmuggleARoleInAMultiRoleRequest` |
+| A project-scoped token cannot mint a wider one, however strong its roles | `TestTokenCannotWidenItsProjectScope` |
+| A project-scoped token holds nothing on an out-of-scope project, at every role | `TestScopedTokenIsDeniedOutOfScopeProjectsRegardlessOfRole` |
+| A revoked or expired token resolves to an empty permission set, not just a failed login | `TestRevokedOrExpiredTokenHoldsNothing` |
+| `token.admin` is held by `admin` alone | `TestTokenAdminIsAdminOnly` |
 
 ### Container sandbox — `container_test.go`
 

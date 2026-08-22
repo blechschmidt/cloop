@@ -148,7 +148,11 @@ func (s *Server) gate(rs routeSpec) http.HandlerFunc {
 		// resolves and stats every registered project. Paying that on each
 		// request would be a real regression for the single-tenant local
 		// use this feature promises to leave untouched.
-		if !s.authzActive() {
+		//
+		// authzActiveFor, not authzActive: an API token brings its own roles,
+		// so this short-circuit must not swallow them on a hub where the
+		// deployment-wide policy is off (Task 20175).
+		if !s.authzActiveFor(r) {
 			rs.Handler(w, r)
 			return
 		}
@@ -220,9 +224,10 @@ func (s *Server) routeTable() []routeSpec {
 		execRead  = authz.PermExecutorRead
 		execMgmt  = authz.PermExecutorManage
 		auditRead = authz.PermAuditRead
-		secGrant  = authz.PermSecretGrant
-		secRevoke = authz.PermSecretRevoke
-		public    = authz.PermPublic
+		secGrant   = authz.PermSecretGrant
+		secRevoke  = authz.PermSecretRevoke
+		tokenAdmin = authz.PermTokenAdmin
+		public     = authz.PermPublic
 	)
 
 	return []routeSpec{
@@ -424,5 +429,21 @@ func (s *Server) routeTable() []routeSpec {
 		{Pattern: "DELETE /api/grants/{id}", Handler: s.handleGrantDelete, Perm: secRevoke, Scope: scopeGlobal},
 		{Pattern: "GET /api/leases", Handler: s.handleLeasesList, Perm: secGrant, Scope: scopeGlobal},
 		{Pattern: "POST /api/leases/{id}/revoke", Handler: s.handleLeaseRevoke, Perm: secRevoke, Scope: scopeGlobal},
+
+		// ── API tokens ───────────────────────────────────────────────
+		// Global and admin-only. Minting a token provisions an identity
+		// that acts without a browser or an IdP session, which is the same
+		// class of action as managing role bindings — hence token.admin
+		// rather than a maintainer-level permission.
+		//
+		// Reads are gated identically to writes on purpose. The list names
+		// every non-interactive credential on the hub, its roles, and which
+		// projects it reaches: a map of where to aim, useful to nobody who
+		// cannot already mint one. Note that holding this permission is
+		// necessary but not sufficient to create a token — the handler also
+		// refuses to issue roles the caller does not hold (Task 20175).
+		{Pattern: "GET /api/tokens", Handler: s.handleTokensList, Perm: tokenAdmin, Scope: scopeGlobal},
+		{Pattern: "POST /api/tokens", Handler: s.handleTokenCreate, Perm: tokenAdmin, Scope: scopeGlobal},
+		{Pattern: "DELETE /api/tokens/{id}", Handler: s.handleTokenRevoke, Perm: tokenAdmin, Scope: scopeGlobal},
 	}
 }

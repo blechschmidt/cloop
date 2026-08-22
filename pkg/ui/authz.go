@@ -24,8 +24,10 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/blechschmidt/cloop/pkg/apierror"
+	"github.com/blechschmidt/cloop/pkg/apitoken"
 	"github.com/blechschmidt/cloop/pkg/authz"
 	"github.com/blechschmidt/cloop/pkg/eventlog"
 	"github.com/blechschmidt/cloop/pkg/logger"
@@ -46,6 +48,22 @@ import (
 // requireExecutorAdmin still applies on top.
 func (s *Server) authzActive() bool {
 	return s.oidcEnabled() && s.Authz.Configured()
+}
+
+// authzActiveFor is authzActive plus the per-request case that has no
+// deployment-wide switch: the caller presented an API token (Task 20175).
+//
+// A PAT carries its own roles, so enforcing them is not optional the way the
+// OIDC-derived policy is. Without this, a scoped token presented to a hub with
+// OIDC disabled would hit gate()'s `!authzActive()` short-circuit and be
+// granted everything — turning the narrowest credential cloop can issue into
+// the broadest one, on exactly the single-tenant deployments most likely to
+// hand a token to CI.
+//
+// The check is a context lookup on a value authMiddleware already resolved, so
+// it costs nothing on the request paths that carry no token.
+func (s *Server) authzActiveFor(r *http.Request) bool {
+	return s.authzActive() || tokenFromRequest(r) != nil
 }
 
 // subjectFromIdentity converts a validated OIDC identity into the claim
@@ -73,6 +91,11 @@ type grant struct {
 	server  *Server
 	subject *authz.Subject
 
+	// token is set when the caller authenticated with an API token. It takes
+	// precedence over subject and bypass: a PAT is a self-contained identity
+	// and resolves from its own roles, never from the binding table.
+	token *apitoken.Token
+
 	// bypass is non-empty when RBAC does not apply to this caller:
 	// authz_disabled (OIDC off) or static_token (deployment credential).
 	bypass authz.Source
@@ -86,6 +109,14 @@ func (g *grant) decide(scope authz.Scope) authz.Decision {
 	if g == nil {
 		// Fail closed: a missing grant must never read as "allowed".
 		return authz.Deny(authz.SourceUnauthenticated, "", scope)
+	}
+	if g.token != nil {
+		// Checked before bypass so that presenting a PAT to a hub with OIDC
+		// disabled resolves to the token's own roles rather than to the
+		// allow-all local decision. Not memoized: Token.Decision is a slice
+		// walk over at most a handful of roles, and skipping the cache keeps
+		// the one path that must never read stale authority off a mutex.
+		return g.token.Decision(scope, time.Now())
 	}
 	if g.bypass != "" {
 		return authz.AllowAll(g.bypass, g.subjectLabel())
@@ -106,6 +137,9 @@ func (g *grant) decide(scope authz.Scope) authz.Decision {
 func (g *grant) subjectLabel() string {
 	if g == nil {
 		return "anonymous"
+	}
+	if g.token != nil {
+		return g.token.Label()
 	}
 	if g.bypass == authz.SourceStaticToken {
 		return "static-token"
@@ -130,6 +164,12 @@ func (s *Server) authzMiddleware(next http.Handler) http.Handler {
 
 // newGrant builds the authorization context for r.
 func (s *Server) newGrant(r *http.Request) *grant {
+	// An API token is checked first and unconditionally: it is the one
+	// credential that carries its own authority, so it must not be able to
+	// fall through to a bypass on a hub where RBAC is otherwise inactive.
+	if tok := tokenFromRequest(r); tok != nil {
+		return &grant{server: s, token: tok}
+	}
 	if !s.authzActive() {
 		return &grant{server: s, bypass: authz.SourceAuthzDisabled}
 	}
@@ -247,7 +287,7 @@ func (s *Server) require(w http.ResponseWriter, r *http.Request, perm authz.Perm
 // Only enforced when RBAC is active; with OIDC disabled the historical
 // fallback behavior is preserved exactly.
 func (s *Server) requireVisibleProject(w http.ResponseWriter, r *http.Request) bool {
-	if !s.authzActive() {
+	if !s.authzActiveFor(r) {
 		return true
 	}
 	raw := r.URL.Query().Get("project_idx")
@@ -298,7 +338,11 @@ func (s *Server) auditAuthz(r *http.Request, d authz.Decision, perm authz.Permis
 	// "a request happened", while costing a SQLite open on the mutation
 	// hot path. The mutations themselves are already journalled by
 	// pkg/statedb; this log is specifically about who was allowed to ask.
-	if !s.authzActive() {
+	//
+	// API-token callers are recorded whether or not RBAC is configured: a
+	// non-interactive credential acting on the hub is exactly the thing an
+	// auditor cannot reconstruct from anywhere else.
+	if !s.authzActiveFor(r) {
 		return
 	}
 	if allowed && !isPrivileged(perm) {

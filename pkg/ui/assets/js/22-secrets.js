@@ -20,8 +20,14 @@ const secState = {
 };
 
 window.loadSecretsPanel = function() {
-  return Promise.all([loadSecrets(), loadGrants(), loadLeases()])
-    .then(() => { _secStartTicker(); });
+  const loads = [loadSecrets(), loadGrants(), loadLeases()];
+  // Tokens are admin-only and the section is hidden below token.admin, so
+  // skip the fetch entirely for a maintainer rather than firing a request
+  // whose only outcome is a 403 and an audit row for the denial.
+  if (typeof canGlobal !== 'function' || canGlobal('token.admin')) {
+    loads.push(loadTokens());
+  }
+  return Promise.all(loads).then(() => { _secStartTicker(); });
 };
 
 window.loadSecrets = function() {
@@ -582,3 +588,252 @@ window.submitGrant = function() {
   });
 };
 
+
+// ── API tokens (Task 20175) ─────────────────────────────────────────────────
+//
+// Scoped credentials for callers with no browser. The panel's job is narrow:
+// show what exists, mint one under the copy-once contract, and revoke.
+//
+// The value is handled in exactly one place — the result step of the modal —
+// and is dropped from both the DOM and this closure when the modal closes.
+// Nothing here writes it to localStorage, to a data-* attribute, or to a URL,
+// because all three survive the modal and two of them survive the tab.
+
+const tokState = {
+  tokens: [],
+  grantableRoles: [],
+  projects: [],
+  staticActive: false,
+
+  // plaintext holds the freshly minted value for as long as the result step
+  // is open, so the Copy button has something to copy. Cleared by
+  // closeTokenModal.
+  plaintext: '',
+};
+
+window.loadTokens = function() {
+  return api('/api/tokens').then(d => {
+    d = d || {};
+    tokState.tokens         = Array.isArray(d.tokens) ? d.tokens : [];
+    tokState.grantableRoles = Array.isArray(d.grantable_roles) ? d.grantable_roles : [];
+    tokState.projects       = Array.isArray(d.projects) ? d.projects : [];
+    tokState.staticActive   = !!d.static_token_active;
+    _tokRenderBanner();
+    _tokRender();
+    return d;
+  }).catch(err => _secFail('secTokensEmpty', 'secTokensTable', err, 'API tokens'));
+};
+
+// _tokRenderBanner surfaces the static-token deprecation where an operator
+// will act on it: next to the feature that replaces it, not only in a startup
+// log line they scrolled past weeks ago.
+function _tokRenderBanner() {
+  const el = document.getElementById('secTokensBanner');
+  if (!el) return;
+  if (!tokState.staticActive) { el.style.display = 'none'; return; }
+  el.style.display = '';
+  el.innerHTML = '<span aria-hidden="true">&#9888;</span><span>' +
+    '<strong>This hub still accepts the static <code>--token</code>.</strong><br>' +
+    'It bypasses RBAC, sees every project, and cannot be revoked for one caller without ' +
+    'breaking the rest. Mint scoped tokens for each caller, then drop ' +
+    '<code>--token</code> / <code>CLOOP_UI_TOKEN</code>.</span>';
+}
+
+function _tokRender() {
+  const body  = document.getElementById('secTokensBody');
+  const table = document.getElementById('secTokensTable');
+  const empty = document.getElementById('secTokensEmpty');
+  const count = document.getElementById('secTokensCount');
+  if (!body) return;
+
+  const rows = tokState.tokens;
+  const live = rows.filter(t => t.status === 'active').length;
+  if (count) count.textContent = rows.length ? '(' + live + ' active / ' + rows.length + ')' : '';
+  if (!rows.length) {
+    if (table) table.style.display = 'none';
+    if (empty) empty.style.display = '';
+    body.innerHTML = '';
+    _secApplyGating();
+    return;
+  }
+  if (empty) empty.style.display = 'none';
+  if (table) table.style.display = '';
+
+  body.innerHTML = rows.map(t => {
+    const revocable = t.status !== 'revoked';
+    return '<tr' + (t.status === 'active' ? '' : ' style="opacity:.6"') + '>' +
+      '<td><strong>' + esc(t.name || '(unnamed)') + '</strong>' +
+        (t.created_by ? '<br><span class="sec-count">by ' + esc(t.created_by) + '</span>' : '') + '</td>' +
+      '<td class="sec-fp sec-hide-sm" title="The public half of the token. The secret is not stored and cannot be shown again.">' +
+        esc(t.prefix || '—') + '</td>' +
+      '<td>' + (t.roles || []).map(r => '<span class="sec-chip kind">' + esc(r) + '</span>').join(' ') + '</td>' +
+      '<td>' + _tokScopeCell(t.project_scope) + '</td>' +
+      '<td>' + _tokStatusCell(t.status) + '</td>' +
+      '<td class="audit-time">' + esc(t.expires_at ? _secFmtTime(t.expires_at) : 'never') + '</td>' +
+      '<td class="audit-time sec-hide-sm">' + esc(t.last_used_at ? _secFmtTime(t.last_used_at) : 'never') + '</td>' +
+      '<td><div class="sec-actions">' +
+        '<button class="btn" data-global-perm="audit.read" data-perm-hide data-tok-audit="' + esc(t.prefix || '') + '">Audit</button>' +
+        (revocable
+          ? '<button class="btn" data-global-perm="token.admin" data-tok-revoke="' + esc(t.id) + '">Revoke</button>'
+          : '') +
+      '</div></td>' +
+    '</tr>';
+  }).join('');
+
+  body.querySelectorAll('[data-tok-revoke]').forEach(btn => {
+    btn.addEventListener('click', () => revokeToken(btn.getAttribute('data-tok-revoke')));
+  });
+  body.querySelectorAll('[data-tok-audit]').forEach(btn => {
+    btn.addEventListener('click', () => secretsAuditFor('secret', btn.getAttribute('data-tok-audit')));
+  });
+  _secApplyGating();
+}
+
+function _tokScopeCell(scope) {
+  if (!scope || !scope.length) {
+    return '<span class="sec-count" title="Every project this token’s roles allow">all projects</span>';
+  }
+  return scope.map(p => '<span class="sec-chip">' + esc(p) + '</span>').join(' ');
+}
+
+function _tokStatusCell(status) {
+  const cls = status === 'active' ? 'sec-ttl' : 'sec-ttl gone';
+  return '<span class="' + cls + '">' + esc(status || 'unknown') + '</span>';
+}
+
+// ── mutations ──
+
+window.revokeToken = function(id) {
+  const t = tokState.tokens.filter(x => x.id === id)[0];
+  const name = (t && t.name) || id;
+  if (!confirm('Revoke token "' + name + '"?\n\nAny CI job, script, or device still using it starts failing on its next request. This cannot be undone — issue a new token instead.')) return;
+  apiMethod('DELETE', '/api/tokens/' + encodeURIComponent(id)).then(() => {
+    toast('Token revoked', 'ok');
+    loadTokens();
+  }).catch(err => toast('Revoke failed: ' + ((err && err.message) || String(err)), 'err'));
+};
+
+// ── mint modal ──
+
+window.openTokenModal = function() {
+  const roles = document.getElementById('tokenRoles');
+  if (roles) {
+    const available = tokState.grantableRoles.length ? tokState.grantableRoles : ['viewer'];
+    roles.innerHTML = available.map(r =>
+      '<option value="' + esc(r) + '"' + (r === 'viewer' ? ' selected' : '') + '>' + esc(r) + '</option>'
+    ).join('');
+  }
+  const projects = document.getElementById('tokenProjects');
+  if (projects) {
+    projects.innerHTML = tokState.projects.length
+      ? tokState.projects.map(p => '<option value="' + esc(p) + '">' + esc(p) + '</option>').join('')
+      : '<option disabled>(no named projects registered)</option>';
+  }
+  const name = document.getElementById('tokenName');
+  if (name) name.value = '';
+  const err = document.getElementById('tokenError');
+  if (err) err.style.display = 'none';
+
+  _tokShowStep('form');
+  const ov = document.getElementById('token-overlay');
+  if (ov) ov.style.display = 'flex';
+  _secApplyGating();
+  setTimeout(() => { if (name) name.focus(); }, 50);
+};
+
+window.closeTokenModal = function() {
+  // Drop the value from the DOM and from this closure together. Leaving it in
+  // a hidden input is the browser-side equivalent of leaving a credential in a
+  // buffer, and unlike the secret modal there is no way to re-fetch it, so
+  // there is nothing to gain by keeping it around.
+  tokState.plaintext = '';
+  const pt = document.getElementById('tokenPlaintext');
+  if (pt) pt.value = '';
+  const ov = document.getElementById('token-overlay');
+  if (ov) ov.style.display = 'none';
+  _tokShowStep('form');
+};
+
+function _tokShowStep(which) {
+  const form = document.getElementById('tokenFormStep');
+  const res  = document.getElementById('tokenResultStep');
+  if (form) form.style.display = (which === 'form') ? '' : 'none';
+  if (res)  res.style.display  = (which === 'result') ? '' : 'none';
+}
+
+window.submitToken = function() {
+  const errEl = document.getElementById('tokenError');
+  const btn   = document.getElementById('tokenSubmitBtn');
+  const body = {
+    name:            ((document.getElementById('tokenName') || {}).value || '').trim(),
+    roles:           _tokSelected('tokenRoles'),
+    project_scope:   _tokSelected('tokenProjects'),
+    expires_in_days: parseInt(((document.getElementById('tokenExpiry') || {}).value) || '90', 10),
+  };
+  if (!body.name)         { _secFormError(errEl, 'A name is required — it is how you decide later whether to revoke it.'); return; }
+  if (!body.roles.length) { _secFormError(errEl, 'Pick at least one role. A token with no role can authenticate and do nothing.'); return; }
+  if (isNaN(body.expires_in_days)) body.expires_in_days = 90;
+
+  if (errEl) errEl.style.display = 'none';
+  if (btn) btn.disabled = true;
+
+  api('/api/tokens', body).then(d => {
+    if (btn) btn.disabled = false;
+    d = d || {};
+    tokState.plaintext = d.plaintext || '';
+    const pt = document.getElementById('tokenPlaintext');
+    if (pt) pt.value = tokState.plaintext;
+    const meta = document.getElementById('tokenResultMeta');
+    if (meta) {
+      const t = d.token || {};
+      meta.innerHTML =
+        '<strong>' + esc(t.name || '') + '</strong> &middot; ' +
+        esc((t.roles || []).join(', ')) + ' &middot; ' +
+        (t.project_scope && t.project_scope.length ? esc(t.project_scope.join(', ')) : 'all projects') +
+        ' &middot; expires ' + esc(t.expires_at ? _secFmtTime(t.expires_at) : 'never');
+    }
+    _tokShowStep('result');
+    setTimeout(() => { if (pt) { pt.focus(); pt.select(); } }, 50);
+    loadTokens();
+  }).catch(err => {
+    if (btn) btn.disabled = false;
+    _secFormError(errEl, (err && err.message) || String(err));
+  });
+};
+
+window.copyTokenPlaintext = function() {
+  const value = tokState.plaintext;
+  if (!value) return;
+  const done = () => {
+    const btn = document.getElementById('tokenCopyBtn');
+    if (btn) {
+      btn.textContent = 'Copied';
+      setTimeout(() => { btn.textContent = 'Copy'; }, 1500);
+    }
+    toast('Token copied to clipboard', 'ok');
+  };
+  // navigator.clipboard needs a secure context, which a hub behind plaintext
+  // HTTP on a LAN will not have. Fall back to selecting the field so the value
+  // is still one keystroke away instead of unreachable.
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(value).then(done).catch(() => _tokSelectField());
+    return;
+  }
+  _tokSelectField();
+};
+
+function _tokSelectField() {
+  const pt = document.getElementById('tokenPlaintext');
+  if (!pt) return;
+  pt.focus();
+  pt.select();
+  toast('Press Ctrl/Cmd+C to copy', 'ok');
+}
+
+function _tokSelected(id) {
+  const el = document.getElementById(id);
+  if (!el || !el.options) return [];
+  return Array.prototype.slice.call(el.options)
+    .filter(o => o.selected && !o.disabled)
+    .map(o => o.value);
+}

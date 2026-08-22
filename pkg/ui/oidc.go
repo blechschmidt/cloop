@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/blechschmidt/cloop/pkg/apitoken"
 	"github.com/blechschmidt/cloop/pkg/authz"
 	"github.com/blechschmidt/cloop/pkg/multiui"
 	"github.com/blechschmidt/cloop/pkg/oidcauth"
@@ -48,6 +49,16 @@ func (s *Server) oidcGate(next http.Handler, w http.ResponseWriter, r *http.Requ
 	}
 	if id := s.sessionIdentity(r); id != nil {
 		next.ServeHTTP(w, r)
+		return
+	}
+	// A scoped API token authenticates before the static one is considered,
+	// so a deployment can migrate to PATs without turning --token off first
+	// (Task 20175). authenticateAPIToken writes its own 401 on a supplied
+	// but bad token and reports handled=true.
+	if r2, ok, handled := s.authenticateAPIToken(w, r); handled {
+		return
+	} else if ok {
+		next.ServeHTTP(w, r2)
 		return
 	}
 	if s.Token != "" {
@@ -207,21 +218,74 @@ func (s *Server) filterEntriesForIdentity(user *oidcauth.Identity, entries []mul
 // can never address another user's project by index.
 func (s *Server) visibleProjectEntries(r *http.Request) []multiui.ProjectEntry {
 	entries := s.allProjectEntries()
+	// A project-scoped API token is filtered regardless of whether OIDC is
+	// on: its scope is a property of the credential, not of the deployment's
+	// identity configuration (Task 20175). Applied here rather than in each
+	// handler because this list *is* the ?project_idx index space that
+	// resolveWorkDir maps through — so an out-of-scope project is not merely
+	// hidden from the list, it has no index the token could name.
+	entries = filterEntriesForToken(tokenFromRequest(r), entries)
 	if !s.oidcEnabled() {
 		return entries
 	}
 	return s.filterEntriesForIdentity(s.sessionIdentity(r), entries)
 }
 
-// visibilityKey groups broadcast recipients that see the same project list:
-// "" for the unfiltered view (OIDC off, token clients, admins), otherwise
-// the user's owner key. Used to marshal each distinct filtered payload once
-// per broadcast instead of once per client.
-func (s *Server) visibilityKey(user *oidcauth.Identity) string {
-	if !s.oidcEnabled() || user == nil || s.OIDC.IsAdmin(user) {
-		return ""
+// filterEntriesForToken narrows entries to a token's ProjectScope. A nil token
+// or an unscoped one passes everything through untouched.
+func filterEntriesForToken(tok *apitoken.Token, entries []multiui.ProjectEntry) []multiui.ProjectEntry {
+	if tok == nil || len(tok.ProjectScope) == 0 {
+		return entries
 	}
-	return user.OwnerKey()
+	visible := entries[:0:0]
+	for _, e := range entries {
+		if tok.AllowsProject(e.Name, e.Path) {
+			visible = append(visible, e)
+		}
+	}
+	return visible
+}
+
+// visibilityKey groups broadcast recipients that see the same project list:
+// "" for the unfiltered view (OIDC off, static-token clients, admins),
+// otherwise a key derived from whatever narrows this recipient. Used to
+// marshal each distinct filtered payload once per broadcast instead of once
+// per client.
+//
+// A project-scoped API token contributes its scope to the key, because two
+// recipients with different scopes must not share a payload — which is what
+// would happen if the key considered only the OIDC identity, since a token
+// client has none (Task 20175).
+func (s *Server) visibilityKey(user *oidcauth.Identity, tok *apitoken.Token) string {
+	key := ""
+	if s.oidcEnabled() && user != nil && !s.OIDC.IsAdmin(user) {
+		key = user.OwnerKey()
+	}
+	if tok != nil && len(tok.ProjectScope) > 0 {
+		key += "\x00tok:" + tok.ID
+	}
+	return key
+}
+
+// filterStatusesForRecipient narrows project statuses to what one recipient
+// may see, applying both the API-token scope and the OIDC ownership rule, and
+// recomputes the aggregate stats over the surviving subset.
+//
+// Both filters are applied here rather than at each call site because there
+// are four of them — the REST list, the SSE stream, the WebSocket stream, and
+// the broadcast fan-out — and a project list that leaks is a project list that
+// leaked from whichever one was forgotten.
+func (s *Server) filterStatusesForRecipient(user *oidcauth.Identity, tok *apitoken.Token, entries []multiui.ProjectEntry, statuses []multiui.ProjectStatus) ([]multiui.ProjectStatus, multiui.AggregateStats) {
+	if tok != nil && len(tok.ProjectScope) > 0 {
+		scoped := make([]multiui.ProjectStatus, 0, len(statuses))
+		for _, st := range statuses {
+			if tok.AllowsProject(st.Name, st.Path) {
+				scoped = append(scoped, st)
+			}
+		}
+		statuses = scoped
+	}
+	return s.filterStatusesForIdentity(user, entries, statuses)
 }
 
 // filterStatusesForIdentity returns the project statuses visible to user

@@ -1364,11 +1364,12 @@ func (s *Server) requireExecutorAdmin(w http.ResponseWriter, r *http.Request) bo
 	if !s.oidcEnabled() {
 		return true
 	}
-	// With RBAC configured, the route gate already required
-	// executor.manage — a richer decision than the admin_emails list, and
-	// one an operator can grant by group. Re-checking admin_emails here
-	// would silently override the configured policy.
-	if s.authzActive() {
+	// With RBAC configured — or with an API token, which carries its own
+	// roles — the route gate already required executor.manage: a richer
+	// decision than the admin_emails list, and one an operator can grant by
+	// group. Re-checking admin_emails here would silently override the
+	// configured policy, and for a token there is no email to check at all.
+	if s.authzActiveFor(r) {
 		return true
 	}
 	id := s.sessionIdentity(r)

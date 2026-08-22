@@ -87,6 +87,15 @@ var (
 	// it were a transient fault — doing so is how the same work ends up
 	// running twice.
 	ErrExecutorSessionClaimLost = errors.New("statedb: executor session claim lost")
+
+	// ErrAPITokenNotFound indicates no api_tokens row has the requested ID.
+	//
+	// On the verification path this is an ordinary outcome, not a fault: it
+	// is what a forged or already-purged token id looks like. Callers must
+	// answer it exactly as they answer a bad secret — an unauthenticated
+	// caller must not be able to use the difference to learn which token ids
+	// exist.
+	ErrAPITokenNotFound = errors.New("statedb: api token not found")
 )
 
 // classifyDriverErr inspects a raw error returned by the modernc.org/sqlite
@@ -157,7 +166,7 @@ func HTTPStatus(err error) int {
 	case err == nil:
 		return http.StatusOK
 	case errors.Is(err, ErrTaskNotFound), errors.Is(err, ErrProjectNotFound),
-		errors.Is(err, ErrExecutorNotFound):
+		errors.Is(err, ErrExecutorNotFound), errors.Is(err, ErrAPITokenNotFound):
 		return http.StatusNotFound
 	case errors.Is(err, ErrStaleVersion):
 		return http.StatusConflict

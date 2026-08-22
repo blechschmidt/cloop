@@ -24,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/apitoken"
 	"github.com/blechschmidt/cloop/pkg/multiui"
 	"github.com/blechschmidt/cloop/pkg/oidcauth"
 )
@@ -472,14 +473,28 @@ func TestOIDCFilterHelpersUnit(t *testing.T) {
 		t.Errorf("nil-user filter = %v", got)
 	}
 
-	if k := s.visibilityKey(alice); k != "alice@example.com" {
+	if k := s.visibilityKey(alice, nil); k != "alice@example.com" {
 		t.Errorf("alice visibilityKey = %q", k)
 	}
-	if k := s.visibilityKey(admin); k != "" {
+	if k := s.visibilityKey(admin, nil); k != "" {
 		t.Errorf("admin visibilityKey = %q, want \"\" (unfiltered)", k)
 	}
-	if k := s.visibilityKey(nil); k != "" {
+	if k := s.visibilityKey(nil, nil); k != "" {
 		t.Errorf("nil visibilityKey = %q, want \"\"", k)
+	}
+	// Two project-scoped API tokens must not share a broadcast payload with
+	// each other or with the unfiltered view (Task 20175).
+	tokA := &apitoken.Token{ID: "aaa", ProjectScope: []string{"payments"}}
+	tokB := &apitoken.Token{ID: "bbb", ProjectScope: []string{"infra"}}
+	kA, kB := s.visibilityKey(nil, tokA), s.visibilityKey(nil, tokB)
+	if kA == kB {
+		t.Errorf("two differently-scoped tokens share visibility key %q", kA)
+	}
+	if kA == "" || kB == "" {
+		t.Error("a scoped token must not map to the unfiltered payload")
+	}
+	if k := s.visibilityKey(nil, &apitoken.Token{ID: "ccc"}); k != "" {
+		t.Errorf("an unscoped token visibilityKey = %q, want \"\" (unfiltered)", k)
 	}
 
 	statuses := []multiui.ProjectStatus{

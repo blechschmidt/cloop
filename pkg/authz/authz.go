@@ -116,6 +116,21 @@ const (
 	// bindings, sessions, and the identity integration.
 	PermUserManage Permission = "user.manage"
 
+	// PermTokenAdmin is the right to mint, list, and revoke the API tokens
+	// that authenticate non-interactive callers (CI, scripts, edge devices).
+	//
+	// Admin-only, like PermUserManage, because minting a token *is*
+	// provisioning an identity: the holder acts with the roles stamped into
+	// it, without a browser, an IdP session, or a human behind it. Handing
+	// that to maintainer would let the role that brokers credentials also
+	// manufacture the callers that consume them.
+	//
+	// Holding it is necessary but not sufficient: the mint path additionally
+	// refuses to issue a role the caller does not already hold, so this
+	// permission grants the ability to *delegate* authority, never to
+	// escalate it. See pkg/ui/tokens_api.go.
+	PermTokenAdmin Permission = "token.admin"
+
 	// PermPublic is not a permission. It is the explicit marker a route
 	// declares when it must stay reachable before authorization can even be
 	// evaluated — the login machinery, the SPA shell, static assets, and
@@ -140,6 +155,7 @@ var AllPermissions = []Permission{
 	PermConfigWrite,
 	PermAuditRead,
 	PermUserManage,
+	PermTokenAdmin,
 }
 
 // Valid reports whether p is a known permission. PermPublic is not a
@@ -395,6 +411,12 @@ const (
 	// bearer token, which is an operator credential by definition.
 	SourceStaticToken Source = "static_token"
 
+	// SourceAPIToken means the caller presented a scoped personal access
+	// token. Unlike SourceStaticToken this is *not* a bypass: the token
+	// carries its own roles and the resulting decision is an ordinary
+	// permission set, resolved by FromRoles rather than by binding lookup.
+	SourceAPIToken Source = "api_token"
+
 	// SourceBinding means a configured role mapping matched.
 	SourceBinding Source = "binding"
 
@@ -479,6 +501,62 @@ func AllowAll(src Source, subjectLabel string) Decision {
 		Source:       src,
 		SubjectLabel: subjectLabel,
 		allowAll:     true,
+	}
+}
+
+// ParseRole normalizes and validates a role name from an external source —
+// a config file, a CLI flag, or a persisted API token. ok is false for an
+// unknown name, which callers must treat as a refusal rather than silently
+// substituting RoleNone: a token row carrying a role this binary no longer
+// recognises has a meaning nobody can compute, and guessing it is how a
+// downgrade turns into an escalation.
+func ParseRole(name string) (Role, bool) {
+	r := Role(strings.ToLower(strings.TrimSpace(name)))
+	if !r.Valid() {
+		return RoleNone, false
+	}
+	return r, true
+}
+
+// FromRoles builds a Decision holding the union of the permissions granted by
+// roles, for callers whose authority is carried directly rather than derived
+// from claims — today, API tokens (see pkg/apitoken).
+//
+// The union is computed explicitly instead of taking the strongest role's set.
+// Today the ladder is cumulative so the two agree, but the union is the
+// definition that stays correct if a future role is ever added off the ladder,
+// and it cannot be wrong in the permissive direction: a permission ends up in
+// the set only if some named role already grants it.
+//
+// Decision.Role is reported as the strongest role present, purely so audit
+// records and /api/me have a single name to show. Enforcement reads the
+// permission set, never that label.
+//
+// An empty or all-unknown role list yields a deny, which is what makes a
+// malformed token inert rather than dangerous.
+func FromRoles(roles []Role, src Source, subjectLabel string, scope Scope) Decision {
+	perms := make(map[Permission]struct{}, len(AllPermissions))
+	strongest := RoleNone
+	for _, role := range roles {
+		if !role.Valid() {
+			continue
+		}
+		if role.rank() > strongest.rank() {
+			strongest = role
+		}
+		for _, p := range rolePermissions[role] {
+			perms[p] = struct{}{}
+		}
+	}
+	if len(perms) == 0 {
+		perms = nil
+	}
+	return Decision{
+		Role:         strongest,
+		Source:       src,
+		Scope:        scope,
+		SubjectLabel: subjectLabel,
+		perms:        perms,
 	}
 }
 

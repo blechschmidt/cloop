@@ -25,6 +25,7 @@ import (
 	"nhooyr.io/websocket"
 
 	"github.com/blechschmidt/cloop/pkg/artifact"
+	"github.com/blechschmidt/cloop/pkg/apitoken"
 	"github.com/blechschmidt/cloop/pkg/authz"
 	"github.com/blechschmidt/cloop/pkg/blocker"
 	"github.com/blechschmidt/cloop/pkg/boundedread"
@@ -73,6 +74,12 @@ type sseClient struct {
 	// when OIDC is disabled or the client authenticated via bearer token.
 	// Broadcasters use it to send per-user filtered "projects" payloads.
 	user *oidcauth.Identity
+
+	// token is the API token this stream authenticated with, nil otherwise.
+	// A long-lived stream must keep honouring the scope the request that
+	// opened it carried, so it is captured here rather than re-derived
+	// (Task 20175).
+	token *apitoken.Token
 }
 
 // sseClientBufferSize mirrors hubClientBufferSize for SSE consumers.
@@ -187,6 +194,11 @@ type hubClient struct {
 	// token. Broadcasters use it to send per-user filtered "projects"
 	// payloads.
 	user *oidcauth.Identity
+
+	// token is the API token this connection authenticated with, nil
+	// otherwise. Captured at upgrade time for the same reason as on
+	// sseClient (Task 20175).
+	token *apitoken.Token
 }
 
 // hubClientBufferSize is the per-client outgoing buffer for WebSocket clients.
@@ -556,6 +568,17 @@ type Server struct {
 	// this field is ignored entirely and every request is granted
 	// everything, preserving single-tenant local behavior.
 	Authz *authz.Resolver
+
+	// tokens verifies the scoped API tokens that authenticate CI, scripts,
+	// and edge devices (Task 20175). Lazily opened on the first request that
+	// presents a `cloop_pat_…` credential — and never on hubs that have none
+	// — then cached with its database handle for the process lifetime,
+	// because verification sits on the authentication path and must not pay
+	// a SQLite open per request. tokenDB is held solely so Shutdown can close
+	// it. Guarded by tokenMu.
+	tokenMu sync.Mutex
+	tokens  *apitoken.Manager
+	tokenDB *statedb.DB
 }
 
 // log returns s.Log, falling back to a default text logger if the field
@@ -1015,6 +1038,10 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	// still writing health rows into a database handle that is about to be
 	// closed under it.
 	stopExecutorSupervisor()
+	// Release the API-token database handle held open for the authentication
+	// path, so a hub restarted in-process (tests, `cloop hub bootstrap`) does
+	// not leak a connection per lifecycle.
+	s.closeTokenManager()
 	return srv.Shutdown(ctx)
 }
 
@@ -1198,6 +1225,17 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if s.oidcEnabled() {
 			s.oidcGate(next, w, r)
+			return
+		}
+		// A scoped API token is honoured before anything else, including on a
+		// hub with no static token configured at all (Task 20175). That
+		// ordering is what makes a PAT restrictive rather than decorative: an
+		// open hub which skipped this would hand a viewer-scoped CI
+		// credential the same authority as the local operator.
+		if r2, ok, handled := s.authenticateAPIToken(w, r); handled {
+			return
+		} else if ok {
+			next.ServeHTTP(w, r2)
 			return
 		}
 		if s.Token == "" || r.URL.Path == "/" {
@@ -2143,6 +2181,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		ch:     make(chan sseEvent, sseClientBufferSize),
 		resync: make(chan struct{}, 1),
 		user:   s.sessionIdentity(r),
+		token:  tokenFromRequest(r),
 	}
 	s.mu.Lock()
 	s.clients[c] = struct{}{}
@@ -2467,6 +2506,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		color:  color,
 		conn:   conn,
 		user:   user,
+		token:  tokenFromRequest(r),
 	}
 	if s.hubClients[workDir] == nil {
 		s.hubClients[workDir] = make(map[*hubClient]struct{})
@@ -4968,12 +5008,12 @@ func (s *Server) broadcastProjectsUpdate() {
 		entries = s.allProjectEntries()
 	}
 	payloads := make(map[string][]byte, 1)
-	payloadFor := func(user *oidcauth.Identity) []byte {
-		key := s.visibilityKey(user)
+	payloadFor := func(user *oidcauth.Identity, tok *apitoken.Token) []byte {
+		key := s.visibilityKey(user, tok)
 		if p, ok := payloads[key]; ok {
 			return p
 		}
-		visible, stats := s.filterStatusesForIdentity(user, entries, statuses)
+		visible, stats := s.filterStatusesForRecipient(user, tok, entries, statuses)
 		p, err := json.Marshal(map[string]interface{}{
 			"projects": visible,
 			"stats":    stats,
@@ -4986,13 +5026,13 @@ func (s *Server) broadcastProjectsUpdate() {
 	}
 	// Pre-warm the unfiltered payload outside the client locks — it serves
 	// every client when OIDC is off (and all token/admin clients otherwise).
-	if payloadFor(nil) == nil && !s.oidcEnabled() {
+	if payloadFor(nil, nil) == nil && !s.oidcEnabled() {
 		return
 	}
 
 	s.mu.Lock()
 	for c := range s.clients {
-		if p := payloadFor(c.user); p != nil {
+		if p := payloadFor(c.user, c.token); p != nil {
 			s.sendSSEOrLag(c, sseEvent{Event: "projects", Data: string(p)})
 		}
 	}
@@ -5001,7 +5041,7 @@ func (s *Server) broadcastProjectsUpdate() {
 	s.hubMu.Lock()
 	for _, clients := range s.hubClients {
 		for hc := range clients {
-			if p := payloadFor(hc.user); p != nil {
+			if p := payloadFor(hc.user, hc.token); p != nil {
 				s.sendOrLag(hc, wsMessage{Type: "projects", Data: json.RawMessage(p)})
 			}
 		}
@@ -5348,7 +5388,7 @@ func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
 	if s.oidcEnabled() {
 		entries = s.allProjectEntries()
 	}
-	statuses, stats := s.filterStatusesForIdentity(s.sessionIdentity(r), entries, statuses)
+	statuses, stats := s.filterStatusesForRecipient(s.sessionIdentity(r), tokenFromRequest(r), entries, statuses)
 	// multi_project is true when there are multiple registered projects so the
 	// frontend can enable the scoped-tabs experience.
 	multiProject := len(statuses) > 1 || len(s.projectsSnapshot()) > 0
@@ -5374,6 +5414,7 @@ func (s *Server) handleProjectsEvents(w http.ResponseWriter, r *http.Request) {
 		ch:     make(chan sseEvent, sseClientBufferSize),
 		resync: make(chan struct{}, 1),
 		user:   s.sessionIdentity(r),
+		token:  tokenFromRequest(r),
 	}
 	s.mu.Lock()
 	s.clients[c] = struct{}{}
@@ -5393,7 +5434,7 @@ func (s *Server) handleProjectsEvents(w http.ResponseWriter, r *http.Request) {
 	if s.oidcEnabled() {
 		entries = s.allProjectEntries()
 	}
-	statuses, stats := s.filterStatusesForIdentity(c.user, entries, statuses)
+	statuses, stats := s.filterStatusesForRecipient(c.user, c.token, entries, statuses)
 	if payload, err := json.Marshal(map[string]interface{}{"projects": statuses, "stats": stats}); err == nil {
 		if werr := writeSSE(w, flusher, "event: projects\ndata: %s\n\n", payload); werr != nil {
 			return

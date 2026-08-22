@@ -13,6 +13,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/multiui"
 	"github.com/blechschmidt/cloop/pkg/oidcauth"
 	"github.com/blechschmidt/cloop/pkg/ui"
+	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 )
 
@@ -54,6 +55,9 @@ but not for anything reachable from a network.`,
 		token := uiToken
 		if token == "" {
 			token = os.Getenv("CLOOP_UI_TOKEN")
+		}
+		if token != "" {
+			warnStaticTokenDeprecated()
 		}
 
 		// Resolve project list from --projects and/or --scan flags.
@@ -212,10 +216,39 @@ func openBrowser(url string) {
 	}
 }
 
+// warnStaticTokenDeprecated prints the migration notice for the unscoped
+// static bearer token (Task 20175).
+//
+// The token still works and will keep working — a hub that goes silent because
+// its one credential was retired under it is a worse outcome than a shared
+// secret. But it is genuinely worse than a PAT in three ways an operator
+// should be told about at the moment they use it, rather than discovering in a
+// post-mortem: it bypasses RBAC entirely, it sees every project on the hub, and
+// it cannot be revoked for one caller without breaking all of them.
+//
+// Written to stderr so it survives a redirected stdout and does not corrupt a
+// piped listing.
+func warnStaticTokenDeprecated() {
+	warn := color.New(color.FgYellow)
+	dim := color.New(color.Faint)
+	warn.Fprintln(os.Stderr, "warning: --token / CLOOP_UI_TOKEN is deprecated.")
+	dim.Fprintln(os.Stderr,
+		"  The static token bypasses RBAC, sees every project on this hub, and cannot be\n"+
+			"  revoked for one caller without breaking every other. Scoped API tokens replace\n"+
+			"  it: they carry roles, can be limited to specific projects, expire, and are\n"+
+			"  revocable one at a time.\n"+
+			"\n"+
+			"    cloop hub token create ci --role operator --project my-app --expires-in 30d\n"+
+			"\n"+
+			"  Then drop --token / CLOOP_UI_TOKEN. See docs/security/model.md.")
+}
+
 func init() {
 	uiCmd.Flags().IntVar(&uiPort, "port", 8080, "Port to listen on")
 	uiCmd.Flags().BoolVar(&uiNoBrowser, "no-browser", false, "Do not open the browser automatically")
-	uiCmd.Flags().StringVar(&uiToken, "token", "", "Auth token (also reads CLOOP_UI_TOKEN env var); if set, all API requests must supply it")
+	uiCmd.Flags().StringVar(&uiToken, "token", "",
+		"DEPRECATED: unscoped static auth token (also reads CLOOP_UI_TOKEN). "+
+			"Bypasses RBAC and sees every project — use `cloop hub token create` instead")
 	uiCmd.Flags().StringArrayVar(&uiProjects, "projects", nil, "Additional project directories to include in the multi-project dashboard")
 	uiCmd.Flags().StringVar(&uiScan, "scan", "", "Scan this directory for cloop projects and add them to the dashboard")
 	uiCmd.Flags().Float64Var(&uiRateLimit, "rate-limit", 0, "Requests per second per IP (default 20; 0 = use default)")

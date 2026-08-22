@@ -399,10 +399,52 @@ signing of exported state. The `pkg/security` package provides `Sign()` /
 `Verify()` utilities; tooling that exports or imports state can use these to
 detect tampering.
 
+### Non-interactive access: API tokens
+
+CI jobs, deploy scripts, and edge devices cannot hold a browser session. Give
+them a **scoped API token** (`cloop_pat_…`):
+
+```bash
+# Read-only, one project, expires in 30 days
+cloop hub token create ci-payments --role operator --project payments --expires-in 30d
+
+cloop hub token list              # id, roles, scope, status, last use
+cloop hub token list --active     # hide revoked and expired
+cloop hub token revoke <id>       # effective on the next request
+```
+
+Or use the **Tokens** section of the Secrets panel, or `POST /api/tokens`.
+Either way the value is printed **exactly once** — cloop stores a salted hash,
+so a lost token is re-minted, never recovered.
+
+A token is not an authorization bypass. It carries roles, and every RBAC check
+applies to it exactly as it does to a signed-in user:
+
+| Field | Meaning |
+| --- | --- |
+| `--role` | roles the bearer acts with (repeatable). You can only grant roles you hold yourself. |
+| `--project` | restrict to these projects (repeatable). Out-of-scope projects are reported as nonexistent, not forbidden. |
+| `--expires-in` | `90d`, `12h`, an RFC3339 timestamp, or `0` for no expiry. |
+
+Use it as `Authorization: Bearer cloop_pat_…` (or `?token=…` for EventSource).
+Minting requires the `token.admin` permission, which only `admin` holds; the
+API additionally refuses to issue a token stronger or wider than its creator.
+Creation, revocation, and every failed authentication are recorded in the audit
+trail (`cloop events`).
+
 ### Web UI (`cloop ui`)
 
-The web dashboard binds to **localhost only** by default. When a `--token` is
-set:
+The web dashboard binds to **localhost only** by default.
+
+> **`--token` / `CLOOP_UI_TOKEN` is deprecated.** It still works and will keep
+> working, but it bypasses RBAC entirely, sees every project on the hub, and
+> cannot be revoked for one caller without breaking every other. Mint a scoped
+> API token per caller (above), then drop the flag and the environment
+> variable. `cloop ui` prints a warning at startup while it is still set, and
+> the Tokens panel shows a banner. See
+> [Migrating off the static token](../security/model.md#migrating-off-the-static-token).
+
+When a `--token` is set:
 
 - Every `/api/*` request must present `Authorization: Bearer <token>` or
   `?token=<token>`.
