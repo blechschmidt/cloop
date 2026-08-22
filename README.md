@@ -51,16 +51,7 @@ flowchart TD
     B --> C[cloop run]
 
     %% ── Run startup ───────────────────────────────────────────────
-    C --> D{PM mode?}
-    D -- No --> E[Simple loop:\nbuild prompt → call provider\n→ check GOAL_COMPLETE]
-    D -- Yes --> F[Decompose goal\ninto task plan via AI]
-
-    %% ── Simple loop path ──────────────────────────────────────────
-    E --> E1{GOAL_COMPLETE\nsignal?}
-    E1 -- No --> E2{Budget / Ctrl+C?}
-    E2 -- No --> E
-    E2 -- Yes --> Z([Loop ends])
-    E1 -- Yes --> AE
+    C --> F[Decompose goal\ninto task plan via AI]
 
     %% ── PM task loop ──────────────────────────────────────────────
     F --> G[(Shared task queue\n.cloop/state.db)]
@@ -111,7 +102,7 @@ flowchart TD
 
     %% ── Loop termination ──────────────────────────────────────────
     G --> TC{Ctrl+C\nor token budget?}
-    TC -- Yes --> Z
+    TC -- Yes --> Z([Loop ends])
     TC -- No --> H
 
     %% ── Styles ────────────────────────────────────────────────────
@@ -122,8 +113,8 @@ flowchart TD
     classDef user fill:#3a2d1e,stroke:#d9944a,color:#fdf0e8
 
     class G,B,UB queue
-    class D,H,J,L,N,P,E1,E2,AE1,TC decision
-    class F,I,M,O,S,AE,AE2,AE3,AE4,AE5,AE6,Q,R,K,E action
+    class H,J,L,N,P,AE1,TC decision
+    class F,I,M,O,S,AE,AE2,AE3,AE4,AE5,AE6,Q,R,K action
     class A,Z endpoint
     class U1,U2,U3,U4,UA user
 ```
@@ -131,7 +122,7 @@ flowchart TD
 **Key paths:**
 
 1. **`cloop init "goal"`** — saves the project goal to `.cloop/state.db`
-2. **`cloop run`** — decomposes the goal into a prioritised task plan (PM mode) or enters a simple goal loop
+2. **`cloop run`** — decomposes the goal into a prioritised task plan; every unit of work is a visible task
 3. **Task execution** — tasks are picked by priority, dependencies checked, approval gates enforced, then executed via the AI provider; auto-heal retries mutated prompts on failure
 4. **Post-task pipeline** — code review, verification script, desktop/Slack notifications, cost ledger entry
 5. **Auto-Evolve** — once the queue drains, the AI analyses the codebase and injects new improvement tasks; `--innovate` activates a richer 7-category discovery prompt
@@ -207,865 +198,114 @@ cloop run --provider ollama --model llama3.2
 
 ---
 
-## Commands Reference
+## Documentation
 
-### `cloop init [goal]`
+The README is an overview. The detail lives in [`docs/`](docs/README.md):
 
-Initialize a new project with a goal.
-
-```bash
-cloop init "Build a CLI tool that converts CSV to JSON"
-cloop init --max-steps 20 "Refactor to clean architecture"
-cloop init --model claude-opus-4-6 --instructions "Use Go, no external deps" "Build a web scraper"
-cloop init "Build a full REST API"
-```
-
-> Every project runs in Product Manager mode: cloop decomposes the goal into a
-> visible task plan and works through it. The legacy free-form feedback loop
-> (`--pm`/non-PM) was removed in Task 20067 so all changes flow through the task
-> pipeline and remain auditable in the UI.
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--max-steps` | `0` (unlimited) | Max autonomous steps |
-| `--instructions` | | Additional constraints for the AI |
-| `--model` | | Model override |
-| `--effort` | | Model reasoning-effort level: `low`, `medium`, `high`, `xhigh`, `max` (claudecode only) |
-| `--provider` | | Provider override |
-
-### `cloop run`
-
-Start or continue the autonomous task pipeline.
-
-```bash
-cloop run
-cloop run --provider anthropic
-cloop run --auto-evolve
-cloop run --model claude-opus-4-6 --step-timeout 15m
-cloop run --add-steps 10      # extend max if paused at limit
-cloop run --dry-run           # show prompts without executing
-cloop run --plan-only         # decompose goal into tasks, then stop
-cloop run --retry-failed      # retry previously failed tasks
-cloop run --replan            # discard plan and re-decompose
-```
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--provider` | from config | AI provider to use |
-| `--model` | from config | Model override |
-| `--effort` | from state/config | Model reasoning-effort level: `low`, `medium`, `high`, `xhigh`, `max` (claudecode only) |
-| `--auto-evolve` | `false` | After goal completion, keep discovering new tasks |
-| `--innovate` | `false` | Innovation mode: push evolve toward novel capabilities |
-| `--step-timeout` | `10m` | Timeout per step |
-| `--max-tokens` | `0` | Max output tokens per step |
-| `--add-steps` | `0` | Add more steps to max before running |
-| `--steps` | `0` | Run at most N steps this session (not persisted) |
-| `--dry-run` | `false` | Show prompts without running |
-| `--plan-only` | `false` | Decompose tasks but don't execute |
-| `--retry-failed` | `false` | Retry failed tasks |
-| `--replan` | `false` | Discard existing plan and re-decompose |
-| `--max-failures` | `3` | PM mode: consecutive task failures before stopping |
-| `--context-steps` | `3` | Recent steps to include in prompts (0 = none) |
-| `--step-delay` | | Delay between steps (e.g. `5s`, `1m`) |
-| `--on-complete` | | Shell command to run on goal completion (e.g. `notify-send done`) |
-| `--token-budget` | `0` | Stop when cumulative tokens reach this limit (0 = unlimited) |
-| `--notify` | `false` | Send OS desktop notifications on task done, task failed, and session complete |
-| `-v, --verbose` | `false` | Show full step output (no truncation) |
-
-**Stopping:** Press `Ctrl+C` to pause gracefully. Run `cloop run` again to resume.
-
-### `cloop status`
-
-Show current project status including provider, progress, and token usage.
-
-```
-Goal:     Build a REST API with auth
-Status:   complete
-Provider: anthropic
-Progress: 5/10 steps
-Tokens:   12450 in / 3820 out
-Created:  2026-05-01 14:00
-Updated:  2026-05-01 14:15
-```
-
-### `cloop log`
-
-Show step history.
-
-```bash
-cloop log              # all steps (truncated output)
-cloop log --step 3     # specific step
-cloop log --last 5     # show only the 5 most recent steps
-cloop log --lines 0    # full output (no truncation)
-cloop log --json       # machine-readable JSON array
-cloop log --grep "error"  # filter steps containing "error" (case-insensitive)
-```
-
-### `cloop goal`
-
-Show or update the project goal without reinitializing (preserves all steps, task plan, and settings).
-
-```bash
-cloop goal                        # show current goal
-cloop goal "New goal text"        # update the goal in-place
-```
-
-### `cloop export`
-
-Export the session as a markdown report (goal, steps, task plan).
-
-```bash
-cloop export                  # print to stdout
-cloop export -o report.md     # write to file
-```
-
-### `cloop report`
-
-Generate a rich progress report with task completion status, timeline, token usage, and cost estimates.
-
-```bash
-cloop report                         # terminal report
-cloop report --format md             # markdown report to stdout
-cloop report --format md -o out.md   # save markdown to file
-cloop report --show-outputs          # include step/task output excerpts
-```
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--format` | `terminal` | Output format: `terminal`, `md`, `markdown` |
-| `--show-outputs` | `false` | Include step/task output excerpts |
-| `-o, --output` | | Save report to file instead of stdout |
-
-### `cloop providers [--test]`
-
-List all providers with their configuration status.
-
-```bash
-cloop providers         # show all providers + config
-cloop providers --test  # also verify connectivity
-```
-
-### `cloop config`
-
-Manage project configuration stored in `.cloop/config.yaml`.
-
-```bash
-cloop config show                          # show config (keys masked)
-cloop config set provider anthropic        # set default provider
-cloop config set anthropic.api_key sk-...  # set a value
-```
-
-Supported keys: `provider`, `anthropic.api_key`, `anthropic.model`, `anthropic.base_url`, `openai.api_key`, `openai.model`, `openai.base_url`, `ollama.base_url`, `ollama.model`, `claudecode.model`, `webhook.url`, `github.token`, `github.repo`
-
-### `cloop task`
-
-Manage tasks in Product Manager mode.
-
-```bash
-cloop task list                    # show all tasks with status
-cloop task list --json             # output tasks as JSON array (for scripting)
-cloop task show <id>               # show full task details (untruncated)
-cloop task show <id> --json        # output task as JSON
-cloop task next                    # show the next pending task (preview before running)
-cloop task add "Title" --desc "Description" --priority 1
-cloop task edit <id> --title "New title" --priority 2
-cloop task skip <id>               # mark as skipped
-cloop task done <id>               # mark as done
-cloop task fail <id>               # mark as failed
-cloop task reset <id>              # reset to pending
-cloop task remove <id>             # remove from plan
-```
-
-### `cloop diff`
-
-Show git changes in the current project.
-
-```bash
-cloop diff              # all uncommitted changes vs HEAD
-cloop diff --stat       # summary (files changed, insertions, deletions)
-cloop diff --name-only  # just the list of changed files
-cloop diff --session    # diff from when the cloop session was initialized
-```
-
-`--session` is useful for reviewing everything the AI changed during this session.
-It finds the last git commit that existed before `cloop init` was run, then diffs from there.
-
-### `cloop watch`
-
-Live-refresh the project status while `cloop run` runs in another terminal.
-
-```bash
-cloop watch              # refresh every 2s (default)
-cloop watch --interval 5s
-```
-
-Shows: goal, status, provider, step/task progress, token counts, and the last step's output — automatically stopping when the session ends.
-
-### `cloop stats`
-
-Show aggregated session statistics.
-
-```bash
-cloop stats
-```
-
-Includes step timing (total/avg/min/max), token usage, cost estimate for known models, and task breakdown in PM mode.
-
-### `cloop reset`
-
-Reset progress but keep the goal and configuration.
-
-### `cloop clean`
-
-Remove `.cloop/` directory entirely.
-
----
-
-## Product Manager Mode
-
-PM mode decomposes the goal into a structured task plan, then executes each task one at a time.
-
-```bash
-# Initialize with PM mode
-cloop init --pm "Build a monitoring dashboard in Go"
-
-# Decompose into tasks first (review before running)
-cloop run --pm --plan-only
-
-# Execute the plan
-cloop run --pm
-
-# Resume after interruption
-cloop run --pm
-
-# Retry any failed tasks
-cloop run --pm --retry-failed
-
-# Discard the existing plan and re-decompose
-cloop run --pm --replan
-```
-
-The AI signals task outcomes with terminal keywords:
-- `TASK_DONE` — task completed successfully
-- `TASK_SKIPPED` — task not applicable / already done
-- `TASK_FAILED` — task could not be completed
-
-Tasks can declare dependencies on other tasks via `depends_on` in the JSON plan.
-A task will not start until all its dependencies are `done` or `skipped`.
-If a dependency fails, all tasks that depend on it are automatically skipped.
-
----
-
-## Analysis & Forecasting
-
-### `cloop scope [goal]`
-
-AI-powered project scope analysis before you start. Estimates task count, complexity, risks, prerequisites, and recommends the best execution mode.
-
-```bash
-cloop scope "Build a REST API with auth"
-cloop scope                           # analyze current project goal
-cloop scope --provider anthropic "Add OAuth support"
-```
-
-Output: task count estimate, complexity (low/medium/high/very_high), estimated AI invocations, risks, prerequisites, assumptions, and recommended execution mode.
-
-### `cloop forecast`
-
-AI-powered completion forecast with optimistic, expected, and pessimistic scenarios. Renders an ASCII burn-down chart and streams an AI narrative about delivery outlook and acceleration opportunities.
-
-```bash
-cloop forecast                       # full forecast (chart + AI narrative)
-cloop forecast --quick               # metrics and chart only, no AI
-cloop forecast --no-chart            # AI narrative without the chart
-cloop forecast --provider anthropic  # use a specific provider
-```
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--quick` | `false` | Show metrics and chart only (no AI) |
-| `--no-chart` | `false` | Skip the burn-down chart |
-| `--provider` | from config | AI provider |
-| `--model` | from config | Model override |
-
-### `cloop insights`
-
-AI-powered project health analysis: task velocity, risk score, bottlenecks, role breakdowns, and AI-generated recommendations.
-
-```bash
-cloop insights                       # full AI analysis
-cloop insights --quick               # metrics panel only, no AI call
-cloop insights --provider anthropic
-```
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--quick` | `false` | Show metrics only, skip AI analysis |
-| `--provider` | from config | AI provider for analysis |
-| `--model` | from config | Model override |
-
-### `cloop retro`
-
-AI-powered sprint retrospective: what went well, what went wrong, bottlenecks, velocity notes, key insights, and recommended next actions.
-
-```bash
-cloop retro                          # terminal retrospective
-cloop retro --format md              # markdown output
-cloop retro --format md -o retro.md  # save markdown to file
-cloop retro --save-memory            # persist insights to project memory
-cloop retro --provider anthropic
-```
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--format` | `terminal` | Output format: `terminal` or `md` |
-| `-o, --output` | | Write output to file (for `--format md`) |
-| `--save-memory` | `false` | Save insights to project memory |
-| `--timeout` | `120s` | Analysis timeout |
-| `--provider` | from config | Provider to use |
-| `--model` | from config | Model override |
-
-### `cloop standup`
-
-Generate an AI-powered daily standup report: what was accomplished, what's planned next, blockers, and delivery forecast. Can post to Slack via webhook.
-
-```bash
-cloop standup                          # AI standup (last 24h)
-cloop standup --hours 48               # look back 48 hours
-cloop standup --quick                  # metrics only, no AI
-cloop standup --post                   # post to Slack webhook
-cloop standup --save                   # save to .cloop/standup-DATE.md
-cloop standup --format slack           # Slack-formatted output
-cloop standup --provider anthropic
-```
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--hours` | `24` | Reporting window in hours |
-| `--quick` | `false` | Show activity summary only, skip AI |
-| `--post` | `false` | Post to configured webhook/Slack |
-| `--save` | `false` | Save to `.cloop/standup-YYYYMMDD.md` |
-| `--format` | `text` | Output format: `text`, `slack` |
-| `--provider` | from config | AI provider |
-| `--model` | from config | Model override |
-
-To enable Slack posting:
-```bash
-cloop config set webhook.url https://hooks.slack.com/services/...
-```
-
----
-
-## Planning & Prioritization
-
-### `cloop backlog`
-
-AI-generated prioritized product backlog from your codebase. Surfaces the highest-value improvements ranked by impact-to-effort ratio.
-
-```bash
-cloop backlog                          # analyze current project
-cloop backlog --format md              # markdown output
-cloop backlog --format md -o backlog.md
-cloop backlog --as-tasks               # add top items to PM plan
-cloop backlog --max-items 10           # limit to top 10 items
-cloop backlog --provider anthropic
-```
-
-Each item includes:
-- **Type**: `feature`, `bug`, `tech_debt`, `performance`, `security`, `docs`
-- **Impact**: `high`, `medium`, `low`
-- **Effort**: `xs` (<1h), `s` (1-4h), `m` (4-16h), `l` (1-5d), `xl` (>1wk)
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--format` | `terminal` | Output format: `terminal` or `md` |
-| `-o, --output` | | Write output to file |
-| `--as-tasks` | `false` | Add backlog items to the PM task plan |
-| `--max-items` | `0` (all) | Maximum number of items to show/add |
-| `--provider` | from config | Provider to use |
-| `--model` | from config | Model override |
-
-### `cloop prioritize`
-
-AI-powered smart task reprioritization. Analyzes the current plan and suggests the optimal execution order based on the critical path, dependencies, risk factors, and value delivery.
-
-```bash
-cloop prioritize                       # show AI priority suggestions
-cloop prioritize --apply               # apply suggestions immediately
-cloop prioritize --provider anthropic
-```
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--apply` | `false` | Apply suggested priority changes |
-| `--dry-run` | `false` | Show suggestions without applying (default) |
-| `--provider` | from config | AI provider |
-| `--model` | from config | Model override |
-
-### `cloop milestone`
-
-Sprint and release planning. Organize PM tasks into milestones with deadlines and velocity-based forecasting.
-
-```bash
-cloop milestone create "v1.0 Launch" --deadline 2026-06-15 --tasks 1,2,3
-cloop milestone list                   # show all milestones with progress
-cloop milestone show "v1.0 Launch"     # detailed status
-cloop milestone assign "v1.0 Launch" --tasks 4,5
-cloop milestone plan                   # AI generates milestone structure
-cloop milestone forecast               # velocity-based completion forecast
-cloop milestone delete "Foundation"
-```
-
-**`milestone create`** flags:
-| Flag | Description |
-|------|-------------|
-| `--deadline` | Target deadline in `YYYY-MM-DD` format |
-| `--description` | One-sentence milestone description |
-| `--tasks` | Comma-separated task IDs to assign (e.g. `1,2,3`) |
-
-**`milestone plan`** flags:
-| Flag | Description |
-|------|-------------|
-| `--force` | Replace existing milestones with AI-generated plan |
-| `--provider` | AI provider to use |
-| `--model` | Model override |
-
-### `cloop simulate <scenario>`
-
-AI what-if scenario analysis: simulate hypothetical changes before committing. Projects the impact on timeline, risk, and task priorities.
-
-```bash
-cloop simulate "what if we cut the authentication module?"
-cloop simulate "what if the deadline moves up by 2 weeks?"
-cloop simulate "what if we add a second engineer to the project?"
-cloop simulate "what if we defer all testing tasks to phase 2?"
-cloop simulate "what if we focus only on the critical path?" --apply
-cloop simulate "what if we switch from REST to GraphQL?" --provider anthropic
-```
-
-Output: summary, timeline delta, risk before/after, confidence, recommendations, task changes, trade-offs, and warnings.
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--apply` | `false` | Apply recommended task changes to the project |
-| `--quick` | `false` | Print project snapshot only, no AI call |
-| `--provider` | from config | AI provider |
-| `--model` | from config | Model override |
-
----
-
-## Code Quality
-
-### `cloop review [commit-range]`
-
-AI-powered code review for git diffs. Returns a quality score, issues by severity, praise, and suggestions.
-
-```bash
-cloop review                           # review all uncommitted changes
-cloop review --staged                  # review only staged changes
-cloop review --last                    # review the last commit
-cloop review HEAD~3..HEAD              # review a range of commits
-cloop review --task 3                  # include PM task context in review
-cloop review --format md               # markdown output
-cloop review --format md -o review.md  # save markdown to file
-cloop review --quick                   # diff stats only, no AI call
-cloop review --provider anthropic
-```
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--staged` | `false` | Review only staged changes |
-| `--last` | `false` | Review the last commit |
-| `--commit` | | Review a specific commit (hash) |
-| `--task` | `0` | Include PM task context in review (task ID) |
-| `--format` | `terminal` | Output format: `terminal` or `md` |
-| `-o, --output` | | Write output to file |
-| `--quick` | `false` | Show diff stats only, no AI call |
-| `--timeout` | | Review timeout (e.g. `60s`, `2m`) |
-| `--provider` | from config | Provider to use |
-| `--model` | from config | Model override |
-
-Issues are graded as: `critical`, `major`, `minor`, `suggestion`.
-
----
-
-## Collaboration & Automation
-
-### `cloop ask <question>`
-
-Ask the AI anything about your project state, tasks, progress, or blockers. The AI has full context: goal, task plan, recent activity, and project memory.
-
-```bash
-cloop ask "What are the remaining blockers?"
-cloop ask "Summarize what has been done so far"
-cloop ask "Which tasks failed and why?"
-cloop ask "What should I do next?"
-cloop ask "How long will the remaining tasks take?"
-cloop ask --provider anthropic "Are there any risks in the current plan?"
-```
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--recent-steps` | `3` | Number of recent steps to include in context (0 = none) |
-| `--provider` | from config | Provider to use |
-| `--model` | from config | Model override |
-
-### `cloop chat`
-
-Interactive conversational AI product manager. Ask questions, get suggestions, or let the AI update your task plan — all through natural conversation.
-
-```bash
-cloop chat
-cloop chat --provider anthropic
-cloop chat --save         # auto-save transcript on exit
-```
-
-**Slash commands inside chat:**
-
-| Command | Description |
-|---------|-------------|
-| `/status` | Show current project status |
-| `/tasks` | List all tasks |
-| `/help` | Show available commands |
-| `/clear` | Clear conversation history |
-| `/save` | Save conversation transcript |
-| `/quit` | Exit the chat (also: `/exit`, Ctrl+D) |
-
-The AI can take PM actions on your behalf: mark tasks done, create new tasks, and add notes to project memory.
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--provider` | from config | AI provider |
-| `--model` | from config | Model override |
-| `--timeout` | `120s` | Response timeout |
-| `--save` | `false` | Auto-save transcript on exit |
-
-### `cloop compare [prompt]`
-
-Benchmark the same prompt across multiple AI providers simultaneously. Compare response quality, latency, token counts, and cost side-by-side.
-
-```bash
-cloop compare "What is the best way to structure a Go project?"
-cloop compare --providers anthropic,openai "Explain REST vs GraphQL"
-cloop compare --judge "Write a haiku about software"
-cloop compare --task 3           # use a PM task's prompt
-cloop compare --format md -o results.md "Design a caching strategy"
-cloop compare --full "Summarize microservices best practices"
-```
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--providers` | all configured | Comma-separated providers to compare |
-| `--judge` | `false` | Use an AI judge to score each response (0-10) |
-| `--judge-provider` | first successful | Provider to use as judge |
-| `--task` | `0` | Use prompt from PM task #N |
-| `--format` | `table` | Output format: `table` or `md` |
-| `-o, --output` | | Save output to file |
-| `--timeout` | `120` | Per-provider timeout in seconds |
-| `--full` | `false` | Show full responses (not truncated) |
-
-### `cloop github`
-
-Sync tasks with GitHub Issues and pull requests.
-
-```bash
-cloop github sync                      # import open issues as tasks
-cloop github sync --repo owner/repo    # specify repo
-cloop github sync --labels bug,enhancement  # filter by label
-cloop github sync --dry-run            # preview without saving
-cloop github push                      # create issues for unlinked tasks
-cloop github push --dry-run            # preview what would be created
-cloop github push --done               # also close issues for done tasks
-cloop github prs                       # list open PRs with CI status
-cloop github prs --state all           # include closed PRs
-cloop github link 3 42                 # link task #3 to issue #42
-cloop github unlink 3                  # remove task #3's issue link
-cloop github status                    # show sync overview
-```
-
-Configure GitHub access:
-```bash
-cloop config set github.token ghp_...         # personal access token
-cloop config set github.repo owner/repo       # default repo
-```
-
-The repo is auto-detected from the `origin` git remote if not configured. GitHub token is also read from `GITHUB_TOKEN` env var.
-
-### `cloop agent`
-
-Autonomous background agent: executes PM tasks without supervision at a regular interval.
-
-```bash
-# Start the agent
-cloop agent start                      # every 5 minutes
-cloop agent start --interval 2m        # every 2 minutes
-cloop agent start --provider anthropic # use Claude API
-
-# Monitor the agent
-cloop agent status                     # is it running? what's it doing?
-cloop agent logs                       # full log stream
-cloop agent logs --tail 30             # last 30 lines
-cloop agent follow                     # tail log in real time
-
-# Stop the agent
-cloop agent stop
-
-# Maintenance
-cloop agent clear-logs                 # truncate the log file
-```
-
-The agent executes one PM task per interval, records results, and stores a running state in `.cloop/agent-state.json`. Logs are written to `.cloop/agent.log`.
-
----
-
-## Project Memory
-
-### `cloop memory`
-
-Manage the project's persistent memory stored in `.cloop/memory.json`. Memory entries are key learnings that are injected into future session prompts.
-
-```bash
-cloop memory list                      # list all stored memory entries
-cloop memory add "Always use chi router, not net/http"  # add a manual entry
-cloop memory delete <id>               # delete a specific entry by ID
-cloop memory clear                     # delete all memory entries
-```
-
-Memory entries can be created automatically via:
-- `cloop retro --save-memory` — saves retro insights to memory
-- `cloop chat` — the AI can add notes via natural conversation
-
-### `cloop checkpoint`
-
-Save, restore, or list named snapshots of the project state. Useful before risky changes or experiments.
-
-```bash
-cloop checkpoint save before-deploy    # save a named checkpoint
-cloop checkpoint save                  # save with auto-generated timestamp name
-cloop checkpoint list                  # list all saved checkpoints
-cloop checkpoint restore before-deploy # restore (current state auto-backed up)
-cloop checkpoint delete before-deploy  # delete a checkpoint
-```
-
-Checkpoints are stored as `.json` files in `.cloop/checkpoints/`. Restoring a checkpoint automatically backs up the current state first.
-
----
-
-## MCP Server (Model Context Protocol)
-
-### `cloop mcp`
-
-Start cloop as an MCP server, exposing it as a set of tools to Claude Desktop, Cursor, Zed, and any other client that supports the [Model Context Protocol](https://spec.modelcontextprotocol.io).
-
-The server speaks JSON-RPC 2.0 over newline-delimited stdio. All log output goes to stderr so it does not corrupt the MCP stream.
-
-```bash
-cloop mcp                          # use the configured/auto-detected provider
-cloop mcp --provider anthropic     # force a specific provider
-cloop mcp --provider openai --model gpt-4o
-```
-
-#### Available MCP Tools
-
-| Tool | Description |
-|------|-------------|
-| `get_status` | Return current orchestrator state: goal, status, step counts, provider |
-| `get_plan` | Return the full PM-mode task plan as JSON with all task details |
-| `add_task` | Append a new task to the current plan (title, description, priority) |
-| `complete_task` | Mark a task done by ID with an optional result summary |
-| `run_task` | Execute a one-shot AI prompt using the configured provider |
-
-#### Claude Desktop Configuration
-
-Add to `~/.claude/claude_desktop_config.json` (or the equivalent on your OS):
-
-```json
-{
-  "mcpServers": {
-    "cloop": {
-      "command": "cloop",
-      "args": ["mcp"],
-      "cwd": "/path/to/your/project"
-    }
-  }
-}
-```
-
-Once configured, Claude Desktop will offer the cloop tools in any conversation. You can ask Claude to check the plan status, add tasks, or run one-off AI prompts directly through cloop's provider.
-
-#### Cursor Configuration
-
-In `.cursor/mcp.json` at the project root:
-
-```json
-{
-  "mcpServers": {
-    "cloop": {
-      "command": "cloop",
-      "args": ["mcp"]
-    }
-  }
-}
-```
-
-#### Example Session (raw JSON-RPC)
-
-```json
-// Client → cloop
-{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{}}}
-
-// cloop → Client
-{"jsonrpc":"2.0","id":1,"result":{"capabilities":{"tools":{}},"protocolVersion":"2024-11-05","serverInfo":{"name":"cloop","version":"1.0.0"}}}
-
-// Client → cloop
-{"jsonrpc":"2.0","method":"initialized"}
-
-// Client → cloop
-{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"get_plan","arguments":{}}}
-
-// cloop → Client
-{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"{ ... plan JSON ... }"}]}}
-```
-
----
-
-## Web Dashboard
-
-### `cloop ui`
-
-Start a local web dashboard with real-time updates via SSE (Server-Sent Events).
-
-```bash
-cloop ui                  # start on default port 8080
-cloop ui --port 9090      # use a custom port
-cloop ui --no-browser     # don't open the browser automatically
-```
-
-The dashboard shows: project goal, status, step history with outputs, task list (PM mode), live progress, and run/stop controls.
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--port` | `8080` | Port to listen on |
-| `--no-browser` | `false` | Do not open the browser automatically |
-
-### `cloop hub`
-
-Control-plane transport security.
-
-```bash
-cloop hub tls-init               # self-signed cert+key for development (0600 key)
-cloop hub tls-init --host cloop.example.com --days 90
-cloop hub pin                    # SPKI pin of the configured certificate
-cloop hub pin --cert /path/to/fullchain.pem
-```
-
-`tls-init` refuses to overwrite existing key material without `--force`:
-regenerating changes the hub's key, and every agent pinned to the old one stops
-connecting until it is re-pinned. See [TLS](#tls) for the serving configuration
-and [Remote executors](#remote-executors-edge-devices) for how the pin reaches
-a device.
-
-### OIDC single sign-on (optional)
-
-The dashboard can authenticate users against any OpenID Connect provider
-(Keycloak, Dex, Authentik, Auth0, Okta, Google, Azure AD, …). It is
-**disabled by default** — nothing changes unless you opt in via
-`.cloop/config.yaml` in the directory `cloop ui` runs from:
-
-```yaml
-ui:
-  oidc:
-    enabled: true
-    issuer: https://auth.example.com/realms/main
-    client_id: cloop-dashboard
-    client_secret: "..."
-    redirect_url: https://cloop.example.com/auth/callback
-    admin_emails: [ops@example.com]   # optional: these users see all projects
-    # scopes: [openid, profile, email]  # default
-    # session_ttl_hours: 24             # default; 1..720
-    # cookie_secure: auto               # auto | always | never
-```
-
-Register cloop at your IdP as a **confidential client** with the
-authorization-code flow and the redirect URL above (PKCE is used
-automatically). All four required fields must be set or `cloop ui` refuses
-to start — the server fails closed rather than silently serving without
-authentication. The same keys are settable via `cloop config set
-ui.oidc.<key> <value>`.
-
-When enabled:
-
-- Every browser request needs an IdP session; unauthenticated visitors are
-  redirected to the sign-in flow at `/auth/login`. A signed-in user chip and
-  sign-out button appear in the header.
-- **Per-user projects**: projects created through the UI are owned by the
-  creating user and are visible only to them (and to `admin_emails`).
-  Pre-existing/CLI-registered projects have no owner and stay visible to
-  every authenticated user. Ownership is recorded in the multi-project
-  registry (`~/.cloop/projects.json`, `owner` field).
-- The static bearer token (`--token` / `CLOOP_UI_TOKEN`) keeps working for
-  API automation and sees all projects.
-- Sessions live in memory: restarting the dashboard signs everyone out
-  (they are silently re-authenticated by the IdP on the next navigation).
-
-### Role-based access control
-
-Map OIDC claims to roles under `ui.oidc.role_mappings`. Each mapping binds a
-claim value to a role, optionally narrowed to one project or one executor:
-
-```yaml
-ui:
-  oidc:
-    enabled: true
-    # ...
-    default_role: none          # role for users matching no mapping
-    role_mappings:
-      - {claim: group, value: cloop-admins,  role: admin}
-      - {claim: group, value: engineering,   role: operator}
-      - {claim: role,  value: sre,           role: maintainer}
-      # Narrower scopes override broader ones — in both directions:
-      - {claim: group, value: engineering, role: maintainer, project: payments}
-      - {claim: group, value: engineering, role: viewer,     project: infra}
-      - {claim: email, value: dana@example.com, role: admin, executor: edge-1}
-```
-
-`claim` is `group`, `role`, `email`, or `sub`. Group and role values match
-case-insensitively and ignore a leading `/`, so Keycloak's `/cloop-admins`
-path form works as written. Group claims are read from `groups`; role claims
-from `roles`, Keycloak's `realm_access.roles`, and this client's entry under
-`resource_access`. `project` matches either a project's registry name or its
-filesystem path.
-
-**Roles** form a ladder, each holding everything below it plus more:
-
-| Role | Adds |
+| | |
 | --- | --- |
-| `viewer` | `project.read`, `executor.read` |
-| `operator` | `run.start`, `run.stop`, `task.mutate` |
-| `maintainer` | `project.write`, `config.write`, `secret.grant`, `secret.revoke` |
-| `admin` | `executor.manage`, `user.manage` |
+| **[Executor architecture](docs/architecture/executors.md)** | how a task travels from the orchestrator to a sandbox and back — the four backends, placement, health supervision, failover, and remote agent enrollment |
+| **[Security model](docs/security/model.md)** | the four trust boundaries, the no-host-execution guarantee, SSO and RBAC, and a table mapping every guarantee to the test that machine-checks it |
+| **[Threat model](docs/security/threat-model.md)** | STRIDE per boundary, with an honest residual-risk column |
+| **[Secrets and egress](docs/guides/secrets.md)** | granting a GitHub repo/PAT, kubeconfig, registry login or Internet lease, with TTLs and constraints |
+| **[Operator runbook](docs/operations/runbook.md)** | backup and restore, audit verification, key rotation, upgrade, rollback, incident playbooks |
+| **[Command reference](docs/reference/commands.md)** | every command and flag |
+| **[Configuration reference](docs/reference/configuration.md)** | every `.cloop/config.yaml` key |
+| **[Deployment](deploy/README.md)** | container image, docker-compose evaluation stack, Helm chart |
 
-**Precedence.** Only mappings whose scope the request satisfies apply. Those
-are ranked by specificity — project+executor, then executor, then project,
-then unscoped — and the most specific tier wins outright; within a tier the
-strongest role wins. A more specific mapping therefore *overrides* a broader
-one instead of merging with it, which is what lets you both promote a global
-viewer on one project and hold a global maintainer down to viewer on a
-sensitive one. `admin_emails` participates as an unscoped `admin` mapping, so
-it keeps working and can still be narrowed per project.
+---
 
-Anything not granted is denied. Denials return `403` with the required
-permission named; scopes you cannot read return `404` instead, so error codes
-never reveal whether a project exists. Every denial and every privileged
-action is appended to the audit log (`cloop events`) with the acting subject.
-The dashboard hides or disables controls your role cannot use.
+## Commands
 
-**Enabling RBAC is opt-in.** With no `role_mappings` and no `default_role`,
-authorization behaves exactly as it did before — every authenticated user has
-full access — so turning on SSO does not lock out a deployment that has not
-written a policy yet. Writing a single mapping (or setting `default_role`,
-including to `none`) switches the deployment to deny-by-default. An invalid
-role or claim name aborts startup rather than silently never matching.
+Full detail — every flag, every subcommand — is in the
+[command reference](docs/reference/commands.md).
+
+**Core loop**
+
+| Command | Does |
+| --- | --- |
+| `cloop init [goal]` | initialize a project; `--interactive` for a guided setup |
+| `cloop run` | decompose the goal into tasks and execute them |
+| `cloop status` | goal, provider, progress, task list |
+| `cloop log` / `cloop watch` | step history; re-evaluate on file change |
+| `cloop task …` | add, edit, split, merge, decompose, assign, annotate, archive |
+| `cloop goal` | change the goal and re-plan |
+| `cloop reset` / `cloop clean` | discard the plan; remove `.cloop/` |
+
+**Analysis and planning** — `scope`, `forecast`, `insights`, `retro`,
+`standup`, `backlog`, `prioritize`, `milestone`, `simulate`, `review`
+
+**Collaboration** — `ask`, `chat`, `compare`, `github`, `agent`, `memory`,
+`checkpoint`, `mcp`
+
+**Hub and fleet**
+
+| Command | Does |
+| --- | --- |
+| `cloop ui` | start the web dashboard |
+| `cloop hub bootstrap` | generate a secure-by-default hub configuration |
+| `cloop hub tls-init` / `pin` | development certificate; SPKI pin for agents |
+| `cloop executor list` / `ls` / `test` | registered backends; fleet health; preflight |
+| `cloop executor enroll` / `agent` / `revoke` | enrol an edge device, run one, revoke it |
+| `cloop executor cordon` / `drain` / `uncordon` / `reap` | take a node out of rotation; clean up strays |
+
+**Credentials and access**
+
+| Command | Does |
+| --- | --- |
+| `cloop secret mint` / `grant` / `grants` / `revoke` | store a credential; grant scoped, expiring access |
+| `cloop secret lease` | dry-run what an executor would receive |
+| `cloop egress grant` / `list` / `revoke` / `test` | lease the hub's Internet connection to a sandbox |
+
+**Operations**
+
+| Command | Does |
+| --- | --- |
+| `cloop db backup` / `restore` / `verify` / `maintain` | hot backup; restore; integrity check; VACUUM + ANALYZE |
+| `cloop audit-log list` / `verify` / `export` | audit trail; hash-chain verification; JSONL/CSV/CEF export |
+| `cloop hub healthcheck` | probe `/healthz` or `/readyz` |
+| `cloop migrate` | apply schema migrations |
+
+`cloop <command> --help` for anything not listed.
+
+---
+
+## Enterprise deployment
+
+cloop runs as a multi-user hub with SSO, RBAC, brokered credentials and
+isolated executors. The hub itself never spawns a harness: workloads run in
+containers, on enrolled edge devices, or as Kubernetes Pods.
+
+```bash
+cloop hub bootstrap --external-url https://cloop.example.com \
+  --oidc-issuer https://idp.example.com --oidc-client-id cloop-hub
+```
+
+That writes a configuration with `executors.allow_host_process: false` and
+`default_role: none` — no host execution, deny by default. From there:
+
+- **[Executor architecture](docs/architecture/executors.md)** — pick and
+  configure a backend, enrol edge devices
+- **[Security model](docs/security/model.md)** — trust boundaries, SSO, RBAC,
+  and what each guarantee is worth
+- **[Secrets and egress](docs/guides/secrets.md)** — grant credentials that
+  expire
+- **[Operator runbook](docs/operations/runbook.md)** — run it in production
+- **[Deployment](deploy/README.md)** — image, compose stack, Helm chart
+
+### Security conformance suite
+
+`tests/security/` is an executable specification of the threat model. Every
+check asserts a property whose absence is **invisible at runtime**: the feature
+still works, the logs look normal, and only an attacker notices the difference.
+
+```bash
+go test -race ./tests/security/
+```
+
+It runs as a required CI job. Each guarantee is mapped to the exact test that
+checks it in the
+[security model](docs/security/model.md#the-guarantee--test-table).
 
 ---
 
@@ -1162,165 +402,10 @@ Status values: `initialized`, `running`, `complete`, `failed`, `paused`, `evolvi
 
 ---
 
-## Security Conformance Suite
-
-cloop's security model is spread across packages that do not import each
-other — `pkg/executor` (host-execution policy), `pkg/secretbroker` (scoped
-credential grants), `pkg/executorstore` (enrollment tokens), `pkg/ui` and
-`pkg/apiserver` (the control plane). Nothing in that arrangement fails loudly
-when a refactor quietly reconnects the UI to `os/exec`, widens a container's
-privileges, or lets an expired lease redeem.
-
-`tests/security/` is an executable specification of the threat model. Every
-check asserts a property whose absence is **invisible at runtime**: the feature
-still works, the logs look normal, and only an attacker notices the difference.
-
-```bash
-# The whole suite. -race matters: the single-use token check races eight
-# concurrent redemptions, which is what a non-atomic guard fails.
-go test -race ./tests/security/
-
-# One guarantee at a time
-go test ./tests/security/ -run TestNoHandlerReachesProcessExecution -v
-
-# Fuzz the remote agent protocol (the only boundary where the peer isn't ours)
-go test ./tests/security/ -run XXX -fuzz FuzzFrameDecoding -fuzztime 5m
-```
-
-It runs as a **required CI job** (`security-conformance` in
-`.github/workflows/ci.yml`), separate from the main test job so a failure reads
-as "a security guarantee broke", not "a test broke".
-
-### The six guarantees
-
-**1. No host execution from HTTP** — `callgraph_test.go`
-
-Type-checks the whole module with `golang.org/x/tools/go/packages` and walks
-outward from every `net/http` handler in `pkg/ui` and `pkg/apiserver`, looking
-for a path to `exec.Command`, `syscall.Exec`, or any other process spawn.
-Packages under `pkg/executor` stop the search — that is the sanctioned door.
-Anything else that reaches a spawn is a violation, and the failure prints the
-call chain.
-
-*Why transitive:* `pkg/ui` already forbids importing `os/exec` directly. That
-is necessary and not sufficient — a handler calling a helper that shells out to
-`git` is exactly as much host execution and passes a per-package import check
-without complaint.
-
-A short list of endpoints legitimately run a program on the control plane
-(`claude auth login` writes the server's own credentials; inline task replay
-reads git history). They are enumerated in `gatedHostExecution` with a reason,
-each is gated on the host-execution policy, and
-`TestGatedHandlersRefuseUnderStrictMode` proves each one refuses under strict
-mode. The two lists are checked against each other, so an endpoint cannot be
-exempted from the static check without also being proved to refuse — and a
-stale exemption fails the build, so the list can only shrink.
-
-**2. Strict mode is enforced, with typed errors** — `strictmode_test.go`
-
-With `executors.allow_host_process: false`, an executor offering no isolation
-is refused at **registration**, at **`Resolve`**, and at the driver's own
-**`Start`**. Refusing at registration is what makes an unbound project fail
-closed rather than falling back to the host.
-
-The refusal must be a `*executor.HostExecutionDeniedError` wrapping
-`ErrHostExecutionDenied` — matchable with both `errors.Is` and `errors.As`, and
-carrying remediation naming the isolated executors available. A refusal that is
-only a log line cannot be turned into a 409 with a fix in it.
-
-The policy is a **ratchet**: it only ever tightens. A permissive `config.yaml`
-cannot re-open host execution, because in a multi-tenant deployment that file
-is tenant-controlled and would otherwise be a privilege escalation.
-
-**3. Brokered credentials are never disclosed** — `secrets_test.go`
-
-Table-driven over GitHub PATs (classic and fine-grained), kubeconfigs, registry
-credentials, and env secrets. Each runs the full mint → grant → lease
-lifecycle, then checks every surface that *describes* the credential: the
-sealed record at rest, JSON serialization (the `/api` response shape), `%+v`
-rendering (what a text logger writes — a `json:"-"` tag hides a field from one
-and not the other), audit events, list APIs, and error strings.
-
-Every check looks for **base64 (three variants), hex, URL-encoded, and
-JSON-escaped forms** as well as raw. A leak that survives one encoding
-round-trip is still a leak, and encoding is the form a credential usually takes
-on its way into a log line.
-
-*Scope, stated honestly:* this asserts non-disclosure by *cloop's* surfaces. It
-cannot assert that a workload never prints its own credential — the workload
-holds the plaintext by design. That is why material is delivered as files and
-named environment variables rather than argv, which guarantee 5 checks.
-
-**4. Leases expire and tokens are single-use** — `leases_test.go`
-
-Expiry is enforced on redemption *and* mid-session: renewing a lease re-reads
-its grant, so revoking a credential reaches workloads already running. Tested
-with an injected clock, because the interesting case is a one-hour TTL that
-must be refused at hour one, and no suite can wait for that.
-
-Enrollment tokens cannot be replayed — including under **eight concurrent
-redemptions**, which is the shape that defeats a check-then-write guard and
-passes a sequential test.
-
-A static scan flags any `==` between two credential-shaped values, which leaks
-the secret through response timing one byte at a time. Comparisons against
-constants are ignored, as are secret *names* and *IDs* — those are printed in
-list APIs by design.
-
-**5. The container never breaks its own sandbox** — `container_test.go`
-
-Across the whole operator-settable option surface, the generated runtime
-command line must never contain `--privileged`, host networking, host
-PID/IPC/UTS namespaces, `--cap-add`, a runtime socket mount, or a bind mount of
-`/`, `/etc`, `/root`, `/proc`, or `/sys`. It must always contain
-`--cap-drop=ALL`, `--security-opt=no-new-privileges`, `--read-only`, and a
-non-root user.
-
-Root in a container defeats `--cap-drop=ALL` and turns a runtime escape into
-host root. Because the UID is derived from the project directory's owner, a
-control plane running as root over a root-owned project used to produce a root
-sandbox silently; that is now refused unless
-`executors.container.allow_root_user` is set — an explicit decision, never a
-default.
-
-Assertions run against the real argv builder via `container.AuditRunArgv`, with
-no container runtime required, so they run everywhere CI does.
-
-**6. The agent protocol survives a hostile peer** — `framing_test.go`
-
-The remote executor link is the one boundary where the code on the other end
-is not cloop's. Fuzz targets cover frame decoding, truncation at every offset,
-oversized payloads, and every exported payload decoder called against every
-frame type — because a hostile peer picks the type byte, so "decode a start
-frame that claims to be a heartbeat" is a reachable state.
-
-The `MaxFrameBytes` cap is asserted to stay within a sane range: raised to
-1 GiB "to fix a truncation bug", it would silently reintroduce the
-memory-exhaustion vector it exists to close, and no functional test would
-notice.
-
-### When a check fails
-
-The failure message names the fix. Do not add an exemption:
-
-- **Guarantee 1** — route the call through
-  `executor.Resolve(projectPath).Start(...)` (see `startWorkload` /
-  `runWorkload` in `pkg/ui/executor.go`, or `pkg/apiserver.startRun`). If the
-  program genuinely must run on the control plane, gate it with
-  `denyHostSideEffect` and add it to *both* `gatedHostExecution` and
-  `gatedEndpoints`.
-- **Guarantee 3** — the credential reached a descriptive surface. Add a
-  `json:"-"` tag *and* keep it out of the `%+v` path, or run it through
-  `secretbroker.RedactString` / `SafeRef`.
-- **Guarantee 5** — the flag belongs in `deniedExtraArgs` if config introduced
-  it, or in `buildRunArgs` if the driver stopped emitting it.
-
----
-
 ## Error Handling
 
-- **Provider error (regular mode)** → stops immediately
-- **3 consecutive task failures (PM mode)** → stops automatically (configurable with `--max-failures`)
+- **3 consecutive task failures** → stops automatically (configurable with `--max-failures`)
+- **Task failure** → auto-heal retries with a mutated prompt before giving up
 - **Ctrl+C** → graceful pause after current step
 - **Rate limits / transient errors** → automatic retry with exponential backoff (up to 3 attempts, retries on 429/5xx)
 
@@ -1406,7 +491,7 @@ cloop run --pm --notify
 cloop run --pm --notify --on-complete 'say "cloop done"'
 ```
 
-`--notify` uses `notify-send` on Linux (requires `libnotify`) and `osascript` on macOS. It is silently ignored on unsupported platforms or headless environments. Events fired: **Task Done**, **Task Failed**, **All Tasks Complete** (PM mode) / **Goal Complete** (loop mode).
+`--notify` uses `notify-send` on Linux (requires `libnotify`) and `osascript` on macOS. It is silently ignored on unsupported platforms or headless environments. Events fired: **Task Done**, **Task Failed**, **All Tasks Complete**.
 
 ### Cross-provider comparison
 
@@ -1485,447 +570,6 @@ Invoke-Expression (&cloop completion powershell)
 | `cloop task tag/untag <id>` | Task ID for first argument |
 | `cloop task merge <id…>` | All task IDs for multi-ID arguments |
 | Subcommands | All registered subcommands with descriptions |
-
-## Execution Backends (Executors)
-
-An **executor** decides *where* a cloop workload actually runs. By default it is
-a child process on the same host as cloop itself, with the same user, the same
-filesystem, and the same network. That is fine on a laptop. It is not fine for a
-hosted deployment where the agent executes model-authored code on someone else's
-behalf.
-
-Projects are pinned to an executor. A project bound to an executor that is not
-available **fails** rather than silently falling back to host execution — an
-isolation boundary you opted into is never downgraded because the backend
-happened to be unreachable.
-
-| Kind | Isolation | Where it runs | Notes |
-|------|-----------|---------------|-------|
-| `localprocess` | none | this host | Default. Zero-config, no sandbox. |
-| `container` | container | this host | Docker/Podman sandbox. Opt-in via config. |
-| `remote` | remote | an enrolled device | Edge box that dialled out to the control plane. |
-
-```bash
-cloop executor list              # what is registered, and what it isolates
-cloop executor ls                # fleet health: state, in-flight work, last seen
-cloop executor test <id>         # preflight + run `cloop version` inside it
-cloop executor reap <id>         # remove containers left by a killed control plane
-cloop executor cordon <id>       # stop new placement; in-flight work continues
-cloop executor uncordon <id>     # back in rotation, at the health its probes justify
-cloop executor drain <id>        # stop placement, wait for in-flight to reach zero
-cloop executor enroll            # mint a token for a remote device
-cloop executor agent --server …  # run *on* the device
-cloop executor revoke <id>       # kill a leaked token or a decommissioned device
-```
-
-### The Executors panel
-
-The web dashboard has a global **Executors** tab: one card per backend with a
-live status dot, a kind badge (host / container / remote), capability chips,
-current load, and enroll/revoke actions. Status changes arrive over the same
-WebSocket the rest of the dashboard uses — nothing polls.
-
-Each project's execution target is a one-click setting: the **Executor** card on
-the project Overview page, next to the provider card. Changing it takes effect
-on the next run; work already in flight stays on the executor that started it.
-
-The tab's banner always states the effective host-execution mode, so "can this
-server still fork a harness next to itself" is never something you have to infer
-from a config file.
-
-### Container sandbox
-
-Enable it in `.cloop/config.yaml`:
-
-```yaml
-executors:
-  container:
-    enabled: true
-    runtime: podman          # or docker; empty auto-detects (podman preferred)
-    image: ghcr.io/blechschmidt/cloop-harness:latest
-    cpus: 2                  # core allowance per workload
-    memory: 2g               # 512m / 2g / 1024k; a bare integer means MB
-    pids_limit: 1024         # process cap; -1 disables
-    network: none            # none (default) | bridge | <named network>
-    extra_args: []           # additional runtime flags, --flag=value form only
-    selinux_label: ""        # "z" or "Z" — required when SELinux is enforcing
-```
-
-or with `cloop config set executors.container.<key> <value>`.
-
-Every container is started with:
-
-- **only the project directory** bind-mounted, at the fixed path `/workspace`.
-  Nothing else of the host is visible.
-- a **non-root UID** taken from the project directory's owner, so files the
-  workload creates are owned correctly on the host and an escape lands on an
-  unprivileged user. Under rootless podman the same is achieved with
-  `--userns=keep-id`.
-- **`--network=none`** by default. Egress is opt-in, per executor.
-- **all Linux capabilities dropped** and `no-new-privileges` set, so a setuid
-  binary in the image cannot undo the UID choice.
-- **`--cpus` / `--memory` / `--pids-limit`**, with swap pinned to the memory
-  ceiling so paging cannot evade it.
-- a deterministic name, `cloop-<project>-<runID>`, so orphans stay reapable.
-
-**Secrets** (provider API keys, brokered credentials) are injected as
-environment at start using the bare `--env NAME` form: the runtime reads each
-value from its own environment, so no secret ever appears in the host's process
-table. Nothing is baked into an image and nothing is written to the mounted
-workdir.
-
-Unlike host execution, a container workload does **not** inherit the control
-plane's environment. Forwarding it would hand the sandbox every credential the
-server holds, so variables are passed explicitly or not at all.
-
-### What the container sandbox does not do
-
-- **It does not filter egress itself.** Anything other than `network: none`
-  grants unrestricted outbound access unless the named network carries its own
-  policy. `cloop executor test` says so explicitly rather than implying a
-  guarantee. The supported way to give a sandbox *scoped* network access is to
-  leave it on `network: none` and grant it egress through the broker — see
-  [Scoped network egress](#scoped-network-egress) below.
-- **It does not pull images.** Runs use `--pull=never` so a cold image cache
-  fails immediately with an actionable error instead of turning a UI click into
-  a multi-minute hang. Preflight tells you what to pull.
-- **It does not enforce disk quotas.** A `DiskMB` request is refused rather
-  than accepted and ignored, because writable-layer quotas only work on a
-  minority of storage-driver configurations.
-
-`extra_args` is validated: flags that would dismantle the sandbox
-(`--privileged`, `--cap-add`, `--volume`, `--network`, `--user`, `--entrypoint`,
-`--env`, …) are rejected, and every entry must be a flag in `--flag=value` form
-so a bare value cannot be consumed as the image reference.
-
-### Sandbox image contract
-
-`executors.container.image` must provide:
-
-- the cloop binary at `/usr/local/bin/cloop`;
-- the agent harness the project's provider needs (for the default `claudecode`
-  provider, the `claude` CLI on `PATH`);
-- `git` and a CA bundle;
-- a non-root user, since the workload runs as the project directory's owner UID.
-
-`cloop executor test` bind-mounts the control plane's *own* binary read-only at
-`/usr/local/bin/cloop`, so the smoke test is meaningful even against an image
-that does not yet ship cloop.
-
-### Remote executors (edge devices)
-
-A remote executor runs work on a machine the control plane **cannot dial** —
-an edge device behind NAT, a build box on an office network, a laptop on hotel
-wifi. The connection is inverted: the device dials out and holds one multiplexed
-WebSocket open, so there is no inbound port to forward, no VPN, and no firewall
-rule.
-
-Enrollment is therefore a two-step, out-of-band flow. On the control plane
-(or in the Executors tab, **+ Enroll device**):
-
-```bash
-cloop executor enroll --name edge-1 --ttl 15m
-```
-
-It prints a single-use, expiring token and the exact command to paste on the
-device — including the control plane's certificate pin, derived automatically
-from `ui.tls.cert_file`:
-
-```bash
-cloop executor agent --server wss://cloop.example.com/api/executors/connect \
-  --token <token> --pin sha256:<base64>
-```
-
-The token is **shown once** — only its hash is stored, so it cannot be
-recovered. On first connect the device redeems it for a long-lived credential,
-persists that 0600 at `~/.cloop/agent.json`, and reconnects with it from then
-on. If a token leaks, `cloop executor revoke <id>` (or **Revoke** on the card)
-kills it; if it was already redeemed, that revokes the resulting credential too,
-drops the device's session, and unbinds every project that pointed at it.
-
-#### Transport security
-
-A token proves the *device* is authorised. It says nothing about whether the
-server that answered is the control plane — so the agent verifies that
-independently, before it sends anything:
-
-- **Plaintext is refused.** `ws://` to a non-loopback host fails at startup,
-  because the enrollment token and the long-lived credential would both travel
-  in the clear and an agent retries forever, making one interception permanent.
-  `--insecure-transport` overrides it for links already protected some other
-  way, and logs a warning on every connection attempt while it is on.
-- **`--pin sha256:<base64>`** requires the server's public key to be exactly the
-  expected one, *in addition to* normal certificate-chain verification — never
-  instead of it. cloop sets `InsecureSkipVerify` on no outbound dial, and
-  `tests/security/transport_test.go` machine-checks that across the agent's
-  whole import closure.
-- The pin is over the **SPKI** (public key), not the certificate, so a routine
-  renewal that reuses the key does not break the fleet. Rotating onto a new key
-  does, deliberately — stage it by passing both pins comma-separated until every
-  device has crossed over.
-- The pin is stored in `~/.cloop/agent.json`, so every reconnect for the life of
-  the device is pinned, not just the first one.
-- **`--ca-file`** adds a PEM bundle to the trusted roots — the supported way to
-  reach a private CA or a `cloop hub tls-init` certificate. There is
-  deliberately no flag that disables verification instead.
-
-Read the current pin at any time with `cloop hub pin`.
-
-The agent endpoint deliberately sits outside the dashboard's token/OIDC auth.
-Agents are not users: they carry their own scoped, individually revocable
-credential rather than one that would grant full UI access. It stays behind the
-rate limiter, which is what absorbs an unauthenticated flood of connect
-attempts.
-
-### Scoped network egress
-
-A sandbox with `network: none` is safe and, on its own, not very useful: it
-cannot fetch a dependency, clone a repo, or call an API. The usual escape is to
-give it a real network and hope. `cloop egress` is the alternative — the
-control plane lends its own connection, one destination at a time.
-
-The sandbox keeps no route of its own. It reaches the outside world only
-through an authenticated forward proxy hosted by the control plane, which
-decides per connection:
-
-```bash
-cloop egress grant --to project:/srv/app \
-    --hosts 'api.github.com,*.githubusercontent.com' --ports 443 \
-    --max-down 500m --ttl 8h
-
-cloop egress list                                  # who may reach what, until when
-cloop egress test https://api.github.com/rate_limit  # ...and does it actually work?
-cloop egress revoke egress_2f1c…                   # withdraw, closing live tunnels
-```
-
-Turn the proxy on under `executors.egress`:
-
-```yaml
-executors:
-  egress:
-    enabled: true
-    listen_addr: "10.88.0.1:8899"                      # reachable from the sandbox
-    advertise_addr: "host.containers.internal:8899"    # what goes into HTTPS_PROXY
-    max_session_minutes: 15
-    default_max_bytes_down: 1g
-```
-
-A grant carries hosts, CIDRs, ports, methods, byte quotas, and a TTL, targeted
-with the same `--to` syntax as `cloop secret grant`. Redeeming one mints a
-**single-use, per-session credential** — 256 random bits, compared in constant
-time, stored only as a SHA-256 — which the workload receives as
-`HTTPS_PROXY` / `HTTP_PROXY` / `NO_PROXY`. It never sees the grant itself.
-
-What the proxy enforces:
-
-- **Host, port, and method** are checked before a byte leaves. Methods gate
-  plain HTTP only; a CONNECT tunnel's method lives inside TLS and is not
-  observable (see below).
-- **Resolve-once pinning.** The destination name is resolved exactly once,
-  *every* returned address must pass policy, and the dial goes to the resolved
-  literal. There is no second lookup for a hostile DNS server to answer
-  differently, so rebinding has nowhere to put the second answer.
-- **SSRF hard-block.** Loopback, RFC1918, CGNAT, link-local — which is where
-  the cloud metadata service at `169.254.169.254` lives — multicast, and
-  unspecified addresses are refused *even under `--hosts '*'`*. Reaching one
-  requires naming its range in `--cidrs`, so an internal destination is always
-  a sentence somebody wrote on purpose. The v4-in-v6 encodings
-  (`::ffff:127.0.0.1`, NAT64, `::127.0.0.1`) are unwrapped before the check.
-- **Quotas, mid-stream.** An over-budget transfer is cut while it is in
-  flight, not flagged after it finishes.
-- **TTL, mid-tunnel.** An open tunnel does not outlive its session, including
-  when idle.
-
-Every decision — allow and deny — lands in the same hash-chained audit log as
-the credential broker, with the identity, task, host, port, byte counts, and
-verdict, and no credential material.
-
-**The tunnel is CA-free.** cloop does not terminate, inspect, or re-sign TLS,
-and installs no certificate in the sandbox: the workload validates the origin's
-certificate itself, exactly as it would without a proxy. That costs visibility
-into tunnelled requests, deliberately — a proxy that could read every sandbox's
-traffic would be a far more valuable thing to compromise than the credentials
-it protects.
-
-Revocation is immediate rather than TTL-bounded, which is the payoff for
-brokering a *capability* instead of handing over a token: a leaked PAT cannot
-be recalled from a running container, but a proxy session is torn down at the
-proxy, mid-tunnel, by the control plane that holds it.
-
-### Hardened (enterprise) configuration
-
-By default cloop may run workloads as child processes of the control plane. To
-guarantee that the web UI **never** spawns a harness on the host, turn host
-execution off:
-
-```yaml
-executors:
-  allow_host_process: false   # strict no-host-execution mode
-  container:
-    enabled: true             # …and give it somewhere else to run
-```
-
-or `cloop config set executors.allow_host_process false`.
-
-This is the one setting a hosted deployment must flip. Absent means `true`, so
-existing single-machine installs keep working across an upgrade.
-
-With it `false`:
-
-- the `localprocess` driver refuses to start anything;
-- `executor.Resolve` refuses to hand that driver out, so background paths are
-  covered too, not just the ones with an explicit check;
-- every Web UI path that would have dispatched work returns **HTTP 409** with a
-  machine-readable `code: host_execution_denied` and a `remediation` string
-  naming the executors that *are* available; and
-- the Executors tab shows the mode as a banner.
-
-Hardening before any device has enrolled is a supported intermediate state —
-remote executors arrive at runtime, not through this file — so the config still
-loads and warns rather than refusing to boot.
-
-The policy is a **ratchet**: it can only tighten at runtime. A control plane
-manages many projects, each with its own `config.yaml`, and applying them
-symmetrically would let a tenant re-enable host execution by editing a file they
-control. Loosening requires a restart with a permissive config.
-
----
-
-## Security Model
-
-### What data leaves the machine
-
-When you run cloop in any AI-powered mode (PM, suggest, explain, etc.) cloop sends
-**only the following** to your configured AI provider:
-
-| Data sent | When |
-|-----------|------|
-| Your project **goal** and **task descriptions** | Every prompt |
-| **Step output** from previous tasks (for context) | When building task context |
-| **Codebase snippets** injected by `--inject-context` or `cloop context` | When context injection is enabled |
-| Git log / diff excerpts | Commands that require them (pr, commit-msg, trace, …) |
-
-**No API keys, passwords, or environment variables** are ever included in prompts.
-**No telemetry** is sent to Anthropic or any third party by cloop itself.
-
-### API key storage
-
-| Location | What is stored |
-|----------|----------------|
-| `.cloop/config.yaml` | API keys (optional — env vars are preferred) |
-| Environment variables | Recommended: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GITHUB_TOKEN` |
-| `.cloop/state.db` | Goal, task list, step outputs — **no API keys** |
-
-**Config file permissions:** cloop writes `.cloop/config.yaml` with mode `0600`
-(owner read/write only). On load, cloop warns if the file has world- or
-group-readable permissions so you can run `chmod 600 .cloop/config.yaml`.
-
-**Encrypted secrets** (`cloop secret`) are stored in `.cloop/secrets.enc` using
-AES-256-GCM and never written to any AI prompt.
-
-### State file integrity (optional HMAC)
-
-Set the `CLOOP_STATE_HMAC_KEY` environment variable to enable HMAC-SHA256
-signing of exported state. The `pkg/security` package provides `Sign()` /
-`Verify()` utilities; tooling that exports or imports state can use these to
-detect tampering.
-
-### Web UI (`cloop ui`)
-
-The web dashboard binds to **localhost only** by default. When a `--token` is
-set:
-
-- Every `/api/*` request must present `Authorization: Bearer <token>` or
-  `?token=<token>`.
-- Failed authentication attempts are **rate-limited**: after 5 consecutive
-  failures from the same IP the endpoint returns HTTP 429 and blocks that IP
-  for 60 seconds.
-- All responses include hardened HTTP headers:
-  - `Content-Security-Policy` — restricts resource loading to same-origin
-  - `X-Content-Type-Options: nosniff`
-  - `X-Frame-Options: DENY`
-  - `Referrer-Policy: no-referrer`
-- CORS is restricted to `localhost` / `127.0.0.1` origins only (no wildcard).
-
-### TLS
-
-**Serving.** `cloop ui` and `cloop serve` can terminate TLS themselves, or sit
-behind a proxy that does. Both are supported; a *half*-configuration is not —
-a certificate without a key (or the reverse) fails at startup rather than
-falling back to plaintext, because a server that quietly serves HTTP after
-being asked for HTTPS is discovered from a packet capture, if at all.
-
-```yaml
-ui:
-  external_url: https://cloop.example.com   # also an accepted WebSocket Origin
-  allowed_origins: [ops.example.com]        # deployment-wide (dashboard + agents)
-  allowed_ws_origins: [legacy.example.com]  # dashboard socket only
-  tls:
-    cert_file: /etc/cloop/tls/fullchain.pem
-    key_file:  /etc/cloop/tls/privkey.pem   # mode 0600
-    min_version: "1.2"                      # or "1.3"; 1.0/1.1 are rejected
-```
-
-Or per-invocation: `cloop ui --tls-cert <pem> --tls-key <pem>` (the flags
-override the config block, as a pair). Only AEAD cipher suites with forward
-secrecy are offered — no CBC, no static RSA. For local development,
-`cloop hub tls-init` generates a self-signed pair (key written 0600 through
-`pkg/atomicfile`, never briefly world-readable) and prints the pin to give
-devices.
-
-**HSTS and cookies.** Responses delivered over TLS carry
-`Strict-Transport-Security: max-age=31536000; includeSubDomains`, and the OIDC
-session cookie becomes `Secure` + `SameSite=Strict`. Both are keyed off the
-request's real scheme, so they are also correct behind a TLS-terminating
-reverse proxy (`X-Forwarded-Proto`, trusted only from a loopback peer). Neither
-is applied on plaintext: HSTS on `http://localhost` would pin a developer's
-browser to HTTPS for a year and break every other local project on that
-hostname.
-
-**WebSocket origins.** Both the dashboard socket and the executor-agent
-endpoint accept an upgrade only from a recognised `Origin` — loopback,
-same-origin, `ui.external_url`, or `ui.allowed_origins`. A request with *no*
-`Origin` is allowed, because that is what every non-browser agent sends and a
-browser cannot suppress the header. A cross-origin upgrade gets 403 with the
-reason, before any token is examined — so it cannot burn a single-use
-enrollment token on the way to being refused.
-
-The two allowlists differ in blast radius and are deliberately not merged:
-`allowed_origins` is deployment-wide and reaches `/api/executors/connect`,
-where an entry can open an agent connection; `allowed_ws_origins` is scoped to
-the dashboard socket only. Prefer setting `external_url` — it covers the
-reverse-proxy case without either list.
-
-Note that same-origin matching falls back to comparing hostnames when the
-`Origin` and `Host` ports differ, which is what makes a proxy that rewrites
-`Host` work. The consequence is that another *port* on the same hostname counts
-as same-origin. If something you do not control is served from the hub's
-hostname, set `external_url` and treat that hostname as part of the trust
-boundary.
-
-**Outbound.** All three remote providers (Anthropic, OpenAI, custom
-OpenAI-compatible) and the executor agent validate certificates against the
-system CA pool. There is **no `InsecureSkipVerify` option** in cloop, and
-`tests/security/transport_test.go` fails the build if one appears on the
-agent's dial path. Reaching a server with a private CA is done by *adding* a
-root (`--ca-file`), not by removing verification.
-
-For self-hosted models on plain HTTP (Ollama), set `ollama.base_url` to the
-local endpoint. Outbound traffic to Anthropic/OpenAI is always TLS.
-
-### Shell hooks and command injection
-
-Pre/post task hooks (`hooks.pre_task`, `hooks.post_task`, etc.) are **user-
-configured shell commands** from `.cloop/config.yaml`. Task context
-(title, status, role) is passed as **environment variables** — never
-interpolated into the hook command string — so task content cannot inject shell
-commands through the hook mechanism.
-
-### Dependency security
-
-cloop uses `govulncheck` (golang.org/x/vuln) for dependency audits. The
-`toolchain` directive in `go.mod` pins the minimum Go version to one that
-resolves all known stdlib vulnerabilities.
 
 ## License
 

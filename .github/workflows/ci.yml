@@ -85,6 +85,50 @@ jobs:
           retention-days: 30
           if-no-files-found: ignore
 
+  docs-drift:
+    name: Documentation drift
+    runs-on: ubuntu-latest
+    # Ten enterprise subsystems shipped before docs/ existed, which is how
+    # documentation normally rots: nothing fails when a new executor backend,
+    # credential kind, role or permission ships undocumented. The feature works,
+    # the tests pass, and the gap is invisible until an operator hits it. This
+    # job reads those enumerations out of the source with go/ast and fails when
+    # one of them is missing from docs/, so a new subsystem cannot ship
+    # undocumented.
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: true
+
+      - name: Docs cover every executor kind, secret kind, role and permission
+        run: go test -v ./tests/docs/
+
+      - name: Relative links inside docs/ resolve
+        # The relative links between these documents are the navigation. A
+        # renamed or moved file leaves them pointing at nothing, and no other
+        # job here would notice.
+        run: |
+          set -euo pipefail
+          broken=0
+          for src in $(find docs -name '*.md'); do
+            for link in $(grep -oE '\]\([^)]+\)' "$src" | sed 's/^](//;s/)$//'); do
+              case "$link" in http*|mailto:*|'#'*) continue ;; esac
+              target="$(dirname "$src")/${link%%#*}"
+              if [ ! -e "$target" ]; then
+                echo "$src: broken link -> $link"
+                broken=1
+              fi
+            done
+          done
+          [ "$broken" = 0 ] || { echo "docs contain broken relative links"; exit 1; }
+          echo "all relative links resolve"
+
   deploy-artifacts:
     name: Deployment artifacts
     runs-on: ubuntu-latest
