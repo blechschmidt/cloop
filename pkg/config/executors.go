@@ -34,11 +34,17 @@ import (
 	"github.com/blechschmidt/cloop/pkg/executor/kubernetes"
 )
 
-// ErrMemoryTooLarge is returned when a size parses but exceeds
-// ContainerMemoryMBUpper. It is a sentinel so ClampMemoryMB can tell "too big"
-// from "malformed" without matching on message text — the two need opposite
+// ErrSizeTooLarge is returned when a size string parses but exceeds its
+// ceiling. It is a sentinel so the Clamp helpers can tell "too big" from
+// "malformed" without matching on message text — the two need opposite
 // treatments, and a refactor of the wording must not silently swap them.
-var ErrMemoryTooLarge = errors.New("config: memory size exceeds the maximum")
+var ErrSizeTooLarge = errors.New("config: size exceeds the maximum")
+
+// ErrMemoryTooLarge is the name this sentinel had when memory was the only
+// size in the config. It is retained as an alias rather than renamed at every
+// call site because it is exported and matched with errors.Is; both names
+// refer to the same value, so a caller written against either keeps working.
+var ErrMemoryTooLarge = ErrSizeTooLarge
 
 // ParseMemoryMB converts a size string to megabytes.
 //
@@ -50,6 +56,23 @@ var ErrMemoryTooLarge = errors.New("config: memory size exceeds the maximum")
 //
 // An empty string yields 0, meaning "no limit requested".
 func ParseMemoryMB(s string) (int, error) {
+	return parseSizeMB(s, "memory", ContainerMemoryMBUpper)
+}
+
+// ParseDiskMB converts a size string to megabytes against the disk ceiling.
+//
+// It is the same grammar as ParseMemoryMB — one parser, so "2g" cannot mean
+// two different things in two neighbouring keys of the same file — with a
+// different bound and a different word in the error, because the reader of
+// "disk 900000g exceeds the maximum" should not have to work out which key
+// they got wrong.
+func ParseDiskMB(s string) (int, error) {
+	return parseSizeMB(s, "disk", ContainerDiskMBUpper)
+}
+
+// parseSizeMB is the shared grammar behind both. field names the key in the
+// error text; upperMB is the ceiling above which the result is ErrSizeTooLarge.
+func parseSizeMB(s, field string, upperMB int) (int, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return 0, nil
@@ -79,14 +102,14 @@ func ParseMemoryMB(s string) (int, error) {
 
 	digits = strings.TrimSpace(digits)
 	if digits == "" {
-		return 0, fmt.Errorf("memory %q has a unit but no value", s)
+		return 0, fmt.Errorf("%s %q has a unit but no value", field, s)
 	}
 	n, err := strconv.ParseInt(digits, 10, 64)
 	if err != nil {
-		return 0, fmt.Errorf("memory %q is not a size (expected forms: 512m, 2g, 1024k)", s)
+		return 0, fmt.Errorf("%s %q is not a size (expected forms: 512m, 2g, 1024k)", field, s)
 	}
 	if n < 0 {
-		return 0, fmt.Errorf("memory %q must not be negative", s)
+		return 0, fmt.Errorf("%s %q must not be negative", field, s)
 	}
 
 	var kb int64
@@ -102,15 +125,15 @@ func ParseMemoryMB(s string) (int, error) {
 		// not theoretical.
 		m := int64(multiplierKB)
 		if n > math.MaxInt64/m {
-			return 0, fmt.Errorf("%w: memory %q exceeds the maximum of %d MB",
-				ErrMemoryTooLarge, s, ContainerMemoryMBUpper)
+			return 0, fmt.Errorf("%w: %s %q exceeds the maximum of %d MB",
+				ErrSizeTooLarge, field, s, upperMB)
 		}
 		kb = n * m
 	}
 	mb := (kb + 1023) / 1024
-	if mb > int64(ContainerMemoryMBUpper) {
-		return 0, fmt.Errorf("%w: memory %q exceeds the maximum of %d MB",
-			ErrMemoryTooLarge, s, ContainerMemoryMBUpper)
+	if mb > int64(upperMB) {
+		return 0, fmt.Errorf("%w: %s %q exceeds the maximum of %d MB",
+			ErrSizeTooLarge, field, s, upperMB)
 	}
 	if n > 0 && mb == 0 {
 		mb = 1
@@ -132,12 +155,31 @@ func ParseMemoryMB(s string) (int, error) {
 // "2gb" is a typo, not an ambitious request, and quietly substituting a number
 // for it would run the sandbox with a limit nobody wrote.
 func ClampMemoryMB(s string) (mb int, clamped bool, err error) {
-	mb, err = ParseMemoryMB(s)
+	return clampSizeMB(ParseMemoryMB, s, ContainerMemoryMBUpper)
+}
+
+// ClampDiskMB is ClampMemoryMB for the disk ceiling: the workspace/scratch
+// budget a project's .cloop/sandbox.yaml asks for.
+//
+// It clamps for exactly the same reason. The author of a repo-committed file
+// does not know the hub's ceiling, and a run that will not start until they
+// guess an acceptable number is worse than one that runs at the limit and says
+// so in a warning.
+func ClampDiskMB(s string) (mb int, clamped bool, err error) {
+	return clampSizeMB(ParseDiskMB, s, ContainerDiskMBUpper)
+}
+
+// clampSizeMB turns "too big" into the ceiling and leaves everything else an
+// error. Malformed stays malformed: "2gb" is a typo, not an ambitious request,
+// and substituting a number for it would run the sandbox with a limit nobody
+// wrote.
+func clampSizeMB(parse func(string) (int, error), s string, upperMB int) (int, bool, error) {
+	mb, err := parse(s)
 	if err == nil {
 		return mb, false, nil
 	}
-	if errors.Is(err, ErrMemoryTooLarge) {
-		return ContainerMemoryMBUpper, true, nil
+	if errors.Is(err, ErrSizeTooLarge) {
+		return upperMB, true, nil
 	}
 	return 0, false, err
 }

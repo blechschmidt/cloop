@@ -60,6 +60,19 @@ func (s *Server) remoteHub() (*remote.Hub, error) {
 		hub, err := remote.NewHub(remote.HubOptions{
 			Store:    store,
 			Registry: executor.DefaultRegistry,
+			// Where an edge device's git credential comes from (Task 20179).
+			//
+			// A factory, not a single source, because a grant is issued to a
+			// *subject*: binding the executor ID at construction is what stops
+			// a fetch for edge-1 being satisfied by a grant issued to edge-2.
+			//
+			// It is built over this hub's own database handle rather than a
+			// fresh one. The hub is a process-wide singleton whose *statedb.DB
+			// deliberately outlives every request, so reusing it costs no
+			// second SQLite connection and no second WAL lock — where opening
+			// a broker per workload, or per agent, would leak a handle on
+			// every dispatch.
+			WorkspaceSource: workspaceCredentialFactory(db),
 			// Agents send no Origin, so these only ever affect browsers.
 			//
 			// The hub gets AllowedOrigins but NOT AllowedWSOrigins: an entry

@@ -100,7 +100,8 @@ func (s *Spec) Hash() string {
 	for _, name := range env {
 		fmt.Fprintf(&b, "env=%s\n", name)
 	}
-	fmt.Fprintf(&b, "cpu=%v\nmemory=%s\npids=%d\n", s.Resources.CPU, s.Resources.Memory, s.Resources.PIDs)
+	fmt.Fprintf(&b, "cpu=%v\nmemory=%s\npids=%d\ndisk=%s\n",
+		s.Resources.CPU, s.Resources.Memory, s.Resources.PIDs, s.Resources.Disk)
 	fmt.Fprintf(&b, "git=%t\nnetwork=%s\n", s.Capabilities.Git, s.Capabilities.Network)
 	mounts := append([]Mount(nil), s.Mounts...)
 	sort.Slice(mounts, func(i, j int) bool { return mounts[i].Target < mounts[j].Target })
@@ -173,7 +174,7 @@ func (r *Resolved) Requirements() executor.Requirements {
 	if len(s.Setup) > 0 {
 		req.RequireSandboxBuild = true
 	}
-	if s.Resources.CPU > 0 || s.Resources.Memory != "" || s.Resources.PIDs > 0 {
+	if s.Resources.CPU > 0 || s.Resources.Memory != "" || s.Resources.PIDs > 0 || s.Resources.Disk != "" {
 		req.RequireResourceLimits = true
 	}
 	if s.Capabilities.Network != "" {
@@ -186,6 +187,15 @@ func (r *Resolved) Requirements() executor.Requirements {
 	if s.Capabilities.Git {
 		req.Harnesses = append(req.Harnesses, "git")
 	}
+	// Deliberately absent: RequireWorkspaceProvisioning, even though
+	// resources.disk feeds Workspace.SizeLimitMB.
+	//
+	// The workspace *kind* is the hub's decision, not the repo's. A
+	// repo-committed file that could ask to be provisioned would be a file that
+	// arranges its own clone — from a URL in the same pull request. There is no
+	// key in this schema that names a repository, for exactly that reason, and a
+	// requirement inferred from one would be the same power arriving sideways.
+	// All a spec may do is bound a fetch the hub already decided to perform.
 	return req
 }
 
@@ -235,6 +245,28 @@ func (r *Resolved) ApplyTo(spec *executor.Spec, projectPath string, grants Grant
 	}
 	if s.Resources.PIDs > 0 {
 		spec.ResourceLimits.PIDs = s.Resources.PIDs
+	}
+	if s.Resources.Disk != "" {
+		mb, err := config.ParseDiskMB(s.Resources.Disk)
+		if err != nil {
+			// normalize() already accepted it, so this is unreachable short of
+			// a caller hand-building a Spec. Refusing beats running unbounded.
+			return fmt.Errorf("sandbox: resources.disk %q: %w", s.Resources.Disk, err)
+		}
+		spec.ResourceLimits.DiskMB = mb
+		// The same number in two places, because two different mechanisms
+		// enforce it and neither covers the other. ResourceLimits.DiskMB
+		// becomes the volume's own ceiling — a Kubernetes emptyDir sizeLimit,
+		// which the kubelet enforces by evicting the Pod. Workspace.SizeLimitMB
+		// is checked by the provisioner right after the fetch, which is what
+		// turns "the repository is bigger than the allowance" into a legible
+		// refusal instead of a Pod that vanishes mid-run.
+		//
+		// Only this field is written. The caller sets spec.Workspace itself —
+		// the kind, the repo, the ref and the grant are all the hub's decisions
+		// (see Requirements) — so assigning a whole Workspace here would silently
+		// discard them.
+		spec.Workspace.SizeLimitMB = mb
 	}
 
 	// --- network ---------------------------------------------------------

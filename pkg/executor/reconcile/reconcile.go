@@ -59,6 +59,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/container"
+	"github.com/blechschmidt/cloop/pkg/executor/gitcreds"
 	"github.com/blechschmidt/cloop/pkg/executor/kubernetes"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
 	"github.com/blechschmidt/cloop/pkg/secretstore"
@@ -203,6 +204,26 @@ type Options struct {
 	Publish *bool
 }
 
+// Identity is everything the Kubernetes driver authenticates with: one
+// credential for the cluster it schedules into, and one for the repositories it
+// fetches project source from.
+//
+// They travel together, and are built together, because both are backed by the
+// same secret broker and therefore the same open state database. Building them
+// through two independent hooks would open two SQLite handles for one executor
+// and hold both for the process's lifetime — see the comment on
+// ensureKubernetes for why that lifetime makes a second handle a leak rather
+// than an inefficiency.
+type Identity struct {
+	// Cluster authenticates to the Kubernetes API server. Required.
+	Cluster kubernetes.CredentialSource
+	// Workspace leases the credential a private-repository fetch needs. nil is
+	// legitimate and means "public repositories only": an in-cluster hub with
+	// no sealing key can still schedule Pods, and the driver's preflight says
+	// so rather than failing a deployment that never needed it.
+	Workspace executor.WorkspaceCredentialSource
+}
+
 // CredentialsFunc builds the identity the Kubernetes driver authenticates
 // with, returning a cleanup to release whatever backs it.
 //
@@ -211,7 +232,7 @@ type Options struct {
 // is deliberately never called; on the path where the source was built but
 // registration then failed, it is the only way to avoid leaking a SQLite
 // handle and its WAL lock on every reconciliation pass. It may be nil.
-type CredentialsFunc func(dir string, cfg *config.Config, execID string) (kubernetes.CredentialSource, func(), error)
+type CredentialsFunc func(dir string, cfg *config.Config, execID string) (Identity, func(), error)
 
 // DefaultPreflightTimeout bounds one driver's preflight. Generous enough for
 // a cold container runtime and a cross-region API server, short enough that a
@@ -668,11 +689,12 @@ func ensureKubernetes(
 	if source == nil {
 		source = BrokerCredentials
 	}
-	creds, cleanup, err := source(dir, cfg, driverOpts.ID)
+	identity, cleanup, err := source(dir, cfg, driverOpts.ID)
 	if err != nil {
 		return nil, false, err
 	}
-	driverOpts.Credentials = creds
+	driverOpts.Credentials = identity.Cluster
+	driverOpts.Workspace = identity.Workspace
 	ex, err := kubernetes.Ensure(reg, driverOpts)
 	if err != nil {
 		// The source is live and owns an open state database, but nothing
@@ -740,40 +762,87 @@ func kubernetesRemediation(cfg *config.Config, execID string) string {
 // which for both a CLI invocation and a long-running hub is exactly the
 // intended lifetime. The cleanup exists for the one path where the source was
 // built and registration then failed.
-func BrokerCredentials(dir string, cfg *config.Config, execID string) (kubernetes.CredentialSource, func(), error) {
+func BrokerCredentials(dir string, cfg *config.Config, execID string) (Identity, func(), error) {
 	k := cfg.Executors.Kubernetes
 	if k.InCluster {
 		src, err := kubernetes.NewInClusterSource(k.Namespace)
 		if err != nil {
-			return nil, nil, fmt.Errorf("in_cluster is set but the ServiceAccount is unusable: %w", err)
+			return Identity{}, nil, fmt.Errorf("in_cluster is set but the ServiceAccount is unusable: %w", err)
 		}
-		// Backed by the Pod's projected token on disk, so there is nothing
-		// to release.
-		return src, nil, nil
+		// Backed by the Pod's projected token on disk, so the cluster
+		// credential has nothing to release. The workspace credential is a
+		// separate question: it needs the broker, and an in-cluster hub is
+		// specifically the deployment that may not have a sealing key
+		// configured yet. Attempting it and accepting nil keeps that hub
+		// schedulable — public repositories still clone, and the driver's
+		// preflight reports the gap rather than the chart failing to come up.
+		ws, closeWS := optionalWorkspaceSource(dir, execID)
+		return Identity{Cluster: src, Workspace: ws}, closeWS, nil
 	}
 
 	db, err := statedb.Open(state.DBPath(dir))
 	if err != nil {
-		return nil, nil, fmt.Errorf("needs a secret broker for its kubeconfig, but the state "+
+		return Identity{}, nil, fmt.Errorf("needs a secret broker for its kubeconfig, but the state "+
 			"database at %s could not be opened: %w", state.DBPath(dir), err)
 	}
 	closeDB := func() { _ = db.Close() }
 	store, err := secretstore.New(db)
 	if err != nil {
 		closeDB()
-		return nil, nil, fmt.Errorf("needs a secret broker for its kubeconfig: %w", err)
+		return Identity{}, nil, fmt.Errorf("needs a secret broker for its kubeconfig: %w", err)
 	}
 	broker, err := secretbroker.New(store, secretbroker.WithAuditor(secretstore.NewAuditor(db)))
 	if err != nil {
 		closeDB()
-		return nil, nil, fmt.Errorf("needs a secret broker for its kubeconfig: %w", err)
+		return Identity{}, nil, fmt.Errorf("needs a secret broker for its kubeconfig: %w", err)
 	}
 	src, err := kubernetes.NewBrokerSource(broker, execID, k.KubeconfigSecret, k.Context)
 	if err != nil {
 		closeDB()
-		return nil, nil, err
+		return Identity{}, nil, err
 	}
-	return src, closeDB, nil
+	// The same broker, so a private-repository fetch and the cluster
+	// credential are governed by one grant store and one audit trail.
+	ws, err := gitcreds.New(broker, execID, "reconcile")
+	if err != nil {
+		closeDB()
+		return Identity{}, nil, err
+	}
+	return Identity{Cluster: src, Workspace: ws}, closeDB, nil
+}
+
+// optionalWorkspaceSource builds a workspace credential source from dir's
+// state database, or returns nil when it cannot.
+//
+// Nil is a supported outcome, not a swallowed error: an executor with no
+// workspace source fetches public repositories anonymously and refuses private
+// ones by name (see *executor.WorkspaceGrantError), which is a far better
+// deployment story than an in-cluster hub that will not start because nobody
+// has minted a GitHub secret yet. Preflight reports it as a warning.
+func optionalWorkspaceSource(dir, execID string) (executor.WorkspaceCredentialSource, func()) {
+	db, err := statedb.Open(state.DBPath(dir))
+	if err != nil {
+		return nil, nil
+	}
+	closeDB := func() { _ = db.Close() }
+	store, err := secretstore.New(db)
+	if err != nil {
+		closeDB()
+		return nil, nil
+	}
+	broker, err := secretbroker.New(store, secretbroker.WithAuditor(secretstore.NewAuditor(db)))
+	if err != nil {
+		// Almost always a missing CLOOP_SECRET_KEY, which is exactly the
+		// in-cluster case this function exists for.
+		closeDB()
+		return nil, nil
+	}
+	src, err := gitcreds.New(broker, execID, "reconcile")
+	if err != nil {
+		closeDB()
+		return nil, nil
+	}
+	return src, closeDB
 }
 
 func convertContainerFindings(in []container.Finding) []Finding {

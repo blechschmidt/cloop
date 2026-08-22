@@ -10,8 +10,9 @@ secret kind, or a new RBAC role ships without appearing here — see
 - **[Executors](architecture/executors.md)** — how a task travels from the
   orchestrator to a sandbox and back. The `Executor` interface, the four
   backends (`localprocess`, `container`, `remote`, `kubernetes`), registry and
-  binding, capability-aware placement, health supervision, and exactly-once
-  failover. Includes the outbound agent enrollment flow for NAT'd edge devices.
+  binding, capability-aware placement, workspace provisioning, health
+  supervision, and exactly-once failover. Includes the outbound agent enrollment
+  flow for NAT'd edge devices.
 
 ## Reference
 
@@ -24,15 +25,17 @@ secret kind, or a new RBAC role ships without appearing here — see
 ## Security
 
 - **[Security model](security/model.md)** — the four trust boundaries and what
-  each authenticates with, the strict no-host-execution guarantee, roles and
-  permissions, and a table mapping every stated guarantee to the test in
-  `tests/security/` that machine-checks it.
+  each authenticates with, the strict no-host-execution guarantee, lease
+  revocation, how a workspace credential reaches one process and nothing else,
+  roles and permissions, and a table mapping every stated guarantee to the test
+  in `tests/security/` that machine-checks it.
 - **[Threat model](security/threat-model.md)** — STRIDE per boundary, with the
   concrete mitigation that exists and an honest residual-risk column.
 
 ## Guides
 
-- **[Secrets and egress](guides/secrets.md)** — granting a GitHub repo/PAT, a
+- **[Secrets and egress](guides/secrets.md)** — granting a GitHub repo/PAT (for
+  a running task, and for the workspace fetch that happens before one), a
   kubeconfig, a registry login, environment variables, and an Internet egress
   lease, with TTLs, constraints, and real command output.
 

@@ -58,7 +58,7 @@ func TestPinnedDigestLandsInTheContainerSpec(t *testing.T) {
 	p, err := ex.buildPodFor(context.Background(), executor.Spec{
 		Argv:  []string{"cloop", "run"},
 		Image: ref,
-	}, "h1", "cloop")
+	}, "h1", "cloop", "")
 	if err != nil {
 		t.Fatalf("buildPodFor: %v", err)
 	}
@@ -84,7 +84,7 @@ func TestTagIsCanonicalisedIntoTheContainerSpec(t *testing.T) {
 	p, err := ex.buildPodFor(context.Background(), executor.Spec{
 		Argv:  []string{"cloop", "run"},
 		Image: "ghcr.io/acme/rust:1.79@" + testDigest,
-	}, "h1", "cloop")
+	}, "h1", "cloop", "")
 	if err != nil {
 		t.Fatalf("buildPodFor: %v", err)
 	}
@@ -109,7 +109,7 @@ func TestUnpinnedImageIsRefusedUnderRequireDigest(t *testing.T) {
 	_, err := ex.buildPodFor(context.Background(), executor.Spec{
 		Argv:  []string{"cloop", "run"},
 		Image: "ghcr.io/acme/rust:1.79",
-	}, "h1", "cloop")
+	}, "h1", "cloop", "")
 	if err == nil {
 		t.Fatal("a tag-only image was scheduled under require_digest")
 	}
@@ -141,7 +141,7 @@ func TestDisallowedRegistryNeverReachesAPod(t *testing.T) {
 			p, err := ex.buildPodFor(context.Background(), executor.Spec{
 				Argv:  []string{"cloop", "run"},
 				Image: ref,
-			}, "h1", "cloop")
+			}, "h1", "cloop", "")
 			if err == nil {
 				t.Fatalf("a Pod was built for %q with image %q", ref, harnessImage(t, p))
 			}
@@ -161,7 +161,7 @@ func TestMalformedImageStaysAnInvalidSpec(t *testing.T) {
 	_, err := ex.buildPodFor(context.Background(), executor.Spec{
 		Argv:  []string{"cloop", "run"},
 		Image: "--privileged",
-	}, "h1", "cloop")
+	}, "h1", "cloop", "")
 	if !errors.Is(err, executor.ErrInvalidSpec) {
 		t.Fatalf("error = %v, want ErrInvalidSpec", err)
 	}
@@ -176,7 +176,7 @@ func TestNoPolicyLeavesTheOverrideAlone(t *testing.T) {
 	p, err := ex.buildPodFor(context.Background(), executor.Spec{
 		Argv:  []string{"cloop", "run"},
 		Image: "ghcr.io/acme/rust:1.79",
-	}, "h1", "cloop")
+	}, "h1", "cloop", "")
 	if err != nil {
 		t.Fatalf("buildPodFor: %v", err)
 	}
@@ -198,7 +198,7 @@ func TestOperatorImageIsNotGovernedByThePolicy(t *testing.T) {
 		RequireDigest:     true,                // and it is tagged, not pinned
 	})
 
-	p, err := ex.buildPodFor(context.Background(), executor.Spec{Argv: []string{"cloop"}}, "h2", "cloop")
+	p, err := ex.buildPodFor(context.Background(), executor.Spec{Argv: []string{"cloop"}}, "h2", "cloop", "")
 	if err != nil {
 		t.Fatalf("the executor's own image was refused by the project image policy: %v", err)
 	}
@@ -227,7 +227,7 @@ func TestSignaturePolicyFailsClosedWithoutAVerifier(t *testing.T) {
 	_, err := ex.buildPodFor(context.Background(), executor.Spec{
 		Argv:  []string{"cloop", "run"},
 		Image: "ghcr.io/acme/rust@" + testDigest,
-	}, "h1", "cloop")
+	}, "h1", "cloop", "")
 	if err == nil {
 		t.Fatal("an unverified image was scheduled by an executor with no verifier")
 	}

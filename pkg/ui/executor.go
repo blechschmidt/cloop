@@ -111,6 +111,14 @@ func bootstrapExecutors(dir string) {
 	executor.SetBindingLookup(func(projectPath string) (string, bool) {
 		return lookupProjectExecutor(dir, projectPath)
 	})
+	// Workspace provisioning is audited by whoever dispatched it. pkg/executor
+	// is a leaf package the edge agent also imports, so it cannot write to the
+	// hub's journal itself; it exposes a process-wide sink instead and the
+	// control plane installs it here. Anywhere else — a CLI command, an agent
+	// — the events are dropped, which is correct: an agent's local provisioning
+	// belongs in the trail of the hub that asked for it, not in a journal on
+	// the device. Best-effort, like every other emitter.
+	executor.SetWorkspaceAuditor(workspaceAuditSink(dir))
 	syncRegistryToStore(dir)
 	startExecutorSupervisor(dir)
 }
@@ -312,6 +320,24 @@ func startWorkload(workDir string, argv []string, labels map[string]string) (exe
 		return nil, executor.Handle{}, err
 	}
 
+	// Then the source tree — after the sandbox, never before. The sandbox is
+	// what sets Workspace.SizeLimitMB (from resources.disk) and what refuses a
+	// spec the executor cannot honour; applyWorkspace fills in the rest and
+	// carries that limit across. The reverse order would let the sandbox
+	// overwrite a workspace decision that was made against the executor it had
+	// already been checked on. Its own capability gate runs last, inside
+	// applyWorkspace, because the requirement it checks does not exist until
+	// the workspace is on the spec.
+	//
+	// It is before Start because a tree that cannot be materialised is a run
+	// that must not begin: a workload starting cleanly on an empty directory is
+	// the exact failure this subsystem exists to remove.
+	spec, err = applyWorkspace(spec, ex, workDir)
+	if err != nil {
+		lease.Close()
+		return nil, executor.Handle{}, err
+	}
+
 	handle, err := ex.Start(context.Background(), spec)
 	if err != nil {
 		lease.Close()
@@ -391,6 +417,24 @@ func runWorkload(ctx context.Context, workDir string, argv []string, labels map[
 	spec, _, err := applySandbox(applyLease(uiSpec(workDir, argv, labels), lease), ex, workDir)
 	if err != nil {
 		auditImageDenial(workDir, err)
+		return nil, err
+	}
+	// Same order and the same reasons as startWorkload, and deliberately not
+	// exempted for being a "short helper subcommand". Every caller of this
+	// function reads or writes the project: `cloop do`, `cloop suggest`,
+	// `cloop reset` and `cloop listen` come through runCloopSubcommand, and all
+	// but the last operate on .cloop/ inside the tree. Running them against an
+	// empty directory is the same bug as running a harness against one, only
+	// quieter — `cloop suggest` would return suggestions for no code.
+	//
+	// The one caller that genuinely needs no tree is /api/projects/new's
+	// `cloop init`, which creates a project from nothing. On an executor that
+	// does not share this filesystem that call could never have worked: init
+	// writes .cloop/ into a filesystem the hub will never read, while the hub
+	// registers the local path it just created. It now fails with a named
+	// error instead of appearing to succeed, which is the honest outcome.
+	spec, err = applyWorkspace(spec, ex, workDir)
+	if err != nil {
 		return nil, err
 	}
 	res, runErr := executor.Run(ctx, ex, spec)

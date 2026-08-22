@@ -30,9 +30,18 @@ package kubernetes
 //
 // None of these are options. An operator who needs them relaxed is asking for
 // a different executor, not a flag on this one.
+//
+// A Pod may carry a second container: the workspace provisioner, which runs as
+// an initContainer when Spec.Workspace asks for a git tree. It is confined by
+// the same confinedSecurityContext the harness gets — one function, so the two
+// cannot drift — and it is the only place a credential enters a Pod. That
+// credential arrives exclusively through valueFrom.secretKeyRef; the token
+// itself never appears in the object this file builds, which is a property
+// asserted directly against the marshalled JSON in workspace_test.go.
 
 import (
 	"fmt"
+	"path"
 	"sort"
 	"strconv"
 	"strings"
@@ -88,13 +97,19 @@ const (
 	// gains nothing from a configurable name.
 	ContainerName = "harness"
 
+	// InitContainerName is the workspace provisioner's name. It is a *second*
+	// named container in the Pod, so anything that reads a container status by
+	// name — podWaitingDetail, classifyPod, the log endpoint — must keep
+	// selecting ContainerName and not "the only one".
+	InitContainerName = "workspace"
+
 	// PodWorkspace is where the writable workspace volume is mounted, and the
 	// container's working directory when the Spec does not override it.
 	//
 	// Unlike the container driver this is *not* a bind mount of a host path:
-	// there is no host to bind from. A Kubernetes workload starts with an
-	// empty workspace and is expected to populate it (git clone, an artifact
-	// fetch) using brokered credentials.
+	// there is no host to bind from. Either the Spec's Workspace says how the
+	// tree gets here (kind git, provisioned by the init container below) or it
+	// says "none" and the workload genuinely wants an empty directory.
 	PodWorkspace = "/workspace"
 
 	// workspaceVolume and tmpVolume are the two writable mounts that make
@@ -113,6 +128,57 @@ const (
 	// maxGenerateName leaves room for the five random characters the API
 	// server appends, within the 63-character name limit.
 	maxGenerateName = 63 - 6
+)
+
+// The environment the workspace init container reads its credential from.
+//
+// These names are the contract between this driver and `cloop workspace
+// provision`, which reads them from here rather than repeating the literals —
+// the driver that emits the argv owns the names. They are here rather
+// than in pkg/executor because they are a *delivery* detail — the remote agent
+// runs the same plan by handing GitCredentialEnv straight to a child process
+// and needs no environment names at all — and because the Pod object is where
+// the names have to be spelled out.
+const (
+	// EnvWorkspaceToken carries the credential. It is *only* ever set through
+	// valueFrom.secretKeyRef: a value: entry here would put the token into the
+	// Pod object, which anybody with `get pods` in the namespace can read, and
+	// into every audit log and `kubectl describe` that follows.
+	//
+	// It carries the bare token rather than a rendered "Basic <b64>"
+	// Authorization header. Base64 is not protection — the header form is
+	// exactly as recoverable — so the choice is decided by which one keeps a
+	// single construction path: the provisioner rebuilds an
+	// executor.GitCredential and calls executor.GitCredentialEnv, the same
+	// function the remote agent calls, so the header is rendered by one piece
+	// of code for every driver. Delivering a pre-rendered header would mean a
+	// second renderer that could drift from the first.
+	EnvWorkspaceToken = "CLOOP_WORKSPACE_TOKEN"
+	// EnvWorkspaceUser carries the basic-auth username. It is a plain value,
+	// because it is not a secret: for a GitHub PAT it is the fixed literal
+	// "x-access-token", and hiding a constant would only make the Pod harder
+	// to debug for no gain.
+	EnvWorkspaceUser = "CLOOP_WORKSPACE_USER"
+
+	// defaultWorkspaceUser matches secretbroker.GitHubUsername. It is
+	// duplicated rather than imported: this package must not depend on the
+	// hub's secret store (see the credential-source interface in
+	// pkg/executor), and the CLI defaults to the same literal when the
+	// variable is absent, so a mismatch cannot be silent.
+	defaultWorkspaceUser = "x-access-token"
+
+	// cloopCommand is the fallback program name for the init container when
+	// the harness's own argv[0] does not name an absolute cloop binary.
+	//
+	// The container driver has ContainerCloopPath = /usr/local/bin/cloop, but
+	// that constant exists because that driver *bind-mounts* the control
+	// plane's binary at a path it chooses. Nothing is bind-mounted here, so
+	// where cloop lives is the image's business, and hardcoding a path would
+	// make the init container fail on an image whose harness container works
+	// perfectly. A bare name is resolved by the kubelet against the image's
+	// PATH — exactly what happens to the harness container when a Spec's
+	// argv[0] is bare.
+	cloopCommand = "cloop"
 )
 
 // --- API types --------------------------------------------------------
@@ -150,23 +216,27 @@ type podList struct {
 }
 
 type podSpec struct {
-	RestartPolicy                 string                  `json:"restartPolicy,omitempty"`
-	ServiceAccountName            string                  `json:"serviceAccountName,omitempty"`
-	AutomountServiceAccountToken  *bool                   `json:"automountServiceAccountToken,omitempty"`
-	ActiveDeadlineSeconds         *int64                  `json:"activeDeadlineSeconds,omitempty"`
-	TerminationGracePeriodSeconds *int64                  `json:"terminationGracePeriodSeconds,omitempty"`
-	NodeSelector                  map[string]string       `json:"nodeSelector,omitempty"`
-	Tolerations                   []toleration            `json:"tolerations,omitempty"`
-	ImagePullSecrets              []localObjectRef        `json:"imagePullSecrets,omitempty"`
-	SecurityContext               *podSecurityContext     `json:"securityContext,omitempty"`
-	Containers                    []container             `json:"containers"`
-	Volumes                       []volume                `json:"volumes,omitempty"`
-	EnableServiceLinks            *bool                   `json:"enableServiceLinks,omitempty"`
-	DNSPolicy                     string                  `json:"dnsPolicy,omitempty"`
-	HostNetwork                   *bool                   `json:"hostNetwork,omitempty"`
-	Priority                      *int32                  `json:"priority,omitempty"`
-	PriorityClassName             string                  `json:"priorityClassName,omitempty"`
-	Affinity                      *map[string]interface{} `json:"affinity,omitempty"`
+	RestartPolicy                 string              `json:"restartPolicy,omitempty"`
+	ServiceAccountName            string              `json:"serviceAccountName,omitempty"`
+	AutomountServiceAccountToken  *bool               `json:"automountServiceAccountToken,omitempty"`
+	ActiveDeadlineSeconds         *int64              `json:"activeDeadlineSeconds,omitempty"`
+	TerminationGracePeriodSeconds *int64              `json:"terminationGracePeriodSeconds,omitempty"`
+	NodeSelector                  map[string]string   `json:"nodeSelector,omitempty"`
+	Tolerations                   []toleration        `json:"tolerations,omitempty"`
+	ImagePullSecrets              []localObjectRef    `json:"imagePullSecrets,omitempty"`
+	SecurityContext               *podSecurityContext `json:"securityContext,omitempty"`
+	// InitContainers run to completion, in order, before Containers start.
+	// Exactly one is ever set here — the workspace provisioner — and only when
+	// the Spec asks for a tree to be fetched.
+	InitContainers     []container             `json:"initContainers,omitempty"`
+	Containers         []container             `json:"containers"`
+	Volumes            []volume                `json:"volumes,omitempty"`
+	EnableServiceLinks *bool                   `json:"enableServiceLinks,omitempty"`
+	DNSPolicy          string                  `json:"dnsPolicy,omitempty"`
+	HostNetwork        *bool                   `json:"hostNetwork,omitempty"`
+	Priority           *int32                  `json:"priority,omitempty"`
+	PriorityClassName  string                  `json:"priorityClassName,omitempty"`
+	Affinity           *map[string]interface{} `json:"affinity,omitempty"`
 }
 
 type localObjectRef struct {
@@ -212,6 +282,22 @@ type containerSecurityContext struct {
 type envVar struct {
 	Name  string `json:"name"`
 	Value string `json:"value,omitempty"`
+	// ValueFrom sources the value from elsewhere in the cluster instead of
+	// spelling it out in the Pod. It is the only way a credential is allowed
+	// into a container here; see EnvWorkspaceToken.
+	ValueFrom *envVarSource `json:"valueFrom,omitempty"`
+}
+
+// envVarSource is the indirection. Only the Secret case is modelled: a
+// ConfigMap or a field reference would be a value the driver could just as
+// well have written inline, so neither has a caller.
+type envVarSource struct {
+	SecretKeyRef *secretKeySelector `json:"secretKeyRef,omitempty"`
+}
+
+type secretKeySelector struct {
+	Name string `json:"name"`
+	Key  string `json:"key"`
 }
 
 type resourceList map[string]string
@@ -258,12 +344,17 @@ type container struct {
 }
 
 type podStatus struct {
-	Phase             string            `json:"phase,omitempty"`
-	Reason            string            `json:"reason,omitempty"`
-	Message           string            `json:"message,omitempty"`
-	StartTime         string            `json:"startTime,omitempty"`
-	ContainerStatuses []containerStatus `json:"containerStatuses,omitempty"`
-	Conditions        []podCondition    `json:"conditions,omitempty"`
+	Phase     string `json:"phase,omitempty"`
+	Reason    string `json:"reason,omitempty"`
+	Message   string `json:"message,omitempty"`
+	StartTime string `json:"startTime,omitempty"`
+	// InitContainerStatuses is how the driver learns that provisioning
+	// finished. It is a separate list from ContainerStatuses, so code that
+	// only reads the latter sees a Pod that is Pending with no container
+	// status at all for the whole of the fetch.
+	InitContainerStatuses []containerStatus `json:"initContainerStatuses,omitempty"`
+	ContainerStatuses     []containerStatus `json:"containerStatuses,omitempty"`
+	Conditions            []podCondition    `json:"conditions,omitempty"`
 }
 
 type podCondition struct {
@@ -332,6 +423,22 @@ func (p *pod) harnessStatus() *containerStatus {
 	return nil
 }
 
+// workspaceInitStatus returns the provisioner's status, if the kubelet has
+// reported one. Unlike harnessStatus there is no "the only one" fallback: an
+// unnamed init container status is not something to guess at, because acting
+// on it deletes the credential Secret.
+func (p *pod) workspaceInitStatus() *containerStatus {
+	if p == nil {
+		return nil
+	}
+	for i := range p.Status.InitContainerStatuses {
+		if p.Status.InitContainerStatuses[i].Name == InitContainerName {
+			return &p.Status.InitContainerStatuses[i]
+		}
+	}
+	return nil
+}
+
 // --- build ------------------------------------------------------------
 
 // podRequest is everything buildPod needs. It is a struct rather than a long
@@ -380,6 +487,15 @@ type podRequest struct {
 	// DisableNetwork marks the Pod as one that should not reach the network.
 	// See LabelEgress for what this driver can and cannot enforce.
 	DisableNetwork bool
+
+	// Workspace says how the source tree gets into the workspace volume. It
+	// never holds a credential — only the name of a grant — so it is safe to
+	// keep in a struct that ends up in an annotation and a log line.
+	Workspace executor.Workspace
+	// WorkspaceSecretName is the Secret the caller has already created holding
+	// the leased credential, or "" for an unauthenticated fetch. buildPod does
+	// not create it and cannot: it is pure. It only wires the reference.
+	WorkspaceSecretName string
 }
 
 // egressLabelValue renders DisableNetwork for LabelEgress.
@@ -432,6 +548,24 @@ func buildPod(req podRequest) (*pod, error) {
 		return nil, fmt.Errorf("%w: work_dir %q must be an absolute path inside the Pod", executor.ErrInvalidSpec, workDir)
 	}
 
+	// The workspace is checked before anything is built, because the answer
+	// changes what the Pod *is* — one container or two — and a half-decided
+	// Pod is the thing this function exists not to produce.
+	if err := req.Workspace.Validate(); err != nil {
+		return nil, err
+	}
+	if req.Workspace.Kind == executor.WorkspaceBind {
+		// bind means "the tree is already at WorkDir because the executor
+		// shares the control plane's filesystem". This one does not: WorkDir
+		// names a path inside a Pod on a node, backed by an emptyDir. Accepting
+		// it would start the harness in an empty directory and produce a run
+		// that looks fine and operated on nothing — the exact failure
+		// Spec.Workspace was added to make impossible.
+		return nil, fmt.Errorf("%w: workspace kind %q needs an executor that shares the control "+
+			"plane's filesystem, and a Pod does not — use kind git with a repo, or kind none for "+
+			"an intentionally empty tree", executor.ErrInvalidSpec, executor.WorkspaceBind)
+	}
+
 	labels := map[string]string{
 		LabelManaged:    "true",
 		LabelExecutorID: sanitizeLabelValue(req.ExecutorID),
@@ -449,6 +583,14 @@ func buildPod(req podRequest) (*pod, error) {
 
 	truePtr, falsePtr := boolPtr(true), boolPtr(false)
 	seccomp := &seccompProfile{Type: "RuntimeDefault"}
+
+	// A project's own disk allowance is more specific than the executor's
+	// configured default, so it wins — the same precedence Spec.ResourceLimits
+	// gets over Options elsewhere in this driver.
+	workspaceSize := strings.TrimSpace(req.WorkspaceSizeLimit)
+	if q := quantityFromMB(req.Workspace.SizeLimitMB); q != "" {
+		workspaceSize = q
+	}
 
 	spec := podSpec{
 		RestartPolicy:      "Never",
@@ -469,7 +611,7 @@ func buildPod(req podRequest) (*pod, error) {
 			SeccompProfile: seccomp,
 		},
 		Volumes: []volume{
-			{Name: workspaceVolume, EmptyDir: &emptyDirSource{SizeLimit: strings.TrimSpace(req.WorkspaceSizeLimit)}},
+			{Name: workspaceVolume, EmptyDir: &emptyDirSource{SizeLimit: workspaceSize}},
 			{Name: tmpVolume, EmptyDir: &emptyDirSource{}},
 		},
 	}
@@ -553,17 +695,16 @@ func buildPod(req podRequest) (*pod, error) {
 		Env:             env,
 		Resources:       res,
 		VolumeMounts:    mounts,
-		SecurityContext: &containerSecurityContext{
-			RunAsNonRoot:             truePtr,
-			RunAsUser:                &runAsUser,
-			RunAsGroup:               &runAsGroup,
-			AllowPrivilegeEscalation: falsePtr,
-			ReadOnlyRootFilesystem:   truePtr,
-			Privileged:               falsePtr,
-			Capabilities:             &capabilities{Drop: []string{"ALL"}},
-			SeccompProfile:           seccomp,
-		},
+		SecurityContext: confinedSecurityContext(runAsUser, runAsGroup),
 	}}
+
+	if req.Workspace.NeedsProvisioning() {
+		provisioner, err := buildWorkspaceInitContainer(req, workDir, runAsUser, runAsGroup, res)
+		if err != nil {
+			return nil, err
+		}
+		spec.InitContainers = []container{*provisioner}
+	}
 
 	return &pod{
 		APIVersion: "v1",
@@ -576,6 +717,146 @@ func buildPod(req podRequest) (*pod, error) {
 		},
 		Spec: spec,
 	}, nil
+}
+
+// confinedSecurityContext is the container-scoped confinement, in one place.
+//
+// It is a function rather than two struct literals because the Pod now has two
+// containers and they must be confined identically. A workspace provisioner
+// that ran with one capability more than the harness would be a way to do
+// privileged work in a Pod that reads as hardened — and the drift would be
+// invisible, because the two literals would sit two hundred lines apart and
+// each look correct on its own.
+func confinedSecurityContext(runAsUser, runAsGroup int64) *containerSecurityContext {
+	return &containerSecurityContext{
+		RunAsNonRoot:             boolPtr(true),
+		RunAsUser:                &runAsUser,
+		RunAsGroup:               &runAsGroup,
+		AllowPrivilegeEscalation: boolPtr(false),
+		ReadOnlyRootFilesystem:   boolPtr(true),
+		Privileged:               boolPtr(false),
+		Capabilities:             &capabilities{Drop: []string{"ALL"}},
+		SeccompProfile:           &seccompProfile{Type: "RuntimeDefault"},
+	}
+}
+
+// buildWorkspaceInitContainer renders the container that fetches the source
+// tree before the harness starts.
+//
+// Four decisions are worth stating, because each had a plausible alternative:
+//
+//   - It uses the *harness image*, not a git image. A second image would need
+//     its own entry in the operator's registry allowlist, its own digest pin,
+//     and its own trip through the image trust policy — three places for the
+//     provenance of the thing that handles a credential to diverge from the
+//     provenance of everything else. Reusing the harness image means the
+//     policy that already approved it approves this too, and there is nothing
+//     extra to configure.
+//   - It provisions into workDir, not into PodWorkspace. When a Spec puts the
+//     harness in a sub-directory of the workspace volume, cloning into the
+//     volume root would leave the harness's actual working directory empty —
+//     the original bug, reproduced one level down. workDir is already
+//     guaranteed by the caller to be inside the workspace volume.
+//   - It does *not* inherit req.Env. The harness's environment carries
+//     brokered provider keys and whatever else the run needs; a git fetch has
+//     no business with any of it, and the narrower the environment the fewer
+//     ways a hostile repository's hooks can reach something interesting.
+//   - Its resources mirror the harness's. Kubernetes takes a Pod's effective
+//     request as max(init containers, sum(containers)), so matching costs
+//     nothing at schedule time — and a namespace whose ResourceQuota demands
+//     limits would otherwise reject the whole Pod for the one container that
+//     had none.
+func buildWorkspaceInitContainer(req podRequest, workDir string, runAsUser, runAsGroup int64,
+	res resourceRequirements) (*container, error) {
+
+	w := req.Workspace
+	// GitPlan is not used to build the argv — the provisioning steps run
+	// inside the container, from the same plan, by `cloop workspace provision`
+	// — but calling it here rejects a workspace that could not produce one
+	// before the Pod is created, where the error still reaches the caller
+	// instead of a container log nobody is watching.
+	if _, err := w.GitPlan(workDir); err != nil {
+		return nil, err
+	}
+
+	argv := []string{
+		workspaceCommand(req.Argv), "workspace", "provision",
+		"--dir", workDir,
+		"--repo", strings.TrimSpace(w.Repo),
+	}
+	if ref := strings.TrimSpace(w.Ref); ref != "" {
+		argv = append(argv, "--ref", ref)
+	}
+	if w.Depth > 0 {
+		argv = append(argv, "--depth", strconv.Itoa(w.Depth))
+	}
+	if w.SizeLimitMB > 0 {
+		// The emptyDir sizeLimit is enforced by the kubelet, which evicts the
+		// Pod when it is exceeded. Telling the provisioner the same number lets
+		// it fail the fetch with an explanation instead, which is the
+		// difference between "the repository is bigger than the allowance" and
+		// a Pod that vanishes mid-run.
+		argv = append(argv, "--size-limit-mb", strconv.Itoa(w.SizeLimitMB))
+	}
+
+	env := []envVar{{Name: EnvWorkspaceUser, Value: defaultWorkspaceUser}}
+	if name := strings.TrimSpace(req.WorkspaceSecretName); name != "" {
+		if err := validateDNSSubdomain(name, "workspace secret"); err != nil {
+			return nil, fmt.Errorf("%w: %v", executor.ErrInvalidSpec, err)
+		}
+		env = append(env, envVar{
+			Name: EnvWorkspaceToken,
+			ValueFrom: &envVarSource{SecretKeyRef: &secretKeySelector{
+				Name: name,
+				Key:  EnvWorkspaceToken,
+			}},
+		})
+	}
+
+	return &container{
+		Name:            InitContainerName,
+		Image:           strings.TrimSpace(req.Image),
+		ImagePullPolicy: strings.TrimSpace(req.ImagePullPolicy),
+		Command:         []string{argv[0]},
+		Args:            append([]string(nil), argv[1:]...),
+		// The volume root, not workDir: `cloop workspace provision` creates
+		// the target directory, and a workingDir that does not exist yet is a
+		// container the kubelet refuses to start.
+		WorkingDir: PodWorkspace,
+		Env:        env,
+		Resources:  res,
+		VolumeMounts: []volumeMount{
+			{Name: workspaceVolume, MountPath: PodWorkspace},
+			// git needs somewhere to write its temporaries, and the root
+			// filesystem is read-only for this container exactly as it is for
+			// the harness.
+			{Name: tmpVolume, MountPath: "/tmp"},
+		},
+		SecurityContext: confinedSecurityContext(runAsUser, runAsGroup),
+	}, nil
+}
+
+// workspaceCommand picks the program the init container runs.
+//
+// The harness container is started with the Spec's argv[0] verbatim, so the
+// most reliable statement anyone has made about where cloop lives in this image
+// is that argv. When it is an absolute path to a binary called cloop, use it:
+// the operator has already told us. Otherwise fall back to the bare name and
+// let the kubelet resolve it against the image's PATH.
+//
+// The base-name check is what stops a Spec like {"/bin/sh", "-c", ...} — which
+// names an interpreter, not the harness — from producing
+// `/bin/sh workspace provision`, a failure whose message would point at the
+// workspace subsystem for a reason that has nothing to do with it.
+func workspaceCommand(argv []string) string {
+	if len(argv) == 0 {
+		return cloopCommand
+	}
+	first := strings.TrimSpace(argv[0])
+	if strings.HasPrefix(first, "/") && path.Base(first) == cloopCommand {
+		return first
+	}
+	return cloopCommand
 }
 
 func (r *resourceRequirements) ensureRequests() resourceList {

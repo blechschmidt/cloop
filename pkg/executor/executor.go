@@ -108,6 +108,16 @@ type Capabilities struct {
 	// into a derived image. Building needs a builder on the executor, which
 	// a driver that only schedules pre-built images does not have.
 	SupportsSandboxBuild bool `json:"supports_sandbox_build"`
+	// SupportsWorkspaceProvisioning reports whether this driver can
+	// materialise a source tree itself (Spec.Workspace.Kind == "git").
+	//
+	// It is what makes a non-local executor honest. A driver that ignored the
+	// field would start the harness in an empty directory, and the run would
+	// look like a working run producing inexplicable output — which is the
+	// exact failure this capability exists to turn into a refusal at
+	// placement time. Drivers that share the host filesystem report false and
+	// are given Kind "bind" instead, because their tree is already there.
+	SupportsWorkspaceProvisioning bool `json:"supports_workspace_provisioning"`
 	// SupportsSandboxMounts reports whether Spec.Mounts is honoured.
 	//
 	// It is tracked separately from SupportsImageOverride even though the same
@@ -224,6 +234,12 @@ type Spec struct {
 	// leases that produced them, so a driver can take an individual
 	// credential back mid-run. See SecretBinding.
 	Secrets []SecretBinding `json:"secrets,omitempty"`
+
+	// Workspace says how the source tree gets into WorkDir. It carries no
+	// credential — only the name of a grant — for the reasons set out in
+	// workspace.go. The zero value is "unspecified", which leaves a driver's
+	// pre-existing behaviour alone.
+	Workspace Workspace `json:"workspace,omitempty"`
 }
 
 // SecretBinding says which parts of a Spec came from one secret lease.
@@ -326,6 +342,18 @@ func (s Spec) Validate() error {
 	if err := ValidateSpecMounts(s.Mounts); err != nil {
 		return err
 	}
+	if err := s.Workspace.Validate(); err != nil {
+		return err
+	}
+	// A tree that must be fetched and a workload forbidden from reaching the
+	// network is a contradiction, and the failure it produces otherwise —
+	// "could not resolve host" from a step nobody knew ran — points nowhere
+	// near the two settings that caused it.
+	if s.Workspace.NeedsProvisioning() && s.DisableNetwork {
+		return fmt.Errorf("%w: workspace kind git needs to fetch %s, but this workload has "+
+			"network egress disabled; either pre-populate the tree or grant egress "+
+			"(.cloop/sandbox.yaml capabilities.network)", ErrInvalidSpec, s.Workspace.Host())
+	}
 	return s.ResourceLimits.Validate()
 }
 
@@ -338,10 +366,12 @@ func (s Spec) Validate() error {
 // several call sites that place work.
 func (s Spec) SandboxRequirements() Requirements {
 	return Requirements{
-		RequireImageOverride:  strings.TrimSpace(s.Image) != "",
-		RequireSandboxBuild:   len(s.SetupCommands) > 0,
-		RequireSandboxMounts:  len(s.Mounts) > 0,
-		RequireResourceLimits: !s.ResourceLimits.IsZero(),
+		RequireImageOverride:           strings.TrimSpace(s.Image) != "",
+		RequireSandboxBuild:            len(s.SetupCommands) > 0,
+		RequireSandboxMounts:           len(s.Mounts) > 0,
+		RequireResourceLimits:          !s.ResourceLimits.IsZero(),
+		RequireWorkspaceProvisioning:   s.Workspace.NeedsProvisioning(),
+		RequireHostFilesystemWorkspace: s.Workspace.Kind == WorkspaceBind,
 	}
 }
 

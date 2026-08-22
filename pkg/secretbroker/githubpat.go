@@ -131,6 +131,45 @@ func buildGitConfig() string {
 	return b.String()
 }
 
+// GitHubToken returns the raw token a GitHub material carries, and whether it
+// carries one at all.
+//
+// It exists because workspace provisioning (pkg/executor/gitcreds) needs the
+// token as an HTTP basic password, and the two paths that already deliver it —
+// the credential-helper script and the bare GITHUB_TOKEN env var — are both
+// wrong for that use. The helper needs a shell and a materialised lease
+// directory, which is exactly the disk write a sandbox fetch must avoid; and
+// GITHUB_TOKEN is only exported for an unrestricted "*" grant, so relying on it
+// would make narrow grants silently unable to clone.
+//
+// Reading the token out of Files rather than re-deriving it keeps one source of
+// truth: whatever githubMaterial decided to deliver is what a caller sees. The
+// returned string is the caller's to handle carefully — it is a credential, and
+// nothing here can stop it being logged.
+func (m Material) GitHubToken() (string, bool) {
+	switch m.Kind {
+	case KindGitHubPAT, KindGitHubApp:
+	default:
+		return "", false
+	}
+	for _, f := range m.Files {
+		if f.Name != tokenFileName {
+			continue
+		}
+		token := strings.TrimSpace(string(f.Content))
+		if token == "" {
+			return "", false
+		}
+		return token, true
+	}
+	return "", false
+}
+
+// GitHubUsername is the basic-auth username GitHub expects alongside a PAT.
+// GitHub ignores the value for a PAT but requires a non-empty one, and
+// "x-access-token" is the name its own tooling uses.
+const GitHubUsername = "x-access-token"
+
 // allowsAllRepos reports whether the allowlist is an unrestricted wildcard.
 //
 // This gates whether a bare GITHUB_TOKEN environment variable is exported.

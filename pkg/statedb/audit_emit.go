@@ -270,6 +270,120 @@ func AuditImagePolicyDenial(d *DB, in ImagePolicyDenialInput) {
 	})
 }
 
+// WorkspaceAuditInput carries one workspace-provisioning observation to the
+// audit log (Task 20179).
+//
+// Provisioning earns its own rows rather than being folded into the run's,
+// because it is the moment a brokered credential is used against an external
+// service on behalf of a project. "Which grant fetched which repository onto
+// which executor, and did it work" is the question an operator has after an
+// incident, and the run's own record cannot answer it: a run looks identical
+// whether the tree arrived or not, which is the entire reason the workspace
+// subsystem exists.
+//
+// No field here can carry a credential. The Workspace the executor dispatched
+// is structurally incapable of holding one — pkg/executor.Workspace has no
+// field a token could go in, by design, because a Spec is persisted, logged
+// and shipped across the remote-executor boundary — and GrantID/LeaseID are
+// identifiers, not material. The token never enters this package's scope.
+type WorkspaceAuditInput struct {
+	// Phase is "start" or "end", matching executor.WorkspaceProvisionStart /
+	// WorkspaceProvisionEnd. It becomes the suffix of the event type, so the
+	// family is filterable as event_type LIKE 'workspace.%' and each phase
+	// individually by exact match. Anything else is dropped rather than
+	// written, so a typo cannot create a third, unqueryable event family.
+	Phase string
+
+	// ProjectPath is the project whose tree was being materialised. It is the
+	// entity the row is filed under, matching how image denials are filed.
+	ProjectPath string
+
+	// ExecutorID and ExecutorKind name the backend doing the fetch. Both are
+	// recorded because an ID is stable but says nothing about *where* the code
+	// landed, and "was this on a Pod or on someone's laptop" is the first
+	// question asked of a provisioning row.
+	ExecutorID   string
+	ExecutorKind string
+
+	// HandleID correlates the two phases with each other and with the run.
+	HandleID string
+
+	// Kind, Repo, Ref and Depth are the workspace as dispatched — the clone
+	// URL exactly as the executor was told to fetch it, which is the only form
+	// that can be compared against what the operator believes is configured.
+	Kind  string
+	Repo  string
+	Ref   string
+	Depth int
+
+	// GrantID and LeaseID name the authority used. They are the join key back
+	// into the secret-broker rows, which is what turns "this repo was fetched"
+	// into "this grant was exercised at this time".
+	GrantID string
+	LeaseID string
+
+	// DurationMS is set on the end phase only.
+	DurationMS int64
+
+	// Err is the failure, already redacted by the driver, or "" on success.
+	Err string
+
+	// Actor is the acting identity. Empty becomes "system": provisioning is
+	// decided by the dispatching control plane, and on the failover path there
+	// is no human to attribute it to.
+	Actor string
+}
+
+// AuditWorkspaceProvision records one workspace-provisioning phase.
+//
+// Best-effort, like every other emitter in this file: an unavailable audit log
+// must not stop a workload from getting its source tree.
+func AuditWorkspaceProvision(d *DB, in WorkspaceAuditInput) {
+	var suffix string
+	switch in.Phase {
+	case "start":
+		suffix = "provision_start"
+	case "end":
+		suffix = "provision_end"
+	default:
+		return
+	}
+	actor := in.Actor
+	if actor == "" {
+		actor = "system"
+	}
+	payload := map[string]any{"phase": in.Phase}
+	for k, v := range map[string]string{
+		"executor_id":   in.ExecutorID,
+		"executor_kind": in.ExecutorKind,
+		"handle_id":     in.HandleID,
+		"kind":          in.Kind,
+		"repo":          in.Repo,
+		"ref":           in.Ref,
+		"grant_id":      in.GrantID,
+		"lease_id":      in.LeaseID,
+		"error":         in.Err,
+		"project":       in.ProjectPath,
+	} {
+		if v != "" {
+			payload[k] = v
+		}
+	}
+	if in.Depth > 0 {
+		payload["depth"] = in.Depth
+	}
+	if in.DurationMS > 0 {
+		payload["duration_ms"] = in.DurationMS
+	}
+	emit(d, &AuditEvent{
+		Actor:      actor,
+		EventType:  "workspace." + suffix,
+		EntityType: "project",
+		EntityID:   in.ProjectPath,
+		Payload:    MarshalAuditPayload(payload),
+	})
+}
+
 func auditStateSave(d *DB, s *State) {
 	if s == nil {
 		return

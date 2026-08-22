@@ -47,6 +47,15 @@ type HubOptions struct {
 	// revocations too — the ones delivered long after the operator pressed
 	// the button — which is the only signal that a queued revocation landed.
 	OnRevokeAck func(executorID, leaseID string, ack RevokedPayload)
+	// WorkspaceSource builds the credential source for one agent's executor.
+	//
+	// It is a factory rather than a single source because a grant is issued to
+	// a *subject*: pkg/executor/gitcreds binds the executor ID at construction
+	// so that a lease taken for edge-1 can never be satisfied by a grant issued
+	// to edge-2. Nil leaves every executor without one, in which case a
+	// workload naming a grant is refused rather than dispatched to fetch a
+	// private repository anonymously.
+	WorkspaceSource func(executorID string) executor.WorkspaceCredentialSource
 	// ExternalURL is what this deployment calls itself, e.g.
 	// https://cloop.example.com. Its host is always an accepted WebSocket
 	// Origin, which is what makes the Executors panel work when a reverse
@@ -157,14 +166,18 @@ func (h *Hub) executorFor(agent AgentRecord, caps AgentCapabilities) (*Executor,
 		h.mu.Unlock()
 		return ex, nil
 	}
-	ex, err := NewExecutor(Options{
+	opts := Options{
 		ID:             agent.AgentID,
 		Name:           agent.Name,
 		Capabilities:   caps,
 		OnStatusChange: h.opts.OnStatusChange,
 		OnRevokeAck:    h.opts.OnRevokeAck,
 		Now:            h.opts.Now,
-	})
+	}
+	if h.opts.WorkspaceSource != nil {
+		opts.Workspace = h.opts.WorkspaceSource(agent.AgentID)
+	}
+	ex, err := NewExecutor(opts)
 	if err != nil {
 		h.mu.Unlock()
 		return nil, err

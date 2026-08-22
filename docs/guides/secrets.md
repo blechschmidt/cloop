@@ -10,6 +10,7 @@ binary. Copy them.
 - [Minting a secret](#minting-a-secret)
 - [Granting it](#granting-it)
 - [GitHub repositories and PATs](#github-repositories-and-pats)
+- [Granting a PAT for workspace provisioning](#granting-a-pat-for-workspace-provisioning)
 - [Kubeconfig](#kubeconfig)
 - [Container registries](#container-registries)
 - [Environment secrets](#environment-secrets)
@@ -162,6 +163,99 @@ the same commands against `otherorg/private` fail to authenticate.
 **`github_app`** is minted and granted identically — `--kind github_app` with an
 installation JSON payload — and is constrained by the same `--repos` /
 `--permissions` flags.
+
+---
+
+## Granting a PAT for workspace provisioning
+
+Everything above is about what a *running* task can reach. This section is about
+something that happens earlier: on an executor that does not share the hub's
+filesystem — a Kubernetes Pod, an enrolled device — the project's source tree
+has to be **fetched before the harness starts**. That fetch needs a credential
+too, and it is the same `github_pat` secret with a different delivery.
+
+The difference matters when you are debugging one. The in-sandbox delivery is a
+credential *helper* in a lease directory, materialised for the task. The
+workspace fetch happens before any of that exists: it runs in a Kubernetes init
+container or as a pre-step on the device, and the token reaches exactly one
+`git fetch` process and nothing else — never the harness, never a file, never an
+argv. See
+[Workspace provisioning](../architecture/executors.md#workspace-provisioning).
+
+End to end, for a project bound to the executor `k8s-prod`:
+
+```console
+$ echo 'ghp_examplesecrettoken' | cloop secret mint workspace-pat --kind github_pat
+✓ minted workspace-pat (github_pat) as sec_3b62fbde8397949474cda945
+  no grant yet — nothing can use it until you run 'cloop secret grant'
+
+$ cloop secret grant workspace-pat \
+    --to executor:k8s-prod \
+    --repos 'acme/tool' \
+    --ttl 24h
+✓ granted workspace-pat to executor:k8s-prod
+  grant:       grant_a3490558e772e0774814cdd7
+  constraints: repos=acme/tool
+  expires:     2026-08-23T17:41:04Z (in 24h0m0s)
+```
+
+Four things about that command are load-bearing:
+
+- **The subject is the executor**, not the project. Either works — the grant is
+  matched against a requester carrying both the executor id and the project path
+  — but the executor is the honest description of what is happening: a machine
+  is being authorised to fetch a repository. `label:` subjects do **not** work
+  on this path.
+- **`--repos` must admit the repository being cloned**, matched as `owner/name`
+  against the same globs documented above. This is the check that keeps a
+  workspace fetch inside its grant.
+- **The remote must be an `https://` URL of the shape `owner/name`.** cloop
+  rewrites the scp form (`git@github.com:acme/tool.git`) and `ssh://` remotes
+  automatically; `http://`, `git://` and local paths are refused, because a
+  brokered token over cleartext is a published token and ssh is not something
+  the broker can lease. A URL that is not `owner/name` — a GitLab subgroup, say
+  — cannot be matched against a repository allowlist at all, so it is fetched
+  anonymously rather than refused: no grant could ever have authorised it.
+- **No `--permissions` is required.** The fetch is a read, and GitHub enforces
+  whatever the PAT itself carries. Setting it is still worth doing, because it
+  is recorded in the grant and shows up in the audit trail.
+
+Nothing else changes. The hub picks the grant up on the next run, records only
+its *name* in the dispatched workload, and leases the material for the length of
+one fetch.
+
+### When it is missing
+
+The run does not start, and it does not start *by name*. The refusal is an HTTP
+409 in the run panel (`workspace_grant_missing`) and this on a terminal:
+
+```
+executor: cannot provision the workspace for /srv/acme on executor k8s-prod: no
+active GitHub grant is issued to executor k8s-prod for this project, so
+acme/tool cannot be fetched — grant one with: cloop secret grant
+<github-pat-secret> --to executor:k8s-prod --repos acme/tool
+```
+
+That is the whole point of the error being typed rather than a string: the
+alternative it replaces is a harness that starts in an empty directory and
+reports confidently on code it never read.
+
+A grant that exists but *excludes* the repository reads differently — "grant
+workspace-pat is issued to this executor but its allowlist excludes repository
+acme/tool" — because the fixes are different. One is `cloop secret grant`, the
+other is widening `--repos` on the grant you already have; an operator told the
+wrong one goes looking in the wrong place.
+
+Two more shapes of the same failure:
+
+| Message names | What it means |
+| --- | --- |
+| "the project has no origin remote" / "is a local path" | the project is not fetchable at all. Give it an https remote, or bind it to an executor that shares this host's filesystem |
+| "cannot materialise a source tree" at *placement* | the executor cannot fetch — a device with no `git`, or an agent below protocol v3. No credential is involved; upgrade the agent or move the project |
+
+`cloop secret lease --project /srv/acme --executor k8s-prod` is the fastest way
+to confirm the grant is being seen at all: if `workspace-pat` is not in that
+output, the workspace fetch will not see it either.
 
 ---
 

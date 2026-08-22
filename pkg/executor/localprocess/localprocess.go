@@ -184,6 +184,10 @@ func (e *Executor) Kind() string { return executor.KindLocalProcess }
 // Capabilities implements executor.Executor. Note SupportsResourceLimits is
 // false: this driver cannot enforce CPU/memory caps, and Start rejects Specs
 // that request them rather than silently ignoring the request.
+//
+// SupportsWorkspaceProvisioning is false for a different reason, and it is an
+// answer rather than a gap: this driver forks in the operator's own working
+// directory, so the tree is already there. See Start.
 func (e *Executor) Capabilities() executor.Capabilities {
 	return executor.Capabilities{
 		Isolation:              executor.IsolationNone,
@@ -192,8 +196,12 @@ func (e *Executor) Capabilities() executor.Capabilities {
 		SupportsResourceLimits: false,
 		SharesHostFilesystem:   true,
 		NetworkEgress:          true,
-		Platform:               runtime.GOOS,
-		Arch:                   runtime.GOARCH,
+		// Stated explicitly rather than left to the zero value: a driver that
+		// runs in the host's filesystem has already answered the workspace
+		// question, and a reader should not have to infer that from an absence.
+		SupportsWorkspaceProvisioning: false,
+		Platform:                      runtime.GOOS,
+		Arch:                          runtime.GOARCH,
 	}
 }
 
@@ -246,6 +254,26 @@ func (e *Executor) Start(ctx context.Context, spec executor.Spec) (executor.Hand
 		return executor.Handle{}, fmt.Errorf(
 			"%w: the %s executor cannot enforce resource limits — bind this project to a container or remote executor",
 			executor.ErrUnsupported, executor.KindLocalProcess)
+	}
+	// Bind semantics are this driver's answer to the workspace question, not a
+	// missing feature.
+	//
+	// The child is forked with cmd.Dir = spec.WorkDir on the machine that holds
+	// it, so the tree is present before the process exists — which is why
+	// WorkspaceBind, WorkspaceNone and the unspecified zero value all pass
+	// through untouched; none of them asks this driver for anything.
+	//
+	// WorkspaceGit is the one that cannot be honoured, and honouring it would be
+	// worse than refusing: the clone target is the operator's own checkout, on
+	// the machine they are sitting at, and `git init` plus a detached checkout
+	// over it would discard uncommitted work that nothing in cloop can restore.
+	if spec.Workspace.Kind == executor.WorkspaceGit {
+		return executor.Handle{}, fmt.Errorf(
+			"%w: the %s executor runs in the host's own filesystem, so the source tree is already "+
+				"at %s and cloning into it would overwrite the operator's checkout; "+
+				"use a bind workspace here, or dispatch a git workspace to a Kubernetes or remote "+
+				"executor, which provision into a directory of their own",
+			executor.ErrUnsupported, executor.KindLocalProcess, spec.WorkDir)
 	}
 	if spec.WorkDir != "" {
 		info, err := os.Stat(spec.WorkDir)

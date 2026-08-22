@@ -307,6 +307,10 @@ func (e *Executor) Image() string { return e.opts.Image }
 // mount of a host path — host-side tooling can read what the workload wrote.
 // NetworkEgress reflects the configured network honestly: claiming isolation
 // the configuration does not provide is the failure mode that matters.
+//
+// SupportsWorkspaceProvisioning is false, and that is the answer rather than a
+// gap. See buildRequest: this driver's whole model is that WorkDir is the
+// operator's own checkout, mounted in. There is no tree for it to fetch.
 func (e *Executor) Capabilities() executor.Capabilities {
 	return executor.Capabilities{
 		Isolation:              executor.IsolationContainer,
@@ -315,6 +319,11 @@ func (e *Executor) Capabilities() executor.Capabilities {
 		SupportsResourceLimits: true,
 		SharesHostFilesystem:   true,
 		NetworkEgress:          e.opts.Network != NetworkNone,
+		// Stated explicitly rather than left to the zero value: a driver that
+		// bind-mounts the host path has already answered the workspace
+		// question, and a reader of this struct should not have to infer that
+		// from an absence.
+		SupportsWorkspaceProvisioning: false,
 		// A per-project sandbox spec can pick its own image and bake its own
 		// setup: this driver has both a local image store to resolve against
 		// and a builder to derive from.
@@ -537,6 +546,29 @@ func sandboxMounts(spec executor.Spec, workDir, selinuxLabel string) ([]mount, e
 
 // buildRequest turns a Spec plus this executor's options into a runRequest.
 func (e *Executor) buildRequest(spec executor.Spec, workDir string, extraMounts []mount) (runRequest, error) {
+	// Bind is this driver's answer to the workspace question, and it is a
+	// deliberate one rather than a missing feature.
+	//
+	// The container's /workspace *is* the host's project directory: the same
+	// inodes, mounted through. The tree is therefore already present before the
+	// container exists, which is why Capabilities reports SharesHostFilesystem
+	// and why WorkspaceBind, WorkspaceNone and the unspecified zero value all
+	// pass through untouched — none of them asks this driver to do anything.
+	//
+	// WorkspaceGit is the one that cannot be honoured, and honouring it would be
+	// worse than refusing. A clone into that path is a clone into the operator's
+	// own checkout: `git init` over their .git, a fetch over their objects, and
+	// a detached checkout over their uncommitted work, on the machine they are
+	// sitting at. The tree they would lose is not reconstructible from anything
+	// cloop holds.
+	if spec.Workspace.Kind == executor.WorkspaceGit {
+		return runRequest{}, fmt.Errorf(
+			"%w: the %s executor bind-mounts the project directory, so the source tree is already "+
+				"at %s and cloning into it would overwrite the operator's own checkout; "+
+				"use a bind workspace here, or dispatch a git workspace to a Kubernetes or remote "+
+				"executor, which provision into a volume of their own",
+			executor.ErrUnsupported, executor.KindContainer, workDir)
+	}
 	if spec.ResourceLimits.DiskMB > 0 {
 		// --storage-opt size= only works on a minority of storage-driver
 		// configurations (overlay2 on xfs with pquota). Accepting the limit

@@ -85,6 +85,17 @@ type Options struct {
 	// it. Replayed revocations report through here too, which is the only
 	// way an operator learns that a queued revocation finally landed.
 	OnRevokeAck func(executorID, leaseID string, ack RevokedPayload)
+	// Workspace leases the credential a git workspace fetch needs, at dispatch
+	// time and for the length of one start.
+	//
+	// It is an interface (executor.WorkspaceCredentialSource) rather than the
+	// broker itself so this package stays free of the hub's secret store —
+	// pkg/executor/agent imports pkg/executor/remote, and an edge binary must
+	// not carry a secret database because the control plane happens to have
+	// one. Nil means no credential can be leased: a workload naming a grant is
+	// refused with the same typed error the broker would have raised, rather
+	// than dispatched to fetch a private repository anonymously.
+	Workspace executor.WorkspaceCredentialSource
 	// Now overrides the clock for tests.
 	Now func() time.Time
 }
@@ -156,8 +167,24 @@ func (e *Executor) AgentCapabilities() AgentCapabilities {
 }
 
 // Capabilities implements executor.Executor.
+//
+// Workspace provisioning is reported as the *intersection* of what the device
+// advertised and what the live session can actually carry. A device with git on
+// PATH is no use if the connection cannot hand it a credential, and claiming
+// otherwise would let placement route a private-repository run to an agent that
+// would silently start the harness in an empty directory.
+//
+// When there is no session the last advertised value stands, which is
+// deliberate and matches Hub.Restore's reasoning: an enrolled device that is
+// merely offline should place and then fail with the truthful
+// ErrAgentUnreachable, not vanish from placement behind "no executor can
+// provision a workspace".
 func (e *Executor) Capabilities() executor.Capabilities {
-	return e.AgentCapabilities().Executor()
+	caps := e.AgentCapabilities().Executor()
+	if sess := e.currentSession(); sess != nil && !SupportsWorkspaceProvisioning(sess.Version()) {
+		caps.SupportsWorkspaceProvisioning = false
+	}
+	return caps
 }
 
 // Status reports the executor-level connectivity status (not a handle's).
@@ -217,7 +244,12 @@ func (e *Executor) setStatus(status string) {
 // and the work may sit there until the device returns days later, by which
 // point the run is meaningless. ErrAgentUnreachable lets the caller say
 // "edge-1 is offline" immediately.
-func (e *Executor) Start(ctx context.Context, spec executor.Spec) (executor.Handle, error) {
+//
+// The named returns are what let the workspace audit's end event observe the
+// outcome from a defer: provisioning is bracketed by two rows and the second
+// one has to say whether the dispatch it describes worked, from whichever of
+// this function's several exits was taken.
+func (e *Executor) Start(ctx context.Context, spec executor.Spec) (handle executor.Handle, err error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -247,6 +279,31 @@ func (e *Executor) Start(ctx context.Context, spec executor.Spec) (executor.Hand
 			describeBindings(revocable), MinRevocationVersion)
 	}
 
+	// The same placement rule for the workspace, and the reason it is a refusal
+	// rather than a best effort is stated at MinWorkspaceVersion: an older agent
+	// does not reject the credential field, it ignores it — and then runs the
+	// harness against the empty directory it created.
+	if spec.Workspace.NeedsProvisioning() && !SupportsWorkspaceProvisioning(sess.Version()) {
+		return executor.Handle{}, fmt.Errorf(
+			"%w: agent %s (%s) speaks protocol v%d but this workload's source tree has to be cloned "+
+				"from %s by the device (needs v%d); upgrade the agent with "+
+				"`cloop executor agent install --upgrade`, or run this project on an executor that "+
+				"shares the control plane's filesystem",
+			ErrWorkspaceUnsupported, e.id, e.name, sess.Version(),
+			spec.Workspace.Repo, MinWorkspaceVersion)
+	}
+
+	// Lease the workspace credential at the last possible moment and give it
+	// back as soon as the agent confirms the start: from that point the device
+	// holds the material, and a lease left open here is a credential the broker
+	// believes is still out in the world. The release is deferred rather than
+	// called at each exit because there are six of them below.
+	cred, releaseCred, credErr := e.leaseWorkspace(ctx, spec)
+	defer releaseCred()
+	if credErr != nil {
+		return executor.Handle{}, credErr
+	}
+
 	// The control plane names the handle, not the agent. If the start
 	// response is lost to a disconnect the workload is still addressable: we
 	// can ask about the ID we chose, and a repeated start for a known ID is a
@@ -254,6 +311,15 @@ func (e *Executor) Start(ctx context.Context, spec executor.Spec) (executor.Hand
 	handleID, err := randomString(idBytes)
 	if err != nil {
 		return executor.Handle{}, fmt.Errorf("remote: generate handle id: %w", err)
+	}
+
+	// Provisioning gets its own audit rows because this is the moment a
+	// brokered credential is used against an external service, and the run's
+	// own record cannot answer "which grant fetched which repository onto which
+	// device" — the run looks identical whether the tree arrived or not.
+	if spec.Workspace.NeedsProvisioning() {
+		endWorkspaceAudit := e.auditWorkspaceStart(handleID, spec, cred)
+		defer func() { endWorkspaceAudit(err) }()
 	}
 
 	now := e.opts.now()
@@ -273,10 +339,18 @@ func (e *Executor) Start(ctx context.Context, spec executor.Spec) (executor.Hand
 	e.pruneLocked()
 	e.mu.Unlock()
 
-	frame, err := sess.frame(TypeStart, newCorrelationID(), handleID, StartPayload{
-		Spec:     spec,
-		HandleID: handleID,
-	})
+	payload := StartPayload{Spec: spec, HandleID: handleID}
+	if !cred.Empty() {
+		// Beside the Spec, never inside it. See WorkspaceCredential: a Spec is
+		// persisted by pkg/executorstore, so a token in one would outlive the
+		// fetch it was minted for by however long the run history is kept.
+		payload.WorkspaceCredential = &WorkspaceCredential{
+			Username:  cred.Username,
+			Password:  cred.Password,
+			ExpiresAt: cred.ExpiresAt,
+		}
+	}
+	frame, err := sess.frame(TypeStart, newCorrelationID(), handleID, payload)
 	if err != nil {
 		e.dropHandle(handleID)
 		return executor.Handle{}, err
@@ -294,7 +368,12 @@ func (e *Executor) Start(ctx context.Context, spec executor.Spec) (executor.Hand
 	}
 	if started.Error != "" {
 		e.dropHandle(handleID)
-		return executor.Handle{}, fmt.Errorf("remote: agent %s refused the workload: %s", e.id, started.Error)
+		// The workspace is named in the refusal because the most common reason
+		// a device rejects a start is now that it could not materialise the
+		// tree, and "agent edge-1 refused the workload" alone sends the
+		// operator looking at the harness instead of at the clone.
+		return executor.Handle{}, fmt.Errorf("remote: agent %s refused the workload%s: %s",
+			e.id, describeWorkspace(spec), started.Error)
 	}
 
 	startedAt := started.StartedAt

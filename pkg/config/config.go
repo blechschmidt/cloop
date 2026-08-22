@@ -113,6 +113,20 @@ const (
 	// any build's fan-out but below the kernel's default pid_max.
 	ContainerPIDsLower = 1
 	ContainerPIDsUpper = 1 << 16
+	// Workspace/scratch disk bounds (Task 20179). Deliberately the same
+	// numbers as the memory pair rather than a second opinion about what a
+	// machine has: both bound a repo-committed request against a ceiling that
+	// exists to stop a typo becoming a silent non-limit, and two different
+	// sets would only invite the question of which one is authoritative.
+	//
+	// The floor is an error rather than a clamp, for the same reason the
+	// memory floor is: clamping *up* would hand the project more than it
+	// asked for, which is the direction a sandbox spec never moves in. Below
+	// it, a checkout plus the harness's own scratch does not fit, and the run
+	// fails on the fetch with a message about the repository rather than
+	// about the limit that actually refused it.
+	ContainerDiskMBLower = 64
+	ContainerDiskMBUpper = 1 << 20 // 1 TiB
 
 	// Kubernetes executor bounds (Task 20161).
 	//

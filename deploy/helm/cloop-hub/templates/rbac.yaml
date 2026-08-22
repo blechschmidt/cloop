@@ -18,7 +18,7 @@ automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountT
 ---
 # The authority the hub runs workloads with, in the workload namespace only.
 #
-# These six rules are not a starting point to be widened — they are the exact
+# These eight rules are not a starting point to be widened — they are the exact
 # set of calls pkg/executor/kubernetes issues, enumerated from the call sites:
 #
 #   pods    create   client.go createPod    — start a run
@@ -27,12 +27,39 @@ automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountT
 #   pods    watch    client.go watchPod     — stream phase transitions
 #   pods    delete   client.go deletePod    — stop, kill, and cleanup
 #   pods/log get     client.go followLogs   — stream task output
+#   secrets create   client.go createSecret — hand one workspace fetch its credential
+#   secrets delete   client.go deleteSecret — take it back when the fetch is done
 #
-# Two absences are deliberate. There is no `update` or `patch`: the driver
-# never mutates a Pod after creating it, so a compromised hub cannot rewrite a
-# running workload's spec. And there is no `secrets` rule at all: an executor
-# that could read Secrets in its own namespace would make the secret broker
-# decorative, since every brokered credential could be fetched directly.
+# ## The secrets rule
+#
+# It is create and delete, and deliberately not get, list or watch. This
+# driver never reads a Secret back: it writes one containing the brokered
+# credential a git workspace fetch needs, points the Pod's init container at it
+# with a secretKeyRef, and deletes it as soon as that container terminates. The
+# whole read side of the Secret API is authority nothing here would use, so
+# nothing here has it — and a compromised hub cannot enumerate what else lives
+# in the namespace.
+#
+# It also does not widen the blast radius the way it first appears to, and it
+# is worth being precise about why rather than asserting it. With `pods:
+# create` plus `pods/log: get` — both of which this identity already had — any
+# Secret in this namespace can be read by mounting it into a Pod and printing
+# it. That is not a hypothetical: it is one `kubectl run` equivalent, and it
+# was true of every previous release of this chart. The namespace has always
+# been the boundary; adding create and delete on Secrets does not move it. What
+# would move it is a ClusterRole, or a rule in the *release* namespace where
+# the hub's own credentials live — and neither exists here.
+#
+# What it buys is that the workspace credential never appears in a Pod spec.
+# Without it the only ways to get a token to the init container are an `env`
+# value or an argv element, and both put the credential in an object readable
+# by anyone with `get pods`, in every `kubectl describe`, and in the API
+# server's audit log. With it, the Pod carries a reference and the material
+# lives for the length of one git fetch.
+#
+# There is still no `update` or `patch` on anything: the driver never mutates
+# an object after creating it, so a compromised hub cannot rewrite a running
+# workload's spec or swap a credential under a Pod that already started.
 #
 # `/version` is also called (preflight). It needs no rule here: Kubernetes
 # grants it to system:authenticated through the built-in
@@ -55,6 +82,10 @@ rules:
   - apiGroups: [""]
     resources: ["pods/log"]
     verbs: ["get"]
+  # Write-only, by design. See the note above: no get, no list, no watch.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

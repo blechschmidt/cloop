@@ -116,6 +116,16 @@ type Resources struct {
 	Memory string `yaml:"memory"`
 	// PIDs caps processes/threads; 0 = executor default.
 	PIDs int `yaml:"pids"`
+	// Disk is a size string bounding the workspace and scratch space; empty =
+	// executor default.
+	//
+	// It is the one resource key that also bounds something the project does
+	// not control: the size of the tree an executor fetches for it. A git
+	// workspace is provisioned from a remote repository whose contents the
+	// executor learns only by downloading them, so the limit reaches both the
+	// volume's own sizeLimit and the provisioner's post-fetch check — see
+	// Resolved.ApplyTo.
+	Disk string `yaml:"disk"`
 }
 
 // Capabilities are the confinement waivers a project may request.
@@ -353,6 +363,32 @@ func (r *Resources) normalize() ([]string, error) {
 			// package never moves in, so it is an error.
 			return warnings, fmt.Errorf("resources.memory %q is below the minimum of %d MB",
 				r.Memory, config.ContainerMemoryMBLower)
+		}
+	}
+
+	r.Disk = strings.TrimSpace(r.Disk)
+	if r.Disk != "" {
+		mb, clamped, err := config.ClampDiskMB(r.Disk)
+		if err != nil {
+			return warnings, fmt.Errorf("resources.disk: %w", err)
+		}
+		if clamped {
+			warnings = append(warnings, fmt.Sprintf(
+				"resources.disk %q exceeds the maximum of %d MB and was clamped",
+				r.Disk, config.ContainerDiskMBUpper))
+			// Rewritten to the clamped value for the same reason memory is: the
+			// spec that is hashed, applied and recorded has to be the one that
+			// actually ran, or the artifact claims a limit the sandbox never had.
+			r.Disk = fmt.Sprintf("%dm", mb)
+		}
+		if mb > 0 && mb < config.ContainerDiskMBLower {
+			// An error rather than a clamp, because clamping *up* would hand the
+			// project more than it asked for — the direction this package never
+			// moves in. Below the floor there is no room for a checkout plus the
+			// harness's own scratch, so the run would fail on the fetch with a
+			// message about the repository rather than about the limit.
+			return warnings, fmt.Errorf("resources.disk %q is below the minimum of %d MB",
+				r.Disk, config.ContainerDiskMBLower)
 		}
 	}
 

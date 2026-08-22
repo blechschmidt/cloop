@@ -59,6 +59,7 @@ const (
 	ConstraintImageOverride    Constraint = "image_override"
 	ConstraintSandboxBuild     Constraint = "sandbox_build"
 	ConstraintSandboxMounts    Constraint = "sandbox_mounts"
+	ConstraintWorkspace        Constraint = "workspace"
 )
 
 // Candidate is one executor offered to the scheduler, together with everything
@@ -153,6 +154,18 @@ type Requirements struct {
 	RequireSandboxBuild bool
 	// RequireSandboxMounts demands a node that honours Spec.Mounts.
 	RequireSandboxMounts bool
+	// RequireWorkspaceProvisioning demands a node that can materialise the
+	// source tree itself, because this workload's tree is not already there.
+	//
+	// Without this constraint the failure mode is the worst kind: the harness
+	// starts, finds an empty directory, and reports back on a repository it
+	// never saw. Refusing placement converts that into a message naming the
+	// executor that cannot fetch.
+	RequireWorkspaceProvisioning bool
+	// RequireHostFilesystemWorkspace demands a node whose WorkDir really is a
+	// path on the control-plane host, because the workload was dispatched with
+	// Workspace.Kind "bind" — i.e. with the tree assumed to be there already.
+	RequireHostFilesystemWorkspace bool
 	// RequireStream and RequireSignal demand live output and the ability to
 	// stop a workload — the two capabilities the Web UI's run panel needs.
 	RequireStream bool
@@ -295,6 +308,12 @@ func CheckSandboxSupport(ex Executor, req Requirements, projectPath string) erro
 	switch rej.Constraint {
 	case ConstraintHostPolicy, ConstraintIsolation:
 		return hostDenied(ex, projectPath)
+	case ConstraintWorkspace:
+		// Never folded into hostDenied. "Bind this project to a sandbox" is
+		// the opposite of the fix here: the bound executor is *already*
+		// isolated and that is precisely why it cannot see the tree. The
+		// constraint-specific message names the real remedy.
+		return &PlacementError{Constraint: rej.Constraint, Rejections: []Rejection{rej}, Considered: 1}
 	case ConstraintImageOverride, ConstraintSandboxBuild, ConstraintSandboxMounts,
 		ConstraintNetworkEgress, ConstraintResourceLimits:
 		// These are capability gaps, not policy ones — but on an un-isolated
@@ -406,6 +425,14 @@ func reject(c Candidate, req Requirements) (Rejection, bool) {
 	if req.RequireSandboxMounts && !caps.SupportsSandboxMounts {
 		return no(ConstraintSandboxMounts, "cannot apply per-project mounts "+
 			"(.cloop/sandbox.yaml sets mounts:)")
+	}
+	if req.RequireWorkspaceProvisioning && !caps.SupportsWorkspaceProvisioning {
+		return no(ConstraintWorkspace, "cannot materialise a source tree, so the harness "+
+			"would run against an empty directory")
+	}
+	if req.RequireHostFilesystemWorkspace && !caps.SharesHostFilesystem {
+		return no(ConstraintWorkspace, "does not share the control-plane filesystem, so "+
+			"a bind workspace would be an empty directory there")
 	}
 	if req.RequireStream && !caps.SupportsStream {
 		return no(ConstraintStream, "cannot stream output")

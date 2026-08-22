@@ -1,13 +1,14 @@
 package kubernetes
 
-// client.go is a hand-rolled Kubernetes API client covering exactly the six
+// client.go is a hand-rolled Kubernetes API client covering exactly the eight
 // calls this driver makes: create a Pod, get a Pod, watch a Pod, follow its
-// logs, delete it, and list Pods by label for garbage collection.
+// logs, delete it, list Pods by label for garbage collection, and create and
+// delete the one Secret a workspace fetch's credential travels in.
 //
 // Not using client-go is a deliberate size decision. client-go plus its
 // api/apimachinery dependencies add roughly 40 MB to a binary that operators
 // copy onto edge devices, in exchange for typed structs and a discovery
-// cache that a six-call surface does not need. The REST API is stable, is
+// cache that an eight-call surface does not need. The REST API is stable, is
 // versioned (`/api/v1`), and is plain JSON over HTTP; the cost of talking to
 // it directly is the handful of structs in pod.go.
 //
@@ -236,9 +237,14 @@ func (e *APIError) hint() string {
 	case e.Code == http.StatusUnauthorized:
 		return "the brokered kubeconfig's credential was rejected. If it is a ServiceAccount token, " +
 			"it may have expired; re-mint it and update the secret with `cloop secret mint --kind kubeconfig`"
+	case e.Code == http.StatusForbidden && strings.Contains(e.Path, "/secrets"):
+		return "the kubeconfig's identity may not manage Secrets in the target namespace, which a git " +
+			"workspace needs: add `- apiGroups: [\"\"] resources: [\"secrets\"] verbs: [\"create\", \"delete\"]` " +
+			"to its Role. create and delete only — the driver never reads a Secret back"
 	case e.Code == http.StatusForbidden:
 		return "the kubeconfig's identity lacks RBAC for this call. It needs a Role in the target " +
-			"namespace granting pods: create, get, list, watch, delete and pods/log: get"
+			"namespace granting pods: create, get, list, watch, delete; pods/log: get; and " +
+			"secrets: create, delete"
 	case e.Code == http.StatusNotFound && strings.Contains(e.Path, "/namespaces/"):
 		return "check that executors.kubernetes.namespace names an existing namespace"
 	case e.Code == http.StatusConflict:
@@ -397,6 +403,70 @@ func (c *client) deletePod(ctx context.Context, namespace, name string, gracePer
 		PropagationPolicy:  "Background",
 	}
 	err := c.doJSON(ctx, http.MethodDelete, podPath(namespace, name), nil, body, nil)
+	if ae, ok := asAPIError(err); ok && ae.NotFound() {
+		return nil
+	}
+	return err
+}
+
+// --- secrets ----------------------------------------------------------
+//
+// The driver creates exactly one kind of Secret — a workspace credential for
+// one run — and deletes it as soon as the init container that consumes it has
+// finished. There is deliberately no getSecret and no listSecrets, and the
+// shipped RBAC grants create and delete only: this driver never reads a Secret
+// back, so the ability to do so would be authority nothing here needs.
+
+// secret models the fields this driver sets. StringData rather than Data
+// because the API server does the base64 for us, and a driver that encoded it
+// itself would be one more place a credential passes through unnecessarily.
+type secret struct {
+	APIVersion string            `json:"apiVersion,omitempty"`
+	Kind       string            `json:"kind,omitempty"`
+	Metadata   objectMeta        `json:"metadata"`
+	Type       string            `json:"type,omitempty"`
+	StringData map[string]string `json:"stringData,omitempty"`
+}
+
+func secretsPath(namespace string) string {
+	return apiPrefix + "/namespaces/" + url.PathEscape(namespace) + "/secrets"
+}
+
+func secretPath(namespace, name string) string {
+	return secretsPath(namespace) + "/" + url.PathEscape(name)
+}
+
+// createSecret POSTs s and returns the server's view of it.
+//
+// The response is decoded for its name the way createPod is, and for nothing
+// else: a Secret the API server echoes back carries the material in its data
+// field, so anything this function did with the response beyond reading
+// metadata would be handling a credential it has no reason to handle.
+func (c *client) createSecret(ctx context.Context, namespace string, s *secret) (*secret, error) {
+	var out secret
+	if err := c.doJSON(ctx, http.MethodPost, secretsPath(namespace), nil, s, &out); err != nil {
+		return nil, err
+	}
+	if out.Metadata.Name == "" {
+		// A Secret is created with an explicit name, not a generateName, so an
+		// empty one back means the response was not the object we asked for —
+		// and the caller is about to reference that name from a Pod.
+		return nil, fmt.Errorf("kubernetes: API server accepted the Secret but returned no name")
+	}
+	return &out, nil
+}
+
+// deleteSecret removes a Secret. As with deletePod, an already-absent object is
+// success: the caller asked for the credential to be gone and it is gone.
+func (c *client) deleteSecret(ctx context.Context, namespace, name string) error {
+	body := deleteOptions{
+		APIVersion: "v1",
+		Kind:       "DeleteOptions",
+		// No grace period: a Secret has no running process to wind down, and
+		// the whole point of the call is that the material stops existing now.
+		PropagationPolicy: "Background",
+	}
+	err := c.doJSON(ctx, http.MethodDelete, secretPath(namespace, name), nil, body, nil)
 	if ae, ok := asAPIError(err); ok && ae.NotFound() {
 		return nil
 	}

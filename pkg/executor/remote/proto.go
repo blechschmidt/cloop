@@ -64,7 +64,12 @@ const (
 	// v2 added the revoke frame (see TypeRevoke): the control plane can take
 	// one secret lease back from a task that is already running, rather than
 	// waiting for the task to exit.
-	ProtocolVersion = 2
+	//
+	// v3 added StartPayload.WorkspaceCredential: the control plane hands the
+	// device the short-lived material for one authenticated git fetch, so an
+	// agent can materialise a private source tree before the harness starts
+	// instead of running it against an empty directory.
+	ProtocolVersion = 3
 	// MinProtocolVersion is the oldest version this build still accepts.
 	MinProtocolVersion = 1
 	// MinRevocationVersion is the first version whose agents understand the
@@ -77,11 +82,26 @@ const (
 	// not need; refusing the *workload that depends on it* fails exactly the
 	// runs whose guarantee could not be met, and names the reason.
 	MinRevocationVersion = 2
+	// MinWorkspaceVersion is the first version whose agents provision a git
+	// workspace before launching the harness.
+	//
+	// It is a placement rule for the same reason MinRevocationVersion is, with
+	// a sharper edge: an older agent does not *reject* the credential field, it
+	// ignores it. It would answer the start frame cheerfully, run the harness
+	// in the empty directory it created, and produce a transcript that looks
+	// like a working run operating on no code at all — which is the precise
+	// failure the workspace contract exists to remove. So the hub refuses to
+	// dispatch such a workload rather than trusting the device to complain.
+	MinWorkspaceVersion = 3
 )
 
 // SupportsRevocation reports whether an agent speaking this protocol version
 // honours the revoke frame.
 func SupportsRevocation(version int) bool { return version >= MinRevocationVersion }
+
+// SupportsWorkspaceProvisioning reports whether an agent speaking this protocol
+// version materialises a git workspace before starting the harness.
+func SupportsWorkspaceProvisioning(version int) bool { return version >= MinWorkspaceVersion }
 
 // Timing constants. These are protocol-level agreements, not tunables: both
 // sides must derive their timeouts from the same numbers or a healthy agent
@@ -237,6 +257,28 @@ func NewFrameAt(version int, t FrameType, id, handle string, payload any) (Frame
 	return f, nil
 }
 
+// String renders a frame for a diagnostic, without its payload.
+//
+// The omission is the point. Since protocol v3 a start frame's payload carries
+// the brokered credential for a workspace fetch (see
+// StartPayload.WorkspaceCredential), so a single `%v` on a Frame in some future
+// log line would write a live token into the control plane's log — and, on the
+// device, into the agent's. What identifies a frame is its type, its
+// correlation ID, its handle and its size; none of those is a secret, and
+// nothing else belongs in a log line anyway.
+func (f Frame) String() string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "frame v%d %s", f.V, f.Type)
+	if f.ID != "" {
+		b.WriteString(" id=" + f.ID)
+	}
+	if f.Handle != "" {
+		b.WriteString(" handle=" + f.Handle)
+	}
+	fmt.Fprintf(&b, " payload=%dB", len(f.Payload))
+	return b.String()
+}
+
 // Validate checks envelope-level invariants that every receiver needs, so
 // neither side has to re-derive them.
 func (f Frame) Validate() error {
@@ -331,6 +373,12 @@ type AgentCapabilities struct {
 	// WorkDirRoot is the directory the agent confines every workload to.
 	// Reported so an operator can see the sandbox boundary from the UI.
 	WorkDirRoot string `json:"workdir_root,omitempty"`
+	// WorkspaceProvisioning reports that this device can materialise a git
+	// workspace itself — it has git on PATH and a build that knows how to use
+	// it. Advertised rather than assumed because the failure it prevents is
+	// silent: a device without git would answer the start frame and run the
+	// harness against an empty tree.
+	WorkspaceProvisioning bool `json:"workspace_provisioning,omitempty"`
 	// MaxConcurrent is the agent's ceiling on simultaneous workloads.
 	MaxConcurrent int `json:"max_concurrent,omitempty"`
 	// Labels are free-form selectors (region, site, gpu) set by the operator.
@@ -353,9 +401,16 @@ func (c AgentCapabilities) Executor() executor.Capabilities {
 		SupportsResourceLimits: false,
 		SharesHostFilesystem:   false,
 		NetworkEgress:          true,
-		MaxConcurrent:          c.MaxConcurrent,
-		Platform:               c.OS,
-		Arch:                   c.Arch,
+		// A remote agent is the driver that most needs to provision: it shares
+		// no filesystem with the control plane, so "bind" is not available to
+		// it and an unprovisioned workspace is necessarily an empty one. The
+		// hub narrows this further by protocol version — see
+		// Executor.Capabilities — because a device that can clone is no use if
+		// the session cannot deliver the credential.
+		SupportsWorkspaceProvisioning: c.WorkspaceProvisioning,
+		MaxConcurrent:                 c.MaxConcurrent,
+		Platform:                      c.OS,
+		Arch:                          c.Arch,
 	}
 }
 
@@ -430,6 +485,65 @@ type StartPayload struct {
 	// treat a repeated start for a known handle as a no-op instead of
 	// launching the workload twice.
 	HandleID string `json:"handle_id"`
+	// WorkspaceCredential is the material for the single authenticated git
+	// fetch Spec.Workspace needs, when it needs one. Added in protocol v3; nil
+	// for a public repository or a workspace that needs no provisioning.
+	//
+	// It is a sibling of Spec rather than a field inside it, and that is a
+	// hard rule rather than a stylistic one: pkg/executorstore persists the
+	// dispatched Spec, the audit trail echoes it, and the reconcile loop
+	// re-reads it after a control-plane restart. A token placed anywhere in a
+	// Spec would be durable in three places within a second of being minted.
+	// Here it is one field of one frame — written to a socket, never to a disk
+	// — and the hub releases the lease as soon as the agent confirms the start.
+	WorkspaceCredential *WorkspaceCredential `json:"workspace_credential,omitempty"`
+}
+
+// WorkspaceCredential is HTTP basic material for one git fetch.
+//
+// It deliberately carries no lease or grant identifier. The device neither
+// renews nor releases the lease — the hub does both — so an identifier here
+// would buy nothing and cost the ability to correlate a captured frame with a
+// lease in the hub's audit trail.
+type WorkspaceCredential struct {
+	// Username is the HTTP basic user. Empty means the broker's GitHub
+	// convention, "x-access-token", which executor.GitCredential applies.
+	Username string `json:"username,omitempty"`
+	// Password is the token. This is the secret; everything else in this
+	// struct is bookkeeping.
+	Password string `json:"password"`
+	// ExpiresAt is the lease deadline, so a device can decline to begin a
+	// fetch with a credential that will lapse mid-transfer rather than failing
+	// halfway through with an opaque 401.
+	ExpiresAt time.Time `json:"expires_at,omitempty"`
+}
+
+// String renders the credential without its secret, so a `%v` on a start
+// payload — or on this struct directly — cannot write a live token into a log.
+// Marshalling is unaffected: only fmt goes through here.
+func (c WorkspaceCredential) String() string {
+	user := strings.TrimSpace(c.Username)
+	if user == "" {
+		user = "x-access-token"
+	}
+	return "workspace credential for " + user + " [redacted]"
+}
+
+// GoString mirrors String so %#v cannot print the token either.
+func (c WorkspaceCredential) GoString() string { return c.String() }
+
+// GitCredential converts the wire form into the type the device's provisioner
+// consumes. A payload with no credential yields the zero value, which
+// executor.GitCredential.Empty reports as "this fetch is unauthenticated".
+func (p StartPayload) GitCredential() executor.GitCredential {
+	if p.WorkspaceCredential == nil {
+		return executor.GitCredential{}
+	}
+	return executor.GitCredential{
+		Username:  p.WorkspaceCredential.Username,
+		Password:  p.WorkspaceCredential.Password,
+		ExpiresAt: p.WorkspaceCredential.ExpiresAt,
+	}
 }
 
 // StartedPayload answers a start.

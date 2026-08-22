@@ -36,6 +36,12 @@ type fakeAPI struct {
 	nextName int
 	watchers map[string][]chan watchEvent
 	logs     map[string]*logStream
+	// secrets holds the workspace credential Secrets the driver creates, and
+	// secretDeletes records every delete by name. Both live here rather than in
+	// workspace_test.go because the routing that fills them is here; the
+	// handlers and every assertion about them are in workspace_test.go.
+	secrets       map[string]*secret
+	secretDeletes []string
 	// history is the per-Pod event log a watch replays from. A real API
 	// server keeps one so a client that reconnects with a resourceVersion
 	// does not miss what happened while it was away; without it here, every
@@ -109,6 +115,7 @@ func newFakeAPI(t *testing.T) *fakeAPI {
 		logs:     make(map[string]*logStream),
 		history:  make(map[string][]versionedEvent),
 		failures: make(map[string]apiFailure),
+		secrets:  make(map[string]*secret),
 	}
 	f.srv = httptest.NewTLSServer(http.HandlerFunc(f.route))
 	t.Cleanup(f.srv.Close)
@@ -155,6 +162,9 @@ func (f *fakeAPI) route(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.URL.Path == "/version":
 		writeJSON(w, 200, map[string]string{"gitVersion": "v1.31.0", "major": "1", "minor": "31"})
+
+	case strings.Contains(r.URL.Path, "/secrets"):
+		f.routeSecret(w, r)
 
 	case strings.HasSuffix(r.URL.Path, "/log"):
 		f.handleLog(w, r)
@@ -505,6 +515,22 @@ func (f *fakeAPI) run(name string) {
 			Name:  ContainerName,
 			Ready: true,
 			State: containerState{Running: &stateRunning{StartedAt: time.Now().UTC().Format(time.RFC3339)}},
+		}}
+	})
+}
+
+// finishInitContainer reports the workspace provisioner as terminated while
+// leaving the Pod Pending, which is what a real kubelet does between an init
+// container exiting and the app container starting. It is the transition the
+// driver drops the credential Secret on.
+func (f *fakeAPI) finishInitContainer(name string, exitCode int, reason string) {
+	f.setPhase(name, func(p *pod) {
+		p.Status.InitContainerStatuses = []containerStatus{{
+			Name: InitContainerName,
+			State: containerState{Terminated: &stateTerminated{
+				ExitCode: exitCode, Reason: reason,
+				FinishedAt: time.Now().UTC().Format(time.RFC3339),
+			}},
 		}}
 	})
 }

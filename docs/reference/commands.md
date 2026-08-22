@@ -764,3 +764,74 @@ connecting until it is re-pinned. See [TLS](#tls) for the serving configuration
 and [Remote executors](#remote-executors-edge-devices) for how the pin reaches
 a device.
 
+---
+
+## Executor internals
+
+Commands an executor runs on your behalf. They are documented because you will
+meet them in a container log or a failing init container, not because you are
+expected to type them.
+
+### `cloop workspace provision`
+
+Materialise a git workspace into a directory, then exit. This is what an
+isolated executor runs *before* the harness starts: a Kubernetes init container
+named `workspace`, or any other place that has to hold the code before the
+workload does. The Kubernetes driver builds the argv, so the flags below are a
+wire format between the driver and this command rather than a UI.
+
+> Unrelated to the other `cloop workspace` subcommands (`add`, `list`,
+> `switch`, …), which manage multiple cloop projects from one root. Same noun,
+> different feature.
+
+```bash
+cloop workspace provision --dir /workspace/project --repo https://github.com/acme/app.git
+cloop workspace provision --dir /workspace/project --repo https://github.com/acme/app.git \
+    --ref main --depth 1 --size-limit-mb 512
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--dir` | | Absolute directory to provision the source tree into (**required**) |
+| `--repo` | | `https://` clone URL of the repository to fetch (**required**) |
+| `--ref` | the remote's default branch | Branch, tag or commit to check out |
+| `--depth` | `0` | Shallow-fetch depth; `0` fetches full history |
+| `--size-limit-mb` | `0` | Refuse a provisioned tree larger than this many megabytes; `0` means no limit |
+
+`--dir` must be absolute: a relative path would resolve against whatever working
+directory the process happens to have, which inside a Pod is the image author's
+choice rather than the driver's. The repo URL must be `https://` and must not
+embed credentials — see [the workspace contract](../architecture/executors.md#workspace-provisioning)
+for why.
+
+**Credentials come from the environment**, because that is the only channel a
+Pod has that is neither an argv (`/proc` publishes those to every process under
+the same uid) nor a file (which outlives the process that needed it):
+
+| Variable | Meaning |
+|----------|---------|
+| `CLOOP_WORKSPACE_TOKEN` | the bare token; absent or empty means an unauthenticated fetch, which works for a public repository |
+| `CLOOP_WORKSPACE_USER` | the basic-auth username; defaults to `x-access-token`, which is what GitHub expects alongside a PAT |
+
+Both are read and **removed from the process's environment before anything is
+spawned**, and no output of this command can contain either — every byte it
+writes and every error it returns is passed through the same redaction the
+provisioner applies.
+
+The sequence is `git init`, `remote add origin`, `fetch`, then
+`checkout --detach FETCH_HEAD` — not `git clone`, because `clone` cannot name a
+bare commit SHA. A directory that already holds a checkout of the *same* remote
+is fetched into rather than re-cloned; one holding a *different* remote is a
+refusal naming both URLs, since re-cloning would discard whatever is there.
+
+Running it by hand is the way to reproduce a workspace failure outside a
+cluster:
+
+```bash
+CLOOP_WORKSPACE_TOKEN=ghp_… cloop workspace provision \
+    --dir /tmp/repro --repo https://github.com/acme/app.git --ref main
+```
+
+A non-zero exit means the tree is not there. The message names the machine, the
+repository and the directory, and is safe to paste into a bug report.
+

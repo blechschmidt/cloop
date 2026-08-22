@@ -34,7 +34,7 @@ func FuzzParse(f *testing.F) {
 		"image: repo@sha256:" + strings.Repeat("a", 64) + "\n",
 		"setup:\n  - pip install -r requirements.txt\n",
 		"env:\n  - GITHUB_TOKEN\n",
-		"resources:\n  cpu: 2\n  memory: 4g\n  pids: 512\n",
+		"resources:\n  cpu: 2\n  memory: 4g\n  pids: 512\n  disk: 2g\n",
 		"capabilities:\n  git: true\n  network: ci\n",
 		"mounts:\n  - source: .cache\n    target: /cache\n    read_only: true\n",
 
@@ -53,6 +53,10 @@ func FuzzParse(f *testing.F) {
 		"resources:\n  memory: 99999999999999999t\n",
 		"resources:\n  memory: 9223372036854775807g\n",
 		"resources:\n  memory: 0\n",
+		"resources:\n  disk: 99999999999999999t\n",
+		"resources:\n  disk: 9223372036854775807g\n",
+		"resources:\n  disk: 0\n",
+		"resources:\n  disk: 8m\n",
 		"resources:\n  cpu: 1e300\n",
 		"resources:\n  pids: -1\n",
 
@@ -205,6 +209,23 @@ func checkAccepted(t *testing.T, spec *Spec) {
 				spec.Resources.Memory, mb, config.ContainerMemoryMBUpper)
 		}
 	}
+	if spec.Resources.Disk != "" {
+		// The disk bound gets the same treatment as memory, and for a sharper
+		// reason: this value becomes Workspace.SizeLimitMB, so an unbounded one
+		// is an unbounded fetch onto a machine the operator may never touch.
+		mb, err := config.ParseDiskMB(spec.Resources.Disk)
+		if err != nil {
+			t.Fatalf("accepted disk %q that does not re-parse: %v", spec.Resources.Disk, err)
+		}
+		if mb > config.ContainerDiskMBUpper {
+			t.Fatalf("accepted disk %q = %d MB, over the ceiling of %d MB",
+				spec.Resources.Disk, mb, config.ContainerDiskMBUpper)
+		}
+		if mb > 0 && mb < config.ContainerDiskMBLower {
+			t.Fatalf("accepted disk %q = %d MB, under the floor of %d MB",
+				spec.Resources.Disk, mb, config.ContainerDiskMBLower)
+		}
+	}
 
 	// --- the applied spec is one the drivers will accept ---------------------
 	//
@@ -222,6 +243,17 @@ func checkAccepted(t *testing.T, spec *Spec) {
 	}
 	if err := applied.Validate(); err != nil {
 		t.Fatalf("an accepted spec produced an executor.Spec the drivers refuse: %v", err)
+	}
+
+	// A repo-committed file may bound a fetch the hub decided to perform; it may
+	// never decide that one happens. If any input could make ApplyTo name a
+	// workspace kind or a repository, this file would be a way to arrange one's
+	// own clone from a URL in the same pull request.
+	if applied.Workspace.Kind != executor.WorkspaceUnspecified || applied.Workspace.Repo != "" {
+		t.Fatalf("a sandbox spec set the workspace itself: %+v", applied.Workspace)
+	}
+	if res.Requirements().RequireWorkspaceProvisioning {
+		t.Fatal("a sandbox spec must never require that a workspace be provisioned")
 	}
 
 	// A spec that asks for something but names no grant must always end up with

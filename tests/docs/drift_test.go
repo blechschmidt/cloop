@@ -72,6 +72,26 @@ var enumerations = []enumeration{
 		typeName:   "Role",
 		documentIn: "docs/security/model.md (add a row to the role ladder)",
 	},
+	{
+		// A workspace kind decides whether an executor fetches the project's
+		// source, assumes it is already there, or deliberately starts empty.
+		// An undocumented one is how "my task ran against an empty directory"
+		// becomes a support question instead of a table lookup.
+		what:       "workspace kind",
+		file:       "pkg/executor/workspace.go",
+		namePrefix: "Workspace",
+		typeName:   "WorkspaceKind",
+		documentIn: "docs/architecture/executors.md (add a row to the workspace-kind table)",
+	},
+	{
+		// A placement constraint is the *name* an operator sees when a run is
+		// refused, and it is the only word in the message they can search for.
+		what:       "placement constraint",
+		file:       "pkg/executor/placement.go",
+		namePrefix: "Constraint",
+		typeName:   "Constraint",
+		documentIn: "docs/architecture/executors.md (add it to the constraint list under Placement)",
+	},
 }
 
 func TestRequiredDocsExist(t *testing.T) {

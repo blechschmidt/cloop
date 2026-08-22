@@ -12,6 +12,7 @@ ceilings are — and the project describes the environment inside it.
 
 - [Schema](#schema)
 - [What a spec can and cannot do](#what-a-spec-can-and-cannot-do)
+- [`resources.disk` and the workspace](#resourcesdisk-and-the-workspace)
 - [Image trust policy](#image-trust-policy)
 - [Executor support](#executor-support)
 - [Reproducibility](#reproducibility)
@@ -46,6 +47,7 @@ resources:
   cpu: 2          # cores; 0 or absent means the executor's default
   memory: 4g      # 512m, 2g, 1024k, or a bare integer read as megabytes
   pids: 512       # process/thread cap
+  disk: 2g        # workspace + scratch ceiling; also bounds a fetched tree
 
 capabilities:
   git: true       # the sandbox needs a working git
@@ -72,6 +74,7 @@ unbounded while its author believed it was capped.
 | `resources.cpu` | ≤ 1024 cores | clamped, with a warning |
 | `resources.memory` | 64 MB – 1 TiB | above: clamped; below 64 MB: error |
 | `resources.pids` | 1 – 65536 | clamped; `-1` (unlimited) is refused |
+| `resources.disk` | 64 MB – 1 TiB | above: clamped; below 64 MB: error |
 | `setup` | 32 commands, 4096 bytes each | error |
 | `env` | 64 names | error |
 | `mounts` | 16 entries | error |
@@ -103,6 +106,31 @@ An `env:` key that is *absent* means "no opinion" and passes the environment
 through untouched. It is not an empty allowlist — reading it that way would
 strip the API key from every project that adds a `sandbox.yaml` purely to pin an
 image.
+
+### `resources.disk` and the workspace
+
+`disk` is the one resource key that also bounds something the project does not
+choose the size of. When an executor has to *fetch* the source tree — a
+Kubernetes Pod, a remote agent; anything that does not share the hub's
+filesystem — the tree arrives from a remote repository whose contents are known
+only after downloading them. So the same number is applied twice:
+
+- as the volume's own ceiling (`ResourceLimits.DiskMB`, which becomes a
+  Kubernetes `emptyDir` `sizeLimit`), enforced by the platform;
+- as the provisioner's post-fetch check (`Workspace.SizeLimitMB`), which turns
+  "this repository is larger than the allowance" into a refusal naming the limit
+  rather than a Pod the kubelet evicts mid-run.
+
+What it does **not** do is ask for a workspace. Nothing in this schema names a
+repository, and nothing in it adds a workspace placement requirement — a
+repo-committed file that could arrange its own clone would be arranging it from
+a URL in the same pull request. The workspace *kind* is the hub's decision; a
+spec may only bound a fetch the hub already decided to perform.
+
+Executors that share the host filesystem — the container and host-process
+drivers — cannot enforce a writable-layer quota, so they refuse a spec that asks
+for one rather than accepting a limit they would ignore. Bind-mounted projects
+should bound disk on the host filesystem instead.
 
 ## Image trust policy
 

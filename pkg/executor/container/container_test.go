@@ -557,6 +557,84 @@ func TestCapabilitiesReflectConfiguration(t *testing.T) {
 			t.Error("NetworkEgress must be true when a network is attached")
 		}
 	})
+
+	t.Run("no workspace provisioning, because there is nothing to provision", func(t *testing.T) {
+		caps := fakeExecutor(t, Options{}).Capabilities()
+		if caps.SupportsWorkspaceProvisioning {
+			t.Error("SupportsWorkspaceProvisioning must be false: the project directory is bind-mounted")
+		}
+		if !caps.SharesHostFilesystem {
+			t.Error("SharesHostFilesystem must be true, which is *why* provisioning is not needed")
+		}
+	})
+}
+
+// TestBuildRequest_RefusesGitWorkspace: the bind mount means the clone target
+// is the operator's own checkout. `git init` over their .git and a detached
+// checkout over their uncommitted work is not a degraded outcome, it is data
+// loss on the machine they are sitting at — so it is refused, not attempted.
+func TestBuildRequest_RefusesGitWorkspace(t *testing.T) {
+	ex := fakeExecutor(t, Options{})
+	_, err := ex.buildRequest(executor.Spec{
+		Argv: []string{"x"},
+		Workspace: executor.Workspace{
+			Kind: executor.WorkspaceGit,
+			Repo: "https://example.com/acme/app.git",
+			Ref:  "main",
+		},
+	}, "/srv/proj", nil)
+	if err == nil {
+		t.Fatal("a git workspace must be refused by a driver that bind-mounts the host path")
+	}
+	if !errors.Is(err, executor.ErrUnsupported) {
+		t.Fatalf("error should wrap ErrUnsupported so callers can branch on it, got %v", err)
+	}
+	// The message has to say what a clone would destroy and where to send the
+	// workload instead; "unsupported" alone sends the reader looking for a bug.
+	for _, want := range []string{"overwrite", "/srv/proj"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal should mention %q; got %v", want, err)
+		}
+	}
+}
+
+// TestBuildRequest_AcceptsNonGitWorkspaces is the other half: bind, none and
+// the unspecified zero value ask this driver for nothing, so none of them may
+// become a refusal.
+func TestBuildRequest_AcceptsNonGitWorkspaces(t *testing.T) {
+	for _, kind := range []executor.WorkspaceKind{
+		executor.WorkspaceUnspecified,
+		executor.WorkspaceBind,
+		executor.WorkspaceNone,
+	} {
+		ex := fakeExecutor(t, Options{})
+		_, err := ex.buildRequest(executor.Spec{
+			Argv:      []string{"x"},
+			Workspace: executor.Workspace{Kind: kind},
+		}, "/srv/proj", nil)
+		if err != nil {
+			t.Errorf("workspace kind %q must build unchanged: %v", kind, err)
+		}
+	}
+}
+
+// TestStart_RefusesGitWorkspace pins the refusal at the entry point callers
+// actually use, and before anything touches a container runtime — a driver that
+// only rejected this deep inside buildRequest would still be correct, but a
+// future reordering could move the runtime call in front of it.
+func TestStart_RefusesGitWorkspace(t *testing.T) {
+	ex := fakeExecutor(t, Options{})
+	_, err := ex.Start(context.Background(), executor.Spec{
+		WorkDir: t.TempDir(),
+		Argv:    []string{"cloop", "run"},
+		Workspace: executor.Workspace{
+			Kind: executor.WorkspaceGit,
+			Repo: "https://example.com/acme/app.git",
+		},
+	})
+	if !errors.Is(err, executor.ErrUnsupported) {
+		t.Fatalf("Start with a git workspace = %v, want it to wrap ErrUnsupported", err)
+	}
 }
 
 func TestSanitizeLabelKeySegment(t *testing.T) {

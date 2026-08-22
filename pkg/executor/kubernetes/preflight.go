@@ -213,6 +213,28 @@ func (e *Executor) Preflight(ctx context.Context) PreflightReport {
 		"Pods join the cluster network with unrestricted egress; cloop does not filter it",
 		fmt.Sprintf("apply a default-deny NetworkPolicy to namespace %q and allow only what the harness needs", namespace))
 
+	// --- 6. workspace -----------------------------------------------------
+	//
+	// This check exists because the failure it heads off is silent. A project
+	// bound to this executor with a private repository and no credential
+	// source does not error at bind time, at placement time, or at Start: the
+	// Pod is created, the init container runs, git asks for a password nobody
+	// supplies, and the operator sees a run that failed for reasons the run's
+	// own output cannot explain.
+	if e.opts.Workspace == nil {
+		add("workspace", LevelWarn,
+			"this executor provisions a git workspace with an init container, but no workspace "+
+				"credential source is wired, so only public repositories can be fetched",
+			fmt.Sprintf("mint and grant a GitHub PAT: cloop secret mint --kind github-pat --name %s-git "+
+				"&& cloop secret grant %s-git --to executor:%s --repos owner/name", e.id, e.id, e.id))
+	} else {
+		add("workspace", LevelOK,
+			fmt.Sprintf("git workspaces are fetched by an init container in the same image, with a "+
+				"brokered credential delivered through a short-lived Secret in %q that is deleted as "+
+				"soon as the fetch finishes", namespace),
+			"")
+	}
+
 	return report
 }
 
@@ -220,6 +242,7 @@ func (e *Executor) Preflight(ctx context.Context) PreflightReport {
 // can paste. Naming the exact verbs is the difference between a two-minute
 // fix and an afternoon.
 func rbacFix(namespace string) string {
-	return fmt.Sprintf("grant a Role in %q with pods: [create get list watch delete] and pods/log: [get], "+
-		"then bind it to the ServiceAccount whose token the kubeconfig carries", namespace)
+	return fmt.Sprintf("grant a Role in %q with pods: [create get list watch delete], pods/log: [get] and "+
+		"secrets: [create delete], then bind it to the ServiceAccount whose token the kubeconfig carries",
+		namespace)
 }

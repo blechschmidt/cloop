@@ -1506,11 +1506,39 @@ func jsonWorkloadErr(w http.ResponseWriter, err error) {
 		return
 	}
 
+	// The executor cannot get at the project's source tree (Task 20179). Also
+	// a 409, and for the strongest version of the same reason: the request is
+	// well-formed and what conflicts is where the project's code lives with
+	// where the operator asked it to run. Both errors carry a Remediation of
+	// their own, and both are checked before the placement case below because
+	// each names the specific repository and grant rather than the constraint
+	// they would otherwise be flattened into.
+	var grantMissing *executor.WorkspaceGrantError
+	if errors.As(err, &grantMissing) {
+		writeSandboxDenied(w, "workspace_grant_missing", grantMissing.Error(),
+			grantMissing.Remediation(), nil)
+		return
+	}
+	var noTree *workspaceSourceError
+	if errors.As(err, &noTree) {
+		writeSandboxDenied(w, "workspace_unavailable", noTree.Error(),
+			noTree.Remediation(), executor.IsolatedIDs())
+		return
+	}
+
 	var placement *executor.PlacementError
 	if errors.As(err, &placement) {
-		writeSandboxDenied(w, "sandbox_unsupported", placement.Error(),
-			fmt.Sprintf("Bind this project to an executor that supports %s, or remove the "+
-				"requirement from %s.", placement.Constraint, sandbox.FileName),
+		remediation := fmt.Sprintf("Bind this project to an executor that supports %s, or remove the "+
+			"requirement from %s.", placement.Constraint, sandbox.FileName)
+		if placement.Constraint == executor.ConstraintWorkspace {
+			// The sandbox file has nothing to do with this one: the workspace
+			// is derived from the project's git remote, not from a spec anyone
+			// wrote, so pointing at sandbox.yaml would send the reader to edit
+			// a file that cannot fix it.
+			remediation = "Bind this project to an executor that can fetch a git workspace, " +
+				"or upgrade the agent on this device to a build that supports workspace provisioning."
+		}
+		writeSandboxDenied(w, "sandbox_unsupported", placement.Error(), remediation,
 			executor.IsolatedIDs())
 		return
 	}

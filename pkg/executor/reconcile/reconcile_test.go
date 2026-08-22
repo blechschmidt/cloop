@@ -21,7 +21,6 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/executor"
-	"github.com/blechschmidt/cloop/pkg/executor/kubernetes"
 )
 
 // fakeRuntime writes an executable named `docker` into a fresh directory and
@@ -459,8 +458,8 @@ func TestKubernetesCredentialCleanupOnRegistrationFailure(t *testing.T) {
 	// A nil CredentialSource with a live cleanup: kubernetes.New rejects it,
 	// so registration fails *after* the source was built — exactly the shape
 	// of a broker that opened its database and then hit a bad driver option.
-	opts.KubernetesCredentials = func(dir string, cfg *config.Config, execID string) (kubernetes.CredentialSource, func(), error) {
-		return nil, func() { cleanups++ }, nil
+	opts.KubernetesCredentials = func(dir string, cfg *config.Config, execID string) (Identity, func(), error) {
+		return Identity{}, func() { cleanups++ }, nil
 	}
 
 	cfg := &config.Config{}

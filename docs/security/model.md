@@ -13,6 +13,7 @@ So every guarantee below ends in a row of the
 
 - [Trust boundaries](#trust-boundaries)
 - [The no-host-execution guarantee](#the-no-host-execution-guarantee)
+- [Workspace provisioning](#workspace-provisioning)
 - [Identity, roles and permissions](#identity-roles-and-permissions)
 - [Session lifecycle and revocation](#session-lifecycle-and-revocation)
 - [The guarantee → test table](#the-guarantee--test-table)
@@ -139,10 +140,20 @@ capabilities dropped, `seccompProfile: RuntimeDefault`, and
 credential of its own.
 
 The chart's executor Role is deliberately narrow, and CI asserts it in both
-directions: it **grants** `create/get/list/watch/delete` on Pods and `get` on
-`pods/log` in the workload namespace, and **denies** `update`/`patch` on Pods,
-any access to Secrets, and anything at all in the hub's own namespace. An
-executor that could read Secrets would make the secret broker decorative.
+directions: it **grants** `create/get/list/watch/delete` on Pods, `get` on
+`pods/log`, and `create`/`delete` on Secrets in the workload namespace, and
+**denies** `update`/`patch` on anything, *reading* Secrets, and anything at all
+in the hub's own namespace.
+
+The Secret rule is write-only on purpose. The driver creates one Secret holding
+the credential a [workspace fetch](#workspace-provisioning) needs, points the
+Pod's init container at it by reference, and deletes it when that container
+terminates; it never reads a Secret back, so an executor that could enumerate
+what else lives in the namespace — which is what would make the secret broker
+decorative — still cannot. Nor does it widen the namespace's blast radius:
+`pods: create` plus `pods/log: get`, which this identity already held, is enough
+to read any Secret in the namespace by mounting it into a Pod and printing it.
+The namespace has always been the boundary. Run workloads in one of their own.
 
 ---
 
@@ -264,6 +275,119 @@ be told (`TestVaultRefusesPathsOutsideALeaseDirectory`,
 intent even if the process dies mid-revocation; `lease.revoke_acked` or
 `lease.revoke_failed` follows per executor, with the lease and executor IDs and
 how long the ack took. Env variable *names* appear; values never do.
+
+---
+
+## Workspace provisioning
+
+> A `git` workspace is fetched with a short-lived brokered credential that
+> reaches exactly one process, and a fetch nobody can authorise is a refusal —
+> never a run against an empty directory.
+
+Two halves, and both are failure modes that look like success from the outside.
+
+A leaked token produces a run that works *perfectly*: the fetch succeeds, the
+task completes, and a long-lived GitHub credential is sitting in a Pod object
+that anyone with `get pods` in the namespace can read. Nothing surfaces until
+somebody else uses it. An empty workspace is worse, because the harness
+cooperates — it starts, finds no code, and produces a plausible report about a
+repository it never saw. See
+[Workspace provisioning](../architecture/executors.md#workspace-provisioning)
+for the mechanism; this section is what it is worth.
+
+### The credential's path
+
+```
+operator:  cloop secret mint … --kind github_pat
+           cloop secret grant … --to executor:k8s-prod --repos acme/tool
+                │
+hub:       applyWorkspace records the grant's NAME in the Spec.  ← no material
+                │                                                  ever, anywhere
+driver:    lease from the broker at dispatch, for one fetch
+                │
+   ┌────────────┴─────────────┐
+   │ kubernetes               │ remote
+   │ → Secret cloop-ws-<h>    │ → one start frame
+   │ → lease released         │ → lease released when the agent answers
+   │ → secretKeyRef in the Pod│
+   │ → Secret deleted when the│
+   │   init container ends    │
+   └────────────┬─────────────┘
+                │
+executor:  kubernetes → read out of CLOOP_WORKSPACE_TOKEN and unset
+                        in the same breath, before anything is spawned
+           remote     → held in the agent's memory for one call
+                │
+           both  → handed to ONE git child — the single `fetch` step —
+                   as a URL-scoped http.<origin>.extraHeader
+```
+
+The lease is deliberately short-lived at each hop rather than held for the run.
+On Kubernetes it is released as soon as the Secret exists, not when the fetch
+finishes: by then the cluster holds the material and the broker's lease controls
+nothing, so releasing later would only keep the broker believing a credential is
+out on loan for hours. The Secret itself is dropped the moment the init
+container terminates — the exposure is the length of a `git fetch`, not the
+length of a run.
+
+### The four absences
+
+| Property | Why it holds |
+| --- | --- |
+| **Not in the Pod spec** | `CLOOP_WORKSPACE_TOKEN` is only ever set through `valueFrom.secretKeyRef`. A `value:` entry would put the token into an object readable by every identity with `get pods`, into every `kubectl describe`, and into the API server's audit log. |
+| **Not in argv** | `/proc/<pid>/cmdline` is readable by every process under the same uid, and a container's argv is additionally in the Pod object and in `docker inspect`. The plan is built from a `Workspace` that structurally cannot hold a credential, and the material is applied only to an environment. |
+| **Not on disk** | No credential file and no credential helper: the token is passed through git's `GIT_CONFIG_COUNT` protocol, `GIT_CONFIG_GLOBAL=/dev/null` and `GIT_CONFIG_NOSYSTEM=1` close the config files, and `credential.helper` is explicitly set empty. The provisioned checkout's own `.git/config` records the remote, not the authority. |
+| **Not in output or logs** | Everything the provisioner emits or returns is passed through `executor.RedactSecrets` against *both* the raw token and its base64 form, because git will quote a header back in an error message and the base64 encoding is the one most likely to be echoed. |
+
+A fifth, structural, sits underneath them: **not in the `Spec`.**
+`executor.Workspace` has no field a token could be assigned to, so a future
+caller cannot put one there even by trying. That matters because a Spec is
+persisted for failover, marshalled across the remote boundary, and echoed into
+audit rows — a credential placed there would be durable in three places before
+anything used it.
+
+### Scoping, and the helper that must not answer
+
+The credential is delivered as `http.<https://host/>.extraHeader`, scoped to the
+repository's own origin. An *unscoped* `http.extraHeader` is sent to every host
+git contacts, including whatever a redirect points at — which turns a hostile or
+merely misconfigured redirect into credential exfiltration. Scoped, a repository
+that redirects elsewhere produces a fetch failure instead.
+
+The empty `credential.helper` entry is not redundant. Without it, a helper
+configured somewhere `GIT_CONFIG_GLOBAL` does not cover could still answer the
+challenge with a *different* credential, and the fetch would succeed using
+authority the grant never issued — the worst possible outcome, because it looks
+like the grant working.
+
+The base environment is closed for the same reason: an inherited `~/.gitconfig`
+could contribute a credential helper, an `insteadOf` rewrite pointing the fetch
+at another host, or a proxy, all decided by whoever last touched the machine.
+The one allowlisted exception is transport (`HTTPS_PROXY`, `NO_PROXY`,
+`SSL_CERT_FILE`, `GIT_SSL_CAINFO` and siblings) — none of which can name a
+repository or supply a credential. `GIT_SSL_NO_VERIFY` is not on that list:
+disabling certificate verification for a fetch carrying a brokered token is not
+a transport preference, it is handing the token to whoever answers.
+
+### Refusal is the other half
+
+An executor that cannot materialise a tree is rejected at *placement* on
+`ConstraintWorkspace`, before any credential is involved and whatever the
+repository's visibility. A fetch no grant authorises fails with a typed
+`*executor.WorkspaceGrantError` naming the repository, the grant and the
+executor, whose `Remediation()` prints the `cloop secret grant` command — see
+[Granting a PAT for workspace provisioning](../guides/secrets.md#granting-a-pat-for-workspace-provisioning).
+
+The provisioning step itself runs attacker-adjacent input (a repository URL, a
+ref, and then whatever the repository contains) inside the same Pod as the
+harness, before the harness exists. It is therefore confined *identically* —
+same `runAsNonRoot`, same read-only root filesystem, same dropped capabilities,
+same seccomp profile, built by one function rather than two struct literals two
+hundred lines apart. A less confined init container would be a way to obtain in
+the sandbox exactly the privileges the sandbox exists to deny.
+
+Every row above is asserted in
+[`workspace_test.go`](#workspace-provisioning--workspace_testgo).
 
 ---
 
@@ -740,6 +864,31 @@ an image the operator's policy admits, or does not start.
 | An unconfigured hub allows any image — asserted, so the day it changes in either direction is visible | `TestNoPolicyIsNotSilentlyAPolicy` |
 | `Evaluate` is pure and deterministic, so the UI's preview and the executor's decision cannot disagree | `TestEvaluateIsPure` in `pkg/imagepolicy` |
 
+### Workspace provisioning — `workspace_test.go`
+
+The [guarantee above](#workspace-provisioning), asserted in both halves. The
+assertions are deliberately about *absence* — the token is not in the Pod
+object, not in an argv, not in the output, not on disk — and about refusal,
+because both failure modes look like success from the outside.
+
+The end-to-end rows drive the real provisioning engine against a real
+`git http-backend` over a real TLS listener, so what they prove is a property of
+how git itself carries the credential. A stub that accepted whatever the
+provisioner sent would prove nothing about where the token ends up. They skip
+where `git` or `git-http-backend` is not installed.
+
+| Guarantee | Test |
+| --- | --- |
+| `executor.Workspace` has no field a credential could be assigned to, and a marshalled `Spec` carries the grant's *name* and nothing more | `TestWorkspaceStructurallyCannotCarryACredential` |
+| The provisioning audit event — the artifact designed to outlive every credential in it — emits a closed, reviewed set of fields | `TestWorkspaceAuditEventCarriesNoCredential` |
+| The Pod object contains neither the token nor its base64 form, and the credential reaches the init container by `secretKeyRef` rather than by value | `TestWorkspaceTokenIsNotInThePodSpec` |
+| The workspace init container is confined *identically* to the harness — it runs untrusted repository input in the same Pod | `TestWorkspaceInitContainerIsAsConfinedAsTheHarness` |
+| No step's argv holds the credential; exactly one step is authenticated; the `extraHeader` is scoped to the repository's own origin, so a redirect cannot carry it away | `TestWorkspaceTokenReachesNoCommandLine` |
+| A successful fetch against a real authenticating remote leaves nothing on disk — including in the checkout's own git metadata — and nothing in the transcript, while the tree genuinely arrives | `TestWorkspaceProvisioningLeaksNothingOnSuccess` |
+| A rejected fetch — where git is most likely to quote the request back — redacts its error and its transcript, and carries `ErrWorkspaceUnavailable` so callers can tell a missing tree from a failing harness | `TestWorkspaceProvisioningRedactsItsFailure` |
+| A workspace no grant authorises is refused with a typed `*WorkspaceGrantError` naming the grant, the repository and a remediation naming both the repository and the executor | `TestMissingGrantIsRefusedByName` |
+| An executor that cannot fetch is refused at placement on `ConstraintWorkspace`, and on the binding path too — no credential involved, whatever the repository's visibility | `TestExecutorThatCannotFetchIsRefusedAtPlacement` |
+
 ### Agent protocol and transport — `framing_test.go`, `transport_test.go`
 
 The remote agent is the only boundary where the peer is not ours, so its
@@ -807,7 +956,25 @@ on that machine until it returns. Rotate at the source when it matters.
 
 **Pod environment is readable in-namespace.** `Spec.Env` lands in the Pod object,
 so anyone with `get pods` in the workload namespace can read it. Run workloads in
-a dedicated namespace with its own RBAC.
+a dedicated namespace with its own RBAC. The
+[workspace credential](#workspace-provisioning) is the exception, and it is an
+exception by construction rather than by care: it reaches the Pod as a
+`secretKeyRef`, never as a value.
+
+**A workspace Secret can be orphaned by a hub that dies mid-dispatch.** A control
+plane killed between creating `cloop-ws-<handle>` and observing the init
+container finish leaves it behind. Nothing sweeps it, because sweeping needs
+`list secrets` and the executor Role deliberately has no read access to Secrets
+at all. The window is seconds and the material inside expires on the broker's own
+TTL regardless; `kubectl -n <ns> delete secret cloop-ws-<handle>` clears one by
+hand.
+
+**A workspace credential is scoped by the grant, not by GitHub.** The broker
+refuses to lease a PAT whose repository allowlist excludes the repository being
+fetched, so a run cannot clone what it was not granted. The *token* is still
+whatever GitHub issued — see `github_pat` above. What bounds it here is that it
+never enters the harness's environment: it is handed to one `git fetch` child and
+to nothing else, so the workload that the model controls cannot spend it.
 
 **No image signature verification.** `--pull=never` prevents surprise pulls at
 task time, but cloop does not verify image signatures or digests. Pin by digest

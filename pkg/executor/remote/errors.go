@@ -64,6 +64,13 @@ var (
 	// fails with this rather than proceeding without the guarantee.
 	ErrRevocationUnsupported = errors.New("remote: agent does not support lease revocation")
 
+	// ErrWorkspaceUnsupported: the agent speaks a protocol version older than
+	// MinWorkspaceVersion, so it would ignore the workspace credential and run
+	// the harness against an empty tree. Placing a workload whose source has to
+	// be cloned fails with this rather than producing a run that looks fine and
+	// operated on no code.
+	ErrWorkspaceUnsupported = errors.New("remote: agent does not support workspace provisioning")
+
 	// ErrLeaseNotHeld: the agent was asked to revoke a lease it is not
 	// holding. It is reported, not raised — "the material is not here" is
 	// the end state a revocation wants — so callers treat it as success

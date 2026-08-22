@@ -474,6 +474,24 @@ func (a *Agent) handleStart(ctx context.Context, sess *deviceSession, frame remo
 	}
 	spec.WorkDir = workDir
 
+	// The tree has to be in place before the harness is, and only this device
+	// can put it there. A failure here fails the start rather than launching
+	// anyway: a harness started against an empty directory produces a run that
+	// looks healthy, streams a plausible transcript, and operated on no code —
+	// which is the exact outcome the workspace contract exists to remove.
+	if err := a.prepareWorkspace(ctx, wl, spec, payload.GitCredential()); err != nil {
+		a.forget(handleID)
+		a.reply(ctx, sess, remote.TypeStarted, frame.ID, handleID, remote.StartedPayload{
+			HandleID: handleID,
+			Error:    err.Error(),
+		})
+		return
+	}
+	// The fetch is this device's job and it is done; the harness runs through
+	// an inner driver that shares this filesystem, so what it is handed must
+	// say the tree is already in place. See provisionedWorkspace.
+	spec.Workspace = provisionedWorkspace(spec.Workspace)
+
 	handle, err := a.local.Start(context.WithoutCancel(ctx), spec)
 	if err != nil {
 		// Release the reservation: nothing is running, and holding the slot
@@ -700,6 +718,18 @@ func (a *Agent) handleSignal(ctx context.Context, sess *deviceSession, frame rem
 		return
 	}
 	localID, _ := wl.local()
+	if localID == "" && wl.cancelProvisioning() {
+		// The workload is still fetching its source tree, so there is no
+		// process to signal — but the fetch is what the stop is actually
+		// aimed at, and it can run for minutes. Cancelling it makes the start
+		// fail a moment later with the device's reason, which is the honest
+		// outcome: the run never began.
+		a.cfg.logf("signal %s arrived during workspace provisioning; cancelling the fetch", frame.Handle)
+		a.reply(ctx, sess, remote.TypeStatus, frame.ID, frame.Handle, remote.StatusPayload{
+			Status: wl.snapshot(),
+		})
+		return
+	}
 	if err := a.local.Signal(ctx, localID, payload.Signal); err != nil {
 		a.replyError(ctx, sess, frame.ID, remote.CodeProtocol, err.Error())
 		return
@@ -832,8 +862,16 @@ func (a *Agent) reserve(wl *workload) bool {
 
 func (a *Agent) forget(handleID string) {
 	a.mu.Lock()
+	wl := a.workloads[handleID]
 	delete(a.workloads, handleID)
 	a.mu.Unlock()
+	if wl != nil {
+		// A workload dropped while its tree was still being fetched has nothing
+		// left to fetch for: the control plane has stopped tracking it, or the
+		// start already failed. Continuing would spend the device's uplink on a
+		// clone nobody will use.
+		wl.cancelProvisioning()
+	}
 	// The material went with the process. Dropping the binding keeps the
 	// vault from reporting a lease as held by a workload that is gone, which
 	// would make a revocation wait for an ack about nothing.
@@ -868,6 +906,30 @@ func (w *workload) draining(st executor.Status) executor.Status {
 	st.State = executor.StateRunning
 	st.FinishedAt = time.Time{}
 	return st
+}
+
+// setProvisionCancel publishes (or clears) the cancel for an in-flight
+// workspace fetch, so a stop that arrives before the harness exists has
+// something to act on.
+func (w *workload) setProvisionCancel(cancel context.CancelFunc) {
+	w.mu.Lock()
+	w.cancelProvision = cancel
+	w.mu.Unlock()
+}
+
+// cancelProvisioning aborts an in-flight workspace fetch, reporting whether
+// there was one. Clearing the field under the same lock makes it single-shot:
+// two concurrent stops cannot both claim to have cancelled the same clone.
+func (w *workload) cancelProvisioning() bool {
+	w.mu.Lock()
+	cancel := w.cancelProvision
+	w.cancelProvision = nil
+	w.mu.Unlock()
+	if cancel == nil {
+		return false
+	}
+	cancel()
+	return true
 }
 
 // local returns the localprocess handle ID and start time. Both are written

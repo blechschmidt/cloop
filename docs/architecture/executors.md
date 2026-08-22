@@ -12,6 +12,7 @@ that must not become the thing it is isolating.
 - [Backends](#backends)
 - [Registry and binding](#registry-and-binding)
 - [Placement](#placement)
+- [Workspace provisioning](#workspace-provisioning)
 - [Supervision, health and failover](#supervision-health-and-failover)
 - [End to end](#end-to-end)
 - [Remote agent enrollment](#remote-agent-enrollment)
@@ -55,9 +56,25 @@ chunks are dropped and the gap is visible as a jump in `LogLine.Seq`
 | Type | Carries | Notes |
 | --- | --- | --- |
 | `Spec` | `WorkDir`, `Argv`, `Env`, `Labels`, `ResourceLimits`, `TimeoutMinutes` | `Argv` is never shell-quoted — there is no shell. `Env == nil` inherits the control plane's environment on `localprocess`, and means *empty* on `container`. |
+| `Spec` (sandbox) | `Image`, `SetupCommands`, `Mounts`, `DisableNetwork`, `SandboxHash` | Derived from the project's [`.cloop/sandbox.yaml`](../reference/sandbox.md). `SandboxHash` records *which* spec produced this workload, so a run can be attributed to the file it was launched under. |
+| `Spec` (credentials) | `Secrets`, `Workspace` | Neither holds material. `Secrets` is a `SecretBinding` list — which lease delivered which env names and file paths — so a `revoke` frame can take one credential back mid-run. `Workspace` names a *grant*, never a token. |
 | `Handle` | `ID`, `ExecutorID`, `PID`, `StartedAt` | `PID` is 0 where the concept is meaningless (Pods, remote agents). |
 | `Status` | `State`, `ExitCode`, `Error` | States: `pending`, `running`, `exited`, `failed`, `killed`, `unknown`. |
 | `LogLine` | `HandleID`, `Stream`, `Text`, `Time`, `Seq` | `Seq` gaps mean dropped chunks, not reordering. |
+
+The second and third rows share one property that is easy to lose in a refactor:
+**a driver that cannot honour a field refuses the workload rather than dropping
+it.** `Spec.SandboxRequirements()` is the single definition of what a given Spec
+needs, and both entry points into "start a workload" — `Select` on the failover
+path and `CheckSandboxSupport` on the binding path — run it through the same
+matcher. A field added there is enforced in both places without anyone
+remembering to add a second call.
+
+A `Spec` is persisted by `pkg/executorstore` (so failover can re-dispatch it
+verbatim), marshalled across the remote-agent boundary, and echoed into audit
+rows. That is why credential material is structurally absent from it rather than
+merely omitted by careful call sites: a token placed here would be durable in
+three places before anything read it.
 
 ### Isolation
 
@@ -122,6 +139,12 @@ zero. One `Executor` therefore spans many WebSocket sessions, and workloads
 outlive the connection that started them. Agents heartbeat every 15 s (±25 %
 jitter); three missed heartbeats mark the node unreachable (~45 s).
 
+The device shares nothing with the hub, so it fetches the project's source tree
+itself before starting the harness — see
+[Workspace provisioning](#workspace-provisioning). That needs `git` on the
+device and protocol v3; an agent below either is refused the *placement* rather
+than trusted to notice.
+
 ### `kubernetes` — Kind `kubernetes`, isolation `remote`
 
 One ephemeral Pod per workload: `generateName`, `restartPolicy: Never`, no
@@ -136,6 +159,12 @@ capabilities dropped, `seccompProfile: RuntimeDefault`, and
 [secret broker lease](../guides/secrets.md#kubeconfig), is held in memory for the
 handle's lifetime, renewed while running, and released on a terminal state — it
 is never written to the hub's disk.
+
+There is no bind mount here, so `/workspace` starts empty and the source tree
+arrives by way of a `workspace` init container — see
+[Workspace provisioning](#workspace-provisioning). Anything that reads a
+container status by name must therefore keep selecting `harness` rather than
+"the only one".
 
 ---
 
@@ -180,9 +209,11 @@ in-flight count. `Requirements` can pin `ExecutorID`, demand `Labels`,
 `Harnesses`, `Platform`/`Arch`, `MinMemoryMB`, `RequireIsolation`,
 `AllowedIsolations`, and capability flags (`RequireStream`, `RequireSignal`,
 `RequireContainerRuntime`, `RequireNetworkEgress`, `RequireResourceLimits`,
-`RequireImageOverride`, `RequireSandboxBuild`, `RequireSandboxMounts`).
+`RequireImageOverride`, `RequireSandboxBuild`, `RequireSandboxMounts`,
+`RequireWorkspaceProvisioning`, `RequireHostFilesystemWorkspace`).
 
-The last three come from a project's
+`RequireImageOverride`, `RequireSandboxBuild` and `RequireSandboxMounts` come
+from a project's
 [`.cloop/sandbox.yaml`](../reference/sandbox.md). They exist so that a
 per-project sandbox spec cannot be *silently* ignored: a project pinning
 `image: rust:1.79` placed on a driver with no image concept would run against
@@ -190,6 +221,11 @@ whatever toolchain the host happens to have, produce a plausible-looking build
 failure, and send its author hunting through their own code. Refusing placement
 and naming the constraint points at the deployment instead. Every field a driver
 can quietly drop has a flag that says whether it does.
+
+The last two are the same argument applied to the source tree, and they pull in
+opposite directions: `RequireWorkspaceProvisioning` demands a node that *can*
+fetch, `RequireHostFilesystemWorkspace` demands one that does not have to. See
+[Workspace provisioning](#workspace-provisioning).
 
 `CheckSandboxSupport(ex, req, projectPath)` runs the *bound* executor through
 this same `reject()` as a candidate list of one, so a constraint added to
@@ -205,15 +241,269 @@ Ranking, applied as a stable sort:
 **There is no fallback.** When nothing matches, `Select` returns a
 `*PlacementError` carrying the headline `Constraint`, a per-candidate
 `Rejection` list, and how many candidates were considered. Constraints are
-named: `health`, `host_policy`, `isolation`, `labels`, `platform`, `arch`,
-`harness`, `container_runtime`, `network_egress`, `resource_limits`, `stream`,
-`signal`, `memory`, `capacity`, `image_override`, `sandbox_build`,
-`sandbox_mounts`. An operator asking "why did nothing schedule?" gets a per-node
-answer, not a shrug.
+named: `no_candidates`, `executor_id`, `health`, `host_execution_policy`,
+`isolation`, `labels`, `platform`, `arch`, `harness`, `container_runtime`,
+`network_egress`, `resource_limits`, `stream`, `signal`, `memory`, `capacity`,
+`image_override`, `sandbox_build`, `sandbox_mounts`, `workspace`. An operator
+asking "why did nothing schedule?" gets a per-node answer, not a shrug.
+
+Two of those names describe the request rather than any node. `no_candidates`
+means the registry was empty — nothing was rejected because there was nothing to
+reject, which is a deployment problem and not a matching one. `executor_id`
+means the workload was pinned to a specific executor and that executor was not
+among the candidates; a pin is a statement about *where*, never a licence to run
+on a node that is dead or that policy forbids, so a pinned workload is still
+checked against every other constraint.
+
+`workspace` is the one constraint `CheckSandboxSupport` deliberately does *not*
+fold into a host-policy denial. Every other capability gap on an un-isolated
+node reads as "bind this project to a sandbox"; here that advice is exactly
+backwards, because the bound executor is already isolated and that is precisely
+why it cannot see the tree.
 
 One subtlety worth knowing: a node that advertises *no* harnesses passes the
 harness requirement. Empty means "detection failed", not "has none" — treating
 it as a hard rejection would strand every node whose probe hadn't run yet.
+
+---
+
+## Workspace provisioning
+
+`Spec.WorkDir` names a directory. For a long time nothing said how the project's
+source tree was supposed to get *into* it, and only one backend had an answer:
+`container` bind-mounts the host path, so the tree was already there. Kubernetes
+mounted an empty `emptyDir` — its own comment conceded the workload was
+"expected to populate it" — and the remote agent `MkdirAll`'d a directory
+beneath its root. Nothing populated either.
+
+That is a bad failure because it does not look like one. The run starts cleanly,
+the harness finds an empty directory, and the model writes a confident report
+about a repository it never read. Nothing in the hub's view distinguishes it
+from a real run — no error, no exit code, no missing artifact.
+
+So every dispatched `Spec` now carries an explicit `Workspace`, and there are
+exactly three answers to "where does the code come from":
+
+| `Kind` | Meaning | Chosen when |
+| --- | --- | --- |
+| `bind` | the tree is already at `WorkDir`; the executor is looking at the same filesystem the hub is | `Capabilities().SharesHostFilesystem` |
+| `git` | the executor fetches it before the harness starts | anything else, for a project-scoped workload |
+| `none` | the workload genuinely wants an empty directory | the workload has no project at all (the voice handler runs `cloop listen --file …`) |
+
+The zero value is `""` — *unspecified* — and leaves a driver's pre-existing
+behaviour alone. It exists so a caller with no workspace concern (`cloop
+executor test`, a smoke run) is not forced into a declaration it has no basis
+for. `none` is not the same thing: it is a statement that an empty tree is
+intended, which is what stops an empty tree being confused with the bug.
+
+**A `bind` driver must never clone.** `WorkDir` on the container and host
+drivers is the *operator's own checkout* — the working tree they have open in an
+editor, with uncommitted changes in it. A provisioner that ran there would
+`git init` over it, fetch, and check out a detached `FETCH_HEAD`, discarding
+work that exists in exactly one place. This is why `SupportsWorkspaceProvisioning`
+is `false` on those drivers as an *answer* rather than a gap, and why
+`Workspace.Validate()` refuses a `bind` spec that also carries a `Repo`: a spec
+with a harmless extra field and a spec whose author believes a clone will happen
+are indistinguishable at the point where it matters.
+
+### Per-driver matrix
+
+| Driver | `SharesHostFilesystem` | `SupportsWorkspaceProvisioning` | Gets | How |
+| --- | --- | --- | --- | --- |
+| `localprocess` | ✅ | ❌ | `bind` | forks in the operator's own directory |
+| `container` | ✅ | ❌ | `bind` | `--volume <project dir>:/cloop/work` |
+| `kubernetes` | ❌ | ✅ | `git` | a `workspace` init container, before the harness container starts |
+| `remote` | ❌ | ✅ *if* the device has `git` on `PATH` **and** speaks protocol ≥ 3 | `git` | a pre-step on the device, before it hands the Spec to its inner host driver |
+
+Kubernetes reports `true` unconditionally, including when no secret broker is
+wired in. What the capability advertises is that the driver *materialises the
+tree* — which it does, with no broker at all, for a public repository. Gating it
+on a credential source would refuse a public clone at placement time for want of
+a credential it does not need; a missing grant deserves the typed error below,
+not a message about a capability.
+
+The remote row is the interesting one. An older agent would accept the start
+frame, ignore the workspace, and run the harness in the empty directory it
+created — the exact failure, on a machine the operator cannot see. So the hub
+refuses the *dispatch* rather than trusting the device to complain, and the
+refusal names the device and the upgrade.
+
+### How the hub decides
+
+`pkg/ui/workspace.go` is the single place a `Workspace` is chosen, and it runs
+after the sandbox spec is applied and before dispatch. For a `git` workspace it
+reads the project's own `.git/config` and `.git/HEAD` **without running git** —
+`pkg/ui` may not spawn processes at all (a control plane that can fork can only
+ever run work as itself), and `git remote get-url` would apply the *ambient*
+configuration anyway: an `insteadOf` rewrite left on the hub by whoever last
+touched it would silently choose a different clone URL.
+
+- The origin remote is normalised to `https://`. The scp form every forge prints
+  (`git@host:owner/name.git`) and `ssh://` URLs are rewritten; `http://`,
+  `git://`, `file://` and bare local paths are refused by name. This is not a
+  preference: the credential travels as an `Authorization` header, which over
+  cleartext is a published token, and over ssh there is nothing the broker can
+  lease at all.
+- The ref is the branch `HEAD` points at. A detached `HEAD` yields an empty ref,
+  which means the remote's default branch — the commit a hub happens to be
+  parked on is not necessarily reachable by a fetch, and inventing a ref that
+  then fails is a worse error than starting from the default.
+- Userinfo in the URL is stripped rather than refused. The URL still names the
+  right repository, and the grant is where the authority is supposed to come
+  from.
+- A project on a non-sharing executor with **no usable git remote** is refused,
+  naming the project, the executor and both fixes (give the project an https
+  remote, or bind it to an executor that shares the host filesystem). That
+  refusal *is* the feature: the tree cannot be materialised, so the run must not
+  start.
+
+The grant is selected from broker *metadata* — `ListGrants` plus `ListSecrets` —
+not by taking a lease. A lease unseals every matching payload and writes an
+audit row per grant, and this decision needs one string: the grant's name. The
+matching mirrors `LeaseFor` exactly (same requester shape, same active-grant
+rule, same repository allowlist) because a grant chosen here that `LeaseFor`
+would not produce is a Spec that fails at dispatch with a worse error. When
+several grants admit the repository the newest wins, which is the one an
+operator who has just created a grant expects.
+
+Two cases fetch anonymously rather than refusing: a repository URL that is not
+`owner/name` (a GitLab subgroup, say) cannot be matched against an allowlist at
+all, so no grant could ever authorise it; and an install with no secret broker
+configured has simply not adopted it yet. In both, a public repository works and
+a private one fails inside the fetch with git's own authentication error —
+neither outcome is a silent empty tree.
+
+### The mechanism
+
+Both drivers run the *same engine*, `pkg/executor/gitprovision`. Two
+implementations of "how cloop clones a repo into a sandbox" would be two chances
+to reintroduce the bug, and the second copy would drift silently — the symptom
+of a drifted provisioner is a run that looks fine.
+
+The plan is `git init` → `remote add` → `fetch` → `checkout --detach
+FETCH_HEAD`, not `git clone`. `clone --branch` can only name a branch or a tag,
+while a fetch can name any ref including a bare commit SHA; a provisioner that
+worked for `main` and silently failed on a pinned commit is the sort of thing
+discovered in production. `Workspace.GitPlan` renders that sequence as a pure
+function — no I/O, no clock, no environment — which is what lets both callers
+emit the same commands and lets a test assert on them without a git binary.
+
+**Kubernetes** renders an init container named `workspace` whose argv is exactly
+[`cloop workspace provision`](../reference/commands.md#cloop-workspace-provision).
+Four choices there each had a plausible alternative:
+
+- It uses the **harness image**, not a git image. A second image would need its
+  own registry-allowlist entry, its own digest pin and its own trip through the
+  [image trust policy](../reference/sandbox.md#image-trust-policy) — three places
+  for the provenance of the thing that handles a credential to diverge from
+  everything else.
+- It provisions into `workDir`, not into `/workspace`. When a Spec puts the
+  harness in a sub-directory of the workspace volume, cloning into the volume
+  root would leave the harness's actual directory empty: the original bug, one
+  level down.
+- It does **not** inherit `Spec.Env`. The harness's environment carries brokered
+  provider keys; a git fetch has no business with any of them, and the narrower
+  the environment the fewer places a hostile repository's hooks can reach.
+- Its `securityContext` is built by the same function as the harness's, so the
+  two cannot drift. An init container with one capability more than the harness
+  would be a way to do privileged work in a Pod that reads as hardened.
+
+**The remote agent** runs the engine as a pre-step in `prepareWorkspace`, bounded
+at 30 minutes (a first clone over an edge uplink is legitimately minutes; the
+bound exists because a fetch stalled on a half-open connection would otherwise
+hold a handle forever). Provisioning output goes into the workload's own
+retained buffer, so it reaches the run's live log through the same
+offset-acknowledged path as the harness's output — including across a reconnect.
+Afterwards the agent rewrites the workspace to `bind` before handing the Spec to
+its inner host driver, which is the literal truth at that point: the tree is now
+on the machine that is about to run.
+
+The engine also owns the parts a pure plan cannot express:
+
+- **An existing checkout is reused, never re-initialised.** Same origin: fetch
+  and check out, which is also much cheaper on a slow uplink. Different origin:
+  a refusal naming both URLs, because re-cloning would discard whatever is
+  there.
+- **Rollback is asymmetric.** A failed provisioning removes the partial
+  repository only if this machine created it; files that were in the directory
+  beforehand are left alone, because deleting what we did not create is
+  unrecoverable.
+- **The size limit is enforced, not advertised.** `resources.disk` from
+  [`.cloop/sandbox.yaml`](../reference/sandbox.md#resourcesdisk-and-the-workspace)
+  is checked immediately after the fetch — the earliest point an oversized
+  repository is visible — and again after the checkout. On a machine with no
+  runtime quota there is nothing between the fetch and the filesystem except
+  this check, and the disk being filled belongs to whoever owns the machine.
+- **The environment is closed, not inherited.** A fetch that read the machine's
+  `~/.gitconfig` could pick up a credential helper, an `insteadOf` rewrite
+  pointing it at another host, or a proxy — all chosen by whoever last touched
+  that box rather than by the grant. The one allowed exception is transport
+  (`HTTPS_PROXY`, `NO_PROXY`, `SSL_CERT_FILE`, `GIT_SSL_CAINFO` and their
+  siblings), because an edge device behind a corporate proxy with a private CA
+  is precisely the machine that cannot otherwise clone, and none of those
+  variables can name a repository or supply a credential. `GIT_SSL_NO_VERIFY` is
+  pointedly absent.
+
+Provisioning writes two audit rows of its own — `start` before the first byte
+moves, `end` once, with the duration and the outcome — because it is the moment
+a brokered credential is used against an external service, and the run's own
+record cannot answer "which grant fetched which repository onto which executor".
+Both rows name the grant and lease IDs; neither can carry material.
+
+### The credential
+
+Covered in full in [the security model](../security/model.md#workspace-provisioning).
+The architectural shape: a `Spec` carries the *name* of a grant, the driver
+dispatching the workload leases the material at the last possible moment, and it
+reaches exactly one child process — the single `fetch` step, marked
+`Authenticated` in the plan — as a URL-scoped `http.<base>.extraHeader` in its
+environment.
+
+A workspace whose fetch nobody can authorise fails with a typed
+`*executor.WorkspaceGrantError` that names the repository, the grant and the
+executor, and whose `Remediation()` prints the `cloop secret grant` command that
+fixes it. The alternative — a bare "missing credential", or worse, a run against
+an empty tree — is what this whole subsystem exists to remove. The Web UI
+renders that remediation directly, as HTTP 409 `workspace_grant_missing`.
+
+`Spec.Validate()` additionally refuses `Kind: git` together with
+`DisableNetwork`. A tree that must be fetched and a workload forbidden from
+reaching the network is a contradiction, and the failure it produces otherwise —
+"could not resolve host", from a step nobody knew ran — points nowhere near the
+two settings that caused it.
+
+### Kubernetes RBAC consequence
+
+The chart's executor Role gained two verbs: `create` and `delete` on `secrets`
+in the workload namespace. Deliberately **not** `get`, `list` or `watch` — the
+driver writes one Secret holding the brokered credential, points the init
+container at it with a `secretKeyRef`, and deletes it as soon as that container
+terminates. It never reads a Secret back, so it holds none of the read side.
+
+It is worth being precise about why this does not widen the namespace's blast
+radius, because it is the objection anyone reviewing the change will raise
+first. With `pods: create` plus `pods/log: get` — both of which this identity
+already had — any Secret in the namespace can already be read by mounting it
+into a Pod and printing it. That is one `kubectl run` equivalent, and it was
+true of every previous release of the chart. **The namespace has always been the
+boundary**; `create` and `delete` on Secrets does not move it. What would move
+it is a ClusterRole, or a rule in the release namespace where the hub's own
+credentials live, and neither exists.
+
+What the rule buys is that the credential never appears in a Pod spec. Without
+it, the only ways to get a token into the init container are an `env` value or
+an argv element, and both publish it to everyone with `get pods`, to every
+`kubectl describe`, and to the API server's audit log. There is still no
+`update` or `patch` on anything, so a compromised hub cannot rewrite a running
+workload's spec or swap a credential under a Pod that has already started.
+
+A hub without the rule fails at `Start` with a 403 that prints the exact YAML to
+add. One honest gap: a control plane killed between creating the Secret and
+observing the init container finish leaves the Secret behind, named
+`cloop-ws-<handle>`. Nothing sweeps it, because sweeping needs `list secrets`.
+The window is seconds and the material expires on the broker's own TTL
+regardless, which is a better trade than holding read authority over every
+Secret in the namespace forever.
 
 ---
 

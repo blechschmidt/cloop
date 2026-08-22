@@ -152,6 +152,11 @@ type workload struct {
 	mu       sync.Mutex
 	status   executor.Status
 	finished bool
+	// cancelProvision aborts an in-flight workspace fetch. It is the only
+	// handle anything has on a workload between the start frame and the launch
+	// — a clone can run for minutes, and during that window there is no process
+	// for a signal to reach. Nil whenever nothing is being fetched.
+	cancelProvision context.CancelFunc
 	// reported records that the terminal status reached the control plane.
 	// A workload that exits while the link is down must keep its slot until
 	// a later session can deliver the outcome, or its exit code and log tail

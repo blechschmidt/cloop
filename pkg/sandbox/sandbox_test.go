@@ -25,6 +25,7 @@ resources:
   cpu: 2
   memory: 4g
   pids: 512
+  disk: 2g
 capabilities:
   git: true
   network: ci-egress
@@ -51,7 +52,8 @@ mounts:
 	if len(spec.Env) != 2 || spec.Env[0] != "ANTHROPIC_API_KEY" {
 		t.Errorf("Env = %v", spec.Env)
 	}
-	if spec.Resources.CPU != 2 || spec.Resources.Memory != "4g" || spec.Resources.PIDs != 512 {
+	if spec.Resources.CPU != 2 || spec.Resources.Memory != "4g" || spec.Resources.PIDs != 512 ||
+		spec.Resources.Disk != "2g" {
 		t.Errorf("Resources = %+v", spec.Resources)
 	}
 	if !spec.Capabilities.Git || spec.Capabilities.Network != "ci-egress" {
@@ -106,6 +108,9 @@ func TestParse_Rejects(t *testing.T) {
 		"negative cpu":        {"resources:\n  cpu: -1\n", "must be >= 0"},
 		"unparsable memory":   {"resources:\n  memory: lots\n", "resources.memory"},
 		"tiny memory":         {"resources:\n  memory: 8m\n", "below the minimum"},
+		"unparsable disk":     {"resources:\n  disk: plenty\n", "resources.disk"},
+		"tiny disk":           {"resources:\n  disk: 8m\n", "below the minimum"},
+		"negative disk":       {"resources:\n  disk: \"-1g\"\n", "must not be negative"},
 		"unlimited pids":      {"resources:\n  pids: -1\n", "cannot waive"},
 		"absolute mount src":  {"mounts:\n  - source: /etc\n    target: /x\n", "is absolute"},
 		"dotdot mount src":    {"mounts:\n  - source: ../../etc\n    target: /x\n", `".." element`},
@@ -136,7 +141,8 @@ func TestParse_Rejects(t *testing.T) {
 // TestParse_ClampsRatherThanRejects: an out-of-range number is a wish, not an
 // attack. Honour it at the ceiling and say so.
 func TestParse_ClampsRatherThanRejects(t *testing.T) {
-	spec, warnings, err := Parse([]byte("resources:\n  cpu: 999999\n  memory: 900000g\n  pids: 999999999\n"))
+	spec, warnings, err := Parse([]byte(
+		"resources:\n  cpu: 999999\n  memory: 900000g\n  pids: 999999999\n  disk: 900000g\n"))
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
@@ -151,7 +157,12 @@ func TestParse_ClampsRatherThanRejects(t *testing.T) {
 		t.Errorf("Memory = %q (%d MB, err %v), want the clamp %d MB",
 			spec.Resources.Memory, mb, err, config.ContainerMemoryMBUpper)
 	}
-	if len(warnings) != 3 {
+	dmb, err := config.ParseDiskMB(spec.Resources.Disk)
+	if err != nil || dmb != config.ContainerDiskMBUpper {
+		t.Errorf("Disk = %q (%d MB, err %v), want the clamp %d MB",
+			spec.Resources.Disk, dmb, err, config.ContainerDiskMBUpper)
+	}
+	if len(warnings) != 4 {
 		t.Errorf("want a warning per clamp, got %d: %v", len(warnings), warnings)
 	}
 }
@@ -289,6 +300,25 @@ func TestRequirements(t *testing.T) {
 				}
 			},
 		},
+		"disk demands enforcement": {
+			"resources:\n  disk: 512m\n",
+			func(t *testing.T, r executor.Requirements) {
+				if !r.RequireResourceLimits {
+					t.Error("RequireResourceLimits not set — the disk limit would be silently ignored")
+				}
+			},
+		},
+		// The workspace kind is the hub's decision. A repo-committed file that
+		// could imply one would be a file that arranges to be cloned from a URL
+		// in the same pull request.
+		"nothing in the schema demands workspace provisioning": {
+			"resources:\n  disk: 512m\ncapabilities:\n  git: true\n",
+			func(t *testing.T, r executor.Requirements) {
+				if r.RequireWorkspaceProvisioning {
+					t.Error("a sandbox spec must never be able to require that a workspace be fetched")
+				}
+			},
+		},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -361,7 +391,7 @@ type denyAll struct{}
 func (denyAll) HasEgressGrant(string, string) bool { return false }
 
 func TestApplyTo_Resources(t *testing.T) {
-	res := mustResolve(t, "resources:\n  cpu: 1.5\n  memory: 2g\n  pids: 256\n")
+	res := mustResolve(t, "resources:\n  cpu: 1.5\n  memory: 2g\n  pids: 256\n  disk: 512m\n")
 	var spec executor.Spec
 	if err := res.ApplyTo(&spec, "/p", allowAll{}); err != nil {
 		t.Fatal(err)
@@ -375,8 +405,80 @@ func TestApplyTo_Resources(t *testing.T) {
 	if spec.ResourceLimits.PIDs != 256 {
 		t.Errorf("PIDs = %d, want 256", spec.ResourceLimits.PIDs)
 	}
+	if spec.ResourceLimits.DiskMB != 512 {
+		t.Errorf("DiskMB = %d, want 512", spec.ResourceLimits.DiskMB)
+	}
+	// The same number has to reach the workspace too: DiskMB becomes the
+	// volume's ceiling (a kubelet eviction when exceeded) and SizeLimitMB is
+	// the provisioner's post-fetch check, which is what turns "the repository
+	// is bigger than the allowance" into a legible refusal.
+	if spec.Workspace.SizeLimitMB != 512 {
+		t.Errorf("Workspace.SizeLimitMB = %d, want 512 — the limit must reach the fetch",
+			spec.Workspace.SizeLimitMB)
+	}
 	if spec.SandboxHash == "" {
 		t.Error("SandboxHash not stamped onto the spec")
+	}
+}
+
+// TestApplyTo_DiskDoesNotClobberTheWorkspace: the caller decides the workspace
+// kind, repo, ref and grant before ApplyTo runs. A spec that assigned a whole
+// Workspace in order to set one field would silently discard all of them, and
+// the symptom would be a run against an empty tree — the exact failure the
+// workspace contract exists to remove.
+func TestApplyTo_DiskDoesNotClobberTheWorkspace(t *testing.T) {
+	// capabilities.network is present because executor.Spec.Validate refuses a
+	// git workspace on a workload with egress disabled — a fetch that cannot
+	// reach the forge is not a workspace, it is a hang. That interaction is
+	// incidental here; the assertion is about the workspace fields surviving.
+	res := mustResolve(t, "resources:\n  disk: 1g\ncapabilities:\n  network: ci\n")
+	spec := executor.Spec{
+		WorkDir: "/p",
+		Argv:    []string{"cloop", "run"},
+		Workspace: executor.Workspace{
+			Kind:            executor.WorkspaceGit,
+			Repo:            "https://example.com/acme/app.git",
+			Ref:             "main",
+			Depth:           1,
+			CredentialGrant: "github-ci",
+		},
+	}
+	if err := res.ApplyTo(&spec, "/p", allowAll{}); err != nil {
+		t.Fatal(err)
+	}
+	if spec.Workspace.Kind != executor.WorkspaceGit ||
+		spec.Workspace.Repo != "https://example.com/acme/app.git" ||
+		spec.Workspace.Ref != "main" || spec.Workspace.Depth != 1 ||
+		spec.Workspace.CredentialGrant != "github-ci" {
+		t.Fatalf("ApplyTo overwrote the caller's workspace: %+v", spec.Workspace)
+	}
+	if spec.Workspace.SizeLimitMB != 1024 {
+		t.Errorf("SizeLimitMB = %d, want 1024", spec.Workspace.SizeLimitMB)
+	}
+	if err := spec.Validate(); err != nil {
+		t.Fatalf("the applied spec must still validate: %v", err)
+	}
+}
+
+// TestApplyTo_NoDiskLeavesTheWorkspaceAlone: absent means "the executor's own
+// default", not zero. Writing 0 would be indistinguishable, but writing
+// anything at all when the key is absent is how a field starts being touched
+// by code that has no opinion about it.
+func TestApplyTo_NoDiskLeavesTheWorkspaceAlone(t *testing.T) {
+	res := mustResolve(t, "resources:\n  cpu: 1\n")
+	spec := executor.Spec{
+		WorkDir:   "/p",
+		Argv:      []string{"cloop"},
+		Workspace: executor.Workspace{Kind: executor.WorkspaceGit, Repo: "https://e.com/a/b.git", SizeLimitMB: 77},
+	}
+	if err := res.ApplyTo(&spec, "/p", allowAll{}); err != nil {
+		t.Fatal(err)
+	}
+	if spec.Workspace.SizeLimitMB != 77 {
+		t.Errorf("SizeLimitMB = %d, want the caller's 77 untouched", spec.Workspace.SizeLimitMB)
+	}
+	if spec.ResourceLimits.DiskMB != 0 {
+		t.Errorf("DiskMB = %d, want 0 when the spec names no disk", spec.ResourceLimits.DiskMB)
 	}
 }
 

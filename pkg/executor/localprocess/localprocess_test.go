@@ -620,6 +620,70 @@ func TestStartRejectsUnenforceableResourceLimits(t *testing.T) {
 	}
 }
 
+// TestCapabilitiesRefuseWorkspaceProvisioning pins the flag itself. It is
+// false because the tree is already in the host filesystem this driver forks
+// in — an answer, not a gap — and placement reads this to decide where a git
+// workspace may go.
+func TestCapabilitiesRefuseWorkspaceProvisioning(t *testing.T) {
+	caps := New("test").Capabilities()
+	if caps.SupportsWorkspaceProvisioning {
+		t.Error("SupportsWorkspaceProvisioning must be false: this driver has no tree to fetch")
+	}
+	if !caps.SharesHostFilesystem {
+		t.Error("SharesHostFilesystem must be true, which is *why* provisioning is not needed")
+	}
+}
+
+// TestStartRefusesGitWorkspace: the clone target would be the operator's own
+// checkout on the machine they are sitting at, so a git workspace is refused
+// rather than honoured. Cloning into it would discard uncommitted work that
+// nothing in cloop can restore.
+func TestStartRefusesGitWorkspace(t *testing.T) {
+	ex := New("test")
+	spec := fixtureSpec(t, modeEcho, t.TempDir())
+	spec.Workspace = executor.Workspace{
+		Kind: executor.WorkspaceGit,
+		Repo: "https://example.com/acme/app.git",
+		Ref:  "main",
+	}
+
+	_, err := ex.Start(context.Background(), spec)
+	if err == nil {
+		t.Fatal("a git workspace must be refused by a driver that shares the host filesystem")
+	}
+	if !errors.Is(err, executor.ErrUnsupported) {
+		t.Fatalf("Start with a git workspace = %v, want it to wrap ErrUnsupported", err)
+	}
+	// The refusal has to say why, because the reader's next move differs
+	// entirely between "this driver is broken" and "bind this elsewhere".
+	if !strings.Contains(err.Error(), "overwrite") {
+		t.Errorf("the refusal should explain what a clone would destroy; got %v", err)
+	}
+}
+
+// TestStartAcceptsNonGitWorkspaces is the other half: bind, none and the
+// unspecified zero value ask this driver for nothing, so none of them may
+// become a refusal.
+func TestStartAcceptsNonGitWorkspaces(t *testing.T) {
+	for _, kind := range []executor.WorkspaceKind{
+		executor.WorkspaceUnspecified,
+		executor.WorkspaceBind,
+		executor.WorkspaceNone,
+	} {
+		t.Run(string(kind)+"|unspecified", func(t *testing.T) {
+			ex := New("test")
+			spec := fixtureSpec(t, modeEcho, t.TempDir())
+			spec.Workspace = executor.Workspace{Kind: kind}
+
+			h, err := ex.Start(context.Background(), spec)
+			if err != nil {
+				t.Fatalf("workspace kind %q must start unchanged: %v", kind, err)
+			}
+			t.Cleanup(func() { _ = ex.Signal(context.Background(), h.ID, executor.SignalKill) })
+		})
+	}
+}
+
 // TestStartHonoursTimeout: Spec.TimeoutMinutes is the driver-enforced
 // wall-clock ceiling. Minutes are too coarse for a test, so this exercises
 // the same machinery through executor.Run's ctx-bound kill instead, which is

@@ -32,7 +32,7 @@ func TestBuildPodFor_ImageOverride(t *testing.T) {
 		p, err := ex.buildPodFor(context.Background(), executor.Spec{
 			Argv:  []string{"cloop", "run"},
 			Image: "ghcr.io/acme/rust:1.79",
-		}, "h1", "cloop")
+		}, "h1", "cloop", "")
 		if err != nil {
 			t.Fatalf("buildPodFor: %v", err)
 		}
@@ -42,7 +42,7 @@ func TestBuildPodFor_ImageOverride(t *testing.T) {
 	})
 
 	t.Run("absent spec image keeps the operator's", func(t *testing.T) {
-		p, err := ex.buildPodFor(context.Background(), executor.Spec{Argv: []string{"cloop"}}, "h2", "cloop")
+		p, err := ex.buildPodFor(context.Background(), executor.Spec{Argv: []string{"cloop"}}, "h2", "cloop", "")
 		if err != nil {
 			t.Fatalf("buildPodFor: %v", err)
 		}
@@ -55,7 +55,7 @@ func TestBuildPodFor_ImageOverride(t *testing.T) {
 		_, err := ex.buildPodFor(context.Background(), executor.Spec{
 			Argv:  []string{"cloop"},
 			Image: "--privileged",
-		}, "h3", "cloop")
+		}, "h3", "cloop", "")
 		if !errors.Is(err, executor.ErrInvalidSpec) {
 			t.Fatalf("buildPodFor = %v, want ErrInvalidSpec", err)
 		}
@@ -70,7 +70,7 @@ func TestBuildPodFor_RefusesSetup(t *testing.T) {
 	_, err := ex.buildPodFor(context.Background(), executor.Spec{
 		Argv:          []string{"cloop"},
 		SetupCommands: []string{"pip install -r requirements.txt"},
-	}, "h", "cloop")
+	}, "h", "cloop", "")
 	if !errors.Is(err, executor.ErrUnsupported) {
 		t.Fatalf("buildPodFor = %v, want ErrUnsupported", err)
 	}
@@ -89,7 +89,7 @@ func TestBuildPodFor_SandboxMounts(t *testing.T) {
 			{Source: ".cache/pip", Target: "/home/agent/.cache/pip"},
 			{Source: "vendor", Target: "/opt/vendor", ReadOnly: true},
 		},
-	}, "h", "cloop")
+	}, "h", "cloop", "")
 	if err != nil {
 		t.Fatalf("buildPodFor: %v", err)
 	}
@@ -136,7 +136,7 @@ func TestBuildPodFor_RejectsShadowingMounts(t *testing.T) {
 			_, err := ex.buildPodFor(context.Background(), executor.Spec{
 				Argv:   []string{"cloop"},
 				Mounts: []executor.SpecMount{{Source: "a", Target: target}},
-			}, "h", "cloop")
+			}, "h", "cloop", "")
 			if err == nil {
 				t.Fatalf("a mount over %s was accepted", target)
 			}
@@ -154,7 +154,7 @@ func TestBuildPodFor_RejectsEscapingMounts(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			if _, err := ex.buildPodFor(context.Background(), executor.Spec{
 				Argv: []string{"cloop"}, Mounts: []executor.SpecMount{m},
-			}, "h", "cloop"); err == nil {
+			}, "h", "cloop", ""); err == nil {
 				t.Fatalf("buildPodFor accepted %+v", m)
 			}
 		})
@@ -171,7 +171,7 @@ func TestBuildPodFor_EgressLabel(t *testing.T) {
 		p, err := ex.buildPodFor(context.Background(), executor.Spec{
 			Argv:           []string{"cloop"},
 			DisableNetwork: disable,
-		}, "h", "cloop")
+		}, "h", "cloop", "")
 		if err != nil {
 			t.Fatalf("buildPodFor: %v", err)
 		}
@@ -186,7 +186,7 @@ func TestBuildPodFor_SandboxHashAnnotation(t *testing.T) {
 	p, err := ex.buildPodFor(context.Background(), executor.Spec{
 		Argv:        []string{"cloop"},
 		SandboxHash: "9f2c8a",
-	}, "h", "cloop")
+	}, "h", "cloop", "")
 	if err != nil {
 		t.Fatalf("buildPodFor: %v", err)
 	}

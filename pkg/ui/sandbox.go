@@ -32,6 +32,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/imagepolicy"
 	"github.com/blechschmidt/cloop/pkg/sandbox"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
+	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 )
 
@@ -121,7 +122,10 @@ func auditImageDenial(workDir string, err error) {
 	if dir == "" {
 		return
 	}
-	db, dbErr := statedb.Open(dir)
+	// state.DBPath, not dir: statedb.Open takes the path of the database file
+	// and handing it a directory fails on every call — which is how this
+	// emitter silently recorded nothing.
+	db, dbErr := statedb.Open(state.DBPath(dir))
 	if dbErr != nil {
 		fmt.Fprintf(os.Stderr, "[ui] sandbox: audit image denial for %s: %v\n", workDir, dbErr)
 		return

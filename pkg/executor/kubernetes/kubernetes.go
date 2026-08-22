@@ -32,6 +32,20 @@
 // released when the handle reaches a terminal state — on the failure paths as
 // well as the success one. See credentials.go.
 //
+// A git workspace needs a second, unrelated credential: the one that
+// authenticates the fetch. It is leased separately, lives in the cluster for
+// the length of one init container rather than for the length of the run, and
+// never appears in the Pod object. See workspace.go.
+//
+// # Where the source tree comes from
+//
+// A Pod shares no filesystem with the control plane, so unlike the container
+// driver there is nothing to bind-mount. Spec.Workspace says how the tree
+// arrives: kind git adds an init container that fetches it before the harness
+// starts, and kind none means the workload wanted an empty directory. A kind
+// bind spec is refused, because honouring it would mean starting the harness in
+// an empty emptyDir and calling it the project's code.
+//
 // # What the confinement is, and is not
 //
 // Every Pod is built by buildPod with runAsNonRoot, a read-only root
@@ -230,6 +244,20 @@ type Options struct {
 	// Credentials supplies the kubeconfig lease. Required.
 	Credentials CredentialSource
 
+	// Workspace leases the credential a git workspace fetch needs. Optional.
+	//
+	// A nil one is not an error and does not disable workspace provisioning:
+	// an unauthenticated fetch of a public repository still works, because the
+	// init container simply runs with no token in its environment. What a nil
+	// one means is that no *private* repository can be fetched, which preflight
+	// reports as a warning rather than leaving an operator to discover it from
+	// a git authentication failure inside a Pod.
+	//
+	// It is an interface from pkg/executor, not a *secretbroker.Broker, so this
+	// driver keeps knowing nothing about the hub's secret store — and so a test
+	// can supply a credential without a database or a sealing key.
+	Workspace executor.WorkspaceCredentialSource
+
 	// ImagePolicy constrains the images a *project* may name in its
 	// .cloop/sandbox.yaml (Task 20177). The zero value constrains nothing.
 	//
@@ -385,6 +413,10 @@ type record struct {
 	// killRequested records that termination was asked for, so a Pod that
 	// exits mid-delete is reported as killed rather than as a plain exit.
 	killRequested bool
+	// ws is the workspace provisioning state, nil when the Spec asked for no
+	// tree. It is what lets the watcher drop the credential Secret the moment
+	// the init container finishes. See workspace.go.
+	ws *workspaceState
 }
 
 // New returns a Kubernetes executor. It performs no I/O: an unreachable
@@ -470,9 +502,19 @@ func (e *Executor) Capabilities() executor.Capabilities {
 		SupportsImageOverride: true,
 		SupportsSandboxBuild:  false,
 		SupportsSandboxMounts: true,
-		MaxConcurrent:         e.opts.MaxConcurrent,
-		Platform:              "linux",
-		Arch:                  e.opts.NodeSelector["kubernetes.io/arch"],
+		// True unconditionally, including when Options.Workspace is nil: what
+		// this advertises is that the driver *materialises the tree*, which it
+		// does with an init container that needs no broker for a public
+		// repository. Gating it on the credential source would refuse a public
+		// clone at placement time for want of a credential it does not need,
+		// and the failure a missing grant deserves is the typed
+		// WorkspaceGrantError from Start — which names the repository and
+		// prints the command that fixes it — not a placement message about a
+		// capability.
+		SupportsWorkspaceProvisioning: true,
+		MaxConcurrent:                 e.opts.MaxConcurrent,
+		Platform:                      "linux",
+		Arch:                          e.opts.NodeSelector["kubernetes.io/arch"],
 	}
 }
 
@@ -604,17 +646,34 @@ func (e *Executor) Start(ctx context.Context, spec executor.Spec) (executor.Hand
 		return executor.Handle{}, err
 	}
 
-	// From here every failure path must release the lease and close the
-	// client, or a refused Start leaks a credential the broker still thinks
-	// is held.
+	// From here every failure path must release the lease, drop any workspace
+	// credential already written into the cluster, and close the client — or a
+	// refused Start leaks a credential the broker still thinks is held, or a
+	// Secret nothing will ever consume. ws is assigned below and read through
+	// the closure, so the same release() is correct before and after it exists.
+	var ws *workspaceState
 	release := func() {
+		e.discardWorkspaceSecret(ws, cli,
+			"the workload was never started, so the tree was never fetched")
 		cli.close()
 		e.opts.Credentials.Release(creds.LeaseID)
 	}
 
 	handleID := newHandleID()
 	namespace := e.namespaceFor(creds)
-	desired, err := e.buildPodFor(ctx, spec, handleID, namespace)
+
+	// Before the Pod, not after. An init container whose secretKeyRef names a
+	// Secret that does not exist yet does not wait for it — the kubelet parks
+	// the Pod in CreateContainerConfigError and retries on its own schedule,
+	// so a Start that created the Pod first would work only by winning a race
+	// it never has to enter.
+	ws, err = e.provisionWorkspace(ctx, spec, cli, handleID, namespace, projectID)
+	if err != nil {
+		release()
+		return executor.Handle{}, err
+	}
+
+	desired, err := e.buildPodFor(ctx, spec, handleID, namespace, ws.secret())
 	if err != nil {
 		release()
 		return executor.Handle{}, err
@@ -637,6 +696,7 @@ func (e *Executor) Start(ctx context.Context, spec executor.Spec) (executor.Hand
 		cli:       cli,
 		leaseID:   creds.LeaseID,
 		leaseExp:  creds.ExpiresAt,
+		ws:        ws,
 	}
 	rec.bus = logbus.New(rec.id, executor.StreamCombined, logbus.Options{})
 
@@ -740,7 +800,13 @@ func classifyImageDenial(err error) error {
 }
 
 // buildPodFor turns a Spec plus this executor's options into a Pod object.
-func (e *Executor) buildPodFor(ctx context.Context, spec executor.Spec, handleID, namespace string) (*pod, error) {
+//
+// workspaceSecret names the Secret holding the leased fetch credential, or is
+// empty when there is none. It is a parameter rather than a field on Options or
+// Spec because it is per-run state that exists for the length of one Pod, and
+// the two structs it could have gone on are both persisted.
+func (e *Executor) buildPodFor(ctx context.Context, spec executor.Spec, handleID, namespace,
+	workspaceSecret string) (*pod, error) {
 	if spec.ResourceLimits.PIDs > 0 {
 		// A Pod cannot express a PID cap: podPidsLimit is a kubelet flag,
 		// set per node by the cluster operator. Accepting the number and not
@@ -806,6 +872,8 @@ func (e *Executor) buildPodFor(ctx context.Context, spec executor.Spec, handleID
 		SandboxMounts:         spec.Mounts,
 		SandboxHash:           spec.SandboxHash,
 		DisableNetwork:        spec.DisableNetwork,
+		Workspace:             spec.Workspace,
+		WorkspaceSecretName:   workspaceSecret,
 
 		ActiveDeadlineSeconds:         e.opts.ActiveDeadlineSeconds,
 		TerminationGracePeriodSeconds: int64(e.opts.TerminationGracePeriod / time.Second),
@@ -1122,6 +1190,11 @@ func (e *Executor) observePhase(rec *record, p *pod) {
 	if p == nil {
 		return
 	}
+	// Before the terminal-phase early return below, because a Pod that failed
+	// *because* provisioning failed goes straight from Pending to Failed and
+	// its credential Secret must still be dropped on the way past.
+	e.observeWorkspace(rec, p)
+
 	// A terminal phase is classified by the pump, which has the container's
 	// exit code and the Pod's reason to work from. Mapping it here would
 	// have to guess, and the only guess available ("not Running, so
@@ -1165,6 +1238,19 @@ func containerNeverStarted(p *pod) bool {
 
 // podWaitingDetail summarises why a Pod has not started yet.
 func podWaitingDetail(p *pod) string {
+	// The provisioner first: while it runs, the Pod is Pending with no harness
+	// status at all, so without this a run that spends two minutes cloning a
+	// large repository narrates nothing and is indistinguishable from a hang.
+	if cs := p.workspaceInitStatus(); cs != nil {
+		switch {
+		case cs.State.Running != nil:
+			return "provisioning the workspace"
+		case cs.State.Waiting != nil && cs.State.Waiting.Message != "":
+			return "workspace: " + cs.State.Waiting.Reason + ": " + firstLine(cs.State.Waiting.Message)
+		case cs.State.Waiting != nil:
+			return "workspace: " + cs.State.Waiting.Reason
+		}
+	}
 	if cs := p.harnessStatus(); cs != nil && cs.State.Waiting != nil {
 		w := cs.State.Waiting
 		if w.Message != "" {
@@ -1338,6 +1424,18 @@ func classifyPod(p *pod) (executor.State, int, string) {
 			}
 			return executor.StateExited, t.ExitCode, msg
 		}
+	}
+
+	// A failed init container is the one failure that must never be reported
+	// as a harness failure. The harness never ran, none of the task's code is
+	// implicated, and the remedy — a grant, a repository URL, a ref that
+	// exists — is somewhere else entirely. Checked before the harness's own
+	// waiting state, which in this case says only "PodInitializing".
+	if prov := p.workspaceInitStatus(); prov != nil && prov.State.Terminated != nil &&
+		(prov.State.Terminated.ExitCode != 0 || prov.State.Terminated.Signal != 0) {
+		return executor.StateFailed, prov.State.Terminated.ExitCode,
+			"the workspace could not be provisioned, so the harness never ran — " +
+				workspaceFailureMessage(prov.State.Terminated)
 	}
 
 	// No terminated container: the Pod failed before the harness ran.
@@ -1731,6 +1829,13 @@ func (e *Executor) pruneLocked() {
 // Lease release lives here, and only here, so that every path out of a
 // handle's life — a clean exit, a failed start's watcher, a kill, a panic in
 // the pump, a Close — drops the credential exactly once.
+//
+// The workspace credential Secret is dropped here for the same reason, and
+// this is the backstop rather than the usual path: observeWorkspace normally
+// removed it seconds after the Pod started, the moment the init container
+// terminated. What this catches is every run that never got there — a Pod
+// deleted before it scheduled, a watch that lost the transition, a control
+// plane shutting down mid-fetch.
 func (e *Executor) finish(rec *record, state executor.State, exitCode int, errMsg string) {
 	rec.mu.Lock()
 	if rec.done {
@@ -1754,8 +1859,11 @@ func (e *Executor) finish(rec *record, state executor.State, exitCode int, errMs
 	cli := rec.cli
 	leaseID := rec.leaseID
 	rec.leaseID = ""
+	ws := rec.ws
 	rec.mu.Unlock()
 
+	// Before cli.close(): the delete needs the client this record owns.
+	e.discardWorkspaceSecret(ws, cli, "")
 	if leaseID != "" && e.opts.Credentials != nil {
 		e.opts.Credentials.Release(leaseID)
 	}
@@ -1781,6 +1889,13 @@ func (r *record) finished() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.done
+}
+
+// workspace returns the provisioning state, or nil when this run had none.
+func (r *record) workspace() *workspaceState {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.ws
 }
 
 // interruptWatch breaks the watch connection in flight so the watcher

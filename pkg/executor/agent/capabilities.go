@@ -63,6 +63,16 @@ func Detect(opts DetectOptions) remote.AgentCapabilities {
 		Labels:        opts.Labels,
 	}
 
+	// Workspace provisioning is git and nothing else, so the capability is
+	// exactly "is git on this PATH". Advertising it is what lets the control
+	// plane refuse to place a private-repository run on a device that would
+	// otherwise accept the start and run the harness against an empty tree —
+	// the failure this whole mechanism exists to turn into a scheduling
+	// decision rather than a confusing transcript.
+	if _, err := lookPath("git"); err == nil {
+		caps.WorkspaceProvisioning = true
+	}
+
 	switch {
 	case opts.MemoryMB > 0:
 		caps.MemoryMB = opts.MemoryMB
