@@ -5117,6 +5117,12 @@ func (s *Server) handleReplayRunGet(w http.ResponseWriter, r *http.Request) {
 // is 5 minutes by default).
 func (s *Server) handleReplayRunCreate(w http.ResponseWriter, r *http.Request) {
 	workDir := s.resolveWorkDir(r)
+	// Replay assembles task context in-process, which shells out to git in
+	// the project directory. That is host execution driven by an HTTP
+	// request, so strict mode refuses it.
+	if denyHostSideEffect(w, workDir, "git (inline task replay)") {
+		return
+	}
 	limitJSONBody(w, r, maxJSONBodyBytes)
 
 	var req struct {
@@ -6582,6 +6588,9 @@ func (s *Server) claudeAuthManager() *claudecodeauth.Manager {
 // login panel.
 // GET /api/claudecode/auth/status
 func (s *Server) handleClaudeCodeAuthStatus(w http.ResponseWriter, r *http.Request) {
+	if denyHostSideEffect(w, "", "claude CLI (auth status)") {
+		return
+	}
 	resp := map[string]interface{}{}
 	if st, err := claudecodeauth.FetchStatus(r.Context()); err != nil {
 		resp["status_error"] = err.Error()
@@ -6596,6 +6605,9 @@ func (s *Server) handleClaudeCodeAuthStatus(w http.ResponseWriter, r *http.Reque
 // the OAuth URL the user must visit in their browser.
 // POST /api/claudecode/auth/login  body: {"console":bool,"email":string,"sso":bool}
 func (s *Server) handleClaudeCodeAuthLoginStart(w http.ResponseWriter, r *http.Request) {
+	if denyHostSideEffect(w, "", "claude CLI (auth login)") {
+		return
+	}
 	var req struct {
 		Console bool   `json:"console"`
 		Email   string `json:"email"`
@@ -6624,6 +6636,9 @@ func (s *Server) handleClaudeCodeAuthLoginStart(w http.ResponseWriter, r *http.R
 // in-flight login session and returns the final outcome.
 // POST /api/claudecode/auth/login/code  body: {"code":string}
 func (s *Server) handleClaudeCodeAuthLoginCode(w http.ResponseWriter, r *http.Request) {
+	if denyHostSideEffect(w, "", "claude CLI (auth login)") {
+		return
+	}
 	var req struct {
 		Code string `json:"code"`
 	}
@@ -6658,6 +6673,9 @@ func (s *Server) handleClaudeCodeAuthLoginCancel(w http.ResponseWriter, r *http.
 // handleClaudeCodeAuthLogout calls `claude auth logout`.
 // POST /api/claudecode/auth/logout
 func (s *Server) handleClaudeCodeAuthLogout(w http.ResponseWriter, r *http.Request) {
+	if denyHostSideEffect(w, "", "claude CLI (auth logout)") {
+		return
+	}
 	if err := claudecodeauth.Logout(r.Context()); err != nil {
 		jsonErr(w, err.Error(), http.StatusBadGateway)
 		return

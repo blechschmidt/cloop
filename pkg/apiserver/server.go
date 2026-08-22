@@ -12,7 +12,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strconv"
@@ -23,6 +22,8 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/apierror"
 	"github.com/blechschmidt/cloop/pkg/boundedread"
+	"github.com/blechschmidt/cloop/pkg/executor"
+	"github.com/blechschmidt/cloop/pkg/executor/localprocess"
 	"github.com/blechschmidt/cloop/pkg/logger"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/reqid"
@@ -43,6 +44,11 @@ const (
 	// rlBucketIdleTTL is how long a bucket is kept after the last request
 	// from that IP. Anything older is eligible for sweep.
 	rlBucketIdleTTL = 1 * time.Hour
+
+	// maxRunWatch bounds how long the reaper waits for a dispatched run to
+	// finish. A remote executor that goes silent must not pin the server into
+	// "a run is in progress" for the life of the process.
+	maxRunWatch = 24 * time.Hour
 
 	// HTTP server timeouts. ReadHeaderTimeout protects against slowloris;
 	// IdleTimeout closes idle keep-alive connections.
@@ -96,9 +102,14 @@ type Server struct {
 	// Task 20102.
 	MaxRequestBodyBytes int64
 
-	mu        sync.Mutex
-	runCmd    *exec.Cmd // currently-running `cloop run` subprocess, if any
-	runActive bool      // mutex-guarded liveness flag; avoids racing on cmd.ProcessState
+	mu sync.Mutex
+	// runExec and runHandle identify the in-flight run. The server holds the
+	// resolving executor rather than re-resolving on stop: a binding changed
+	// mid-run would otherwise send the signal to a different backend than the
+	// one holding the workload.
+	runExec   executor.Executor
+	runHandle executor.Handle
+	runActive bool // mutex-guarded liveness flag
 	runLog    strings.Builder
 
 	// Per-IP rate-limit buckets.
@@ -122,6 +133,24 @@ type Server struct {
 	// background goroutines). Nil means the package picks a sensible
 	// default at first-use (text output to stdout, project bound).
 	Log logger.Logger
+}
+
+// builtinExecutorsOnce guards one-time registration of the in-process drivers.
+var builtinExecutorsOnce sync.Once
+
+// registerBuiltinExecutors registers the drivers that ship in-process.
+//
+// The host driver is registered unconditionally so a fresh single-machine
+// install works with no configuration. Deployments that must never execute on
+// the control-plane host set executors.allow_host_process: false, and both
+// Resolve and the driver's own Start then refuse — registration is not what
+// grants permission to run.
+func registerBuiltinExecutors() {
+	builtinExecutorsOnce.Do(func() {
+		if err := localprocess.Ensure(executor.DefaultRegistry); err != nil {
+			fmt.Fprintf(os.Stderr, "apiserver: register local executor: %v\n", err)
+		}
+	})
 }
 
 // New creates a new API server.
@@ -727,16 +756,18 @@ func (s *Server) handleRunStart(w http.ResponseWriter, r *http.Request) {
 		args = append(args, "--model", req.Model)
 	}
 
-	exe, err := os.Executable()
+	ex, handle, err := s.startRun(r.Context(), args)
 	if err != nil {
-		exe = "cloop"
-	}
-	cmd := exec.Command(exe, args...)
-	cmd.Dir = s.WorkDir
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
-	if err := cmd.Start(); err != nil {
+		// A policy refusal is a client-visible configuration conflict, not an
+		// internal fault: the operator disabled host execution and this
+		// project is not bound to an isolated executor. Reporting it as 500
+		// would send them looking for a crash instead of a binding.
+		var denied *executor.HostExecutionDeniedError
+		if errors.As(err, &denied) {
+			apierror.WriteError(w, apierror.New(apierror.CodeConflict, denied.Error()).
+				WithDetails(map[string]any{"remediation": denied.Remediation()}))
+			return
+		}
 		apierror.WriteError(w, apierror.New(apierror.CodeInternal, "failed to start run").
 			WithCause(err).
 			WithDetails(map[string]any{"reason": err.Error()}))
@@ -744,52 +775,130 @@ func (s *Server) handleRunStart(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.mu.Lock()
-	s.runCmd = cmd
+	s.runExec = ex
+	s.runHandle = handle
 	s.runActive = true
 	s.mu.Unlock()
 
-	// Reap the process in a goroutine. Recover from panics so a bug in the
-	// reaper cannot kill the API server, and always clear runActive so the
-	// caller can start another run after this one exits.
-	go func() {
-		startedAt := time.Now()
-		defer func() {
-			if r := recover(); r != nil {
-				s.log().Error(logger.EventTaskFailed, 0, "panic in run reaper", map[string]interface{}{
-					"panic":       r,
-					"duration_ms": time.Since(startedAt).Milliseconds(),
-				})
-			}
-			s.mu.Lock()
-			s.runActive = false
-			s.mu.Unlock()
-		}()
-		_ = cmd.Wait()
-		s.log().Info(logger.EventSessionDone, 0, "run subprocess exited", map[string]interface{}{
-			"pid":         cmd.Process.Pid,
-			"duration_ms": time.Since(startedAt).Milliseconds(),
-		})
-	}()
+	go s.reapRun(ex, handle)
 
 	jsonOK(w, map[string]any{
-		"started": true,
-		"pid":     cmd.Process.Pid,
-		"args":    args,
+		"started":   true,
+		"pid":       handle.PID,
+		"handle":    handle.ID,
+		"executor":  ex.ID(),
+		"isolation": string(ex.Capabilities().Isolation),
+		"args":      args,
 	})
 }
 
-// POST /run/stop — send SIGTERM to the running subprocess.
+// startRun dispatches a `cloop run` workload through the executor boundary.
+//
+// The API server never forks the harness itself. Which machine the run lands
+// on — this host, a container, a remote edge agent — is a deployment decision
+// expressed by the project's executor binding, and Resolve is the single place
+// that decision is made and the host-execution policy is enforced.
+func (s *Server) startRun(ctx context.Context, args []string) (executor.Executor, executor.Handle, error) {
+	registerBuiltinExecutors()
+	ex, err := executor.Resolve(s.WorkDir)
+	if err != nil {
+		return nil, executor.Handle{}, fmt.Errorf("no executor available for %s: %w", s.WorkDir, err)
+	}
+
+	exe, err := os.Executable()
+	if err != nil {
+		exe = "cloop"
+	}
+	spec := executor.Spec{
+		WorkDir: s.WorkDir,
+		Argv:    append([]string{exe}, args...),
+		Labels: map[string]string{
+			"component": "apiserver",
+			"project":   s.WorkDir,
+		},
+	}
+
+	// Start is given a context detached from the request: the run outlives
+	// the HTTP call that asked for it, and tying it to r.Context() would kill
+	// every run the moment its originating response was written.
+	handle, err := ex.Start(context.WithoutCancel(ctx), spec)
+	if err != nil {
+		return nil, executor.Handle{}, err
+	}
+	return ex, handle, nil
+}
+
+// reapRun waits for a dispatched run to reach a terminal state and clears the
+// liveness flag so another run can start.
+//
+// It watches the output stream rather than a process handle, because a handle
+// is all the server has for a workload that may be running on another machine.
+// The stream closing is the driver's report that the workload finished and its
+// output was drained.
+func (s *Server) reapRun(ex executor.Executor, handle executor.Handle) {
+	startedAt := time.Now()
+	defer func() {
+		if r := recover(); r != nil {
+			s.log().Error(logger.EventTaskFailed, 0, "panic in run reaper", map[string]interface{}{
+				"panic":       r,
+				"duration_ms": time.Since(startedAt).Milliseconds(),
+			})
+		}
+		s.mu.Lock()
+		s.runActive = false
+		s.mu.Unlock()
+	}()
+
+	// Bound the watch so a driver that never closes its stream cannot pin the
+	// server into "a run is in progress" forever.
+	ctx, cancel := context.WithTimeout(context.Background(), maxRunWatch)
+	defer cancel()
+
+	if lines, err := ex.Stream(ctx, handle.ID); err == nil {
+		for line := range lines {
+			if line.Text != "" {
+				_, _ = io.WriteString(os.Stderr, line.Text)
+			}
+		}
+	} else {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				st, err := ex.Status(ctx, handle.ID)
+				if err != nil || st.State.Terminal() {
+					goto done
+				}
+			}
+		}
+	}
+done:
+	s.log().Info(logger.EventSessionDone, 0, "run workload exited", map[string]interface{}{
+		"handle":      handle.ID,
+		"executor":    ex.ID(),
+		"pid":         handle.PID,
+		"duration_ms": time.Since(startedAt).Milliseconds(),
+	})
+}
+
+// POST /run/stop — ask the executor to interrupt the running workload.
 func (s *Server) handleRunStop(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
-	cmd := s.runCmd
+	ex := s.runExec
+	handle := s.runHandle
 	active := s.runActive
 	s.mu.Unlock()
 
-	if cmd == nil || !active {
+	if ex == nil || !active {
 		jsonErr(w, "no run currently in progress", http.StatusConflict)
 		return
 	}
-	if err := cmd.Process.Kill(); err != nil {
+	// Interrupt rather than kill: cloop traps SIGINT to checkpoint before
+	// exiting, so a killed run loses the work of the task in flight.
+	if err := ex.Signal(r.Context(), handle.ID, executor.SignalInterrupt); err != nil {
 		jsonErr(w, "failed to stop run: "+err.Error(), http.StatusInternalServerError)
 		return
 	}

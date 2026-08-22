@@ -83,6 +83,8 @@ func TestBuildRunArgs_FullCommandLine(t *testing.T) {
 		"--name", "cloop-proj-abc123",
 		"--cap-drop=ALL",
 		"--security-opt=no-new-privileges",
+		"--read-only",
+		"--tmpfs", "/tmp:rw,nosuid,nodev,exec,size=512m",
 		"--user", "1000:1000",
 		"--network=bridge",
 		"--add-host", "api.example.com:10.0.0.5",

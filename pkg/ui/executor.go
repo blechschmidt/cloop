@@ -23,6 +23,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"strings"
 	"sync"
@@ -79,6 +80,13 @@ func registerBuiltinExecutors() {
 // project→executor bindings, and records a row for every backend that can run
 // work.
 func bootstrapExecutors(dir string) {
+	// Policy first. Registration of a non-isolating driver is refused under
+	// strict mode, so reading the config after registering would let the host
+	// driver in through the door the policy exists to close. (The eviction
+	// sweep in ApplyHostExecutionPolicy covers the reverse order too, since
+	// other entry points also register; doing it in the right order here
+	// means the refusal is the normal path rather than the repair.)
+	applyHostExecutionPolicy(dir)
 	registerBuiltinExecutors()
 	controlPlaneDirMu.Lock()
 	controlPlaneDirValue = dir
@@ -86,7 +94,6 @@ func bootstrapExecutors(dir string) {
 	executor.SetBindingLookup(func(projectPath string) (string, bool) {
 		return lookupProjectExecutor(dir, projectPath)
 	})
-	applyHostExecutionPolicy(dir)
 	syncRegistryToStore(dir)
 	startExecutorSupervisor(dir)
 }
@@ -119,6 +126,38 @@ func applyHostExecutionPolicy(dir string) {
 		return
 	}
 	executor.ApplyHostExecutionPolicy(cfg.Executors.HostProcessAllowed())
+}
+
+// denyHostSideEffect refuses a handler that must run a program on the
+// control-plane host itself, when policy forbids host execution.
+//
+// A handful of endpoints are not workload dispatch and so cannot be routed
+// through an executor: `claude auth login` writes credentials into the control
+// plane's own home directory, and inline task replay reads the project's git
+// history in-process. They are host execution all the same — an HTTP request
+// causes a program to run next to the control plane — so strict mode has to
+// refuse them, or "the UI never executes on the host" is true only of the
+// paths someone remembered to convert.
+//
+// projectPath may be empty, and is for endpoints whose side effect belongs to
+// the control plane rather than to any one project — `claude auth login`
+// writes credentials for the server's own identity, not a tenant's.
+//
+// It returns true when the request was refused and a response already written.
+// The typed error carries the remediation, so the operator sees what to change
+// rather than a bare 409. tests/security enumerates every handler that reaches
+// this gate and asserts each one still refuses.
+func denyHostSideEffect(w http.ResponseWriter, projectPath, what string) bool {
+	if executor.HostExecutionAllowed() {
+		return false
+	}
+	err := &executor.HostExecutionDeniedError{
+		ExecutorID:   what,
+		ProjectPath:  projectPath,
+		Alternatives: executor.IsolatedIDs(),
+	}
+	jsonErr(w, err.Error(), http.StatusConflict)
+	return true
 }
 
 // lookupProjectExecutor reads the persisted project→executor binding from

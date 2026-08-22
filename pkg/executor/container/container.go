@@ -129,6 +129,17 @@ type Options struct {
 	// SELinuxLabel is "", "z", or "Z" — the relabel option applied to bind
 	// mounts on SELinux hosts.
 	SELinuxLabel string
+	// AllowRootUser permits the workload to run as uid 0 inside the
+	// container. Default false, and it should stay false.
+	//
+	// The UID is normally derived from the project directory's owner, so a
+	// control plane running as root over a root-owned project silently
+	// produces a root sandbox — capabilities dropped, but still uid 0 against
+	// a bind mount from the host and the full kernel surface. That is a
+	// decision an operator should make on purpose, which is what this flag
+	// makes it: without it, such a configuration is refused with an error
+	// that says how to fix it.
+	AllowRootUser bool
 }
 
 // Normalize fills in defaults and validates. It returns a copy so a caller's
@@ -463,6 +474,7 @@ func (e *Executor) buildRequest(spec executor.Spec, workDir string, extraMounts 
 		Network:   e.opts.Network,
 		AddHosts:  e.opts.AllowHosts,
 		ExtraArgs: e.opts.ExtraArgs,
+		AllowRoot: e.opts.AllowRootUser,
 		Argv:      spec.Argv,
 		Detach:    true,
 		Labels: map[string]string{

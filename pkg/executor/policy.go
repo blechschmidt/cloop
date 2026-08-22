@@ -73,8 +73,28 @@ func HostExecutionAllowed() bool { return allowHostExecution.Load() }
 // permissive config, which is the same ceremony every other security-relevant
 // setting requires.
 func ApplyHostExecutionPolicy(allowed bool) {
-	if !allowed {
-		allowHostExecution.Store(false)
+	if allowed {
+		return
+	}
+	allowHostExecution.Store(false)
+	// Evict anything that was registered while the switch was still
+	// permissive. Bootstrap order is not something a security guarantee can
+	// depend on: `cloop ui` registers the host driver from several entry
+	// points (Server construction, the first workload, tests building a
+	// Server literal), and any one of them running before the config is read
+	// would otherwise leave a host driver registered — and therefore
+	// eligible to be the registry's default — in a deployment that forbids
+	// host execution.
+	DefaultRegistry.evictNonIsolating()
+}
+
+// evictNonIsolating unregisters every executor that puts no boundary between
+// a workload and the control-plane host.
+func (r *Registry) evictNonIsolating() {
+	for _, ex := range r.List() {
+		if !isolatesFromHost(ex) {
+			r.Unregister(ex.ID())
+		}
 	}
 }
 
@@ -139,9 +159,22 @@ func (e *HostExecutionDeniedError) Remediation() string {
 // The check is on Capabilities().Isolation rather than on Kind so a future
 // driver gets the right answer by describing itself honestly, rather than by
 // being added to a list here that someone has to remember to update.
+//
+// It allow-lists the known isolating levels rather than denying IsolationNone.
+// The difference only shows up for a driver that does not set Isolation at
+// all — a new backend mid-development, or a struct built by a caller who did
+// not know the field mattered — and there the two spellings disagree in the
+// worst possible direction. Denying "none" would treat an undeclared driver
+// as isolated and let it run under strict mode; allow-listing treats silence
+// as "no boundary claimed", which is the only safe reading of it.
 func isolatesFromHost(ex Executor) bool {
 	if ex == nil {
 		return false
 	}
-	return ex.Capabilities().Isolation != IsolationNone
+	switch ex.Capabilities().Isolation {
+	case IsolationContainer, IsolationVM, IsolationRemote:
+		return true
+	default:
+		return false
+	}
 }

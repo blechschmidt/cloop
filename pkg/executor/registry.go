@@ -50,6 +50,15 @@ var DefaultRegistry = NewRegistry()
 // Register adds ex to the registry. The first executor registered also
 // becomes the default, so a process that only ever configures one backend
 // needs no extra wiring. Returns ErrAlreadyRegistered if the ID is taken.
+//
+// Under strict no-host-execution mode a driver that offers no isolation is
+// refused outright, with a *HostExecutionDeniedError. Resolve and the driver's
+// own Start both refuse such an executor too, so this is defense in depth
+// rather than the only gate — but it is the layer that matters most, because
+// an executor that was never registered cannot become the registry's default.
+// Without it, a project with no explicit binding falls back to Default() and
+// gets the host driver, which then refuses at Start: a confusing late failure
+// where the honest answer is that no executor is available at all.
 func (r *Registry) Register(ex Executor) error {
 	if ex == nil {
 		return fmt.Errorf("%w: nil executor", ErrInvalidSpec)
@@ -57,6 +66,12 @@ func (r *Registry) Register(ex Executor) error {
 	id := strings.TrimSpace(ex.ID())
 	if id == "" {
 		return fmt.Errorf("%w: executor ID is blank", ErrInvalidSpec)
+	}
+	if !HostExecutionAllowed() && !isolatesFromHost(ex) {
+		return &HostExecutionDeniedError{
+			ExecutorID:   id,
+			Alternatives: r.IsolatedIDs(),
+		}
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()

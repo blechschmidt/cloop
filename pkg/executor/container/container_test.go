@@ -90,6 +90,13 @@ func newTestExecutor(t *testing.T, image string, mutate func(*Options)) *Executo
 	opts := Options{
 		ID:    "test-container",
 		Image: image,
+		// The integration suite runs wherever CI puts it, including as root
+		// with a root-owned t.TempDir(). Production refuses that combination
+		// (Options.AllowRootUser) so a root sandbox is never accidental; here
+		// it is deliberate, because these tests are about container lifecycle
+		// and not about the UID policy. The policy itself is asserted in
+		// tests/security and in TestBuildRunArgs_RefusesRootUser.
+		AllowRootUser: true,
 	}
 	if mutate != nil {
 		mutate(&opts)
@@ -808,7 +815,14 @@ func TestIntegration_TimeoutKillsTheWorkload(t *testing.T) {
 
 func TestIntegration_MissingImageIsActionable(t *testing.T) {
 	rt := requireRuntime(t)
-	ex, err := New(Options{ID: "test-missing", Image: "cloop-test.invalid/definitely-not-pulled:v0"})
+	// AllowRootUser for the same reason as newTestExecutor: this test is about
+	// the missing-image message, and running as root would otherwise make the
+	// UID refusal the first error and mask it.
+	ex, err := New(Options{
+		ID:            "test-missing",
+		Image:         "cloop-test.invalid/definitely-not-pulled:v0",
+		AllowRootUser: true,
+	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

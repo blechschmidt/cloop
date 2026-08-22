@@ -51,6 +51,11 @@ const (
 
 // Network modes.
 const (
+	// tmpfsScratchMB sizes the writable /tmp handed back to a workload whose
+	// rootfs is read-only. It is RAM, so it is capped: an unbounded tmpfs is
+	// a memory-exhaustion vector dressed up as a filesystem.
+	tmpfsScratchMB = 512
+
 	// NetworkNone fully isolates the workload: no interfaces but loopback.
 	NetworkNone = "none"
 	// NetworkBridge attaches the runtime's default bridge, giving the
@@ -117,6 +122,9 @@ type runRequest struct {
 	// the same UID inside the container so bind-mounted files keep their
 	// ownership. Rootless podman only.
 	KeepID bool
+	// AllowRoot waives the non-root user check. See Options.AllowRootUser —
+	// it exists so a root sandbox is a decision, never a default.
+	AllowRoot bool
 
 	// Network is "none", "bridge", or an operator-defined network name.
 	Network string
@@ -188,6 +196,14 @@ func buildRunArgs(req runRequest) (builtCommand, error) {
 		// with a confusing EPERM.
 		return builtCommand{}, fmt.Errorf("container: --user and --userns=keep-id are mutually exclusive")
 	}
+	// keep-id maps the invoking (unprivileged) user, so it is non-root by
+	// construction. Every other path must name a non-root UID explicitly,
+	// unless the operator has deliberately opted into a root sandbox.
+	if !req.KeepID && !req.AllowRoot {
+		if err := validateNonRootUser(req.User); err != nil {
+			return builtCommand{}, err
+		}
+	}
 
 	args := []string{"run"}
 	if req.Detach {
@@ -210,6 +226,21 @@ func buildRunArgs(req runRequest) (builtCommand, error) {
 	// no-new-privileges makes setuid binaries inside the image unable to
 	// elevate, so a stray setuid root helper cannot undo --user.
 	args = append(args, "--security-opt=no-new-privileges")
+
+	// Read-only root filesystem. The workspace bind mount and the scratch
+	// tmpfs below stay writable; everything the image ships — /usr, /etc,
+	// the interpreter on the next run's PATH — becomes immutable. Without
+	// this, a workload that is compromised once can persist by rewriting a
+	// binary in the image's writable layer, and every later run on the same
+	// container starts already owned.
+	args = append(args, "--read-only")
+	// A read-only rootfs with no scratch space breaks essentially every
+	// toolchain: compilers, test binaries and package managers all write to
+	// /tmp. Handing it back as a tmpfs keeps those writes in RAM, bounded,
+	// and discarded with the container. nosuid and nodev block the standard
+	// escalation tricks; exec has to stay, because `go test` writes its test
+	// binaries into TMPDIR and then runs them.
+	args = append(args, "--tmpfs", fmt.Sprintf("/tmp:rw,nosuid,nodev,exec,size=%dm", tmpfsScratchMB))
 
 	if req.KeepID {
 		args = append(args, "--userns=keep-id")
@@ -458,6 +489,51 @@ func validateContainerName(name string) error {
 		default:
 			return fmt.Errorf("container: container name %q contains an invalid character %q at %d", name, r, i)
 		}
+	}
+	return nil
+}
+
+// ValidateNonRootUser rejects a --user value that would run the workload as
+// UID 0 inside the container, or leave the user unset.
+//
+// Root in a container is not the same as root on the host, but it is one
+// kernel bug or one careless bind mount away from being exactly that, and it
+// makes --cap-drop=ALL far less valuable than it looks. An unset user is worse
+// than an explicit root: most base images default to root, so "no --user
+// flag" is root without saying so.
+//
+// The refusal is deliberate rather than a silent downgrade to a fixed UID like
+// nobody. The workspace is a bind mount from the host, so a UID the operator
+// did not choose produces a container that cannot write to its own project
+// directory — a confusing mid-run permission failure instead of an immediate,
+// actionable one.
+func ValidateNonRootUser(user string) error { return validateNonRootUser(user) }
+
+func validateNonRootUser(user string) error {
+	u := strings.TrimSpace(user)
+	if u == "" {
+		return fmt.Errorf("container: refusing to start without an explicit --user: " +
+			"the image's default user is root in almost every base image. " +
+			"Run the control plane as a non-root user, or chown the project " +
+			"directory to the unprivileged UID the workload should use")
+	}
+	uidField := u
+	if i := strings.IndexByte(u, ':'); i >= 0 {
+		uidField = u[:i]
+	}
+	uid, err := strconv.Atoi(strings.TrimSpace(uidField))
+	if err != nil {
+		// A username can only be resolved against the image's /etc/passwd,
+		// which is not readable from here. Requiring a numeric UID keeps the
+		// check honest rather than approving "app" and hoping.
+		return fmt.Errorf("container: --user %q must be a numeric uid[:gid]; "+
+			"a username cannot be checked for root-ness without reading the image", user)
+	}
+	if uid == 0 {
+		return fmt.Errorf("container: refusing to run the workload as uid 0 (--user %q). "+
+			"Root in a container defeats --cap-drop=ALL and turns any runtime escape "+
+			"into host root. Chown the project directory to an unprivileged user, or "+
+			"run the control plane rootless so podman's keep-id mapping applies", user)
 	}
 	return nil
 }
