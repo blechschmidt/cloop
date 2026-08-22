@@ -220,6 +220,8 @@ func (s *Server) routeTable() []routeSpec {
 		execRead  = authz.PermExecutorRead
 		execMgmt  = authz.PermExecutorManage
 		auditRead = authz.PermAuditRead
+		secGrant  = authz.PermSecretGrant
+		secRevoke = authz.PermSecretRevoke
 		public    = authz.PermPublic
 	)
 
@@ -391,5 +393,22 @@ func (s *Server) routeTable() []routeSpec {
 		// project-scoped grant should ever confer. See authz.PermAuditRead.
 		{Pattern: "GET /api/audit", Handler: s.handleAuditList, Perm: auditRead, Scope: scopeGlobal},
 		{Pattern: "GET /api/audit/verify", Handler: s.handleAuditVerify, Perm: auditRead, Scope: scopeGlobal},
+
+		// ── Secrets, grants, and leases ──────────────────────────────
+		// Global, and never below maintainer. Reads are gated on
+		// secret.grant rather than project.read because the list of which
+		// credentials exist, which executor holds them, and what each one
+		// may reach is reconnaissance: the roles that cannot broker access
+		// have no reason to enumerate it. Deletions and lease revocations
+		// take secret.revoke, so an operator can be given the ability to
+		// pull a leaked credential without the ability to issue one.
+		{Pattern: "GET /api/secrets", Handler: s.handleSecretsList, Perm: secGrant, Scope: scopeGlobal},
+		{Pattern: "POST /api/secrets", Handler: s.handleSecretCreate, Perm: secGrant, Scope: scopeGlobal},
+		{Pattern: "DELETE /api/secrets/{id}", Handler: s.handleSecretDelete, Perm: secRevoke, Scope: scopeGlobal},
+		{Pattern: "GET /api/grants", Handler: s.handleGrantsList, Perm: secGrant, Scope: scopeGlobal},
+		{Pattern: "POST /api/grants", Handler: s.handleGrantCreate, Perm: secGrant, Scope: scopeGlobal},
+		{Pattern: "DELETE /api/grants/{id}", Handler: s.handleGrantDelete, Perm: secRevoke, Scope: scopeGlobal},
+		{Pattern: "GET /api/leases", Handler: s.handleLeasesList, Perm: secGrant, Scope: scopeGlobal},
+		{Pattern: "POST /api/leases/{id}/revoke", Handler: s.handleLeaseRevoke, Perm: secRevoke, Scope: scopeGlobal},
 	}
 }

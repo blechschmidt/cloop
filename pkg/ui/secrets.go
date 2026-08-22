@@ -27,6 +27,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"sync"
 	"time"
 
@@ -41,6 +42,79 @@ import (
 // A workload that cannot get its lease promptly starts without it rather
 // than hanging an HTTP handler.
 const leaseTimeout = 10 * time.Second
+
+// liveLeases tracks the leases this hub has issued and still holds open, so
+// GET /api/leases can answer "which executor is holding which credential
+// right now" and POST /api/leases/{id}/revoke can take it away (Task 20171).
+//
+// A registry is needed because Broker.leases is per-instance and every spawn
+// builds its own broker over the control-plane database. Asking a freshly
+// constructed broker to list leases would truthfully report none, which is
+// the worst possible answer for a panel whose job is to show outstanding
+// access.
+//
+// It holds only leases this process issued and has not yet wiped. That is
+// the honest scope: a lease's materials live in a tmpfs directory this
+// process owns, so a lease it does not hold is one it could not revoke
+// either, and listing it would offer a button that does nothing.
+var liveLeases = &leaseRegistry{active: make(map[string]*secretLease)}
+
+// leaseRegistry is a concurrent set of open leases keyed by lease ID.
+type leaseRegistry struct {
+	mu     sync.Mutex
+	active map[string]*secretLease
+}
+
+// add records an open lease. Called once per successful materialisation.
+func (lr *leaseRegistry) add(sl *secretLease) {
+	if sl == nil || sl.lease == nil {
+		return
+	}
+	lr.mu.Lock()
+	lr.active[sl.lease.ID] = sl
+	lr.mu.Unlock()
+}
+
+// remove forgets a lease without wiping it. Close calls this; callers that
+// want the credentials gone want revoke instead.
+func (lr *leaseRegistry) remove(id string) {
+	lr.mu.Lock()
+	delete(lr.active, id)
+	lr.mu.Unlock()
+}
+
+// snapshot returns the currently open leases, newest first.
+func (lr *leaseRegistry) snapshot() []*secretLease {
+	lr.mu.Lock()
+	out := make([]*secretLease, 0, len(lr.active))
+	for _, sl := range lr.active {
+		out = append(out, sl)
+	}
+	lr.mu.Unlock()
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].lease.IssuedAt.After(out[j].lease.IssuedAt)
+	})
+	return out
+}
+
+// revoke wipes one lease's credential directory and releases it, reporting
+// whether the lease was open here.
+//
+// The lease is dropped from the map *before* Close runs. Close calls remove
+// itself, and holding the mutex across it would deadlock; doing it in this
+// order also means a second concurrent revoke of the same ID reports false
+// rather than racing to wipe the same directory twice.
+func (lr *leaseRegistry) revoke(id string) (*secretLease, bool) {
+	lr.mu.Lock()
+	sl, ok := lr.active[id]
+	delete(lr.active, id)
+	lr.mu.Unlock()
+	if !ok {
+		return nil, false
+	}
+	sl.Close()
+	return sl, true
+}
 
 // secretLease couples a lease to the mount holding its files, so a caller
 // has one thing to close.
@@ -68,6 +142,9 @@ func (sl *secretLease) Close() {
 		return
 	}
 	sl.once.Do(func() {
+		if sl.lease != nil {
+			liveLeases.remove(sl.lease.ID)
+		}
 		if sl.mount != nil {
 			if err := sl.mount.Close(); err != nil {
 				fmt.Fprintf(os.Stderr, "ui: wipe secret lease: %v\n", err)
@@ -123,7 +200,13 @@ func acquireSecretLease(controlPlaneDir, workDir, executorID string) *secretLeas
 		closeDB()
 		return nil
 	}
-	return &secretLease{broker: broker, lease: lease, mount: mount, closer: closeDB}
+	sl := &secretLease{broker: broker, lease: lease, mount: mount, closer: closeDB}
+	// Registered only once the credentials actually exist on disk: every
+	// earlier return path has already released the lease, and a registry
+	// entry for one of those would offer a revoke button for a lease that
+	// was never held.
+	liveLeases.add(sl)
+	return sl
 }
 
 // openUIBroker builds a broker over the control plane's database.

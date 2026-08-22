@@ -329,7 +329,7 @@ what it is looking for.
 | Each of the five host-touching endpoints returns 409 naming `allow_host_process` | `TestGatedHandlersRefuseUnderStrictMode` |
 | The gated-endpoint list and the gated-call-graph list cannot drift apart | `TestGatedListsAgree` |
 
-### Secret non-disclosure — `secrets_test.go`, `audit_test.go`
+### Secret non-disclosure — `secrets_test.go`, `audit_test.go`, `uiroutes_test.go`
 
 | Guarantee | Test |
 | --- | --- |
@@ -344,6 +344,9 @@ what it is looking for.
 | Secret-broker grant/revoke rows carry decisions, never material | `TestSecretBrokerDecisionsNeverCarryMaterial` |
 | Redaction is stable under the hash chain — redacting does not break verification | `TestRedactionSurvivesTheHashChain` |
 | *Every* audit row rendering is scanned for canary secrets, not a sampled subset | `TestEveryAuditRowIsScannedForSecrets` |
+| The Secrets & Grants REST API never returns material, on any route, read path, write path or error path | `TestSecretsAPIRoutesNeverDiscloseMaterial` |
+| Those responses emit a closed, reviewed set of JSON keys, so a new struct field cannot start being serialised by accident | `TestSecretsAPIViewStructsCarryNoMaterialField` |
+| `GET /api/leases` renders a genuinely materialised lease without its credentials (in `pkg/ui`, which can issue one) | `TestSecretsAPINeverDisclosesLeaseMaterial` |
 
 ### Lease and token invariants — `leases_test.go`
 

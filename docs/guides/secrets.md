@@ -356,6 +356,71 @@ material ([`TestSecretBrokerDecisionsNeverCarryMaterial`](../security/model.md#t
 
 ---
 
+## The Secrets panel
+
+Everything above is also reachable from the dashboard's global **Secrets** tab,
+which is the surface a hosted operator has when they do not have a shell on the
+hub. Three tables, matching the three concepts in [The model](#the-model):
+
+- **Stored secrets** — name, kind, fingerprint, and how many grants point at
+  each. **+ Secret** stores one.
+- **Grants** — both brokers in one list, with the full allowlist rendered per
+  row and a live countdown. **+ Grant** opens a per-kind wizard: repository
+  allowlist and permission subset for a PAT, context and namespace for a
+  kubeconfig, host allowlist with byte quotas for egress, registry or env-key
+  allowlist for the rest. The wizard offers only secrets matching the chosen
+  kind, and there is no "allow everything" default — an empty allowlist is
+  rejected by the same `Constraints.ValidateFor` the CLI goes through.
+- **Live leases** — what is outstanding *right now*: which executor, which
+  project, which credentials, and how long is left. **Revoke** wipes that
+  workload's credential directory immediately instead of waiting out the lease.
+
+Each row links into the [Audit panel](../security/model.md) filtered to that
+secret or grant, so "who granted this, and when" is one click from the grant
+itself.
+
+### What it will not show you
+
+No endpoint behind this panel returns secret material or a decrypted lease
+token — not on a read, not in the response to a create, not in an error
+message. What a row carries instead is a **fingerprint**: `sha256:` over the
+*sealed* record, truncated to 16 hex characters.
+
+That is a deliberate trade. A digest of the plaintext would let you compare two
+secrets for equality, and would also hand anyone who can read the endpoint an
+offline oracle to test guesses against — fatal for the low-entropy payloads the
+store also holds (a registry password, an env value). So the fingerprint
+identifies the stored record, not the value: storing the same credential twice
+yields two different fingerprints. Use it to confirm a rotation changed
+something, not to confirm two secrets match.
+
+`TestSecretsAPIRoutesNeverDiscloseMaterial` seeds known plaintext of every kind
+and drives every route — reads, writes, and the error paths that are holding a
+credential when they build their message — asserting the canary appears in none
+of them, in any encoding.
+
+### Who can see it
+
+The tab is hidden, and every route behind it refused, below **maintainer**:
+
+| Route | Permission |
+| --- | --- |
+| `GET`/`POST` `/api/secrets`, `/api/grants`, `GET /api/leases` | `secret.grant` |
+| `DELETE /api/secrets/{id}`, `DELETE /api/grants/{id}`, `POST /api/leases/{id}/revoke` | `secret.revoke` |
+
+Reads sit at `secret.grant` rather than `project.read` on purpose: the list of
+which credentials exist, which executor holds them, and what each may reach is
+reconnaissance, and a role that cannot broker access has no reason to enumerate
+it. Being able to *spend* a credential — which an operator can, by starting a
+run — is not the same as being able to *enumerate* the fleet's credentials.
+
+Every create and revoke lands in the audit trail under the operator's OIDC
+identity, not under `ui`. A lease revoked from the panel writes a second row
+naming the person who pressed the button: the broker's own release event names
+the executor, which does not answer "who took this away".
+
+---
+
 ## Choosing TTLs
 
 | | Default | Ceiling | Guidance |

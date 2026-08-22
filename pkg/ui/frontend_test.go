@@ -40,6 +40,12 @@ var executorsAPISource string
 //go:embed audit_api.go
 var auditAPISource string
 
+// secretsAPISource is pkg/ui/secrets_api.go, for the same reason again: the
+// `secrets_update` broadcast (Task 20171) lives there.
+//
+//go:embed secrets_api.go
+var secretsAPISource string
+
 // routesSource is pkg/ui/routes.go, which holds the declarative route table
 // (Task 20164). Routes moved out of server.go when registration started
 // carrying a required permission, so the architectural tests that scan for
@@ -54,7 +60,7 @@ var routesSource string
 // new //go:embed directive above.
 func allUISources() string {
 	return serverSource + "\n" + providerCallsSource + "\n" + executorsAPISource +
-		"\n" + auditAPISource
+		"\n" + auditAPISource + "\n" + secretsAPISource
 }
 
 // The cloop dashboard is a single embedded HTML/CSS/JS string (`dashboardHTML`
@@ -558,6 +564,10 @@ func TestDashboard_APIEndpoints_AllRegistered(t *testing.T) {
 		"/api/projects/{idx}/run",
 		"/api/projects/{idx}/stop",
 		"/api/kb/{id}",
+		// The real route is POST /api/leases/{id}/revoke; the extractor
+		// truncates the call at the interpolated id, so the truncated form is
+		// what has to be listed here.
+		"/api/leases/{id}",
 	}
 	for _, r := range knownDynamic {
 		routes[r] = struct{}{}
