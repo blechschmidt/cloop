@@ -47,11 +47,31 @@ Two rules that prevent most of the bad days:
 | Endpoint | Question | Behaviour |
 | --- | --- | --- |
 | `/healthz` | is the process alive? | never fails while it can accept a connection — do **not** wire a restart to a slow database |
-| `/readyz` | should traffic come here? | pings the state database; fails during startup or storage loss |
+| `/readyz` | should traffic come here? | two gates: the state database, then the execution path. Fails during startup, on storage loss, and when strict mode leaves no isolating executor registered |
 | `/metrics` | Prometheus text | — |
 
 All three bypass auth and rate limiting so a probe can never be locked out by a
 flood or a broken IdP.
+
+The second `/readyz` gate is why a rollout of a misconfigured hub fails instead
+of going green. A hub with `allow_host_process: false` and no container,
+Kubernetes or enrolled-agent executor can only answer a run request with a 409,
+so it reports `not_ready` and the response body names the fix:
+
+```json
+{
+  "status": "not_ready",
+  "check": "executors",
+  "reason": "strict mode is on (executors.allow_host_process: false) and no isolating executor is registered, so every run would be refused",
+  "remediation": "enable executors.container or executors.kubernetes in .cloop/config.yaml, enroll a remote agent (`cloop executor enroll`), or set executors.allow_host_process: true to permit un-isolated host execution"
+}
+```
+
+The verdict is live, not a snapshot of startup: a hub that boots with nothing
+isolating becomes ready the moment an edge device enrolls, with no restart.
+An executor that registered but failed *preflight* is degraded, not missing —
+it still satisfies this gate, because a cluster that was briefly unreachable
+during boot should not keep a hub out of service until someone restarts it.
 
 ```console
 $ cloop hub healthcheck --url https://hub.example.com --endpoint readyz
@@ -409,9 +429,31 @@ verify` to separate corruption from tampering, and compare against your last
 off-box export to find where the histories diverge.
 
 **`/readyz` fails but `/healthz` passes.**
-Storage. Check the volume is mounted and writable, then `cloop db verify`. Under
-Kubernetes, check the PVC is bound and that no second replica is mounting it —
-SQLite is `ReadWriteOnce` and the chart pins `replicaCount: 1` for that reason.
+Read the `check` field first — it names which gate failed.
+
+`"check": "sqlite"` is storage. Check the volume is mounted and writable, then
+`cloop db verify`. Under Kubernetes, check the PVC is bound and that no second
+replica is mounting it — SQLite is `ReadWriteOnce` and the chart pins
+`replicaCount: 1` for that reason.
+
+`"check": "executors"` means the hub has nothing to dispatch to: strict mode is
+on and no isolating executor registered. The `remediation` field says what to
+do. The usual causes, in order of frequency:
+
+- the config enables no isolating backend at all — set
+  `executors.container.enabled` or `executors.kubernetes.enabled`, or enroll an
+  edge device;
+- one is enabled but could not be *built* — no container runtime on the hub
+  host, or no kubeconfig grant. `GET /api/executors` carries a `reconciliation`
+  block with a per-driver `status` and `remediation`, and the startup log has
+  the same line;
+- the hub is running in a distroless image (as the chart's is) with
+  `executors.container.enabled: true`. There is no container runtime inside
+  that image; use the Kubernetes backend, which is what
+  `executor.kubernetes.enabled` in `values.yaml` configures.
+
+Do **not** set `allow_host_process: true` to clear this. That does make the
+probe pass, by removing the isolation boundary the gate exists to enforce.
 
 **"database is locked".**
 WAL and `busy_timeout` are already configured, so this points at a second writer.

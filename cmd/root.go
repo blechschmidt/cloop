@@ -127,17 +127,34 @@ func init() {
 		// rather than in an init() because it needs the project config, and
 		// therefore the final working directory — which --workspace may have
 		// just changed. The host driver is registered by executors.go's
-		// init() and always remains the default; this only adds isolated
-		// backends the operator opted into.
+		// init(); this adds the isolated backends the operator opted into.
 		if cwd, err := os.Getwd(); err == nil {
 			if cfg, cfgErr := config.Load(cwd); cfgErr == nil {
-				registerContainerExecutor(cfg)
-				registerKubernetesExecutor(cfg, wantsPodReconcile(cmd.Name()))
-				// Strict no-host-execution mode (Task 20160). Applied after
-				// the isolated backends are registered so a refusal can name
-				// them as alternatives instead of claiming none exist. The
+				// Strict no-host-execution mode (Task 20160), applied BEFORE
+				// reconciling. Two reasons, and the first is a correctness
+				// bug fixed in Task 20170: reconcile.FromConfig records
+				// StrictMode from this switch, so reconciling first stamped
+				// every CLI report strict_mode:false and suppressed the
+				// "no isolating executor is registered" warning in exactly
+				// the deployments that needed it. Second, it matches the
+				// order pkg/ui and pkg/apiserver use — one bootstrap order,
+				// not three. Registering isolated drivers afterwards is
+				// safe: strict mode refuses only non-isolating ones. The
 				// policy is a ratchet — see executor.ApplyHostExecutionPolicy.
 				executor.ApplyHostExecutionPolicy(cfg.Executors.HostProcessAllowed())
+
+				// Commands that construct a control plane reconcile from
+				// their OWN workdir a moment later, and skipping the pass
+				// here is what lets that one win. Reconciliation reuses an
+				// executor already registered under the same ID, so a pass
+				// against cwd would otherwise claim the ID and leave the
+				// server's — including the state database its Kubernetes
+				// credentials are brokered from — permanently unused. It
+				// also saves a redundant SQLite open and key derivation on
+				// every server start.
+				if !hostsControlPlane(cmd.Name()) {
+					reconcileExecutors(cwd, cfg, wantsPodReconcile(cmd.Name()))
+				}
 			}
 		}
 

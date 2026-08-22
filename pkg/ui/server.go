@@ -35,6 +35,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/decompose"
 	"github.com/blechschmidt/cloop/pkg/epic"
 	"github.com/blechschmidt/cloop/pkg/executor"
+	"github.com/blechschmidt/cloop/pkg/executor/reconcile"
 	"github.com/blechschmidt/cloop/pkg/globalbudget"
 	"github.com/blechschmidt/cloop/pkg/kb"
 	"github.com/blechschmidt/cloop/pkg/logger"
@@ -829,26 +830,57 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 // default verifies (a) state.db exists at the resolved workdir, (b) a
 // fresh statedb handle opens against it, and (c) `SELECT 1` returns
 // within 1s.
+// Readiness gates, in the order they are evaluated. The storage check runs
+// first because an executor verdict is meaningless on a hub whose state store
+// is gone.
+//
+// The executor gate (Task 20170) is what stops a strict-mode hub with no
+// isolating executor from accepting traffic it can only answer with 409s. It
+// is deliberately not routed through Server.ReadyCheck: that hook exists so a
+// test can stub out SQLite, and letting it also suppress the execution-path
+// gate would mean the guarantee held only for deployments nobody had stubbed.
 func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
-	check := s.ReadyCheck
-	if check == nil {
-		check = s.defaultReadyCheck
+	storage := s.ReadyCheck
+	if storage == nil {
+		storage = s.defaultReadyCheck
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), readyCheckTimeout)
 	defer cancel()
 
 	w.Header().Set("Content-Type", "application/json")
-	if err := check(ctx); err != nil {
-		w.WriteHeader(http.StatusServiceUnavailable)
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"status": "not_ready",
-			"check":  "sqlite",
-			"error":  err.Error(),
-		})
+	if err := storage(ctx); err != nil {
+		writeNotReady(w, "sqlite", err)
+		return
+	}
+	if err := reconcile.Ready(); err != nil {
+		writeNotReady(w, "executors", err)
 		return
 	}
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(`{"status":"ready","check":"sqlite"}`))
+}
+
+// writeNotReady emits the 503 body, naming the gate that failed and — for the
+// executor gate — the remediation as its own field so an operator reading
+// `kubectl describe pod` output gets the fix, not just the symptom.
+func writeNotReady(w http.ResponseWriter, check string, err error) {
+	w.WriteHeader(http.StatusServiceUnavailable)
+	body := map[string]any{
+		"status": "not_ready",
+		"check":  check,
+		"error":  err.Error(),
+	}
+	var notReady *reconcile.NotReadyError
+	if errors.As(err, &notReady) {
+		body["reason"] = notReady.Reason
+		if notReady.Remediation != "" {
+			body["remediation"] = notReady.Remediation
+		}
+		if len(notReady.Diagnostics) > 0 {
+			body["diagnostics"] = notReady.Diagnostics
+		}
+	}
+	_ = json.NewEncoder(w).Encode(body)
 }
 
 // readyCheckTimeout caps the readiness probe's view of the SQLite store.
@@ -896,6 +928,7 @@ func (s *Server) Run(ctx context.Context) error {
 	mux := http.NewServeMux()
 	s.registerRoutes(mux)
 	s.registerProviderCallNotifier()
+	s.restoreEnrolledExecutors()
 
 	watcherCtx, cancelWatchers := context.WithCancel(context.Background())
 	defer cancelWatchers()
@@ -17408,6 +17441,13 @@ function _renderExecutors(d) {
     }
   }
 
+  // No separate "not ready" banner: executorPolicy() already renders one for
+  // the identical condition (strict mode with no isolating executor) and its
+  // wording names the config key. The response still carries the ready and
+  // remediation fields so a client can act on the verdict without re-deriving
+  // it. (No backticks in this file's JS comments — the whole dashboard is a
+  // Go raw string literal and one would close it.)
+
   const execs = (d && d.executors) || [];
   if (empty) empty.style.display = execs.length ? 'none' : 'block';
 
@@ -17454,6 +17494,21 @@ function _renderExecutors(d) {
     }
     if (ex.blocked && ex.blocked_reason) {
       h += '<div class="exec-blocked-note">&#9888; Blocked by policy. ' + esc(ex.blocked_reason) + '</div>';
+    }
+    // Startup reconciliation (Task 20170). Distinct from health above: health
+    // probes a registered executor, this says whether it came up from config
+    // at all — the only thing there is to report about one that did not.
+    if (ex.reconcile_status && ex.reconcile_status !== 'ok') {
+      h += '<div class="exec-blocked-note">&#9888; Startup ' + esc(ex.reconcile_status) + '. '
+        + esc(ex.reconcile_message || '') + '</div>';
+      if (ex.reconcile_remediation) {
+        h += '<div class="exec-sched-note">Fix: ' + esc(ex.reconcile_remediation) + '</div>';
+      }
+      const fails = (ex.preflight_findings || []).filter(f => f.level === 'fail');
+      if (fails.length) {
+        h += '<div class="exec-sched-note">' + fails.map(f =>
+          esc(f.name) + ': ' + esc(f.message)).join('<br>') + '</div>';
+      }
     }
 
     h += '<div class="exec-actions">';

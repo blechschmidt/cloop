@@ -40,6 +40,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/executor"
+	"github.com/blechschmidt/cloop/pkg/executor/reconcile"
 	"github.com/blechschmidt/cloop/pkg/executor/remote"
 	"github.com/blechschmidt/cloop/pkg/executorstore"
 	"github.com/blechschmidt/cloop/pkg/state"
@@ -138,6 +139,23 @@ type executorView struct {
 	// rendered "—" rather than "0".
 	InFlight      int  `json:"in_flight"`
 	InFlightKnown bool `json:"in_flight_known"`
+
+	// ---- startup reconciliation (Task 20170) -------------------------------
+	//
+	// Health above is a live probe of a *registered* executor. These describe
+	// what happened when this hub tried to bring the executor up from config
+	// at all, which is the only thing there is to say about one that failed:
+	// it has no registry entry to probe.
+
+	// ReconcileStatus is ok|degraded|failed|skipped, empty when this executor
+	// was not configured in this hub's config (an enrolled remote agent).
+	ReconcileStatus string `json:"reconcile_status,omitempty"`
+	// ReconcileMessage summarises the outcome.
+	ReconcileMessage string `json:"reconcile_message,omitempty"`
+	// ReconcileRemediation is the concrete fix for a non-OK status.
+	ReconcileRemediation string `json:"reconcile_remediation,omitempty"`
+	// PreflightFindings is the driver's startup checklist.
+	PreflightFindings []reconcile.Finding `json:"preflight_findings,omitempty"`
 }
 
 // executorPolicyView is the banner state for the Executors tab.
@@ -181,6 +199,31 @@ type executorsResponse struct {
 	Policy    executorPolicyView   `json:"policy"`
 	Project   *executorProjectView `json:"project,omitempty"`
 	DefaultID string               `json:"default_id,omitempty"`
+
+	// Reconciliation is the startup diagnostic for every executor this hub's
+	// config asked for (Task 20170). It is the only place a *failed* driver
+	// appears: one that could not be built has no registry entry and no
+	// executors-table row, so without this the panel's answer to "why is my
+	// container executor not here" was an empty list.
+	Reconciliation *reconciliationView `json:"reconciliation,omitempty"`
+
+	// Ready mirrors what /readyz reports about the execution path, so the
+	// panel can show the same verdict an orchestrator acts on rather than
+	// leaving an operator to infer it from the card list.
+	Ready bool `json:"ready"`
+	// NotReadyReason and Remediation are set only when Ready is false.
+	NotReadyReason string `json:"not_ready_reason,omitempty"`
+	Remediation    string `json:"remediation,omitempty"`
+}
+
+// reconciliationView is the last startup reconciliation, rendered for the
+// Executors tab.
+type reconciliationView struct {
+	Diagnostics  []reconcile.Diagnostic `json:"diagnostics"`
+	ReconciledAt time.Time              `json:"reconciled_at"`
+	// Problems counts diagnostics that are failed or degraded, so the tab can
+	// badge the section without walking the list.
+	Problems int `json:"problems"`
 }
 
 // controlPlaneDB opens the control plane's own state database.
@@ -506,6 +549,66 @@ func (s *Server) projectExecutorView(workDir string, db *statedb.DB) *executorPr
 	return view
 }
 
+// applyDiagnostics folds the startup reconciliation into the cards, and adds
+// a card for any configured executor that failed to register.
+//
+// The second half is the point. A driver that could not be built has no
+// registry entry and no executors-table row, so it appeared in the panel as
+// nothing at all — the operator saw an empty Executors tab and no indication
+// that the container section they wrote had been read, tried, and rejected.
+func applyDiagnostics(views []executorView, rec *reconciliationView) []executorView {
+	if rec == nil {
+		return views
+	}
+	byID := make(map[string]int, len(views))
+	for i, v := range views {
+		byID[v.ID] = i
+	}
+	for _, d := range rec.Diagnostics {
+		i, ok := byID[d.ID]
+		if !ok {
+			continue
+		}
+		views[i].ReconcileStatus = string(d.Status)
+		views[i].ReconcileMessage = d.Message
+		views[i].ReconcileRemediation = d.Remediation
+		views[i].PreflightFindings = d.Findings
+	}
+	return views
+}
+
+// missingExecutorViews builds cards for configured executors that never made
+// it into the registry, so a failed driver is visible rather than absent.
+func missingExecutorViews(views []executorView, rec *reconciliationView) []executorView {
+	if rec == nil {
+		return views
+	}
+	present := make(map[string]bool, len(views))
+	for _, v := range views {
+		present[v.ID] = true
+	}
+	for _, d := range rec.Diagnostics {
+		if present[d.ID] {
+			continue
+		}
+		views = append(views, executorView{
+			ID:                   d.ID,
+			Name:                 d.ID,
+			Kind:                 d.Kind,
+			Registered:           false,
+			Status:               statedb.ExecutorStatusUnknown,
+			Health:               d.Message,
+			SchedState:           "unreachable",
+			ReconcileStatus:      string(d.Status),
+			ReconcileMessage:     d.Message,
+			ReconcileRemediation: d.Remediation,
+			PreflightFindings:    d.Findings,
+		})
+	}
+	sort.Slice(views, func(i, j int) bool { return views[i].ID < views[j].ID })
+	return views
+}
+
 // handleExecutorsList serves GET /api/executors.
 func (s *Server) handleExecutorsList(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -529,10 +632,35 @@ func (s *Server) handleExecutorsList(w http.ResponseWriter, r *http.Request) {
 		Policy:    s.executorPolicy(),
 		Project:   s.projectExecutorView(workDir, db),
 		DefaultID: executor.DefaultRegistry.DefaultID(),
+		Ready:     true,
 	}
 	if resp.Executors == nil {
 		resp.Executors = []executorView{}
 	}
+	if report, ok := reconcile.LastReport(); ok {
+		resp.Reconciliation = &reconciliationView{
+			Diagnostics:  report.Diagnostics,
+			ReconciledAt: report.ReconciledAt,
+			Problems:     len(report.Problems()),
+		}
+		if resp.Reconciliation.Diagnostics == nil {
+			resp.Reconciliation.Diagnostics = []reconcile.Diagnostic{}
+		}
+	}
+	if err := reconcile.Ready(); err != nil {
+		resp.Ready = false
+		resp.NotReadyReason = err.Error()
+		var notReady *reconcile.NotReadyError
+		if errors.As(err, &notReady) {
+			resp.NotReadyReason = notReady.Reason
+			resp.Remediation = notReady.Remediation
+		}
+	}
+	// Attach each driver's diagnostic to its own card, so an operator reading
+	// a degraded executor sees why on the card rather than having to correlate
+	// it with a separate list, then add cards for the ones that never
+	// registered and would otherwise be invisible.
+	resp.Executors = missingExecutorViews(applyDiagnostics(resp.Executors, resp.Reconciliation), resp.Reconciliation)
 	jsonOK(w, resp)
 }
 

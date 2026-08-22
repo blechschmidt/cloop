@@ -26,6 +26,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/container"
 	"github.com/blechschmidt/cloop/pkg/executor/kubernetes"
+	"github.com/blechschmidt/cloop/pkg/executor/reconcile"
 )
 
 var executorCmd = &cobra.Command{
@@ -354,119 +355,65 @@ func exitCodeFor(err error) int {
 	return 1
 }
 
-// registerContainerExecutor builds and registers the container executor from
-// the project config, when enabled.
+// reconcileExecutors brings up every executor the project config enables,
+// through the same code path `cloop ui` and `cloop serve` use (Task 20170).
+//
+// It replaces two near-duplicate registration functions that lived here and
+// were reachable only from the CLI. Sharing one implementation is the point:
+// the previous split meant a hub started as a long-running server registered
+// a different set of executors than the CLI did in the same directory, and
+// only the CLI half ever ran preflight.
 //
 // A configured-but-unbuildable executor is a warning rather than a fatal
 // error: cloop has many subcommands that never execute a workload, and
 // failing every one of them because a container runtime is missing would be
-// disproportionate. The failure surfaces where it matters — `cloop executor
-// test` reports it, and executor.Resolve fails closed for any project bound
-// to the missing ID rather than downgrading it to host execution.
-func registerContainerExecutor(cfg *config.Config) {
-	if cfg == nil || !cfg.Executors.Container.Enabled {
+// disproportionate. The failure surfaces where it matters — the diagnostic
+// is recorded, `cloop executor test` reports it, /readyz refuses under strict
+// mode, and executor.Resolve fails closed for any project bound to the
+// missing ID rather than downgrading it to host execution.
+//
+// Preflight is skipped here. It costs a container-runtime round trip and a
+// Kubernetes API call, which is the right price for a server that will
+// dispatch workloads for hours and the wrong one for `cloop status`. The
+// server entry points call reconcile.Bootstrap instead, which registers
+// synchronously and preflights in the background.
+func reconcileExecutors(dir string, cfg *config.Config, sweepOrphans bool) {
+	if cfg == nil {
 		return
 	}
-	opts, err := cfg.Executors.Container.DriverOptions()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "warning: executors.container is enabled but invalid: %v\n", err)
-		return
-	}
-	if _, err := container.Ensure(executor.DefaultRegistry, opts); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: container executor %q could not be registered: %v\n", opts.ID, err)
-		fmt.Fprintf(os.Stderr, "         projects bound to it will fail rather than run on this host.\n")
-	}
+	reconcile.FromConfig(context.Background(), dir, cfg, reconcile.Options{
+		SkipPreflight:    true,
+		ReconcileOrphans: sweepOrphans,
+		// Only problems: every cloop subcommand runs this, and a line
+		// reading "executor container: ready" before the output of
+		// `cloop status` would be noise on every invocation.
+		QuietWhenHealthy: true,
+		Logf: func(format string, args ...any) {
+			fmt.Fprintf(os.Stderr, "warning: "+format+"\n", args...)
+		},
+	})
 }
 
-// registerKubernetesExecutor builds and registers the Kubernetes executor
-// from the project config, when enabled.
+// The identity the Kubernetes executor authenticates with now lives in
+// reconcile.BrokerCredentials, so the CLI and the two server entry points
+// cannot disagree about it. It reads the broker out of the directory being
+// reconciled rather than out of os.Getwd(), which is the bug that made a hub
+// started with an explicit workdir look at the wrong state database.
+
+// hostsControlPlane reports whether a command constructs a cloop server that
+// runs its own executor reconciliation.
 //
-// Unlike the container driver this one cannot be constructed from config
-// alone: its credentials come from the secret broker, so registration needs
-// an open state database and a decryption key. A missing key is the ordinary
-// "not adopted yet" state and is reported once, not treated as fatal — cloop
-// has dozens of subcommands that never execute a workload, and refusing to
-// run `cloop status` because CLOOP_SECRET_KEY is unset would be absurd.
-//
-// The database handle is deliberately not closed: the executor holds the
-// broker for the process's lifetime and needs it on every Start. For a
-// short-lived CLI invocation the process exit closes it; for the UI server
-// the handle is meant to live as long as the server does.
-//
-// reconcile asks for the startup orphan sweep. It is passed rather than
-// assumed because the sweep costs API calls, and paying them on every
-// `cloop status` would be a poor trade for a cleanup that only matters after
-// a control plane died mid-run.
-func registerKubernetesExecutor(cfg *config.Config, reconcile bool) {
-	if cfg == nil || !cfg.Executors.Kubernetes.Enabled {
-		return
+// Those commands must not be reconciled from the CLI's cwd first: whichever
+// pass registers an executor ID owns it, and the server's pass — which reads
+// the directory the server was actually given — would silently reuse the cwd
+// one instead. Today the two directories happen to agree, which is precisely
+// why this needs stating rather than leaving to luck.
+func hostsControlPlane(cmdName string) bool {
+	switch cmdName {
+	case "ui", "serve":
+		return true
 	}
-	opts, err := cfg.Executors.Kubernetes.DriverOptions()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "warning: executors.kubernetes is enabled but invalid: %v\n", err)
-		return
-	}
-
-	source, err := kubernetesCredentialSource(cfg, opts.ID)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "warning: kubernetes executor %q: %v\n", opts.ID, err)
-		return
-	}
-	opts.Credentials = source
-
-	kex, err := kubernetes.Ensure(executor.DefaultRegistry, opts)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "warning: kubernetes executor %q could not be registered: %v\n", opts.ID, err)
-		fmt.Fprintf(os.Stderr, "         projects bound to it will fail rather than run on this host.\n")
-		return
-	}
-
-	if !reconcile {
-		return
-	}
-	// Detached and bounded: a cluster that is slow to answer must not delay
-	// the command the operator actually ran, and a sweep that cannot finish
-	// in a minute is one the next startup can finish instead.
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-		defer cancel()
-		removed, err := kex.ReconcileOrphans(ctx)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "warning: kubernetes executor %q could not reconcile orphaned Pods: %v\n",
-				opts.ID, err)
-			return
-		}
-		if len(removed) > 0 {
-			fmt.Fprintf(os.Stderr, "kubernetes: garbage-collected %d orphaned Pod(s) from a previous run: %s\n",
-				len(removed), strings.Join(removed, ", "))
-		}
-	}()
-}
-
-// kubernetesCredentialSource picks the identity the Kubernetes executor will
-// authenticate with. There are exactly two, and config decides which — never
-// a fallback from one to the other, because an executor that quietly used a
-// different identity than the operator configured is an audit trail that
-// lies.
-func kubernetesCredentialSource(cfg *config.Config, execID string) (kubernetes.CredentialSource, error) {
-	k := cfg.Executors.Kubernetes
-	if k.InCluster {
-		src, err := kubernetes.NewInClusterSource(k.Namespace)
-		if err != nil {
-			return nil, fmt.Errorf("in_cluster is set but the ServiceAccount is unusable: %w", err)
-		}
-		return src, nil
-	}
-
-	broker, _, err := openBroker()
-	if err != nil {
-		return nil, fmt.Errorf("needs a secret broker for its kubeconfig: %w.\n"+
-			"         Set CLOOP_SECRET_KEY and grant a kubeconfig with "+
-			"`cloop secret grant <secret> --to executor:%s`, or set "+
-			"executors.kubernetes.in_cluster when the hub runs inside the target cluster",
-			err, execID)
-	}
-	return kubernetes.NewBrokerSource(broker, execID, k.KubeconfigSecret, k.Context)
+	return false
 }
 
 // wantsPodReconcile reports whether a command is long-running enough to be

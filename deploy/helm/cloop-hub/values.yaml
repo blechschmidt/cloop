@@ -91,7 +91,19 @@ config:
   # false means no run can ever fork a harness on the hub Pod. Leave it.
   # The hub becomes useful by having an executor (below), not by being
   # allowed to execute.
+  #
+  # Because that is true, the chart REFUSES to render when this is false and
+  # executor.kubernetes.enabled is also false: such a hub refuses every run
+  # and its /readyz never goes green, so the install would hang at 0/1
+  # Available rather than fail with a reason. Enable the Kubernetes executor,
+  # or set the escape hatch below.
   allowHostProcess: false
+
+  # Skip that check. For adopting a hub whose fleet is enrolled remote agents:
+  # it starts not-ready — correctly, it has nothing to dispatch to — and
+  # becomes ready when the first agent connects. Raise
+  # readinessProbe.failureThreshold if agents dial in slowly.
+  allowIsolationlessInstall: false
 
   # Verbatim extra YAML merged into the generated config.yaml at the top
   # level. For settings the chart does not model — budgets, webhooks,

@@ -353,12 +353,65 @@ startWorkload(workDir, argv, labels)
 commands: it calls `executor.Run`, which ties workload lifetime to the caller's
 context and collects combined output with a 4 MiB tail-heavy cap.
 
-At boot, `bootstrapExecutors(dir)` (`executor.go:82`) runs in a fixed order that
-is itself a safety property: **apply the host-execution policy first**, then
-register built-ins, then install the persistent binding lookup, sync the
-registry to the store, and only then start the supervisor. Registering before
-applying the policy would leave a window in which a host executor is
-schedulable.
+## Startup reconciliation
+
+At boot, `bootstrapExecutors(dir)` runs in a fixed order that is itself a
+safety property:
+
+1. **apply the host-execution policy** — first, because registering before
+   applying it would leave a window in which a host executor is schedulable;
+2. **register the built-in host driver** — before the configured ones, so it
+   stays the registry default on a permissive single-machine install. Under
+   strict mode this registration is refused and the first isolating driver
+   becomes the default instead;
+3. **reconcile the configured drivers** — `reconcile.Bootstrap(dir, cfg, opts)`;
+4. install the persistent binding lookup, sync the registry to the store, and
+   only then start the supervisor.
+
+Step 3 is `pkg/executor/reconcile`, and all three hosting entry points go
+through it: `cloop ui`, `cloop serve`, and every CLI command via
+`cmd/root.go`'s `PersistentPreRunE`. It cannot live in `pkg/executor` itself —
+`pkg/config` imports the container and Kubernetes driver packages for their
+`Options` types, so a `pkg/executor` that imported `pkg/config` would close an
+import cycle.
+
+Reconciliation reads `executors.container.*` and `executors.kubernetes.*`,
+builds each enabled driver, runs its preflight, and records a **diagnostic**
+per driver: `id`, `kind`, `status`, `registered`, `message`, `remediation`, and
+the preflight checklist. Three statuses matter:
+
+| Status | Registered? | Meaning |
+| --- | --- | --- |
+| `ok` | yes | built and preflight found nothing fatal |
+| `degraded` | yes | built, but preflight found a fatal problem |
+| `failed` | no | could not be built at all — no container runtime on PATH, no kubeconfig grant |
+
+`degraded` staying registered is deliberate. Preflight is a point-in-time probe
+of a remote system; a driver dropped because the cluster was restarting during
+boot would stay gone until someone restarted the hub, which is worse than one
+that reports the problem and lets the next dispatch retry.
+
+`Bootstrap` registers synchronously and preflights in the background, because
+the two halves have opposite latency budgets: registration must finish before
+the listener opens (or `/readyz` would report a hub with no executors as ready
+purely because bootstrap had not got there yet), while preflight is a runtime
+round-trip that would make `cloop ui` look hung on a host with a wedged docker
+daemon. Running both is safe because reconciliation is **idempotent** — a
+driver already in the registry is reused rather than rebuilt, which matters
+beyond tidiness for the Kubernetes driver, whose credential source opens a
+state database it holds for the process's lifetime.
+
+Diagnostics are surfaced in three places, so a failure cannot be silent:
+
+- **startup logs**, one line per driver plus the remediation;
+- **`GET /api/executors`**, as a `reconciliation` block and as per-card
+  `reconcile_status` / `reconcile_remediation` fields. A `failed` driver has no
+  registry entry and no `executors` row, so this is the *only* place it
+  appears;
+- **`/readyz`**, which reports `not_ready` with `"check": "executors"` when
+  strict mode is on and no isolating executor is registered. That verdict is
+  computed live rather than frozen at startup, so a hub becomes ready the
+  moment an edge device enrolls.
 
 ---
 

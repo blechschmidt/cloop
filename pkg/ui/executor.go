@@ -21,6 +21,7 @@ package ui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -32,6 +33,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/localprocess"
+	"github.com/blechschmidt/cloop/pkg/executor/reconcile"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 )
@@ -69,16 +71,23 @@ func controlPlaneDir() string {
 // executor; Resolve then fails closed rather than falling back here.
 func registerBuiltinExecutors() {
 	builtinExecutorsOnce.Do(func() {
-		if err := localprocess.Ensure(executor.DefaultRegistry); err != nil {
-			fmt.Fprintf(os.Stderr, "ui: register local executor: %v\n", err)
+		err := localprocess.Ensure(executor.DefaultRegistry)
+		// Under strict mode this refusal is the designed outcome, not a
+		// problem: the policy exists to keep the host driver out. Logging it
+		// printed an alarming line on every hardened start — and, because the
+		// isolating drivers are reconciled a moment later, one whose
+		// "no isolated executor is configured" advice was usually false.
+		if err == nil || errors.Is(err, executor.ErrHostExecutionDenied) {
+			return
 		}
+		fmt.Fprintf(os.Stderr, "ui: register local executor: %v\n", err)
 	})
 }
 
-// bootstrapExecutors registers the built-in drivers, applies the host-execution
-// policy, points the registry at this control plane's persisted
-// project→executor bindings, and records a row for every backend that can run
-// work.
+// bootstrapExecutors registers the built-in drivers, reconciles the
+// configured isolating ones, applies the host-execution policy, points the
+// registry at this control plane's persisted project→executor bindings, and
+// records a row for every backend that can run work.
 func bootstrapExecutors(dir string) {
 	// Policy first. Registration of a non-isolating driver is refused under
 	// strict mode, so reading the config after registering would let the host
@@ -87,7 +96,15 @@ func bootstrapExecutors(dir string) {
 	// other entry points also register; doing it in the right order here
 	// means the refusal is the normal path rather than the repair.)
 	applyHostExecutionPolicy(dir)
+	// Host driver before the configured ones so it keeps being the registry
+	// default on a permissive single-machine install — Register makes the
+	// first executor the default, and an operator who enabled a container
+	// sandbox without binding any project to it should not silently have
+	// every project move into it. Under strict mode this registration is
+	// refused and the first isolating driver below becomes the default,
+	// which is exactly what that mode is asking for.
 	registerBuiltinExecutors()
+	reconcileConfiguredExecutors(dir)
 	controlPlaneDirMu.Lock()
 	controlPlaneDirValue = dir
 	controlPlaneDirMu.Unlock()
@@ -126,6 +143,63 @@ func applyHostExecutionPolicy(dir string) {
 		return
 	}
 	executor.ApplyHostExecutionPolicy(cfg.Executors.HostProcessAllowed())
+}
+
+// reconcileConfiguredExecutors brings up the container and Kubernetes drivers
+// this control plane's config enables (Task 20170).
+//
+// Before it, only the localprocess driver was registered here and the
+// isolating drivers came up from cmd/root.go's PersistentPreRunE — keyed off
+// os.Getwd() rather than the directory this server was handed, and with any
+// failure printed to stderr and forgotten. A hub deployed from the Helm chart
+// with allow_host_process: false therefore had the host driver correctly
+// refused and no isolating driver registered, and nothing anywhere said so.
+//
+// A config that cannot be read is not an error: single-project `cloop ui`
+// runs in directories that have no executors section at all, and the host
+// driver registered above is the whole configuration those deployments need.
+func reconcileConfiguredExecutors(dir string) {
+	if strings.TrimSpace(dir) == "" {
+		return
+	}
+	cfg, err := config.Load(dir)
+	if err != nil || cfg == nil {
+		return
+	}
+	reconcile.Bootstrap(dir, cfg, reconcile.Options{
+		// This is a process a control plane restarts as, so it is worth
+		// paying for the sweep that cleans up Pods a previous instance left
+		// running when it died mid-run.
+		ReconcileOrphans: true,
+		Logf: func(format string, args ...any) {
+			fmt.Fprintf(os.Stderr, "ui: "+format+"\n", args...)
+		},
+	})
+}
+
+// restoreEnrolledExecutors registers an offline executor for every agent that
+// previously enrolled, before the listener opens.
+//
+// The agent hub is otherwise built lazily on the first request that touches
+// it, and under strict mode that is a deadlock (Task 20170). A hub whose only
+// isolating backends are edge devices starts with an empty registry, so
+// /readyz reports not-ready, so Kubernetes drops it from the Service
+// Endpoints, so no agent can reach /api/executors/connect to be restored — and
+// the hub never becomes ready again. Since edge devices are a first-class
+// fleet for cloop, not an edge case, the restore has to happen before anything
+// can observe readiness.
+//
+// It runs from Run rather than from bootstrapExecutors because the hub
+// captures ExternalURL and AllowedOrigins, which cmd/ui_cmd.go sets on the
+// Server *after* New returns. Building it during New would freeze empty origin
+// rules into a sync.Once for the process's lifetime.
+//
+// A failure is logged, not fatal: a control plane that cannot read its agent
+// table should still serve the dashboard that lets someone fix it.
+func (s *Server) restoreEnrolledExecutors() {
+	if _, err := s.remoteHub(); err != nil {
+		fmt.Fprintf(os.Stderr, "ui: restore enrolled executors: %v\n", err)
+	}
 }
 
 // denyHostSideEffect refuses a handler that must run a program on the

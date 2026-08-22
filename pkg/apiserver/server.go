@@ -23,8 +23,10 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/apierror"
 	"github.com/blechschmidt/cloop/pkg/boundedread"
+	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/localprocess"
+	"github.com/blechschmidt/cloop/pkg/executor/reconcile"
 	"github.com/blechschmidt/cloop/pkg/logger"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/reqid"
@@ -158,14 +160,55 @@ var builtinExecutorsOnce sync.Once
 // grants permission to run.
 func registerBuiltinExecutors() {
 	builtinExecutorsOnce.Do(func() {
-		if err := localprocess.Ensure(executor.DefaultRegistry); err != nil {
-			fmt.Fprintf(os.Stderr, "apiserver: register local executor: %v\n", err)
+		err := localprocess.Ensure(executor.DefaultRegistry)
+		// A strict-mode refusal is the designed outcome, not a problem — the
+		// policy exists to keep the host driver out. See the same guard in
+		// pkg/ui.
+		if err == nil || errors.Is(err, executor.ErrHostExecutionDenied) {
+			return
 		}
+		fmt.Fprintf(os.Stderr, "apiserver: register local executor: %v\n", err)
+	})
+}
+
+// bootstrapExecutors applies the host-execution policy, registers the
+// built-in host driver, and reconciles the isolating executors this control
+// plane's config enables (Task 20170).
+//
+// Policy first, host driver second, configured drivers third — the same order
+// pkg/ui uses, and for the same two reasons. Registration of a non-isolating
+// driver is refused under strict mode, so reading the config afterwards would
+// let the host driver in through the door the policy exists to close; and
+// registering the host driver before the isolating ones keeps it the registry
+// default on a permissive single-machine install, where making a configured
+// container sandbox the default would silently move every unbound project
+// into it.
+//
+// A config that cannot be read leaves the host driver as the only backend,
+// which is what a plain `cloop serve` in a git checkout wants.
+func bootstrapExecutors(dir string) {
+	var cfg *config.Config
+	if strings.TrimSpace(dir) != "" {
+		if loaded, err := config.Load(dir); err == nil && loaded != nil {
+			cfg = loaded
+			executor.ApplyHostExecutionPolicy(cfg.Executors.HostProcessAllowed())
+		}
+	}
+	registerBuiltinExecutors()
+	if cfg == nil {
+		return
+	}
+	reconcile.Bootstrap(dir, cfg, reconcile.Options{
+		ReconcileOrphans: true,
+		Logf: func(format string, args ...any) {
+			fmt.Fprintf(os.Stderr, "apiserver: "+format+"\n", args...)
+		},
 	})
 }
 
 // New creates a new API server.
 func New(workdir string, port int, token string) *Server {
+	bootstrapExecutors(workdir)
 	return &Server{
 		WorkDir:   workdir,
 		Port:      port,
@@ -538,26 +581,55 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 // this work directory; any failure yields 503 with a JSON body that
 // names the failing check. The check is bounded by a 1s timeout so a
 // hung database cannot block the probe response.
+// It also gates on the execution path (Task 20170): a strict-mode server with
+// no isolating executor registered can only answer run requests with a 409,
+// so reporting it ready would have an orchestrator send it traffic it cannot
+// serve. That gate is deliberately not routed through Server.ReadyCheck —
+// that hook exists so a test can stub out SQLite, and letting it also
+// suppress the execution-path check would mean the guarantee held only where
+// nobody had stubbed anything.
 func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
-	check := s.ReadyCheck
-	if check == nil {
-		check = s.defaultReadyCheck
+	storage := s.ReadyCheck
+	if storage == nil {
+		storage = s.defaultReadyCheck
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), readyCheckTimeout)
 	defer cancel()
 
 	w.Header().Set("Content-Type", "application/json")
-	if err := check(ctx); err != nil {
-		w.WriteHeader(http.StatusServiceUnavailable)
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"status": "not_ready",
-			"check":  "sqlite",
-			"error":  err.Error(),
-		})
+	if err := storage(ctx); err != nil {
+		writeNotReady(w, "sqlite", err)
+		return
+	}
+	if err := reconcile.Ready(); err != nil {
+		writeNotReady(w, "executors", err)
 		return
 	}
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(`{"status":"ready","check":"sqlite"}`))
+}
+
+// writeNotReady emits the 503 body, naming the gate that failed and — for
+// the executor gate — carrying the remediation as its own field so an
+// operator reading `kubectl describe pod` gets the fix, not just the symptom.
+func writeNotReady(w http.ResponseWriter, check string, err error) {
+	w.WriteHeader(http.StatusServiceUnavailable)
+	body := map[string]any{
+		"status": "not_ready",
+		"check":  check,
+		"error":  err.Error(),
+	}
+	var notReady *reconcile.NotReadyError
+	if errors.As(err, &notReady) {
+		body["reason"] = notReady.Reason
+		if notReady.Remediation != "" {
+			body["remediation"] = notReady.Remediation
+		}
+		if len(notReady.Diagnostics) > 0 {
+			body["diagnostics"] = notReady.Diagnostics
+		}
+	}
+	_ = json.NewEncoder(w).Encode(body)
 }
 
 // defaultReadyCheck verifies the state store is initialized at the server's

@@ -1,3 +1,20 @@
+{{- /*
+Refuse to render a hub that cannot run anything.
+
+With allowHostProcess false and no isolating executor configured, the hub comes
+up correctly refusing every run, and /readyz reports not-ready — so the
+Deployment never reaches Available and `helm install` hangs until it times out
+with nothing useful said. Failing here turns that into a message naming the two
+values that resolve it.
+
+Enrolled remote agents are the third way to satisfy this, but a fresh install
+has none, so requiring one of the two in-cluster backends is right for a first
+render. Set config.allowIsolationlessInstall to skip this when adopting an
+existing hub whose fleet is edge devices.
+*/ -}}
+{{- if and (not .Values.config.allowHostProcess) (not .Values.executor.kubernetes.enabled) (not .Values.config.allowIsolationlessInstall) }}
+{{- fail "cloop-hub: config.allowHostProcess is false but no isolating executor is enabled, so this hub could not run any workload and would never pass its readiness probe.\n\nPick one:\n  --set executor.kubernetes.enabled=true    schedule runs as ephemeral Pods (recommended; the chart installs the Role)\n  --set config.allowHostProcess=true        run harnesses in the hub Pod itself (no isolation boundary)\n  --set config.allowIsolationlessInstall=true   you will enroll remote agents; the hub starts not-ready until one does" }}
+{{- end }}
 {{- if .Values.config.fromConfigMap }}
 apiVersion: v1
 kind: ConfigMap
