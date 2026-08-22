@@ -68,6 +68,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/internal/logbus"
+	"github.com/blechschmidt/cloop/pkg/imagepolicy"
 )
 
 // DefaultID is the executor ID used when none is configured.
@@ -229,6 +230,16 @@ type Options struct {
 	// Credentials supplies the kubeconfig lease. Required.
 	Credentials CredentialSource
 
+	// ImagePolicy constrains the images a *project* may name in its
+	// .cloop/sandbox.yaml (Task 20177). The zero value constrains nothing.
+	//
+	// It matters more here than on the container backend. There, a tag is
+	// resolved against a local store and the digest is what runs; a cluster
+	// has no store the control plane can read, so a tag in a Pod spec is
+	// resolved by a kubelet, on a node, at a time nobody controls. Setting
+	// require_digest is the only way to make a Kubernetes run reproducible.
+	ImagePolicy imagepolicy.Policy
+
 	// now overrides the clock for tests.
 	now func() time.Time
 }
@@ -275,6 +286,10 @@ func (o Options) Normalize() (Options, error) {
 	if err := ValidateImageRef(o.Image); err != nil {
 		return o, err
 	}
+	if err := o.ImagePolicy.Validate(); err != nil {
+		return o, fmt.Errorf("kubernetes: image policy: %w", err)
+	}
+	o.ImagePolicy = o.ImagePolicy.Normalize()
 	for field, q := range map[string]string{
 		"cpu_request":             o.CPURequest,
 		"cpu_limit":               o.CPULimit,
@@ -332,6 +347,10 @@ func (o Options) Normalize() (Options, error) {
 type Executor struct {
 	id   string
 	opts Options
+	// verifier checks image signatures when opts.ImagePolicy requires them.
+	// A nil one fails closed, so a struct-literal Executor in a test refuses a
+	// signed-image policy rather than quietly satisfying it.
+	verifier imagepolicy.Verifier
 
 	mu      sync.Mutex
 	handles map[string]*record
@@ -383,9 +402,13 @@ func New(opts Options) (*Executor, error) {
 			norm.ID, norm.ID)
 	}
 	return &Executor{
-		id:      norm.ID,
-		opts:    norm,
-		handles: make(map[string]*record),
+		id:   norm.ID,
+		opts: norm,
+		// One verifier for the executor's lifetime so its per-digest cache
+		// survives across Pod creations; a fresh one per Pod would re-spawn
+		// cosign for every task in a project that runs one image.
+		verifier: imagepolicy.NewCosignVerifier(),
+		handles:  make(map[string]*record),
 	}, nil
 }
 
@@ -591,7 +614,7 @@ func (e *Executor) Start(ctx context.Context, spec executor.Spec) (executor.Hand
 
 	handleID := newHandleID()
 	namespace := e.namespaceFor(creds)
-	desired, err := e.buildPodFor(spec, handleID, namespace)
+	desired, err := e.buildPodFor(ctx, spec, handleID, namespace)
 	if err != nil {
 		release()
 		return executor.Handle{}, err
@@ -673,8 +696,51 @@ func podImage(created, desired *pod) string {
 	return ""
 }
 
+// authorizeImage applies the hub's image trust policy to a project-supplied
+// image reference, returning the reference that must go into the Pod.
+//
+// There is no Resolver here: a cluster's image store belongs to its nodes, and
+// the control plane cannot read it. So a tag cannot be pinned at this layer —
+// it can only be *required* to arrive pinned, which is what
+// sandbox.image_policy.require_digest does and why the shipped chart default
+// sets it. Without it the Pod carries a tag, some kubelet resolves it whenever
+// it happens to schedule, and the artifact that runs is not the one anything
+// evaluated. Authorize returns a warning saying so rather than leaving the
+// operator to deduce it.
+func (e *Executor) authorizeImage(ctx context.Context, ref string) (string, error) {
+	enforcer := imagepolicy.Enforcer{
+		Policy:   e.opts.ImagePolicy,
+		Verifier: e.verifier,
+	}
+	res, err := enforcer.Authorize(ctx, ref)
+	if err != nil {
+		return "", classifyImageDenial(err)
+	}
+	for _, w := range res.Warnings {
+		fmt.Fprintf(os.Stderr, "[kubernetes] sandbox image: %s\n", w)
+	}
+	return res.Ref, nil
+}
+
+// classifyImageDenial folds a policy refusal into this package's error
+// taxonomy.
+//
+// A reference that is not a reference is a broken file, so it carries
+// ErrInvalidSpec and the API renders it as 400 — the author edits the repo and
+// nothing on the hub changes. Every other rule is a well-formed request that
+// the operator's configuration forbids; it stays a *imagepolicy.DenyError so
+// the UI can render the rule and its remediation as a conflict rather than as a
+// syntax complaint the author cannot act on.
+func classifyImageDenial(err error) error {
+	var denied *imagepolicy.DenyError
+	if errors.As(err, &denied) && denied.Malformed() {
+		return fmt.Errorf("%w: sandbox image: %w", executor.ErrInvalidSpec, err)
+	}
+	return err
+}
+
 // buildPodFor turns a Spec plus this executor's options into a Pod object.
-func (e *Executor) buildPodFor(spec executor.Spec, handleID, namespace string) (*pod, error) {
+func (e *Executor) buildPodFor(ctx context.Context, spec executor.Spec, handleID, namespace string) (*pod, error) {
 	if spec.ResourceLimits.PIDs > 0 {
 		// A Pod cannot express a PID cap: podPidsLimit is a kubelet flag,
 		// set per node by the cluster operator. Accepting the number and not
@@ -696,12 +762,23 @@ func (e *Executor) buildPodFor(spec executor.Spec, handleID, namespace string) (
 	// A per-project image replaces the executor's configured one. It has
 	// already been through container.ValidateImageRef in the parser, and goes
 	// through this package's ValidateImageRef below on the way into the Pod.
+	//
+	// It also goes through the hub's image trust policy here, which is the
+	// last point before the reference becomes a field the API server accepts
+	// and a kubelet acts on. authorizeImage returns the digest-pinned form
+	// where the policy could obtain one, and that is what lands in the Pod:
+	// past this line the project's tag does not exist, so no later edit can
+	// reintroduce the window between deciding and pulling.
 	image := e.opts.Image
 	if override := strings.TrimSpace(spec.Image); override != "" {
-		if err := ValidateImageRef(override); err != nil {
+		authorized, err := e.authorizeImage(ctx, override)
+		if err != nil {
+			return nil, err
+		}
+		if err := ValidateImageRef(authorized); err != nil {
 			return nil, fmt.Errorf("%w: sandbox image: %w", executor.ErrInvalidSpec, err)
 		}
-		image = override
+		image = authorized
 	}
 
 	req := podRequest{

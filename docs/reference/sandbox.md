@@ -12,6 +12,7 @@ ceilings are — and the project describes the environment inside it.
 
 - [Schema](#schema)
 - [What a spec can and cannot do](#what-a-spec-can-and-cannot-do)
+- [Image trust policy](#image-trust-policy)
 - [Executor support](#executor-support)
 - [Reproducibility](#reproducibility)
 - [Errors](#errors)
@@ -103,6 +104,160 @@ through untouched. It is not an empty allowlist — reading it that way would
 strip the API key from every project that adds a `sandbox.yaml` purely to pin an
 image.
 
+## Image trust policy
+
+`image:` is the one field the narrowing rules above do not cover, because it is
+not a knob on the sandbox — it *is* the sandbox. Its entrypoint, its libraries
+and its PATH are the environment the harness runs in, and every credential the
+hub injects at start is handed to it. A pull request that chooses the image has
+chosen what executes; dropping capabilities around it does not change that.
+
+So the operator constrains which images a project may name, hub-wide, under
+`sandbox.image_policy` in `config.yaml`:
+
+```yaml
+sandbox:
+  image_policy:
+    # Registry hosts a project may pull from. Also accepts "*.example.com"
+    # (subdomains, at a label boundary) and "*" (any registry).
+    allowed_registries:
+      - ghcr.io
+
+    # Optional: narrow to particular repositories. A trailing "/*" matches at
+    # a path-component boundary.
+    allowed_repos:
+      - ghcr.io/acme/*
+
+    # Refuse a reference pinned only to a tag.
+    require_digest: true
+
+    # Refuse an image cosign cannot verify. Needs the cosign binary on the hub.
+    require_signature: false
+    cosign_public_keys:
+      - /etc/cloop/cosign/acme.pub
+    cosign_identities:
+      - issuer: https://token.actions.githubusercontent.com
+        subject_regexp: ^https://github\.com/acme/.+
+
+    # Qualify a reference that names no registry. Unset, "alpine:3" is refused.
+    default_registry: ""
+```
+
+The policy is **deny-by-default within each rule it configures**: with
+`allowed_registries` set, a registry not on it is refused. A section that is
+absent entirely constrains nothing, which is the single-developer default — a
+laptop's `image: python:3.12` keeps working across an upgrade. Rules that are
+*present* are the ones that bite, so `require_digest` on its own is a valid
+policy meaning "anywhere, but immutably".
+
+The policy governs **project-supplied images only**. `executors.container.image`
+and `executors.kubernetes.image` are the operator's own choice, made in the same
+file as the policy; running them through an allowlist the same person wrote
+would be a lint rather than a control.
+
+### Matching is on the parsed reference
+
+Every comparison is against the reference after it is parsed into
+(registry, repository, tag, digest) — never against the string. With
+`allowed_registries: [ghcr.io]`, all of these are refused:
+
+| Reference | Actually pulls from | Why a naive check passes it |
+| --- | --- | --- |
+| `evil.example/ghcr.io/tools` | `evil.example` | the allowed name appears as a repository path |
+| `ghcr.io.evil.example/tools` | `ghcr.io.evil.example` | the allowed name appears as a domain prefix |
+| `notghcr.io/tools` | `notghcr.io` | the allowed name is a suffix |
+| `ghсr.io/tools` | whatever its owner points it at | the `с` is Cyrillic; it renders identically |
+
+The last row is why the whole reference must be ASCII. A valid OCI reference is
+ASCII by grammar, so a non-ASCII byte is refused as malformed — which removes
+homographs, and the punycode a Unicode-aware normalizer would otherwise produce,
+in one rule rather than by enumerating lookalikes.
+
+Similarly, `allowed_repos: [ghcr.io/acme/*]` matches `ghcr.io/acme/tools` and
+`ghcr.io/acme/tools/nested`, and does **not** match `ghcr.io/acme-evil/tools`.
+
+### Digests, and why a tag is not enough
+
+`require_digest` refuses `image: ghcr.io/acme/tools:3.12` outright. Where it is
+off and a tag is accepted, the container executor resolves it to a digest and
+runs *that* — the tag stops existing before anything is inspected, built from or
+started, so a tag repointed between the check and the pull cannot change what
+runs.
+
+The Kubernetes executor cannot do this. A cluster's image store belongs to its
+nodes, so the control plane has nothing to resolve against; the Pod carries the
+reference to an API server and some kubelet resolves it later, on a node, when
+it schedules. **On Kubernetes, `require_digest: true` is the only thing that
+closes that window**, which is why the shipped Helm chart sets it.
+
+An accepted digest reference is reduced to its canonical `repo@sha256:…` form.
+A `repo:tag@sha256:…` resolves identically, but then the same artifact would
+appear under two spellings in Pod specs, audit rows and artifacts depending only
+on how it was written. The requested text is preserved in the task artifact's
+`sandbox_image_requested`.
+
+### Signatures
+
+`require_signature` verifies the image with [cosign](https://docs.sigstore.dev/cosign/),
+against `cosign_public_keys` (`cosign verify --key`) or `cosign_identities`
+(keyless, `--certificate-oidc-issuer` + `--certificate-identity-regexp`). Any
+one configured key or identity is enough — listing two describes a rotation or
+two trusted publishers, not a quorum.
+
+Two properties are worth stating because their opposites are the usual bugs:
+
+- **Verification is on the digest, never on a tag.** A signature checked against
+  a tag verifies whatever the tag pointed at during the check. An image that
+  cannot be pinned — a locally built one, with no registry digest — is therefore
+  refused under `require_signature` rather than passed.
+- **A missing cosign binary is a denial, not a skip.** A hub configured to
+  require signatures, on a host with no cosign, refuses every project image with
+  an installation diagnostic. The alternative is a hub that reports everything
+  as fine while verifying nothing, and the difference is invisible in every
+  other observable.
+
+`cosign_identities` requires `subject_regexp`. An issuer alone would trust every
+workflow at that provider, including one in a repository you have never heard
+of.
+
+Successful verifications are cached per (policy, digest) for an hour, so a
+project running one image all day spawns cosign once. A policy edit changes the
+cache key; failures are never cached.
+
+### Denials
+
+A refusal names the rule that produced it, and every rule has a remediation
+aimed at whoever can act on it:
+
+| Rule | Meaning |
+| --- | --- |
+| `reference-syntax` | not a usable image reference (includes non-ASCII) |
+| `unqualified-reference` | names no registry and the hub sets no `default_registry` |
+| `registry-allowlist` | the registry is not on `allowed_registries` |
+| `repository-allowlist` | the repository is not on `allowed_repos` |
+| `digest-required` | pinned to a tag under `require_digest` |
+| `digest-resolution` | had to be pinned and could not be |
+| `signature-required` | `require_signature` is on and verification did not pass |
+| `policy-configuration` | the policy itself is unusable |
+
+The check runs in three places, and all three apply the same rules:
+
+1. **`.cloop/sandbox.yaml` validation** — so a bad image is a config error
+   surfaced in the UI before a run starts, not a container that fails to launch.
+2. **The container executor**, before the image is pulled, inspected or run.
+3. **The Kubernetes pod builder**, before the reference becomes a field the API
+   server accepts.
+
+The executors are the authority — they are what runs the image — and the
+validation pass exists so the error arrives early and reads as a file problem.
+
+Every denial is written to the audit trail as `sandbox.image_denied`, carrying
+the project, the reference *as written* (not normalized — that would hide the
+homograph that is the reason to look), the rule and the parsed registry and
+repository. The question it is there to answer is not "did this one repo have a
+typo" but "did the same unknown registry get named across six projects in an
+hour".
+
 ## Executor support
 
 A spec is matched against the executor's advertised capabilities *before* the
@@ -193,6 +348,8 @@ can see.
 | Bound executor lacks a capability | 409 | `*executor.PlacementError` naming the constraint |
 | Un-isolated executor, or strict mode | 409 | `*executor.HostExecutionDeniedError`, listing isolated executors to bind to |
 | `capabilities.network` names a grant the project lacks | 409 | `*sandbox.GrantDeniedError`, with the command to request it |
+| `image:` is refused by the trust policy | 409 | `code: sandbox_image_denied`, naming the rule and its remediation |
+| `image:` is not a usable reference | 400 | `imagepolicy: malformed image reference: …` — the author fixes the file |
 
 Each carries its own remediation, which the Web UI renders as a separate element
 from the cause.

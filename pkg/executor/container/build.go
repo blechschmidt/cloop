@@ -35,6 +35,7 @@ import (
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/executor"
+	"github.com/blechschmidt/cloop/pkg/imagepolicy"
 )
 
 // DerivedImagePrefix is the repository derived sandbox images are tagged under.
@@ -151,6 +152,61 @@ func (e *Executor) ResolveImage(ctx context.Context, ref string) (string, error)
 	return id.Pinned(), nil
 }
 
+// ResolveDigest implements imagepolicy.Resolver against the local image store.
+//
+// It reports imagepolicy.ErrNoDigest rather than an error when the image is
+// present but carries no repo digest, which is the case for anything built
+// locally or loaded from a tarball. The two outcomes need opposite handling —
+// one means "nothing to pin to", the other means "the image is not here" — and
+// collapsing them would make a missing image look like an unsigned one.
+func (e *Executor) ResolveDigest(ctx context.Context, ref string) (string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	id, err := InspectImage(ctx, e.rt, ref)
+	if err != nil {
+		return "", err
+	}
+	_, digest, ok := strings.Cut(id.RepoDigest, "@")
+	if !ok || digest == "" {
+		return "", fmt.Errorf("%w: %s has no repo digest in the local store", imagepolicy.ErrNoDigest, ref)
+	}
+	return digest, nil
+}
+
+// authorizeImage applies the hub's image trust policy to a project-supplied
+// image reference, returning the reference the workload must actually run.
+//
+// It is called before the image is inspected, built from, or run — "before
+// pull/run" in the literal sense that nothing has touched the reference yet.
+// The returned string is digest-pinned whenever the store can resolve one, and
+// everything downstream uses that rather than the project's original text: the
+// tag stops existing at this line, so nothing later can accidentally use it.
+func (e *Executor) authorizeImage(ctx context.Context, ref string) (string, error) {
+	enforcer := imagepolicy.Enforcer{
+		Policy:   e.opts.ImagePolicy,
+		Resolver: e,
+		Verifier: e.verifier,
+	}
+	res, err := enforcer.Authorize(ctx, ref)
+	if err != nil {
+		// A reference that is not a reference is a broken file: it carries
+		// ErrInvalidSpec so the API renders it as 400 and the author fixes the
+		// repo. Every other rule is a well-formed request the operator's
+		// configuration forbids, and stays a *imagepolicy.DenyError so the UI
+		// renders the rule and its remediation as a conflict.
+		var denied *imagepolicy.DenyError
+		if errors.As(err, &denied) && denied.Malformed() {
+			return "", fmt.Errorf("%w: sandbox image: %w", executor.ErrInvalidSpec, err)
+		}
+		return "", err
+	}
+	for _, w := range res.Warnings {
+		fmt.Fprintf(os.Stderr, "[container] %s: %s\n", FileNameHint, w)
+	}
+	return res.Ref, nil
+}
+
 // sandboxImage returns the image a Spec should actually run, resolving the
 // per-project override and building a derived image when the spec carries
 // setup commands.
@@ -162,6 +218,16 @@ func (e *Executor) sandboxImage(ctx context.Context, spec executor.Spec) (ImageI
 	base := strings.TrimSpace(spec.Image)
 	if base == "" {
 		base = e.opts.Image
+	} else {
+		// A project-supplied override. This is the untrusted one — it came out
+		// of a repo — so it goes through the trust policy before it is
+		// inspected, built from, or run, and what comes back is what the rest
+		// of this function uses. The original tag is not carried forward.
+		authorized, err := e.authorizeImage(ctx, base)
+		if err != nil {
+			return ImageIdentity{}, err
+		}
+		base = authorized
 	}
 	baseID, err := InspectImage(ctx, e.rt, base)
 	if err != nil {

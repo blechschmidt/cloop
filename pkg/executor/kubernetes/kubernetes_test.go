@@ -862,7 +862,7 @@ func TestSpecTimeoutBecomesActiveDeadline(t *testing.T) {
 	spec := testSpec()
 	spec.TimeoutMinutes = 5
 
-	p, err := ex.buildPodFor(spec, "k-test", "cloop")
+	p, err := ex.buildPodFor(context.Background(), spec, "k-test", "cloop")
 	if err != nil {
 		t.Fatalf("buildPodFor: %v", err)
 	}
@@ -882,7 +882,7 @@ func TestSpecLimitsOverrideExecutorDefaults(t *testing.T) {
 	spec := testSpec()
 	spec.ResourceLimits = executor.ResourceLimits{CPUMillis: 2500, MemoryMB: 4096, DiskMB: 8192}
 
-	p, err := ex.buildPodFor(spec, "k-test", "cloop")
+	p, err := ex.buildPodFor(context.Background(), spec, "k-test", "cloop")
 	if err != nil {
 		t.Fatalf("buildPodFor: %v", err)
 	}

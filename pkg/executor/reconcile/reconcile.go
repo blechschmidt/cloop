@@ -491,6 +491,10 @@ func reconcileContainer(ctx context.Context, cfg *config.Config, opts Options) (
 			"then verify with `cloop config validate`"
 		return d, true
 	}
+	// The image trust policy lives in its own top-level section because it
+	// governs every backend identically, so it is attached here rather than in
+	// DriverOptions, which only sees executors.container.
+	driverOpts.ImagePolicy = cfg.Sandbox.ImagePolicy.Policy()
 	d.ID = driverOpts.ID
 
 	ex, err := ensureContainer(reg, driverOpts)
@@ -591,6 +595,8 @@ func reconcileKubernetes(ctx context.Context, dir string, cfg *config.Config, op
 			"then verify with `cloop config validate`"
 		return d, true
 	}
+	// Same policy, same section, both backends — see reconcileContainer.
+	driverOpts.ImagePolicy = cfg.Sandbox.ImagePolicy.Policy()
 	d.ID = driverOpts.ID
 
 	ex, created, err := ensureKubernetes(reg, dir, cfg, driverOpts, opts)

@@ -160,6 +160,36 @@ the run, with the constraint named.
 Full schema, the narrowing rules, per-executor support, and the digest pinning
 that keeps a run reproducible: **[Per-project sandbox](sandbox.md)**.
 
+### Image trust: `sandbox.image_policy`
+
+`image:` above is the one field the narrowing rules do not cover, because it is
+not a knob on the sandbox — it *is* the sandbox. Constrain which images a
+project may name:
+
+```yaml
+sandbox:
+  image_policy:
+    allowed_registries: [ghcr.io]     # also "*.example.com" or "*"
+    allowed_repos: [ghcr.io/acme/*]   # optional; empty means any repo there
+    require_digest: true              # refuse a reference pinned to a tag
+    require_signature: false          # cosign; needs the binary on the hub
+```
+
+Matching is on the **parsed** reference, so `ghcr.io` here admits neither
+`evil.example/ghcr.io/x` nor `ghcr.io.evil.example/x`, and a Unicode lookalike
+of it is refused as malformed. An accepted tag is resolved to a digest and the
+digest is what runs. An absent section constrains nothing, which keeps existing
+single-machine installs working across an upgrade.
+
+`require_digest` matters most on Kubernetes: the control plane cannot read a
+cluster's image store, so an unpinned reference is resolved by a kubelet, on a
+node, when it schedules. The [Helm chart](../../deploy/helm/cloop-hub) sets it,
+and defaults `allowed_registries` to the registry the hub's own image comes
+from.
+
+Rules, denial codes, the cosign contract and the audit record:
+**[Image trust policy](sandbox.md#image-trust-policy)**.
+
 ### Remote executors (edge devices)
 
 A remote executor runs work on a machine the control plane **cannot dial** —
@@ -331,9 +361,19 @@ executors:
   allow_host_process: false   # strict no-host-execution mode
   container:
     enabled: true             # …and give it somewhere else to run
+
+sandbox:
+  image_policy:               # …and constrain what "somewhere else" may be
+    allowed_registries: [ghcr.io]
+    require_digest: true
 ```
 
 or `cloop config set executors.allow_host_process false`.
+
+The image policy belongs in the same breath as the executor. Moving execution
+off the host and then letting a repo-committed file choose the image puts the
+untrusted code back on the trusted side of the boundary — the container is not
+the host, but its contents were still chosen by a pull request.
 
 This is the one setting a hosted deployment must flip. Absent means `true`, so
 existing single-machine installs keep working across an upgrade.

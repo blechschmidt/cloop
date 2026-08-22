@@ -18,6 +18,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/executor"
+	"github.com/blechschmidt/cloop/pkg/imagepolicy"
 )
 
 // GrantChecker reports whether a project already holds an active egress grant
@@ -124,6 +125,33 @@ func (s *Spec) SetupHash() string {
 	}
 	sum := sha256.Sum256([]byte(b.String()))
 	return hex.EncodeToString(sum[:])
+}
+
+// CheckImagePolicy evaluates the spec's image against the hub's trust policy.
+//
+// This is the *validation* surface, not the enforcement one. Enforcement lives
+// in the executors, where the reference is about to become a runtime argument
+// and can additionally be pinned and signature-checked. This runs earlier, from
+// the same place that parses the file, so a project whose image is refused
+// learns it as a config error naming the rule — before a run starts, before a
+// container is created, and in the same response as every other thing wrong
+// with its sandbox.yaml.
+//
+// The returned Decision is populated whether or not the image was allowed, so
+// the UI can render "this would be refused, because X" without an error path.
+// A spec with no image, or an unconfigured policy, yields a zero Decision and a
+// nil error.
+func (r *Resolved) CheckImagePolicy(p imagepolicy.Policy) (imagepolicy.Decision, error) {
+	if !r.Present() || r.Spec.Image == "" {
+		return imagepolicy.Decision{}, nil
+	}
+	decision, err := p.Evaluate(r.Spec.Image)
+	if err != nil {
+		// Wrapped with the file name because the author needs to be told which
+		// of their files is wrong, not only which rule refused it.
+		return decision, fmt.Errorf("%s: image: %w", FileName, err)
+	}
+	return decision, nil
 }
 
 // Requirements returns the placement constraints this spec implies.

@@ -295,8 +295,14 @@ func TestInspectImage_MissingImageNamesThePull(t *testing.T) {
 	}
 }
 
-// TestSandboxImage_PinsTheOverride: the spec names a tag, the handle records a
-// digest. That difference is the whole reproducibility claim.
+// TestSandboxImage_PinsTheOverride: the spec names a tag, and the tag stops
+// existing before anything is inspected, built from, or run.
+//
+// The reference is pinned at the trust-policy boundary (Task 20177) rather than
+// at the end, so there is no window in which a repointed tag could be resolved
+// twice to two different artifacts. That is why Ref here is the digest and not
+// the "alpine:3.20" the spec asked for — the requested text is preserved in the
+// task artifact's sandbox_image_requested, which is where a human wants it.
 func TestSandboxImage_PinsTheOverride(t *testing.T) {
 	ex := newTestExecutor(t, "alpine:3.20", nil)
 	image := requireImage(t, ex.rt, "alpine:3.20")
@@ -308,11 +314,27 @@ func TestSandboxImage_PinsTheOverride(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sandboxImage: %v", err)
 	}
-	if got.Ref != image {
-		t.Fatalf("Ref = %q, want the requested %q", got.Ref, image)
-	}
 	if got.ID == "" {
 		t.Fatal("no content id resolved")
+	}
+	if !strings.Contains(got.Ref, "@sha256:") {
+		t.Fatalf("Ref = %q, want a digest-pinned reference — a tag here is a TOCTOU window", got.Ref)
+	}
+	if strings.Contains(got.Ref, ":3.20") {
+		t.Errorf("the mutable tag survived into the reference that will be run: %q", got.Ref)
+	}
+	// Ref and RepoDigest may spell the repository differently — the policy
+	// preserves the name as written ("alpine"), the runtime reports the
+	// resolved one ("docker.io/library/alpine") — but they must name the same
+	// artifact, and Pinned(), which is what Start actually runs, must be the
+	// fully-qualified form.
+	_, refDigest, _ := strings.Cut(got.Ref, "@")
+	_, repoDigest, _ := strings.Cut(got.RepoDigest, "@")
+	if refDigest != repoDigest {
+		t.Errorf("Ref %q and RepoDigest %q are different artifacts", got.Ref, got.RepoDigest)
+	}
+	if got.Pinned() != got.RepoDigest {
+		t.Errorf("Pinned() = %q, want the fully-qualified %q", got.Pinned(), got.RepoDigest)
 	}
 }
 

@@ -62,6 +62,53 @@ executors:
   #   listen_addr: 127.0.0.1:8899
   #   max_session_minutes: 15
 
+# ── Image trust ─────────────────────────────────────────────────────────────
+# Which container images a *project* may name in its own .cloop/sandbox.yaml.
+#
+# That file arrives by `git pull`, and the image it names is not data the
+# sandbox processes — it is the sandbox. Without a policy here, "the hub never
+# runs untrusted code on the host" is true and beside the point, because the
+# code inside the container was chosen by a pull request.
+#
+# Deny by default: with allowed_registries set, an image from anywhere else is
+# refused with the rule named, and the refusal is recorded in the audit trail.
+# The rules apply to project-supplied images only — the executor's own image is
+# the operator's choice, made in this same file.
+#
+# The executors above are commented out in this stack, so nothing here has an
+# effect until one is enabled. It is written out anyway because enabling an
+# executor without an image policy is the gap this section exists to close.
+sandbox:
+  image_policy:
+    # Matching is on the parsed reference. "ghcr.io" here does not admit
+    # "ghcr.io.attacker.example/x" or "attacker.example/ghcr.io/x", and a
+    # Unicode lookalike of it is refused as a malformed reference.
+    allowed_registries:
+      - ghcr.io
+
+    # Narrow to particular repositories. A trailing "/*" matches at a
+    # path-component boundary, so this does not match ghcr.io/acme-evil/x.
+    # allowed_repos:
+    #   - ghcr.io/acme/*
+
+    # A tag is a mutable pointer: `image: python:3.12` is a different artifact
+    # in June than it was in March. The container executor resolves an accepted
+    # tag to a digest and runs that, so this is belt-and-braces there — but a
+    # Kubernetes Pod carries the reference to a kubelet that resolves it later
+    # on some node, where nothing but this can close the gap.
+    require_digest: true
+
+    # Verify signatures with cosign. Off here because the published hub image
+    # does not ship the cosign binary, and with it on a hub that cannot verify
+    # refuses every project image rather than admitting them unchecked. Turn it
+    # on with an image that has cosign, plus keys or identities:
+    #
+    # require_signature: true
+    # cosign_identities:
+    #   - issuer: https://token.actions.githubusercontent.com
+    #     subject_regexp: ^https://github\.com/acme/.+
+    require_signature: false
+
 # ── HTTP surface ────────────────────────────────────────────────────────────
 ui:
   # The public URL. Used to build OIDC redirects and to decide which origins

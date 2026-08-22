@@ -20,15 +20,19 @@ package ui
 // rather than at the code being worked on.
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/artifact"
+	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/egressbroker"
 	"github.com/blechschmidt/cloop/pkg/executor"
+	"github.com/blechschmidt/cloop/pkg/imagepolicy"
 	"github.com/blechschmidt/cloop/pkg/sandbox"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
+	"github.com/blechschmidt/cloop/pkg/statedb"
 )
 
 // applySandbox resolves the project's sandbox spec and folds it into spec.
@@ -49,6 +53,14 @@ func applySandbox(spec executor.Spec, ex executor.Executor, workDir string) (exe
 		return spec, resolved, nil
 	}
 
+	// Image trust, before anything else looks at the spec. The executors
+	// enforce this too — they are the authority, because they are what runs the
+	// image — but a refusal here reaches the author as a config error on the
+	// file they wrote, rather than as a container that failed to start.
+	if _, err := resolved.CheckImagePolicy(hubImagePolicy()); err != nil {
+		return spec, resolved, err
+	}
+
 	// Capability gate, against the executor this project is bound to.
 	if err := executor.CheckSandboxSupport(ex, resolved.Requirements(), workDir); err != nil {
 		return spec, resolved, err
@@ -59,6 +71,75 @@ func applySandbox(spec executor.Spec, ex executor.Executor, workDir string) (exe
 	}
 	spec.Env = resolved.FilterEnv(spec.Env)
 	return spec, resolved, nil
+}
+
+// hubImagePolicy reads the control plane's image trust policy.
+//
+// Read per call rather than cached, so an operator who tightens the policy sees
+// it apply to the next run instead of after a restart — the same expectation
+// every other section of config.yaml sets.
+//
+// A config that will not load yields the zero policy, which constrains nothing.
+// That is not a fail-open hole: this is the *early* check, and the executors
+// hold their own copy of the policy from the config that loaded successfully at
+// bootstrap. A hub whose config.yaml became unreadable mid-flight therefore
+// loses the friendly error, not the enforcement.
+func hubImagePolicy() imagepolicy.Policy {
+	dir := controlPlaneDir()
+	if dir == "" {
+		return imagepolicy.Policy{}
+	}
+	cfg, err := config.Load(dir)
+	if err != nil || cfg == nil {
+		return imagepolicy.Policy{}
+	}
+	return cfg.Sandbox.ImagePolicy.Policy()
+}
+
+// auditImageDenial records a container image refused by the trust policy, and
+// does nothing for any other error.
+//
+// It is called from the workload entry points rather than from applySandbox,
+// because a denial can come from either of two places: the early validation
+// check here, or the executor itself — which is also where a signature
+// verification failure is decided, and that is the denial an operator most
+// wants a row for. Emitting at the entry point catches both without either
+// layer having to know about the trail.
+//
+// The actor is "system": these functions are reached from handlers that know
+// who is signed in, but also from the supervisor's failover path, which is
+// nobody. Attributing a hub-side refusal to whichever human happened to trigger
+// the dispatch would be the more misleading of the two records; the identity
+// that started the run is already in the trail and correlates by project and
+// timestamp.
+func auditImageDenial(workDir string, err error) {
+	var denied *imagepolicy.DenyError
+	if !errors.As(err, &denied) {
+		return
+	}
+	dir := controlPlaneDir()
+	if dir == "" {
+		return
+	}
+	db, dbErr := statedb.Open(dir)
+	if dbErr != nil {
+		fmt.Fprintf(os.Stderr, "[ui] sandbox: audit image denial for %s: %v\n", workDir, dbErr)
+		return
+	}
+	defer db.Close()
+
+	in := statedb.ImagePolicyDenialInput{
+		ProjectPath: workDir,
+		Image:       denied.Ref,
+		Rule:        denied.Rule,
+		Reason:      denied.Reason,
+	}
+	// Re-parse for the structured components. A reference that does not parse
+	// leaves them empty, which is correct: there was no registry to record.
+	if ref, perr := imagepolicy.ParseReference(denied.Ref); perr == nil {
+		in.Registry, in.Repository = ref.Registry, ref.Repository
+	}
+	statedb.AuditImagePolicyDenial(db, in)
 }
 
 // recordSandboxProvenance writes the run's execution-environment record into

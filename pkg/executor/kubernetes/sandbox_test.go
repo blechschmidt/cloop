@@ -5,6 +5,7 @@ package kubernetes
 // and the refusal to pretend it can build an image.
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -28,7 +29,7 @@ func TestBuildPodFor_ImageOverride(t *testing.T) {
 	ex := sandboxExecutor(t)
 
 	t.Run("spec image wins", func(t *testing.T) {
-		p, err := ex.buildPodFor(executor.Spec{
+		p, err := ex.buildPodFor(context.Background(), executor.Spec{
 			Argv:  []string{"cloop", "run"},
 			Image: "ghcr.io/acme/rust:1.79",
 		}, "h1", "cloop")
@@ -41,7 +42,7 @@ func TestBuildPodFor_ImageOverride(t *testing.T) {
 	})
 
 	t.Run("absent spec image keeps the operator's", func(t *testing.T) {
-		p, err := ex.buildPodFor(executor.Spec{Argv: []string{"cloop"}}, "h2", "cloop")
+		p, err := ex.buildPodFor(context.Background(), executor.Spec{Argv: []string{"cloop"}}, "h2", "cloop")
 		if err != nil {
 			t.Fatalf("buildPodFor: %v", err)
 		}
@@ -51,7 +52,7 @@ func TestBuildPodFor_ImageOverride(t *testing.T) {
 	})
 
 	t.Run("a dangerous override is refused", func(t *testing.T) {
-		_, err := ex.buildPodFor(executor.Spec{
+		_, err := ex.buildPodFor(context.Background(), executor.Spec{
 			Argv:  []string{"cloop"},
 			Image: "--privileged",
 		}, "h3", "cloop")
@@ -66,7 +67,7 @@ func TestBuildPodFor_ImageOverride(t *testing.T) {
 // re-run per task and their result would die with the Pod.
 func TestBuildPodFor_RefusesSetup(t *testing.T) {
 	ex := sandboxExecutor(t)
-	_, err := ex.buildPodFor(executor.Spec{
+	_, err := ex.buildPodFor(context.Background(), executor.Spec{
 		Argv:          []string{"cloop"},
 		SetupCommands: []string{"pip install -r requirements.txt"},
 	}, "h", "cloop")
@@ -82,7 +83,7 @@ func TestBuildPodFor_RefusesSetup(t *testing.T) {
 
 func TestBuildPodFor_SandboxMounts(t *testing.T) {
 	ex := sandboxExecutor(t)
-	p, err := ex.buildPodFor(executor.Spec{
+	p, err := ex.buildPodFor(context.Background(), executor.Spec{
 		Argv: []string{"cloop"},
 		Mounts: []executor.SpecMount{
 			{Source: ".cache/pip", Target: "/home/agent/.cache/pip"},
@@ -132,7 +133,7 @@ func TestBuildPodFor_RejectsShadowingMounts(t *testing.T) {
 		"tmp":       "/tmp",
 	} {
 		t.Run(name, func(t *testing.T) {
-			_, err := ex.buildPodFor(executor.Spec{
+			_, err := ex.buildPodFor(context.Background(), executor.Spec{
 				Argv:   []string{"cloop"},
 				Mounts: []executor.SpecMount{{Source: "a", Target: target}},
 			}, "h", "cloop")
@@ -151,7 +152,7 @@ func TestBuildPodFor_RejectsEscapingMounts(t *testing.T) {
 		"unclean":  {Source: "a//b", Target: "/x"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if _, err := ex.buildPodFor(executor.Spec{
+			if _, err := ex.buildPodFor(context.Background(), executor.Spec{
 				Argv: []string{"cloop"}, Mounts: []executor.SpecMount{m},
 			}, "h", "cloop"); err == nil {
 				t.Fatalf("buildPodFor accepted %+v", m)
@@ -167,7 +168,7 @@ func TestBuildPodFor_EgressLabel(t *testing.T) {
 	ex := sandboxExecutor(t)
 	cases := map[bool]string{true: "deny", false: "allow"}
 	for disable, want := range cases {
-		p, err := ex.buildPodFor(executor.Spec{
+		p, err := ex.buildPodFor(context.Background(), executor.Spec{
 			Argv:           []string{"cloop"},
 			DisableNetwork: disable,
 		}, "h", "cloop")
@@ -182,7 +183,7 @@ func TestBuildPodFor_EgressLabel(t *testing.T) {
 
 func TestBuildPodFor_SandboxHashAnnotation(t *testing.T) {
 	ex := sandboxExecutor(t)
-	p, err := ex.buildPodFor(executor.Spec{
+	p, err := ex.buildPodFor(context.Background(), executor.Spec{
 		Argv:        []string{"cloop"},
 		SandboxHash: "9f2c8a",
 	}, "h", "cloop")

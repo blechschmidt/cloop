@@ -308,12 +308,16 @@ func startWorkload(workDir string, argv []string, labels map[string]string) (exe
 	spec, sandboxSpec, err := applySandbox(spec, ex, workDir)
 	if err != nil {
 		lease.Close()
+		auditImageDenial(workDir, err)
 		return nil, executor.Handle{}, err
 	}
 
 	handle, err := ex.Start(context.Background(), spec)
 	if err != nil {
 		lease.Close()
+		// The executor enforces the image policy too, and it is the layer that
+		// verifies signatures — so a denial can surface here and not above.
+		auditImageDenial(workDir, err)
 		return nil, executor.Handle{}, err
 	}
 	go wipeLeaseOnExit(ex, handle.ID, lease)
@@ -386,9 +390,13 @@ func runWorkload(ctx context.Context, workDir string, argv []string, labels map[
 
 	spec, _, err := applySandbox(applyLease(uiSpec(workDir, argv, labels), lease), ex, workDir)
 	if err != nil {
+		auditImageDenial(workDir, err)
 		return nil, err
 	}
 	res, runErr := executor.Run(ctx, ex, spec)
+	if runErr != nil {
+		auditImageDenial(workDir, runErr)
+	}
 	return res.Output, runErr
 }
 

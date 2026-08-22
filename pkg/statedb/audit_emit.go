@@ -205,6 +205,71 @@ func AuditExecutorLifecycle(d *DB, in ExecutorAuditInput) {
 	})
 }
 
+// ImagePolicyDenialInput carries one refused container image to the audit log
+// (Task 20177).
+//
+// This is the one sandbox decision worth a permanent row. The others describe
+// a project asking for less than it could have; this one describes a project
+// asking to execute code from somewhere the operator does not trust, and the
+// question it has to answer later is "was this a typo in one repo, or did the
+// same unknown registry get named across six projects in an hour". Only a
+// durable, queryable trail answers the second.
+type ImagePolicyDenialInput struct {
+	// ProjectPath identifies the project whose .cloop/sandbox.yaml was
+	// refused. It is the entity the row is filed under.
+	ProjectPath string
+	// Image is the reference as the project wrote it, unmodified — the
+	// normalized form would hide exactly the homograph or confusion attempt
+	// that is the reason to look.
+	Image string
+	// Rule is the imagepolicy rule that refused it ("registry-allowlist",
+	// "digest-required", …). Kept as the same string the API and the error
+	// text use, so filtering the trail and reading a bug report agree.
+	Rule string
+	// Reason is the human-readable observation.
+	Reason string
+	// Registry and Repository are the parsed components, empty when the
+	// reference did not parse. They are what makes "show me every denial for
+	// this registry" a query rather than a grep.
+	Registry   string
+	Repository string
+	// Actor is the acting identity, normally the OIDC subject label.
+	Actor string
+}
+
+// AuditImagePolicyDenial records a container image refused by the hub's trust
+// policy. Best-effort, like every other emitter here.
+func AuditImagePolicyDenial(d *DB, in ImagePolicyDenialInput) {
+	if in.Image == "" && in.Rule == "" {
+		return
+	}
+	actor := in.Actor
+	if actor == "" {
+		actor = "system"
+	}
+	payload := map[string]any{
+		"image":  in.Image,
+		"rule":   in.Rule,
+		"reason": in.Reason,
+	}
+	if in.ProjectPath != "" {
+		payload["project"] = in.ProjectPath
+	}
+	if in.Registry != "" {
+		payload["registry"] = in.Registry
+	}
+	if in.Repository != "" {
+		payload["repository"] = in.Repository
+	}
+	emit(d, &AuditEvent{
+		Actor:      actor,
+		EventType:  "sandbox.image_denied",
+		EntityType: "project",
+		EntityID:   in.ProjectPath,
+		Payload:    MarshalAuditPayload(payload),
+	})
+}
+
 func auditStateSave(d *DB, s *State) {
 	if s == nil {
 		return

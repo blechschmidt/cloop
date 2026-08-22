@@ -239,6 +239,13 @@ type Config struct {
 	// Absent means "host process only", which is the zero-configuration
 	// single-machine default.
 	Executors ExecutorsConfig `yaml:"executors,omitempty"`
+
+	// Sandbox configures the envelope around a project's own
+	// .cloop/sandbox.yaml (Task 20177). It is a separate section from
+	// Executors because it governs what a *project* may ask for, not what
+	// backends the operator runs — and it applies identically to every
+	// backend that honours an image override.
+	Sandbox SandboxConfig `yaml:"sandbox,omitempty"`
 }
 
 // ExecutorsConfig groups the execution backends a control plane offers.
@@ -1563,7 +1570,7 @@ func (c *Config) ValidateNumeric() error {
 	if err := ValidateExecutors(c.Executors); err != nil {
 		return err
 	}
-	return nil
+	return ValidateSandbox(c.Sandbox)
 }
 
 // applyEnvVars overlays environment variable values onto config fields.

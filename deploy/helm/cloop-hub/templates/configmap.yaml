@@ -15,6 +15,17 @@ existing hub whose fleet is edge devices.
 {{- if and (not .Values.config.allowHostProcess) (not .Values.executor.kubernetes.enabled) (not .Values.config.allowIsolationlessInstall) }}
 {{- fail "cloop-hub: config.allowHostProcess is false but no isolating executor is enabled, so this hub could not run any workload and would never pass its readiness probe.\n\nPick one:\n  --set executor.kubernetes.enabled=true    schedule runs as ephemeral Pods (recommended; the chart installs the Role)\n  --set config.allowHostProcess=true        run harnesses in the hub Pod itself (no isolation boundary)\n  --set config.allowIsolationlessInstall=true   you will enroll remote agents; the hub starts not-ready until one does" }}
 {{- end }}
+{{- /*
+Refuse to render a signature requirement with nothing to verify against.
+
+The hub would come up and deny every project image with a message about cosign,
+sending the operator to debug their installation rather than their values file.
+The Go validator catches this too, but by then it is a failed executor card in
+the dashboard rather than a line in `helm install`'s output.
+*/ -}}
+{{- if and .Values.sandbox.imagePolicy.requireSignature (not .Values.sandbox.imagePolicy.cosignPublicKeys) (not .Values.sandbox.imagePolicy.cosignIdentities) }}
+{{- fail "cloop-hub: sandbox.imagePolicy.requireSignature is true but neither cosignPublicKeys nor cosignIdentities is set, so there is nothing to verify signatures against and every project image would be refused.\n\nSet one of:\n  sandbox.imagePolicy.cosignPublicKeys   paths to public keys inside the hub Pod\n  sandbox.imagePolicy.cosignIdentities   keyless {issuer, subjectRegexp} pairs\n\nNote also that requireSignature needs the cosign binary in the hub image; the published image does not ship it." }}
+{{- end }}
 {{- if .Values.config.fromConfigMap }}
 apiVersion: v1
 kind: ConfigMap
@@ -64,6 +75,40 @@ data:
         active_deadline_seconds: {{ .Values.executor.kubernetes.activeDeadlineSeconds }}
         max_concurrent: {{ .Values.executor.kubernetes.maxConcurrent }}
     {{- end }}
+
+    # Which images a project's own .cloop/sandbox.yaml may name. Deny by
+    # default: anything not matching is refused with the rule named, and the
+    # refusal is recorded in the audit trail.
+    #
+    # allowed_registries defaults to the registry image.repository pulls from,
+    # so a fresh install already constrains projects to the one registry this
+    # deployment has decided to trust rather than to the whole Internet.
+    #
+    # It governs project-supplied images only. The executor's own image, above,
+    # is the operator's choice made in this same file — running it through an
+    # allowlist the same person wrote would be a lint, not a control, and with
+    # require_digest on it would refuse the hub's own tagged image at boot.
+    sandbox:
+      image_policy:
+        allowed_registries: {{ toJson (default (list (include "cloop-hub.imageRegistry" .)) .Values.sandbox.imagePolicy.allowedRegistries) }}
+        {{- with .Values.sandbox.imagePolicy.allowedRepos }}
+        allowed_repos: {{ toJson . }}
+        {{- end }}
+        require_digest: {{ .Values.sandbox.imagePolicy.requireDigest }}
+        require_signature: {{ .Values.sandbox.imagePolicy.requireSignature }}
+        {{- with .Values.sandbox.imagePolicy.cosignPublicKeys }}
+        cosign_public_keys: {{ toJson . }}
+        {{- end }}
+        {{- with .Values.sandbox.imagePolicy.cosignIdentities }}
+        cosign_identities:
+          {{- range . }}
+          - issuer: {{ required "sandbox.imagePolicy.cosignIdentities[].issuer is required" .issuer | quote }}
+            subject_regexp: {{ required "sandbox.imagePolicy.cosignIdentities[].subjectRegexp is required — an issuer alone would trust every workflow at that provider" .subjectRegexp | quote }}
+          {{- end }}
+        {{- end }}
+        {{- with .Values.sandbox.imagePolicy.defaultRegistry }}
+        default_registry: {{ . | quote }}
+        {{- end }}
 
     ui:
       external_url: {{ .Values.config.externalURL | quote }}

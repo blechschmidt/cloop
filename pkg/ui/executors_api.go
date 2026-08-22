@@ -43,6 +43,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/executor/reconcile"
 	"github.com/blechschmidt/cloop/pkg/executor/remote"
 	"github.com/blechschmidt/cloop/pkg/executorstore"
+	"github.com/blechschmidt/cloop/pkg/imagepolicy"
 	"github.com/blechschmidt/cloop/pkg/sandbox"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/statedb"
@@ -1437,6 +1438,22 @@ func jsonWorkloadErr(w http.ResponseWriter, err error) {
 		writeSandboxDenied(w, "sandbox_grant_denied", grantDenied.Error(), grantDenied.Remediation(), nil)
 		return
 	}
+	// The image the project named is not one this hub will run (Task 20177).
+	// A 409 like the two above — the request is well-formed and what conflicts
+	// is the repo's image with the hub's trust policy — carrying the rule that
+	// decided, so the author can tell "publish it to an allowed registry" from
+	// "pin it by digest" without being shown the hub's configuration.
+	//
+	// Malformed references are excluded here and fall through to the 400
+	// below: "this is not an image reference" is a syntax error the author
+	// fixes alone, and rendering it as a policy conflict would point them at an
+	// operator who cannot help.
+	var imageDenied *imagepolicy.DenyError
+	if errors.As(err, &imageDenied) && !imageDenied.Malformed() {
+		writeSandboxDenied(w, "sandbox_image_denied", imageDenied.Error(), imageDenied.Remediation, nil)
+		return
+	}
+
 	var placement *executor.PlacementError
 	if errors.As(err, &placement) {
 		writeSandboxDenied(w, "sandbox_unsupported", placement.Error(),
@@ -1445,7 +1462,8 @@ func jsonWorkloadErr(w http.ResponseWriter, err error) {
 			executor.IsolatedIDs())
 		return
 	}
-	if errors.Is(err, sandbox.ErrInvalidSpec) {
+	if errors.Is(err, sandbox.ErrInvalidSpec) || errors.Is(err, executor.ErrInvalidSpec) ||
+		errors.Is(err, imagepolicy.ErrBadReference) {
 		// The file itself is wrong. 400: the author can fix it by editing the
 		// repo, without anything on the hub changing.
 		jsonErr(w, err.Error(), http.StatusBadRequest)

@@ -73,6 +73,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/internal/logbus"
+	"github.com/blechschmidt/cloop/pkg/imagepolicy"
 )
 
 // DefaultID is the executor ID used when none is configured.
@@ -140,6 +141,16 @@ type Options struct {
 	// makes it: without it, such a configuration is refused with an error
 	// that says how to fix it.
 	AllowRootUser bool
+
+	// ImagePolicy constrains the images a *project* may name in its
+	// .cloop/sandbox.yaml (Task 20177). The zero value constrains nothing.
+	//
+	// It deliberately does not apply to Image above. That reference is the
+	// operator's own choice, made in the same file as the policy; running it
+	// through an allowlist the same person wrote would be a lint, not a
+	// control, and with a safe chart default of "digests only" it would refuse
+	// the hub's own tagged image at boot.
+	ImagePolicy imagepolicy.Policy
 }
 
 // Normalize fills in defaults and validates. It returns a copy so a caller's
@@ -187,6 +198,12 @@ func (o Options) Normalize() (Options, error) {
 	if err := ValidateExtraArgs(o.ExtraArgs); err != nil {
 		return o, err
 	}
+	// A policy that cannot be applied must be refused where it was written,
+	// not silently reduced to one that allows everything.
+	if err := o.ImagePolicy.Validate(); err != nil {
+		return o, fmt.Errorf("container: image policy: %w", err)
+	}
+	o.ImagePolicy = o.ImagePolicy.Normalize()
 	return o, nil
 }
 
@@ -195,6 +212,10 @@ type Executor struct {
 	id   string
 	opts Options
 	rt   Runtime
+	// verifier checks image signatures when opts.ImagePolicy requires them.
+	// Never nil for an executor built by New; a nil one fails closed, which
+	// is what a struct-literal Executor in a test should do.
+	verifier imagepolicy.Verifier
 
 	mu      sync.Mutex
 	handles map[string]*record
@@ -235,10 +256,15 @@ func New(opts Options) (*Executor, error) {
 		return nil, err
 	}
 	return &Executor{
-		id:      norm.ID,
-		opts:    norm,
-		rt:      rt,
-		handles: make(map[string]*record),
+		id:   norm.ID,
+		opts: norm,
+		rt:   rt,
+		// One verifier for the executor's lifetime, so its per-digest cache
+		// actually caches: a fresh one per workload start would re-spawn
+		// cosign — and re-contact the transparency log — for every task in a
+		// project that runs the same image all day.
+		verifier: imagepolicy.NewCosignVerifier(),
+		handles:  make(map[string]*record),
 	}, nil
 }
 

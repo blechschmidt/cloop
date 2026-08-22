@@ -110,6 +110,76 @@ config:
   # provider tuning.
   extra: {}
 
+# ── Image trust ─────────────────────────────────────────────────────────────
+# Which container images a *project* may name in its own .cloop/sandbox.yaml.
+#
+# That file arrives by `git pull`: anyone who can open a pull request can
+# propose one, and the image it names is not data the sandbox processes — it IS
+# the sandbox. Its entrypoint, its libraries and its PATH are the environment
+# the harness runs in, and the credentials the hub injects at start are handed
+# straight to it. Without a policy here, "the hub never runs untrusted code on
+# the host" is true and beside the point, because the code inside the container
+# was chosen by the same pull request.
+#
+# The defaults are deliberately restrictive. A project that needs a different
+# toolchain publishes its image to the registry this deployment already trusts,
+# or the operator widens allowedRegistries on purpose.
+sandbox:
+  imagePolicy:
+    # Registry hosts a project may pull from. Empty derives the registry of
+    # image.repository above — the one registry this deployment has already
+    # decided to trust.
+    #
+    # Matching is on the parsed reference, so "ghcr.io" here does not admit
+    # "ghcr.io.attacker.example/x" or "attacker.example/ghcr.io/x". Two other
+    # forms are accepted: "*.example.com" (subdomains, at a label boundary)
+    # and "*" (any registry — only meaningful alongside requireDigest).
+    allowedRegistries: []
+    #  - ghcr.io
+    #  - registry.internal:5000
+
+    # Narrow further to particular repositories. Empty means any repository on
+    # an allowed registry. A trailing "/*" matches at a path-component
+    # boundary, so "ghcr.io/acme/*" does not match "ghcr.io/acme-evil/x".
+    allowedRepos: []
+    #  - ghcr.io/acme/*
+
+    # Refuse an image pinned only to a tag.
+    #
+    # On by default, and it matters most here: a tag in a Pod spec is resolved
+    # by a kubelet, on a node, whenever it schedules — the control plane has no
+    # cluster image store to resolve it against first. So on Kubernetes an
+    # unpinned reference means the artifact that runs is whatever the tag
+    # pointed at by then, which may not be what anything evaluated.
+    requireDigest: true
+
+    # Refuse an image whose signature cosign cannot verify.
+    #
+    # Off by default because it needs the cosign binary in the hub image and
+    # keys or identities below. When it is on and cosign is missing, the hub
+    # refuses every project image rather than admitting them unchecked — that
+    # is the intended behaviour, and it is why this is opt-in.
+    requireSignature: false
+
+    # Paths (inside the hub Pod) to cosign public keys. Any one may carry the
+    # signature; listing two describes a rotation, not a quorum.
+    cosignPublicKeys: []
+    #  - /etc/cloop/cosign/acme.pub
+
+    # Keyless identities. subjectRegexp is required — an issuer on its own
+    # would trust every workflow at that provider, including one in a
+    # repository you have never heard of.
+    cosignIdentities: []
+    #  - issuer: https://token.actions.githubusercontent.com
+    #    subjectRegexp: ^https://github\.com/acme/.+
+
+    # Qualify a reference that names no registry. Unset, "alpine:3" is refused
+    # rather than assumed to be Docker Hub: which registry an unqualified name
+    # resolves to is the executor host's configuration (podman consults
+    # unqualified-search-registries), so the same reference can legitimately
+    # pull from different places on two nodes in one fleet.
+    defaultRegistry: ""
+
 oidc:
   enabled: false
   issuer: ""                       # https://idp.example.com/realms/main
