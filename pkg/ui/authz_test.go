@@ -73,6 +73,10 @@ var publicRouteAllowlist = map[string]string{
 		"immediately after losing a device",
 	"GET /api/me":            "reports the caller's own permissions; the UI cannot render without it",
 	"POST /api/client-error": "browser error reports; writes no state and must work for a user with no role",
+	"GET /api/quota/me": "reports the caller's own quota and live usage, scoped by construction — the " +
+		"handler takes no identity and reads the one on the request, so no parameter could reach " +
+		"someone else's. Strictly read-only: raising a quota is PUT /api/quotas/{identity}, gated on " +
+		"user.manage. A tenant who cannot see why a run was refused files a ticket instead of waiting",
 }
 
 // TestEveryRouteDeclaresAPermission is the route-coverage check: every entry

@@ -86,6 +86,7 @@ var bundleFiles = []string{
 	// formatting helpers (_secFmtDuration, _secTTLClass, _secApplyGating) and
 	// renders into the same Secrets tab.
 	"assets/js/26-sessions.js",
+	"assets/js/27-quotas.js",
 }
 
 // Cache-Control values. Hashed asset URLs change whenever their bytes change,

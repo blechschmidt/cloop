@@ -23,6 +23,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 )
@@ -38,6 +39,12 @@ func (a *Authenticator) createSession(id Identity, r *http.Request, refreshToken
 		return "", err
 	}
 	now := a.now()
+
+	// Make room under the identity's session quota before minting another,
+	// so the cap holds at the moment it is crossed rather than at the next
+	// sweep. See Config.SessionLimit for why this evicts rather than refuses.
+	a.enforceSessionLimit(id, now)
+
 	rec := SessionRecord{
 		ID:        HashSessionID(sid),
 		Identity:  id,
@@ -70,6 +77,61 @@ func (a *Authenticator) createSession(id Identity, r *http.Request, refreshToken
 		Reason:    refreshReadyReason(refreshToken),
 	})
 	return sid, nil
+}
+
+// enforceSessionLimit evicts the identity's oldest sessions until one more
+// will fit under its quota (Task 20182).
+//
+// Least-recently-seen first, which is the session the user is least likely to
+// still be sitting in front of. Evictions are audited as ordinary revocations
+// with a reason, so an operator seeing a user's session vanish can tell "the
+// quota reclaimed it" from "somebody terminated it".
+//
+// Every failure here is non-fatal: a store that will not list, or will not
+// delete, must not stop somebody signing in. The cost of degrading is that an
+// identity briefly holds one session more than its cap, which is a far smaller
+// problem than a hub that cannot authenticate.
+func (a *Authenticator) enforceSessionLimit(id Identity, now time.Time) {
+	if a.cfg.SessionLimit == nil {
+		return
+	}
+	key := id.OwnerKey()
+	if key == "" {
+		return
+	}
+	limit := a.cfg.SessionLimit(key, id.Groups, id.Roles)
+	if limit <= 0 {
+		return
+	}
+
+	all, err := a.store.List()
+	if err != nil {
+		return
+	}
+	mine := make([]SessionRecord, 0, 4)
+	for _, rec := range all {
+		// Match on the same key ownership is recorded under, not on Sub
+		// alone: an identity is the thing being capped, and OwnerKey is
+		// what everything else in the hub counts by.
+		if rec.Identity.OwnerKey() != key {
+			continue
+		}
+		// An already-dead session is not headroom somebody else is using.
+		// Counting it would evict a live session to make room for a row the
+		// next read would have refused anyway.
+		if rec.Expired(now) || rec.Idle(now, a.cfg.IdleTimeout) {
+			continue
+		}
+		mine = append(mine, rec)
+	}
+	surplus := len(mine) - (limit - 1)
+	if surplus <= 0 {
+		return
+	}
+	sort.Slice(mine, func(i, j int) bool { return mine[i].LastSeen.Before(mine[j].LastSeen) })
+	for i := 0; i < surplus && i < len(mine); i++ {
+		a.terminate(mine[i], AuditSessionRevoked, "session_quota_exceeded", "quota")
+	}
 }
 
 // refreshReadyReason records, at sign-in, whether this session can be revoked

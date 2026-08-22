@@ -689,6 +689,101 @@ written a policy yet. Writing a single mapping (or setting `default_role`,
 including to `none`) switches the deployment to deny-by-default. An invalid
 role or claim name aborts startup rather than silently never matching.
 
+### Quotas: how much, not whether
+
+Roles answer *may this identity act?* Quotas answer *how much?* Without them a
+single tenant on a shared hub can hold every executor slot, open projects
+without bound, and burn the organisation's whole token budget from one
+compromised account before anyone looks. `pkg/globalbudget` predates this and
+is keyed by **project**, which is the wrong axis under multi-tenancy: a user
+who can create projects can create budget headroom.
+
+Six resources are capped per identity (`pkg/quota/quota.go`):
+
+| Resource | Caps | Enforced at |
+| --- | --- | --- |
+| `max_projects` | projects owned at once | `POST /api/projects/new` |
+| `max_concurrent_tasks` | runs executing at once | `POST /api/run` |
+| `max_executors` | executors enrolled | `POST /api/executors/enroll` |
+| `max_sessions` | concurrent signed-in sessions | session creation |
+| `daily_token_budget` | input+output tokens per UTC day | `POST /api/run` |
+| `daily_cost_usd` | estimated USD per UTC day | `POST /api/run` |
+
+```yaml
+ui:
+  quotas:
+    defaults:
+      max_projects: 3
+      max_concurrent_tasks: 1
+      daily_token_budget: 500000
+    bindings:
+      - claim: group
+        value: engineering
+        limits: {max_projects: 25, max_concurrent_tasks: 4}
+      - claim: email
+        value: sre@example.com
+        limits: {max_executors: 50}
+```
+
+**Precedence** is per-resource and most-specific-wins: `sub` > `email` >
+`role` > `group` > `defaults`. A binding that sets only `max_projects` does
+not blank out the `max_concurrent_tasks` a broader binding granted. Within one
+tier — a user in several groups — the **smallest** ceiling wins. That is the
+opposite of how roles resolve, and deliberately so: a role is a grant, so
+unioning is safe, but a quota is a ceiling, and unioning ceilings would make
+joining one more group a privilege-escalation primitive. The minimum is also
+order-independent, so a security property does not depend on YAML line order.
+
+A resource absent from every binding is **unlimited**. A negative value also
+means unlimited, because `-1` means that in almost every system that has ever
+had a quota and reading it as a ceiling of −1 would deny a tenant everything
+with no visible cause. `0` means *none allowed*, which is a real setting.
+
+**Enforcement is at admission**, before the resource is committed — before the
+project directory is created, before the enrolment token is minted, before the
+run is dispatched — never only in the browser. Check-and-increment is one
+critical section, so concurrent requests cannot both observe headroom only one
+of them can have.
+
+Refusals are a typed `QUOTA_EXCEEDED` (`pkg/apierror`). One stable code, two
+statuses: **429 with `Retry-After`** where waiting alone clears the denial (a
+run finishes; a UTC day rolls over), **403 with no `Retry-After`** where it
+does not (projects, executors and sessions stay held until somebody removes
+one or raises the cap). Sending a `Retry-After` that will never come true
+trains clients to poll a wall. Every denial is written to the audit trail as
+`quota.denied`.
+
+**Sessions are the exception**: the cap is enforced by evicting the identity's
+least recently used sessions, not by refusing the login. Refusing would leave
+the user with no session — and the self-service remedy,
+`POST /api/session/logout-all`, requires one, so a capped user could be locked
+out of their own account with no way back in.
+
+**API tokens spend their minter's quota**, not their own. A PAT resolves to
+`CreatedBy`, so *"hit your concurrency cap, mint a token, keep going"* is not
+a bypass.
+
+**Counters are reconciled from live state at startup**, not trusted. A hub
+killed mid-run comes back believing that tenant still holds the slot, and
+nothing decrements a counter for a process that no longer exists — left alone,
+one crash permanently narrows the tenant it happened to. So the four gauges
+are rebuilt from what actually exists: the project registry, the enrolment
+records, the session table, and the projects whose persisted state says a run
+is in progress. Daily spend is deliberately *not* rebuilt, because re-deriving
+it would hand a compromised account a fresh budget on every crash.
+
+**Editing a quota is `user.manage`** — admin-only in the default ladder.
+Anything weaker would make the cap advisory: a tenant who can raise their own
+limit does not have one. The Quotas panel, `GET /api/quotas`,
+`PUT /api/quotas/{identity}` and `DELETE /api/quotas/{identity}` all require
+it. `GET /api/quota/me` is ungated but read-only and scoped by construction —
+the handler takes no identity and reads the one on the request.
+
+Live limits and usage are exported as Prometheus gauges on the hub's
+`/metrics` (`cloop_quota_limit`, `cloop_quota_usage`,
+`cloop_quota_denials_total`), gated on `audit.read` because the payload names
+every identity and its spend.
+
 ---
 
 ## The guarantee → test table

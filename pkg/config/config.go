@@ -715,6 +715,75 @@ type UIConfig struct {
 	// OIDC configures optional OpenID Connect single sign-on for the web
 	// dashboard. Disabled by default; see OIDCConfig.
 	OIDC OIDCConfig `yaml:"oidc,omitempty"`
+
+	// Quotas caps how much each identity may consume on a shared hub.
+	// Empty (the default) means unlimited, which is what keeps a
+	// single-tenant deployment untouched. See QuotasConfig.
+	Quotas QuotasConfig `yaml:"quotas,omitempty"`
+}
+
+// QuotasConfig is the per-identity admission policy (Task 20182).
+//
+// It lives next to ui.oidc.role_mappings on purpose: RBAC decides whether an
+// identity may act, this decides how much, and the two are read together when
+// answering "what can this tenant do to my hub?". Keeping the bulk of quota
+// policy in config rather than in the database also means it is reviewable,
+// diffable and deployable like the role mappings it sits beside; the Quotas
+// panel's per-identity edits are the escape hatch, stored separately and
+// stamped with who made them.
+//
+//	ui:
+//	  quotas:
+//	    defaults:
+//	      max_projects: 3
+//	      max_concurrent_tasks: 1
+//	      daily_token_budget: 500000
+//	    bindings:
+//	      - claim: group
+//	        value: engineering
+//	        limits:
+//	          max_projects: 25
+//	          max_concurrent_tasks: 4
+//	      - claim: email
+//	        value: sre@example.com
+//	        limits:
+//	          max_executors: 50
+//
+// Resolution is per-resource and most-specific-wins (sub > email > role >
+// group > defaults). Within one tier the *smallest* ceiling wins, so joining
+// another group can never raise a tenant's own cap. See pkg/quota.
+type QuotasConfig struct {
+	// Defaults apply to every identity no binding covers.
+	Defaults map[string]float64 `yaml:"defaults,omitempty"`
+
+	// Bindings narrow (or widen) limits per claim value.
+	Bindings []QuotaBinding `yaml:"bindings,omitempty"`
+}
+
+// Configured reports whether any quota policy was written.
+func (q QuotasConfig) Configured() bool {
+	return len(q.Defaults) > 0 || len(q.Bindings) > 0
+}
+
+// QuotaBinding is one claim→limits binding in ui.quotas.bindings. It mirrors
+// quota.Binding; cmd/ui_cmd.go converts between the two so pkg/config stays
+// free of quota logic and pkg/quota stays free of YAML — the same split
+// RoleMapping has with authz.Binding.
+type QuotaBinding struct {
+	// Claim selects what Value is compared against: group, role, email,
+	// or sub. Same vocabulary as ui.oidc.role_mappings.
+	Claim string `yaml:"claim"`
+
+	// Value is the claim value to match. Group and role values are
+	// compared case-insensitively and a leading "/" is ignored, so
+	// Keycloak's group-path form works as written.
+	Value string `yaml:"value"`
+
+	// Limits are the ceilings this binding contributes. Valid keys are
+	// max_projects, max_concurrent_tasks, max_executors, max_sessions,
+	// daily_token_budget and daily_cost_usd. Only the keys present are
+	// affected; the rest keep resolving from less specific bindings.
+	Limits map[string]float64 `yaml:"limits,omitempty"`
 }
 
 // TLSConfig configures native TLS termination for cloop's HTTP servers.

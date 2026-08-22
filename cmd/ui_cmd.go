@@ -12,6 +12,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/multiui"
 	"github.com/blechschmidt/cloop/pkg/oidcauth"
+	"github.com/blechschmidt/cloop/pkg/quota"
 	"github.com/blechschmidt/cloop/pkg/ui"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
@@ -139,6 +140,11 @@ but not for anything reachable from a network.`,
 					CookieSecure:    cfg.UI.OIDC.CookieSecure,
 					Store:           store,
 					Audit:           srv.SessionAuditSink(),
+					// Per-identity session cap (Task 20182). Resolved live
+					// rather than captured, so an admin lowering somebody's
+					// quota takes effect at their next sign-in without a
+					// restart.
+					SessionLimit: srv.SessionLimitFor,
 				})
 				if oidcErr != nil {
 					return fmt.Errorf("ui.oidc is enabled but invalid: %w", oidcErr)
@@ -168,7 +174,38 @@ but not for anything reachable from a network.`,
 					time.Duration(cfg.UI.OIDC.EffectiveIdleTimeoutHours())*time.Hour,
 					describeRevalidation(refreshMinutes, srv.SessionStoreSealsRefreshTokens()))
 			}
+
+			// Per-identity quotas (ui.quotas — Task 20182). Fail-closed like
+			// the role mappings above and for the same reason: a typo in a
+			// resource name produces a binding that matches nothing, and
+			// "the quota I configured is not being enforced" is the failure
+			// an admission-control system can least afford to have silently.
+			//
+			// Installed even when no policy is configured, because an admin
+			// can still cap one identity from the panel and that override
+			// needs somewhere to live. With neither, every admission
+			// succeeds and a single-tenant hub is unchanged.
+			quotaResolver, quotaErr := quota.New(quota.Config{
+				Defaults: quotaLimitsFrom(cfg.UI.Quotas.Defaults),
+				Bindings: quotaBindingsFrom(cfg.UI.Quotas.Bindings),
+			})
+			if quotaErr != nil {
+				return fmt.Errorf("ui.quotas is invalid: %w", quotaErr)
+			}
+			srv.SetQuotaPolicy(quotaResolver)
+			if cfg.UI.Quotas.Configured() {
+				fmt.Printf("Quotas: %d binding(s), %d default limit(s)\n",
+					len(cfg.UI.Quotas.Bindings), len(cfg.UI.Quotas.Defaults))
+			}
 		}
+
+		// Rebuild the gauge counters from what actually exists, before the
+		// listener binds. A persisted counter is a claim nothing else
+		// corrects: a hub killed mid-run comes back believing that tenant
+		// still holds the slot, forever. Doing it here — synchronously, not
+		// in a goroutine — means the first admission after startup is
+		// evaluated against reconciled numbers rather than racing them.
+		srv.ReconcileQuotas()
 
 		if uiTLSCert != "" || uiTLSKey != "" {
 			srv.TLSCertFile, srv.TLSKeyFile = uiTLSCert, uiTLSKey
@@ -207,6 +244,37 @@ func roleMappingsToBindings(mappings []config.RoleMapping) []authz.Binding {
 		})
 	}
 	return bindings
+}
+
+// quotaLimitsFrom converts the YAML limit map into the quota model.
+// Validation (unknown resources, negative ceilings) happens in quota.New so
+// there is exactly one place that decides what is well-formed — the same
+// split roleMappingsToBindings has with authz.New.
+func quotaLimitsFrom(m map[string]float64) quota.Limits {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make(quota.Limits, len(m))
+	for k, v := range m {
+		out[quota.Resource(k)] = v
+	}
+	return out
+}
+
+// quotaBindingsFrom converts ui.quotas.bindings into the quota model.
+func quotaBindingsFrom(bindings []config.QuotaBinding) []quota.Binding {
+	if len(bindings) == 0 {
+		return nil
+	}
+	out := make([]quota.Binding, 0, len(bindings))
+	for _, b := range bindings {
+		out = append(out, quota.Binding{
+			Claim:  authz.ClaimKind(b.Claim),
+			Value:  b.Value,
+			Limits: quotaLimitsFrom(b.Limits),
+		})
+	}
+	return out
 }
 
 // effectiveDefaultRole renders the configured default for the startup

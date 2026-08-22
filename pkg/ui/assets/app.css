@@ -425,6 +425,47 @@
     .audit-table th.audit-hide-sm, .audit-table td.audit-hide-sm { display:none; }
   }
 
+  /* ── Quotas panel (Task 20182) ── */
+  /* Reuses .audit-table for the grid. What is specific here is the cell: a
+     limit that is editable in place, with live usage under it, so "how much
+     is left" and "change it" are the same glance rather than two screens. */
+  .quota-table td.quota-cell { padding:4px 8px; vertical-align:top; }
+  .quota-input {
+    width:100%; box-sizing:border-box; padding:3px 6px; font-size:12px;
+    font-family:var(--mono, monospace);
+    border:1px solid var(--border); border-radius:4px;
+    background:var(--card-bg, transparent); color:var(--fg);
+  }
+  .quota-input:focus { outline:none; border-color:var(--accent); }
+  /* The unlimited placeholder is the infinity sign, dimmed so a blank cell
+     reads as "no ceiling" rather than "not filled in yet". */
+  .quota-input::placeholder { color:var(--muted); opacity:.7; }
+  .quota-used { display:block; margin-top:3px; font-size:10.5px; color:var(--muted); font-family:var(--mono, monospace); }
+  .quota-identity { font-family:var(--mono, monospace); font-size:12px; word-break:break-all; }
+  .quota-badge {
+    display:inline-block; padding:1px 5px; margin-left:4px; border-radius:3px;
+    font-size:10px; font-family:var(--font, inherit);
+    background:rgba(88,166,255,.15); color:var(--accent); vertical-align:middle;
+  }
+  /* Saturation is colour on the cell, not on a separate status column: the
+     thing an operator scans for is "who is about to be refused". */
+  .quota-cell.quota-warn { background:rgba(210,153,34,.12); }
+  .quota-cell.quota-full { background:rgba(248,81,73,.14); }
+
+  /* The caller's own badge in the header. Only rendered at 80% and above —
+     a quota nobody is near is noise, and a quota that just refused a run
+     needs to be visible without opening a panel the user cannot even see. */
+  .quota-self-badge {
+    padding:2px 8px; border-radius:10px; font-size:11px; font-weight:500;
+    border:1px solid var(--yellow, #d29922); color:var(--yellow, #d29922);
+    background:rgba(210,153,34,.10); white-space:nowrap;
+  }
+  .quota-self-badge.quota-full {
+    border-color:var(--red, #f85149); color:var(--red, #f85149);
+    background:rgba(248,81,73,.12);
+  }
+  @media (max-width:767px) { .quota-self-badge { display:none !important; } }
+
   /* ── Secrets & Grants panel (Task 20171) ── */
   /* The tables reuse .audit-table wholesale: this panel and the Audit panel
      are read side by side when answering "who could reach what", and two

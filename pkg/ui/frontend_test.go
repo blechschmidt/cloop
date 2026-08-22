@@ -70,6 +70,16 @@ var tokensAPISource string
 //go:embed sessions_api.go
 var sessionsAPISource string
 
+// quotasAPISource is pkg/ui/quotas_api.go (Task 20182). Embedded for the same
+// reason as tokens_api.go — its handlers are registered routes whose bodies
+// the route-drift tests read — and additionally because
+// TestNonAdminCannotRaiseOwnQuotaThroughAnyRoute scans handler bodies for
+// calls that write a quota, which is only sound if the file holding them is
+// actually in the scanned corpus.
+//
+//go:embed quotas_api.go
+var quotasAPISource string
+
 // routesSource is pkg/ui/routes.go, which holds the declarative route table
 // (Task 20164). Routes moved out of server.go when registration started
 // carrying a required permission, so the architectural tests that scan for
@@ -85,7 +95,7 @@ var routesSource string
 func allUISources() string {
 	return serverSource + "\n" + providerCallsSource + "\n" + executorsAPISource +
 		"\n" + auditAPISource + "\n" + secretsAPISource + "\n" + installScriptSource +
-		"\n" + tokensAPISource + "\n" + sessionsAPISource
+		"\n" + tokensAPISource + "\n" + sessionsAPISource + "\n" + quotasAPISource
 }
 
 // dashboardSource is the whole dashboard front end — the rendered index.html

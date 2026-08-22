@@ -228,6 +228,7 @@ func (s *Server) routeTable() []routeSpec {
 		secRevoke  = authz.PermSecretRevoke
 		tokenAdmin = authz.PermTokenAdmin
 		sessAdmin  = authz.PermSessionAdmin
+		userMgmt   = authz.PermUserManage
 		public     = authz.PermPublic
 	)
 
@@ -464,5 +465,36 @@ func (s *Server) routeTable() []routeSpec {
 		// who is signed in, from where, on what — is reconnaissance.
 		{Pattern: "GET /api/sessions", Handler: s.handleSessionsList, Perm: sessAdmin, Scope: scopeGlobal},
 		{Pattern: "DELETE /api/sessions/{id}", Handler: s.handleSessionRevoke, Perm: sessAdmin, Scope: scopeGlobal},
+
+		// ── Per-identity quotas (Task 20182) ─────────────────────────
+		// Global and admin-only. A quota is the ceiling on what an
+		// identity may consume, so the ability to edit one is the ability
+		// to grant yourself unlimited compute and unlimited spend — the
+		// same class of authority as rewriting role bindings, which is
+		// what user.manage already names. Anything weaker would make the
+		// cap advisory: a tenant who can raise their own limit does not
+		// have one.
+		//
+		// The read is gated identically. It names every tenant on the hub
+		// and what each one is spending, which is both a roster and a map
+		// of who is worth compromising.
+		{Pattern: "GET /api/quotas", Handler: s.handleQuotasList, Perm: userMgmt, Scope: scopeGlobal},
+		{Pattern: "PUT /api/quotas/{identity}", Handler: s.handleQuotaSet, Perm: userMgmt, Scope: scopeGlobal},
+		{Pattern: "DELETE /api/quotas/{identity}", Handler: s.handleQuotaClear, Perm: userMgmt, Scope: scopeGlobal},
+
+		// The caller's own quota. Ungated for the same reason as
+		// /api/session/logout-all: it is scoped to the caller by
+		// construction — the handler takes no identity and reads the one
+		// on the request — and a tenant who cannot see why a run was
+		// refused files a ticket instead of waiting for a counter to fall.
+		{Pattern: "GET /api/quota/me", Handler: s.handleQuotaMe, Perm: public},
+
+		// Prometheus scrape endpoint. `cloop ui` served no metrics at all
+		// before this. Gated on audit.read because the payload names every
+		// identity and what each one spends — oversight-grade data of the
+		// same class as the audit trail, and on a hosted hub a wide-open
+		// /metrics is a tenant roster for anyone who can reach the port.
+		// A scraper authenticates with an API token holding the role.
+		{Pattern: "GET /metrics", Handler: s.handleMetrics, Perm: auditRead, Scope: scopeGlobal},
 	}
 }

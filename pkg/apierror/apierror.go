@@ -78,6 +78,24 @@ const (
 	// to HTTP 429. Servers should set Retry-After alongside this error.
 	CodeRateLimited Code = "RATE_LIMITED"
 
+	// CodeQuotaExceeded indicates the caller's identity is at one of its
+	// configured ceilings: too many projects, concurrent tasks, executors
+	// or sessions, or its daily token/cost budget is spent (pkg/quota).
+	//
+	// Deliberately distinct from CodeRateLimited, which is about request
+	// frequency from an address and clears in milliseconds. A quota denial
+	// is about an identity's standing allocation, and the two need opposite
+	// client behaviour: retry the rate limit, do not retry a quota that
+	// needs an admin to raise.
+	//
+	// The default status is 429 because the common cases — a concurrency
+	// slot, a daily budget — do clear on their own, and those carry a
+	// Retry-After. The cases that do not clear by waiting (max_projects,
+	// max_executors, max_sessions) are written with WithStatus(403) and no
+	// Retry-After, so the code stays stable while the status tells a client
+	// whether waiting is worth anything.
+	CodeQuotaExceeded Code = "QUOTA_EXCEEDED"
+
 	// CodeInternal indicates an unexpected server-side failure. Maps to
 	// HTTP 500. Use sparingly; prefer a specific code when one fits.
 	CodeInternal Code = "INTERNAL"
@@ -107,7 +125,7 @@ func defaultStatus(c Code) int {
 		return http.StatusConflict
 	case CodePayloadTooLarge:
 		return http.StatusRequestEntityTooLarge
-	case CodeRateLimited:
+	case CodeRateLimited, CodeQuotaExceeded:
 		return http.StatusTooManyRequests
 	case CodeUnavailable:
 		return http.StatusServiceUnavailable

@@ -92,6 +92,17 @@ var enumerations = []enumeration{
 		typeName:   "Constraint",
 		documentIn: "docs/architecture/executors.md (add it to the constraint list under Placement)",
 	},
+	{
+		// A quota resource is a YAML key an operator writes by hand and the
+		// name that comes back in a QUOTA_EXCEEDED refusal. An undocumented
+		// one is a cap nobody knows to set — and a cap nobody sets is the
+		// starvation this subsystem exists to prevent.
+		what:       "quota resource",
+		file:       "pkg/quota/quota.go",
+		namePrefix: "Res",
+		typeName:   "Resource",
+		documentIn: "docs/security/model.md (add a row to the quota resource table under Quotas)",
+	},
 }
 
 func TestRequiredDocsExist(t *testing.T) {

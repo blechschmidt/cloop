@@ -43,6 +43,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/executor/reconcile"
 	"github.com/blechschmidt/cloop/pkg/executor/remote"
 	"github.com/blechschmidt/cloop/pkg/executorstore"
+	"github.com/blechschmidt/cloop/pkg/quota"
 	"github.com/blechschmidt/cloop/pkg/imagepolicy"
 	"github.com/blechschmidt/cloop/pkg/sandbox"
 	"github.com/blechschmidt/cloop/pkg/state"
@@ -793,14 +794,37 @@ func (s *Server) handleExecutorEnroll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Admission (Task 20182). Enrolling a device grants it the right to run
+	// project workloads, so an unbounded tenant can grow the trusted compute
+	// base without an admin ever looking. The reservation is taken here, at
+	// the mint, rather than when the agent first connects: the token *is*
+	// the enrolment, and counting only connected agents would let a tenant
+	// stockpile credentials against a cap that never sees them.
+	//
+	// Not transient — a tenant at their executor cap revokes one or gets a
+	// bigger cap — so this is a 403 with no Retry-After.
+	quotaID := s.quotaIdentity(r)
+	if !s.admitQuota(w, r, quota.ResExecutors, 1) {
+		return
+	}
+	enrolAdmitted := true
+	releaseEnrolment := func() {
+		if enrolAdmitted {
+			enrolAdmitted = false
+			s.releaseQuota(quotaID, quota.ResExecutors, 1)
+		}
+	}
+
 	db, err := s.controlPlaneDB()
 	if err != nil {
+		releaseEnrolment()
 		jsonErr(w, err.Error(), http.StatusServiceUnavailable)
 		return
 	}
 	defer db.Close()
 	store, err := executorstore.New(db)
 	if err != nil {
+		releaseEnrolment()
 		jsonErr(w, err.Error(), http.StatusServiceUnavailable)
 		return
 	}
@@ -818,13 +842,22 @@ func (s *Server) handleExecutorEnroll(w http.ResponseWriter, r *http.Request) {
 		Labels:      req.Labels,
 		Server:      serverURL,
 		Pin:         pin,
+		// The minting identity. MintOptions has always had the field and
+		// this handler has never filled it, so every enrolment made from the
+		// panel was attributed to nobody. The executor quota is accounted
+		// against it, so without it a restart cannot tell whose enrolments
+		// these are and every tenant comes back with a clean slate
+		// (Task 20182).
+		CreatedBy: firstNonEmpty(quotaID, s.auditActor(r)),
 	})
 	if err != nil {
+		releaseEnrolment()
 		jsonErr(w, "mint enrollment token: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	encoded, err := bundle.Encode()
 	if err != nil {
+		releaseEnrolment()
 		jsonErr(w, "encode enrollment bundle: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -975,6 +1008,15 @@ func (s *Server) handleExecutorDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	executor.DefaultRegistry.Unregister(id)
+	// Credit the slot back to whoever enrolled the device, not to whoever
+	// revoked it (Task 20182): an admin cleaning up a tenant's stale agent
+	// must return the headroom to that tenant. ExecutorRow.EnrolledBy holds
+	// the enrollment token's id, so the identity comes from the token record.
+	if storeErr == nil {
+		if enrol, e := store.GetEnrollment(row.EnrolledBy); e == nil {
+			s.releaseQuota(enrol.CreatedBy, quota.ResExecutors, 1)
+		}
+	}
 
 	fmt.Fprintf(os.Stderr, "ui: revoked executor %s (%s)\n", id, row.Name)
 	statedb.AuditExecutorLifecycle(db, statedb.ExecutorAuditInput{

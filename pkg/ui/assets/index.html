@@ -44,6 +44,7 @@
     </div>
     <!-- Scope hint badge: indicates whether the active tab is project-scoped or global -->
     <span id="scopeHint" class="scope-hint" aria-live="polite" title="Indicates whether the current tab shows data for a single project or applies globally"></span>
+    <span id="quotaSelfBadge" class="quota-self-badge" aria-live="polite" style="display:none"></span>
     <!-- Hamburger button (mobile only) -->
     <button class="hamburger-btn" id="hamburgerBtn" onclick="openMobileNav()" aria-label="Open navigation menu" aria-expanded="false">
       <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
@@ -75,6 +76,7 @@
       <button class="tab-btn global-tab" onclick="switchTab('executors')" id="tbtn-executors" title="Execution backends: host, container sandbox, and enrolled remote devices (global)">Executors</button>
       <button class="tab-btn global-tab" data-global-perm="secret.grant" data-perm-hide onclick="switchTab('secrets')" id="tbtn-secrets" title="Credentials an executor may hold: GitHub repos and PATs, kubeconfigs, and Internet egress — with TTL grants and live leases (global, maintainer and above)">Secrets</button>
       <button class="tab-btn global-tab" data-global-perm="audit.read" data-perm-hide onclick="switchTab('audit')" id="tbtn-audit" title="Tamper-evident compliance trail: who granted which credential to which executor, and when (global, admin only)">Audit</button>
+      <button class="tab-btn global-tab" data-global-perm="user.manage" data-perm-hide onclick="switchTab('quotas')" id="tbtn-quotas" title="Per-identity caps on projects, concurrent runs, executors, sessions and daily spend — with live usage (global, admin only)">Quotas</button>
       <button class="tab-btn global-tab" onclick="switchTab('settings')"  id="tbtn-settings" title="Settings (global)">Settings</button>
     </div>
     <div class="spacer"></div>
@@ -1394,6 +1396,36 @@
           No executors registered. That should not happen &mdash; the host driver is built in.
         </div>
         <div id="execList" class="exec-grid"></div>
+      </div>
+    </div>
+
+    <!-- ═══════════════════════════════════════════════════════════ QUOTAS -->
+    <div id="tab-quotas" class="tab-panel">
+      <div class="section">
+        <div class="section-title" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+          Quotas
+          <span style="font-size:11px;font-weight:400;color:var(--muted)">global &mdash; admin only</span>
+          <button class="btn" style="padding:4px 10px;font-size:12px;margin-left:auto" onclick="loadQuotas()" title="Reload limits and live usage">&#8635; Refresh</button>
+        </div>
+        <p style="font-size:12px;color:var(--muted);margin-top:4px;margin-bottom:12px">
+          Roles decide whether an identity may act; quotas decide how much. Each cell is the ceiling,
+          with live usage below it. Leave a cell blank for <strong>unlimited</strong> &mdash; which is not
+          the same as <strong>0</strong>, meaning none allowed. Edits here override the policy in
+          <code>ui.quotas</code> for that one identity and are recorded in the audit trail.
+          Enforcement is at admission &mdash; before a run is dispatched, a project created, or an
+          executor enrolled &mdash; so a client that skips this dashboard is refused just the same.
+          The same counters are exported as Prometheus gauges on <code>/metrics</code>.
+        </p>
+
+        <div id="quotaBanner" class="sec-banner" style="display:none"></div>
+        <div id="quotaEmpty" class="audit-empty" style="display:none"></div>
+
+        <div style="overflow-x:auto">
+          <table class="audit-table quota-table" id="quotaTable" style="display:none">
+            <thead id="quotaHead"></thead>
+            <tbody id="quotaBody"></tbody>
+          </table>
+        </div>
       </div>
     </div>
 

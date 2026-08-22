@@ -126,6 +126,7 @@ window.switchTab = function(name) {
     if (name === 'executors') loadExecutors();
     if (name === 'audit') { loadAudit(); verifyAuditChain(); }
     if (name === 'secrets') loadSecretsPanel();
+    if (name === 'quotas') loadQuotas();
     // The Overview's Executor card needs the same payload; it is the only
     // per-project field on that page the state diff does not carry, because
     // bindings live in the control plane's database rather than in project
@@ -161,7 +162,7 @@ window.switchTab = function(name) {
   if (isMultiProject) {
     const bc = document.getElementById('projectBreadcrumb');
     updateProjectSelector();
-    if (name === 'projects' || name === 'settings' || name === 'budget' || name === 'executors' || name === 'audit' || name === 'secrets') {
+    if (name === 'projects' || name === 'settings' || name === 'budget' || name === 'executors' || name === 'audit' || name === 'secrets' || name === 'quotas') {
       // Global tabs: hide breadcrumb
       if (bc) bc.style.display = 'none';
     } else {
@@ -177,7 +178,7 @@ window.switchTab = function(name) {
 // updateScopeHint reflects whether the active tab is per-project or global.
 // In single-project mode the hint still appears so the distinction is clear.
 function updateScopeHint(name) {
-  const globalTabs = ['projects','budget','settings','executors','audit','secrets'];
+  const globalTabs = ['projects','budget','settings','executors','audit','secrets','quotas'];
   const hint = document.getElementById('scopeHint');
   if (!hint) return;
   hint.classList.remove('visible','project','global');
@@ -626,6 +627,10 @@ function refreshPermissions() {
       myGlobalPerms = Array.isArray(me.global_permissions) ? me.global_permissions : null;
       myRole = me.role || '';
       applyPermissionGating();
+      // The caller's own quota badge rides the same refresh: it changes for
+      // exactly the reasons permissions do (a new project selected, an admin
+      // edit) and one round trip fewer is one fewer to keep in sync.
+      try { window.refreshMyQuota && window.refreshMyQuota(); } catch (_) {}
       return me;
     })
     .catch(() => null);

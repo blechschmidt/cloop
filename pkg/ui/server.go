@@ -43,6 +43,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/oidcauth"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/provider"
+	"github.com/blechschmidt/cloop/pkg/quota"
 	"github.com/blechschmidt/cloop/pkg/ratelimit"
 	"github.com/blechschmidt/cloop/pkg/reqid"
 	"github.com/blechschmidt/cloop/pkg/riskmatrix"
@@ -568,6 +569,18 @@ type Server struct {
 	// this field is ignored entirely and every request is granted
 	// everything, preserving single-tenant local behavior.
 	Authz *authz.Resolver
+
+	// quotaEnforcer caps how much each identity may consume (Task 20182).
+	// Nil means no quota policy was installed, in which case every
+	// admission helper in quotas_api.go succeeds and single-tenant use is
+	// unchanged. Installed by SetQuotaPolicy from ui.quotas in
+	// .cloop/config.yaml, and rebuilt from live state by ReconcileQuotas
+	// before the listener binds.
+	//
+	// It is where RBAC stops and admission control starts: Authz answers
+	// "may this identity act?", this answers "how much?".
+	quotaMu       sync.RWMutex
+	quotaEnforcer *quota.Enforcer
 
 	// tokens verifies the scoped API tokens that authenticate CI, scripts,
 	// and edge devices (Task 20175). Lazily opened on the first request that
@@ -2764,6 +2777,29 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 	// JSON body so older clients don't error.
 	_, _ = io.Copy(io.Discard, r.Body)
 
+	// Admission (Task 20182), before anything is dispatched. Starting a run
+	// is the action that actually spends the fleet: it holds an executor
+	// slot for as long as it runs and bills tokens the whole time. Two gates
+	// apply — a concurrency slot the tenant may not have, and a daily budget
+	// it may already have spent — and each returns a typed QUOTA_EXCEEDED
+	// with a Retry-After, because both clear on their own.
+	quotaID := s.quotaIdentity(r)
+	if !s.admitSpend(w, r) {
+		return
+	}
+	if !s.admitQuota(w, r, quota.ResConcurrentTasks, 1) {
+		return
+	}
+	// Every path from here must give the slot back exactly once, or a run
+	// that never started narrows the tenant until the next reconciliation.
+	slotHeld := true
+	releaseSlot := func() {
+		if slotHeld {
+			slotHeld = false
+			s.releaseQuota(quotaID, quota.ResConcurrentTasks, 1)
+		}
+	}
+
 	args := []string{"run"}
 
 	exe, err := os.Executable()
@@ -2780,6 +2816,7 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 		// 409 when strict no-host-execution mode refused the dispatch, so
 		// the browser can show the remediation instead of a generic 500
 		// (Task 20160).
+		releaseSlot()
 		jsonWorkloadErr(w, err)
 		return
 	}
@@ -2801,11 +2838,21 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 		s.liveLogRunning = false
 		s.liveLogMu.Unlock()
 		s.broadcastRunState(workDir, false, true)
+		// The run is live but unobservable, so nothing will ever tell us it
+		// ended. Release the slot now rather than hold one forever: the cap
+		// exists to stop a tenant starving the fleet, and a counter that can
+		// only go up would do that on its own.
+		releaseSlot()
 		jsonOK(w, map[string]interface{}{"ok": true, "command": "cloop " + strings.Join(args, " ")})
 		return
 	}
 
 	go func() {
+		// Unconditional, and before the recover: the concurrency slot must
+		// come back whether the watcher exits cleanly or panics. A deferred
+		// release inside the recover branch would leak the slot on the
+		// normal path, and one after it would be skipped on the panic path.
+		defer releaseSlot()
 		defer func() {
 			if rec := recover(); rec != nil {
 				fmt.Fprintf(os.Stderr, "ui: run output goroutine panic recovered: %v\n", rec)
@@ -5622,15 +5669,33 @@ func (s *Server) handleProjectNew(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Admission (Task 20182), after validation and before anything is
+	// created on disk. Not transient: a tenant at their project cap has to
+	// delete one or be given a bigger cap, so this answers 403 rather than
+	// 429 and carries no Retry-After.
+	quotaID := s.quotaIdentity(r)
+	if !s.admitQuota(w, r, quota.ResProjects, 1) {
+		return
+	}
+	projectAdmitted := true
+	releaseProject := func() {
+		if projectAdmitted {
+			projectAdmitted = false
+			s.releaseQuota(quotaID, quota.ResProjects, 1)
+		}
+	}
+
 	// Resolve to absolute path.
 	abs, err := filepath.Abs(req.Dir)
 	if err != nil {
+		releaseProject()
 		jsonErr(w, "invalid dir: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 
 	// Create the directory if it does not exist.
 	if err := os.MkdirAll(abs, 0o755); err != nil {
+		releaseProject()
 		jsonErr(w, "cannot create dir: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -5661,6 +5726,7 @@ func (s *Server) handleProjectNew(w http.ResponseWriter, r *http.Request) {
 	defer cancelInit()
 	if out, initErr := runWorkload(initCtx, abs, append([]string{exe}, args...),
 		map[string]string{"handler": "project-new"}); initErr != nil {
+		releaseProject()
 		if errors.Is(initErr, executor.ErrHostExecutionDenied) {
 			jsonWorkloadErr(w, initErr)
 			return
@@ -5776,6 +5842,10 @@ func (s *Server) handleProjectDelete(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "failed to update registry: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	// Give the owner their project slot back (Task 20182). Keyed on the
+	// entry's recorded owner rather than on the caller, so an admin
+	// deleting somebody else's project credits the right tenant.
+	s.releaseQuota(entry.Owner, quota.ResProjects, 1)
 
 	// Drop the in-memory --projects flag entry (if any) so the next
 	// allProjectEntries() call doesn't resurrect this project until the

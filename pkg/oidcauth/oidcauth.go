@@ -178,6 +178,20 @@ type Config struct {
 	// Clock supplies the current time. Nil means time.Now. It exists so the
 	// two expiry clocks can be tested without sleeping through them.
 	Clock func() time.Time
+
+	// SessionLimit reports how many concurrent sessions one identity may
+	// hold. Zero (and a nil hook) means unlimited. Supplied by pkg/ui from
+	// the per-identity quota policy; this package stays stdlib-only and
+	// holds no opinion about where the number comes from (Task 20182).
+	//
+	// The cap is enforced by evicting the identity's least recently used
+	// sessions, never by refusing the login. Refusing would leave the user
+	// with no session at all — and the self-service remedy, POST
+	// /api/session/logout-all, requires one, so a capped user could be
+	// locked out of their own account with no way back in. Eviction keeps
+	// the invariant the cap exists for (no identity holds more than N)
+	// without that failure mode.
+	SessionLimit func(identity string, groups, roles []string) int
 }
 
 // Identity is the authenticated user extracted from a validated ID token.
