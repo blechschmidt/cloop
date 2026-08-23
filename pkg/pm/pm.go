@@ -161,42 +161,42 @@ func AddAnnotation(task *Task, author, text string) {
 
 // Task is a single unit of work derived from the project goal.
 type Task struct {
-	ID               int        `json:"id"`
-	Title            string     `json:"title"`
-	Description      string     `json:"description"`
-	Priority         int        `json:"priority"` // 1 = highest
-	Status           TaskStatus `json:"status"`
-	Role             AgentRole  `json:"role,omitempty"`       // specialized agent role for this task
-	DependsOn        []int      `json:"depends_on,omitempty"` // IDs of tasks that must complete before this one
-	Result           string     `json:"result,omitempty"`
-	StartedAt        *time.Time `json:"started_at,omitempty"`
-	CompletedAt      *time.Time `json:"completed_at,omitempty"`
-	Deadline         *time.Time `json:"deadline,omitempty"`         // optional SLA deadline; overdue tasks are auto-boosted to P1
-	VerifyRetries    int        `json:"verify_retries,omitempty"`    // number of times task was re-queued by verifier
-	GitHubIssue      int        `json:"github_issue,omitempty"`      // linked GitHub issue number (0 = none)
-	EstimatedMinutes int        `json:"estimated_minutes,omitempty"` // AI-predicted duration
-	ActualMinutes    int        `json:"actual_minutes,omitempty"`    // measured duration (set on completion)
-	ArtifactPath      string       `json:"artifact_path,omitempty"`       // path to the full AI response artifact file
-	FailureDiagnosis  string       `json:"failure_diagnosis,omitempty"`   // AI diagnosis of what went wrong on failure
-	Tags              []string     `json:"tags,omitempty"`                // user-defined labels for filtering
-	FailCount         int          `json:"fail_count,omitempty"`          // number of times this task has been marked failed
-	HealAttempts      int          `json:"heal_attempts,omitempty"`       // number of auto-heal re-attempts made for this task
-	Annotations       []Annotation `json:"annotations,omitempty"`         // timestamped notes from user or AI
-	Condition         string       `json:"condition,omitempty"`           // optional gate: "$cmd" = shell check, else AI yes/no prompt
-	Recurrence        string       `json:"recurrence,omitempty"`          // cron expression (5-field); auto-resets task when due
-	NextRunAt         *time.Time   `json:"next_run_at,omitempty"`         // computed next trigger time for recurring tasks
-	RequiresApproval  bool         `json:"requires_approval,omitempty"`   // task must be interactively approved before execution
-	Approved          bool         `json:"approved,omitempty"`            // pre-approved via 'cloop task approve'; bypasses interactive gate
-	MaxMinutes        int          `json:"max_minutes,omitempty"`         // per-task execution time budget in minutes (0 = no limit)
-	Assignee          string       `json:"assignee,omitempty"`            // team member assigned to this task
-	ExternalURL       string       `json:"external_url,omitempty"`        // URL of the external resource (e.g. GitHub PR)
-	Links             []Link       `json:"links,omitempty"`               // external URLs/tickets/docs associated with this task
-	Pinned            bool         `json:"pinned,omitempty"`              // pinned tasks always appear at the top of task lists
-	TDDStatus         string       `json:"tdd_status,omitempty"`          // TDD verification outcome: "pass", "fail", or "skipped"
-	TDDScore          int          `json:"tdd_score,omitempty"`           // TDD score 0-100 (percentage of acceptance criteria met)
-	SprintID          int          `json:"sprint_id,omitempty"`           // sprint this task belongs to (0 = unassigned)
-	ComplexitySize    string       `json:"complexity_size,omitempty"`     // T-shirt size: XS/S/M/L/XL (set by ai-complexity)
-	StoryPoints       int          `json:"story_points,omitempty"`        // Fibonacci story points: 1/2/3/5/8/13 (set by ai-complexity)
+	ID               int          `json:"id"`
+	Title            string       `json:"title"`
+	Description      string       `json:"description"`
+	Priority         int          `json:"priority"` // 1 = highest
+	Status           TaskStatus   `json:"status"`
+	Role             AgentRole    `json:"role,omitempty"`       // specialized agent role for this task
+	DependsOn        []int        `json:"depends_on,omitempty"` // IDs of tasks that must complete before this one
+	Result           string       `json:"result,omitempty"`
+	StartedAt        *time.Time   `json:"started_at,omitempty"`
+	CompletedAt      *time.Time   `json:"completed_at,omitempty"`
+	Deadline         *time.Time   `json:"deadline,omitempty"`          // optional SLA deadline; overdue tasks are auto-boosted to P1
+	VerifyRetries    int          `json:"verify_retries,omitempty"`    // number of times task was re-queued by verifier
+	GitHubIssue      int          `json:"github_issue,omitempty"`      // linked GitHub issue number (0 = none)
+	EstimatedMinutes int          `json:"estimated_minutes,omitempty"` // AI-predicted duration
+	ActualMinutes    int          `json:"actual_minutes,omitempty"`    // measured duration (set on completion)
+	ArtifactPath     string       `json:"artifact_path,omitempty"`     // path to the full AI response artifact file
+	FailureDiagnosis string       `json:"failure_diagnosis,omitempty"` // AI diagnosis of what went wrong on failure
+	Tags             []string     `json:"tags,omitempty"`              // user-defined labels for filtering
+	FailCount        int          `json:"fail_count,omitempty"`        // number of times this task has been marked failed
+	HealAttempts     int          `json:"heal_attempts,omitempty"`     // number of auto-heal re-attempts made for this task
+	Annotations      []Annotation `json:"annotations,omitempty"`       // timestamped notes from user or AI
+	Condition        string       `json:"condition,omitempty"`         // optional gate: "$cmd" = shell check, else AI yes/no prompt
+	Recurrence       string       `json:"recurrence,omitempty"`        // cron expression (5-field); auto-resets task when due
+	NextRunAt        *time.Time   `json:"next_run_at,omitempty"`       // computed next trigger time for recurring tasks
+	RequiresApproval bool         `json:"requires_approval,omitempty"` // task must be interactively approved before execution
+	Approved         bool         `json:"approved,omitempty"`          // pre-approved via 'cloop task approve'; bypasses interactive gate
+	MaxMinutes       int          `json:"max_minutes,omitempty"`       // per-task execution time budget in minutes (0 = no limit)
+	Assignee         string       `json:"assignee,omitempty"`          // team member assigned to this task
+	ExternalURL      string       `json:"external_url,omitempty"`      // URL of the external resource (e.g. GitHub PR)
+	Links            []Link       `json:"links,omitempty"`             // external URLs/tickets/docs associated with this task
+	Pinned           bool         `json:"pinned,omitempty"`            // pinned tasks always appear at the top of task lists
+	TDDStatus        string       `json:"tdd_status,omitempty"`        // TDD verification outcome: "pass", "fail", or "skipped"
+	TDDScore         int          `json:"tdd_score,omitempty"`         // TDD score 0-100 (percentage of acceptance criteria met)
+	SprintID         int          `json:"sprint_id,omitempty"`         // sprint this task belongs to (0 = unassigned)
+	ComplexitySize   string       `json:"complexity_size,omitempty"`   // T-shirt size: XS/S/M/L/XL (set by ai-complexity)
+	StoryPoints      int          `json:"story_points,omitempty"`      // Fibonacci story points: 1/2/3/5/8/13 (set by ai-complexity)
 	// ChainInput holds the previous task's output when this task is part of a pipeline
 	// chain (tagged "chain:<uuid>"). It is runtime-only and never persisted.
 	ChainInput string `json:"-"`
@@ -591,13 +591,13 @@ func ParseTaskPlan(goal, output string) (*Plan, error) {
 
 	var raw struct {
 		Tasks []struct {
-			ID                   int       `json:"id"`
-			Title                string    `json:"title"`
-			Description          string    `json:"description"`
-			Priority             int       `json:"priority"`
-			Role                 AgentRole `json:"role"`
-			DependsOn            []int     `json:"depends_on"`
-			TimeEstimateMinutes  int       `json:"time_estimate_minutes"`
+			ID                  int       `json:"id"`
+			Title               string    `json:"title"`
+			Description         string    `json:"description"`
+			Priority            int       `json:"priority"`
+			Role                AgentRole `json:"role"`
+			DependsOn           []int     `json:"depends_on"`
+			TimeEstimateMinutes int       `json:"time_estimate_minutes"`
 		} `json:"tasks"`
 	}
 	if err := json.Unmarshal([]byte(jsonStr), &raw); err != nil {

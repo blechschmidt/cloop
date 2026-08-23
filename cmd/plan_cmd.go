@@ -70,9 +70,9 @@ var planHistoryCmd = &cobra.Command{
 }
 
 var (
-	planDiffNoAI    bool
+	planDiffNoAI     bool
 	planDiffProvider string
-	planDiffModel   string
+	planDiffModel    string
 )
 
 var planDiffCmd = &cobra.Command{

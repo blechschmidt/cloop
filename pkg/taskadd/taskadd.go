@@ -16,14 +16,14 @@ import (
 
 // TaskSpec holds the AI-structured representation of a new task.
 type TaskSpec struct {
-	Title              string    `json:"title"`
-	Description        string    `json:"description"`
-	Priority           int       `json:"priority"`
-	Role               string    `json:"role"`
-	EstimatedMinutes   int       `json:"estimated_minutes"`
-	Tags               []string  `json:"tags"`
-	SuggestedDependsOn []int     `json:"suggested_depends_on"`
-	Rationale          string    `json:"rationale"`
+	Title              string   `json:"title"`
+	Description        string   `json:"description"`
+	Priority           int      `json:"priority"`
+	Role               string   `json:"role"`
+	EstimatedMinutes   int      `json:"estimated_minutes"`
+	Tags               []string `json:"tags"`
+	SuggestedDependsOn []int    `json:"suggested_depends_on"`
+	Rationale          string   `json:"rationale"`
 }
 
 // GenerateTaskPrompt builds the AI prompt that converts a free-form task

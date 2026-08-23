@@ -16,10 +16,10 @@ import (
 )
 
 const (
-	DefaultTTL      = 24 * time.Hour
-	DefaultMaxSize  = 100
-	cacheDir        = ".cloop/cache"
-	statsFile       = ".cloop/cache/stats.json"
+	DefaultTTL     = 24 * time.Hour
+	DefaultMaxSize = 100
+	cacheDir       = ".cloop/cache"
+	statsFile      = ".cloop/cache/stats.json"
 )
 
 // Entry is a single cached response stored on disk.
@@ -35,10 +35,10 @@ type Entry struct {
 
 // Stats holds aggregate cache statistics.
 type Stats struct {
-	Hits     int64   `json:"hits"`
-	Misses   int64   `json:"misses"`
-	Entries  int     `json:"entries"`
-	HitRate  float64 `json:"hit_rate"`
+	Hits    int64   `json:"hits"`
+	Misses  int64   `json:"misses"`
+	Entries int     `json:"entries"`
+	HitRate float64 `json:"hit_rate"`
 }
 
 // Cache is a disk-based LRU response cache.

@@ -49,11 +49,11 @@ const (
 // Bus is the fan-out point for one workload's output. The zero value is not
 // usable; call New.
 type Bus struct {
-	handleID   string
-	stream     executor.StreamName
-	bufSize    int
-	replayCap  int
-	nowFn      func() time.Time
+	handleID  string
+	stream    executor.StreamName
+	bufSize   int
+	replayCap int
+	nowFn     func() time.Time
 
 	mu          sync.Mutex
 	seq         uint64

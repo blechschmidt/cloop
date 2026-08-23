@@ -125,14 +125,14 @@ var statusCmd = &cobra.Command{
 						}
 					}
 					assigneeSuffix := ""
-				if t.Assignee != "" {
-					assigneeSuffix = color.New(color.FgBlue).Sprintf(" [@%s]", t.Assignee)
-				}
-				blockerSuffix := ""
-				if _, isBlocked := blockedIDs[t.ID]; isBlocked {
-					blockerSuffix = color.New(color.FgRed, color.Bold).Sprint(" [BLOCKED]")
-				}
-				fmt.Printf("          %s Task %d: %s%s%s%s%s%s%s\n", taskMarker(t.Status), t.ID, t.Title, failCountSuffix, notesSuffix, reviewSuffix, deadlineSuffix, assigneeSuffix, blockerSuffix)
+					if t.Assignee != "" {
+						assigneeSuffix = color.New(color.FgBlue).Sprintf(" [@%s]", t.Assignee)
+					}
+					blockerSuffix := ""
+					if _, isBlocked := blockedIDs[t.ID]; isBlocked {
+						blockerSuffix = color.New(color.FgRed, color.Bold).Sprint(" [BLOCKED]")
+					}
+					fmt.Printf("          %s Task %d: %s%s%s%s%s%s%s\n", taskMarker(t.Status), t.ID, t.Title, failCountSuffix, notesSuffix, reviewSuffix, deadlineSuffix, assigneeSuffix, blockerSuffix)
 					if t.Condition != "" {
 						condStr := t.Condition
 						if len(condStr) > 80 {

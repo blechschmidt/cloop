@@ -19,10 +19,10 @@ import (
 
 // Channel represents a single notification channel.
 type Channel struct {
-	Name        string
-	Configured  bool
-	Reachable   bool
-	Detail      string
+	Name       string
+	Configured bool
+	Reachable  bool
+	Detail     string
 }
 
 // Setup runs the interactive wizard for all notification channels.

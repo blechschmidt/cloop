@@ -294,9 +294,9 @@ func outputForecastJSON(f *forecast.Forecast) error {
 		AvgEstimatedMinutes float64 `json:"avg_estimated_minutes"`
 		MinuteDataPoints    int     `json:"minute_data_points"`
 
-		Optimistic  scenarioJSON     `json:"optimistic"`
-		Expected    scenarioJSON     `json:"expected"`
-		Pessimistic scenarioJSON     `json:"pessimistic"`
+		Optimistic  scenarioJSON          `json:"optimistic"`
+		Expected    scenarioJSON          `json:"expected"`
+		Pessimistic scenarioJSON          `json:"pessimistic"`
 		TaskWindows []forecast.TaskWindow `json:"task_windows"`
 	}
 

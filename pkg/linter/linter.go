@@ -364,18 +364,18 @@ Tasks:
 
 // FixSuggestion holds an AI-generated field rewrite for a single task.
 type FixSuggestion struct {
-	TaskID      int
-	TitleFix    string
-	DescFix     string
+	TaskID   int
+	TitleFix string
+	DescFix  string
 }
 
 // GenerateFixes asks the provider to rewrite titles/descriptions for the given issues.
 func GenerateFixes(ctx context.Context, prov provider.Provider, model string, plan *pm.Plan, issues []Issue) ([]FixSuggestion, error) {
 	// Collect tasks that need fixing
 	type fixTarget struct {
-		task        *pm.Task
-		fixTitle    bool
-		fixDesc     bool
+		task     *pm.Task
+		fixTitle bool
+		fixDesc  bool
 	}
 	targets := map[int]*fixTarget{}
 	for _, issue := range issues {

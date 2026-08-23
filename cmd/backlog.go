@@ -19,12 +19,12 @@ import (
 )
 
 var (
-	backlogProvider  string
-	backlogModel     string
-	backlogFormat    string
-	backlogOutput    string
-	backlogAsTasks   bool
-	backlogMaxItems  int
+	backlogProvider string
+	backlogModel    string
+	backlogFormat   string
+	backlogOutput   string
+	backlogAsTasks  bool
+	backlogMaxItems int
 )
 
 var backlogCmd = &cobra.Command{

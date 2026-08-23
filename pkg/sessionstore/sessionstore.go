@@ -160,18 +160,18 @@ func (s *Store) Put(rec oidcauth.SessionRecord) error {
 		return err
 	}
 	return s.db.PutSession(statedb.SessionRow{
-		ID:               rec.ID,
-		Subject:          rec.Identity.Sub,
-		Email:            rec.Identity.Email,
-		DisplayName:      rec.Identity.Name,
-		OwnerKey:         rec.Identity.OwnerKey(),
-		Groups:           rec.Identity.Groups,
-		Roles:            rec.Identity.Roles,
-		IP:               rec.IP,
-		UserAgent:        rec.UserAgent,
-		IssuedAt:         rec.IssuedAt,
-		LastSeen:         rec.LastSeen,
-		ExpiresAt:        rec.ExpiresAt,
+		ID:                rec.ID,
+		Subject:           rec.Identity.Sub,
+		Email:             rec.Identity.Email,
+		DisplayName:       rec.Identity.Name,
+		OwnerKey:          rec.Identity.OwnerKey(),
+		Groups:            rec.Identity.Groups,
+		Roles:             rec.Identity.Roles,
+		IP:                rec.IP,
+		UserAgent:         rec.UserAgent,
+		IssuedAt:          rec.IssuedAt,
+		LastSeen:          rec.LastSeen,
+		ExpiresAt:         rec.ExpiresAt,
 		RefreshSealed:     env.Ciphertext,
 		RefreshKeyID:      env.KeyID,
 		RefreshWrappedDEK: env.WrappedDEK,
@@ -292,10 +292,10 @@ func (s *Store) unseal(row statedb.SessionRow) string {
 	}
 	plain, err := s.keyring.OpenEnvelope(
 		secretbroker.AADFor(secretbroker.SetSessions, row.ID), secretbroker.Envelope{
-		KeyID:      row.RefreshKeyID,
-		WrappedDEK: row.RefreshWrappedDEK,
-		Ciphertext: row.RefreshSealed,
-	})
+			KeyID:      row.RefreshKeyID,
+			WrappedDEK: row.RefreshWrappedDEK,
+			Ciphertext: row.RefreshSealed,
+		})
 	if err != nil {
 		return ""
 	}

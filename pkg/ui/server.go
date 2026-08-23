@@ -24,8 +24,8 @@ import (
 
 	"nhooyr.io/websocket"
 
-	"github.com/blechschmidt/cloop/pkg/artifact"
 	"github.com/blechschmidt/cloop/pkg/apitoken"
+	"github.com/blechschmidt/cloop/pkg/artifact"
 	"github.com/blechschmidt/cloop/pkg/authz"
 	"github.com/blechschmidt/cloop/pkg/blocker"
 	"github.com/blechschmidt/cloop/pkg/boundedread"
@@ -5169,6 +5169,7 @@ func (s *Server) broadcastProjectsUpdate() {
 //   - status: filter by lifecycle state (queued|running|done|failed|skipped)
 //   - kind:   filter by entry kind (task|heal|evolve|external|session)
 //   - task_id: filter rows tied to a specific plan task id
+//
 // Row bounds for /api/queue, previously documented but never enforced.
 const (
 	defaultQueueLimit = 200
@@ -7361,4 +7362,3 @@ func (s *Server) handleProviderModelSet(w http.ResponseWriter, r *http.Request) 
 		"effort":   ps.Effort,
 	})
 }
-

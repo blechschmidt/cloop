@@ -65,11 +65,11 @@ type Score struct {
 
 // EvalResult is the full evaluation output for one task.
 type EvalResult struct {
-	TaskID    int       `json:"task_id"`
-	TaskTitle string    `json:"task_title"`
-	Scores    []Score   `json:"scores"`
+	TaskID    int     `json:"task_id"`
+	TaskTitle string  `json:"task_title"`
+	Scores    []Score `json:"scores"`
 	// Weighted is the overall weighted average (1-10).
-	Weighted  float64   `json:"weighted_average"`
+	Weighted    float64   `json:"weighted_average"`
 	EvaluatedAt time.Time `json:"evaluated_at"`
 }
 

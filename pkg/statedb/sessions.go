@@ -20,26 +20,26 @@ import (
 // it — the sealing happens in pkg/sessionstore, so the storage layer never
 // holds a live credential and cannot leak one by logging a row.
 type SessionRow struct {
-	ID               string
-	Subject          string
-	Issuer           string
-	Email            string
-	DisplayName      string
-	OwnerKey         string
-	Groups           []string
-	Roles            []string
-	IP               string
-	UserAgent        string
-	IssuedAt         time.Time
-	LastSeen         time.Time
-	ExpiresAt        time.Time
-	RefreshSealed    []byte
+	ID            string
+	Subject       string
+	Issuer        string
+	Email         string
+	DisplayName   string
+	OwnerKey      string
+	Groups        []string
+	Roles         []string
+	IP            string
+	UserAgent     string
+	IssuedAt      time.Time
+	LastSeen      time.Time
+	ExpiresAt     time.Time
+	RefreshSealed []byte
 	// RefreshKeyID and RefreshWrappedDEK are the envelope this row's sealed
 	// refresh token belongs to (Task 20181). "legacy" means the token is
 	// sealed directly under the passphrase-derived key, with no wrapped DEK.
 	RefreshKeyID      string
 	RefreshWrappedDEK []byte
-	RefreshCheckedAt time.Time
+	RefreshCheckedAt  time.Time
 }
 
 const sessionColumns = `id, subject, issuer, email, display_name, owner_key,

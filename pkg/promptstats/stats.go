@@ -20,7 +20,7 @@ const statsFile = ".cloop/prompt-stats.jsonl"
 type Record struct {
 	TaskTitle  string `json:"task_title"`
 	PromptHash string `json:"prompt_hash"`
-	Outcome    string `json:"outcome"`    // "done", "failed", "skipped"
+	Outcome    string `json:"outcome"`     // "done", "failed", "skipped"
 	DurationMs int64  `json:"duration_ms"` // wall-clock ms for the task
 }
 
@@ -82,12 +82,12 @@ func Load(workDir string) ([]Record, error) {
 
 // HashStats aggregates outcomes for a single prompt hash.
 type HashStats struct {
-	Hash     string
-	Total    int
-	Done     int
-	Failed   int
-	Skipped  int
-	TotalMs  int64
+	Hash    string
+	Total   int
+	Done    int
+	Failed  int
+	Skipped int
+	TotalMs int64
 }
 
 // FailureRate returns the fraction of executions that failed (0.0 – 1.0).

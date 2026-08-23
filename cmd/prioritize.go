@@ -222,9 +222,9 @@ Examples:
 		}
 
 		type preview struct {
-			ID   int
-			Prio int
-			Role string
+			ID    int
+			Prio  int
+			Role  string
 			Title string
 		}
 		var previews []preview

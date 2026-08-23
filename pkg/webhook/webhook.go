@@ -31,14 +31,14 @@ const webhookMaxResponseBytes int64 = 64 * 1024
 type EventType string
 
 const (
-	EventSessionStarted  EventType = "session_started"
-	EventSessionComplete EventType = "session_complete"
-	EventSessionFailed   EventType = "session_failed"
-	EventTaskStarted     EventType = "task_started"
-	EventTaskDone        EventType = "task_done"
-	EventTaskFailed      EventType = "task_failed"
-	EventTaskSkipped     EventType = "task_skipped"
-	EventPlanComplete    EventType = "plan_complete"
+	EventSessionStarted   EventType = "session_started"
+	EventSessionComplete  EventType = "session_complete"
+	EventSessionFailed    EventType = "session_failed"
+	EventTaskStarted      EventType = "task_started"
+	EventTaskDone         EventType = "task_done"
+	EventTaskFailed       EventType = "task_failed"
+	EventTaskSkipped      EventType = "task_skipped"
+	EventPlanComplete     EventType = "plan_complete"
 	EventEvolveDiscovered EventType = "evolve_discovered"
 )
 
@@ -60,15 +60,15 @@ type Progress struct {
 
 // SessionInfo carries aggregate session stats inside a Payload.
 type SessionInfo struct {
-	TotalTasks     int    `json:"total_tasks,omitempty"`
-	DoneTasks      int    `json:"done_tasks,omitempty"`
-	FailedTasks    int    `json:"failed_tasks,omitempty"`
-	InputTokens    int    `json:"input_tokens,omitempty"`
-	OutputTokens   int    `json:"output_tokens,omitempty"`
-	Duration       string `json:"duration,omitempty"`
-	EstCostUSD     string `json:"est_cost_usd,omitempty"`
-	NewTasksFound  int    `json:"new_tasks_found,omitempty"`
-	EvolveStep     int    `json:"evolve_step,omitempty"`
+	TotalTasks    int    `json:"total_tasks,omitempty"`
+	DoneTasks     int    `json:"done_tasks,omitempty"`
+	FailedTasks   int    `json:"failed_tasks,omitempty"`
+	InputTokens   int    `json:"input_tokens,omitempty"`
+	OutputTokens  int    `json:"output_tokens,omitempty"`
+	Duration      string `json:"duration,omitempty"`
+	EstCostUSD    string `json:"est_cost_usd,omitempty"`
+	NewTasksFound int    `json:"new_tasks_found,omitempty"`
+	EvolveStep    int    `json:"evolve_step,omitempty"`
 }
 
 // Payload is the JSON body sent to the webhook URL.
@@ -102,7 +102,7 @@ func TruncateError(s string) string {
 // Client sends webhook notifications.
 type Client struct {
 	url     string
-	secret  string            // HMAC-SHA256 signing secret (empty = no signing)
+	secret  string             // HMAC-SHA256 signing secret (empty = no signing)
 	events  map[EventType]bool // nil = all events
 	headers map[string]string
 	isSlack bool

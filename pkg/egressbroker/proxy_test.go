@@ -402,8 +402,8 @@ func TestUnauthenticatedRequestsAreRefused(t *testing.T) {
 			req.URL.Scheme = "http"
 			proxyURL, _ := url.Parse("http://" + f.proxy.Addr())
 			tr := &http.Transport{
-				Proxy:             http.ProxyURL(proxyURL),
-				DisableKeepAlives: true,
+				Proxy:              http.ProxyURL(proxyURL),
+				DisableKeepAlives:  true,
 				ProxyConnectHeader: http.Header{},
 			}
 			if tc.auth != "" {

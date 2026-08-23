@@ -131,7 +131,7 @@ func (d *DB) GetEnrollmentToken(id string) (EnrollmentTokenRow, error) {
 //
 // The single-use guarantee lives entirely in this statement's WHERE clause.
 // SQLite serialises writers, so of two concurrent redemptions exactly one
-// finds redeemed_at = '' and updates a row; the other matches nothing and gets
+// finds redeemed_at = ” and updates a row; the other matches nothing and gets
 // ErrEnrollmentSpent. A read-then-write implementation would let both succeed
 // and hand two devices the same identity, which is the precise attack that
 // single-use tokens exist to prevent.

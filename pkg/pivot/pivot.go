@@ -22,12 +22,12 @@ type SkipDirective struct {
 
 // NewTaskSpec is a task the AI wants to add to fulfil the new goal.
 type NewTaskSpec struct {
-	Title            string      `json:"title"`
-	Description      string      `json:"description"`
-	Priority         int         `json:"priority"`
+	Title            string       `json:"title"`
+	Description      string       `json:"description"`
+	Priority         int          `json:"priority"`
 	Role             pm.AgentRole `json:"role,omitempty"`
-	EstimatedMinutes int         `json:"estimated_minutes,omitempty"`
-	Tags             []string    `json:"tags,omitempty"`
+	EstimatedMinutes int          `json:"estimated_minutes,omitempty"`
+	Tags             []string     `json:"tags,omitempty"`
 }
 
 // PivotResult is the structured JSON returned by the AI during a pivot.

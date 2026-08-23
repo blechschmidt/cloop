@@ -10,6 +10,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/blechschmidt/cloop/internal/hometest"
 )
 
 // fakeCloopEnv is a sentinel: when set, TestMain pretends to be a "cloop"
@@ -18,10 +20,14 @@ import (
 // shelling out to system tools that don't accept arbitrary argv.
 const fakeCloopEnv = "CLOOP_MULTIUI_FAKE_CLOOP"
 
-// TestMain enables the fake-cloop subprocess shim. When the env var is set
-// the binary blocks on stdin (or sleeps for 60s, whichever comes first) so
-// the parent can inspect its /proc entry. When unset it runs the normal
-// test suite.
+// TestMain enables the fake-cloop subprocess shim, and isolates the registry
+// this package owns from the developer's real ~/.cloop.
+//
+// When the env var is set the binary blocks on stdin (or sleeps for 60s,
+// whichever comes first) so the parent can inspect its /proc entry. When unset
+// it runs the normal test suite under a temporary home — Save and AddPaths
+// write to a fixed path outside the working tree, so without this the tests
+// for them would mutate the registry of whoever ran them.
 func TestMain(m *testing.M) {
 	if os.Getenv(fakeCloopEnv) != "" {
 		// Sleep up to 60s so parent can inspect /proc; parent always
@@ -30,7 +36,7 @@ func TestMain(m *testing.M) {
 		time.Sleep(60 * time.Second)
 		os.Exit(0)
 	}
-	os.Exit(m.Run())
+	os.Exit(hometest.Isolate(m))
 }
 
 // TestCloopRunMatch covers the pure decision predicate that decides whether

@@ -31,9 +31,9 @@ var saveMu sync.Mutex
 type Entry struct {
 	ID        int       `json:"id"`
 	Timestamp time.Time `json:"timestamp"`
-	Goal      string    `json:"goal,omitempty"`   // project goal when memory was recorded
-	Content   string    `json:"content"`           // the learning / fact
-	Source    string    `json:"source"`            // "ai" or "user"
+	Goal      string    `json:"goal,omitempty"` // project goal when memory was recorded
+	Content   string    `json:"content"`        // the learning / fact
+	Source    string    `json:"source"`         // "ai" or "user"
 	Tags      []string  `json:"tags,omitempty"`
 }
 

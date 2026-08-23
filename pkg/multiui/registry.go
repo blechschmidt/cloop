@@ -1,5 +1,6 @@
 // Package multiui manages a registry of cloop projects for the multi-project
-// web UI dashboard. The registry is persisted at ~/.cloop/projects.json.
+// web UI dashboard. The registry is persisted at <root>/projects.json, where
+// root is $CLOOP_HOME when set and $HOME/.cloop otherwise — see Root.
 package multiui
 
 import (
@@ -209,13 +210,57 @@ type registry struct {
 	Projects []ProjectEntry `json:"projects"`
 }
 
-// registryPath returns ~/.cloop/projects.json.
-func registryPath() (string, error) {
+// EnvRoot names the environment variable that relocates the directory this
+// registry lives in, which would otherwise be $HOME/.cloop. It follows the
+// CARGO_HOME convention: the variable holds the directory itself, not the home
+// that contains it.
+//
+// Scope note: only this package consults it. The other things under ~/.cloop —
+// profiles, plugins, the executor agent credential — still resolve from $HOME
+// directly, so setting this alone does not relocate them. Redirect $HOME for
+// that. docs/reference/configuration.md states the same thing for operators.
+//
+// It exists because this registry is process-global mutable state living at a
+// fixed path outside the working tree. Without a seam, any test that reached
+// AddPaths wrote into the developer's real ~/.cloop/projects.json and stayed
+// there. That is not hypothetical: a single test in pkg/ui accumulated 99
+// entries into the real registry on a development host, at which point project
+// index 99 resolved to a deleted /tmp directory and three unrelated
+// authorization tests began failing on every run. Ephemeral CI runners always
+// start from an empty HOME, so the pipeline stayed green while every developer
+// went red — and the failures surfaced as authorization assertions, which
+// invites "fixing" the assertion instead of the leak.
+const EnvRoot = "CLOOP_HOME"
+
+// Root returns cloop's per-user state directory: $CLOOP_HOME when set and
+// non-empty, otherwise $HOME/.cloop.
+//
+// A relative CLOOP_HOME is resolved against the current working directory, so
+// that a caller cannot silently end up addressing two different directories
+// from two different working directories.
+func Root() (string, error) {
+	if v := strings.TrimSpace(os.Getenv(EnvRoot)); v != "" {
+		abs, err := filepath.Abs(v)
+		if err != nil {
+			return "", fmt.Errorf("multiui: resolve %s=%q: %w", EnvRoot, v, err)
+		}
+		return abs, nil
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, ".cloop", "projects.json"), nil
+	return filepath.Join(home, ".cloop"), nil
+}
+
+// registryPath returns <root>/projects.json — ~/.cloop/projects.json unless
+// CLOOP_HOME redirects it. See Root.
+func registryPath() (string, error) {
+	root, err := Root()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(root, "projects.json"), nil
 }
 
 // Load reads the registry from disk; returns an empty registry if file is absent.
@@ -435,8 +480,8 @@ const (
 type ProjectStatus struct {
 	Name         string    `json:"name"`
 	Path         string    `json:"path"`
-	Status       string    `json:"status"`        // state.Status field value
-	Health       Health    `json:"health"`        // computed indicator
+	Status       string    `json:"status"` // state.Status field value
+	Health       Health    `json:"health"` // computed indicator
 	Goal         string    `json:"goal"`
 	TotalTasks   int       `json:"total_tasks"`
 	DoneTasks    int       `json:"done_tasks"`

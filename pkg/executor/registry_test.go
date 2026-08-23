@@ -16,8 +16,8 @@ type fakeExecutor struct {
 	kind string
 }
 
-func (f *fakeExecutor) ID() string             { return f.id }
-func (f *fakeExecutor) Kind() string           { return f.kind }
+func (f *fakeExecutor) ID() string   { return f.id }
+func (f *fakeExecutor) Kind() string { return f.kind }
 func (f *fakeExecutor) Capabilities() Capabilities {
 	return Capabilities{Isolation: IsolationNone}
 }

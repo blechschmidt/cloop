@@ -167,8 +167,8 @@ func (sh *Shell) chat(ctx context.Context, userMsg string, out io.Writer) error 
 	defer cancel()
 
 	opts := provider.Options{
-		Model:     sh.Model,
-		Timeout:   sh.Timeout,
+		Model:   sh.Model,
+		Timeout: sh.Timeout,
 	}
 
 	var streamBuf strings.Builder

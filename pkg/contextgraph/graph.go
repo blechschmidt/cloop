@@ -44,11 +44,11 @@ type Node struct {
 type EdgeRel string
 
 const (
-	RelDependsOn  EdgeRel = "depends_on"  // task → task
-	RelProduced   EdgeRel = "produced"    // task → artifact
-	RelAnnotated  EdgeRel = "annotated"   // task → annotation
-	RelLinkedKB   EdgeRel = "linked_kb"   // task → kb
-	RelCommit     EdgeRel = "commit"      // commit → task
+	RelDependsOn EdgeRel = "depends_on" // task → task
+	RelProduced  EdgeRel = "produced"   // task → artifact
+	RelAnnotated EdgeRel = "annotated"  // task → annotation
+	RelLinkedKB  EdgeRel = "linked_kb"  // task → kb
+	RelCommit    EdgeRel = "commit"     // commit → task
 )
 
 // Edge is a directed edge in the context graph.

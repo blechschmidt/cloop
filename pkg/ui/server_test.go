@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -291,12 +292,21 @@ func TestPerProjectTabSwitching(t *testing.T) {
 			}
 		}
 
-		// Both project names must appear
-		if !containsAny(names, "cloop") {
-			t.Errorf("cloop not in project names: %v", names)
-		}
-		if !containsAny(names, "sysmon") {
-			t.Errorf("sysmon not in project names: %v", names)
+		// Both project names must appear.
+		//
+		// Asserted against the directories this test actually created, not
+		// against the literals "cloop" and "sysmon". Both projects here are
+		// os.MkdirTemp("", "cloop-ui-test-*"), so neither is ever named
+		// "sysmon" — that assertion passed only on machines whose real
+		// ~/.cloop/projects.json happened to contain a project of that name,
+		// and failed on any clean checkout. Reading ambient state is how the
+		// registry leak this suite now guards against stayed invisible; a test
+		// that passes because of what is on the developer's disk is the same
+		// bug wearing the opposite sign.
+		for _, want := range []string{filepath.Base(cloopDir), filepath.Base(sysmonDir)} {
+			if !containsAny(names, want) {
+				t.Errorf("project %q not in /api/projects names: %v", want, names)
+			}
 		}
 
 		// Both goals must appear

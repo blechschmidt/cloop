@@ -47,9 +47,9 @@ type ProviderResult struct {
 	ProviderName string
 	Model        string
 	// Averaged across runs.
-	AvgLatencyMS float64
-	MinLatencyMS float64
-	MaxLatencyMS float64
+	AvgLatencyMS    float64
+	MinLatencyMS    float64
+	MaxLatencyMS    float64
 	AvgInputTokens  float64
 	AvgOutputTokens float64
 	TotalCostUSD    float64

@@ -87,7 +87,7 @@ func DefaultCases(workDir string) []SuiteCase {
 			Fault: Fault{
 				Type: FaultSlowDisk, Probability: 1.0,
 				StartedAt: time.Now(), Until: until(2 * time.Second),
-				Note:      "75ms",
+				Note: "75ms",
 			},
 			Description: "atomicfile writes get a 75ms delay applied",
 			Probe:       slowDiskProbe(workDir),

@@ -36,11 +36,11 @@ const (
 
 // TraceEntry links a single commit to a task (or indicates no match).
 type TraceEntry struct {
-	Hash              string     `json:"hash"`
-	Subject           string     `json:"subject"`
-	MatchedTaskID     int        `json:"matched_task_id"`     // 0 = no match
-	MatchedTaskTitle  string     `json:"matched_task_title"`  // empty = no match
-	Confidence        Confidence `json:"confidence"`
+	Hash             string     `json:"hash"`
+	Subject          string     `json:"subject"`
+	MatchedTaskID    int        `json:"matched_task_id"`    // 0 = no match
+	MatchedTaskTitle string     `json:"matched_task_title"` // empty = no match
+	Confidence       Confidence `json:"confidence"`
 }
 
 // TraceMap is the complete mapping for a run.

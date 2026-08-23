@@ -153,7 +153,7 @@ func TestLooksLikeClarificationQuestion(t *testing.T) {
 			expect: false,
 		},
 		{
-			name:   "trailing-space-sensitive: 'should i' without trailing space and no other pattern",
+			name: "trailing-space-sensitive: 'should i' without trailing space and no other pattern",
 			// "Should I?" has no trailing space after "i", and no other pattern.
 			// The pattern list uses "should i " (with trailing space) precisely
 			// to require a word boundary, so this must be a negative.

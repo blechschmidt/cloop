@@ -46,7 +46,7 @@ type BlockerReport struct {
 	TaskTitle      string       `json:"task_title"`
 	Detection      *BlockerInfo `json:"detection"`
 	RootCause      string       `json:"root_cause"`
-	Actions        []string     `json:"actions"` // exactly 3 concrete unblocking steps
+	Actions        []string     `json:"actions"`        // exactly 3 concrete unblocking steps
 	Recommendation string       `json:"recommendation"` // "retry", "skip", or "reassign"
 }
 

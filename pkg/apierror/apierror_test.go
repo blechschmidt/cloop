@@ -343,8 +343,8 @@ func TestFromHTTPStatus(t *testing.T) {
 		{http.StatusTooManyRequests, CodeRateLimited},
 		{http.StatusServiceUnavailable, CodeUnavailable},
 		{http.StatusInternalServerError, CodeInternal},
-		{http.StatusBadGateway, CodeInternal},        // unknown → internal
-		{http.StatusGatewayTimeout, CodeInternal},    // unknown → internal
+		{http.StatusBadGateway, CodeInternal},          // unknown → internal
+		{http.StatusGatewayTimeout, CodeInternal},      // unknown → internal
 		{http.StatusUnprocessableEntity, CodeInternal}, // unknown → internal
 	}
 	for _, tc := range cases {

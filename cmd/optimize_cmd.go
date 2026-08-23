@@ -18,11 +18,11 @@ import (
 )
 
 var (
-	optimizeCmdProvider    string
-	optimizeCmdModel       string
-	optimizeCmdApply       bool
-	optimizeCmdDryRun      bool
-	optimizeCmdTimeout     string
+	optimizeCmdProvider string
+	optimizeCmdModel    string
+	optimizeCmdApply    bool
+	optimizeCmdDryRun   bool
+	optimizeCmdTimeout  string
 )
 
 var optimizeCmd = &cobra.Command{

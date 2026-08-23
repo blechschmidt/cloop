@@ -131,10 +131,10 @@ const (
 
 // ImportResult carries the imported plan along with diagnostic counters.
 type ImportResult struct {
-	Plan       *pm.Plan
-	Added      int // tasks appended (merge mode only)
-	Skipped    int // tasks skipped because they already existed (merge mode only)
-	Replaced   int // tasks in the new plan (replace mode only)
+	Plan     *pm.Plan
+	Added    int // tasks appended (merge mode only)
+	Skipped  int // tasks skipped because they already existed (merge mode only)
+	Replaced int // tasks in the new plan (replace mode only)
 }
 
 // Import reads a plan file from filePath, validates it, and merges or replaces

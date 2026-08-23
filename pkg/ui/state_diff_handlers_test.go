@@ -118,10 +118,10 @@ func TestTaskAddHandler_EmitsStateDiffNotFullPlan(t *testing.T) {
 	// Parse and assert: tasks_added has exactly the new task, no top-level
 	// state churn beyond updated_at and the post-add plan version bump.
 	var payload struct {
-		TasksAdded   []*pm.Task         `json:"tasks_added"`
-		TasksRemoved []int              `json:"tasks_removed"`
-		TasksChanged []json.RawMessage  `json:"tasks_changed"`
-		StateChanged map[string]any     `json:"state_changed"`
+		TasksAdded   []*pm.Task        `json:"tasks_added"`
+		TasksRemoved []int             `json:"tasks_removed"`
+		TasksChanged []json.RawMessage `json:"tasks_changed"`
+		StateChanged map[string]any    `json:"state_changed"`
 	}
 	if err := json.Unmarshal(diff.Data, &payload); err != nil {
 		t.Fatalf("unmarshal state_diff: %v", err)

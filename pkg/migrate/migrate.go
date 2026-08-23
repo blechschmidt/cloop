@@ -24,12 +24,12 @@ const CurrentVersion = 2
 
 // Report summarises what was (or would be) done during a migration run.
 type Report struct {
-	FromVersion   int
-	ToVersion     int
-	DryRun        bool
-	Steps         []StepReport
-	Warnings      []string
-	RowsMigrated  int
+	FromVersion    int
+	ToVersion      int
+	DryRun         bool
+	Steps          []StepReport
+	Warnings       []string
+	RowsMigrated   int
 	FilesConverted int
 }
 
@@ -43,9 +43,9 @@ type StepReport struct {
 
 // RepairReport describes a single repair action.
 type RepairReport struct {
-	Kind    string // "orphan_snapshot", "missing_column", "invalid_config_key"
-	Detail  string
-	Fixed   bool
+	Kind   string // "orphan_snapshot", "missing_column", "invalid_config_key"
+	Detail string
+	Fixed  bool
 }
 
 // Options controls migration behaviour.
@@ -444,8 +444,8 @@ func repairConfigTypes(dotcloop string, dryRun bool) ([]RepairReport, error) {
 	var repairs []RepairReport
 	lines := strings.Split(string(raw), "\n")
 	boolKeys := map[string]bool{
-		"auto_evolve": true,
-		"pm_mode":     true,
+		"auto_evolve":  true,
+		"pm_mode":      true,
 		"skip_clarify": true,
 	}
 	for i, line := range lines {
@@ -661,25 +661,25 @@ func columnSet(conn *sql.DB, table string) (map[string]bool, error) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 type legacyState struct {
-	Goal              string        `json:"goal"`
-	WorkDir           string        `json:"workdir"`
-	MaxSteps          int           `json:"max_steps"`
-	CurrentStep       int           `json:"current_step"`
-	Status            string        `json:"status"`
-	Steps             []legacyStep  `json:"steps"`
-	CreatedAt         time.Time     `json:"created_at"`
-	UpdatedAt         time.Time     `json:"updated_at"`
-	Model             string        `json:"model,omitempty"`
-	Instructions      string        `json:"instructions,omitempty"`
-	AutoEvolve        bool          `json:"auto_evolve"`
-	EvolveStep        int           `json:"evolve_step"`
-	Provider          string        `json:"provider,omitempty"`
-	PMMode            bool          `json:"pm_mode,omitempty"`
-	Plan              *pm.Plan      `json:"plan,omitempty"`
-	TotalInputTokens  int           `json:"total_input_tokens,omitempty"`
-	TotalOutputTokens int           `json:"total_output_tokens,omitempty"`
-	DefaultMaxMinutes int           `json:"default_max_minutes,omitempty"`
-	SkipClarify       bool          `json:"skip_clarify,omitempty"`
+	Goal              string       `json:"goal"`
+	WorkDir           string       `json:"workdir"`
+	MaxSteps          int          `json:"max_steps"`
+	CurrentStep       int          `json:"current_step"`
+	Status            string       `json:"status"`
+	Steps             []legacyStep `json:"steps"`
+	CreatedAt         time.Time    `json:"created_at"`
+	UpdatedAt         time.Time    `json:"updated_at"`
+	Model             string       `json:"model,omitempty"`
+	Instructions      string       `json:"instructions,omitempty"`
+	AutoEvolve        bool         `json:"auto_evolve"`
+	EvolveStep        int          `json:"evolve_step"`
+	Provider          string       `json:"provider,omitempty"`
+	PMMode            bool         `json:"pm_mode,omitempty"`
+	Plan              *pm.Plan     `json:"plan,omitempty"`
+	TotalInputTokens  int          `json:"total_input_tokens,omitempty"`
+	TotalOutputTokens int          `json:"total_output_tokens,omitempty"`
+	DefaultMaxMinutes int          `json:"default_max_minutes,omitempty"`
+	SkipClarify       bool         `json:"skip_clarify,omitempty"`
 }
 
 type legacyStep struct {

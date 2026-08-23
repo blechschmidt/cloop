@@ -212,9 +212,9 @@ func TestBackup_WhileConcurrentWriter(t *testing.T) {
 			// during the backup is exactly the contention pattern WAL
 			// mode is supposed to handle gracefully.
 			err := db.AppendCost(statedb.CostEntry{
-				TaskID: int(written.Load() % 5),
-				Provider: "test",
-				Model: "m",
+				TaskID:      int(written.Load() % 5),
+				Provider:    "test",
+				Model:       "m",
 				InputTokens: 1, OutputTokens: 1,
 				EstimatedUSD: 0.001,
 			})

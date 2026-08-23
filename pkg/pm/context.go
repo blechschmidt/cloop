@@ -12,10 +12,10 @@ import (
 // ProjectContext holds a lightweight snapshot of the project's current state.
 // It is injected into task prompts to give the AI situational awareness.
 type ProjectContext struct {
-	FileTree    string
-	GitStatus   string
-	RecentLog   string
-	WorkDir     string
+	FileTree  string
+	GitStatus string
+	RecentLog string
+	WorkDir   string
 }
 
 // BuildProjectContext collects project state from the filesystem and git.

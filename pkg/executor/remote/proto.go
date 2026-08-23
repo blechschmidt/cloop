@@ -468,9 +468,9 @@ func (c AgentCapabilities) Executor() executor.Capabilities {
 		// version in Executor.Capabilities, because a device that can commit
 		// and bundle is no use if the session cannot carry the result frames.
 		SupportsWriteBack: c.WriteBack,
-		MaxConcurrent:                 c.MaxConcurrent,
-		Platform:                      c.OS,
-		Arch:                          c.Arch,
+		MaxConcurrent:     c.MaxConcurrent,
+		Platform:          c.OS,
+		Arch:              c.Arch,
 	}
 }
 

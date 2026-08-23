@@ -7,6 +7,122 @@ on:
     branches: [main]
 
 jobs:
+  static-analysis:
+    name: Static analysis
+    runs-on: ubuntu-latest
+    # Three checks that were all clean locally and none of which anything
+    # stopped from regressing. `go vet` passed but was ungated; `gofmt` had
+    # drifted to 137 unformatted files precisely because nothing looked; and a
+    # go.mod that disagrees with `go mod tidy` is how an unused — or worse, a
+    # silently downgraded — dependency survives review.
+    #
+    # They are separated from the vulnerability scan below so the two fail
+    # independently: source hygiene is fixed by the author of the change,
+    # a newly published CVE is not.
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          # go.mod, not a literal: its `toolchain` directive is pinned to a
+          # patch release for security reasons, and a job that silently built
+          # on an older 1.25.x would make that pin decorative.
+          go-version-file: go.mod
+          cache: true
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: gofmt
+        # -l lists files whose formatting differs; the diff is printed because
+        # a bare list of 137 paths tells you nothing about what to change.
+        run: |
+          set -euo pipefail
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::these files are not gofmt-clean:"
+            echo "$unformatted"
+            echo "--- diff ---"
+            gofmt -d $unformatted
+            echo
+            echo "run: gofmt -w \$(gofmt -l .)"
+            exit 1
+          fi
+          echo "all files are gofmt-clean"
+
+      - name: go.mod and go.sum are tidy
+        # Compared against a copy taken just beforehand, not against HEAD.
+        # `git diff` would also fire on any unrelated uncommitted change to
+        # these files, reporting "not tidy" for something that is merely
+        # unstaged — right by luck in a clean CI checkout, and confusing for
+        # anyone who runs this step locally to reproduce a failure.
+        run: |
+          set -euo pipefail
+          cp go.mod /tmp/go.mod.before
+          cp go.sum /tmp/go.sum.before
+          go mod tidy
+          if ! diff -u /tmp/go.mod.before go.mod || ! diff -u /tmp/go.sum.before go.sum; then
+            echo "::error::go mod tidy changed go.mod/go.sum — run it and commit the result"
+            exit 1
+          fi
+          echo "go.mod and go.sum are tidy"
+
+  vulnerability-scan:
+    name: Vulnerability scan
+    runs-on: ubuntu-latest
+    # govulncheck reports only vulnerabilities whose vulnerable symbols this
+    # code can actually reach, so a finding here is a call path, not an
+    # advisory to triage. It exited 3 with 14 reachable findings before this
+    # job existed — one grpc (the xDS RBAC engine and HTTP/2 transport, reached
+    # from the remote executor) and 13 stdlib, landing on the TLS config, the
+    # OIDC handler, the egress proxy and the dashboard's template escaping.
+    #
+    # This gate can newly fail on a commit that changed nothing, because a
+    # vulnerability was published against code that was already there. That is
+    # the intended behaviour: the alternative is finding out later.
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: The toolchain pin is in effect
+        # 13 of the 14 findings this job was created for were stdlib, fixed by
+        # the `toolchain` line in go.mod rather than by any dependency. If the
+        # job silently built on an older 1.25.x, govulncheck would report them
+        # again and the failure would look like a regression in this code.
+        # Assert the pin resolved, so that failure mode names itself instead.
+        run: |
+          set -euo pipefail
+          want=$(awk '/^toolchain /{print $2}' go.mod)
+          got=$(go version | awk '{print $3}')
+          echo "go.mod pins $want; the go command in this module reports $got"
+          [ -n "$want" ] || { echo "::error::go.mod has no toolchain directive"; exit 1; }
+          # Sort -V puts the older first; if `want` is not the older of the two
+          # then the toolchain in use predates the pin.
+          older=$(printf '%s\n%s\n' "${want#go}" "${got#go}" | sort -V | head -1)
+          [ "$older" = "${want#go}" ] || {
+            echo "::error::building with $got, which is older than the pinned $want"
+            exit 1
+          }
+
+      - name: govulncheck
+        run: |
+          set -euo pipefail
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          # Invoked by absolute path rather than relying on GOPATH/bin being on
+          # PATH: if it were not, `govulncheck: command not found` would fail
+          # this job for a reason that looks nothing like a vulnerability.
+          "$(go env GOPATH)/bin/govulncheck" ./...
+
   build-and-test:
     name: Build and Test
     runs-on: ubuntu-latest
@@ -18,11 +134,42 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.25'
+          go-version-file: go.mod
           cache: true
 
       - name: Build
         run: go build ./...
+
+      - name: The test suite does not depend on a clean home directory
+        # cloop keeps per-user state outside the working tree (the
+        # multi-project registry at ~/.cloop/projects.json, budgets and ledgers
+        # under ~/.config/cloop). A test that writes there passes on a fresh
+        # runner and fails on a developer's machine once enough state has
+        # accumulated — which is exactly what happened: one dashboard test
+        # appended an entry per run to a real registry until project index 99
+        # resolved and three authorization tests began failing, for that
+        # developer only. CI could not see it, because CI always starts empty.
+        #
+        # So dirty the home directory first, and make the suite prove it does
+        # not care. Without this step every other run here is the clean case.
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.cloop" "$HOME/.config/cloop"
+          python3 - <<'PY'
+          import json, os
+          entries = [{"name": f"ci-decoy-{i}", "path": f"/nonexistent/ci-decoy-{i}"}
+                     for i in range(150)]
+          with open(os.path.expanduser("~/.cloop/projects.json"), "w") as f:
+              json.dump({"projects": entries}, f)
+          PY
+          echo "seeded $HOME/.cloop/projects.json with 150 unresolvable projects"
+
+      - name: Every package that reads $HOME isolates it in TestMain
+        # The structural half of the same guarantee. The seeding above only
+        # catches a leak in a package that happens to have a test asserting
+        # against index 99; this one catches the next package to be added,
+        # on the day it is added.
+        run: go test -v ./tests/hermetic/
 
       - name: Test with race detector and coverage
         run: go test -race -coverprofile=coverage.out -covermode=atomic $(go list ./... | grep -v 'tests/e2e')
@@ -31,6 +178,41 @@ jobs:
         run: |
           go build -o cloop .
           go test -v -timeout 120s ./tests/e2e/
+
+      - name: The seeded home directory was left untouched
+        # The assertion that makes the seeding meaningful, and it has to run
+        # after the suite. If a test wrote to the real registry the entry count
+        # changes here — failing at the leak, rather than at whichever
+        # unrelated test the accumulated entries eventually break.
+        #
+        # if: always() so that a suite which fails *because* it polluted the
+        # home directory still reports the actual cause.
+        if: always()
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, sys
+          p = os.path.expanduser("~/.cloop/projects.json")
+          n = len(json.load(open(p))["projects"])
+          if n != 150:
+              sys.exit(f"::error::the test suite modified {p}: 150 entries before, "
+                       f"{n} after — a test is writing to the user's home directory")
+          print(f"{p} still has {n} entries; nothing wrote to it")
+          PY
+          # Nothing should have appeared beside it, or in the other per-user
+          # state directory: pkg/globalbudget and pkg/cost write budget.yaml,
+          # costs.jsonl and global.db under ~/.config/cloop, and an entry-count
+          # check on the registry alone would not notice.
+          unexpected=$(
+            find "$HOME/.cloop" -mindepth 1 ! -name projects.json
+            find "$HOME/.config/cloop" -mindepth 1
+          )
+          if [ -n "$unexpected" ]; then
+            echo "::error::the test suite created files under the home directory:"
+            echo "$unexpected"
+            exit 1
+          fi
+          echo "no per-user state was written"
 
       - name: Upload coverage report
         uses: actions/upload-artifact@v4
@@ -55,7 +237,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.25'
+          go-version-file: go.mod
           cache: true
 
       - name: Threat-model conformance suite
@@ -103,7 +285,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.25'
+          go-version-file: go.mod
           cache: true
 
       - name: Docs cover every executor kind, secret kind, role and permission

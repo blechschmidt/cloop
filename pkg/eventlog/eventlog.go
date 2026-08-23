@@ -117,11 +117,11 @@ func (l *Log) DistinctEntityTypes() ([]string, error) {
 
 // TailOptions controls Tail behaviour.
 type TailOptions struct {
-	FromID  int64         // start streaming events with id >= FromID (1 = beginning)
-	Follow  bool          // when true, keep polling for new events; when false, return at head
-	Poll    time.Duration // follow-mode polling interval (default 500ms)
-	Filter  AuditFilter   // additional filtering (Order/Limit/Offset/FromID are overridden)
-	BatchSize int         // events per query (default 200, capped at 5000)
+	FromID    int64         // start streaming events with id >= FromID (1 = beginning)
+	Follow    bool          // when true, keep polling for new events; when false, return at head
+	Poll      time.Duration // follow-mode polling interval (default 500ms)
+	Filter    AuditFilter   // additional filtering (Order/Limit/Offset/FromID are overridden)
+	BatchSize int           // events per query (default 200, capped at 5000)
 }
 
 // Tail streams events to out in id-ascending order. When Follow is false the

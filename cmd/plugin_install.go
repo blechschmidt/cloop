@@ -41,7 +41,7 @@ Example:
 			if reg.Plugins[i].Name == name {
 				found = &reg.Plugins[i]
 				break
-		}
+			}
 		}
 		if found == nil {
 			return fmt.Errorf("plugin %q not found in registry (try: cloop plugin search)", name)

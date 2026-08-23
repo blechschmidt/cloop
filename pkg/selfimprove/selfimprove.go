@@ -27,7 +27,7 @@ import (
 // Suggestion is a concrete improvement recommendation with a source location.
 type Suggestion struct {
 	Rank         int    `json:"rank"`
-	Category     string `json:"category"`     // "performance"|"error_handling"|"ux"|"reliability"|"testing"
+	Category     string `json:"category"` // "performance"|"error_handling"|"ux"|"reliability"|"testing"
 	Title        string `json:"title"`
 	Description  string `json:"description"`
 	FileCitation string `json:"file_citation"` // "pkg/foo/bar.go:42" or "pkg/foo/"

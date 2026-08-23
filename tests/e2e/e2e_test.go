@@ -16,6 +16,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/blechschmidt/cloop/internal/hometest"
 )
 
 // ─────────────────────────────────────────────
@@ -623,7 +625,14 @@ func writeFixtureSnapshot(t *testing.T, workDir string, version int) {
 // Binary availability guard
 // ─────────────────────────────────────────────
 
-// TestMain ensures the binary exists before running any test.
+// TestMain ensures the binary exists before running any test, and isolates the
+// home directory the tests run against.
+//
+// The isolation matters more here than anywhere else in the repository: these
+// tests do not call cloop's packages, they execute the built binary. A
+// subprocess inherits $HOME, so any command that registers a project writes to
+// the real ~/.cloop/projects.json — with none of the in-process safeguards
+// applying, because the leak happens in a different process.
 func TestMain(m *testing.M) {
 	// Parse flags so -update works.
 	// testing.Init() is called automatically; we just call flag.Parse to catch -update.
@@ -641,5 +650,5 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 
-	os.Exit(m.Run())
+	os.Exit(hometest.Isolate(m))
 }

@@ -40,16 +40,16 @@ type ThemeGroup struct {
 
 // TaskContext holds the data collected for a single completed task.
 type TaskContext struct {
-	ID          int
-	Title       string
-	Description string
-	Status      pm.TaskStatus
-	Role        string
-	Tags        []string
-	Result      string
+	ID              int
+	Title           string
+	Description     string
+	Status          pm.TaskStatus
+	Role            string
+	Tags            []string
+	Result          string
 	ArtifactContent string
-	Annotations []pm.Annotation
-	CompletedAt *time.Time
+	Annotations     []pm.Annotation
+	CompletedAt     *time.Time
 }
 
 // CollectTaskContexts gathers all relevant task data for tasks that are done,

@@ -22,9 +22,9 @@ type Report struct {
 	CurrentGoal       string
 	GoalDrifted       bool
 
-	TasksAdded         []*pm.Task
-	TasksRemoved       []*pm.Task
-	PriorityEscalated  []PriorityChange
+	TasksAdded          []*pm.Task
+	TasksRemoved        []*pm.Task
+	PriorityEscalated   []PriorityChange
 	PriorityDeescalated []PriorityChange
 
 	BaselineTaskCount int
@@ -39,8 +39,8 @@ type Report struct {
 
 // PriorityChange records a task whose priority changed between snapshots.
 type PriorityChange struct {
-	TaskID    int
-	TaskTitle string
+	TaskID      int
+	TaskTitle   string
 	OldPriority int
 	NewPriority int
 }

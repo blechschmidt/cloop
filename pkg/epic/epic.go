@@ -22,11 +22,11 @@ type Epic struct {
 // EpicProgress augments Epic with live completion statistics.
 type EpicProgress struct {
 	Epic
-	Total    int `json:"total"`
-	Done     int `json:"done"`
-	Failed   int `json:"failed"`
-	Skipped  int `json:"skipped"`
-	Pending  int `json:"pending"`
+	Total   int `json:"total"`
+	Done    int `json:"done"`
+	Failed  int `json:"failed"`
+	Skipped int `json:"skipped"`
+	Pending int `json:"pending"`
 }
 
 // aiResponse is the JSON envelope returned by the AI provider.

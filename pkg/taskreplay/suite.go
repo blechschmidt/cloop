@@ -23,15 +23,15 @@ type SuiteOptions struct {
 
 // SuiteSummary aggregates a SuiteRun's results.
 type SuiteSummary struct {
-	TotalTasks       int
-	Replayed         int
-	Skipped          int
-	Failed           int
-	AverageJaccard   float64
-	AverageEquiv     float64
-	HighEquivCount   int // equivalence_score >= 8
-	LowEquivCount    int // equivalence_score in [1,4]
-	Results          []*Result
+	TotalTasks     int
+	Replayed       int
+	Skipped        int
+	Failed         int
+	AverageJaccard float64
+	AverageEquiv   float64
+	HighEquivCount int // equivalence_score >= 8
+	LowEquivCount  int // equivalence_score in [1,4]
+	Results        []*Result
 }
 
 // RunSuite replays every replayable task in the project that matches the

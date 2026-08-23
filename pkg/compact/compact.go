@@ -36,14 +36,14 @@ func DefaultOptions() Options {
 
 // Summary reports bytes freed per category.
 type Summary struct {
-	SnapshotsBytesFreed    int64
-	CheckpointsBytesFreed  int64
-	ArtifactsBytesFreed    int64
-	StepLogBytesFreed      int64
-	SnapshotsDeleted       int
-	CheckpointsDeleted     int
-	ArtifactsDeleted       int
-	StepLogTruncated       bool
+	SnapshotsBytesFreed   int64
+	CheckpointsBytesFreed int64
+	ArtifactsBytesFreed   int64
+	StepLogBytesFreed     int64
+	SnapshotsDeleted      int
+	CheckpointsDeleted    int
+	ArtifactsDeleted      int
+	StepLogTruncated      bool
 }
 
 // TotalBytesFreed returns total bytes freed across all categories.

@@ -21,7 +21,7 @@ const (
 	CategoryUX          Category = "ux"
 	CategoryPerformance Category = "performance"
 	CategorySecurity    Category = "security"
-	CategoryDX          Category = "dx"         // developer experience
+	CategoryDX          Category = "dx" // developer experience
 	CategoryIntegration Category = "integration"
 	CategoryDocs        Category = "docs"
 )

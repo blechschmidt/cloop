@@ -34,22 +34,22 @@ type CandidateResponse struct {
 
 // Score holds a judge's assessment of one candidate.
 type Score struct {
-	ProviderName string  `json:"provider"`
-	Model        string  `json:"model"`
-	Correctness  int     `json:"correctness"`  // 1–10
-	Safety       int     `json:"safety"`       // 1–10
-	Completeness int     `json:"completeness"` // 1–10
-	Total        int     `json:"total"`        // sum of the three dimensions
-	Rationale    string  `json:"rationale"`
+	ProviderName string `json:"provider"`
+	Model        string `json:"model"`
+	Correctness  int    `json:"correctness"`  // 1–10
+	Safety       int    `json:"safety"`       // 1–10
+	Completeness int    `json:"completeness"` // 1–10
+	Total        int    `json:"total"`        // sum of the three dimensions
+	Rationale    string `json:"rationale"`
 }
 
 // Report is the full consensus decision record attached to the task artifact.
 type Report struct {
-	TaskID    int              `json:"task_id"`
-	TaskTitle string           `json:"task_title"`
-	Scores    []Score          `json:"scores"`
-	Winner    string           `json:"winner_provider"`
-	Timestamp time.Time        `json:"timestamp"`
+	TaskID    int       `json:"task_id"`
+	TaskTitle string    `json:"task_title"`
+	Scores    []Score   `json:"scores"`
+	Winner    string    `json:"winner_provider"`
+	Timestamp time.Time `json:"timestamp"`
 }
 
 // isCritical returns true when the task should trigger consensus.

@@ -40,17 +40,17 @@ var sourceExtensions = map[string]bool{
 
 // ignoredDirs are directories skipped during source file collection.
 var ignoredDirs = map[string]bool{
-	".git":        true,
+	".git":         true,
 	"node_modules": true,
-	"vendor":      true,
-	".cloop":      true,
-	"dist":        true,
-	"build":       true,
-	"target":      true,
-	"__pycache__": true,
-	".next":       true,
-	".nuxt":       true,
-	"coverage":    true,
+	"vendor":       true,
+	".cloop":       true,
+	"dist":         true,
+	"build":        true,
+	"target":       true,
+	"__pycache__":  true,
+	".next":        true,
+	".nuxt":        true,
+	"coverage":     true,
 }
 
 // ciScoredFile pairs a file path with its relevance score for a given task.

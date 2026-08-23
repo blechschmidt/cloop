@@ -24,10 +24,10 @@ import (
 
 // Quadrant names.
 const (
-	QuadrantCritical = "Critical"  // high risk, high impact
-	QuadrantMitigate = "Mitigate"  // high risk, low impact
-	QuadrantLeverage = "Leverage"  // low risk,  high impact
-	QuadrantDefer    = "Defer"     // low risk,  low impact
+	QuadrantCritical = "Critical" // high risk, high impact
+	QuadrantMitigate = "Mitigate" // high risk, low impact
+	QuadrantLeverage = "Leverage" // low risk,  high impact
+	QuadrantDefer    = "Defer"    // low risk,  low impact
 )
 
 // quadrantThreshold is the mid-point split (scores ≥ this = "high").

@@ -83,7 +83,6 @@ Use --dry-run to preview what would be deleted without making any changes.`,
 	},
 }
 
-
 func init() {
 	defaults := compact.DefaultOptions()
 	compactCmd.Flags().Bool("dry-run", false, "Show what would be deleted without deleting anything")

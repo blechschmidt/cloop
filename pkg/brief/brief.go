@@ -102,7 +102,7 @@ func buildContext(s *state.ProjectState) Input {
 
 		// Extract top-3 risks: tasks with highest RiskScore that are pending/in-progress.
 		type taskRisk struct {
-			t    *pm.Task
+			t      *pm.Task
 			rScore int
 		}
 		var riskTasks []taskRisk

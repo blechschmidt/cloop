@@ -19,8 +19,8 @@ import (
 // Scenario represents one completion estimate (optimistic / expected / pessimistic).
 type Scenario struct {
 	Label          string
-	VelocityFactor float64  // multiplier applied to baseline velocity
-	DaysRemaining  float64  // -1 = cannot compute
+	VelocityFactor float64 // multiplier applied to baseline velocity
+	DaysRemaining  float64 // -1 = cannot compute
 	CompletionDate time.Time
 	Confidence     string // "high" | "medium" | "low"
 }
@@ -63,9 +63,9 @@ type Forecast struct {
 	ProjectStartDate   time.Time
 
 	// Velocity metrics (minute-based: actual vs estimated)
-	VelocityRatio        float64 // sum(actual_minutes)/sum(estimated_minutes); 1.0 if no data
-	AvgEstimatedMinutes  float64 // average EstimatedMinutes across all tasks with estimates
-	MinuteDataPoints     int     // number of tasks with both estimated and actual minutes
+	VelocityRatio       float64 // sum(actual_minutes)/sum(estimated_minutes); 1.0 if no data
+	AvgEstimatedMinutes float64 // average EstimatedMinutes across all tasks with estimates
+	MinuteDataPoints    int     // number of tasks with both estimated and actual minutes
 
 	// Scenarios
 	Optimistic  Scenario

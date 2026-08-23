@@ -48,9 +48,9 @@ var AllSources = []SourceType{
 // Result is one match returned by a search.
 type Result struct {
 	Source    SourceType `json:"source"`
-	ID        string     `json:"id,omitempty"`         // task ID, KB entry ID, etc.
-	Title     string     `json:"title,omitempty"`      // human-readable label
-	Excerpt   string     `json:"excerpt"`              // matched text snippet (≤200 chars)
+	ID        string     `json:"id,omitempty"`        // task ID, KB entry ID, etc.
+	Title     string     `json:"title,omitempty"`     // human-readable label
+	Excerpt   string     `json:"excerpt"`             // matched text snippet (≤200 chars)
 	FilePath  string     `json:"file_path,omitempty"` // relative path to file
 	Timestamp time.Time  `json:"timestamp,omitempty"` // when the artifact was created/updated
 	Score     int        `json:"score"`               // relevance score (higher = more relevant)

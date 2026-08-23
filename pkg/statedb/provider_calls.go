@@ -91,8 +91,8 @@ func (d *DB) ListProviderCalls(offset, limit, taskID int, provider string) (rows
 	}
 
 	var (
-		where  []string
-		args   []any
+		where []string
+		args  []any
 	)
 	if taskID > 0 {
 		where = append(where, "task_id = ?")

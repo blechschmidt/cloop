@@ -32,16 +32,16 @@ const (
 
 // ADR is one decision record.
 type ADR struct {
-	ID            int       // sequential, 1-indexed
-	Title         string    // human title
-	Status        string    // Proposed/Accepted/Deprecated/Superseded/Rejected
-	Date          time.Time // creation date
-	Deciders      []string
-	Tags          []string
-	Supersedes    []int // ADR IDs this one replaces
-	SupersededBy  []int // ADR IDs that replace this one
-	Path          string // absolute file path
-	Body          string // markdown body (after frontmatter)
+	ID           int       // sequential, 1-indexed
+	Title        string    // human title
+	Status       string    // Proposed/Accepted/Deprecated/Superseded/Rejected
+	Date         time.Time // creation date
+	Deciders     []string
+	Tags         []string
+	Supersedes   []int  // ADR IDs this one replaces
+	SupersededBy []int  // ADR IDs that replace this one
+	Path         string // absolute file path
+	Body         string // markdown body (after frontmatter)
 }
 
 // Slug turns a title into a filesystem-safe slug.

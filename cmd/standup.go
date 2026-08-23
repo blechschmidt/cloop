@@ -293,10 +293,10 @@ Examples:
 					resp.Body.Close()
 					if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 						trunc := webhookURL
-					if len(trunc) > 40 {
-						trunc = trunc[:40]
-					}
-					goodColor.Printf("Posted to webhook (%s)\n\n", trunc)
+						if len(trunc) > 40 {
+							trunc = trunc[:40]
+						}
+						goodColor.Printf("Posted to webhook (%s)\n\n", trunc)
 					} else {
 						warnColor.Printf("Warning: webhook returned %d\n", resp.StatusCode)
 					}

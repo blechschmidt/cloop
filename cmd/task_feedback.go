@@ -178,4 +178,3 @@ func init() {
 	taskFeedbackCmd.AddCommand(taskFeedbackListCmd)
 	taskCmd.AddCommand(taskFeedbackCmd)
 }
-

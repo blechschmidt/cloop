@@ -25,9 +25,9 @@ import (
 
 // ReplayOptions controls Replay behaviour.
 type ReplayOptions struct {
-	FromID    int64       // 0 or 1 = entire history; >1 = only events with id >= FromID
-	OnEvent   func(ev AuditEvent) // optional per-event callback (e.g. progress)
-	StopAt    int64       // 0 = no upper bound; otherwise stop after id == StopAt
+	FromID  int64               // 0 or 1 = entire history; >1 = only events with id >= FromID
+	OnEvent func(ev AuditEvent) // optional per-event callback (e.g. progress)
+	StopAt  int64               // 0 = no upper bound; otherwise stop after id == StopAt
 }
 
 // ReplayReport summarises what Replay applied.
@@ -38,7 +38,7 @@ type ReplayReport struct {
 	StepsWritten int
 	ConfigWrites int
 	Skipped      int
-	BreakAtID    int64  // first id whose payload could not be applied (0 = none)
+	BreakAtID    int64 // first id whose payload could not be applied (0 = none)
 	BreakReason  string
 	StartedAt    time.Time
 	FinishedAt   time.Time

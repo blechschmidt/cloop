@@ -174,4 +174,3 @@ func Stop(workdir string) error {
 func RemovePID(workdir string) error {
 	return os.Remove(PIDPath(workdir))
 }
-

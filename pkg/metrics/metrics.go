@@ -182,9 +182,9 @@ type Metrics struct {
 	costTotal *labeledFloat
 
 	// Metadata
-	startTime  time.Time
-	provider   string
-	model      string
+	startTime time.Time
+	provider  string
+	model     string
 }
 
 // New creates a new Metrics instance.
@@ -320,26 +320,26 @@ func formatFloat(f float64) string {
 
 // Summary is a snapshot of all metrics for JSON serialization.
 type Summary struct {
-	Timestamp             time.Time          `json:"timestamp"`
-	Provider              string             `json:"provider"`
-	Model                 string             `json:"model"`
-	DurationSecs          float64            `json:"duration_seconds"`
-	TasksTotal            int64              `json:"tasks_total"`
-	TasksCompleted        int64              `json:"tasks_completed"`
-	TasksFailed           int64              `json:"tasks_failed"`
-	TasksSkipped          int64              `json:"tasks_skipped"`
-	StepsTotal            int64              `json:"steps_total"`
-	TaskDuration          DurationSummary    `json:"task_duration_seconds"`
-	TokensUsed            map[string]int64   `json:"tokens_used_total"`
-	CostUSD               map[string]float64 `json:"cost_usd_total"`
-	RetryBudgetExhausted  int64              `json:"retry_budget_exhausted_total"`
+	Timestamp            time.Time          `json:"timestamp"`
+	Provider             string             `json:"provider"`
+	Model                string             `json:"model"`
+	DurationSecs         float64            `json:"duration_seconds"`
+	TasksTotal           int64              `json:"tasks_total"`
+	TasksCompleted       int64              `json:"tasks_completed"`
+	TasksFailed          int64              `json:"tasks_failed"`
+	TasksSkipped         int64              `json:"tasks_skipped"`
+	StepsTotal           int64              `json:"steps_total"`
+	TaskDuration         DurationSummary    `json:"task_duration_seconds"`
+	TokensUsed           map[string]int64   `json:"tokens_used_total"`
+	CostUSD              map[string]float64 `json:"cost_usd_total"`
+	RetryBudgetExhausted int64              `json:"retry_budget_exhausted_total"`
 }
 
 // DurationSummary summarizes the task_duration_seconds histogram.
 type DurationSummary struct {
-	Count   int64              `json:"count"`
-	Sum     float64            `json:"sum"`
-	Buckets map[string]int64   `json:"buckets"`
+	Count   int64            `json:"count"`
+	Sum     float64          `json:"sum"`
+	Buckets map[string]int64 `json:"buckets"`
 }
 
 // Snapshot returns the current state as a Summary.

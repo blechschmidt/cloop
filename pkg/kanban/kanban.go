@@ -652,4 +652,3 @@ func statusToOp(s pm.TaskStatus) string {
 		return ""
 	}
 }
-

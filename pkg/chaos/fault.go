@@ -3,47 +3,47 @@
 // graceful shutdown) be exercised against simulated failures rather than
 // just unit-tested.
 //
-// Design overview
+// # Design overview
 //
 // The framework has four collaborating pieces:
 //
-//   1. A Controller that holds the currently-active faults in memory plus a
-//      file-watched mirror at .cloop/chaos/active.json. The mirror lets a
-//      `cloop chaos inject` invocation in one process influence a long-lived
-//      `cloop ui` daemon in another, without IPC plumbing.
-//   2. Middleware that wraps the provider HTTP client (see Transport) and
-//      consults the controller on every request to decide whether to inject
-//      a timeout, 429, 500, or network flap.
-//   3. A SQLite busy holder (see SQLiteBusy) that opens a separate connection
-//      to the project's state database and parks a write transaction for the
-//      configured duration, forcing every other writer to time out under
-//      WAL/busy_timeout — the realistic SQLITE_BUSY scenario.
-//   4. A persistent journal at the chaos_runs SQLite table that records every
-//      injected fault and its observed outcome, so `cloop chaos report` can
-//      summarise how the system handled each fault.
+//  1. A Controller that holds the currently-active faults in memory plus a
+//     file-watched mirror at .cloop/chaos/active.json. The mirror lets a
+//     `cloop chaos inject` invocation in one process influence a long-lived
+//     `cloop ui` daemon in another, without IPC plumbing.
+//  2. Middleware that wraps the provider HTTP client (see Transport) and
+//     consults the controller on every request to decide whether to inject
+//     a timeout, 429, 500, or network flap.
+//  3. A SQLite busy holder (see SQLiteBusy) that opens a separate connection
+//     to the project's state database and parks a write transaction for the
+//     configured duration, forcing every other writer to time out under
+//     WAL/busy_timeout — the realistic SQLITE_BUSY scenario.
+//  4. A persistent journal at the chaos_runs SQLite table that records every
+//     injected fault and its observed outcome, so `cloop chaos report` can
+//     summarise how the system handled each fault.
 //
-// Fault catalogue
+// # Fault catalogue
 //
 // The supported fault types are deliberately a small, fixed set that map to
 // the failure modes the rest of cloop is designed to survive:
 //
-//   provider-timeout         — every outbound HTTP call to a provider hangs
-//                              past the controller's per-fault timeout, then
-//                              is cancelled with context.DeadlineExceeded.
-//   provider-429             — provider responses are replaced with HTTP 429
-//                              (rate limited). Exercises retry/backoff.
-//   provider-500             — provider responses are replaced with HTTP 500.
-//                              Exercises retry-on-5xx and circuit breaker.
-//   sqlite-busy              — a sibling write transaction is held open on
-//                              .cloop/state.db, forcing concurrent writers
-//                              to wait out busy_timeout.
-//   network-flap             — a configurable percentage of HTTP requests
-//                              fail with connection-refused-like errors.
-//   disk-full-simulation     — temporarily fills .cloop/chaos/ballast with a
-//                              large file so writes intended for that
-//                              directory fail with ENOSPC-like errors.
-//   slow-disk                — wraps atomicfile writes with an artificial
-//                              delay (caller-side; see SlowDisk).
+//	provider-timeout         — every outbound HTTP call to a provider hangs
+//	                           past the controller's per-fault timeout, then
+//	                           is cancelled with context.DeadlineExceeded.
+//	provider-429             — provider responses are replaced with HTTP 429
+//	                           (rate limited). Exercises retry/backoff.
+//	provider-500             — provider responses are replaced with HTTP 500.
+//	                           Exercises retry-on-5xx and circuit breaker.
+//	sqlite-busy              — a sibling write transaction is held open on
+//	                           .cloop/state.db, forcing concurrent writers
+//	                           to wait out busy_timeout.
+//	network-flap             — a configurable percentage of HTTP requests
+//	                           fail with connection-refused-like errors.
+//	disk-full-simulation     — temporarily fills .cloop/chaos/ballast with a
+//	                           large file so writes intended for that
+//	                           directory fail with ENOSPC-like errors.
+//	slow-disk                — wraps atomicfile writes with an artificial
+//	                           delay (caller-side; see SlowDisk).
 //
 // Faults are intentionally additive: injecting two compatible faults at once
 // (e.g. provider-429 + sqlite-busy) lets you stress multiple components

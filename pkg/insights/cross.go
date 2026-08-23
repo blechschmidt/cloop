@@ -58,9 +58,9 @@ type CrossMetrics struct {
 
 	AvgCompletionRate float64 // mean completion % across projects
 
-	TopTags             []TagCount
-	TopRoles            []TagCount
-	TopFailureKeywords  []TagCount
+	TopTags            []TagCount
+	TopRoles           []TagCount
+	TopFailureKeywords []TagCount
 
 	ProviderCounts map[string]int
 

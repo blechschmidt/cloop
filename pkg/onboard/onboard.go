@@ -22,19 +22,19 @@ import (
 
 // Input holds all data collected to build the onboarding prompt.
 type Input struct {
-	Goal             string
-	Instructions     string
-	CompletedTasks   []*pm.Task
-	PendingTasks     []*pm.Task
-	DirTree          string
-	GitLog           string
-	Readme           string
-	Manifest         string
-	Integrations     []integrations.IntegrationStatus
-	ProviderName     string
-	ProviderModel    string
-	Profiles         []profile.Profile
-	KBEntries        []*kb.Entry
+	Goal           string
+	Instructions   string
+	CompletedTasks []*pm.Task
+	PendingTasks   []*pm.Task
+	DirTree        string
+	GitLog         string
+	Readme         string
+	Manifest       string
+	Integrations   []integrations.IntegrationStatus
+	ProviderName   string
+	ProviderModel  string
+	Profiles       []profile.Profile
+	KBEntries      []*kb.Entry
 }
 
 // Collect gathers all context needed to generate the onboarding guide.

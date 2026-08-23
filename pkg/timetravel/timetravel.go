@@ -29,10 +29,10 @@ var (
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(lipgloss.Color("33"))
 
-	styleAdd    = lipgloss.NewStyle().Foreground(lipgloss.Color("10"))  // green
-	styleRemove = lipgloss.NewStyle().Foreground(lipgloss.Color("9"))   // red
+	styleAdd     = lipgloss.NewStyle().Foreground(lipgloss.Color("10")) // green
+	styleRemove  = lipgloss.NewStyle().Foreground(lipgloss.Color("9"))  // red
 	styleNeutral = lipgloss.NewStyle().Foreground(lipgloss.Color("11")) // yellow
-	styleDim    = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
+	styleDim     = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
 
 	styleCheckpointActive = lipgloss.NewStyle().
 				Bold(true).
@@ -54,10 +54,10 @@ var (
 
 // Model is the bubbletea model for the time-travel TUI.
 type Model struct {
-	entries  []*checkpoint.HistoryEntry
-	taskID   int
+	entries   []*checkpoint.HistoryEntry
+	taskID    int
 	taskTitle string
-	cursor   int // currently selected checkpoint index
+	cursor    int // currently selected checkpoint index
 
 	width  int
 	height int

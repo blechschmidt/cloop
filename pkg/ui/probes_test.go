@@ -104,8 +104,8 @@ func TestReadyz(t *testing.T) {
 		name           string
 		setupServer    func(t *testing.T) *Server
 		wantStatus     int
-		wantBodyStatus string  // value of the "status" JSON field
-		wantErrMatch   string  // substring expected in the "error" field on failure
+		wantBodyStatus string // value of the "status" JSON field
+		wantErrMatch   string // substring expected in the "error" field on failure
 	}{
 		{
 			name: "healthy — initialized state.db, SELECT 1 succeeds",

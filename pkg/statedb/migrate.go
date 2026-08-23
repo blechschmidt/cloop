@@ -113,10 +113,10 @@ func parseVersion(name string) (int, error) {
 
 // MigrationReport summarises the outcome of a Migrate call.
 type MigrationReport struct {
-	StartVersion   int      // version recorded before this run (0 = brand new DB)
-	EndVersion     int      // highest version applied (or already present)
-	Applied        []int    // versions newly applied during this run
-	BaselineApplied bool    // true when an existing pre-framework DB was adopted at v1
+	StartVersion    int   // version recorded before this run (0 = brand new DB)
+	EndVersion      int   // highest version applied (or already present)
+	Applied         []int // versions newly applied during this run
+	BaselineApplied bool  // true when an existing pre-framework DB was adopted at v1
 }
 
 // Migrate brings db up to the latest embedded schema version. Safe to call
@@ -311,8 +311,8 @@ func isUniqueConstraintErr(err error) bool {
 // ever introduced.
 func splitStatements(sql string) []string {
 	var (
-		out     []string
-		current strings.Builder
+		out      []string
+		current  strings.Builder
 		inSingle bool
 		inDouble bool
 	)

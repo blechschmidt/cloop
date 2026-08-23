@@ -163,7 +163,7 @@ func (d *DB) ListQuotaCounters() ([]QuotaCounterRow, error) {
 	return out, nil
 }
 
-// ReplaceQuotaGauges swaps every gauge row (bucket = '') for rows in one
+// ReplaceQuotaGauges swaps every gauge row (bucket = ”) for rows in one
 // transaction.
 //
 // A transaction rather than delete-then-insert because the intermediate state
@@ -203,7 +203,7 @@ func (d *DB) ReplaceQuotaGauges(rows []QuotaCounterRow) error {
 }
 
 // PruneQuotaCounters deletes daily counters older than bucket. Gauge rows
-// (bucket = '') are never pruned: they are live state, not history, and ''
+// (bucket = ”) are never pruned: they are live state, not history, and ”
 // sorts before every date so an unguarded comparison would delete all of them.
 func (d *DB) PruneQuotaCounters(bucket string) error {
 	if strings.TrimSpace(bucket) == "" {

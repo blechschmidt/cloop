@@ -11,8 +11,8 @@ import (
 	"strconv"
 
 	"github.com/blechschmidt/cloop/pkg/provider"
-	clooptemplate "github.com/blechschmidt/cloop/pkg/template"
 	"github.com/blechschmidt/cloop/pkg/state"
+	clooptemplate "github.com/blechschmidt/cloop/pkg/template"
 	"github.com/spf13/cobra"
 )
 

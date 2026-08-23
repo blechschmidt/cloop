@@ -140,12 +140,12 @@ var budgetStatusCmd = &cobra.Command{
 // ── budget set ────────────────────────────────────────────────────────────────
 
 var (
-	budgetSetDailyUSD      float64
-	budgetSetDailyTokens   int
-	budgetSetThreshold     int
-	budgetSetGlobal        bool
-	budgetSetGlobalUSDPct  float64
-	budgetSetGlobalTokPct  float64
+	budgetSetDailyUSD     float64
+	budgetSetDailyTokens  int
+	budgetSetThreshold    int
+	budgetSetGlobal       bool
+	budgetSetGlobalUSDPct float64
+	budgetSetGlobalTokPct float64
 )
 
 var budgetSetCmd = &cobra.Command{

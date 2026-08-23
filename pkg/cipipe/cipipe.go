@@ -66,8 +66,8 @@ type TechStack struct {
 	HasSetupPy         bool
 
 	// Docker signals
-	HasDockerfile      bool
-	HasDockerCompose   bool
+	HasDockerfile    bool
+	HasDockerCompose bool
 
 	// Build tool signals
 	HasMakefile bool

@@ -34,10 +34,10 @@ import (
 // fields (Goal, Version) are surfaced here too under "plan_goal" and
 // "plan_version" so the client doesn't need plan-specific diff logic.
 type stateDiff struct {
-	TasksAdded   []*pm.Task         `json:"tasks_added,omitempty"`
-	TasksRemoved []int              `json:"tasks_removed,omitempty"`
-	TasksChanged []taskChange       `json:"tasks_changed,omitempty"`
-	StateChanged map[string]any     `json:"state_changed,omitempty"`
+	TasksAdded   []*pm.Task     `json:"tasks_added,omitempty"`
+	TasksRemoved []int          `json:"tasks_removed,omitempty"`
+	TasksChanged []taskChange   `json:"tasks_changed,omitempty"`
+	StateChanged map[string]any `json:"state_changed,omitempty"`
 	// HasChanges is set false only when there is literally nothing to ship
 	// (all four buckets are empty). Callers use this to skip the broadcast
 	// entirely instead of fanning out an empty envelope.
@@ -269,8 +269,8 @@ func (s *Server) ensureDiffCache() *stateCache {
 // invalidating the cache). Bounded only by the number of distinct projects
 // the daemon has broadcasted for — same lifetime as hubClients.
 type stateCache struct {
-	mu    sync.Mutex
-	prev  map[string]*state.ProjectState
+	mu   sync.Mutex
+	prev map[string]*state.ProjectState
 }
 
 func newStateCache() *stateCache {

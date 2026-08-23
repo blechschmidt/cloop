@@ -281,7 +281,7 @@ func (d *DB) ListProjectExecutorBindings() ([]ProjectExecutorBinding, error) {
 	var out []ProjectExecutorBinding
 	for rows.Next() {
 		var (
-			b         ProjectExecutorBinding
+			b          ProjectExecutorBinding
 			boundAtStr string
 		)
 		if err := rows.Scan(&b.ProjectPath, &b.ExecutorID, &boundAtStr, &b.BoundBy); err != nil {

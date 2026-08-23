@@ -419,4 +419,3 @@ func WriteFromError(w http.ResponseWriter, err error) {
 	}
 	WriteError(w, FromError(err))
 }
-

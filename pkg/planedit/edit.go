@@ -56,18 +56,18 @@ func BuildEditPrompt(plan *pm.Plan, instruction string) string {
 // It strips runtime-only fields (artifact paths, internal timestamps) to keep the
 // prompt focused on the structural data the AI needs to reason about.
 type compactTask struct {
-	ID          int            `json:"id"`
-	Title       string         `json:"title"`
-	Description string         `json:"description,omitempty"`
-	Priority    int            `json:"priority"`
-	Status      pm.TaskStatus  `json:"status"`
-	Role        pm.AgentRole   `json:"role,omitempty"`
-	DependsOn   []int          `json:"depends_on,omitempty"`
-	Tags        []string       `json:"tags,omitempty"`
-	EstMinutes  int            `json:"estimated_minutes,omitempty"`
-	MaxMinutes  int            `json:"max_minutes,omitempty"`
-	Assignee    string         `json:"assignee,omitempty"`
-	Condition   string         `json:"condition,omitempty"`
+	ID          int           `json:"id"`
+	Title       string        `json:"title"`
+	Description string        `json:"description,omitempty"`
+	Priority    int           `json:"priority"`
+	Status      pm.TaskStatus `json:"status"`
+	Role        pm.AgentRole  `json:"role,omitempty"`
+	DependsOn   []int         `json:"depends_on,omitempty"`
+	Tags        []string      `json:"tags,omitempty"`
+	EstMinutes  int           `json:"estimated_minutes,omitempty"`
+	MaxMinutes  int           `json:"max_minutes,omitempty"`
+	Assignee    string        `json:"assignee,omitempty"`
+	Condition   string        `json:"condition,omitempty"`
 }
 
 type compactPlanDTO struct {

@@ -103,12 +103,12 @@ func TestParsePriorityFilter(t *testing.T) {
 		{"2", 2},
 		{"3", 3},
 		{"4", 4},
-		{"0", 0},      // out of range
-		{"5", 0},      // out of range
-		{"-1", 0},     // negative
-		{"99999", 0},  // out of range — was the silent-overflow bug
-		{"abc", 0},    // non-numeric
-		{"1.5", 0},    // not an integer
+		{"0", 0},     // out of range
+		{"5", 0},     // out of range
+		{"-1", 0},    // negative
+		{"99999", 0}, // out of range — was the silent-overflow bug
+		{"abc", 0},   // non-numeric
+		{"1.5", 0},   // not an integer
 	}
 	for _, c := range cases {
 		got := parsePriorityFilter(c.in)
@@ -127,10 +127,10 @@ func TestParsePositiveID(t *testing.T) {
 		{"", 0, false},
 		{"1", 1, true},
 		{"42", 42, true},
-		{"0", 0, false},      // zero rejected (was a gap in handleKBDelete)
-		{"-3", 0, false},     // negative rejected
-		{"abc", 0, false},    // non-numeric
-		{"  7  ", 0, false},  // whitespace not allowed (path values are pre-trimmed)
+		{"0", 0, false},     // zero rejected (was a gap in handleKBDelete)
+		{"-3", 0, false},    // negative rejected
+		{"abc", 0, false},   // non-numeric
+		{"  7  ", 0, false}, // whitespace not allowed (path values are pre-trimmed)
 	}
 	for _, c := range cases {
 		gotID, gotOK := parsePositiveID(c.in)

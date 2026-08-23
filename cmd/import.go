@@ -10,7 +10,6 @@ import (
 	"github.com/spf13/cobra"
 )
 
-
 var importFormat string
 
 var importCmd = &cobra.Command{

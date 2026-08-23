@@ -89,12 +89,12 @@ func Audit(workDir string, cfg *config.Config, opts Options) ([]Finding, error) 
 var apiKeyPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`sk-ant-[A-Za-z0-9_-]{20,}`),    // Anthropic
 	regexp.MustCompile(`sk-proj-[A-Za-z0-9_-]{20,}`),   // OpenAI project key
-	regexp.MustCompile(`sk-[A-Za-z0-9]{20,}`),           // OpenAI legacy
-	regexp.MustCompile(`ghp_[A-Za-z0-9]{30,}`),          // GitHub PAT classic
-	regexp.MustCompile(`ghs_[A-Za-z0-9]{30,}`),          // GitHub App token
-	regexp.MustCompile(`github_pat_[A-Za-z0-9_]{50,}`),  // GitHub fine-grained PAT
-	regexp.MustCompile(`AIzaSy[A-Za-z0-9_-]{33}`),       // Google API key
-	regexp.MustCompile(`AKIA[A-Z0-9]{16}`),              // AWS access key
+	regexp.MustCompile(`sk-[A-Za-z0-9]{20,}`),          // OpenAI legacy
+	regexp.MustCompile(`ghp_[A-Za-z0-9]{30,}`),         // GitHub PAT classic
+	regexp.MustCompile(`ghs_[A-Za-z0-9]{30,}`),         // GitHub App token
+	regexp.MustCompile(`github_pat_[A-Za-z0-9_]{50,}`), // GitHub fine-grained PAT
+	regexp.MustCompile(`AIzaSy[A-Za-z0-9_-]{33}`),      // Google API key
+	regexp.MustCompile(`AKIA[A-Z0-9]{16}`),             // AWS access key
 }
 
 func checkAPIKeysInGit(workDir string, cfg *config.Config, add addFn) {

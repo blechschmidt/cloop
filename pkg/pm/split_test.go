@@ -6,10 +6,10 @@ import (
 
 func TestParseSplitResponse_Valid(t *testing.T) {
 	parent := &Task{
-		ID:       5,
-		Title:    "Build authentication system",
-		Priority: 2,
-		Role:     RoleBackend,
+		ID:        5,
+		Title:     "Build authentication system",
+		Priority:  2,
+		Role:      RoleBackend,
 		DependsOn: []int{3},
 	}
 	response := `[

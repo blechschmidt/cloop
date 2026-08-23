@@ -100,9 +100,9 @@ Examples:
 }
 
 var (
-	recipeRunGoal    string
-	recipeRunDryRun  bool
-	recipeRunExtras  []string
+	recipeRunGoal   string
+	recipeRunDryRun bool
+	recipeRunExtras []string
 )
 
 var recipeRunCmd = &cobra.Command{

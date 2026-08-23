@@ -37,7 +37,7 @@ func Send(title, body string) {
 		sendLinux(title, body)
 	case "darwin":
 		sendDarwin(title, body)
-	// Other platforms: no-op.
+		// Other platforms: no-op.
 	}
 }
 
@@ -142,9 +142,9 @@ type discordPayload struct {
 }
 
 type discordEmbed struct {
-	Title       string `json:"title"`
-	Description string `json:"description"`
-	Color       int    `json:"color"`
+	Title       string         `json:"title"`
+	Description string         `json:"description"`
+	Color       int            `json:"color"`
 	Footer      *discordFooter `json:"footer,omitempty"`
 }
 

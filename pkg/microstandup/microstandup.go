@@ -21,15 +21,15 @@ import (
 
 // TaskContext holds all gathered context for a single in-progress task.
 type TaskContext struct {
-	Task           *pm.Task
-	Goal           string
-	RecentSteps    []string // last 20 step log lines
-	CheckpointDiff string   // human-readable diff between last two checkpoints
-	ElapsedMinutes int      // minutes since task.StartedAt (0 if unknown)
-	EstimatedMinutes int    // from task.EstimatedMinutes
-	HealAttempts   int      // from task.HealAttempts
-	Links          []pm.Link
-	GitHubIssue    int
+	Task             *pm.Task
+	Goal             string
+	RecentSteps      []string // last 20 step log lines
+	CheckpointDiff   string   // human-readable diff between last two checkpoints
+	ElapsedMinutes   int      // minutes since task.StartedAt (0 if unknown)
+	EstimatedMinutes int      // from task.EstimatedMinutes
+	HealAttempts     int      // from task.HealAttempts
+	Links            []pm.Link
+	GitHubIssue      int
 }
 
 // Card is the AI-generated micro-standup for one task.

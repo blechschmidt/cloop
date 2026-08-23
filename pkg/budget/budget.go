@@ -8,10 +8,10 @@ import (
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/config"
-	"github.com/blechschmidt/cloop/pkg/ratelimit"
 	"github.com/blechschmidt/cloop/pkg/cost"
 	"github.com/blechschmidt/cloop/pkg/globalbudget"
 	"github.com/blechschmidt/cloop/pkg/notify"
+	"github.com/blechschmidt/cloop/pkg/ratelimit"
 )
 
 // DailyStats holds today's aggregated usage figures.

@@ -29,9 +29,9 @@ environment variables.
 }
 
 var (
-	flowDryRun      bool
-	flowTemplate    string
-	flowInitOutput  string
+	flowDryRun     bool
+	flowTemplate   string
+	flowInitOutput string
 )
 
 var flowRunCmd = &cobra.Command{

@@ -755,7 +755,7 @@ func TestContainerName(t *testing.T) {
 // every run in that project fail.
 func TestContainerNameAlwaysValid(t *testing.T) {
 	hostile := []string{
-		"/a/éèê",       // non-ASCII
+		"/a/éèê",                         // non-ASCII
 		"/a/" + strings.Repeat("x", 200), // very long
 		"/a/....",
 		"/a/-",

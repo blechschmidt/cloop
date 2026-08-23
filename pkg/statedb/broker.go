@@ -22,10 +22,10 @@ import (
 // BrokerSecretRow is one row of broker_secrets. Times are RFC3339 strings,
 // matching the rest of the schema.
 type BrokerSecretRow struct {
-	ID           string
-	Kind         string
-	Name         string
-	Payload      []byte // ciphertext under this row's DEK; never plaintext
+	ID      string
+	Kind    string
+	Name    string
+	Payload []byte // ciphertext under this row's DEK; never plaintext
 	// KeyID names the KEK that WrappedDEK is sealed under, or "legacy" for
 	// rows predating envelope encryption (Task 20181). WrappedDEK is the
 	// row's data key, itself sealed. Neither is key material on its own.

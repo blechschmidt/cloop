@@ -58,13 +58,13 @@ type Diagnosis struct {
 
 // Report is the final output of the test command.
 type Report struct {
-	Framework  string
-	Passed     int
-	Failed     int
-	Skipped    int
-	Diagnoses  []Diagnosis
-	RawOutput  string
-	AISummary  string
+	Framework string
+	Passed    int
+	Failed    int
+	Skipped   int
+	Diagnoses []Diagnosis
+	RawOutput string
+	AISummary string
 }
 
 // Detect probes workDir for known project files and returns the best matching
@@ -133,9 +133,9 @@ func detectNodeFramework(workDir string) *Framework {
 	}
 
 	var pkg struct {
-		Scripts      map[string]string            `json:"scripts"`
-		Dependencies map[string]string            `json:"dependencies"`
-		DevDeps      map[string]string            `json:"devDependencies"`
+		Scripts      map[string]string `json:"scripts"`
+		Dependencies map[string]string `json:"dependencies"`
+		DevDeps      map[string]string `json:"devDependencies"`
 	}
 	if err := json.Unmarshal(data, &pkg); err != nil {
 		// package.json present but unparseable — fall back to npm test
@@ -261,11 +261,11 @@ func parseGoResults(output string, r *Result) {
 // --- pytest parser ---
 
 var (
-	pytestFailRe     = regexp.MustCompile(`(?m)^FAILED (.+)`)
-	pytestPassRe     = regexp.MustCompile(`(?m) (\d+) passed`)
-	pytestFailCntRe  = regexp.MustCompile(`(?m) (\d+) failed`)
-	pytestSkipRe     = regexp.MustCompile(`(?m) (\d+) skipped`)
-	pytestShortReRe  = regexp.MustCompile(`(?m)^_{5,}\n(.+)\n_{5,}`)
+	pytestFailRe    = regexp.MustCompile(`(?m)^FAILED (.+)`)
+	pytestPassRe    = regexp.MustCompile(`(?m) (\d+) passed`)
+	pytestFailCntRe = regexp.MustCompile(`(?m) (\d+) failed`)
+	pytestSkipRe    = regexp.MustCompile(`(?m) (\d+) skipped`)
+	pytestShortReRe = regexp.MustCompile(`(?m)^_{5,}\n(.+)\n_{5,}`)
 )
 
 func parsePytestResults(output string, r *Result) {
@@ -304,12 +304,12 @@ func parsePytestResults(output string, r *Result) {
 // --- Jest / Vitest / npm test parser ---
 
 var (
-	jestFailRe     = regexp.MustCompile(`(?m)^\s*● (.+)`)
-	jestPassCntRe  = regexp.MustCompile(`(?m)Tests:\s+(?:\d+ skipped, )?(?:(\d+) passed)?`)
-	jestFailCntRe  = regexp.MustCompile(`(?m)Tests:\s+(\d+) failed`)
-	jestSkipCntRe  = regexp.MustCompile(`(?m)Tests:\s+(\d+) skipped`)
-	vitestPassRe   = regexp.MustCompile(`(?m)(\d+) passed`)
-	vitestFailRe   = regexp.MustCompile(`(?m)(\d+) failed`)
+	jestFailRe    = regexp.MustCompile(`(?m)^\s*● (.+)`)
+	jestPassCntRe = regexp.MustCompile(`(?m)Tests:\s+(?:\d+ skipped, )?(?:(\d+) passed)?`)
+	jestFailCntRe = regexp.MustCompile(`(?m)Tests:\s+(\d+) failed`)
+	jestSkipCntRe = regexp.MustCompile(`(?m)Tests:\s+(\d+) skipped`)
+	vitestPassRe  = regexp.MustCompile(`(?m)(\d+) passed`)
+	vitestFailRe  = regexp.MustCompile(`(?m)(\d+) failed`)
 )
 
 func parseNodeResults(output string, r *Result) {

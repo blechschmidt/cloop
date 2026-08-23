@@ -65,14 +65,14 @@ func (c BreakerConfig) withDefaults() BreakerConfig {
 // BreakerStatus is a point-in-time snapshot of a breaker for surfacing in
 // the UI or metrics layer. Safe to copy across goroutines.
 type BreakerStatus struct {
-	Key              string        `json:"key"`
-	State            string        `json:"state"`
-	ConsecutiveFails int           `json:"consecutive_failures"`
-	RecentFailures   int           `json:"recent_failures"`
-	OpenedAt         time.Time     `json:"opened_at,omitempty"`
+	Key               string        `json:"key"`
+	State             string        `json:"state"`
+	ConsecutiveFails  int           `json:"consecutive_failures"`
+	RecentFailures    int           `json:"recent_failures"`
+	OpenedAt          time.Time     `json:"opened_at,omitempty"`
 	CooldownRemaining time.Duration `json:"cooldown_remaining"`
-	LastFailure      time.Time     `json:"last_failure,omitempty"`
-	LastError        string        `json:"last_error,omitempty"`
+	LastFailure       time.Time     `json:"last_failure,omitempty"`
+	LastError         string        `json:"last_error,omitempty"`
 }
 
 // CircuitBreaker tracks failures for one logical endpoint (typically a single

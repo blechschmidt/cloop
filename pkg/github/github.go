@@ -25,15 +25,15 @@ const maxGitHubResponseBytes int64 = 32 << 20
 
 // Issue represents a GitHub issue.
 type Issue struct {
-	Number    int       `json:"number"`
-	Title     string    `json:"title"`
-	Body      string    `json:"body"`
-	State     string    `json:"state"`
-	HTMLURL   string    `json:"html_url"`
-	Labels    []Label   `json:"labels"`
-	Assignees []User    `json:"assignees"`
+	Number    int          `json:"number"`
+	Title     string       `json:"title"`
+	Body      string       `json:"body"`
+	State     string       `json:"state"`
+	HTMLURL   string       `json:"html_url"`
+	Labels    []Label      `json:"labels"`
+	Assignees []User       `json:"assignees"`
 	Milestone *GHMilestone `json:"milestone"`
-	UpdatedAt time.Time `json:"updated_at"`
+	UpdatedAt time.Time    `json:"updated_at"`
 	// PullRequest is non-nil when this is actually a PR (issues endpoint returns both).
 	PullRequest *struct{} `json:"pull_request,omitempty"`
 }
@@ -68,14 +68,14 @@ type GHMilestone struct {
 
 // PR represents a GitHub pull request.
 type PR struct {
-	Number    int     `json:"number"`
-	Title     string  `json:"title"`
-	State     string  `json:"state"`
-	Draft     bool    `json:"draft"`
-	HTMLURL   string  `json:"html_url"`
-	User      User    `json:"user"`
-	Labels    []Label `json:"labels"`
-	Head      struct {
+	Number  int     `json:"number"`
+	Title   string  `json:"title"`
+	State   string  `json:"state"`
+	Draft   bool    `json:"draft"`
+	HTMLURL string  `json:"html_url"`
+	User    User    `json:"user"`
+	Labels  []Label `json:"labels"`
+	Head    struct {
 		Ref string `json:"ref"`
 		SHA string `json:"sha"`
 	} `json:"head"`

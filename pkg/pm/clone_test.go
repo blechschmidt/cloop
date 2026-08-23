@@ -23,7 +23,7 @@ func (m *mockCloneProvider) Complete(_ context.Context, _ string, _ provider.Opt
 	return &provider.Result{Output: m.output}, nil
 }
 
-func (m *mockCloneProvider) Name() string        { return "mock" }
+func (m *mockCloneProvider) Name() string         { return "mock" }
 func (m *mockCloneProvider) DefaultModel() string { return "mock-model" }
 
 // ---- ClonePrompt tests ----

@@ -63,7 +63,7 @@ func TestShouldSend_FilteredEvents(t *testing.T) {
 
 func TestNew_SlackDetection(t *testing.T) {
 	tests := []struct {
-		url      string
+		url       string
 		wantSlack bool
 	}{
 		{"https://hooks.slack.com/services/T000/B000/xxxx", true},
@@ -147,10 +147,10 @@ func computeExpectedSig(secret string, body []byte) string {
 func TestSend_HMACSigningCorrect(t *testing.T) {
 	const secret = "my-webhook-secret"
 	var (
-		mu          sync.Mutex
-		receivedSig string
+		mu           sync.Mutex
+		receivedSig  string
 		receivedBody []byte
-		done        = make(chan struct{})
+		done         = make(chan struct{})
 	)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -260,27 +260,27 @@ func TestSend_FilteredEventNotDelivered(t *testing.T) {
 
 func TestFormatSlackMessage(t *testing.T) {
 	tests := []struct {
-		name    string
-		payload Payload
+		name     string
+		payload  Payload
 		contains []string
 	}{
 		{
-			name:    "session started",
-			payload: Payload{Event: EventSessionStarted, Goal: "build app"},
+			name:     "session started",
+			payload:  Payload{Event: EventSessionStarted, Goal: "build app"},
 			contains: []string{"Session started", "build app"},
 		},
 		{
 			name: "session complete with stats",
 			payload: Payload{
-				Event: EventSessionComplete,
-				Goal:  "build app",
+				Event:   EventSessionComplete,
+				Goal:    "build app",
 				Session: &SessionInfo{DoneTasks: 5, TotalTasks: 6, Duration: "10m", EstCostUSD: "$0.05"},
 			},
 			contains: []string{"Session complete", "5/6", "10m", "$0.05", "build app"},
 		},
 		{
-			name:    "session failed",
-			payload: Payload{Event: EventSessionFailed, Goal: "build app"},
+			name:     "session failed",
+			payload:  Payload{Event: EventSessionFailed, Goal: "build app"},
 			contains: []string{"FAILED", "build app"},
 		},
 		{
@@ -335,8 +335,8 @@ func TestFormatSlackMessage(t *testing.T) {
 		{
 			name: "plan complete",
 			payload: Payload{
-				Event: EventPlanComplete,
-				Goal:  "finish project",
+				Event:   EventPlanComplete,
+				Goal:    "finish project",
 				Session: &SessionInfo{DoneTasks: 8, TotalTasks: 8},
 			},
 			contains: []string{"Plan complete", "8/8", "finish project"},
@@ -344,8 +344,8 @@ func TestFormatSlackMessage(t *testing.T) {
 		{
 			name: "evolve discovered new tasks",
 			payload: Payload{
-				Event: EventEvolveDiscovered,
-				Goal:  "evolve app",
+				Event:   EventEvolveDiscovered,
+				Goal:    "evolve app",
 				Session: &SessionInfo{EvolveStep: 2, NewTasksFound: 3},
 			},
 			contains: []string{"Evolve #2", "3 new task", "evolve app"},
@@ -353,8 +353,8 @@ func TestFormatSlackMessage(t *testing.T) {
 		{
 			name: "evolve no new tasks",
 			payload: Payload{
-				Event: EventEvolveDiscovered,
-				Goal:  "evolve app",
+				Event:   EventEvolveDiscovered,
+				Goal:    "evolve app",
 				Session: &SessionInfo{EvolveStep: 1, NewTasksFound: 0},
 			},
 			contains: []string{"no new tasks", "fully evolved", "evolve app"},

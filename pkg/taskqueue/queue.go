@@ -53,20 +53,20 @@ const (
 
 // Entry is a single queue row.
 type Entry struct {
-	ID            int64     `json:"id"`
-	Kind          Kind      `json:"kind"`
-	TaskID        int       `json:"task_id,omitempty"`     // 0 if not linked to a plan task
-	Attempt       int       `json:"attempt,omitempty"`     // 1-based attempt counter (heal retries)
-	ParentID      int64     `json:"parent_id,omitempty"`   // queue id of the parent entry, if any
-	Title         string    `json:"title"`
-	Description   string    `json:"description,omitempty"`
-	Status        Status    `json:"status"`
-	Source        string    `json:"source,omitempty"`      // "orchestrator" | "evolve" | "external" | "api" | "cli"
-	CreatedAt     time.Time `json:"created_at"`
+	ID            int64      `json:"id"`
+	Kind          Kind       `json:"kind"`
+	TaskID        int        `json:"task_id,omitempty"`   // 0 if not linked to a plan task
+	Attempt       int        `json:"attempt,omitempty"`   // 1-based attempt counter (heal retries)
+	ParentID      int64      `json:"parent_id,omitempty"` // queue id of the parent entry, if any
+	Title         string     `json:"title"`
+	Description   string     `json:"description,omitempty"`
+	Status        Status     `json:"status"`
+	Source        string     `json:"source,omitempty"` // "orchestrator" | "evolve" | "external" | "api" | "cli"
+	CreatedAt     time.Time  `json:"created_at"`
 	StartedAt     *time.Time `json:"started_at,omitempty"`
 	CompletedAt   *time.Time `json:"completed_at,omitempty"`
-	OutputSummary string    `json:"output_summary,omitempty"`
-	ErrorMessage  string    `json:"error_message,omitempty"`
+	OutputSummary string     `json:"output_summary,omitempty"`
+	ErrorMessage  string     `json:"error_message,omitempty"`
 }
 
 // Queue is a thread-safe handle to the queue database.
@@ -431,9 +431,9 @@ func (q *Queue) List(opts ListOptions) ([]Entry, error) {
 	var out []Entry
 	for rows.Next() {
 		var (
-			e                                      Entry
-			kind, status, createdAt                string
-			startedAt, completedAt                 sql.NullString
+			e                       Entry
+			kind, status, createdAt string
+			startedAt, completedAt  sql.NullString
 		)
 		if err := rows.Scan(
 			&e.ID, &kind, &e.TaskID, &e.Attempt, &e.ParentID,

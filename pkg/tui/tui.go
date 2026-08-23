@@ -24,17 +24,17 @@ const pollInterval = 500 * time.Millisecond
 type viewMode int
 
 const (
-	viewMain        viewMode = iota
-	viewDetail               // task detail / artifact view
+	viewMain   viewMode = iota
+	viewDetail          // task detail / artifact view
 	viewAddTask
-	viewAnnotations          // annotations modal for selected task
+	viewAnnotations // annotations modal for selected task
 )
 
 // ---- styles ----------------------------------------------------------------
 
 var (
-	styleBold      = lipgloss.NewStyle().Bold(true)
-	styleHeader    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("12"))
+	styleBold        = lipgloss.NewStyle().Bold(true)
+	styleHeader      = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("12"))
 	stylePanelBorder = lipgloss.NewStyle().
 				Border(lipgloss.RoundedBorder()).
 				BorderForeground(lipgloss.Color("240"))
@@ -100,7 +100,7 @@ type Model struct {
 	err     error
 
 	// task list cursor
-	cursor   int
+	cursor     int
 	taskOffset int // scroll offset for task list
 
 	// log panel scroll

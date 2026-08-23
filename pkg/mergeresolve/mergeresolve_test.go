@@ -131,8 +131,8 @@ func TestExtractCodeBlock(t *testing.T) {
 	}{
 		{"```\nhello\n```", "hello\n"},
 		{"```go\npackage x\n```", "package x\n"},
-		{"```\n\n```", ""},                              // empty fence = give up
-		{"no fence here", "no fence here"},              // tolerate no fence
+		{"```\n\n```", ""},                 // empty fence = give up
+		{"no fence here", "no fence here"}, // tolerate no fence
 		{"```\nunterminated\nlines\n", "unterminated\nlines\n"},
 	}
 	for _, c := range cases {

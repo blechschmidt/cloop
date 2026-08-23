@@ -70,15 +70,15 @@ type chatMessage struct {
 }
 
 type requestBody struct {
-	Model            string        `json:"model"`
-	MaxTokens        int           `json:"max_tokens,omitempty"`
-	MaxCompletionTokens int        `json:"max_completion_tokens,omitempty"`
-	Messages         []chatMessage `json:"messages"`
-	Stream           bool          `json:"stream,omitempty"`
-	Temperature      *float64      `json:"temperature,omitempty"`
-	TopP             *float64      `json:"top_p,omitempty"`
-	FrequencyPenalty *float64      `json:"frequency_penalty,omitempty"`
-	ReasoningEffort  string        `json:"reasoning_effort,omitempty"`
+	Model               string        `json:"model"`
+	MaxTokens           int           `json:"max_tokens,omitempty"`
+	MaxCompletionTokens int           `json:"max_completion_tokens,omitempty"`
+	Messages            []chatMessage `json:"messages"`
+	Stream              bool          `json:"stream,omitempty"`
+	Temperature         *float64      `json:"temperature,omitempty"`
+	TopP                *float64      `json:"top_p,omitempty"`
+	FrequencyPenalty    *float64      `json:"frequency_penalty,omitempty"`
+	ReasoningEffort     string        `json:"reasoning_effort,omitempty"`
 }
 
 type responseBody struct {
@@ -88,8 +88,8 @@ type responseBody struct {
 		} `json:"message"`
 	} `json:"choices"`
 	Usage *struct {
-		PromptTokens     int `json:"prompt_tokens"`
-		CompletionTokens int `json:"completion_tokens"`
+		PromptTokens            int `json:"prompt_tokens"`
+		CompletionTokens        int `json:"completion_tokens"`
 		CompletionTokensDetails *struct {
 			ReasoningTokens int `json:"reasoning_tokens"`
 		} `json:"completion_tokens_details"`
@@ -109,8 +109,8 @@ type streamChunk struct {
 		FinishReason string `json:"finish_reason"`
 	} `json:"choices"`
 	Usage *struct {
-		PromptTokens     int `json:"prompt_tokens"`
-		CompletionTokens int `json:"completion_tokens"`
+		PromptTokens            int `json:"prompt_tokens"`
+		CompletionTokens        int `json:"completion_tokens"`
 		CompletionTokensDetails *struct {
 			ReasoningTokens int `json:"reasoning_tokens"`
 		} `json:"completion_tokens_details"`

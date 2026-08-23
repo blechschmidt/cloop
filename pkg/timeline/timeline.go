@@ -101,9 +101,9 @@ func Build(plan *pm.Plan, planStart time.Time) []Bar {
 // ─── ASCII rendering ──────────────────────────────────────────────────────────
 
 const (
-	titleWidth  = 28  // chars reserved for task title column
-	colMinutes  = 30  // minutes per grid column
-	gridWidth   = 50  // total number of time columns
+	titleWidth  = 28 // chars reserved for task title column
+	colMinutes  = 30 // minutes per grid column
+	gridWidth   = 50 // total number of time columns
 	blockChar   = "█"
 	emptyChar   = " "
 	colorReset  = "\033[0m"

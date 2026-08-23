@@ -254,8 +254,8 @@ func TestScopedBindingPrecedence(t *testing.T) {
 		wantRole Role
 	}{
 		{
-			name:     "global binding applies to the global scope",
-			subject:  eng, scope: GlobalScope, wantRole: RoleOperator,
+			name:    "global binding applies to the global scope",
+			subject: eng, scope: GlobalScope, wantRole: RoleOperator,
 		},
 		{
 			name:     "project binding upgrades within its project",

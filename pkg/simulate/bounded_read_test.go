@@ -109,4 +109,3 @@ func TestReadFileTruncated_MissingFile(t *testing.T) {
 		t.Fatalf("expected error for missing file, got nil")
 	}
 }
-

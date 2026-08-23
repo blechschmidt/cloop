@@ -259,15 +259,15 @@ func (s *Server) routeTable() []routeSpec {
 	// Shorthands keep the table scannable: the permission and scope of
 	// each row should be readable at a glance.
 	const (
-		read      = authz.PermProjectRead
-		write     = authz.PermProjectWrite
-		task      = authz.PermTaskMutate
-		start     = authz.PermRunStart
-		stop      = authz.PermRunStop
-		cfgWrite  = authz.PermConfigWrite
-		execRead  = authz.PermExecutorRead
-		execMgmt  = authz.PermExecutorManage
-		auditRead = authz.PermAuditRead
+		read       = authz.PermProjectRead
+		write      = authz.PermProjectWrite
+		task       = authz.PermTaskMutate
+		start      = authz.PermRunStart
+		stop       = authz.PermRunStop
+		cfgWrite   = authz.PermConfigWrite
+		execRead   = authz.PermExecutorRead
+		execMgmt   = authz.PermExecutorManage
+		auditRead  = authz.PermAuditRead
 		secGrant   = authz.PermSecretGrant
 		secRevoke  = authz.PermSecretRevoke
 		tokenAdmin = authz.PermTokenAdmin

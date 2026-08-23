@@ -46,7 +46,7 @@ func IsValidSize(s string) bool {
 			return true
 		}
 	}
-	return false;
+	return false
 }
 
 // PointsForSize returns the Fibonacci story points for a given T-shirt size.

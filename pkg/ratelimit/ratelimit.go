@@ -60,16 +60,16 @@ func (w Window) PercentUsed() int {
 
 // ModelLimits is the full rate-limit snapshot for one model.
 type ModelLimits struct {
-	Model       string    `json:"model"`
-	UpdatedAt   time.Time `json:"updated_at"`
-	Tier        string    `json:"tier,omitempty"`         // anthropic-priority-tier or similar
-	Requests    Window    `json:"requests"`               // RPM
-	Tokens      Window    `json:"tokens"`                 // overall TPM (legacy, may be 0)
-	InputTokens Window    `json:"input_tokens"`           // ITPM
-	OutputTokens Window   `json:"output_tokens"`          // OTPM
-	Weekly      Window    `json:"weekly,omitempty"`       // weekly window if present
-	FiveHour    Window    `json:"five_hour,omitempty"`    // 5-hour rolling window
-	MonthlySpendUSD float64 `json:"monthly_spend_usd,omitempty"` // x-spend-limit-monthly if present
+	Model           string    `json:"model"`
+	UpdatedAt       time.Time `json:"updated_at"`
+	Tier            string    `json:"tier,omitempty"`              // anthropic-priority-tier or similar
+	Requests        Window    `json:"requests"`                    // RPM
+	Tokens          Window    `json:"tokens"`                      // overall TPM (legacy, may be 0)
+	InputTokens     Window    `json:"input_tokens"`                // ITPM
+	OutputTokens    Window    `json:"output_tokens"`               // OTPM
+	Weekly          Window    `json:"weekly,omitempty"`            // weekly window if present
+	FiveHour        Window    `json:"five_hour,omitempty"`         // 5-hour rolling window
+	MonthlySpendUSD float64   `json:"monthly_spend_usd,omitempty"` // x-spend-limit-monthly if present
 	// Raw is the full set of anthropic-ratelimit-* headers as returned by the
 	// API, for debugging / forward-compatibility.
 	Raw map[string]string `json:"raw,omitempty"`

@@ -62,11 +62,11 @@ func splitPattern(pattern string) (method, path string) {
 // requires editing this list — a new unguarded route cannot appear by
 // accident or by copy-paste.
 var publicRouteAllowlist = map[string]string{
-	"/":                      "the SPA shell; authMiddleware already gated whether this caller may load it",
-	"/assets/":               "content-hashed CSS/JS served same-origin for the CSP",
-	"GET /auth/login":        "login machinery — gating it would require being signed in to sign in",
-	"GET /auth/callback":     "login machinery",
-	"POST /auth/logout":      "signing out must always be possible",
+	"/":                  "the SPA shell; authMiddleware already gated whether this caller may load it",
+	"/assets/":           "content-hashed CSS/JS served same-origin for the CSP",
+	"GET /auth/login":    "login machinery — gating it would require being signed in to sign in",
+	"GET /auth/callback": "login machinery",
+	"POST /auth/logout":  "signing out must always be possible",
 	"POST /api/session/logout-all": "ends only the caller's own sessions, scoped to their session's subject " +
 		"and taking no id — there is no parameter that could reach someone else's, and requiring a " +
 		"permission would put an operator in the path of the one action a user must be able to take " +

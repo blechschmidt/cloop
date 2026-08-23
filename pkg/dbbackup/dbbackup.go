@@ -78,14 +78,14 @@ type Metadata struct {
 
 // BackupReport summarises a successful backup run.
 type BackupReport struct {
-	Source         string
-	Output         string
-	MetadataPath   string
-	SizeBytes      int64
-	Duration       time.Duration
-	SHA256         string
-	WALCheckpoint  string // "PASSED" or human-readable diagnostic
-	SchemaVersion  int
+	Source        string
+	Output        string
+	MetadataPath  string
+	SizeBytes     int64
+	Duration      time.Duration
+	SHA256        string
+	WALCheckpoint string // "PASSED" or human-readable diagnostic
+	SchemaVersion int
 }
 
 // Backup creates a hot backup of the SQLite database at srcPath and writes

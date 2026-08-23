@@ -32,10 +32,10 @@ var sessionMu sync.Mutex
 
 // Session describes a named execution session.
 type Session struct {
-	Name        string    `json:"name"`
-	CreatedAt   time.Time `json:"created_at"`
-	StateFile   string    `json:"state_file"`   // relative path from workDir
-	ConfigFile  string    `json:"config_file"`  // relative path from workDir
+	Name       string    `json:"name"`
+	CreatedAt  time.Time `json:"created_at"`
+	StateFile  string    `json:"state_file"`  // relative path from workDir
+	ConfigFile string    `json:"config_file"` // relative path from workDir
 }
 
 // Dir returns the absolute path to the session directory.

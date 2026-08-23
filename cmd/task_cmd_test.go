@@ -22,8 +22,8 @@ func TestMarshalTasksJSON_SortsByPriority(t *testing.T) {
 
 	// Unmarshal and check order
 	var decoded []struct {
-		ID       int    `json:"id"`
-		Priority int    `json:"priority"`
+		ID       int `json:"id"`
+		Priority int `json:"priority"`
 	}
 	if err := json.Unmarshal([]byte(got), &decoded); err != nil {
 		t.Fatalf("unmarshal failed: %v\n%s", err, got)
@@ -445,7 +445,7 @@ func taskMoveHelper(tasks []*pm.Task, id int, direction string) ([]*pm.Task, err
 type taskNotFoundError struct{ id int }
 type taskAtBoundaryError struct{}
 
-func (e *taskNotFoundError) Error() string  { return "not found" }
+func (e *taskNotFoundError) Error() string   { return "not found" }
 func (e *taskAtBoundaryError) Error() string { return "at boundary" }
 
 func TestTaskMove_Up_SwapsPriorities(t *testing.T) {

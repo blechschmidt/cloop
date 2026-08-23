@@ -423,13 +423,13 @@ func RoleStats(workDir string, role pm.AgentRole) ([]*VariantStat, error) {
 			st = &variantStats{VariantID: v.ID, Role: role}
 		}
 		out = append(out, &VariantStat{
-			Variant:     v,
-			Trials:      st.Trials,
-			Successes:   st.Successes,
-			Failures:    st.Trials - st.Successes,
-			AvgLatency:  st.AvgLatencyMs(),
-			WinRate:     st.WinRate(),
-			Wilson:      st.WilsonScore(),
+			Variant:    v,
+			Trials:     st.Trials,
+			Successes:  st.Successes,
+			Failures:   st.Trials - st.Successes,
+			AvgLatency: st.AvgLatencyMs(),
+			WinRate:    st.WinRate(),
+			Wilson:     st.WilsonScore(),
 		})
 	}
 

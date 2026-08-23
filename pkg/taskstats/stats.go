@@ -60,11 +60,11 @@ type TaskStats struct {
 
 // AggregateStats summarises analytics across all tasks in a plan.
 type AggregateStats struct {
-	TotalTasks     int
-	DoneTasks      int
-	SkippedTasks   int
-	FailedTasks    int
-	PendingTasks   int
+	TotalTasks      int
+	DoneTasks       int
+	SkippedTasks    int
+	FailedTasks     int
+	PendingTasks    int
 	InProgressTasks int
 
 	CompletionRate float64 // (done+skipped) / total
@@ -191,14 +191,14 @@ func CollectOne(s *state.ProjectState, workDir, model string, taskID int) (*Task
 // collectTask builds TaskStats for a single task.
 func collectTask(t *pm.Task, s *state.ProjectState, workDir, model string) *TaskStats {
 	ts := &TaskStats{
-		TaskID:        t.ID,
-		TaskTitle:     t.Title,
-		Status:        t.Status,
-		StartedAt:     t.StartedAt,
-		CompletedAt:   t.CompletedAt,
-		HealAttempts:  t.HealAttempts,
-		VerifyRetries: t.VerifyRetries,
-		FailCount:     t.FailCount,
+		TaskID:           t.ID,
+		TaskTitle:        t.Title,
+		Status:           t.Status,
+		StartedAt:        t.StartedAt,
+		CompletedAt:      t.CompletedAt,
+		HealAttempts:     t.HealAttempts,
+		VerifyRetries:    t.VerifyRetries,
+		FailCount:        t.FailCount,
 		EstimatedMinutes: t.EstimatedMinutes,
 		ActualMinutes:    t.ActualMinutes,
 	}

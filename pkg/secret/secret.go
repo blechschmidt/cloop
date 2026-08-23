@@ -34,9 +34,9 @@ const (
 
 // Store holds the decrypted set of secrets in memory.
 type Store struct {
-	entries  map[string]string
-	workDir  string
-	passKey  []byte // derived AES key cached for re-encryption
+	entries map[string]string
+	workDir string
+	passKey []byte // derived AES key cached for re-encryption
 }
 
 // secretsPath returns the path to .cloop/secrets.enc.

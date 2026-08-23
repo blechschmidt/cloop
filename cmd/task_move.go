@@ -22,12 +22,12 @@ import (
 )
 
 var (
-	moveToDir      string
-	moveAdapt      bool
-	moveYes        bool
-	moveProvider   string
-	moveModel      string
-	moveTimeout    string
+	moveToDir    string
+	moveAdapt    bool
+	moveYes      bool
+	moveProvider string
+	moveModel    string
+	moveTimeout  string
 )
 
 // taskRelocateCmd implements `cloop task move <id> --to <dir>`.

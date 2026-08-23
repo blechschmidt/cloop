@@ -23,27 +23,27 @@ import (
 
 // TaskChange describes a recommended change to a specific task.
 type TaskChange struct {
-	TaskID     int    `json:"task_id"`
-	TaskTitle  string `json:"task_title"`
-	Action     string `json:"action"`     // "cut", "defer", "reprioritize", "add", "split"
-	NewPrio    int    `json:"new_prio,omitempty"`
-	Rationale  string `json:"rationale"`
+	TaskID    int    `json:"task_id"`
+	TaskTitle string `json:"task_title"`
+	Action    string `json:"action"` // "cut", "defer", "reprioritize", "add", "split"
+	NewPrio   int    `json:"new_prio,omitempty"`
+	Rationale string `json:"rationale"`
 }
 
 // SimResult is the structured output of a scenario simulation.
 type SimResult struct {
-	Scenario       string       `json:"scenario"`
-	Summary        string       `json:"summary"`
-	TimelineDelta  int          `json:"timeline_delta_days"` // +days = delayed, -days = faster
-	BaselineDays   float64      `json:"baseline_days"`
-	SimulatedDays  float64      `json:"simulated_days"`
-	RiskBefore     string       `json:"risk_before"`         // "low" | "medium" | "high" | "critical"
-	RiskAfter      string       `json:"risk_after"`
-	Confidence     string       `json:"confidence"`          // "low" | "medium" | "high"
-	Recommendations []string    `json:"recommendations"`
-	TaskChanges    []TaskChange `json:"task_changes,omitempty"`
-	TradeOffs      []string     `json:"trade_offs,omitempty"`
-	Warnings       []string     `json:"warnings,omitempty"`
+	Scenario        string       `json:"scenario"`
+	Summary         string       `json:"summary"`
+	TimelineDelta   int          `json:"timeline_delta_days"` // +days = delayed, -days = faster
+	BaselineDays    float64      `json:"baseline_days"`
+	SimulatedDays   float64      `json:"simulated_days"`
+	RiskBefore      string       `json:"risk_before"` // "low" | "medium" | "high" | "critical"
+	RiskAfter       string       `json:"risk_after"`
+	Confidence      string       `json:"confidence"` // "low" | "medium" | "high"
+	Recommendations []string     `json:"recommendations"`
+	TaskChanges     []TaskChange `json:"task_changes,omitempty"`
+	TradeOffs       []string     `json:"trade_offs,omitempty"`
+	Warnings        []string     `json:"warnings,omitempty"`
 }
 
 // ProjectSnapshot builds a concise text summary of current project state for AI context.
@@ -244,20 +244,20 @@ func min(a, b int) int {
 
 // TaskPrediction holds the AI-predicted outcome for a single pending task.
 type TaskPrediction struct {
-	TaskID          int      `json:"task_id"`
-	TaskTitle       string   `json:"task_title"`
-	SuccessProb     int      `json:"success_probability"` // 0-100
-	ExpectedOutput  string   `json:"expected_output"`
-	Risks           []string `json:"risks"`
-	PreConditions   []string `json:"pre_conditions"`
+	TaskID         int      `json:"task_id"`
+	TaskTitle      string   `json:"task_title"`
+	SuccessProb    int      `json:"success_probability"` // 0-100
+	ExpectedOutput string   `json:"expected_output"`
+	Risks          []string `json:"risks"`
+	PreConditions  []string `json:"pre_conditions"`
 }
 
 // SimulationReport aggregates per-task predictions into an overall assessment.
 type SimulationReport struct {
-	Goal            string           `json:"goal"`
-	GeneratedAt     time.Time        `json:"generated_at"`
-	Predictions     []TaskPrediction `json:"predictions"`
-	OverallConfidence int            `json:"overall_confidence"` // 0-100 average success prob
+	Goal              string           `json:"goal"`
+	GeneratedAt       time.Time        `json:"generated_at"`
+	Predictions       []TaskPrediction `json:"predictions"`
+	OverallConfidence int              `json:"overall_confidence"` // 0-100 average success prob
 }
 
 // predictionPrompt builds the AI prompt for a single pending task.

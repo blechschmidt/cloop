@@ -110,11 +110,11 @@ var (
 
 // Model is the bubbletea model for the batch-edit TUI.
 type Model struct {
-	tasks    []*pm.Task // sorted display order (pinned first, then by priority)
+	tasks    []*pm.Task   // sorted display order (pinned first, then by priority)
 	selected map[int]bool // task IDs that are checked
 	cursor   int          // index into tasks slice (list panel)
 
-	panel      int // panelList or panelForm
+	panel       int // panelList or panelForm
 	activeField int // field index in form panel
 
 	// form field values (strings, applied on Enter)

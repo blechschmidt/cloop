@@ -90,20 +90,20 @@ func (sess *Session) Send(ctx context.Context, userMsg string) (string, []Action
 type ActionType string
 
 const (
-	ActionTaskDone    ActionType = "TASK_DONE"
-	ActionTaskFail    ActionType = "TASK_FAIL"
-	ActionTaskSkip    ActionType = "TASK_SKIP"
-	ActionTaskStart   ActionType = "TASK_START"
-	ActionTaskCreate  ActionType = "TASK_CREATE"
-	ActionNote        ActionType = "NOTE"
-	ActionGoalDone    ActionType = "GOAL_COMPLETE"
+	ActionTaskDone   ActionType = "TASK_DONE"
+	ActionTaskFail   ActionType = "TASK_FAIL"
+	ActionTaskSkip   ActionType = "TASK_SKIP"
+	ActionTaskStart  ActionType = "TASK_START"
+	ActionTaskCreate ActionType = "TASK_CREATE"
+	ActionNote       ActionType = "NOTE"
+	ActionGoalDone   ActionType = "GOAL_COMPLETE"
 )
 
 // Action represents a PM directive embedded in an AI response.
 type Action struct {
-	Type   ActionType
-	Args   []string // parsed arguments
-	Raw    string   // original directive line
+	Type ActionType
+	Args []string // parsed arguments
+	Raw  string   // original directive line
 }
 
 // ActionResult records what happened when an action was applied.

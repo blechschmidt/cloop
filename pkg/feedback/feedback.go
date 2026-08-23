@@ -18,7 +18,7 @@ const feedbackFile = ".cloop/feedback.jsonl"
 type Record struct {
 	TaskID    int       `json:"task_id"`
 	TaskTitle string    `json:"task_title"`
-	Rating    int       `json:"rating"`    // 1-5
+	Rating    int       `json:"rating"` // 1-5
 	Comment   string    `json:"comment,omitempty"`
 	Provider  string    `json:"provider,omitempty"`
 	Model     string    `json:"model,omitempty"`

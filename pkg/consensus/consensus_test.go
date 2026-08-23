@@ -107,7 +107,7 @@ func (e *errorProvider) DefaultModel() string { return "error-model" }
 // making it harder for operators (and the orchestrator's MaxFailures gate
 // reasoning) to attribute the failure correctly.
 func TestRunConsensus_AllProvidersFailed_SurfacesRealErrorNotNil(t *testing.T) {
-	silent := &staticProvider{name: "silent", output: ""}        // valid filter drops empty output
+	silent := &staticProvider{name: "silent", output: ""} // valid filter drops empty output
 	authFail := &errorProvider{name: "alpha", err: errors.New("HTTP 401: invalid_api_key")}
 
 	_, _, err := RunConsensus(

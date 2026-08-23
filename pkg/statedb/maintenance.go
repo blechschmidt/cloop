@@ -219,8 +219,8 @@ func (d *DB) LastMaintenanceLog() (*MaintenanceLogEntry, error) {
 		ORDER BY id DESC LIMIT 1`)
 
 	var (
-		e                       MaintenanceLogEntry
-		startedAt, completedAt  string
+		e                      MaintenanceLogEntry
+		startedAt, completedAt string
 	)
 	err := row.Scan(&e.ID, &e.Operation, &startedAt, &completedAt,
 		&e.PageCountBefore, &e.PageCountAfter, &e.PageSize,

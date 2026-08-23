@@ -9,8 +9,8 @@ import (
 
 func TestBuildPrompt_ContainsGoal(t *testing.T) {
 	ctx := &PRContext{
-		Base:  "main",
-		Goal:  "Build a REST API with user auth",
+		Base:   "main",
+		Goal:   "Build a REST API with user auth",
 		GitLog: "abc1234 feat: add user endpoint",
 	}
 	prompt := BuildPrompt(ctx)

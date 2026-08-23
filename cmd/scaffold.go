@@ -152,7 +152,7 @@ Examples:
 
 		if scaffoldDryRun {
 			warnColor.Println("DRY-RUN — no files written")
-		fmt.Println()
+			fmt.Println()
 		}
 
 		fmt.Printf("%-6s  %s\n", "TYPE", "PATH")

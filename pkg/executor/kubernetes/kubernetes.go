@@ -611,7 +611,7 @@ func (e *Executor) Capabilities() executor.Capabilities {
 		SupportsWriteBack: true,
 		MaxConcurrent:     e.opts.MaxConcurrent,
 		Platform:          "linux",
-		Arch:                          e.opts.NodeSelector["kubernetes.io/arch"],
+		Arch:              e.opts.NodeSelector["kubernetes.io/arch"],
 	}
 }
 

@@ -10,6 +10,54 @@ reference those documents refer to.
 
 ---
 
+## Per-user state: `CLOOP_HOME`
+
+Most configuration is per-project and lives in `.cloop/config.yaml` inside the
+working tree. A few things are per-*user* and deliberately outside it — the
+multi-project registry the dashboard lists, the global budget and cost ledger,
+named profiles, and cached provider credentials:
+
+| Path | Contents | Relocated by `CLOOP_HOME` |
+| --- | --- | --- |
+| `~/.cloop/projects.json` | The multi-project registry: which projects the dashboard shows | **yes** |
+| `~/.cloop/profiles.yaml` | Named provider profiles | no |
+| `~/.cloop/agent.json` | Remote executor agent credential and pinned certificate | no |
+| `~/.cloop/plugins/` | User-level plugins | no |
+| `~/.config/cloop/budget.yaml` | Global spend caps | no |
+| `~/.config/cloop/costs.jsonl` | Global cost ledger | no |
+| `~/.config/cloop/workspaces.json` | Registered workspaces | no |
+
+**`CLOOP_HOME`** overrides the directory that would otherwise be `~/.cloop`,
+following the `CARGO_HOME` convention: it names the directory itself, not a home
+that contains it. A relative value is resolved against the process working
+directory; an empty or whitespace-only value is treated as unset.
+
+```bash
+CLOOP_HOME=/var/lib/cloop/alice cloop ui
+```
+
+**It currently affects the registry only** — the right-hand column above is not
+decoration. Profiles, plugins and the agent credential still resolve from
+`$HOME` directly, so setting `CLOOP_HOME` alone does not give a second hub its
+own copy of those. To relocate everything, set `HOME`; `CLOOP_HOME` then
+narrows the registry further if you want it somewhere else again.
+
+Two reasons to set it:
+
+- **Running more than one hub under one Unix account.** Without it they share a
+  registry, so projects registered by one appear in the other.
+- **Testing.** The registry is process-global state at a fixed path outside the
+  working tree, which makes it easy for a test to write to the machine it runs
+  on and leave it there. That is not theoretical: a dashboard test accumulated
+  99 entries into a developer's real `projects.json`, one per run, until project
+  index 99 resolved to a deleted directory and three unrelated authorization
+  tests began failing — on that machine only, since CI always starts from an
+  empty `$HOME`. Go tests here isolate via `internal/hometest.Isolate` in
+  `TestMain`, which redirects `$HOME` and clears `CLOOP_HOME`; `tests/hermetic`
+  fails the build if a package that reads `$HOME` and has tests does not.
+
+---
+
 ## Execution Backends (Executors)
 
 An **executor** decides *where* a cloop workload actually runs. By default it is

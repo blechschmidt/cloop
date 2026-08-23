@@ -78,10 +78,10 @@ func TestBlockReasonMatrix(t *testing.T) {
 		{"::ffff:127.0.0.1", true, "loopback"},
 		{"::ffff:10.0.0.1", true, "private (RFC1918/ULA)"},
 		{"::ffff:169.254.169.254", true, "cloud metadata service (169.254.169.254)"},
-		{"64:ff9b::7f00:1", true, "loopback"},       // NAT64 of 127.0.0.1
+		{"64:ff9b::7f00:1", true, "loopback"}, // NAT64 of 127.0.0.1
 		{"64:ff9b::a9fe:a9fe", true, "cloud metadata service (169.254.169.254)"},
-		{"::127.0.0.1", true, "loopback"},           // deprecated v4-compatible
-		{"::a00:1", true, "private (RFC1918/ULA)"},  // ::10.0.0.1
+		{"::127.0.0.1", true, "loopback"},          // deprecated v4-compatible
+		{"::a00:1", true, "private (RFC1918/ULA)"}, // ::10.0.0.1
 		// The encodings an adversarial review turned up: local-use NAT64
 		// (RFC 8215), IPv4-translatable (RFC 6145), and 6to4 (RFC 3056).
 		// Each routes to the embedded v4 on a host configured for it.
@@ -89,9 +89,9 @@ func TestBlockReasonMatrix(t *testing.T) {
 		// so 127.0.0.1 lands in bytes 6,7,9,10 — not contiguously.
 		{"64:ff9b:1:7f00:0:100::", true, "loopback"},
 		{"64:ff9b:1:a9fe:a9:fe00::", true, "cloud metadata service (169.254.169.254)"},
-		{"::ffff:0:7f00:1", true, "loopback"},                 // IPv4-translatable
-		{"::ffff:0:a00:1", true, "private (RFC1918/ULA)"},     // IPv4-translatable 10.0.0.1
-		{"2002:7f00:1::1", true, "loopback"},                  // 6to4 of 127.0.0.1
+		{"::ffff:0:7f00:1", true, "loopback"},             // IPv4-translatable
+		{"::ffff:0:a00:1", true, "private (RFC1918/ULA)"}, // IPv4-translatable 10.0.0.1
+		{"2002:7f00:1::1", true, "loopback"},              // 6to4 of 127.0.0.1
 		{"2002:a9fe:a9fe::1", true, "cloud metadata service (169.254.169.254)"},
 		// A legitimate public address whose suffix merely looks inward must
 		// still pass: the unwrapping is prefix-driven, not suffix-driven.

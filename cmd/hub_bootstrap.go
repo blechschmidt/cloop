@@ -361,7 +361,7 @@ ui:
     # client_secret comes from CLOOP_OIDC_CLIENT_SECRET in .cloop/hub.env.
     redirect_url: {{.ExternalURL}}/auth/callback
 {{- else}}
-    # No identity provider was given to `+"`cloop hub bootstrap`"+`. Until this is
+    # No identity provider was given to ` + "`cloop hub bootstrap`" + `. Until this is
     # enabled the dashboard is protected by CLOOP_UI_TOKEN alone — one shared
     # bearer token, no per-user identity, and therefore no usable audit trail.
     # Fill in the four required fields and set enabled: true.
@@ -447,7 +447,7 @@ CLOOP_SECRET_KEY=%s
 
 # Static bearer token for the dashboard and REST API. This is what keeps the
 # hub closed before an identity provider is wired up, and what API automation
-# keeps using afterwards. Send it as `+"`Authorization: Bearer <token>`"+`.
+# keeps using afterwards. Send it as ` + "`Authorization: Bearer <token>`" + `.
 CLOOP_UI_TOKEN=%s
 
 # OIDC client secret, when ui.oidc.enabled is true. The value belongs to the

@@ -17,13 +17,13 @@ import (
 
 // Metrics holds computed project health metrics.
 type Metrics struct {
-	TotalTasks     int
-	DoneTasks      int
-	FailedTasks    int
-	SkippedTasks   int
+	TotalTasks      int
+	DoneTasks       int
+	FailedTasks     int
+	SkippedTasks    int
 	InProgressTasks int
-	PendingTasks   int
-	BlockedTasks   int // permanently blocked by failed deps
+	PendingTasks    int
+	BlockedTasks    int // permanently blocked by failed deps
 
 	// Velocity: tasks completed per day (based on CompletedAt timestamps)
 	VelocityPerDay float64

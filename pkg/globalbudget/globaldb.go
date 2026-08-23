@@ -24,9 +24,9 @@ import (
 )
 
 const (
-	globalDBFile        = "global.db"
-	globalDBMetaKey     = "budget_yaml"
-	globalDBSchema      = `
+	globalDBFile    = "global.db"
+	globalDBMetaKey = "budget_yaml"
+	globalDBSchema  = `
 PRAGMA journal_mode=WAL;
 PRAGMA busy_timeout=5000;
 

@@ -21,12 +21,12 @@ import (
 // ─── flags ────────────────────────────────────────────────────────────────────
 
 var (
-	msProvider    string
-	msModel       string
-	msDeadline    string
-	msDesc        string
-	msTasks       string // comma-separated task IDs
-	msForce       bool   // allow overwriting existing milestones in plan
+	msProvider string
+	msModel    string
+	msDeadline string
+	msDesc     string
+	msTasks    string // comma-separated task IDs
+	msForce    bool   // allow overwriting existing milestones in plan
 )
 
 // ─── root milestone command ───────────────────────────────────────────────────

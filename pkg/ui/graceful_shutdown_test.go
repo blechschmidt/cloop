@@ -321,4 +321,3 @@ func waitForServerReady(t *testing.T, port int, timeout time.Duration) {
 	}
 	t.Fatalf("server on port %d did not become ready within %v", port, timeout)
 }
-

@@ -221,19 +221,19 @@ type podList struct {
 }
 
 type podSpec struct {
-	RestartPolicy                 string              `json:"restartPolicy,omitempty"`
-	ServiceAccountName            string              `json:"serviceAccountName,omitempty"`
-	AutomountServiceAccountToken  *bool               `json:"automountServiceAccountToken,omitempty"`
-	ActiveDeadlineSeconds         *int64              `json:"activeDeadlineSeconds,omitempty"`
-	TerminationGracePeriodSeconds *int64              `json:"terminationGracePeriodSeconds,omitempty"`
-	NodeSelector                  map[string]string   `json:"nodeSelector,omitempty"`
-	Tolerations                   []toleration        `json:"tolerations,omitempty"`
+	RestartPolicy                 string            `json:"restartPolicy,omitempty"`
+	ServiceAccountName            string            `json:"serviceAccountName,omitempty"`
+	AutomountServiceAccountToken  *bool             `json:"automountServiceAccountToken,omitempty"`
+	ActiveDeadlineSeconds         *int64            `json:"activeDeadlineSeconds,omitempty"`
+	TerminationGracePeriodSeconds *int64            `json:"terminationGracePeriodSeconds,omitempty"`
+	NodeSelector                  map[string]string `json:"nodeSelector,omitempty"`
+	Tolerations                   []toleration      `json:"tolerations,omitempty"`
 	// RuntimeClassName selects a node-level RuntimeClass — the Kubernetes
 	// spelling of "run this Pod under Kata rather than runc". Omitted when
 	// empty so the cluster's default handler stays in effect.
-	RuntimeClassName string `json:"runtimeClassName,omitempty"`
-	ImagePullSecrets              []localObjectRef    `json:"imagePullSecrets,omitempty"`
-	SecurityContext               *podSecurityContext `json:"securityContext,omitempty"`
+	RuntimeClassName string              `json:"runtimeClassName,omitempty"`
+	ImagePullSecrets []localObjectRef    `json:"imagePullSecrets,omitempty"`
+	SecurityContext  *podSecurityContext `json:"securityContext,omitempty"`
 	// InitContainers run to completion, in order, before Containers start.
 	// Exactly one is ever set here — the workspace provisioner — and only when
 	// the Spec asks for a tree to be fetched.

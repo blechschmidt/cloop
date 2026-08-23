@@ -152,7 +152,6 @@ func TestNew_MissingState(t *testing.T) {
 	}
 }
 
-
 // --- truncate ---
 
 func TestTruncate_ShortString(t *testing.T) {
@@ -175,7 +174,6 @@ func TestTruncate_TooLong(t *testing.T) {
 		t.Errorf("expected %q, got %q", "hello...", got)
 	}
 }
-
 
 // --- AddSteps / SetAutoEvolve ---
 
@@ -431,7 +429,6 @@ func TestRun_DispatchesPMMode(t *testing.T) {
 	}
 }
 
-
 // --- Replan ---
 
 func TestRunPM_Replan_ClearsExistingPlan(t *testing.T) {
@@ -452,7 +449,7 @@ func TestRunPM_Replan_ClearsExistingPlan(t *testing.T) {
 	prov := &mockProvider{
 		name: "mock",
 		results: []*provider.Result{
-			{Output: newPlanJSON, Provider: "mock"},                     // decompose
+			{Output: newPlanJSON, Provider: "mock"},                    // decompose
 			{Output: "finished new task\nTASK_DONE", Provider: "mock"}, // execute
 		},
 	}
@@ -871,7 +868,7 @@ func TestRunPM_ClarificationAutoResolve_AnnotationOutcome(t *testing.T) {
 		{
 			name: "resolved on attempt 1",
 			results: []*provider.Result{
-				{Output: question, Provider: "mock"},      // initial — clarification
+				{Output: question, Provider: "mock"},          // initial — clarification
 				{Output: "done\nTASK_DONE", Provider: "mock"}, // retry 1 — completes
 			},
 			expectStatus:   pm.TaskDone,
@@ -880,8 +877,8 @@ func TestRunPM_ClarificationAutoResolve_AnnotationOutcome(t *testing.T) {
 		{
 			name: "resolved on attempt 2",
 			results: []*provider.Result{
-				{Output: question, Provider: "mock"},      // initial — clarification
-				{Output: question, Provider: "mock"},      // retry 1 — still clarification
+				{Output: question, Provider: "mock"},          // initial — clarification
+				{Output: question, Provider: "mock"},          // retry 1 — still clarification
 				{Output: "done\nTASK_DONE", Provider: "mock"}, // retry 2 — completes
 			},
 			expectStatus:   pm.TaskDone,
@@ -910,7 +907,7 @@ func TestRunPM_ClarificationAutoResolve_AnnotationOutcome(t *testing.T) {
 			name: "aborted by provider error",
 			results: []*provider.Result{
 				{Output: question, Provider: "mock"}, // initial — clarification
-				nil, // retry 1 — slot for the err below
+				nil,                                  // retry 1 — slot for the err below
 			},
 			errs: []error{
 				nil,
@@ -1043,7 +1040,6 @@ func TestPrintOutputTo_TruncationThresholdIsExactly20(t *testing.T) {
 		t.Error("exactly 20 lines should not be truncated")
 	}
 }
-
 
 func TestRunPM_StepsLimit_StopsAfterN(t *testing.T) {
 	dir := tempDir(t)
@@ -1273,9 +1269,9 @@ func TestRunPM_Decompose_NoExistingPlan_FullFlow(t *testing.T) {
 	prov := &mockProvider{
 		name: "mock",
 		results: []*provider.Result{
-			{Output: planJSON, Provider: "mock"},                        // decompose
-			{Output: "implemented add\nTASK_DONE", Provider: "mock"},   // task 1
-			{Output: "wrote tests\nTASK_DONE", Provider: "mock"},       // task 2
+			{Output: planJSON, Provider: "mock"},                     // decompose
+			{Output: "implemented add\nTASK_DONE", Provider: "mock"}, // task 1
+			{Output: "wrote tests\nTASK_DONE", Provider: "mock"},     // task 2
 		},
 	}
 	o := newOrchestrator(t, dir, Config{WorkDir: dir, PMMode: true}, prov)
@@ -1587,16 +1583,16 @@ func TestRunPM_AutoEvolve_MultipleRounds(t *testing.T) {
 	prov := &mockProvider{
 		name: "mock",
 		results: []*provider.Result{
-			{Output: "done A\nTASK_DONE", Provider: "mock"},    // execute task 1
-			{Output: round1JSON, Provider: "mock"},             // evolvePM round 1 → task 2
-			{Output: dedupAllNovel, Provider: "mock"},          // dedup round 1 → all novel
-			{Output: "done r1\nTASK_DONE", Provider: "mock"},   // execute task 2
-			{Output: round2JSON, Provider: "mock"},             // evolvePM round 2 → task 3
-			{Output: dedupAllNovel, Provider: "mock"},          // dedup round 2 → all novel
-			{Output: "done r2\nTASK_DONE", Provider: "mock"},   // execute task 3
-			{Output: `{"tasks":[]}`, Provider: "mock"},         // evolvePM round 3 → none (1/3)
-			{Output: `{"tasks":[]}`, Provider: "mock"},         // evolvePM round 4 → none (2/3)
-			{Output: `{"tasks":[]}`, Provider: "mock"},         // evolvePM round 5 → none (3/3) → stop
+			{Output: "done A\nTASK_DONE", Provider: "mock"},  // execute task 1
+			{Output: round1JSON, Provider: "mock"},           // evolvePM round 1 → task 2
+			{Output: dedupAllNovel, Provider: "mock"},        // dedup round 1 → all novel
+			{Output: "done r1\nTASK_DONE", Provider: "mock"}, // execute task 2
+			{Output: round2JSON, Provider: "mock"},           // evolvePM round 2 → task 3
+			{Output: dedupAllNovel, Provider: "mock"},        // dedup round 2 → all novel
+			{Output: "done r2\nTASK_DONE", Provider: "mock"}, // execute task 3
+			{Output: `{"tasks":[]}`, Provider: "mock"},       // evolvePM round 3 → none (1/3)
+			{Output: `{"tasks":[]}`, Provider: "mock"},       // evolvePM round 4 → none (2/3)
+			{Output: `{"tasks":[]}`, Provider: "mock"},       // evolvePM round 5 → none (3/3) → stop
 		},
 	}
 	o := newOrchestrator(t, dir, Config{WorkDir: dir, PMMode: true}, prov)
@@ -1764,11 +1760,11 @@ func TestRunPM_SyncFromDisk_ExternalTasksDoNotDuplicateOnRepeatedSync(t *testing
 
 // concurrencyTrackingProvider counts peak simultaneous goroutines inside Complete().
 type concurrencyTrackingProvider struct {
-	mu          sync.Mutex
-	active      int
-	peakActive  int
-	totalCalls  int
-	output      string
+	mu         sync.Mutex
+	active     int
+	peakActive int
+	totalCalls int
+	output     string
 }
 
 func (p *concurrencyTrackingProvider) Complete(_ context.Context, _ string, _ provider.Options) (*provider.Result, error) {
@@ -1906,13 +1902,13 @@ func TestRunPMParallel_MaxParallel_Zero_AllTasksRunAtOnce(t *testing.T) {
 // lowers the on-disk MaxParallel so subsequent rounds should pick up the new
 // cap via SyncFromDisk.
 type liveCapProvider struct {
-	mu               sync.Mutex
-	workDir          string
-	newCap           int
-	calls            int
-	concurrent       int
-	peakAfterChange  int
-	changed          bool
+	mu              sync.Mutex
+	workDir         string
+	newCap          int
+	calls           int
+	concurrent      int
+	peakAfterChange int
+	changed         bool
 }
 
 func (p *liveCapProvider) Complete(_ context.Context, _ string, _ provider.Options) (*provider.Result, error) {
@@ -2075,7 +2071,7 @@ func TestMockProvider_SubstringMatch(t *testing.T) {
 		Goal: "goal",
 		Tasks: []*pm.Task{
 			{ID: 1, Title: "Build feature", Priority: 1, Status: pm.TaskPending},
-			{ID: 2, Title: "Write docs",    Priority: 2, Status: pm.TaskPending},
+			{ID: 2, Title: "Write docs", Priority: 2, Status: pm.TaskPending},
 		},
 	}
 	s.Save()

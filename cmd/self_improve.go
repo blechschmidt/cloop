@@ -19,10 +19,10 @@ import (
 )
 
 var (
-	selfImproveProvider string
-	selfImproveModel    string
-	selfImproveInject   bool
-	selfImproveDryRun   bool
+	selfImproveProvider  string
+	selfImproveModel     string
+	selfImproveInject    bool
+	selfImproveDryRun    bool
 	selfImproveSourceDir string
 )
 

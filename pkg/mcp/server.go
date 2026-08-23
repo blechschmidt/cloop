@@ -96,12 +96,12 @@ type ToolResult struct {
 // Server is an MCP server that reads JSON-RPC requests from r and writes
 // responses to w, exposing cloop functionality as MCP tools.
 type Server struct {
-	workDir  string
-	prov     provider.Provider
-	mu       sync.Mutex
-	in       *bufio.Scanner
-	out      *json.Encoder
-	outMu    sync.Mutex
+	workDir string
+	prov    provider.Provider
+	mu      sync.Mutex
+	in      *bufio.Scanner
+	out     *json.Encoder
+	outMu   sync.Mutex
 }
 
 // New creates a new MCP Server.
@@ -208,7 +208,7 @@ func (s *Server) handleToolsList(req *Request) {
 			Name:        "add_task",
 			Description: "Append a new task to the current PM-mode plan.",
 			InputSchema: jsonSchema(map[string]any{
-				"title": propString("Task title (short, imperative)"),
+				"title":       propString("Task title (short, imperative)"),
 				"description": propString("Detailed description of what the task should accomplish"),
 				"priority": map[string]any{
 					"type":        "integer",
@@ -231,7 +231,7 @@ func (s *Server) handleToolsList(req *Request) {
 			Name:        "run_task",
 			Description: "Execute a one-shot AI prompt using the configured provider and return the response.",
 			InputSchema: jsonSchema(map[string]any{
-				"prompt":       propString("The prompt to send to the AI provider"),
+				"prompt":        propString("The prompt to send to the AI provider"),
 				"system_prompt": propString("Optional system prompt to prepend"),
 			}, "prompt"),
 		},

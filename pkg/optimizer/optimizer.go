@@ -19,10 +19,10 @@ import (
 type SuggestionType string
 
 const (
-	SuggestionReorder   SuggestionType = "reorder"   // change execution order
-	SuggestionSplit     SuggestionType = "split"      // break one task into multiple
-	SuggestionMerge     SuggestionType = "merge"      // combine two or more tasks
-	SuggestionFlag      SuggestionType = "flag"       // contradictory, redundant, or risky
+	SuggestionReorder    SuggestionType = "reorder"    // change execution order
+	SuggestionSplit      SuggestionType = "split"      // break one task into multiple
+	SuggestionMerge      SuggestionType = "merge"      // combine two or more tasks
+	SuggestionFlag       SuggestionType = "flag"       // contradictory, redundant, or risky
 	SuggestionDependency SuggestionType = "dependency" // missing or wrong dependency
 )
 
@@ -51,8 +51,8 @@ type SplitSpec struct {
 
 // MergeSpec describes which tasks should be combined.
 type MergeSpec struct {
-	TaskIDs      []int  `json:"task_ids"`
-	MergedTitle  string `json:"merged_title"`
+	TaskIDs     []int  `json:"task_ids"`
+	MergedTitle string `json:"merged_title"`
 }
 
 // OptimizeResult is the full output of the optimization pass.

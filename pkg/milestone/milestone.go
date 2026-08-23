@@ -40,12 +40,12 @@ type Progress struct {
 
 // ForecastResult holds an AI-powered completion prediction.
 type ForecastResult struct {
-	EstimatedDate   *time.Time
-	DaysRemaining   int
-	TasksPerDay     float64
-	IsOnTrack       bool
-	RiskLevel       string // "low" | "medium" | "high"
-	Notes           string
+	EstimatedDate *time.Time
+	DaysRemaining int
+	TasksPerDay   float64
+	IsOnTrack     bool
+	RiskLevel     string // "low" | "medium" | "high"
+	Notes         string
 }
 
 // Progress computes task completion stats for the milestone against the given plan.
