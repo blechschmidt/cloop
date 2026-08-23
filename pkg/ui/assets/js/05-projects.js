@@ -491,10 +491,390 @@ function _npUpdateModels() {
     sel.appendChild(opt);
   });
 }
-// Wire up provider change to update models.
+// ── New Project → Access (Task 20187) ───────────────────────────────────────
+//
+// The dialog can pin the new project to an executor and open its credentials
+// in the same request that creates it, instead of sending the developer to the
+// Executors panel and then to Secrets to hand-type "project:/path" as a grant
+// subject. Both halves are optional and are left out of the body entirely when
+// untouched, so an ordinary creation posts exactly what it always did.
+//
+// Everything below is assembled with DOM calls rather than an HTML string.
+// What goes into these rows is secret names, executor IDs and operator-typed
+// allowlists; interpolating those into markup — or into an inline onclick — is
+// the bug class this dashboard has re-learned more than once.
+
+// _npAccess caches what the section is built from. It is fetched when the
+// dialog opens rather than at page load, so a user who never creates a project
+// never pays for the two requests.
+var _npAccess = {executors: [], secrets: [], byID: {}, brokerNote: ''};
+
+// _NP_GRANT_FIELDS maps a secret's kind to the constraint dimensions that
+// actually gate it, mirroring secretbroker.Constraints.ValidateFor. Showing a
+// namespace box for a GitHub PAT would invite a grant the broker rejects
+// ("writable applies to local_repo grants, not …"), and hiding the repository
+// box for a local_repo would guarantee one.
+var _NP_GRANT_FIELDS = {
+  github_pat:   ['repos', 'permissions'],
+  github_app:   ['repos', 'permissions'],
+  kubeconfig:   ['contexts', 'namespaces'],
+  local_repo:   ['repos', 'writable'],
+  registry:     ['registries'],
+  env:          ['env_keys'],
+  egress_proxy: ['hosts']
+};
+
+// _NP_FIELD_META is the label and placeholder for each dimension. Every one of
+// them is a comma-separated list except `writable`, which is a checkbox.
+var _NP_FIELD_META = {
+  repos:       {label: 'Repositories',     ph: 'api, shared-*'},
+  permissions: {label: 'Permissions',      ph: 'contents:read, pull_requests:write'},
+  contexts:    {label: 'Contexts',         ph: 'prod, staging'},
+  namespaces:  {label: 'Namespaces',       ph: 'default, team-a'},
+  registries:  {label: 'Registries',       ph: 'ghcr.io, docker.io'},
+  env_keys:    {label: 'Environment keys', ph: 'NPM_TOKEN, SENTRY_DSN'},
+  hosts:       {label: 'Hosts',            ph: 'api.github.com, *.npmjs.org'}
+};
+
+// _NP_KIND_HINT explains, per kind, which of the row's boxes the broker
+// insists on — the same sentences it would refuse the grant with, said before
+// the request instead of after it.
+var _NP_KIND_HINT = {
+  github_pat:   'A repository allowlist is required — use * to allow every repository.',
+  github_app:   'A repository allowlist is required — use * to allow every repository.',
+  kubeconfig:   'At least one context or namespace is required; the delivered kubeconfig is rewritten to hold only these.',
+  local_repo:   'A repository allowlist is required. The directories are bind-mounted read-only unless writable is ticked.',
+  registry:     'A registry allowlist is required.',
+  env:          'Leave empty to deliver every key the secret holds.',
+  egress_proxy: 'A host allowlist is required.'
+};
+
+// _npList splits a comma-separated field into a clean list.
+function _npList(raw) {
+  return String(raw == null ? '' : raw).split(',')
+    .map(function(v) { return v.trim(); })
+    .filter(function(v) { return v !== ''; });
+}
+
+function _npEl(tag, cls, text) {
+  var el = document.createElement(tag);
+  if (cls) el.className = cls;
+  if (text !== undefined && text !== null) el.textContent = text;
+  return el;
+}
+
+// _npOption appends one <option>; the label is set as text, never as markup.
+function _npOption(sel, value, label, disabled) {
+  var opt = _npEl('option', null, label);
+  opt.value = value;
+  if (disabled) opt.disabled = true;
+  sel.appendChild(opt);
+  return opt;
+}
+
+// _npFieldGroup is one labelled list input, tagged with the constraint
+// dimension it fills so the row can be read back without any per-row IDs.
+function _npFieldGroup(field) {
+  var meta = _NP_FIELD_META[field] || {label: field, ph: ''};
+  var g = _npEl('div', 'form-group');
+  g.setAttribute('data-np-group', field);
+  g.appendChild(_npEl('label', 'form-label', meta.label));
+  var input = _npEl('input', 'form-input');
+  input.setAttribute('data-np-field', field);
+  input.placeholder = meta.ph;
+  g.appendChild(input);
+  return g;
+}
+
+// _npWritableGroup is the local_repo-only checkbox. The broker rejects
+// writable on every other kind, so it is hidden rather than merely ignored.
+function _npWritableGroup() {
+  var g = _npEl('div', 'form-group');
+  g.setAttribute('data-np-group', 'writable');
+  var lab = _npEl('label', 'adv-label');
+  var cb = document.createElement('input');
+  cb.type = 'checkbox';
+  cb.setAttribute('data-np-field', 'writable');
+  lab.appendChild(cb);
+  lab.appendChild(document.createTextNode(' Writable (the project may commit into these checkouts)'));
+  g.appendChild(lab);
+  return g;
+}
+
+// _npRowInput finds one field inside a grant row.
+function _npRowInput(row, field) {
+  return row.querySelector('[data-np-field="' + field + '"]');
+}
+
+function _npRowValue(row, field) {
+  var el = _npRowInput(row, field);
+  return el ? el.value : '';
+}
+
+// _npFillSecretSelect (re)populates one row's secret picker. Called again when
+// the list arrives, since a row can be added before the fetch resolves.
+function _npFillSecretSelect(sel) {
+  var keep = sel.value;
+  sel.innerHTML = '';
+  if (!_npAccess.secrets.length) {
+    _npOption(sel, '', '— no stored secrets —');
+    return;
+  }
+  _npOption(sel, '', 'Choose a secret…');
+  _npAccess.secrets.forEach(function(s) {
+    _npOption(sel, s.id, (s.name || s.id) + ' (' + (s.kind || 'unknown') + ')');
+  });
+  if (keep) sel.value = keep;
+}
+
+// _npApplyKind shows the dimensions the selected secret's kind is gated on and
+// hides the rest.
+function _npApplyKind(row) {
+  var sel = row.querySelector('[data-np-grant-secret]');
+  var secret = sel ? _npAccess.byID[sel.value] : null;
+  var kind = secret ? secret.kind : '';
+  var show = _NP_GRANT_FIELDS[kind] || [];
+  row.querySelectorAll('[data-np-group]').forEach(function(g) {
+    var field = g.getAttribute('data-np-group');
+    g.style.display = show.indexOf(field) === -1 ? 'none' : '';
+  });
+  var hint = row.querySelector('[data-np-kind-hint]');
+  if (hint) {
+    hint.textContent = kind
+      ? (_NP_KIND_HINT[kind] || '')
+      : (_npAccess.secrets.length
+          ? 'Pick the secret this project should hold.'
+          : (_npAccess.brokerNote
+              || 'No secrets are stored on this hub yet — add one in the Secrets tab first.'));
+  }
+}
+
+function _npUpdateGrantsEmpty() {
+  var host = document.getElementById('npGrantRows');
+  var empty = document.getElementById('npGrantsEmpty');
+  if (empty) empty.style.display = host && host.children.length ? 'none' : '';
+}
+
+// _npAddGrantRow appends one grant row and returns it.
+function _npAddGrantRow() {
+  var host = document.getElementById('npGrantRows');
+  if (!host) return null;
+  var row = _npEl('div', 'np-grant-row');
+
+  var head = _npEl('div', 'np-grant-head');
+  var secGroup = _npEl('div', 'form-group');
+  secGroup.appendChild(_npEl('label', 'form-label', 'Secret'));
+  var sec = _npEl('select', 'form-select');
+  sec.setAttribute('data-np-grant-secret', '');
+  sec.addEventListener('change', function() { _npApplyKind(row); });
+  secGroup.appendChild(sec);
+  head.appendChild(secGroup);
+
+  var del = _npEl('button', 'btn', 'Remove');
+  del.type = 'button';
+  del.addEventListener('click', function() {
+    row.remove();
+    _npUpdateGrantsEmpty();
+  });
+  head.appendChild(del);
+  row.appendChild(head);
+
+  var hint = _npEl('div', 'sec-hint');
+  hint.setAttribute('data-np-kind-hint', '');
+  hint.style.margin = '8px 0';
+  row.appendChild(hint);
+
+  // Scope and lifetime apply to every kind, so they are not part of the
+  // kind-driven show/hide below.
+  var meta = _npEl('div', 'form-row');
+  var scopeGroup = _npEl('div', 'form-group');
+  scopeGroup.appendChild(_npEl('label', 'form-label', 'Scope (label)'));
+  var scope = _npEl('input', 'form-input');
+  scope.setAttribute('data-np-field', 'scope');
+  scope.placeholder = 'build';
+  scopeGroup.appendChild(scope);
+  meta.appendChild(scopeGroup);
+
+  var ttlGroup = _npEl('div', 'form-group');
+  ttlGroup.appendChild(_npEl('label', 'form-label', 'Lifetime'));
+  var ttl = _npEl('select', 'form-select');
+  ttl.setAttribute('data-np-field', 'ttl');
+  // The blank option means "whatever the API's default is" rather than a
+  // number copied here that could drift away from it.
+  _npOption(ttl, '', 'Default');
+  [[60, '1 hour'], [480, '8 hours'], [1440, '24 hours'],
+   [10080, '7 days'], [43200, '30 days']].forEach(function(o) {
+    _npOption(ttl, String(o[0]), o[1]);
+  });
+  ttlGroup.appendChild(ttl);
+  meta.appendChild(ttlGroup);
+  row.appendChild(meta);
+
+  // Every dimension is built once and hidden; which ones are visible is the
+  // selected secret's kind's business.
+  var pairs = _npEl('div', 'form-row');
+  pairs.appendChild(_npFieldGroup('repos'));
+  pairs.appendChild(_npFieldGroup('permissions'));
+  row.appendChild(pairs);
+  var pairs2 = _npEl('div', 'form-row');
+  pairs2.appendChild(_npFieldGroup('contexts'));
+  pairs2.appendChild(_npFieldGroup('namespaces'));
+  row.appendChild(pairs2);
+  var rest = _npEl('div', 'form-row');
+  rest.appendChild(_npFieldGroup('registries'));
+  rest.appendChild(_npFieldGroup('env_keys'));
+  rest.appendChild(_npFieldGroup('hosts'));
+  row.appendChild(rest);
+  row.appendChild(_npWritableGroup());
+
+  host.appendChild(row);
+  _npFillSecretSelect(sec);
+  _npApplyKind(row);
+  _npUpdateGrantsEmpty();
+  return row;
+}
+
+// _npFillExecutors renders the executor picker from GET /api/executors.
+function _npFillExecutors(d) {
+  var sel = document.getElementById('npExecutor');
+  if (!sel) return;
+  var execs = (d && d.executors) || [];
+  _npAccess.executors = execs;
+  var keep = sel.value;
+  sel.innerHTML = '';
+  _npOption(sel, '', 'Default (hub decides)'
+    + (d && d.default_id ? ' — ' + d.default_id : ''));
+  execs.forEach(function(ex) {
+    // "id — kind", then whatever makes it a poor choice. An executor the hub
+    // would refuse is offered disabled rather than hidden: a fleet member that
+    // silently vanishes from the list reads as a bug, and the reason it cannot
+    // be used is the useful part.
+    var notes = [];
+    if (ex.blocked) notes.push('blocked by policy');
+    if (ex.registered === false) notes.push('not registered here');
+    if (ex.status && ex.status !== 'ready') notes.push(ex.status);
+    if (ex.health) notes.push('unhealthy');
+    var label = ex.id + ' — ' + (ex.kind || 'unknown')
+      + (notes.length ? ' · ' + notes.join(', ') : '');
+    _npOption(sel, ex.id, label, !!ex.blocked || ex.registered === false);
+  });
+  if (keep) sel.value = keep;
+  var hint = document.getElementById('npExecutorHint');
+  if (hint && !execs.length) {
+    hint.textContent = 'No executors are registered on this hub; the project runs wherever the hub does.';
+  }
+}
+
+// _npLoadAccessSources fetches the two lists the section is built from. Each
+// endpoint is permission-gated server-side, so a caller who cannot use a half
+// is not asked to fetch it — the controls for it are hidden anyway.
+function _npLoadAccessSources() {
+  if (typeof canGlobal !== 'function' || canGlobal('executor.manage')) {
+    api('/api/executors').then(function(d) { _npFillExecutors(d); }).catch(function() {});
+  }
+  if (typeof canGlobal !== 'function' || canGlobal('secret.grant')) {
+    api('/api/secrets').then(function(d) {
+      _npAccess.secrets = (d && d.secrets) || [];
+      // An unadopted broker is a legitimate state, and "no secrets" is the
+      // wrong explanation for it: the store is what is missing, not the
+      // secrets, and the response says how to fix that.
+      var b = (d && d.broker) || {};
+      _npAccess.brokerNote = b.secrets_available === false
+        ? ((b.reason || 'The secret store is not available on this hub.')
+            + (b.remediation ? ' ' + b.remediation : ''))
+        : '';
+      _npAccess.byID = {};
+      _npAccess.secrets.forEach(function(s) { _npAccess.byID[s.id] = s; });
+      // A row may have been added before this resolved.
+      document.querySelectorAll('#npGrantRows [data-np-grant-secret]').forEach(function(sel) {
+        _npFillSecretSelect(sel);
+      });
+      document.querySelectorAll('#npGrantRows .np-grant-row').forEach(_npApplyKind);
+    }).catch(function() {});
+  }
+}
+
+// _npSectionHidden reports whether a group was hidden by permission gating.
+function _npSectionHidden(id) {
+  var el = document.getElementById(id);
+  return !el || el.style.display === 'none';
+}
+
+// _npResetAccess returns the section to "nothing asked for", which is what
+// makes a reopened dialog post the same body a first-time one does.
+function _npResetAccess() {
+  _npAccess = {executors: [], secrets: [], byID: {}, brokerNote: ''};
+  var det = document.getElementById('npAccessSection');
+  if (det) {
+    det.open = false;
+    // With neither permission there is nothing behind the disclosure, and an
+    // "Access (optional)" toggle that opens onto an empty box reads as a
+    // broken panel rather than as a permission boundary.
+    det.style.display = _npSectionHidden('npExecutorGroup') && _npSectionHidden('npGrantsGroup')
+      ? 'none' : '';
+  }
+  var rows = document.getElementById('npGrantRows');
+  if (rows) rows.innerHTML = '';
+  var sel = document.getElementById('npExecutor');
+  if (sel) {
+    sel.innerHTML = '';
+    _npOption(sel, '', 'Default (hub decides)');
+  }
+  _npUpdateGrantsEmpty();
+}
+
+// _npCollectAccess reads the section into the optional half of the request
+// body. It returns {access: {...}} — empty when the section was left alone —
+// or {error: "…"} for the one thing worth catching client-side: a row with no
+// secret chosen, which the server can only report as an index.
+function _npCollectAccess() {
+  var out = {};
+  var execSel = document.getElementById('npExecutor');
+  if (execSel && !_npSectionHidden('npExecutorGroup') && execSel.value) {
+    out.executor_id = execSel.value;
+  }
+
+  var grants = [];
+  var rows = _npSectionHidden('npGrantsGroup')
+    ? [] : document.querySelectorAll('#npGrantRows .np-grant-row');
+  for (var i = 0; i < rows.length; i++) {
+    var row = rows[i];
+    var secSel = row.querySelector('[data-np-grant-secret]');
+    var ref = secSel ? secSel.value : '';
+    if (!ref) {
+      return {error: 'Grant ' + (i + 1) + ': choose a secret, or remove the row.'};
+    }
+    var secret = _npAccess.byID[ref] || {};
+    var g = {secret_ref: ref};
+    var scope = _npRowValue(row, 'scope').trim();
+    if (scope) g.scope = scope;
+    var ttl = parseInt(_npRowValue(row, 'ttl') || '0', 10);
+    if (ttl > 0) g.ttl_minutes = ttl;
+    // Only the dimensions this kind is gated on are sent: an allowlist the
+    // broker does not read for this kind is rejected, not ignored.
+    (_NP_GRANT_FIELDS[secret.kind] || []).forEach(function(field) {
+      if (field === 'writable') {
+        var cb = _npRowInput(row, 'writable');
+        if (cb && cb.checked) g.writable = true;
+        return;
+      }
+      var list = _npList(_npRowValue(row, field));
+      if (list.length) g[field] = list;
+    });
+    grants.push(g);
+  }
+  if (grants.length) out.grants = grants;
+  return {access: out};
+}
+
+// Wire up provider change to update models, and the Access section's one
+// static button. Listeners rather than inline onclick: the rows they build
+// carry operator-supplied strings.
 (function() {
   var np = document.getElementById('npProvider');
   if (np) np.addEventListener('change', _npUpdateModels);
+  var add = document.getElementById('npAddGrantBtn');
+  if (add) add.addEventListener('click', function() { _npAddGrantRow(); });
 })();
 
 window.openNewProjectModal = function() {
@@ -507,6 +887,10 @@ window.openNewProjectModal = function() {
   document.getElementById('npPMMode').checked = false;
   document.getElementById('npAutoRun').checked = false;
   document.getElementById('npError').style.display = 'none';
+  // Access starts collapsed and empty on every open, then fills itself from
+  // the fleet and the secret store as those answer.
+  _npResetAccess();
+  _npLoadAccessSources();
   const el = document.getElementById('new-project-overlay');
   if (el) { el.style.display = 'flex'; }
 };
@@ -527,9 +911,22 @@ window.submitNewProject = function() {
   const errEl    = document.getElementById('npError');
   if (!dir)  { errEl.textContent = 'Directory is required'; errEl.style.display = ''; return; }
   if (!goal) { errEl.textContent = 'Goal is required'; errEl.style.display = ''; return; }
+  // Access (Task 20187): executor_id and grants are added only when the
+  // operator asked for them, so an untouched dialog posts the body it always
+  // did and takes the server's unchanged path.
+  const collected = _npCollectAccess();
+  if (collected.error) { errEl.textContent = collected.error; errEl.style.display = ''; return; }
+  const body = {dir, goal, provider, model, effort, pmMode, autoRun};
+  Object.keys(collected.access).forEach(k => { body[k] = collected.access[k]; });
   errEl.style.display = 'none';
-  api('/api/projects/new', {dir, goal, provider, model, effort, pmMode, autoRun}).then(d => {
-    if (!d.ok) { errEl.textContent = d.error || 'Failed to create project'; errEl.style.display = ''; return; }
+  api('/api/projects/new', body).then(d => {
+    // Verbatim: the access failures name the executor, the grant index and the
+    // constraint that was missing, and any paraphrase of that is worse.
+    if (!d || !d.ok) {
+      errEl.textContent = (d && d.error) || 'Failed to create project';
+      errEl.style.display = '';
+      return;
+    }
     closeNewProjectModal();
     toast('Project created: ' + dir, 'ok');
     // Reload projects list and open the new project.
@@ -542,6 +939,15 @@ window.submitNewProject = function() {
         openProject(d.project_idx, dir.split('/').pop());
       }
     }).catch(() => {});
-  }).catch(() => toast('Request failed', 'err'));
+  }).catch(err => {
+    // 401 and 403 have already been shown by parseAPIResponse (login modal,
+    // "not permitted" toast); anything else is a transport failure whose
+    // message belongs next to the form the operator is still looking at.
+    const msg = (err && err.message) || String(err);
+    if (msg === '401' || msg === 'FORBIDDEN') return;
+    errEl.textContent = 'Request failed: ' + msg;
+    errEl.style.display = '';
+    toast('Request failed', 'err');
+  });
 };
 

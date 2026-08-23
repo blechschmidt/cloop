@@ -176,6 +176,8 @@ type grantConstraintsView struct {
 	Hosts       []string `json:"hosts,omitempty"`
 	Registries  []string `json:"registries,omitempty"`
 	EnvKeys     []string `json:"env_keys,omitempty"`
+	// Writable is local_repo-only: true means the bind is read-write.
+	Writable bool `json:"writable,omitempty"`
 
 	// egress-only dimensions
 	CIDRs             []string `json:"cidrs,omitempty"`
@@ -485,6 +487,16 @@ func (s *Server) handleSecretCreate(w http.ResponseWriter, r *http.Request) {
 		apierror.WriteError(w, apierror.New(apierror.CodeInvalidInput, err.Error()))
 		return
 	}
+	// A local_repo payload is a path on this host, so it is the one kind whose
+	// validity is knowable now. Checking it here turns a typo into a message in
+	// the dialog the operator is still looking at, instead of a lease failure
+	// during someone else's run an hour later.
+	if kind == secretbroker.KindLocalRepo {
+		if _, err := secretbroker.ParseLocalRepoRoot([]byte(req.Payload)); err != nil {
+			apierror.WriteError(w, apierror.New(apierror.CodeInvalidInput, err.Error()))
+			return
+		}
+	}
 
 	bs, ok := s.openBrokersOr(w)
 	if !ok {
@@ -661,6 +673,7 @@ func secretGrantView(g secretbroker.Grant, sec secretbroker.Secret, now time.Tim
 			Hosts:       g.Constraints.Hosts,
 			Registries:  g.Constraints.Registries,
 			EnvKeys:     g.Constraints.EnvKeys,
+			Writable:    g.Constraints.Writable,
 		},
 		CreatedAt:        g.CreatedAt,
 		CreatedBy:        g.CreatedBy,
@@ -739,6 +752,9 @@ type createGrantRequest struct {
 	Hosts       []string `json:"hosts"`
 	Registries  []string `json:"registries"`
 	EnvKeys     []string `json:"env_keys"`
+	// Writable makes a local_repo grant read-write. Absent means read-only,
+	// which is both the safe reading and the common one.
+	Writable bool `json:"writable"`
 
 	CIDRs             []string `json:"cidrs"`
 	Ports             []int    `json:"ports"`
@@ -803,6 +819,7 @@ func (s *Server) handleGrantCreate(w http.ResponseWriter, r *http.Request) {
 			Hosts:       cleanList(req.Hosts),
 			Registries:  cleanList(req.Registries),
 			EnvKeys:     cleanList(req.EnvKeys),
+			Writable:    req.Writable,
 		},
 	})
 	if err != nil {

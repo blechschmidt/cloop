@@ -580,6 +580,13 @@ func (e *Executor) Capabilities() executor.Capabilities {
 		SupportsImageOverride: true,
 		SupportsSandboxBuild:  false,
 		SupportsSandboxMounts: true,
+		// False, and not because of a missing feature. A hostPath volume on
+		// a cluster node names a path on *that node*, which is not the
+		// control plane and has never seen the hub's checkouts; honouring the
+		// field would mount an unrelated directory, or nothing, and the
+		// harness would report that the repository is empty. Refusing at
+		// placement is the only outcome that points at the deployment.
+		SupportsHostMounts: false,
 		// True unconditionally, including when Options.Workspace is nil: what
 		// this advertises is that the driver *materialises the tree*, which it
 		// does with an init container that needs no broker for a public

@@ -60,6 +60,7 @@ const (
 	ConstraintImageOverride    Constraint = "image_override"
 	ConstraintSandboxBuild     Constraint = "sandbox_build"
 	ConstraintSandboxMounts    Constraint = "sandbox_mounts"
+	ConstraintHostMounts       Constraint = "host_mounts"
 	ConstraintWorkspace        Constraint = "workspace"
 	ConstraintWriteBack        Constraint = "write_back"
 )
@@ -165,6 +166,16 @@ type Requirements struct {
 	RequireSandboxBuild bool
 	// RequireSandboxMounts demands a node that honours Spec.Mounts.
 	RequireSandboxMounts bool
+	// RequireHostMounts demands a node that honours Spec.HostMounts — a
+	// driver that can bind a path from the control-plane host into the
+	// sandbox, which is what a local_repo grant needs.
+	//
+	// This is the constraint that makes "local repositories" and "remote
+	// sandbox" an honest either/or rather than a silent failure. A project
+	// granted three checkouts on the hub and bound to a Kubernetes or remote
+	// executor is refused here, naming both facts, instead of running against
+	// an empty /repos on a machine that has never seen those files.
+	RequireHostMounts bool
 	// RequireWorkspaceProvisioning demands a node that can materialise the
 	// source tree itself, because this workload's tree is not already there.
 	//
@@ -451,6 +462,12 @@ func reject(c Candidate, req Requirements) (Rejection, bool) {
 	if req.RequireSandboxMounts && !caps.SupportsSandboxMounts {
 		return no(ConstraintSandboxMounts, "cannot apply per-project mounts "+
 			"(.cloop/sandbox.yaml sets mounts:)")
+	}
+	if req.RequireHostMounts && !caps.SupportsHostMounts {
+		return no(ConstraintHostMounts, "cannot bind repositories from the control-plane "+
+			"host into the sandbox, so a local_repo grant would deliver nothing; bind a "+
+			"container or Kata executor on the hub, or publish the repositories over https "+
+			"and grant a github_pat instead")
 	}
 	if req.RequireWorkspaceProvisioning && !caps.SupportsWorkspaceProvisioning {
 		return no(ConstraintWorkspace, "cannot materialise a source tree, so the harness "+

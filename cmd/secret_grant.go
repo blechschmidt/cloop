@@ -35,6 +35,7 @@ var (
 	grantHostsFlag      []string
 	grantRegistriesFlag []string
 	grantEnvKeysFlag    []string
+	grantWritableFlag   bool
 	grantTTLFlag        string
 	grantScopeFlag      string
 
@@ -93,13 +94,17 @@ var secretMintCmd = &cobra.Command{
 	Long: `Seal a credential into the broker with a kind that determines how it is
 constrained and delivered.
 
-Kinds: github_pat, github_app, kubeconfig, registry, env, egress_proxy
+Kinds: github_pat, github_app, kubeconfig, registry, env, egress_proxy,
+local_repo
 
 The payload comes from --value, from --file, or from stdin. Prefer --file or
 stdin: a --value argument is visible in the process table and in shell history.
+A local_repo is the exception: its payload is a path, not a credential, so
+--value is the natural way to give it.
 
   cloop secret mint deploy-pat --kind github_pat --file token.txt
   cloop secret mint prod-kube  --kind kubeconfig --file ~/.kube/config
+  cloop secret mint dev-src    --kind local_repo --value /home/dev/src
   cat token | cloop secret mint ci-pat --kind github_pat`,
 	Args:         cobra.ExactArgs(1),
 	SilenceUsage: true,
@@ -171,11 +176,17 @@ under constraints that are enforced at delivery.
   cloop secret grant deploy-pat --to project:/srv/app --repos 'org/*' --ttl 24h
   cloop secret grant prod-kube  --to executor:edge-01 --namespaces team-a --ttl 8h
   cloop secret grant proxy      --to label:region=eu --hosts '*.internal.example.com'
+  cloop secret grant dev-src    --to project:/srv/app --repos api,shared-'*'
 
 Constraints are required, not optional: a github grant needs --repos, a
 kubeconfig grant needs --namespaces and/or --contexts, an egress_proxy grant
-needs --hosts, and a registry grant needs --registries. Pass '*' explicitly
-if you really mean "everything" — there is no implicit wildcard.`,
+needs --hosts, a registry grant needs --registries, and a local_repo grant
+needs --repos. Pass '*' explicitly if you really mean "everything" — there is
+no implicit wildcard.
+
+A local_repo grant is read-only unless --writable is given. Its --repos
+patterns match repository *directory names* under the granted root, not
+owner/repo as they do for github.`,
 	Args:         cobra.ExactArgs(1),
 	SilenceUsage: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -210,6 +221,7 @@ if you really mean "everything" — there is no implicit wildcard.`,
 				Hosts:       grantHostsFlag,
 				Registries:  grantRegistriesFlag,
 				EnvKeys:     grantEnvKeysFlag,
+				Writable:    grantWritableFlag,
 			},
 			Actor: currentActor(),
 		})
@@ -492,7 +504,9 @@ func init() {
 	secretGrantCmd.Flags().StringVar(&grantToFlag, "to", "",
 		"subject: project:<path>, executor:<id>, label:<k=v,...>, or any")
 	secretGrantCmd.Flags().StringSliceVar(&grantReposFlag, "repos", nil,
-		"github repository allowlist as owner/repo globs (e.g. 'org/*')")
+		"repository allowlist: owner/repo globs for github, directory-name globs for local_repo")
+	secretGrantCmd.Flags().BoolVar(&grantWritableFlag, "writable", false,
+		"make a local_repo grant read-write (default read-only)")
 	secretGrantCmd.Flags().StringSliceVar(&grantPermsFlag, "permissions", nil,
 		"github permission set (e.g. contents:read,pull_requests:write)")
 	secretGrantCmd.Flags().StringSliceVar(&grantNamespacesFlag, "namespaces", nil,

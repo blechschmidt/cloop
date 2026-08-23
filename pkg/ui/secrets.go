@@ -28,6 +28,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -133,6 +134,15 @@ func (sl *secretLease) Env() []string {
 		return nil
 	}
 	return sl.mount.Env()
+}
+
+// Mounts returns the local repositories this lease opened. Nil when the
+// project holds no local_repo grant, which is the overwhelmingly common case.
+func (sl *secretLease) Mounts() []secretbroker.RepoMount {
+	if sl == nil || sl.mount == nil {
+		return nil
+	}
+	return sl.mount.Mounts()
 }
 
 // Bindings projects the mount's per-grant attribution onto the driver-facing
@@ -317,4 +327,157 @@ func applyLease(spec executor.Spec, sl *secretLease) executor.Spec {
 	merged = append(merged, env...)
 	spec.Env = merged
 	return spec
+}
+
+// applyRepoGrants attaches the local repositories a lease opened to the spec,
+// in the form the bound executor can actually honour.
+//
+// The same grant reaches a workload three different ways, and which one is
+// correct is a property of the driver, not of the grant:
+//
+//   - A driver that can bind (container, Kata) gets Spec.HostMounts, and the
+//     workload finds the repositories under /repos.
+//   - A driver that shares the hub's filesystem but has no mount namespace to
+//     bind into (localprocess) gets no mounts at all, because the repositories
+//     are already visible at their own paths. The environment names those
+//     paths instead.
+//   - Anything else — Kubernetes, a remote agent — is refused. Those run on a
+//     machine that has never seen these files, so there is no rendering of the
+//     grant that is not a lie, and a harness that started anyway would report
+//     that the repository is empty.
+//
+// The refusal is the interesting case and it is deliberately a hard error
+// rather than a warning. This is the point where "I granted my checkouts to
+// this project" and "I bound this project to a remote sandbox" turn out to be
+// incompatible, and the person who needs to know is the one who just clicked
+// Run.
+func applyRepoGrants(spec executor.Spec, ex executor.Executor, sl *secretLease) (executor.Spec, error) {
+	mounts := sl.Mounts()
+	if len(mounts) == 0 {
+		return spec, nil
+	}
+	caps := ex.Capabilities()
+
+	// Path variables are added here rather than by the broker because only
+	// this function knows which of the two answers is true. The names of the
+	// repositories (CLOOP_LOCAL_REPOS) came with the material and are already
+	// on the spec; these say where they landed.
+	env := make([]string, 0, len(mounts)+1)
+	bind := caps.SupportsHostMounts
+
+	if !bind && !caps.SharesHostFilesystem {
+		names := make([]string, 0, len(mounts))
+		for _, m := range mounts {
+			names = append(names, m.Name)
+		}
+		return spec, fmt.Errorf(
+			"%w: executor %s (%s) cannot receive repositories from the control-plane host, "+
+				"but this project holds a local_repo grant for %s. Bind the project to a "+
+				"container or Kata executor running on the hub, or publish the repositories "+
+				"over https and grant a github_pat instead",
+			executor.ErrInvalidSpec, ex.ID(), ex.Kind(), strings.Join(names, ", "))
+	}
+
+	// Two grants can legitimately name the same repository — /a/api and /b/api
+	// are different trees with the same basename — and they would collide at
+	// /repos/api. That must not be a hard failure: it would fail *every* run of
+	// a project whose grants happen to overlap, at start time, until an
+	// operator noticed and revoked one. The first grant wins (grant order is
+	// stable) and the loser is named on stderr, which is recoverable; a run
+	// that cannot start is not.
+	claimed := make(map[string]string, len(mounts))
+	kept := make([]secretbroker.RepoMount, 0, len(mounts))
+	for _, m := range mounts {
+		if prev, dup := claimed[m.Name]; dup {
+			fmt.Fprintf(os.Stderr,
+				"ui: local_repo grants collide on %q (%s and %s); using %s. "+
+					"Rename one checkout or narrow one grant's --repos.\n",
+				m.Name, prev, m.Source, prev)
+			continue
+		}
+		claimed[m.Name] = m.Source
+		kept = append(kept, m)
+	}
+
+	// A repository whose name has no unambiguous variable rendering gets no
+	// variable, and so does one that would collide with another's. "my-api"
+	// and "my.api" both fold to CLOOP_LOCAL_REPO_MY_API; emitting both would
+	// mean a workload read whichever was appended last. Both are still mounted
+	// and both are still in CLOOP_LOCAL_REPOS — only the shortcut is withheld.
+	keyOwners := make(map[string]int, len(kept))
+	for _, m := range kept {
+		if k := repoEnvKey(m.Name); k != "" {
+			keyOwners[k]++
+		}
+	}
+
+	for _, m := range kept {
+		path := m.Source
+		if bind {
+			path = m.Target
+			spec.HostMounts = append(spec.HostMounts, executor.HostMount{
+				Name:     m.Name,
+				Source:   m.Source,
+				Target:   m.Target,
+				ReadOnly: m.ReadOnly,
+			})
+		}
+		if key := repoEnvKey(m.Name); key != "" && keyOwners[key] == 1 {
+			env = append(env, key+"="+path)
+		}
+	}
+	if bind {
+		// Validate the assembled list, not just the entries. Dedup above has
+		// already removed the collisions this would otherwise catch, so a
+		// failure here means something the caller cannot fix by renaming — and
+		// is worth refusing.
+		if err := executor.ValidateHostMounts(spec.HostMounts); err != nil {
+			return spec, err
+		}
+		env = append(env, "CLOOP_LOCAL_REPO_ROOT="+secretbroker.SandboxRepoRoot)
+	} else {
+		// The shares-the-filesystem case. The repositories are reachable at
+		// their own paths, which also means a read-only grant is not enforced
+		// here: the harness runs as the hub user and can write to them however
+		// the grant was written. Say so rather than letting the dashboard's
+		// "read-only" badge be believed — this driver has the whole filesystem
+		// anyway, which is why it is the one an operator turns off first.
+		for _, m := range kept {
+			if m.ReadOnly {
+				fmt.Fprintf(os.Stderr,
+					"ui: executor %s shares the hub filesystem, so the read-only local_repo "+
+						"grant on %q is not enforced; bind a container executor to enforce it\n",
+					ex.ID(), m.Name)
+			}
+		}
+	}
+
+	base := spec.Env
+	if base == nil {
+		base = os.Environ()
+	}
+	spec.Env = append(append(make([]string, 0, len(base)+len(env)), base...), env...)
+	return spec, nil
+}
+
+// repoEnvKey renders a repository name as an environment variable name, or ""
+// when the name contains anything that has no rendering at all.
+//
+// It does not detect collisions — two names can render to the same key, and
+// deciding what to do about that needs the whole set. The caller counts owners
+// per key and withholds any key claimed more than once.
+func repoEnvKey(name string) string {
+	var b strings.Builder
+	b.WriteString("CLOOP_LOCAL_REPO_")
+	for _, r := range strings.ToUpper(name) {
+		switch {
+		case r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '-', r == '_', r == '.':
+			b.WriteRune('_')
+		default:
+			return ""
+		}
+	}
+	return b.String()
 }

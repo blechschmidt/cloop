@@ -5648,6 +5648,11 @@ func (s *Server) handleProjectNew(w http.ResponseWriter, r *http.Request) {
 		Effort   string `json:"effort"`
 		PMMode   bool   `json:"pmMode"`
 		AutoRun  bool   `json:"autoRun"`
+		// Access is the executor and the grants the project should have on
+		// creation (Task 20187). Absent means an ordinary project on the
+		// default executor with no credentials, which is what every existing
+		// client sends.
+		projectAccessRequest
 	}
 	limitJSONBody(w, r, maxJSONBodyBytes)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -5667,6 +5672,30 @@ func (s *Server) handleProjectNew(w http.ResponseWriter, r *http.Request) {
 	if !provider.ValidEffort(req.Effort) {
 		jsonErr(w, "invalid effort "+strconv.Quote(req.Effort)+" — valid: "+strings.Join(provider.EffortLevels, ", "), http.StatusBadRequest)
 		return
+	}
+
+	// Access (Task 20187): the executor to pin to and the grants to open. Both
+	// are gated on their own permissions rather than riding in on this route's
+	// project.write — see provision.go — and both are validated before
+	// anything exists on disk, so a mistyped secret name costs nothing.
+	access := req.projectAccessRequest
+	var accessBrokers *brokerSet
+	if access.requested() {
+		if !s.authorizeProjectAccess(w, r, access) {
+			return
+		}
+		if len(access.Grants) > 0 {
+			bs, ok := s.openBrokersOr(w)
+			if !ok {
+				return
+			}
+			defer bs.close()
+			accessBrokers = bs
+		}
+		if err := validateProjectAccess(accessBrokers, access); err != nil {
+			jsonErr(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 	}
 
 	// Admission (Task 20182), after validation and before anything is
@@ -5737,6 +5766,26 @@ func (s *Server) handleProjectNew(w http.ResponseWriter, r *http.Request) {
 		}
 		jsonErr(w, "cloop init failed: "+msg, http.StatusInternalServerError)
 		return
+	}
+
+	// Bind the executor and open the grants. After init, because init writes
+	// .cloop/ and has to run where the hub can read it — not on the remote
+	// executor this project may be about to be pinned to.
+	//
+	// A failure here rolls the access back and fails the request: "create a
+	// project with access to my cluster" is one intention, and half of it is
+	// not a useful thing to hand back. The directory stays, because this code
+	// may not have created it and deleting a developer's tree to tidy up a
+	// failed API call is worse than anything it would clean up after.
+	if access.requested() {
+		rollback, accessErr := s.applyProjectAccess(r, accessBrokers, abs, access)
+		if accessErr != nil {
+			rollback()
+			releaseProject()
+			jsonErr(w, "project initialised but access could not be provisioned, "+
+				"so it was rolled back: "+accessErr.Error(), http.StatusInternalServerError)
+			return
+		}
 	}
 
 	// Register the new project in the multi-project registry. With OIDC

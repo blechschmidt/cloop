@@ -403,8 +403,13 @@ func (e *Executor) Capabilities() executor.Capabilities {
 		SupportsImageOverride: true,
 		SupportsSandboxBuild:  true,
 		SupportsSandboxMounts: true,
-		Platform:              runtime.GOOS,
-		Arch:                  runtime.GOARCH,
+		// This driver runs on the control plane and builds its own mount
+		// namespace, so a repository granted from the hub's filesystem is a
+		// bind it can actually make. It is the executor a developer wanting
+		// their local checkouts in a sandbox should be bound to.
+		SupportsHostMounts: true,
+		Platform:           runtime.GOOS,
+		Arch:               runtime.GOARCH,
 	}
 }
 
@@ -634,6 +639,68 @@ func sandboxMounts(spec executor.Spec, workDir, selinuxLabel string) ([]mount, e
 	return out, nil
 }
 
+// grantedRepoMounts renders Spec.HostMounts — the repositories a local_repo
+// grant opened — as binds.
+//
+// It is separate from sandboxMounts because the two have opposite containment
+// rules and merging them would mean one function with a flag deciding whether
+// escaping the workspace is allowed. Here the source is *expected* to be
+// outside the workspace: that is what the grant is for. What the driver
+// re-checks instead is that the path is absolute, clean and free of the
+// characters that would let it re-parse into something else at the -v flag —
+// and that it exists, because a bind of a missing source is a directory the
+// runtimes silently create as root-owned and empty.
+func grantedRepoMounts(spec executor.Spec) ([]mount, error) {
+	if len(spec.HostMounts) == 0 {
+		return nil, nil
+	}
+	// The whole-list check catches duplicate targets, which no per-entry
+	// validation can see.
+	if err := executor.ValidateHostMounts(spec.HostMounts); err != nil {
+		return nil, fmt.Errorf("container: %w", err)
+	}
+	out := make([]mount, 0, len(spec.HostMounts))
+	for i, m := range spec.HostMounts {
+		// buildCommand refuses this too, but generically ("extra mount may not
+		// shadow /workspace"). Catching it here lets the message name the
+		// grant, which is the only thing the operator can act on: the fix is
+		// to change a constraint, not to change the spec.
+		if m.Target == ContainerWorkspace {
+			return nil, fmt.Errorf(
+				"%w: host mount[%d] (%s) targets %s, which would replace the project's own source tree",
+				executor.ErrInvalidSpec, i, m.Name, ContainerWorkspace)
+		}
+		// Stat, deliberately not EvalSymlinks. The broker already resolved
+		// this path and checked it against the granted root, which is the only
+		// place that root is known; re-resolving here would follow whatever
+		// links exist *now* with nothing to check them against, so a component
+		// swapped between the lease and this call would move the bind out of
+		// the root. The only thing the driver needs to establish is that the
+		// source exists, because both runtimes create a missing bind source as
+		// an empty root-owned directory — which yields a sandbox whose
+		// /repos/api is present and empty, the exact failure that looks like a
+		// working run.
+		if _, err := os.Stat(m.Source); err != nil {
+			return nil, fmt.Errorf(
+				"%w: host mount[%d] source %q is not readable on this executor: %v",
+				executor.ErrInvalidSpec, i, m.Source, err)
+		}
+		out = append(out, mount{
+			HostPath:   m.Source,
+			TargetPath: m.Target,
+			ReadOnly:   m.ReadOnly,
+			// No SELinux label, unlike sandboxMounts. A label of "Z" makes the
+			// runtime *recursively relabel the source*, and this source is the
+			// developer's own checkout rather than a directory cloop owns —
+			// relabelling it would break their editor and their shell on a
+			// tree cloop was only lent. An operator on an enforcing host gets a
+			// permission error they can fix per-directory; the alternative is
+			// cloop silently rewriting labels outside its own state.
+		})
+	}
+	return out, nil
+}
+
 // buildRequest turns a Spec plus this executor's options into a runRequest.
 func (e *Executor) buildRequest(spec executor.Spec, workDir string, extraMounts []mount) (runRequest, error) {
 	// Bind is this driver's answer to the workspace question, and it is a
@@ -705,6 +772,12 @@ func (e *Executor) buildRequest(spec executor.Spec, workDir string, extraMounts 
 		return runRequest{}, err
 	}
 	req.ExtraMounts = append(req.ExtraMounts, specMounts...)
+
+	hostMounts, err := grantedRepoMounts(spec)
+	if err != nil {
+		return runRequest{}, err
+	}
+	req.ExtraMounts = append(req.ExtraMounts, hostMounts...)
 
 	// A sandbox spec may take the network away and may never add one, so this
 	// is an assignment in one direction only. See executor.Spec.DisableNetwork.

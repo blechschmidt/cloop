@@ -498,8 +498,9 @@ in-flight count. `Requirements` can pin `ExecutorID`, demand `Labels`,
 `AllowedIsolations`, `RequireVirtualization`, and capability flags
 (`RequireStream`, `RequireSignal`, `RequireContainerRuntime`,
 `RequireNetworkEgress`, `RequireResourceLimits`, `RequireImageOverride`,
-`RequireSandboxBuild`, `RequireSandboxMounts`, `RequireWorkspaceProvisioning`,
-`RequireHostFilesystemWorkspace`).
+`RequireSandboxBuild`, `RequireSandboxMounts`, `RequireHostMounts`,
+`RequireWorkspaceProvisioning`, `RequireHostFilesystemWorkspace`,
+`RequireWriteBack`).
 
 `RequireVirtualization` is separate from `AllowedIsolations` because it cuts
 across it. Both a local Kata container (`vm`) and a Kata Pod on a cluster
@@ -519,9 +520,30 @@ failure, and send its author hunting through their own code. Refusing placement
 and naming the constraint points at the deployment instead. Every field a driver
 can quietly drop has a flag that says whether it does.
 
-The last two are the same argument applied to the source tree, and they pull in
-opposite directions: `RequireWorkspaceProvisioning` demands a node that *can*
-fetch, `RequireHostFilesystemWorkspace` demands one that does not have to. See
+`RequireHostMounts` is the same argument again, but the request comes from a
+*grant* rather than from a repo-committed file: a
+[`local_repo`](../guides/secrets.md#local-git-repositories) grant binds
+directories from the control-plane host into the sandbox at `/repos`, and
+`Capabilities().SupportsHostMounts` is whether this driver can do that at all.
+
+| Driver | `SupportsHostMounts` | Why |
+| --- | --- | --- |
+| `container` | ✅ | it runs on the hub and has a mount namespace to bind into |
+| `localprocess` | ❌ | shares the hub's filesystem, so there is nothing to bind — the granted repositories are already visible at their own paths |
+| `kubernetes`, `remote` | ❌ | the workload runs on a machine that has never seen those files |
+
+It is deliberately **not** implied by `SharesHostFilesystem`, and the middle row
+is why the two are different answers rather than one: a driver needs both to run
+here *and* to have a namespace to bind into, and `localprocess` has only the
+first. A driver that ignored the field would start a harness whose `/repos` is
+empty, which is the failure this constraint converts into a refusal that names
+the grant and the binding.
+
+`RequireWorkspaceProvisioning`, `RequireHostFilesystemWorkspace` and
+`RequireWriteBack` are the same argument applied to the source tree, and the
+first two pull in opposite directions: one demands a node that *can* fetch, the
+other one that does not have to. `RequireWriteBack` asks whether the files the
+task changed can be returned at all. See
 [Workspace provisioning](#workspace-provisioning).
 
 `CheckSandboxSupport(ex, req, projectPath)` runs the *bound* executor through
@@ -542,8 +564,8 @@ named: `no_candidates`, `executor_id`, `health`, `host_execution_policy`,
 `isolation`, `virtualization`, `labels`, `platform`, `arch`, `harness`,
 `container_runtime`, `network_egress`, `resource_limits`, `stream`, `signal`,
 `memory`, `capacity`, `image_override`, `sandbox_build`, `sandbox_mounts`,
-`workspace`, `write_back`. An operator asking "why did nothing schedule?" gets a
-per-node answer, not a shrug.
+`host_mounts`, `workspace`, `write_back`. An operator asking "why did nothing
+schedule?" gets a per-node answer, not a shrug.
 
 `virtualization` is the one whose message names the two config keys that fix it,
 because the candidate is otherwise healthy and correct: it "shares the executing

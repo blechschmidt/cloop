@@ -39,6 +39,16 @@ type Constraints struct {
 	// means every key in the secret, which is safe because an env secret's
 	// keys *are* its scope — there is nothing wider to fall open to.
 	EnvKeys []string `json:"env_keys,omitempty"`
+	// Writable makes a local_repo grant read-write. It is the one constraint
+	// that widens rather than narrows, so it is a bool that defaults to the
+	// safe reading: a grant that says nothing delivers a read-only mount.
+	//
+	// Read-only is the useful default rather than a cautious one. The common
+	// case is a sandbox that needs to *read* a developer's checkout — build
+	// against it, grep it, copy from it — and a read-only bind means a
+	// runaway harness cannot rewrite the history of a repository that exists
+	// nowhere else. A project that genuinely needs to commit asks for it.
+	Writable bool `json:"writable,omitempty"`
 }
 
 // patternCharset is the set of characters a glob pattern may contain.
@@ -153,8 +163,19 @@ func (c Constraints) ValidateFor(kind Kind) error {
 				"%w: a registry grant needs a registry allowlist (--registries)",
 				ErrInvalidConstraint)
 		}
+	case KindLocalRepo:
+		if len(c.Repos) == 0 {
+			return fmt.Errorf(
+				"%w: a local_repo grant needs a repository allowlist (--repos my-service, or --repos '*' for every repository under the root)",
+				ErrInvalidConstraint)
+		}
 	case KindEnv:
 		// EnvKeys may be empty: an env secret's own keys bound it.
+	}
+	if c.Writable && kind != KindLocalRepo {
+		return fmt.Errorf(
+			"%w: writable applies to local_repo grants, not %s",
+			ErrInvalidConstraint, kind)
 	}
 	return nil
 }
@@ -511,6 +532,11 @@ func (c Constraints) Summary() string {
 	add("hosts", c.Hosts)
 	add("registries", c.Registries)
 	add("env", c.EnvKeys)
+	if c.Writable {
+		// Only when true. A "writable=false" on every github grant's summary
+		// would be noise, and the read-only default is what the absence means.
+		parts = append(parts, "writable")
+	}
 	if len(parts) == 0 {
 		return "none"
 	}

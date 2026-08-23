@@ -80,6 +80,25 @@ const (
 	// KindEgressProxy is an outbound proxy endpoint, possibly with embedded
 	// credentials. Constrained by an allowed-host list.
 	KindEgressProxy Kind = "egress_proxy"
+	// KindLocalRepo is a directory on the hub host that holds git
+	// repositories. Constrained by a repository allowlist, and delivered as
+	// a bind mount rather than as bytes.
+	//
+	// It is the odd one out here and deliberately so. The payload is a path,
+	// not a credential, and the thing being granted is reach into the control
+	// plane's own filesystem — which is exactly why it belongs in this
+	// package rather than beside SpecMount. A path that a sandbox may read is
+	// an authority, and every property this broker already provides for
+	// authorities is one it needs: a named subject so the grant reaches one
+	// project and not the fleet, a TTL so it lapses, an audit row recording
+	// who opened it, and revocation that lands within a lease period.
+	//
+	// The alternative — a host path in .cloop/sandbox.yaml — is the reason
+	// SpecMount sources are workspace-relative: that file is repo-committed,
+	// so it is whatever a pull request says it is. This kind is the same
+	// capability with the trust inverted. A human with secret.grant names the
+	// path, out of band, and the project receives it.
+	KindLocalRepo Kind = "local_repo"
 )
 
 // Kinds returns every valid Kind, sorted, for CLI help and validation
@@ -87,7 +106,7 @@ const (
 func Kinds() []Kind {
 	return []Kind{
 		KindEgressProxy, KindEnv, KindGitHubApp,
-		KindGitHubPAT, KindKubeconfig, KindRegistry,
+		KindGitHubPAT, KindKubeconfig, KindLocalRepo, KindRegistry,
 	}
 }
 
@@ -95,7 +114,7 @@ func Kinds() []Kind {
 func (k Kind) Valid() bool {
 	switch k {
 	case KindGitHubPAT, KindGitHubApp, KindKubeconfig,
-		KindRegistry, KindEnv, KindEgressProxy:
+		KindRegistry, KindEnv, KindEgressProxy, KindLocalRepo:
 		return true
 	}
 	return false

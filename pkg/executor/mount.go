@@ -151,3 +151,113 @@ func ValidateSpecMounts(mounts []SpecMount) error {
 	}
 	return nil
 }
+
+// MaxHostMounts bounds how many host repositories one lease may open.
+//
+// It matches secretbroker.MaxLocalRepos rather than MaxSpecMounts because the
+// two limits answer different questions: MaxSpecMounts bounds what a
+// repo-committed file may rearrange, this bounds what a human-issued grant may
+// open. The value is duplicated rather than imported because pkg/secretbroker
+// imports nothing from here and the dependency should not start now.
+const MaxHostMounts = 32
+
+// HostMount binds an absolute path on the executor's host into the sandbox.
+//
+// It is the deliberate counterpart to SpecMount, and the difference between the
+// two types is the trust boundary, not the mechanism. A SpecMount comes from
+// .cloop/sandbox.yaml — repo-committed, therefore whatever a pull request says
+// it is — so its source is workspace-relative and cannot escape. A HostMount
+// comes from a secret grant: a human with secret.grant named this path, named
+// the project it goes to, and the broker recorded who did it. That is the only
+// provenance under which an absolute host path may enter a Spec.
+//
+// Keeping them as separate types rather than one type with an "absolute
+// allowed" flag is the point. There is no code path that turns a SpecMount into
+// a HostMount, so a future change to the sandbox parser cannot widen into host
+// access by setting a bool: it would have to construct a different type, in a
+// package that parses untrusted YAML, and that is a visible thing to review.
+type HostMount struct {
+	// Name is the granted repository's handle, for diagnostics and audit.
+	Name string `json:"name,omitempty"`
+	// Source is the absolute path on the executor's host.
+	Source string `json:"source"`
+	// Target is the absolute path it appears at inside the sandbox.
+	Target string `json:"target"`
+	// ReadOnly binds the source read-only. The zero value is read-write, so
+	// callers building one of these by hand get the same default as the
+	// runtime flag they render into — the safe default lives in the grant
+	// (secretbroker.Constraints.Writable), which is where an operator sets it.
+	ReadOnly bool `json:"read_only,omitempty"`
+}
+
+// Validate enforces the containment rules for a host mount.
+//
+// Unlike SpecMount.Validate this cannot check containment — the whole point is
+// that the source is outside the workspace — so what it checks instead is that
+// the path cannot be *reinterpreted*: no colon to append runtime mount options,
+// no relative segment for a driver to resolve against a directory this code
+// cannot see, nothing that changes meaning between here and a -v flag.
+func (m HostMount) Validate() error {
+	src, dst := strings.TrimSpace(m.Source), strings.TrimSpace(m.Target)
+	switch {
+	case src == "":
+		return fmt.Errorf("%w: host mount source is empty", ErrInvalidSpec)
+	case dst == "":
+		return fmt.Errorf("%w: host mount target is empty (source %q)", ErrInvalidSpec, src)
+	}
+	for _, f := range []struct{ name, val string }{{"source", src}, {"target", dst}} {
+		// The colon check is first and for the same reason as in SpecMount:
+		// the container runtimes' -v flag is colon-separated, so a path
+		// containing one appends mount options — ":rw", or a third path — to
+		// a flag the operator believed they controlled.
+		if strings.ContainsAny(f.val, ":\x00\n\r") {
+			return fmt.Errorf("%w: host mount %s %q contains a colon, NUL or newline",
+				ErrInvalidSpec, f.name, f.val)
+		}
+		if strings.Contains(f.val, `\`) {
+			return fmt.Errorf("%w: host mount %s %q contains a backslash; use forward slashes",
+				ErrInvalidSpec, f.name, f.val)
+		}
+		if !strings.HasPrefix(f.val, "/") {
+			return fmt.Errorf("%w: host mount %s %q is not absolute", ErrInvalidSpec, f.name, f.val)
+		}
+		if p := path.Clean(f.val); p != f.val {
+			// A path that does not survive Clean unchanged means something
+			// different to the runtime than it reads as here — "/a/../b" is
+			// /b — and the reviewer of an audit row would be reading the
+			// wrong one.
+			return fmt.Errorf("%w: host mount %s %q is not a clean path (did you mean %q?)",
+				ErrInvalidSpec, f.name, f.val, p)
+		}
+	}
+	if dst == "/" {
+		return fmt.Errorf("%w: host mount target may not be the sandbox root", ErrInvalidSpec)
+	}
+	return nil
+}
+
+// ValidateHostMounts checks a whole host-mount list: each entry, the list
+// length, and that no two entries claim the same target.
+//
+// Duplicate targets are rejected for the same reason as in ValidateSpecMounts —
+// the runtimes resolve the collision differently — and additionally because two
+// grants shadowing each other would make "which repository is at /repos/api"
+// depend on grant iteration order.
+func ValidateHostMounts(mounts []HostMount) error {
+	if len(mounts) > MaxHostMounts {
+		return fmt.Errorf("%w: %d host mounts requested, at most %d are allowed",
+			ErrInvalidSpec, len(mounts), MaxHostMounts)
+	}
+	seen := make(map[string]struct{}, len(mounts))
+	for i, m := range mounts {
+		if err := m.Validate(); err != nil {
+			return fmt.Errorf("host mount[%d]: %w", i, err)
+		}
+		target := strings.TrimSpace(m.Target)
+		if _, dup := seen[target]; dup {
+			return fmt.Errorf("%w: host mount target %q is claimed twice", ErrInvalidSpec, target)
+		}
+		seen[target] = struct{}{}
+	}
+	return nil
+}

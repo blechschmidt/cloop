@@ -309,6 +309,16 @@ func startWorkload(workDir string, argv []string, labels map[string]string) (exe
 	lease := acquireSecretLease(controlPlaneDir(), workDir, ex.ID())
 	spec := applyLease(uiSpec(workDir, argv, labels), lease)
 
+	// Repositories the lease opened from the hub's own filesystem. Before the
+	// sandbox check, so that a project whose executor cannot receive them is
+	// refused for that reason — which names both the grant and the binding —
+	// rather than for whatever the next check would have complained about.
+	spec, err = applyRepoGrants(spec, ex, lease)
+	if err != nil {
+		lease.Close()
+		return nil, executor.Handle{}, err
+	}
+
 	// The project's .cloop/sandbox.yaml, if it has one. It is applied after
 	// the lease so its env allowlist can narrow the leased secrets, and it is
 	// refused rather than partially honoured when the bound executor cannot
@@ -414,7 +424,11 @@ func runWorkload(ctx context.Context, workDir string, argv []string, labels map[
 	lease := acquireSecretLease(controlPlaneDir(), workDir, ex.ID())
 	defer lease.Close()
 
-	spec, _, err := applySandbox(applyLease(uiSpec(workDir, argv, labels), lease), ex, workDir)
+	spec, err := applyRepoGrants(applyLease(uiSpec(workDir, argv, labels), lease), ex, lease)
+	if err != nil {
+		return nil, err
+	}
+	spec, _, err = applySandbox(spec, ex, workDir)
 	if err != nil {
 		auditImageDenial(workDir, err)
 		return nil, err

@@ -516,6 +516,20 @@
   @media (max-width:767px) {
     .audit-table th.sec-hide-sm, .audit-table td.sec-hide-sm { display:none; }
   }
+  /* New Project → Access (Task 20187). The grant rows are assembled in JS from
+     executor and secret names, so their appearance lives here: a style
+     attribute built by string concatenation is one interpolation away from the
+     class of bug the dialog is meant not to have. */
+  .np-access > summary { cursor:pointer; font-size:12px; color:var(--muted); user-select:none; }
+  .np-access > summary:hover { color:var(--text); }
+  .np-access[open] > summary { color:var(--text); margin-bottom:2px; }
+  .np-grant-row {
+    border:1px solid var(--border); border-radius:var(--radius); background:var(--bg);
+    padding:12px; margin-bottom:10px;
+  }
+  .np-grant-head { display:flex; gap:10px; align-items:flex-end; }
+  .np-grant-head .form-group { flex:1; margin-bottom:0; }
+  .np-grant-head .btn { padding:3px 9px; font-size:11.5px; }
   .exec-card {
     border:1px solid var(--border); border-radius:var(--radius); background:var(--surface);
     padding:14px; display:flex; flex-direction:column; gap:8px;

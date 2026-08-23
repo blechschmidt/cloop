@@ -238,6 +238,17 @@ func (b *Broker) Mint(ctx context.Context, req MintRequest) (Secret, error) {
 	return s, nil
 }
 
+// DescribeSecret resolves a secret by ID or name. The payload stays sealed:
+// this answers "does this reference name something, and of what kind", which is
+// what a caller validating a grant before creating it needs.
+//
+// It exists so that path does not have to re-implement reference resolution
+// against ListSecrets, where a subtly different name match would mean a grant
+// validated against one secret and then created against another.
+func (b *Broker) DescribeSecret(ref string) (Secret, error) {
+	return resolveSecret(b.store, ref)
+}
+
 // ListSecrets returns stored secrets. Payloads stay sealed.
 func (b *Broker) ListSecrets() ([]Secret, error) {
 	secrets, err := b.store.ListSecrets()

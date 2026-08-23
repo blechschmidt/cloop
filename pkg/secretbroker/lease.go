@@ -29,6 +29,16 @@ type Material struct {
 	Env map[string]string `json:"-"`
 	// Files are written into the lease's tmpfs directory.
 	Files []File `json:"-"`
+	// Mounts are host paths the grant opens to the workload. Unlike Files
+	// they are not written anywhere: the path already exists and the grant
+	// is permission to reach it, so materialisation validates it and the
+	// driver binds it.
+	//
+	// This one is not json:"-", because a mount carries no secret — a source
+	// path and a read-only flag are exactly what an operator inspecting a
+	// lease needs to see, and hiding them would make the one material kind
+	// with no credential in it the hardest to audit.
+	Mounts []RepoMount `json:"mounts,omitempty"`
 	// Summary is the audit-safe description of what was delivered
 	// (surviving kubeconfig contexts, allowed registries, env key names).
 	Summary string `json:"summary,omitempty"`
@@ -115,8 +125,24 @@ type Mount struct {
 	mu       sync.Mutex
 	env      []string
 	files    []string
+	mounts   []RepoMount
 	bindings []LeaseBinding
 	closed   bool
+}
+
+// Mounts returns the host repositories this lease opens, in the order the
+// materials were processed. The caller binds them into the sandbox; there is
+// nothing on disk here to clean up, so Close does not touch them.
+func (m *Mount) Mounts() []RepoMount {
+	if m == nil {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed {
+		return nil
+	}
+	return append([]RepoMount(nil), m.mounts...)
 }
 
 // LeaseBinding attributes part of a materialised lease to the grant that
@@ -144,6 +170,36 @@ type LeaseBinding struct {
 	Files []string
 	// Dir is the lease directory holding Files.
 	Dir string
+	// Mounts are the host paths this grant opened, recorded for the audit
+	// trail rather than for revocation.
+	//
+	// The distinction matters and is a real limitation: a revoked lease's
+	// files are wiped and its variables scrubbed, but a bind already in a
+	// running sandbox's mount namespace cannot be taken back from outside it.
+	// A local_repo grant therefore lapses when the workload exits, not when
+	// the grant is revoked. Narrowing that window means stopping the workload.
+	Mounts []RepoMount
+}
+
+// RepoMount is one local git repository a grant opens to a workload.
+//
+// It names paths on two different machines' terms: Source is on the host the
+// executor runs on, Target is inside the sandbox. They are equal only for a
+// driver that shares the host filesystem, which is why the distinction is in
+// the type rather than left to the driver to remember.
+type RepoMount struct {
+	// Name is the repository's directory name under the granted root, and
+	// the handle a workload refers to it by.
+	Name string `json:"name"`
+	// Source is the absolute host path. Always inside the granted root:
+	// selectRepos resolves symlinks before accepting one, so a symlink
+	// planted under the root cannot redirect the bind out of it.
+	Source string `json:"source"`
+	// Target is the absolute path the repository appears at in the sandbox.
+	Target string `json:"target"`
+	// ReadOnly mirrors the grant's Writable constraint, inverted, because
+	// read-only is the default and a zero value should mean the safe thing.
+	ReadOnly bool `json:"read_only,omitempty"`
 }
 
 // tmpfsCandidates are checked in order for a memory-backed directory to hold
@@ -234,6 +290,19 @@ func (l *Lease) Materialize(baseDir string) (*Mount, error) {
 				}
 				binding.EnvKeys = append(binding.EnvKeys, f.EnvVar)
 			}
+		}
+		// Mounts need no writing — the path is already there and the grant
+		// is the right to reach it — but they are re-validated here rather
+		// than trusted from the Material. materialFor and Materialize can be
+		// separated by a store round trip, and a bind is the one material
+		// that hands over a host path verbatim.
+		for _, rm := range mat.Mounts {
+			if err := rm.validate(); err != nil {
+				_ = m.Close()
+				return nil, err
+			}
+			binding.Mounts = append(binding.Mounts, rm)
+			m.mounts = append(m.mounts, rm)
 		}
 		// Sorted so the binding — which ends up in an audit row and in a
 		// revoke frame — is stable across runs rather than reflecting Go's

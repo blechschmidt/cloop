@@ -1735,7 +1735,7 @@
 
 <!-- New Project modal -->
 <div id="new-project-overlay" onclick="if(event.target===this)closeNewProjectModal()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
-  <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;width:480px;max-width:95vw">
+  <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;width:560px;max-width:95vw;max-height:90vh;overflow:auto">
     <h2 style="font-size:15px;font-weight:600;margin-bottom:16px">New Project</h2>
     <div class="form-group">
       <label class="form-label">Directory *</label>
@@ -1779,7 +1779,41 @@
       <label class="adv-label"><input type="checkbox" id="npPMMode"> PM mode</label>
       <label class="adv-label"><input type="checkbox" id="npAutoRun"> Start run immediately</label>
     </div>
-    <div id="npError" style="font-size:12px;color:var(--red);margin-bottom:8px;display:none"></div>
+
+    <!-- Access (Task 20187): where the project runs and what it may reach from
+         there, chosen while the project is being created rather than in two
+         other panels afterwards. Collapsed by default — an ordinary project
+         needs neither, and the untouched section posts nothing. -->
+    <details id="npAccessSection" class="np-access">
+      <summary>Access (optional)</summary>
+      <div class="sec-hint" style="margin:8px 0 12px">
+        Applied as part of the creation: if the executor or any grant is refused, the whole
+        project is rolled back rather than half-provisioned.
+      </div>
+
+      <div class="form-group" id="npExecutorGroup" data-global-perm="executor.manage" data-perm-hide>
+        <label class="form-label" for="npExecutor">Executor</label>
+        <select class="form-select" id="npExecutor">
+          <option value="">Default (hub decides)</option>
+        </select>
+        <div class="sec-hint" id="npExecutorHint" style="margin-top:6px">
+          Pins where this project&rsquo;s harness runs. Leave on the default to let the hub place it.
+        </div>
+      </div>
+
+      <div class="form-group" id="npGrantsGroup" data-global-perm="secret.grant" data-perm-hide>
+        <label class="form-label">Grants</label>
+        <div class="sec-hint">
+          Each row leases one stored secret to this project, narrowed to what you list.
+          There is no &ldquo;allow everything&rdquo; default: an empty allowlist is rejected, not read as unrestricted.
+        </div>
+        <div id="npGrantRows"></div>
+        <div class="sec-hint" id="npGrantsEmpty">No grants &mdash; the project starts able to reach nothing.</div>
+        <button class="btn" type="button" id="npAddGrantBtn">Add grant</button>
+      </div>
+    </details>
+
+    <div id="npError" style="font-size:12px;color:var(--red);margin-bottom:8px;display:none;white-space:pre-wrap"></div>
     <div class="modal-footer">
       <button class="btn" onclick="closeNewProjectModal()">Cancel</button>
       <button class="btn primary" onclick="submitNewProject()">Create Project</button>

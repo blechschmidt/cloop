@@ -166,6 +166,18 @@ type Capabilities struct {
 	// runs, and cannot find the cache directory the project told it to expect.
 	// Every field a driver can quietly drop needs a flag that says so.
 	SupportsSandboxMounts bool `json:"supports_sandbox_mounts"`
+	// SupportsHostMounts reports whether Spec.HostMounts is honoured — i.e.
+	// whether this driver can bind a path from the control-plane host into
+	// the sandbox.
+	//
+	// It is not implied by SharesHostFilesystem, and the two are genuinely
+	// different answers. localprocess shares the filesystem and cannot bind
+	// anything: a granted repository is simply already visible at its own
+	// path there. A remote agent can bind, but not paths from *this* host,
+	// which it has never seen. Only a driver that both runs here and has a
+	// mount namespace to bind into can honour the field, and a driver that
+	// ignored it would start a harness whose /repos is empty.
+	SupportsHostMounts bool `json:"supports_host_mounts"`
 	// MaxConcurrent is the advertised ceiling on simultaneously running
 	// handles; 0 means unbounded/unknown.
 	MaxConcurrent int `json:"max_concurrent,omitempty"`
@@ -255,6 +267,12 @@ type Spec struct {
 	// Mounts re-expose sub-paths of WorkDir elsewhere in the sandbox. See
 	// SpecMount: sources are workspace-relative and cannot escape it.
 	Mounts []SpecMount `json:"mounts,omitempty"`
+	// HostMounts bind absolute paths on the executor's host into the
+	// sandbox. Unlike Mounts they may point anywhere, which is why nothing
+	// that parses a repo-committed file is allowed to set them: the only
+	// writer is a secret lease (secretbroker.KindLocalRepo), where a human
+	// named the path and the broker recorded who. See HostMount.
+	HostMounts []HostMount `json:"host_mounts,omitempty"`
 	// DisableNetwork forces this workload off the network regardless of how
 	// the executor is configured.
 	//
@@ -390,6 +408,13 @@ func (s Spec) Validate() error {
 	if err := ValidateSpecMounts(s.Mounts); err != nil {
 		return err
 	}
+	// Host mounts are checked here too, not only by the driver that honours
+	// them. A Spec is persisted and re-hydrated (executorstore records the
+	// dispatched spec), and the next driver to grow SupportsHostMounts would
+	// otherwise inherit no enforcement at all.
+	if err := ValidateHostMounts(s.HostMounts); err != nil {
+		return err
+	}
 	if err := s.Workspace.Validate(); err != nil {
 		return err
 	}
@@ -461,6 +486,7 @@ func (s Spec) SandboxRequirements() Requirements {
 		RequireImageOverride:           strings.TrimSpace(s.Image) != "",
 		RequireSandboxBuild:            len(s.SetupCommands) > 0,
 		RequireSandboxMounts:           len(s.Mounts) > 0,
+		RequireHostMounts:              len(s.HostMounts) > 0,
 		RequireResourceLimits:          !s.ResourceLimits.IsZero(),
 		RequireWorkspaceProvisioning:   s.Workspace.NeedsProvisioning(),
 		RequireHostFilesystemWorkspace: s.Workspace.Kind == WorkspaceBind,

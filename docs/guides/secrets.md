@@ -14,6 +14,7 @@ binary. Copy them.
 - [Kubeconfig](#kubeconfig)
 - [Container registries](#container-registries)
 - [Environment secrets](#environment-secrets)
+- [Local git repositories](#local-git-repositories)
 - [Egress leases](#egress-leases)
 - [Inspecting, debugging, revoking](#inspecting-debugging-revoking)
 - [Choosing TTLs](#choosing-ttls)
@@ -40,8 +41,10 @@ broker *rewrites the payload* before delivery — a narrower credential cannot b
 widened by whoever holds it. `github_pat` and `github_app` are enforced at the
 point of use instead, because GitHub has no API to narrow an already-issued
 token. `egress_proxy`'s allowlist is enforced by the executor's network policy.
-[The security model](../security/model.md#what-is-not-mitigated) is explicit
-about which is which; do not mistake one for the other.
+`local_repo` is minimised by *selection* — only the repositories its allowlist
+matches are ever bound, and the bind is read-only unless the grant says
+otherwise. [The security model](../security/model.md#what-is-not-mitigated) is
+explicit about which is which; do not mistake one for the other.
 
 Everything fails closed. An unparseable constraint, an unsatisfiable one, an
 expired or revoked grant, or a payload that minimises to nothing all produce a
@@ -63,6 +66,7 @@ cloop secret mint <name> --kind <kind> [--file <path> | --value <literal>]
 | `registry` | docker `config.json`, or `user:password` |
 | `env` | one or more environment variables |
 | `egress_proxy` | an outbound proxy endpoint, credentials optional |
+| `local_repo` | an absolute path **on the hub host** to a directory of git repositories (or to a single repository) |
 
 Prefer **stdin** or `--file`. `--value` puts the credential in your shell history
 and in the host process table, and the flag's own help text says so:
@@ -102,6 +106,7 @@ cloop secret grant <secret> --to <subject> [constraints] [--ttl 24h]
 | Flag | Applies to | Meaning |
 | --- | --- | --- |
 | `--repos` | `github_pat`, `github_app` | owner/repo globs — **required** (`--repos '*'` to opt out explicitly) |
+| `--repos` | `local_repo` | repository *directory-name* globs under the granted root — **required** |
 | `--permissions` | `github_pat`, `github_app` | e.g. `contents:read,pull_requests:write` |
 | `--contexts` | `kubeconfig` | context allowlist |
 | `--namespaces` | `kubeconfig` | namespace allowlist — at least one of contexts/namespaces required |
@@ -110,6 +115,10 @@ cloop secret grant <secret> --to <subject> [constraints] [--ttl 24h]
 | `--hosts` | `egress_proxy` | host allowlist — required |
 
 `--scope` is a grouping label for operators and carries **no** authority.
+
+One more constraint applies to `local_repo` only: `--writable`, which is the
+single constraint that *widens* rather than narrows — see
+[Read-only by default](#read-only-by-default).
 
 ---
 
@@ -130,7 +139,9 @@ $ cloop secret grant deploy-pat \
 **Pattern rules.** `myorg/*` matches every repo directly in the org and does not
 cross a `/` — `myorg/team/tool` is refused. `myorg/tool` is exact, not a prefix,
 so `myorg/toolkit` is refused. `*` and `*/*` mean everything. Matching is
-case-insensitive, because GitHub names are.
+case-insensitive, because GitHub names are. (`local_repo` is the exception: its
+patterns match directory names, which on Linux are case-sensitive, so `api` does
+not open `API`.)
 
 ### What the sandbox actually gets
 
@@ -327,6 +338,252 @@ $ cloop secret grant app-env --to project:/srv/app --env-keys API_KEY --ttl 8h
 Only the allowlisted keys are set in the workload's environment; the rest are
 dropped. Omitting `--env-keys` delivers every key in the secret — which is fine
 when the secret was minted narrow in the first place.
+
+---
+
+## Local git repositories
+
+Every other kind hands a workload *bytes*. This one hands it **paths**: a
+directory on the hub host holding git checkouts, opened to one project as bind
+mounts. It is for the developer who has three repositories on the machine the
+hub runs on and wants one project to build against them.
+
+It is a grant rather than a
+[`.cloop/sandbox.yaml`](../reference/sandbox.md) mount because that file is
+repo-committed — it is whatever a pull request says it is — which is exactly why
+`mounts.source` there is workspace-relative and cannot name a host path at all.
+This kind is the same capability with the trust inverted: a human holding
+`secret.grant` names the root, the repositories and the project, out of band. So
+it arrives with the properties every other authority here already has — one
+subject, a TTL, an audit row naming who opened it, and revocation that lands
+within a lease period rather than at the end of the run.
+
+```console
+$ cloop secret mint local-src --kind local_repo --value /home/dev/src
+✓ minted local-src (local_repo) as sec_8f2cca804195c0b73296b674
+  no grant yet — nothing can use it until you run 'cloop secret grant'
+```
+
+The payload is an **absolute path on the hub** to a directory containing git
+repositories. A root that is itself a repository is accepted too, so the
+single-checkout case needs no wrapper directory. `--value` is not a disclosure
+risk for once — the payload is a path, not a credential.
+
+The root is stored once and each grant opens a different slice of it to a
+different project, which is what "these particular repositories" means when
+there are five projects and twenty checkouts:
+
+```console
+$ cloop secret grant local-src \
+    --to project:/srv/app \
+    --repos 'api-service' --repos 'shared-*' \
+    --ttl 8h
+✓ granted local-src to project:/srv/app
+  grant:       grant_dfdcf87b1d4ea6da67bcbba7
+  constraints: repos=api-service|shared-*
+  expires:     2026-08-23T08:08:36Z (in 8h0m0s)
+```
+
+**`--repos` is required, and it is matched differently here than for a PAT.**
+The subject is the repository's *directory name* directly under the root, not
+`owner/repo`: `api-service` is exact, `shared-*` is a glob, `*` is every
+repository under the root. Only **direct children** are considered — a root of
+`/home/dev` does not reach a checkout at `/home/dev/.cache/dep/vendor/x`, which
+is not what anyone granting "the source tree" is picturing. Entries that are not
+git repositories, and entries whose name begins with a dot, are skipped. At most
+32 repositories may be opened by one grant; past that the grant has stopped
+describing "these repositories" and started describing the machine, and it is
+refused rather than truncated.
+
+Omitting it is refused at creation, not at delivery:
+
+```console
+$ cloop secret grant local-src --to project:/srv/app
+Error: secretbroker: invalid constraint: a local_repo grant needs a repository
+allowlist (--repos my-service, or --repos '*' for every repository under the root)
+```
+
+So is an allowlist that matches nothing — a lease that delivered an empty
+`/repos` would let the harness discover the problem as a missing directory
+several minutes in.
+
+### What the sandbox actually gets
+
+Repositories appear under **`/repos`**. The path is fixed rather than
+configurable so a harness, a setup script and a README can all name it without
+knowing which executor they landed on, and it sits outside `/workspace` because
+the workspace is bind-mounted whole — a target underneath it would be shadowed
+by that mount on some drivers and not others.
+
+```
+mounts: /home/dev/src/api-service   ->  /repos/api-service    read-only
+        /home/dev/src/shared-proto  ->  /repos/shared-proto   read-only
+env:    CLOOP_LOCAL_REPOS=api-service,shared-proto
+        CLOOP_LOCAL_REPO_ROOT=/repos
+        CLOOP_LOCAL_REPO_API_SERVICE=/repos/api-service
+        CLOOP_LOCAL_REPO_SHARED_PROTO=/repos/shared-proto
+```
+
+`CLOOP_LOCAL_REPOS` is the list that stays true whatever the driver does, and it
+is the one the broker sets. The path variables are added later, by the caller
+holding both the lease and the executor, because *where* the repositories are is
+a property of the driver rather than of the grant (see below). A repository whose
+name has no unambiguous rendering as a variable name — `my-api` and `my.api`
+would both fold to `CLOOP_LOCAL_REPO_MY_API` — gets no convenience variable
+rather than one pointing at whichever grant was processed last. It is still
+mounted and still listed in `CLOOP_LOCAL_REPOS`.
+
+Dry-run it like any other lease:
+
+```console
+$ cloop secret lease --project /srv/app --executor edge-01
+1 material(s), lease expires 2026-08-23T00:23:36Z
+
+  local-src (local_repo)
+    grant:       grant_dfdcf87b1d4ea6da67bcbba7
+    constraints: repos=api-service|shared-*
+    delivers:    local repos (read-only): api-service,shared-proto
+    env:         CLOOP_LOCAL_REPOS
+```
+
+Anything under the root that the allowlist does not match, or that is not a git
+repository, is simply absent from that list. Both checks run against this host,
+so a mistyped glob is visible here rather than mid-run.
+
+### Read-only by default
+
+`writable` is the one constraint that **widens** rather than narrows, so it is a
+bool that defaults to the safe reading: a grant that says nothing delivers a
+read-only bind. `Constraints.ValidateFor` refuses it outright on every other
+kind — "writable applies to local_repo grants, not `github_pat`".
+
+Read-only is the useful default rather than the merely cautious one. The common
+case is a sandbox that needs to *read* a developer's checkout — build against it,
+grep it, copy from it — and a read-only bind means a runaway harness cannot
+rewrite the history of a repository that exists nowhere else. A project that
+genuinely needs to commit asks for it.
+
+A read-write grant is `--writable` on the CLI, `"writable": true` on the API, or
+a checkbox on the dashboard's grant form — offered only for `local_repo` rather
+than shown and ignored:
+
+```console
+$ cloop secret grant local-src --to project:/srv/app --repos api-service \
+    --writable --ttl 8h
+```
+
+The same thing over HTTP:
+
+```console
+$ curl -X POST https://cloop.example.com/api/grants \
+    -H "Authorization: Bearer $CLOOP_TOKEN" \
+    -d '{"secret_ref":"local-src","subject":"project:/srv/app",
+         "repos":["api-service"],"writable":true,"ttl_minutes":480}'
+```
+
+A read-write grant carries `writable` in its constraint summary, in
+`cloop secret grants` and in every audit row; a read-only one carries nothing at
+all there, because the absence *is* the default.
+
+### Not every executor can receive it
+
+**This is the one grant an executor can refuse, and the refusal is the part to
+read before you rely on it.** The same grant reaches a workload three different
+ways, and which one is correct is a property of the driver:
+
+| Executor | What happens | `SupportsHostMounts` |
+| --- | --- | --- |
+| `container` (including Kata) | each repository is bound at `/repos/<name>` | ✅ |
+| `localprocess` | no mounts at all — it shares the hub's filesystem, so the repositories are already visible at their own paths, and the environment names *those* | ❌ (`SharesHostFilesystem` carries it instead) |
+| `kubernetes`, `remote` | **refused** | ❌ |
+
+Kubernetes and remote-agent executors run on a machine that has never seen these
+files. There is no rendering of the grant that is not a lie, so the run does not
+start:
+
+```
+executor: invalid spec: executor k8s-prod (kubernetes) cannot receive
+repositories from the control-plane host, but this project holds a local_repo
+grant for api-service, shared-proto. Bind the project to a container or Kata
+executor running on the hub, or publish the repositories over https and grant a
+github_pat instead
+```
+
+A hard error rather than a warning, because this is the exact point at which "I
+granted my checkouts to this project" and "I bound this project to a remote
+sandbox" turn out to be incompatible, and the person who needs to know is the one
+who just pressed Run. The alternative is a harness that starts anyway and reports
+that the repository is empty.
+
+On `localprocess`, `writable: false` is **not enforced**. The harness runs as the
+hub user against the repositories' real paths, so it can write to them whatever
+the grant says; cloop logs a line saying so at start. That driver already has the
+whole filesystem — it is the one an operator turns off first (`executors:
+allow_host_process: false`) — so the grant is a routing decision there, not a
+boundary. Bind a container executor to make read-only mean read-only.
+
+`SupportsHostMounts` is **not** implied by `SharesHostFilesystem`, and the middle
+row of that table is why: `localprocess` shares the filesystem and can bind
+nothing. Only a driver that both runs on the hub *and* has a mount namespace to
+bind into can honour the field. The same gap is named `host_mounts` when a spec
+carrying host mounts is placed or failed over across a fleet — see
+[Placement](../architecture/executors.md#placement).
+
+### Revocation releases it at the end of the run
+
+Revoking a `local_repo` grant behaves differently from revoking a token, and the
+difference is a genuine limitation rather than an oversight. A revoked lease's
+files are wiped and its environment variables scrubbed, but a bind mount already
+in a running sandbox's mount namespace cannot be taken back from outside it. The
+grant stops being *re-issued* immediately — the next lease renewal, at most 15
+minutes away, will not contain it, so no new run gets the repository — but the
+run already holding it keeps it until it exits.
+
+To cut access to a repository *now*, stop the workload:
+`cloop stop`, or the Stop button, or
+[cordon the executor](../architecture/executors.md#placement).
+
+### Containment
+
+The operator names a root; nothing under it may redirect the bind out of it.
+That is the whole security argument for this kind, and it rests on one rule:
+**every candidate path is resolved with `EvalSymlinks` and re-checked against the
+resolved root.** A symlink planted at `<root>/evil -> /` resolves to `/`, which is
+not under the root, and is dropped — regardless of who created the link.
+Containment is tested with `filepath.Rel` rather than a string prefix, so a root
+of `/home/dev/src` does not accidentally admit `/home/dev/src-other`.
+
+Resolution happens once, when the lease is issued, and the resolved path is what
+the driver binds — the container driver deliberately does *not* re-resolve, since
+it no longer knows the root to check against. The window that leaves is between
+issuing the lease and starting the sandbox: someone able to write to the granted
+root itself could swap a component in that interval. A sandbox holding a
+read-only grant cannot do this (it can write inside a repository, not to the
+directory that holds it), so the exposure is to something already running as the
+developer on the hub — but a root that untrusted processes can write to is not a
+root worth granting.
+
+Resolving *first* is also what makes a symlinked checkout work, which is how
+plenty of people arrange a source tree: the link is followed, and then the result
+is required to be inside the root. A root that is itself a symlink is fine for
+the same reason — it is resolved before anything is compared against it.
+
+Names are checked separately from paths. A repository directory whose name
+contains a colon would append mount options, or a third path, to the container
+runtime's `-v` flag; one that is `.` or `..`, or that contains a slash, a
+backslash, a NUL or a newline, would not be a direct child at all; and one over
+128 characters is refused outright. An entry under the root that fails this is
+skipped rather than failing the lease, because it is a property of what happens
+to be sitting in the directory and not of the grant — otherwise anyone who can
+write to the root could break an unrelated project's runs by creating a file
+there. The check runs again immediately before a driver receives the mount,
+since the two moments can be separated by a store round trip and this is the one
+material kind that carries a host path verbatim into a runtime flag.
+
+Revocation has one extra obligation here. Scrubbing a credential file is
+something the hub can do; taking a bind back is not — the hub cannot reach into a
+running sandbox's mount namespace — so the driver has to unbind, and the mounts
+are recorded on the lease for exactly that reason.
 
 ---
 
