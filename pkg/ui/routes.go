@@ -139,9 +139,53 @@ func (s *Server) projectScopeFromIdx(r *http.Request) (authz.Scope, bool) {
 	return authz.Scope{Project: entries[i].Name, ProjectPath: entries[i].Path}, true
 }
 
+// safeMethod reports whether m is read-only by HTTP semantics (RFC 9110 §9.2.1).
+func safeMethod(m string) bool {
+	return m == http.MethodGet || m == http.MethodHead || m == http.MethodOptions
+}
+
+// methodAllowed rejects a mutating verb on a route whose permission for that
+// verb is only `read` (Task 20188).
+//
+// Ten routes are registered without a method prefix — /api/state, /api/steps,
+// /api/projects and friends — so http.ServeMux hands them every verb, and
+// none of their handlers checked r.Method. DELETE /api/state returned 200 and
+// the full state; DELETE /api/projects returned 200 and the project list,
+// which is the sharp one, because DELETE /api/projects/{idx} really does
+// delete and a client that drops the trailing index got a cheerful 200 from a
+// listing instead of an error.
+//
+// Expressing the rule in terms of the declared permission rather than a list
+// of patterns means it also holds for routes added later, and it states the
+// real invariant: a mutating verb must never be authorized by `read`. Routes
+// that legitimately multiplex a read and a write behind one pattern
+// (/api/config, /api/goal, /api/instructions) declare MethodPerms, so their
+// writes resolve to a write permission and pass this check.
+func methodAllowed(perm authz.Permission, method string) bool {
+	if safeMethod(method) {
+		return true
+	}
+	switch perm {
+	case authz.PermProjectRead, authz.PermExecutorRead, authz.PermAuditRead:
+		return false
+	}
+	return true
+}
+
 // gate wraps a spec's handler with its permission check.
 func (s *Server) gate(rs routeSpec) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// Ahead of the authzActiveFor short-circuit below: this is a
+		// contract check on the route, not an identity check, so it must
+		// hold in single-tenant deployments too — which is exactly where
+		// the 200-from-DELETE behaviour was observed.
+		if !methodAllowed(rs.permFor(r.Method), r.Method) {
+			w.Header().Set("Allow", "GET, HEAD, OPTIONS")
+			apierror.WriteError(w, apierror.New(apierror.CodeMethodNotAllowed,
+				r.Method+" is not supported by this read-only endpoint"))
+			return
+		}
+
 		// With RBAC inactive every request is granted everything, so the
 		// entire layer collapses to one boolean. This is not just an
 		// optimization: deriving a scope calls allProjectEntries(), which

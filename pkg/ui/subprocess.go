@@ -66,13 +66,20 @@ const (
 // context.DeadlineExceeded so callers can distinguish "the command failed"
 // from "we killed it" and surface a more useful message to the user.
 func runCloopSubcommand(ctx context.Context, exe, workDir string, timeout time.Duration, args ...string) ([]byte, error) {
+	return runCloopSubcommandEnv(ctx, exe, workDir, timeout, nil, args...)
+}
+
+// runCloopSubcommandEnv is runCloopSubcommand with extra "K=V" environment
+// entries for the child, for handlers that must pass a credential without
+// exposing it on the argv (Task 20188).
+func runCloopSubcommandEnv(ctx context.Context, exe, workDir string, timeout time.Duration, extraEnv []string, args ...string) ([]byte, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	out, runErr := runWorkload(cctx, workDir, append([]string{exe}, args...),
+	out, runErr := runWorkloadEnv(cctx, workDir, append([]string{exe}, args...), extraEnv,
 		map[string]string{"handler": "subcommand"})
 
 	// Distinguish ctx-driven kills from actual workload failures so the

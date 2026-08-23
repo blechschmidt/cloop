@@ -415,6 +415,19 @@ func wipeLeaseOnExit(ex executor.Executor, handleID string, lease *secretLease) 
 // cancelled or times out the workload is killed, matching the
 // exec.CommandContext semantics the UI relied on before.
 func runWorkload(ctx context.Context, workDir string, argv []string, labels map[string]string) ([]byte, error) {
+	return runWorkloadEnv(ctx, workDir, argv, nil, labels)
+}
+
+// runWorkloadEnv is runWorkload with extra environment variables for the
+// workload. It exists so a caller can hand a credential to a subcommand
+// without putting it on the argv, where /proc/<pid>/cmdline exposes it to
+// every local user for the lifetime of the process (Task 20188).
+//
+// extraEnv entries are "K=V" and are appended to the inherited environment,
+// not substituted for it: applyLease reads a nil Spec.Env as "inherit
+// os.Environ()", so assigning a bare one-element slice would silently strip
+// PATH and HOME from the child.
+func runWorkloadEnv(ctx context.Context, workDir string, argv, extraEnv []string, labels map[string]string) ([]byte, error) {
 	registerBuiltinExecutors()
 	ex, err := executor.Resolve(workDir)
 	if err != nil {
@@ -424,7 +437,11 @@ func runWorkload(ctx context.Context, workDir string, argv []string, labels map[
 	lease := acquireSecretLease(controlPlaneDir(), workDir, ex.ID())
 	defer lease.Close()
 
-	spec, err := applyRepoGrants(applyLease(uiSpec(workDir, argv, labels), lease), ex, lease)
+	base := uiSpec(workDir, argv, labels)
+	if len(extraEnv) > 0 {
+		base.Env = append(os.Environ(), extraEnv...)
+	}
+	spec, err := applyRepoGrants(applyLease(base, lease), ex, lease)
 	if err != nil {
 		return nil, err
 	}

@@ -126,11 +126,11 @@ allowlist, and that limit is structural.
 
 ---
 
-## Two vulnerabilities found while building this
+## Vulnerabilities found while building this
 
 Recorded because a threat model that lists only theoretical threats is less
-useful than one that lists the threats that were actually present. Both are
-fixed and both have a regression test.
+useful than one that lists the threats that were actually present. All are
+fixed and all have a regression test.
 
 **`--cidrs 0.0.0.0/0` waived the entire SSRF block set.** An explicit CIDR is
 what waives the block set — that is the design, and it is why there is no
@@ -158,6 +158,58 @@ against a real container, not by reading the rules. Fixed by rendering both
 hooks with the same rules, since which hook a destination takes is a fact about
 the host's routing table and not a security boundary
 (`TestHostSideFilterCoversHostBoundServices`, `TestBridgeFormFiltersBothHooks`).
+
+**Project creation was unconfined, which made project deletion an arbitrary
+delete.** `POST /api/projects/new` ran `filepath.Abs` + `os.MkdirAll` on the
+caller's string with no confinement at all, so a relative `dir` resolved
+against the *hub process's* cwd and escaped through `../../../..`, while an
+absolute one simply landed wherever it pointed. On its own that is a
+directory-creation nuisance. The chain is what matters: the created path is
+registered, and `DELETE /api/projects/{idx}?delete_root=true` then
+`os.RemoveAll`s it behind a guard that rejected only `""`, relative paths,
+`/` and `$HOME` — `/etc`, `/usr`, `/var` and `/home` all passed as "safe".
+Because `MkdirAll` returns nil for a directory that already exists, two
+`project.write` calls were an arbitrary-directory-deletion primitive. Fixed by
+giving creation and deletion one shared predicate, `isSafeProjectRoot`, which
+now also refuses system subtrees and bare top-level directories while leaving
+`/var/lib/cloop/projects/…` — where the packaged image puts state — working
+(`TestIsSafeProjectRootRejectsSystemPaths`,
+`TestProjectCreateRejectsSystemDirectories`).
+
+**A 60-byte read request returned a 109 MB response.** `/api/analytics`
+validated that `?from=`/`?to=` *parsed* as dates but never how far apart they
+were, and `time.Parse` accepts years 0000–9999. The handler builds one label
+per day in the window and sizes a `float64` slice per provider from it, so
+`?from=0001-01-01&to=9999-12-31` drove a ~3.65M-iteration loop; measured on an
+empty project it returned 109,562,327 bytes in ~2s. The route carries `read`,
+the lowest permission on the hub, and the per-IP limiter defaults to 20 rps, so
+a viewer — or anyone at all on a hub with auth misconfigured — could OOM the
+daemon with a handful of concurrent GETs. Fixed by clamping the window to
+`maxAnalyticsWindowDays` and normalising an inverted range, which also keeps
+every dataset the same width as the label axis
+(`TestAnalyticsBoundsTheDateWindow`, `TestAnalyticsAcceptsOrdinaryWindows`).
+
+**Mutating verbs were served by read-only routes.** Ten routes are registered
+without a method prefix, so `http.ServeMux` hands them every verb, and none of
+the handlers checked `r.Method`: `DELETE /api/state` returned 200 and the full
+state, `DELETE /api/projects` returned 200 and a 37 KB project listing. No data
+was destroyed — the handlers only read — but a mutating verb was being
+authorized by the `read` permission, and a client that dropped the index from
+the real `DELETE /api/projects/{idx}` got a cheerful 200 from a listing instead
+of an error. Fixed in `gate()` rather than per-handler, expressed as "a
+mutating verb is never authorized by a read permission" so it also holds for
+routes added later, and placed ahead of the `authzActiveFor` short-circuit so
+it applies in single-tenant deployments too
+(`TestReadOnlyRoutesRejectMutatingMethods`).
+
+**The Groq API key was passed on the argv.** `/api/voice` appended a
+caller-supplied `--groq-api-key` to the subprocess argv, where
+`/proc/<pid>/cmdline` exposes it to every local user for the lifetime of the
+child — the same exposure `install_script.go` already refuses for enrolment
+tokens. Fixed by passing it in the environment, which `cloop listen` already
+reads as `GROQ_API_KEY`; the plumbing appends to the inherited environment
+rather than replacing it, since `applyLease` reads a nil `Spec.Env` as
+"inherit `os.Environ()`".
 
 ---
 

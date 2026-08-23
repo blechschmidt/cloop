@@ -2514,7 +2514,13 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	// With OIDC enabled, present the real signed-in user instead of a random
 	// animal name so collaborators see who is actually connected.
 	if user != nil {
-		name = boundedQueryString(user.DisplayName(), maxPresenceFieldLen)
+		// Truncate, don't drop (Task 20188): boundedQueryString returns ""
+		// for oversized input, which is right for a filter but here would
+		// discard the fallback assigned just above and broadcast a blank
+		// label to every peer.
+		if dn := boundedDisplayName(user.DisplayName(), maxPresenceFieldLen); dn != "" {
+			name = dn
+		}
 	}
 	// Override with user-supplied name/color from query params if provided.
 	// Both fields are echoed to every other connected client via the presence
@@ -3151,6 +3157,13 @@ func (s *Server) handleTaskAdd(w http.ResponseWriter, r *http.Request) {
 		priority = maxPri + 1
 	}
 
+	// selfID is 0: the task does not exist yet, so it cannot be self-
+	// referential, but its dependencies must still name tasks that exist.
+	if err := validateDependsOn(req.DependsOn, 0, ps.Plan.Tasks); err != nil {
+		jsonErr(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
 	task := &pm.Task{
 		ID:          maxID + 1,
 		Title:       req.Title,
@@ -3638,6 +3651,10 @@ func (s *Server) handleTaskEdit(w http.ResponseWriter, r *http.Request) {
 		task.Priority = req.Priority
 	}
 	if req.DependsOn != nil {
+		if err := validateDependsOn(*req.DependsOn, task.ID, ps.Plan.Tasks); err != nil {
+			jsonErr(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 		task.DependsOn = *req.DependsOn
 	}
 	if req.MaxMinutes != nil {
@@ -3757,6 +3774,10 @@ func (s *Server) handlePutTask(w http.ResponseWriter, r *http.Request) {
 		task.Priority = req.Priority
 	}
 	if req.DependsOn != nil {
+		if err := validateDependsOn(*req.DependsOn, task.ID, ps.Plan.Tasks); err != nil {
+			jsonErr(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 		task.DependsOn = *req.DependsOn
 	}
 	if req.MaxMinutes != nil {
@@ -4585,8 +4606,14 @@ func (s *Server) handleVoice(w http.ResponseWriter, r *http.Request) {
 	if v := r.FormValue("whisper_model"); v != "" {
 		listenArgs = append(listenArgs, "--whisper-model", v)
 	}
+	// The Groq key travels in the environment, never on the argv: argv is
+	// world-readable through /proc/<pid>/cmdline for the lifetime of the
+	// child, which is the same reasoning install_script.go already applies
+	// to enrollment tokens (Task 20188). `cloop listen` already falls back
+	// to GROQ_API_KEY (cmd/listen.go), so no flag is needed.
+	var listenEnv []string
 	if v := r.FormValue("groq_api_key"); v != "" {
-		listenArgs = append(listenArgs, "--groq-api-key", v)
+		listenEnv = append(listenEnv, "GROQ_API_KEY="+v)
 	}
 
 	// Run cloop listen via the installed binary. Bound by r.Context() so the
@@ -4596,7 +4623,7 @@ func (s *Server) handleVoice(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		exe = "cloop"
 	}
-	out, cmdErr := runCloopSubcommand(r.Context(), exe, "", voiceSubprocessTimeout, listenArgs...)
+	out, cmdErr := runCloopSubcommandEnv(r.Context(), exe, "", voiceSubprocessTimeout, listenEnv, listenArgs...)
 	output := strings.TrimSpace(string(out))
 
 	if cmdErr != nil {
@@ -5118,11 +5145,17 @@ func (s *Server) broadcastProjectsUpdate() {
 //
 // Query params:
 //   - project_idx: index into the multi-project registry (resolved by resolveWorkDir)
-//   - limit: max rows (default 200, hard cap 1000)
+//   - limit: max rows (default defaultQueueLimit, hard cap maxQueueLimit)
 //   - offset: pagination offset (default 0)
 //   - status: filter by lifecycle state (queued|running|done|failed|skipped)
 //   - kind:   filter by entry kind (task|heal|evolve|external|session)
 //   - task_id: filter rows tied to a specific plan task id
+// Row bounds for /api/queue, previously documented but never enforced.
+const (
+	defaultQueueLimit = 200
+	maxQueueLimit     = 1000
+)
+
 func (s *Server) handleQueue(w http.ResponseWriter, r *http.Request) {
 	workDir := s.resolveWorkDir(r)
 	q, err := taskqueue.Open(workDir)
@@ -5132,12 +5165,18 @@ func (s *Server) handleQueue(w http.ResponseWriter, r *http.Request) {
 	}
 	defer q.Close()
 
-	opts := taskqueue.ListOptions{}
+	opts := taskqueue.ListOptions{Limit: defaultQueueLimit}
 	qs := r.URL.Query()
 	if v := qs.Get("limit"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			opts.Limit = n
 		}
+	}
+	// The doc comment above has always promised this cap; the handler never
+	// implemented it, leaving pkg/taskqueue's 5000 as the real bound and the
+	// echoed value a fiction (Task 20188).
+	if opts.Limit > maxQueueLimit {
+		opts.Limit = maxQueueLimit
 	}
 	if v := qs.Get("offset"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
@@ -5722,6 +5761,19 @@ func (s *Server) handleProjectNew(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Confine the target before creating anything (Task 20188). A relative
+	// dir resolves against the *server's* cwd, so "../../../.." escaped
+	// freely; an absolute one landed wherever it pointed. The registered
+	// path then becomes the workdir for every later ?project_idx= call and
+	// the target of ?delete_root=true, so this is the moment to refuse.
+	if !isSafeProjectRoot(abs) {
+		releaseProject()
+		jsonErr(w, "refusing to create a project at "+strconv.Quote(abs)+
+			": system directories and bare top-level directories are not valid project roots",
+			http.StatusBadRequest)
+		return
+	}
+
 	// Create the directory if it does not exist.
 	if err := os.MkdirAll(abs, 0o755); err != nil {
 		releaseProject()
@@ -5952,10 +6004,33 @@ func (s *Server) removeProjectsFlag(absPath string) {
 	s.Projects = filtered
 }
 
-// isSafeProjectRoot returns false when path is an obviously unsafe target for
-// recursive deletion (empty, relative, the filesystem root, $HOME itself, or
-// the running user's CWD-equivalent). It is a defence-in-depth check on top
-// of the registry contract; the UI already requires explicit confirmation.
+// systemSubtrees are directories that are never a valid project root, at any
+// depth. Anything under them belongs to the OS or the container image.
+var systemSubtrees = []string{
+	"/bin", "/boot", "/dev", "/etc", "/lib", "/lib32", "/lib64", "/libx32",
+	"/proc", "/run", "/sbin", "/sys", "/usr",
+}
+
+// isSafeProjectRoot reports whether path is an acceptable project root — and
+// therefore an acceptable target for `cloop init` and, with explicit
+// confirmation, for recursive deletion.
+//
+// It is used by both POST /api/projects/new and
+// DELETE /api/projects/{idx}?delete_root=true. Sharing one predicate across
+// creation and deletion is deliberate (Task 20188): previously only the
+// delete path was guarded, and only against "", relative paths, "/" and
+// $HOME. /etc, /usr and /var all passed as "safe". Because os.MkdirAll
+// returns nil for a directory that already exists, an unguarded create
+// followed by a guarded delete was an arbitrary-directory-deletion primitive
+// available to any caller holding project.write.
+//
+// The rules, in order:
+//   - must be an absolute, non-empty path;
+//   - never the filesystem root or $HOME itself;
+//   - never inside a system subtree (see systemSubtrees);
+//   - never a bare top-level directory. /var is refused while
+//     /var/lib/cloop/projects/demo is allowed — the latter is where the
+//     packaged hub image puts its state, so this must keep working.
 func isSafeProjectRoot(path string) bool {
 	if path == "" || !filepath.IsAbs(path) {
 		return false
@@ -5968,6 +6043,17 @@ func isSafeProjectRoot(path string) bool {
 		if cleanHome := filepath.Clean(home); cleanHome != "" && clean == cleanHome {
 			return false
 		}
+	}
+	for _, sub := range systemSubtrees {
+		if clean == sub || strings.HasPrefix(clean, sub+"/") {
+			return false
+		}
+	}
+	// A bare top-level directory (/var, /home, /tmp, /opt, …) is a shared
+	// mount point, never one project's root. Depth is measured on the
+	// cleaned absolute path, so "/var" has one segment and "/var/x" two.
+	if len(strings.Split(strings.TrimPrefix(clean, "/"), "/")) < 2 {
+		return false
 	}
 	return true
 }
@@ -6227,9 +6313,17 @@ func (s *Server) handleRiskMatrix(w http.ResponseWriter, r *http.Request) {
 
 // ── Analytics handler ─────────────────────────────────────────────────────────
 
+// maxAnalyticsWindowDays caps the ?from/?to span of /api/analytics at ten
+// years. The handler builds one label per day in the window and sizes a
+// float64 slice per provider from it, so the window is a direct multiplier on
+// both allocation and response size. Ten years is far beyond any real
+// project's history while keeping the worst case in the low megabytes.
+const maxAnalyticsWindowDays = 3660
+
 // handleAnalytics returns a JSON payload with all data needed by the analytics
 // dashboard tab. Accepts optional ?from=YYYY-MM-DD and ?to=YYYY-MM-DD query
-// params. GET /api/analytics
+// params. The date range is clamped to maxAnalyticsWindowDays.
+// GET /api/analytics
 func (s *Server) handleAnalytics(w http.ResponseWriter, r *http.Request) {
 	workDir := s.resolveWorkDir(r)
 
@@ -6250,6 +6344,21 @@ func (s *Server) handleAnalytics(w http.ResponseWriter, r *http.Request) {
 	}
 	fromTime := parseDay(r.URL.Query().Get("from"), fromDefault)
 	toTime := parseDay(r.URL.Query().Get("to"), toDefault).Add(24 * time.Hour) // inclusive
+
+	// Clamp the window before anything sizes an allocation from it
+	// (Task 20188). parseDay validates only that the value is a date, and
+	// time.Parse accepts years 0000-9999 — so ?from=0001-01-01&to=9999-12-31
+	// drove the label loop below ~3.65M times and sized three more slices per
+	// provider off the result. A 60-byte request returned a 109 MB body, at
+	// the *read* permission. Normalising an inverted range here also keeps
+	// every dataset the same width as the label axis, so the chart cannot
+	// silently misalign costs against dates.
+	if toTime.Before(fromTime) {
+		fromTime, toTime = toTime, fromTime
+	}
+	if maxSpan := time.Duration(maxAnalyticsWindowDays) * 24 * time.Hour; toTime.Sub(fromTime) > maxSpan {
+		fromTime = toTime.Add(-maxSpan)
+	}
 
 	// ── 1. Status donut (current plan state) ──────────────────────────────────
 	type statusDonut struct {
@@ -7061,6 +7170,12 @@ func (s *Server) handleMaxParallelSet(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// maxStepTimeout is the upper bound accepted by /api/options/step-timeout. A
+// step budget longer than a day is indistinguishable from "disabled" (which
+// has its own explicit sentinel, "0") and would let a wedged step pin an
+// executor slot past any useful watchdog.
+const maxStepTimeout = 24 * time.Hour
+
 // handleStepTimeoutSet updates the per-project step timeout.
 // POST /api/options/step-timeout body: {"value":"10m"} or {"value":"0"} to disable.
 func (s *Server) handleStepTimeoutSet(w http.ResponseWriter, r *http.Request) {
@@ -7072,10 +7187,27 @@ func (s *Server) handleStepTimeoutSet(w http.ResponseWriter, r *http.Request) {
 		respondToBodyError(w, err)
 		return
 	}
-	// Validate: must be "0", empty, or a valid Go duration.
+	// Validate: must be "0", empty, or a valid Go duration inside a sane
+	// band. Parseability alone is not enough (Task 20188): "-1h" parses, and
+	// the providers special-case only zero ("use the default"), so a negative
+	// value reached context.WithTimeout and produced an already-expired
+	// context — every provider call in the project then failed instantly
+	// with "context deadline exceeded" and nothing in the UI said why.
+	// handleMaxParallelSet and handleTaskTimeoutSet next door both range-
+	// check; this is the same contract.
 	if req.Value != "" && req.Value != "0" {
-		if _, err := time.ParseDuration(req.Value); err != nil {
+		d, err := time.ParseDuration(req.Value)
+		if err != nil {
 			jsonErr(w, "invalid duration format (examples: 10m, 30m, 1h, 0)", http.StatusBadRequest)
+			return
+		}
+		if d <= 0 {
+			jsonErr(w, "step_timeout must be positive (use \"0\" to disable the timeout)", http.StatusBadRequest)
+			return
+		}
+		if d > maxStepTimeout {
+			jsonErr(w, fmt.Sprintf("step_timeout must be at most %s (use \"0\" to disable the timeout)", maxStepTimeout),
+				http.StatusBadRequest)
 			return
 		}
 	}

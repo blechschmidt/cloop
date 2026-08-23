@@ -61,6 +61,19 @@ type providerCallDetail struct {
 	Headers      map[string]interface{} `json:"headers"`
 }
 
+// Pagination bounds for /api/provider-calls. These mirror what
+// pkg/statedb.ListProviderCalls already enforces internally; declaring them
+// here lets the handler clamp *before* the query so the values it echoes back
+// are the values it actually used (Task 20188).
+const (
+	// defaultProviderCallsLimit is the page size when ?limit= is absent or
+	// unparseable.
+	defaultProviderCallsLimit = 100
+
+	// maxProviderCallsLimit is the largest page the store will serve.
+	maxProviderCallsLimit = 500
+)
+
 // handleProviderCallsList serves GET /api/provider-calls?offset=N&limit=M&task_id=K&provider=P
 func (s *Server) handleProviderCallsList(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -68,13 +81,25 @@ func (s *Server) handleProviderCallsList(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	q := r.URL.Query()
+	// Clamp before querying so the values echoed in the response are the
+	// values actually used (Task 20188). pkg/statedb clamps internally too,
+	// but it clamped silently: the handler reported the *request's* numbers,
+	// so ?offset=-100 came back as offset:-100 while page 0 was served, and
+	// ?limit=99999999 came back verbatim while 100 rows were returned. The
+	// dashboard paginates off these numbers, so it either looped or skipped.
 	offset, _ := strconv.Atoi(q.Get("offset"))
-	limit, _ := strconv.Atoi(q.Get("limit"))
+	if offset < 0 {
+		offset = 0
+	}
+	limit, err := strconv.Atoi(q.Get("limit"))
+	if err != nil || limit <= 0 {
+		limit = defaultProviderCallsLimit
+	}
+	if limit > maxProviderCallsLimit {
+		limit = maxProviderCallsLimit
+	}
 	taskID, _ := strconv.Atoi(q.Get("task_id"))
 	providerFilter := q.Get("provider")
-	if limit <= 0 {
-		limit = 100
-	}
 
 	rows, total, err := state.ListProviderCalls(s.resolveWorkDir(r), offset, limit, taskID, providerFilter)
 	if err != nil {
