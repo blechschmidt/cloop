@@ -127,6 +127,27 @@ type MigrationReport struct {
 // Errors are wrapped with ErrSchemaMismatch so callers can use errors.Is to
 // distinguish migration failures from generic SQLite errors.
 func Migrate(db *sql.DB) (*MigrationReport, error) {
+	return MigrateTo(db, LatestVersion)
+}
+
+// LatestVersion is the sentinel MigrateTo accepts to mean "every embedded
+// migration". Any real schema version is far below it.
+const LatestVersion = 1 << 30
+
+// MigrateTo is Migrate, stopping after the migration numbered target. It exists
+// so that a test can construct the schema some earlier release actually shipped
+// and then let Open() migrate it forward, which is the only way to exercise a
+// migration against the database it will really meet.
+//
+// The alternative — migrate fully, then hand-undo one migration's DDL and
+// delete its schema_migrations row — does not work, and the way it fails is
+// worth recording. currentVersion is MAX(version), so forgetting migration N
+// forgets everything after it too, and they all re-run. That is harmless while
+// every later migration is CREATE ... IF NOT EXISTS, and stops being harmless
+// the moment one of them is an ALTER TABLE ADD COLUMN, which SQLite has no
+// idempotent spelling for. It then fails with "duplicate column name" inside
+// whichever unrelated test did the rewinding.
+func MigrateTo(db *sql.DB, target int) (*MigrationReport, error) {
 	migrations, err := loadMigrations()
 	if err != nil {
 		return nil, wrap(ErrSchemaMismatch, err)
@@ -163,6 +184,9 @@ func Migrate(db *sql.DB) (*MigrationReport, error) {
 	for _, m := range migrations {
 		if m.Version <= current {
 			continue
+		}
+		if m.Version > target {
+			break
 		}
 		if err := applyOne(db, m); err != nil {
 			return report, wrap(ErrSchemaMismatch, fmt.Errorf("apply migration %s: %w", m.Name, err))

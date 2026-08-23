@@ -3,6 +3,7 @@ package pm
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -312,22 +313,65 @@ func TestSkipDir(t *testing.T) {
 	}
 }
 
-// --- BuildProjectContext integration (uses real git on the cloop repo) ---
+// --- BuildProjectContext integration (uses real git) ---
 
 func TestBuildProjectContext_ReturnsContext(t *testing.T) {
-	// Use the actual project working directory; we just verify the struct is populated
-	// (we don't assert on exact git output since it changes)
-	ctx := BuildProjectContext("/root/Projects/cloop")
+	// A repository built here rather than the checkout this test happens to be
+	// running from. The previous version pointed at a hardcoded
+	// /root/Projects/cloop, so it asserted nothing anywhere except on the one
+	// machine that path exists on — on CI it read a directory that is not
+	// there, got an empty RecentLog, and failed every run.
+	dir := newTestGitRepo(t)
+
+	ctx := BuildProjectContext(dir)
 	if ctx == nil {
 		t.Fatal("BuildProjectContext returned nil")
 	}
-	if ctx.WorkDir != "/root/Projects/cloop" {
-		t.Errorf("WorkDir = %q", ctx.WorkDir)
+	if ctx.WorkDir != dir {
+		t.Errorf("WorkDir = %q, want %q", ctx.WorkDir, dir)
 	}
-	// In a git repo we expect at least some output
+	// One commit exists, so the log is non-empty; the file it touched is
+	// untracked-free but present, so the tree is non-empty too.
 	if ctx.RecentLog == "" {
 		t.Error("expected non-empty RecentLog in a git repository")
 	}
+	if ctx.FileTree == "" {
+		t.Error("expected non-empty FileTree for a directory with files in it")
+	}
+	if ctx.Format() == "" {
+		t.Error("Format() should render a context that has content")
+	}
+}
+
+// newTestGitRepo creates a git repository with a single commit and returns its
+// path. Skips the test if git is unavailable, matching how the rest of the
+// suite treats an external tool it does not own.
+func newTestGitRepo(t *testing.T) string {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not installed")
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	for _, args := range [][]string{
+		{"init", "-q"},
+		{"config", "user.email", "test@example.invalid"},
+		{"config", "user.name", "cloop test"},
+		{"add", "main.go"},
+		{"commit", "-q", "-m", "initial commit"},
+	} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		// A developer's global git config can set commit.gpgsign or a hook
+		// path; neither is this test's business.
+		cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Skipf("git %v failed (%v): %s", args, err, out)
+		}
+	}
+	return dir
 }
 
 func TestBuildProjectContext_NonExistentDir(t *testing.T) {

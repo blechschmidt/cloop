@@ -77,6 +77,20 @@ func newScene(t *testing.T) *scene {
 	sandbox := filepath.Join(root, "sandbox")
 	git(t, root, "clone", "--quiet", origin, sandbox)
 
+	// A committer identity written into each repository's own config, not
+	// passed through the environment of the helper above.
+	//
+	// Production code runs git here too — mergequeue shells out to
+	// `git merge --no-ff`, which writes a merge commit — and it inherits this
+	// process's environment, not the helper's. On a developer machine that
+	// still worked, because git fell back to a global ~/.gitconfig; on a CI
+	// runner, which has none, it failed with "Committer identity unknown" and
+	// the test read as "remote work did not merge".
+	for _, repo := range []string{hub, sandbox} {
+		git(t, repo, "config", "user.name", "cloop test")
+		git(t, repo, "config", "user.email", "test@example.invalid")
+	}
+
 	return &scene{origin: origin, hub: hub, sandbox: sandbox, base: git(t, hub, "rev-parse", "HEAD")}
 }
 

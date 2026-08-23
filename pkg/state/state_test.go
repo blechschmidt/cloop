@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/pm"
+	"github.com/blechschmidt/cloop/pkg/statedb"
 )
 
 func tempDir(t *testing.T) string {
@@ -100,6 +101,123 @@ func TestLoad_CorruptFile(t *testing.T) {
 	_, err := Load(dir)
 	if err == nil {
 		t.Error("expected error for corrupt state file")
+	}
+}
+
+// --- legacy state.json migration ---
+
+// TestLoad_MigratesLegacyJSONIntoAnAlreadyCreatedDatabase pins the trigger that
+// was missing, and the exact shape of the situation it has to survive: a
+// project whose state is still in .cloop/state.json, next to a .cloop/state.db
+// that exists, is fully schema-migrated, is NEWER than the JSON — and is empty.
+//
+// That is not a contrived arrangement. Opening a state database creates the
+// file and every table in it, and cloop opens a project's database from
+// PersistentPreRunE to reconcile executors, so any command at all — `cloop
+// version` — leaves one behind. Both of the original migration triggers then
+// declined: the file exists, so "no database yet" did not fire, and the file it
+// had just created was newer than the JSON, so "legacy file is newer" did not
+// either. Load returned an empty project and the user's goal, plan and history
+// stayed on disk in a file nothing would ever read again.
+//
+// The 16 end-to-end tests that seed a fixture through state.json all failed on
+// this, which is what surfaced it.
+func TestLoad_MigratesLegacyJSONIntoAnAlreadyCreatedDatabase(t *testing.T) {
+	dir := tempDir(t)
+	if err := os.MkdirAll(filepath.Join(dir, ".cloop"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	legacy := `{
+	  "goal": "ship the thing",
+	  "pm_mode": true,
+	  "plan": {"goal": "ship the thing", "tasks": [
+	    {"id": 1, "title": "first", "status": "done"},
+	    {"id": 2, "title": "second", "status": "pending"}
+	  ]}
+	}`
+	if err := os.WriteFile(StatePath(dir), []byte(legacy), 0o644); err != nil {
+		t.Fatalf("write legacy state: %v", err)
+	}
+
+	// Exactly what a bystander open leaves behind, and it must be newer than
+	// the JSON — that is the half of the bug a mtime comparison cannot see.
+	db, err := statedb.Open(DBPath(dir))
+	if err != nil {
+		t.Fatalf("pre-create the database: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if fresh, err := os.Stat(DBPath(dir)); err != nil {
+		t.Fatalf("stat db: %v", err)
+	} else if legacyInfo, err := os.Stat(StatePath(dir)); err != nil {
+		t.Fatalf("stat json: %v", err)
+	} else if !fresh.ModTime().After(legacyInfo.ModTime()) {
+		// Not an assertion about the code — an assertion that this test is
+		// still testing what it says it is.
+		t.Fatalf("the pre-created database is not newer than the legacy file, "+
+			"so this test no longer reproduces the bug (db %v, json %v)",
+			fresh.ModTime(), legacyInfo.ModTime())
+	}
+
+	for _, tc := range []struct {
+		name string
+		load func(string) (*ProjectState, error)
+	}{
+		{"Load", Load},
+		{"LoadLite", LoadLite},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, err := tc.load(dir)
+			if err != nil {
+				t.Fatalf("%s: %v", tc.name, err)
+			}
+			if s.Goal != "ship the thing" {
+				t.Errorf("goal = %q, want %q — the legacy file was not migrated",
+					s.Goal, "ship the thing")
+			}
+			if s.Plan == nil {
+				t.Fatal("plan is nil — the legacy file was not migrated")
+			}
+			if len(s.Plan.Tasks) != 2 {
+				t.Fatalf("migrated %d tasks, want 2", len(s.Plan.Tasks))
+			}
+			if s.Plan.Tasks[0].Title != "first" {
+				t.Errorf("first task = %q, want %q", s.Plan.Tasks[0].Title, "first")
+			}
+		})
+	}
+}
+
+// TestLoad_DoesNotOverwriteADatabaseThatHoldsState is the other side of it. The
+// new trigger keys on "the database holds no project", so a database that does
+// hold one must be left alone however stale the state.json beside it looks —
+// otherwise an old file would silently roll a live project backwards.
+func TestLoad_DoesNotOverwriteADatabaseThatHoldsState(t *testing.T) {
+	dir := tempDir(t)
+	if _, err := Init(dir, "the current goal", 10); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+
+	if err := os.WriteFile(StatePath(dir),
+		[]byte(`{"goal": "a goal from a previous era"}`), 0o644); err != nil {
+		t.Fatalf("write legacy state: %v", err)
+	}
+	// Backdate it so the mtime trigger stays quiet and only the emptiness
+	// check is in play.
+	old := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(StatePath(dir), old, old); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+
+	got, err := Load(dir)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got.Goal != "the current goal" {
+		t.Errorf("goal = %q, want %q — a stale state.json overwrote a live database",
+			got.Goal, "the current goal")
 	}
 }
 

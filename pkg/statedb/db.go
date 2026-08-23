@@ -7,6 +7,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -304,6 +305,29 @@ func (d *DB) saveStateLocked(s *State) error {
 		return classifyDriverErr(err)
 	}
 	return nil
+}
+
+// HasProjectState reports whether any project state has ever been written to
+// this database — that is, whether the metadata table holds a row.
+//
+// It distinguishes a database that merely *exists* from one that holds a
+// project. Opening a state.db creates the file and every table in it, so file
+// existence alone says nothing: several code paths open a project's database
+// for reasons unrelated to its state (executor reconciliation does it on every
+// CLI invocation), and each of them leaves behind a complete but empty
+// database. Callers that need "is there a project here" must ask this.
+func (d *DB) HasProjectState() (bool, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	var one int
+	err := d.conn.QueryRow(`SELECT 1 FROM metadata LIMIT 1`).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, classifyDriverErr(err)
+	}
+	return true, nil
 }
 
 // ────────────────────────────────────────────────────────────

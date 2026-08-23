@@ -125,22 +125,17 @@ func (h *rotationHarness) open(t *testing.T, id string) string {
 // the pre-envelope schema, writes a row the way the old code did, and lets
 // statedb.Open migrate it forward.
 //
-// Rewinding rather than hand-building the old schema matters: a hand-built
-// "old" database is a copy of the migration's assumptions, so it would agree
-// with a broken migration. This one is the schema the previous release
-// actually shipped, minus exactly what 0019 adds.
+// Running the real migrations up to 0018 rather than hand-building the old
+// schema matters: a hand-built "old" database is a copy of the migration's
+// assumptions, so it would agree with a broken migration. This is the schema
+// the release before 0019 actually shipped.
 func TestMigration0019StampsAndUpgradesPreExistingRows(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "state.db")
 
-	// 1. A fully migrated database, so every table 0019 touches exists.
-	db, err := statedb.Open(path)
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	if err := db.Close(); err != nil {
-		t.Fatalf("close: %v", err)
-	}
+	// 1. The database as it stood one migration before envelope encryption.
+	const preEnvelope = 18
+	seedPre0019(t, path, preEnvelope)
 
 	// 2. Seal a payload the way the pre-envelope code did — one key derived
 	//    from the passphrase and the store-wide salt, applied directly.
@@ -151,11 +146,10 @@ func TestMigration0019StampsAndUpgradesPreExistingRows(t *testing.T) {
 	}
 	legacySealed := sealLegacy(t, rotationPassphrase, salt, legacyPayload)
 
-	// 3. Rewind: drop everything 0019 added, insert the legacy row in the old
-	//    shape, and forget that the migration ran.
-	rewindPast0019(t, path, salt, legacySealed)
+	// 3. Write the legacy row in the shape 0018 could hold.
+	insertLegacyRow(t, path, salt, legacySealed)
 
-	// 4. Reopen — 0019 re-applies.
+	// 4. Open — 0019 and everything after it apply, once each.
 	db2, err := statedb.Open(path)
 	if err != nil {
 		t.Fatalf("reopen (migrating): %v", err)
@@ -235,10 +229,14 @@ func sealLegacy(t *testing.T, passphrase string, salt []byte, plaintext string) 
 	return sealed
 }
 
-// rewindPast0019 removes everything migration 0019 added and inserts a row in
-// the pre-migration shape, so reopening the database re-runs the migration
-// against realistic data.
-func rewindPast0019(t *testing.T, path string, salt, legacySealed []byte) {
+// seedPre0019 creates a database at exactly schema version `upTo` by running
+// the real embedded migrations and stopping, so what 0019 later meets is the
+// schema that shipped rather than a reconstruction of it.
+//
+// It also asserts it actually stopped short of the target being tested. A
+// migration numbered <= upTo would make this a no-op that still passes, which
+// is the one way this helper could lie.
+func seedPre0019(t *testing.T, path string, upTo int) {
 	t.Helper()
 	raw, err := sql.Open("sqlite", path)
 	if err != nil {
@@ -246,36 +244,43 @@ func rewindPast0019(t *testing.T, path string, salt, legacySealed []byte) {
 	}
 	defer raw.Close()
 
-	stmts := []string{
-		// The legacy row, written with the columns that existed before 0019.
+	report, err := statedb.MigrateTo(raw, upTo)
+	if err != nil {
+		t.Fatalf("migrate to %d: %v", upTo, err)
+	}
+	if report.EndVersion != upTo {
+		t.Fatalf("seeded database is at version %d, want %d", report.EndVersion, upTo)
+	}
+	latest, err := statedb.LatestSchemaVersion()
+	if err != nil {
+		t.Fatalf("latest schema version: %v", err)
+	}
+	if latest <= upTo {
+		t.Fatalf("latest schema version is %d, so stopping at %d tests nothing", latest, upTo)
+	}
+}
+
+// insertLegacyRow writes a secret in the pre-0019 shape — no key_id, no
+// wrapped DEK — plus the store-wide salt the old cipher derived from.
+func insertLegacyRow(t *testing.T, path string, salt, legacySealed []byte) {
+	t.Helper()
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("raw open: %v", err)
+	}
+	defer raw.Close()
+
+	if _, err := raw.Exec(
 		`INSERT INTO broker_secrets(id, kind, name, payload, metadata_json, created_at, created_by)
 		 VALUES ('sec_legacy','env','legacy-secret', ?, '{}', '2026-01-01T00:00:00Z','test')`,
-		// The store-wide salt the old cipher derived from.
+		legacySealed); err != nil {
+		t.Fatalf("insert legacy secret: %v", err)
+	}
+	if _, err := raw.Exec(
 		`INSERT INTO broker_meta(key, value) VALUES ('secretbroker.salt', ?)
 		 ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
-		`DROP INDEX IF EXISTS idx_broker_secrets_key`,
-		`DROP INDEX IF EXISTS idx_sessions_refresh_key`,
-		`ALTER TABLE broker_secrets DROP COLUMN key_id`,
-		`ALTER TABLE broker_secrets DROP COLUMN wrapped_dek`,
-		`ALTER TABLE sessions DROP COLUMN refresh_key_id`,
-		`ALTER TABLE sessions DROP COLUMN refresh_wrapped_dek`,
-		`DROP TABLE IF EXISTS broker_keks`,
-		`DROP TABLE IF EXISTS key_rotations`,
-		`DELETE FROM schema_migrations WHERE version >= 19`,
-	}
-	for i, stmt := range stmts {
-		var err error
-		switch i {
-		case 0:
-			_, err = raw.Exec(stmt, legacySealed)
-		case 1:
-			_, err = raw.Exec(stmt, hexOf(salt))
-		default:
-			_, err = raw.Exec(stmt)
-		}
-		if err != nil {
-			t.Fatalf("rewind step %d (%.40s…): %v", i, stmt, err)
-		}
+		hexOf(salt)); err != nil {
+		t.Fatalf("insert legacy salt: %v", err)
 	}
 }
 

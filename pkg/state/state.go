@@ -214,23 +214,8 @@ func Load(workdir string) (*ProjectState, error) {
 	dbPath := effectiveDBPath(dir)
 	jsonPath := effectiveLegacyPath(dir)
 
-	// If state.db doesn't exist but state.json does, run the migration.
-	// Also re-migrate when state.json is newer than state.db (e.g. cloop-stable
-	// continues writing the legacy file while the UI reads via the new path).
-	if dbInfo, dbErr := os.Stat(dbPath); os.IsNotExist(dbErr) {
-		if _, jsonErr := os.Stat(jsonPath); jsonErr == nil {
-			if migrateErr := migrateFromJSON(dir, jsonPath, dbPath); migrateErr != nil {
-				return nil, fmt.Errorf("migrate state.json → state.db: %w", migrateErr)
-			}
-		}
-	} else if dbErr == nil {
-		if jsonInfo, jsonErr := os.Stat(jsonPath); jsonErr == nil {
-			if jsonInfo.ModTime().After(dbInfo.ModTime()) {
-				if migrateErr := migrateFromJSON(dir, jsonPath, dbPath); migrateErr != nil {
-					return nil, fmt.Errorf("re-migrate state.json → state.db: %w", migrateErr)
-				}
-			}
-		}
+	if err := migrateLegacyIfNeeded(dir, jsonPath, dbPath); err != nil {
+		return nil, err
 	}
 
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
@@ -276,20 +261,8 @@ func LoadLite(workdir string) (*ProjectState, error) {
 
 	// Mirror Load's migration triggers so a stale legacy file is upgraded
 	// even on lite reads.
-	if dbInfo, dbErr := os.Stat(dbPath); os.IsNotExist(dbErr) {
-		if _, jsonErr := os.Stat(jsonPath); jsonErr == nil {
-			if migrateErr := migrateFromJSON(dir, jsonPath, dbPath); migrateErr != nil {
-				return nil, fmt.Errorf("migrate state.json → state.db: %w", migrateErr)
-			}
-		}
-	} else if dbErr == nil {
-		if jsonInfo, jsonErr := os.Stat(jsonPath); jsonErr == nil {
-			if jsonInfo.ModTime().After(dbInfo.ModTime()) {
-				if migrateErr := migrateFromJSON(dir, jsonPath, dbPath); migrateErr != nil {
-					return nil, fmt.Errorf("re-migrate state.json → state.db: %w", migrateErr)
-				}
-			}
-		}
+	if err := migrateLegacyIfNeeded(dir, jsonPath, dbPath); err != nil {
+		return nil, err
 	}
 
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
@@ -642,6 +615,77 @@ func fromRaw(r *statedb.State) *ProjectState {
 // ────────────────────────────────────────────────────────────
 // Migration: state.json → state.db
 // ────────────────────────────────────────────────────────────
+
+// migrateLegacyIfNeeded upgrades a legacy .cloop/state.json into state.db.
+// Shared by Load and LoadLite so the two cannot drift apart. A project with no
+// legacy file — every project created by a current binary — returns on the
+// first stat.
+//
+// There are three triggers, and the third is the one that was missing:
+//
+//  1. No state.db at all: a project last written by a pre-SQLite binary.
+//
+//  2. state.json is newer than state.db: another process is still writing the
+//     legacy file (an older cloop running beside this one).
+//
+//  3. state.db exists but holds no project state. Opening a database creates
+//     the file and its schema, and several paths open a project's database
+//     without ever writing state to it — executor reconciliation does it from
+//     PersistentPreRunE, so *any* command, `cloop version` included, is enough.
+//     Trigger 1 then never fires, because the file exists; trigger 2 never
+//     fires, because the file it just created is newer than the state.json it
+//     should have been migrated from. The upgrade was silently skipped and the
+//     project came back empty — the user's goal, plan and history still on
+//     disk in a file nothing would read again.
+func migrateLegacyIfNeeded(dir, jsonPath, dbPath string) error {
+	jsonInfo, jsonErr := os.Stat(jsonPath)
+	if jsonErr != nil {
+		return nil // no legacy file: nothing to migrate, and nothing to check
+	}
+
+	dbInfo, dbErr := os.Stat(dbPath)
+	if os.IsNotExist(dbErr) {
+		if err := migrateFromJSON(dir, jsonPath, dbPath); err != nil {
+			return fmt.Errorf("migrate state.json → state.db: %w", err)
+		}
+		return nil
+	}
+	if dbErr != nil {
+		return nil // unreadable for some other reason; let the open below report it
+	}
+
+	if jsonInfo.ModTime().After(dbInfo.ModTime()) {
+		if err := migrateFromJSON(dir, jsonPath, dbPath); err != nil {
+			return fmt.Errorf("re-migrate state.json → state.db: %w", err)
+		}
+		return nil
+	}
+
+	// The extra open is paid only by projects that still have a state.json
+	// beside a database that is not older than it — a legacy project, not the
+	// common case, which returned at the first stat above.
+	written, err := legacyDBHasState(dbPath)
+	if err != nil || written {
+		return nil // unreadable, or already holds a project: leave it alone
+	}
+	if err := migrateFromJSON(dir, jsonPath, dbPath); err != nil {
+		return fmt.Errorf("migrate state.json into an empty state.db: %w", err)
+	}
+	return nil
+}
+
+// legacyDBHasState reports whether dbPath already holds project state.
+// An error is reported to the caller rather than swallowed as "no state":
+// treating an unreadable database as empty would overwrite it from a stale
+// legacy file.
+func legacyDBHasState(dbPath string) (bool, error) {
+	db, err := statedb.Open(dbPath)
+	if err != nil {
+		return false, err
+	}
+	defer db.Close()
+	return db.HasProjectState()
+}
 
 // legacyState mirrors ProjectState for JSON decoding (avoids the import of
 // newer packages that might not exist in old JSON files).

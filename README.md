@@ -47,62 +47,61 @@ The diagram below shows the complete cloop lifecycle — from goal setting throu
 ```mermaid
 flowchart TD
     %% ── Entry points ──────────────────────────────────────────────
-    A([User: cloop init &quot;goal&quot;]) --> B[(\.cloop/state\ngoal saved)]
-    B --> C[cloop run]
+    A(["User: cloop init &quot;goal&quot;"]) --> B[(".cloop/state.db<br/>goal saved")]
+    B --> C["cloop run"]
 
     %% ── Run startup ───────────────────────────────────────────────
-    C --> F[Decompose goal\ninto task plan via AI]
+    C --> F["Decompose goal<br/>into task plan via AI"]
 
     %% ── PM task loop ──────────────────────────────────────────────
-    F --> G[(Shared task queue\n.cloop/state.db)]
+    F --> G[("Shared task queue<br/>.cloop/state.db")]
 
-    G --> H{Pending tasks\nin queue?}
-    H -- No --> AE[Auto-Evolve\n--auto-evolve flag]
-    H -- Yes --> I[Pick highest-priority\npending task\nrespecting deps]
+    G --> H{"Pending tasks<br/>in queue?"}
+    H -- No --> AE["Auto-Evolve<br/>--auto-evolve flag"]
+    H -- Yes --> I["Pick highest-priority<br/>pending task<br/>respecting deps"]
 
-    I --> J{Condition\ncheck passes?}
-    J -- No / skip --> K[Mark task skipped]
+    I --> J{"Condition<br/>check passes?"}
+    J -- "No / skip" --> K["Mark task skipped"]
     K --> G
 
-    J -- Yes --> L{Approval gate?\ncritical task}
+    J -- Yes --> L{"Approval gate?<br/>critical task"}
     L -- Denied --> K
-    L -- Approved / n/a --> M[Execute task\nvia AI provider]
+    L -- "Approved / n/a" --> M["Execute task<br/>via AI provider"]
 
-    M --> N{Task signal?}
-    N -- TASK_DONE --> O[Mark done\nsave artifact\nrun post-hooks]
-    N -- TASK_FAILED --> P{Auto-heal\nattempts left?}
+    M --> N{"Task signal?"}
+    N -- TASK_DONE --> O["Mark done<br/>save artifact<br/>run post-hooks"]
+    N -- TASK_FAILED --> P{"Auto-heal<br/>attempts left?"}
     N -- TASK_SKIPPED --> K
 
-    P -- Yes --> Q[Mutate prompt\nheal attempt]
+    P -- Yes --> Q["Mutate prompt<br/>heal attempt"]
     Q --> M
-    P -- No --> R[Mark failed\nrun diagnosis]
+    P -- No --> R["Mark failed<br/>run diagnosis"]
     R --> G
 
-    O --> S[Post-task:\ncode review · verify script\nnotify · cost ledger]
+    O --> S["Post-task:<br/>code review · verify script<br/>notify · cost ledger"]
     S --> G
 
     %% ── Auto-Evolve ───────────────────────────────────────────────
-    AE --> AE1{--innovate flag?}
-    AE1 -- Yes --> AE2[Innovation-mode\nevolve prompt\n7 categories]
-    AE1 -- No  --> AE3[Standard\nevolve prompt]
-    AE2 & AE3 --> AE4[AI discovers\n1–5 improvements]
-    AE4 --> AE5[Semantic dedup\nagainst existing tasks]
-    AE5 --> AE6[Inject new tasks\ninto shared queue]
+    AE --> AE1{"--innovate flag?"}
+    AE1 -- Yes --> AE2["Innovation-mode<br/>evolve prompt<br/>7 categories"]
+    AE1 -- No --> AE3["Standard<br/>evolve prompt"]
+    AE2 & AE3 --> AE4["AI discovers<br/>1–5 improvements"]
+    AE4 --> AE5["Semantic dedup<br/>against existing tasks"]
+    AE5 --> AE6["Inject new tasks<br/>into shared queue"]
     AE6 --> G
 
     %% ── User task input path (parallel) ──────────────────────────
-    subgraph USER ["User task inputs  (any time, run in parallel)"]
-        U1[cloop task add\n'description'] --> UA[AI structures task\nrefinement REPL]
-        U2[Web UI\nplan editor] --> UA
-        U3[cloop listen / voice\nSTT → NLP] --> UA
-        U4[cloop import\nJira · Linear · GitHub CSV] --> UA
-        UA --> UB[(Shared task queue)]
+    subgraph USER ["User task inputs (any time, run in parallel)"]
+        U1["cloop task add<br/>'description'"] --> UA["AI structures task<br/>refinement REPL"]
+        U2["Web UI<br/>plan editor"] --> UA
+        U3["cloop listen / voice<br/>STT → NLP"] --> UA
+        U4["cloop import<br/>Jira · Linear · GitHub CSV"] --> UA
     end
-    UB -.->|merged into| G
+    UA -.->|merged into| G
 
     %% ── Loop termination ──────────────────────────────────────────
-    G --> TC{Ctrl+C\nor token budget?}
-    TC -- Yes --> Z([Loop ends])
+    G --> TC{"Ctrl+C<br/>or token budget?"}
+    TC -- Yes --> Z(["Loop ends"])
     TC -- No --> H
 
     %% ── Styles ────────────────────────────────────────────────────
@@ -112,9 +111,9 @@ flowchart TD
     classDef endpoint fill:#4a1e1e,stroke:#d94a4a,color:#fde8e8
     classDef user fill:#3a2d1e,stroke:#d9944a,color:#fdf0e8
 
-    class G,B,UB queue
+    class G,B queue
     class H,J,L,N,P,AE1,TC decision
-    class F,I,M,O,S,AE,AE2,AE3,AE4,AE5,AE6,Q,R,K action
+    class C,F,I,M,O,S,AE,AE2,AE3,AE4,AE5,AE6,Q,R,K action
     class A,Z endpoint
     class U1,U2,U3,U4,UA user
 ```

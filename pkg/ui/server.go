@@ -452,6 +452,17 @@ type Server struct {
 	TLSKeyFile    string
 	TLSMinVersion string
 
+	// SelfExe is the cloop binary this server hands to an executor when a
+	// handler needs to run a subcommand (`init`, `run`, `reset`, `do`,
+	// `listen`, `suggest`). Empty means os.Executable(), which is correct in
+	// production and wrong under `go test`: there os.Executable() is the
+	// compiled test binary, so a handler that spawns it re-runs the package's
+	// own test suite as a child process with CLI-looking argv. That child
+	// passes and is never reported, so the only visible symptom was pkg/ui
+	// taking ten minutes — long enough to trip the default per-package test
+	// timeout and fail CI. Tests point this at a stub.
+	SelfExe string
+
 	mu      sync.Mutex
 	clients map[*sseClient]struct{}
 	lastMod time.Time
@@ -624,6 +635,32 @@ func (s *Server) log() logger.Logger {
 	}
 	s.Log = logger.New(false).With("project", s.WorkDir).With("component", "ui")
 	return s.Log
+}
+
+// defaultSelfExe is the SelfExe used by any Server that does not set one.
+// Empty in production. The pkg/ui test binary sets it once in TestMain, which
+// is the only way to cover this package: 139 test call sites build a Server,
+// about half of them as a struct literal rather than through New, and the next
+// test added should not have to know that a handler can fork.
+var defaultSelfExe string
+
+// selfExe returns the cloop binary handlers hand to an executor. See the
+// SelfExe field for why this is not a bare os.Executable() call.
+//
+// The "cloop" fallback is a bare name on purpose: if the path cannot be
+// resolved, PATH lookup is a better guess than a path known to be wrong.
+func (s *Server) selfExe() string {
+	if s.SelfExe != "" {
+		return s.SelfExe
+	}
+	if defaultSelfExe != "" {
+		return defaultSelfExe
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return "cloop"
+	}
+	return exe
 }
 
 // New creates a new UI server for the given working directory and port.
@@ -2876,10 +2913,7 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 
 	args := []string{"run"}
 
-	exe, err := os.Executable()
-	if err != nil {
-		exe = "cloop"
-	}
+	exe := s.selfExe()
 	workDir := s.resolveWorkDir(r)
 
 	// The harness is never forked here. It is handed to whichever executor
@@ -4245,10 +4279,7 @@ func (s *Server) handleSuggestGenerate(w http.ResponseWriter, r *http.Request) {
 	s.suggestMu.Unlock()
 	s.broadcastSuggestStatus(suggestWorkDir)
 
-	exe, err := os.Executable()
-	if err != nil {
-		exe = "cloop"
-	}
+	exe := s.selfExe()
 
 	go func() {
 		defer func() {
@@ -4679,10 +4710,7 @@ func (s *Server) handleVoice(w http.ResponseWriter, r *http.Request) {
 	// Run cloop listen via the installed binary. Bound by r.Context() so the
 	// upload handler doesn't keep the STT subprocess alive after the client
 	// gives up, plus a hard timeout in case the STT provider hangs.
-	exe, err := os.Executable()
-	if err != nil {
-		exe = "cloop"
-	}
+	exe := s.selfExe()
 	out, cmdErr := runCloopSubcommandEnv(r.Context(), exe, "", voiceSubprocessTimeout, listenEnv, listenArgs...)
 	output := strings.TrimSpace(string(out))
 
@@ -4764,10 +4792,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	// Run cloop do <message> to parse and execute the intent. The subprocess
 	// is bound by both r.Context() (browser tab close = SIGKILL the child) and
 	// a hard timeout so a wedged provider call can't pin this goroutine.
-	exe, err := os.Executable()
-	if err != nil {
-		exe = "cloop"
-	}
+	exe := s.selfExe()
 	out, cmdErr := runCloopSubcommand(r.Context(), exe, chatWorkDir, chatSubprocessTimeout, "do", msg)
 	output := strings.TrimSpace(string(out))
 
@@ -4974,10 +4999,7 @@ func (s *Server) handleReset(w http.ResponseWriter, r *http.Request) {
 	if !requirePOST(w, r) {
 		return
 	}
-	exe, err := os.Executable()
-	if err != nil {
-		exe = "cloop"
-	}
+	exe := s.selfExe()
 	out, err := runCloopSubcommand(r.Context(), exe, s.resolveWorkDir(r), resetSubprocessTimeout, "reset")
 	if err != nil {
 		msg := strings.TrimSpace(string(out))
@@ -5661,10 +5683,7 @@ func (s *Server) handleProjectRun(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewDecoder(r.Body).Decode(&req)
 	}
 
-	exe, err := os.Executable()
-	if err != nil {
-		exe = "cloop"
-	}
+	exe := s.selfExe()
 	args := []string{"run"}
 	if req.PM {
 		args = append(args, "--pm")
@@ -5844,10 +5863,7 @@ func (s *Server) handleProjectNew(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Run `cloop init <goal>` in that directory.
-	exe, err := os.Executable()
-	if err != nil {
-		exe = "cloop"
-	}
+	exe := s.selfExe()
 	args := []string{"init", req.Goal, "--skip-clarify"}
 	if req.Provider != "" {
 		args = append(args, "--provider", req.Provider)

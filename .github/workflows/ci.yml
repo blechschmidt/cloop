@@ -22,10 +22,10 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           # go.mod, not a literal: its `toolchain` directive is pinned to a
           # patch release for security reasons, and a job that silently built
@@ -86,10 +86,10 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           cache: true
@@ -129,10 +129,10 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           cache: true
@@ -172,7 +172,14 @@ jobs:
         run: go test -v ./tests/hermetic/
 
       - name: Test with race detector and coverage
-        run: go test -race -coverprofile=coverage.out -covermode=atomic $(go list ./... | grep -v 'tests/e2e')
+        # -timeout, because `go test`'s default is a per-package 10 minutes and
+        # pkg/ui is a large instrumented package that lands within a factor of
+        # two of it. It has already gone over once: every handler that shells
+        # out to a cloop subcommand was forking the test binary instead (see
+        # pkg/ui/main_test.go), which put the package at ~10m and failed this
+        # step outright. That is fixed, and the cliff should not be somewhere a
+        # merely slower runner can fall off.
+        run: go test -race -timeout 20m -coverprofile=coverage.out -covermode=atomic $(go list ./... | grep -v 'tests/e2e')
 
       - name: End-to-end integration tests
         run: |
@@ -215,7 +222,7 @@ jobs:
           echo "no per-user state was written"
 
       - name: Upload coverage report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: coverage-report
           path: coverage.out
@@ -232,10 +239,10 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           cache: true
@@ -260,7 +267,7 @@ jobs:
         # A crash writes its reproducer into testdata/fuzz/. Without this it
         # lives only on the runner and is gone before anyone can look.
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: fuzz-corpus
           path: tests/security/testdata/fuzz/
@@ -280,10 +287,10 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           cache: true
@@ -311,6 +318,86 @@ jobs:
           [ "$broken" = 0 ] || { echo "docs contain broken relative links"; exit 1; }
           echo "all relative links resolve"
 
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Every mermaid diagram still renders
+        # The README's lifecycle diagram is the first thing a visitor sees, and
+        # a mermaid block GitHub cannot parse does not fail loudly — it renders
+        # as a grey "Unable to render rich display" box, in a file no other job
+        # here compiles. That is how this one drifted: it used `\n` for line
+        # breaks, which is not documented mermaid syntax (the repository's own
+        # docs/ diagrams use <br/>), and a stray backslash that had been
+        # printing as "\.cloop/state" for as long as the diagram existed.
+        #
+        # mermaid.parse is the same parser GitHub runs, driven under jsdom
+        # rather than a headless browser: parsing is where a diagram fails to
+        # render, and skipping the browser removes a Chromium download and the
+        # system libraries it needs from the critical path of a docs check.
+        run: |
+          set -euo pipefail
+          # Installed outside the working tree: node_modules inside it would be
+          # untracked clutter, and would put ~40 vendored README diagrams in
+          # front of the extractor below.
+          npm install --no-audit --no-fund --silent --prefix /tmp/mermaid-tools \
+            mermaid@11.12.0 jsdom@26.1.0
+
+          rm -rf /tmp/mermaid && mkdir -p /tmp/mermaid
+          python3 - <<'PY'
+          import pathlib, re, subprocess
+
+          fence = re.compile(r'^```mermaid[ \t]*\r?\n(.*?)^```', re.S | re.M)
+          found = 0
+          # git ls-files, so this sees the repository's own Markdown and
+          # nothing a tool happened to leave in the checkout.
+          for name in subprocess.check_output(['git', 'ls-files', '*.md'], text=True).split():
+              text = pathlib.Path(name).read_text(encoding='utf-8')
+              for m in fence.finditer(text):
+                  line = text[:m.start()].count('\n') + 1
+                  out = pathlib.Path('/tmp/mermaid') / f'{name.replace("/", "__")}#L{line}.mmd'
+                  out.write_text(m.group(1), encoding='utf-8')
+                  found += 1
+          print(f'extracted {found} mermaid diagram(s)')
+          if found == 0:
+              raise SystemExit('::error::no mermaid diagrams found - the extractor is broken')
+          PY
+
+          # The script lives beside the node_modules it imports: ESM resolves
+          # bare specifiers by walking up from the importing file and ignores
+          # NODE_PATH, so a heredoc piped to `node --input-type=module` cannot
+          # find them.
+          cat > /tmp/mermaid-tools/check.mjs <<'JS'
+          import { readdirSync, readFileSync } from 'node:fs';
+          import { JSDOM } from 'jsdom';
+
+          const dom = new JSDOM('<!DOCTYPE html><body></body>', { pretendToBeVisual: true });
+          globalThis.window = dom.window;
+          globalThis.document = dom.window.document;
+
+          const mermaid = (await import('mermaid')).default;
+          mermaid.initialize({ startOnLoad: false });
+
+          let failed = 0;
+          // Every diagram is checked before exiting: a first failure should not
+          // hide the second one from whoever has to fix them.
+          for (const f of readdirSync('/tmp/mermaid').sort()) {
+            const where = f.replace(/\.mmd$/, '').replaceAll('__', '/');
+            try {
+              await mermaid.parse(readFileSync(`/tmp/mermaid/${f}`, 'utf8'));
+              console.log(`  renders: ${where}`);
+            } catch (e) {
+              failed++;
+              console.log(`::error::${where} is not valid mermaid, so GitHub will show ` +
+                          `"Unable to render rich display" instead of the diagram:`);
+              console.log(String(e.message ?? e).split('\n').map(l => `    ${l}`).join('\n'));
+            }
+          }
+          process.exit(failed === 0 ? 0 : 1);
+          JS
+          node /tmp/mermaid-tools/check.mjs
+
   deploy-artifacts:
     name: Deployment artifacts
     runs-on: ubuntu-latest
@@ -323,7 +410,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Build the hub image
         # Plain docker build, loaded into the local daemon: the steps below
