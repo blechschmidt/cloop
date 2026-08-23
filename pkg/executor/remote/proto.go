@@ -49,6 +49,7 @@ package remote
 import (
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"strings"
 	"time"
 
@@ -82,7 +83,15 @@ const (
 	// left every workload running on the device forever, unreadable and
 	// unstoppable. An explicit action lets the refusal say "terminate this",
 	// which is the only honest answer for work nobody is left to collect.
-	ProtocolVersion = 5
+	//
+	// v6 added StartPayload.SecretFiles: the *contents* of a secret lease's
+	// credential files, so a device that shares no filesystem with the hub can
+	// place them itself. Until then a lease's files were written into the hub's
+	// own /dev/shm and named in Spec.Env — a delivery that means nothing on
+	// another machine — so a repository-scoped github_pat arrived at an edge
+	// device as an environment variable pointing at a path that did not exist
+	// there, with no token behind it.
+	ProtocolVersion = 6
 	// MinProtocolVersion is the oldest version this build still accepts.
 	MinProtocolVersion = 1
 	// MinRevocationVersion is the first version whose agents understand the
@@ -136,6 +145,23 @@ const (
 	// workload whatever the hub's version, so the fix reaches a fleet through
 	// the half that can actually stop a process.
 	MinResumeTerminateVersion = 5
+	// MinSecretFilesVersion is the first version whose agents receive a secret
+	// lease's credential files and place them where the workload will look.
+	//
+	// A placement rule, like MinWorkspaceVersion and for the same shape of
+	// reason: an older agent does not reject StartPayload.SecretFiles, it
+	// ignores it. It would answer the start cheerfully and run the harness with
+	// an environment naming GIT_CONFIG_GLOBAL, KUBECONFIG and CLOOP_LEASE_DIR
+	// under a directory nothing ever created — and a repository-scoped
+	// github_pat, whose entire enforcement *is* those files, would arrive with
+	// no token at all. git then fails to authenticate for a reason nothing in
+	// the transcript names.
+	//
+	// So the hub refuses the *workload*, not the device. A v5 agent still
+	// connects and still runs everything that needs no credential files;
+	// stranding a fleet mid-upgrade over a capability most work does not use
+	// would be a worse failure than the one being prevented.
+	MinSecretFilesVersion = 6
 )
 
 // SupportsRevocation reports whether an agent speaking this protocol version
@@ -154,6 +180,10 @@ func SupportsWriteBack(version int) bool { return version >= MinWriteBackVersion
 // version acts on an explicit ResumeAck.Action rather than reading only
 // membership of Welcome.ResumeAccepted.
 func SupportsResumeTerminate(version int) bool { return version >= MinResumeTerminateVersion }
+
+// SupportsSecretFiles reports whether an agent speaking this protocol version
+// receives a lease's credential file contents and places them for the workload.
+func SupportsSecretFiles(version int) bool { return version >= MinSecretFilesVersion }
 
 // Timing constants. These are protocol-level agreements, not tunables: both
 // sides must derive their timeouts from the same numbers or a healthy agent
@@ -189,11 +219,35 @@ func HeartbeatDeadline() time.Duration {
 	return HeartbeatInterval * MissedHeartbeatLimit
 }
 
-// MaxFrameBytes bounds a single decoded frame. The dominant frame is a log
-// chunk, which the agent already caps at MaxLogChunkBytes; the rest are small.
-// This ceiling exists so a malicious or malfunctioning agent cannot make the
-// control plane allocate unboundedly from a single read.
+// MaxFrameBytes bounds a single decoded frame. This ceiling exists so a
+// malicious or malfunctioning agent cannot make the control plane allocate
+// unboundedly from a single read.
+//
+// Two frames are large enough to need their own bound underneath this one: a
+// log chunk, capped at MaxLogChunkBytes, and — since v6 — a start frame
+// carrying credential files, capped at MaxSecretFilesBytes. Everything else is
+// small.
 const MaxFrameBytes = 1 << 20 // 1 MiB
+
+// MaxSecretFilesBytes bounds the total plaintext one start frame may carry in
+// StartPayload.SecretFiles.
+//
+// Before v6 a start frame was small and bounded by the Spec alone; now it can
+// carry file contents, so it is the one frame that could plausibly approach
+// MaxFrameBytes. The ceiling is set well below it because JSON encodes []byte
+// as base64: 512 KiB of plaintext is ~683 KiB on the wire, which still leaves
+// room for the Spec, the workspace credential and the envelope.
+//
+// It is checked on both sides and it is not the same check as MaxFrameBytes.
+// Hitting the frame limit produces "payload 1103241 bytes exceeds 1048576",
+// which tells an operator nothing about which lease is too big; hitting this
+// one names the credential files. And enforcing it on the sending side means
+// the hub refuses a lease it could never deliver instead of dispatching a frame
+// the device will drop.
+//
+// executor.MaxSecretFileBytes (256 KiB) bounds one file; this bounds the set,
+// which is the quantity a frame actually has to carry.
+const MaxSecretFilesBytes = 512 << 10 // 512 KiB
 
 // MaxLogChunkBytes is the largest amount of workload output an agent puts in
 // one log_chunk frame. Output beyond this is split across frames; it is never
@@ -342,11 +396,12 @@ func NewFrameAt(version int, t FrameType, id, handle string, payload any) (Frame
 //
 // The omission is the point. Since protocol v3 a start frame's payload carries
 // the brokered credential for a workspace fetch (see
-// StartPayload.WorkspaceCredential), so a single `%v` on a Frame in some future
-// log line would write a live token into the control plane's log — and, on the
-// device, into the agent's. What identifies a frame is its type, its
-// correlation ID, its handle and its size; none of those is a secret, and
-// nothing else belongs in a log line anyway.
+// StartPayload.WorkspaceCredential), and since v6 the plaintext of the lease's
+// credential files as well (StartPayload.SecretFiles) — so a single `%v` on a
+// Frame in some future log line would write live tokens into the control
+// plane's log and, on the device, into the agent's. What identifies a frame is
+// its type, its correlation ID, its handle and its size; none of those is a
+// secret, and nothing else belongs in a log line anyway.
 func (f Frame) String() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "frame v%d %s", f.V, f.Type)
@@ -499,9 +554,23 @@ func (c AgentCapabilities) Executor() executor.Capabilities {
 		// version in Executor.Capabilities, because a device that can commit
 		// and bundle is no use if the session cannot carry the result frames.
 		SupportsWriteBack: c.WriteBack,
-		MaxConcurrent:     c.MaxConcurrent,
-		Platform:          c.OS,
-		Arch:              c.Arch,
+		// Unconditionally true, and deliberately *not* an AgentCapabilities
+		// field — which is the difference between this capability and the two
+		// above it. Provisioning and write-back need git on the device, so
+		// there is something to detect and advertise; placing a credential file
+		// needs os.WriteFile and a directory the agent already owns, which
+		// every device that can run a workload at all can do. The only thing
+		// that can vary is whether the *session* can carry the bytes, so that
+		// is the one narrowing, and it happens in Executor.Capabilities where
+		// the protocol version is known.
+		SupportsSecretFiles: true,
+		// Left false: the device shares no filesystem with the control plane,
+		// so it can never read files at the path the hub wrote them to. That is
+		// exactly why the bytes travel in the start frame.
+		SecretFilesFromHostPath: false,
+		MaxConcurrent:           c.MaxConcurrent,
+		Platform:                c.OS,
+		Arch:                    c.Arch,
 	}
 }
 
@@ -649,6 +718,168 @@ type StartPayload struct {
 	// Here it is one field of one frame — written to a socket, never to a disk
 	// — and the hub releases the lease as soon as the agent confirms the start.
 	WorkspaceCredential *WorkspaceCredential `json:"workspace_credential,omitempty"`
+	// SecretFiles carries the plaintext of the credential files this workload's
+	// secret lease produced, for the device to write where Spec.Env already
+	// says they are. Added in protocol v6; nil when the lease carries none,
+	// which is every workload that leases only environment variables.
+	//
+	// It is a sibling of Spec for exactly the reason WorkspaceCredential is,
+	// and here the rule is enforced by the type system rather than by
+	// convention: executor.Spec.SecretFiles is tagged json:"-" precisely so
+	// that it *cannot* travel inside a Spec. pkg/executorstore persists the
+	// dispatched Spec, the audit trail echoes it, and reconcile re-reads it
+	// after a control-plane restart — a credential that reached a Spec field
+	// would be durable in three places within a second of being minted. Here
+	// the bytes are one field of one frame, written to a socket and never to a
+	// disk, and the device wipes them when the workload ends.
+	//
+	// This is also why the remote protocol has to carry them explicitly: a
+	// driver that shares the hub's filesystem reads the files the broker
+	// already wrote, and a driver on another machine has nothing to read.
+	SecretFiles []SecretFile `json:"secret_files,omitempty"`
+}
+
+// SecretFile is one credential file, with the bytes, on its way to a device.
+//
+// It mirrors executor.SecretFile rather than reusing it because the two have
+// opposite serialization contracts: the executor type must never appear in
+// JSON (see its json:"-" field on Spec), and this one exists only to be
+// marshalled. Keeping them separate makes "the bytes are on the wire" an
+// explicit, greppable opt-in of exactly one struct instead of a property that
+// could be reintroduced by adding a tag somewhere else.
+type SecretFile struct {
+	// LeaseID and GrantID attribute the file, so the device can tie what it
+	// wrote to the binding a later revoke frame will name.
+	LeaseID string `json:"lease_id,omitempty"`
+	GrantID string `json:"grant_id,omitempty"`
+	// Dir is the directory the workload's environment already points at. It is
+	// the hub's *declaration*, not an instruction: the hub has no idea what is
+	// writable on an edge device, so the agent picks a real directory of its
+	// own and relocates the environment onto it (see the agent's
+	// materializeSecretFiles and Spec.RelocateSecrets).
+	Dir string `json:"dir"`
+	// Name is a bare file name. Re-validated on receipt: a name with a
+	// separator in it is an arbitrary-file-write primitive aimed at the device.
+	Name string `json:"name"`
+	// Mode is the permission bits, as a plain uint32 because fs.FileMode's
+	// JSON form is an opaque integer whose high bits mean things a wire format
+	// should not be able to assert. Zero means 0600.
+	Mode uint32 `json:"mode,omitempty"`
+	// Content is the plaintext, base64 in JSON. This is the credential;
+	// everything else in this struct is bookkeeping.
+	Content []byte `json:"content"`
+}
+
+// String renders the file without its content, so a `%v` on a start payload —
+// or on a slice of these, which is how they travel — cannot write a live
+// credential into the hub's log or the device's. Marshalling is unaffected;
+// only fmt goes through here.
+//
+// The rendering is delegated to executor.SecretFile so the two redactions
+// cannot drift apart: a future field added to one and printed there would
+// otherwise be printed here too, unredacted.
+func (f SecretFile) String() string { return f.Executor().String() }
+
+// GoString mirrors String so %#v cannot print the content either.
+func (f SecretFile) GoString() string { return f.String() }
+
+// Executor converts the wire form into the type a driver consumes.
+func (f SecretFile) Executor() executor.SecretFile {
+	return executor.SecretFile{
+		LeaseID: f.LeaseID,
+		GrantID: f.GrantID,
+		Dir:     f.Dir,
+		Name:    f.Name,
+		Mode:    fs.FileMode(f.Mode),
+		Content: f.Content,
+	}
+}
+
+// Validate re-derives executor.SecretFile.Validate on the receiving side.
+//
+// Re-deriving rather than trusting is the whole point. The sender validated
+// too, but this struct crossed a process boundary and, in this system's threat
+// model, the control plane is a party that can be compromised (see the
+// confinement note at the top of the agent's vault.go). A device that took the
+// hub's word for "this is a bare file name" would hand a compromised hub a
+// write anywhere on every enrolled machine.
+func (f SecretFile) Validate() error { return f.Executor().Validate() }
+
+// NewSecretFile converts a driver-facing credential file into the wire form.
+func NewSecretFile(f executor.SecretFile) SecretFile {
+	return SecretFile{
+		LeaseID: f.LeaseID,
+		GrantID: f.GrantID,
+		Dir:     f.Dir,
+		Name:    f.Name,
+		// FileMode, not Mode: the default (0600) is applied once, here, so the
+		// device is told the mode to create the file with rather than left to
+		// re-derive a default the two sides could disagree about.
+		Mode:    uint32(f.FileMode()),
+		Content: f.Content,
+	}
+}
+
+// NewSecretFiles converts a set, returning nil for an empty one so the field is
+// omitted from the frame entirely rather than encoded as an empty array.
+func NewSecretFiles(files []executor.SecretFile) []SecretFile {
+	if len(files) == 0 {
+		return nil
+	}
+	out := make([]SecretFile, 0, len(files))
+	for _, f := range files {
+		out = append(out, NewSecretFile(f))
+	}
+	return out
+}
+
+// CredentialFiles converts a start payload's files into the type the device's
+// placement code consumes.
+//
+// It is not called SecretFiles() because that name belongs to the field; the
+// asymmetry mirrors GitCredential() above, which is the accessor for
+// WorkspaceCredential for the same reason.
+func (p StartPayload) CredentialFiles() []executor.SecretFile {
+	if len(p.SecretFiles) == 0 {
+		return nil
+	}
+	out := make([]executor.SecretFile, 0, len(p.SecretFiles))
+	for _, f := range p.SecretFiles {
+		out = append(out, f.Executor())
+	}
+	return out
+}
+
+// ValidateSecretFiles checks a start payload's credential files: each one
+// individually, plus the aggregate size no single file can see.
+//
+// Both sides call it. The hub calls it before dispatch, so a lease it could
+// never deliver fails with a message naming the files instead of producing a
+// frame the device silently drops; the agent calls it at decode, before a byte
+// of it reaches a filesystem.
+func ValidateSecretFiles(files []SecretFile) error {
+	if len(files) == 0 {
+		return nil
+	}
+	total := 0
+	converted := make([]executor.SecretFile, 0, len(files))
+	for _, f := range files {
+		total += len(f.Content)
+		converted = append(converted, f.Executor())
+	}
+	if total > MaxSecretFilesBytes {
+		return fmt.Errorf(
+			"%w: this workload's %d credential file(s) total %d bytes, over the %d-byte ceiling a "+
+				"start frame can carry",
+			ErrProtocol, len(files), total, MaxSecretFilesBytes)
+	}
+	// Delegated so the per-file rules — bare names, absolute clean directories,
+	// no group- or world-readable modes, the per-file size cap — have exactly
+	// one implementation, shared with every other driver that places files.
+	if err := executor.ValidateSecretFiles(converted); err != nil {
+		return fmt.Errorf("%w: %v", ErrProtocol, err)
+	}
+	return nil
 }
 
 // WorkspaceCredential is HTTP basic material for one git fetch.
@@ -937,10 +1168,23 @@ func DecodeHeartbeatAck(f Frame) (HeartbeatAckPayload, error) {
 	return p, err
 }
 
+// DecodeStart decodes a dispatch, refusing one whose credential files could not
+// have come from a well-behaved hub.
+//
+// The check is here rather than at the point of the write because this is the
+// boundary: everything past it is device code that has already accepted the
+// frame. A traversal in a file name, a mode that would make a token
+// world-readable, or a payload too large to be a lease is rejected before the
+// agent has decided where anything goes.
 func DecodeStart(f Frame) (StartPayload, error) {
 	var p StartPayload
-	err := decodePayload(f, &p)
-	return p, err
+	if err := decodePayload(f, &p); err != nil {
+		return p, err
+	}
+	if err := ValidateSecretFiles(p.SecretFiles); err != nil {
+		return p, err
+	}
+	return p, nil
 }
 
 func DecodeStarted(f Frame) (StartedPayload, error) {

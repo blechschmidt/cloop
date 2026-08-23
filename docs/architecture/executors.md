@@ -564,8 +564,8 @@ named: `no_candidates`, `executor_id`, `health`, `host_execution_policy`,
 `isolation`, `virtualization`, `labels`, `platform`, `arch`, `harness`,
 `container_runtime`, `network_egress`, `resource_limits`, `stream`, `signal`,
 `memory`, `capacity`, `image_override`, `sandbox_build`, `sandbox_mounts`,
-`host_mounts`, `workspace`, `write_back`. An operator asking "why did nothing
-schedule?" gets a per-node answer, not a shrug.
+`host_mounts`, `workspace`, `write_back`, `secret_files`. An operator asking
+"why did nothing schedule?" gets a per-node answer, not a shrug.
 
 `virtualization` is the one whose message names the two config keys that fix it,
 because the candidate is otherwise healthy and correct: it "shares the executing
@@ -581,11 +581,21 @@ among the candidates; a pin is a statement about *where*, never a licence to run
 on a node that is dead or that policy forbids, so a pinned workload is still
 checked against every other constraint.
 
-`workspace` is the one constraint `CheckSandboxSupport` deliberately does *not*
-fold into a host-policy denial. Every other capability gap on an un-isolated
-node reads as "bind this project to a sandbox"; here that advice is exactly
-backwards, because the bound executor is already isolated and that is precisely
-why it cannot see the tree.
+`workspace`, `write_back` and `secret_files` are the constraints
+`CheckSandboxSupport` deliberately does *not* fold into a host-policy denial.
+Every other capability gap on an un-isolated node reads as "bind this project to
+a sandbox"; for these three that advice is exactly backwards, because the bound
+executor is already isolated and that is precisely why it cannot see the tree,
+return the diff, or open the hub's lease directory.
+
+`secret_files` deserves its own note, because the failure it prevents is the
+quietest one in the list. An executor that cannot receive a secret lease's
+credential *files* still receives its environment — so the workload starts
+holding `GIT_CONFIG_GLOBAL` and `CLOOP_LEASE_DIR` pointing at a directory that
+does not exist on that machine, and, for a repository-scoped `github_pat`, no
+token at all (see [Secret file delivery](#secret-file-delivery)). The run
+succeeds in every observable way except the one that mattered. Refusing
+placement is the only point at which anything can name the cause.
 
 One subtlety worth knowing: a node that advertises *no* harnesses passes the
 harness requirement. Empty means "detection failed", not "has none" — treating
@@ -830,6 +840,101 @@ observing the init container finish leaves the Secret behind, named
 The window is seconds and the material expires on the broker's own TTL
 regardless, which is a better trade than holding read authority over every
 Secret in the namespace forever.
+
+---
+
+## Secret file delivery
+
+A secret lease produces three shapes of material, and only two of them used to
+reach every backend.
+
+| Shape | Carried in | Reaches |
+| --- | --- | --- |
+| Environment variables | `Spec.Env` | every backend |
+| Host paths to bind | `Spec.HostMounts` | backends with `SupportsHostMounts` |
+| **Files** | **`Spec.SecretFiles`** | backends with `supports_secret_files` |
+
+The third row is new. Before it, the hub wrote every lease's files into its own
+`/dev/shm/cloop-lease-<hex>` and put the resulting paths into the workload's
+environment — a delivery only for a workload running on the hub's filesystem.
+The container driver forwarded `Spec.Env` and never mounted the directory; the
+Kubernetes driver had no consumer for it; the remote protocol had no frame that
+could carry a byte of it. Nothing failed. The sandbox started, the harness ran,
+and the credential was absent.
+
+It mattered most for the credential that is hardest to scope. GitHub cannot
+narrow an already-issued PAT, so "this token may only touch `acme/*`" is
+enforced at the moment git asks for it: the grant delivers a credential helper
+that stays silent for every other repository, the token it reads, and a
+gitconfig installed through `GIT_CONFIG_GLOBAL`. All three are files, and a
+narrow grant deliberately exports **no** bare `GITHUB_TOKEN` — an environment
+variable is unscoped by construction, so exporting one would hand every tool in
+the sandbox a token good for every repository. A sandbox that lost the files
+therefore received no credential at all, and failed to authenticate several
+minutes later with an error naming none of this.
+
+### Who materialises
+
+Two capabilities, because they answer different questions:
+
+- `SupportsSecretFiles` — do the files reach the workload at all? `false`
+  refuses placement with the `secret_files` constraint.
+- `SecretFilesFromHostPath` — does the workload read them off the *control
+  plane's* filesystem?
+
+Only `localprocess` says yes to the second, and that is the rule: **the hub
+writes plaintext only for a backend that will genuinely read it from there.**
+Anywhere else it would create a credential file on the control plane that
+nothing ever opens. For every isolating backend the lease is rendered in memory
+(`Lease.Deliver`, not `Lease.Materialize`) and the bytes travel on
+`Spec.SecretFiles`, which is `json:"-"` — so they are absent from the Spec that
+`pkg/executorstore` persists, from the audit trail that echoes it, and from the
+reconcile loop that re-reads it after a restart.
+
+| Driver | `supports_secret_files` | `SecretFilesFromHostPath` | How the files arrive |
+| --- | --- | --- | --- |
+| `localprocess` | ✅ | ✅ | the hub's tmpfs directory, opened directly |
+| `container` | ✅ | ❌ | staged into a private per-run tmpfs owned by the sandbox UID, bind-mounted read-only at the spec'd directory |
+| `kubernetes` | ✅ | ❌ | a per-run `Opaque` Secret, projected read-only, created before the Pod and deleted with it |
+| `remote` | ✅ *if* the device speaks protocol ≥ 6 | ❌ | a `secret_files` field on the start frame; the agent writes them into a `cloop-lease-*` directory of its own |
+
+The container driver is the interesting row: it reports `SharesHostFilesystem`
+`true` and still cannot use a hub path, because it has a mount namespace of its
+own *and* runs as an unprivileged UID taken from the project directory's owner,
+while the hub's lease directory is `0700` owned by the control-plane user. Two
+independent reasons, either one sufficient.
+
+### Paths, and who may choose them
+
+The directory in `Spec.SecretFiles[].Dir` is where the *workload* expects the
+files, because the broker has already baked it into `GIT_CONFIG_GLOBAL`,
+`KUBECONFIG` and `CLOOP_LEASE_DIR`. A driver that can honour it verbatim does:
+the container binds at it, Kubernetes mounts at it.
+
+The remote agent does not, and the difference is a threat-model boundary rather
+than a convenience. The hub has no idea what is writable on an edge device, and
+in this system's model the control plane is a party that can be compromised — so
+honouring an absolute path from a frame would hand a compromised hub a
+file-write primitive on every enrolled machine. The agent picks its own
+directory under a tmpfs, names it with the `cloop-lease-` prefix its own
+confinement rule recognises, and calls `Spec.RelocateSecrets` to move `Spec.Env`
+and `Spec.Secrets[].Dir`/`.Files` onto it. That last step is load-bearing:
+`vault.bind` indexes those paths for revocation, and a revoke naming a path the
+agent never wrote is a revoke that reports success having deleted nothing.
+
+### Modes, and read-only
+
+Files are created with the mode the grant asked for — `0600` for a token,
+`0700` for the credential helper git has to execute — and never with a group or
+other bit. Kubernetes is the one exception in form only: the projected volume
+asks for `0400` because the Pod sets `fsGroup` and the kubelet ORs group-read
+into a volume it owns, so `0400` lands as an effective `0440`. Asking for `0600`
+there would name a mode the kubelet does not preserve.
+
+Every mount is read-only. That is not decoration: a credential helper the
+workload could rewrite is a credential helper that answers for every
+repository, which would undo the only enforcement point a repository-scoped PAT
+has.
 
 ---
 

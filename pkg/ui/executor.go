@@ -306,8 +306,12 @@ func startWorkload(workDir string, argv []string, labels map[string]string) (exe
 	// would pull the credential files out from under a process that has not
 	// read them yet, so cleanup is deferred to a watcher that waits for the
 	// handle to reach a terminal state.
-	lease := acquireSecretLease(controlPlaneDir(), workDir, ex.ID())
-	spec := applyLease(uiSpec(workDir, argv, labels), lease)
+	lease := acquireSecretLease(controlPlaneDir(), workDir, ex)
+	spec, err := applyLease(uiSpec(workDir, argv, labels), ex, lease)
+	if err != nil {
+		lease.Close()
+		return nil, executor.Handle{}, err
+	}
 
 	// Repositories the lease opened from the hub's own filesystem. Before the
 	// sandbox check, so that a project whose executor cannot receive them is
@@ -434,14 +438,18 @@ func runWorkloadEnv(ctx context.Context, workDir string, argv, extraEnv []string
 		return nil, fmt.Errorf("no executor available for %s: %w", workDir, err)
 	}
 	// Run is synchronous, so the lease's lifetime is exactly this call's.
-	lease := acquireSecretLease(controlPlaneDir(), workDir, ex.ID())
+	lease := acquireSecretLease(controlPlaneDir(), workDir, ex)
 	defer lease.Close()
 
 	base := uiSpec(workDir, argv, labels)
 	if len(extraEnv) > 0 {
 		base.Env = append(os.Environ(), extraEnv...)
 	}
-	spec, err := applyRepoGrants(applyLease(base, lease), ex, lease)
+	spec, err := applyLease(base, ex, lease)
+	if err != nil {
+		return nil, err
+	}
+	spec, err = applyRepoGrants(spec, ex, lease)
 	if err != nil {
 		return nil, err
 	}

@@ -336,6 +336,10 @@ type record struct {
 	cancelPump context.CancelFunc
 	// killTimer enforces Spec.TimeoutMinutes; nil when unbounded.
 	killTimer *time.Timer
+	// secretStage holds the credential files bound into this container, so
+	// they can be wiped when it is terminal. Nil for a workload with no
+	// file-backed grants, which is the common case.
+	secretStage *secretStage
 
 	mu         sync.Mutex
 	state      executor.State
@@ -471,8 +475,16 @@ func (e *Executor) Capabilities() executor.Capabilities {
 		// bind it can actually make. It is the executor a developer wanting
 		// their local checkouts in a sandbox should be bound to.
 		SupportsHostMounts: true,
-		Platform:           runtime.GOOS,
-		Arch:               runtime.GOARCH,
+		// A lease's credential files are staged into a directory this driver
+		// creates and binds read-only at the path the workload's environment
+		// names — see secrets.go. SecretFilesFromHostPath stays false, and the
+		// pair is not a contradiction: the container runs on the hub and still
+		// cannot open a path the hub wrote, because it has a mount namespace
+		// of its own and runs as a different user.
+		SupportsSecretFiles:     true,
+		SecretFilesFromHostPath: false,
+		Platform:                runtime.GOOS,
+		Arch:                    runtime.GOARCH,
 	}
 }
 
@@ -517,7 +529,23 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, extraMounts []
 		return executor.Handle{}, err
 	}
 
-	req, err := e.buildRequest(spec, workDir, extraMounts)
+	// Credentials before anything that can fail cheaply, and torn down on
+	// every path that does not reach a running container. A staged credential
+	// outliving a start that never happened is the leak this ordering exists
+	// to prevent; the sandbox user is resolved the same way buildRequest does,
+	// because files the workload cannot read are not a delivery.
+	stage, err := stageSecretFiles(spec, e.sandboxUser(workDir))
+	if err != nil {
+		return executor.Handle{}, err
+	}
+	started := false
+	defer func() {
+		if !started {
+			stage.remove()
+		}
+	}()
+
+	req, err := e.buildRequest(spec, workDir, append(append([]mount(nil), extraMounts...), stage.mountList()...))
 	if err != nil {
 		return executor.Handle{}, err
 	}
@@ -596,7 +624,12 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, extraMounts []
 		name:      req.Name,
 		startedAt: time.Now(),
 		state:     executor.StateRunning,
+		// The staged credentials belong to this container now: they are wiped
+		// by finish, which every terminal path funnels through, rather than by
+		// the deferred cleanup above.
+		secretStage: stage,
 	}
+	started = true
 	rec.bus = logbus.New(rec.id, executor.StreamCombined, logbus.Options{})
 
 	e.mu.Lock()
@@ -663,6 +696,25 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, extraMounts []
 		StartedAt: rec.startedAt,
 		Image:     req.Image,
 	}, nil
+}
+
+// sandboxUser returns the "uid:gid" a rootful runtime should run the workload
+// as, or "" when the project directory's owner cannot be read.
+//
+// It is a method rather than an inline block in buildRequest because the
+// staging of credential files needs the same answer: files owned by the
+// control-plane user are unreadable to the sandbox, so secrets.go has to chown
+// to exactly this UID and must not re-derive it independently.
+func (e *Executor) sandboxUser(workDir string) string {
+	info, err := os.Stat(workDir)
+	if err != nil {
+		return ""
+	}
+	owner, ok := fileOwner(info)
+	if !ok {
+		return ""
+	}
+	return strconv.Itoa(owner.uid) + ":" + strconv.Itoa(owner.gid)
 }
 
 // resolveWorkDir validates and canonicalises the project directory. Unlike
@@ -908,10 +960,8 @@ func (e *Executor) buildRequest(spec executor.Spec, workDir string, extraMounts 
 	// leaves files readable on the host afterwards.
 	if e.rt.Rootless {
 		req.KeepID = true
-	} else if info, err := os.Stat(workDir); err == nil {
-		if owner, ok := fileOwner(info); ok {
-			req.User = strconv.Itoa(owner.uid) + ":" + strconv.Itoa(owner.gid)
-		}
+	} else {
+		req.User = e.sandboxUser(workDir)
 	}
 
 	// Environment: names into argv, values into the runtime CLI's own
@@ -1736,6 +1786,14 @@ func (e *Executor) finish(rec *record, state executor.State, exitCode int, errMs
 	if timer != nil {
 		timer.Stop()
 	}
+	// The workload is terminal, so the credentials bound into it have nobody
+	// left to serve. Wiping here rather than at container removal is
+	// deliberate: finish is the one funnel every terminal path goes through —
+	// normal exit, timeout kill, reaper, lost container — and a credential
+	// that survives one of those is a credential that survives on the host
+	// until the next reboot.
+	rec.secretStage.remove()
+
 	// Close the bus only after the status is final; see pump's doc comment.
 	rec.bus.Close()
 	if cancel != nil {

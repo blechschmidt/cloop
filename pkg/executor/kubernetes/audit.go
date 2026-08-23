@@ -69,6 +69,27 @@ func auditPod(ctx context.Context, opts Options, spec executor.Spec, workspaceSe
 	return ex.buildPodFor(ctx, spec, "audit", norm.Namespace, workspaceSecret)
 }
 
+// AuditCapabilities returns what this driver claims to support, without the
+// credential source a real constructor demands.
+//
+// Placement reads nothing else, so a conformance suite asserting "every backend
+// either delivers this or refuses it" needs the real answer from the real
+// driver — a table of capabilities written out in a test would agree with
+// itself forever while production drifted. New() cannot be used because it
+// insists on a kubeconfig grant, which is correct for a driver that would
+// otherwise fall back to host execution and useless for reading a struct.
+func AuditCapabilities(opts Options) (executor.Capabilities, error) {
+	if opts.Namespace == "" {
+		opts.Namespace = DefaultNamespace
+	}
+	norm, err := opts.Normalize()
+	if err != nil {
+		return executor.Capabilities{}, err
+	}
+	ex := &Executor{id: norm.ID, opts: norm, handles: make(map[string]*record)}
+	return ex.Capabilities(), nil
+}
+
 // AuditPodImage returns the image a Pod would actually be created with for
 // spec, or the error that refuses it.
 //

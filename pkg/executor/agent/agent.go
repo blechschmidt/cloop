@@ -172,6 +172,31 @@ type workload struct {
 	// reconnect that races the output pump cannot deliver two results — and,
 	// more to the point, cannot commit the tree twice.
 	wroteBack bool
+	// secrets is the credential files this device wrote for the workload, and
+	// the means to unlink them. Held on the workload rather than in the vault
+	// because the vault indexes by *lease* — which is the right key for a
+	// revocation and the wrong one for "this run ended, wipe what it was given".
+	// Nil when the lease delivered no files, which is most workloads.
+	secrets *placedSecrets
+}
+
+// setSecrets records the credential files placed for this workload.
+func (w *workload) setSecrets(p *placedSecrets) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.secrets = p
+}
+
+// takeSecrets removes and returns the placement, so a caller can wipe it
+// outside the lock and a second caller finds nothing left to wipe. Wiping under
+// w.mu would hold it across a handful of unlinks while the output pump wants it
+// to record a status.
+func (w *workload) takeSecrets() *placedSecrets {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	p := w.secrets
+	w.secrets = nil
+	return p
 }
 
 // writeBackSpec returns the workload's write-back plan, or false when there is

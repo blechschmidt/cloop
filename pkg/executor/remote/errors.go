@@ -71,6 +71,13 @@ var (
 	// operated on no code.
 	ErrWorkspaceUnsupported = errors.New("remote: agent does not support workspace provisioning")
 
+	// ErrSecretFilesUnsupported: the agent speaks a protocol version older than
+	// MinSecretFilesVersion, so it would ignore the credential files and run the
+	// harness with an environment naming paths nothing ever created. Placing a
+	// workload whose secret lease delivers files fails with this rather than
+	// producing a run whose git authentication fails for a reason nothing names.
+	ErrSecretFilesUnsupported = errors.New("remote: agent does not support secret credential files")
+
 	// ErrLeaseNotHeld: the agent was asked to revoke a lease it is not
 	// holding. It is reported, not raised — "the material is not here" is
 	// the end state a revocation wants — so callers treat it as success

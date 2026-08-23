@@ -426,14 +426,24 @@ func (c *client) deletePod(ctx context.Context, namespace, name string, gracePer
 // shipped RBAC grants create and delete only: this driver never reads a Secret
 // back, so the ability to do so would be authority nothing here needs.
 
-// secret models the fields this driver sets. StringData rather than Data
-// because the API server does the base64 for us, and a driver that encoded it
-// itself would be one more place a credential passes through unnecessarily.
+// secret models the fields this driver sets.
+//
+// Both value maps are here because the two kinds of material this driver puts
+// in a Secret have different requirements. The workspace token is a string, so
+// StringData carries it and the API server does the base64 — one fewer place a
+// credential passes through. A lease's credential *files* are bytes: a
+// gitconfig is text today, but nothing in executor.SecretFile promises that,
+// and routing arbitrary content through a Go string would mean any byte
+// sequence that is not valid UTF-8 reaches the workload silently mangled.
+// Data is the `data` field of the Secret wire format, which is base64 by
+// definition, and encoding/json base64-encodes a []byte for free — so using it
+// is both the binary-safe choice and no extra code.
 type secret struct {
 	APIVersion string            `json:"apiVersion,omitempty"`
 	Kind       string            `json:"kind,omitempty"`
 	Metadata   objectMeta        `json:"metadata"`
 	Type       string            `json:"type,omitempty"`
+	Data       map[string][]byte `json:"data,omitempty"`
 	StringData map[string]string `json:"stringData,omitempty"`
 }
 

@@ -117,32 +117,90 @@ func (lr *leaseRegistry) revoke(id string) (*secretLease, bool) {
 	return sl, true
 }
 
-// secretLease couples a lease to the mount holding its files, so a caller
-// has one thing to close.
+// secretLease couples a lease to whichever rendering of it the bound executor
+// can consume, so a caller has one thing to close.
+//
+// Exactly one of mount and delivery is set, and which one is a property of the
+// executor rather than of the lease:
+//
+//   - mount: the credentials are files in this host's tmpfs, and the workload
+//     will open them there. Only a driver that runs the workload directly on
+//     the control plane's filesystem (localprocess) can.
+//   - delivery: the credentials stayed in memory, and the driver is handed the
+//     bytes to place inside the sandbox — a container's own tmpfs, a
+//     Kubernetes Secret, an edge agent's confined lease directory.
+//
+// The asymmetry is the point. Writing plaintext into the hub's /dev/shm for a
+// workload that cannot open it produces a credential file on the control plane
+// that nothing ever reads, which is pure exposure.
 type secretLease struct {
-	broker *secretbroker.Broker
-	lease  *secretbroker.Lease
-	mount  *secretbroker.Mount
-	closer func()
+	broker   *secretbroker.Broker
+	lease    *secretbroker.Lease
+	mount    *secretbroker.Mount
+	delivery *secretbroker.Delivery
+	closer   func()
 
 	once sync.Once
 }
 
 // Env returns the environment additions for the workload, or nil.
 func (sl *secretLease) Env() []string {
-	if sl == nil || sl.mount == nil {
+	if sl == nil {
 		return nil
 	}
-	return sl.mount.Env()
+	if sl.mount != nil {
+		return sl.mount.Env()
+	}
+	return sl.delivery.Env()
 }
 
 // Mounts returns the local repositories this lease opened. Nil when the
 // project holds no local_repo grant, which is the overwhelmingly common case.
 func (sl *secretLease) Mounts() []secretbroker.RepoMount {
-	if sl == nil || sl.mount == nil {
+	if sl == nil {
 		return nil
 	}
-	return sl.mount.Mounts()
+	if sl.mount != nil {
+		return sl.mount.Mounts()
+	}
+	return sl.delivery.Mounts()
+}
+
+// SecretFiles returns the credential files the driver has to place, with their
+// contents. Empty for a hub-materialised lease, where the files already exist
+// at the paths the bindings name.
+func (sl *secretLease) SecretFiles() []executor.SecretFile {
+	if sl == nil || sl.delivery == nil {
+		return nil
+	}
+	raw := sl.delivery.Files()
+	if len(raw) == 0 {
+		return nil
+	}
+	out := make([]executor.SecretFile, 0, len(raw))
+	for _, f := range raw {
+		out = append(out, executor.SecretFile{
+			LeaseID: sl.lease.ID,
+			GrantID: f.GrantID,
+			Dir:     f.Dir,
+			Name:    f.Name,
+			Mode:    f.Mode,
+			Content: f.Content,
+		})
+	}
+	return out
+}
+
+// leaseBindings returns the per-grant attribution from whichever rendering is
+// in play.
+func (sl *secretLease) leaseBindings() []secretbroker.LeaseBinding {
+	if sl == nil {
+		return nil
+	}
+	if sl.mount != nil {
+		return sl.mount.Bindings()
+	}
+	return sl.delivery.Bindings()
 }
 
 // Bindings projects the mount's per-grant attribution onto the driver-facing
@@ -154,10 +212,10 @@ func (sl *secretLease) Mounts() []secretbroker.RepoMount {
 // is the difference between a lease TTL that binds the whole system and one
 // that binds only the hub.
 func (sl *secretLease) Bindings() []executor.SecretBinding {
-	if sl == nil || sl.lease == nil || sl.mount == nil {
+	if sl == nil || sl.lease == nil {
 		return nil
 	}
-	raw := sl.mount.Bindings()
+	raw := sl.leaseBindings()
 	out := make([]executor.SecretBinding, 0, len(raw))
 	for _, b := range raw {
 		out = append(out, executor.SecretBinding{
@@ -198,6 +256,13 @@ func (sl *secretLease) Close() {
 				fmt.Fprintf(os.Stderr, "ui: wipe secret lease: %v\n", err)
 			}
 		}
+		if sl.delivery != nil {
+			// Nothing to unlink — the plaintext never left this process — but
+			// the buffers holding it are zeroed rather than left for the
+			// garbage collector, so a heap dump taken an hour later does not
+			// contain a credential this hub merely relayed.
+			_ = sl.delivery.Close()
+		}
 		if sl.broker != nil && sl.lease != nil {
 			sl.broker.Release(sl.lease.ID)
 		}
@@ -207,12 +272,21 @@ func (sl *secretLease) Close() {
 	})
 }
 
-// acquireSecretLease leases and materialises the credentials for a workload.
+// acquireSecretLease leases the credentials for a workload and renders them
+// for the executor that will run it.
 //
 // It returns nil (not an error) when there is nothing to deliver, so callers
 // can treat "no secrets" and "broker not configured" identically: both mean
 // "start the workload with its ordinary environment".
-func acquireSecretLease(controlPlaneDir, workDir, executorID string) *secretLease {
+//
+// The executor is a parameter rather than an ID because *where* the plaintext
+// goes is its decision. See secretLease: a lease bound for an isolated sandbox
+// is never written to this host at all.
+func acquireSecretLease(controlPlaneDir, workDir string, ex executor.Executor) *secretLease {
+	executorID := ""
+	if ex != nil {
+		executorID = ex.ID()
+	}
 	broker, closeDB, err := openUIBroker(controlPlaneDir)
 	if err != nil {
 		// Not configured is the common case and is not worth a log line on
@@ -241,14 +315,31 @@ func acquireSecretLease(controlPlaneDir, workDir, executorID string) *secretLeas
 		return nil
 	}
 
-	mount, err := lease.Materialize("")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "ui: materialize secret lease: %v\n", err)
-		broker.Release(lease.ID)
-		closeDB()
-		return nil
+	sl := &secretLease{broker: broker, lease: lease, closer: closeDB}
+	if ex != nil && ex.Capabilities().SecretFilesFromHostPath {
+		mount, merr := lease.Materialize("")
+		if merr != nil {
+			fmt.Fprintf(os.Stderr, "ui: materialize secret lease: %v\n", merr)
+			broker.Release(lease.ID)
+			closeDB()
+			return nil
+		}
+		sl.mount = mount
+	} else {
+		// The sandbox will find its credentials here; the driver is
+		// responsible for putting them there. Nothing is written on this host,
+		// which is why a hub can broker a kubeconfig to a Kubernetes executor
+		// or a PAT to an edge device without ever holding the plaintext on a
+		// filesystem of its own.
+		delivery, derr := lease.Deliver(secretbroker.SandboxLeaseDir(lease.ID))
+		if derr != nil {
+			fmt.Fprintf(os.Stderr, "ui: prepare secret lease: %v\n", derr)
+			broker.Release(lease.ID)
+			closeDB()
+			return nil
+		}
+		sl.delivery = delivery
 	}
-	sl := &secretLease{broker: broker, lease: lease, mount: mount, closer: closeDB}
 	// Registered only once the credentials actually exist on disk: every
 	// earlier return path has already released the lease, and a registry
 	// entry for one of those would offer a revoke button for a lease that
@@ -302,21 +393,45 @@ func isBrokerUnconfigured(err error) bool {
 		errors.Is(err, secretbroker.ErrNoKey)
 }
 
-// applyLease appends a lease's environment to a spec.
+// applyLease appends a lease's environment — and, for an isolating executor,
+// its credential files — to a spec.
 //
 // Spec.Env nil means "inherit the control plane's environment", which is the
 // behaviour every existing UI spawn relies on. Adding lease variables means
 // we must now materialise that inheritance explicitly, or the workload would
 // lose everything it used to get from the server's environment.
-func applyLease(spec executor.Spec, sl *secretLease) executor.Spec {
+//
+// The refusal is the part worth reading. A lease can carry files, and files
+// are how the interesting grants enforce themselves: a repository-scoped
+// github_pat ships a credential helper, a token file and a gitconfig, and
+// deliberately exports no bare GITHUB_TOKEN, because an environment variable
+// is unscoped by construction. An executor that cannot receive files therefore
+// receives *nothing usable* from such a grant while still receiving the
+// variables that name the missing paths — a sandbox that starts, runs, and
+// fails to authenticate to git with nothing in its transcript pointing at the
+// cause. So the combination is refused here, typed as ErrUnsupported, before
+// anything starts.
+func applyLease(spec executor.Spec, ex executor.Executor, sl *secretLease) (executor.Spec, error) {
 	env := sl.Env()
 	if len(env) == 0 {
-		return spec
+		return spec, nil
 	}
 	// Attribution travels with the material. Without it the executor sees an
 	// environment it cannot take anything back out of, and a revocation could
 	// only ever kill the workload — see pkg/executor.SecretBinding.
 	spec.Secrets = append(spec.Secrets, sl.Bindings()...)
+	spec.SecretFiles = append(spec.SecretFiles, sl.SecretFiles()...)
+
+	if spec.NeedsSecretFiles() && ex != nil && !ex.Capabilities().SupportsSecretFiles {
+		return spec, fmt.Errorf(
+			"%w: executor %s (%s) cannot deliver credential files to the workload, but this "+
+				"project's grants for %s deliver %s as files. Placing the workload there would "+
+				"leave it holding paths it cannot open and, for a repository-scoped github_pat, "+
+				"no token at all. Bind the project to a container or Kubernetes executor, or "+
+				"upgrade the remote agent",
+			executor.ErrUnsupported, ex.ID(), ex.Kind(),
+			strings.Join(sl.lease.SecretNames(), ", "), describeSecretFileKinds(sl))
+	}
 
 	base := spec.Env
 	if base == nil {
@@ -326,7 +441,34 @@ func applyLease(spec executor.Spec, sl *secretLease) executor.Spec {
 	merged = append(merged, base...)
 	merged = append(merged, env...)
 	spec.Env = merged
-	return spec
+	return spec, nil
+}
+
+// describeSecretFileKinds names the credential kinds in this lease that are
+// delivered as files, so a refusal says which grant is the problem rather than
+// leaving the operator to work it out from a list of every secret they hold.
+func describeSecretFileKinds(sl *secretLease) string {
+	seen := make(map[string]struct{})
+	var kinds []string
+	for _, b := range sl.leaseBindings() {
+		if len(b.Files) == 0 {
+			continue
+		}
+		k := string(b.Kind)
+		if k == "" {
+			k = "unknown"
+		}
+		if _, dup := seen[k]; dup {
+			continue
+		}
+		seen[k] = struct{}{}
+		kinds = append(kinds, k)
+	}
+	if len(kinds) == 0 {
+		return "credentials"
+	}
+	sort.Strings(kinds)
+	return strings.Join(kinds, ", ")
 }
 
 // applyRepoGrants attaches the local repositories a lease opened to the spec,

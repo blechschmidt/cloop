@@ -25,6 +25,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/executor"
+
 	"github.com/blechschmidt/cloop/pkg/authz"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
 	"github.com/blechschmidt/cloop/pkg/secretstore"
@@ -219,7 +221,14 @@ func TestSecretsAPINeverDisclosesLeaseMaterial(t *testing.T) {
 	// The real lease. Registering it in liveLeases is what acquireSecretLease
 	// does on the spawn path, so this exercises the same registry the handler
 	// reads.
-	lease := acquireSecretLease(dir, "/srv/leaseproj", "edge-lease")
+	// SecretFilesFromHostPath is what makes the credentials land on this
+	// machine's disk, which is the precondition for the assertion below that
+	// they never reach the API response. An isolating executor would keep them
+	// in memory and the on-disk check would be vacuous.
+	lease := acquireSecretLease(dir, "/srv/leaseproj", stubExec{
+		id:   "edge-lease",
+		caps: executor.Capabilities{SupportsSecretFiles: true, SecretFilesFromHostPath: true},
+	})
 	if lease == nil {
 		t.Fatal("acquireSecretLease returned nil — the fixture did not produce a lease, so this test would be vacuous")
 	}

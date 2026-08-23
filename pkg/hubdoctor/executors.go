@@ -150,6 +150,7 @@ func executorFinding(ctx context.Context, ex executor.Executor, opts Options) Fi
 		"virtualized":     caps.Virtualized,
 		"workspace":       caps.SupportsWorkspaceProvisioning,
 		"write_back":      caps.SupportsWriteBack,
+		"secret_files":    caps.SupportsSecretFiles,
 		"network_egress":  caps.NetworkEgress,
 		"resource_limits": caps.SupportsResourceLimits,
 	}

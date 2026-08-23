@@ -507,6 +507,34 @@ func (a *Agent) handleStart(ctx context.Context, sess *deviceSession, frame remo
 	}
 
 	spec := payload.Spec
+
+	// Place the lease's credential files first, because everything below
+	// depends on where they actually landed.
+	//
+	// The hub declares a nominal directory it has no way to know is writable
+	// here; this device picks its own and rewrites the Spec onto it. Doing that
+	// *before* vault.bind is what makes revocation work at all — bind indexes
+	// Spec.Secrets[].Dir and .Files, and indexing the hub's nominal path would
+	// give this agent a lease it can report on and cannot scrub. A failed
+	// placement fails the start: a harness launched with an environment naming
+	// credential files that were never written authenticates against nothing and
+	// says so minutes later, in a transcript that cannot explain itself.
+	placed, err := a.materializeSecretFiles(&spec, payload.CredentialFiles())
+	if err != nil {
+		a.forget(handleID)
+		a.reply(ctx, sess, remote.TypeStarted, frame.ID, handleID, remote.StartedPayload{
+			HandleID: handleID,
+			Error:    err.Error(),
+		})
+		return
+	}
+	// Recorded on the workload immediately, so every failure path below — and
+	// the workload's own end — reaches the wipe through forget().
+	wl.setSecrets(placed)
+	if placed != nil {
+		a.cfg.logf("workload %s: placed %s", handleID, describeSecretFiles(placed))
+	}
+
 	// Index the lease material before anything can run with it. A revoke that
 	// arrives between here and the launch finds the binding and scrubs it;
 	// binding afterwards would leave a window in which the credential is live
@@ -954,6 +982,14 @@ func (a *Agent) forget(handleID string) {
 		// start already failed. Continuing would spend the device's uplink on a
 		// clone nobody will use.
 		wl.cancelProvisioning()
+		// Take the credential files back. This is the only exit every workload
+		// passes through — a refused start, a killed run, a workload the hub
+		// disowned, and the ordinary finish in deliverFinal all arrive here — so
+		// it is the one place where "an edge device does not accumulate the
+		// plaintext of every credential it has ever been handed" can be made
+		// true. A revoke that already scrubbed the files leaves nothing to do:
+		// wipeCredentialFile treats a missing file as the desired end state.
+		wl.takeSecrets().wipe(a.cfg.logf)
 	}
 	// The material went with the process. Dropping the binding keeps the
 	// vault from reporting a lease as held by a workload that is gone, which

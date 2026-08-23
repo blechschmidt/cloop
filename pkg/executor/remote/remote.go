@@ -228,6 +228,13 @@ func (e *Executor) Capabilities() executor.Capabilities {
 		if !SupportsWriteBack(sess.Version()) {
 			caps.SupportsWriteBack = false
 		}
+		// Nothing about the device narrows this one — writing a file needs no
+		// tool — so the session's version is the whole question. A pre-v6 agent
+		// has no frame field to receive the bytes in, and placement must see
+		// that before it routes a lease that delivers files here.
+		if !SupportsSecretFiles(sess.Version()) {
+			caps.SupportsSecretFiles = false
+		}
 	}
 	return caps
 }
@@ -338,6 +345,31 @@ func (e *Executor) Start(ctx context.Context, spec executor.Spec) (handle execut
 			spec.Workspace.Repo, MinWorkspaceVersion)
 	}
 
+	// And the same rule for the lease's credential files. An older agent ignores
+	// StartPayload.SecretFiles exactly as it ignores any unknown field, then runs
+	// the harness with GIT_CONFIG_GLOBAL, KUBECONFIG and CLOOP_LEASE_DIR all
+	// naming a directory that was never created on that machine — so the failure
+	// surfaces minutes later as an authentication error the transcript cannot
+	// explain. Refusing here is the only place it can be named.
+	if spec.NeedsSecretFiles() && !SupportsSecretFiles(sess.Version()) {
+		return executor.Handle{}, fmt.Errorf(
+			"%w: agent %s (%s) speaks protocol v%d but %s is delivered to this workload as credential "+
+				"files the device has to write (needs v%d); upgrade the agent with "+
+				"`cloop executor agent install --upgrade`, or remove the grant from this project",
+			ErrSecretFilesUnsupported, e.id, e.name, sess.Version(),
+			describeSecretFiles(spec), MinSecretFilesVersion)
+	}
+
+	// Convert and bound the credential files here, before a credential is leased
+	// or a handle row is written, so a lease that cannot fit in a start frame
+	// fails naming the files rather than surfacing later as an oversized-payload
+	// protocol error from the device. The same check runs on the receiving side;
+	// see ValidateSecretFiles for why both.
+	secretFiles := NewSecretFiles(spec.SecretFiles)
+	if err := ValidateSecretFiles(secretFiles); err != nil {
+		return executor.Handle{}, fmt.Errorf("remote: start on agent %s: %w", e.id, err)
+	}
+
 	// Lease the workspace credential at the last possible moment and give it
 	// back as soon as the agent confirms the start: from that point the device
 	// holds the material, and a lease left open here is a credential the broker
@@ -437,6 +469,20 @@ func (e *Executor) Start(ctx context.Context, spec executor.Spec) (handle execut
 			ExpiresAt: cred.ExpiresAt,
 		}
 	}
+	// The lease's credential files travel beside the Spec too, and for a reason
+	// the Spec cannot express: executor.Spec.SecretFiles is json:"-", so the
+	// bytes are simply absent from the marshalled Spec however the caller filled
+	// it in. Carrying them here is what turns "the environment names a token
+	// file" into "the token file exists on the machine running the harness".
+	//
+	// Guarded by the session version because the field is invisible to an older
+	// agent; the Start gate above has already refused the workloads that would
+	// notice, so this is the belt to that braces — a spec that needs no files
+	// still sends none, and one that does never reaches here on a v5 session.
+	if len(secretFiles) > 0 && SupportsSecretFiles(sess.Version()) {
+		payload.SecretFiles = secretFiles
+	}
+
 	frame, err := sess.frame(TypeStart, newCorrelationID(), handleID, payload)
 	if err != nil {
 		e.dropHandle(handleID)
@@ -1074,6 +1120,22 @@ func describeBindings(bindings []executor.SecretBinding) string {
 		return "the brokered credential " + names[0]
 	}
 	return "brokered credentials " + strings.Join(names, ", ")
+}
+
+// describeSecretFiles names the credential whose files a device would have to
+// place, for a refusal an operator can act on.
+//
+// It falls back rather than calling describeBindings unconditionally because
+// the two ways a Spec can need files are not the same shape: a lease that
+// delivered bindings has names to quote, while a Spec carrying only
+// SecretFiles — which a caller assembling one by hand may legitimately do — has
+// nothing but bytes, and "brokered credentials " with an empty list after it
+// would be worse than a generic phrase.
+func describeSecretFiles(spec executor.Spec) string {
+	if len(spec.Secrets) > 0 {
+		return describeBindings(spec.Secrets)
+	}
+	return "a brokered credential"
 }
 
 // newCorrelationID returns an ID for matching a response to its request.

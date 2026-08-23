@@ -178,6 +178,42 @@ type Capabilities struct {
 	// mount namespace to bind into can honour the field, and a driver that
 	// ignored it would start a harness whose /repos is empty.
 	SupportsHostMounts bool `json:"supports_host_mounts"`
+	// SupportsSecretFiles reports whether the credential *files* a secret
+	// lease produces actually reach the workload.
+	//
+	// It is the flag whose absence was silent, and expensively so. A lease's
+	// environment travelled everywhere; its files were written into the hub's
+	// own /dev/shm and named in Spec.Env, which is a delivery only for a
+	// workload running on the hub's filesystem. Every isolating driver
+	// forwarded the variable and dropped the file. A repo-scoped github_pat
+	// delivers its *whole enforcement* as files — a credential helper, a token
+	// file, a gitconfig exported through GIT_CONFIG_GLOBAL — and deliberately
+	// exports no bare token unless the grant is unrestricted, so what arrived
+	// in the sandbox was a path that did not exist and no credential at all.
+	//
+	// False here refuses such a workload at placement time (see
+	// Requirements.RequireSecretFiles) instead of starting a sandbox whose git
+	// authentication will fail for a reason nothing names.
+	SupportsSecretFiles bool `json:"supports_secret_files"`
+	// SecretFilesFromHostPath reports whether the workload reads those files
+	// straight off the control-plane host's filesystem, at the path the hub
+	// wrote them to.
+	//
+	// It decides *who materialises*, which is a different question from
+	// whether files are supported at all, and the two cannot be collapsed.
+	// localprocess reads hub paths, so the hub writes the plaintext and the
+	// process opens it. A container also runs on the hub — SharesHostFilesystem
+	// is true for it — and still cannot read that directory: it has a mount
+	// namespace of its own, and the lease directory is 0700 owned by the hub
+	// user while the sandbox runs as an unprivileged UID. So the container
+	// driver takes the bytes and stages its own copy, and the hub writes no
+	// plaintext at all. Kubernetes and remote are further out again.
+	//
+	// The rule this field encodes: the hub materialises a credential only for
+	// a backend that will genuinely read it from there. Anywhere else, writing
+	// it would create a plaintext file on the control plane that nothing ever
+	// opens.
+	SecretFilesFromHostPath bool `json:"secret_files_from_host_path,omitempty"`
 	// MaxConcurrent is the advertised ceiling on simultaneously running
 	// handles; 0 means unbounded/unknown.
 	MaxConcurrent int `json:"max_concurrent,omitempty"`
@@ -292,6 +328,19 @@ type Spec struct {
 	// leases that produced them, so a driver can take an individual
 	// credential back mid-run. See SecretBinding.
 	Secrets []SecretBinding `json:"secrets,omitempty"`
+
+	// SecretFiles carries the *contents* of those credential files, for a
+	// driver that has to place them itself because the workload cannot read
+	// the control plane's filesystem. Empty when the hub materialised them
+	// (see Capabilities.SecretFilesFromHostPath) — then Secrets[].Files
+	// already names paths the workload can open.
+	//
+	// json:"-" is a hard rule, not a default. This is the one field of a Spec
+	// that holds plaintext, and a Spec is persisted by pkg/executorstore,
+	// echoed into the audit trail, and re-read by reconcile after a restart.
+	// A wire format that legitimately needs the bytes opts in with a type of
+	// its own; see remote.StartPayload.SecretFiles.
+	SecretFiles []SecretFile `json:"-"`
 
 	// Workspace says how the source tree gets into WorkDir. It carries no
 	// credential — only the name of a grant — for the reasons set out in
@@ -415,6 +464,13 @@ func (s Spec) Validate() error {
 	if err := ValidateHostMounts(s.HostMounts); err != nil {
 		return err
 	}
+	// Checked here as well as by the driver that writes them, and for the same
+	// reason: a bare file name is what stops a crafted secret from becoming an
+	// arbitrary-file-write on whichever host ends up materialising it, and the
+	// Spec crosses a process boundary on the remote path.
+	if err := ValidateSecretFiles(s.SecretFiles); err != nil {
+		return err
+	}
 	if err := s.Workspace.Validate(); err != nil {
 		return err
 	}
@@ -491,6 +547,7 @@ func (s Spec) SandboxRequirements() Requirements {
 		RequireWorkspaceProvisioning:   s.Workspace.NeedsProvisioning(),
 		RequireHostFilesystemWorkspace: s.Workspace.Kind == WorkspaceBind,
 		RequireWriteBack:               s.WriteBack.Enabled(),
+		RequireSecretFiles:             s.NeedsSecretFiles(),
 	}
 }
 

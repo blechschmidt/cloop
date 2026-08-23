@@ -221,8 +221,16 @@ func (e *Executor) Capabilities() executor.Capabilities {
 		// runs in the host's filesystem has already answered the workspace
 		// question, and a reader should not have to infer that from an absence.
 		SupportsWorkspaceProvisioning: false,
-		Platform:                      runtime.GOOS,
-		Arch:                          runtime.GOARCH,
+		// This is the one driver whose workload opens the control plane's own
+		// files, so it is the one the hub may materialise a lease for: the
+		// tmpfs directory the broker writes is the directory the process
+		// reads. Every isolating driver reports SecretFilesFromHostPath false
+		// and is handed the bytes instead, which is why a sandboxed run leaves
+		// no plaintext on the hub at all.
+		SupportsSecretFiles:     true,
+		SecretFilesFromHostPath: true,
+		Platform:                runtime.GOOS,
+		Arch:                    runtime.GOARCH,
 	}
 }
 

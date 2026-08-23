@@ -500,6 +500,12 @@ type record struct {
 	// tree. It is what lets the watcher drop the credential Secret the moment
 	// the init container finishes. See workspace.go.
 	ws *workspaceState
+	// leaseFiles is the secret-lease credential-file state, nil when the Spec
+	// carried none. Unlike ws it has no early drop: the files are read by the
+	// harness for the whole of the run — a credential helper is invoked every
+	// time git talks to a remote — so the Secret lives until the workload does
+	// not. See secretfiles.go.
+	leaseFiles *secretFilesState
 	// wantWriteBack is the write-back this workload was dispatched with, so a
 	// Pod that produced no report can be told apart from one that was never
 	// asked for anything. Outside the mutex because it is written once, before
@@ -634,6 +640,17 @@ func (e *Executor) Capabilities() executor.Capabilities {
 		// harness would report that the repository is empty. Refusing at
 		// placement is the only outcome that points at the deployment.
 		SupportsHostMounts: false,
+		// The credential files a secret lease produces are projected as a
+		// per-run Secret, mounted read-only at the directory the workload's
+		// environment already names (see secretfiles.go).
+		//
+		// SecretFilesFromHostPath is false and the two are not in tension: the
+		// hub's filesystem is not reachable from a node, and this driver never
+		// writes the material to a node's disk either — the kubelet keeps a
+		// secret volume on tmpfs. So the plaintext exists in etcd for the
+		// length of one run and in the Pod's memory, and nowhere else.
+		SupportsSecretFiles:     true,
+		SecretFilesFromHostPath: false,
 		// True unconditionally, including when Options.Workspace is nil: what
 		// this advertises is that the driver *materialises the tree*, which it
 		// does with an init container that needs no broker for a public
@@ -791,14 +808,16 @@ func (e *Executor) Start(ctx context.Context, spec executor.Spec) (executor.Hand
 	}
 
 	// From here every failure path must release the lease, drop any workspace
-	// credential already written into the cluster, remove any NetworkPolicy it
-	// created, and close the client — or a refused Start leaks a credential the
-	// broker still thinks is held, a Secret nothing will ever consume, or a
-	// policy no Pod will ever be governed by. ws and policyName are assigned
-	// below and read through the closure, so the same release() is correct
-	// before and after either exists.
+	// credential already written into the cluster, drop any leased credential
+	// files likewise, remove any NetworkPolicy it created, and close the client
+	// — or a refused Start leaks a credential the broker still thinks is held, a
+	// Secret nothing will ever consume, or a policy no Pod will ever be governed
+	// by. ws, leaseFiles and policyName are assigned below and read through the
+	// closure, so the same release() is correct before and after any of them
+	// exists.
 	var (
 		ws         *workspaceState
+		leaseFiles *secretFilesState
 		policyName string
 	)
 	handleID := newHandleID()
@@ -806,6 +825,7 @@ func (e *Executor) Start(ctx context.Context, spec executor.Spec) (executor.Hand
 	release := func() {
 		e.discardWorkspaceSecret(ws, cli,
 			"the workload was never started, so the tree was never fetched")
+		e.discardSecretFiles(leaseFiles, cli)
 		e.deleteNetworkPolicyDetached(cli, namespace, policyName)
 		cli.close()
 		e.opts.Credentials.Release(creds.LeaseID)
@@ -817,6 +837,16 @@ func (e *Executor) Start(ctx context.Context, spec executor.Spec) (executor.Hand
 	// so a Start that created the Pod first would work only by winning a race
 	// it never has to enter.
 	ws, err = e.provisionWorkspace(ctx, spec, cli, handleID, namespace, projectID)
+	if err != nil {
+		release()
+		return executor.Handle{}, err
+	}
+
+	// Before the Pod for the same reason, one step stronger: a Pod whose volume
+	// names a Secret that does not exist is not started at all — the kubelet
+	// parks it in ContainerCreating and retries — so creating the Pod first
+	// would trade a guaranteed ordering for a race with nothing to gain.
+	leaseFiles, err = e.provisionSecretFiles(ctx, spec, cli, handleID, namespace)
 	if err != nil {
 		release()
 		return executor.Handle{}, err
@@ -885,6 +915,7 @@ func (e *Executor) Start(ctx context.Context, spec executor.Spec) (executor.Hand
 		leaseID:           creds.LeaseID,
 		leaseExp:          creds.ExpiresAt,
 		ws:                ws,
+		leaseFiles:        leaseFiles,
 
 		wantWriteBack: spec.WriteBack,
 	}
@@ -1115,6 +1146,7 @@ func (e *Executor) podRequestFor(ctx context.Context, spec executor.Spec, handle
 		Workspace:             spec.Workspace,
 		WriteBack:             spec.WriteBack,
 		WorkspaceSecretName:   workspaceSecret,
+		SecretFiles:           spec.SecretFiles,
 
 		ActiveDeadlineSeconds:         e.opts.ActiveDeadlineSeconds,
 		TerminationGracePeriodSeconds: int64(e.opts.TerminationGracePeriod / time.Second),
@@ -1136,6 +1168,18 @@ func (e *Executor) podRequestFor(ctx context.Context, spec executor.Spec, handle
 	// a control-plane restart, where a timer would not.
 	if d := spec.Timeout(); d > 0 {
 		req.ActiveDeadlineSeconds = int64(d / time.Second)
+	}
+
+	// The lease Secret's name is derived here rather than threaded in the way
+	// workspaceSecret is, because the two questions are different shapes. A
+	// workspace can legitimately need no Secret at all — a public repository is
+	// fetched unauthenticated — so only the create path knows whether one
+	// exists, and an empty name is how it says so. Here the Spec itself is the
+	// discriminator: files present means a Secret was created for them, under a
+	// name that is a pure function of the handle ID, computed by the same
+	// function on both sides.
+	if len(spec.SecretFiles) > 0 {
+		req.SecretFilesSecretName = secretFilesSecretName(handleID)
 	}
 
 	return req, nil
@@ -2244,6 +2288,7 @@ func (e *Executor) finish(rec *record, state executor.State, exitCode int, errMs
 	leaseID := rec.leaseID
 	rec.leaseID = ""
 	ws := rec.ws
+	leaseFiles := rec.leaseFiles
 	// The egress policy is dropped only when the workload actually stopped.
 	// Close finishes every live handle with StateUnknown and deliberately
 	// leaves its Pods running, so a hub restarting for an upgrade would
@@ -2259,6 +2304,18 @@ func (e *Executor) finish(rec *record, state executor.State, exitCode int, errMs
 
 	// Before cli.close(): the deletes need the client this record owns.
 	e.discardWorkspaceSecret(ws, cli, "")
+	// Unconditional, not gated on a terminal state the way the egress policy
+	// is, and the asymmetry is deliberate. Removing a policy from a Pod that is
+	// still running *widens* what it can reach, which is the one thing cleanup
+	// must never do. Removing this Secret narrows: the kubelet has already
+	// projected the files into the Pod's tmpfs and does not clear them when the
+	// source disappears, so a workload the hub is walking away from keeps the
+	// credentials it is using while the durable copy in etcd — which nothing
+	// will renew or revoke once this process is gone — stops existing. The
+	// honest cost is a Pod that had not yet mounted the volume, which will stay
+	// in ContainerCreating; the material is short-lived on the broker's own TTL
+	// anyway, so that run was going to fail regardless.
+	e.discardSecretFiles(leaseFiles, cli)
 	e.deleteNetworkPolicyDetached(cli, rec.namespace, policyName)
 	// Past the rec.done guard above, so a double finish — the pump and an
 	// explicit reap racing on the same handle — drops the row once.

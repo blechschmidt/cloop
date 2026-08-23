@@ -171,6 +171,17 @@ inspected as text.
 The result: `git clone`, `git push` and `gh` inside `myorg/*` work normally, and
 the same commands against `otherorg/private` fail to authenticate.
 
+**Those three files have to reach the sandbox for any of this to be true**, and
+which executor you are bound to decides how they get there. The hub writes them
+to its own disk only for the host-process driver; a container gets a private
+per-run tmpfs bind-mounted read-only, a Pod gets a per-run Secret projected
+read-only, and an edge device is sent the bytes on the start frame and writes
+them itself. An executor that cannot receive files at all — an agent below
+protocol v6 — refuses the run with the `secret_files` placement constraint
+rather than starting a sandbox that would hold `GIT_CONFIG_GLOBAL` pointing at
+nothing and no token behind it. See
+[Secret file delivery](../architecture/executors.md#secret-file-delivery).
+
 **`github_app`** is minted and granted identically — `--kind github_app` with an
 installation JSON payload — and is constrained by the same `--repos` /
 `--permissions` flags.
@@ -487,9 +498,14 @@ all there, because the absence *is* the default.
 
 ### Not every executor can receive it
 
-**This is the one grant an executor can refuse, and the refusal is the part to
-read before you rely on it.** The same grant reaches a workload three different
-ways, and which one is correct is a property of the driver:
+**This grant is the one an executor can refuse outright, and the refusal is the
+part to read before you rely on it.** (The other refusal is `secret_files`,
+which is about an executor that cannot receive a lease's *files* — see
+[Secret file delivery](../architecture/executors.md#secret-file-delivery). This
+one is narrower and harder: it is about an executor that cannot reach the hub's
+filesystem at all, which no protocol version fixes.) The same grant reaches a
+workload three different ways, and which one is correct is a property of the
+driver:
 
 | Executor | What happens | `SupportsHostMounts` |
 | --- | --- | --- |

@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -238,29 +239,16 @@ func leaseBaseDir(override string) string {
 	return os.TempDir()
 }
 
-// Materialize writes the lease's credentials into a private directory and
-// returns the Mount describing it. baseDir may be empty to use a tmpfs.
+// render lays the lease out against dir without touching a filesystem: which
+// environment variables it produces, which files belong where, and how each
+// grant is attributed.
 //
-// The caller must Close the Mount when the workload exits. Failure partway
-// through cleans up what was already written rather than leaving credential
-// files behind.
-func (l *Lease) Materialize(baseDir string) (*Mount, error) {
-	if l == nil {
-		return nil, wrapf(ErrLeaseNotFound, "nil lease")
-	}
-	dir, err := os.MkdirTemp(leaseBaseDir(baseDir), "cloop-lease-")
-	if err != nil {
-		return nil, fmt.Errorf("secretbroker: create lease dir: %w", err)
-	}
-	// MkdirTemp already creates 0700, but say so explicitly: the guarantee
-	// that no other user on the host can read these files is the reason the
-	// directory exists at all, and it should not rest on a default.
-	if err := os.Chmod(dir, 0o700); err != nil {
-		_ = os.RemoveAll(dir)
-		return nil, fmt.Errorf("secretbroker: secure lease dir: %w", err)
-	}
-
-	m := &Mount{Dir: dir}
+// It is shared by Materialize and Deliver so the two delivery paths cannot
+// disagree about what a lease means. That mattered the moment a second path
+// existed: an isolated executor computes its environment from a directory it
+// will create itself, and a second implementation of "what does GIT_CONFIG_GLOBAL
+// point at" is how the sandbox ends up with a variable naming nothing.
+func (l *Lease) render(dir string) (env []string, files []placedFile, bindings []LeaseBinding, mounts []RepoMount, err error) {
 	envMap := make(map[string]string)
 
 	for _, mat := range l.Materials {
@@ -276,11 +264,20 @@ func (l *Lease) Materialize(baseDir string) (*Mount, error) {
 			binding.EnvKeys = append(binding.EnvKeys, k)
 		}
 		for _, f := range mat.Files {
-			path, werr := m.writeFile(f)
-			if werr != nil {
-				_ = m.Close()
-				return nil, werr
+			name, nerr := leaseFileName(f)
+			if nerr != nil {
+				return nil, nil, nil, nil, nerr
 			}
+			path := filepath.Join(dir, name)
+			files = append(files, placedFile{
+				GrantID:    mat.GrantID,
+				SecretName: mat.SecretName,
+				Kind:       mat.Kind,
+				Name:       name,
+				Path:       path,
+				Mode:       leaseFileMode(f),
+				Content:    f.Content,
+			})
 			binding.Files = append(binding.Files, path)
 			if f.EnvVar != "" {
 				if f.EnvIsDir {
@@ -293,22 +290,21 @@ func (l *Lease) Materialize(baseDir string) (*Mount, error) {
 		}
 		// Mounts need no writing — the path is already there and the grant
 		// is the right to reach it — but they are re-validated here rather
-		// than trusted from the Material. materialFor and Materialize can be
+		// than trusted from the Material. materialFor and this call can be
 		// separated by a store round trip, and a bind is the one material
 		// that hands over a host path verbatim.
 		for _, rm := range mat.Mounts {
-			if err := rm.validate(); err != nil {
-				_ = m.Close()
-				return nil, err
+			if verr := rm.validate(); verr != nil {
+				return nil, nil, nil, nil, verr
 			}
 			binding.Mounts = append(binding.Mounts, rm)
-			m.mounts = append(m.mounts, rm)
+			mounts = append(mounts, rm)
 		}
 		// Sorted so the binding — which ends up in an audit row and in a
 		// revoke frame — is stable across runs rather than reflecting Go's
 		// randomised map order.
 		sort.Strings(binding.EnvKeys)
-		m.bindings = append(m.bindings, binding)
+		bindings = append(bindings, binding)
 	}
 
 	// CLOOP_LEASE_DIR lets a workload find its own credential directory
@@ -326,37 +322,309 @@ func (l *Lease) Materialize(baseDir string) (*Mount, error) {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
-	m.env = make([]string, 0, len(keys))
+	env = make([]string, 0, len(keys))
 	for _, k := range keys {
-		m.env = append(m.env, k+"="+envMap[k])
+		env = append(env, k+"="+envMap[k])
 	}
-	return m, nil
+	return env, files, bindings, mounts, nil
 }
 
-// writeFile places one credential file in the mount directory.
-func (m *Mount) writeFile(f File) (string, error) {
+// placedFile is one credential file after render has decided where it goes.
+type placedFile struct {
+	GrantID    string
+	SecretName string
+	Kind       Kind
+	Name       string
+	Path       string
+	Mode       os.FileMode
+	Content    []byte
+}
+
+// leaseFileName validates and returns the bare name a credential file gets.
+//
+// A file name is attacker-influenced only if a stored constraint is, but the
+// cost of checking is a strings.Contains and the cost of not checking is an
+// arbitrary-file-write primitive — on whichever host ends up materialising the
+// lease, which since Deliver exists may not be this one.
+//
+// "." needs its own clause: filepath.Base(".") is ".", so it slips past the
+// Base comparison, and Join(dir, ".") is the lease directory itself. Nothing
+// escapes, but without the check the rejection arrives as a raw "is a
+// directory" I/O error rather than ErrInvalidSecret, and a caller switching on
+// the sentinel would misclassify a malformed name as a disk problem.
+func leaseFileName(f File) (string, error) {
 	name := strings.TrimSpace(f.Name)
-	// A file name is attacker-influenced only if a stored constraint is,
-	// but the cost of checking is a strings.Contains and the cost of not
-	// checking is an arbitrary-file-write primitive.
-	//
-	// "." needs its own clause: filepath.Base(".") is ".", so it slips past
-	// the Base comparison, and Join(dir, ".") is the lease directory itself.
-	// Nothing escapes, but without the check the rejection arrives as a raw
-	// "is a directory" I/O error rather than ErrInvalidSecret, and a caller
-	// switching on the sentinel would misclassify a malformed name as a
-	// disk problem.
 	if name == "" || name == "." || name == ".." ||
 		name != filepath.Base(name) || strings.ContainsAny(name, `/\`) {
 		return "", wrapf(ErrInvalidSecret, "unsafe lease file name %q", f.Name)
 	}
+	return name, nil
+}
+
+// leaseFileMode is the mode a credential file is created with. 0600 is the
+// default and the only sane one; a grant that asked for anything group- or
+// world-readable is narrowed rather than honoured.
+func leaseFileMode(f File) os.FileMode {
 	mode := f.Mode
 	if mode == 0 {
-		mode = 0o600
+		return 0o600
 	}
-	path := filepath.Join(m.Dir, name)
+	return mode &^ os.FileMode(0o077)
+}
+
+// Materialize writes the lease's credentials into a private directory and
+// returns the Mount describing it. baseDir may be empty to use a tmpfs.
+//
+// Call it only for a workload that will read this host's filesystem — see
+// executor.Capabilities.SecretFilesFromHostPath. For anything isolated, use
+// Deliver: writing plaintext here for a sandbox that cannot open it creates a
+// credential file on the control plane that nothing ever reads.
+//
+// The caller must Close the Mount when the workload exits. Failure partway
+// through cleans up what was already written rather than leaving credential
+// files behind.
+func (l *Lease) Materialize(baseDir string) (*Mount, error) {
+	if l == nil {
+		return nil, wrapf(ErrLeaseNotFound, "nil lease")
+	}
+	dir, err := os.MkdirTemp(leaseBaseDir(baseDir), leaseDirPrefix)
+	if err != nil {
+		return nil, fmt.Errorf("secretbroker: create lease dir: %w", err)
+	}
+	// MkdirTemp already creates 0700, but say so explicitly: the guarantee
+	// that no other user on the host can read these files is the reason the
+	// directory exists at all, and it should not rest on a default.
+	if err := os.Chmod(dir, 0o700); err != nil {
+		_ = os.RemoveAll(dir)
+		return nil, fmt.Errorf("secretbroker: secure lease dir: %w", err)
+	}
+
+	env, files, bindings, mounts, err := l.render(dir)
+	if err != nil {
+		_ = os.RemoveAll(dir)
+		return nil, err
+	}
+
+	m := &Mount{Dir: dir, env: env, bindings: bindings, mounts: mounts}
+	for _, f := range files {
+		if werr := m.writeFile(f); werr != nil {
+			_ = m.Close()
+			return nil, werr
+		}
+	}
+	return m, nil
+}
+
+// Deliver renders the lease for a workload that will find its credentials at
+// dir on a filesystem this process does not own, without writing anything.
+//
+// The Delivery holds the plaintext in memory for the driver to place —
+// staged into a container's own tmpfs, projected as a Kubernetes Secret, or
+// sent to an edge agent that writes it through its confined vault path. That
+// is the whole difference from Materialize: the control plane never has a file
+// to leak for a credential it is only relaying.
+func (l *Lease) Deliver(dir string) (*Delivery, error) {
+	if l == nil {
+		return nil, wrapf(ErrLeaseNotFound, "nil lease")
+	}
+	clean := filepath.Clean(strings.TrimSpace(dir))
+	if clean == "" || clean == "." || !filepath.IsAbs(clean) {
+		return nil, wrapf(ErrInvalidSecret, "delivery directory %q is not an absolute path", dir)
+	}
+	env, files, bindings, mounts, err := l.render(clean)
+	if err != nil {
+		return nil, err
+	}
+	return &Delivery{Dir: clean, env: env, files: files, bindings: bindings, mounts: mounts}, nil
+}
+
+// Delivery is a lease rendered for someone else's filesystem: the environment
+// to hand the workload, the per-grant attribution, and the file bytes the
+// driver must place at Dir.
+//
+// It is the Mount's counterpart, with the same accessors and one difference
+// that is the point of the type: nothing here has touched a disk, so Close
+// zeroes buffers rather than unlinking files.
+type Delivery struct {
+	// Dir is where the workload will find the files. It is a path on the
+	// executor, not on this host.
+	Dir string
+
+	mu       sync.Mutex
+	env      []string
+	files    []placedFile
+	bindings []LeaseBinding
+	mounts   []RepoMount
+	closed   bool
+}
+
+// Env returns the environment additions in "K=V" form, sorted.
+func (d *Delivery) Env() []string {
+	if d == nil {
+		return nil
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return append([]string(nil), d.env...)
+}
+
+// Mounts returns the host repositories this lease opens.
+func (d *Delivery) Mounts() []RepoMount {
+	if d == nil {
+		return nil
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.closed {
+		return nil
+	}
+	return append([]RepoMount(nil), d.mounts...)
+}
+
+// Bindings returns the per-grant attribution: names and paths, never values.
+func (d *Delivery) Bindings() []LeaseBinding {
+	if d == nil {
+		return nil
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	out := make([]LeaseBinding, len(d.bindings))
+	for i, b := range d.bindings {
+		copied := b
+		copied.EnvKeys = append([]string(nil), b.EnvKeys...)
+		copied.Files = append([]string(nil), b.Files...)
+		out[i] = copied
+	}
+	return out
+}
+
+// Files returns the credential files for the driver to place, with their
+// contents. Nil after Close.
+//
+// The content is copied per call rather than aliased: a driver that base64s it
+// into a frame must not be handed the buffer Close will zero underneath it.
+func (d *Delivery) Files() []DeliveredFile {
+	if d == nil {
+		return nil
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.closed {
+		return nil
+	}
+	out := make([]DeliveredFile, 0, len(d.files))
+	for _, f := range d.files {
+		out = append(out, DeliveredFile{
+			GrantID:    f.GrantID,
+			SecretName: f.SecretName,
+			Kind:       f.Kind,
+			Dir:        d.Dir,
+			Name:       f.Name,
+			Mode:       f.Mode,
+			Content:    append([]byte(nil), f.Content...),
+		})
+	}
+	return out
+}
+
+// Close zeroes the buffers holding the plaintext and drops the rest. It is
+// idempotent, so it is safe in a defer beside an explicit call.
+//
+// Zeroing is not a guarantee — Go's garbage collector may already have copied
+// the bytes during a slice growth, and nothing here can reach that copy — but
+// it bounds the window in which a heap dump of a long-lived control plane
+// contains a credential it relayed hours ago.
+func (d *Delivery) Close() error {
+	if d == nil {
+		return nil
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.closed {
+		return nil
+	}
+	d.closed = true
+	for i := range d.files {
+		for j := range d.files[i].Content {
+			d.files[i].Content[j] = 0
+		}
+		d.files[i].Content = nil
+	}
+	d.files = nil
+	d.env = nil
+	d.bindings = nil
+	return nil
+}
+
+// DeliveredFile is one credential file a Delivery is handing to a driver.
+type DeliveredFile struct {
+	GrantID    string
+	SecretName string
+	Kind       Kind
+	// Dir is the directory on the executor, mirroring Delivery.Dir so a
+	// caller can build one flat list from several leases.
+	Dir  string
+	Name string
+	Mode os.FileMode
+	// Content is the plaintext.
+	Content []byte
+}
+
+// String redacts the content, so a `%v` on a delivery cannot log a credential.
+func (f DeliveredFile) String() string {
+	return fmt.Sprintf("credential file %s (%d bytes) [redacted]", filepath.Join(f.Dir, f.Name), len(f.Content))
+}
+
+// GoString mirrors String so %#v is redacted too.
+func (f DeliveredFile) GoString() string { return f.String() }
+
+// leaseDirPrefix names every directory a lease's files live in, on the hub and
+// inside a sandbox alike.
+//
+// It is load-bearing rather than cosmetic: pkg/executor/agent refuses to
+// unlink any path whose parent is not named this way, which is what stops a
+// compromised control plane from turning revocation into an arbitrary-unlink
+// primitive on every enrolled device. A directory chosen for a sandbox must
+// therefore carry the prefix too — see SandboxLeaseDir.
+const leaseDirPrefix = "cloop-lease-"
+
+// SandboxLeaseRoot is the parent directory a lease's files are delivered under
+// inside an executor that does not share the hub's filesystem.
+//
+// /run is the conventional place for ephemeral runtime state and is a tmpfs on
+// every systemd host, which is the same property the hub's /dev/shm is chosen
+// for. A driver that cannot write there relocates and rewrites the
+// environment; see executor.Spec.RelocateSecrets.
+const SandboxLeaseRoot = "/run/cloop"
+
+// SandboxLeaseDir returns the directory a lease's credential files take inside
+// a sandbox. The final element carries leaseDirPrefix so the agent's
+// confinement rule recognises it as lease-owned.
+func SandboxLeaseDir(leaseID string) string {
+	slug := strings.TrimPrefix(strings.TrimSpace(leaseID), "lease_")
+	var b strings.Builder
+	for _, r := range strings.ToLower(slug) {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '-':
+			b.WriteRune(r)
+		}
+	}
+	name := b.String()
+	if name == "" {
+		// A lease with no usable ID still needs a directory whose name the
+		// agent will accept; "unknown" is distinguishable in a log and cannot
+		// collide with a real 96-bit identifier.
+		name = "unknown"
+	}
+	return path.Join(SandboxLeaseRoot, leaseDirPrefix+name)
+}
+
+// writeFile places one already-rendered credential file on disk.
+func (m *Mount) writeFile(f placedFile) error {
+	path := f.Path
+	mode := f.Mode
 	if err := os.WriteFile(path, f.Content, mode); err != nil {
-		return "", fmt.Errorf("secretbroker: write lease file %s: %w", name, err)
+		return fmt.Errorf("secretbroker: write lease file %s: %w", f.Name, err)
 	}
 	// Track the file the moment it exists, before anything else can fail.
 	// Registering it after the chmod would mean a chmod error left a
@@ -368,9 +636,9 @@ func (m *Mount) writeFile(f File) (string, error) {
 	// WriteFile honours the mode only when it creates the file; chmod
 	// covers the case where a previous lease left one behind.
 	if err := os.Chmod(path, mode); err != nil {
-		return "", fmt.Errorf("secretbroker: chmod lease file %s: %w", name, err)
+		return fmt.Errorf("secretbroker: chmod lease file %s: %w", f.Name, err)
 	}
-	return path, nil
+	return nil
 }
 
 // Bindings returns the per-grant attribution for this mount: which variables

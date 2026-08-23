@@ -63,6 +63,7 @@ const (
 	ConstraintHostMounts       Constraint = "host_mounts"
 	ConstraintWorkspace        Constraint = "workspace"
 	ConstraintWriteBack        Constraint = "write_back"
+	ConstraintSecretFiles      Constraint = "secret_files"
 )
 
 // Candidate is one executor offered to the scheduler, together with everything
@@ -198,6 +199,17 @@ type Requirements struct {
 	// the sandbox. The first is confusing on arrival, the second is invisible
 	// until someone goes looking for the commit.
 	RequireWriteBack bool
+	// RequireSecretFiles demands a node that delivers a secret lease's
+	// credential *files* to the workload, not only its environment.
+	//
+	// The failure it prevents is the quietest one in this list. A node that
+	// drops the files still starts, still runs, and still receives the
+	// environment variables naming them — so the workload holds
+	// GIT_CONFIG_GLOBAL pointing at a directory that does not exist, gets no
+	// token (a narrow github_pat deliberately exports none), and fails to
+	// authenticate with nothing in the transcript connecting that to the
+	// grant. Refusing placement is what turns it into a sentence.
+	RequireSecretFiles bool
 	// RequireStream and RequireSignal demand live output and the ability to
 	// stop a workload — the two capabilities the Web UI's run panel needs.
 	RequireStream bool
@@ -340,11 +352,12 @@ func CheckSandboxSupport(ex Executor, req Requirements, projectPath string) erro
 	switch rej.Constraint {
 	case ConstraintHostPolicy, ConstraintIsolation:
 		return hostDenied(ex, projectPath)
-	case ConstraintWorkspace, ConstraintWriteBack:
+	case ConstraintWorkspace, ConstraintWriteBack, ConstraintSecretFiles:
 		// Never folded into hostDenied. "Bind this project to a sandbox" is
 		// the opposite of the fix here: the bound executor is *already*
-		// isolated and that is precisely why it cannot see the tree. The
-		// constraint-specific message names the real remedy.
+		// isolated and that is precisely why it cannot see the tree, or the
+		// hub's lease directory. The constraint-specific message names the
+		// real remedy.
 		return &PlacementError{Constraint: rej.Constraint, Rejections: []Rejection{rej}, Considered: 1}
 	case ConstraintImageOverride, ConstraintSandboxBuild, ConstraintSandboxMounts,
 		ConstraintNetworkEgress, ConstraintResourceLimits, ConstraintVirtualization:
@@ -480,6 +493,13 @@ func reject(c Candidate, req Requirements) (Rejection, bool) {
 	if req.RequireWriteBack && !caps.SupportsWriteBack {
 		return no(ConstraintWriteBack, "cannot return the files a task changes, so the work "+
 			"would be discarded with the sandbox when the run ends")
+	}
+	if req.RequireSecretFiles && !caps.SupportsSecretFiles {
+		return no(ConstraintSecretFiles, "cannot deliver a secret lease's credential files to the "+
+			"workload, so a file-backed grant would arrive as an environment variable naming a "+
+			"path the sandbox cannot open — a repository-scoped github_pat would reach it with no "+
+			"token at all; upgrade the executor agent, or bind this project to a container or "+
+			"Kubernetes executor")
 	}
 	if req.RequireStream && !caps.SupportsStream {
 		return no(ConstraintStream, "cannot stream output")

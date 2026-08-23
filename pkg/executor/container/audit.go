@@ -65,6 +65,63 @@ func AuditRunArgv(opts Options, rt AuditRuntime, workDir string, spec executor.S
 	return built.Args, nil
 }
 
+// AuditSecretStaging stages spec.SecretFiles the way Start does and returns
+// the resulting command line together with the host directories the credentials
+// were written into.
+//
+// It exists because the property worth asserting is not "the driver has a
+// function that writes files" but "the bytes a lease produced end up somewhere
+// the sandbox can read and nowhere else" — the mode they are created with, the
+// directory's mode, and the :ro on the bind that carries them. All three are
+// decided inside Start, past a runtime the conformance suite cannot assume is
+// installed, so without this seam the delivery that Task 20192 exists to build
+// would be exactly as untested as the drop it replaced.
+//
+// The caller must invoke cleanup, which wipes the staged credentials. A test
+// that skips it leaves plaintext in /dev/shm.
+func AuditSecretStaging(opts Options, rt AuditRuntime, workDir string, spec executor.Spec) (argv []string, dirs []string, cleanup func(), err error) {
+	norm, oerr := opts.Normalize()
+	if oerr != nil {
+		return nil, nil, func() {}, fmt.Errorf("normalize options: %w", oerr)
+	}
+	name := rt.Name
+	if name == "" {
+		name = RuntimeDocker
+	}
+	e := &Executor{
+		id:      norm.ID,
+		opts:    norm,
+		rt:      Runtime{Name: name, Path: "/usr/bin/" + name, Rootless: rt.Rootless},
+		handles: map[string]*record{},
+	}
+	resolved, rerr := e.resolveWorkDir(workDir)
+	if rerr != nil {
+		return nil, nil, func() {}, rerr
+	}
+	// The same two calls Start makes, in the same order and with the same
+	// sandbox user — a staging that chose a different UID here would prove
+	// nothing about the one production creates.
+	stage, serr := stageSecretFiles(spec, e.sandboxUser(resolved))
+	if serr != nil {
+		return nil, nil, func() {}, serr
+	}
+	cleanup = stage.remove
+	req, berr := e.buildRequest(spec, resolved, stage.mountList())
+	if berr != nil {
+		cleanup()
+		return nil, nil, func() {}, berr
+	}
+	built, aerr := buildRunArgs(req)
+	if aerr != nil {
+		cleanup()
+		return nil, nil, func() {}, aerr
+	}
+	if stage != nil {
+		dirs = append(dirs, stage.dirs...)
+	}
+	return built.Args, dirs, cleanup, nil
+}
+
 // AuditBuildNetwork returns the network a derived-image build would run with
 // for spec.
 //

@@ -336,6 +336,36 @@ type emptyDirSource struct {
 type volume struct {
 	Name     string          `json:"name"`
 	EmptyDir *emptyDirSource `json:"emptyDir,omitempty"`
+	// Secret projects a Secret's keys as files. It is how a lease's credential
+	// files reach the workload — see secretfiles.go — and the kubelet backs
+	// such a volume with tmpfs, so the material never touches a node's disk.
+	Secret *secretSource `json:"secret,omitempty"`
+}
+
+// secretSource projects a Secret as a directory of files.
+//
+// Items is not optional in practice: without it the kubelet writes every key in
+// the Secret, under the key's own name. This driver stores one lease's files
+// under prefixed keys so that two directories cannot collide, so the mapping
+// back to the bare name the workload expects has to be spelled out.
+type secretSource struct {
+	SecretName string      `json:"secretName"`
+	Items      []keyToPath `json:"items,omitempty"`
+	// DefaultMode is the permission bits the kubelet creates the files with,
+	// as a decimal number in JSON. See secretFileMode for why it is 0400 and
+	// not the 0600 executor.SecretFile asks for.
+	DefaultMode *int32 `json:"defaultMode,omitempty"`
+	// Optional is deliberately always false. A missing Secret must park the
+	// Pod in ContainerCreating, not start a workload whose credential
+	// directory is silently empty — which is the exact failure mode
+	// Spec.SecretFiles exists to remove.
+	Optional *bool `json:"optional,omitempty"`
+}
+
+// keyToPath maps one Secret key onto the file name it is written as.
+type keyToPath struct {
+	Key  string `json:"key"`
+	Path string `json:"path"`
 }
 
 type container struct {
@@ -513,6 +543,21 @@ type podRequest struct {
 	// the leased credential, or "" for an unauthenticated fetch. buildPod does
 	// not create it and cannot: it is pure. It only wires the reference.
 	WorkspaceSecretName string
+
+	// SecretFiles are the credential files a secret lease produced, which the
+	// workload's environment already points at by absolute path. Only their
+	// Dirs and Names are read here — the content goes into the Secret named by
+	// SecretFilesSecretName, which the caller creates before the Pod — but the
+	// whole slice travels so that one derivation decides both the Secret's keys
+	// and the volume items that map them back. See secretfiles.go.
+	//
+	// Anything printed from a podRequest is safe: SecretFile's String and
+	// GoString redact the content, so a %v on this struct cannot put a live
+	// credential into a log line.
+	SecretFiles []executor.SecretFile
+	// SecretFilesSecretName is the per-run Secret holding those files' bytes.
+	// Empty when there are none.
+	SecretFilesSecretName string
 }
 
 // egressLabelValue renders DisableNetwork for LabelEgress.
@@ -702,6 +747,28 @@ func buildPod(req podRequest) (*pod, error) {
 	if h := strings.TrimSpace(req.SandboxHash); h != "" {
 		annotations[AnnotationSandboxHash] = sanitizeLabelValue(h)
 	}
+
+	// A secret lease's credential files, projected from the Secret the caller
+	// created before this Pod. They go to the harness container and to nothing
+	// else — the workspace provisioner below builds its own mount list and has
+	// no business holding a credential its git fetch does not use.
+	secretVolumes, secretMounts, err := secretFileVolumes(req.SecretFilesSecretName, req.SecretFiles)
+	if err != nil {
+		return nil, err
+	}
+	for _, m := range secretMounts {
+		// The lease directory is /run/cloop/cloop-lease-<hex>, so a collision
+		// with the writable volumes cannot happen in practice. Checked anyway,
+		// because the failure it would produce — a workspace shadowed by a
+		// read-only credential directory — reads as an empty checkout rather
+		// than as a mount problem.
+		if m.MountPath == PodWorkspace || m.MountPath == "/tmp" {
+			return nil, fmt.Errorf("%w: secret lease directory %q would shadow the %s volume",
+				executor.ErrInvalidSpec, m.MountPath, m.MountPath)
+		}
+	}
+	spec.Volumes = append(spec.Volumes, secretVolumes...)
+	mounts = append(mounts, secretMounts...)
 
 	// The harness argv, possibly wrapped so the work it produces survives the
 	// Pod. See buildWriteBackArgv for why a wrapper is the only place a
