@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -69,6 +70,45 @@ func snapshotFilename(ts time.Time, version int) string {
 	return fmt.Sprintf("%s-v%d.json", ts.UTC().Format("20060102-150405"), version)
 }
 
+// snapshotVersionFromName extracts N from a snapshot filename of the form
+// <timestamp>-v<N>.json, the shape snapshotFilename writes. Quarantined
+// siblings (<name>.corrupt-<unix>) and unrelated files yield ok=false.
+func snapshotVersionFromName(name string) (int, bool) {
+	if !strings.HasSuffix(name, ".json") || strings.Contains(name, ".corrupt-") {
+		return 0, false
+	}
+	base := strings.TrimSuffix(name, ".json")
+	i := strings.LastIndex(base, "-v")
+	if i < 0 {
+		return 0, false
+	}
+	v, err := strconv.Atoi(base[i+len("-v"):])
+	if err != nil || v < 0 {
+		return 0, false
+	}
+	return v, true
+}
+
+// latestSnapshotVersion returns the highest version present in the history
+// directory, derived from filenames alone — it opens no snapshot files.
+// Returns 0 when the directory is absent or holds no parseable snapshot.
+func latestSnapshotVersion(dir string) int {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0
+	}
+	max := 0
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		if v, ok := snapshotVersionFromName(e.Name()); ok && v > max {
+			max = v
+		}
+	}
+	return max
+}
+
 // historyPath returns the path to the plan-history directory.
 func historyPath(workDir string) string {
 	return filepath.Join(workDir, historyDir)
@@ -98,13 +138,20 @@ func SaveSnapshot(workDir string, plan *Plan) error {
 	}
 
 	// Read the latest snapshot (if any) and skip if identical.
-	metas, _ := ListSnapshots(workDir)
-	var latestOnDisk int
-	if len(metas) > 0 {
-		latest := metas[len(metas)-1]
-		latestOnDisk = latest.Version
-		last, loadErr := LoadSnapshot(workDir, latest.Version)
-		if loadErr == nil {
+	//
+	// The version and the newest file are both derivable from filenames, so
+	// resolve them with a dirent scan plus one targeted read. Calling
+	// ListSnapshots here instead — as this did — reads and unmarshals *every*
+	// snapshot, and each snapshot is a full copy of the plan. On a long-lived
+	// project that is the dominant cost of saving state: 3.8k snapshots
+	// averaging ~525 KiB meant ~1.9 GiB of JSON parsed per save, which put a
+	// ~16s stall behind every task add, status change and edit in the UI.
+	latestOnDisk := latestSnapshotVersion(dir)
+	if latestOnDisk > 0 {
+		// A corrupt newest snapshot fails to load (and is quarantined by
+		// LoadSnapshot); fall through and write a fresh one rather than
+		// deduplicating against nothing. That self-heals on the next save.
+		if last, loadErr := LoadSnapshot(workDir, latestOnDisk); loadErr == nil && last.Plan != nil {
 			lastFP, fpErr := planFingerprint(last.Plan)
 			if fpErr == nil && lastFP == fingerprint {
 				return nil // no change
