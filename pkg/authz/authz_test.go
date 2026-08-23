@@ -698,3 +698,113 @@ func TestPermissionAndRoleWireStability(t *testing.T) {
 		}
 	}
 }
+
+// ── Intersect ───────────────────────────────────────────────────────────────
+
+// TestIntersectNeverGrantsMoreThanEitherSide is the property delegated
+// credentials rest on (Task 20194): a token minted on a user's behalf carries
+// a role ceiling, and what it may actually do is that ceiling narrowed by the
+// owner's live authority. If Intersect could ever return a permission only one
+// side held, a display-glasses link would be an escalation path.
+func TestIntersectNeverGrantsMoreThanEitherSide(t *testing.T) {
+	scope := Scope{Project: "p"}
+	decisions := []Decision{
+		Deny(SourceAPIToken, "denied", scope),
+		FromRoles([]Role{RoleViewer}, SourceAPIToken, "viewer", scope),
+		FromRoles([]Role{RoleOperator}, SourceBinding, "operator", scope),
+		FromRoles([]Role{RoleMaintainer}, SourceBinding, "maintainer", scope),
+		FromRoles([]Role{RoleAdmin}, SourceBinding, "admin", scope),
+		AllowAll(SourceAuthzDisabled, "local"),
+	}
+	for _, a := range decisions {
+		for _, b := range decisions {
+			got := Intersect(a, b)
+			for _, p := range AllPermissions {
+				if got.Allows(p) && !(a.Allows(p) && b.Allows(p)) {
+					t.Errorf("Intersect(%s, %s) grants %q, which %s=%v %s=%v",
+						a.Role, b.Role, p, a.Role, a.Allows(p), b.Role, b.Allows(p))
+				}
+				// And it must not lose a permission both sides hold, or a
+				// delegated link would be uselessly weaker than its owner.
+				if a.Allows(p) && b.Allows(p) && !got.Allows(p) {
+					t.Errorf("Intersect(%s, %s) drops %q, which both sides grant", a.Role, b.Role, p)
+				}
+			}
+		}
+	}
+}
+
+// TestIntersectIsCommutativeAndReportsTheWeakerRole pins the label the audit
+// trail and /api/me read.
+func TestIntersectIsCommutativeAndReportsTheWeakerRole(t *testing.T) {
+	viewer := FromRoles([]Role{RoleViewer}, SourceAPIToken, "tok", GlobalScope)
+	admin := FromRoles([]Role{RoleAdmin}, SourceBinding, "sub", GlobalScope)
+
+	if got := Intersect(viewer, admin); got.Role != RoleViewer {
+		t.Errorf("Intersect(viewer, admin).Role = %q, want viewer", got.Role)
+	}
+	if got := Intersect(admin, viewer); got.Role != RoleViewer {
+		t.Errorf("Intersect(admin, viewer).Role = %q, want viewer", got.Role)
+	}
+
+	// An empty result must not keep a role label that claims otherwise.
+	denied := Deny(SourceBinding, "unmapped", GlobalScope)
+	got := Intersect(admin, denied)
+	if got.Role != RoleNone {
+		t.Errorf("intersecting with a deny left Role = %q, want none", got.Role)
+	}
+	if len(got.Permissions()) != 0 {
+		t.Errorf("intersecting with a deny granted %v", got.Permissions())
+	}
+}
+
+// TestIntersectWithAllowAllIsIdentity: the OIDC-disabled and static-token paths
+// resolve to allow-all, and intersecting against one must not silently pin a
+// token to today's permission list.
+func TestIntersectWithAllowAllIsIdentity(t *testing.T) {
+	tok := FromRoles([]Role{RoleOperator}, SourceAPIToken, "tok", GlobalScope)
+	got := Intersect(tok, AllowAll(SourceAuthzDisabled, "local"))
+	for _, p := range AllPermissions {
+		if got.Allows(p) != tok.Allows(p) {
+			t.Errorf("permission %q changed when intersecting with allow-all", p)
+		}
+	}
+	both := Intersect(AllowAll(SourceStaticToken, "static"), AllowAll(SourceAuthzDisabled, "local"))
+	for _, p := range AllPermissions {
+		if !both.Allows(p) {
+			t.Errorf("allow-all ∩ allow-all dropped %q", p)
+		}
+	}
+}
+
+// TestIntersectKeepsTheActingCredentialsLabels: the audit trail has to name
+// the credential that acted, not the authority that bounded it. Without this,
+// a refused delegated link is indistinguishable from its owner's own session
+// being refused — which is the one thing an operator investigating a leak
+// needs to tell apart.
+func TestIntersectKeepsTheActingCredentialsLabels(t *testing.T) {
+	binding := &Binding{Claim: ClaimGroup, Value: "readers", Role: RoleViewer}
+	acting := FromRoles([]Role{RoleViewer}, SourceAPIToken, "token:link (cloop_pat_ab12)", GlobalScope)
+	owner := Decision{Role: RoleAdmin, Source: SourceBinding, SubjectLabel: "alice@example.com", Binding: binding}
+	owner = Intersect(FromRoles([]Role{RoleAdmin}, SourceBinding, "alice@example.com", GlobalScope), owner)
+
+	// Owner outranks the token: the token's ceiling wins on permissions.
+	got := Intersect(acting, owner)
+	if got.Source != SourceAPIToken || got.SubjectLabel != acting.SubjectLabel {
+		t.Errorf("labels came from the bounding authority: source=%q subject=%q", got.Source, got.SubjectLabel)
+	}
+
+	// And when the owner ranks *lower*, which is the case that used to swap
+	// the labels wholesale.
+	denied := Deny(SourceBinding, "alice@example.com", GlobalScope)
+	got = Intersect(acting, denied)
+	if got.Source != SourceAPIToken {
+		t.Errorf("a denied delegated call was attributed to source %q, want %q", got.Source, SourceAPIToken)
+	}
+	if got.SubjectLabel != acting.SubjectLabel {
+		t.Errorf("a denied delegated call was attributed to %q, want the token's label", got.SubjectLabel)
+	}
+	if got.Role != RoleNone || len(got.Permissions()) != 0 {
+		t.Errorf("the deny did not bound the token: role=%q perms=%v", got.Role, got.Permissions())
+	}
+}

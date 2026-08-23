@@ -136,6 +136,67 @@ var (
 	ErrNoRoles = errors.New("apitoken: token carries no usable role")
 )
 
+// Kind labels what a token was issued for. The empty kind is an ordinary
+// operator-minted PAT; named kinds mark tokens the hub issues on a user's
+// behalf, which have their own lifecycle rules.
+const (
+	// KindGlasses is a per-user display-glasses link (Task 20194). One live
+	// token per identity: minting rotates, so a link handed out yesterday
+	// stops working the moment a new one is generated.
+	KindGlasses = "glasses"
+)
+
+// Owner is the identity a token was minted on behalf of.
+//
+// It is the claim bundle as it stood at mint time, not a foreign key: cloop
+// has no user directory to resolve one against, and an IdP subject that has
+// not signed in recently exists nowhere else on the hub. Storing the claims
+// lets the authorization path re-resolve the owner's *current* authority from
+// the *current* policy on every request — so an operator who edits a role
+// mapping changes what every delegated token can do, immediately, without
+// having to find and revoke them.
+//
+// What it deliberately does not store: anything from the ID token beyond the
+// claims pkg/authz already resolves against. No access token, no refresh
+// token, nothing that would let a stolen database act as the user elsewhere.
+type Owner struct {
+	Sub    string   `json:"sub,omitempty"`
+	Email  string   `json:"email,omitempty"`
+	Name   string   `json:"name,omitempty"`
+	Groups []string `json:"groups,omitempty"`
+	Roles  []string `json:"roles,omitempty"`
+}
+
+// Key returns the stable per-user string, matching oidcauth.Identity.OwnerKey
+// so a token's owner and a project's recorded owner compare directly. A nil
+// owner yields "", which is "no owner" and never matches a recorded one.
+func (o *Owner) Key() string {
+	if o == nil {
+		return ""
+	}
+	if o.Email != "" {
+		return strings.ToLower(o.Email)
+	}
+	if o.Sub == "" {
+		return ""
+	}
+	return "sub:" + o.Sub
+}
+
+// Label is the friendliest name for the owning user, for display and audit.
+func (o *Owner) Label() string {
+	if o == nil {
+		return ""
+	}
+	switch {
+	case o.Name != "":
+		return o.Name
+	case o.Email != "":
+		return o.Email
+	}
+	return o.Sub
+}
+
 // Token is one API token as persisted. Hash is the derived secret; the
 // plaintext exists only in the return value of Mint.
 type Token struct {
@@ -150,10 +211,38 @@ type Token struct {
 	ExpiresAt    time.Time
 	LastUsedAt   time.Time
 	RevokedAt    time.Time
+
+	// Kind is "" for an ordinary PAT, or one of the Kind* constants.
+	Kind string
+
+	// Owner is set on a token minted on a user's behalf. When present, the
+	// token's authority is the *intersection* of its own roles and whatever
+	// the owner may currently do — see authz.Intersect and the ui package's
+	// grant.decide. Roles alone are a ceiling, never a grant.
+	Owner *Owner
+
+	// OwnerUnreadable marks a row whose stored owner binding did not decode.
+	// Only List sets it: the verification path refuses such a row outright
+	// (see SQLStore.Get), but a listing has to keep showing it or an operator
+	// would have no surface from which to revoke it. A token carrying this
+	// flag must never be treated as unbound — "we cannot tell whose this is"
+	// is not the same answer as "it belongs to nobody".
+	OwnerUnreadable bool
 }
 
 // Revoked reports whether the token has been withdrawn.
 func (t *Token) Revoked() bool { return t != nil && !t.RevokedAt.IsZero() }
+
+// OwnerBinding returns the identity this token acts for, or nil. Nil-safe on
+// the receiver so callers can chain it off a lookup that may have found no
+// token at all — "no token" and "a token acting as nobody" are the same
+// answer to every question the callers ask.
+func (t *Token) OwnerBinding() *Owner {
+	if t == nil {
+		return nil
+	}
+	return t.Owner
+}
 
 // Expired reports whether the token is past its expiry at time now. A zero
 // ExpiresAt means the token does not expire.
@@ -298,6 +387,12 @@ type MintOptions struct {
 	// operator's calendar.
 	ExpiresAt time.Time
 
+	// Kind labels a hub-issued token; "" for an ordinary PAT.
+	Kind string
+
+	// Owner binds the token to the identity it acts for. See Token.Owner.
+	Owner *Owner
+
 	// Now overrides the clock, for tests.
 	Now time.Time
 }
@@ -361,6 +456,8 @@ func Mint(opts MintOptions) (Minted, error) {
 			CreatedBy:    strings.TrimSpace(opts.CreatedBy),
 			CreatedAt:    now,
 			ExpiresAt:    expires,
+			Kind:         strings.TrimSpace(opts.Kind),
+			Owner:        opts.Owner,
 		},
 		Plaintext: Prefix + id + "_" + secret,
 	}, nil

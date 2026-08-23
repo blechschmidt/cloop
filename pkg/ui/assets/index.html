@@ -1055,6 +1055,34 @@
           <button class="btn settings-save" onclick="saveOllamaCfg()">Save</button>
         </div>
 
+        <!--
+          Display glasses (Task 20194). Per-user, not per-project: the link is
+          a credential belonging to whoever is signed in, and it reaches every
+          project that user can already see. Lives in Settings rather than in
+          the Secrets tab because generating it needs no operator role — it is
+          a personal device pairing, like an app password.
+        -->
+        <div class="settings-section">
+          <h3>Display glasses</h3>
+          <p style="font-size:12px;color:var(--muted);margin-bottom:12px">
+            Meta Ray-Ban Display glasses can only add an app by URL, so this link carries its own
+            credential. It reaches <strong>only the glasses views</strong>, read-only: your projects
+            and their task lists. It cannot start a run, change a plan, or read secrets, settings,
+            agent transcripts or the audit log, and it can never see more than your own account can.
+            Treat the URL itself as the password — anyone holding it sees your projects and tasks
+            until it expires in 30 days. Generating a new link revokes the old one.
+          </p>
+          <div id="glassesStatus" style="font-size:13px;margin-bottom:12px;color:var(--muted)">Loading…</div>
+          <div id="glassesUrlBox" style="display:none;margin-bottom:12px">
+            <label class="form-label">Your link — shown once, copy it now</label>
+            <input class="form-input" id="glassesUrl" readonly onclick="this.select()" style="font-family:monospace;font-size:12px">
+            <p id="glassesWarning" style="font-size:12px;color:var(--warn,#e0a800);margin-top:8px"></p>
+          </div>
+          <button class="btn primary" id="glassesGenBtn" onclick="generateGlassesLink()">Generate link</button>
+          <button class="btn" id="glassesCopyBtn" onclick="copyGlassesLink()" style="display:none">Copy</button>
+          <button class="btn danger" id="glassesRevokeBtn" onclick="revokeGlassesLink()" style="display:none">Revoke</button>
+        </div>
+
         <!-- Danger zone -->
         <div class="settings-section danger-zone">
           <h3>Danger Zone</h3>

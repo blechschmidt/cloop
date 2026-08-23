@@ -28,6 +28,39 @@ func (s *Server) sessionIdentity(r *http.Request) *oidcauth.Identity {
 	return s.OIDC.IdentityFromRequest(r)
 }
 
+// identityFromOwner reconstructs the minting user from a token's owner
+// binding, so an owner-bound token is filtered by exactly the rules its
+// owner's browser session is filtered by — including admin_emails, which is
+// read from the live config rather than frozen at mint time.
+func identityFromOwner(o *apitoken.Owner) *oidcauth.Identity {
+	if o == nil {
+		return nil
+	}
+	return &oidcauth.Identity{
+		Sub:    o.Sub,
+		Email:  o.Email,
+		Name:   o.Name,
+		Groups: o.Groups,
+		Roles:  o.Roles,
+	}
+}
+
+// recipientIdentity is the user a request (or a long-lived stream) acts as:
+// the session user, or — for a token minted on someone's behalf — that
+// someone.
+//
+// Every per-user filter goes through this rather than sessionIdentity, because
+// a delegated token has no session and would otherwise read as nil, which is
+// the *unfiltered* case: a display-glasses link would see every tenant's
+// projects. Returning the owner instead makes the link show exactly what its
+// owner's own dashboard shows.
+func (s *Server) recipientIdentity(r *http.Request) *oidcauth.Identity {
+	if id := s.sessionIdentity(r); id != nil {
+		return id
+	}
+	return identityFromOwner(tokenFromRequest(r).OwnerBinding())
+}
+
 // oidcGate is the authentication path used by authMiddleware when OIDC is
 // enabled. Order of acceptance:
 //
@@ -240,7 +273,7 @@ func (s *Server) visibleProjectEntries(r *http.Request) []multiui.ProjectEntry {
 	if !s.oidcEnabled() {
 		return entries
 	}
-	return s.filterEntriesForIdentity(s.sessionIdentity(r), entries)
+	return s.filterEntriesForIdentity(s.recipientIdentity(r), entries)
 }
 
 // filterEntriesForToken narrows entries to a token's ProjectScope. A nil token
@@ -268,6 +301,9 @@ func filterEntriesForToken(tok *apitoken.Token, entries []multiui.ProjectEntry) 
 // recipients with different scopes must not share a payload — which is what
 // would happen if the key considered only the OIDC identity, since a token
 // client has none (Task 20175).
+// A token minted on a user's behalf contributes its *owner* here, because
+// callers resolve it through recipientIdentity: two links owned by different
+// users must not share a payload any more than two browser sessions would.
 func (s *Server) visibilityKey(user *oidcauth.Identity, tok *apitoken.Token) string {
 	key := ""
 	if s.oidcEnabled() && user != nil && !s.OIDC.IsAdmin(user) {

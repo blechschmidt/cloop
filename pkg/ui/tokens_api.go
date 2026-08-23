@@ -228,7 +228,73 @@ func (s *Server) authenticateAPIToken(w http.ResponseWriter, r *http.Request) (*
 		jsonErr(w, "unauthorized", http.StatusUnauthorized)
 		return nil, false, true
 	}
+	if !s.tokenKindAdmitted(w, r, tok) {
+		return nil, false, true
+	}
 	return r.WithContext(context.WithValue(r.Context(), apiTokenCtxKey{}, tok)), true, false
+}
+
+// glassesPathPrefixes is the entire surface a display-glasses link may reach.
+//
+// Confinement by *path* rather than by permission, because `viewer` is not a
+// small permission: it carries project.read, and the routes that declare
+// project.read include GET /api/provider-calls/{id}, which returns an agent
+// call's prompt and response verbatim. Those transcripts routinely contain
+// whatever the agent was handed — file contents, tokens, keys. A credential
+// that lives in a URL, and therefore in a proxy access log, must not be able
+// to read them, and no role in the ladder expresses "may read task titles but
+// not agent transcripts".
+//
+// So the link is pinned to the endpoints built for it, whose payloads are
+// projections of exactly what a heads-up display draws. The role ceiling still
+// applies on top; this only narrows.
+var glassesPathPrefixes = []string{
+	"/glasses",
+	"/api/glasses/",
+}
+
+// tokenKindAdmitted applies the extra rules that belong to a token's kind
+// rather than to its roles. Returns false having written the refusal.
+//
+// Two rules, both specific to a link the hub issued on a user's behalf:
+//
+//  1. It may only reach the paths built for it (see glassesPathPrefixes).
+//  2. It must still name the user it acts for. An owner-less glasses token can
+//     only have been minted on a hub with no sign-on configured, where there
+//     was one operator and nothing to be narrowed relative to. If that hub
+//     later turns OIDC on, the same token would be filtered by no identity and
+//     intersected with no authority — a URL in someone's phone quietly
+//     becoming a cross-tenant viewer. Refusing it is the fail-closed reading,
+//     and the remedy is one click in the panel that minted it.
+func (s *Server) tokenKindAdmitted(w http.ResponseWriter, r *http.Request, tok *apitoken.Token) bool {
+	if tok == nil || tok.Kind != apitoken.KindGlasses {
+		return true
+	}
+	if s.oidcEnabled() && tok.Owner == nil {
+		s.auditTokenEvent(tokenAuditRecord{
+			Actor:     "anonymous",
+			EventType: "api_token.auth_failed",
+			TokenID:   tok.Prefix,
+			Extra: map[string]any{
+				"reason": "unowned_link_on_multi_tenant_hub",
+				"ip":     clientIP(r),
+				"path":   r.URL.Path,
+			},
+		})
+		apierror.WriteError(w, apierror.New(apierror.CodeForbidden,
+			"this display-glasses link predates single sign-on on this hub and is no longer "+
+				"honoured — sign in and generate a new one"))
+		return false
+	}
+	path := r.URL.Path
+	for _, prefix := range glassesPathPrefixes {
+		if path == prefix || strings.HasPrefix(path, prefix) {
+			return true
+		}
+	}
+	apierror.WriteError(w, apierror.New(apierror.CodeForbidden,
+		"a display-glasses link may only reach the glasses views"))
+	return false
 }
 
 // tokenFailureReason maps a verification error to a stable audit string. It is

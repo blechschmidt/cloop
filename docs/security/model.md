@@ -771,6 +771,88 @@ write. Creation, revocation, and every failed authentication are appended to
 the hash-chained trail; failures record *why* (expired, revoked, bad secret)
 while the caller receives an identical `401` in every case.
 
+### Delegated links: display glasses
+
+Meta Ray-Ban Display glasses — and heads-up displays generally — add a web app
+by URL and nothing else. There is no keyboard to type a password into, no
+browser chrome to complete an OIDC redirect in, and nowhere to paste a bearer
+token. Whatever authenticates the wearer has to already be inside the URL they
+saved.
+
+So cloop issues one, from **Settings → Display glasses**:
+
+```
+https://cloop.example.com/glasses?token=cloop_pat_…
+```
+
+A credential in a URL is a credential in browser history, in the phone app that
+stored it, and in the access log of every proxy in front of the hub. The device
+leaves no alternative, so the design question is not whether to avoid it but
+how little that URL may be able to do. Five answers, none of which live in the
+glasses code:
+
+1. **Read-only.** The token carries `viewer` and only `viewer` — not the
+   generating user's role, so what the URL can do never depends on who was
+   signed in when it was made. Every gate asking for `run.start`,
+   `task.mutate`, `config.write`, `secret.grant`, `audit.read` or
+   `token.admin` refuses it.
+2. **Confined to the glasses surface.** `viewer` is not a small permission: it
+   carries `project.read`, which is also what `GET /api/provider-calls/{id}`
+   declares — an endpoint that returns an agent call's prompt and response
+   verbatim, and those transcripts routinely contain the file contents, tokens
+   and keys the agent was handed. A credential that lives in a proxy access log
+   must not reach them, and no role in the ladder means "may read task titles
+   but not agent transcripts". So a glasses token is pinned by *path* to
+   `/glasses` and `/api/glasses/`; presenting it anywhere else is a `403`.
+3. **Never more than its owner.** The token records the minting identity's
+   claims (`apitoken.Owner`) and its roles act as a *ceiling*: on every request
+   the hub re-resolves that identity against the **current policy** and
+   intersects the two (`authz.Intersect`). Narrow a user's role mapping and
+   every link they hold narrows with it, immediately. A link owned by someone
+   who matches no binding reads nothing, even though the token says `viewer`.
+
+   The *claims* are a mint-time snapshot, though, and that limit is worth
+   stating plainly: cloop re-resolves the policy, not the identity. If your
+   bindings key on `group` and the IdP removes someone from that group, their
+   browser session dies at the next revalidation but their link keeps working
+   until it expires. **Offboarding must revoke the link**, not only the group —
+   `cloop hub token list` shows them, and an admin can revoke any of them.
+4. **Only their projects.** Project visibility resolves an owner-bound token to
+   its owner, so the link's `?project_idx` namespace is that user's — the same
+   list their dashboard shows, and no index names anyone else's project. A link
+   minted before sign-on was configured carries no owner and is refused
+   outright once OIDC is on, rather than being treated as unscoped.
+5. **One per user, expiring.** Generating rotates: *every* live link the user
+   holds is revoked in the same call, so "regenerate" also means "revoke what I
+   handed out" even if a racing request left an extra one behind. Links expire
+   after 30 days.
+6. **It cannot mint.** A caller authenticating *with* a token is refused by the
+   link endpoints entirely. Without this, a leaked URL could issue its own
+   successor with a fresh expiry before anyone noticed, and revocation would be
+   advisory.
+
+The page sends the token in an `Authorization` header after reading it out of
+the query string once, so it appears in one request line rather than in every
+one. `Referrer-Policy: no-referrer` is set on every response, so it does not
+leak sideways. It is still a URL: treat it like a password, and revoke it from
+the same panel if the device is lost.
+
+The wearable reads three endpoints — `/api/glasses/projects`,
+`/api/glasses/tasks`, `/api/glasses/tasks/{id}` — which project each record
+down to the handful of fields a stamp-sized display draws. They are both a
+payload bound and, per property 2, the whole of what the link may reach.
+
+`/glasses` itself is served *before* authentication, like `/assets/`: it is a
+static document with no project data, and a wearable with no keyboard, console
+or address bar has to be able to load the page that says "this link is no
+longer valid" rather than render a raw `401` JSON body. The page stops polling
+once it sees one, so a forgotten pair in a drawer cannot retry the hub into a
+per-IP auth-failure lockout that other callers share.
+
+On a hub with no OIDC configured there is one operator, so there is one link,
+and the panel says so rather than implying an isolation the deployment does not
+have.
+
 ### Migrating off the static token
 
 `--token` / `CLOOP_UI_TOKEN` still works, and will keep working — a hub that

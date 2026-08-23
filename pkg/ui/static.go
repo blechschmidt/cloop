@@ -46,7 +46,7 @@ import (
 // directive — but it still has to be listed in bundleFiles below to be
 // served, and TestStaticAssets_BundleCoversEveryFragment fails if it is not.
 //
-//go:embed assets/index.html assets/app.css assets/chart.umd.min.js assets/js
+//go:embed assets/index.html assets/glasses.html assets/app.css assets/chart.umd.min.js assets/js
 var assetFS embed.FS
 
 // bundleFiles is the concatenation order of the main IIFE. The order is
@@ -87,6 +87,10 @@ var bundleFiles = []string{
 	// renders into the same Secrets tab.
 	"assets/js/26-sessions.js",
 	"assets/js/27-quotas.js",
+	// Last, and it closes the IIFE 00-core.js opened. A fragment appended
+	// after the close lands at global scope, where none of the shared helpers
+	// are visible — see TestDashboard_MainIIFEClosesInLastFragment.
+	"assets/js/28-glasses.js",
 }
 
 // Cache-Control values. Hashed asset URLs change whenever their bytes change,
@@ -123,12 +127,19 @@ type assetSet struct {
 	byPath map[string]*staticAsset
 	page   *staticAsset
 
+	// glasses is the wearable's shell, served from /glasses (Task 20194).
+	// Self-contained rather than content-addressed: it is a few kilobytes of
+	// markup, CSS and script in one document, so a device on a phone's link
+	// paints after a single round trip instead of three.
+	glasses *staticAsset
+
 	// The individual sources, kept so tests can assert over the whole front
 	// end the way they used to assert over the dashboardHTML constant.
-	css       string
-	bundle    string
-	boundary  string
-	indexTmpl string
+	css         string
+	bundle      string
+	boundary    string
+	indexTmpl   string
+	glassesTmpl string
 }
 
 // loadAssets builds the asset set on first use and reuses it forever after.
@@ -166,12 +177,15 @@ func buildAssets() *assetSet {
 	chart := read("assets/chart.umd.min.js")
 	indexTmpl := read("assets/index.html")
 
+	glassesTmpl := read("assets/glasses.html")
+
 	set := &assetSet{
-		byPath:    map[string]*staticAsset{},
-		css:       string(css),
-		bundle:    bundle.String(),
-		boundary:  string(boundary),
-		indexTmpl: string(indexTmpl),
+		byPath:      map[string]*staticAsset{},
+		css:         string(css),
+		bundle:      bundle.String(),
+		boundary:    string(boundary),
+		indexTmpl:   string(indexTmpl),
+		glassesTmpl: string(glassesTmpl),
 	}
 
 	// name → (placeholder token, base file name, content type, bytes).
@@ -197,6 +211,10 @@ func buildAssets() *assetSet {
 	}
 
 	set.page = newStaticAsset("text/html; charset=utf-8", cacheNoCache, []byte(page))
+	// no-cache with an ETag, like index.html: the glasses re-open the saved
+	// URL on every glance, and a 304 is the cheapest possible answer to "is
+	// this still the page I have" without ever serving a stale one.
+	set.glasses = newStaticAsset("text/html; charset=utf-8", cacheNoCache, glassesTmpl)
 	return set
 }
 

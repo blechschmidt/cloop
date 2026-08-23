@@ -287,6 +287,14 @@ func (s *Server) routeTable() []routeSpec {
 		// because the paths change with their contents (see static.go).
 		{Pattern: "/assets/", Handler: s.handleAsset, Perm: public},
 
+		// The display-glasses shell (Task 20194). Public for the same
+		// reason "/" is: authMiddleware has already decided whether this
+		// caller may load anything — the wearable's token travels in the
+		// query string, which is the only channel the device has — and
+		// the document itself carries no project data. Everything it
+		// draws comes from the gated /api/glasses/* routes below.
+		{Pattern: "GET /glasses", Handler: s.handleGlassesPage, Perm: public},
+
 		// OIDC login machinery. Gating these on a permission would make
 		// signing in require being signed in.
 		{Pattern: "GET /auth/login", Handler: s.handleOIDCLogin, Perm: public},
@@ -509,6 +517,27 @@ func (s *Server) routeTable() []routeSpec {
 		// who is signed in, from where, on what — is reconnaissance.
 		{Pattern: "GET /api/sessions", Handler: s.handleSessionsList, Perm: sessAdmin, Scope: scopeGlobal},
 		{Pattern: "DELETE /api/sessions/{id}", Handler: s.handleSessionRevoke, Perm: sessAdmin, Scope: scopeGlobal},
+
+		// ── Display glasses (Task 20194) ─────────────────────────────
+		// The wearable's own read surface. Ordinary project reads: the
+		// link authenticates as a viewer-ceilinged token bound to the
+		// user who generated it, so these rows say nothing special —
+		// which is the point. The credential is narrow; the endpoints
+		// are not privileged.
+		{Pattern: "GET /api/glasses/projects", Handler: s.handleGlassesProjects, Perm: read, Scope: scopeGlobal},
+		{Pattern: "GET /api/glasses/tasks", Handler: s.handleGlassesTasks, Perm: read, Scope: scopeProject},
+		{Pattern: "GET /api/glasses/tasks/{id}", Handler: s.handleGlassesTaskDetail, Perm: read, Scope: scopeProject},
+
+		// Link management, scoped to the caller's own identity by
+		// construction: no parameter names a user, the owner is read off
+		// the session, and glassesSelfService refuses any caller holding
+		// a token — so a leaked link cannot mint its own successor.
+		// Public for the same reason logout-all is: a user whose role was
+		// never bound still needs to be able to revoke their own
+		// credential, and gating that would put an operator in the path.
+		{Pattern: "GET /api/glasses/link", Handler: s.handleGlassesLinkGet, Perm: public},
+		{Pattern: "POST /api/glasses/link", Handler: s.handleGlassesLinkCreate, Perm: public},
+		{Pattern: "DELETE /api/glasses/link", Handler: s.handleGlassesLinkRevoke, Perm: public},
 
 		// ── Per-identity quotas (Task 20182) ─────────────────────────
 		// Global and admin-only. A quota is the ceiling on what an

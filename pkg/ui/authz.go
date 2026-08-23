@@ -80,6 +80,22 @@ func subjectFromIdentity(id *oidcauth.Identity) *authz.Subject {
 	}
 }
 
+// subjectFromOwner converts a token's owner binding into the claim bundle
+// pkg/authz resolves against. Same shape as subjectFromIdentity — the owner
+// binding *is* a stored copy of those claims — so a delegated token and its
+// owner's browser session resolve through exactly one code path.
+func subjectFromOwner(o *apitoken.Owner) *authz.Subject {
+	if o == nil {
+		return nil
+	}
+	return &authz.Subject{
+		Sub:    o.Sub,
+		Email:  o.Email,
+		Groups: o.Groups,
+		Roles:  o.Roles,
+	}
+}
+
 // grant is the per-request authorization context: the resolved subject plus
 // a memo table of decisions keyed by scope. Building it is cheap; resolving
 // a scope walks the binding list, so the memo keeps a handler that checks
@@ -116,7 +132,20 @@ func (g *grant) decide(scope authz.Scope) authz.Decision {
 		// allow-all local decision. Not memoized: Token.Decision is a slice
 		// walk over at most a handful of roles, and skipping the cache keeps
 		// the one path that must never read stale authority off a mutex.
-		return g.token.Decision(scope, time.Now())
+		d := g.token.Decision(scope, time.Now())
+		// A token minted on a user's behalf — a display-glasses link
+		// (Task 20194) — carries roles only as a *ceiling*. What it may
+		// actually do is that ceiling intersected with whatever its owner may
+		// currently do, resolved from the current policy on every request. So
+		// narrowing a user's role narrows every link they hold, immediately,
+		// and a delegated credential can never outrank the person it was
+		// delegated from. With RBAC inactive there is no policy to resolve
+		// against and every identity holds everything, so the intersection
+		// would be a no-op — skipped rather than computed.
+		if owner := g.token.Owner; owner != nil && g.server.authzActive() {
+			d = authz.Intersect(d, g.server.Authz.Resolve(subjectFromOwner(owner), scope))
+		}
+		return d
 	}
 	if g.bypass != "" {
 		return authz.AllowAll(g.bypass, g.subjectLabel())

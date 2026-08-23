@@ -7,6 +7,7 @@ package apitoken
 // SQLStore is the only production implementation.
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -60,6 +61,10 @@ func NewSQLStore(db *statedb.DB) (*SQLStore, error) {
 }
 
 func (s *SQLStore) Put(t Token) error {
+	owner, err := marshalOwner(t.Owner)
+	if err != nil {
+		return err
+	}
 	return s.db.PutAPIToken(statedb.APITokenRow{
 		ID:           t.ID,
 		Name:         t.Name,
@@ -72,7 +77,42 @@ func (s *SQLStore) Put(t Token) error {
 		ExpiresAt:    t.ExpiresAt,
 		LastUsedAt:   t.LastUsedAt,
 		RevokedAt:    t.RevokedAt,
+		Kind:         t.Kind,
+		OwnerJSON:    owner,
 	})
+}
+
+// marshalOwner encodes an owner binding for storage. A nil owner is the empty
+// string, not "null", so the unbound case is one value rather than two.
+func marshalOwner(o *Owner) (string, error) {
+	if o == nil {
+		return "", nil
+	}
+	b, err := json.Marshal(o)
+	if err != nil {
+		return "", fmt.Errorf("apitoken: marshal owner: %w", err)
+	}
+	return string(b), nil
+}
+
+// unmarshalOwner decodes a stored owner binding.
+//
+// An unparseable non-empty value is an error, not a nil owner. Degrading to
+// nil would fail in the widening direction — an unbound token is *broader*
+// than a bound one, since nothing would intersect its roles with its owner's
+// authority — so one corrupt byte would silently promote a delegated link into
+// a standalone credential. Refusing the row instead turns the same corruption
+// into a 401 the operator can see and re-mint out of.
+func unmarshalOwner(raw string) (*Owner, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || raw == "null" {
+		return nil, nil
+	}
+	var o Owner
+	if err := json.Unmarshal([]byte(raw), &o); err != nil {
+		return nil, fmt.Errorf("apitoken: decode owner binding: %w", err)
+	}
+	return &o, nil
 }
 
 func (s *SQLStore) Get(id string) (Token, error) {
@@ -80,7 +120,7 @@ func (s *SQLStore) Get(id string) (Token, error) {
 	if err != nil {
 		return Token{}, translateErr(err)
 	}
-	return fromRow(row), nil
+	return fromRow(row)
 }
 
 func (s *SQLStore) List() ([]Token, error) {
@@ -90,7 +130,26 @@ func (s *SQLStore) List() ([]Token, error) {
 	}
 	out := make([]Token, 0, len(rows))
 	for _, row := range rows {
-		out = append(out, fromRow(row))
+		tok, ferr := fromRow(row)
+		if ferr != nil {
+			// Listing is not the authentication path, so it does not have to
+			// fail closed the way Get does — and it must not fail *shut*: the
+			// tokens panel and every self-service link route read through
+			// here, so refusing the whole list over one damaged row would take
+			// away the only surface an operator could revoke it from. The row
+			// is already inert (Verify goes through Get, which refuses it), so
+			// surfacing it without its binding loses nothing and keeps it
+			// revocable.
+			tok = Token{
+				ID: row.ID, Name: row.Name, Hash: row.Hash, Prefix: row.Prefix,
+				Roles: row.Roles, ProjectScope: row.ProjectScope,
+				CreatedBy: row.CreatedBy, CreatedAt: row.CreatedAt,
+				ExpiresAt: row.ExpiresAt, LastUsedAt: row.LastUsedAt,
+				RevokedAt: row.RevokedAt, Kind: row.Kind,
+				OwnerUnreadable: true,
+			}
+		}
+		out = append(out, tok)
 	}
 	return out, nil
 }
@@ -106,7 +165,11 @@ func (s *SQLStore) Touch(id string, at time.Time) error {
 	return s.db.TouchAPIToken(id, at)
 }
 
-func fromRow(row statedb.APITokenRow) Token {
+func fromRow(row statedb.APITokenRow) (Token, error) {
+	owner, err := unmarshalOwner(row.OwnerJSON)
+	if err != nil {
+		return Token{}, fmt.Errorf("token %q: %w", row.ID, err)
+	}
 	return Token{
 		ID:           row.ID,
 		Name:         row.Name,
@@ -119,7 +182,9 @@ func fromRow(row statedb.APITokenRow) Token {
 		ExpiresAt:    row.ExpiresAt,
 		LastUsedAt:   row.LastUsedAt,
 		RevokedAt:    row.RevokedAt,
-	}
+		Kind:         row.Kind,
+		Owner:        owner,
+	}, nil
 }
 
 // translateErr maps the storage sentinel onto this package's, so callers test

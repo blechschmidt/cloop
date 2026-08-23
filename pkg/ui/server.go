@@ -600,6 +600,13 @@ type Server struct {
 	tokens  *apitoken.Manager
 	tokenDB *statedb.DB
 
+	// glassesMu serializes display-glasses link rotation (Task 20194).
+	// Minting a link is read-then-revoke-then-write across three store calls,
+	// and "one live link per user" is an invariant this process maintains
+	// rather than one SQLite enforces — two concurrent Generate taps would
+	// otherwise leave a second live credential that no later call can find.
+	glassesMu sync.Mutex
+
 	// sessions holds the durable session store and its database handle
 	// (Task 20176). Opened by OpenSessionStore before OIDC is constructed, so
 	// unlike tokens it is not lazily built on the request path. Zero value
@@ -1263,6 +1270,10 @@ func clientIP(r *http.Request) string {
 // rate-limited per IP in both modes.
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if isPublicShell(r) {
+			next.ServeHTTP(w, r)
+			return
+		}
 		if s.oidcEnabled() {
 			s.oidcGate(next, w, r)
 			return
@@ -1315,6 +1326,25 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		w.WriteHeader(http.StatusUnauthorized)
 		json.NewEncoder(w).Encode(map[string]string{"error": "unauthorized"}) //nolint:errcheck
 	})
+}
+
+// isPublicShell reports whether the request is for the display-glasses
+// document itself (Task 20194), which is served before authentication for the
+// same reason /assets/ is: it is a static document carrying no project data,
+// and everything it draws comes from the gated /api/glasses/* routes.
+//
+// The reason it needs the carve-out at all is the failure it produces without
+// one. A wearer's link expires or is rotated; the glasses re-open the saved
+// URL; authenticateAPIToken rejects the dead credential and writes
+// `{"error":"unauthorized"}`. On a device with no keyboard, no console and no
+// address bar, that JSON blob *is* the product. Serving the shell lets the
+// page say "this link is no longer valid, generate a new one" — and it can
+// only say that if it loads.
+//
+// Narrow on purpose: exactly one path, GET only. An API request is not a shell
+// and must keep failing closed.
+func isPublicShell(r *http.Request) bool {
+	return r.URL.Path == "/glasses" && (r.Method == http.MethodGet || r.Method == http.MethodHead)
 }
 
 // authLockoutActive reports whether ip is currently locked out from
@@ -2245,7 +2275,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	c := &sseClient{
 		ch:      make(chan sseEvent, sseClientBufferSize),
 		resync:  make(chan struct{}, 1),
-		user:    s.sessionIdentity(r),
+		user:    s.recipientIdentity(r),
 		token:   tokenFromRequest(r),
 		workDir: s.resolveWorkDir(r),
 	}
@@ -2536,7 +2566,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 	workDir := s.resolveWorkDir(r)
-	user := s.sessionIdentity(r)
+	user := s.recipientIdentity(r)
 
 	// Assign a unique id, color-coded name and accent color to this connection.
 	connID := fmt.Sprintf("%x", time.Now().UnixNano())
@@ -2549,7 +2579,14 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	color := presenceColors[totalClients%len(presenceColors)]
 	// With OIDC enabled, present the real signed-in user instead of a random
 	// animal name so collaborators see who is actually connected.
-	if user != nil {
+	//
+	// sessionIdentity, not the `user` above: `user` may be an identity derived
+	// from a token minted on someone's behalf, which is right for *filtering*
+	// (the connection must see exactly that user's projects) and wrong for
+	// *naming*. A delegated credential lives in a URL; letting it announce
+	// itself as its owner would turn a leaked link into a way to appear in the
+	// presence list as that person.
+	if user := s.sessionIdentity(r); user != nil {
 		// Truncate, don't drop (Task 20188): boundedQueryString returns ""
 		// for oversized input, which is right for a filter but here would
 		// discard the fallback assigned just above and broadcast a blank
@@ -5513,7 +5550,7 @@ func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
 	if s.oidcEnabled() {
 		entries = s.allProjectEntries()
 	}
-	statuses, stats := s.filterStatusesForRecipient(s.sessionIdentity(r), tokenFromRequest(r), entries, statuses)
+	statuses, stats := s.filterStatusesForRecipient(s.recipientIdentity(r), tokenFromRequest(r), entries, statuses)
 	// multi_project is true when there are multiple registered projects so the
 	// frontend can enable the scoped-tabs experience.
 	multiProject := len(statuses) > 1 || len(s.projectsSnapshot()) > 0
@@ -5538,7 +5575,7 @@ func (s *Server) handleProjectsEvents(w http.ResponseWriter, r *http.Request) {
 	c := &sseClient{
 		ch:      make(chan sseEvent, sseClientBufferSize),
 		resync:  make(chan struct{}, 1),
-		user:    s.sessionIdentity(r),
+		user:    s.recipientIdentity(r),
 		token:   tokenFromRequest(r),
 		workDir: s.resolveWorkDir(r),
 	}

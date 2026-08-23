@@ -77,6 +77,24 @@ var publicRouteAllowlist = map[string]string{
 		"handler takes no identity and reads the one on the request, so no parameter could reach " +
 		"someone else's. Strictly read-only: raising a quota is PUT /api/quotas/{identity}, gated on " +
 		"user.manage. A tenant who cannot see why a run was refused files a ticket instead of waiting",
+	"GET /glasses": "the display-glasses shell: a static document with no project data, served " +
+		"before authentication (isPublicShell) for the same reason /assets/ is. A wearable has no " +
+		"keyboard, console or address bar, so a dead link must be able to load the page that says " +
+		"so rather than render a raw 401 JSON body. Every field it draws comes from the gated " +
+		"/api/glasses/* routes",
+	"GET /api/glasses/link": "reports whether the caller holds a display-glasses link, never the link " +
+		"itself (the secret is not stored). Scoped by construction: the owner is read off the session " +
+		"and no parameter names a user. glassesSelfService additionally refuses any caller presenting " +
+		"a token, so a leaked link cannot enumerate its own successor",
+	"POST /api/glasses/link": "mints the caller's own read-only link, bounded three ways that do not " +
+		"depend on a permission: it carries `viewer` and nothing else, its authority is intersected " +
+		"with its owner's live authority on every request (authz.Intersect), and glassesSelfService " +
+		"refuses a token-authenticated caller so a link can never mint a successor with a fresh " +
+		"expiry. Gating it would deny a user with no global role the ability to issue themselves a " +
+		"credential strictly weaker than the session they already hold",
+	"DELETE /api/glasses/link": "revokes the caller's own link, the same reasoning as " +
+		"POST /api/session/logout-all: a user who has lost a device must be able to withdraw their " +
+		"credential without an operator in the path",
 }
 
 // TestEveryRouteDeclaresAPermission is the route-coverage check: every entry

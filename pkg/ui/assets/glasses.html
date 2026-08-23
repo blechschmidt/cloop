@@ -1,0 +1,392 @@
+<!DOCTYPE html>
+<!--
+  cloop for display glasses (Task 20194).
+
+  A separate document from the dashboard, sized for a monocular heads-up
+  display of roughly 600x600 logical pixels that the wearer drives with a wrist
+  band rather than a pointer. Three design rules follow from that hardware and
+  explain most of what looks unusual below:
+
+    1. Black is transparent. A waveguide display adds light to the world; it
+       cannot subtract any. A light theme would paint a bright rectangle over
+       whatever the wearer is looking at, so the background stays #000 and the
+       content is near-white with large type.
+
+    2. Everything is one column of large targets. There is no hover, no
+       right-click, and no precise pointing. Rows are full width and tall, and
+       the only gestures are "activate a row" and "go back".
+
+    3. One round trip, then as little as possible. The page is a single
+       self-contained document — no external CSS or JS — because a device on a
+       phone's link pays dearly for each request. Data comes from
+       /api/glasses/*, which projects records down to the handful of fields
+       drawn here.
+
+  The credential arrives in the query string, because adding an app by URL is
+  the only input channel the device has. The script lifts it out on load and
+  sends it in an Authorization header from then on, so it appears in exactly
+  one request rather than in every one — and the same value never has to be
+  re-typed by a wearer who has no keyboard.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="referrer" content="no-referrer">
+<meta name="color-scheme" content="dark">
+<title>cloop</title>
+<style>
+  :root {
+    --fg: #f2f4f8;
+    --muted: #9aa4b2;
+    --line: #2a2f3a;
+    --accent: #6ea8ff;
+    --ok: #4ade80;
+    --run: #fbbf24;
+    --bad: #f87171;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body {
+    margin: 0; padding: 0;
+    background: #000; color: var(--fg);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    font-size: 22px; line-height: 1.35;
+    /* The wearer cannot select text with a band, and an accidental selection
+       highlight is a bright block that is hard to clear. */
+    -webkit-user-select: none; user-select: none;
+  }
+  #app { padding: 14px 16px 28px; max-width: 900px; margin: 0 auto; }
+
+  header {
+    display: flex; align-items: center; gap: 12px;
+    padding-bottom: 10px; margin-bottom: 10px;
+    border-bottom: 2px solid var(--line);
+  }
+  #back {
+    display: none; flex: 0 0 auto;
+    min-width: 64px; min-height: 56px;
+    font-size: 26px; font-weight: 700;
+    color: var(--accent); background: transparent;
+    border: 2px solid var(--line); border-radius: 12px;
+    cursor: pointer;
+  }
+  #back.on { display: block; }
+  #title {
+    flex: 1 1 auto; font-size: 26px; font-weight: 700;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  #reload {
+    flex: 0 0 auto; min-width: 64px; min-height: 56px;
+    font-size: 24px; color: var(--muted); background: transparent;
+    border: 2px solid var(--line); border-radius: 12px; cursor: pointer;
+  }
+
+  #sub { color: var(--muted); font-size: 19px; margin-bottom: 12px; }
+
+  .row {
+    display: block; width: 100%; text-align: left;
+    padding: 14px 16px; margin-bottom: 10px;
+    background: #10131a; color: var(--fg);
+    border: 2px solid var(--line); border-radius: 14px;
+    font: inherit; cursor: pointer;
+  }
+  .row:active { border-color: var(--accent); }
+  .row .name { font-size: 24px; font-weight: 650; }
+  .row .meta { color: var(--muted); font-size: 18px; margin-top: 6px; }
+
+  /* A status dot carries the state at a glance; the word is there for the
+     cases where a small coloured dot on a see-through display is ambiguous
+     against a bright background. */
+  .dot { display: inline-block; width: 14px; height: 14px; border-radius: 50%;
+         margin-right: 8px; vertical-align: -1px; background: var(--muted); }
+  .dot.in_progress, .dot.running { background: var(--run); }
+  .dot.done, .dot.complete { background: var(--ok); }
+  .dot.failed, .dot.timed_out { background: var(--bad); }
+  .dot.pending { background: var(--muted); }
+  .dot.skipped { background: #6b7280; }
+
+  .bar { height: 8px; border-radius: 4px; background: #222836; margin-top: 10px; }
+  .bar > i { display: block; height: 100%; border-radius: 4px; background: var(--accent); }
+
+  #filters { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+  .chip {
+    padding: 10px 14px; min-height: 48px;
+    background: #10131a; color: var(--muted);
+    border: 2px solid var(--line); border-radius: 999px;
+    font: inherit; font-size: 18px; cursor: pointer;
+  }
+  .chip.on { color: #000; background: var(--accent); border-color: var(--accent); font-weight: 700; }
+
+  #more {
+    display: none; width: 100%; padding: 14px; margin-top: 4px;
+    background: transparent; color: var(--accent);
+    border: 2px dashed var(--line); border-radius: 14px; font: inherit; cursor: pointer;
+  }
+  #more.on { display: block; }
+
+  .detail h2 { font-size: 25px; margin: 0 0 10px; }
+  .detail .block { margin-top: 16px; }
+  .detail .label { color: var(--muted); font-size: 17px; text-transform: uppercase; letter-spacing: .06em; }
+  .detail .body {
+    margin-top: 6px; white-space: pre-wrap; word-break: break-word;
+    -webkit-user-select: text; user-select: text;
+  }
+  #msg { padding: 18px 0; color: var(--muted); font-size: 20px; }
+  #msg.bad { color: var(--bad); }
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <button id="back" type="button" aria-label="Back">&#8592;</button>
+    <div id="title">cloop</div>
+    <button id="reload" type="button" aria-label="Refresh">&#8635;</button>
+  </header>
+  <div id="sub"></div>
+  <div id="filters"></div>
+  <div id="msg"></div>
+  <div id="list"></div>
+  <button id="more" type="button">More</button>
+</div>
+<script>
+(function() {
+'use strict';
+
+// ── credential ──────────────────────────────────────────────────────────────
+// The URL is the only place the glasses can carry one. Lift it out once and
+// keep it in a closure variable: every later call sends it as a header, so the
+// token stops appearing in request lines after the initial page load.
+//
+// Deliberately not copied to sessionStorage or localStorage. It would buy
+// nothing — the device re-opens the saved URL on every launch, so the query
+// string is always there — while putting a live credential in a store that any
+// future script-injection on this origin could read at leisure.
+var TOKEN = '';
+try {
+  TOKEN = new URLSearchParams(location.search).get('token') || '';
+} catch (e) { /* malformed query string: the API calls will 401 and say so */ }
+
+var state = { view: 'projects', project: null, tasks: [], offset: 0, total: 0, status: '' };
+
+// dead is set once the hub has told us this link is finished (401/403). It is
+// terminal: nothing the wearer can do from a device with no keyboard will make
+// the credential work again, so the page stops asking.
+var dead = false;
+
+function el(id) { return document.getElementById(id); }
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, function(c) {
+    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+  });
+}
+
+function api(path) {
+  if (dead) { return Promise.reject(new Error(DEAD_MSG)); }
+  var headers = { 'Accept': 'application/json' };
+  if (TOKEN) { headers['Authorization'] = 'Bearer ' + TOKEN; }
+  return fetch(path, { headers: headers, credentials: 'same-origin', cache: 'no-store' })
+    .then(function(res) {
+      if (res.status === 401 || res.status === 403) {
+        // Terminal, and the retry loop has to stop here rather than keep
+        // asking. Every rejected attempt costs the hub an audit record and
+        // trips its per-IP auth-failure lockout — and because glasses tether
+        // through a phone, that lockout is shared with every other caller
+        // behind the same address. A pair sitting forgotten in a drawer must
+        // not be able to lock out the CI tokens.
+        dead = true;
+        stopPolling();
+        throw new Error(DEAD_MSG);
+      }
+      if (!res.ok) { throw new Error('cloop returned ' + res.status); }
+      return res.json();
+    });
+}
+
+var DEAD_MSG = 'This link is no longer valid. Generate a new one from the cloop dashboard, ' +
+               'then re-add the app with the new URL.';
+
+function say(text, bad) {
+  var m = el('msg');
+  m.textContent = text || '';
+  m.className = bad ? 'bad' : '';
+}
+
+// ── projects ────────────────────────────────────────────────────────────────
+
+function showProjects() {
+  state.view = 'projects';
+  state.project = null;
+  el('back').className = '';
+  el('title').textContent = 'Projects';
+  el('filters').innerHTML = '';
+  el('more').className = '';
+  el('list').innerHTML = '';
+  el('sub').textContent = '';
+  say('Loading…');
+
+  api('/api/glasses/projects').then(function(d) {
+    var projects = (d && d.projects) || [];
+    if (!projects.length) {
+      say('No projects yet.');
+      return;
+    }
+    say('');
+    el('sub').textContent = projects.length + (projects.length === 1 ? ' project' : ' projects');
+    el('list').innerHTML = projects.map(function(p) {
+      var pct = p.total > 0 ? Math.round(p.done / p.total * 100) : 0;
+      var stateWord = p.running ? 'running' : (p.status || 'idle');
+      return '<button class="row" type="button" data-idx="' + p.idx + '" data-name="' + esc(p.name) + '">' +
+        '<div class="name"><span class="dot ' + esc(p.running ? 'running' : stateWord) + '"></span>' + esc(p.name) + '</div>' +
+        '<div class="meta">' + esc(stateWord) + ' &middot; ' + p.done + '/' + p.total + ' tasks' +
+        (p.failed > 0 ? ' &middot; ' + p.failed + ' failed' : '') + '</div>' +
+        '<div class="bar"><i style="width:' + pct + '%"></i></div>' +
+        '</button>';
+    }).join('');
+  }).catch(function(err) { say(err.message, true); });
+}
+
+// ── tasks ───────────────────────────────────────────────────────────────────
+
+var FILTERS = [
+  { key: '', label: 'All' },
+  { key: 'in_progress,pending', label: 'Open' },
+  { key: 'done', label: 'Done' },
+  { key: 'failed', label: 'Failed' }
+];
+
+function showTasks(idx, name, append) {
+  state.view = 'tasks';
+  state.project = { idx: idx, name: name };
+  el('back').className = 'on';
+  el('title').textContent = name || 'Tasks';
+  if (!append) {
+    state.offset = 0;
+    state.tasks = [];
+    el('list').innerHTML = '';
+    say('Loading…');
+  }
+  renderFilters();
+
+  var url = '/api/glasses/tasks?project_idx=' + encodeURIComponent(idx) +
+    '&offset=' + state.offset + (state.status ? '&status=' + encodeURIComponent(state.status) : '');
+  api(url).then(function(d) {
+    state.total = (d && d.total) || 0;
+    var batch = (d && d.tasks) || [];
+    state.tasks = state.tasks.concat(batch);
+    state.offset = state.tasks.length;
+    if (!state.tasks.length) {
+      say('No tasks match.');
+      el('sub').textContent = '';
+      el('more').className = '';
+      return;
+    }
+    say('');
+    el('sub').textContent = state.tasks.length + ' of ' + state.total +
+      (d && d.goal ? ' · ' + d.goal : '');
+    el('list').innerHTML = state.tasks.map(function(t) {
+      return '<button class="row" type="button" data-task="' + t.id + '">' +
+        '<div class="name"><span class="dot ' + esc(t.status) + '"></span>#' + t.id + ' ' + esc(t.title) + '</div>' +
+        '<div class="meta">' + esc(t.status.replace(/_/g, ' ')) +
+        (t.priority ? ' &middot; P' + t.priority : '') + '</div>' +
+        '</button>';
+    }).join('');
+    el('more').className = state.tasks.length < state.total ? 'on' : '';
+  }).catch(function(err) { say(err.message, true); });
+}
+
+function renderFilters() {
+  el('filters').innerHTML = FILTERS.map(function(f) {
+    return '<button class="chip' + (f.key === state.status ? ' on' : '') +
+      '" type="button" data-status="' + esc(f.key) + '">' + esc(f.label) + '</button>';
+  }).join('');
+}
+
+// ── one task ────────────────────────────────────────────────────────────────
+
+function showTask(id) {
+  state.view = 'task';
+  el('back').className = 'on';
+  el('filters').innerHTML = '';
+  el('more').className = '';
+  el('list').innerHTML = '';
+  say('Loading…');
+
+  api('/api/glasses/tasks/' + encodeURIComponent(id) +
+      '?project_idx=' + encodeURIComponent(state.project ? state.project.idx : 0)).then(function(t) {
+    say('');
+    el('title').textContent = 'Task #' + t.id;
+    el('sub').textContent = t.status.replace(/_/g, ' ') + (t.priority ? ' · P' + t.priority : '');
+    var html = '<div class="detail"><h2><span class="dot ' + esc(t.status) + '"></span>' + esc(t.title) + '</h2>';
+    if (t.description) {
+      html += '<div class="block"><div class="label">Description</div><div class="body">' + esc(t.description) + '</div></div>';
+    }
+    if (t.result) {
+      html += '<div class="block"><div class="label">Result</div><div class="body">' + esc(t.result) + '</div></div>';
+    }
+    html += '</div>';
+    el('list').innerHTML = html;
+  }).catch(function(err) { say(err.message, true); });
+}
+
+// ── navigation ──────────────────────────────────────────────────────────────
+// One delegated listener rather than per-row handlers: rows are rebuilt on
+// every refresh, and re-binding them each time is how a wearable ends up with
+// a growing pile of dead listeners.
+
+el('list').addEventListener('click', function(ev) {
+  var row = ev.target.closest('.row');
+  if (!row) { return; }
+  if (row.dataset.task) { showTask(parseInt(row.dataset.task, 10)); return; }
+  if (row.dataset.idx !== undefined) { showTasks(parseInt(row.dataset.idx, 10), row.dataset.name, false); }
+});
+
+el('filters').addEventListener('click', function(ev) {
+  var chip = ev.target.closest('.chip');
+  if (!chip || !state.project) { return; }
+  state.status = chip.dataset.status || '';
+  showTasks(state.project.idx, state.project.name, false);
+});
+
+el('more').addEventListener('click', function() {
+  if (state.project) { showTasks(state.project.idx, state.project.name, true); }
+});
+
+el('back').addEventListener('click', function() {
+  if (state.view === 'task' && state.project) {
+    showTasks(state.project.idx, state.project.name, false);
+  } else {
+    showProjects();
+  }
+});
+
+el('reload').addEventListener('click', refresh);
+
+function refresh() {
+  if (state.view === 'projects') { showProjects(); }
+  else if (state.view === 'tasks' && state.project) { showTasks(state.project.idx, state.project.name, false); }
+}
+
+// The dashboard is push-based over a WebSocket; this page is not, deliberately.
+// A heads-up display spends most of its life asleep, and an idle socket is a
+// radio the wearer is paying for plus a broadcast fan-out the hub is holding
+// open for a device that is not looking. Refreshing only while the document is
+// actually visible costs one small request a minute and stops entirely the
+// moment the wearer looks away — or the moment the link stops working.
+var pollTimer = setInterval(tick, 60000);
+document.addEventListener('visibilitychange', tick);
+
+function tick() {
+  if (dead || document.visibilityState !== 'visible' || state.view === 'task') { return; }
+  refresh();
+}
+
+function stopPolling() {
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  document.removeEventListener('visibilitychange', tick);
+}
+
+showProjects();
+})();
+</script>
+</body>
+</html>

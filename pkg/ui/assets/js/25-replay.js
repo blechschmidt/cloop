@@ -126,4 +126,3 @@ window._populateReplayTaskSelector = function _populateReplayTaskSelector() {
   sel.innerHTML = '<option value="">— pick a completed task —</option>' + opts;
 };
 
-})();

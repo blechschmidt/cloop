@@ -39,10 +39,20 @@ type APITokenRow struct {
 	ExpiresAt    time.Time `json:"expires_at,omitempty"`
 	LastUsedAt   time.Time `json:"last_used_at,omitempty"`
 	RevokedAt    time.Time `json:"revoked_at,omitempty"`
+
+	// Kind labels a hub-issued token; "" is an ordinary PAT (migration 0023).
+	Kind string `json:"kind,omitempty"`
+
+	// OwnerJSON is the owning identity's claim bundle, stored opaquely. This
+	// layer deliberately does not know its shape: pkg/apitoken owns the
+	// encoding, and a second opinion here about what a claim set looks like is
+	// how the two drift apart. Never serialized outward for the same reason
+	// Hash is not — it carries a user's email and group memberships.
+	OwnerJSON string `json:"-"`
 }
 
 const apiTokenColumns = `id, name, hash, prefix, roles_json, project_scope_json,
-	created_by, created_at, expires_at, last_used_at, revoked_at`
+	created_by, created_at, expires_at, last_used_at, revoked_at, kind, owner_json`
 
 // PutAPIToken inserts a token row. It is an insert, not an upsert: a token's
 // secret, roles, and scope are fixed at mint time, and silently rewriting an
@@ -71,13 +81,14 @@ func (d *DB) PutAPIToken(row APITokenRow) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	_, err = d.conn.Exec(
-		`INSERT INTO api_tokens(`+apiTokenColumns+`) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+		`INSERT INTO api_tokens(`+apiTokenColumns+`) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		row.ID, row.Name, row.Hash, row.Prefix, roles, scope,
 		row.CreatedBy,
 		row.CreatedAt.UTC().Format(time.RFC3339Nano),
 		formatOptionalTime(row.ExpiresAt),
 		formatOptionalTime(row.LastUsedAt),
 		formatOptionalTime(row.RevokedAt),
+		row.Kind, row.OwnerJSON,
 	)
 	if err != nil {
 		return fmt.Errorf("statedb: insert api token %q: %w", row.ID, classifyDriverErr(err))
@@ -225,7 +236,8 @@ func scanAPITokenRow(sc interface{ Scan(...any) error }) (APITokenRow, error) {
 		createdAt, expiresAt, lastUsed, revoked string
 	)
 	if err := sc.Scan(&out.ID, &out.Name, &out.Hash, &out.Prefix, &rolesJSON, &scopeJSON,
-		&out.CreatedBy, &createdAt, &expiresAt, &lastUsed, &revoked); err != nil {
+		&out.CreatedBy, &createdAt, &expiresAt, &lastUsed, &revoked,
+		&out.Kind, &out.OwnerJSON); err != nil {
 		return APITokenRow{}, err
 	}
 	out.Roles = unmarshalStringSlice(rolesJSON)

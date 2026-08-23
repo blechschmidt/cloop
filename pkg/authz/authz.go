@@ -513,6 +513,67 @@ func (d Decision) Permissions() []Permission {
 	return out
 }
 
+// Intersect returns the decision granting only what *both* inputs grant.
+//
+// It exists for delegated credentials: a token minted on behalf of a user
+// carries a role ceiling of its own, but must never outlive or outrank the
+// authority of the person it was minted for. Resolving the owner's authority
+// afresh on every request and intersecting it with the token's ceiling makes
+// that a live property rather than a snapshot — a user demoted this morning
+// loses the delegated access this afternoon, without anyone remembering to
+// revoke anything.
+//
+// The intersection is over *permission sets*, not over role ranks. Today the
+// ladder is cumulative, so the two agree; computing it from the sets means the
+// answer stays correct if a future role ever bundles permissions that are not
+// a superset of the tier below. Role is reported as the weaker of the two
+// labels, which is display and audit only — Allows reads the set.
+//
+// An allow-all input (OIDC disabled, static token) contributes no restriction:
+// intersecting with it yields the other side untouched, including any future
+// permission neither side had to enumerate.
+//
+// The result always keeps a's Source, SubjectLabel and Binding — a is the
+// *acting* credential and b is the authority bounding it. Copying b's labels
+// when b happens to rank lower would file every refusal of a leaked link under
+// the name of the human it was minted for, which is precisely the case the
+// owner binding exists to make visible: an operator reading the audit trail
+// could not tell a stolen URL from that user's own browser being denied.
+func Intersect(a, b Decision) Decision {
+	out := a
+	if b.Role.rank() < a.Role.rank() {
+		out.Role = b.Role
+	}
+	out.allowAll = a.allowAll && b.allowAll
+	switch {
+	case out.allowAll:
+		out.perms = nil
+	case a.allowAll:
+		out.perms = b.perms
+	case b.allowAll:
+		out.perms = a.perms
+	default:
+		perms := make(map[Permission]struct{}, len(a.perms))
+		for p := range a.perms {
+			if _, ok := b.perms[p]; ok {
+				perms[p] = struct{}{}
+			}
+		}
+		if len(perms) == 0 {
+			perms = nil
+		}
+		out.perms = perms
+	}
+	// A decision that ended up granting nothing must not keep a role label
+	// claiming otherwise: /api/me and the audit trail both read Role, and
+	// "admin" next to an empty permission list is the kind of contradiction
+	// an operator resolves in the wrong direction.
+	if !out.allowAll && len(out.perms) == 0 {
+		out.Role = RoleNone
+	}
+	return out
+}
+
 // AllowAll builds a decision granting every permission, used for the two
 // paths that intentionally bypass RBAC: OIDC disabled (single-tenant local
 // use) and static-token automation. src records which.
