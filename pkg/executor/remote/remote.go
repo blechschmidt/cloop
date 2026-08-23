@@ -375,11 +375,12 @@ func (e *Executor) Start(ctx context.Context, spec executor.Spec) (handle execut
 	// holds the material, and a lease left open here is a credential the broker
 	// believes is still out in the world. The release is deferred rather than
 	// called at each exit because there are six of them below.
-	cred, releaseCred, credErr := e.leaseWorkspace(ctx, spec)
+	access, releaseCred, credErr := e.leaseWorkspace(ctx, spec)
 	defer releaseCred()
 	if credErr != nil {
 		return executor.Handle{}, credErr
 	}
+	cred := access.Credential
 
 	// The control plane names the handle, not the agent. If the start
 	// response is lost to a disconnect the workload is still addressable: we
@@ -459,6 +460,12 @@ func (e *Executor) Start(ctx context.Context, spec executor.Spec) (handle execut
 	})
 
 	payload := StartPayload{Spec: spec, HandleID: handleID}
+	// Route the *shipped* copy of the workspace, not the one persisted and
+	// audited above. When a git proxy is interposed the device must fetch and
+	// push through it, while the durable record should keep naming the real
+	// repository — an operator reading a run row wants github.com/acme/tool,
+	// not a proxy URL whose session died with the run.
+	payload.Spec.Workspace = access.Apply(spec.Workspace)
 	if !cred.Empty() {
 		// Beside the Spec, never inside it. See WorkspaceCredential: a Spec is
 		// persisted by pkg/executorstore, so a token in one would outlive the

@@ -463,10 +463,16 @@ func (p *Proxy) upstreamRequest(r *http.Request, sess *Session, suffix string, b
 	if err != nil {
 		return nil, fmt.Errorf("building upstream request: %w", err)
 	}
-	// Unknown length: the replay reader concatenates a buffer and a stream, and
-	// a gzipped body was decompressed on the way in, so neither the client's
-	// Content-Length nor its Content-Encoding still describes what goes out.
-	req.ContentLength = -1
+	if body != nil {
+		// Unknown length: the replay reader concatenates a buffer and a stream,
+		// and a gzipped body was decompressed on the way in, so neither the
+		// client's Content-Length nor its Content-Encoding still describes what
+		// goes out. Only when there *is* a body: net/http refuses to send a
+		// request whose ContentLength is non-zero while Body is nil, so setting
+		// this on the body-less GET of /info/refs fails every clone, fetch and
+		// push at the ref advertisement.
+		req.ContentLength = -1
+	}
 
 	for _, h := range []string{"Content-Type", "Accept", "Git-Protocol"} {
 		if v := r.Header.Get(h); v != "" {

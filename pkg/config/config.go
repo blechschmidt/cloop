@@ -298,6 +298,82 @@ type ExecutorsConfig struct {
 	// Egress configures the scoped forward proxy that lends the control
 	// plane's Internet connection to isolated sandboxes.
 	Egress EgressConfig `yaml:"egress,omitempty"`
+
+	// GitProxy configures the git interception proxy that keeps the forge
+	// credential on the hub and enforces a branch allowlist on every push.
+	GitProxy GitProxyConfig `yaml:"git_proxy,omitempty"`
+}
+
+// GitProxyConfig configures the git interception proxy.
+//
+// With it off, a sandbox that pushes a work product is handed a GitHub PAT and
+// asked to confine itself to the cloop/ namespace; that check runs in code the
+// sandbox itself executes, so it is a convention. With it on, the PAT stays on
+// the hub, the sandbox gets a session token worth nothing anywhere else, and
+// the branch allowlist is enforced on the push's own ref-update list by a
+// process the sandbox does not control.
+//
+// See docs/git-interception-proxy.md.
+type GitProxyConfig struct {
+	// Enabled starts the proxy with the control plane and routes every git
+	// workspace through it. Off by default: interposing a proxy changes the
+	// URL sandboxes push to, and that must be an operator's decision rather
+	// than something a config file acquires on upgrade.
+	Enabled bool `yaml:"enabled,omitempty"`
+
+	// ListenAddr is the proxy's bind address. Empty binds an ephemeral
+	// loopback port, which is safe and — for anything but a sandbox sharing
+	// the host's network namespace — unusable. See AdvertiseURL.
+	ListenAddr string `yaml:"listen_addr,omitempty"`
+
+	// AdvertiseURL is the https base URL sandboxes are pointed at. It must be
+	// https, carry no path, and be reachable *from the sandbox*, which is
+	// frequently not where the hub sees itself: podman reaches the host at
+	// host.containers.internal, docker at host.docker.internal, a Pod at a
+	// Service name, and an edge device at whatever address the hub has on the
+	// link between them. Empty falls back to the bound address, which is
+	// correct only when the sandbox shares the host's network namespace.
+	AdvertiseURL string `yaml:"advertise_url,omitempty"`
+
+	// CertFile and KeyFile are the proxy's TLS material. Both are required
+	// when Enabled: the session token rides an Authorization header on every
+	// request, and over cleartext that token is published rather than
+	// delivered. A loopback listener is not an exception — a sandbox is by
+	// construction something that may share a host with other listeners.
+	//
+	// The certificate must be trusted by the *sandbox's* git, not by the
+	// hub's. A self-signed hub certificate needs its CA in the sandbox image,
+	// or git refuses the connection.
+	CertFile string `yaml:"cert_file,omitempty"`
+	KeyFile  string `yaml:"key_file,omitempty"`
+
+	// MinTLSVersion is "1.2" or "1.3". Empty means 1.2, matching the hub.
+	MinTLSVersion string `yaml:"min_tls_version,omitempty"`
+
+	// SessionMinutes bounds one session: the window covering a run's clone at
+	// the start and its write-back push at the end. Zero uses 60. Values
+	// outside [1, GitProxySessionMinutesUpper] are clamped.
+	//
+	// This is the deadline that actually bounds a sandbox's access to the
+	// forge. Before interception the sandbox held the PAT and its access
+	// ended never; a run that outlives this fails its push, which is by far
+	// the better of the two failures.
+	SessionMinutes int `yaml:"session_minutes,omitempty"`
+
+	// AllowedRefs overrides the branch allowlist. Empty means
+	// refs/heads/cloop/** — the write-back namespace, and the only thing an
+	// executor needs.
+	//
+	// Widening this is how a hub stops protecting the branches a human owns,
+	// so it deliberately has no convenient shorthand: a pattern is a full ref
+	// glob, and "*" does not cross a "/".
+	AllowedRefs []string `yaml:"allowed_refs,omitempty"`
+
+	// AllowDelete permits a sandbox to delete refs it may otherwise write.
+	// Off by default, and rarely right: a write-back never deletes, and an
+	// allowlist that forgot about deletes would let a sandbox destroy the
+	// very branches it was scoped to.
+	AllowDelete bool `yaml:"allow_delete,omitempty"`
 }
 
 // EgressConfig configures the egress broker's forward proxy.
@@ -1785,6 +1861,18 @@ func (c *Config) validateAndClamp(path string) {
 		field, detail, found := strings.Cut(msg, ": ")
 		if !found {
 			field, detail = "executors.egress", msg
+		}
+		warn(field, detail)
+	}
+	// Git interception proxy: the same rule once more, with one difference
+	// worth stating. A repair that would leave the proxy unusable or unsafe
+	// disables it rather than binding somewhere nobody chose — and disabling
+	// is safe here because the proxy is not a fallback path: with it off a
+	// workspace is provisioned exactly as it was before interception existed.
+	for _, msg := range clampGitProxyConfig(&c.Executors.GitProxy) {
+		field, detail, found := strings.Cut(msg, ": ")
+		if !found {
+			field, detail = "executors.git_proxy", msg
 		}
 		warn(field, detail)
 	}

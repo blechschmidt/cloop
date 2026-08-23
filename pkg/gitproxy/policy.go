@@ -88,6 +88,18 @@ type Policy struct {
 // credential in a single request.
 const DefaultMaxPackBytes int64 = 2 << 30 // 2 GiB
 
+// IsZero reports whether the policy grants nothing and names nothing.
+//
+// It distinguishes "the caller never filled this in" from "the caller
+// deliberately wrote a policy that permits nothing", which Validate refuses.
+// Only the first is safe to replace with a default; treating the second as an
+// invitation to substitute WriteBackPolicy would silently widen a policy
+// somebody wrote to be narrow.
+func (p Policy) IsZero() bool {
+	return len(p.AllowedRefs) == 0 && !p.AllowCreate && !p.AllowUpdate &&
+		!p.AllowDelete && !p.AllowFetch
+}
+
 // WriteBackPolicy returns the policy the executor write-back path needs: create
 // and update inside the cloop/ namespace, no deletes, no fetch.
 //
@@ -108,7 +120,15 @@ func (p *Policy) Normalize() {
 		p.AllowedRefs = []string{DefaultAllowedRef}
 	}
 	seen := make(map[string]bool, len(p.AllowedRefs))
-	out := p.AllowedRefs[:0]
+	// A fresh slice, not p.AllowedRefs[:0]. A Policy is copied by value at
+	// every call site — Mint takes req.Policy, gitproxycreds takes a policy
+	// argument — but a copied struct shares the original's backing array, so
+	// filtering in place writes normalized values through into the *caller's*
+	// slice and leaves a stale tail behind the shortened length. It cannot
+	// widen a policy, since every value written is a normalized form of one
+	// already present, but a caller whose allowlist mutates when it is read is
+	// a trap laid for whoever reuses one.
+	out := make([]string, 0, len(p.AllowedRefs))
 	for _, raw := range p.AllowedRefs {
 		pat := normalizeRefPattern(raw)
 		if pat == "" || seen[pat] {

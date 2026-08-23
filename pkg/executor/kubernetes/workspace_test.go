@@ -48,15 +48,18 @@ func gitWorkspace() executor.Workspace {
 // fakeWorkspaceSource is an executor.WorkspaceCredentialSource that hands out
 // a canned token, or the typed refusal a missing grant produces.
 type fakeWorkspaceSource struct {
-	mu       sync.Mutex
-	cred     executor.GitCredential
+	mu   sync.Mutex
+	cred executor.GitCredential
+	// repo, when set, is the routed URL the source redirects the workspace to,
+	// as a git proxy would.
+	repo     string
 	err      error
 	calls    int
 	released int
 }
 
 func (s *fakeWorkspaceSource) ForWorkspace(ctx context.Context, projectID string,
-	w executor.Workspace) (executor.GitCredential, func(), error) {
+	w executor.Workspace) (executor.WorkspaceAccess, func(), error) {
 
 	s.mu.Lock()
 	s.calls++
@@ -73,9 +76,9 @@ func (s *fakeWorkspaceSource) ForWorkspace(ctx context.Context, projectID string
 		// path, and that a source which never leased anything must not report
 		// a release. Returning the counting closure here would hide a driver
 		// that released a lease it was never given.
-		return executor.GitCredential{}, func() {}, err
+		return executor.WorkspaceAccess{}, func() {}, err
 	}
-	return cred, release, nil
+	return executor.WorkspaceAccess{Credential: cred, Repo: s.repo}, release, nil
 }
 
 func (s *fakeWorkspaceSource) counts() (calls, released int) {

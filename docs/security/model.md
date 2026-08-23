@@ -491,6 +491,52 @@ out on loan for hours. The Secret itself is dropped the moment the init
 container terminates — the exposure is the length of a `git fetch`, not the
 length of a run.
 
+### With the git interception proxy on, the forge token never leaves the hub
+
+Everything above describes a hub with no proxy configured, which is the default
+and what an install gets until someone decides otherwise. What it cannot offer is
+a fetch the sandbox is not trusted with a forge credential for, and that is what
+[`executors.git_proxy`](../git-interception-proxy.md) adds.
+
+With `enabled: true`, `pkg/executor/gitproxycreds` decorates the credential
+source every git-provisioning driver already uses. The inner source leases the
+PAT exactly as before; the PAT then **stays on the hub**, and what travels the
+path above is an ephemeral session token for a proxy the hub runs, bound to one
+repository, one policy and one TTL:
+
+```
+driver:    lease from the broker at dispatch
+                │
+hub:       mint a gitproxy session against the leased PAT   ← the PAT stops here
+                │
+   the sandbox receives:  Session.ID + token, and Minted.RepoURL as its remote
+                │
+sandbox:   git fetch / git push ──▶ hub's proxy ──PAT──▶ github.com
+                                       │
+                                  policy per ref update
+```
+
+Three properties make this a boundary rather than a redirection:
+
+- **The credential and the URL it is good against travel together.** A driver
+  receives an `executor.WorkspaceAccess`, not a bare credential, and applies it
+  to the workspace for the fetch and the push at once. A driver that ignored the
+  URL would aim the sandbox at the forge holding a token the forge has never
+  heard of — a loud failure, rather than a quiet restoration of the direct path.
+- **It fails closed.** If the session cannot be minted the dispatch fails and
+  the inner lease is released. There is no fallback to handing over the PAT,
+  because a fallback would deliver the credential precisely when the boundary is
+  broken.
+- **The expiry the sandbox is bound by becomes the session's**, not the lease's.
+  A leased PAT the sandbox holds is usable until the forge revokes it, whatever
+  the lease record says; a session token stops working at its TTL, at the hub.
+
+What does *not* change: the four absences below, the origin-scoped delivery, the
+`owner/name` shape a grant is matched against (`Minted.RepoURL` preserves it, so
+`Workspace.RepoPath` returns the same string), and every audit row that names a
+repository or a grant. The proxy is off by default, so an un-configured hub is
+described by the paragraphs above, not by this one.
+
 ### The four absences
 
 | Property | Why it holds |
@@ -1202,6 +1248,42 @@ where `git` or `git-http-backend` is not installed.
 | A rejected fetch — where git is most likely to quote the request back — redacts its error and its transcript, and carries `ErrWorkspaceUnavailable` so callers can tell a missing tree from a failing harness | `TestWorkspaceProvisioningRedactsItsFailure` |
 | A workspace no grant authorises is refused with a typed `*WorkspaceGrantError` naming the grant, the repository and a remediation naming both the repository and the executor | `TestMissingGrantIsRefusedByName` |
 | An executor that cannot fetch is refused at placement on `ConstraintWorkspace`, and on the binding path too — no credential involved, whatever the repository's visibility | `TestExecutorThatCannotFetchIsRefusedAtPlacement` |
+
+### Git interception proxy — the package suites
+
+The [proxy](../git-interception-proxy.md) is optional, so its rows live with the
+packages rather than in `tests/security/`: a conformance suite that skipped
+itself whenever a hub had the section switched off would be a suite that never
+ran. What they assert is the two halves an operator is trusting — that the forge
+credential does not leave the hub, and that the allowlist is enforced on a push a
+real `git` binary actually sends.
+
+The end-to-end rows run the production topology: `git` → proxy →
+`git-http-backend` behind TLS → a bare repository. The forge demands the PAT, so
+"the ref did not move" is evidence that the proxy declined to authenticate rather
+than that a mock recorded a call. They skip where `git` or `git-http-backend` is
+not installed.
+
+| Guarantee | Test |
+| --- | --- |
+| The leased forge PAT reaches no part of what the driver is handed — the sandbox gets a session token instead | `pkg/executor/gitproxycreds: TestForWorkspaceKeepsTheForgePATOnTheHub` |
+| The upstream URL and the credential stay on the hub side of the registry | `pkg/gitproxy: TestMintUpstreamAndCredentialStayOnTheHub` |
+| The workspace is redirected at the proxy, so the provisioning fetch and the write-back push cannot end up on different hosts; with no proxy the workspace is left alone | `pkg/executor/gitproxycreds: TestForWorkspaceRedirectsTheRepoAtTheProxy`, `TestWorkspaceAccessApplyWithNoRepoLeavesTheWorkspaceAlone` |
+| The proxy URL preserves the `owner/name` path, so grant matching and every audit row naming a repository are unaffected | `pkg/executor/gitproxycreds: TestProxyRepoURLPreservesTheOwnerNamePath`, `pkg/gitproxy: TestUpstreamRepoPathMatchesExecutorRepoPath` |
+| A session that cannot be minted **fails the dispatch** rather than falling back to the PAT | `pkg/executor/gitproxycreds: TestForWorkspaceFailsClosedWhenTheSessionCannotBeMinted`, `TestForWorkspaceFailsClosedOnAnUnmintablePolicyOrTTL` |
+| The expiry the sandbox is bound by is the session's, not the lease's | `pkg/executor/gitproxycreds: TestCredentialExpiryIsTheSessionsNotTheLeases` |
+| A public repository is passed through with no session — there is no credential to keep off the sandbox | `pkg/executor/gitproxycreds: TestPublicRepoIsPassedThroughWithoutASession` |
+| A hub configured to intercept, whose proxy did not start, refuses git workspaces instead of falling back to the PAT | `pkg/ui: TestGitProxyRequiredButAbsentFailsClosed` |
+| Turning the proxy on routes the workspace and leaves it valid: it still validates, still yields `owner/name`, still renders a git plan, and scopes the credential to the proxy origin | `pkg/ui: TestGitProxyRoutesTheWorkspace` |
+| The proxy listener actually speaks TLS and refuses an unauthenticated request | `pkg/ui: TestStartGitProxyServesTLS` |
+| A missing-grant refusal reaches the UI unwrapped, with its remediation intact | `pkg/executor/gitproxycreds: TestInnerErrorIsReturnedUnchanged` |
+| A session is pinned to one repository and one TTL, and unknown session, wrong token, revoked and expired are one indistinguishable error | `pkg/gitproxy: TestMintTTL`, `TestAuthenticateFailuresAreOneError`, `TestAuthenticateExpiryBoundary` |
+| The ref-pattern table in [the policy model](../git-interception-proxy.md#ref-patterns) is the matching the code performs, not a description of it | `pkg/gitproxy: TestPolicyAllowsRefMatchesTheDocumentedTable` |
+| A policy that permits nothing, an uncompilable pattern, or an over-long allowlist is refused at construction rather than silently denying everything | `pkg/gitproxy: TestPolicyValidateRefusesAPolicyThatPermitsNothing`, `TestPolicyValidateRejectsMalformedPatterns`, `TestPolicyValidateBoundsTheAllowlistLength` |
+| End to end: a real `git push` to an allowed branch lands on a real forge — the control, without which every refusal below could be a proxy that refuses everything | `pkg/gitproxy: TestPushToAllowedBranchSucceeds` |
+| End to end: a real `git push` to `refs/heads/main` is refused, git reports it, no `push_allowed` is emitted, and the upstream ref does not move — and the identical push lands once `main` is added to the allowlist, so what stopped it was the policy and nothing else | `pkg/gitproxy: TestPushToProtectedBranchIsRefused` |
+| End to end: a delete of an *allowed* ref is still refused, and a fetch without `AllowFetch` is refused | `pkg/gitproxy: TestDeleteOfAllowedRefIsRefused`, `TestFetchRequiresAllowFetch` |
+| End to end: a session past its TTL cannot push, whatever its policy said | `pkg/gitproxy: TestExpiredSessionIsRefused` |
 
 ### Result write-back — `writeback_bundle_test.go`
 

@@ -254,8 +254,7 @@ func (r *Registry) Mint(req MintRequest) (*Minted, error) {
 	}
 
 	pol := req.Policy
-	if len(pol.AllowedRefs) == 0 && !pol.AllowCreate && !pol.AllowUpdate &&
-		!pol.AllowDelete && !pol.AllowFetch {
+	if pol.IsZero() {
 		pol = WriteBackPolicy()
 	}
 	pol.Normalize()

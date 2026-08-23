@@ -66,15 +66,15 @@ func New(broker *secretbroker.Broker, executorID, actor string) (*BrokerSource, 
 // a distinct Reason, because "create a grant" and "widen the grant you have"
 // are different fixes and an operator who is told the wrong one will go looking
 // in the wrong place.
-func (s *BrokerSource) ForWorkspace(ctx context.Context, projectID string, w executor.Workspace) (executor.GitCredential, func(), error) {
+func (s *BrokerSource) ForWorkspace(ctx context.Context, projectID string, w executor.Workspace) (executor.WorkspaceAccess, func(), error) {
 	noop := func() {}
 	if s == nil || s.Broker == nil {
-		return executor.GitCredential{}, noop, errors.New("gitcreds: no broker configured")
+		return executor.WorkspaceAccess{}, noop, errors.New("gitcreds: no broker configured")
 	}
 	if !w.RequiresCredential() {
 		// An unauthenticated fetch. Legitimate for a public repository, and
 		// not something to manufacture a lease for.
-		return executor.GitCredential{}, noop, nil
+		return executor.WorkspaceAccess{}, noop, nil
 	}
 
 	repoPath, hasRepoPath := w.RepoPath()
@@ -92,7 +92,7 @@ func (s *BrokerSource) ForWorkspace(ctx context.Context, projectID string, w exe
 		// Repository allowlists are owner/name globs, so a URL that is not
 		// owner/name cannot be matched against one. Saying so beats leasing a
 		// credential that no constraint could have narrowed.
-		return executor.GitCredential{}, noop, denied(fmt.Sprintf(
+		return executor.WorkspaceAccess{}, noop, denied(fmt.Sprintf(
 			"%s is not an owner/name repository URL, so no repository allowlist can authorise it", w.Repo))
 	}
 
@@ -101,7 +101,7 @@ func (s *BrokerSource) ForWorkspace(ctx context.Context, projectID string, w exe
 		ProjectID:  projectID,
 	}, s.Actor)
 	if err != nil {
-		return executor.GitCredential{}, noop, fmt.Errorf("gitcreds: lease for %s: %w", projectID, err)
+		return executor.WorkspaceAccess{}, noop, fmt.Errorf("gitcreds: lease for %s: %w", projectID, err)
 	}
 	release := func() { s.Broker.Release(lease.ID) }
 
@@ -119,13 +119,15 @@ func (s *BrokerSource) ForWorkspace(ctx context.Context, projectID string, w exe
 		if !mat.Constraints.AllowsRepo(repoPath) {
 			continue
 		}
-		return executor.GitCredential{
-			Username:   secretbroker.GitHubUsername,
-			Password:   token,
-			LeaseID:    lease.ID,
-			GrantID:    mat.GrantID,
-			SecretName: mat.SecretName,
-			ExpiresAt:  lease.ExpiresAt,
+		return executor.WorkspaceAccess{
+			Credential: executor.GitCredential{
+				Username:   secretbroker.GitHubUsername,
+				Password:   token,
+				LeaseID:    lease.ID,
+				GrantID:    mat.GrantID,
+				SecretName: mat.SecretName,
+				ExpiresAt:  lease.ExpiresAt,
+			},
 		}, release, nil
 	}
 
@@ -134,14 +136,14 @@ func (s *BrokerSource) ForWorkspace(ctx context.Context, projectID string, w exe
 	// in the world.
 	release()
 	if sawSecret {
-		return executor.GitCredential{}, noop, denied(fmt.Sprintf(
+		return executor.WorkspaceAccess{}, noop, denied(fmt.Sprintf(
 			"grant %s does not include repository %s in its allowlist", want, repoPath))
 	}
 	if want != "" {
-		return executor.GitCredential{}, noop, denied(fmt.Sprintf(
+		return executor.WorkspaceAccess{}, noop, denied(fmt.Sprintf(
 			"no active GitHub grant named %s is issued to this executor for this project", want))
 	}
-	return executor.GitCredential{}, noop, denied(fmt.Sprintf(
+	return executor.WorkspaceAccess{}, noop, denied(fmt.Sprintf(
 		"no active GitHub grant authorises %s", repoPath))
 }
 

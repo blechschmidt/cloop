@@ -795,6 +795,26 @@ reaches exactly one child process — the single `fetch` step, marked
 `Authenticated` in the plan — as a URL-scoped `http.<base>.extraHeader` in its
 environment.
 
+What a driver leases is an `executor.WorkspaceAccess`: the credential **and** the
+repository URL that credential is good against, which `Apply` writes onto the
+workspace before anything is rendered. With no interception the URL is empty and
+`Apply` changes nothing. With the
+[git interception proxy](../git-interception-proxy.md) enabled the credential is
+an ephemeral session token and the URL is the proxy's, so the fetch and the
+write-back push both aim there and the forge PAT never leaves the hub. The two
+travel together on purpose — a driver that took the credential and ignored the
+URL would send the sandbox at the forge holding a token the forge has never heard
+of, which fails immediately rather than quietly restoring the direct path.
+
+Which copy of the workspace is rewritten differs by driver, and deliberately so.
+The Kubernetes driver routes the workspace the Pod is built from, so the init
+container's fetch, the checkout and the push all agree. The remote driver routes
+only the *shipped* Spec: the persisted and audited copy keeps naming the real
+repository, because an operator reading a run row wants `github.com/acme/tool`,
+not a proxy URL whose session died with the run. `container` and `localprocess`
+never reach this path at all — they bind the operator's own checkout and provision
+nothing.
+
 A workspace whose fetch nobody can authorise fails with a typed
 `*executor.WorkspaceGrantError` that names the repository, the grant and the
 executor, and whose `Remediation()` prints the `cloop secret grant` command that

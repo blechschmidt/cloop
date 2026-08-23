@@ -45,6 +45,9 @@ func gitSpec(grant string) executor.Spec {
 // fakeSource is a WorkspaceCredentialSource with no broker behind it.
 type fakeSource struct {
 	cred executor.GitCredential
+	// repo, when set, is the routed URL the source redirects the workspace to,
+	// as a git proxy would.
+	repo string
 	err  error
 
 	mu        sync.Mutex
@@ -53,7 +56,7 @@ type fakeSource struct {
 	projectID string
 }
 
-func (f *fakeSource) ForWorkspace(_ context.Context, projectID string, _ executor.Workspace) (executor.GitCredential, func(), error) {
+func (f *fakeSource) ForWorkspace(_ context.Context, projectID string, _ executor.Workspace) (executor.WorkspaceAccess, func(), error) {
 	f.mu.Lock()
 	f.calls++
 	f.projectID = projectID
@@ -64,9 +67,9 @@ func (f *fakeSource) ForWorkspace(_ context.Context, projectID string, _ executo
 		f.mu.Unlock()
 	}
 	if f.err != nil {
-		return executor.GitCredential{}, func() {}, f.err
+		return executor.WorkspaceAccess{}, func() {}, f.err
 	}
-	return f.cred, release, nil
+	return executor.WorkspaceAccess{Credential: f.cred, Repo: f.repo}, release, nil
 }
 
 func (f *fakeSource) counts() (calls, released int) {

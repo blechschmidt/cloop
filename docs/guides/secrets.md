@@ -186,6 +186,12 @@ nothing and no token behind it. See
 installation JSON payload — and is constrained by the same `--repos` /
 `--permissions` flags.
 
+The [git interception proxy](../git-interception-proxy.md) does **not** change
+any of this. It brokers the one repository cloop itself clones and pushes back
+to, on the [workspace-provisioning path](#granting-a-pat-for-workspace-provisioning);
+a PAT granted to the task is delivered into the sandbox as above whether or not
+a proxy is configured.
+
 ---
 
 ## Granting a PAT for workspace provisioning
@@ -245,6 +251,32 @@ Four things about that command are load-bearing:
 Nothing else changes. The hub picks the grant up on the next run, records only
 its *name* in the dispatched workload, and leases the material for the length of
 one fetch.
+
+### With the git proxy on, the token does not enter the sandbox at all
+
+A hub with [`executors.git_proxy`](../git-interception-proxy.md) enabled leases
+this grant exactly as described above and then keeps the PAT: the sandbox is
+given a session token for a proxy the hub runs, and its remote is rewritten to
+that proxy. The clone and the write-back push both go through it, and the proxy
+refuses any ref update outside `refs/heads/cloop/**`.
+
+Nothing about the grant changes — same `--to executor:…`, same `--repos`, same
+matching, same audit rows naming the same grant and repository, because the
+proxy's URL keeps the `owner/name` shape the allowlist is matched against. What
+changes is that a leaked sandbox now yields a token worth one namespace on one
+repository for the rest of its TTL, instead of the PAT.
+
+Two things worth knowing before turning it on: a session lasts
+`session_minutes` (60 by default) rather than the length of a run, so a run that
+outlives it fails its push; and the sandbox's git must trust the proxy's
+certificate, which for a self-signed hub certificate means installing the CA in
+the sandbox image. Both are covered in
+[operating it](../git-interception-proxy.md#operating-it).
+
+**It does not cover the section above.** A `github_pat` granted for the *task* is
+still delivered into the sandbox as a credential helper — that grant exists so
+the workload can reach repositories, and the proxy brokers exactly one:
+the project's own. The two are separate paths and separate decisions.
 
 ### When it is missing
 

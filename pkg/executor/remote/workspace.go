@@ -30,13 +30,13 @@ import (
 // including the error paths, where the lease has already been given back before
 // this returns. A lease held open for a workload that will not start is a
 // credential the broker believes is out in the world.
-func (e *Executor) leaseWorkspace(ctx context.Context, spec executor.Spec) (executor.GitCredential, func(), error) {
+func (e *Executor) leaseWorkspace(ctx context.Context, spec executor.Spec) (executor.WorkspaceAccess, func(), error) {
 	noop := func() {}
 	if !spec.Workspace.RequiresCredential() {
 		// Either not a git workspace at all, or a public repository. Neither
 		// needs a lease, and minting one anyway would put a token on the wire
 		// for a fetch that will not present it.
-		return executor.GitCredential{}, noop, nil
+		return executor.WorkspaceAccess{}, noop, nil
 	}
 
 	src := e.opts.Workspace
@@ -46,7 +46,7 @@ func (e *Executor) leaseWorkspace(ctx context.Context, spec executor.Spec) (exec
 		// operator's next step identical whichever half is missing, instead of
 		// making "no source configured" a distinct mystery.
 		repoPath, _ := spec.Workspace.RepoPath()
-		return executor.GitCredential{}, noop, &executor.WorkspaceGrantError{
+		return executor.WorkspaceAccess{}, noop, &executor.WorkspaceGrantError{
 			Repo:        spec.Workspace.Repo,
 			RepoPath:    repoPath,
 			Grant:       strings.TrimSpace(spec.Workspace.CredentialGrant),
@@ -57,7 +57,7 @@ func (e *Executor) leaseWorkspace(ctx context.Context, spec executor.Spec) (exec
 		}
 	}
 
-	cred, release, err := src.ForWorkspace(ctx, projectOf(spec), spec.Workspace)
+	access, release, err := src.ForWorkspace(ctx, projectOf(spec), spec.Workspace)
 	if release == nil {
 		// The interface promises non-nil, but a caller of Start must not
 		// segfault because someone's source forgot.
@@ -70,9 +70,9 @@ func (e *Executor) leaseWorkspace(ctx context.Context, spec executor.Spec) (exec
 		// several layers up (the run panel, the placement error) match it with
 		// errors.As — wrapping it here would keep errors.As working but bury
 		// the remediation behind two prefixes nobody needs.
-		return executor.GitCredential{}, noop, err
+		return executor.WorkspaceAccess{}, noop, err
 	}
-	return cred, release, nil
+	return access, release, nil
 }
 
 // auditWorkspaceStart emits the provisioning start row and returns the function

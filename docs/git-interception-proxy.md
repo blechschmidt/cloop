@@ -11,6 +11,14 @@ only then presents the credential upstream. The branch allowlist stops being
 something the sandbox is asked to honour and becomes a property of the network
 path.
 
+The proxy runs **inside the hub process** and is **off by default**. An
+unconfigured hub behaves exactly as [the hole it closes](#the-hole-it-closes)
+describes: the forge credential is delivered into the sandbox and the branch
+rule is a convention. Setting `executors.git_proxy.enabled: true` turns it on,
+and from then on every git workspace the hub provisions — Kubernetes Pods and
+enrolled edge devices alike — clones and pushes through it. See
+[operating it](#operating-it).
+
 - [The hole it closes](#the-hole-it-closes)
 - [The inversion](#the-inversion)
 - [The policy model](#the-policy-model)
@@ -20,18 +28,12 @@ path.
 - [Audit events](#audit-events)
 - [Threat model notes](#threat-model-notes)
 
-> **Status.** The package is complete and self-contained, and nothing in the
-> repository calls it yet: the write-back path still pushes from inside the
-> sandbox as described below. Read this as the design and the API of the
-> boundary, not as a description of a boundary that is currently deployed. The
-> section on [operating it](#operating-it) says which command surface exists and
-> which does not.
-
 ---
 
 ## The hole it closes
 
-Today's push write-back runs `git push` *in the sandbox*. `pkg/executor`
+With the proxy off — the default, and what an un-configured hub does — the push
+write-back runs `git push` *in the sandbox*. `pkg/executor`
 requires every write-back branch to sit under `cloop/`
 (`executor.ValidateWriteBackBranch`), and `pkg/writeback` re-verifies the branch
 when the result arrives. Both checks are real, and neither is a boundary:
@@ -58,13 +60,20 @@ git push --force origin HEAD:main
 ```
 
 reaches `main`, and the first anyone hears of it is the force-push
-notification. Nothing in the current design detects the attempt, because nothing
-in the current design is on the path.
+notification. Nothing there detects the attempt, because nothing there is on the
+path.
 
 That the ordinary write-back itself pushes with `--force` (the ref is
 cloop-owned, so forcing it is correct) is worth noting only because it means the
 sandbox's git is already configured for exactly the operation you would least
 like it to aim elsewhere.
+
+Turning the proxy on does not remove either check. `ValidateWriteBackBranch` and
+`pkg/writeback`'s inspection stay exactly where they are; what changes is that
+they stop being the only thing between the sandbox and `main`, because the
+sandbox no longer holds a credential that could reach it. That is deliberate: a
+hub with the proxy off, or a driver that never routed through one, keeps the
+behaviour above rather than losing a check to a feature flag.
 
 ---
 
@@ -241,7 +250,19 @@ the sandbox is precisely what turns it into a boundary.
 It is a constructor rather than a documented recipe because every caller that
 hand-assembled these four booleans would be a caller that could get one wrong,
 and three of the four failures are silent. `Mint` applies it when the request's
-policy is entirely zero-valued.
+policy is entirely zero-valued — `Policy.IsZero()`, which is "nobody filled this
+in" and not "somebody deliberately wrote a policy that permits nothing"; the
+second is a `Validate()` error, and substituting a default for it would widen a
+policy an operator wrote to be narrow.
+
+**The hub's own policy is this plus fetch.** `GitProxyConfig.Policy()` sets
+`AllowFetch` unconditionally, because with a proxy interposed the provisioning
+*clone* goes through it too — a hub whose sandboxes still fetched directly would
+still be delivering the PAT, and would have moved the boundary onto half the
+round trip. The rest comes from configuration: `allowed_refs` is the allowlist
+(empty means `refs/heads/cloop/**`), `allow_delete` is the one direction an
+operator can add, and create and update are always on because a write-back is
+exactly those two.
 
 ### Deciding a push
 
@@ -318,22 +339,61 @@ purpose: a caller that could tell "no such session" from "wrong token" would be
 an oracle for enumerating session ids. `ErrSessionNotFound` exists separately for
 management calls, where the caller is the operator and precision is the point.
 
+The hub's session TTL is `executors.git_proxy.session_minutes`, defaulting to
+60 — the same hour as `DefaultSessionTTL`. A value outside
+`[0, GitProxySessionMinutesUpper]` (720, i.e. `MaxSessionTTL`) is reported and
+reset to the default at load rather than silently narrowed.
+
+### A session's life is its TTL, not the run's
+
+**Nothing closes a session when a run ends.** The credential source mints at
+dispatch and hands the sandbox its token; `ForWorkspace` is not told when the
+workload finished, and a session closed at the moment the credential was
+delivered would refuse the write-back it exists to authorise — the sandbox
+fetches at the *start* of a run and pushes at the *end*.
+
+The consequence is a real operational limit, and it is worth stating plainly: **a
+run that outlives `session_minutes` fails its push.** The proxy answers an
+expired session with HTTP 401, which the sandbox's git reports as an
+authentication failure, and the attempt lands in the audit trail as a `rejected`
+event. Set the TTL against the longest run the hub is expected to complete, not
+against the median one. The trade is deliberate — before interception the
+sandbox held the PAT and its access ended never, whatever the lease said — but a
+push that fails at the end of a two-hour run is an expensive way to discover a
+one-hour ceiling.
+
 ### Closing and reaping
 
-`Registry.Close(id, reason)` revokes a session and is idempotent, so a driver can
+`Registry.Close(id, reason)` revokes a session and is idempotent, so a caller can
 call it from a `defer` without checking whether the run already ended. The
-closing audit row carries the session's counters.
+closing audit row carries the session's counters. It is what makes revocation a
+local decision: the next request is refused with no forge round-trip and no
+coordination.
+
+No command exposes it. The hub closes sessions on shutdown and nowhere else, so
+an operator ending one early either restarts the hub — which closes all of them —
+or waits for the TTL, which is enforced at authentication whether or not the
+reaper has swept it. Revoking the underlying grant with `cloop secret revoke`
+stops the *next* dispatch from minting anything; it does not reach a session
+already minted.
 
 `Registry.ReapExpired()` drops sessions past their TTL and returns how many
 went. `Authenticate` already refuses an expired session, so this is hygiene
 rather than enforcement — without it the map grows for the life of the process.
-Nothing calls it on a timer; whoever owns the registry owns that loop.
+The hub runs it every 5 minutes, so a lapsed entry occupies memory for at most
+that long after it stopped being usable.
+
+On hub shutdown every live session is closed with the reason *"the hub is
+shutting down"* rather than abandoned, so the trail records why they ended and
+their counters land in the closing rows instead of disappearing with the
+process.
 
 `Session.Stats()` snapshots `Pushes`, `Fetches`, `Denied`, `BytesUp` and
-`BytesDown` for the UI and for the closing audit row. `BytesDown` counts the
-bytes streamed back to the sandbox; `BytesUp` is currently never incremented and
-reads zero, which is worth knowing before an operator concludes from a dashboard
-that nothing was pushed.
+`BytesDown`. The first three are what an operator actually meets, in the
+`Detail` of a `gitproxy.session_closed` row; the byte counters are visible only
+through `Stats()` itself. `BytesDown` counts the bytes streamed back to the
+sandbox. `BytesUp` is never incremented and reads zero — worth knowing before
+concluding from a counter that nothing was pushed.
 
 ---
 
@@ -405,10 +465,18 @@ listening on loopback — that is the whole premise of running the workload in o
 
 `Proxy.Serve(ln)` takes a listener rather than a certificate path, so the
 caller configures TLS through [`pkg/tlsconf`](../pkg/tlsconf/tlsconf.go) exactly
-as the hub does, and a TLS listener drops straight in. `Options.Transport`
+as the hub does, and a TLS listener drops straight in — which is what the hub
+does with `cert_file`, `key_file` and `min_tls_version`. `Options.Transport`
 exists for the other leg: an operator whose forge sits behind a private CA
 supplies a `RoundTripper`, instead of the package growing a flag that weakens
 the default.
+
+An enabled section with no `cert_file` and `key_file` does not start a cleartext
+proxy: the pair is required when `enabled` is true, and a section that has one
+without the other is reported and switched **off** at load. Disabling is the
+safe repair precisely because the proxy is not a fallback — with it off a
+workspace is provisioned the way it was before interception existed, which is a
+documented behaviour rather than a new failure mode.
 
 Timeouts are set where a stall is a bug and left off where a wait is legitimate:
 15 s to dial the forge, 60 s for it to start replying, 30 s to read request
@@ -417,67 +485,185 @@ deliberately **no** overall client timeout and no `WriteTimeout` — a clone or 
 push of a large repository is legitimately slower than any ceiling worth setting,
 and the request context already ends when the peer hangs up.
 
-### Running one
+### Turning it on
 
-There is no `cloop git-proxy` command in the tree yet, and no CLI flags to
-document: `pkg/gitproxy` is a library with no callers. When the write-back path
-is inverted onto it, the operator-facing entry point is `cloop git-proxy`. Until
-then the API is the interface:
+One section in the hub's `.cloop/config.yaml`:
 
-```go
-reg, err := gitproxy.NewRegistry("https://hub.internal:8443")
-if err != nil {
-	return err
-}
-reg.OnEvent = func(e gitproxy.Event) { auditSink.Write(e.String()) }
-
-px, err := gitproxy.New(reg, gitproxy.Options{})
-if err != nil {
-	return err
-}
-
-cfg, err := tlsconf.ServerConfig(certFile, keyFile, "1.2")
-if err != nil {
-	return err
-}
-ln, err := net.Listen("tcp", ":8443")
-if err != nil {
-	return err
-}
-go px.Serve(tls.NewListener(ln, cfg))
-defer px.Close()
+```yaml
+executors:
+  git_proxy:
+    enabled: true
+    listen_addr: "0.0.0.0:8443"                    # where the proxy binds
+    advertise_url: "https://hub.internal:8443"     # what the SANDBOX connects to
+    cert_file: /etc/cloop/tls/git-proxy.crt
+    key_file: /etc/cloop/tls/git-proxy.key
+    min_tls_version: "1.2"                         # or "1.3"; empty means 1.2
+    session_minutes: 60                            # 0 means 60; ceiling is 720
+    allowed_refs: ["refs/heads/cloop/**"]          # the default; widen deliberately
+    allow_delete: false
 ```
 
-Per dispatched task, the driver mints a session, rewrites the sandbox's remote,
-and closes the session when the run ends:
+`enabled`, `cert_file` and `key_file` are the only keys with no useful default.
+An empty `listen_addr` binds an ephemeral loopback port, and an empty
+`advertise_url` falls back to the bound address — a pair that is correct only
+when the sandbox shares the hub's network namespace.
 
-```go
-m, err := reg.Mint(gitproxy.MintRequest{
-	Upstream:   "https://github.com/acme/tool",
-	Credential: gitproxy.Credential{Username: "x-access-token", Password: pat},
-	Policy:     gitproxy.WriteBackPolicy(),   // refs/heads/cloop/**, create+update
-	TTL:        gitproxy.DefaultSessionTTL,
-	ProjectID:  projectID,
-	TaskID:     taskID,
-	ExecutorID: exec.ID(),
-	Actor:      actor,
-})
-if err != nil {
-	return err
-}
-defer reg.Close(m.Session.ID, "task finished")
+Validation is not deferred to start time. `allowed_refs` is put through the same
+`Normalize()` and `Validate()` the proxy enforces with, so a pattern that would
+silently match nothing is refused when it is written rather than read as a
+working allowlist that denies everything; a rejected list resets to the built-in
+namespace whole, because a half-applied allowlist is a policy nobody wrote. The
+same is true of `session_minutes`, `min_tls_version`, `listen_addr` and
+`advertise_url`. The three repairs that could only produce an unusable or unsafe
+proxy — a listen address nobody chose, an advertise URL a sandbox would send a
+token to in cleartext, missing TLS material — switch `enabled` **off** rather
+than starting one anyway.
 
-// The sandbox gets m.RepoURL as its remote and m.Credential() to authenticate
-// with. It never sees pat.
+A hub that started the proxy says so, once, naming the bind address, what
+sandboxes will be pointed at, and the allowlist in force:
+
+```
+ui: git interception proxy on 0.0.0.0:8443, advertised as https://hub.internal:8443; pushes limited to refs/heads/cloop/**
 ```
 
-The PAT in that snippet is a `secretbroker` lease like any other — the change is
-where it is *used*, not where it comes from. See
+A hub that could not start it comes up anyway, and says exactly what is not in
+effect:
+
+```
+ui: git interception proxy NOT started: git proxy listen on 0.0.0.0:8443: bind: address already in use
+    executors.git_proxy is enabled, so no git workspace can be provisioned:
+    dispatches needing one will be refused rather than handed the forge
+    credential directly. Fix the section or set enabled: false.
+```
+
+Two things are true at once here and the split is deliberate. The **dashboard
+still boots** — `cloop ui` is also how a single-project install runs, and
+refusing to start it over a proxy certificate would be a poor exchange. But
+**git workspaces stop**: a hub told to intercept does not quietly go back to
+delivering the PAT, because a security control that disappears when it fails to
+load is one nobody can rely on. The refusal carries
+`executor.ErrWorkspaceUnavailable` and names the fix, and it is distinct from
+the missing-grant refusal — "fix the proxy section" and "create a grant" send an
+operator to different places.
+
+Everything that is not a git workspace is unaffected: bind-mount executors,
+non-git workloads and the whole UI keep working.
+
+A related line, `ui: executor <id> is NOT routed through the git proxy: …`,
+reports the same condition for one executor. `ui: git proxy decisions will go to
+stderr, not the audit trail: …` is milder — the boundary still holds, the
+evidence just is not in the database.
+
+### Where it runs, and why there is no `cloop git-proxy`
+
+The proxy is a background service of the hub process, started from
+`bootstrapExecutors` (`pkg/ui/gitproxy.go`). There is no standalone command, and
+that is a property of the design rather than an omission.
+
+A session is minted at dispatch, in the driver, and authenticated minutes later
+when the sandbox's git connects. Sessions live in a `gitproxy.Registry`, which is
+memory — so **the process that mints must be the process that serves.** A
+separate `cloop git-proxy` would authenticate against an empty registry and
+refuse every request the hub had authorised. The alternative that would make one
+work is a shared session store, which means the forge credential at rest in a
+second place, for a topology nobody has asked for.
+
+Two consequences follow from that:
+
+- **It starts before any driver is given a credential source.** Reconciliation
+  hands the Kubernetes driver its source once and that source is kept for the
+  process's life, so a proxy started later would route the edge devices that
+  connect afterwards and silently miss every Pod.
+- **It is a process-wide singleton**, like the executor registry it feeds. Two
+  `Server` instances in one process share one set of executors, so they must
+  share the registry those executors' sandboxes authenticate against.
+
+### The certificate the sandbox has to trust
+
+The proxy's certificate is validated by **the sandbox's git**, not by the hub's
+HTTP client. This is the deployment step most often missed, because everything on
+the hub side works before it is done and the failure surfaces as a clone that
+cannot verify the peer.
+
+A certificate from a public CA needs nothing further. A self-signed or private-CA
+certificate — the ordinary case for a `hub.internal` name — needs its CA in the
+sandbox's trust store, which in practice means installing it in the sandbox
+image. Alternatively, `pkg/executor/gitprovision` forwards `GIT_SSL_CAINFO`,
+`GIT_SSL_CAPATH`, `SSL_CERT_FILE` and `SSL_CERT_DIR` from the machine git runs
+on, so an operator who owns the image or the device can point at a bundle instead
+of installing one. `GIT_SSL_NO_VERIFY` is deliberately not on that list:
+disabling verification for a fetch carrying a brokered token is not a transport
+preference, it is handing the token to whoever answers.
+
+### `advertise_url`: what the sandbox can reach
+
+`listen_addr` is where the proxy binds. `advertise_url` is what becomes the
+sandbox's remote, and it has to resolve and route from *inside* the sandbox,
+which is frequently not where the hub sees itself:
+
+| Where git runs | `advertise_url` |
+| --- | --- |
+| Kubernetes Pod | the hub's Service — `https://cloop-hub.cloop.svc:8443` |
+| enrolled edge device | whatever address the hub has on the link between them, and a certificate that covers it |
+| a device sharing the hub's network namespace | may be omitted; the bound address is used, with an unspecified bind (`0.0.0.0`) read as `127.0.0.1` |
+| inside docker on the hub's host | `https://host.docker.internal:8443` |
+| inside podman on the hub's host | `https://host.containers.internal:8443` |
+
+The first two rows are the ones that usually matter, because they are the only
+two drivers that provision a git workspace at all. The container forms are here
+for the case where the *agent* is itself containerised on the hub's host — the
+`container` driver never clones, so it never reaches the proxy.
+
+It must be `https`, must name a host, and must carry no path, query, fragment or
+embedded credentials. The port is the one the sandbox reaches, which is the
+published port rather than the bound one wherever a NAT sits in between.
+
+Getting this wrong is not dangerous, only slow to diagnose: the sandbox's fetch
+cannot connect, rather than a credential going somewhere it should not.
+
+### What a dispatch does
+
+No driver knows about the proxy. `pkg/executor/gitproxycreds` decorates the
+`executor.WorkspaceCredentialSource` a driver was going to use anyway:
+
+1. the inner source leases the forge credential from the broker, exactly as
+   before;
+2. that credential stays on the hub, and a session is minted against it;
+3. the driver receives an `executor.WorkspaceAccess` — the session token plus
+   `Minted.RepoURL` — and `Apply` rewrites the workspace's `Repo` for every git
+   command that follows, the provisioning fetch and the write-back push alike.
+
+Returning the URL *with* the credential is what makes the redirection hard to
+skip: a driver that ignored `Repo` would send the sandbox at the forge holding a
+token the forge has never heard of, which fails immediately instead of quietly
+restoring the un-proxied path.
+
+Two behaviours are worth naming.
+
+**It fails closed.** If `Mint` fails, the dispatch fails: the inner lease is
+released and the error names the repository. Falling back to the direct
+credential would hand the sandbox the PAT precisely when the boundary is broken,
+which is the one moment it must not — a proxy that fails open is not a boundary,
+it is a default.
+
+**A public repository passes through unproxied.** An empty credential is an
+unauthenticated fetch; there is nothing to keep off the sandbox, so a session
+would only add a hop that can fail.
+
+The `ExpiresAt` the driver sees on the credential is the *session's*, not the
+lease's. That is the deadline that now actually bounds the sandbox's access to
+the forge — before interception the sandbox held the PAT and its access ended
+never, whatever the lease said.
+
+Every git-provisioning driver is routed, which is both of them: the Kubernetes
+driver through `reconcile.Options.WrapWorkspaceSource`, and the remote agent
+through the hub's per-executor credential factory. The `container` and
+`localprocess` drivers bind the operator's own checkout and never clone, so there
+is nothing on them to intercept.
+
+The PAT itself is a `secretbroker` lease like any other — the change is where it
+is *used*, not where it comes from. See
 [GitHub repositories and PATs](guides/secrets.md#github-repositories-and-pats).
-
-Something must call `reg.ReapExpired()` periodically; expiry is enforced at
-authentication regardless, so a missed sweep leaks map entries rather than
-access.
 
 ---
 
@@ -497,7 +683,29 @@ are safe to write to a log an operator reads. `Event.String()` renders one line.
 | `rejected` | a request was refused *before* policy ran | Unauthenticated, wrong repository, malformed pkt-lines, a route the proxy does not serve, or an upstream stream that ended early. Distinct from `push_denied`: nothing here got as far as a decision about a ref. |
 
 `OnEvent` runs on the request goroutine. A handler that blocks blocks a push —
-hand off to a queue if the sink can be slow.
+hand off to a queue if the sink can be slow. The hub's own sink does one insert
+for that reason.
+
+### Where they land
+
+The hub forwards every event into the same hash-chained `audit_events` table as
+the credential broker, with `entity_type` `gitproxy`, the session id as the
+entity, and the event type prefixed: `gitproxy.push_denied`,
+`gitproxy.push_allowed`, `gitproxy.session_minted`, `gitproxy.session_closed`,
+`gitproxy.fetch`, `gitproxy.rejected`. The payload carries the session, the
+repository, the project and task ids, the ref names and the reason — the same
+fields `Event.String()` renders, and no others; `gitproxy.Event` has no field
+that could hold credential material or object content, which is what makes the
+table safe to export.
+
+```console
+$ cloop audit-log list --entity gitproxy --since 7d
+$ cloop audit-log list --type gitproxy.push_denied --since 30d --json
+```
+
+An audit write that fails does not fail the push — but the decision has to be
+visible somewhere, so it goes to stderr instead, prefixed `git-proxy:`. So does
+every event on a hub whose database would not open.
 
 A `push_denied` is not a false positive to be tuned away. Under this design a
 well-behaved SDK-driven task never produces one, so every occurrence is either a
@@ -514,8 +722,8 @@ question is only what a leak is worth.
 
 | Leaked | Worth |
 | --- | --- |
-| **Session token** | Exactly the policy, for the remaining TTL: push to `refs/heads/cloop/**`, create and update only, on **one** repository, through **one** proxy. No deletes. No fetch unless `AllowFetch` was set. No other repository the same proxy serves, because the session is pinned. Nothing at all against `github.com` directly — the token is meaningless there. |
-| **PAT delivered into the sandbox (today)** | Every repository the token is scoped to, every ref in them, in every direction, from anywhere on the Internet, until someone notices and revokes it. |
+| **Session token** | Exactly the policy, for the remaining TTL: push to `refs/heads/cloop/**`, create and update only, on **one** repository, through **one** proxy — plus the read of that one repository, since the hub's policy sets `AllowFetch` so the clone can go through the proxy as well. No deletes. No other repository the same proxy serves, because the session is pinned. Nothing at all against `github.com` directly — the token is meaningless there. |
+| **PAT delivered into the sandbox** — what an un-configured hub still does | Every repository the token is scoped to, every ref in them, in every direction, from anywhere on the Internet, until someone notices and revokes it. |
 
 Some sharper points:
 
@@ -528,7 +736,11 @@ Some sharper points:
   credentials for every live session. It must not run inside a sandbox, must not
   be reachable from anywhere the sandbox network is not, and its logs are as
   sensitive as its memory is — which is why events carry no material and errors
-  are scrubbed.
+  are scrubbed. In the shipped topology that process is the **hub**, which
+  already holds the sealing key and every stored credential, so this concentrates
+  nothing that was not already concentrated. What it does add is a second
+  listener on the hub, reachable by everything the sandbox network can reach:
+  bind `listen_addr` as narrowly as that network allows.
 - **Compromised proxy.** Nothing here defends against that; a compromised proxy
   is a compromised credential store. What it does buy over the status quo is
   that there is now exactly one such store to protect, instead of one per

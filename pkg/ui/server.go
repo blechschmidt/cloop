@@ -1078,6 +1078,10 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	// Same for the session store: the janitor stopped with the watcher context
 	// above, so nothing is still reading through this handle.
 	s.closeSessionStore()
+	// Stop the git interception proxy and close every live session, so the
+	// audit trail records why they ended rather than leaving rows that simply
+	// stop. Nil-safe when none is configured.
+	activeGitProxy().Close()
 	return srv.Shutdown(ctx)
 }
 

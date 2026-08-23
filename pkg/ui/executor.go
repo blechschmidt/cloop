@@ -89,6 +89,12 @@ func registerBuiltinExecutors() {
 // registry at this control plane's persisted project→executor bindings, and
 // records a row for every backend that can run work.
 func bootstrapExecutors(dir string) {
+	// The git interception proxy before anything that could be handed a
+	// credential source. Reconciliation below gives the Kubernetes driver its
+	// source once and keeps it for the process's life, so a proxy started
+	// after this point would route the edge devices that connect later and
+	// silently miss every Pod. See gitproxy.go.
+	ensureGitProxy(dir)
 	// Policy first. Registration of a non-isolating driver is refused under
 	// strict mode, so reading the config after registering would let the host
 	// driver in through the door the policy exists to close. (The eviction
@@ -186,6 +192,12 @@ func reconcileConfiguredExecutors(dir string) {
 		// paying for the sweep that cleans up Pods a previous instance left
 		// running when it died mid-run.
 		ReconcileOrphans: true,
+		// Route the Kubernetes driver's workspace fetches and write-back
+		// pushes through the git interception proxy when one is configured.
+		// Nil-safe: with no proxy the source is returned unchanged.
+		WrapWorkspaceSource: func(execID string, src executor.WorkspaceCredentialSource) executor.WorkspaceCredentialSource {
+			return activeGitProxy().Wrap(execID, src)
+		},
 		Logf: func(format string, args ...any) {
 			fmt.Fprintf(os.Stderr, "ui: "+format+"\n", args...)
 		},

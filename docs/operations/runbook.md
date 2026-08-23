@@ -265,6 +265,96 @@ including one that scans *every* row rendering rather than a sample.
 
 ---
 
+## The git interception proxy
+
+Off by default. With it on, a sandbox that fetches and pushes the project's
+source never holds the forge PAT — it gets a session token for a proxy the hub
+runs, which enforces the branch allowlist on the push's own ref-update list. The
+design is in [git interception proxy](../git-interception-proxy.md); this is the
+operational part.
+
+### Turning it on
+
+1. **Give it a certificate the sandbox will accept.** This is the step that gets
+   missed: the certificate is validated by *the sandbox's* git, not by the hub.
+   A public-CA certificate needs nothing further; a self-signed or private-CA one
+   needs its CA in the sandbox image's trust store, or in a bundle named by
+   `SSL_CERT_FILE` / `GIT_SSL_CAINFO` on the machine git runs on.
+2. **Decide what the sandbox can reach.** `listen_addr` is the bind address;
+   `advertise_url` is what becomes the sandbox's remote, and it has to route
+   from where git actually runs — a Service for the Kubernetes backend, the
+   hub's address on the link for an edge device. The
+   [table of forms](../git-interception-proxy.md#advertise_url-what-the-sandbox-can-reach)
+   covers the rest.
+3. **Write the section and restart the hub.**
+
+   ```yaml
+   executors:
+     git_proxy:
+       enabled: true
+       listen_addr: "0.0.0.0:8443"
+       advertise_url: "https://hub.internal:8443"
+       cert_file: /etc/cloop/tls/git-proxy.crt
+       key_file: /etc/cloop/tls/git-proxy.key
+       session_minutes: 60
+   ```
+
+4. **Confirm it came up.** One line on stderr names the bind address, what
+   sandboxes are pointed at, and the allowlist:
+
+   ```
+   ui: git interception proxy on 0.0.0.0:8443, advertised as https://hub.internal:8443; pushes limited to refs/heads/cloop/**
+   ```
+
+5. **Run one task on the executor** and check the audit trail for the session and
+   the fetch: `cloop audit-log list --entity gitproxy --since 1h`.
+
+Two failure lines matter, and both mean the boundary is not in effect:
+`ui: git interception proxy NOT started: …` (the whole hub is unprotected — every
+dispatch after it hands out the PAT) and `ui: executor <id> is NOT routed through
+the git proxy: …` (one executor is). The hub deliberately still boots, so these
+are worth alerting on rather than relying on a failed start. A third,
+`ui: git proxy decisions will go to stderr, not the audit trail: …`, is smaller:
+the proxy still refuses what it should, the evidence just is not in the database.
+
+### Session lifetime is not run lifetime
+
+A session lives for `session_minutes` (60 by default, 720 maximum) from
+*dispatch*, and nothing closes it when the run ends. **A run that outlives its
+session fails its push** with an authentication error from git and a
+`gitproxy.rejected` row. Set the TTL against the longest run the hub is expected
+to finish, not the median one.
+
+There is no command that ends one session early. Sessions live in the hub's
+memory, so a hub restart closes every live one — recorded as
+`gitproxy.session_closed` with the reason *"the hub is shutting down"* — and
+short of that a session expires on its own TTL, which is enforced at
+authentication whether or not the five-minute reaper has swept it. That is the
+blunt instrument; the sharp one is
+revoking the underlying grant with `cloop secret revoke`, which stops the *next*
+dispatch from minting anything, and rotating the PAT at the forge.
+
+### Alert on `gitproxy.push_denied`
+
+```console
+$ cloop audit-log list --type gitproxy.push_denied --since 7d
+$ cloop audit-log list --entity gitproxy --since 24h --json
+```
+
+A `push_denied` row is a sandbox that tried to move a ref outside its allowlist —
+`refs/heads/main`, say — and was refused before anything was forwarded to the
+forge. It is the only place that attempt is written down; nothing else in cloop
+records it, because without the proxy nothing else is on the path.
+
+It is not a noisy signal to be tuned away. A well-behaved task never produces
+one, so each occurrence is either a workload doing something it was not asked to
+do or a policy narrower than the task it was minted for, and both want a human.
+Its sibling `gitproxy.push_allowed` is emitted *before* forwarding, so a
+`push_allowed` with no matching change on the forge means the forge refused it —
+branch protection, a non-fast-forward — not that the proxy did.
+
+---
+
 ## Key rotation
 
 Three different keys, three different procedures. The sealing key rotates
@@ -293,6 +383,13 @@ comma-separated pin set precisely so the two can overlap:
 
 Reversing steps 2 and 3 locks every agent out. `cloop hub tls-init` generates a
 self-signed certificate for development only.
+
+The [git proxy](#the-git-interception-proxy) has its own `cert_file` and
+`key_file` and is not covered by any of the above. Nothing pins it, but its
+certificate is validated by every sandbox's git, so a rotation onto a new CA has
+to reach the sandbox image's trust store *before* the hub starts serving it —
+otherwise the first symptom is every provisioning fetch failing to verify the
+peer.
 
 ### Dashboard token (`CLOOP_UI_TOKEN`) — manual, causes a logout
 

@@ -47,6 +47,13 @@ secret kind, or a new RBAC role ships without appearing here — see
 - **[Threat model](security/threat-model.md)** — STRIDE per boundary, with the
   concrete mitigation that exists and an honest residual-risk column, plus the
   [two vulnerabilities found while building the egress filter](security/threat-model.md#two-vulnerabilities-found-while-building-this).
+- **[Git interception proxy](git-interception-proxy.md)** — how a sandbox is
+  allowed to push to some branches and not others without ever holding a
+  credential that could reach the others: the branch allowlist enforced on the
+  push's own ref-update list by a proxy the hub runs, the session model, what a
+  leaked token is worth, and [operating it](git-interception-proxy.md#operating-it)
+  — `executors.git_proxy`, the certificate the sandbox has to trust, and why
+  there is no standalone command. Off by default.
 
 ## Guides
 

@@ -717,7 +717,11 @@ func workspaceCredentialFactory(db *statedb.DB) func(string) executor.WorkspaceC
 			// one".
 			return nil
 		}
-		return src
+		// Route through the git interception proxy when one is configured, so
+		// the edge device gets a session token scoped to one repository and
+		// the branch allowlist instead of the forge PAT. Nil-safe: with no
+		// proxy the source is returned unchanged.
+		return activeGitProxy().Wrap(executorID, src)
 	}
 }
 

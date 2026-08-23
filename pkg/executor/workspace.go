@@ -478,25 +478,64 @@ func GitCredentialEnv(w Workspace, c GitCredential) ([]string, error) {
 	}, nil
 }
 
-// WorkspaceCredentialSource leases the credential one git workspace fetch
-// needs.
+// WorkspaceAccess is what one git workspace gets: the material, and the
+// repository URL that material is good against.
+//
+// The two travel together because a brokered credential only means anything
+// against the URL it was brokered for. With no interception the credential is
+// the forge token and Repo is empty, meaning "leave Workspace.Repo alone". When
+// the hub interposes a git proxy the credential is an ephemeral session token
+// and Repo is the proxy's URL for that session — the forge token stays on the
+// hub, and the sandbox's git talks to the proxy instead.
+//
+// Returning the URL alongside the credential, rather than leaving the driver to
+// discover the redirection some other way, is what makes the interception
+// impossible to skip by accident: a driver that ignores Repo sends the sandbox
+// at the forge holding a token the forge has never heard of, which fails
+// immediately and loudly instead of quietly restoring the un-proxied path.
+type WorkspaceAccess struct {
+	// Credential authenticates the git commands. It may be empty, for the
+	// unauthenticated fetch of a public repository.
+	Credential GitCredential
+	// Repo, when non-empty, replaces Workspace.Repo for every git command the
+	// executor runs against this workspace — the fetch that provisions it and
+	// the push that writes back. Empty means no redirection.
+	Repo string
+}
+
+// Apply returns w routed according to the access.
+//
+// Drivers call this once and pass the result everywhere they would have passed
+// the original: the spec shipped to a remote agent, the plan rendered into an
+// init container, the write-back request. Rewriting Repo in one place keeps the
+// fetch and the push pointed at the same host, which matters because the
+// credential is scoped to exactly one origin — split them and the push
+// authenticates against a URL its header does not cover.
+func (a WorkspaceAccess) Apply(w Workspace) Workspace {
+	if repo := strings.TrimSpace(a.Repo); repo != "" {
+		w.Repo = repo
+	}
+	return w
+}
+
+// WorkspaceCredentialSource leases the access one git workspace fetch needs.
 //
 // It is an interface with no secret-broker types in it so that pkg/executor
 // stays a leaf package — the remote agent imports it and must not drag the
 // hub's secret store onto an edge device — and so a driver test can supply a
 // fake credential without a database, a sealing key, or a grant.
 //
-// The release function returned alongside the credential is always non-nil,
+// The release function returned alongside the access is always non-nil,
 // including on error paths, so callers can defer it unconditionally.
 type WorkspaceCredentialSource interface {
 	// ForWorkspace leases material authorising a fetch of w on behalf of
 	// projectID. A workspace that needs no credential yields the zero
-	// GitCredential, a no-op release, and a nil error.
+	// WorkspaceAccess, a no-op release, and a nil error.
 	//
 	// When no grant authorises the fetch the error is a
 	// *WorkspaceGrantError, which names the missing grant. Drivers surface it
 	// unchanged rather than starting a workload against an empty tree.
-	ForWorkspace(ctx context.Context, projectID string, w Workspace) (GitCredential, func(), error)
+	ForWorkspace(ctx context.Context, projectID string, w Workspace) (WorkspaceAccess, func(), error)
 }
 
 // --- audit ------------------------------------------------------------------

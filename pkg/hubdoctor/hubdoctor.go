@@ -274,6 +274,7 @@ func Run(ctx context.Context, dir string, cfg *config.Config, opts Options) *Rep
 	checkRBAC(cfg, add)
 	checkImagePolicy(ctx, cfg, opts, add)
 	checkExecutors(ctx, dir, cfg, opts, add)
+	checkGitProxy(cfg, add)
 	checkStorage(dir, add)
 	checkAdmission(cfg, add)
 

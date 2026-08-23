@@ -441,14 +441,14 @@ func TestMissingGrantIsRefusedByName(t *testing.T) {
 		Kind: executor.WorkspaceGit, Repo: "https://github.com/acme/tool.git",
 		Ref: "main", CredentialGrant: "github-conformance",
 	}
-	cred, release, err := src.ForWorkspace(context.Background(), "/srv/acme", w)
+	access, release, err := src.ForWorkspace(context.Background(), "/srv/acme", w)
 	if release != nil {
 		release()
 	}
 	if err == nil {
 		t.Fatal("a workspace with no grant leased a credential")
 	}
-	if !cred.Empty() {
+	if !access.Credential.Empty() {
 		t.Fatal("a refused workspace still produced credential material")
 	}
 	if !errors.Is(err, executor.ErrWorkspaceGrantMissing) {

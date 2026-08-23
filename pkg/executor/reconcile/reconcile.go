@@ -214,6 +214,17 @@ type Options struct {
 	// credential source inject it here.
 	KubernetesCredentials CredentialsFunc
 
+	// WrapWorkspaceSource decorates the credential source a driver is given,
+	// per executor. nil means no decoration.
+	//
+	// It exists so the hub can interpose the git interception proxy
+	// (pkg/executor/gitproxycreds) without this package learning about it:
+	// reconciliation decides *which* executors exist and what authenticates
+	// them, while whether a sandbox reaches the forge directly or through a
+	// proxy is a property of the deployment. A nil source stays nil — there is
+	// nothing to route when no credential is leased in the first place.
+	WrapWorkspaceSource func(execID string, src executor.WorkspaceCredentialSource) executor.WorkspaceCredentialSource
+
 	// Logf receives one line per diagnostic. nil logs to stderr; supply a
 	// no-op to silence a pass entirely.
 	Logf func(format string, args ...any)
@@ -770,6 +781,9 @@ func ensureKubernetes(
 	}
 	driverOpts.Credentials = identity.Cluster
 	driverOpts.Workspace = identity.Workspace
+	if opts.WrapWorkspaceSource != nil && driverOpts.Workspace != nil {
+		driverOpts.Workspace = opts.WrapWorkspaceSource(driverOpts.ID, driverOpts.Workspace)
+	}
 	ex, err := kubernetes.Ensure(reg, driverOpts)
 	if err != nil {
 		// The source is live and owns an open state database, but nothing

@@ -685,6 +685,54 @@ Pair it with [`egress_filter`](#ip-layer-egress-filtering) — ideally
 all — so that the allowlist above is enforced on everything rather than on the
 cooperative case.
 
+### Git interception proxy
+
+A sandbox that clones the project and pushes its work back needs a forge
+credential, and the branch rule that keeps it inside `cloop/` runs in code the
+sandbox itself executes — which makes it a convention rather than a boundary.
+`executors.git_proxy` inverts that: the hub keeps the PAT, runs a git smart-HTTP
+proxy, and hands the sandbox a session token good for one repository under one
+policy. The proxy parses each push's ref-update list and refuses anything outside
+the allowlist before presenting the credential upstream.
+
+```yaml
+executors:
+  git_proxy:
+    enabled: true
+    listen_addr: "0.0.0.0:8443"                    # where it binds
+    advertise_url: "https://hub.internal:8443"     # what the SANDBOX connects to
+    cert_file: /etc/cloop/tls/git-proxy.crt
+    key_file: /etc/cloop/tls/git-proxy.key
+    min_tls_version: "1.2"                         # or "1.3"
+    session_minutes: 60                            # 0 means 60; ceiling is 720
+    allowed_refs: ["refs/heads/cloop/**"]          # the default
+    allow_delete: false
+```
+
+- **Off by default.** Interposing a proxy changes the URL sandboxes push to, so
+  it is an operator's decision rather than something a config file acquires on
+  upgrade. With it off, workspaces are provisioned exactly as before.
+- **TLS is required**, and the certificate is validated by *the sandbox's* git,
+  not by the hub — a self-signed one needs its CA in the sandbox image. An
+  enabled section without both `cert_file` and `key_file` is switched off at
+  load rather than serving session tokens in cleartext.
+- **`advertise_url` must be reachable from where git runs** — a Kubernetes
+  Service for the Pod backend, the hub's address on the link for an edge device,
+  or `host.docker.internal` / `host.containers.internal` for a containerised
+  agent. Empty falls back to the bound address, which is right only when that
+  process shares the hub's network namespace.
+- **A session lasts `session_minutes` from dispatch, not for the run.** A run
+  that outlives it fails its push.
+- Every decision lands in the hash-chained audit log as
+  `gitproxy.push_denied`, `gitproxy.push_allowed`, `gitproxy.session_minted`,
+  `gitproxy.session_closed`, `gitproxy.fetch` and `gitproxy.rejected`. Alert on
+  the first.
+
+The proxy runs inside the hub process — sessions are in memory, so the process
+that mints them must be the one that serves them — and there is deliberately no
+standalone command. Full design and operations:
+[git interception proxy](../git-interception-proxy.md).
+
 ### Hardened (enterprise) configuration
 
 By default cloop may run workloads as child processes of the control plane. To

@@ -73,7 +73,11 @@ type workspaceState struct {
 	namespace  string
 	handleID   string
 
-	workspace   executor.Workspace
+	workspace executor.Workspace
+	// routed is workspace with any git-proxy redirection applied. It is what
+	// the Pod fetches and pushes through; workspace above stays the true
+	// upstream so the audit rows name the repository an operator recognises.
+	routed      executor.Workspace
 	projectPath string
 	grantID     string
 	leaseID     string
@@ -139,6 +143,7 @@ func (e *Executor) provisionWorkspace(ctx context.Context, spec executor.Spec, c
 		namespace:   namespace,
 		handleID:    handleID,
 		workspace:   spec.Workspace,
+		routed:      spec.Workspace,
 		projectPath: projectPath,
 		startedAt:   e.opts.now(),
 	}
@@ -157,7 +162,10 @@ func (e *Executor) provisionWorkspace(ctx context.Context, spec executor.Spec, c
 	)
 	if e.opts.Workspace != nil {
 		var err error
-		cred, release, err = e.opts.Workspace.ForWorkspace(ctx, projectPath, spec.Workspace)
+		var access executor.WorkspaceAccess
+		access, release, err = e.opts.Workspace.ForWorkspace(ctx, projectPath, spec.Workspace)
+		cred = access.Credential
+		st.routed = access.Apply(spec.Workspace)
 		if release == nil {
 			// The interface promises a non-nil release on every path. This is
 			// the guard against an implementation that forgets on one of them,

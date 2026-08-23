@@ -841,6 +841,14 @@ func (e *Executor) Start(ctx context.Context, spec executor.Spec) (executor.Hand
 		release()
 		return executor.Handle{}, err
 	}
+	if ws != nil {
+		// Everything built below — the init container's fetch, the harness's
+		// checkout, the write-back push — must aim at whatever the credential
+		// source routed the workspace to. When a git proxy is interposed that
+		// is the proxy; otherwise routed is the spec's own workspace and this
+		// assignment changes nothing.
+		spec.Workspace = ws.routed
+	}
 
 	// Before the Pod for the same reason, one step stronger: a Pod whose volume
 	// names a Secret that does not exist is not started at all — the kubelet
