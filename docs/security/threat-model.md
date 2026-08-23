@@ -33,7 +33,8 @@ is.
 | **T**ampering | Request forgery from another origin | `SameSite=Strict` on the session cookie; `wsOriginAllowed` refuses cross-origin WebSocket upgrades (`TestHubRejectsCrossOriginUpgrade`) | Deployments that must set `SameSite=Lax` (plaintext loopback) rely on origin checks alone |
 | **T**ampering | Downgrade or MITM on the wire | TLS 1.2 minimum, ECDHE+AEAD suites only, server cipher preference | The hub does not emit HSTS itself; set it at the terminating proxy |
 | **R**epudiation | User denies making a privileged change | Every privileged allow *and* deny is written to a SHA-256 hash-chained audit trail with actor identity | Chain proves *tampering*, not *deletion of the tail*: truncating the newest rows leaves a shorter valid chain. Export off-box (see the [runbook](../operations/runbook.md#audit-chain-verification)) |
-| **I**nformation disclosure | Dashboard leaks another tenant's project | Every route declares a `Scope`; project-scoped routes resolve the project and re-check visibility (`requireVisibleProject`) | Scoping is per-route; a new route that forgets `Scope` is caught by `routeSpec.validate()` only for the *permission*, not for the scope |
+| **I**nformation disclosure | Dashboard leaks another tenant's project | Every route declares a `Scope`; project-scoped routes resolve the project and re-check visibility (`requireVisibleProject`) | Scoping is per-route; a new route that forgets `Scope` is caught by `routeSpec.validate()` only for the *permission*, not for the scope. **Push channels are not routes at all** — see [scope is not permission](#scope-is-not-permission) |
+| **I**nformation disclosure | Live harness output crosses a project boundary | Every log chunk is fanned out with `broadcastToProject`; the replay buffer is keyed by resolved `workDir` and reachable only through accessors that take one (`TestLiveLogDoesNotCrossProjectsOverWebSocket`, `TestLiveLogBufferIsUnreachableWithoutAWorkDir`) | Output itself is still unredacted — a workload that echoes its own token puts it in its *own* project's buffer, where anyone who can see that project can read it |
 | **I**nformation disclosure | Secrets rendered into the UI or an error | Broker never returns plaintext outside a `Material`; error paths and audit rows are redacted (`TestBrokeredMaterialIsNeverDisclosed`, `TestBrokerErrorsDoNotEchoCredentials`) | Task **output** is not redacted — a workload that echoes its own token puts it on the dashboard |
 | **D**enial of service | Request flood or connection exhaustion | Per-IP token-bucket rate limiting; WebSocket connections bounded per-IP and globally; `/healthz` and `/readyz` bypass auth and rate limiting so probes never lock out an operator | A single tenant can still saturate the executor fleet — there is no per-tenant concurrency quota |
 | **E**levation of privilege | Viewer performs an operator action | Deny by default: `oidc.default_role: none`; permission declared per route in `routeTable()`, enforced by `gate()`/`require()`; a route with no permission fails `validate()` at startup | Role comes from an IdP claim — an IdP that lets users self-assign groups hands out cloop roles |
@@ -126,6 +127,65 @@ allowlist, and that limit is structural.
 
 ---
 
+## Scope is not permission
+
+The row above says a new route that forgets `Scope` is caught only for its
+permission. A cross-tenant log leak in the WebSocket hub showed that the gap is
+wider than "routes": **the push channels are not routes**, so no amount of
+route-table validation reaches them.
+
+The two controls answer different questions, and passing one says nothing about
+the other:
+
+| | Question | Enforced by | Failure looks like |
+| --- | --- | --- | --- |
+| **Permission** | *May this actor read this kind of thing?* | `Perm` on the route, `gate()` / `require()` | 403 for someone who should have been allowed, or a viewer performing an operator action |
+| **Scope** | *Whose data is this, and is this actor one of them?* | `Scope` on the route, `resolveWorkDir` + `requireVisibleProject`, and on push channels `broadcastToProject` | A correctly-authenticated, correctly-authorised operator is shown **another tenant's** data |
+
+A scope failure is the more dangerous of the two because everything about it
+looks healthy. The recipient is signed in. Their role permits reading live
+output. The audit trail records no denial, because nothing was denied. Only the
+*subject* of the data is wrong — and the disclosed party performed no action
+and sees no trace.
+
+The concrete bug (Task 20189): `broadcastLog` wrote each chunk of live harness
+output to every SSE client and then iterated **all** of `s.hubClients`, which is
+`map[workDir]map[*hubClient]struct{}` — a per-project room map, walked as if it
+were one flat set. The correct primitive, `broadcastToProject`, already existed
+and was already used correctly one function away by `broadcastStateDiff`. Under
+it sat a deeper problem: the replay buffer was a single global `[]string` on
+`Server`, so the three replay sites (WebSocket connect, SSE connect,
+`GET /api/livelog`) *could not* have been correct — `handleLiveLog` even
+resolved a `workDir` and then used it only for a liveness probe. There was one
+buffer, so there was nothing to be right about.
+
+Three things this generalises to:
+
+1. **Scope is a property of the data, not of the request.** The route table
+   checks the request. A broadcast has no request — by the time a chunk is
+   fanned out, the identity that caused it is gone and the identities receiving
+   it were established on other connections entirely. Anything that fans out
+   has to carry its subject with it.
+2. **Prefer making the mistake unsayable to auditing for it.** The fix was not
+   a `workDir` check bolted onto each read site; it was deleting the global
+   buffer. Live output now lives in a map reachable only through accessors that
+   take a `workDir` first, so a handler that has not resolved a project cannot
+   name a room, and `TestLiveLogBufferIsUnreachableWithoutAWorkDir` fails the
+   build if a future edit reintroduces either the direct map access or an
+   unkeyed field on `Server`.
+3. **"Global" is a legitimate scope — state it, don't default into it.** Three
+   other unscoped `s.hubClients` walks were audited in the same pass and left
+   alone: `broadcastAuditAppend`, `broadcastExecutorUpdate`,
+   `broadcastSecretsUpdate`. The audit trail, the executor fleet and the secret
+   inventory are hub-wide resources; there is no owning project to key them on.
+   Their reach *is* wider than the permission to read the underlying rows,
+   which is exactly why each envelope carries only an event verb and an opaque
+   id, and clients re-read the RBAC-gated endpoint for anything more. That
+   trade is now written at each call site so the next reader can tell a
+   deliberate global from an overlooked one.
+
+---
+
 ## Vulnerabilities found while building this
 
 Recorded because a threat model that lists only theoretical threats is less
@@ -201,6 +261,14 @@ mutating verb is never authorized by a read permission" so it also holds for
 routes added later, and placed ahead of the `authzActiveFor` short-circuit so
 it applies in single-tenant deployments too
 (`TestReadOnlyRoutesRejectMutatingMethods`).
+
+**Live harness output was broadcast to every project's dashboard.** One
+project's raw stdout — file paths, source excerpts, anything the workload
+echoed — reached every open dashboard on the hub, including projects belonging
+to other identities, and was replayed from a single global buffer to any client
+that connected afterwards. See [scope is not permission](#scope-is-not-permission)
+for the anatomy; fixed by routing every chunk through `broadcastToProject` and
+partitioning the buffer by resolved `workDir`.
 
 **The Groq API key was passed on the argv.** `/api/voice` appended a
 caller-supplied `--groq-api-key` to the subprocess argv, where

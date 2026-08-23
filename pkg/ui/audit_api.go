@@ -284,6 +284,13 @@ func (s *Server) auditExecutorAction(r *http.Request, action, executorID string,
 // regardless of role, so putting row contents in the envelope would leak the
 // audit log to viewers over the WebSocket. Clients re-read GET /api/audit,
 // where the permission is actually enforced.
+//
+// Scope: hub-global, deliberately (audited under Task 20189, which scoped
+// broadcastLog). The audit trail is one hub-wide resource, not a per-project
+// one, so there is no room to narrow this to. The payload is a bare verb —
+// no project path, no actor, no row — precisely because reach here is wider
+// than read permission on GET /api/audit. See the scope-vs-permission note
+// in docs/security/threat-model.md.
 func (s *Server) broadcastAuditAppend(action string) {
 	payload, err := json.Marshal(map[string]any{"action": action})
 	if err != nil {

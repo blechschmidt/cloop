@@ -81,6 +81,13 @@ type sseClient struct {
 	// opened it carried, so it is captured here rather than re-derived
 	// (Task 20175).
 	token *apitoken.Token
+
+	// workDir is the project this stream subscribed to, resolved once at
+	// connect time. Project-scoped events (state, run_state, suggest
+	// status, live output) are filtered against it — the SSE analogue of
+	// the hubClients room key. Without it the SSE fallback path fanned
+	// every project's events to every listener (Task 20189).
+	workDir string
 }
 
 // sseClientBufferSize mirrors hubClientBufferSize for SSE consumers.
@@ -332,8 +339,6 @@ type ChatMessage struct {
 	Action    string    `json:"action,omitempty"` // resolved cloop command, if any
 }
 
-const liveLogMaxLines = 500
-
 // maxChatHistoryPerWorkDir caps each per-project chat conversation kept in
 // memory by the long-running UI daemon. Without this, every /api/chat POST
 // appends forever and the in-memory transcript grows unbounded for the
@@ -487,10 +492,12 @@ type Server struct {
 	rlMu      sync.Mutex
 	rlBuckets map[string]*uiIPBucket
 
-	// Live log ring-buffer (last liveLogMaxLines lines of subprocess output).
-	liveLogMu      sync.Mutex
-	liveLogLines   []string
-	liveLogRunning bool
+	// Live harness output, partitioned by project workDir (Task 20189).
+	// There is deliberately no un-keyed buffer here: every accessor in
+	// livelog.go takes a workDir, so a handler that has not resolved a
+	// project cannot reach another tenant's bytes.
+	liveLogMu    sync.Mutex
+	liveLogRooms map[string]*liveLogRoom
 
 	// runStates tracks the last-broadcast running flag per project workDir so
 	// the watcher can emit `run_state` WS events only on transitions instead of
@@ -632,6 +639,7 @@ func New(workdir string, port int, token string) *Server {
 		rlBuckets:       make(map[string]*uiIPBucket),
 		chatHistories:   make(map[string][]ChatMessage),
 		runStates:       make(map[string]bool),
+		liveLogRooms:    make(map[string]*liveLogRoom),
 		Log:             logger.New(false).With("project", workdir).With("component", "ui"),
 		diffCache:       newStateCache(),
 	}
@@ -1411,22 +1419,34 @@ func (s *Server) watchState(ctx context.Context) {
 			// SSE consumers still get the full state — they are a fallback
 			// path and not the perf-critical one. WebSocket consumers get a
 			// state_diff event with only the changed fields (Task 20132).
-			s.broadcast(string(data))
+			s.broadcast(s.WorkDir, string(data))
 			s.broadcastStateDiff(s.WorkDir, ps)
 		}()
 	}
 }
 
-// broadcast sends a full-state JSON payload to all connected SSE clients.
-// WebSocket clients are fanned out via broadcastStateDiff which ships only
-// the delta against the cached snapshot (Task 20132).
+// broadcast sends workDir's full-state JSON payload to that project's SSE
+// clients. WebSocket clients are fanned out via broadcastStateDiff which
+// ships only the delta against the cached snapshot (Task 20132).
+//
+// Scoped for the same reason as broadcastLog: the payload is one project's
+// state — goal, task titles, statuses — and both call sites already pair
+// this with a per-project broadcastStateDiff on the WebSocket side. The SSE
+// mirror used to fan out to every listener regardless of project
+// (Task 20189).
 //
 // Slow consumers do NOT silently drop events: the SSE path uses
 // sendSSEOrLag, which queues a resync directive when the per-client buffer
 // is full.
-func (s *Server) broadcast(data string) {
+func (s *Server) broadcast(workDir, data string) {
+	if workDir == "" {
+		return
+	}
 	s.mu.Lock()
 	for c := range s.clients {
+		if c.workDir != workDir {
+			continue
+		}
 		s.sendSSEOrLag(c, sseEvent{Data: data})
 	}
 	s.mu.Unlock()
@@ -1603,9 +1623,13 @@ func (s *Server) broadcastRunState(workDir string, running, force bool) {
 	}
 	s.broadcastToProject(workDir, wsMessage{Type: "run_state", Data: raw})
 
-	// Mirror to SSE clients (fallback path).
+	// Mirror to this project's SSE clients (fallback path) — matching the
+	// scoping the WebSocket line above already applies (Task 20189).
 	s.mu.Lock()
 	for c := range s.clients {
+		if c.workDir != workDir {
+			continue
+		}
 		s.sendSSEOrLag(c, sseEvent{Event: "run_state", Data: string(raw)})
 	}
 	s.mu.Unlock()
@@ -1634,45 +1658,54 @@ func (s *Server) broadcastSuggestStatus(workDir string) {
 	}
 	s.broadcastToProject(workDir, wsMessage{Type: "suggest_status", Data: raw})
 
-	// Mirror to SSE clients (fallback path).
+	// Mirror to this project's SSE clients (fallback path). The payload
+	// carries generated suggestion text for one plan, so it is scoped the
+	// same way as the WebSocket line above (Task 20189).
 	s.mu.Lock()
 	for c := range s.clients {
+		if c.workDir != workDir {
+			continue
+		}
 		s.sendSSEOrLag(c, sseEvent{Event: "suggest_status", Data: string(raw)})
 	}
 	s.mu.Unlock()
 }
 
-// broadcastLog sends a log chunk to all connected SSE clients as a "log"
-// SSE event, and stores it in the ring buffer.
-func (s *Server) broadcastLog(chunk string) {
-	// Update ring buffer: split chunk into lines and append.
-	s.liveLogMu.Lock()
-	for _, line := range strings.SplitAfter(chunk, "\n") {
-		if line == "" {
+// broadcastLog ships one chunk of workDir's live harness output to that
+// project's subscribers — WebSocket and SSE — and records it for replay.
+//
+// Every fan-out here is per-project. Live output is raw stdout from an AI
+// harness working inside someone's repository, so a chunk reaching a client
+// that did not subscribe to workDir is an active disclosure, not a cosmetic
+// bug: on a multi-tenant hub the other subscriber may be another identity
+// entirely. broadcastToProject is the primitive that gets this right;
+// pre-fix this function walked all of s.hubClients and all of s.clients
+// instead, so one project's output landed on every open dashboard
+// (Task 20189).
+func (s *Server) broadcastLog(workDir, chunk string) {
+	// No project, no delivery. An unresolved workDir used to mean "send it
+	// everywhere"; it now means the chunk is dropped, which is the safe
+	// direction to fail.
+	if workDir == "" {
+		return
+	}
+	s.liveLogAppend(workDir, chunk)
+
+	data, err := json.Marshal(map[string]string{"chunk": chunk})
+	if err != nil {
+		return
+	}
+
+	s.mu.Lock()
+	for c := range s.clients {
+		if c.workDir != workDir {
 			continue
 		}
-		s.liveLogLines = append(s.liveLogLines, line)
-		if len(s.liveLogLines) > liveLogMaxLines {
-			s.liveLogLines = s.liveLogLines[len(s.liveLogLines)-liveLogMaxLines:]
-		}
-	}
-	s.liveLogMu.Unlock()
-
-	data, _ := json.Marshal(map[string]string{"chunk": chunk})
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for c := range s.clients {
 		s.sendSSEOrLag(c, sseEvent{Event: "log", Data: string(data)})
 	}
-	wsData := json.RawMessage(data)
-	logMsg := wsMessage{Type: "step_output", Data: wsData}
-	s.hubMu.Lock()
-	for _, clients := range s.hubClients {
-		for hc := range clients {
-			s.sendOrLag(hc, logMsg)
-		}
-	}
-	s.hubMu.Unlock()
+	s.mu.Unlock()
+
+	s.broadcastToProject(workDir, wsMessage{Type: "step_output", Data: json.RawMessage(data)})
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -2206,10 +2239,11 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Connection", "keep-alive")
 
 	c := &sseClient{
-		ch:     make(chan sseEvent, sseClientBufferSize),
-		resync: make(chan struct{}, 1),
-		user:   s.sessionIdentity(r),
-		token:  tokenFromRequest(r),
+		ch:      make(chan sseEvent, sseClientBufferSize),
+		resync:  make(chan struct{}, 1),
+		user:    s.sessionIdentity(r),
+		token:   tokenFromRequest(r),
+		workDir: s.resolveWorkDir(r),
 	}
 	s.mu.Lock()
 	s.clients[c] = struct{}{}
@@ -2231,18 +2265,16 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Send current live log buffer so reconnecting clients see recent output.
-	s.liveLogMu.Lock()
-	if len(s.liveLogLines) > 0 {
-		buf := strings.Join(s.liveLogLines, "")
-		s.liveLogMu.Unlock()
-		if d, err := json.Marshal(map[string]string{"chunk": buf}); err == nil {
+	// Replay this stream's own project, never "the" buffer: c.workDir was
+	// resolved at connect time above, and a client that subscribed to a
+	// project with no output must get an empty replay rather than whatever
+	// ran most recently (Task 20189).
+	if lines := s.liveLogReplay(c.workDir); len(lines) > 0 {
+		if d, err := json.Marshal(map[string]string{"chunk": strings.Join(lines, "")}); err == nil {
 			if werr := writeSSE(w, flusher, "event: log\ndata: %s\n\n", d); werr != nil {
 				return
 			}
 		}
-	} else {
-		s.liveLogMu.Unlock()
 	}
 
 	ctx := r.Context()
@@ -2570,27 +2602,22 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Replay live log ring-buffer for reconnecting clients.
-	s.liveLogMu.Lock()
-	if len(s.liveLogLines) > 0 {
-		buf := strings.Join(s.liveLogLines, "")
-		s.liveLogMu.Unlock()
-		if d, err := json.Marshal(map[string]string{"chunk": buf}); err == nil {
+	// Replay the connecting client's own project. workDir was resolved at
+	// the top of handleWS and is the same key this client's hub room uses,
+	// so a tab opening on project B never receives project A's backlog
+	// (Task 20189).
+	if lines := s.liveLogReplay(workDir); len(lines) > 0 {
+		if d, err := json.Marshal(map[string]string{"chunk": strings.Join(lines, "")}); err == nil {
 			if msg, err := json.Marshal(wsMessage{Type: "step_output", Data: d}); err == nil {
 				_ = wsWrite(ctx, conn, msg)
 			}
 		}
-	} else {
-		s.liveLogMu.Unlock()
 	}
 
 	// Send initial run state so the client can position the Run/Stop buttons
 	// without polling /api/livelog.
 	{
-		s.liveLogMu.Lock()
-		internalRunning := s.liveLogRunning
-		s.liveLogMu.Unlock()
-		running := internalRunning || multiui.IsCloopRunningInDir(workDir)
+		running := s.liveLogRunningFor(workDir) || multiui.IsCloopRunningInDir(workDir)
 		if raw, err := json.Marshal(map[string]interface{}{"running": running}); err == nil {
 			if msg, err := json.Marshal(wsMessage{Type: "run_state", Data: raw}); err == nil {
 				_ = wsWrite(ctx, conn, msg)
@@ -2827,11 +2854,8 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Clear old log and mark running.
-	s.liveLogMu.Lock()
-	s.liveLogLines = nil
-	s.liveLogRunning = true
-	s.liveLogMu.Unlock()
+	// Clear this project's old log and mark it running.
+	s.liveLogStartRun(workDir)
 	s.broadcastRunState(workDir, true, true)
 
 	lines, streamErr := ex.Stream(context.Background(), handle.ID)
@@ -2840,9 +2864,7 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 		// Clear the running flag rather than leaving the UI wedged showing a
 		// run in progress forever.
 		fmt.Fprintf(os.Stderr, "ui: cannot stream run output: %v\n", streamErr)
-		s.liveLogMu.Lock()
-		s.liveLogRunning = false
-		s.liveLogMu.Unlock()
+		s.liveLogSetRunning(workDir, false)
 		s.broadcastRunState(workDir, false, true)
 		// The run is live but unobservable, so nothing will ever tell us it
 		// ended. Release the slot now rather than hold one forever: the cap
@@ -2863,9 +2885,7 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 			if rec := recover(); rec != nil {
 				fmt.Fprintf(os.Stderr, "ui: run output goroutine panic recovered: %v\n", rec)
 				// Best-effort cleanup so the UI doesn't think a run is still in progress.
-				s.liveLogMu.Lock()
-				s.liveLogRunning = false
-				s.liveLogMu.Unlock()
+				s.liveLogSetRunning(workDir, false)
 			}
 		}()
 		// The driver closes the channel only after the workload has been
@@ -2875,11 +2895,9 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			os.Stderr.WriteString(line.Text) // also echo to server's stderr
-			s.broadcastLog(line.Text)
+			s.broadcastLog(workDir, line.Text)
 		}
-		s.liveLogMu.Lock()
-		s.liveLogRunning = false
-		s.liveLogMu.Unlock()
+		s.liveLogSetRunning(workDir, false)
 		s.broadcastRunState(workDir, false, true)
 		// Broadcast updated state after run completes. Lite-load —
 		// marshalStateForWire drops Steps before broadcast (Task 20125).
@@ -2887,7 +2905,7 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 		// against the cached snapshot (Task 20132).
 		if ps, loadErr := state.LoadLite(workDir); loadErr == nil {
 			if data, marshalErr := marshalStateForWire(ps); marshalErr == nil {
-				s.broadcast(string(data))
+				s.broadcast(workDir, string(data))
 			}
 			s.broadcastStateDiff(workDir, ps)
 		}
@@ -4127,15 +4145,16 @@ func (s *Server) handleReorderTasks(w http.ResponseWriter, r *http.Request) {
 
 // handleLiveLog returns the current live log ring buffer and running status.
 // The running field reflects actual process state: it checks the in-memory
-// liveLogRunning flag (set when a run was started via this server) and also
+// per-project run flag (set when a run was started via this server) and also
 // probes /proc for any cloop process running in the project directory.
 func (s *Server) handleLiveLog(w http.ResponseWriter, r *http.Request) {
 	workDir := s.resolveWorkDir(r)
-	s.liveLogMu.Lock()
-	lines := make([]string, len(s.liveLogLines))
-	copy(lines, s.liveLogLines)
-	running := s.liveLogRunning
-	s.liveLogMu.Unlock()
+	// Answer for the project the request resolved to. Pre-fix workDir was
+	// computed here and then used only for the /proc probe below, while the
+	// lines came from a single global buffer — so ?project_idx=B returned
+	// project A's output (Task 20189).
+	lines := s.liveLogReplay(workDir)
+	running := s.liveLogRunningFor(workDir)
 
 	// If not tracked in-memory, check whether a cloop process is actually
 	// running in the project directory (handles externally-started runs).
@@ -5512,10 +5531,11 @@ func (s *Server) handleProjectsEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Connection", "keep-alive")
 
 	c := &sseClient{
-		ch:     make(chan sseEvent, sseClientBufferSize),
-		resync: make(chan struct{}, 1),
-		user:   s.sessionIdentity(r),
-		token:  tokenFromRequest(r),
+		ch:      make(chan sseEvent, sseClientBufferSize),
+		resync:  make(chan struct{}, 1),
+		user:    s.sessionIdentity(r),
+		token:   tokenFromRequest(r),
+		workDir: s.resolveWorkDir(r),
 	}
 	s.mu.Lock()
 	s.clients[c] = struct{}{}
@@ -5952,6 +5972,13 @@ func (s *Server) handleProjectDelete(w http.ResponseWriter, r *http.Request) {
 	// allProjectEntries() call doesn't resurrect this project until the
 	// server restarts.
 	s.removeProjectsFlag(entry.Path)
+
+	// Drop the project's buffered live output. Without this the bytes sit in
+	// memory for the daemon's lifetime and would replay to whoever next
+	// registers this path — a deleted project is exactly the case where
+	// "nobody is watching, so it can wait for LRU eviction" is wrong
+	// (Task 20189).
+	s.liveLogEvict(entry.Path)
 
 	rootDeleted := false
 	if deleteRoot {

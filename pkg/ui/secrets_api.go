@@ -1269,6 +1269,11 @@ func writeBrokerError(w http.ResponseWriter, err error, action string) {
 // and an ID — never a grant's contents. A WebSocket fans out to every
 // connected client regardless of role, so putting row data in it would hand
 // the credential inventory to a viewer who cannot reach GET /api/grants.
+//
+// Scope: hub-global, deliberately (audited under Task 20189). The secret and
+// grant tables are hub-wide, so there is no project room to send this to.
+// That the fan-out is wider than the read permission is exactly why the
+// envelope is an event verb plus an opaque id and nothing else.
 func (s *Server) broadcastSecretsUpdate(event, id string) {
 	payload, err := json.Marshal(map[string]any{"event": event, "id": id})
 	if err != nil {

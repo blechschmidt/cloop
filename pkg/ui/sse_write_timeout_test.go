@@ -143,7 +143,9 @@ func TestSSE_StalledClientDisconnectsWithinDeadline(t *testing.T) {
 	go func() {
 		defer close(pumpDone)
 		for i := 0; i < 200; i++ {
-			srv.broadcast(bigPayload)
+			// dir is what /api/events resolves with no ?project_idx, so
+			// this reaches the stalled client (scoped since Task 20189).
+			srv.broadcast(dir, bigPayload)
 			time.Sleep(5 * time.Millisecond)
 		}
 	}()

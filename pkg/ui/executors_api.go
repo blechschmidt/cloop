@@ -1619,6 +1619,11 @@ func writeSandboxDenied(w http.ResponseWriter, code, message, remediation string
 // only for tabs viewing some particular project. The payload deliberately
 // carries no executor detail — clients re-read GET /api/executors, which is
 // the one place the registry/table/binding join lives.
+//
+// Scope: hub-global, deliberately (audited under Task 20189). Executors are
+// fleet resources shared across projects, so unlike live log output there is
+// no owning project to key the fan-out on. The envelope is an event verb and
+// an opaque executor id for the same reason as broadcastAuditAppend.
 func (s *Server) broadcastExecutorUpdate(event, executorID string) {
 	payload, err := json.Marshal(map[string]any{
 		"event":       event,

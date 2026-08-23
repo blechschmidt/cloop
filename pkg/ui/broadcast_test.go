@@ -411,9 +411,12 @@ func TestSSE_LaggedClientReceivesResyncDirective(t *testing.T) {
 	srv := New(dir, 0, "")
 
 	// Manually register an sseClient — no actual SSE handler, so no reader.
+	// workDir mirrors what handleEvents resolves at connect time; broadcast
+	// is project-scoped since Task 20189.
 	c := &sseClient{
-		ch:     make(chan sseEvent, sseClientBufferSize),
-		resync: make(chan struct{}, 1),
+		ch:      make(chan sseEvent, sseClientBufferSize),
+		resync:  make(chan struct{}, 1),
+		workDir: dir,
 	}
 	srv.mu.Lock()
 	srv.clients[c] = struct{}{}
@@ -421,7 +424,7 @@ func TestSSE_LaggedClientReceivesResyncDirective(t *testing.T) {
 
 	const totalEvents = 500
 	for i := 0; i < totalEvents; i++ {
-		srv.broadcast(`{"goal":"test"}`)
+		srv.broadcast(dir, `{"goal":"test"}`)
 	}
 
 	delivered := 0

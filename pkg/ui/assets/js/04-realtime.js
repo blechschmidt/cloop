@@ -318,18 +318,31 @@ function handleRealtimeMsg(type, data) {
 // resulting subscription delivers task_update / state_diff events for that
 // project only, removing the need to refetch /api/state on project switch
 // (Task 20134).
-function _wsURL() {
-  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+function _streamParams() {
   const params = [];
   if (authToken) params.push('token=' + encodeURIComponent(authToken));
   if (isMultiProject && selectedProjectIdx !== null) {
     params.push('project_idx=' + encodeURIComponent(selectedProjectIdx));
   }
-  const qs = params.length ? '?' + params.join('&') : '';
-  return proto + '//' + location.host + '/api/ws' + qs;
+  return params.length ? '?' + params.join('&') : '';
+}
+
+function _wsURL() {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  return proto + '//' + location.host + '/api/ws' + _streamParams();
 }
 
 function connectWS() {
+  // Already fell back to SSE: re-open that stream instead of retrying an
+  // upgrade this proxy has shown it will block. The reconnect still matters
+  // — every caller of connectWS() is a project switch, and the server scopes
+  // an SSE stream to the project it resolved at connect time (Task 20189),
+  // so without this the fallback path would stay pinned to whichever project
+  // was selected when the page loaded.
+  if (sseUsed) {
+    connectSSE();
+    return;
+  }
   if (wsConn) {
     // Mark this close as intentional so onclose doesn't probe /api/state and
     // schedule a backoff reconnect — the immediate new WebSocket() handles it.
@@ -404,8 +417,10 @@ function _fallbackToSSE() {
 
 function connectSSE() {
   if (evtSource) evtSource.close();
-  const sseUrl = authToken ? '/api/events?token=' + encodeURIComponent(authToken) : '/api/events';
-  evtSource = new EventSource(sseUrl);
+  // Carries project_idx for the same reason _wsURL() does: the server binds
+  // the stream to the project it resolves here and filters project-scoped
+  // events against it (Task 20189).
+  evtSource = new EventSource('/api/events' + _streamParams());
   const dot = document.getElementById('liveDot');
   evtSource.onopen = () => {
     dot.classList.add('connected');
