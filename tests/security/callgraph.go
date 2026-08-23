@@ -380,3 +380,82 @@ func reconstruct(parent map[string]string, end string) []string {
 	}
 	return rev
 }
+
+// ---------------------------------------------------------------------------
+// Reachability between named functions
+// ---------------------------------------------------------------------------
+//
+// FindSpawnReachable answers "can a handler reach a forbidden thing". The
+// destruction guarantees need the mirror image: "does a required thing sit on
+// a path that always runs". A credential wipe that exists, is correct, and is
+// only reachable from an optional code path is indistinguishable from no wipe
+// at all on every execution that does not take it — which is exactly how
+// credential files came to survive normal task exits.
+
+// FindFunc returns the graph key for a function declared in pkgPath.
+//
+// name may be a plain function ("forget") or a method ("(*Agent).forget" is
+// matched by "forget" too, since a package rarely declares both). The lookup is
+// by suffix rather than by an assembled FullName because the receiver's
+// rendering — pointer, alias, type parameters — is a detail a test should not
+// have to reproduce exactly.
+func (g *Graph) FindFunc(pkgPath, name string) (string, bool) {
+	var found string
+	for key, n := range g.nodes {
+		if n.pkgPath != pkgPath {
+			continue
+		}
+		if !strings.HasSuffix(key, "."+name) {
+			continue
+		}
+		if found != "" && found != key {
+			// Ambiguity would make a passing test meaningless: the assertion
+			// would be about whichever overload the map happened to yield.
+			return "", false
+		}
+		found = key
+	}
+	return found, found != ""
+}
+
+// Reaches reports whether `to` is reachable from `from`, returning the path.
+//
+// Same reference-graph semantics as FindSpawnReachable: taking a function's
+// address counts as an edge. For a "the wipe is reachable" assertion that
+// over-approximates in the *unsafe* direction, so the path is returned for the
+// test to print and a human to sanity-check rather than trusted blindly.
+func (g *Graph) Reaches(from, to string) ([]string, bool) {
+	if from == "" || to == "" {
+		return nil, false
+	}
+	if _, ok := g.nodes[from]; !ok {
+		return nil, false
+	}
+	parent := map[string]string{from: ""}
+	queue := []string{from}
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		if cur == to {
+			return reconstruct(parent, cur), true
+		}
+		n := g.nodes[cur]
+		if n == nil {
+			continue
+		}
+		callees := make([]string, 0, len(n.callees))
+		for callee := range n.callees {
+			callees = append(callees, callee)
+		}
+		// Sorted so a failure prints the same path every run.
+		sort.Strings(callees)
+		for _, callee := range callees {
+			if _, seen := parent[callee]; seen {
+				continue
+			}
+			parent[callee] = cur
+			queue = append(queue, callee)
+		}
+	}
+	return nil, false
+}

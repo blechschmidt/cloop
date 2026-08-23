@@ -991,10 +991,27 @@ func (a *Agent) forget(handleID string) {
 		// wipeCredentialFile treats a missing file as the desired end state.
 		wl.takeSecrets().wipe(a.cfg.logf)
 	}
-	// The material went with the process. Dropping the binding keeps the
-	// vault from reporting a lease as held by a workload that is gone, which
-	// would make a revocation wait for an ack about nothing.
-	a.vault.release(handleID)
+	// Destroy whatever the vault still holds for this workload, then drop the
+	// binding so a revocation does not wait for an ack about nothing.
+	//
+	// release wipes rather than merely forgetting, and that is a recent fix:
+	// until it did, the only path that ever reached the unlink was an explicit
+	// revoke frame. A task that simply finished — the overwhelmingly common
+	// case — left its credential files behind, and because the lease was then
+	// forgotten, a later revoke answered "not known" and still wiped nothing.
+	//
+	// The reports are logged, not discarded. A failed wipe means a credential
+	// is still on this device's disk, and an operator learning that from a log
+	// line is the difference between a known gap and an invisible one.
+	for _, report := range a.vault.release(handleID) {
+		if len(report.Errors) > 0 {
+			a.cfg.logf("warning: lease %s may have left credential material on this device "+
+				"after %s exited: %s", report.LeaseID, handleID, strings.Join(report.Errors, "; "))
+			continue
+		}
+		a.cfg.logf("lease %s: destroyed %d credential file(s) when %s exited",
+			report.LeaseID, report.FilesRemoved, handleID)
+	}
 }
 
 func (w *workload) snapshot() executor.Status {

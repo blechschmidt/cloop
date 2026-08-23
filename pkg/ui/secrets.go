@@ -140,6 +140,13 @@ type secretLease struct {
 	delivery *secretbroker.Delivery
 	closer   func()
 
+	// db and dir together are the durable trace of a mount: dir is the
+	// directory this hub wrote plaintext into, and db holds the row saying so.
+	// Both are empty for a delivery, which puts nothing on this host's disk and
+	// so has nothing a restart could orphan.
+	db  *statedb.DB
+	dir string
+
 	once sync.Once
 }
 
@@ -252,8 +259,20 @@ func (sl *secretLease) Close() {
 			liveLeases.remove(sl.lease.ID)
 		}
 		if sl.mount != nil {
-			if err := sl.mount.Close(); err != nil {
+			err := sl.mount.Close()
+			if err != nil {
 				fmt.Fprintf(os.Stderr, "ui: wipe secret lease: %v\n", err)
+			}
+			// Clear the durable record only once the wipe has actually
+			// succeeded. Deleting it unconditionally would discard the one
+			// thing that lets the next startup finish the job — a failed wipe
+			// is exactly the case the sweep exists for, and forgetting the
+			// directory because we tried and failed to clean it would turn a
+			// recoverable orphan into a permanent one.
+			if err == nil && sl.db != nil && sl.dir != "" {
+				if derr := sl.db.DeleteSecretLeaseDir(sl.dir); derr != nil {
+					fmt.Fprintf(os.Stderr, "ui: clear lease directory record %s: %v\n", sl.dir, derr)
+				}
 			}
 		}
 		if sl.delivery != nil {
@@ -287,7 +306,7 @@ func acquireSecretLease(controlPlaneDir, workDir string, ex executor.Executor) *
 	if ex != nil {
 		executorID = ex.ID()
 	}
-	broker, closeDB, err := openUIBroker(controlPlaneDir)
+	broker, db, closeDB, err := openUIBrokerDB(controlPlaneDir)
 	if err != nil {
 		// Not configured is the common case and is not worth a log line on
 		// every run; a genuine failure is.
@@ -317,14 +336,56 @@ func acquireSecretLease(controlPlaneDir, workDir string, ex executor.Executor) *
 
 	sl := &secretLease{broker: broker, lease: lease, closer: closeDB}
 	if ex != nil && ex.Capabilities().SecretFilesFromHostPath {
-		mount, merr := lease.Materialize("")
+		// Name the directory, record the intent, *then* write the plaintext.
+		//
+		// The ordering is what makes an orphan recoverable. Materialize used to
+		// pick its own directory and the only record of it was the goroutine
+		// waiting to wipe it, so a hub killed at any point before that
+		// goroutine ran left credential files in /dev/shm that nothing — not
+		// the TTL janitor, which sweeps an in-memory registry, and not the next
+		// startup — would ever collect. With the row written first, a crash
+		// anywhere after this point leaves a trace the startup sweep reconciles.
+		dir, derr := secretbroker.NewLeaseDirPath("")
+		if derr != nil {
+			fmt.Fprintf(os.Stderr, "ui: choose lease directory: %v\n", derr)
+			broker.Release(lease.ID)
+			closeDB()
+			return nil
+		}
+		row := statedb.SecretLeaseDirRow{
+			Dir:         dir,
+			LeaseID:     lease.ID,
+			ExecutorID:  executorID,
+			ProjectPath: workDir,
+			ExpiresAt:   lease.ExpiresAt,
+		}
+		if err := db.PutSecretLeaseDir(row); err != nil {
+			// Fail closed. A credential this hub cannot account for is one it
+			// cannot promise to destroy, and running the task without secrets
+			// is a visible, diagnosable failure — where writing the plaintext
+			// anyway would be an invisible one.
+			fmt.Fprintf(os.Stderr,
+				"ui: refusing to materialize lease %s: cannot record its directory, "+
+					"so a restart could not clean it up: %v\n", lease.ID, err)
+			broker.Release(lease.ID)
+			closeDB()
+			return nil
+		}
+		mount, merr := lease.MaterializeAt(dir)
 		if merr != nil {
 			fmt.Fprintf(os.Stderr, "ui: materialize secret lease: %v\n", merr)
+			// The directory was never populated, so drop the row rather than
+			// leaving the next startup an orphan to chase.
+			if derr := db.DeleteSecretLeaseDir(dir); derr != nil {
+				fmt.Fprintf(os.Stderr, "ui: clear lease directory record %s: %v\n", dir, derr)
+			}
 			broker.Release(lease.ID)
 			closeDB()
 			return nil
 		}
 		sl.mount = mount
+		sl.db = db
+		sl.dir = dir
 	} else {
 		// The sandbox will find its credentials here; the driver is
 		// responsible for putting them there. Nothing is written on this host,
@@ -356,28 +417,40 @@ func acquireSecretLease(controlPlaneDir, workDir string, ex executor.Executor) *
 // directory, and a tenant must not be able to grant itself credentials by
 // writing to a database it owns.
 func openUIBroker(controlPlaneDir string) (*secretbroker.Broker, func(), error) {
+	broker, _, closeDB, err := openUIBrokerDB(controlPlaneDir)
+	return broker, closeDB, err
+}
+
+// openUIBrokerDB is openUIBroker plus the underlying database handle, for the
+// one caller that also needs to write to it: acquireSecretLease records where
+// it is about to put plaintext (see migrations/0022_secret_lease_dirs.sql) and
+// clears that row once it has wiped.
+//
+// The handle stays valid until closeDB runs, which secretLease.Close calls
+// last — after the row delete, so the delete still has a live connection.
+func openUIBrokerDB(controlPlaneDir string) (*secretbroker.Broker, *statedb.DB, func(), error) {
 	if controlPlaneDir == "" {
-		return nil, nil, fmt.Errorf("no control plane directory")
+		return nil, nil, nil, fmt.Errorf("no control plane directory")
 	}
 	dbPath := state.DBPath(controlPlaneDir)
 	if _, err := os.Stat(dbPath); err != nil {
-		return nil, nil, fmt.Errorf("no state database: %w", err)
+		return nil, nil, nil, fmt.Errorf("no state database: %w", err)
 	}
 	db, err := statedb.Open(dbPath)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	store, err := secretstore.New(db)
 	if err != nil {
 		_ = db.Close()
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	broker, err := secretbroker.New(store, secretbroker.WithAuditor(secretstore.NewAuditor(db)))
 	if err != nil {
 		_ = db.Close()
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	return broker, func() { _ = db.Close() }, nil
+	return broker, db, func() { _ = db.Close() }, nil
 }
 
 // isBrokerUnconfigured reports whether the broker simply is not set up on

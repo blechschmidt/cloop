@@ -403,3 +403,189 @@ func itoa(n int) string {
 	}
 	return string(buf[i:])
 }
+
+// TestVaultReleaseWipesCredentialFilesOnNormalExit is the regression test for
+// the destruction hole.
+//
+// wipeCredentialFile was reachable from exactly one place: vault.scrub, called
+// only from the hub-initiated revoke frame handler. The normal exit —
+// deliverFinal -> forget -> release — deleted map entries and nothing else, so
+// a task that simply *finished*, which is what almost every task does, left its
+// credential files on the device. Worse, the lease was then forgotten, so a
+// later revoke reported "not known" and still wiped nothing: the plaintext of
+// every credential the device had ever been handed accumulated in /dev/shm
+// until the machine rebooted.
+//
+// No revoke frame appears anywhere in this test. That is the point.
+func TestVaultReleaseWipesCredentialFilesOnNormalExit(t *testing.T) {
+	dir, file := leaseDir(t, "normal-exit")
+	v := newVault()
+	v.bind("handle-1", []executor.SecretBinding{binding("lease_exit", dir, file)})
+
+	reports := v.release("handle-1")
+
+	if _, err := os.Stat(file); !os.IsNotExist(err) {
+		t.Errorf("the credential file survived a normal task exit: %v\n"+
+			"only an explicit revocation used to destroy it, so a device accumulated "+
+			"the plaintext of every credential it had ever run with", err)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Errorf("the lease directory survived a normal task exit: %v", err)
+	}
+	if len(reports) != 1 {
+		t.Fatalf("release reported %d leases, want 1: the caller has to be able to log a failed wipe", len(reports))
+	}
+	if reports[0].LeaseID != "lease_exit" {
+		t.Errorf("report names lease %q, want lease_exit", reports[0].LeaseID)
+	}
+	if reports[0].FilesRemoved != 1 {
+		t.Errorf("FilesRemoved = %d, want 1", reports[0].FilesRemoved)
+	}
+	if len(reports[0].Errors) != 0 {
+		t.Errorf("unexpected errors: %v", reports[0].Errors)
+	}
+}
+
+// TestVaultReleaseWipesOnlyWhenTheLastHolderGoes guards against the opposite
+// mistake. Two workloads can share one lease, and destroying its files when the
+// first finishes would pull the credential out from under the second.
+func TestVaultReleaseWipesOnlyWhenTheLastHolderGoes(t *testing.T) {
+	dir, file := leaseDir(t, "shared")
+	v := newVault()
+	b := binding("lease_shared", dir, file)
+	v.bind("handle-1", []executor.SecretBinding{b})
+	v.bind("handle-2", []executor.SecretBinding{b})
+
+	if reports := v.release("handle-1"); len(reports) != 0 {
+		t.Errorf("release of one of two holders destroyed material: %+v", reports)
+	}
+	if _, err := os.Stat(file); err != nil {
+		t.Fatalf("the credential must survive while another workload holds it: %v", err)
+	}
+
+	v.release("handle-2")
+	if _, err := os.Stat(file); !os.IsNotExist(err) {
+		t.Errorf("the credential survived the last holder's exit: %v", err)
+	}
+}
+
+// TestVaultReleaseAndScrubAreIdempotentInBothOrders is the "make release
+// idempotent with scrub" half of the fix. The two paths run the same
+// scrubLocked body, so neither can double-wipe, report a hollow success, or
+// leave the other with work it silently skips.
+func TestVaultReleaseAndScrubAreIdempotentInBothOrders(t *testing.T) {
+	t.Run("scrub then release", func(t *testing.T) {
+		dir, file := leaseDir(t, "scrub-first")
+		v := newVault()
+		v.bind("handle-1", []executor.SecretBinding{binding("lease_a", dir, file)})
+
+		if report := v.scrub("lease_a", "", nil); report.FilesRemoved != 1 {
+			t.Fatalf("scrub removed %d files, want 1: %v", report.FilesRemoved, report.Errors)
+		}
+		// The files are already gone, so release has nothing to destroy and
+		// must not claim otherwise.
+		for _, r := range v.release("handle-1") {
+			if r.FilesRemoved != 0 {
+				t.Errorf("release re-counted %d already-destroyed files", r.FilesRemoved)
+			}
+			if len(r.Errors) != 0 {
+				t.Errorf("release errored over an already-scrubbed lease: %v", r.Errors)
+			}
+		}
+	})
+
+	t.Run("release then scrub", func(t *testing.T) {
+		dir, file := leaseDir(t, "release-first")
+		v := newVault()
+		v.bind("handle-1", []executor.SecretBinding{binding("lease_b", dir, file)})
+
+		v.release("handle-1")
+		if _, err := os.Stat(file); !os.IsNotExist(err) {
+			t.Fatalf("release left the credential behind: %v", err)
+		}
+		// The ack stays Known=false — the hub relies on that to distinguish
+		// "this agent never had it" from "this agent scrubbed it" — but the
+		// device must be able to say which happened in its own log.
+		report := v.scrub("lease_b", "", nil)
+		if report.Known {
+			t.Error("a released lease must not be reported as still held")
+		}
+		if !v.wasRetired("lease_b") {
+			t.Error("the device should remember it destroyed this lease, so a later " +
+				"revoke is logged as a no-op rather than as one that found nothing")
+		}
+	})
+}
+
+// TestVaultRetiredTombstonesAreBounded keeps a long-lived agent from leaking.
+// A device runs thousands of tasks over months; remembering every lease it has
+// ever destroyed would be an unbounded map on a machine chosen for being small.
+func TestVaultRetiredTombstonesAreBounded(t *testing.T) {
+	v := newVault()
+	for i := 0; i < maxRetiredLeases*3; i++ {
+		id := "lease_" + itoa(i)
+		handle := "handle-" + itoa(i)
+		v.bind(handle, []executor.SecretBinding{{LeaseID: id, GrantID: "g"}})
+		v.release(handle)
+	}
+	v.mu.Lock()
+	got := len(v.retired)
+	v.mu.Unlock()
+	if got > maxRetiredLeases {
+		t.Errorf("retired list holds %d entries, cap is %d", got, maxRetiredLeases)
+	}
+	if !v.wasRetired("lease_" + itoa(maxRetiredLeases*3-1)) {
+		t.Error("the most recent destruction should still be remembered")
+	}
+}
+
+// TestVaultRenewalClearsTheTombstone covers the case that would make the
+// diagnostic lie: a renewal legitimately re-issues the same lease ID, and a
+// stale tombstone would make a genuine revocation of live material read as
+// "already destroyed".
+func TestVaultRenewalClearsTheTombstone(t *testing.T) {
+	dir, file := leaseDir(t, "renewed")
+	v := newVault()
+	v.bind("handle-1", []executor.SecretBinding{binding("lease_renew", dir, file)})
+	v.release("handle-1")
+	if !v.wasRetired("lease_renew") {
+		t.Fatal("expected a tombstone after the first exit")
+	}
+
+	dir2, file2 := leaseDir(t, "renewed-again")
+	v.bind("handle-2", []executor.SecretBinding{binding("lease_renew", dir2, file2)})
+	if v.wasRetired("lease_renew") {
+		t.Error("re-delivered material is live again; the tombstone must be cleared")
+	}
+	if report := v.scrub("lease_renew", "", nil); !report.Known {
+		t.Error("a renewed lease must be revocable")
+	}
+	if _, err := os.Stat(file2); !os.IsNotExist(err) {
+		t.Errorf("the renewed credential survived revocation: %v", err)
+	}
+}
+
+// TestVaultReleaseSurfacesAWipeItCouldNotPerform is the "stop swallowing wipe
+// errors" contract at the vault level: a credential still on disk must reach
+// the caller, which logs it. Silence here is the failure mode the whole task
+// exists to remove.
+func TestVaultReleaseSurfacesAWipeItCouldNotPerform(t *testing.T) {
+	dir, file := leaseDir(t, "unwipeable")
+	// A subdirectory inside the lease directory cannot be removed by the
+	// confined wipe, which refuses to recurse. It is a deterministic,
+	// root-safe way to make the destruction genuinely fail.
+	if err := os.Mkdir(filepath.Join(dir, "nested"), 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	v := newVault()
+	v.bind("handle-1", []executor.SecretBinding{binding("lease_stuck", dir, file)})
+	reports := v.release("handle-1")
+
+	if len(reports) != 1 || len(reports[0].Errors) == 0 {
+		t.Fatalf("a failed lease-directory wipe was not reported: %+v", reports)
+	}
+	if _, err := os.Stat(dir); err != nil {
+		t.Errorf("the directory should still be there — that is what makes it worth reporting: %v", err)
+	}
+}

@@ -36,21 +36,25 @@ package agent
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 
 	"github.com/blechschmidt/cloop/pkg/executor"
+	"github.com/blechschmidt/cloop/pkg/securewipe"
 )
 
 // leaseDirPrefix is the name prefix secretbroker gives every lease directory.
-// It is duplicated here rather than imported: pkg/executor/agent must build
-// for a device that carries no broker, and depending on the broker package for
-// one string constant would drag the whole secret store onto every edge
-// binary.
-const leaseDirPrefix = "cloop-lease-"
+//
+// It comes from pkg/securewipe rather than from the broker: pkg/executor/agent
+// must build for a device that carries no secret store, and importing the
+// broker for one string constant would drag the whole thing onto every edge
+// binary. A leaf package both sides can depend on gets the shared constant
+// without the shared weight — and without the risk that two hand-copied
+// literals drift, which would silently turn every revocation on this device
+// into a refusal.
+const leaseDirPrefix = securewipe.LeaseDirPrefix
 
 // heldLease is one lease's material as this device sees it.
 type heldLease struct {
@@ -89,6 +93,10 @@ type heldLease struct {
 type vault struct {
 	mu     sync.Mutex
 	leases map[string]*heldLease
+	// retired is a bounded FIFO of lease IDs whose material this agent has
+	// already destroyed, so a later revocation can be logged as the no-op it
+	// genuinely is rather than as one that found nothing. See retire.
+	retired []string
 }
 
 func newVault() *vault { return &vault{leases: make(map[string]*heldLease)} }
@@ -130,18 +138,112 @@ func (v *vault) bind(handleID string, bindings []executor.SecretBinding) {
 		// legitimately re-issues the same lease ID, and leaving the flag set
 		// would make the next revocation a no-op that reports success.
 		held.scrubbed = false
+		v.unretire(id)
 	}
 }
 
-// release forgets a finished workload. A lease with no workloads left is
-// dropped entirely: its material went with the process that held it.
-func (v *vault) release(handleID string) {
+// release retires a finished workload and destroys any material that went with
+// it. A lease with no workloads left is wiped and dropped.
+//
+// The wipe is the point, and its absence was a real hole. "Its material went
+// with the process that held it" was true of environment variables and false
+// of files: release used to delete map entries and nothing else, so the only
+// path that ever reached wipeCredentialFile was an explicit revoke frame. A
+// task that simply *finished* — overwhelmingly the common case — left its
+// credential files on the device, and because the lease was then forgotten a
+// later revoke answered "not known" and still wiped nothing. The plaintext of
+// every credential the device had ever been handed accumulated in /dev/shm
+// until the machine rebooted.
+//
+// Destruction goes through the same scrubLocked as revocation, so the two are
+// idempotent with respect to each other in both orders: a revoke that already
+// wiped leaves scrubbed set and this does nothing, and a release that wiped
+// first means a later revoke has nothing left to find.
+//
+// The returned reports name what was destroyed, so the caller can log a
+// failure. Callers must not ignore them — a wipe that failed is a credential
+// still on disk, and that is precisely the thing this system may not discover
+// silently.
+func (v *vault) release(handleID string) []scrubReport {
 	v.mu.Lock()
 	defer v.mu.Unlock()
+
+	var reports []scrubReport
 	for id, held := range v.leases {
 		delete(held.handles, handleID)
-		if len(held.handles) == 0 {
-			delete(v.leases, id)
+		if len(held.handles) > 0 {
+			continue
+		}
+		// Last holder gone: the credential has no legitimate reader left, so
+		// take it back now rather than waiting for a revocation that may never
+		// come. scrubEnv is nil because the workload is finished — there is no
+		// live environment to scrub, and the driver's copy goes with the
+		// handle.
+		report := v.scrubLocked(held, nil)
+		report.LeaseID = id
+		if report.FilesRemoved > 0 || len(report.Errors) > 0 {
+			reports = append(reports, report)
+		}
+		delete(v.leases, id)
+		v.retire(id)
+	}
+	sort.Slice(reports, func(i, j int) bool { return reports[i].LeaseID < reports[j].LeaseID })
+	return reports
+}
+
+// maxRetiredLeases bounds the memory the tombstone list can take. A long-lived
+// agent runs thousands of tasks, and remembering every lease it has ever
+// destroyed would be an unbounded leak in a process that is meant to sit on a
+// small device for months.
+const maxRetiredLeases = 64
+
+// retire records that a lease's material was destroyed here.
+//
+// It exists for the diagnostic, not for the protocol. A revoke for a lease that
+// finished normally is answered Known=false, which the hub relies on to
+// distinguish "this agent never had it" from "this agent scrubbed it" (see
+// pkg/executor/remote/revoke.go) — so that answer must not change. What the
+// tombstone buys is an accurate line in the device's own log: "already
+// destroyed when its workload exited" rather than "not held by this agent",
+// which reads like the revocation missed.
+//
+// Caller holds v.mu.
+func (v *vault) retire(leaseID string) {
+	for _, id := range v.retired {
+		if id == leaseID {
+			return
+		}
+	}
+	v.retired = append(v.retired, leaseID)
+	if len(v.retired) > maxRetiredLeases {
+		v.retired = v.retired[len(v.retired)-maxRetiredLeases:]
+	}
+}
+
+// wasRetired reports whether this agent destroyed the lease's material on the
+// normal exit path. Best-effort: the list is bounded, so a false answer means
+// "not recently", not "never".
+func (v *vault) wasRetired(leaseID string) bool {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	for _, id := range v.retired {
+		if id == leaseID {
+			return true
+		}
+	}
+	return false
+}
+
+// unretire drops a tombstone because the lease is live material again. A
+// renewal legitimately re-issues the same lease ID, and a stale tombstone would
+// make the device log a genuine revocation as a no-op.
+//
+// Caller holds v.mu.
+func (v *vault) unretire(leaseID string) {
+	for i, id := range v.retired {
+		if id == leaseID {
+			v.retired = append(v.retired[:i], v.retired[i+1:]...)
+			return
 		}
 	}
 }
@@ -169,6 +271,9 @@ type envScrubber func(handleID string, keys []string) []string
 
 // scrubReport is what a scrub achieved, for the ack.
 type scrubReport struct {
+	// LeaseID is set by release, which scrubs leases the caller did not name.
+	// A revoke already knows which lease it asked about.
+	LeaseID       string
 	Known         bool
 	EnvKeys       []string
 	FilesRemoved  int
@@ -202,6 +307,18 @@ func (v *vault) scrub(leaseID, grantID string, scrubEnv envScrubber) scrubReport
 		return scrubReport{Known: false}
 	}
 
+	return v.scrubLocked(held, scrubEnv)
+}
+
+// scrubLocked destroys one held lease's material. Caller holds v.mu.
+//
+// It is shared by scrub (an operator or the TTL janitor taking a credential
+// back) and release (a workload finishing normally), which is the whole reason
+// it is a separate function: those two were different code paths, only one of
+// them wiped anything, and the one that ran on every task was the one that did
+// not. A single body means a future change to what "destroyed" means cannot
+// apply to revocation and miss the ordinary exit.
+func (v *vault) scrubLocked(held *heldLease, scrubEnv envScrubber) scrubReport {
 	report := scrubReport{Known: true, EgressDropped: held.egress}
 	for h := range held.handles {
 		report.Handles = append(report.Handles, h)
@@ -264,59 +381,34 @@ func (v *vault) scrub(leaseID, grantID string, scrubEnv envScrubber) scrubReport
 // blocks that survive until they are reused. On a tmpfs the pages are freed
 // anyway and this is belt-and-braces. Neither is a guarantee against a
 // copy-on-write or log-structured filesystem — see pkg/secretbroker's Mount.
+// The overwrite itself lives in pkg/securewipe, shared with the hub's
+// secretbroker. It used to be duplicated verbatim in both, and both copies
+// discarded every error the overwrite could produce: an open, WriteAt or Sync
+// failure still returned nil, so a caller was told the bytes were zeroed when
+// only the name had been removed. What stays here is the confinement — the
+// part that is this device's own policy and must not be shared with the party
+// supplying the paths.
 func wipeCredentialFile(path string) error {
 	if err := checkLeaseOwned(path); err != nil {
 		return err
 	}
-	info, err := os.Lstat(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil // already gone; the desired end state
-		}
-		return fmt.Errorf("agent: stat credential %s: %w", path, err)
-	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		// Following it would write zeros through the link into whatever it
-		// points at. Remove the link itself and nothing else.
-		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("agent: remove credential link %s: %w", path, err)
-		}
-		return nil
-	}
-	if !info.Mode().IsRegular() {
-		return fmt.Errorf("agent: refused to remove %s: not a regular file", path)
-	}
-	if size := info.Size(); size > 0 {
-		if f, oerr := os.OpenFile(path, os.O_WRONLY, 0o600); oerr == nil {
-			zeros := make([]byte, size)
-			_, _ = f.WriteAt(zeros, 0)
-			_ = f.Sync()
-			_ = f.Close()
-		}
-	}
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("agent: remove credential %s: %w", path, err)
+	if err := securewipe.File(path); err != nil {
+		return fmt.Errorf("agent: wipe credential %s: %w", path, err)
 	}
 	return nil
 }
 
-// removeLeaseDir removes an emptied lease directory.
+// removeLeaseDir wipes and removes a lease directory.
 //
-// os.Remove, not RemoveAll: the directory must be empty by now, and a
-// recursive delete driven by a control-plane-supplied path is the exact
-// primitive the confinement rules above exist to withhold. A non-empty
-// directory is reported, not force-removed.
+// securewipe.Dir zeroes any file still in it before unlinking the directory —
+// which matters because the tracked file list covers what the *hub* delivered,
+// and a harness that wrote its own credential there (a git helper's scratch
+// file, a kubectl cache) is exactly the material nothing else would catch. It
+// refuses to recurse and refuses a directory not named cloop-lease-*, so a
+// control plane still cannot turn this into a recursive-delete primitive.
 func removeLeaseDir(dir string) error {
-	if !isLeaseDirName(dir) {
-		return fmt.Errorf(
-			"agent: refused to remove lease directory %s: its name does not start with %s",
-			dir, leaseDirPrefix)
-	}
-	if err := os.Remove(dir); err != nil && !os.IsNotExist(err) {
-		// Not fatal to the scrub: the credential files themselves are gone,
-		// which is what the revocation was for. An empty directory left behind
-		// is untidy, not dangerous.
-		return fmt.Errorf("agent: remove lease directory %s: %w", dir, err)
+	if err := securewipe.Dir(dir); err != nil {
+		return fmt.Errorf("agent: clear lease directory %s: %w", dir, err)
 	}
 	return nil
 }
@@ -337,10 +429,7 @@ func checkLeaseOwned(path string) error {
 }
 
 // isLeaseDirName reports whether dir's final element is a lease directory.
-func isLeaseDirName(dir string) bool {
-	base := filepath.Base(filepath.Clean(strings.TrimSpace(dir)))
-	return strings.HasPrefix(base, leaseDirPrefix) && len(base) > len(leaseDirPrefix)
-}
+func isLeaseDirName(dir string) bool { return securewipe.IsLeaseDir(dir) }
 
 // partitionLeaseFiles splits control-plane-supplied paths into those this
 // agent will unlink and those it refuses.

@@ -120,6 +120,13 @@ func bootstrapExecutors(dir string) {
 	// the device. Best-effort, like every other emitter.
 	executor.SetWorkspaceAuditor(workspaceAuditSink(dir))
 	syncRegistryToStore(dir)
+	// Before the supervisor, which can dispatch and therefore mint new leases.
+	// The sweep skips directories held by a live lease, so the order is not
+	// load-bearing for correctness — but a sweep that runs while work is
+	// starting has to reason about a moving set, and there is no reason to make
+	// it. At this point every recorded directory is unambiguously an orphan of
+	// a previous run.
+	sweepOrphanedLeaseDirs(dir)
 	startExecutorSupervisor(dir)
 }
 

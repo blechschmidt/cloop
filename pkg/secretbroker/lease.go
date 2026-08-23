@@ -2,6 +2,7 @@ package secretbroker
 
 import (
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"os"
 	"path"
@@ -10,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/blechschmidt/cloop/pkg/securewipe"
 )
 
 // Material is one grant's credentials, already minimized against that
@@ -384,20 +387,76 @@ func leaseFileMode(f File) os.FileMode {
 // through cleans up what was already written rather than leaving credential
 // files behind.
 func (l *Lease) Materialize(baseDir string) (*Mount, error) {
+	dir, err := NewLeaseDirPath(baseDir)
+	if err != nil {
+		return nil, err
+	}
+	return l.MaterializeAt(dir)
+}
+
+// NewLeaseDirPath returns an unused lease-directory path under baseDir —
+// without creating it, and without writing anything.
+//
+// It exists so a caller can record its intent to materialise *before* any
+// plaintext lands on disk. Materialize used to pick the directory itself with
+// MkdirTemp, which left no way to write a durable "a lease directory is about
+// to exist at this path" row first: a hub killed between the mkdir and the row
+// came back up with a credential directory nothing knew about, and the startup
+// sweep had nothing to reconcile it against. /dev/shm is a tmpfs and clears on
+// reboot, but a hub *process* restart is the common case and clears nothing.
+//
+// Splitting the naming from the creation makes the ordering possible:
+//
+//	dir, _ := NewLeaseDirPath("")   // nothing on disk yet
+//	db.PutSecretLeaseDir(...)       // intent recorded
+//	lease.MaterializeAt(dir)        // plaintext appears
+//
+// A crash after the row exists leaves a trace the sweep can act on; a crash
+// before it leaves nothing at all. There is no window in between.
+//
+// baseDir may be empty to use a tmpfs. The 96-bit suffix matches lease IDs, so
+// two hubs sharing one /dev/shm cannot collide.
+func NewLeaseDirPath(baseDir string) (string, error) {
+	buf := make([]byte, 12)
+	if _, err := rand.Read(buf); err != nil {
+		return "", fmt.Errorf("secretbroker: generate lease dir name: %w", err)
+	}
+	return filepath.Join(leaseBaseDir(baseDir), leaseDirPrefix+encodeHex(buf)), nil
+}
+
+// MaterializeAt writes the lease's credentials into dir, which it creates.
+//
+// dir must be absolute and its final element must carry leaseDirPrefix: the
+// prefix is what every wipe path in this system uses to recognise a directory
+// as lease-owned, and one created without it could never be swept. Creation is
+// exclusive — a directory that already exists is refused rather than reused,
+// so two leases cannot land in one directory and have the first Close take the
+// second's files.
+func (l *Lease) MaterializeAt(dir string) (*Mount, error) {
 	if l == nil {
 		return nil, wrapf(ErrLeaseNotFound, "nil lease")
 	}
-	dir, err := os.MkdirTemp(leaseBaseDir(baseDir), leaseDirPrefix)
-	if err != nil {
+	clean := filepath.Clean(strings.TrimSpace(dir))
+	if clean == "" || clean == "." || !filepath.IsAbs(clean) {
+		return nil, wrapf(ErrInvalidSecret, "lease directory %q is not an absolute path", dir)
+	}
+	if !securewipe.IsLeaseDir(clean) {
+		return nil, wrapf(ErrInvalidSecret,
+			"lease directory %s does not carry the %s prefix, so nothing would recognise it as lease-owned",
+			clean, leaseDirPrefix)
+	}
+	// 0700 from the start rather than created-then-chmodded: a directory that
+	// is traversable for even an instant is one in which a file created inside
+	// it is reachable, whatever the file's own mode. os.Mkdir applies the
+	// process umask, so the explicit Chmod below is what actually guarantees it.
+	if err := os.Mkdir(clean, 0o700); err != nil {
 		return nil, fmt.Errorf("secretbroker: create lease dir: %w", err)
 	}
-	// MkdirTemp already creates 0700, but say so explicitly: the guarantee
-	// that no other user on the host can read these files is the reason the
-	// directory exists at all, and it should not rest on a default.
-	if err := os.Chmod(dir, 0o700); err != nil {
-		_ = os.RemoveAll(dir)
+	if err := os.Chmod(clean, 0o700); err != nil {
+		_ = os.RemoveAll(clean)
 		return nil, fmt.Errorf("secretbroker: secure lease dir: %w", err)
 	}
+	dir = clean
 
 	env, files, bindings, mounts, err := l.render(dir)
 	if err != nil {
@@ -586,7 +645,11 @@ func (f DeliveredFile) GoString() string { return f.String() }
 // compromised control plane from turning revocation into an arbitrary-unlink
 // primitive on every enrolled device. A directory chosen for a sandbox must
 // therefore carry the prefix too — see SandboxLeaseDir.
-const leaseDirPrefix = "cloop-lease-"
+//
+// Defined in pkg/securewipe so the hub and the agent cannot drift apart on it:
+// they are separate binaries enforcing one rule, and a prefix that disagreed
+// would make every revocation on an edge device a silent no-op.
+const leaseDirPrefix = securewipe.LeaseDirPrefix
 
 // SandboxLeaseRoot is the parent directory a lease's files are delivered under
 // inside an executor that does not share the hub's filesystem.
@@ -697,48 +760,41 @@ func (m *Mount) Close() error {
 	}
 	m.closed = true
 
-	var firstErr error
+	var errs []error
 	for _, path := range m.files {
-		if err := wipeFile(path); err != nil && firstErr == nil {
-			firstErr = err
+		if err := wipeFile(path); err != nil {
+			errs = append(errs, err)
 		}
 	}
 	m.files = nil
 	m.env = nil
 	m.bindings = nil
 	if m.Dir != "" {
-		if err := os.RemoveAll(m.Dir); err != nil && firstErr == nil {
-			firstErr = err
+		// securewipe.Dir rather than os.RemoveAll, and the difference is not
+		// tidiness: RemoveAll unlinks whatever the workload left in the lease
+		// directory without overwriting it, so a kubectl cache or a git
+		// credential helper's scratch file — written by the workload, never
+		// tracked in m.files — would leave its bytes on the device. Dir
+		// enumerates and zeroes everything it finds.
+		if err := securewipe.Dir(m.Dir); err != nil {
+			errs = append(errs, err)
 		}
 	}
-	return firstErr
+	// Joined rather than first-wins: a caller deciding whether to tell an
+	// operator "this credential is destroyed" needs every reason it might not
+	// be, and the first failure is not reliably the worst one.
+	return errors.Join(errs...)
 }
 
 // wipeFile overwrites a file's contents with zeros, syncs, and removes it.
 // A missing file is not an error: something else having already cleaned up
 // is the desired end state.
-func wipeFile(path string) error {
-	info, err := os.Stat(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return err
-	}
-	if size := info.Size(); size > 0 {
-		f, oerr := os.OpenFile(path, os.O_WRONLY, 0o600)
-		if oerr == nil {
-			zeros := make([]byte, size)
-			_, _ = f.WriteAt(zeros, 0)
-			_ = f.Sync()
-			_ = f.Close()
-		}
-	}
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	return nil
-}
+// It is a thin alias for securewipe.File, kept so the call sites here read in
+// this package's terms. The implementation moved out because an identical copy
+// lived in pkg/executor/agent and both had discarded every error from the
+// overwrite — the doc comment above promised a wipe and the code delivered an
+// unlink. See pkg/securewipe.
+func wipeFile(path string) error { return securewipe.File(path) }
 
 // newLeaseID returns a lease identifier. Leases are shorter-lived than
 // grants but are quoted in audit rows, so they get the same 96 bits.

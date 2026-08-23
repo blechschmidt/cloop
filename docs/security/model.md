@@ -1014,6 +1014,33 @@ what it is looking for.
 | A symlink planted in a lease directory does not redirect the wipe onto its target | `TestVaultDoesNotFollowSymlinks` (`pkg/executor/agent`) |
 | Scrubbing is race-safe against a task concurrently reading the credential | `TestVaultConcurrentReadAndScrub`, `TestScrubEnvConcurrentWithStatusAndSignal` |
 
+### Credential destruction — `destruction_test.go`
+
+Revocation is a credential being *taken back*; destruction is a credential
+going away on its own. They are different guarantees with different failure
+modes, and the second one is the dangerous one: it runs on every task exit with
+nobody watching, so when it stops running nothing fails and nothing alerts —
+plaintext simply accumulates on a disk.
+
+| Guarantee | Test |
+| --- | --- |
+| *Statically*: the wipe is reachable from the agent's ordinary exit (`deliverFinal`), not only from the revoke frame handler | `TestCredentialDestructionIsReachableFromTheNormalExitPath` |
+| *Statically*: it is reachable from `forget`, the one exit every workload passes through — refused start, kill, disowned handle, clean finish | `TestCredentialDestructionIsReachableFromTheNormalExitPath` |
+| *Statically*: `vault.release` destroys rather than merely forgetting, so a released lease is not left on disk *and* unrevocable | `TestCredentialDestructionIsReachableFromTheNormalExitPath` |
+| *Statically*: the normal-exit route to the wipe does not pass through the revoke handler, so a task nobody revokes still loses its credentials | `TestNormalExitDestructionDoesNotDependOnRevocation` |
+| A credential file is gone after a normal task exit, with no revoke frame anywhere | `TestVaultReleaseWipesCredentialFilesOnNormalExit` (`pkg/executor/agent`) |
+| Shared material survives until the *last* holder exits | `TestVaultReleaseWipesOnlyWhenTheLastHolderGoes` (`pkg/executor/agent`) |
+| Release and scrub are idempotent with respect to each other, in both orders | `TestVaultReleaseAndScrubAreIdempotentInBothOrders` (`pkg/executor/agent`) |
+| A wipe that cannot happen returns an error instead of claiming success | `TestWipeReportsAFailureRatherThanClaimingSuccess`, `TestFileReportsAnOverwriteItCannotPerform` (`pkg/securewipe`) |
+| The bytes are overwritten before the unlink, observed through a surviving file handle | `TestFileOverwritesBeforeUnlinking` (`pkg/securewipe`) |
+| Callers surface a failed wipe rather than swallowing it | `TestMountCloseSurfacesAWipeItCouldNotPerform` (`pkg/secretbroker`), `TestVaultReleaseSurfacesAWipeItCouldNotPerform` (`pkg/executor/agent`) |
+| Files the *workload* wrote into a lease directory are zeroed too, not just unlinked | `TestMountCloseZeroesFilesTheWorkloadWrote` (`pkg/secretbroker`) |
+| A lease directory is named and recorded before any plaintext exists at it | `TestMaterializedLeaseLeavesADurableTraceForTheNextHub`, `TestNewLeaseDirPathCreatesNothing` (`pkg/secretbroker`) |
+| A directory left behind by a hub crash is wiped at the next startup | `TestStartupSweepWipesCrashOrphanedLeaseDir` (`pkg/ui`) |
+| The sweep leaves directories it has no record of alone, so co-tenant hubs are not destroyed | `TestStartupSweepLeavesUnrecordedDirectoriesAlone` (`pkg/ui`) |
+| A failed sweep keeps its record, so the next startup retries instead of going blind | `TestStartupSweepKeepsTheRecordWhenTheWipeFails` (`pkg/ui`) |
+| The durable record carries no credential material | `TestMaterializedLeaseLeavesADurableTraceForTheNextHub` |
+
 ### Lease and token invariants — `leases_test.go`
 
 | Guarantee | Test |

@@ -452,3 +452,122 @@ func TestMaterializeEmptyLease(t *testing.T) {
 		t.Errorf("empty lease materialised %d files", len(entries))
 	}
 }
+
+// TestMountCloseSurfacesAWipeItCouldNotPerform is the caller-side half of the
+// "stop swallowing wipe errors" contract.
+//
+// Close's own error return existed already, but everything under it discarded
+// failures: wipeFile returned nil whatever happened, and os.RemoveAll unlinked
+// stragglers without zeroing them. A hub calling Close and getting nil would
+// log "secret lease wiped" over plaintext still on disk.
+func TestMountCloseSurfacesAWipeItCouldNotPerform(t *testing.T) {
+	lease := &Lease{
+		ID:        "lease_stuck",
+		ExpiresAt: time.Now().Add(time.Hour),
+		Materials: []Material{{
+			GrantID:    "grant_1",
+			SecretName: "github-ci",
+			Kind:       KindGitHubPAT,
+			Files:      []File{{Name: "token", Content: []byte("ghp_canary"), Mode: 0o600}},
+		}},
+	}
+	mount, err := lease.Materialize(t.TempDir())
+	if err != nil {
+		t.Fatalf("Materialize: %v", err)
+	}
+	// The confined wipe refuses to recurse, so a subdirectory is a
+	// deterministic, root-safe way to make destruction genuinely fail.
+	if err := os.Mkdir(filepath.Join(mount.Dir, "nested"), 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	if err := mount.Close(); err == nil {
+		t.Fatal("Close returned nil while the lease directory was still on disk; " +
+			"the caller would report the credential as destroyed")
+	}
+	if _, err := os.Stat(mount.Dir); err != nil {
+		t.Errorf("the directory should still be there — that is what makes it worth reporting: %v", err)
+	}
+}
+
+// TestMountCloseZeroesFilesTheWorkloadWrote covers what os.RemoveAll used to
+// miss. m.files tracks only what the broker placed; a harness that dropped its
+// own credential in the lease directory — a git helper's scratch file, a
+// kubectl cache — had it unlinked without ever being overwritten.
+func TestMountCloseZeroesFilesTheWorkloadWrote(t *testing.T) {
+	lease := &Lease{
+		ID:        "lease_extra",
+		ExpiresAt: time.Now().Add(time.Hour),
+		Materials: []Material{{
+			GrantID: "grant_1", SecretName: "kube", Kind: KindKubeconfig,
+			Files: []File{{Name: "config", Content: []byte("apiVersion: v1"), Mode: 0o600}},
+		}},
+	}
+	mount, err := lease.Materialize(t.TempDir())
+	if err != nil {
+		t.Fatalf("Materialize: %v", err)
+	}
+	stray := filepath.Join(mount.Dir, "workload-wrote-this")
+	if err := os.WriteFile(stray, []byte("ghp_stray_canary"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	witness, err := os.Open(stray)
+	if err != nil {
+		t.Fatalf("open witness: %v", err)
+	}
+	defer witness.Close()
+
+	if err := mount.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	buf := make([]byte, len("ghp_stray_canary"))
+	if _, err := witness.ReadAt(buf, 0); err != nil {
+		t.Fatalf("read through witness: %v", err)
+	}
+	if strings.Contains(string(buf), "ghp_") {
+		t.Errorf("an untracked file in the lease directory was unlinked but not zeroed: %q", buf)
+	}
+}
+
+// TestMaterializeAtRefusesADirectoryNothingCouldSweep guards the invariant the
+// whole destruction story rests on: every wipe path in this system recognises a
+// lease directory by its name prefix, so one created without it could never be
+// swept, revoked, or reconciled.
+func TestMaterializeAtRefusesADirectoryNothingCouldSweep(t *testing.T) {
+	lease := &Lease{ID: "lease_x", ExpiresAt: time.Now().Add(time.Hour)}
+	for _, dir := range []string{
+		filepath.Join(t.TempDir(), "plain-directory"),
+		"relative/cloop-lease-x",
+		"",
+	} {
+		if _, err := lease.MaterializeAt(dir); err == nil {
+			t.Errorf("MaterializeAt(%q) was accepted; nothing would ever recognise it as lease-owned", dir)
+		}
+	}
+}
+
+// TestNewLeaseDirPathCreatesNothing is what makes the write-ahead ordering
+// possible: the caller records its intent to materialise before any plaintext
+// exists, so a crash always leaves either nothing or a reconcilable trace, and
+// never plaintext with no record.
+func TestNewLeaseDirPathCreatesNothing(t *testing.T) {
+	base := t.TempDir()
+	dir, err := NewLeaseDirPath(base)
+	if err != nil {
+		t.Fatalf("NewLeaseDirPath: %v", err)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Errorf("%s exists already; the intent row could not precede the plaintext: %v", dir, err)
+	}
+	if !strings.HasPrefix(filepath.Base(dir), leaseDirPrefix) {
+		t.Errorf("%s does not carry the lease prefix", dir)
+	}
+	other, err := NewLeaseDirPath(base)
+	if err != nil {
+		t.Fatalf("NewLeaseDirPath: %v", err)
+	}
+	if other == dir {
+		t.Error("two calls returned the same path; two hubs sharing /dev/shm would collide")
+	}
+}

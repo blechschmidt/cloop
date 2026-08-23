@@ -82,6 +82,14 @@ func (a *Agent) handleRevoke(ctx context.Context, sess *deviceSession, frame rem
 	}
 
 	switch {
+	case !report.Known && a.vault.wasRetired(leaseID):
+		// Worth distinguishing for whoever reads this device's log after
+		// revoking a credential. The ack stays Known=false either way — the
+		// hub relies on that to tell "this agent never had it" from "this agent
+		// scrubbed it" — but "not held" for a lease destroyed ten seconds ago
+		// reads like the revocation missed, when in fact it arrived after the
+		// normal-exit wipe had already run.
+		a.cfg.logf("revoke %s: already destroyed when its workload exited (nothing left to scrub)", leaseID)
 	case !report.Known:
 		a.cfg.logf("revoke %s: not held by this agent (nothing to scrub)", leaseID)
 	default:
