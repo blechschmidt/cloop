@@ -1044,6 +1044,452 @@ Diagnostics are surfaced in three places, so a failure cannot be silent:
   computed live rather than frozen at startup, so a hub becomes ready the
   moment an edge device enrolls.
 
+### Durable handle identity (Task 20191)
+
+Reconciliation above brings the *drivers* back. The workloads they dispatched
+are a separate problem, and until Task 20191 they were not solved at all.
+
+Every driver keeps its handle map in memory. That is the right place for the
+live bookkeeping — a log bus, a kill timer, a cancel func — but it also made
+the map the only record that a workload existed. A control plane that restarted
+came up believing it had dispatched nothing, while the containers, Pods and
+edge-device processes it had dispatched kept running. `Stream`, `Status` and
+`Signal` all answered `ErrHandleNotFound` for them, so the workload was
+simultaneously alive and unreachable: no output, no status, no way to stop it.
+
+The fix splits identity from liveness. A `HandleRecord` carries only what is
+needed to *find* a workload again, and that survives the process; the live
+bookkeeping is rebuilt from it on the next start ("rehydration"). This works
+because the runtime, not cloop, owns the workload: `docker logs -f` and a Pod
+log follow attach to something nobody in this process started just as happily
+as to something it did.
+
+Identity lives in `executor_handles` (migration `0021`):
+
+| Column | Meaning |
+| --- | --- |
+| `handle_id` | the driver-side handle, and the key callers hold |
+| `executor_id` | owning executor instance; rehydration is scoped by it, so two container executors on one runtime cannot adopt each other's containers |
+| `driver` | the `Kind*` constant, so a sweep can reason about rows whose executor is no longer registered at all |
+| `external_id` | the name the *runtime* knows the workload by — the whole point of the row |
+| `project_path`, `task_id` | what the work was, so an operator reading the table can tell, and a sweep can scope itself to one project |
+| `pid` | the OS pid where one is meaningful (`localprocess`), else 0 |
+| `image` | the resolved image reference that actually ran — the digest the tag pointed to at dispatch, not the configured tag, which may have been repointed since. Empty for drivers with no image |
+| `meta_json` | driver-specific extras, stored verbatim, never secrets |
+| `started_at` | dispatch time, not row-write time, because the orphan sweep ages against it |
+| `deadline` | the instant `Spec.TimeoutMinutes` expires, or empty for an unbounded workload. Absolute rather than a duration, so a restart resumes the remaining time instead of restarting the clock |
+| `updated_at` | last write, for operator forensics |
+
+`external_id` is driver-specific and nothing outside the owning driver
+interprets it:
+
+| Driver | `external_id` |
+| --- | --- |
+| `localprocess` | the OS process ID, in decimal |
+| `container` | the container name |
+| `kubernetes` | `namespace/podname` |
+| `remote` | the agent-side handle ID (the same string as `handle_id`; the agent offers it back on reconnect) |
+
+**This is deliberately not `executor_sessions` (`0013`)**, even though the two
+describe overlapping things. `executor_sessions` is the *control plane's*
+ledger: the supervisor opens a row when it dispatches, failover requeues from
+it, drain counts it, its key is a session ID the control plane minted, and it
+retains the `Spec` so a session can be re-dispatched somewhere else.
+`executor_handles` is the *driver's* ledger: the driver writes a row when the
+runtime accepts a workload and drops it when the workload goes terminal, keyed
+by the driver-side handle and carrying the external name. Collapsing them would
+mean either drivers minting claim tokens they have no business minting, or the
+control plane inventing external IDs it cannot know — and it would break the
+case that motivated the split, since a driver used without the supervisor (the
+CLI, an embedder) still needs to survive a restart and never gets a session row.
+
+**There is no `spec_json` column, on purpose.** `Spec.Env` carries brokered
+secret values, and a handle row outlives the lease those values came from.
+Rehydration reattaches to a *running* workload and never re-dispatches one, so
+it needs no `Spec`; `executor_sessions` keeps one where re-dispatch actually
+happens. Widening the blast radius of a stolen state database to duplicate it
+here would buy nothing.
+
+The one part of the `Spec` that had to survive anyway is the timeout, and it
+does — as a `deadline` column of its own rather than as a persisted `Spec`.
+It is stored as an **absolute instant, not a duration**, and the two disagree
+in exactly the case it exists for: a hub down for twenty minutes must resume a
+one-hour timeout with forty minutes left, not restart the hour. A duration
+would silently extend every timeout by the length of the outage.
+
+Re-arming is a correctness requirement rather than a nicety. An adopted
+workload is *tracked*, so no orphan sweep will ever collect it; without the
+deadline, a task with a one-hour cap that outlived a restart would run until
+the host was rebooted — trading the bug this section describes for a quieter
+version of it. A deadline that has already passed arms at zero and kills on the
+next tick: the timeout expired, and nobody having been there to enforce it is
+not a reprieve.
+
+Only the drivers holding a `time.AfterFunc` in the hub's own process
+(`localprocess`, `container`) write a deadline. The Kubernetes driver leaves it
+zero, because it hands the API server `activeDeadlineSeconds`, which already
+survives a control-plane restart — which is why a client-side timer was the
+wrong mechanism there in the first place. A zero deadline arms no timer, so a
+workload that was deliberately uncapped stays uncapped.
+
+There is also no foreign key to `executors`, for the same reason
+`executor_health` has none — in-process drivers never enroll, and they are
+exactly the drivers whose orphans an operator most often has to clean up.
+
+Persistence is **best-effort in both directions**. `RecordHandle`,
+`ForgetHandle` and `LoadHandles` report failure to stderr and never propagate
+it. A workload that started successfully must not be reported as failed because
+the state database was momentarily locked: the caller would mark the task failed
+and retry it, producing the double execution the whole scheduling layer exists
+to prevent. A lost row degrades to exactly the pre-Task-20191 behaviour, which
+is the floor rather than a new failure. A driver that cannot *read* its rows
+still constructs, for the same reason: a hub that refuses to start over a stale
+row leaves the operator with no hub at all.
+
+Where the row is written differs by driver, and the asymmetry is the point.
+`container` and `kubernetes` write it *after* the runtime has accepted the
+workload and after the map insert, because a row written earlier would name
+nothing, and a crash in between only loses a row for a container that is running
+— which the orphan sweep already handles. `remote` writes it *before* the start
+frame goes out, because the workload comes into existence on another machine on
+the far side of a link that may be an LTE modem, and the whole round trip is a
+window in which this process can die while the device is already running the
+harness; `dropHandle` deletes the row on every failure path, and after a restart
+an adopted handle the device never started is resolved by the first heartbeat
+that does not list it.
+
+The store is resolved once per reconciliation pass and threaded into both
+configured drivers, so the two never open separate handles onto the same
+database. `reconcile.Options.HandleStore` overrides it, `DisableHandleStore`
+opts out entirely (tests reconciling into a temp directory, which should not
+create a state database as a side effect), and drivers registered *outside*
+reconciliation — the `localprocess` singleton, a remote executor whose device
+dialled in — receive it through `AttachHandleStore`, matched structurally rather
+than by a type switch so a driver added later cannot be silently skipped.
+
+### What each driver can and cannot recover
+
+| | `container` | `kubernetes` | `remote` | `localprocess` |
+| --- | --- | --- | --- | --- |
+| Status / liveness | yes | yes | yes, once the agent reconnects | yes, from `/proc` |
+| Output stream | yes, re-read from the start | yes, re-read from the start | whatever the device still retains | **no** |
+| Exit code | yes | yes | yes | **no** |
+| Signal / stop | yes | yes | yes | yes, after re-verifying identity |
+| Timeout | yes, re-armed from `deadline` | yes, the API server enforces it | yes, the agent's own timer never stopped | yes, re-armed from `deadline` |
+
+**`container`.** Adoption is a map insert, a fresh log bus and a pump; every
+runtime call happens on the pump's goroutine, so `New` keeps its promise of no
+I/O. The record starts `Running`, which is a claim rather than an observation,
+and the pump corrects it within milliseconds — a live container streams until it
+exits, an already-exited one yields its backlog and recorded exit code, and one
+that is gone entirely fails `wait`, which finishes the handle and *drops the
+row*. That last case is what stops a stale row being re-adopted and re-failed on
+every boot forever. `meta_json` records the runtime that started the container,
+because podman and docker keep entirely separate container stores: a hub
+reconfigured between restarts is reattaching against a namespace where its
+containers do not exist, and the one legible warning it prints is the only hint
+an operator gets that a live sandbox has been left behind under a runtime
+nothing is watching.
+
+**`kubernetes`.** `adopt` inserts into the handle map *synchronously*, before
+`New` returns and before anything can call `ReconcileOrphans` — a tracked Pod is
+never swept, and that ordering is what keeps the sweep safe to run on a hub
+whose workloads are still going. Only then does the adopted handle's own
+goroutine do cluster I/O. Three things cannot come out of a row and each is
+handled by saying so rather than pretending: the **kubeconfig lease** is
+re-acquired through the same `Options.Credentials` path `Start` uses, with the
+same project ID, so a grant revoked while the hub was down is not silently
+resumed on authority that no longer exists (failure to lease finishes the record
+and hands the Pod to the orphan sweep); the **`Spec`**, so an adopted record does
+not know a write-back was *asked for* and a run that produces no report reads as
+"no write-back" rather than "a failed one"; and the **workspace provisioning
+state**, which by restart time has either already done its job or is still
+needed by a Pending Pod. The log is re-read from the beginning rather than
+tailed, so the reattached stream is the whole run.
+
+What the row *does* carry beyond identity is the one piece of cleanup state no
+API query can reconstruct: the name of the egress NetworkPolicy created
+alongside the Pod. The policy selects the Pod by label, so the Pod does not name
+it back, and a rehydrated handle that had forgotten it would leave a firewall
+object behind for the orphan sweep to find minutes later. `project_path` is
+likewise the same string the original dispatch leased its kubeconfig with rather
+than the Pod's project annotation, because a value that resolved to a different
+grant would hand the reattached handle authority over a namespace this run was
+never entitled to.
+
+**`remote`.** Almost nothing has to be rebuilt — the device holds the process,
+its output buffer and its exit code, and this side holds a name, a bus and a
+status — so adoption is a map insert with no I/O, which is why it runs
+synchronously inside `NewExecutor`: it must finish before the hub's listener can
+accept the agent whose resume offer it exists to match. What a row cannot carry
+is the log offset. Adding a durable counter would put a database write in the
+path of every 32 KiB of output, so an adopted handle starts at offset 0 and asks
+the device for everything it still has; the device's retain buffer is capped
+(1 MiB, `agent.DefaultRetainBytes`) so the replay is bounded, and the handle is
+flagged **gapped** regardless — a workload that produced output before the
+restart and none after resends nothing at all, and between "this log may be
+missing its start" and "here is the whole run", only the first is safe to be
+wrong about.
+
+**`localprocess` recovers least, and says so.** A forked child is not killed
+when its parent dies: the kernel reparents it to init and it carries on holding
+the CPU, the network and the project directory. What survives is only what the
+kernel tracks independently of parentage.
+
+- **Stream is not recoverable.** The child's stdout and stderr were an
+  `os.Pipe` whose read end died with the previous process; the write end the
+  child still holds now goes nowhere, and there is no way to re-open it. The
+  adopted handle emits one `[cloop]` line saying exactly that, through the same
+  path real output takes, so it lands in the replay buffer for every subscriber
+  that attaches later.
+- **Exit status is not recoverable.** `wait4` reports only to a parent. An
+  adopted workload that exits is finished as `failed` with exit code `-1` and an
+  error naming the reason, never as `exited(0)` — a caller reads the exit code
+  to decide whether a task succeeded, and guessing zero there would mark failed
+  work as done.
+- **A bare pid is never treated as identity.** A pid is a small recycled
+  integer: between the old control plane dying and the new one adopting the row,
+  the child may have exited and its number been handed to a database, an ssh
+  session, or the operator's shell. Acting on that would deliver SIGKILL to an
+  unrelated process. Identity is instead a pair recorded at dispatch and
+  compared exactly at adoption — `/proc/<pid>/stat` field 22 (start time in
+  clock ticks, assigned at fork and never changed) and
+  `/proc/sys/kernel/random/boot_id`, which closes the hole that tick counts
+  restart from zero after a reboot. Anything that cannot be checked against that
+  pair is treated as gone: the handle is finished as failed and its row deleted.
+  The check is re-run immediately before **every** signal, not only at adoption,
+  because the window reopens continuously.
+- Liveness is polled once a second, because the exit of a process that is not
+  our child produces no event to wait for — `wait4` answers only for our own
+  children and SIGCHLD is never delivered for one init inherited. The netlink
+  proc connector needs `CAP_NET_ADMIN` (so a hub running as an ordinary user
+  would lose rehydration entirely rather than degrade) and `pidfd_open(2)`, the
+  right primitive, needs a dependency change; the poll is the honest interim.
+
+### The restart sweep
+
+Rehydration lives in the drivers, because only a driver knows how to re-open
+`docker logs -f`. `reconcile.Sweep` owns the three things left over afterwards,
+none of which any single driver can see. It is requested by
+`reconcile.Options.ReconcileOrphans`, which was Kubernetes-only before Task 20191
+and is now the full sweep; the entry points that ask for it are the ones a
+control plane actually restarts as (`cloop ui`, `cloop serve`, and `daemon`,
+`run` and `agent` through `cmd/root.go`), because for a short CLI call it is
+only latency and API traffic.
+
+```
+FromConfig
+  ├─ reconcileContainer  → driver constructed → rehydrate()   ← adopt, synchronously
+  │                      → go sweepContainerOrphans           ← only on the pass that registered it
+  ├─ reconcileKubernetes → driver constructed → rehydrate()
+  │                      → go sweepOrphans
+  ├─ attachHandleStores  → the localprocess singleton, enrolled remote executors
+  ├─ publish the report
+  └─ go Sweep(dir)
+       ├─ sweepSessions   → close stale `running` rows; return the task IDs that survived
+       └─ pruneWorktrees  → collect leaked worktrees, sparing those task IDs
+```
+
+The ordering is not incidental. Rehydration must have happened first, because
+the question the session sweep asks — "does this row's executor still own its
+handle?" — is only answerable once the drivers have adopted what they own, and
+because a Pod or container that has been adopted is in the tracked set before
+the orphan sweep goroutine is spawned. Sessions are settled before worktrees,
+because the set of task IDs still legitimately running is exactly the set of
+sessions that survived; pruning first would delete the worktree of a task that
+is still being worked on, which is unrecoverable.
+
+The whole sweep is detached and bounded at two minutes, and every step is
+independently recoverable. A git prune and a runtime listing must not sit
+between a hub's start and its listener, and a hub whose state database is
+momentarily locked must still come up — it just comes up with the mess still
+there and sweeps it on the next restart. Nothing in here is fatal and nothing is
+half-done: closed rows stay closed, reaped containers stay reaped, a pruned
+worktree is gone.
+
+**Stale sessions.** `openSessionFor` writes a `running` row that only an
+in-memory goroutine closes, and a hub that dies takes that goroutine with it.
+Nothing else ever touched those rows: `RunningSessions` is called from exactly
+one place, inside `failOver`, reachable only from a live healthy→unreachable
+transition — and a restarted hub sees its local and container executors as
+healthy, so no transition fires. `WaitForDrain` polls until the in-flight count
+reaches zero, so a single stale row made `cloop executor drain` and the UI drain
+button fail with `ErrDrainTimeout` permanently on any executor that had a run in
+flight during the restart. Every `running` row now gets a verdict:
+
+| Situation | Verdict |
+| --- | --- |
+| executor registered, reports a live handle | left alone; its task ID is returned so the worktree sweep spares it |
+| executor registered, does not know the handle | closed with the terminal state the driver reports, or `failed` when it reports nothing |
+| executor not registered at all | closed as `failed` — the session is over either way, but we genuinely do not know how the work ended |
+| session never obtained a handle | closed as `failed`: `Start` failed, or the hub died inside it |
+
+`sessionOutcome` biases towards **live**, and the bias is the safe direction: a
+driver that cannot answer — `Status` returned something that is not
+`ErrHandleNotFound`, a cluster that is unreachable right now — is treated as
+still running. Closing a session whose workload is actually alive would let the
+scheduler re-place its task, producing two agents editing one repository.
+Leaving it open costs a drain that waits, and the next restart re-evaluates it.
+
+**Leaked worktrees.** `pkg/worktree` cleaned only the same task path on the next
+`Create`, and `Remove` deliberately left the branch, so a parallel run killed
+between `git worktree add` and its merge leaked both the directory and the
+`cloop/task-N-*` branch permanently — and nothing ever looked at
+`.cloop/worktrees` as a whole. `worktree.List` now reconciles two sources, `git
+worktree list --porcelain` and the directory itself, because the interesting
+cases are exactly where they disagree: a directory with no registration is what
+a `git worktree prune` leaves, a registration with no directory is what an
+`rm -rf` leaves, and a sweep looking at only one source is blind to one of them.
+Only entries under `<repo>/.cloop/worktrees` are ever returned, which is what
+keeps the operator's own checkout out of a sweep's reach even if it happens to
+have a `cloop/task-N` branch checked out.
+
+Two guards make it safe to run unattended, and they are not interchangeable.
+`MinAge` (default 2 h) is the backstop that holds even when the caller's idea of
+what is running is wrong or missing — a directory's mtime does not move when an
+agent rewrites a file three levels down, so it can only ever be a heuristic. The
+surviving sessions, passed as `Active`, are the precise answer: a task that has
+been running for six hours is older than any sane `MinAge` and is exactly the
+one whose worktree must not be touched. A `git worktree lock` is honoured
+unconditionally, and a directory whose age cannot be read at all is kept.
+
+**Branches are never deleted by the sweep.** `worktree.Prune` can delete merged
+ones, but an unattended sweep would have to be certain what "merged" means for a
+repository it did not configure, and the cost of being wrong is destroyed work
+against a saved-disk-space figure of nearly zero. `cloop worktree prune
+--delete-branches` is where an operator asks for it deliberately, and even there
+the check is enforced twice — an explicit `for-each-ref --merged` query and then
+`git branch -d` rather than `-D`, which is never used anywhere in the package —
+so an error in the first still cannot destroy unmerged work. Squash-merged
+branches are kept, because no ancestry test can see a squash and a stale ref is
+cheaper than somebody's work.
+
+### Orphan grace periods
+
+Reaping is what happens when rehydration could not save the run. An executor
+with a handle store adopts its own workloads at construction and therefore
+tracks them, so the sweep only ever sees what a process with no durable store,
+or one whose rows were lost, left behind.
+
+Before Task 20191, `container.ReapOrphans` filtered `status=exited` only and was
+called from nothing but the manual `cloop executor reap` CLI. A hub killed
+mid-run therefore left a **running** sandbox container burning CPU indefinitely,
+with nobody reading its output and no reaper anywhere. Both backends now collect
+two populations, and they are deliberately not symmetric:
+
+- **Terminated workloads are removed immediately.** An exited container holds a
+  name and a writable layer and nothing else, so the worst case of removing a
+  peer's is that peer losing a `docker logs` it had not read.
+- **Running workloads are removed only after `OrphanGracePeriod`** (10 minutes
+  by default for both drivers). For a container, all of these must hold: it
+  carries `cloop.managed=true`, it carries this executor's own `cloop.executor`
+  id (two container executors on one host must not reap each other's work), it
+  carries a `cloop.handle` label at all (a hand-made container wearing the
+  managed label is not ours to kill), this executor does not track it, and the
+  *runtime* says it has been running longer than the grace period.
+
+The grace period is a correctness condition rather than a courtesy. `ps` returns
+a snapshot, and between that snapshot and the tracked-name check a container can
+legitimately be both running and untracked: our own `start()` has had `run -d`
+return but has not yet reached the map insert, or a second control plane sharing
+the runtime is inside the same window. Both are microseconds to milliseconds
+wide; anything older has a demonstrably absent owner. Ten minutes is far wider
+than the race it guards, which is the correct direction to be wrong in — an
+orphan reaped ten minutes late costs CPU, one reaped ten milliseconds early
+costs somebody's run.
+
+Every uncertain input resolves to "do not touch": a zero grace period (which is
+what an un-normalised `Options` carries, so honouring it would make the
+least-configured executor the most destructive), a container whose timestamp
+cannot be parsed, and one that claims to have started in the future, which means
+the runtime's clock and ours disagree. The comparison uses the *runtime's* start
+time, never the local clock at listing time — that records when we looked, which
+is the same instant for a container that started an hour ago and one that
+started while the `ps` was in flight, precisely the two cases the check has to
+tell apart.
+
+A running container is collected with `rm --force`, which is SIGKILL plus
+removal in one call. The Kubernetes driver offers a termination grace period
+because a Pod's results live inside it; a sandbox container's workspace is a
+bind mount whose writes are already on the host's disk, and this container has
+by definition been running unobserved for longer than the grace period.
+
+Configured as
+[`executors.container.orphan_grace_period_seconds`](../reference/configuration.md#container-sandbox)
+and `executors.kubernetes.orphan_grace_period_seconds`.
+
+### Resume or terminate: protocol v5
+
+The remote driver's failure was the worst of the four, because its reconnect
+protocol made it permanent. The agent offers its surviving handles in the hello;
+`reconcileResume` answered from the (empty) handle map and refused every one;
+the agent read the refusal as "stop reporting" and dropped its bookkeeping
+**without stopping the process**. The result was a harness running forever on an
+edge device — output discarded, invisible to the UI, unstoppable, with no reaper
+on either side. Nothing about it looked wrong from the control plane: the run had
+simply vanished.
+
+Rehydration makes the offer matchable again. The other half is that a refusal
+now has to mean something, so `ProtocolVersion` went 4 → 5:
+
+```go
+type ResumeAck struct {
+    HandleID   string
+    FromOffset int64        // meaningless when Action is terminate
+    Action     ResumeAction // "continue" | "terminate"; empty means continue
+    Reason     string       // carried into the device's own log
+}
+```
+
+Absence used to be the only way to say no, and absence cannot be distinguished
+from an old hub, a truncated list, or a bug — so the agent's only safe reading of
+it was the destructive one. Naming the verdict makes the destructive path
+deliberate and lets it carry a reason the device can write in its own log, which
+is where an operator looks when a workload dies moments after the hub came back.
+`ResumeAck.Effective()` defaults an absent *or unrecognised* action to
+`continue`, for the same reason `RevokePayload.Effective` defaults to scrub: an
+agent meeting a control plane speaking a dialect it does not understand must
+fail towards keeping the work, because the workload is hours of compute and the
+ack is one field.
+
+**Backward compatibility runs in both directions, and they are not symmetric.**
+
+`MinResumeTerminateVersion` is 5, but unlike `MinRevocationVersion`,
+`MinWorkspaceVersion` and `MinWriteBackVersion` it is **not a placement rule** —
+there is nothing to refuse to place. It governs what the hub may *say* to an
+agent that is already connected and already running work. An older agent does
+not reject an unknown `Action`, it ignores it, and then reads the handle's mere
+presence in `ResumeAccepted` as permission to keep streaming — which for a
+handle the hub has forgotten means chunks answered with `unknown_handle`
+forever. So the hub omits refusals entirely below v5, reproducing the pre-v5
+wire byte for byte: the agent sees the handle missing and abandons it, which is
+what it did before. That is the floor this change must not go below.
+
+The leak is therefore closed on the **device** side. An upgraded agent's
+`applyResume` stops a disowned workload whatever the hub's version, treating
+both shapes of refusal the same way — an explicit `terminate`, and *no entry at
+all*, which is the only refusal a pre-v5 hub can express and is still what one
+sends. Since agents are upgraded independently of hubs, and most of a fleet is
+un-upgraded for most of a rollout, the fix has to reach it through the half that
+can actually stop a process. Stopping is ordered before forgetting, because the
+terminate needs the workload still in the map to find its process, and `forget`
+runs on every path — including the one where there was nothing to signal,
+because for a workload still fetching its source tree `forget` is what cancels
+the fetch.
+
+One bound: `maxResumeRefusals` (256) caps how many terminate verdicts one
+welcome may carry. Acceptances are bounded by what this hub dispatched, but a
+refusal is emitted for anything the peer cares to list, so an unbounded list
+would let a device offering a megabyte of invented handle IDs push the welcome
+past `MaxFrameBytes` — an amplification costing the hub the work and the agent
+its session. Offers past the cap fall through to omission, which an upgraded
+agent still reads as "stop this", so the bound costs nothing but the reason text.
+
+A hub configured with no handle store is still supported and behaves exactly as
+it did before Task 20191, with one changed consequence worth stating: every
+resume offer is refused, and a refusal now stops the workload. A storeless hub
+trades a leaked process for a lost run.
+
 ---
 
 ## Remote agent enrollment

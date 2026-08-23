@@ -974,6 +974,92 @@ for what each layer does and does not bind.
 
 ---
 
+## Cleaning up after a killed control plane
+
+A hub that dies mid-run does not take its workloads with it. Containers, Pods
+and edge-device processes keep running, and since Task 20191 the next hub
+reattaches to the ones it can still identify and sweeps the rest — so these two
+commands are for the residue nothing is left to sweep: a host whose hub is not
+running, a runtime shared with one that never will be, and the half of the
+worktree cleanup that is too destructive to do unattended. See
+[the restart sweep](../architecture/executors.md#the-restart-sweep) for what the
+hub does on its own.
+
+### `cloop executor reap <executor-id>`
+
+Remove sandbox containers or Pods this control plane created but no longer
+tracks. It takes exactly one executor ID and applies to `container` and
+`kubernetes` executors; anything else is refused by kind.
+
+Both backends remove **terminated** workloads immediately, and **running** ones
+once they are older than that executor's
+[`orphan_grace_period_seconds`](configuration.md#container-sandbox) — ten minutes
+by default. The running case is the one that matters: an exited container holds a
+name and a writable layer, while a running orphan keeps burning a core, or a
+node's CPU and a ResourceQuota slot, with nobody reading its output.
+
+The grace period is what makes touching a running workload safe. A container or
+Pod that appeared moments ago may belong to a control plane that is starting
+right now, or to this one between dispatching a workload and recording its
+handle; anything older than the grace period has outlived both windows. A
+running container is additionally required to carry this executor's own labels,
+so two container executors sharing a host cannot reap each other's work.
+
+### `cloop worktree list` / `cloop worktree prune`
+
+Parallel task execution gives each task its own git worktree under
+`.cloop/worktrees/task-<id>`, on a branch named `cloop/task-<id>-<slug>`. Both
+are removed when the task finishes; a run killed in between leaks both. Both
+commands act on the current working directory's repository.
+
+```console
+$ cloop worktree list
+TASK     BRANCH                                 DIR        GIT        AGE
+17       cloop/task-17-add-retry                yes        yes        3h0m0s
+23       cloop/task-23-fix-parser               yes        no         26h0m0s
+```
+
+`DIR` is whether the directory is on disk, `GIT` whether `git worktree list`
+still registers it. The two disagreeing is not an inconsistency to ignore, it is
+the leak: a directory with no registration is what a `git worktree prune` leaves
+behind, a registration with no directory is what an `rm -rf` leaves, and a sweep
+that consults only one source is blind to one of them. `list` also prints the
+`cloop/task-*` branches present in the repository, which is the population
+`prune` will not touch unless asked.
+
+`prune` removes the directories. Start with `--dry-run`.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--dry-run` | `false` | Report the whole plan, including branches, without changing anything |
+| `--min-age` | `2h0m0s` | Only prune worktrees idle for at least this long; `0` disables the guard |
+| `--delete-branches` | `false` | Also delete `cloop/task-*` branches already merged into the base |
+| `--base` | the checked-out branch | Branch to test merged-ness against |
+
+**`--min-age` is the only flag here that can destroy work.** A live parallel
+run's worktrees are in that directory *right now*, and an agent that has been
+thinking for twenty minutes has written nothing in that time — mtime cannot tell
+"finished an hour ago" from "still running and quiet for an hour". Two hours is
+long enough to cover any plausible quiet period inside a running task; passing
+`--min-age 0` is how you say you have established that nothing is running, and
+git cannot restore what was never committed. A `git worktree lock` is honoured
+whatever the age, and a directory whose age cannot be read is kept.
+
+**`--delete-branches` cannot delete unmerged work at any setting.** A branch is
+deleted only if its commits are already contained in `--base`, and the check is
+enforced twice — an explicit `git for-each-ref --merged` query, and then `git
+branch -d`, which refuses an unmerged branch on its own authority. `-D` is never
+used. Squash-merged branches are therefore kept and reported, because no ancestry
+test can see a squash: a stale ref costs a line of output, and being wrong the
+other way costs a task's only copy of its work.
+
+Every entry the sweep spares is reported with its reason, because the question
+after a prune is usually "why is this directory still full". A non-zero exit
+means some worktree could not be removed — a permission error, a busy mount —
+and names it; the others were still collected.
+
+---
+
 ## Executor internals
 
 Commands an executor runs on your behalf. They are documented because you will

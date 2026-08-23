@@ -168,7 +168,12 @@ func Accept(ctx context.Context, conn Conn, opts AcceptOptions) (*Session, error
 
 	// Reconcile resume offers before sending welcome: the welcome carries the
 	// answer, and the agent blocks on it before resending anything.
-	acks := opts.Executor.reconcileResume(hello.Resume)
+	//
+	// The negotiated version goes in because the answer's *shape* depends on it:
+	// only an agent at MinResumeTerminateVersion or newer can be told to stop a
+	// workload the control plane no longer tracks, and an older one has to be
+	// given the pre-v5 payload instead. See reconcileResume.
+	acks := opts.Executor.reconcileResume(hello.Resume, version)
 
 	welcome, err := NewFrameAt(version, TypeWelcome, frame.ID, "", WelcomePayload{
 		ProtocolVersion:  version,

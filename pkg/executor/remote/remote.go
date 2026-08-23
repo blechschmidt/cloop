@@ -99,6 +99,22 @@ type Options struct {
 	// refused with the same typed error the broker would have raised, rather
 	// than dispatched to fetch a private repository anonymously.
 	Workspace executor.WorkspaceCredentialSource
+	// HandleStore persists handle identity so a hub that restarts still knows
+	// which workloads it dispatched to this device (Task 20191). See
+	// rehydrate.go.
+	//
+	// Nil is the pre-Task-20191 behaviour and remains supported: the driver
+	// dispatches, streams, signals and reconciles exactly as it did. What it
+	// loses is the one thing only a durable row can supply — recognising a
+	// reconnecting agent's resume offer after a restart. Without it every offer
+	// is refused, and a refusal now stops the workload, so a storeless hub
+	// trades a leaked process for a lost run.
+	//
+	// It is a field rather than a constructor argument because a remote
+	// executor is built by the hub from an enrollment record, early and
+	// synchronously, while the state database that backs the store is opened
+	// later; AttachHandleStore installs it once that has happened.
+	HandleStore executor.HandleStore
 	// Now overrides the clock for tests.
 	Now func() time.Time
 }
@@ -125,6 +141,12 @@ type Executor struct {
 	// material, so a revocation knows which tasks to kill and whether this
 	// executor is holding the credential at all.
 	leaseHandles map[string]map[string]struct{}
+	// store persists handle identity across control-plane restarts. It is a
+	// field of its own rather than a read of opts.HandleStore because
+	// AttachHandleStore may install it after construction, while the session
+	// read loop is already calling applyStatus — and opts is otherwise treated
+	// as immutable. Guarded by mu; read through handleStore().
+	store executor.HandleStore
 
 	// revocations is the log of leases this executor has been told to give
 	// back, retained across disconnects so they can be replayed. See
@@ -135,11 +157,18 @@ type Executor struct {
 // NewExecutor builds a remote executor for an enrolled agent. It starts
 // disconnected: Start fails with ErrAgentUnreachable until the device dials in
 // and a session attaches.
+//
+// When Options.HandleStore is set it also rehydrates: every workload this
+// executor ID dispatched before the process restarted is put back into the
+// handle map, so the agent's reconnect finds a control plane that still
+// recognises its work. That happens here, synchronously, because the agent may
+// dial in the moment the hub's listener opens and a resume offer that races
+// rehydration would be refused — which now means killed.
 func NewExecutor(opts Options) (*Executor, error) {
 	if opts.ID == "" {
 		return nil, fmt.Errorf("%w: remote executor ID is blank", executor.ErrInvalidSpec)
 	}
-	return &Executor{
+	e := &Executor{
 		id:           opts.ID,
 		name:         opts.Name,
 		opts:         opts,
@@ -148,7 +177,10 @@ func NewExecutor(opts Options) (*Executor, error) {
 		leaseHandles: make(map[string]map[string]struct{}),
 		revocations:  newRevocationLog(),
 		status:       StatusOffline,
-	}, nil
+		store:        opts.HandleStore,
+	}
+	e.rehydrate()
+	return e, nil
 }
 
 // ID implements executor.Executor.
@@ -350,7 +382,49 @@ func (e *Executor) Start(ctx context.Context, spec executor.Spec) (handle execut
 	e.mu.Lock()
 	e.handles[handleID] = hs
 	e.pruneLocked()
+	store := e.store
 	e.mu.Unlock()
+
+	// Persisted after the map insert and *before* the start frame goes out,
+	// which is the opposite of where the container and Kubernetes drivers put
+	// it — because for those two the workload does not exist until a local API
+	// call returns, and a row written earlier would name nothing. Here the
+	// workload comes into existence on another machine, on the far side of a
+	// link that may be an LTE modem: the whole round trip is a window in which
+	// this process can die while the device is already running the harness.
+	// Writing the row first makes that window empty.
+	//
+	// The cost is a row that may describe a workload the agent never started —
+	// the start frame was lost, or refused. That is bounded and self-correcting
+	// from both ends: dropHandle deletes it on every failure path inside this
+	// process, and after a restart the adopted handle is resolved by the first
+	// heartbeat that does not list it (see reconcileActive), which is the same
+	// mechanism that already handles a device that lost the process.
+	//
+	// RecordHandle never fails the start: see its doc for why a busy state
+	// database must not become a spurious task failure.
+	executor.RecordHandle(store, executor.HandleRecord{
+		HandleID:   handleID,
+		ExecutorID: e.id,
+		Driver:     executor.KindRemoteAgent,
+		// The same string as HandleID, and deliberately duplicated rather than
+		// left blank: the control plane mints the handle and the agent offers
+		// that exact ID back on reconnect, so for this driver the name the
+		// "runtime" knows the workload by *is* the handle. Validate refuses a
+		// row with no external ID, and a driver whose rows were the only ones
+		// missing that column would be invisible to a cross-driver sweep.
+		ExternalID: handleID,
+		// The project as the audit trail and the lease request see it, so one
+		// workload has one identity in the handle table whichever driver ran it.
+		ProjectPath: projectOf(spec),
+		TaskID:      taskIDFromLabels(spec.Labels),
+		// Dispatch time in the control plane's clock, not the device's. The
+		// device's StartedAt arrives in the started frame a round trip later and
+		// comes from a clock that, on an edge box with no RTC, may be wrong by
+		// years — and the orphan sweep compares this field against a grace
+		// period.
+		StartedAt: now,
+	})
 
 	payload := StartPayload{Spec: spec, HandleID: handleID}
 	if !cred.Empty() {
@@ -600,12 +674,20 @@ func (e *Executor) pruneLocked() {
 }
 
 // dropHandle removes a handle that never successfully started.
+//
+// The durable row goes with it. Start writes the row before the start frame so
+// a hub that dies mid-dispatch can still find the workload, which means every
+// path that concludes "there is no workload" has to undo that optimism —
+// otherwise a refused start leaves a row the next boot adopts, reports as
+// running, and then resolves as a failed run that never ran.
 func (e *Executor) dropHandle(handleID string) {
 	e.releaseLeases(handleID)
 	e.mu.Lock()
 	hs := e.handles[handleID]
 	delete(e.handles, handleID)
+	store := e.store
 	e.mu.Unlock()
+	executor.ForgetHandle(store, handleID)
 	if hs != nil {
 		hs.bus.Close()
 	}
@@ -671,26 +753,85 @@ func (e *Executor) detach(sess *Session, status string) {
 	e.setStatus(status)
 }
 
-// reconcileResume answers an agent's resume offer.
+// maxResumeRefusals bounds how many terminate verdicts one welcome may carry.
 //
-// For each handle the agent still has and the control plane still tracks, the
-// answer is "resend from the offset I actually received". Handles the control
-// plane has forgotten are omitted, which tells the agent to abandon them
-// rather than stream output nobody is listening for.
-func (e *Executor) reconcileResume(offers []ResumeHandle) []ResumeAck {
+// It is the only part of a welcome whose size is chosen by the *agent*: an
+// accepted verdict requires a matching handle, so those are bounded by what
+// this hub dispatched, while a refusal is emitted for anything the peer cares
+// to list. Without a ceiling a device offering a megabyte of invented handle
+// IDs would make the hub assemble a welcome larger than MaxFrameBytes, which
+// the peer's own read limit then rejects — an amplification that costs the hub
+// the work and the agent its session.
+//
+// Set to the handle-retention ceiling because a device can never legitimately
+// be running more workloads than this hub retains handles for; its own
+// MaxConcurrent is smaller by an order of magnitude. Offers past the cap fall
+// through to omission, which is the pre-v5 answer and which an upgraded agent
+// still reads as "stop this" — so the bound costs nothing but the reason text.
+const maxResumeRefusals = maxRetainedHandles
+
+// resumeRefusedReason is what a refused device writes in its own log.
+//
+// A shared constant rather than a per-handle message naming the executor: the
+// text is identical for every refusal in a welcome, and repeating a formatted
+// string per entry is what turns a large offer list into a large frame. The
+// device already knows which control plane it is talking to.
+const resumeRefusedReason = "the control plane has no record of this workload, so nothing there " +
+	"can read its output, collect its result, or stop it"
+
+// reconcileResume answers an agent's resume offer, one verdict per offer.
+//
+// For a handle the control plane still tracks the answer is "resend from the
+// offset I actually received", which for a handle rehydrated from the store is
+// zero — see rehydrate.go's adopt for why that is the honest number rather than
+// a guess.
+//
+// For a handle it does *not* track the answer is "terminate it", and that is
+// the fix for the leak this whole file's resume machinery used to have. The old
+// answer was silence, which the agent read as "stop reporting": the device went
+// on running a harness whose output nobody would read, whose result nobody
+// would collect, and which nothing could signal — forever, invisibly, with no
+// reaper anywhere. A refusal that does not stop the work is not a refusal.
+//
+// version is the session's negotiated protocol version, and it gates only the
+// refusal. Below MinResumeTerminateVersion the entry is omitted instead, which
+// reproduces the pre-v5 wire byte for byte: an older agent that saw a refusal
+// in this list would ignore the action, take the entry as permission to keep
+// streaming, and have every chunk answered with CodeUnknownHandle. Omission
+// leaves such an agent exactly as it was, which is the floor this change must
+// not go below; the leak is closed on its side by upgrading it.
+func (e *Executor) reconcileResume(offers []ResumeHandle, version int) []ResumeAck {
 	if len(offers) == 0 {
 		return nil
 	}
+	canTerminate := SupportsResumeTerminate(version)
+	refusals := 0
 	acks := make([]ResumeAck, 0, len(offers))
 	for _, offer := range offers {
 		hs, err := e.lookup(offer.HandleID)
 		if err != nil {
+			if !canTerminate || refusals >= maxResumeRefusals {
+				continue
+			}
+			refusals++
+			acks = append(acks, ResumeAck{
+				HandleID: offer.HandleID,
+				Action:   ResumeTerminate,
+				Reason:   resumeRefusedReason,
+			})
 			continue
 		}
 		hs.mu.Lock()
 		from := hs.receivedOffset
 		hs.mu.Unlock()
-		acks = append(acks, ResumeAck{HandleID: offer.HandleID, FromOffset: from})
+		// Action is set explicitly even though it is the default, so the frame
+		// says what it means rather than relying on a reader inferring consent
+		// from an absent field. An older agent ignores it and behaves as before.
+		acks = append(acks, ResumeAck{
+			HandleID:   offer.HandleID,
+			FromOffset: from,
+			Action:     ResumeContinue,
+		})
 	}
 	return acks
 }
@@ -828,6 +969,21 @@ func (e *Executor) applyStatus(handleID string, p StatusPayload) {
 		// finished task and reporting "unreachable" for a credential that is
 		// already gone with the process that held it.
 		e.releaseLeases(handleID)
+		// And the durable row: nothing can reattach to a workload the device
+		// has already reported terminal, and a row that outlived its process
+		// would be re-adopted on the next boot, offered by nobody, and then
+		// resolved as failed by the first heartbeat — a phantom failed run for
+		// a task that exited cleanly.
+		//
+		// Gated on shouldClose, which is `terminal && !closed`, so it fires
+		// exactly once per handle and only for a genuinely terminal state. That
+		// gate is the whole of the bug the Kubernetes driver hit: an ungated
+		// forget also fires for the handles a graceful shutdown marks unknown
+		// while their workloads keep running, erasing the identity of every
+		// in-flight run at precisely the moment rehydration exists to serve.
+		// failAllHandles is this driver's version of that path and deliberately
+		// does not come through here.
+		executor.ForgetHandle(e.handleStore(), handleID)
 	}
 }
 
@@ -848,6 +1004,15 @@ func (e *Executor) LogGapped(handleID string) bool {
 // still be running on the device, but this control plane will never learn
 // their outcome, and leaving subscribers blocked on a channel that will never
 // close would hang every caller of executor.Run.
+//
+// It deliberately does not drop the durable rows, even though the states it
+// writes are terminal. The distinction is who ended the workload: applyStatus
+// forgets a row because the device said the process is gone, while this marks
+// handles failed because the *link* is gone and the processes very likely are
+// not. That row is then the only surviving record that a machine we have just
+// stopped talking to is running our work — which is exactly what
+// HandleRecord.Driver is for, since a cross-driver sweep can act on rows whose
+// executor is no longer registered and nothing else can.
 func (e *Executor) failAllHandles(reason string) {
 	e.mu.RLock()
 	tracked := make([]*handleState, 0, len(e.handles))

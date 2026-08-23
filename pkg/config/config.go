@@ -450,6 +450,15 @@ type ContainerExecutorConfig struct {
 	// readable inside the container when SELinux is enforcing.
 	SELinuxLabel string `yaml:"selinux_label,omitempty"`
 
+	// OrphanGracePeriodSeconds protects a young container from the startup
+	// reconcile sweep. Zero means 600, the same default and meaning as the
+	// Kubernetes executor's field of the same name (Task 20191).
+	//
+	// It is what makes reaping a *running* orphan safe: a container that
+	// appeared moments ago may belong to a control plane starting alongside
+	// this one, or to this one between `run -d` and recording the handle.
+	OrphanGracePeriodSeconds int64 `yaml:"orphan_grace_period_seconds,omitempty"`
+
 	// AllowRootUser permits the sandbox to run as uid 0. Default false.
 	//
 	// The workload's UID is derived from the project directory's owner, so a

@@ -232,14 +232,23 @@ var executorReapCmd = &cobra.Command{
 	Long: `Remove workloads this control plane created but no longer tracks — the
 residue of a control plane that was killed mid-run.
 
-For a container executor, only exited containers are removed: a running one
-may belong to another live control plane sharing the same runtime.
+Both backends remove terminated workloads immediately, and running ones once
+they are older than the executor's orphan_grace_period_seconds (default 10
+minutes) — executors.container.orphan_grace_period_seconds for containers,
+executors.kubernetes.orphan_grace_period_seconds for Pods.
 
-For a Kubernetes executor, terminated Pods are removed immediately and running
-Pods once they are older than executors.kubernetes.orphan_grace_period_seconds
-(default 10 minutes). A running orphan is the case that matters — it keeps
-consuming a node's CPU and a ResourceQuota slot with nobody reading its
-output.`,
+The grace period is what makes reaping a running workload safe. A container or
+Pod that appeared moments ago may belong to a control plane that is starting
+right now, or to this one between dispatching a workload and recording it, and
+neither is an orphan. Anything older than the grace period has outlived both
+windows.
+
+A running orphan is the case that matters: it keeps consuming CPU — a node's
+and a ResourceQuota slot, or the hub host's — with nobody reading its output.
+
+Since Task 20191 a hub reaps on its own at startup, so this command is for
+cleaning up after a hub that is not running, or for a runtime shared with one
+that never will be.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		ex, err := executor.Get(args[0])

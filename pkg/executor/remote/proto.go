@@ -74,7 +74,15 @@ const (
 	// device sends back the work product — a branch and commit SHA, and for a
 	// device with no egress the git bundle itself — so a task's edits survive
 	// the workload that made them.
-	ProtocolVersion = 4
+	//
+	// v5 gave ResumeAck an Action (see ResumeAction). Until then the only way
+	// the control plane could refuse a resume offer was to leave the handle out
+	// of Welcome.ResumeAccepted, and the agent read that as "stop reporting" —
+	// so a hub that restarted with an empty handle map refused every offer and
+	// left every workload running on the device forever, unreadable and
+	// unstoppable. An explicit action lets the refusal say "terminate this",
+	// which is the only honest answer for work nobody is left to collect.
+	ProtocolVersion = 5
 	// MinProtocolVersion is the oldest version this build still accepts.
 	MinProtocolVersion = 1
 	// MinRevocationVersion is the first version whose agents understand the
@@ -110,6 +118,24 @@ const (
 	// for a write-back to a device that cannot make one, rather than
 	// discovering the loss after the work is gone.
 	MinWriteBackVersion = 4
+	// MinResumeTerminateVersion is the first version whose agents understand an
+	// explicit refusal in ResumeAck.Action.
+	//
+	// Unlike the three floors above this one is *not* a placement rule, because
+	// there is nothing to refuse to place: it governs what the hub may say to an
+	// agent that is already connected and already running work. An older agent
+	// does not reject an unknown Action, it ignores it — and then reads the
+	// handle's mere presence in ResumeAccepted as "keep streaming", which for a
+	// handle the hub has forgotten means chunks the hub answers with
+	// CodeUnknownHandle forever. So the hub omits refusals entirely below this
+	// version, which reproduces the pre-v5 wire exactly: the agent sees the
+	// handle missing from the list and abandons it, which is what it did before.
+	//
+	// The leak that behaviour causes is fixed on the *device* rather than here
+	// (see the agent's applyResume): an upgraded agent kills an abandoned
+	// workload whatever the hub's version, so the fix reaches a fleet through
+	// the half that can actually stop a process.
+	MinResumeTerminateVersion = 5
 )
 
 // SupportsRevocation reports whether an agent speaking this protocol version
@@ -123,6 +149,11 @@ func SupportsWorkspaceProvisioning(version int) bool { return version >= MinWork
 // SupportsWriteBack reports whether an agent speaking this protocol version
 // returns the work product after a task finishes.
 func SupportsWriteBack(version int) bool { return version >= MinWriteBackVersion }
+
+// SupportsResumeTerminate reports whether an agent speaking this protocol
+// version acts on an explicit ResumeAck.Action rather than reading only
+// membership of Welcome.ResumeAccepted.
+func SupportsResumeTerminate(version int) bool { return version >= MinResumeTerminateVersion }
 
 // Timing constants. These are protocol-level agreements, not tunables: both
 // sides must derive their timeouts from the same numbers or a healthy agent
@@ -498,19 +529,80 @@ type WelcomePayload struct {
 	// than assumed so the control plane can slow down a large fleet without
 	// redeploying every device.
 	HeartbeatSeconds int `json:"heartbeat_seconds"`
-	// ResumeAccepted lists the handles from Hello.Resume the control plane
-	// still knows about. Anything the agent offered that is absent here has
-	// been forgotten by the control plane and the agent should abandon it,
-	// rather than stream output nobody is listening for.
+	// ResumeAccepted answers Hello.Resume, one entry per offer the control
+	// plane has a verdict for. Since v5 the verdict is explicit: an entry may
+	// say "resume from this offset" or "terminate this workload" (see
+	// ResumeAck.Action). Below v5 the hub emits accepted handles only, because
+	// an older agent would read a refusal's presence in this list as
+	// permission to keep streaming.
+	//
+	// The field name is historical and no longer literal — every entry used to
+	// be an acceptance. It is kept because it is a wire name, and renaming it
+	// would strand every deployed agent for the sake of a better noun.
+	//
+	// A handle the agent offered and that is absent here still means "the
+	// control plane is not tracking this". An agent that receives no entry for
+	// a workload must stop it rather than merely stop reporting it: nothing
+	// will ever read its output, collect its result, or be able to signal it.
 	ResumeAccepted []ResumeAck `json:"resume_accepted,omitempty"`
 }
 
-// ResumeAck tells the agent where to restart one handle's log stream.
+// ResumeAction is the control plane's verdict on one resume offer.
+//
+// It exists because absence used to be the only way to say no, and absence
+// cannot be distinguished from an old hub, a truncated list, or a bug — so the
+// agent's only safe reading of it was the destructive one. Naming the verdict
+// makes the destructive path deliberate and lets it carry a reason the device
+// can put in its own log, which is where the operator looks when a workload
+// dies moments after the hub came back.
+type ResumeAction string
+
+const (
+	// ResumeContinue resends this handle's output from FromOffset and carries
+	// on. This is the default for an absent or unrecognised action: a frame
+	// from a possibly-newer control plane must not be read as an instruction
+	// to destroy work.
+	ResumeContinue ResumeAction = "continue"
+	// ResumeTerminate stops the workload. The control plane has no record of
+	// it — most often because it restarted and this handle was never
+	// persisted — so nothing can read its output, collect its work product or
+	// signal it. Leaving it running would burn the device's CPU on a result
+	// with no destination, invisibly and until someone logs into the device.
+	ResumeTerminate ResumeAction = "terminate"
+)
+
+// Valid reports whether the action is one this build knows.
+func (a ResumeAction) Valid() bool { return a == ResumeContinue || a == ResumeTerminate }
+
+// ResumeAck is the control plane's answer to one resume offer.
 type ResumeAck struct {
 	HandleID string `json:"handle_id"`
 	// FromOffset is the first byte the control plane still needs. The agent
-	// resends from here; anything below it was already delivered.
+	// resends from here; anything below it was already delivered. Meaningless
+	// when Action is ResumeTerminate.
 	FromOffset int64 `json:"from_offset"`
+	// Action is the verdict. Empty means ResumeContinue, which is what a v4
+	// hub's acks decode to and is therefore the only backward-compatible
+	// default. Added in protocol v5.
+	Action ResumeAction `json:"action,omitempty"`
+	// Reason is operator-facing text explaining a refusal, carried into the
+	// device's log so "why did my task die" has an answer on the machine it
+	// died on and not only in the control plane's.
+	Reason string `json:"reason,omitempty"`
+}
+
+// Effective returns the action to apply, defaulting an absent or unknown value
+// to ResumeContinue.
+//
+// The default is the non-destructive one on purpose, and for the same reason
+// RevokePayload.Effective defaults to scrub: an agent that met a control plane
+// speaking a dialect it does not understand must fail towards keeping the work,
+// because the workload is hours of compute and the ack is one field.
+func (a ResumeAck) Effective() ResumeAction {
+	if a.Action.Valid() {
+		return a.Action
+	}
+	return ResumeContinue
 }
 
 // HeartbeatPayload proves liveness.

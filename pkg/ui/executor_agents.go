@@ -57,9 +57,28 @@ func (s *Server) remoteHub() (*remote.Hub, error) {
 			executorHubErr = err
 			return
 		}
+		handles, err := executorstore.NewHandles(db)
+		if err != nil {
+			_ = db.Close()
+			executorHubErr = err
+			return
+		}
 		hub, err := remote.NewHub(remote.HubOptions{
 			Store:    store,
 			Registry: executor.DefaultRegistry,
+			// Durable handle identity for every device executor this hub
+			// builds (Task 20191). Without it a hub restart empties the
+			// in-memory handle map, every resume offer from a reconnecting
+			// agent is refused, and the harness on the edge device runs on
+			// forever — invisible, its output discarded, with no reaper
+			// anywhere. Passed at construction rather than attached after,
+			// so a device that dials in during startup finds its handles
+			// already adopted.
+			//
+			// Over the hub's own database handle, for the same reason
+			// WorkspaceSource is: the hub is a process-wide singleton whose
+			// *statedb.DB deliberately outlives every request.
+			HandleStore: handles,
 			// Where an edge device's git credential comes from (Task 20179).
 			//
 			// A factory, not a single source, because a grant is issued to a

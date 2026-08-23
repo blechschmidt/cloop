@@ -294,6 +294,21 @@ type Options struct {
 	// require_digest is the only way to make a Kubernetes run reproducible.
 	ImagePolicy imagepolicy.Policy
 
+	// HandleStore persists handle identity so a control plane that restarts
+	// can find the Pods it already dispatched (Task 20191). Optional.
+	//
+	// A nil one is not a degraded mode to apologise for, it is exactly the
+	// behaviour this driver had before: the handle map is the only record a
+	// Pod exists, and a hub that restarts comes back believing it dispatched
+	// nothing while the Pods keep running. Embedders with no state database —
+	// the tests in this package, `cloop executor test` — want that, and a
+	// driver that refused to construct without a store would make the state
+	// database a hard dependency of a package that deliberately has none.
+	//
+	// It is read once at construction and written on every dispatch and every
+	// terminal transition. See rehydrate.go for what a row carries and why.
+	HandleStore executor.HandleStore
+
 	// now overrides the clock for tests.
 	now func() time.Time
 }
@@ -422,6 +437,14 @@ type Executor struct {
 	mu      sync.Mutex
 	handles map[string]*record
 	closed  bool
+	// store persists handle identity across control-plane restarts. It is a
+	// field of its own rather than a read of opts.HandleStore because
+	// AttachHandleStore may install it *after* construction — the state
+	// database is opened later in boot than the drivers are built — and opts
+	// is read without a lock from every goroutine this driver spawns, so
+	// mutating it there would be a data race on a struct the whole file
+	// treats as immutable. Guarded by mu; read through handleStore().
+	store executor.HandleStore
 }
 
 // record is the driver's bookkeeping for one Pod.
@@ -442,6 +465,21 @@ type record struct {
 
 	// cancelPump stops the watcher, the log follower and the lease renewer.
 	cancelPump context.CancelFunc
+
+	// ready is closed once the record has a client to talk to the cluster
+	// with, and is nil for records Start created — those hold a lease before
+	// they are ever published, so nothing can observe them without one.
+	//
+	// It exists for the one record that can: an adopted one (rehydrate.go) is
+	// inserted into the handle map immediately, so that a concurrent orphan
+	// sweep cannot mistake its Pod for untracked, but leases its kubeconfig on
+	// its own goroutine a moment later. Signal reaches rec.cli directly, and
+	// in that window it would find nil and panic the caller's request
+	// goroutine. Waiting is the honest answer: a Stop pressed a millisecond
+	// after a hub restart should stop the Pod, not fail because the credential
+	// had not landed yet. Written before the record is published; closed
+	// exactly once, by markReady.
+	ready chan struct{}
 
 	mu sync.Mutex
 	// cancelWatch breaks the watch connection currently in flight, without
@@ -474,9 +512,15 @@ type record struct {
 	writeBack sentinelScanner
 }
 
-// New returns a Kubernetes executor. It performs no I/O: an unreachable
-// cluster surfaces at HealthCheck or Start, not at construction, so a control
-// plane still boots when the cluster is briefly down.
+// New returns a Kubernetes executor. It performs no cluster I/O: an
+// unreachable cluster surfaces at HealthCheck or Start, not at construction,
+// so a control plane still boots when the cluster is briefly down.
+//
+// That promise survives Options.HandleStore. Rehydration reads the store —
+// a local row read — and rebuilds the handle map synchronously, because a
+// Pod that is not in the map before New returns is a Pod ReconcileOrphans may
+// legitimately kill; every API round-trip an adopted handle needs happens
+// afterwards, on that handle's own goroutine. See rehydrate.go.
 func New(opts Options) (*Executor, error) {
 	norm, err := opts.Normalize()
 	if err != nil {
@@ -488,7 +532,7 @@ func New(opts Options) (*Executor, error) {
 			"mint one with `cloop secret mint --kind kubeconfig` and grant it to executor:%s",
 			norm.ID, norm.ID)
 	}
-	return &Executor{
+	ex := &Executor{
 		id:   norm.ID,
 		opts: norm,
 		// One verifier for the executor's lifetime so its per-digest cache
@@ -496,7 +540,10 @@ func New(opts Options) (*Executor, error) {
 		// cosign for every task in a project that runs one image.
 		verifier: imagepolicy.NewCosignVerifier(),
 		handles:  make(map[string]*record),
-	}, nil
+		store:    norm.HandleStore,
+	}
+	ex.rehydrate()
+	return ex, nil
 }
 
 // Ensure registers a Kubernetes executor built from opts into reg (nil means
@@ -857,6 +904,38 @@ func (e *Executor) Start(ctx context.Context, spec executor.Spec) (executor.Hand
 	e.pruneLocked()
 	e.mu.Unlock()
 
+	// Persisted the instant the handle becomes real, and not one statement
+	// later than it has to be: everything between the create call above and
+	// this line is a window in which a hub killed mid-Start leaves a Pod
+	// nothing will ever reattach to. Failure is swallowed by RecordHandle by
+	// design — a workload that started must not be reported as failed because
+	// the state database was busy — so the worst case here degrades to the
+	// pre-Task-20191 behaviour rather than to a double execution.
+	//
+	// ProjectPath is the *same* string connect() leased this Pod's kubeconfig
+	// with, not the Pod's project annotation, and the difference matters:
+	// adoption re-acquires a lease with it, and a value that resolved to a
+	// different grant would hand the reattached handle authority over a
+	// namespace this run was never entitled to.
+	//
+	// The Spec is deliberately absent (see pkg/executor/handles.go). What is
+	// here instead is identity plus the one piece of cleanup state no API
+	// query can reconstruct: the egress NetworkPolicy's name. The policy
+	// selects the Pod by label, so the Pod does not name it back, and a
+	// rehydrated handle that had forgotten it would leave a firewall behind
+	// for the orphan sweep to find minutes later.
+	executor.RecordHandle(e.handleStore(), executor.HandleRecord{
+		HandleID:    rec.id,
+		ExecutorID:  e.id,
+		Driver:      executor.KindKubernetes,
+		ExternalID:  externalIDFor(rec.namespace, rec.podName),
+		ProjectPath: projectID,
+		TaskID:      taskIDNumber(spec.Labels),
+		Image:       podImage(created, desired),
+		StartedAt:   rec.startedAt,
+		Meta:        handleMeta(rec.networkPolicyName),
+	})
+
 	rec.bus.Emit(fmt.Sprintf("[cloop] pod %s/%s created on %s\n",
 		namespace, rec.podName, creds.Rest.Server))
 
@@ -1166,7 +1245,17 @@ func (e *Executor) pump(ctx context.Context, rec *record) {
 	// Delete before finishing so the Pod is gone by the time the caller sees
 	// a terminal status — otherwise a UI that immediately re-runs would race
 	// a completed Pod still holding its ResourceQuota slot.
-	if !e.opts.KeepCompletedPods {
+	//
+	// Only for a terminal outcome, and that guard is not cosmetic.
+	// classifyOutcome returns a non-terminal state on exactly one path: the
+	// pump's context was cancelled, which happens when Close finishes a live
+	// handle with StateUnknown. There the workload is still running, and
+	// deleting it would destroy the work in flight that Close documents itself
+	// as preserving — and, since Task 20191, would delete the very Pod the
+	// persisted handle exists so the next boot can reattach to. A restart for
+	// an upgrade would have killed every run on the way down and then
+	// rehydrated a set of handles whose Pods it had just removed.
+	if state.Terminal() && !e.opts.KeepCompletedPods {
 		e.deletePodDetached(rec, e.opts.KillGracePeriod)
 	}
 	e.finish(rec, state, exitCode, msg)
@@ -1697,11 +1786,22 @@ func (e *Executor) Signal(ctx context.Context, handleID string, sig executor.Sig
 	if err != nil {
 		return err
 	}
+	// A handle adopted from the durable store is in the map before it has a
+	// kubeconfig — see record.ready. Deletion is the only lever this driver
+	// has, and it needs a client, so a Stop that lands in that window waits
+	// for the lease instead of dereferencing a nil one. Bounded by the
+	// caller's context, so a broker that is wedged fails the request rather
+	// than hanging it.
+	if err := rec.awaitClient(ctx); err != nil {
+		return err
+	}
 
 	rec.mu.Lock()
 	if rec.done || rec.state.Terminal() {
 		rec.mu.Unlock()
-		// The caller wanted it stopped and it is stopped.
+		// The caller wanted it stopped and it is stopped. This is also the
+		// path an adoption that could not lease a credential lands on: it
+		// finished the record as failed, so there is nothing left to delete.
 		return nil
 	}
 	rec.killRequested = true
@@ -2117,6 +2217,9 @@ func (e *Executor) pruneLocked() {
 // terminating would hand a workload in its grace period the unrestricted egress
 // the filter exists to deny, and a SIGTERM handler is exactly where a
 // compromised harness would put its last outbound call.
+//
+// The durable handle row is dropped here too, under the same terminal-state
+// guard and for a sharper version of the same reason — see below.
 func (e *Executor) finish(rec *record, state executor.State, exitCode int, errMsg string) {
 	rec.mu.Lock()
 	if rec.done {
@@ -2157,6 +2260,21 @@ func (e *Executor) finish(rec *record, state executor.State, exitCode int, errMs
 	// Before cli.close(): the deletes need the client this record owns.
 	e.discardWorkspaceSecret(ws, cli, "")
 	e.deleteNetworkPolicyDetached(cli, rec.namespace, policyName)
+	// Past the rec.done guard above, so a double finish — the pump and an
+	// explicit reap racing on the same handle — drops the row once.
+	//
+	// Gated on a terminal state, which is the whole of Task 20191 in one
+	// condition. Close finishes every live handle with StateUnknown while
+	// deliberately leaving its Pods running; forgetting those rows would erase
+	// the identity of every workload in flight at precisely the moment — a
+	// graceful restart — that rehydration exists to serve, and the next boot
+	// would come up with an empty map and a namespace full of Pods it no
+	// longer recognises. A row that outlives its process is the intended
+	// outcome; a row whose Pod turns out to be gone is dropped by the adoption
+	// that fails to find it, not by guessing here.
+	if state.Terminal() {
+		executor.ForgetHandle(e.handleStore(), rec.id)
+	}
 	if leaseID != "" && e.opts.Credentials != nil {
 		e.opts.Credentials.Release(leaseID)
 	}

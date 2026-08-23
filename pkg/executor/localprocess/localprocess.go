@@ -36,6 +36,7 @@ import (
 	"os/exec"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -75,6 +76,13 @@ type Executor struct {
 
 	mu      sync.Mutex
 	handles map[string]*record
+	// store persists handle identity so this executor can reattach to the
+	// children it forked after the control plane restarts. Guarded by mu
+	// because AttachHandleStore installs it long after New has returned, while
+	// the output pumps that call ForgetHandle are already running; read it
+	// through handleStore(). Nil when the embedder gave none, which degrades to
+	// the pre-Task-20191 behaviour. See rehydrate.go.
+	store executor.HandleStore
 }
 
 // record is the driver's bookkeeping for one started process.
@@ -85,6 +93,19 @@ type record struct {
 	startedAt time.Time
 
 	cmd *exec.Cmd
+
+	// adopted is non-nil exactly for records rebuilt from a persisted row by
+	// rehydrate.go, and carries the identity token pid must still match.
+	//
+	// Its nil-ness is load-bearing, because it marks the one difference that
+	// matters to Signal. A record this process forked holds an *exec.Cmd whose
+	// child has not been reaped while the record is live, and an unreaped child
+	// keeps its pid allocated as a zombie — so a forked record's pid provably
+	// still names its own workload and can be signalled without a check. An
+	// adopted record has no such claim on the number: its process was reaped by
+	// init the moment it exited, and the pid became free for anyone. See
+	// rehydrate.go's header.
+	adopted *procIdentity
 
 	// killTimer enforces Spec.TimeoutMinutes; nil when unbounded.
 	killTimer *time.Timer
@@ -324,14 +345,73 @@ func (e *Executor) Start(ctx context.Context, spec executor.Spec) (executor.Hand
 	e.mu.Lock()
 	e.handles[rec.id] = rec
 	e.pruneLocked()
+	store := e.store
 	e.mu.Unlock()
 
-	if d := spec.Timeout(); d > 0 {
-		rec.killTimer = time.AfterFunc(d, func() {
-			rec.markKilled(fmt.Sprintf("timeout after %s", d))
-			_ = signalProcess(rec.pid, executor.SignalKill)
+	// Capture the pid's identity *before* the pump goroutine exists, and this
+	// ordering is the correctness argument for the whole rehydration path.
+	//
+	// The pump is what calls cmd.Wait(), and reaping is what releases the pid
+	// back to the kernel's allocator. Until then the child is at worst a zombie
+	// whose /proc entry — including the starttime we are reading — is fully
+	// present and provably belongs to *this* workload. Reading it after the
+	// pump had started would introduce a window in which a fast-exiting child
+	// is reaped, its pid handed to something else, and this driver persists a
+	// stranger's start time as the token that authorises signalling it.
+	//
+	// A failure here is not a failed start. It costs this handle the ability to
+	// survive a restart, which is exactly the behaviour that existed before the
+	// row did, and reporting a running workload as failed over an unreadable
+	// procfs would be a far larger regression than the one it guards.
+	ident, _, identErr := probeProcess(rec.pid)
+	if identErr != nil {
+		warnNoIdentityOnce.Do(func() {
+			fmt.Fprintf(os.Stderr, "localprocess: workloads on this host will not survive a "+
+				"control-plane restart, because their process identity cannot be read (first seen on "+
+				"handle %s, pid %d): %v\n", rec.id, rec.pid, identErr)
 		})
 	}
+
+	// Persist identity after the map insert, never before. The two orders differ
+	// only in what a crash between them leaves behind, and the asymmetry is
+	// decisive: this one can lose a row for a process that is running, which
+	// degrades to the pre-Task-20191 behaviour. The other would leave a row for a
+	// process that was never forked, whose pid the next boot would adopt, verify
+	// against a stranger's start time, and — because the identity would not
+	// match — report to a caller as a failed run that never ran.
+	//
+	// It happens here rather than in the pump because the caller holds a Handle
+	// the moment Start returns and is entitled to assume that handle outlives
+	// this process. RecordHandle never fails the start: see its doc for why a
+	// locked database must not become a spurious task failure.
+	// Armed before the row is written so the persisted deadline is the one
+	// actually in force, and as an absolute instant so a restart resumes the
+	// remaining time rather than restarting the clock.
+	var deadline time.Time
+	if d := spec.Timeout(); d > 0 {
+		deadline = rec.startedAt.Add(d)
+		e.armKillTimer(rec, d, fmt.Sprintf("timeout after %s", d))
+	}
+
+	executor.RecordHandle(store, executor.HandleRecord{
+		HandleID:   rec.id,
+		ExecutorID: e.id,
+		Driver:     executor.KindLocalProcess,
+		// The pid as decimal. It is the only handle the operating system will
+		// answer for a process, and everything reattachment does is built on it —
+		// which is also why it is never trusted on its own; see Meta.
+		ExternalID:  strconv.Itoa(rec.pid),
+		ProjectPath: spec.WorkDir,
+		TaskID:      taskIDFromLabels(spec.Labels),
+		PID:         rec.pid,
+		StartedAt:   rec.startedAt,
+		Deadline:    deadline,
+		// The boot id and start time that turn the pid above from a recycled
+		// integer into an identity. Nil when they could not be read, in which
+		// case the row is still written — a sweep can still see that a workload
+		// exists — but adoption will decline it rather than guess.
+		Meta: ident.meta(),
+	})
 
 	go e.pump(rec, pipeR)
 
@@ -355,7 +435,7 @@ func (e *Executor) pump(rec *record, pipeR *os.File) {
 			// A panic here would silently strand the handle in "running"
 			// forever and leak the subscriber channels.
 			fmt.Fprintf(os.Stderr, "localprocess: output pump panic recovered (handle %s): %v\n", rec.id, r)
-			rec.finish(executor.StateFailed, -1, fmt.Sprintf("output pump panic: %v", r))
+			e.finish(rec, executor.StateFailed, -1, fmt.Sprintf("output pump panic: %v", r))
 		}
 	}()
 
@@ -372,9 +452,6 @@ func (e *Executor) pump(rec *record, pipeR *os.File) {
 	_ = pipeR.Close()
 
 	waitErr := rec.cmd.Wait()
-	if rec.killTimer != nil {
-		rec.killTimer.Stop()
-	}
 
 	exitCode := 0
 	state := executor.StateExited
@@ -395,7 +472,7 @@ func (e *Executor) pump(rec *record, pipeR *os.File) {
 			errMsg = waitErr.Error()
 		}
 	}
-	rec.finish(state, exitCode, errMsg)
+	e.finish(rec, state, exitCode, errMsg)
 }
 
 // Signal implements executor.Executor. Signalling a finished handle is a
@@ -416,9 +493,37 @@ func (e *Executor) Signal(ctx context.Context, handleID string, sig executor.Sig
 	rec.mu.Lock()
 	running := rec.state == executor.StateRunning || rec.state == executor.StatePending
 	pid := rec.pid
+	adopted := rec.adopted
 	rec.mu.Unlock()
 	if !running {
 		return nil
+	}
+	// Re-prove the pid before delivering anything to an adopted handle.
+	//
+	// Verifying once at adoption is not enough, and the gap is not theoretical:
+	// an adopted process can exit at any moment, its pid can be reused
+	// immediately, and the watcher only notices at its next poll. A Stop pressed
+	// inside that window would deliver SIGKILL to whatever inherited the number
+	// — a database, an ssh session, the operator's own shell. Checking here
+	// narrows the exposure to the microseconds between this read and the
+	// os.FindProcess below, and on Linux 5.3+ even that half is covered by the
+	// kernel: os.FindProcess opens a pidfd, so the signal lands on the process
+	// that held the pid when the descriptor was opened rather than on whoever
+	// holds it when the signal is sent. Closing the remaining sliver entirely
+	// needs a pidfd held from verification time, which needs a dependency this
+	// module does not have — see rehydrate.go's adoptPollInterval.
+	//
+	// A failure is not reported as a signal error. The caller asked for the
+	// workload to stop, and the workload is not running: that request is
+	// satisfied. What it does mean is that the handle is finished and its row
+	// dropped, so the next Status says why instead of claiming it is still up.
+	if adopted != nil {
+		if err := adopted.verify(pid); err != nil {
+			msg := watchFailureMessage(pid, err)
+			rec.emit("[cloop] " + msg + "\n")
+			e.finish(rec, executor.StateFailed, -1, msg)
+			return nil
+		}
 	}
 	if sig == executor.SignalKill {
 		// Record the intent before delivering it so a Status read that
@@ -649,6 +754,34 @@ func (r *record) removeSubscriber(sub *subscriber) {
 	sub.close()
 }
 
+// armKillTimer schedules a SIGKILL after d and records reason as the cause.
+//
+// Shared by Start and by adoption (see rehydrate.go) so a timeout resumed
+// across a restart is enforced by exactly the same mechanism as the one it
+// interrupted. A non-positive d fires immediately, which is what an adopted
+// workload whose deadline passed while the control plane was down deserves:
+// the timeout expired, and nobody having been there to enforce it is not a
+// reprieve.
+//
+// It signals rec.pid rather than the *exec.Cmd because an adopted record has
+// no Cmd. For an adopted record that pid is safe only because adopt verified
+// the process's identity before arming this — see rehydrate.go, where the same
+// reasoning keeps Signal from reaching a stranger that inherited the number.
+func (e *Executor) armKillTimer(rec *record, d time.Duration, reason string) {
+	if d < 0 {
+		d = 0
+	}
+	timer := time.AfterFunc(d, func() {
+		rec.markKilled(reason)
+		_ = signalProcess(rec.pid, executor.SignalKill)
+	})
+	// Under rec.mu because finish reads the field to stop the timer, and it
+	// can run concurrently once the pump or the adoption watcher is up.
+	rec.mu.Lock()
+	rec.killTimer = timer
+	rec.mu.Unlock()
+}
+
 // markKilled records that termination was requested, so the final Status
 // reports StateKilled instead of a plain non-zero exit. It does not itself
 // deliver a signal.
@@ -664,35 +797,85 @@ func (r *record) markKilled(reason string) {
 	}
 }
 
-// finish records the terminal state and releases every subscriber. Called
-// exactly once per record, from the pump.
-func (r *record) finish(state executor.State, exitCode int, errMsg string) {
+// finished reports whether the record has already reached its terminal state.
+// Used by the adopted-process watcher to stop polling a handle that Signal has
+// already retired.
+func (r *record) finished() bool {
 	r.mu.Lock()
-	if r.closed {
-		r.mu.Unlock()
+	defer r.mu.Unlock()
+	return r.closed
+}
+
+// finish records the terminal state, drops the handle's durable row, and
+// releases every subscriber. Called at most once per record — from the output
+// pump for a forked workload, from the watcher or Signal for an adopted one.
+//
+// It hangs off the Executor rather than the record so it can reach the handle
+// store, matching the container and Kubernetes drivers, where e.finish exists
+// for the same reason.
+func (e *Executor) finish(rec *record, state executor.State, exitCode int, errMsg string) {
+	rec.mu.Lock()
+	if rec.closed {
+		rec.mu.Unlock()
 		return
 	}
-	r.closed = true
+	rec.closed = true
 	// A kill we requested wins over the exit status the kernel reports,
 	// which would otherwise look like an ordinary signal death.
-	if r.state == executor.StateKilled && state == executor.StateExited {
+	if rec.state == executor.StateKilled && state == executor.StateExited {
 		state = executor.StateKilled
 	}
-	if r.state == executor.StateKilled && errMsg == "" {
-		errMsg = r.errMsg
+	if rec.state == executor.StateKilled && errMsg == "" {
+		errMsg = rec.errMsg
 	}
-	r.state = state
-	r.exitCode = exitCode
-	r.finishedAt = time.Now()
+	rec.state = state
+	rec.exitCode = exitCode
+	rec.finishedAt = time.Now()
 	if errMsg != "" {
-		r.errMsg = errMsg
+		rec.errMsg = errMsg
 	}
-	subs := make([]*subscriber, 0, len(r.subscribers))
-	for sub := range r.subscribers {
+	final := rec.state
+	// Stopping the timeout timer belongs here rather than in the output pump,
+	// and for an adopted record it is a safety requirement rather than tidiness.
+	// An adopted record finishes through the watcher, which never touches the
+	// pump — so a timer left armed would fire after the process had exited and
+	// deliver SIGKILL to rec.pid, a number the kernel may by then have handed
+	// to something else entirely. That is the recycled-pid kill that adopt's
+	// whole identity check exists to make impossible, arriving by the back door.
+	timer := rec.killTimer
+	rec.killTimer = nil
+	subs := make([]*subscriber, 0, len(rec.subscribers))
+	for sub := range rec.subscribers {
 		subs = append(subs, sub)
 	}
-	r.subscribers = make(map[*subscriber]struct{})
-	r.mu.Unlock()
+	rec.subscribers = make(map[*subscriber]struct{})
+	rec.mu.Unlock()
+
+	if timer != nil {
+		timer.Stop()
+	}
+
+	// The workload is over, so its durable identity has nobody left to serve —
+	// nothing can reattach to a process that has exited. Dropping the row here
+	// is also what stops a handle whose pid turned out to be recycled from
+	// being re-adopted and re-failed on every subsequent boot.
+	//
+	// Gated on a terminal state, and the gate is the point rather than a
+	// formality. Every call today passes a terminal state, but the moment this
+	// driver grows a Close() that retires live handles as StateUnknown while
+	// deliberately leaving their processes running — which is what a graceful
+	// control-plane shutdown is — an ungated delete would erase the identity of
+	// every workload in flight at precisely the moment rehydration exists to
+	// serve, and the next boot would come up with an empty map and a host full
+	// of orphaned children. The Kubernetes driver hit exactly that; the gate is
+	// how it stopped hitting it.
+	//
+	// It sits after the rec.closed guard so a double finish writes once, and
+	// outside rec.mu because handleStore() takes e.mu and the lock order in this
+	// driver is e.mu before rec.mu (see pruneLocked).
+	if final.Terminal() {
+		executor.ForgetHandle(e.handleStore(), rec.id)
+	}
 
 	for _, sub := range subs {
 		sub.close()

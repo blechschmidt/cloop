@@ -115,6 +115,21 @@ const (
 	// should exhaust its own PID budget, not the host's. 1024 is far above
 	// what a build or test run needs.
 	defaultPIDsLimit = 1024
+
+	// DefaultOrphanGracePeriod protects a *running* container young enough
+	// that it might belong to a dispatch still in flight. Only running
+	// containers older than this are collected by ReapOrphans; exited ones are
+	// collected immediately and ignore it entirely.
+	//
+	// The value is kubernetes.DefaultOrphanGracePeriod, deliberately: the
+	// window it covers is the same window (a Start between creating the
+	// workload and tracking it, or a peer control plane booting against the
+	// same backend), and an operator who has reasoned about one driver's sweep
+	// should not find the other one behaves differently. Ten minutes is far
+	// wider than the millisecond-scale race it guards, which is the correct
+	// direction to be wrong in: an orphan reaped ten minutes late costs CPU,
+	// an orphan reaped ten milliseconds early costs somebody's run.
+	DefaultOrphanGracePeriod = 10 * time.Minute
 )
 
 // Options configures a container executor instance.
@@ -178,6 +193,33 @@ type Options struct {
 	// ruleset on their bridge would firewall them too.
 	EgressFilter EgressFilter
 
+	// HandleStore persists handle identity so this executor can reattach to
+	// its own containers after the control plane restarts (Task 20191). See
+	// rehydrate.go for what reattachment can and cannot rebuild.
+	//
+	// Nil means no persistence, which is exactly the pre-Task-20191 behaviour
+	// and remains a supported configuration: the driver starts, streams,
+	// signals and reaps as it always did. What it loses is survival. A hub
+	// killed mid-run comes back with an empty handle map, so Stream, Status
+	// and Signal answer ErrHandleNotFound for containers that are still alive,
+	// and the only thing that eventually reclaims them is the running half of
+	// ReapOrphans — after OrphanGracePeriod, and by killing the work.
+	//
+	// It is a field rather than a constructor argument because a container
+	// executor is routinely built before there is anything durable to give it:
+	// `cloop executor test`, Preflight and the config validator all construct
+	// a driver with no state database in sight. Those callers pass nil and get
+	// a working executor; the control plane calls AttachHandleStore once the
+	// database is open.
+	HandleStore executor.HandleStore
+
+	// OrphanGracePeriod protects a running container young enough that it
+	// might belong to a Start still in flight, or to a second control plane
+	// that has just booted against the same runtime. Zero means
+	// DefaultOrphanGracePeriod; see shouldReapRunningOrphan for why the window
+	// is a correctness condition rather than a courtesy.
+	OrphanGracePeriod time.Duration
+
 	// ImagePolicy constrains the images a *project* may name in its
 	// .cloop/sandbox.yaml (Task 20177). The zero value constrains nothing.
 	//
@@ -204,6 +246,14 @@ func (o Options) Normalize() (Options, error) {
 	}
 	if o.PIDsLimit == 0 {
 		o.PIDsLimit = defaultPIDsLimit
+	}
+	// A non-positive grace period becomes the default rather than an error,
+	// matching the Kubernetes driver. Treating zero as "reap running orphans
+	// on sight" would make the un-configured case the destructive one, and
+	// treating a negative as an error would fail a config whose only sin is
+	// leaving a field unset.
+	if o.OrphanGracePeriod <= 0 {
+		o.OrphanGracePeriod = DefaultOrphanGracePeriod
 	}
 	o.OCIRuntime = strings.TrimSpace(o.OCIRuntime)
 	if err := ValidateImageRef(o.Image); err != nil {
@@ -267,6 +317,11 @@ type Executor struct {
 
 	mu      sync.Mutex
 	handles map[string]*record
+	// store is the durable handle table, nil when the embedder has none. It
+	// lives under mu rather than being set once at construction because
+	// AttachHandleStore can install one long after New has returned, while the
+	// log pumps that call ForgetHandle are already running.
+	store executor.HandleStore
 }
 
 // record is the driver's bookkeeping for one container.
@@ -303,7 +358,7 @@ func New(opts Options) (*Executor, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Executor{
+	e := &Executor{
 		id:   norm.ID,
 		opts: norm,
 		rt:   rt,
@@ -313,7 +368,15 @@ func New(opts Options) (*Executor, error) {
 		// project that runs the same image all day.
 		verifier: imagepolicy.NewCosignVerifier(),
 		handles:  make(map[string]*record),
-	}, nil
+		store:    norm.HandleStore,
+	}
+	// Reattach before returning, so a caller that lists handles immediately
+	// sees the workloads the previous process left running rather than an
+	// empty executor that fills in later. This keeps New's "no I/O beyond
+	// resolving the binary" promise: adopt inserts records and spawns
+	// goroutines, and every runtime call happens on those goroutines.
+	e.rehydrate()
+	return e, nil
 }
 
 // Ensure registers a container executor built from opts into reg (nil means
@@ -539,16 +602,48 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, extraMounts []
 	e.mu.Lock()
 	e.handles[rec.id] = rec
 	e.pruneLocked()
+	store := e.store
 	e.mu.Unlock()
 
+	// Armed before the row is written so the persisted deadline is the one
+	// actually in force, and as an absolute instant so a restart resumes the
+	// remaining time rather than restarting the clock.
+	var deadline time.Time
 	if d := spec.Timeout(); d > 0 {
-		rec.killTimer = time.AfterFunc(d, func() {
-			rec.markKilled(fmt.Sprintf("timeout after %s", d))
-			killCtx, killCancel := context.WithTimeout(context.Background(), shortCmdTimeout)
-			defer killCancel()
-			_, _ = runCLI(killCtx, e.rt, nil, "kill", "--signal", "SIGKILL", rec.name)
-		})
+		deadline = rec.startedAt.Add(d)
+		e.armKillTimer(rec, d, fmt.Sprintf("timeout after %s", d))
 	}
+
+	// Persist identity after the map insert, never before. The two orders
+	// differ only in what a crash between them leaves behind, and the
+	// asymmetry is decisive: this one can lose a row for a container that is
+	// running, which degrades to the pre-Task-20191 behaviour the orphan sweep
+	// already handles. The other would leave a row for a container that was
+	// never started, which the next boot would adopt, fail to `wait` on, and
+	// report to a caller as a failed run that never ran.
+	//
+	// It happens here rather than in the log pump because the caller holds a
+	// Handle the moment Start returns and is entitled to assume that handle
+	// outlives the process. RecordHandle never fails the start: see its doc
+	// for why a locked database must not become a spurious task failure.
+	executor.RecordHandle(store, executor.HandleRecord{
+		HandleID:   rec.id,
+		ExecutorID: e.id,
+		Driver:     executor.KindContainer,
+		// The container name, which is the only identifier the runtime will
+		// answer `logs`, `wait` and `kill` for. Everything reattachment does
+		// is built on it.
+		ExternalID:  rec.name,
+		ProjectPath: workDir,
+		TaskID:      taskIDFromLabels(spec.Labels),
+		// The digest-pinned reference that actually ran, not opts.Image: an
+		// operator reading the table after a restart wants to know what is
+		// executing, and the tag may have been repointed since.
+		Image:     req.Image,
+		StartedAt: rec.startedAt,
+		Deadline:  deadline,
+		Meta:      map[string]string{metaRuntime: e.rt.Name},
+	})
 
 	// The pump is detached from ctx on purpose: it must outlive the request
 	// that started the workload, and is stopped by cancelPump when the
@@ -1251,12 +1346,48 @@ func (e *Executor) Handles() []string {
 	return out
 }
 
-// ReapOrphans removes exited containers this control plane created but no
-// longer tracks — the residue of a control plane that was killed mid-run.
-// Running containers are never touched: they may belong to another live
-// control plane sharing the same runtime.
+// ReapedRunningSuffix marks an entry in ReapOrphans' result as a container
+// that was still running when it was collected, rather than one that had
+// already exited.
 //
-// It returns the names of the containers removed.
+// The distinction has to travel in the string because the result is a
+// []string the caller renders more or less verbatim, and the two cases mean
+// very different things to whoever reads that line: an exited orphan was
+// costing disk, a running one was burning a core with nobody reading its
+// output — and, unlike the exited case, collecting it destroyed work in
+// progress. A caller that wants to say so can test for this suffix.
+const ReapedRunningSuffix = " (running)"
+
+// ReapOrphans removes containers this control plane created but no longer
+// tracks — the residue of a control plane that was killed mid-run.
+//
+// It collects two populations, and they are deliberately not symmetric.
+//
+// Exited containers are removed immediately and across every executor id,
+// exactly as they always have been. An exited container holds a name and a
+// writable layer and nothing else, so the worst case of removing one that
+// belongs to a peer control plane is that peer losing a `docker logs` it had
+// not read yet.
+//
+// Running containers are the case that actually costs something — before Task
+// 20191 they were never touched at all, so a hub killed mid-run left a sandbox
+// burning CPU forever, with nobody reading its output and no handle able to
+// stop it — and they are also the case where a wrong answer destroys work in
+// progress. So a running container is collected only when all of the
+// following hold: it carries this executor's own id (two container executors
+// on one host must not reap each other's work), it carries a handle label (a
+// hand-made container wearing cloop.managed=true is not ours to kill), this
+// executor does not track it, and the *runtime* says it has been running for
+// longer than OrphanGracePeriod. See shouldReapRunningOrphan.
+//
+// An executor with a HandleStore adopts its own containers at construction and
+// therefore tracks them, so this sweep only ever sees containers left by a
+// process that had no durable store or whose rows were lost. That is the
+// intended relationship between the two halves of Task 20191: rehydration
+// saves the run, and reaping is what happens when it could not be saved.
+//
+// It returns the names of the containers removed, the running ones carrying
+// ReapedRunningSuffix.
 func (e *Executor) ReapOrphans(ctx context.Context) ([]string, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -1281,8 +1412,207 @@ func (e *Executor) ReapOrphans(ctx context.Context) ([]string, error) {
 			removed = append(removed, name)
 		}
 	}
+
+	running, runErr := e.reapRunningOrphans(ctx, live)
+	removed = append(removed, running...)
 	sort.Strings(removed)
+	if runErr != nil {
+		// The exited sweep already succeeded and its removals really happened.
+		// Returning them alongside the error rather than discarding them keeps
+		// the caller's report honest: "removed these, and then the running
+		// sweep failed" is actionable, "nothing removed" would be a lie.
+		return removed, runErr
+	}
 	return removed, nil
+}
+
+// reapRunningOrphans kills and removes running containers this executor owns
+// but does not track, once the runtime says they are older than the grace
+// period. live is the tracked-name set, passed in so both halves of the sweep
+// reason about the same snapshot.
+func (e *Executor) reapRunningOrphans(ctx context.Context, live map[string]struct{}) ([]string, error) {
+	// Only `running`. `paused` and `created` are deliberately out of scope:
+	// neither burns CPU, and a `created` container is nearly always the
+	// half-second-old product of a `run -d` that start() is about to either
+	// track or clean up itself.
+	res, err := runCLITimeout(ctx, e.rt, shortCmdTimeout,
+		"ps", "--all",
+		"--filter", "label="+LabelManaged+"=true",
+		// Scoped to this executor's id, which the exited sweep above does not
+		// do. Killing a peer's live sandbox is unrecoverable; removing its
+		// exited one is not.
+		"--filter", "label="+LabelExecutor+"="+e.id,
+		// Key-only filter: the container must carry a handle label at all.
+		// Both runtimes support the bare-key form, and it is the same
+		// belt-and-braces the Kubernetes driver's selector applies with
+		// LabelTaskID — an operator's hand-labelled container is not ours.
+		"--filter", "label="+LabelHandle,
+		"--filter", "status=running",
+		// Tab-separated because {{.CreatedAt}} contains spaces, so the field
+		// splitting the exited sweep uses would tear the timestamp apart.
+		"--format", "{{.Names}}\t{{.CreatedAt}}")
+	if err != nil {
+		return nil, fmt.Errorf("container: list running orphans: %w", err)
+	}
+	if res.ExitCode != 0 {
+		return nil, fmt.Errorf("container: list running orphans failed: %s", firstLine(res.Stderr))
+	}
+
+	now := time.Now()
+	grace := e.orphanGracePeriod()
+	var removed []string
+	for _, line := range strings.Split(res.Stdout, "\n") {
+		name, created, ok := strings.Cut(strings.TrimSpace(line), "\t")
+		if !ok || name == "" {
+			continue
+		}
+		startedAt, perr := parseRuntimeTime(created)
+		if perr != nil {
+			// Skip, never guess. A runtime whose `ps` timestamp we cannot read
+			// is a reason to leave its containers alone; substituting the
+			// local clock would date every container to "just listed", which
+			// is either always young (nothing is ever reaped) or, if someone
+			// later inverts the comparison, always old (everything is).
+			fmt.Fprintf(os.Stderr, "container: not reaping %s: %v\n", name, perr)
+			continue
+		}
+		_, tracked := live[name]
+		if !shouldReapRunningOrphan(now, startedAt, grace, tracked) {
+			continue
+		}
+		// `rm --force` is SIGKILL plus removal in one call, and that is the
+		// right amount of ceremony here. The Kubernetes driver offers a
+		// termination grace period because a Pod's results live inside it; a
+		// sandbox container's workspace is a bind mount whose writes are
+		// already on the host's disk, and this container has by definition
+		// been running unobserved for longer than the grace period. A polite
+		// SIGTERM would buy a chance of a clean shutdown in exchange for
+		// doubling the sweep's latency per orphan and a second failure mode
+		// when the workload ignores it.
+		if e.removeContainer(ctx, name) {
+			removed = append(removed, name+ReapedRunningSuffix)
+		}
+	}
+	return removed, nil
+}
+
+// orphanGracePeriod is OrphanGracePeriod with the default applied.
+//
+// Normalize already does this for an executor built by New, but the tests and
+// the audit seam construct Executor values directly, and the field's zero
+// value is the one setting under which the running sweep would be actively
+// destructive. Defaulting at the point of use means no path can reach the
+// comparison with zero.
+func (e *Executor) orphanGracePeriod() time.Duration {
+	if e.opts.OrphanGracePeriod > 0 {
+		return e.opts.OrphanGracePeriod
+	}
+	return DefaultOrphanGracePeriod
+}
+
+// shouldReapRunningOrphan is the entire decision the running sweep makes,
+// extracted as a pure function so it can be tested without a runtime.
+//
+// The grace period is not a courtesy, it is the correctness condition. `ps`
+// returns a snapshot, and between that snapshot and the moment
+// liveContainerNames is consulted a container can legitimately be both running
+// and untracked:
+//
+//   - our own start() has had `run -d` return but has not yet reached the
+//     e.handles insert. The container exists; the record that would protect
+//     it does not, and the run is microseconds old.
+//   - a second control plane sharing this runtime — a rolling restart, or a
+//     developer's hub running next to the systemd one — is inside the same
+//     window, possibly configured with the same executor id.
+//
+// Both windows are microseconds to milliseconds wide. Anything older than the
+// grace period is a container whose owner is demonstrably gone, which is the
+// only case worth killing.
+//
+// containerStart must be the runtime's own timestamp for the container, not
+// the local clock at listing time. The listing time records when *we* looked,
+// which is the same instant for a container that started an hour ago and one
+// that started while the `ps` was in flight — precisely the two cases this
+// function has to tell apart.
+//
+// Every uncertain input resolves to false: a container we cannot confidently
+// date is a container we do not touch.
+func shouldReapRunningOrphan(now, containerStart time.Time, grace time.Duration, tracked bool) bool {
+	if tracked {
+		return false
+	}
+	if grace <= 0 {
+		// Refuse rather than treat zero as "reap on sight". Zero is what an
+		// un-normalised Options carries, so honouring it would make the
+		// least-configured executor the most destructive one.
+		return false
+	}
+	if containerStart.IsZero() {
+		return false
+	}
+	if containerStart.After(now) {
+		// A container that claims to have started in the future means the
+		// runtime's clock and ours disagree — a VM resumed from a snapshot, a
+		// container inherited across an NTP step. Ageing it against our clock
+		// would produce an arbitrary answer, so decline to have one.
+		return false
+	}
+	return now.Sub(containerStart) >= grace
+}
+
+// runtimeTimeLayouts are the timestamp formats the runtime CLIs emit.
+//
+// Both render a Go time.Time with its default String() layout for
+// `ps --format {{.CreatedAt}}`, but they truncate differently — docker to the
+// second, podman to the nanosecond — so the fractional part has to be
+// optional, which is what the .999999999 form means when parsing. RFC3339 is
+// listed too because docker's `inspect --format {{.State.StartedAt}}` uses it
+// (while podman's uses the Go layout), so a caller that reaches for inspect
+// instead of ps does not have to rediscover the discrepancy.
+var runtimeTimeLayouts = []string{
+	"2006-01-02 15:04:05.999999999 -0700 MST",
+	time.RFC3339Nano,
+}
+
+// parseRuntimeTime reads a timestamp out of runtime CLI output.
+//
+// The zone *name* in the layout is decorative. Both runtimes emit a numeric
+// offset next to it and time.Parse prefers the offset, so a hub in CEST
+// reading "+0200 CEST" gets the right instant rather than the fabricated
+// zero-offset zone Parse invents for an abbreviation it cannot resolve.
+func parseRuntimeTime(s string) (time.Time, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return time.Time{}, fmt.Errorf("the runtime reported no start time")
+	}
+	for _, layout := range runtimeTimeLayouts {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t, nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("unrecognised runtime timestamp %q", s)
+}
+
+// taskIDFromLabels extracts the cloop task ID a Spec was dispatched for.
+//
+// executor.Spec has no typed task field — task identity travels in Labels,
+// which is what the callers already populate under "task_id" (see
+// cmd/executor_cmd.go and the Kubernetes driver's taskIDFrom, whose key list
+// this mirrors so one driver's records are not searchable by a key the other's
+// are not). So this is a parse, not a field read.
+//
+// Zero means "not task-bound", which is the honest answer for a smoke test or
+// a hand-driven run and is exactly what HandleRecord.TaskID documents zero to
+// mean. A label that is present but unparsable also yields zero rather than an
+// error: a record that identifies the container is worth storing even when the
+// bookkeeping metadata on it is junk.
+func taskIDFromLabels(labels map[string]string) int {
+	for _, key := range []string{"task_id", "task", "taskid"} {
+		if n, err := strconv.Atoi(strings.TrimSpace(labels[key])); err == nil && n > 0 {
+			return n
+		}
+	}
+	return 0
 }
 
 // liveContainerNames is the set of container names this executor is actively
@@ -1386,6 +1716,23 @@ func (e *Executor) finish(rec *record, state executor.State, exitCode int, errMs
 	cancel := rec.cancelPump
 	rec.mu.Unlock()
 
+	// The workload is terminal, so its durable identity has no one left to
+	// serve: nothing can reattach to a container that has exited, and reap has
+	// already removed it. Dropping the row here is also what stops a container
+	// that vanished from the runtime — `wait` fails, pump finishes it failed —
+	// from leaving a row that every subsequent boot re-adopts and re-fails.
+	//
+	// It sits after the rec.done guard on purpose. finish is idempotent by
+	// design (the kill timer's SIGKILL and the reaper race each other on every
+	// timed-out run), and a delete outside the guard would turn that race into
+	// two database writes per handle for no gain. It sits outside rec.mu
+	// because the store is guarded by e.mu, and the lock order in this file is
+	// e.mu before rec.mu — see liveContainerNames.
+	e.mu.Lock()
+	store := e.store
+	e.mu.Unlock()
+	executor.ForgetHandle(store, rec.id)
+
 	if timer != nil {
 		timer.Stop()
 	}
@@ -1394,6 +1741,31 @@ func (e *Executor) finish(rec *record, state executor.State, exitCode int, errMs
 	if cancel != nil {
 		cancel()
 	}
+}
+
+// armKillTimer schedules a SIGKILL after d and records reason as the cause.
+//
+// Shared by Start and by adoption (see rehydrate.go) so the timeout a restart
+// resumes is enforced by exactly the same mechanism as the one it interrupted.
+// A non-positive d fires immediately, which is what an adopted workload whose
+// deadline already passed while the control plane was down deserves: the
+// timeout expired, and the fact that nobody was watching when it did does not
+// entitle the workload to more time.
+func (e *Executor) armKillTimer(rec *record, d time.Duration, reason string) {
+	if d < 0 {
+		d = 0
+	}
+	timer := time.AfterFunc(d, func() {
+		rec.markKilled(reason)
+		killCtx, killCancel := context.WithTimeout(context.Background(), shortCmdTimeout)
+		defer killCancel()
+		_, _ = runCLI(killCtx, e.rt, nil, "kill", "--signal", "SIGKILL", rec.name)
+	})
+	// Under rec.mu because finish reads the field to stop the timer, and it
+	// can run concurrently once the pump is up.
+	rec.mu.Lock()
+	rec.killTimer = timer
+	rec.mu.Unlock()
 }
 
 // markKilled records that termination was requested. It does not deliver a

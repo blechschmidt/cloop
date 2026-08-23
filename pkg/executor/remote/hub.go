@@ -47,6 +47,17 @@ type HubOptions struct {
 	// revocations too — the ones delivered long after the operator pressed
 	// the button — which is the only signal that a queued revocation landed.
 	OnRevokeAck func(executorID, leaseID string, ack RevokedPayload)
+	// HandleStore persists handle identity for every executor this hub builds,
+	// so a restart still recognises the workloads its devices are running
+	// (Task 20191). Nil is the pre-Task-20191 behaviour; see
+	// Options.HandleStore for what that costs.
+	//
+	// One store for the whole hub rather than one per agent: rows are scoped by
+	// executor ID inside the store, and a per-agent factory — the shape
+	// WorkspaceSource needs, because a *grant* is issued to a subject — would
+	// invite an implementation that scoped by something else and let one
+	// device's executor adopt another's handles.
+	HandleStore executor.HandleStore
 	// WorkspaceSource builds the credential source for one agent's executor.
 	//
 	// It is a factory rather than a single source because a grant is issued to
@@ -172,7 +183,13 @@ func (h *Hub) executorFor(agent AgentRecord, caps AgentCapabilities) (*Executor,
 		Capabilities:   caps,
 		OnStatusChange: h.opts.OnStatusChange,
 		OnRevokeAck:    h.opts.OnRevokeAck,
-		Now:            h.opts.Now,
+		// Passed at construction rather than attached afterwards, because
+		// NewExecutor rehydrates and this is called from ServeHTTP: an agent
+		// that dials in immediately after a restart must find its handles
+		// already adopted, and an attach one statement later would be a race
+		// whose losing side terminates the device's work.
+		HandleStore: h.opts.HandleStore,
+		Now:         h.opts.Now,
 	}
 	if h.opts.WorkspaceSource != nil {
 		opts.Workspace = h.opts.WorkspaceSource(agent.AgentID)

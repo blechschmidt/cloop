@@ -534,7 +534,7 @@ Taking a node out of service:
 
 ```console
 $ cloop executor cordon edge-01 --reason "kernel patch"   # no new work; running work continues
-$ cloop executor drain  edge-01 --reason "decommission"   # no new work; wait for zero in-flight
+$ cloop executor drain  edge-01                            # no new work; wait for zero in-flight
 $ cloop executor uncordon edge-01                          # back to whatever the probes justify
 ```
 
@@ -547,8 +547,112 @@ surviving nodes exactly once. See
 [failover](../architecture/executors.md#failover-task-20162).
 
 ```console
-$ cloop executor reap                    # remove sandbox containers/Pods left by earlier runs
+$ cloop executor reap container          # remove sandbox containers/Pods left by earlier runs
 ```
+
+`reap` takes an executor ID — it acts on one backend, not the fleet. Since Task
+20191 a hub reaps on its own at startup, so this is for cleaning up after a hub
+that is *not* running, or for a runtime shared with one that never will be.
+
+### After a control-plane restart
+
+A hub that is killed mid-run does not lose the workloads it dispatched: the
+containers, Pods and edge-device processes keep running, and on the next start
+each driver reattaches to its own from `executor_handles`. What is left over
+after that — session rows nothing will close, workloads nothing can reattach to,
+worktrees nothing will merge — is swept in the background, bounded at two
+minutes, so a git prune and a runtime listing never delay the listener. See
+[durable handle identity](../architecture/executors.md#durable-handle-identity-task-20191).
+
+The sweep reports what it did through the hub's normal log, prefixed `ui:` under
+`cloop ui` and `apiserver:` under `cloop serve`. The lines worth recognising:
+
+```
+executor: 3 in-flight session(s) reattached to a still-running workload
+executor: closed 1 stale in-flight session(s) left by a previous control plane (drain would otherwise have waited on them forever)
+executor container: garbage-collected 2 exited container(s) from a previous run: cloop-app-a1b2, cloop-app-c3d4
+executor container: killed 1 container(s) still running from a previous control plane: cloop-app-e5f6
+executor: pruned 2 leaked task worktree(s) in /srv/app: worktree gc: removed 2 worktree(s) and 0 branch(es); kept 5; 0 error(s)
+```
+
+**"reattached" is the good line.** Those runs survived the restart: their output
+continues in the dashboard and their exit codes are still collected.
+
+**"killed N container(s) still running from a previous control plane" is the one
+to read carefully.** It means a sandbox was *executing a harness* when it was
+collected — work in progress was destroyed, not litter tidied away — and it is
+deliberately worded differently from the "garbage-collected N exited" line so the
+two are distinguishable in a log. It fires only for a container older than the
+[grace period](../reference/configuration.md#container-sandbox) that carries this
+executor's own labels and that no live handle claims, which after a healthy
+restart should be nothing: rehydration adopts what it can, so anything reaped was
+dispatched by a process with no handle store or one whose rows were lost. Seeing
+it routinely means handle persistence is not working — check the startup log for
+`handle persistence unavailable`, which names the reason and warns that workloads
+dispatched by that process will not survive a restart.
+
+`localprocess` is the driver that recovers least, and an operator will see it in
+the run's own log rather than the hub's. A host workload that survived a restart
+carries a `[cloop]` line saying its live output was lost with the pipe that
+carried it, and that the process is still being watched; one whose pid was
+recycled, or whose host rebooted, is reported `failed` with exit code `-1` and a
+message naming which. That is honest rather than pessimistic — the exit status of
+a process this hub was never the parent of genuinely cannot be collected, and
+reporting `exited(0)` would mark failed work as done.
+
+### A drain never finishes
+
+`cloop executor drain <id>` (and the dashboard's drain button) waits for the
+executor's in-flight session count to reach zero and gives up with
+`ErrDrainTimeout`. Before Task 20191, a hub that restarted while a run was in
+flight left a `running` row in `executor_sessions` that nothing would ever
+close, so drain timed out on that executor *permanently* — the count never moved,
+and no amount of waiting helped.
+
+The startup sweep is the fix, so the first thing to try is a restart of the hub:
+it closes rows whose executor no longer knows the handle. If drain still hangs
+after that, the count is real and the sweep has deliberately left the rows alone
+— `sessionOutcome` treats a driver that cannot answer (an unreachable cluster, a
+device that has not dialled back in) as *live*, because closing a session whose
+workload is actually running would let the scheduler re-place its task and put
+two agents in one repository. Check the executor's health with `cloop executor
+ls` and fix the reachability. `--force` stops *waiting* rather than failing — the
+node stays draining, and the sessions it reports are still running and were not
+touched.
+
+### Pruning leaked worktrees by hand
+
+Parallel task execution gives each task a git worktree under
+`.cloop/worktrees/task-<id>` on a `cloop/task-<id>-<slug>` branch. A run killed
+between creating the worktree and merging it leaks both. The hub collects the
+*directories* on its next start, older than two hours and skipping any task it
+believes is still running; it never touches a branch, because an unmerged one is
+the only copy of that task's work.
+
+```console
+$ cloop worktree list                              # what is on disk, what git knows, and how old
+$ cloop worktree prune --dry-run                   # the plan, including the branches it would keep
+$ cloop worktree prune                             # remove directories older than 2h
+$ cloop worktree prune --delete-branches           # …and merged cloop/task-* branches
+```
+
+Run these from inside the repository — both act on the current working
+directory. `list` shows two shapes that are both leaks and both invisible to a
+sweep that looks at only one source: a directory git no longer registers (`GIT`
+`no`), and a registration whose directory is gone (`DIR` `no`).
+
+`--min-age 0` disables the age guard and is the one flag here that can destroy
+work: a live parallel run's worktrees are in that directory *right now*, and git
+cannot restore what was never committed. Use it only when you have established
+that nothing is running. `--delete-branches` is safe by comparison — it deletes
+only branches already contained in the base branch (`--base`, defaulting to the
+checked-out one), the check is enforced twice, and `git branch -d` refuses
+unmerged work on its own authority. A branch reported as kept because it "is not
+merged" is the API declining to destroy the only copy of a task's work; merge or
+delete it yourself.
+
+A non-zero exit from `prune` means some worktree could not be removed — a
+permission error, a busy mount — and names it. The rest were still collected.
 
 ---
 

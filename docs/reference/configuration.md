@@ -82,7 +82,7 @@ happened to be unreachable.
 cloop executor list              # what is registered, and what it isolates
 cloop executor ls                # fleet health: state, in-flight work, last seen
 cloop executor test <id>         # preflight + run `cloop version` inside it
-cloop executor reap <id>         # remove containers left by a killed control plane
+cloop executor reap <id>         # remove containers/Pods left by a killed control plane
 cloop executor cordon <id>       # stop new placement; in-flight work continues
 cloop executor uncordon <id>     # back in rotation, at the health its probes justify
 cloop executor drain <id>        # stop placement, wait for in-flight to reach zero
@@ -123,10 +123,35 @@ executors:
     network: none            # none (default) | bridge | <named network>
     extra_args: []           # additional runtime flags, --flag=value form only
     selinux_label: ""        # "z" or "Z" — required when SELinux is enforcing
+    orphan_grace_period_seconds: 600   # 0 means 600; see below
 ```
 
 or with `cloop config set executors.container.<key> <value>`. `oci_runtime` is
 the exception: the setter's key list does not cover it, so it is edited here.
+
+`orphan_grace_period_seconds` is how old a **running** container has to be before
+the startup sweep and `cloop executor reap` will kill it. Exited containers are
+collected immediately and ignore it entirely.
+
+It is what makes reaping a running orphan safe rather than reckless. A container
+listed moments ago may belong to a control plane that is starting right now, or
+to this one in the microseconds between `run -d` returning and the handle being
+recorded, and neither is an orphan — but a container that has been running
+untracked for longer than this has a demonstrably absent owner. Zero means the
+600-second default, because treating an unset field as "reap on sight" would make
+the least-configured executor the most destructive one; the accepted range is
+0–604800 (7 days), and a value outside it is reported and reset to the default
+rather than silently clamped. `executors.kubernetes.orphan_grace_period_seconds`
+is the same key with the same default and the same meaning for Pods.
+
+Ten minutes is far wider than the millisecond-scale race it guards, and that is
+the correct direction to be wrong in: an orphan reaped ten minutes late costs
+CPU, an orphan reaped ten milliseconds early costs somebody's run. Lower it only
+on a host where nothing else shares the runtime. See
+[orphan grace periods](../architecture/executors.md#orphan-grace-periods) for
+what else has to be true before a running container is touched, and
+[after a control-plane restart](../operations/runbook.md#after-a-control-plane-restart)
+for the log line that reports one.
 
 Every container is started with:
 

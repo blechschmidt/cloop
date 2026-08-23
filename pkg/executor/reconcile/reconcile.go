@@ -172,10 +172,41 @@ type Options struct {
 	// one the operator needs told about, not one worth waiting for.
 	PreflightTimeout time.Duration
 
-	// ReconcileOrphans asks the Kubernetes driver to sweep Pods left behind
-	// by a control plane that died mid-run. It costs API calls, so only the
-	// entry points a control plane actually restarts as should ask for it.
+	// ReconcileOrphans asks for the full restart sweep: orphaned Pods and
+	// orphaned containers from the drivers, stale `running` session rows, and
+	// leaked task worktrees. It costs API calls and runtime round-trips, so
+	// only the entry points a control plane actually restarts as should ask
+	// for it.
+	//
+	// It was Kubernetes-only until Task 20191, which is why the name says
+	// "orphans" rather than "restart". The three additions all answer the
+	// same question — "what did the process I am replacing leave behind?" —
+	// and splitting them across four flags would only create combinations
+	// with no operator meaning. See startup.go.
 	ReconcileOrphans bool
+
+	// HandleStore persists driver handle identity so a control plane that
+	// restarts reattaches to workloads that are still running instead of
+	// losing them (Task 20191).
+	//
+	// Nil means "open dir's state database", which is what a real deployment
+	// wants and what makes ReconcileOrphans able to tell a workload this hub
+	// dispatched from an orphan. Set DisableHandleStore to opt out entirely.
+	HandleStore executor.HandleStore
+
+	// DisableHandleStore suppresses handle persistence. Tests reconciling
+	// into a private registry set it so a pass over a temp directory does not
+	// create a state database as a side effect.
+	//
+	// It is a separate bool rather than a nil HandleStore because nil already
+	// means "use the default", the same shape Publish needed and for the same
+	// reason: the zero value has to be the production behaviour.
+	DisableHandleStore bool
+
+	// WorktreeMinAge bounds the leaked-worktree sweep. Zero uses
+	// worktree.DefaultMinAge. It is the single most safety-critical knob in
+	// the sweep — see pruneWorktrees.
+	WorktreeMinAge time.Duration
 
 	// KubernetesCredentials overrides how the Kubernetes driver's identity is
 	// obtained. nil uses BrokerCredentials, which reads the secret broker out
@@ -377,15 +408,22 @@ func Bootstrap(dir string, cfg *config.Config, opts Options) Report {
 	if opts.SkipPreflight || len(report.Diagnostics) == 0 {
 		return report
 	}
+	// No sweeping on the second pass: the registration pass above already owns
+	// that decision. The per-driver orphan sweeps are gated on `created` and
+	// so skip themselves here anyway — ensureContainer and ensureKubernetes
+	// both report this pass as a reuse — but Sweep is not, and clearing the
+	// flag is what keeps it from running the session and worktree passes
+	// twice per start. Both are idempotent, so this is about not paying for a
+	// git prune and a round of driver Status calls for no reason.
+	slow := opts
+	slow.ReconcileOrphans = false
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
 				opts.logf("executor: panic during background preflight: %v", r)
 			}
 		}()
-		// No orphan sweep here: the registration pass above already owns
-		// that decision, and ensureKubernetes reports this pass as a reuse.
-		FromConfig(context.Background(), dir, cfg, opts)
+		FromConfig(context.Background(), dir, cfg, slow)
 	}()
 	return report
 }
@@ -421,12 +459,21 @@ func FromConfig(ctx context.Context, dir string, cfg *config.Config, opts Option
 		return report
 	}
 
-	if d, ok := reconcileContainer(ctx, cfg, opts); ok {
+	// Resolved once and threaded into both drivers, so the two never open
+	// separate handles onto the same database (Task 20191).
+	store := opts.handleStore(dir)
+
+	if d, ok := reconcileContainer(ctx, cfg, store, opts); ok {
 		report.Diagnostics = append(report.Diagnostics, d)
 	}
-	if d, ok := reconcileKubernetes(ctx, dir, cfg, opts); ok {
+	if d, ok := reconcileKubernetes(ctx, dir, cfg, store, opts); ok {
 		report.Diagnostics = append(report.Diagnostics, d)
 	}
+	// After the configured drivers, so a container or Kubernetes executor
+	// registered by this pass is not attached twice, and covering the ones
+	// registered elsewhere: the localprocess singleton, and any remote
+	// executor whose device has already dialled in.
+	attachHandleStores(opts.registry(), store)
 
 	sort.Slice(report.Diagnostics, func(i, j int) bool {
 		return report.Diagnostics[i].ID < report.Diagnostics[j].ID
@@ -436,6 +483,14 @@ func FromConfig(ctx context.Context, dir string, cfg *config.Config, opts Option
 	logReport(report, opts)
 	if opts.publish() {
 		publishAt(ticket, report)
+	}
+
+	// Last, and detached: every driver has now rehydrated, which is the
+	// precondition for telling a session whose workload we reattached to from
+	// one whose workload is gone. Detached because a git prune and a runtime
+	// listing must not sit between the hub's start and its listener.
+	if opts.ReconcileOrphans {
+		go Sweep(context.WithoutCancel(ctx), dir, opts)
 	}
 	return report
 }
@@ -492,7 +547,7 @@ func logReport(r Report, opts Options) {
 // reconcileContainer brings up the container sandbox driver. The bool reports
 // whether a diagnostic applies at all: a config with no container section
 // gets no card, because an executor nobody asked for is not a problem.
-func reconcileContainer(ctx context.Context, cfg *config.Config, opts Options) (Diagnostic, bool) {
+func reconcileContainer(ctx context.Context, cfg *config.Config, store executor.HandleStore, opts Options) (Diagnostic, bool) {
 	if !cfg.Executors.Container.Enabled {
 		return Diagnostic{}, false
 	}
@@ -516,14 +571,26 @@ func reconcileContainer(ctx context.Context, cfg *config.Config, opts Options) (
 	// governs every backend identically, so it is attached here rather than in
 	// DriverOptions, which only sees executors.container.
 	driverOpts.ImagePolicy = cfg.Sandbox.ImagePolicy.Policy()
+	// Set before Ensure, because New rehydrates from it: a store attached
+	// afterwards would leave a window in which the driver has been registered,
+	// can be dispatched to, and does not yet know about the containers it is
+	// already responsible for.
+	driverOpts.HandleStore = store
 	d.ID = driverOpts.ID
 
-	ex, err := ensureContainer(reg, driverOpts)
+	ex, created, err := ensureContainer(reg, driverOpts)
 	if err != nil {
 		d.Status = StatusFailed
 		d.Message = fmt.Sprintf("could not be registered: %v", err)
 		d.Remediation = containerRemediation(driverOpts, err)
 		return d, true
+	}
+
+	// Only on the pass that actually registered it — same reasoning as the
+	// Kubernetes sweep below: Bootstrap reconciles twice by design, and two
+	// concurrent sweeps could both decide to remove the same container.
+	if created && opts.ReconcileOrphans {
+		go sweepContainerOrphans(ex, opts)
 	}
 
 	if opts.SkipPreflight {
@@ -556,20 +623,26 @@ func reconcileContainer(ctx context.Context, cfg *config.Config, opts Options) (
 }
 
 // ensureContainer returns the registered container executor, reusing one that
-// is already present so repeated passes neither rebuild nor duplicate it.
-func ensureContainer(reg *executor.Registry, opts container.Options) (*container.Executor, error) {
+// is already present so repeated passes neither rebuild nor duplicate it. The
+// bool reports whether this pass is the one that registered it, which is what
+// gates the orphan sweep.
+func ensureContainer(reg *executor.Registry, opts container.Options) (*container.Executor, bool, error) {
 	if existing, err := reg.Get(opts.ID); err == nil {
 		if ex, ok := existing.(*container.Executor); ok {
-			return ex, nil
+			return ex, false, nil
 		}
 		// Something else already owns this ID — a remote agent enrolled
 		// under it, most likely. Refusing is the honest answer: silently
 		// preflighting a different executor than the config describes would
 		// report health for a backend the operator never configured.
-		return nil, fmt.Errorf("executor ID %q is already taken by a %s executor",
+		return nil, false, fmt.Errorf("executor ID %q is already taken by a %s executor",
 			opts.ID, existing.Kind())
 	}
-	return container.Ensure(reg, opts)
+	ex, err := container.Ensure(reg, opts)
+	if err != nil {
+		return nil, false, err
+	}
+	return ex, true, nil
 }
 
 // containerRemediation turns a registration or preflight failure into the
@@ -596,7 +669,7 @@ func containerRemediation(opts container.Options, err error) string {
 }
 
 // reconcileKubernetes brings up the ephemeral-Pod driver.
-func reconcileKubernetes(ctx context.Context, dir string, cfg *config.Config, opts Options) (Diagnostic, bool) {
+func reconcileKubernetes(ctx context.Context, dir string, cfg *config.Config, store executor.HandleStore, opts Options) (Diagnostic, bool) {
 	if !cfg.Executors.Kubernetes.Enabled {
 		return Diagnostic{}, false
 	}
@@ -618,6 +691,8 @@ func reconcileKubernetes(ctx context.Context, dir string, cfg *config.Config, op
 	}
 	// Same policy, same section, both backends — see reconcileContainer.
 	driverOpts.ImagePolicy = cfg.Sandbox.ImagePolicy.Policy()
+	// Before Ensure, so New rehydrates from it; see reconcileContainer.
+	driverOpts.HandleStore = store
 	d.ID = driverOpts.ID
 
 	ex, created, err := ensureKubernetes(reg, dir, cfg, driverOpts, opts)
@@ -707,30 +782,6 @@ func ensureKubernetes(
 		return nil, false, err
 	}
 	return ex, true, nil
-}
-
-// sweepOrphans garbage-collects Pods a previous control plane left running.
-//
-// Detached and bounded: a cluster slow to answer must not delay the hub's
-// startup, and a sweep that cannot finish in a minute is one the next restart
-// can finish instead.
-func sweepOrphans(ex *kubernetes.Executor, opts Options) {
-	defer func() {
-		if r := recover(); r != nil {
-			opts.logf("executor: panic during orphaned-Pod sweep: %v", r)
-		}
-	}()
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-	defer cancel()
-	removed, err := ex.ReconcileOrphans(ctx)
-	if err != nil {
-		opts.logf("executor %s: could not reconcile orphaned Pods: %v", ex.ID(), err)
-		return
-	}
-	if len(removed) > 0 {
-		opts.logf("executor %s: garbage-collected %d orphaned Pod(s) from a previous run: %s",
-			ex.ID(), len(removed), strings.Join(removed, ", "))
-	}
 }
 
 // kubernetesRemediation names the identity the operator has to fix, which

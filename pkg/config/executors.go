@@ -402,6 +402,11 @@ func ValidateContainerExecutor(c ContainerExecutorConfig) error {
 		}
 	}
 
+	if c.OrphanGracePeriodSeconds < 0 || c.OrphanGracePeriodSeconds > KubernetesSecondsUpper {
+		return fmt.Errorf("executors.container.orphan_grace_period_seconds must be between 0 and %d (got %d)",
+			KubernetesSecondsUpper, c.OrphanGracePeriodSeconds)
+	}
+
 	if c.CPUs < 0 {
 		return fmt.Errorf("executors.container.cpus must be >= 0 (got %v)", c.CPUs)
 	}
@@ -482,6 +487,12 @@ func (c ContainerExecutorConfig) DriverOptions() (container.Options, error) {
 		SELinuxLabel:  c.SELinuxLabel,
 		AllowRootUser: c.AllowRootUser,
 		EgressFilter:  c.EgressFilter.driverFilter(),
+	}
+	// Zero is left alone rather than mapped to a default here: the driver's
+	// Normalize owns that, so a caller building Options by hand and a caller
+	// building them from YAML get the same grace period.
+	if c.OrphanGracePeriodSeconds > 0 {
+		opts.OrphanGracePeriod = time.Duration(c.OrphanGracePeriodSeconds) * time.Second
 	}
 	return opts.Normalize()
 }
@@ -730,6 +741,11 @@ func clampContainerExecutor(c *ContainerExecutorConfig) []string {
 		rt != container.RuntimePodman && rt != container.RuntimeDocker {
 		changed = append(changed, fmt.Sprintf("executors.container.runtime: %q is not a supported runtime", rt))
 		c.Runtime = ""
+	}
+	if c.OrphanGracePeriodSeconds < 0 || c.OrphanGracePeriodSeconds > KubernetesSecondsUpper {
+		changed = append(changed, fmt.Sprintf("executors.container.orphan_grace_period_seconds: value %d outside [0, %d]",
+			c.OrphanGracePeriodSeconds, KubernetesSecondsUpper))
+		c.OrphanGracePeriodSeconds = 0
 	}
 	if c.CPUs < 0 || c.CPUs > ContainerCPUsUpper {
 		changed = append(changed, fmt.Sprintf("executors.container.cpus: value %v outside [0, %.0f]", c.CPUs, ContainerCPUsUpper))

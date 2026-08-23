@@ -272,12 +272,37 @@ func (a *Agent) resumeOffers() []remote.ResumeHandle {
 	return out
 }
 
-// applyResume restarts the streams the control plane still wants and abandons
-// the ones it has forgotten.
+// applyResume restarts the streams the control plane still wants and stops the
+// workloads it has disowned.
+//
+// Stopping, not merely abandoning, and that is the fix for the worst failure
+// this protocol had. This function used to answer a refusal by calling forget:
+// bookkeeping dropped, provisioning cancelled, vault binding released — and the
+// process left running. Nobody was left to read its output, collect its result
+// or signal it, and no reaper existed on either side, so a control-plane restart
+// silently converted every in-flight run on the device into a harness that
+// would burn a CPU until someone logged in and found it. Killing is the only
+// honest response to "nothing is listening any more": the work is already lost
+// at that point, and the only remaining question is whether the machine keeps
+// paying for it.
+//
+// Two shapes of refusal are handled, and they must stay both handled:
+//
+//   - an explicit ResumeTerminate (protocol v5 and newer), which carries the
+//     control plane's reason into this device's log;
+//   - no entry at all, which is the only refusal a pre-v5 control plane can
+//     express, and is still what one sends. An agent that treated absence as
+//     benign would leave the leak in place against every hub that has not been
+//     upgraded yet — which, since agents are upgraded independently of hubs, is
+//     most of the fleet for most of a rollout.
+//
+// An entry that is present with an action this build does not recognise resumes
+// rather than dies: see ResumeAck.Effective for why the unknown-dialect case
+// has to fail towards keeping the work.
 func (a *Agent) applyResume(ctx context.Context, sess *deviceSession, w remote.WelcomePayload) {
-	accepted := make(map[string]int64, len(w.ResumeAccepted))
+	acks := make(map[string]remote.ResumeAck, len(w.ResumeAccepted))
 	for _, ack := range w.ResumeAccepted {
-		accepted[ack.HandleID] = ack.FromOffset
+		acks[ack.HandleID] = ack
 	}
 
 	a.mu.Lock()
@@ -288,21 +313,43 @@ func (a *Agent) applyResume(ctx context.Context, sess *deviceSession, w remote.W
 	a.mu.Unlock()
 
 	for _, wl := range current {
-		from, ok := accepted[wl.handleID]
-		if !ok {
-			// The control plane no longer tracks this workload. Streaming its
-			// output would waste the device's uplink on data nobody will
-			// read; the process is left alone and simply stops being
-			// reported, and the heartbeat's handle list will drop it.
-			a.cfg.logf("control plane no longer tracks %s; abandoning its stream", wl.handleID)
-			a.forget(wl.handleID)
-			continue
+		ack, ok := acks[wl.handleID]
+		switch {
+		case !ok:
+			a.stopDisowned(ctx, wl.handleID,
+				"the control plane did not acknowledge this workload on reconnect, so it is no "+
+					"longer tracked there")
+		case ack.Effective() == remote.ResumeTerminate:
+			reason := strings.TrimSpace(ack.Reason)
+			if reason == "" {
+				reason = "the control plane asked for this workload to be terminated on reconnect"
+			}
+			a.stopDisowned(ctx, wl.handleID, reason)
+		default:
+			wl.sendMu.Lock()
+			wl.sentOffset = ack.FromOffset
+			wl.sendMu.Unlock()
+			a.flush(ctx, sess, wl)
 		}
-		wl.sendMu.Lock()
-		wl.sentOffset = from
-		wl.sendMu.Unlock()
-		a.flush(ctx, sess, wl)
 	}
+}
+
+// stopDisowned terminates a workload the control plane is no longer tracking
+// and then drops it.
+//
+// The order is load-bearing: terminateWorkload needs the workload still in the
+// map to find its process, and forget removes it. The SIGKILL escalation
+// terminateWorkload arms works off the localprocess handle rather than off this
+// map, so it survives the forget and a harness that traps SIGTERM still dies.
+//
+// forget runs on every path, including the one where nothing was signalled. A
+// workload that has already exited, or that has not launched because its source
+// tree is still being fetched, has no process to stop — but it must still stop
+// being reported, and for the second case forget is what cancels the fetch.
+func (a *Agent) stopDisowned(ctx context.Context, handleID, reason string) {
+	a.cfg.logf("stopping %s: %s", handleID, reason)
+	a.terminateWorkload(ctx, handleID, reason)
+	a.forget(handleID)
 }
 
 // heartbeatLoop beats at the protocol interval with jitter.

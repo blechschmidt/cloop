@@ -121,41 +121,69 @@ func (a *Agent) scrubHandleEnv(handleID string, keys []string) []string {
 
 // killHolders terminates every workload still holding a revoked lease.
 //
-// SIGTERM first so a harness can flush and exit cleanly, SIGKILL after
-// killGrace so a process that traps the signal cannot outlive the revocation.
 // The returned list is what was actually signalled, so the ack does not claim
 // to have stopped a task that had already finished.
 func (a *Agent) killHolders(ctx context.Context, handles []string, reason string) []string {
 	var killed []string
 	for _, handleID := range handles {
-		wl, ok := a.workload(handleID)
-		if !ok {
-			continue
+		if a.terminateWorkload(ctx, handleID, "its credential was revoked"+reasonSuffix(reason)) {
+			killed = append(killed, handleID)
 		}
-		localID, _ := wl.local()
-		if localID == "" {
-			continue
-		}
-		if st := wl.snapshot(); st.State.Terminal() {
-			continue
-		}
-		if err := a.local.Signal(ctx, localID, executor.SignalTerminate); err != nil {
-			a.cfg.logf("revoke: terminate %s: %v", handleID, err)
-			continue
-		}
-		killed = append(killed, handleID)
-		a.cfg.logf("revoke: terminated %s because its credential was revoked%s",
-			handleID, reasonSuffix(reason))
-		go a.escalateKill(handleID, localID)
 	}
 	return killed
 }
 
+// terminateWorkload stops one running workload, reporting whether a signal was
+// actually delivered.
+//
+// SIGTERM first so a harness can flush and exit cleanly, SIGKILL after
+// killGrace so a process that traps the signal cannot outlive the decision to
+// stop it. That escalation is what makes this a termination rather than a
+// request, and it is why every caller that means "this workload must stop" goes
+// through here instead of signalling directly: a bare SIGTERM is something a
+// harness can ignore.
+//
+// The two callers want it for different reasons and neither is the other's
+// special case. A revocation kills because the credential in the process's own
+// memory cannot be reached any other way. A refused resume kills because the
+// control plane has no record of the workload, so nothing will read its output
+// or collect its result — the work is already lost and only the CPU is still
+// being spent. False means there was nothing to signal: the workload is not
+// here, has not launched yet, or has already finished.
+func (a *Agent) terminateWorkload(ctx context.Context, handleID, reason string) bool {
+	wl, ok := a.workload(handleID)
+	if !ok {
+		return false
+	}
+	localID, _ := wl.local()
+	if localID == "" {
+		// Bound but not launched: the workload is still fetching its source
+		// tree, and there is no process a signal could reach. Callers pair this
+		// with forget, which cancels the fetch — the only lever that exists
+		// during that window.
+		return false
+	}
+	if st := wl.snapshot(); st.State.Terminal() {
+		return false
+	}
+	if err := a.local.Signal(ctx, localID, executor.SignalTerminate); err != nil {
+		a.cfg.logf("terminate %s: %v", handleID, err)
+		return false
+	}
+	a.cfg.logf("terminated %s: %s", handleID, reason)
+	go a.escalateKill(handleID, localID)
+	return true
+}
+
 // escalateKill sends SIGKILL if the workload is still alive after killGrace.
 //
-// Detached from the revoke's context on purpose: the ack goes out immediately,
-// and the escalation must not be cancelled by the request that triggered it
-// returning. Bounded by killGrace either way, so it cannot leak.
+// Detached from the caller's context on purpose: a revoke's ack goes out
+// immediately and a refused resume's handshake returns immediately, and the
+// escalation must not be cancelled by either. It works off the localprocess
+// handle rather than looking the workload up again, so it still fires for a
+// workload the caller has since dropped from its bookkeeping — which is exactly
+// the abandoned-resume case, where forgetting the handle is the point.
+// Bounded by killGrace either way, so it cannot leak.
 func (a *Agent) escalateKill(handleID, localID string) {
 	defer func() {
 		if r := recover(); r != nil {
