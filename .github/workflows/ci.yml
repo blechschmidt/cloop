@@ -251,7 +251,29 @@ jobs:
         # -race because the single-use enrollment token check races eight
         # concurrent redemptions against each other, and a non-atomic guard
         # is exactly what it is looking for.
-        run: go test -race -v -timeout 15m ./tests/security/
+        #
+        # The failing assertions are re-emitted as ::error:: annotations, not
+        # only left in the log. Reading a job log needs a token; annotations
+        # come back from the public check-runs API, so with this a maintainer
+        # without push rights — and anyone reproducing a failure from outside
+        # — can see *which* guarantee broke rather than "exit code 1". This
+        # suite failed on every commit for months while the only thing visible
+        # from outside was the exit code.
+        run: |
+          set -o pipefail
+          if go test -race -v -timeout 15m ./tests/security/ 2>&1 | tee /tmp/security.log; then
+            exit 0
+          fi
+          echo "::error::the threat-model conformance suite failed; the assertions are below"
+          # Test names and the file:line of each failed assertion. Capped
+          # because GitHub keeps only the first handful of annotations per
+          # step, and the first failures are the ones worth reading.
+          grep -E '^\s*--- FAIL|^\s+[A-Za-z0-9_]+\.go:[0-9]+:|^panic:|^\s*FAIL\s' /tmp/security.log \
+            | head -25 \
+            | while IFS= read -r line; do
+                printf '::error::%s\n' "$(printf '%s' "$line" | sed 's/^[[:space:]]*//')"
+              done
+          exit 1
 
       - name: Fuzz the remote agent protocol framing
         # A short smoke fuzz on every push: long enough to catch a decoder
