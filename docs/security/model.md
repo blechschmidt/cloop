@@ -1398,15 +1398,22 @@ defence. The end-to-end rows skip where `git` is not installed.
 | The control: ordinary work — including a contained symlink — genuinely lands, so the rows above are not passing because everything is rejected | `TestWriteBackBundleDeliversOrdinaryWork`, `TestWriteBackAcceptsOrdinaryContent` |
 | A rejection leaves nothing behind: no `refs/heads` branch, and no surviving quarantine ref for a later checkout to find | asserted in every refusal row above |
 
-One asymmetry is pinned rather than smoothed over. Which layer refuses a `.git`
-tree depends on the transport: git's `fetch.fsckObjects`/`hasDotgit` check runs
-only when the objects arrive as a pack, so on the bundle path
-`executor.InspectWriteBack` is the sole defence, while on the push path git
-refuses first — and `pkg/writeback` reports git's refusal through
-`ErrWriteBackUnavailable`, the sentinel meaning *"infrastructure problem"*,
-rather than `ErrWriteBackRejected`. The commit does not land either way, but a
-caller that retries on `ErrWriteBackUnavailable` would retry a hostile
-write-back. See the note on `assertGitHookNeverLands`.
+Which layer refuses a `.git` tree is deliberately not pinned, because it is not
+stable. Git runs `fetch.fsckObjects`/`hasDotgit` from `index-pack`, and whether
+a bundle fetch reaches `index-pack` or unpacks loose objects changed under us —
+measured with a hostile bundle and both fsck settings on, git 2.43 and 2.45
+unpack loose and never run fsck, while 2.47 and 2.54 pack them and fsck refuses
+first. The push path has always packed. So on an older git
+`executor.InspectWriteBack` is the sole defence on the bundle path, and on a
+newer one git usually speaks first; the suite asserts the property on every
+transport and every version rather than the layer.
+
+What *is* pinned is the classification. Both layers report a content refusal as
+`ErrWriteBackRejected`, never as `ErrWriteBackUnavailable` — the sentinel
+meaning *"infrastructure problem, retry it"*. This closes a finding: git's own
+refusal used to arrive as `ErrWriteBackUnavailable`, so a caller that retried on
+that sentinel would have retried a hostile write-back on a loop, and whether it
+did so depended on the git version installed on the hub.
 
 ### Sealing keys and rotation — `keyrotation_test.go`
 

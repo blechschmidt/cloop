@@ -259,20 +259,78 @@ jobs:
         # — can see *which* guarantee broke rather than "exit code 1". This
         # suite failed on every commit for months while the only thing visible
         # from outside was the exit code.
+        # Annotations are derived from -json rather than grepped out of the
+        # log. Grepping for `file.go:123:` cannot tell a t.Log from a t.Error
+        # — they are the same shape — so the first version of this reported
+        # eight failures when there was one, and the real assertion was the
+        # last of them. -json attributes every line to a test and says which
+        # tests failed, so only those are re-emitted.
         run: |
           set -o pipefail
-          if go test -race -v -timeout 15m ./tests/security/ 2>&1 | tee /tmp/security.log; then
+          # -json is not readable in a job log, so the raw stream is kept for
+          # the annotation pass below and the human form is reconstructed here
+          # as the tests run. A line that is not an event (the go command's own
+          # errors, which 2>&1 merges in) is passed through untouched.
+          cat > /tmp/unjson.py <<'PY'
+          import json, sys
+
+          for line in sys.stdin:
+              try:
+                  event = json.loads(line)
+              except ValueError:
+                  sys.stdout.write(line)
+                  continue
+              if event.get('Action') == 'output':
+                  sys.stdout.write(event.get('Output', ''))
+          PY
+          if go test -json -race -v -timeout 15m ./tests/security/ 2>&1 \
+               | tee /tmp/security.json \
+               | python3 -u /tmp/unjson.py; then
             exit 0
           fi
           echo "::error::the threat-model conformance suite failed; the assertions are below"
-          # Test names and the file:line of each failed assertion. Capped
-          # because GitHub keeps only the first handful of annotations per
-          # step, and the first failures are the ones worth reading.
-          grep -E '^\s*--- FAIL|^\s+[A-Za-z0-9_]+\.go:[0-9]+:|^panic:|^\s*FAIL\s' /tmp/security.log \
-            | head -25 \
-            | while IFS= read -r line; do
-                printf '::error::%s\n' "$(printf '%s' "$line" | sed 's/^[[:space:]]*//')"
-              done
+          python3 - <<'PY'
+          import json, collections
+
+          out, failed = collections.defaultdict(list), []
+          with open('/tmp/security.json') as fh:
+              for line in fh:
+                  try:
+                      e = json.loads(line)
+                  except ValueError:
+                      continue
+                  key = (e.get('Package', ''), e.get('Test') or '')
+                  if e.get('Action') == 'output':
+                      out[key].append(e.get('Output', ''))
+                  elif e.get('Action') == 'fail' and e.get('Test'):
+                      failed.append(key)
+
+          # A parent fails because its subtest did, and its own output is just
+          # the summary line — the subtest's annotation is the one carrying the
+          # assertion. Emitting both puts a content-free entry next to the real
+          # one, inside a per-step annotation budget.
+          names = {t for _, t in failed}
+          failed = [(p, t) for p, t in failed
+                    if not any(o != t and o.startswith(t + '/') for o in names)]
+
+          noise = ('=== RUN', '=== PAUSE', '=== CONT', '=== NAME')
+          shown = 0
+          for pkg, test in failed:
+              body = [l.rstrip() for l in out[(pkg, test)]
+                      if l.strip() and not l.lstrip().startswith(noise)]
+              if not body:
+                  continue
+              # GitHub caps annotations per step; the first failures are the
+              # ones worth reading, and the log above still has all of them.
+              shown += 1
+              if shown > 20:
+                  print(f'::notice::{len(failed) - 20} further failing test(s) '
+                        f'are in the log above')
+                  break
+              msg = '%0A'.join(l.replace('%', '%25').replace('\r', '')
+                               for l in body[:12])
+              print(f'::error title={test}::{msg}')
+          PY
           exit 1
 
       - name: Fuzz the remote agent protocol framing

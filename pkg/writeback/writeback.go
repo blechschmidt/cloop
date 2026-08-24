@@ -19,27 +19,38 @@
 // spends its whole life somewhere `git checkout` will not find it, and a
 // rejection deletes it.
 //
-// # Two layers of content checks, and where the first one is absent
+// # Two layers of content checks, and why neither may be assumed
 //
 // Every fetch here runs with fetch.fsckObjects and core.protectNTFS/protectHFS
 // set, so git refuses malformed objects and — the part that matters — trees
 // containing a path named .git in any of the spellings a case-insensitive
 // filesystem would fold back to it.
 //
-// That layer is real on the push path and *absent on the bundle path*. Git runs
-// its fsck rules from index-pack, which only executes when objects arrive as a
-// pack over a transport; a fetch from a local bundle file unpacks loose objects
-// and skips them entirely. Verified against git 2.43: a bundle carrying a tree
-// entry named .git fetches cleanly with both fsck settings on.
+// Whether that layer fires on the bundle path depends on the git in $PATH, so
+// it is not something this package may rely on. Git runs its fsck rules from
+// index-pack, and which of index-pack or unpack-objects handles a bundle fetch
+// changed under us. Measured, with a bundle carrying a tree entry named .git
+// and both fsck settings on:
 //
-// So executor.InspectWriteBack is not a second opinion, it is the only opinion
-// on the transport that needs one most — the one that requires no credential.
-// It is also the layer that knows things fsck does not care about: that a
-// symlink pointing outside the project root turns every later write through it
-// into a write anywhere on the control plane, and that a submodule entry names
-// a URL rather than content. tests/security/writeback_bundle_test.go asserts
-// the refusals over both transports for exactly this reason — the two paths do
-// not have the same defences, so neither may be assumed to cover the other.
+//	git 2.43, 2.45  fetch succeeds  — objects unpack loose, fsck never runs
+//	git 2.47, 2.54  fetch fails     — hasDotgit, "fsck error in packed object"
+//
+// The push path has always run through index-pack and so has always had it.
+//
+// This is why executor.InspectWriteBack is not a second opinion: on any git
+// that unpacks loose it is the only opinion, on the transport that needs one
+// most — the one requiring no credential. It is also the layer that knows
+// things fsck does not care about: that a symlink pointing outside the project
+// root turns every later write through it into a write anywhere on the control
+// plane, and that a submodule entry names a URL rather than content.
+//
+// Because either layer may be the one that speaks, both classify a content
+// refusal the same way — as ErrWriteBackRejected, never as the retryable
+// ErrWriteBackUnavailable. A hostile write-back must not be reported as an
+// outage on one git and a rejection on another.
+// tests/security/writeback_bundle_test.go asserts the refusals over both
+// transports for exactly this reason — the two paths do not have the same
+// defences, so neither may be assumed to cover the other.
 //
 // # Both transports are inspected
 //
@@ -404,8 +415,21 @@ func fetchFromBundle(ctx context.Context, g *gitRunner, req Request,
 		return fmt.Errorf("%w: the returned bundle is not usable here: %v: %s",
 			executor.ErrWriteBackRejected, err, collapse(out))
 	}
-	if _, err := g.untrustedFetch(ctx, "--no-tags", "--", path,
+	if out, err := g.untrustedFetch(ctx, "--no-tags", "--", path,
 		"+refs/heads/"+branch+":"+quarantine); err != nil {
+		if isFsckRefusal(out) {
+			// Git refused the content, not the transfer — the same judgement
+			// the push path makes, and it has to reach the caller the same
+			// way. Whether git gets to make it here at all depends on the git
+			// version (package comment), so classifying it as the retryable
+			// ErrWriteBackUnavailable would mean a hostile bundle is an
+			// "outage, retry it" on 2.47 and a rejection on 2.45. The verdict
+			// on a sandbox's work product must not depend on that.
+			return &executor.WriteBackRejection{
+				Branch: branch, CommitSHA: rep.CommitSHA,
+				Reason: "git refused the bundled objects: " + collapse(out),
+			}
+		}
 		return fmt.Errorf("%w: cannot fetch %s out of the returned bundle: %v",
 			executor.ErrWriteBackUnavailable, branch, err)
 	}
@@ -510,13 +534,18 @@ func (g *gitRunner) run(ctx context.Context, args ...string) (string, error) {
 // case-insensitive or NTFS filesystem folds back to it; protectHFS and
 // protectNTFS extend that to the Unicode and 8.3 forms.
 //
-// They are set on every fetch and they only fire on some. Git runs fsck from
-// index-pack, which handles objects arriving as a pack; a fetch from a local
-// bundle unpacks loose objects and never reaches it. So this hardens the push
-// path and does nothing for the bundle path, where InspectWriteBack stands
-// alone. Setting them anyway is still right — the push path is real, and the
-// cost is two -c flags — but nothing here may be relied on as the reason a
-// hostile tree cannot land.
+// They are set on every fetch and they fire on some. Git runs fsck from
+// index-pack, and whether a bundle fetch reaches index-pack or unpacks loose
+// objects depends on the git version — 2.45 unpacks loose and skips fsck
+// entirely, 2.47 packs and enforces it (see the package comment for the
+// measurements). The push path always reaches it.
+//
+// So this is a layer that is present or absent depending on the machine, and
+// nothing here may be relied on as the reason a hostile tree cannot land; that
+// is InspectWriteBack's job. Setting the flags is still right — where they do
+// fire they stop the objects before they are ever written — and callers must
+// treat a refusal from either layer identically, which is what isFsckRefusal
+// below is for.
 func (g *gitRunner) untrustedFetch(ctx context.Context, args ...string) (string, error) {
 	pre := []string{
 		"-c", "fetch.fsckObjects=true",

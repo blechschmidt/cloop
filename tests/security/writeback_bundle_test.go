@@ -358,19 +358,24 @@ func TestWriteBackAcceptsOrdinaryContent(t *testing.T) {
 // bundle would be securing the path that needs no credential while leaving open
 // the one that does.
 //
-// The two subtests assert different things about *which* layer refuses, because
-// they genuinely differ, and the difference is worth pinning rather than
-// papering over:
+// What this deliberately does *not* pin is which layer does the refusing. An
+// earlier version of this test did, and it was wrong within two git releases:
 //
-//   - bundle: git's fetch-time fsck does not run, so executor.InspectWriteBack
-//     is the only defence and the refusal is the typed *WriteBackRejection
-//     naming the hook path.
 //   - push: the sandbox's push packs the objects, the hub's fetch runs them
 //     through index-pack, and fetch.fsckObjects/hasDotgit refuses them before
-//     the inspection is ever reached. That refusal is real, but pkg/writeback
-//     wraps a failed fetch as ErrWriteBackUnavailable — the sentinel that means
-//     "infrastructure problem, retry it" — so a *security* event arrives
-//     classified as an outage. See the note on assertGitHookNeverLands.
+//     the inspection is reached. This has always been so.
+//   - bundle: whether the fetch reaches index-pack at all depends on the git
+//     version. Measured with this exact hostile bundle: 2.43 and 2.45 unpack
+//     loose objects and never run fsck, leaving executor.InspectWriteBack as
+//     the only defence; 2.47 and 2.54 pack them and fsck refuses first. The
+//     test asserted the former and so began failing on any modern runner while
+//     passing on the developer's 2.43 — a false red that says nothing about
+//     whether the hook can land.
+//
+// So the assertions below are the properties that must hold on every transport
+// and every git: the hook does not land, the refusal is classified as a
+// rejection rather than a retryable outage, and it names what was refused.
+// Which layer speaks is git's business.
 func TestWriteBackBundleCannotDeliverAGitHook(t *testing.T) {
 	t.Run("bundle transport", func(t *testing.T) {
 		s := newWriteBackScene(t)
@@ -388,19 +393,21 @@ func TestWriteBackBundleCannotDeliverAGitHook(t *testing.T) {
 		})
 		assertGitHookNeverLands(t, s, err)
 
-		// On this transport the content policy is what stopped it, and it says
-		// so: the path an operator has to see is in the error.
-		if !errors.Is(err, executor.ErrWriteBackRejected) {
-			t.Fatalf("a bundled .git/hooks/post-checkout was not refused by the content "+
-				"policy: %v\n  git's own fsck does not run on a bundle fetch, so "+
-				"InspectWriteBack is the only thing between a sandbox and a hook on the hub.", err)
-		}
 		var rej *executor.WriteBackRejection
 		if !errors.As(err, &rej) {
 			t.Fatalf("want a *WriteBackRejection an operator can read, got %T: %v", err, err)
 		}
-		if rej.Path != ".git/hooks/post-checkout" {
-			t.Errorf("the rejection names %q, not the hook path", rej.Path)
+		// Whichever layer refused has to say what it refused, or the operator
+		// is left with "write-back rejected" and no way to tell a hostile
+		// sandbox from a broken one. The two name different things: the content
+		// policy walked the tree and has the path, git's fsck died inside
+		// index-pack and has only the object id and the rule it broke.
+		namesTheViolation := rej.Path == ".git/hooks/post-checkout" ||
+			strings.Contains(strings.ToLower(rej.Reason), "hasdotgit")
+		if !namesTheViolation {
+			t.Errorf("the rejection names neither the hook path nor git's hasDotgit rule, so "+
+				"an operator cannot tell what was refused:\n  path=%q\n  reason=%q",
+				rej.Path, rej.Reason)
 		}
 	})
 
@@ -425,27 +432,23 @@ func TestWriteBackBundleCannotDeliverAGitHook(t *testing.T) {
 // hook does not become a branch on the hub, and nothing unvetted outlives the
 // attempt.
 //
-// The error is required to carry one of the two write-back sentinels rather than
-// specifically ErrWriteBackRejected, and that weakening is a finding rather than
-// a convenience. Which layer refuses a .git tree depends on whether git had to
-// run index-pack — that is, on whether the source happened to hand over a pack
-// or loose objects — and the applier reports git's own refusal through
-// ErrWriteBackUnavailable, whose documented meaning is "nothing about the task's
-// code is implicated; the remedy is an operator's". A hub that retried on that
-// sentinel would retry a hostile write-back. Tightening it means classifying an
-// fsck failure during untrustedFetch as a rejection; when that lands, this
-// assertion should become errors.Is(err, ErrWriteBackRejected) on both
-// transports.
+// The error must carry ErrWriteBackRejected specifically. This used to accept
+// ErrWriteBackUnavailable as well, because when git's own fsck was the layer
+// that refused, pkg/writeback reported it as a failed fetch — and that sentinel
+// is documented as "nothing about the task's code is implicated; the remedy is
+// an operator's". A hub that retried on it would retry a hostile write-back on
+// a loop. Both transports now classify a content refusal as a rejection, so the
+// weakening is gone and this asserts the property directly.
 func assertGitHookNeverLands(t *testing.T, s *writeBackScene, err error) {
 	t.Helper()
 	if err == nil {
 		t.Fatalf("a commit adding .git/hooks/post-checkout was accepted\n" +
 			"  A hook delivered this way runs on the hub at the next checkout of the branch.")
 	}
-	if !errors.Is(err, executor.ErrWriteBackRejected) &&
-		!errors.Is(err, executor.ErrWriteBackUnavailable) {
-		t.Fatalf("the refusal carries neither write-back sentinel, so no caller can classify "+
-			"it: %T: %v", err, err)
+	if !errors.Is(err, executor.ErrWriteBackRejected) {
+		t.Fatalf("a .git/hooks write-back was refused as %T: %v\n"+
+			"  It has to carry ErrWriteBackRejected: ErrWriteBackUnavailable means "+
+			"\"retry it\", and this must never be retried.", err, err)
 	}
 	assertWriteBackLeftNoTrace(t, s, writeBackTestBranch)
 }
