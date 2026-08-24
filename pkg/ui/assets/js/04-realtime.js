@@ -113,8 +113,84 @@ if (!_clientID) {
   };
 })();
 
+// ── Stream scoping (Task 20197) ──────────────────────────────────────────────
+//
+// A realtime frame carries no project identity. The server puts that identity
+// in the *subscription*: a stream opened with ?project_idx=N joins that
+// project's hub room and receives only its events. So the project a frame
+// belongs to is a property of the stream that delivered it, and the client has
+// to remember it — nothing in the payload can be consulted after the fact.
+//
+// Two interleavings make that remembering necessary, and both were reproduced
+// against this bundle before the guard existed (see testdata/scoping_-
+// scenarios.js):
+//
+//   1. Switching projects closes the old socket and opens a new one, but
+//      close() only *starts* a handshake. Frames already in flight on the old
+//      socket still reach onmessage, after selectedProjectIdx has moved on.
+//   2. The projects landing page holds a stream with no project_idx, which
+//      resolveWorkDir resolves to the primary project. Clicking into a project
+//      leaves that stream's in-flight frames — full state for a project the
+//      user did not open — arriving under the new selection.
+//
+// In both cases the old guard (`selectedProjectIdx === null`) let the frame
+// through: it answers "is a project selected", not "is this frame for the
+// project that is selected".
+//
+// Types that carry one project's data. Everything else (projects, executor_-
+// update, audit_append, secrets_update, resync, error) is fleet-wide and is
+// broadcast to every room, so it must not be filtered.
+//
+// presence is deliberately absent: it describes who is connected to the room,
+// which is meaningful on the projects landing page too. It is filtered by
+// stream identity rather than by project — see below.
+const PROJECT_SCOPED_EVENTS = new Set([
+  'task_update', 'state_diff', 'task_added', 'task_deleted', 'task_mutation',
+  'step_output', 'run_state', 'suggest_status', 'provider_call',
+]);
+
+// _streamScope captures what the current selection is, to be frozen into a
+// stream at the moment it is opened.
+function _streamScope() {
+  return {idx: selectedProjectIdx};
+}
+
+// _isCurrentStream reports whether `scope` describes the stream the UI is
+// currently driven by. null matches null: the landing page's fleet-wide stream
+// is the current one while no project is selected.
+function _isCurrentStream(scope) {
+  if (!isMultiProject) return true;   // one project, one stream, no index space
+  return (scope ? scope.idx : null) === selectedProjectIdx;
+}
+
+// _scopeAccepts reports whether a project-scoped frame delivered by a stream
+// opened for `scope` may be applied to the UI now.
+//
+// Identity is the stream's captured index, not anything in the frame: an
+// unscoped stream (idx null) is bound server-side to the primary project, so
+// it is never a match for a selected project — which is precisely case 2.
+function _scopeAccepts(scope) {
+  if (!isMultiProject) return true;
+  // Landing page: no project is being rendered, so no per-project frame is.
+  // Belt to the server's braces — a current server sends no project frames on
+  // a scope=global stream at all, but an older one predates that contract.
+  if (selectedProjectIdx === null) return false;
+  return _isCurrentStream(scope);
+}
+
 // handleRealtimeMsg dispatches a typed message from either WebSocket or SSE.
-function handleRealtimeMsg(type, data) {
+// scope is the stream's captured selection (see _streamScope); it is absent
+// only for synthetic calls, which are treated as belonging to the current
+// selection.
+function handleRealtimeMsg(type, data, scope) {
+  const from = scope === undefined ? _streamScope() : scope;
+  if (PROJECT_SCOPED_EVENTS.has(type) && !_scopeAccepts(from)) return;
+  // Presence is per-room, so a superseded stream would paint the previous
+  // project's collaborators over the current one's.
+  if (type === 'presence' && !_isCurrentStream(from)) return;
+
+  // Set after the scope gate, not before: a frame from a superseded stream
+  // says nothing about whether the *current* stream is healthy.
   const dot = document.getElementById('liveDot');
   if (dot) dot.classList.add('connected');
 
@@ -156,12 +232,9 @@ function handleRealtimeMsg(type, data) {
   // FrontendWSCases for the architectural invariant.
   switch (type) {
     case 'task_update':
-      // Task 20134: in multi-project mode the WebSocket subscribes to the
-      // currently-selected project (via project_idx in the WS URL), so any
-      // event we receive here is for the right project. Only skip when no
-      // project is selected (the all-projects landing view doesn't render
-      // per-project payloads).
-      if (isMultiProject && selectedProjectIdx === null) return;
+      // Visibility is settled by the scope gate at the top of this function
+      // (Task 20197): reaching here means the delivering stream is the one
+      // opened for the currently-selected project.
       try { render(data); } catch(_) {}
       // Analytics refresh is scheduled by the dispatch switch above
       // (Task 20126) — no inline call here.
@@ -169,9 +242,12 @@ function handleRealtimeMsg(type, data) {
     case 'state_diff':
       // Task 20132: server ships only the delta against its cached snapshot
       // (tasks_added / tasks_removed / tasks_changed / state_changed). Apply
-      // to local appState and re-render. Same multi-project visibility rule
-      // as task_update — the hub already filters by project subscription.
-      if (isMultiProject && selectedProjectIdx === null) return;
+      // to local appState and re-render.
+      //
+      // A delta is the more dangerous of the two to misroute: applyStateDiff
+      // merges into whatever appState holds, so a frame from the wrong stream
+      // splices another project's tasks into this project's list rather than
+      // replacing it. The scope gate above is what keeps that from happening.
       try { applyStateDiff(data); } catch(_) {}
       break;
     case 'step_output':
@@ -203,11 +279,8 @@ function handleRealtimeMsg(type, data) {
       try {
         if (data.state) {
           // Legacy server (pre Task 20132): payload still has full state.
-          // Task 20134: hub already filters by project subscription, so render
-          // unless we're on the all-projects landing.
-          if (!isMultiProject || selectedProjectIdx !== null) {
-            render(data.state);
-          }
+          // Scope-gated above like every other project-scoped kind.
+          render(data.state);
         }
         if (data.conflict) {
           const taskTitle = data.task && data.task.title ? '"' + data.task.title + '"' : 'a task';
@@ -222,11 +295,7 @@ function handleRealtimeMsg(type, data) {
       // the full state in data.state — apply it if present for backwards
       // compat with older daemons.
       try {
-        if (data.state) {
-          if (!isMultiProject || selectedProjectIdx !== null) {
-            render(data.state);
-          }
-        }
+        if (data.state) { render(data.state); }
       } catch(_) {}
       break;
     case 'run_state':
@@ -323,6 +392,14 @@ function _streamParams() {
   if (authToken) params.push('token=' + encodeURIComponent(authToken));
   if (isMultiProject && selectedProjectIdx !== null) {
     params.push('project_idx=' + encodeURIComponent(selectedProjectIdx));
+  } else if (isMultiProject) {
+    // The projects landing page wants fleet-wide events only. Saying so is
+    // what stops the server from resolving the missing index to the primary
+    // project and streaming its state to a client that renders none of it —
+    // frames that used to arrive under whichever project the user opened next
+    // (Task 20197). Single-project mode never sends this, so its stream keeps
+    // being primed exactly as before.
+    params.push('scope=global');
   }
   return params.length ? '?' + params.join('&') : '';
 }
@@ -353,6 +430,11 @@ function connectWS() {
   const url   = _wsURL();
   const dot   = document.getElementById('liveDot');
 
+  // Frozen with the URL: _wsURL() encodes this same selection as project_idx,
+  // so the scope and the subscription the server creates from it are decided
+  // in the same breath and cannot drift apart (Task 20197).
+  const scope = _streamScope();
+
   let ws;
   try { ws = new WebSocket(url); } catch(_) { _fallbackToSSE(); return; }
   wsConn = ws;
@@ -361,6 +443,10 @@ function connectWS() {
     wsBackoff = 1000; // reset on successful connect
     sseUsed = false;
     if (dot) dot.classList.add('connected');
+    // A socket for a project the user has already navigated away from must not
+    // hydrate the log panel: pUrl() would resolve against the *current*
+    // selection, pulling the new project's log on the old project's event.
+    if (!_scopeAccepts(scope)) return;
     // On reconnect also refresh the live log buffer in case we missed output.
     api(pUrl('/api/livelog')).then(d => {
       if (d.lines && d.lines.length) {
@@ -373,7 +459,7 @@ function connectWS() {
   ws.onmessage = (e) => {
     try {
       const msg = JSON.parse(e.data);
-      handleRealtimeMsg(msg.type, msg.data);
+      handleRealtimeMsg(msg.type, msg.data, scope);
     } catch(_) {}
   };
 
@@ -421,9 +507,14 @@ function connectSSE() {
   // the stream to the project it resolves here and filters project-scoped
   // events against it (Task 20189).
   evtSource = new EventSource('/api/events' + _streamParams());
+  // Same capture as the WebSocket path, for the same reason: an EventSource is
+  // bound server-side to the project it resolved at connect time, and close()
+  // does not retract frames already written to the response (Task 20197).
+  const scope = _streamScope();
   const dot = document.getElementById('liveDot');
   evtSource.onopen = () => {
     dot.classList.add('connected');
+    if (!_scopeAccepts(scope)) return;
     api(pUrl('/api/livelog')).then(d => {
       if (d.lines && d.lines.length) {
         liveLogText = d.lines.join('');
@@ -433,23 +524,23 @@ function connectSSE() {
   };
   evtSource.onmessage = (e) => {
     try {
-      handleRealtimeMsg('task_update', JSON.parse(e.data));
+      handleRealtimeMsg('task_update', JSON.parse(e.data), scope);
     } catch(_) {}
   };
   evtSource.addEventListener('log', (e) => {
-    try { handleRealtimeMsg('step_output', JSON.parse(e.data)); } catch(_) {}
+    try { handleRealtimeMsg('step_output', JSON.parse(e.data), scope); } catch(_) {}
   });
   evtSource.addEventListener('projects', (e) => {
-    try { handleRealtimeMsg('projects', JSON.parse(e.data)); } catch(_) {}
+    try { handleRealtimeMsg('projects', JSON.parse(e.data), scope); } catch(_) {}
   });
   evtSource.addEventListener('run_state', (e) => {
-    try { handleRealtimeMsg('run_state', JSON.parse(e.data)); } catch(_) {}
+    try { handleRealtimeMsg('run_state', JSON.parse(e.data), scope); } catch(_) {}
   });
   evtSource.addEventListener('suggest_status', (e) => {
-    try { handleRealtimeMsg('suggest_status', JSON.parse(e.data)); } catch(_) {}
+    try { handleRealtimeMsg('suggest_status', JSON.parse(e.data), scope); } catch(_) {}
   });
   evtSource.addEventListener('resync', (e) => {
-    try { handleRealtimeMsg('resync', JSON.parse(e.data)); } catch(_) {}
+    try { handleRealtimeMsg('resync', JSON.parse(e.data), scope); } catch(_) {}
   });
   evtSource.onerror = () => {
     dot.classList.remove('connected');

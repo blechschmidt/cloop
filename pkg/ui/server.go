@@ -820,6 +820,39 @@ func (s *Server) resolveWorkDir(r *http.Request) string {
 	return s.WorkDir
 }
 
+// globalStreamScope is the value a realtime stream sends as ?scope= to say it
+// wants fleet-wide events only and no project subscription.
+const globalStreamScope = "global"
+
+// hubRoomGlobal is the room key for such streams. It is deliberately not a
+// path, so broadcastToProject — which is always called with a real project
+// directory — can never reach it, while the fleet-wide broadcasts that walk
+// every room (projects, executor_update, audit_append, secrets_update) still
+// do.
+const hubRoomGlobal = ""
+
+// resolveStreamScope returns the project room a realtime stream joins.
+//
+// A stream that asks for ?scope=global gets no project: without this, an
+// index-less stream fell through resolveWorkDir to the primary project and
+// was subscribed to it, so the dashboard's projects landing page — which
+// renders no per-project data at all — was served the primary project's
+// state, live log and run state. Those frames then arrived under whatever
+// project the user opened next (Task 20197), and under OIDC they are a
+// project the user may not be entitled to see at all.
+//
+// The declaration is explicit rather than inferred from "is this hub in
+// multi-project mode?" because the two ends have to agree: a single-project
+// client sends no index either, and withholding its frames on a mode
+// misdetection would leave it with a permanently empty dashboard. Only a
+// client that knows it has no project selected sends scope=global.
+func (s *Server) resolveStreamScope(r *http.Request) (workDir string, scoped bool) {
+	if r.URL.Query().Get("scope") == globalStreamScope {
+		return hubRoomGlobal, false
+	}
+	return s.resolveWorkDir(r), true
+}
+
 // Handler returns the HTTP handler for the server with all routes registered
 // and security/auth middleware applied.  It does NOT start background goroutines
 // (watchState, watchProjects); call Start() for the full lifecycle.
@@ -2309,12 +2342,13 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 
+	streamWorkDir, projectScoped := s.resolveStreamScope(r)
 	c := &sseClient{
 		ch:      make(chan sseEvent, sseClientBufferSize),
 		resync:  make(chan struct{}, 1),
 		user:    s.recipientIdentity(r),
 		token:   tokenFromRequest(r),
-		workDir: s.resolveWorkDir(r),
+		workDir: streamWorkDir,
 	}
 	s.mu.Lock()
 	s.clients[c] = struct{}{}
@@ -2325,25 +2359,37 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		s.mu.Unlock()
 	}()
 
-	// Send current state immediately on connect. Lite-load: the SSE frame
-	// passes through marshalStateForWire which drops Steps anyway, so
-	// reading the per-step rows here is wasted work (Task 20125).
-	if ps, err := state.LoadLite(s.WorkDir); err == nil {
-		if data, err := marshalStateForWire(ps); err == nil {
-			if werr := writeSSE(w, flusher, "data: %s\n\n", data); werr != nil {
-				return
+	// The connect burst, under the same rule as the WebSocket path: a
+	// ?scope=global stream is not subscribed to a project and is primed with
+	// none of its data (Task 20197).
+	if projectScoped {
+		// Send current state immediately on connect. Lite-load: the SSE frame
+		// passes through marshalStateForWire which drops Steps anyway, so
+		// reading the per-step rows here is wasted work (Task 20125).
+		//
+		// c.workDir, not s.WorkDir (Task 20197): this frame was reading the
+		// *primary* project regardless of the ?project_idx the stream asked
+		// for, so on the SSE fallback path every client's opening frame was
+		// another project's full state — not a race, every time. It is the
+		// same mistake the replay below was fixed for in Task 20189, one line
+		// apart.
+		if ps, err := state.LoadLite(c.workDir); err == nil {
+			if data, err := marshalStateForWire(ps); err == nil {
+				if werr := writeSSE(w, flusher, "data: %s\n\n", data); werr != nil {
+					return
+				}
 			}
 		}
-	}
 
-	// Replay this stream's own project, never "the" buffer: c.workDir was
-	// resolved at connect time above, and a client that subscribed to a
-	// project with no output must get an empty replay rather than whatever
-	// ran most recently (Task 20189).
-	if lines := s.liveLogReplay(c.workDir); len(lines) > 0 {
-		if d, err := json.Marshal(map[string]string{"chunk": strings.Join(lines, "")}); err == nil {
-			if werr := writeSSE(w, flusher, "event: log\ndata: %s\n\n", d); werr != nil {
-				return
+		// Replay this stream's own project, never "the" buffer: c.workDir was
+		// resolved at connect time above, and a client that subscribed to a
+		// project with no output must get an empty replay rather than whatever
+		// ran most recently (Task 20189).
+		if lines := s.liveLogReplay(c.workDir); len(lines) > 0 {
+			if d, err := json.Marshal(map[string]string{"chunk": strings.Join(lines, "")}); err == nil {
+				if werr := writeSSE(w, flusher, "event: log\ndata: %s\n\n", d); werr != nil {
+					return
+				}
 			}
 		}
 	}
@@ -2602,7 +2648,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	// leaving the hubClient registered for an extra watcher tick or two.
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
-	workDir := s.resolveWorkDir(r)
+	workDir, projectScoped := s.resolveStreamScope(r)
 	user := s.recipientIdentity(r)
 
 	// Assign a unique id, color-coded name and accent color to this connection.
@@ -2669,32 +2715,39 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		s.broadcastPresence(workDir)
 	}()
 
-	// Send current state immediately. Same lite-load reasoning as the SSE
-	// initial-state path: the frame is marshalStateForWire'd, so Steps are
-	// dropped before going on the wire (Task 20125).
-	if ps, err := state.LoadLite(workDir); err == nil {
-		if raw, err := marshalStateForWire(ps); err == nil {
-			if msg, err := json.Marshal(wsMessage{Type: "task_update", Data: raw}); err == nil {
-				_ = wsWrite(ctx, conn, msg)
+	// The connect burst — state snapshot, live-log backlog, run flag, in-flight
+	// suggest job — is every per-project frame this stream is primed with. A
+	// ?scope=global stream has no project, so it gets none of them; see
+	// resolveStreamScope for why sending them was the bug (Task 20197).
+	//
+	// Presence, below, is deliberately outside this guard: it is scoped to the
+	// room rather than to a project, so landing-page clients see each other.
+	if projectScoped {
+		// Same lite-load reasoning as the SSE initial-state path: the frame is
+		// marshalStateForWire'd, so Steps are dropped before going on the wire
+		// (Task 20125).
+		if ps, err := state.LoadLite(workDir); err == nil {
+			if raw, err := marshalStateForWire(ps); err == nil {
+				if msg, err := json.Marshal(wsMessage{Type: "task_update", Data: raw}); err == nil {
+					_ = wsWrite(ctx, conn, msg)
+				}
 			}
 		}
-	}
 
-	// Replay the connecting client's own project. workDir was resolved at
-	// the top of handleWS and is the same key this client's hub room uses,
-	// so a tab opening on project B never receives project A's backlog
-	// (Task 20189).
-	if lines := s.liveLogReplay(workDir); len(lines) > 0 {
-		if d, err := json.Marshal(map[string]string{"chunk": strings.Join(lines, "")}); err == nil {
-			if msg, err := json.Marshal(wsMessage{Type: "step_output", Data: d}); err == nil {
-				_ = wsWrite(ctx, conn, msg)
+		// Replay the connecting client's own project. workDir was resolved at
+		// the top of handleWS and is the same key this client's hub room uses,
+		// so a tab opening on project B never receives project A's backlog
+		// (Task 20189).
+		if lines := s.liveLogReplay(workDir); len(lines) > 0 {
+			if d, err := json.Marshal(map[string]string{"chunk": strings.Join(lines, "")}); err == nil {
+				if msg, err := json.Marshal(wsMessage{Type: "step_output", Data: d}); err == nil {
+					_ = wsWrite(ctx, conn, msg)
+				}
 			}
 		}
-	}
 
-	// Send initial run state so the client can position the Run/Stop buttons
-	// without polling /api/livelog.
-	{
+		// Send initial run state so the client can position the Run/Stop buttons
+		// without polling /api/livelog.
 		running := s.liveLogRunningFor(workDir) || multiui.IsCloopRunningInDir(workDir)
 		if raw, err := json.Marshal(map[string]interface{}{"running": running}); err == nil {
 			if msg, err := json.Marshal(wsMessage{Type: "run_state", Data: raw}); err == nil {
@@ -2706,12 +2759,10 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		s.runStateMu.Lock()
 		s.runStates[workDir] = running
 		s.runStateMu.Unlock()
-	}
 
-	// Send initial suggest status if a job for this project is in flight or
-	// has results to display, so the suggestions panel can hydrate without
-	// polling /api/suggest/status.
-	{
+		// Send initial suggest status if a job for this project is in flight or
+		// has results to display, so the suggestions panel can hydrate without
+		// polling /api/suggest/status.
 		s.suggestMu.Lock()
 		matches := s.suggestWorkDir == workDir && (s.suggestRunning || s.suggestDone)
 		payload := map[string]interface{}{

@@ -184,6 +184,53 @@ Three things this generalises to:
    trade is now written at each call site so the next reader can tell a
    deliberate global from an overlooked one.
 
+### The same class on the subscription path (Task 20197)
+
+Task 20189 made every *broadcast* carry its subject. What it did not reach is
+how a stream acquires a subject in the first place, and two of those were
+wrong:
+
+- **The connect burst read the wrong project.** `handleEvents` resolved the
+  stream's project into `c.workDir`, then built its opening state frame from
+  `s.WorkDir`. Every SSE client's first frame was the primary project's full
+  task list regardless of the `?project_idx` it asked for — deterministic, not
+  a race, on any network where a proxy blocks WebSocket upgrades. The live-log
+  replay eight lines below it is the site Task 20189 fixed; the snapshot above
+  it was missed.
+- **An index-less stream defaulted into a project.** `resolveWorkDir` falls
+  back to `s.WorkDir` when no `?project_idx` is given, which is right for a
+  request and wrong for a subscription. The dashboard's projects landing page
+  holds a stream while no project is selected, so it was subscribed to the
+  primary project and primed with its state, live log and run flag — a project
+  the viewer may hold no claim to. Those frames were then still arriving when
+  the user clicked into a different project, and the client rendered them,
+  which is the user-visible bug this task was filed for: *another project's
+  tasks on the tasks page.*
+
+Both are point 3 restated from the other side. "No project selected" is a
+legitimate scope; defaulting it into "the primary project" is the same
+overlooked-global mistake, and it is now stated instead: the client sends
+`?scope=global`, the server puts that stream in a room no `broadcastToProject`
+call can name, and it is primed with nothing.
+
+The client half is worth recording separately, because it is the part a
+server-side rule cannot enforce. A frame carries no project id — the identity
+lives in the subscription — so a frame is only interpretable together with the
+stream that delivered it. `close()` on a WebSocket starts a handshake and
+returns; frames already in flight still arrive. The receiver therefore has to
+freeze the scope at the moment it opens the stream and check it on delivery,
+which is what `_scopeAccepts` in `04-realtime.js` does. The guard it replaced
+asked `selectedProjectIdx === null` — *is a project selected*, not *is this
+frame for the project that is selected*.
+
+This bug class had been re-fixed seven times (Tasks 150, 152, 163, 168, 8000,
+20013, 20018), each time behind a test that greps the front end as text.
+Ordering is not a property text can express, so the regression test runs the
+real bundle in node against a DOM shim and delivers the frames in the order
+that corrupts the view (`pkg/ui/scoping_test.go`,
+`pkg/ui/testdata/scoping_scenarios.js`). Five of its seven scenarios fail
+against the parent commit.
+
 ---
 
 ## Vulnerabilities found while building this

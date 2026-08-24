@@ -228,8 +228,12 @@ window.openProject = function(idx, name) {
   selectedProjectIdx  = idx;
   selectedProjectName = name;
   // Drop stale per-project state so the new project's initial WS task_update
-  // is the first thing the renderer sees.
+  // is the first thing the renderer sees. Dropping appState is not enough on
+  // its own — the panels rendered from it keep their markup until something
+  // rewrites them, so the previous project's rows stay on screen for as long
+  // as the new project's first frame takes to arrive (Task 20197).
   appState = null;
+  clearProjectScopedPanels();
   const bc = document.getElementById('projectBreadcrumb');
   if (bc) { bc.style.display = 'flex'; }
   const bn = document.getElementById('breadcrumbName');
@@ -257,6 +261,7 @@ window.clearProjectSelection = function() {
   selectedProjectIdx  = null;
   selectedProjectName = '';
   appState            = null;
+  clearProjectScopedPanels();
   const bc = document.getElementById('projectBreadcrumb');
   if (bc) bc.style.display = 'none';
   const sw = document.getElementById('projSelectorWrap');
@@ -264,10 +269,10 @@ window.clearProjectSelection = function() {
   // Back to the global view: re-resolve against the unscoped permission set.
   refreshPermissions();
   switchTab('projects');
-  // Reconnect WS without project_idx so the hub registration falls back to
-  // the primary project for global events (projects list, presence) — the
-  // landing view ignores any per-project event payloads via the guard in
-  // handleRealtimeMsg (selectedProjectIdx === null).
+  // Reconnect WS without project_idx. That stream carries only fleet-wide
+  // events; its per-project frames are dropped by the scope gate in
+  // handleRealtimeMsg, which is what stops the primary project's state from
+  // landing under whichever project the user opens next (Task 20197).
   connectWS();
   // No project selected → no per-project running task to advertise.
   updateBrowserTitle();

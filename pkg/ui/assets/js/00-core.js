@@ -76,6 +76,40 @@ let pendingDeleteId = null;
 let liveLogText = '';         // accumulated text for the panel
 let liveLogAutoScroll = true; // whether to auto-scroll (user can disable by scrolling up)
 
+// clearProjectScopedPanels blanks every panel rendered from appState, for use
+// when the selection changes and the new project's first frame has not arrived.
+//
+// Setting appState = null is not enough by itself: the panels keep the markup
+// they were last rendered with, so without this the previous project's task
+// rows, kanban cards and live log stay on screen — indistinguishable, to the
+// user, from the new project genuinely having those tasks (Task 20197).
+//
+// The placeholder says "Loading" rather than reusing the "No tasks yet" empty
+// state, which would be a false claim about a project we have not read yet.
+function clearProjectScopedPanels() {
+  const loading = '<div class="empty-state"><h3>Loading…</h3></div>';
+
+  const taskList = document.getElementById('taskListFull');
+  if (taskList) taskList.innerHTML = loading;
+  const badge = document.getElementById('taskCountBadge');
+  if (badge) badge.textContent = '';
+
+  const board = document.getElementById('kanbanBoard');
+  if (board) board.innerHTML = loading;
+
+  const steps = document.getElementById('stepList');
+  if (steps) steps.innerHTML = loading;
+
+  // The live log is per-project too, and its buffer is client-side: a stale
+  // buffer would keep scrolling the old project's output under the new one
+  // until a replay overwrote it.
+  liveLogText = '';
+  try { renderLiveLog(); } catch(_) {}
+
+  // Nothing is known to be running on a project we have not loaded.
+  try { updateBrowserTitle(); } catch(_) {}
+}
+
 // ── Tab switching ───────────────────────────────────────────────────────────
 
 window.switchTab = function(name) {
