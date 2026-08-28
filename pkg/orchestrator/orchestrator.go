@@ -419,6 +419,14 @@ type Orchestrator struct {
 	statedb     *statedb.DB        // shared SQLite handle (kill_requests, events journal); nil-safe
 	watchdog    *watchdog.Watchdog // per-task cancel registry for manual aborts (Task 20140); nil-safe
 
+	// capWarnMu guards the rate-limiting of the "subscription caps are not
+	// being enforced" warning, which is reached before every task and so
+	// would otherwise repeat once per task for as long as usage is
+	// unreadable. See warnCapsUnenforced.
+	capWarnMu   sync.Mutex
+	capWarnAt   time.Time
+	capWarnLast string
+
 	// killWG tracks the goroutine that polls kill_requests for manual aborts
 	// (Task 20140). The orchestrator's Run() spawns it under the run context
 	// and waits on this group during Close so the loop exits cleanly.
@@ -964,10 +972,48 @@ func (o *Orchestrator) enforceClaudeCodeLimits() error {
 	// PM plan and would otherwise hammer the OAuth usage API.
 	usage, err := ratelimit.FetchOrCachedUsage("", ratelimit.MinUsageCacheTTL)
 	if err != nil && usage == nil {
-		// Best-effort: when both fresh fetch and cache fail, skip enforcement.
+		// Best-effort: when both fresh fetch and cache fail, skip enforcement
+		// rather than blocking work on a monitoring outage. But say so — caps
+		// the operator configured are not being applied right now, and a dead
+		// credential can keep it that way indefinitely. This one went unnoticed
+		// for four days (Task 20202) precisely because it was silent.
+		o.warnCapsUnenforced(err)
 		return nil
 	}
 	return ratelimit.EnforceClaudeCodeLimits(cc, usage)
+}
+
+// capWarnInterval throttles the unenforced-caps warning. The check runs before
+// every task, so an unthrottled warning would bury the step log.
+const capWarnInterval = 15 * time.Minute
+
+// warnCapsUnenforced reports that configured subscription caps are not being
+// applied because usage could not be read, at most once per capWarnInterval —
+// and immediately whenever the reason changes, so a transient outage turning
+// into "you must log in again" is never swallowed by the throttle.
+func (o *Orchestrator) warnCapsUnenforced(cause error) {
+	msg := cause.Error()
+
+	o.capWarnMu.Lock()
+	throttled := msg == o.capWarnLast && time.Since(o.capWarnAt) < capWarnInterval
+	if !throttled {
+		o.capWarnAt, o.capWarnLast = time.Now(), msg
+	}
+	o.capWarnMu.Unlock()
+	if throttled {
+		return
+	}
+
+	fields := map[string]interface{}{"error": msg}
+	// Point at the fix when there is one, rather than leaving the operator to
+	// infer that a monitoring error is really a login prompt.
+	var authErr *ratelimit.AuthError
+	if errors.As(cause, &authErr) {
+		fields["reauth_required"] = true
+		fields["hint"] = authErr.Hint()
+	}
+	o.log.Warn(logger.EventSessionStart, 0,
+		"claude code subscription caps are NOT being enforced: usage is unreadable", fields)
 }
 
 func (o *Orchestrator) Run(ctx context.Context) error {

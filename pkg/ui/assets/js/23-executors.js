@@ -721,15 +721,43 @@ window.loadCCLimits = function() {
     _setVal('ccMaxWeeklyOpusPct',   limits.max_weekly_opus_pct   || '');
     _setVal('ccMaxWeeklySonnetPct', limits.max_weekly_sonnet_pct || '');
 
+    // Authentication banner. When the OAuth credential has expired or been
+    // revoked the caps simply stop advancing, which on its own looks like
+    // "nothing is happening" rather than "you must log in again" — so say it.
+    var authBox = document.getElementById('ccLimitsAuth');
+    if (authBox) {
+      if (d.reauth_required) {
+        authBox.style.display = '';
+        authBox.innerHTML =
+          '<strong>&#9888; Claude Code sign-in required — subscription usage is not updating.</strong>'
+          + '<div style="margin-top:6px">' + esc(d.hint || '') + '</div>'
+          + (d.stale_since
+              ? '<div style="margin-top:6px;color:var(--muted)">Figures below are frozen at ' + esc(fmtDate(d.stale_since)) + '.</div>'
+              : '')
+          + '<div style="margin-top:8px"><button class="btn" style="padding:4px 10px;font-size:12px" '
+          + 'onclick="switchTab(\'budget\')">Open Claude Code sign-in</button></div>';
+      } else if (d.usage_error) {
+        // Not an auth problem: transient, so keep it low-key.
+        authBox.style.display = '';
+        authBox.innerHTML = '<strong>Usage temporarily unavailable.</strong><div style="margin-top:6px;color:var(--muted)">'
+          + esc(d.usage_error) + '</div>';
+      } else {
+        authBox.style.display = 'none';
+        authBox.innerHTML = '';
+      }
+    }
+
     var usagePanel = document.getElementById('ccLimitsUsage');
     if (usagePanel) {
       var rows = '';
+      var reported = 0;
       var u = d.usage || {};
       function row(label, win, cap) {
         if (!win) {
           rows += '<div style="font-size:12px;color:var(--muted)">' + label + ': <em>not reported</em></div>';
           return;
         }
+        reported++;
         var pct = Math.round(win.utilization || 0);
         var capN = parseFloat(cap) || 0;
         var capped = capN > 0 && pct >= capN;
@@ -750,7 +778,16 @@ window.loadCCLimits = function() {
       row('5-Hour',       u.five_hour,        limits.max_five_hour_pct);
       row('Weekly Opus',  u.seven_day_opus,   limits.max_weekly_opus_pct);
       row('Weekly Sonnet',u.seven_day_sonnet, limits.max_weekly_sonnet_pct);
-      usagePanel.innerHTML = rows || '<div style="font-size:12px;color:var(--muted)">No usage data available — make sure ~/.claude/.credentials.json exists or set CLAUDE_CODE_OAUTH_TOKEN.</div>';
+      // `rows` is never empty (every window emits at least "not reported"),
+      // so gate the empty-state hint on whether any window actually reported.
+      // Keying it off `rows` made this hint unreachable, which is part of why
+      // a dead credential showed up as four blank rows and no explanation.
+      if (reported === 0 && !d.reauth_required) {
+        usagePanel.innerHTML = '<div style="font-size:12px;color:var(--muted)">No usage data available — make sure '
+          + '~/.claude/.credentials.json exists or set CLAUDE_CODE_OAUTH_TOKEN.</div>';
+      } else {
+        usagePanel.innerHTML = rows;
+      }
     }
 
     var violationBox = document.getElementById('ccLimitsViolation');

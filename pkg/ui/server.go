@@ -7015,7 +7015,16 @@ func (s *Server) handleClaudeUsage(w http.ResponseWriter, r *http.Request) {
 	// per-task limit check share one HTTP round-trip per refresh window.
 	usage, err := ratelimit.FetchOrCachedUsage("", 3*time.Minute)
 	if err != nil && usage == nil {
-		jsonOK(w, map[string]interface{}{"error": err.Error()})
+		resp := map[string]interface{}{"error": err.Error()}
+		// Distinguish "log in again" from a transient outage so the caller
+		// can offer the fix instead of just showing a red string.
+		var authErr *ratelimit.AuthError
+		if errors.As(err, &authErr) {
+			resp["reauth_required"] = true
+			resp["auth_problem"] = string(authErr.Problem)
+			resp["hint"] = authErr.Hint()
+		}
+		jsonOK(w, resp)
 		return
 	}
 	jsonOK(w, usage)
@@ -7032,16 +7041,16 @@ func (s *Server) handleClaudeCodeLimitsGet(w http.ResponseWriter, r *http.Reques
 	if cfg != nil {
 		cc = cfg.ClaudeCode
 	}
-	// Cached for at least 1 minute; ignores fetch errors and falls back to
-	// any stale snapshot so the panel still renders historical numbers when
-	// the OAuth usage endpoint is briefly unreachable.
-	usage, _ := ratelimit.FetchOrCachedUsage("", ratelimit.MinUsageCacheTTL)
+	// Cached for at least 1 minute; falls back to any stale snapshot so the
+	// panel still renders historical numbers when the OAuth usage endpoint is
+	// briefly unreachable.
+	usage, usageErr := ratelimit.FetchOrCachedUsage("", ratelimit.MinUsageCacheTTL)
 	violations := ratelimit.CheckClaudeCodeLimits(cc, usage)
 	violationStrs := make([]string, 0, len(violations))
 	for _, v := range violations {
 		violationStrs = append(violationStrs, v.Error())
 	}
-	jsonOK(w, map[string]interface{}{
+	resp := map[string]interface{}{
 		"limits": map[string]interface{}{
 			"max_weekly_pct":        cc.MaxWeeklyPct,
 			"max_five_hour_pct":     cc.MaxFiveHourPct,
@@ -7050,7 +7059,26 @@ func (s *Server) handleClaudeCodeLimitsGet(w http.ResponseWriter, r *http.Reques
 		},
 		"usage":      usage,
 		"violations": violationStrs,
-	})
+	}
+	// Report the fetch error even when a stale snapshot is being served.
+	// Discarding it here is what let this hub's caps sit frozen for four days
+	// behind an expired token while the panel looked merely uninteresting:
+	// every window rendered "not reported" and nothing said "log in again".
+	if usageErr != nil {
+		resp["usage_error"] = usageErr.Error()
+		var authErr *ratelimit.AuthError
+		if errors.As(usageErr, &authErr) {
+			resp["reauth_required"] = true
+			resp["auth_problem"] = string(authErr.Problem)
+			resp["hint"] = authErr.Hint()
+		}
+		if usage != nil {
+			// The numbers on screen are real but frozen at this instant.
+			resp["stale"] = true
+			resp["stale_since"] = usage.FetchedAt
+		}
+	}
+	jsonOK(w, resp)
 }
 
 // handleClaudeCodeLimitsSave updates the per-project claudecode subscription

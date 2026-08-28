@@ -88,7 +88,9 @@ var (
 	oauthRefreshMu sync.Mutex
 )
 
-const usageEndpoint = "https://api.anthropic.com/api/oauth/usage"
+// usageEndpoint is the OAuth subscription-usage API. A var, not a const, so
+// tests can point it at a mock server — same reason as claudeOAuthTokenURL.
+var usageEndpoint = "https://api.anthropic.com/api/oauth/usage"
 
 // MinUsageCacheTTL is the floor on how long a fetched ClaudeUsage snapshot is
 // served without re-fetching. The OAuth usage API returns slowly-changing
@@ -116,6 +118,10 @@ func ClearUsageCache() {
 	usageMu.Lock()
 	lastUsage = nil
 	usageMu.Unlock()
+	// Also drop any cached authentication failure. A login that just
+	// succeeded must not keep being told it needs to re-authenticate for the
+	// remainder of authFailureTTL.
+	clearAuthFailure()
 }
 
 // FetchOrCachedUsage returns the cached usage snapshot when it is fresher
@@ -153,20 +159,18 @@ func FetchOrCachedUsage(token string, ttl time.Duration) (*ClaudeUsage, error) {
 // The token should be a Claude Code OAuth access token (sk-ant-oat01-*).
 func FetchClaudeUsage(token string) (*ClaudeUsage, error) {
 	explicit := token != ""
-	if token == "" {
-		// Prefer the credentials file (which validates expiry and refreshes
-		// under lock) over the CLAUDE_CODE_OAUTH_TOKEN env var. The env var is
-		// only a cache populated by a previous refresh and is never re-checked
-		// for expiry, so trusting it first meant a stale token kept producing
-		// 401s with no refresh. readCredentialsToken returns the env token
-		// implicitly only when it is still the freshest source.
-		token = readCredentialsToken()
-	}
-	if token == "" {
-		token = os.Getenv("CLAUDE_CODE_OAUTH_TOKEN")
-	}
-	if token == "" {
-		return nil, fmt.Errorf("no OAuth token available")
+	if !explicit {
+		// Serve a recently classified auth failure without another doomed
+		// round-trip. Cleared by a successful fetch and by ClearUsageCache
+		// on login, so a re-authentication is picked up promptly.
+		if cached := cachedAuthFailure(); cached != nil {
+			return nil, cached
+		}
+		var authErr *AuthError
+		token, authErr = resolveCredentialToken()
+		if authErr != nil {
+			return nil, recordAuthFailure(authErr)
+		}
 	}
 
 	usage, status, err := fetchUsageWithToken(token)
@@ -179,10 +183,59 @@ func FetchClaudeUsage(token string) (*ClaudeUsage, error) {
 		// == is the habit worth not having. tests/security enforces it.
 		if fresh := forceRefreshToken(); fresh != "" &&
 			subtle.ConstantTimeCompare([]byte(fresh), []byte(token)) != 1 {
-			usage, _, err = fetchUsageWithToken(fresh)
+			usage, status, err = fetchUsageWithToken(fresh)
 		}
 	}
+
+	if explicit {
+		// A caller-supplied token must never poison the shared cache that
+		// describes the *ambient* credential.
+		return usage, err
+	}
+	// The server is the only authority on whether a credential still works, so
+	// these classifications are facts rather than inferences from local expiry
+	// bookkeeping. Both are terminal: refreshing cannot widen a scope, and it
+	// cannot revive a revoked grant.
+	if status == http.StatusUnauthorized || status == http.StatusForbidden {
+		problem := AuthRejected
+		if status == http.StatusForbidden {
+			problem = AuthScopeInsufficient
+		}
+		detail := "Claude rejected the stored OAuth token"
+		if err != nil {
+			detail = err.Error()
+		}
+		return nil, recordAuthFailure(&AuthError{Problem: problem, Detail: detail})
+	}
+	if err == nil {
+		clearAuthFailure()
+	}
 	return usage, err
+}
+
+// resolveCredentialToken picks the OAuth access token to authenticate with,
+// preferring the credentials file (which validates expiry and refreshes under
+// lock) over CLAUDE_CODE_OAUTH_TOKEN. The env var is only a cache populated by
+// a previous refresh and is never re-checked for expiry, so trusting it first
+// meant a stale token kept producing 401s with no refresh.
+//
+// The returned *AuthError is non-nil only when no token could be produced at
+// all; it is already classified for display.
+func resolveCredentialToken() (string, *AuthError) {
+	tok, authErr := credentialFileToken()
+	if tok != "" {
+		return tok, nil
+	}
+	if env := strings.TrimSpace(os.Getenv("CLAUDE_CODE_OAUTH_TOKEN")); env != "" {
+		return env, nil
+	}
+	if authErr == nil {
+		authErr = &AuthError{
+			Problem: AuthNoCredentials,
+			Detail:  fmt.Sprintf("no access token in %s and CLAUDE_CODE_OAUTH_TOKEN is unset", credentialsPath()),
+		}
+	}
+	return "", authErr
 }
 
 // forceRefreshToken refreshes the OAuth token regardless of the cached
@@ -350,14 +403,24 @@ func tokenIsFresh(c claudeCredentials) bool {
 // second time (which is what produced the recurring 401 burst). This is the
 // classic single-flight pattern for rotating refresh tokens.
 func readCredentialsToken() string {
+	tok, _ := credentialFileToken()
+	return tok
+}
+
+// credentialFileToken implements readCredentialsToken and additionally
+// classifies the failure when it cannot produce a token.
+func credentialFileToken() (string, *AuthError) {
 	creds, ok := loadCredentials()
 	if !ok {
-		return ""
+		return "", &AuthError{
+			Problem: AuthNoCredentials,
+			Detail:  fmt.Sprintf("%s is missing or unreadable", credentialsPath()),
+		}
 	}
 
 	// Fast path: token still fresh, no lock needed.
 	if tokenIsFresh(creds) {
-		return creds.ClaudeAiOauth.AccessToken
+		return creds.ClaudeAiOauth.AccessToken, nil
 	}
 
 	// Slow path: needs refresh. Serialize so only one refresh happens.
@@ -367,18 +430,38 @@ func readCredentialsToken() string {
 	// Double-check after acquiring the lock: a concurrent caller may have
 	// refreshed the file while we waited.
 	if creds2, ok := loadCredentials(); ok && tokenIsFresh(creds2) {
-		return creds2.ClaudeAiOauth.AccessToken
+		return creds2.ClaudeAiOauth.AccessToken, nil
 	} else if ok {
 		creds = creds2 // use the most recent refresh token on disk
 	}
 
 	if creds.ClaudeAiOauth.RefreshToken == "" {
-		return "" // expired and can't refresh
+		// Past its recorded expiry with no way to rotate. Hand the token
+		// back anyway rather than declaring defeat locally: expiresAt is our
+		// own bookkeeping and can be wrong (a refresh response without
+		// expires_in used to leave the previous, already-past value behind;
+		// clocks skew; `claude setup-token` writes long-lived credentials
+		// with no refresh token at all). Only the server can say whether a
+		// token still works — if it is genuinely dead the request comes
+		// back 401 and FetchClaudeUsage classifies it as AuthRejected, which
+		// is a fact instead of a guess. Refusing to even try is what turned
+		// one expired token into four days of silently frozen caps.
+		if creds.ClaudeAiOauth.AccessToken != "" {
+			return creds.ClaudeAiOauth.AccessToken, nil
+		}
+		return "", &AuthError{
+			Problem: AuthNoCredentials,
+			Detail:  fmt.Sprintf("%s has neither an access token nor a refresh token", credentialsPath()),
+		}
 	}
-	if newToken, err := refreshOAuthToken(creds.ClaudeAiOauth.RefreshToken); err == nil {
-		return newToken
+	newToken, err := refreshOAuthToken(creds.ClaudeAiOauth.RefreshToken)
+	if err != nil {
+		// A failed exchange is a sharper diagnosis than the 401 that
+		// attempting the stale access token would produce, so report it
+		// rather than burning a doomed request to rediscover it.
+		return "", &AuthError{Problem: AuthRefreshFailed, Detail: err.Error()}
 	}
-	return "" // expired and refresh failed
+	return newToken, nil
 }
 
 // credentialsLockPath is the advisory lock file guarding refresh+write of the
@@ -545,6 +628,14 @@ func updateCredentialsFile(accessToken, refreshToken string, expiresIn int64) er
 	}
 	if expiresIn > 0 {
 		oauth["expiresAt"] = time.Now().UnixMilli() + expiresIn*1000
+	} else {
+		// The response carried no expires_in, so we have no idea when this
+		// brand-new token dies. Keeping the *previous* expiresAt is the worst
+		// option: it is already in the past, so tokenIsFresh would report the
+		// new token as stale forever and every refresh would be re-attempted
+		// on a token that never gets a chance to be used. Dropping the key
+		// means "no recorded expiry", which tokenIsFresh trusts as-is.
+		delete(oauth, "expiresAt")
 	}
 
 	updated, err := json.MarshalIndent(raw, "", "  ")
