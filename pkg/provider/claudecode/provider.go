@@ -4,6 +4,7 @@ package claudecode
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -19,6 +20,40 @@ import (
 const ProviderName = "claudecode"
 
 var envOnce sync.Once
+
+// ErrAuthFailure marks a CLI invocation the API rejected for credential
+// reasons (HTTP 401 / authentication_error). Callers use errors.Is to tell it
+// apart from the other fatal CLI failures — 403, 429, 5xx, HTML error pages —
+// which a credential refresh cannot fix and which must therefore not be
+// retried here.
+var ErrAuthFailure = errors.New("claude CLI authentication failure")
+
+// refreshCredential rotates the stored Claude Code OAuth credential and
+// returns a fresh access token, or "" when none could be produced.
+//
+// It is a hook rather than a direct call to pkg/ratelimit because that package
+// transitively pulls in the executor, Kubernetes and secret-broker trees;
+// importing it here would turn a leaf provider into a package that cannot
+// compile — or be tested — unless all of that builds. cmd/providers.go wires
+// the real implementation, alongside the other provider registration.
+//
+// Leaving it unset degrades gracefully rather than breaking the retry: the CLI
+// re-reads ~/.claude/.credentials.json on the second attempt anyway, which is
+// what recovers the common case where a peer process won the refresh race and
+// has already written the rotated token to disk.
+var refreshCredential func() string
+
+// SetCredentialRefresher installs the OAuth refresh used before an
+// authentication retry. Called once from cmd/providers.go; also used by tests
+// to substitute a stub for the real credentials and network.
+func SetCredentialRefresher(fn func() string) { refreshCredential = fn }
+
+// CredentialRefresherWired reports whether a refresher has been installed.
+// Exists so a test can assert the cmd/providers.go wiring is still present:
+// losing it degrades the retry silently — it would still fire, but could only
+// recover races a peer process happened to win, not a credential this process
+// must rotate itself.
+func CredentialRefresherWired() bool { return refreshCredential != nil }
 
 type Provider struct{}
 
@@ -68,9 +103,65 @@ func buildArgs(opts provider.Options) []string {
 	return args
 }
 
+// Complete runs the CLI once and, if the API rejected our credentials,
+// refreshes the OAuth token and retries exactly once.
+//
+// Why a retry belongs here (Task 20204): a 401 from this provider is usually
+// not a dead credential but a *lost race* for one. The CLI subprocesses
+// refresh OAuth independently of each other and of cloop, and Claude.ai
+// refresh tokens are single-use — so when a parallel round of tasks straddles
+// the token's expiry, several CLI processes exchange the same refresh token at
+// once. One wins; the losers get invalid_grant and surface "API Error: 401".
+// The task after them succeeds because the winner has meanwhile written a
+// fresh credential to disk, which is precisely the reported symptom: an
+// isolated 401 with a healthy task on either side. A transient 401 from the
+// edge (observed: a Cloudflare 502 body delivered under a 401 status) has the
+// same shape and the same remedy.
+//
+// Retrying is therefore scoped strictly to authentication failures. 429 and
+// 5xx are deliberately excluded: an immediate retry cannot help a rate limit
+// and would feed the loop that keeps it alive, and the orchestrator's
+// MaxFailures gate already handles sustained upstream outages.
 func (p *Provider) Complete(ctx context.Context, prompt string, opts provider.Options) (*provider.Result, error) {
 	envOnce.Do(loadEnvFiles)
 
+	res, err := p.runCLI(ctx, prompt, opts, "")
+	if err == nil || !errors.Is(err, ErrAuthFailure) {
+		return res, err
+	}
+	// Don't spend a retry on a context that is already done — the second
+	// attempt would fail instantly and replace a clear auth diagnosis with a
+	// cancellation one.
+	if ctx.Err() != nil {
+		return res, err
+	}
+
+	// Re-resolve the credential under pkg/ratelimit's process-wide mutex and
+	// cross-process flock. When peers lost the same race, they coalesce here
+	// and all receive the winner's token, so a whole parallel round recovers
+	// on a single exchange rather than N competing ones.
+	var fresh string
+	if refreshCredential != nil {
+		fresh = refreshCredential()
+	}
+
+	retryRes, retryErr := p.runCLI(ctx, prompt, opts, fresh)
+	if retryErr != nil {
+		// Keep the sentinel intact so errors.Is still classifies this, and say
+		// that the retry happened so a genuinely dead credential is not
+		// mistaken for a race that nobody tried to recover from.
+		return retryRes, fmt.Errorf("%w (retried once after refreshing credentials)", retryErr)
+	}
+	return retryRes, nil
+}
+
+// runCLI performs a single claude CLI invocation. tokenOverride, when
+// non-empty, pins CLAUDE_CODE_OAUTH_TOKEN for this child process; it carries
+// the freshly refreshed credential into a retry so the attempt cannot be
+// undone by a stale token already present in the environment (cloop injects
+// one from ~/.openclaw/workspace/.env via loadEnvFiles, and that value is a
+// snapshot that is never itself refreshed).
+func (p *Provider) runCLI(ctx context.Context, prompt string, opts provider.Options, tokenOverride string) (*provider.Result, error) {
 	args := buildArgs(opts)
 
 	timeout := opts.Timeout
@@ -93,6 +184,12 @@ func (p *Provider) Complete(ctx context.Context, prompt string, opts provider.Op
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.WaitDelay = 5 * time.Second
 	cmd.Env = append(os.Environ(), "IS_SANDBOX=1")
+	if tokenOverride != "" {
+		// exec deduplicates the environment keeping the last occurrence, so
+		// this wins over any CLAUDE_CODE_OAUTH_TOKEN inherited or loaded from
+		// a .env file.
+		cmd.Env = append(cmd.Env, "CLAUDE_CODE_OAUTH_TOKEN="+tokenOverride)
+	}
 	if opts.WorkDir != "" {
 		cmd.Dir = opts.WorkDir
 	}
@@ -156,17 +253,17 @@ func (p *Provider) Complete(ctx context.Context, prompt string, opts provider.Op
 		// Without this, the orchestrator records the auth-failure message as a
 		// normal step output and re-runs forever (observed: 1500+ consecutive
 		// 401s in a single session).
-		if isFatalCLIError(output) {
-			return nil, fmt.Errorf("claude CLI auth/API failure (exit %d): %s", exitErr.ExitCode(), truncateForError(output))
+		if kind := classifyCLIError(output); kind != cliErrorNone {
+			return nil, cliFailureError(kind, exitErr.ExitCode(), output)
 		}
-	} else if isFatalCLIError(output) {
+	} else if kind := classifyCLIError(output); kind != cliErrorNone {
 		// In production the claude CLI sometimes exits 0 while writing an
 		// auth/API failure to stdout (observed: 2000+ consecutive 401-bearing
 		// steps in one session, all with exit 0). The exit-non-zero branch
 		// above never fired, so the failure leaked through as "successful"
 		// step output. Surface it as an error here too so the orchestrator's
 		// MaxFailures gate can stop the loop.
-		return nil, fmt.Errorf("claude CLI auth/API failure (exit 0): %s", truncateForError(output))
+		return nil, cliFailureError(kind, 0, output)
 	}
 
 	return &provider.Result{
@@ -195,26 +292,60 @@ func (p *Provider) Complete(ctx context.Context, prompt string, opts provider.Op
 // persistent (≥MaxFailures → abort). A single 502 therefore costs one step;
 // a 502 storm costs at most MaxFailures steps before the loop stops.
 func isFatalCLIError(output string) bool {
+	return classifyCLIError(output) != cliErrorNone
+}
+
+// cliErrorKind separates the fatal CLI failures that a credential refresh can
+// plausibly fix from those it cannot. Only the former are worth an immediate
+// retry (Task 20204).
+type cliErrorKind int
+
+const (
+	// cliErrorNone: not a recognised API-side failure.
+	cliErrorNone cliErrorKind = iota
+	// cliErrorAuth: the API rejected our credentials (401 /
+	// authentication_error). Frequently a lost race for a rotating
+	// single-use refresh token, so one retry after refreshing usually wins.
+	cliErrorAuth
+	// cliErrorOther: fatal, but retrying now would not help — 403 (the grant
+	// is too narrow, refreshing cannot widen it), 429 (retrying sustains the
+	// rate limit), 5xx and HTML error pages (upstream, not us).
+	cliErrorOther
+)
+
+// classifyCLIError inspects the combined stdout/stderr for a recognised
+// API-side failure and reports which kind it is.
+//
+// Auth markers are tested first and deliberately win over the others: the CLI
+// has been observed emitting "Failed to authenticate. API Error: 401" with an
+// upstream HTML 502 body attached, and that is a transient auth failure worth
+// retrying, not an HTML error page worth giving up on.
+func classifyCLIError(output string) cliErrorKind {
 	lower := strings.ToLower(output)
 	switch {
-	case strings.Contains(lower, "failed to authenticate"):
-		return true
-	case strings.Contains(lower, "invalid authentication credentials"):
-		return true
-	case strings.Contains(lower, "authentication_error"):
-		return true
-	case strings.Contains(lower, "api error: 401"):
-		return true
-	case strings.Contains(lower, "api error: 403"):
-		return true
-	case strings.Contains(lower, "api error: 429"):
-		return true
-	case hasAPIError5xx(lower):
-		return true
-	case isLikelyHTMLErrorPage(lower):
-		return true
+	case strings.Contains(lower, "failed to authenticate"),
+		strings.Contains(lower, "invalid authentication credentials"),
+		strings.Contains(lower, "authentication_error"),
+		strings.Contains(lower, "api error: 401"):
+		return cliErrorAuth
+	case strings.Contains(lower, "api error: 403"),
+		strings.Contains(lower, "api error: 429"),
+		hasAPIError5xx(lower),
+		isLikelyHTMLErrorPage(lower):
+		return cliErrorOther
 	}
-	return false
+	return cliErrorNone
+}
+
+// cliFailureError renders a fatal CLI failure, tagging authentication ones
+// with ErrAuthFailure so Complete can decide whether a retry is worthwhile.
+// The non-auth wording is unchanged from before the split, since operators and
+// log greps already know it.
+func cliFailureError(kind cliErrorKind, exitCode int, output string) error {
+	if kind == cliErrorAuth {
+		return fmt.Errorf("%w (exit %d): %s", ErrAuthFailure, exitCode, truncateForError(output))
+	}
+	return fmt.Errorf("claude CLI auth/API failure (exit %d): %s", exitCode, truncateForError(output))
 }
 
 // hasAPIError5xx reports whether the (already lower-cased) output contains the

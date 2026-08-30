@@ -11,6 +11,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/provider/ollama"
 	"github.com/blechschmidt/cloop/pkg/provider/openai"
 	"github.com/blechschmidt/cloop/pkg/provideraudit"
+	"github.com/blechschmidt/cloop/pkg/ratelimit"
 )
 
 func init() {
@@ -19,6 +20,12 @@ func init() {
 	// provider_calls table (Task 20105 / Task 20123 — powers the Web UI's
 	// "Provider Calls" inspector panel).
 	provider.RegisterAuditDecorator(provideraudit.WithAudit)
+
+	// Let the claudecode provider rotate the Claude Code OAuth credential
+	// before retrying a 401 (Task 20204). Wired here rather than imported
+	// directly so pkg/provider/claudecode stays a leaf package — pkg/ratelimit
+	// transitively depends on the executor and secret-broker trees.
+	claudecode.SetCredentialRefresher(ratelimit.ForceCredentialRefresh)
 
 	provider.Register(claudecode.ProviderName, func(cfg provider.ProviderConfig) (provider.Provider, error) {
 		return claudecode.New(), nil

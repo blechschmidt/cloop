@@ -2,6 +2,8 @@ package claudecode
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -458,5 +460,283 @@ func TestBuildArgs_ModelAndMaxTokens(t *testing.T) {
 		if !strings.Contains(joined, want) {
 			t.Errorf("args missing %q: %v", want, args)
 		}
+	}
+}
+
+// --- 401 auth retry (Task 20204) ---
+
+// recordingClaudeScript installs a fake claude that records one line per
+// invocation into a log file (the attempt's CLAUDE_CODE_OAUTH_TOKEN), and
+// replays the given per-attempt behaviours. Behaviours beyond the list reuse
+// the last one, so an "always fails" fake needs only a single entry.
+//
+// Returns the PATH dir and a func reading back the per-attempt token log.
+func recordingClaudeScript(t *testing.T, behaviours ...string) (string, func() []string) {
+	t.Helper()
+	dir := t.TempDir()
+	log := filepath.Join(dir, "attempts.log")
+
+	var cases string
+	for i, b := range behaviours {
+		// The last behaviour is the catch-all (*) so extra attempts reuse it,
+		// which is what makes "retried more than once" detectable.
+		pattern := fmt.Sprintf("%d", i+1)
+		if i == len(behaviours)-1 {
+			pattern = "*"
+		}
+		cases += fmt.Sprintf("  %s)\n%s\n    ;;\n", pattern, b)
+	}
+
+	script := "#!/bin/sh\n" +
+		"echo \"${CLAUDE_CODE_OAUTH_TOKEN:-<unset>}\" >> " + log + "\n" +
+		"n=$(wc -l < " + log + " | tr -d ' ')\n" +
+		"case \"$n\" in\n" + cases + "esac\n"
+
+	bin := filepath.Join(dir, "claude")
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake claude script: %v", err)
+	}
+	return dir, func() []string {
+		data, err := os.ReadFile(log)
+		if err != nil {
+			return nil // never invoked
+		}
+		return strings.Split(strings.TrimSpace(string(data)), "\n")
+	}
+}
+
+const authFailOutput = "Failed to authenticate. API Error: 401 " +
+	`{"type":"error","error":{"type":"authentication_error","message":"Invalid authentication credentials"}}`
+
+// stubRefresher installs a credential refresher for the duration of the test
+// and restores the previous one afterwards.
+func stubRefresher(t *testing.T, fn func() string) {
+	t.Helper()
+	prev := refreshCredential
+	SetCredentialRefresher(fn)
+	t.Cleanup(func() { SetCredentialRefresher(prev) })
+}
+
+// TestComplete_RetriesOnceAfter401 is the headline behaviour for Task 20204.
+// A 401 is usually a lost race for a rotating single-use refresh token, so the
+// second attempt — after refreshing — normally succeeds. Without the retry the
+// task fails outright even though the credential is healthy by then, which is
+// the reported "sometimes 401, next task is fine" symptom.
+func TestComplete_RetriesOnceAfter401(t *testing.T) {
+	binDir, attempts := recordingClaudeScript(t,
+		"    echo '"+authFailOutput+"'\n    exit 1",
+		"    echo 'recovered output'\n    exit 0",
+	)
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+
+	var refreshed int
+	stubRefresher(t, func() string { refreshed++; return "fresh-token" })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	result, err := New().Complete(ctx, "test", provider.Options{})
+	if err != nil {
+		t.Fatalf("expected the retry to succeed, got error: %v", err)
+	}
+	if !strings.Contains(result.Output, "recovered output") {
+		t.Errorf("expected the retry's output, got %q", result.Output)
+	}
+	if got := attempts(); len(got) != 2 {
+		t.Fatalf("expected exactly 2 CLI invocations (original + one retry), got %d: %v", len(got), got)
+	}
+	if refreshed != 1 {
+		t.Errorf("expected exactly 1 credential refresh, got %d", refreshed)
+	}
+}
+
+// TestComplete_RetryUsesRefreshedToken pins the refreshed credential into the
+// retry's environment. cloop itself injects a CLAUDE_CODE_OAUTH_TOKEN from
+// ~/.openclaw/workspace/.env (loadEnvFiles), and that value is a snapshot that
+// is never refreshed — so without the override the retry could re-send exactly
+// the credential the server just rejected and be guaranteed to fail.
+func TestComplete_RetryUsesRefreshedToken(t *testing.T) {
+	binDir, attempts := recordingClaudeScript(t,
+		"    echo '"+authFailOutput+"'\n    exit 1",
+		"    echo ok\n    exit 0",
+	)
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "stale-token")
+
+	stubRefresher(t, func() string { return "rotated-token" })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	if _, err := New().Complete(ctx, "test", provider.Options{}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	got := attempts()
+	if len(got) != 2 {
+		t.Fatalf("expected 2 invocations, got %d: %v", len(got), got)
+	}
+	if got[0] != "stale-token" {
+		t.Errorf("first attempt should use the ambient token, got %q", got[0])
+	}
+	if got[1] != "rotated-token" {
+		t.Errorf("retry should use the refreshed token, got %q", got[1])
+	}
+}
+
+// TestComplete_RetriesAtMostOnce guards the budget: a genuinely dead
+// credential must surface as a failure after exactly one retry, never loop.
+func TestComplete_RetriesAtMostOnce(t *testing.T) {
+	binDir, attempts := recordingClaudeScript(t,
+		"    echo '"+authFailOutput+"'\n    exit 1",
+	)
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+	stubRefresher(t, func() string { return "still-bad" })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	_, err := New().Complete(ctx, "test", provider.Options{})
+	if err == nil {
+		t.Fatal("expected an error when both attempts fail")
+	}
+	if !errors.Is(err, ErrAuthFailure) {
+		t.Errorf("error should still classify as ErrAuthFailure, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "retried once") {
+		t.Errorf("error should record that a retry was spent, got: %v", err)
+	}
+	if got := attempts(); len(got) != 2 {
+		t.Fatalf("expected exactly 2 invocations, got %d: %v", len(got), got)
+	}
+}
+
+// TestComplete_DoesNotRetryNonAuthFailures keeps the retry scoped. Retrying a
+// 429 immediately cannot help and feeds the loop that sustains the rate limit;
+// 5xx and HTML error pages are upstream problems the MaxFailures gate handles.
+func TestComplete_DoesNotRetryNonAuthFailures(t *testing.T) {
+	for _, tc := range []struct{ name, output string }{
+		{"rate limited", "API Error: 429 rate_limit_error"},
+		{"server error", "API Error: 503 upstream unavailable"},
+		{"forbidden", "API Error: 403 oauth_scope_insufficient"},
+		{"html error page", "<!doctype html><html><body>nope</body></html>"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			binDir, attempts := recordingClaudeScript(t,
+				"    echo '"+tc.output+"'\n    exit 1",
+			)
+			t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+
+			refreshed := false
+			stubRefresher(t, func() string { refreshed = true; return "x" })
+
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+
+			_, err := New().Complete(ctx, "test", provider.Options{})
+			if err == nil {
+				t.Fatal("expected a fatal error")
+			}
+			if errors.Is(err, ErrAuthFailure) {
+				t.Errorf("%s must not be classified as an auth failure: %v", tc.name, err)
+			}
+			if got := attempts(); len(got) != 1 {
+				t.Errorf("expected exactly 1 invocation (no retry), got %d: %v", len(got), got)
+			}
+			if refreshed {
+				t.Error("must not refresh credentials for a non-auth failure")
+			}
+		})
+	}
+}
+
+// TestComplete_RetryWithoutRefresherWired covers the degraded path: if the
+// cmd/providers.go wiring is ever missed, the retry must still happen. The CLI
+// re-reads the credentials file itself, which is what recovers the common case
+// where a peer process already won the refresh race.
+func TestComplete_RetryWithoutRefresherWired(t *testing.T) {
+	binDir, attempts := recordingClaudeScript(t,
+		"    echo '"+authFailOutput+"'\n    exit 1",
+		"    echo 'recovered'\n    exit 0",
+	)
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+	stubRefresher(t, nil) // nothing wired
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	result, err := New().Complete(ctx, "test", provider.Options{})
+	if err != nil {
+		t.Fatalf("retry must happen even with no refresher wired, got: %v", err)
+	}
+	if !strings.Contains(result.Output, "recovered") {
+		t.Errorf("expected the retry's output, got %q", result.Output)
+	}
+	if got := attempts(); len(got) != 2 {
+		t.Errorf("expected 2 invocations, got %d: %v", len(got), got)
+	}
+}
+
+// TestComplete_NoRetryOnCancelledContext: once the caller's context is done a
+// second attempt would fail instantly and replace a clear auth diagnosis with
+// a cancellation one.
+func TestComplete_NoRetryOnCancelledContext(t *testing.T) {
+	binDir, attempts := recordingClaudeScript(t,
+		"    echo '"+authFailOutput+"'\n    exit 1",
+	)
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+
+	refreshed := false
+	stubRefresher(t, func() string { refreshed = true; return "x" })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	// The first attempt runs to completion; cancelling here means ctx is
+	// already done by the time the retry decision is made.
+	cancel()
+
+	if _, err := New().Complete(ctx, "test", provider.Options{}); err == nil {
+		t.Fatal("expected an error")
+	}
+	if got := attempts(); len(got) > 1 {
+		t.Errorf("must not retry on a done context, got %d invocations: %v", len(got), got)
+	}
+	if refreshed {
+		t.Error("must not refresh credentials when the context is done")
+	}
+}
+
+// TestClassifyCLIError separates the failures a credential refresh can fix
+// from those it cannot.
+func TestClassifyCLIError(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want cliErrorKind
+	}{
+		{"401", "API Error: 401 unauthorized", cliErrorAuth},
+		{"failed to authenticate", "Failed to authenticate. API Error: 401", cliErrorAuth},
+		{"authentication_error", `{"type":"authentication_error"}`, cliErrorAuth},
+		{"invalid credentials", "Invalid authentication credentials", cliErrorAuth},
+		// Observed in production: a 401 status carrying an upstream HTML 502
+		// body. Auth markers must win over the HTML-page check, because this
+		// is transient and a retry is exactly right.
+		{"401 with html body", "Failed to authenticate. API Error: 401 <html><head><title>502 Bad Gateway</title></head></html>", cliErrorAuth},
+		{"403 scope", "API Error: 403 oauth_scope_insufficient", cliErrorOther},
+		{"429", "API Error: 429 rate limited", cliErrorOther},
+		{"502", "API Error: 502 Bad Gateway", cliErrorOther},
+		{"html page", "<!doctype html><html></html>", cliErrorOther},
+		{"benign", "Sure, here is the function you asked for.", cliErrorNone},
+		{"mentions 401 in prose", "The handler should return 401 when the token is missing.", cliErrorNone},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := classifyCLIError(tc.in); got != tc.want {
+				t.Errorf("classifyCLIError(%q) = %v, want %v", tc.in, got, tc.want)
+			}
+			// isFatalCLIError must stay consistent with the classifier, since
+			// existing callers and tests depend on it.
+			if gotFatal, wantFatal := isFatalCLIError(tc.in), tc.want != cliErrorNone; gotFatal != wantFatal {
+				t.Errorf("isFatalCLIError(%q) = %v, want %v", tc.in, gotFatal, wantFatal)
+			}
+		})
 	}
 }
