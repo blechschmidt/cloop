@@ -639,6 +639,33 @@
   .task-title { font-weight:500; font-size:13px; }
   .task-desc { font-size:12px; color:var(--muted); margin-top:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .task-meta { font-size:11px; color:var(--muted); margin-top:3px; display:flex; gap:10px; }
+
+  /* Background work an agent left running after claiming the task was done
+     (Task 20205). Given its own line rather than a chip in .task-meta: a task
+     with work still running is not finished whatever its status says, and that
+     has to be readable at a glance rather than lost among the tags. */
+  .task-background {
+    display:flex; align-items:center; gap:6px; flex-wrap:wrap;
+    margin-top:5px; padding:3px 8px; border-radius:4px;
+    font-size:11px; font-weight:500; border:1px solid transparent;
+  }
+  .task-background .bg-glyph { font-size:12px; line-height:1; flex-shrink:0; }
+  .task-background .bg-cmds  { font-family:var(--mono,monospace); opacity:.75; font-size:10px; }
+  .task-background.bg-waiting {
+    background:rgba(210,153,34,.12); color:var(--yellow); border-color:rgba(210,153,34,.3);
+  }
+  /* The wait is live, so the marker moves — this is the one place in the task
+     list where something is still happening after the agent stopped talking. */
+  .task-background.bg-waiting .bg-glyph { animation:pulse 1.5s infinite; }
+  .task-background.bg-abandoned {
+    background:rgba(248,81,73,.12); color:var(--red); border-color:rgba(248,81,73,.3);
+  }
+  .task-background.bg-drained {
+    background:rgba(139,148,158,.12); color:var(--muted); border-color:rgba(139,148,158,.25);
+  }
+  /* A task blocked on background work reads as running, not as whatever its
+     own signal claimed. */
+  .task-item.has-background-waiting { border-color:var(--yellow); background:rgba(210,153,34,.05); }
   .task-priority { padding:1px 5px; border-radius:3px; font-size:11px; font-weight:600; }
   .task-priority.p1 { background:rgba(248,81,73,.15);   color:var(--red); }
   .task-priority.p2 { background:rgba(210,153,34,.15);  color:var(--yellow); }
@@ -803,6 +830,7 @@
   .event-icon.ev-task-del    { background:#888; }
   .event-icon.ev-task-status { background:#7c5fb3; }
   .event-icon.ev-evolve      { background:#39b58b; }
+  .event-icon.ev-task-bg     { background:#b8862b; }
   .event-icon.ev-writeback   { background:#2f7fa8; }
   .event-icon.ev-plan        { background:var(--cyan); }
   .event-icon.ev-session     { background:#444; }

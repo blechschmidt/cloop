@@ -842,3 +842,64 @@ func TestLoad_PermWarning_ConcurrentLoadsDoNotRaceOrDuplicate(t *testing.T) {
 		t.Errorf("expected exactly 1 perm-warning across 320 concurrent Load() calls, got %d\nstderr:\n%s", count, output)
 	}
 }
+
+// TestBackgroundConfigClamp guards the bounds on the background-work settings
+// (Task 20205). A grace window is paid by every task that leaves anything
+// behind, and an unbounded wait would hang a project on one runaway process,
+// so both are clamped — and the correction is reported rather than applied
+// silently.
+func TestBackgroundConfigClamp(t *testing.T) {
+	tests := []struct {
+		name      string
+		in        BackgroundConfig
+		wantGrace int
+		wantWait  int
+		wantNotes int
+	}{
+		{name: "zero value is left alone", in: BackgroundConfig{}},
+		{
+			name:      "negative grace falls back to the default",
+			in:        BackgroundConfig{GraceSeconds: -5},
+			wantNotes: 1,
+		},
+		{
+			name:      "oversized grace is clamped",
+			in:        BackgroundConfig{GraceSeconds: 9999},
+			wantGrace: BackgroundGraceSecondsMax,
+			wantNotes: 1,
+		},
+		{
+			name:      "oversized wait is clamped",
+			in:        BackgroundConfig{WaitMinutes: 100000},
+			wantWait:  BackgroundWaitMinutesMax,
+			wantNotes: 1,
+		},
+		{
+			// Negative is the documented way to say "report it, do not wait".
+			name:     "negative wait is preserved",
+			in:       BackgroundConfig{WaitMinutes: -1},
+			wantWait: -1,
+		},
+		{
+			name:      "sane values pass through",
+			in:        BackgroundConfig{GraceSeconds: 5, WaitMinutes: 60},
+			wantGrace: 5,
+			wantWait:  60,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.in
+			notes := got.Clamp()
+			if got.GraceSeconds != tc.wantGrace {
+				t.Errorf("GraceSeconds = %d, want %d", got.GraceSeconds, tc.wantGrace)
+			}
+			if got.WaitMinutes != tc.wantWait {
+				t.Errorf("WaitMinutes = %d, want %d", got.WaitMinutes, tc.wantWait)
+			}
+			if len(notes) != tc.wantNotes {
+				t.Errorf("got %d notes %v, want %d", len(notes), notes, tc.wantNotes)
+			}
+		})
+	}
+}

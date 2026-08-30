@@ -4,6 +4,8 @@ package cmd
 // Importing this file (via the cmd package) registers all providers automatically.
 
 import (
+	"time"
+
 	"github.com/blechschmidt/cloop/pkg/provider"
 	"github.com/blechschmidt/cloop/pkg/provider/anthropic"
 	"github.com/blechschmidt/cloop/pkg/provider/claudecode"
@@ -28,7 +30,17 @@ func init() {
 	claudecode.SetCredentialRefresher(ratelimit.ForceCredentialRefresh)
 
 	provider.Register(claudecode.ProviderName, func(cfg provider.ProviderConfig) (provider.Provider, error) {
-		return claudecode.New(), nil
+		// Work the CLI leaves running after it exits (Task 20205). A zero
+		// value in any of these fields resolves to the recommended default
+		// inside the provider, so an unconfigured project still gets the
+		// detection, the wait, and the cleanup.
+		bg := cfg.ClaudeCodeBackground
+		return claudecode.NewWithBackground(claudecode.BackgroundPolicy{
+			Disabled:    bg.Disabled,
+			Grace:       time.Duration(bg.GraceSeconds) * time.Second,
+			Wait:        time.Duration(bg.WaitMinutes) * time.Minute,
+			KeepOrphans: bg.KeepOrphans,
+		}), nil
 	})
 
 	provider.Register(anthropic.ProviderName, func(cfg provider.ProviderConfig) (provider.Provider, error) {

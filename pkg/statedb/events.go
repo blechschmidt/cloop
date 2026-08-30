@@ -48,6 +48,15 @@ const (
 	// show an operator the run whose transcript was right and whose code was
 	// lost. Making exactly that case visible is why this subsystem exists.
 	EventWriteBack EventType = "write_back"
+
+	// EventTaskBackground records work an agent harness left running after it
+	// reported the task complete (Task 20205), and how that resolved.
+	//
+	// Its own type rather than a detail on task_done because it explains the
+	// two things a status alone cannot: why a task sat running long after its
+	// agent had stopped talking, and why a task whose output ended in
+	// TASK_DONE was nonetheless not accepted as done.
+	EventTaskBackground EventType = "task_background"
 )
 
 // NoStep is the EventRow.Step value for events that are not bound to any

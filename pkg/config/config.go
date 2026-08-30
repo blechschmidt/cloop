@@ -1478,6 +1478,67 @@ type ClaudeCodeConfig struct {
 	// MaxWeeklySonnetPct, when > 0, blocks new runs once the weekly Sonnet
 	// utilization reaches this percent.
 	MaxWeeklySonnetPct float64 `yaml:"max_weekly_sonnet_pct,omitempty"`
+
+	// Background tunes what happens to work the harness leaves running after
+	// it exits (Task 20205). The zero value is the recommended behaviour.
+	Background BackgroundConfig `yaml:"background,omitempty"`
+}
+
+// BackgroundConfig tunes the handling of work an agent harness leaves running
+// after it reports a task complete.
+//
+// It exists because an agent that starts a training run in the background and
+// then prints TASK_DONE hands the next task an artifact that is still being
+// written. cloop waits for that work and refuses to accept the task while it
+// is unfinished; these knobs adjust how long it waits and what it does with
+// work that never finishes.
+type BackgroundConfig struct {
+	// Disabled turns detection off entirely, restoring the older behaviour of
+	// trusting a harness that claims success while its work is still running.
+	Disabled bool `yaml:"disabled,omitempty"`
+	// GraceSeconds is how long a surviving process may live before it counts
+	// as background work rather than ordinary teardown. 0 selects the default.
+	GraceSeconds int `yaml:"grace_seconds,omitempty"`
+	// WaitMinutes bounds how long cloop blocks for that work to finish.
+	// 0 selects the default; negative means report it without waiting.
+	WaitMinutes int `yaml:"wait_minutes,omitempty"`
+	// KeepOrphans leaves work that outlived the budget running instead of
+	// terminating it. The task is reported incomplete either way. Off by
+	// default: an orphan belongs to no task, and a retry would start a second
+	// copy racing the first over the same output files.
+	KeepOrphans bool `yaml:"keep_orphans,omitempty"`
+}
+
+// Bounds for BackgroundConfig, applied by Clamp. A grace window longer than a
+// couple of minutes would be paid by every task that leaves anything behind,
+// and a wait measured in days would hang a project on one runaway process.
+const (
+	BackgroundGraceSecondsMax = 120
+	BackgroundWaitMinutesMax  = 24 * 60
+)
+
+// Clamp bounds the background settings, returning a note for anything it had
+// to correct so a bad config is reported rather than silently reinterpreted.
+func (b *BackgroundConfig) Clamp() []string {
+	var notes []string
+	if b.GraceSeconds < 0 {
+		notes = append(notes, fmt.Sprintf(
+			"claudecode.background.grace_seconds %d is negative; using the default", b.GraceSeconds))
+		b.GraceSeconds = 0
+	}
+	if b.GraceSeconds > BackgroundGraceSecondsMax {
+		notes = append(notes, fmt.Sprintf(
+			"claudecode.background.grace_seconds %d exceeds %d; clamped",
+			b.GraceSeconds, BackgroundGraceSecondsMax))
+		b.GraceSeconds = BackgroundGraceSecondsMax
+	}
+	if b.WaitMinutes > BackgroundWaitMinutesMax {
+		notes = append(notes, fmt.Sprintf(
+			"claudecode.background.wait_minutes %d exceeds %d; clamped",
+			b.WaitMinutes, BackgroundWaitMinutesMax))
+		b.WaitMinutes = BackgroundWaitMinutesMax
+	}
+	return notes
 }
 
 // MockConfig holds settings for the deterministic offline mock provider.

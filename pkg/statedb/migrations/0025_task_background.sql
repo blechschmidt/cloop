@@ -1,0 +1,28 @@
+-- 0025_task_background: record work an agent left running after it reported a
+-- task complete (Task 20205).
+--
+-- An agent asked to train a model may start the training with `nohup ... &` and
+-- exit immediately, printing TASK_DONE. Without this column the fact is lost at
+-- the first save: the task reads back as an ordinary failure, and the operator
+-- looking at why three downstream tasks produced nonsense has nothing pointing
+-- at the cause. The reported incident was exactly that — tasks 49 to 51 of a
+-- project all ran against a model that task 48 was still training.
+--
+-- Column:
+--
+--   background  a JSON object, or '' when the agent left nothing running.
+--               Fields: state ("waiting" | "drained" | "abandoned"), detected,
+--               commands, waited_seconds, terminated, detected_at.
+--
+-- JSON rather than a column per field, which is how this table stores every
+-- other scalar: the value is a small nested record that is always read and
+-- written whole, never filtered or aggregated on, and spreading six fields
+-- across six columns would buy nothing for a shape that is likely to gain a
+-- field as more executor backends learn to report it. tags and annotations
+-- already set this precedent in the same table.
+--
+-- NOT NULL DEFAULT '' means every row predating this migration reads back as
+-- the empty string, which the loader maps to "no background work" — so no
+-- backfill pass runs and no NULL handling is needed.
+
+ALTER TABLE plan_tasks ADD COLUMN background TEXT NOT NULL DEFAULT '';

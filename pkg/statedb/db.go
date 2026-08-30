@@ -547,7 +547,7 @@ func (d *DB) LoadTask(id int) (*pm.Task, error) {
 			estimated_minutes, actual_minutes, artifact_path, failure_diagnosis,
 			tags, fail_count, heal_attempts, annotations, condition_expr,
 			recurrence, next_run_at, requires_approval, approved, max_minutes,
-			write_back_branch, write_back_commit
+			write_back_branch, write_back_commit, background
 		FROM plan_tasks WHERE id = ? LIMIT 1`, id)
 	if err != nil {
 		return nil, classifyDriverErr(err)
@@ -562,6 +562,7 @@ func (d *DB) LoadTask(id int) (*pm.Task, error) {
 	t := &pm.Task{}
 	var (
 		status, role, depsJSON, tagsJSON, annJSON   string
+		bgJSON                                      string
 		startedAt, completedAt, deadline, nextRunAt sql.NullString
 		reqApproval, approved                       int
 	)
@@ -575,7 +576,7 @@ func (d *DB) LoadTask(id int) (*pm.Task, error) {
 		&tagsJSON, &t.FailCount, &t.HealAttempts,
 		&annJSON, &t.Condition, &t.Recurrence,
 		&nextRunAt, &reqApproval, &approved, &t.MaxMinutes,
-		&t.WriteBackBranch, &t.WriteBackCommit,
+		&t.WriteBackBranch, &t.WriteBackCommit, &bgJSON,
 	); err != nil {
 		return nil, classifyDriverErr(err)
 	}
@@ -584,6 +585,7 @@ func (d *DB) LoadTask(id int) (*pm.Task, error) {
 	_ = json.Unmarshal([]byte(depsJSON), &t.DependsOn)
 	_ = json.Unmarshal([]byte(tagsJSON), &t.Tags)
 	_ = json.Unmarshal([]byte(annJSON), &t.Annotations)
+	t.Background = decodeBackground(bgJSON)
 	t.RequiresApproval = reqApproval == 1
 	t.Approved = approved == 1
 	if startedAt.Valid {
@@ -686,8 +688,8 @@ func upsertTaskTx(tx *sql.Tx, t *pm.Task) error {
 			estimated_minutes, actual_minutes, artifact_path, failure_diagnosis,
 			tags, fail_count, heal_attempts, annotations, condition_expr,
 			recurrence, next_run_at, requires_approval, approved, max_minutes,
-			write_back_branch, write_back_commit
-		) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+			write_back_branch, write_back_commit, background
+		) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(id) DO UPDATE SET
 			title=excluded.title, description=excluded.description,
 			priority=excluded.priority, status=excluded.status, role=excluded.role,
@@ -706,7 +708,8 @@ func upsertTaskTx(tx *sql.Tx, t *pm.Task) error {
 			requires_approval=excluded.requires_approval,
 			approved=excluded.approved, max_minutes=excluded.max_minutes,
 			write_back_branch=excluded.write_back_branch,
-			write_back_commit=excluded.write_back_commit`,
+			write_back_commit=excluded.write_back_commit,
+			background=excluded.background`,
 		t.ID, t.Title, t.Description, t.Priority, string(t.Status), string(t.Role),
 		string(depsJSON), t.Result,
 		startedAt, completedAt, deadline,
@@ -718,7 +721,7 @@ func upsertTaskTx(tx *sql.Tx, t *pm.Task) error {
 		nextRunAt,
 		boolInt(t.RequiresApproval), boolInt(t.Approved),
 		t.MaxMinutes,
-		t.WriteBackBranch, t.WriteBackCommit,
+		t.WriteBackBranch, t.WriteBackCommit, encodeBackground(t.Background),
 	)
 	return err
 }
@@ -730,7 +733,7 @@ func loadTasks(conn *sql.DB) ([]*pm.Task, error) {
 			estimated_minutes, actual_minutes, artifact_path, failure_diagnosis,
 			tags, fail_count, heal_attempts, annotations, condition_expr,
 			recurrence, next_run_at, requires_approval, approved, max_minutes,
-			write_back_branch, write_back_commit
+			write_back_branch, write_back_commit, background
 		FROM plan_tasks ORDER BY id`)
 	if err != nil {
 		return nil, err
@@ -742,6 +745,7 @@ func loadTasks(conn *sql.DB) ([]*pm.Task, error) {
 		t := &pm.Task{}
 		var (
 			status, role, depsJSON, tagsJSON, annJSON   string
+			bgJSON                                      string
 			startedAt, completedAt, deadline, nextRunAt sql.NullString
 			reqApproval, approved                       int
 		)
@@ -755,7 +759,7 @@ func loadTasks(conn *sql.DB) ([]*pm.Task, error) {
 			&tagsJSON, &t.FailCount, &t.HealAttempts,
 			&annJSON, &t.Condition, &t.Recurrence,
 			&nextRunAt, &reqApproval, &approved, &t.MaxMinutes,
-			&t.WriteBackBranch, &t.WriteBackCommit,
+			&t.WriteBackBranch, &t.WriteBackCommit, &bgJSON,
 		); err != nil {
 			return nil, err
 		}
@@ -764,6 +768,7 @@ func loadTasks(conn *sql.DB) ([]*pm.Task, error) {
 		_ = json.Unmarshal([]byte(depsJSON), &t.DependsOn)
 		_ = json.Unmarshal([]byte(tagsJSON), &t.Tags)
 		_ = json.Unmarshal([]byte(annJSON), &t.Annotations)
+		t.Background = decodeBackground(bgJSON)
 		t.RequiresApproval = reqApproval == 1
 		t.Approved = approved == 1
 		if startedAt.Valid {
@@ -950,4 +955,43 @@ func boolInt(b bool) int {
 func atoi(s string) int {
 	n, _ := strconv.Atoi(s)
 	return n
+}
+
+// encodeBackground serialises a task's background-work record for the
+// plan_tasks.background column (Task 20205).
+//
+// Absent work is stored as the empty string rather than the JSON literal
+// "null", so a row written by this build is indistinguishable from one that
+// predates the column's migration. That keeps the "no background work" case a
+// single value instead of three that all have to be handled.
+func encodeBackground(b *pm.BackgroundWork) string {
+	if b == nil {
+		return ""
+	}
+	raw, err := json.Marshal(b)
+	if err != nil {
+		// A record that cannot be encoded must not take the task's whole save
+		// down with it: the status, result and diagnosis matter more than the
+		// annotation of why it failed.
+		return ""
+	}
+	return string(raw)
+}
+
+// decodeBackground parses the background column, treating anything
+// unreadable as "no background work".
+//
+// Tolerating a bad value rather than failing the load is deliberate: this
+// field is diagnostic, and refusing to open a project because one task's
+// diagnostic annotation is malformed would trade a cosmetic loss for a total
+// one.
+func decodeBackground(raw string) *pm.BackgroundWork {
+	if raw == "" || raw == "null" {
+		return nil
+	}
+	var b pm.BackgroundWork
+	if err := json.Unmarshal([]byte(raw), &b); err != nil || b.State == "" {
+		return nil
+	}
+	return &b
 }

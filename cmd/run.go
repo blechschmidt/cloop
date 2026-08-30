@@ -189,6 +189,11 @@ Press Ctrl+C to pause gracefully.`,
 		if model == "" {
 			model = os.Getenv("CLOOP_MODEL")
 		}
+		// Bound the background settings before they reach the provider, and
+		// say so rather than silently reinterpreting a bad value.
+		for _, note := range cfg.ClaudeCode.Background.Clamp() {
+			fmt.Fprintf(os.Stderr, "warning: %s\n", note)
+		}
 		provCfg := provider.ProviderConfig{
 			Name:              providerName,
 			AnthropicAPIKey:   cfg.Anthropic.APIKey,
@@ -197,6 +202,12 @@ Press Ctrl+C to pause gracefully.`,
 			OpenAIBaseURL:     cfg.OpenAI.BaseURL,
 			OllamaBaseURL:     cfg.Ollama.BaseURL,
 			MockResponsesFile: cfg.Mock.ResponsesFile,
+			ClaudeCodeBackground: provider.BackgroundPolicyConfig{
+				Disabled:     cfg.ClaudeCode.Background.Disabled,
+				GraceSeconds: cfg.ClaudeCode.Background.GraceSeconds,
+				WaitMinutes:  cfg.ClaudeCode.Background.WaitMinutes,
+				KeepOrphans:  cfg.ClaudeCode.Background.KeepOrphans,
+			},
 		}
 
 		// Apply per-provider model defaults from config if not overridden by flag

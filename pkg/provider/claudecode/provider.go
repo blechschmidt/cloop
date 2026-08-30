@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/procgroup"
 	"github.com/blechschmidt/cloop/pkg/provider"
 )
 
@@ -55,9 +56,75 @@ func SetCredentialRefresher(fn func() string) { refreshCredential = fn }
 // must rotate itself.
 func CredentialRefresherWired() bool { return refreshCredential != nil }
 
-type Provider struct{}
+// BackgroundPolicy governs what happens to work the harness leaves running in
+// its process group after it exits. The zero value is the recommended
+// behaviour: detect it, wait for it, and terminate whatever outlives the wait.
+type BackgroundPolicy struct {
+	// Disabled turns detection off, restoring the previous behaviour of
+	// trusting a harness that reports success while its work is still
+	// running. An escape hatch for a deployment where the tradeoff is wrong,
+	// not a default.
+	Disabled bool
+	// Grace is how long a surviving process may live before it counts as
+	// background work rather than ordinary teardown. Zero selects
+	// DefaultBackgroundGrace.
+	Grace time.Duration
+	// Wait bounds how long cloop blocks for that work to finish. Zero selects
+	// DefaultBackgroundWait; negative means report it without waiting.
+	Wait time.Duration
+	// TerminateGrace is how long a terminated group has to exit on SIGTERM
+	// before SIGKILL. Zero selects DefaultTerminateGrace.
+	TerminateGrace time.Duration
+	// KeepOrphans leaves work that outlived the budget running instead of
+	// terminating it. The task is still reported incomplete either way.
+	KeepOrphans bool
+}
+
+// Background-policy defaults.
+//
+// The wait is generous on purpose. Its job is to cover the case this feature
+// exists for — a build, a test suite or a training run that the agent started
+// and should have waited for — and those finish in minutes, not seconds. The
+// cost of waiting too long is a slow task; the cost of waiting too briefly is
+// a task marked incomplete and retried when it would have succeeded, which is
+// both more expensive and more confusing.
+const (
+	DefaultBackgroundGrace = 2 * time.Second
+	DefaultBackgroundWait  = 30 * time.Minute
+	DefaultTerminateGrace  = 5 * time.Second
+)
+
+// resolve fills in defaults for a zero-valued policy.
+func (b BackgroundPolicy) resolve() BackgroundPolicy {
+	if b.Grace == 0 {
+		b.Grace = DefaultBackgroundGrace
+	}
+	if b.Wait == 0 {
+		b.Wait = DefaultBackgroundWait
+	} else if b.Wait < 0 {
+		b.Wait = 0 // report without waiting
+	}
+	if b.TerminateGrace == 0 {
+		b.TerminateGrace = DefaultTerminateGrace
+	}
+	return b
+}
+
+type Provider struct {
+	// Background governs the handling of work the CLI leaves running after it
+	// exits. The zero value detects, waits and terminates; see
+	// BackgroundPolicy.
+	Background BackgroundPolicy
+}
 
 func New() *Provider { return &Provider{} }
+
+// NewWithBackground builds a provider with an explicit policy for work the CLI
+// leaves running. Zero-valued fields resolve to the documented defaults, so a
+// caller that configures nothing still gets detection, the wait, and cleanup.
+func NewWithBackground(policy BackgroundPolicy) *Provider {
+	return &Provider{Background: policy}
+}
 
 func (p *Provider) Name() string         { return ProviderName }
 func (p *Provider) DefaultModel() string { return "" }
@@ -212,9 +279,14 @@ func (p *Provider) runCLI(ctx context.Context, prompt string, opts provider.Opti
 	go func() { waitCh <- cmd.Wait() }()
 
 	var err error
+	var background *provider.BackgroundActivity
 	select {
 	case err = <-waitCh:
-		// Process exited normally.
+		// Process exited normally. Before trusting its output, settle whatever
+		// it left running: the CLI may have started a long job in the
+		// background and exited immediately, in which case its "done" is a
+		// claim about work that has barely begun. See settleBackground.
+		background = p.settleBackground(ctx, cmd.Process.Pid, opts)
 	case <-ctx.Done():
 		// Context cancelled or timed out. Kill the whole process group
 		// (negative pid) so forked children die too; fall back to killing
@@ -267,11 +339,89 @@ func (p *Provider) runCLI(ctx context.Context, prompt string, opts provider.Opti
 	}
 
 	return &provider.Result{
-		Output:   output,
-		Duration: duration,
-		Provider: ProviderName,
-		Model:    opts.Model,
+		Output:     output,
+		Duration:   duration,
+		Provider:   ProviderName,
+		Model:      opts.Model,
+		Background: background,
 	}, nil
+}
+
+// settleBackground resolves work the CLI left running in its process group
+// after it exited, and reports what happened.
+//
+// The problem it solves: an agent asked to train a model may start the
+// training with `nohup ... &` and exit immediately, printing TASK_DONE. cloop
+// then marks the task complete and runs the next one, which reads a model file
+// that is still being written. Nothing errors — the work is just wrong, and no
+// log cloop keeps says why. Watching the output pipes cannot catch this,
+// because nohup redirects the child's descriptors and the pipes close on time.
+//
+// Waiting here rather than in the orchestrator is deliberate. It makes the
+// provider's contract "when Complete returns, the work the harness started is
+// finished", which fixes every caller at once — the sequential path, the
+// parallel path, heal retries, evolve, and decompose all consume this result,
+// and each would otherwise need the same wait bolted on.
+//
+// pgid equals the CLI's pid because runCLI starts it with Setpgid.
+func (p *Provider) settleBackground(ctx context.Context, pgid int, opts provider.Options) *provider.BackgroundActivity {
+	policy := p.Background.resolve()
+	if policy.Disabled {
+		return nil
+	}
+
+	// Detach from the caller's context for the wait. ctx carries the task
+	// timeout, and by this point the CLI has already exited: an expired
+	// deadline should not turn "wait for the work to finish" into "return
+	// immediately and report it as abandoned", which would mark a task
+	// incomplete for the one reason it is not the task's fault.
+	waitCtx := context.WithoutCancel(ctx)
+
+	out := procgroup.Drain(waitCtx, pgid, procgroup.DrainOptions{
+		Grace:  policy.Grace,
+		Budget: policy.Wait,
+		OnDetect: func(members []procgroup.Process) {
+			if opts.OnBackgroundWait == nil {
+				return
+			}
+			names := make([]string, 0, len(members))
+			for _, m := range members {
+				names = append(names, m.Command)
+			}
+			opts.OnBackgroundWait(provider.BackgroundActivity{
+				Detected: len(members),
+				Commands: names,
+			})
+		},
+	})
+	if out.Detected == 0 {
+		return nil
+	}
+
+	activity := &provider.BackgroundActivity{
+		Detected: out.Detected,
+		Commands: out.Commands,
+		Waited:   out.Waited,
+		Drained:  out.Drained,
+	}
+	if out.Drained {
+		return activity
+	}
+
+	// The work outlived its budget. Leaving it running is not the neutral
+	// option: the processes are orphaned, attributable to no task, and a retry
+	// of this task would start a second copy racing the first over the same
+	// output files. Operators who want the opposite set KeepOrphans.
+	if !policy.KeepOrphans {
+		killed, err := procgroup.Terminate(pgid, policy.TerminateGrace)
+		activity.Terminated = killed
+		if err != nil {
+			// Report rather than fail: the caller is about to mark this task
+			// incomplete anyway, and that is the outcome that matters.
+			fmt.Fprintf(os.Stderr, "cloop: terminating background work from pgid %d: %v\n", pgid, err)
+		}
+	}
+	return activity
 }
 
 // isFatalCLIError returns true when the claude CLI's combined stdout/stderr

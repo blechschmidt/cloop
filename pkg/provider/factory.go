@@ -23,6 +23,25 @@ type ProviderConfig struct {
 
 	// Mock settings
 	MockResponsesFile string
+
+	// ClaudeCodeBackground tunes the handling of work the claude CLI leaves
+	// running after it exits (Task 20205). The zero value detects it, waits
+	// for it, and terminates whatever outlives the wait.
+	ClaudeCodeBackground BackgroundPolicyConfig
+}
+
+// BackgroundPolicyConfig carries pkg/config's background settings to the
+// claudecode factory in units the factory can apply directly.
+//
+// A plain struct here rather than an import of pkg/config because the
+// dependency runs the other way round: the provider tree is imported by
+// pkg/config's consumers, and a leaf provider must not be made to depend on
+// the configuration package to compile.
+type BackgroundPolicyConfig struct {
+	Disabled     bool
+	GraceSeconds int
+	WaitMinutes  int
+	KeepOrphans  bool
 }
 
 // ProviderFactory is a function that creates a Provider from a ProviderConfig.

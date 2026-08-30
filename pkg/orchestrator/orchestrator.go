@@ -1947,6 +1947,12 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		var taskInputTokens, taskOutputTokens, taskThinkingTokens int
 		var taskProviderName, taskModelName string
 		var consensusReport *consensus.Report // non-nil when consensus was used
+		// taskBackground carries work the agent left running (Task 20205). It
+		// is reassigned alongside taskOutput on every path that produces a new
+		// result — including heal and clarify retries — because it describes
+		// that specific attempt, and a stale value would judge the new output
+		// by the old attempt's leftovers.
+		var taskBackground *provider.BackgroundActivity
 
 		if o.config.MultiAgent {
 			dimColor.Printf("→ Running multi-agent pipeline on task %d (architect→coder→reviewer)...\n", task.ID)
@@ -2066,6 +2072,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 				dimColor.Printf("→ Running %s on task %d...\n", taskProvider.Name(), task.ID)
 
 				opts, wasStreamed := o.makeOpts(s.Model, s.LiveEffort(), true)
+				opts = o.withBackgroundWaitNotice(opts, s, task, nil)
 				// Open live artifact file so `cloop task watch` can tail output.
 				liveFile, liveErr := artifact.OpenLiveArtifact(o.config.WorkDir, task.ID)
 				if liveErr != nil {
@@ -2150,6 +2157,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 				}
 
 				taskOutput = result.Output
+				taskBackground = result.Background
 				taskInputTokens = result.InputTokens
 				taskOutputTokens = result.OutputTokens
 				taskThinkingTokens = result.ThinkingTokens
@@ -2355,6 +2363,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 					printOutput(healResult.Output, dimColor, o.config.Verbose)
 				}
 				taskOutput = healResult.Output
+				taskBackground = healResult.Background
 
 				// Account for tokens used by heal attempts.
 				s.TotalInputTokens += healResult.InputTokens
@@ -2436,6 +2445,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 						printOutput(clarifyResult.Output, dimColor, o.config.Verbose)
 					}
 					taskOutput = clarifyResult.Output
+					taskBackground = clarifyResult.Background
 					s.TotalInputTokens += clarifyResult.InputTokens
 					s.TotalOutputTokens += clarifyResult.OutputTokens
 					signal = pm.CheckTaskSignal(taskOutput)
@@ -2459,6 +2469,23 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		if signal == pm.TaskInProgress && looksLikeClarificationQuestion(taskOutput) {
 			signal = pm.TaskFailed
 			clarificationReroute = true
+		}
+
+		// Background work the agent left running (Task 20205). This is applied
+		// after the heal loop rather than before it on purpose: heal re-runs
+		// the whole task, and the wait that detects abandonment is measured in
+		// minutes, so feeding this into heal would spend that wait — and kill a
+		// long job — once per retry. Failing once with a diagnosis that names
+		// the remedy is both cheaper and more useful.
+		signal = applyBackgroundOutcome(task, taskBackground, signal)
+		if task.Background != nil {
+			o.logBackgroundEvent(s, task, task.Background)
+			if task.Background.State == pm.BackgroundAbandoned {
+				task.FailureDiagnosis = backgroundFailureDiagnosis(task.Background)
+				color.New(color.FgYellow).Printf(
+					"⏳ Task %d left %d background process(es) running after %ds — not accepting it as complete\n",
+					task.ID, task.Background.Detected, task.Background.WaitedSeconds)
+			}
 		}
 
 		switch signal {
@@ -3671,6 +3698,7 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 				// Use role-specific provider if configured.
 				taskProvider := o.router.For(t.Role)
 				opts, _ := o.makeOpts(s.Model, s.LiveEffort(), false) // no streaming in parallel
+				opts = o.withBackgroundWaitNotice(opts, s, t, &mu)
 				// Worktree-parallel: override the provider's working directory
 				// so file edits land in this task's isolated worktree instead
 				// of the shared project root. Falls through to o.config.WorkDir
@@ -3918,6 +3946,15 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 			if clarificationReroute {
 				pm.AddAnnotation(task, "ai", "Task failed: LLM asked clarification questions instead of completing the work (parallel mode has no auto-resolve loop).")
 			}
+			// Background work the agent left running (Task 20205). Held under
+			// the same lock as the rest of the task mutation below: several of
+			// these goroutines run at once, and this both writes task fields
+			// and decides the signal the switch is about to act on.
+			signal = applyBackgroundOutcome(task, result.Background, signal)
+			backgroundWork := task.Background
+			if backgroundWork != nil && backgroundWork.State == pm.BackgroundAbandoned {
+				task.FailureDiagnosis = backgroundFailureDiagnosis(backgroundWork)
+			}
 			switch signal {
 			case pm.TaskDone:
 				task.Status = pm.TaskDone
@@ -4115,6 +4152,13 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 			s.Save()
 			mu.Unlock()
 
+			// Journalled outside the lock: it writes to the event DB, not to
+			// task state, and holding the shared mutex across that write would
+			// serialise every parallel worker behind it.
+			if backgroundWork != nil {
+				o.logBackgroundEvent(s, task, backgroundWork)
+			}
+
 			if tooManyErrors {
 				s.Status = "failed"
 				s.Save()
@@ -4283,6 +4327,34 @@ func (o *Orchestrator) makeOpts(model, effort string, streaming bool) (provider.
 		}
 	}
 	return opts, func() bool { return streamed }
+}
+
+// withBackgroundWaitNotice attaches the live notification for background work
+// an agent left running (Task 20205), so a task blocked on somebody's training
+// run is visibly blocked instead of merely slow.
+//
+// The callback fires from inside the provider call, while the task is still
+// executing. It records the wait on the task and saves, which is what pushes
+// the state to the dashboard; mu guards the task because the parallel path
+// runs several of these at once. Passing a nil mutex is allowed for the
+// sequential path, which has no contention.
+func (o *Orchestrator) withBackgroundWaitNotice(opts provider.Options, s *state.ProjectState, task *pm.Task, mu sync.Locker) provider.Options {
+	opts.OnBackgroundWait = func(activity provider.BackgroundActivity) {
+		work := noteBackgroundWait(activity)
+		if mu != nil {
+			mu.Lock()
+		}
+		task.Background = work
+		s.Save()
+		if mu != nil {
+			mu.Unlock()
+		}
+		o.logBackgroundEvent(s, task, work)
+		color.New(color.FgYellow).Printf(
+			"⏳ Task %d: waiting for %d background process(es) the agent left running (%v)\n",
+			task.ID, work.Detected, work.Commands)
+	}
+	return opts
 }
 
 // tokenLimit returns the effective ContextTokenLimit: the configured value or the default

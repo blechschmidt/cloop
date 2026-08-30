@@ -231,6 +231,39 @@ function _renderTaskDetails(d) {
 
   let html = '<div class="td-meta">'+chips.join('')+'</div>';
 
+  // Background work the agent left running (Task 20205). Placed above the
+  // result, because when it is present it qualifies everything below it: a
+  // result written while the work was still running describes something that
+  // had not happened yet.
+  if (t.background && t.background.state) {
+    const bg = t.background;
+    const n = bg.detected || 0;
+    const procs = n + ' process' + (n === 1 ? '' : 'es');
+    let cls, head, note;
+    if (bg.state === 'waiting') {
+      cls = 'warn'; head = 'Background work running';
+      note = 'This task is still waiting for ' + procs + ' its agent started. ' +
+             'It is not finished, whatever its status shows.';
+    } else if (bg.state === 'abandoned') {
+      cls = 'fail'; head = 'Background work never finished';
+      note = 'The agent reported completion while ' + procs + ' it started were still ' +
+             'running after ' + fmtDurationShort(bg.waited_seconds) + '. The task was not ' +
+             'accepted as complete, and tasks depending on it are blocked.' +
+             (bg.terminated ? ' ' + bg.terminated + ' process(es) were terminated so a retry ' +
+              'cannot race the leftovers.' : '');
+    } else {
+      cls = ''; head = 'Background work';
+      note = 'The agent left ' + procs + ' running; cloop waited ' +
+             fmtDurationShort(bg.waited_seconds) + ' for them to finish before accepting the result.';
+    }
+    html += '<div class="td-section '+cls+'"><h3>'+esc(head)+'</h3>'+
+      '<div class="td-text">'+esc(note)+'</div>'+
+      (bg.commands && bg.commands.length
+        ? '<div class="td-text"><code>'+bg.commands.map(esc).join('</code>, <code>')+'</code></div>'
+        : '')+
+      '</div>';
+  }
+
   if (t.description) {
     html += '<div class="td-section"><h3>Description</h3>'+
       '<div class="td-text">'+esc(t.description)+'</div></div>';

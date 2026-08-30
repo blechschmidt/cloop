@@ -46,6 +46,7 @@ const (
 	EventTaskAddedExternal = statedb.EventTaskAddedExternal
 	EventTaskDeleted       = statedb.EventTaskDeleted
 	EventTaskStatusChange  = statedb.EventTaskStatusChange
+	EventTaskBackground    = statedb.EventTaskBackground
 	EventEvolveRoundStart  = statedb.EventEvolveRoundStart
 	EventEvolveDiscovered  = statedb.EventEvolveDiscovered
 	EventEvolveNoOp        = statedb.EventEvolveNoOp

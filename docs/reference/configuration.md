@@ -58,6 +58,56 @@ Two reasons to set it:
 
 ---
 
+## Background work left by an agent
+
+An agent can start a long job and exit before it finishes — `nohup python
+train.py &`, a background build, a test run it never waits on — and then print
+`TASK_DONE`. Its transcript is honest about what it *started* and silent about
+what it *finished*, so without help cloop marks the task complete and runs the
+next one against an artifact that is still being written. The incident this
+guards against had three consecutive tasks operating on a model the task before
+them was still training.
+
+cloop detects this. The `claude` CLI runs in its own process group, so anything
+it forks is still identifiable after it exits. When the harness returns, cloop
+scans that group:
+
+- **Nothing left running** — the common case. Costs one procfs scan, and the
+  task proceeds normally.
+- **Something exits within the grace window** — ordinary teardown, ignored.
+- **Real background work** — cloop blocks until it finishes, then accepts the
+  task. The wait is visible in the UI and the event log while it happens.
+- **Work outlives the budget** — the task is *not* accepted as complete, whatever
+  its output claimed. It is marked failed with a diagnosis naming the surviving
+  processes, dependent tasks stay blocked, and the orphans are terminated so a
+  retry cannot race the leftovers.
+
+Configure it under the provider:
+
+```yaml
+claudecode:
+  background:
+    disabled: false      # true restores the old trust-the-transcript behaviour
+    grace_seconds: 2     # teardown window before survivors count as real work
+    wait_minutes: 30     # how long to wait; negative reports without waiting
+    keep_orphans: false  # true leaves survivors running (task still fails)
+```
+
+`grace_seconds` is capped at 120 and `wait_minutes` at 1440; a value beyond
+either is clamped with a warning rather than silently reinterpreted.
+
+Raise `wait_minutes` if your tasks legitimately start long jobs — the cost of
+waiting too long is a slow task, while the cost of waiting too briefly is a task
+retried when it would have succeeded. Set `keep_orphans: true` only if something
+outside cloop is responsible for reaping those processes.
+
+**Limit:** a child that calls `setsid()` leaves the process group and is not
+detected. That is deliberate — `setsid` is the explicit "I intend to outlive my
+parent" gesture, and the case this exists to catch is the opposite one, where
+the work was meant to be waited for.
+
+---
+
 ## Execution Backends (Executors)
 
 An **executor** decides *where* a cloop workload actually runs. By default it is

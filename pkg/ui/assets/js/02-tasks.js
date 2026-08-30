@@ -222,7 +222,10 @@ function renderTasks(s) {
     const cls = t.status || 'pending';
     const statusActions = buildStatusActions(t);
     const tid = t.id;
-    return '<div class="task-item '+esc(cls)+'" draggable="true" data-task-id="'+tid+'" '+
+    // A task blocked on background work gets the running treatment on the row
+    // itself, so the list reads correctly at a glance: it is not finished.
+    const bgCls = (t.background && t.background.state === 'waiting') ? ' has-background-waiting' : '';
+    return '<div class="task-item '+esc(cls)+bgCls+'" draggable="true" data-task-id="'+tid+'" '+
       'onclick="taskRowClick(event,'+tid+')" '+
       'style="cursor:pointer" '+
       'title="Click to view execution summary, output, and history" '+
@@ -243,6 +246,7 @@ function renderTasks(s) {
           (t.tags&&t.tags.length?'<span class="task-tags">'+t.tags.map(function(tg){return '<span class="task-tag">'+esc(tg)+'</span>';}).join('')+'</span>':'')+
           fmtTimeEstimate(t)+
         '</div>'+
+        fmtBackgroundWork(t)+
         fmtTaskLinks(t)+
       '</div>'+
       '<div class="task-actions">'+
@@ -256,6 +260,61 @@ function renderTasks(s) {
       '</div>'+
     '</div>';
   }).join('');
+}
+
+// fmtBackgroundWork renders work an agent left running after it claimed the
+// task was finished (Task 20205).
+//
+// It is a row of its own rather than another chip in .task-meta because of
+// what it means: a task with work still running is not finished, whatever its
+// status says, and the next task probably should not be reading its output
+// yet. That deserves to be legible at a glance in the list, not folded in
+// among the tags and time estimates.
+function fmtBackgroundWork(t) {
+  const bg = t && t.background;
+  if (!bg || !bg.state) return '';
+  const names = (bg.commands && bg.commands.length)
+    ? bg.commands.map(esc).join(', ') : '';
+  const n = bg.detected || 0;
+  const procs = n + ' background process' + (n === 1 ? '' : 'es');
+  const waited = bg.waited_seconds ? fmtDurationShort(bg.waited_seconds) : '';
+  let cls, glyph, text, tip;
+
+  if (bg.state === 'waiting') {
+    cls = 'bg-waiting';
+    glyph = '⏳';
+    text = 'Waiting for ' + procs + ' the agent left running';
+    tip = 'This task is not finished: work it started is still running' +
+          (names ? ' (' + names + ')' : '') + '.';
+  } else if (bg.state === 'abandoned') {
+    cls = 'bg-abandoned';
+    glyph = '⚠';
+    text = procs + ' still running after ' + waited + ' — task not complete';
+    tip = 'The agent reported completion while work it started was still running' +
+          (names ? ' (' + names + ')' : '') +
+          (bg.terminated ? '. ' + bg.terminated + ' terminated' : '') +
+          '. Dependent tasks are blocked.';
+  } else {
+    cls = 'bg-drained';
+    glyph = '⏱';
+    text = 'Waited ' + waited + ' for ' + procs;
+    tip = 'The agent left work running; cloop waited for it to finish' +
+          (names ? ' (' + names + ')' : '') + '.';
+  }
+  return '<div class="task-background ' + cls + '" title="' + esc(tip) + '">' +
+    '<span class="bg-glyph">' + glyph + '</span>' + esc(text) +
+    (names ? '<span class="bg-cmds">' + names + '</span>' : '') +
+    '</div>';
+}
+
+// fmtDurationShort renders a second count as the coarsest useful unit.
+function fmtDurationShort(seconds) {
+  const s = Math.max(0, Math.round(seconds || 0));
+  if (s < 60) return s + 's';
+  if (s < 3600) return Math.round(s / 60) + 'm';
+  const h = Math.floor(s / 3600);
+  const m = Math.round((s % 3600) / 60);
+  return m ? h + 'h ' + m + 'm' : h + 'h';
 }
 
 function fmtTimeEstimate(t) {

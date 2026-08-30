@@ -410,6 +410,11 @@ function _eventVisuals(kind) {
     case 'task_added_external': return { glyph:'+',      cls:'ev-task-add',    label:'external'  };
     case 'task_deleted':        return { glyph:'−', cls:'ev-task-del',    label:'deleted'   };
     case 'task_status_change':  return { glyph:'⇄', cls:'ev-task-status', label:'status'    };
+    // Work an agent left running after reporting the task complete. Its own
+    // row because it explains the two things a status cannot: why a task sat
+    // running long after its agent stopped talking, and why a task whose
+    // output said TASK_DONE was not accepted as done.
+    case 'task_background':     return { glyph:'⏳', cls:'ev-task-bg',     label:'background'};
     case 'evolve_round_start':  return { glyph:'↻', cls:'ev-evolve',      label:'evolve'    };
     case 'evolve_discovered':   return { glyph:'✨', cls:'ev-evolve',      label:'discovered'};
     case 'evolve_no_op':        return { glyph:'—', cls:'ev-evolve',      label:'no-op'     };

@@ -225,6 +225,53 @@ type Task struct {
 	// fetching the named branch.
 	WriteBackBranch string `json:"write_back_branch,omitempty"`
 	WriteBackCommit string `json:"write_back_commit,omitempty"`
+	// Background records work the agent harness left running after it claimed
+	// to be finished (Task 20205), so the UI can show why a task waited, or
+	// why it was not accepted as done.
+	Background *BackgroundWork `json:"background,omitempty"`
+}
+
+// BackgroundWork records processes an agent left running after it reported the
+// task complete, and how that resolved.
+//
+// It is persisted on the task rather than only logged because it answers two
+// questions an operator asks later: why did this task take twenty minutes, and
+// why was this task not marked done when its own output said TASK_DONE.
+type BackgroundWork struct {
+	// State is "waiting" while cloop is blocked on the work, "drained" once it
+	// finished, and "abandoned" when it outlived its budget.
+	State BackgroundState `json:"state"`
+	// Detected is how many processes were still running.
+	Detected int `json:"detected"`
+	// Commands names them, for diagnosis.
+	Commands []string `json:"commands,omitempty"`
+	// WaitedSeconds is how long cloop blocked on the work.
+	WaitedSeconds int `json:"waited_seconds,omitempty"`
+	// Terminated is how many processes were killed after outliving the budget.
+	Terminated int `json:"terminated,omitempty"`
+	// DetectedAt is when the work was first seen.
+	DetectedAt time.Time `json:"detected_at"`
+}
+
+// BackgroundState is the lifecycle of background work left by an agent.
+type BackgroundState string
+
+const (
+	// BackgroundWaiting means cloop is currently blocked on the work. A task
+	// in this state is running, not finished, however complete its own output
+	// claims to be.
+	BackgroundWaiting BackgroundState = "waiting"
+	// BackgroundDrained means the work finished on its own and the task's
+	// result can be trusted.
+	BackgroundDrained BackgroundState = "drained"
+	// BackgroundAbandoned means the work outlived its budget. The task is not
+	// complete: its output describes work that had not finished.
+	BackgroundAbandoned BackgroundState = "abandoned"
+)
+
+// Pending reports whether the task is still blocked on background work.
+func (b *BackgroundWork) Pending() bool {
+	return b != nil && b.State == BackgroundWaiting
 }
 
 // Plan is the full task plan for a goal.
@@ -571,6 +618,19 @@ func ExecuteTaskPrompt(goal, instructions, workDir string, plan *Plan, task *Tas
 	b.WriteString("2. Implement it fully and verify it works\n")
 	b.WriteString("3. If the task is already done or not applicable, explain why\n")
 	b.WriteString("4. Summarize what you did\n\n")
+	// Prevention for the failure mode in Task 20205: an agent that starts a
+	// long job in the background and signals TASK_DONE hands the next task a
+	// half-written artifact. cloop now detects and waits for that work, but
+	// the wait costs real time and can end in the task being rejected, so it
+	// is far cheaper to ask the agent not to do it in the first place.
+	b.WriteString("## BACKGROUND WORK\n")
+	b.WriteString("Do NOT signal completion while work you started is still running. If you start\n")
+	b.WriteString("anything in the background — a build, a test run, a training job, a `&` or\n")
+	b.WriteString("`nohup` command, a background shell — you must wait for it to finish and check\n")
+	b.WriteString("its result before you finish. Later tasks may depend on its output, and a task\n")
+	b.WriteString("that reports success while its work is still running will hand them an\n")
+	b.WriteString("incomplete artifact. If the work genuinely cannot finish within this task,\n")
+	b.WriteString("end with TASK_FAILED and say what is still running rather than claiming success.\n\n")
 	b.WriteString("When the task is successfully completed, end with: TASK_DONE\n")
 	b.WriteString("If the task is not applicable or already done, end with: TASK_SKIPPED\n")
 	b.WriteString("If you cannot complete the task, end with: TASK_FAILED\n")
