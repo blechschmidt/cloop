@@ -10,7 +10,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
+	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 )
 
@@ -23,10 +25,15 @@ type KillRequest = statedb.KillRequest
 // the worker exits, target_status is re-applied so the operator's choice
 // wins over the worker's "canceled → failed" handling.
 //
+// attempt names the execution being aborted — the RFC3339Nano started_at the
+// caller observed on the task, via AttemptToken. Requests are scoped to that
+// attempt so one filed against an execution that has since ended cannot cancel
+// a later attempt of the same task (Task 20203).
+//
 // Returns nil on success or when the project DB does not exist (a kill request
 // against a project with no orchestrator running is benign — there's nothing
 // to cancel).
-func RequestTaskKill(workDir string, taskID int, targetStatus, requestedBy string) error {
+func RequestTaskKill(workDir string, taskID int, targetStatus, requestedBy, attempt string) error {
 	if workDir == "" || taskID <= 0 {
 		return nil
 	}
@@ -47,7 +54,22 @@ func RequestTaskKill(workDir string, taskID int, targetStatus, requestedBy strin
 		TaskID:       taskID,
 		TargetStatus: targetStatus,
 		RequestedBy:  requestedBy,
+		Attempt:      attempt,
 	})
+}
+
+// AttemptToken renders a task's StartedAt as the attempt identifier used to
+// scope kill requests. Returns "" for a task that has never been started,
+// which the poller treats as naming no live execution.
+//
+// Both sides of the comparison go through this function so the two never drift
+// on formatting; the poller additionally compares parsed instants so a row
+// written by a differently-formatting client still matches.
+func AttemptToken(t *pm.Task) string {
+	if t == nil || t.StartedAt == nil || t.StartedAt.IsZero() {
+		return ""
+	}
+	return t.StartedAt.Format(time.RFC3339Nano)
 }
 
 // PendingKills returns all currently-pending abort requests for the project.

@@ -12,7 +12,7 @@ func TestRequestTaskKill_RoundTripThroughDisk(t *testing.T) {
 		t.Fatalf("Init: %v", err)
 	}
 
-	if err := RequestTaskKill(dir, 5, "done", "ui"); err != nil {
+	if err := RequestTaskKill(dir, 5, "done", "ui", "2026-01-01T00:00:00Z"); err != nil {
 		t.Fatalf("RequestTaskKill: %v", err)
 	}
 	rows, err := PendingKills(dir)
@@ -21,6 +21,12 @@ func TestRequestTaskKill_RoundTripThroughDisk(t *testing.T) {
 	}
 	if len(rows) != 1 || rows[0].TaskID != 5 || rows[0].TargetStatus != "done" {
 		t.Fatalf("rows = %+v", rows)
+	}
+	// The attempt token must survive the round trip: the poller refuses any
+	// request that does not name the execution it is about to cancel, so a
+	// dropped token would silently disable manual aborts (Task 20203).
+	if rows[0].Attempt != "2026-01-01T00:00:00Z" {
+		t.Errorf("rows[0].Attempt = %q; want the token passed to RequestTaskKill", rows[0].Attempt)
 	}
 
 	r, ok, err := LookupTaskKill(dir, 5)
@@ -42,7 +48,7 @@ func TestRequestTaskKill_NoDB_NoOp(t *testing.T) {
 	// erroring or creating files. The orchestrator may not be running yet, in
 	// which case there's nothing to cancel.
 	dir := t.TempDir()
-	if err := RequestTaskKill(dir, 1, "done", "ui"); err != nil {
+	if err := RequestTaskKill(dir, 1, "done", "ui", ""); err != nil {
 		t.Errorf("RequestTaskKill on uninitialized dir = %v; want nil", err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, ".cloop", "state.db")); err == nil {
@@ -55,10 +61,10 @@ func TestRequestTaskKill_RejectsZeroOrEmpty(t *testing.T) {
 	if _, err := Init(dir, "g", 0); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
-	if err := RequestTaskKill("", 1, "done", "ui"); err != nil {
+	if err := RequestTaskKill("", 1, "done", "ui", ""); err != nil {
 		t.Errorf("RequestTaskKill empty workDir = %v; want nil (silent no-op)", err)
 	}
-	if err := RequestTaskKill(dir, 0, "done", "ui"); err != nil {
+	if err := RequestTaskKill(dir, 0, "done", "ui", ""); err != nil {
 		t.Errorf("RequestTaskKill task_id=0 = %v; want nil (silent no-op)", err)
 	}
 	rows, _ := PendingKills(dir)

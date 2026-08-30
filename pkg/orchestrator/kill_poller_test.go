@@ -1,7 +1,12 @@
-// Tests for the manual-abort poller (Task 20140). These exercise the two
-// phases independently — firing the cancel while the worker is still running
-// and applying the operator's chosen target_status after the worker drains —
+// Tests for the manual-abort poller (Task 20140, Task 20203). These exercise
+// the two phases — firing the cancel while the worker is still running and
+// applying the operator's chosen target_status after the worker drains —
 // without spinning up the full PM execution loop.
+//
+// Phase 2 is always driven through phase 1 rather than by hand-writing a row
+// and flipping the status: the poller only rewrites a status for an execution
+// it watched running, so a test that skipped phase 1 would be asserting on a
+// path production never takes.
 package orchestrator
 
 import (
@@ -60,13 +65,29 @@ func addInProgressTask(t *testing.T, o *Orchestrator, id int, title string) (con
 	return ctx, task
 }
 
+// requestKill files a kill row the way the UI does: stamped with the attempt
+// token of the execution the operator was looking at.
+func requestKill(t *testing.T, o *Orchestrator, task *pm.Task, target string) {
+	t.Helper()
+	if err := o.statedb.RequestKill(statedb.KillRequest{
+		TaskID:       task.ID,
+		TargetStatus: target,
+		RequestedBy:  "ui",
+		Attempt:      state.AttemptToken(task),
+	}); err != nil {
+		t.Fatalf("RequestKill: %v", err)
+	}
+}
+
+// drainWorker mimics what the orchestrator's worker does once its context is
+// cancelled: it records the "canceled -> failed" terminal status.
+func drainWorker(task *pm.Task) { task.Status = pm.TaskFailed }
+
 func TestProcessPendingKills_Phase1FiresCancel(t *testing.T) {
 	o := newTestOrchestrator(t)
 	ctx, task := addInProgressTask(t, o, 11, "phase1")
 
-	if err := o.statedb.RequestKill(statedb.KillRequest{TaskID: 11, TargetStatus: "done", RequestedBy: "ui"}); err != nil {
-		t.Fatalf("RequestKill: %v", err)
-	}
+	requestKill(t, o, task, "done")
 
 	o.processPendingKills()
 
@@ -94,14 +115,15 @@ func TestProcessPendingKills_Phase2AppliesTargetStatus(t *testing.T) {
 	o := newTestOrchestrator(t)
 	_, task := addInProgressTask(t, o, 22, "phase2")
 
-	if err := o.statedb.RequestKill(statedb.KillRequest{TaskID: 22, TargetStatus: "done", RequestedBy: "ui"}); err != nil {
-		t.Fatalf("RequestKill: %v", err)
-	}
+	requestKill(t, o, task, "done")
 
-	// Simulate the worker exiting after a cancel — set status to TaskFailed,
-	// which is what the orchestrator's "canceled → failed" path would do.
-	task.Status = pm.TaskFailed
+	// Phase 1: the poller sees the task running and fires its cancel.
+	o.processPendingKills()
 
+	// The worker exits and records the "canceled -> failed" terminal status.
+	drainWorker(task)
+
+	// Phase 2: the operator's choice overrides it.
 	o.processPendingKills()
 
 	// Phase 2: target status must have been applied.
@@ -135,11 +157,10 @@ func TestProcessPendingKills_TargetStatusVariants(t *testing.T) {
 		t.Run(c.target, func(t *testing.T) {
 			o := newTestOrchestrator(t)
 			_, task := addInProgressTask(t, o, 1, "t")
-			if err := o.statedb.RequestKill(statedb.KillRequest{TaskID: 1, TargetStatus: c.target}); err != nil {
-				t.Fatalf("RequestKill: %v", err)
-			}
-			task.Status = pm.TaskFailed // worker's default after cancel
-			o.processPendingKills()
+			requestKill(t, o, task, c.target)
+			o.processPendingKills() // phase 1: fire the cancel
+			drainWorker(task)       // worker's default after cancel
+			o.processPendingKills() // phase 2: apply the target
 			if task.Status != c.want {
 				t.Errorf("target=%q -> task.Status=%q, want %q", c.target, task.Status, c.want)
 			}

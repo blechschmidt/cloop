@@ -432,6 +432,15 @@ type Orchestrator struct {
 	// and waits on this group during Close so the loop exits cleanly.
 	killWG sync.WaitGroup
 
+	// killObserved maps task ID → the attempt token this process has seen
+	// running while that task's kill row was pending. A request may only
+	// rewrite a task's status once its attempt appears here, which is what
+	// keeps a row left over from an earlier run from re-applying itself to a
+	// task the operator has since reset (Task 20203). Guarded by killMu
+	// because tests drive processPendingKills off the poller goroutine.
+	killMu       sync.Mutex
+	killObserved map[int]string
+
 	// liveDeadlines tracks per-task cancellable budgets so changes to
 	// task.MaxMinutes / state.DefaultMaxMinutes made via the Web UI take
 	// effect on the currently-running task within a few seconds rather

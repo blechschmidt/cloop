@@ -3647,6 +3647,9 @@ func (s *Server) handleTaskStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	oldStatus := string(task.Status)
+	// Capture the attempt token before SaveDirect so the kill request names
+	// the execution the operator was actually looking at (Task 20203).
+	attempt := state.AttemptToken(task)
 	task.Status = newStatus
 	if err := ps.SaveDirect(); err != nil {
 		jsonErr(w, "save failed: "+err.Error(), statedb.HTTPStatus(err))
@@ -3660,7 +3663,7 @@ func (s *Server) handleTaskStatus(w http.ResponseWriter, r *http.Request) {
 	// the request just means the task continues to run; the disk status is
 	// already correct so the UI reflects the operator's choice.
 	if oldStatus == string(pm.TaskInProgress) && newStatus != pm.TaskInProgress {
-		if killErr := state.RequestTaskKill(workDir, req.ID, req.Status, "ui"); killErr != nil {
+		if killErr := state.RequestTaskKill(workDir, req.ID, req.Status, "ui", attempt); killErr != nil {
 			fmt.Fprintf(os.Stderr, "[ui] task %d kill request: %v\n", req.ID, killErr)
 		}
 	}
@@ -3928,8 +3931,11 @@ func (s *Server) handlePutTask(w http.ResponseWriter, r *http.Request) {
 		task.MaxMinutes = *req.MaxMinutes
 	}
 	// Capture the prior status BEFORE the assignment so the manual-abort hook
-	// below can detect a transition out of in_progress (Task 20140).
+	// below can detect a transition out of in_progress (Task 20140), and the
+	// attempt token it names so the request cannot outlive that execution
+	// (Task 20203).
 	priorStatus := task.Status
+	priorAttempt := state.AttemptToken(task)
 	statusChanged := false
 	if req.Status != "" {
 		validStatuses := map[string]pm.TaskStatus{
@@ -3955,7 +3961,7 @@ func (s *Server) handlePutTask(w http.ResponseWriter, r *http.Request) {
 	// provider call. Best-effort — kill_request failures are logged but do
 	// not fail the PUT (disk status already reflects the operator's choice).
 	if statusChanged && priorStatus == pm.TaskInProgress && task.Status != pm.TaskInProgress {
-		if killErr := state.RequestTaskKill(s.resolveWorkDir(r), id, req.Status, "ui"); killErr != nil {
+		if killErr := state.RequestTaskKill(s.resolveWorkDir(r), id, req.Status, "ui", priorAttempt); killErr != nil {
 			fmt.Fprintf(os.Stderr, "[ui] task %d kill request: %v\n", id, killErr)
 		}
 	}

@@ -1,0 +1,24 @@
+-- 0024_kill_request_attempt: bind each abort request to the execution attempt
+-- it was filed against (Task 20203).
+--
+-- 0008 keyed kill_requests by task_id alone, which carries no notion of *which*
+-- execution the operator meant to abort. A row that outlived its run therefore
+-- matched the next execution of the same task ID. The observed failure: an
+-- operator resets a stuck in_progress task to pending (which files a kill row,
+-- since that is a transition out of in_progress), no orchestrator is alive to
+-- consume it, and the next run's poller applies the row one tick after the task
+-- starts — cancelling a freshly-started attempt, or re-applying a "skipped"
+-- target to a task the operator had just reset.
+--
+-- `attempt` holds the RFC3339Nano started_at of the execution being aborted, as
+-- observed by the client filing the request. The poller honours a row only
+-- while that value still matches the task's current started_at; a row naming a
+-- different (or absent) attempt refers to an execution that is already over and
+-- is discarded without touching the task.
+--
+-- Legacy rows written before this migration get '' and are treated as naming no
+-- attempt, i.e. discarded. That direction is deliberate: failing to deliver an
+-- abort costs the operator one more click, whereas honouring a stale one kills
+-- an unrelated run.
+
+ALTER TABLE kill_requests ADD COLUMN attempt TEXT NOT NULL DEFAULT '';

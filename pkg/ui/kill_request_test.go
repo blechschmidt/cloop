@@ -1,11 +1,14 @@
 // Tests for the manual-abort UI hook (Task 20140). The handlers
 // handleTaskStatus (POST /api/task/status) and handlePutTask (PUT/PATCH
 // /api/tasks/{id}) must record a kill request whenever the operator's
-// status change moves a task out of in_progress.
+// status change moves a task out of in_progress, stamped with the attempt
+// that request is scoped to (Task 20203).
 package ui
 
 import (
+	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/state"
@@ -111,5 +114,45 @@ func TestPutTask_DoesNotRequestKillWhenStatusUnchanged(t *testing.T) {
 	rows, _ := state.PendingKills(dir)
 	if len(rows) != 0 {
 		t.Errorf("kill_requests = %+v; want empty (status field absent from PATCH)", rows)
+	}
+}
+
+// TestKillRequest_StampsObservedAttempt pins the UI half of Task 20203. The
+// poller discards any request that does not name the execution it is about to
+// cancel, so a handler that forgot to stamp the attempt would not merely lose
+// the scoping — it would disable manual aborts outright, and every test above
+// would still pass because none of their tasks has a StartedAt.
+func TestKillRequest_StampsObservedAttempt(t *testing.T) {
+	startedAt := time.Date(2026, 8, 29, 19, 10, 31, 123456789, time.UTC)
+	want := state.AttemptToken(&pm.Task{StartedAt: &startedAt})
+
+	for _, c := range []struct {
+		name string
+		id   int
+		post func(t *testing.T, ts *httptest.Server, id int)
+	}{
+		{"POST /api/task/status", 1, func(t *testing.T, ts *httptest.Server, id int) {
+			apiPOST(t, ts, "/api/task/status", map[string]interface{}{"id": id, "status": "skipped"})
+		}},
+		{"PATCH /api/tasks/{id}", 2, func(t *testing.T, ts *httptest.Server, id int) {
+			apiPATCH(t, ts, "/api/tasks/2", map[string]interface{}{"status": "skipped"})
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			dir := setupProjectWithTasks(t, cloopGoal, []*pm.Task{
+				{ID: c.id, Title: "running", Status: pm.TaskInProgress, StartedAt: &startedAt},
+			})
+			ts := newTestServer(t, dir, nil)
+
+			c.post(t, ts, c.id)
+
+			rows, _ := state.PendingKills(dir)
+			if len(rows) != 1 {
+				t.Fatalf("kill_requests = %+v; want exactly one row", rows)
+			}
+			if rows[0].Attempt != want {
+				t.Errorf("Attempt = %q; want %q (the StartedAt the operator was looking at)", rows[0].Attempt, want)
+			}
+		})
 	}
 }
