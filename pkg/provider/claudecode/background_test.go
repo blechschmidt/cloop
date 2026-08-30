@@ -185,7 +185,11 @@ echo "TASK_DONE"`)
 
 func TestKeepOrphansLeavesWorkRunning(t *testing.T) {
 	requireLinux(t)
-	fakeHarness(t, `nohup sleep 300 >/dev/null 2>&1 &
+	// Long enough to outlive the budget below, short enough to reap itself
+	// soon after: this policy deliberately declines to kill the process, so a
+	// `sleep 300` here would leave one running on the machine for five minutes
+	// after the suite finishes.
+	fakeHarness(t, `nohup sleep 3 >/dev/null 2>&1 &
 echo "TASK_DONE"`)
 
 	p := &Provider{Background: BackgroundPolicy{
