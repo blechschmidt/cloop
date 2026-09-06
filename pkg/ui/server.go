@@ -529,8 +529,15 @@ type Server struct {
 	suggestWorkDir     string
 
 	// Multi-project state cache
-	projMu       sync.RWMutex
+	projMu sync.RWMutex
+	// projStatuses and projEntries are refreshed together and must be read
+	// together: the statuses carry the live per-project figures while the
+	// entries carry the registry metadata (who owns a project, who has
+	// hidden it) that filtering those statuses per recipient depends on.
+	// Reading the registry separately would let a project registered
+	// between the two reads appear in one and not the other.
 	projStatuses []multiui.ProjectStatus
+	projEntries  []multiui.ProjectEntry
 	projLastMod  map[string]time.Time // path -> last mod time
 
 	// Per-project chat conversation histories (keyed by resolved workDir path).
@@ -5085,14 +5092,33 @@ func (s *Server) allProjectEntries() []multiui.ProjectEntry {
 	seen := make(map[string]bool)
 	var entries []multiui.ProjectEntry
 
+	// Paths from persistent registry (~/.cloop/projects.json), read up front
+	// so the synthesized entries below can adopt the view preferences stored
+	// against the same path. WorkDir and --projects paths are commonly
+	// registered as well, and they are listed from those flags first — the
+	// registry row is then skipped below as a duplicate, which would drop
+	// its HiddenFor and make "hide" silently fail for precisely the project
+	// a single-project deployment was launched on.
+	registered, _ := multiui.Load()
+	hiddenFor := make(map[string][]string, len(registered))
+	for _, e := range registered {
+		if len(e.HiddenFor) == 0 {
+			continue
+		}
+		if abs, err := filepath.Abs(e.Path); err == nil {
+			hiddenFor[abs] = e.HiddenFor
+		}
+	}
+
 	// Always include current WorkDir as the "primary" project.
 	if s.WorkDir != "" {
 		abs, _ := filepath.Abs(s.WorkDir)
 		if !seen[abs] {
 			seen[abs] = true
 			entries = append(entries, multiui.ProjectEntry{
-				Name: filepath.Base(abs),
-				Path: abs,
+				Name:      filepath.Base(abs),
+				Path:      abs,
+				HiddenFor: hiddenFor[abs],
 			})
 		}
 	}
@@ -5108,13 +5134,12 @@ func (s *Server) allProjectEntries() []multiui.ProjectEntry {
 		}
 		seen[abs] = true
 		entries = append(entries, multiui.ProjectEntry{
-			Name: filepath.Base(abs),
-			Path: abs,
+			Name:      filepath.Base(abs),
+			Path:      abs,
+			HiddenFor: hiddenFor[abs],
 		})
 	}
 
-	// Paths from persistent registry (~/.cloop/projects.json).
-	registered, _ := multiui.Load()
 	for _, e := range registered {
 		abs, err := filepath.Abs(e.Path)
 		if err != nil {
@@ -5128,10 +5153,20 @@ func (s *Server) allProjectEntries() []multiui.ProjectEntry {
 		if name == "" {
 			name = filepath.Base(abs)
 		}
-		entries = append(entries, multiui.ProjectEntry{Name: name, Path: abs, Owner: e.Owner})
+		entries = append(entries, multiui.ProjectEntry{Name: name, Path: abs, Owner: e.Owner, HiddenFor: e.HiddenFor})
 	}
 
 	return entries
+}
+
+// cachedProjectView returns the cached project statuses together with the
+// registry entries they were built from. Every per-recipient filter takes
+// both from here so the metadata always describes the statuses being
+// filtered.
+func (s *Server) cachedProjectView() ([]multiui.ProjectEntry, []multiui.ProjectStatus) {
+	s.projMu.RLock()
+	defer s.projMu.RUnlock()
+	return s.projEntries, s.projStatuses
 }
 
 // refreshProjectStatuses rebuilds the projStatuses cache from disk.
@@ -5143,6 +5178,7 @@ func (s *Server) refreshProjectStatuses() {
 	}
 	s.projMu.Lock()
 	s.projStatuses = statuses
+	s.projEntries = entries
 	s.projMu.Unlock()
 }
 
@@ -5224,20 +5260,15 @@ func (s *Server) watchProjects(ctx context.Context) {
 // broadcastProjectsUpdate sends the updated project statuses to SSE and
 // WebSocket clients. With OIDC enabled each client receives the list
 // filtered to what its session user may see; payloads are marshalled once
-// per distinct visibility (not once per client). With OIDC disabled every
-// client shares the unfiltered payload, exactly as before.
+// per distinct visibility (not once per client). Clients that see the same
+// projects and have hidden the same ones share one payload.
 func (s *Server) broadcastProjectsUpdate() {
-	s.projMu.RLock()
-	statuses := s.projStatuses
-	s.projMu.RUnlock()
+	entries, statuses := s.cachedProjectView()
 
-	var entries []multiui.ProjectEntry
-	if s.oidcEnabled() {
-		entries = s.allProjectEntries()
-	}
+	anyHidden := entriesHaveHidden(entries)
 	payloads := make(map[string][]byte, 1)
 	payloadFor := func(user *oidcauth.Identity, tok *apitoken.Token) []byte {
-		key := s.visibilityKey(user, tok)
+		key := s.projectsPayloadKey(user, tok, anyHidden)
 		if p, ok := payloads[key]; ok {
 			return p
 		}
@@ -5619,16 +5650,11 @@ func splitProviderModelToken(s string) (string, string, bool) {
 // handleProjects returns all project statuses and aggregate stats.
 func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
 	s.refreshProjectStatuses()
-	s.projMu.RLock()
-	statuses := s.projStatuses
-	s.projMu.RUnlock()
 	// With OIDC enabled, scope the list (and the aggregate stats) to the
-	// projects the session user may see. Entries are only needed for their
-	// ownership metadata, so skip the registry read entirely when OIDC is off.
-	var entries []multiui.ProjectEntry
-	if s.oidcEnabled() {
-		entries = s.allProjectEntries()
-	}
+	// projects the session user may see; in every mode, flag the ones this
+	// viewer has hidden. The entries supply both, and come from the same
+	// snapshot as the statuses they describe.
+	entries, statuses := s.cachedProjectView()
 	statuses, stats := s.filterStatusesForRecipient(s.recipientIdentity(r), tokenFromRequest(r), entries, statuses)
 	// multi_project is true when there are multiple registered projects so the
 	// frontend can enable the scoped-tabs experience.
@@ -5668,14 +5694,8 @@ func (s *Server) handleProjectsEvents(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	// Send current snapshot immediately, scoped to the session user when
-	// OIDC is enabled.
-	s.projMu.RLock()
-	statuses := s.projStatuses
-	s.projMu.RUnlock()
-	var entries []multiui.ProjectEntry
-	if s.oidcEnabled() {
-		entries = s.allProjectEntries()
-	}
+	// OIDC is enabled and flagged with this viewer's hidden projects.
+	entries, statuses := s.cachedProjectView()
 	statuses, stats := s.filterStatusesForRecipient(c.user, c.token, entries, statuses)
 	if payload, err := json.Marshal(map[string]interface{}{"projects": statuses, "stats": stats}); err == nil {
 		if werr := writeSSE(w, flusher, "event: projects\ndata: %s\n\n", payload); werr != nil {
@@ -6016,6 +6036,57 @@ func (s *Server) handleProjectNew(w http.ResponseWriter, r *http.Request) {
 	}
 
 	jsonOK(w, map[string]interface{}{"ok": true, "dir": abs, "project_idx": newIdx})
+}
+
+// handleProjectHidden serves POST /api/projects/{idx}/hidden, recording
+// whether the calling viewer wants this project kept off their dashboard.
+//
+// Body: {"hidden": true} to hide, {"hidden": false} to restore.
+//
+// The project is addressed by its index in the caller's *visible* list, the
+// same namespace every other /api/projects/{idx} route uses — and it stays in
+// that list once hidden, so the settings panel restores a project through
+// exactly this route rather than needing a second, path-addressed one that
+// would have to re-derive its own authorization.
+//
+// The gate has already checked PermViewPrefs against this project's scope, so
+// reaching here means the caller can see the project. Nothing about the
+// project itself changes: the preference is stored against the caller's own
+// viewer key and is invisible to every other user.
+func (s *Server) handleProjectHidden(w http.ResponseWriter, r *http.Request) {
+	idx, err := strconv.Atoi(r.PathValue("idx"))
+	if err != nil {
+		jsonErr(w, "invalid project index", http.StatusBadRequest)
+		return
+	}
+	entries := s.visibleProjectEntries(r)
+	if idx < 0 || idx >= len(entries) {
+		jsonErr(w, "project index out of range", http.StatusBadRequest)
+		return
+	}
+	entry := entries[idx]
+
+	var req struct {
+		Hidden bool `json:"hidden"`
+	}
+	limitJSONBody(w, r, maxJSONBodyBytes)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonErr(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	if err := multiui.SetHidden(entry.Path, s.viewerKey(r), req.Hidden); err != nil {
+		jsonErr(w, "failed to update registry: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Rebuild before broadcasting: the status cache carries the entries the
+	// per-recipient filter reads, so a broadcast off the stale snapshot
+	// would push back the pre-change list and the card would reappear.
+	s.refreshProjectStatuses()
+	s.broadcastProjectsUpdate()
+
+	jsonOK(w, map[string]interface{}{"ok": true, "hidden": req.Hidden, "name": entry.Name})
 }
 
 // handleProjectDelete removes a project from the multi-project registry. When

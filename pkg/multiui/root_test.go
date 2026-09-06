@@ -6,6 +6,7 @@ package multiui
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -129,7 +130,7 @@ func TestSaveAndLoadRoundTripThroughEnvRoot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if len(got) != 1 || got[0] != want[0] {
+	if !reflect.DeepEqual(got, want) {
 		t.Errorf("Load() = %+v, want %+v", got, want)
 	}
 }

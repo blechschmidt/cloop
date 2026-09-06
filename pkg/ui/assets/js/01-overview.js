@@ -250,7 +250,19 @@ function renderMultiProjectOverview() {
     grid.innerHTML = '<div class="empty-state"><h3>No projects loaded</h3><p>Use <code>cloop ui --projects /path/a /path/b</code> to add projects.</p></div>';
     return;
   }
-  grid.innerHTML = data.projects.map(function(p, i) {
+  // This is the second place the project list is drawn, and hiding has to
+  // reach both — a project that disappears from the Projects tab but still
+  // fills a card here has not been hidden, it has been misplaced. Index
+  // before filtering: the card's openProject() call addresses the project by
+  // its position in the *unfiltered* payload.
+  const shown = data.projects.map(function(p, i) { return {p: p, i: i}; })
+                             .filter(function(e) { return !e.p.hidden; });
+  if (!shown.length) {
+    grid.innerHTML = '<div class="empty-state"><h3>All projects hidden</h3><p>Restore them under <strong>Settings &rarr; Hidden Projects</strong>.</p></div>';
+    return;
+  }
+  grid.innerHTML = shown.map(function(entry) {
+    const p = entry.p, i = entry.i;
     const health   = p.health || 'unknown';
     const hCol     = healthColor(health);
     const total    = p.total_tasks || 0;

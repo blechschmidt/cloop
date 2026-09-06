@@ -67,9 +67,17 @@ window.toggleCompletedProjects = function() {
 
 function renderProjects(projects, stats) {
   window._lastProjectsData = {projects, stats};
-  // Update aggregate stats.
+  // Projects this viewer hid are still delivered — the server keeps them in
+  // the list so every index-addressed call keeps pointing at the same
+  // project — so the grid drops them here while carrying the original index
+  // along for the action buttons. Settings is where they reappear.
+  const shown = projects.map((p, i) => ({p, i})).filter(({p}) => !p.hidden);
+  renderHiddenProjects(projects);
+
+  // Update aggregate stats. The server already discounts hidden projects, so
+  // the local fallback must too or the counter disagrees with the grid.
   const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v === undefined ? '—' : v; };
-  set('paTotal',  stats.total_projects  ?? projects.length);
+  set('paTotal',  stats.total_projects  ?? shown.length);
   set('paActive', stats.active_runs     ?? 0);
   set('paTasks',  stats.total_tasks     ?? 0);
   set('paDone',   stats.done_tasks      ?? 0);
@@ -87,14 +95,22 @@ function renderProjects(projects, stats) {
   }
   empty.style.display = 'none';
 
+  // Every project is hidden: say so, and point at the one place that can
+  // undo it. Falling through would render the "all completed" message below
+  // and send the user hunting for a Show-completed button that changes
+  // nothing.
+  if (!shown.length) {
+    list.innerHTML = '<div class="empty-state" style="padding:16px 0"><h3>All projects hidden</h3><p>Restore them under <strong>Settings &rarr; Hidden Projects</strong>.</p></div>';
+    return;
+  }
+
   // Filter out fully-completed projects unless toggle is on; preserve original index for API calls.
   const isCompleted = p => p.total_tasks > 0 && p.done_tasks >= p.total_tasks;
-  const indexed  = projects.map((p, i) => ({p, i}));
-  const visibleI = showCompletedProjects ? indexed : indexed.filter(({p}) => !isCompleted(p));
-  const hiddenCount = projects.length - visibleI.length;
+  const visibleI = showCompletedProjects ? shown : shown.filter(({p}) => !isCompleted(p));
+  const completedCount = shown.length - visibleI.length;
   const btn = document.getElementById('toggleCompletedProjectsBtn');
-  if (btn && hiddenCount > 0 && !showCompletedProjects) {
-    btn.textContent = 'Show completed (' + hiddenCount + ')';
+  if (btn && completedCount > 0 && !showCompletedProjects) {
+    btn.textContent = 'Show completed (' + completedCount + ')';
   } else if (btn) {
     btn.textContent = showCompletedProjects ? 'Hide completed' : 'Show completed';
   }
@@ -141,6 +157,7 @@ function renderProjects(projects, stats) {
             ? '<button class="btn danger" onclick="projectStop('+idx+')" title="Stop">&#9632; Stop</button>'
             : '<button class="btn success" onclick="projectRun('+idx+',false)" title="Run">&#9654; Run</button><button class="btn primary" onclick="projectRun('+idx+',true)" title="Run PM">&#9654; PM</button>'
           }
+          <button class="btn" onclick="projectHide(${idx},${nameSafe})" title="Hide from your dashboard (restore under Settings)">Hide</button>
           <button class="btn danger" onclick="projectDelete(${idx},${nameSafe},${pathSafe})" title="Remove project">&#10005; Delete</button>
         </div>
       </div>
@@ -171,6 +188,77 @@ window.projectStop = function(idx) {
   api('/api/projects/' + idx + '/stop', {method:'POST'})
     .then(d => { toast(d.ok ? 'Stopped' : 'Nothing running', d.ok ? 'ok' : 'err'); })
     .catch(() => toast('Failed to stop', 'err'));
+};
+
+// ── Hiding ───────────────────────────────────────────────────────────────────
+// Hiding is a per-user view preference, not a deletion and not an access
+// control: the project keeps running, keeps its index, and stays reachable —
+// it just stops taking up room in this user's grid. So there is no
+// confirmation modal; the undo lives in Settings and the toast says where.
+
+// setProjectHidden posts the preference and lets the server's 'projects'
+// broadcast redraw both the grid and the Settings list. loadProjects() covers
+// the case where that stream is down.
+function setProjectHidden(idx, name, hidden) {
+  api('/api/projects/' + idx + '/hidden', {hidden})
+    .then(d => {
+      if (!d || d.ok !== true) {
+        toast((d && d.error) || 'Failed to update project', 'err');
+        return;
+      }
+      const label = name || ('project #' + idx);
+      toast(hidden ? label + ' hidden — restore it in Settings' : label + ' restored', 'ok');
+      if (typeof loadProjects === 'function') loadProjects();
+    })
+    .catch(err => toast('Failed to update project: ' + (err && err.message ? err.message : 'error'), 'err'));
+}
+
+window.projectHide = function(idx, name) {
+  // Leaving the user parked on a project that just vanished from the grid
+  // would strand them on an overview they can no longer navigate back to.
+  if (selectedProjectIdx === idx && typeof window.clearProjectSelection === 'function') {
+    window.clearProjectSelection();
+  }
+  setProjectHidden(idx, name, true);
+};
+
+window.projectUnhide = function(idx, name) {
+  setProjectHidden(idx, name, false);
+};
+
+// renderHiddenProjects fills the Settings list from the same payload that
+// feeds the grid, so the two can never disagree about what is hidden.
+function renderHiddenProjects(projects) {
+  const box = document.getElementById('hiddenProjectsList');
+  if (!box) return;
+  const hidden = (projects || []).map((p, i) => ({p, i})).filter(({p}) => p.hidden);
+  if (!hidden.length) {
+    box.innerHTML = '<p style="font-size:12px;color:var(--muted)">No hidden projects.</p>';
+    return;
+  }
+  box.innerHTML = hidden.map(({p, i: idx}) => {
+    const nameSafe = JSON.stringify(p.name).replace(/"/g, '&quot;');
+    return `
+      <div class="hidden-proj-row">
+        <div class="hidden-proj-info">
+          <span class="hidden-proj-name">${esc(p.name)}</span>
+          <span class="hidden-proj-path">${esc(p.path || '')}</span>
+        </div>
+        <button class="btn primary" onclick="projectUnhide(${idx},${nameSafe})" title="Show this project again">Unhide</button>
+      </div>
+    `;
+  }).join('');
+}
+
+// loadHiddenProjects populates the Settings list when that tab is opened.
+// Renders from the cached payload when there is one, otherwise fetches —
+// Settings can be the first tab a user opens.
+window.loadHiddenProjects = function() {
+  if (window._lastProjectsData) {
+    renderHiddenProjects(window._lastProjectsData.projects);
+  } else if (typeof loadProjects === 'function') {
+    loadProjects();
+  }
 };
 
 // projectDelete opens the confirmation modal for removing a project from the
@@ -292,7 +380,11 @@ function updateProjectSelector() {
   const drop = document.getElementById('projSelectorDropdown');
   if (!drop) return;
   const projects = (window._lastProjectsData && window._lastProjectsData.projects) || [];
-  drop.innerHTML = projects.map((p, i) => {
+  // Third place the list is drawn, and the one that would quietly undo the
+  // feature: a hidden project still offered by the header dropdown is one
+  // click from being selected again. Index before filtering — the item
+  // addresses its project by position in the unfiltered payload.
+  drop.innerHTML = projects.map((p, i) => ({p, i})).filter(({p}) => !p.hidden).map(({p, i}) => {
     const health = p.health || 'unknown';
     const activeCls = selectedProjectIdx === i ? ' active' : '';
     const dotStyle = 'background:' + healthColor(health);

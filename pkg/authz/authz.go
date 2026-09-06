@@ -151,6 +151,23 @@ const (
 	// is never an escalation.
 	PermSessionAdmin Permission = "session.admin"
 
+	// PermViewPrefs is the right to change one's own dashboard presentation
+	// — currently, which projects to hide from the project list.
+	//
+	// Granted from viewer up, making it the weakest permission in the
+	// ladder, because it authorizes nothing about a project: it records a
+	// preference under the caller's own viewer key, against a project they
+	// can already see, and no other user can observe the result. Gating it
+	// on project.write instead — the nearest existing permission a POST may
+	// carry — would leave the roles that live in the dashboard all day as
+	// the only ones unable to tidy it.
+	//
+	// It is not a weaker form of project.read. A hidden project is still
+	// delivered to the caller and still reachable by index: hiding is
+	// decluttering, not concealment, and must never be relied on to keep a
+	// project out of someone's reach.
+	PermViewPrefs Permission = "view.prefs"
+
 	// PermPublic is not a permission. It is the explicit marker a route
 	// declares when it must stay reachable before authorization can even be
 	// evaluated — the login machinery, the SPA shell, static assets, and
@@ -177,6 +194,7 @@ var AllPermissions = []Permission{
 	PermUserManage,
 	PermTokenAdmin,
 	PermSessionAdmin,
+	PermViewPrefs,
 }
 
 // Valid reports whether p is a known permission. PermPublic is not a
@@ -245,13 +263,13 @@ func (r Role) Valid() bool { return r.rank() >= 0 }
 // so the table reads as a ladder and cannot drift out of order.
 var rolePermissions = map[Role][]Permission{
 	RoleNone:   {},
-	RoleViewer: {PermProjectRead, PermExecutorRead},
+	RoleViewer: {PermProjectRead, PermExecutorRead, PermViewPrefs},
 	RoleOperator: {
-		PermProjectRead, PermExecutorRead,
+		PermProjectRead, PermExecutorRead, PermViewPrefs,
 		PermRunStart, PermRunStop, PermTaskMutate,
 	},
 	RoleMaintainer: {
-		PermProjectRead, PermExecutorRead,
+		PermProjectRead, PermExecutorRead, PermViewPrefs,
 		PermRunStart, PermRunStop, PermTaskMutate,
 		PermProjectWrite, PermConfigWrite, PermSecretGrant, PermSecretRevoke,
 	},

@@ -792,6 +792,15 @@
   .settings-section h3 .badge { font-size:10px; }
   .settings-save { margin-top:10px; }
 
+  /* Hidden-projects list (Settings). The path is the disambiguator when two
+     checkouts share a basename, so it stays legible rather than being a
+     tooltip. */
+  .hidden-proj-row { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:8px 0; border-bottom:1px solid var(--border); }
+  .hidden-proj-row:last-child { border-bottom:none; }
+  .hidden-proj-info { display:flex; flex-direction:column; gap:2px; min-width:0; }
+  .hidden-proj-name { font-size:13px; font-weight:600; color:var(--text); }
+  .hidden-proj-path { font-size:11px; color:var(--muted); font-family:var(--mono,monospace); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+
   /* ── Step history ── */
   .step-list { display:flex; flex-direction:column; gap:5px; }
   .step-item { border:1px solid var(--border); border-radius:var(--radius); overflow:hidden; }

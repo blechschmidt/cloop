@@ -273,6 +273,7 @@ func (s *Server) routeTable() []routeSpec {
 		tokenAdmin = authz.PermTokenAdmin
 		sessAdmin  = authz.PermSessionAdmin
 		userMgmt   = authz.PermUserManage
+		viewPrefs  = authz.PermViewPrefs
 		public     = authz.PermPublic
 	)
 
@@ -442,6 +443,7 @@ func (s *Server) routeTable() []routeSpec {
 		{Pattern: "POST /api/projects/{idx}/run", Handler: s.handleProjectRun, Perm: start, Scope: scopeProjectIdx},
 		{Pattern: "POST /api/projects/{idx}/stop", Handler: s.handleProjectStop, Perm: stop, Scope: scopeProjectIdx},
 		{Pattern: "DELETE /api/projects/{idx}", Handler: s.handleProjectDelete, Perm: write, Scope: scopeProjectIdx},
+		{Pattern: "POST /api/projects/{idx}/hidden", Handler: s.handleProjectHidden, Perm: viewPrefs, Scope: scopeProjectIdx},
 		// Choosing where a project's code runs is a fleet decision, not a
 		// project one.
 		{Pattern: "POST /api/projects/{idx}/executor", Handler: s.handleProjectExecutorBind, Perm: execMgmt, Scope: scopeProjectIdx},

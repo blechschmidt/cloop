@@ -204,6 +204,109 @@ type ProjectEntry struct {
 	// project is visible to every authenticated user. The field is ignored
 	// entirely when OIDC is disabled.
 	Owner string `json:"owner,omitempty"`
+
+	// HiddenFor lists the viewers who have hidden this project from their
+	// dashboard. Values are viewer keys in the same namespace as Owner (see
+	// SetHidden).
+	//
+	// This is a per-viewer set rather than a single bool because the
+	// registry is one file shared by every user of a hub. A global flag
+	// would mean one user decluttering their own dashboard blanks the
+	// project out of everyone else's — the same tenancy mistake a global
+	// task list would be.
+	//
+	// Hiding is presentation only. It is deliberately *not* access control:
+	// a hidden project stays in the caller's project list (flagged via
+	// ProjectStatus.Hidden) so index-addressed routes keep resolving to the
+	// same project, and so the settings panel can offer it back. Owner
+	// governs who may see a project at all; this governs who wants to.
+	HiddenFor []string `json:"hidden_for,omitempty"`
+}
+
+// HiddenForViewer reports whether viewer has hidden this project. Comparison
+// is case-insensitive to match the Owner rule, since both hold email-derived
+// keys that an IdP may not case-normalize.
+func (e ProjectEntry) HiddenForViewer(viewer string) bool {
+	if viewer == "" {
+		return false
+	}
+	for _, v := range e.HiddenFor {
+		if strings.EqualFold(v, viewer) {
+			return true
+		}
+	}
+	return false
+}
+
+// SetHidden records (hidden=true) or clears (hidden=false) viewer's wish to
+// keep the project at path off their dashboard, and saves the registry.
+//
+// viewer is an opaque per-user key chosen by the caller — pkg/ui passes the
+// OIDC OwnerKey, or a fixed single-user sentinel when OIDC is disabled. This
+// package deliberately does not know how that key is derived.
+//
+// Addressing is by path, not by index, for the same reason RemovePath is: an
+// index is only meaningful relative to a list that a concurrent add or
+// re-order can shift underneath the request.
+//
+// A path that is not yet registered is added rather than rejected. Projects
+// reach the dashboard from three places — the registry, --projects, and the
+// directory the server was launched in — and only the first is persistent.
+// Refusing here would make "hide" fail for the other two with an error about
+// registration that says nothing about what the user asked for.
+func SetHidden(path, viewer string, hidden bool) error {
+	if strings.TrimSpace(viewer) == "" {
+		return fmt.Errorf("multiui: hide requires a viewer key")
+	}
+	registryMu.Lock()
+	defer registryMu.Unlock()
+
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return err
+	}
+	existing, err := Load()
+	if err != nil {
+		return err
+	}
+	for i := range existing {
+		entryAbs, absErr := filepath.Abs(existing[i].Path)
+		if absErr != nil || entryAbs != abs {
+			continue
+		}
+		existing[i].HiddenFor = applyHidden(existing[i].HiddenFor, viewer, hidden)
+		return saveLocked(existing)
+	}
+	// Unregistered path: there is nothing to unhide, so only a hide needs
+	// to be made durable.
+	if !hidden {
+		return nil
+	}
+	existing = append(existing, ProjectEntry{
+		Name:      filepath.Base(abs),
+		Path:      abs,
+		HiddenFor: []string{viewer},
+	})
+	return saveLocked(existing)
+}
+
+// applyHidden adds or removes viewer from set, returning nil when the result
+// is empty so the field drops out of the serialized entry entirely rather
+// than accumulating `"hidden_for": []` noise.
+func applyHidden(set []string, viewer string, hidden bool) []string {
+	out := set[:0:0]
+	for _, v := range set {
+		if !strings.EqualFold(v, viewer) {
+			out = append(out, v)
+		}
+	}
+	if hidden {
+		out = append(out, viewer)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 type registry struct {
@@ -494,6 +597,18 @@ type ProjectStatus struct {
 	PMMode       bool      `json:"pm_mode"`
 	HasProject   bool      `json:"has_project"` // false if no state file found
 	Running      bool      `json:"running"`     // true if cloop run is actually executing
+
+	// Hidden reports that the recipient of this payload has hidden the
+	// project from their dashboard. It is per-recipient, so GetStatus
+	// deliberately leaves it false: the status cache is shared by every
+	// connected client, and the flag is stamped on a per-recipient copy
+	// when the list is filtered for delivery.
+	//
+	// Hidden projects are still delivered. Dropping them would renumber
+	// the list, and the whole dashboard addresses projects by their index
+	// in it — a hidden project at index 2 would silently shift every
+	// project after it onto a neighbour's tasks, runs and deletes.
+	Hidden bool `json:"hidden,omitempty"`
 }
 
 // GetStatus loads the state for the project at path and returns a ProjectStatus.
@@ -604,9 +719,16 @@ type AggregateStats struct {
 }
 
 // Aggregate computes aggregate stats from a slice of project statuses.
+//
+// Statuses the recipient has hidden are skipped, so the headline counters
+// agree with the cards actually on screen. A "12 projects" total above a grid
+// showing nine would read as a rendering bug.
 func Aggregate(statuses []ProjectStatus) AggregateStats {
 	var a AggregateStats
 	for _, s := range statuses {
+		if s.Hidden {
+			continue
+		}
 		a.TotalProjects++
 		if s.Health == HealthRunning {
 			a.ActiveRuns++

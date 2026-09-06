@@ -76,7 +76,6 @@ import (
 	"github.com/blechschmidt/cloop/pkg/apierror"
 	"github.com/blechschmidt/cloop/pkg/apitoken"
 	"github.com/blechschmidt/cloop/pkg/authz"
-	"github.com/blechschmidt/cloop/pkg/multiui"
 	"github.com/blechschmidt/cloop/pkg/oidcauth"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/state"
@@ -516,14 +515,7 @@ type glassesProject struct {
 // a project by index that it could not see in this response.
 func (s *Server) handleGlassesProjects(w http.ResponseWriter, r *http.Request) {
 	s.refreshProjectStatuses()
-	s.projMu.RLock()
-	statuses := s.projStatuses
-	s.projMu.RUnlock()
-
-	var entries []multiui.ProjectEntry
-	if s.oidcEnabled() {
-		entries = s.allProjectEntries()
-	}
+	entries, statuses := s.cachedProjectView()
 	statuses, _ = s.filterStatusesForRecipient(s.recipientIdentity(r), tokenFromRequest(r), entries, statuses)
 
 	// The index must be the position in visibleProjectEntries, not in the
@@ -538,6 +530,12 @@ func (s *Server) handleGlassesProjects(w http.ResponseWriter, r *http.Request) {
 
 	out := make([]glassesProject, 0, len(statuses))
 	for _, st := range statuses {
+		// A project the wearer hid from their dashboard stays hidden on the
+		// glasses. The display fits a handful of rows, so honouring the
+		// decluttering matters more here than anywhere else.
+		if st.Hidden {
+			continue
+		}
 		idx, ok := idxByPath[st.Path]
 		if !ok {
 			continue

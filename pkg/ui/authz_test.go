@@ -503,7 +503,7 @@ func TestEnforcementAcrossRoles(t *testing.T) {
 			t.Errorf("role = %q, want viewer", me.Role)
 		}
 		sort.Strings(me.Permissions)
-		if want := "executor.read,project.read"; strings.Join(me.Permissions, ",") != want {
+		if want := "executor.read,project.read,view.prefs"; strings.Join(me.Permissions, ",") != want {
 			t.Errorf("permissions = %v, want [%s]", me.Permissions, want)
 		}
 		if me.GlobalPermissions == nil {

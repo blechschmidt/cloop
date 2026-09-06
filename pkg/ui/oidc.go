@@ -61,6 +61,46 @@ func (s *Server) recipientIdentity(r *http.Request) *oidcauth.Identity {
 	return identityFromOwner(tokenFromRequest(r).OwnerBinding())
 }
 
+// localViewer is the viewer key for a deployment with no OIDC: one dashboard,
+// one person, so their view preferences need a stable name to be stored under.
+//
+// It cannot collide with a real OwnerKey, which is always either an email
+// (contains "@") or "sub:"-prefixed.
+const localViewer = "local"
+
+// viewerKey names whose dashboard preferences a request acts on — currently
+// which projects to hide. It is the recipient identity's OwnerKey, so a
+// delegated token adjusts its owner's view rather than a view of its own,
+// and localViewer when OIDC is off.
+//
+// Distinct from the authorization identity on purpose: preferences are about
+// whose screen this is, not what they are allowed to reach. An admin who
+// hides a noisy project hides it from their own dashboard only, and hiding
+// grants nobody sight of a project they could not already see.
+func (s *Server) viewerKey(r *http.Request) string {
+	return viewerKeyFor(s.recipientIdentity(r))
+}
+
+// viewerKeyFor is viewerKey for a resolved identity, used by the broadcast
+// fan-out where recipients are stored rather than re-derived per request.
+//
+// An identity carrying neither an email nor a subject is treated as no
+// identity at all. OwnerKey renders that case as the bare prefix "sub:",
+// which is a *shared* key: two unrelated malformed identities would land in
+// the same preference bucket and see each other's hidden projects. A
+// validated ID token always carries a subject, so this is a guard against
+// an identity assembled somewhere other than the token path rather than
+// against a real IdP.
+func viewerKeyFor(user *oidcauth.Identity) string {
+	if user == nil || (user.Email == "" && user.Sub == "") {
+		return localViewer
+	}
+	if key := user.OwnerKey(); key != "" {
+		return key
+	}
+	return localViewer
+}
+
 // oidcGate is the authentication path used by authMiddleware when OIDC is
 // enabled. Order of acceptance:
 //
@@ -315,6 +355,37 @@ func (s *Server) visibilityKey(user *oidcauth.Identity, tok *apitoken.Token) str
 	return key
 }
 
+// projectsPayloadKey is visibilityKey extended with whose *preferences* shape
+// the payload, for the broadcast fan-out's marshal-once cache.
+//
+// visibilityKey alone is not enough once projects can be hidden. It collapses
+// every admin, every unscoped-token client and — with OIDC off — every
+// browser onto the key "", because authorization gives them all the same
+// list. Hiding does not: two admins who hid different projects need different
+// payloads, and keying on authorization alone would serve whichever of them
+// broadcast first to both.
+//
+// anyHidden keeps the collapse when nobody has hidden anything, which is the
+// overwhelmingly common case and the one the cache exists for.
+func (s *Server) projectsPayloadKey(user *oidcauth.Identity, tok *apitoken.Token, anyHidden bool) string {
+	key := s.visibilityKey(user, tok)
+	if anyHidden {
+		key += "\x00view:" + viewerKeyFor(user)
+	}
+	return key
+}
+
+// entriesHaveHidden reports whether any registered project is hidden by
+// anyone, i.e. whether per-viewer payloads are needed at all.
+func entriesHaveHidden(entries []multiui.ProjectEntry) bool {
+	for _, e := range entries {
+		if len(e.HiddenFor) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // filterStatusesForRecipient narrows project statuses to what one recipient
 // may see, applying both the API-token scope and the OIDC ownership rule, and
 // recomputes the aggregate stats over the surviving subset.
@@ -333,7 +404,43 @@ func (s *Server) filterStatusesForRecipient(user *oidcauth.Identity, tok *apitok
 		}
 		statuses = scoped
 	}
-	return s.filterStatusesForIdentity(user, entries, statuses)
+	statuses, stats := s.filterStatusesForIdentity(user, entries, statuses)
+	// Marking runs last, over the set this recipient may actually see, and
+	// re-derives the stats because Aggregate discounts hidden projects.
+	marked, changed := markHiddenFor(viewerKeyFor(user), entries, statuses)
+	if !changed {
+		return statuses, stats
+	}
+	return marked, multiui.Aggregate(marked)
+}
+
+// markHiddenFor returns statuses with Hidden stamped for the projects viewer
+// has hidden, reporting whether anything was marked.
+//
+// It copies before writing rather than stamping in place: statuses aliases
+// the server's shared status cache, which every connected client reads. One
+// recipient's preference written into it would be served to all of them, and
+// concurrently at that.
+func markHiddenFor(viewer string, entries []multiui.ProjectEntry, statuses []multiui.ProjectStatus) ([]multiui.ProjectStatus, bool) {
+	hidden := make(map[string]bool, len(entries))
+	for _, e := range entries {
+		if e.HiddenForViewer(viewer) {
+			hidden[e.Path] = true
+		}
+	}
+	if len(hidden) == 0 {
+		return statuses, false
+	}
+	marked := make([]multiui.ProjectStatus, len(statuses))
+	copy(marked, statuses)
+	any := false
+	for i := range marked {
+		if hidden[marked[i].Path] {
+			marked[i].Hidden = true
+			any = true
+		}
+	}
+	return marked, any
 }
 
 // filterStatusesForIdentity returns the project statuses visible to user

@@ -608,7 +608,7 @@ which `cloop hub bootstrap` writes as `none`.
 | Role | Adds |
 | --- | --- |
 | `none` | nothing — the default default |
-| `viewer` | `project.read`, `executor.read` |
+| `viewer` | `project.read`, `executor.read`, `view.prefs` |
 | `operator` | `run.start`, `run.stop`, `task.mutate` |
 | `maintainer` | `project.write`, `config.write`, `secret.grant`, `secret.revoke` |
 | `admin` | everything, including `executor.manage`, `audit.read`, `user.manage`, `token.admin`, `session.admin` |
@@ -616,7 +616,14 @@ which `cloop hub bootstrap` writes as `none`.
 **Permissions** (`AllPermissions`): `project.read`, `project.write`, `run.start`,
 `run.stop`, `task.mutate`, `executor.read`, `executor.manage`, `secret.grant`,
 `secret.revoke`, `config.write`, `audit.read`, `user.manage`, `token.admin`,
-`session.admin`.
+`session.admin`, `view.prefs`.
+`view.prefs` sits at the bottom of the ladder and authorizes nothing about a
+project: it records the caller's own dashboard preferences — currently which
+projects to hide from their project list — under their own viewer key, against
+a project they can already see. Hiding is decluttering, not concealment: a
+hidden project is still delivered to that caller and still reachable by index,
+so it must never be relied on to keep a project away from someone. `project.read`
+is what governs that.
 Plus `public`, an explicit escape hatch used only by unguarded routes (the
 dashboard shell, the OIDC login endpoints, `/api/me`, `/api/session/logout-all`,
 `/healthz`, `/readyz`).
@@ -921,6 +928,12 @@ When enabled:
   Pre-existing/CLI-registered projects have no owner and stay visible to
   every authenticated user. Ownership is recorded in the multi-project
   registry (`~/.cloop/projects.json`, `owner` field).
+- **Per-user hiding**: a user can hide any project they can see from their own
+  project list, and restore it under Settings → Hidden Projects. The
+  preference is recorded per viewer (`hidden_for` in the same registry), so
+  one user decluttering a shared project does not blank it out of anyone
+  else's dashboard. It is presentation only — a hidden project keeps running
+  and stays reachable by index — so it is not a substitute for ownership.
 - The static bearer token (`--token` / `CLOOP_UI_TOKEN`) keeps working for
   API automation and sees all projects.
 - Sessions are persisted in the hub's control-plane database and survive a
