@@ -3427,6 +3427,11 @@ func TestRunPM_AISignal_Annotated(t *testing.T) {
 // breadcrumb explaining that a prior run had been interrupted. Same
 // audit-trail accuracy class as the gate-skip, verify-errored, implicit-done,
 // provider-error, and AI-signal annotation fixes.
+//
+// These tasks have no live artifact behind them, so they take recovery's
+// requeue path. The adoption path — where a dead run's finished outcome is
+// taken from the artifact instead of the task being re-executed — is covered
+// in pkg/taskrecover.
 func TestRecoverStaleTasks_Annotated(t *testing.T) {
 	dir := tempDir(t)
 	s := initState(t, dir, "goal", 0)
@@ -3459,7 +3464,7 @@ func TestRecoverStaleTasks_Annotated(t *testing.T) {
 		if task.StartedAt != nil {
 			t.Errorf("task %d StartedAt should be cleared, got %v", id, task.StartedAt)
 		}
-		want := "previous run was interrupted"
+		want := "after an interrupted run"
 		found := false
 		for _, a := range task.Annotations {
 			if a.Author == "ai" && strings.Contains(a.Text, want) {

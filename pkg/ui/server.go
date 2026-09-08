@@ -5189,6 +5189,11 @@ func (s *Server) watchProjects(ctx context.Context) {
 	s.projLastMod = make(map[string]time.Time)
 	s.refreshProjectStatuses()
 
+	// Resolve anything a run left stranded while this hub was down. The
+	// per-tick edge below cannot see those: it needs a previous run state, and
+	// a hub that has just started has none.
+	s.reconcileStaleTasksOnStartup()
+
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -5250,8 +5255,18 @@ func (s *Server) watchProjects(ctx context.Context) {
 			// buttons without the client having to poll /api/livelog. handleRun
 			// already pushes a forced run_state on internal start; this loop
 			// catches in-flight transitions and externally-started runs.
+			//
+			// A running→stopped transition is also the moment to resolve any
+			// task the departed run left marked in_progress: nothing intends to
+			// finish it, and left alone it renders as a running task forever.
+			// Tested before the broadcast, which is what updates the
+			// previous-state map the edge is read from.
 			for _, e := range s.allProjectEntries() {
-				s.broadcastRunState(e.Path, multiui.IsCloopRunningInDir(e.Path), false)
+				running := multiui.IsCloopRunningInDir(e.Path)
+				if prev, known := s.wasRunning(e.Path); known && prev && !running {
+					s.reconcileStaleTasks(e.Path)
+				}
+				s.broadcastRunState(e.Path, running, false)
 			}
 		}()
 	}

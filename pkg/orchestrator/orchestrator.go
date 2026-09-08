@@ -58,6 +58,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 	"github.com/blechschmidt/cloop/pkg/taskqueue"
+	"github.com/blechschmidt/cloop/pkg/taskrecover"
 	clooptracing "github.com/blechschmidt/cloop/pkg/tracing"
 	"github.com/blechschmidt/cloop/pkg/verify"
 	"github.com/blechschmidt/cloop/pkg/watchdog"
@@ -426,6 +427,14 @@ type Orchestrator struct {
 	capWarnMu   sync.Mutex
 	capWarnAt   time.Time
 	capWarnLast string
+
+	// requeued records which tasks this run's stale-task recovery reset to
+	// pending, so the interactive skip prompt is offered only for work that
+	// still has to happen — never for a task whose finished outcome was
+	// adopted from a dead run's live artifact. Guarded because recovery runs
+	// before the worker pool starts but the map outlives it.
+	requeuedMu sync.Mutex
+	requeued   map[int]bool
 
 	// killWG tracks the goroutine that polls kill_requests for manual aborts
 	// (Task 20140). The orchestrator's Run() spawns it under the run context
@@ -1253,54 +1262,36 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		return nil
 	}
 
-	// Stale checkpoint detection: if a checkpoint.json exists for a task that is
-	// still marked in_progress (e.g. the previous run was killed), ask the user
-	// whether to resume or restart that task.
-	// Note: NextTask() only returns pending tasks, so an in_progress task would be
-	// permanently skipped without intervention. The checkpoint ensures we notice and
-	// give the user control.
-	if cp, cpErr := checkpoint.Load(o.config.WorkDir); cpErr == nil && cp != nil {
-		// Find the matching task in the current plan.
-		var staleTask *pm.Task
+	// Stale in-progress recovery: a task still marked in_progress means the
+	// previous run died while holding it. Recovery is adoption-first — where
+	// the agent had already reported an outcome, that outcome is taken from the
+	// live artifact instead of the task being executed a second time; where it
+	// had not, the task returns to pending. See pkg/taskrecover for why the
+	// live artifact is trustworthy evidence.
+	//
+	// This must happen before scheduling: NextTask() only returns pending
+	// tasks, so an in_progress task is otherwise skipped forever.
+	o.recoverStaleTasks(s)
+
+	// An operator at a terminal may prefer to skip a task that was re-queued
+	// rather than watch it fail again. Adopted tasks are not offered — there is
+	// nothing left to decide about work that is already finished.
+	if clarify.IsTTY() {
 		for _, t := range s.Plan.Tasks {
-			if t.ID == cp.TaskID && t.Status == pm.TaskInProgress {
-				staleTask = t
+			if t == nil || t.Status != pm.TaskPending || !o.wasRequeued(t.ID) {
+				continue
+			}
+			fmt.Printf("Retry task %d or skip it? [r]etry / [s]kip: ", t.ID)
+			scanner := bufio.NewScanner(os.Stdin)
+			if !scanner.Scan() {
 				break
 			}
-		}
-		if staleTask != nil {
-			color.New(color.FgYellow, color.Bold).Printf("\n⚠ Stale checkpoint detected: Task %d — %s\n", cp.TaskID, cp.TaskTitle)
-			dimColor.Printf("  The previous run was interrupted while executing this task.\n")
-			dimColor.Printf("  Started: %s ago\n\n", time.Since(cp.StartTimestamp).Round(time.Second))
-			fmt.Printf("Retry this task or skip it? [r]etry / [s]kip: ")
-			scanner := bufio.NewScanner(os.Stdin)
-			if scanner.Scan() {
-				answer := strings.ToLower(strings.TrimSpace(scanner.Text()))
-				if answer == "s" || answer == "skip" {
-					staleTask.Status = pm.TaskSkipped
-					staleTask.StartedAt = nil
-					pm.AddAnnotation(staleTask, "ai", "Task skipped at stale-checkpoint recovery (user chose 'skip' after a previously interrupted run).")
-					s.Save()
-					_ = checkpoint.Clear(o.config.WorkDir)
-					dimColor.Printf("→ Task %d skipped.\n\n", staleTask.ID)
-				} else {
-					// Default: retry — reset to pending so NextTask() picks it up.
-					staleTask.Status = pm.TaskPending
-					staleTask.StartedAt = nil
-					s.Save()
-					_ = checkpoint.Clear(o.config.WorkDir)
-					dimColor.Printf("→ Retrying task %d.\n\n", staleTask.ID)
-				}
-			} else {
-				// EOF / non-interactive: default to retry.
-				staleTask.Status = pm.TaskPending
-				staleTask.StartedAt = nil
+			if answer := strings.ToLower(strings.TrimSpace(scanner.Text())); answer == "s" || answer == "skip" {
+				t.Status = pm.TaskSkipped
+				pm.AddAnnotation(t, "ai", "Task skipped at stale-task recovery (operator chose 'skip' after a previously interrupted run).")
 				s.Save()
-				_ = checkpoint.Clear(o.config.WorkDir)
+				dimColor.Printf("→ Task %d skipped.\n\n", t.ID)
 			}
-		} else {
-			// No matching in-progress task — checkpoint is fully stale; remove it.
-			_ = checkpoint.Clear(o.config.WorkDir)
 		}
 	}
 
@@ -3058,41 +3049,76 @@ func reviewTask(task *pm.Task) string {
 	return "quit" // EOF or error
 }
 
-// recoverStaleTasks resets any tasks left in `in_progress` from a prior crashed
-// or killed run back to `pending` so they re-enter the scheduling pool. Without
-// this, NextTask() (which only returns pending tasks) would skip them forever
-// and any dependent tasks would stay blocked.
+// recoverStaleTasks resolves any task left `in_progress` by a prior crashed or
+// killed run. Without this, NextTask() (which only returns pending tasks) would
+// skip them forever and any dependent tasks would stay blocked.
 //
-// Used by the parallel runner — the sequential runner does its own interactive
-// stale-checkpoint prompt earlier in runPMSequential.
+// Recovery is adoption-first, not reset-first. A run can die between the agent
+// finishing and that outcome reaching the database, and re-executing a task
+// whose work is already done is destructive rather than merely wasteful — so
+// where the live artifact shows a terminal signal, that outcome is adopted and
+// the task is not run again. Only genuinely unfinished tasks return to pending.
+// pkg/taskrecover explains why that evidence is trustworthy.
+//
+// Used by both runners: the parallel one before it schedules work, the
+// sequential one before its interactive skip prompt.
 func (o *Orchestrator) recoverStaleTasks(s *state.ProjectState) {
 	if s == nil || s.Plan == nil {
 		return
 	}
-	recovered := 0
-	for _, t := range s.Plan.Tasks {
-		if t == nil {
-			continue
+	outcomes := taskrecover.Reconcile(o.config.WorkDir, s.Plan)
+	if len(outcomes) > 0 {
+		o.requeuedMu.Lock()
+		if o.requeued == nil {
+			o.requeued = make(map[int]bool, len(outcomes))
 		}
-		if t.Status == pm.TaskInProgress {
-			t.Status = pm.TaskPending
-			t.StartedAt = nil
-			pm.AddAnnotation(t, "ai", "Task reset to pending: previous run was interrupted while this task was in_progress (parallel-mode stale-task recovery).")
-			recovered++
+		for _, oc := range outcomes {
+			if oc.Action == taskrecover.ActionRequeued {
+				o.requeued[oc.TaskID] = true
+			}
+		}
+		o.requeuedMu.Unlock()
+
+		for _, oc := range outcomes {
+			o.reportRecovery(oc)
 		}
 	}
-	if recovered > 0 {
-		// Drop any stale checkpoint pointing at a task we just reset.
-		_ = checkpoint.Clear(o.config.WorkDir)
+
+	// Drop any checkpoint left behind — either it pointed at a task we just
+	// resolved, or it has no in-progress task to match and is fully stale.
+	_ = checkpoint.Clear(o.config.WorkDir)
+
+	if len(outcomes) > 0 {
 		if err := s.Save(); err != nil {
 			color.New(color.Faint).Printf("(stale-task recovery save failed: %v)\n", err)
 			return
 		}
-		color.New(color.Faint).Printf("Recovered %d in-progress task(s) from prior run.\n", recovered)
 	}
 
 	// Also recover stale queue entries left in "running" from a prior crash.
 	o.recoverStaleQueueEntries()
+}
+
+// reportRecovery narrates one recovered task to the terminal and hands it to
+// the shared event writer, so a recovery reads the same in the timeline whether
+// this run noticed it or the hub did.
+func (o *Orchestrator) reportRecovery(oc taskrecover.Outcome) {
+	switch oc.Action {
+	case taskrecover.ActionAdopted:
+		color.New(color.FgGreen).Printf("✓ Recovered task %d (%s) — the previous run finished it but died before recording the result.\n",
+			oc.TaskID, oc.Status)
+	case taskrecover.ActionRequeued:
+		color.New(color.Faint).Printf("↻ Task %d reset to pending — %s.\n", oc.TaskID, oc.Reason)
+	}
+	taskrecover.LogOutcome(o.config.WorkDir, oc)
+}
+
+// wasRequeued reports whether this run's stale-task recovery reset the given
+// task, as opposed to adopting a finished outcome for it.
+func (o *Orchestrator) wasRequeued(taskID int) bool {
+	o.requeuedMu.Lock()
+	defer o.requeuedMu.Unlock()
+	return o.requeued[taskID]
 }
 
 // recoverStaleQueueEntries marks any queue entries stuck in "running" as failed,
