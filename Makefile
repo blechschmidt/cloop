@@ -1,7 +1,16 @@
-.PHONY: build test test-unit test-e2e test-e2e-update e2e-stack fuzz clean
+.PHONY: build test test-unit test-e2e test-e2e-update e2e-stack fuzz clean \
+        docs-check docs-stage docs-site docs-serve
 
 BINARY := cloop
 GO := /usr/local/go/bin/go
+
+# Documentation site. The toolchain is pure Python and pinned in
+# website/requirements.txt; no Go is involved, and the venv lives under dist/
+# so `make clean` and .gitignore only need to know about one directory.
+DIST := dist
+DOCS_VENV := $(DIST)/docs-venv
+DOCS_MKDOCS := $(DOCS_VENV)/bin/mkdocs
+DOCS_PORT ?= 8000
 
 # Per-target fuzz time. 30s is enough to catch shallow panics on every parser
 # without making the target painful to run locally; CI may set a longer budget.
@@ -53,6 +62,42 @@ fuzz:
 	$(GO) test -run=^$$ -fuzz=FuzzParseDeadline   -fuzztime=$(FUZZTIME) ./pkg/pm/
 	$(GO) test -run=^$$ -fuzz=FuzzValidate        -fuzztime=$(FUZZTIME) ./pkg/configvalidate/
 
-## clean: remove build artifacts and coverage reports
+# ---------------------------------------------------------------------------
+# Documentation site (https://blechschmidt.github.io/cloop/)
+# ---------------------------------------------------------------------------
+# The site is not a second copy of the docs: scripts/build-docs.py stages this
+# repository's own Markdown, mirroring the repository layout so the relative
+# links between pages survive, and derives the navigation from docs/README.md.
+# CI runs these same targets, so a local build and the published site cannot
+# drift.
+
+$(DOCS_VENV): website/requirements.txt
+	@echo "==> creating the documentation venv from website/requirements.txt"
+	@python3 -m venv $(DOCS_VENV)
+	@$(DOCS_VENV)/bin/pip install --quiet --upgrade pip
+	@$(DOCS_VENV)/bin/pip install --quiet -r website/requirements.txt
+	@touch $(DOCS_VENV)
+
+## docs-check: structural check — every page indexed, every relative link resolves
+docs-check:
+	@./scripts/check-docs.sh
+
+## docs-stage: assemble dist/docs-src and dist/mkdocs.yml from docs/ and README.md
+docs-stage:
+	@python3 scripts/build-docs.py
+
+## docs-site: build the documentation site into dist/docs-site (strict)
+docs-site: $(DOCS_VENV) docs-check docs-stage
+	@echo "==> mkdocs build --strict"
+	@$(DOCS_MKDOCS) build --strict -f $(DIST)/mkdocs.yml
+	@echo "==> site built: $(DIST)/docs-site/index.html"
+
+## docs-serve: live-preview the documentation site (http://127.0.0.1:$(DOCS_PORT))
+docs-serve: $(DOCS_VENV) docs-stage
+	@echo "==> mkdocs serve on http://127.0.0.1:$(DOCS_PORT)  (re-run to pick up docs/ edits)"
+	@$(DOCS_MKDOCS) serve --strict -f $(DIST)/mkdocs.yml -a 127.0.0.1:$(DOCS_PORT)
+
+## clean: remove build artifacts, coverage reports and the documentation site
 clean:
 	rm -f $(BINARY) coverage.out
+	rm -rf $(DIST)

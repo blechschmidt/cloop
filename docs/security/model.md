@@ -1247,7 +1247,7 @@ a reconstruction, so this row set spans three packages.
 The properties in [the network section](#the-network-the-sandbox-sits-on),
 driven through the real compiler and the real renderers so they hold wherever
 the policy is enforced. Two rows are the shape of a bug that was actually
-present; the [threat model](threat-model.md#two-vulnerabilities-found-while-building-this)
+present; the [threat model](threat-model.md#vulnerabilities-found-while-building-this)
 describes both.
 
 | Guarantee | Test |

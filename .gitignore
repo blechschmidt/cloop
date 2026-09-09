@@ -10,6 +10,10 @@ cloop.exe
 *.out
 vendor/
 
+# Documentation site: the staged tree, the rendered site and the pinned venv
+# `make docs-site` builds. All of it is derived from docs/ and website/.
+dist/
+
 # OS
 .DS_Store
 Thumbs.db

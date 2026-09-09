@@ -732,7 +732,12 @@ In `.cursor/mcp.json` at the project root:
 
 ### `cloop ui`
 
-Start a local web dashboard with real-time updates via SSE (Server-Sent Events).
+Start a web dashboard with real-time updates over a WebSocket (`/api/ws`),
+falling back to SSE where a WebSocket cannot be established.
+
+The listener binds every interface on its port, not just localhost, and
+authenticates nothing unless a token or OIDC is configured — see
+[Web UI](configuration.md#web-ui-cloop-ui) before exposing it.
 
 ```bash
 cloop ui                  # start on default port 8080
@@ -760,8 +765,8 @@ cloop hub pin --cert /path/to/fullchain.pem
 
 `tls-init` refuses to overwrite existing key material without `--force`:
 regenerating changes the hub's key, and every agent pinned to the old one stops
-connecting until it is re-pinned. See [TLS](#tls) for the serving configuration
-and [Remote executors](#remote-executors-edge-devices) for how the pin reaches
+connecting until it is re-pinned. See [TLS](configuration.md#tls) for the serving configuration
+and [Remote executors](configuration.md#remote-executors-edge-devices) for how the pin reaches
 a device.
 
 ### `cloop hub key`

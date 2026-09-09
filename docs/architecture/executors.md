@@ -155,7 +155,7 @@ where the hub and the workload are the same trust domain by definition.
 
 Shells out to the Docker or Podman CLI. The argv is built by a pure function,
 `buildRunArgs` (`container/argv.go`), which is why the sandbox flags can be
-[exhaustively tested](../security/model.md#the-guarantee-to-test-table) without a
+[exhaustively tested](../security/model.md#the-guarantee--test-table) without a
 runtime present. Forced on every invocation:
 
 ```
@@ -375,7 +375,7 @@ Two things about the bridge form are worth knowing before reading one:
   decision picks the hook — destinations the host forwards on take `forward`,
   destinations belonging to the host itself take `input` — so a ruleset with
   only a `forward` chain filters the Internet and leaves the host wide open.
-  See the [threat model](../security/threat-model.md#two-vulnerabilities-found-while-building-this).
+  See the [threat model](../security/threat-model.md#vulnerabilities-found-while-building-this).
 - **The chain policy is `accept`, not `drop`.** Base chains on the same hook all
   run and a drop in any of them kills the packet, so a `policy drop` chain here
   would take down every other container on the host. Each chain instead returns
@@ -1686,7 +1686,7 @@ dispatch to and `/readyz` is red, the executor enrolls itself and it goes green,
 then a real task runs on the device against a tree it fetched over HTTPS. See
 [deploy/README.md](../../deploy/README.md).
 
-Transport is covered in [the security model](../security/model.md#2-hub--remote-agent).
+Transport is covered in [the security model](../security/model.md#②-hub--remote-agent).
 
 ### Installing the agent as a service
 

@@ -5,6 +5,32 @@ Written from the code, and gated against drifting from it. A CI check
 secret kind, or a new RBAC role ships without appearing here — see
 [`tests/docs/drift_test.go`](../tests/docs/drift_test.go).
 
+New to cloop? Read [your first project](getting-started/first-project.md), then
+[how cloop works](getting-started/concepts.md). Everything else on this page
+assumes you have run it once.
+
+This file is also the site's table of contents: the published navigation is
+generated from the sections and links below, so a page joins the menu the
+moment it is listed here and nowhere else.
+
+## Getting started
+
+Five pages in order, indexed at
+**[getting started](getting-started/README.md)**:
+
+- **[Installation](getting-started/installation.md)** — prerequisites,
+  `go install`, building from source, the container image, shell completion.
+- **[Your first project](getting-started/first-project.md)** — one walkthrough:
+  a goal, the plan cloop derives from it, running it, watching it, steering it.
+- **[How cloop works](getting-started/concepts.md)** — the loop itself: what a
+  task is, how one is picked, how completion is detected, what happens on
+  failure, and what auto-evolve does once the plan drains.
+- **[Providers](getting-started/providers.md)** — the backends, how provider
+  and model are actually resolved, and the environment variables that override
+  them.
+- **[Web dashboard](getting-started/web-ui.md)** — `cloop ui`, what each screen
+  shows, and the authentication default to know before exposing it.
+
 ## Architecture
 
 - **[Executors](architecture/executors.md)** — how a task travels from the
@@ -46,7 +72,7 @@ secret kind, or a new RBAC role ships without appearing here — see
   neither can do.
 - **[Threat model](security/threat-model.md)** — STRIDE per boundary, with the
   concrete mitigation that exists and an honest residual-risk column, plus the
-  [two vulnerabilities found while building the egress filter](security/threat-model.md#two-vulnerabilities-found-while-building-this).
+  [two vulnerabilities found while building the egress filter](security/threat-model.md#vulnerabilities-found-while-building-this).
 - **[Git interception proxy](git-interception-proxy.md)** — how a sandbox is
   allowed to push to some branches and not others without ever holding a
   credential that could reach the others: the branch allowlist enforced on the

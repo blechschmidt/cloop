@@ -1,0 +1,134 @@
+# Material for MkDocs configuration for the published documentation site.
+#
+# This is the *base* config. `scripts/build-docs.py` copies it to
+# `dist/mkdocs.yml` and appends the generated `nav:` — the navigation is
+# derived from the sections and links of `docs/README.md`, so a page joins the
+# site's menu the moment it is listed there. Do not add a `nav:` key here; the
+# build script refuses to run if you do.
+#
+# Every relative path below is resolved from `dist/`, because that is where
+# mkdocs reads the assembled config from:
+#
+#   make docs-site    -> dist/docs-site/          (what CI publishes)
+#   make docs-serve   -> http://127.0.0.1:8000    (live preview)
+
+site_name: cloop
+site_url: https://blechschmidt.github.io/cloop/
+site_author: cloop contributors
+site_description: >-
+  An autonomous AI product manager: decompose a goal into a task plan, execute
+  it, and keep going — with isolated executors, brokered credentials and SSO
+  when you run it for a team.
+copyright: Copyright &copy; 2026 cloop contributors — MIT licensed
+
+repo_url: https://github.com/blechschmidt/cloop
+repo_name: blechschmidt/cloop
+edit_uri: edit/main/
+
+# Resolved from dist/, where build-docs.py writes the assembled config.
+docs_dir: docs-src
+site_dir: docs-site
+
+# MkDocs reports a dead #heading-anchor at INFO by default, which --strict does
+# not act on — eight cross-page anchors had rotted behind that default before
+# this was turned up. Raising them to warnings is what makes --strict a link
+# checker rather than a spell of confidence: a renamed heading now fails the
+# build in the pull request that renames it.
+validation:
+  omitted_files: warn
+  absolute_links: warn
+  unrecognized_links: warn
+  anchors: warn
+
+theme:
+  name: material
+  language: en
+  favicon: assets/favicon.svg
+  icon:
+    logo: material/rotate-right
+    repo: fontawesome/brands/github
+    edit: material/pencil
+    view: material/eye
+  palette:
+    # Follows the reader's OS preference, with a manual override either way.
+    - media: "(prefers-color-scheme)"
+      toggle:
+        icon: material/brightness-auto
+        name: Switch to light mode
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: teal
+      accent: teal
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: teal
+      accent: teal
+      toggle:
+        icon: material/brightness-4
+        name: Switch to system preference
+  features:
+    - content.action.edit          # "edit this page" -> the file on GitHub
+    - content.action.view          # "view source" -> the raw file
+    - content.code.annotate
+    - content.code.copy            # copy button on every fenced block
+    - content.tooltips
+    - navigation.indexes           # a section's README.md is the section page
+    - navigation.instant           # SPA-style navigation
+    - navigation.instant.progress
+    - navigation.top               # back-to-top button
+    - navigation.tracking          # deep-link the anchor into the address bar
+    - search.highlight
+    - search.share
+    - search.suggest
+    - toc.follow
+
+extra_css:
+  - assets/extra.css
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/blechschmidt/cloop
+      name: cloop on GitHub
+  generator: false
+
+plugins:
+  - search
+
+markdown_extensions:
+  - abbr
+  - admonition
+  - attr_list                      # {: .md-button } and friends
+  - def_list
+  - footnotes
+  - md_in_html                     # the grid cards on the landing page
+  - tables
+  - toc:
+      permalink: true
+      toc_depth: 3
+      # GitHub-compatible anchors. The cross-page links under docs/ were
+      # written against GitHub's slugs; python-markdown's default slugifier
+      # collapses runs of whitespace and would silently break every anchor
+      # that follows an em dash.
+      slugify: !!python/object/apply:pymdownx.slugs.slugify {kwds: {case: lower}}
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.keys
+  - pymdownx.superfences:
+      # Mermaid diagrams (the lifecycle flowchart in getting-started/concepts.md)
+      # render client-side; without this they would ship as unhighlighted code.
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true

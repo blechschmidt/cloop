@@ -1,0 +1,137 @@
+name: Documentation site (GitHub Pages)
+
+# Publishes the documentation tree to https://blechschmidt.github.io/cloop/
+#
+# The site is not a second copy of the docs: scripts/build-docs.py stages this
+# repository's own Markdown (docs/ and README.md) mirroring the repository
+# layout so the relative links between pages survive, derives the navigation
+# from docs/README.md, and Material for MkDocs renders it.
+#
+# Both jobs run the same `make docs-site` developers run locally, so CI and
+# local builds cannot drift. That build is --strict with `validation.anchors`
+# turned up, which makes this workflow a gate as well as a publisher: a
+# relative link that does not resolve, a dead #heading-anchor, or a page under
+# docs/ that no section of docs/README.md lists all fail it. Pull requests
+# build but do not deploy, so breakage is caught in review rather than on the
+# live site.
+#
+# Publishing needs two repository settings, both one-time and both outside a
+# workflow's control:
+#
+#   * Pages enabled with the "GitHub Actions" source. configure-pages is asked
+#     to enable it below, but GITHUB_TOKEN cannot *create* a Pages site however
+#     its permissions are set — that needs repository administration, which no
+#     workflow token carries. Until an admin has enabled it once, that step
+#     fails with "Create Pages site failed: Resource not accessible by
+#     integration".
+#   * the deploying branch allowed in the `github-pages` environment's
+#     deployment-branch rules. This deploys from `main`, which is the default
+#     branch, and the environment GitHub creates for Pages allows the default
+#     branch — so this holds as configured. It is named here because it stops
+#     holding the moment the deploy moves to any other branch.
+#
+# Neither is downgraded to a notice. A deploy that does not deploy is a failed
+# deploy, and nobody reads a warning under a green check.
+# No secrets are needed: deployment authenticates with the run's OIDC token.
+
+on:
+  # Kept in sync between push and pull_request by hand: GitHub Actions does not
+  # support YAML anchors in workflow files.
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "website/**"
+      - "README.md"
+      - "scripts/build-docs.py"
+      - "scripts/check-docs.sh"
+      - "Makefile"
+      - ".github/workflows/docs.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "website/**"
+      - "README.md"
+      - "scripts/build-docs.py"
+      - "scripts/check-docs.sh"
+      - "Makefile"
+      - ".github/workflows/docs.yml"
+  # Manual re-publish, e.g. after enabling Pages or changing branch policy.
+  workflow_dispatch:
+
+# Never cancel an in-flight deployment: a half-published site is worse than a
+# slightly stale one. Superseded *builds* are cheap enough to let finish.
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build site (strict)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      # The site toolchain is pure Python and pinned in
+      # website/requirements.txt; no Go toolchain is involved.
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: website/requirements.txt
+
+      # Structural gate first: it names the offending file and the fix
+      # ("docs/foo/bar.md is listed by no section of docs/README.md"), which is
+      # a better error than the same problem surfacing as a missing nav entry.
+      - name: Documentation structure check
+        run: make docs-check
+
+      # Stages the tree, generates the nav, renders with --strict. Creates its
+      # own venv under dist/ from the pinned requirements, populated from the
+      # pip cache above.
+      - name: Build the site
+        run: make docs-site
+
+      - name: Upload the Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist/docs-site
+
+  deploy:
+    name: Deploy to GitHub Pages
+    # Pull requests validate the build above; only the branch publishes.
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    permissions:
+      pages: write        # deploy to the Pages site
+      id-token: write     # OIDC token deploy-pages authenticates with
+
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      # Resolves the site's base URL, and re-asserts the "GitHub Actions"
+      # source in case someone flips it back to branch-based publishing. It
+      # cannot create the site from scratch — see the header — so a failure
+      # here means Pages is not enabled on the repository, which is exactly the
+      # condition that should stop the run rather than pass quietly.
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+        with:
+          enablement: true
+
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4

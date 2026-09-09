@@ -1,0 +1,35 @@
+/* Site-specific styling. Everything else is Material for MkDocs defaults. */
+
+/* The landing page's card grid. `md_in_html` lets a <div class="grid cards">
+   wrap ordinary Markdown lists, which Material styles as cards; this only
+   tightens the spacing and gives each card a full-height click target. */
+.md-typeset .grid.cards > ul > li {
+  display: flex;
+  flex-direction: column;
+}
+
+.md-typeset .grid.cards > ul > li > p:last-child {
+  margin-top: auto;
+}
+
+/* Mermaid renders into an SVG that inherits no page styling. Centre it and let
+   it use the full column, otherwise the lifecycle flowchart in
+   getting-started/concepts.md sits left-aligned in a sea of whitespace. */
+.md-typeset .mermaid {
+  display: flex;
+  justify-content: center;
+  margin: 1.2em 0;
+}
+
+/* Screenshots of the dashboard are UI, not illustrations: a border keeps a
+   light-theme screenshot from bleeding into a light-theme page. */
+.md-typeset img[src*="screenshots/"] {
+  border: 1px solid var(--md-default-fg-color--lightest);
+  border-radius: 4px;
+}
+
+/* Tables in the reference pages are wide and dense; wrapping the first column
+   makes flag names unreadable. */
+.md-typeset table:not([class]) td:first-child code {
+  white-space: nowrap;
+}

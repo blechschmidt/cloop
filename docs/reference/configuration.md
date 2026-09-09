@@ -952,7 +952,16 @@ the IdP is unreachable, are in
 
 ### Web UI (`cloop ui`)
 
-The web dashboard binds to **localhost only** by default.
+The web dashboard binds to **every interface** on its port. The listener is
+opened on `:<port>`, and there is no bind-address flag — the `http://localhost`
+URL printed at startup is where *you* reach it, not a limit on who else can.
+With no `--token`, no scoped API token and no OIDC issuer configured, requests
+are not authenticated at all, so on a shared network the default is a dashboard
+anyone routable to the port can drive.
+
+Put it somewhere private before that matters: run it behind a reverse proxy
+bound to `127.0.0.1`, publish the container port as `127.0.0.1:8080:8080`, or
+configure OIDC and give people accounts.
 
 > **`--token` / `CLOOP_UI_TOKEN` is deprecated.** It still works and will keep
 > working, but it bypasses RBAC entirely, sees every project on the hub, and

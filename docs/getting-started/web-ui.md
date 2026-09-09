@@ -1,0 +1,252 @@
+# The web dashboard
+
+Everything cloop does from a terminal it also does from a browser: creating a
+project, editing its goal, adding and reordering tasks, toggling run options,
+starting and stopping a run, and watching the output arrive live. This page is
+about the single-user case — one person, one machine. Running it for a team is
+a different setup, and the last section says where that is documented.
+
+- [Starting it](#starting-it)
+- [What it authenticates by default](#what-it-authenticates-by-default)
+- [The layout](#the-layout)
+- [Projects](#projects)
+- [A project's Overview](#a-projects-overview)
+- [Tasks](#tasks)
+- [Run options](#run-options)
+- [Settings](#settings)
+- [Live updates](#live-updates)
+- [Beyond one user on one machine](#beyond-one-user-on-one-machine)
+
+---
+
+## Starting it
+
+```bash
+cloop ui                                    # port 8080, opens your browser
+cloop ui --port 9090 --no-browser
+cloop ui --scan ~/Projects                  # find every cloop project under a directory
+cloop ui --projects /srv/app --projects /srv/api
+```
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--port` | `8080` | Port to listen on |
+| `--no-browser` | `false` | Do not open a browser window at startup |
+| `--projects` | — | Additional project directories, repeatable |
+| `--scan` | — | Scan a directory for cloop projects and add them |
+| `--token` | — | **Deprecated** static bearer token; also read from `CLOOP_UI_TOKEN` |
+| `--rate-limit` | `20` | Requests per second per IP (`0` uses the default) |
+| `--rate-burst` | `50` | Burst size per IP (`0` uses the default) |
+| `--tls-cert` / `--tls-key` | — | Serve HTTPS directly; overrides `ui.tls` in the config |
+
+Projects found by `--projects` and `--scan` are written into the per-user
+registry at `~/.cloop/projects.json`, so they are still listed next time
+without the flags. `CLOOP_HOME` relocates that registry — useful when two hubs
+share a Unix account. TLS, WebSocket connection caps and the origin allowlists
+come from `ui.*` in `.cloop/config.yaml`; a YAML parse error here is fatal
+rather than a warning, because it is where the security settings live. See
+[the configuration reference](../reference/configuration.md#tls).
+
+**There is no bind-address flag.** The listener is opened on `:<port>`, which
+means every interface on the machine, not just loopback. The startup line
+prints a `localhost` URL because that is the address to open in a browser — not
+because the socket is restricted to it.
+
+---
+
+## What it authenticates by default
+
+**Nothing.** With no `--token`, no scoped API token and no OIDC configured,
+every route — including the ones that start a run, edit a plan or delete a
+project — is served without authentication. Combined with the bind behaviour
+above, a plain `cloop ui` on a machine other people can reach is a machine
+other people can run code on.
+
+That default is the right one for a laptop and wrong for anything else. If the
+port is reachable from a network, configure one of the real options before you
+start it:
+
+- **Scoped API tokens** (`cloop hub token create`) for scripts and CI. They
+  carry roles, can be limited to specific projects, expire, and are revocable
+  one at a time.
+- **OIDC single sign-on** (`ui.oidc.*`) for people, with claim-based RBAC.
+
+`--token` / `CLOOP_UI_TOKEN` still works and prints a deprecation warning at
+startup: it bypasses RBAC entirely, sees every project on the hub, and cannot
+be revoked for one caller without breaking every other. Both proper options are
+covered in [the security model](../security/model.md).
+
+---
+
+## The layout
+
+The tab bar is split into two labelled groups. **Project** tabs show one
+project at a time — Overview, Tasks, Activity, Kanban, Timeline, Knowledge
+Base, Dependencies, Risk Matrix, Analytics, Chat, Assistant, Replay and
+Provider Calls. **Global** tabs apply across the whole hub: Projects, Budget,
+Executors, Secrets, Audit, Quotas and Settings. The last three are hidden
+outright unless your role carries the matching permission, so a single-user
+install typically sees Projects, Budget, Executors and Settings.
+
+The screenshots below were taken from an earlier release; the tab bar has grown
+since, but the panels they show work the same way.
+
+---
+
+## Projects
+
+![The Projects tab: fleet-wide counters across the top, then one row per registered project with its goal, run status, progress bar, task count, last activity and provider, plus Run / PM / Stop buttons.](../screenshots/01-projects-overview.png)
+
+The Projects tab is the fleet view: counters for projects, active runs, total /
+done / failed tasks and total steps, then one row per project. Each row carries
+its goal, a live status pill, a progress bar, `done/total` tasks, when it last
+did anything, and the provider and model it is using. Clicking a row opens it in
+the Project tabs.
+
+**Adding one.** **+ New Project** opens a modal asking for a directory and a
+goal, with optional Provider, Model and Effort pickers, a **PM mode** checkbox
+and **Start run immediately**. A collapsed **Access (optional)** section can
+pick the executor the project runs on and attach credential grants at the same
+time; if the executor or any grant is refused, the whole creation is rolled back
+rather than left half-provisioned. In a directory that is not yet a cloop
+project, the Overview tab shows an *Initialize a project* panel that does the
+same job for the working directory.
+
+**Running one.** Each row has **Run** and **PM** buttons, and **Stop** while a
+run is in flight — so you can drive several projects without leaving the list.
+
+**Hiding and deleting.** **Hide** removes a project from *your* dashboard only;
+it keeps running, other users still see it, and it comes back from
+**Settings → Hidden Projects**. **Delete** is separate and asks for
+confirmation, with an opt-in checkbox to also delete the project directory from
+disk.
+
+---
+
+## A project's Overview
+
+The Overview tab is the control panel for one project, top to bottom:
+
+| Card | Contents |
+| --- | --- |
+| **Project Goal** | the goal, the status badge, and an **Edit** button |
+| **Instructions / Constraints** | the extra instructions the AI is given, also editable |
+| **Overview** | Steps, Provider, Executor, Mode, Tokens, Est. Cost, Created, Updated |
+| **Active Options** | the persistent run flags — see [Run options](#run-options) |
+| **Claude Code Subscription Caps** | weekly / 5-hour / Opus / Sonnet utilisation ceilings, shown only on the `claudecode` provider |
+| **Controls** | **Run**, **Pause / Stop** while running, **Refresh**, **Voice** |
+| **Live Output** | the running step's output as it arrives, with **Clear** |
+| **Event History** | steps merged with task starts, completions, failures, skips, heals, evolve cycles and status changes |
+
+Two of the stat cards are also buttons. **Provider** opens a Provider & Model
+picker whose choice is saved on the project and used by every subsequent run
+until changed; the Effort selector there applies to `claudecode` only and says
+so. **Executor** picks where this project's harness actually runs, and takes
+effect on the next run — work already in flight stays where it started.
+
+---
+
+## Tasks
+
+![The Tasks tab: a search and filter bar, an inline Add Task form with title, description, priority and dependency fields, then the task list — each entry showing its status, role tags, priority badge and ID, with Done, Skip, Fail, Reset, Edit and Remove buttons.](../screenshots/03-tasks.png)
+
+The list filters by free text, status, priority, assignee and tags, and hides
+completed tasks behind a **Show completed** toggle. The header counts what is
+done and what is hidden.
+
+**Adding** is the inline form at the top: title, optional description, priority
+(`1` = highest) and a comma-separated list of task IDs to depend on. **Add
+Task** appends it immediately.
+
+**Editing** happens in a modal with title, description, priority, dependencies
+and a per-task **Max minutes** budget (`0` inherits the project default).
+**Reordering** is drag and drop. The per-row buttons — **Done**, **Skip**,
+**Fail**, **Reset**, **Edit**, **Remove** — set status directly; **Remove**
+asks for confirmation first.
+
+The same plan is visible other ways: **Kanban** as four columns (Pending, In
+Progress, Done, Failed/Skipped) with draggable cards, **Timeline** as a Gantt
+chart, **Dependencies** as a graph, and **Activity** as a per-task log of every
+execution, heal retry and evolve cycle.
+
+---
+
+## Run options
+
+There is no options dialog on the Run button. Every persistent flag is a badge
+in the **Active Options** card on Overview, and clicking a badge toggles it:
+
+| Badge | Flag |
+| --- | --- |
+| Evolve Mode | `--auto-evolve` |
+| Innovate Mode | `--innovate` |
+| Skip Clarify | `--skip-clarify` |
+| Parallel | `--parallel` |
+| Plan Only | `--plan-only` |
+| Retry Failed | `--retry-failed` |
+| Dry Run | `--dry-run` |
+
+Three numeric controls sit in the same card: **Max Parallel** (`-j`, 1–64, the
+worker cap when Parallel is on), **Step Timeout** (a duration, or `off`), and
+**Task Timeout** (minutes, `0` for none). Task Timeout is applied to
+*currently running* tasks within a few seconds, not only to the next one.
+
+Because these are stored on the project rather than passed per click, the
+dashboard and the CLI agree: a badge you turn on here is the flag `cloop run`
+will use.
+
+---
+
+## Settings
+
+![The global Settings tab: a Configuration section with cards for Default Provider, ClaudeCode, Anthropic and OpenAI — each with its own model, base URL and password-masked API key field, and its own Save button.](../screenshots/05-settings.png)
+
+Settings is global rather than per-project. The **Configuration** section edits
+the same provider keys `cloop config set` writes — the default provider, and
+per-backend model, base URL and API key for ClaudeCode, Anthropic, OpenAI and
+Ollama. Each card saves independently, keys are write-only (blank keeps the
+existing value), and a *no key* badge marks a backend that has none. What each
+of those keys means is in
+[Choosing and configuring a provider](providers.md).
+
+Below it: **Display glasses**, a personal read-only link for Meta Ray-Ban
+Display glasses that expires after 30 days and can be revoked; **Hidden
+Projects**, with an Unhide button per entry; and a **Danger Zone** whose
+*Reset Project State* clears step history and resets status while preserving
+the goal and configuration.
+
+---
+
+## Live updates
+
+The dashboard holds a WebSocket open at `/api/ws` and falls back to
+Server-Sent Events at `/api/events` when a proxy blocks the upgrade. Task
+changes, state diffs, run start/stop, step output, provider calls, executor
+health and presence all arrive over it — nothing polls, and two people looking
+at the same project see the same thing. Concurrent edits to one task are
+detected and reported rather than silently overwritten.
+
+---
+
+## Beyond one user on one machine
+
+Everything above assumes the default: one person, one host, work executed as a
+child process of the dashboard itself. A shared or hosted deployment needs two
+more decisions, and both have their own documentation.
+
+- **Who may do what** — SSO, sessions, roles and scoped API tokens are in
+  [the security model](../security/model.md). Start there before exposing the
+  port; the defaults on this page are not the ones you want.
+- **Where the work runs** — the dashboard forking a harness next to itself is
+  fine on a laptop and not fine when the code being run was written by a model
+  on someone else's behalf. Container, Kubernetes and remote executors, and the
+  `executors.allow_host_process: false` switch that makes host execution
+  impossible, are in
+  [the configuration reference](../reference/configuration.md#execution-backends-executors).
+- **Running it day to day** — backup, upgrade, key rotation and incident
+  playbooks are in [the operator runbook](../operations/runbook.md).
+
+---
+
+See also: [core concepts](concepts.md), [your first project](first-project.md),
+and the [command reference](../reference/commands.md).

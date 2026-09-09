@@ -260,7 +260,7 @@ passed verification at export time. Every format carries `prev_hash` and
 are written 0600.
 
 Audit rows never contain credential material — that is asserted by
-[five separate checks](../security/model.md#secret-non-disclosure--secrets_testgo-audit_testgo),
+[five separate checks](../security/model.md#secret-non-disclosure--secrets_testgo-audit_testgo-uiroutes_testgo),
 including one that scans *every* row rendering rather than a sample.
 
 ---
