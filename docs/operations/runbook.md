@@ -894,6 +894,23 @@ correct behaviour, wrong fleet. Bind the project to an isolated executor or
 enable the container backend; do **not** set `allow_host_process: true` to make
 the message go away.
 
+**A project shows "running" but nothing is running.**
+This resolves itself. A run that is killed rather than stopped — the kernel's
+OOM killer, a `SIGKILL`, a host reboot — never writes a terminal status, and the
+hub reconciles that within a few seconds: the project returns to `paused`, each
+task the run left in progress is either adopted (its agent had finished and said
+so, so the outcome is taken rather than the work redone) or re-queued, and the
+event journal records why. Look there first: the entry names the cause,
+and an out-of-memory kill says so explicitly along with the remedy (give the
+executor more memory, or make the task hold less at once). Repeated OOM entries
+for the same project are a sizing problem, not a cloop problem.
+
+If it does *not* resolve, the hub is telling you it refused to. Check the server
+log for `stale-run recovery: skipped, state points at another directory` — that
+is a project whose `.cloop` was copied or moved from somewhere else, so its
+persisted `WorkDir` names its old home and writing the repair would land in the
+original project's database. Fix the state file rather than the symptom.
+
 ---
 
 ## See also

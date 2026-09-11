@@ -57,7 +57,7 @@ func TestReconcileStaleTasksAdoptsAndPersists(t *testing.T) {
 	dir, taskID := stalledProject(t)
 	srv := &Server{WorkDir: dir}
 
-	srv.reconcileStaleTasks(dir)
+	srv.reconcileDeadRun(dir, runVerdict{})
 
 	reloaded, err := state.Load(dir)
 	if err != nil {
@@ -91,7 +91,7 @@ func TestReconcileStaleTasksSkipsLiveProject(t *testing.T) {
 	srv := &Server{WorkDir: dir}
 	srv.liveLogSetRunning(dir, true)
 
-	srv.reconcileStaleTasks(dir)
+	srv.reconcileDeadRun(dir, runVerdict{})
 
 	reloaded, err := state.Load(dir)
 	if err != nil {
@@ -123,7 +123,7 @@ func TestReconcileStaleTasksRefusesRelocatedState(t *testing.T) {
 	}
 
 	srv := &Server{WorkDir: moved}
-	srv.reconcileStaleTasks(moved)
+	srv.reconcileDeadRun(moved, runVerdict{})
 
 	// The original must be untouched: reconciling the copy must not reach
 	// across into a project it was never asked about.
@@ -166,13 +166,13 @@ func TestReconcileStaleTasksIsIdempotent(t *testing.T) {
 	dir, taskID := stalledProject(t)
 	srv := &Server{WorkDir: dir}
 
-	srv.reconcileStaleTasks(dir)
+	srv.reconcileDeadRun(dir, runVerdict{})
 	first, err := state.Load(dir)
 	if err != nil {
 		t.Fatalf("reload after first pass: %v", err)
 	}
 
-	srv.reconcileStaleTasks(dir)
+	srv.reconcileDeadRun(dir, runVerdict{})
 	second, err := state.Load(dir)
 	if err != nil {
 		t.Fatalf("reload after second pass: %v", err)

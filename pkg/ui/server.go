@@ -516,6 +516,13 @@ type Server struct {
 	runStateMu sync.Mutex
 	runStates  map[string]bool
 
+	// runHandles remembers the workload this hub dispatched for each project,
+	// keyed by workDir, for as long as it is in flight. It is what lets stale
+	// detection ask the driver whether a run is over instead of inferring it
+	// from whether output is still arriving (see stale_recovery.go).
+	runHandleMu sync.Mutex
+	runHandles  map[string]dispatchedRun
+
 	// Suggest background job state. Suggestions are generated and held for the
 	// user to review individually; clients add either selected ones or all.
 	// suggestWorkDir remembers which project the active job was launched from
@@ -1496,25 +1503,8 @@ func (s *Server) watchState(ctx context.Context) {
 		}
 		func() {
 			defer recoverGoroutine("watchState iteration")
-			// State lives in state.db (SQLite); state.json is the legacy
-			// pre-migration format kept only as a stat fallback so the
-			// watcher still fires for projects that were never migrated.
-			dbPath := state.StateDBPath(s.WorkDir)
-			fi, err := os.Stat(dbPath)
-			if err != nil {
-				fi, err = os.Stat(state.StatePath(s.WorkDir))
-			}
-			if err != nil {
-				return
-			}
-			mod := fi.ModTime()
-			// Under WAL journaling, writes land in state.db-wal first and
-			// the main db file's mtime can lag behind; take the newest of
-			// the two so changes are noticed on the next tick.
-			if wfi, werr := os.Stat(dbPath + "-wal"); werr == nil && wfi.ModTime().After(mod) {
-				mod = wfi.ModTime()
-			}
-			if mod.Equal(s.lastMod) {
+			mod, ok := stateModTime(s.WorkDir)
+			if !ok || mod.Equal(s.lastMod) {
 				return
 			}
 			s.lastMod = mod
@@ -1724,6 +1714,12 @@ func (s *Server) broadcastRunState(workDir string, running, force bool) {
 	if !force && ok && prev == running {
 		s.runStateMu.Unlock()
 		return
+	}
+	if s.runStates == nil {
+		// New() allocates this, but recovery runs on a background goroutine
+		// behind a recover(), so a Server that skipped New() would turn a
+		// nil-map panic into a silently skipped repair rather than a crash.
+		s.runStates = make(map[string]bool)
 	}
 	s.runStates[workDir] = running
 	s.runStateMu.Unlock()
@@ -2989,6 +2985,9 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 
 	// Clear this project's old log and mark it running.
 	s.liveLogStartRun(workDir)
+	// Remember the workload behind that flag, so if it dies without saying so
+	// the driver can still be asked (stale_recovery.go).
+	s.trackRun(workDir, ex, handle.ID)
 	s.broadcastRunState(workDir, true, true)
 
 	lines, streamErr := ex.Stream(context.Background(), handle.ID)
@@ -2998,6 +2997,7 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 		// run in progress forever.
 		fmt.Fprintf(os.Stderr, "ui: cannot stream run output: %v\n", streamErr)
 		s.liveLogSetRunning(workDir, false)
+		s.untrackRun(workDir)
 		s.broadcastRunState(workDir, false, true)
 		// The run is live but unobservable, so nothing will ever tell us it
 		// ended. Release the slot now rather than hold one forever: the cap
@@ -3032,6 +3032,13 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 		}
 		s.liveLogSetRunning(workDir, false)
 		s.broadcastRunState(workDir, false, true)
+		// The stream closing is the earliest and best-informed moment to
+		// settle the run: the driver still holds its exit status, so a run
+		// that was killed rather than finished can be recorded as such
+		// instead of being inferred later from an empty /proc scan. Must
+		// follow liveLogSetRunning(false), which is what tells the liveness
+		// check that this run is no longer the one in flight.
+		s.runEnded(workDir, ex, handle.ID)
 		// Broadcast updated state after run completes. Lite-load —
 		// marshalStateForWire drops Steps before broadcast (Task 20125).
 		// SSE consumers get the full state; WS clients get a state_diff
@@ -3066,7 +3073,7 @@ func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 	workDir := s.resolveWorkDir(r)
 	pids := multiui.CloopRunPIDsInDir(workDir)
 	if len(pids) == 0 {
-		if s.reconcileStaleRunState(workDir) {
+		if s.reconcileDeadRun(workDir, runVerdict{}) {
 			jsonOK(w, map[string]interface{}{"ok": true, "message": "no running process found — cleared stale running status"})
 			return
 		}
@@ -3080,33 +3087,6 @@ func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 	}
 	s.observeRunExit(workDir)
 	jsonOK(w, map[string]interface{}{"ok": true, "message": "pause signal sent", "signalled": signalled})
-}
-
-// reconcileStaleRunState clears a persisted "running"/"evolving" project
-// status that no longer has a live cloop run process behind it. Returns true
-// when stale state was found and cleared. The status is set to "paused" —
-// the same terminal the orchestrator writes on a graceful SIGINT — so
-// health, status filters, and the Run/Stop button all recover. Broadcasts
-// the corrected run_state and a state diff so open dashboards flip from
-// Stop to Run without a reload.
-func (s *Server) reconcileStaleRunState(workDir string) bool {
-	ps, err := state.Load(workDir)
-	if err != nil || ps == nil {
-		return false
-	}
-	if ps.Status != "running" && ps.Status != "evolving" {
-		return false
-	}
-	ps.Status = "paused"
-	if err := ps.SaveDirect(); err != nil {
-		fmt.Fprintf(os.Stderr, "ui: reconcile stale run state for %s: %v\n", workDir, err)
-		return false
-	}
-	s.broadcastRunState(workDir, false, true)
-	s.broadcastStateDiff(workDir, ps)
-	s.refreshProjectStatuses()
-	s.broadcastProjectsUpdate()
-	return true
 }
 
 // observeRunExit watches for the signalled run to actually exit and then
@@ -5169,6 +5149,23 @@ func (s *Server) cachedProjectView() ([]multiui.ProjectEntry, []multiui.ProjectS
 	return s.projEntries, s.projStatuses
 }
 
+// cachedRunningClaims returns the set of project paths whose *persisted* status
+// claims a run is in flight. It is a claim rather than a fact: the status is
+// written by the run and cleared by the run, so it survives a run that was
+// killed before it could clear anything. Comparing it against actual liveness
+// is what stale detection is.
+func (s *Server) cachedRunningClaims() map[string]struct{} {
+	s.projMu.RLock()
+	defer s.projMu.RUnlock()
+	claims := make(map[string]struct{})
+	for _, st := range s.projStatuses {
+		if st.Status == "running" || st.Status == "evolving" {
+			claims[st.Path] = struct{}{}
+		}
+	}
+	return claims
+}
+
 // refreshProjectStatuses rebuilds the projStatuses cache from disk.
 func (s *Server) refreshProjectStatuses() {
 	entries := s.allProjectEntries()
@@ -5182,6 +5179,36 @@ func (s *Server) refreshProjectStatuses() {
 	s.projMu.Unlock()
 }
 
+// stateModTime returns the newest modification time across every file a
+// project's state can land in, and whether any of them exist.
+//
+// All of them, because looking at only one is how a live project reads as an
+// idle one. The database runs in WAL mode, so a commit lands in state.db-wal
+// and does not touch state.db at all until something checkpoints — and while
+// any reader holds the database open, nothing does. Statting state.db alone
+// therefore reports a project as unchanged through an entire run, which is
+// what left the dashboard showing state minutes old until somebody pressed
+// refresh (Task 20209).
+// State lives in state.db (SQLite); state.json is the legacy pre-migration
+// format, kept as a fallback so the watchers still fire for a project that was
+// never migrated.
+func stateModTime(dir string) (time.Time, bool) {
+	dbPath := state.StateDBPath(dir)
+	var newest time.Time
+	var found bool
+	for _, path := range []string{dbPath, dbPath + "-wal", state.StatePath(dir)} {
+		fi, err := os.Stat(path)
+		if err != nil {
+			continue
+		}
+		found = true
+		if fi.ModTime().After(newest) {
+			newest = fi.ModTime()
+		}
+	}
+	return newest, found
+}
+
 // watchProjects polls state files for all registered projects and broadcasts
 // updates to SSE clients on change. It returns when ctx is cancelled so Run
 // can shut down cleanly instead of leaking the polling goroutine.
@@ -5192,7 +5219,14 @@ func (s *Server) watchProjects(ctx context.Context) {
 	// Resolve anything a run left stranded while this hub was down. The
 	// per-tick edge below cannot see those: it needs a previous run state, and
 	// a hub that has just started has none.
-	s.reconcileStaleTasksOnStartup()
+	s.reconcileDeadRunsOnStartup()
+
+	// reconcileAt holds, per project, the earliest time at which the sweep
+	// below may act on a persisted "running" that has nothing behind it —
+	// first to wait out a transient /proc miss, then to space out retries for
+	// a repair that cannot be applied. Local to the watcher goroutine: nothing
+	// else reads it, so it needs no lock.
+	reconcileAt := make(map[string]time.Time)
 
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
@@ -5206,19 +5240,13 @@ func (s *Server) watchProjects(ctx context.Context) {
 			defer recoverGoroutine("watchProjects iteration")
 			var changedPaths []string
 			for _, e := range s.allProjectEntries() {
-				statePath := filepath.Join(e.Path, ".cloop", "state.json")
-				fi, err := os.Stat(statePath)
-				if err != nil {
-					// Also try state.db.
-					statePath = filepath.Join(e.Path, ".cloop", "state.db")
-					fi, err = os.Stat(statePath)
-				}
-				if err != nil {
+				mod, ok := stateModTime(e.Path)
+				if !ok {
 					continue
 				}
 				prev := s.projLastMod[e.Path]
-				if !fi.ModTime().Equal(prev) {
-					s.projLastMod[e.Path] = fi.ModTime()
+				if !mod.Equal(prev) {
+					s.projLastMod[e.Path] = mod
 					changedPaths = append(changedPaths, e.Path)
 				}
 			}
@@ -5256,17 +5284,71 @@ func (s *Server) watchProjects(ctx context.Context) {
 			// already pushes a forced run_state on internal start; this loop
 			// catches in-flight transitions and externally-started runs.
 			//
-			// A running→stopped transition is also the moment to resolve any
-			// task the departed run left marked in_progress: nothing intends to
-			// finish it, and left alone it renders as a running task forever.
-			// Tested before the broadcast, which is what updates the
+			// A running→stopped transition is also the moment to resolve what
+			// the departed run left behind — a task marked in_progress that
+			// nothing intends to finish, and a project status that still says
+			// "running". Tested before the broadcast, which is what updates the
 			// previous-state map the edge is read from.
+			//
+			// The edge is not the only trigger, because it only fires for a run
+			// this hub watched die. A run that was already gone when the hub
+			// first looked — started from the CLI, or outliving a hub restart
+			// by less than a tick — produces no transition, and before this
+			// sweep such a project stayed "running" on the dashboard until
+			// somebody pressed Stop and was told the state had been stale all
+			// along. So a persisted "running" with nothing behind it is itself
+			// a trigger, held for staleRunGrace first because, unlike the edge,
+			// it rests on the absence of evidence.
+			//
+			// That second trigger reads the persisted status from the status
+			// cache rather than from disk. The cache is rebuilt whenever a
+			// project's state file changes, so it cannot miss a run starting —
+			// and reading it costs nothing, where a per-project LoadLite every
+			// two seconds would put the whole registry back on the I/O path
+			// this loop was pulled off (Task 20125).
+			claimsRunning := s.cachedRunningClaims()
+			armed := make(map[string]struct{}, len(reconcileAt))
 			for _, e := range s.allProjectEntries() {
 				running := multiui.IsCloopRunningInDir(e.Path)
-				if prev, known := s.wasRunning(e.Path); known && prev && !running {
-					s.reconcileStaleTasks(e.Path)
+				prev, known := s.wasRunning(e.Path)
+				_, claimed := claimsRunning[e.Path]
+				now := time.Now()
+				switch {
+				case running:
+					delete(reconcileAt, e.Path)
+				case known && prev:
+					// Watched it stop: positive evidence, so no grace needed.
+					// Checked before the status claim, because a run can strand
+					// a task without stranding the project status and that task
+					// still has to be resolved.
+					delete(reconcileAt, e.Path)
+					s.reconcileDeadRun(e.Path, runVerdict{})
+				case !claimed:
+					delete(reconcileAt, e.Path)
+				default:
+					due, armedAlready := reconcileAt[e.Path]
+					if !armedAlready {
+						reconcileAt[e.Path] = now.Add(staleRunGrace)
+					} else if !now.Before(due) {
+						s.reconcileDeadRun(e.Path, runVerdict{})
+						// Re-arm rather than clear. A successful repair takes
+						// the project out of claimsRunning on the next tick and
+						// the entry goes with it; one that could not be applied
+						// — a state file pointing elsewhere, an unreadable
+						// database — would otherwise be retried, with a full
+						// state load and a warning, on every single tick.
+						reconcileAt[e.Path] = now.Add(staleRunRetry)
+					}
+					armed[e.Path] = struct{}{}
 				}
 				s.broadcastRunState(e.Path, running, false)
+			}
+			// Drop timers for projects that have since been deregistered, so
+			// the map stays bounded by what is on the dashboard now.
+			for path := range reconcileAt {
+				if _, ok := armed[path]; !ok {
+					delete(reconcileAt, path)
+				}
 			}
 		}()
 	}
@@ -5791,7 +5873,11 @@ func (s *Server) handleProjectRun(w http.ResponseWriter, r *http.Request) {
 	// Echo the run's output into the server log, which is what
 	// cmd.Stdout = os.Stderr used to do.
 	if lines, streamErr := ex.Stream(context.Background(), handle.ID); streamErr == nil {
-		go drainToStderr(lines, "project-run "+entry.Name)
+		s.trackRun(entry.Path, ex, handle.ID)
+		go func() {
+			drainToStderr(lines, "project-run "+entry.Name)
+			s.runEnded(entry.Path, ex, handle.ID)
+		}()
 	}
 	// Push immediate run_state + projects events so the UI updates the
 	// Run/Stop button and project card without waiting for the 2s
@@ -5825,7 +5911,7 @@ func (s *Server) handleProjectStop(w http.ResponseWriter, r *http.Request) {
 		// No live process: if state still claims the project is running (the
 		// run died without writing a terminal status), clear it so the card
 		// stops offering a Stop button that can never succeed (Task 20153).
-		if s.reconcileStaleRunState(entry.Path) {
+		if s.reconcileDeadRun(entry.Path, runVerdict{}) {
 			jsonOK(w, map[string]interface{}{"ok": true, "project": entry.Name, "message": "no running process found — cleared stale running status"})
 			return
 		}
@@ -6033,7 +6119,11 @@ func (s *Server) handleProjectNew(w http.ResponseWriter, r *http.Request) {
 			// beats silently swallowing it as the pre-executor code did.
 			fmt.Fprintf(os.Stderr, "ui: auto-run for new project %s failed to start: %v\n", abs, startErr)
 		} else if lines, streamErr := runEx.Stream(context.Background(), runHandle.ID); streamErr == nil {
-			go drainToStderr(lines, "auto-run "+abs)
+			s.trackRun(abs, runEx, runHandle.ID)
+			go func() {
+				drainToStderr(lines, "auto-run "+abs)
+				s.runEnded(abs, runEx, runHandle.ID)
+			}()
 		}
 	}
 
