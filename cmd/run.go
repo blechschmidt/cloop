@@ -16,6 +16,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/hooks"
 	"github.com/blechschmidt/cloop/pkg/metrics"
 	"github.com/blechschmidt/cloop/pkg/orchestrator"
+	"github.com/blechschmidt/cloop/pkg/outlive"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/profile"
 	"github.com/blechschmidt/cloop/pkg/provider"
@@ -112,6 +113,12 @@ Press Ctrl+C to pause gracefully.`,
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		// A run is normally started by the hub, which owns the other end of
+		// the pipe this process logs to. Outlive it: if the hub dies, the next
+		// progress line would otherwise kill this process partway through a
+		// task, committing the work but never recording that it finished.
+		outlive.ControlPlane()
+
 		workdir, _ := os.Getwd()
 
 		// Use config step_timeout if CLI flag wasn't explicitly set.

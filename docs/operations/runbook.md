@@ -911,6 +911,21 @@ is a project whose `.cloop` was copied or moved from somewhere else, so its
 persisted `WorkDir` names its old home and writing the repair would land in the
 original project's database. Fix the state file rather than the symptom.
 
+**Restarting the hub does not stop the runs it started.**
+This is deliberate, and it is why the nightly rebuild of `cloop-latest` does not
+interrupt work in progress. Runs are orphaned rather than killed
+(`KillMode=process` on both hub units) and they are built to outlive the hub: a
+run whose output pipe breaks keeps working and still records its outcome, so
+losing the hub costs the live-log stream and nothing else. Progress keeps landing
+in `state.db`, so the task list stays current even while the log panel is empty;
+streaming resumes with the *next* run, not the one that was in flight.
+
+Before this, such a run died — not of the kill, but of its own next log line,
+because Go makes `SIGPIPE` fatal on file descriptors 1 and 2. That committed the
+work and lost the outcome, which was the most common way a project came to be
+stuck showing "running" at all. If you want a run to stop, stop it: the Stop
+button, or `POST /api/projects/{idx}/stop`.
+
 ---
 
 ## See also
