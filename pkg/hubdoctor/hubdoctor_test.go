@@ -10,6 +10,7 @@ package hubdoctor
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -20,6 +21,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/executor"
+	"github.com/blechschmidt/cloop/pkg/statedb"
 	"github.com/blechschmidt/cloop/pkg/tlsconf"
 )
 
@@ -697,6 +699,79 @@ func TestStorageSchemaChecks(t *testing.T) {
 		wantSeverity(t, f, SeverityFail)
 		if !strings.Contains(f.Message, "ahead") {
 			t.Errorf("the message must say the database is ahead: %q", f.Message)
+		}
+		// The diagnosis has to point at an image tag, not just a number —
+		// otherwise the operator knows they are stuck but not what to deploy.
+		if !strings.Contains(f.Message, futureBuild) {
+			t.Errorf("the message must name the build that applied the newer schema: %q", f.Message)
+		}
+		if !strings.Contains(f.Remediation, statedb.EnvAllowSchemaDowngrade) {
+			t.Errorf("the remediation must offer the opt-out: %q", f.Remediation)
+		}
+		// Details carry both numbers for anything parsing --json.
+		if f.Details["db_version"] == nil || f.Details["binary_version"] == nil {
+			t.Errorf("details must carry both versions: %+v", f.Details)
+		}
+		// The guard is on, so the guard finding must be absent.
+		if len(got["storage.schema_guard"]) != 0 {
+			t.Error("storage.schema_guard reported while the guard is enabled")
+		}
+	})
+
+	// The schema check has to keep working on the one database the hub itself
+	// refuses to open, or `cloop hub doctor` becomes useless exactly when an
+	// operator needs it (Task 20226). The subtest above already proves it —
+	// this one states why, by asserting the hub would in fact refuse.
+	t.Run("the hub refuses what the doctor can still read", func(t *testing.T) {
+		dir := t.TempDir()
+		dbPath := mustInitStateDB(t, dir)
+		recordFutureMigration(t, dir)
+
+		if _, err := statedb.Open(dbPath); !errors.Is(err, statedb.ErrSchemaTooNew) {
+			t.Fatalf("statedb.Open: want ErrSchemaTooNew, got %v", err)
+		}
+		got := findingsFor(t, dir, hubCfg(), Options{Offline: true})
+		f := only(t, got, "storage.schema")
+		if strings.Contains(f.Message, "could not open") {
+			t.Errorf("the doctor fell back to a generic open failure: %q", f.Message)
+		}
+	})
+}
+
+// TestSchemaGuardOptOutIsItselfReported: an exemption nobody can see outlives
+// its reason. Setting CLOOP_ALLOW_SCHEMA_DOWNGRADE must show up in the
+// diagnosis — as a warning on its own, as a failure when it is actually
+// suppressing a live skew.
+func TestSchemaGuardOptOutIsItselfReported(t *testing.T) {
+	t.Run("set with matching schemas", func(t *testing.T) {
+		t.Setenv(statedb.EnvAllowSchemaDowngrade, "1")
+		dir := t.TempDir()
+		mustInitStateDB(t, dir)
+		got := findingsFor(t, dir, hubCfg(), Options{Offline: true})
+		wantSeverity(t, only(t, got, "storage.schema"), SeverityPass)
+		wantSeverity(t, only(t, got, "storage.schema_guard"), SeverityWarn)
+	})
+
+	t.Run("set while the database is ahead", func(t *testing.T) {
+		t.Setenv(statedb.EnvAllowSchemaDowngrade, "1")
+		dir := t.TempDir()
+		mustInitStateDB(t, dir)
+		recordFutureMigration(t, dir)
+		got := findingsFor(t, dir, hubCfg(), Options{Offline: true})
+		f := only(t, got, "storage.schema_guard")
+		wantSeverity(t, f, SeverityFail)
+		if !strings.Contains(f.Message, "does not fully know") {
+			t.Errorf("the message must say the hub is running on an unknown schema: %q", f.Message)
+		}
+	})
+
+	t.Run("unset", func(t *testing.T) {
+		t.Setenv(statedb.EnvAllowSchemaDowngrade, "")
+		dir := t.TempDir()
+		mustInitStateDB(t, dir)
+		got := findingsFor(t, dir, hubCfg(), Options{Offline: true})
+		if len(got["storage.schema_guard"]) != 0 {
+			t.Error("storage.schema_guard reported while the guard is enabled")
 		}
 	})
 }

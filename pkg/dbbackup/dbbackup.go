@@ -138,7 +138,15 @@ func Backup(srcPath, outPath string) (*BackupReport, error) {
 	// the checkpoint and VACUUM INTO interact correctly with concurrent
 	// writers. Migrate runs on Open, but it is idempotent — no-op when the
 	// schema is already current.
-	db, err := statedb.Open(srcPath)
+	//
+	// The version-skew guard is explicitly off here (Task 20226). It stops an
+	// older binary *interpreting* a newer schema, and this path does not
+	// interpret anything: WAL checkpoint and VACUUM INTO copy pages, and the
+	// copy of a v30 database is a valid v30 database whichever binary made it.
+	// Refusing would take backups away at the one moment an operator most
+	// needs one — a rolled-back hub that will not start — and the documented
+	// way out of that state (runbook: Rollback) begins with having a backup.
+	db, err := statedb.OpenWithOptions(srcPath, statedb.OpenOptions{AllowSchemaDowngrade: true})
 	if err != nil {
 		return nil, fmt.Errorf("dbbackup: open source: %w", err)
 	}

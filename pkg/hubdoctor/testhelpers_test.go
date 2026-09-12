@@ -35,10 +35,18 @@ func mustInitStateDB(t *testing.T, dir string) string {
 	return path
 }
 
+// futureBuild is the build identifier recordFutureMigration attributes the
+// newer schema to — what an operator would have to go and re-deploy.
+const futureBuild = "v9.9.9-from-the-future"
+
 // recordFutureMigration stamps a version higher than any this binary carries,
 // simulating a database written by a newer cloop and then rolled back onto this
 // one. Writing the row directly is the point: there is no migration to run,
 // only a claim in schema_migrations that this binary must notice.
+//
+// applied_by is filled in because the useful half of the finding is naming the
+// build that moved the schema; a test that only asserted the version numbers
+// would not notice that half going missing.
 func recordFutureMigration(t *testing.T, dir string) {
 	t.Helper()
 	latest, err := statedb.LatestSchemaVersion()
@@ -53,8 +61,9 @@ func recordFutureMigration(t *testing.T, dir string) {
 	defer func() { _ = raw.Close() }()
 
 	if _, err := raw.Exec(
-		`INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, datetime('now'))`,
-		latest+1, "9999_from_the_future.sql"); err != nil {
+		`INSERT INTO schema_migrations (version, name, applied_at, applied_by)
+		 VALUES (?, ?, datetime('now'), ?)`,
+		latest+1, "9999_from_the_future.sql", futureBuild); err != nil {
 		t.Fatalf("stamp future migration: %v", err)
 	}
 }

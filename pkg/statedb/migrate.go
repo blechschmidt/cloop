@@ -119,13 +119,27 @@ type MigrationReport struct {
 	BaselineApplied bool  // true when an existing pre-framework DB was adopted at v1
 }
 
+// MigrateOptions configures MigrateWithOptions.
+type MigrateOptions struct {
+	// Target stops after the migration numbered Target. Zero means
+	// LatestVersion — every embedded migration.
+	Target int
+
+	// AllowSchemaDowngrade suppresses the refusal to open a database whose
+	// schema is ahead of this binary's. See schema_guard.go; the operator-
+	// facing spelling is the CLOOP_ALLOW_SCHEMA_DOWNGRADE environment
+	// variable, which Migrate and MigrateTo read on the caller's behalf.
+	AllowSchemaDowngrade bool
+}
+
 // Migrate brings db up to the latest embedded schema version. Safe to call
 // repeatedly: a fully migrated database is a no-op. Each pending migration
 // runs inside a transaction together with the schema_migrations row insert,
 // so an interrupted run leaves the database at the previous version.
 //
 // Errors are wrapped with ErrSchemaMismatch so callers can use errors.Is to
-// distinguish migration failures from generic SQLite errors.
+// distinguish migration failures from generic SQLite errors. A database ahead
+// of this binary additionally carries ErrSchemaTooNew.
 func Migrate(db *sql.DB) (*MigrationReport, error) {
 	return MigrateTo(db, LatestVersion)
 }
@@ -147,11 +161,32 @@ const LatestVersion = 1 << 30
 // the moment one of them is an ALTER TABLE ADD COLUMN, which SQLite has no
 // idempotent spelling for. It then fails with "duplicate column name" inside
 // whichever unrelated test did the rewinding.
+//
+// Note that target bounds how far *forward* this call migrates and has no
+// bearing on the version-skew refusal, which always compares the database
+// against the highest migration the binary embeds.
 func MigrateTo(db *sql.DB, target int) (*MigrationReport, error) {
+	return MigrateWithOptions(db, MigrateOptions{
+		Target:               target,
+		AllowSchemaDowngrade: AllowSchemaDowngradeFromEnv(),
+	})
+}
+
+// MigrateWithOptions is Migrate with the opt-out under the caller's control
+// rather than the environment's. `cloop hub doctor` uses it to inspect a
+// database the hub itself would refuse — diagnosing a skew is the one job that
+// must still work when the skew is present.
+func MigrateWithOptions(db *sql.DB, opts MigrateOptions) (*MigrationReport, error) {
+	target := opts.Target
+	if target <= 0 {
+		target = LatestVersion
+	}
+
 	migrations, err := loadMigrations()
 	if err != nil {
 		return nil, wrap(ErrSchemaMismatch, err)
 	}
+	latest := migrations[len(migrations)-1].Version
 
 	if err := ensureMigrationsTable(db); err != nil {
 		return nil, wrap(ErrSchemaMismatch, err)
@@ -159,6 +194,17 @@ func MigrateTo(db *sql.DB, target int) (*MigrationReport, error) {
 
 	current, err := currentVersion(db)
 	if err != nil {
+		return nil, wrap(ErrSchemaMismatch, err)
+	}
+
+	// The direction the loop below cannot see. Checked before anything is
+	// written, so a refusal leaves the database untouched — including the
+	// provenance column added immediately after.
+	if err := checkNotFromFuture(db, current, latest, opts.AllowSchemaDowngrade); err != nil {
+		return nil, err
+	}
+
+	if err := ensureMigrationsProvenance(db); err != nil {
 		return nil, wrap(ErrSchemaMismatch, err)
 	}
 
@@ -200,15 +246,45 @@ func MigrateTo(db *sql.DB, target int) (*MigrationReport, error) {
 
 // ensureMigrationsTable creates the schema_migrations bookkeeping table.
 // Idempotent.
+//
+// This table is the framework's own bookkeeping, so it is maintained here in Go
+// rather than by a migration file: a migration cannot be recorded until the
+// table that records it exists, and resolving that circularity in SQL is worse
+// than the two idempotent statements it saves.
 func ensureMigrationsTable(db *sql.DB) error {
 	_, err := db.Exec(`
 		CREATE TABLE IF NOT EXISTS schema_migrations (
-			version    INTEGER PRIMARY KEY,
-			applied_at TEXT    NOT NULL,
-			name       TEXT    NOT NULL DEFAULT ''
+			version     INTEGER PRIMARY KEY,
+			applied_at  TEXT    NOT NULL,
+			name        TEXT    NOT NULL DEFAULT '',
+			applied_by  TEXT    NOT NULL DEFAULT ''
 		)`)
 	if err != nil {
 		return fmt.Errorf("create schema_migrations: %w", err)
+	}
+	return nil
+}
+
+// ensureMigrationsProvenance adds applied_by to a schema_migrations table
+// created before that column existed.
+//
+// Rows already there keep an empty applied_by, which reads as "an unidentified
+// build" — accurate, since nothing recorded it. Guarded by a column check
+// because SQLite has no ADD COLUMN IF NOT EXISTS and the alternative is
+// swallowing a "duplicate column name" error, which would also swallow real
+// ones.
+func ensureMigrationsProvenance(db *sql.DB) error {
+	has, err := hasColumn(db, "schema_migrations", "applied_by")
+	if err != nil {
+		return err
+	}
+	if has {
+		return nil
+	}
+	if _, err := db.Exec(
+		`ALTER TABLE schema_migrations ADD COLUMN applied_by TEXT NOT NULL DEFAULT ''`,
+	); err != nil {
+		return fmt.Errorf("add schema_migrations.applied_by: %w", err)
 	}
 	return nil
 }
@@ -247,10 +323,14 @@ func detectBaseline(db *sql.DB) (bool, error) {
 
 // recordVersion inserts a row into schema_migrations. Used both by
 // applyOne (within its tx) and by the baseline-adoption path.
+//
+// applied_by is this build's identifier, which is what lets a later binary's
+// refusal name the build that moved the schema past it rather than only the
+// version number it landed on.
 func recordVersion(db *sql.DB, version int, name string) error {
 	_, err := db.Exec(
-		`INSERT INTO schema_migrations(version, applied_at, name) VALUES (?, ?, ?)`,
-		version, time.Now().UTC().Format(time.RFC3339Nano), name,
+		`INSERT INTO schema_migrations(version, applied_at, name, applied_by) VALUES (?, ?, ?, ?)`,
+		version, time.Now().UTC().Format(time.RFC3339Nano), name, binaryVersion(),
 	)
 	if err != nil {
 		// A concurrent process may have recorded the same baseline version
@@ -300,8 +380,8 @@ func applyOne(db *sql.DB, m migration) error {
 	}
 
 	if _, err := tx.Exec(
-		`INSERT INTO schema_migrations(version, applied_at, name) VALUES (?, ?, ?)`,
-		m.Version, time.Now().UTC().Format(time.RFC3339Nano), m.Name,
+		`INSERT INTO schema_migrations(version, applied_at, name, applied_by) VALUES (?, ?, ?, ?)`,
+		m.Version, time.Now().UTC().Format(time.RFC3339Nano), m.Name, binaryVersion(),
 	); err != nil {
 		// A unique-constraint failure means a concurrent process won the race
 		// and recorded this version first — already applied, not an error.

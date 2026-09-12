@@ -91,8 +91,27 @@ type DB struct {
 //
 // Errors returned by this function may wrap the typed sentinels
 // ErrDBLocked or ErrSchemaMismatch — callers should use errors.Is to
-// distinguish them from generic open failures.
+// distinguish them from generic open failures. A database migrated past this
+// binary's schema is refused with ErrSchemaTooNew rather than opened; see
+// schema_guard.go.
 func Open(dbPath string) (*DB, error) {
+	return OpenWithOptions(dbPath, OpenOptions{
+		AllowSchemaDowngrade: AllowSchemaDowngradeFromEnv(),
+	})
+}
+
+// OpenOptions configures OpenWithOptions.
+type OpenOptions struct {
+	// AllowSchemaDowngrade opens a database whose schema is ahead of this
+	// binary's instead of refusing it. Open sets this from
+	// CLOOP_ALLOW_SCHEMA_DOWNGRADE; diagnostics that must read a skewed
+	// database in order to report on it set it directly.
+	AllowSchemaDowngrade bool
+}
+
+// OpenWithOptions is Open with the version-skew opt-out under the caller's
+// control rather than the environment's.
+func OpenWithOptions(dbPath string, opts OpenOptions) (*DB, error) {
 	conn, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("statedb open %s: %w", dbPath, classifyDriverErr(err))
@@ -110,8 +129,19 @@ func Open(dbPath string) (*DB, error) {
 		return nil, err
 	}
 
-	if _, err := Migrate(conn); err != nil {
+	if _, err := MigrateWithOptions(conn, MigrateOptions{
+		AllowSchemaDowngrade: opts.AllowSchemaDowngrade,
+	}); err != nil {
 		conn.Close()
+		// A version-skew refusal is already a complete, operator-facing
+		// sentence naming both versions, the build that moved the schema and
+		// the way out. Prefixing it with "statedb migrate:" only buries the
+		// lede in what is, for a rolled-back hub, the first thing printed at
+		// startup.
+		var tooNew *SchemaTooNewError
+		if errors.As(err, &tooNew) {
+			return nil, err
+		}
 		return nil, fmt.Errorf("statedb migrate: %w", err)
 	}
 	return &DB{conn: conn}, nil

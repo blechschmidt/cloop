@@ -106,7 +106,7 @@ What it checks, and what each one catches that nothing else does:
 | `rbac` | the mappings parse, the default role's blast radius, group bindings with no `groups` scope, and **whether anybody maps to admin** |
 | `images` | policy validity, digest pinning, cosign actually installed when `require_signature` is on, the hub's own executor images against its own policy, and registry reachability |
 | `executors` | reconciliation diagnostics, the strict-mode gate, and a liveness probe plus capability report per executor |
-| `storage` | `quick_check`, and the schema version against this binary's — the rollback case |
+| `storage` | `quick_check`, the schema version against this binary's — the rollback case, naming the build that moved the schema — and whether `CLOOP_ALLOW_SCHEMA_DOWNGRADE` is suppressing that guard |
 | `quotas`, `budget` | policy validity, limits set to `0` (which means *none allowed*, not unlimited), and unbounded spend on a multi-tenant hub |
 
 Exit is 1 on any failure and 0 with only warnings, so it is usable as a
@@ -657,11 +657,11 @@ Short TTLs mean grants rotate themselves. See
 
 ## Upgrade
 
-Schema migrations live in `pkg/statedb/migrations/` (`0001_init.sql` through
-`0026_hub_instances.sql`), are embedded in the binary, and are applied
-automatically by `statedb.Open()` on every start. Each runs in a transaction and
-records itself in `schema_migrations`, so a crash mid-migration rolls back
-cleanly and the next start retries.
+Schema migrations live in `pkg/statedb/migrations/`, numbered from `0001_init.sql`,
+are embedded in the binary, and are applied automatically by `statedb.Open()` on
+every start. Each runs in a transaction and records itself in `schema_migrations`
+— together with the version of the binary that applied it — so a crash
+mid-migration rolls back cleanly and the next start retries.
 
 **There are no down-migrations. Migration is roll-forward only** — which is why
 step 1 below is not optional.
@@ -708,13 +708,49 @@ upgrade.
 ## Rollback
 
 **A newer schema cannot be opened by an older binary**, and there are no
-down-migrations. Rollback is therefore *restore*, not *downgrade*:
+down-migrations. This is enforced, not merely advised: an older binary compares
+the database's recorded version against the highest migration it embeds and
+refuses to open it, naming both versions and the build that moved the schema
+forward.
+
+```console
+$ cloop ui
+Error: statedb: database schema is newer than this binary: database is at schema
+version 30 but this binary carries 29 (applied by cloop v0.4.0 as
+0030_widget_policy.sql at 2026-05-02T09:14:22Z); …
+```
+
+The refusal happens before the hub binds a port or takes the control-plane
+lease, so a rolled-back image fails its health check instead of serving from a
+schema it half-understands. Every command goes through the same path, and
+`cloop hub doctor` reports it as `storage.schema` without needing the hub to be
+startable — run that first when a rollback will not come up.
+
+Rollback is therefore *restore*, not *downgrade*:
 
 1. stop the hub
 2. install the previous binary or image tag
 3. `cloop db restore <backup taken before the upgrade> --force`
 4. `cloop db verify`
 5. start; check `/readyz`, then `cloop audit-log verify`
+
+### When the schemas are known-compatible
+
+Not every version bump changes a table an older binary reads. If you have
+checked the migrations between the two versions and none of them touches what
+the older build uses, `CLOOP_ALLOW_SCHEMA_DOWNGRADE=1` opens the database
+anyway:
+
+```bash
+CLOOP_ALLOW_SCHEMA_DOWNGRADE=1 cloop ui
+```
+
+This is an escape hatch for a rollback you have already reasoned about, not a
+default. `cloop hub doctor` reports the variable being set as its own finding —
+`storage.schema_guard`, a warning on its own and a failure while a skew is
+actually present — so an exemption left in a Deployment manifest does not
+quietly outlive the incident that justified it. Unset it once the rollback is
+over.
 
 Everything between the backup and the rollback is lost — task state, audit rows,
 grants minted in the window. If that window is unacceptable, export the audit

@@ -49,6 +49,18 @@ var (
 	// opened by an older one). Manual intervention is usually required.
 	ErrSchemaMismatch = errors.New("statedb: schema mismatch")
 
+	// ErrSchemaTooNew indicates the database has been migrated past the
+	// highest migration this binary embeds — an older binary opened a
+	// database a newer one moved forward.
+	//
+	// Distinct from ErrSchemaMismatch because the remedy is different: this
+	// is fixed by running a different binary, not by repairing the database.
+	// Errors carrying it also satisfy errors.Is for ErrSchemaMismatch, so
+	// callers that only handle the general case keep working. The detail —
+	// both versions, and which build applied the newer schema — is in
+	// *SchemaTooNewError, reachable with errors.As.
+	ErrSchemaTooNew = errors.New("statedb: database schema is newer than this binary")
+
 	// ErrExecutorNotFound indicates the requested execution backend is not
 	// registered in the executors table. Callers must treat this as fatal
 	// for the operation rather than falling back to host execution — see

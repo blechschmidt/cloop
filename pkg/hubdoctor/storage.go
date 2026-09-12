@@ -10,15 +10,21 @@ package hubdoctor
 //
 // The version comparison is the check that only exists in a hosted world. On a
 // developer's laptop the binary and the database always advance together. In a
-// deployment they are separate artifacts: a rolled-back image runs against a
-// schema written by a newer one and fails on whichever column it does not know
-// about, at whatever moment first touches it — which is exactly the kind of
-// failure a rollback is supposed to prevent.
+// deployment they are separate artifacts, and a rolled-back image meets a schema
+// a newer one wrote.
+//
+// pkg/statedb now refuses that combination outright (Task 20226), so this check
+// has become a pre-flight rather than the only line of defence: it answers "will
+// the hub start" before the operator finds out by starting it, and names the
+// build that moved the schema so the answer points at an image tag. That is also
+// why it opens the database with the guard explicitly off — a diagnostic that
+// cannot read the broken thing has nothing to report about it.
 
 import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/blechschmidt/cloop/pkg/dbverify"
 	"github.com/blechschmidt/cloop/pkg/statedb"
@@ -89,7 +95,14 @@ func checkSchemaVersion(dbPath string, add addFn) {
 		return
 	}
 
-	db, err := statedb.Open(dbPath)
+	// Deliberately opted out of the version-skew guard. A hub refuses to open
+	// a database newer than itself, which is the whole point of the guard —
+	// but a diagnostic that cannot open the broken thing cannot diagnose it,
+	// and "could not open .cloop/state.db" is exactly the uninformative answer
+	// this check exists to replace. Reading it is safe: nothing here writes,
+	// and the two version numbers live in schema_migrations, whose shape has
+	// not changed since 0001.
+	db, err := statedb.OpenWithOptions(dbPath, statedb.OpenOptions{AllowSchemaDowngrade: true})
 	if err != nil {
 		add(Finding{
 			Check: "storage.schema", Title: "Schema version", Severity: SeverityFail,
@@ -126,12 +139,73 @@ func checkSchemaVersion(dbPath string, add addFn) {
 			Remediation: "Run `cloop migrate` and read the error it reports",
 		})
 	default:
+		// What happens next depends on whether the guard is suppressed, and
+		// saying "this build will not open it" to an operator who has already
+		// set the opt-out would be simply wrong.
+		consequence := "and this build will refuse to open it"
+		remediation := "Roll forward to that cloop version, or restore a backup taken before the " +
+			"upgrade (`cloop db restore`). If the schemas are known-compatible, set " +
+			statedb.EnvAllowSchemaDowngrade + "=1 to start anyway"
+		if statedb.AllowSchemaDowngradeFromEnv() {
+			consequence = "and this build opens it only because " +
+				statedb.EnvAllowSchemaDowngrade + " is set"
+			remediation = "Roll forward to that cloop version, or restore a backup taken before the " +
+				"upgrade (`cloop db restore`), then unset " + statedb.EnvAllowSchemaDowngrade
+		}
 		add(Finding{
 			Check: "storage.schema", Title: "Schema version", Severity: SeverityFail,
 			Message: fmt.Sprintf("database is at version %d, ahead of this binary's %d: it was written "+
-				"by a newer cloop and this one will fail on columns it does not know about",
-				current, latest),
-			Remediation: "Roll forward to the newer cloop version, or restore a snapshot taken before the upgrade",
+				"by a newer cloop%s, %s", current, latest, appliedByClause(db), consequence),
+			Remediation: remediation,
+			Details:     map[string]any{"db_version": current, "binary_version": latest},
 		})
 	}
+
+	checkSchemaGuard(current, latest, add)
+}
+
+// appliedByClause names the build that applied the database's current schema
+// version, so the finding points at an image tag rather than only a number.
+// Returns "" when the database records nothing useful — provenance is a
+// convenience, and its absence must not cost the rest of the message.
+func appliedByClause(db *statedb.DB) string {
+	stamp, err := db.SchemaStamp()
+	if err != nil || stamp.AppliedBy == "" {
+		return ""
+	}
+	out := " (cloop " + stamp.AppliedBy
+	if !stamp.AppliedAt.IsZero() {
+		out += ", " + stamp.AppliedAt.UTC().Format(time.RFC3339)
+	}
+	return out + ")"
+}
+
+// checkSchemaGuard reports the version-skew guard being switched off.
+//
+// The opt-out exists because not every schema bump touches a table an older
+// binary reads, and an operator who has checked should not have to restore a
+// backup to get back to a known-good build. But an exemption nobody can see is
+// an exemption that outlives its reason: it ends up in a Deployment manifest,
+// survives three upgrades, and is still there the day it stops being true. So
+// the off state is itself a finding — a warning when the schemas do agree, a
+// failure when the thing it is suppressing is actually present.
+func checkSchemaGuard(current, latest int, add addFn) {
+	if !statedb.AllowSchemaDowngradeFromEnv() {
+		return
+	}
+	f := Finding{
+		Check: "storage.schema_guard", Title: "Schema version guard", Severity: SeverityWarn,
+		Message: statedb.EnvAllowSchemaDowngrade + " is set: this hub will open a database " +
+			"migrated by a newer cloop instead of refusing it",
+		Remediation: "Unset " + statedb.EnvAllowSchemaDowngrade + " once the rollback that needed it is over",
+	}
+	if current > latest {
+		f.Severity = SeverityFail
+		f.Message = fmt.Sprintf("%s is set and the database is at version %d against this binary's %d: "+
+			"the hub is running on a schema it does not fully know",
+			statedb.EnvAllowSchemaDowngrade, current, latest)
+		f.Remediation = "Roll forward to the cloop that wrote this schema, or restore a backup taken " +
+			"before the upgrade (`cloop db restore`), then unset " + statedb.EnvAllowSchemaDowngrade
+	}
+	add(f)
 }
