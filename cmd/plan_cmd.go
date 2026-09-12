@@ -20,18 +20,12 @@ import (
 var planCmd = &cobra.Command{
 	Use:   "plan",
 	Short: "Manage plan version history and diffs",
+	// No hand-written subcommand list here: cobra renders one below from the
+	// groups in zz_groups.go, and a second copy would drift from it.
 	Long: `Inspect and mutate your AI-managed task plan.
 
-Subcommands:
-  history               List all saved plan snapshots
-  diff [v1] [v2]       Show a human-readable diff between two plan versions
-  edit <instr>         Apply a natural-language instruction to mutate the plan
-  export [--format]    Export plan to a portable YAML/JSON/TOML file
-  import <file>        Import a plan from a portable file (--merge or --replace)
-  critique             AI adversarial plan review — devil's advocate pressure-test
-  ai-brief             Generate a one-page AI executive brief for stakeholders
-  ai-roadmap           Generate a quarterly milestone roadmap with ASCII/MD/HTML output
-  ai-epic              Cluster tasks into 3-7 named epics/themes using AI`,
+Every mutation snapshots the previous version first, so 'plan history' and
+'plan diff' can always show what changed and 'cloop rollback' can undo it.`,
 }
 
 var planHistoryCmd = &cobra.Command{

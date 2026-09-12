@@ -4,6 +4,47 @@ Every `cloop` command and its flags. For conceptual documentation see the
 [documentation index](../README.md); for the executor and security
 configuration keys see [Configuration](configuration.md).
 
+## Finding a command
+
+`cloop --help` groups its commands rather than listing them flat. The nine
+groups, and what belongs in each:
+
+| Group | What is in it |
+|-------|---------------|
+| **Core workflow** | `init`, `run`, `status`, `log`, `goal`, `queue`, `watch`, `reset`, `clean` |
+| **Plan and tasks** | `task`, `plan`, `milestone`, `sprint`, `suggest`, `scope`, and the rest of the plan-shaping commands |
+| **Hub, executors and serving** | `ui`, `serve`, `hub`, `executor`, `egress`, `agent`, `daemon`, `workspace`, `session` |
+| **Secrets, access and spend** | `secret`, `env`, `config`, `budget`, `cost`, `audit`, `audit-log`, `events` |
+| **Insight and reporting** | `report`, `retro`, `standup`, `insights`, `metrics`, `search`, `trace`, and other read-only views |
+| **AI assistants** | `ask`, `chat`, `shell`, `do`, `ai-pair`, `kb`, `memory`, `skill`, `recipe`, `flow` |
+| **Providers and models** | `providers`, `profile`, `router`, `tune`, `bench`, `compare`, `cache` |
+| **Integrations and delivery** | `github`, `sync`, `ci`, `release`, `pr`, `review`, `notify`, `plugin` |
+| **Maintenance and diagnostics** | `doctor`, `db`, `migrate`, `compact`, `snapshot`, `upgrade`, `version` |
+
+`cloop task` and `cloop plan` are grouped the same way — run `cloop task --help`.
+
+Three health checks are worth knowing before anything else goes wrong:
+
+```bash
+cloop doctor            # environment, configuration, and provider reachability
+cloop config validate   # validate .cloop/config.yaml and the project state
+cloop hub doctor        # control-plane readiness for a hosted hub
+```
+
+### Hidden AI advisories
+
+The single-shot `ai-*` wrappers under `cloop task` and `cloop plan` each make one
+provider call, print a report, and change nothing unless you pass `--apply`.
+They are hidden from the help listing so they stop crowding it, and they remain
+fully callable and scriptable at the paths they always had:
+
+```bash
+cloop task ai-acceptance-criteria   cloop task ai-blocker      cloop task ai-coach
+cloop task ai-complexity            cloop task ai-impact       cloop task ai-naming
+cloop task ai-risk-matrix           cloop task ai-standup      cloop task ai-what-if
+cloop plan ai-brief                 cloop plan ai-epic         cloop plan ai-roadmap
+```
+
 ---
 
 ## Commands Reference
