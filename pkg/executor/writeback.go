@@ -498,9 +498,101 @@ type WriteBackRejection struct {
 	Target string
 	// Reason is the human-readable refusal.
 	Reason string
+	// Code classifies the refusal into a closed set, for metrics and for
+	// alerting.
+	//
+	// It exists because Reason cannot serve that purpose and must not be
+	// made to: it interpolates branch names, commit SHAs and paths, all of
+	// which come from the sandbox. Counting rejections by Reason would let
+	// a sandbox mint an unbounded number of Prometheus series by varying
+	// the branch it pushes — an out-of-memory the isolated workload gets to
+	// trigger from inside the box. Code is chosen by the hub from
+	// WriteBackReason*, so a sandbox can influence which bucket it lands in
+	// but never how many buckets exist.
+	//
+	// The zero value is WriteBackReasonUnspecified rather than a panic: a
+	// rejection with no code is still a valid rejection, and losing the
+	// refusal because its classification was forgotten would be strictly
+	// worse than losing the classification.
+	Code WriteBackReason
 	// Branch and CommitSHA locate the refusal in the sandbox's output.
 	Branch    string
 	CommitSHA string
+}
+
+// WriteBackReason is the closed set of write-back refusal classifications.
+type WriteBackReason string
+
+const (
+	// WriteBackReasonUnspecified is the zero value: a refusal that was not
+	// classified. Its presence in a scrape is a bug in the hub, not in the
+	// sandbox.
+	WriteBackReasonUnspecified WriteBackReason = "unspecified"
+	// WriteBackReasonBadBranch: the reported branch name is not a valid or
+	// permitted ref.
+	WriteBackReasonBadBranch WriteBackReason = "bad_branch"
+	// WriteBackReasonBadCommit: a reported SHA is not a well-formed object
+	// name.
+	WriteBackReasonBadCommit WriteBackReason = "bad_commit"
+	// WriteBackReasonEmptyRange: the reported head is the base it was built
+	// on, or the range holds no commits.
+	WriteBackReasonEmptyRange WriteBackReason = "empty_range"
+	// WriteBackReasonUnknownBase: the base commit is not an object this
+	// repository has, so the work is not built on anything the hub knows.
+	WriteBackReasonUnknownBase WriteBackReason = "unknown_base"
+	// WriteBackReasonFsck: git refused the bundled objects.
+	WriteBackReasonFsck WriteBackReason = "fsck"
+	// WriteBackReasonRefMoved: the quarantine ref is not where the executor
+	// said it would be.
+	WriteBackReasonRefMoved WriteBackReason = "ref_moved"
+	// WriteBackReasonNotDescendant: the head does not descend from the base
+	// it claims.
+	WriteBackReasonNotDescendant WriteBackReason = "not_descendant"
+	// WriteBackReasonTooManyCommits: the range is longer than the hub
+	// applies.
+	WriteBackReasonTooManyCommits WriteBackReason = "too_many_commits"
+	// WriteBackReasonPath: an entry's path is not one the hub will write —
+	// an escape, or a write into .git.
+	WriteBackReasonPath WriteBackReason = "path"
+	// WriteBackReasonMode: an entry's file mode is not permitted.
+	WriteBackReasonMode WriteBackReason = "mode"
+)
+
+// AllWriteBackReasons is every classification, for tests that assert the
+// documentation and the dashboards cover the whole set.
+var AllWriteBackReasons = []WriteBackReason{
+	WriteBackReasonUnspecified,
+	WriteBackReasonBadBranch,
+	WriteBackReasonBadCommit,
+	WriteBackReasonEmptyRange,
+	WriteBackReasonUnknownBase,
+	WriteBackReasonFsck,
+	WriteBackReasonRefMoved,
+	WriteBackReasonNotDescendant,
+	WriteBackReasonTooManyCommits,
+	WriteBackReasonPath,
+	WriteBackReasonMode,
+}
+
+// ReasonCode returns the rejection's classification, normalising the zero
+// value so a caller never has to special-case an unclassified refusal.
+func (e *WriteBackRejection) ReasonCode() WriteBackReason {
+	if e == nil || e.Code == "" {
+		return WriteBackReasonUnspecified
+	}
+	return e.Code
+}
+
+// WriteBackReasonOf extracts the classification from any error in a
+// write-back's chain, returning ("", false) when the error is not a rejection.
+// Callers use it to separate a policy refusal from an infrastructure outage
+// without type-asserting at every site.
+func WriteBackReasonOf(err error) (WriteBackReason, bool) {
+	var rej *WriteBackRejection
+	if errors.As(err, &rej) {
+		return rej.ReasonCode(), true
+	}
+	return "", false
 }
 
 // Error implements error.
@@ -683,17 +775,28 @@ func InspectWriteBack(branch, commitSHA string, entries []BundleEntry) error {
 		return &WriteBackRejection{
 			Branch:    branch,
 			CommitSHA: commitSHA,
+			Code:      WriteBackReasonTooManyCommits,
 			Reason: fmt.Sprintf("changes %d paths, at most %d are allowed",
 				len(entries), MaxWriteBackFiles),
 		}
 	}
 	for _, e := range entries {
 		if err := ValidateBundleEntry(e); err != nil {
+			// Which of the two rules refused it, asked in the order
+			// ValidateBundleEntry applies them: the path is checked
+			// first, so a failing path is the classification whatever
+			// the mode is. Re-running the path check is cheaper and
+			// less brittle than matching on the message text.
+			code := WriteBackReasonMode
+			if ValidateWriteBackPath(e.Path) != nil {
+				code = WriteBackReasonPath
+			}
 			return &WriteBackRejection{
 				Path:      e.Path,
 				Mode:      e.Mode,
 				Target:    e.LinkTarget,
 				Reason:    err.Error(),
+				Code:      code,
 				Branch:    branch,
 				CommitSHA: commitSHA,
 			}

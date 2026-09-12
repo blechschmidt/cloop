@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -876,4 +877,73 @@ func TestHandleStatuses_ReportsRunningWork(t *testing.T) {
 	}
 	t.Error("a killed workload is still counted as running — the panel would show " +
 		"permanent phantom load")
+}
+
+// TestUnrequestedKillReportsTheSignal covers the evidence stale-run recovery
+// uses to tell an out-of-memory kill from a stop (Task 20209).
+//
+// Nothing here goes through Signal, so the driver never learns a reason — which
+// is precisely the OOM killer's signature. The kernel's own account of the
+// death has to survive into Status.Error, because it is the only thing that
+// distinguishes "something killed this run" from "somebody stopped it".
+func TestUnrequestedKillReportsTheSignal(t *testing.T) {
+	ex := New("test")
+	ctx := context.Background()
+
+	handle, err := ex.Start(ctx, fixtureSpec(t, modeSleep, t.TempDir()))
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	lines, err := ex.Stream(ctx, handle.ID)
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+
+	// Kill it behind the driver's back, the way the OOM killer would.
+	if err := syscall.Kill(handle.PID, syscall.SIGKILL); err != nil {
+		t.Fatalf("kill %d: %v", handle.PID, err)
+	}
+	collect(t, lines, 30*time.Second) // blocks until the workload is reaped
+
+	st, err := ex.Status(ctx, handle.ID)
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if st.State != executor.StateKilled {
+		t.Fatalf("State = %q, want %q", st.State, executor.StateKilled)
+	}
+	if !strings.Contains(st.Error, "signal: killed") {
+		t.Errorf("Error = %q, want the kernel's account of the signal — "+
+			"without it an OOM kill is indistinguishable from a requested stop", st.Error)
+	}
+}
+
+// TestRequestedKillKeepsItsOwnReason is the other half: a termination cloop
+// asked for must not be overwritten by the signal used to deliver it, or every
+// stop would be reported as an OOM.
+func TestRequestedKillKeepsItsOwnReason(t *testing.T) {
+	ex := New("test")
+	ctx := context.Background()
+
+	handle, err := ex.Start(ctx, fixtureSpec(t, modeSleep, t.TempDir()))
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	lines, err := ex.Stream(ctx, handle.ID)
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	if err := ex.Signal(ctx, handle.ID, executor.SignalKill); err != nil {
+		t.Fatalf("Signal: %v", err)
+	}
+	collect(t, lines, 30*time.Second)
+
+	st, err := ex.Status(ctx, handle.ID)
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if strings.Contains(st.Error, "signal: killed") {
+		t.Errorf("Error = %q — a stop cloop requested was reported with the bare kernel account, "+
+			"which recovery reads as an out-of-memory kill", st.Error)
+	}
 }

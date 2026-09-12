@@ -81,6 +81,29 @@ type Lease struct {
 	Materials []Material `json:"materials"`
 }
 
+// Kinds returns the distinct credential kinds the lease carries, sorted.
+//
+// Deduplicated because a lease holding two GitHub PATs is one lease that
+// involves PATs, not two: leaving the duplicate in would make the lease event
+// counters a function of how many grants happened to match rather than of how
+// many leases were issued.
+func (l *Lease) Kinds() []Kind {
+	if l == nil {
+		return nil
+	}
+	seen := make(map[Kind]bool, len(l.Materials))
+	out := make([]Kind, 0, len(l.Materials))
+	for _, m := range l.Materials {
+		if m.Kind == "" || seen[m.Kind] {
+			continue
+		}
+		seen[m.Kind] = true
+		out = append(out, m.Kind)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
+}
+
 // Expired reports whether the lease is past its TTL at now.
 func (l *Lease) Expired(now time.Time) bool {
 	return l == nil || !now.Before(l.ExpiresAt)

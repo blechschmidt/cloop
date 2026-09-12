@@ -68,6 +68,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/blechschmidt/cloop/pkg/hubmetrics"
 )
 
 // Content types git uses for the smart protocol.
@@ -351,6 +353,8 @@ func (p *Proxy) handleReceivePack(w http.ResponseWriter, r *http.Request, sess *
 		status := http.StatusBadRequest
 		if errors.Is(err, errPushCert) {
 			status = http.StatusForbidden
+			hubmetrics.GitProxyPushes.Inc(hubmetrics.ResultDenied)
+			hubmetrics.GitProxyDenials.Inc(string(DenyPushCert))
 		}
 		p.rejectSession(w, r, sess, status, err.Error())
 		return
@@ -366,6 +370,8 @@ func (p *Proxy) handleReceivePack(w http.ResponseWriter, r *http.Request, sess *
 
 	if len(head.Commands) > pol.MaxCommands {
 		sess.denied.Add(1)
+		hubmetrics.GitProxyPushes.Inc(hubmetrics.ResultDenied)
+		hubmetrics.GitProxyDenials.Inc(string(DenyTooManyCommands))
 		p.emitPush(sess, EventPushDenied, head.Commands,
 			fmt.Sprintf("%d ref updates exceeds the %d this session allows", len(head.Commands), pol.MaxCommands))
 		p.refuse(w, r, sess, head, nil,
@@ -380,13 +386,21 @@ func (p *Proxy) handleReceivePack(w http.ResponseWriter, r *http.Request, sess *
 		for _, d := range decisions {
 			if !d.Allowed() {
 				refused = append(refused, d.Update.Ref+": "+d.Reason())
+				// One sample per refused command, not per push: a push
+				// mixing an allowlist miss with a delete refusal is two
+				// distinct policy findings and an operator needs both.
+				if reason, ok := DenyReasonOf(d.Err); ok {
+					hubmetrics.GitProxyDenials.Inc(string(reason))
+				}
 			}
 		}
+		hubmetrics.GitProxyPushes.Inc(hubmetrics.ResultDenied)
 		p.emitPush(sess, EventPushDenied, head.Commands, strings.Join(refused, "; "))
 		p.refuse(w, r, sess, head, decisions, "")
 		return
 	}
 
+	hubmetrics.GitProxyPushes.Inc(hubmetrics.ResultAllowed)
 	p.emitPush(sess, EventPushAllowed, head.Commands, summarize(head.Commands))
 
 	up, err := p.upstreamRequest(r, sess, "/"+receivePackService, replay)

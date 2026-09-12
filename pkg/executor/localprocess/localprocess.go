@@ -471,6 +471,15 @@ func (e *Executor) pump(rec *record, pipeR *os.File) {
 			// ExitCode() is -1 when the process was terminated by a signal.
 			if exitCode == -1 {
 				state = executor.StateKilled
+				// Record the kernel's account of the death — exec.ExitError
+				// renders it as e.g. "signal: killed". For a kill cloop
+				// requested this is redundant (finish prefers the reason the
+				// requester gave), so what survives here is precisely the
+				// case with no requester: something outside cloop terminated
+				// the workload, which on a busy host is usually the OOM
+				// killer. Callers reconciling a run that vanished have no
+				// other evidence of that.
+				errMsg = exitErr.Error()
 			}
 		} else {
 			// Wait itself failed (I/O error, already reaped): we no longer
@@ -830,11 +839,18 @@ func (e *Executor) finish(rec *record, state executor.State, exitCode int, errMs
 	rec.closed = true
 	// A kill we requested wins over the exit status the kernel reports,
 	// which would otherwise look like an ordinary signal death.
-	if rec.state == executor.StateKilled && state == executor.StateExited {
-		state = executor.StateKilled
-	}
-	if rec.state == executor.StateKilled && errMsg == "" {
-		errMsg = rec.errMsg
+	if rec.state == executor.StateKilled {
+		if state == executor.StateExited {
+			state = executor.StateKilled
+		}
+		// ...and so does the reason we gave for it. "Stopped by request" and
+		// "deadline exceeded" explain a death that "signal: killed" only
+		// describes, and the difference is load-bearing downstream: a run
+		// that reports the bare kernel account is one nothing in cloop asked
+		// to die, which is how an OOM kill is told apart from a stop.
+		if state == executor.StateKilled && rec.errMsg != "" {
+			errMsg = rec.errMsg
+		}
 	}
 	rec.state = state
 	rec.exitCode = exitCode

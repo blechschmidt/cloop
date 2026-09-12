@@ -32,6 +32,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	"github.com/blechschmidt/cloop/pkg/hubmetrics"
 )
 
 // Constraint identifies which requirement eliminated a candidate. It is a
@@ -282,6 +284,8 @@ func (e *PlacementError) Unwrap() error { return ErrNoPlacement }
 //     flaky.
 func Select(candidates []Candidate, req Requirements) (Candidate, error) {
 	if len(candidates) == 0 {
+		hubmetrics.Placements.Inc(hubmetrics.PlacementFailed)
+		hubmetrics.PlacementFailures.Inc(string(ConstraintNoCandidates))
 		return Candidate{}, &PlacementError{Constraint: ConstraintNoCandidates}
 	}
 
@@ -304,8 +308,15 @@ func Select(candidates []Candidate, req Requirements) (Candidate, error) {
 		sort.Slice(rejections, func(i, j int) bool {
 			return rejections[i].ExecutorID < rejections[j].ExecutorID
 		})
+		headline := headlineConstraint(rejections)
+		hubmetrics.Placements.Inc(hubmetrics.PlacementFailed)
+		// The headline constraint only, not one sample per rejection. A pool
+		// of fifty executors that all fail the same check is one placement
+		// failure with one cause; counting per candidate would make the
+		// metric a function of fleet size and read as fifty incidents.
+		hubmetrics.PlacementFailures.Inc(string(headline))
 		return Candidate{}, &PlacementError{
-			Constraint: headlineConstraint(rejections),
+			Constraint: headline,
 			Rejections: rejections,
 			Considered: len(candidates),
 		}
@@ -314,6 +325,7 @@ func Select(candidates []Candidate, req Requirements) (Candidate, error) {
 	sort.SliceStable(eligible, func(i, j int) bool {
 		return lessCandidate(eligible[i], eligible[j])
 	})
+	hubmetrics.Placements.Inc(hubmetrics.PlacementPlaced)
 	return eligible[0], nil
 }
 

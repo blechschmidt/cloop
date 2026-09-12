@@ -43,6 +43,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/apierror"
@@ -50,6 +51,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/eventlog"
 	"github.com/blechschmidt/cloop/pkg/executor/remote"
 	"github.com/blechschmidt/cloop/pkg/executorstore"
+	"github.com/blechschmidt/cloop/pkg/hubmetrics"
 	"github.com/blechschmidt/cloop/pkg/logger"
 	"github.com/blechschmidt/cloop/pkg/quota"
 	"github.com/blechschmidt/cloop/pkg/quotastore"
@@ -702,88 +704,86 @@ func quotaResourceNames() []string {
 // the class the audit trail carries, and a wide-open /metrics on a hosted hub
 // is a tenant roster for anyone who can reach the port. A Prometheus scraper
 // authenticates with an API token holding a role that grants it.
+//
+// The scrape used to be assembled here by hand, one fmt.Fprintf per sample.
+// It now renders hubmetrics.Default, so the same request also carries what
+// every other enterprise subsystem records — executor placement, lease
+// lifecycle, unseal failures, merge outcomes, git-proxy denials, egress. The
+// quota families keep their exact names, label schemas and types, because an
+// operator's scrape config and recording rules are already written against
+// them; what changes is that they now get the registry's cardinality ceiling,
+// escaping and stable ordering instead of their own one-off versions.
 func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
-	var b strings.Builder
-
-	e := s.quotas()
-	b.WriteString("# HELP cloop_quota_enforcement_enabled Whether a per-identity quota policy is in force.\n")
-	b.WriteString("# TYPE cloop_quota_enforcement_enabled gauge\n")
-	if e != nil && e.Enabled() {
-		b.WriteString("cloop_quota_enforcement_enabled 1\n")
-	} else {
-		b.WriteString("cloop_quota_enforcement_enabled 0\n")
-	}
-
-	if e != nil {
-		var known []string
-		for _, entry := range s.allProjectEntries() {
-			if entry.Owner != "" {
-				known = append(known, entry.Owner)
-			}
-		}
-		snapshot := e.Snapshot(known)
-
-		b.WriteString("\n# HELP cloop_quota_limit Configured ceiling per identity and resource.\n")
-		b.WriteString("# TYPE cloop_quota_limit gauge\n")
-		for _, v := range snapshot {
-			for _, res := range quota.AllResources {
-				if limit, ok := v.Limits.Get(res); ok {
-					writeGauge(&b, "cloop_quota_limit", v.Identity, string(res), limit)
-				}
-			}
-		}
-
-		b.WriteString("\n# HELP cloop_quota_usage Live consumption per identity and resource.\n")
-		b.WriteString("# TYPE cloop_quota_usage gauge\n")
-		for _, v := range snapshot {
-			for _, res := range quota.AllResources {
-				writeGauge(&b, "cloop_quota_usage", v.Identity, string(res), v.Usage[res])
-			}
-		}
-
-		b.WriteString("\n# HELP cloop_quota_denials_total Admission refusals since this hub started.\n")
-		b.WriteString("# TYPE cloop_quota_denials_total counter\n")
-		denials := e.Denials()
-		for _, res := range quota.AllResources {
-			b.WriteString(fmt.Sprintf("cloop_quota_denials_total{resource=%q} %d\n",
-				string(res), denials[res]))
-		}
-
-		b.WriteString("\n# HELP cloop_quota_identities Identities the hub is currently accounting.\n")
-		b.WriteString("# TYPE cloop_quota_identities gauge\n")
-		b.WriteString(fmt.Sprintf("cloop_quota_identities %d\n", len(snapshot)))
-	}
-
-	// Fleet-level context a quota alert needs to be actionable: how many
-	// projects and executors exist at all.
-	entries := s.allProjectEntries()
-	b.WriteString("\n# HELP cloop_projects_registered Projects in the hub registry.\n")
-	b.WriteString("# TYPE cloop_projects_registered gauge\n")
-	b.WriteString(fmt.Sprintf("cloop_projects_registered %d\n", len(entries)))
+	metricsMu.Lock()
+	s.publishQuotaGauges()
+	body := hubmetrics.Default.Gather()
+	metricsMu.Unlock()
 
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte(b.String()))
+	_, _ = w.Write([]byte(body))
 }
 
-// writeGauge emits one sample. Label values are escaped per the exposition
-// format: an identity is user-influenced (an IdP can release any email), and
-// an unescaped quote or newline there would let a tenant inject metric lines
-// into a scrape — the metrics equivalent of log injection.
-func writeGauge(b *strings.Builder, name, identity, resource string, value float64) {
-	fmt.Fprintf(b, "%s{identity=\"%s\",resource=\"%s\"} %s\n",
-		name, escapeLabelValue(identity), escapeLabelValue(resource), formatMetricValue(value))
-}
+// metricsMu makes publish-then-render atomic.
+//
+// The quota gauges are per-Server state published into a process-global
+// registry, and publishing Resets before it Sets. One hub has one Server so
+// this never contends in production, but pkg/ui builds a Server per test and
+// runs them in parallel; without the lock one test's Reset lands between
+// another's Set and its Gather, and the scrape comes back missing the very
+// identity that test just admitted. Serialising scrapes costs nothing real —
+// Prometheus polls on the order of tens of seconds.
+var metricsMu sync.Mutex
 
-func escapeLabelValue(v string) string {
-	r := strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`)
-	return r.Replace(v)
-}
+// publishQuotaGauges refreshes the identity-scoped gauges from live enforcer
+// state immediately before a scrape reads them.
+//
+// Reset-then-Set rather than incremental updates is what keeps this metric
+// bounded: cardinality becomes the number of identities the hub is accounting
+// right now, not the number it has ever seen, so a tenant cannot grow the
+// registry by churning identities. It is also what stops a departed identity's
+// last usage reading from being exported forever as though it were live.
+func (s *Server) publishQuotaGauges() {
+	hubmetrics.QuotaLimit.Reset()
+	hubmetrics.QuotaUsage.Reset()
 
-func formatMetricValue(v float64) string {
-	if v == math.Trunc(v) && math.Abs(v) < 1e15 {
-		return strconv.FormatFloat(v, 'f', -1, 64)
+	entries := s.allProjectEntries()
+	hubmetrics.ProjectsRegistered.Set(float64(len(entries)))
+
+	e := s.quotas()
+	if e == nil || !e.Enabled() {
+		hubmetrics.QuotaEnforcementEnabled.Set(0)
+	} else {
+		hubmetrics.QuotaEnforcementEnabled.Set(1)
 	}
-	return strconv.FormatFloat(v, 'g', -1, 64)
+	if e == nil {
+		hubmetrics.QuotaIdentities.Set(0)
+		return
+	}
+
+	var known []string
+	for _, entry := range entries {
+		if entry.Owner != "" {
+			known = append(known, entry.Owner)
+		}
+	}
+	snapshot := e.Snapshot(known)
+	for _, v := range snapshot {
+		for _, res := range quota.AllResources {
+			if limit, ok := v.Limits.Get(res); ok {
+				hubmetrics.QuotaLimit.Set(limit, v.Identity, string(res))
+			}
+			hubmetrics.QuotaUsage.Set(v.Usage[res], v.Identity, string(res))
+		}
+	}
+
+	// Set, not Add: the enforcer holds the authoritative running total, so
+	// mirroring the absolute value keeps the counter monotonic across
+	// scrapes without this path having to track what it last published.
+	denials := e.Denials()
+	for _, res := range quota.AllResources {
+		hubmetrics.QuotaDenials.Set(float64(denials[res]), string(res))
+	}
+	hubmetrics.QuotaIdentities.Set(float64(len(snapshot)))
 }

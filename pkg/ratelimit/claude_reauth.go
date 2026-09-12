@@ -145,6 +145,47 @@ func clearAuthFailure() {
 	authFailMu.Unlock()
 }
 
+// transientBackoff is how long a *non-auth* fetch failure (429, 5xx, network)
+// suppresses further attempts.
+//
+// Without it a failing fetch is retried by every caller that asks, because
+// only a *successful* fetch populates the snapshot cache: before every task in
+// a parallel plan and on every dashboard render. Against an endpoint that
+// answers "Rate limited. Please try again later." that is self-sustaining —
+// the retries are what keep it rate-limited, so the caps stay frozen for as
+// long as the loop runs. Shorter than MinUsageCacheTTL because these failures
+// really are transient and should recover on their own.
+const transientBackoff = 30 * time.Second
+
+var (
+	fetchErrMu sync.Mutex
+	fetchErr   error
+	fetchErrAt time.Time
+)
+
+// recentFetchError returns a still-current transient failure, or nil to let
+// the caller try again.
+func recentFetchError() error {
+	fetchErrMu.Lock()
+	defer fetchErrMu.Unlock()
+	if fetchErr != nil && time.Since(fetchErrAt) < transientBackoff {
+		return fetchErr
+	}
+	return nil
+}
+
+func recordFetchError(err error) {
+	fetchErrMu.Lock()
+	fetchErr, fetchErrAt = err, time.Now()
+	fetchErrMu.Unlock()
+}
+
+func clearFetchError() {
+	fetchErrMu.Lock()
+	fetchErr, fetchErrAt = nil, time.Time{}
+	fetchErrMu.Unlock()
+}
+
 // AuthFailure reports the currently cached authentication failure, or nil when
 // the last usage fetch authenticated successfully. The dashboard uses this to
 // decide whether to show the re-authentication banner without triggering a

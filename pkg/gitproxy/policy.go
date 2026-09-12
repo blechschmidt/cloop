@@ -36,6 +36,73 @@ var DefaultAllowedRef = "refs/heads/" + executor.WriteBackBranchPrefix + "**"
 // malformed request or a broken upstream.
 var ErrRefDenied = errors.New("ref update denied by policy")
 
+// DenyReason classifies a refusal into a closed set.
+//
+// The prose in a refusal names the ref and the allowlist that excluded it, so
+// it is exactly as varied as the branch names a sandbox chooses to push. That
+// makes it unusable as a metric label: a sandbox pushing refs/heads/1,
+// refs/heads/2, ... would mint one Prometheus series per attempt, turning a
+// probe of the allowlist into memory pressure on the hub watching it. The
+// reason code is chosen by this package from the constants below, so the
+// number of buckets is fixed no matter what a sandbox sends.
+type DenyReason string
+
+const (
+	// DenyRefNotAllowed: the ref is outside the session's branch allowlist.
+	// A sandbox hitting this repeatedly is enumerating the allowlist.
+	DenyRefNotAllowed DenyReason = "ref_not_allowed"
+	// DenyDelete: deleting refs is not permitted for this session.
+	DenyDelete DenyReason = "delete_denied"
+	// DenyCreate: creating refs is not permitted for this session.
+	DenyCreate DenyReason = "create_denied"
+	// DenyUpdate: updating existing refs is not permitted for this session.
+	DenyUpdate DenyReason = "update_denied"
+	// DenyNoWrite: the session's policy carries no write capability at all.
+	DenyNoWrite DenyReason = "no_write"
+	// DenyTooManyCommands: the push carries more ref updates than allowed.
+	DenyTooManyCommands DenyReason = "too_many_commands"
+	// DenyPushCert: signed pushes are not supported.
+	DenyPushCert DenyReason = "push_cert"
+)
+
+// AllDenyReasons is every classification, for tests that assert the docs and
+// dashboards cover the whole set.
+var AllDenyReasons = []DenyReason{
+	DenyRefNotAllowed, DenyDelete, DenyCreate, DenyUpdate,
+	DenyNoWrite, DenyTooManyCommands, DenyPushCert,
+}
+
+// RefDenial is a policy refusal carrying both its prose and its class.
+//
+// Error renders exactly as the fmt.Errorf it replaced — the sentinel's text, a
+// colon, then the message — because Decision.Reason strips that prefix to
+// build git's status line, and the sandbox-facing wording of a refusal is
+// covered by tests.
+type RefDenial struct {
+	Reason  DenyReason
+	Message string
+}
+
+func (e *RefDenial) Error() string { return ErrRefDenied.Error() + ": " + e.Message }
+
+// Unwrap keeps errors.Is(err, ErrRefDenied) true for every existing caller.
+func (e *RefDenial) Unwrap() error { return ErrRefDenied }
+
+// DenyReasonOf extracts the classification from anything in an error's chain,
+// falling back to DenyRefNotAllowed for a refusal that predates classification
+// — the conservative choice, since that is the reason a security-minded
+// operator most wants counted rather than dropped.
+func DenyReasonOf(err error) (DenyReason, bool) {
+	var d *RefDenial
+	if errors.As(err, &d) {
+		return d.Reason, true
+	}
+	if errors.Is(err, ErrRefDenied) {
+		return DenyRefNotAllowed, true
+	}
+	return "", false
+}
+
 // Policy is what a sandbox is allowed to do to a repository's refs.
 //
 // It is deny-by-default in every dimension. An empty AllowedRefs is not "no
@@ -242,16 +309,17 @@ func matchRefPattern(pat, ref string) bool {
 // than "delete is not permitted", because the first names the real problem.
 func (p Policy) Decide(u RefUpdate) error {
 	if !p.AllowsRef(u.Ref) {
-		return fmt.Errorf("%w: %s is not in this session's branch allowlist (%s)",
-			ErrRefDenied, u.Ref, strings.Join(p.AllowedRefs, ", "))
+		return &RefDenial{Reason: DenyRefNotAllowed, Message: fmt.Sprintf(
+			"%s is not in this session's branch allowlist (%s)",
+			u.Ref, strings.Join(p.AllowedRefs, ", "))}
 	}
 	switch {
 	case u.IsDelete() && !p.AllowDelete:
-		return fmt.Errorf("%w: this session may not delete refs", ErrRefDenied)
+		return &RefDenial{Reason: DenyDelete, Message: "this session may not delete refs"}
 	case u.IsCreate() && !p.AllowCreate:
-		return fmt.Errorf("%w: this session may not create refs", ErrRefDenied)
+		return &RefDenial{Reason: DenyCreate, Message: "this session may not create refs"}
 	case u.IsUpdate() && !p.AllowUpdate:
-		return fmt.Errorf("%w: this session may not update existing refs", ErrRefDenied)
+		return &RefDenial{Reason: DenyUpdate, Message: "this session may not update existing refs"}
 	}
 	return nil
 }

@@ -28,6 +28,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/blechschmidt/cloop/pkg/hubmetrics"
 )
 
 // Resolver attempts to automatically resolve a git merge conflict.
@@ -187,6 +189,13 @@ func (q *Queue) Submit(req Request) *Result {
 	}
 	select {
 	case q.jobs <- job{req: req, res: res}:
+		// Depth is maintained here rather than read from len(q.jobs) at
+		// scrape time because a hub runs one queue per project and the
+		// operator's question is about the hub: "is the integration path
+		// falling behind", not "is project 7's channel full". Adding on
+		// enqueue and subtracting on every exit path makes the gauge the
+		// sum across queues without any of them knowing the others exist.
+		hubmetrics.MergeQueueDepth.Add(1)
 	case <-q.stop:
 		res.Err = errors.New("mergequeue: queue stopped")
 		close(res.Done)
@@ -211,6 +220,7 @@ func (q *Queue) run(ctx context.Context) {
 				return
 			}
 			sha, err := q.mergeOne(ctx, j.req)
+			hubmetrics.MergeQueueDepth.Add(-1)
 			j.res.CommitSHA = sha
 			j.res.Err = err
 			close(j.res.Done)
@@ -224,6 +234,8 @@ func (q *Queue) drain(err error) {
 	for {
 		select {
 		case j := <-q.jobs:
+			hubmetrics.MergeQueueDepth.Add(-1)
+			hubmetrics.MergeOutcomes.Inc(hubmetrics.MergeError)
 			j.res.Err = err
 			close(j.res.Done)
 		default:
@@ -238,9 +250,11 @@ func (q *Queue) drain(err error) {
 // produces a visible merge commit in the history.
 func (q *Queue) mergeOne(ctx context.Context, req Request) (string, error) {
 	if req.Branch == "" {
+		hubmetrics.MergeOutcomes.Inc(hubmetrics.MergeError)
 		return "", errors.New("mergequeue: empty branch")
 	}
 	if q.BaseBranch == "" {
+		hubmetrics.MergeOutcomes.Inc(hubmetrics.MergeError)
 		return "", errors.New("mergequeue: empty base branch")
 	}
 
@@ -252,6 +266,7 @@ func (q *Queue) mergeOne(ctx context.Context, req Request) (string, error) {
 	// Always operate from BaseBranch in the main worktree. If we're somewhere
 	// else (e.g. a previous task was merged from a detached HEAD), checkout.
 	if _, err := q.git(ctx, timeout, "checkout", q.BaseBranch); err != nil {
+		hubmetrics.MergeOutcomes.Inc(hubmetrics.MergeError)
 		return "", fmt.Errorf("mergequeue: checkout %q: %w", q.BaseBranch, err)
 	}
 
@@ -270,6 +285,7 @@ func (q *Queue) mergeOne(ctx context.Context, req Request) (string, error) {
 		// surface the original error.
 		if resolver := q.currentResolver(); resolver != nil {
 			if sha, rerr := q.tryAutoResolve(ctx, timeout, req, msg, resolver); rerr == nil {
+				hubmetrics.MergeOutcomes.Inc(hubmetrics.MergeAutoResolved)
 				return sha, nil
 			}
 		}
@@ -278,13 +294,16 @@ func (q *Queue) mergeOne(ctx context.Context, req Request) (string, error) {
 		// land. Without the abort the working tree would be stuck in a
 		// MERGING state, breaking the next task's checkout.
 		_, _ = q.git(ctx, timeout, "merge", "--abort")
+		hubmetrics.MergeOutcomes.Inc(hubmetrics.MergeUnresolved)
 		return "", fmt.Errorf("mergequeue: merge %q into %q failed: %w", req.Branch, q.BaseBranch, err)
 	}
 
 	sha, err := q.git(ctx, timeout, "rev-parse", "HEAD")
 	if err != nil {
+		hubmetrics.MergeOutcomes.Inc(hubmetrics.MergeError)
 		return "", fmt.Errorf("mergequeue: rev-parse HEAD: %w", err)
 	}
+	hubmetrics.MergeOutcomes.Inc(hubmetrics.MergeClean)
 	return strings.TrimSpace(sha), nil
 }
 

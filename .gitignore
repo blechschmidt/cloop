@@ -10,6 +10,17 @@ cloop.exe
 *.out
 vendor/
 
+# A separate project that happens to live here.
+#
+# polyauth/ is its own Go module (github.com/blechschmidt/polyauth) with no
+# .git of its own, so to this repository it looks like 191 MB of untracked
+# files — including two built binaries. Unignored, the `git add -A` in the
+# standing commit instructions would vacuum an unrelated project into cloop's
+# history, where removing it again means a rewrite. Ignoring it is not a
+# judgement about the code; it is a fence between two projects sharing a
+# directory.
+polyauth/
+
 # Documentation site: the staged tree, the rendered site and the pinned venv
 # `make docs-site` builds. All of it is derived from docs/ and website/.
 dist/

@@ -74,6 +74,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/gitprovision"
 	"github.com/blechschmidt/cloop/pkg/executor/gitwriteback"
+	"github.com/blechschmidt/cloop/pkg/hubmetrics"
 	"github.com/blechschmidt/cloop/pkg/mergequeue"
 )
 
@@ -149,6 +150,46 @@ type Result struct {
 // and Result.MergeErr says so — because losing the branch would throw away the
 // work the conflict is about.
 func Apply(ctx context.Context, req Request) (Result, error) {
+	res, err := apply(ctx, req)
+	countWriteBack(res, err)
+	return res, err
+}
+
+// countWriteBack classifies one Apply outcome for the metrics registry.
+//
+// It wraps the whole function rather than sitting at each return because there
+// are a dozen of those spread over two hundred lines, and a counter that is
+// only incremented on the paths someone remembered is worse than no counter:
+// it reads as a complete accounting and is not one. Wrapping also keeps the
+// rejection/outage split honest, since it makes the classification from the
+// same sentinels the caller matches on.
+func countWriteBack(res Result, err error) {
+	switch {
+	case err == nil:
+		if res.Skipped {
+			// Nothing was offered, so nothing was accepted or refused.
+			// Counting a skip as an acceptance would put every task that
+			// produced no commits into the acceptance rate.
+			return
+		}
+		hubmetrics.WriteBackBundles.Inc(hubmetrics.WriteBackAccepted)
+	case errors.Is(err, executor.ErrWriteBackRejected):
+		hubmetrics.WriteBackBundles.Inc(hubmetrics.WriteBackRejected)
+		reason, _ := executor.WriteBackReasonOf(err)
+		if reason == "" {
+			reason = executor.WriteBackReasonUnspecified
+		}
+		hubmetrics.WriteBackRejections.Inc(string(reason))
+	default:
+		// Everything else is the hub being unable to reach a verdict:
+		// ErrWriteBackUnavailable, a dead context, a broken git. Separate
+		// from a rejection because they page differently — a rejection is
+		// a misbehaving sandbox, an outage is broken infrastructure.
+		hubmetrics.WriteBackBundles.Inc(hubmetrics.WriteBackUnavailable)
+	}
+}
+
+func apply(ctx context.Context, req Request) (Result, error) {
 	emit := req.Emit
 	if emit == nil {
 		emit = func(string) {}
@@ -174,22 +215,25 @@ func Apply(ctx context.Context, req Request) (Result, error) {
 	// git command line. Branch and both SHAs become argv elements and refspec
 	// components a moment from now.
 	branch := strings.TrimSpace(rep.Branch)
-	reject := func(reason string) (Result, error) {
+	// reject takes the classification alongside the prose because the prose
+	// cannot be recovered into one: it interpolates SHAs and branch names, so
+	// counting refusals by message would mint a metric series per commit.
+	reject := func(code executor.WriteBackReason, reason string) (Result, error) {
 		return res, &executor.WriteBackRejection{
-			Branch: branch, CommitSHA: rep.CommitSHA, Reason: reason,
+			Branch: branch, CommitSHA: rep.CommitSHA, Reason: reason, Code: code,
 		}
 	}
 	if err := executor.ValidateWriteBackBranch(branch); err != nil {
-		return reject("the reported branch is not acceptable: " + err.Error())
+		return reject(executor.WriteBackReasonBadBranch, "the reported branch is not acceptable: "+err.Error())
 	}
 	if err := executor.ValidateCommitSHA(rep.CommitSHA); err != nil {
-		return reject("the reported commit is not acceptable: " + err.Error())
+		return reject(executor.WriteBackReasonBadCommit, "the reported commit is not acceptable: "+err.Error())
 	}
 	if err := executor.ValidateCommitSHA(rep.BaseSHA); err != nil {
-		return reject("the reported base commit is not acceptable: " + err.Error())
+		return reject(executor.WriteBackReasonBadCommit, "the reported base commit is not acceptable: "+err.Error())
 	}
 	if rep.BaseSHA == rep.CommitSHA {
-		return reject("the reported commit is the base it was built on, so nothing was produced")
+		return reject(executor.WriteBackReasonEmptyRange, "the reported commit is the base it was built on, so nothing was produced")
 	}
 
 	g := &gitRunner{dir: repo, timeout: req.Timeout}
@@ -200,8 +244,9 @@ func Apply(ctx context.Context, req Request) (Result, error) {
 	// the bundle's own prerequisite — so a base the hub has never seen means
 	// the sandbox is describing history that did not come from here.
 	if _, err := g.run(ctx, "cat-file", "-e", rep.BaseSHA+"^{commit}"); err != nil {
-		return reject(fmt.Sprintf("the base commit %s is not in this repository, so the reported "+
-			"work is not built on anything the hub knows", executor.ShortSHA(rep.BaseSHA)))
+		return reject(executor.WriteBackReasonUnknownBase,
+			fmt.Sprintf("the base commit %s is not in this repository, so the reported "+
+				"work is not built on anything the hub knows", executor.ShortSHA(rep.BaseSHA)))
 	}
 
 	// Whatever happens below, the unvetted ref does not survive this function.
@@ -238,6 +283,7 @@ func Apply(ctx context.Context, req Request) (Result, error) {
 				// — would otherwise retry a hostile write-back on a loop.
 				return res, &executor.WriteBackRejection{
 					Branch: branch, CommitSHA: rep.CommitSHA,
+					Code:   executor.WriteBackReasonFsck,
 					Reason: "git refused the pushed objects: " + collapse(out),
 				}
 			}
@@ -262,9 +308,10 @@ func Apply(ctx context.Context, req Request) (Result, error) {
 		// made. A mismatch means the ref moved between the sandbox reporting
 		// and the hub fetching — someone else pushed over it, or the report is
 		// not describing the objects that arrived.
-		return reject(fmt.Sprintf("the branch is at %s but the executor reported %s; "+
-			"the ref moved between being written and being fetched",
-			executor.ShortSHA(landed), executor.ShortSHA(rep.CommitSHA)))
+		return reject(executor.WriteBackReasonRefMoved,
+			fmt.Sprintf("the branch is at %s but the executor reported %s; "+
+				"the ref moved between being written and being fetched",
+				executor.ShortSHA(landed), executor.ShortSHA(rep.CommitSHA)))
 	}
 
 	// Ancestry, so the range base..commit is the whole of what arrived. Without
@@ -272,8 +319,9 @@ func Apply(ctx context.Context, req Request) (Result, error) {
 	// at all — rewritten history whose diff against base looks small while the
 	// merge replaces files nobody inspected.
 	if _, err := g.run(ctx, "merge-base", "--is-ancestor", rep.BaseSHA, rep.CommitSHA); err != nil {
-		return reject(fmt.Sprintf("commit %s is not a descendant of the base %s it claims to "+
-			"build on", executor.ShortSHA(rep.CommitSHA), executor.ShortSHA(rep.BaseSHA)))
+		return reject(executor.WriteBackReasonNotDescendant,
+			fmt.Sprintf("commit %s is not a descendant of the base %s it claims to "+
+				"build on", executor.ShortSHA(rep.CommitSHA), executor.ShortSHA(rep.BaseSHA)))
 	}
 
 	count, err := g.run(ctx, "rev-list", "--count", "--end-of-options",
@@ -284,11 +332,12 @@ func Apply(ctx context.Context, req Request) (Result, error) {
 	}
 	commits, convErr := strconv.Atoi(strings.TrimSpace(count))
 	if convErr != nil || commits <= 0 {
-		return reject("the returned range contains no commits")
+		return reject(executor.WriteBackReasonEmptyRange, "the returned range contains no commits")
 	}
 	if commits > executor.MaxWriteBackCommits {
-		return reject(fmt.Sprintf("the returned range contains %d commits, at most %d are allowed",
-			commits, executor.MaxWriteBackCommits))
+		return reject(executor.WriteBackReasonTooManyCommits,
+			fmt.Sprintf("the returned range contains %d commits, at most %d are allowed",
+				commits, executor.MaxWriteBackCommits))
 	}
 	res.Commits = commits
 
@@ -412,8 +461,16 @@ func fetchFromBundle(ctx context.Context, g *gitRunner, req Request,
 	// repository holds every prerequisite the bundle names, which is what makes
 	// the range base..commit the complete description of what arrived.
 	if out, err := g.run(ctx, "bundle", "verify", "--", path); err != nil {
-		return fmt.Errorf("%w: the returned bundle is not usable here: %v: %s",
-			executor.ErrWriteBackRejected, err, collapse(out))
+		// Typed rather than a bare wrap of the sentinel, so it carries a
+		// classification like every other refusal on this path. `bundle
+		// verify` failing is git declining the objects, which is the same
+		// verdict isFsckRefusal reaches further down by a different route.
+		return &executor.WriteBackRejection{
+			Branch: branch, CommitSHA: rep.CommitSHA,
+			Code: executor.WriteBackReasonFsck,
+			Reason: fmt.Sprintf("the returned bundle is not usable here: %v: %s",
+				err, collapse(out)),
+		}
 	}
 	if out, err := g.untrustedFetch(ctx, "--no-tags", "--", path,
 		"+refs/heads/"+branch+":"+quarantine); err != nil {
@@ -427,6 +484,7 @@ func fetchFromBundle(ctx context.Context, g *gitRunner, req Request,
 			// on a sandbox's work product must not depend on that.
 			return &executor.WriteBackRejection{
 				Branch: branch, CommitSHA: rep.CommitSHA,
+				Code:   executor.WriteBackReasonFsck,
 				Reason: "git refused the bundled objects: " + collapse(out),
 			}
 		}

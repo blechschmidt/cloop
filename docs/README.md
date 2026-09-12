@@ -97,6 +97,10 @@ Five pages in order, indexed at
 - **[Operator runbook](operations/runbook.md)** — backup and restore, database
   maintenance, audit chain verification and SIEM export, key rotation, upgrade,
   rollback, fleet operations, and incident playbooks.
+- **[Metrics](operations/metrics.md)** — the `/metrics` endpoint and how to
+  authenticate a scraper against it, every exported metric with its labels,
+  the alerts worth writing, and what the cardinality ceiling does when an
+  instrumentation bug reaches it.
 
 ## Elsewhere in the repository
 

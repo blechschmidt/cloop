@@ -118,10 +118,11 @@ func ClearUsageCache() {
 	usageMu.Lock()
 	lastUsage = nil
 	usageMu.Unlock()
-	// Also drop any cached authentication failure. A login that just
-	// succeeded must not keep being told it needs to re-authenticate for the
-	// remainder of authFailureTTL.
+	// Also drop any cached failure. A login that just succeeded must not keep
+	// being told it needs to re-authenticate for the remainder of the TTL,
+	// and an operator hitting Refresh deserves a real attempt.
 	clearAuthFailure()
+	clearFetchError()
 }
 
 // FetchOrCachedUsage returns the cached usage snapshot when it is fresher
@@ -144,13 +145,21 @@ func FetchOrCachedUsage(token string, ttl time.Duration) (*ClaudeUsage, error) {
 	if u := GetCachedUsage(); u != nil && time.Since(u.FetchedAt) <= ttl {
 		return u, nil
 	}
+	// Back off after a transient failure instead of letting every caller
+	// re-attempt: only a successful fetch refreshes the snapshot, so without
+	// this a 429 is retried before every task and keeps itself alive.
+	if berr := recentFetchError(); berr != nil {
+		return GetCachedUsage(), berr
+	}
 	fresh, err := FetchClaudeUsage(token)
 	if err != nil {
+		recordFetchError(err)
 		if u := GetCachedUsage(); u != nil {
 			return u, err
 		}
 		return nil, err
 	}
+	clearFetchError()
 	return fresh, nil
 }
 

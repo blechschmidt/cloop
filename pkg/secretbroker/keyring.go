@@ -53,6 +53,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/blechschmidt/cloop/pkg/hubmetrics"
 )
 
 const (
@@ -635,9 +637,14 @@ func (k *Keyring) OpenEnvelope(aad string, env Envelope) ([]byte, error) {
 		legacy := k.legacy
 		k.mu.RUnlock()
 		if legacy == nil {
+			hubmetrics.UnsealFailures.Inc("key_unavailable")
 			return nil, fmt.Errorf("%w: no legacy sealing key on this hub", ErrKeyUnavailable)
 		}
-		return legacy.Unseal(env.Ciphertext)
+		out, err := legacy.Unseal(env.Ciphertext)
+		if err != nil {
+			hubmetrics.UnsealFailures.Inc("seal_failed")
+		}
+		return out, err
 	}
 
 	kek, rec, known := k.lookup(env.KeyID)
@@ -653,25 +660,38 @@ func (k *Keyring) OpenEnvelope(aad string, env Envelope) ([]byte, error) {
 	}
 
 	if kek == nil {
+		// The reason label mirrors the sentinel, and the sentinels are
+		// distinguishable for the reason given above: the three call for
+		// completely different operator responses, so an alert that fires
+		// on a rate of "unseal failures" is only actionable if the operator
+		// can see which kind without opening the logs.
 		switch {
 		case known && rec.Retired():
+			hubmetrics.UnsealFailures.Inc("key_retired")
 			return nil, fmt.Errorf("%w: sealing key %s was retired at %s; this material cannot be recovered",
 				ErrKeyRetired, env.KeyID, formatOrUnknown(rec.RetiredAt))
 		case known:
+			hubmetrics.UnsealFailures.Inc("key_unavailable")
 			return nil, fmt.Errorf("%w: sealing key %s exists but cannot be derived from the current %s",
 				ErrKeyUnavailable, env.KeyID, EnvPassphraseKey)
 		default:
+			hubmetrics.UnsealFailures.Inc("key_unknown")
 			return nil, fmt.Errorf("%w: no sealing key %s in this hub's registry", ErrKeyUnknown, env.KeyID)
 		}
 	}
 
 	dek, err := openWith(kek, dekAAD(env.KeyID, aad), env.WrappedDEK)
 	if err != nil {
+		hubmetrics.UnsealFailures.Inc("seal_failed")
 		return nil, fmt.Errorf("%w: unwrap data key for %s", ErrSealFailed, SafeRef(aad))
 	}
 	defer zero(dek)
 
-	return openWith(dek, payloadAAD(aad), env.Ciphertext)
+	plaintext, err := openWith(dek, payloadAAD(aad), env.Ciphertext)
+	if err != nil {
+		hubmetrics.UnsealFailures.Inc("seal_failed")
+	}
+	return plaintext, err
 }
 
 // Rewrap moves an envelope onto the primary KEK without decrypting its

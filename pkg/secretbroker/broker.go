@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/blechschmidt/cloop/pkg/hubmetrics"
 )
 
 // DefaultMaxLeaseTTL bounds how long any single lease is valid, regardless
@@ -53,6 +55,9 @@ type leaseState struct {
 	requester Requester
 	actor     string
 	expiresAt time.Time
+	// kinds are the credential kinds this lease carried, kept so an
+	// expiring lease can be counted by kind after its materials are gone.
+	kinds []Kind
 }
 
 // Option configures a Broker.
@@ -555,9 +560,15 @@ func (b *Broker) LeaseFor(ctx context.Context, r Requester, actor string) (*Leas
 		Materials:  materials,
 	}
 
+	kinds := lease.Kinds()
 	b.mu.Lock()
-	b.leases[lease.ID] = &leaseState{requester: r, actor: actor, expiresAt: lease.ExpiresAt}
+	b.leases[lease.ID] = &leaseState{
+		requester: r, actor: actor, expiresAt: lease.ExpiresAt, kinds: kinds,
+	}
 	b.mu.Unlock()
+	for _, k := range kinds {
+		hubmetrics.LeaseEvents.Inc(string(k), hubmetrics.LeaseIssued)
+	}
 
 	summary := base
 	summary.LeaseID = lease.ID
@@ -609,6 +620,15 @@ func (b *Broker) Renew(ctx context.Context, leaseID string) (*Lease, error) {
 	delete(b.leases, leaseID)
 	b.mu.Unlock()
 
+	// Renewal is counted in addition to the issue that LeaseFor already
+	// counted, not instead of it: cloop_secret_lease_events_total{event="issued"}
+	// is "how many leases came into existence", which a renewal genuinely
+	// does. Subtracting here would make the issued series stop matching the
+	// number of distinct lease IDs the audit trail shows.
+	for _, k := range renewed.Kinds() {
+		hubmetrics.LeaseEvents.Inc(string(k), hubmetrics.LeaseRenewed)
+	}
+
 	b.emit(Event{
 		Action:     ActionRenew,
 		Actor:      st.actor,
@@ -632,6 +652,9 @@ func (b *Broker) Release(leaseID string) {
 	if !ok {
 		return
 	}
+	for _, k := range st.kinds {
+		hubmetrics.LeaseEvents.Inc(string(k), hubmetrics.LeaseRevoked)
+	}
 	b.emit(Event{
 		Action:     ActionRelease,
 		Actor:      st.actor,
@@ -640,6 +663,50 @@ func (b *Broker) Release(leaseID string) {
 		ProjectID:  st.requester.ProjectID,
 		Decision:   DecisionAllow,
 	})
+}
+
+// SweepExpired drops lease records whose TTL has passed and reports what is
+// left, tallied by credential kind.
+//
+// It exists for two reasons that happen to have the same implementation.
+//
+// The metrics reason: cloop_secret_leases_live has to mean "leases that would
+// be honoured right now", and the only way to know that is to apply the same
+// expiry test the broker applies. Counting map entries would report leases
+// that expired hours ago as live.
+//
+// The correctness reason: before this, a lease record was removed only by
+// Renew or Release. A lease that simply expired — the ordinary end of a task
+// that was killed, or an executor that went away without releasing — left its
+// leaseState in the map for the lifetime of the process. On a busy hub that is
+// an unbounded map keyed by lease ID, which is to say a slow leak that a
+// tenant can drive. Expiry now collects them.
+//
+// The returned maps are (expired, live) counts by kind.
+func (b *Broker) SweepExpired() (expired, live map[Kind]int) {
+	expired = make(map[Kind]int)
+	live = make(map[Kind]int)
+	now := b.now()
+
+	b.mu.Lock()
+	for id, st := range b.leases {
+		if now.Before(st.expiresAt) {
+			for _, k := range st.kinds {
+				live[k]++
+			}
+			continue
+		}
+		delete(b.leases, id)
+		for _, k := range st.kinds {
+			expired[k]++
+		}
+	}
+	b.mu.Unlock()
+
+	for k, n := range expired {
+		hubmetrics.LeaseEvents.Add(float64(n), string(k), hubmetrics.LeaseExpired)
+	}
+	return expired, live
 }
 
 // CheckRepoAccess is the in-process enforcement point for github grants: it

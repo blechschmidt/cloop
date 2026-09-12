@@ -506,3 +506,150 @@ func TestMetricsRequiresAuditRead(t *testing.T) {
 		t.Fatal("GET /metrics is not in the route table")
 	}
 }
+
+// TestMetricsServesTheHubCatalogToo. The route used to hand-build a handful of
+// quota gauges; it now renders hubmetrics.Default, so the same scrape carries
+// what every enterprise subsystem records. Naming families from four different
+// subsystems is the assertion that the registry is actually wired in, rather
+// than the endpoint having kept its own private exposition.
+func TestMetricsServesTheHubCatalogToo(t *testing.T) {
+	t.Parallel()
+
+	srv := &Server{WorkDir: t.TempDir()}
+	rr := httptest.NewRecorder()
+	srv.handleMetrics(rr, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	body := rr.Body.String()
+
+	for _, want := range []string{
+		"cloop_executor_task_starts_total",
+		"cloop_executor_placement_failures_total",
+		"cloop_secret_unseal_failures_total",
+		"cloop_mergequeue_depth",
+		"cloop_gitproxy_push_denials_total",
+		"cloop_writeback_bundles_total",
+		"cloop_metrics_series_dropped_total",
+	} {
+		if !strings.Contains(body, "# TYPE "+want+" ") {
+			t.Errorf("/metrics does not declare %s", want)
+		}
+	}
+
+	// And the quota families the route served before still do.
+	for _, want := range []string{
+		"cloop_quota_enforcement_enabled",
+		"cloop_quota_limit",
+		"cloop_quota_usage",
+		"cloop_quota_denials_total",
+		"cloop_quota_identities",
+		"cloop_projects_registered",
+	} {
+		if !strings.Contains(body, "# TYPE "+want+" ") {
+			t.Errorf("/metrics dropped %s, which operators already scrape", want)
+		}
+	}
+}
+
+// TestMetricsDeclaresEachFamilyOnce is the specific way this route could break.
+//
+// The quota families are declared in the hubmetrics catalog *and* were built by
+// hand here. Leaving both paths in place would emit two HELP and two TYPE lines
+// per family, which a real scraper rejects outright — so the whole endpoint
+// would fail, not just the duplicated metrics, and it would fail in Prometheus
+// rather than in a test.
+func TestMetricsDeclaresEachFamilyOnce(t *testing.T) {
+	t.Parallel()
+
+	srv := &Server{WorkDir: t.TempDir()}
+	installQuotas(t, srv, quota.Config{Defaults: quota.Limits{quota.ResProjects: 1}})
+
+	rr := httptest.NewRecorder()
+	srv.handleMetrics(rr, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+
+	seen := map[string]int{}
+	for _, line := range strings.Split(rr.Body.String(), "\n") {
+		if !strings.HasPrefix(line, "# HELP ") && !strings.HasPrefix(line, "# TYPE ") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 3 {
+			t.Errorf("malformed metadata line: %q", line)
+			continue
+		}
+		seen[fields[1]+" "+fields[2]]++
+	}
+	if len(seen) == 0 {
+		t.Fatal("the scrape declared no families at all")
+	}
+	for what, n := range seen {
+		if n > 1 {
+			t.Errorf("%q appears %d times; a family may declare it once", what, n)
+		}
+	}
+}
+
+// TestMetricsGaugesTrackTheServerThatServedThem.
+//
+// The quota gauges are per-Server enforcer state published into a
+// process-global registry, and publishing Resets before it Sets. A scrape must
+// therefore reflect the Server it was addressed to and not whichever one wrote
+// last — the property metricsMu exists to provide.
+//
+// The identities are unique to this test on purpose. Several other files in
+// this package register projects owned by alice@example.com and
+// bob@example.com, and a project owner is legitimately carried into every
+// Server's scrape by allProjectEntries — that is a shared *registry*, not a
+// leak between enforcers, and asserting on the usual fixture names would test
+// the registry rather than the thing under test.
+func TestMetricsGaugesTrackTheServerThatServedThem(t *testing.T) {
+	t.Parallel()
+
+	const (
+		mine   = "owner-20212-mine@example.com"
+		theirs = "owner-20212-theirs@example.com"
+	)
+
+	scrape := func(srv *Server) string {
+		rr := httptest.NewRecorder()
+		srv.handleMetrics(rr, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+		return rr.Body.String()
+	}
+
+	a := &Server{WorkDir: t.TempDir()}
+	ea := installQuotas(t, a, quota.Config{Defaults: quota.Limits{quota.ResProjects: 3}})
+	if _, err := ea.Admit(&authz.Subject{Email: mine}, quota.ResProjects, 2); err != nil {
+		t.Fatalf("admit %s: %v", mine, err)
+	}
+
+	b := &Server{WorkDir: t.TempDir()}
+	eb := installQuotas(t, b, quota.Config{Defaults: quota.Limits{quota.ResProjects: 9}})
+	if _, err := eb.Admit(&authz.Subject{Email: theirs}, quota.ResProjects, 1); err != nil {
+		t.Fatalf("admit %s: %v", theirs, err)
+	}
+
+	// Interleaved, so the second scrape of a is taken after b has Reset and
+	// repopulated the very same gauges.
+	first := scrape(a)
+	other := scrape(b)
+	second := scrape(a)
+
+	for i, body := range []string{first, second} {
+		if !strings.Contains(body, `cloop_quota_usage{identity="`+mine+`",resource="max_projects"} 2`) {
+			t.Errorf("scrape %d of server a lost its own gauge:\n%s", i, body)
+		}
+		if strings.Contains(body, theirs) {
+			t.Errorf("scrape %d of server a carried an identity only server b's "+
+				"enforcer knows:\n%s", i, body)
+		}
+		if !strings.Contains(body, `cloop_quota_limit{identity="`+mine+`",resource="max_projects"} 3`) {
+			t.Errorf("scrape %d of server a reported another Server's limit:\n%s", i, body)
+		}
+	}
+
+	// And the converse, so the test cannot pass by a never publishing at all.
+	if !strings.Contains(other, `cloop_quota_usage{identity="`+theirs+`",resource="max_projects"} 1`) {
+		t.Errorf("server b's scrape lost its own gauge:\n%s", other)
+	}
+	if strings.Contains(other, mine) {
+		t.Errorf("server b's scrape carried server a's identity:\n%s", other)
+	}
+}
