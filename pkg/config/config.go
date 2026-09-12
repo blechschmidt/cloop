@@ -67,6 +67,20 @@ const (
 	WebSocketConnsDefault      = 256
 	WebSocketConnsPerIPDefault = 8
 
+	// Audit-trail retention window in days (Task 20218). Zero in YAML means
+	// "keep everything", which is the pre-Task-20218 behaviour and stays the
+	// default — see AuditConfig for why retention on a compliance record is
+	// opt-in. Non-zero values outside the band are clamped back to zero
+	// (validateAndClamp) and rejected by `cloop config set` (ValidateNumeric).
+	//
+	// Bounds: one day lower, because a sub-day window would prune rows a
+	// running incident investigation is still reading. Ten years upper,
+	// which is past every retention schedule cloop is likely to meet and
+	// exists to catch a units mix-up (hours or minutes typed into a field
+	// counted in days) rather than to express a policy.
+	AuditRetentionDaysLower = 1
+	AuditRetentionDaysUpper = 3650
+
 	// HTTP request body cap for the cloop ui and cloop serve servers
 	// (Task 20102). The cap protects against memory-exhaustion DoS via
 	// oversized POST/PUT/PATCH payloads on the long-running daemon. Zero
@@ -260,6 +274,43 @@ type Config struct {
 	// backends the operator runs — and it applies identically to every
 	// backend that honours an image override.
 	Sandbox SandboxConfig `yaml:"sandbox,omitempty"`
+
+	// Audit configures retention for the hash-chained audit trail
+	// (Task 20218). Absent means "keep everything", which is what every
+	// deployment did before there was a retention path at all.
+	Audit AuditConfig `yaml:"audit,omitempty"`
+}
+
+// AuditConfig is the retention policy for .cloop/state.db's audit_events
+// table (Task 20218).
+//
+// Retention is opt-in, and deliberately so. The table is the compliance
+// record; a default that quietly started deleting from it would be a worse
+// failure than the unbounded growth it fixes, and an operator who has not
+// chosen a window has not told us which one their regulator allows. Zero —
+// the zero value, and what every existing config already has — keeps
+// everything.
+//
+// Enabling it does not destroy anything either: a prune seals the removed
+// prefix to ExportDir first and records that file's digest in an anchor, so
+// "retention" here means "moved out of the hot database", not "gone".
+type AuditConfig struct {
+	// RetentionDays is how long audit rows stay in the database. Zero
+	// disables retention entirely. Non-zero is validated to
+	// AuditRetentionDaysLower..AuditRetentionDaysUpper.
+	RetentionDays int `yaml:"retention_days,omitempty"`
+
+	// ExportDir is where sealed prefixes are written. Empty selects
+	// <workdir>/.cloop/audit-archive. A path on separate storage is the
+	// better choice for a real deployment: a seal's value comes from being
+	// somewhere an attacker who owns the database does not also own.
+	ExportDir string `yaml:"export_dir,omitempty"`
+
+	// PruneOnMaintain lets `cloop db maintain` apply the retention window
+	// before it vacuums, so the freed pages are reclaimed in the same pass.
+	// Without it, retention is only applied by an explicit
+	// `cloop hub audit prune`.
+	PruneOnMaintain bool `yaml:"prune_on_maintain,omitempty"`
 }
 
 // ExecutorsConfig groups the execution backends a control plane offers.
@@ -1878,6 +1929,14 @@ func (c *Config) validateAndClamp(path string) {
 		warn("ui.max_websocket_conns_per_ip", fmt.Sprintf("value %d exceeds ui.max_websocket_conns %d", c.UI.MaxWebSocketConnsPerIP, c.UI.MaxWebSocketConns))
 		c.UI.MaxWebSocketConnsPerIP = 0
 	}
+	// Audit retention: zero means "keep everything"; an out-of-range value
+	// falls back to zero rather than to a default window, because the
+	// conservative reading of a nonsensical retention setting is "do not
+	// delete anything until a human says what they meant".
+	if c.Audit.RetentionDays != 0 && (c.Audit.RetentionDays < AuditRetentionDaysLower || c.Audit.RetentionDays > AuditRetentionDaysUpper) {
+		warn("audit.retention_days", fmt.Sprintf("value %d outside [%d, %d]", c.Audit.RetentionDays, AuditRetentionDaysLower, AuditRetentionDaysUpper))
+		c.Audit.RetentionDays = 0
+	}
 	// Request body cap: zero means default; out-of-range falls back to zero
 	// so the runtime substitutes MaxRequestBodyBytesDefault. Pathological
 	// values (negative, microscopically small, or absurdly large) are
@@ -1991,6 +2050,10 @@ func (c *Config) ValidateNumeric() error {
 	if c.UI.MaxWebSocketConnsPerIP != 0 && (c.UI.MaxWebSocketConnsPerIP < WebSocketConnsPerIPLower || c.UI.MaxWebSocketConnsPerIP > WebSocketConnsPerIPUpper) {
 		return fmt.Errorf("ui.max_websocket_conns_per_ip must be between %d and %d (or 0 for the default %d) (got %d)",
 			WebSocketConnsPerIPLower, WebSocketConnsPerIPUpper, WebSocketConnsPerIPDefault, c.UI.MaxWebSocketConnsPerIP)
+	}
+	if c.Audit.RetentionDays != 0 && (c.Audit.RetentionDays < AuditRetentionDaysLower || c.Audit.RetentionDays > AuditRetentionDaysUpper) {
+		return fmt.Errorf("audit.retention_days must be between %d and %d (or 0 to keep everything) (got %d)",
+			AuditRetentionDaysLower, AuditRetentionDaysUpper, c.Audit.RetentionDays)
 	}
 	if c.UI.MaxWebSocketConns != 0 && c.UI.MaxWebSocketConnsPerIP != 0 && c.UI.MaxWebSocketConnsPerIP > c.UI.MaxWebSocketConns {
 		return fmt.Errorf("ui.max_websocket_conns_per_ip (%d) must not exceed ui.max_websocket_conns (%d)",

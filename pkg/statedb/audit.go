@@ -12,6 +12,36 @@
 // Best-effort write semantics: callers in mutation hot paths swallow errors
 // (audit failures must not block user work). The verify command surfaces
 // lost-row gaps as a hash break; that's the explicit cost of best-effort.
+//
+// ── What belongs in this table (Task 20218) ────────────────────────────────
+//
+// The rule, in one line: an audit row records a mutation that actually changed
+// something. Two consequences, both of which were violated badly enough to
+// grow this table to 1.09M rows and 2.4 GB on a real hub:
+//
+//  1. NO NO-OPS. A writer re-declaring a byte-identical row is not a mutation
+//     and must not produce an event. auditPlanTasks() emitted one row per task
+//     in the plan on every SaveState — 99.7% of the table — because it never
+//     asked whether anything differed. Emitters that write a whole collection
+//     must diff against what is stored, inside the same transaction as the
+//     write, and emit only the difference. audit_task_fingerprints (migration
+//     0027) is the mechanism; see diffPlanTaskFingerprints.
+//
+//  2. NO PER-ROW TRANSACTIONS FOR BULK WORK. AppendAuditEvent takes d.mu and
+//     opens a transaction per row. Emitting a collection through it costs one
+//     transaction per element and serialises the writer behind itself. Bulk
+//     emitters use AppendAuditEvents, which chains a whole batch in one
+//     transaction.
+//
+// What does NOT follow from the rule: that machine actors are unwelcome.
+// actor='system' rows are kept, because pkg/eventlog/replay.go reconstructs
+// the task tree from task.upsert payloads — they are the restore vector, not
+// decoration, and moving them to the `events` table would delete a documented
+// capability to solve a volume problem that was really a correctness bug. The
+// distinction from `events` (0003) is unchanged and is about *kind*, not
+// actor: `events` is a UI journal that may be lossy and prunable at will;
+// audit_events is the hash-chained legal record, and rows leave it only
+// through PruneAuditPrefix, which seals them first.
 
 package statedb
 
@@ -20,6 +50,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -69,6 +100,47 @@ func (d *DB) AppendAuditEvent(ev *AuditEvent) error {
 		return fmt.Errorf("statedb audit: empty event_type")
 	}
 
+	return d.appendAuditEvents([]*AuditEvent{ev})
+}
+
+// AppendAuditEvents chains and inserts a whole batch in a single transaction.
+//
+// This is the bulk path, and the reason it exists is measured: emitting a
+// 417-task plan through AppendAuditEvent cost 417 transactions and 417 tip
+// reads per SaveState, which is most of what made the audit trail expensive
+// enough to notice. Chaining in-process and writing once is the same chain
+// with one commit.
+//
+// Events are chained in slice order, so callers control causal order. Each
+// element is mutated in place with its assigned ID and hashes. A nil or
+// empty slice is a no-op; a nil element, or one with an empty event type, is
+// an error and nothing is written.
+func (d *DB) AppendAuditEvents(evs []*AuditEvent) error {
+	if len(evs) == 0 {
+		return nil
+	}
+	for i, ev := range evs {
+		if ev == nil {
+			return fmt.Errorf("statedb audit: nil event at index %d", i)
+		}
+		if ev.Timestamp.IsZero() {
+			ev.Timestamp = time.Now().UTC()
+		} else {
+			ev.Timestamp = ev.Timestamp.UTC()
+		}
+		if ev.Actor == "" {
+			ev.Actor = "system"
+		}
+		if ev.EventType == "" {
+			return fmt.Errorf("statedb audit: empty event_type at index %d", i)
+		}
+	}
+	return d.appendAuditEvents(evs)
+}
+
+// appendAuditEvents is the shared writer. Callers have already normalised and
+// validated every element.
+func (d *DB) appendAuditEvents(evs []*AuditEvent) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
@@ -78,43 +150,100 @@ func (d *DB) AppendAuditEvent(ev *AuditEvent) error {
 	}
 	defer tx.Rollback() //nolint:errcheck
 
-	// Read the current chain tip. SELECT MAX(id) is reliable because we hold
-	// d.mu and are inside a tx; no concurrent insert can interleave.
-	var (
-		maxID    sql.NullInt64
-		lastHash sql.NullString
-	)
-	if err := tx.QueryRow(
-		`SELECT id, row_hash FROM audit_events ORDER BY id DESC LIMIT 1`,
-	).Scan(&maxID, &lastHash); err != nil && err != sql.ErrNoRows {
-		return fmt.Errorf("statedb audit: read tip: %w", classifyDriverErr(err))
+	nextID, prevHash, err := auditChainTip(tx)
+	if err != nil {
+		return err
 	}
 
-	prevHash := genesisHash
-	if maxID.Valid && lastHash.Valid && lastHash.String != "" {
-		prevHash = lastHash.String
-	}
-	nextID := maxID.Int64 + 1
-	ev.ID = nextID
-	ev.PrevHash = prevHash
-	ev.RowHash = computeRowHash(*ev)
-
-	if _, err := tx.Exec(
+	stmt, err := tx.Prepare(
 		`INSERT INTO audit_events(id, timestamp, actor, event_type,
 			entity_type, entity_id, payload, prev_hash, row_hash)
-		 VALUES (?,?,?,?,?,?,?,?,?)`,
-		ev.ID,
-		ev.Timestamp.Format(time.RFC3339Nano),
-		ev.Actor, ev.EventType, ev.EntityType, ev.EntityID,
-		ev.Payload, ev.PrevHash, ev.RowHash,
-	); err != nil {
-		return fmt.Errorf("statedb audit: insert: %w", classifyDriverErr(err))
+		 VALUES (?,?,?,?,?,?,?,?,?)`)
+	if err != nil {
+		return fmt.Errorf("statedb audit: prepare: %w", classifyDriverErr(err))
+	}
+	defer stmt.Close()
+
+	for _, ev := range evs {
+		ev.ID = nextID
+		ev.PrevHash = prevHash
+		ev.RowHash = computeRowHash(*ev)
+
+		if _, err := stmt.Exec(
+			ev.ID,
+			ev.Timestamp.Format(time.RFC3339Nano),
+			ev.Actor, ev.EventType, ev.EntityType, ev.EntityID,
+			ev.Payload, ev.PrevHash, ev.RowHash,
+		); err != nil {
+			return fmt.Errorf("statedb audit: insert: %w", classifyDriverErr(err))
+		}
+		nextID++
+		prevHash = ev.RowHash
 	}
 
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("statedb audit: commit: %w", classifyDriverErr(err))
 	}
 	return nil
+}
+
+// rowQuerier is the subset of *sql.Tx / *sql.DB auditChainTip needs, so the
+// tip can be resolved inside whichever transaction the caller already holds.
+type rowQuerier interface {
+	QueryRow(query string, args ...any) *sql.Row
+}
+
+// auditChainTip returns the id and prev_hash the next appended row must use.
+//
+// Normally that is simply "one past the last row, linked to its hash". The
+// case worth spelling out is an empty table, which has two very different
+// meanings: a database that has never been audited, or one whose entire trail
+// was pruned. Restarting at id 1 / genesis in the second case would silently
+// fork the chain — the new rows would look like a fresh, valid trail while the
+// anchor still claims the sealed prefix precedes them, and the two could never
+// be reconciled. So an empty table resumes from the newest anchor instead, and
+// ids and hashes stay continuous across the truncation.
+//
+// Callers must hold d.mu (or be inside a transaction that does), so MAX(id)
+// cannot race an interleaved insert.
+func auditChainTip(q rowQuerier) (nextID int64, prevHash string, err error) {
+	var (
+		maxID    sql.NullInt64
+		lastHash sql.NullString
+	)
+	err = q.QueryRow(
+		`SELECT id, row_hash FROM audit_events ORDER BY id DESC LIMIT 1`,
+	).Scan(&maxID, &lastHash)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return 0, "", fmt.Errorf("statedb audit: read tip: %w", classifyDriverErr(err))
+	}
+	if maxID.Valid {
+		prev := genesisHash
+		if lastHash.Valid && lastHash.String != "" {
+			prev = lastHash.String
+		}
+		return maxID.Int64 + 1, prev, nil
+	}
+
+	var (
+		throughID sql.NullInt64
+		boundary  sql.NullString
+	)
+	err = q.QueryRow(
+		`SELECT pruned_through_id, boundary_hash FROM audit_anchors
+		 ORDER BY pruned_through_id DESC, id DESC LIMIT 1`,
+	).Scan(&throughID, &boundary)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return 0, "", fmt.Errorf("statedb audit: read anchor tip: %w", classifyDriverErr(err))
+	}
+	if throughID.Valid && throughID.Int64 > 0 {
+		prev := genesisHash
+		if boundary.Valid && boundary.String != "" {
+			prev = boundary.String
+		}
+		return throughID.Int64 + 1, prev, nil
+	}
+	return 1, genesisHash, nil
 }
 
 // computeRowHash returns SHA-256(prev_hash || canonical(row)).
@@ -280,15 +409,71 @@ type AuditVerifyReport struct {
 	// clean run.
 	ExpectedHash string
 	ActualHash   string
+
+	// Anchored reports that a retention prune has truncated the chain and the
+	// walk was validated against an anchor rather than against genesis. The
+	// remaining fields describe that anchor, so a report can say "verified
+	// from id N; everything before it is in <export>, sha256 <digest>" instead
+	// of leaving an operator to wonder why the trail does not start at 1.
+	Anchored     bool
+	AnchorID     int64
+	PrunedCount  int64
+	ExportPath   string
+	ExportSHA256 string
+
+	// VerifiedFromID is the id of the first row the walk checked, or 0 when
+	// the table is empty.
+	VerifiedFromID int64
 }
 
 // VerifyAuditChain walks audit_events in id order and recomputes each row's
 // hash, comparing to the stored value. The first mismatch (or gap, or
 // missing prev_hash linkage) stops the walk and is reported. Verification
 // is read-only and holds the DB mutex only during the row scan.
+//
+// A pruned chain (Task 20218) does not start at genesis, and the naive walk
+// would report the first survivor as tampered. When an anchor exists the walk
+// starts from it instead: the first row must be exactly the id the anchor
+// pinned, and its prev_hash must be the row_hash of the last row the anchor
+// removed. That is a stronger check than "tolerate a short chain" — it means a
+// second, undeclared truncation just after the boundary is still caught,
+// because the anchor says where the chain has to resume.
+//
+// What this cannot do is prove the pruned prefix itself was honest; nothing
+// inside the database can, since an attacker with write access could author
+// both the truncation and the anchor. That is what the export digest is for,
+// and VerifyAuditExports checks it.
 func (d *DB) VerifyAuditChain() (AuditVerifyReport, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+
+	report := AuditVerifyReport{OK: true}
+
+	expectedPrev := genesisHash
+	var requireFirstID int64
+	anchor, aerr := d.latestAuditAnchorLocked()
+	switch {
+	case aerr == nil:
+		report.Anchored = true
+		report.AnchorID = anchor.ID
+		report.PrunedCount = anchor.PrunedCount
+		report.ExportPath = anchor.ExportPath
+		report.ExportSHA256 = anchor.ExportSHA256
+		expectedPrev = anchor.BoundaryHash
+		// Where the chain has to resume. When the prune left survivors that is
+		// the first of them; when it emptied the table it is the next id
+		// auditChainTip will hand out, which is one past the boundary rather
+		// than 1 — see the comment there for why restarting at 1 would fork
+		// the chain.
+		requireFirstID = anchor.RetainedFromID
+		if requireFirstID == 0 {
+			requireFirstID = anchor.PrunedThroughID + 1
+		}
+	case errors.Is(aerr, ErrAuditAnchorNotFound):
+		// Never pruned: the chain must start at genesis, as before.
+	default:
+		return AuditVerifyReport{}, aerr
+	}
 
 	rows, err := d.conn.Query(
 		`SELECT id, timestamp, actor, event_type, entity_type, entity_id,
@@ -300,8 +485,19 @@ func (d *DB) VerifyAuditChain() (AuditVerifyReport, error) {
 	}
 	defer rows.Close()
 
-	report := AuditVerifyReport{OK: true}
-	expectedPrev := genesisHash
+	// fail marks the report broken at id and returns it. Going through one
+	// helper keeps the anchor context (which the caller needs in order to
+	// interpret the break) attached to every outcome, rather than depending on
+	// each break site remembering to copy five fields.
+	fail := func(id int64, reason, expected, actual string) (AuditVerifyReport, error) {
+		report.OK = false
+		report.BreakAtID = id
+		report.Reason = reason
+		report.ExpectedHash = expected
+		report.ActualHash = actual
+		return report, nil
+	}
+
 	var lastID int64
 	for rows.Next() {
 		report.Total++
@@ -318,37 +514,39 @@ func (d *DB) VerifyAuditChain() (AuditVerifyReport, error) {
 			ev.Timestamp = t
 		}
 
+		// The first row is where a truncation would hide. Unanchored, any
+		// start other than 1 still fails below on prev_hash != genesis. Under
+		// an anchor we can be exact about it, so a prune followed by a quiet
+		// deletion of the next few rows is caught here rather than passing as
+		// "the anchor said the chain was short".
+		if report.Total == 1 {
+			report.VerifiedFromID = ev.ID
+			if requireFirstID > 0 && ev.ID != requireFirstID {
+				return fail(ev.ID, fmt.Sprintf(
+					"anchor %d pins the chain to resume at id %d, but the first row is %d",
+					report.AnchorID, requireFirstID, ev.ID), "", "")
+			}
+		}
+
 		// Detect missing rows (a deletion shows up as a gap in id).
 		if lastID > 0 && ev.ID != lastID+1 {
-			return AuditVerifyReport{
-				Total:     report.Total,
-				OK:        false,
-				BreakAtID: ev.ID,
-				Reason:    fmt.Sprintf("id gap: expected %d, got %d", lastID+1, ev.ID),
-			}, nil
+			return fail(ev.ID,
+				fmt.Sprintf("id gap: expected %d, got %d", lastID+1, ev.ID), "", "")
 		}
 		lastID = ev.ID
 
 		if ev.PrevHash != expectedPrev {
-			return AuditVerifyReport{
-				Total:        report.Total,
-				OK:           false,
-				BreakAtID:    ev.ID,
-				Reason:       fmt.Sprintf("prev_hash mismatch at id %d: stored=%s expected=%s", ev.ID, short(ev.PrevHash), short(expectedPrev)),
-				ExpectedHash: expectedPrev,
-				ActualHash:   ev.PrevHash,
-			}, nil
+			return fail(ev.ID,
+				fmt.Sprintf("prev_hash mismatch at id %d: stored=%s expected=%s",
+					ev.ID, short(ev.PrevHash), short(expectedPrev)),
+				expectedPrev, ev.PrevHash)
 		}
 		want := computeRowHash(ev)
 		if want != ev.RowHash {
-			return AuditVerifyReport{
-				Total:        report.Total,
-				OK:           false,
-				BreakAtID:    ev.ID,
-				Reason:       fmt.Sprintf("row_hash mismatch at id %d: stored=%s recomputed=%s", ev.ID, short(ev.RowHash), short(want)),
-				ExpectedHash: want,
-				ActualHash:   ev.RowHash,
-			}, nil
+			return fail(ev.ID,
+				fmt.Sprintf("row_hash mismatch at id %d: stored=%s recomputed=%s",
+					ev.ID, short(ev.RowHash), short(want)),
+				want, ev.RowHash)
 		}
 		expectedPrev = ev.RowHash
 	}

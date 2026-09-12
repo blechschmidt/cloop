@@ -28,6 +28,18 @@ type ReplayOptions struct {
 	FromID  int64               // 0 or 1 = entire history; >1 = only events with id >= FromID
 	OnEvent func(ev AuditEvent) // optional per-event callback (e.g. progress)
 	StopAt  int64               // 0 = no upper bound; otherwise stop after id == StopAt
+
+	// AllowTruncated permits a replay that starts after a retention prune
+	// (Task 20218).
+	//
+	// Replay rebuilds state by applying every mutation in order, so it is only
+	// complete if it starts at the first one. Once a prefix has been pruned,
+	// the rows before the boundary live in a sealed archive and not in this
+	// database — a replay from "the beginning" would quietly produce a partial
+	// database that looks whole. Refusing is the safe default; this opts into
+	// the partial rebuild deliberately, which is the right call when the tail
+	// is all the operator wanted.
+	AllowTruncated bool
 }
 
 // ReplayReport summarises what Replay applied.
@@ -42,6 +54,14 @@ type ReplayReport struct {
 	BreakReason  string
 	StartedAt    time.Time
 	FinishedAt   time.Time
+
+	// Truncated reports that a retention prune removed events older than the
+	// replay's starting point, so the rebuild is of the surviving tail rather
+	// than of the whole history. Set only when the caller passed
+	// AllowTruncated; without it a truncated trail is an error.
+	Truncated          bool
+	TruncatedThroughID int64
+	ArchivePath        string
 }
 
 // Replay reads audit events from the source workdir and applies them to a
@@ -72,6 +92,38 @@ func Replay(ctx context.Context, srcWorkDir, destPath string, opts ReplayOptions
 	}
 	defer src.Close()
 
+	from := opts.FromID
+	if from < 1 {
+		from = 1
+	}
+
+	// A pruned trail cannot be replayed from the beginning: the beginning is
+	// in a sealed archive. Decide this before creating the destination, so a
+	// refusal leaves nothing behind — Replay requires destPath not to exist,
+	// so a half-made file would make the corrected re-run fail too.
+	var (
+		truncated    bool
+		truncThrough int64
+		archivePath  string
+	)
+	anchor, aerr := src.DB().LatestAuditAnchor()
+	switch {
+	case aerr == nil && from <= anchor.PrunedThroughID:
+		if !opts.AllowTruncated {
+			return nil, fmt.Errorf(
+				"replay: events %d–%d were pruned by retention on %s and are archived at %s — "+
+					"replay from id %d would rebuild only the surviving tail; "+
+					"re-run with --allow-truncated to accept that, or restore the archive first",
+				anchor.PrunedFirstID, anchor.PrunedThroughID,
+				anchor.CreatedAt.Format(time.RFC3339), anchor.ExportPath, from)
+		}
+		truncated = true
+		truncThrough = anchor.PrunedThroughID
+		archivePath = anchor.ExportPath
+	case aerr != nil && !errors.Is(aerr, statedb.ErrAuditAnchorNotFound):
+		return nil, fmt.Errorf("replay: read retention anchor: %w", aerr)
+	}
+
 	dst, err := statedb.Open(destPath)
 	if err != nil {
 		return nil, fmt.Errorf("replay open dst: %w", err)
@@ -86,11 +138,12 @@ func Replay(ctx context.Context, srcWorkDir, destPath string, opts ReplayOptions
 	statedb.SetAuditEnabled(false)
 	defer statedb.SetAuditEnabled(true)
 
-	report := &ReplayReport{DestPath: destPath, StartedAt: time.Now()}
-
-	from := opts.FromID
-	if from < 1 {
-		from = 1
+	report := &ReplayReport{
+		DestPath:           destPath,
+		StartedAt:          time.Now(),
+		Truncated:          truncated,
+		TruncatedThroughID: truncThrough,
+		ArchivePath:        archivePath,
 	}
 
 	// Stream events in id-ascending order via Tail with Follow=false. We do

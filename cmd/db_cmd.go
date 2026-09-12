@@ -1,11 +1,14 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/auditretention"
+	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/dbbackup"
 	"github.com/blechschmidt/cloop/pkg/dbmaintain"
 	"github.com/blechschmidt/cloop/pkg/dbverify"
@@ -116,6 +119,16 @@ Flags:
               Nothing is written to the database.
   --auto      Run only if page_count has grown >20% since the last recorded
               vacuum. First run on a fresh project always proceeds.
+  --prune-audit
+              Also apply the audit-trail retention window from
+              audit.retention_days before vacuuming, so the rows it seals and
+              removes actually give their pages back. Implied by
+              audit.prune_on_maintain. See 'cloop hub audit prune'.
+
+VACUUM rewrites the whole database file, which is unsafe underneath a running
+hub — and this control plane can have two, since several hubs may be started
+from one directory. The command refuses while another instance holds the
+control-plane lease (Task 20214); stop it, or wait for the lease to lapse.
 
 Exit codes:
   0  maintenance ran (or was skipped by --auto)
@@ -124,9 +137,30 @@ Exit codes:
 	RunE: func(cmd *cobra.Command, args []string) error {
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
 		auto, _ := cmd.Flags().GetBool("auto")
+		pruneAudit, _ := cmd.Flags().GetBool("prune-audit")
 
 		workdir, _ := os.Getwd()
 		dbPath := filepath.Join(workdir, ".cloop", "state.db")
+
+		// Retention is opt-in twice over: a window must be configured, and
+		// either the flag or audit.prune_on_maintain must ask for it here.
+		// Deleting from the compliance record is not something a routine
+		// "reclaim disk space" command should start doing on its own.
+		cfg, _ := config.Load(workdir)
+		var retention *dbmaintain.RetentionOptions
+		if cfg != nil && cfg.Audit.RetentionDays > 0 && (pruneAudit || cfg.Audit.PruneOnMaintain) {
+			exportDir := cfg.Audit.ExportDir
+			if exportDir == "" {
+				exportDir = filepath.Join(workdir, ".cloop", auditretention.DefaultExportDirName)
+			}
+			retention = &dbmaintain.RetentionOptions{
+				Days:      cfg.Audit.RetentionDays,
+				ExportDir: exportDir,
+				Actor:     "cli",
+			}
+		} else if pruneAudit {
+			return fmt.Errorf("--prune-audit needs a retention window: set audit.retention_days in .cloop/config.yaml")
+		}
 
 		header := color.New(color.FgCyan, color.Bold)
 		pass := color.New(color.FgGreen, color.Bold)
@@ -142,10 +176,18 @@ Exit codes:
 		dim.Printf("  database: %s\n\n", dbPath)
 
 		rep, err := dbmaintain.Run(dbPath, dbmaintain.Options{
-			DryRun: dryRun,
-			Auto:   auto,
+			DryRun:    dryRun,
+			Auto:      auto,
+			Retention: retention,
 		})
 		if err != nil {
+			// A live peer is an ordinary, actionable outcome, not a crash:
+			// say what to do about it rather than printing it as a failure
+			// and exiting 1 into a cron log.
+			if errors.Is(err, dbmaintain.ErrPeerHubLive) {
+				warn.Printf("Skipped — %v\n", err)
+				return nil
+			}
 			fail.Printf("Maintenance failed: %v\n", err)
 			// Distinguish "could not run at all" (missing file) from "started
 			// but failed midway through" so cron jobs can react appropriately.
@@ -174,6 +216,18 @@ Exit codes:
 			warn.Println("SKIPPED — auto-mode threshold not met.")
 			dim.Printf("  %s\n", rep.Reason)
 			return nil
+		}
+
+		if r := rep.Retention; r != nil {
+			switch {
+			case r.Candidate.Count == 0:
+				dim.Printf("  audit retention: nothing older than %s\n", r.Cutoff.Format(time.RFC3339))
+			case r.DryRun:
+				dim.Printf("  audit retention: would seal %d rows (id %d…%d)\n",
+					r.Candidate.Count, r.Candidate.FirstID, r.Candidate.ThroughID)
+			default:
+				dim.Printf("  audit retention: sealed %d rows to %s\n", r.Anchor.PrunedCount, r.ExportPath)
+			}
 		}
 
 		if rep.DryRun {
@@ -375,6 +429,7 @@ func init() {
 	dbVerifyCmd.Flags().Bool("quick", false, "Use PRAGMA quick_check instead of integrity_check (faster, less thorough)")
 	dbMaintainCmd.Flags().Bool("dry-run", false, "Report DB size and reclaimable estimate without running VACUUM/ANALYZE")
 	dbMaintainCmd.Flags().Bool("auto", false, "Run only if DB has grown >20% since the last recorded vacuum")
+	dbMaintainCmd.Flags().Bool("prune-audit", false, "Apply audit.retention_days before vacuuming (see 'cloop hub audit prune')")
 	dbBackupCmd.Flags().String("output", "", "Output path for the backup file (default: .cloop/backups/state-<UTC>.db)")
 	dbRestoreCmd.Flags().Bool("force", false, "Overwrite an active destination database; the previous file is preserved as .pre-restore.<timestamp>")
 	dbRestoreCmd.Flags().Bool("skip-checksum", false, "Skip SHA-256 verification against the sidecar metadata")

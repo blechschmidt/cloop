@@ -903,3 +903,89 @@ func TestBackgroundConfigClamp(t *testing.T) {
 		})
 	}
 }
+
+// ── audit retention bounds (Task 20218) ─────────────────────────────────────
+//
+// Retention deletes from the compliance record, so the failure mode of a bad
+// value here is not a wasted goroutine — it is rows leaving the audit trail
+// on a schedule nobody intended. Both directions matter: an out-of-range value
+// must fall back to "keep everything" rather than to some default window, and
+// a valid one must survive Load unchanged.
+
+func TestLoad_ClampsOutOfRangeAuditRetention(t *testing.T) {
+	for _, tc := range []struct{ name, yaml string }{
+		{"too large", "provider: claudecode\naudit:\n  retention_days: 40000\n"},
+		{"negative", "provider: claudecode\naudit:\n  retention_days: -30\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resetClampWarned()
+			dir := tempDir(t)
+			writeYAMLConfig(t, dir, tc.yaml)
+			var cfg *Config
+			out := captureStderr(t, func() {
+				var err error
+				cfg, err = Load(dir)
+				if err != nil {
+					t.Fatalf("load: %v", err)
+				}
+			})
+			if cfg.Audit.RetentionDays != 0 {
+				t.Errorf("expected retention_days clamped to 0 (keep everything), got %d",
+					cfg.Audit.RetentionDays)
+			}
+			if !strings.Contains(out, "audit.retention_days") {
+				t.Errorf("expected a warning naming audit.retention_days, got: %q", out)
+			}
+		})
+	}
+}
+
+func TestLoad_AcceptsValidAuditRetention(t *testing.T) {
+	resetClampWarned()
+	dir := tempDir(t)
+	writeYAMLConfig(t, dir,
+		"provider: claudecode\naudit:\n  retention_days: 90\n  export_dir: /srv/audit\n  prune_on_maintain: true\n")
+	cfg, err := Load(dir)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.Audit.RetentionDays != 90 {
+		t.Errorf("retention_days = %d, want 90", cfg.Audit.RetentionDays)
+	}
+	if cfg.Audit.ExportDir != "/srv/audit" {
+		t.Errorf("export_dir = %q, want /srv/audit", cfg.Audit.ExportDir)
+	}
+	if !cfg.Audit.PruneOnMaintain {
+		t.Error("prune_on_maintain did not survive Load")
+	}
+}
+
+func TestAuditRetentionDefaultsToKeepingEverything(t *testing.T) {
+	resetClampWarned()
+	dir := tempDir(t)
+	writeYAMLConfig(t, dir, "provider: claudecode\n")
+	cfg, err := Load(dir)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.Audit.RetentionDays != 0 {
+		t.Errorf("a config with no audit section enabled retention (%d days); "+
+			"pruning the compliance record must stay opt-in", cfg.Audit.RetentionDays)
+	}
+}
+
+func TestValidateNumeric_RejectsBadAuditRetention(t *testing.T) {
+	cfg := Default()
+	cfg.Audit.RetentionDays = AuditRetentionDaysUpper + 1
+	if err := cfg.ValidateNumeric(); err == nil {
+		t.Fatal("ValidateNumeric accepted an out-of-range retention window")
+	}
+	cfg.Audit.RetentionDays = AuditRetentionDaysUpper
+	if err := cfg.ValidateNumeric(); err != nil {
+		t.Fatalf("ValidateNumeric rejected the upper bound itself: %v", err)
+	}
+	cfg.Audit.RetentionDays = 0
+	if err := cfg.ValidateNumeric(); err != nil {
+		t.Fatalf("ValidateNumeric rejected 0 (keep everything): %v", err)
+	}
+}

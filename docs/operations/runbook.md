@@ -321,6 +321,54 @@ $ cloop audit-log export --format cef  --since 24h --verify | logger -t cloop -p
 | `csv` | flat table for spreadsheets |
 | `cef` | ArcSight Common Event Format, syslog-ready |
 
+### Retention: keeping the trail bounded
+
+The trail only grows, and on a busy hub it grows fast enough to matter — this
+project's own control plane reached 1.1M rows and 2.4 GB. Retention moves the
+old prefix out of the database without breaking verification.
+
+It is **opt-in**. With no `audit.retention_days`, nothing is ever pruned.
+
+```yaml
+audit:
+  retention_days: 90            # 1–3650; 0 or absent keeps everything
+  export_dir: /srv/audit-archive # default: .cloop/audit-archive
+  prune_on_maintain: true       # let `cloop db maintain` apply it
+```
+
+A prune never simply deletes. It streams the prefix to a JSONL archive,
+chain-verifies every row on the way out, digests the file, and only then
+removes the rows — recording an *anchor* holding the boundary hash, the id the
+chain resumes at, and the archive's SHA-256.
+
+```console
+$ cloop hub audit prune --before 90d --dry-run
+$ cloop hub audit prune --before 90d
+$ cloop hub audit anchors        # every truncation, oldest first
+$ cloop hub audit verify-seals   # re-hash each archive against its anchor
+```
+
+After a prune, `cloop audit-log verify` walks *across* the gap using the anchor
+and still reports OK. That is not a relaxation: the anchor pins the id the
+chain must resume at, so deleting a few more rows just past the boundary is
+still caught.
+
+Three things worth knowing:
+
+- **Pruning does not shrink the file.** It frees pages onto SQLite's freelist.
+  Run `cloop db maintain` to return them to the filesystem. That command
+  VACUUMs, which rewrites the whole file, so it **refuses while another hub
+  holds the control-plane lease** — stop the peer or wait for the lease to
+  lapse (`cloop hub lease status`).
+- **`verify-seals` is the check that leaves the database.** Chain verification
+  can only prove the survivors agree with what the anchors claim, and anyone
+  who can rewrite `audit_events` can rewrite `audit_anchors` too. Copy the
+  archives somewhere the hub cannot write; that copy is the real evidence.
+- **A pruned trail can no longer be replayed from the beginning.**
+  `cloop events replay` refuses rather than silently rebuilding a partial
+  database, and names the archive holding the missing events. Pass
+  `--allow-truncated` to rebuild just the surviving tail on purpose.
+
 `--verify` refuses to export a broken chain, so an exported file is one that
 passed verification at export time. Every format carries `prev_hash` and
 `row_hash`, letting the recipient re-verify independently. Filters: `--actor`,

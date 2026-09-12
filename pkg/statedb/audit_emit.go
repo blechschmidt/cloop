@@ -453,17 +453,53 @@ func AuditSecretDecision(d *DB, in SecretAuditInput) {
 	})
 }
 
-// auditPlanTasks emits a task.upsert event per task in the saved plan, but
-// only when SaveState is the only mutation path the orchestrator uses. We
-// rely on caller intent: the orchestrator's hot path goes through SaveState
-// rather than UpsertTask, so without this we'd lose all task-level audit
-// rows. Cost: one audit row per task per save. Acceptable given typical
-// plans (50–500 tasks) and SaveState frequency (once per finished step).
-func auditPlanTasks(d *DB, s *State) {
-	if s == nil || s.Plan == nil {
+// auditPlanTasks emits the task-level audit rows for one SaveState.
+//
+// It records the delta saveStateLocked computed inside its transaction, not
+// the plan: one row per task whose audit payload actually changed, plus one
+// per task that disappeared. The previous version emitted one row per task in
+// the plan on every save and conceded in its own comment that this was "one
+// audit row per task per save. Acceptable given typical plans" — on this
+// project's hub it produced 1,093,055 rows, 99.7% of the audit table, for a
+// 417-task plan saved once per finished step.
+//
+// The whole batch goes through AppendAuditEvents so a save costs one
+// transaction rather than one per row. Emission stays best-effort: a wedged
+// audit log must not fail a state write that already committed.
+func auditPlanTasks(d *DB, changed []taskAuditChange, deleted []int) {
+	if !auditEnabled || d == nil || (len(changed) == 0 && len(deleted) == 0) {
 		return
 	}
-	for _, t := range s.Plan.Tasks {
-		auditTaskUpsert(d, t, "system")
+	evs := make([]*AuditEvent, 0, len(changed)+len(deleted))
+	for _, c := range changed {
+		if c.Task == nil {
+			continue
+		}
+		evs = append(evs, &AuditEvent{
+			Actor:      "system",
+			EventType:  "task.upsert",
+			EntityType: "task",
+			EntityID:   fmt.Sprintf("%d", c.Task.ID),
+			// Reuse the payload the diff already marshalled and redacted.
+			// Re-marshalling here could produce a different string from the
+			// one that was fingerprinted, which would make the next save see a
+			// change that never happened.
+			Payload: c.Payload,
+		})
+	}
+	for _, id := range deleted {
+		evs = append(evs, &AuditEvent{
+			Actor:      "system",
+			EventType:  "task.delete",
+			EntityType: "task",
+			EntityID:   fmt.Sprintf("%d", id),
+			Payload:    MarshalAuditPayload(map[string]any{"id": id}),
+		})
+	}
+	if len(evs) == 0 {
+		return
+	}
+	if err := d.AppendAuditEvents(evs); err != nil {
+		auditWarn("emit %d plan task events: %v", len(evs), err)
 	}
 }

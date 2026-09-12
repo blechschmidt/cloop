@@ -905,6 +905,28 @@ API additionally refuses to issue a token stronger or wider than its creator.
 Creation, revocation, and every failed authentication are recorded in the audit
 trail (`cloop events`).
 
+### Audit-trail retention
+
+The hash-chained audit trail only grows. `audit:` bounds it — and is **off by
+default**, because deleting from a compliance record on a schedule nobody chose
+is worse than the disk it saves.
+
+```yaml
+audit:
+  retention_days: 90              # 0 or absent: keep everything
+  export_dir: /srv/audit-archive  # default: .cloop/audit-archive
+  prune_on_maintain: true         # apply it during `cloop db maintain`
+```
+
+| Key | Default | Range | What it does |
+| --- | --- | --- | --- |
+| `retention_days` | `0` (disabled) | `1`–`3650` | How long rows stay in the database. Older ones are **archived, then removed** — never deleted outright. Out-of-range values fall back to `0`, not to some default window. |
+| `export_dir` | `.cloop/audit-archive` | — | Where sealed prefixes are written. Put it on storage the hub does not otherwise own: the archive's value is that it can be compared against a database an attacker may have edited. |
+| `prune_on_maintain` | `false` | — | Lets `cloop db maintain` apply the window before it VACUUMs, so the freed pages actually come back. Otherwise only `cloop hub audit prune` applies it. |
+
+The procedure, what an anchor is, and why a pruned chain still verifies are in
+[the runbook](../operations/runbook.md#retention-keeping-the-trail-bounded).
+
 ### Interactive access: single sign-on and sessions
 
 `ui.oidc.*` configures OpenID Connect for the dashboard. The full setup is in

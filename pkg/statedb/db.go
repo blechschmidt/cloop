@@ -204,24 +204,32 @@ func (d *DB) getMeta(key string) (string, error) {
 // ────────────────────────────────────────────────────────────
 
 func (d *DB) SaveState(s *State) error {
-	if err := d.saveStateLocked(s); err != nil {
+	changed, deleted, err := d.saveStateLocked(s)
+	if err != nil {
 		return err
 	}
 	// Audit emission must happen after the write commits and after the
 	// caller-facing mutex is released. We snapshot the relevant fields here
 	// so the audit row records the post-commit state.
+	//
+	// Only genuinely changed tasks are emitted: saveStateLocked diffed them
+	// against their stored fingerprints inside its own transaction, before the
+	// wholesale rewrite destroyed the previous values. See audit_fingerprint.go
+	// for why that diff cannot be done here.
 	auditStateSave(d, s)
-	auditPlanTasks(d, s)
+	auditPlanTasks(d, changed, deleted)
 	return nil
 }
 
-func (d *DB) saveStateLocked(s *State) error {
+// saveStateLocked writes the state and returns the task-audit delta the write
+// produced: tasks whose audit payload changed, and ids that disappeared.
+func (d *DB) saveStateLocked(s *State) (changed []taskAuditChange, deleted []int, err error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
 	tx, err := d.conn.Begin()
 	if err != nil {
-		return classifyDriverErr(err)
+		return nil, nil, classifyDriverErr(err)
 	}
 	defer tx.Rollback() //nolint:errcheck
 
@@ -274,7 +282,7 @@ func (d *DB) saveStateLocked(s *State) error {
 
 	for k, v := range meta {
 		if err := d.setMeta(tx, k, v); err != nil {
-			return fmt.Errorf("set metadata %q: %w", k, classifyDriverErr(err))
+			return nil, nil, fmt.Errorf("set metadata %q: %w", k, classifyDriverErr(err))
 		}
 	}
 
@@ -284,12 +292,20 @@ func (d *DB) saveStateLocked(s *State) error {
 	// had) a plan, and deleting here would destroy tasks added externally
 	// (e.g. via the UI) before decomposition ran.
 	if s.Plan != nil {
+		// Diff before the rewrite: after the DELETE the previous payloads are
+		// gone, and "what changed" is unanswerable. The fingerprint table is
+		// updated in this same transaction, so a rollback below leaves the
+		// audit bookkeeping exactly as consistent as the tasks.
+		changed, deleted, err = diffPlanTaskFingerprints(tx, s.Plan.Tasks)
+		if err != nil {
+			return nil, nil, err
+		}
 		if _, err := tx.Exec(`DELETE FROM plan_tasks`); err != nil {
-			return classifyDriverErr(err)
+			return nil, nil, classifyDriverErr(err)
 		}
 		for _, t := range s.Plan.Tasks {
 			if err := insertTask(tx, t); err != nil {
-				return fmt.Errorf("insert task %d: %w", t.ID, classifyDriverErr(err))
+				return nil, nil, fmt.Errorf("insert task %d: %w", t.ID, classifyDriverErr(err))
 			}
 		}
 	}
@@ -297,14 +313,14 @@ func (d *DB) saveStateLocked(s *State) error {
 	// ── steps (upsert, never delete) ──
 	for _, row := range s.Steps {
 		if err := upsertStep(tx, row); err != nil {
-			return fmt.Errorf("upsert step %d: %w", row.Step, classifyDriverErr(err))
+			return nil, nil, fmt.Errorf("upsert step %d: %w", row.Step, classifyDriverErr(err))
 		}
 	}
 
 	if err := tx.Commit(); err != nil {
-		return classifyDriverErr(err)
+		return nil, nil, classifyDriverErr(err)
 	}
-	return nil
+	return changed, deleted, nil
 }
 
 // HasProjectState reports whether any project state has ever been written to
@@ -472,6 +488,16 @@ func (d *DB) UpsertTask(t *pm.Task) error {
 		d.mu.Unlock()
 		return classifyDriverErr(err)
 	}
+	// Keep the audit fingerprint in step with the row, in the same transaction
+	// as the row. A single-task write that skipped this would leave SaveState's
+	// diff comparing against a stale value — harmlessly re-emitting in one
+	// direction, and silently swallowing a real change in the other.
+	payload := MarshalAuditPayload(t)
+	if err := recordTaskFingerprintTx(tx, t.ID, payload); err != nil {
+		_ = tx.Rollback()
+		d.mu.Unlock()
+		return err
+	}
 	if err := tx.Commit(); err != nil {
 		d.mu.Unlock()
 		return classifyDriverErr(err)
@@ -620,6 +646,15 @@ func (d *DB) DeleteTask(id int) error {
 		_ = tx.Rollback()
 		d.mu.Unlock()
 		return classifyDriverErr(err)
+	}
+	// Drop the audit fingerprint with the row. Task ids are reused (see the
+	// merge logic in pkg/state), and a fingerprint outliving its task would
+	// make the next task to claim that id look unchanged against a predecessor
+	// it has nothing to do with — an unrelated task's creation going unaudited.
+	if err := forgetTaskFingerprintTx(tx, id); err != nil {
+		_ = tx.Rollback()
+		d.mu.Unlock()
+		return err
 	}
 	if err := tx.Commit(); err != nil {
 		d.mu.Unlock()

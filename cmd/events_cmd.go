@@ -185,6 +185,7 @@ var (
 	eventsReplayFromID int64
 	eventsReplayStopAt int64
 	eventsReplayQuiet  bool
+	eventsReplayTrunc  bool
 )
 
 var eventsReplayCmd = &cobra.Command{
@@ -207,8 +208,9 @@ else (task list, plan goal, config blob, step metadata) is faithful.`,
 		defer cancel()
 
 		opts := eventlog.ReplayOptions{
-			FromID: eventsReplayFromID,
-			StopAt: eventsReplayStopAt,
+			FromID:         eventsReplayFromID,
+			StopAt:         eventsReplayStopAt,
+			AllowTruncated: eventsReplayTrunc,
 		}
 		if !eventsReplayQuiet {
 			opts.OnEvent = func(ev eventlog.AuditEvent) {
@@ -230,6 +232,14 @@ else (task list, plan goal, config blob, step metadata) is faithful.`,
 			fmt.Printf("  skipped:        %d\n", report.Skipped)
 			if !report.StartedAt.IsZero() && !report.FinishedAt.IsZero() {
 				fmt.Printf("  duration:       %s\n", report.FinishedAt.Sub(report.StartedAt).Round(time.Millisecond))
+			}
+			if report.Truncated {
+				// Loud, because the rebuilt database is genuinely incomplete
+				// and nothing inside it will say so.
+				color.New(color.FgYellow, color.Bold).Printf(
+					"  PARTIAL: events up to id=%d were pruned by retention and are not in this rebuild\n",
+					report.TruncatedThroughID)
+				fmt.Printf("           archived at %s\n", report.ArchivePath)
 			}
 			if report.BreakAtID > 0 {
 				color.New(color.FgRed, color.Bold).Printf("  break at id=%d: %s\n", report.BreakAtID, report.BreakReason)
@@ -371,6 +381,8 @@ func init() {
 	eventsReplayCmd.Flags().Int64Var(&eventsReplayFromID, "from", 1, "Replay events with id >= FROM")
 	eventsReplayCmd.Flags().Int64Var(&eventsReplayStopAt, "stop-at", 0, "Stop after replaying event with this id (0 = head)")
 	eventsReplayCmd.Flags().BoolVar(&eventsReplayQuiet, "quiet", false, "Suppress per-100-event progress output")
+	eventsReplayCmd.Flags().BoolVar(&eventsReplayTrunc, "allow-truncated", false,
+		"Rebuild only the surviving tail when retention has pruned the earlier history")
 
 	eventsCmd.AddCommand(eventsTailCmd, eventsListCmd, eventsReplayCmd, eventsVerifyCmd)
 	rootCmd.AddCommand(eventsCmd)
