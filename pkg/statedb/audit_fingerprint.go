@@ -23,6 +23,13 @@
 // The fingerprints are persisted rather than cached in memory so a hub restart
 // does not re-emit the whole plan, and are written inside the same transaction
 // as the tasks so the two cannot disagree.
+//
+// One consequence worth naming: the diff runs even when SetAuditEnabled(false)
+// has silenced emission, so mutations made while auditing was off do not
+// reappear as a burst of rows when it is switched back on. That is the honest
+// behaviour — those changes were not audited, and re-emitting them later under
+// today's timestamps would put a false account of when they happened into a
+// table whose whole purpose is to say when things happened.
 
 package statedb
 
