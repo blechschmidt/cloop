@@ -228,6 +228,95 @@ jobs:
           path: coverage.out
           retention-days: 7
 
+  benchmarks:
+    name: Benchmarks
+    runs-on: ubuntu-latest
+    # The hub control plane grew a multi-tenant WebSocket fanout, a
+    # hash-chained audit trail touched on every mutation, per-identity quota
+    # admission in front of every request, and plan persistence that re-diffs
+    # the whole task set on each save — none of it measured, and this module
+    # had no benchmarks at all. The cost of all four scales with something no
+    # operator sets deliberately: tenants, trail length, plan size. A change
+    # that made one of them quadratic would first be noticed as a CI timeout
+    # in build-and-test, which reads as flakiness rather than as the
+    # regression it is.
+    #
+    # This job is deliberately advisory. It asserts no latency bound, because
+    # the run-to-run variance on a shared runner is larger than most
+    # regressions worth catching and a threshold here would fire wrongly far
+    # more often than rightly. What it does is keep the benchmarks compiling
+    # against the code they measure — a benchmark that stops building is a
+    # benchmark nobody notices is gone — and leave the numbers in an artifact
+    # so two commits can be compared by hand.
+    #
+    # The guard against a blowup is timeout-minutes, not a per-benchmark
+    # number. `make bench` is ~16s locally at the default -benchtime, and the
+    # job is dominated by checkout, toolchain setup and compiling the packages
+    # under test. Ten minutes is therefore several times the expected job and
+    # is a backstop against something catastrophic — a path that went
+    # quadratic on the 800-task plan — rather than a calibrated multiple. A
+    # regression smaller than that shows up in the artifact, read by a human,
+    # which is the intended workflow here.
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Benchmark the control-plane hot paths
+        # Not under -race: the detector inflates every number by roughly an
+        # order of magnitude and does so unevenly, so the result would
+        # measure the instrumentation. Concurrency correctness is asserted by
+        # the unit suite (TestConcurrentAdmissionNeverOverAdmits and friends),
+        # which does run under -race in build-and-test.
+        #
+        # tee, so the numbers are in the job log as well as the artifact —
+        # the log is what someone reads when a PR looks slow, and having to
+        # download a zip to see it means nobody looks.
+        run: |
+          set -euo pipefail
+          make bench 2>&1 | tee bench.txt
+
+      - name: Every benchmark actually ran
+        # `go test -bench` prints "ok" and exits 0 when its regexp matches
+        # nothing, so a renamed or deleted benchmark would leave this job
+        # green and silently stop measuring. Assert the expected set is
+        # present in the output instead of trusting the exit code.
+        run: |
+          set -euo pipefail
+          missing=0
+          for b in BenchmarkMarshalStateForWire BenchmarkComputeStateDiff \
+                   BenchmarkBroadcastToProject BenchmarkBroadcastStateDiff \
+                   BenchmarkSaveState BenchmarkLoadStateLite \
+                   BenchmarkAppendAuditEvent BenchmarkAppendAuditEvents \
+                   BenchmarkVerifyAuditChain BenchmarkAdmit \
+                   BenchmarkAdmitDistinctIdentities BenchmarkAdmitParallel \
+                   BenchmarkAdmitDenied; do
+            if ! grep -q "^${b}[-/]" bench.txt; then
+              echo "::error::${b} produced no output — renamed, deleted, or failing to match"
+              missing=1
+            fi
+          done
+          [ "$missing" -eq 0 ] || exit 1
+          echo "all expected benchmarks reported a result"
+
+      - name: Upload benchmark results
+        # if: always() so a run that blew past timeout-minutes still leaves
+        # behind whatever it managed to print — which is the part that says
+        # which benchmark was the slow one.
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: benchmark-results
+          path: bench.txt
+          retention-days: 30
+
   security-conformance:
     name: Security Conformance
     runs-on: ubuntu-latest

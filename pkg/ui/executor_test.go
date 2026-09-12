@@ -159,6 +159,7 @@ func TestLookupProjectExecutorReadsBindings(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(controlPlane, ".cloop"), 0o755); err != nil {
 		t.Fatalf("mkdir .cloop: %v", err)
 	}
+	seedMigratedDB(t, controlPlane)
 	dbPath := state.DBPath(controlPlane)
 	db, err := statedb.Open(dbPath)
 	if err != nil {

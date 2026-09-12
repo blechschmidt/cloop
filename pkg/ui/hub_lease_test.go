@@ -22,6 +22,7 @@ import (
 
 func leaseFixture(t *testing.T, dir string) (*statedb.DB, *hublease.Lease) {
 	t.Helper()
+	seedMigratedDB(t, dir)
 	db, err := statedb.Open(state.DBPath(dir))
 	if err != nil {
 		t.Fatalf("statedb.Open: %v", err)

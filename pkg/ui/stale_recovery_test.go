@@ -18,6 +18,7 @@ import (
 func stalledProject(t *testing.T) (dir string, taskID int) {
 	t.Helper()
 	dir = t.TempDir()
+	seedMigratedDB(t, dir)
 
 	st, err := state.Init(dir, "ship the thing", 0)
 	if err != nil {

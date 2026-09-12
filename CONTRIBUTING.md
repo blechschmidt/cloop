@@ -30,6 +30,48 @@ Always run unit tests with the race detector (`make test-unit` enables it) when
 touching the orchestrator, state, or WebSocket hub — those code paths have
 historically grown subtle data races.
 
+### Keeping the suite fast
+
+`pkg/ui` is the largest package and the one closest to CI's timeout, so it is
+worth knowing why it is not slower than it is. Two things dominate, and both
+have a fix already in place that new tests should reuse:
+
+- **Creating a project database.** `statedb.Open` applies 29 migrations to a
+  new database, which costs ~457ms under `-race` because `modernc.org/sqlite`
+  is pure Go and the detector instruments all of it. Test helpers call
+  `seedMigratedDB(t, dir)` (see `pkg/ui/dbtemplate_test.go`) to drop a
+  pre-migrated database into the directory first, so `Open` finds nothing left
+  to apply. A new helper that creates a project directory should do the same.
+- **Scanning the dashboard bundle.** Static-analysis tests that walk
+  `dashboardSource` run over ~13k lines. Narrow the lines once before looping
+  over routes rather than running a regex per (route × line).
+
+## Benchmarking
+
+```bash
+make bench                                    # all, short benchtime
+make bench BENCHTIME=2s BENCH=BenchmarkAdmit  # one, for a real number
+```
+
+The benchmarks cover the control-plane paths whose cost scales with something
+no operator sets deliberately — tenants, audit-trail length, plan size:
+
+| Package | Covers |
+| --- | --- |
+| `pkg/ui` | wire-snapshot marshalling, state diffing, WebSocket fanout at 1/10/100 subscribers |
+| `pkg/statedb` | plan save/load, audit append (single and batch), full chain verification |
+| `pkg/quota` | per-identity admission, serial and contended, admit and deny |
+
+CI runs them at the default short benchtime and publishes the output as the
+`benchmark-results` artifact. That job asserts **no latency bound** on purpose:
+run-to-run variance on a shared runner is larger than most regressions worth
+catching, so a threshold would fire wrongly far more often than rightly. It
+exists to keep the benchmarks compiling and to make two commits comparable by
+hand; the order-of-magnitude guard is the job's `timeout-minutes`.
+
+Don't run benchmarks under `-race` — the detector inflates every number
+unevenly, so the result measures the instrumentation.
+
 ## Fuzzing
 
 cloop ships native Go fuzz targets (`testing.F`) for every parser that ingests

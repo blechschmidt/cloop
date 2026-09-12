@@ -1,4 +1,4 @@
-.PHONY: build test test-unit test-e2e test-e2e-update e2e-stack fuzz clean \
+.PHONY: build test test-unit test-e2e test-e2e-update e2e-stack fuzz bench clean \
         docs-check docs-stage docs-site docs-serve
 
 BINARY := cloop
@@ -61,6 +61,32 @@ fuzz:
 	$(GO) test -run=^$$ -fuzz=FuzzMigrateLegacyJSON -fuzztime=$(FUZZTIME) ./pkg/state/
 	$(GO) test -run=^$$ -fuzz=FuzzParseDeadline   -fuzztime=$(FUZZTIME) ./pkg/pm/
 	$(GO) test -run=^$$ -fuzz=FuzzValidate        -fuzztime=$(FUZZTIME) ./pkg/configvalidate/
+
+## bench: benchmark the hub control-plane hot paths
+##
+## Covers the four things whose cost scales with something no operator sets
+## deliberately: the wire snapshot and WebSocket fanout (pkg/ui), the
+## hash-chained audit trail and plan persistence (pkg/statedb), and per-identity
+## quota admission (pkg/quota).
+##
+## Deliberately not run under -race: the detector inflates every number by
+## roughly an order of magnitude and unevenly, so a race-instrumented
+## benchmark measures the instrumentation. Correctness under concurrency is
+## the unit suite's job (see TestConcurrentAdmissionNeverOverAdmits).
+##
+## BENCHTIME tunes the per-benchmark budget. The default is what CI uses —
+## enough to keep them compiling and to catch an order-of-magnitude blowup,
+## not enough for a number worth quoting. For a real measurement, run with a
+## time budget on an idle machine:
+##
+##     make bench BENCHTIME=2s BENCH=BenchmarkBroadcastStateDiff
+##
+## BENCH selects a subset by regexp (default: all).
+BENCHTIME ?= 10x
+BENCH ?= .
+bench:
+	$(GO) test -run='^$$' -bench='$(BENCH)' -benchtime=$(BENCHTIME) -benchmem \
+		-timeout 30m ./pkg/ui/ ./pkg/statedb/ ./pkg/quota/
 
 # ---------------------------------------------------------------------------
 # Documentation site (https://blechschmidt.github.io/cloop/)

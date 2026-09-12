@@ -38,6 +38,9 @@ func setupProjectDir(t *testing.T, goal string, tasks []*pm.Task) string {
 	}
 	t.Cleanup(func() { os.RemoveAll(dir) })
 
+	// Skip the 29-migration replay; see dbtemplate_test.go.
+	seedMigratedDB(t, dir)
+
 	ps, err := state.Init(dir, goal, 0)
 	if err != nil {
 		t.Fatalf("state.Init(%s): %v", dir, err)

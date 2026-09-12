@@ -32,6 +32,7 @@ func seedPATGrant(t *testing.T, executorID, canary string) string {
 	t.Setenv(secretbroker.EnvPassphraseKey, "secret-delivery-unit-passphrase")
 
 	dir := t.TempDir()
+	seedMigratedDB(t, dir)
 	if _, err := state.Init(dir, "secret delivery", 0); err != nil {
 		t.Fatalf("state.Init: %v", err)
 	}

@@ -951,6 +951,46 @@ func TestDashboard_ProjectScopedAPIs_UsePUrl(t *testing.T) {
 	}
 	var bad []violation
 	lines := strings.Split(dashboardSource, "\n")
+
+	// Both regexes below are anchored on a literal `fetch(`, `api(` or
+	// `apiMethod(`, so only a line containing one of those three substrings
+	// can possibly match. Finding them once — rather than running two
+	// regexes over all ~13k bundle lines for each of the ~100 project-scoped
+	// routes — is what takes this test from 22s to under a second, and it is
+	// a pure narrowing: every line the regexes could have matched is still
+	// offered to them.
+	//
+	// The lookback window has to be captured here too. It is derived from
+	// the full line sequence including the lines that are filtered out, so
+	// it cannot be reconstructed from the candidates alone.
+	const lookbackLines = 4
+	type callSite struct {
+		idx  int
+		text string
+		prev []string // up to 4 preceding non-empty lines, oldest first
+	}
+	var sites []callSite
+	prev := make([]string, 0, lookbackLines)
+	for i, line := range lines {
+		if strings.Contains(line, "fetch(") ||
+			strings.Contains(line, "api(") ||
+			strings.Contains(line, "apiMethod(") {
+			sites = append(sites, callSite{
+				idx:  i,
+				text: line,
+				// Copied, because prev is reused and reslices in place.
+				prev: append([]string(nil), prev...),
+			})
+		}
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		if len(prev) == lookbackLines {
+			prev = prev[1:]
+		}
+		prev = append(prev, line)
+	}
+
 	for path := range projectScoped {
 		callRe := regexp.MustCompile(
 			`(?:fetch|api|apiMethod)\([^)]*['"]` +
@@ -962,47 +1002,32 @@ func TestDashboard_ProjectScopedAPIs_UsePUrl(t *testing.T) {
 				`(?:fetch|api|apiMethod)\([^)]*['"]` +
 					regexp.QuoteMeta(prefix) + `['"]\s*\+`)
 		}
-		// Track up to the last 4 non-empty lines so an allowlist hint
-		// placed anywhere within the immediately-preceding comment block
+		// site.prev holds up to the last 4 non-empty lines, so an allowlist
+		// hint placed anywhere within the immediately-preceding comment block
 		// matches (some sites have a 2-3 line comment explaining why the
 		// call is intentionally global).
-		const lookbackLines = 4
-		prev := make([]string, 0, lookbackLines)
-		pushPrev := func(s string) {
-			if strings.TrimSpace(s) == "" {
-				return
-			}
-			if len(prev) == lookbackLines {
-				prev = prev[1:]
-			}
-			prev = append(prev, s)
-		}
-		for i, line := range lines {
-			matches := callRe.MatchString(line)
+		for _, site := range sites {
+			matches := callRe.MatchString(site.text)
 			if !matches && dynRe != nil {
-				matches = dynRe.MatchString(line)
+				matches = dynRe.MatchString(site.text)
 			}
 			if !matches {
-				pushPrev(line)
 				continue
 			}
-			if strings.Contains(line, "pUrl(") {
-				pushPrev(line)
+			if strings.Contains(site.text, "pUrl(") {
 				continue
 			}
-			isAllowed := allowedSite(path, line)
-			for _, p := range prev {
+			isAllowed := allowedSite(path, site.text)
+			for _, p := range site.prev {
 				if allowedSite(path, p) {
 					isAllowed = true
 					break
 				}
 			}
 			if isAllowed {
-				pushPrev(line)
 				continue
 			}
-			bad = append(bad, violation{path: path, line: i + 1, text: strings.TrimSpace(line)})
-			pushPrev(line)
+			bad = append(bad, violation{path: path, line: site.idx + 1, text: strings.TrimSpace(site.text)})
 		}
 	}
 	if len(bad) > 0 {
