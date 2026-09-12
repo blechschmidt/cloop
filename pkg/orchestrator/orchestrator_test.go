@@ -3498,6 +3498,12 @@ func TestRecoverStaleTasks_Annotated(t *testing.T) {
 // (in_progress → pending) with no breadcrumb explaining why — same audit-trail
 // accuracy class as the verify-errored, gate-skip, provider-error, and
 // stale-task-recovery fixes.
+//
+// The annotations are authored by "cloop", not "ai". Task 20211 routed both
+// watchdogs through the shared abort path, and attributing cloop's own
+// decision to the model is the same misattribution this test family exists to
+// prevent — the AI said nothing here; it returned nothing. "cloop" matches
+// what the background-work subsystem already uses for orchestrator notes.
 func TestEmptyOutputWatchdog_Annotated(t *testing.T) {
 	t.Run("runPM_sequential", func(t *testing.T) {
 		dir := tempDir(t)
@@ -3524,7 +3530,7 @@ func TestEmptyOutputWatchdog_Annotated(t *testing.T) {
 		want := "provider returned empty output"
 		found := false
 		for _, ann := range task.Annotations {
-			if ann.Author == "ai" && strings.Contains(ann.Text, want) {
+			if ann.Author == "cloop" && strings.Contains(ann.Text, want) {
 				found = true
 				break
 			}
@@ -3532,6 +3538,9 @@ func TestEmptyOutputWatchdog_Annotated(t *testing.T) {
 		if !found {
 			t.Errorf("missing empty-output annotation containing %q;\ngot annotations: %+v",
 				want, task.Annotations)
+		}
+		if task.Status != pm.TaskPending {
+			t.Errorf("status = %q, want pending: an empty response is not work", task.Status)
 		}
 	})
 
@@ -3565,7 +3574,7 @@ func TestEmptyOutputWatchdog_Annotated(t *testing.T) {
 		wantMode := "parallel mode"
 		found := false
 		for _, ann := range task.Annotations {
-			if ann.Author == "ai" && strings.Contains(ann.Text, want) && strings.Contains(ann.Text, wantMode) {
+			if ann.Author == "cloop" && strings.Contains(ann.Text, want) && strings.Contains(ann.Text, wantMode) {
 				found = true
 				break
 			}

@@ -840,6 +840,7 @@
   .event-icon.ev-task-status { background:#7c5fb3; }
   .event-icon.ev-evolve      { background:#39b58b; }
   .event-icon.ev-task-bg     { background:#b8862b; }
+  .event-icon.ev-task-abort  { background:#c07a2c; }
   .event-icon.ev-writeback   { background:#2f7fa8; }
   .event-icon.ev-plan        { background:var(--cyan); }
   .event-icon.ev-session     { background:#444; }

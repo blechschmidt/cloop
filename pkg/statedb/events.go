@@ -57,6 +57,19 @@ const (
 	// agent had stopped talking, and why a task whose output ended in
 	// TASK_DONE was nonetheless not accepted as done.
 	EventTaskBackground EventType = "task_background"
+
+	// EventTaskAborted records a run that never produced work: a provider
+	// usage limit or quota, a rejected credential, a harness that refused to
+	// start, or output with no diff and no artifact behind it (Task 20211).
+	//
+	// Its own type rather than task_failed because the two are different
+	// claims and are acted on differently. A failure is a judgement about the
+	// work; an abort is the absence of any work to judge, so the task returns
+	// to pending instead of staying terminal. Folding them together is what
+	// let fourteen tasks be recorded as done whose entire stored summary was
+	// "You've hit your limit" — and let auto-evolve plan follow-up work on
+	// the belief that they had shipped.
+	EventTaskAborted EventType = "task_aborted"
 )
 
 // NoStep is the EventRow.Step value for events that are not bound to any

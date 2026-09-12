@@ -76,13 +76,18 @@ const (
 	EventTaskDone     Event = "task_done"
 	EventTaskFailed   Event = "task_failed"
 	EventTaskSkipped  Event = "task_skipped"
-	EventStep         Event = "step"
-	EventHeal         Event = "heal"
-	EventEvolve       Event = "evolve"
-	EventHealthCheck  Event = "health_check"
-	EventOptimize     Event = "optimize"
-	EventVerify       Event = "verify"
-	EventCheckpoint   Event = "checkpoint"
+	// EventTaskAborted tags a run that produced no work at all — a provider
+	// limit, a rejected credential, or a harness that refused to start. It is
+	// distinct from EventTaskFailed so that dashboards counting failures do
+	// not count runs that never happened (Task 20211).
+	EventTaskAborted Event = "task_aborted"
+	EventStep        Event = "step"
+	EventHeal        Event = "heal"
+	EventEvolve      Event = "evolve"
+	EventHealthCheck Event = "health_check"
+	EventOptimize    Event = "optimize"
+	EventVerify      Event = "verify"
+	EventCheckpoint  Event = "checkpoint"
 
 	// EventAuthz tags access-control decisions and failures of the
 	// authorization machinery itself (Task 20164). Decisions are also

@@ -420,6 +420,13 @@ type Orchestrator struct {
 	statedb     *statedb.DB        // shared SQLite handle (kill_requests, events journal); nil-safe
 	watchdog    *watchdog.Watchdog // per-task cancel registry for manual aborts (Task 20140); nil-safe
 
+	// testAbortWaitCeiling and testAbortBackoff narrow maxAbortWait and
+	// abortBackoff so tests can exercise the abort paths without sleeping out
+	// a real usage window. Zero means the production value. See
+	// abortWaitCeiling and abortRetryBackoff.
+	testAbortWaitCeiling time.Duration
+	testAbortBackoff     time.Duration
+
 	// capWarnMu guards the rate-limiting of the "subscription caps are not
 	// being enforced" warning, which is reached before every task and so
 	// would otherwise repeat once per task for as long as usage is
@@ -932,6 +939,13 @@ func (o *Orchestrator) logTaskOutcomeEvent(task *pm.Task, taskDur string, step i
 	case pm.TaskTimedOut:
 		typ = state.EventTaskKilled
 		msg = fmt.Sprintf("Task #%d timed out after %s", task.ID, taskDur)
+	case pm.TaskPending:
+		// Not a terminal outcome: the run aborted and the task was returned
+		// to the queue. abortTask already journalled EventTaskAborted with
+		// the reason, and emitting a "completed (implicit)" row here — which
+		// the default arm below would do — is precisely the accounting error
+		// this whole path exists to correct (Task 20211).
+		return
 	default:
 		// Implicit-done and other terminal states use the done event.
 		typ = state.EventTaskDone
@@ -1798,6 +1812,13 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		pm.AddAnnotation(task, "ai", fmt.Sprintf("Task started by executor (provider: %s)", o.provider.Name()))
 		s.Save()
 
+		// Snapshot the repository so an unsignalled run can be judged on what
+		// it changed rather than on the agent process having exited (Task
+		// 20211). Taken before the provider call so it captures the
+		// pre-existing tree, and cheap enough (two git invocations) to run
+		// per task.
+		repoBefore := repoFingerprint(o.config.WorkDir)
+
 		// Central queue: record this task execution as a work item BEFORE the
 		// provider call. The id is carried forward so we can mark the entry
 		// done/failed/skipped after the call returns. Every work path in the
@@ -2172,11 +2193,9 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		// abort once the threshold trips.
 		if strings.TrimSpace(taskOutput) == "" {
 			consecutiveErrors++
-			failColor.Printf("✗ Task %d: provider returned empty output (consecutive errors: %d/%d)\n",
-				task.ID, consecutiveErrors, maxConsecutiveErrors)
-			pm.AddAnnotation(task, "ai", fmt.Sprintf("Task re-queued: provider returned empty output (consecutive errors: %d/%d).", consecutiveErrors, maxConsecutiveErrors))
-			task.Status = pm.TaskPending
-			_ = o.queue.MarkFailed(queueID, "provider returned empty output")
+			ab := Abort{Class: AbortEmptyOutput, Reason: fmt.Sprintf("provider returned empty output (consecutive errors: %d/%d)", consecutiveErrors, maxConsecutiveErrors)}
+			o.abortTask(s, task, ab, s.CurrentStep)
+			_ = o.queue.MarkFailed(queueID, abortSummaryForQueue(ab))
 			s.Save()
 			if consecutiveErrors >= maxConsecutiveErrors {
 				s.Status = "failed"
@@ -2759,7 +2778,35 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 				return abortErr
 			}
 		default:
-			// No signal found — treat as done (AI finished without explicit signal)
+			// No signal found. Promotion to done needs positive evidence —
+			// the agent process exiting is not evidence, and treating it as
+			// such is what recorded provider refusals as completed work
+			// (Task 20211). decideUnsignalled classifies the refusals it
+			// recognises and otherwise demands a diff or an artifact.
+			if ab, aborted := decideUnsignalled(o.config.WorkDir, task.ArtifactPath, taskOutput,
+				repoChanged(repoBefore, repoFingerprint(o.config.WorkDir))); aborted {
+				consecutiveErrors++
+				o.abortTask(s, task, ab, s.CurrentStep)
+				_ = o.queue.MarkFailed(queueID, abortSummaryForQueue(ab))
+				s.Save()
+				if consecutiveErrors >= maxConsecutiveErrors {
+					s.Status = "failed"
+					s.Save()
+					abortErr := fmt.Errorf("%d consecutive aborted tasks (last: %s)", consecutiveErrors, ab)
+					o.webhook.Send(webhook.EventSessionFailed, webhook.Payload{
+						Goal:    s.Goal,
+						Session: &webhook.SessionInfo{InputTokens: s.TotalInputTokens, OutputTokens: s.TotalOutputTokens},
+						Error:   webhook.TruncateError(abortErr.Error()),
+					})
+					return abortErr
+				}
+				// Wait out a usage window rather than picking the same
+				// now-pending task straight back up and hitting the same wall.
+				if o.scheduleAbortRetry(ctx, s, ab) {
+					return nil
+				}
+				continue
+			}
 			task.Status = pm.TaskDone
 			pm.AddAnnotation(task, "ai", "Task implicitly completed: AI finished without an explicit TASK_DONE/TASK_FAILED/TASK_SKIPPED signal — treated as done.")
 			if !o.log.IsJSON() {
@@ -3881,13 +3928,12 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 			// draining the whole plan when the provider is hiccupping (auth
 			// flaps, content-filtered completions, partial responses).
 			if result == nil || strings.TrimSpace(result.Output) == "" {
-				failColor.Printf("✗ Task %d: provider returned empty output\n", task.ID)
-				_ = o.queue.MarkFailed(parallelQueueID, "provider returned empty output")
 				cleanupWorktree(task.ID)
 				mu.Lock()
-				pm.AddAnnotation(task, "ai", fmt.Sprintf("Task re-queued: provider returned empty output (parallel mode, consecutive errors: %d/%d).", consecutiveErrors+1, maxConsecutiveErrors))
-				task.Status = pm.TaskPending
 				consecutiveErrors++
+				ab := Abort{Class: AbortEmptyOutput, Reason: fmt.Sprintf("provider returned empty output (parallel mode, consecutive errors: %d/%d)", consecutiveErrors, maxConsecutiveErrors)}
+				o.abortTask(s, task, ab, s.CurrentStep)
+				_ = o.queue.MarkFailed(parallelQueueID, abortSummaryForQueue(ab))
 				s.Save()
 				tooManyErrors := consecutiveErrors >= maxConsecutiveErrors
 				mu.Unlock()
@@ -3968,6 +4014,9 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 
 			taskDur := res.duration.Round(time.Second).String()
 			taskDurMs := res.duration.Milliseconds()
+			// Set by the switch below when the run produced no work. Read
+			// after mu is released, because the retry it schedules may sleep.
+			var abortedTask *Abort
 			mu.Lock()
 			if clarificationReroute {
 				pm.AddAnnotation(task, "ai", "Task failed: LLM asked clarification questions instead of completing the work (parallel mode has no auto-resolve loop).")
@@ -4049,6 +4098,19 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 				}
 				consecutiveErrors++
 			default:
+				// Same evidence rule as the sequential loop — see the
+				// `default:` arm of runPMSequential. The diff half is not
+				// available here: several workers mutate the tree at once, so
+				// a repository fingerprint taken around one task would credit
+				// it with another's changes. The artifact and the classifier
+				// still apply, which is what catches provider refusals.
+				if ab, aborted := decideUnsignalled(o.config.WorkDir, task.ArtifactPath, result.Output, false); aborted {
+					consecutiveErrors++
+					o.abortTask(s, task, ab, s.CurrentStep)
+					_ = o.queue.MarkFailed(parallelQueueID, abortSummaryForQueue(ab))
+					abortedTask = &ab
+					break
+				}
 				task.Status = pm.TaskDone
 				pm.AddAnnotation(task, "ai", "Task implicitly completed (parallel mode): AI finished without an explicit TASK_DONE/TASK_FAILED/TASK_SKIPPED signal — treated as done.")
 				if !o.log.IsJSON() {
@@ -4074,16 +4136,21 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 				consecutiveErrors = 0
 			}
 
-			// Central queue: mark this parallel work item terminal.
-			switch task.Status {
-			case pm.TaskDone:
-				_ = o.queue.MarkDone(parallelQueueID, stepSummaryLine(result.Output, 200))
-			case pm.TaskFailed:
-				_ = o.queue.MarkFailed(parallelQueueID, stepSummaryLine(result.Output, 200))
-			case pm.TaskSkipped:
-				_ = o.queue.MarkSkipped(parallelQueueID, "AI emitted TASK_SKIPPED")
-			default:
-				_ = o.queue.MarkDone(parallelQueueID, stepSummaryLine(result.Output, 200))
+			// Central queue: mark this parallel work item terminal. An aborted
+			// run already marked its entry failed and left the task pending,
+			// which this switch's `default:` arm would otherwise record as
+			// done — the same fail-open shape the abort path exists to close.
+			if abortedTask == nil {
+				switch task.Status {
+				case pm.TaskDone:
+					_ = o.queue.MarkDone(parallelQueueID, stepSummaryLine(result.Output, 200))
+				case pm.TaskFailed:
+					_ = o.queue.MarkFailed(parallelQueueID, stepSummaryLine(result.Output, 200))
+				case pm.TaskSkipped:
+					_ = o.queue.MarkSkipped(parallelQueueID, "AI emitted TASK_SKIPPED")
+				default:
+					_ = o.queue.MarkDone(parallelQueueID, stepSummaryLine(result.Output, 200))
+				}
 			}
 
 			// Worktree-parallel: commit changes and enqueue the merge for
@@ -4177,6 +4244,15 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 			tooManyErrors := consecutiveErrors >= maxConsecutiveErrors
 			s.Save()
 			mu.Unlock()
+
+			// Wait out a usage window (or pause on a quota/credential wall)
+			// before the next round picks the now-pending task straight back
+			// up. Done outside the lock: it sleeps.
+			if abortedTask != nil {
+				if o.scheduleAbortRetry(ctx, s, *abortedTask) {
+					return nil
+				}
+			}
 
 			// Journalled outside the lock: it writes to the event DB, not to
 			// task state, and holding the shared mutex across that write would

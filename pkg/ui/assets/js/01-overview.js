@@ -427,6 +427,11 @@ function _eventVisuals(kind) {
     // running long after its agent stopped talking, and why a task whose
     // output said TASK_DONE was not accepted as done.
     case 'task_background':     return { glyph:'⏳', cls:'ev-task-bg',     label:'background'};
+    // A run that produced no work — a provider limit, a rejected credential,
+    // a harness that refused to start. Distinct from 'failed': the task went
+    // back in the queue rather than being judged, so the row must not read as
+    // a terminal outcome.
+    case 'task_aborted':        return { glyph:'⚠', cls:'ev-task-abort',  label:'aborted'   };
     case 'evolve_round_start':  return { glyph:'↻', cls:'ev-evolve',      label:'evolve'    };
     case 'evolve_discovered':   return { glyph:'✨', cls:'ev-evolve',      label:'discovered'};
     case 'evolve_no_op':        return { glyph:'—', cls:'ev-evolve',      label:'no-op'     };
