@@ -245,7 +245,20 @@ window.verifyAuditChain = function() {
   return api(pUrl('/api/audit/verify')).then(d => {
     d = d || {};
     if (!badge || !text) return d;
-    if (d.ok) {
+    if (d.ok && d.anchored) {
+      // A pruned chain verifies, but not from the beginning. Saying only
+      // "intact" over a trail whose early history has been archived elsewhere
+      // is true and misleading; the badge has to name the boundary.
+      badge.className = 'audit-integrity ok';
+      text.textContent = 'Chain intact from #' + (d.verified_from_id || '?') +
+        ' — ' + (d.total || 0) + ' event' + (d.total === 1 ? '' : 's') + ' verified, ' +
+        (d.pruned_count || 0) + ' archived';
+      badge.title = 'Every row hash matched, and the first row links to the retention anchor ' +
+        'for the pruned prefix.\n' +
+        (d.archive_path   ? 'archive: ' + d.archive_path   + '\n' : '') +
+        (d.archive_sha256 ? 'sha256:  ' + d.archive_sha256 + '\n' : '') +
+        'Checked at ' + (d.checked_at || '');
+    } else if (d.ok) {
       badge.className = 'audit-integrity ok';
       text.textContent = 'Chain intact — ' + (d.total || 0) + ' event' + (d.total === 1 ? '' : 's') + ' verified';
       badge.title = 'Every row hash was recomputed from the genesis row and matched. Checked at ' + (d.checked_at || '');

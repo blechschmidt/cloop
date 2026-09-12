@@ -59,7 +59,6 @@ var (
 	hubAuditPruneDryRun    bool
 	hubAuditPruneActor     string
 	hubAuditPruneNoGzip    bool
-	hubAuditPruneYes       bool
 )
 
 var hubAuditPruneCmd = &cobra.Command{
@@ -316,10 +315,6 @@ func init() {
 		"write the archive as plain JSONL instead of gzip (roughly 10x larger)")
 	hubAuditPruneCmd.Flags().StringVar(&hubAuditPruneActor, "actor", "",
 		"identity to record on the anchor (default: cli)")
-	hubAuditPruneCmd.Flags().BoolVar(&hubAuditPruneYes, "yes", false,
-		"deprecated no-op, retained so existing scripts keep working")
-	_ = hubAuditPruneCmd.Flags().MarkHidden("yes")
-
 	hubAuditCmd.AddCommand(hubAuditPruneCmd)
 	hubAuditCmd.AddCommand(hubAuditAnchorsCmd)
 	hubAuditCmd.AddCommand(hubAuditVerifySealsCmd)

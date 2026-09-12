@@ -87,6 +87,17 @@ type auditVerifyResponse struct {
 	ExpectedHash string `json:"expected_hash"`
 	ActualHash   string `json:"actual_hash"`
 	CheckedAt    string `json:"checked_at"`
+
+	// Retention context (Task 20218). A pruned chain verifies OK, and without
+	// these the panel would render a green badge over a trail that no longer
+	// starts at the beginning — technically true and materially misleading.
+	// Anchored says the walk started from an anchor rather than from genesis;
+	// the rest say where the history went so a reader can go and get it.
+	Anchored       bool   `json:"anchored"`
+	VerifiedFromID int64  `json:"verified_from_id"`
+	PrunedCount    int64  `json:"pruned_count"`
+	ArchivePath    string `json:"archive_path"`
+	ArchiveSHA256  string `json:"archive_sha256"`
 }
 
 // handleAuditList serves GET /api/audit.
@@ -201,6 +212,12 @@ func (s *Server) handleAuditVerify(w http.ResponseWriter, r *http.Request) {
 		ExpectedHash: report.ExpectedHash,
 		ActualHash:   report.ActualHash,
 		CheckedAt:    time.Now().UTC().Format(time.RFC3339),
+
+		Anchored:       report.Anchored,
+		VerifiedFromID: report.VerifiedFromID,
+		PrunedCount:    report.PrunedCount,
+		ArchivePath:    report.ExportPath,
+		ArchiveSHA256:  report.ExportSHA256,
 	})
 }
 
