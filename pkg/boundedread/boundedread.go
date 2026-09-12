@@ -28,6 +28,25 @@ import (
 // artifacts) while keeping a torn write or runaway log out of memory.
 const DefaultMaxBytes int64 = 1 << 20
 
+// ArtifactMaxBytes is the shared cap for reads of a task artifact — the
+// agent's own captured stdout, stored under .cloop/tasks/ and
+// .cloop/artifacts/.
+//
+// This content is not adversarial in the usual sense, which is exactly why it
+// went unbounded for so long: nobody writes a hostile artifact, but a task
+// that shells out to a build, a training run, or a chatty test suite produces
+// a multi-gigabyte one by accident. Every reader of that blob — context
+// injection, summarization, evaluation, the TUI — then pulls it whole into
+// the hub's memory.
+//
+// 16 MiB is far above any real transcript (they are kilobytes) and far below
+// what would threaten the process. Callers that exceed it must report the
+// truncation rather than silently reasoning over a prefix.
+//
+// Deliberately untyped: it is used both as an int64 byte cap and as an int
+// length in callers and tests.
+const ArtifactMaxBytes = 16 << 20
+
 // ErrTooLarge is returned (wrapped in *SizeError) when the file exceeds the
 // caller's size cap. Use errors.Is(err, ErrTooLarge) to detect it.
 var ErrTooLarge = errors.New("file exceeds size limit")
@@ -129,4 +148,51 @@ func ReadFileTruncated(path string, maxBytes int64) (data []byte, truncated bool
 		return buf[:maxBytes], true, nil
 	}
 	return buf, false, nil
+}
+
+// ReadFileTail reads up to the last maxBytes of path and reports whether
+// earlier content was skipped. Pass 0 for maxBytes to use DefaultMaxBytes.
+//
+// Use this instead of ReadFileTruncated whenever the caller wants the outcome
+// of a process rather than its preamble: a completion signal, a stack trace, a
+// test summary and an agent's closing report all live at the end of a log. A
+// head-biased preview of a 2 GB build log is 16 MiB of compiler chatter and
+// none of the answer.
+//
+// The size is taken with fstat on the already-open handle, so there is no
+// window in which the path could be swapped for a larger file between the
+// check and the read. A file still being appended to may grow after the seek
+// offset is computed; the read stays capped at maxBytes regardless, it simply
+// ends slightly before the true end of file.
+//
+// The returned slice starts at a byte offset, not a line or rune boundary, so
+// its first line may be a partial one. Callers that render the result should
+// pair it with a visible truncation marker.
+func ReadFileTail(path string, maxBytes int64) (data []byte, truncated bool, err error) {
+	if maxBytes <= 0 {
+		maxBytes = DefaultMaxBytes
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, false, err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return nil, false, err
+	}
+	if info.IsDir() {
+		return nil, false, fmt.Errorf("boundedread: %s is a directory", path)
+	}
+	if info.Size() > maxBytes {
+		if _, err := f.Seek(info.Size()-maxBytes, io.SeekStart); err != nil {
+			return nil, false, fmt.Errorf("boundedread: seek %s: %w", path, err)
+		}
+		truncated = true
+	}
+	buf, err := io.ReadAll(io.LimitReader(f, maxBytes))
+	if err != nil {
+		return nil, false, fmt.Errorf("boundedread: read %s: %w", path, err)
+	}
+	return buf, truncated, nil
 }

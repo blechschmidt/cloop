@@ -12,10 +12,32 @@ import (
 	"strings"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/artifact"
 	"github.com/blechschmidt/cloop/pkg/atomicfile"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/provider"
 )
+
+// artifactPromptBudget caps how much of one task's artifact reaches the
+// summary prompt. Artifacts are capped at artifact.MaxReadBytes on the way off
+// disk; this second, much smaller bound keeps a plan with 200 completed tasks
+// from producing a prompt no model will accept.
+const artifactPromptBudget = 1500
+
+// tailChars returns the last n bytes of s, reporting whether anything was
+// dropped. The cut is moved forward to the next newline so the result never
+// opens with half a line — which also guarantees it never splits a UTF-8 rune,
+// since a newline is always a rune boundary.
+func tailChars(s string, n int) (string, bool) {
+	if len(s) <= n {
+		return s, false
+	}
+	cut := s[len(s)-n:]
+	if idx := strings.IndexByte(cut, '\n'); idx >= 0 && idx < len(cut)-1 {
+		cut = cut[idx+1:]
+	}
+	return cut, true
+}
 
 // Summary is the structured output of an executive summary.
 type Summary struct {
@@ -95,13 +117,29 @@ func CollectTaskContexts(workDir string, plan *pm.Plan, sinceVersion int) []Task
 		}
 
 		// Try to load artifact content for richer context.
+		//
+		// Read the tail, not the head: this is a summary of what a task
+		// accomplished, and an agent states what it accomplished at the end of
+		// its transcript, not in its opening line. The read is capped first
+		// (artifact.MaxReadBytes) so a task that shelled out to a build and
+		// produced a gigabyte of log cannot be pulled into memory just to keep
+		// the last 1500 characters of it.
 		if t.ArtifactPath != "" {
-			data, err := os.ReadFile(filepath.Join(workDir, t.ArtifactPath))
+			data, capped, total, err := artifact.ReadArtifactTail(workDir, t.ArtifactPath)
 			if err == nil {
-				content := string(data)
-				// Trim very long artifacts to keep prompt manageable.
-				if len(content) > 1500 {
-					content = content[:1500] + "\n...(truncated)"
+				content, trimmed := tailChars(string(data), artifactPromptBudget)
+				if capped || trimmed {
+					// Say so in the prompt itself. A summary written over a
+					// silent fraction of the work reads exactly like one
+					// written over all of it.
+					//
+					// The notice is stated against the prompt budget, not the
+					// read cap: the budget is the binding limit here, and for
+					// an artifact that never reached the cap a message about
+					// the cap would simply be untrue.
+					content = fmt.Sprintf(
+						"[truncated: artifact is %s; only the final %d characters are shown — earlier output was not read]\n\n",
+						artifact.HumanBytes(total), len(content)) + content
 				}
 				tc.ArtifactContent = content
 			}

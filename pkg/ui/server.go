@@ -4237,10 +4237,14 @@ func (s *Server) handleTaskDetails(w http.ResponseWriter, r *http.Request) {
 	// In-progress tasks (or tasks that crashed mid-flight) may not have a
 	// finalized artifact but do have a live streaming file we can show.
 	if liveAbs := artifact.LiveArtifactPath(workDir, id); liveAbs != "" {
-		if data, err := os.ReadFile(liveAbs); err == nil && len(data) > 0 {
+		// Bounded and tail-biased: this is the log of a task running right
+		// now, so it is the one file here that can still be growing while we
+		// read it. clip() keeps the tail for display; the cap keeps the rest
+		// of a runaway build log out of the hub's memory on the way there.
+		if data, capped, _, err := artifact.ReadLiveArtifactTail(workDir, id); err == nil && len(data) > 0 {
 			body, trunc := clip(string(data))
 			liveBody = body
-			liveTruncated = trunc
+			liveTruncated = trunc || capped
 			if rel, relErr := filepath.Rel(workDir, liveAbs); relErr == nil {
 				livePath = rel
 			} else {

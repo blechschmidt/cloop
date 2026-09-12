@@ -50,6 +50,7 @@ import (
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/artifact"
+	"github.com/blechschmidt/cloop/pkg/boundedread"
 	"github.com/blechschmidt/cloop/pkg/pm"
 )
 
@@ -57,7 +58,10 @@ import (
 // Real artifacts are kilobytes; the cap exists so a runaway agent that wrote a
 // gigabyte of output cannot turn recovery into an OOM of its own. Beyond it we
 // read the tail, which is where the signal lives.
-const maxLiveArtifactBytes = 16 << 20
+//
+// Aliased to the shared artifact cap rather than restating 16 MiB, so recovery
+// and every other artifact reader move together.
+const maxLiveArtifactBytes = boundedread.ArtifactMaxBytes
 
 // truncationNotice heads an artifact recovered from an over-long live file, so
 // nobody reads the surviving tail as the whole transcript.

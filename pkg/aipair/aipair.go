@@ -351,22 +351,25 @@ func (sess *Session) buildPrompt(userMsg string) string {
 // readTaskArtifact reads the most recent task output artifact from disk.
 // Returns empty string if none found.
 func (sess *Session) readTaskArtifact(t *pm.Task) string {
-	// Check task.ArtifactPath first.
+	// Check task.ArtifactPath first. Bounded and tail-biased: this feeds a
+	// pairing session that needs to know where the task got to, and a task
+	// that shelled out to a build can leave a multi-gigabyte artifact behind.
 	if t.ArtifactPath != "" {
-		absPath := t.ArtifactPath
-		if !filepath.IsAbs(absPath) {
-			absPath = filepath.Join(sess.WorkDir, absPath)
-		}
-		data, err := os.ReadFile(absPath)
+		data, truncated, total, err := artifact.ReadArtifactTail(sess.WorkDir, t.ArtifactPath)
 		if err == nil {
+			if truncated {
+				return artifact.TailTruncationNotice(total) + string(data)
+			}
 			return string(data)
 		}
 	}
 
 	// Try the live artifact file.
-	livePath := artifact.LiveArtifactPath(sess.WorkDir, t.ID)
-	data, err := os.ReadFile(livePath)
+	data, truncated, total, err := artifact.ReadLiveArtifactTail(sess.WorkDir, t.ID)
 	if err == nil && len(data) > 0 {
+		if truncated {
+			return artifact.TailTruncationNotice(total) + string(data)
+		}
 		return string(data)
 	}
 

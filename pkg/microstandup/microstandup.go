@@ -8,11 +8,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/artifact"
 	"github.com/blechschmidt/cloop/pkg/checkpoint"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/provider"
@@ -87,9 +86,15 @@ func Collect(workDir string, task *pm.Task, goal string) (*TaskContext, error) {
 		}
 	} else {
 		// Fall back to reading the task artifact file if available.
+		//
+		// Only the last 20 lines are wanted, so read the tail rather than
+		// pulling a whole build log into memory to discard all but its end.
 		if task.ArtifactPath != "" {
-			data, readErr := os.ReadFile(filepath.Join(workDir, task.ArtifactPath))
+			data, capped, total, readErr := artifact.ReadArtifactTail(workDir, task.ArtifactPath)
 			if readErr == nil {
+				if capped {
+					ctx.RecentSteps = append(ctx.RecentSteps, strings.TrimSpace(artifact.TailTruncationNotice(total)))
+				}
 				lines := strings.Split(string(data), "\n")
 				start := 0
 				if len(lines) > 20 {

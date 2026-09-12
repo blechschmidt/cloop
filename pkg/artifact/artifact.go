@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/atomicfile"
+	"github.com/blechschmidt/cloop/pkg/boundedread"
 	"github.com/blechschmidt/cloop/pkg/pm"
 )
 
@@ -69,17 +70,123 @@ func WriteExecArtifact(workDir string, task *pm.Task, cmdArgs []string, exitCode
 
 var nonSlugRe = regexp.MustCompile(`[^a-z0-9-]+`)
 
-// ReadTaskOutput reads the full AI output for a completed task.
+// MaxReadBytes is the cap applied to every read of a task artifact. It is the
+// shared constant described in boundedread; see there for why artifacts need
+// one despite not being attacker-controlled.
+const MaxReadBytes = boundedread.ArtifactMaxBytes
+
+// resolveArtifactPath makes an artifact path absolute. Paths are stored
+// relative to the project directory (see WriteTaskArtifact), but callers
+// occasionally hold an absolute one already.
+func resolveArtifactPath(workDir, artifactPath string) string {
+	if filepath.IsAbs(artifactPath) {
+		return artifactPath
+	}
+	return filepath.Join(workDir, artifactPath)
+}
+
+// ReadArtifactTail reads at most MaxReadBytes from the end of a task artifact.
+//
+// This is the right default for anything that wants to know how a task turned
+// out — context injection into the next task, evaluation, summarization —
+// because an agent's conclusion, its completion signal and any failure it hit
+// are all at the end of its transcript. total is the artifact's full size on
+// disk, so callers can say how much they did not read.
+func ReadArtifactTail(workDir, artifactPath string) (data []byte, truncated bool, total int64, err error) {
+	abs := resolveArtifactPath(workDir, artifactPath)
+	info, err := os.Stat(abs)
+	if err != nil {
+		return nil, false, 0, err
+	}
+	data, truncated, err = boundedread.ReadFileTail(abs, MaxReadBytes)
+	if err != nil {
+		return nil, false, 0, err
+	}
+	return data, truncated, info.Size(), nil
+}
+
+// ReadArtifactHead reads at most MaxReadBytes from the start of a task
+// artifact. Prefer ReadArtifactTail unless the caller genuinely wants the
+// beginning — a browsable detail pane that renders the first N lines, for
+// instance, where the reader scrolls from the top.
+func ReadArtifactHead(workDir, artifactPath string) (data []byte, truncated bool, total int64, err error) {
+	abs := resolveArtifactPath(workDir, artifactPath)
+	info, err := os.Stat(abs)
+	if err != nil {
+		return nil, false, 0, err
+	}
+	data, truncated, err = boundedread.ReadFileTruncated(abs, MaxReadBytes)
+	if err != nil {
+		return nil, false, 0, err
+	}
+	return data, truncated, info.Size(), nil
+}
+
+// ReadLiveArtifactTail reads at most MaxReadBytes from the end of a task's
+// live streaming output file.
+//
+// Live artifacts are the riskiest of the lot: they are the log of a task that
+// is running right now, so they are the ones actually growing while something
+// reads them. Always tail-biased — a live log is read to find out where the
+// task has got to, which is by definition its last line.
+func ReadLiveArtifactTail(workDir string, taskID int) (data []byte, truncated bool, total int64, err error) {
+	return ReadArtifactTail(workDir, LiveArtifactPath(workDir, taskID))
+}
+
+// TailTruncationNotice is the marker to prepend to a tail-biased read that hit
+// the cap. It goes at the top because that is where the omission is: the
+// reader is about to see the end of a much longer log.
+//
+// Truncation must always be stated. A summarizer that silently receives 16 MiB
+// of a 2 GB log reports confidently on a fraction of the work; one that is
+// told the log was cut can qualify what it says.
+func TailTruncationNotice(total int64) string {
+	return fmt.Sprintf("[truncated: artifact is %s; only the final %s is shown — earlier output was not read]\n\n",
+		HumanBytes(total), HumanBytes(MaxReadBytes))
+}
+
+// HeadTruncationNotice is the marker to append to a head-biased read that hit
+// the cap. It goes at the bottom, where the content stops.
+func HeadTruncationNotice(total int64) string {
+	return fmt.Sprintf("[truncated: artifact is %s; only the first %s was read — later output, including the task outcome, is not shown]",
+		HumanBytes(total), HumanBytes(MaxReadBytes))
+}
+
+// HumanBytes renders a byte count for a human reading a log line or a prompt.
+// Exported so callers that impose their own, tighter budget on top of the read
+// cap can describe it in the same units.
+func HumanBytes(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(unit), 0
+	for v := n / unit; v >= unit && exp < 4; v /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTP"[exp])
+}
+
+// ReadTaskOutput reads the AI output for a completed task.
 // If task.ArtifactPath is set and readable, it returns the artifact body with
 // YAML frontmatter stripped.  Falls back to task.Result if the file is missing.
 // Returns empty string when neither source is available.
+//
+// The read is bounded at MaxReadBytes and biased to the tail, because every
+// caller of this function wants the outcome: chained task input, acceptance
+// checks, post-task evaluation, replay comparison and the task detail panel.
+// When the cap is hit the returned string opens with TailTruncationNotice so
+// no consumer mistakes the surviving tail for the whole transcript.
 func ReadTaskOutput(workDir string, task *pm.Task) string {
 	if task.ArtifactPath != "" {
-		absPath := task.ArtifactPath
-		if !filepath.IsAbs(absPath) {
-			absPath = filepath.Join(workDir, absPath)
-		}
-		if data, err := os.ReadFile(absPath); err == nil {
+		data, truncated, total, err := ReadArtifactTail(workDir, task.ArtifactPath)
+		if err == nil {
+			if truncated {
+				// Frontmatter lives at the head, which by definition was not
+				// read, so there is nothing to strip off a truncated tail.
+				return TailTruncationNotice(total) + string(data)
+			}
 			return stripFrontmatter(string(data))
 		}
 	}

@@ -12,6 +12,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/blechschmidt/cloop/pkg/artifact"
 	"github.com/blechschmidt/cloop/pkg/cost"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/state"
@@ -544,10 +545,14 @@ func (m Model) buildDetailText() string {
 		sb.WriteString(t.Result)
 		sb.WriteString("\n")
 	}
-	// Try to read artifact
+	// Try to read artifact.
+	//
+	// Head-biased, unlike the readers that want a task's outcome: this pane
+	// renders the first 100 lines for someone browsing from the top. The read
+	// is still capped at artifact.MaxReadBytes so opening the detail view on a
+	// task that logged a gigabyte does not pull it into the TUI's memory.
 	if t.ArtifactPath != "" {
-		artifactPath := filepath.Join(m.workdir, t.ArtifactPath)
-		if data, err := os.ReadFile(artifactPath); err == nil {
+		if data, capped, total, err := artifact.ReadArtifactHead(m.workdir, t.ArtifactPath); err == nil {
 			sb.WriteString("\n── Artifact ──────────────────────────────\n")
 			// show up to first 100 lines of artifact
 			artifactLines := strings.Split(string(data), "\n")
@@ -556,8 +561,14 @@ func (m Model) buildDetailText() string {
 				limit = len(artifactLines)
 			}
 			sb.WriteString(strings.Join(artifactLines[:limit], "\n"))
-			if len(artifactLines) > 100 {
-				sb.WriteString(fmt.Sprintf("\n… (%d more lines)", len(artifactLines)-100))
+			if len(artifactLines) > limit {
+				sb.WriteString(fmt.Sprintf("\n… (%d more lines)", len(artifactLines)-limit))
+			}
+			if capped {
+				// Without this the "N more lines" count above is a count
+				// within the window we read, silently understating a file
+				// that is orders of magnitude larger.
+				sb.WriteString("\n" + artifact.HeadTruncationNotice(total))
 			}
 		}
 	}

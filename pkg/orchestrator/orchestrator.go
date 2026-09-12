@@ -2999,12 +2999,12 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 
 		// Auto-eval: score task output against default rubric after successful completion.
 		if o.config.AutoEval && task.Status == pm.TaskDone {
-			evalOutput := task.Result
-			if task.ArtifactPath != "" {
-				if data, readErr := os.ReadFile(task.ArtifactPath); readErr == nil {
-					evalOutput = string(data)
-				}
-			}
+			// Bounded, tail-biased, and falls back to task.Result when there
+			// is no artifact. The previous inline read was unbounded and
+			// resolved task.ArtifactPath — which is stored relative to the
+			// project — against the process working directory, so it only
+			// ever found the artifact when those happened to coincide.
+			evalOutput := artifact.ReadTaskOutput(o.config.WorkDir, task)
 			if evalOutput != "" {
 				dimColor.Printf("  Running post-task quality evaluation...\n")
 				evalResult, evalErr := eval.Evaluate(ctx, o.provider, s.Model, o.config.StepTimeout, o.config.WorkDir, task, evalOutput, eval.DefaultRubric())
