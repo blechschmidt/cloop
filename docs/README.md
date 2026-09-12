@@ -55,6 +55,10 @@ Five pages in order, indexed at
   [IP-layer egress filtering](reference/configuration.md#ip-layer-egress-filtering):
   the `egress_filter` keys for both the container and Kubernetes backends, why
   they are off by default, and what a hostname allowlist compiles to at layer 3.
+- **[Decision records](reference/adr.md)** — `cloop adr`: recording why the
+  system is shaped the way it is, how that differs from the per-task journal,
+  and the Proposed → Accepted → Superseded lifecycle, in which a reversal is a
+  new record linked to the one it replaces rather than an edit to it.
 - **[Commands](reference/commands.md)** — every CLI subcommand, including
   [`cloop egress firewall`](reference/commands.md#cloop-egress-firewall), which
   renders the packet filter an authorisation compiles to and answers

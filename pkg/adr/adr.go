@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -29,6 +30,29 @@ const (
 	StatusSuperseded = "Superseded"
 	StatusRejected   = "Rejected"
 )
+
+// Statuses returns the valid statuses in lifecycle order.
+func Statuses() []string {
+	return []string{StatusProposed, StatusAccepted, StatusDeprecated, StatusSuperseded, StatusRejected}
+}
+
+// ParseStatus resolves a user-supplied status to its canonical spelling,
+// case-insensitively.
+//
+// Reads tolerate a free-form status so that a hand-written file still loads,
+// but writes must not invent a sixth value: a typo persisted as "Acepted" is
+// invisible to every status filter and silently drops the record out of the
+// listings an operator relies on. Refusing it here is the only place that can
+// tell the difference between a typo and a deliberate choice.
+func ParseStatus(s string) (string, error) {
+	want := strings.ToLower(strings.TrimSpace(s))
+	for _, valid := range Statuses() {
+		if strings.ToLower(valid) == want {
+			return valid, nil
+		}
+	}
+	return "", fmt.Errorf("unknown status %q: want one of %s", s, strings.Join(Statuses(), ", "))
+}
 
 // ADR is one decision record.
 type ADR struct {
@@ -54,7 +78,9 @@ func Slug(title string) string {
 		s = "untitled"
 	}
 	if len(s) > 60 {
-		s = s[:60]
+		// Trim again: cutting mid-word can land on a separator, which would
+		// leave a filename like 0007-a-long-title-.md.
+		s = strings.Trim(s[:60], "-")
 	}
 	return s
 }
@@ -206,8 +232,7 @@ func parseFrontmatterLine(a *ADR, line string) {
 		return
 	}
 	key := strings.TrimSpace(line[:idx])
-	val := strings.TrimSpace(line[idx+1:])
-	val = strings.Trim(val, `"'`)
+	val := unquote(strings.TrimSpace(line[idx+1:]))
 	switch strings.ToLower(key) {
 	case "id":
 		fmt.Sscanf(val, "%d", &a.ID)
@@ -232,6 +257,23 @@ func parseFrontmatterLine(a *ADR, line string) {
 	}
 }
 
+// unquote strips one layer of surrounding quotes from a frontmatter scalar.
+//
+// Save writes strings with %q, so a title containing a quote is stored as
+// "He said \"hi\"". Trimming the outer quote characters would leave the
+// backslashes behind, and since Load feeds Save on every status change, the
+// escaping compounds: one edit later the title reads He said \\"hi\\". Unquote
+// reverses %q exactly. The Trim fallback keeps hand-written frontmatter
+// working, where a value may be single-quoted or bare.
+func unquote(v string) string {
+	if len(v) >= 2 && v[0] == '"' && v[len(v)-1] == '"' {
+		if s, err := strconv.Unquote(v); err == nil {
+			return s
+		}
+	}
+	return strings.Trim(v, `"'`)
+}
+
 func splitList(v string) []string {
 	v = strings.Trim(v, "[]")
 	if v == "" {
@@ -240,7 +282,7 @@ func splitList(v string) []string {
 	parts := strings.Split(v, ",")
 	var out []string
 	for _, p := range parts {
-		p = strings.Trim(strings.TrimSpace(p), `"'`)
+		p = unquote(strings.TrimSpace(p))
 		if p != "" {
 			out = append(out, p)
 		}

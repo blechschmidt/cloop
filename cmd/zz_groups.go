@@ -192,6 +192,7 @@ var rootCommandGroups = map[string]string{
 	"commit-msg":   groupDelivery,
 	"review":       groupDelivery,
 	"docs":         groupDelivery,
+	"adr":          groupDelivery,
 	"changelog":    groupDelivery,
 	"notify":       groupDelivery,
 	"integrations": groupDelivery,
