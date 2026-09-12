@@ -22,10 +22,26 @@ image:
 nameOverride: ""
 fullnameOverride: ""
 
-# One replica, deliberately. The hub's state is SQLite on a ReadWriteOnce
-# volume; a second replica would corrupt it rather than share the load. The
-# Deployment uses Recreate for the same reason — a rolling update would run
-# two Pods against one volume during the handover.
+# One replica, and the chart refuses to render with more.
+#
+# Not a conservative default to raise once you trust it: the hub is not
+# horizontally scalable, and raising this does not distribute load. Its
+# project-status cache, run registry and WebSocket client set live in process
+# memory, and an event reaches only the clients of the Pod that produced it —
+# so a second replica serves a second, quietly diverging view of the same
+# database while duplicating every background sweep against it.
+#
+# cloop enforces this itself: one hub holds a lease on the control plane
+# (`cloop hub lease status`), and a second refuses to start rather than
+# diverge. Extra replicas would CrashLoopBackOff, so the chart fails at
+# template time with the reason attached instead.
+#
+# The Deployment uses Recreate for the same constraint — a rolling update
+# would run two Pods against one volume during the handover, and the new one
+# would refuse to start until the old one released its lease.
+#
+# To handle more load: give the hub more resources, or move work off it with
+# executor.kubernetes.enabled. Executors scale out; the control plane does not.
 replicaCount: 1
 
 # ── HTTP ────────────────────────────────────────────────────────────────────

@@ -66,6 +66,22 @@ Everything here fails the render rather than warning. A warning during
 {{- fail "executor.kubernetes.enabled is true but serviceAccount.automountServiceAccountToken is false. In-cluster mode authenticates with the projected token; without it the executor cannot start anything." }}
 {{- end }}
 
+{{/* --- replicas -------------------------------------------------------
+  replicaCount is a number, which makes it look like a dial. It is not one:
+  the hub keeps its project-status cache, run registry and WebSocket clients
+  in process memory and fans events out only to its own clients, so a second
+  Pod does not share load — it serves a different, quietly diverging view of
+  the same database while running the same background sweeps against it.
+
+  cloop enforces this itself as of Task 20214: the second hub takes no lease,
+  refuses to start and CrashLoopBackOffs. Failing here instead means the
+  operator learns it from `helm install` with the reason attached, rather than
+  from a Pod that will not stay up.
+*/}}
+{{- if gt (int .Values.replicaCount) 1 }}
+{{- fail "replicaCount must be 1. The hub is not horizontally scalable: its project-status cache, run registry and WebSocket client set live in process memory, and events reach only the clients of the Pod that produced them — so a second replica serves a diverging view of the same SQLite database while duplicating every background sweep.\n\ncloop refuses this at runtime too: only one hub can hold the control-plane lease, so the extra replicas would take no lease, refuse to start, and CrashLoopBackOff.\n\nTo handle more load, give the hub more resources, or move work to executors (executor.kubernetes.enabled=true) — those scale out, the control plane does not." }}
+{{- end }}
+
 {{/* --- storage -------------------------------------------------------- */}}
 {{- if and (not .Values.persistence.enabled) .Values.persistence.existingClaim }}
 {{- fail "persistence.existingClaim is set but persistence.enabled is false, so the claim would be ignored and the hub would run on an emptyDir — discarding every project, task and sealed secret on restart, while appearing to use your volume." }}

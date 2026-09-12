@@ -37,6 +37,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/reconcile"
 	"github.com/blechschmidt/cloop/pkg/globalbudget"
+	"github.com/blechschmidt/cloop/pkg/hublease"
 	"github.com/blechschmidt/cloop/pkg/kb"
 	"github.com/blechschmidt/cloop/pkg/logger"
 	"github.com/blechschmidt/cloop/pkg/multiui"
@@ -559,6 +560,18 @@ type Server struct {
 	shutdownMu sync.Mutex
 	httpServer *http.Server
 
+	// Lease fences this process as the sole control plane for its state.db
+	// (Task 20214). Set by `cloop ui` before the server is constructed, so
+	// nothing in New — which already reconciles executors and sweeps orphaned
+	// sessions — can run against a control plane another hub owns.
+	//
+	// nil means unfenced, which is what every in-process test wants: each one
+	// gets its own temp directory, so there is nothing to fence against, and
+	// requiring a lease would make the lifecycle harder to drive without
+	// testing anything. Run starts the heartbeat, watches for the lease being
+	// lost, and Shutdown releases it; every one of those is nil-safe.
+	Lease *hublease.Lease
+
 	// ReadyCheck overrides the readiness check used by /readyz. nil
 	// means use defaultReadyCheck (stat state.db, open it, run SELECT 1
 	// bounded by ctx). Tests use this field to simulate degraded states
@@ -1068,6 +1081,10 @@ func (s *Server) Run(ctx context.Context) error {
 
 	watcherCtx, cancelWatchers := context.WithCancel(context.Background())
 	defer cancelWatchers()
+	// Renew the instance lease for as long as this hub serves. Started before
+	// the watchers because they are the background sweeps a second hub would
+	// duplicate, and the lease is what entitles this process to run them.
+	s.Lease.Start(watcherCtx)
 	go s.watchState(watcherCtx)
 	go s.watchProjects(watcherCtx)
 	go s.watchAutoBackup(watcherCtx)
@@ -1133,6 +1150,23 @@ func (s *Server) Run(ctx context.Context) error {
 		// Drain ListenAndServe — after Shutdown it returns http.ErrServerClosed.
 		<-errCh
 		return nil
+	case <-s.Lease.Lost():
+		// Another hub holds the control plane now. Everything this process
+		// would do from here — sweeping project statuses, recovering stale
+		// runs, signalling stops — belongs to that hub, and doing it anyway is
+		// exactly the divergence the lease exists to prevent. So this is a
+		// shutdown, not a warning: stop serving, then exit non-zero so a
+		// supervisor reports a failed unit with a reason rather than logging
+		// into a void.
+		lost := s.Lease.LostErr()
+		fmt.Fprintf(os.Stderr, "cloop ui: standing down — %v\n", lost)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := s.Shutdown(shutdownCtx); err != nil && !errors.Is(err, context.DeadlineExceeded) {
+			return fmt.Errorf("ui server shutdown after losing the hub lease: %w", err)
+		}
+		<-errCh
+		return fmt.Errorf("hub lease lost: %w", lost)
 	case err := <-errCh:
 		if errors.Is(err, http.ErrServerClosed) {
 			return nil
@@ -1173,7 +1207,17 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	// audit trail records why they ended rather than leaving rows that simply
 	// stop. Nil-safe when none is configured.
 	activeGitProxy().Close()
-	return srv.Shutdown(ctx)
+	err := srv.Shutdown(ctx)
+	// The instance lease goes last, after in-flight requests have drained: it
+	// is what entitles this process to be the control plane, so releasing it
+	// while a handler is still writing would invite a successor to start
+	// against state this hub has not finished touching. Nil-safe, idempotent,
+	// and fenced on our instance id, so a release that arrives after the lease
+	// was already taken over cannot free the successor's claim.
+	if rerr := s.Lease.Release(); rerr != nil && err == nil {
+		err = fmt.Errorf("release hub lease: %w", rerr)
+	}
+	return err
 }
 
 // closeAllWebSocketsForShutdown sends a code-1001 (websocket.StatusGoingAway)

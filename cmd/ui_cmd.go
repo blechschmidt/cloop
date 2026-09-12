@@ -10,9 +10,11 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/authz"
 	"github.com/blechschmidt/cloop/pkg/config"
+	"github.com/blechschmidt/cloop/pkg/hublease"
 	"github.com/blechschmidt/cloop/pkg/multiui"
 	"github.com/blechschmidt/cloop/pkg/oidcauth"
 	"github.com/blechschmidt/cloop/pkg/quota"
+	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/ui"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
@@ -53,6 +55,26 @@ but not for anything reachable from a network.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		workdir, _ := os.Getwd()
 
+		// Fence this process as the sole control plane for workdir's state.db
+		// before anything touches it (Task 20214). This is the first statement
+		// in the command on purpose: ui.New reconciles executors and sweeps
+		// orphaned sessions, and a second hub doing that against a live hub's
+		// rows is the damage the lease exists to prevent — so the check has to
+		// come before the constructor, not inside it.
+		//
+		// Released by Server.Shutdown once requests have drained. If this
+		// returns before then — a config error, a bad TLS certificate — the
+		// deferred release stops a failed start from holding the fence.
+		lease, err := hublease.Acquire(hublease.Options{
+			DBPath:  state.DBPath(workdir),
+			Address: ":" + strconv.Itoa(uiPort),
+			Version: Version,
+		})
+		if err != nil {
+			return err
+		}
+		defer lease.Release()
+
 		token := uiToken
 		if token == "" {
 			token = os.Getenv("CLOOP_UI_TOKEN")
@@ -81,6 +103,7 @@ but not for anything reachable from a network.`,
 		}
 
 		srv := ui.New(workdir, uiPort, token)
+		srv.Lease = lease
 		srv.Projects = projectPaths
 		srv.RPS = uiRateLimit
 		srv.Burst = uiRateBurst

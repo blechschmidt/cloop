@@ -297,10 +297,37 @@ and capabilities dropped.
 
 ### One replica, `Recreate`
 
-Not a placeholder to raise later. Hub state is SQLite on a ReadWriteOnce
-volume; a second replica corrupts it rather than sharing the load, and a
-rolling update would schedule the new Pod before the old one released the
-volume. Scaling out is a change to the storage layer, not to `replicaCount`.
+Not a placeholder to raise later, and the chart fails to render if you do.
+
+The reason is not the volume — it is the hub. Its project-status cache, run
+registry, chat histories and WebSocket client set live in process memory, and
+an event reaches only the clients of the process that produced it. A second
+replica therefore does not halve the load; it serves a second view of the same
+database that quietly stops agreeing with the first, while running the same
+background sweeps and issuing its own stop signals for the same runs. SQLite's
+WAL keeps the file intact throughout, which is exactly why the failure is silent.
+
+cloop enforces this at runtime: one hub holds a lease on the control plane, and
+a second refuses to start with an error naming the holder.
+
+```
+cloop hub lease status    # who holds it, and when it lapses
+```
+
+The lease is renewed while the hub serves and released on shutdown, so an
+ordinary restart reacquires immediately. A hub that is killed outright leaves
+the lease behind, and the replacement takes it over as soon as the previous
+process is gone — or after 60s of silence if cloop cannot tell (a different
+node, or a reboot). Nothing has to be cleared by hand; `cloop hub lease clear`
+exists for deliberate cleanup and refuses while the lease is live.
+
+`Recreate` follows from the same constraint: a rolling update would start the
+new Pod while the old one still held both the volume and the lease.
+
+To handle more load, give the hub more resources or move work to executors —
+those scale out, the control plane does not. Making the control plane itself
+horizontally scalable is a change to how the hub holds state, not to
+`replicaCount`.
 
 The PVC carries `helm.sh/resource-policy: keep`, so `helm uninstall` does not
 delete your database.

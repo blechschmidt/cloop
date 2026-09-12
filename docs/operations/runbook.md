@@ -118,6 +118,74 @@ once in CI against the config repo. `--offline` makes the second cheap.
 
 ---
 
+## The control-plane lease
+
+**One hub per `state.db`.** This is enforced, not advised: a hub takes a lease
+at startup and a second one refuses to start.
+
+The reason is not the file. SQLite's WAL keeps it perfectly consistent under two
+writers, which is why this used to fail silently. What diverges is everything
+the hub keeps *beside* it — the project-status cache, the run registry, chat
+histories, live-log rooms and the WebSocket client set are all process memory,
+and an event reaches only the clients of the process that produced it. A second
+hub therefore serves a view that quietly stops agreeing with the first, while
+running the same background sweeps and issuing its own stop signals for the same
+runs.
+
+```console
+$ cloop hub lease status
+Control-plane lease
+  /srv/cloop/.cloop/state.db
+
+  state      held
+  instance   hub_59f28a07ceea8b8fa2b4386edc1cef40
+  host       hub-1 (pid 1234)
+  serving    :8080
+  acquired   2026-09-12T17:23:15Z
+  last beat  11s ago
+  lapses in  49s if the holder stops renewing
+```
+
+### How it behaves
+
+| Situation | What happens |
+| --- | --- |
+| Clean shutdown (SIGTERM, `helm upgrade`, `systemctl restart`) | The lease is released after requests drain. The replacement starts immediately. |
+| Hub killed outright (SIGKILL, OOM, node crash) — same host | The successor probes the recorded pid and takes over at once. No wait. |
+| Hub gone on another host, or after a reboot | The pid cannot be trusted, so the lease lapses on its **last heartbeat + 60s** and the next start succeeds. |
+| A hub is paused past the TTL and its lease taken | Its next renewal fails, it logs `standing down`, drains and exits non-zero. It does **not** keep serving. |
+| A second hub started deliberately | Refuses with an error naming the holder's host, pid and port. |
+
+Nothing here needs an operator in the normal case, including the crash case.
+That is the point of a lease rather than a lock file: a stale lease is free, so a
+dead hub cannot wedge its own restart.
+
+### When a hub refuses to start
+
+```
+Error: another cloop hub already controls this state (/srv/cloop/.cloop/state.db)
+
+  holder     hub_59f28a07… on hub-1 (pid 1234), serving :8080
+```
+
+Treat this as correct until proven otherwise — it is reporting a second hub, and
+the fix is almost always to stop that one. In order:
+
+1. `cloop hub lease status` — is the holder this machine? Is its pid alive?
+2. If the holder is alive, stop it. Under Kubernetes check for a second Pod;
+   `replicaCount` above 1 is the usual cause and the chart now refuses to render
+   with it.
+3. If you want two dashboards on purpose, give the second one its **own
+   directory**. A hub roots its control plane at its working directory, so a
+   second one needs a second one. They will not share state — that is the whole
+   constraint — but both can watch the same registered projects.
+4. If the holder is genuinely gone, wait for `lapses in` to reach zero and start
+   again. `cloop hub lease clear` does it explicitly, and refuses while the lease
+   is live. There is no `--force`: a live lease means a hub is renewing it right
+   now, and evicting it would create exactly the split-brain the lease prevents.
+
+---
+
 ## Backup and restore
 
 ### Backup
@@ -542,7 +610,7 @@ Short TTLs mean grants rotate themselves. See
 ## Upgrade
 
 Schema migrations live in `pkg/statedb/migrations/` (`0001_init.sql` through
-`0019_envelope_encryption.sql`), are embedded in the binary, and are applied
+`0026_hub_instances.sql`), are embedded in the binary, and are applied
 automatically by `statedb.Open()` on every start. Each runs in a transaction and
 records itself in `schema_migrations`, so a crash mid-migration rolls back
 cleanly and the next start retries.
@@ -780,6 +848,18 @@ Read the `check` field first — it names which gate failed.
 `cloop db verify`. Under Kubernetes, check the PVC is bound and that no second
 replica is mounting it — SQLite is `ReadWriteOnce` and the chart pins
 `replicaCount: 1` for that reason.
+
+**The hub exits with "another cloop hub already controls this state".**
+Not a bug — a second hub was started against a control plane that already has
+one, and it refused rather than diverging. See
+[the control-plane lease](#the-control-plane-lease).
+
+**The hub logs "standing down" and exits after running normally.**
+It lost its lease: something else took over the control plane while this process
+was unable to renew for a full TTL, usually a long pause (a suspended node, a
+stalled volume) or a second hub that judged it dead. The process is right to
+exit — past that point another hub owns the state. Find the other hub with
+`cloop hub lease status` and decide which one should be running.
 
 `"check": "executors"` means the hub has nothing to dispatch to: strict mode is
 on and no isolating executor registered. The `remediation` field says what to
