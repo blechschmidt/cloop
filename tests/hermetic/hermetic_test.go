@@ -121,6 +121,18 @@ func scan(t *testing.T, root string) []pkgInfo {
 			case ".git", "node_modules", "testdata", "vendor":
 				return filepath.SkipDir
 			}
+			// A directory with its own go.mod is a different module, and
+			// this gate is about *this* one — `go test ./...` never builds
+			// it, so demanding a TestMain there is an instruction nobody can
+			// act on from this repository. Checking out an unrelated Go
+			// project into the tree (polyauth/ is one) would otherwise turn
+			// the gate red with failures that name files this module does
+			// not own.
+			if path != root {
+				if _, err := os.Stat(filepath.Join(path, "go.mod")); err == nil {
+					return filepath.SkipDir
+				}
+			}
 			return nil
 		}
 		if !strings.HasSuffix(path, ".go") {
