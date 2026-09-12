@@ -8,9 +8,11 @@ package auditretention
 
 import (
 	"bufio"
+	"compress/gzip"
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -130,8 +132,17 @@ func readSealIDs(t *testing.T, path string) []int64 {
 		t.Fatalf("open seal: %v", err)
 	}
 	defer f.Close()
+	var src io.Reader = f
+	if strings.HasSuffix(path, ".gz") {
+		zr, zerr := gzip.NewReader(f)
+		if zerr != nil {
+			t.Fatalf("open seal as gzip: %v", zerr)
+		}
+		defer zr.Close()
+		src = zr
+	}
 	var ids []int64
-	sc := bufio.NewScanner(f)
+	sc := bufio.NewScanner(src)
 	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
@@ -430,4 +441,62 @@ func rawQueryInt(db *statedb.DB, q string, out *int) error {
 	}
 	defer conn.Close()
 	return conn.QueryRow(q).Scan(out)
+}
+
+// TestSealIsCompressedByDefaultAndStillVerifiable pins the default and the
+// property that makes it safe: the digest covers the file as written, so a
+// compressed archive verifies through exactly the same path.
+func TestSealIsCompressedByDefaultAndStillVerifiable(t *testing.T) {
+	db := newDB(t)
+	base := time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)
+	rows := seed(t, db, base, 40)
+	dir := t.TempDir()
+
+	rep, err := Prune(db, Options{Before: rows[30].Timestamp, ExportDir: dir})
+	if err != nil {
+		t.Fatalf("prune: %v", err)
+	}
+	if !strings.HasSuffix(rep.ExportPath, ".jsonl.gz") {
+		t.Errorf("seal is not compressed by default: %s", rep.ExportPath)
+	}
+	if rep.Anchor.ExportFormat != "jsonl.gz" {
+		t.Errorf("anchor records format %q, want jsonl.gz", rep.Anchor.ExportFormat)
+	}
+	// Readable back, in full, in order.
+	ids := readSealIDs(t, rep.ExportPath)
+	if len(ids) != 30 {
+		t.Fatalf("compressed archive holds %d rows, want 30", len(ids))
+	}
+	statuses, err := VerifySeals(db)
+	if err != nil {
+		t.Fatalf("verify seals: %v", err)
+	}
+	if len(statuses) != 1 || !statuses[0].OK {
+		t.Fatalf("compressed seal failed digest verification: %+v", statuses)
+	}
+	if rep.ExportBytes <= 0 {
+		t.Error("anchor recorded no archive size")
+	}
+}
+
+func TestUncompressedSealOptOut(t *testing.T) {
+	db := newDB(t)
+	base := time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)
+	rows := seed(t, db, base, 12)
+	dir := t.TempDir()
+
+	rep, err := Prune(db, Options{Before: rows[6].Timestamp, ExportDir: dir, Uncompressed: true})
+	if err != nil {
+		t.Fatalf("prune: %v", err)
+	}
+	if !strings.HasSuffix(rep.ExportPath, ".jsonl") || strings.HasSuffix(rep.ExportPath, ".gz") {
+		t.Errorf("--no-compress produced %s", rep.ExportPath)
+	}
+	if got := readSealIDs(t, rep.ExportPath); len(got) != 6 {
+		t.Errorf("plain archive holds %d rows, want 6", len(got))
+	}
+	statuses, _ := VerifySeals(db)
+	if len(statuses) != 1 || !statuses[0].OK {
+		t.Errorf("plain seal failed digest verification: %+v", statuses)
+	}
 }

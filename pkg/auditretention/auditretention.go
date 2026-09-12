@@ -25,9 +25,18 @@
 // that has lost bytes cannot answer the question it was kept for. Converting a
 // seal into CEF or CSV afterwards is `cloop audit-log export`; converting the
 // other way is impossible.
+//
+// And why it is gzipped by default: an audit archive is written once, read
+// rarely, and enormously repetitive — successive rows differ in a few fields
+// of the same JSON shape. The prefix this project's own hub needed to seal was
+// 1.81 GB of JSONL on a filesystem with 1.9 GB free; compressed it is a small
+// fraction of that. The digest covers the file as written, so a compressed
+// seal is verified exactly the same way. --no-compress is there for an
+// operator who would rather grep the archive than gunzip it.
 package auditretention
 
 import (
+	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -66,6 +75,11 @@ type Options struct {
 	// BatchSize is how many rows are read and written per round trip. Zero
 	// selects a sane default. Bounded internally.
 	BatchSize int
+
+	// Uncompressed writes plain JSONL instead of gzip. The zero value
+	// compresses, which is the right default for a write-once, read-rarely,
+	// highly repetitive archive.
+	Uncompressed bool
 
 	// Now is injected by tests. Production leaves it nil.
 	Now func() time.Time
@@ -142,11 +156,15 @@ func Prune(db *statedb.DB, opts Options) (*Report, error) {
 	// The seal is named for the range it holds and the moment it was taken, so
 	// successive prunes never collide and a directory listing reads as a
 	// timeline without opening anything.
-	name := fmt.Sprintf("audit-%d-%d-%s.jsonl",
-		cand.FirstID, cand.ThroughID, now().UTC().Format("20060102T150405Z"))
+	ext, format := ".jsonl.gz", "jsonl.gz"
+	if opts.Uncompressed {
+		ext, format = ".jsonl", string(auditexport.FormatJSONL)
+	}
+	name := fmt.Sprintf("audit-%d-%d-%s%s",
+		cand.FirstID, cand.ThroughID, now().UTC().Format("20060102T150405Z"), ext)
 	finalPath := filepath.Join(dir, name)
 
-	digest, written, err := sealPrefix(db, cand, finalPath, opts.BatchSize)
+	digest, written, err := sealPrefix(db, cand, finalPath, opts.BatchSize, !opts.Uncompressed)
 	if err != nil {
 		return nil, err
 	}
@@ -162,7 +180,7 @@ func Prune(db *statedb.DB, opts Options) (*Report, error) {
 		PrunedThroughID: cand.ThroughID,
 		BoundaryHash:    cand.BoundaryHash,
 		ExportPath:      finalPath,
-		ExportFormat:    string(auditexport.FormatJSONL),
+		ExportFormat:    format,
 		ExportSHA256:    digest,
 		ExportBytes:     written,
 	})
@@ -186,7 +204,7 @@ func Prune(db *statedb.DB, opts Options) (*Report, error) {
 // to be caught. Afterwards the rows are gone from the database and the only
 // copy is this file; sealing a broken chain and then deleting the original
 // would convert a detectable tamper into an archived one.
-func sealPrefix(db *statedb.DB, cand statedb.AuditPruneCandidate, path string, batch int) (digest string, written int64, err error) {
+func sealPrefix(db *statedb.DB, cand statedb.AuditPruneCandidate, path string, batch int, compress bool) (digest string, written int64, err error) {
 	// Establish what the first row's prev_hash must be: the boundary of an
 	// earlier prune if there was one, genesis otherwise.
 	expectedPrev := statedb.AuditGenesisHash
@@ -199,7 +217,7 @@ func sealPrefix(db *statedb.DB, cand statedb.AuditPruneCandidate, path string, b
 		return "", 0, aerr
 	}
 
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".audit-seal-*.jsonl.tmp")
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".audit-seal-*.tmp")
 	if err != nil {
 		return "", 0, fmt.Errorf("auditretention: create seal: %w", err)
 	}
@@ -214,9 +232,17 @@ func sealPrefix(db *statedb.DB, cand statedb.AuditPruneCandidate, path string, b
 		return "", 0, fmt.Errorf("auditretention: chmod seal: %w", err)
 	}
 
+	// The hash and the byte count cover the file as written — compressed, if
+	// it is compressed — because that is what VerifySeals re-reads.
 	hasher := sha256.New()
 	counter := &countingWriter{}
-	sink := io.MultiWriter(tmp, hasher, counter)
+	file := io.MultiWriter(tmp, hasher, counter)
+	sink := file
+	var gz *gzip.Writer
+	if compress {
+		gz = gzip.NewWriter(file)
+		sink = gz
+	}
 
 	var (
 		seen    int64
@@ -265,6 +291,14 @@ func sealPrefix(db *statedb.DB, cand statedb.AuditPruneCandidate, path string, b
 	if lastRow != cand.BoundaryHash {
 		return "", 0, fmt.Errorf(
 			"auditretention: boundary row %d changed under the seal", cand.ThroughID)
+	}
+
+	// Flush the gzip trailer before hashing or syncing: without it the file is
+	// truncated and the digest is of an archive that cannot be read back.
+	if gz != nil {
+		if err := gz.Close(); err != nil {
+			return "", 0, fmt.Errorf("auditretention: finish compression: %w", err)
+		}
 	}
 
 	// Durability before deletion is the whole contract: the rows may only be

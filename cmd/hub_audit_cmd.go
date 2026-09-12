@@ -58,6 +58,7 @@ var (
 	hubAuditPruneExportDir string
 	hubAuditPruneDryRun    bool
 	hubAuditPruneActor     string
+	hubAuditPruneNoGzip    bool
 	hubAuditPruneYes       bool
 )
 
@@ -109,8 +110,9 @@ Examples:
 		rep, err := auditretention.Prune(log.DB(), auditretention.Options{
 			Before:    cutoff,
 			ExportDir: exportDir,
-			Actor:     actor,
-			DryRun:    hubAuditPruneDryRun,
+			Actor:        actor,
+			DryRun:       hubAuditPruneDryRun,
+			Uncompressed: hubAuditPruneNoGzip,
 		})
 		if err != nil {
 			return err
@@ -310,6 +312,8 @@ func init() {
 		"directory to seal the removed prefix into (default: audit.export_dir, else .cloop/audit-archive)")
 	hubAuditPruneCmd.Flags().BoolVar(&hubAuditPruneDryRun, "dry-run", false,
 		"report what would be sealed and removed without touching anything")
+	hubAuditPruneCmd.Flags().BoolVar(&hubAuditPruneNoGzip, "no-compress", false,
+		"write the archive as plain JSONL instead of gzip (roughly 10x larger)")
 	hubAuditPruneCmd.Flags().StringVar(&hubAuditPruneActor, "actor", "",
 		"identity to record on the anchor (default: cli)")
 	hubAuditPruneCmd.Flags().BoolVar(&hubAuditPruneYes, "yes", false,
