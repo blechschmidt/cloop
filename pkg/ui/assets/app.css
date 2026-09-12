@@ -666,6 +666,46 @@
   /* A task blocked on background work reads as running, not as whatever its
      own signal claimed. */
   .task-item.has-background-waiting { border-color:var(--yellow); background:rgba(210,153,34,.05); }
+  /* A task recorded as done whose whole summary is a provider refusal
+     (Task 20224). Same treatment as .task-background and for the same reason:
+     the status field says "done" and is wrong, so the contradiction has to be
+     visible in the list rather than only inside the task. */
+  .task-abort {
+    display:flex; align-items:center; gap:6px; flex-wrap:wrap;
+    margin-top:5px; padding:3px 8px; border-radius:4px;
+    font-size:11px; font-weight:500; border:1px solid transparent;
+  }
+  .task-abort .ab-glyph { font-size:12px; line-height:1; flex-shrink:0; }
+  .task-abort .ab-evidence {
+    font-family:var(--mono,monospace); opacity:.75; font-size:10px;
+    max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+  }
+  .task-abort.ab-open {
+    background:rgba(188,140,255,.12); color:var(--purple); border-color:rgba(188,140,255,.35);
+  }
+  /* Checked and allowed to stand: still a wrong ledger entry, so it stays on
+     the row, but muted — it is history now, not an open finding. */
+  .task-abort.ab-cleared {
+    background:rgba(139,148,158,.10); color:var(--muted); border-color:rgba(139,148,158,.25);
+  }
+  .task-item.has-aborted-outcome { border-color:var(--purple); background:rgba(188,140,255,.05); }
+  /* Overview banner for tasks the plan believes it finished that never ran
+     (Task 20224). Sits above the goal because it qualifies every figure on the
+     page: the task counts, the progress bar and the velocity are all computed
+     over a plan that was counting work which did not happen. */
+  .ledger-banner {
+    margin-bottom:16px; padding:12px 14px; border-radius:var(--radius);
+    background:rgba(188,140,255,.10); border:1px solid rgba(188,140,255,.35);
+  }
+  .ledger-banner-head {
+    display:flex; align-items:center; gap:8px;
+    font-size:13px; font-weight:700; color:var(--purple);
+  }
+  .ledger-banner-head .lb-glyph { font-size:14px; line-height:1; }
+  .ledger-banner-body { margin-top:6px; font-size:12px; color:var(--text); line-height:1.5; }
+  .ledger-banner-ids {
+    margin-top:6px; font-family:var(--mono,monospace); font-size:11px; color:var(--muted);
+  }
   .task-priority { padding:1px 5px; border-radius:3px; font-size:11px; font-weight:600; }
   .task-priority.p1 { background:rgba(248,81,73,.15);   color:var(--red); }
   .task-priority.p2 { background:rgba(210,153,34,.15);  color:var(--yellow); }
@@ -680,6 +720,12 @@
   .act.remove:hover { color:var(--red);    border-color:var(--red); }
   .act.edit:hover   { color:var(--accent); border-color:var(--accent); }
   .act.split:hover  { color:var(--accent); border-color:var(--accent); }
+  /* The two verdicts on a task recorded done against a refusal (Task 20224).
+     Reopen is the default action, so it carries colour at rest rather than
+     only on hover — the finding is the reason the row is highlighted. */
+  .act.reopen { color:var(--purple); border-color:rgba(188,140,255,.45); }
+  .act.reopen:hover { color:var(--purple); border-color:var(--purple); }
+  .act.keep:hover   { color:var(--muted);  border-color:var(--muted); }
 
   /* ── Drag-and-drop ── */
   .task-item[draggable] { cursor: grab; }

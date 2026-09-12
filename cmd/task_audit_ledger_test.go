@@ -40,7 +40,11 @@ func corruptedPlan() *pm.Plan {
 }
 
 func TestAuditPlanLedger_FindsOnlyCorruptedDoneTasks(t *testing.T) {
-	findings := auditPlanLedger(corruptedPlan())
+	plan := corruptedPlan()
+	findings, dirty := auditPlanLedger(plan)
+	if !dirty {
+		t.Error("classifying four fresh findings must mark the plan as needing a save")
+	}
 
 	want := map[int]orchestrator.AbortClass{
 		193:   orchestrator.AbortUsageLimit,
@@ -57,12 +61,37 @@ func TestAuditPlanLedger_FindsOnlyCorruptedDoneTasks(t *testing.T) {
 			t.Errorf("task #%d should not have been flagged (%s)", f.TaskID, f.Reason)
 			continue
 		}
-		if f.Class != wantClass {
+		if f.Class != string(wantClass) {
 			t.Errorf("task #%d class = %q, want %q", f.TaskID, f.Class, wantClass)
 		}
 		if f.Evidence == "" {
 			t.Errorf("task #%d has no evidence quoted — the report would not say what was seen", f.TaskID)
 		}
+		// The finding must be attached to the task, not just returned: the
+		// orchestrator's sweep and the dashboard read it from there.
+		task := plan.TaskByID(f.TaskID)
+		if task == nil || task.Abort == nil {
+			t.Errorf("task #%d: finding was not persisted onto the task", f.TaskID)
+			continue
+		}
+		if !task.Abort.Blocks() {
+			t.Errorf("task #%d: a fresh finding must block plan completion", f.TaskID)
+		}
+	}
+
+	// A plan carrying an open finding is not complete, whatever its statuses say.
+	if plan.IsComplete() {
+		t.Error("IsComplete() = true on a plan with four tasks that never ran")
+	}
+
+	// Re-classifying reuses what is already on the tasks rather than deriving
+	// it again, so a second pass reports the same findings and no new writes.
+	again, dirtyAgain := auditPlanLedger(plan)
+	if len(again) != len(findings) {
+		t.Errorf("second pass found %d findings, want %d", len(again), len(findings))
+	}
+	if dirtyAgain {
+		t.Error("second pass rewrote records that were already persisted")
 	}
 }
 
@@ -80,7 +109,7 @@ func TestAuditPlanLedger_EmptySummaryIsNotTheSignature(t *testing.T) {
 			{ID: 20043, Title: "Convert projects into isolated tenants", Status: pm.TaskDone, Result: "   \n\t "},
 		},
 	}
-	if findings := auditPlanLedger(plan); len(findings) != 0 {
+	if findings, _ := auditPlanLedger(plan); len(findings) != 0 {
 		t.Errorf("an absent summary is not evidence of a refusal; flagged %+v", findings)
 	}
 }
@@ -105,10 +134,16 @@ func TestReopenLedgerTasks_ResetsToPending(t *testing.T) {
 		t.Fatalf("Save: %v", err)
 	}
 
-	findings := auditPlanLedger(s.Plan)
-	reopened := reopenLedgerTasks(dir, s, findings)
-	if len(reopened) != 4 {
-		t.Fatalf("reopened %d task(s), want 4: %v", len(reopened), reopened)
+	if _, dirty := auditPlanLedger(s.Plan); !dirty {
+		t.Fatal("audit did not attach any finding to the plan")
+	}
+	auditLedgerReopen, auditLedgerClear = true, false
+	t.Cleanup(func() { auditLedgerReopen, auditLedgerClear, auditLedgerNote = false, false, "" })
+	if n := applyLedgerVerdicts(dir, s, nil); n != 4 {
+		t.Fatalf("reopened %d task(s), want 4", n)
+	}
+	if err := s.Save(); err != nil {
+		t.Fatalf("Save after reopen: %v", err)
 	}
 
 	reloaded, err := state.Load(dir)
@@ -156,8 +191,70 @@ func TestReopenLedgerTasks_ResetsToPending(t *testing.T) {
 		t.Errorf("task #20201 was already failed; audit must leave it alone, got %q", got)
 	}
 
-	// Re-running finds nothing: the audit is idempotent.
-	if again := auditPlanLedger(reloaded.Plan); len(again) != 0 {
+	// Re-running finds nothing: the audit is idempotent. The tasks still carry
+	// their records — that is how the UI explains why a finished-looking task
+	// is back in the queue — but a pending task is not an open finding.
+	if again, _ := auditPlanLedger(reloaded.Plan); len(again) != 0 {
 		t.Errorf("second audit still reports %d task(s): %+v", len(again), again)
+	}
+	if byID[193].Abort == nil {
+		t.Error("reopened task lost the record explaining why")
+	}
+	if len(reloaded.Plan.UnverifiedAborts()) != 0 {
+		t.Error("a reopened task must not keep blocking completion — it is pending now")
+	}
+}
+
+// TestApplyLedgerVerdicts_ClearRecordsTheReason covers the other verdict. Nine
+// of this project's fourteen corrupted entries were re-implemented by later
+// tasks; without a way to record that, the audit would reopen finished work
+// every time it ran.
+func TestApplyLedgerVerdicts_ClearRecordsTheReason(t *testing.T) {
+	dir := t.TempDir()
+	s, err := state.Init(dir, "goal", 0)
+	if err != nil {
+		t.Fatalf("state.Init: %v", err)
+	}
+	s.PMMode = true
+	s.Plan = corruptedPlan()
+	if err := s.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if _, dirty := auditPlanLedger(s.Plan); !dirty {
+		t.Fatal("audit did not attach any finding")
+	}
+
+	auditLedgerReopen, auditLedgerClear = false, true
+	auditLedgerNote = "re-landed by cmd/task_tdd.go"
+	t.Cleanup(func() { auditLedgerReopen, auditLedgerClear, auditLedgerNote = false, false, "" })
+
+	if n := applyLedgerVerdicts(dir, s, map[int]bool{193: true}); n != 1 {
+		t.Fatalf("cleared %d task(s), want 1", n)
+	}
+	if err := s.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	reloaded, err := state.Load(dir)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	task := reloaded.Plan.TaskByID(193)
+	if task.Status != pm.TaskDone {
+		t.Errorf("a cleared task stays done, got %q", task.Status)
+	}
+	if task.Abort == nil || !task.Abort.Cleared {
+		t.Fatalf("clearance did not persist: %+v", task.Abort)
+	}
+	if task.Abort.ClearedNote != auditLedgerNote {
+		t.Errorf("cleared note = %q, want %q", task.Abort.ClearedNote, auditLedgerNote)
+	}
+	if task.Abort.Blocks() {
+		t.Error("a cleared finding must stop blocking completion")
+	}
+	// The other three are untouched and still open.
+	open := reloaded.Plan.UnverifiedAborts()
+	if len(open) != 3 {
+		t.Errorf("clearing one finding changed %d others; %d still open, want 3", 4-len(open)-1, len(open))
 	}
 }

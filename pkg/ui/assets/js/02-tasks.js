@@ -225,7 +225,10 @@ function renderTasks(s) {
     // A task blocked on background work gets the running treatment on the row
     // itself, so the list reads correctly at a glance: it is not finished.
     const bgCls = (t.background && t.background.state === 'waiting') ? ' has-background-waiting' : '';
-    return '<div class="task-item '+esc(cls)+bgCls+'" draggable="true" data-task-id="'+tid+'" '+
+    // A task whose recorded "work" is a provider refusal gets the row marked
+    // too (Task 20224) — it is the opposite of finished, however it is filed.
+    const abCls = isOpenAbortFinding(t) ? ' has-aborted-outcome' : '';
+    return '<div class="task-item '+esc(cls)+bgCls+abCls+'" draggable="true" data-task-id="'+tid+'" '+
       'onclick="taskRowClick(event,'+tid+')" '+
       'style="cursor:pointer" '+
       'title="Click to view execution summary, output, and history" '+
@@ -247,6 +250,7 @@ function renderTasks(s) {
           fmtTimeEstimate(t)+
         '</div>'+
         fmtBackgroundWork(t)+
+        fmtAbortedOutcome(t)+
         fmtTaskLinks(t)+
       '</div>'+
       '<div class="task-actions">'+
@@ -346,9 +350,80 @@ function fmtTaskLinks(t) {
   return '<div class="task-links">'+items.join('')+'</div>';
 }
 
+// abortClassLabel turns an AbortClass into something an operator reads without
+// consulting the source.
+function abortClassLabel(cls) {
+  switch (cls) {
+    case 'usage_limit':     return 'provider usage limit';
+    case 'quota_exceeded':  return 'provider quota exhausted';
+    case 'auth_refused':    return 'credentials rejected';
+    case 'harness_refused': return 'agent harness refused to start';
+    case 'zero_artifact':   return 'no output produced';
+    case 'no_evidence':     return 'no evidence of work';
+    case 'empty_output':    return 'provider returned nothing';
+    default:                return cls || 'aborted';
+  }
+}
+
+// fmtAbortedOutcome renders a task whose stored summary is a provider or
+// harness refusal rather than work (Task 20224).
+//
+// Until now the only place this was visible was `cloop task audit-ledger` on
+// the CLI, which nothing and nobody ran — so fourteen tasks sat in this
+// project's own list looking finished, three of them for features that were
+// never written. It gets its own row for the same reason background work does:
+// the status says done and the status is wrong, and that has to be legible
+// without opening the task.
+function fmtAbortedOutcome(t) {
+  const ab = t && t.abort;
+  if (!ab || !ab.class) return '';
+  const label = abortClassLabel(ab.class);
+  if (ab.cleared) {
+    const note = ab.cleared_note || 'verified present';
+    return '<div class="task-abort ab-cleared" title="' +
+      esc('Recorded done on a ' + label + ', but the work was verified to exist: ' + note) + '">' +
+      '<span class="ab-glyph">✓</span>Ledger entry checked — ' + esc(note) +
+      '</div>';
+  }
+  // Only a task still filed as done is an open finding. Once reopened it is
+  // pending and already queued to run, so the record becomes history — worth
+  // showing (it explains why a task that looked finished is back in the queue)
+  // but not worth shouting about.
+  if (!isOpenAbortFinding(t)) {
+    return '<div class="task-abort ab-cleared" title="' +
+      esc('This task was recorded as done on a ' + label + ' and has been reopened, so the work can run.') + '">' +
+      '<span class="ab-glyph">↻</span>Reopened — had been recorded on a ' + esc(label) +
+      '</div>';
+  }
+  const reason = ab.reason || label;
+  return '<div class="task-abort ab-open" title="' +
+    esc('This task\'s entire recorded summary is a ' + label + ': "' + (ab.evidence || reason) +
+        '". It never ran, so the plan may not count it as done.') + '">' +
+    '<span class="ab-glyph">⚠</span>Never ran — recorded on a ' + esc(label) +
+    (ab.evidence ? '<span class="ab-evidence">' + esc(ab.evidence) + '</span>' : '') +
+    '</div>';
+}
+
+// isOpenAbortFinding reports whether a task is still *filed as finished* on a
+// refusal — the only state in which the two verdicts mean anything. This is the
+// same condition pm.Plan.UnverifiedAborts uses to block completion, so the
+// badge and the orchestrator agree about what counts as open.
+function isOpenAbortFinding(t) {
+  return !!(t && t.abort && t.abort.class && !t.abort.cleared && (t.status || 'pending') === 'done');
+}
+
 function buildStatusActions(t) {
   const cls = t.status || 'pending';
   let btns = '';
+  // A task recorded as done on a refusal needs the two verdicts the audit
+  // exists to collect, offered before the ordinary status buttons: run it for
+  // real, or record that a later task already did and stop flagging it.
+  if (isOpenAbortFinding(t)) {
+    btns += '<button class="act reopen" title="Reset to pending so the work actually runs" ' +
+            'onclick="reopenAbortedTask('+t.id+')">Reopen</button>';
+    btns += '<button class="act keep" title="Record that the work exists despite the refusal summary" ' +
+            'onclick="clearAbortedTask('+t.id+')">Keep</button>';
+  }
   if (cls !== 'done')        btns += '<button class="act done"  onclick="setStatus('+t.id+',\'done\')">Done</button>';
   if (cls !== 'skipped')     btns += '<button class="act skip"  onclick="setStatus('+t.id+',\'skipped\')">Skip</button>';
   if (cls !== 'failed')      btns += '<button class="act fail"  onclick="setStatus('+t.id+',\'failed\')">Fail</button>';

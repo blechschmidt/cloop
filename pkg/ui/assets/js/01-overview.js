@@ -131,6 +131,8 @@ function render(s) {
   // Status badge
   document.getElementById('statusBadge').innerHTML = statusBadge(s.status);
 
+  renderAbortedLedgerBanner(s);
+
   // Sync Run/Stop button visibility from project status. Without this the
   // buttons rely on WebSocket 'run_state' events, which may not have arrived
   // yet on initial render, page refresh, or project tab switch — leaving
@@ -234,6 +236,49 @@ function updateBrowserTitle() {
 
 // renderMultiProjectOverview shows a card grid summary of all projects on the
 // Overview tab when no specific project is selected in multi-project mode.
+// renderAbortedLedgerBanner surfaces tasks the plan believes it finished whose
+// entire recorded summary is a provider or harness refusal (Task 20224).
+//
+// The overview is where this belongs because of what it invalidates. Every
+// figure on this page — steps, tokens, the task counts the progress bar is
+// drawn from — is computed over a plan that counts those tasks as done. On this
+// project fourteen of them were counted for roughly a hundred iterations while
+// three of the features they named were absent from the tree entirely.
+function renderAbortedLedgerBanner(s) {
+  const el = document.getElementById('abortedLedgerBanner');
+  if (!el) return;
+  const tasks = (s && s.plan && s.plan.tasks) || [];
+  // Only tasks still *filed as finished* count. A reopened one is pending and
+  // already queued to run, so it is no longer a claim the plan is making about
+  // work that happened — same condition as pm.Plan.UnverifiedAborts.
+  const open = tasks.filter(isOpenAbortFinding);
+  if (!open.length) { el.style.display = 'none'; el.innerHTML = ''; return; }
+
+  // Group by class so the banner names the cause rather than just a count:
+  // "8 usage_limit" tells an operator to wait, "3 harness_refused" tells them
+  // to go and fix the host.
+  const byClass = {};
+  open.forEach(t => { byClass[t.abort.class] = (byClass[t.abort.class] || 0) + 1; });
+  const parts = Object.keys(byClass).sort().map(c =>
+    byClass[c] + ' × ' + esc(abortClassLabel(c)));
+
+  const ids = open.slice(0, 12).map(t => '#' + t.id).join(', ') +
+              (open.length > 12 ? ', …' : '');
+
+  el.style.display = '';
+  el.innerHTML =
+    '<div class="ledger-banner-head"><span class="lb-glyph">⚠</span>' +
+    open.length + ' task' + (open.length === 1 ? '' : 's') +
+    ' recorded as done never actually ran</div>' +
+    '<div class="ledger-banner-body">' +
+      'Their stored summary is a provider or harness refusal, not a description of work: ' +
+      parts.join(', ') + '. The plan does not count them as complete and auto-evolve ' +
+      'will not plan new work on top of them. Reopen each one from the Tasks tab to run it ' +
+      'for real, or record there that a later task already did it.' +
+    '</div>' +
+    '<div class="ledger-banner-ids">' + esc(ids) + '</div>';
+}
+
 function renderMultiProjectOverview() {
   const panel    = document.getElementById('multiProjectOverview');
   const initP    = document.getElementById('initPanel');

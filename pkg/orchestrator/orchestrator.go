@@ -1482,6 +1482,15 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		if o.wantParallel() {
 			return errSwitchMode
 		}
+		// A plan may not finish — or evolve — on the strength of an error
+		// message. Any task recorded as done whose summary is a provider or
+		// harness refusal goes back to pending here, before IsComplete is
+		// asked (Task 20224).
+		if n := o.sweepAbortedOutcomes(s); n > 0 {
+			color.New(color.FgYellow).Printf(
+				"↻ %d task(s) recorded as done never actually ran — reopened before checking completion\n", n)
+			continue
+		}
 		if s.Plan.IsComplete() {
 			if !o.log.IsJSON() {
 				if s.AutoEvolve {
@@ -3436,6 +3445,15 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 		// CLI flag wins — if --parallel was passed, stay parallel.
 		if !o.config.Parallel && !o.wantParallel() {
 			return errSwitchMode
+		}
+		// Same gate as the sequential loop: no completion and no evolve round
+		// on top of tasks whose recorded "work" is a refusal (Task 20224).
+		// Safe here for the same reason the mode switch above is — top of the
+		// loop, no batch in flight.
+		if n := o.sweepAbortedOutcomes(s); n > 0 {
+			color.New(color.FgYellow).Printf(
+				"↻ %d task(s) recorded as done never actually ran — reopened before checking completion\n", n)
+			continue
 		}
 		if s.Plan.IsComplete() {
 			if s.AutoEvolve {

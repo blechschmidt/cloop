@@ -1,0 +1,43 @@
+-- 0029_task_abort: record that a task's stored summary is a provider or harness
+-- refusal rather than work (Task 20224).
+--
+-- Task 20211 taught the orchestrator to recognise a refusal live and reset the
+-- task to pending. Everything recorded before that stayed wrong: fourteen tasks
+-- in this project's own ledger are marked done whose entire summary is "You've
+-- hit your limit" or the harness declining to run under root. The plan counted
+-- them, called itself complete, and auto-evolve planned new work on top of
+-- features that had never been written.
+--
+-- Without this column the finding cannot outlive the process that made it, and
+-- the two things that must persist are:
+--
+--   * the classification and its evidence, so the UI can show why a task was
+--     reopened without re-deriving it from prose on every read; and
+--   * the *verdict*, for the nine of those fourteen that a later task quietly
+--     re-implemented. Their refusal summary is genuine but the work exists, so
+--     the entry must stay visible without being reopened forever. An audit that
+--     cannot record "checked, it is fine" is an audit that gets switched off —
+--     which is exactly what happened to the previous ledger command.
+--
+-- Column:
+--
+--   abort  a JSON object, or '' when the summary is not a refusal.
+--          Fields: class, reason, evidence, detected_at, summary_fingerprint,
+--          and the clearance set cleared/cleared_by/cleared_note/cleared_at.
+--
+-- summary_fingerprint binds the record to the summary it judged. When a
+-- reopened task runs again and produces real work the fingerprint stops
+-- matching, and the record — clearance included — is discarded rather than
+-- masking the new outcome.
+--
+-- JSON rather than a column per field for the same reasons as plan_tasks.
+-- background (0025): the value is a small nested record always read and written
+-- whole, never filtered or aggregated on. tags and annotations set the
+-- precedent in this table.
+--
+-- NOT NULL DEFAULT '' means every row predating this migration reads back as
+-- the empty string, which the loader maps to "no abort record" — so no backfill
+-- runs and no NULL handling is needed. The orchestrator's sweep reclassifies
+-- those rows on its next pass anyway.
+
+ALTER TABLE plan_tasks ADD COLUMN abort TEXT NOT NULL DEFAULT '';

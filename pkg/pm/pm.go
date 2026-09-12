@@ -229,6 +229,11 @@ type Task struct {
 	// to be finished (Task 20205), so the UI can show why a task waited, or
 	// why it was not accepted as done.
 	Background *BackgroundWork `json:"background,omitempty"`
+	// Abort records that this task's stored summary is a provider or harness
+	// refusal rather than work (Task 20224). It is set by the orchestrator's
+	// pre-completion sweep and is what stops a plan full of usage-limit
+	// messages counting as finished. See abort.go for the lifecycle.
+	Abort *TaskAbort `json:"abort,omitempty"`
 }
 
 // BackgroundWork records processes an agent left running after it reported the
@@ -393,12 +398,22 @@ func (p *Plan) ReadyTasks() []*Task {
 
 // IsComplete returns true if all tasks are done or skipped, or if remaining
 // pending tasks are permanently blocked (all their deps include a failed task).
+//
+// A task recorded as done whose stored summary is an uncleared provider or
+// harness refusal does not count (Task 20224). It never ran, so a plan resting
+// on it is not finished — and answering otherwise is what let auto-evolve plan
+// new work on top of features that were never written. The orchestrator's sweep
+// reopens such tasks, but the guard lives here so that every caller asking
+// whether the plan is done gets the same truthful answer.
 func (p *Plan) IsComplete() bool {
 	if len(p.Tasks) == 0 {
 		return false
 	}
 	for _, t := range p.Tasks {
 		if t.Status == TaskInProgress {
+			return false
+		}
+		if t.Status == TaskDone && t.Abort.Blocks() {
 			return false
 		}
 		if t.Status == TaskPending {

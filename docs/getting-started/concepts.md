@@ -201,13 +201,26 @@ TASK_FAILED    the task could not be completed
 it equals the token exactly — `TASK_DONE.` or `Result: TASK_DONE` does not
 count. The first match in those five lines wins.
 
-**No signal at all is treated as success** — the task is marked `done` with an
-annotation saying it was implicitly completed, so a chatty agent that ends on a
-summary paragraph gets the benefit of the doubt. Unless it reads as a
-*question*: an unsignalled output that looks like a request for clarification
-is re-prompted (twice) to decide for itself, and failed if that does not
-resolve, rather than laundered into "done". The parallel loop skips the
-re-prompt and fails it immediately.
+**No signal needs positive evidence.** An unsignalled response is given the
+benefit of the doubt — marked `done` with an annotation saying it was
+implicitly completed, so a chatty agent that ends on a summary paragraph is not
+punished for it — but only if there is something to show for the run: a change
+in the repository, or a non-empty artifact. The agent process exiting is not
+evidence. Before that rule existed, every provider refusal became a completed
+task, and fourteen tasks in cloop's own ledger are recorded as done whose entire
+summary is "You've hit your limit" (`pkg/orchestrator/abort.go`).
+
+An unsignalled output that is a recognisable refusal — a usage limit, an
+exhausted quota, a rejected credential, a harness declining to start — is
+classified as an **abort** rather than a failure. The distinction matters: a
+failed task is a judgement about the work, an aborted one is the absence of any
+work to judge. It resets to `pending`, is journalled under its own event type,
+and the run waits out the window or pauses for an operator rather than burning
+the rest of the plan against the same wall.
+
+An unsignalled output that reads as a *question* is re-prompted (twice) to
+decide for itself, and failed if that does not resolve, rather than laundered
+into "done". The parallel loop skips the re-prompt and fails it immediately.
 
 One rule overrides even an explicit `TASK_DONE`. If the agent left processes
 running — a build, a test suite, a training job — cloop waits for them, and a
@@ -259,7 +272,24 @@ per process.
 
 When no task is runnable and the plan is complete, the run normally ends with
 status `complete`. With `--auto-evolve` it does not: the queue draining is the
-trigger for a new round of work. An evolve round calls the provider with
+trigger for a new round of work.
+
+Before either can happen, the loop sweeps the plan for tasks it believes it
+finished whose stored summary is a refusal rather than work
+(`pkg/orchestrator/abort_sweep.go`). This is the historical half of the rule
+above: aborts have been recognised live since the evidence rule landed, but
+everything recorded before it stayed marked `done`, and a plan resting on those
+entries is not finished. Each one found is reset to `pending`, and the
+classification is persisted on the task, so the reason survives a reload and the
+dashboard can show it without re-reading the prose.
+
+The audit does not run in only one direction. A refusal summary is genuine
+evidence that *that run* produced nothing, but the work may exist anyway because
+a later task re-landed it — nine of cloop's own fourteen turned out that way. So
+a finding can be **cleared**, with a note recording where the work actually
+landed; a cleared entry stays visible as a bad ledger entry but stops blocking
+completion. Both verdicts are available from the Tasks tab and from
+`cloop task audit-ledger --reopen|--clear`. An evolve round calls the provider with
 `pm.EvolveDiscoverPrompt`, which shows the completed tasks and their result
 summaries and asks for **1 to 5 new improvement tasks** focused on features,
 tests, documentation, performance, security, UX and refactoring. `--innovate`

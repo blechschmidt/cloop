@@ -251,6 +251,13 @@
       <!-- Project overview -->
       <div id="projectPanel" style="display:none">
 
+        <!-- Tasks recorded as done whose stored summary is a provider or
+             harness refusal (Task 20224). Hidden unless there are any. Placed
+             above the goal because it qualifies every number below it: the
+             progress counts, the velocity and the completion percentage are
+             all computed over tasks that include work which never happened. -->
+        <div id="abortedLedgerBanner" class="ledger-banner" style="display:none"></div>
+
         <!-- Goal + status -->
         <div class="section">
           <div class="section-title">Project Goal</div>

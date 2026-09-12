@@ -358,6 +358,12 @@ func (s *Server) routeTable() []routeSpec {
 		{Pattern: "DELETE /api/tasks/{id}", Handler: s.handleDeleteTask, Perm: task, Scope: scopeProject},
 		{Pattern: "GET /api/tasks/{id}/blocker", Handler: s.handleTaskBlocker, Perm: read, Scope: scopeProject},
 		{Pattern: "GET /api/tasks/{id}/details", Handler: s.handleTaskDetails, Perm: read, Scope: scopeProject},
+		// Aborted-outcome verdicts (Task 20224). Both change what the plan
+		// believes about itself — clearing one is what allows the plan to be
+		// counted complete — so they are `task`, not `read`. Neither spends a
+		// provider call, so neither is `start`. See ledger_api.go.
+		{Pattern: "POST /api/tasks/{id}/reopen-aborted", Handler: s.handleTaskReopenAborted, Perm: task, Scope: scopeProject},
+		{Pattern: "POST /api/tasks/{id}/clear-aborted", Handler: s.handleTaskClearAborted, Perm: task, Scope: scopeProject},
 		// Reproduction (Task 20221). The reads are `read` because a verdict is
 		// a statement about code the caller can already see; the POST is
 		// `start` because it makes the fleet execute a model and a test suite.

@@ -39,6 +39,34 @@ window.setStatus = function(id, status) {
   }).catch(() => toast('Request failed', 'err'));
 };
 
+// reopenAbortedTask and clearAbortedTask record the two verdicts available on a
+// task whose stored summary is a provider refusal rather than work
+// (Task 20224). Until now the only way to act on one of these findings was
+// `cloop task audit-ledger --reopen` on the CLI — which is why fourteen of them
+// sat unnoticed in this project's own plan for about a hundred iterations.
+window.reopenAbortedTask = function(id) {
+  api(pUrl('/api/tasks/'+id+'/reopen-aborted'), {}).then(d => {
+    if (d.ok) { toast('Task '+id+' reopened — it never ran', 'ok'); refreshState(); }
+    else toast(d.error||'Reopen failed', 'err');
+  }).catch(() => toast('Request failed', 'err'));
+};
+
+// The note is mandatory server-side: a clearance without a reason cannot be
+// told apart from giving up on the audit, and an audit nobody can close is an
+// audit that gets ignored. Prompt rather than a modal because the answer is one
+// line ("re-landed by Task N") and this is a rare, deliberate action.
+window.clearAbortedTask = function(id) {
+  const note = window.prompt(
+    'This task is recorded as done but its summary is a provider refusal.\n\n' +
+    'Where did the work actually land? (e.g. "re-implemented by Task 20016")');
+  if (note === null) return;
+  if (!note.trim()) { toast('A note is required', 'err'); return; }
+  api(pUrl('/api/tasks/'+id+'/clear-aborted'), {note: note.trim()}).then(d => {
+    if (d.ok) { toast('Task '+id+': ledger entry checked', 'ok'); refreshState(); }
+    else toast(d.error||'Could not clear the finding', 'err');
+  }).catch(() => toast('Request failed', 'err'));
+};
+
 window.moveTask = function(id, direction) {
   api(pUrl('/api/task/move'), {id, direction}).then(d => {
     if (d.ok) { refreshState(); }
@@ -361,6 +389,31 @@ function _renderTaskDetails(d) {
         ? '<div class="td-text"><code>'+bg.commands.map(esc).join('</code>, <code>')+'</code></div>'
         : '')+
       '</div>';
+  }
+
+  // The stored summary is a provider or harness refusal (Task 20224). Placed
+  // above the result for the same reason as background work: it qualifies
+  // everything below it. The "Result" section is about to render an error
+  // message under a heading that implies it describes work, and the reader
+  // needs to know that before they read it.
+  if (t.abort && t.abort.class) {
+    const ab = t.abort;
+    const label = (typeof abortClassLabel === 'function') ? abortClassLabel(ab.class) : ab.class;
+    if (ab.cleared) {
+      html += '<div class="td-section"><h3>Ledger entry checked</h3>'+
+        '<div class="td-text">This task was recorded as done on a '+esc(label)+
+        ', so its summary below is not a description of work. It was verified anyway'+
+        (ab.cleared_by ? ' by '+esc(ab.cleared_by) : '')+': '+esc(ab.cleared_note || '')+'</div>'+
+        '</div>';
+    } else {
+      html += '<div class="td-section fail"><h3>This task never ran</h3>'+
+        '<div class="td-text">Its entire recorded summary is a '+esc(label)+
+        ', not a description of work, so the plan does not count it as done. '+
+        'Reopen it to run the work for real, or — if a later task already did it — '+
+        'record that from the task list so it stops blocking completion.</div>'+
+        (ab.evidence ? '<div class="td-text"><code>'+esc(ab.evidence)+'</code></div>' : '')+
+        '</div>';
+    }
   }
 
   if (t.description) {

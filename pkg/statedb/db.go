@@ -573,7 +573,7 @@ func (d *DB) LoadTask(id int) (*pm.Task, error) {
 			estimated_minutes, actual_minutes, artifact_path, failure_diagnosis,
 			tags, fail_count, heal_attempts, annotations, condition_expr,
 			recurrence, next_run_at, requires_approval, approved, max_minutes,
-			write_back_branch, write_back_commit, background
+			write_back_branch, write_back_commit, background, abort
 		FROM plan_tasks WHERE id = ? LIMIT 1`, id)
 	if err != nil {
 		return nil, classifyDriverErr(err)
@@ -588,7 +588,7 @@ func (d *DB) LoadTask(id int) (*pm.Task, error) {
 	t := &pm.Task{}
 	var (
 		status, role, depsJSON, tagsJSON, annJSON   string
-		bgJSON                                      string
+		bgJSON, abortJSON                           string
 		startedAt, completedAt, deadline, nextRunAt sql.NullString
 		reqApproval, approved                       int
 	)
@@ -602,7 +602,7 @@ func (d *DB) LoadTask(id int) (*pm.Task, error) {
 		&tagsJSON, &t.FailCount, &t.HealAttempts,
 		&annJSON, &t.Condition, &t.Recurrence,
 		&nextRunAt, &reqApproval, &approved, &t.MaxMinutes,
-		&t.WriteBackBranch, &t.WriteBackCommit, &bgJSON,
+		&t.WriteBackBranch, &t.WriteBackCommit, &bgJSON, &abortJSON,
 	); err != nil {
 		return nil, classifyDriverErr(err)
 	}
@@ -612,6 +612,7 @@ func (d *DB) LoadTask(id int) (*pm.Task, error) {
 	_ = json.Unmarshal([]byte(tagsJSON), &t.Tags)
 	_ = json.Unmarshal([]byte(annJSON), &t.Annotations)
 	t.Background = decodeBackground(bgJSON)
+	t.Abort = decodeAbort(abortJSON)
 	t.RequiresApproval = reqApproval == 1
 	t.Approved = approved == 1
 	if startedAt.Valid {
@@ -723,8 +724,8 @@ func upsertTaskTx(tx *sql.Tx, t *pm.Task) error {
 			estimated_minutes, actual_minutes, artifact_path, failure_diagnosis,
 			tags, fail_count, heal_attempts, annotations, condition_expr,
 			recurrence, next_run_at, requires_approval, approved, max_minutes,
-			write_back_branch, write_back_commit, background
-		) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+			write_back_branch, write_back_commit, background, abort
+		) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(id) DO UPDATE SET
 			title=excluded.title, description=excluded.description,
 			priority=excluded.priority, status=excluded.status, role=excluded.role,
@@ -744,7 +745,7 @@ func upsertTaskTx(tx *sql.Tx, t *pm.Task) error {
 			approved=excluded.approved, max_minutes=excluded.max_minutes,
 			write_back_branch=excluded.write_back_branch,
 			write_back_commit=excluded.write_back_commit,
-			background=excluded.background`,
+			background=excluded.background, abort=excluded.abort`,
 		t.ID, t.Title, t.Description, t.Priority, string(t.Status), string(t.Role),
 		string(depsJSON), t.Result,
 		startedAt, completedAt, deadline,
@@ -757,6 +758,7 @@ func upsertTaskTx(tx *sql.Tx, t *pm.Task) error {
 		boolInt(t.RequiresApproval), boolInt(t.Approved),
 		t.MaxMinutes,
 		t.WriteBackBranch, t.WriteBackCommit, encodeBackground(t.Background),
+		encodeAbort(t.Abort),
 	)
 	return err
 }
@@ -768,7 +770,7 @@ func loadTasks(conn *sql.DB) ([]*pm.Task, error) {
 			estimated_minutes, actual_minutes, artifact_path, failure_diagnosis,
 			tags, fail_count, heal_attempts, annotations, condition_expr,
 			recurrence, next_run_at, requires_approval, approved, max_minutes,
-			write_back_branch, write_back_commit, background
+			write_back_branch, write_back_commit, background, abort
 		FROM plan_tasks ORDER BY id`)
 	if err != nil {
 		return nil, err
@@ -780,7 +782,7 @@ func loadTasks(conn *sql.DB) ([]*pm.Task, error) {
 		t := &pm.Task{}
 		var (
 			status, role, depsJSON, tagsJSON, annJSON   string
-			bgJSON                                      string
+			bgJSON, abortJSON                           string
 			startedAt, completedAt, deadline, nextRunAt sql.NullString
 			reqApproval, approved                       int
 		)
@@ -794,7 +796,7 @@ func loadTasks(conn *sql.DB) ([]*pm.Task, error) {
 			&tagsJSON, &t.FailCount, &t.HealAttempts,
 			&annJSON, &t.Condition, &t.Recurrence,
 			&nextRunAt, &reqApproval, &approved, &t.MaxMinutes,
-			&t.WriteBackBranch, &t.WriteBackCommit, &bgJSON,
+			&t.WriteBackBranch, &t.WriteBackCommit, &bgJSON, &abortJSON,
 		); err != nil {
 			return nil, err
 		}
@@ -804,6 +806,7 @@ func loadTasks(conn *sql.DB) ([]*pm.Task, error) {
 		_ = json.Unmarshal([]byte(tagsJSON), &t.Tags)
 		_ = json.Unmarshal([]byte(annJSON), &t.Annotations)
 		t.Background = decodeBackground(bgJSON)
+		t.Abort = decodeAbort(abortJSON)
 		t.RequiresApproval = reqApproval == 1
 		t.Approved = approved == 1
 		if startedAt.Valid {
@@ -1029,4 +1032,37 @@ func decodeBackground(raw string) *pm.BackgroundWork {
 		return nil
 	}
 	return &b
+}
+
+// encodeAbort serialises a task's refusal record for the plan_tasks.abort
+// column (Task 20224). Same shape as encodeBackground above: absent is the
+// empty string, not the JSON literal "null", so a row written by this build is
+// indistinguishable from one predating migration 0029.
+func encodeAbort(a *pm.TaskAbort) string {
+	if a == nil {
+		return ""
+	}
+	raw, err := json.Marshal(a)
+	if err != nil {
+		return ""
+	}
+	return string(raw)
+}
+
+// decodeAbort parses the abort column, treating anything unreadable as "no
+// record".
+//
+// A record without a class is discarded rather than kept: the class is what the
+// sweep and the UI key off, and a classless record would block plan completion
+// while being unable to say why. Losing it costs one reclassification on the
+// next sweep — the summary it describes is still on the task.
+func decodeAbort(raw string) *pm.TaskAbort {
+	if raw == "" || raw == "null" {
+		return nil
+	}
+	var a pm.TaskAbort
+	if err := json.Unmarshal([]byte(raw), &a); err != nil || a.Class == "" {
+		return nil
+	}
+	return &a
 }

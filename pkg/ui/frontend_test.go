@@ -88,6 +88,15 @@ var quotasAPISource string
 //go:embed reproduce_api.go
 var reproduceAPISource string
 
+// ledgerAPISource is pkg/ui/ledger_api.go (Task 20224). Embedded for the same
+// reason as tokens_api.go — its two handlers are registered routes whose
+// accepted verbs the route-drift tests read out of the handler bodies — and
+// because both call broadcastStateDiff, which the broadcast-reachability scan
+// would otherwise miss.
+//
+//go:embed ledger_api.go
+var ledgerAPISource string
+
 // routesSource is pkg/ui/routes.go, which holds the declarative route table
 // (Task 20164). Routes moved out of server.go when registration started
 // carrying a required permission, so the architectural tests that scan for
@@ -104,7 +113,7 @@ func allUISources() string {
 	return serverSource + "\n" + providerCallsSource + "\n" + executorsAPISource +
 		"\n" + auditAPISource + "\n" + secretsAPISource + "\n" + installScriptSource +
 		"\n" + tokensAPISource + "\n" + sessionsAPISource + "\n" + quotasAPISource +
-		"\n" + reproduceAPISource
+		"\n" + reproduceAPISource + "\n" + ledgerAPISource
 }
 
 // dashboardSource is the whole dashboard front end — the rendered index.html
