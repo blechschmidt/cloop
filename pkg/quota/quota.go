@@ -66,6 +66,18 @@ const (
 	// concurrent run holds an executor slot and spends tokens.
 	ResConcurrentTasks Resource = "max_concurrent_tasks"
 
+	// ResConcurrentReproductions caps how many hermetic reproductions
+	// (Task 20221) an identity may have executing at once.
+	//
+	// Deliberately its own gauge rather than a share of ResConcurrentTasks.
+	// A reproduction costs about what the run it reproduces cost — a full
+	// sandbox, a full model call, and the project's test suite on two trees —
+	// so an auditor sweeping a quarter of commits would drain the same pool the
+	// tenant's real work draws from. Counting them apart means a reproduction
+	// storm slows reproductions and nothing else, which is the non-destructive
+	// contract extended from the repository to the fleet's capacity.
+	ResConcurrentReproductions Resource = "max_concurrent_reproductions"
+
 	// ResExecutors caps how many executors an identity may enrol. Enrolling
 	// a device grants it the right to run workloads, so an unbounded tenant
 	// can grow the trusted compute base without an admin ever looking.
@@ -88,6 +100,7 @@ const (
 var AllResources = []Resource{
 	ResProjects,
 	ResConcurrentTasks,
+	ResConcurrentReproductions,
 	ResExecutors,
 	ResSessions,
 	ResDailyTokens,

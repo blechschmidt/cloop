@@ -30,12 +30,15 @@ package artifact
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/atomicfile"
+	"github.com/blechschmidt/cloop/pkg/pm"
 )
 
 // SandboxRunFile is where the current run's environment record lives, relative
@@ -169,4 +172,103 @@ func (r SandboxRecord) frontmatter() string {
 		fmt.Fprintf(&b, "sandbox_setup_sha256: %q\n", r.SetupHash)
 	}
 	return b.String()
+}
+
+// frontmatterKeys maps each frontmatter key back to the field it came from.
+//
+// It is derived from frontmatter above by reading it, and the round-trip test
+// in sandbox_test.go is what keeps the two honest: a field added to the writer
+// without a line here would silently stop being recoverable, and "silently" is
+// the whole problem — provenance that is absent looks exactly like provenance
+// for a run that had none.
+var frontmatterKeys = map[string]func(*SandboxRecord, string){
+	"executor_id":             func(r *SandboxRecord, v string) { r.ExecutorID = v },
+	"executor_kind":           func(r *SandboxRecord, v string) { r.ExecutorKind = v },
+	"sandbox_spec_sha256":     func(r *SandboxRecord, v string) { r.SpecHash = v },
+	"sandbox_image_requested": func(r *SandboxRecord, v string) { r.RequestedImage = v },
+	"sandbox_image":           func(r *SandboxRecord, v string) { r.PinnedImage = v },
+	"sandbox_setup_sha256":    func(r *SandboxRecord, v string) { r.SetupHash = v },
+}
+
+// maxFrontmatterBytes bounds how far into an artifact the frontmatter scan
+// reads. The block is a handful of short lines; anything past this is the
+// agent's own transcript, which is exactly the unbounded input Task 20220 made
+// every other artifact read stop trusting.
+const maxFrontmatterBytes = 16 << 10
+
+// ReadTaskSandbox recovers the sandbox a past task actually ran in.
+//
+// # Why this exists alongside LoadSandboxRun
+//
+// They read the same record from two different places, and only one of them is
+// durable. LoadSandboxRun reads .cloop/sandbox-run.json, which the control
+// plane overwrites before every run — it answers "what am I running in right
+// now", and by the time anyone asks about task 42 it describes some later task.
+// The per-task copy stamped into the artifact's frontmatter is the one that
+// survives, so it is the one a reproduction has to read.
+//
+// Returns ok=false for a task with no artifact, no frontmatter, or no sandbox
+// stamp — the ordinary case for a run that predates the stamp or executed on
+// the host. A caller must treat that as "unknown", never as "unsandboxed".
+func ReadTaskSandbox(workDir string, task *pm.Task) (SandboxRecord, bool) {
+	if task == nil || strings.TrimSpace(task.ArtifactPath) == "" {
+		return SandboxRecord{}, false
+	}
+	abs := resolveArtifactPath(workDir, task.ArtifactPath)
+	f, err := os.Open(abs) //nolint:gosec // path is derived from the project's own state
+	if err != nil {
+		return SandboxRecord{}, false
+	}
+	defer f.Close()
+
+	head := make([]byte, maxFrontmatterBytes)
+	n, err := io.ReadFull(f, head)
+	if n == 0 && err != nil {
+		return SandboxRecord{}, false
+	}
+	return ParseSandboxFrontmatter(string(head[:n]))
+}
+
+// ParseSandboxFrontmatter extracts the sandbox stamp from a task artifact's
+// leading YAML frontmatter block.
+//
+// It is deliberately a hand-rolled scan of `key: value` lines rather than a
+// YAML decode. The block is written by frontmatter above one line at a time,
+// the keys are a closed set, and a partial read that lands mid-block must yield
+// the keys it did see rather than a parse error for the truncated last line —
+// which is what a real YAML parser would give.
+func ParseSandboxFrontmatter(s string) (SandboxRecord, bool) {
+	s = strings.TrimLeft(s, "\ufeff \t\r\n")
+	if !strings.HasPrefix(s, "---\n") {
+		return SandboxRecord{}, false
+	}
+	body := s[len("---\n"):]
+	if end := strings.Index(body, "\n---"); end >= 0 {
+		body = body[:end]
+	}
+
+	var rec SandboxRecord
+	for _, line := range strings.Split(body, "\n") {
+		key, value, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
+		}
+		set, known := frontmatterKeys[strings.TrimSpace(key)]
+		if !known {
+			continue
+		}
+		value = strings.TrimSpace(value)
+		// Every value the writer emits is %q-quoted. An unquoted one is a
+		// truncated or hand-edited line; take it verbatim rather than drop it.
+		if unquoted, err := strconv.Unquote(value); err == nil {
+			value = unquoted
+		}
+		if value != "" {
+			set(&rec, value)
+		}
+	}
+	if rec.IsZero() {
+		return SandboxRecord{}, false
+	}
+	return rec, true
 }

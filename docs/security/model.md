@@ -1000,12 +1000,13 @@ compromised account before anyone looks. `pkg/globalbudget` predates this and
 is keyed by **project**, which is the wrong axis under multi-tenancy: a user
 who can create projects can create budget headroom.
 
-Six resources are capped per identity (`pkg/quota/quota.go`):
+Seven resources are capped per identity (`pkg/quota/quota.go`):
 
 | Resource | Caps | Enforced at |
 | --- | --- | --- |
 | `max_projects` | projects owned at once | `POST /api/projects/new` |
 | `max_concurrent_tasks` | runs executing at once | `POST /api/run` |
+| `max_concurrent_reproductions` | reproductions executing at once | `POST /api/tasks/{id}/reproduce` |
 | `max_executors` | executors enrolled | `POST /api/executors/enroll` |
 | `max_sessions` | concurrent signed-in sessions | session creation |
 | `daily_token_budget` | input+output tokens per UTC day | `POST /api/run` |
@@ -1026,6 +1027,18 @@ ui:
         value: sre@example.com
         limits: {max_executors: 50}
 ```
+
+`max_concurrent_reproductions` is a gauge of its own rather than a share of
+`max_concurrent_tasks`, because a reproduction (see
+[Proving a commit reproduces](../guides/reproduce.md)) costs about what the run
+it reproduces cost: a full sandbox, a full model call, and the project's test
+suite on two trees. An auditor sweeping a quarter of commits would otherwise
+drain the pool the tenant's real work draws from. Counting them apart means a
+reproduction storm slows reproductions and nothing else.
+
+Unlike the other gauges, it is not rebuilt from live state on restart. A
+reproduction is a synchronous dispatch held by the hub process that started it,
+so none survives a restart and reconciliation zeroes the counter.
 
 **Precedence** is per-resource and most-specific-wins: `sub` > `email` >
 `role` > `group` > `defaults`. A binding that sets only `max_projects` does

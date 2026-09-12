@@ -263,6 +263,11 @@ func quotaDenialMessage(d *quota.Denial) string {
 		return fmt.Sprintf("you already have %.0f of %.0f runs in progress — "+
 			"wait for one to finish, or ask an administrator to raise your concurrency quota",
 			d.Used, d.Limit)
+	case quota.ResConcurrentReproductions:
+		return fmt.Sprintf("you already have %.0f of %.0f reproductions running — "+
+			"a reproduction runs a full sandbox and the project's tests, so they are capped separately "+
+			"from your runs; wait for one to finish, or ask an administrator to raise the cap",
+			d.Used, d.Limit)
 	case quota.ResProjects:
 		return fmt.Sprintf("you own %.0f of %.0f permitted projects — "+
 			"delete one, or ask an administrator to raise your project quota", d.Used, d.Limit)

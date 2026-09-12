@@ -91,6 +91,11 @@ Five pages in order, indexed at
   a running task, and for the workspace fetch that happens before one), a
   kubeconfig, a registry login, environment variables, and an Internet egress
   lease, with TTLs, constraints, and real command output.
+- **[Proving a commit reproduces](guides/reproduce.md)** — `cloop task
+  reproduce`: re-running a task in a fresh sandbox and comparing the commit it
+  returns against the original. The four verdicts, why equivalence is gated on
+  your own test suite rather than an LLM's opinion, how the base commit is
+  recovered, and the non-destructive contract.
 - **[Kata Containers](guides/kata.md)** — giving a sandbox its own kernel:
   installing Kata, registering it with docker or podman, the `/dev/kvm` and
   nested-virtualization prerequisite, the Kubernetes RuntimeClass path, and how

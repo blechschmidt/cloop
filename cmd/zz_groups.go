@@ -275,11 +275,16 @@ var taskCommandGroups = map[string]string{
 	"narrative":        groupTaskShape,
 
 	// Verify and analyze — evidence about a task that already ran.
-	"stats":            groupTaskVerify,
-	"generate-tests":   groupTaskVerify,
-	"tdd":              groupTaskVerify,
-	"replay":           groupTaskVerify,
-	"replay-suite":     groupTaskVerify,
+	"stats":          groupTaskVerify,
+	"generate-tests": groupTaskVerify,
+	"tdd":            groupTaskVerify,
+	"replay":         groupTaskVerify,
+	"replay-suite":   groupTaskVerify,
+	"reproduce":      groupTaskVerify,
+	// reproduce-exec is the in-sandbox half of reproduce (Task 20221). Hidden,
+	// because it is an argv the executor builds rather than something a person
+	// runs — but still a registered subcommand, so the gate requires a row.
+	"reproduce-exec":   groupTaskVerify,
 	"checkpoint-diff":  groupTaskVerify,
 	"time-travel":      groupTaskVerify,
 	"audit-ledger":     groupTaskVerify,

@@ -176,6 +176,105 @@ window.taskDetailsEditCurrent = function() {
   if (id) openEditModal(id);
 };
 
+// ── Reproduction (Task 20221) ─────────────────────────────────────────────
+//
+// The provenance call is cheap and runs when the modal opens; it decides
+// whether the button is even pressable and supplies the tooltip explaining
+// why not. That ordering matters: a Reproduce button that is always enabled
+// and fails with "no recorded commit" on every host-run task would train
+// people to ignore it, and the tasks it cannot answer for are the majority on
+// a hub that has not adopted isolated executors yet.
+
+function _tdVerdictChip(v) {
+  const known = ['identical','equivalent','divergent','inconclusive'];
+  const cls = known.indexOf(v) >= 0 ? v : 'inconclusive';
+  return '<span class="td-verdict '+cls+'">'+esc(v||'inconclusive')+'</span>';
+}
+
+function _tdRenderReproductions(list) {
+  const host = document.getElementById('td-repro-list');
+  if (!host) return;
+  if (!list || !list.length) {
+    host.innerHTML = '<div class="td-empty">This task has never been reproduced.</div>';
+    return;
+  }
+  host.innerHTML = list.map(r => {
+    const c = r.comparison || {};
+    let files = '';
+    if (c.files_differing && c.files_differing.length) {
+      files = '<div class="td-repro-when">'+c.files_differing.length+' file(s) differ</div>';
+    }
+    return '<div class="td-repro-row">'+
+      '<div class="td-repro-head">'+_tdVerdictChip(r.verdict)+
+        '<span class="td-repro-when">'+esc(_fmtDateTime(r.created_at))+
+        (r.executor_kind ? ' · '+esc(r.executor_kind) : '')+'</span></div>'+
+      '<div class="td-repro-reason">'+esc(r.reason||'')+'</div>'+files+
+      (r.error ? '<div class="td-repro-warn">'+esc(r.error)+'</div>' : '')+
+    '</div>';
+  }).join('');
+}
+
+function _tdLoadReproductions(id) {
+  const btn = document.getElementById('td-reproduce-btn');
+  if (btn) { btn.disabled = true; btn.title = 'Checking whether this task can be reproduced…'; }
+
+  fetch(pUrl('/api/tasks/'+id+'/provenance'), {credentials:'same-origin'})
+    .then(r => r.json())
+    .then(d => {
+      if (!btn || _tdCurrentId !== id) return;
+      const ok = !!(d && d.ok && d.reproducible);
+      btn.disabled = !ok;
+      btn.title = (d && d.reason) || 'Reproduce this task in a fresh sandbox and compare the commit';
+      const note = document.getElementById('td-repro-note');
+      if (note && d) {
+        const warns = (d.provenance && d.provenance.warnings) || [];
+        note.innerHTML = '<div class="td-repro-reason">'+esc(d.reason||'')+'</div>'+
+          warns.map(wm => '<div class="td-repro-warn">'+esc(wm)+'</div>').join('');
+      }
+    })
+    .catch(() => {});
+
+  fetch(pUrl('/api/tasks/'+id+'/reproductions'), {credentials:'same-origin'})
+    .then(r => r.json())
+    .then(d => { if (_tdCurrentId === id) _tdRenderReproductions(d && d.reproductions); })
+    .catch(() => {});
+}
+
+window.taskDetailsReproduce = function() {
+  const id = _tdCurrentId;
+  if (!id) return;
+  const btn = document.getElementById('td-reproduce-btn');
+  const host = document.getElementById('td-repro-list');
+  if (btn) { btn.disabled = true; btn.textContent = 'Reproducing…'; }
+  if (host) {
+    host.innerHTML = '<div class="td-empty">Running the task again in a fresh sandbox and comparing the '+
+      'commit. This takes as long as the original run did.</div>';
+  }
+  // No timeout on the client: the server bounds this at 20 minutes and a
+  // client-side abort would orphan the sandbox without releasing its quota.
+  fetch(pUrl('/api/tasks/'+id+'/reproduce'), {
+    method:'POST', credentials:'same-origin',
+    headers:{'Content-Type':'application/json'}, body:'{}'
+  })
+    .then(r => r.json())
+    .then(d => {
+      if (btn) { btn.textContent = 'Reproduce'; btn.disabled = false; }
+      if (!d || !d.ok) {
+        const msg = (d && (d.message || d.error)) || 'The reproduction could not be run';
+        if (host) host.innerHTML = '<div class="td-empty">'+esc(msg)+'</div>';
+        toast(msg, false);
+        return;
+      }
+      if (_tdCurrentId === id) _tdLoadReproductions(id);
+      toast('Verdict: '+String(d.reproduction && d.reproduction.verdict || '').toUpperCase(),
+            !!(d.reproduction && (d.reproduction.verdict === 'identical' || d.reproduction.verdict === 'equivalent')));
+    })
+    .catch(() => {
+      if (btn) { btn.textContent = 'Reproduce'; btn.disabled = false; }
+      if (host) host.innerHTML = '<div class="td-empty">Request failed</div>';
+    });
+};
+
 function _fmtDateTime(s) {
   if (!s) return '';
   const d = new Date(s);
@@ -317,7 +416,15 @@ function _renderTaskDetails(d) {
     html += '<div class="td-section"><h3>Links</h3>'+items+'</div>';
   }
 
+  // Reproduction (Task 20221). Rendered as an empty shell here and filled by
+  // _tdLoadReproductions, because both of its fetches are independent of the
+  // details call and must not delay the rest of the modal.
+  html += '<div class="td-section"><h3>Reproduction</h3>'+
+    '<div id="td-repro-note"></div>'+
+    '<div id="td-repro-list"><div class="td-empty">Loading…</div></div></div>';
+
   body.innerHTML = html;
+  _tdLoadReproductions(t.id);
 }
 
 // Triggered from the task list. Ignore clicks that originated on action

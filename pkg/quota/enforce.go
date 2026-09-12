@@ -314,6 +314,12 @@ func (e *Enforcer) Reconcile(live LiveState) error {
 	add(ResConcurrentTasks, live.Tasks)
 	add(ResExecutors, live.Executors)
 	add(ResSessions, live.Sessions)
+	// ResConcurrentReproductions is deliberately absent, and its absence is
+	// the reconciliation. A reproduction is a synchronous dispatch held by the
+	// hub process that started it, so none can survive a restart: the loop
+	// above drops every gauge with an empty bucket and nothing re-adds this
+	// one, which zeroes it. Re-deriving it from live state would need a live
+	// state that cannot exist.
 
 	rows := make([]CounterRow, 0, len(fresh))
 	now := e.now()
@@ -698,7 +704,7 @@ func (e *Enforcer) dayBucket(t time.Time) string {
 // waiting will not help.
 func (e *Enforcer) retryAfter(res Resource) time.Duration {
 	switch res {
-	case ResConcurrentTasks:
+	case ResConcurrentTasks, ResConcurrentReproductions:
 		// A slot frees when a run finishes. Half a minute is short enough
 		// to feel responsive and long enough not to invite a spin loop.
 		return 30 * time.Second

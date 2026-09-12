@@ -948,6 +948,19 @@
   .td-anno-head { color:var(--muted); font-size:11px; margin-bottom:3px; }
   .td-link-row a { color:var(--accent); }
 
+  /* ── Reproduction verdicts (Task 20221) ── */
+  .td-verdict { display:inline-block; font-size:11px; font-weight:700; letter-spacing:.6px; text-transform:uppercase;
+                border-radius:10px; padding:2px 9px; border:1px solid var(--border); }
+  .td-verdict.identical    { color:var(--green); border-color:rgba(63,185,80,.5); }
+  .td-verdict.equivalent   { color:var(--accent); border-color:var(--accent); }
+  .td-verdict.divergent    { color:var(--red); border-color:rgba(248,81,73,.5); }
+  .td-verdict.inconclusive { color:#d29922; border-color:rgba(210,153,34,.5); }
+  .td-repro-row { background:var(--bg); border:1px solid var(--border); border-radius:6px; padding:8px 10px; margin-bottom:6px; font-size:12px; }
+  .td-repro-head { display:flex; align-items:center; gap:8px; margin-bottom:4px; flex-wrap:wrap; }
+  .td-repro-when { color:var(--muted); font-size:11px; }
+  .td-repro-reason { line-height:1.5; }
+  .td-repro-warn { color:#d29922; font-size:11px; margin-top:4px; line-height:1.45; }
+
   /* ── Decompose modal (AI task splitting) ── */
   #dc-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,.7); z-index:60; align-items:center; justify-content:center; }
   #dc-overlay.open { display:flex; }

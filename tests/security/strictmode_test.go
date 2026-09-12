@@ -279,6 +279,24 @@ var gatedEndpoints = []struct {
 		body:    `{"task_id":1}`,
 		handler: "(*github.com/blechschmidt/cloop/pkg/ui.Server).handleReplayRunCreate",
 	},
+	{
+		// Reconstructing a task's prompt collects repository context, which
+		// shells out to git in the project directory (Task 20221).
+		name:    "task provenance",
+		method:  http.MethodGet,
+		path:    "/api/tasks/1/provenance",
+		handler: "(*github.com/blechschmidt/cloop/pkg/ui.Server).handleTaskProvenance",
+	},
+	{
+		// The reproduced task itself runs in an isolating sandbox, but
+		// resolving the base commit and diffing the returned one run read-only
+		// git plumbing on the control plane (Task 20221).
+		name:    "task reproduce",
+		method:  http.MethodPost,
+		path:    "/api/tasks/1/reproduce",
+		body:    `{}`,
+		handler: "(*github.com/blechschmidt/cloop/pkg/ui.Server).handleTaskReproduce",
+	},
 }
 
 // TestGatedHandlersRefuseUnderStrictMode is what turns the static exemption

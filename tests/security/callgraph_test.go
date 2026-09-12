@@ -45,6 +45,14 @@ var gatedHostExecution = map[string]string{
 	"(*github.com/blechschmidt/cloop/pkg/ui.Server).handleClaudeCodeAuthLogout":    "runs `claude auth logout` against the control plane's credentials",
 	"(*github.com/blechschmidt/cloop/pkg/ui.Server).handleReplayRunCreate": "replays a task inline, and context collection shells out to git in the " +
 		"project directory; migrating this to a dispatched workload is tracked work",
+	"(*github.com/blechschmidt/cloop/pkg/ui.Server).handleTaskProvenance": "reconstructs a task's prompt, and pm.ExecuteTaskPrompt's context " +
+		"collection shells out to `git diff` in the project directory — the same " +
+		"path handleReplayRunCreate is listed for. Read-only, and no harness runs here",
+	"(*github.com/blechschmidt/cloop/pkg/ui.Server).handleTaskReproduce": "runs the reproduced task in an isolating sandbox, never the host (see " +
+		"pkg/ui/reproduce_runner.go), but resolves the base commit and diffs the " +
+		"returned one with read-only git plumbing on the control plane: rev-parse, " +
+		"merge-base, rev-list, diff, and a fetch into a scratch directory. Moving " +
+		"the comparison into a sandbox of its own would lift this",
 }
 
 // minExpectedHandlers guards against the analysis silently finding nothing.

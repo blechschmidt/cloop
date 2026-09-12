@@ -358,6 +358,14 @@ func (s *Server) routeTable() []routeSpec {
 		{Pattern: "DELETE /api/tasks/{id}", Handler: s.handleDeleteTask, Perm: task, Scope: scopeProject},
 		{Pattern: "GET /api/tasks/{id}/blocker", Handler: s.handleTaskBlocker, Perm: read, Scope: scopeProject},
 		{Pattern: "GET /api/tasks/{id}/details", Handler: s.handleTaskDetails, Perm: read, Scope: scopeProject},
+		// Reproduction (Task 20221). The reads are `read` because a verdict is
+		// a statement about code the caller can already see; the POST is
+		// `start` because it makes the fleet execute a model and a test suite.
+		// See the permissions note in reproduce_api.go.
+		{Pattern: "GET /api/tasks/{id}/provenance", Handler: s.handleTaskProvenance, Perm: read, Scope: scopeProject},
+		{Pattern: "GET /api/tasks/{id}/reproductions", Handler: s.handleTaskReproductions, Perm: read, Scope: scopeProject},
+		{Pattern: "POST /api/tasks/{id}/reproduce", Handler: s.handleTaskReproduce, Perm: start, Scope: scopeProject},
+		{Pattern: "GET /api/reproductions/{id}", Handler: s.handleReproductionGet, Perm: read, Scope: scopeProject},
 		// Decomposition previews mutate nothing, but they call a provider
 		// and therefore spend the project's budget — gated at the same
 		// level as the mutation they precede rather than as a read.
