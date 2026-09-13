@@ -203,7 +203,19 @@ window.toggleTaskDictation = async function() {
   dictateChunks = [];
   dictateHeardSound = false;
   listenForSound(stream, () => { dictateHeardSound = true; });
-  dictateRecorder = new MediaRecorder(stream, mime ? { mimeType: mime } : {});
+  try {
+    dictateRecorder = new MediaRecorder(stream, mime ? { mimeType: mime } : {});
+  } catch (err) {
+    // A constructor that rejects the mime type would otherwise leave
+    // dictateStarting set and the button dead until a reload, with the
+    // microphone still open.
+    stream.getTracks().forEach(t => t.stop());
+    closeDictateAudioCtx();
+    dictateStarting = false;
+    setDictateState('idle', 'Dictate');
+    toast('This browser cannot record ' + (mime || 'audio'), 'err');
+    return;
+  }
   dictateRecorder.ondataavailable = e => { if (e.data && e.data.size > 0) dictateChunks.push(e.data); };
   dictateRecorder.onstop = () => {
     // Release the mic before the upload, not after: the browser's recording
