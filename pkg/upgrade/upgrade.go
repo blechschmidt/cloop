@@ -109,8 +109,21 @@ func Check(current string) (*CheckResult, error) {
 // assetName returns the expected release asset name for the current OS/arch.
 // Convention: cloop_<version>_<os>_<arch>.tar.gz  (GoReleaser default).
 func assetName(version string) string {
+	return assetNameFor(version, runtime.GOOS, runtime.GOARCH)
+}
+
+// assetNameFor is assetName with the platform passed in rather than taken from
+// the running binary, so the naming can be asserted for platforms other than
+// the one the test happens to run on.
+//
+// This is one half of a contract: scripts/build-release.sh publishes the names
+// this function computes, and release_assets_test.go fails if the two drift.
+// The leading "v" is stripped because the tag is v0.0.1 and the asset is
+// 0.0.1 — a release that gets this wrong breaks `cloop upgrade` for everyone
+// simultaneously, with an error naming the release rather than the cause.
+func assetNameFor(version, goos, goarch string) string {
 	tag := strings.TrimPrefix(version, "v")
-	return fmt.Sprintf("cloop_%s_%s_%s.tar.gz", tag, runtime.GOOS, runtime.GOARCH)
+	return fmt.Sprintf("cloop_%s_%s_%s.tar.gz", tag, goos, goarch)
 }
 
 // findAsset returns the asset whose Name matches needle (case-insensitive), or nil.

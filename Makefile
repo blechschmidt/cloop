@@ -1,5 +1,5 @@
 .PHONY: build test test-unit test-e2e test-e2e-update e2e-stack fuzz bench clean \
-        docs-check docs-stage docs-site docs-serve
+        docs-check docs-stage docs-site docs-serve release-dist
 
 BINARY := cloop
 GO := /usr/local/go/bin/go
@@ -122,6 +122,22 @@ docs-site: $(DOCS_VENV) docs-check docs-stage
 docs-serve: $(DOCS_VENV) docs-stage
 	@echo "==> mkdocs serve on http://127.0.0.1:$(DOCS_PORT)  (re-run to pick up docs/ edits)"
 	@$(DOCS_MKDOCS) serve --strict -f $(DIST)/mkdocs.yml -a 127.0.0.1:$(DOCS_PORT)
+
+## release-dist: build the release artifacts for VERSION into dist/release
+##
+## The same script the Release workflow runs, so a release can be reproduced
+## and inspected locally before a tag is pushed — which is the only way to
+## find out that a platform stopped compiling before users do.
+##
+##     make release-dist VERSION=v0.0.1
+##
+## Produces one cloop_<version>_<os>_<arch>.tar.gz per platform plus a
+## checksums.txt, in the layout `cloop upgrade` expects to find on the release.
+## Tarballs are reproducible: the same commit and version yield identical
+## bytes, so these checksums can be compared against the published ones.
+release-dist:
+	@test -n "$(VERSION)" || { echo "usage: make release-dist VERSION=v0.0.1"; exit 2; }
+	@GO=$(GO) ./scripts/build-release.sh $(VERSION) $(DIST)/release
 
 ## clean: remove build artifacts, coverage reports and the documentation site
 clean:

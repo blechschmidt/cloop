@@ -1,0 +1,115 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+# The default GITHUB_TOKEN is read-only. Creating a release and uploading
+# assets needs contents: write, and nothing here needs more than that.
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          # The full history, because the release notes are generated from the
+          # commits since the previous tag and a shallow clone has none of them.
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          # go.mod, same as CI: its toolchain directive is pinned to a patch
+          # release for security reasons (see the vulnerability-scan job in
+          # ci.yml, where 13 of 14 findings were stdlib fixed by that pin).
+          # A release binary built on an older toolchain would ship exactly the
+          # vulnerabilities that job exists to keep out.
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build release artifacts
+        # The same script a developer runs locally, rather than the build
+        # inlined here — so "it built on my machine" and "it built in CI" are
+        # the same statement, and so pkg/upgrade's drift gate has something to
+        # assert against.
+        run: |
+          set -euo pipefail
+          ./scripts/build-release.sh "${GITHUB_REF_NAME}" dist/release
+          ls -la dist/release
+
+      - name: The published binary reports the tag it was built from
+        # `cloop upgrade --check` compares the running binary's version against
+        # the latest release tag, and treats the literal string "dev" as "never
+        # upgrade". A release whose -X ldflag silently failed to apply would
+        # therefore install fine and then never see another update — a defect
+        # with no symptom until the *second* release. Unpack what is about to
+        # be published and make it say its own version.
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/verify
+          tar -xzf "dist/release/cloop_${GITHUB_REF_NAME#v}_linux_amd64.tar.gz" \
+            -C /tmp/verify
+          got=$(/tmp/verify/cloop version | head -1)
+          echo "binary reports: $got"
+          [ "$got" = "cloop ${GITHUB_REF_NAME}" ] || {
+            echo "::error::built binary reports '$got', expected 'cloop ${GITHUB_REF_NAME}'"
+            exit 1
+          }
+
+      - name: The checksums match the artifacts
+        # Published so `cloop upgrade` can verify a download before unpacking
+        # it; verified here so a corrupt upload is caught before anyone's
+        # upgrade fails on a checksum mismatch they cannot act on.
+        run: |
+          set -euo pipefail
+          cd dist/release
+          sha256sum -c checksums.txt
+
+      - name: Extract this tag's section from CHANGELOG.md
+        # The release body is the changelog entry, not GitHub's commit list.
+        # Auto-generated notes are still appended below (the API pre-pends
+        # whatever body it is given), so the page reads as "what changed, in
+        # prose" followed by "every commit" rather than only the latter.
+        #
+        # A missing section is not fatal: it degrades to the auto-generated
+        # notes alone, because failing a release over a changelog heading
+        # would mean the artifacts are built and then thrown away.
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          # Print lines between this version's "## [x.y.z]" heading and the
+          # next "## " heading, dropping the heading itself.
+          awk -v v="$version" '
+            $0 ~ "^## \\[" v "\\]" { found = 1; next }
+            found && /^## / { exit }
+            found { print }
+          ' CHANGELOG.md > release-body.md
+          if [ -s release-body.md ]; then
+            echo "found a CHANGELOG section for $version:"
+            cat release-body.md
+          else
+            echo "::warning::no CHANGELOG.md section for $version; \
+          falling back to auto-generated notes only"
+          fi
+
+      - name: Publish the GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/release/*.tar.gz
+            dist/release/checksums.txt
+          body_path: release-body.md
+          generate_release_notes: true
+          # make_latest is what puts the release behind the /releases/latest
+          # endpoint, which is the only one `cloop upgrade` ever queries. A
+          # release that is not "latest" is invisible to the upgrader.
+          make_latest: true
+          draft: false
+          prerelease: false
