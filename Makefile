@@ -2,7 +2,24 @@
         docs-check docs-stage docs-site docs-serve release-dist
 
 BINARY := cloop
-GO := /usr/local/go/bin/go
+
+# The Go toolchain, taken from PATH rather than hardcoded to an absolute path.
+#
+# It was /usr/local/go/bin/go, which is where this project's toolchain lives on
+# a developer box and nowhere on a GitHub runner: setup-go installs into the
+# tool cache and puts that on PATH. So `make bench` died with "no such file or
+# directory" before running a single benchmark, and the Benchmarks job had
+# never once passed — failing in 0.0s, which looks nothing like the benchmark
+# regression the job exists to catch. The docs jobs kept passing throughout,
+# because their targets are pure Python and never expand $(GO).
+#
+# PATH is also the more correct source on CI even where an absolute path would
+# resolve: it yields the toolchain setup-go pinned from go.mod, whereas
+# /usr/local/go/bin/go would be whatever the runner image ships, quietly
+# bypassing the pin that ci.yml's vulnerability scan asserts is in effect.
+#
+# Override when the toolchain is not on PATH:  make build GO=/usr/local/go/bin/go
+GO ?= go
 
 # Documentation site. The toolchain is pure Python and pinned in
 # website/requirements.txt; no Go is involved, and the venv lives under dist/
