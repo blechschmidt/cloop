@@ -1,0 +1,183 @@
+# Publishes the two container images this repository's defaults point at.
+#
+# Both were referenced long before they existed. `deploy/helm/cloop-hub`
+# defaults image.repository to ghcr.io/blechschmidt/cloop, and
+# pkg/executor/container.DefaultImage (with its Kubernetes twin) defaults to
+# ghcr.io/blechschmidt/cloop-harness:latest — so an operator following the
+# documentation got ImagePullBackOff from Helm and "image is not present
+# locally" from `cloop executor preflight`, in both cases for a reference that
+# could never resolve. This workflow is what makes those defaults true.
+#
+# Nothing here needs a secret: GITHUB_TOKEN can push to ghcr.io under the
+# repository owner's namespace given `packages: write`, and the package it
+# creates is linked back to this repository automatically.
+
+name: Publish images
+
+on:
+  push:
+    tags:
+      - 'v*'
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      publish_latest:
+        # A bootstrap escape hatch, and only that.
+        #
+        # `latest` is what pkg/executor/container.DefaultImage points at, so it
+        # has to exist before that default can work — but the release it should
+        # describe (v0.0.1) was cut before this workflow existed, and a
+        # workflow_dispatch against a tag can only run a workflow present in
+        # that tag's tree. So the very first `latest` cannot come from a tag,
+        # and is published from main, once, deliberately, by a human.
+        #
+        # Every subsequent `latest` moves on a release tag via the rule below.
+        description: 'Also tag this build :latest (one-time backfill; normally latest moves only on a release tag)'
+        type: boolean
+        default: false
+
+# Least privilege: read the tree, write packages. Notably NOT contents: write —
+# publishing an image must not be able to move a tag or edit a release.
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  # Serialise per ref so two pushes cannot race to move the same tag, but let
+  # different refs publish in parallel.
+  group: publish-images-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: ${{ matrix.image }} (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    # The harness builds arm64 under emulation because the claude CLI's native
+    # helpers have to be selected for the target architecture, not the builder's
+    # (see the harness stage in the Dockerfile). That is slow, and slow is the
+    # reason for a generous ceiling rather than the default 360.
+    timeout-minutes: 90
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The hub. Pure-Go and cross-compiled from the builder's arch via
+          # BUILDPLATFORM, so both platforms are cheap.
+          - image: cloop
+            target: runtime
+            platforms: linux/amd64,linux/arm64
+          # The sandbox workload image. Its arm64 leg runs npm under QEMU.
+          - image: cloop-harness
+            target: harness
+            platforms: linux/amd64,linux/arm64
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      # Required for the harness's arm64 leg: without binfmt registered, the
+      # emulated npm install cannot execute and the build fails on the first
+      # RUN of the foreign-arch stage.
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive tags and labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}
+          # `latest` moves only on a release tag. The Go defaults point at
+          # :latest, so this is the difference between "the default is the
+          # newest release" and "the default is whatever last landed on main".
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') || inputs.publish_latest }}
+            type=raw,value=edge,enable=${{ github.ref == 'refs/heads/main' }}
+
+      - name: Resolve the version to stamp into the binary
+        # Mirrors the release workflow: a tag stamps its own name, anything else
+        # is a development build. `cloop upgrade --check` treats the literal
+        # "dev" as "never upgrade", so an edge image must not claim a version.
+        id: version
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            echo "value=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=dev" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: ${{ matrix.target }}
+          platforms: ${{ matrix.platforms }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ steps.version.outputs.value }}
+            REVISION=${{ github.sha }}
+            CREATED=${{ github.event.repository.updated_at }}
+          provenance: true
+          sbom: true
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,scope=${{ matrix.image }},mode=max
+
+      - name: The published image satisfies its contract
+        # Pulling by digest is what makes this a check of the *published*
+        # artifact rather than of a local build that happens to still be in the
+        # daemon's cache. Only the native arch is exercised: running the arm64
+        # manifest under QEMU here would test the emulator as much as the image.
+        run: |
+          set -euo pipefail
+          ref="ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}@${{ steps.build.outputs.digest }}"
+          echo "verifying $ref"
+          docker pull -q "$ref"
+
+          user=$(docker image inspect "$ref" --format '{{.Config.User}}')
+          [ -n "$user" ] && [ "${user%%:*}" != "0" ] && [ "$user" != "root" ] || {
+            echo "::error::image runs as root by default (User=${user:-<unset>})"; exit 1; }
+          echo "default user: $user"
+
+          if [ "${{ matrix.target }}" = "harness" ]; then
+            # The contract on pkg/executor/container.DefaultImage, asserted
+            # against the artifact. Each of these is a failure mode that is
+            # invisible inside a sandbox: a swallowed argv, a missing provider
+            # harness, or a HOME the workload's uid cannot write to.
+            ep=$(docker image inspect "$ref" --format '{{json .Config.Entrypoint}}')
+            [ "$ep" = "null" ] || [ "$ep" = "[]" ] || {
+              echo "::error::harness image must have no ENTRYPOINT; the driver denylists --entrypoint and the image must exec the argv it is handed (got $ep)"
+              exit 1; }
+            echo "entrypoint: none"
+
+            # An arbitrary uid, because that is what the driver passes: --user is
+            # derived from the project directory's owner, never from the image.
+            docker run --rm --user 12345:12345 --cap-drop ALL \
+              --security-opt no-new-privileges --network none \
+              --tmpfs /tmp:rw,nosuid,nodev,exec,size=64m \
+              "$ref" sh -euc '
+                test -x /usr/local/bin/cloop
+                command -v claude >/dev/null
+                command -v git >/dev/null
+                test -f /etc/ssl/certs/ca-certificates.crt
+                git config --global user.email probe@example.invalid
+                echo "contract OK as uid $(id -u): cloop, claude, git, CA bundle, writable HOME=$HOME"'
+          else
+            docker run --rm "$ref" version
+          fi

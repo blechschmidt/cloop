@@ -136,7 +136,93 @@ USER 65532:65532
 ENTRYPOINT ["/sbin/tini", "--", "/usr/local/bin/cloop"]
 CMD ["executor", "agent"]
 
-# ── Stage 3: runtime ────────────────────────────────────────────────────────
+# ── Stage 3: harness sandbox ────────────────────────────────────────────────
+# The image a container or Kubernetes executor actually runs a task *in*, and
+# the default for both (pkg/executor/container.DefaultImage and
+# pkg/executor/kubernetes.DefaultImage). The contract it satisfies is documented
+# on those constants; this stage is the reference implementation of it.
+#
+# Four properties are load-bearing, and each one is a bug that costs a debugging
+# cycle if it is missing:
+#
+#   1. NO ENTRYPOINT. The driver denylists --entrypoint (see the entry in
+#      argv.go's denied map) precisely so that the image cannot change what argv
+#      runs — which means the image has to exec the argv it is handed. An
+#      ENTRYPOINT here would swallow the hub's `cloop run` and the task would
+#      silently do nothing.
+#   2. cloop at /usr/local/bin/cloop, because the harness re-invokes cloop
+#      subcommands from inside the sandbox.
+#   3. The `claude` CLI on PATH, because claudecode is the default provider and
+#      pkg/provider/claudecode resolves the binary by name.
+#   4. It must work under an ARBITRARY uid. The driver derives --user from the
+#      project directory's owner, so there is no uid this image can bake in and
+#      rely on. That is what HOME=/tmp below is for.
+#
+# Debian rather than the alpine the executor stage uses: the claude CLI ships
+# prebuilt native helpers (ripgrep among them) linked against glibc, and on musl
+# they fail at exec time — inside a sandbox, where the error is hardest to see.
+# A harness image is the wrong place to spend a boundary on image size.
+#
+# It is declared BEFORE the runtime stage so `runtime` remains the last one and
+# therefore the default target: a plain `docker build .` must keep producing the
+# hub, not this. Build it explicitly:
+#   docker build --target harness -t cloop-harness:dev .
+FROM node:22-bookworm-slim AS harness
+
+# git and a CA bundle because almost every task shells out to one or the other;
+# ca-certificates additionally backs the provider's own TLS calls. procps
+# supplies the ps(1) that background-activity detection shells out to.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      git ca-certificates openssh-client procps \
+ && rm -rf /var/lib/apt/lists/*
+
+# The agent harness for the default provider. Pinned by the ARG so a rebuild of
+# an old tag is reproducible rather than silently newer; override to move it.
+ARG CLAUDE_CODE_VERSION=latest
+RUN npm install -g --no-fund --no-audit "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
+ && npm cache clean --force \
+ && claude --version
+
+COPY --from=build /out/cloop /usr/local/bin/cloop
+
+# A non-root user for the documented default and for any runtime that resolves
+# the image's own USER. The driver overrides it with --user on every start, so
+# this is the floor rather than the decision: an image whose default user is
+# root is one --user flag away from a root workload, and ValidateNonRootUser
+# exists because most base images make that the easy mistake.
+RUN useradd --uid 65532 --create-home --shell /usr/sbin/nologin cloop
+
+# HOME on the tmpfs the driver mounts at /tmp, NOT on /home/cloop.
+#
+# This is the arbitrary-uid property made concrete. git writes ~/.gitconfig, npm
+# and claude write dotfiles, and a uid that is not 65532 cannot write to
+# /home/cloop — so a HOME pointing there produces "could not lock config file"
+# from git on a task that looked like it should work. /tmp is mounted
+# rw,nosuid,nodev,exec by the driver for every workload regardless of uid, which
+# makes it the only path guaranteed writable by whoever we turn out to be.
+ENV HOME=/tmp
+
+# Credentials are deliberately absent: provider API keys and brokered secrets
+# are injected as environment at start (buildRunArgs' `--env NAME` passthrough),
+# which is what makes one image safe to share across tenants and safe to publish.
+
+LABEL org.opencontainers.image.title="cloop harness" \
+      org.opencontainers.image.description="cloop sandbox image: the default workload image for container and Kubernetes executors" \
+      org.opencontainers.image.source="https://github.com/blechschmidt/cloop" \
+      org.opencontainers.image.documentation="https://github.com/blechschmidt/cloop/blob/main/docs/architecture/executors.md" \
+      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.vendor="blechschmidt" \
+      org.opencontainers.image.base.name="node:22-bookworm-slim"
+
+USER 65532:65532
+
+# Explicit and empty, so that the no-ENTRYPOINT contract is stated in the image
+# rather than merely inherited from whatever the base image happens to do.
+ENTRYPOINT []
+CMD ["/usr/local/bin/cloop", "--help"]
+
+# ── Stage 4: runtime ────────────────────────────────────────────────────────
 FROM gcr.io/distroless/static-debian12:nonroot AS runtime
 
 ARG VERSION=dev
