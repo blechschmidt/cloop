@@ -220,6 +220,19 @@ func (d *DB) setMeta(tx *sql.Tx, key, value string) error {
 	return err
 }
 
+// getMeta reads one metadata value inside an open transaction. It is separate
+// from the (*DB).getMeta below because that one queries d.conn directly, and
+// issuing a read on the same connection while a write transaction is open on
+// it is a different question than the caller means to ask.
+func getMeta(tx *sql.Tx, key string) (string, error) {
+	var v string
+	err := tx.QueryRow(`SELECT value FROM metadata WHERE key=?`, key).Scan(&v)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return v, err
+}
+
 func (d *DB) getMeta(key string) (string, error) {
 	var v string
 	err := d.conn.QueryRow(`SELECT value FROM metadata WHERE key=?`, key).Scan(&v)
@@ -308,6 +321,22 @@ func (d *DB) saveStateLocked(s *State) (changed []taskAuditChange, deleted []int
 		meta["milestones"] = string(b)
 	} else {
 		meta["milestones"] = ""
+	}
+
+	// workdir is write-once: it records where the project was created, and the
+	// process saving is not always in a position to know that. An isolating
+	// executor bind-mounts the project somewhere of its own — the container
+	// driver uses /workspace — so a task running in a sandbox would otherwise
+	// overwrite the hub's own path with one that exists only inside a mount
+	// namespace that has since been torn down. state.Load already tolerates a
+	// stored path that does not resolve (see resolveWorkDir there), but a
+	// record the hub cannot act on is still worse than the one it wrote, and
+	// pkg/ui's stale-run recovery refuses to repair a project whose state
+	// points somewhere else.
+	if existing, err := getMeta(tx, "workdir"); err != nil {
+		return nil, nil, fmt.Errorf("read metadata %q: %w", "workdir", classifyDriverErr(err))
+	} else if existing != "" {
+		delete(meta, "workdir")
 	}
 
 	for k, v := range meta {

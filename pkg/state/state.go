@@ -238,14 +238,41 @@ func Load(workdir string) (*ProjectState, error) {
 	s := fromRaw(raw)
 	// Ensure WorkDir is set to the resolved session dir so Save() writes back
 	// to the correct location.
-	if s.WorkDir == "" {
-		s.WorkDir = dir
-	}
+	s.WorkDir = resolveWorkDir(s.WorkDir, dir)
 	// Migrate older projects that ran before non-PM mode was removed in
 	// Task 20067. All work now flows through the PM task pipeline, so the
 	// flag must be true once a project is loaded by this binary.
 	s.PMMode = true
 	return s, nil
+}
+
+// resolveWorkDir reconciles the WorkDir persisted in the database with the
+// directory the state was actually read from.
+//
+// The stored value is an absolute path recorded when the project was created,
+// and it is not always meaningful to the process reading it. An isolating
+// executor bind-mounts the project somewhere of its own choosing — the
+// container driver uses /workspace — so a hub-side path like
+// /var/lib/cloop/projects/api names nothing inside the sandbox. Honouring it
+// there sends every subsequent Save, snapshot and event write to a path that
+// does not exist, which on a read-only rootfs surfaces as
+// "mkdir …/.cloop: read-only file system" from whichever subsystem happened to
+// write first, several layers from the cause. A project directory that was
+// moved on the host fails the same way.
+//
+// So the stored path is honoured only while it still resolves to a directory.
+// Otherwise the directory the database was just opened from wins, because that
+// is demonstrably where this project lives from here. The stored column stays
+// as it is: it is a record of where the project was created, and rewriting it
+// from inside a sandbox would let the sandbox's view overwrite the hub's.
+func resolveWorkDir(stored, dir string) string {
+	if stored == "" {
+		return dir
+	}
+	if info, err := os.Stat(stored); err == nil && info.IsDir() {
+		return stored
+	}
+	return dir
 }
 
 // LoadLite is like Load but skips reading the per-step rows. The returned
@@ -283,9 +310,7 @@ func LoadLite(workdir string) (*ProjectState, error) {
 		return nil, err
 	}
 	s := fromRaw(raw)
-	if s.WorkDir == "" {
-		s.WorkDir = dir
-	}
+	s.WorkDir = resolveWorkDir(s.WorkDir, dir)
 	s.PMMode = true
 	return s, nil
 }
@@ -309,9 +334,7 @@ func LoadFromDir(dir string) (*ProjectState, error) {
 		return nil, err
 	}
 	s := fromRaw(raw)
-	if s.WorkDir == "" {
-		s.WorkDir = dir
-	}
+	s.WorkDir = resolveWorkDir(s.WorkDir, dir)
 	// See Load: every loaded project is PM-mode after Task 20067.
 	s.PMMode = true
 	return s, nil

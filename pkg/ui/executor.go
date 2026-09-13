@@ -460,10 +460,15 @@ func runWorkload(ctx context.Context, workDir string, argv []string, labels map[
 // without putting it on the argv, where /proc/<pid>/cmdline exposes it to
 // every local user for the lifetime of the process (Task 20188).
 //
-// extraEnv entries are "K=V" and are appended to the inherited environment,
-// not substituted for it: applyLease reads a nil Spec.Env as "inherit
-// os.Environ()", so assigning a bare one-element slice would silently strip
-// PATH and HOME from the child.
+// On the host driver, extraEnv entries are appended to the inherited
+// environment rather than substituted for it: applyLease reads a nil Spec.Env
+// as "inherit os.Environ()", so assigning a bare one-element slice would
+// silently strip PATH and HOME from the child.
+//
+// On an isolating executor they are the whole environment. Inheriting there
+// forwards the hub's own process environment into the sandbox, which is a
+// credential leak rather than a convenience — see applyLease, which makes the
+// same distinction for the leased material and explains it at length.
 func runWorkloadEnv(ctx context.Context, workDir string, argv, extraEnv []string, labels map[string]string) ([]byte, error) {
 	registerBuiltinExecutors()
 	ex, err := executor.Resolve(workDir)
@@ -476,7 +481,11 @@ func runWorkloadEnv(ctx context.Context, workDir string, argv, extraEnv []string
 
 	base := uiSpec(workDir, argv, labels)
 	if len(extraEnv) > 0 {
-		base.Env = append(os.Environ(), extraEnv...)
+		if executor.IsolatesFromHost(ex) {
+			base.Env = extraEnv
+		} else {
+			base.Env = append(os.Environ(), extraEnv...)
+		}
 	}
 	spec, err := applyLease(base, ex, lease)
 	if err != nil {

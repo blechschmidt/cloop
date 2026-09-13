@@ -178,3 +178,13 @@ func isolatesFromHost(ex Executor) bool {
 		return false
 	}
 }
+
+// IsolatesFromHost reports whether ex puts any boundary between the workload
+// and the control-plane host. It is the exported form of isolatesFromHost, for
+// callers outside this package that have to treat the two cases differently —
+// pkg/ui decides from it whether a workload may inherit the hub's own process
+// environment, which is safe only when the workload runs on the hub anyway.
+//
+// It fails closed the same way: a driver that declares no isolation is not
+// isolated. See isolatesFromHost for why that direction is the safe one.
+func IsolatesFromHost(ex Executor) bool { return isolatesFromHost(ex) }

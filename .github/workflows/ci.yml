@@ -581,6 +581,112 @@ jobs:
           JS
           node /tmp/mermaid-tools/check.mjs
 
+  flagship-circuit:
+    name: Flagship circuit
+    runs-on: ubuntu-latest
+    # The headline claim of this project, run end to end: the web UI never
+    # spawns a harness on the host — it runs the task in a sandbox, gives that
+    # sandbox only what was granted to it, takes the result back, and destroys
+    # the credential material afterwards.
+    #
+    # Nothing else here covers it. The container and Kubernetes suites skip
+    # when no runtime is present or drive a fake; `cloop executor test` runs
+    # `cloop version` rather than a task; deploy/eval/e2e.sh exercises the
+    # *remote agent* and is not wired into CI at all. So the one claim the
+    # whole architecture exists to make was verified by hand, on one machine.
+    #
+    # Writing it found three defects no other test could see, all fixed in the
+    # commit that added it — the worst being that pkg/ui forwarded the hub's
+    # entire process environment, CLOOP_SECRET_KEY and CLOOP_UI_TOKEN included,
+    # into every sandbox that held a grant.
+    #
+    # continue-on-error until it has three consecutive green runs on main, then
+    # drop this line and make it required. It is advisory *because* it is new,
+    # not because its assertions are soft: the container suites are known to
+    # flake under load, and a new job that gates every PR before its own
+    # stability is established teaches people to ignore it.
+    continue-on-error: true
+    # Above the sum of the test's own per-step budgets, so a hang trips the
+    # step's named deadline — which says what it was waiting for — rather than
+    # this one, which cannot.
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build a static cloop for the sandbox
+        # CGO_ENABLED=0 is load-bearing rather than an optimisation. The sandbox
+        # image is alpine (musl) and the hub bind-mounts its own binary in, so a
+        # dynamically linked build dies there with "exec …: no such file or
+        # directory" — an error that names neither the binary nor the reason.
+        # The same flag, for the same reason, is why the runtime image in
+        # Dockerfile can be distroless static.
+        #
+        # Built here and handed to the test so the job's own step reports a
+        # compile failure, instead of it surfacing from inside a test binary.
+        run: |
+          set -euo pipefail
+          CGO_ENABLED=0 go build -trimpath -o /tmp/cloop-flagship-bin .
+          # Both spellings: `file` says "statically linked" for the default
+          # build and "static-pie linked" where the toolchain defaults to PIE.
+          # Asserted rather than assumed, because CGO_ENABLED is an environment
+          # variable and the failure it prevents is a container that exits 127
+          # with no output.
+          file /tmp/cloop-flagship-bin | grep -qE 'statically linked|static-pie' || {
+            echo "::error::the built binary is not static; it cannot run in the alpine sandbox"
+            file /tmp/cloop-flagship-bin
+            exit 1
+          }
+
+      - name: Pre-pull the pinned sandbox base
+        # The base is pinned by digest in tests/flagship, and pulling it in a
+        # step of its own means a registry hiccup fails *here*, named, rather
+        # than inside the image build the test drives — where it would read as
+        # a failure of the circuit. Nothing is pulled once the circuit is
+        # running: the container driver passes --pull=never.
+        run: |
+          set -euo pipefail
+          digest=$(grep -oE 'alpine@sha256:[0-9a-f]{64}' tests/flagship/flagship_test.go | head -1)
+          [ -n "$digest" ] || { echo "::error::no pinned base image found in tests/flagship"; exit 1; }
+          echo "pinned base: $digest"
+          docker pull "$digest"
+
+      - name: Run the circuit
+        env:
+          CLOOP_FLAGSHIP_E2E: "1"
+          CLOOP_FLAGSHIP_BIN: /tmp/cloop-flagship-bin
+          # Keep the tree so the diagnostics step below has a hub log to read.
+          # The runner is ephemeral, so there is nothing to clean up after it.
+          CLOOP_FLAGSHIP_KEEP: "1"
+        # -timeout above the test's own budgets for the same reason as
+        # timeout-minutes: the test's deadlines are the informative ones.
+        run: go test ./tests/flagship/ -run TestFlagshipCircuit -v -count=1 -timeout 20m
+
+      - name: Circuit diagnostics on failure
+        # A failure here is a failure of an eight-step circuit, and the step
+        # that failed is rarely the one that broke. The hub's log says what it
+        # dispatched and what came back; a surviving container or a surviving
+        # lease directory each name a specific defect on their own.
+        if: failure()
+        run: |
+          echo "── hub log ──"
+          tail -200 /var/tmp/cloop-flagship/hub.log 2>/dev/null || echo "(no hub log)"
+          echo "── containers cloop created ──"
+          docker ps -a --filter label=cloop.managed=true 2>/dev/null || true
+          echo "── lease material still on the host ──"
+          ls -la /dev/shm/cloop-lease-* /tmp/cloop-lease-* 2>/dev/null || echo "(none — wiped)"
+          echo "── the throwaway remote ──"
+          git -c safe.directory='*' -C /var/tmp/cloop-flagship/origin.git \
+            for-each-ref --format='%(refname) %(objectname:short) %(contents:subject)' 2>/dev/null \
+            || echo "(no remote)"
+
   deploy-artifacts:
     name: Deployment artifacts
     runs-on: ubuntu-latest

@@ -195,3 +195,137 @@ func TestExecutorThatCannotTakeFilesIsRefused(t *testing.T) {
 		t.Error("the refusal quotes the token")
 	}
 }
+
+// The environment half of the same boundary.
+//
+// applyLease seeds Spec.Env from the hub's own os.Environ() when the caller
+// left it nil, because a harness forked on the host needs PATH and HOME. Every
+// name in Spec.Env is then forwarded into the sandbox — the container driver
+// emits a bare `--env NAME` per entry — so doing that for an isolating executor
+// exported the control plane's entire environment across the isolation
+// boundary. On a hosted deployment that is CLOOP_SECRET_KEY, the master key
+// that unseals every credential in the broker, and CLOOP_UI_TOKEN, a token that
+// bypasses RBAC: the sandbox is handed the store it is being leased one scoped
+// item from.
+//
+// It only happened for a project that *held* a grant (applyLease returns early
+// when the lease is empty), which is to say it happened exactly on the
+// enterprise path and never on the one a developer tries first.
+
+// TestIsolatedExecutorDoesNotInheritTheHubEnvironment pins the fix.
+func TestIsolatedExecutorDoesNotInheritTheHubEnvironment(t *testing.T) {
+	const canary = "ghp_envisolation0123456789abcdefghij"
+	dir := seedPATGrant(t, "sandbox-env", canary)
+
+	// CLOOP_SECRET_KEY is already in this process's environment: seedPATGrant
+	// set it, because it is secretbroker.EnvPassphraseKey and the store cannot
+	// be unsealed without it. That makes the setup faithful rather than
+	// contrived — the hub really does hold the master key in its environment
+	// while it leases, which is exactly why inheriting it was dangerous. Do not
+	// overwrite it here; a second value would just break the unseal.
+	if os.Getenv(secretbroker.EnvPassphraseKey) == "" {
+		t.Fatal("the broker passphrase is not set, so this test cannot observe it leaking")
+	}
+	t.Setenv("CLOOP_FLAGSHIP_CANARY", "host-only-value")
+
+	ex := stubExec{id: "sandbox-env", caps: executor.Capabilities{
+		Isolation:           executor.IsolationContainer,
+		SupportsSecretFiles: true,
+	}}
+	lease := acquireSecretLease(dir, "/srv/proj", ex)
+	if lease == nil {
+		t.Fatal("no lease was issued, so this test would be vacuous")
+	}
+	defer lease.Close()
+
+	spec, err := applyLease(executor.Spec{Argv: []string{"cloop", "run"}}, ex, lease)
+	if err != nil {
+		t.Fatalf("applyLease: %v", err)
+	}
+	if len(spec.Env) == 0 {
+		t.Fatal("the spec carries no environment at all, so the lease delivered nothing")
+	}
+	for _, kv := range spec.Env {
+		name, _, _ := strings.Cut(kv, "=")
+		switch name {
+		case "CLOOP_SECRET_KEY":
+			t.Error("CLOOP_SECRET_KEY is forwarded to an isolated executor: the sandbox would " +
+				"receive the key that unseals every credential in the broker")
+		case "CLOOP_FLAGSHIP_CANARY":
+			t.Error("the hub's own process environment is forwarded to an isolated executor")
+		}
+	}
+	// The lease's own material still has to arrive, or the fix would have
+	// closed the leak by breaking delivery.
+	if !hasEnvName(spec.Env, "CLOOP_LEASE_ID") {
+		t.Errorf("the leased environment did not survive: %v", envNames(spec.Env))
+	}
+}
+
+// TestHostExecutorStillInheritsTheEnvironment is the other direction, and it
+// is why the fix is conditional rather than a deletion. A harness forked on
+// the host is a process on this machine that would have had this environment
+// anyway; stripping it takes PATH and HOME away from the child and breaks
+// every shell-out it makes.
+func TestHostExecutorStillInheritsTheEnvironment(t *testing.T) {
+	const canary = "ghp_hostinherit0123456789abcdefghijk"
+	dir := seedPATGrant(t, "host-1", canary)
+	t.Setenv("CLOOP_FLAGSHIP_CANARY", "host-only-value")
+
+	ex := stubExec{id: "host-1", caps: executor.Capabilities{
+		Isolation:               executor.IsolationNone,
+		SupportsSecretFiles:     true,
+		SecretFilesFromHostPath: true,
+	}}
+	lease := acquireSecretLease(dir, "/srv/proj", ex)
+	if lease == nil {
+		t.Fatal("no lease was issued, so this test would be vacuous")
+	}
+	defer lease.Close()
+
+	spec, err := applyLease(executor.Spec{Argv: []string{"cloop", "run"}}, ex, lease)
+	if err != nil {
+		t.Fatalf("applyLease: %v", err)
+	}
+	if !hasEnvName(spec.Env, "CLOOP_FLAGSHIP_CANARY") {
+		t.Error("a host-executed harness lost the hub's environment, which is where its PATH " +
+			"and HOME come from")
+	}
+}
+
+// TestUndeclaredIsolationIsTreatedAsHostExposure covers the driver that says
+// nothing about itself. Capabilities.Isolation is a string with a meaningful
+// zero value, so a backend mid-development declares no isolation by default —
+// and the safe reading of silence is "no boundary claimed". This asserts the
+// predicate reads it that way, since the opposite mistake would export the
+// hub's environment to something that never promised to contain it.
+func TestUndeclaredIsolationIsTreatedAsHostExposure(t *testing.T) {
+	if executor.IsolatesFromHost(stubExec{id: "undeclared"}) {
+		t.Error("an executor declaring no isolation is treated as isolated")
+	}
+	for _, iso := range []executor.Isolation{
+		executor.IsolationContainer, executor.IsolationVM, executor.IsolationRemote,
+	} {
+		if !executor.IsolatesFromHost(stubExec{id: "x", caps: executor.Capabilities{Isolation: iso}}) {
+			t.Errorf("isolation %q is not recognised as isolating", iso)
+		}
+	}
+}
+
+func envNames(env []string) []string {
+	out := make([]string, 0, len(env))
+	for _, kv := range env {
+		name, _, _ := strings.Cut(kv, "=")
+		out = append(out, name)
+	}
+	return out
+}
+
+func hasEnvName(env []string, want string) bool {
+	for _, kv := range env {
+		if name, _, _ := strings.Cut(kv, "="); name == want {
+			return true
+		}
+	}
+	return false
+}

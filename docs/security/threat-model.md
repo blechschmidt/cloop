@@ -324,7 +324,43 @@ child — the same exposure `install_script.go` already refuses for enrolment
 tokens. Fixed by passing it in the environment, which `cloop listen` already
 reads as `GROQ_API_KEY`; the plumbing appends to the inherited environment
 rather than replacing it, since `applyLease` reads a nil `Spec.Env` as
-"inherit `os.Environ()`".
+"inherit `os.Environ()`" — on the host driver. On an isolating executor it no
+longer inherits anything; see the next entry.
+
+**The hub's master sealing key was forwarded into every sandbox that held a
+grant (Task 20234).** `applyLease` seeded `Spec.Env` from `os.Environ()`
+whenever the caller left it nil, which every dispatch from `handleRun` does.
+Every name in `Spec.Env` is then forwarded into the workload — the container
+driver emits a bare `--env NAME` per entry — so the hub's entire process
+environment crossed the isolation boundary into a container running
+model-authored code. On a hosted deployment started from `.cloop/hub.env` that
+environment contains `CLOOP_SECRET_KEY`, the master key that unseals *every*
+credential in the broker, and `CLOOP_UI_TOKEN`, which bypasses RBAC and sees
+every project on the hub. A sandbox leased one repository-scoped token was
+handed the keys to the store that token came from, which inverts the entire
+point of [scoped grants](#cross-cutting-the-secret-and-egress-brokers).
+
+It applied only to a project that *held* a grant, because `applyLease` returns
+early on an empty lease — so it was live on exactly the enterprise path and
+absent from the one a developer tries first. It was invisible to every existing
+test: the container suite asserts credentials never reach the *argv*, which was
+true, and nothing asserted what reached the environment.
+
+Fixed by making the inheritance conditional on `executor.IsolatesFromHost`: a
+host-executed harness still inherits, because it is a process on this machine
+that would have had that environment anyway and needs `PATH` and `HOME`; an
+isolated workload gets exactly the leased material layered on its image's own
+environment, and anything else it needs is a grant. The same fix removed a
+second symptom — the host's `PATH` was replacing the image's inside the
+sandbox, so a `sh` that existed at `/bin/sh` could not be found.
+
+Found by building the end-to-end circuit in `tests/flagship`, which is the
+first test to run a real task through an isolating executor rather than against
+a fake. Guarded by `TestIsolatedExecutorDoesNotInheritTheHubEnvironment`,
+`TestHostExecutorStillInheritsTheEnvironment` and
+`TestUndeclaredIsolationIsTreatedAsHostExposure`, and end to end by the
+flagship circuit, which has the sandbox report whether it can see either
+variable and fails if it can.
 
 ---
 

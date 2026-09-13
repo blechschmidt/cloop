@@ -506,8 +506,30 @@ func applyLease(spec executor.Spec, ex executor.Executor, sl *secretLease) (exec
 			strings.Join(sl.lease.SecretNames(), ", "), describeSecretFileKinds(sl))
 	}
 
+	// A nil Spec.Env means "inherit", and what that may inherit depends on
+	// where the workload runs.
+	//
+	// On the host driver the child is a process on this machine that would
+	// have had this environment anyway, and stripping it would take PATH and
+	// HOME away from the harness.
+	//
+	// On an isolating executor it must not. Every name in Spec.Env is
+	// forwarded into the sandbox — the container driver emits a bare
+	// `--env NAME` per entry — so inheriting here hands model-authored code
+	// the hub's entire process environment. On a hosted deployment that
+	// includes CLOOP_SECRET_KEY, the master key that unseals every credential
+	// in the broker, and CLOOP_UI_TOKEN, an RBAC-bypassing dashboard token:
+	// the sandbox would be handed the keys to the store it is being given one
+	// scoped item from. It also drags the host's PATH across a filesystem
+	// boundary where it names nothing, which is how this was found — a
+	// post-task hook in an alpine sandbox could not find sh, because the hub's
+	// PATH had replaced the image's and did not list /bin.
+	//
+	// So an isolated workload gets exactly the leased material, layered on the
+	// image's own environment. Anything else it needs is a grant, which is the
+	// mechanism that already exists for saying so.
 	base := spec.Env
-	if base == nil {
+	if base == nil && !executor.IsolatesFromHost(ex) {
 		base = os.Environ()
 	}
 	merged := make([]string, 0, len(base)+len(env))
