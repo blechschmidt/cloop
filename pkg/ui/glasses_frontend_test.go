@@ -17,37 +17,80 @@ package ui
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 )
 
-// glassesScenarios extracts the page's script, runs the scenarios in node and
-// returns each one's raw result.
+// glassesScenarios returns every scenario's raw result.
+//
+// The whole file is driven once per test binary, not once per test. Each of
+// these tests asks about a different scenario, but the harness has always run
+// all of them — so a per-test invocation forked one node process per test to
+// recompute an identical map, two dozen times over, in a package whose
+// WebSocket timing tests already fail under load. Running it once is both
+// cheaper and the only version where "scenario X threw" is reported once
+// rather than by every test in the file.
+//
+// Safe to share: the run reads the shipped page and writes nothing a scenario
+// can observe, so every caller was already getting a byte-identical map.
 func glassesScenarios(t *testing.T) map[string]json.RawMessage {
 	t.Helper()
+	r := glassesRunOnce()
+	if r.skip != "" {
+		t.Skip(r.skip)
+	}
+	if r.err != nil {
+		t.Fatalf("%v", r.err)
+	}
+	return r.results
+}
 
+type glassesRunResult struct {
+	results map[string]json.RawMessage
+	skip    string
+	err     error
+}
+
+var glassesRunOnce = sync.OnceValue(runGlassesScenarios)
+
+func runGlassesScenarios() glassesRunResult {
 	node, err := exec.LookPath("node")
 	if err != nil {
-		t.Skip("node not installed; cannot drive the glasses page")
+		return glassesRunResult{skip: "node not installed; cannot drive the glasses page"}
 	}
 
-	script := extractGlassesScript(t)
-	dir := t.TempDir()
+	m := glassesScriptRe.FindStringSubmatch(glassesPageSource())
+	if m == nil {
+		return glassesRunResult{err: errors.New("no inline <script> in glasses.html — the " +
+			"extraction broke, or the page stopped being self-contained")}
+	}
+
+	// Not t.TempDir(): this run outlives any one test. The script is only
+	// needed while node reads it, so the directory goes when node is done.
+	dir, err := os.MkdirTemp("", "cloop-glasses-*")
+	if err != nil {
+		return glassesRunResult{err: fmt.Errorf("temp dir: %w", err)}
+	}
+	defer os.RemoveAll(dir)
+
 	path := filepath.Join(dir, "glasses.js")
-	if err := os.WriteFile(path, []byte(script), 0o644); err != nil {
-		t.Fatalf("write script: %v", err)
+	if err := os.WriteFile(path, []byte(m[1]), 0o644); err != nil {
+		return glassesRunResult{err: fmt.Errorf("write script: %w", err)}
 	}
 	shim, err := filepath.Abs("testdata/glassesdom.js")
 	if err != nil {
-		t.Fatalf("resolve shim: %v", err)
+		return glassesRunResult{err: fmt.Errorf("resolve shim: %w", err)}
 	}
 	scenarios, err := filepath.Abs("testdata/glasses_scenarios.js")
 	if err != nil {
-		t.Fatalf("resolve scenarios: %v", err)
+		return glassesRunResult{err: fmt.Errorf("resolve scenarios: %w", err)}
 	}
 
 	cmd := exec.Command(node, scenarios, shim, path)
@@ -55,40 +98,33 @@ func glassesScenarios(t *testing.T) map[string]json.RawMessage {
 	out, err := cmd.Output()
 	if err != nil {
 		stderr := ""
-		if ee, ok := err.(*exec.ExitError); ok {
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
 			stderr = string(ee.Stderr)
 		}
-		t.Fatalf("running the scenarios failed: %v\nstdout:\n%s\nstderr:\n%s", err, out, stderr)
+		return glassesRunResult{err: fmt.Errorf("running the scenarios failed: %w\nstdout:\n%s\nstderr:\n%s",
+			err, out, stderr)}
 	}
 
 	var results map[string]json.RawMessage
 	if err := json.Unmarshal(out, &results); err != nil {
-		t.Fatalf("scenario output is not JSON: %v\n%s", err, out)
+		return glassesRunResult{err: fmt.Errorf("scenario output is not JSON: %w\n%s", err, out)}
 	}
 	if len(results) == 0 {
-		t.Fatal("no scenarios ran — the harness is disabled, not passing")
+		return glassesRunResult{err: errors.New("no scenarios ran — the harness is disabled, not passing")}
 	}
 	for name, raw := range results {
 		var probe struct {
 			Error string `json:"error"`
 		}
 		if json.Unmarshal(raw, &probe) == nil && probe.Error != "" {
-			t.Fatalf("scenario %s threw:\n%s", name, probe.Error)
+			return glassesRunResult{err: fmt.Errorf("scenario %s threw:\n%s", name, probe.Error)}
 		}
 	}
-	return results
+	return glassesRunResult{results: results}
 }
 
 var glassesScriptRe = regexp.MustCompile(`(?s)<script>(.*?)</script>`)
-
-func extractGlassesScript(t *testing.T) string {
-	t.Helper()
-	m := glassesScriptRe.FindStringSubmatch(glassesPageSource())
-	if m == nil {
-		t.Fatal("no inline <script> in glasses.html — the extraction broke, or the page stopped being self-contained")
-	}
-	return m[1]
-}
 
 func glassesScenario(t *testing.T, results map[string]json.RawMessage, name string, into any) {
 	t.Helper()
@@ -758,6 +794,245 @@ func hasStop(list []string, want string) bool {
 	return false
 }
 
+// ── adding a task (Task 20243) ──────────────────────────────────────────────
+
+// TestGlassesAddButtonReachableWithoutAMicrophone is the reported gap: "on the
+// Meta glasses' view, I don't see any button to add tasks."
+//
+// The device that filed it is the one that cannot record — Meta lists
+// microphone, camera and text input as unsupported for Ray-Ban Display web
+// apps — so before this the only add-a-task affordance hid itself there and
+// left a line of grey text in its place. This drives the no-microphone runtime
+// and asserts three things: the button is a stop in the focus ring, the screen
+// behind it offers rows that can actually be pinched, and the cursor lands on
+// one of them.
+func TestGlassesAddButtonReachableWithoutAMicrophone(t *testing.T) {
+	t.Parallel()
+
+	var r struct {
+		OnTasks []string `json:"onTasks"`
+		Title   string   `json:"title"`
+		Rows    []string `json:"rows"`
+		RowText []string `json:"rowText"`
+		Note    string   `json:"note"`
+		Ring    []string `json:"ring"`
+		Cursor  string   `json:"cursor"`
+	}
+	glassesScenario(t, glassesScenarios(t), "add_button_offered_without_a_microphone", &r)
+
+	if !hasString(r.OnTasks, "#add") {
+		t.Fatalf("no way to add a task on a device that cannot record: the task list's ring is %v.\n"+
+			"The button has to be there whether or not a microphone exists — the rows behind it "+
+			"do not need one.", r.OnTasks)
+	}
+	if r.Title != "Add task" {
+		t.Errorf("pinching the button opened %q rather than the Add screen", r.Title)
+	}
+	if len(r.Rows) == 0 {
+		t.Fatal("the Add screen offered nothing at all — a button leading to an empty screen is " +
+			"worse than the missing button it replaced")
+	}
+	for _, row := range r.Rows {
+		if !strings.HasPrefix(row, "q:") {
+			t.Errorf("unexpected row %q on the Add screen; want only ready-made rows", row)
+		}
+	}
+	if !hasString(r.Ring, r.Rows[0]) {
+		t.Errorf("the first ready-made row is not reachable by swiping; ring = %v", r.Ring)
+	}
+	if r.Cursor != r.Rows[0] {
+		t.Errorf("the cursor should open on the first row so one pinch does something useful; "+
+			"it is on %q", r.Cursor)
+	}
+	if len(r.RowText) == 0 || strings.TrimSpace(r.RowText[0]) == "" {
+		t.Errorf("a ready-made row rendered with no text: %v", r.RowText)
+	}
+	if !strings.Contains(strings.ToLower(r.Note), "phone") {
+		t.Errorf("the Add screen still has to name the one way to say something new — opening the\n"+
+			"same link on the paired phone. Got: %q", r.Note)
+	}
+}
+
+// TestGlassesAddScreenLeadsWithSpeech: where a microphone exists it is the only
+// way to add something the ready-made list does not already say, so it goes
+// first and takes the cursor.
+func TestGlassesAddScreenLeadsWithSpeech(t *testing.T) {
+	t.Parallel()
+
+	var r struct {
+		Ring   []string `json:"ring"`
+		Cursor string   `json:"cursor"`
+		Note   string   `json:"note"`
+		Rows   []string `json:"rows"`
+	}
+	glassesScenario(t, glassesScenarios(t), "add_screen_leads_with_speech_when_possible", &r)
+
+	if !hasString(r.Ring, "#dictate") {
+		t.Errorf("with a microphone, speech must be offered on the Add screen; ring = %v", r.Ring)
+	}
+	if r.Cursor != "#dictate" {
+		t.Errorf("the cursor should open on speech when it works, not %q", r.Cursor)
+	}
+	if r.Note != "" {
+		t.Errorf("a working microphone should need no explanation, got %q", r.Note)
+	}
+	if len(r.Rows) == 0 {
+		t.Error("the ready-made rows should still be offered alongside speech — they are the " +
+			"faster answer for the work they already name")
+	}
+}
+
+// TestGlassesAddButtonTracksTheCredential: a read-only link must not draw the
+// button at all. Every row behind it posts, and a control whose only outcome is
+// a refusal is worse than no control on a display with no error console.
+func TestGlassesAddButtonTracksTheCredential(t *testing.T) {
+	t.Parallel()
+	results := glassesScenarios(t)
+
+	var ro struct {
+		Ring []string `json:"ring"`
+		Note string   `json:"note"`
+	}
+	glassesScenario(t, results, "add_button_absent_for_a_read_only_link", &ro)
+	if hasString(ro.Ring, "#add") {
+		t.Errorf("a read-only link was offered the Add button; ring = %v", ro.Ring)
+	}
+	if ro.Note != "" {
+		t.Errorf("no explanation is warranted for a link that may not add anything, got %q", ro.Note)
+	}
+
+	// ...but a hub with no speech backend is a different case entirely: the
+	// ready-made rows work there, so the button must survive.
+	var noSpeech struct {
+		OnTasks []string `json:"onTasks"`
+		Ring    []string `json:"ring"`
+		Note    string   `json:"note"`
+		Rows    []string `json:"rows"`
+	}
+	glassesScenario(t, results, "add_button_survives_a_hub_with_no_speech", &noSpeech)
+	if !hasString(noSpeech.OnTasks, "#add") {
+		t.Errorf("a hub with no speech backend lost the Add button; ring = %v", noSpeech.OnTasks)
+	}
+	if hasString(noSpeech.Ring, "#dictate") {
+		t.Errorf("speech offered against a hub that cannot transcribe; ring = %v", noSpeech.Ring)
+	}
+	if noSpeech.Note != "" {
+		t.Errorf("the microphone note is about this device, not about the hub; got %q", noSpeech.Note)
+	}
+	if len(noSpeech.Rows) == 0 {
+		t.Error("no ready-made rows offered, so the surviving button leads nowhere")
+	}
+}
+
+// TestGlassesReadyMadeTaskRoundTrip drives the second way in end to end: pinch
+// a row, confirm, one task posted — carrying the brief the row holds but never
+// shows, which is what makes a one-pinch task more than a bare title.
+func TestGlassesReadyMadeTaskRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	var r struct {
+		ConfirmRows     []string `json:"confirmRows"`
+		Shown           string   `json:"shown"`
+		CursorOnConfirm string   `json:"cursorOnConfirm"`
+		Posted          []struct {
+			URL  string `json:"url"`
+			Body string `json:"body"`
+		} `json:"posted"`
+		View string `json:"view"`
+	}
+	glassesScenario(t, glassesScenarios(t), "add_ready_made_task_round_trip", &r)
+
+	if !hasString(r.ConfirmRows, "act:confirm") || !hasString(r.ConfirmRows, "act:discard") {
+		t.Fatalf("a ready-made row must go through the same confirmation a transcript does — "+
+			"one stray pinch must not file work. Rows: %v", r.ConfirmRows)
+	}
+	if r.CursorOnConfirm != "act:confirm" {
+		t.Errorf("the cursor should land on Add; it is on %q", r.CursorOnConfirm)
+	}
+	if !strings.Contains(r.Shown, "Fix the failure in task #2") {
+		t.Errorf("the confirmation must show what is about to be created, got %q", r.Shown)
+	}
+
+	var created string
+	var posts int
+	for _, p := range r.Posted {
+		if strings.HasSuffix(p.URL, "/tasks") {
+			created = p.Body
+			posts++
+		}
+	}
+	if posts != 1 {
+		t.Fatalf("want exactly one POST to /api/glasses/tasks, got %d: %+v", posts, r.Posted)
+	}
+	if !strings.Contains(created, "Fix the failure in task #2") {
+		t.Errorf("the picked title did not reach the hub: %s", created)
+	}
+	if !strings.Contains(created, "description") || !strings.Contains(created, "recorded result") {
+		t.Errorf("the row's brief must travel with it — a bare \"fix task 2\" invites the blind "+
+			"re-run that produced the failure. Body: %s", created)
+	}
+}
+
+// TestGlassesAddButtonWaitsForItsOwnProject is this dashboard's oldest bug
+// class arriving on the wearable. Two ready-made rows name a failure by id, so
+// a button offered before the newly-opened project's rows have landed would
+// hand the wearer the *previous* project's repair job — and creating it would
+// file work against the wrong plan under a title that names a task in another
+// one.
+func TestGlassesAddButtonWaitsForItsOwnProject(t *testing.T) {
+	t.Parallel()
+
+	type visit struct {
+		During []string `json:"during"`
+		Rows   []string `json:"rows"`
+	}
+	var r struct {
+		Alpha visit `json:"alpha"`
+		Beta  visit `json:"beta"`
+	}
+	glassesScenario(t, glassesScenarios(t), "add_button_waits_for_this_projects_rows", &r)
+
+	for name, v := range map[string]visit{"first": r.Alpha, "second": r.Beta} {
+		if hasString(v.During, "#add") {
+			t.Errorf("on the %s project the Add button was offered before its rows arrived; "+
+				"ring = %v", name, v.During)
+		}
+		if len(v.Rows) == 0 {
+			t.Fatalf("the %s project's Add screen has no rows at all", name)
+		}
+	}
+	if len(r.Beta.Rows) != 1 || !strings.Contains(r.Beta.Rows[0], "#9") {
+		t.Errorf("the second project's Add screen is showing the first project's rows: %v",
+			r.Beta.Rows)
+	}
+}
+
+// TestGlassesAddScreenDoesNotPoll: the minute refresh rebuilds the list it is
+// looking at, and on this screen that would move the cursor out from under a
+// wearer part way through choosing.
+func TestGlassesAddScreenDoesNotPoll(t *testing.T) {
+	t.Parallel()
+
+	var r struct {
+		Before int      `json:"before"`
+		After  int      `json:"after"`
+		Rows   []string `json:"rows"`
+		Cursor string   `json:"cursor"`
+	}
+	glassesScenario(t, glassesScenarios(t), "add_screen_does_not_poll", &r)
+
+	if r.After != r.Before {
+		t.Errorf("the Add screen issued %d request(s) on the minute tick; it should issue none",
+			r.After-r.Before)
+	}
+	if len(r.Rows) == 0 {
+		t.Error("the rows did not survive the tick")
+	}
+	if !strings.HasPrefix(r.Cursor, "q:") {
+		t.Errorf("the cursor moved off the row the wearer had selected, onto %q", r.Cursor)
+	}
+}
+
 // ── dictation (Task 20238) ──────────────────────────────────────────────────
 
 // TestGlassesDictationOfferedOnlyWhenUsable covers the three ways the control
@@ -839,10 +1114,10 @@ func TestGlassesDictationRoundTrip(t *testing.T) {
 	if !strings.Contains(r.Heard, "add a retention policy") {
 		t.Errorf("the transcript must be shown before it becomes a task; screen read %q", r.Heard)
 	}
-	if !hasString(r.ConfirmRows, "act:add") || !hasString(r.ConfirmRows, "act:discard") {
+	if !hasString(r.ConfirmRows, "act:confirm") || !hasString(r.ConfirmRows, "act:discard") {
 		t.Errorf("confirmation needs both an Add and a Discard row, got %v", r.ConfirmRows)
 	}
-	if r.FocusOnConfirm != "act:add" {
+	if r.FocusOnConfirm != "act:confirm" {
 		t.Errorf("focus should land on Add — it is why the wearer spoke, and the transcript\n"+
 			"above it is not focusable. Got %q", r.FocusOnConfirm)
 	}
@@ -869,17 +1144,19 @@ func TestGlassesDictationRoundTrip(t *testing.T) {
 }
 
 // TestGlassesDictationDiscardCreatesNothing is the other half of confirming:
-// a rejected transcript must leave no trace.
+// a rejected transcript must leave no trace, and must land the wearer back
+// where they can immediately try again.
 func TestGlassesDictationDiscardCreatesNothing(t *testing.T) {
 	t.Parallel()
 	results := glassesScenarios(t)
 
 	var r struct {
+		Title     string   `json:"title"`
 		Rows      []string `json:"rows"`
 		TaskPosts int      `json:"taskPosts"`
 		Ring      []string `json:"ring"`
 	}
-	glassesScenario(t, results, "dictate_discard_returns_to_tasks", &r)
+	glassesScenario(t, results, "dictate_discard_returns_to_the_add_screen", &r)
 
 	if r.TaskPosts != 0 {
 		t.Errorf("discard created %d task(s) — it must create none", r.TaskPosts)
@@ -889,6 +1166,10 @@ func TestGlassesDictationDiscardCreatesNothing(t *testing.T) {
 			t.Errorf("still on the confirmation screen after discarding: rows = %v", r.Rows)
 			break
 		}
+	}
+	if r.Title != "Add task" {
+		t.Errorf("discarding should return to the Add screen, where trying again is one pinch "+
+			"away; landed on %q instead", r.Title)
 	}
 	if !hasString(r.Ring, "#dictate") {
 		t.Errorf("after discarding, the wearer should be able to try again; ring = %v", r.Ring)
@@ -923,7 +1204,7 @@ func TestGlassesDictationReleasesTheMicrophone(t *testing.T) {
 	glassesScenario(t, results, "dictate_navigating_away_releases_the_mic", &away)
 
 	if away.MicReleased == 0 {
-		t.Error("leaving the tasks screen while recording left the microphone track live — the " +
+		t.Error("leaving the Add screen while recording left the microphone track live — the " +
 			"phone's recording indicator stays lit for the rest of the session")
 	}
 	if away.RecorderState == "recording" {
@@ -1009,10 +1290,9 @@ func TestGlassesDictationRefusesSilence(t *testing.T) {
 	results := glassesScenarios(t)
 
 	var quiet struct {
-		Uploads int      `json:"uploads"`
-		Msg     string   `json:"msg"`
-		Rows    []string `json:"rows"`
-		Label   string   `json:"label"`
+		Uploads int    `json:"uploads"`
+		Msg     string `json:"msg"`
+		Label   string `json:"label"`
 	}
 	glassesScenario(t, results, "dictate_silence_is_not_uploaded", &quiet)
 
@@ -1022,12 +1302,6 @@ func TestGlassesDictationRefusesSilence(t *testing.T) {
 	}
 	if quiet.Msg == "" {
 		t.Error("nothing told the wearer why nothing happened")
-	}
-	for _, row := range quiet.Rows {
-		if strings.HasPrefix(row, "act:") {
-			t.Errorf("a confirmation screen was raised for a silent clip: %v", quiet.Rows)
-			break
-		}
 	}
 
 	// The guard must not simply block everything.
@@ -1039,7 +1313,7 @@ func TestGlassesDictationRefusesSilence(t *testing.T) {
 	if loud.Uploads == 0 {
 		t.Error("audio containing sound was not uploaded — the silence guard is too aggressive")
 	}
-	if !hasString(loud.Rows, "act:add") {
+	if !hasString(loud.Rows, "act:confirm") {
 		t.Errorf("a real recording did not reach the confirmation screen: %v", loud.Rows)
 	}
 }

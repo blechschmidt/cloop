@@ -30,8 +30,10 @@ function mkTasks(n, status) {
 }
 
 // tasksRoute answers like the real endpoint: honour offset and limit, and
-// report the unpaged total, so the paging assertions mean something.
-function tasksRoute(all, seen) {
+// report the unpaged total, so the paging assertions mean something. extras is
+// merged into the body for the capability blocks the real route carries
+// alongside the page — dictation and the Add screen's ready-made rows.
+function tasksRoute(all, seen, extras) {
   return url => {
     const q = new URLSearchParams(url.split('?')[1] || '');
     const offset = parseInt(q.get('offset') || '0', 10);
@@ -41,7 +43,11 @@ function tasksRoute(all, seen) {
     const matched = status ? all.filter(t => status.split(',').indexOf(t.status) >= 0) : all;
     return {
       status: 200,
-      body: { tasks: matched.slice(offset, offset + limit), total: matched.length, goal: 'ship it' },
+      body: Object.assign({
+        tasks: matched.slice(offset, offset + limit),
+        total: matched.length,
+        goal: 'ship it',
+      }, extras || {}),
     };
   };
 }
@@ -449,57 +455,217 @@ scenarios.markup_in_a_title_stays_text = async () => {
   return { text: row.textContent, nasty, nodes: row.childNodes.length };
 };
 
-// ── dictation (Task 20238) ──────────────────────────────────────────────────
+// ── adding a task (Tasks 20238, 20243) ──────────────────────────────────────
 // The device cannot record: Meta lists camera, microphone and getUserMedia as
-// unsupported for Ray-Ban Display web apps. So the two cases that matter are
-// "a runtime with a microphone drives the whole flow" and "a runtime without
-// one says so instead of offering a dead control", and the second is the one
-// the glasses themselves will hit.
+// unsupported for Ray-Ban Display web apps. Dictation therefore only works when
+// the same link is opened on the paired phone — which is why the way in is a
+// button that is always there (Task 20243) rather than a microphone control
+// that hides itself, and why the screen behind it also offers ready-made rows.
+//
+// The scenarios that matter are: the button is reachable on the device that
+// cannot record; the screen behind it offers something there; and the whole
+// circuit, both ways in, ends with exactly one task posted.
 
 const DICTATION_ON = { available: true, can_add_tasks: true, backend: 'groq' };
+
+// What /api/glasses/tasks sends as the Add screen's rows. Shaped like the real
+// response: repairs naming a specific failure first, then the standing set.
+const QUICK = [
+  { title: 'Fix the failure in task #2: task 2', description: 'Task #2 ("task 2") ended as failed. Read its recorded result…' },
+  { title: 'Review the recent changes and fix any bugs found', description: 'Go over the work committed most recently…' },
+  { title: 'Add tests for the code that changed most recently', description: 'Identify the packages touched…' },
+];
 
 // The real /api/glasses/tasks carries the dictation status too, and it is the
 // authoritative copy — the project list's is resolved against the default
 // project. A fixture that omitted it would leave the refresh path untested.
-function tasksRouteWithDictation(all, dictation) {
-  const inner = tasksRoute(all, null);
-  return url => {
-    const r = inner(url);
-    r.body.dictation = dictation;
-    return r;
-  };
+// quick rides on the same response, and the server sends none of it to a link
+// that may not add tasks, so the fixture does not either.
+function tasksRouteWithDictation(all, dictation, quick) {
+  return tasksRoute(all, null, {
+    dictation: dictation,
+    quick: quick || (dictation.can_add_tasks ? QUICK : []),
+  });
 }
 
-function dictationRoutes(dictation, extra) {
+function dictationRoutes(dictation, extra, quick) {
   const routes = {
     '/api/glasses/projects': { projects: PROJECTS, dictation: dictation },
-    '/api/glasses/tasks': tasksRouteWithDictation(mkTasks(3), dictation),
+    '/api/glasses/tasks': tasksRouteWithDictation(mkTasks(3), dictation, quick),
   };
   return Object.assign(routes, extra || {});
 }
 
 // openAlpha walks from the project list into a project, which is the only
-// screen where dictation is offered — a task needs somewhere to belong.
+// screen where adding is offered — a task needs somewhere to belong.
 async function openAlpha(dom) {
   await dom.settle();
   dom.click(dom.doc.getElementById('list').childNodes[0]);
   await dom.settle();
 }
 
+// openAddScreen goes one further, through the button this task added.
+async function openAddScreen(dom) {
+  await openAlpha(dom);
+  dom.click(dom.doc.getElementById('add'));
+  await dom.settle();
+}
+
+// ── the reported gap (Task 20243) ───────────────────────────────────────────
+// "I don't see any button to add tasks." The device that cannot record is the
+// one that must still show the way in, so this is the no-microphone runtime.
+
+scenarios.add_button_offered_without_a_microphone = async () => {
+  const dom = boot({ routes: dictationRoutes(DICTATION_ON) });
+  await openAlpha(dom);
+  const onTasks = dom.ring();
+  dom.click(dom.doc.getElementById('add'));
+  await dom.settle();
+  return {
+    onTasks: onTasks,
+    title: dom.text('title'),
+    rows: dom.rows(),
+    rowText: dom.rowNodes().map(n => n.textContent),
+    note: dom.text('micnote'),
+    ring: dom.ring(),
+    cursor: dom.cursorName(),
+  };
+};
+
+// ...and with one, where speech is the better option and should be where the
+// cursor lands.
+scenarios.add_screen_leads_with_speech_when_possible = async () => {
+  const dom = boot({ mic: true, routes: dictationRoutes(DICTATION_ON) });
+  await openAddScreen(dom);
+  return { ring: dom.ring(), cursor: dom.cursorName(), note: dom.text('micnote'), rows: dom.rows() };
+};
+
+// A read-only link must not draw the button at all — every row behind it would
+// be refused.
+scenarios.add_button_absent_for_a_read_only_link = async () => {
+  const dom = boot({ mic: true, routes: dictationRoutes({ available: true, can_add_tasks: false }) });
+  await openAlpha(dom);
+  return { ring: dom.ring(), note: dom.text('micnote') };
+};
+
+// A hub with no speech backend still has to offer the button: the ready-made
+// rows behind it do not need one.
+scenarios.add_button_survives_a_hub_with_no_speech = async () => {
+  const dom = boot({ mic: true, routes: dictationRoutes({ available: false, can_add_tasks: true }) });
+  await openAlpha(dom);
+  const onTasks = dom.ring();
+  dom.click(dom.doc.getElementById('add'));
+  await dom.settle();
+  return { onTasks: onTasks, ring: dom.ring(), note: dom.text('micnote'), rows: dom.rows() };
+};
+
+// The second way in, end to end: pinch a ready-made row, confirm, task posted —
+// with the brief the row carries, which never appears on screen.
+scenarios.add_ready_made_task_round_trip = async () => {
+  const dom = boot({ routes: dictationRoutes(DICTATION_ON) });
+  await openAddScreen(dom);
+
+  const first = dom.rowNodes()[0];
+  dom.click(first);
+  await dom.settle();
+  const confirmRows = dom.rows();
+  const shown = dom.text('list');
+  const cursorOnConfirm = dom.cursorName();   // before the pinch navigates away
+
+  const go = dom.rowNodes().filter(n => n.dataset.act === 'confirm')[0];
+  if (go) { dom.click(go); }
+  await dom.settle();
+
+  const posts = dom.sent.filter(s => s.method === 'POST');
+  return {
+    confirmRows: confirmRows,
+    shown: shown,
+    cursorOnConfirm: cursorOnConfirm,
+    posted: posts.map(p => ({ url: p.url.split('?')[0], body: p.body })),
+    view: dom.text('title'),
+  };
+};
+
+// Backing out of a ready-made row returns to the Add screen, not the task
+// list: the next thing a wearer wants after rejecting one is another one.
+scenarios.add_discard_returns_to_the_add_screen = async () => {
+  const dom = boot({ routes: dictationRoutes(DICTATION_ON) });
+  await openAddScreen(dom);
+  dom.click(dom.rowNodes()[0]);
+  await dom.settle();
+
+  const discard = dom.rowNodes().filter(n => n.dataset.act === 'discard')[0];
+  if (discard) { dom.click(discard); }
+  await dom.settle();
+
+  const posts = dom.sent.filter(s => s.method === 'POST');
+  return { title: dom.text('title'), rows: dom.rows(), posts: posts.length };
+};
+
+// Two of the rows name a failure by id, so the button must not appear until
+// *this* project's rows have arrived. Offering the previous project's — the
+// gap between pinching a project and its task list landing — would file work
+// against the wrong plan, which is this dashboard's oldest bug class.
+scenarios.add_button_waits_for_this_projects_rows = async () => {
+  const BETA_QUICK = [{ title: 'Fix the failure in task #9: beta only', description: 'beta brief' }];
+  const perProject = url => {
+    const idx = new URLSearchParams(url.split('?')[1] || '').get('project_idx');
+    return tasksRouteWithDictation(mkTasks(2), DICTATION_ON, idx === '1' ? BETA_QUICK : QUICK)(url);
+  };
+  const dom = boot({ routes: {
+    '/api/glasses/projects': { projects: PROJECTS, dictation: DICTATION_ON },
+    '/api/glasses/tasks': perProject,
+  } });
+  await dom.settle();
+
+  const open = async (n) => {
+    dom.click(dom.doc.getElementById('list').childNodes[n]);
+    const during = dom.ring();          // the response has not landed yet
+    await dom.settle();
+    dom.click(dom.doc.getElementById('add'));
+    await dom.settle();
+    return { during: during, rows: dom.rowNodes().map(r => r.textContent) };
+  };
+
+  const alpha = await open(0);
+  dom.click(dom.doc.getElementById('back'));   // back to alpha's task list
+  await dom.settle();
+  dom.click(dom.doc.getElementById('back'));   // back to the project list
+  await dom.settle();
+  const beta = await open(1);
+
+  return { alpha: alpha, beta: beta };
+};
+
+// The Add screen does not poll. A refresh that rebuilt it would move the cursor
+// out from under a wearer part way through a decision.
+scenarios.add_screen_does_not_poll = async () => {
+  const dom = boot({ routes: dictationRoutes(DICTATION_ON) });
+  await openAddScreen(dom);
+  const before = dom.calls.length;
+  dom.tick();
+  await dom.settle();
+  return { before: before, after: dom.calls.length, rows: dom.rows(), cursor: dom.cursorName() };
+};
+
+// ── dictation (Task 20238) ──────────────────────────────────────────────────
+
 scenarios.dictate_offered_when_a_microphone_exists = async () => {
   const dom = boot({ mic: true, routes: dictationRoutes(DICTATION_ON) });
-  await openAlpha(dom);
+  await openAddScreen(dom);
   return { ring: dom.ring(), note: dom.text('micnote'), label: dom.text('dictate') };
 };
 
 // The glasses case: no getUserMedia anywhere in the runtime.
 scenarios.dictate_explains_when_no_microphone = async () => {
   const dom = boot({ routes: dictationRoutes(DICTATION_ON) });
-  await openAlpha(dom);
+  await openAddScreen(dom);
   return { ring: dom.ring(), note: dom.text('micnote') };
 };
 
 // A read-only link must not draw the control at all — it would be refused.
+// The button that opens this screen is gone too, so reach it the only other
+// way there is and confirm nothing is offered.
 scenarios.dictate_absent_for_a_read_only_link = async () => {
   const dom = boot({ mic: true, routes: dictationRoutes({ available: true, can_add_tasks: false }) });
   await openAlpha(dom);
@@ -509,7 +675,7 @@ scenarios.dictate_absent_for_a_read_only_link = async () => {
 // And absent when the hub has no speech backend configured at all.
 scenarios.dictate_absent_when_hub_has_no_backend = async () => {
   const dom = boot({ mic: true, routes: dictationRoutes({ available: false, can_add_tasks: true }) });
-  await openAlpha(dom);
+  await openAddScreen(dom);
   return { ring: dom.ring(), note: dom.text('micnote') };
 };
 
@@ -519,10 +685,9 @@ scenarios.dictate_round_trip_creates_a_task = async () => {
     mic: true,
     routes: dictationRoutes(DICTATION_ON, {
       '/api/glasses/transcribe': { text: 'add a retention policy' },
-      '/api/glasses/tasks': tasksRoute(mkTasks(3), null),
     }),
   });
-  await openAlpha(dom);
+  await openAddScreen(dom);
 
   const before = dom.text('dictate');
   dom.click(dom.doc.getElementById('dictate'));      // start recording
@@ -537,7 +702,7 @@ scenarios.dictate_round_trip_creates_a_task = async () => {
   const focusOnConfirm = dom.focusName();
 
   // Pinch "Add task".
-  const add = dom.rowNodes().filter(n => n.dataset.act === 'add')[0];
+  const add = dom.rowNodes().filter(n => n.dataset.act === 'confirm')[0];
   if (add) { dom.click(add); }
   await dom.settle();
 
@@ -553,13 +718,14 @@ scenarios.dictate_round_trip_creates_a_task = async () => {
   };
 };
 
-// Discarding must drop the transcript rather than keep offering it.
-scenarios.dictate_discard_returns_to_tasks = async () => {
+// Discarding must drop the transcript rather than keep offering it, and land
+// back where the wearer started it.
+scenarios.dictate_discard_returns_to_the_add_screen = async () => {
   const dom = boot({
     mic: true,
     routes: dictationRoutes(DICTATION_ON, { '/api/glasses/transcribe': { text: 'never mind' } }),
   });
-  await openAlpha(dom);
+  await openAddScreen(dom);
   dom.click(dom.doc.getElementById('dictate'));
   await dom.settle();
   dom.click(dom.doc.getElementById('dictate'));
@@ -570,7 +736,7 @@ scenarios.dictate_discard_returns_to_tasks = async () => {
   await dom.settle();
 
   const posts = dom.sent.filter(s => s.method === 'POST' && s.url.indexOf('/tasks') >= 0);
-  return { rows: dom.rows(), taskPosts: posts.length, ring: dom.ring() };
+  return { title: dom.text('title'), rows: dom.rows(), taskPosts: posts.length, ring: dom.ring() };
 };
 
 // Navigating away mid-recording must release the microphone, and must not
@@ -578,15 +744,14 @@ scenarios.dictate_discard_returns_to_tasks = async () => {
 // pinch would otherwise upload the walk through the menus.
 scenarios.dictate_navigating_away_releases_the_mic = async () => {
   const dom = boot({ mic: true, routes: dictationRoutes(DICTATION_ON) });
-  await openAlpha(dom);
+  await openAddScreen(dom);
 
   dom.click(dom.doc.getElementById('dictate'));   // start recording
   await dom.settle();
   const recorderBefore = dom.recorder();
 
-  // Pinch a task row: leaves the tasks view while still recording.
-  const row = dom.rowNodes().filter(n => n.dataset.key && n.dataset.key.indexOf('t:') === 0)[0];
-  if (row) { dom.click(row); }
+  // Back out to the task list while still recording.
+  dom.click(dom.doc.getElementById('back'));
   await dom.settle();
 
   const posts = dom.sent.filter(s => s.method === 'POST');
@@ -601,7 +766,7 @@ scenarios.dictate_navigating_away_releases_the_mic = async () => {
 // Two quick pinches must not start two recorders.
 scenarios.dictate_double_press_starts_one_recorder = async () => {
   const dom = boot({ mic: true, routes: dictationRoutes(DICTATION_ON) });
-  await openAlpha(dom);
+  await openAddScreen(dom);
   dom.click(dom.doc.getElementById('dictate'));
   dom.click(dom.doc.getElementById('dictate'));   // before getUserMedia resolves
   await dom.settle();
@@ -615,7 +780,7 @@ scenarios.dictate_stale_transcript_is_dropped = async () => {
     mic: true,
     routes: dictationRoutes(DICTATION_ON, { '/api/glasses/transcribe': { text: 'too late' } }),
   });
-  await openAlpha(dom);
+  await openAddScreen(dom);
   dom.click(dom.doc.getElementById('dictate'));
   await dom.settle();
   dom.click(dom.doc.getElementById('dictate'));   // stop -> upload in flight
@@ -627,7 +792,7 @@ scenarios.dictate_stale_transcript_is_dropped = async () => {
 // The minute poll must not repaint a control that is mid-recording.
 scenarios.dictate_poll_does_not_disturb_recording = async () => {
   const dom = boot({ mic: true, routes: dictationRoutes(DICTATION_ON) });
-  await openAlpha(dom);
+  await openAddScreen(dom);
   dom.click(dom.doc.getElementById('dictate'));
   await dom.settle();
   const during = dom.text('dictate');
@@ -652,7 +817,7 @@ scenarios.dictate_silence_is_not_uploaded = async () => {
     mic: true, audio: 'silent',
     routes: dictationRoutes(DICTATION_ON, { '/api/glasses/transcribe': { text: 'Thank you.' } }),
   });
-  await openAlpha(dom);
+  await openAddScreen(dom);
   dom.click(dom.doc.getElementById('dictate'));
   await dom.settle();
   dom.tick();                       // let the level poll observe the silence
@@ -661,7 +826,7 @@ scenarios.dictate_silence_is_not_uploaded = async () => {
   await dom.settle();
 
   const posts = dom.sent.filter(s => s.method === 'POST');
-  return { uploads: posts.length, msg: dom.text('msg'), rows: dom.rows(), label: dom.text('dictate') };
+  return { uploads: posts.length, msg: dom.text('msg'), label: dom.text('dictate') };
 };
 
 // ...and actual sound must still go through, so the guard is not just "never
@@ -671,7 +836,7 @@ scenarios.dictate_sound_is_uploaded = async () => {
     mic: true, audio: 'sound',
     routes: dictationRoutes(DICTATION_ON, { '/api/glasses/transcribe': { text: 'real words' } }),
   });
-  await openAlpha(dom);
+  await openAddScreen(dom);
   dom.click(dom.doc.getElementById('dictate'));
   await dom.settle();
   dom.tick();

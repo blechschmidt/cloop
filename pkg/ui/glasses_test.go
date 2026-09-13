@@ -1106,6 +1106,124 @@ func TestGlassesReadOnlyLinkCannotDictate(t *testing.T) {
 	}
 }
 
+// ── ready-made tasks (Task 20243) ───────────────────────────────────────────
+
+// TestGlassesQuickTasksLeadWithTheNewestFailure is the whole point of deriving
+// these server-side: a fixed list could have been a constant in the page, and
+// the rows worth pinching are the ones that name what just broke.
+func TestGlassesQuickTasksLeadWithTheNewestFailure(t *testing.T) {
+	t.Parallel()
+
+	plan := &pm.Plan{Tasks: []*pm.Task{
+		{ID: 1, Title: "first", Status: pm.TaskDone},
+		{ID: 2, Title: "an old failure", Status: pm.TaskFailed},
+		{ID: 3, Title: "still going", Status: pm.TaskInProgress},
+		{ID: 4, Title: "ran out of time", Status: pm.TaskTimedOut},
+		{ID: 5, Title: "the newest failure", Status: pm.TaskFailed},
+		{ID: 6, Title: "waiting", Status: pm.TaskPending},
+	}}
+
+	got := glassesQuickTasks(plan, true)
+	if len(got) > glassesQuickCap {
+		t.Fatalf("%d rows offered; the wearer reaches each one by swiping, so the list is capped "+
+			"at %d", len(got), glassesQuickCap)
+	}
+	if len(got) < 2 {
+		t.Fatalf("want at least the two repairs, got %d rows: %+v", len(got), got)
+	}
+
+	// Newest first: a failure from ten minutes ago is the one the wearer
+	// glanced up to look at.
+	if !strings.Contains(got[0].Title, "#5") {
+		t.Errorf("the first row should name task #5, the newest failure; got %q", got[0].Title)
+	}
+	if !strings.Contains(got[1].Title, "#4") {
+		t.Errorf("the second row should name task #4, the timed-out one — a task that ran out of "+
+			"time is as broken as one that failed; got %q", got[1].Title)
+	}
+	for _, q := range got[2:] {
+		if strings.Contains(q.Title, "#") {
+			t.Errorf("more than %d repair rows: %q — they would crowd out the standing set",
+				glassesQuickRepairs, q.Title)
+		}
+	}
+
+	// Every row has to be usable as a task on its own: the wearer cannot add a
+	// word to it, so a title with no brief is the entire instruction.
+	for i, q := range got {
+		if strings.TrimSpace(q.Title) == "" {
+			t.Errorf("row %d has no title", i)
+		}
+		if len(q.Title) > glassesQuickTitleCap+4 { // +4 for the ellipsis rune
+			t.Errorf("row %d title is %d bytes, past the %d cap: %q",
+				i, len(q.Title), glassesQuickTitleCap, q.Title)
+		}
+		if strings.TrimSpace(q.Description) == "" {
+			t.Errorf("row %d (%q) carries no brief; the wearer cannot supply one", i, q.Title)
+		}
+	}
+}
+
+// TestGlassesQuickTasksSurviveAnEmptyPlan: a project with no plan yet is
+// exactly one where adding a task is the useful thing to do, so the standing
+// rows have to be there before anything else is.
+func TestGlassesQuickTasksSurviveAnEmptyPlan(t *testing.T) {
+	t.Parallel()
+
+	for name, plan := range map[string]*pm.Plan{
+		"no plan":  nil,
+		"no tasks": {},
+	} {
+		got := glassesQuickTasks(plan, true)
+		if len(got) == 0 {
+			t.Errorf("%s: no rows offered, so the Add screen leads nowhere", name)
+		}
+		for _, q := range got {
+			if strings.Contains(q.Title, "#") {
+				t.Errorf("%s: offered a repair row %q with no failure to repair", name, q.Title)
+			}
+		}
+	}
+}
+
+// TestGlassesQuickTasksWithheldFromAReadOnlyLink checks the response itself,
+// not just the page. The wearable hides the whole screen for a read-only link,
+// and this is what makes that a property of the hub rather than of the client
+// agreeing to behave.
+func TestGlassesQuickTasksWithheldFromAReadOnlyLink(t *testing.T) {
+	f := newTokenFixture(t)
+	idx := f.idxOf(t, f.dirA)
+
+	for _, tc := range []struct {
+		name    string
+		mint    string
+		wantAny bool
+	}{
+		{"default link", "{}", true},
+		{"read-only link", `{"read_only":true}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tok := tokenInURL(t, mintLinkOpts(t, f, tc.mint))
+			code, body := f.do(t, tok, http.MethodGet,
+				"/api/glasses/tasks?project_idx="+itoaArch(idx), "")
+			if code != http.StatusOK {
+				t.Fatalf("GET /api/glasses/tasks = %d\nbody: %s", code, body)
+			}
+			var resp struct {
+				Quick []glassesQuickTask `json:"quick"`
+			}
+			if err := json.Unmarshal([]byte(body), &resp); err != nil {
+				t.Fatalf("decode: %v\nbody: %s", err, body)
+			}
+			if got := len(resp.Quick) > 0; got != tc.wantAny {
+				t.Errorf("quick rows present = %v, want %v — a link that may not add tasks must "+
+					"not be handed rows whose only outcome is a refusal (%d rows)",
+					got, tc.wantAny, len(resp.Quick))
+			}
+		})
+	}
+}
+
 // TestGlassesDictationStatusTracksTheLink stops the wearable drawing a control
 // its credential cannot use: the capability it reads has to match the gate.
 func TestGlassesDictationStatusTracksTheLink(t *testing.T) {

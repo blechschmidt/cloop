@@ -219,17 +219,20 @@ function makeDOM(opts) {
   const reload = node('button', 'reload', header);
   node('div', 'sub', app);
   node('div', 'filters', app);
+  const addBtn = node('button', 'add', app);
   const dictate = node('button', 'dictate', app);
   node('div', 'micnote', app);
   node('div', 'msg', app);
   node('div', 'list', app);
   const more = node('button', 'more', app);
 
-  // The three controls the stylesheet starts hidden.
+  // The four controls the stylesheet starts hidden.
   back.hidden = true;
   back.className = 'focusable';
   more.hidden = true;
   more.className = 'focusable';
+  addBtn.hidden = true;
+  addBtn.className = 'focusable';
   dictate.hidden = true;
   dictate.className = 'focusable';
   reload.className = 'focusable';

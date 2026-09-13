@@ -219,9 +219,9 @@ configuration.
 
 The link opens a separate, much smaller page — `/glasses` — that lists your
 projects, drills into one project's tasks and shows a single task. Beyond
-reading, the only thing it can do is add a task by dictation; it cannot start a
-run, change an existing task, or reach anything outside the glasses views.
-Generate the link with **Read-only** ticked to remove even that.
+reading, the only thing it can do is add a task; it cannot start a run, change
+an existing task, or reach anything outside the glasses views. Generate the
+link with **Read-only** ticked to remove even that.
 
 The glasses have no pointer and no keyboard. Every band or temple gesture
 arrives at the page as an arrow key or Enter, so the page provides the cursor
@@ -241,6 +241,31 @@ move and never a scroll. The page re-reads the hub about once a minute and
 patches what changed in place, so a refresh does not move your selection or lose
 your place in a long task result.
 
+### Adding a task from the glasses
+
+Inside a project there is a **+ Add task** button above the list. It is always
+there when the link may add tasks, and it opens a screen with the ways of
+composing one that work on whatever is reading the page:
+
+- **🎤 Speak a new task**, when the device has a microphone — which on Ray-Ban
+  Display means the phone, not the glasses (see below).
+- **Ready-made tasks**, a short list the hub builds from the project's own
+  plan. The first rows name the newest failed or timed-out tasks — *Fix the
+  failure in task #63: …* — and the rest are standing jobs worth doing on any
+  project: review the recent changes for bugs, add tests for what changed,
+  bring the documentation back in line. Each carries a full brief for the agent
+  that never has to fit on the display.
+
+Either way the next screen shows what is about to be created, with *Add task*
+and *Discard*, so a stray pinch cannot file work. Discarding returns you to the
+Add screen rather than the task list, because the next thing you want after
+rejecting one is usually another one.
+
+The list exists because the hardware leaves no alternative: with no microphone
+and no text input, choosing from a list is the only way to compose anything
+with a band that sends arrow keys and Enter. Nothing here calls a model — the
+rows are derived from plan state — so opening the screen costs nothing.
+
 ---
 
 ## Dictating a task
@@ -254,16 +279,17 @@ good, not perfect, and the field is right there to correct before you press
 The button only appears when the hub has a speech backend configured, and the
 browser needs an `https` origin (or `localhost`) to reach a microphone at all.
 
-Inside a project, the glasses page offers the same thing as **🎤 Speak a new
-task**, with a confirmation screen — the transcript, then *Add task* or
-*Discard* — because a wearer has no keyboard to correct a wrong word with.
+The glasses page offers the same thing as **🎤 Speak a new task**, on the *+
+Add task* screen described above, with a confirmation step — the transcript,
+then *Add task* or *Discard* — because a wearer has no keyboard to correct a
+wrong word with.
 
 **The glasses cannot record.** Meta's developer guide lists camera, microphone
 and `getUserMedia` as unsupported for Ray-Ban Display web apps, so no web app
 on that device can hear anything. Dictation therefore runs on the phone the
 glasses tether through: open the same saved link there and the control is live.
-On the glasses the page says so in one line rather than offering a button that
-cannot work.
+On the glasses the Add screen says so in one line and offers the ready-made
+rows instead, rather than showing a button that cannot work.
 
 ### Configuring speech-to-text
 

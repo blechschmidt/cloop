@@ -28,6 +28,13 @@
   one request rather than in every one — and the same value never has to be
   re-typed by a wearer who has no keyboard.
 
+  Output is not the only thing the hardware constrains. Adding a task (Tasks
+  20238, 20243) has to be expressible with arrow keys and Enter, because that
+  is all the device sends — there is no microphone and no text input for a web
+  app here. So the "+ Add task" button opens a list: speech where a microphone
+  exists (the paired phone), and otherwise ready-made tasks the hub derives
+  from the project's own plan. See the "adding a task" section of the script.
+
   Input (Tasks 20237, 20242). The band and the temple touch strip are not a
   pointer and not a touchscreen: the glasses OS translates every gesture into
   an arrow-key or Enter keydown aimed at document.activeElement, and delivers
@@ -191,22 +198,27 @@
   }
   #more.on { display: block; }
 
-  /* Dictation (Task 20238). Solid rather than dashed like #more, because this
-     one starts something rather than extending the list, and on an additive
-     display a filled border is the strongest "this is the action" signal
-     available without spending colour. */
-  #dictate {
+  /* The two primary actions: opening the Add screen (Task 20243) and, on it,
+     starting a recording (Task 20238). Solid rather than dashed like #more,
+     because these start something rather than extending the list, and on an
+     additive display a filled border is the strongest "this is the action"
+     signal available without spending colour. Never both on screen at once —
+     #add lives on the task list and #dictate on the screen it opens — so they
+     can look identical. */
+  #add, #dictate {
     display: none; width: 100%; padding: 14px; margin-bottom: 12px;
     background: #10131a; color: var(--accent);
     border: 2px solid var(--accent); border-radius: 14px; font: inherit;
     font-weight: 650; cursor: pointer;
   }
-  #dictate.on { display: block; }
+  #add.on, #dictate.on { display: block; }
   #dictate.rec { color: var(--bad); border-color: var(--bad); }
-  #dictate:disabled { opacity: .5; }
+  #add:disabled, #dictate:disabled { opacity: .5; }
   /* The wearable cannot reach a microphone at all (see the note in the script),
-     so where that is true the feature is one muted line rather than a control:
-     a ring stop that cannot do anything is worse than no ring stop. */
+     so where that is true speech is one muted line rather than a control: a
+     ring stop that cannot do anything is worse than no ring stop. The line now
+     sits on the Add screen, where the wearer went looking for it, instead of
+     on the task list where it read as an apology for a missing button. */
   #micnote { display: none; color: var(--muted); font-size: 17px; margin-bottom: 12px; }
   #micnote.on { display: block; }
   /* The transcript, shown large enough to check at a glance before it becomes
@@ -237,6 +249,7 @@
   </header>
   <div id="sub"></div>
   <div id="filters"></div>
+  <button id="add" class="focusable" type="button" hidden>&#43; Add task</button>
   <button id="dictate" class="focusable" type="button" hidden>&#127908; Speak a new task</button>
   <div id="micnote"></div>
   <div id="msg"></div>
@@ -267,7 +280,22 @@ try {
 // then waiting a minute does not silently collapse the list back to 25.
 var PAGE = 25, MAX_WINDOW = 100;
 
-var state = { view: 'projects', project: null, tasks: [], total: 0, status: '', taskID: 0 };
+// view is one of: projects, tasks, task, add, heard.
+// quick holds the Add screen's ready-made rows, as sent by /api/glasses/tasks;
+// null means "not loaded for this project yet", which is distinct from a
+// project that has none — two of the rows name a failure by id, and offering
+// the previous project's while the new one is still in flight would file work
+// against the wrong plan.
+// from records which screen the confirmation was reached from, so backing out
+// of it returns the wearer where they were rather than somewhere plausible.
+var state = { view: 'projects', project: null, tasks: [], total: 0, status: '',
+              taskID: 0, quick: null, from: 'tasks' };
+
+// What this link may do, as the hub resolves it for the project the wearer has
+// open. Read off the API rather than the token: the credential arrives in a URL
+// the page cannot inspect, and a read-only link must not draw controls it would
+// only be refused for pinching.
+var link = { canAdd: false };
 
 // dead is set once the hub has told us this link is finished (401/403). It is
 // terminal: nothing the wearer can do from a device with no keyboard will make
@@ -628,9 +656,10 @@ function openProjects() {
   state.view = 'projects';
   state.project = null;
   state.taskID = 0;
+  state.quick = null;
   show(el('back'), false);
   show(el('more'), false);
-  showDictate();   // a task needs a project to belong to; there is none here
+  showAddControls();   // a task needs a project to belong to; there is none here
   setText(el('title'), 'Projects');
   setText(el('sub'), '');
   clear(el('filters'));
@@ -648,7 +677,7 @@ function loadProjects(navigating) {
     // tasks — a read-only link must not draw a control it cannot use.
     if (d && d.dictation) {
       mic.available = !!d.dictation.available;
-      mic.canAdd = !!d.dictation.can_add_tasks;
+      link.canAdd = !!d.dictation.can_add_tasks;
     }
     var projects = (d && d.projects) || [];
     say(projects.length ? '' : 'No projects yet.');
@@ -699,11 +728,13 @@ var FILTERS = [
 ];
 
 function openTasks(idx, name) {
+  abandonDictation();   // reachable from the Add screen, possibly mid-recording
   state.view = 'tasks';
   state.project = { idx: idx, name: name };
   state.tasks = [];
   state.total = 0;
   state.taskID = 0;
+  state.quick = null;   // the previous project's rows are not this project's
   show(el('back'), true);
   show(el('more'), false);
   setText(el('title'), name || 'Tasks');
@@ -712,7 +743,7 @@ function openTasks(idx, name) {
   say('Loading…');
   renderFilters();
   resetDictate();
-  showDictate();
+  showAddControls();
   return load(true);
 }
 
@@ -737,9 +768,15 @@ function loadTasks(navigating, mode) {
     // a user's task.mutate may be scoped to some projects and not others.
     if (d && d.dictation) {
       mic.available = !!d.dictation.available;
-      mic.canAdd = !!d.dictation.can_add_tasks;
-      showDictate();
+      link.canAdd = !!d.dictation.can_add_tasks;
     }
+    // The Add screen's rows ride along on the same response (Task 20243). Two
+    // of them name the project's newest failure, so they are rebuilt whenever
+    // the list is — including on the minute poll, which is how a failure that
+    // happened while the wearer was looking becomes pinchable without a
+    // reload.
+    state.quick = (d && d.quick) || [];
+    showAddControls();
 
     state.total = (d && d.total) || 0;
     var batch = (d && d.tasks) || [];
@@ -794,7 +831,7 @@ function openTask(id) {
   state.taskID = id;
   show(el('back'), true);
   show(el('more'), false);
-  showDictate();
+  showAddControls();
   clear(el('filters'));
   clear(el('list'));
   say('Loading…');
@@ -848,34 +885,44 @@ function fillBlock(block, text) {
   setText(block._body, text || '');
 }
 
-// ── dictation ───────────────────────────────────────────────────────────────
-// Adding a task by speaking it (Task 20238).
+// ── adding a task ───────────────────────────────────────────────────────────
+// Tasks 20238 (speak it) and 20243 (the button, and a way in that works on the
+// device itself).
 //
 // # What the glasses can and cannot do
 //
-// Not on the glasses themselves. Meta's own build guide for Ray-Ban Display
-// web apps lists camera, microphone and getUserMedia as unsupported, alongside
-// text input — the runtime grants a web app the display, the Neural Band and
-// captouch as arrow keys, the IMU, location and local storage, and nothing
-// that can hear. There is no permission to ask for and no flag to set: a web
-// app on this device cannot capture audio, so it cannot dictate, and it cannot
-// type either.
+// Meta's own build guide for Ray-Ban Display web apps lists camera, microphone
+// and getUserMedia as unsupported, alongside text input — the runtime grants a
+// web app the display, the Neural Band and captouch as arrow keys, the IMU,
+// location and local storage, and nothing that can hear. There is no permission
+// to ask for and no flag to set: a web app on this device cannot capture audio,
+// so it cannot dictate, and it cannot type either.
 //
-// What it *can* do is be the same app on the phone the glasses tether through.
-// The link is one URL carrying its own credential, so opening it there is a
-// working microphone away from the same task list — which is why the feature
-// lives in this document rather than only in the dashboard, and why the
-// unsupported case is a sentence naming the fix rather than a hidden control.
+// Dictation still ships, because the same link opened on the phone the glasses
+// tether through *does* have a microphone, and that is one URL away from the
+// same task list. But it hides itself where it cannot work, and on the glasses
+// that left the wearer with no way to add anything and nothing to press —
+// which is what Task 20243 reported.
+//
+// # So what is left
+//
+// Choosing from a list. It is the one composition method arrow keys and Enter
+// can express, so the Add screen is a list: speak it, where a microphone
+// exists, and otherwise a handful of ready-made tasks the hub derives from the
+// project's own plan (see glassesQuickTasks in glasses_api.go — the two at the
+// top name the newest failure by id). A pinch turns one into a real task.
 //
 // # Why a confirmation step
 //
 // The wearer has no keyboard. On the dashboard a wrong word is one keystroke
 // from fixed, because the transcript lands in a text field; here it cannot be
-// edited at all. So the transcript is shown and committed by a second pinch,
-// which is the cheapest possible review and the only one available.
+// edited at all. So what is about to be created is shown and committed by a
+// second pinch, which is the cheapest possible review and the only one
+// available — and it is also what stops a stray pinch on a 600x600 display
+// silently filing work.
 
-var mic = { available: false, canAdd: false, rec: null, chunks: [], stream: null, heard: '',
-            sound: false, ctx: null };
+var mic = { available: false, rec: null, chunks: [], stream: null, heard: '',
+            heardDesc: '', sound: false, ctx: null };
 
 // Whisper does not answer "silence". Handed a clip with nothing in it it
 // returns a stock phrase — "Thank you." is the one this endpoint produces —
@@ -914,17 +961,27 @@ function micUsable() {
   return !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.MediaRecorder);
 }
 
-// showDictate decides which of the three states the tasks screen is in: an
-// active control, a one-line explanation, or nothing at all.
-function showDictate() {
+// showAddControls places the two chrome buttons this feature owns: "Add task"
+// on the task list, and "Speak a new task" on the screen it opens. Called from
+// every view transition and from the minute poll, so it derives everything from
+// state rather than being told.
+function showAddControls() {
   // loadTasks calls this on every minute poll, and show() rewrites the class
   // attribute — which would drop the `rec` styling while the wearer is part
   // way through speaking, turning the red Stop control back to blue with no
   // other indication that it is still recording. Leave a live control alone.
   if (mic.rec || mic.starting) { return; }
 
-  var onTasks = state.view === 'tasks';
-  var offered = onTasks && mic.available && mic.canAdd;
+  // The way in. Shown on the task list whenever the link may add tasks — not
+  // conditioned on the microphone, which is the bug being fixed: a wearer must
+  // be able to find the feature on the device that cannot record, because that
+  // is where the ready-made rows behind this button are the only option.
+  // ...and not until this project's rows have arrived, so the screen behind it
+  // can never be the previous project's.
+  show(el('add'), state.view === 'tasks' && link.canAdd && state.quick !== null);
+
+  var onAdd = state.view === 'add';
+  var offered = onAdd && mic.available && link.canAdd;
   show(el('dictate'), offered && micUsable());
 
   var note = el('micnote');
@@ -935,6 +992,64 @@ function showDictate() {
         : 'To add a task by voice, open this same link on your phone. The glasses have no microphone available to web apps.')
     : '');
   setClass(note, explain ? 'on' : '');
+}
+
+// openAdd is the screen the button opens: every way of adding a task that
+// works on whatever is reading this page, as a list of pinchable rows.
+function openAdd() {
+  if (!state.project) { return; }
+  state.view = 'add';
+  state.taskID = 0;
+  show(el('back'), true);
+  show(el('more'), false);
+  clear(el('filters'));
+  clear(el('list'));
+  say('');
+  setText(el('title'), 'Add task');
+  resetDictate();
+  showAddControls();
+  renderQuick();
+
+  var speak = el('dictate'), rows = el('list').childNodes;
+  setText(el('sub'), !speak.hidden
+    ? 'Speak it, or pick one below.'
+    : (rows.length ? 'Pick one to add it to ' + state.project.name + '.' : ''));
+  if (speak.hidden && !rows.length) {
+    say('This link cannot add tasks. Generate a new one from the cloop dashboard.', true);
+  }
+
+  // Land on speech where it exists — it is the only way to say something new —
+  // and on the first ready-made row otherwise, so the screen opens with its
+  // best option already under the wearer's next pinch.
+  if (!speak.hidden) { select(speak); }
+  else if (rows.length) { select(rows[0]); }
+  else { select(el('back')); }
+}
+
+// renderQuick draws the ready-made rows. Built outright rather than through
+// patch(): this screen does not poll, so there is no node identity to preserve
+// and nothing to reconcile against.
+function renderQuick() {
+  var host = el('list');
+  clear(host);
+  var quick = state.quick || [];
+  for (var i = 0; i < quick.length; i++) {
+    var q = quick[i] || {};
+    if (!q.title) { continue; }
+    var row = rowButton('quick', q.title);
+    row.dataset.qi = String(i);
+    row.dataset.key = 'q:' + i;
+    host.appendChild(row);
+  }
+}
+
+// The description never reaches the screen — it is several lines of brief for
+// the agent, and the row has to stay one glance wide — but it travels with the
+// title to the confirmation and on to the hub.
+function pickQuick(i) {
+  var q = (state.quick || [])[i];
+  if (!q || !q.title) { return; }
+  openHeard(q.title, q.description, 'add');
 }
 
 // setDictateLabel repaints the control without deciding whether it is shown.
@@ -1036,21 +1151,30 @@ function uploadDictation(blob) {
     // the same rule loadProjects and loadTasks follow, and it matters more
     // here: openHeard would repaint whatever screen they are now on, and
     // commitHeard would then find state.project null and silently do nothing.
-    if (state.view !== 'tasks' || state.project !== from) { return; }
+    if (state.view !== 'add' || state.project !== from) { return; }
     if (!d || !d.text) { say('No speech was recognised.', true); return; }
-    openHeard(d.text);
+    openHeard(d.text, '', 'add');
   }).catch(function(err) { resetDictate(); fail(err); });
 }
 
 function resetDictate() { setDictateLabel('🎤 Speak a new task', false, false); }
 
-// openHeard is the confirmation screen: the transcript, then Add and Discard.
-function openHeard(text) {
+// openHeard is the confirmation screen: what is about to be created, then Add
+// and Discard. Reached from a transcript and from a ready-made row alike —
+// both are a sentence the wearer cannot edit, so both get the same review.
+//
+// desc is the brief that travels with the title and is never shown: it is
+// several lines long and the display is 600 pixels. from is the screen to
+// return to if the wearer backs out.
+function openHeard(text, desc, from) {
   mic.heard = text;
+  mic.heardDesc = desc || '';
   mic.starting = false;
   state.view = 'heard';
+  state.from = from || 'tasks';
   show(el('back'), true);
   show(el('more'), false);
+  show(el('add'), false);
   show(el('dictate'), false);
   setClass(el('micnote'), '');
   clear(el('filters'));
@@ -1064,12 +1188,12 @@ function openHeard(text) {
   heard.id = 'heard';
   host.appendChild(heard);
 
-  var add = rowButton('add', '✓ Add task');
-  host.appendChild(add);
+  var addRow = rowButton('confirm', '✓ Add task');
+  host.appendChild(addRow);
   host.appendChild(rowButton('discard', '✕ Discard'));
-  // Land on Add: it is the reason the wearer spoke, and the transcript above
-  // is not focusable, so an unaimed pinch would otherwise hit nothing.
-  select(add);
+  // Land on Add: it is the reason the wearer got here, and the transcript
+  // above is not focusable, so an unaimed pinch would otherwise hit nothing.
+  select(addRow);
 }
 
 function rowButton(action, label) {
@@ -1084,10 +1208,13 @@ function rowButton(action, label) {
 function commitHeard() {
   var title = mic.heard;
   if (!title || !state.project) { return; }
+  var body = { title: title };
+  if (mic.heardDesc) { body.description = mic.heardDesc; }
   setText(el('title'), 'Adding…');
-  send('POST', '/api/glasses/tasks?project_idx=' + encodeURIComponent(state.project.idx), { title: title })
+  send('POST', '/api/glasses/tasks?project_idx=' + encodeURIComponent(state.project.idx), body)
     .then(function() {
       mic.heard = '';
+      mic.heardDesc = '';
       openTasks(state.project.idx, state.project.name);
     })
     .catch(function(err) { fail(err); setText(el('title'), 'Add this task?'); });
@@ -1101,8 +1228,9 @@ function commitHeard() {
 el('list').addEventListener('click', function(ev) {
   var row = ev.target.closest ? ev.target.closest('.row') : null;
   if (!row) { return; }
-  if (row.dataset.act === 'add') { commitHeard(); return; }
+  if (row.dataset.act === 'confirm') { commitHeard(); return; }
   if (row.dataset.act === 'discard') { goBack(); return; }
+  if (row.dataset.act === 'quick') { pickQuick(parseInt(row.dataset.qi, 10)); return; }
   if (row.dataset.task) { openTask(parseInt(row.dataset.task, 10)); return; }
   if (row.dataset.idx !== undefined) { openTasks(parseInt(row.dataset.idx, 10), row.dataset.name); }
 });
@@ -1125,17 +1253,25 @@ el('more').addEventListener('click', function() {
 });
 
 el('back').addEventListener('click', goBack);
+el('add').addEventListener('click', openAdd);
 
 function goBack() {
-  // A discarded or backed-out transcript is dropped rather than kept for the
-  // next visit: coming back to a screen still offering to add a sentence the
-  // wearer already rejected is the wrong default when Enter is one pinch.
+  // A discarded or backed-out draft is dropped rather than kept for the next
+  // visit: coming back to a screen still offering to add a sentence the wearer
+  // already rejected is the wrong default when Enter is one pinch.
   if (state.view === 'heard') {
     mic.heard = '';
+    mic.heardDesc = '';
+    // Back to where they picked it. After rejecting a transcript or a
+    // ready-made row the next thing a wearer wants is another one, and that is
+    // the Add screen — not the task list, which would cost two more pinches to
+    // get back from.
+    if (state.from === 'add' && state.project) { openAdd(); return; }
     if (state.project) { openTasks(state.project.idx, state.project.name); return; }
   }
-  if (state.view === 'task' && state.project) { openTasks(state.project.idx, state.project.name); }
-  else if (state.view !== 'projects') { openProjects(); }
+  if ((state.view === 'add' || state.view === 'task') && state.project) {
+    openTasks(state.project.idx, state.project.name);
+  } else if (state.view !== 'projects') { openProjects(); }
 }
 
 el('reload').addEventListener('click', function() {
@@ -1152,6 +1288,10 @@ function load(navigating) {
   if (state.view === 'projects') { return loadProjects(navigating).catch(fail); }
   if (state.view === 'tasks' && state.project) { return loadTasks(navigating, navigating ? 'open' : 'refresh').catch(fail); }
   if (state.view === 'task') { return loadTask().catch(fail); }
+  // Add and its confirmation deliberately fetch nothing. Their rows were
+  // settled when the wearer arrived, and a poll that rebuilt them would move
+  // the cursor out from under someone part way through a decision — or, worse,
+  // repaint a control that is mid-recording.
   return Promise.resolve();
 }
 

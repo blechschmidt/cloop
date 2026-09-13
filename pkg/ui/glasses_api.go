@@ -77,6 +77,7 @@ package ui
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -121,6 +122,19 @@ const (
 	// glasses show a few dozen words at a time; a task result on this project
 	// runs to kilobytes, none of which would ever be scrolled to.
 	glassesTextCap = 1200
+
+	// glassesQuickCap is how many ready-made tasks the Add screen offers, and
+	// glassesQuickRepairs how many of those may name a specific failure
+	// (Task 20243). Both are small because the wearer reaches a row by swiping
+	// to it: a list long enough to need scrolling is a list nobody reaches the
+	// end of.
+	glassesQuickCap     = 5
+	glassesQuickRepairs = 2
+
+	// glassesQuickTitleCap bounds a ready-made title. It becomes a real task
+	// title, and one of them interpolates a failed task's own title, which on
+	// this project's plan runs to a paragraph.
+	glassesQuickTitleCap = 160
 )
 
 // ---------------------------------------------------------------------------
@@ -650,6 +664,132 @@ func (s *Server) handleGlassesProjects(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// ---------------------------------------------------------------------------
+// ready-made tasks
+// ---------------------------------------------------------------------------
+
+// glassesQuickTask is one row of the Add screen: a task the wearer can create
+// with a single pinch (Task 20243).
+//
+// # Why the wearable needs these at all
+//
+// A task is a sentence, and the glasses cannot take one. Meta's build guide
+// lists microphone, camera and text input as unsupported for Ray-Ban Display
+// web apps; what the runtime delivers is arrow keys and Enter, synthesised from
+// band and captouch gestures. Dictation (Task 20238) therefore only works when
+// the same link is opened on the paired phone — which left the wearer with no
+// way to add anything at all while actually wearing the device, and no button
+// to press either, since the dictate control hides itself where it cannot work.
+//
+// So the composition method has to be one the hardware can express: choosing
+// from a list. These are the list.
+//
+// # Why they are built here and not in the page
+//
+// Two of them name a real failure by id and title, which only the plan knows.
+// Keeping the whole set server-side means the page has one code path rather
+// than one for the contextual rows and another for the fixed ones, and means
+// the wording can improve without re-pairing anyone's glasses.
+//
+// # Why no AI call
+//
+// Asking a provider to brainstorm titles is the obvious richer answer, and it
+// is deliberately not what this does. On a hub configured for the claudecode
+// provider a provider call spawns the `claude` binary on the control-plane
+// host, and "an HTTP handler must not cause a program to run on the host" is
+// the load-bearing guarantee of the executor design (tests/security
+// TestNoHandlerReachesProcessExecution). A glasses link is a credential that
+// lives in a URL in a phone's app list; it is the last credential that should
+// be able to start a process here. These rows cost nothing and cannot.
+type glassesQuickTask struct {
+	Title       string `json:"title"`
+	Description string `json:"description,omitempty"`
+}
+
+// glassesStandingTasks are the ready-made rows that do not depend on the plan.
+//
+// Each is a real instruction rather than a category, because the wearer never
+// gets to elaborate: whatever is here is the entire brief the agent will act
+// on. They are also all work that is worth doing on any project at any time,
+// which is what makes a fixed list honest rather than filler.
+var glassesStandingTasks = []glassesQuickTask{
+	{
+		Title: "Review the recent changes and fix any bugs found",
+		Description: "Go over the work committed most recently. Look for correctness bugs, " +
+			"unhandled errors, race conditions and resource leaks, fix what you find, and add a " +
+			"regression test for each fix. Verify with a build and the full test suite.",
+	},
+	{
+		Title: "Add tests for the code that changed most recently",
+		Description: "Identify the packages touched by the most recent commits, find the paths " +
+			"that have no coverage, and add tests for them — including the failure paths, not " +
+			"just the happy one. Run the full suite and make sure it passes.",
+	},
+	{
+		Title: "Update the documentation to match the current behaviour",
+		Description: "Check the README and the docs tree against what the code actually does " +
+			"now. Correct anything stale, document anything recently added that is missing, and " +
+			"remove anything describing a feature that no longer exists.",
+	},
+}
+
+// glassesQuickTasks builds the Add screen's list: repairs for the newest
+// failures first, then the standing set, capped.
+//
+// allowed is the caller's own task.mutate standing. A read-only link gets an
+// empty list rather than rows it would be refused for pinching — the page
+// hides the whole screen in that case, and this makes that a property of the
+// response rather than of the client agreeing to behave.
+func glassesQuickTasks(plan *pm.Plan, allowed bool) []glassesQuickTask {
+	out := make([]glassesQuickTask, 0, glassesQuickCap)
+	if !allowed {
+		return out
+	}
+
+	if plan != nil {
+		var failed []*pm.Task
+		for _, t := range plan.Tasks {
+			switch taskStatusOrPending(t) {
+			case string(pm.TaskFailed), string(pm.TaskTimedOut):
+				failed = append(failed, t)
+			}
+		}
+		// Newest first: a failure from ten minutes ago is the one the wearer
+		// glanced up to look at, and one from last month has had its chance.
+		sort.SliceStable(failed, func(i, j int) bool { return failed[i].ID > failed[j].ID })
+		for _, t := range failed {
+			if len(out) >= glassesQuickRepairs {
+				break
+			}
+			out = append(out, glassesRepairTask(t))
+		}
+	}
+
+	for _, q := range glassesStandingTasks {
+		if len(out) >= glassesQuickCap {
+			break
+		}
+		out = append(out, q)
+	}
+	return out
+}
+
+// glassesRepairTask turns one failed task into a pinch-to-add repair job.
+//
+// The description tells the agent to diagnose before retrying, because the
+// wearer cannot add that themselves and a bare "fix task 63" invites exactly
+// the blind re-run that produced the failure the first time.
+func glassesRepairTask(t *pm.Task) glassesQuickTask {
+	title := truncateForGlasses(t.Title, 100)
+	return glassesQuickTask{
+		Title: truncateForGlasses(
+			fmt.Sprintf("Fix the failure in task #%d: %s", t.ID, title), glassesQuickTitleCap),
+		Description: fmt.Sprintf("Task #%d (%q) ended as %s. Read its recorded result, work out "+
+			"why it actually failed rather than retrying it blindly, fix the underlying cause, and "+
+			"verify with a build and the test suite.", t.ID, title, taskStatusOrPending(t)),
+	}
+}
+
 // glassesTask is one row of the task list.
 type glassesTask struct {
 	ID       int    `json:"id"`
@@ -665,11 +805,19 @@ type glassesTask struct {
 // so the header the wearer reads ("12 of 213") does not change meaning as they
 // scroll.
 func (s *Server) handleGlassesTasks(w http.ResponseWriter, r *http.Request) {
+	dictation := s.dictationStatusFor(r)
+
 	ps, err := state.Load(s.resolveWorkDir(r))
 	if err != nil || ps.Plan == nil {
+		// Still answer with the capability block and the standing rows: a
+		// project whose plan has not been created yet is exactly one where
+		// adding a task is the useful thing to do, and a screen that offered
+		// nothing there would read as broken rather than empty.
 		jsonOK(w, map[string]any{
 			"tasks": []glassesTask{}, "total": 0, "offset": 0,
 			"limit": glassesPageSize, "counts": map[string]int{},
+			"dictation": dictation,
+			"quick":     glassesQuickTasks(nil, dictation.CanAddTasks),
 		})
 		return
 	}
@@ -744,7 +892,11 @@ func (s *Server) handleGlassesTasks(w http.ResponseWriter, r *http.Request) {
 		// against the default project. A user whose operator binding is scoped
 		// to one project would be told the wrong thing there; this route is
 		// the one that knows which project the wearer actually opened.
-		"dictation": s.dictationStatusFor(r),
+		"dictation": dictation,
+		// The Add screen's rows (Task 20243), on this response rather than a
+		// route of their own: the wearable's budget is one request per screen,
+		// and two of these are derived from the same plan already loaded here.
+		"quick": glassesQuickTasks(ps.Plan, dictation.CanAddTasks),
 	})
 }
 
