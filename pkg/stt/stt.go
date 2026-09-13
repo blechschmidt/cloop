@@ -122,13 +122,21 @@ type Result struct {
 	Backend Provider `json:"backend,omitempty"`
 }
 
-// Silent reports whether the transcript carries no actual words.
+// Silent reports whether the transcript carries no actual words — an empty
+// string, a lone ".", punctuation only.
 //
-// Whisper never returns "nothing". Handed a room tone, a cough, or a button
-// pressed and released, it answers with an empty string, a lone "." or a
-// stray "you" — its hallucination on silence. A caller that turned any of
-// those into a task would leave someone a row to find and delete, so the
-// check is for letters or digits rather than for a non-empty string.
+// It is a backstop, not the defence. Whisper never returns "nothing": handed
+// two seconds of digital silence, this endpoint returns "Thank you." — a
+// fluent stock phrase that this function cannot distinguish from a real short
+// title, and neither can the response metadata. Measured against the live API,
+// no_speech_prob comes back 0.0000 for silence and for speech alike, and
+// avg_logprob differed by less (0.29 vs 0.21) than two real sentences differ
+// from each other. There is no server-side discriminator to build on.
+//
+// The real check is client-side, on the samples, before anything is uploaded —
+// see listenForSound in assets/js/15-voice.js and assets/glasses.html. This
+// catches the residue: a clip that got past the level gate and still produced
+// nothing a human would call a title.
 func (r Result) Silent() bool {
 	for _, c := range r.Text {
 		if unicode.IsLetter(c) || unicode.IsDigit(c) {

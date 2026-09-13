@@ -764,3 +764,52 @@ func TestGlassesDictationSurvivesThePoll(t *testing.T) {
 		t.Errorf("the poll relabelled a live control: %q -> %q", r.LabelBefore, r.LabelAfter)
 	}
 }
+
+// TestGlassesDictationRefusesSilence is a bug found by recording actual
+// silence against the live endpoint, not by reading the code: Whisper answered
+// a two-second empty clip with "Thank you." — and would have made that a task.
+//
+// The response carries nothing that distinguishes it. Measured against Groq's
+// whisper-large-v3-turbo, no_speech_prob is 0.0000 for digital silence and for
+// real speech alike, and avg_logprob differed by less than the gap between two
+// real sentences. So the check has to be client-side, on the samples, before
+// the upload happens at all.
+func TestGlassesDictationRefusesSilence(t *testing.T) {
+	t.Parallel()
+	results := glassesScenarios(t)
+
+	var quiet struct {
+		Uploads int      `json:"uploads"`
+		Msg     string   `json:"msg"`
+		Rows    []string `json:"rows"`
+		Label   string   `json:"label"`
+	}
+	glassesScenario(t, results, "dictate_silence_is_not_uploaded", &quiet)
+
+	if quiet.Uploads != 0 {
+		t.Errorf("a silent recording was uploaded (%d POSTs) — Whisper answers silence with a "+
+			"stock phrase, so this becomes a task titled \"Thank you.\"", quiet.Uploads)
+	}
+	if quiet.Msg == "" {
+		t.Error("nothing told the wearer why nothing happened")
+	}
+	for _, row := range quiet.Rows {
+		if strings.HasPrefix(row, "act:") {
+			t.Errorf("a confirmation screen was raised for a silent clip: %v", quiet.Rows)
+			break
+		}
+	}
+
+	// The guard must not simply block everything.
+	var loud struct {
+		Uploads int      `json:"uploads"`
+		Rows    []string `json:"rows"`
+	}
+	glassesScenario(t, results, "dictate_sound_is_uploaded", &loud)
+	if loud.Uploads == 0 {
+		t.Error("audio containing sound was not uploaded — the silence guard is too aggressive")
+	}
+	if !hasString(loud.Rows, "act:add") {
+		t.Errorf("a real recording did not reach the confirmation screen: %v", loud.Rows)
+	}
+}

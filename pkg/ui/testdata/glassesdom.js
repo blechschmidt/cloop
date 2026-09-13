@@ -267,6 +267,24 @@ function makeDOM(opts) {
       }
     }
     globalThis.MediaRecorder = FakeRecorder;
+
+    // An AudioContext is installed only when a scenario names one, because the
+    // page treats "cannot measure the level" as "assume speech" — so the
+    // default (absent) keeps every other scenario uploading as before. With
+    // one present the analyser reports a flat 128 for silence, which is what
+    // the real waveform looks like when nobody spoke.
+    if (opts.audio) {
+      const level = opts.audio === 'silent' ? 128 : 200;
+      globalThis.AudioContext = class {
+        createAnalyser() {
+          return { fftSize: 2048, getByteTimeDomainData(buf) { buf.fill(level); } };
+        }
+        createMediaStreamSource() { return { connect() {} }; }
+        close() {}
+      };
+    } else {
+      delete globalThis.AudioContext;
+    }
     setNavigator({
       mediaDevices: {
         getUserMedia: () => {

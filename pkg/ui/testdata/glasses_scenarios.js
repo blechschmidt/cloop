@@ -509,6 +509,45 @@ scenarios.dictate_poll_does_not_disturb_recording = async () => {
   };
 };
 
+// Saying nothing must not produce a task. Whisper answers an empty clip with a
+// stock phrase ("Thank you."), and no field in the response distinguishes it —
+// so the page has to notice before it uploads.
+scenarios.dictate_silence_is_not_uploaded = async () => {
+  const dom = boot({
+    mic: true, audio: 'silent',
+    routes: dictationRoutes(DICTATION_ON, { '/api/glasses/transcribe': { text: 'Thank you.' } }),
+  });
+  await openAlpha(dom);
+  dom.click(dom.doc.getElementById('dictate'));
+  await dom.settle();
+  dom.tick();                       // let the level poll observe the silence
+  await dom.settle();
+  dom.click(dom.doc.getElementById('dictate'));   // stop
+  await dom.settle();
+
+  const posts = dom.sent.filter(s => s.method === 'POST');
+  return { uploads: posts.length, msg: dom.text('msg'), rows: dom.rows(), label: dom.text('dictate') };
+};
+
+// ...and actual sound must still go through, so the guard is not just "never
+// upload anything".
+scenarios.dictate_sound_is_uploaded = async () => {
+  const dom = boot({
+    mic: true, audio: 'sound',
+    routes: dictationRoutes(DICTATION_ON, { '/api/glasses/transcribe': { text: 'real words' } }),
+  });
+  await openAlpha(dom);
+  dom.click(dom.doc.getElementById('dictate'));
+  await dom.settle();
+  dom.tick();
+  await dom.settle();
+  dom.click(dom.doc.getElementById('dictate'));
+  await dom.settle();
+
+  const posts = dom.sent.filter(s => s.method === 'POST');
+  return { uploads: posts.length, rows: dom.rows() };
+};
+
 // ── run ─────────────────────────────────────────────────────────────────────
 
 (async () => {

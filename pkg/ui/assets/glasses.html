@@ -727,7 +727,38 @@ function fillBlock(block, text) {
 // edited at all. So the transcript is shown and committed by a second pinch,
 // which is the cheapest possible review and the only one available.
 
-var mic = { available: false, canAdd: false, rec: null, chunks: [], stream: null, heard: '' };
+var mic = { available: false, canAdd: false, rec: null, chunks: [], stream: null, heard: '',
+            sound: false, ctx: null };
+
+// Whisper does not answer "silence". Handed a clip with nothing in it it
+// returns a stock phrase — "Thank you." is the one this endpoint produces —
+// and the metadata cannot tell you: measured against the live API,
+// no_speech_prob is 0.0000 for digital silence and for real speech alike.
+// So the check has to happen where the samples are, before anything is sent.
+function listenForSound(stream) {
+  var Ctx = window.AudioContext || window.webkitAudioContext;
+  if (!Ctx) { mic.sound = true; return; }   // cannot measure: never block on it
+  try {
+    mic.ctx = new Ctx();
+    var analyser = mic.ctx.createAnalyser();
+    analyser.fftSize = 2048;
+    mic.ctx.createMediaStreamSource(stream).connect(analyser);
+    var buf = new Uint8Array(analyser.fftSize);
+    var poll = setInterval(function() {
+      if (!mic.ctx) { clearInterval(poll); return; }
+      analyser.getByteTimeDomainData(buf);
+      for (var i = 0; i < buf.length; i++) {
+        // 128 is silence here. The threshold is low on purpose: a quiet
+        // talker must get through, and a false positive costs one upload.
+        if (Math.abs(buf[i] - 128) > 6) { mic.sound = true; clearInterval(poll); return; }
+      }
+    }, 100);
+  } catch (e) { mic.sound = true; }
+}
+
+function closeMicCtx() {
+  if (mic.ctx) { try { mic.ctx.close(); } catch (e) {} mic.ctx = null; }
+}
 
 // micUsable reports whether this runtime can record at all — false on the
 // glasses by platform policy, and false on an http origin, where the API is
@@ -788,6 +819,8 @@ function startDictation() {
   }).then(function(stream) {
     mic.stream = stream;
     mic.chunks = [];
+    mic.sound = false;
+    listenForSound(stream);
     var type = '';
     ['audio/webm;codecs=opus', 'audio/ogg;codecs=opus', 'audio/webm'].some(function(t) {
       if (window.MediaRecorder.isTypeSupported(t)) { type = t; return true; }
@@ -800,8 +833,14 @@ function startDictation() {
       // recording indicator stays lit while a track is live, and leaving it on
       // across a network round trip reads as "still listening".
       stream.getTracks().forEach(function(t) { t.stop(); });
+      closeMicCtx();
       var blob = new Blob(mic.chunks, { type: (mic.rec && mic.rec.mimeType) || 'audio/webm' });
       mic.rec = null; mic.stream = null;
+      if (!mic.sound) {
+        resetDictate();
+        say('No sound was recorded. Try again, closer to the microphone.', true);
+        return;
+      }
       uploadDictation(blob);
     };
     mic.rec.start();
@@ -834,6 +873,7 @@ function abandonDictation() {
   if (rec && rec.state !== 'inactive') { try { rec.stop(); } catch (e) {} }
   if (mic.stream) { mic.stream.getTracks().forEach(function(t) { t.stop(); }); }
   mic.stream = null;
+  closeMicCtx();
   mic.starting = false;
   resetDictate();
 }

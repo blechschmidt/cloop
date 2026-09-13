@@ -84,6 +84,44 @@ let dictateRecorder = null;
 let dictateChunks = [];
 let dictateActive = false;
 let dictateStarting = false;
+let dictateHeardSound = false;
+let dictateAudioCtx = null;
+
+// Whisper does not answer "silence" — handed a clip with nothing in it, it
+// confidently returns a stock phrase: "Thank you.", "Thanks for watching!", a
+// subtitle credit. Measured against the live endpoint, the metadata that
+// should catch this does not: no_speech_prob comes back 0.0000 for digital
+// silence and for real speech alike, and avg_logprob differs by less than the
+// gap between two real sentences. There is no server-side discriminator.
+//
+// The browser has the one signal that works — the samples themselves. Watching
+// the level while recording means an empty clip is never uploaded at all,
+// which also saves the round trip and the API call.
+function listenForSound(stream, onSound) {
+  const Ctx = window.AudioContext || window.webkitAudioContext;
+  if (!Ctx) { onSound(); return; }   // cannot measure: assume speech, do not block
+  try {
+    dictateAudioCtx = new Ctx();
+    const analyser = dictateAudioCtx.createAnalyser();
+    analyser.fftSize = 2048;
+    dictateAudioCtx.createMediaStreamSource(stream).connect(analyser);
+    const buf = new Uint8Array(analyser.fftSize);
+    const poll = setInterval(() => {
+      if (!dictateAudioCtx) { clearInterval(poll); return; }
+      analyser.getByteTimeDomainData(buf);
+      for (let i = 0; i < buf.length; i++) {
+        // 128 is silence in this encoding; anything meaningfully off it is
+        // sound. The threshold is deliberately low — a quiet talker must get
+        // through, and the cost of a false positive is one wasted upload.
+        if (Math.abs(buf[i] - 128) > 6) { onSound(); clearInterval(poll); return; }
+      }
+    }, 100);
+  } catch (e) { onSound(); }
+}
+
+function closeDictateAudioCtx() {
+  if (dictateAudioCtx) { try { dictateAudioCtx.close(); } catch (e) {} dictateAudioCtx = null; }
+}
 
 const DICTATE_IDLE_ICON = '<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M5 3a3 3 0 0 1 6 0v5a3 3 0 0 1-6 0V3z"/><path d="M3.5 6.5A.5.5 0 0 1 4 7v1a4 4 0 0 0 8 0V7a.5.5 0 0 1 1 0v1a5 5 0 0 1-4.5 4.975V15h2a.5.5 0 0 1 0 1h-5a.5.5 0 0 1 0-1h2v-2.025A5 5 0 0 1 3 8V7a.5.5 0 0 1 .5-.5z"/></svg>';
 const DICTATE_STOP_ICON = '<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M5 5h6v6H5z"/></svg>';
@@ -163,6 +201,8 @@ window.toggleTaskDictation = async function() {
              : (MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : '');
 
   dictateChunks = [];
+  dictateHeardSound = false;
+  listenForSound(stream, () => { dictateHeardSound = true; });
   dictateRecorder = new MediaRecorder(stream, mime ? { mimeType: mime } : {});
   dictateRecorder.ondataavailable = e => { if (e.data && e.data.size > 0) dictateChunks.push(e.data); };
   dictateRecorder.onstop = () => {
@@ -170,7 +210,13 @@ window.toggleTaskDictation = async function() {
     // indicator stays lit for as long as a track is live, and leaving it on
     // through a network round trip reads as "this page is still listening".
     stream.getTracks().forEach(t => t.stop());
+    closeDictateAudioCtx();
     dictateActive = false;
+    if (!dictateHeardSound) {
+      setDictateState('idle', 'Dictate');
+      toast('No sound was recorded — check the microphone', 'err');
+      return;
+    }
     sendTaskDictation(new Blob(dictateChunks, { type: dictateRecorder.mimeType || 'audio/webm' }));
   };
 
