@@ -67,8 +67,12 @@ type UsageDetail struct {
 }
 
 var (
-	usageMu   sync.RWMutex
-	lastUsage *ClaudeUsage
+	usageMu sync.RWMutex
+	// usageByDir holds the last fetched snapshot per Claude CLI configuration
+	// directory ("" being the host default). Keyed rather than singular
+	// because a hub serves many users at once and a shared slot would show
+	// one tenant their neighbour's subscription utilization (Task 20241).
+	usageByDir = map[string]*ClaudeUsage{}
 
 	// usageFetchMu serializes concurrent FetchOrCachedUsage refreshes so a
 	// burst of callers (orchestrator + UI poller + limit check arriving in
@@ -103,10 +107,20 @@ const MinUsageCacheTTL = time.Minute
 // GetCachedUsage returns the last fetched usage, or nil if not available.
 // No freshness check — callers that need fresh data should use
 // FetchOrCachedUsage instead.
-func GetCachedUsage() *ClaudeUsage {
+func GetCachedUsage() *ClaudeUsage { return GetCachedUsageIn(envConfigDir()) }
+
+// GetCachedUsageIn is GetCachedUsage scoped to one identity's configuration
+// directory.
+func GetCachedUsageIn(dir string) *ClaudeUsage {
 	usageMu.RLock()
 	defer usageMu.RUnlock()
-	return lastUsage
+	return usageByDir[dir]
+}
+
+func setCachedUsage(dir string, u *ClaudeUsage) {
+	usageMu.Lock()
+	usageByDir[dir] = u
+	usageMu.Unlock()
 }
 
 // ClearUsageCache discards the in-memory ClaudeUsage snapshot so the next
@@ -114,15 +128,20 @@ func GetCachedUsage() *ClaudeUsage {
 // reauthentication (login completes, logout) — the cached snapshot was tied
 // to the previous identity's account and would otherwise be served as stale
 // data for up to MinUsageCacheTTL.
-func ClearUsageCache() {
+func ClearUsageCache() { ClearUsageCacheIn(envConfigDir()) }
+
+// ClearUsageCacheIn is ClearUsageCache scoped to one identity, so a user
+// logging in or out invalidates only their own snapshot and leaves every
+// other tenant's cached usage intact.
+func ClearUsageCacheIn(dir string) {
 	usageMu.Lock()
-	lastUsage = nil
+	delete(usageByDir, dir)
 	usageMu.Unlock()
 	// Also drop any cached failure. A login that just succeeded must not keep
 	// being told it needs to re-authenticate for the remainder of the TTL,
 	// and an operator hitting Refresh deserves a real attempt.
-	clearAuthFailure()
-	clearFetchError()
+	clearAuthFailure(dir)
+	clearFetchError(dir)
 }
 
 // FetchOrCachedUsage returns the cached usage snapshot when it is fresher
@@ -132,34 +151,41 @@ func ClearUsageCache() {
 // cached snapshot (if any) is returned alongside the error so callers can
 // fall back to stale data instead of failing open.
 func FetchOrCachedUsage(token string, ttl time.Duration) (*ClaudeUsage, error) {
+	return FetchOrCachedUsageIn(envConfigDir(), token, ttl)
+}
+
+// FetchOrCachedUsageIn is FetchOrCachedUsage scoped to one identity's Claude
+// CLI configuration directory. A hub calls this with the requesting user's
+// directory so the caps panel reports that user's own subscription.
+func FetchOrCachedUsageIn(dir, token string, ttl time.Duration) (*ClaudeUsage, error) {
 	if ttl < MinUsageCacheTTL {
 		ttl = MinUsageCacheTTL
 	}
-	if u := GetCachedUsage(); u != nil && time.Since(u.FetchedAt) <= ttl {
+	if u := GetCachedUsageIn(dir); u != nil && time.Since(u.FetchedAt) <= ttl {
 		return u, nil
 	}
 	usageFetchMu.Lock()
 	defer usageFetchMu.Unlock()
 	// Re-check after acquiring the lock — a sibling caller may have just
 	// refreshed the cache while we were waiting.
-	if u := GetCachedUsage(); u != nil && time.Since(u.FetchedAt) <= ttl {
+	if u := GetCachedUsageIn(dir); u != nil && time.Since(u.FetchedAt) <= ttl {
 		return u, nil
 	}
 	// Back off after a transient failure instead of letting every caller
 	// re-attempt: only a successful fetch refreshes the snapshot, so without
 	// this a 429 is retried before every task and keeps itself alive.
-	if berr := recentFetchError(); berr != nil {
-		return GetCachedUsage(), berr
+	if berr := recentFetchError(dir); berr != nil {
+		return GetCachedUsageIn(dir), berr
 	}
-	fresh, err := FetchClaudeUsage(token)
+	fresh, err := FetchClaudeUsageIn(dir, token)
 	if err != nil {
-		recordFetchError(err)
-		if u := GetCachedUsage(); u != nil {
+		recordFetchError(dir, err)
+		if u := GetCachedUsageIn(dir); u != nil {
 			return u, err
 		}
 		return nil, err
 	}
-	clearFetchError()
+	clearFetchError(dir)
 	return fresh, nil
 }
 
@@ -167,22 +193,28 @@ func FetchOrCachedUsage(token string, ttl time.Duration) (*ClaudeUsage, error) {
 // limits (5-hour window, weekly window, per-model breakdowns).
 // The token should be a Claude Code OAuth access token (sk-ant-oat01-*).
 func FetchClaudeUsage(token string) (*ClaudeUsage, error) {
+	return FetchClaudeUsageIn(envConfigDir(), token)
+}
+
+// FetchClaudeUsageIn is FetchClaudeUsage scoped to one identity's Claude CLI
+// configuration directory.
+func FetchClaudeUsageIn(dir, token string) (*ClaudeUsage, error) {
 	explicit := token != ""
 	if !explicit {
 		// Serve a recently classified auth failure without another doomed
 		// round-trip. Cleared by a successful fetch and by ClearUsageCache
 		// on login, so a re-authentication is picked up promptly.
-		if cached := cachedAuthFailure(); cached != nil {
+		if cached := cachedAuthFailure(dir); cached != nil {
 			return nil, cached
 		}
 		var authErr *AuthError
-		token, authErr = resolveCredentialToken()
+		token, authErr = resolveCredentialToken(dir)
 		if authErr != nil {
-			return nil, recordAuthFailure(authErr)
+			return nil, recordAuthFailure(dir, authErr)
 		}
 	}
 
-	usage, status, err := fetchUsageWithToken(token)
+	usage, status, err := fetchUsageWithToken(dir, token)
 	// On 401 with a non-explicit token, the token went stale between our
 	// freshness check and the request (or the env var was used). Force a
 	// refresh once and retry, instead of surfacing a spurious auth failure.
@@ -190,9 +222,9 @@ func FetchClaudeUsage(token string) (*ClaudeUsage, error) {
 		// Constant-time even though both values are local: this is a
 		// "did the token change" check, and comparing credential bytes with
 		// == is the habit worth not having. tests/security enforces it.
-		if fresh := forceRefreshToken(); fresh != "" &&
+		if fresh := forceRefreshTokenIn(dir); fresh != "" &&
 			subtle.ConstantTimeCompare([]byte(fresh), []byte(token)) != 1 {
-			usage, status, err = fetchUsageWithToken(fresh)
+			usage, status, err = fetchUsageWithToken(dir, fresh)
 		}
 	}
 
@@ -214,10 +246,10 @@ func FetchClaudeUsage(token string) (*ClaudeUsage, error) {
 		if err != nil {
 			detail = err.Error()
 		}
-		return nil, recordAuthFailure(&AuthError{Problem: problem, Detail: detail})
+		return nil, recordAuthFailure(dir, &AuthError{Problem: problem, Detail: detail})
 	}
 	if err == nil {
-		clearAuthFailure()
+		clearAuthFailure(dir)
 	}
 	return usage, err
 }
@@ -230,18 +262,27 @@ func FetchClaudeUsage(token string) (*ClaudeUsage, error) {
 //
 // The returned *AuthError is non-nil only when no token could be produced at
 // all; it is already classified for display.
-func resolveCredentialToken() (string, *AuthError) {
-	tok, authErr := credentialFileToken()
+// dir scopes the lookup to one identity's configuration directory.
+func resolveCredentialToken(dir string) (string, *AuthError) {
+	tok, authErr := credentialFileToken(dir)
 	if tok != "" {
 		return tok, nil
 	}
-	if env := strings.TrimSpace(os.Getenv("CLAUDE_CODE_OAUTH_TOKEN")); env != "" {
-		return env, nil
+	// The ambient-token fallback applies only to the host default. Under an
+	// explicit per-identity directory it would answer "this user is logged
+	// in" using the host's credential, so a user who never logged in would
+	// transparently spend the host's subscription — the exact pooling this
+	// scoping exists to end. Absent a credential of their own, they are
+	// logged out, and the classified error below says so.
+	if dir == "" {
+		if env := strings.TrimSpace(os.Getenv("CLAUDE_CODE_OAUTH_TOKEN")); env != "" {
+			return env, nil
+		}
 	}
 	if authErr == nil {
 		authErr = &AuthError{
 			Problem: AuthNoCredentials,
-			Detail:  fmt.Sprintf("no access token in %s and CLAUDE_CODE_OAUTH_TOKEN is unset", credentialsPath()),
+			Detail:  fmt.Sprintf("no access token in %s", credentialsPathIn(dir)),
 		}
 	}
 	return "", authErr
@@ -251,9 +292,15 @@ func resolveCredentialToken() (string, *AuthError) {
 // freshness check, serialized through the same locks as the normal path. Used
 // to recover from a 401 caused by a token that expired mid-flight.
 func forceRefreshToken() string {
+	return forceRefreshTokenIn(envConfigDir())
+}
+
+// forceRefreshTokenIn is forceRefreshToken scoped to one identity's
+// configuration directory.
+func forceRefreshTokenIn(dir string) string {
 	oauthRefreshMu.Lock()
 	defer oauthRefreshMu.Unlock()
-	creds, ok := loadCredentials()
+	creds, ok := loadCredentialsIn(dir)
 	if !ok || creds.ClaudeAiOauth.RefreshToken == "" {
 		return ""
 	}
@@ -261,7 +308,7 @@ func forceRefreshToken() string {
 	if tokenIsFresh(creds) {
 		return creds.ClaudeAiOauth.AccessToken
 	}
-	if tok, err := refreshOAuthToken(creds.ClaudeAiOauth.RefreshToken); err == nil {
+	if tok, err := refreshOAuthToken(dir, creds.ClaudeAiOauth.RefreshToken); err == nil {
 		return tok
 	}
 	return ""
@@ -270,7 +317,7 @@ func forceRefreshToken() string {
 // fetchUsageWithToken performs a single usage-API request with the given
 // bearer token. It returns the parsed usage (on success), the HTTP status
 // code (0 if the request never completed), and any error.
-func fetchUsageWithToken(token string) (*ClaudeUsage, int, error) {
+func fetchUsageWithToken(dir, token string) (*ClaudeUsage, int, error) {
 	client := &http.Client{Timeout: 10 * time.Second}
 	req, err := http.NewRequest("GET", usageEndpoint, nil)
 	if err != nil {
@@ -324,9 +371,7 @@ func fetchUsageWithToken(token string) (*ClaudeUsage, int, error) {
 		usage.SevenDaySonnet = parseWindow(raw.SevenDaySonnet)
 	}
 
-	usageMu.Lock()
-	lastUsage = usage
-	usageMu.Unlock()
+	setCachedUsage(dir, usage)
 
 	return usage, resp.StatusCode, nil
 }
@@ -363,9 +408,48 @@ type claudeCredentials struct {
 	} `json:"claudeAiOauth"`
 }
 
-func credentialsPath() string {
+// envConfigDir reports the Claude CLI configuration directory this process is
+// pinned to, or "" for the host default.
+//
+// On an OIDC hub each user's run subprocess is started with CLAUDE_CONFIG_DIR
+// pointing at that user's private directory (Task 20241). Honouring it here is
+// what makes the refresh path per-user: without it a run executing as user A
+// would rotate the *host's* single-use refresh token, simultaneously breaking
+// the host credential and handing A a credential that is not theirs.
+func envConfigDir() string {
+	return strings.TrimSpace(os.Getenv("CLAUDE_CONFIG_DIR"))
+}
+
+// credentialsPathIn returns the credentials file inside a specific Claude CLI
+// configuration directory. An empty dir means the host default (~/.claude).
+func credentialsPathIn(dir string) string {
+	if dir != "" {
+		return filepath.Join(dir, ".credentials.json")
+	}
 	home, _ := os.UserHomeDir()
-	return home + "/.claude/.credentials.json"
+	return filepath.Join(home, ".claude", ".credentials.json")
+}
+
+// credentialsPath returns the credentials file for this process's own
+// configuration directory.
+func credentialsPath() string {
+	return credentialsPathIn(envConfigDir())
+}
+
+// cacheTokenInEnv publishes a freshly resolved access token into the process
+// environment, where the claude CLI and later in-process callers pick it up.
+//
+// It is a no-op unless dir is the directory this process itself is pinned to.
+// That guard is the difference between a cache and a cross-tenant credential
+// leak: a hub serving many users refreshes on behalf of whoever is asking, and
+// exporting user A's token into the hub's own environment would hand it to
+// every subprocess started afterwards — including runs belonging to user B,
+// who would silently spend A's subscription.
+func cacheTokenInEnv(dir, accessToken string) {
+	if dir != envConfigDir() || accessToken == "" {
+		return
+	}
+	os.Setenv("CLAUDE_CODE_OAUTH_TOKEN", accessToken)
 }
 
 // tokenExpiryBufferMs is how far ahead of the real expiry we treat a token as
@@ -376,7 +460,13 @@ const tokenExpiryBufferMs int64 = 60000
 // loadCredentials reads and parses ~/.claude/.credentials.json. Returns the
 // parsed struct and whether parsing succeeded.
 func loadCredentials() (claudeCredentials, bool) {
-	data, err := os.ReadFile(credentialsPath())
+	return loadCredentialsIn(envConfigDir())
+}
+
+// loadCredentialsIn reads and parses the credentials file belonging to one
+// Claude CLI configuration directory.
+func loadCredentialsIn(dir string) (claudeCredentials, bool) {
+	data, err := os.ReadFile(credentialsPathIn(dir))
 	if err != nil {
 		return claudeCredentials{}, false
 	}
@@ -412,18 +502,19 @@ func tokenIsFresh(c claudeCredentials) bool {
 // second time (which is what produced the recurring 401 burst). This is the
 // classic single-flight pattern for rotating refresh tokens.
 func readCredentialsToken() string {
-	tok, _ := credentialFileToken()
+	tok, _ := credentialFileToken(envConfigDir())
 	return tok
 }
 
 // credentialFileToken implements readCredentialsToken and additionally
-// classifies the failure when it cannot produce a token.
-func credentialFileToken() (string, *AuthError) {
-	creds, ok := loadCredentials()
+// classifies the failure when it cannot produce a token. dir scopes every
+// read, lock and write to one identity's configuration directory.
+func credentialFileToken(dir string) (string, *AuthError) {
+	creds, ok := loadCredentialsIn(dir)
 	if !ok {
 		return "", &AuthError{
 			Problem: AuthNoCredentials,
-			Detail:  fmt.Sprintf("%s is missing or unreadable", credentialsPath()),
+			Detail:  fmt.Sprintf("%s is missing or unreadable", credentialsPathIn(dir)),
 		}
 	}
 
@@ -438,7 +529,7 @@ func credentialFileToken() (string, *AuthError) {
 
 	// Double-check after acquiring the lock: a concurrent caller may have
 	// refreshed the file while we waited.
-	if creds2, ok := loadCredentials(); ok && tokenIsFresh(creds2) {
+	if creds2, ok := loadCredentialsIn(dir); ok && tokenIsFresh(creds2) {
 		return creds2.ClaudeAiOauth.AccessToken, nil
 	} else if ok {
 		creds = creds2 // use the most recent refresh token on disk
@@ -460,10 +551,10 @@ func credentialFileToken() (string, *AuthError) {
 		}
 		return "", &AuthError{
 			Problem: AuthNoCredentials,
-			Detail:  fmt.Sprintf("%s has neither an access token nor a refresh token", credentialsPath()),
+			Detail:  fmt.Sprintf("%s has neither an access token nor a refresh token", credentialsPathIn(dir)),
 		}
 	}
-	newToken, err := refreshOAuthToken(creds.ClaudeAiOauth.RefreshToken)
+	newToken, err := refreshOAuthToken(dir, creds.ClaudeAiOauth.RefreshToken)
 	if err != nil {
 		// A failed exchange is a sharper diagnosis than the 401 that
 		// attempting the stale access token would produce, so report it
@@ -478,8 +569,11 @@ func credentialFileToken() (string, *AuthError) {
 // claude CLI run by this host). We lock a sidecar file rather than the
 // credentials file itself so an flock failure can never leave the real
 // credentials truncated.
-func credentialsLockPath() string {
-	return credentialsPath() + ".lock"
+// Scoped per configuration directory, so two users refreshing at the same
+// time contend only with peers holding the same credential, not with each
+// other.
+func credentialsLockPath(dir string) string {
+	return credentialsPathIn(dir) + ".lock"
 }
 
 // withCredentialsFileLock runs fn while holding an exclusive cross-process
@@ -487,8 +581,8 @@ func credentialsLockPath() string {
 // runs fn (best-effort) rather than failing the refresh outright — the
 // in-process mutex already prevents the common self-race; the flock is defense
 // against multiple cloop processes / the CLI.
-func withCredentialsFileLock(fn func()) {
-	lockPath := credentialsLockPath()
+func withCredentialsFileLock(dir string, fn func()) {
+	lockPath := credentialsLockPath(dir)
 	if err := os.MkdirAll(filepath.Dir(lockPath), 0700); err != nil {
 		fn()
 		return
@@ -512,7 +606,7 @@ func withCredentialsFileLock(fn func()) {
 // HTTP-exchange + file-write happens under a cross-process flock so a
 // concurrent cloop process (or the claude CLI) can't interleave its own
 // refresh and double-consume the rotating refresh token.
-func refreshOAuthToken(refreshToken string) (string, error) {
+func refreshOAuthToken(dir string, refreshToken string) (string, error) {
 	client := &http.Client{Timeout: 10 * time.Second}
 
 	formData := oauthRefreshForm(refreshToken)
@@ -521,13 +615,13 @@ func refreshOAuthToken(refreshToken string) (string, error) {
 		accessToken string
 		refreshErr  error
 	)
-	withCredentialsFileLock(func() {
+	withCredentialsFileLock(dir, func() {
 		// Re-check under the cross-process lock: another process may have
 		// just refreshed. If so, adopt its fresh token and skip the exchange
 		// so we never POST an already-consumed refresh token.
-		if creds, ok := loadCredentials(); ok && tokenIsFresh(creds) {
+		if creds, ok := loadCredentialsIn(dir); ok && tokenIsFresh(creds) {
 			accessToken = creds.ClaudeAiOauth.AccessToken
-			os.Setenv("CLAUDE_CODE_OAUTH_TOKEN", accessToken)
+			cacheTokenInEnv(dir, accessToken)
 			return
 		} else if ok && creds.ClaudeAiOauth.RefreshToken != "" {
 			// Use the newest refresh token on disk, not the (possibly stale)
@@ -580,10 +674,10 @@ func refreshOAuthToken(refreshToken string) (string, error) {
 		// usable), but it must be loud: the refresh token is single-use,
 		// so if the rotated one isn't on disk, every other consumer of the
 		// credentials file is now holding a dead token.
-		if err := updateCredentialsFile(tokenResp.AccessToken, tokenResp.RefreshToken, tokenResp.ExpiresIn); err != nil {
-			fmt.Fprintf(os.Stderr, "cloop: WARNING: failed to persist refreshed OAuth credentials to %s: %v (the rotated refresh token only exists in this process; other claude/cloop processes may fail to authenticate)\n", credentialsPath(), err)
+		if err := updateCredentialsFile(dir, tokenResp.AccessToken, tokenResp.RefreshToken, tokenResp.ExpiresIn); err != nil {
+			fmt.Fprintf(os.Stderr, "cloop: WARNING: failed to persist refreshed OAuth credentials to %s: %v (the rotated refresh token only exists in this process; other claude/cloop processes may fail to authenticate)\n", credentialsPathIn(dir), err)
 		}
-		os.Setenv("CLAUDE_CODE_OAUTH_TOKEN", tokenResp.AccessToken)
+		cacheTokenInEnv(dir, tokenResp.AccessToken)
 		accessToken = tokenResp.AccessToken
 	})
 
@@ -614,8 +708,8 @@ func oauthRefreshForm(refreshToken string) string {
 // returned "401 Invalid authentication credentials" on every subsequent step.
 //
 // Callers should hold the cross-process flock (see withCredentialsFileLock).
-func updateCredentialsFile(accessToken, refreshToken string, expiresIn int64) error {
-	path := credentialsPath()
+func updateCredentialsFile(dir string, accessToken, refreshToken string, expiresIn int64) error {
+	path := credentialsPathIn(dir)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("reading credentials file: %w", err)

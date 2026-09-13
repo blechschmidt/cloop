@@ -642,6 +642,15 @@ function _renderClaudeAuth(d) {
     h += '</div>';
   }
 
+  // With OIDC on, this panel shows the signed-in user's own Claude account.
+  // Say so: otherwise a hub-wide settings page reads like a shared setting,
+  // and a user cannot tell whether signing out affects their colleagues.
+  if (d.per_user) {
+    h += '<div style="background:var(--surface-alt,#1a1a1a);border:1px solid var(--border);border-radius:6px;padding:10px 12px;margin-bottom:12px;font-size:12px;color:var(--muted)">';
+    h += 'This Claude Code login is yours alone. Other users of this hub sign in separately, your tasks run on your subscription, and signing out here does not sign anyone else out.';
+    h += '</div>';
+  }
+
   if (sess && sess.active && sess.url && !sess.done) {
     // In-flight login session: show URL + code input.
     h += '<div style="background:var(--surface-alt,#1a1a1a);border:1px solid var(--border);border-radius:6px;padding:14px;margin-bottom:12px">';

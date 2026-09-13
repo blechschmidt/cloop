@@ -161,7 +161,7 @@ func TestWriteFileAtomic_ValidAfterWrite(t *testing.T) {
 // Tests run sequentially so we don't bother locking writers here.
 func resetUsageCache() {
 	usageMu.Lock()
-	lastUsage = nil
+	usageByDir = map[string]*ClaudeUsage{}
 	usageMu.Unlock()
 }
 
@@ -172,7 +172,7 @@ func TestFetchOrCachedUsage_ServesCacheWithinTTL(t *testing.T) {
 	// Seed the cache as if a previous fetch had succeeded.
 	seeded := &ClaudeUsage{FetchedAt: time.Now().UTC()}
 	usageMu.Lock()
-	lastUsage = seeded
+	usageByDir = map[string]*ClaudeUsage{"": seeded}
 	usageMu.Unlock()
 
 	got, err := FetchOrCachedUsage("ignored-token", MinUsageCacheTTL)
@@ -193,7 +193,7 @@ func TestFetchOrCachedUsage_TTLFloor(t *testing.T) {
 	// returned without an HTTP attempt.
 	seeded := &ClaudeUsage{FetchedAt: time.Now().UTC().Add(-30 * time.Second)}
 	usageMu.Lock()
-	lastUsage = seeded
+	usageByDir = map[string]*ClaudeUsage{"": seeded}
 	usageMu.Unlock()
 
 	got, err := FetchOrCachedUsage("ignored-token", 5*time.Second)
@@ -211,7 +211,7 @@ func TestClearUsageCache(t *testing.T) {
 
 	seeded := &ClaudeUsage{FetchedAt: time.Now().UTC()}
 	usageMu.Lock()
-	lastUsage = seeded
+	usageByDir = map[string]*ClaudeUsage{"": seeded}
 	usageMu.Unlock()
 
 	if GetCachedUsage() != seeded {
@@ -233,7 +233,7 @@ func TestFetchOrCachedUsage_StaleCacheTriggersRefresh(t *testing.T) {
 	// the UI/orchestrator never lose historical numbers.
 	stale := &ClaudeUsage{FetchedAt: time.Now().UTC().Add(-2 * time.Minute)}
 	usageMu.Lock()
-	lastUsage = stale
+	usageByDir = map[string]*ClaudeUsage{"": stale}
 	usageMu.Unlock()
 
 	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "")

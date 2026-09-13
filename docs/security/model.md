@@ -1096,8 +1096,16 @@ When enabled:
   one user decluttering a shared project does not blank it out of anyone
   else's dashboard. It is presentation only — a hidden project keeps running
   and stays reachable by index — so it is not a substitute for ownership.
+- **Per-user Claude Code logins**: each signed-in user gets their own Claude
+  CLI configuration directory, so login, logout, session history and
+  subscription usage stop being hub-wide. Automatic — there is no key for it.
+  The caveat that decides whether it is real is an ambient
+  `CLAUDE_CODE_OAUTH_TOKEN`, which outranks the directory; see
+  [per-user Claude Code logins](claude-code-identity.md).
 - The static bearer token (`--token` / `CLOOP_UI_TOKEN`) keeps working for
-  API automation and sees all projects.
+  API automation and sees all projects. It carries no owner binding, so the
+  Claude Code auth and usage endpoints refuse it with `403` rather than
+  falling back to the host's account.
 - Sessions are persisted in the hub's control-plane database and survive a
   restart. Set `CLOOP_SECRET_KEY` to arm IdP-side revocation — without it,
   refresh tokens are not retained. See

@@ -68,7 +68,7 @@ func TestBufferedReaderAppendBounded(t *testing.T) {
 
 func TestManagerSnapshotInactive(t *testing.T) {
 	m := NewManager()
-	st := m.Snapshot()
+	st := m.Snapshot("")
 	if st.Active {
 		t.Fatalf("fresh manager should be inactive, got %+v", st)
 	}
@@ -76,7 +76,7 @@ func TestManagerSnapshotInactive(t *testing.T) {
 
 func TestManagerSubmitCodeWithoutSession(t *testing.T) {
 	m := NewManager()
-	if _, err := m.SubmitCode("code"); err == nil {
+	if _, err := m.SubmitCode("", "code"); err == nil {
 		t.Fatal("expected error when submitting code with no active session")
 	}
 }
@@ -85,7 +85,7 @@ func TestManagerCancelNoSession(t *testing.T) {
 	m := NewManager()
 	// Should not panic or deadlock.
 	done := make(chan struct{})
-	go func() { m.Cancel(); close(done) }()
+	go func() { m.Cancel(""); close(done) }()
 	select {
 	case <-done:
 	case <-time.After(time.Second):

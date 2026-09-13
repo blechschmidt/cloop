@@ -111,37 +111,47 @@ func (e *AuthError) Hint() string {
 // recovers on the next refresh rather than after a TTL.
 const authFailureTTL = time.Minute
 
+// Every cache in this file is keyed by Claude CLI configuration directory
+// ("" being the host default), because a hub holds one credential per signed-in
+// user (Task 20241). A single shared slot would let one tenant's expired token
+// raise a "re-authenticate" banner on everybody else's dashboard, and one
+// tenant's success clear a warning that is still true for the rest.
+type authFailure struct {
+	err *AuthError
+	at  time.Time
+}
+
 var (
-	authFailMu  sync.Mutex
-	authFailErr *AuthError
-	authFailAt  time.Time
+	authFailMu sync.Mutex
+	authFails  = map[string]authFailure{}
 )
 
-// cachedAuthFailure returns the last classified auth failure while it is still
-// within authFailureTTL, or nil to let the caller make a live attempt.
-func cachedAuthFailure() *AuthError {
+// cachedAuthFailure returns the last classified auth failure for dir while it
+// is still within authFailureTTL, or nil to let the caller make a live attempt.
+func cachedAuthFailure(dir string) *AuthError {
 	authFailMu.Lock()
 	defer authFailMu.Unlock()
-	if authFailErr != nil && time.Since(authFailAt) < authFailureTTL {
-		return authFailErr
+	f := authFails[dir]
+	if f.err != nil && time.Since(f.at) < authFailureTTL {
+		return f.err
 	}
 	return nil
 }
 
-// recordAuthFailure caches e and returns it, so call sites can
+// recordAuthFailure caches e against dir and returns it, so call sites can
 // `return nil, recordAuthFailure(...)` in one line.
-func recordAuthFailure(e *AuthError) *AuthError {
+func recordAuthFailure(dir string, e *AuthError) *AuthError {
 	authFailMu.Lock()
-	authFailErr, authFailAt = e, time.Now()
+	authFails[dir] = authFailure{err: e, at: time.Now()}
 	authFailMu.Unlock()
 	return e
 }
 
-// clearAuthFailure forgets any cached failure. Called after a successful fetch
-// and from ClearUsageCache on login/logout.
-func clearAuthFailure() {
+// clearAuthFailure forgets any cached failure for dir. Called after a
+// successful fetch and from ClearUsageCache on login/logout.
+func clearAuthFailure(dir string) {
 	authFailMu.Lock()
-	authFailErr, authFailAt = nil, time.Time{}
+	delete(authFails, dir)
 	authFailMu.Unlock()
 }
 
@@ -157,45 +167,57 @@ func clearAuthFailure() {
 // really are transient and should recover on their own.
 const transientBackoff = 30 * time.Second
 
+type fetchFailure struct {
+	err error
+	at  time.Time
+}
+
 var (
 	fetchErrMu sync.Mutex
-	fetchErr   error
-	fetchErrAt time.Time
+	fetchErrs  = map[string]fetchFailure{}
 )
 
-// recentFetchError returns a still-current transient failure, or nil to let
-// the caller try again.
-func recentFetchError() error {
+// recentFetchError returns a still-current transient failure for dir, or nil
+// to let the caller try again.
+func recentFetchError(dir string) error {
 	fetchErrMu.Lock()
 	defer fetchErrMu.Unlock()
-	if fetchErr != nil && time.Since(fetchErrAt) < transientBackoff {
-		return fetchErr
+	f := fetchErrs[dir]
+	if f.err != nil && time.Since(f.at) < transientBackoff {
+		return f.err
 	}
 	return nil
 }
 
-func recordFetchError(err error) {
+func recordFetchError(dir string, err error) {
 	fetchErrMu.Lock()
-	fetchErr, fetchErrAt = err, time.Now()
+	fetchErrs[dir] = fetchFailure{err: err, at: time.Now()}
 	fetchErrMu.Unlock()
 }
 
-func clearFetchError() {
+func clearFetchError(dir string) {
 	fetchErrMu.Lock()
-	fetchErr, fetchErrAt = nil, time.Time{}
+	delete(fetchErrs, dir)
 	fetchErrMu.Unlock()
 }
 
-// AuthFailure reports the currently cached authentication failure, or nil when
-// the last usage fetch authenticated successfully. The dashboard uses this to
-// decide whether to show the re-authentication banner without triggering a
-// fetch of its own.
-func AuthFailure() *AuthError {
+// AuthFailure reports the currently cached authentication failure for this
+// process's own credential, or nil when the last usage fetch authenticated
+// successfully. The dashboard uses this to decide whether to show the
+// re-authentication banner without triggering a fetch of its own.
+func AuthFailure() *AuthError { return AuthFailureIn(envConfigDir()) }
+
+// AuthFailureIn is AuthFailure scoped to one identity's configuration
+// directory.
+func AuthFailureIn(dir string) *AuthError {
 	authFailMu.Lock()
 	defer authFailMu.Unlock()
-	return authFailErr
+	return authFails[dir].err
 }
 
 // ReauthRequired reports whether the last attempt failed in a way a human
 // fixes by logging in again.
 func ReauthRequired() bool { return AuthFailure() != nil }
+
+// ReauthRequiredIn is ReauthRequired scoped to one identity.
+func ReauthRequiredIn(dir string) bool { return AuthFailureIn(dir) != nil }

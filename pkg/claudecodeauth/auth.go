@@ -6,9 +6,14 @@
 // the process handle; SubmitCode writes the code to stdin and waits for the
 // process to exit; Cancel/Stop kills it.
 //
-// Only one in-flight login session is supported at a time per process. That
-// matches the single-user assumption of the local dashboard and avoids leaking
-// processes if the operator opens multiple browser tabs.
+// Every operation is scoped to a Claude CLI configuration directory (see
+// identity.go), so an OIDC hub can give each signed-in user their own login,
+// credential and session history. An empty configDir means "use the host
+// default", which is the single-user behaviour this package started with.
+//
+// Login sessions are keyed the same way, because a hub has as many concurrent
+// operators as it has users: one global in-flight session would mean the
+// second person to click Login silently kills the first person's OAuth flow.
 package claudecodeauth
 
 import (
@@ -46,6 +51,93 @@ func findClaude() string {
 	return "claude"
 }
 
+// AmbientTokenVars are the environment variables that hand the Claude CLI a
+// credential without it ever consulting its configuration directory.
+//
+// They must be cleared whenever a per-identity configDir is in force. cloop
+// itself populates CLAUDE_CODE_OAUTH_TOKEN from ~/.openclaw/workspace/.env and
+// ~/.env (see pkg/provider/claudecode.loadEnvFiles), and an ambient token
+// beats an empty config directory: measured against the real CLI, a user who
+// has never logged in reports `loggedIn: true, authMethod: oauth_token` and
+// their prompts run on the host's account. Per-user isolation would then be
+// an illusion — every tenant silently sharing one subscription — which is
+// precisely the failure this package exists to prevent.
+var AmbientTokenVars = []string{
+	"CLAUDE_CODE_OAUTH_TOKEN",
+	"ANTHROPIC_API_KEY",
+	"ANTHROPIC_AUTH_TOKEN",
+}
+
+// ClaudeOnlyTokenVars is the subset of AmbientTokenVars that nothing except
+// the Claude Code path consumes.
+//
+// The distinction matters because the two environments this package scopes are
+// not the same. A `claude` subprocess may have every ambient credential
+// cleared, since that environment serves one program. A dispatched cloop
+// harness may not: ANTHROPIC_API_KEY is also how pkg/provider/anthropic finds
+// its key, so blanking it there would break a project using the `anthropic`
+// provider on an OIDC hub — a self-inflicted outage in the name of isolating a
+// provider that project is not even using.
+var ClaudeOnlyTokenVars = []string{"CLAUDE_CODE_OAUTH_TOKEN"}
+
+// ScopeEnv returns env (in "K=V" form) rewritten so the Claude CLI resolves
+// its credential from configDir and nowhere else. Use it for a `claude`
+// subprocess, where clearing every ambient credential is free of collateral
+// damage.
+//
+// When configDir is empty the environment is returned untouched: a deployment
+// with no OIDC keeps using whatever credential the host is configured with,
+// ambient tokens included.
+//
+// Clearing is done by appending an empty assignment rather than by dropping
+// the variable, so the result is correct whether the caller hands it to
+// exec (last assignment wins) or scans it for a value.
+func ScopeEnv(env []string, configDir string) []string {
+	return scopeEnv(env, configDir, AmbientTokenVars)
+}
+
+// ScopeHarnessEnv pins a dispatched cloop harness to one identity's Claude
+// configuration directory, clearing only the variables that belong to the
+// Claude Code path. Other providers' credentials pass through untouched — see
+// ClaudeOnlyTokenVars.
+//
+// The harness's own claudecode provider re-scopes with the stricter ScopeEnv
+// when it finally spawns the CLI, so the remaining ambient credentials never
+// reach the `claude` binary regardless.
+func ScopeHarnessEnv(env []string, configDir string) []string {
+	return scopeEnv(env, configDir, ClaudeOnlyTokenVars)
+}
+
+func scopeEnv(env []string, configDir string, clear []string) []string {
+	if strings.TrimSpace(configDir) == "" {
+		return env
+	}
+	out := make([]string, 0, len(env)+len(clear)+1)
+	for _, kv := range env {
+		if !assignsAny(kv, clear) && !strings.HasPrefix(kv, "CLAUDE_CONFIG_DIR=") {
+			out = append(out, kv)
+		}
+	}
+	for _, k := range clear {
+		out = append(out, k+"=")
+	}
+	return append(out, "CLAUDE_CONFIG_DIR="+configDir)
+}
+
+func assignsAny(kv string, keys []string) bool {
+	for _, k := range keys {
+		if strings.HasPrefix(kv, k+"=") {
+			return true
+		}
+	}
+	return false
+}
+
+// cliEnv builds the environment for a `claude` subprocess scoped to configDir.
+func cliEnv(configDir string) []string {
+	return ScopeEnv(append(os.Environ(), "IS_SANDBOX=1"), configDir)
+}
+
 // Status mirrors the JSON shape that `claude auth status --json` returns.
 // Fields not emitted by the CLI are simply left zero-valued.
 type Status struct {
@@ -62,11 +154,14 @@ type Status struct {
 // returns exit code 0 even when logged out (loggedIn=false in the JSON), so
 // any non-nil error here is a real environmental failure (binary missing,
 // timeout, malformed output) and the UI should surface it as such.
-func FetchStatus(ctx context.Context) (*Status, error) {
+// configDir scopes the lookup to one identity's credential; empty means the
+// host default.
+func FetchStatus(ctx context.Context, configDir string) (*Status, error) {
 	if _, cancel := contextWithTimeoutIfNone(ctx, 10*time.Second); cancel != nil {
 		defer cancel()
 	}
 	cmd := exec.CommandContext(ctx, findClaude(), "auth", "status", "--json")
+	cmd.Env = cliEnv(configDir)
 	out, err := cmd.Output()
 	// The CLI exits 1 when logged out but still returns valid JSON with
 	// loggedIn=false. Try to parse the output first; only treat as error
@@ -101,12 +196,15 @@ func FetchStatus(ctx context.Context) (*Status, error) {
 
 // Logout invokes `claude auth logout`. The CLI is non-interactive in this path
 // so a 10-second timeout is sufficient.
-func Logout(ctx context.Context) error {
+// configDir scopes the logout to one identity, so a user signing out of the
+// hub does not sign out every other tenant.
+func Logout(ctx context.Context, configDir string) error {
 	ctx, cancel := contextWithTimeoutIfNone(ctx, 10*time.Second)
 	if cancel != nil {
 		defer cancel()
 	}
 	cmd := exec.CommandContext(ctx, findClaude(), "auth", "logout")
+	cmd.Env = cliEnv(configDir)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("claude auth logout: %w: %s", err, strings.TrimSpace(string(out)))
@@ -132,14 +230,15 @@ type Session struct {
 	StartedAt time.Time
 	URL       string
 
-	mu        sync.Mutex
-	cmd       *exec.Cmd
-	stdin     io.WriteCloser
-	stdoutBuf *bufferedReader
-	done      chan struct{}
-	exitErr   error
-	output    string
-	closed    bool
+	mu         sync.Mutex
+	cmd        *exec.Cmd
+	stdin      io.WriteCloser
+	stdoutBuf  *bufferedReader
+	done       chan struct{}
+	exitErr    error
+	output     string
+	closed     bool
+	finishedAt time.Time
 }
 
 // State is a snapshot of session progress safe to serialize for the UI.
@@ -185,29 +284,59 @@ func (s *Session) Snapshot() State {
 	return st
 }
 
-// Manager owns the single in-flight login session per process. Methods are
+// maxSessions bounds how many login flows can be in flight across the whole
+// hub. Each one is a live `claude auth login` subprocess parked on stdin, so
+// an unbounded map is a process-exhaustion lever for any authenticated user
+// with a script. Well past what a real deployment needs concurrently, since a
+// session only lives for as long as a human takes to paste a code.
+const maxSessions = 32
+
+// sessionReapAfter is how long a finished session's outcome stays readable
+// before it is swept. The UI polls the snapshot right after SubmitCode to
+// render success or the CLI's error text, so terminal sessions cannot be
+// dropped immediately — but they must not accumulate either.
+const sessionReapAfter = 10 * time.Minute
+
+// Manager owns the in-flight login sessions, keyed by identity. Methods are
 // safe for concurrent use by multiple HTTP handlers.
+//
+// The key is the caller's identity (an OwnerKey) so that two users logging in
+// at the same time do not evict each other, and so one user's pasted code can
+// never be delivered to another user's OAuth flow. An empty key is the
+// single-user/host session.
 type Manager struct {
-	mu      sync.Mutex
-	session *Session
+	mu       sync.Mutex
+	sessions map[string]*Session
 }
 
 // NewManager returns a fresh login session manager.
-func NewManager() *Manager { return &Manager{} }
+func NewManager() *Manager { return &Manager{sessions: make(map[string]*Session)} }
 
-// Start spawns `claude auth login` and waits for it to emit the OAuth URL,
-// returning a Session that the caller can later complete by passing the
-// authorization code to SubmitCode. If another session is already active it
-// is killed first so the new flow can take over.
-func (m *Manager) Start(ctx context.Context, opts LoginOptions) (*Session, error) {
+// Start spawns `claude auth login` scoped to configDir and waits for it to
+// emit the OAuth URL, returning a Session that the caller can later complete
+// by passing the authorization code to SubmitCode. If the same identity
+// already has a session in flight it is killed first so the new flow can take
+// over; other identities' sessions are left alone.
+func (m *Manager) Start(ctx context.Context, key, configDir string, opts LoginOptions) (*Session, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// Replace any existing session — the previous browser tab presumably
-	// timed out or the user restarted the flow.
-	if m.session != nil {
-		m.session.kill("superseded by new login attempt")
-		m.session = nil
+	if m.sessions == nil {
+		m.sessions = make(map[string]*Session)
+	}
+	m.reapLocked()
+
+	// Replace this identity's existing session — the previous browser tab
+	// presumably timed out or the user restarted the flow.
+	if prev := m.sessions[key]; prev != nil {
+		prev.kill("superseded by new login attempt")
+		delete(m.sessions, key)
+	}
+
+	// Counted after reaping and after evicting our own predecessor, so a user
+	// retrying their own login never trips the bound.
+	if len(m.sessions) >= maxSessions {
+		return nil, fmt.Errorf("too many Claude logins in flight (%d); retry shortly", len(m.sessions))
 	}
 
 	args := []string{"auth", "login"}
@@ -227,7 +356,10 @@ func (m *Manager) Start(ctx context.Context, opts LoginOptions) (*Session, error
 	// lifetime explicitly via Cancel/SubmitCode/kill, and we don't want the
 	// HTTP handler's request context to abort an in-flight OAuth flow.
 	cmd := exec.Command(findClaude(), args...)
-	cmd.Env = append(os.Environ(), "IS_SANDBOX=1")
+	// Scoped to this identity's directory, with ambient tokens cleared — see
+	// ScopeEnv. Without this the CLI would happily report the host's account
+	// as already logged in and never perform the OAuth exchange at all.
+	cmd.Env = cliEnv(configDir)
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -276,6 +408,7 @@ func (m *Manager) Start(ctx context.Context, opts LoginOptions) (*Session, error
 		sess.exitErr = err
 		sess.output = sess.stdoutBuf.snapshot()
 		sess.closed = true
+		sess.finishedAt = time.Now()
 		close(sess.done)
 		sess.mu.Unlock()
 		_ = stdin.Close()
@@ -301,17 +434,41 @@ func (m *Manager) Start(ctx context.Context, opts LoginOptions) (*Session, error
 		return nil, fmt.Errorf("claude auth login exited before emitting a URL: %s", strings.TrimSpace(out))
 	}
 
-	m.session = sess
+	m.sessions[key] = sess
 	return sess, nil
+}
+
+// reapLocked drops sessions that finished long enough ago that nobody is
+// still reading their outcome. Caller must hold m.mu.
+func (m *Manager) reapLocked() {
+	for k, sess := range m.sessions {
+		if sess.finishedBefore(time.Now().Add(-sessionReapAfter)) {
+			delete(m.sessions, k)
+		}
+	}
+}
+
+// finishedBefore reports whether the session has exited and did so before t.
+func (s *Session) finishedBefore(t time.Time) bool {
+	select {
+	case <-s.done:
+	default:
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.finishedAt.Before(t)
 }
 
 // SubmitCode pipes the OAuth authorization code to the running login session
 // and waits up to 30 seconds for the CLI to exit. On success the session is
 // cleared. The returned State describes the final outcome regardless of
 // whether the CLI exited cleanly.
-func (m *Manager) SubmitCode(code string) (State, error) {
+// The key selects the caller's own session, so a code pasted by one user can
+// never complete another user's OAuth flow.
+func (m *Manager) SubmitCode(key, code string) (State, error) {
 	m.mu.Lock()
-	sess := m.session
+	sess := m.sessions[key]
 	m.mu.Unlock()
 	if sess == nil {
 		return State{}, errors.New("no active login session")
@@ -348,20 +505,20 @@ func (m *Manager) SubmitCode(code string) (State, error) {
 	snap := sess.Snapshot()
 
 	m.mu.Lock()
-	if m.session == sess {
-		m.session = nil
+	if m.sessions[key] == sess {
+		delete(m.sessions, key)
 	}
 	m.mu.Unlock()
 
 	return snap, nil
 }
 
-// Cancel kills the current login session (if any) and clears the manager's
-// reference so a fresh Start can begin.
-func (m *Manager) Cancel() {
+// Cancel kills one identity's login session (if any) and clears the manager's
+// reference so a fresh Start can begin. Other identities are unaffected.
+func (m *Manager) Cancel(key string) {
 	m.mu.Lock()
-	sess := m.session
-	m.session = nil
+	sess := m.sessions[key]
+	delete(m.sessions, key)
 	m.mu.Unlock()
 	if sess != nil {
 		sess.kill("cancelled by user")
@@ -369,16 +526,32 @@ func (m *Manager) Cancel() {
 	}
 }
 
-// Snapshot returns the current session's state, or an inactive zero State if
-// no session is in flight.
-func (m *Manager) Snapshot() State {
+// Snapshot returns one identity's session state, or an inactive zero State if
+// that identity has no session in flight.
+func (m *Manager) Snapshot(key string) State {
 	m.mu.Lock()
-	sess := m.session
+	sess := m.sessions[key]
 	m.mu.Unlock()
 	if sess == nil {
 		return State{Active: false}
 	}
 	return sess.Snapshot()
+}
+
+// Shutdown kills every in-flight login session. Called when the hub is
+// stopping so parked `claude auth login` children do not outlive it.
+func (m *Manager) Shutdown() {
+	m.mu.Lock()
+	sessions := make([]*Session, 0, len(m.sessions))
+	for k, sess := range m.sessions {
+		sessions = append(sessions, sess)
+		delete(m.sessions, k)
+	}
+	m.mu.Unlock()
+	for _, sess := range sessions {
+		sess.kill("hub shutting down")
+		<-sess.done
+	}
 }
 
 func (s *Session) kill(reason string) {

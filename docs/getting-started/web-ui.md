@@ -310,7 +310,10 @@ more decisions, and both have their own documentation.
 
 - **Who may do what** — SSO, sessions, roles and scoped API tokens are in
   [the security model](../security/model.md). Start there before exposing the
-  port; the defaults on this page are not the ones you want.
+  port; the defaults on this page are not the ones you want. Turning SSO on
+  also splits the Budget tab's Claude Code sign-in, which is otherwise one
+  account for the whole hub — see
+  [per-user Claude Code logins](../security/claude-code-identity.md).
 - **Where the work runs** — the dashboard forking a harness next to itself is
   fine on a laptop and not fine when the code being run was written by a model
   on someone else's behalf. Container, Kubernetes and remote executors, and the

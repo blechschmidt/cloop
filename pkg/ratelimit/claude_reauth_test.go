@@ -195,7 +195,7 @@ func TestUpdateCredentialsFileDropsStaleExpiry(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	path := writeCreds(t, "old-access", "old-refresh", time.Now().Add(-time.Hour).UnixMilli())
 
-	if err := updateCredentialsFile("new-access", "new-refresh", 0); err != nil {
+	if err := updateCredentialsFile("", "new-access", "new-refresh", 0); err != nil {
 		t.Fatalf("updateCredentialsFile: %v", err)
 	}
 
@@ -222,7 +222,7 @@ func TestMissingCredentialsFallsBackToEnv(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "env-token")
 
-	tok, authErr := resolveCredentialToken()
+	tok, authErr := resolveCredentialToken("")
 	if authErr != nil {
 		t.Fatalf("expected the env token to satisfy the resolver, got %v", authErr)
 	}

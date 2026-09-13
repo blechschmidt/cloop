@@ -77,6 +77,14 @@ Five pages in order, indexed at
 - **[Threat model](security/threat-model.md)** — STRIDE per boundary, with the
   concrete mitigation that exists and an honest residual-risk column, plus the
   [two vulnerabilities found while building the egress filter](security/threat-model.md#vulnerabilities-found-while-building-this).
+- **[Per-user Claude Code logins](security/claude-code-identity.md)** — what a
+  hub with SSO does about the `claudecode` provider's one shared sign-in: a
+  private Claude CLI configuration directory per identity, per-caller login,
+  logout, status and subscription usage, and
+  [the ambient token that outranks all of it](security/claude-code-identity.md#the-ambient-token-outranks-the-directory)
+  — why an exported `CLAUDE_CODE_OAUTH_TOKEN` turns the isolation into an
+  illusion. Includes the isolating-executor boundary and deprovisioning.
+  Automatic when OIDC is on; nothing to configure.
 - **[Git interception proxy](git-interception-proxy.md)** — how a sandbox is
   allowed to push to some branches and not others without ever holding a
   credential that could reach the others: the branch allowlist enforced on the

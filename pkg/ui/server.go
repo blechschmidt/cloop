@@ -1212,6 +1212,15 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	// audit trail records why they ended rather than leaving rows that simply
 	// stop. Nil-safe when none is configured.
 	activeGitProxy().Close()
+	// Kill any parked `claude auth login` children. Each one is a subprocess
+	// blocked on stdin waiting for a pasted code, so on a multi-user hub an
+	// unclean stop could otherwise leave one per half-finished login.
+	s.ccAuthMu.Lock()
+	ccAuth := s.ccAuth
+	s.ccAuthMu.Unlock()
+	if ccAuth != nil {
+		ccAuth.Shutdown()
+	}
 	err := srv.Shutdown(ctx)
 	// The instance lease goes last, after in-flight requests have drained: it
 	// is what entitles this process to be the control plane, so releasing it
@@ -3035,7 +3044,8 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 	// The harness is never forked here. It is handed to whichever executor
 	// this project is bound to — the local host by default, a container or
 	// a remote edge agent when configured (Task 20156).
-	ex, handle, err := startWorkload(workDir, append([]string{exe}, args...), map[string]string{"handler": "run"})
+	ex, handle, err := startWorkloadAs(s.claudeEnvResolver(r),
+		workDir, append([]string{exe}, args...), map[string]string{"handler": "run"})
 	if err != nil {
 		// 409 when strict no-host-execution mode refused the dispatch, so
 		// the browser can show the remediation instead of a generic 500
@@ -4390,6 +4400,9 @@ func (s *Server) handleSuggestGenerate(w http.ResponseWriter, r *http.Request) {
 	s.broadcastSuggestStatus(suggestWorkDir)
 
 	exe := s.selfExe()
+	// Resolved here rather than inside the goroutine: brainstorming spends the
+	// caller's Claude tokens, and r must not outlive this handler.
+	claudeEnv := s.claudeEnvResolver(r)
 
 	go func() {
 		defer func() {
@@ -4408,7 +4421,7 @@ func (s *Server) handleSuggestGenerate(w http.ResponseWriter, r *http.Request) {
 		// hung sub-binary would otherwise leave suggestRunning=true forever
 		// (every subsequent /api/suggest/start returns 409 Conflict until the
 		// UI server is restarted).
-		out, runErr := runCloopSubcommand(context.Background(), exe, suggestWorkDir, suggestSubprocessTimeout,
+		out, runErr := runCloopSubcommandFor(context.Background(), exe, suggestWorkDir, suggestSubprocessTimeout, claudeEnv,
 			"suggest", "--json", "--count", strconv.Itoa(req.Count))
 
 		s.suggestMu.Lock()
@@ -4903,7 +4916,8 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	// is bound by both r.Context() (browser tab close = SIGKILL the child) and
 	// a hard timeout so a wedged provider call can't pin this goroutine.
 	exe := s.selfExe()
-	out, cmdErr := runCloopSubcommand(r.Context(), exe, chatWorkDir, chatSubprocessTimeout, "do", msg)
+	out, cmdErr := runCloopSubcommandFor(r.Context(), exe, chatWorkDir, chatSubprocessTimeout,
+		s.claudeEnvResolver(r), "do", msg)
 	output := strings.TrimSpace(string(out))
 
 	ok := cmdErr == nil
@@ -5930,7 +5944,8 @@ func (s *Server) handleProjectRun(w http.ResponseWriter, r *http.Request) {
 	}
 	// Dispatched to the project's bound executor rather than forked here
 	// (Task 20156).
-	ex, handle, err := startWorkload(entry.Path, append([]string{exe}, args...),
+	ex, handle, err := startWorkloadAs(s.claudeEnvResolver(r),
+		entry.Path, append([]string{exe}, args...),
 		map[string]string{"handler": "project-run", "project_name": entry.Name})
 	if err != nil {
 		jsonWorkloadErr(w, err)
@@ -6177,7 +6192,8 @@ func (s *Server) handleProjectNew(w http.ResponseWriter, r *http.Request) {
 		if req.PMMode {
 			runArgs = append(runArgs, "--pm")
 		}
-		runEx, runHandle, startErr := startWorkload(abs, append([]string{exe}, runArgs...),
+		runEx, runHandle, startErr := startWorkloadAs(s.claudeEnvResolver(r),
+			abs, append([]string{exe}, runArgs...),
 			map[string]string{"handler": "project-new-autorun"})
 		if startErr != nil {
 			// Non-fatal: the project was created successfully, only the
@@ -7261,7 +7277,15 @@ func (s *Server) handleClaudeUsage(w http.ResponseWriter, r *http.Request) {
 	// FetchOrCachedUsage enforces a >=1-minute TTL and coalesces concurrent
 	// callers, so a browser polling this endpoint plus the orchestrator's
 	// per-task limit check share one HTTP round-trip per refresh window.
-	usage, err := ratelimit.FetchOrCachedUsage("", 3*time.Minute)
+	// Scoped to the caller: on an OIDC hub each user has their own Claude
+	// subscription, and reporting the host's utilization to everybody would
+	// both leak one account's figures and mislead the rest (Task 20241).
+	scope, scopeErr := s.claudeScopeFor(r)
+	if scopeErr != nil {
+		jsonErr(w, scopeErr.Error(), http.StatusForbidden)
+		return
+	}
+	usage, err := ratelimit.FetchOrCachedUsageIn(scope.ConfigDir, "", 3*time.Minute)
 	if err != nil && usage == nil {
 		resp := map[string]interface{}{"error": err.Error()}
 		// Distinguish "log in again" from a transient outage so the caller
@@ -7292,7 +7316,13 @@ func (s *Server) handleClaudeCodeLimitsGet(w http.ResponseWriter, r *http.Reques
 	// Cached for at least 1 minute; falls back to any stale snapshot so the
 	// panel still renders historical numbers when the OAuth usage endpoint is
 	// briefly unreachable.
-	usage, usageErr := ratelimit.FetchOrCachedUsage("", ratelimit.MinUsageCacheTTL)
+	// Per-caller, for the same reason as /api/claude-usage.
+	scope, scopeErr := s.claudeScopeFor(r)
+	if scopeErr != nil {
+		jsonErr(w, scopeErr.Error(), http.StatusForbidden)
+		return
+	}
+	usage, usageErr := ratelimit.FetchOrCachedUsageIn(scope.ConfigDir, "", ratelimit.MinUsageCacheTTL)
 	violations := ratelimit.CheckClaudeCodeLimits(cc, usage)
 	violationStrs := make([]string, 0, len(violations))
 	for _, v := range violations {
@@ -7386,13 +7416,18 @@ func (s *Server) handleClaudeCodeAuthStatus(w http.ResponseWriter, r *http.Reque
 	if denyHostSideEffect(w, "", "claude CLI (auth status)") {
 		return
 	}
-	resp := map[string]interface{}{}
-	if st, err := claudecodeauth.FetchStatus(r.Context()); err != nil {
+	scope, err := s.claudeScopeFor(r)
+	if err != nil {
+		jsonErr(w, err.Error(), http.StatusForbidden)
+		return
+	}
+	resp := map[string]interface{}{"per_user": scope.PerUser()}
+	if st, err := claudecodeauth.FetchStatus(r.Context(), scope.ConfigDir); err != nil {
 		resp["status_error"] = err.Error()
 	} else {
 		resp["status"] = st
 	}
-	resp["session"] = s.claudeAuthManager().Snapshot()
+	resp["session"] = s.claudeAuthManager().Snapshot(scope.Owner)
 	jsonOK(w, resp)
 }
 
@@ -7415,7 +7450,12 @@ func (s *Server) handleClaudeCodeAuthLoginStart(w http.ResponseWriter, r *http.R
 			return
 		}
 	}
-	sess, err := s.claudeAuthManager().Start(r.Context(), claudecodeauth.LoginOptions{
+	scope, err := s.claudeScopeFor(r)
+	if err != nil {
+		jsonErr(w, err.Error(), http.StatusForbidden)
+		return
+	}
+	sess, err := s.claudeAuthManager().Start(r.Context(), scope.Owner, scope.ConfigDir, claudecodeauth.LoginOptions{
 		Console: req.Console,
 		Email:   req.Email,
 		SSO:     req.SSO,
@@ -7442,17 +7482,24 @@ func (s *Server) handleClaudeCodeAuthLoginCode(w http.ResponseWriter, r *http.Re
 		respondToBodyError(w, err)
 		return
 	}
-	st, err := s.claudeAuthManager().SubmitCode(req.Code)
+	scope, err := s.claudeScopeFor(r)
+	if err != nil {
+		jsonErr(w, err.Error(), http.StatusForbidden)
+		return
+	}
+	st, err := s.claudeAuthManager().SubmitCode(scope.Owner, req.Code)
 	if err != nil {
 		jsonErr(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	// Reauthentication invalidates the cached Claude Code usage snapshot:
 	// the previous identity's window/extra-usage numbers no longer apply.
-	ratelimit.ClearUsageCache()
+	// Scoped, so one user logging in does not blank every other tenant's
+	// cached figures.
+	ratelimit.ClearUsageCacheIn(scope.ConfigDir)
 	// Refresh status so the UI doesn't have to round-trip a second call.
 	resp := map[string]interface{}{"session": st}
-	if status, sErr := claudecodeauth.FetchStatus(r.Context()); sErr == nil {
+	if status, sErr := claudecodeauth.FetchStatus(r.Context(), scope.ConfigDir); sErr == nil {
 		resp["status"] = status
 	}
 	jsonOK(w, resp)
@@ -7461,7 +7508,12 @@ func (s *Server) handleClaudeCodeAuthLoginCode(w http.ResponseWriter, r *http.Re
 // handleClaudeCodeAuthLoginCancel kills the current login session (if any).
 // POST /api/claudecode/auth/login/cancel
 func (s *Server) handleClaudeCodeAuthLoginCancel(w http.ResponseWriter, r *http.Request) {
-	s.claudeAuthManager().Cancel()
+	scope, err := s.claudeScopeFor(r)
+	if err != nil {
+		jsonErr(w, err.Error(), http.StatusForbidden)
+		return
+	}
+	s.claudeAuthManager().Cancel(scope.Owner)
 	jsonOK(w, map[string]bool{"ok": true})
 }
 
@@ -7471,12 +7523,17 @@ func (s *Server) handleClaudeCodeAuthLogout(w http.ResponseWriter, r *http.Reque
 	if denyHostSideEffect(w, "", "claude CLI (auth logout)") {
 		return
 	}
-	if err := claudecodeauth.Logout(r.Context()); err != nil {
+	scope, err := s.claudeScopeFor(r)
+	if err != nil {
+		jsonErr(w, err.Error(), http.StatusForbidden)
+		return
+	}
+	if err := claudecodeauth.Logout(r.Context(), scope.ConfigDir); err != nil {
 		jsonErr(w, err.Error(), http.StatusBadGateway)
 		return
 	}
 	// Discard cached usage — it belonged to the now-logged-out identity.
-	ratelimit.ClearUsageCache()
+	ratelimit.ClearUsageCacheIn(scope.ConfigDir)
 	jsonOK(w, map[string]bool{"ok": true})
 }
 

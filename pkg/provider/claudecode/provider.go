@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/claudecodeauth"
 	"github.com/blechschmidt/cloop/pkg/procgroup"
 	"github.com/blechschmidt/cloop/pkg/provider"
 )
@@ -250,7 +251,12 @@ func (p *Provider) runCLI(ctx context.Context, prompt string, opts provider.Opti
 	// pkg/plugin and pkg/hooks).
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.WaitDelay = 5 * time.Second
-	cmd.Env = append(os.Environ(), "IS_SANDBOX=1")
+	// When this process is pinned to a per-user Claude configuration directory
+	// (an OIDC hub starts each run that way — Task 20241), ScopeEnv clears the
+	// ambient token variables. An ambient CLAUDE_CODE_OAUTH_TOKEN outranks the
+	// directory, so leaving one in place would silently run every user's tasks
+	// on the host's account instead of their own.
+	cmd.Env = claudecodeauth.ScopeEnv(append(os.Environ(), "IS_SANDBOX=1"), os.Getenv("CLAUDE_CONFIG_DIR"))
 	if tokenOverride != "" {
 		// exec deduplicates the environment keeping the last occurrence, so
 		// this wins over any CLAUDE_CODE_OAUTH_TOKEN inherited or loaded from
@@ -570,6 +576,11 @@ func loadEnvFile(path string) {
 	if err != nil {
 		return
 	}
+	// A per-user configuration directory names the identity to authenticate
+	// as. Importing a credential out of the host's dotfiles would override
+	// that choice with the host's own account, so those keys are skipped
+	// entirely here rather than merely being cleared later.
+	scoped := strings.TrimSpace(os.Getenv("CLAUDE_CONFIG_DIR")) != ""
 	for _, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
@@ -579,9 +590,29 @@ func loadEnvFile(path string) {
 		if len(parts) == 2 {
 			key := strings.TrimSpace(parts[0])
 			val := strings.TrimSpace(parts[1])
+			if scoped && isAmbientTokenKey(key) {
+				continue
+			}
 			if os.Getenv(key) == "" {
 				os.Setenv(key, val)
 			}
 		}
 	}
+}
+
+// isAmbientTokenKey reports whether an env key hands the Claude CLI a
+// credential directly, bypassing its configuration directory.
+//
+// Only the Claude-specific variables are withheld here. This function gates
+// what lands in *this process's* environment, which every provider reads, so
+// skipping ANTHROPIC_API_KEY would deny the anthropic provider a key it is
+// entitled to. The CLI never sees it either way: runCLI re-scopes with the
+// stricter ScopeEnv before spawning.
+func isAmbientTokenKey(key string) bool {
+	for _, k := range claudecodeauth.ClaudeOnlyTokenVars {
+		if key == k {
+			return true
+		}
+	}
+	return false
 }

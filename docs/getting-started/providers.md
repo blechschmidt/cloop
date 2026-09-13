@@ -33,7 +33,10 @@ billing. cloop looks for `claude` on `PATH` first, then at
 `~/.local/bin/claude`, `~/.npm-global/bin/claude` and `/usr/local/bin/claude`,
 which is what makes it work when the dashboard is started from a service manager
 with a thin environment. It reports no default model: cloop passes `--model`
-only when one is set, and otherwise lets the CLI choose.
+only when one is set, and otherwise lets the CLI choose. "Existing sign-in"
+means the machine's on a single-user install and the *requesting user's* on a
+hub with SSO, where each identity has its own Claude login — see
+[per-user Claude Code logins](../security/claude-code-identity.md).
 
 **`anthropic`** is the same family of models over the HTTP API, billed per
 token — the one to pick when you want an API key rather than a subscription.

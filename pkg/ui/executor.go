@@ -315,10 +315,33 @@ func uiSpec(workDir string, argv []string, labels map[string]string) executor.Sp
 // same instance to Stream and Status the handle — re-resolving later could
 // pick a different executor if bindings changed mid-run.
 func startWorkload(workDir string, argv []string, labels map[string]string) (executor.Executor, executor.Handle, error) {
+	return startWorkloadAs(nil, workDir, argv, labels)
+}
+
+// startWorkloadAs is startWorkload with the requesting identity attached, so
+// the dispatched harness authenticates as that user's Claude account rather
+// than the host's shared one (Task 20241).
+//
+// envFor is consulted after the executor is resolved because the answer
+// depends on it: a per-user configuration directory is a path on the hub's
+// filesystem and means nothing inside an isolating sandbox. A nil envFor —
+// every non-HTTP caller — keeps the host credential, which is correct for a
+// single-user install and for internal dispatches that belong to no user.
+func startWorkloadAs(envFor func(executor.Executor) []string, workDir string, argv []string, labels map[string]string) (executor.Executor, executor.Handle, error) {
 	registerBuiltinExecutors()
 	ex, err := executor.Resolve(workDir)
 	if err != nil {
 		return nil, executor.Handle{}, fmt.Errorf("no executor available for %s: %w", workDir, err)
+	}
+
+	base := uiSpec(workDir, argv, labels)
+	if envFor != nil {
+		if extra := envFor(ex); len(extra) > 0 {
+			// Inheriting the hub's environment first matches what the local
+			// driver would have done anyway; the per-user assignments are
+			// appended so they win, exec keeping the last occurrence of a key.
+			base.Env = append(os.Environ(), extra...)
+		}
 	}
 
 	// The lease outlives this call because the workload does. Wiping it here
@@ -326,7 +349,7 @@ func startWorkload(workDir string, argv []string, labels map[string]string) (exe
 	// read them yet, so cleanup is deferred to a watcher that waits for the
 	// handle to reach a terminal state.
 	lease := acquireSecretLease(controlPlaneDir(), workDir, ex)
-	spec, err := applyLease(uiSpec(workDir, argv, labels), ex, lease)
+	spec, err := applyLease(base, ex, lease)
 	if err != nil {
 		lease.Close()
 		return nil, executor.Handle{}, err
@@ -479,10 +502,26 @@ func runWorkload(ctx context.Context, workDir string, argv []string, labels map[
 // credential leak rather than a convenience — see applyLease, which makes the
 // same distinction for the leased material and explains it at length.
 func runWorkloadEnv(ctx context.Context, workDir string, argv, extraEnv []string, labels map[string]string) ([]byte, error) {
+	var envFor func(executor.Executor) []string
+	if len(extraEnv) > 0 {
+		envFor = func(executor.Executor) []string { return extraEnv }
+	}
+	return runWorkloadEnvFor(ctx, workDir, argv, envFor, labels)
+}
+
+// runWorkloadEnvFor is runWorkloadEnv with the extra environment decided from
+// the resolved executor rather than fixed up front. A per-user Claude config
+// directory is a path on the hub's filesystem, so whether it may be passed at
+// all depends on which backend the workload lands on (Task 20241).
+func runWorkloadEnvFor(ctx context.Context, workDir string, argv []string, envFor func(executor.Executor) []string, labels map[string]string) ([]byte, error) {
 	registerBuiltinExecutors()
 	ex, err := executor.Resolve(workDir)
 	if err != nil {
 		return nil, fmt.Errorf("no executor available for %s: %w", workDir, err)
+	}
+	var extraEnv []string
+	if envFor != nil {
+		extraEnv = envFor(ex)
 	}
 	// Run is synchronous, so the lease's lifetime is exactly this call's.
 	lease := acquireSecretLease(controlPlaneDir(), workDir, ex)

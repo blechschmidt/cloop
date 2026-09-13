@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/blechschmidt/cloop/pkg/executor"
 )
 
 // Default per-handler caps for cloop subcommand invocations spawned from the
@@ -73,13 +75,26 @@ func runCloopSubcommand(ctx context.Context, exe, workDir string, timeout time.D
 // entries for the child, for handlers that must pass a credential without
 // exposing it on the argv (Task 20188).
 func runCloopSubcommandEnv(ctx context.Context, exe, workDir string, timeout time.Duration, extraEnv []string, args ...string) ([]byte, error) {
+	var envFor func(executor.Executor) []string
+	if len(extraEnv) > 0 {
+		envFor = func(executor.Executor) []string { return extraEnv }
+	}
+	return runCloopSubcommandFor(ctx, exe, workDir, timeout, envFor, args...)
+}
+
+// runCloopSubcommandFor is runCloopSubcommandEnv with the child's extra
+// environment decided from the resolved executor. Handlers that invoke a
+// provider on a user's behalf — `cloop do`, `cloop suggest` — pass the
+// caller's Claude scope through here so the tokens are spent on their own
+// subscription rather than the hub operator's (Task 20241).
+func runCloopSubcommandFor(ctx context.Context, exe, workDir string, timeout time.Duration, envFor func(executor.Executor) []string, args ...string) ([]byte, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	out, runErr := runWorkloadEnv(cctx, workDir, append([]string{exe}, args...), extraEnv,
+	out, runErr := runWorkloadEnvFor(cctx, workDir, append([]string{exe}, args...), envFor,
 		map[string]string{"handler": "subcommand"})
 
 	// Distinguish ctx-driven kills from actual workload failures so the
