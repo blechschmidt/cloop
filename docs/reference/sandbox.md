@@ -51,7 +51,9 @@ resources:
 
 capabilities:
   git: true       # the sandbox needs a working git
-  network: ci     # the name of an egress grant this project already holds
+  network: egress_2f1c9a4e7b3d05286af1c0d4   # the ID of an egress grant this
+                  # project holds; `cloop egress list` prints it. Not the
+                  # --scope label ("ci", "deps") — that is never matched.
   virtualized: true       # only run behind a hypervisor (Kata); never share a kernel
   kernel_isolated: true   # weaker and usually what you want: gVisor *or* Kata
   egress: public          # public Internet only; drop all private address space
@@ -100,7 +102,7 @@ infrastructure executes it. Every rule follows from that.
 
 | | |
 | --- | --- |
-| **Network** | Omitting `capabilities.network` forces `--network=none` for the run, whatever the executor is configured with. Naming a grant does *not* turn the network on — it asserts the project already holds that grant, and the executor's own network stands. There is no field that adds egress. |
+| **Network** | Omitting `capabilities.network` forces `--network=none` for the run, whatever the executor is configured with. Naming a grant does *not* turn the network on — it asserts the project already holds the grant with that **ID**, and the executor's own network stands. There is no field that adds egress. The value is compared against `Grant.ID` (the minted `egress_…` string) and never against the `--scope` label, so a human-friendly name here is a denied run, not a matched one. |
 | **Secrets** | `env` filters an environment the hub already assembled from the project's grants. A name the project was not granted forwards nothing. Values in this file are refused outright (`FOO=bar` is not a valid entry). |
 | **Filesystem** | `mounts.source` is relative to the workspace and may not contain `..`, be absolute, or contain a colon (which would append options to the runtime's `-v` flag). Sources are re-checked after symlink resolution, so a symlink inside the repo pointing at `/etc` is rejected too. |
 | **Privilege** | Nothing in the schema grants capabilities, changes the UID, or disables seccomp. The generated Dockerfile for `setup:` emits only `FROM`, `LABEL` and `RUN` — no `COPY`, `USER` or `ENV` — so a repo cannot bake its own files or a privileged user into a cached image later tasks inherit. |

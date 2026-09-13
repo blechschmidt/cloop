@@ -34,7 +34,10 @@ cloop hub doctor        # control-plane readiness for a hosted hub
 ### Hidden AI advisories
 
 The single-shot `ai-*` wrappers under `cloop task` and `cloop plan` each make one
-provider call, print a report, and change nothing unless you pass `--apply`.
+provider call and print a report. Where one can mutate the plan it does so only
+behind `--apply`. Four of them have no `--apply` at all — `task ai-coach`,
+`task ai-standup`, `plan ai-brief` and `plan ai-roadmap` are advisory only — and
+`plan ai-roadmap` writes to `.cloop/roadmaps/` unless you pass `--no-save`.
 They are hidden from the help listing so they stop crowding it, and they remain
 fully callable and scriptable at the paths they always had:
 
@@ -96,7 +99,7 @@ cloop run --replan            # discard plan and re-decompose
 | `--effort` | from state/config | Model reasoning-effort level: `low`, `medium`, `high`, `xhigh`, `max` (claudecode only) |
 | `--auto-evolve` | `false` | After goal completion, keep discovering new tasks |
 | `--innovate` | `false` | Innovation mode: push evolve toward novel capabilities |
-| `--step-timeout` | `10m` | Timeout per step |
+| `--step-timeout` | `0` (disabled) | Timeout per step (e.g. `10m`); falls back to `step_timeout` in config when unset |
 | `--max-tokens` | `0` | Max output tokens per step |
 | `--add-steps` | `0` | Add more steps to max before running |
 | `--steps` | `0` | Run at most N steps this session (not persisted) |
@@ -172,7 +175,7 @@ cloop report --show-outputs          # include step/task output excerpts
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--format` | `terminal` | Output format: `terminal`, `md`, `markdown` |
+| `--format` | `terminal` | Output format: `terminal`, `md`/`markdown`, `html` |
 | `--show-outputs` | `false` | Include step/task output excerpts |
 | `-o, --output` | | Save report to file instead of stdout |
 
@@ -263,26 +266,28 @@ Remove `.cloop/` directory entirely.
 
 ## Product Manager Mode
 
-PM mode decomposes the goal into a structured task plan, then executes each task one at a time.
+cloop decomposes the goal into a structured task plan, then executes each task
+one at a time. This is the only mode, so there is no `--pm` flag to turn it on:
+it was removed in Task 20067 along with the free-form loop it selected between.
 
 ```bash
-# Initialize with PM mode
-cloop init --pm "Build a monitoring dashboard in Go"
+# Initialize
+cloop init "Build a monitoring dashboard in Go"
 
 # Decompose into tasks first (review before running)
-cloop run --pm --plan-only
+cloop run --plan-only
 
 # Execute the plan
-cloop run --pm
+cloop run
 
 # Resume after interruption
-cloop run --pm
+cloop run
 
 # Retry any failed tasks
-cloop run --pm --retry-failed
+cloop run --retry-failed
 
 # Discard the existing plan and re-decompose
-cloop run --pm --replan
+cloop run --replan
 ```
 
 The AI signals task outcomes with terminal keywords:
@@ -385,7 +390,7 @@ cloop standup --provider anthropic
 | `--quick` | `false` | Show activity summary only, skip AI |
 | `--post` | `false` | Post to configured webhook/Slack |
 | `--save` | `false` | Save to `.cloop/standup-YYYYMMDD.md` |
-| `--format` | `text` | Output format: `text`, `slack` |
+| `--format` | `plain` | Output format: `plain`, `markdown`, `slack` |
 | `--provider` | from config | AI provider |
 | `--model` | from config | Model override |
 
@@ -695,7 +700,7 @@ Checkpoints are stored as `.json` files in `.cloop/checkpoints/`. Restoring a ch
 
 ### `cloop mcp`
 
-Start cloop as an MCP server, exposing it as a set of tools to Claude Desktop, Cursor, Zed, and any other client that supports the [Model Context Protocol](https://spec.modelcontextprotocol.io).
+Start cloop as an MCP server, exposing it as a set of tools to Claude Desktop, Cursor, Zed, and any other client that supports the [Model Context Protocol](https://modelcontextprotocol.io/specification).
 
 The server speaks JSON-RPC 2.0 over newline-delimited stdio. All log output goes to stderr so it does not corrupt the MCP stream.
 

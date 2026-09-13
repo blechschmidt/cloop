@@ -139,8 +139,10 @@ produces a permanent regression test.
 Critical long-lived subsystems ship a package-local `*_goroutine_leak_test.go`
 file that catches background-goroutine leaks before they reach production.
 The pattern is documented in detail at the top of
-[`pkg/watchdog/goroutine_leak_test.go`](pkg/watchdog/goroutine_leak_test.go) —
-read that file first when adding a new one.
+[`pkg/statedb/goroutine_leak_test.go`](pkg/statedb/goroutine_leak_test.go) —
+read that file first when adding a new one. It is the fullest of the nine,
+because it also explains how the slack threshold is chosen when the subsystem
+under test keeps ambient goroutines of its own.
 
 cloop intentionally does NOT depend on `go.uber.org/goleak`. Instead each
 test follows a three-piece shape:

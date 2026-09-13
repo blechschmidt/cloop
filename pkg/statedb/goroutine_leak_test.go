@@ -15,9 +15,9 @@ package statedb_test
 // workload that opens many short-lived handles (the CLI test suite, the
 // healthz probes, multi-project orchestration).
 //
-// This test mirrors the pattern documented in
-// pkg/watchdog/goroutine_leak_test.go (the canonical reference) and the
-// other *_goroutine_leak_test.go files in cloop: open N short-lived
+// This test mirrors the pattern shared by the other
+// *_goroutine_leak_test.go files in cloop — pkg/orchestrator and pkg/ui
+// among them: open N short-lived
 // handles, exercise them, close them, and assert runtime.NumGoroutine
 // has returned to within a small slack of the pre-test baseline.
 //

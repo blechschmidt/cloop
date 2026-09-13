@@ -6,11 +6,15 @@
 #
 # What this is for: evaluating the *hosted* posture — SSO, deny-by-default
 # RBAC, TLS, no host execution — without registering an OIDC client at a real
-# identity provider or terminating TLS with a real certificate. Three services:
+# identity provider or terminating TLS with a real certificate. Six services:
 #
-#   proxy   nginx, terminates TLS and is the single origin the browser sees
-#   dex     a mock OIDC provider with one static user, no external IdP needed
-#   cloop   the hub, plain HTTP inside the network, never published to the host
+#   certs    one-shot, generates the TLS pair with `cloop hub tls-init`
+#   proxy    nginx, terminates TLS and is the single origin the browser sees
+#   dex      a mock OIDC provider with three static users, no external IdP needed
+#   cloop    the hub, plain HTTP inside the network, never published to the host
+#   enroll   one-shot, mints an executor join bundle once the hub is healthy
+#   executor the agent that redeems the bundle; without it /readyz stays red,
+#            because a hub in strict mode has no isolating executor until then
 #
 # ── The hostname is load-bearing ────────────────────────────────────────────
 #

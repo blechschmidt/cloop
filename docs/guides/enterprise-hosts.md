@@ -174,6 +174,10 @@ executors:
   container:
     enabled: true
     image: ghcr.io/acme/cloop-harness:2024-11
+    # Required alongside a filter. The default is network: none, and the
+    # driver refuses that combination outright — "a workload with no
+    # interfaces has nothing to filter".
+    network: bridge
     egress_filter:
       enabled: true
       allow_public_internet: true
@@ -580,7 +584,10 @@ executors:
     enabled: true
     runtime: podman
     oci_runtime: runsc           # gVisor
-    image: ghcr.io/acme/cloop-harness:2024-11
+    # Digest-pinned, because require_digest below is hub-wide and
+    # `cloop hub doctor` checks this field against it too — a tag here
+    # reports "would be refused by this hub's own image policy".
+    image: ghcr.io/acme/cloop-harness@sha256:…
     network: bridge
     cpus: 16
     memory: 32g
@@ -595,7 +602,11 @@ executors:
 # any project may name, whichever driver ends up running it.
 sandbox:
   image_policy:
-    allowed_registries: [ghcr.io/acme]
+    # Registries are hosts. An entry containing "/" fails validation —
+    # "names a path; registries are hosts" — so narrowing to one org is
+    # allowed_repos' job, not this field's.
+    allowed_registries: [ghcr.io]
+    allowed_repos: ["ghcr.io/acme/*"]
     require_digest: true
 ```
 
@@ -613,7 +624,10 @@ cloop secret grant host-src --to project:/srv/projects/firmware \
 
 ```yaml
 # /srv/projects/firmware/.cloop/sandbox.yaml — committed to the repo
-image: ghcr.io/acme/cloop-harness:2024-11
+# Digest-pinned: the hub above sets require_digest, and a project-supplied
+# tag is denied outright ("is pinned to a tag, and this hub requires a
+# digest") before the run starts.
+image: ghcr.io/acme/cloop-harness@sha256:…
 resources:
   cpu: 8
   memory: 16g

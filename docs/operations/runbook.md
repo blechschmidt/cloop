@@ -48,10 +48,12 @@ Two rules that prevent most of the bad days:
 | --- | --- | --- |
 | `/healthz` | is the process alive? | never fails while it can accept a connection — do **not** wire a restart to a slow database |
 | `/readyz` | should traffic come here? | two gates: the state database, then the execution path. Fails during startup, on storage loss, and when strict mode leaves no isolating executor registered |
-| `/metrics` | Prometheus text | — |
+| `/metrics` | Prometheus text | gated: requires the `audit.read` permission, unlike the two probes above |
 
-All three bypass auth and rate limiting so a probe can never be locked out by a
-flood or a broken IdP.
+`/healthz` and `/readyz` bypass auth and rate limiting so a probe can never be
+locked out by a flood or a broken IdP. `/metrics` does not — it is an ordinary
+authorised route, so a scraper needs a credential carrying `audit.read`. See
+[Metrics](metrics.md).
 
 The second `/readyz` gate is why a rollout of a misconfigured hub fails instead
 of going green. A hub with `allow_host_process: false` and no container,
@@ -669,7 +671,7 @@ step 1 below is not optional.
 ```console
 $ cloop db backup                        # 1. NOT optional — the only way back
 $ cloop migrate --dry-run                # 2. what would change
-$ cloop --version                        # 3. install the new binary
+$ cloop version                          # 3. install the new binary
 $ cloop migrate                          # 4. or just start the hub; Open() migrates
 $ cloop db verify                        # 5.
 $ cloop hub healthcheck --endpoint readyz

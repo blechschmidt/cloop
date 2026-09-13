@@ -171,13 +171,16 @@ executors:
     memory: 2g               # 512m / 2g / 1024k; a bare integer means MB
     pids_limit: 1024         # process cap; -1 disables
     network: none            # none (default) | bridge | <named network>
-    extra_args: []           # additional runtime flags, --flag=value form only
+    extra_args: []           # additional runtime flags; each must start with "-"
     selinux_label: ""        # "z" or "Z" — required when SELinux is enforcing
     orphan_grace_period_seconds: 600   # 0 means 600; see below
 ```
 
-or with `cloop config set executors.container.<key> <value>`. `oci_runtime` is
-the exception: the setter's key list does not cover it, so it is edited here.
+or with `cloop config set executors.container.<key> <value>`. The setter's key
+list covers `enabled`, `id`, `runtime`, `image`, `cpus`, `memory`, `pids_limit`,
+`network`, `allow_hosts`, `extra_args` and `selinux_label` — so `oci_runtime`,
+`orphan_grace_period_seconds`, `allow_root_user` and the whole `egress_filter`
+subtree have no setter key and are edited in the file directly.
 
 `orphan_grace_period_seconds` is how old a **running** container has to be before
 the startup sweep and `cloop executor reap` will kill it. Exited containers are
@@ -248,8 +251,9 @@ server holds, so variables are passed explicitly or not at all.
 
 `extra_args` is validated: flags that would dismantle the sandbox
 (`--privileged`, `--cap-add`, `--volume`, `--network`, `--user`, `--entrypoint`,
-`--env`, …) are rejected, and every entry must be a flag in `--flag=value` form
-so a bare value cannot be consumed as the image reference.
+`--env`, …) are rejected, and every entry must start with `-` so a bare value
+cannot be consumed as the image reference. Prefer `--flag=value`: only the part
+before the `=` is matched against the denylist.
 
 ### IP-layer egress filtering
 

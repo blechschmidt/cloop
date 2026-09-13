@@ -69,9 +69,12 @@ browser ──TLS──> nginx :8443 ──┬── /dex/*  ──> dex        
                                └── /*      ──> cloop hub  (plain HTTP, not published)
 ```
 
-Four services: a one-shot `certs` job that generates the TLS pair with
+Six services: a one-shot `certs` job that generates the TLS pair with
 `cloop hub tls-init`, `dex` as the identity provider, `nginx` terminating TLS,
-and the hub itself.
+the hub itself, a one-shot `enroll` job that mints a join bundle once the hub is
+healthy, and the `executor` agent that redeems it. The last two are what give
+the stack an isolating executor — which is also why `/readyz` is red until they
+have run, since a hub in strict mode is not ready without one.
 
 ### Why the hostname is `cloop.localtest.me` and not `localhost`
 
@@ -354,12 +357,18 @@ The chart installs a Role scoped to exactly the calls the driver makes:
 | --- | --- | --- |
 | `pods` | `create`, `get`, `list`, `watch`, `delete` | start, poll, reconcile orphans, stream, stop |
 | `pods/log` | `get` | stream task output |
+| `secrets` | `create`, `delete` | deliver a brokered lease to a workload, then destroy it |
+| `networkpolicies` | `create`, `delete`, `list` | the per-Pod egress allowlist; `list` is for the orphan sweep |
 
-Two absences are deliberate. There is **no `update` or `patch`** — the driver
-never mutates a Pod after creating it, so a compromised hub cannot rewrite a
-running workload's spec. And there is **no `secrets` rule at all** — an
-executor that could read Secrets in its namespace would make the secret broker
-decorative. CI asserts both directions, so a copy-pasted `"*"` fails the build.
+The absences are what matter, and each is deliberate. There is **no `update` or
+`patch` on `pods`** — the driver never mutates a Pod after creating it, so a
+compromised hub cannot rewrite a running workload's spec. The `secrets` rule is
+**write-only: no `get`, no `list`, no `watch`** — the driver has to be able to
+place a lease and destroy it, but an executor that could *read* Secrets in its
+namespace would make the secret broker decorative. And `networkpolicies` has
+**no `update`**, so a running Pod's firewall cannot be widened underneath it.
+
+CI asserts both directions, so a copy-pasted `"*"` fails the build.
 
 The Role lives in `executor.kubernetes.namespace` (default `cloop-workloads`),
 not in the hub's namespace. **Do not point it at the hub's own namespace**: a
@@ -453,8 +462,9 @@ So it boots the things:
    still refuse every configuration in the table above.
 5. Spins up kind, runs `helm template | kubectl apply --dry-run` both
    client- and server-side, installs the chart, and waits for readiness.
-6. Asserts the executor Role grants exactly the six Pod verbs and nothing
-   else, in the workload namespace only.
+6. Asserts the executor Role grants the five `pods` verbs plus `pods/log: get`,
+   and that it denies `update`/`patch` on Pods and `get`/`list` on Secrets, in
+   the workload namespace only.
 7. Runs a real workload through the in-cluster executor.
 
 ---

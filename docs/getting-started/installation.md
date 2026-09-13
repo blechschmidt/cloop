@@ -63,7 +63,10 @@ curl -fsSLO "$BASE/$ASSET"
 curl -fsSLO "$BASE/checksums.txt"
 sha256sum --ignore-missing -c checksums.txt   # shasum -a 256 -c on macOS
 
-tar -xzf "$ASSET" cloop
+# Members carry a "./" prefix (the archive is built with `tar -C "$workdir" .`),
+# so the member name has to be written as ./cloop — a bare `cloop` is "Not
+# found in archive".
+tar -xzf "$ASSET" ./cloop
 sudo install -m 0755 cloop /usr/local/bin/cloop
 ```
 
@@ -177,12 +180,37 @@ docker compose up --build     # then open https://cloop.localtest.me:8443/
 docker compose down -v        # resets everything
 ```
 
+A third target builds the **harness image** — the sandbox a container or
+Kubernetes executor actually runs a task inside, and the default for both:
+
+```bash
+docker build --target harness -t cloop-harness:dev .
+```
+
+You rarely need to build it yourself. It is published, and the executor defaults
+already point at it:
+
+```bash
+docker pull ghcr.io/blechschmidt/cloop-harness:latest
+```
+
+What makes an image usable as a harness is a contract, not just a base OS: it
+carries `cloop` at `/usr/local/bin/cloop`, the `claude` CLI on `PATH` for the
+default provider, `git` and a CA bundle, **no `ENTRYPOINT`** (the driver
+denylists `--entrypoint`, so the image must exec the argv it is handed), and a
+`HOME` that is writable by any UID — the driver derives `--user` from the
+project directory's owner, so nothing can be baked in. Build your own when a
+task needs a toolchain this one lacks, and point `executors.container.image` at
+it. Credentials are never baked in: provider keys and brokered secrets are
+injected as environment at start, which is what makes one image safe to share
+across tenants.
+
 For Kubernetes there is a chart at `deploy/helm/cloop-hub`. Its default
 `image.repository` is `ghcr.io/blechschmidt/cloop` and `image.tag` defaults to
-the chart's `appVersion`. **This repository publishes no image of its own** —
-CI builds `cloop-hub:ci`, asserts its user and labels, boots it, and never
-pushes it — so a real deployment builds the image, pushes it to a registry you
-control, and pins it by digest rather than by tag.
+the chart's `appVersion`. Both images are published to GHCR by
+`.github/workflows/publish-images.yml` on every release tag, with `:edge`
+tracking `main`. For production, pin by digest rather than by tag — a floating
+tag means the thing that runs your agents can change without a deploy.
 
 ---
 

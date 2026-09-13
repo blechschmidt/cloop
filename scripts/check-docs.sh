@@ -14,7 +14,9 @@
 # Checks:
 #   1. every *.md under docs/ is linked from docs/README.md
 #   2. every docs/*.md link in docs/README.md resolves to a file
-#   3. every relative link between documentation pages resolves
+#   3. every relative link between documentation pages resolves — including
+#      from README.md and CONTRIBUTING.md, which are documentation that happens
+#      to sit at the root rather than under docs/
 #   4. every embedded image resolves
 #
 # Anchors are not checked here — `mkdocs build --strict` does that against the
@@ -64,6 +66,15 @@ done < "$listed"
 
 echo "==> every relative link and image between documentation pages resolves"
 
+# README.md and CONTRIBUTING.md are checked alongside docs/ because they are
+# documentation that happens to live at the root, and leaving them out is not
+# free: CONTRIBUTING.md spent two releases pointing at
+# pkg/watchdog/goroutine_leak_test.go after Task 20151 deleted it, precisely
+# because nothing walked it. Their links are relative to the repository root,
+# which is what dirname gives for a root-level file, so the loop below needs no
+# special case for them.
+root_pages() { ls README.md CONTRIBUTING.md 2>/dev/null || true; }
+
 while IFS= read -r page; do
   dir=$(dirname "$page")
   while IFS= read -r target; do
@@ -77,7 +88,7 @@ while IFS= read -r page; do
       err "$page -> $target does not resolve ($resolved)"
     fi
   done < <(targets "$page")
-done < <(find docs -name '*.md' | sort)
+done < <({ find docs -name '*.md'; root_pages; } | sort)
 
 # Images are written as ![alt](path) and caught by the same scan above, since
 # the trailing ]( is identical; this only reports the count for the log.
