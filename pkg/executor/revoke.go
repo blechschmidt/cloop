@@ -713,7 +713,9 @@ func (li *LeaseIndex) Release(handleID string) {
 }
 
 // Unresolved returns handleID → reason for every handle whose bindings this
-// index cannot enumerate, sorted by handle.
+// index cannot enumerate. A copy, so a caller cannot mutate live state; nil
+// when nothing is in doubt. UnresolvedError is what renders it in a stable
+// order for an operator.
 func (li *LeaseIndex) Unresolved() map[string]string {
 	if li == nil {
 		return nil
