@@ -43,6 +43,9 @@ on:
       - "docs/**"
       - "website/**"
       - "README.md"
+      # CONTRIBUTING.md is link-checked by check-docs.sh alongside docs/, so a
+      # break in it must trigger this workflow or the gate cannot see it.
+      - "CONTRIBUTING.md"
       - "scripts/build-docs.py"
       - "scripts/check-docs.sh"
       - "Makefile"
@@ -53,6 +56,9 @@ on:
       - "docs/**"
       - "website/**"
       - "README.md"
+      # CONTRIBUTING.md is link-checked by check-docs.sh alongside docs/, so a
+      # break in it must trigger this workflow or the gate cannot see it.
+      - "CONTRIBUTING.md"
       - "scripts/build-docs.py"
       - "scripts/check-docs.sh"
       - "Makefile"
