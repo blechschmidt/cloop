@@ -107,8 +107,8 @@ Examples:
 		}
 
 		rep, err := auditretention.Prune(log.DB(), auditretention.Options{
-			Before:    cutoff,
-			ExportDir: exportDir,
+			Before:       cutoff,
+			ExportDir:    exportDir,
 			Actor:        actor,
 			DryRun:       hubAuditPruneDryRun,
 			Uncompressed: hubAuditPruneNoGzip,

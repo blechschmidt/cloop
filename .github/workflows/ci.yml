@@ -117,7 +117,21 @@ jobs:
       - name: govulncheck
         run: |
           set -euo pipefail
-          go install golang.org/x/vuln/cmd/govulncheck@latest
+          # GOTOOLCHAIN=auto on the install only, and it is load-bearing.
+          # setup-go pins GOTOOLCHAIN to the version it installed, so the go
+          # command here refuses to build anything declaring a newer one — and
+          # the scanner is not this module, it is a tool with its own floor.
+          # x/vuln v1.8.0 raised that floor to go 1.26.0 while go.mod pins the
+          # toolchain to 1.25.14, so the install died with "requires go >=
+          # 1.26.0" and took the job with it. That reads as a vulnerability
+          # finding and is not one: govulncheck exits 3 when it finds something
+          # reachable, and this was exit 1 before it had scanned a line.
+          #
+          # Letting the install pick its own toolchain decouples the two, so
+          # the next floor bump does not fail this job either. The scan below
+          # still runs under the pinned toolchain — it is invoked outside this
+          # override, and the step above has already asserted the pin resolved.
+          GOTOOLCHAIN=auto go install golang.org/x/vuln/cmd/govulncheck@latest
           # Invoked by absolute path rather than relying on GOPATH/bin being on
           # PATH: if it were not, `govulncheck: command not found` would fail
           # this job for a reason that looks nothing like a vulnerability.
