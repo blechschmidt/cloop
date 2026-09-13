@@ -148,16 +148,16 @@ func runInstallerHarness(t *testing.T, docker, script, harness string, port int)
 		"-e", fmt.Sprintf("CLOOP_RELEASES=http://host.docker.internal:%d", port),
 		"alpine:3", "sh", "/in/harness.sh")
 
-	done := make(chan struct{})
+	// A container that never exits would otherwise hang the package's whole
+	// test binary until the -timeout fires, hiding which test was at fault.
 	timer := time.AfterFunc(5*time.Minute, func() {
 		if cmd.Process != nil {
 			_ = cmd.Process.Kill()
 		}
-		close(done)
 	})
-	out, err := cmd.CombinedOutput()
-	timer.Stop()
+	defer timer.Stop()
 
+	out, err := cmd.CombinedOutput()
 	return string(out), err
 }
 
