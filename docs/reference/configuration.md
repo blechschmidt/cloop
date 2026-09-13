@@ -927,6 +927,49 @@ audit:
 The procedure, what an anchor is, and why a pruned chain still verifies are in
 [the runbook](../operations/runbook.md#retention-keeping-the-trail-bounded).
 
+### Disk retention
+
+`retention:` governs the janitor the hub runs on a timer to keep `.cloop`
+bounded. Unlike `audit:` above, it is **on by default** — what it reclaims is
+derived data and dead database pages, not a compliance record, and a hub that
+fills its disk is an outage.
+
+Every key's zero value means "use the default", not "off", so a config file
+that predates this section gets the working policy. Turning it off is explicit.
+
+```yaml
+retention:
+  enabled: true                   # false disables the janitor entirely
+  interval_hours: 24              # how often a pass runs
+  keep_snapshots: 50              # .cloop/plan-history bound
+  vacuum_free_ratio: 0.30         # VACUUM once this fraction of state.db is free pages
+  vacuum_min_free_mb: 64          # ...but not for less than this
+  vacuum_max_inline_mb: 1024      # ...and not more than this without stopping the hub
+  archive_max_mb: 0               # 0: keep every audit seal
+  archive_max_age_days: 0         # 0: keep every audit seal
+```
+
+| Key | Default | Range | What it does |
+| --- | --- | --- | --- |
+| `enabled` | `true` | — | Runs a pass every `interval_hours`. Set `false` and nothing reclaims `.cloop` automatically. |
+| `interval_hours` | `24` | `1`–`336` | How often a pass runs. The stamp at `.cloop/retention-last-run` makes the cadence survive a restart. |
+| `keep_snapshots` | `50` | `1`–`10000` | How many plan snapshots survive. Enforced **at write time** inside `SaveSnapshot` as well as by the pass, so a busy project cannot outrun the interval. |
+| `vacuum_free_ratio` | `0.30` | `≥ 0.01` | Free-page fraction at which `state.db` is rewritten. `1` or more never vacuums. A ratio, not a size: 2 GB of freelist is urgent in a 2.3 GB file and unremarkable in a 200 GB one. |
+| `vacuum_min_free_mb` | `64` | `1`–`1048576` | Absolute floor beneath the ratio, so a small database is not rewritten daily to reclaim a few hundred kilobytes. |
+| `vacuum_max_inline_mb` | `1024` | `1`–`1048576` | The most **live** data the hub will rewrite *without being stopped*. The control-plane database holds the hub's own lease, so a VACUUM that outlasts the lease TTL starves its heartbeat and the hub stands down believing another instance took over. Past this the janitor declines and points at `cloop hub retention --apply`, which has no heartbeat to lose. Measured against live data, not file size — a 2.3 GB file holding 300 MB is a fast rewrite. |
+| `archive_max_mb` | `0` (disabled) | `1`–`1048576` | Caps `.cloop/audit-archive`; oldest seals go first. Off by default — a seal is the **only** remaining copy of the rows it holds. |
+| `archive_max_age_days` | `0` (disabled) | `1`–`3650` | Deletes seals older than this. Off by default, for the same reason. |
+
+Two safety properties are not configurable. The newest audit seal is never
+deleted, so a cap smaller than a single seal cannot empty the directory; and a
+VACUUM is refused unless another hub does not hold the control-plane lease and
+the filesystem has room for the rebuild — SQLite needs free space *before* it
+returns any, which makes a nearly-full disk the worst moment to try.
+
+Preview or force a pass with `cloop hub retention` (a dry run unless you pass
+`--apply`). `cloop doctor` and `cloop hub doctor` both report the per-directory
+breakdown and the reclaimable-page estimate.
+
 ### Interactive access: single sign-on and sessions
 
 `ui.oidc.*` configures OpenID Connect for the dashboard. The full setup is in

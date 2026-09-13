@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/atomicfile"
@@ -22,6 +23,196 @@ const historyDir = ".cloop/plan-history"
 // version N+1, and write two files at the same version — one clobbering the
 // other or producing duplicate-versioned snapshots.
 var historyMu sync.Mutex
+
+// DefaultSnapshotRetention is how many plan snapshots SaveSnapshot keeps on
+// disk (Task 20229).
+//
+// Every mutation of the plan writes a full copy of it, so an unbounded history
+// grows without limit in proportion to how much work a project does — not to
+// how much state it holds. This repository's own history reached 3,983 files
+// and 2.0 GB, which is 40% of its .cloop directory and larger than the state
+// database it describes.
+//
+// The bound is enforced here, at write time, rather than only by the periodic
+// janitor, because a busy project can write thousands of snapshots between two
+// janitor passes. A write-time bound makes the directory's size a function of
+// the policy alone; the janitor then only has to catch up existing installs
+// and re-apply a lowered keep-count.
+//
+// 50 is deliberately more generous than `cloop compact`'s KeepSnapshots of 10
+// — this runs unattended, so it should destroy less than the tool an operator
+// invokes on purpose — while still bounding the directory at roughly 25 MB at
+// this repository's average snapshot size. Commands that reach far back into
+// history (`cloop diff`, `cloop scope creep`, `cloop rollback`) address
+// snapshots by version, and a pruned version reports "not found" rather than
+// returning wrong data.
+const DefaultSnapshotRetention = 50
+
+// snapshotRetention is the live keep-count, settable at runtime so the hub can
+// apply an operator's configured policy (config `retention.keep_snapshots`)
+// to the in-process writers — the orchestrator and every UI mutation — without
+// threading it through the twelve call sites of SaveSnapshot.
+//
+// Zero or negative means "keep everything", which is the pre-Task-20229
+// behaviour and what an operator gets by explicitly opting out.
+var snapshotRetention atomic.Int64
+
+func init() { snapshotRetention.Store(DefaultSnapshotRetention) }
+
+// SetSnapshotRetention sets how many snapshots SaveSnapshot keeps. A value of
+// zero or less disables write-time pruning entirely.
+func SetSnapshotRetention(keep int) {
+	if keep < 0 {
+		keep = 0
+	}
+	snapshotRetention.Store(int64(keep))
+}
+
+// SnapshotRetention reports the process-wide write-time keep-count. Zero means
+// pruning is disabled.
+func SnapshotRetention() int { return int(snapshotRetention.Load()) }
+
+// retentionResolver, when set, answers the keep-count for a specific project,
+// overriding the process-wide value.
+//
+// The hub needs this because it is the one writer that serves many projects
+// from one process: pkg/state's Save calls SaveSnapshot for whichever project
+// a request touched, so a single process-wide number would apply the control
+// plane's policy to every tenant — silently pruning the history of a project
+// whose own config said to keep it. A resolver keeps the value a property of
+// the project rather than of the process.
+//
+// Guarded by its own mutex rather than an atomic: it is written once at
+// startup and read on every save, and a func value cannot be stored atomically
+// without an interface box.
+var (
+	retentionMu       sync.RWMutex
+	retentionResolver func(workDir string) int
+)
+
+// SetSnapshotRetentionResolver installs a per-project keep-count lookup. Pass
+// nil to fall back to the process-wide value set by SetSnapshotRetention.
+//
+// The resolver is called on every snapshot write, so it must be cheap and must
+// not call back into this package.
+func SetSnapshotRetentionResolver(fn func(workDir string) int) {
+	retentionMu.Lock()
+	defer retentionMu.Unlock()
+	retentionResolver = fn
+}
+
+// snapshotRetentionFor returns the keep-count that governs workDir.
+func snapshotRetentionFor(workDir string) int {
+	retentionMu.RLock()
+	fn := retentionResolver
+	retentionMu.RUnlock()
+	if fn == nil {
+		return SnapshotRetention()
+	}
+	return fn(workDir)
+}
+
+// PruneStats reports what a snapshot prune removed.
+type PruneStats struct {
+	// Deleted counts snapshot files removed (or, for a dry run, that would
+	// have been removed).
+	Deleted int
+	// BytesFreed sums their sizes.
+	BytesFreed int64
+	// Remaining counts the snapshots left behind.
+	Remaining int
+}
+
+// PruneSnapshots deletes all but the `keep` newest snapshots in workDir's
+// plan-history directory, newest by version number.
+//
+// keep <= 0 is a no-op: it means "retention disabled", not "delete
+// everything". Callers that want an empty history should remove the directory
+// themselves, so that a mis-parsed or zero-valued config can never be the
+// instruction that destroys a project's history.
+//
+// Files that do not parse as snapshots are left strictly alone — including the
+// `.corrupt-<unix>` siblings LoadSnapshot quarantines, which are forensic
+// evidence that something wrote a bad snapshot and are not ours to reclaim.
+func PruneSnapshots(workDir string, keep int, dryRun bool) (PruneStats, error) {
+	historyMu.Lock()
+	defer historyMu.Unlock()
+	return pruneSnapshotsLocked(historyPath(workDir), keep, dryRun)
+}
+
+// pruneSnapshotsLocked is the body of PruneSnapshots, split out so SaveSnapshot
+// can prune while it already holds historyMu.
+func pruneSnapshotsLocked(dir string, keep int, dryRun bool) (PruneStats, error) {
+	var st PruneStats
+	if keep <= 0 {
+		return st, nil
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return st, nil
+		}
+		return st, fmt.Errorf("read plan-history: %w", err)
+	}
+
+	// Order by version, not by filename. The two agree in practice because
+	// filenames lead with a timestamp, but version is the authoritative
+	// sequence — SaveSnapshot anchors it to max(caller's version, on-disk
+	// max)+1 precisely so concurrent writers cannot reuse one — and a clock
+	// that stepped backwards would otherwise make the oldest-first ordering
+	// delete the wrong files.
+	type snapFile struct {
+		name    string
+		version int
+	}
+	var files []snapFile
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		v, ok := snapshotVersionFromName(e.Name())
+		if !ok {
+			continue
+		}
+		files = append(files, snapFile{name: e.Name(), version: v})
+	}
+
+	st.Remaining = len(files)
+	if len(files) <= keep {
+		return st, nil
+	}
+	sort.Slice(files, func(i, j int) bool {
+		if files[i].version != files[j].version {
+			return files[i].version < files[j].version
+		}
+		return files[i].name < files[j].name
+	})
+
+	var firstErr error
+	for _, f := range files[:len(files)-keep] {
+		path := filepath.Join(dir, f.name)
+		fi, err := os.Stat(path)
+		if err != nil {
+			continue
+		}
+		if !dryRun {
+			if err := os.Remove(path); err != nil {
+				// Keep going: one undeletable file (permissions, a concurrent
+				// reader on Windows) must not leave the rest of the backlog in
+				// place. Report the first failure so the caller can surface it.
+				if firstErr == nil {
+					firstErr = fmt.Errorf("remove snapshot %s: %w", f.name, err)
+				}
+				continue
+			}
+		}
+		st.Deleted++
+		st.BytesFreed += fi.Size()
+		st.Remaining--
+	}
+	return st, firstErr
+}
 
 // Snapshot is a versioned, timestamped copy of a Plan.
 type Snapshot struct {
@@ -185,7 +376,23 @@ func SaveSnapshot(workDir string, plan *Plan) error {
 
 	fname := snapshotFilename(snap.Timestamp, snap.Version)
 	path := filepath.Join(dir, fname)
-	return atomicfile.Write(path, data, 0o644)
+	if err := atomicfile.Write(path, data, 0o644); err != nil {
+		return err
+	}
+
+	// Bound the directory in the same call that grew it (Task 20229). The
+	// snapshot just written has the highest version, so it always survives.
+	//
+	// A prune failure is reported but does not fail the save: the snapshot is
+	// on disk and the caller's state is durable, and returning an error here
+	// would make a read-only plan-history directory look like a failure to
+	// persist the plan. The janitor retries on its next pass.
+	if keep := snapshotRetentionFor(workDir); keep > 0 {
+		if _, err := pruneSnapshotsLocked(dir, keep, false); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: plan-history retention (keep %d): %v\n", keep, err)
+		}
+	}
+	return nil
 }
 
 // LoadSnapshot loads the snapshot with the given version number.

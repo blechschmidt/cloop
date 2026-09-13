@@ -1382,6 +1382,24 @@
         </div>
       </div>
 
+      <!-- Disk usage and retention (Task 20229). Read-only: the policy it
+           reports is edited as config above, and a second writer for the same
+           keys would be a second thing to keep in sync. -->
+      <div class="section">
+        <div class="section-title" style="display:flex;align-items:center;gap:12px">
+          Disk &amp; Retention
+          <button class="btn" style="padding:4px 10px;font-size:12px;margin-left:auto" onclick="loadDiskUsage()">&#8635; Refresh</button>
+        </div>
+        <p style="font-size:12px;color:var(--muted);margin-top:6px;margin-bottom:12px">
+          What this project's <code>.cloop</code> directory costs, and what reclaims it. The
+          reclaimable figure is SQLite free pages — space the database holds but no longer
+          uses, which <code>du</code> cannot see.
+        </p>
+        <div id="diskUsageBody">
+          <div style="font-size:13px;color:var(--muted)">Loading...</div>
+        </div>
+      </div>
+
       <!-- Claude Code authentication -->
       <div class="section">
         <div class="section-title" style="display:flex;align-items:center;gap:12px">

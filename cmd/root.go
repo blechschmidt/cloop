@@ -6,6 +6,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/executor"
+	"github.com/blechschmidt/cloop/pkg/janitor"
 	"github.com/blechschmidt/cloop/pkg/migrate"
 	"github.com/blechschmidt/cloop/pkg/workspace"
 	"github.com/fatih/color"
@@ -78,6 +79,13 @@ func init() {
 		// init(); this adds the isolated backends the operator opted into.
 		if cwd, err := os.Getwd(); err == nil {
 			if cfg, cfgErr := config.Load(cwd); cfgErr == nil {
+				// Bound plan-history at write time (Task 20229). Applied for
+				// every command, not just the server, because the writer that
+				// grew .cloop/plan-history to 2 GB is the orchestrator — which
+				// the hub runs as a subprocess, so it inherits none of the
+				// hub's in-process settings and has to read the policy itself.
+				janitor.ApplySnapshotRetention(cfg)
+
 				// Strict no-host-execution mode (Task 20160), applied BEFORE
 				// reconciling. Two reasons, and the first is a correctness
 				// bug fixed in Task 20170: reconcile.FromConfig records

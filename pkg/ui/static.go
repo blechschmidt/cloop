@@ -92,10 +92,13 @@ var bundleFiles = []string{
 	// renders into the same Secrets tab.
 	"assets/js/26-sessions.js",
 	"assets/js/27-quotas.js",
+	// Renders into the Settings tab, which is where the config that governs
+	// it is already edited (Task 20229).
+	"assets/js/28-retention.js",
 	// Last, and it closes the IIFE 00-core.js opened. A fragment appended
 	// after the close lands at global scope, where none of the shared helpers
 	// are visible — see TestDashboard_MainIIFEClosesInLastFragment.
-	"assets/js/28-glasses.js",
+	"assets/js/29-glasses.js",
 }
 
 // Cache-Control values. Hashed asset URLs change whenever their bytes change,

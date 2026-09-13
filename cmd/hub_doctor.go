@@ -197,6 +197,8 @@ func groupTitle(group string) string {
 		return "EXECUTORS"
 	case "storage":
 		return "STORAGE"
+	case "retention":
+		return "DISK RETENTION"
 	case "quotas", "budget":
 		return "ADMISSION"
 	default:

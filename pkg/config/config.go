@@ -81,6 +81,52 @@ const (
 	AuditRetentionDaysLower = 1
 	AuditRetentionDaysUpper = 3650
 
+	// Retention janitor bounds (Task 20229). Zero in YAML means "use the
+	// package default" for every one of these — see RetentionConfig for why
+	// this section defaults on where audit retention defaults off. Values
+	// outside the band are clamped back to zero (validateAndClamp), which
+	// restores the default rather than disabling the step: a mis-typed
+	// interval should not silently stop a hub reclaiming its disk.
+	//
+	// Interval: one hour lower, because a pass walks the whole .cloop tree
+	// and running it more often than that costs more I/O than the growth it
+	// would find. A fortnight upper, past which an operator is not really
+	// running a janitor and should say `enabled: false` instead.
+	RetentionIntervalHoursLower = 1
+	RetentionIntervalHoursUpper = 336
+
+	// Keep-count: one lower, because keeping zero snapshots is expressed by
+	// disabling the step, not by a keep-count that would delete the snapshot
+	// written a moment ago. 10,000 upper to catch a units mix-up; the
+	// directory this bounds reached 3,983 files before anything bounded it.
+	RetentionKeepSnapshotsLower = 1
+	RetentionKeepSnapshotsUpper = 10000
+
+	// Archive limits, in MiB and days. Both are opt-in (zero keeps
+	// everything); the bands only constrain a value an operator did set.
+	RetentionArchiveMaxMBLower      = 1
+	RetentionArchiveMaxMBUpper      = 1 << 20 // 1 TiB
+	RetentionArchiveMaxAgeDaysLower = 1
+	RetentionArchiveMaxAgeDaysUpper = 3650
+
+	// Vacuum threshold: a fraction of the file, so the band is 0..1. The
+	// lower bound is 0.01 rather than 0 because 0 means "unset, use the
+	// default" — an operator who genuinely wants to vacuum unconditionally
+	// is asking to rewrite a multi-gigabyte file daily, and 1% is close
+	// enough to that while still being a threshold. 1 or more disables
+	// vacuuming and is accepted, not clamped.
+	RetentionVacuumFreeRatioLower = 0.01
+
+	// Absolute floor beneath the ratio, in MiB. 1 MiB lower; 1 TiB upper to
+	// catch a units mix-up.
+	RetentionVacuumMinFreeMBLower = 1
+	RetentionVacuumMinFreeMBUpper = 1 << 20
+
+	// Ceiling on the live data an in-process VACUUM will rewrite, in MiB.
+	// Same band as the floor above; the default lives in pkg/janitor.
+	RetentionVacuumMaxInlineMBLower = 1
+	RetentionVacuumMaxInlineMBUpper = 1 << 20
+
 	// HTTP request body cap for the cloop ui and cloop serve servers
 	// (Task 20102). The cap protects against memory-exhaustion DoS via
 	// oversized POST/PUT/PATCH payloads on the long-running daemon. Zero
@@ -279,6 +325,76 @@ type Config struct {
 	// (Task 20218). Absent means "keep everything", which is what every
 	// deployment did before there was a retention path at all.
 	Audit AuditConfig `yaml:"audit,omitempty"`
+
+	// Retention configures the background janitor that bounds .cloop
+	// (Task 20229). Absent means the defaults in pkg/janitor, which are on:
+	// unlike audit retention, the growth this bounds is not a compliance
+	// record and an unattended hub that fills its disk is an outage.
+	Retention RetentionConfig `yaml:"retention,omitempty"`
+}
+
+// RetentionConfig is the policy for the in-hub retention janitor
+// (Task 20229).
+//
+// It is the opposite default to AuditConfig, on purpose. Audit retention is
+// opt-in because it governs a compliance record. This governs plan snapshots,
+// which are a derived convenience, and SQLite freelist pages, which are not
+// data at all — so leaving it off by default would mean shipping a hub that
+// still fills its disk, which is the defect.
+//
+// Every field's zero value selects the package default rather than "off", so
+// an existing config.yaml that has never heard of this section gets the
+// working policy. Disabling is explicit: `enabled: false`.
+type RetentionConfig struct {
+	// Enabled turns the janitor off when set to false. Pointer-valued so an
+	// absent key is distinguishable from an explicit false — absent means
+	// "use the default", which is on.
+	Enabled *bool `yaml:"enabled,omitempty"`
+
+	// IntervalHours is how often a pass runs. Zero selects the default of 24.
+	// Validated to RetentionIntervalHoursLower..RetentionIntervalHoursUpper.
+	IntervalHours int `yaml:"interval_hours,omitempty"`
+
+	// KeepSnapshots bounds .cloop/plan-history, enforced both by the janitor
+	// and by pm.SaveSnapshot at write time. Zero selects
+	// pm.DefaultSnapshotRetention. Validated to
+	// RetentionKeepSnapshotsLower..RetentionKeepSnapshotsUpper.
+	KeepSnapshots int `yaml:"keep_snapshots,omitempty"`
+
+	// ArchiveMaxMB caps the total size of .cloop/audit-archive. Zero — the
+	// default — keeps every seal, because a seal is the only remaining copy
+	// of the rows it holds. See janitor.Policy.ArchiveMaxBytes.
+	ArchiveMaxMB int `yaml:"archive_max_mb,omitempty"`
+
+	// ArchiveMaxAgeDays deletes seals older than this. Zero — the default —
+	// keeps every seal. See ArchiveMaxMB.
+	ArchiveMaxAgeDays int `yaml:"archive_max_age_days,omitempty"`
+
+	// VacuumFreeRatio is the freelist fraction at which the janitor vacuums.
+	// Zero selects janitor.DefaultVacuumFreeRatio; 1 or more disables
+	// vacuuming and is accepted as-is. Values between zero and
+	// RetentionVacuumFreeRatioLower are rejected as nonsense.
+	VacuumFreeRatio float64 `yaml:"vacuum_free_ratio,omitempty"`
+
+	// VacuumMinFreeMB is an absolute floor below which the ratio is ignored,
+	// so a small database is not rewritten daily to reclaim a few hundred
+	// kilobytes. Zero selects janitor.DefaultVacuumMinFreeBytes.
+	VacuumMinFreeMB int `yaml:"vacuum_min_free_mb,omitempty"`
+
+	// VacuumMaxInlineMB caps the live data the hub will rewrite *without
+	// being stopped*. The control-plane database holds the hub's own lease,
+	// so a VACUUM that outlasts the lease TTL starves its heartbeat and the
+	// hub stands down believing another instance took over. Above this bound
+	// the janitor declines and points at `cloop hub retention --apply`, which
+	// has no heartbeat to lose. Zero selects
+	// janitor.DefaultVacuumMaxInlineBytes.
+	VacuumMaxInlineMB int `yaml:"vacuum_max_inline_mb,omitempty"`
+}
+
+// RetentionEnabled reports whether the janitor should run, resolving the
+// absent-means-default pointer.
+func (r RetentionConfig) RetentionEnabled() bool {
+	return r.Enabled == nil || *r.Enabled
 }
 
 // AuditConfig is the retention policy for .cloop/state.db's audit_events
@@ -1937,6 +2053,42 @@ func (c *Config) validateAndClamp(path string) {
 		warn("audit.retention_days", fmt.Sprintf("value %d outside [%d, %d]", c.Audit.RetentionDays, AuditRetentionDaysLower, AuditRetentionDaysUpper))
 		c.Audit.RetentionDays = 0
 	}
+	// Retention janitor: zero means "use the package default" for every
+	// field, so an out-of-range value falls back to zero and the hub runs the
+	// default policy. That is the conservative reading here — the opposite of
+	// audit retention above — because the failure mode of not running is a
+	// full disk, not a deleted compliance record.
+	if c.Retention.IntervalHours != 0 && (c.Retention.IntervalHours < RetentionIntervalHoursLower || c.Retention.IntervalHours > RetentionIntervalHoursUpper) {
+		warn("retention.interval_hours", fmt.Sprintf("value %d outside [%d, %d]", c.Retention.IntervalHours, RetentionIntervalHoursLower, RetentionIntervalHoursUpper))
+		c.Retention.IntervalHours = 0
+	}
+	if c.Retention.KeepSnapshots != 0 && (c.Retention.KeepSnapshots < RetentionKeepSnapshotsLower || c.Retention.KeepSnapshots > RetentionKeepSnapshotsUpper) {
+		warn("retention.keep_snapshots", fmt.Sprintf("value %d outside [%d, %d]", c.Retention.KeepSnapshots, RetentionKeepSnapshotsLower, RetentionKeepSnapshotsUpper))
+		c.Retention.KeepSnapshots = 0
+	}
+	if c.Retention.ArchiveMaxMB != 0 && (c.Retention.ArchiveMaxMB < RetentionArchiveMaxMBLower || c.Retention.ArchiveMaxMB > RetentionArchiveMaxMBUpper) {
+		warn("retention.archive_max_mb", fmt.Sprintf("value %d outside [%d, %d]", c.Retention.ArchiveMaxMB, RetentionArchiveMaxMBLower, RetentionArchiveMaxMBUpper))
+		c.Retention.ArchiveMaxMB = 0
+	}
+	if c.Retention.ArchiveMaxAgeDays != 0 && (c.Retention.ArchiveMaxAgeDays < RetentionArchiveMaxAgeDaysLower || c.Retention.ArchiveMaxAgeDays > RetentionArchiveMaxAgeDaysUpper) {
+		warn("retention.archive_max_age_days", fmt.Sprintf("value %d outside [%d, %d]", c.Retention.ArchiveMaxAgeDays, RetentionArchiveMaxAgeDaysLower, RetentionArchiveMaxAgeDaysUpper))
+		c.Retention.ArchiveMaxAgeDays = 0
+	}
+	// A ratio of 1 or more is a legitimate "never vacuum" and is left alone;
+	// only a value between zero and the lower bound, or a negative one, is
+	// nonsense.
+	if c.Retention.VacuumFreeRatio != 0 && c.Retention.VacuumFreeRatio < RetentionVacuumFreeRatioLower {
+		warn("retention.vacuum_free_ratio", fmt.Sprintf("value %g below %g", c.Retention.VacuumFreeRatio, RetentionVacuumFreeRatioLower))
+		c.Retention.VacuumFreeRatio = 0
+	}
+	if c.Retention.VacuumMinFreeMB != 0 && (c.Retention.VacuumMinFreeMB < RetentionVacuumMinFreeMBLower || c.Retention.VacuumMinFreeMB > RetentionVacuumMinFreeMBUpper) {
+		warn("retention.vacuum_min_free_mb", fmt.Sprintf("value %d outside [%d, %d]", c.Retention.VacuumMinFreeMB, RetentionVacuumMinFreeMBLower, RetentionVacuumMinFreeMBUpper))
+		c.Retention.VacuumMinFreeMB = 0
+	}
+	if c.Retention.VacuumMaxInlineMB != 0 && (c.Retention.VacuumMaxInlineMB < RetentionVacuumMaxInlineMBLower || c.Retention.VacuumMaxInlineMB > RetentionVacuumMaxInlineMBUpper) {
+		warn("retention.vacuum_max_inline_mb", fmt.Sprintf("value %d outside [%d, %d]", c.Retention.VacuumMaxInlineMB, RetentionVacuumMaxInlineMBLower, RetentionVacuumMaxInlineMBUpper))
+		c.Retention.VacuumMaxInlineMB = 0
+	}
 	// Request body cap: zero means default; out-of-range falls back to zero
 	// so the runtime substitutes MaxRequestBodyBytesDefault. Pathological
 	// values (negative, microscopically small, or absurdly large) are
@@ -2054,6 +2206,34 @@ func (c *Config) ValidateNumeric() error {
 	if c.Audit.RetentionDays != 0 && (c.Audit.RetentionDays < AuditRetentionDaysLower || c.Audit.RetentionDays > AuditRetentionDaysUpper) {
 		return fmt.Errorf("audit.retention_days must be between %d and %d (or 0 to keep everything) (got %d)",
 			AuditRetentionDaysLower, AuditRetentionDaysUpper, c.Audit.RetentionDays)
+	}
+	if c.Retention.IntervalHours != 0 && (c.Retention.IntervalHours < RetentionIntervalHoursLower || c.Retention.IntervalHours > RetentionIntervalHoursUpper) {
+		return fmt.Errorf("retention.interval_hours must be between %d and %d (or 0 for the default) (got %d)",
+			RetentionIntervalHoursLower, RetentionIntervalHoursUpper, c.Retention.IntervalHours)
+	}
+	if c.Retention.KeepSnapshots != 0 && (c.Retention.KeepSnapshots < RetentionKeepSnapshotsLower || c.Retention.KeepSnapshots > RetentionKeepSnapshotsUpper) {
+		return fmt.Errorf("retention.keep_snapshots must be between %d and %d (or 0 for the default) (got %d)",
+			RetentionKeepSnapshotsLower, RetentionKeepSnapshotsUpper, c.Retention.KeepSnapshots)
+	}
+	if c.Retention.ArchiveMaxMB != 0 && (c.Retention.ArchiveMaxMB < RetentionArchiveMaxMBLower || c.Retention.ArchiveMaxMB > RetentionArchiveMaxMBUpper) {
+		return fmt.Errorf("retention.archive_max_mb must be between %d and %d (or 0 to keep every seal) (got %d)",
+			RetentionArchiveMaxMBLower, RetentionArchiveMaxMBUpper, c.Retention.ArchiveMaxMB)
+	}
+	if c.Retention.ArchiveMaxAgeDays != 0 && (c.Retention.ArchiveMaxAgeDays < RetentionArchiveMaxAgeDaysLower || c.Retention.ArchiveMaxAgeDays > RetentionArchiveMaxAgeDaysUpper) {
+		return fmt.Errorf("retention.archive_max_age_days must be between %d and %d (or 0 to keep every seal) (got %d)",
+			RetentionArchiveMaxAgeDaysLower, RetentionArchiveMaxAgeDaysUpper, c.Retention.ArchiveMaxAgeDays)
+	}
+	if c.Retention.VacuumFreeRatio != 0 && c.Retention.VacuumFreeRatio < RetentionVacuumFreeRatioLower {
+		return fmt.Errorf("retention.vacuum_free_ratio must be at least %g (0 for the default, or >= 1 to never vacuum) (got %g)",
+			RetentionVacuumFreeRatioLower, c.Retention.VacuumFreeRatio)
+	}
+	if c.Retention.VacuumMinFreeMB != 0 && (c.Retention.VacuumMinFreeMB < RetentionVacuumMinFreeMBLower || c.Retention.VacuumMinFreeMB > RetentionVacuumMinFreeMBUpper) {
+		return fmt.Errorf("retention.vacuum_min_free_mb must be between %d and %d (or 0 for the default) (got %d)",
+			RetentionVacuumMinFreeMBLower, RetentionVacuumMinFreeMBUpper, c.Retention.VacuumMinFreeMB)
+	}
+	if c.Retention.VacuumMaxInlineMB != 0 && (c.Retention.VacuumMaxInlineMB < RetentionVacuumMaxInlineMBLower || c.Retention.VacuumMaxInlineMB > RetentionVacuumMaxInlineMBUpper) {
+		return fmt.Errorf("retention.vacuum_max_inline_mb must be between %d and %d (or 0 for the default) (got %d)",
+			RetentionVacuumMaxInlineMBLower, RetentionVacuumMaxInlineMBUpper, c.Retention.VacuumMaxInlineMB)
 	}
 	if c.UI.MaxWebSocketConns != 0 && c.UI.MaxWebSocketConnsPerIP != 0 && c.UI.MaxWebSocketConnsPerIP > c.UI.MaxWebSocketConns {
 		return fmt.Errorf("ui.max_websocket_conns_per_ip (%d) must not exceed ui.max_websocket_conns (%d)",

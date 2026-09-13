@@ -16,6 +16,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/configdiff"
 	"github.com/blechschmidt/cloop/pkg/configvalidate"
 	"github.com/blechschmidt/cloop/pkg/dbverify"
+	"github.com/blechschmidt/cloop/pkg/diskusage"
 	"github.com/blechschmidt/cloop/pkg/provider"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 )
@@ -862,34 +863,81 @@ func checkHookScripts(cfg *config.Config, add addFn) {
 	}
 }
 
-// checkDiskUsage warns when .cloop/ exceeds 50 MB and recommends cloop compact.
+// checkDiskUsage reports what .cloop costs, broken down by what produced it
+// (Task 20229).
+//
+// The aggregate this used to print — one number for the whole directory — was
+// not actionable. An operator told ".cloop/ uses 4900 MB" cannot tell whether
+// to vacuum the database, prune plan history, or ship audit archives to cold
+// storage, and those have very different costs and consequences. Naming the
+// largest contributors turns the warning into an instruction; the retention
+// janitor then acts on it automatically, and this is how an operator confirms
+// it is working.
 func checkDiskUsage(workdir string, add addFn) {
-	clDir := filepath.Join(workdir, ".cloop")
 	const warnThreshold int64 = 50 * 1024 * 1024 // 50 MB
+	// Entries smaller than this are noise next to the ones that matter; the
+	// total already accounts for them.
+	const entryFloor int64 = 10 * 1024 * 1024 // 10 MB
+	// Cap the breakdown so a pathological directory cannot bury the rest of
+	// the report.
+	const maxEntries = 5
 
-	var size int64
-	_ = filepath.Walk(clDir, func(_ string, fi os.FileInfo, err error) error {
-		if err == nil && !fi.IsDir() {
-			size += fi.Size()
-		}
-		return nil
-	})
-
-	const MB = 1024 * 1024
-	msg := fmt.Sprintf(".cloop/ directory uses %.1f MB", float64(size)/float64(MB))
-
-	if size >= warnThreshold {
+	usage, err := diskusage.MeasureFiles(workdir)
+	if err != nil {
 		add(Result{
 			Name:    ".cloop/ disk usage",
 			Level:   Warn,
-			Message: msg + " (exceeds 50 MB recommended limit)",
-			Fix:     "Run: cloop compact  (or --dry-run to preview)",
+			Message: fmt.Sprintf("could not measure: %v", err),
 		})
-	} else {
+		return
+	}
+
+	msg := fmt.Sprintf(".cloop/ uses %s", humanBytes(usage.TotalBytes))
+	if usage.TotalBytes >= warnThreshold {
 		add(Result{
 			Name:    ".cloop/ disk usage",
-			Level:   Pass,
-			Message: msg,
+			Level:   Warn,
+			Message: msg + " (exceeds the 50 MB recommended limit)",
+			Fix:     "Enable the retention janitor (config retention.enabled, on by default in the hub), or run: cloop compact",
 		})
+	} else {
+		add(Result{Name: ".cloop/ disk usage", Level: Pass, Message: msg})
+	}
+
+	shown := 0
+	for _, e := range usage.Entries {
+		if e.Bytes < entryFloor || shown >= maxEntries {
+			break // Entries is sorted largest-first
+		}
+		shown++
+		detail := humanBytes(e.Bytes)
+		if e.IsDir {
+			detail += fmt.Sprintf(" in %d files", e.Files)
+		}
+		add(Result{
+			Name:    "  .cloop/" + e.Name,
+			Level:   Pass, // informational: the aggregate above carries the verdict
+			Message: detail + entryAdvice(e),
+		})
+	}
+}
+
+// entryAdvice appends the one-line "what reclaims this" note for the entries
+// a retention policy governs, so the breakdown says what to do about each
+// rather than only how big it is.
+func entryAdvice(e diskusage.Entry) string {
+	switch e.Name {
+	case "plan-history":
+		return " — bounded by retention.keep_snapshots"
+	case "audit-archive":
+		return " — sealed audit exports; retention.archive_max_mb is off by default"
+	case "state.db":
+		return " — reclaimed by VACUUM; see the state.db size check above"
+	case "state.db-wal":
+		return " — write-ahead log; folded into state.db at the next checkpoint"
+	case "tasks", "artifacts":
+		return " — task output; bounded by cloop compact"
+	default:
+		return ""
 	}
 }

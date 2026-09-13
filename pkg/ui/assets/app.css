@@ -394,6 +394,24 @@
   .audit-row { cursor:pointer; }
   .audit-row:hover { background:var(--hover-bg); }
   .audit-row.expanded { background:var(--hover-bg); }
+
+  /* Disk & Retention panel (Task 20229). Reuses .audit-table for the
+     breakdown; these add the two headline figures and the inline share bar
+     that makes "which directory is the problem" readable at a glance. */
+  .du-headline { display:flex; gap:28px; flex-wrap:wrap; margin-bottom:14px; }
+  .du-stat-val { font-size:22px; font-weight:600; font-variant-numeric:tabular-nums; }
+  .du-stat-label { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.5px; }
+  .du-warn { color:var(--warn, #d08512); }
+  .du-table td { vertical-align:middle; }
+  .du-num { text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap; }
+  .du-note { color:var(--muted); font-size:11.5px; }
+  /* Drawn behind the entry name rather than in its own column: the column
+     would cost width on mobile, and the bar only has to convey proportion. */
+  .du-bar {
+    display:inline-block; height:3px; border-radius:2px; background:var(--accent);
+    opacity:.35; vertical-align:middle; margin-right:8px; max-width:90px; min-width:2px;
+  }
+  .du-policy { margin-top:14px; font-size:12.5px; line-height:1.55; }
   .audit-id { font-family:var(--mono, monospace); color:var(--muted); white-space:nowrap; }
   .audit-time { white-space:nowrap; color:var(--muted); font-variant-numeric:tabular-nums; }
   .audit-actor { color:var(--accent); word-break:break-word; }

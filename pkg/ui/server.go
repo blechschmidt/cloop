@@ -1088,6 +1088,11 @@ func (s *Server) Run(ctx context.Context) error {
 	go s.watchState(watcherCtx)
 	go s.watchProjects(watcherCtx)
 	go s.watchAutoBackup(watcherCtx)
+	// Bounds .cloop on a timer. Started after the lease for the same reason
+	// the other sweeps are: its VACUUM step rewrites the control-plane file,
+	// and the lease is what entitles this process to do that. See
+	// retention.go.
+	go s.watchRetention(watcherCtx)
 	s.startSessionJanitor(watcherCtx)
 	// Sweeps lapsed secret leases off live agents. Without it a lease TTL
 	// binds only the hub: an executor handed a fifteen-minute credential

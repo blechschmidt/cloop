@@ -276,6 +276,7 @@ func Run(ctx context.Context, dir string, cfg *config.Config, opts Options) *Rep
 	checkExecutors(ctx, dir, cfg, opts, add)
 	checkGitProxy(cfg, add)
 	checkStorage(dir, add)
+	checkRetention(dir, cfg, add)
 	checkAdmission(cfg, add)
 
 	return rep

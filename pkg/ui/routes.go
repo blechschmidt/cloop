@@ -329,6 +329,12 @@ func (s *Server) routeTable() []routeSpec {
 		{Pattern: "GET /api/deps", Handler: s.handleDeps, Perm: read, Scope: scopeProject},
 		{Pattern: "GET /api/risk-matrix", Handler: s.handleRiskMatrix, Perm: read, Scope: scopeProject},
 		{Pattern: "GET /api/analytics", Handler: s.handleAnalytics, Perm: read, Scope: scopeProject},
+		// Disk usage and retention policy for the selected project
+		// (Task 20229). `read`, not an admin permission: it reports how much
+		// space a project occupies and when the janitor will next reclaim
+		// some, which is the same class of operational fact as its analytics.
+		// See retention_api.go.
+		{Pattern: "GET /api/disk-usage", Handler: s.handleDiskUsage, Perm: read, Scope: scopeProject},
 		{Pattern: "GET /api/epics", Handler: s.handleEpics, Perm: read, Scope: scopeProject},
 		{Pattern: "GET /api/queue", Handler: s.handleQueue, Perm: read, Scope: scopeProject},
 		{Pattern: "GET /api/queue/stats", Handler: s.handleQueueStats, Perm: read, Scope: scopeProject},
