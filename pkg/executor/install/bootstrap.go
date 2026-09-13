@@ -172,26 +172,83 @@ fetch_cloop() {
     armv7l|armv7|armhf) arch=arm ;;
     *) die "unsupported architecture $(uname -m). Install the cloop binary manually and re-run." ;;
   esac
-  url="$CLOOP_RELEASES/cloop_${os}_${arch}.tar.gz"
+  # The asset name carries no version, because this URL must stay valid across
+  # releases: /releases/latest/download/ resolves a fixed name against whatever
+  # release is current. scripts/build-release.sh publishes exactly these names
+  # and its tests fail if the two ever disagree.
+  name="cloop_${os}_${arch}.tar.gz"
+  url="$CLOOP_RELEASES/$name"
   tmp=$(mktemp -d)
   # The trap fires on the error paths too, so a failed download does not leave
   # a half-extracted binary in /tmp for the next run to find.
   trap 'rm -rf "$tmp"' EXIT INT TERM
   say "downloading $url"
-  if command -v curl >/dev/null 2>&1; then
-    curl -fsSL "$url" -o "$tmp/cloop.tar.gz" || die "download failed: $url"
-  elif command -v wget >/dev/null 2>&1; then
-    wget -qO "$tmp/cloop.tar.gz" "$url" || die "download failed: $url"
-  else
-    die "neither curl nor wget is available; install the cloop binary manually and re-run"
-  fi
+  download "$url" "$tmp/cloop.tar.gz" || die "download failed: $url"
+  verify_archive "$tmp/cloop.tar.gz" "$name" "$tmp"
   tar -xzf "$tmp/cloop.tar.gz" -C "$tmp" || die "could not extract $url"
   [ -f "$tmp/cloop" ] || die "the release archive did not contain a cloop binary"
   install -m 0755 "$tmp/cloop" /usr/local/bin/cloop || die "could not install /usr/local/bin/cloop"
   echo /usr/local/bin/cloop
 }
 
-say()  { printf '\033[36m==>\033[0m %s\n' "$*"; }
+download() {
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL "$1" -o "$2"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -qO "$2" "$1"
+  else
+    die "neither curl nor wget is available; install the cloop binary manually and re-run"
+  fi
+}
+
+# verify_archive checks the download against the release's own checksums.txt.
+#
+# This archive is unpacked as root and installed root-owned and
+# world-executable into /usr/local/bin, on a machine that is about to be handed
+# credentials. TLS authenticates the transport and nothing else; checksums.txt
+# is published beside the artifact precisely so the content can be checked too,
+# and a verification that is available but skipped is not a defence.
+#
+# It fails closed: a mismatch, a missing checksums.txt, or an artifact absent
+# from it all abort the install. An operator who wants to supply their own
+# binary already has CLOOP_BIN, which skips this path entirely — so failing
+# closed here costs nothing but an explicit decision.
+verify_archive() {
+  archive=$1 name=$2 dir=$3
+
+  if command -v sha256sum >/dev/null 2>&1; then
+    actual=$(sha256sum "$archive" | cut -d' ' -f1)
+  elif command -v shasum >/dev/null 2>&1; then
+    actual=$(shasum -a 256 "$archive" | cut -d' ' -f1)
+  else
+    # Nothing to verify with. Warn rather than abort: on a system this
+    # stripped down there is no second opinion to be had, and refusing would
+    # only push the operator towards an unverified manual download.
+    warn "no sha256sum or shasum available; cannot verify $name"
+    return 0
+  fi
+
+  download "$CLOOP_RELEASES/checksums.txt" "$dir/checksums.txt" ||
+    die "could not download $CLOOP_RELEASES/checksums.txt to verify $name"
+
+  # checksums.txt is GNU format: "<hex>  <filename>". Match the exact name so
+  # a substring like cloop_linux_arm.tar.gz cannot satisfy cloop_linux_arm64.
+  expected=$(awk -v n="$name" '$2 == n { print $1; exit }' "$dir/checksums.txt")
+  [ -n "$expected" ] || die "$name is not listed in checksums.txt"
+
+  [ "$actual" = "$expected" ] || die \
+    "checksum mismatch for $name: expected $expected, got $actual. \
+Refusing to install. This means the download was corrupted or tampered with."
+
+  say "verified $name (sha256 $actual)"
+}
+
+# All three write to stderr, and say() must: find_or_fetch_cloop returns the
+# binary path to its caller through a command substitution, so anything else
+# written to stdout inside it is concatenated into that path and then executed
+# as a single word. The script has no stdout output that is data, so stderr is
+# the right destination for all of it regardless.
+say()  { printf '\033[36m==>\033[0m %s\n' "$*" >&2; }
 warn() { printf '\033[33m==> warning:\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[31m==> error:\033[0m %s\n' "$*" >&2; exit 1; }
 

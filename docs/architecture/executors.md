@@ -1895,6 +1895,24 @@ hub's configured name is frequently not the one the operator reached. The script
 carries no credential: it locates a `cloop` binary and hands off to
 `cloop executor agent install`, where the hardening above actually lives.
 
+It prefers a binary the device already has — `CLOOP_BIN`, then `cloop` on
+`PATH`, then `/usr/local/bin/cloop`, then `/usr/bin/cloop` — so an operator who
+pinned or built a version does not have it replaced behind their back. Only when
+there is none does it download
+`https://github.com/blechschmidt/cloop/releases/latest/download/cloop_<os>_<arch>.tar.gz`
+(override the base with `CLOOP_RELEASES`), verify it against the release's
+`checksums.txt`, and install it to `/usr/local/bin/cloop` at mode `0755`.
+
+That verification fails closed: a mismatch, an unreachable `checksums.txt`, or
+an artifact missing from it all abort the install rather than proceed
+unverified. The archive is unpacked as root onto a machine that is about to be
+handed credentials, so TLS authenticating the transport is not on its own
+enough. An operator who wants to skip the download entirely already has
+`CLOOP_BIN`.
+
+The asset name carries no version, because `latest/download` resolves only a
+fixed name — see [Installation](../getting-started/installation.md).
+
 ### Fleet inventory: which build is each device running?
 
 Every agent reports its own build version and a hardware advertisement in its

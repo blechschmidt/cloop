@@ -107,9 +107,9 @@ func Check(current string) (*CheckResult, error) {
 }
 
 // assetName returns the expected release asset name for the current OS/arch.
-// Convention: cloop_<version>_<os>_<arch>.tar.gz  (GoReleaser default).
-func assetName(version string) string {
-	return assetNameFor(version, runtime.GOOS, runtime.GOARCH)
+// Convention: cloop_<os>_<arch>.tar.gz
+func assetName() string {
+	return assetNameFor(runtime.GOOS, runtime.GOARCH)
 }
 
 // assetNameFor is assetName with the platform passed in rather than taken from
@@ -118,10 +118,29 @@ func assetName(version string) string {
 //
 // This is one half of a contract: scripts/build-release.sh publishes the names
 // this function computes, and release_assets_test.go fails if the two drift.
-// The leading "v" is stripped because the tag is v0.0.1 and the asset is
-// 0.0.1 — a release that gets this wrong breaks `cloop upgrade` for everyone
-// simultaneously, with an error naming the release rather than the cause.
-func assetNameFor(version, goos, goarch string) string {
+//
+// The name carries no version. That is not a simplification — it is what lets
+// https://github.com/.../releases/latest/download/<name> resolve, which is the
+// URL the bootstrap installer served at GET /install.sh hardcodes. The
+// upgrader itself could cope with a versioned name (it resolves assets through
+// the releases API, where the tag is already known), so the constraint comes
+// entirely from the installer; both are kept on one name so there is one thing
+// to be right about. See scripts/build-release.sh for the full rationale.
+func assetNameFor(goos, goarch string) string {
+	return fmt.Sprintf("cloop_%s_%s.tar.gz", goos, goarch)
+}
+
+// legacyAssetNameFor is the versioned name published through v0.0.1, before
+// Task 20240 dropped the version so that /releases/latest/download/ could
+// resolve.
+//
+// It is still consulted when the unversioned name is absent, because the
+// release this binary upgrades *from* may predate the rename: a binary built
+// after the change, checking against v0.0.1, would otherwise report "no
+// release asset found" for a release whose asset is sitting right there. The
+// fallback costs one map lookup and can be deleted once no supported release
+// carries versioned assets.
+func legacyAssetNameFor(version, goos, goarch string) string {
 	tag := strings.TrimPrefix(version, "v")
 	return fmt.Sprintf("cloop_%s_%s_%s.tar.gz", tag, goos, goarch)
 }
@@ -261,14 +280,21 @@ func Upgrade(current string, progress func(msg string)) (string, error) {
 		return "", err
 	}
 
-	name := assetName(rel.TagName)
+	name := assetName()
 	progress(fmt.Sprintf("Looking for asset: %s", name))
 
 	binaryAsset := findAsset(rel.Assets, name)
+	legacy := legacyAssetNameFor(rel.TagName, runtime.GOOS, runtime.GOARCH)
+	if binaryAsset == nil {
+		binaryAsset = findAsset(rel.Assets, legacy)
+		if binaryAsset != nil {
+			progress(fmt.Sprintf("Falling back to pre-rename asset: %s", legacy))
+		}
+	}
 	if binaryAsset == nil {
 		return "", fmt.Errorf(
-			"no release asset found for %s/%s (tag %s); expected %s",
-			runtime.GOOS, runtime.GOARCH, rel.TagName, name,
+			"no release asset found for %s/%s (tag %s); expected %s (or %s)",
+			runtime.GOOS, runtime.GOARCH, rel.TagName, name, legacy,
 		)
 	}
 

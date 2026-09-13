@@ -3,25 +3,42 @@
 # Build the release artifacts for a tag, in the exact layout `cloop upgrade`
 # expects to find on the GitHub release.
 #
-# That contract is not a convention this script is free to reinterpret. The
-# upgrader computes the asset name it will look for from its own runtime
-# GOOS/GOARCH (pkg/upgrade/upgrade.go, assetNameFor) and fails the upgrade
-# outright if no asset matches:
+# That contract is not a convention this script is free to reinterpret. Two
+# independent consumers compute the name they will fetch, and neither can
+# discover a rename except by failing:
 #
-#     cloop_<version-without-v>_<os>_<arch>.tar.gz
+#     cloop_<os>_<arch>.tar.gz
 #
-# and verifies the download against a GNU-style `checksums.txt` published
-# beside it. Rename either and `cloop upgrade` breaks for every user at once,
-# with an error that points at the release rather than at this file — so
-# pkg/upgrade/release_assets_test.go runs this script in --list mode and fails
-# if the two ever disagree.
+#   - `cloop upgrade` (pkg/upgrade/upgrade.go, assetNameFor) resolves it
+#     against the releases API and verifies the download against a GNU-style
+#     `checksums.txt` published beside it.
+#   - The bootstrap installer the hub serves at GET /install.sh
+#     (pkg/executor/install/bootstrap.go) fetches it from
+#     https://github.com/.../releases/latest/download/<name>.
+#
+# The name carries NO version, and that is load-bearing rather than cosmetic:
+# GitHub's /releases/latest/download/ endpoint resolves a *fixed* asset name
+# against whatever release is current. It is the only URL that stays valid
+# across releases, so it is the only one a `curl … | sh` installer can hardcode
+# — and an installer that has to be re-edited for every tag is an installer
+# that is wrong between tags. Versioned archives left that URL pointing at an
+# asset no release has ever published, i.e. a permanent 404 (Task 20240). The
+# version is not lost by dropping it here: it is stamped into the binary by the
+# -X ldflag below, which is what `cloop version` and `cloop upgrade` read.
+#
+# Rename an artifact and both consumers break for every user at once, with
+# errors that point at the release rather than at this file — so
+# pkg/upgrade/release_assets_test.go and
+# pkg/executor/install/bootstrap_release_test.go both run this script in --list
+# mode and fail if any of the three ever disagree.
 #
 # Usage:
 #   scripts/build-release.sh <version> [outdir]   build artifacts into outdir
-#   scripts/build-release.sh --list <version>     print artifact names only
+#   scripts/build-release.sh --list               print artifact names only
 #
-# --list compiles nothing. It exists so the drift gate above can assert the
-# naming without paying for five cross-compilations.
+# --list compiles nothing, and takes no version — because the names do not
+# depend on one. It exists so the drift gates above can assert the naming
+# without paying for five cross-compilations.
 
 set -euo pipefail
 
@@ -29,6 +46,12 @@ set -euo pipefail
 # `cloop upgrade` to start working on it; the test asserts the platform this
 # binary is *running* on is present, so dropping one is caught rather than
 # silently turning that platform's upgrade into "no release asset found".
+#
+# linux/arm is armv7 (32-bit Raspberry Pi and similar), built because the
+# bootstrap installer maps `uname -m` of armv7l/armv7/armhf onto it. Without an
+# asset here that mapping resolves to a URL nothing publishes, so the class of
+# device the executor fleet most wants to onboard would be told "download
+# failed" — the exact failure this file's header is about.
 #
 # windows/amd64 is deliberately absent: cloop does not compile for it. The
 # process-group supervision it kills harnesses with is POSIX-only and carries
@@ -41,6 +64,7 @@ set -euo pipefail
 PLATFORMS=(
   linux/amd64
   linux/arm64
+  linux/arm
   darwin/amd64
   darwin/arm64
 )
@@ -48,30 +72,26 @@ PLATFORMS=(
 GO="${GO:-go}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-# artifact_name mirrors pkg/upgrade.assetNameFor. The leading "v" is stripped
-# because the upgrader strips it: the tag is v0.0.1, the asset is 0.0.1.
+# artifact_name mirrors pkg/upgrade.assetNameFor and the URL built by
+# pkg/executor/install.BootstrapScript. It deliberately takes no version: see
+# the header for why the name has to stay constant across releases.
 artifact_name() {
-  local version="$1" os="$2" arch="$3"
-  printf 'cloop_%s_%s_%s.tar.gz' "${version#v}" "$os" "$arch"
+  local os="$1" arch="$2"
+  printf 'cloop_%s_%s.tar.gz' "$os" "$arch"
 }
 
-list_only=0
 if [ "${1:-}" = "--list" ]; then
-  list_only=1
-  shift
+  for platform in "${PLATFORMS[@]}"; do
+    printf '%s\n' "$(artifact_name "${platform%/*}" "${platform#*/}")"
+  done
+  exit 0
 fi
 
 VERSION="${1:-}"
 if [ -z "$VERSION" ]; then
-  echo "usage: $0 [--list] <version> [outdir]" >&2
+  echo "usage: $0 <version> [outdir]" >&2
+  echo "       $0 --list" >&2
   exit 2
-fi
-
-if [ "$list_only" = "1" ]; then
-  for platform in "${PLATFORMS[@]}"; do
-    printf '%s\n' "$(artifact_name "$VERSION" "${platform%/*}" "${platform#*/}")"
-  done
-  exit 0
 fi
 
 OUTDIR="${2:-$REPO_ROOT/dist/release}"
@@ -111,7 +131,7 @@ for platform in "${PLATFORMS[@]}"; do
   # extra entries are free.
   cp "$REPO_ROOT/README.md" "$REPO_ROOT/LICENSE" "$workdir/"
 
-  archive="$OUTDIR/$(artifact_name "$VERSION" "$os" "$arch")"
+  archive="$OUTDIR/$(artifact_name "$os" "$arch")"
 
   # --sort, --owner, --group, --numeric-owner and --mtime together make the
   # archive a function of its contents alone: two builds of the same commit

@@ -3,6 +3,7 @@ package upgrade
 import (
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -21,9 +22,12 @@ import (
 
 const releaseScript = "../../scripts/build-release.sh"
 
-// listReleaseArtifacts runs the release script's --list mode for version and
-// returns the artifact names it says it would publish.
-func listReleaseArtifacts(t *testing.T, version string) []string {
+// listReleaseArtifacts runs the release script's --list mode and returns the
+// artifact names it says it would publish.
+//
+// It takes no version, because the names do not depend on one — that is the
+// invariant TestReleaseArtifactsCarryNoVersion exists to defend.
+func listReleaseArtifacts(t *testing.T) []string {
 	t.Helper()
 
 	path, err := filepath.Abs(releaseScript)
@@ -31,9 +35,9 @@ func listReleaseArtifacts(t *testing.T, version string) []string {
 		t.Fatalf("resolving %s: %v", releaseScript, err)
 	}
 
-	out, err := exec.Command("bash", path, "--list", version).Output()
+	out, err := exec.Command("bash", path, "--list").Output()
 	if err != nil {
-		t.Fatalf("running %s --list %s: %v", releaseScript, version, err)
+		t.Fatalf("running %s --list: %v", releaseScript, err)
 	}
 
 	var names []string
@@ -52,10 +56,8 @@ func listReleaseArtifacts(t *testing.T, version string) []string {
 // script publishes is one the upgrader would recognise — i.e. that each name
 // round-trips through assetNameFor for the platform encoded in it.
 func TestReleaseArtifactsMatchAssetNaming(t *testing.T) {
-	const version = "v1.2.3"
-
-	for _, name := range listReleaseArtifacts(t, version) {
-		// cloop_1.2.3_linux_amd64.tar.gz -> ["cloop", "1.2.3", "linux", "amd64"]
+	for _, name := range listReleaseArtifacts(t) {
+		// cloop_linux_amd64.tar.gz -> ["cloop", "linux", "amd64"]
 		trimmed := strings.TrimSuffix(name, ".tar.gz")
 		if trimmed == name {
 			t.Errorf("artifact %q does not end in .tar.gz; the upgrader only "+
@@ -64,14 +66,14 @@ func TestReleaseArtifactsMatchAssetNaming(t *testing.T) {
 		}
 
 		parts := strings.Split(trimmed, "_")
-		if len(parts) != 4 {
-			t.Errorf("artifact %q does not have the cloop_<version>_<os>_<arch> "+
-				"shape the upgrader parses", name)
+		if len(parts) != 3 {
+			t.Errorf("artifact %q does not have the cloop_<os>_<arch> shape "+
+				"the upgrader parses", name)
 			continue
 		}
 
-		goos, goarch := parts[2], parts[3]
-		if want := assetNameFor(version, goos, goarch); want != name {
+		goos, goarch := parts[1], parts[2]
+		if want := assetNameFor(goos, goarch); want != name {
 			t.Errorf("release script publishes %q for %s/%s, but the upgrader "+
 				"looks for %q", name, goos, goarch, want)
 		}
@@ -83,10 +85,8 @@ func TestReleaseArtifactsMatchAssetNaming(t *testing.T) {
 // runs on is not published, `cloop upgrade` on that platform can only ever
 // report "no release asset found".
 func TestReleaseCoversRunningPlatform(t *testing.T) {
-	const version = "v1.2.3"
-
-	want := assetNameFor(version, runtime.GOOS, runtime.GOARCH)
-	for _, name := range listReleaseArtifacts(t, version) {
+	want := assetNameFor(runtime.GOOS, runtime.GOARCH)
+	for _, name := range listReleaseArtifacts(t) {
 		if name == want {
 			return
 		}
@@ -96,17 +96,54 @@ func TestReleaseCoversRunningPlatform(t *testing.T) {
 		runtime.GOOS, runtime.GOARCH, want)
 }
 
-// TestReleaseVersionPrefixStripped pins the one transformation that is easy to
-// get backwards. The git tag carries a leading "v" and the asset does not; an
-// asset named cloop_v0.0.1_... is findable by nothing.
-func TestReleaseVersionPrefixStripped(t *testing.T) {
-	for _, name := range listReleaseArtifacts(t, "v0.0.1") {
-		if strings.Contains(name, "_v0.0.1_") {
-			t.Errorf("artifact %q kept the tag's leading \"v\"; the upgrader "+
-				"strips it and would look for cloop_0.0.1_...", name)
+// TestReleaseArtifactsCarryNoVersion is the regression test for Task 20240.
+//
+// A versioned asset name is not merely ugly: it makes
+// /releases/latest/download/<name> — the only stable download URL GitHub
+// offers, and the one the bootstrap installer hardcodes — resolve to an asset
+// no release has ever published. The break is invisible to every other check
+// here, because a versioned name is perfectly self-consistent; it round-trips,
+// it covers every platform, and it 404s for every user.
+//
+// Version numbers are the obvious thing to reach for when naming a build
+// artifact, so this asserts their absence explicitly rather than leaving it
+// implied by the shape assertion above.
+func TestReleaseArtifactsCarryNoVersion(t *testing.T) {
+	// Any run of digits separated by dots, with or without a leading "v":
+	// 1.2.3, v0.0.1, 2.0, and so on.
+	versionish := regexp.MustCompile(`v?\d+\.\d+`)
+
+	for _, name := range listReleaseArtifacts(t) {
+		stem := strings.TrimSuffix(name, ".tar.gz")
+		if m := versionish.FindString(stem); m != "" {
+			t.Errorf("artifact %q embeds a version (%q). The installer fetches "+
+				"releases/latest/download/%s, which can only resolve if the name "+
+				"is the same for every release — see scripts/build-release.sh",
+				name, m, assetNameFor(runtime.GOOS, runtime.GOARCH))
 		}
-		if !strings.Contains(name, "_0.0.1_") {
-			t.Errorf("artifact %q does not carry the bare version 0.0.1", name)
-		}
+	}
+}
+
+// TestUpgradeFallsBackToVersionedAsset covers the other half of the rename:
+// a binary built after Task 20240 still has to be able to upgrade from the
+// releases published before it, which carry versioned assets.
+func TestUpgradeFallsBackToVersionedAsset(t *testing.T) {
+	legacy := legacyAssetNameFor("v0.0.1", runtime.GOOS, runtime.GOARCH)
+	if strings.Contains(legacy, "_v0.0.1_") {
+		t.Errorf("legacyAssetNameFor kept the tag's leading %q: %s", "v", legacy)
+	}
+	if !strings.Contains(legacy, "_0.0.1_") {
+		t.Errorf("legacyAssetNameFor(%q) = %q, want the bare version in it",
+			"v0.0.1", legacy)
+	}
+
+	// The fallback must be reachable from a release that carries only the old
+	// name — which is exactly what github.com/blechschmidt/cloop v0.0.1 is.
+	assets := []Asset{{Name: legacy}}
+	if got := findAsset(assets, assetNameFor(runtime.GOOS, runtime.GOARCH)); got != nil {
+		t.Fatal("the unversioned name matched a release that has no unversioned asset")
+	}
+	if got := findAsset(assets, legacy); got == nil {
+		t.Errorf("a v0.0.1-era release is unreachable: no asset matched %q", legacy)
 	}
 }

@@ -8,6 +8,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 While the major version is 0, the command-line surface, the configuration
 schema and the hub's HTTP API may change in any release.
 
+## [Unreleased]
+
+### Fixed
+
+- **The executor bootstrap installer could never install anything.** Two
+  defects on the same path, the first hiding the second. Release archives
+  carried the version in their names (`cloop_0.0.1_linux_amd64.tar.gz`) while
+  the script served at `GET /install.sh` fetched
+  `releases/latest/download/cloop_linux_amd64.tar.gz` — a URL no release had
+  ever published, so every device got a `404`. With that fixed the install
+  still died at exit 127: progress messages went to stdout, which is the
+  channel `find_or_fetch_cloop` returns the binary path on, so the path came
+  back with a log line glued to the front of it and was executed as one word.
+  Release assets are now unversioned — which is what makes `latest/download`
+  resolve at all — and every diagnostic goes to stderr.
+
+### Added
+
+- **The installer verifies what it downloads.** The archive is checked against
+  the release's `checksums.txt` before anything is unpacked, failing closed on
+  a mismatch, an unreachable checksums file, or an artifact missing from it.
+  It is unpacked as root onto a device about to be handed credentials, so
+  authenticating only the transport was not enough. `CLOOP_BIN` still bypasses
+  the download entirely.
+- **`linux/arm` (armv7) release builds.** The installer already mapped
+  `armv7l`/`armv7`/`armhf` onto an asset that was never built, so 32-bit
+  Raspberry Pi-class devices — the fleet's most likely edge hardware — were
+  told "download failed".
+
+### Changed
+
+- Release assets are named `cloop_<os>_<arch>.tar.gz` rather than
+  `cloop_<version>_<os>_<arch>.tar.gz`. `cloop upgrade` reads both, so a
+  v0.0.1 binary still upgrades forward; the version now lives in the binary
+  (`cloop version`) instead of in the filename.
+
 ## [0.0.1] - 2026-09-12
 
 First tagged release. Everything below already existed; what is new is that it

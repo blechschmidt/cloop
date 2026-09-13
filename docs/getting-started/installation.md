@@ -49,15 +49,21 @@ a static binary per platform, plus a `checksums.txt` covering all of them:
 
 | Platform | Asset |
 | --- | --- |
-| Linux x86-64 | `cloop_<version>_linux_amd64.tar.gz` |
-| Linux arm64 | `cloop_<version>_linux_arm64.tar.gz` |
-| macOS Intel | `cloop_<version>_darwin_amd64.tar.gz` |
-| macOS Apple silicon | `cloop_<version>_darwin_arm64.tar.gz` |
+| Linux x86-64 | `cloop_linux_amd64.tar.gz` |
+| Linux arm64 | `cloop_linux_arm64.tar.gz` |
+| Linux armv7 | `cloop_linux_arm.tar.gz` |
+| macOS Intel | `cloop_darwin_amd64.tar.gz` |
+| macOS Apple silicon | `cloop_darwin_arm64.tar.gz` |
+
+Asset names carry no version. That is deliberate: it lets
+`releases/latest/download/<asset>` resolve to the current release, which is the
+only URL that stays valid across releases and the one the executor bootstrap
+installer uses. The version is in the binary, not the filename — `cloop version`
+prints it.
 
 ```bash
-VERSION=0.0.1   # no leading "v" in the asset name; the git tag has one
-ASSET="cloop_${VERSION}_$(uname -s | tr '[:upper:]' '[:lower:]')_amd64.tar.gz"
-BASE="https://github.com/blechschmidt/cloop/releases/download/v${VERSION}"
+ASSET="cloop_$(uname -s | tr '[:upper:]' '[:lower:]')_amd64.tar.gz"
+BASE="https://github.com/blechschmidt/cloop/releases/latest/download"
 
 curl -fsSLO "$BASE/$ASSET"
 curl -fsSLO "$BASE/checksums.txt"
@@ -69,6 +75,13 @@ sha256sum --ignore-missing -c checksums.txt   # shasum -a 256 -c on macOS
 tar -xzf "$ASSET" ./cloop
 sudo install -m 0755 cloop /usr/local/bin/cloop
 ```
+
+To pin a specific release instead of tracking the newest, swap `latest/download`
+for `download/v<version>` — for example
+`https://github.com/blechschmidt/cloop/releases/download/v0.0.1`. Releases up to
+and including v0.0.1 published versioned asset names
+(`cloop_0.0.1_linux_amd64.tar.gz`); `cloop upgrade` still recognises those, so an
+older binary can upgrade forward.
 
 Unlike `go install`, these binaries carry a real version string, so
 `cloop upgrade` works from here: it queries the releases API, downloads the

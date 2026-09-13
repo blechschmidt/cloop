@@ -54,8 +54,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p /tmp/verify
-          tar -xzf "dist/release/cloop_${GITHUB_REF_NAME#v}_linux_amd64.tar.gz" \
-            -C /tmp/verify
+          tar -xzf dist/release/cloop_linux_amd64.tar.gz -C /tmp/verify
           got=$(/tmp/verify/cloop version | head -1)
           echo "binary reports: $got"
           [ "$got" = "cloop ${GITHUB_REF_NAME}" ] || {
@@ -113,3 +112,40 @@ jobs:
           make_latest: true
           draft: false
           prerelease: false
+
+      - name: The install script's download URL resolves
+        # The one check that would have caught Task 20240 before a user did.
+        #
+        # Everything upstream of here can be green while the released artifacts
+        # are unreachable: the build succeeds, the checksums match, the tag is
+        # right — and the URL the bootstrap installer actually fetches still
+        # 404s, because the asset it names was never published under that name.
+        # Nothing in the repository can detect that, since it is a property of
+        # the release as GitHub serves it. So ask GitHub.
+        #
+        # This is the literal URL from pkg/executor/install/bootstrap.go, not a
+        # reconstruction of it: hardcoded on both sides on purpose, so that
+        # changing one without the other fails here rather than on a device.
+        run: |
+          set -euo pipefail
+          base="https://github.com/${GITHUB_REPOSITORY}/releases/latest/download"
+          for asset in cloop_linux_amd64.tar.gz cloop_linux_arm64.tar.gz \
+                       cloop_linux_arm.tar.gz cloop_darwin_amd64.tar.gz \
+                       cloop_darwin_arm64.tar.gz checksums.txt; do
+            # The "latest" pointer is updated asynchronously from the release
+            # creation above, so a 404 on the first try means "not yet" at
+            # least as often as it means "broken". Retry before believing it.
+            for attempt in 1 2 3 4 5; do
+              code=$(curl -sSL -o /dev/null -w '%{http_code}' "$base/$asset")
+              [ "$code" = "200" ] && break
+              echo "attempt $attempt: $asset -> HTTP $code, retrying"
+              sleep 10
+            done
+            [ "$code" = "200" ] || {
+              echo "::error::$base/$asset is HTTP $code. The install script at" \
+                   "GET /install.sh fetches this exact URL and will fail for" \
+                   "every new device."
+              exit 1
+            }
+            echo "ok: $asset"
+          done
