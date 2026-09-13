@@ -93,6 +93,31 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Does :latest exist yet?
+        id: latest
+        # The bootstrap, made self-limiting.
+        #
+        # :latest is what pkg/executor/container.DefaultImage resolves to, so it
+        # has to exist before that default can work — but the release it ought
+        # to describe (v0.0.1) was cut before this workflow existed, and a
+        # workflow_dispatch against a tag can only run a workflow present in
+        # that tag's tree. So the first :latest cannot come from a tag.
+        #
+        # Rather than let main move :latest forever, this asks the registry
+        # whether the tag is there at all. Absent, it is published once; present,
+        # this is a no-op and the rule below is the only thing that moves it.
+        # The condition therefore stops being true the moment it has been used.
+        run: |
+          set -uo pipefail
+          ref="ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}:latest"
+          if docker buildx imagetools inspect "$ref" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "$ref already exists; :latest will move only on a release tag"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::$ref does not exist yet; publishing it from this build"
+          fi
+
       - name: Derive tags and labels
         id: meta
         uses: docker/metadata-action@v5
@@ -104,7 +129,12 @@ jobs:
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') || inputs.publish_latest }}
+            # Compared against the string 'true' rather than used as a boolean:
+            # on a push event `inputs` is null, and `false || null` renders as
+            # the empty string, which metadata-action rejects with "Invalid
+            # value for enable attribute". An explicit comparison is total over
+            # both event shapes.
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') || github.event.inputs.publish_latest == 'true' || steps.latest.outputs.exists == 'false' }}
             type=raw,value=edge,enable=${{ github.ref == 'refs/heads/main' }}
 
       - name: Resolve the version to stamp into the binary
