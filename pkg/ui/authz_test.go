@@ -82,6 +82,23 @@ var publicRouteAllowlist = map[string]string{
 		"keyboard, console or address bar, so a dead link must be able to load the page that says " +
 		"so rather than render a raw 401 JSON body. Every field it draws comes from the gated " +
 		"/api/glasses/* routes",
+	// The icons (Task 20228). One justification covers all six: they are
+	// static images and a static manifest compiled into the binary, byte-
+	// identical on every deployment, carrying no project, tenant or user data.
+	// They disclose only that a cloop hub is listening, which "/" already
+	// discloses by serving the login page to anyone who asks. Gating them
+	// would not protect anything — it would just mean no icon, because
+	// nothing that fetches one sends a credential: a browser probes
+	// /favicon.ico with no Authorization header, and a display-glasses
+	// launcher fetches the tile in a request of its own rather than as a
+	// subresource of the tokenised page the wearer saved.
+	"GET /favicon.ico":          "static icon, see the note above",
+	"GET /icon-192.png":         "static icon, see the note above",
+	"GET /apple-touch-icon.png": "static icon, see the note above",
+	"GET /icon-512.png":         "static icon, see the note above",
+	"GET /icon.svg":             "static icon, see the note above",
+	"GET /manifest.webmanifest": "static web app manifest naming the icons above; no project data",
+
 	"GET /api/glasses/link": "reports whether the caller holds a display-glasses link, never the link " +
 		"itself (the secret is not stored). Scoped by construction: the owner is read off the session " +
 		"and no parameter names a user. glassesSelfService additionally refuses any caller presenting " +

@@ -277,7 +277,7 @@ func (s *Server) routeTable() []routeSpec {
 		public     = authz.PermPublic
 	)
 
-	return []routeSpec{
+	table := []routeSpec{
 		// ── Unauthenticated surface ──────────────────────────────────
 		// The SPA shell and its assets: authMiddleware already decided
 		// whether this caller may load the dashboard at all, and the app
@@ -586,4 +586,11 @@ func (s *Server) routeTable() []routeSpec {
 		// A scraper authenticates with an API token holding the role.
 		{Pattern: "GET /metrics", Handler: s.handleMetrics, Perm: auditRead, Scope: scopeGlobal},
 	}
+
+	// The favicon set and the web app manifest (Task 20228), spliced in from
+	// their own table so that serving an icon and registering it cannot drift
+	// apart. Public, and additionally exempt from authentication: nothing that
+	// fetches an icon — a browser probing /favicon.ico, a display-glasses
+	// launcher rendering a saved app — sends a credential. See icons.go.
+	return append(table, s.iconRoutes()...)
 }

@@ -4,6 +4,16 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>cloop dashboard</title>
+<!-- Icons (Task 20228). The PNG comes first because a launcher that takes the
+     first rel="icon" it sees has to land on a raster — Meta Ray-Ban Display
+     rejects SVG outright. Browsers read the whole list and pick by type and
+     size regardless of order, so nothing is lost by ordering for the device. -->
+<link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png">
+<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
+<link rel="icon" type="image/svg+xml" href="/icon.svg">
+<link rel="icon" sizes="48x48 32x32 16x16" href="/favicon.ico">
+<link rel="manifest" href="/manifest.webmanifest">
+<meta name="theme-color" content="#0d1117">
 <script>(function(){var t=localStorage.getItem('cloop-theme')||(window.matchMedia('(prefers-color-scheme: light)').matches?'light':'dark');document.documentElement.setAttribute('data-theme',t);})();</script>
 <link rel="stylesheet" href="{{asset:app.css}}">
 <script src="{{asset:chart.js}}"></script>

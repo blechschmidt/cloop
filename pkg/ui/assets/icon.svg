@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  The cloop mark, and the single source of truth for every icon the hub serves
+  (Task 20228). scripts/build-icons.sh rasterises it into the PNGs and the ICO
+  next to this file; pkg/ui/icons.go serves them.
+
+  Edit this file and nothing else, then run `make icons`. A test
+  (TestIconsAreInSyncWithTheirSource) fails if the two ever drift.
+
+  Why it looks like this:
+
+    * A "c" that is also a loop, closed by an arrowhead — cloop is a feedback
+      loop that keeps running until its plan is complete.
+
+    * Full bleed, no rounded corners. Every launcher masks an icon to its own
+      shape, and a rounded rect inside that mask leaves transparent corners
+      which iOS paints black and Android paints white. A square that the
+      platform rounds looks right everywhere; one that arrives pre-rounded
+      does not.
+
+    * Two colours, one shape, no gradient. The mark has to survive being drawn
+      16 pixels wide in a browser tab and being projected onto a monocular
+      waveguide display, where a gradient bands and fine detail disappears.
+      #0d1117 is the dashboard's background and #58a6ff its accent.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="cloop">
+  <title>cloop</title>
+  <rect width="64" height="64" fill="#0d1117"/>
+  <path d="M 44.04 45.38 A 18 18 0 1 1 40.45 16.11" fill="none" stroke="#58a6ff" stroke-width="8.5" stroke-linecap="round"/>
+  <path d="M 48.84 20.57 L 36.93 22.73 L 43.97 9.48 Z" fill="#58a6ff"/>
+</svg>

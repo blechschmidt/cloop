@@ -37,6 +37,17 @@ FUZZTIME ?= 30s
 build:
 	$(GO) build -o $(BINARY) .
 
+## icons: re-rasterise the favicon set from pkg/ui/assets/icon.svg
+##
+## Only needed after editing icon.svg — the rendered PNGs and the ICO are
+## committed, because `go build` must work without an SVG toolchain and
+## //go:embed cannot run a converter. TestIconsAreInSyncWithTheirSource fails
+## if the mark is edited without running this.
+##
+## Requires librsvg2-bin and python3-pil.
+icons:
+	@./scripts/build-icons.sh
+
 ## test: run all tests (unit + e2e)
 test: test-unit test-e2e
 

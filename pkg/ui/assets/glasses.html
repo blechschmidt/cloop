@@ -35,6 +35,17 @@
 <meta name="referrer" content="no-referrer">
 <meta name="color-scheme" content="dark">
 <title>cloop</title>
+<!-- The launcher tile (Task 20228). PNG only: the device rejects SVG and wants
+     at least 52px, and these are the two <link> rels its guide names.
+
+     Deliberately no <link rel="manifest"> here, though the device would read
+     one. A manifest declares a start_url, and the only URL that works on the
+     glasses is the tokenised one the wearer saved — a launcher that honoured
+     start_url would relaunch the app at "/" and drop the credential the device
+     has no keyboard to re-enter. The dashboard links the manifest; this page
+     gets its icon from tags that cannot rewrite where it opens. -->
+<link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png">
+<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
 <style>
   :root {
     --fg: #f2f4f8;

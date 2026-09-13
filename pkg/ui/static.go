@@ -46,7 +46,12 @@ import (
 // directive — but it still has to be listed in bundleFiles below to be
 // served, and TestStaticAssets_BundleCoversEveryFragment fails if it is not.
 //
+// The icon set (Task 20228) is listed explicitly rather than as a directory
+// glob so that an asset which is never served cannot slip into the binary.
+//
 //go:embed assets/index.html assets/glasses.html assets/app.css assets/chart.umd.min.js assets/js
+//go:embed assets/favicon.ico assets/icon-192.png assets/icon-512.png
+//go:embed assets/apple-touch-icon.png assets/icon.svg assets/manifest.webmanifest
 var assetFS embed.FS
 
 // bundleFiles is the concatenation order of the main IIFE. The order is
@@ -127,6 +132,12 @@ type assetSet struct {
 	byPath map[string]*staticAsset
 	page   *staticAsset
 
+	// icons holds the favicon set and the web app manifest, keyed by their
+	// fixed root URLs (Task 20228). Separate from byPath because these are
+	// not content-addressed — /favicon.ico is probed blind by clients that
+	// never read our HTML — so they revalidate instead of caching forever.
+	icons map[string]*staticAsset
+
 	// glasses is the wearable's shell, served from /glasses (Task 20194).
 	// Self-contained rather than content-addressed: it is a few kilobytes of
 	// markup, CSS and script in one document, so a device on a phone's link
@@ -159,13 +170,7 @@ var loadAssets = sync.OnceValue(buildAssets)
 // a binary that passed CI, and panicRecoveryMiddleware turns it into a logged
 // 500 rather than a dead process if one ever ships.
 func buildAssets() *assetSet {
-	read := func(path string) []byte {
-		b, err := assetFS.ReadFile(path)
-		if err != nil {
-			panic(fmt.Sprintf("ui: embedded asset %q is missing: %v", path, err))
-		}
-		return b
-	}
+	read := mustReadAsset
 
 	var bundle bytes.Buffer
 	for _, f := range bundleFiles {
@@ -181,6 +186,7 @@ func buildAssets() *assetSet {
 
 	set := &assetSet{
 		byPath:      map[string]*staticAsset{},
+		icons:       buildIcons(),
 		css:         string(css),
 		bundle:      bundle.String(),
 		boundary:    string(boundary),
@@ -216,6 +222,19 @@ func buildAssets() *assetSet {
 	// this still the page I have" without ever serving a stale one.
 	set.glasses = newStaticAsset("text/html; charset=utf-8", cacheNoCache, glassesTmpl)
 	return set
+}
+
+// mustReadAsset returns an embedded asset's bytes, or panics naming the path.
+//
+// A miss here means the embed directive and the code that reads it disagree,
+// which is a build-time mistake no request can recover from — there is no
+// dashboard to degrade to. See buildAssets for why a panic is the right answer.
+func mustReadAsset(path string) []byte {
+	b, err := assetFS.ReadFile(path)
+	if err != nil {
+		panic(fmt.Sprintf("ui: embedded asset %q is missing: %v", path, err))
+	}
+	return b
 }
 
 // jsContentType is the media type for every script we serve. `text/javascript`

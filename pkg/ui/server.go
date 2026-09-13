@@ -1398,7 +1398,7 @@ func clientIP(r *http.Request) string {
 // rate-limited per IP in both modes.
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if isPublicShell(r) {
+		if servedBeforeAuth(r) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -1454,6 +1454,19 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		w.WriteHeader(http.StatusUnauthorized)
 		json.NewEncoder(w).Encode(map[string]string{"error": "unauthorized"}) //nolint:errcheck
 	})
+}
+
+// servedBeforeAuth is the complete set of requests answered without a
+// credential: the display-glasses shell and the icons. It exists so that "what
+// can an unauthenticated caller reach" has one answer to read rather than a
+// growing chain of conditions inside authMiddleware.
+//
+// Both carve-outs share a justification — a static document or image compiled
+// into the binary, identical on every deployment, carrying no project, tenant
+// or user data — and both are narrow in the same way: exact paths, read-only
+// verbs, failing closed on anything else.
+func servedBeforeAuth(r *http.Request) bool {
+	return isPublicShell(r) || isPublicIcon(r)
 }
 
 // isPublicShell reports whether the request is for the display-glasses

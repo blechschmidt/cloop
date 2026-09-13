@@ -1,0 +1,3 @@
+# sha256 of icon.svg at the last run of scripts/build-icons.sh.
+# Mismatch means the mark changed but the rasters did not: run `make icons`.
+37078fc46481f59dae0061a4ce33822b5f8f879acee61ec89764e5e20c314eb8
