@@ -27,6 +27,14 @@
   sends it in an Authorization header from then on, so it appears in exactly
   one request rather than in every one — and the same value never has to be
   re-typed by a wearer who has no keyboard.
+
+  Input (Task 20237). The band and the temple touch strip are not a pointer and
+  not a touchscreen: the glasses OS translates every gesture into an arrow-key
+  or Enter keydown aimed at document.activeElement, and delivers nothing else —
+  no touch, no wheel, no coordinates. It also supplies no focus engine of its
+  own, so moving the selection is this page's job and nobody else's. That is
+  handled in the "gestures" section, which is the only place a gesture is
+  interpreted.
 -->
 <html lang="en">
 <head>
@@ -91,6 +99,10 @@
     font-size: 24px; color: var(--muted); background: transparent;
     border: 2px solid var(--line); border-radius: 12px; cursor: pointer;
   }
+  /* Feedback for a refresh that no longer blanks the screen. Since the list is
+     patched in place there is nothing else to tell the wearer that the tap
+     registered, so the control itself dims while the request is out. */
+  #reload.busy { opacity: .45; }
 
   #sub { color: var(--muted); font-size: 19px; margin-bottom: 12px; }
 
@@ -104,6 +116,24 @@
   .row:active { border-color: var(--accent); }
   .row .name { font-size: 24px; font-weight: 650; }
   .row .meta { color: var(--muted); font-size: 18px; margin-top: 6px; }
+
+  /* The focus ring is the entire cursor. There is no pointer on this device,
+     so the only way a wearer knows what a pinch will activate is this outline
+     — it has to read at a glance, against whatever the world behind the
+     waveguide happens to be. Plain :focus rather than :focus-visible: every
+     input here arrives as a key event, so the two would mean the same thing,
+     and :focus is the state the device's own guidance is written against. */
+  .focusable:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px rgba(110, 168, 255, .55), 0 0 20px rgba(110, 168, 255, .35);
+  }
+  /* The three chrome controls carry id-level borders, and an id outranks a
+     class however many times you repeat it — so their accent has to be said
+     again at the same specificity or they alone would glow without changing
+     outline. */
+  #back:focus, #reload:focus, #more:focus { border-color: var(--accent); }
+  .row.focusable:focus { background: #172033; }
 
   /* A status dot carries the state at a glance; the word is there for the
      cases where a small coloured dot on a see-through display is ambiguous
@@ -149,15 +179,15 @@
 <body>
 <div id="app">
   <header>
-    <button id="back" type="button" aria-label="Back">&#8592;</button>
+    <button id="back" class="focusable" type="button" hidden aria-label="Back">&#8592;</button>
     <div id="title">cloop</div>
-    <button id="reload" type="button" aria-label="Refresh">&#8635;</button>
+    <button id="reload" class="focusable" type="button" aria-label="Refresh">&#8635;</button>
   </header>
   <div id="sub"></div>
   <div id="filters"></div>
   <div id="msg"></div>
   <div id="list"></div>
-  <button id="more" type="button">More</button>
+  <button id="more" class="focusable" type="button" hidden>More</button>
 </div>
 <script>
 (function() {
@@ -177,7 +207,13 @@ try {
   TOKEN = new URLSearchParams(location.search).get('token') || '';
 } catch (e) { /* malformed query string: the API calls will 401 and say so */ }
 
-var state = { view: 'projects', project: null, tasks: [], offset: 0, total: 0, status: '' };
+// How many tasks one request asks for, and the ceiling the endpoint enforces
+// on a client-supplied limit. A refresh re-reads the window the wearer has
+// actually paged into view rather than the first page, so pressing More and
+// then waiting a minute does not silently collapse the list back to 25.
+var PAGE = 25, MAX_WINDOW = 100;
+
+var state = { view: 'projects', project: null, tasks: [], total: 0, status: '', taskID: 0 };
 
 // dead is set once the hub has told us this link is finished (401/403). It is
 // terminal: nothing the wearer can do from a device with no keyboard will make
@@ -185,11 +221,6 @@ var state = { view: 'projects', project: null, tasks: [], offset: 0, total: 0, s
 var dead = false;
 
 function el(id) { return document.getElementById(id); }
-function esc(s) {
-  return String(s == null ? '' : s).replace(/[&<>"']/g, function(c) {
-    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
-  });
-}
 
 function api(path) {
   if (dead) { return Promise.reject(new Error(DEAD_MSG)); }
@@ -218,42 +249,247 @@ var DEAD_MSG = 'This link is no longer valid. Generate a new one from the cloop 
 
 function say(text, bad) {
   var m = el('msg');
-  m.textContent = text || '';
+  setText(m, text || '');
   m.className = bad ? 'bad' : '';
 }
 
+function fail(err) { say(err && err.message ? err.message : String(err), true); }
+
+// ── dom ─────────────────────────────────────────────────────────────────────
+// Everything below builds nodes and writes textContent instead of assembling
+// HTML strings. Two reasons, and the second is the one this page was rewritten
+// for. It removes the hand-rolled escaper that every interpolated task title
+// used to depend on being correct; and it lets a refresh reuse the node that is
+// already on screen, which is what keeps the wearer's focus and scroll offset
+// alive across the poll.
+
+function mk(tag, cls, text) {
+  var n = document.createElement(tag);
+  if (cls) { n.className = cls; }
+  if (text != null) { n.textContent = text; }
+  return n;
+}
+
+// Write only on change. An unconditional assignment re-lays-out the row on
+// every poll even when nothing moved, which on a 600x600 waveguide reads as a
+// flicker once a minute.
+function setText(node, text) {
+  text = text == null ? '' : String(text);
+  if (node.textContent !== text) { node.textContent = text; }
+}
+function setClass(node, cls) { if (node.className !== cls) { node.className = cls; } }
+
+// show() keeps the class contract and the hidden property in step. The CSS
+// hides #back and #more by default and reveals them on .on; `hidden` carries
+// the same fact somewhere the focus ring can read without consulting layout,
+// so a control the wearer cannot see is never a stop on the way round.
+function show(node, on) {
+  node.hidden = !on;
+  setClass(node, on ? 'on focusable' : 'focusable');
+}
+
+// A status word arrives from the API and lands in a class attribute. Statuses
+// are a closed set of identifiers, but a stray space would silently add a
+// second class, so keep it to what the stylesheet actually defines.
+function dotClass(word) { return 'dot ' + String(word || '').replace(/[^a-z_]/gi, ''); }
+
+// ── reconciler ──────────────────────────────────────────────────────────────
+// The list is patched in place rather than rebuilt from a string. Two things
+// depend on node identity surviving a refresh: the wearer's focus, which sits
+// on one of these buttons, and the scroll offset, which a wholesale innerHTML
+// swap drops back to the top. Reusing the node for a key that is still there
+// preserves both, so the minute poll is invisible unless something changed.
+function patch(host, items, keyOf, build, fill) {
+  var live = {}, i, key, node;
+  for (i = 0; i < host.childNodes.length; i++) {
+    key = host.childNodes[i].dataset && host.childNodes[i].dataset.key;
+    if (key) { live[key] = host.childNodes[i]; }
+  }
+  var want = [];
+  for (i = 0; i < items.length; i++) {
+    key = keyOf(items[i]);
+    node = live[key];
+    if (node) { delete live[key]; } else { node = build(items[i]); node.dataset.key = key; }
+    fill(node, items[i]);
+    want.push(node);
+  }
+  for (key in live) {
+    if (live[key].parentNode === host) { host.removeChild(live[key]); }
+  }
+  for (i = 0; i < want.length; i++) {
+    if (host.childNodes[i] !== want[i]) { host.insertBefore(want[i], host.childNodes[i] || null); }
+  }
+}
+
+// patchList is patch() plus the one case node reuse cannot cover: the focused
+// row itself disappearing, because a task changed status out from under a
+// filter or a project was hidden. Dropping focus to the top of the document is
+// the worst available answer on a device whose only correction is swiping the
+// whole way back down, so land on whatever now occupies that position.
+function patchList(host, items, keyOf, build, fill) {
+  var active = document.activeElement;
+  var owned = !!(active && active.parentNode === host);
+  var at = owned ? indexIn(host, active) : -1;
+
+  patch(host, items, keyOf, build, fill);
+
+  if (owned && active.parentNode !== host && host.childNodes.length) {
+    focusNode(host.childNodes[Math.min(at < 0 ? 0 : at, host.childNodes.length - 1)]);
+  }
+}
+
+function indexIn(host, node) {
+  for (var i = 0; i < host.childNodes.length; i++) {
+    if (host.childNodes[i] === node) { return i; }
+  }
+  return -1;
+}
+
+function clear(host) {
+  while (host.firstChild) { host.removeChild(host.firstChild); }
+}
+
+// ── gestures ────────────────────────────────────────────────────────────────
+// The device delivers arrow-key and Enter keydowns aimed at document
+// .activeElement and supplies no focus navigation of its own, so this handler
+// is the whole cursor. It is also why left and right used to appear to stick
+// after one press: nothing here moved the selection, and the engine's own
+// fallback for a horizontal key on a single column of full-width rows is to
+// look for something beside the current row and find nothing.
+//
+// Left and right are the selection axis, and they wrap, so the ring is closed
+// and a wearer can always reach every control by continuing to swipe one way.
+// Up and down are left alone while the document can scroll, because reading a
+// long task result is what that axis is for and the wearer asked to keep it;
+// on a screen that fits, where they would otherwise do nothing at all, they
+// fall back to moving the selection.
+
+function focusables() {
+  var all = document.querySelectorAll('.focusable'), out = [], i;
+  for (i = 0; i < all.length; i++) {
+    if (!all[i].hidden && !all[i].disabled) { out.push(all[i]); }
+  }
+  return out;
+}
+
+function focusNode(node) {
+  if (!node) { return; }
+  node.focus();
+  // focus() scrolls the node into view on its own; asking for 'nearest' keeps
+  // a row that is already visible exactly where the wearer is looking instead
+  // of yanking the column to centre it.
+  if (node.scrollIntoView) { node.scrollIntoView({ block: 'nearest' }); }
+}
+
+function moveFocus(delta) {
+  var ring = focusables();
+  if (!ring.length) { return; }
+  var at = ring.indexOf(document.activeElement);
+  var next = at < 0 ? (delta > 0 ? 0 : ring.length - 1) : at + delta;
+  focusNode(ring[(next % ring.length + ring.length) % ring.length]);
+}
+
+function focusFirstRow() {
+  var rows = el('list').childNodes;
+  for (var i = 0; i < rows.length; i++) {
+    if (rows[i].classList && rows[i].classList.contains('focusable')) { focusNode(rows[i]); return; }
+  }
+  moveFocus(1);
+}
+
+function pageScrolls() {
+  var d = document.scrollingElement || document.documentElement;
+  return !!d && d.scrollHeight > d.clientHeight + 1;
+}
+
+document.addEventListener('keydown', function(ev) {
+  if (ev.defaultPrevented || ev.altKey || ev.ctrlKey || ev.metaKey) { return; }
+  var key = ev.key;
+
+  if (key === 'ArrowRight' || key === 'ArrowLeft') {
+    moveFocus(key === 'ArrowRight' ? 1 : -1);
+  } else if (key === 'ArrowDown' || key === 'ArrowUp') {
+    if (pageScrolls()) { return; }
+    moveFocus(key === 'ArrowDown' ? 1 : -1);
+  } else if (key === 'Enter' || key === ' ' || key === 'Spacebar') {
+    var active = document.activeElement;
+    // A pinch arrives as Enter on whatever has focus, and on a fresh or
+    // rebuilt screen that can still be the body. Treat it as "give me the
+    // cursor back" rather than dropping the gesture: it is the only way out
+    // for a wearer who has no other key to press.
+    if (active && active.classList && active.classList.contains('focusable')) {
+      // Activate explicitly and swallow the default. A native button would
+      // otherwise do it too, and the device's Enter is not reliably trusted;
+      // doing it here is one activation in both cases rather than two in one
+      // and none in the other.
+      active.click();
+    } else {
+      moveFocus(1);
+    }
+  } else if (key === 'Escape') {
+    goBack();
+  } else {
+    return; // not ours: leave the default alone
+  }
+  ev.preventDefault();
+});
+
 // ── projects ────────────────────────────────────────────────────────────────
 
-function showProjects() {
+function openProjects() {
   state.view = 'projects';
   state.project = null;
-  el('back').className = '';
-  el('title').textContent = 'Projects';
-  el('filters').innerHTML = '';
-  el('more').className = '';
-  el('list').innerHTML = '';
-  el('sub').textContent = '';
+  state.taskID = 0;
+  show(el('back'), false);
+  show(el('more'), false);
+  setText(el('title'), 'Projects');
+  setText(el('sub'), '');
+  clear(el('filters'));
+  clear(el('list'));
   say('Loading…');
+  return load(true);
+}
 
-  api('/api/glasses/projects').then(function(d) {
+function loadProjects(navigating) {
+  return api('/api/glasses/projects').then(function(d) {
+    if (state.view !== 'projects') { return; }  // the wearer moved on mid-flight
     var projects = (d && d.projects) || [];
-    if (!projects.length) {
-      say('No projects yet.');
-      return;
-    }
-    say('');
-    el('sub').textContent = projects.length + (projects.length === 1 ? ' project' : ' projects');
-    el('list').innerHTML = projects.map(function(p) {
-      var pct = p.total > 0 ? Math.round(p.done / p.total * 100) : 0;
-      var stateWord = p.running ? 'running' : (p.status || 'idle');
-      return '<button class="row" type="button" data-idx="' + p.idx + '" data-name="' + esc(p.name) + '">' +
-        '<div class="name"><span class="dot ' + esc(p.running ? 'running' : stateWord) + '"></span>' + esc(p.name) + '</div>' +
-        '<div class="meta">' + esc(stateWord) + ' &middot; ' + p.done + '/' + p.total + ' tasks' +
-        (p.failed > 0 ? ' &middot; ' + p.failed + ' failed' : '') + '</div>' +
-        '<div class="bar"><i style="width:' + pct + '%"></i></div>' +
-        '</button>';
-    }).join('');
-  }).catch(function(err) { say(err.message, true); });
+    say(projects.length ? '' : 'No projects yet.');
+    setText(el('sub'), projects.length ? projects.length + (projects.length === 1 ? ' project' : ' projects') : '');
+    patchList(el('list'), projects, projectKey, buildProject, fillProject);
+    if (navigating) { focusFirstRow(); }
+  });
+}
+
+// Keyed by name, not by index: indices shift when a project is hidden or
+// added, and a key that moves would rebuild every row below it and take the
+// wearer's focus with it.
+function projectKey(p) { return 'p:' + p.name; }
+
+function buildProject() {
+  var row = mk('button', 'row focusable');
+  row.type = 'button';
+  var name = mk('div', 'name');
+  row._dot = name.appendChild(mk('span', 'dot'));
+  row._name = name.appendChild(mk('span'));
+  row.appendChild(name);
+  row._meta = row.appendChild(mk('div', 'meta'));
+  var bar = mk('div', 'bar');
+  row._fill = bar.appendChild(mk('i'));
+  row.appendChild(bar);
+  return row;
+}
+
+function fillProject(row, p) {
+  var word = p.running ? 'running' : (p.status || 'idle');
+  row.dataset.idx = p.idx;
+  row.dataset.name = p.name;
+  setClass(row._dot, dotClass(word));
+  setText(row._name, p.name);
+  setText(row._meta, word + ' · ' + p.done + '/' + p.total + ' tasks' +
+    (p.failed > 0 ? ' · ' + p.failed + ' failed' : ''));
+  var pct = (p.total > 0 ? Math.round(p.done / p.total * 100) : 0) + '%';
+  if (row._fill.style.width !== pct) { row._fill.style.width = pct; }
 }
 
 // ── tasks ───────────────────────────────────────────────────────────────────
@@ -265,78 +501,142 @@ var FILTERS = [
   { key: 'failed', label: 'Failed' }
 ];
 
-function showTasks(idx, name, append) {
+function openTasks(idx, name) {
   state.view = 'tasks';
   state.project = { idx: idx, name: name };
-  el('back').className = 'on';
-  el('title').textContent = name || 'Tasks';
-  if (!append) {
-    state.offset = 0;
-    state.tasks = [];
-    el('list').innerHTML = '';
-    say('Loading…');
-  }
+  state.tasks = [];
+  state.total = 0;
+  state.taskID = 0;
+  show(el('back'), true);
+  show(el('more'), false);
+  setText(el('title'), name || 'Tasks');
+  setText(el('sub'), '');
+  clear(el('list'));
+  say('Loading…');
   renderFilters();
+  return load(true);
+}
+
+// mode is 'open', 'refresh' or 'more'. Only 'more' pages forward; a refresh
+// re-reads the whole window the wearer has open so an expanded list stays
+// expanded, and so a task that changed status is updated rather than appended.
+function loadTasks(navigating, mode) {
+  var idx = state.project.idx, status = state.status;
+  var offset = mode === 'more' ? state.tasks.length : 0;
+  var limit = mode === 'refresh' ? Math.min(Math.max(state.tasks.length, PAGE), MAX_WINDOW) : PAGE;
 
   var url = '/api/glasses/tasks?project_idx=' + encodeURIComponent(idx) +
-    '&offset=' + state.offset + (state.status ? '&status=' + encodeURIComponent(state.status) : '');
-  api(url).then(function(d) {
+    '&offset=' + offset + '&limit=' + limit +
+    (status ? '&status=' + encodeURIComponent(status) : '');
+
+  return api(url).then(function(d) {
+    // A response for the project or filter the wearer has already left is the
+    // bug class this dashboard has fixed eight times over. Drop it.
+    if (state.view !== 'tasks' || !state.project || state.project.idx !== idx || state.status !== status) { return; }
+
     state.total = (d && d.total) || 0;
     var batch = (d && d.tasks) || [];
-    state.tasks = state.tasks.concat(batch);
-    state.offset = state.tasks.length;
-    if (!state.tasks.length) {
-      say('No tasks match.');
-      el('sub').textContent = '';
-      el('more').className = '';
-      return;
-    }
-    say('');
-    el('sub').textContent = state.tasks.length + ' of ' + state.total +
-      (d && d.goal ? ' · ' + d.goal : '');
-    el('list').innerHTML = state.tasks.map(function(t) {
-      return '<button class="row" type="button" data-task="' + t.id + '">' +
-        '<div class="name"><span class="dot ' + esc(t.status) + '"></span>#' + t.id + ' ' + esc(t.title) + '</div>' +
-        '<div class="meta">' + esc(t.status.replace(/_/g, ' ')) +
-        (t.priority ? ' &middot; P' + t.priority : '') + '</div>' +
-        '</button>';
-    }).join('');
-    el('more').className = state.tasks.length < state.total ? 'on' : '';
-  }).catch(function(err) { say(err.message, true); });
+    state.tasks = mode === 'more' ? state.tasks.concat(batch) : batch;
+
+    say(state.tasks.length ? '' : 'No tasks match.');
+    setText(el('sub'), state.tasks.length
+      ? state.tasks.length + ' of ' + state.total + (d && d.goal ? ' · ' + d.goal : '')
+      : '');
+    patchList(el('list'), state.tasks, taskKey, buildTask, fillTask);
+    show(el('more'), state.tasks.length > 0 && state.tasks.length < state.total);
+    if (navigating) { focusFirstRow(); }
+  });
+}
+
+function taskKey(t) { return 't:' + t.id; }
+
+function buildTask(t) {
+  var row = mk('button', 'row focusable');
+  row.type = 'button';
+  row.dataset.task = t.id;
+  var name = mk('div', 'name');
+  row._dot = name.appendChild(mk('span', 'dot'));
+  row._name = name.appendChild(mk('span'));
+  row.appendChild(name);
+  row._meta = row.appendChild(mk('div', 'meta'));
+  return row;
+}
+
+function fillTask(row, t) {
+  setClass(row._dot, dotClass(t.status));
+  setText(row._name, '#' + t.id + ' ' + t.title);
+  setText(row._meta, String(t.status || '').replace(/_/g, ' ') + (t.priority ? ' · P' + t.priority : ''));
 }
 
 function renderFilters() {
-  el('filters').innerHTML = FILTERS.map(function(f) {
-    return '<button class="chip' + (f.key === state.status ? ' on' : '') +
-      '" type="button" data-status="' + esc(f.key) + '">' + esc(f.label) + '</button>';
-  }).join('');
+  patch(el('filters'), FILTERS, function(f) { return 'f:' + f.key; }, function(f) {
+    var chip = mk('button', 'chip focusable', f.label);
+    chip.type = 'button';
+    chip.dataset.status = f.key;
+    return chip;
+  }, function(chip, f) {
+    setClass(chip, f.key === state.status ? 'chip focusable on' : 'chip focusable');
+  });
 }
 
 // ── one task ────────────────────────────────────────────────────────────────
 
-function showTask(id) {
+function openTask(id) {
   state.view = 'task';
-  el('back').className = 'on';
-  el('filters').innerHTML = '';
-  el('more').className = '';
-  el('list').innerHTML = '';
+  state.taskID = id;
+  show(el('back'), true);
+  show(el('more'), false);
+  clear(el('filters'));
+  clear(el('list'));
   say('Loading…');
+  // Nothing in a detail pane is focusable, so hand the cursor to Back now
+  // rather than after the fetch: the wearer's next swipe has somewhere to
+  // start from, and the way out of this screen is already under it.
+  focusNode(el('back'));
+  return load(true);
+}
 
-  api('/api/glasses/tasks/' + encodeURIComponent(id) +
-      '?project_idx=' + encodeURIComponent(state.project ? state.project.idx : 0)).then(function(t) {
+function loadTask() {
+  var id = state.taskID;
+  return api('/api/glasses/tasks/' + encodeURIComponent(id) +
+    '?project_idx=' + encodeURIComponent(state.project ? state.project.idx : 0)).then(function(t) {
+    if (state.view !== 'task' || state.taskID !== id) { return; }
     say('');
-    el('title').textContent = 'Task #' + t.id;
-    el('sub').textContent = t.status.replace(/_/g, ' ') + (t.priority ? ' · P' + t.priority : '');
-    var html = '<div class="detail"><h2><span class="dot ' + esc(t.status) + '"></span>' + esc(t.title) + '</h2>';
-    if (t.description) {
-      html += '<div class="block"><div class="label">Description</div><div class="body">' + esc(t.description) + '</div></div>';
+    setText(el('title'), 'Task #' + t.id);
+    setText(el('sub'), String(t.status || '').replace(/_/g, ' ') + (t.priority ? ' · P' + t.priority : ''));
+
+    // Detail is patched like the lists are, for the same reason: a running
+    // task's result grows under the poll, and rebuilding the pane would throw
+    // away the scroll offset of a wearer who is part way down it.
+    var host = el('list'), d = host.firstChild;
+    if (!d || d.dataset.key !== 'detail') {
+      clear(host);
+      d = mk('div', 'detail');
+      d.dataset.key = 'detail';
+      var h = mk('h2');
+      d._dot = h.appendChild(mk('span', 'dot'));
+      d._title = h.appendChild(mk('span'));
+      d.appendChild(h);
+      d._blocks = {};
+      ['Description', 'Result'].forEach(function(label) {
+        var block = mk('div', 'block');
+        block.appendChild(mk('div', 'label', label));
+        block._body = block.appendChild(mk('div', 'body'));
+        d._blocks[label] = block;
+        d.appendChild(block);
+      });
+      host.appendChild(d);
     }
-    if (t.result) {
-      html += '<div class="block"><div class="label">Result</div><div class="body">' + esc(t.result) + '</div></div>';
-    }
-    html += '</div>';
-    el('list').innerHTML = html;
-  }).catch(function(err) { say(err.message, true); });
+    setClass(d._dot, dotClass(t.status));
+    setText(d._title, t.title);
+    fillBlock(d._blocks.Description, t.description);
+    fillBlock(d._blocks.Result, t.result);
+  });
+}
+
+function fillBlock(block, text) {
+  block.hidden = !text;
+  setText(block._body, text || '');
 }
 
 // ── navigation ──────────────────────────────────────────────────────────────
@@ -345,36 +645,51 @@ function showTask(id) {
 // a growing pile of dead listeners.
 
 el('list').addEventListener('click', function(ev) {
-  var row = ev.target.closest('.row');
+  var row = ev.target.closest ? ev.target.closest('.row') : null;
   if (!row) { return; }
-  if (row.dataset.task) { showTask(parseInt(row.dataset.task, 10)); return; }
-  if (row.dataset.idx !== undefined) { showTasks(parseInt(row.dataset.idx, 10), row.dataset.name, false); }
+  if (row.dataset.task) { openTask(parseInt(row.dataset.task, 10)); return; }
+  if (row.dataset.idx !== undefined) { openTasks(parseInt(row.dataset.idx, 10), row.dataset.name); }
 });
 
 el('filters').addEventListener('click', function(ev) {
-  var chip = ev.target.closest('.chip');
+  var chip = ev.target.closest ? ev.target.closest('.chip') : null;
   if (!chip || !state.project) { return; }
   state.status = chip.dataset.status || '';
-  showTasks(state.project.idx, state.project.name, false);
+  state.tasks = [];
+  clear(el('list'));
+  renderFilters();
+  // Focus stays on the chip the wearer just activated — the reconciler reuses
+  // it — so the next swipe continues from the filter row rather than from the
+  // top of a list that has just changed under them.
+  loadTasks(false, 'open').catch(fail);
 });
 
 el('more').addEventListener('click', function() {
-  if (state.project) { showTasks(state.project.idx, state.project.name, true); }
+  if (state.project) { loadTasks(false, 'more').catch(fail); }
 });
 
-el('back').addEventListener('click', function() {
-  if (state.view === 'task' && state.project) {
-    showTasks(state.project.idx, state.project.name, false);
-  } else {
-    showProjects();
-  }
+el('back').addEventListener('click', goBack);
+
+function goBack() {
+  if (state.view === 'task' && state.project) { openTasks(state.project.idx, state.project.name); }
+  else if (state.view !== 'projects') { openProjects(); }
+}
+
+el('reload').addEventListener('click', function() {
+  var btn = el('reload');
+  setClass(btn, 'busy focusable');
+  load(false).then(function() { setClass(btn, 'focusable'); });
 });
 
-el('reload').addEventListener('click', refresh);
-
-function refresh() {
-  if (state.view === 'projects') { showProjects(); }
-  else if (state.view === 'tasks' && state.project) { showTasks(state.project.idx, state.project.name, false); }
+// load dispatches to whichever view is current. navigating says whether the
+// wearer just arrived — the difference between "clear the screen, say Loading
+// and hand them the first row" and "patch what changed and touch nothing
+// else", which is the whole of the smooth-refresh behaviour.
+function load(navigating) {
+  if (state.view === 'projects') { return loadProjects(navigating).catch(fail); }
+  if (state.view === 'tasks' && state.project) { return loadTasks(navigating, navigating ? 'open' : 'refresh').catch(fail); }
+  if (state.view === 'task') { return loadTask().catch(fail); }
+  return Promise.resolve();
 }
 
 // The dashboard is push-based over a WebSocket; this page is not, deliberately.
@@ -387,8 +702,8 @@ var pollTimer = setInterval(tick, 60000);
 document.addEventListener('visibilitychange', tick);
 
 function tick() {
-  if (dead || document.visibilityState !== 'visible' || state.view === 'task') { return; }
-  refresh();
+  if (dead || document.visibilityState !== 'visible') { return; }
+  load(false);
 }
 
 function stopPolling() {
@@ -396,7 +711,7 @@ function stopPolling() {
   document.removeEventListener('visibilitychange', tick);
 }
 
-showProjects();
+openProjects();
 })();
 </script>
 </body>

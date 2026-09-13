@@ -215,6 +215,27 @@ Projects**, with an Unhide button per entry; and a **Danger Zone** whose
 *Reset Project State* clears step history and resets status while preserving
 the goal and configuration.
 
+### On the glasses
+
+The link opens a separate, much smaller page — `/glasses` — that lists your
+projects, drills into one project's tasks and shows a single task. It is
+read-only: nothing on it can start a run or change a task.
+
+The glasses have no pointer and no keyboard. Every band or temple gesture
+arrives at the page as an arrow key or Enter, so the page provides the cursor
+itself:
+
+| Gesture | What it does |
+| --- | --- |
+| Swipe left / right | Move the selection to the previous / next control. It wraps, so continuing one way always gets you everywhere. |
+| Swipe up / down | Scroll. On a screen with nothing to scroll they move the selection instead. |
+| Pinch | Activate whatever is selected. With nothing selected it takes the cursor back rather than doing nothing. |
+
+The selected control carries a blue ring — that ring is the only cursor there
+is. The page re-reads the hub about once a minute and patches what changed in
+place, so a refresh does not move your selection or lose your place in a long
+task result.
+
 ---
 
 ## Live updates
