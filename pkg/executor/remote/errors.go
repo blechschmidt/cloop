@@ -1,6 +1,11 @@
 package remote
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+
+	"github.com/blechschmidt/cloop/pkg/executor"
+)
 
 // Sentinel errors for the remote executor. Callers match with errors.Is;
 // implementations wrap these with %w and add detail.
@@ -62,7 +67,13 @@ var (
 	// than MinRevocationVersion, so material handed to it could never be
 	// taken back mid-run. Placing a workload that carries revocable secrets
 	// fails with this rather than proceeding without the guarantee.
-	ErrRevocationUnsupported = errors.New("remote: agent does not support lease revocation")
+	//
+	// It wraps executor.ErrRevocationUnsupported so a caller that has no
+	// reason to know which driver refused — the run panel reporting why a
+	// task would not start — can match the one sentinel and still get this
+	// driver's far more specific message.
+	ErrRevocationUnsupported = fmt.Errorf("remote: agent does not support lease revocation: %w",
+		executor.ErrRevocationUnsupported)
 
 	// ErrWorkspaceUnsupported: the agent speaks a protocol version older than
 	// MinWorkspaceVersion, so it would ignore the workspace credential and run

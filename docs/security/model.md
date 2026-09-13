@@ -367,11 +367,54 @@ by the lease rather than by the grant. That bound is only real if something can
 take the material back mid-run — otherwise a fifteen-minute lease handed to a
 three-hour task is a fifteen-minute *label* on three hours of access.
 
-The `revoke` frame (protocol v2) is what makes it real. `POST
-/api/leases/{id}/revoke` wipes the hub's own copy and pushes a scrub to every
-executor holding the lease; a TTL janitor sweeps live agent sessions once a
-minute; and cordon/drain scrubs everything the device is holding. All three go
+`POST /api/leases/{id}/revoke` wipes the hub's own copy and pushes a scrub to
+every executor holding the lease; a TTL janitor sweeps live sessions once a
+minute; and cordon/drain scrubs everything a device is holding. All three go
 through one path, so they cannot drift apart.
+
+Revocation is a capability of the *executor*, expressed as the optional
+`executor.Revoker` interface. A driver that does not implement it is refused
+any workload carrying revocable bindings — see
+[Revocation per backend](#revocation-per-backend) — so the guarantee is a
+property of the system rather than of which backend a project happens to be
+bound to.
+
+### Revocation per backend
+
+Each driver can take back what it can actually reach, and the report says which
+strength was delivered rather than flattening them into "revoked".
+
+| Backend | How the material is taken back | Does a scrub kill the workload? |
+| --- | --- | --- |
+| `remote` | `revoke` frame (protocol ≥ 2); the agent wipes files, drops allowlist entries and scrubs its own env copies | No — unless `action=kill` |
+| `container` | the staged lease directory is wiped through `pkg/securewipe`; it is bind-mounted into the sandbox, so the container sees the same inode | **Yes, for env-borne material only** |
+| `kubernetes` | the backing `cloop-lease-*` and `cloop-ws-*` Secrets are deleted | **Yes, whenever the Pod is still running** |
+| `localprocess` | env scrubbed from the driver's retained copies; the lease's files wiped | No — unless `action=kill` |
+
+The two escalations are the interesting rows, and both are forced by the
+backend rather than chosen.
+
+A **container** keeps a second copy of the environment in the runtime's own
+container config on disk, which `podman inspect` prints for as long as the
+container exists. Killing the process would leave that copy, so env-borne
+material is revoked with `rm --force`, which removes the config with the
+process. File-backed material needs none of this: unlinking on the host is what
+makes the next read inside the sandbox fail, and the workload keeps running.
+
+A **Kubernetes** Pod cannot have a projected volume un-projected. The kubelet
+serves the last content it synchronised and does not blank the tmpfs when the
+source Secret disappears, and a `secretKeyRef` value was copied into the
+container's environment when it started. Deleting the Secret is therefore
+necessary and not sufficient, and the Pod is deleted too.
+
+In both cases the operator asked for the gentler action, the gentler action is
+not available for that material, and the kill is **reported** — `Ack.Killed`
+names the handle. Doing nothing and reporting success is the only worse answer
+than escalating.
+
+This is also why `github_pat` delivery ships a credential *helper* reading a
+token *file* rather than exporting a bare `GITHUB_TOKEN`: on every backend, the
+file is the copy that can be revoked without destroying the run.
 
 ### What it is worth, per material
 
@@ -394,6 +437,80 @@ Go strings are immutable, so the env scrub replaces the slice entry rather than
 overwriting the bytes: the value becomes unreachable and is collected, but a
 memory dump taken in that window can still contain it. Files, which are
 mutable, *are* zeroed before being unlinked.
+
+### What it is worth after a hub restart
+
+**Undiminished, on every backend.** A revocation issued after a restart reaches
+a workload started before it.
+
+This was not always true, and the shape of the old failure is worth keeping in
+view because it was a *silent* one. Durable handle identity gave a restarted hub
+enough to stream, signal and reap a workload it had forgotten it started, but
+each driver's lease→handle index was still built in `Start` and nowhere else. A
+surviving workload therefore answered `HoldsLease` with false, and the fan-out
+in `pkg/ui/secrets_revoke.go` skips a non-holder — so the driver was never
+asked, nothing was wiped, and no replay was queued for when it could be.
+
+What the operator saw instead was an aggregate computed over an empty set:
+`revoked` where the hub still held a live lease of its own to wipe, `pending`
+where it did not. Neither is a lie the code tells on purpose, and that is the
+point — nothing logged, nothing failed, and the one component that could have
+answered was the one component not consulted. `liveLeases` is in-memory and
+does not survive a restart either; the startup sweep *wipes* the previous
+incarnation's lease directories rather than re-adopting them (see [Credential
+destruction](#credential-destruction--destruction_testgo)). So after a restart
+the executors' own copies are the only copies left, and the drivers' answers are
+the whole of the aggregate.
+
+What closes it is one column. `executor_handles.secrets_json`
+(`migrations/0031_executor_handle_secrets.sql`) stores the workload's
+`SecretBinding` set beside its identity, and all four drivers restore it through
+the same `executor.LeaseIndex.Adopt`. That the bindings are safe to persist is a
+property of the type rather than a promise made by the table: `SecretBinding`
+carries lease ids, environment **variable names**, file paths and a TTL, and no
+values — which is what already lets the control plane write it into
+`executor_sessions` and into audit rows, and is machine-checked by
+`TestSecretBindingCarriesNoMaterial`. `Spec.Env` holds the credentials
+themselves and stays out of the table, as it always has.
+
+One rule is shared rather than written per driver, because it is a security
+decision and not bookkeeping: **what an unrecorded binding means.** A row
+written before that column existed — an upgrade catches workloads mid-flight —
+says nothing about what its workload holds, and "no bindings recorded" and "no
+leases held" are the same empty set. Reading the first as the second is the
+original bug with extra steps. So such a handle is marked *unresolved*, and:
+
+- `HoldsLease` answers **true**, for any lease, so the executor is asked rather
+  than skipped — there is no honest way to say which lease it might hold;
+- `RevokeLease` reports **`failed`**, naming the handle and telling the operator
+  to rotate at the source. The aggregate takes the worst across holders, so one
+  unaccounted workload cannot be averaged away by three clean acks;
+- `Leases()` still lists only what is *known*, because inventing a lease id
+  would be a different lie;
+- the Secrets panel lists that executor among a lease's holders, which is the
+  consistent answer rather than an over-report: it *is* asked and it *does*
+  report a failure, so calling it a non-holder would contradict the outcome the
+  same operator is about to read;
+- the doubt clears when that workload exits. One pre-upgrade row does not poison
+  an executor for the life of the process.
+
+The `remote` driver is the one deliberate asymmetry, and it is asymmetric
+because the authority is: the device keeps a lease index of its own, in a
+process the hub's restart did not touch, so the frame reaches the material
+either way and the agent's ack is a *better* answer than anything the hub could
+reconstruct. What the unresolved mark buys there is the ask, not the verdict.
+
+| After a restart, the hub… | Answer | Reported as |
+| --- | --- | --- |
+| rebuilt the binding | the revocation reaches the workload | `revoked`, with files removed / killed handles |
+| rebuilt it, agent offline | queued and replayed on reconnect | `unreachable` |
+| cannot rebuild it | it cannot say whether the credential is in use | `failed`, naming the handle |
+
+An unresolved handle is a narrow case — a workload that outlived the hub *and*
+whose row predates the column, so at most one upgrade's worth — but it is the
+case in which the system has to admit it does not know. Rotation at the source
+remains the only action that does not depend on machinery, and the lease TTL
+still expires the grant.
 
 ### What it is worth when the agent is unreachable
 
@@ -436,6 +553,12 @@ be told (`TestVaultRefusesPathsOutsideALeaseDirectory`,
 intent even if the process dies mid-revocation; `lease.revoke_acked` or
 `lease.revoke_failed` follows per executor, with the lease and executor IDs and
 how long the ack took. Env variable *names* appear; values never do.
+
+Every backend is recorded, not only the remote fleet. Each driver also keeps an
+in-memory revocation log, which the Secrets panel reads — but that is live
+state, for replaying what an offline agent still owes. The hash-chained audit
+rows are the record: a process restart must not be able to erase the evidence
+that a credential was withdrawn.
 
 ---
 
@@ -1160,8 +1283,28 @@ what it is looking for.
 | `SecretBinding` — serialised into start frames, session rows and audit rows at once — emits a closed, reviewed set of JSON keys and no value-shaped field | `TestSecretBindingCarriesNoMaterial` |
 | `revoked` / `revoke_pending` / `unreachable` / `failed` stay distinct, and only `revoked` is terminal | `TestRevocationStatesAreDistinct` |
 | A binding that delivered nothing, or names no lease, does not count as revocable | `TestRevocableMaterialRequiresARevocableAgent` |
+| **Every** executor driver implements `executor.Revoker`, so the guarantee does not depend on which backend a project is bound to | `TestEveryExecutorDriverImplementsRevoker` |
+| A **new** driver cannot opt out silently: the tree is scanned, and any package implementing `Executor` without `Revoker` fails the suite | `TestNoDriverEscapesTheRevocationGate` |
+| A driver that cannot revoke is refused revocable material, with a diagnostic naming the driver and the credential — and a spec carrying none is unaffected | `TestRevocableMaterialIsRefusedOnADriverThatCannotRevoke` |
+| The refusal also holds on the failover path, which places through `executor.Select` rather than `Resolve` | `TestPlacementRefusesADriverThatCannotRevoke` |
+| A container revocation wipes exactly the named lease's staged files and leaves every other lease readable | `TestRevokeWipesOnlyTheNamedLease` (`pkg/executor/container`) |
+| A grant-scoped revocation narrows within a lease, and a shared lease directory survives while a live grant still uses it | `TestRevokeByGrantNarrowsWithinALease` (`pkg/executor/container`) |
+| Revoking twice is not an error, and teardown after a revocation still wipes the rest | `TestRevokeIsIdempotentAndRemoveStillWorksAfterIt` (`pkg/executor/container`) |
+| Staged files carry lease attribution, so a revocation can take one lease without taking the workload's others | `TestStagedFilesAreAttributedToTheirLease` (`pkg/executor/container`) |
+| A Kubernetes revocation deletes both backing Secrets and reports what it removed | `TestRevokeLease_DeletesTheLeasedSecrets` (`pkg/executor/kubernetes`) |
+| It also evicts the Pod, because a projected volume and a started container's env are copies the API server cannot reach | `TestRevokeLease_EvictsThePodBecauseTheMaterialIsAlreadyInside` (`pkg/executor/kubernetes`) |
+| A lease an executor never held is reported as not-held rather than as a failure, and deletes nothing | `TestRevokeLease_LeaseThisExecutorNeverHadIsNotAFailure` (`pkg/executor/kubernetes`) |
+| A lease binding is tracked while the workload can use it and released once it finishes | `TestHoldsLease_TracksTheBindingForAsLongAsThePodCanUseIt` (`pkg/executor/kubernetes`) |
+| The hub-side wipe is not an arbitrary-unlink primitive either: a binding naming a path outside a `cloop-lease-*` directory is refused and reported | `TestWipeBindingFilesRefusesPathsOutsideALeaseDirectory` (`pkg/executor/localprocess`) |
+| …and the positive case still destroys the material, so the refusal is not passing by refusing everything | `TestWipeBindingFilesRemovesLeaseMaterial` (`pkg/executor/localprocess`) |
 | An agent below `MinRevocationVersion` is refused placement for revocable material, with a diagnostic naming the device and the fix | `TestOldAgentIsRefusedRevocableWorkload` (`pkg/executor/remote`) |
 | A revocation issued while an agent was offline is replayed on reconnect, action intact | `TestRevocationIsReplayedOnReconnect` (`pkg/executor/remote`) |
+| A revocation issued **after a hub restart** still reaches a workload started before it, and wipes its credential file | `TestRevocationReachesAWorkloadThatOutlivedTheHub` |
+| A hub that cannot rebuild a binding reports a failure naming the handle, never a success — and the doubt clears when that workload exits | `TestAHubThatCannotRebuildABindingSaysSo` |
+| The same holds for a remote agent: a rehydrated device is still a holder, so an offline revocation is queued for replay rather than never issued | `TestTheRemoteDriverAlsoRestoresBindingsOnRehydration` |
+| The bindings persisted to `executor_handles.secrets_json` carry no material, and "unrecorded" (`''`) never collapses into "recorded, none" (`'[]'`) | `TestPersistedBindingsCarryNoMaterialThroughSQLite` |
+| No driver drops the wiring: every backend both records bindings at dispatch and restores them on adoption | `TestEveryDriverRehydratesItsLeaseBindings` |
+| The shared adoption rule itself — doubt is not absence, doubt is not scoped to one lease, `Bind` resolves it, `Release` clears it | `TestLeaseIndexAdoptOfAnUnrecordedRecordIsDoubtNotAbsence` and siblings (`pkg/executor`) |
 | A revoke mid-run really removes the credential: the running workload observes its token file disappear | `TestLoopbackRevokeScrubsMaterialMidRun` (`pkg/executor/remote`) |
 | `action=kill` terminates every holder, escalating to `SIGKILL` | `TestLoopbackRevokeKillTerminatesHolder` (`pkg/executor/remote`) |
 | The revoke frame is not an arbitrary-unlink primitive: paths outside a `cloop-lease-*` directory are refused and reported | `TestVaultRefusesPathsOutsideALeaseDirectory`, `TestLoopbackRevokeRefusesPathsOutsideALeaseDirectory` |
@@ -1537,6 +1680,17 @@ not of the secret the key comes from. Someone who has read `hub.env` can still
 derive every non-retired KEK. Changing the passphrase remains a re-mint, and the
 [runbook](../operations/runbook.md#changing-cloop_secret_key-itself) says so
 plainly rather than letting the new command imply otherwise.
+
+**Draining an executor revokes only the leases it can name.** Cordon and drain
+enumerate `Leases()` and revoke each one, and `Leases()` deliberately lists only
+what is *known* — there is no honest way to name a lease an unaccounted workload
+might be holding. So an executor drained while running a workload whose bindings
+could not be rebuilt is reported as drained, and the per-lease revocation path is
+the one that reports the doubt (see [What it is worth after a hub
+restart](#what-it-is-worth-after-a-hub-restart)). The window is at most one
+upgrade wide and closes when that workload exits; until then, an operator
+decommissioning a device should rotate its credentials at the source rather than
+treat the drain as proof.
 
 **DEKs live in process memory.** The suite asserts that a plaintext DEK never
 reaches disk or a log. It cannot assert that the kernel never paged one out of

@@ -83,6 +83,15 @@ type Executor struct {
 	// through handleStore(). Nil when the embedder gave none, which degrades to
 	// the pre-Task-20191 behaviour. See rehydrate.go.
 	store executor.HandleStore
+
+	// leases maps a secret lease to the processes started with its material,
+	// so a revocation knows whose environment to scrub and which files to
+	// wipe. Its own lock, not mu, because a revocation must not queue behind
+	// a fork holding the executor lock. See revoke.go.
+	leases *executor.LeaseIndex
+	// revocations is the log of leases this executor has been told to give
+	// back, for the Secrets panel.
+	revocations *executor.RevocationLog
 }
 
 // record is the driver's bookkeeping for one started process.
@@ -172,7 +181,12 @@ func New(id string) *Executor {
 	if strings.TrimSpace(id) == "" {
 		id = DefaultID
 	}
-	return &Executor{id: id, handles: make(map[string]*record)}
+	return &Executor{
+		id:          id,
+		handles:     make(map[string]*record),
+		leases:      executor.NewLeaseIndex(),
+		revocations: executor.NewRevocationLog(),
+	}
 }
 
 var (
@@ -356,6 +370,12 @@ func (e *Executor) Start(ctx context.Context, spec executor.Spec) (executor.Hand
 	store := e.store
 	e.mu.Unlock()
 
+	// Bound immediately after the handle is reachable, so the window in which
+	// a revocation could miss this process is closed before anything slow
+	// happens. The reverse order would leave a workload holding a credential
+	// that HoldsLease reports as absent.
+	e.leases.Bind(rec.id, spec.Secrets)
+
 	// Capture the pid's identity *before* the pump goroutine exists, and this
 	// ordering is the correctness argument for the whole rehydration path.
 	//
@@ -419,6 +439,12 @@ func (e *Executor) Start(ctx context.Context, spec executor.Spec) (executor.Hand
 		// case the row is still written — a sweep can still see that a workload
 		// exists — but adoption will decline it rather than guess.
 		Meta: ident.meta(),
+		// The lease attribution recorded above in e.leases.Bind, persisted so
+		// a revocation arriving after a hub restart can rebuild that index and
+		// still reach this process. Names and paths only — the credential
+		// values are in Spec.Env, which is deliberately not stored.
+		Secrets:         spec.Secrets,
+		SecretsRecorded: true,
 	})
 
 	go e.pump(rec, pipeR)
@@ -899,6 +925,11 @@ func (e *Executor) finish(rec *record, state executor.State, exitCode int, errMs
 	// driver is e.mu before rec.mu (see pruneLocked).
 	if final.Terminal() {
 		executor.ForgetHandle(e.handleStore(), rec.id)
+		// And the lease attribution with it: the process is gone, so this
+		// handle must stop answering HoldsLease. Leaving it bound would make
+		// the Secrets panel show a finished run as a live holder, and send
+		// every later revocation chasing a pid that no longer exists.
+		e.leases.Release(rec.id)
 	}
 
 	for _, sub := range subs {

@@ -322,7 +322,23 @@ type Executor struct {
 	// AttachHandleStore can install one long after New has returned, while the
 	// log pumps that call ForgetHandle are already running.
 	store executor.HandleStore
+
+	// leases maps a secret lease to the containers started with its material,
+	// so a revocation knows which sandboxes to reach into. It carries the
+	// bindings, never the Spec: SecretBinding holds names and paths and no
+	// values, which is what makes it safe to retain for a handle's lifetime.
+	// Its own lock, not mu, because a revocation must not queue behind a
+	// slow image pull holding the executor lock. See revoke.go.
+	leases *executor.LeaseIndex
+	// revocations is the log of leases this executor has been told to give
+	// back, for the Secrets panel.
+	revocations *executor.RevocationLog
 }
+
+// now is the driver's clock. A method rather than a direct time.Now() call so
+// the revocation timestamps that bound "how long was the credential still
+// live" come from one place.
+func (e *Executor) now() time.Time { return time.Now() }
 
 // record is the driver's bookkeeping for one container.
 type record struct {
@@ -347,6 +363,18 @@ type record struct {
 	finishedAt time.Time
 	errMsg     string
 	done       bool
+	// killRequested records that this driver asked for the container's death
+	// and why, without yet claiming it happened.
+	//
+	// It is separate from markKilled's state transition because a revocation
+	// needs to state its cause *before* issuing `rm --force` — the reaper can
+	// reach finish the instant the container disappears, and a cause recorded
+	// after the removal would lose the race and report "could not be waited
+	// on" instead of "the credential was revoked". Recording the state that
+	// early would be the opposite error: a removal that fails would leave a
+	// live container reported as killed. So intent and outcome are two fields.
+	killRequested bool
+	killReason    string
 }
 
 // New returns a container executor, detecting the runtime described by opts.
@@ -370,9 +398,11 @@ func New(opts Options) (*Executor, error) {
 		// actually caches: a fresh one per workload start would re-spawn
 		// cosign — and re-contact the transparency log — for every task in a
 		// project that runs the same image all day.
-		verifier: imagepolicy.NewCosignVerifier(),
-		handles:  make(map[string]*record),
-		store:    norm.HandleStore,
+		verifier:    imagepolicy.NewCosignVerifier(),
+		handles:     make(map[string]*record),
+		store:       norm.HandleStore,
+		leases:      executor.NewLeaseIndex(),
+		revocations: executor.NewRevocationLog(),
 	}
 	// Reattach before returning, so a caller that lists handles immediately
 	// sees the workloads the previous process left running rather than an
@@ -638,6 +668,19 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, extraMounts []
 	store := e.store
 	e.mu.Unlock()
 
+	// Bound as soon as the handle exists, which is the earliest point at which
+	// there is a handle to bind.
+	//
+	// It is not the earliest point at which the credential exists: the files
+	// were staged near the top of this function, and sandboxImage above can
+	// spend minutes building a derived image between the two. A revocation
+	// landing in that window finds no holder and reports "not here" — which is
+	// true of any running workload and false of the host. The narrower fix is
+	// to bind against the staged material rather than the handle; recorded
+	// here because the window is real and a reader deserves to know its shape
+	// rather than be told it is closed.
+	e.leases.Bind(rec.id, spec.Secrets)
+
 	// Armed before the row is written so the persisted deadline is the one
 	// actually in force, and as an absolute instant so a restart resumes the
 	// remaining time rather than restarting the clock.
@@ -676,6 +719,12 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, extraMounts []
 		StartedAt: rec.startedAt,
 		Deadline:  deadline,
 		Meta:      map[string]string{metaRuntime: e.rt.Name},
+		// The lease attribution recorded above in e.leases.Bind, persisted so
+		// a revocation arriving after a hub restart can rebuild that index and
+		// still reach this sandbox. Names and paths only — the credential
+		// values are in Spec.Env, which is deliberately not stored.
+		Secrets:         spec.Secrets,
+		SecretsRecorded: true,
 	})
 
 	// The pump is detached from ctx on purpose: it must outlive the request
@@ -1748,13 +1797,26 @@ func (e *Executor) finish(rec *record, state executor.State, exitCode int, errMs
 		return
 	}
 	rec.done = true
-	// A kill we requested wins over the exit status the runtime reports,
-	// which would otherwise look like an ordinary signal death.
-	if rec.state == executor.StateKilled && state == executor.StateExited {
+	// A kill we requested wins over whatever the runtime reports afterwards,
+	// and "whatever" is the operative word. markKilled is only ever called by
+	// this driver — the timeout timer, an explicit Signal, a lease revocation —
+	// so once it has run the workload's death is ours and anything the reaper
+	// subsequently observes is a consequence of it.
+	//
+	// StateFailed has to be covered, not just StateExited. Revocation removes
+	// the container with `rm --force`, so the reaper's `wait` then fails with
+	// "no such container" and arrives here as StateFailed carrying that as the
+	// reason. Promoting only from StateExited would report a revoked sandbox as
+	// "failed: container … could not be waited on", erasing the one fact the
+	// transcript needed to record: that a withdrawn credential killed it.
+	if rec.state == executor.StateKilled || rec.killRequested {
 		state = executor.StateKilled
-	}
-	if rec.state == executor.StateKilled && errMsg == "" {
-		errMsg = rec.errMsg
+		switch {
+		case rec.killReason != "":
+			errMsg = rec.killReason
+		case rec.errMsg != "":
+			errMsg = rec.errMsg
+		}
 	}
 	rec.state = state
 	rec.exitCode = exitCode
@@ -1793,6 +1855,13 @@ func (e *Executor) finish(rec *record, state executor.State, exitCode int, errMs
 	// that survives one of those is a credential that survives on the host
 	// until the next reboot.
 	rec.secretStage.remove()
+	// And the lease attribution with it, but only for a workload that is
+	// actually over — the same gate ForgetHandle above carries. A handle
+	// retired while its container keeps running must stay bound, or it would
+	// stop answering HoldsLease while still holding the credential.
+	if state.Terminal() {
+		e.leases.Release(rec.id)
+	}
 
 	// Close the bus only after the status is final; see pump's doc comment.
 	rec.bus.Close()
@@ -1828,6 +1897,29 @@ func (e *Executor) armKillTimer(rec *record, d time.Duration, reason string) {
 
 // markKilled records that termination was requested. It does not deliver a
 // signal.
+// requestKill records the driver's intent to destroy this container, and why,
+// without asserting that it has happened yet. Paired with abandonKill on the
+// path where the destruction fails.
+func (r *record) requestKill(reason string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.state.Terminal() {
+		return
+	}
+	r.killRequested = true
+	r.killReason = reason
+}
+
+// abandonKill withdraws a requestKill whose destruction did not happen, so a
+// container that is still running is not later attributed to a cause that never
+// took effect.
+func (r *record) abandonKill() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.killRequested = false
+	r.killReason = ""
+}
+
 func (r *record) markKilled(reason string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

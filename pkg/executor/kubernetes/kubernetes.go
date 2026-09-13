@@ -445,7 +445,30 @@ type Executor struct {
 	// mutating it there would be a data race on a struct the whole file
 	// treats as immutable. Guarded by mu; read through handleStore().
 	store executor.HandleStore
+
+	// leases maps a secret lease to the Pods started with its material, so a
+	// revocation knows which workloads to evict. It carries the bindings,
+	// never the Spec: SecretBinding holds names and paths and no values,
+	// which is what makes it safe to retain for a handle's lifetime. Its own
+	// lock, not mu, because a revocation must not queue behind a slow Pod
+	// create holding the executor lock. See revoke.go.
+	leases *executor.LeaseIndex
+	// revocations is the log of leases this executor has been told to give
+	// back, for the Secrets panel.
+	revocations *executor.RevocationLog
 }
+
+// now is the driver's clock, and it delegates to the injectable one that every
+// other site in this file already uses.
+//
+// Reading the wall clock directly here would hand a caller that injected a
+// clock two of them: rec.startedAt and rec.finishedAt from the fake, and a
+// revocation's SentAt/AckedAt from the host. Those timestamps get subtracted
+// from each other to answer "how long was the credential still live after the
+// operator pressed the button" — a question an incident review asks — and an
+// answer computed across two clocks is worse than no answer, because it looks
+// like one.
+func (e *Executor) now() time.Time { return e.opts.now() }
 
 // record is the driver's bookkeeping for one Pod.
 type record struct {
@@ -544,9 +567,11 @@ func New(opts Options) (*Executor, error) {
 		// One verifier for the executor's lifetime so its per-digest cache
 		// survives across Pod creations; a fresh one per Pod would re-spawn
 		// cosign for every task in a project that runs one image.
-		verifier: imagepolicy.NewCosignVerifier(),
-		handles:  make(map[string]*record),
-		store:    norm.HandleStore,
+		verifier:    imagepolicy.NewCosignVerifier(),
+		handles:     make(map[string]*record),
+		store:       norm.HandleStore,
+		leases:      executor.NewLeaseIndex(),
+		revocations: executor.NewRevocationLog(),
 	}
 	ex.rehydrate()
 	return ex, nil
@@ -943,6 +968,12 @@ func (e *Executor) Start(ctx context.Context, spec executor.Spec) (executor.Hand
 	e.pruneLocked()
 	e.mu.Unlock()
 
+	// Bound immediately after the handle is reachable, so the window in which
+	// a revocation could miss this Pod is closed before anything slow happens.
+	// The reverse order would leave a workload holding a credential that
+	// HoldsLease reports as absent.
+	e.leases.Bind(rec.id, spec.Secrets)
+
 	// Persisted the instant the handle becomes real, and not one statement
 	// later than it has to be: everything between the create call above and
 	// this line is a window in which a hub killed mid-Start leaves a Pod
@@ -973,6 +1004,12 @@ func (e *Executor) Start(ctx context.Context, spec executor.Spec) (executor.Hand
 		Image:       podImage(created, desired),
 		StartedAt:   rec.startedAt,
 		Meta:        handleMeta(rec.networkPolicyName),
+		// The lease attribution recorded above in e.leases.Bind, persisted so
+		// a revocation arriving after a hub restart can rebuild that index and
+		// still reach this Pod. Names and paths only — the credential values
+		// live in the backing Secrets, which this row does not name.
+		Secrets:         spec.Secrets,
+		SecretsRecorded: true,
 	})
 
 	rec.bus.Emit(fmt.Sprintf("[cloop] pod %s/%s created on %s\n",
@@ -2324,6 +2361,16 @@ func (e *Executor) finish(rec *record, state executor.State, exitCode int, errMs
 	// in ContainerCreating; the material is short-lived on the broker's own TTL
 	// anyway, so that run was going to fail regardless.
 	e.discardSecretFiles(leaseFiles, cli)
+	// The lease attribution is dropped only for a workload that is actually
+	// over, and the gate is the point rather than a formality — it is the same
+	// one ForgetHandle below carries, for the same reason. Close() finishes
+	// every live handle as StateUnknown while deliberately leaving its Pods
+	// running; unbinding there would make a graceful hub shutdown silently
+	// unrevocable, because every Pod still holding projected credentials would
+	// stop answering HoldsLease while continuing to use them.
+	if state.Terminal() {
+		e.leases.Release(rec.id)
+	}
 	e.deleteNetworkPolicyDetached(cli, rec.namespace, policyName)
 	// Past the rec.done guard above, so a double finish — the pump and an
 	// explicit reap racing on the same handle — drops the row once.
@@ -2365,6 +2412,15 @@ func (r *record) finished() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.done
+}
+
+// leaseFilesState returns the credential-file bookkeeping, or nil when this run
+// had none — which is also the case for a record adopted after a restart, whose
+// Secret names revoke.go re-derives from the handle ID instead.
+func (r *record) leaseFilesState() *secretFilesState {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.leaseFiles
 }
 
 // workspace returns the provisioning state, or nil when this run had none.

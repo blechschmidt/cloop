@@ -76,6 +76,11 @@ func storeExecutor(t *testing.T, id string, rt Runtime, store executor.HandleSto
 		rt:      rt,
 		handles: make(map[string]*record),
 		store:   store,
+		// The lease index is what rehydration restores bindings into, so a
+		// double that omitted it would let a rehydration test pass without
+		// exercising the half of adoption a revocation depends on.
+		leases:      executor.NewLeaseIndex(),
+		revocations: executor.NewRevocationLog(),
 	}
 }
 

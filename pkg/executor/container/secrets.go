@@ -31,13 +31,16 @@ package container
 // undo the one enforcement point a repository-scoped GitHub PAT has.
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/blechschmidt/cloop/pkg/executor"
+	"github.com/blechschmidt/cloop/pkg/securewipe"
 )
 
 // secretDirPrefix names the staging directories. It matches the prefix
@@ -53,13 +56,36 @@ const secretDirPrefix = "cloop-lease-"
 // is the only thing carrying the guarantee.
 var secretTmpfsCandidates = []string{"/dev/shm"}
 
+// stagedFile is one credential file on the host, attributed to the lease that
+// produced it.
+//
+// The attribution is what makes revocation possible at the right granularity.
+// Without it a stage is an anonymous set of paths, and "revoke lease_abc" could
+// only be honoured by wiping every credential the workload holds — taking away
+// a kubeconfig because a GitHub PAT was withdrawn.
+type stagedFile struct {
+	// host is the path on this machine. It is inside a dir bind-mounted into
+	// the container, so unlinking it here is what the workload sees.
+	host string
+	// leaseID and grantID attribute the file, copied from executor.SecretFile.
+	leaseID string
+	grantID string
+}
+
 // secretStage is one run's staged credential files, and the means to remove
-// them.
+// them — either all at once on teardown, or one lease at a time on revocation.
+//
+// It is mutex-guarded because those two callers race: a revocation arriving
+// while the workload is exiting would otherwise have finish() walking the same
+// slices the revocation is truncating.
 type secretStage struct {
+	mu sync.Mutex
 	// mounts are the read-only binds to add to the run.
 	mounts []mount
 	// dirs are the host directories created, for teardown.
 	dirs []string
+	// files are the staged credentials, attributed to their leases.
+	files []stagedFile
 }
 
 // mountList returns the binds to add to the run, or nil for no stage.
@@ -67,6 +93,8 @@ func (s *secretStage) mountList() []mount {
 	if s == nil {
 		return nil
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return s.mounts
 }
 
@@ -76,10 +104,86 @@ func (s *secretStage) remove() {
 	if s == nil {
 		return
 	}
-	for _, dir := range s.dirs {
+	s.mu.Lock()
+	dirs, files := s.dirs, s.files
+	s.dirs, s.files = nil, nil
+	s.mu.Unlock()
+
+	// Files first, then the directories. Wiping a file the dir sweep would
+	// also have caught is harmless; the reverse — removing the directory and
+	// then finding an unwiped file — is not expressible.
+	for _, f := range files {
+		if err := securewipe.File(f.host); err != nil {
+			fmt.Fprintf(os.Stderr, "container: wipe secret file %s: %v\n", f.host, err)
+		}
+	}
+	for _, dir := range dirs {
 		wipeSecretDir(dir)
 	}
-	s.dirs = nil
+}
+
+// revoke wipes the staged files matching req and reports how many went.
+//
+// Only the matching files are touched: a directory shared by two leases loses
+// one lease's credentials and keeps the other's, and the directory itself is
+// removed only once nothing staged remains in it. The bind mount stays in
+// place either way — the container's view of the directory is the same inode
+// as the host's, so unlinking here is what makes the next read inside the
+// sandbox fail. Removing the mount would need a remount of a running
+// container's namespace, which no runtime exposes, and is not needed: an empty
+// read-only directory delivers nothing.
+//
+// Errors are joined and returned rather than logged, because this one runs
+// with an operator waiting for an answer. A wipe that failed must not be
+// reported as a revocation that succeeded.
+func (s *secretStage) revoke(req executor.RevokeRequest) (int, error) {
+	if s == nil {
+		return 0, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var (
+		errs    []error
+		removed int
+		kept    []stagedFile
+	)
+	for _, f := range s.files {
+		if !req.Matches(executor.SecretBinding{LeaseID: f.leaseID, GrantID: f.grantID}) {
+			kept = append(kept, f)
+			continue
+		}
+		if err := securewipe.File(f.host); err != nil {
+			errs = append(errs, fmt.Errorf("wipe %s: %w", f.host, err))
+			// Kept deliberately: a file that would not wipe is still this
+			// stage's responsibility, and dropping it from the list would
+			// mean teardown never tried again.
+			kept = append(kept, f)
+			continue
+		}
+		removed++
+	}
+	s.files = kept
+
+	// A directory with no staged file left in it is removed, so a revoked
+	// lease leaves nothing behind — not even an empty directory naming it.
+	inUse := make(map[string]struct{}, len(kept))
+	for _, f := range kept {
+		inUse[filepath.Dir(f.host)] = struct{}{}
+	}
+	var keptDirs []string
+	for _, dir := range s.dirs {
+		if _, still := inUse[dir]; still {
+			keptDirs = append(keptDirs, dir)
+			continue
+		}
+		if err := securewipe.Dir(dir); err != nil {
+			errs = append(errs, fmt.Errorf("remove lease dir %s: %w", dir, err))
+			keptDirs = append(keptDirs, dir)
+		}
+	}
+	s.dirs = keptDirs
+	return removed, errors.Join(errs...)
 }
 
 // stageSecretFiles writes spec.SecretFiles into per-run host directories and
@@ -151,6 +255,15 @@ func stageSecretFiles(spec executor.Spec, user string) (*secretStage, error) {
 			stage.remove()
 			return nil, fmt.Errorf("container: write secret file %s: %w", f.Name, werr)
 		}
+		// Attributed as soon as it exists, before the chown and chmod below
+		// can fail: a file that was written and then failed to be secured is
+		// still a credential on this host, and the teardown that runs on the
+		// error path has to know about it.
+		stage.files = append(stage.files, stagedFile{
+			host:    path,
+			leaseID: f.LeaseID,
+			grantID: f.GrantID,
+		})
 		// WriteFile honours the mode only when it creates the file, and chown
 		// clears the setuid/setgid bits on some systems — so the mode is
 		// asserted after both, not before either.

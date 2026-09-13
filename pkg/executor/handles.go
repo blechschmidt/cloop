@@ -24,6 +24,16 @@
 // duplicating it here would widen the blast radius of a stolen state database
 // for no gain, because rehydration reattaches to a *running* workload and
 // never re-dispatches one.
+//
+// What *is* persisted from the spec, and only this (Task 20231): Spec.Secrets,
+// the lease attribution. Identity alone turned out to be too little. A
+// rehydrated handle could be streamed, signalled and reaped, but the driver's
+// lease→handle index stayed in memory, so a workload that survived the restart
+// answered HoldsLease with false and a revocation aimed at it reported
+// nothing-to-revoke. Persisting the bindings is safe for a reason that is a
+// property of SecretBinding rather than of this table — it holds names and
+// paths and no values — and it is the same property that already lets the
+// control plane write bindings into executor_sessions and audit rows.
 
 package executor
 
@@ -102,6 +112,35 @@ type HandleRecord struct {
 	// a Kubernetes NetworkPolicy name, a container's runtime. Never secrets:
 	// this map is persisted verbatim.
 	Meta map[string]string `json:"meta,omitempty"`
+	// Secrets are the lease bindings the workload was started with, so a
+	// revocation arriving after a control-plane restart can still find it.
+	//
+	// This is the one field that is *material-adjacent* and still safe to
+	// persist, and the reason is a property of the type rather than of this
+	// call site: SecretBinding carries lease ids, variable names and paths
+	// and no values — which is what already lets it be written to
+	// executor_sessions and into audit rows. The Spec next to it is not safe
+	// and is deliberately absent; see the file header.
+	//
+	// Without it the driver's lease→handle index was in-memory only, so a
+	// rehydrated workload answered HoldsLease with false and a revocation
+	// aimed at it reported nothing-to-revoke — a *success* for a credential
+	// that was still in use.
+	Secrets []SecretBinding `json:"secrets,omitempty"`
+	// SecretsRecorded reports whether Secrets is an authoritative answer.
+	//
+	// It exists because nil is ambiguous in the one direction that matters:
+	// "this workload held no leases" and "nobody wrote down which leases this
+	// workload held" are the same empty slice, and reading the second as the
+	// first is how a revocation silently misses a holder. A row written
+	// before bindings were persisted at all decodes with this false, and its
+	// driver marks the adopted handle unresolved rather than unbound — see
+	// LeaseIndex.Adopt.
+	//
+	// False is therefore the safe zero value: a writer that forgets to set it
+	// produces an over-cautious revocation report, never an over-confident
+	// one.
+	SecretsRecorded bool `json:"secrets_recorded,omitempty"`
 }
 
 // Validate reports whether the record carries enough identity to be useful.
@@ -220,15 +259,19 @@ func (m *MemoryHandleStore) PutHandle(rec HandleRecord) error {
 	if m.rows == nil {
 		m.rows = make(map[string]HandleRecord)
 	}
-	// Copy the map so a caller mutating Meta after the write cannot reach
-	// into stored state — the SQLite implementation marshals, and an
-	// in-memory store that aliased would let tests pass where SQLite fails.
+	// Copy the map and the binding slice so a caller mutating either after the
+	// write cannot reach into stored state — the SQLite implementation
+	// marshals, and an in-memory store that aliased would let tests pass where
+	// SQLite fails.
 	cp := rec
 	if len(rec.Meta) > 0 {
 		cp.Meta = make(map[string]string, len(rec.Meta))
 		for k, v := range rec.Meta {
 			cp.Meta[k] = v
 		}
+	}
+	if rec.Secrets != nil {
+		cp.Secrets = append([]SecretBinding(nil), rec.Secrets...)
 	}
 	m.rows[rec.HandleID] = cp
 	return nil

@@ -66,6 +66,7 @@ const (
 	ConstraintWorkspace        Constraint = "workspace"
 	ConstraintWriteBack        Constraint = "write_back"
 	ConstraintSecretFiles      Constraint = "secret_files"
+	ConstraintRevocation       Constraint = "revocation"
 )
 
 // Candidate is one executor offered to the scheduler, together with everything
@@ -212,6 +213,16 @@ type Requirements struct {
 	// authenticate with nothing in the transcript connecting that to the
 	// grant. Refusing placement is what turns it into a sentence.
 	RequireSecretFiles bool
+	// RequireRevocation demands a node that can take a secret lease's material
+	// back from a workload that is already running.
+	//
+	// It is the constraint that makes "revoking a lease takes the credential
+	// away" a property of the system rather than of which backend a project
+	// happens to be bound to. A driver that cannot honour a revocation still
+	// starts the workload and still receives the credential — it simply has no
+	// way to give it back, so the TTL and the push revocation become advice.
+	// Refusing placement is the only point at which that is visible.
+	RequireRevocation bool
 	// RequireStream and RequireSignal demand live output and the ability to
 	// stop a workload — the two capabilities the Web UI's run panel needs.
 	RequireStream bool
@@ -512,6 +523,16 @@ func reject(c Candidate, req Requirements) (Rejection, bool) {
 			"path the sandbox cannot open — a repository-scoped github_pat would reach it with no "+
 			"token at all; upgrade the executor agent, or bind this project to a container or "+
 			"Kubernetes executor")
+	}
+	// Deliberately not derived from Capabilities: revocation is an interface a
+	// driver implements, and a bool in a struct is a claim anyone can set. The
+	// two would drift, and the direction they would drift in is a backend
+	// advertising a guarantee it does not implement.
+	if req.RequireRevocation && !SupportsRevocation(c.Executor) {
+		return no(ConstraintRevocation, "cannot take a secret lease's material back from a running "+
+			"workload, so a brokered credential placed there could not be withdrawn until the task "+
+			"ended on its own; bind this project to an executor that supports revocation, or remove "+
+			"the grant from the project")
 	}
 	if req.RequireStream && !caps.SupportsStream {
 		return no(ConstraintStream, "cannot stream output")

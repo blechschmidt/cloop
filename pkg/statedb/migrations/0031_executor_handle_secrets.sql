@@ -1,0 +1,46 @@
+-- 0031_executor_handle_secrets: persist a dispatched workload's secret-lease
+-- bindings alongside its handle, so a revocation still reaches it after the
+-- control plane restarts (Task 20231).
+--
+-- 0021 made a workload's *identity* durable: which driver, which executor, and
+-- the external name the runtime knows it by. That was enough to stream, signal
+-- and reap a workload the hub had forgotten it started, and it was not enough
+-- for the one question a revocation asks — "which of my running workloads is
+-- using this lease". Each driver answered that from an in-memory index built in
+-- Start and nowhere else, so after a restart a surviving workload answered
+-- HoldsLease with false, and a revocation aimed at it found no holder and
+-- reported nothing-to-revoke. That is a *success* code for a credential that
+-- was still being used.
+--
+-- Why this column is safe when spec_json deliberately is not (see 0021): the
+-- distinction is a property of the type, not of a promise made here.
+-- executor.SecretBinding holds lease and grant ids, environment *variable
+-- names*, file paths and a TTL — and no values. That is what already lets the
+-- control plane write bindings into executor_sessions and into audit rows, and
+-- it is machine-checked by TestSecretBindingCarriesNoMaterial in
+-- tests/security, which fails on any new value-shaped field. Spec.Env holds
+-- the credentials themselves, and stays out of this table.
+--
+-- Column:
+--   secrets_json  JSON array of executor.SecretBinding, marshalled by
+--                 pkg/executorstore (which owns the type; this package stores
+--                 opaque text so the agent binary never links SQLite).
+--
+-- Three values, and the difference between the last two is the whole point:
+--
+--   ''      unknown. The row was written before this migration, so nobody
+--           recorded what it held. The adopting driver marks the handle
+--           unresolved and every revocation on that executor reports a failure
+--           naming it, rather than a success. Self-clearing: the row is deleted
+--           when the workload finishes.
+--   '[]'    known, and the workload held no leases. Nothing to revoke, and
+--           saying so is a real answer.
+--   '[...]' known bindings; a revocation rebuilds the index from them.
+--
+-- '' is the DEFAULT rather than '[]' for the same reason it is the zero value
+-- of executor.HandleRecord.SecretsRecorded: a future writer that forgets this
+-- column produces an over-cautious revocation report, never an over-confident
+-- one. Defaulting to '[]' would make "I was not told" indistinguishable from
+-- "there was nothing", which is the bug.
+
+ALTER TABLE executor_handles ADD COLUMN secrets_json TEXT NOT NULL DEFAULT '';

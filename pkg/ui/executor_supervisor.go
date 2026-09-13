@@ -338,6 +338,14 @@ func redispatchSession(ctx context.Context, dir string, ev executor.FailoverEven
 		return fmt.Errorf("failover: replacement executor %s: %w", ev.To, err)
 	}
 
+	// Failover must not launder a credential onto a backend that cannot give
+	// it back. The spec being re-dispatched is the one the original run
+	// carried, bindings and all, so a replacement chosen for liveness alone
+	// could otherwise be the exact placement RequireRevocable exists to refuse.
+	if err := executor.RequireRevocable(target, spec); err != nil {
+		return fmt.Errorf("failover: replacement executor %s: %w", ev.To, err)
+	}
+
 	// Detached from ctx: ctx belongs to the probe round that noticed the
 	// failure, and the replacement run must outlive it exactly as the
 	// original outlived the HTTP request that started it.

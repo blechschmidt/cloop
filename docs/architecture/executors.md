@@ -564,7 +564,7 @@ named: `no_candidates`, `executor_id`, `health`, `host_execution_policy`,
 `isolation`, `virtualization`, `labels`, `platform`, `arch`, `harness`,
 `container_runtime`, `network_egress`, `resource_limits`, `stream`, `signal`,
 `memory`, `capacity`, `image_override`, `sandbox_build`, `sandbox_mounts`,
-`host_mounts`, `workspace`, `write_back`, `secret_files`. An operator asking
+`host_mounts`, `workspace`, `write_back`, `secret_files`, `revocation`. An operator asking
 "why did nothing schedule?" gets a per-node answer, not a shrug.
 
 `virtualization` is the one whose message names the two config keys that fix it,
@@ -596,6 +596,20 @@ does not exist on that machine, and, for a repository-scoped `github_pat`, no
 token at all (see [Secret file delivery](#secret-file-delivery)). The run
 succeeds in every observable way except the one that mattered. Refusing
 placement is the only point at which anything can name the cause.
+
+`revocation` is the same shape of failure one level up, and it is the reason
+the constraint exists at all. A driver that cannot take a lease back still
+starts the workload and still delivers the credential — it simply has no way to
+withdraw it, so the lease TTL and the push revocation become advice on that
+backend. Because nothing observable changes, the gap is invisible until an
+operator revokes a credential during an incident and it keeps working.
+
+The constraint is answered by the driver implementing `executor.Revoker`, not
+by a capability flag. The two would drift, and the direction they would drift
+in is a backend advertising a guarantee it does not implement. A new driver
+therefore opts in by writing the code; until it does, every workload carrying a
+brokered credential is refused there by name. See
+[Revocation per backend](../security/model.md#revocation-per-backend).
 
 One subtlety worth knowing: a node that advertises *no* harnesses passes the
 harness requirement. Empty means "detection failed", not "has none" — treating
@@ -1201,6 +1215,7 @@ Identity lives in `executor_handles` (migration `0021`):
 | `pid` | the OS pid where one is meaningful (`localprocess`), else 0 |
 | `image` | the resolved image reference that actually ran — the digest the tag pointed to at dispatch, not the configured tag, which may have been repointed since. Empty for drivers with no image |
 | `meta_json` | driver-specific extras, stored verbatim, never secrets |
+| `secrets_json` | the workload's secret-lease bindings (migration `0031`) — lease ids, variable *names*, paths; never values. Three states, and the last two are not the same: `''` unrecorded, `'[]'` recorded-and-none, `'[…]'` the bindings. See below |
 | `started_at` | dispatch time, not row-write time, because the orphan sweep ages against it |
 | `deadline` | the instant `Spec.TimeoutMinutes` expires, or empty for an unbounded workload. Absolute rather than a duration, so a restart resumes the remaining time instead of restarting the clock |
 | `updated_at` | last write, for operator forensics |
@@ -1234,6 +1249,24 @@ Rehydration reattaches to a *running* workload and never re-dispatches one, so
 it needs no `Spec`; `executor_sessions` keeps one where re-dispatch actually
 happens. Widening the blast radius of a stolen state database to duplicate it
 here would buy nothing.
+
+**`secrets_json` is the one part of the `Spec` that does get stored**, and the
+distinction is a property of the type rather than an exception to the rule
+above. Identity alone turned out to be too little: a rehydrated handle could be
+streamed, signalled and reaped, but the driver's lease→handle index stayed in
+memory, so a workload that survived a restart answered `HoldsLease` with false
+and a revocation aimed at it reported nothing-to-revoke — a success code for a
+credential still in use. `SecretBinding` holds lease ids, environment variable
+*names*, file paths and a TTL and no values, which is the same property that
+already lets the control plane write bindings into `executor_sessions` and into
+audit rows.
+
+A row that predates the column cannot say what its workload holds, and `''` is
+therefore **not** read as "held nothing": the adopting driver marks the handle
+*unresolved*, `HoldsLease` answers true so the executor is still asked, and the
+revocation reports a failure naming the handle instead of a success. The mark
+clears when the workload exits. See [What it is worth after a hub
+restart](../security/model.md#what-it-is-worth-after-a-hub-restart).
 
 The one part of the `Spec` that had to survive anyway is the timeout, and it
 does — as a `deadline` column of its own rather than as a persisted `Spec`.

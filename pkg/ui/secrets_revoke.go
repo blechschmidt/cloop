@@ -4,13 +4,19 @@ package ui
 // holding the credential, instead of waiting for their tasks to exit.
 //
 // Before this, POST /api/leases/{id}/revoke wiped the tmpfs directory on the
-// *hub*. For a host or container executor that is the same directory the
-// workload reads, so the revocation was real. For a remote executor it was
-// not: the material had already been shipped to the device inside the start
-// frame, and the hub's copy was a directory nobody was reading. Revoking a
-// GitHub PAT or a kubeconfig therefore had no effect on a task in flight — it
-// kept using the credential for the rest of the run, which on a long
-// autonomous run is hours.
+// *hub*. For a host executor that is the same directory the workload reads, so
+// the revocation was real. For a remote executor it was not: the material had
+// already been shipped to the device inside the start frame, and the hub's copy
+// was a directory nobody was reading.
+//
+// The same was true of the container and Kubernetes backends, which this file
+// used to describe as covered by the hub wipe. They are not, and secrets.go in
+// the container driver says why in its own header: a container has a mount
+// namespace of its own, so the hub's lease directory is simply not present
+// inside it, and the driver stages a separate copy. The Kubernetes driver
+// projects its copy from a Secret in etcd. Wiping the hub's directory reached
+// neither. Those two backends are now asked directly, through
+// executor.Revoker, exactly as a remote agent is.
 //
 // Three triggers drive revocation, and they are deliberately all routed
 // through revokeLeaseEverywhere so they cannot drift apart:
@@ -32,6 +38,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/remote"
 	"github.com/blechschmidt/cloop/pkg/logger"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
@@ -53,9 +60,23 @@ type leaseRevocation struct {
 	WipedLocally bool `json:"wiped_locally"`
 	// Remote is what each holding agent reported.
 	Remote []remote.RevokeResult `json:"remote,omitempty"`
+	// Local is what each holding executor on this hub reported — the
+	// container, Kubernetes and host-process drivers. Separate from Remote
+	// because the failure modes differ: a local driver is never
+	// "unreachable", and an operator reading the panel should not have to
+	// work out which of the two a row came from.
+	Local []executor.RevokeOutcome `json:"local,omitempty"`
 	// State is the weakest state across every holder, because a revocation
 	// is only as strong as the credential copy it failed to reach.
 	State remote.RevokeState `json:"state"`
+}
+
+// holders returns every outcome, remote and local, for aggregation.
+func (lr leaseRevocation) holders() []executor.RevokeOutcome {
+	out := make([]executor.RevokeOutcome, 0, len(lr.Remote)+len(lr.Local))
+	out = append(out, lr.Remote...)
+	out = append(out, lr.Local...)
+	return out
 }
 
 // aggregateState folds per-executor results into the one state the UI shows.
@@ -108,32 +129,61 @@ func (s *Server) revokeLeaseEverywhere(ctx context.Context, leaseID, grantID, re
 		secretNames = sl.lease.SecretNames()
 	}
 
-	hub, err := s.remoteHub()
-	if err != nil || hub == nil {
-		// No hub means no remote agents on this install, so the local wipe is
-		// the whole story. Not an error: a hub-only deployment is a supported
-		// topology, not a degraded one.
-		out.State = aggregateState(nil, out.WipedLocally)
-		s.auditRevokeSent(actor, leaseID, grantID, executorID, projectID, reason, action, secretNames, nil)
-		return out
+	req := remote.RevokePayload{
+		LeaseID: leaseID,
+		GrantID: grantID,
+		Reason:  reason,
+		Action:  action,
 	}
 
 	fanCtx, cancel := context.WithTimeout(ctx, revokeFanoutTimeout)
 	defer cancel()
 
-	s.auditRevokeSent(actor, leaseID, grantID, executorID, projectID, reason, action, secretNames,
-		hub.LeaseHolders(leaseID))
+	hub, err := s.remoteHub()
+	if err != nil || hub == nil {
+		// No hub means no remote agents on this install. Not an error: a
+		// hub-only deployment is a supported topology, not a degraded one.
+		// The local drivers below are still asked — they are where a
+		// container or in-cluster sandbox holds its own copy.
+		s.auditRevokeSent(actor, leaseID, grantID, executorID, projectID, reason, action, secretNames, nil)
+	} else {
+		s.auditRevokeSent(actor, leaseID, grantID, executorID, projectID, reason, action, secretNames,
+			hub.LeaseHolders(leaseID))
+		out.Remote = hub.RevokeLease(fanCtx, req)
+	}
 
-	out.Remote = hub.RevokeLease(fanCtx, remote.RevokePayload{
-		LeaseID: leaseID,
-		GrantID: grantID,
-		Reason:  reason,
-		Action:  action,
-	})
-	out.State = aggregateState(out.Remote, out.WipedLocally)
+	out.Local = s.revokeOnLocalDrivers(fanCtx, req)
+	out.State = aggregateState(out.holders(), out.WipedLocally)
 
-	for _, res := range out.Remote {
+	for _, res := range out.holders() {
 		s.auditRevokeResult(actor, projectID, res)
+	}
+	return out
+}
+
+// revokeOnLocalDrivers asks every executor running on this hub to give the
+// lease back.
+//
+// Remote executors are skipped because the hub above already fanned out to
+// them, with queueing and reconnect replay a plain registry walk cannot offer;
+// asking twice would double every audit row and reopen a settled log entry.
+//
+// Executors that do not hold the lease are skipped rather than asked and
+// ignored. The distinction is not cosmetic: a driver asked about a lease it
+// never had answers "not here", which is indistinguishable in the audit trail
+// from a driver that held it and wiped it — and "where did this credential
+// live" is the question an incident actually asks.
+func (s *Server) revokeOnLocalDrivers(ctx context.Context, req remote.RevokePayload) []executor.RevokeOutcome {
+	var out []executor.RevokeOutcome
+	for _, ex := range executor.List() {
+		if _, isRemote := ex.(*remote.Executor); isRemote {
+			continue
+		}
+		rv, ok := executor.AsRevoker(ex)
+		if !ok || !rv.HoldsLease(req.LeaseID) {
+			continue
+		}
+		out = append(out, rv.RevokeLease(ctx, req))
 	}
 	return out
 }
@@ -364,15 +414,31 @@ type revocationView struct {
 	Error         string   `json:"error,omitempty"`
 }
 
-// fleetRevocations indexes every remote executor's revocation log by lease, so
-// GET /api/leases can annotate rows without a round trip per lease.
+// fleetRevocations indexes every executor's revocation log by lease, so GET
+// /api/leases can annotate rows without a round trip per lease.
+//
+// Local drivers are included alongside remote agents. A panel that showed only
+// the fleet's remote revocations would report "never revoked" for a credential
+// a container sandbox gave back thirty seconds ago, which is the same class of
+// untruth — a UI claiming a state the system is not in — that this whole task
+// was about.
 func (s *Server) fleetRevocations() map[string][]revocationView {
-	hub, err := s.remoteHub()
-	if err != nil || hub == nil {
-		return nil
-	}
 	out := make(map[string][]revocationView)
-	for _, res := range hub.Revocations() {
+
+	var all []executor.RevokeOutcome
+	if hub, err := s.remoteHub(); err == nil && hub != nil {
+		all = append(all, hub.Revocations()...)
+	}
+	for _, ex := range executor.List() {
+		if _, isRemote := ex.(*remote.Executor); isRemote {
+			continue // already counted above, with its queued replays
+		}
+		if rv, ok := executor.AsRevoker(ex); ok {
+			all = append(all, rv.Revocations()...)
+		}
+	}
+
+	for _, res := range all {
 		view := revocationView{
 			State:      res.State,
 			ExecutorID: res.ExecutorID,

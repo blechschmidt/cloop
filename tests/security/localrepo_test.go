@@ -92,6 +92,19 @@ func (e stubCapExecutor) Stream(context.Context, string) (<-chan executor.LogLin
 }
 func (e stubCapExecutor) HealthCheck(context.Context) error { return nil }
 
+// The stub stands in for the real backends, and every one of them implements
+// executor.Revoker — so the stub must too, or the capability matrix it is used
+// to explore would be refused at placement for a reason that has nothing to do
+// with the capability under test. See TestEveryExecutorDriverImplementsRevoker,
+// which is what makes "every one of them" true rather than assumed.
+func (e stubCapExecutor) SupportsRevocation() bool { return true }
+func (e stubCapExecutor) HoldsLease(string) bool   { return false }
+func (e stubCapExecutor) Leases() []string         { return nil }
+func (e stubCapExecutor) RevokeLease(context.Context, executor.RevokeRequest) executor.RevokeOutcome {
+	return executor.RevokeOutcome{State: executor.RevokeStateRevoked}
+}
+func (e stubCapExecutor) Revocations() []executor.RevokeOutcome { return nil }
+
 // gitTree makes dir look like a git repository to the selector.
 func gitTree(t *testing.T, dir string) string {
 	t.Helper()

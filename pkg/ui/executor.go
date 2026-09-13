@@ -371,6 +371,20 @@ func startWorkload(workDir string, argv []string, labels map[string]string) (exe
 		return nil, executor.Handle{}, err
 	}
 
+	// Last gate before dispatch, and deliberately after every step that can add
+	// a binding to the spec: the lease, the repository grants and the workspace
+	// credential each contribute material, so a check placed earlier would be
+	// asking about a spec that does not exist yet.
+	//
+	// This is where the guarantee is actually enforced for the hub's own
+	// dispatch path. Placement's RequireRevocation covers the failover path,
+	// which assembles candidates rather than starting one; a security control
+	// with one enforcement point is a security control with a bypass.
+	if err := executor.RequireRevocable(ex, spec); err != nil {
+		lease.Close()
+		return nil, executor.Handle{}, err
+	}
+
 	handle, err := ex.Start(context.Background(), spec)
 	if err != nil {
 		lease.Close()

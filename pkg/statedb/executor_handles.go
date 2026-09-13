@@ -38,8 +38,17 @@ type ExecutorHandleRow struct {
 	// MetaJSON is a marshalled map[string]string of driver-specific extras.
 	// '' and '{}' both mean "none"; readers must tolerate both because the
 	// column default is '{}' and a caller may write ''.
-	MetaJSON  string
-	StartedAt time.Time
+	MetaJSON string
+	// SecretsJSON is a marshalled array of the workload's secret-lease
+	// bindings — lease ids, variable names and paths, never values. This
+	// package stores it as opaque text; pkg/executorstore owns the type.
+	//
+	// Unlike MetaJSON, '' and '[]' are *not* the same. '' means nobody
+	// recorded what this workload held (a row from before 0031), and '[]'
+	// means it held nothing. Collapsing them would let a revocation read an
+	// unrecorded holder as a non-holder and report success; see 0031.
+	SecretsJSON string
+	StartedAt   time.Time
 	// Deadline is when the workload's timeout expires; the zero time means
 	// unbounded. Absolute, so a hub that was down does not restart the clock.
 	Deadline  time.Time
@@ -78,8 +87,8 @@ func (d *DB) PutExecutorHandle(row ExecutorHandleRow) error {
 	_, err := d.conn.Exec(
 		`INSERT INTO executor_handles(handle_id, executor_id, driver, external_id,
 		                              project_path, task_id, pid, image, meta_json,
-		                              started_at, deadline, updated_at)
-		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+		                              secrets_json, started_at, deadline, updated_at)
+		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
 		 ON CONFLICT(handle_id) DO UPDATE SET
 		   executor_id  = excluded.executor_id,
 		   driver       = excluded.driver,
@@ -89,11 +98,13 @@ func (d *DB) PutExecutorHandle(row ExecutorHandleRow) error {
 		   pid          = excluded.pid,
 		   image        = excluded.image,
 		   meta_json    = excluded.meta_json,
+		   secrets_json = excluded.secrets_json,
 		   started_at   = excluded.started_at,
 		   deadline     = excluded.deadline,
 		   updated_at   = excluded.updated_at`,
 		row.HandleID, row.ExecutorID, row.Driver, row.ExternalID,
 		row.ProjectPath, row.TaskID, row.PID, row.Image, row.MetaJSON,
+		row.SecretsJSON,
 		formatOptionalTime(row.StartedAt), formatOptionalTime(row.Deadline),
 		formatOptionalTime(row.UpdatedAt),
 	)
@@ -109,7 +120,7 @@ func (d *DB) GetExecutorHandle(handleID string) (ExecutorHandleRow, error) {
 	defer d.mu.Unlock()
 	row := d.conn.QueryRow(
 		`SELECT handle_id, executor_id, driver, external_id, project_path, task_id,
-		        pid, image, meta_json, started_at, deadline, updated_at
+		        pid, image, meta_json, secrets_json, started_at, deadline, updated_at
 		 FROM executor_handles WHERE handle_id = ?`, handleID)
 	out, err := scanExecutorHandleRow(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -132,7 +143,7 @@ func (d *DB) ListExecutorHandles(executorID string) ([]ExecutorHandleRow, error)
 	defer d.mu.Unlock()
 
 	query := `SELECT handle_id, executor_id, driver, external_id, project_path, task_id,
-	                 pid, image, meta_json, started_at, deadline, updated_at
+	                 pid, image, meta_json, secrets_json, started_at, deadline, updated_at
 	          FROM executor_handles`
 	var args []any
 	if strings.TrimSpace(executorID) != "" {
@@ -184,7 +195,7 @@ func scanExecutorHandleRow(sc rowScanner) (ExecutorHandleRow, error) {
 	)
 	if err := sc.Scan(&rec.HandleID, &rec.ExecutorID, &rec.Driver, &rec.ExternalID,
 		&rec.ProjectPath, &rec.TaskID, &rec.PID, &rec.Image, &rec.MetaJSON,
-		&startedAt, &deadline, &updatedAt); err != nil {
+		&rec.SecretsJSON, &startedAt, &deadline, &updatedAt); err != nil {
 		return ExecutorHandleRow{}, err
 	}
 	rec.StartedAt = parseOptionalTime(startedAt)

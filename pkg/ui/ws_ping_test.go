@@ -79,8 +79,15 @@ func TestWSPing_UnresponsivePeerDroppedViaPingTimeout(t *testing.T) {
 func TestWSPing_ResponsivePeerStaysConnected(t *testing.T) {
 	prevInterval := wsPingInterval
 	prevTimeout := wsPingTimeout
+	// A short interval so many pings fire, but a timeout long enough that
+	// losing the CPU cannot be mistaken for an unresponsive peer. At 500ms
+	// this test was asserting that the client goroutine gets scheduled
+	// promptly, which under a full -race suite it does not: a single stall
+	// longer than the timeout drops the connection and the test reports a
+	// ping-path regression that is not there. The pong deadline is not what
+	// this test is about — see the companion above for that.
 	wsPingInterval = 50 * time.Millisecond
-	wsPingTimeout = 500 * time.Millisecond
+	wsPingTimeout = 5 * time.Second
 	t.Cleanup(func() {
 		wsPingInterval = prevInterval
 		wsPingTimeout = prevTimeout
@@ -102,12 +109,14 @@ func TestWSPing_ResponsivePeerStaysConnected(t *testing.T) {
 	defer conn.Close(websocket.StatusNormalClosure, "") //nolint:errcheck
 	conn.SetReadLimit(-1)
 
-	if got := waitForHubClients(srv, 1, 2*time.Second); got != 1 {
-		t.Fatalf("server never registered the WebSocket client (got %d)", got)
-	}
-
-	// Run a continuous reader so nhooyr's pong dispatch can run. Stop on
-	// any error (test-end Close is the expected cause).
+	// Started before the registration wait, and that ordering is the fix.
+	// nhooyr only dispatches pong frames from inside Read, so until this
+	// goroutine is running the peer is unresponsive at the protocol layer —
+	// exactly what the companion test above simulates deliberately. The
+	// server begins pinging the moment the client registers, so starting the
+	// reader after waiting for that left a window in which the peer this test
+	// calls "responsive" was not, and a slow enough runner turned the window
+	// into a disconnect.
 	readDone := make(chan struct{})
 	readCtx, readCancel := context.WithCancel(context.Background())
 	defer readCancel()
@@ -120,8 +129,14 @@ func TestWSPing_ResponsivePeerStaysConnected(t *testing.T) {
 		}
 	}()
 
-	// Run for several ping intervals; the client must remain connected.
-	time.Sleep(10 * (wsPingInterval + wsPingTimeout))
+	if got := waitForHubClients(srv, 1, 10*time.Second); got != 1 {
+		t.Fatalf("server never registered the WebSocket client (got %d)", got)
+	}
+
+	// Long enough for many pings to fire and be answered. Scaled off the
+	// interval alone: tying it to the timeout as well would make the run
+	// time grow with a deadline that is now deliberately generous.
+	time.Sleep(20 * wsPingInterval)
 
 	if got := activeHubClientCount(srv); got != 1 {
 		t.Fatalf("responsive peer was disconnected by ping path; want 1 hubClient, got %d", got)

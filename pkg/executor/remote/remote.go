@@ -18,7 +18,6 @@ import (
 	"context"
 	"fmt"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 
@@ -137,10 +136,16 @@ type Executor struct {
 	session *Session
 	handles map[string]*handleState
 	status  string
-	// leaseHandles maps a secret lease ID to the handles started with its
-	// material, so a revocation knows which tasks to kill and whether this
-	// executor is holding the credential at all.
-	leaseHandles map[string]map[string]struct{}
+	// leases maps a secret lease ID to the handles started with its material,
+	// so a revocation knows whether this executor is holding the credential at
+	// all and which tasks to kill.
+	//
+	// The shared executor.LeaseIndex rather than a map of this driver's own:
+	// it carries the one rule that must be identical across backends — what an
+	// *unrecorded* binding on a rehydrated handle means — and a private copy
+	// here would be the fourth place that rule could drift. Not guarded by mu;
+	// the index locks itself.
+	leases *executor.LeaseIndex
 	// store persists handle identity across control-plane restarts. It is a
 	// field of its own rather than a read of opts.HandleStore because
 	// AttachHandleStore may install it after construction, while the session
@@ -151,7 +156,7 @@ type Executor struct {
 	// revocations is the log of leases this executor has been told to give
 	// back, retained across disconnects so they can be replayed. See
 	// revoke.go.
-	revocations *revocationLog
+	revocations *executor.RevocationLog
 }
 
 // NewExecutor builds a remote executor for an enrolled agent. It starts
@@ -169,15 +174,15 @@ func NewExecutor(opts Options) (*Executor, error) {
 		return nil, fmt.Errorf("%w: remote executor ID is blank", executor.ErrInvalidSpec)
 	}
 	e := &Executor{
-		id:           opts.ID,
-		name:         opts.Name,
-		opts:         opts,
-		caps:         opts.Capabilities,
-		handles:      make(map[string]*handleState),
-		leaseHandles: make(map[string]map[string]struct{}),
-		revocations:  newRevocationLog(),
-		status:       StatusOffline,
-		store:        opts.HandleStore,
+		id:          opts.ID,
+		name:        opts.Name,
+		opts:        opts,
+		caps:        opts.Capabilities,
+		handles:     make(map[string]*handleState),
+		leases:      executor.NewLeaseIndex(),
+		revocations: executor.NewRevocationLog(),
+		status:      StatusOffline,
+		store:       opts.HandleStore,
 	}
 	e.rehydrate()
 	return e, nil
@@ -457,6 +462,16 @@ func (e *Executor) Start(ctx context.Context, spec executor.Spec) (handle execut
 		// years — and the orphan sweep compares this field against a grace
 		// period.
 		StartedAt: now,
+		// The lease attribution, persisted so a revocation arriving after a hub
+		// restart can rebuild the lease→handle index and still route a frame to
+		// this device. Names and paths only — the credential values travel in
+		// the start frame's Spec.Env and are never written here.
+		//
+		// Written before bindLease below rather than after, which is the safe
+		// order: the row exists from the moment the device could be holding the
+		// material, so a crash between the two loses nothing a revocation needs.
+		Secrets:         spec.Secrets,
+		SecretsRecorded: true,
 	})
 
 	payload := StartPayload{Spec: spec, HandleID: handleID}
@@ -531,7 +546,7 @@ func (e *Executor) Start(ctx context.Context, spec executor.Spec) (handle execut
 	// workload that never ran would make the executor claim to hold a
 	// credential it was never given, and a revocation would then wait for an
 	// ack that has no reason to exist.
-	e.bindLease(handleID, bindingsOf(spec))
+	e.leases.Bind(handleID, spec.Secrets)
 
 	return executor.Handle{
 		ID:         handleID,
@@ -1091,42 +1106,14 @@ func (e *Executor) failAllHandles(reason string) {
 	}
 }
 
-// bindingsOf projects a spec's secret bindings onto the compact form the
-// executor tracks. Only revocable bindings are recorded: a binding that
-// delivered nothing has nothing to take back.
-func bindingsOf(spec executor.Spec) []leaseBinding {
-	revocable := spec.RevocableSecrets()
-	if len(revocable) == 0 {
-		return nil
-	}
-	out := make([]leaseBinding, 0, len(revocable))
-	for _, b := range revocable {
-		out = append(out, leaseBinding{leaseID: b.LeaseID, grantID: b.GrantID})
-	}
-	return out
-}
-
 // describeBindings names the credentials in a refusal, so the operator reads
 // "the GitHub PAT github-ci" rather than "a secret".
+//
+// It delegates because every driver refusing a placement has to phrase the
+// same sentence, and an operator comparing two refusals should not have to
+// work out whether two different wordings mean the same thing.
 func describeBindings(bindings []executor.SecretBinding) string {
-	names := make([]string, 0, len(bindings))
-	for _, b := range bindings {
-		switch {
-		case b.SecretName != "" && b.Kind != "":
-			names = append(names, fmt.Sprintf("%s (%s)", b.SecretName, b.Kind))
-		case b.SecretName != "":
-			names = append(names, b.SecretName)
-		case b.Kind != "":
-			names = append(names, b.Kind)
-		default:
-			names = append(names, b.LeaseID)
-		}
-	}
-	sort.Strings(names)
-	if len(names) == 1 {
-		return "the brokered credential " + names[0]
-	}
-	return "brokered credentials " + strings.Join(names, ", ")
+	return executor.DescribeBindings(bindings)
 }
 
 // describeSecretFiles names the credential whose files a device would have to

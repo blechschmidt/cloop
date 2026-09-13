@@ -940,6 +940,15 @@ func (s *Server) startRun(ctx context.Context, args []string) (executor.Executor
 		},
 	}
 
+	// This spec carries no brokered bindings today — the REST server does not
+	// apply leases — so the check passes trivially. It is here because the
+	// moment it grows one, the refusal must already be in place: a guarantee
+	// that has to be remembered at each new dispatch site is a guarantee that
+	// will eventually be forgotten at one.
+	if err := executor.RequireRevocable(ex, spec); err != nil {
+		return nil, executor.Handle{}, err
+	}
+
 	// Start is given a context detached from the request: the run outlives
 	// the HTTP call that asked for it, and tying it to r.Context() would kill
 	// every run the moment its originating response was written.

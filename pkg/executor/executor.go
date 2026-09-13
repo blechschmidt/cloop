@@ -548,6 +548,10 @@ func (s Spec) SandboxRequirements() Requirements {
 		RequireHostFilesystemWorkspace: s.Workspace.Kind == WorkspaceBind,
 		RequireWriteBack:               s.WriteBack.Enabled(),
 		RequireSecretFiles:             s.NeedsSecretFiles(),
+		// A spec carrying material that can be taken back must go somewhere
+		// that can take it back. See RequireRevocable for the same rule applied
+		// at the moment of dispatch.
+		RequireRevocation: len(s.RevocableSecrets()) > 0,
 	}
 }
 
@@ -839,6 +843,13 @@ func Run(ctx context.Context, ex Executor, spec Spec) (RunResult, error) {
 	// caller's ctx: we want to own the handle for cleanup. If ctx is
 	// already dead, bail before spawning anything.
 	if err := ctx.Err(); err != nil {
+		return RunResult{}, err
+	}
+
+	// A workload carrying revocable credentials may not be placed on a driver
+	// that cannot give them back, whichever entry point started it. See
+	// RequireRevocable.
+	if err := RequireRevocable(ex, spec); err != nil {
 		return RunResult{}, err
 	}
 

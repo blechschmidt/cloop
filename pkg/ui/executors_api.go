@@ -563,18 +563,30 @@ func (s *Server) buildExecutorView(
 // annotateRevocation records whether secret leases placed on this executor can
 // be taken back while a task is still running.
 //
-// Non-remote drivers are unconditionally revocable: their material is a tmpfs
-// directory this process owns, so wiping it needs no cooperation from anyone.
-// A remote agent has to be asked, and one speaking a protocol older than v2
-// has no frame with which to answer.
+// It used to answer this with "is this driver remote?", and report every other
+// driver as revocable on the theory that their material is a tmpfs directory
+// this process owns. That was true of the directory and silent about whether
+// any code wiped it — and for the container and Kubernetes backends, none did.
+// The panel claimed a guarantee those backends did not deliver.
+//
+// The answer now comes from the driver itself: executor.SupportsRevocation is
+// true only for a driver that implements executor.Revoker *and* says it can
+// honour a revocation right now. A remote agent adds the second condition —
+// it has to be asked, and one speaking a protocol older than v2 has no frame
+// with which to answer — so its more specific note is kept below.
 func (s *Server) annotateRevocation(view *executorView, ex executor.Executor) {
+	view.SupportsRevocation = executor.SupportsRevocation(ex)
+
 	remoteEx, ok := ex.(*remote.Executor)
 	if !ok {
-		view.SupportsRevocation = true
+		if !view.SupportsRevocation {
+			view.RevocationNote = fmt.Sprintf(
+				"The %s driver cannot take a brokered credential back from a running workload. "+
+					"cloop will refuse to place a workload carrying one here.", ex.Kind())
+		}
 		return
 	}
 	view.ProtocolVersion = remoteEx.ProtocolVersion()
-	view.SupportsRevocation = remoteEx.SupportsRevocation()
 	switch {
 	case view.SupportsRevocation:
 		return

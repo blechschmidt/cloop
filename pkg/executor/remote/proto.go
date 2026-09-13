@@ -1014,89 +1014,42 @@ type ResultPayload struct {
 	Result executor.WriteBackResult `json:"result"`
 }
 
-// RevokeAction is what the agent should do about a workload still using the
-// material being taken away.
-type RevokeAction string
+// The revocation vocabulary is defined in pkg/executor and aliased here.
+//
+// It lived in this file first, because this driver was the only one that could
+// revoke anything. That turned out to be the bug rather than the design: a
+// guarantee implemented in one driver is not a property of the system, and the
+// container and Kubernetes backends silently accepted credentials they could
+// not give back. The types moved up to pkg/executor so every driver speaks one
+// vocabulary; the aliases keep this the wire contract.
+//
+// Aliases rather than conversions because these values cross the link: a
+// separate wire type would have to be converted at every frame boundary, and
+// the conversion that was eventually forgotten would be the one that dropped a
+// field from an ack. They are JSON-encoded with omitempty throughout, so a
+// field added upstream is backward-compatible with an older agent — which is
+// what makes sharing them across a versioned protocol safe.
+type (
+	// RevokeAction is what the agent should do about a workload still using
+	// the material being taken away: scrub or kill.
+	RevokeAction = executor.RevokeAction
+	// RevokePayload takes one lease's material back from a running agent.
+	RevokePayload = executor.RevokeRequest
+	// RevokedPayload acknowledges a revoke and reports what was actually
+	// done. It is deliberately specific rather than a bare "ok": an operator
+	// revoking a kubeconfig needs to know whether the file is gone or
+	// whether the agent merely forgot about it, and an ack that cannot
+	// distinguish the two would let a UI claim a guarantee the system did
+	// not deliver.
+	RevokedPayload = executor.RevokeReport
+)
 
 const (
 	// RevokeScrub invalidates the material and lets the task keep running.
-	// It will fail naturally the next time it reaches for the credential.
-	//
-	// This is the default because a long autonomous run is usually doing
-	// many things, only one of which needed the revoked credential. Killing
-	// it to revoke a kubeconfig it used an hour ago throws away hours of
-	// work to close a window that scrubbing already closes.
-	RevokeScrub RevokeAction = "scrub"
+	RevokeScrub = executor.RevokeScrub
 	// RevokeKill scrubs and then terminates every task holding the lease.
-	//
-	// It exists because scrubbing has one hard limit: a credential handed to
-	// a process as an environment variable is in that process's own memory,
-	// and no control plane can reach into another process's heap. When the
-	// credential itself is compromised rather than merely over-granted,
-	// killing the task is the only thing that actually stops its use.
-	RevokeKill RevokeAction = "kill"
+	RevokeKill = executor.RevokeKill
 )
-
-// Valid reports whether the action is one the agent knows.
-func (a RevokeAction) Valid() bool {
-	return a == RevokeScrub || a == RevokeKill
-}
-
-// RevokePayload takes one lease's material back from a running agent.
-type RevokePayload struct {
-	// LeaseID is the lease being revoked. Required.
-	LeaseID string `json:"lease_id"`
-	// GrantID narrows the revocation to one grant within the lease. Empty
-	// revokes everything the lease delivered.
-	GrantID string `json:"grant_id,omitempty"`
-	// Reason is operator-facing text carried into the agent's log and the
-	// audit trail, so "why did my run lose its token" has an answer on both
-	// sides of the link.
-	Reason string `json:"reason,omitempty"`
-	// Action is scrub or kill. An empty or unknown action is treated as
-	// scrub: the conservative reading of a frame from a possibly-newer
-	// control plane is the one that does not destroy work.
-	Action RevokeAction `json:"action,omitempty"`
-}
-
-// Effective returns the action to apply, defaulting an absent or unknown
-// value to RevokeScrub.
-func (p RevokePayload) Effective() RevokeAction {
-	if p.Action.Valid() {
-		return p.Action
-	}
-	return RevokeScrub
-}
-
-// RevokedPayload acknowledges a revoke and reports what was actually done.
-//
-// It is deliberately specific rather than a bare "ok". An operator revoking
-// a kubeconfig needs to know whether the file is gone or whether the agent
-// merely forgot about it, and an ack that cannot distinguish the two would
-// let a UI claim a guarantee the system did not deliver.
-type RevokedPayload struct {
-	LeaseID string       `json:"lease_id"`
-	GrantID string       `json:"grant_id,omitempty"`
-	Action  RevokeAction `json:"action,omitempty"`
-	// Known reports whether the agent was holding this lease at all. False
-	// is a success, not a failure: the material is not here, which is the
-	// end state the revoke asked for.
-	Known bool `json:"known"`
-	// EnvScrubbed names the variables whose values the agent dropped. Names
-	// only — echoing a revoked credential back to the control plane would
-	// be a fine way to write it into a log.
-	EnvScrubbed []string `json:"env_scrubbed,omitempty"`
-	// FilesRemoved counts credential files wiped from the device.
-	FilesRemoved int `json:"files_removed,omitempty"`
-	// EgressDropped reports that the lease's network allowlist entry is gone.
-	EgressDropped bool `json:"egress_dropped,omitempty"`
-	// Killed lists the handles terminated, for RevokeKill.
-	Killed []string `json:"killed,omitempty"`
-	// Error is non-empty when part of the scrub failed. The ack is still
-	// sent: "I tried and this is what went wrong" is far more actionable
-	// than silence, which the hub can only read as unreachable.
-	Error string `json:"error,omitempty"`
-}
 
 // ByePayload announces an orderly shutdown.
 type ByePayload struct {

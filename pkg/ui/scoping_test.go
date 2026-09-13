@@ -322,6 +322,21 @@ func TestGlobalScopeStreamJoinsNoProjectRoom(t *testing.T) {
 
 	// And it must not be in the primary project's room, or every later
 	// broadcast would reach it too.
+	//
+	// Waited for rather than sampled. The read loop above ends on a deadline,
+	// not on the handler having finished joining: websocket.Dial returns once
+	// the HTTP handshake completes and registration happens after it, on
+	// another goroutine. Reading the map straight afterwards asserted on
+	// whatever the scheduler had got to, which is why this failed about one
+	// full-suite run in three under -race while passing every time alone.
+	//
+	// The wait is for membership of *any* room, not of the global one, so a
+	// regression that joins the wrong room still reports as "joined the
+	// primary project's room" immediately instead of timing out here and
+	// reporting the much vaguer "joined no room at all".
+	if got := waitForHubClients(srv, 1, 10*time.Second); got != 1 {
+		t.Fatalf("the landing stream never registered as a hub client (got %d)", got)
+	}
 	srv.hubMu.Lock()
 	inPrimary := len(srv.hubClients[dirA])
 	inGlobal := len(srv.hubClients[hubRoomGlobal])

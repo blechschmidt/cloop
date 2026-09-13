@@ -518,6 +518,13 @@ func (e *Executor) adopt(saved executor.HandleRecord) {
 	e.pruneLocked()
 	e.mu.Unlock()
 
+	// Restore the lease→handle index from the persisted bindings, so a
+	// revocation issued after this restart still finds the workload. A row
+	// that did not record them marks the handle unresolved instead, and every
+	// revocation on this executor then reports that doubt rather than a
+	// success it cannot stand behind. See executor.LeaseIndex.Adopt.
+	e.leases.Adopt(saved)
+
 	if verifyErr != nil {
 		msg := adoptionFailureMessage(pid, verifyErr)
 		rec.emit("[cloop] " + msg + "\n")

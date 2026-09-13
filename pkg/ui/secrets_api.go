@@ -58,6 +58,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/apierror"
 	"github.com/blechschmidt/cloop/pkg/egressbroker"
+	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/remote"
 	"github.com/blechschmidt/cloop/pkg/logger"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
@@ -1051,7 +1052,7 @@ func (s *Server) handleLeaseRevoke(w http.ResponseWriter, r *http.Request) {
 	result := s.revokeLeaseEverywhere(r.Context(), id, strings.TrimSpace(req.GrantID),
 		reason, action, s.auditActor(r))
 
-	if !result.WipedLocally && len(result.Remote) == 0 {
+	if !result.WipedLocally && len(result.holders()) == 0 {
 		apierror.WriteError(w, apierror.New(apierror.CodeNotFound,
 			"no lease with that id is open on this hub and no connected agent is holding it — "+
 				"it may have already expired, been wiped, or been revoked"))
@@ -1073,7 +1074,12 @@ func (s *Server) handleLeaseRevoke(w http.ResponseWriter, r *http.Request) {
 		"wiped_locally": result.WipedLocally,
 		"holders":       holders,
 		"remote":        result.Remote,
-		"note":          revokeNote(result),
+		// Local holders are reported alongside the remote fleet rather than
+		// folded into it. A container sandbox or an in-cluster Pod that gave
+		// the credential back is a holder the operator needs to see; omitting
+		// it would make a real revocation look like it reached nobody.
+		"local": result.Local,
+		"note":  revokeNote(result),
 	})
 }
 
@@ -1096,17 +1102,40 @@ type leaseRevokeRequest struct {
 // but a device downgraded after a placement, or one enrolled before the
 // binding existed, can still turn up here.
 func (s *Server) leaseHolders(leaseID string) (holders []string, revocable bool) {
-	hub, err := s.remoteHub()
-	if err != nil || hub == nil {
-		// No remote fleet. The hub's own mount is the only copy, and wiping
-		// it is unconditionally within this process's power.
-		return nil, true
-	}
-	holders = hub.LeaseHolders(leaseID)
 	revocable = true
-	for _, id := range holders {
-		ex, ok := hub.Executor(id)
-		if !ok || !ex.SupportsRevocation() {
+
+	if hub, err := s.remoteHub(); err == nil && hub != nil {
+		holders = hub.LeaseHolders(leaseID)
+		for _, id := range holders {
+			ex, ok := hub.Executor(id)
+			if !ok || !ex.SupportsRevocation() {
+				revocable = false
+			}
+		}
+	}
+
+	// Executors on this hub hold their own copies — a container's staged lease
+	// directory, a Pod's backing Secret — and are holders in exactly the sense
+	// this function reports. Listing only the remote fleet would answer "who
+	// has this credential" with silence for a single-machine deployment, which
+	// is the topology most installs actually run.
+	//
+	// HoldsLease also answers true for an executor running a workload whose
+	// persisted lease bindings could not be rebuilt, whatever the lease (see
+	// executor.LeaseIndex.Holds). Listing it here is the consistent answer
+	// rather than an over-report: that executor *is* asked by the fan-out and
+	// *does* report a failure, so a panel that had called it a non-holder
+	// would contradict the outcome the same operator is about to read.
+	for _, ex := range executor.List() {
+		if _, isRemote := ex.(*remote.Executor); isRemote {
+			continue // already listed above
+		}
+		rv, ok := executor.AsRevoker(ex)
+		if !ok || !rv.HoldsLease(leaseID) {
+			continue
+		}
+		holders = append(holders, ex.ID())
+		if !rv.SupportsRevocation() {
 			revocable = false
 		}
 	}
@@ -1134,7 +1163,22 @@ func revokeNote(result leaseRevocation) string {
 	case remote.RevokeStatePending:
 		return "Sent; waiting for the agent to acknowledge."
 	default:
-		if len(result.Remote) == 0 {
+		// A workload that had to be terminated is the headline, whichever
+		// backend did it: the operator asked for a scrub, and a sandbox died.
+		// Reporting the gentler outcome would be a surprise discovered later
+		// from a failed run rather than from this sentence.
+		var killed int
+		for _, res := range result.holders() {
+			if res.Ack != nil {
+				killed += len(res.Ack.Killed)
+			}
+		}
+		if killed > 0 {
+			return fmt.Sprintf("Credential withdrawn, and %d running workload(s) were terminated "+
+				"because the material was already inside them — a container's environment or a Pod's "+
+				"projected volume cannot be taken back any other way.", killed)
+		}
+		if len(result.holders()) == 0 {
 			return "Credential files wiped. A process that already read one keeps what it read."
 		}
 		return "Credential files removed and egress allowlist entries dropped on every holder. " +

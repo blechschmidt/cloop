@@ -44,195 +44,44 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sort"
 	"strings"
-	"sync"
 	"time"
+
+	"github.com/blechschmidt/cloop/pkg/executor"
 )
 
-// RevokeState is how far one lease's revocation has got.
-type RevokeState string
+// The state machine, the result type and the retention rules are defined in
+// pkg/executor and aliased here: every Revoker needs exactly these, and three
+// copies of the eviction rule would eventually become three different rules —
+// with the one that quietly dropped a pending entry losing a revocation rather
+// than a log line.
+type (
+	// RevokeState is how far one lease's revocation has got.
+	RevokeState = executor.RevokeState
+	// RevokeResult is one executor's outcome for one lease revocation.
+	RevokeResult = executor.RevokeOutcome
+)
 
 const (
 	// RevokeStatePending: the frame is on its way, or is queued for an agent
 	// that is not currently connected but is expected back.
-	RevokeStatePending RevokeState = "revoke_pending"
+	RevokeStatePending = executor.RevokeStatePending
 	// RevokeStateRevoked: the agent acked and reported what it scrubbed.
-	RevokeStateRevoked RevokeState = "revoked"
+	RevokeStateRevoked = executor.RevokeStateRevoked
 	// RevokeStateUnreachable: the agent is offline, so the material is still
 	// on the device. The revocation is queued and will be replayed, but until
 	// then this is the honest state and the UI must show it as such.
-	RevokeStateUnreachable RevokeState = "unreachable"
+	RevokeStateUnreachable = executor.RevokeStateUnreachable
 	// RevokeStateFailed: the agent answered, and the answer was an error.
-	RevokeStateFailed RevokeState = "failed"
+	RevokeStateFailed = executor.RevokeStateFailed
 )
 
-// Terminal reports whether the state can still change on its own. Only
-// RevokeStateRevoked is final; a failure is retried on the next sweep and an
-// unreachable agent is retried when it reconnects.
-func (s RevokeState) Terminal() bool { return s == RevokeStateRevoked }
-
-// RevokeResult is one executor's outcome for one lease revocation.
-type RevokeResult struct {
-	LeaseID    string      `json:"lease_id"`
-	GrantID    string      `json:"grant_id,omitempty"`
-	ExecutorID string      `json:"executor_id"`
-	State      RevokeState `json:"state"`
-	// Action is what was asked for, echoed so a caller reading only the
-	// result knows whether a kill was requested.
-	Action RevokeAction `json:"action,omitempty"`
-	Reason string       `json:"reason,omitempty"`
-	// SentAt / AckedAt bound how long the material was still live after the
-	// operator pressed the button. Operators ask this after an incident.
-	SentAt  time.Time `json:"sent_at"`
-	AckedAt time.Time `json:"acked_at,omitempty"`
-	// Ack is the agent's report, present once State is RevokeStateRevoked.
-	Ack *RevokedPayload `json:"ack,omitempty"`
-	// Error explains a failed or unreachable outcome.
-	Error string `json:"error,omitempty"`
-}
-
-// Pending reports whether this result still needs to be delivered.
-func (r RevokeResult) Pending() bool { return !r.State.Terminal() }
-
-// revocationLog is an executor's record of the leases it has been told to
-// take back, so they can be replayed on reconnect and reported to the UI.
-type revocationLog struct {
-	mu sync.Mutex
-	// byLease is keyed by "leaseID\x00grantID" so a whole-lease revocation
-	// and a single-grant one do not overwrite each other.
-	byLease map[string]*RevokeResult
-	order   []string
-}
-
-// maxRetainedRevocations bounds the log. A control plane runs for months and
-// an operator can revoke as often as they like, so without a ceiling this
-// would grow forever. Completed entries are evicted oldest-first; pending
-// ones never are, because forgetting a pending revocation would silently drop
-// the replay that is the whole point of retaining it.
-const maxRetainedRevocations = 512
-
-func newRevocationLog() *revocationLog {
-	return &revocationLog{byLease: make(map[string]*RevokeResult)}
-}
-
-func revocationKey(leaseID, grantID string) string {
-	return strings.TrimSpace(leaseID) + "\x00" + strings.TrimSpace(grantID)
-}
-
-// record inserts or refreshes an entry, returning the live pointer.
-func (rl *revocationLog) record(res RevokeResult) *RevokeResult {
-	key := revocationKey(res.LeaseID, res.GrantID)
-	rl.mu.Lock()
-	defer rl.mu.Unlock()
-
-	if prev, ok := rl.byLease[key]; ok {
-		// A repeat revocation of an already-acked lease is not an error and
-		// must not reopen it: the material is gone, and flipping a settled
-		// "revoked" back to "pending" would make the panel oscillate for an
-		// operator who clicked twice.
-		if prev.State.Terminal() {
-			return prev
-		}
-		prev.State = res.State
-		prev.Action = res.Action
-		prev.SentAt = res.SentAt
-		prev.Error = res.Error
-		if res.Reason != "" {
-			prev.Reason = res.Reason
-		}
-		return prev
-	}
-
-	entry := res
-	rl.byLease[key] = &entry
-	rl.order = append(rl.order, key)
-	rl.pruneLocked()
-	return &entry
-}
-
-// pruneLocked evicts the oldest settled entries. Callers hold rl.mu.
-func (rl *revocationLog) pruneLocked() {
-	if len(rl.order) <= maxRetainedRevocations {
-		return
-	}
-	kept := rl.order[:0]
-	for _, key := range rl.order {
-		entry, ok := rl.byLease[key]
-		if !ok {
-			continue
-		}
-		if len(rl.byLease) > maxRetainedRevocations && entry.State.Terminal() {
-			delete(rl.byLease, key)
-			continue
-		}
-		kept = append(kept, key)
-	}
-	rl.order = kept
-}
-
-// settle applies an agent's ack.
-func (rl *revocationLog) settle(leaseID, grantID string, ack RevokedPayload, at time.Time) {
-	key := revocationKey(leaseID, grantID)
-	rl.mu.Lock()
-	defer rl.mu.Unlock()
-	entry, ok := rl.byLease[key]
-	if !ok {
-		return
-	}
-	entry.AckedAt = at
-	copied := ack
-	entry.Ack = &copied
-	if ack.Error != "" {
-		entry.State = RevokeStateFailed
-		entry.Error = ack.Error
-		return
-	}
-	entry.State = RevokeStateRevoked
-	entry.Error = ""
-}
-
-// fail marks an entry undelivered, without discarding it: it stays in the log
-// so the next reconnect replays it.
-func (rl *revocationLog) fail(leaseID, grantID string, state RevokeState, err error) {
-	key := revocationKey(leaseID, grantID)
-	rl.mu.Lock()
-	defer rl.mu.Unlock()
-	entry, ok := rl.byLease[key]
-	if !ok {
-		return
-	}
-	entry.State = state
-	if err != nil {
-		entry.Error = err.Error()
-	}
-}
-
-// pending returns the revocations still owed to the agent, oldest first.
-func (rl *revocationLog) pending() []RevokeResult {
-	rl.mu.Lock()
-	defer rl.mu.Unlock()
-	out := make([]RevokeResult, 0, len(rl.byLease))
-	for _, entry := range rl.byLease {
-		if entry.Pending() {
-			out = append(out, *entry)
-		}
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].SentAt.Before(out[j].SentAt) })
-	return out
-}
-
-// snapshot returns every entry, newest first.
-func (rl *revocationLog) snapshot() []RevokeResult {
-	rl.mu.Lock()
-	defer rl.mu.Unlock()
-	out := make([]RevokeResult, 0, len(rl.byLease))
-	for _, entry := range rl.byLease {
-		out = append(out, *entry)
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].SentAt.After(out[j].SentAt) })
-	return out
-}
+// This driver is a Revoker, and the assertion is what keeps it one. The
+// interface's four methods are spread across this file and remote.go, so a
+// refactor that changed one signature would otherwise surface not as a build
+// failure but as a driver that silently stopped being placeable for leased
+// work — the exact failure mode this task existed to remove.
+var _ executor.Revoker = (*Executor)(nil)
 
 // ---------------------------------------------------------------------------
 // Session
@@ -297,62 +146,19 @@ func (e *Executor) ProtocolVersion() int {
 
 // HoldsLease reports whether any handle this executor tracks was started with
 // material from leaseID.
-func (e *Executor) HoldsLease(leaseID string) bool {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
-	_, ok := e.leaseHandles[strings.TrimSpace(leaseID)]
-	return ok
-}
+//
+// It answers true for an executor with any *unresolved* handle too, whatever
+// the lease — a workload rehydrated from a row that did not record its
+// bindings might be holding this one, and nothing here can tell. That routes
+// the revocation to RevokeLease, which reports the doubt. See
+// executor.LeaseIndex.Holds.
+func (e *Executor) HoldsLease(leaseID string) bool { return e.leases.Holds(leaseID) }
 
 // Leases lists the lease IDs this executor is holding material for.
-func (e *Executor) Leases() []string {
-	e.mu.RLock()
-	out := make([]string, 0, len(e.leaseHandles))
-	for id := range e.leaseHandles {
-		out = append(out, id)
-	}
-	e.mu.RUnlock()
-	sort.Strings(out)
-	return out
-}
-
-// bindLease records that handleID was started with material from a lease, so
-// a later revocation knows where to send the frame and which task to kill.
-func (e *Executor) bindLease(handleID string, bindings []leaseBinding) {
-	if len(bindings) == 0 {
-		return
-	}
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	for _, b := range bindings {
-		id := strings.TrimSpace(b.leaseID)
-		if id == "" {
-			continue
-		}
-		if e.leaseHandles[id] == nil {
-			e.leaseHandles[id] = make(map[string]struct{})
-		}
-		e.leaseHandles[id][handleID] = struct{}{}
-	}
-}
+func (e *Executor) Leases() []string { return e.leases.Leases() }
 
 // releaseLeases forgets a handle's lease bindings once it is gone.
-func (e *Executor) releaseLeases(handleID string) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	for id, handles := range e.leaseHandles {
-		delete(handles, handleID)
-		if len(handles) == 0 {
-			delete(e.leaseHandles, id)
-		}
-	}
-}
-
-// leaseBinding is the executor's compact view of one Spec.SecretBinding.
-type leaseBinding struct {
-	leaseID string
-	grantID string
-}
+func (e *Executor) releaseLeases(handleID string) { e.leases.Release(handleID) }
 
 // RevokeLease takes one lease's material back from this executor's agent.
 //
@@ -361,6 +167,16 @@ type leaseBinding struct {
 // gone, in doubt, or definitely still out there. The log entry is written
 // before the frame goes out so a revocation is never lost to a crash between
 // the two.
+//
+// Unlike the hub's own drivers this does *not* fail on an unresolved binding,
+// and the asymmetry is deliberate. Those drivers' lease index is the only
+// record that a workload was ever handed a credential, so doubt there is
+// unresolvable. Here the device keeps an index of its own, in a process the
+// hub's restart did not touch, and the frame reaches it either way — so the
+// agent's ack is a *better* answer than anything the hub could reconstruct,
+// and Known comes from the machine actually holding the material. What the
+// unresolved mark still buys is the ask: HoldsLease answers true for it, so
+// the frame is sent rather than the executor skipped.
 func (e *Executor) RevokeLease(ctx context.Context, p RevokePayload) RevokeResult {
 	if ctx == nil {
 		ctx = context.Background()
@@ -380,7 +196,7 @@ func (e *Executor) RevokeLease(ctx context.Context, p RevokePayload) RevokeResul
 		res.Error = "revoke requires a lease id"
 		return res
 	}
-	e.revocations.record(res)
+	e.revocations.Record(res)
 
 	sess := e.currentSession()
 	if sess == nil {
@@ -389,7 +205,7 @@ func (e *Executor) RevokeLease(ctx context.Context, p RevokePayload) RevokeResul
 		// the credential is still sitting on a machine we cannot talk to.
 		err := fmt.Errorf("%w: agent %s (%s) is not connected; the revocation is queued and will "+
 			"be delivered when it reconnects", ErrAgentUnreachable, e.id, e.name)
-		e.revocations.fail(res.LeaseID, res.GrantID, RevokeStateUnreachable, err)
+		e.revocations.Fail(res.LeaseID, res.GrantID, RevokeStateUnreachable, err)
 		res.State, res.Error = RevokeStateUnreachable, err.Error()
 		return res
 	}
@@ -403,13 +219,13 @@ func (e *Executor) RevokeLease(ctx context.Context, p RevokePayload) RevokeResul
 		if isUnreachable(err) {
 			state = RevokeStateUnreachable
 		}
-		e.revocations.fail(res.LeaseID, res.GrantID, state, err)
+		e.revocations.Fail(res.LeaseID, res.GrantID, state, err)
 		res.State, res.Error = state, err.Error()
 		return res
 	}
 
 	acked := e.opts.now()
-	e.revocations.settle(res.LeaseID, res.GrantID, ack, acked)
+	e.revocations.Settle(res.LeaseID, res.GrantID, ack, acked)
 	res.State, res.AckedAt, res.Ack = RevokeStateRevoked, acked, &ack
 	if ack.Error != "" {
 		res.State, res.Error = RevokeStateFailed, ack.Error
@@ -441,7 +257,7 @@ func isUnreachable(err error) bool {
 }
 
 // Revocations reports this executor's revocation log for the UI.
-func (e *Executor) Revocations() []RevokeResult { return e.revocations.snapshot() }
+func (e *Executor) Revocations() []RevokeResult { return e.revocations.Snapshot() }
 
 // replayRevocations re-sends every revocation still owed to a reconnecting
 // agent.
@@ -455,7 +271,7 @@ func (e *Executor) Revocations() []RevokeResult { return e.revocations.snapshot(
 // path, which must not block on a round trip to the device it is still
 // setting up.
 func (e *Executor) replayRevocations(sess *Session) {
-	owed := e.revocations.pending()
+	owed := e.revocations.Pending()
 	if len(owed) == 0 {
 		return
 	}
@@ -463,7 +279,7 @@ func (e *Executor) replayRevocations(sess *Session) {
 		err := fmt.Errorf("%w: agent %s reconnected speaking protocol v%d",
 			ErrRevocationUnsupported, e.id, sess.Version())
 		for _, r := range owed {
-			e.revocations.fail(r.LeaseID, r.GrantID, RevokeStateFailed, err)
+			e.revocations.Fail(r.LeaseID, r.GrantID, RevokeStateFailed, err)
 		}
 		return
 	}
@@ -481,10 +297,10 @@ func (e *Executor) replayRevocations(sess *Session) {
 			if isUnreachable(err) {
 				state = RevokeStateUnreachable
 			}
-			e.revocations.fail(r.LeaseID, r.GrantID, state, err)
+			e.revocations.Fail(r.LeaseID, r.GrantID, state, err)
 			continue
 		}
-		e.revocations.settle(r.LeaseID, r.GrantID, ack, e.opts.now())
+		e.revocations.Settle(r.LeaseID, r.GrantID, ack, e.opts.now())
 		if e.opts.OnRevokeAck != nil {
 			e.opts.OnRevokeAck(e.id, r.LeaseID, ack)
 		}
