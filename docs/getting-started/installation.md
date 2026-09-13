@@ -10,6 +10,7 @@ other three need a credential. That is the only prerequisite that is not "a Go
 toolchain".
 
 - [Prerequisites](#prerequisites)
+- [Download a release binary](#download-a-release-binary)
 - [Install with `go install`](#install-with-go-install)
 - [Build from source](#build-from-source)
 - [The container image](#the-container-image)
@@ -38,6 +39,47 @@ is *not* an API key:
 `cloop providers` prints that table for your machine, with each provider marked
 configured or not, and `cloop providers --test` additionally makes one live call
 to each. See [Providers](providers.md) for choosing between them.
+
+---
+
+## Download a release binary
+
+The only install path that needs no Go toolchain at all. Each release publishes
+a static binary per platform, plus a `checksums.txt` covering all of them:
+
+| Platform | Asset |
+| --- | --- |
+| Linux x86-64 | `cloop_<version>_linux_amd64.tar.gz` |
+| Linux arm64 | `cloop_<version>_linux_arm64.tar.gz` |
+| macOS Intel | `cloop_<version>_darwin_amd64.tar.gz` |
+| macOS Apple silicon | `cloop_<version>_darwin_arm64.tar.gz` |
+
+```bash
+VERSION=0.0.1   # no leading "v" in the asset name; the git tag has one
+ASSET="cloop_${VERSION}_$(uname -s | tr '[:upper:]' '[:lower:]')_amd64.tar.gz"
+BASE="https://github.com/blechschmidt/cloop/releases/download/v${VERSION}"
+
+curl -fsSLO "$BASE/$ASSET"
+curl -fsSLO "$BASE/checksums.txt"
+sha256sum --ignore-missing -c checksums.txt   # shasum -a 256 -c on macOS
+
+tar -xzf "$ASSET" cloop
+sudo install -m 0755 cloop /usr/local/bin/cloop
+```
+
+Unlike `go install`, these binaries carry a real version string, so
+`cloop upgrade` works from here: it queries the releases API, downloads the
+asset for the running OS and architecture, verifies its SHA-256 against the
+same `checksums.txt`, and swaps the running binary atomically.
+`cloop upgrade --check` reports whether an update exists and does nothing else.
+
+**There is no Windows build.** The process-group supervision cloop stops
+harnesses with is POSIX-only, so releases carry Linux and macOS binaries only.
+
+Release archives are reproducible: the same tag rebuilt from the same commit
+produces byte-identical tarballs, so the checksums above can be regenerated
+locally with `make release-dist VERSION=v<version>` and compared against the
+published ones.
 
 ---
 

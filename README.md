@@ -24,6 +24,11 @@ cloop init "Add a health check endpoint to the HTTP server"
 cloop run
 ```
 
+No Go toolchain? Grab a static binary for Linux or macOS from the
+[latest release](https://github.com/blechschmidt/cloop/releases/latest) —
+see [Installation](https://blechschmidt.github.io/cloop/docs/getting-started/installation/)
+for the checksum-verifying one-liner.
+
 That is the whole first run. cloop calls your provider once to turn the goal
 into a numbered plan, then works through it — writing code, running your
 tests, and recording the result of each task before it starts the next one.
