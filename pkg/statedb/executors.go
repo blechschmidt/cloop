@@ -40,6 +40,52 @@ type ExecutorRow struct {
 	LastHeartbeat time.Time         `json:"last_heartbeat,omitempty"`
 	CreatedAt     time.Time         `json:"created_at"`
 	EnrolledBy    string            `json:"enrolled_by,omitempty"`
+	// Inventory is the parsed, queryable subset of what a device advertised.
+	// Zero for backends that were configured rather than enrolled: a container
+	// driver has no build version of its own, it runs this one.
+	Inventory ExecutorInventory `json:"inventory,omitzero"`
+}
+
+// ExecutorInventory is what an edge device reported about itself, parsed out of
+// its capability advertisement into typed, individually-queryable fields.
+//
+// It is a nested struct rather than eight more fields on ExecutorRow because
+// these travel together: they are refreshed as a set on every connect, they are
+// all empty for a non-enrolled backend, and grouping them keeps "is this row's
+// device inventory known" a single question.
+//
+// Capabilities on ExecutorRow still holds the full advertisement. This is not a
+// replacement for it but a projection of the parts that have to be selectable —
+// see migration 0030 for why both exist.
+type ExecutorInventory struct {
+	// AgentVersion is the cloop build the device reported at its last connect.
+	// Empty means it reported none; the literal "1" means the placeholder that
+	// pre-inventory agents sent. Both are "unknown", but only the second tells
+	// an operator the device is definitely old.
+	AgentVersion string `json:"agent_version,omitempty"`
+	// OS and Arch are the device's GOOS/GOARCH.
+	OS   string `json:"os,omitempty"`
+	Arch string `json:"arch,omitempty"`
+	// CPUs and MemoryMB are logical cores and total memory. Zero means the
+	// agent could not detect it, which is never "too small".
+	CPUs     int `json:"cpus,omitempty"`
+	MemoryMB int `json:"memory_mb,omitempty"`
+	// Harnesses are the agent CLIs on the device's PATH ("claude", "codex").
+	Harnesses []string `json:"harnesses,omitempty"`
+	// ContainerRuntimes are the container runtimes it can drive.
+	ContainerRuntimes []string `json:"container_runtimes,omitempty"`
+	// WorkDirRoot is the directory the agent confines every workload beneath.
+	WorkDirRoot string `json:"workdir_root,omitempty"`
+}
+
+// Known reports whether anything was actually advertised. Used to decide
+// between rendering an inventory and rendering nothing at all — a panel that
+// showed "0 CPUs, no harnesses" for a device that never reported would be
+// inventing a fault.
+func (i ExecutorInventory) Known() bool {
+	return i.AgentVersion != "" || i.OS != "" || i.Arch != "" ||
+		i.CPUs > 0 || i.MemoryMB > 0 || i.WorkDirRoot != "" ||
+		len(i.Harnesses) > 0 || len(i.ContainerRuntimes) > 0
 }
 
 // ProjectExecutorBinding pins one project directory to one executor.
@@ -79,25 +125,48 @@ func (d *DB) UpsertExecutor(row ExecutorRow) error {
 		labels = string(encoded)
 	}
 
+	harnesses, err := marshalStringList(row.Inventory.Harnesses)
+	if err != nil {
+		return fmt.Errorf("statedb: marshal executor harnesses: %w", err)
+	}
+	runtimes, err := marshalStringList(row.Inventory.ContainerRuntimes)
+	if err != nil {
+		return fmt.Errorf("statedb: marshal executor container runtimes: %w", err)
+	}
+
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	_, err := d.conn.Exec(
+	_, err = d.conn.Exec(
 		`INSERT INTO executors(id, name, kind, endpoint, status, capabilities_json,
-		                       labels_json, last_heartbeat, created_at, enrolled_by)
-		 VALUES(?,?,?,?,?,?,?,?,?,?)
+		                       labels_json, last_heartbeat, created_at, enrolled_by,
+		                       agent_version, agent_os, agent_arch, agent_cpus,
+		                       agent_memory_mb, agent_harnesses, agent_runtimes,
+		                       agent_workdir_root)
+		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		 ON CONFLICT(id) DO UPDATE SET
-		   name              = excluded.name,
-		   kind              = excluded.kind,
-		   endpoint          = excluded.endpoint,
-		   status            = excluded.status,
-		   capabilities_json = excluded.capabilities_json,
-		   labels_json       = excluded.labels_json,
-		   last_heartbeat    = excluded.last_heartbeat,
-		   enrolled_by       = excluded.enrolled_by`,
+		   name               = excluded.name,
+		   kind               = excluded.kind,
+		   endpoint           = excluded.endpoint,
+		   status             = excluded.status,
+		   capabilities_json  = excluded.capabilities_json,
+		   labels_json        = excluded.labels_json,
+		   last_heartbeat     = excluded.last_heartbeat,
+		   enrolled_by        = excluded.enrolled_by,
+		   agent_version      = excluded.agent_version,
+		   agent_os           = excluded.agent_os,
+		   agent_arch         = excluded.agent_arch,
+		   agent_cpus         = excluded.agent_cpus,
+		   agent_memory_mb    = excluded.agent_memory_mb,
+		   agent_harnesses    = excluded.agent_harnesses,
+		   agent_runtimes     = excluded.agent_runtimes,
+		   agent_workdir_root = excluded.agent_workdir_root`,
 		row.ID, row.Name, row.Kind, row.Endpoint, row.Status, caps, labels,
 		formatOptionalTime(row.LastHeartbeat),
 		row.CreatedAt.UTC().Format(time.RFC3339Nano),
 		row.EnrolledBy,
+		row.Inventory.AgentVersion, row.Inventory.OS, row.Inventory.Arch,
+		row.Inventory.CPUs, row.Inventory.MemoryMB, harnesses, runtimes,
+		row.Inventory.WorkDirRoot,
 	)
 	if err != nil {
 		return fmt.Errorf("statedb: upsert executor %q: %w", row.ID, classifyDriverErr(err))
@@ -105,13 +174,54 @@ func (d *DB) UpsertExecutor(row ExecutorRow) error {
 	return nil
 }
 
+// executorColumns is the select list for a full executor row, shared by
+// GetExecutor and ListExecutors so the two cannot drift out of step with
+// scanExecutorRow's argument order — which is the failure mode that a new
+// column on this table invites, and which SQLite reports only as a scan type
+// error at runtime.
+const executorColumns = `id, name, kind, endpoint, status, capabilities_json, labels_json,
+	        last_heartbeat, created_at, enrolled_by, agent_version, agent_os,
+	        agent_arch, agent_cpus, agent_memory_mb, agent_harnesses,
+	        agent_runtimes, agent_workdir_root`
+
+// marshalStringList encodes a list for storage, normalising nil and empty to
+// "[]" so a reader never has to distinguish them.
+func marshalStringList(v []string) (string, error) {
+	if len(v) == 0 {
+		return "[]", nil
+	}
+	encoded, err := json.Marshal(v)
+	if err != nil {
+		return "", err
+	}
+	return string(encoded), nil
+}
+
+// unmarshalStringList decodes a stored list, treating a malformed blob as
+// absent.
+//
+// Advisory inventory must not be able to fail a listing: a device whose
+// harness list somehow got corrupted is still a device an operator needs to see
+// in the panel, and returning an error here would take the whole fleet view
+// down with it. The same reasoning the labels decode already uses.
+func unmarshalStringList(s string) []string {
+	s = strings.TrimSpace(s)
+	if s == "" || s == "[]" {
+		return nil
+	}
+	var out []string
+	if err := json.Unmarshal([]byte(s), &out); err != nil {
+		return nil
+	}
+	return out
+}
+
 // GetExecutor returns one executor by ID, or ErrExecutorNotFound.
 func (d *DB) GetExecutor(id string) (ExecutorRow, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	row := d.conn.QueryRow(
-		`SELECT id, name, kind, endpoint, status, capabilities_json, labels_json,
-		        last_heartbeat, created_at, enrolled_by
+		`SELECT `+executorColumns+`
 		 FROM executors WHERE id = ?`, id)
 	out, err := scanExecutorRow(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -128,8 +238,7 @@ func (d *DB) ListExecutors() ([]ExecutorRow, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	rows, err := d.conn.Query(
-		`SELECT id, name, kind, endpoint, status, capabilities_json, labels_json,
-		        last_heartbeat, created_at, enrolled_by
+		`SELECT ` + executorColumns + `
 		 FROM executors ORDER BY id ASC`)
 	if err != nil {
 		return nil, fmt.Errorf("statedb: list executors: %w", classifyDriverErr(err))
@@ -308,11 +417,19 @@ func scanExecutorRow(sc rowScanner) (ExecutorRow, error) {
 		labels    string
 		heartbeat string
 		created   string
+		harnesses string
+		runtimes  string
 	)
+	// Argument order must match executorColumns exactly.
 	if err := sc.Scan(&row.ID, &row.Name, &row.Kind, &row.Endpoint, &row.Status,
-		&caps, &labels, &heartbeat, &created, &row.EnrolledBy); err != nil {
+		&caps, &labels, &heartbeat, &created, &row.EnrolledBy,
+		&row.Inventory.AgentVersion, &row.Inventory.OS, &row.Inventory.Arch,
+		&row.Inventory.CPUs, &row.Inventory.MemoryMB, &harnesses, &runtimes,
+		&row.Inventory.WorkDirRoot); err != nil {
 		return ExecutorRow{}, err
 	}
+	row.Inventory.Harnesses = unmarshalStringList(harnesses)
+	row.Inventory.ContainerRuntimes = unmarshalStringList(runtimes)
 	if caps != "" && caps != "{}" {
 		row.Capabilities = json.RawMessage(caps)
 	}

@@ -817,8 +817,17 @@ that is the only action that does not depend on a machine you cannot talk to.
 `not revocable` in the panel means a holder is running an agent older than
 protocol v2 and has no `revoke` frame to honour. The hub refuses to *place* new
 revocable material on such an agent, so this only appears for a device
-downgraded after a placement. Fix it with
-`cloop executor agent install --upgrade`.
+downgraded after a placement. Fix it by upgrading the device: copy the new
+`cloop` binary onto it and run
+
+```bash
+sudo cloop executor agent install --upgrade
+```
+
+which replaces the binary and restarts the service, leaving the unit file and
+the enrollment credential untouched. It is idempotent, so it is safe to re-run.
+See [Executors](../architecture/executors.md) for the build-version reporting
+that tells you which devices need it.
 
 ### The three triggers
 

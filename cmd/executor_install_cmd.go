@@ -57,6 +57,18 @@ carries its path. The agent deletes that file once the token is redeemed.
   --output shell    emit a POSIX init script for devices without systemd
   --dry-run         print what would be written, and write nothing
   --uninstall       reverse an install; idempotent, safe to re-run
+  --upgrade         replace the binary of an existing install and restart it
+
+--upgrade rolls a device forward without re-enrolling it. It replaces the binary
+atomically and restarts the service, and it deliberately does nothing else: the
+unit file and the credential are left exactly as they are, because re-rendering
+the unit needs the control-plane URL and certificate pin from an enrollment
+bundle that nobody still has months later. A unit change means re-running a full
+install with the bundle.
+
+It is idempotent — an upgrade to the identical binary copies nothing and
+restarts nothing — and it refuses rather than half-installing a device that was
+never installed in the first place.
 
 Examples:
 
@@ -68,6 +80,12 @@ Examples:
 
   # Review before committing.
   cloop executor agent install --bundle cloopenroll1.… --dry-run
+
+  # Roll this device forward after copying a new cloop binary onto it.
+  sudo /tmp/cloop executor agent install --upgrade
+
+  # Upgrade from an explicit path instead of the running executable.
+  sudo cloop executor agent install --upgrade --from /tmp/cloop-new
 
   # Remove it, including the agent's identity and workspaces.
   sudo cloop executor agent install --uninstall --purge`,
@@ -83,11 +101,47 @@ Examples:
 		uninstall, _ := cmd.Flags().GetBool("uninstall")
 		purge, _ := cmd.Flags().GetBool("purge")
 		root, _ := cmd.Flags().GetString("root")
+		upgrade, _ := cmd.Flags().GetBool("upgrade")
+		force, _ := cmd.Flags().GetBool("force")
+
+		if upgrade && uninstall {
+			return fmt.Errorf("--upgrade and --uninstall are opposites; pass one")
+		}
 
 		dim := color.New(color.Faint)
 		inst := &install.Installer{
 			Root: strings.TrimSpace(root),
 			Logf: func(format string, a ...any) { dim.Fprintf(os.Stderr, "  "+format+"\n", a...) },
+		}
+
+		if upgrade {
+			if err := requirePrivilege(inst, dryRun); err != nil {
+				return err
+			}
+			// The two paths an upgrade involves are kept on separate flags,
+			// because collapsing them is genuinely ambiguous: --binary has
+			// always meant "where the binary lives on the device", and that is
+			// the *destination*, already fixed by the existing install. The new
+			// binary is a different path, so it gets --from.
+			//
+			// specFromFlags defaults --binary to this executable, which is right
+			// for an install and wrong here — on an upgrade this executable is
+			// the replacement, not the target. So the raw flag is re-read and an
+			// unset one is left empty for Normalize to default.
+			dest, _ := cmd.Flags().GetString("binary")
+			spec.BinaryPath = strings.TrimSpace(dest)
+			from, _ := cmd.Flags().GetString("from")
+
+			res, err := inst.Upgrade(spec, out, install.UpgradeOptions{
+				Source: strings.TrimSpace(from), // empty: Upgrade uses this executable
+				Force:  force,
+				DryRun: dryRun,
+			})
+			if err != nil {
+				return err
+			}
+			printUpgraded(cmd.OutOrStdout(), res)
+			return nil
 		}
 
 		if uninstall {
@@ -260,6 +314,80 @@ func printDryRun(w io.Writer, p install.Plan) {
 	fmt.Fprintln(w, p.Display)
 }
 
+// printUpgraded reports what the upgrade actually did.
+//
+// Three outcomes are all successes and all mean different things, so they get
+// different output rather than one "Upgraded." line: nothing needed doing; the
+// binary was replaced and the service restarted; the binary was replaced but
+// the service was not running, so the device is not yet on the new build. The
+// third is the one an operator must not miss, because everything looks fine and
+// the old build is still what would run.
+func printUpgraded(w io.Writer, res install.UpgradeResult) {
+	ok := color.New(color.FgGreen, color.Bold)
+	warn := color.New(color.FgYellow, color.Bold)
+	dim := color.New(color.Faint)
+
+	if res.AlreadyCurrent {
+		ok.Fprintf(w, "\nAlready up to date.\n")
+		fmt.Fprintf(w, "  binary:  %s\n", res.Spec.BinaryPath)
+		dim.Fprintf(w, "  build:   %s\n", shortChecksum(res.NewChecksum))
+		dim.Fprintln(w, "  Nothing was replaced and the service was not restarted.")
+		dim.Fprintln(w, "  Pass --force to replace and restart anyway.")
+		return
+	}
+
+	if res.DryRun {
+		header := color.New(color.FgCyan, color.Bold)
+		header.Fprintf(w, "\nDry run — nothing was changed.\n")
+		fmt.Fprintf(w, "  binary:  %s\n", res.Spec.BinaryPath)
+		fmt.Fprintf(w, "  from:    %s\n", res.Source)
+		fmt.Fprintf(w, "  build:   %s -> %s\n",
+			shortChecksum(res.PreviousChecksum), shortChecksum(res.NewChecksum))
+		dim.Fprintf(w, "\n  Would replace the binary and restart %s.\n", res.Spec.ServiceName)
+		dim.Fprintln(w, "  The unit file and credential would be left unchanged.")
+		return
+	}
+
+	ok.Fprintf(w, "\nUpgraded %s.\n", res.Spec.ServiceName)
+	fmt.Fprintf(w, "  binary:  %s\n", res.Spec.BinaryPath)
+	fmt.Fprintf(w, "  from:    %s\n", res.Source)
+	fmt.Fprintf(w, "  build:   %s -> %s\n", shortChecksum(res.PreviousChecksum), shortChecksum(res.NewChecksum))
+
+	if res.Restarted {
+		fmt.Fprintf(w, "  service: restarted\n")
+	} else {
+		warn.Fprintf(w, "\nThe service was not running, so it was not started.\n")
+		dim.Fprintf(w, "  The new binary is in place and will be used when it next starts.\n")
+		switch res.Output {
+		case install.OutputSystemd:
+			dim.Fprintf(w, "  Start it with: systemctl start %s\n", res.Spec.UnitFileName())
+		case install.OutputShell:
+			dim.Fprintf(w, "  Start it with: %s start\n", res.Spec.InitScriptPath())
+		}
+	}
+
+	fmt.Fprintln(w)
+	// Named because an upgrade that silently left the unit alone would
+	// otherwise look like one that refreshed everything.
+	dim.Fprintln(w, "  The unit file and credential were left unchanged.")
+	dim.Fprintln(w, "  To change either, re-run a full install with the enrollment bundle.")
+	if res.Output == install.OutputSystemd {
+		dim.Fprintf(w, "  logs: journalctl -fu %s\n", res.Spec.UnitFileName())
+	}
+}
+
+// shortChecksum abbreviates a content checksum for display, naming an absent one
+// rather than printing a blank field.
+func shortChecksum(d string) string {
+	if d == "" {
+		return "unknown"
+	}
+	if len(d) > 12 {
+		return d[:12]
+	}
+	return d
+}
+
 // printInstalled tells the operator what to do next, in the order they will
 // want it: is it running, where are the logs, how do I undo this.
 func printInstalled(p install.Plan) {
@@ -302,6 +430,12 @@ func init() {
 	f.Bool("dry-run", false, "print what would be written without touching the filesystem")
 	f.Bool("uninstall", false, "remove a previous install; idempotent")
 	f.Bool("purge", false, "with --uninstall, also delete the agent's identity and workspaces")
+	f.Bool("upgrade", false,
+		"replace the binary of an existing install and restart it; idempotent, keeps the unit and credentials")
+	f.String("from", "",
+		"with --upgrade, the new cloop binary to install (default: this executable)")
+	f.Bool("force", false,
+		"with --upgrade, replace and restart even when the installed binary is already identical")
 	f.String("root", "",
 		"stage the files beneath this directory instead of installing them, for image builds")
 

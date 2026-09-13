@@ -104,6 +104,13 @@ var ledgerAPISource string
 //go:embed retention_api.go
 var retentionAPISource string
 
+// executorsInventorySource is pkg/ui/executors_inventory.go (Task 20230). It
+// carries no route, but it does broadcast — a device reconnecting on a new build
+// pushes an executor update — so it belongs in the scan for broadcast sites.
+//
+//go:embed executors_inventory.go
+var executorsInventorySource string
+
 // routesSource is pkg/ui/routes.go, which holds the declarative route table
 // (Task 20164). Routes moved out of server.go when registration started
 // carrying a required permission, so the architectural tests that scan for
@@ -120,7 +127,8 @@ func allUISources() string {
 	return serverSource + "\n" + providerCallsSource + "\n" + executorsAPISource +
 		"\n" + auditAPISource + "\n" + secretsAPISource + "\n" + installScriptSource +
 		"\n" + tokensAPISource + "\n" + sessionsAPISource + "\n" + quotasAPISource +
-		"\n" + reproduceAPISource + "\n" + ledgerAPISource + "\n" + retentionAPISource
+		"\n" + reproduceAPISource + "\n" + ledgerAPISource + "\n" + retentionAPISource +
+		"\n" + executorsInventorySource
 }
 
 // dashboardSource is the whole dashboard front end — the rendered index.html

@@ -68,7 +68,7 @@ but not for anything reachable from a network.`,
 		lease, err := hublease.Acquire(hublease.Options{
 			DBPath:  state.DBPath(workdir),
 			Address: ":" + strconv.Itoa(uiPort),
-			Version: Version,
+			Version: Version(),
 		})
 		if err != nil {
 			return err

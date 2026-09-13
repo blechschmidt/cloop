@@ -26,6 +26,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/localprocess"
 	"github.com/blechschmidt/cloop/pkg/executor/remote"
+	"github.com/blechschmidt/cloop/pkg/version"
 )
 
 // Reconnect backoff bounds. These mirror pkg/provider/retry.go's semantics —
@@ -460,7 +461,17 @@ func defaultConcurrency() int {
 // AgentVersion identifies this agent build to the control plane, so version
 // skew across a fleet is visible from the Executors panel rather than being
 // inferred from behaviour.
-const AgentVersion = "1"
+//
+// It was a hardcoded "1" for as long as this file existed, and was never once
+// incremented — so the field meant to diagnose version skew was itself the
+// reason skew could not be diagnosed. Every device in every fleet reported the
+// same value, whatever it was actually running.
+//
+// The real build version lives in pkg/version, below both this package and the
+// CLI, which is what makes it askable from here at all. A var rather than a
+// const so a test can stage a specific build without rebuilding, and because
+// its value is no longer a compile-time constant.
+var AgentVersion = version.String()
 
 // rand64 returns a uniform [0,1) float. Wrapped so the jitter call sites read
 // clearly and so a test can substitute a deterministic source if one is ever

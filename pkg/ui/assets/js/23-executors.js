@@ -98,6 +98,60 @@ function _execCapChips(ex) {
   return chips.join('');
 }
 
+// _execInventoryChips renders what an edge device reported about itself: its
+// cloop build, its hardware, and the harnesses it can actually invoke.
+//
+// These fields crossed the wire from the day remote executors existed, and the
+// panel showed none of them — the backend handed the browser an opaque
+// capabilities blob and nothing unpacked it. So an operator could not tell which
+// build a device was running, nor why placement had skipped it. Every chip here
+// answers one of those two questions.
+function _execInventoryChips(ex) {
+  const inv = ex.inventory;
+  if (!inv) return '';
+  const chips = [];
+
+  // Build first: it is the field an operator is looking for, and the one the
+  // skew banner below refers to.
+  if (inv.agent_version_label) {
+    const skew = (ex.version_skew && ex.version_skew.skew) || '';
+    // Only a material skew is coloured. Patch drift across a fleet is normal,
+    // and colouring it would train operators to ignore the colour.
+    const cls = (ex.version_skew && ex.version_skew.material) ? 'neg' : '';
+    chips.push('<span class="exec-chip ' + cls + '" title="'
+      + esc(skew ? 'Build skew: ' + skew : 'Reported cloop build') + '">build '
+      + esc(inv.agent_version_label) + '</span>');
+  }
+  if (inv.os) {
+    chips.push('<span class="exec-chip">' + esc(inv.os)
+      + (inv.arch ? '/' + esc(inv.arch) : '') + '</span>');
+  }
+  if (inv.cpus) {
+    chips.push('<span class="exec-chip">' + esc(inv.cpus) + ' cores</span>');
+  }
+  // memory_label is computed server-side so every client renders the unit
+  // identically; an absent one means the agent could not detect memory, which
+  // is not the same as a device with none.
+  if (inv.memory_label) {
+    chips.push('<span class="exec-chip">' + esc(inv.memory_label) + '</span>');
+  }
+  (inv.harnesses || []).forEach(h => {
+    chips.push('<span class="exec-chip pos" title="Harness available on this device">'
+      + esc(h) + '</span>');
+  });
+  (inv.container_runtimes || []).forEach(r => {
+    chips.push('<span class="exec-chip pos" title="Container runtime this device can drive">'
+      + esc(r) + '</span>');
+  });
+  // Marked when the numbers came from the stored row rather than a live
+  // session, so an offline device's inventory does not read as current.
+  if (!inv.live && chips.length) {
+    chips.push('<span class="exec-chip" title="Last reported when the device was '
+      + 'connected; it is offline now.">last known</span>');
+  }
+  return chips.join('');
+}
+
 function _renderExecutors(d) {
   const banner = document.getElementById('execPolicyBanner');
   const warnBox = document.getElementById('execWarnings');
@@ -155,6 +209,13 @@ function _renderExecutors(d) {
     h += '</div>';
     h += '<div class="exec-id">' + esc(ex.id) + '</div>';
     h += '<div class="exec-chips">' + _execCapChips(ex) + '</div>';
+    // A second row rather than appended to the first: driver capabilities are
+    // about what the backend can do, device inventory is about what this
+    // particular machine is, and mixing them made both unreadable.
+    const invChips = _execInventoryChips(ex);
+    if (invChips) {
+      h += '<div class="exec-chips">' + invChips + '</div>';
+    }
 
     h += '<div class="exec-meta">';
     h += '<span>Load: ' + (ex.running_known ? esc(ex.running) + ' running' : 'unknown') + '</span>';
@@ -172,6 +233,12 @@ function _renderExecutors(d) {
     if (ex.projects && ex.projects.length) {
       h += '<span>Projects: ' + esc(ex.projects.length) + ' bound</span>';
     }
+    // The sandbox boundary, which an operator auditing isolation would
+    // otherwise have to read out of the database.
+    if (ex.inventory && ex.inventory.workdir_root) {
+      h += '<span title="Every workload on this device is confined beneath this '
+        + 'directory.">Workdir: ' + esc(ex.inventory.workdir_root) + '</span>';
+    }
     if (ex.health) {
       h += '<span style="color:var(--yellow,#d29922)">' + esc(ex.health) + '</span>';
     }
@@ -186,6 +253,13 @@ function _renderExecutors(d) {
     // fleet is a run that will not start.
     if (ex.revocation_note) {
       h += '<div class="exec-blocked-note">&#9888; ' + esc(ex.revocation_note) + '</div>';
+    }
+    // Build skew, shown only when it is material. A device trailing by a patch
+    // release is normal across a fleet and a warning on every card would cost
+    // the operator the one that matters. The note names the upgrade procedure
+    // that actually works — it used to name a flag that did not exist.
+    if (ex.version_skew && ex.version_skew.material && ex.version_skew.note) {
+      h += '<div class="exec-blocked-note">&#9888; ' + esc(ex.version_skew.note) + '</div>';
     }
     if (ex.blocked && ex.blocked_reason) {
       h += '<div class="exec-blocked-note">&#9888; Blocked by policy. ' + esc(ex.blocked_reason) + '</div>';

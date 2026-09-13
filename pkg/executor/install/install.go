@@ -109,6 +109,13 @@ const (
 	// ScriptFileMode is for the generated init script, which must be
 	// executable by root and readable for debugging.
 	ScriptFileMode os.FileMode = 0o755
+
+	// BinaryMode is for the cloop binary an upgrade installs: executable by
+	// everyone, writable only by its owner. Asserted explicitly rather than
+	// inherited, because CreateTemp makes 0600 and a binary left at 0600 is a
+	// service that fails to start as its own unprivileged user — the exact
+	// failure mode an upgrade must not introduce.
+	BinaryMode os.FileMode = 0o755
 )
 
 // Spec describes the installation to materialise.

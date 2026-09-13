@@ -42,6 +42,23 @@ type HubOptions struct {
 	// OnEnroll is called after a device successfully redeems an enrollment
 	// token, so the caller can write an executors-table row for it.
 	OnEnroll func(agent AgentRecord, caps AgentCapabilities)
+	// OnConnect is called after *every* successful handshake, including the
+	// one that enrolled the device, carrying what the agent just advertised
+	// about itself.
+	//
+	// It exists because OnEnroll fires once, ever. A device's build version
+	// and capabilities are exactly the facts that change when an operator
+	// upgrades it, so recording them only at enrollment meant the stored copy
+	// was frozen at whatever the device was running the day it joined —
+	// reproducing, in the storage layer, the same staleness the hardcoded
+	// agent version produced on the wire. An upgraded device would have gone
+	// on being reported as its year-old self.
+	//
+	// Distinct from OnEnroll rather than replacing it: enrollment is an
+	// auditable one-time event that also establishes CreatedAt and the minting
+	// token, and collapsing the two would either lose that or re-assert it on
+	// every reconnect.
+	OnConnect func(agent AgentRecord, caps AgentCapabilities, agentVersion string)
 	// OnRevokeAck receives an agent's acknowledgement of a lease revocation,
 	// so the caller can write the audit row. It fires for replayed
 	// revocations too — the ones delivered long after the operator pressed
@@ -555,8 +572,13 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if enrolledNw && h.opts.OnEnroll != nil {
 		h.opts.OnEnroll(agent, sess.Capabilities())
 	}
-	h.opts.logf("remote: agent %s (%s) connected, protocol v%d",
-		agent.AgentID, agent.Name, sess.Version())
+	// After OnEnroll, so the row exists before this refreshes it, and on every
+	// connect rather than only the first — see OnConnect.
+	if h.opts.OnConnect != nil {
+		h.opts.OnConnect(agent, sess.Capabilities(), sess.AgentVersion())
+	}
+	h.opts.logf("remote: agent %s (%s) connected, protocol v%d, build %s",
+		agent.AgentID, agent.Name, sess.Version(), displayAgentVersion(sess.AgentVersion()))
 
 	// Block until the session ends. The HTTP handler's lifetime is the
 	// connection's lifetime; returning early would let net/http tear the

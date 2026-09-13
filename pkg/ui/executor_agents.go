@@ -106,6 +106,11 @@ func (s *Server) remoteHub() (*remote.Hub, error) {
 			// than polled (Tasks 20126/20134, 20160).
 			OnStatusChange: s.makeExecutorStatusBroadcaster(makeExecutorStatusMirror(db)),
 			OnEnroll:       s.makeExecutorEnrollBroadcaster(makeExecutorEnrollRecorder(db)),
+			// Every connect, not just the enrolling one: a device's build
+			// version and hardware are what change when it is upgraded, so
+			// recording them once at enrollment would freeze the fleet
+			// inventory at each device's join date (Task 20230).
+			OnConnect: s.makeExecutorConnectBroadcaster(makeExecutorConnectRecorder(db)),
 			Logf: func(format string, args ...any) {
 				fmt.Fprintf(os.Stderr, format+"\n", args...)
 			},

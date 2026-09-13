@@ -30,6 +30,8 @@ import (
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 	"github.com/blechschmidt/cloop/pkg/tlsconf"
+	"github.com/blechschmidt/cloop/pkg/ui"
+	"github.com/blechschmidt/cloop/pkg/version"
 )
 
 // openExecutorStore opens the control plane's enrollment storage for the
@@ -422,7 +424,20 @@ plane is running; otherwise revocation takes effect on its next reconnect.`,
 var executorAgentsCmd = &cobra.Command{
 	Use:   "agents",
 	Short: "List enrolled remote agents and outstanding enrollment tokens",
-	Args:  cobra.NoArgs,
+	Long: `List enrolled remote agents, the cloop build each is running, and any
+outstanding enrollment tokens.
+
+The BUILD column is the version the device reported the last time it connected.
+A leading "!" marks a build that materially trails this hub — a different major
+or minor release, or one of the two kinds of unknown:
+
+  unreported   the device has never reported a version (a very old build)
+  legacy       the device reported the placeholder that agents sent before
+               they knew their own version
+
+Pass --inventory for each device's hardware and installed harnesses, which is
+what placement matches on.`,
+	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		store, db, err := openExecutorStore()
 		if err != nil {
@@ -432,16 +447,37 @@ var executorAgentsCmd = &cobra.Command{
 
 		header := color.New(color.FgCyan, color.Bold)
 		dim := color.New(color.Faint)
+		warn := color.New(color.FgYellow, color.Bold)
+		showInventory, _ := cmd.Flags().GetBool("inventory")
 
 		agents, err := store.ListAgents()
 		if err != nil {
 			return err
 		}
+
+		// Inventory lives on the executors table, keyed by the same ID. Indexed
+		// rather than queried per agent so a large fleet costs one read, and
+		// tolerant of a missing row: a credential can exist without an
+		// executors row (an agent enrolled but never connected), and that agent
+		// must still be listed.
+		inventory := map[string]statedb.ExecutorInventory{}
+		if rows, lErr := db.ListExecutors(); lErr == nil {
+			for _, r := range rows {
+				inventory[r.ID] = r.Inventory
+			}
+		} else {
+			dim.Printf("  note: could not read device inventory: %v\n", lErr)
+		}
+
+		hub := Version()
+		skewed := 0
+
 		header.Println("Enrolled agents")
 		if len(agents) == 0 {
 			dim.Println("  none — mint a token with `cloop executor enroll --name <name>`")
 		} else {
-			fmt.Printf("  %-20s %-16s %-10s %s\n", "AGENT ID", "NAME", "STATE", "LAST SEEN")
+			fmt.Printf("  %-20s %-16s %-10s %-20s %s\n",
+				"AGENT ID", "NAME", "STATE", "BUILD", "LAST SEEN")
 			for _, a := range agents {
 				st := "active"
 				if a.Revoked() {
@@ -451,7 +487,31 @@ var executorAgentsCmd = &cobra.Command{
 				if !a.LastSeen.IsZero() {
 					last = a.LastSeen.Format(time.RFC3339)
 				}
-				fmt.Printf("  %-20s %-16s %-10s %s\n", a.AgentID, a.Name, st, last)
+				inv := inventory[a.AgentID]
+				build := agentBuildCell(inv.AgentVersion)
+				skew, _ := version.Classify(hub, inv.AgentVersion)
+				// A revoked agent's build is not actionable — nobody is going
+				// to upgrade a device that has been cut off — so it is shown
+				// without being counted or flagged.
+				if skew.Material() && !a.Revoked() {
+					skewed++
+					build = "!" + build
+				}
+				fmt.Printf("  %-20s %-16s %-10s %-20s %s\n", a.AgentID, a.Name, st, build, last)
+
+				if showInventory {
+					printAgentInventory(dim, inv)
+				}
+			}
+		}
+
+		if len(agents) > 0 {
+			fmt.Println()
+			dim.Printf("  hub build: %s\n", hub)
+			if skewed > 0 {
+				warn.Printf("  %d of %d agents materially trail this hub.\n", skewed, len(agents))
+				dim.Printf("  Upgrade a device by copying the new cloop binary to it and running:\n")
+				dim.Printf("    %s\n", ui.AgentUpgradeCommand)
 			}
 		}
 
@@ -481,6 +541,65 @@ var executorAgentsCmd = &cobra.Command{
 		}
 		return nil
 	},
+}
+
+// agentBuildCell renders a reported build for the BUILD column.
+//
+// The two kinds of unknown are named rather than both rendered blank, because
+// they call for different actions: a device that reported nothing predates
+// version reporting entirely, while one reporting the placeholder is definitely
+// running a build older than build-version reporting and is the first thing to
+// upgrade. A blank cell would say neither.
+func agentBuildCell(v string) string {
+	switch v {
+	case "":
+		return "unreported"
+	case version.LegacyAgentVersion:
+		return "legacy"
+	default:
+		return v
+	}
+}
+
+// printAgentInventory prints one device's hardware and harnesses beneath its
+// row, for --inventory.
+//
+// Only fields the device actually reported are printed. A zero CPU count means
+// the agent could not detect it, and rendering "0 cores" would report a fault
+// that does not exist.
+func printAgentInventory(dim *color.Color, inv statedb.ExecutorInventory) {
+	if !inv.Known() {
+		dim.Printf("      (no inventory reported — the device has not connected since " +
+			"this hub learned to record it)\n")
+		return
+	}
+	if inv.OS != "" || inv.Arch != "" {
+		platform := strings.TrimPrefix(inv.OS+"/"+inv.Arch, "/")
+		dim.Printf("      platform:  %s\n", strings.TrimSuffix(platform, "/"))
+	}
+	if inv.CPUs > 0 || inv.MemoryMB > 0 {
+		parts := make([]string, 0, 2)
+		if inv.CPUs > 0 {
+			parts = append(parts, fmt.Sprintf("%d cores", inv.CPUs))
+		}
+		if inv.MemoryMB > 0 {
+			if inv.MemoryMB < 1024 {
+				parts = append(parts, fmt.Sprintf("%d MB", inv.MemoryMB))
+			} else {
+				parts = append(parts, fmt.Sprintf("%.1f GB", float64(inv.MemoryMB)/1024))
+			}
+		}
+		dim.Printf("      resources: %s\n", strings.Join(parts, ", "))
+	}
+	if len(inv.Harnesses) > 0 {
+		dim.Printf("      harnesses: %s\n", strings.Join(inv.Harnesses, ", "))
+	}
+	if len(inv.ContainerRuntimes) > 0 {
+		dim.Printf("      runtimes:  %s\n", strings.Join(inv.ContainerRuntimes, ", "))
+	}
+	if inv.WorkDirRoot != "" {
+		dim.Printf("      workdir:   %s\n", inv.WorkDirRoot)
+	}
 }
 
 // applyBundleDefaults fills any of server/token/pin/root the operator did not
@@ -564,5 +683,7 @@ func init() {
 	executorCmd.AddCommand(executorEnrollCmd)
 	executorCmd.AddCommand(executorAgentCmd)
 	executorCmd.AddCommand(executorRevokeCmd)
+	executorAgentsCmd.Flags().Bool("inventory", false,
+		"show each device's hardware and installed harnesses")
 	executorCmd.AddCommand(executorAgentsCmd)
 }

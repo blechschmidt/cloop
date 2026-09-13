@@ -91,11 +91,17 @@ go install github.com/blechschmidt/cloop@latest
 
 The binary lands in `$(go env GOPATH)/bin`, which must be on your `PATH`.
 
-A binary installed this way reports its version as `dev`. That is not a bug: the
-version string is a build-time linker flag
-(`-X github.com/blechschmidt/cloop/cmd.Version=…`) and `go install` does not set
-it. Nothing depends on the value except the version banner and
-`cloop upgrade --check`.
+A binary installed this way reports its version as `dev` (plus the short commit
+it was built from, when the toolchain recorded one — `dev+g4f7b5bc`). That is not
+a bug: the version string is a build-time linker flag
+(`-X github.com/blechschmidt/cloop/pkg/version.Version=…`) and `go install` does
+not set it.
+
+Three things read the value: the version banner, `cloop upgrade --check`, and —
+on a device running as an executor agent — the build version reported to the
+control plane, which the hub's Executors panel uses to flag version skew across
+a fleet. An unstamped agent is reported as running an unreleased build rather
+than being silently assumed current.
 
 ---
 
@@ -112,7 +118,7 @@ build uses:
 
 ```bash
 go build -trimpath \
-  -ldflags "-X github.com/blechschmidt/cloop/cmd.Version=v1.2.3" \
+  -ldflags "-X github.com/blechschmidt/cloop/pkg/version.Version=v1.2.3" \
   -o cloop .
 ```
 

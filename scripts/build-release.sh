@@ -102,7 +102,7 @@ for platform in "${PLATFORMS[@]}"; do
   # there is nothing to do, forever.
   CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" \
     "$GO" build -trimpath \
-      -ldflags "-s -w -X github.com/blechschmidt/cloop/cmd.Version=$VERSION" \
+      -ldflags "-s -w -X github.com/blechschmidt/cloop/pkg/version.Version=$VERSION" \
       -o "$workdir/$binary" \
       "$REPO_ROOT"
 

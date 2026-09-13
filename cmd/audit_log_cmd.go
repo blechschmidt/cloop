@@ -255,7 +255,7 @@ Examples:
 
 		if err := auditexport.Write(out, rows, auditexport.Options{
 			Format:         format,
-			ProductVersion: Version,
+			ProductVersion: Version(),
 		}); err != nil {
 			return err
 		}

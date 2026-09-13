@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -35,6 +36,12 @@ type Session struct {
 	nowFn func() time.Time
 	// poll is how often watchHeartbeat checks for silence.
 	poll time.Duration
+
+	// agentVersion is the cloop build the device reported at hello. Set once
+	// during the handshake and never mutated, so it needs no lock — unlike
+	// caps, which shares the mutex below because a future reconnect-in-place
+	// could replace it.
+	agentVersion string
 
 	mu       sync.Mutex
 	caps     AgentCapabilities
@@ -153,17 +160,18 @@ func Accept(ctx context.Context, conn Conn, opts AcceptOptions) (*Session, error
 		poll = HeartbeatInterval / 2
 	}
 	sess := &Session{
-		conn:        conn,
-		ex:          opts.Executor,
-		agentID:     opts.Agent.AgentID,
-		version:     version,
-		nowFn:       opts.now,
-		poll:        poll,
-		caps:        hello.Capabilities,
-		pending:     make(map[string]chan Frame),
-		ackedOffset: make(map[string]int64),
-		lastSeen:    now,
-		done:        make(chan struct{}),
+		conn:         conn,
+		ex:           opts.Executor,
+		agentID:      opts.Agent.AgentID,
+		version:      version,
+		agentVersion: strings.TrimSpace(hello.AgentVersion),
+		nowFn:        opts.now,
+		poll:         poll,
+		caps:         hello.Capabilities,
+		pending:      make(map[string]chan Frame),
+		ackedOffset:  make(map[string]int64),
+		lastSeen:     now,
+		done:         make(chan struct{}),
 	}
 
 	// Reconcile resume offers before sending welcome: the welcome carries the
@@ -216,6 +224,15 @@ func (s *Session) Capabilities() AgentCapabilities {
 
 // AgentID returns the authenticated identity of the peer.
 func (s *Session) AgentID() string { return s.agentID }
+
+// AgentVersion returns the cloop build the device reported at hello, or "" if
+// it reported none.
+//
+// The hello field existed and carried a comment about "diagnosing version-skew
+// problems from the control plane", but nothing on this side ever read it: the
+// value was decoded and dropped on the floor. Surfacing it is what lets the
+// hub persist it and the Executors panel flag a device that trails.
+func (s *Session) AgentVersion() string { return s.agentVersion }
 
 // Version returns the negotiated protocol version.
 func (s *Session) Version() int { return s.version }

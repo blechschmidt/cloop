@@ -55,7 +55,7 @@ ARG BUILDARCH
 # produces the same bytes on a developer laptop and in CI.
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     go build -trimpath \
-      -ldflags="-s -w -X github.com/blechschmidt/cloop/cmd.Version=${VERSION}" \
+      -ldflags="-s -w -X github.com/blechschmidt/cloop/pkg/version.Version=${VERSION}" \
       -o /out/cloop .
 
 # Fail the build rather than the deployment if the binary turns out to be

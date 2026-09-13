@@ -86,11 +86,20 @@ type executorView struct {
 
 	Isolation    string                 `json:"isolation"`
 	Capabilities *executor.Capabilities `json:"capabilities,omitempty"`
-	// AgentCapabilities is the device's full advertisement (CPU count,
-	// memory, container runtimes, installed harnesses) as stored at
-	// enrollment. Opaque here; the panel renders it as extra chips.
-	AgentCapabilities json.RawMessage   `json:"agent_capabilities,omitempty"`
-	Labels            map[string]string `json:"labels,omitempty"`
+	// AgentCapabilities is the device's full advertisement as stored. Kept as
+	// raw JSON deliberately: it is the forward-compatible copy, carrying
+	// whatever a newer agent advertised even when this build has no field for
+	// it. Inventory below is the typed, renderable projection — which is what
+	// the panel actually needs, and what this field was never able to give it.
+	AgentCapabilities json.RawMessage `json:"agent_capabilities,omitempty"`
+	// Inventory is the device's build and hardware, parsed into named fields.
+	// Nil for a backend that is not an enrolled device.
+	Inventory *executorInventoryView `json:"inventory,omitempty"`
+	// VersionSkew compares the device's build against the hub's. Nil for a
+	// backend that is not an enrolled device; a Skew of "none" means compared
+	// and uniform, which is distinct from never compared.
+	VersionSkew *executorSkewView `json:"version_skew,omitempty"`
+	Labels      map[string]string `json:"labels,omitempty"`
 
 	LastHeartbeat *time.Time `json:"last_heartbeat,omitempty"`
 	CreatedAt     *time.Time `json:"created_at,omitempty"`
@@ -481,6 +490,14 @@ func (s *Server) buildExecutorView(
 	if row.Kind == executor.KindRemoteAgent {
 		view.AgentCapabilities = row.Capabilities
 	}
+	// Build version and hardware inventory, preferring a live session's answer
+	// over the stored row. Before the unregistered early-return below, like the
+	// cordon state: a device that is offline is exactly the one whose
+	// last-known build an operator cannot ask about directly.
+	{
+		liveRemote, _ := ex.(*remote.Executor)
+		annotateInventory(&view, row, liveRemote)
+	}
 	sort.Strings(view.Projects)
 	if view.Name == "" {
 		view.Name = id
@@ -566,8 +583,8 @@ func (s *Server) annotateRevocation(view *executorView, ex executor.Executor) {
 	default:
 		view.RevocationNote = fmt.Sprintf(
 			"Speaks protocol v%d; lease revocation needs v%d. cloop will refuse to place a workload "+
-				"carrying brokered credentials here. Upgrade with `cloop executor agent install --upgrade`.",
-			view.ProtocolVersion, remote.MinRevocationVersion)
+				"carrying brokered credentials here. %s",
+			view.ProtocolVersion, remote.MinRevocationVersion, upgradeHint)
 	}
 }
 

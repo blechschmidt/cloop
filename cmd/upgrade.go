@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/blechschmidt/cloop/pkg/upgrade"
+	"github.com/blechschmidt/cloop/pkg/version"
 	"github.com/spf13/cobra"
 )
 
@@ -19,7 +20,11 @@ Use --check to only report whether an update is available.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		checkOnly, _ := cmd.Flags().GetBool("check")
 
-		result, err := upgrade.Check(Version)
+		// version.Version, not Version(): the raw stamp. Check treats the
+		// literal "dev" as "never self-upgrade", and the enriched form
+		// ("dev+g4f7b5bc") would slip past that test and offer to replace a
+		// developer's working binary with the latest release.
+		result, err := upgrade.Check(version.Version)
 		if err != nil {
 			return fmt.Errorf("checking for updates: %w", err)
 		}
@@ -36,7 +41,7 @@ Use --check to only report whether an update is available.`,
 			return nil
 		}
 
-		newVersion, err := upgrade.Upgrade(Version, func(msg string) {
+		newVersion, err := upgrade.Upgrade(version.Version, func(msg string) {
 			fmt.Println(msg)
 		})
 		if err != nil {

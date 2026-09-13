@@ -1736,6 +1736,9 @@ Other outputs and flags:
 | `--purge` | with `--uninstall`, also removes the agent's identity and workspaces |
 | `--root <dir>` | stages the files for a golden image instead of installing them |
 | `--no-start` | installs and enables without starting, for first-boot enrollment |
+| `--upgrade` | replaces the binary of an existing install and restarts it — see [Upgrading a device](#upgrading-a-device) |
+| `--from <path>` | with `--upgrade`, the new binary (default: the running executable) |
+| `--force` | with `--upgrade`, replace and restart even when the installed binary is already identical |
 
 **`GET /install.sh`** serves the bootstrap script. It is gated on
 `executor.manage` — the same permission as minting a token, since it discloses
@@ -1747,6 +1750,109 @@ request (honouring `X-Forwarded-Proto` / `X-Forwarded-Host`), because a hosted
 hub's configured name is frequently not the one the operator reached. The script
 carries no credential: it locates a `cloop` binary and hands off to
 `cloop executor agent install`, where the hardening above actually lives.
+
+### Fleet inventory: which build is each device running?
+
+Every agent reports its own build version and a hardware advertisement in its
+`hello` frame. The hub records both on the device's executor row — refreshed on
+**every connect**, not at enrollment — so the fleet can be inventoried from the
+control plane without touching a device.
+
+Refreshing on connect rather than at enrollment is the whole design. Enrollment
+happens once in a device's life; an upgrade is precisely the event that changes
+these facts. Recording them at enrollment would freeze each device's reported
+build at its join date, so an upgraded device would go on being reported as the
+build it arrived with.
+
+| Column | From | Used for |
+| --- | --- | --- |
+| `agent_version` | `HelloPayload.AgentVersion` | version-skew detection |
+| `agent_os`, `agent_arch` | `AgentCapabilities` | placement, "which arm64 devices trail" |
+| `agent_cpus`, `agent_memory_mb` | `AgentCapabilities` | capacity, `MinMemoryMB` placement |
+| `agent_harnesses` | `AgentCapabilities` | `Requirements.Harnesses` placement |
+| `agent_runtimes` | `AgentCapabilities` | `RequireContainerRuntime` placement |
+| `agent_workdir_root` | `AgentCapabilities` | the sandbox boundary, for isolation audits |
+
+`capabilities_json` still holds the *full* advertisement alongside these. The
+columns are a projection of the fields that have to be selectable and typed; the
+blob is the forward-compatible copy, so a capability a newer agent advertises is
+preserved even before it has a column of its own.
+
+Read it from the Executors panel, or:
+
+```bash
+cloop executor agents              # BUILD column; "!" marks material skew
+cloop executor agents --inventory  # hardware and installed harnesses per device
+```
+
+**Skew classification** lives in `pkg/version` and compares an agent's build
+against the hub's. Only a *material* skew is surfaced as a warning — patch drift
+across a fleet is normal, and a warning on every card would train operators to
+ignore the one that matters.
+
+| Class | Meaning | Material |
+| --- | --- | --- |
+| `none` | same build as the hub | no |
+| `patch` | trails by a patch release | no |
+| `behind` | trails by a minor or major release | **yes** |
+| `ahead` | newer than the hub — it can speak frames the hub does not implement | **yes** |
+| `legacy` | reported the placeholder that pre-inventory agents sent | **yes** |
+| `unknown` | reported no version at all | no |
+| `unversioned` | one side is an unstamped `dev` build, so the two cannot be ordered | **yes** |
+
+`legacy` is recognised explicitly rather than compared, because it is actively
+misleading: agents built before build-version reporting sent a hardcoded `1`,
+and parsed as a version that is major 1 — which sorts *above* the hub's `v0.x`.
+A naive comparison would report the devices most in need of upgrading as being
+ahead of their control plane.
+
+A build version only exists if the linker put one there. Release builds are
+stamped with
+`-ldflags "-X github.com/blechschmidt/cloop/pkg/version.Version=v1.2.3"`; a
+`go build` with no stamp reports `dev` plus the short commit
+(`dev+g4f7b5bc`, or `dev+g4f7b5bc.dirty` for an uncommitted tree), which is why
+an unstamped agent is classified `unversioned` rather than silently assumed
+current.
+
+### Upgrading a device
+
+```bash
+# On the device, after copying the new binary onto it.
+sudo cloop executor agent install --upgrade
+
+# Or from an explicit path, without replacing the binary you are running.
+sudo cloop executor agent install --upgrade --from /tmp/cloop-new
+
+# See what it would do first.
+cloop executor agent install --upgrade --dry-run
+```
+
+`--upgrade` replaces the binary atomically (write beside, `fsync`, rename — a
+running executable cannot be opened for writing on Linux at all) and then asks
+systemd to `try-restart` the unit. `try-restart` rather than `restart`, so a
+service an operator deliberately stopped stays stopped.
+
+It deliberately does **not** re-render the unit file and does not touch the
+credential. The unit embeds the hub URL and the certificate pin, both of which
+arrive in an enrollment bundle that an operator upgrading a device months later
+does not have in hand; re-rendering from a bare spec would quietly write a unit
+pointing at no server, turning "your agent is one version behind" into "your
+agent no longer knows where its hub is". Changing the unit means re-running a
+full install with the bundle.
+
+Three properties, each covered by a test:
+
+- **Idempotent.** An upgrade to a byte-identical binary copies nothing and
+  restarts nothing, and says so. Pass `--force` to replace and restart anyway.
+- **Refuses what it cannot do.** On a device that was never installed it fails
+  with `ErrNotInstalled` and names the install command, rather than leaving a
+  binary with no supervisor around it. With `--output docker` there is no binary
+  on the filesystem to replace, so it refuses and prints the pull-and-recreate
+  procedure instead.
+- **Honest about the outcome.** "Nothing needed doing", "replaced and
+  restarted", and "replaced but the service was not running" are three different
+  successes, and the last one — where everything looks fine and the old build is
+  still what would run — gets a warning.
 
 ---
 
