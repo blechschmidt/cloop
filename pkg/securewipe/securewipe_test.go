@@ -91,39 +91,86 @@ func TestFileOnMissingPathIsNotAnError(t *testing.T) {
 	}
 }
 
-// TestFileReportsAnOverwriteItCannotPerform is the regression test for the
-// original defect.
+// TestFileWipesAReadOnlyCredential covers the mode a credential is most likely
+// to actually have.
 //
-// A file this process cannot open for writing cannot be zeroed. The old code
-// swallowed the open error and returned nil, so the caller logged "credential
-// wiped" over an unlinked-but-intact secret. The new contract: the unlink still
-// happens (a weaker outcome beats none), and the error still comes back.
-func TestFileReportsAnOverwriteItCannotPerform(t *testing.T) {
-	if os.Geteuid() == 0 {
-		// Root bypasses the permission check, so the open would succeed and
-		// there would be no failure to report. Skipping is honest; asserting a
-		// failure that cannot occur would be a test that only passes by
-		// accident of the CI user.
-		t.Skip("running as root: file permissions cannot make an open fail")
-	}
+// secretbroker.leaseFileMode narrows only the group and other bits, so a grant
+// asking for 0400 — an SSH key, a kubeconfig — is created exactly 0400. An
+// unprivileged agent cannot open such a file O_WRONLY, and File used to give up
+// there: it reported the overwrite failure and unlinked the file anyway, which
+// freed the plaintext's blocks without ever zeroing them. Owning the file means
+// being able to widen its mode, so there is nothing here that cannot be wiped.
+//
+// This test previously asserted the opposite, and skipped under root. That is
+// why the defect survived: root bypasses the mode check, so the only
+// environment where it reproduced was the unprivileged edge device this package
+// is written for, and the one test that went near it had the bug written into
+// its expectations.
+func TestFileWipesAReadOnlyCredential(t *testing.T) {
 	_, file := leaseDir(t)
 	if err := os.Chmod(file, 0o400); err != nil {
 		t.Fatalf("chmod: %v", err)
 	}
 
-	err := File(file)
-	if err == nil {
-		t.Fatal("File returned nil for a credential it could not overwrite; " +
-			"the caller would report a secret as destroyed when only its name was removed")
+	// The same witness as TestFileOverwritesBeforeUnlinking: the inode outlives
+	// the unlink while this handle holds it, so this reads what is genuinely
+	// left on the filesystem rather than what File claims it did.
+	fd, err := os.Open(file)
+	if err != nil {
+		t.Fatalf("open witness: %v", err)
 	}
-	if !strings.Contains(err.Error(), "overwrite") {
-		t.Errorf("error should name the failed step, got: %v", err)
+	defer fd.Close()
+
+	if err := File(file); err != nil {
+		t.Fatalf("File on a 0400 credential: %v\n"+
+			"a read-only credential is the normal case, not an unwipeable one", err)
 	}
-	// The unlink is still attempted: an unlinked-but-unzeroed credential is a
-	// worse outcome than a destroyed one and a better one than an untouched
-	// file sitting in /dev/shm.
 	if _, serr := os.Stat(file); !os.IsNotExist(serr) {
-		t.Errorf("the file should still have been unlinked despite the failed overwrite: %v", serr)
+		t.Errorf("credential survived the wipe: %v", serr)
+	}
+
+	buf := make([]byte, len(secret))
+	if _, err := fd.ReadAt(buf, 0); err != nil {
+		t.Fatalf("read through witness handle: %v", err)
+	}
+	for i, b := range buf {
+		if b != 0 {
+			t.Fatalf("byte %d is %#x, want 0: a read-only credential was unlinked "+
+				"without being overwritten, leaving the plaintext recoverable from "+
+				"the freed blocks (read back: %q)", i, b, buf)
+		}
+	}
+}
+
+// TestFileRestoresNothingItCannotVerify pins the confinement half of the mode
+// widening. Widening runs through a descriptor (fchmod) precisely so that a
+// path swapped between the caller's Lstat and the open cannot redirect it, and
+// the SameFile check is what makes that true rather than merely intended.
+func TestFileRestoresNothingItCannotVerify(t *testing.T) {
+	dir, file := leaseDir(t)
+	if err := os.Chmod(file, 0o400); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	other := filepath.Join(dir, "other")
+	if err := os.WriteFile(other, []byte("not the credential"), 0o600); err != nil {
+		t.Fatalf("write decoy: %v", err)
+	}
+
+	info, err := os.Lstat(file)
+	if err != nil {
+		t.Fatalf("lstat: %v", err)
+	}
+	if err := makeWritable(other, info); err == nil {
+		t.Fatal("makeWritable widened a file that was not the one it was asked about; " +
+			"a swapped path would have had its mode changed")
+	} else if !strings.Contains(err.Error(), "replaced between stat and open") {
+		t.Errorf("refusal should say why, got: %v", err)
+	}
+	// The decoy keeps the mode it had: a refused widening changes nothing.
+	if got, err := os.Stat(other); err != nil {
+		t.Fatalf("stat decoy: %v", err)
+	} else if got.Mode().Perm() != 0o600 {
+		t.Errorf("decoy mode = %v, want 0600", got.Mode().Perm())
 	}
 }
 

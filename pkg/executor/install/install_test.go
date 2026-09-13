@@ -605,6 +605,7 @@ func TestNormalizeRejectsUnusableSpecs(t *testing.T) {
 		{"relative binary", Spec{Server: "wss://h/x", BinaryPath: "cloop"}, "--binary"},
 		{"relative state dir", Spec{Server: "wss://h/x", StateDir: "state"}, "--state-dir"},
 		{"relative workdir root", Spec{Server: "wss://h/x", WorkDirRoot: "work"}, "--workdir-root"},
+		{"relative init dir", Spec{Server: "wss://h/x", InitDir: "init.d"}, "--init-dir"},
 		{"bad service name", Spec{Server: "wss://h/x", ServiceName: "a b"}, "--service-name"},
 		{"path in service name", Spec{Server: "wss://h/x", ServiceName: "../etc/x"}, "--service-name"},
 		{"bad user", Spec{Server: "wss://h/x", User: "root; rm -rf /"}, "--user"},
@@ -621,6 +622,57 @@ func TestNormalizeRejectsUnusableSpecs(t *testing.T) {
 				t.Errorf("error %q does not mention %q", err, tc.want)
 			}
 		})
+	}
+}
+
+// TestInitDirIsRedirectable pins the property that makes the OutputShell path
+// testable at all.
+//
+// InitScriptPath used to be hard-wired to DefaultInitDir, alone among this
+// package's destinations in having no override. The cost was not theoretical:
+// the upgrade tests put every other artifact under t.TempDir() and then wrote
+// the init script to the real /etc/init.d — clobbering the host's own service
+// file when run as root, and failing outright as the unprivileged user CI runs
+// as, which is how it was found.
+func TestInitDirIsRedirectable(t *testing.T) {
+	def, err := Spec{Server: "wss://h/x"}.Normalize()
+	if err != nil {
+		t.Fatalf("Normalize: %v", err)
+	}
+	if got, want := def.InitScriptPath(), filepath.Join(DefaultInitDir, def.ServiceName); got != want {
+		t.Errorf("default InitScriptPath = %q, want %q", got, want)
+	}
+
+	root := t.TempDir()
+	redirected, err := Spec{Server: "wss://h/x", InitDir: filepath.Join(root, "etc", "init.d")}.Normalize()
+	if err != nil {
+		t.Fatalf("Normalize with InitDir: %v", err)
+	}
+	if got := redirected.InitScriptPath(); !strings.HasPrefix(got, root) {
+		t.Errorf("InitScriptPath = %q, which is outside the requested InitDir %q", got, root)
+	}
+
+	// And the plan writes there rather than to the host.
+	plan, err := BuildPlan(redirected, OutputShell)
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+	var found bool
+	for _, a := range plan.Artifacts {
+		if a.Path == redirected.InitScriptPath() {
+			found = true
+		}
+		if strings.HasPrefix(a.Path, DefaultInitDir) {
+			t.Errorf("plan writes %q under the host's %s despite InitDir", a.Path, DefaultInitDir)
+		}
+	}
+	if !found {
+		t.Errorf("plan has no init script at %q", redirected.InitScriptPath())
+	}
+	for _, d := range plan.Dirs {
+		if strings.HasPrefix(d.Path, DefaultInitDir) {
+			t.Errorf("plan creates %q under the host's %s despite InitDir", d.Path, DefaultInitDir)
+		}
 	}
 }
 

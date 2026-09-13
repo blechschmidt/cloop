@@ -145,6 +145,16 @@ type Spec struct {
 	// /etc/systemd/system.
 	UnitDir string
 
+	// InitDir is where the OutputShell init script is written. Empty defaults
+	// to /etc/init.d.
+	//
+	// It exists for the same reason UnitDir does. Without it the shell output
+	// was the one artifact in this package with no redirectable destination,
+	// which made every OutputShell path untestable except against the real
+	// /etc/init.d: as root a test would overwrite the host's own service
+	// script, and as anyone else it failed outright.
+	InitDir string
+
 	// CredentialsFile is the 0600 file the enrollment material is written
 	// to. Empty defaults to <StateDir>/enrollment.
 	//
@@ -265,6 +275,9 @@ func (s Spec) normalize(requireServer bool) (Spec, error) {
 	if strings.TrimSpace(out.UnitDir) == "" {
 		out.UnitDir = DefaultUnitDir
 	}
+	if strings.TrimSpace(out.InitDir) == "" {
+		out.InitDir = DefaultInitDir
+	}
 	if strings.TrimSpace(out.CredentialsFile) == "" {
 		out.CredentialsFile = filepath.Join(out.StateDir, "enrollment")
 	}
@@ -285,6 +298,7 @@ func (s Spec) normalize(requireServer bool) (Spec, error) {
 		{"--binary", out.BinaryPath},
 		{"--state-dir", out.StateDir},
 		{"--unit-dir", out.UnitDir},
+		{"--init-dir", out.InitDir},
 		{"--credentials-file", out.CredentialsFile},
 		{"--workdir-root", out.WorkDirRoot},
 	} {
@@ -338,7 +352,7 @@ func (s Spec) UnitFileName() string { return s.ServiceName + ".service" }
 func (s Spec) UnitPath() string { return filepath.Join(s.UnitDir, s.UnitFileName()) }
 
 // InitScriptPath is where OutputShell writes its script.
-func (s Spec) InitScriptPath() string { return filepath.Join(DefaultInitDir, s.ServiceName) }
+func (s Spec) InitScriptPath() string { return filepath.Join(s.InitDir, s.ServiceName) }
 
 // agentArgs builds the agent's argv, minus the binary itself.
 //
@@ -469,7 +483,7 @@ func BuildPlan(spec Spec, out Output) (Plan, error) {
 		p.Dirs = append(p.Dirs,
 			Dir{s.StateDir, StateDirMode},
 			Dir{s.WorkDirRoot, StateDirMode},
-			Dir{DefaultInitDir, SystemDirMode})
+			Dir{s.InitDir, SystemDirMode})
 		p.Artifacts = append(p.Artifacts, Artifact{
 			Path: s.InitScriptPath(), Mode: ScriptFileMode, Content: script,
 		})

@@ -32,7 +32,11 @@ func newUpgradeFixture(t *testing.T, out Output, installedBinary string) *upgrad
 		BinaryPath:  filepath.Join(dir, "usr", "local", "bin", "cloop"),
 		StateDir:    filepath.Join(dir, "var", "lib", "cloop-executor"),
 		UnitDir:     filepath.Join(dir, "etc", "systemd", "system"),
-		Server:      "wss://hub.example:8888/api/executors/connect",
+		// Without this the OutputShell cases write to the real /etc/init.d:
+		// as root they overwrite the host's own service script, and as the
+		// unprivileged user CI runs as they fail with permission denied.
+		InitDir: filepath.Join(dir, "etc", "init.d"),
+		Server:  "wss://hub.example:8888/api/executors/connect",
 	}
 	norm, err := spec.Normalize()
 	if err != nil {

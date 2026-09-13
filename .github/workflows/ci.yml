@@ -441,10 +441,17 @@ jobs:
         # that a refactor made panic, short enough not to gate a PR on luck.
         # The corpus persists in the Go build cache across runs, so coverage
         # accumulates rather than restarting from the seeds each time.
+        #
+        # Through a script rather than three `go test` lines, because Go reports
+        # a clean budget expiry as a failure often enough to turn this job red at
+        # random — which is what it was doing. The script fails on a written
+        # reproducer and tolerates only the deadline artifact; the reasoning is
+        # in its header.
         run: |
-          go test ./tests/security/ -run XXX -fuzz FuzzFrameDecoding   -fuzztime 60s
-          go test ./tests/security/ -run XXX -fuzz FuzzFrameTruncation -fuzztime 60s
-          go test ./tests/security/ -run XXX -fuzz FuzzRedactStringNeverEmitsACredentialBody -fuzztime 60s
+          ./scripts/fuzz-ci.sh \
+            FuzzFrameDecoding \
+            FuzzFrameTruncation \
+            FuzzRedactStringNeverEmitsACredentialBody
 
       - name: Upload fuzz failure corpus
         # A crash writes its reproducer into testdata/fuzz/. Without this it

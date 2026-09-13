@@ -227,6 +227,7 @@ func specFromFlags(cmd *cobra.Command) (install.Spec, install.Output, error) {
 		BinaryPath:      str("binary"),
 		StateDir:        str("state-dir"),
 		UnitDir:         str("unit-dir"),
+		InitDir:         str("init-dir"),
 		CredentialsFile: str("credentials-file"),
 		WorkDirRoot:     str("workdir-root"),
 		Server:          str("server"),
@@ -454,6 +455,7 @@ func init() {
 	f.String("binary", "", "path to the cloop binary on this device (default: this executable)")
 	f.String("state-dir", "", "state directory (default: /var/lib/<service-name>)")
 	f.String("unit-dir", install.DefaultUnitDir, "where to write the systemd unit")
+	f.String("init-dir", install.DefaultInitDir, "where to write the --output shell init script")
 	f.String("credentials-file", "",
 		"0600 file holding the enrollment token (default: <state-dir>/enrollment)")
 	f.String("workdir-root", "", "confine every workload beneath this directory (default: <state-dir>/work)")

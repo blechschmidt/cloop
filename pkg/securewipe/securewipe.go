@@ -135,6 +135,26 @@ func overwrite(path string, info os.FileInfo) error {
 	}
 
 	f, err := os.OpenFile(path, os.O_WRONLY, 0o600)
+	if errors.Is(err, fs.ErrPermission) {
+		// A credential file need not be writable. secretbroker.leaseFileMode
+		// narrows only the group and other bits, so a grant that asks for 0400
+		// — an SSH key, a kubeconfig — is created exactly 0400, and a process
+		// that is not root cannot open it O_WRONLY.
+		//
+		// Running as root is what hid this: root bypasses the mode check, so
+		// the overwrite succeeded on every development box and failed on every
+		// unprivileged edge device, which is the deployment this package
+		// exists for. The failure was also the quiet kind — File still
+		// unlinked the file, so the plaintext's blocks were freed without ever
+		// being zeroed, which is precisely the outcome the package promises
+		// does not happen.
+		//
+		// Widening the mode costs nothing: the file is unlinked moments later.
+		if werr := makeWritable(path, info); werr != nil {
+			return errors.Join(fmt.Errorf("securewipe: open %s for overwrite: %w", path, err), werr)
+		}
+		f, err = os.OpenFile(path, os.O_WRONLY, 0o600)
+	}
 	if err != nil {
 		return fmt.Errorf("securewipe: open %s for overwrite: %w", path, err)
 	}
@@ -179,6 +199,37 @@ func overwrite(path string, info os.FileInfo) error {
 	}
 	if err := f.Close(); err != nil {
 		return fmt.Errorf("securewipe: close %s: %w", path, err)
+	}
+	return nil
+}
+
+// makeWritable adds the owner-write bit to the file behind path, so that a
+// read-only credential can be overwritten before it is unlinked.
+//
+// os.Chmod(path, ...) would be one line and would be a bug. chmod follows
+// symlinks, so between the Lstat in File and the chmod a writer with access to
+// the lease directory could swap path for a link and redirect the mode change
+// onto whatever it names. Opening read-only first, re-checking os.SameFile
+// against the caller's Lstat, and then calling Chmod on the *descriptor*
+// (fchmod, which takes no path at all) means the change reaches the inode that
+// was verified or nothing at all — the same argument that makes the SameFile
+// check in overwrite load-bearing rather than decorative.
+func makeWritable(path string, info os.FileInfo) error {
+	f, err := os.OpenFile(path, os.O_RDONLY, 0)
+	if err != nil {
+		return fmt.Errorf("securewipe: open %s to widen its mode: %w", path, err)
+	}
+	defer f.Close()
+
+	opened, err := f.Stat()
+	if err != nil {
+		return fmt.Errorf("securewipe: stat %s to widen its mode: %w", path, err)
+	}
+	if !os.SameFile(info, opened) {
+		return fmt.Errorf("securewipe: refused to widen %s: it was replaced between stat and open", path)
+	}
+	if err := f.Chmod(opened.Mode().Perm() | 0o200); err != nil {
+		return fmt.Errorf("securewipe: add owner-write to %s: %w", path, err)
 	}
 	return nil
 }

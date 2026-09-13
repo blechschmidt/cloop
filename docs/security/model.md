@@ -1328,8 +1328,10 @@ plaintext simply accumulates on a disk.
 | A credential file is gone after a normal task exit, with no revoke frame anywhere | `TestVaultReleaseWipesCredentialFilesOnNormalExit` (`pkg/executor/agent`) |
 | Shared material survives until the *last* holder exits | `TestVaultReleaseWipesOnlyWhenTheLastHolderGoes` (`pkg/executor/agent`) |
 | Release and scrub are idempotent with respect to each other, in both orders | `TestVaultReleaseAndScrubAreIdempotentInBothOrders` (`pkg/executor/agent`) |
-| A wipe that cannot happen returns an error instead of claiming success | `TestWipeReportsAFailureRatherThanClaimingSuccess`, `TestFileReportsAnOverwriteItCannotPerform` (`pkg/securewipe`) |
+| A wipe that cannot happen returns an error instead of claiming success | `TestWipeReportsAFailureRatherThanClaimingSuccess`, `TestFileRefusesNonRegularFiles` (`pkg/securewipe`) |
 | The bytes are overwritten before the unlink, observed through a surviving file handle | `TestFileOverwritesBeforeUnlinking` (`pkg/securewipe`) |
+| A read-only credential is overwritten too, not merely unlinked — an unprivileged agent widens the mode of a file it owns rather than giving up on it | `TestFileWipesAReadOnlyCredential` (`pkg/securewipe`) |
+| Widening that mode cannot be redirected onto another file by a path swapped underneath it | `TestFileRestoresNothingItCannotVerify` (`pkg/securewipe`) |
 | Callers surface a failed wipe rather than swallowing it | `TestMountCloseSurfacesAWipeItCouldNotPerform` (`pkg/secretbroker`), `TestVaultReleaseSurfacesAWipeItCouldNotPerform` (`pkg/executor/agent`) |
 | Files the *workload* wrote into a lease directory are zeroed too, not just unlinked | `TestMountCloseZeroesFilesTheWorkloadWrote` (`pkg/secretbroker`) |
 | A lease directory is named and recorded before any plaintext exists at it | `TestMaterializedLeaseLeavesADurableTraceForTheNextHub`, `TestNewLeaseDirPathCreatesNothing` (`pkg/secretbroker`) |
