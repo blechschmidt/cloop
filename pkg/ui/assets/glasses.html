@@ -28,13 +28,15 @@
   one request rather than in every one — and the same value never has to be
   re-typed by a wearer who has no keyboard.
 
-  Input (Task 20237). The band and the temple touch strip are not a pointer and
-  not a touchscreen: the glasses OS translates every gesture into an arrow-key
-  or Enter keydown aimed at document.activeElement, and delivers nothing else —
-  no touch, no wheel, no coordinates. It also supplies no focus engine of its
-  own, so moving the selection is this page's job and nobody else's. That is
-  handled in the "gestures" section, which is the only place a gesture is
-  interpreted.
+  Input (Tasks 20237, 20242). The band and the temple touch strip are not a
+  pointer and not a touchscreen: the glasses OS translates every gesture into
+  an arrow-key or Enter keydown aimed at document.activeElement, and delivers
+  nothing else — no touch, no wheel, no coordinates. It also supplies no focus
+  engine of its own, so moving the selection is this page's job and nobody
+  else's. That is handled in the "gestures" section, which is the only place a
+  gesture is interpreted, and which assumes as little about the runtime as it
+  can: it reads three spellings of every key and keeps the selection in a
+  variable rather than reading focus back out of the document.
 -->
 <html lang="en">
 <head>
@@ -73,8 +75,26 @@
     /* The wearer cannot select text with a band, and an accidental selection
        highlight is a bright block that is hard to clear. */
     -webkit-user-select: none; user-select: none;
+    /* There is nothing to the side of this layout, by design — it is one
+       column of full-width rows. Refusing the axis outright means a sideways
+       gesture can never be spent scrolling instead of moving the selection,
+       whatever a future row puts in it. The vertical axis is unaffected: with
+       one axis hidden the other computes to auto rather than visible. */
+    overflow-x: hidden;
   }
   #app { padding: 14px 16px 28px; max-width: 900px; margin: 0 auto; }
+
+  /* ...and nothing should be overflowing in the first place. Task titles carry
+     paths, image refs and Go identifiers — ghcr.io/blechschmidt/cloop-harness
+     :latest, OrchestratorTaskTimeoutMinutesDefault — and a token with no space
+     in it is wider than this column at every viewport the device reports, so
+     the default `normal` wrapping pushed a horizontal scroller out from under
+     the task list while the project list, whose names are short, stayed clean.
+     `word-break` first for engines that predate `anywhere`. */
+  .row, .row .name, .row .meta, #sub, #heard, .detail, .detail .body {
+    word-break: break-word;
+    overflow-wrap: anywhere;
+  }
 
   header {
     display: flex; align-items: center; gap: 12px;
@@ -117,13 +137,18 @@
   .row .name { font-size: 24px; font-weight: 650; }
   .row .meta { color: var(--muted); font-size: 18px; margin-top: 6px; }
 
-  /* The focus ring is the entire cursor. There is no pointer on this device,
-     so the only way a wearer knows what a pinch will activate is this outline
-     — it has to read at a glance, against whatever the world behind the
-     waveguide happens to be. Plain :focus rather than :focus-visible: every
-     input here arrives as a key event, so the two would mean the same thing,
-     and :focus is the state the device's own guidance is written against. */
-  .focusable:focus {
+  /* The ring is the entire cursor. There is no pointer on this device, so the
+     only way a wearer knows what a pinch will activate is this outline — it
+     has to read at a glance, against whatever the world behind the waveguide
+     happens to be.
+
+     Two selectors, not one. `.sel` is the page's own cursor and the one that
+     always paints; `:focus` is there so a real browser — the phone the glasses
+     tether through, or a screen reader — shows the same thing when focus is
+     moved by something other than a swipe. The page can no longer depend on
+     :focus alone, because it cannot depend on the device's focus model: see
+     the note above the gesture handler. */
+  .focusable:focus, .focusable.sel {
     outline: none;
     border-color: var(--accent);
     box-shadow: 0 0 0 3px rgba(110, 168, 255, .55), 0 0 20px rgba(110, 168, 255, .35);
@@ -132,8 +157,9 @@
      class however many times you repeat it — so their accent has to be said
      again at the same specificity or they alone would glow without changing
      outline. */
-  #back:focus, #reload:focus, #more:focus { border-color: var(--accent); }
-  .row.focusable:focus { background: #172033; }
+  #back:focus, #reload:focus, #more:focus,
+  #back.sel, #reload.sel, #more.sel { border-color: var(--accent); }
+  .row.focusable:focus, .row.focusable.sel { background: #172033; }
 
   /* A status dot carries the state at a glance; the word is there for the
      cases where a small coloured dot on a see-through display is ambiguous
@@ -317,7 +343,16 @@ function setText(node, text) {
   text = text == null ? '' : String(text);
   if (node.textContent !== text) { node.textContent = text; }
 }
-function setClass(node, cls) { if (node.className !== cls) { node.className = cls; } }
+
+// setClass is the single place a class attribute is written wholesale, which
+// makes it the single place the cursor marker can be lost. Re-assert it here
+// rather than repainting after every caller: show(), setDictateLabel() and the
+// filter strip all rewrite className, and any one of them forgetting would
+// leave the wearer looking at an unmarked selection.
+function setClass(node, cls) {
+  if (node === cursor) { cls = cls ? cls + ' sel' : 'sel'; }
+  if (node.className !== cls) { node.className = cls; }
+}
 
 // show() keeps the class contract and the hidden property in step. The CSS
 // hides #back and #more by default and reveals them on .on; `hidden` carries
@@ -367,14 +402,14 @@ function patch(host, items, keyOf, build, fill) {
 // the worst available answer on a device whose only correction is swiping the
 // whole way back down, so land on whatever now occupies that position.
 function patchList(host, items, keyOf, build, fill) {
-  var active = document.activeElement;
-  var owned = !!(active && active.parentNode === host);
-  var at = owned ? indexIn(host, active) : -1;
+  var held = cursorNode();
+  var owned = !!(held && held.parentNode === host);
+  var at = owned ? indexIn(host, held) : -1;
 
   patch(host, items, keyOf, build, fill);
 
-  if (owned && active.parentNode !== host && host.childNodes.length) {
-    focusNode(host.childNodes[Math.min(at < 0 ? 0 : at, host.childNodes.length - 1)]);
+  if (owned && held.parentNode !== host && host.childNodes.length) {
+    select(host.childNodes[Math.min(at < 0 ? 0 : at, host.childNodes.length - 1)]);
   }
 }
 
@@ -392,10 +427,33 @@ function clear(host) {
 // ── gestures ────────────────────────────────────────────────────────────────
 // The device delivers arrow-key and Enter keydowns aimed at document
 // .activeElement and supplies no focus navigation of its own, so this handler
-// is the whole cursor. It is also why left and right used to appear to stick
-// after one press: nothing here moved the selection, and the engine's own
-// fallback for a horizontal key on a single column of full-width rows is to
-// look for something beside the current row and find nothing.
+// is the whole cursor.
+//
+// Three things here are defensive against a runtime this code cannot be tested
+// against directly, and each one is a way the previous attempt stayed inert on
+// the hardware while passing in a desktop browser:
+//
+//   1. The gesture is read from ev.key, ev.code *and* ev.keyCode. This device
+//      is not a keyboard — it synthesises key events from band and captouch
+//      gestures — and engines in that class variously send the legacy
+//      'Left'/'Right' names, leave key as 'Unidentified' and fill only
+//      keyCode, or set code alone. Matching one spelling is how a handler ends
+//      up never firing, which is exactly what the symptom said: sideways
+//      swipes scrolled the tasks page horizontally, and a handler that runs
+//      cannot let that happen, because it calls preventDefault().
+//
+//   2. The listener is on the capture phase, so nothing downstream can consume
+//      the event first, and defaultPrevented is not consulted — in capture it
+//      can only have been set by something above us in the path, and on this
+//      page there is nothing above us that should win.
+//
+//   3. The selection is a variable this page owns, not document.activeElement.
+//      If the engine refuses to focus a <button>, or re-aims focus at the top
+//      of the document after every gesture, reading focus back gives -1 every
+//      time and the ring restarts from the first control — a cursor that
+//      "selects the first item once and then never moves". Owning it means the
+//      ring advances whatever the device does with focus. focus() is still
+//      called, for real browsers and assistive tech; it is just not believed.
 //
 // Left and right are the selection axis, and they wrap, so the ring is closed
 // and a wearer can always reach every control by continuing to swipe one way.
@@ -403,6 +461,10 @@ function clear(host) {
 // long task result is what that axis is for and the wearer asked to keep it;
 // on a screen that fits, where they would otherwise do nothing at all, they
 // fall back to moving the selection.
+
+// cursor is the selection. Never read it directly — cursorNode() is the read,
+// and it answers null for a cursor that has been detached or hidden.
+var cursor = null;
 
 function focusables() {
   var all = document.querySelectorAll('.focusable'), out = [], i;
@@ -412,29 +474,88 @@ function focusables() {
   return out;
 }
 
-function focusNode(node) {
+// The cursor, if it is still a control on screen. A row can be removed by a
+// refresh or hidden by a view change while it holds the selection, and a stale
+// node has to read as "no cursor" rather than as a position in the ring.
+function cursorNode() {
+  var ring = focusables();
+  if (cursor && ring.indexOf(cursor) >= 0) { return cursor; }
+  // Nothing of ours: adopt the engine's focus if it happens to be useful, so a
+  // tap on the phone that the glasses tether through carries on from there.
+  var active = document.activeElement;
+  if (active && ring.indexOf(active) >= 0) { return active; }
+  return null;
+}
+
+function select(node) {
   if (!node) { return; }
-  node.focus();
-  // focus() scrolls the node into view on its own; asking for 'nearest' keeps
-  // a row that is already visible exactly where the wearer is looking instead
-  // of yanking the column to centre it.
+  if (cursor && cursor !== node && cursor.classList) { cursor.classList.remove('sel'); }
+  cursor = node;
+  if (node.classList) { node.classList.add('sel'); }
+  // preventScroll because scrollIntoView below does the scrolling, and does it
+  // with 'nearest': a row already on screen stays exactly where the wearer is
+  // looking instead of being yanked to the middle.
+  try { node.focus({ preventScroll: true }); } catch (e) { try { node.focus(); } catch (e2) {} }
   if (node.scrollIntoView) { node.scrollIntoView({ block: 'nearest' }); }
 }
 
-function moveFocus(delta) {
-  var ring = focusables();
-  if (!ring.length) { return; }
-  var at = ring.indexOf(document.activeElement);
-  var next = at < 0 ? (delta > 0 ? 0 : ring.length - 1) : at + delta;
-  focusNode(ring[(next % ring.length + ring.length) % ring.length]);
+// How much of a control the wearer can see: 2 whole, 1 partly, 0 not at all.
+// A shim or an engine without layout reports no rectangle, and "cannot tell"
+// has to read as fully visible — treating everything as off-screen would
+// re-anchor the cursor on every single swipe.
+var SEEN_FULLY = 2, SEEN_PARTLY = 1, SEEN_NOT = 0;
+
+function seen(node) {
+  if (!node || !node.getBoundingClientRect) { return SEEN_FULLY; }
+  var r = node.getBoundingClientRect();
+  if (!r) { return SEEN_FULLY; }
+  var h = window.innerHeight ||
+    (document.documentElement && document.documentElement.clientHeight) || 0;
+  if (!h) { return SEEN_FULLY; }
+  if (r.bottom <= 0 || r.top >= h) { return SEEN_NOT; }
+  return (r.top >= 0 && r.bottom <= h) ? SEEN_FULLY : SEEN_PARTLY;
 }
 
-function focusFirstRow() {
+// The control to hand the cursor to when the wearer has scrolled away from it,
+// searched in the direction they swiped. A whole row is preferred over one cut
+// off at the edge, because select() scrolls what it picks into view and
+// choosing a half-visible row would jerk the column the wearer just placed.
+function anchor(ring, delta) {
+  var best = -1, i, from = delta > 0 ? 0 : ring.length - 1, step = delta > 0 ? 1 : -1;
+  for (i = from; i >= 0 && i < ring.length; i += step) {
+    var how = seen(ring[i]);
+    if (how === SEEN_FULLY) { return i; }
+    if (how === SEEN_PARTLY && best < 0) { best = i; }
+  }
+  return best;
+}
+
+function moveCursor(delta) {
+  var ring = focusables();
+  if (!ring.length) { return; }
+  var at = ring.indexOf(cursorNode());
+
+  // The wearer has scrolled away from the selection. Where they are looking is
+  // no longer where the cursor is, so hand it to what is actually in front of
+  // them rather than stepping from a row they left behind and dragging the
+  // whole column back to it. This is the "after a vertical scroll" half of the
+  // report: up and down move the page and not the cursor, which is exactly
+  // what lets the two drift apart.
+  if (at >= 0 && seen(ring[at]) === SEEN_NOT) {
+    var landing = anchor(ring, delta);
+    if (landing >= 0) { select(ring[landing]); return; }
+  }
+
+  var next = at < 0 ? (delta > 0 ? 0 : ring.length - 1) : at + delta;
+  select(ring[(next % ring.length + ring.length) % ring.length]);
+}
+
+function selectFirstRow() {
   var rows = el('list').childNodes;
   for (var i = 0; i < rows.length; i++) {
-    if (rows[i].classList && rows[i].classList.contains('focusable')) { focusNode(rows[i]); return; }
+    if (rows[i].classList && rows[i].classList.contains('focusable')) { select(rows[i]); return; }
   }
-  moveFocus(1);
+  moveCursor(1);
 }
 
 function pageScrolls() {
@@ -442,37 +563,63 @@ function pageScrolls() {
   return !!d && d.scrollHeight > d.clientHeight + 1;
 }
 
-document.addEventListener('keydown', function(ev) {
-  if (ev.defaultPrevented || ev.altKey || ev.ctrlKey || ev.metaKey) { return; }
-  var key = ev.key;
+// What the device sent, in the page's own vocabulary. '' means "not ours".
+var GESTURE_KEYS = {
+  ArrowLeft: 'prev', Left: 'prev',
+  ArrowRight: 'next', Right: 'next',
+  ArrowUp: 'up', Up: 'up',
+  ArrowDown: 'down', Down: 'down',
+  Enter: 'go', Return: 'go', ' ': 'go', Space: 'go', Spacebar: 'go', NumpadEnter: 'go',
+  Escape: 'back', Esc: 'back', BrowserBack: 'back', GoBack: 'back'
+};
+// Last resort, and the reason it is safe: these seven codes mean the same seven
+// keys on every layout, so falling back to them cannot capture a letter.
+var GESTURE_CODES = { 13: 'go', 27: 'back', 32: 'go', 37: 'prev', 38: 'up', 39: 'next', 40: 'down' };
 
-  if (key === 'ArrowRight' || key === 'ArrowLeft') {
-    moveFocus(key === 'ArrowRight' ? 1 : -1);
-  } else if (key === 'ArrowDown' || key === 'ArrowUp') {
-    if (pageScrolls()) { return; }
-    moveFocus(key === 'ArrowDown' ? 1 : -1);
-  } else if (key === 'Enter' || key === ' ' || key === 'Spacebar') {
-    var active = document.activeElement;
+// Own properties only: ev.key is attacker-adjacent free text, and a key named
+// 'constructor' would otherwise walk up to Object.prototype and hand back a
+// function from something documented to return one of five words.
+function lookup(map, k) {
+  return (k && Object.prototype.hasOwnProperty.call(map, k)) ? map[k] : '';
+}
+
+function gestureOf(ev) {
+  return lookup(GESTURE_KEYS, ev.key) || lookup(GESTURE_KEYS, ev.code) ||
+    lookup(GESTURE_CODES, ev.keyCode || ev.which) || '';
+}
+
+document.addEventListener('keydown', function(ev) {
+  // A modifier means a real keyboard and a real shortcut; the band has none.
+  if (ev.altKey || ev.ctrlKey || ev.metaKey) { return; }
+  var g = gestureOf(ev);
+
+  if (g === 'next' || g === 'prev') {
+    moveCursor(g === 'next' ? 1 : -1);
+  } else if (g === 'down' || g === 'up') {
+    if (pageScrolls()) { return; }   // the reading axis: leave the scroll alone
+    moveCursor(g === 'down' ? 1 : -1);
+  } else if (g === 'go') {
     // A pinch arrives as Enter on whatever has focus, and on a fresh or
     // rebuilt screen that can still be the body. Treat it as "give me the
     // cursor back" rather than dropping the gesture: it is the only way out
     // for a wearer who has no other key to press.
-    if (active && active.classList && active.classList.contains('focusable')) {
+    var target = cursorNode();
+    if (target) {
       // Activate explicitly and swallow the default. A native button would
       // otherwise do it too, and the device's Enter is not reliably trusted;
       // doing it here is one activation in both cases rather than two in one
       // and none in the other.
-      active.click();
+      target.click();
     } else {
-      moveFocus(1);
+      moveCursor(1);
     }
-  } else if (key === 'Escape') {
+  } else if (g === 'back') {
     goBack();
   } else {
     return; // not ours: leave the default alone
   }
   ev.preventDefault();
-});
+}, true);
 
 // ── projects ────────────────────────────────────────────────────────────────
 
@@ -507,7 +654,7 @@ function loadProjects(navigating) {
     say(projects.length ? '' : 'No projects yet.');
     setText(el('sub'), projects.length ? projects.length + (projects.length === 1 ? ' project' : ' projects') : '');
     patchList(el('list'), projects, projectKey, buildProject, fillProject);
-    if (navigating) { focusFirstRow(); }
+    if (navigating) { selectFirstRow(); }
   });
 }
 
@@ -604,7 +751,7 @@ function loadTasks(navigating, mode) {
       : '');
     patchList(el('list'), state.tasks, taskKey, buildTask, fillTask);
     show(el('more'), state.tasks.length > 0 && state.tasks.length < state.total);
-    if (navigating) { focusFirstRow(); }
+    if (navigating) { selectFirstRow(); }
   });
 }
 
@@ -654,7 +801,7 @@ function openTask(id) {
   // Nothing in a detail pane is focusable, so hand the cursor to Back now
   // rather than after the fetch: the wearer's next swipe has somewhere to
   // start from, and the way out of this screen is already under it.
-  focusNode(el('back'));
+  select(el('back'));
   return load(true);
 }
 
@@ -922,7 +1069,7 @@ function openHeard(text) {
   host.appendChild(rowButton('discard', '✕ Discard'));
   // Land on Add: it is the reason the wearer spoke, and the transcript above
   // is not focusable, so an unaimed pinch would otherwise hit nothing.
-  focusNode(add);
+  select(add);
 }
 
 function rowButton(action, label) {

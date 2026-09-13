@@ -8,10 +8,25 @@
 // the controls in. So this shim has a real parent/child tree, real document
 // order, a real activeElement and real event bubbling, and nothing else.
 //
-// What it does NOT model is layout: no geometry, no computed style, no CSS.
-// Visibility is therefore taken from the `hidden` property alone, which is
-// exactly why the page sets `hidden` alongside its class contract rather than
-// relying on a stylesheet this shim cannot read.
+// What it does NOT model is layout, except where a scenario states it: there is
+// no CSS and no computed style, and getBoundingClientRect answers only for
+// nodes a scenario has placed with layout(). Visibility is otherwise taken from
+// the `hidden` property alone, which is exactly why the page sets `hidden`
+// alongside its class contract rather than relying on a stylesheet this shim
+// cannot read.
+//
+// Three things here exist because the page cannot trust the glasses runtime and
+// this shim has to be able to play one (Task 20242):
+//
+//   - press() takes a bag of event fields, not just a key name, so a scenario
+//     can send the legacy 'Right' spelling or a bare keyCode the way an engine
+//     that synthesises key events from gestures might.
+//   - focus: 'dead' makes Element.focus() a no-op and focus: 'hijack' re-aims
+//     it at the first row after every keydown, which are the two ways a runtime
+//     can make document.activeElement useless as a cursor.
+//   - listeners record their capture flag and dispatch runs both phases in the
+//     right order, because the page's gesture handler is now a capture
+//     listener and a shim that ignored the phase could not tell.
 
 'use strict';
 
@@ -91,16 +106,21 @@ function makeDOM(opts) {
       return child;
     };
 
-    el.addEventListener = (type, fn) => {
-      (el._listeners[type] = el._listeners[type] || []).push(fn);
+    el.addEventListener = (type, fn, capture) => {
+      (el._listeners[type] = el._listeners[type] || []).push({ fn, capture: !!capture });
     };
     el.removeEventListener = (type, fn) => {
-      el._listeners[type] = (el._listeners[type] || []).filter(f => f !== fn);
+      el._listeners[type] = (el._listeners[type] || []).filter(r => r.fn !== fn);
     };
 
-    el.focus = () => { doc.activeElement = el; };
+    // A runtime that will not focus a <button> is the failure the page's own
+    // cursor exists to survive, so the shim can be one.
+    el.focus = () => { if (opts.focus !== 'dead' && opts.focus !== 'hijack') { doc.activeElement = el; } };
     el.blur = () => { if (doc.activeElement === el) { doc.activeElement = doc.body; } };
     el.scrollIntoView = () => { el.scrollIntoViewCalls++; };
+    // Undefined unless a scenario placed this node with layout(); the page
+    // reads "no rectangle" as "cannot tell, assume visible".
+    el.getBoundingClientRect = () => el._rect;
     el.click = () => dispatch(el, { type: 'click' });
     el.closest = sel => {
       for (let n = el; n && n !== doc; n = n.parentNode) {
@@ -146,10 +166,18 @@ function makeDOM(opts) {
     const path = [];
     for (let n = target; n; n = n.parentNode) { path.push(n); }
     path.push(doc);
-    for (const n of path) {
-      const fns = (n._listeners && n._listeners[ev.type]) || [];
-      for (const fn of fns.slice()) { fn(ev); }
-    }
+    let stopped = false;
+    ev.stopPropagation = () => { stopped = true; };
+    const fire = (n, capture) => {
+      const recs = (n._listeners && n._listeners[ev.type]) || [];
+      for (const rec of recs.slice()) { if (rec.capture === capture) { rec.fn(ev); } }
+    };
+    // Capture runs root-first, bubble target-first. The page's gesture handler
+    // sits in the capture phase deliberately, so nothing downstream can consume
+    // the event before it, and a shim that collapsed the two phases could not
+    // tell that apart from a bubble-phase regression.
+    for (let i = path.length - 1; i >= 0 && !stopped; i--) { fire(path[i], true); }
+    for (const n of path) { if (stopped) { break; } fire(n, false); }
     return ev;
   }
 
@@ -163,9 +191,11 @@ function makeDOM(opts) {
     createElement: mkElement,
     getElementById: id => byId[id] || null,
     querySelectorAll: sel => collect(doc.documentElement, sel),
-    addEventListener: (t, fn) => { (doc._listeners[t] = doc._listeners[t] || []).push(fn); },
+    addEventListener: (t, fn, capture) => {
+      (doc._listeners[t] = doc._listeners[t] || []).push({ fn, capture: !!capture });
+    },
     removeEventListener: (t, fn) => {
-      doc._listeners[t] = (doc._listeners[t] || []).filter(f => f !== fn);
+      doc._listeners[t] = (doc._listeners[t] || []).filter(r => r.fn !== fn);
     },
   };
 
@@ -331,10 +361,44 @@ function makeDOM(opts) {
     // ── driving ─────────────────────────────────────────────────────────────
 
     // press models exactly what the glasses deliver: a keydown aimed at
-    // activeElement (or the body when nothing has focus) that bubbles.
-    press: key => dispatch(doc.activeElement || doc.body, { type: 'keydown', key }),
+    // activeElement (or the body when nothing has focus) that propagates.
+    //
+    // A string is the modern key name. An object is the whole event, so a
+    // scenario can send what a gesture-synthesising engine might instead —
+    // {key:'Right'}, {key:'Unidentified', keyCode:39}, {code:'ArrowRight'} —
+    // which is the difference the page now has to survive.
+    press: key => {
+      const init = typeof key === 'string' ? { key } : key;
+      const ev = dispatch(doc.activeElement || doc.body, Object.assign({ type: 'keydown' }, init));
+      // 'hijack': the runtime re-aims focus at the first row after every
+      // gesture, the way an engine with its own opinion about where the cursor
+      // belongs would. The page must keep steering regardless.
+      if (opts.focus === 'hijack') {
+        const first = doc.getElementById('list').childNodes[0];
+        if (first) { doc.activeElement = first; }
+      }
+      return ev;
+    },
     click: el => dispatch(el, { type: 'click' }),
     tick: () => win.timers.filter(t => !t.cleared).forEach(t => t.fn()),
+
+    // layout stacks the ring down a column of the given row height and puts the
+    // viewport at `scrollTop`, which is the only geometry any scenario needs:
+    // it decides which controls the wearer can actually see. Everything not
+    // placed here keeps no rectangle at all and so reads as visible.
+    layout: (rowHeight, scrollTop, viewportHeight) => {
+      const h = viewportHeight == null ? 600 : viewportHeight;
+      globalThis.innerHeight = h;
+      const ring = collect(doc.documentElement, '.focusable').filter(e => !e.hidden && !e.disabled);
+      ring.forEach((e, i) => {
+        const top = i * rowHeight - scrollTop;
+        e._rect = { top, bottom: top + rowHeight, left: 0, right: 300, width: 300, height: rowHeight };
+      });
+      return ring.map((e, i) => ({
+        name: e.id ? '#' + e.id : e.dataset.key || e.textContent,
+        visible: e._rect.bottom > 0 && e._rect.top < h,
+      }));
+    },
 
     // settle flushes the promise chain a fetch handler turns into. Four turns
     // covers fetch -> json -> then, with room to spare; the scenarios assert
@@ -350,6 +414,32 @@ function makeDOM(opts) {
       if (!a || a === doc.body) { return '<body>'; }
       if (a.id) { return '#' + a.id; }
       return (a.dataset && a.dataset.key) || a.textContent || '<?>';
+    },
+    // The cursor however the page expresses it — painted first, focus second.
+    // Scenarios that ask "did this gesture steer?" use this, so that they fail
+    // on the gesture and not on which mechanism the page happens to use to show
+    // the answer; scenarios about the mechanism itself use selName directly.
+    cursorName: () => {
+      const marked = collect(doc.documentElement, '.sel');
+      if (marked.length === 1) {
+        const n = marked[0];
+        return n.id ? '#' + n.id : (n.dataset && n.dataset.key) || n.textContent || '<?>';
+      }
+      if (marked.length > 1) { return '<' + marked.length + ' selected>'; }
+      const a = doc.activeElement;
+      if (!a || a === doc.body) { return '<none>'; }
+      return a.id ? '#' + a.id : (a.dataset && a.dataset.key) || a.textContent || '<?>';
+    },
+
+    // The cursor as the wearer sees it: whatever carries the painted ring.
+    // This is the assertion that still means something when the runtime will
+    // not move focus, which is the whole point of the page owning a cursor.
+    selName: () => {
+      const marked = collect(doc.documentElement, '.sel');
+      if (!marked.length) { return '<none>'; }
+      if (marked.length > 1) { return '<' + marked.length + ' selected>'; }
+      const n = marked[0];
+      return n.id ? '#' + n.id : (n.dataset && n.dataset.key) || n.textContent || '<?>';
     },
     ring: () => collect(doc.documentElement, '.focusable')
       .filter(e => !e.hidden && !e.disabled)

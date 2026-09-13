@@ -112,11 +112,21 @@ func TestGlassesSwipeWalksTheFocusRing(t *testing.T) {
 	results := glassesScenarios(t)
 
 	var fwd struct {
-		Start string   `json:"start"`
-		Stops []string `json:"stops"`
-		Ring  []string `json:"ring"`
+		Start   string   `json:"start"`
+		Stops   []string `json:"stops"`
+		Painted []string `json:"painted"`
+		Ring    []string `json:"ring"`
 	}
 	glassesScenario(t, results, "swipe_right_walks_the_ring", &fwd)
+
+	// The selection has to be painted by the page, not left to :focus alone.
+	// The ring is the only cursor this device has, and a runtime that declines
+	// to focus a <button> would otherwise leave the wearer with none at all —
+	// see TestGlassesCursorSurvivesAHostileFocusModel.
+	if strings.Join(fwd.Painted, ",") != strings.Join(fwd.Stops, ",") {
+		t.Errorf("the painted selection %v does not track the focused one %v; the wearer's ring "+
+			"and the page's idea of the cursor have come apart", fwd.Painted, fwd.Stops)
+	}
 
 	if fwd.Start == "<body>" {
 		t.Error("nothing has focus once the first screen has loaded — the wearer's first swipe " +
@@ -181,6 +191,213 @@ func TestGlassesSwipeWalksTheFocusRing(t *testing.T) {
 	if consumed.Other {
 		t.Error("a key the page does not handle was swallowed anyway — that suppresses whatever " +
 			"the device would have done with it")
+	}
+}
+
+// TestGlassesReadsEverySpellingOfAGesture is Task 20242, and the reason the
+// previous fix was inert on the hardware while passing everywhere else.
+//
+// The tell was in the report: a sideways swipe scrolled the tasks page
+// sideways. A handler that runs calls preventDefault, and a prevented arrow key
+// cannot scroll — so the handler was never matching the events the device
+// sends. The glasses are not a keyboard; they synthesise key events from band
+// and captouch gestures, and an engine in that class may send the legacy
+// 'Right' name, leave key as 'Unidentified' and fill only keyCode, or set code
+// alone. Matching one spelling is matching none of them.
+func TestGlassesReadsEverySpellingOfAGesture(t *testing.T) {
+	t.Parallel()
+
+	var got map[string]struct {
+		Forward   []string `json:"forward"`
+		Back      string   `json:"back"`
+		Prevented bool     `json:"prevented"`
+	}
+	glassesScenario(t, glassesScenarios(t), "every_spelling_of_a_swipe_steers", &got)
+
+	if len(got) < 4 {
+		t.Fatalf("only %d spellings exercised; the point is that no single one is trusted", len(got))
+	}
+	modern, ok := got["modern"]
+	if !ok {
+		t.Fatal("the modern spelling was not exercised")
+	}
+	for name, run := range got {
+		for i, stop := range run.Forward {
+			prev := ""
+			if i > 0 {
+				prev = run.Forward[i-1]
+			}
+			if stop == "<none>" {
+				t.Fatalf("%s: swipe %d selected nothing — this spelling is not recognised at all, "+
+					"so the device's own handling runs instead and the page never steers", name, i+1)
+			}
+			if stop == prev {
+				t.Fatalf("%s: swipe %d stayed on %q; the selection is stuck", name, i+1, stop)
+			}
+		}
+		if !run.Prevented {
+			t.Errorf("%s: the gesture kept its default action. On the tasks page that default is a "+
+				"horizontal scroll, which is exactly what the wearer reported seeing", name)
+		}
+		if len(run.Forward) > 1 && run.Back != run.Forward[len(run.Forward)-2] {
+			t.Errorf("%s: swiping back landed on %q, want %q — left must retrace right",
+				name, run.Back, run.Forward[len(run.Forward)-2])
+		}
+		// Every spelling means the same gesture, so every spelling must walk the
+		// same ring. A fallback that drifted would be worse than none.
+		if strings.Join(run.Forward, ",") != strings.Join(modern.Forward, ",") {
+			t.Errorf("%s walked %v but the modern spelling walked %v", name, run.Forward, modern.Forward)
+		}
+	}
+
+	var typed struct {
+		Before    string `json:"before"`
+		After     string `json:"after"`
+		Prevented bool   `json:"prevented"`
+	}
+	glassesScenario(t, glassesScenarios(t), "an_ordinary_key_is_left_alone", &typed)
+	if typed.After != typed.Before || typed.Prevented {
+		t.Errorf("a plain letter moved the cursor %q -> %q (prevented=%v); the keyCode fallback has "+
+			"become a net that catches ordinary typing on the phone the glasses tether through",
+			typed.Before, typed.After, typed.Prevented)
+	}
+}
+
+// TestGlassesCursorSurvivesAHostileFocusModel covers the other way the previous
+// fix could be inert on hardware it cannot be tested against: it read the
+// selection back out of document.activeElement, so a runtime that will not
+// focus a <button>, or that re-aims focus itself after every gesture, produced
+// exactly the reported symptom — the first control selected once, then nothing,
+// because every swipe found "no cursor" and restarted from the top of the ring.
+//
+// The page keeps the selection in a variable now and paints it itself, so both
+// runtimes steer. focus() is still called; it is just no longer believed.
+func TestGlassesCursorSurvivesAHostileFocusModel(t *testing.T) {
+	t.Parallel()
+
+	results := glassesScenarios(t)
+
+	for _, tc := range []struct{ scenario, runtime string }{
+		{"cursor_survives_a_runtime_that_will_not_focus", "a runtime whose focus() does nothing"},
+		{"cursor_survives_a_runtime_that_reclaims_focus", "a runtime that re-aims focus after every gesture"},
+	} {
+		var got struct {
+			Stops []string `json:"stops"`
+			Focus string   `json:"focus"`
+			Title string   `json:"title"`
+		}
+		glassesScenario(t, results, tc.scenario, &got)
+
+		for i, stop := range got.Stops {
+			prev := "p:alpha"
+			if i > 0 {
+				prev = got.Stops[i-1]
+			}
+			if stop == prev || stop == "<none>" {
+				t.Fatalf("under %s, swipe %d left the selection on %q — stops %v.\nThis is the "+
+					"reported failure exactly: the first item selected once, then nothing.",
+					tc.runtime, i+1, stop, got.Stops)
+			}
+		}
+		// The proof that the page acted on its own cursor rather than on focus:
+		// gamma is where the selection walked to, alpha is where the runtime's
+		// focus was sitting.
+		if got.Title != "gamma" {
+			t.Errorf("under %s, a pinch opened %q; the wearer can only see the painted selection, "+
+				"so that is what a pinch has to activate (focus was on %q)",
+				tc.runtime, got.Title, got.Focus)
+		}
+	}
+}
+
+// TestGlassesGestureHandlerCannotBeSwallowed: the handler is a capture listener
+// so nothing downstream can consume the gesture before the page sees it, and so
+// defaultPrevented cannot already be set by the time it looks.
+func TestGlassesGestureHandlerCannotBeSwallowed(t *testing.T) {
+	t.Parallel()
+
+	var got struct {
+		Before string `json:"before"`
+		After  string `json:"after"`
+	}
+	glassesScenario(t, glassesScenarios(t), "a_swallowed_event_still_steers", &got)
+
+	if got.After == got.Before {
+		t.Errorf("a listener on the focused row stopped the gesture reaching the page (cursor stayed "+
+			"%q) — the handler is back in the bubble phase", got.Before)
+	}
+}
+
+// TestGlassesSwipeAfterAScrollLandsOnScreen is the "after a vertical scroll"
+// qualifier in the report, which is load-bearing. Up and down move the page and
+// deliberately not the cursor, so after a scroll the two are in different
+// places; the next sideways swipe must continue from what is in front of the
+// wearer rather than drag the whole column back to a row they left behind.
+func TestGlassesSwipeAfterAScrollLandsOnScreen(t *testing.T) {
+	t.Parallel()
+
+	var got struct {
+		Start     string   `json:"start"`
+		Landed    string   `json:"landed"`
+		Visible   []string `json:"visible"`
+		NaiveStep string   `json:"naiveStep"`
+	}
+	glassesScenario(t, glassesScenarios(t), "swipe_after_a_scroll_lands_on_screen", &got)
+
+	if len(got.Visible) == 0 {
+		t.Fatal("the scenario scrolled every control off screen; it no longer tests anything")
+	}
+	if got.Landed == got.Start {
+		t.Errorf("the swipe did not move the cursor at all (still %q)", got.Start)
+	}
+	if !hasStop(got.Visible, got.Landed) {
+		t.Errorf("after scrolling, a swipe put the cursor on %q, which is off screen. On screen: %v.\n"+
+			"The wearer sees no ring move and the column jumps to a row they scrolled past.",
+			got.Landed, got.Visible)
+	}
+	if got.Landed == got.NaiveStep {
+		t.Errorf("the cursor stepped to %q, the row after the one the wearer scrolled away from, "+
+			"rather than re-anchoring to what is on screen", got.NaiveStep)
+	}
+}
+
+// TestGlassesHasNoHorizontalAxis is the second half of Task 20242: "swiping left
+// and right now moves the horizontal scroll bar, which should not be there in
+// the first place."
+//
+// It was there. Measured in Chromium at 600x600, the tasks page reported
+// scrollWidth 586 against clientWidth 585, and 586 against 305 at the narrowest
+// viewport tried — the same 586 every time, because the overflow is one
+// unbreakable token, not a width. Task titles here carry paths and image refs
+// (ghcr.io/blechschmidt/cloop-harness:latest) and Go identifiers
+// (OrchestratorTaskTimeoutMinutesDefault); the project list, whose names are one
+// short word, stayed clean, which is why the report names only the tasks page.
+//
+// A grep, because the node shim models no layout and CI has no browser. It
+// checks the two declarations that make the axis impossible rather than that
+// any particular page is currently narrow enough.
+func TestGlassesHasNoHorizontalAxis(t *testing.T) {
+	t.Parallel()
+
+	src := glassesPageSource()
+
+	if !regexp.MustCompile(`(?s)html,\s*body\s*\{[^}]*overflow-x:\s*hidden`).MatchString(src) {
+		t.Error("glasses.html no longer refuses horizontal overflow on the root. One column of " +
+			"full-width rows has nothing to the side of it, and a sideways gesture spent scrolling " +
+			"is a gesture not spent moving the selection")
+	}
+	// The rule that stops the overflow existing, rather than only hiding it: a
+	// clipped title is still unreadable.
+	wrap := regexp.MustCompile(`(?s)\.row\s*\.name[^{]*\{[^}]*overflow-wrap:\s*anywhere`).MatchString(src) ||
+		regexp.MustCompile(`(?s)\{[^}]*overflow-wrap:\s*anywhere[^}]*\}`).MatchString(src)
+	if !wrap {
+		t.Error("nothing breaks a long token in a task title any more; a path or an identifier with " +
+			"no space in it is wider than the column at every viewport the device reports")
+	}
+	for _, sel := range []string{".row .name", ".row .meta", "#sub"} {
+		if !strings.Contains(src, sel) {
+			t.Errorf("the wrapping rule no longer names %s; that is where the overflowing text is", sel)
+		}
 	}
 }
 
@@ -409,14 +626,27 @@ func TestGlassesFilterKeepsItsChip(t *testing.T) {
 	t.Parallel()
 
 	var got struct {
+		Reached      bool     `json:"reached"`
 		FocusAfter   string   `json:"focusAfter"`
+		PaintedAfter string   `json:"paintedAfter"`
 		SameChipNode bool     `json:"sameChipNode"`
 		Rows         []string `json:"rows"`
 	}
 	glassesScenario(t, glassesScenarios(t), "filter_keeps_the_chip_under_the_cursor", &got)
 
+	if !got.Reached {
+		t.Fatal("swiping never reached the Done chip: the filter strip cannot be driven by gesture " +
+			"at all, which is the only way the wearer has to reach it")
+	}
 	if got.FocusAfter != "f:done" {
 		t.Errorf("after pinching the Done filter the cursor is on %q, want the chip itself", got.FocusAfter)
+	}
+	// Activating a filter rewrites every chip's class attribute. That write goes
+	// through setClass, which re-asserts the cursor marker for exactly this
+	// reason — otherwise the selection would silently stop being drawn.
+	if got.PaintedAfter != "f:done" {
+		t.Errorf("the selection is painted on %q after the filter strip was repainted; rewriting a "+
+			"class attribute scrubbed the cursor off the node the wearer is looking at", got.PaintedAfter)
 	}
 	if !got.SameChipNode {
 		t.Error("the filter strip was rebuilt rather than patched, so the chip under the cursor " +

@@ -229,14 +229,17 @@ itself:
 
 | Gesture | What it does |
 | --- | --- |
-| Swipe left / right | Move the selection to the previous / next control. It wraps, so continuing one way always gets you everywhere. |
+| Swipe left / right | Move the selection to the previous / next control. It wraps, so continuing one way always gets you everywhere. If you have scrolled away from the selection, it jumps to what is on screen rather than dragging the page back to it. |
 | Swipe up / down | Scroll. On a screen with nothing to scroll they move the selection instead. |
 | Pinch | Activate whatever is selected. With nothing selected it takes the cursor back rather than doing nothing. |
 
 The selected control carries a blue ring — that ring is the only cursor there
-is. The page re-reads the hub about once a minute and patches what changed in
-place, so a refresh does not move your selection or lose your place in a long
-task result.
+is, and the page paints it itself rather than leaving it to the browser, so it
+keeps working on a runtime with its own ideas about focus. Nothing here scrolls
+sideways: the layout is one column, so a sideways gesture is always a selection
+move and never a scroll. The page re-reads the hub about once a minute and
+patches what changed in place, so a refresh does not move your selection or lose
+your place in a long task result.
 
 ---
 

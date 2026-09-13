@@ -66,9 +66,15 @@ scenarios.swipe_right_walks_the_ring = async () => {
   await dom.settle();
 
   const start = dom.focusName();
-  const stops = [];
-  for (let i = 0; i < 6; i++) { dom.press('ArrowRight'); stops.push(dom.focusName()); }
-  return { start, stops, ring: dom.ring() };
+  const stops = [], painted = [];
+  for (let i = 0; i < 6; i++) {
+    dom.press('ArrowRight');
+    stops.push(dom.focusName());
+    painted.push(dom.selName());
+  }
+  // The painted ring and the document's focus have to agree in a runtime where
+  // both work; they diverge only where the runtime refuses one of them.
+  return { start, stops, painted, ring: dom.ring() };
 };
 
 scenarios.swipe_left_walks_back = async () => {
@@ -92,6 +98,120 @@ scenarios.arrow_keys_are_consumed = async () => {
     // Anything the page does not act on has to keep its default, or the
     // device's own handling is suppressed for no reason.
     other: dom.press('PageDown').defaultPrevented,
+  };
+};
+
+// ── the runtime the page cannot be tested against ───────────────────────────
+// Task 20242. The previous fix walked the ring in a desktop browser and did
+// nothing whatsoever on the hardware, and the report contained the tell: a
+// sideways swipe scrolled the tasks page sideways. A handler that runs calls
+// preventDefault, and a prevented arrow key cannot scroll — so the handler was
+// never matching the events the device sends. These scenarios send what a
+// runtime that synthesises key events from gestures plausibly sends instead,
+// and take away the two facilities the page used to lean on.
+
+const SPELLINGS = {
+  modern: { next: { key: 'ArrowRight' }, prev: { key: 'ArrowLeft' } },
+  // The IE-era names, still emitted by embedded and TV engines.
+  legacy: { next: { key: 'Right' }, prev: { key: 'Left' } },
+  // No usable name at all, which is what a synthesised event often carries.
+  keycode_only: { next: { key: 'Unidentified', keyCode: 39 }, prev: { key: 'Unidentified', keyCode: 37 } },
+  // The physical key without the logical one.
+  code_only: { next: { code: 'ArrowRight' }, prev: { code: 'ArrowLeft' } },
+};
+
+scenarios.every_spelling_of_a_swipe_steers = async () => {
+  const out = {};
+  for (const name of Object.keys(SPELLINGS)) {
+    const dom = boot({ routes: { '/api/glasses/projects': { projects: PROJECTS } } });
+    await dom.settle();
+    const forward = [];
+    for (let i = 0; i < 3; i++) { dom.press(SPELLINGS[name].next); forward.push(dom.cursorName()); }
+    const ev = dom.press(SPELLINGS[name].prev);
+    out[name] = { forward, back: dom.cursorName(), prevented: ev.defaultPrevented };
+  }
+  return out;
+};
+
+// The keyCode fallback must not be a net that catches ordinary typing: a page
+// that swallowed every key would break the phone the glasses tether through.
+scenarios.an_ordinary_key_is_left_alone = async () => {
+  const dom = boot({ routes: { '/api/glasses/projects': { projects: PROJECTS } } });
+  await dom.settle();
+  const before = dom.cursorName();
+  const ev = dom.press({ key: 'a', keyCode: 65 });
+  return { before, after: dom.cursorName(), prevented: ev.defaultPrevented };
+};
+
+// A runtime that will not focus a <button> makes document.activeElement useless
+// as a cursor: reading it back gives "nothing" every time, the ring restarts
+// from the first control on every swipe, and the wearer sees exactly what was
+// reported — the first item selected once, then nothing.
+scenarios.cursor_survives_a_runtime_that_will_not_focus = async () => {
+  const dom = boot({ focus: 'dead', routes: {
+    '/api/glasses/projects': { projects: PROJECTS },
+    '/api/glasses/tasks': tasksRoute(mkTasks(2)),
+  } });
+  await dom.settle();
+  const stops = [];
+  for (let i = 0; i < 2; i++) { dom.press('ArrowRight'); stops.push(dom.selName()); }
+  dom.press('Enter');                       // must activate what is painted
+  await dom.settle();
+  return { stops, focus: dom.focusName(), title: dom.text('title') };
+};
+
+// ...and a runtime that has its own opinion about where the cursor belongs and
+// re-aims focus after every gesture. The page must keep steering, and a pinch
+// must activate what the wearer can see rather than what the engine grabbed.
+scenarios.cursor_survives_a_runtime_that_reclaims_focus = async () => {
+  const dom = boot({ focus: 'hijack', routes: {
+    '/api/glasses/projects': { projects: PROJECTS },
+    '/api/glasses/tasks': tasksRoute(mkTasks(2)),
+  } });
+  await dom.settle();
+  const stops = [];
+  for (let i = 0; i < 2; i++) { dom.press('ArrowRight'); stops.push(dom.selName()); }
+  dom.press('Enter');
+  await dom.settle();
+  return { stops, focus: dom.focusName(), title: dom.text('title') };
+};
+
+// The handler is a capture listener so nothing downstream can consume the
+// gesture first. A bubble-phase handler on the document would never run here.
+scenarios.a_swallowed_event_still_steers = async () => {
+  const dom = boot({ routes: { '/api/glasses/projects': { projects: PROJECTS } } });
+  await dom.settle();
+  dom.rowNodes()[0].addEventListener('keydown', ev => ev.stopPropagation(), false);
+  const before = dom.cursorName();
+  dom.press('ArrowRight');
+  return { before, after: dom.cursorName() };
+};
+
+// The "after a vertical scroll" half of the report. Up and down move the page
+// and deliberately not the cursor, so the two drift apart; the next sideways
+// swipe has to continue from what the wearer is looking at rather than drag the
+// column back to a row that left the screen several gestures ago.
+scenarios.swipe_after_a_scroll_lands_on_screen = async () => {
+  const many = [];
+  for (let i = 0; i < 10; i++) {
+    many.push({ idx: i, name: 'proj-' + i, status: 'idle', running: false, done: i, total: i + 2, failed: 0 });
+  }
+  const dom = boot({ routes: { '/api/glasses/projects': { projects: many } } });
+  await dom.settle();
+
+  const start = dom.cursorName();
+  // 150px rows in a 600px viewport, scrolled 700px down: the cursor's row and
+  // everything above it is now off the top.
+  const placed = dom.layout(150, 700, 600);
+  dom.press('ArrowRight');
+
+  return {
+    start,
+    landed: dom.cursorName(),
+    visible: placed.filter(p => p.visible).map(p => p.name),
+    // The one directly after the cursor, which is where a naive step would go
+    // and which is nowhere near the screen.
+    naiveStep: placed[2].name,
   };
 };
 
@@ -138,9 +258,14 @@ scenarios.pinch_activates_the_focused_row = async () => {
 scenarios.pinch_recovers_a_lost_cursor = async () => {
   const dom = boot({ routes: { '/api/glasses/projects': { projects: PROJECTS } } });
   await dom.settle();
-  dom.doc.activeElement = dom.doc.body;      // nothing focused, as after a cold start
+  // Take the cursor's row out from under it and leave nothing focused — the
+  // one state where the page genuinely has no selection. A pinch here has to
+  // hand one back rather than be dropped: it is the only key the wearer has.
+  const list = dom.doc.getElementById('list');
+  list.childNodes.slice().forEach(n => list.removeChild(n));
+  dom.doc.activeElement = dom.doc.body;
   dom.press('Enter');
-  return { after: dom.focusName() };
+  return { after: dom.focusName(), painted: dom.selName() };
 };
 
 // ── the smooth refresh ──────────────────────────────────────────────────────
@@ -253,15 +378,25 @@ scenarios.filter_keeps_the_chip_under_the_cursor = async () => {
   dom.press('Enter');
   await dom.settle();
 
-  // Put the cursor on the "Done" chip and pinch it.
-  const chips = dom.doc.getElementById('filters').childNodes;
-  chips[2].focus();
-  const chipNode = chips[2];
+  // Swipe to the "Done" chip the way a wearer reaches it. Deliberately not
+  // chip.focus(): focus is not the cursor any more, so calling it would test a
+  // path no gesture can produce.
+  const chipNode = dom.doc.getElementById('filters').childNodes[2];
+  let reached = false;
+  for (let i = 0; i < 20 && !reached; i++) {
+    dom.press('ArrowRight');
+    reached = dom.cursorName() === 'f:done';
+  }
   dom.press('Enter');
   await dom.settle();
 
   return {
-    focusAfter: dom.focusName(),
+    reached,
+    focusAfter: dom.cursorName(),
+    // Activating a filter rewrites the class attribute of every chip, which is
+    // the one routine way the cursor marker can be scrubbed off the node the
+    // wearer is looking at.
+    paintedAfter: dom.selName(),
     sameChipNode: dom.doc.getElementById('filters').childNodes[2] === chipNode,
     rows: dom.rows(),
   };
