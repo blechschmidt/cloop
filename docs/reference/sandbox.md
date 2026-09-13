@@ -52,7 +52,10 @@ resources:
 capabilities:
   git: true       # the sandbox needs a working git
   network: ci     # the name of an egress grant this project already holds
-  virtualized: true  # only run behind a hypervisor (Kata); never share a kernel
+  virtualized: true       # only run behind a hypervisor (Kata); never share a kernel
+  kernel_isolated: true   # weaker and usually what you want: gVisor *or* Kata
+  egress: public          # public Internet only; drop all private address space
+  devices: [serial0]      # select from the host_device grants this project holds
 
 # Re-expose a sub-path of the workspace at another path inside the sandbox.
 # Sources are workspace-relative; targets are absolute.
@@ -102,7 +105,9 @@ infrastructure executes it. Every rule follows from that.
 | **Filesystem** | `mounts.source` is relative to the workspace and may not contain `..`, be absolute, or contain a colon (which would append options to the runtime's `-v` flag). Sources are re-checked after symlink resolution, so a symlink inside the repo pointing at `/etc` is rejected too. |
 | **Privilege** | Nothing in the schema grants capabilities, changes the UID, or disables seccomp. The generated Dockerfile for `setup:` emits only `FROM`, `LABEL` and `RUN` — no `COPY`, `USER` or `ENV` — so a repo cannot bake its own files or a privileged user into a cached image later tasks inherit. |
 | **Build-time network** | A `setup:` build inherits the run's network posture. A spec with no egress grant builds with `--network=none`, so `setup:` is not a way to reach the Internet from a deployment that forbids it. |
-| **Virtualization** | `capabilities.virtualized` is the one capability field that is a plain bool, and it does not contradict the rule — it asks for a boundary *stronger* than the executor would otherwise apply, so it needs no grant to name. It cannot turn a runc executor into a Kata one; it can only refuse to run on one. See [the Kata guide](../guides/kata.md). |
+| **Virtualization** | `capabilities.virtualized` is a plain bool, and it does not contradict the rule — it asks for a boundary *stronger* than the executor would otherwise apply, so it needs no grant to name. It cannot turn a runc executor into a Kata one; it can only refuse to run on one. `capabilities.kernel_isolated` is the same shape and weaker: it is satisfied by gVisor as well as Kata, and is what to use unless a hypervisor is specifically required. See [the Kata guide](../guides/kata.md). |
+| **Egress scope** | `capabilities.egress` is a closed enum (`public`, `none`), never an address list. Every value removes reach, which is why no grant is needed for any of them — and why there is deliberately no `allow_cidrs` key. Reaching *into* private space is what `capabilities.network` and an operator-issued egress grant are for. `public` is refused, not downgraded, on an executor whose sandboxes only reach an egress broker: there it would be a widening. |
+| **Devices** | `capabilities.devices` selects by *name* from the `host_device` grants the project already holds. There is no path-shaped key, for the same reason `mounts.source` cannot be absolute: this file is whatever a pull request says it is, and a device node is an authority over the machine. Naming an ungranted device is a 409, not a silent omission — a missing device node makes the task meaningless. |
 
 An `env:` key that is *absent* means "no opinion" and passes the environment
 through untouched. It is not an empty allowlist — reading it that way would
@@ -304,6 +309,10 @@ is never partially applied.
 | `resources` | ✅ | ✅ (no `pids`) | ❌ | ❌ |
 | `capabilities.network` off | ✅ enforced | ⚠️ label only | ❌ | ❌ |
 | `capabilities.virtualized` | ✅ with `oci_runtime` | ✅ with `runtime_class` | ❌ | ❌ |
+| `capabilities.kernel_isolated` | ✅ with `oci_runtime` (`runsc` or kata) | ✅ with `runtime_class` | ❌ | ❌ |
+| `capabilities.egress: public` | ✅ own bridge + nft table | ❌ | ❌ | ❌ |
+| `capabilities.egress: none` | ✅ enforced | ⚠️ label only | ❌ | ❌ |
+| `capabilities.devices` | ✅ `--device` | ❌ | ❌ | ❌ |
 
 Two entries deserve their reasons stated plainly:
 
@@ -380,6 +389,12 @@ can see.
 | Un-isolated executor, or strict mode | 409 | `*executor.HostExecutionDeniedError`, listing isolated executors to bind to |
 | `capabilities.network` names a grant the project lacks | 409 | `*sandbox.GrantDeniedError`, with the command to request it |
 | `capabilities.virtualized` on a kernel-sharing executor | 409 | `*executor.PlacementError`, constraint `virtualization` — or `*executor.HostExecutionDeniedError` when the bound executor is `localprocess`, where binding to a sandbox is the first step anyway |
+| `capabilities.kernel_isolated` on a runc executor | 409 | `*executor.PlacementError`, constraint `kernel_isolation`, naming both the gVisor and the Kata config key |
+| `capabilities.egress: public` on an executor that cannot scope egress | 409 | `*executor.PlacementError`, constraint `egress_scope` |
+| `capabilities.egress: public` on a broker-only executor | 409 | `executor.ErrUnsupported` — the scope asks for more reach than the executor grants, so it is refused rather than downgraded |
+| `capabilities.egress: public` with no `resolvers` configured | 400 | dropping private space drops the sandbox's resolver, so cloop refuses rather than install a policy with no working DNS |
+| `capabilities.devices` names an ungranted device | 409 | `*sandbox.DeviceNotGrantedError`, with the `cloop secret grant` command that fixes it |
+| a `host_device` grant on an executor that cannot expose devices | 409 | `executor.ErrInvalidSpec`, naming the grant and the binding |
 | `image:` is refused by the trust policy | 409 | `code: sandbox_image_denied`, naming the rule and its remediation |
 | `image:` is not a usable reference | 400 | `imagepolicy: malformed image reference: …` — the author fixes the file |
 

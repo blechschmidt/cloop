@@ -251,6 +251,24 @@ type Input struct {
 	// happens to it.
 	AllowPublicInternet bool
 
+	// AllowAllPorts waives the requirement to name ports alongside
+	// destinations, producing allow rules that match any port.
+	//
+	// Compile otherwise refuses a destination with no ports, and that guard
+	// is correct for the case it was written for: an operator granting
+	// 10.0.0.0/8 with no port list has described a hole, and inferring 443
+	// is not a firewall compiler's decision. This field is for the other
+	// case, where the policy is *narrowing* an executor that currently has
+	// unrestricted egress down to "public addresses only, private space
+	// dropped". There the port list is not what bounds the policy — the
+	// block set is — and demanding one would force a caller to invent a
+	// restriction finer than the one being asked for.
+	//
+	// It is a separate opt-in rather than "empty ports means any" so that the
+	// guard still catches the grant that forgot its ports. Saying this is
+	// something a caller does on purpose, in a line a reviewer can see.
+	AllowAllPorts bool
+
 	// HostPatterns is the L7 allowlist this policy could not enforce. It is
 	// used only to write an accurate warning.
 	HostPatterns []string
@@ -292,9 +310,16 @@ func Compile(in Input) (Policy, error) {
 	}
 
 	wantsDestinations := len(cidrs) > 0 || in.AllowPublicInternet
-	if wantsDestinations && len(ports) == 0 {
+	if wantsDestinations && len(ports) == 0 && !in.AllowAllPorts {
 		return Policy{}, fmt.Errorf("netfilter: destinations are allowed but no ports are — " +
-			"name the ports the sandbox may reach (the egress grant's --ports)")
+			"name the ports the sandbox may reach (the egress grant's --ports), or set " +
+			"AllowAllPorts when the policy is narrowing an already-unrestricted executor")
+	}
+	if in.AllowAllPorts && len(ports) > 0 {
+		// Both would silently mean "any port", discarding the list. A caller
+		// that supplied one meant it to apply.
+		return Policy{}, fmt.Errorf("netfilter: AllowAllPorts is set alongside %d explicit "+
+			"ports; the list would be ignored — set one or the other", len(ports))
 	}
 
 	p := Policy{Mode: modeFor(len(brokers) > 0, wantsDestinations)}

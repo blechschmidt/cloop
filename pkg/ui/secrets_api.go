@@ -171,6 +171,7 @@ type grantView struct {
 // null Kubernetes fields.
 type grantConstraintsView struct {
 	Repos       []string `json:"repos,omitempty"`
+	Devices     []string `json:"devices,omitempty"`
 	Permissions []string `json:"permissions,omitempty"`
 	Namespaces  []string `json:"namespaces,omitempty"`
 	Contexts    []string `json:"contexts,omitempty"`
@@ -498,6 +499,18 @@ func (s *Server) handleSecretCreate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// A host_device inventory is checked here for the same reason, and with one
+	// more of its own: it is the only payload that can name something whose
+	// exposure would waive the sandbox's isolation entirely (/dev/mem), and the
+	// person who typed it is the only person who can fix that. Existence is
+	// deliberately not checked — the device may belong to an executor on another
+	// host, which is Preflight's question, not this handler's.
+	if kind == secretbroker.KindHostDevice {
+		if _, err := secretbroker.ParseDeviceInventory([]byte(req.Payload)); err != nil {
+			apierror.WriteError(w, apierror.New(apierror.CodeInvalidInput, err.Error()))
+			return
+		}
+	}
 
 	bs, ok := s.openBrokersOr(w)
 	if !ok {
@@ -668,6 +681,7 @@ func secretGrantView(g secretbroker.Grant, sec secretbroker.Secret, now time.Tim
 		Summary:    g.Constraints.Summary(),
 		Constraints: grantConstraintsView{
 			Repos:       g.Constraints.Repos,
+			Devices:     g.Constraints.Devices,
 			Permissions: g.Constraints.Permissions,
 			Namespaces:  g.Constraints.Namespaces,
 			Contexts:    g.Constraints.Contexts,
@@ -747,6 +761,7 @@ type createGrantRequest struct {
 	TTLMinutes int `json:"ttl_minutes"`
 
 	Repos       []string `json:"repos"`
+	Devices     []string `json:"devices"`
 	Permissions []string `json:"permissions"`
 	Namespaces  []string `json:"namespaces"`
 	Contexts    []string `json:"contexts"`
@@ -814,6 +829,7 @@ func (s *Server) handleGrantCreate(w http.ResponseWriter, r *http.Request) {
 		Actor:     actor,
 		Constraints: secretbroker.Constraints{
 			Repos:       cleanList(req.Repos),
+			Devices:     cleanList(req.Devices),
 			Permissions: cleanList(req.Permissions),
 			Namespaces:  cleanList(req.Namespaces),
 			Contexts:    cleanList(req.Contexts),

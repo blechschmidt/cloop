@@ -100,6 +100,13 @@ Five pages in order, indexed at
   installing Kata, registering it with docker or podman, the `/dev/kvm` and
   nested-virtualization prerequisite, the Kubernetes RuntimeClass path, and how
   to tell whether a workload is really running in a VM.
+- **[Critical hosts as executors](guides/enterprise-hosts.md)** — running agent
+  tasks on a high-performance machine without letting them reach the rest of the
+  estate: per-project repository access, an IP-layer firewall that allows the
+  Internet and drops all private address space, a gVisor sandbox whose only view
+  of the filesystem is a bind mount, and passing a serial port, GPU or TUN device
+  in. Includes the topology table, and what a read-only device grant does and
+  does not enforce.
 
 ## Operations
 

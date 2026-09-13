@@ -235,6 +235,19 @@ func (e *Executor) Capabilities() executor.Capabilities {
 		// runs in the host's filesystem has already answered the workspace
 		// question, and a reader should not have to infer that from an absence.
 		SupportsWorkspaceProvisioning: false,
+		// False, and here that is a statement about enforcement rather than
+		// about plumbing. The workload is a plain process in the hub's own
+		// namespaces, so every device node the hub user can open is already
+		// open to it: there is nothing to expose, and nothing that could be
+		// withheld. A device grant on this driver would be recorded and
+		// unenforced, so the grant path says so out loud rather than letting a
+		// "granted" badge imply a boundary that does not exist.
+		SupportsDevices: false,
+		// False for the same shape of reason: the process shares the hub's
+		// network namespace, so confining its egress would mean filtering the
+		// control plane's own traffic. A project that needs bounded egress
+		// needs a sandbox, and placement says that instead of pretending.
+		SupportsEgressScope: false,
 		// This is the one driver whose workload opens the control plane's own
 		// files, so it is the one the hub may materialise a lease for: the
 		// tmpfs directory the broker writes is the directory the process

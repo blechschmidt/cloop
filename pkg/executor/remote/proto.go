@@ -550,6 +550,26 @@ func (c AgentCapabilities) Executor() executor.Capabilities {
 		// Executor.Capabilities — because a device that can clone is no use if
 		// the session cannot deliver the credential.
 		SupportsWorkspaceProvisioning: c.WorkspaceProvisioning,
+		// Left false, and it is worth being explicit about why, because an edge
+		// device with hardware attached is exactly the case someone will expect
+		// this to cover. Two things stand in the way, and only one of them is a
+		// missing feature.
+		//
+		// The first is that a host_device grant names a path on the *hub's*
+		// host. A device at /dev/ttyUSB0 there says nothing about /dev/ttyUSB0
+		// on a device in another building, and handing the path over would
+		// expose whatever that machine happens to have at the same path.
+		//
+		// The second is that the agent runs each workload with localprocess —
+		// a plain process in its own namespaces — so it has no sandbox to put a
+		// device *into*. The devices it can reach are already reachable. Pass
+		// hardware into a confined sandbox by running the container executor on
+		// the machine that has the hardware; see docs/guides/enterprise-hosts.md.
+		SupportsDevices: false,
+		// False for the second of those reasons alone: there is no per-workload
+		// network namespace on the agent to filter. A project needing bounded
+		// egress on a remote site needs a sandbox there, not a scope here.
+		SupportsEgressScope: false,
 		// The device advertised it; the hub narrows it further by protocol
 		// version in Executor.Capabilities, because a device that can commit
 		// and bundle is no use if the session cannot carry the result frames.

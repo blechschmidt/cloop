@@ -29,6 +29,7 @@ import (
 var (
 	grantToFlag         string
 	grantReposFlag      []string
+	grantDevicesFlag    []string
 	grantPermsFlag      []string
 	grantNamespacesFlag []string
 	grantContextsFlag   []string
@@ -95,17 +96,23 @@ var secretMintCmd = &cobra.Command{
 constrained and delivered.
 
 Kinds: github_pat, github_app, kubeconfig, registry, env, egress_proxy,
-local_repo
+local_repo, host_device
 
 The payload comes from --value, from --file, or from stdin. Prefer --file or
 stdin: a --value argument is visible in the process table and in shell history.
-A local_repo is the exception: its payload is a path, not a credential, so
---value is the natural way to give it.
+local_repo and host_device are the exceptions: their payloads are references to
+things on a host rather than credentials, so --value and --file are natural.
 
   cloop secret mint deploy-pat --kind github_pat --file token.txt
   cloop secret mint prod-kube  --kind kubeconfig --file ~/.kube/config
   cloop secret mint dev-src    --kind local_repo --value /home/dev/src
-  cat token | cloop secret mint ci-pat --kind github_pat`,
+  cloop secret mint bench-hw   --kind host_device --file bench-hw.txt
+  cat token | cloop secret mint ci-pat --kind github_pat
+
+A host_device inventory is one 'name=/dev/path[:/dev/target][:mode]' per line,
+where mode is r, rw (the default) or rwm. Grants then select from it by name:
+
+  cloop secret grant bench-hw --to project:/srv/fw --devices serial0 --ttl 8h`,
 	Args:         cobra.ExactArgs(1),
 	SilenceUsage: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -115,6 +122,9 @@ A local_repo is the exception: its payload is a path, not a credential, so
 		}
 		payload, err := readMintPayload(cmd)
 		if err != nil {
+			return err
+		}
+		if err := validateMintPayload(kind, payload); err != nil {
 			return err
 		}
 
@@ -139,21 +149,69 @@ A local_repo is the exception: its payload is a path, not a credential, so
 	},
 }
 
+// validateMintPayload checks the payloads whose validity is knowable at mint
+// time, so the mistake is caught in front of the person who typed it.
+//
+// Two of the eight kinds qualify, and they are the two whose payload is a
+// reference to something on a host rather than a credential: a local_repo root
+// and a host_device inventory. For the rest — a PAT, a kubeconfig, a registry
+// login — "is this correct" is a question only the remote side can answer, and
+// guessing here would refuse working credentials.
+//
+// Doing it before Mint rather than inside the broker is deliberate. Mint stores
+// bytes and is not the layer that knows what they mean; the delivery rule is,
+// and it already validates. What this adds is *when*: without it the refusal
+// lands at lease time, which is during someone else's run, in a log they are not
+// reading, an hour after the typo. The dashboard has done this since Task 20171
+// (see pkg/ui/secrets_api.go); this brings the CLI to parity.
+func validateMintPayload(kind secretbroker.Kind, payload []byte) error {
+	switch kind {
+	case secretbroker.KindLocalRepo:
+		_, err := secretbroker.ParseLocalRepoRoot(payload)
+		return err
+	case secretbroker.KindHostDevice:
+		// The one payload that can name something whose exposure would waive
+		// the sandbox's isolation outright (/dev/mem), which is why catching it
+		// here matters more than for any other kind.
+		//
+		// Existence is deliberately not checked, by the parser or here: the
+		// device may belong to a container executor on another host, so "does
+		// this path exist" is a question about the wrong machine. Preflight asks
+		// it on the right one.
+		_, err := secretbroker.ParseDeviceInventory(payload)
+		return err
+	}
+	return nil
+}
+
 // readMintPayload collects the credential from the least-exposed source
 // available, preferring a file or stdin over an argv value.
 func readMintPayload(cmd *cobra.Command) ([]byte, error) {
+	// "-" is the conventional spelling for stdin, and it is what anyone feeding
+	// a heredoc in reaches for — a multi-line host_device inventory is the case
+	// that invites it. Read literally it becomes a filename, and the run fails
+	// with "open -: no such file or directory", which names neither the mistake
+	// nor the fix.
+	//
+	// It takes precedence over --value rather than falling through to it: the
+	// flag was passed explicitly, and silently sealing a different payload than
+	// the one on stdin is the worst available outcome for a credential.
+	stdinRequested := mintFileFlag == "-"
 	switch {
-	case mintFileFlag != "":
+	case mintFileFlag != "" && !stdinRequested:
 		data, err := os.ReadFile(mintFileFlag)
 		if err != nil {
 			return nil, fmt.Errorf("secret: read payload file: %w", err)
 		}
 		return data, nil
-	case mintValueFlag != "":
+	case mintValueFlag != "" && !stdinRequested:
 		return []byte(mintValueFlag), nil
 	default:
 		info, err := os.Stdin.Stat()
 		if err != nil || info.Mode()&os.ModeCharDevice != 0 {
+			if stdinRequested {
+				return nil, fmt.Errorf("secret: --file - reads the payload from stdin, but stdin is a terminal — pipe the credential in, or pass a path")
+			}
 			return nil, fmt.Errorf("secret: no payload — pass --file, --value, or pipe the credential on stdin")
 		}
 		data, err := readAllStdin()
@@ -215,6 +273,7 @@ owner/repo as they do for github.`,
 			TTL:       ttl,
 			Constraints: secretbroker.Constraints{
 				Repos:       grantReposFlag,
+				Devices:     grantDevicesFlag,
 				Permissions: grantPermsFlag,
 				Namespaces:  grantNamespacesFlag,
 				Contexts:    grantContextsFlag,
@@ -496,8 +555,9 @@ func materialFileNames(m secretbroker.Material) string {
 
 func init() {
 	secretMintCmd.Flags().StringVar(&mintKindFlag, "kind", "env",
-		"secret kind: github_pat, github_app, kubeconfig, registry, env, egress_proxy")
-	secretMintCmd.Flags().StringVar(&mintFileFlag, "file", "", "read the payload from a file")
+		"secret kind: github_pat, github_app, kubeconfig, registry, env, egress_proxy, "+
+			"local_repo, host_device")
+	secretMintCmd.Flags().StringVar(&mintFileFlag, "file", "", "read the payload from a file (\"-\" for stdin)")
 	secretMintCmd.Flags().StringVar(&mintValueFlag, "value", "",
 		"payload as a literal (visible in the process table — prefer --file or stdin)")
 
@@ -505,8 +565,10 @@ func init() {
 		"subject: project:<path>, executor:<id>, label:<k=v,...>, or any")
 	secretGrantCmd.Flags().StringSliceVar(&grantReposFlag, "repos", nil,
 		"repository allowlist: owner/repo globs for github, directory-name globs for local_repo")
+	secretGrantCmd.Flags().StringSliceVar(&grantDevicesFlag, "devices", nil,
+		"host_device allowlist: device-name globs from the inventory (e.g. serial0,gpu*)")
 	secretGrantCmd.Flags().BoolVar(&grantWritableFlag, "writable", false,
-		"make a local_repo grant read-write (default read-only)")
+		"make a local_repo or host_device grant read-write (default read-only)")
 	secretGrantCmd.Flags().StringSliceVar(&grantPermsFlag, "permissions", nil,
 		"github permission set (e.g. contents:read,pull_requests:write)")
 	secretGrantCmd.Flags().StringSliceVar(&grantNamespacesFlag, "namespaces", nil,

@@ -68,6 +68,10 @@ const (
 	MaxSetupCommands = 32
 	MaxSetupCmdLen   = 4096
 	MaxEnvNames      = 64
+	// MaxDeviceSelectors matches executor.MaxDevices: this list can only ever
+	// select from what a grant already delivered, so a longer one is naming
+	// devices that cannot exist.
+	MaxDeviceSelectors = 16
 )
 
 // ErrNotFound is returned by Load when the project has no sandbox spec. It is a
@@ -156,6 +160,40 @@ type Capabilities struct {
 	// provide, which needs nobody's permission — the worst a repo can do with
 	// it is refuse to run anywhere, and it refuses loudly.
 	Virtualized bool `yaml:"virtualized"`
+	// KernelIsolated demands an executor on which the workload's system calls
+	// are not served by the executing machine's kernel. Both Kata and gVisor
+	// satisfy it.
+	//
+	// It is the key most projects that reach for `virtualized` actually want.
+	// The requirement behind "my task must not be able to turn a kernel bug
+	// into a host compromise" is that the syscalls go somewhere else, and
+	// gVisor's Sentry does that without a hypervisor — so demanding a VM would
+	// refuse a gVisor fleet that met the requirement exactly. Setting both is
+	// allowed and means the stricter one; see Requirements.
+	KernelIsolated bool `yaml:"kernel_isolated"`
+	// Egress confines this project's IP-layer network reach independently of
+	// the other projects on the same executor. "public" allows the public
+	// Internet and drops private, link-local, metadata and CGNAT address
+	// space; "none" removes the network entirely.
+	//
+	// A closed enum rather than an address list, and that is the same
+	// narrow-only rule again. Every value here takes reach away, so no grant is
+	// needed for any of them; reaching *into* private space is what
+	// capabilities.network and an operator-issued egress grant are for. There
+	// is deliberately no `allow_cidrs` key, because a repo-committed file that
+	// could name 10.0.0.0/8 would be a pull request that reaches the
+	// operator's network.
+	Egress string `yaml:"egress"`
+	// Devices selects, by name, from the host_device grants this project
+	// already holds. Empty means every granted device is exposed.
+	//
+	// Selection only: a name here that the project holds no grant for is a
+	// hard error, not a request. That asymmetry is deliberate and differs from
+	// `env`, where an unheld name silently forwards nothing — the difference is
+	// that a missing variable degrades a run and a missing device node makes
+	// the task meaningless, so it is better to refuse than to start a firmware
+	// build with no serial port.
+	Devices []string `yaml:"devices"`
 }
 
 // Mount is the YAML shape of executor.SpecMount.
@@ -323,6 +361,48 @@ func (s *Spec) normalize() ([]string, error) {
 		}
 	}
 
+	s.Capabilities.Egress = strings.TrimSpace(s.Capabilities.Egress)
+	if e := s.Capabilities.Egress; e != "" {
+		scope, err := executor.ParseEgressScope(e)
+		if err != nil {
+			return warnings, fmt.Errorf("capabilities.egress: %w", err)
+		}
+		// Rewritten to the canonical spelling so that the value hashed into
+		// SandboxHash, rendered into a container label and shown in the
+		// dashboard is one string rather than three casings of it.
+		s.Capabilities.Egress = string(scope)
+		if scope == executor.EgressScopeNone && s.Capabilities.Network != "" {
+			// Both keys are honoured one-directionally, so this is not
+			// ambiguous — `none` wins and the grant is simply unused — but it
+			// is certainly a mistake. The author asked for a network grant and
+			// for no network, and whichever they meant, the file does not say
+			// it.
+			return warnings, fmt.Errorf(
+				"capabilities.egress is %q but capabilities.network names the grant %q; "+
+					"the first removes the network the second asks to use — drop one",
+				scope, s.Capabilities.Network)
+		}
+	}
+
+	if len(s.Capabilities.Devices) > MaxDeviceSelectors {
+		return warnings, fmt.Errorf("capabilities.devices: %d names, at most %d are allowed",
+			len(s.Capabilities.Devices), MaxDeviceSelectors)
+	}
+	seenDev := make(map[string]struct{}, len(s.Capabilities.Devices))
+	devices := make([]string, 0, len(s.Capabilities.Devices))
+	for i, name := range s.Capabilities.Devices {
+		name = strings.TrimSpace(name)
+		if err := validateDeviceSelector(name); err != nil {
+			return warnings, fmt.Errorf("capabilities.devices[%d]: %w", i, err)
+		}
+		if _, dup := seenDev[name]; dup {
+			continue
+		}
+		seenDev[name] = struct{}{}
+		devices = append(devices, name)
+	}
+	s.Capabilities.Devices = devices
+
 	// --- mounts ---------------------------------------------------------
 	for i := range s.Mounts {
 		s.Mounts[i].Source = strings.TrimSpace(s.Mounts[i].Source)
@@ -439,8 +519,16 @@ func (s *Spec) IsZero() bool {
 	if s == nil {
 		return true
 	}
+	// Capabilities is no longer comparable with == (it holds a slice), so the
+	// scalar fields are compared and Devices is length-checked. Spelling it out
+	// rather than reaching for reflect.DeepEqual keeps the compiler pointing at
+	// this function when a field is added, which is what caught the omission
+	// the last time one was.
 	return s.Image == "" && len(s.Setup) == 0 && len(s.Env) == 0 &&
-		len(s.Mounts) == 0 && s.Resources == (Resources{}) && s.Capabilities == (Capabilities{})
+		len(s.Mounts) == 0 && s.Resources == (Resources{}) &&
+		s.Capabilities.Git == false && s.Capabilities.Network == "" &&
+		s.Capabilities.Virtualized == false && s.Capabilities.KernelIsolated == false &&
+		s.Capabilities.Egress == "" && len(s.Capabilities.Devices) == 0
 }
 
 // validateEnvName enforces the POSIX-ish shape both container runtimes and the
@@ -461,6 +549,25 @@ func validateEnvName(name string) error {
 		default:
 			return fmt.Errorf("environment variable name %q is not [A-Za-z_][A-Za-z0-9_]*", name)
 		}
+	}
+	return nil
+}
+
+// validateDeviceSelector bounds a device name from `capabilities.devices`.
+//
+// It is matched against a grant's inventory rather than used as a path, so the
+// shape enforced here is the inventory's own handle shape — the same one
+// secretbroker.validDeviceName enforces at the other end. Keeping them aligned
+// means a name that can be granted can also be selected, and vice versa.
+func validateDeviceSelector(name string) error {
+	switch {
+	case name == "":
+		return errors.New("device name is empty")
+	case len(name) > 64:
+		return fmt.Errorf("device name %q exceeds 64 characters", name)
+	case strings.ContainsAny(name, ":\x00\n\r/\\= "):
+		return fmt.Errorf("device name %q contains a colon, slash, backslash, equals sign, "+
+			"space, NUL or newline", name)
 	}
 	return nil
 }

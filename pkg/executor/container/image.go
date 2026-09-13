@@ -18,6 +18,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/blechschmidt/cloop/pkg/executor"
 )
 
 // DefaultImage is the reference used when executors.container.image is unset.
@@ -196,6 +198,9 @@ func (e *Executor) Preflight(ctx context.Context, workDir string) PreflightRepor
 	// --- 3c. egress filter ----------------------------------------------
 	e.preflightEgressFilter(ctx, add)
 
+	// --- 3d. device access mode -----------------------------------------
+	e.preflightDeviceMode(add)
+
 	// --- 4. image ------------------------------------------------------
 	imgRes, err := runCLITimeout(ctx, e.rt, preflightCmdTimeout, "image", "inspect", e.opts.Image)
 	switch {
@@ -283,9 +288,32 @@ func (e *Executor) preflightOCIRuntime(ctx context.Context, add func(name, level
 			ociRuntimeFix(e.rt, name))
 	}
 
+	// gVisor. Reported rather than probed, because there is nothing to probe:
+	// runsc needs no host device and its default ptrace platform works
+	// anywhere. What an operator does need to know is that cloop has recognised
+	// the name — the boundary they paid for only reaches placement if
+	// IsKernelIsolatedRuntime agrees it is gVisor, and a typo like "runcs"
+	// would otherwise be silently treated as a plain container.
+	if executor.IsUserspaceKernelRuntime(name) {
+		add("gvisor", LevelOK,
+			fmt.Sprintf("%s is recognised as gVisor: workload syscalls are served by the "+
+				"Sentry rather than the host kernel, so this executor satisfies "+
+				"capabilities.kernel_isolated", name), "")
+		return
+	}
+
 	// Virtualization. Only asked of a runtime that needs it: crun and runsc
 	// have no use for /dev/kvm and reporting on it would be noise.
 	if !IsVirtualizedOCIRuntime(name) {
+		// Neither Kata nor gVisor. Worth one line, because "I set oci_runtime
+		// and nothing changed" is otherwise indistinguishable from a working
+		// kernel-isolated sandbox, and a project requiring one would be refused
+		// placement here with no hint as to why this node did not qualify.
+		add("oci-runtime-isolation", LevelWarn,
+			fmt.Sprintf("%s is not a runtime cloop recognises as kernel-isolated, so this "+
+				"executor serves workload syscalls from the host kernel", name),
+			"for a stronger boundary set executors.container.oci_runtime to runsc (gVisor) "+
+				"or a kata runtime; leave it unset for the runtime's own default")
 		return
 	}
 	switch st := checkKVM(); {
@@ -407,4 +435,29 @@ func selinuxEnforcing() bool {
 		return false
 	}
 	return strings.TrimSpace(string(data)) == "1"
+}
+
+// preflightDeviceMode reports what a host_device grant's access mode does and
+// does not enforce on this host.
+//
+// It is a statement rather than a probe, and that is a deliberate limit. The
+// only way to establish whether the device cgroup is enforced is to start a
+// container, grant it a device read-only and try to write — which is a container
+// run, an image dependency and a second of latency inside a command an operator
+// may run on a node that has no image pulled yet. What preflight can do without
+// any of that is make sure nobody assumes the stronger reading.
+//
+// The warning is unconditional for the same reason the unfiltered-egress warning
+// is: a driver that says nothing about a boundary reads as a driver that provides
+// it, and "read-only device grant" is a phrase that invites exactly that reading.
+func (e *Executor) preflightDeviceMode(add func(name, level, msg, fix string)) {
+	add("devices", LevelWarn,
+		"a host_device grant's access mode (r/rw/rwm) is programmed into the container's "+
+			"device cgroup, whose enforcement depends on this host's cgroup version and "+
+			"runtime build and cannot be verified from here — on a host where it is not "+
+			"attached, a device granted \"r\" is writable because the node keeps its host "+
+			"file mode",
+		"where read-only access must be enforced, set it on the host node itself "+
+			"(chown root:cloop-ro /dev/… && chmod 0640) so the sandbox UID cannot open it "+
+			"for writing regardless of cgroups; verify with `cloop executor test`")
 }

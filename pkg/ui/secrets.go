@@ -173,6 +173,17 @@ func (sl *secretLease) Mounts() []secretbroker.RepoMount {
 	return sl.delivery.Mounts()
 }
 
+// Devices returns the host device nodes this lease opens, or nil.
+func (sl *secretLease) Devices() []secretbroker.GrantedDevice {
+	if sl == nil {
+		return nil
+	}
+	if sl.mount != nil {
+		return sl.mount.Devices()
+	}
+	return sl.delivery.Devices()
+}
+
 // SecretFiles returns the credential files the driver has to place, with their
 // contents. Empty for a hub-materialised lease, where the files already exist
 // at the paths the bindings name.
@@ -694,6 +705,95 @@ func applyRepoGrants(spec executor.Spec, ex executor.Executor, sl *secretLease) 
 		base = os.Environ()
 	}
 	spec.Env = append(append(make([]string, 0, len(base)+len(env)), base...), env...)
+	return spec, nil
+}
+
+// applyDeviceGrants writes a lease's host_device grants onto the spec.
+//
+// It is applyRepoGrants' sibling and deliberately parallel to it, because the
+// two answer the same question about different authorities: the broker decided
+// *what* the project may reach, and only this layer knows whether the bound
+// executor can actually deliver it.
+//
+// The three outcomes differ from the repository case in one important way. A
+// repository has a fallback — an executor that shares the hub's filesystem
+// already has the files at their own paths — and a device does not. The
+// hardware is either exposed into a sandbox or it is not, so there is no
+// equivalent of the "already visible" branch, and an executor that cannot
+// expose devices is an error rather than a degraded success.
+func applyDeviceGrants(spec executor.Spec, ex executor.Executor, sl *secretLease) (executor.Spec, error) {
+	return applyDeviceGrantsList(spec, ex, sl.Devices())
+}
+
+// applyDeviceGrantsList is applyDeviceGrants with the lease's device list already
+// extracted.
+//
+// Split out so the three outcomes can be tested against a stub executor without
+// standing up a sealed store, a keyring and a materialised tmpfs directory to
+// produce a lease whose only contribution is this slice. The lease-shaped wrapper
+// above stays the only caller in production.
+func applyDeviceGrantsList(spec executor.Spec, ex executor.Executor, granted []secretbroker.GrantedDevice) (executor.Spec, error) {
+	if len(granted) == 0 {
+		return spec, nil
+	}
+	caps := ex.Capabilities()
+	names := make([]string, 0, len(granted))
+	for _, d := range granted {
+		names = append(names, d.Name)
+	}
+
+	if !caps.SupportsDevices {
+		if caps.SharesHostFilesystem && caps.Isolation == executor.IsolationNone {
+			// The host driver. Every device the hub user can open is already
+			// open to the workload, so the grant is satisfied in the weakest
+			// possible sense: nothing is exposed because nothing was withheld.
+			//
+			// This is a warning rather than an error because refusing would
+			// break a host-executor project the moment someone granted it a
+			// device, and the run would in fact have the access. But it must not
+			// be silent: the dashboard would otherwise show a scoped device
+			// grant on a workload that has the whole of /dev.
+			fmt.Fprintf(os.Stderr,
+				"ui: executor %s runs workloads on the hub host with no sandbox, so the "+
+					"host_device grant for %s is not enforced — the workload can already reach "+
+					"every device the hub user can. Bind the project to a container or Kata "+
+					"executor to make the grant a boundary.\n",
+				ex.ID(), strings.Join(names, ", "))
+			return spec, nil
+		}
+		return spec, fmt.Errorf(
+			"%w: executor %s (%s) cannot expose host devices inside a sandbox, but this "+
+				"project holds a host_device grant for %s. A device grant names hardware on "+
+				"one machine, so bind the project to a container or Kata executor running on "+
+				"the host that has it",
+			executor.ErrInvalidSpec, ex.ID(), ex.Kind(), strings.Join(names, ", "))
+	}
+
+	for _, d := range granted {
+		spec.Devices = append(spec.Devices, executor.HostDevice{
+			Name:        d.Name,
+			Source:      d.Source,
+			Target:      d.Target,
+			Permissions: executor.DevicePermissions(d.Permissions),
+		})
+	}
+	// Validate the assembled list rather than each entry, because the failures
+	// that matter here are collisions between grants — two devices claiming one
+	// sandbox path — which no single entry can reveal.
+	if err := executor.ValidateDevices(spec.Devices); err != nil {
+		return spec, err
+	}
+
+	// Names only. Where the device *is* inside the sandbox is already knowable
+	// from the grant, and a workload that needs the path opens the device it was
+	// given; a list of host paths in the environment would leak the host's
+	// hardware layout to every process in the sandbox.
+	base := spec.Env
+	if base == nil {
+		base = os.Environ()
+	}
+	spec.Env = append(append(make([]string, 0, len(base)+1), base...),
+		"CLOOP_HOST_DEVICES="+strings.Join(names, ","))
 	return spec, nil
 }
 

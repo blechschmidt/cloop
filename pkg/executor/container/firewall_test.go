@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/netfilter"
 )
 
@@ -145,7 +146,7 @@ func TestNetworkNameIsDerivedAndSafe(t *testing.T) {
 		strings.Repeat("x", 80): "cloop-sbx-" + strings.Repeat("x", 32),
 	}
 	for in, want := range cases {
-		got := networkName(in)
+		got := networkName(in, executor.EgressScopeUnset)
 		if got != want {
 			t.Errorf("networkName(%q) = %q, want %q", in, got, want)
 		}
@@ -274,7 +275,7 @@ func TestEnsureNetworkIsIdempotent(t *testing.T) {
 	}
 
 	e := &Executor{id: "fwtest", rt: rt, opts: mustNormalize(t, Options{Network: NetworkBridge})}
-	name := networkName("cloop-selftest-" + t.Name())
+	name := networkName("cloop-selftest-"+t.Name(), executor.EgressScopeUnset)
 	t.Cleanup(func() {
 		_, _ = runCLITimeout(context.Background(), rt, shortCmdTimeout, "network", "rm", name)
 	})

@@ -39,6 +39,15 @@ type Constraints struct {
 	// means every key in the secret, which is safe because an env secret's
 	// keys *are* its scope — there is nothing wider to fall open to.
 	EnvKeys []string `json:"env_keys,omitempty"`
+	// Devices is the device-name allowlist for host_device. Patterns match
+	// case-sensitively against the inventory's handles; "*" alone allows
+	// every device in the inventory.
+	//
+	// Case-sensitive for the reason the local_repo matcher is: these names
+	// are chosen by an operator and matched exactly, and folding would make a
+	// grant on "gpu0" also open "GPU0" — which, if both existed, would be two
+	// different pieces of hardware nobody named.
+	Devices []string `json:"devices,omitempty"`
 	// Writable makes a local_repo grant read-write. It is the one constraint
 	// that widens rather than narrows, so it is a bool that defaults to the
 	// safe reading: a grant that says nothing delivers a read-only mount.
@@ -132,6 +141,9 @@ func (c Constraints) ValidateFor(kind Kind) error {
 	if err := validatePatterns("permissions", c.Permissions); err != nil {
 		return err
 	}
+	if err := validatePatterns("devices", c.Devices); err != nil {
+		return err
+	}
 	for _, k := range c.EnvKeys {
 		if err := validateEnvKey(k); err != nil {
 			return err
@@ -169,12 +181,23 @@ func (c Constraints) ValidateFor(kind Kind) error {
 				"%w: a local_repo grant needs a repository allowlist (--repos my-service, or --repos '*' for every repository under the root)",
 				ErrInvalidConstraint)
 		}
+	case KindHostDevice:
+		if len(c.Devices) == 0 {
+			return fmt.Errorf(
+				"%w: a host_device grant needs a device allowlist (--devices serial0, or --devices '*' for every device in the inventory)",
+				ErrInvalidConstraint)
+		}
 	case KindEnv:
 		// EnvKeys may be empty: an env secret's own keys bound it.
 	}
-	if c.Writable && kind != KindLocalRepo {
+	if c.Writable && kind != KindLocalRepo && kind != KindHostDevice {
 		return fmt.Errorf(
-			"%w: writable applies to local_repo grants, not %s",
+			"%w: writable applies to local_repo and host_device grants, not %s",
+			ErrInvalidConstraint, kind)
+	}
+	if len(c.Devices) > 0 && kind != KindHostDevice {
+		return fmt.Errorf(
+			"%w: a device allowlist applies to host_device grants, not %s",
 			ErrInvalidConstraint, kind)
 	}
 	return nil
@@ -532,6 +555,7 @@ func (c Constraints) Summary() string {
 	add("hosts", c.Hosts)
 	add("registries", c.Registries)
 	add("env", c.EnvKeys)
+	add("devices", c.Devices)
 	if c.Writable {
 		// Only when true. A "writable=false" on every github grant's summary
 		// would be noise, and the read-only default is what the absence means.

@@ -99,6 +99,15 @@ const (
 	// capability with the trust inverted. A human with secret.grant names the
 	// path, out of band, and the project receives it.
 	KindLocalRepo Kind = "local_repo"
+	// KindHostDevice is an inventory of device nodes on the executor's host,
+	// opened to one project. Constrained by a device-name allowlist, and
+	// delivered as a runtime --device rather than as bytes.
+	//
+	// It is the widest authority this broker issues, and it is here for the
+	// reason KindLocalRepo is: the alternative is a device path in
+	// .cloop/sandbox.yaml, which is whatever a pull request says it is. See
+	// hostdevice.go.
+	KindHostDevice Kind = "host_device"
 )
 
 // Kinds returns every valid Kind, sorted, for CLI help and validation
@@ -106,7 +115,7 @@ const (
 func Kinds() []Kind {
 	return []Kind{
 		KindEgressProxy, KindEnv, KindGitHubApp,
-		KindGitHubPAT, KindKubeconfig, KindLocalRepo, KindRegistry,
+		KindGitHubPAT, KindHostDevice, KindKubeconfig, KindLocalRepo, KindRegistry,
 	}
 }
 
@@ -114,7 +123,7 @@ func Kinds() []Kind {
 func (k Kind) Valid() bool {
 	switch k {
 	case KindGitHubPAT, KindGitHubApp, KindKubeconfig,
-		KindRegistry, KindEnv, KindEgressProxy, KindLocalRepo:
+		KindRegistry, KindEnv, KindEgressProxy, KindLocalRepo, KindHostDevice:
 		return true
 	}
 	return false

@@ -613,6 +613,18 @@ func (e *Executor) RuntimeClass() string { return e.opts.RuntimeClass }
 // Virtualized reports whether Pods run behind a hypervisor.
 func (e *Executor) Virtualized() bool { return executor.IsVirtualizedRuntime(e.opts.RuntimeClass) }
 
+// KernelIsolated reports whether a Pod's system calls are served by something
+// other than the node's kernel — a Kata guest kernel or gVisor's Sentry.
+//
+// The RuntimeClass name is the only evidence available and the whole mechanism:
+// a cluster administrator registers `gvisor` or `kata` as a RuntimeClass, the
+// node's containerd maps it to a shim, and a client can see the name but never
+// the mapping. That is the same trust the Virtualized claim already rests on,
+// and Preflight is where a mismatch is surfaced.
+func (e *Executor) KernelIsolated() bool {
+	return executor.IsKernelIsolatedRuntime(e.opts.RuntimeClass)
+}
+
 // Capabilities implements executor.Executor.
 //
 // Isolation is IsolationRemote rather than IsolationContainer: kube-scheduler
@@ -641,6 +653,7 @@ func (e *Executor) Capabilities() executor.Capabilities {
 	return executor.Capabilities{
 		Isolation:              executor.IsolationRemote,
 		Virtualized:            e.Virtualized(),
+		KernelIsolated:         e.KernelIsolated(),
 		SupportsStream:         true,
 		SupportsSignal:         true,
 		SupportsResourceLimits: true,
@@ -665,6 +678,27 @@ func (e *Executor) Capabilities() executor.Capabilities {
 		// harness would report that the repository is empty. Refusing at
 		// placement is the only outcome that points at the deployment.
 		SupportsHostMounts: false,
+		// False for a sharper version of the same reason. A device grant names a
+		// path like /dev/ttyUSB0 on a specific machine, and Kubernetes does not
+		// take device paths at all: a device plugin owns the node and hands a
+		// container whichever unit it has free, in response to an extended
+		// resource request. So there is nothing honest for this driver to do with
+		// a path-shaped grant, and mounting /dev/ttyUSB0 as a hostPath from
+		// whatever node the scheduler picked would expose an unrelated piece of
+		// that node's hardware — the one failure mode worse than refusing.
+		//
+		// A cluster that wants GPUs in cloop sandboxes wants the node's device
+		// plugin and a resource request, which is a different feature from a
+		// host_device grant and is why HostDevice.KubernetesResource exists but
+		// is not yet consumed here.
+		SupportsDevices: false,
+		// False: egress here is a NetworkPolicy applied by the CNI, selected by
+		// Pod labels and scoped to the whole executor's namespace. Narrowing one
+		// project independently would mean a per-run policy object, and a CNI
+		// that does not implement NetworkPolicy at all (flannel) would accept it
+		// and enforce nothing — which is precisely the silent over-permission a
+		// scope exists to prevent. Refusing at placement says so instead.
+		SupportsEgressScope: false,
 		// The credential files a secret lease produces are projected as a
 		// per-run Secret, mounted read-only at the directory the workload's
 		// environment already names (see secretfiles.go).

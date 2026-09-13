@@ -342,6 +342,15 @@ func startWorkload(workDir string, argv []string, labels map[string]string) (exe
 		return nil, executor.Handle{}, err
 	}
 
+	// Host devices the lease opened, for the same reason and in the same place:
+	// an executor that cannot expose hardware should be refused naming the grant
+	// that needs it.
+	spec, err = applyDeviceGrants(spec, ex, lease)
+	if err != nil {
+		lease.Close()
+		return nil, executor.Handle{}, err
+	}
+
 	// The project's .cloop/sandbox.yaml, if it has one. It is applied after
 	// the lease so its env allowlist can narrow the leased secrets, and it is
 	// refused rather than partially honoured when the bound executor cannot
@@ -492,6 +501,10 @@ func runWorkloadEnv(ctx context.Context, workDir string, argv, extraEnv []string
 		return nil, err
 	}
 	spec, err = applyRepoGrants(spec, ex, lease)
+	if err != nil {
+		return nil, err
+	}
+	spec, err = applyDeviceGrants(spec, ex, lease)
 	if err != nil {
 		return nil, err
 	}

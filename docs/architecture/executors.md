@@ -100,14 +100,16 @@ more or less, isolated), so no single value could mean both without misstating
 one of them. `Isolation` therefore keeps the fact a driver always has, and
 `Virtualized` carries the one it sometimes adds:
 
-| Driver | `Isolation` | `Virtualized` | Turned on by |
-| --- | --- | --- | --- |
-| `localprocess` | `none` | ❌ | — |
-| `container`, default runtime | `container` | ❌ | — |
-| `container`, Kata runtime | `vm` | ✅ | [`executors.container.oci_runtime`](../reference/configuration.md#vm-isolated-sandboxes-kata-containers) |
-| `remote` | `remote` | ❌ | — |
-| `kubernetes`, default class | `remote` | ❌ | — |
-| `kubernetes`, Kata RuntimeClass | `remote` | ✅ | [`executors.kubernetes.runtime_class`](../reference/configuration.md#vm-isolated-sandboxes-kata-containers) |
+| Driver | `Isolation` | `Virtualized` | `KernelIsolated` | Turned on by |
+| --- | --- | --- | --- | --- |
+| `localprocess` | `none` | ❌ | ❌ | — |
+| `container`, default runtime | `container` | ❌ | ❌ | — |
+| `container`, gVisor runtime | `container` | ❌ | ✅ | [`executors.container.oci_runtime`](../guides/enterprise-hosts.md#3-per-project-sandbox-with-gvisor) |
+| `container`, Kata runtime | `vm` | ✅ | ✅ | [`executors.container.oci_runtime`](../reference/configuration.md#vm-isolated-sandboxes-kata-containers) |
+| `remote` | `remote` | ❌ | ❌ | — |
+| `kubernetes`, default class | `remote` | ❌ | ❌ | — |
+| `kubernetes`, gVisor RuntimeClass | `remote` | ❌ | ✅ | [`executors.kubernetes.runtime_class`](../guides/enterprise-hosts.md#3-per-project-sandbox-with-gvisor) |
+| `kubernetes`, Kata RuntimeClass | `remote` | ✅ | ✅ | [`executors.kubernetes.runtime_class`](../reference/configuration.md#vm-isolated-sandboxes-kata-containers) |
 
 Both drivers decide it from the configured runtime **name**, through one shared
 matcher — `executor.IsVirtualizedRuntime` (`pkg/executor/virtualization.go`).
@@ -129,6 +131,52 @@ work that was required to be virtualized onto something that is not. So gVisor's
 `runsc` reports false even though it is a genuinely stronger boundary than runc:
 it is a userspace kernel, not a virtual machine, and calling it one would
 misstate what an escape reaches.
+
+#### `KernelIsolated` is the third column, and the reason there is one
+
+That last point used to end the discussion, and it left a gap. An operator running
+gVisor got a sandbox described as a plain container — indistinguishable from runc —
+so a project whose actual requirement was "my task's syscalls must not reach the
+host kernel" had no way to ask for one, and `virtualized: true` *actively refused*
+the gVisor executor that would have satisfied the intent. A refusal nobody needed
+is still an outage.
+
+Hence a second boolean and a second predicate, asking a deliberately different
+question:
+
+| Predicate | Question | True for |
+| --- | --- | --- |
+| `IsVirtualizedRuntime` | is there a hypervisor? | Kata |
+| `IsKernelIsolatedRuntime` | are the workload's syscalls served by something other than the executing machine's kernel? | Kata **and** gVisor |
+
+`Capabilities.KernelIsolated` is set from the second, so it is the **union** of
+Kata and gVisor and a strict superset of `Virtualized`: virtualization implies
+kernel isolation and not the reverse, and the gap between the two columns is
+exactly gVisor. `runc` and `crun` are false in both, which is the case the field
+exists to exclude — their boundary is namespaces, cgroups and seccomp, so a kernel
+bug is a host bug.
+
+It is a separate field rather than a widening of `Virtualized` because the two are
+different promises and a project needs to be able to ask for the weaker one. A
+`.cloop/sandbox.yaml` saying `capabilities: kernel_isolated: true` is satisfied by
+either technology; `virtualized: true` demands a hypervisor and is checked against
+the narrower field. Collapsing them in either direction breaks something: widening
+`Virtualized` to include gVisor would tell an operator they have a VM when they do
+not, and leaving `KernelIsolated` out forces every project with the weaker
+requirement to over-ask and watch every `runsc` node in the fleet get rejected for
+a property it had provided. The matching constraints are `virtualization` and
+`kernel_isolation` — see [Placement](#placement).
+
+Like `Virtualized`, `KernelIsolated` stays false unless the driver is certain,
+because `RequireKernelIsolation` is checked against it and a false positive runs a
+workload on the host kernel it was told to stay off. Both drivers read it from the
+same configured runtime name through the same matcher, so the two claims are
+consistent by construction: a name cannot be virtualized without also being
+kernel-isolated. Note that `Isolation` stays `container` for gVisor even when
+`KernelIsolated` is true, and the two do not conflict — gVisor is a container by
+every structural measure that enum describes (namespaces, a cgroup, an image, no
+VM). What it changes is *who executes the syscalls*, which is a different axis and
+gets a field rather than a fifth enum value nothing else understands.
 
 The name is all either API exposes, which is a real limit — an operator can
 register runc under the name `kata` and be believed. That is not a gap a name
@@ -495,12 +543,12 @@ A `Candidate` carries the executor plus its scheduling context: `Health`,
 operator `Labels`, detected `Harnesses`, `ContainerRuntimes`, `MemoryMB`, and
 in-flight count. `Requirements` can pin `ExecutorID`, demand `Labels`,
 `Harnesses`, `Platform`/`Arch`, `MinMemoryMB`, `RequireIsolation`,
-`AllowedIsolations`, `RequireVirtualization`, and capability flags
-(`RequireStream`, `RequireSignal`, `RequireContainerRuntime`,
+`AllowedIsolations`, `RequireVirtualization`, `RequireKernelIsolation`, and
+capability flags (`RequireStream`, `RequireSignal`, `RequireContainerRuntime`,
 `RequireNetworkEgress`, `RequireResourceLimits`, `RequireImageOverride`,
 `RequireSandboxBuild`, `RequireSandboxMounts`, `RequireHostMounts`,
-`RequireWorkspaceProvisioning`, `RequireHostFilesystemWorkspace`,
-`RequireWriteBack`).
+`RequireDevices`, `RequireEgressScope`, `RequireWorkspaceProvisioning`,
+`RequireHostFilesystemWorkspace`, `RequireWriteBack`).
 
 `RequireVirtualization` is separate from `AllowedIsolations` because it cuts
 across it. Both a local Kata container (`vm`) and a Kata Pod on a cluster
@@ -539,6 +587,48 @@ first. A driver that ignored the field would start a harness whose `/repos` is
 empty, which is the failure this constraint converts into a refusal that names
 the grant and the binding.
 
+`RequireDevices` and `RequireEgressScope` are the same argument for the two
+capabilities that are about what the *host* can do rather than what the transport
+can carry. `Capabilities().SupportsDevices` is whether a driver can expose a host
+device node inside the sandbox, which a
+[`host_device`](../guides/secrets.md#host-devices) grant asks for;
+`Capabilities().SupportsEgressScope` is whether it can confine one workload's
+IP-layer egress *independently of the other workloads on the same executor*, which
+`capabilities.egress` in a project's
+[`.cloop/sandbox.yaml`](../reference/sandbox.md) asks for.
+
+| Driver | `SupportsDevices` | `SupportsEgressScope` | Why |
+| --- | --- | --- | --- |
+| `container` | ✅ | ✅ | it runs on the machine with the hardware and the runtime takes `--device`; and a scope gets a bridge and an nftables table of its own, which this driver provisions |
+| `kubernetes` | ❌ | ❌ | Kubernetes takes no device paths — a device plugin hands the container whichever unit it has free — and egress here is a namespace-wide `NetworkPolicy` applied by the CNI, selected by Pod labels |
+| `remote` | ❌ | ❌ | a device path names the *hub's* host, and the agent runs each workload as a plain process, so there is neither a sandbox to put a device into nor a per-workload network namespace to filter |
+| `localprocess` | ❌ | ❌ | the workload is a process in the hub's own namespaces: every device the hub user can open is already open to it, and confining its egress would mean filtering the control plane's own traffic |
+
+Two notes on why these are refusals rather than best-effort.
+
+`SupportsDevices` is not implied by `SupportsHostMounts`, because a device is not
+a file a driver can bind and be done with: a container runtime needs a cgroup rule
+permitting the `major:minor` pair as well as the node itself, and the Kubernetes
+driver needs the node to advertise the hardware at all. `HostDevice` carries a
+`KubernetesResource` field for the extended-resource shape that driver would need;
+it is deliberately unconsumed rather than approximated with a `hostPath`, since
+mounting `/dev/nvidia0` from whatever node the scheduler picked would expose an
+unrelated piece of *that* node's hardware — worse than refusing. A driver that
+dropped the field would produce a sandbox whose `/dev` is missing exactly the
+hardware the task exists to talk to.
+
+`SupportsEgressScope` cannot be best-effort for a sharper reason: its absence is
+silent *and* over-permissive. An executor that ignored a project's request to be
+cut off from private address space would hand the harness the reach into the
+operator's internal network the project had explicitly renounced, and report
+success doing it. On Kubernetes the failure is worse than an omission — a CNI that
+does not implement `NetworkPolicy` at all (flannel) accepts the object and enforces
+nothing, which is precisely the silent over-permission a scope exists to prevent.
+`container` advertises it unconditionally rather than gating on
+`egress_filter.enabled`, because the whole point of a scope is that a project can
+ask to be confined on an executor whose default is unfiltered; a host without
+`nft(8)` fails at install time with a message naming it.
+
 `RequireWorkspaceProvisioning`, `RequireHostFilesystemWorkspace` and
 `RequireWriteBack` are the same argument applied to the source tree, and the
 first two pull in opposite directions: one demands a node that *can* fetch, the
@@ -561,10 +651,11 @@ Ranking, applied as a stable sort:
 `*PlacementError` carrying the headline `Constraint`, a per-candidate
 `Rejection` list, and how many candidates were considered. Constraints are
 named: `no_candidates`, `executor_id`, `health`, `host_execution_policy`,
-`isolation`, `virtualization`, `labels`, `platform`, `arch`, `harness`,
-`container_runtime`, `network_egress`, `resource_limits`, `stream`, `signal`,
-`memory`, `capacity`, `image_override`, `sandbox_build`, `sandbox_mounts`,
-`host_mounts`, `workspace`, `write_back`, `secret_files`, `revocation`. An operator asking
+`isolation`, `virtualization`, `kernel_isolation`, `labels`, `platform`, `arch`,
+`harness`, `container_runtime`, `network_egress`, `resource_limits`, `stream`,
+`signal`, `memory`, `capacity`, `image_override`, `sandbox_build`,
+`sandbox_mounts`, `host_mounts`, `devices`, `egress_scope`, `workspace`,
+`write_back`, `secret_files`, `revocation`. An operator asking
 "why did nothing schedule?" gets a per-node answer, not a shrug.
 
 `virtualization` is the one whose message names the two config keys that fix it,
@@ -572,6 +663,26 @@ because the candidate is otherwise healthy and correct: it "shares the executing
 machine's kernel", which is the normal state of a container or a plain Pod, and
 the remedy is a line of hub configuration rather than anything about the node's
 health, labels or capacity.
+
+`kernel_isolation` is its weaker sibling and exists because conflating the two
+costs real placements. It asks only that the workload's syscalls are not served
+by the executing machine's kernel, which gVisor's Sentry satisfies without a
+hypervisor — so a project whose actual requirement is "a kernel bug in my task
+must not be a kernel bug on the host" can say that, instead of demanding a VM and
+watching every `runsc` node in the fleet get rejected for a property it had
+provided. Every virtualized executor is also kernel-isolated; the reverse does
+not hold, and the gap between them is exactly gVisor.
+
+`devices` and `egress_scope` are the two whose refusal is about *where* rather
+than about a missing feature. A `host_device` grant names hardware on one
+machine, so a project holding one and bound to a Kubernetes or remote executor
+has asked for something no retry will produce; `egress_scope` needs a driver that
+can confine one project's egress independently of its neighbours, which means a
+bridge and an nftables table of its own. Both name the alternative rather than
+degrading: the first says which executor to bind to, the second says to enable
+`executors.container.egress_filter` on a host with `nft(8)` or to drop the key
+and inherit the executor's own policy. See
+[critical hosts as executors](../guides/enterprise-hosts.md).
 
 Two of those names describe the request rather than any node. `no_candidates`
 means the registry was empty — nothing was rejected because there was nothing to

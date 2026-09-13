@@ -8,6 +8,7 @@ import (
 	"net/netip"
 	"strings"
 
+	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/netfilter"
 )
 
@@ -71,6 +72,17 @@ type EgressFilter struct {
 	AllowPublicInternet bool
 	Resolvers           []string
 
+	// AllowAllPorts waives the port restriction that accompanies a
+	// destination allow. It is not operator-settable — pkg/config has no key
+	// for it — and exists for the per-project scopes in effectiveFilter,
+	// where the policy's bound is the block set rather than a port list.
+	//
+	// Keeping it off the config surface is deliberate. An operator naming
+	// allow_cidrs with no ports has described a hole, and netfilter.Compile
+	// refuses that on purpose; this field would turn that refusal into a
+	// footgun with a yaml key.
+	AllowAllPorts bool
+
 	// Broker is the egress proxy endpoint ("10.7.0.2:8118") the sandbox
 	// must reach. Only needed alongside a direct-egress filter; on an
 	// --internal network the broker is reachable because it shares the
@@ -100,6 +112,7 @@ func (f EgressFilter) Policy() (netfilter.Policy, error) {
 	}
 	in := netfilter.Input{
 		AllowPublicInternet: f.AllowPublicInternet,
+		AllowAllPorts:       f.AllowAllPorts,
 		HostPatterns:        f.HostPatterns,
 	}
 	for _, c := range f.AllowCIDRs {
@@ -178,15 +191,37 @@ func (f EgressFilter) Validate() error {
 	return nil
 }
 
-// networkName derives the runtime network this filter needs.
+// networkName derives the runtime network a filter needs.
 //
-// It is per-executor rather than per-task because Network is per-executor
-// config: one filter, one network, one ruleset. Deriving the name from the
-// executor ID rather than accepting one keeps an operator from pointing two
-// differently-filtered executors at the same bridge, where the second Apply
-// would silently replace the first's rules.
-func networkName(executorID string) string {
-	return "cloop-sbx-" + sanitizeNetworkPart(executorID)
+// It is keyed by executor *and* by scope, because those are exactly the two
+// things that decide which ruleset applies. Deriving the name rather than
+// accepting one keeps an operator from pointing two differently-filtered
+// executors at the same bridge, where the second Apply would silently replace
+// the first's rules; adding the scope extends the same guarantee to two
+// differently-confined projects on one executor.
+//
+// Projects that requested the same scope do share a bridge. That is the
+// pre-existing model — every project on an executor shared one — and the
+// sharing is bounded by the policy itself: under EgressScopePublic the bridge
+// subnet is private address space, so a sandbox's neighbours are on the far
+// side of a drop rule rather than merely uninteresting to it.
+func networkName(executorID string, scope executor.EgressScope) string {
+	base := "cloop-sbx-" + sanitizeNetworkPart(executorID)
+	if scope == executor.EgressScopeUnset {
+		// Unsuffixed, so every deployment predating per-project scopes keeps
+		// the bridge it already has and no running sandbox is orphaned.
+		return base
+	}
+	return base + "-" + sanitizeNetworkPart(string(scope))
+}
+
+// firewallTable derives the nftables table name for one (executor, scope) pair,
+// matching networkName so that a bridge and its ruleset are never mismatched.
+func firewallTable(executorID string, scope executor.EgressScope) string {
+	if scope == executor.EgressScopeUnset {
+		return netfilter.TableName("sbx", executorID)
+	}
+	return netfilter.TableName("sbx", executorID+"-"+string(scope))
 }
 
 func sanitizeNetworkPart(s string) string {
@@ -374,13 +409,16 @@ func validateNetworkName(name string) error {
 // be installed would produce exactly the unrestricted egress the filter was
 // configured to prevent, and it would do it silently — the operator asked for
 // a firewall and would get a working sandbox with no sign that it has none.
-func (e *Executor) installFirewall(ctx context.Context) (string, error) {
-	f := e.opts.EgressFilter
+func (e *Executor) installFirewall(ctx context.Context, scope executor.EgressScope) (string, error) {
+	f, err := e.effectiveFilter(scope)
+	if err != nil {
+		return "", err
+	}
 	if !f.Enabled {
 		return e.opts.Network, nil
 	}
 
-	name := networkName(e.id)
+	name := networkName(e.id, scope)
 	bridge, err := e.ensureNetwork(ctx, name, f.Internal)
 	if err != nil {
 		return "", err
@@ -397,7 +435,7 @@ func (e *Executor) installFirewall(ctx context.Context) (string, error) {
 		// the same bridge. Removing an absent table is success, so this
 		// costs one nft call on the common path and closes the case where
 		// the configuration moved and the kernel did not.
-		if err := e.removeFirewall(ctx); err != nil {
+		if err := e.removeFirewall(ctx, scope); err != nil {
 			return "", err
 		}
 		return name, nil
@@ -412,12 +450,99 @@ func (e *Executor) installFirewall(ctx context.Context) (string, error) {
 		return "", err
 	}
 	if err := applier.Apply(ctx, policy, netfilter.NftablesOptions{
-		Table:  netfilter.TableName("sbx", e.id),
+		Table:  firewallTable(e.id, scope),
 		Bridge: bridge,
 	}); err != nil {
 		return "", err
 	}
 	return name, nil
+}
+
+// effectiveFilter resolves the executor's configured filter against one
+// project's requested scope.
+//
+// The whole security argument of per-project egress lives in this function, and
+// it is one sentence: a scope may only ever *remove* reach. Everything below is
+// that sentence applied to the three shapes an executor's own configuration can
+// take.
+func (e *Executor) effectiveFilter(scope executor.EgressScope) (EgressFilter, error) {
+	f := e.opts.EgressFilter
+	// EgressScopeNone never reaches here needing a filter — buildRequest has
+	// already set --network=none — and an unset scope is "no opinion", which
+	// leaves the executor's configuration exactly as it was.
+	if !scope.NeedsFilter() {
+		return f, nil
+	}
+	if scope != executor.EgressScopePublic {
+		// Unreachable while EgressScopePublic is the only filtering scope, and
+		// deliberately not a default case that guesses: the next scope added
+		// must come here and state its own compilation.
+		return EgressFilter{}, fmt.Errorf("container: egress scope %q has no filter mapping", scope)
+	}
+
+	// Case 1: the executor is unfiltered. The project is narrowing "everything"
+	// down to "public only", which is the plainest form of the request.
+	//
+	// Case 2: the executor already filters direct egress. The project's scope
+	// narrows it further, so the CIDR allow list — the operator's grant of
+	// reach into private space — is dropped and the rest is kept. What survives
+	// is the infrastructure a sandbox cannot work without: the resolvers, and
+	// the broker if one is configured.
+	//
+	// Case 3 is the one that cannot be honoured, and it is handled below.
+	if f.Enabled && f.Internal && !f.filtersDirectly() {
+		// Internal means the runtime installs no route off the bridge: the
+		// sandbox's only path out is the egress broker's hostname allowlist.
+		// "The public Internet" is strictly more than that, so this is a
+		// widening request and the answer is no.
+		//
+		// Downgrading it to the internal network instead would be worse than
+		// refusing. The project asked to be able to reach the Internet and
+		// would be told it succeeded, then fail on its first fetch with a DNS
+		// error, on an executor whose configuration is not visible to it.
+		return EgressFilter{}, fmt.Errorf(
+			"%w: this project requests the %q egress scope, but executor %s puts sandboxes on an "+
+				"internal network whose only route out is the egress broker — the scope asks for "+
+				"more reach than the executor grants, not less. Either drop capabilities.egress "+
+				"from .cloop/sandbox.yaml and use an egress grant for the hosts this project "+
+				"needs, or bind it to an executor configured with "+
+				"executors.container.egress_filter.allow_public_internet",
+			executor.ErrUnsupported, scope, e.id)
+	}
+
+	out := EgressFilter{
+		Enabled:             true,
+		AllowPublicInternet: true,
+		// No ports named, and that is the request rather than an omission: the
+		// scope's bound is the block set, not a port list. See
+		// netfilter.Input.AllowAllPorts.
+		AllowAllPorts: true,
+		// Carried over so the compiled policy can still warn that an L7
+		// allowlist is not being enforced at layer 3.
+		HostPatterns: f.HostPatterns,
+		Resolvers:    f.Resolvers,
+		Broker:       f.Broker,
+	}
+	if len(out.Resolvers) == 0 {
+		// DNS is the failure this check exists to prevent, and it is invisible
+		// otherwise. A container on a bridge network resolves through an address
+		// the runtime hands it — the host's stub resolver, or the bridge gateway
+		// — and both are private. Dropping private space therefore breaks name
+		// resolution, and the symptom is every hostname failing to resolve:
+		// which reads as "the Internet is blocked", sends the reader to the
+		// allow list, and is not fixed by anything they find there.
+		//
+		// Refusing with the remedy named beats installing a policy that is
+		// technically correct and practically a sandbox with no working DNS.
+		return EgressFilter{}, fmt.Errorf(
+			"%w: the %q egress scope drops all private address space, which includes whatever "+
+				"resolver the container runtime hands the sandbox, so DNS would fail for every "+
+				"name. Set executors.container.egress_filter.resolvers on executor %s to the "+
+				"resolvers sandboxes may query directly (a public resolver, or one of yours "+
+				"reachable from the sandbox bridge)",
+			executor.ErrInvalidSpec, scope, e.id)
+	}
+	return out, nil
 }
 
 // removeFirewall deletes this executor's nftables table.
@@ -428,7 +553,7 @@ func (e *Executor) installFirewall(ctx context.Context) (string, error) {
 // an internal network — a table that survives is a *wider* policy than the
 // configuration says, and swallowing that would be the same class of silent
 // over-permission this package exists to remove.
-func (e *Executor) removeFirewall(ctx context.Context) error {
+func (e *Executor) removeFirewall(ctx context.Context, scope executor.EgressScope) error {
 	applier, err := netfilter.NewApplier()
 	if err != nil {
 		if errors.Is(err, netfilter.ErrUnavailable) {
@@ -436,7 +561,7 @@ func (e *Executor) removeFirewall(ctx context.Context) error {
 		}
 		return err
 	}
-	return applier.Remove(ctx, netfilter.TableName("sbx", e.id))
+	return applier.Remove(ctx, firewallTable(e.id, scope))
 }
 
 // preflightEgressFilter reports what the configured filter will and will not

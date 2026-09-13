@@ -27,6 +27,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/blechschmidt/cloop/pkg/executor"
 )
 
 // ContainerWorkspace is the fixed in-container path the project directory is
@@ -51,6 +53,14 @@ const (
 	// container was shaped by, so a running container can be tied back to the
 	// spec that produced it even after the file has been edited.
 	LabelSandboxHash = "cloop.sandbox"
+	// LabelDevices records the names of the granted host devices exposed to
+	// the container, so an operator looking at a running sandbox can see what
+	// hardware it holds without reconstructing it from the lease.
+	LabelDevices = "cloop.devices"
+	// LabelEgressScope records the per-project egress confinement in force,
+	// which is otherwise invisible: the network name alone does not say
+	// whether the workload was cut off from private address space.
+	LabelEgressScope = "cloop.egress_scope"
 )
 
 // Network modes.
@@ -138,6 +148,12 @@ type runRequest struct {
 	Network string
 	// AddHosts pins name→address resolution as "host:ip" entries.
 	AddHosts []string
+
+	// Devices are host device nodes to expose, already validated by
+	// executor.ValidateDevices. They are rendered as --device and are the
+	// only route to that flag: it is on deniedExtraArgs precisely so that
+	// the one path to host hardware is this typed, lease-attributed field.
+	Devices []executor.HostDevice
 
 	// CPUs is the core allowance (1.5 = one and a half cores); 0 = unset.
 	CPUs float64
@@ -282,6 +298,25 @@ func buildRunArgs(req runRequest) (builtCommand, error) {
 			return builtCommand{}, err
 		}
 		args = append(args, "--add-host", h)
+	}
+
+	// --- Devices ------------------------------------------------------
+	//
+	// Validated again here rather than trusted from the caller. This function
+	// is the last thing between a Spec and a root-privileged runtime CLI, and
+	// a Spec reaches it having been persisted and re-hydrated by
+	// pkg/executorstore; re-checking is one map lookup against the cost of
+	// rendering a --device flag nobody authorised.
+	if err := executor.ValidateDevices(req.Devices); err != nil {
+		return builtCommand{}, err
+	}
+	for _, d := range req.Devices {
+		// src:dst:perms. Both runtimes take this form, and the explicit
+		// permission field is what keeps a read-only grant read-only: without
+		// it the runtime defaults to rwm and the cgroup allows mknod on the
+		// device's major:minor, which is a second handle on the same hardware.
+		args = append(args, "--device",
+			fmt.Sprintf("%s:%s:%s", d.Source, d.EffectiveTarget(), d.EffectivePermissions()))
 	}
 
 	// --- Resource limits ---------------------------------------------

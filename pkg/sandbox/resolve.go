@@ -103,6 +103,20 @@ func (s *Spec) Hash() string {
 	fmt.Fprintf(&b, "cpu=%v\nmemory=%s\npids=%d\ndisk=%s\n",
 		s.Resources.CPU, s.Resources.Memory, s.Resources.PIDs, s.Resources.Disk)
 	fmt.Fprintf(&b, "git=%t\nnetwork=%s\n", s.Capabilities.Git, s.Capabilities.Network)
+	// Every capability field belongs in the hash, because the hash is what the
+	// audit trail uses to say "this container was shaped by that spec". A
+	// confinement key left out here would let two runs with materially different
+	// boundaries — one kernel-isolated and cut off from private space, one not —
+	// record the same sandbox identity.
+	fmt.Fprintf(&b, "virtualized=%t\nkernel_isolated=%t\negress=%s\n",
+		s.Capabilities.Virtualized, s.Capabilities.KernelIsolated, s.Capabilities.Egress)
+	// Sorted for the reason env is: the set of selected devices is what matters,
+	// not the order they were typed in.
+	devices := append([]string(nil), s.Capabilities.Devices...)
+	sort.Strings(devices)
+	for _, name := range devices {
+		fmt.Fprintf(&b, "device=%s\n", name)
+	}
 	mounts := append([]Mount(nil), s.Mounts...)
 	sort.Slice(mounts, func(i, j int) bool { return mounts[i].Target < mounts[j].Target })
 	for _, m := range mounts {
@@ -184,8 +198,41 @@ func (r *Resolved) Requirements() executor.Requirements {
 		// instead of a task that fails on its first `git fetch`.
 		req.RequireNetworkEgress = true
 	}
+	if len(s.Capabilities.Devices) > 0 {
+		// The same argument as Network, for the other grant-backed capability.
+		// The grant says the project is allowed the hardware; the executor still
+		// has to be able to expose it, and only a driver advertising
+		// SupportsDevices can. Without this, CheckSandboxSupport would accept a
+		// node that cannot deliver a device the spec names.
+		//
+		// Keyed on the selector rather than on the grant because this function
+		// only sees the repo's file. An *empty* selector means "every device
+		// this project holds", which is usually none, so requiring the
+		// capability for it would refuse ordinary projects on ordinary
+		// executors. That case is carried by Spec.SandboxRequirements instead,
+		// which counts the devices actually attached.
+		req.RequireDevices = true
+	}
 	if s.Capabilities.Git {
 		req.Harnesses = append(req.Harnesses, "git")
+	}
+	if s.Capabilities.KernelIsolated {
+		// Like Virtualized, one of the few requirements asking for *more*
+		// confinement than the executor would otherwise apply, so it needs no
+		// grant. Set independently of Virtualized rather than implied by it:
+		// every virtualized executor is kernel-isolated, so a spec that sets
+		// both gets the stricter check and neither requirement has to know
+		// about the other.
+		req.RequireKernelIsolation = true
+	}
+	if scope := executor.EgressScope(s.Capabilities.Egress); scope.NeedsFilter() {
+		// Only a scope that needs a ruleset installed becomes a requirement.
+		// `none` is honourable by any driver with a network to take away, so
+		// requiring the capability for it would refuse executors that deliver
+		// exactly what was asked for. See Spec.SandboxRequirements, which draws
+		// the same line for the same reason.
+		req.RequireEgressScope = true
+		req.RequireNetworkEgress = true
 	}
 	if s.Capabilities.Virtualized {
 		// One of the few requirements that asks for *more* confinement than the
@@ -278,6 +325,39 @@ func (r *Resolved) ApplyTo(spec *executor.Spec, projectPath string, grants Grant
 		spec.Workspace.SizeLimitMB = mb
 	}
 
+	// --- egress scope ----------------------------------------------------
+	// Written before the network grant is resolved, because the two are
+	// independent narrowings and a scope must survive the early return below.
+	// Both can only remove reach, so their order does not change the outcome —
+	// but a scope dropped by an early return would be a confinement the author
+	// asked for and did not get, which is the one failure direction this
+	// package does not permit.
+	if s.Capabilities.Egress != "" {
+		scope, err := executor.ParseEgressScope(s.Capabilities.Egress)
+		if err != nil {
+			// normalize() already accepted it, so this is unreachable short of a
+			// caller hand-building a Spec. Refusing beats running unconfined.
+			return fmt.Errorf("sandbox: capabilities.egress %q: %w", s.Capabilities.Egress, err)
+		}
+		spec.EgressScope = scope
+	}
+
+	// --- devices ---------------------------------------------------------
+	// Selection, never addition. spec.Devices already holds whatever the
+	// project's host_device grants delivered (see pkg/ui.applyDeviceGrants), so
+	// this narrows that list and can only shorten it.
+	if sel := s.Capabilities.Devices; len(sel) > 0 {
+		kept, missing := selectDevices(spec.Devices, sel)
+		if len(missing) > 0 {
+			// An error rather than a silent omission, unlike `env`. A missing
+			// variable degrades a run; a missing device node makes the task
+			// meaningless, and a firmware build that starts with no serial port
+			// reports on hardware it never reached.
+			return &DeviceNotGrantedError{ProjectPath: projectPath, Names: missing}
+		}
+		spec.Devices = kept
+	}
+
 	// --- network ---------------------------------------------------------
 	// The asymmetry is the security property. No grant named → the network is
 	// removed. A grant named → it must already exist, and if it does the
@@ -356,4 +436,53 @@ func (e *GrantDeniedError) Remediation() string {
 	return fmt.Sprintf("Ask an operator to create an egress grant named %q for this project "+
 		"(Secrets & Grants tab, or `cloop egress grant`), or remove capabilities.network "+
 		"from %s to run without the network.", e.GrantID, FileName)
+}
+
+// selectDevices narrows a granted device list to the names a spec asked for.
+//
+// It returns the kept devices in the *spec's* order rather than the grant's,
+// because the spec's order is the one its author wrote down and the one any
+// diagnostic they read will list. The second return is the names that matched
+// nothing, which is what the caller turns into a refusal.
+func selectDevices(granted []executor.HostDevice, want []string) ([]executor.HostDevice, []string) {
+	byName := make(map[string]executor.HostDevice, len(granted))
+	for _, d := range granted {
+		byName[strings.TrimSpace(d.Name)] = d
+	}
+	kept := make([]executor.HostDevice, 0, len(want))
+	var missing []string
+	for _, name := range want {
+		name = strings.TrimSpace(name)
+		d, ok := byName[name]
+		if !ok {
+			missing = append(missing, name)
+			continue
+		}
+		kept = append(kept, d)
+	}
+	return kept, missing
+}
+
+// DeviceNotGrantedError is returned when a sandbox spec names a device the
+// project holds no host_device grant for.
+//
+// A typed error for the reason GrantDeniedError is one: the two outcomes need
+// different HTTP statuses and different remediation. This one is a 409 — the
+// file is well-formed and this deployment has not been told to honour it — and
+// the fix is an operator running secret.grant, not an edit to the repo.
+type DeviceNotGrantedError struct {
+	ProjectPath string
+	Names       []string
+}
+
+func (e *DeviceNotGrantedError) Error() string {
+	return fmt.Sprintf("%s: capabilities.devices names %s, which this project holds no "+
+		"host_device grant for", FileName, strings.Join(e.Names, ", "))
+}
+
+// Remediation is the operator-facing next step, kept beside the error so the UI
+// and the CLI print the same sentence.
+func (e *DeviceNotGrantedError) Remediation() string {
+	return fmt.Sprintf("grant the device to this project: cloop secret grant <inventory-secret> "+
+		"--subject project:%s --devices %s", e.ProjectPath, strings.Join(e.Names, ","))
 }

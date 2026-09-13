@@ -15,6 +15,7 @@ binary. Copy them.
 - [Container registries](#container-registries)
 - [Environment secrets](#environment-secrets)
 - [Local git repositories](#local-git-repositories)
+- [Host devices](#host-devices)
 - [Egress leases](#egress-leases)
 - [Inspecting, debugging, revoking](#inspecting-debugging-revoking)
 - [Choosing TTLs](#choosing-ttls)
@@ -67,6 +68,7 @@ cloop secret mint <name> --kind <kind> [--file <path> | --value <literal>]
 | `env` | one or more environment variables |
 | `egress_proxy` | an outbound proxy endpoint, credentials optional |
 | `local_repo` | an absolute path **on the hub host** to a directory of git repositories (or to a single repository) |
+| `host_device` | an inventory of device nodes on the executor's host, one `name=/dev/path` per line |
 
 Prefer **stdin** or `--file`. `--value` puts the credential in your shell history
 and in the host process table, and the flag's own help text says so:
@@ -113,12 +115,14 @@ cloop secret grant <secret> --to <subject> [constraints] [--ttl 24h]
 | `--registries` | `registry` | registry allowlist — required |
 | `--env-keys` | `env` | key allowlist; omit to deliver every key in the secret |
 | `--hosts` | `egress_proxy` | host allowlist — required |
+| `--devices` | `host_device` | device-*name* globs from the inventory — **required** |
 
 `--scope` is a grouping label for operators and carries **no** authority.
 
-One more constraint applies to `local_repo` only: `--writable`, which is the
-single constraint that *widens* rather than narrows — see
-[Read-only by default](#read-only-by-default).
+One more constraint applies to `local_repo` and `host_device` only:
+`--writable`, which is the single constraint that *widens* rather than narrows —
+see [Read-only by default](#read-only-by-default) and
+[Narrowing is the only direction](#narrowing-is-the-only-direction).
 
 ---
 
@@ -587,9 +591,9 @@ grant stops being *re-issued* immediately — the next lease renewal, at most 15
 minutes away, will not contain it, so no new run gets the repository — but the
 run already holding it keeps it until it exits.
 
-To cut access to a repository *now*, stop the workload:
-`cloop stop`, or the Stop button, or
-[cordon the executor](../architecture/executors.md#placement).
+To cut access to a repository *now*, stop the workload: the dashboard's Stop
+button, or [cordon the executor](../architecture/executors.md#placement). There
+is no top-level `cloop stop` command.
 
 ### Containment
 
@@ -632,6 +636,332 @@ Revocation has one extra obligation here. Scrubbing a credential file is
 something the hub can do; taking a bind back is not — the hub cannot reach into a
 running sandbox's mount namespace — so the driver has to unbind, and the mounts
 are recorded on the lease for exactly that reason.
+
+---
+
+## Host devices
+
+`local_repo` hands a workload paths. This one hands it **hardware**: device nodes
+on the executor's host, opened to one project. It is for the bench with
+instruments on serial lines, the box with a GPU in it, the task that needs
+`/dev/net/tun` to build an interface of its own.
+
+It is a grant for the reason `local_repo` is, one notch sharper. A device node is
+an authority over the machine — `/dev/ttyUSB0` is a serial line into whatever is
+plugged in, `/dev/nvidia0` is a compute unit with its own memory and its own
+history of escapes — and the file that would otherwise carry it,
+[`.cloop/sandbox.yaml`](../reference/sandbox.md), is repo-committed. A `devices:`
+key there that could name `/dev/anything` would turn "merge this pull request"
+into "hand over the hardware", which is why that file has no path-shaped key at
+all. So the operator owns the inventory and the project owns the *selection*:
+`capabilities.devices` picks by **name** from what the project already holds, and
+picking fewer is the only freedom it has.
+
+The payload is the host's inventory, stored once:
+
+```
+# rack 3, bench A
+serial0=/dev/ttyUSB0
+serial1=/dev/ttyUSB1
+# a logic analyser, read-only: nothing should be able to reprogram it
+analyser=/dev/ttyACM0:r
+# remapped, so a project's code does not change when the hardware moves
+accel=/dev/nvidia0:/dev/accel0:rw
+accelctl=/dev/nvidiactl:rw
+```
+
+```console
+$ cloop secret mint bench-hw --kind host_device --file ./bench-hw.txt
+✓ minted bench-hw (host_device) as sec_03c245577f4b645d30e23a1c
+  no grant yet — nothing can use it until you run 'cloop secret grant'
+```
+
+One entry per line, `name=/dev/source[:/dev/target][:mode]`. The mode is `r`, `rw`
+or `rwm`, and an omitted one means **`rw`** — what a device is actually useful
+with, and still short of `mknod`. A second path in the middle field remaps the
+node, which is what makes a grant portable: a project told it has `accel` does not
+need to know that *this* host enumerates the card as `nvidia0`. Blank lines are
+skipped and a line beginning `#` is a comment, so the inventory keeps its
+annotations and can live in configuration management. At most **256 lines** are
+read — a host's grantable hardware is a short list, and parsing an unbounded one
+on a path an operator's browser can reach is a memory-exhaustion primitive rather
+than a feature.
+
+The name is the handle everything downstream refers to — the grant's allowlist,
+the sandbox spec, the audit row — so it is held to the same shape as a repository
+name: at most 64 characters, and no colon, slash, backslash, equals sign, space,
+NUL or newline. Two entries may not share a name, and two may not share a
+sandbox-side target; either collision would otherwise be resolved by argv order,
+and a workload could not tell which piece of hardware it had opened.
+
+**Existence is deliberately not checked when the inventory is stored.** The secret
+is minted on the hub and may be honoured by a container executor on another
+machine, so "this path exists" is not a question the broker can answer about the
+right host. What is checked is the shape, which is host-independent — see
+[What the inventory refuses](#what-the-inventory-refuses).
+
+Each grant then opens a different slice to a different project:
+
+```console
+$ cloop secret grant bench-hw \
+    --to project:/srv/projects/firmware \
+    --devices serial0,analyser \
+    --writable \
+    --ttl 8h
+✓ granted bench-hw to project:/srv/projects/firmware
+  grant:       grant_662a06d49509af57fdad8186
+  constraints: devices=analyser|serial0 writable
+  expires:     2026-09-14T01:12:54Z (in 8h0m0s)
+```
+
+**`--devices` is required, and it matches names rather than paths.** `serial0` is
+exact, `gpu*` is a glob, and `*` alone allows every device in the inventory.
+Matching is **case-sensitive**: these handles are chosen by an operator and
+matched exactly, and folding would make a grant on `gpu0` also open `GPU0` —
+which, if both existed, would be two different pieces of hardware nobody named.
+At most 16 devices may be opened by one grant, the same ceiling a sandbox spec can
+carry, so a grant cannot mint more than the dispatch path will accept.
+
+Omitting it is refused at creation, not at delivery:
+
+```console
+$ cloop secret grant bench-hw --to project:/srv/projects/firmware --ttl 8h
+Error: secretbroker: invalid constraint: a host_device grant needs a device
+allowlist (--devices serial0, or --devices '*' for every device in the inventory)
+```
+
+So is an allowlist that matches nothing. The grant asserts that this hardware is
+reachable, and delivering an empty device list would start a harness that
+discovers the problem as an `ENOENT` on a path it was told to expect.
+
+### What the sandbox actually gets
+
+Each granted device appears at its **target** path — the same path as on the host
+unless the inventory remapped it — with the access mode the grant resolved to:
+
+```
+devices: /dev/ttyACM0  ->  /dev/ttyACM0   r
+         /dev/ttyUSB0  ->  /dev/ttyUSB0   rw
+env:     CLOOP_HOST_DEVICES=analyser,serial0
+```
+
+`CLOOP_HOST_DEVICES` lists the **names**, and never the host paths. The path is a
+fact about one machine's hardware layout; the name is what the project was granted
+and what its code refers to, and a workload that needs a path opens the device it
+was given. Putting host paths in the environment would publish the host's hardware
+layout to every process in the sandbox for no benefit.
+
+Dry-run it like any other lease:
+
+```console
+$ cloop secret lease --project /srv/projects/firmware --executor bench-01
+1 material(s), lease expires 2026-09-13T17:27:54Z
+
+  bench-hw (host_device)
+    grant:       grant_662a06d49509af57fdad8186
+    constraints: devices=analyser|serial0 writable
+    delivers:    host devices: analyser,serial0
+    env:         CLOOP_HOST_DEVICES
+```
+
+The delivered list is sorted by name, because it reaches an audit row and a `Spec`
+that `pkg/executorstore` persists, and neither should vary between identical runs.
+
+A project selects from this by name in its own repository —
+`capabilities.devices: [serial0]`, or the key omitted to take everything the
+project holds. Naming a device the project has no grant for is an **error**,
+unlike `env:`, where an unheld name simply forwards nothing: a missing variable
+degrades a run, whereas a missing device node makes a firmware build meaningless.
+See the [sandbox spec reference](../reference/sandbox.md).
+
+### Narrowing is the only direction
+
+`writable` widens, so — as for `local_repo` — it is a bool that defaults to the
+safe reading, and the invariant is the *direction* rather than the value. A
+constraint may take access away and may never add it:
+
+- a grant **without** `--writable` narrows every device it opens to `r`,
+  whatever the inventory recorded;
+- a grant **with** `--writable` cannot promote an entry the inventory recorded as
+  `:r`. The analyser above stays read-only under the `--writable` grant that
+  opened it.
+
+That asymmetry is what lets one inventory serve several projects. An operator who
+decides "nothing may ever reprogram the analyser" writes `:r` once, at the
+inventory, and no grant, spec or flag downstream can undo it.
+
+### The access mode is not a boundary on every host
+
+**Read this before relying on a read-only device grant.**
+
+The mode becomes the third field of the runtime's `--device src:dst:perms`, which
+programs the container's *device cgroup*. On cgroup v1 that is the devices
+controller; on cgroup v2 it is an eBPF program attached to the container's cgroup,
+and whether it is attached at all depends on the kernel, the runtime build and the
+cgroup delegation — none of which cloop can interrogate. On a host where it is not
+attached, **a device granted `r` is readable and writable**, because the node
+inside the sandbox carries the host node's file mode and `/dev/zero` is `0666`
+nearly everywhere.
+
+So the mode is defence in depth and not a boundary cloop can promise. The
+container driver's preflight — phase one of `cloop executor test` — says so rather
+than leaving the stronger reading to be assumed:
+
+```
+warn devices     a host_device grant's access mode (r/rw/rwm) is programmed into the
+                 container's device cgroup, whose enforcement depends on this host's
+                 cgroup version and runtime build and cannot be verified from here —
+                 on a host where it is not attached, a device granted "r" is writable
+                 because the node keeps its host file mode
+                 fix: where read-only access must be enforced, set it on the host node
+                 itself (chown root:cloop-ro /dev/… && chmod 0640) so the sandbox UID
+                 cannot open it for writing regardless of cgroups; verify with
+                 `cloop executor test`
+```
+
+The warning is unconditional, and deliberately so: it is a statement, not a probe.
+Establishing whether the cgroup rule is enforced would mean starting a container,
+granting it a device read-only and trying to write — a container run and an image
+dependency inside a command an operator may be running on a node with nothing
+pulled yet.
+
+**The control that holds on every host is the node's own ownership and mode.** The
+sandbox runs as the project directory's owner UID, so a device at `crw-rw----
+root:dialout` is unopenable by a sandbox whose UID is not in that group, whatever
+the cgroup does. An operator who needs read-only access *enforced* sets it there —
+`chown`/`chmod`, with a udev rule so it survives a re-plug. The full recipe is in
+[critical hosts as cloop executors](enterprise-hosts.md#what-the-access-mode-does-and-does-not-enforce).
+
+cloop still emits the mode, because on the hosts where the cgroup rule *is*
+enforced it is enforced exactly, and withholding `mknod` by default costs nothing.
+
+### Not every executor can receive it
+
+`local_repo` reaches a workload three ways depending on the driver; this one
+reaches it on **one**, and the other three are refusals rather than renderings:
+
+| Executor | What happens | `SupportsDevices` |
+| --- | --- | --- |
+| `container` (including Kata and gVisor) | each device is exposed at its target path with the granted mode | ✅ |
+| `kubernetes` | **refused** — Kubernetes does not take device paths | ❌ |
+| `remote` | **refused** — the grant names a path on the *hub's* host, and the agent has no sandbox to put a device into | ❌ |
+| `localprocess` | not exposed and **not enforced**; a warning is logged | ❌ |
+
+On `kubernetes` a device plugin owns the node and hands a container whichever unit
+it has free, in response to an extended resource request — so there is nothing
+honest to do with a path-shaped grant, and mounting `/dev/nvidia0` as a hostPath
+from whatever node the scheduler picked would expose an unrelated piece of *that*
+node's hardware, which is the one outcome worse than refusing. (`HostDevice`
+carries a `kubernetes_resource` field for the resource-request shape this driver
+would need; it is not consumed yet.)
+
+On `remote` two things stand in the way and only one of them is a missing feature.
+A grant naming `/dev/ttyUSB0` on the hub says nothing about `/dev/ttyUSB0` on a
+machine in another building; and the agent runs each workload with `localprocess`
+— a plain process in its own namespaces — so it has no sandbox to put a device
+*into*. Pass hardware into a confined sandbox by running the container executor on
+the machine that has the hardware.
+
+`localprocess` is the one warning rather than error, because the workload is a
+plain process in the hub's own namespaces: every device node the hub user can open
+is already open to it. There is nothing to expose and nothing that could have been
+withheld, so the grant is satisfied in the weakest possible sense. It must not be
+silent — a dashboard showing a scoped device grant on a workload that has the whole
+of `/dev` would be describing a boundary that does not exist — so a line goes to
+the hub's stderr naming the grant and telling you to bind a container executor to
+make it one.
+
+The refusals land at placement, naming both facts:
+
+```
+executor: invalid spec: executor k8s-prod (kubernetes) cannot expose host devices
+inside a sandbox, but this project holds a host_device grant for serial0. A device
+grant names hardware on one machine, so bind the project to a container or Kata
+executor running on the host that has it
+```
+
+A hard error rather than a warning, for the same reason `local_repo`'s is: this is
+the exact point at which "I granted this bench's hardware to that project" and "I
+bound that project to a cluster" turn out to be incompatible, and the person who
+needs to know is the one who just pressed Run. The same gap is named `devices`
+when a spec carrying devices is placed or failed over across a fleet — see
+[Placement](../architecture/executors.md#placement).
+
+### Revocation lapses when the workload exits
+
+This is the same limitation `local_repo` has, and harder. A device already in a
+running sandbox's cgroup and mount namespace cannot be taken back from outside it,
+exactly as a bind mount cannot. Revoking the grant stops it being *re-issued*
+immediately — the next lease, at most 15 minutes away, will not contain it, so no
+new run gets the hardware — but the run already holding it keeps it until it exits.
+The devices are recorded on the lease for the audit trail rather than for
+revocation, which is the honest reading of what the hub can and cannot do.
+
+Narrowing that window means revoking and then stopping the workload — from the
+dashboard's Stop button, or by
+[cordoning the executor](../architecture/executors.md#placement). There is no
+top-level `cloop stop`:
+
+```console
+$ cloop secret revoke <grant-id>
+✓ revoked grant_7f3a1c
+  already-materialised credentials survive until the workload exits
+```
+
+**Grant TTLs are the routine control here, not revocation.** Eight hours for a
+bench session is better than a week, because the grant lapsing is what makes it a
+session rather than a standing entitlement to the machine's hardware.
+
+### What the inventory refuses
+
+The broker cannot know which host will honour a device path, so it checks the
+things that are true of any host. A path must be absolute, canonical (`/dev/../etc`
+is refused rather than cleaned, because the two differ exactly when someone wrote
+something they did not mean), at most 256 characters, and free of backslashes, NULs
+and newlines.
+
+Beyond that, two classes are refused outright.
+
+**Devices whose exposure would waive the sandbox entirely.** `/dev/mem`,
+`/dev/kmem`, `/dev/kcore`, `/dev/port`, `/dev/msr` and `/dev/cpu` exist to give
+unmediated access to the machine, and whole host disks — `/dev/sda`,
+`/dev/nvme0n1`, `/dev/vda` — hand over every filesystem on it:
+
+```
+secretbroker: malformed secret payload: host_device line 1: device "ram" source
+path "/dev/mem" maps all of physical memory, including kernel text, so granting it
+would waive every isolation guarantee the sandbox provides
+```
+
+This is a denylist on top of an allowlist, which is normally a smell. It is here
+because the allowlist above it is "an absolute path under `/dev` that an operator
+typed", and an operator typing `/dev/mem` has made a mistake no downstream layer
+can catch: every confinement cloop advertises would be decoration. Grant a
+partition, or a directory as a `local_repo`, instead.
+
+**Anything outside `/dev`.** The field's contract is a device node, and a regular
+file arriving here would be a host bind mount wearing a device's name — bypassing
+the `local_repo` grant that exists for exactly that, and the symlink containment
+that comes with it:
+
+```
+secretbroker: malformed secret payload: host_device line 1: device "src" source
+path "/srv/git" is not under /dev; grant a host file or directory as a local_repo
+instead
+```
+
+Both checks exist twice on purpose, at the two ends of the same pipe. The broker's
+copy is the one that has to be *helpful* — over the API and the dashboard the
+inventory is parsed as it is stored, so the error appears in the dialog in front
+of the person who typed the path. `pkg/executor`'s copy is the one that has to
+*hold*, and it runs again immediately before a driver renders a runtime flag,
+because a `Spec` reaches that point having been persisted and re-hydrated and this
+is a field that carries a host path verbatim into the argv of a root-privileged
+runtime CLI.
+
+The end-to-end host setup — the inventory, the udev rules, gVisor, the egress
+filter and how they compose on one bench machine — is
+[critical hosts as cloop executors](enterprise-hosts.md).
 
 ---
 

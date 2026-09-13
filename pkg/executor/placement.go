@@ -48,6 +48,7 @@ const (
 	ConstraintHostPolicy       Constraint = "host_execution_policy"
 	ConstraintIsolation        Constraint = "isolation"
 	ConstraintVirtualization   Constraint = "virtualization"
+	ConstraintKernelIsolation  Constraint = "kernel_isolation"
 	ConstraintLabels           Constraint = "labels"
 	ConstraintPlatform         Constraint = "platform"
 	ConstraintArch             Constraint = "arch"
@@ -63,6 +64,8 @@ const (
 	ConstraintSandboxBuild     Constraint = "sandbox_build"
 	ConstraintSandboxMounts    Constraint = "sandbox_mounts"
 	ConstraintHostMounts       Constraint = "host_mounts"
+	ConstraintDevices          Constraint = "devices"
+	ConstraintEgressScope      Constraint = "egress_scope"
 	ConstraintWorkspace        Constraint = "workspace"
 	ConstraintWriteBack        Constraint = "write_back"
 	ConstraintSecretFiles      Constraint = "secret_files"
@@ -147,11 +150,37 @@ type Requirements struct {
 	// exactly those two without also admitting the non-Kata remote executors
 	// that share their isolation value.
 	RequireVirtualization bool
+	// RequireKernelIsolation demands a node on which the workload's system
+	// calls are not served by the executing machine's kernel — either a
+	// hypervisor-backed sandbox (Kata) or a userspace kernel (gVisor).
+	//
+	// Weaker than RequireVirtualization and separate from it because the two
+	// are different asks, and conflating them costs real placements. A project
+	// whose actual requirement is "a kernel bug in my task must not be a
+	// kernel bug on the host" is satisfied by gVisor; making it say
+	// `virtualized: true` to express that would refuse every gVisor executor
+	// in the fleet, so an operator who had deliberately standardised on gVisor
+	// would watch their nodes rejected for a property they had in fact
+	// provided.
+	RequireKernelIsolation bool
 	// RequireContainerRuntime demands a node that can drive containers.
 	RequireContainerRuntime bool
 	// RequireNetworkEgress demands a node whose workloads can reach the
 	// network.
 	RequireNetworkEgress bool
+	// RequireDevices demands a node that honours Spec.Devices — one that can
+	// expose a host device node inside the sandbox.
+	//
+	// The refusal it produces is the point. A granted /dev/ttyUSB0 is a
+	// statement about one machine's hardware, so a project holding that grant
+	// and bound to a Kubernetes or remote executor has asked for something no
+	// amount of retrying will produce. Saying so at placement time names both
+	// facts; the alternative is a harness that opens the path, gets ENOENT,
+	// and reports that the device is broken.
+	RequireDevices bool
+	// RequireEgressScope demands a node that can confine one workload's
+	// IP-layer egress independently of its neighbours (Spec.EgressScope).
+	RequireEgressScope bool
 	// RequireResourceLimits demands a node that actually enforces
 	// Spec.ResourceLimits rather than ignoring them.
 	RequireResourceLimits bool
@@ -383,7 +412,8 @@ func CheckSandboxSupport(ex Executor, req Requirements, projectPath string) erro
 		// real remedy.
 		return &PlacementError{Constraint: rej.Constraint, Rejections: []Rejection{rej}, Considered: 1}
 	case ConstraintImageOverride, ConstraintSandboxBuild, ConstraintSandboxMounts,
-		ConstraintNetworkEgress, ConstraintResourceLimits, ConstraintVirtualization:
+		ConstraintNetworkEgress, ConstraintResourceLimits, ConstraintVirtualization,
+		ConstraintKernelIsolation, ConstraintEgressScope:
 		// These are capability gaps, not policy ones — but on an un-isolated
 		// executor the remedy is identical to the policy case ("bind this
 		// project to a sandbox"), and it is the remedy, not the taxonomy, that
@@ -455,6 +485,16 @@ func reject(c Candidate, req Requirements) (Rejection, bool) {
 			"shares the executing machine's kernel; this workload requires a hypervisor-backed "+
 				"sandbox (set executors.container.oci_runtime or executors.kubernetes.runtime_class to a Kata runtime)")
 	}
+	// Checked after RequireVirtualization so that a spec setting both gets the
+	// more specific message. Every virtualized executor is kernel-isolated, so
+	// this can only fire on its own.
+	if req.RequireKernelIsolation && !caps.KernelIsolated {
+		return no(ConstraintKernelIsolation,
+			"serves the workload's system calls from the executing machine's kernel; this "+
+				"workload requires a kernel-isolated sandbox (set "+
+				"executors.container.oci_runtime to runsc for gVisor or a kata runtime, or "+
+				"executors.kubernetes.runtime_class to the matching RuntimeClass)")
+	}
 
 	for k, want := range req.Labels {
 		got, ok := c.Labels[k]
@@ -504,6 +544,17 @@ func reject(c Candidate, req Requirements) (Rejection, bool) {
 			"host into the sandbox, so a local_repo grant would deliver nothing; bind a "+
 			"container or Kata executor on the hub, or publish the repositories over https "+
 			"and grant a github_pat instead")
+	}
+	if req.RequireDevices && !caps.SupportsDevices {
+		return no(ConstraintDevices, "cannot expose host devices inside the sandbox, so a "+
+			"host_device grant would deliver nothing; bind a container or Kata executor on "+
+			"the host that has the hardware, or enrol that host as a remote executor")
+	}
+	if req.RequireEgressScope && !caps.SupportsEgressScope {
+		return no(ConstraintEgressScope, "cannot confine one project's egress independently "+
+			"of its neighbours (.cloop/sandbox.yaml sets capabilities.egress:); enable "+
+			"executors.container.egress_filter on a host with nft(8) and CAP_NET_ADMIN, or "+
+			"drop the key and inherit the executor's own policy")
 	}
 	if req.RequireWorkspaceProvisioning && !caps.SupportsWorkspaceProvisioning {
 		return no(ConstraintWorkspace, "cannot materialise a source tree, so the harness "+

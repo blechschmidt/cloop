@@ -50,6 +50,8 @@ func (b *Broker) materialFor(s Secret, g Grant) (Material, error) {
 		return b.egressMaterial(mat, plaintext)
 	case KindLocalRepo:
 		return b.localRepoMaterial(mat, plaintext)
+	case KindHostDevice:
+		return b.hostDeviceMaterial(mat, plaintext)
 	default:
 		return Material{}, wrapf(ErrInvalidKind, "no delivery rule for kind %q", s.Kind)
 	}

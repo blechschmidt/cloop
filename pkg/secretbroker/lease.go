@@ -43,6 +43,12 @@ type Material struct {
 	// lease needs to see, and hiding them would make the one material kind
 	// with no credential in it the hardest to audit.
 	Mounts []RepoMount `json:"mounts,omitempty"`
+	// Devices are host device nodes the grant opens to the workload. Like
+	// Mounts they are not written anywhere — the node already exists and the
+	// grant is permission to reach it — and like Mounts they are not
+	// json:"-", because a device name, path and access mode are exactly what
+	// an operator inspecting a lease needs to see and carry no credential.
+	Devices []GrantedDevice `json:"devices,omitempty"`
 	// Summary is the audit-safe description of what was delivered
 	// (surviving kubeconfig contexts, allowed registries, env key names).
 	Summary string `json:"summary,omitempty"`
@@ -153,6 +159,7 @@ type Mount struct {
 	env      []string
 	files    []string
 	mounts   []RepoMount
+	devices  []GrantedDevice
 	bindings []LeaseBinding
 	closed   bool
 }
@@ -170,6 +177,21 @@ func (m *Mount) Mounts() []RepoMount {
 		return nil
 	}
 	return append([]RepoMount(nil), m.mounts...)
+}
+
+// Devices returns the host devices this lease opens, in the order the materials
+// were processed. The caller exposes them to the sandbox; there is nothing on
+// disk here to clean up, so Close does not touch them.
+func (m *Mount) Devices() []GrantedDevice {
+	if m == nil {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed {
+		return nil
+	}
+	return append([]GrantedDevice(nil), m.devices...)
 }
 
 // LeaseBinding attributes part of a materialised lease to the grant that
@@ -206,6 +228,15 @@ type LeaseBinding struct {
 	// A local_repo grant therefore lapses when the workload exits, not when
 	// the grant is revoked. Narrowing that window means stopping the workload.
 	Mounts []RepoMount
+	// Devices are the host device nodes this grant opened, recorded for the
+	// audit trail rather than for revocation.
+	//
+	// The same limitation as Mounts applies, and harder: a device already in a
+	// running sandbox's cgroup and mount namespace cannot be taken back from
+	// outside it. A host_device grant therefore lapses when the workload exits,
+	// not when the grant is revoked, and narrowing that window means stopping
+	// the workload.
+	Devices []GrantedDevice
 }
 
 // RepoMount is one local git repository a grant opens to a workload.
@@ -274,7 +305,7 @@ func leaseBaseDir(override string) string {
 // existed: an isolated executor computes its environment from a directory it
 // will create itself, and a second implementation of "what does GIT_CONFIG_GLOBAL
 // point at" is how the sandbox ends up with a variable naming nothing.
-func (l *Lease) render(dir string) (env []string, files []placedFile, bindings []LeaseBinding, mounts []RepoMount, err error) {
+func (l *Lease) render(dir string) (env []string, files []placedFile, bindings []LeaseBinding, mounts []RepoMount, devices []GrantedDevice, err error) {
 	envMap := make(map[string]string)
 
 	for _, mat := range l.Materials {
@@ -292,7 +323,7 @@ func (l *Lease) render(dir string) (env []string, files []placedFile, bindings [
 		for _, f := range mat.Files {
 			name, nerr := leaseFileName(f)
 			if nerr != nil {
-				return nil, nil, nil, nil, nerr
+				return nil, nil, nil, nil, nil, nerr
 			}
 			path := filepath.Join(dir, name)
 			files = append(files, placedFile{
@@ -321,10 +352,21 @@ func (l *Lease) render(dir string) (env []string, files []placedFile, bindings [
 		// that hands over a host path verbatim.
 		for _, rm := range mat.Mounts {
 			if verr := rm.validate(); verr != nil {
-				return nil, nil, nil, nil, verr
+				return nil, nil, nil, nil, nil, verr
 			}
 			binding.Mounts = append(binding.Mounts, rm)
 			mounts = append(mounts, rm)
+		}
+		// Devices, for the same reason and with the same re-validation: this is
+		// the material that hands a host path to a root-privileged runtime CLI
+		// as a --device flag, so the shape checks have to hold on what the
+		// driver receives rather than on what the broker minted.
+		for _, gd := range mat.Devices {
+			if verr := gd.validate(); verr != nil {
+				return nil, nil, nil, nil, nil, verr
+			}
+			binding.Devices = append(binding.Devices, gd)
+			devices = append(devices, gd)
 		}
 		// Sorted so the binding — which ends up in an audit row and in a
 		// revoke frame — is stable across runs rather than reflecting Go's
@@ -352,7 +394,7 @@ func (l *Lease) render(dir string) (env []string, files []placedFile, bindings [
 	for _, k := range keys {
 		env = append(env, k+"="+envMap[k])
 	}
-	return env, files, bindings, mounts, nil
+	return env, files, bindings, mounts, devices, nil
 }
 
 // placedFile is one credential file after render has decided where it goes.
@@ -481,13 +523,13 @@ func (l *Lease) MaterializeAt(dir string) (*Mount, error) {
 	}
 	dir = clean
 
-	env, files, bindings, mounts, err := l.render(dir)
+	env, files, bindings, mounts, devices, err := l.render(dir)
 	if err != nil {
 		_ = os.RemoveAll(dir)
 		return nil, err
 	}
 
-	m := &Mount{Dir: dir, env: env, bindings: bindings, mounts: mounts}
+	m := &Mount{Dir: dir, env: env, bindings: bindings, mounts: mounts, devices: devices}
 	for _, f := range files {
 		if werr := m.writeFile(f); werr != nil {
 			_ = m.Close()
@@ -513,11 +555,14 @@ func (l *Lease) Deliver(dir string) (*Delivery, error) {
 	if clean == "" || clean == "." || !filepath.IsAbs(clean) {
 		return nil, wrapf(ErrInvalidSecret, "delivery directory %q is not an absolute path", dir)
 	}
-	env, files, bindings, mounts, err := l.render(clean)
+	env, files, bindings, mounts, devices, err := l.render(clean)
 	if err != nil {
 		return nil, err
 	}
-	return &Delivery{Dir: clean, env: env, files: files, bindings: bindings, mounts: mounts}, nil
+	return &Delivery{
+		Dir: clean, env: env, files: files,
+		bindings: bindings, mounts: mounts, devices: devices,
+	}, nil
 }
 
 // Delivery is a lease rendered for someone else's filesystem: the environment
@@ -537,6 +582,7 @@ type Delivery struct {
 	files    []placedFile
 	bindings []LeaseBinding
 	mounts   []RepoMount
+	devices  []GrantedDevice
 	closed   bool
 }
 
@@ -548,6 +594,19 @@ func (d *Delivery) Env() []string {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return append([]string(nil), d.env...)
+}
+
+// Devices returns the host devices this lease opens.
+func (d *Delivery) Devices() []GrantedDevice {
+	if d == nil {
+		return nil
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.closed {
+		return nil
+	}
+	return append([]GrantedDevice(nil), d.devices...)
 }
 
 // Mounts returns the host repositories this lease opens.

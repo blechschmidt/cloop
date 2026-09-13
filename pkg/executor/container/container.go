@@ -453,6 +453,19 @@ func (e *Executor) OCIRuntime() string { return e.opts.OCIRuntime }
 // Virtualized reports whether workloads run behind a hypervisor.
 func (e *Executor) Virtualized() bool { return IsVirtualizedOCIRuntime(e.opts.OCIRuntime) }
 
+// KernelIsolated reports whether the workload's system calls are served by
+// something other than the host kernel — a Kata guest kernel or gVisor's
+// Sentry.
+//
+// Isolation stays IsolationContainer for gVisor even when this is true, and the
+// two statements do not conflict. gVisor is a container by every structural
+// measure the enum describes: namespaces, a cgroup, an image, no VM. What it
+// changes is who executes the syscalls, which is a different axis and gets a
+// different field rather than a fourth enum value that nothing else understands.
+func (e *Executor) KernelIsolated() bool {
+	return executor.IsKernelIsolatedRuntime(e.opts.OCIRuntime)
+}
+
 // Capabilities implements executor.Executor.
 //
 // SharesHostFilesystem is true because the project directory really is a bind
@@ -476,8 +489,13 @@ func (e *Executor) Capabilities() executor.Capabilities {
 		isolation = executor.IsolationVM
 	}
 	return executor.Capabilities{
-		Isolation:              isolation,
-		Virtualized:            e.Virtualized(),
+		Isolation:   isolation,
+		Virtualized: e.Virtualized(),
+		// Kata *or* gVisor. Reading it from the same configured runtime name
+		// keeps the two claims consistent by construction: a name cannot be
+		// virtualized without also being kernel-isolated, because
+		// IsKernelIsolatedRuntime is defined as the union.
+		KernelIsolated:         e.KernelIsolated(),
 		SupportsStream:         true,
 		SupportsSignal:         true,
 		SupportsResourceLimits: true,
@@ -505,6 +523,22 @@ func (e *Executor) Capabilities() executor.Capabilities {
 		// bind it can actually make. It is the executor a developer wanting
 		// their local checkouts in a sandbox should be bound to.
 		SupportsHostMounts: true,
+		// Host devices are the same story as host mounts with harder edges: the
+		// driver runs on the machine that has the hardware, and the runtime
+		// takes --device, so a granted device node is one it can genuinely
+		// expose. Whether the *hardware* is present is a different question,
+		// answered by Preflight rather than here — this field says the driver
+		// honours the field, not that /dev/ttyUSB0 exists.
+		SupportsDevices: true,
+		// A per-project egress scope needs a bridge of its own and an nftables
+		// table of its own, both of which this driver provisions (see
+		// firewall.go). Advertised unconditionally rather than gated on
+		// EgressFilter.Enabled: the whole point of a scope is that a project can
+		// ask to be confined on an executor whose default is unfiltered, and
+		// gating it here would refuse exactly that case. A host without nft(8)
+		// fails at install time with a message naming it, which is the right
+		// place for a missing-tooling error.
+		SupportsEgressScope: true,
 		// A lease's credential files are staged into a directory this driver
 		// creates and binds read-only at the path the workload's environment
 		// names — see secrets.go. SecretFilesFromHostPath stays false, and the
@@ -589,8 +623,14 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, extraMounts []
 	// has already set req.Network to "none", which is narrower than anything
 	// the filter would install, and provisioning a bridge for a workload
 	// that will have no interfaces is pure cost.
-	if e.opts.EgressFilter.Enabled && req.Network != NetworkNone {
-		network, ferr := e.installFirewall(ctx)
+	//
+	// The project's own scope joins the executor's filter in deciding whether
+	// there is anything to install, because a scope can call for a ruleset on an
+	// executor that has none configured — that is the point of it. Both are
+	// passed on so the network and the table are keyed by the pair; see
+	// networkName.
+	if (e.opts.EgressFilter.Enabled || spec.EgressScope.NeedsFilter()) && req.Network != NetworkNone {
+		network, ferr := e.installFirewall(ctx, spec.EgressScope)
 		if ferr != nil {
 			return executor.Handle{}, ferr
 		}
@@ -975,13 +1015,32 @@ func (e *Executor) buildRequest(spec executor.Spec, workDir string, extraMounts 
 	}
 	req.ExtraMounts = append(req.ExtraMounts, hostMounts...)
 
+	if len(spec.Devices) > 0 {
+		if err := executor.ValidateDevices(spec.Devices); err != nil {
+			return runRequest{}, err
+		}
+		// Copied rather than aliased. The Spec outlives this request and is
+		// persisted by executorstore, so a driver that mutated the slice would
+		// be rewriting the record of what was dispatched.
+		req.Devices = append([]executor.HostDevice(nil), spec.Devices...)
+		req.Labels[LabelDevices] = strings.Join(executor.DeviceNames(spec.Devices), ",")
+	}
+
 	// A sandbox spec may take the network away and may never add one, so this
 	// is an assignment in one direction only. See executor.Spec.DisableNetwork.
-	if spec.DisableNetwork {
+	//
+	// EgressScopeNone joins it here rather than being handled with the other
+	// scopes below, because taking the interfaces away is not a filter: it needs
+	// no bridge, no nft and no privilege, so it must not depend on a filter
+	// being installable.
+	if spec.DisableNetwork || spec.EgressScope.RemovesNetwork() {
 		req.Network = NetworkNone
 		// --add-host entries are name pins for a network that no longer
 		// exists; both runtimes reject them alongside --network=none.
 		req.AddHosts = nil
+	}
+	if spec.EgressScope != "" {
+		req.Labels[LabelEgressScope] = string(spec.EgressScope)
 	}
 	if spec.SandboxHash != "" {
 		req.Labels[LabelSandboxHash] = spec.SandboxHash

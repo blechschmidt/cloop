@@ -98,6 +98,22 @@ type Capabilities struct {
 	// virtualized is checked against this field, so a false positive places a
 	// workload that must be behind a hypervisor onto one that is not.
 	Virtualized bool `json:"virtualized,omitempty"`
+	// KernelIsolated reports whether the workload's system calls are served
+	// by something other than the executing machine's kernel — a guest
+	// kernel in a VM, or gVisor's Sentry.
+	//
+	// Every virtualized executor is also kernel-isolated; the reverse does
+	// not hold, and the gap between them is exactly gVisor. Before this
+	// field existed a gVisor sandbox advertised the same capabilities as a
+	// runc one, so the stronger boundary an operator had paid for was
+	// invisible to placement and a project could not ask for it without
+	// demanding a hypervisor it did not need.
+	//
+	// Like Virtualized it stays false unless the driver is certain, and for
+	// the same reason: RequireKernelIsolation is checked against it, so a
+	// false positive runs a workload on the host kernel it was told to stay
+	// off.
+	KernelIsolated bool `json:"kernel_isolated,omitempty"`
 	// SupportsStream reports whether Stream returns live output. Drivers
 	// that only persist output post-hoc set this false.
 	SupportsStream bool `json:"supports_stream"`
@@ -178,6 +194,27 @@ type Capabilities struct {
 	// mount namespace to bind into can honour the field, and a driver that
 	// ignored it would start a harness whose /repos is empty.
 	SupportsHostMounts bool `json:"supports_host_mounts"`
+	// SupportsDevices reports whether Spec.Devices is honoured — i.e.
+	// whether this driver can expose a host device node inside the sandbox.
+	//
+	// Distinct from SupportsHostMounts because a device is not a file the
+	// driver can bind and be done with. A container runtime needs a cgroup
+	// rule permitting the major:minor pair as well as the node itself, and
+	// the Kubernetes driver needs the node to advertise the device at all.
+	// A driver that quietly dropped the field would produce a sandbox whose
+	// /dev is missing exactly the hardware the task exists to talk to, so
+	// the honest outcome is a placement refusal naming the executor.
+	SupportsDevices bool `json:"supports_devices"`
+	// SupportsEgressScope reports whether Spec.EgressScope is honoured —
+	// whether this driver can confine one workload's IP-layer egress
+	// independently of the other workloads on the same executor.
+	//
+	// Its absence is the reason the field cannot simply be best-effort. An
+	// executor that ignored a project's request to be cut off from private
+	// address space would hand a harness the reach into the operator's
+	// internal network that the project had explicitly renounced, and would
+	// report success doing it.
+	SupportsEgressScope bool `json:"supports_egress_scope"`
 	// SupportsSecretFiles reports whether the credential *files* a secret
 	// lease produces actually reach the workload.
 	//
@@ -309,6 +346,20 @@ type Spec struct {
 	// writer is a secret lease (secretbroker.KindLocalRepo), where a human
 	// named the path and the broker recorded who. See HostMount.
 	HostMounts []HostMount `json:"host_mounts,omitempty"`
+	// Devices expose host device nodes inside the sandbox. Like HostMounts
+	// and for the same reason, nothing that parses a repo-committed file may
+	// set them: the only writer is a secret lease
+	// (secretbroker.KindHostDevice), where a human named the device and the
+	// broker recorded who. A sandbox spec may select among what the project
+	// was granted, never add to it. See HostDevice.
+	Devices []HostDevice `json:"devices,omitempty"`
+	// EgressScope confines this workload's IP-layer network reach
+	// independently of the other workloads on the same executor.
+	//
+	// One-directional like DisableNetwork: a scope can only take reach away.
+	// A project that needs to reach private address space says so with an
+	// egress grant, which an operator issues; see egressscope.go.
+	EgressScope EgressScope `json:"egress_scope,omitempty"`
 	// DisableNetwork forces this workload off the network regardless of how
 	// the executor is configured.
 	//
@@ -464,6 +515,17 @@ func (s Spec) Validate() error {
 	if err := ValidateHostMounts(s.HostMounts); err != nil {
 		return err
 	}
+	// Devices, for the same reason and with one more: a device grant is the
+	// widest thing in a Spec, so the check that a source is a /dev node and not
+	// /dev/mem has to hold on the re-hydrated spec a driver actually starts
+	// from, not only on the one the broker minted.
+	if err := ValidateDevices(s.Devices); err != nil {
+		return err
+	}
+	if !s.EgressScope.Valid() {
+		return fmt.Errorf("%w: egress_scope %q is not a known scope (want one of: %s)",
+			ErrInvalidSpec, s.EgressScope, joinEgressScopes())
+	}
 	// Checked here as well as by the driver that writes them, and for the same
 	// reason: a bare file name is what stops a crafted secret from becoming an
 	// arbitrary-file-write on whichever host ends up materialising it, and the
@@ -539,10 +601,18 @@ func (s Spec) Validate() error {
 // several call sites that place work.
 func (s Spec) SandboxRequirements() Requirements {
 	return Requirements{
-		RequireImageOverride:           strings.TrimSpace(s.Image) != "",
-		RequireSandboxBuild:            len(s.SetupCommands) > 0,
-		RequireSandboxMounts:           len(s.Mounts) > 0,
-		RequireHostMounts:              len(s.HostMounts) > 0,
+		RequireImageOverride: strings.TrimSpace(s.Image) != "",
+		RequireSandboxBuild:  len(s.SetupCommands) > 0,
+		RequireSandboxMounts: len(s.Mounts) > 0,
+		RequireHostMounts:    len(s.HostMounts) > 0,
+		RequireDevices:       len(s.Devices) > 0,
+		// Only a scope that needs a filter installed becomes a requirement.
+		// EgressScopeNone is honourable by every driver that can take the
+		// network away, which is every driver that has one, so requiring
+		// SupportsEgressScope for it would refuse executors that can in fact
+		// deliver exactly what was asked for.
+		RequireEgressScope:             s.EgressScope.NeedsFilter(),
+		RequireNetworkEgress:           s.EgressScope.NeedsFilter(),
 		RequireResourceLimits:          !s.ResourceLimits.IsZero(),
 		RequireWorkspaceProvisioning:   s.Workspace.NeedsProvisioning(),
 		RequireHostFilesystemWorkspace: s.Workspace.Kind == WorkspaceBind,
