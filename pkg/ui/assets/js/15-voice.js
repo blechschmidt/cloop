@@ -66,6 +66,161 @@ function stopVoiceRecording() {
   voiceRecording = false;
 }
 
+// ── Dictate a task (Task 20238) ───────────────────────────────────────────────
+//
+// Separate from the voice modal above, and deliberately much smaller. That one
+// records a *command* — it uploads to /api/voice, which shells out to `cloop
+// listen`, asks a model to classify the sentence into one of a dozen intents,
+// and executes the result. This one records a *task title*: it posts to
+// /api/transcribe, which transcribes and stops, and drops the words into the
+// field the user is already looking at.
+//
+// The transcript is not submitted automatically. Speech recognition is good,
+// not perfect, and the difference between a wrong word here and a wrong word
+// in a chat message is that this one becomes a row in someone's plan. The
+// field is inches away, so review costs a glance.
+
+let dictateRecorder = null;
+let dictateChunks = [];
+let dictateActive = false;
+let dictateStarting = false;
+
+const DICTATE_IDLE_ICON = '<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M5 3a3 3 0 0 1 6 0v5a3 3 0 0 1-6 0V3z"/><path d="M3.5 6.5A.5.5 0 0 1 4 7v1a4 4 0 0 0 8 0V7a.5.5 0 0 1 1 0v1a5 5 0 0 1-4.5 4.975V15h2a.5.5 0 0 1 0 1h-5a.5.5 0 0 1 0-1h2v-2.025A5 5 0 0 1 3 8V7a.5.5 0 0 1 .5-.5z"/></svg>';
+const DICTATE_STOP_ICON = '<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M5 5h6v6H5z"/></svg>';
+
+function dictateBtn()   { return document.getElementById('dictateTaskBtn'); }
+function dictateLabel() { return document.getElementById('dictateTaskLabel'); }
+
+// Paint the button. Kept in one place because three call sites (start, stop,
+// failure) all have to leave it in a consistent state, and a mic button stuck
+// on "Stop" with no recorder behind it is unrecoverable without a reload.
+function setDictateState(state, text) {
+  const btn = dictateBtn(), lab = dictateLabel();
+  if (!btn) return;
+  btn.classList.toggle('recording', state === 'recording');
+  btn.disabled = (state === 'busy');
+  btn.innerHTML = (state === 'recording' ? DICTATE_STOP_ICON : DICTATE_IDLE_ICON) +
+                  ' <span id="dictateTaskLabel"></span>';
+  const fresh = document.getElementById('dictateTaskLabel');
+  if (fresh) fresh.textContent = text || (lab ? lab.textContent : 'Dictate');
+}
+
+// Reveal the button only when the hub can actually transcribe. One call at
+// load; the answer depends on hub config, which does not change under the
+// user's feet often enough to be worth re-checking.
+window.initTaskDictation = function() {
+  const btn = dictateBtn();
+  if (!btn) return;
+  // api() with no second argument is a GET; passing null would make it a POST.
+  // Both halves have to hold: a hub with no speech backend, and a viewer who
+  // could not create the task anyway, each get no button rather than one that
+  // fails or sits permanently disabled.
+  api('/api/dictate').then(d => {
+    if (d && d.available && d.can_add_tasks) {
+      btn.style.display = '';
+      btn.title = 'Dictate the task title (' + (d.backend || 'speech') + ')';
+    }
+  }).catch(() => { /* leave it hidden — no backend, no button */ });
+};
+
+document.addEventListener('DOMContentLoaded', () => { window.initTaskDictation(); });
+
+window.toggleTaskDictation = async function() {
+  if (dictateActive) { stopTaskDictation(); return; }
+
+  // dictateActive is only set after getUserMedia resolves, so a double click
+  // would otherwise start two recorders and orphan the first one's microphone
+  // track — the browser's recording indicator then stays lit with nothing able
+  // to turn it off. Claim the slot synchronously.
+  if (dictateStarting) return;
+  dictateStarting = true;
+
+  // getUserMedia is absent on an insecure origin and on platforms that refuse
+  // it outright — the Meta Ray-Ban Display web runtime being the one this
+  // project cares about. Say which, because the two have different fixes.
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || typeof MediaRecorder === 'undefined') {
+    dictateStarting = false;
+    toast(window.isSecureContext === false
+      ? 'Dictation needs an https connection to reach the microphone'
+      : 'This browser cannot record audio', 'err');
+    return;
+  }
+
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+    });
+  } catch (err) {
+    dictateStarting = false;
+    setDictateState('idle', 'Dictate');
+    toast('Microphone unavailable: ' + (err && err.message ? err.message : err), 'err');
+    return;
+  }
+
+  const mime = MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus'
+             : MediaRecorder.isTypeSupported('audio/ogg;codecs=opus')  ? 'audio/ogg;codecs=opus'
+             : (MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : '');
+
+  dictateChunks = [];
+  dictateRecorder = new MediaRecorder(stream, mime ? { mimeType: mime } : {});
+  dictateRecorder.ondataavailable = e => { if (e.data && e.data.size > 0) dictateChunks.push(e.data); };
+  dictateRecorder.onstop = () => {
+    // Release the mic before the upload, not after: the browser's recording
+    // indicator stays lit for as long as a track is live, and leaving it on
+    // through a network round trip reads as "this page is still listening".
+    stream.getTracks().forEach(t => t.stop());
+    dictateActive = false;
+    sendTaskDictation(new Blob(dictateChunks, { type: dictateRecorder.mimeType || 'audio/webm' }));
+  };
+
+  dictateRecorder.start();
+  dictateActive = true;
+  dictateStarting = false;
+  setDictateState('recording', 'Stop');
+};
+
+function stopTaskDictation() {
+  if (dictateRecorder && dictateRecorder.state !== 'inactive') dictateRecorder.stop();
+  dictateActive = false;
+  setDictateState('busy', 'Transcribing…');
+}
+
+async function sendTaskDictation(blob) {
+  if (!blob || !blob.size) { setDictateState('idle', 'Dictate'); toast('Nothing was recorded', 'info'); return; }
+  setDictateState('busy', 'Transcribing…');
+
+  const ext = (blob.type || '').indexOf('ogg') >= 0 ? 'ogg' : 'webm';
+  const form = new FormData();
+  form.append('audio', blob, 'dictation.' + ext);
+
+  try {
+    const headers = authHeaders();
+    delete headers['Content-Type']; // FormData sets its own boundary
+    const resp = await fetch('/api/transcribe', { method: 'POST', headers, body: form });
+    const data = await resp.json().catch(() => ({}));
+
+    if (!resp.ok || !data.text) {
+      toast((data && (data.message || data.error)) || 'Transcription failed', 'err');
+      setDictateState('idle', 'Dictate');
+      return;
+    }
+
+    const title = document.getElementById('newTaskTitle');
+    if (title) {
+      // Append rather than replace when the field already has words in it, so
+      // a second press extends a sentence instead of discarding the first.
+      title.value = title.value.trim() ? (title.value.trim() + ' ' + data.text) : data.text;
+      title.focus();
+      title.setSelectionRange(title.value.length, title.value.length);
+    }
+    toast('Heard: ' + data.text, 'ok');
+  } catch (err) {
+    toast('Transcription request failed', 'err');
+  }
+  setDictateState('idle', 'Dictate');
+}
+
 window.sendVoiceAudio = async function() {
   if (!voiceBlob) { toast('No recording yet', 'info'); return; }
 

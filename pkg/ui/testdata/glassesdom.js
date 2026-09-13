@@ -189,15 +189,19 @@ function makeDOM(opts) {
   const reload = node('button', 'reload', header);
   node('div', 'sub', app);
   node('div', 'filters', app);
+  const dictate = node('button', 'dictate', app);
+  node('div', 'micnote', app);
   node('div', 'msg', app);
   node('div', 'list', app);
   const more = node('button', 'more', app);
 
-  // The two controls the stylesheet starts hidden.
+  // The three controls the stylesheet starts hidden.
   back.hidden = true;
   back.className = 'focusable';
   more.hidden = true;
   more.className = 'focusable';
+  dictate.hidden = true;
+  dictate.className = 'focusable';
   reload.className = 'focusable';
   doc.activeElement = doc.body;
 
@@ -218,9 +222,14 @@ function makeDOM(opts) {
     return typeof hit === 'function' ? hit(url) : { status: 200, body: hit };
   }
 
+  // Request bodies, so a scenario can assert what the page actually sent —
+  // the dictation flow's whole point is that a POST carries the transcript.
+  const sent = [];
+
   const win = {
-    fetch: url => {
+    fetch: (url, init) => {
       calls.push(url);
+      sent.push({ url: url, method: (init && init.method) || 'GET', body: init && init.body });
       const r = route(url);
       return Promise.resolve({
         ok: r.status >= 200 && r.status < 300,
@@ -231,9 +240,59 @@ function makeDOM(opts) {
     timers: [],
   };
 
+  // node defines globalThis.navigator as an accessor with no setter, so a
+  // plain assignment throws. defineProperty replaces the whole descriptor.
+  function setNavigator(value) {
+    Object.defineProperty(globalThis, 'navigator', {
+      value: value, writable: true, configurable: true, enumerable: true,
+    });
+  }
+
+  // A fake microphone, installed only when a scenario asks for one.
+  //
+  // Absent by default, which is the Meta Ray-Ban Display case and therefore
+  // the default worth testing: that runtime does not expose getUserMedia at
+  // all, so the page has to notice and explain rather than offer a control
+  // that cannot work.
+  function installMic() {
+    let live = null;
+    class FakeRecorder {
+      constructor() { this.state = 'inactive'; this.mimeType = 'audio/webm;codecs=opus'; live = this; }
+      static isTypeSupported() { return true; }
+      start() { this.state = 'recording'; }
+      stop() {
+        this.state = 'inactive';
+        if (this.ondataavailable) { this.ondataavailable({ data: { size: 1024 } }); }
+        if (this.onstop) { this.onstop(); }
+      }
+    }
+    globalThis.MediaRecorder = FakeRecorder;
+    setNavigator({
+      mediaDevices: {
+        getUserMedia: () => {
+          mic.starts++;
+          return Promise.resolve({ getTracks: () => [{ stop() { mic.stopped++; } }] });
+        },
+      },
+    });
+    globalThis.Blob = function (parts, o) { this.size = 1024; this.type = (o && o.type) || ''; };
+    globalThis.FormData = function () {
+      this.parts = [];
+      this.append = (k, v, n) => { this.parts.push({ k, n }); };
+    };
+    return { recorder: () => live };
+  }
+  const mic = { stopped: 0, starts: 0 };
+
+  let micCtl = null;
+
   return {
     doc,
     calls,
+    sent,
+    mic,
+    recorder: () => (micCtl ? micCtl.recorder() : null),
+    micStarts: () => mic.starts,
     setRoutes: r => { routes = r; },
     install() {
       globalThis.window = globalThis;
@@ -242,6 +301,13 @@ function makeDOM(opts) {
       globalThis.fetch = win.fetch;
       globalThis.setInterval = (fn, ms) => { win.timers.push({ fn, ms }); return win.timers.length; };
       globalThis.clearInterval = id => { if (win.timers[id - 1]) { win.timers[id - 1].cleared = true; } };
+      globalThis.isSecureContext = opts.insecure ? false : true;
+      // Clear any microphone a previous scenario installed: these run in one
+      // node process, and a leaked getUserMedia would make the no-microphone
+      // case — the glasses themselves — silently untested.
+      delete globalThis.MediaRecorder;
+      setNavigator({ mediaDevices: undefined });
+      micCtl = opts.mic ? installMic() : null;
     },
 
     // ── driving ─────────────────────────────────────────────────────────────

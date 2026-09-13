@@ -746,7 +746,11 @@ function _tokRender() {
         (t.created_by ? '<br><span class="sec-count">by ' + esc(t.created_by) + '</span>' : '') + '</td>' +
       '<td class="sec-fp sec-hide-sm" title="The public half of the token. The secret is not stored and cannot be shown again.">' +
         esc(t.prefix || '—') + '</td>' +
-      '<td>' + (t.roles || []).map(r => '<span class="sec-chip kind">' + esc(r) + '</span>').join(' ') + '</td>' +
+      // A confined token's roles overstate it: a glasses link lists `operator`
+      // but is pinned by path to the glasses views. Say so on the row, or the
+      // honest reading is "a URL in someone's phone can start runs".
+      '<td>' + (t.roles || []).map(r => '<span class="sec-chip kind">' + esc(r) + '</span>').join(' ') +
+        (t.confinement ? ' <span class="sec-count" title="' + esc(t.confinement) + '">confined</span>' : '') + '</td>' +
       '<td>' + _tokScopeCell(t.project_scope) + '</td>' +
       '<td>' + _tokStatusCell(t.status) + '</td>' +
       '<td class="audit-time">' + esc(t.expires_at ? _secFmtTime(t.expires_at) : 'never') + '</td>' +

@@ -1039,3 +1039,101 @@ func TestGlassesLinkWarnsOnPlaintextTransport(t *testing.T) {
 		t.Errorf("https link was warned about anyway:\n%s", resp.Warning)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// dictation (Task 20238)
+// ---------------------------------------------------------------------------
+
+// mintLinkOpts mints a link with an explicit body, for the read_only choice.
+func mintLinkOpts(t *testing.T, f *tokenFixture, body string) string {
+	t.Helper()
+	code, resp := f.do(t, "", http.MethodPost, "/api/glasses/link", body)
+	if code != http.StatusOK {
+		t.Fatalf("POST /api/glasses/link = %d, want 200\nbody: %s", code, resp)
+	}
+	var out struct {
+		URL  string `json:"url"`
+		Link struct {
+			CanAddTasks bool `json:"can_add_tasks"`
+		} `json:"link"`
+	}
+	if err := json.Unmarshal([]byte(resp), &out); err != nil {
+		t.Fatalf("decode mint response: %v\nbody: %s", err, resp)
+	}
+	return out.URL
+}
+
+// TestGlassesLinkCanDictateATask is the feature's reason to exist: the default
+// link may add a task through the wearable's own surface — and only through
+// that surface, which TestGlassesLinkIsReadOnly proves from the other side.
+func TestGlassesLinkCanDictateATask(t *testing.T) {
+	f := newTokenFixture(t)
+	tok := tokenInURL(t, mintLinkVia(t, f))
+	idx := f.idxOf(t, f.dirA)
+
+	code, body := f.do(t, tok, http.MethodPost,
+		"/api/glasses/tasks?project_idx="+itoaArch(idx), `{"title":"buy more waveguides"}`)
+	if code != http.StatusOK {
+		t.Fatalf("POST /api/glasses/tasks with a default link = %d, want 200\nbody: %s", code, body)
+	}
+	if !strings.Contains(body, "buy more waveguides") {
+		t.Errorf("created task not echoed back: %s", body)
+	}
+
+	// And it is really in the plan, not just acknowledged.
+	code, body = f.do(t, tok, http.MethodGet, "/api/glasses/tasks?project_idx="+itoaArch(idx), "")
+	if code != http.StatusOK || !strings.Contains(body, "buy more waveguides") {
+		t.Errorf("dictated task missing from the list (%d): %s", code, body)
+	}
+}
+
+// TestGlassesReadOnlyLinkCannotDictate is the opt-down half. A wearer who asks
+// for a read-only link must get the pre-Task-20238 credential exactly.
+func TestGlassesReadOnlyLinkCannotDictate(t *testing.T) {
+	f := newTokenFixture(t)
+	tok := tokenInURL(t, mintLinkOpts(t, f, `{"read_only":true}`))
+	idx := f.idxOf(t, f.dirA)
+
+	code, body := f.do(t, tok, http.MethodPost,
+		"/api/glasses/tasks?project_idx="+itoaArch(idx), `{"title":"should not land"}`)
+	if code == http.StatusOK {
+		t.Fatalf("a read-only link added a task — the opt-down is not wired\nbody: %s", body)
+	}
+
+	// Reading still works: read-only means read-only, not useless.
+	if code, _ := f.do(t, tok, http.MethodGet, "/api/glasses/projects", ""); code != http.StatusOK {
+		t.Errorf("read-only link lost its read access: GET /api/glasses/projects = %d", code)
+	}
+}
+
+// TestGlassesDictationStatusTracksTheLink stops the wearable drawing a control
+// its credential cannot use: the capability it reads has to match the gate.
+func TestGlassesDictationStatusTracksTheLink(t *testing.T) {
+	f := newTokenFixture(t)
+	for _, tc := range []struct {
+		name string
+		body string
+		want bool
+	}{
+		{"default link", "{}", true},
+		{"read-only link", `{"read_only":true}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tok := tokenInURL(t, mintLinkOpts(t, f, tc.body))
+			code, body := f.do(t, tok, http.MethodGet, "/api/glasses/dictate", "")
+			if code != http.StatusOK {
+				t.Fatalf("GET /api/glasses/dictate = %d\nbody: %s", code, body)
+			}
+			var st struct {
+				CanAddTasks bool `json:"can_add_tasks"`
+			}
+			if err := json.Unmarshal([]byte(body), &st); err != nil {
+				t.Fatalf("decode: %v\nbody: %s", err, body)
+			}
+			if st.CanAddTasks != tc.want {
+				t.Errorf("can_add_tasks = %v, want %v — the page would draw the wrong affordance",
+					st.CanAddTasks, tc.want)
+			}
+		})
+	}
+}

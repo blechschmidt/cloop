@@ -59,10 +59,10 @@ func grantedInventory(t *testing.T, inventory string, allow []string, writable b
 		t.Fatalf("Mint: %v", err)
 	}
 	if _, err := b.Grant(ctx, secretbroker.GrantRequest{
-		SecretRef: sec.ID,
-		Subject:   secretbroker.Subject{Type: secretbroker.SubjectProject, Value: secretbroker.NormalizeProjectID("/srv/p")},
-		TTL:       time.Hour,
-		Actor:     "test",
+		SecretRef:   sec.ID,
+		Subject:     secretbroker.Subject{Type: secretbroker.SubjectProject, Value: secretbroker.NormalizeProjectID("/srv/p")},
+		TTL:         time.Hour,
+		Actor:       "test",
 		Constraints: secretbroker.Constraints{Devices: allow, Writable: writable},
 	}); err != nil {
 		t.Fatalf("Grant: %v", err)

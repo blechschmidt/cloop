@@ -157,6 +157,7 @@ func collectConfigSecrets(cfg *config.Config) []string {
 	add(cfg.OpenAI.APIKey)
 	add(cfg.GitHub.Token)
 	add(cfg.Webhook.Secret)
+	add(cfg.STT.GroqAPIKey)
 	return secrets
 }
 

@@ -209,17 +209,19 @@ existing value), and a *no key* badge marks a backend that has none. What each
 of those keys means is in
 [Choosing and configuring a provider](providers.md).
 
-Below it: **Display glasses**, a personal read-only link for Meta Ray-Ban
-Display glasses that expires after 30 days and can be revoked; **Hidden
-Projects**, with an Unhide button per entry; and a **Danger Zone** whose
-*Reset Project State* clears step history and resets status while preserving
-the goal and configuration.
+Below it: **Display glasses**, a personal link for Meta Ray-Ban Display glasses
+that expires after 30 days and can be revoked; **Hidden Projects**, with an
+Unhide button per entry; and a **Danger Zone** whose *Reset Project State*
+clears step history and resets status while preserving the goal and
+configuration.
 
 ### On the glasses
 
 The link opens a separate, much smaller page — `/glasses` — that lists your
-projects, drills into one project's tasks and shows a single task. It is
-read-only: nothing on it can start a run or change a task.
+projects, drills into one project's tasks and shows a single task. Beyond
+reading, the only thing it can do is add a task by dictation; it cannot start a
+run, change an existing task, or reach anything outside the glasses views.
+Generate the link with **Read-only** ticked to remove even that.
 
 The glasses have no pointer and no keyboard. Every band or temple gesture
 arrives at the page as an arrow key or Enter, so the page provides the cursor
@@ -235,6 +237,57 @@ The selected control carries a blue ring — that ring is the only cursor there
 is. The page re-reads the hub about once a minute and patches what changed in
 place, so a refresh does not move your selection or lose your place in a long
 task result.
+
+---
+
+## Dictating a task
+
+A **Dictate** button sits beside *Add Task* on the Tasks tab. Press it, say the
+task, press it again: the recording goes to the hub, comes back as text, and
+lands in the title field. It is not submitted for you — speech recognition is
+good, not perfect, and the field is right there to correct before you press
+*Add Task*.
+
+The button only appears when the hub has a speech backend configured, and the
+browser needs an `https` origin (or `localhost`) to reach a microphone at all.
+
+Inside a project, the glasses page offers the same thing as **🎤 Speak a new
+task**, with a confirmation screen — the transcript, then *Add task* or
+*Discard* — because a wearer has no keyboard to correct a wrong word with.
+
+**The glasses cannot record.** Meta's developer guide lists camera, microphone
+and `getUserMedia` as unsupported for Ray-Ban Display web apps, so no web app
+on that device can hear anything. Dictation therefore runs on the phone the
+glasses tether through: open the same saved link there and the control is live.
+On the glasses the page says so in one line rather than offering a button that
+cannot work.
+
+### Configuring speech-to-text
+
+The hub transcribes with hosted Whisper on Groq, and only that. `cloop listen`
+on your own machine also falls back to a local `openai-whisper` CLI, but the
+hub never does: that fallback starts a Python process per request, fed
+caller-supplied audio, beside the control plane — which is precisely what
+[no host execution](../security/model.md) forbids. So the hub needs a key:
+
+```bash
+cloop config set stt.groq_api_key gsk_...     # or export GROQ_API_KEY
+cloop config set stt.language en              # optional; empty auto-detects
+```
+
+| Key | Default | What it does |
+| --- | --- | --- |
+| `stt.groq_api_key` | `$GROQ_API_KEY` | Credential for hosted Whisper. Required for dictation in the web UI. |
+| `stt.model` | `whisper-large-v3-turbo` | Hosted model. |
+| `stt.endpoint` | Groq's URL | Point at any OpenAI-compatible transcription server. |
+| `stt.language` | auto-detect | ISO-639-1 hint, e.g. `en`, `de`. |
+| `stt.provider` | auto | `groq` or `whisper`. Only `cloop listen` honours `whisper`; the hub is hosted-only. |
+| `stt.whisper_model` | `base` | Local CLI model, for `cloop listen`. |
+
+A project's own `.cloop/config.yaml` overrides the hub's field by field, so one
+key at the hub serves every project while a project that needs a different
+language can say so locally. Without a key the button stays hidden and
+`GET /api/dictate` explains what is missing.
 
 ---
 

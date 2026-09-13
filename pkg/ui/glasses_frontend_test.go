@@ -527,3 +527,240 @@ func hasStop(list []string, want string) bool {
 	}
 	return false
 }
+
+// ── dictation (Task 20238) ──────────────────────────────────────────────────
+
+// TestGlassesDictationOfferedOnlyWhenUsable covers the three ways the control
+// must not appear, and the one way it must. The middle case is the device this
+// page exists for: Meta's build guide lists camera, microphone and
+// getUserMedia as unsupported for Ray-Ban Display web apps, so on the glasses
+// themselves the page can never record and has to say so rather than put a
+// dead stop in the focus ring.
+func TestGlassesDictationOfferedOnlyWhenUsable(t *testing.T) {
+	t.Parallel()
+	results := glassesScenarios(t)
+
+	type view struct {
+		Ring  []string `json:"ring"`
+		Note  string   `json:"note"`
+		Label string   `json:"label"`
+	}
+
+	var withMic view
+	glassesScenario(t, results, "dictate_offered_when_a_microphone_exists", &withMic)
+	if !hasString(withMic.Ring, "#dictate") {
+		t.Errorf("with a microphone the dictate control must be reachable by swiping; ring = %v", withMic.Ring)
+	}
+	if withMic.Note != "" {
+		t.Errorf("a working microphone should need no explanation, got %q", withMic.Note)
+	}
+
+	var noMic view
+	glassesScenario(t, results, "dictate_explains_when_no_microphone", &noMic)
+	if hasString(noMic.Ring, "#dictate") {
+		t.Errorf("the glasses cannot record, so the control must not be a stop in the ring; ring = %v", noMic.Ring)
+	}
+	if !strings.Contains(strings.ToLower(noMic.Note), "phone") {
+		t.Errorf("without a microphone the page must name the one thing that works — opening the\n"+
+			"same link on the paired phone. Got: %q", noMic.Note)
+	}
+
+	// A control the credential cannot use, and a control the hub cannot serve,
+	// are both worse than nothing on a 600x600 display.
+	for _, name := range []string{
+		"dictate_absent_for_a_read_only_link",
+		"dictate_absent_when_hub_has_no_backend",
+	} {
+		var v view
+		glassesScenario(t, results, name, &v)
+		if hasString(v.Ring, "#dictate") {
+			t.Errorf("%s: dictate control offered anyway; ring = %v", name, v.Ring)
+		}
+		if v.Note != "" {
+			t.Errorf("%s: no explanation is warranted here, got %q", name, v.Note)
+		}
+	}
+}
+
+// TestGlassesDictationRoundTrip drives the whole circuit against the real page
+// script: record, stop, confirm, create.
+func TestGlassesDictationRoundTrip(t *testing.T) {
+	t.Parallel()
+	results := glassesScenarios(t)
+
+	var r struct {
+		Before         string   `json:"before"`
+		Recording      string   `json:"recording"`
+		ConfirmRows    []string `json:"confirmRows"`
+		Heard          string   `json:"heard"`
+		FocusOnConfirm string   `json:"focusOnConfirm"`
+		MicReleased    int      `json:"micReleased"`
+		Posted         []struct {
+			URL  string `json:"url"`
+			Body string `json:"body"`
+		} `json:"posted"`
+	}
+	glassesScenario(t, results, "dictate_round_trip_creates_a_task", &r)
+
+	if r.Before == r.Recording {
+		t.Errorf("the control must change once recording starts — on a display with no other\n"+
+			"feedback it is the only sign the pinch registered. Both read %q", r.Before)
+	}
+	if !strings.Contains(r.Heard, "add a retention policy") {
+		t.Errorf("the transcript must be shown before it becomes a task; screen read %q", r.Heard)
+	}
+	if !hasString(r.ConfirmRows, "act:add") || !hasString(r.ConfirmRows, "act:discard") {
+		t.Errorf("confirmation needs both an Add and a Discard row, got %v", r.ConfirmRows)
+	}
+	if r.FocusOnConfirm != "act:add" {
+		t.Errorf("focus should land on Add — it is why the wearer spoke, and the transcript\n"+
+			"above it is not focusable. Got %q", r.FocusOnConfirm)
+	}
+	if r.MicReleased == 0 {
+		t.Error("the microphone track was never stopped: the recording indicator would stay lit " +
+			"through the upload, which reads as 'this page is still listening'")
+	}
+
+	var transcribed, created string
+	for _, p := range r.Posted {
+		switch {
+		case strings.HasSuffix(p.URL, "/transcribe"):
+			transcribed = p.Body
+		case strings.HasSuffix(p.URL, "/tasks"):
+			created = p.Body
+		}
+	}
+	if transcribed != "form" {
+		t.Errorf("audio must be posted as multipart form data, got %q", transcribed)
+	}
+	if !strings.Contains(created, "add a retention policy") {
+		t.Errorf("the confirmed transcript must reach POST /api/glasses/tasks, got %q", created)
+	}
+}
+
+// TestGlassesDictationDiscardCreatesNothing is the other half of confirming:
+// a rejected transcript must leave no trace.
+func TestGlassesDictationDiscardCreatesNothing(t *testing.T) {
+	t.Parallel()
+	results := glassesScenarios(t)
+
+	var r struct {
+		Rows      []string `json:"rows"`
+		TaskPosts int      `json:"taskPosts"`
+		Ring      []string `json:"ring"`
+	}
+	glassesScenario(t, results, "dictate_discard_returns_to_tasks", &r)
+
+	if r.TaskPosts != 0 {
+		t.Errorf("discard created %d task(s) — it must create none", r.TaskPosts)
+	}
+	for _, row := range r.Rows {
+		if strings.HasPrefix(row, "act:") {
+			t.Errorf("still on the confirmation screen after discarding: rows = %v", r.Rows)
+			break
+		}
+	}
+	if !hasString(r.Ring, "#dictate") {
+		t.Errorf("after discarding, the wearer should be able to try again; ring = %v", r.Ring)
+	}
+}
+
+// hasString is a local helper: the package already has a contains() over
+// authz.Permission, and these assertions are over ring/row labels.
+func hasString(haystack []string, want string) bool {
+	for _, s := range haystack {
+		if s == want {
+			return true
+		}
+	}
+	return false
+}
+
+// TestGlassesDictationReleasesTheMicrophone covers the lifecycle bugs that are
+// invisible to a grep and expensive in practice: a wearable whose microphone
+// stays live after the wearer has moved on, and a recorder left behind a
+// button that says it is idle.
+func TestGlassesDictationReleasesTheMicrophone(t *testing.T) {
+	t.Parallel()
+	results := glassesScenarios(t)
+
+	var away struct {
+		MicReleased   int    `json:"micReleased"`
+		RecorderState string `json:"recorderState"`
+		Label         string `json:"label"`
+		Uploads       int    `json:"uploads"`
+	}
+	glassesScenario(t, results, "dictate_navigating_away_releases_the_mic", &away)
+
+	if away.MicReleased == 0 {
+		t.Error("leaving the tasks screen while recording left the microphone track live — the " +
+			"phone's recording indicator stays lit for the rest of the session")
+	}
+	if away.RecorderState == "recording" {
+		t.Error("the MediaRecorder is still running after navigating away")
+	}
+	if away.Uploads != 0 {
+		t.Errorf("navigating away uploaded %d recording(s); abandoning must not transcribe", away.Uploads)
+	}
+
+	var dbl struct {
+		Starts int    `json:"starts"`
+		Label  string `json:"label"`
+	}
+	glassesScenario(t, results, "dictate_double_press_starts_one_recorder", &dbl)
+	if dbl.Starts > 1 {
+		t.Errorf("a double pinch called getUserMedia %d times: the first recorder is orphaned "+
+			"with its microphone track unreachable", dbl.Starts)
+	}
+}
+
+// TestGlassesDictationDropsAStaleTranscript is the bug class this dashboard has
+// fixed eight times over, arriving in a new place: a response for a screen the
+// wearer has already left must not repaint the one they are on.
+func TestGlassesDictationDropsAStaleTranscript(t *testing.T) {
+	t.Parallel()
+	results := glassesScenarios(t)
+
+	var r struct {
+		View string   `json:"view"`
+		Rows []string `json:"rows"`
+	}
+	glassesScenario(t, results, "dictate_stale_transcript_is_dropped", &r)
+
+	if r.View == "Add this task?" {
+		t.Error("a transcript that resolved after the wearer navigated back seized the screen")
+	}
+	for _, row := range r.Rows {
+		if strings.HasPrefix(row, "act:") {
+			t.Errorf("confirmation rows rendered onto a screen the wearer had left: %v", r.Rows)
+			break
+		}
+	}
+}
+
+// TestGlassesDictationSurvivesThePoll: the page refreshes itself once a
+// minute, and that refresh must not repaint a control the wearer is currently
+// speaking into — losing the red Stop styling mid-sentence leaves no
+// indication that the microphone is still open.
+func TestGlassesDictationSurvivesThePoll(t *testing.T) {
+	t.Parallel()
+	results := glassesScenarios(t)
+
+	var r struct {
+		LabelBefore string `json:"labelBefore"`
+		LabelAfter  string `json:"labelAfter"`
+		RecBefore   bool   `json:"recBefore"`
+		RecAfter    bool   `json:"recAfter"`
+	}
+	glassesScenario(t, results, "dictate_poll_does_not_disturb_recording", &r)
+
+	if !r.RecBefore {
+		t.Fatal("the control never entered the recording state — the scenario proves nothing")
+	}
+	if !r.RecAfter {
+		t.Error("the minute poll cleared the recording styling while a recording was live")
+	}
+	if r.LabelBefore != r.LabelAfter {
+		t.Errorf("the poll relabelled a live control: %q -> %q", r.LabelBefore, r.LabelAfter)
+	}
+}

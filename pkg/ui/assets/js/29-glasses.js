@@ -40,17 +40,20 @@ function _glassesRender(link) {
   if (copy) copy.style.display = _glassesURL ? '' : 'none';
 
   if (!link.exists) {
-    status.innerHTML = 'No link yet. Generating one issues a read-only credential that expires in 30 days.' +
+    status.innerHTML = 'No link yet. Generating one issues a credential that expires in 30 days.' +
       (link.per_user ? '' : ' <em>This hub has no sign-on configured, so the link belongs to the deployment rather than to an individual user.</em>');
     if (gen) gen.textContent = 'Generate link';
     if (revoke) revoke.style.display = 'none';
     return;
   }
 
+  // Say which kind of link this is. can_add_tasks is read off the stored token,
+  // so a link minted before dictation existed still reads as read-only.
+  const kind = link.can_add_tasks ? 'can add tasks by voice' : 'read-only';
   const expires = link.expires_at ? new Date(link.expires_at) : null;
   const used    = link.last_used_at ? new Date(link.last_used_at) : null;
-  let html = 'Active link <code>' + esc(link.prefix || '') + '</code>';
-  if (link.owner) html += ' for ' + esc(link.owner);
+  let html = 'Active link <code>' + esc(link.prefix || '') + '</code> · ' + kind;
+  if (link.owner) html += ' · for ' + esc(link.owner);
   if (expires)    html += ' · expires ' + expires.toLocaleDateString();
   html += used ? ' · last used ' + relTime(used) : ' · never used';
   html += '<br><span style="color:var(--muted)">The URL itself cannot be shown again — cloop stores only a hash. ' +
@@ -72,7 +75,8 @@ window.generateGlassesLink = function() {
   const btn = document.getElementById('glassesGenBtn');
   if (btn) { btn.disabled = true; btn.textContent = 'Generating…'; }
 
-  apiMethod('POST', '/api/glasses/link', {}).then(d => {
+  const ro = document.getElementById('glassesReadOnly');
+  apiMethod('POST', '/api/glasses/link', { read_only: !!(ro && ro.checked) }).then(d => {
     _glassesURL = (d && d.url) || '';
     const box = document.getElementById('glassesUrlBox');
     const url = document.getElementById('glassesUrl');

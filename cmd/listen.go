@@ -100,15 +100,35 @@ func runListen(cmd *cobra.Command, args []string) error {
 	dimColor.Printf("  Audio : %s\n", audioPath)
 
 	// ── 2. Transcribe ────────────────────────────────────────────────────────
+	// Flags win, then .cloop/config.yaml's stt section, then the environment —
+	// the same precedence every other backend setting follows, so `cloop config
+	// set stt.language de` means the same thing here as it does in the web UI.
 	sttCfg := stt.Config{
 		Provider:     stt.Provider(listenSTTProvider),
 		WhisperModel: listenWhisperModel,
 		GroqAPIKey:   listenGroqAPIKey,
 	}
+	sttDir, _ := os.Getwd()
+	if cfg, err := config.Load(sttDir); err == nil && cfg != nil {
+		if sttCfg.Provider == "" {
+			sttCfg.Provider = stt.Provider(cfg.STT.Provider)
+		}
+		if sttCfg.WhisperModel == "" {
+			sttCfg.WhisperModel = cfg.STT.WhisperModel
+		}
+		if sttCfg.GroqAPIKey == "" {
+			sttCfg.GroqAPIKey = cfg.STT.GroqAPIKey
+		}
+		sttCfg.Model = cfg.STT.Model
+		sttCfg.Endpoint = cfg.STT.Endpoint
+		sttCfg.Language = cfg.STT.Language
+	}
 	if sttCfg.GroqAPIKey == "" {
 		sttCfg.GroqAPIKey = os.Getenv("GROQ_API_KEY")
 	}
 
+	// Report the backend that will actually answer, not the unresolved field:
+	// the difference between the two is whether the audio leaves this machine.
 	dimColor.Printf("  STT   : %s (model: %s)\n\n", sttOrDefault(sttCfg.Provider), whisperModelOrDefault(sttCfg.WhisperModel))
 	dimColor.Printf("Transcribing...\n")
 

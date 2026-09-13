@@ -59,6 +59,9 @@ var configShowCmd = &cobra.Command{
 		if displayCfg.UI.OIDC.ClientSecret != "" {
 			displayCfg.UI.OIDC.ClientSecret = maskSecret(displayCfg.UI.OIDC.ClientSecret)
 		}
+		if displayCfg.STT.GroqAPIKey != "" {
+			displayCfg.STT.GroqAPIKey = maskSecret(displayCfg.STT.GroqAPIKey)
+		}
 
 		data, err := yaml.Marshal(&displayCfg)
 		if err != nil {
@@ -143,6 +146,23 @@ func applyConfigKey(cfg *config.Config, key, value string) error {
 			return fmt.Errorf("invalid effort %q — valid: %s (or empty to clear)", value, strings.Join(provider.EffortLevels, ", "))
 		}
 		cfg.ClaudeCode.Effort = value
+
+	// Speech-to-text for dictated tasks (Task 20238).
+	case "stt.provider":
+		if value != "" && value != "groq" && value != "whisper" {
+			return fmt.Errorf("invalid stt provider %q — valid: groq, whisper (or empty to auto-select)", value)
+		}
+		cfg.STT.Provider = value
+	case "stt.groq_api_key":
+		cfg.STT.GroqAPIKey = value
+	case "stt.model":
+		cfg.STT.Model = value
+	case "stt.endpoint":
+		cfg.STT.Endpoint = value
+	case "stt.language":
+		cfg.STT.Language = value
+	case "stt.whisper_model":
+		cfg.STT.WhisperModel = value
 
 	case "executors.allow_host_process":
 		// Strict no-host-execution mode (Task 20160). Parsed strictly rather

@@ -356,6 +356,16 @@ type tokenView struct {
 	// revoked. Derived server-side so the UI cannot disagree with the
 	// verification path about whether a credential still works.
 	Status string `json:"status"`
+
+	// Confinement names the extra limit a token's kind imposes beyond its
+	// roles, or is empty when the roles are the whole story (Task 20238).
+	//
+	// It exists because a display-glasses link lists `operator`, and read
+	// literally that says a credential living in a URL may start runs. It may
+	// not: tokenKindAdmitted pins it to the glasses views, where the only
+	// mutating routes are dictation. Without this the honest reaction to the
+	// panel is to revoke a working link.
+	Confinement string `json:"confinement,omitempty"`
 }
 
 type tokensListResponse struct {
@@ -632,6 +642,15 @@ func tokenExpiry(days int, now time.Time) (time.Time, error) {
 	return exp, nil
 }
 
+// tokenConfinement describes a kind-imposed restriction for the panel.
+func tokenConfinement(t *apitoken.Token) string {
+	if t != nil && t.Kind == apitoken.KindGlasses {
+		return "display-glasses link — confined to /glasses and /api/glasses/, " +
+			"where the only mutating routes are dictating a task"
+	}
+	return ""
+}
+
 func toTokenView(t *apitoken.Token, now time.Time) tokenView {
 	return tokenView{
 		ID:           t.ID,
@@ -640,6 +659,7 @@ func toTokenView(t *apitoken.Token, now time.Time) tokenView {
 		Roles:        t.Roles,
 		ProjectScope: t.ProjectScope,
 		CreatedBy:    t.CreatedBy,
+		Confinement:  tokenConfinement(t),
 		CreatedAt:    formatTokenTime(t.CreatedAt),
 		ExpiresAt:    formatTokenTime(t.ExpiresAt),
 		LastUsedAt:   formatTokenTime(t.LastUsedAt),

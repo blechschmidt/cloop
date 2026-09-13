@@ -393,6 +393,25 @@ func (s *Server) routeTable() []routeSpec {
 		{Pattern: "POST /api/chat/plan", Handler: s.handlePlanChat, Perm: task, Scope: scopeProject},
 		{Pattern: "/api/voice", Handler: s.handleVoice, Perm: task, Scope: scopeProject},
 
+		// Dictated tasks (Task 20238). Transcription only — no intent
+		// classification, no subprocess — so the microphone beside the
+		// task field puts the spoken words in it and nothing else. It
+		// spends a provider's quota and is the first half of creating a
+		// task, so it is gated with the second half rather than with
+		// reading. The status row is a read: it reports only whether a
+		// backend is configured, which is what lets the button stay
+		// hidden instead of failing after someone has spoken into it.
+		//
+		// scopeProject, not scopeGlobal, and that has to match the task
+		// creation this feeds. A project-scoped operator binding does not
+		// apply to a global-scope request (see Binding.appliesTo), so a
+		// global gate here would advertise the microphone via
+		// can_add_tasks — resolved per project — and then refuse the
+		// upload, which is the exact "find out by trying" failure that
+		// field exists to prevent.
+		{Pattern: "GET /api/dictate", Handler: s.handleDictateStatus, Perm: read, Scope: scopeProject},
+		{Pattern: "POST /api/transcribe", Handler: s.handleTranscribe, Perm: task, Scope: scopeProject},
+
 		// ── Knowledge base ───────────────────────────────────────────
 		{Pattern: "GET /api/kb", Handler: s.handleKBList, Perm: read, Scope: scopeProject},
 		{Pattern: "GET /api/kb/search", Handler: s.handleKBSearch, Perm: read, Scope: scopeProject},
@@ -541,14 +560,34 @@ func (s *Server) routeTable() []routeSpec {
 		{Pattern: "DELETE /api/sessions/{id}", Handler: s.handleSessionRevoke, Perm: sessAdmin, Scope: scopeGlobal},
 
 		// ── Display glasses (Task 20194) ─────────────────────────────
-		// The wearable's own read surface. Ordinary project reads: the
-		// link authenticates as a viewer-ceilinged token bound to the
-		// user who generated it, so these rows say nothing special —
-		// which is the point. The credential is narrow; the endpoints
-		// are not privileged.
+		// The wearable's own surface. Ordinary project reads: the link
+		// authenticates as a role-ceilinged token bound to the user who
+		// generated it, so these rows say nothing special — which is the
+		// point. The credential is narrow; the endpoints are not
+		// privileged. Since Task 20238 a default link also carries
+		// task.mutate, reachable only on the two dictation rows below.
 		{Pattern: "GET /api/glasses/projects", Handler: s.handleGlassesProjects, Perm: read, Scope: scopeGlobal},
 		{Pattern: "GET /api/glasses/tasks", Handler: s.handleGlassesTasks, Perm: read, Scope: scopeProject},
 		{Pattern: "GET /api/glasses/tasks/{id}", Handler: s.handleGlassesTaskDetail, Perm: read, Scope: scopeProject},
+
+		// Dictated tasks from the wearable (Task 20238). Duplicated onto
+		// the /api/glasses/ prefix rather than shared with the dashboard's
+		// rows below, because that prefix is the entire surface a link may
+		// reach (see tokenKindAdmitted) — a glasses token calling
+		// /api/transcribe is refused by path before its role is consulted.
+		//
+		// The handler for task creation is the dashboard's own, so the
+		// wearable cannot drift into a second ID-assignment path: reusing
+		// it is what keeps "externally added tasks overwrite each other"
+		// from having a third place to come back in.
+		//
+		// These are the only two task.mutate rows under this prefix, and
+		// TestGlassesSurface_GrantsNoMoreThanTaskMutate holds that line:
+		// the link's role ceiling is operator, so anything stronger added
+		// here would silently widen every link already in a user's phone.
+		{Pattern: "GET /api/glasses/dictate", Handler: s.handleDictateStatus, Perm: read, Scope: scopeProject},
+		{Pattern: "POST /api/glasses/transcribe", Handler: s.handleTranscribe, Perm: task, Scope: scopeProject},
+		{Pattern: "POST /api/glasses/tasks", Handler: s.handleTaskAdd, Perm: task, Scope: scopeProject},
 
 		// Link management, scoped to the caller's own identity by
 		// construction: no parameter names a user, the owner is read off

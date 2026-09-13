@@ -314,6 +314,201 @@ scenarios.markup_in_a_title_stays_text = async () => {
   return { text: row.textContent, nasty, nodes: row.childNodes.length };
 };
 
+// ── dictation (Task 20238) ──────────────────────────────────────────────────
+// The device cannot record: Meta lists camera, microphone and getUserMedia as
+// unsupported for Ray-Ban Display web apps. So the two cases that matter are
+// "a runtime with a microphone drives the whole flow" and "a runtime without
+// one says so instead of offering a dead control", and the second is the one
+// the glasses themselves will hit.
+
+const DICTATION_ON = { available: true, can_add_tasks: true, backend: 'groq' };
+
+// The real /api/glasses/tasks carries the dictation status too, and it is the
+// authoritative copy — the project list's is resolved against the default
+// project. A fixture that omitted it would leave the refresh path untested.
+function tasksRouteWithDictation(all, dictation) {
+  const inner = tasksRoute(all, null);
+  return url => {
+    const r = inner(url);
+    r.body.dictation = dictation;
+    return r;
+  };
+}
+
+function dictationRoutes(dictation, extra) {
+  const routes = {
+    '/api/glasses/projects': { projects: PROJECTS, dictation: dictation },
+    '/api/glasses/tasks': tasksRouteWithDictation(mkTasks(3), dictation),
+  };
+  return Object.assign(routes, extra || {});
+}
+
+// openAlpha walks from the project list into a project, which is the only
+// screen where dictation is offered — a task needs somewhere to belong.
+async function openAlpha(dom) {
+  await dom.settle();
+  dom.click(dom.doc.getElementById('list').childNodes[0]);
+  await dom.settle();
+}
+
+scenarios.dictate_offered_when_a_microphone_exists = async () => {
+  const dom = boot({ mic: true, routes: dictationRoutes(DICTATION_ON) });
+  await openAlpha(dom);
+  return { ring: dom.ring(), note: dom.text('micnote'), label: dom.text('dictate') };
+};
+
+// The glasses case: no getUserMedia anywhere in the runtime.
+scenarios.dictate_explains_when_no_microphone = async () => {
+  const dom = boot({ routes: dictationRoutes(DICTATION_ON) });
+  await openAlpha(dom);
+  return { ring: dom.ring(), note: dom.text('micnote') };
+};
+
+// A read-only link must not draw the control at all — it would be refused.
+scenarios.dictate_absent_for_a_read_only_link = async () => {
+  const dom = boot({ mic: true, routes: dictationRoutes({ available: true, can_add_tasks: false }) });
+  await openAlpha(dom);
+  return { ring: dom.ring(), note: dom.text('micnote') };
+};
+
+// And absent when the hub has no speech backend configured at all.
+scenarios.dictate_absent_when_hub_has_no_backend = async () => {
+  const dom = boot({ mic: true, routes: dictationRoutes({ available: false, can_add_tasks: true }) });
+  await openAlpha(dom);
+  return { ring: dom.ring(), note: dom.text('micnote') };
+};
+
+// The whole circuit: pinch to record, pinch to stop, confirm, task created.
+scenarios.dictate_round_trip_creates_a_task = async () => {
+  const dom = boot({
+    mic: true,
+    routes: dictationRoutes(DICTATION_ON, {
+      '/api/glasses/transcribe': { text: 'add a retention policy' },
+      '/api/glasses/tasks': tasksRoute(mkTasks(3), null),
+    }),
+  });
+  await openAlpha(dom);
+
+  const before = dom.text('dictate');
+  dom.click(dom.doc.getElementById('dictate'));      // start recording
+  await dom.settle();
+  const recording = dom.text('dictate');
+
+  dom.click(dom.doc.getElementById('dictate'));      // stop -> upload
+  await dom.settle();
+
+  const confirmRows = dom.rows();
+  const heard = dom.text('list');
+  const focusOnConfirm = dom.focusName();
+
+  // Pinch "Add task".
+  const add = dom.rowNodes().filter(n => n.dataset.act === 'add')[0];
+  if (add) { dom.click(add); }
+  await dom.settle();
+
+  const posts = dom.sent.filter(s => s.method === 'POST');
+  return {
+    before: before,
+    recording: recording,
+    confirmRows: confirmRows,
+    heard: heard,
+    focusOnConfirm: focusOnConfirm,
+    micReleased: dom.mic.stopped,
+    posted: posts.map(p => ({ url: p.url.split('?')[0], body: typeof p.body === 'string' ? p.body : 'form' })),
+  };
+};
+
+// Discarding must drop the transcript rather than keep offering it.
+scenarios.dictate_discard_returns_to_tasks = async () => {
+  const dom = boot({
+    mic: true,
+    routes: dictationRoutes(DICTATION_ON, { '/api/glasses/transcribe': { text: 'never mind' } }),
+  });
+  await openAlpha(dom);
+  dom.click(dom.doc.getElementById('dictate'));
+  await dom.settle();
+  dom.click(dom.doc.getElementById('dictate'));
+  await dom.settle();
+
+  const discard = dom.rowNodes().filter(n => n.dataset.act === 'discard')[0];
+  if (discard) { dom.click(discard); }
+  await dom.settle();
+
+  const posts = dom.sent.filter(s => s.method === 'POST' && s.url.indexOf('/tasks') >= 0);
+  return { rows: dom.rows(), taskPosts: posts.length, ring: dom.ring() };
+};
+
+// Navigating away mid-recording must release the microphone, and must not
+// leave mic.rec set behind a button relabelled "Speak a new task" — the next
+// pinch would otherwise upload the walk through the menus.
+scenarios.dictate_navigating_away_releases_the_mic = async () => {
+  const dom = boot({ mic: true, routes: dictationRoutes(DICTATION_ON) });
+  await openAlpha(dom);
+
+  dom.click(dom.doc.getElementById('dictate'));   // start recording
+  await dom.settle();
+  const recorderBefore = dom.recorder();
+
+  // Pinch a task row: leaves the tasks view while still recording.
+  const row = dom.rowNodes().filter(n => n.dataset.key && n.dataset.key.indexOf('t:') === 0)[0];
+  if (row) { dom.click(row); }
+  await dom.settle();
+
+  const posts = dom.sent.filter(s => s.method === 'POST');
+  return {
+    micReleased: dom.mic.stopped,
+    recorderState: recorderBefore ? recorderBefore.state : 'none',
+    label: dom.text('dictate'),
+    uploads: posts.length,
+  };
+};
+
+// Two quick pinches must not start two recorders.
+scenarios.dictate_double_press_starts_one_recorder = async () => {
+  const dom = boot({ mic: true, routes: dictationRoutes(DICTATION_ON) });
+  await openAlpha(dom);
+  dom.click(dom.doc.getElementById('dictate'));
+  dom.click(dom.doc.getElementById('dictate'));   // before getUserMedia resolves
+  await dom.settle();
+  return { starts: dom.micStarts(), label: dom.text('dictate') };
+};
+
+// A transcript that lands after the wearer navigated away must be dropped, not
+// painted over whatever they are now looking at.
+scenarios.dictate_stale_transcript_is_dropped = async () => {
+  const dom = boot({
+    mic: true,
+    routes: dictationRoutes(DICTATION_ON, { '/api/glasses/transcribe': { text: 'too late' } }),
+  });
+  await openAlpha(dom);
+  dom.click(dom.doc.getElementById('dictate'));
+  await dom.settle();
+  dom.click(dom.doc.getElementById('dictate'));   // stop -> upload in flight
+  dom.click(dom.doc.getElementById('back'));      // leave before it resolves
+  await dom.settle();
+  return { view: dom.text('title'), rows: dom.rows() };
+};
+
+// The minute poll must not repaint a control that is mid-recording.
+scenarios.dictate_poll_does_not_disturb_recording = async () => {
+  const dom = boot({ mic: true, routes: dictationRoutes(DICTATION_ON) });
+  await openAlpha(dom);
+  dom.click(dom.doc.getElementById('dictate'));
+  await dom.settle();
+  const during = dom.text('dictate');
+  const classDuring = dom.doc.getElementById('dictate').className;
+
+  dom.tick();                 // the once-a-minute refresh
+  await dom.settle();
+
+  return {
+    labelBefore: during,
+    labelAfter: dom.text('dictate'),
+    recBefore: classDuring.indexOf('rec') >= 0,
+    recAfter: dom.doc.getElementById('dictate').className.indexOf('rec') >= 0,
+  };
+};
+
 // ── run ─────────────────────────────────────────────────────────────────────
 
 (async () => {

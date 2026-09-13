@@ -165,6 +165,32 @@
   }
   #more.on { display: block; }
 
+  /* Dictation (Task 20238). Solid rather than dashed like #more, because this
+     one starts something rather than extending the list, and on an additive
+     display a filled border is the strongest "this is the action" signal
+     available without spending colour. */
+  #dictate {
+    display: none; width: 100%; padding: 14px; margin-bottom: 12px;
+    background: #10131a; color: var(--accent);
+    border: 2px solid var(--accent); border-radius: 14px; font: inherit;
+    font-weight: 650; cursor: pointer;
+  }
+  #dictate.on { display: block; }
+  #dictate.rec { color: var(--bad); border-color: var(--bad); }
+  #dictate:disabled { opacity: .5; }
+  /* The wearable cannot reach a microphone at all (see the note in the script),
+     so where that is true the feature is one muted line rather than a control:
+     a ring stop that cannot do anything is worse than no ring stop. */
+  #micnote { display: none; color: var(--muted); font-size: 17px; margin-bottom: 12px; }
+  #micnote.on { display: block; }
+  /* The transcript, shown large enough to check at a glance before it becomes
+     a row in a plan. */
+  #heard {
+    margin: 4px 0 14px; padding: 14px 16px;
+    background: #10131a; border: 2px solid var(--line); border-radius: 14px;
+    font-size: 24px; -webkit-user-select: text; user-select: text;
+  }
+
   .detail h2 { font-size: 25px; margin: 0 0 10px; }
   .detail .block { margin-top: 16px; }
   .detail .label { color: var(--muted); font-size: 17px; text-transform: uppercase; letter-spacing: .06em; }
@@ -185,6 +211,8 @@
   </header>
   <div id="sub"></div>
   <div id="filters"></div>
+  <button id="dictate" class="focusable" type="button" hidden>&#127908; Speak a new task</button>
+  <div id="micnote"></div>
   <div id="msg"></div>
   <div id="list"></div>
   <button id="more" class="focusable" type="button" hidden>More</button>
@@ -222,11 +250,23 @@ var dead = false;
 
 function el(id) { return document.getElementById(id); }
 
-function api(path) {
+function api(path) { return send('GET', path, null); }
+
+// send is api() plus a method and a body, for the two dictation calls. Same
+// credential handling and the same terminal 401/403 rule, because a link that
+// has stopped working has stopped working for writes too.
+function send(method, path, body) {
   if (dead) { return Promise.reject(new Error(DEAD_MSG)); }
   var headers = { 'Accept': 'application/json' };
   if (TOKEN) { headers['Authorization'] = 'Bearer ' + TOKEN; }
-  return fetch(path, { headers: headers, credentials: 'same-origin', cache: 'no-store' })
+  var init = { method: method, headers: headers, credentials: 'same-origin', cache: 'no-store' };
+  if (body instanceof FormData) {
+    init.body = body;            // the browser sets the multipart boundary
+  } else if (body != null) {
+    headers['Content-Type'] = 'application/json';
+    init.body = JSON.stringify(body);
+  }
+  return fetch(path, init)
     .then(function(res) {
       if (res.status === 401 || res.status === 403) {
         // Terminal, and the retry loop has to stop here rather than keep
@@ -437,11 +477,13 @@ document.addEventListener('keydown', function(ev) {
 // ── projects ────────────────────────────────────────────────────────────────
 
 function openProjects() {
+  abandonDictation();
   state.view = 'projects';
   state.project = null;
   state.taskID = 0;
   show(el('back'), false);
   show(el('more'), false);
+  showDictate();   // a task needs a project to belong to; there is none here
   setText(el('title'), 'Projects');
   setText(el('sub'), '');
   clear(el('filters'));
@@ -453,6 +495,14 @@ function openProjects() {
 function loadProjects(navigating) {
   return api('/api/glasses/projects').then(function(d) {
     if (state.view !== 'projects') { return; }  // the wearer moved on mid-flight
+    // Dictation capability rides on this response so the wearable does not
+    // spend a second request on it (Task 20238). Both halves matter: whether
+    // the hub has a speech backend at all, and whether *this link* may add
+    // tasks — a read-only link must not draw a control it cannot use.
+    if (d && d.dictation) {
+      mic.available = !!d.dictation.available;
+      mic.canAdd = !!d.dictation.can_add_tasks;
+    }
     var projects = (d && d.projects) || [];
     say(projects.length ? '' : 'No projects yet.');
     setText(el('sub'), projects.length ? projects.length + (projects.length === 1 ? ' project' : ' projects') : '');
@@ -514,6 +564,8 @@ function openTasks(idx, name) {
   clear(el('list'));
   say('Loading…');
   renderFilters();
+  resetDictate();
+  showDictate();
   return load(true);
 }
 
@@ -533,6 +585,14 @@ function loadTasks(navigating, mode) {
     // A response for the project or filter the wearer has already left is the
     // bug class this dashboard has fixed eight times over. Drop it.
     if (state.view !== 'tasks' || !state.project || state.project.idx !== idx || state.status !== status) { return; }
+
+    // The per-project answer, which supersedes the one the project list gave:
+    // a user's task.mutate may be scoped to some projects and not others.
+    if (d && d.dictation) {
+      mic.available = !!d.dictation.available;
+      mic.canAdd = !!d.dictation.can_add_tasks;
+      showDictate();
+    }
 
     state.total = (d && d.total) || 0;
     var batch = (d && d.tasks) || [];
@@ -582,10 +642,12 @@ function renderFilters() {
 // ── one task ────────────────────────────────────────────────────────────────
 
 function openTask(id) {
+  abandonDictation();
   state.view = 'task';
   state.taskID = id;
   show(el('back'), true);
   show(el('more'), false);
+  showDictate();
   clear(el('filters'));
   clear(el('list'));
   say('Loading…');
@@ -639,6 +701,211 @@ function fillBlock(block, text) {
   setText(block._body, text || '');
 }
 
+// ── dictation ───────────────────────────────────────────────────────────────
+// Adding a task by speaking it (Task 20238).
+//
+// # What the glasses can and cannot do
+//
+// Not on the glasses themselves. Meta's own build guide for Ray-Ban Display
+// web apps lists camera, microphone and getUserMedia as unsupported, alongside
+// text input — the runtime grants a web app the display, the Neural Band and
+// captouch as arrow keys, the IMU, location and local storage, and nothing
+// that can hear. There is no permission to ask for and no flag to set: a web
+// app on this device cannot capture audio, so it cannot dictate, and it cannot
+// type either.
+//
+// What it *can* do is be the same app on the phone the glasses tether through.
+// The link is one URL carrying its own credential, so opening it there is a
+// working microphone away from the same task list — which is why the feature
+// lives in this document rather than only in the dashboard, and why the
+// unsupported case is a sentence naming the fix rather than a hidden control.
+//
+// # Why a confirmation step
+//
+// The wearer has no keyboard. On the dashboard a wrong word is one keystroke
+// from fixed, because the transcript lands in a text field; here it cannot be
+// edited at all. So the transcript is shown and committed by a second pinch,
+// which is the cheapest possible review and the only one available.
+
+var mic = { available: false, canAdd: false, rec: null, chunks: [], stream: null, heard: '' };
+
+// micUsable reports whether this runtime can record at all — false on the
+// glasses by platform policy, and false on an http origin, where the API is
+// withheld from insecure contexts.
+function micUsable() {
+  return !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.MediaRecorder);
+}
+
+// showDictate decides which of the three states the tasks screen is in: an
+// active control, a one-line explanation, or nothing at all.
+function showDictate() {
+  // loadTasks calls this on every minute poll, and show() rewrites the class
+  // attribute — which would drop the `rec` styling while the wearer is part
+  // way through speaking, turning the red Stop control back to blue with no
+  // other indication that it is still recording. Leave a live control alone.
+  if (mic.rec || mic.starting) { return; }
+
+  var onTasks = state.view === 'tasks';
+  var offered = onTasks && mic.available && mic.canAdd;
+  show(el('dictate'), offered && micUsable());
+
+  var note = el('micnote');
+  var explain = offered && !micUsable();
+  setText(note, explain
+    ? (window.isSecureContext === false
+        ? 'To add a task by voice, open this link over https — a microphone needs a secure connection.'
+        : 'To add a task by voice, open this same link on your phone. The glasses have no microphone available to web apps.')
+    : '');
+  setClass(note, explain ? 'on' : '');
+}
+
+// setDictateLabel repaints the control without deciding whether it is shown.
+// The `on` class carries visibility (#dictate.on sets display:block, which
+// outranks the hidden attribute's UA rule), so it has to be derived from the
+// current hidden state rather than asserted — otherwise relabelling a hidden
+// button would put it back on screen.
+function setDictateLabel(text, recording, busy) {
+  var b = el('dictate');
+  setText(b, text);
+  setClass(b, (b.hidden ? 'focusable' : 'on focusable') + (recording ? ' rec' : ''));
+  b.disabled = !!busy;
+}
+
+el('dictate').addEventListener('click', function() {
+  if (mic.rec) { stopDictation(); return; }
+  startDictation();
+});
+
+function startDictation() {
+  // mic.rec is only assigned once getUserMedia resolves, so two quick pinches
+  // — easy to produce on a captouch strip — would both find it null and start
+  // two recorders, the first of which becomes unreachable with its microphone
+  // track never stopped. Claim the slot synchronously instead.
+  if (mic.starting) { return; }
+  mic.starting = true;
+  navigator.mediaDevices.getUserMedia({
+    audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+  }).then(function(stream) {
+    mic.stream = stream;
+    mic.chunks = [];
+    var type = '';
+    ['audio/webm;codecs=opus', 'audio/ogg;codecs=opus', 'audio/webm'].some(function(t) {
+      if (window.MediaRecorder.isTypeSupported(t)) { type = t; return true; }
+      return false;
+    });
+    mic.rec = new MediaRecorder(stream, type ? { mimeType: type } : {});
+    mic.rec.ondataavailable = function(ev) { if (ev.data && ev.data.size) { mic.chunks.push(ev.data); } };
+    mic.rec.onstop = function() {
+      // Release the microphone before the upload rather than after: the
+      // recording indicator stays lit while a track is live, and leaving it on
+      // across a network round trip reads as "still listening".
+      stream.getTracks().forEach(function(t) { t.stop(); });
+      var blob = new Blob(mic.chunks, { type: (mic.rec && mic.rec.mimeType) || 'audio/webm' });
+      mic.rec = null; mic.stream = null;
+      uploadDictation(blob);
+    };
+    mic.rec.start();
+    mic.starting = false;
+    setDictateLabel('■ Stop and add', true, false);
+  }).catch(function(err) {
+    mic.starting = false;
+    resetDictate();
+    say('Microphone unavailable: ' + (err && err.message ? err.message : err), true);
+  });
+}
+
+function stopDictation() {
+  if (mic.rec && mic.rec.state !== 'inactive') { mic.rec.stop(); }
+  setDictateLabel('Transcribing…', false, true);
+}
+
+// abandonDictation drops a recording in progress without uploading it.
+//
+// Navigating away mid-record has to release the microphone. Simply hiding the
+// control would leave the track live — the phone's recording indicator stays
+// lit for the rest of the session — and would leave mic.rec set behind a
+// button relabelled "Speak a new task", so the next pinch would upload the
+// walk through the menus rather than start something new.
+function abandonDictation() {
+  if (!mic.rec && !mic.stream) { return; }
+  var rec = mic.rec;
+  mic.rec = null;                       // onstop reads this; clear it first so
+  if (rec) { rec.onstop = null; }       // the upload path does not run
+  if (rec && rec.state !== 'inactive') { try { rec.stop(); } catch (e) {} }
+  if (mic.stream) { mic.stream.getTracks().forEach(function(t) { t.stop(); }); }
+  mic.stream = null;
+  mic.starting = false;
+  resetDictate();
+}
+
+function uploadDictation(blob) {
+  if (!blob || !blob.size) { resetDictate(); say('Nothing was recorded.', true); return; }
+  var form = new FormData();
+  form.append('audio', blob, 'dictation.' + ((blob.type || '').indexOf('ogg') >= 0 ? 'ogg' : 'webm'));
+  var from = state.project;
+  send('POST', '/api/glasses/transcribe', form).then(function(d) {
+    resetDictate();
+    // The wearer moved on while this was in flight. Dropping the result is
+    // the same rule loadProjects and loadTasks follow, and it matters more
+    // here: openHeard would repaint whatever screen they are now on, and
+    // commitHeard would then find state.project null and silently do nothing.
+    if (state.view !== 'tasks' || state.project !== from) { return; }
+    if (!d || !d.text) { say('No speech was recognised.', true); return; }
+    openHeard(d.text);
+  }).catch(function(err) { resetDictate(); fail(err); });
+}
+
+function resetDictate() { setDictateLabel('🎤 Speak a new task', false, false); }
+
+// openHeard is the confirmation screen: the transcript, then Add and Discard.
+function openHeard(text) {
+  mic.heard = text;
+  mic.starting = false;
+  state.view = 'heard';
+  show(el('back'), true);
+  show(el('more'), false);
+  show(el('dictate'), false);
+  setClass(el('micnote'), '');
+  clear(el('filters'));
+  clear(el('list'));
+  say('');
+  setText(el('title'), 'Add this task?');
+  setText(el('sub'), state.project ? state.project.name : '');
+
+  var host = el('list');
+  var heard = mk('div', '', text);
+  heard.id = 'heard';
+  host.appendChild(heard);
+
+  var add = rowButton('add', '✓ Add task');
+  host.appendChild(add);
+  host.appendChild(rowButton('discard', '✕ Discard'));
+  // Land on Add: it is the reason the wearer spoke, and the transcript above
+  // is not focusable, so an unaimed pinch would otherwise hit nothing.
+  focusNode(add);
+}
+
+function rowButton(action, label) {
+  var b = mk('button', 'row focusable');
+  b.type = 'button';
+  b.dataset.act = action;
+  b.dataset.key = 'act:' + action;
+  b.appendChild(mk('div', 'name', label));
+  return b;
+}
+
+function commitHeard() {
+  var title = mic.heard;
+  if (!title || !state.project) { return; }
+  setText(el('title'), 'Adding…');
+  send('POST', '/api/glasses/tasks?project_idx=' + encodeURIComponent(state.project.idx), { title: title })
+    .then(function() {
+      mic.heard = '';
+      openTasks(state.project.idx, state.project.name);
+    })
+    .catch(function(err) { fail(err); setText(el('title'), 'Add this task?'); });
+}
+
 // ── navigation ──────────────────────────────────────────────────────────────
 // One delegated listener rather than per-row handlers: rows are rebuilt on
 // every refresh, and re-binding them each time is how a wearable ends up with
@@ -647,6 +914,8 @@ function fillBlock(block, text) {
 el('list').addEventListener('click', function(ev) {
   var row = ev.target.closest ? ev.target.closest('.row') : null;
   if (!row) { return; }
+  if (row.dataset.act === 'add') { commitHeard(); return; }
+  if (row.dataset.act === 'discard') { goBack(); return; }
   if (row.dataset.task) { openTask(parseInt(row.dataset.task, 10)); return; }
   if (row.dataset.idx !== undefined) { openTasks(parseInt(row.dataset.idx, 10), row.dataset.name); }
 });
@@ -671,6 +940,13 @@ el('more').addEventListener('click', function() {
 el('back').addEventListener('click', goBack);
 
 function goBack() {
+  // A discarded or backed-out transcript is dropped rather than kept for the
+  // next visit: coming back to a screen still offering to add a sentence the
+  // wearer already rejected is the wrong default when Enter is one pinch.
+  if (state.view === 'heard') {
+    mic.heard = '';
+    if (state.project) { openTasks(state.project.idx, state.project.name); return; }
+  }
   if (state.view === 'task' && state.project) { openTasks(state.project.idx, state.project.name); }
   else if (state.view !== 'projects') { openProjects(); }
 }

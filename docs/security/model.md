@@ -921,11 +921,27 @@ leaves no alternative, so the design question is not whether to avoid it but
 how little that URL may be able to do. Five answers, none of which live in the
 glasses code:
 
-1. **Read-only.** The token carries `viewer` and only `viewer` — not the
-   generating user's role, so what the URL can do never depends on who was
-   signed in when it was made. Every gate asking for `run.start`,
-   `task.mutate`, `config.write`, `secret.grant`, `audit.read` or
-   `token.admin` refuses it.
+1. **A fixed role, and a small *reachable* one.** The token carries a role
+   chosen at mint time, never the generating user's — so what the URL can do
+   never depends on who was signed in when it was made.
+
+   A link generated with **Read-only** carries `viewer` and only `viewer`:
+   every gate asking for `run.start`, `task.mutate`, `config.write`,
+   `secret.grant`, `audit.read` or `token.admin` refuses it. Links minted
+   before cloop supported dictation are all of this kind, and stay that way
+   until their holder regenerates them.
+
+   The default carries `operator`, so a wearer can add a task by speaking it
+   (see [Dictation](#dictation) below). `operator` also names `run.start`, and
+   that is tolerable only because of property 2: the link is pinned to
+   `/api/glasses/`, where the only `task.mutate` routes are transcription and
+   task creation, and no run, secret or config route exists. The *reachable*
+   grant is therefore exactly "read, plus add a task".
+
+   That makes the path pin load-bearing rather than defence in depth. A new
+   endpoint under `/api/glasses/` would widen every link already sitting in a
+   wearer's phone, so `TestGlassesSurface_GrantsNoMoreThanTaskMutate` fails the
+   build if one appears needing more than `project.read` or `task.mutate`.
 2. **Confined to the glasses surface.** `viewer` is not a small permission: it
    carries `project.read`, which is also what `GET /api/provider-calls/{id}`
    declares — an endpoint that returns an agent call's prompt and response
@@ -970,7 +986,30 @@ the same panel if the device is lost.
 The wearable reads three endpoints — `/api/glasses/projects`,
 `/api/glasses/tasks`, `/api/glasses/tasks/{id}` — which project each record
 down to the handful of fields a stamp-sized display draws. They are both a
-payload bound and, per property 2, the whole of what the link may reach.
+payload bound and, per property 2, most of what the link may reach.
+
+#### Dictation
+
+Three more endpoints exist for adding a task by speaking it:
+`GET /api/glasses/dictate` reports whether a speech backend is configured and
+whether *this* link may add tasks; `POST /api/glasses/transcribe` turns audio
+into text and creates nothing; `POST /api/glasses/tasks` appends one pending
+task. The last reuses the dashboard's own task-creation handler rather than a
+parallel one, so the wearable cannot drift into a second ID-assignment path.
+
+Transcription is gated on `task.mutate` rather than `project.read` because it
+spends the operator's speech-API quota and is the first half of creating a
+task. A read-only link is refused by both, and the status endpoint says so up
+front so the page never draws a control the credential cannot use.
+
+**The glasses themselves cannot record.** Meta's build guide for Ray-Ban
+Display web apps lists camera, microphone and `getUserMedia` as unsupported,
+along with text input; a web app there gets the display, the Neural Band and
+captouch as arrow keys, the IMU, location and local storage. So dictation runs
+on the paired phone, where the same link opens with a working microphone, and
+on the glasses the page prints one line saying so instead of offering a control
+that cannot work. Audio never touches the wearable's storage in either case:
+the hub spools the upload to a temp file, transcribes it, and deletes it.
 
 `/glasses` itself is served *before* authentication, like `/assets/`: it is a
 static document with no project data, and a wearable with no keyboard, console

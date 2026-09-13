@@ -264,6 +264,9 @@ type Config struct {
 	// Watch configures the file-watch mode for `cloop watch --glob`.
 	Watch WatchConfig `yaml:"watch,omitempty"`
 
+	// STT configures speech-to-text for dictated tasks (Task 20238).
+	STT STTConfig `yaml:"stt,omitempty"`
+
 	// Notify configures Slack and Discord incoming webhook notifications.
 	Notify NotifyConfig `yaml:"notify,omitempty"`
 
@@ -1750,6 +1753,29 @@ type GitHubConfig struct {
 	Repo string `yaml:"repo,omitempty"`
 	// Labels added to issues created by cloop push
 	Labels []string `yaml:"labels,omitempty"`
+}
+
+// STTConfig holds speech-to-text settings for dictated tasks (Task 20238).
+//
+// The backend order is the Lisa project's: hosted Whisper on Groq when a key
+// is configured, the local openai-whisper CLI otherwise. Leaving every field
+// empty is a valid configuration — it resolves to whichever of the two is
+// actually available, and the microphone button stays hidden when neither is.
+type STTConfig struct {
+	// Provider pins the backend: "groq" or "whisper". Empty auto-selects.
+	Provider string `yaml:"provider,omitempty"`
+	// GroqAPIKey authenticates hosted Whisper (falls back to GROQ_API_KEY).
+	GroqAPIKey string `yaml:"groq_api_key,omitempty"`
+	// Model overrides the hosted model. Defaults to whisper-large-v3-turbo.
+	Model string `yaml:"model,omitempty"`
+	// Endpoint overrides the transcription URL for an OpenAI-compatible
+	// server that is not Groq.
+	Endpoint string `yaml:"endpoint,omitempty"`
+	// Language is an ISO-639-1 hint ("en", "de"). Empty means auto-detect,
+	// which is the right default for a hub whose users do not share one.
+	Language string `yaml:"language,omitempty"`
+	// WhisperModel selects the local CLI model: base, small, medium, large.
+	WhisperModel string `yaml:"whisper_model,omitempty"`
 }
 
 // BudgetConfig holds spend limit settings.

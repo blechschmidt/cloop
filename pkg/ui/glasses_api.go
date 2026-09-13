@@ -18,10 +18,20 @@ package ui
 //
 // Five properties, each enforced somewhere that is not this file:
 //
-//   - Read-only. The token carries `viewer` and only `viewer` — not the
-//     generating user's role, so what the URL can do never depends on who was
-//     signed in when it was made. Every gate in routes.go asking for
-//     run.start, task.mutate, config.write or secret.grant refuses it.
+//   - A fixed role, never the generating user's, so what the URL can do does
+//     not depend on who was signed in when it was made. A link minted
+//     read-only carries `viewer` and nothing else — every gate in routes.go
+//     asking for run.start, task.mutate, config.write or secret.grant refuses
+//     it — and links issued before dictation existed are all of that kind.
+//
+//     The default carries `operator`, so a wearer with no keyboard can still
+//     add a task by speaking it (Task 20238). `operator` also names run.start,
+//     and the only thing that makes that acceptable is the next property: the
+//     token is pinned to /api/glasses/, where the sole task.mutate routes are
+//     transcribe and task-create and no run route exists. The *reachable*
+//     grant is therefore exactly "viewer, plus add a task" — which is why
+//     TestGlassesSurface_GrantsNoMoreThanTaskMutate fails the build if a
+//     stronger route ever appears under that prefix.
 //
 //   - Confined to this surface. `viewer` is not a small permission: it carries
 //     project.read, and project.read is what GET /api/provider-calls/{id}
@@ -65,7 +75,9 @@ package ui
 // page size rather than by how much the agent has written.
 
 import (
+	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/url"
 	"sort"
@@ -131,6 +143,11 @@ type glassesLinkView struct {
 	// operator and therefore one link; the panel says so rather than implying
 	// an isolation the deployment does not have.
 	PerUser bool `json:"per_user"`
+
+	// CanAddTasks reports whether this link may dictate tasks (Task 20238).
+	// Read off the stored token, so a link minted before dictation existed
+	// keeps reading as read-only until its holder regenerates it.
+	CanAddTasks bool `json:"can_add_tasks"`
 }
 
 // glassesLinkResponse is the mint result. URL is the whole point and exists
@@ -169,6 +186,21 @@ func (s *Server) handleGlassesLinkCreate(w http.ResponseWriter, r *http.Request)
 	if !ok {
 		return
 	}
+
+	// An absent or empty body means "the default link", so the panel's
+	// Generate button needs no payload and every existing caller keeps
+	// working. Only an explicit read_only:true narrows it.
+	var opts struct {
+		ReadOnly bool `json:"read_only"`
+	}
+	if r.Body != nil {
+		limitJSONBody(w, r, maxJSONBodyBytes)
+		if err := json.NewDecoder(r.Body).Decode(&opts); err != nil && !errors.Is(err, io.EOF) {
+			respondToBodyError(w, err)
+			return
+		}
+	}
+	readOnly := opts.ReadOnly
 
 	owner := ownerFromIdentity(s.sessionIdentity(r))
 	if s.oidcEnabled() && owner == nil {
@@ -214,12 +246,29 @@ func (s *Server) handleGlassesLinkCreate(w http.ResponseWriter, r *http.Request)
 
 	minted, err := mgr.Mint(apitoken.MintOptions{
 		Name: glassesTokenName,
-		// Viewer and only viewer. Not derived from the caller's own role: a
-		// link that could act with an operator's authority because an operator
-		// generated it would make "what can this URL do" depend on who was
-		// signed in, which is not a property anyone can reason about after the
-		// fact. The owner binding narrows this further; nothing widens it.
-		Roles:     []string{string(authz.RoleViewer)},
+		// A fixed role, not the caller's own. A link that acted with an
+		// operator's authority because an operator generated it would make
+		// "what can this URL do" depend on who was signed in, which is not a
+		// property anyone can reason about after the fact. The owner binding
+		// narrows this further; nothing widens it.
+		//
+		// Which fixed role is the wearer's choice, and read-only is still what
+		// most links should be (Task 20238). The default carries `operator`
+		// because dictating a task is the one thing a wearer can actually do
+		// on a device with no keyboard — but `operator` also names run.start,
+		// the permission that spends money, so it is only safe here because of
+		// the second layer:
+		//
+		//   tokenKindAdmitted pins a glasses token to /glasses and
+		//   /api/glasses/, and the only task.mutate routes under that prefix
+		//   are transcribe and task-create. There is no run endpoint there, so
+		//   the *reachable* grant is exactly "viewer, plus add a task".
+		//
+		// That makes the path pin load-bearing rather than defence in depth,
+		// which is why TestGlassesSurface_GrantsNoMoreThanTaskMutate asserts
+		// it: adding a stronger route under /api/glasses/ would retroactively
+		// widen every link already sitting in someone's phone.
+		Roles:     []string{string(glassesRole(readOnly))},
 		CreatedBy: actor,
 		ExpiresAt: time.Now().Add(glassesTTLDays * 24 * time.Hour),
 		Kind:      apitoken.KindGlasses,
@@ -244,8 +293,12 @@ func (s *Server) handleGlassesLinkCreate(w http.ResponseWriter, r *http.Request)
 	})
 
 	link := s.glassesURL(r, minted.Plaintext)
+	reach := "read your projects and tasks"
+	if !readOnly {
+		reach = "read your projects and tasks, and add new ones by dictation"
+	}
 	warning := "This URL is the credential. It is shown once and cannot be recovered — " +
-		"cloop stores only a hash. Anyone who has it can read your projects and tasks " +
+		"cloop stores only a hash. Anyone who has it can " + reach + " " +
 		"until it expires, so add it to your glasses and do not paste it anywhere else. " +
 		"Generating a new link revokes this one."
 	// Say so when the link just handed out is a plaintext one. Reaching the hub
@@ -264,6 +317,34 @@ func (s *Server) handleGlassesLinkCreate(w http.ResponseWriter, r *http.Request)
 		URL:     link,
 		Warning: warning,
 	})
+}
+
+// glassesRole maps the wearer's choice onto a role.
+//
+// Two values, not a spectrum. The role ladder is cumulative — there is no
+// "viewer plus task.mutate" tier to name — so the grant is expressed as
+// operator-confined-by-path rather than as a bespoke permission set, and the
+// confinement is what the test named above holds in place.
+func glassesRole(readOnly bool) authz.Role {
+	if readOnly {
+		return authz.RoleViewer
+	}
+	return authz.RoleOperator
+}
+
+// glassesCanAddTasks reports whether a link may dictate tasks, read off the
+// token rather than recomputed — a link minted before this existed carries
+// viewer and must keep reading as read-only.
+func glassesCanAddTasks(tok *apitoken.Token) bool {
+	if tok == nil {
+		return false
+	}
+	for _, role := range tok.Roles {
+		if authz.Role(role) == authz.RoleOperator {
+			return true
+		}
+	}
+	return false
 }
 
 // linkHostIsLoopback reports whether a generated link points at this machine,
@@ -469,6 +550,7 @@ func (s *Server) glassesLinkView(r *http.Request, tok *apitoken.Token) glassesLi
 	v.ExpiresAt = formatTokenTime(tok.ExpiresAt)
 	v.LastUsed = formatTokenTime(tok.LastUsedAt)
 	v.Owner = tok.Owner.Label()
+	v.CanAddTasks = glassesCanAddTasks(tok)
 	return v
 }
 
@@ -559,7 +641,13 @@ func (s *Server) handleGlassesProjects(w http.ResponseWriter, r *http.Request) {
 		}
 		return strings.ToLower(out[i].Name) < strings.ToLower(out[j].Name)
 	})
-	jsonOK(w, map[string]any{"projects": out})
+	// Dictation availability rides along on the first screen's response rather
+	// than costing a second request (Task 20238). This page is loaded over a
+	// phone tether, and its own header says the budget is one round trip.
+	jsonOK(w, map[string]any{
+		"projects":  out,
+		"dictation": s.dictationStatusFor(r),
+	})
 }
 
 // glassesTask is one row of the task list.
@@ -650,6 +738,13 @@ func (s *Server) handleGlassesTasks(w http.ResponseWriter, r *http.Request) {
 		"offset":  offset,
 		"limit":   limit,
 		"counts":  counts,
+		// Repeated here, and this is the authoritative copy (Task 20238). The
+		// project list carries it too so the first screen costs one request,
+		// but that response has no ?project_idx and so resolves task.mutate
+		// against the default project. A user whose operator binding is scoped
+		// to one project would be told the wrong thing there; this route is
+		// the one that knows which project the wearer actually opened.
+		"dictation": s.dictationStatusFor(r),
 	})
 }
 
