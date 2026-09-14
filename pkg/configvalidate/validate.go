@@ -238,6 +238,10 @@ func Run(ctx context.Context, workdir string, opts ValidateOptions) (*Report, er
 		// 2e'. Other numeric bounds (max_parallel, rate_limit, claudecode caps)
 		checkNumericBounds(rawCfg, add)
 
+		// 2e''. Executor section — the isolation boundary, so a value that
+		// fails to parse must not degrade into "no limit".
+		checkExecutors(rawCfg, add)
+
 		// 2f. Hooks referencing non-executable scripts
 		checkHookScripts(cfg, add)
 
@@ -448,6 +452,33 @@ func checkNumericBounds(cfg *config.Config, add func(Finding)) {
 				Message:  fmt.Sprintf("value %.4f outside 0–100 (percent)", p.val),
 			})
 		}
+	}
+}
+
+// checkExecutors runs the strict executor validator, the same one `cloop
+// config set` rejects a bad value with.
+//
+// Until this existed the executor section had two of its three entry points
+// uncovered: `config set` validated it, Load only clamped it, and this command
+// — the one an operator runs precisely to ask "is my config good?" — never
+// looked at it at all. A hand-edited container runtime, Kubernetes namespace
+// or egress filter could therefore be reported clean here and refused by the
+// driver at the first dispatch.
+//
+// rawCfg rather than the loaded config on purpose: Load's clamp repairs some
+// of these in place, and a validator that inspected the repaired value would
+// report the file as healthy while the operator's actual text stayed wrong.
+//
+// ValidateExecutors reports the first problem rather than all of them, which
+// matches what `cloop config set` prints for the same input; a second opinion
+// here would be a second place for the two to disagree.
+func checkExecutors(cfg *config.Config, add func(Finding)) {
+	if err := config.ValidateExecutors(cfg.Executors); err != nil {
+		add(Finding{
+			Severity: SeverityError,
+			Field:    "config.executors",
+			Message:  err.Error(),
+		})
 	}
 }
 

@@ -11,13 +11,17 @@ package hubdoctor
 // so nothing reports — which is precisely the shape of finding this command
 // exists to surface.
 //
-// What the checks do NOT do is dial the proxy. A doctor run happens on the host
-// and often before the listener is up, and the interesting question is not
-// "does this port answer" but "will a sandbox, on its own network, reach the
-// URL it is about to be handed" — which cannot be answered from here. Reading
-// the config is the narrower and more honest answer.
+// Reading the config answers most of this, but it cannot answer for the
+// advertised URL. That value is handed to a sandbox and consumed on the far
+// side of a network boundary, so loopback is the only wrongness legible in the
+// text — an address that resolves on the hub and nowhere a Pod can see it
+// reads exactly like a correct one. reachability.go dials it for that reason,
+// and is deliberate about what a dial from here settles: the hub is not on the
+// sandbox's network, and a Service name that fails to resolve here is
+// frequently the correct configuration, so the probe reports and never fails.
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strings"
@@ -27,7 +31,7 @@ import (
 )
 
 // checkGitProxy reports whether git pushes from sandboxes are brokered.
-func checkGitProxy(cfg *config.Config, add addFn) {
+func checkGitProxy(ctx context.Context, cfg *config.Config, opts Options, add addFn) {
 	g := cfg.Executors.GitProxy
 
 	if !g.Enabled {
@@ -110,6 +114,30 @@ func checkGitProxy(cfg *config.Config, add addFn) {
 			Remediation: "Set executors.git_proxy.advertise_url to an address reachable from " +
 				"the sandbox's network, not from the hub's",
 		})
+	}
+
+	// Dialling it is separate from reading it, and reported separately, because
+	// the two answer different questions: the checks above ask whether the
+	// value is the kind of address a sandbox could use, this one asks whether
+	// anything is actually there. A loopback URL fails the first and passes the
+	// second, which is exactly the combination worth seeing spelled out.
+	if adv != "" {
+		target, err := dialTarget(adv)
+		if err != nil {
+			add(Finding{
+				Check:    "gitproxy.advertise_reachable",
+				Title:    "Git proxy reachability",
+				Severity: SeverityWarn,
+				Message: fmt.Sprintf("executors.git_proxy.advertise_url %q could not be turned into an "+
+					"address to dial: %v", adv, err),
+				Remediation: "Set executors.git_proxy.advertise_url to an absolute URL such as " +
+					"https://cloop-gitproxy.cloop.svc:8443",
+			})
+		} else {
+			add(reachFinding("gitproxy.advertise_reachable", "Git proxy reachability",
+				"the git proxy", "executors.git_proxy.advertise_url",
+				probeReach(ctx, opts, target), opts))
+		}
 	}
 
 	// A widened allowlist is legitimate and deliberate, and worth saying out

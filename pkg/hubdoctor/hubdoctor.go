@@ -47,6 +47,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"time"
 
@@ -195,6 +196,12 @@ type Options struct {
 	// LookPath overrides executable lookup, for the cosign check. Tests
 	// substitute it; nil means exec.LookPath.
 	LookPath func(string) (string, error)
+
+	// DialContext overrides the dialer used by the advertised-address
+	// reachability probes. Tests substitute one so a case can produce a
+	// refusal or a resolution failure without depending on what the machine
+	// running the suite can reach; nil means a plain net.Dialer.
+	DialContext func(ctx context.Context, network, addr string) (net.Conn, error)
 }
 
 // DefaultProbeTimeout bounds one network probe. Ten seconds is long enough for
@@ -274,8 +281,10 @@ func Run(ctx context.Context, dir string, cfg *config.Config, opts Options) *Rep
 	checkRBAC(cfg, add)
 	checkImagePolicy(ctx, cfg, opts, add)
 	checkExecutors(ctx, dir, cfg, opts, add)
-	checkGitProxy(cfg, add)
+	checkGitProxy(ctx, cfg, opts, add)
+	checkEgressBroker(ctx, cfg, opts, add)
 	checkStorage(dir, add)
+	checkConfigDrift(dir, add)
 	checkRetention(dir, cfg, add)
 	checkAdmission(cfg, add)
 

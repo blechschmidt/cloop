@@ -100,53 +100,84 @@ func (f EgressFilter) filtersDirectly() bool {
 	return f.Enabled && (len(f.AllowCIDRs) > 0 || f.AllowPublicInternet || f.Broker != "" || len(f.Resolvers) > 0)
 }
 
-// Policy compiles the filter.
+// Policy compiles the filter for use, refusing a filter that is switched off.
 //
-// It is exported and pure so that pkg/config can validate an operator's YAML
-// against exactly the rules the driver will apply, and so `cloop egress
-// firewall` can render what a given configuration would install without
-// touching the host.
+// It is exported and pure so that `cloop egress firewall` can render what a
+// given configuration would install without touching the host. Callers that
+// want to *validate* an authorisation rather than apply it want Compile,
+// which does not care whether the switch is on.
 func (f EgressFilter) Policy() (netfilter.Policy, error) {
 	if !f.Enabled {
 		return netfilter.Policy{}, fmt.Errorf("container: egress filter is not enabled")
 	}
+	p, err := f.Compile()
+	if err != nil {
+		return netfilter.Policy{}, fmt.Errorf("container: egress filter: %w", err)
+	}
+	return p, nil
+}
+
+// Compile turns the filter into the policy the nftables renderer consumes,
+// whether or not Enabled is set.
+//
+// The Enabled-independence is the point, and it mirrors
+// kubernetes.EgressFilter.Compile. pkg/config compiles at load so that a CIDR
+// with a typo in it is a startup error naming the key; if that check skipped
+// switched-off sections, the typo would sit in the file until the day an
+// operator flipped the boolean, and would surface then as a sandbox whose
+// every network request fails — the furthest possible point from the edit
+// that caused it.
+//
+// Errors name the YAML key and the offending value, unprefixed, because the
+// operator reading one is looking at their config file. Callers applying a
+// filter rather than checking one (Policy, Validate) add the driver context.
+func (f EgressFilter) Compile() (netfilter.Policy, error) {
+	in, err := f.input()
+	if err != nil {
+		return netfilter.Policy{}, err
+	}
+	return netfilter.Compile(in)
+}
+
+// input projects the filter onto the authorisation netfilter compiles.
+func (f EgressFilter) input() (netfilter.Input, error) {
 	in := netfilter.Input{
 		AllowPublicInternet: f.AllowPublicInternet,
 		AllowAllPorts:       f.AllowAllPorts,
 		HostPatterns:        f.HostPatterns,
 	}
-	for _, c := range f.AllowCIDRs {
+	for i, c := range f.AllowCIDRs {
 		p, err := netip.ParsePrefix(strings.TrimSpace(c))
 		if err != nil {
-			return netfilter.Policy{}, fmt.Errorf(
-				"container: egress filter CIDR %q is not a prefix (want 10.0.0.0/8 or 2001:db8::/32)", c)
+			return netfilter.Input{}, fmt.Errorf(
+				"allow_cidrs[%d]: %q is not a CIDR (want a form like 10.0.0.0/8 or 2001:db8::/32)", i, c)
 		}
 		in.AllowCIDRs = append(in.AllowCIDRs, p)
 	}
-	for _, p := range f.AllowPorts {
+	for i, p := range f.AllowPorts {
 		if p <= 0 || p > 65535 {
-			return netfilter.Policy{}, fmt.Errorf("container: egress filter port %d is out of range", p)
+			return netfilter.Input{}, fmt.Errorf("allow_ports[%d]: %d is not a port (1-65535)", i, p)
 		}
 		in.AllowPorts = append(in.AllowPorts, uint16(p))
 	}
 	if f.Broker != "" {
 		ap, err := parseEndpoint(f.Broker, 0)
 		if err != nil {
-			return netfilter.Policy{}, fmt.Errorf("container: egress filter broker %q: %w", f.Broker, err)
+			return netfilter.Input{}, fmt.Errorf("broker: %q: %w", f.Broker, err)
 		}
 		in.Brokers = append(in.Brokers, ap)
 	}
-	for _, r := range f.Resolvers {
+	for i, r := range f.Resolvers {
 		// A resolver written without a port means the standard one. That is
 		// the only defaulting here: a broker endpoint has no standard port,
 		// so it must be spelled out.
 		ap, err := parseEndpoint(r, 53)
 		if err != nil {
-			return netfilter.Policy{}, fmt.Errorf("container: egress filter resolver %q: %w", r, err)
+			return netfilter.Input{}, fmt.Errorf("resolvers[%d]: %q: %w", i, r, err)
 		}
 		in.Resolvers = append(in.Resolvers, ap)
 	}
-	return netfilter.Compile(in)
+	return in, nil
 }
 
 // parseEndpoint accepts "addr:port" or, when defaultPort is non-zero, a bare
@@ -175,6 +206,11 @@ func parseEndpoint(s string, defaultPort uint16) (netip.AddrPort, error) {
 }
 
 // Validate checks the filter without touching the host.
+//
+// A switched-off filter is accepted unconditionally: this runs when the driver
+// builds an executor, and refusing to register one over a typo in an inert
+// section would turn a latent misconfiguration into an outage. Reporting that
+// typo is pkg/config's job, where the operator is looking at the file.
 func (f EgressFilter) Validate() error {
 	if !f.Enabled {
 		return nil
@@ -183,10 +219,13 @@ func (f EgressFilter) Validate() error {
 		return fmt.Errorf("container: egress filter is enabled but allows nothing and is not internal — " +
 			"set internal: true to route the sandbox through the broker, or name the CIDRs it may reach")
 	}
-	if f.filtersDirectly() {
-		if _, err := f.Policy(); err != nil {
-			return err
-		}
+	// Compiled even when the filter relies on an --internal network alone and
+	// installs no ruleset. A port list that cannot be compiled is still a port
+	// list the operator wrote, and a per-project egress scope can add the
+	// destinations that turn it into a ruleset later — at which point the
+	// error would surface against a project rather than against the config.
+	if _, err := f.Compile(); err != nil {
+		return fmt.Errorf("container: egress filter: %w", err)
 	}
 	return nil
 }

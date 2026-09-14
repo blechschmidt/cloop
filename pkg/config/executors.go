@@ -473,6 +473,21 @@ func ValidateContainerExecutor(c ContainerExecutorConfig) error {
 		return fmt.Errorf("executors.container.selinux_label must be empty, \"z\", or \"Z\" (got %q)", c.SELinuxLabel)
 	}
 
+	// The egress filter is compiled, not pattern-matched — the same call the
+	// driver makes when it renders the sandbox's nftables ruleset, so anything
+	// refused here is refused for the reason it will be refused later, in the
+	// operator's own vocabulary and while they still have the file open.
+	//
+	// Compiled regardless of egress_filter.enabled, matching
+	// ValidateKubernetesExecutor. A switched-off section is the case this
+	// catches that nothing else does: DriverOptions below reaches the driver's
+	// Validate, which accepts an inert filter without looking at it, so a
+	// mistyped CIDR under enabled: false survives `cloop config set` today and
+	// resurfaces months later as a sandbox whose every network request fails.
+	if _, err := c.EgressFilter.driverFilter().Compile(); err != nil {
+		return fmt.Errorf("executors.container.egress_filter: %w", err)
+	}
+
 	// Delegated to the driver so the sandbox-critical checks (network name,
 	// image reference, denied flags) have a single definition.
 	if _, err := c.DriverOptions(); err != nil {
@@ -843,6 +858,33 @@ func clampContainerExecutor(c *ContainerExecutorConfig) []string {
 			"executors.container.oci_runtime: %v — executor disabled rather than silently "+
 				"falling back to the default runtime, which would be a weaker sandbox than configured", err))
 		c.Enabled = false
+	}
+	// The egress filter is the one field here that is never repaired, for the
+	// reason clampKubernetesExecutor gives: dropping the CIDR an operator
+	// mistyped leaves a filter narrower than they wrote, and dropping the
+	// filter leaves one wider. Neither is a repair, so what happens instead
+	// depends on whether there is a security control to lose.
+	//
+	// A filter that is switched *on* and will not compile is a control the
+	// executor cannot enforce, so the executor is not registered — a hub with
+	// one fewer executor is visible and diagnosable, a hub whose sandboxes are
+	// less confined than its config says is not. A filter that is switched
+	// *off* and will not compile confines nothing either way, so it is only
+	// warned about: disabling an executor over an inert typo would be an
+	// outage with no security gain. Either way Load reports it, which is the
+	// gap this closes — until now Load compiled the Kubernetes filter and
+	// never looked at the container one.
+	if _, err := c.EgressFilter.driverFilter().Compile(); err != nil {
+		if c.EgressFilter.Enabled && c.Enabled {
+			changed = append(changed, fmt.Sprintf(
+				"executors.container: disabled because egress_filter is unusable: %v", err))
+			c.Enabled = false
+		} else {
+			changed = append(changed, fmt.Sprintf(
+				"executors.container.egress_filter: %v — left as written because the section "+
+					"is switched off, but every sandbox network request will fail if it is "+
+					"switched on", err))
+		}
 	}
 	return changed
 }

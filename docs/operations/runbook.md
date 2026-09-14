@@ -121,12 +121,25 @@ What it checks, and what each one catches that nothing else does:
 | `rbac` | the mappings parse, the default role's blast radius, group bindings with no `groups` scope, and **whether anybody maps to admin** |
 | `images` | policy validity, digest pinning, cosign actually installed when `require_signature` is on, the hub's own executor images against its own policy, and registry reachability |
 | `executors` | reconciliation diagnostics, the strict-mode gate, and a liveness probe plus capability report per executor |
+| `gitproxy` | whether pushes are brokered at all, TLS material, the branch allowlist and delete authority, and whether the advertised URL is one a sandbox could use — plus a bounded dial of it |
+| `egress` | whether the broker is on, whether the advertised address is one a sandbox could use, a bounded dial of it, and the trap of an `internal: true` filter with no broker to proxy through |
 | `storage` | `quick_check`, the schema version against this binary's — the rollback case, naming the build that moved the schema — and whether `CLOOP_ALLOW_SCHEMA_DOWNGRADE` is suppressing that guard |
+| `config` | drift between `.cloop/config.yaml` and the copy mirrored in `state.db`, which is what "I changed that setting and nothing happened" usually is |
 | `quotas`, `budget` | policy validity, limits set to `0` (which means *none allowed*, not unlimited), and unbounded spend on a multi-tenant hub |
 
 Exit is 1 on any failure and 0 with only warnings, so it is usable as a
 deployment gate. `--strict` fails on warnings too. Every non-pass finding
 carries a one-line remediation; the `check` ids in `--json` are stable.
+
+Two of those checks dial rather than read, because `executors.git_proxy.advertise_url`
+and `executors.egress.advertise_addr` are the only config values a hub hands to a
+sandbox and never uses itself — so a value that is right on the hub and unroutable
+from a Pod is invisible everywhere else. The dial is bounded (3 s, or `--timeout`)
+and never fails the run: the hub is not on the sandbox's network, and a Kubernetes
+Service name that does not resolve on the hub is frequently the *correct* setting.
+Read `gitproxy.advertise_reachable` and `egress.advertise_reachable` as "nothing is
+listening" versus "this was never checked" — which were previously the same green
+line. `--offline` reports them as skipped rather than passing.
 
 Run it twice: once before the first `helm install` or `docker compose up`, and
 once in CI against the config repo. `--offline` makes the second cheap.

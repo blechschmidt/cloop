@@ -2080,6 +2080,22 @@ func Load(workdir string) (*Config, error) {
 	return cfg, nil
 }
 
+// statesOwnOutcome reports whether a clamp message already says what happened
+// to the value, in which case appending the generic "clamped to default" would
+// contradict it in the same sentence.
+//
+// Almost every repair here resets a field, and for those the generic suffix is
+// the whole outcome. Two kinds of message are exceptions. Some sections
+// disable themselves, because for them the default is *weaker* than the value
+// being rejected — an executor whose oci_runtime is malformed must not fall
+// back to runc. Others deliberately change nothing: a container egress filter
+// that will not compile while switched off confines nothing either way, so
+// there is no repair to make and no control to lose, and the warning exists
+// only so the operator learns about it before flipping the boolean.
+func statesOwnOutcome(msg string) bool {
+	return strings.Contains(msg, "disabled") || strings.Contains(msg, "left as written")
+}
+
 // validateAndClamp inspects user-supplied numeric values, warns once per
 // (path, field) when a value is outside the safe range, and resets the field
 // to its zero value (= "use default") so the runtime cannot be steered into
@@ -2100,12 +2116,8 @@ func (c *Config) validateAndClamp(path string) {
 			return
 		}
 		// "clamped to default" is the outcome for almost every repair here, but
-		// not all: a few sections disable themselves instead, because for them
-		// the default is *weaker* than the value being rejected (an executor
-		// whose oci_runtime is malformed must not fall back to runc). Those
-		// messages state their own outcome, and appending the generic one would
-		// contradict it in the same sentence.
-		if strings.Contains(msg, "disabled") {
+		// not all — see statesOwnOutcome.
+		if statesOwnOutcome(msg) {
 			fmt.Fprintf(os.Stderr, "warning: config %s: %s\n", field, msg)
 			return
 		}
