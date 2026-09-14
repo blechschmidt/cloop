@@ -86,11 +86,29 @@ func AllCloopRunPIDs() []int {
 // cwd satisfies the supplied predicate. It returns nil if /proc cannot be
 // read (e.g. non-Linux hosts) — callers treat nil and empty identically.
 func cloopRunPIDs(match func(cwd string) bool) []int {
+	var pids []int
+	forEachCloopRun(func(pid int, cwd string) {
+		if match(cwd) {
+			pids = append(pids, pid)
+		}
+	})
+	return pids
+}
+
+// forEachCloopRun walks /proc once and invokes visit with the PID and working
+// directory of every "cloop run" process. It is the shared body behind both
+// cloopRunPIDs and ScanRunningDirs, so the two cannot drift on what counts as a
+// run. It returns without visiting anything if /proc cannot be read.
+//
+// The executable is checked before the other two reads: on a host with several
+// hundred processes almost none of them are cloop, and the check is the
+// cheapest discriminator available, so testing it first skips two syscalls per
+// uninteresting process.
+func forEachCloopRun(visit func(pid int, cwd string)) {
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
-		return nil
+		return
 	}
-	var pids []int
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
@@ -101,7 +119,7 @@ func cloopRunPIDs(match func(cwd string) bool) []int {
 			continue
 		}
 		exePath, err := os.Readlink("/proc/" + name + "/exe")
-		if err != nil {
+		if err != nil || !isCloopExe(exePath) {
 			continue
 		}
 		cmdline, err := os.ReadFile("/proc/" + name + "/cmdline")
@@ -112,12 +130,17 @@ func cloopRunPIDs(match func(cwd string) bool) []int {
 		if err != nil {
 			continue
 		}
-		if cloopRunMatch(exePath, splitCmdline(cmdline), cwd, match) {
-			pids = append(pids, pidNum)
+		// The full decision still goes through cloopRunMatch so the rules stay
+		// in the one place that is unit-tested without a live /proc.
+		if cloopRunMatch(exePath, splitCmdline(cmdline), cwd, matchAnyDir) {
+			visit(pidNum, cwd)
 		}
 	}
-	return pids
 }
+
+// matchAnyDir is the cwd predicate that accepts every directory, used when the
+// caller filters (or indexes) the results itself.
+func matchAnyDir(string) bool { return true }
 
 // cloopRunMatch is the pure decision function extracted from cloopRunPIDs so
 // the matching rules can be unit-tested without a live /proc filesystem.
@@ -592,6 +615,10 @@ type ProjectStatus struct {
 	ActiveTasks  int       `json:"active_tasks"`
 	TotalSteps   int       `json:"total_steps"`
 	LastActivity time.Time `json:"last_activity"`
+	// LastStepTime is the timestamp of the project's most recent step. It is
+	// kept off the wire and exists so RefreshHealth can re-derive staleness
+	// from a cached status without reloading the project.
+	LastStepTime time.Time `json:"-"`
 	Provider     string    `json:"provider,omitempty"`
 	Model        string    `json:"model,omitempty"`
 	PMMode       bool      `json:"pm_mode"`
@@ -612,7 +639,18 @@ type ProjectStatus struct {
 }
 
 // GetStatus loads the state for the project at path and returns a ProjectStatus.
+//
+// It determines liveness itself by walking /proc. A caller refreshing many
+// projects at once should scan once and use GetStatusUsing instead, or it pays
+// for that walk per project.
 func GetStatus(entry ProjectEntry) ProjectStatus {
+	return GetStatusUsing(entry, IsCloopRunningInDir(entry.Path))
+}
+
+// GetStatusUsing is GetStatus for a caller that has already determined whether
+// a run is executing in the project — typically from a single ScanRunningDirs
+// shared across the whole registry.
+func GetStatusUsing(entry ProjectEntry, running bool) ProjectStatus {
 	ps := ProjectStatus{
 		Name:   entry.Name,
 		Path:   entry.Path,
@@ -669,28 +707,50 @@ func GetStatus(entry ProjectEntry) ProjectStatus {
 		}
 	}
 
+	ps.LastStepTime = st.LastStepTime
 	ps.Health = computeHealth(st)
-	ps.Running = IsCloopRunningInDir(entry.Path)
+	ps.Running = running
 	return ps
+}
+
+// RefreshHealth recomputes the time-derived part of Health from the fields the
+// status already carries, so a caller holding a cached ProjectStatus can keep
+// its staleness indicator current without reloading the project.
+//
+// Health is the one field that moves on its own: a run that stops writing is
+// "running" for fifteen minutes and "stalled" after, with no state change in
+// between to notice. Everything else in a ProjectStatus only changes when the
+// project's state does.
+func (ps *ProjectStatus) RefreshHealth() {
+	if !ps.HasProject {
+		return
+	}
+	ps.Health = healthFrom(ps.Status, ps.Goal, ps.LastActivity, ps.LastStepTime)
 }
 
 // computeHealth derives a Health indicator from the project state.
 func computeHealth(st *state.ProjectState) Health {
-	switch st.Status {
+	return healthFrom(st.Status, st.Goal, st.UpdatedAt, st.LastStepTime)
+}
+
+// healthFrom holds the health rules over exactly the four fields they read, so
+// the same rules serve both a freshly loaded state and a cached ProjectStatus.
+func healthFrom(status, goal string, updatedAt, lastStepTime time.Time) Health {
+	switch status {
 	case "running", "evolving":
 		// If state was updated recently the run is still active — never stalled.
-		if !st.UpdatedAt.IsZero() && time.Since(st.UpdatedAt) <= 15*time.Minute {
+		if !updatedAt.IsZero() && time.Since(updatedAt) <= 15*time.Minute {
 			return HealthRunning
 		}
 		// Check for stall: last step older than 15 minutes while status is
-		// running. Reads st.LastStepTime so this works under both Load and
-		// LoadLite (where st.Steps is nil but LastStepTime is populated
-		// from a cheap SQL aggregate — Task 20125).
-		if !st.LastStepTime.IsZero() && time.Since(st.LastStepTime) > 15*time.Minute {
+		// running. Reads LastStepTime so this works under both Load and
+		// LoadLite (where Steps is nil but LastStepTime is populated from a
+		// cheap SQL aggregate — Task 20125).
+		if !lastStepTime.IsZero() && time.Since(lastStepTime) > 15*time.Minute {
 			return HealthStalled
 		}
 		// If we have no steps but UpdatedAt is older than 15 min, consider stalled.
-		if !st.UpdatedAt.IsZero() && time.Since(st.UpdatedAt) > 15*time.Minute {
+		if !updatedAt.IsZero() && time.Since(updatedAt) > 15*time.Minute {
 			return HealthStalled
 		}
 		return HealthRunning
@@ -701,7 +761,7 @@ func computeHealth(st *state.ProjectState) Health {
 	case "paused", "initialized":
 		return HealthIdle
 	default:
-		if st.Goal != "" {
+		if goal != "" {
 			return HealthIdle
 		}
 		return HealthUnknown

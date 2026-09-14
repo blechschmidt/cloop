@@ -570,7 +570,6 @@ type Server struct {
 	// between the two reads appear in one and not the other.
 	projStatuses []multiui.ProjectStatus
 	projEntries  []multiui.ProjectEntry
-	projLastMod  map[string]time.Time // path -> last mod time
 
 	// Per-project chat conversation histories (keyed by resolved workDir path).
 	chatMu        sync.Mutex
@@ -5353,17 +5352,88 @@ func (s *Server) cachedRunningClaims() map[string]struct{} {
 	return claims
 }
 
-// refreshProjectStatuses rebuilds the projStatuses cache from disk.
+// refreshProjectStatuses rebuilds the projStatuses cache from disk, reloading
+// every project.
 func (s *Server) refreshProjectStatuses() {
-	entries := s.allProjectEntries()
+	s.refreshProjectStatusesUsing(s.allProjectEntries(), multiui.ScanRunningDirs(), nil)
+}
+
+// refreshProjectStatusesUsing rebuilds the projStatuses cache for a caller that
+// has already listed the projects and scanned for running processes.
+//
+// Two reasons it takes both. The scan, because GetStatus determines liveness by
+// walking /proc — rebuilding the cache the obvious way walked it once per
+// registered project, which on the sweep's path was a second full
+// (projects × processes) pass on top of the one the sweep already did.
+//
+// And changed, because a project whose state has not been written cannot have a
+// new status to read. Reloading it anyway meant that one tenant saving a task
+// opened, migrated and queried every other tenant's database — the cost of a
+// single active project scaled with how many idle ones it had for company. A
+// nil changed set reloads everything, which is what a caller with no idea what
+// moved has to do.
+//
+// The reused entries still get their liveness and their staleness re-derived:
+// those are the two fields that move without the project's state moving.
+func (s *Server) refreshProjectStatusesUsing(entries []multiui.ProjectEntry, live multiui.RunningDirs, changed map[string]struct{}) {
+	var cached map[string]multiui.ProjectStatus
+	if changed != nil {
+		s.projMu.RLock()
+		cached = make(map[string]multiui.ProjectStatus, len(s.projStatuses))
+		for _, st := range s.projStatuses {
+			cached[st.Path] = st
+		}
+		s.projMu.RUnlock()
+	}
+
 	statuses := make([]multiui.ProjectStatus, 0, len(entries))
 	for _, e := range entries {
-		statuses = append(statuses, multiui.GetStatus(e))
+		running := live.Contains(e.Path)
+		if _, dirty := changed[e.Path]; !dirty {
+			if prev, ok := cached[e.Path]; ok {
+				// Entry metadata is authoritative from the registry, not from
+				// whatever it was when the project was last loaded.
+				prev.Name, prev.Path = e.Name, e.Path
+				prev.Running = running
+				prev.RefreshHealth()
+				statuses = append(statuses, prev)
+				continue
+			}
+		}
+		statuses = append(statuses, multiui.GetStatusUsing(e, running))
 	}
+
 	s.projMu.Lock()
 	s.projStatuses = statuses
 	s.projEntries = entries
 	s.projMu.Unlock()
+}
+
+// subscribedPaths returns the set of project paths with at least one live
+// WebSocket subscriber, read under a single lock rather than one per project.
+func (s *Server) subscribedPaths() map[string]struct{} {
+	s.hubMu.Lock()
+	defer s.hubMu.Unlock()
+	paths := make(map[string]struct{}, len(s.hubClients))
+	for path, clients := range s.hubClients {
+		if len(clients) > 0 {
+			paths[path] = struct{}{}
+		}
+	}
+	return paths
+}
+
+// runStateSnapshot copies the last run state this server broadcast, for every
+// project it has ever broadcast one for. The sweep reads it once per tick
+// instead of taking runStateMu twice per project.
+func (s *Server) runStateSnapshot() map[string]bool {
+	s.runStateMu.Lock()
+	defer s.runStateMu.Unlock()
+	snap := make(map[string]bool, len(s.runStates))
+	for path, running := range s.runStates {
+		snap[path] = running
+	}
+	return snap
 }
 
 // stateModTime returns the newest modification time across every file a
@@ -5400,20 +5470,13 @@ func stateModTime(dir string) (time.Time, bool) {
 // updates to SSE clients on change. It returns when ctx is cancelled so Run
 // can shut down cleanly instead of leaking the polling goroutine.
 func (s *Server) watchProjects(ctx context.Context) {
-	s.projLastMod = make(map[string]time.Time)
+	sw := newProjectSweep()
 	s.refreshProjectStatuses()
 
 	// Resolve anything a run left stranded while this hub was down. The
 	// per-tick edge below cannot see those: it needs a previous run state, and
 	// a hub that has just started has none.
 	s.reconcileDeadRunsOnStartup()
-
-	// reconcileAt holds, per project, the earliest time at which the sweep
-	// below may act on a persisted "running" that has nothing behind it —
-	// first to wait out a transient /proc miss, then to space out retries for
-	// a repair that cannot be applied. Local to the watcher goroutine: nothing
-	// else reads it, so it needs no lock.
-	reconcileAt := make(map[string]time.Time)
 
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
@@ -5425,119 +5488,271 @@ func (s *Server) watchProjects(ctx context.Context) {
 		}
 		func() {
 			defer recoverGoroutine("watchProjects iteration")
-			var changedPaths []string
-			for _, e := range s.allProjectEntries() {
-				mod, ok := stateModTime(e.Path)
-				if !ok {
-					continue
-				}
-				prev := s.projLastMod[e.Path]
-				if !mod.Equal(prev) {
-					s.projLastMod[e.Path] = mod
-					changedPaths = append(changedPaths, e.Path)
-				}
-			}
-			if len(changedPaths) > 0 {
-				s.refreshProjectStatuses()
-				s.broadcastProjectsUpdate()
-
-				// Task 20134: push a state_diff for every project whose state
-				// file changed so subscribers receive the delta over WebSocket
-				// without having to refetch /api/state. Primary project diffs
-				// are already handled by watchState (1s cadence); skipping it
-				// here avoids a duplicate cache lookup. Only load state for
-				// projects with active WebSocket subscribers to keep the
-				// secondary-project case zero-cost when nobody is watching.
-				primaryAbs, _ := filepath.Abs(s.WorkDir)
-				for _, path := range changedPaths {
-					if path == primaryAbs {
-						continue
-					}
-					s.hubMu.Lock()
-					hasSubs := len(s.hubClients[path]) > 0
-					s.hubMu.Unlock()
-					if !hasSubs {
-						continue
-					}
-					if ps, err := state.LoadLite(path); err == nil {
-						s.broadcastStateDiff(path, ps)
-					}
-				}
-			}
-
-			// Independently of state-file changes, sample running status for each
-			// project so externally-started cloop processes flip the Run/Stop
-			// buttons without the client having to poll /api/livelog. handleRun
-			// already pushes a forced run_state on internal start; this loop
-			// catches in-flight transitions and externally-started runs.
-			//
-			// A running→stopped transition is also the moment to resolve what
-			// the departed run left behind — a task marked in_progress that
-			// nothing intends to finish, and a project status that still says
-			// "running". Tested before the broadcast, which is what updates the
-			// previous-state map the edge is read from.
-			//
-			// The edge is not the only trigger, because it only fires for a run
-			// this hub watched die. A run that was already gone when the hub
-			// first looked — started from the CLI, or outliving a hub restart
-			// by less than a tick — produces no transition, and before this
-			// sweep such a project stayed "running" on the dashboard until
-			// somebody pressed Stop and was told the state had been stale all
-			// along. So a persisted "running" with nothing behind it is itself
-			// a trigger, held for staleRunGrace first because, unlike the edge,
-			// it rests on the absence of evidence.
-			//
-			// That second trigger reads the persisted status from the status
-			// cache rather than from disk. The cache is rebuilt whenever a
-			// project's state file changes, so it cannot miss a run starting —
-			// and reading it costs nothing, where a per-project LoadLite every
-			// two seconds would put the whole registry back on the I/O path
-			// this loop was pulled off (Task 20125).
-			claimsRunning := s.cachedRunningClaims()
-			armed := make(map[string]struct{}, len(reconcileAt))
-			for _, e := range s.allProjectEntries() {
-				running := multiui.IsCloopRunningInDir(e.Path)
-				prev, known := s.wasRunning(e.Path)
-				_, claimed := claimsRunning[e.Path]
-				now := time.Now()
-				switch {
-				case running:
-					delete(reconcileAt, e.Path)
-				case known && prev:
-					// Watched it stop: positive evidence, so no grace needed.
-					// Checked before the status claim, because a run can strand
-					// a task without stranding the project status and that task
-					// still has to be resolved.
-					delete(reconcileAt, e.Path)
-					s.reconcileDeadRun(e.Path, runVerdict{})
-				case !claimed:
-					delete(reconcileAt, e.Path)
-				default:
-					due, armedAlready := reconcileAt[e.Path]
-					if !armedAlready {
-						reconcileAt[e.Path] = now.Add(staleRunGrace)
-					} else if !now.Before(due) {
-						s.reconcileDeadRun(e.Path, runVerdict{})
-						// Re-arm rather than clear. A successful repair takes
-						// the project out of claimsRunning on the next tick and
-						// the entry goes with it; one that could not be applied
-						// — a state file pointing elsewhere, an unreadable
-						// database — would otherwise be retried, with a full
-						// state load and a warning, on every single tick.
-						reconcileAt[e.Path] = now.Add(staleRunRetry)
-					}
-					armed[e.Path] = struct{}{}
-				}
-				s.broadcastRunState(e.Path, running, false)
-			}
-			// Drop timers for projects that have since been deregistered, so
-			// the map stays bounded by what is on the dashboard now.
-			for path := range reconcileAt {
-				if _, ok := armed[path]; !ok {
-					delete(reconcileAt, path)
-				}
-			}
+			s.sweepProjectsTick(sw, time.Now())
 		}()
+	}
+}
+
+// projectSweep is the watcher goroutine's carry-over between ticks.
+//
+// It lives here rather than on Server because nothing outside that one
+// goroutine reads it, so none of it needs a lock — and because
+// sweepProjectsTick has to be callable from a benchmark with state that starts
+// empty and stays private to the caller.
+type projectSweep struct {
+	// lastMod is the newest state-file timestamp seen for each project. It is
+	// what turns a stat into a change event.
+	lastMod map[string]time.Time
+	// reconcileAt holds, per project, the earliest time at which the sweep may
+	// act on a persisted "running" that has nothing behind it — first to wait
+	// out a transient /proc miss, then to space out retries for a repair that
+	// cannot be applied.
+	reconcileAt map[string]time.Time
+	// nextStat holds, per dormant project, the earliest time at which its
+	// state files are worth statting again. See statDue.
+	nextStat map[string]time.Time
+}
+
+func newProjectSweep() *projectSweep {
+	return &projectSweep{
+		lastMod:     make(map[string]time.Time),
+		reconcileAt: make(map[string]time.Time),
+		nextStat:    make(map[string]time.Time),
+	}
+}
+
+// statBackoffAfter is how long a project's state must have gone untouched
+// before the sweep stops statting it on every tick.
+//
+// Well beyond any gap a live run leaves between writes, so a project that is
+// merely between steps is never mistaken for a dormant one.
+const statBackoffAfter = 10 * time.Minute
+
+// statBackoff is how often a dormant project is statted instead.
+const statBackoff = 30 * time.Second
+
+// statDue reports whether this tick should stat path's state files.
+//
+// Every project is statted on every tick unless it is demonstrably dormant:
+// nothing running in it, nobody watching it, and nothing written to it for
+// statBackoffAfter. Those three are what make a deferral unobservable.
+//
+// A project that starts or stops is unaffected, because neither is detected
+// here: liveness comes from the per-tick process scan, which is never deferred,
+// and a project found running is put straight back on the fast cadence. The
+// same holds the moment anyone opens it. What a deferral can delay is a state
+// file written from outside this hub — a CLI `cloop task add` against a project
+// that has been idle for ten minutes and that nobody has open — which surfaces
+// within statBackoff instead of within a tick.
+func (sw *projectSweep) statDue(path string, now time.Time, running bool, subscribed map[string]struct{}) bool {
+	last, seen := sw.lastMod[path]
+	if !seen || running {
+		// Never looked at it, or there is a run behind it writing state.
+		delete(sw.nextStat, path)
+		return true
+	}
+	if _, watched := subscribed[path]; watched {
+		delete(sw.nextStat, path)
+		return true
+	}
+	if now.Sub(last) < statBackoffAfter {
+		delete(sw.nextStat, path)
+		return true
+	}
+	if due, deferred := sw.nextStat[path]; deferred && now.Before(due) {
+		return false
+	}
+	sw.nextStat[path] = now.Add(statBackoff)
+	return true
+}
+
+// invalidate puts path back on the fast cadence and makes its next stat report
+// a change.
+//
+// Called when the sweep itself has written to a project, which is the one write
+// a deferral could otherwise hide: a repair happens because nothing is running
+// and nobody is watching, which is exactly the state that qualifies a project
+// for backoff, so without this the dashboard could keep showing a run that the
+// sweep had already cleaned up.
+func (sw *projectSweep) invalidate(path string) {
+	delete(sw.nextStat, path)
+	delete(sw.lastMod, path)
+}
+
+// sweepProjectsTick is one iteration of the watcher loop, split out from
+// watchProjects so its cost can be measured (BenchmarkWatchProjectsTick) rather
+// than argued about. now is passed in so tests can drive the grace timers
+// without sleeping.
+func (s *Server) sweepProjectsTick(sw *projectSweep, now time.Time) {
+	reconcileAt := sw.reconcileAt
+
+	// One registry read per tick. The two passes below used to call this
+	// separately, which read and parsed ~/.cloop/projects.json twice every two
+	// seconds for a list that cannot change in between.
+	entries := s.allProjectEntries()
+
+	// One process-table walk per tick, shared by both passes and by the status
+	// refresh. Each pass used to ask per project, and every one of those
+	// questions walked the whole of /proc.
+	live := multiui.ScanRunningDirs()
+	running := make(map[string]bool, len(entries))
+	for _, e := range entries {
+		running[e.Path] = live.Contains(e.Path)
+	}
+
+	// Which projects somebody actually has open, read once rather than under a
+	// fresh lock per changed project. Used both to push diffs and to keep a
+	// watched project on the fast stat cadence.
+	subscribed := s.subscribedPaths()
+
+	var changedPaths []string
+	changed := make(map[string]struct{})
+	for _, e := range entries {
+		if !sw.statDue(e.Path, now, running[e.Path], subscribed) {
+			continue
+		}
+		mod, ok := stateModTime(e.Path)
+		if !ok {
+			// The state files have gone — a project deleted or replaced
+			// underneath the hub. Treat the disappearance as a change so the
+			// project is reloaded once and stops reporting the task counts of
+			// a database that is no longer there. Reloading everything on any
+			// change used to do this as a side effect; the incremental refresh
+			// has to mean it.
+			if _, tracked := sw.lastMod[e.Path]; tracked {
+				delete(sw.lastMod, e.Path)
+				changedPaths = append(changedPaths, e.Path)
+				changed[e.Path] = struct{}{}
+			}
+			continue
+		}
+		prev := sw.lastMod[e.Path]
+		if !mod.Equal(prev) {
+			sw.lastMod[e.Path] = mod
+			changedPaths = append(changedPaths, e.Path)
+			changed[e.Path] = struct{}{}
+		}
+	}
+	if len(changedPaths) > 0 {
+		s.refreshProjectStatusesUsing(entries, live, changed)
+		s.broadcastProjectsUpdate()
+
+		// Task 20134: push a state_diff for every project whose state
+		// file changed so subscribers receive the delta over WebSocket
+		// without having to refetch /api/state. Primary project diffs
+		// are already handled by watchState (1s cadence); skipping it
+		// here avoids a duplicate cache lookup. Only load state for
+		// projects with active WebSocket subscribers to keep the
+		// secondary-project case zero-cost when nobody is watching.
+		primaryAbs, _ := filepath.Abs(s.WorkDir)
+		for _, path := range changedPaths {
+			if path == primaryAbs {
+				continue
+			}
+			if _, hasSubs := subscribed[path]; !hasSubs {
+				continue
+			}
+			if ps, err := state.LoadLite(path); err == nil {
+				s.broadcastStateDiff(path, ps)
+			}
+		}
+	}
+
+	// Independently of state-file changes, sample running status for each
+	// project so externally-started cloop processes flip the Run/Stop
+	// buttons without the client having to poll /api/livelog. handleRun
+	// already pushes a forced run_state on internal start; this loop
+	// catches in-flight transitions and externally-started runs.
+	//
+	// A running→stopped transition is also the moment to resolve what
+	// the departed run left behind — a task marked in_progress that
+	// nothing intends to finish, and a project status that still says
+	// "running". Tested before the broadcast, which is what updates the
+	// previous-state map the edge is read from.
+	//
+	// The edge is not the only trigger, because it only fires for a run
+	// this hub watched die. A run that was already gone when the hub
+	// first looked — started from the CLI, or outliving a hub restart
+	// by less than a tick — produces no transition, and before this
+	// sweep such a project stayed "running" on the dashboard until
+	// somebody pressed Stop and was told the state had been stale all
+	// along. So a persisted "running" with nothing behind it is itself
+	// a trigger, held for staleRunGrace first because, unlike the edge,
+	// it rests on the absence of evidence.
+	//
+	// That second trigger reads the persisted status from the status
+	// cache rather than from disk. The cache is rebuilt whenever a
+	// project's state file changes, so it cannot miss a run starting —
+	// and reading it costs nothing, where a per-project LoadLite every
+	// two seconds would put the whole registry back on the I/O path
+	// this loop was pulled off (Task 20125).
+	claimsRunning := s.cachedRunningClaims()
+	// The previous run state for every project, read once. Taking
+	// runStateMu twice per project per tick (wasRunning, then
+	// broadcastRunState) put every tenant on a lock that every
+	// WebSocket handshake also takes.
+	prevStates := s.runStateSnapshot()
+	armed := make(map[string]struct{}, len(reconcileAt))
+	for _, e := range entries {
+		isRunning := running[e.Path]
+		prev, known := prevStates[e.Path]
+		_, claimed := claimsRunning[e.Path]
+		switch {
+		case isRunning:
+			delete(reconcileAt, e.Path)
+		case known && prev:
+			// Watched it stop: positive evidence, so no grace needed.
+			// Checked before the status claim, because a run can strand
+			// a task without stranding the project status and that task
+			// still has to be resolved.
+			delete(reconcileAt, e.Path)
+			s.reconcileDeadRun(e.Path, runVerdict{})
+			sw.invalidate(e.Path)
+		case !claimed:
+			delete(reconcileAt, e.Path)
+		default:
+			due, armedAlready := reconcileAt[e.Path]
+			if !armedAlready {
+				reconcileAt[e.Path] = now.Add(staleRunGrace)
+			} else if !now.Before(due) {
+				s.reconcileDeadRun(e.Path, runVerdict{})
+				sw.invalidate(e.Path)
+				// Re-arm rather than clear. A successful repair takes
+				// the project out of claimsRunning on the next tick and
+				// the entry goes with it; one that could not be applied
+				// — a state file pointing elsewhere, an unreadable
+				// database — would otherwise be retried, with a full
+				// state load and a warning, on every single tick.
+				reconcileAt[e.Path] = now.Add(staleRunRetry)
+			}
+			armed[e.Path] = struct{}{}
+		}
+		// Edge-triggered: broadcastRunState suppresses repeats itself,
+		// but reaching it meant a lock, a marshal-guard and a map write
+		// per project per tick regardless. Transitions are rare, so
+		// testing the edge here is what makes an idle tenant free.
+		if !known || prev != isRunning {
+			s.broadcastRunState(e.Path, isRunning, false)
+		}
+	}
+	// Drop carry-over for projects that have since been deregistered,
+	// so the maps stay bounded by what is on the dashboard now. running
+	// is keyed by exactly this tick's entries, which makes it the
+	// membership test for all three.
+	for path := range reconcileAt {
+		if _, ok := armed[path]; !ok {
+			delete(reconcileAt, path)
+		}
+	}
+	for path := range sw.nextStat {
+		if _, ok := running[path]; !ok {
+			delete(sw.nextStat, path)
+		}
+	}
+	for path := range sw.lastMod {
+		if _, ok := running[path]; !ok {
+			delete(sw.lastMod, path)
+		}
 	}
 }
 

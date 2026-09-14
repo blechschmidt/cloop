@@ -1,14 +1,18 @@
 package ui
 
-// Benchmarks for the hub's two per-mutation hot paths: turning a project state
-// into the bytes that go on the wire, and fanning those bytes out to every
-// subscribed tab.
+// Benchmarks for the hub's control-plane hot paths: the two per-mutation ones —
+// turning a project state into the bytes that go on the wire, and fanning those
+// bytes out to every subscribed tab — and the per-tick project sweep, which
+// costs the same whether or not any mutation happens at all.
 //
-// They matter together. Every plan mutation marshals once and then fans out
-// once per connected client, so the cost of a single task edit on a
+// The first two matter together. Every plan mutation marshals once and then
+// fans out once per connected client, so the cost of a single task edit on a
 // multi-tenant hub is (snapshot cost) + (subscribers × handoff cost). Neither
 // term had a number attached to it. The first scales with plan size, the
 // second with tenancy, and both are inputs nobody sets deliberately.
+//
+// The sweep is the floor underneath them: it runs on a two-second timer
+// regardless, so its cost is what a hub pays for merely having tenants.
 //
 // Fanout is measured at 1, 10 and 100 subscribers because the interesting
 // question is not the absolute number but whether it stays linear: the send is
@@ -21,6 +25,8 @@ package ui
 import (
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -264,4 +270,137 @@ func BenchmarkBroadcastStateDiff(b *testing.B) {
 			}
 		})
 	}
+}
+
+// ── the per-tick project sweep ──────────────────────────────────────────────
+
+// benchSweepServer builds a hub with n registered projects, each a real
+// project directory carrying a small plan.
+//
+// Real directories because the sweep's cost is almost entirely syscalls and
+// per-project I/O — stat the state files, walk /proc, and on any change reload
+// every project's status from its database. A synthetic registry pointing at
+// paths that do not exist would short-circuit all of it and measure nothing.
+//
+// The projects are wired in through the --projects flag rather than the
+// on-disk registry so the benchmark does not depend on (or write to) the
+// user's ~/.cloop/projects.json.
+func benchSweepServer(b *testing.B, n int) (*Server, []string) {
+	b.Helper()
+	root := b.TempDir()
+	paths := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		dir := filepath.Join(root, fmt.Sprintf("project-%04d", i))
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			b.Fatalf("mkdir: %v", err)
+		}
+		// Skip the migration run per project: at 500 projects that dominates
+		// setup and none of it is what we are measuring.
+		seedMigratedDB(b, dir)
+		ps, err := state.Init(dir, fmt.Sprintf("tenant %d", i), 0)
+		if err != nil {
+			b.Fatalf("state.Init: %v", err)
+		}
+		ps.PMMode = true
+		ps.Plan = &pm.Plan{Goal: ps.Goal, Tasks: []*pm.Task{
+			{ID: 1, Title: "A task the sweep has to count", Status: pm.TaskDone},
+			{ID: 2, Title: "Another one", Status: pm.TaskPending},
+		}}
+		if err := ps.Save(); err != nil {
+			b.Fatalf("state.Save: %v", err)
+		}
+		paths = append(paths, dir)
+	}
+	// WorkDir is one of the tenants rather than a separate directory, so the
+	// project count is exactly n.
+	srv := New(paths[0], 0, "")
+	srv.Projects = append([]string(nil), paths[1:]...)
+	return srv, paths
+}
+
+// BenchmarkWatchProjectsTick measures one iteration of the hub's project sweep
+// at 10, 100 and 500 registered projects.
+//
+// This is the hub's floor cost: it runs every two seconds whether or not
+// anybody is connected and whether or not any project is doing anything, so it
+// is the price of merely having tenants. It was the one control-plane hot path
+// the Task 20227 benchmarks left uncovered — those measure what a *mutation*
+// costs, and this measures what idling costs.
+//
+// Two shapes, because they exercise very different amounts of work:
+//
+//   - idle: no project's state file has changed since the last tick. This is
+//     the overwhelmingly common case on a hosted hub and should be close to
+//     free per project.
+//   - one-changed: exactly one project wrote to its state file, which is what
+//     a single active tenant looks like. It is worth measuring separately
+//     because a change in *any* project reloads the status of *every* project.
+//
+// Growth across the project counts is the signal, not the absolute numbers:
+// the sweep is inherently O(projects), so what matters is the constant on that
+// term and whether the one-changed shape stays close to the idle one.
+func BenchmarkWatchProjectsTick(b *testing.B) {
+	for _, n := range []int{10, 100, 500} {
+		srv, paths := benchSweepServer(b, n)
+
+		b.Run(fmt.Sprintf("projects=%d/idle", n), func(b *testing.B) {
+			sw := newProjectSweep()
+			// Prime lastMod so the timed iterations see no change; the first
+			// tick against a fresh sweep reports every project as changed.
+			srv.sweepProjectsTick(sw, time.Now())
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				srv.sweepProjectsTick(sw, time.Now())
+			}
+		})
+
+		b.Run(fmt.Sprintf("projects=%d/dormant", n), func(b *testing.B) {
+			// Every project last written long enough ago to qualify for the
+			// stat backoff — a hosted hub whose tenants are between sessions,
+			// which is the shape the deferral exists for. The idle case above
+			// deliberately does not qualify (its projects were written during
+			// setup), so the difference between the two is what the deferral
+			// is worth.
+			old := time.Now().Add(-24 * time.Hour)
+			for _, dir := range paths {
+				for _, f := range stateFilesFor(dir) {
+					_ = os.Chtimes(f, old, old)
+				}
+			}
+			sw := newProjectSweep()
+			srv.sweepProjectsTick(sw, time.Now())
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				srv.sweepProjectsTick(sw, time.Now())
+			}
+		})
+
+		b.Run(fmt.Sprintf("projects=%d/one-changed", n), func(b *testing.B) {
+			sw := newProjectSweep()
+			srv.sweepProjectsTick(sw, time.Now())
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				// Drop one project's remembered timestamp instead of touching
+				// the file: it drives the identical code path without adding
+				// the write to the measurement.
+				b.StopTimer()
+				delete(sw.lastMod, paths[i%len(paths)])
+				b.StartTimer()
+				srv.sweepProjectsTick(sw, time.Now())
+			}
+		})
+	}
+}
+
+// stateFilesFor lists the files stateModTime stats for a project, so a
+// benchmark can backdate them.
+func stateFilesFor(dir string) []string {
+	db := state.StateDBPath(dir)
+	return []string{db, db + "-wal", state.StatePath(dir)}
 }
