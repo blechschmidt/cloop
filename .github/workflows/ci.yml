@@ -839,6 +839,140 @@ jobs:
             for-each-ref --format='%(refname) %(objectname:short) %(contents:subject)' 2>/dev/null \
             || echo "(no remote)"
 
+  eval-stack:
+    name: Eval stack (SSO + remote executor)
+    runs-on: ubuntu-latest
+    # The enterprise onboarding path, booted: docker-compose.yml brings up a
+    # certs one-shot, dex as the IdP, nginx terminating TLS, the hub configured
+    # exactly as `cloop hub bootstrap --behind-proxy` writes it, an enrollment
+    # step and a remote executor agent. Until this job existed nothing in CI ran
+    # any of it — `docker compose` and `dex` did not appear in this file at all.
+    #
+    # What no other job here can cover:
+    #
+    #   deploy-artifacts builds the image and asserts its user and labels, but
+    #   boots the hub alone, over plain http, with a static token.
+    #   flagship-circuit proves hub → container executor → lease → writeback,
+    #   all in one process on one host.
+    #
+    # Neither performs an OIDC login or enrolls an agent over a network — the
+    # two things the documentation tells an operator to do first, and the two
+    # most likely to break silently between releases. Both are covered here, and
+    # deliberately not with a PAT: a token bypasses the identity provider by
+    # design, so every assertion about discovery, PKCE, the code exchange,
+    # ID-token verification and claim-to-role resolution has to come from a real
+    # sign-in. deploy/eval/oidc-login.sh performs one, with curl, against dex.
+    #
+    # Writing it found that `make e2e-stack` was already broken: on a clean boot
+    # the hub preflights its issuer *through the proxy*, which compose can only
+    # start after the hub container exists, so the preflight fails and /readyz
+    # reports the identity gate — while the script asserted it names the
+    # executor one. It died there every time. That is precisely the rot this job
+    # exists to stop, and it had already happened.
+    #
+    # Gating, not advisory. This carries no continue-on-error: the flagship job
+    # was added advisory "until three green runs" and stayed that way through
+    # seventeen, which is how a check that cannot fail becomes permanent. A red
+    # result here means an operator following deploy/README.md hits the same
+    # wall, which is worth stopping a merge for.
+    #
+    # Runtime: ~20s for the stack itself once images are warm, so the cost is
+    # almost entirely the image build — the same build deploy-artifacts already
+    # pays, on its own runner and in parallel. Above the sum of the per-step
+    # budgets below, so a hang trips the step's named deadline rather than this.
+    timeout-minutes: 32
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Pre-pull the stack's third-party images
+        timeout-minutes: 5 # pulls ~170 MB, plus up to ~30s of backoff on retry
+        # The one step here allowed to retry, for the same reason the flagship
+        # job's pull is: its failure is definitionally not a defect in cloop.
+        # Docker Hub rate-limits by source IP and hosted runners share theirs,
+        # so a 429 says nothing about the change under test. Everything
+        # downstream asserts this repository's behaviour and runs exactly once.
+        #
+        # --ignore-buildable pulls only what the stack does not build — dex and
+        # nginx, both pinned to a version tag in docker-compose.yml — so this
+        # stays correct when those pins move without naming them twice. alpine
+        # is pulled separately because e2e.sh runs it directly, to read the
+        # generated certificate out of a volume, rather than as a service.
+        run: |
+          set -euo pipefail
+          alpine=$(grep -oE 'alpine:3\.[0-9]+' deploy/eval/e2e.sh | head -1)
+          [ -n "$alpine" ] || { echo "::error::no pinned alpine in deploy/eval/e2e.sh"; exit 1; }
+
+          # Resolved once, outside the retry loop. An unsupported flag fails
+          # identically to a rate-limited registry, and retrying it three times
+          # would end at the message below — which would then be a lie.
+          if docker compose pull --help 2>&1 | grep -q -- '--ignore-buildable'; then
+            pull=(docker compose pull --ignore-buildable --quiet)
+          else
+            echo "::notice::compose lacks --ignore-buildable; naming the unbuilt services"
+            pull=(docker compose pull --quiet dex proxy)
+          fi
+
+          for attempt in 1 2 3; do
+            if "${pull[@]}" && docker pull -q "$alpine"; then
+              echo "pulled on attempt $attempt"
+              exit 0
+            fi
+            echo "::warning::pull attempt $attempt failed"
+            sleep $((attempt * 10))
+          done
+          echo "::error::could not pull the stack's base images after 3 attempts; this is" \
+               "the registry, not the stack — nothing about cloop is asserted until it succeeds"
+          exit 1
+
+      - name: Build the hub and executor images
+        timeout-minutes: 15 # a cold Go build of both targets
+        # Built in a step of its own so a compile error reports here, by name,
+        # instead of surfacing as "the stack never became healthy" three
+        # assertions into the run. e2e.sh passes --build itself, which is then
+        # a cache hit.
+        run: docker compose build
+
+      - name: Boot the stack and assert the path end to end
+        timeout-minutes: 10 # observed: ~20s warm; the waits inside are bounded
+        env:
+          # Bounds every wait_for in the script. Well under the step deadline so
+          # a stuck wait reports which assertion it was on.
+          TIMEOUT_SECS: "240"
+        # The exit code alone is not sufficient evidence the circuit ran, for
+        # the same reason it is not in the flagship job: a script that exits 0
+        # having asserted nothing is the failure mode a required gate is
+        # supposed to make impossible. e2e.sh prints PASSED only after its last
+        # assertion, so that line is the evidence, and its absence is an error
+        # even when the status is green.
+        run: |
+          set -euo pipefail
+          ./deploy/eval/e2e.sh 2>&1 | tee /tmp/eval-stack.log
+          grep -q '==> PASSED' /tmp/eval-stack.log || {
+            echo "::error::e2e.sh exited 0 without reaching its final assertion — the" \
+                 "SSO and remote-executor path is unverified for this commit"
+            exit 1
+          }
+
+      - name: Stack diagnostics on failure
+        timeout-minutes: 3
+        if: failure()
+        # e2e.sh dumps the logs of any container that exited non-zero, and of
+        # the whole stack on failure, from its own EXIT handler — before
+        # `down -v` destroys them. So the record is already above, in the step
+        # that failed. What is worth adding is what teardown was supposed to
+        # remove: a surviving container, volume or network after `down -v` is a
+        # leak, and it is invisible to a script that has already exited.
+        run: |
+          echo "── anything the teardown left behind ──"
+          docker ps -a --filter label=com.docker.compose.project=cloop-eval \
+            --format '{{.Names}}\t{{.State}}\t{{.Status}}' || true
+          docker volume ls --filter label=com.docker.compose.project=cloop-eval -q || true
+          docker network ls --filter label=com.docker.compose.project=cloop-eval -q || true
+          echo "── disk, which a failed image build exhausts first ──"
+          df -h / || true
+
   deploy-artifacts:
     name: Deployment artifacts
     runs-on: ubuntu-latest

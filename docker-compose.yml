@@ -116,7 +116,13 @@ services:
       # seeds one; a plain `docker compose up` just gets 404s there.
       - gitrepos:/srv/git:ro
     ports:
-      - "8443:8443"
+      # The container port is fixed at 8443 because the issuer URL embeds it —
+      # change it and the OIDC discovery document no longer matches the address
+      # the hub redirects to. The *host* port is not load-bearing in the same
+      # way, so it is overridable for the common case of a box that already has
+      # something on 8443. Point a browser at the port you chose; scripts set
+      # CLOOP_EVAL_CURL_CONNECT to match (see deploy/eval/oidc-login.sh).
+      - "${CLOOP_EVAL_PORT:-8443}:8443"
     networks:
       default:
         aliases:

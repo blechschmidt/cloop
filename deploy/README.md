@@ -143,17 +143,52 @@ make e2e-stack          # brings the stack up, runs one task, tears it down
 KEEP=1 make e2e-stack    # leave it running afterwards
 ```
 
-Boots the stack, asserts `/readyz` is red with nothing to dispatch to, enrolls
-the executor and waits for it to go green, seeds a project with an https git
-origin served by the same proxy, dispatches a real `cloop run` to the device
-with a scoped API token, and asserts that the executor fetched the tree and that
-the harness's output came back to the hub. The task is driven by the mock
-provider, so it needs no API key and no network beyond the image pulls.
+Boots the stack, asserts `/readyz` is red with nothing to dispatch to, signs in
+through dex as three users, enrolls the executor and waits for it to go green,
+seeds a project with an https git origin served by the same proxy, dispatches a
+real `cloop run` to the device with a scoped API token, and asserts that the
+executor fetched the tree and that the harness's output came back to the hub.
+The task is driven by the mock provider, so it needs no API key and no network
+beyond the image pulls.
+
+The sign-in step is a real browser flow driven by curl
+(`deploy/eval/oidc-login.sh`), not a token: a PAT bypasses the identity provider
+by design, so discovery, PKCE, the code exchange, ID-token verification and
+claim-to-role resolution are only exercised by an actual login. It asserts all
+three RBAC outcomes — `admin@example.com` resolves to admin, `operator@example.com`
+is mapped to operator by claim, and `nobody@example.com` authenticates
+successfully and is still refused a gated route with 403, which is
+deny-by-default working. Run it on its own against a live stack:
+
+```bash
+CA_FILE=$(mktemp) && docker run --rm -v cloop-eval_certs:/c alpine:3.20 \
+  cat /c/cert.pem > "$CA_FILE"
+CA_FILE=$CA_FILE deploy/eval/oidc-login.sh nobody@example.com
+```
+
+On teardown it checks every container's final state and fails if any of them is
+stopped with a non-zero exit code, dumping that container's log first. A
+container still running is not judged on how it got there: nginx resolves its
+upstream at config-parse time, so the proxy legitimately exits once and restarts
+into a working state when it loses the start race against the hub.
+
+If something already has port 8443, publish the stack elsewhere. The port inside
+the URL cannot move — the certificate, the issuer and every OIDC redirect embed
+it — so the host port and the client's connection mapping change together:
+
+```bash
+CLOOP_EVAL_PORT=18443 \
+CLOOP_EVAL_CURL_CONNECT='--connect-to cloop.localtest.me:8443:127.0.0.1:18443' \
+  make e2e-stack
+```
 
 What it does not assert: that the *files* the task changed came back. That is a
 separate mechanism (a git bundle produced on the device and applied by
 `pkg/writeback`), and a run dispatched from `POST /api/run` does not currently
 request one.
+
+CI runs all of this on every push and pull request, as the **Eval stack (SSO +
+remote executor)** job, which is gating.
 
 ### Not a production template
 

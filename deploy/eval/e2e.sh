@@ -27,12 +27,81 @@ HUB_PROJECT=/var/lib/cloop/projects/eval-project
 KEEP=${KEEP:-0}
 TIMEOUT_SECS=${TIMEOUT_SECS:-300}
 
+# How to reach the proxy, as curl arguments. The URL always says :8443 because
+# the certificate, the issuer and every redirect in the OIDC flow do; only the
+# published host port is negotiable. Override both together when 8443 is taken:
+#
+#   CLOOP_EVAL_PORT=18443 \
+#   CLOOP_EVAL_CURL_CONNECT='--connect-to cloop.localtest.me:8443:127.0.0.1:18443' \
+#   make e2e-stack
+read -r -a CURL_CONNECT <<<"${CLOOP_EVAL_CURL_CONNECT:---resolve cloop.localtest.me:8443:127.0.0.1}"
+export CLOOP_EVAL_CURL_CONNECT
+
 say()  { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 ok()   { printf '    \033[32m✔\033[0m %s\n' "$*"; }
 die()  { printf '    \033[31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
 
+# sweep_exits — fail if any container's *final* state is a non-zero exit.
+#
+# The assertions above can all pass while a container died behind them: a
+# one-shot that failed after its work was observed, a service that crashed once
+# the last request was served, an OOM kill. None of that shows up in an exit
+# code the script already collected, so it is asked for explicitly here.
+#
+# Judged on final state rather than on history, and that distinction is
+# load-bearing. nginx resolves its upstream at config-parse time, so the proxy
+# legitimately exits non-zero when it loses the start race against the hub and
+# is restarted into a working state — documented in docker-compose.yml. Failing
+# on "has ever exited non-zero" would make this gate red on a stack that is
+# behaving exactly as designed, and a gate that cries wolf gets disabled.
+#
+# So: a container still running at teardown passes whatever it did on the way
+# here, and a container that is *stopped* with a non-zero code fails. Restart
+# counts are reported rather than asserted, because that is the signal that
+# distinguishes "recovered once" from "crash-looping" for whoever reads the log.
+sweep_exits() {
+  local rc=0 id name state code restarts
+  for id in $("${COMPOSE[@]}" ps -aq 2>/dev/null); do
+    name=$(docker inspect -f '{{.Name}}' "$id" 2>/dev/null | sed 's|^/||')
+    state=$(docker inspect -f '{{.State.Status}}' "$id" 2>/dev/null)
+    code=$(docker inspect -f '{{.State.ExitCode}}' "$id" 2>/dev/null)
+    restarts=$(docker inspect -f '{{.RestartCount}}' "$id" 2>/dev/null)
+    [ -n "$name" ] || continue
+
+    if [ "$state" = "running" ] || [ "$state" = "created" ]; then
+      if [ "${restarts:-0}" -gt 0 ]; then
+        printf '    \033[33m!\033[0m %s: running, but restarted %s time(s)\n' "$name" "$restarts"
+      fi
+      continue
+    fi
+    if [ "${code:-0}" -ne 0 ]; then
+      rc=1
+      printf '    \033[31m✗\033[0m %s exited %s (state %s) — last 80 lines:\n' "$name" "$code" "$state"
+      docker logs --tail=80 "$id" 2>&1 | sed 's/^/        /' || true
+    else
+      printf '    \033[32m✔\033[0m %s exited 0\n' "$name"
+    fi
+  done
+  return $rc
+}
+
 cleanup() {
   local status=$?
+  # The cookie jars hold live session cookies and the CA is a temp copy; a
+  # failure part-way through the SSO block would otherwise leave credentials in
+  # /tmp. Unconditional, and first, so an early `die` cleans up too.
+  rm -f "${ADMIN_JAR:-}" "${NOBODY_JAR:-}" "${CA_FILE:-}"
+
+  # Runs before `down -v`, which destroys the evidence it reads.
+  say "Container exit codes"
+  if ! sweep_exits; then
+    printf '    \033[31m✗ a container exited non-zero\033[0m\n' >&2
+    # Only promotes a pass to a failure; never masks the original one. Spelled
+    # as a full if rather than `[ ... ] && status=1`, whose non-zero status when
+    # the test is false is a trap to reason about inside an EXIT handler.
+    if [ $status -eq 0 ]; then status=1; fi
+  fi
+
   if [ "$KEEP" = "1" ]; then
     say "KEEP=1: leaving the stack up. Tear down with: docker compose down -v"
     return $status
@@ -41,7 +110,7 @@ cleanup() {
   # Logs before the containers go away: a failure here is otherwise
   # undiagnosable, because down -v destroys the only record of it.
   if [ $status -ne 0 ]; then
-    "${COMPOSE[@]}" logs --no-color --tail=80 cloop executor enroll 2>&1 | sed 's/^/    /' || true
+    "${COMPOSE[@]}" logs --no-color --tail=80 cloop executor enroll proxy dex 2>&1 | sed 's/^/    /' || true
   fi
   "${COMPOSE[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
   return $status
@@ -59,8 +128,18 @@ hub() {
   local path=$1; shift
   curl --silent --show-error \
        --cacert "$CA_FILE" \
-       --resolve "cloop.localtest.me:8443:127.0.0.1" \
+       "${CURL_CONNECT[@]}" \
        "https://cloop.localtest.me:8443${path}" "$@"
+}
+
+# The same request as a single shell word, for wait_for, which takes a command
+# rather than a function. Keeping one definition means the CA and the connection
+# mapping cannot drift between the polled requests and the asserted ones.
+hub_sh() {
+  printf 'curl -sf --cacert %q' "$CA_FILE"
+  local arg
+  for arg in "${CURL_CONNECT[@]}"; do printf ' %q' "$arg"; done
+  printf ' %q' "https://cloop.localtest.me:8443$1"
 }
 
 # wait_for <description> <seconds> <command...> — poll until the command
@@ -91,24 +170,93 @@ wait_for "certificate published" 120 \
   docker "$CA_FILE"
 [ -s "$CA_FILE" ] || die "could not read the generated certificate"
 
-wait_for "hub is alive (/healthz)" 120 bash -c \
-  'curl -sf --cacert "$0" --resolve cloop.localtest.me:8443:127.0.0.1 https://cloop.localtest.me:8443/healthz' "$CA_FILE"
+wait_for "hub is alive (/healthz)" 120 bash -c "$(hub_sh /healthz)"
 
-say "The readiness gate: strict mode with no executor must be NOT ready"
+say "The readiness gate: a hub with nothing to dispatch to must NOT be ready"
 code=$(hub /readyz -o /dev/null -w '%{http_code}')
 if [ "$code" != "503" ]; then
   die "/readyz returned $code, want 503 — a hub with nothing to dispatch to must not accept traffic"
 fi
+# Which gate it names is deliberately not asserted yet. Two are legitimately
+# unsatisfied here and they resolve in a fixed order, identity first — and
+# whether identity is satisfied at this instant is a race nobody wins reliably:
+# the hub preflights its issuer before binding its listener, and that request
+# goes through a proxy which compose only starts once the hub container exists.
+# The executors gate is asserted precisely, below, once the SSO step has
+# resolved the identity one and made the answer deterministic.
 body=$(hub /readyz || true)
 case "$body" in
-  *executor*) ok "/readyz is 503 and names executors as the reason" ;;
+  *'"status":"not_ready"'*) ok "/readyz is 503 and reports why" ;;
   *) die "/readyz is 503 but does not say why: $body" ;;
+esac
+
+# ── Single sign-on ──────────────────────────────────────────────────────────
+#
+# Everything else in this script authenticates with a PAT, which by design never
+# touches the identity provider. So without the next three logins the entire SSO
+# path — discovery, PKCE, the code exchange, ID-token verification, session
+# minting and claim-to-role resolution — ships untested, and it is the first
+# thing the documentation tells an operator to do.
+say "SSO: signing in through dex, as three users with three different outcomes"
+
+ADMIN_JAR=$(mktemp); NOBODY_JAR=$(mktemp)   # removed by cleanup(), on any exit
+
+login() { CA_FILE="$CA_FILE" JAR_OUT="${2:-}" ./deploy/eval/oidc-login.sh "$1"; }
+
+role_of() { printf '%s' "$1" | python3 -c 'import json,sys; print(json.load(sys.stdin)["role"])'; }
+
+# The mapped admin: listed in ui.oidc.admin_emails.
+admin_me=$(login admin@example.com "$ADMIN_JAR") || die "admin@example.com could not sign in"
+[ "$(role_of "$admin_me")" = "admin" ] \
+  || die "admin@example.com resolved to $(role_of "$admin_me"), want admin: $admin_me"
+ok "admin@example.com signed in through dex and resolved to admin"
+
+# The mapped operator: matched by a role_mapping on the email claim.
+op_me=$(login operator@example.com) || die "operator@example.com could not sign in"
+[ "$(role_of "$op_me")" = "operator" ] \
+  || die "operator@example.com resolved to $(role_of "$op_me"), want operator: $op_me"
+ok "operator@example.com mapped to operator by claim"
+
+# The unmapped user. This is the one worth running: authentication *succeeds*
+# and authority is still refused, because default_role is none. A hub that
+# quietly handed this user viewer would pass every other assertion here.
+nobody_me=$(login nobody@example.com "$NOBODY_JAR") || die "nobody@example.com could not sign in"
+[ "$(role_of "$nobody_me")" = "none" ] \
+  || die "SECURITY: nobody@example.com matches no mapping but resolved to \
+$(role_of "$nobody_me"), not none — deny-by-default is not in force: $nobody_me"
+ok "nobody@example.com authenticated and resolved to role none"
+
+# Asserted against a real gated route, not just against /api/me. The first is
+# the hub describing its decision; only this is the hub enforcing it.
+code=$(hub /api/executors -b "$NOBODY_JAR" -o /dev/null -w '%{http_code}')
+case "$code" in
+  403|404) ok "an unmapped user is refused a gated route (HTTP $code)" ;;
+  *) die "SECURITY: GET /api/executors returned $code for an unmapped user, want 403 — \
+a user matching no role mapping must not read the fleet" ;;
+esac
+
+# And the contrast, so the 403 above cannot be explained by the route being
+# broken for everyone.
+code=$(hub /api/executors -b "$ADMIN_JAR" -o /dev/null -w '%{http_code}')
+[ "$code" = "200" ] \
+  || die "GET /api/executors returned $code for the admin session, want 200 — \
+the deny above proves nothing if the route refuses everybody"
+ok "the same route answers the admin session with 200"
+
+# Now deterministic: the identity gate was satisfied by the logins above, so
+# the only thing left keeping this hub out of service is the absence of an
+# executor — which is the gate this stack exists to demonstrate.
+say "With identity resolved, the remaining gate must be the executor one"
+body=$(hub /readyz || true)
+case "$body" in
+  *executor*) ok "/readyz names executors as the one remaining reason" ;;
+  *) die "/readyz should now be blocked only on executors, got: $body" ;;
 esac
 
 say "Enrolling the executor"
 "${COMPOSE[@]}" up -d --build enroll executor
-wait_for "the agent enrolled and connected (/readyz is green)" "$TIMEOUT_SECS" bash -c \
-  'curl -sf --cacert "$0" --resolve cloop.localtest.me:8443:127.0.0.1 https://cloop.localtest.me:8443/readyz' "$CA_FILE"
+wait_for "the agent enrolled and connected (/readyz is green over the real TLS chain)" \
+  "$TIMEOUT_SECS" bash -c "$(hub_sh /readyz)"
 
 say "Seeding a project with an https origin the executor can fetch"
 # As the agent user, not root: the service drops every capability, so a root
@@ -126,8 +274,7 @@ ok "project seeded"
 # The hub caches its project registry; a restart is the supported way to make
 # it re-read one that was written underneath it.
 "${COMPOSE[@]}" restart cloop >/dev/null
-wait_for "hub back up after re-reading the registry" 120 bash -c \
-  'curl -sf --cacert "$0" --resolve cloop.localtest.me:8443:127.0.0.1 https://cloop.localtest.me:8443/readyz' "$CA_FILE"
+wait_for "hub back up after re-reading the registry" 120 bash -c "$(hub_sh /readyz)"
 
 say "Minting a scoped API token for the run"
 # Not the static CLOOP_UI_TOKEN: it passes the SSO gate but resolves to the
@@ -140,12 +287,31 @@ ok "token minted"
 
 AUTH=(-H "Authorization: Bearer $TOKEN")
 
-say "Confirming the executor is registered and isolating"
-execs=$(hub "/api/executors" "${AUTH[@]}")
-case "$execs" in
-  *'"kind":"remote"'*) ok "a remote executor is registered" ;;
-  *) die "no remote executor in /api/executors: $execs" ;;
-esac
+say "Confirming the executor is registered, isolating, and schedulable"
+# "A row exists" and "the scheduler would place work here" are different
+# claims, and the gap between them is where this silently rots: an enrolled
+# agent that is unreachable, cordoned or draining still appears in the fleet.
+# /readyz went green above, so this asserts the specific node rather than the
+# aggregate — a second executor could be carrying that readiness.
+#
+# Polled rather than read once: enrollment and the supervisor's first probe are
+# separate events, so a node can be registered a moment before it is ready.
+fleet_ready() {
+  hub "/api/executors" "${AUTH[@]}" | python3 -c '
+import json, sys
+fleet = json.load(sys.stdin)
+rows = fleet if isinstance(fleet, list) else fleet.get("executors", [])
+for e in rows:
+    if e.get("kind") != "remote":
+        continue
+    if e.get("sched_state") == "ready" and e.get("schedulable") is True:
+        print("%s %s" % (e.get("name") or e.get("id"), e.get("sched_state")))
+        sys.exit(0)
+sys.exit(1)
+'
+}
+wait_for "a remote executor reached a ready, schedulable state" 120 fleet_ready
+ok "fleet reports: $(fleet_ready)"
 
 say "Locating the seeded project"
 # Not project_idx=0: index 0 is always the hub's own working directory, and
