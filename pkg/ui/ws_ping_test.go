@@ -24,19 +24,30 @@ import (
 	"nhooyr.io/websocket"
 )
 
+// setWSPingTiming shrinks the ping cadence for one test and restores it after.
+//
+// The restore is the reason this exists as a helper rather than an inline
+// t.Cleanup: these cells are package-wide, every pkg/ui test that starts a
+// server leaves a writer loop reading them, and the test binary runs cleanups
+// while other tests are still serving. Writing them directly was a genuine data
+// race — see wsPingIntervalNS — so the mutation goes through the atomics in one
+// place instead of being spelled out at each call site.
+func setWSPingTiming(t *testing.T, interval, timeout time.Duration) {
+	t.Helper()
+	prevInterval := wsPingIntervalNS.Swap(int64(interval))
+	prevTimeout := wsPingTimeoutNS.Swap(int64(timeout))
+	t.Cleanup(func() {
+		wsPingIntervalNS.Store(prevInterval)
+		wsPingTimeoutNS.Store(prevTimeout)
+	})
+}
+
 // TestWSPing_UnresponsivePeerDroppedViaPingTimeout verifies that a peer
 // that keeps the TCP connection open but never processes inbound frames
 // (so it never sends pongs) is dropped within roughly wsPingInterval +
 // wsPingTimeout. We shrink both for speed.
 func TestWSPing_UnresponsivePeerDroppedViaPingTimeout(t *testing.T) {
-	prevInterval := wsPingInterval
-	prevTimeout := wsPingTimeout
-	wsPingInterval = 100 * time.Millisecond
-	wsPingTimeout = 200 * time.Millisecond
-	t.Cleanup(func() {
-		wsPingInterval = prevInterval
-		wsPingTimeout = prevTimeout
-	})
+	setWSPingTiming(t, 100*time.Millisecond, 200*time.Millisecond)
 
 	dir := setupProjectDir(t, cloopGoal, nil)
 	srv := New(dir, 0, "")
@@ -64,10 +75,10 @@ func TestWSPing_UnresponsivePeerDroppedViaPingTimeout(t *testing.T) {
 	// Allow up to ~20x (wsPingInterval+wsPingTimeout) for the ping to fire,
 	// the timeout to expire, the writer to exit, and the deferred cleanup
 	// path to deregister the hubClient.
-	budget := 20 * (wsPingInterval + wsPingTimeout)
+	budget := 20 * (wsPingInterval() + wsPingTimeout())
 	if got := waitForHubClients(srv, 0, budget); got != 0 {
 		t.Fatalf("unresponsive peer was not dropped via ping timeout within %v (interval=%v, timeout=%v); %d hubClient(s) still registered",
-			budget, wsPingInterval, wsPingTimeout, got)
+			budget, wsPingInterval(), wsPingTimeout(), got)
 	}
 }
 
@@ -77,8 +88,6 @@ func TestWSPing_UnresponsivePeerDroppedViaPingTimeout(t *testing.T) {
 // are tiny. Catches regressions where the writer loop misinterprets a
 // ping success as an error or where ctx propagation is broken.
 func TestWSPing_ResponsivePeerStaysConnected(t *testing.T) {
-	prevInterval := wsPingInterval
-	prevTimeout := wsPingTimeout
 	// A short interval so many pings fire, but a timeout long enough that
 	// losing the CPU cannot be mistaken for an unresponsive peer. At 500ms
 	// this test was asserting that the client goroutine gets scheduled
@@ -86,12 +95,7 @@ func TestWSPing_ResponsivePeerStaysConnected(t *testing.T) {
 	// longer than the timeout drops the connection and the test reports a
 	// ping-path regression that is not there. The pong deadline is not what
 	// this test is about — see the companion above for that.
-	wsPingInterval = 50 * time.Millisecond
-	wsPingTimeout = 5 * time.Second
-	t.Cleanup(func() {
-		wsPingInterval = prevInterval
-		wsPingTimeout = prevTimeout
-	})
+	setWSPingTiming(t, 50*time.Millisecond, 5*time.Second)
 
 	dir := setupProjectDir(t, cloopGoal, nil)
 	srv := New(dir, 0, "")
@@ -136,7 +140,7 @@ func TestWSPing_ResponsivePeerStaysConnected(t *testing.T) {
 	// Long enough for many pings to fire and be answered. Scaled off the
 	// interval alone: tying it to the timeout as well would make the run
 	// time grow with a deadline that is now deliberately generous.
-	time.Sleep(20 * wsPingInterval)
+	time.Sleep(20 * wsPingInterval())
 
 	if got := activeHubClientCount(srv); got != 1 {
 		t.Fatalf("responsive peer was disconnected by ping path; want 1 hubClient, got %d", got)

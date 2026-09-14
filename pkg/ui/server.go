@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -266,19 +267,42 @@ var wsMaxInboundMsgsPerSecond = 100
 // dispatch internally via the active drain Read; the writer's Ping call
 // blocks on the matching pong (or ctx) so concurrent operation is safe.
 //
-// Declared as var (not const) so regression tests can shrink it; production
-// callers should treat it as immutable.
-var wsPingInterval = 30 * time.Second
+// Tunable so regression tests can shrink it; production callers should treat
+// it as immutable. See wsPingIntervalNS for why it is an atomic rather than a
+// plain var.
+func wsPingInterval() time.Duration { return time.Duration(wsPingIntervalNS.Load()) }
 
 // wsPingTimeout caps how long the writer loop waits for a pong to a single
 // ping. Exceeding this is treated as a dead connection and the writer exits;
 // the deferred conn.CloseNow + hubClient cleanup unwind the goroutine. 10s
 // is generous for a slow link round-trip but tight enough that a peer that
 // stops responding mid-session is detected quickly.
+func wsPingTimeout() time.Duration { return time.Duration(wsPingTimeoutNS.Load()) }
+
+// The backing cells, in nanoseconds.
 //
-// Declared as var (not const) so regression tests can shrink it; production
-// callers should treat it as immutable.
-var wsPingTimeout = 10 * time.Second
+// Atomic rather than plain vars because the tests that shrink them are not the
+// only thing running when they restore them. Every pkg/ui test that starts an
+// httptest server leaves a writer loop reading these, and Go's test binary runs
+// cleanups while other tests' servers are still serving — so `wsPingTimeout =
+// prev` in a t.Cleanup raced the read in handleWS, and the race detector
+// failed whichever test happened to be holding the connection. That is a real
+// data race on an unsynchronized global, not a timing artifact, and it was a
+// recurring source of red CI on main.
+//
+// This makes the access safe. It does not make the *value* per-server: a test
+// that shrinks the interval still shrinks it for every connection alive at that
+// moment. Tests that care set both through setWSPingTiming and keep the timeout
+// generous for exactly that reason.
+var (
+	wsPingIntervalNS atomic.Int64
+	wsPingTimeoutNS  atomic.Int64
+)
+
+func init() {
+	wsPingIntervalNS.Store(int64(30 * time.Second))
+	wsPingTimeoutNS.Store(int64(10 * time.Second))
+}
 
 // wsWrite sends a single WebSocket text frame with a per-call deadline
 // derived from ctx. Returns whatever Write returns (deadline-exceeded shows
@@ -2994,7 +3018,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	// faster than the OS-level TCP keepalive (~2h on Linux). nhooyr's
 	// pong dispatch happens via the active drain Read, so it is safe to
 	// call Ping here concurrently.
-	pingTicker := time.NewTicker(wsPingInterval)
+	pingTicker := time.NewTicker(wsPingInterval())
 	defer pingTicker.Stop()
 
 	for {
@@ -3044,7 +3068,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 				_ = conn.Close(websocket.StatusPolicyViolation, "authorization withdrawn")
 				return
 			}
-			pctx, pcancel := context.WithTimeout(ctx, wsPingTimeout)
+			pctx, pcancel := context.WithTimeout(ctx, wsPingTimeout())
 			err := conn.Ping(pctx)
 			pcancel()
 			if err != nil {
