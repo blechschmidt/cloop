@@ -1,0 +1,61 @@
+-- 0032_task_executor: record which executor ran each task (Task 20244).
+--
+-- The hub's headline claim is that the web UI never spawns a harness on the
+-- host. Nothing on the task record said where a task actually ran, so the
+-- claim was unauditable after the fact. Executor identity existed in two
+-- places, and neither answers the question:
+--
+--   * project_executors says which executor a project is *bound* to — where
+--     its next task would go. Rebind the project and the binding now
+--     describes a placement that never happened for any task already run.
+--
+--   * the audit trail records dispatches, which are per-run and per-project.
+--     Correlating a task back to one means reconstructing a time window and
+--     hoping no other run overlapped it.
+--
+-- The durable answer belongs on the row that outlives both.
+--
+-- Columns:
+--
+--   executor_id    the executor the task was placed on, e.g. 'local' or
+--                  'edge-pi4'. Empty for a task that predates this migration,
+--                  and for a run started outside the hub where no placement
+--                  record was written — see the note on executor_kind, which
+--                  is what distinguishes those two cases.
+--
+--   executor_kind  the driver: 'localprocess' | 'container' | 'remote' |
+--                  'kubernetes', mirroring executor.Kind(). This is the column
+--                  the audit question is actually asked against
+--                  ("show me everything that ran on the host"), which is why
+--                  it is stored rather than derived by joining executor_id
+--                  back to the executors table: an executor that has since
+--                  been deleted or re-enrolled under the same id would
+--                  silently rewrite the history of every task it ran.
+--
+--   isolation      the boundary the executor advertised at placement time:
+--                  'none' | 'container' | 'vm' | 'remote', mirroring
+--                  executor.Capabilities.Isolation. Stored for the same reason
+--                  as the kind — a driver's capabilities can change between a
+--                  task running and someone asking about it, and the honest
+--                  record is what was true when the work ran.
+--
+-- Written at task start rather than at completion, so a task still in flight
+-- is attributable: during an incident the question is "what is running on that
+-- device right now", and a column only populated on completion cannot answer
+-- it. A task that is killed mid-run keeps its attribution for the same reason.
+--
+-- No index. The fleet-facing query ("tasks on this executor") is served from a
+-- project's own plan_tasks table, which holds hundreds of rows rather than
+-- millions, and a scan of it costs less than maintaining three indexes across
+-- every project database. Add one here if a deployment's plan ever grows to
+-- where that stops being true.
+--
+-- NOT NULL DEFAULT '' means every pre-existing row reads back as the empty
+-- string, so no backfill pass runs and the loaders need no NULL handling.
+-- Empty is the correct reading of "this task ran before anyone was recording",
+-- and is deliberately distinct from 'localprocess', which is a positive claim
+-- that the work touched the host.
+
+ALTER TABLE plan_tasks ADD COLUMN executor_id   TEXT NOT NULL DEFAULT '';
+ALTER TABLE plan_tasks ADD COLUMN executor_kind TEXT NOT NULL DEFAULT '';
+ALTER TABLE plan_tasks ADD COLUMN isolation     TEXT NOT NULL DEFAULT '';

@@ -225,6 +225,35 @@ type Task struct {
 	// fetching the named branch.
 	WriteBackBranch string `json:"write_back_branch,omitempty"`
 	WriteBackCommit string `json:"write_back_commit,omitempty"`
+	// ExecutorID, ExecutorKind and Isolation record *where* this task ran
+	// (Task 20244). The hub's headline claim is that it never spawns a
+	// harness on the host; without these the claim is unauditable after the
+	// fact, because executor identity otherwise exists only in the
+	// project_executors binding — which says where the project's *next* task
+	// would go, not where this one went — and in audit payloads that are
+	// scoped to a dispatch rather than to a task.
+	//
+	// They are stamped at task start, not at completion, so a task that is
+	// still in flight is attributable too: "what is running on that edge
+	// device right now" is the question an operator asks during an incident,
+	// and a field that only appears at completion cannot answer it.
+	//
+	// Isolation is the boundary strength the executor advertised
+	// ("none" | "container" | "vm" | "remote"), mirroring
+	// executor.Capabilities.Isolation. Kind mirrors executor.Kind()
+	// ("localprocess" | "container" | "remote" | "kubernetes"). Held as
+	// strings rather than the executor package's named types to keep pm free
+	// of a dependency on the execution layer — pm is the data model that the
+	// CLI, the TUI and the exporters all load, and none of them place work.
+	//
+	// Isolation "none" or kind "localprocess" means the harness ran as a
+	// child process of the hub with the host's filesystem and network. That
+	// is the case the UI renders differently on purpose: it is legitimate for
+	// a developer's own machine and is precisely what must never happen
+	// silently on a shared hub.
+	ExecutorID   string `json:"executor_id,omitempty"`
+	ExecutorKind string `json:"executor_kind,omitempty"`
+	Isolation    string `json:"isolation,omitempty"`
 	// Background records work the agent harness left running after it claimed
 	// to be finished (Task 20205), so the UI can show why a task waited, or
 	// why it was not accepted as done.

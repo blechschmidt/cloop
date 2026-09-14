@@ -2354,6 +2354,11 @@ func (s *Server) handleGetTasks(w http.ResponseWriter, r *http.Request) {
 	q := strings.ToLower(boundedQueryString(r.URL.Query().Get("q"), maxQueryStringLen))
 	assignee := boundedQueryString(r.URL.Query().Get("assignee"), maxQueryStringLen)
 	priority := parsePriorityFilter(r.URL.Query().Get("priority"))
+	// "What did this executor run here" (Task 20244). Bounded like every other
+	// free-text filter. An id that matches nothing yields an empty list rather
+	// than an error, so the fleet panel can link to it without first checking
+	// whether the executor ever ran anything in this project.
+	executorID := boundedQueryString(r.URL.Query().Get("executor_id"), maxQueryStringLen)
 
 	statusSet := map[string]bool{}
 	for _, sv := range parseCSVList(r.URL.Query().Get("status"), maxCSVItems, maxCSVItemLen) {
@@ -2396,6 +2401,9 @@ func (s *Server) handleGetTasks(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		if priority > 0 && t.Priority != priority {
+			continue
+		}
+		if executorID != "" && t.ExecutorID != executorID {
 			continue
 		}
 		out = append(out, t)

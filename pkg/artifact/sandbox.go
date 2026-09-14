@@ -55,6 +55,16 @@ type SandboxRecord struct {
 	// ExecutorID and ExecutorKind identify where it ran.
 	ExecutorID   string `json:"executor_id,omitempty"`
 	ExecutorKind string `json:"executor_kind,omitempty"`
+	// Isolation is the boundary strength the executor advertised at dispatch:
+	// "none" | "container" | "vm" | "remote" (executor.Capabilities.Isolation).
+	//
+	// Recorded here rather than looked up from the executor later because it
+	// is a statement about this run: a driver reconfigured afterwards, or an
+	// id re-enrolled against a different backend, would otherwise rewrite the
+	// history of every task it ever ran. Empty on records written before
+	// Task 20244 — readers infer it from ExecutorKind, which has always been
+	// written, rather than reading the absence as "no isolation".
+	Isolation string `json:"isolation,omitempty"`
 	// SpecHash is the .cloop/sandbox.yaml content hash, or empty when the
 	// project has no spec and ran on the executor's defaults.
 	SpecHash string `json:"spec_sha256,omitempty"`

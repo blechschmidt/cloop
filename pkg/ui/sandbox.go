@@ -163,6 +163,7 @@ func recordSandboxProvenance(workDir string, resolved *sandbox.Resolved, ex exec
 	}
 	if ex != nil {
 		rec.ExecutorID, rec.ExecutorKind = ex.ID(), ex.Kind()
+		rec.Isolation = string(ex.Capabilities().Isolation)
 	}
 	if resolved.Present() {
 		rec.SpecHash = resolved.Hash

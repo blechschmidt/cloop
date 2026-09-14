@@ -2,6 +2,7 @@ package statedb_test
 
 import (
 	"database/sql"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -277,6 +278,96 @@ func TestSaveAndLoad_WriteBackFields(t *testing.T) {
 	}
 	assertEqual(t, "upserted WriteBackBranch", one.WriteBackBranch, again.WriteBackBranch)
 	assertEqual(t, "upserted WriteBackCommit", one.WriteBackCommit, again.WriteBackCommit)
+}
+
+// TestSaveAndLoad_ExecutorAttribution pins the three placement columns added
+// by Task 20244 through every path a task takes in and out of the database.
+//
+// The whole point of the migration is that a struct field and a JSON tag are
+// not enough: without the column and the four db.go sites the value is dropped
+// silently at the first Save, and an attribution feature that silently records
+// nothing is worse than none — it answers the audit question with a confident
+// blank.
+func TestSaveAndLoad_ExecutorAttribution(t *testing.T) {
+	db, _ := tempDB(t)
+	s := baseState()
+	s.PMMode = true
+
+	s.Plan = &pm.Plan{
+		Goal: "attributable execution",
+		Tasks: []*pm.Task{
+			{
+				ID: 7, Title: "ran in a container", Status: pm.TaskDone,
+				ExecutorID: "docker-1", ExecutorKind: "container", Isolation: "container",
+			},
+			{
+				ID: 8, Title: "ran on an edge device", Status: pm.TaskInProgress,
+				ExecutorID: "edge-pi4", ExecutorKind: "remote", Isolation: "remote",
+			},
+			{
+				ID: 9, Title: "ran on the host", Status: pm.TaskDone,
+				ExecutorID: "local", ExecutorKind: "localprocess", Isolation: "none",
+			},
+			// Unattributed: predates the feature. Empty is the correct value
+			// and is deliberately distinct from "localprocess" — see the
+			// migration's note on why a blank must not read as a host claim.
+			{ID: 10, Title: "recorded before attribution existed", Status: pm.TaskDone},
+		},
+	}
+	if err := db.SaveState(s); err != nil {
+		t.Fatalf("SaveState: %v", err)
+	}
+
+	// Path 1: loadTasks, the bulk reader behind LoadState.
+	got, err := db.LoadState()
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	if got.Plan == nil || len(got.Plan.Tasks) != 4 {
+		t.Fatalf("want 4 tasks, got %+v", got.Plan)
+	}
+	for i, want := range s.Plan.Tasks {
+		g := got.Plan.Tasks[i]
+		assertEqual(t, fmt.Sprintf("LoadState Task[%d].ExecutorID", i), want.ExecutorID, g.ExecutorID)
+		assertEqual(t, fmt.Sprintf("LoadState Task[%d].ExecutorKind", i), want.ExecutorKind, g.ExecutorKind)
+		assertEqual(t, fmt.Sprintf("LoadState Task[%d].Isolation", i), want.Isolation, g.Isolation)
+	}
+
+	// Path 2: LoadTask, the single-row reader the write-back path uses.
+	one, err := db.LoadTask(8)
+	if err != nil {
+		t.Fatalf("LoadTask(8): %v", err)
+	}
+	assertEqual(t, "LoadTask ExecutorID", "edge-pi4", one.ExecutorID)
+	assertEqual(t, "LoadTask ExecutorKind", "remote", one.ExecutorKind)
+	assertEqual(t, "LoadTask Isolation", "remote", one.Isolation)
+
+	// Path 3: UpsertTask, which writes through ON CONFLICT DO UPDATE rather
+	// than the INSERT the two paths above exercise.
+	//
+	// The attribution is *changed* here, not merely carried along. An upsert
+	// that re-writes the values it just read cannot tell a correct SET clause
+	// from a missing one — the row already holds the right answer either way —
+	// so a test that only re-saves what it loaded passes against a dropped
+	// `executor_kind=excluded.executor_kind`. Re-placing the task is what makes
+	// the clause observable, and re-placement is real: a task reset and run
+	// again lands somewhere else.
+	one.ExecutorID = "docker-1"
+	one.ExecutorKind = "container"
+	one.Isolation = "container"
+	one.WriteBackBranch = "cloop/task-8"
+	one.WriteBackCommit = "0123456789abcdef0123456789abcdef01234567"
+	if err := db.UpsertTask(one); err != nil {
+		t.Fatalf("UpsertTask: %v", err)
+	}
+	again, err := db.LoadTask(8)
+	if err != nil {
+		t.Fatalf("LoadTask(8) after upsert: %v", err)
+	}
+	assertEqual(t, "upserted ExecutorID", "docker-1", again.ExecutorID)
+	assertEqual(t, "upserted ExecutorKind", "container", again.ExecutorKind)
+	assertEqual(t, "upserted Isolation", "container", again.Isolation)
+	assertEqual(t, "upserted WriteBackBranch", "cloop/task-8", again.WriteBackBranch)
 }
 
 func TestAppendStep(t *testing.T) {

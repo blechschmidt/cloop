@@ -236,6 +236,11 @@
     margin-top: 6px; white-space: pre-wrap; word-break: break-word;
     -webkit-user-select: text; user-select: text;
   }
+  /* Host execution (Task 20244). The hub's claim is that it never spawns a
+     harness on the host; a task that did is an exception, and on a display
+     this small it has to be findable without reading. */
+  .detail .block.host .label,
+  .detail .block.host .body { color: var(--bad); }
   #msg { padding: 18px 0; color: var(--muted); font-size: 20px; }
   #msg.bad { color: var(--bad); }
 </style>
@@ -864,7 +869,11 @@ function loadTask() {
       d._title = h.appendChild(mk('span'));
       d.appendChild(h);
       d._blocks = {};
-      ['Description', 'Result'].forEach(function(label) {
+      // Executor first (Task 20244): where the task ran is the one field a
+      // wearer must not have to scroll to. Built here inside the reuse branch
+      // with the others, so the pane is still patched rather than rebuilt on
+      // every poll.
+      ['Executor', 'Description', 'Result'].forEach(function(label) {
         var block = mk('div', 'block');
         block.appendChild(mk('div', 'label', label));
         block._body = block.appendChild(mk('div', 'body'));
@@ -875,6 +884,12 @@ function loadTask() {
     }
     setClass(d._dot, dotClass(t.status));
     setText(d._title, t.title);
+    // The server pre-renders the line and decides on_host, so the device never
+    // has to reason about isolation vocabulary. The class carries the warning
+    // colour; the text carries it too, because the wearer may be looking at
+    // this in daylight.
+    fillBlock(d._blocks.Executor, t.executor);
+    setClass(d._blocks.Executor, t.on_host ? 'block host' : 'block');
     fillBlock(d._blocks.Description, t.description);
     fillBlock(d._blocks.Result, t.result);
   });

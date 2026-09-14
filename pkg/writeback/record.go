@@ -57,6 +57,21 @@ func Record(db Recorder, taskID int, taskTitle string, reported executor.WriteBa
 		return nil
 	}
 
+	// Loaded before the event is emitted so the event can name where the work
+	// came from (Task 20244). A write-back exists precisely because the task
+	// ran somewhere the hub does not share a filesystem with, so "which
+	// executor produced this branch" is the first question asked of the row —
+	// and it has to be on the row even when the write-back failed, which is
+	// the case that never reaches the task update below.
+	//
+	// Best-effort, exactly as the later load was: a write-back for a task the
+	// database does not have is a whole-project run with no task binding, and
+	// the event is still worth recording without attribution.
+	task, err := db.LoadTask(taskID)
+	if err != nil {
+		task = nil
+	}
+
 	ev := statedb.EventRow{
 		Type:      statedb.EventWriteBack,
 		TaskID:    taskID,
@@ -64,7 +79,7 @@ func Record(db Recorder, taskID int, taskTitle string, reported executor.WriteBa
 		Step:      statedb.NoStep,
 		Message:   writeBackMessage(reported, applied, applyErr),
 	}
-	if detail, err := json.Marshal(writeBackDetail(reported, applied, applyErr)); err == nil {
+	if detail, err := json.Marshal(writeBackDetail(reported, applied, applyErr, task)); err == nil {
 		ev.Details = string(detail)
 	}
 	evErr := db.RecordEvent(ev)
@@ -77,11 +92,7 @@ func Record(db Recorder, taskID int, taskTitle string, reported executor.WriteBa
 	if applyErr != nil || !applied.Delivered() {
 		return evErr
 	}
-	task, err := db.LoadTask(taskID)
-	if err != nil || task == nil {
-		// A write-back for a task the database does not have is not an error
-		// worth failing on: the run may be a whole-project one with no task
-		// binding at all, and the event row above already recorded it.
+	if task == nil {
 		return evErr
 	}
 	task.WriteBackBranch = applied.Branch
@@ -131,12 +142,29 @@ func writeBackMessage(reported executor.WriteBackResult, applied Result, applyEr
 // writeBackDetail is the structured blob the event row carries, for the UI's
 // expandable detail panel. It holds identifiers only — no credential could
 // reach here, since neither WriteBackResult nor Result has a field for one.
-func writeBackDetail(reported executor.WriteBackResult, applied Result, applyErr error) map[string]any {
+func writeBackDetail(reported executor.WriteBackResult, applied Result, applyErr error,
+	task *pm.Task) map[string]any {
+
 	d := map[string]any{
 		"mode":   string(reported.Mode),
 		"branch": applied.Branch,
 		"commit": applied.CommitSHA,
 		"base":   reported.BaseSHA,
+	}
+	// Where the branch came from (Task 20244). Omitted rather than emitted
+	// empty when the task is unknown or predates attribution: a blank executor
+	// on an audit row reads as a claim about the host, and the absence of a
+	// record is not that claim.
+	if task != nil {
+		if task.ExecutorID != "" {
+			d["executor_id"] = task.ExecutorID
+		}
+		if task.ExecutorKind != "" {
+			d["executor_kind"] = task.ExecutorKind
+		}
+		if task.Isolation != "" {
+			d["isolation"] = task.Isolation
+		}
 	}
 	if d["branch"] == "" {
 		// Report what the executor claimed even when nothing landed: "which

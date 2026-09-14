@@ -104,6 +104,14 @@ var ledgerAPISource string
 //go:embed retention_api.go
 var retentionAPISource string
 
+// executorDetailAPISource is pkg/ui/executor_detail_api.go (Task 20244).
+// Embedded for the same reason as retention_api.go: its handler is a
+// registered route, so the route-drift and authz tests have to be able to read
+// the verbs its body accepts.
+//
+//go:embed executor_detail_api.go
+var executorDetailAPISource string
+
 // executorsInventorySource is pkg/ui/executors_inventory.go (Task 20230). It
 // carries no route, but it does broadcast — a device reconnecting on a new build
 // pushes an executor update — so it belongs in the scan for broadcast sites.
@@ -128,7 +136,7 @@ func allUISources() string {
 		"\n" + auditAPISource + "\n" + secretsAPISource + "\n" + installScriptSource +
 		"\n" + tokensAPISource + "\n" + sessionsAPISource + "\n" + quotasAPISource +
 		"\n" + reproduceAPISource + "\n" + ledgerAPISource + "\n" + retentionAPISource +
-		"\n" + executorsInventorySource
+		"\n" + executorsInventorySource + "\n" + executorDetailAPISource
 }
 
 // dashboardSource is the whole dashboard front end — the rendered index.html

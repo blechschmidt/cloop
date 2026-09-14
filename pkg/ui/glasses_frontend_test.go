@@ -723,6 +723,50 @@ func TestGlassesDetailRefreshesInPlace(t *testing.T) {
 	}
 }
 
+// TestGlassesDetailShowsExecutor: the wearable reports where a task ran, and a
+// host run is distinguishable from a sandboxed one (Task 20244).
+//
+// The hub's claim is that it never spawns a harness on the host. The glasses
+// are the surface with the least room to explain anything, so the host case has
+// to carry its warning in the text as well as in the class — a wearer in
+// daylight may not be able to rely on the colour.
+func TestGlassesDetailShowsExecutor(t *testing.T) {
+	t.Parallel()
+
+	var got struct {
+		Sandboxed          string `json:"sandboxed"`
+		SandboxedHost      bool   `json:"sandboxedHost"`
+		HostText           string `json:"hostText"`
+		HostFlagged        bool   `json:"hostFlagged"`
+		Reused             bool   `json:"reused"`
+		UnattributedHidden bool   `json:"unattributedHidden"`
+	}
+	glassesScenario(t, glassesScenarios(t), "detail_shows_executor", &got)
+
+	if !strings.Contains(got.Sandboxed, "docker-1") {
+		t.Errorf("the detail pane does not name the executor: %q", got.Sandboxed)
+	}
+	if got.SandboxedHost {
+		t.Error("a container-placed task was flagged as a host run — a false alarm " +
+			"on the one signal the wearer is meant to act on")
+	}
+	if !strings.Contains(got.HostText, "HOST") {
+		t.Errorf("a host run does not say so in the text: %q", got.HostText)
+	}
+	if !got.HostFlagged {
+		t.Error("a host run carries no .host class, so it renders in the same " +
+			"colour as every other block")
+	}
+	if !got.Reused {
+		t.Error("adding the executor block turned the detail refresh back into a " +
+			"rebuild, dropping the wearer's scroll offset")
+	}
+	if !got.UnattributedHidden {
+		t.Error("a task with no attribution renders an empty Executor block — a " +
+			"blank where the host warning would be reads as reassurance")
+	}
+}
+
 // TestGlassesTitlesAreTextNotMarkup: rows are built as nodes now rather than
 // concatenated into an HTML string, which retires the hand-rolled escaper every
 // interpolated project and task title used to depend on.

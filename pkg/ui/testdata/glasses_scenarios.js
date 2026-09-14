@@ -441,6 +441,71 @@ scenarios.detail_refreshes_in_place = async () => {
   };
 };
 
+// ── executor attribution on the detail pane (Task 20244) ────────────────────
+// The wearer has to be able to see where a task ran, and a host run has to be
+// distinguishable from a sandboxed one. The block is built inside the same
+// reuse branch as Description and Result, so this also re-checks that adding
+// it did not turn the refresh back into a rebuild.
+
+scenarios.detail_shows_executor = async () => {
+  const detail = (extra) => Object.assign({
+    id: 1, title: 'task 1', status: 'done', priority: 1,
+    description: 'do it', result: 'shipped',
+  }, extra);
+
+  const dom = boot({
+    routes: {
+      '/api/glasses/projects': { projects: PROJECTS },
+      '/api/glasses/tasks': tasksRoute(mkTasks(3)),
+      '/api/glasses/tasks/1': detail({ executor: 'docker-1 — container', on_host: false }),
+    },
+  });
+  await dom.settle();
+  dom.press('Enter');
+  await dom.settle();
+  dom.press('Enter');
+  await dom.settle();
+
+  // The shim's selector engine matches a single class, so `.host` rather than
+  // `.detail .block.host`. Only the executor block ever carries it.
+  const hostBlocks = () => dom.doc.querySelectorAll('.host').length;
+
+  const paneBefore = dom.doc.getElementById('list').firstChild;
+  const sandboxed = paneBefore ? paneBefore.textContent : '';
+  const sandboxedHost = hostBlocks() > 0;
+
+  // The same task, re-reported as a host run.
+  dom.setRoutes({
+    '/api/glasses/tasks/1': detail({ executor: '⚠ HOST — local (no sandbox)', on_host: true }),
+  });
+  dom.tick();
+  await dom.settle();
+
+  const paneAfter = dom.doc.getElementById('list').firstChild;
+  const hostText = paneAfter ? paneAfter.textContent : '';
+  const hostFlagged = hostBlocks() > 0;
+
+  // And a task with no attribution: the block must hide rather than render an
+  // empty, reassuring row.
+  dom.setRoutes({
+    '/api/glasses/tasks/1': detail({ executor: '', on_host: false }),
+  });
+  dom.tick();
+  await dom.settle();
+
+  const unattributedHidden = dom.doc.querySelectorAll('.block')
+    .some((b) => b.textContent.indexOf('Executor') === 0 && b.hidden === true);
+
+  return {
+    sandboxed,
+    sandboxedHost,
+    hostText,
+    hostFlagged,
+    reused: paneBefore === paneAfter,
+    unattributedHidden,
+  };
+};
+
 // ── escaping, now that there is none ────────────────────────────────────────
 // Titles used to be concatenated into an HTML string. They are textContent
 // now, so a title carrying markup has to appear verbatim and create no nodes.

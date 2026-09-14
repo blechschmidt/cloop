@@ -963,6 +963,12 @@ func (o *Orchestrator) logTaskOutcomeEvent(task *pm.Task, taskDur string, step i
 		"heal_attempts":  task.HealAttempts,
 		"verify_retries": task.VerifyRetries,
 		"fail_count":     task.FailCount,
+		// Where the work ran, carried on the terminal record so the journal
+		// answers "what ran on the host" without joining back to the task
+		// table — and still answers it for a task later deleted (Task 20244).
+		"executor_id":   task.ExecutorID,
+		"executor_kind": task.ExecutorKind,
+		"isolation":     task.Isolation,
 	})
 }
 
@@ -1818,7 +1824,12 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		now := time.Now()
 		task.Status = pm.TaskInProgress
 		task.StartedAt = &now
-		pm.AddAnnotation(task, "ai", fmt.Sprintf("Task started by executor (provider: %s)", o.provider.Name()))
+		// Stamp placement before the task runs, not after it finishes, so an
+		// in-flight task is attributable too (Task 20244).
+		execID, execKind, execIso := resolveTaskAttribution(o.config.WorkDir)
+		stampAttribution(task, execID, execKind, execIso)
+		pm.AddAnnotation(task, "ai", fmt.Sprintf("Task started on executor %s (kind: %s, isolation: %s, provider: %s)",
+			attributionLabel(execID), execKind, execIso, o.provider.Name()))
 		s.Save()
 
 		// Snapshot the repository so an unsignalled run can be judged on what
@@ -3646,9 +3657,13 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 		// the slice index when marking results below to avoid an extra map.
 		queueIDs := make([]int64, len(ready))
 		now := time.Now()
+		// One placement for the whole batch: every task in it runs inside this
+		// same process on the executor the hub already chose (Task 20244).
+		execID, execKind, execIso := resolveTaskAttribution(o.config.WorkDir)
 		for i, t := range ready {
 			t.Status = pm.TaskInProgress
 			t.StartedAt = &now
+			stampAttribution(t, execID, execKind, execIso)
 			queueIDs[i] = o.enqueueWork(taskqueue.Entry{
 				Kind:        taskqueue.KindTask,
 				TaskID:      t.ID,
@@ -3667,9 +3682,12 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 				Step:      s.CurrentStep,
 				Message:   fmt.Sprintf("Task #%d started (parallel)", t.ID),
 			}, map[string]any{
-				"priority": t.Priority,
-				"role":     t.Role,
-				"parallel": true,
+				"priority":      t.Priority,
+				"role":          t.Role,
+				"parallel":      true,
+				"executor_id":   execID,
+				"executor_kind": execKind,
+				"isolation":     execIso,
 			})
 		}
 		s.Save()

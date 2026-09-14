@@ -504,6 +504,12 @@ func (s *Server) routeTable() []routeSpec {
 		// checked against installScriptPath by
 		// TestInstallScriptRouteMatchesTheConstant.
 		{Pattern: "/install.sh", Handler: s.handleInstallScript, Perm: execMgmt, Scope: scopeGlobal},
+		// One executor, plus what it has actually run (Task 20244). execRead
+		// rather than execMgmt: this is the read half of the fleet view, and
+		// gating "what ran on the host" behind the permission to *change* the
+		// fleet would put the audit out of reach of whoever is meant to
+		// perform it.
+		{Pattern: "GET /api/executors/{id}", Handler: s.handleExecutorDetail, Perm: execRead, Scope: scopeExecutor},
 		{Pattern: "DELETE /api/executors/{id}", Handler: s.handleExecutorDelete, Perm: execMgmt, Scope: scopeExecutor},
 		{Pattern: "POST /api/executors/{id}/cordon", Handler: s.handleExecutorCordon, Perm: execMgmt, Scope: scopeExecutor},
 		{Pattern: "POST /api/executors/{id}/uncordon", Handler: s.handleExecutorUncordon, Perm: execMgmt, Scope: scopeExecutor},

@@ -213,6 +213,34 @@ window.taskDetailsEditCurrent = function() {
 // people to ignore it, and the tasks it cannot answer for are the majority on
 // a hub that has not adopted isolated executors yet.
 
+// _tdOnHost mirrors orchestrator.RanOnHost: did this task's harness run as a
+// process on the hub's own machine, with its filesystem and network?
+//
+// Either signal alone is enough. The two are written together and should always
+// agree; a disagreement is exactly when the warning should fire rather than
+// resolve to "fine". A task with no attribution at all — recorded before
+// Task 20244 — is unknown, not host, because saying otherwise would
+// retroactively accuse every historical task of touching the host.
+function _tdOnHost(t) {
+  if (!t) return false;
+  return t.executor_kind === 'localprocess' ||
+         (t.isolation === 'none' && !!t.executor_kind);
+}
+
+// _tdExecutorChip renders where a task ran, or nothing when that was never
+// recorded. An unattributed task says so rather than defaulting to a
+// reassuring value.
+function _tdExecutorChip(t) {
+  if (!t || (!t.executor_id && !t.executor_kind)) return '';
+  const onHost = _tdOnHost(t);
+  const label = t.executor_id || t.executor_kind;
+  const title = onHost
+    ? 'This task ran as a process on the hub host, sharing its filesystem and network — no sandbox boundary.'
+    : 'Executor this task was placed on when it started.';
+  return '<span class="td-chip'+(onHost ? ' host' : '')+'" title="'+esc(title)+'">'+
+         (onHost ? '⚠ Host' : 'Executor')+'<strong>'+esc(label)+'</strong></span>';
+}
+
 function _tdVerdictChip(v) {
   const known = ['identical','equivalent','divergent','inconclusive'];
   const cls = known.indexOf(v) >= 0 ? v : 'inconclusive';
@@ -349,6 +377,12 @@ function _renderTaskDetails(d) {
   if (t.max_minutes)       chips.push('<span class="td-chip" title="Per-task timeout override. 0 = inherits project default.">Timeout<strong>'+t.max_minutes+'m</strong></span>');
   if (t.fail_count)        chips.push('<span class="td-chip">Failures<strong>'+t.fail_count+'</strong></span>');
   if (t.heal_attempts)     chips.push('<span class="td-chip">Heal attempts<strong>'+t.heal_attempts+'</strong></span>');
+  // Where the task ran (Task 20244). The host case is styled as a warning
+  // rather than as one more grey chip: the hub's claim is that it never spawns
+  // a harness on the host, so a task that did is the one thing on this row an
+  // operator must not be able to scroll past.
+  chips.push(_tdExecutorChip(t));
+  if (t.isolation) chips.push('<span class="td-chip'+(_tdOnHost(t) ? ' host' : '')+'" title="Isolation boundary the executor advertised when this task was placed.">Isolation<strong>'+esc(t.isolation)+'</strong></span>');
   if (t.write_back_branch) chips.push('<span class="td-chip" title="Branch an isolated executor left this task\'s work on. Local runs commit into the working tree and have no branch.">Branch<strong>'+esc(t.write_back_branch)+'</strong></span>');
   if (t.write_back_commit) chips.push('<span class="td-chip" title="'+esc(t.write_back_commit)+'">Commit<strong>'+esc(t.write_back_commit.slice(0,12))+'</strong></span>');
   if (t.started_at)        chips.push('<span class="td-chip">Started<strong>'+esc(_fmtDateTime(t.started_at))+'</strong></span>');

@@ -928,6 +928,13 @@ func (s *Server) handleGlassesTaskDetail(w http.ResponseWriter, r *http.Request)
 			"priority":    t.Priority,
 			"description": truncateForGlasses(t.Description, glassesTextCap),
 			"result":      truncateForGlasses(t.Result, glassesTextCap),
+			// Where it ran (Task 20244). Sent as one pre-rendered line plus a
+			// boolean rather than three raw fields: the glasses view builds
+			// text nodes, has no room for a chip row, and every formatting
+			// decision it makes has to be made on a device that cannot be
+			// debugged. on_host is what drives the warning styling there.
+			"executor": glassesExecutorLine(t),
+			"on_host":  taskRanOnHost(t),
 		}
 		if t.StartedAt != nil {
 			out["started_at"] = t.StartedAt.UTC().Format(time.RFC3339)
@@ -939,6 +946,32 @@ func (s *Server) handleGlassesTaskDetail(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	apierror.WriteError(w, apierror.New(apierror.CodeNotFound, "no such task"))
+}
+
+// glassesExecutorLine renders a task's placement as one short line for the
+// glasses detail pane (Task 20244).
+//
+// Empty when the task carries no attribution, which makes the block hide
+// itself rather than display a reassuring blank. The host case is prefixed
+// with a warning marker because the display has no colour vocabulary an
+// operator can rely on at a glance and the text has to carry the signal
+// on its own.
+func glassesExecutorLine(t *pm.Task) string {
+	if t == nil || (t.ExecutorID == "" && t.ExecutorKind == "") {
+		return ""
+	}
+	where := t.ExecutorID
+	if where == "" {
+		where = t.ExecutorKind
+	}
+	iso := t.Isolation
+	if iso == "" {
+		iso = "unknown"
+	}
+	if taskRanOnHost(t) {
+		return truncateForGlasses("⚠ HOST — "+where+" (no sandbox)", 120)
+	}
+	return truncateForGlasses(where+" — "+iso, 120)
 }
 
 // handleGlassesPage serves the wearable's HTML shell at /glasses.

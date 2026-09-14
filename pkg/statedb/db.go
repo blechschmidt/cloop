@@ -632,7 +632,8 @@ func (d *DB) LoadTask(id int) (*pm.Task, error) {
 			estimated_minutes, actual_minutes, artifact_path, failure_diagnosis,
 			tags, fail_count, heal_attempts, annotations, condition_expr,
 			recurrence, next_run_at, requires_approval, approved, max_minutes,
-			write_back_branch, write_back_commit, background, abort
+			write_back_branch, write_back_commit, background, abort,
+			executor_id, executor_kind, isolation
 		FROM plan_tasks WHERE id = ? LIMIT 1`, id)
 	if err != nil {
 		return nil, classifyDriverErr(err)
@@ -662,6 +663,7 @@ func (d *DB) LoadTask(id int) (*pm.Task, error) {
 		&annJSON, &t.Condition, &t.Recurrence,
 		&nextRunAt, &reqApproval, &approved, &t.MaxMinutes,
 		&t.WriteBackBranch, &t.WriteBackCommit, &bgJSON, &abortJSON,
+		&t.ExecutorID, &t.ExecutorKind, &t.Isolation,
 	); err != nil {
 		return nil, classifyDriverErr(err)
 	}
@@ -783,8 +785,9 @@ func upsertTaskTx(tx *sql.Tx, t *pm.Task) error {
 			estimated_minutes, actual_minutes, artifact_path, failure_diagnosis,
 			tags, fail_count, heal_attempts, annotations, condition_expr,
 			recurrence, next_run_at, requires_approval, approved, max_minutes,
-			write_back_branch, write_back_commit, background, abort
-		) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+			write_back_branch, write_back_commit, background, abort,
+			executor_id, executor_kind, isolation
+		) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(id) DO UPDATE SET
 			title=excluded.title, description=excluded.description,
 			priority=excluded.priority, status=excluded.status, role=excluded.role,
@@ -804,7 +807,10 @@ func upsertTaskTx(tx *sql.Tx, t *pm.Task) error {
 			approved=excluded.approved, max_minutes=excluded.max_minutes,
 			write_back_branch=excluded.write_back_branch,
 			write_back_commit=excluded.write_back_commit,
-			background=excluded.background, abort=excluded.abort`,
+			background=excluded.background, abort=excluded.abort,
+			executor_id=excluded.executor_id,
+			executor_kind=excluded.executor_kind,
+			isolation=excluded.isolation`,
 		t.ID, t.Title, t.Description, t.Priority, string(t.Status), string(t.Role),
 		string(depsJSON), t.Result,
 		startedAt, completedAt, deadline,
@@ -818,6 +824,7 @@ func upsertTaskTx(tx *sql.Tx, t *pm.Task) error {
 		t.MaxMinutes,
 		t.WriteBackBranch, t.WriteBackCommit, encodeBackground(t.Background),
 		encodeAbort(t.Abort),
+		t.ExecutorID, t.ExecutorKind, t.Isolation,
 	)
 	return err
 }
@@ -829,7 +836,8 @@ func loadTasks(conn *sql.DB) ([]*pm.Task, error) {
 			estimated_minutes, actual_minutes, artifact_path, failure_diagnosis,
 			tags, fail_count, heal_attempts, annotations, condition_expr,
 			recurrence, next_run_at, requires_approval, approved, max_minutes,
-			write_back_branch, write_back_commit, background, abort
+			write_back_branch, write_back_commit, background, abort,
+			executor_id, executor_kind, isolation
 		FROM plan_tasks ORDER BY id`)
 	if err != nil {
 		return nil, err
@@ -856,6 +864,7 @@ func loadTasks(conn *sql.DB) ([]*pm.Task, error) {
 			&annJSON, &t.Condition, &t.Recurrence,
 			&nextRunAt, &reqApproval, &approved, &t.MaxMinutes,
 			&t.WriteBackBranch, &t.WriteBackCommit, &bgJSON, &abortJSON,
+			&t.ExecutorID, &t.ExecutorKind, &t.Isolation,
 		); err != nil {
 			return nil, err
 		}
