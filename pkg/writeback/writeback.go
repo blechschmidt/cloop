@@ -574,6 +574,12 @@ func (g *gitRunner) run(ctx context.Context, args ...string) (string, error) {
 	// the repository's config, which GIT_CONFIG_NOSYSTEM does not suppress.
 	cmd.Env = append(executor.GitBaseEnv(), gitprovision.TransportEnv()...)
 	cmd.Dir = g.dir
+	// The fetch step execs git-remote-https, which inherits the captured pipes,
+	// so without this the timeout above is decorative: killing git leaves the
+	// helper holding the pipe and Wait blocks until the remote gives up. On the
+	// hub that stalls a merge-queue slot rather than one sandbox. See
+	// gitprovision.BoundChild.
+	gitprovision.BoundChild(cmd)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {

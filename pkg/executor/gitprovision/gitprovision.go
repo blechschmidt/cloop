@@ -55,6 +55,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/executor"
@@ -180,7 +181,7 @@ func Provision(ctx context.Context, r Request) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fail("cannot create the workspace directory %s on %s: %v", dir, hostName, err)
 	}
-	reuse, err := inspectDir(dir, w, hostName)
+	reuse, err := inspectDir(ctx, dir, w, hostName)
 	if err != nil {
 		return fail("%v", err)
 	}
@@ -274,6 +275,60 @@ func transportEnv() []string {
 	return out
 }
 
+// childWaitDelay bounds how long Wait may block after the child has exited or
+// its context has been cancelled, before the pipes are closed by force.
+//
+// Five seconds rather than the two pkg/plugin and pkg/hooks use: those bound a
+// local script, while everything here is a network transfer whose helper may be
+// mid-syscall when the group is signalled. It only ever elapses when something
+// has already gone wrong — on the ordinary path the pipes close the instant the
+// child exits and the timer never fires.
+const childWaitDelay = 5 * time.Second
+
+// BoundChild makes a git child process cancellable and its Wait bounded.
+//
+// Neither property is free, and the absence of the first one is a hang rather
+// than a slow path. `git fetch` and `git push` do not speak the wire protocol
+// themselves — they exec a transport helper (git-remote-https), which inherits
+// the captured stdout and stderr pipes. exec.CommandContext's default
+// cancellation kills only the process it started, so cancelling a fetch kills
+// git and leaves the helper holding the write end of a pipe that
+// CombinedOutput is still reading. Wait then blocks until the helper exits on
+// its own, which for a remote that has stopped answering means until the TCP
+// stack gives up: the caller's context deadline expires and Provision does not
+// return. That is the failure the context was threaded through this package to
+// prevent, and it is invisible in any test whose remote answers.
+//
+// So the child gets its own process group and cancellation signals the group,
+// which reaches the helper too; WaitDelay is the backstop for a pipe-holder
+// that somehow survives the group kill. This mirrors pkg/provider/claudecode,
+// pkg/plugin and pkg/hooks, which reached the same conclusion for the same
+// reason — and it is exported so the write-back engine
+// (pkg/executor/gitwriteback) gets it from here rather than growing a fourth
+// copy, exactly as it does with TransportEnv.
+//
+// The Cmd must have been created by exec.CommandContext: os/exec refuses to
+// Start a command that has a Cancel and no context. That refusal is not
+// theoretical — it is how this function's first version was caught, by a
+// context-less `git config` read that stopped running and reported its silence
+// as "this checkout has no origin remote".
+func BoundChild(cmd *exec.Cmd) {
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	cmd.SysProcAttr.Setpgid = true
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return os.ErrProcessDone
+		}
+		// Negative pid: the whole group, which is git plus every helper it
+		// forked. Setpgid above is what makes that group exactly this child's.
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		return os.ErrProcessDone
+	}
+	cmd.WaitDelay = childWaitDelay
+}
+
 // runStep runs one command of a plan and reports its output.
 func runStep(ctx context.Context, dir string, w executor.Workspace, cred executor.GitCredential,
 	step executor.GitStep, hostName string, secrets []string, emit func(string)) error {
@@ -298,6 +353,8 @@ func runStep(ctx context.Context, dir string, w executor.Workspace, cred executo
 	// never inherits the caller's own cwd, which on a service-managed agent may
 	// be "/" or a directory that has since been deleted.
 	cmd.Dir = dir
+	// Without this the fetch step ignores cancellation: see BoundChild.
+	BoundChild(cmd)
 
 	out, err := cmd.CombinedOutput()
 	if text := strings.TrimRight(executor.RedactSecrets(string(out), secrets), "\n"); text != "" {
@@ -371,7 +428,7 @@ func (r reuseState) rollback(dir string, emit func(string)) {
 // also much cheaper than a fresh clone on a machine with a slow uplink — or it
 // is a different one, which is a refusal naming both URLs rather than a silent
 // choice between them.
-func inspectDir(dir string, w executor.Workspace, hostName string) (reuseState, error) {
+func inspectDir(ctx context.Context, dir string, w executor.Workspace, hostName string) (reuseState, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return reuseState{}, fmt.Errorf("cannot read the workspace directory %s: %v", dir, err)
@@ -386,7 +443,7 @@ func inspectDir(dir string, w executor.Workspace, hostName string) (reuseState, 
 	}
 	reuse.fresh = false
 
-	have, err := remoteURL(dir)
+	have, err := remoteURL(ctx, dir)
 	if err != nil {
 		return reuse, err
 	}
@@ -401,10 +458,16 @@ func inspectDir(dir string, w executor.Workspace, hostName string) (reuseState, 
 }
 
 // remoteURL reads the origin URL of an existing checkout.
-func remoteURL(dir string) (string, error) {
-	cmd := exec.Command("git", "-C", dir, "config", "--get", "remote.origin.url")
+//
+// It takes a context for the same reason the plan's steps do: this runs on a
+// machine whose workspace may sit on a network filesystem, where a `git config`
+// read is not guaranteed to return. It is also what lets BoundChild apply here
+// — os/exec refuses a Cancel without one.
+func remoteURL(ctx context.Context, dir string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", "-C", dir, "config", "--get", "remote.origin.url")
 	cmd.Env = executor.GitBaseEnv()
 	cmd.Dir = dir
+	BoundChild(cmd)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

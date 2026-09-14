@@ -10,6 +10,7 @@ package executor
 
 import (
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -297,23 +298,72 @@ func TestGitCredentialEnvScopesTheHeader(t *testing.T) {
 		t.Fatalf("GitCredentialEnv: %v", err)
 	}
 	joined := strings.Join(env, "\n")
+	cfg := parseGitConfigEnv(t, env)
 
-	if !strings.Contains(joined, "GIT_CONFIG_KEY_0=http.https://github.com/.extraHeader") {
+	if got := cfg["http.https://github.com/.extraHeader"]; !strings.HasPrefix(got, "Authorization: ") {
 		t.Errorf("the header is not scoped to the repository's origin:\n%s", joined)
 	}
 	// An inherited credential helper could answer the challenge with a
 	// different credential, and the fetch would succeed using authority the
 	// grant never issued.
-	if !strings.Contains(joined, "GIT_CONFIG_KEY_1=credential.helper") ||
-		!strings.Contains(joined, "GIT_CONFIG_VALUE_1=") {
+	if got, ok := cfg["credential.helper"]; !ok || got != "" {
 		t.Errorf("the environment does not disable inherited credential helpers:\n%s", joined)
 	}
-	if !strings.Contains(joined, "GIT_CONFIG_COUNT=2") {
-		t.Errorf("GIT_CONFIG_COUNT does not match the number of entries:\n%s", joined)
+	// The credential block replaces the base block's count, so it has to carry
+	// the base settings too. A redirect guard that is switched off precisely
+	// when a credential is present would be worse than not having one.
+	if got := cfg["http.followRedirects"]; got != "false" {
+		t.Errorf("the credential environment does not refuse redirects (http.followRedirects=%q); "+
+			"git re-bases to the redirect target and keeps sending the header scoped to the "+
+			"original origin:\n%s", got, joined)
 	}
+}
+
+// parseGitConfigEnv decodes git's GIT_CONFIG_COUNT protocol back into a map.
+//
+// Asserting on the decoded settings rather than on "GIT_CONFIG_KEY_0=..."
+// strings is what keeps these tests honest about the thing that actually
+// matters: a key whose index is beyond GIT_CONFIG_COUNT is silently ignored by
+// git, so a test that matched the literal text would pass for an environment
+// where the setting never applies. It fails the test if the count and the keys
+// disagree, which is the only way that mistake is visible.
+func parseGitConfigEnv(t *testing.T, env []string) map[string]string {
+	t.Helper()
+	lookup := map[string]string{}
+	for _, kv := range env {
+		if k, v, ok := strings.Cut(kv, "="); ok {
+			lookup[k] = v
+		}
+	}
+	count, err := strconv.Atoi(lookup["GIT_CONFIG_COUNT"])
+	if err != nil {
+		t.Fatalf("GIT_CONFIG_COUNT is %q, which git cannot read: %v", lookup["GIT_CONFIG_COUNT"], err)
+	}
+	out := make(map[string]string, count)
+	for i := 0; i < count; i++ {
+		n := strconv.Itoa(i)
+		key, ok := lookup["GIT_CONFIG_KEY_"+n]
+		if !ok {
+			t.Fatalf("GIT_CONFIG_COUNT is %d but GIT_CONFIG_KEY_%s is missing; git would fail to "+
+				"start", count, n)
+		}
+		out[key] = lookup["GIT_CONFIG_VALUE_"+n]
+	}
+	// A key past the count is a setting the author believes is applied and git
+	// ignores.
+	if _, stray := lookup["GIT_CONFIG_KEY_"+strconv.Itoa(count)]; stray {
+		t.Errorf("GIT_CONFIG_KEY_%d is set but GIT_CONFIG_COUNT is %d, so git ignores it",
+			count, count)
+	}
+	return out
+}
+
+func TestGitCredentialEnvRefusesWhatItCannotScope(t *testing.T) {
+	w := gitWS()
+	c := GitCredential{Username: "x-access-token", Password: "ghp_secret_token_value"}
 
 	// No credential is not an error: a public repository fetches anonymously.
-	env, err = GitCredentialEnv(w, GitCredential{})
+	env, err := GitCredentialEnv(w, GitCredential{})
 	if err != nil || env != nil {
 		t.Errorf("GitCredentialEnv with no credential = %v, %v; want nil, nil", env, err)
 	}
@@ -326,7 +376,8 @@ func TestGitCredentialEnvScopesTheHeader(t *testing.T) {
 }
 
 func TestGitBaseEnvIsClosed(t *testing.T) {
-	joined := strings.Join(GitBaseEnv(), "\n")
+	base := GitBaseEnv()
+	joined := strings.Join(base, "\n")
 	// Each of these turns a missing credential or a hostile configuration into
 	// something other than a silent success.
 	for _, want := range []string{
@@ -338,6 +389,13 @@ func TestGitBaseEnvIsClosed(t *testing.T) {
 		if !strings.Contains(joined, want) {
 			t.Errorf("GitBaseEnv is missing %q:\n%s", want, joined)
 		}
+	}
+	// A redirect is how a fetch ends up talking to a host the grant never
+	// covered, so refusing to follow one belongs to the closed environment
+	// rather than to the credential: an unauthenticated fetch redirected
+	// elsewhere is still a fetch of the wrong tree.
+	if got := parseGitConfigEnv(t, base)["http.followRedirects"]; got != "false" {
+		t.Errorf("GitBaseEnv has http.followRedirects=%q, want %q:\n%s", got, "false", joined)
 	}
 }
 

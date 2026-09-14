@@ -412,6 +412,11 @@ func (g *gitRunner) run(ctx context.Context, name string, authenticated bool, r 
 	cmd := exec.CommandContext(ctx, "git", argv...)
 	cmd.Env = env
 	cmd.Dir = g.dir
+	// The push step execs git-remote-https, which inherits the captured pipes;
+	// without this the write-back ignores its own Timeout when the remote stops
+	// answering. See gitprovision.BoundChild — shared rather than restated for
+	// the same reason TransportEnv is.
+	gitprovision.BoundChild(cmd)
 
 	out, err := cmd.CombinedOutput()
 	text := executor.RedactSecrets(string(out), g.secrets)

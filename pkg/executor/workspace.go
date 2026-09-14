@@ -426,7 +426,7 @@ func (c GitCredential) Secrets() []string {
 // an insteadOf rewrite pointing the fetch at another host, or a proxy — all
 // decided by whoever last touched that machine rather than by the grant.
 func GitBaseEnv() []string {
-	return []string{
+	return append([]string{
 		// No prompting, ever. A git that blocks on a terminal that will never
 		// answer turns a missing credential into a hung task.
 		"GIT_TERMINAL_PROMPT=0",
@@ -439,7 +439,57 @@ func GitBaseEnv() []string {
 		// Advertise the workload, so a server-side log names cloop rather than
 		// an anonymous git.
 		"GIT_HTTP_USER_AGENT=cloop-workspace",
+	}, gitConfigEnv(baseGitConfig()...)...)
+}
+
+// baseGitConfig is the git configuration every child runs with, credential or
+// not. It travels through the environment rather than a file for the same
+// reason everything else here does: nothing may be written to the disk of a
+// machine the workload can read.
+func baseGitConfig() [][2]string {
+	return [][2]string{
+		// Refuse redirects outright, rather than git's default of following one
+		// on the initial request.
+		//
+		// This is the enforcement behind the scoping claim in BaseURL, and
+		// without it that claim is false. Following the initial redirect does
+		// not merely move the fetch — it re-bases the remote URL to the new
+		// host and then keeps sending the http.<origin>.extraHeader that was
+		// resolved for the *old* one. Measured against a real git client: the
+		// redirected info/refs arrives at the third party with no Authorization
+		// header, and the git-upload-pack POST that follows arrives with the
+		// brokered token in full. The fetch then succeeds, so the disclosure
+		// leaves no trace anywhere an operator would look.
+		//
+		// A leased credential is scoped to exactly one origin, so a remote that
+		// wants to send the fetch elsewhere is asking for authority the grant
+		// did not issue. Refusing turns that into `unable to access ...: The
+		// requested URL returned error: 301` — a legible failure naming the URL
+		// to correct — instead of a silent hand-off. The cost is that a
+		// repository which has genuinely moved must have its URL updated in the
+		// spec, which is the right place for that fact to live anyway.
+		//
+		// pkg/gitproxy already refuses redirects on its own upstream leg, for
+		// the same reason; this is the client leg of the same circuit.
+		{"http.followRedirects", "false"},
 	}
+}
+
+// gitConfigEnv renders key/value pairs into git's GIT_CONFIG_COUNT protocol.
+//
+// The indices are computed rather than written out, because they are the one
+// part of this protocol that cannot be checked by reading: a hand-numbered key
+// that disagrees with the count is silently ignored by git, and the setting it
+// was carrying — here, the one that keeps a credential from leaving its origin
+// — simply does not apply.
+func gitConfigEnv(pairs ...[2]string) []string {
+	out := make([]string, 0, 1+2*len(pairs))
+	out = append(out, "GIT_CONFIG_COUNT="+strconv.Itoa(len(pairs)))
+	for i, kv := range pairs {
+		n := strconv.Itoa(i)
+		out = append(out, "GIT_CONFIG_KEY_"+n+"="+kv[0], "GIT_CONFIG_VALUE_"+n+"="+kv[1])
+	}
+	return out
 }
 
 // GitCredentialEnv returns the additional environment for the authenticated
@@ -449,8 +499,16 @@ func GitBaseEnv() []string {
 // GIT_CONFIG_COUNT protocol. That is the only delivery path here that satisfies
 // all three constraints at once: nothing is written to disk, nothing appears in
 // argv (which /proc publishes to every process with the same uid), and the
-// header is scoped to the repository's own origin so a redirect cannot carry it
-// to a third party.
+// header is scoped to the repository's own origin.
+//
+// The scoping alone is not what keeps the header at its origin — baseGitConfig's
+// refusal to follow redirects is, and the two only work together. The whole
+// block is re-emitted here rather than added to GitBaseEnv's, because
+// GIT_CONFIG_COUNT is a single count for the whole environment: a second block
+// appended after the first overrides the count, and any key the second block
+// did not repeat would be dropped along with it. Emitting one complete block
+// means the credential cannot arrive with the redirect guard silently switched
+// off.
 //
 // The empty credential.helper entry is not redundant: without it, a helper
 // configured in a location GIT_CONFIG_GLOBAL does not cover could still answer
@@ -471,13 +529,10 @@ func GitCredentialEnv(w Workspace, c GitCredential) ([]string, error) {
 		// newline would be a header-injection primitive against the remote.
 		return nil, fmt.Errorf("%w: workspace credential encodes to a multi-line header", ErrInvalidSpec)
 	}
-	return []string{
-		"GIT_CONFIG_COUNT=2",
-		"GIT_CONFIG_KEY_0=http." + base + ".extraHeader",
-		"GIT_CONFIG_VALUE_0=Authorization: " + header,
-		"GIT_CONFIG_KEY_1=credential.helper",
-		"GIT_CONFIG_VALUE_1=",
-	}, nil
+	return gitConfigEnv(append(baseGitConfig(),
+		[2]string{"http." + base + ".extraHeader", "Authorization: " + header},
+		[2]string{"credential.helper", ""},
+	)...), nil
 }
 
 // WorkspaceAccess is what one git workspace gets: the material, and the

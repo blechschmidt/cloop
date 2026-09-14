@@ -790,8 +790,28 @@ anything used it.
 The credential is delivered as `http.<https://host/>.extraHeader`, scoped to the
 repository's own origin. An *unscoped* `http.extraHeader` is sent to every host
 git contacts, including whatever a redirect points at — which turns a hostile or
-merely misconfigured redirect into credential exfiltration. Scoped, a repository
-that redirects elsewhere produces a fetch failure instead.
+merely misconfigured redirect into credential exfiltration.
+
+Scoping alone does not close that hole, and it is worth being precise about why,
+because the gap is invisible from the configuration. git's default
+`http.followRedirects` is `initial`: it follows a redirect on the first request
+and **re-bases the remote URL to the new host**, then keeps sending the
+`extraHeader` that was resolved for the *original* origin. Measured against a
+real git client, the redirected `info/refs` reaches the third party with no
+`Authorization` header — which is what makes this so easy to mistake for working
+scoping — and the `git-upload-pack` POST immediately after it carries the
+brokered token in full. The fetch then succeeds, so nothing fails and nothing is
+logged.
+
+So the closed environment sets `http.followRedirects=false` for every git child,
+credential or not, and that is what actually produces the fetch failure. A
+leased credential is good against exactly one origin; a remote asking to move
+the fetch elsewhere is asking for authority the grant did not issue, and the
+answer is `unable to access …: The requested URL returned error: 301` — a
+failure naming the URL to correct. The cost is that a repository which has
+genuinely moved needs its URL updated in the spec. The git interception proxy
+(`pkg/gitproxy`) already refuses redirects on its upstream leg for the same
+reason; this is the client leg of the same circuit.
 
 The empty `credential.helper` entry is not redundant. Without it, a helper
 configured somewhere `GIT_CONFIG_GLOBAL` does not cover could still answer the
