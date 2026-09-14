@@ -80,6 +80,20 @@ type SandboxRecord struct {
 	Warnings []string `json:"warnings,omitempty"`
 	// StartedAt is when the workload began.
 	StartedAt time.Time `json:"started_at,omitempty"`
+
+	// Identity is who asked for this run — an oidcauth OwnerKey, the owning
+	// project's registry Owner, or cost.IdentityLocal when nobody
+	// authenticated (Task 20264). It rides this record for the same reason
+	// the executor fields do: the hub knows it and the orchestrator needs it,
+	// and the project directory is the only channel that crosses the sandbox
+	// boundary in that direction.
+	//
+	// The orchestrator stamps it onto every cost ledger row so a report can
+	// answer "what did alice spend today". It is *not* what the hub's quota
+	// enforcement books against — see pkg/ui/spend.go — because this file
+	// lands in a directory the workload can write to, and a workload that
+	// could name the payer could drain a colleague's budget.
+	Identity string `json:"identity,omitempty"`
 }
 
 // Pinned reports whether the recorded image is immutable — whether re-running

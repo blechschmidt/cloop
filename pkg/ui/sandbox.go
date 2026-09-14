@@ -153,10 +153,11 @@ func auditImageDenial(workDir string, err error) {
 // Best-effort by design. A project directory that cannot be written is already
 // a run that will fail on its first artifact, and failing the start here would
 // replace that clear error with a confusing one about provenance.
-func recordSandboxProvenance(workDir string, resolved *sandbox.Resolved, ex executor.Executor, h executor.Handle) {
+func recordSandboxProvenance(workDir string, resolved *sandbox.Resolved, ex executor.Executor, h executor.Handle, identity string) {
 	rec := artifact.SandboxRecord{
 		PinnedImage: h.Image,
 		StartedAt:   h.StartedAt,
+		Identity:    identity,
 	}
 	if rec.StartedAt.IsZero() {
 		rec.StartedAt = time.Now()
@@ -171,10 +172,16 @@ func recordSandboxProvenance(workDir string, resolved *sandbox.Resolved, ex exec
 		rec.SetupHash = resolved.Spec.SetupHash()
 		rec.Warnings = resolved.Warnings
 	}
-	if rec.IsZero() {
+	if rec.IsZero() && rec.Identity == "" {
 		// Nothing to record: no sandbox spec and a driver with no image. Leave
 		// any previous run's record in place rather than replacing it with an
 		// empty one that would read as "this run had no environment".
+		//
+		// An identity alone is worth a record even when the environment is
+		// not, and is in fact the common case on a host-executor hub: without
+		// this the spend of every local run would be unattributable, and — the
+		// worse half — a *previous* run's record would survive and attribute
+		// this run's spend to whoever started that one.
 		return
 	}
 	if _, err := artifact.WriteSandboxRun(workDir, rec); err != nil {

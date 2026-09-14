@@ -948,7 +948,31 @@ type CostEntry struct {
 	OutputTokens   int
 	ThinkingTokens int
 	EstimatedUSD   float64
+
+	// Identity is who this spend is attributed to — an oidcauth OwnerKey, or
+	// the "local" sentinel for an unauthenticated run (Task 20264). Empty on
+	// rows written before migration 0035, which means *unattributed* rather
+	// than unowned. Self-reported by the orchestrator; see 0035 for why quota
+	// enforcement deliberately does not read it.
+	Identity string
+
+	// RowID is the costs.id of this row. Set by the readers that select it,
+	// zero elsewhere (AppendCost does not read it back).
+	//
+	// It exists for the hub's spend drain, which needs a watermark it can
+	// resume from without double-booking. A timestamp cannot serve: two tasks
+	// finishing in the same nanosecond collide, and a clock adjustment moves
+	// one backwards — either would book a tenant twice or not at all. The
+	// autoincrement id is monotonic in insertion order, which is the order the
+	// drain actually walks.
+	RowID int64
 }
+
+// costColumns is the select list every cost reader shares, so a column added
+// to the table is added to all of them at once. It is paired with
+// scanCostRows, which must scan exactly these, in this order.
+const costColumns = `id, timestamp, task_id, task_title, provider, model,
+	input_tokens, output_tokens, thinking_tokens, estimated_usd, identity`
 
 // AppendCost inserts a cost entry into the costs table.
 func (d *DB) AppendCost(entry CostEntry) error {
@@ -960,12 +984,12 @@ func (d *DB) AppendCost(entry CostEntry) error {
 
 	_, err := d.conn.Exec(`
 		INSERT INTO costs(timestamp, task_id, task_title, provider, model,
-			input_tokens, output_tokens, thinking_tokens, estimated_usd)
-		VALUES(?,?,?,?,?,?,?,?,?)`,
+			input_tokens, output_tokens, thinking_tokens, estimated_usd, identity)
+		VALUES(?,?,?,?,?,?,?,?,?,?)`,
 		entry.Timestamp.UTC().Format(time.RFC3339Nano),
 		entry.TaskID, entry.TaskTitle, entry.Provider, entry.Model,
 		entry.InputTokens, entry.OutputTokens, entry.ThinkingTokens,
-		entry.EstimatedUSD,
+		entry.EstimatedUSD, entry.Identity,
 	)
 	return classifyDriverErr(err)
 }
@@ -975,9 +999,7 @@ func (d *DB) ReadCosts() ([]CostEntry, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	rows, err := d.conn.Query(`
-		SELECT timestamp, task_id, task_title, provider, model,
-			input_tokens, output_tokens, thinking_tokens, estimated_usd
+	rows, err := d.conn.Query(`SELECT ` + costColumns + `
 		FROM costs ORDER BY timestamp ASC`)
 	if err != nil {
 		return nil, err
@@ -991,9 +1013,7 @@ func (d *DB) ReadCostsSince(since time.Time) ([]CostEntry, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	rows, err := d.conn.Query(`
-		SELECT timestamp, task_id, task_title, provider, model,
-			input_tokens, output_tokens, thinking_tokens, estimated_usd
+	rows, err := d.conn.Query(`SELECT `+costColumns+`
 		FROM costs WHERE timestamp >= ? ORDER BY timestamp ASC`,
 		since.UTC().Format(time.RFC3339Nano),
 	)
@@ -1004,6 +1024,111 @@ func (d *DB) ReadCostsSince(since time.Time) ([]CostEntry, error) {
 	return scanCostRows(rows)
 }
 
+// ReadCostsAfterID returns cost entries with id > afterID, oldest first.
+//
+// This is the hub's spend drain (Task 20264): it books everything it has not
+// booked before and remembers the highest id it saw. Ordering by id rather
+// than timestamp is what makes the watermark sound — see CostEntry.RowID.
+//
+// limit bounds one drain so a project whose ledger grew while the hub was down
+// cannot pull an unbounded result set into memory; the caller advances its
+// watermark and comes back for the rest.
+func (d *DB) ReadCostsAfterID(afterID int64, limit int) ([]CostEntry, error) {
+	if limit <= 0 {
+		limit = 1000
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	rows, err := d.conn.Query(`SELECT `+costColumns+`
+		FROM costs WHERE id > ? ORDER BY id ASC LIMIT ?`, afterID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanCostRows(rows)
+}
+
+// MaxCostRowID returns the highest costs.id present, or 0 when the table is
+// empty. It seeds a drain watermark at a point that means "everything already
+// here is somebody else's business", so a hub adopting an existing project
+// does not retroactively bill a tenant for spend that predates it.
+func (d *DB) MaxCostRowID() (int64, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	var id sql.NullInt64
+	if err := d.conn.QueryRow(`SELECT MAX(id) FROM costs`).Scan(&id); err != nil {
+		return 0, err
+	}
+	if !id.Valid {
+		return 0, nil
+	}
+	return id.Int64, nil
+}
+
+// IdentitySpend is one identity's total spend over a window.
+type IdentitySpend struct {
+	Identity       string
+	InputTokens    int
+	OutputTokens   int
+	ThinkingTokens int
+	EstimatedUSD   float64
+	Entries        int
+}
+
+// SpendByIdentity aggregates costs per identity over [from, to).
+//
+// A zero `from` or `to` leaves that side of the window open, so the caller can
+// ask for "today", "since Monday" or "everything" through one query. Rows with
+// no identity aggregate under the empty string: they are reported as
+// unattributed rather than dropped, because spend that happened is spend that
+// happened and a total that silently omits it would not reconcile against the
+// project ledger.
+func (d *DB) SpendByIdentity(from, to time.Time) ([]IdentitySpend, error) {
+	query := `SELECT identity,
+			COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0),
+			COALESCE(SUM(thinking_tokens),0), COALESCE(SUM(estimated_usd),0),
+			COUNT(*)
+		FROM costs`
+	var (
+		where []string
+		args  []interface{}
+	)
+	if !from.IsZero() {
+		where = append(where, "timestamp >= ?")
+		args = append(args, from.UTC().Format(time.RFC3339Nano))
+	}
+	if !to.IsZero() {
+		where = append(where, "timestamp < ?")
+		args = append(args, to.UTC().Format(time.RFC3339Nano))
+	}
+	if len(where) > 0 {
+		query += " WHERE " + strings.Join(where, " AND ")
+	}
+	query += " GROUP BY identity ORDER BY identity ASC"
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	rows, err := d.conn.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []IdentitySpend
+	for rows.Next() {
+		var s IdentitySpend
+		if err := rows.Scan(&s.Identity, &s.InputTokens, &s.OutputTokens,
+			&s.ThinkingTokens, &s.EstimatedUSD, &s.Entries); err != nil {
+			return nil, err
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
 // MonthlyCosts returns cost entries for the given UTC year/month.
 func (d *DB) MonthlyCosts(year, month int) ([]CostEntry, error) {
 	// Build inclusive date range: YYYY-MM-01 00:00:00 → YYYY-MM-01 of next month.
@@ -1012,9 +1137,7 @@ func (d *DB) MonthlyCosts(year, month int) ([]CostEntry, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	rows, err := d.conn.Query(`
-		SELECT timestamp, task_id, task_title, provider, model,
-			input_tokens, output_tokens, thinking_tokens, estimated_usd
+	rows, err := d.conn.Query(`SELECT `+costColumns+`
 		FROM costs WHERE timestamp >= ? AND timestamp < ? ORDER BY timestamp ASC`,
 		start.Format(time.RFC3339Nano), end.Format(time.RFC3339Nano),
 	)
@@ -1030,8 +1153,9 @@ func scanCostRows(rows *sql.Rows) ([]CostEntry, error) {
 	for rows.Next() {
 		var e CostEntry
 		var ts string
-		if err := rows.Scan(&ts, &e.TaskID, &e.TaskTitle, &e.Provider, &e.Model,
-			&e.InputTokens, &e.OutputTokens, &e.ThinkingTokens, &e.EstimatedUSD); err != nil {
+		if err := rows.Scan(&e.RowID, &ts, &e.TaskID, &e.TaskTitle, &e.Provider, &e.Model,
+			&e.InputTokens, &e.OutputTokens, &e.ThinkingTokens, &e.EstimatedUSD,
+			&e.Identity); err != nil {
 			return nil, err
 		}
 		e.Timestamp, _ = time.Parse(time.RFC3339Nano, ts)

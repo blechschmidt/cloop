@@ -318,7 +318,7 @@ func uiSpec(workDir string, argv []string, labels map[string]string) executor.Sp
 // same instance to Stream and Status the handle — re-resolving later could
 // pick a different executor if bindings changed mid-run.
 func startWorkload(workDir string, argv []string, labels map[string]string) (executor.Executor, executor.Handle, error) {
-	return startWorkloadAs(nil, workDir, argv, labels)
+	return startWorkloadAs(nil, "", workDir, argv, labels)
 }
 
 // startWorkloadAs is startWorkload with the requesting identity attached, so
@@ -330,7 +330,14 @@ func startWorkload(workDir string, argv []string, labels map[string]string) (exe
 // filesystem and means nothing inside an isolating sandbox. A nil envFor —
 // every non-HTTP caller — keeps the host credential, which is correct for a
 // single-user install and for internal dispatches that belong to no user.
-func startWorkloadAs(envFor func(executor.Executor) []string, workDir string, argv []string, labels map[string]string) (executor.Executor, executor.Handle, error) {
+//
+// identity is who to bill this run to (Task 20264): an oidcauth OwnerKey, the
+// project's registry Owner, or "" for an internal dispatch with no initiator,
+// which the orchestrator reads back as cost.IdentityLocal. It is recorded in
+// the run's provenance file so the harness can stamp it onto every cost row.
+// An explicit parameter rather than another label because it decides who pays,
+// and that should be visible at each call site rather than buried in a map.
+func startWorkloadAs(envFor func(executor.Executor) []string, identity, workDir string, argv []string, labels map[string]string) (executor.Executor, executor.Handle, error) {
 	registerBuiltinExecutors()
 	ex, err := executor.Resolve(workDir)
 	if err != nil {
@@ -429,7 +436,7 @@ func startWorkloadAs(envFor func(executor.Executor) []string, workDir string, ar
 		return nil, executor.Handle{}, err
 	}
 	go wipeLeaseOnExit(ex, handle.ID, lease)
-	recordSandboxProvenance(workDir, sandboxSpec, ex, handle)
+	recordSandboxProvenance(workDir, sandboxSpec, ex, handle, identity)
 
 	// Record the dispatch so the supervisor can fail it over if this executor
 	// dies holding it. Best-effort: a session that cannot be recorded yields

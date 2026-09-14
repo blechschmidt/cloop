@@ -686,3 +686,150 @@ func (m *memStore) PruneCountersBefore(bucket string) error {
 }
 
 var _ Store = (*memStore)(nil)
+
+// TestSpendAccumulatesPerIdentityAndRollsOverAtUTCMidnight is the enforcer-side
+// pair to the hub's booking tests (Task 20264).
+//
+// Two properties in one, because they interact: counters are keyed by
+// (identity, day), so a bug in either half — pooling two tenants into one
+// counter, or carrying yesterday's key forward — presents as the other tenant
+// or the other day being refused when they should not be.
+func TestSpendAccumulatesPerIdentityAndRollsOverAtUTCMidnight(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 9, 14, 23, 59, 0, 0, time.UTC)
+	e := NewEnforcer(mustResolver(t, Config{
+		Defaults: Limits{ResDailyTokens: 1000, ResDailyCostUSD: 10},
+	}), nil, WithClock(func() time.Time { return now }))
+
+	bob := &authz.Subject{Sub: "u-2", Email: "bob@example.com"}
+
+	// Alice spends her whole token budget; Bob spends a little.
+	e.Spend("alice@example.com", 600, 4)
+	e.Spend("alice@example.com", 400, 3)
+	e.Spend("bob@example.com", 50, 0.5)
+
+	if got := e.Usage("alice@example.com")[ResDailyTokens]; got != 1000 {
+		t.Errorf("alice's tokens = %v, want the 600+400 she spent", got)
+	}
+	if got := e.Usage("bob@example.com")[ResDailyTokens]; got != 50 {
+		t.Errorf("bob's tokens = %v, want 50 — alice's spend pooled into his counter", got)
+	}
+	if got := e.Usage("alice@example.com")[ResDailyCostUSD]; got != 7 {
+		t.Errorf("alice's usd = %v, want 7", got)
+	}
+
+	// Alice is out; Bob is not. A shared counter would refuse them together.
+	if err := e.CheckSpend(alice()); err == nil {
+		t.Error("alice spent her entire daily token budget and was still admitted")
+	}
+	if err := e.CheckSpend(bob); err != nil {
+		t.Errorf("bob was refused on alice's spending: %v", err)
+	}
+
+	// Past UTC midnight both start clean, with no scheduled job having run.
+	now = now.Add(2 * time.Minute)
+	if err := e.CheckSpend(alice()); err != nil {
+		t.Errorf("alice is still refused after the day rolled over: %v", err)
+	}
+	if got := e.Usage("alice@example.com")[ResDailyTokens]; got != 0 {
+		t.Errorf("alice's new-day counter = %v, want 0 — yesterday's spend leaked forward", got)
+	}
+
+	// And today's spend accrues to today's bucket, not to yesterday's.
+	e.Spend("alice@example.com", 700, 1)
+	if got := e.Usage("alice@example.com")[ResDailyTokens]; got != 700 {
+		t.Errorf("after the rollover alice's counter = %v, want 700", got)
+	}
+}
+
+// TestCheckSpendIdentityKeysTheSameCounterSpendWrites is a regression test for
+// a bug that made daily budgets unenforceable for every non-email identity.
+//
+// Spend keys the counter by the identity string. The obvious way to check it
+// afterwards — CheckSpend(SubjectForIdentity(id)) — keys by subject.Label(),
+// and the two disagree for any identity that is neither an email nor already
+// "sub:"-prefixed: SubjectForIdentity("local").Label() is "sub:local". So the
+// spend went to one counter and the gate read another, empty one, and the
+// budget never applied. That covers the "local" sentinel every unauthenticated
+// run is billed to, and any registry owner that is a bare username.
+func TestCheckSpendIdentityKeysTheSameCounterSpendWrites(t *testing.T) {
+	t.Parallel()
+
+	for _, identity := range []string{"local", "ops-team", "alice@example.com", "sub:u-1"} {
+		t.Run(identity, func(t *testing.T) {
+			e := NewEnforcer(mustResolver(t, Config{
+				Defaults: Limits{ResDailyTokens: 100},
+			}), nil)
+
+			if err := e.CheckSpendIdentity(identity); err != nil {
+				t.Fatalf("refused before spending anything: %v", err)
+			}
+			e.Spend(identity, 150, 0)
+
+			if got := e.Usage(identity)[ResDailyTokens]; got != 150 {
+				t.Fatalf("Usage(%q) = %v, want the 150 that was spent", identity, got)
+			}
+			if err := e.CheckSpendIdentity(identity); err == nil {
+				t.Fatalf("%q spent 150 against a limit of 100 and was still admitted — "+
+					"the spend and the check are keyed differently", identity)
+			}
+		})
+	}
+}
+
+// TestCheckSpendIdentityHonoursGroupDerivedLimits: the drain must resolve the
+// same ceiling the run was admitted against.
+//
+// A synthesized subject carries no groups, so resolving through one falls back
+// to the defaults. A tenant admitted at run start against a generous group
+// budget would then be refused mid-run against a tighter default and have their
+// work killed for exceeding a limit that is not theirs.
+func TestCheckSpendIdentityHonoursGroupDerivedLimits(t *testing.T) {
+	t.Parallel()
+
+	e := NewEnforcer(mustResolver(t, Config{
+		Defaults: Limits{ResDailyTokens: 1000},
+		Bindings: []Binding{{
+			Claim: authz.ClaimGroup, Value: "engineering",
+			Limits: Limits{ResDailyTokens: 1000000},
+		}},
+	}), nil)
+
+	// alice() is in the "engineering" group. Admission remembers her claims.
+	if err := e.CheckSpend(alice()); err != nil {
+		t.Fatalf("admission refused alice: %v", err)
+	}
+	e.Spend("alice@example.com", 5000, 0)
+
+	// 5000 is over the 1000 default and far under her group's 1000000.
+	if err := e.CheckSpendIdentity("alice@example.com"); err != nil {
+		t.Fatalf("the drain refused alice at %v — it resolved the default limit "+
+			"rather than the group binding she was admitted under", err)
+	}
+
+	// The binding is genuinely what is carrying her, not an absent limit.
+	e.Spend("alice@example.com", 1000000, 0)
+	if err := e.CheckSpendIdentity("alice@example.com"); err == nil {
+		t.Fatal("alice blew even her group budget and was still admitted")
+	}
+}
+
+// TestCheckSpendIdentityFindsAnOverrideOnANonEmailIdentity: an admin capping
+// "local" must have that cap enforced. Overrides are keyed by identity, and
+// resolving them through a synthesized subject's Label() would miss for
+// exactly the identities the test above covers.
+func TestCheckSpendIdentityFindsAnOverrideOnANonEmailIdentity(t *testing.T) {
+	t.Parallel()
+
+	e := NewEnforcer(mustResolver(t, Config{}), nil)
+	if err := e.SetOverride("local", Limits{ResDailyTokens: 10}, "admin"); err != nil {
+		t.Fatalf("SetOverride: %v", err)
+	}
+
+	e.Spend("local", 25, 0)
+	if err := e.CheckSpendIdentity("local"); err == nil {
+		t.Fatal("an admin's cap on \"local\" was not enforced — the override " +
+			"was looked up under a different key than it was stored under")
+	}
+}

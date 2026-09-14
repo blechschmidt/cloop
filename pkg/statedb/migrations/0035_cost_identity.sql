@@ -1,0 +1,47 @@
+-- 0035_cost_identity: attribute AI spend to the identity that spent it
+-- (Task 20264).
+--
+-- The costs table has recorded what a run spent since 0001, but never who
+-- spent it. On a single-user project that was complete information; on a
+-- multi-tenant hub it is the one column that makes the table answerable. The
+-- question an operator actually asks is "what did alice@example.com spend
+-- today", and before this migration nothing in the database could be joined to
+-- reach it — a row knew its task, its provider and its dollars, and the task
+-- knew nothing about who started the run it belonged to.
+--
+--   identity  the initiating identity, in the same namespace as
+--             multiui.ProjectEntry.Owner and quota's counter keys: an
+--             oidcauth.Identity.OwnerKey() (a lowercased email, or
+--             "sub:<subject>" when the IdP released no email), or the
+--             "local" sentinel for a run nobody authenticated — a bare
+--             `cloop run`, or a hub with OIDC switched off. One namespace
+--             across all three is what lets a spend row line up with a quota
+--             counter without a translation table that could disagree with
+--             itself.
+--
+-- Empty means unattributed, which is exactly what every row written before
+-- this migration is: cloop did not know, and inventing an owner for historical
+-- rows would put spend on somebody's ledger that they cannot be shown to have
+-- incurred. Reports surface those rows under an explicit "unattributed"
+-- heading rather than folding them into any identity's total.
+--
+-- # What this column is and is not trusted for
+--
+-- It is written by the orchestrator, which runs inside the sandbox, into a
+-- database inside the sandbox's own workspace. So it is *self-reported*, and
+-- it is used for reporting and forensics only. Quota enforcement never reads
+-- it: the hub books spend against the identity it resolved at dispatch and
+-- holds in its own memory, because a workload that could name the payer could
+-- drain a colleague's daily budget by writing their address here. See
+-- pkg/ui/spend.go, which documents that split at the point it is relied on.
+--
+-- Additive with a default, so an existing state.db opens unchanged and every
+-- prior row keeps its exact previous meaning.
+
+ALTER TABLE costs ADD COLUMN identity TEXT NOT NULL DEFAULT '';
+
+-- The report is always "this identity, over this window", so the index leads
+-- with identity and carries timestamp to keep the range scan inside it. A hub
+-- that has been running for a year has a cost row per task per project; this
+-- keeps a per-identity daily report a seek rather than a full scan.
+CREATE INDEX IF NOT EXISTS costs_identity_timestamp ON costs(identity, timestamp);

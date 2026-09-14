@@ -368,6 +368,27 @@ func claimNames() string {
 // enforces nothing, which keeps single-tenant local use exactly as it was.
 func (r *Resolver) Configured() bool { return r != nil && r.configured }
 
+// HasClaimBindings reports whether any binding resolves off a group or role
+// claim, so a caller holding only an identity string can tell whether a
+// synthesized subject would under-resolve that identity's ceiling.
+//
+// It exists for the hub's spend drain, which runs long after the request that
+// carried the claims. When this is true and the enforcer has not seen the real
+// subject, the resolved limit is the default rather than whatever binding the
+// tenant was actually admitted under — and acting on that would stop work for
+// exceeding a limit that does not apply.
+func (r *Resolver) HasClaimBindings() bool {
+	if r == nil {
+		return false
+	}
+	for _, b := range r.bindings {
+		if b.Claim == authz.ClaimGroup || b.Claim == authz.ClaimRole {
+			return true
+		}
+	}
+	return false
+}
+
 // Effective is the resolved ceiling set for one identity, with provenance.
 type Effective struct {
 	// Identity is the key limits are accounted against — authz.Subject's

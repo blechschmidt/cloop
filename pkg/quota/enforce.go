@@ -459,7 +459,70 @@ func (e *Enforcer) CheckSpend(subject *authz.Subject) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
+	// Remember the claims, as every other subject-taking entry point does.
+	// The hub's spend drain resolves this identity's ceiling later, from the
+	// identity alone, and without the real subject it would fall back to the
+	// defaults and refuse a tenant against a limit that is not theirs.
+	e.rememberSubjectLocked(subject)
 	eff := e.resolveLocked(subject)
+	for _, res := range []Resource{ResDailyTokens, ResDailyCostUSD} {
+		limit, ok := eff.Limits.Get(res)
+		if !ok {
+			continue
+		}
+		used := e.counters[counterKey{identity, res, bucket}]
+		if used >= limit {
+			e.denials[res]++
+			return &Denial{
+				Identity:   identity,
+				Resource:   res,
+				Limit:      limit,
+				Used:       used,
+				Requested:  0,
+				RetryAfter: e.retryAfter(res),
+				Source:     eff.Sources[res],
+			}
+		}
+	}
+	return nil
+}
+
+// CheckSpendIdentity is CheckSpend for a caller that holds an identity string
+// rather than a live subject — the hub's spend drain, which books a run's cost
+// long after the request that started it is gone (Task 20264).
+//
+// It exists because the obvious spelling, CheckSpend(SubjectForIdentity(id)),
+// is wrong in two independent ways:
+//
+//   - The counter key does not round-trip. Spend keys by the identity string;
+//     SubjectForIdentity("local") yields Subject{Sub: "local"}, whose Label()
+//     is "sub:local". Spend books to one key and the check reads another, so
+//     every run attributed to the "local" sentinel — or to any registry owner
+//     that is a bare username rather than an email — is billed to a counter
+//     nothing ever consults. The budget silently never applies.
+//
+//   - The limits come out wrong. A synthesized subject carries no groups and
+//     no roles, so every group- and role-derived binding fails to match and
+//     resolution falls back to the defaults. A tenant admitted at start
+//     against a generous group budget would then be refused mid-run against a
+//     tighter default, and killed for exceeding a limit that is not theirs.
+//
+// Both are avoided by keying the counter on the identity exactly as Spend does,
+// and resolving limits through the subject the enforcer remembers for that
+// identity — the real one, with its claims, when this process has seen it.
+func (e *Enforcer) CheckSpendIdentity(identity string) error {
+	if e == nil || identity == "" || identity == "anonymous" {
+		return nil
+	}
+	bucket := e.dayBucket(e.now())
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	// Not resolveLocked: that looks the override up by subject.Label(), which
+	// is the same non-round-tripping key the counter problem above turns on.
+	// An admin's override on "local" must be found under "local".
+	eff := e.resolver.Resolve(e.subjectForIdentityLocked(identity), e.overrides[identity])
 	for _, res := range []Resource{ResDailyTokens, ResDailyCostUSD} {
 		limit, ok := eff.Limits.Get(res)
 		if !ok {
@@ -655,6 +718,34 @@ func (e *Enforcer) subjectForIdentityLocked(id string) *authz.Subject {
 		return s
 	}
 	return subjectFromIdentityKey(id)
+}
+
+// KnowsSubject reports whether this process has seen the real claims for
+// identity, as opposed to only ever synthesizing a subject from the identity
+// string.
+//
+// Callers that act on a resolved limit — rather than merely displaying one —
+// use it together with Resolver.HasClaimBindings to tell "this tenant is over
+// their ceiling" apart from "this tenant is over the default ceiling and their
+// real one is unknown". The two are indistinguishable from the resolved limit
+// alone, and only the first justifies stopping work.
+func (e *Enforcer) KnowsSubject(identity string) bool {
+	if e == nil || identity == "" {
+		return false
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	s, ok := e.subjects[identity]
+	return ok && s != nil
+}
+
+// HasClaimBindings reports whether the policy resolves any limit from a group
+// or role claim. See Resolver.HasClaimBindings.
+func (e *Enforcer) HasClaimBindings() bool {
+	if e == nil {
+		return false
+	}
+	return e.resolver.HasClaimBindings()
 }
 
 // Denials returns the per-resource refusal counts for this process.

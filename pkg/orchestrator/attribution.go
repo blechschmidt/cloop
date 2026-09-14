@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/artifact"
+	"github.com/blechschmidt/cloop/pkg/cost"
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/pm"
 )
@@ -114,6 +115,31 @@ func isolationOf(rec artifact.SandboxRecord) string {
 	default:
 		return string(executor.IsolationNone)
 	}
+}
+
+// resolveRunIdentity reports who this run's spend is attributable to, for
+// stamping onto each cost ledger row (Task 20264).
+//
+// Same channel and same fallback shape as resolveTaskAttribution above: the
+// hub wrote the initiating identity into .cloop/sandbox-run.json at dispatch,
+// and no record means no hub — a bare `cloop run`, which is cost.IdentityLocal
+// by definition.
+//
+// The staleness check is the part that matters. A record left by yesterday's
+// hub-dispatched run stays in the project directory forever, so without it a
+// developer's own `cloop run` in the same directory would bill its tokens to
+// whoever last started a run there. Falling back to "local" when the evidence
+// is old is both the honest answer and the one that cannot put spend on
+// somebody else's name.
+func resolveRunIdentity(workDir string) string {
+	rec, ok := artifact.LoadSandboxRun(workDir)
+	if !ok || staleRecord(rec) {
+		return cost.IdentityLocal
+	}
+	if id := strings.TrimSpace(rec.Identity); id != "" {
+		return id
+	}
+	return cost.IdentityLocal
 }
 
 // stampAttribution records where a task is running, on the task itself.

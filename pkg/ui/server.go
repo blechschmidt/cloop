@@ -3201,7 +3201,18 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 	// The harness is never forked here. It is handed to whichever executor
 	// this project is bound to — the local host by default, a container or
 	// a remote edge agent when configured (Task 20156).
-	ex, handle, err := startWorkloadAs(s.claudeEnvResolver(r),
+	// Who pays for this run. Resolved from the request while it is still in
+	// hand — a run outlives its HTTP request, and after this point there is no
+	// authenticated caller left to ask (Task 20264).
+	payer := s.runIdentity(r, workDir)
+
+	// Seed the billing cursor before the workload exists, not after. Seeded at
+	// the project ledger's current end, so this run pays for what it spends and
+	// never for what was already there — and with no window in which a task
+	// could finish and have its row skipped as pre-existing.
+	s.openSpendCursor(workDir, payer)
+
+	ex, handle, err := startWorkloadAs(s.claudeEnvResolver(r), payer,
 		workDir, append([]string{exe}, args...), map[string]string{"handler": "run"})
 	if err != nil {
 		// 409 when strict no-host-execution mode refused the dispatch, so
@@ -3250,6 +3261,19 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 				s.liveLogSetRunning(workDir, false)
 			}
 		}()
+		// Book spend as the run produces it, so a daily budget is a real
+		// ceiling rather than a check performed once at the start. The ticker
+		// runs alongside the output loop rather than inside it: a run that has
+		// gone quiet mid-task is exactly when an overrun needs catching, and a
+		// loop driven by log lines would not tick at all.
+		// Deferred for the same reason releaseSlot is: a panic in the output
+		// loop is recovered above, and a plain call after the loop would then
+		// be skipped — leaving the ticker draining this project every thirty
+		// seconds for the life of the process, and the last task unbooked.
+		stopDrain := s.startSpendDrain(workDir)
+		defer stopDrain()
+		defer func() { _, _ = s.drainSpend(workDir) }()
+
 		// The driver closes the channel only after the workload has been
 		// reaped, so falling out of this loop means the run is over.
 		for line := range lines {
@@ -3259,6 +3283,12 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 			os.Stderr.WriteString(line.Text) // also echo to server's stderr
 			s.broadcastLog(workDir, line.Text)
 		}
+		stopDrain()
+		// One final drain after the workload is reaped: the last task's cost
+		// row lands as the run exits, and without this it would stay unbooked
+		// until the next run — letting a tenant spend a fresh budget every
+		// time by running one task per run.
+		s.drainSpend(workDir)
 		s.liveLogSetRunning(workDir, false)
 		s.broadcastRunState(workDir, false, true)
 		// The stream closing is the earliest and best-informed moment to
@@ -6337,7 +6367,9 @@ func (s *Server) handleProjectRun(w http.ResponseWriter, r *http.Request) {
 	}
 	// Dispatched to the project's bound executor rather than forked here
 	// (Task 20156).
-	ex, handle, err := startWorkloadAs(s.claudeEnvResolver(r),
+	payer := s.runIdentity(r, entry.Path)
+	s.openSpendCursor(entry.Path, payer)
+	ex, handle, err := startWorkloadAs(s.claudeEnvResolver(r), payer,
 		entry.Path, append([]string{exe}, args...),
 		map[string]string{"handler": "project-run", "project_name": entry.Name})
 	if err != nil {
@@ -6349,6 +6381,9 @@ func (s *Server) handleProjectRun(w http.ResponseWriter, r *http.Request) {
 	if lines, streamErr := ex.Stream(context.Background(), handle.ID); streamErr == nil {
 		s.trackRun(entry.Path, ex, handle.ID)
 		go func() {
+			stopDrain := s.startSpendDrain(entry.Path)
+			defer stopDrain()
+			defer func() { _, _ = s.drainSpend(entry.Path) }() // run over; next start is the gate
 			drainToStderr(lines, "project-run "+entry.Name)
 			s.runEnded(entry.Path, ex, handle.ID)
 		}()
@@ -6585,7 +6620,9 @@ func (s *Server) handleProjectNew(w http.ResponseWriter, r *http.Request) {
 		if req.PMMode {
 			runArgs = append(runArgs, "--pm")
 		}
-		runEx, runHandle, startErr := startWorkloadAs(s.claudeEnvResolver(r),
+		autoPayer := s.runIdentity(r, abs)
+		s.openSpendCursor(abs, autoPayer)
+		runEx, runHandle, startErr := startWorkloadAs(s.claudeEnvResolver(r), autoPayer,
 			abs, append([]string{exe}, runArgs...),
 			map[string]string{"handler": "project-new-autorun"})
 		if startErr != nil {
@@ -6596,6 +6633,9 @@ func (s *Server) handleProjectNew(w http.ResponseWriter, r *http.Request) {
 		} else if lines, streamErr := runEx.Stream(context.Background(), runHandle.ID); streamErr == nil {
 			s.trackRun(abs, runEx, runHandle.ID)
 			go func() {
+				stopDrain := s.startSpendDrain(abs)
+				defer stopDrain()
+				defer func() { _, _ = s.drainSpend(abs) }() // run over; next start is the gate
 				drainToStderr(lines, "auto-run "+abs)
 				s.runEnded(abs, runEx, runHandle.ID)
 			}()

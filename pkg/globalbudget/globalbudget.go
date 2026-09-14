@@ -76,6 +76,16 @@ type GlobalLedgerEntry struct {
 	OutputTokens   int       `json:"output_tokens"`
 	ThinkingTokens int       `json:"thinking_tokens,omitempty"`
 	EstimatedUSD   float64   `json:"estimated_usd"`
+
+	// Identity attributes the spend to whoever initiated the run — an
+	// oidcauth OwnerKey, or "local" for an unauthenticated one (Task 20264).
+	//
+	// Carried here as well as in the per-project costs table because this
+	// ledger is the only one that spans projects, and "what did alice spend
+	// today" is a question about a person, not about a directory. Omitted
+	// when empty, so a line written before this field existed round-trips
+	// unchanged and reads back as unattributed.
+	Identity string `json:"identity,omitempty"`
 }
 
 // DailyStats is the aggregated global usage for today.

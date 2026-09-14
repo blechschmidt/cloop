@@ -749,6 +749,19 @@ func (s *Server) routeTable() []routeSpec {
 		// refused files a ticket instead of waiting for a counter to fall.
 		{Pattern: "GET /api/quota/me", Handler: s.handleQuotaMe, Perm: public},
 
+		// Per-identity spend (Task 20264). `read` rather than userMgmt, and
+		// deliberately so: the handler returns the caller's own row and
+		// nothing else unless they hold user.manage, so the narrow case needs
+		// a permission every bound role has. It takes no identity parameter —
+		// the subject comes off the request — which is what makes "a
+		// non-admin cannot read another identity's spend" true by
+		// construction rather than by a check.
+		//
+		// Still deny-by-default: `read` is a real permission, so an
+		// authenticated-but-unbound identity is refused at the gate and sees
+		// nothing, not even its own figure.
+		{Pattern: "GET /api/cost/identities", Handler: s.handleCostIdentities, Perm: read, Scope: scopeGlobal},
+
 		// ── The hub's own description (Task 20257) ───────────────────
 		// An OpenAPI 3 document generated from this table, so an
 		// integrator does not have to read Go source to find out what the

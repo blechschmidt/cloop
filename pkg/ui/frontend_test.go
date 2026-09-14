@@ -80,6 +80,9 @@ var sessionsAPISource string
 //go:embed quotas_api.go
 var quotasAPISource string
 
+//go:embed cost_api.go
+var costAPISource string
+
 // offboardAPISource is pkg/ui/offboard_api.go (Task 20261). Embedded for the
 // same reason as tokens_api.go: its handler is a registered route whose
 // accepted verbs the route-drift tests read out of the handler body.
@@ -168,7 +171,7 @@ func allUISources() string {
 		"\n" + reproduceAPISource + "\n" + ledgerAPISource + "\n" + retentionAPISource +
 		"\n" + executorsInventorySource + "\n" + executorDetailAPISource +
 		"\n" + versionAPISource + "\n" + telemetryAPISource +
-		"\n" + openAPIAPISource
+		"\n" + openAPIAPISource + "\n" + costAPISource
 }
 
 // dashboardSource is the whole dashboard front end — the rendered index.html

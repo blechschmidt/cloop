@@ -2895,6 +2895,11 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 				OutputTokens:   taskOutputTokens,
 				ThinkingTokens: taskThinkingTokens,
 				EstimatedUSD:   usd,
+				// Who to bill. Re-read per task rather than cached at start,
+				// for the same reason the executor attribution is: a hub that
+				// fails this plan over to another executor rewrites the record,
+				// and the tasks after that point belong to whatever it now says.
+				Identity: resolveRunIdentity(o.config.WorkDir),
 			}
 			if lErr := cost.AppendLedger(o.config.WorkDir, entry); lErr != nil {
 				dimColor.Printf("  cost ledger write error (ignored): %v\n", lErr)

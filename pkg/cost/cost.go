@@ -19,6 +19,23 @@ import (
 const ledgerFile = ".cloop/costs.jsonl"
 const stateDBFile = ".cloop/state.db"
 
+// IdentityLocal is the sentinel for spend nobody authenticated: a bare
+// `cloop run` from a terminal, or a hub with OIDC switched off.
+//
+// A sentinel rather than an empty string because the two mean different
+// things and a report has to tell them apart. "local" is a positive claim —
+// this ran outside any identity system, and on a single-user install that is
+// every row. Empty means the row predates attribution entirely (migration
+// 0035) and cloop genuinely does not know. Folding the second into the first
+// would put historical spend under a name, which is a guess dressed as a fact.
+//
+// It cannot collide with a real identity: OwnerKey yields either a lowercased
+// email (contains "@") or a "sub:"-prefixed subject, and "local" is neither.
+const IdentityLocal = "local"
+
+// IdentityUnattributed is how reports label rows with no identity at all.
+const IdentityUnattributed = "(unattributed)"
+
 // LedgerEntry records the cost of one task execution.
 type LedgerEntry struct {
 	Timestamp      time.Time `json:"timestamp"`
@@ -30,6 +47,11 @@ type LedgerEntry struct {
 	OutputTokens   int       `json:"output_tokens"`
 	ThinkingTokens int       `json:"thinking_tokens,omitempty"`
 	EstimatedUSD   float64   `json:"estimated_usd"`
+
+	// Identity attributes this spend to whoever initiated the run: an
+	// oidcauth OwnerKey (lowercased email, or "sub:<subject>"), or
+	// IdentityLocal. Empty means unattributed — see migration 0035.
+	Identity string `json:"identity,omitempty"`
 }
 
 // AppendLedger appends a cost entry to the project's SQLite database (primary)
@@ -54,6 +76,7 @@ func AppendLedger(workDir string, entry LedgerEntry) error {
 				OutputTokens:   entry.OutputTokens,
 				ThinkingTokens: entry.ThinkingTokens,
 				EstimatedUSD:   entry.EstimatedUSD,
+				Identity:       entry.Identity,
 			})
 			db.Close()
 		}
@@ -85,6 +108,7 @@ func AppendLedger(workDir string, entry LedgerEntry) error {
 		OutputTokens:   entry.OutputTokens,
 		ThinkingTokens: entry.ThinkingTokens,
 		EstimatedUSD:   entry.EstimatedUSD,
+		Identity:       entry.Identity,
 	})
 	return nil
 }
@@ -173,6 +197,7 @@ func migrateJSONLToDB(db *statedb.DB, existing []statedb.CostEntry, jsonl []Ledg
 			OutputTokens:   e.OutputTokens,
 			ThinkingTokens: e.ThinkingTokens,
 			EstimatedUSD:   e.EstimatedUSD,
+			Identity:       e.Identity,
 		})
 		inserted++
 	}
@@ -193,6 +218,7 @@ func dbRowsToEntries(rows []statedb.CostEntry) []LedgerEntry {
 			OutputTokens:   r.OutputTokens,
 			ThinkingTokens: r.ThinkingTokens,
 			EstimatedUSD:   r.EstimatedUSD,
+			Identity:       r.Identity,
 		}
 	}
 	return out

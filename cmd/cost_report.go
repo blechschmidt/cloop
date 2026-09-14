@@ -26,18 +26,20 @@ var costCmd = &cobra.Command{
 
 var costReportSince string
 var costReportBy string
+var costReportByIdentity bool
 
 var costReportCmd = &cobra.Command{
 	Use:   "report",
 	Short: "Show historical API cost dashboard",
 	Long: `Read .cloop/costs.jsonl and render a cost breakdown table.
 
-Group by task (default), provider, or day:
+Group by task (default), provider, day, or identity:
 
   cloop cost report
   cloop cost report --since 2024-01-01
   cloop cost report --by provider
-  cloop cost report --by day`,
+  cloop cost report --by day
+  cloop cost report --by-identity      # who spent it`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		workdir, _ := os.Getwd()
 
@@ -91,11 +93,20 @@ Group by task (default), provider, or day:
 		fmt.Printf("Total entries : %d\n", len(entries))
 		fmt.Printf("Total spend   : %s\n\n", cost.FormatCost(total))
 
-		switch strings.ToLower(costReportBy) {
+		// --by-identity is shorthand for --by identity, and wins when both are
+		// given: the more specific flag is the one the user typed on purpose.
+		groupBy := strings.ToLower(costReportBy)
+		if costReportByIdentity {
+			groupBy = "identity"
+		}
+
+		switch groupBy {
 		case "provider":
 			printByProvider(entries)
 		case "day":
 			printByDay(entries)
+		case "identity":
+			printByIdentity(entries)
 		default:
 			printByTask(entries)
 		}
@@ -315,6 +326,87 @@ func printByProvider(entries []cost.LedgerEntry) {
 	}
 }
 
+// identityRow is one line of the --by-identity table: everything one identity spent.
+type identityRow struct {
+	identity       string
+	inputTokens    int
+	outputTokens   int
+	thinkingTokens int
+	usd            float64
+	count          int
+}
+
+// aggregateByIdentity sums ledger entries per identity, biggest spender first.
+// Split out from the printer so the attribution arithmetic is testable without
+// capturing stdout.
+func aggregateByIdentity(entries []cost.LedgerEntry) []identityRow {
+	byIdent := map[string]*identityRow{}
+	for _, e := range entries {
+		key := e.Identity
+		if key == "" {
+			// Rows written before migration 0035. Labelling these
+			// cost.IdentityLocal would turn a hole in the record into a claim
+			// about who spent the money, so they stay visibly separate.
+			key = cost.IdentityUnattributed
+		}
+		r, ok := byIdent[key]
+		if !ok {
+			r = &identityRow{identity: key}
+			byIdent[key] = r
+		}
+		r.inputTokens += e.InputTokens
+		r.outputTokens += e.OutputTokens
+		r.thinkingTokens += e.ThinkingTokens
+		r.usd += e.EstimatedUSD
+		r.count++
+	}
+
+	rows := make([]identityRow, 0, len(byIdent))
+	for _, r := range byIdent {
+		rows = append(rows, *r)
+	}
+	// Descending spend answers the question a cost report is opened to answer;
+	// the name tiebreak keeps map iteration order out of the output.
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].usd != rows[j].usd {
+			return rows[i].usd > rows[j].usd
+		}
+		return rows[i].identity < rows[j].identity
+	})
+	return rows
+}
+
+// printByIdentity renders a table grouped by the identity that incurred the spend.
+// Unlike task titles, identities are never truncated: they are keys, and two
+// clipped addresses on the same domain read as one person.
+func printByIdentity(entries []cost.LedgerEntry) {
+	rows := aggregateByIdentity(entries)
+
+	var totalThinking int
+	for _, r := range rows {
+		totalThinking += r.thinkingTokens
+	}
+
+	bold := color.New(color.Bold)
+	if totalThinking > 0 {
+		bold.Printf("%-30s  %5s  %8s  %9s  %10s  %10s\n",
+			"Identity", "Tasks", "In-tok", "Out-tok", "Think-tok", "Cost")
+		fmt.Println(strings.Repeat("-", 82))
+		for _, r := range rows {
+			fmt.Printf("%-30s  %5d  %8d  %9d  %10d  %10s\n",
+				r.identity, r.count, r.inputTokens, r.outputTokens, r.thinkingTokens, cost.FormatCost(r.usd))
+		}
+	} else {
+		bold.Printf("%-30s  %5s  %8s  %9s  %10s\n",
+			"Identity", "Tasks", "In-tok", "Out-tok", "Cost")
+		fmt.Println(strings.Repeat("-", 70))
+		for _, r := range rows {
+			fmt.Printf("%-30s  %5d  %8d  %9d  %10s\n",
+				r.identity, r.count, r.inputTokens, r.outputTokens, cost.FormatCost(r.usd))
+		}
+	}
+}
+
 // printByDay renders a table grouped by calendar day with a simple ASCII trend.
 func printByDay(entries []cost.LedgerEntry) {
 	type row struct {
@@ -370,7 +462,8 @@ func printByDay(entries []cost.LedgerEntry) {
 
 func init() {
 	costReportCmd.Flags().StringVar(&costReportSince, "since", "", "Only include records on or after this date (YYYY-MM-DD or RFC3339)")
-	costReportCmd.Flags().StringVar(&costReportBy, "by", "task", "Group results by: task, provider, or day")
+	costReportCmd.Flags().StringVar(&costReportBy, "by", "task", "Group results by: task, provider, day, or identity")
+	costReportCmd.Flags().BoolVar(&costReportByIdentity, "by-identity", false, "Shorthand for --by identity: attribute spend to the identity that incurred it")
 
 	costBudgetCmd.AddCommand(costBudgetSetCmd)
 	costCmd.AddCommand(costReportCmd, costBudgetCmd)

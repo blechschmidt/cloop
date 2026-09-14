@@ -1032,7 +1032,9 @@ cloop hub quota set alice@example.com \
   --limit max_concurrent_tasks=2 \
   --reason "runaway plan INC-4413"
 
-# 3. Stop what is already running, which the cap does not do by itself.
+# 3. Stop what is already running. A daily budget applied to a live hub does
+#    end the run, but only once the spend catches up with it; the others
+#    (max_concurrent_tasks, max_projects) bound the next request and nothing else.
 cloop hub session revoke --identity alice@example.com --reason "runaway plan INC-4413"
 
 # 4. Afterwards: drop one ceiling back to configured policy, or all of them.
@@ -1076,6 +1078,17 @@ curl -X PUT https://hub.example.com/api/quotas/alice@example.com \
   -H 'Content-Type: application/json' \
   -d '{"limits":{"daily_cost_usd":5,"max_concurrent_tasks":2}}'
 ```
+
+A `daily_cost_usd` or `daily_token_budget` set this way does stop the run that
+provoked it. The hub books each project's cost rows into the enforcer every 30
+seconds, so the run ends at the first task boundary after the budget goes, with
+`quota.spend_refused` in the audit trail naming the identity, the limit and the
+usage. The other ceilings only bound the next request.
+
+*How much* an identity is over is `cloop hub quota list`; *where it went* is
+`GET /api/cost/identities?window=today` across the fleet, or `cloop cost report
+--by-identity` inside one project. See
+[per-identity attribution](../security/model.md#who-spent-it-per-identity-attribution).
 
 #### Somebody leaves
 

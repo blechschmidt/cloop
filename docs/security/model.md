@@ -1370,8 +1370,8 @@ Seven resources are capped per identity (`pkg/quota/quota.go`):
 | `max_concurrent_reproductions` | reproductions executing at once | `POST /api/tasks/{id}/reproduce` |
 | `max_executors` | executors enrolled | `POST /api/executors/enroll` |
 | `max_sessions` | concurrent signed-in sessions | session creation |
-| `daily_token_budget` | input+output tokens per UTC day | `POST /api/run` |
-| `daily_cost_usd` | estimated USD per UTC day | `POST /api/run` |
+| `daily_token_budget` | input+output tokens per UTC day | `POST /api/run`, and between tasks |
+| `daily_cost_usd` | estimated USD per UTC day | `POST /api/run`, and between tasks |
 
 ```yaml
 ui:
@@ -1459,6 +1459,159 @@ Live limits and usage are exported as Prometheus gauges on the hub's
 `/metrics` (`cloop_quota_limit`, `cloop_quota_usage`,
 `cloop_quota_denials_total`), gated on `audit.read` because the payload names
 every identity and its spend.
+
+### Who spent it: per-identity attribution
+
+The two daily budgets above only bite if something counts against them, and for
+a while nothing did — `POST /api/run` was gated on a counter no code path ever
+incremented, so a `daily_token_budget` could be configured, shown in the Quotas
+panel, and never once exceeded. Closing that needs two separate things: knowing
+who spent a dollar, and charging it to them.
+
+**Resolving the payer.** The hub decides at dispatch, in descending order of
+what it actually knows:
+
+1. The authenticated caller — the same subject the quota gate admitted, so a run
+   is charged to exactly the identity whose budget let it start. This is an
+   `oidcauth.Identity.OwnerKey()`: a lowercased email, or `sub:<subject>` when
+   the provider releases no email claim.
+2. The project's registered owner, for a caller the hub cannot name — a
+   deployment credential or a static token against an owned project.
+3. `local`, for a run nobody authenticated: a bare `cloop run`, or a hub with
+   OIDC off.
+
+One namespace for all three, shared with the project registry's `Owner` and with
+the quota counters' keys, so a spend figure lines up with a ceiling without a
+translation table that could disagree with itself. `local` cannot collide with a
+real identity, which either contains `@` or begins `sub:`.
+
+The result is never empty. A cost row that *is* empty predates attribution
+(migration `0035_cost_identity`) and reports as `(unattributed)` — spend cloop
+genuinely cannot place, kept visibly apart rather than folded into somebody's
+total.
+
+**Reading it back**, per project, from the CLI:
+
+```console
+$ cloop cost report --by-identity
+
+cloop cost report
+Total entries : 5
+Total spend   : $2.33
+
+Identity                        Tasks    In-tok    Out-tok        Cost
+----------------------------------------------------------------------
+alice@example.com                   2    280460      59980       $1.74
+sub:8f2a11c4                        1     51200      12640       $0.34
+(unattributed)                      1     30000       8000       $0.21
+local                               1     20480       5120       $0.04
+```
+
+Identities are never truncated the way task titles are: they are keys, and two
+clipped addresses on the same domain read as one person. `--by-identity` is
+shorthand for `--by identity` and wins when both are given.
+
+Fleet-wide, aggregated across every project the hub knows about:
+
+```console
+$ curl -s -H "Authorization: Bearer $CLOOP_PAT" \
+    'https://hub.example.com/api/cost/identities?window=today'
+{
+  "window": "today",
+  "scope": "fleet",
+  "identities": [
+    {"identity": "alice@example.com", "input_tokens": 280460, "output_tokens": 59980,
+     "thinking_tokens": 0, "total_tokens": 340440, "estimated_usd": 1.741,
+     "entries": 2, "projects": 1}
+  ]
+}
+```
+
+`window` is `today` (the default), `7d`, `30d` or `all`; an unrecognised value
+reads as `today` rather than widening on a typo. Each is anchored to UTC
+midnight, the same boundary the enforcer's daily counters roll over on, so the
+report's *today* and the budget's *today* cannot disagree. Rows are ordered by
+spend, biggest first.
+
+**Who may read whose.** The route requires `project.read`, not `user.manage`,
+because the person most entitled to a spend figure is the person who spent it: a
+tenant refused at their cap should not have to ask an administrator to read their
+own number back. The restriction is carried by the *rows* instead — a caller
+holding `user.manage` gets the fleet (`"scope": "fleet"`), everyone else gets
+exactly one row, their own (`"scope": "self"`), whatever they ask for. There is
+no identity parameter to tamper with; the handler takes the subject off the
+request. Deny-by-default still holds at the route, so an identity the IdP
+authenticated but no mapping binds is refused before the handler runs and sees
+nothing at all, not even its own figure.
+
+**Charging it.** The numbers are produced by the orchestrator, which is not the
+hub's process: it writes one cost row per finished task into the *project's*
+`state.db`. So the hub reads what the run wrote and books it into the enforcer
+every 30 seconds while a run is live, tracking how far it has got in
+`project_spend_cursor` (migration `0036_spend_cursor`) — a durable position held
+in the control plane, seeded at dispatch from the ledger's current end so that
+adopting a project with a year of history does not bill today's tenant for all
+of it.
+
+A batch is *claimed* before it is booked, by a compare-and-swap on the cursor,
+and booked only by whoever won the claim. Two hubs can share one control plane —
+as the two on this deployment do — and both can read the same cursor before
+either moves it; a merely monotonic "only move forward" rule would reject the
+second write long after both had already charged the rows. Claiming first also
+bounds the failure when the control plane is briefly unwritable: a process that
+dies between the claim and the booking loses one batch once, rather than
+re-charging the same batch every 30 seconds until the budget is gone and the run
+is killed on arithmetic that never happened.
+
+Seeding a cursor for a new run settles the outgoing one's bill first. Reseeding
+jumps the position to the ledger's end, so anything the previous run left
+unbooked would otherwise be skipped for good — which a dispatch racing the
+previous run's final drain, a run whose output could not be streamed, and a hub
+restart with a container run still going all reach. Draining first does not make
+that spend timely, only certain: it lands at the next dispatch rather than when
+it happened.
+
+When the paying identity's daily budget is gone, **the run is stopped at the
+first task boundary after that** — not merely at the next start, which on its own
+would let one long run spend without limit inside itself. The stop is a SIGINT
+delivered through the executor, so the orchestrator finishes its in-flight step
+and persists its plan; a budget overrun is not a reason to corrupt the work of
+the tenant who hit it. Host PIDs are signalled only as a fallback, because a
+container or an edge agent has none locally and those are the runs a hosted
+deployment most wants stopped. The reason is written to the project's live log,
+where the person watching actually finds out, and to the audit trail as
+`quota.spend_refused` with the identity, resource, limit, usage, the binding the
+limit came from, and the project.
+
+One case deliberately books but does not stop: an identity over the *default*
+budget whose real ceiling the hub cannot resolve. Group- and role-derived limits
+need the claims that arrived with a request, and the hub remembers those per
+process — so after a restart, with a run still going, a tenant who has not
+signed in since would resolve to the default rather than the binding they were
+admitted under. Stopping work for exceeding a limit that does not apply is the
+worst thing this path can do, so it logs and leaves the run alone; the next
+start gates against the real subject anyway.
+
+**What the hub trusts here.** A cost row carries an identity too, and enforcement
+deliberately ignores it. That column is written by the orchestrator, inside the
+sandbox, into a database in the sandbox's own workspace — if the hub charged the
+name in the row, a workload could empty a colleague's daily budget by writing
+their address into its own ledger. Enforcement charges
+`project_spend_cursor.identity`, which only the hub writes and which it resolved
+from the authenticated request that asked for the run. The row's identity is for
+reporting and forensics.
+
+Read the consequence for the report honestly: `cloop cost report --by-identity`
+and `/api/cost/identities` group by the row's column, so a workload that writes
+somebody else's address into its own ledger moves its spend on the *report*
+while still being charged correctly against its own budget. The enforcement is
+sound; the report is workload-reported and should be read as such when the
+question is adversarial rather than operational. Negative amounts are clamped at
+zero on the way into a counter, so a single row cannot cancel out the honest
+ones beside it.
+
+What remains self-reported either way is the *amount*: see
+[what is not mitigated](#what-is-not-mitigated).
 
 ---
 
@@ -1995,6 +2148,15 @@ by *cloop's* surfaces. It cannot assert that a workload never prints its own
 token to stdout — the workload holds the plaintext by design, and task output is
 not redacted (`tests/security/secrets_test.go:13-20`). Scope grants so that the
 blast radius of such a disclosure is a single repo for a few hours.
+
+**A daily budget bounds honest overspend, not a hostile workload.** The hub
+charges the identity it resolved at dispatch, which the workload cannot
+influence — but the *amount* it charges is whatever the run reported, and the
+provider call happens inside the sandbox. A workload that under-reports its own
+tokens spends past its cap, and no accounting in the control plane can see it.
+`daily_token_budget` and `daily_cost_usd` are cost controls against runaway
+plans and honest overruns; containment is the
+[isolation model's](#the-no-host-execution-guarantee) job, not the ledger's.
 
 **`egress_proxy` constraints are enforced outside the broker.** For kubeconfig,
 registry and env secrets the broker *rewrites the payload* before delivery, so a

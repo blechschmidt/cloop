@@ -78,7 +78,10 @@ Five pages in order, indexed at
   in `tests/security/` that machine-checks it. Read
   [the network the sandbox sits on](security/model.md#the-network-the-sandbox-sits-on)
   for what the HTTP proxy binds, what the packet filter binds, and the one thing
-  neither can do.
+  neither can do, and
+  [who spent it](security/model.md#who-spent-it-per-identity-attribution) for
+  how a daily budget is attributed to an identity, enforced between tasks, and
+  read back — including the one number in it that is self-reported.
 - **[Threat model](security/threat-model.md)** — STRIDE per boundary, with the
   concrete mitigation that exists and an honest residual-risk column, plus the
   [two vulnerabilities found while building the egress filter](security/threat-model.md#vulnerabilities-found-while-building-this).
