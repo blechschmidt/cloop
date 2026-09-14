@@ -6,9 +6,19 @@ on:
       - 'v*'
 
 # The default GITHUB_TOKEN is read-only. Creating a release and uploading
-# assets needs contents: write, and nothing here needs more than that.
+# assets needs contents: write.
+#
+# id-token: write is what makes keyless signing possible, and it is worth being
+# precise about what it grants: not a signing key, but the ability to ask
+# GitHub for a short-lived OIDC token asserting *which workflow, in which
+# repository, at which ref* is running. Fulcio exchanges that assertion for a
+# certificate naming the same, and that name is the whole of what verification
+# pins (pkg/provenance.DefaultIdentityRegexp). There is consequently no signing
+# key anywhere in this repository to leak or rotate — and a workflow that could
+# sign a release is a workflow that had to be running from a tag on this repo.
 permissions:
   contents: write
+  id-token: write
 
 jobs:
   release:
@@ -71,6 +81,87 @@ jobs:
           cd dist/release
           sha256sum -c checksums.txt
 
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign every artifact and the checksum list
+        # The checksums proved the download arrived intact. They cannot prove
+        # where it came from: checksums.txt is served from this same release, so
+        # whoever can replace an asset can replace its checksum in the same
+        # breath and both sides of that comparison move together. A signature is
+        # the part an attacker who does not control this workflow cannot forge.
+        #
+        # Every archive is signed individually rather than only checksums.txt,
+        # so a consumer holding one artifact can verify it without fetching a
+        # second file and without trusting the indirection through a list. The
+        # list is signed too, because the installer checks the archive against
+        # it and an unsigned list would leave that step vouching for nothing.
+        #
+        # --bundle writes a Sigstore bundle: signature, signing certificate and
+        # Rekor inclusion proof in one file. cosign v3 removed
+        # --output-signature/--output-certificate, so the separate .sig/.pem
+        # pair is no longer emitted — and the bundle is the better artifact
+        # regardless, since the transparency-log evidence travels with the
+        # signature instead of being re-fetched at verification time.
+        run: |
+          set -euo pipefail
+          cd dist/release
+          for f in *.tar.gz checksums.txt; do
+            echo "==> signing $f"
+            # -y because there is no terminal here to confirm the transparency
+            # log entry at; the entry is the point, not a side effect.
+            cosign sign-blob --yes "$f" --bundle "$f.sigstore.json"
+          done
+          ls -la
+
+      - name: The signatures verify against the pinned trust root
+        # Signing that is never verified is a ritual. This runs the exact check
+        # `cloop upgrade` and the bootstrap installer will run on a user's
+        # machine, against the same constants — so if the identity Fulcio
+        # issued does not match the one pkg/provenance pins, it fails here,
+        # where the fix is a one-line edit, rather than on every device after
+        # the release is public and irreversible.
+        #
+        # The identity is spelled out literally rather than read from the Go
+        # source: hardcoded on both sides on purpose, so that changing one
+        # without the other fails this step instead of shipping a release
+        # nothing can install.
+        run: |
+          set -euo pipefail
+          cd dist/release
+          issuer="https://token.actions.githubusercontent.com"
+          identity="^https://github\.com/${GITHUB_REPOSITORY}/\.github/workflows/release\.yml@refs/tags/v[^/]+$"
+          echo "issuer:   $issuer"
+          echo "identity: $identity"
+          for f in *.tar.gz checksums.txt; do
+            cosign verify-blob "$f" \
+              --bundle "$f.sigstore.json" \
+              --certificate-oidc-issuer "$issuer" \
+              --certificate-identity-regexp "$identity"
+            echo "ok: $f"
+          done
+
+      - name: A tampered artifact is actually refused
+        # The verification above passing proves the signatures are valid. It
+        # does not prove they would catch anything — a check that accepts
+        # everything also accepts the genuine artifact. So corrupt a copy and
+        # require the refusal, which is the property the whole pipeline exists
+        # for and the only one that can silently stop holding.
+        run: |
+          set -euo pipefail
+          cd dist/release
+          cp cloop_linux_amd64.tar.gz /tmp/tampered.tar.gz
+          cp cloop_linux_amd64.tar.gz.sigstore.json /tmp/tampered.tar.gz.sigstore.json
+          printf 'malicious' >> /tmp/tampered.tar.gz
+          if cosign verify-blob /tmp/tampered.tar.gz \
+               --bundle /tmp/tampered.tar.gz.sigstore.json \
+               --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+               --certificate-identity-regexp "^https://github\.com/${GITHUB_REPOSITORY}/\.github/workflows/release\.yml@refs/tags/v[^/]+$"; then
+            echo "::error::cosign accepted a tampered archive. Signature verification is not protecting anything."
+            exit 1
+          fi
+          echo "ok: the tampered archive was refused"
+
       - name: Extract this tag's section from CHANGELOG.md
         # The release body is the changelog entry, not GitHub's commit list.
         # Auto-generated notes are still appended below (the API pre-pends
@@ -104,6 +195,7 @@ jobs:
           files: |
             dist/release/*.tar.gz
             dist/release/checksums.txt
+            dist/release/*.sigstore.json
           body_path: release-body.md
           generate_release_notes: true
           # make_latest is what puts the release behind the /releases/latest
@@ -129,9 +221,20 @@ jobs:
         run: |
           set -euo pipefail
           base="https://github.com/${GITHUB_REPOSITORY}/releases/latest/download"
+          # The .sigstore.json bundles are listed beside the artifacts they
+          # sign, because the installer now fetches both and fails closed if
+          # the bundle 404s. An unpublished bundle would therefore break every
+          # install exactly as an unpublished archive does — the failure this
+          # whole step exists to catch before a device does.
           for asset in cloop_linux_amd64.tar.gz cloop_linux_arm64.tar.gz \
                        cloop_linux_arm.tar.gz cloop_darwin_amd64.tar.gz \
-                       cloop_darwin_arm64.tar.gz checksums.txt; do
+                       cloop_darwin_arm64.tar.gz checksums.txt \
+                       cloop_linux_amd64.tar.gz.sigstore.json \
+                       cloop_linux_arm64.tar.gz.sigstore.json \
+                       cloop_linux_arm.tar.gz.sigstore.json \
+                       cloop_darwin_amd64.tar.gz.sigstore.json \
+                       cloop_darwin_arm64.tar.gz.sigstore.json \
+                       checksums.txt.sigstore.json; do
             # The "latest" pointer is updated asynchronously from the release
             # creation above, so a 404 on the first try means "not yet" at
             # least as often as it means "broken". Retry before believing it.

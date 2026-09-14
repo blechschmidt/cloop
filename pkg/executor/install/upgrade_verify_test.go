@@ -18,6 +18,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/blechschmidt/cloop/pkg/provenance"
 )
 
 // corruptBinary is what a truncated or interrupted download looks like: an ELF
@@ -440,6 +442,10 @@ func TestUpgradeReportsAFailedRollback(t *testing.T) {
 // one — the same rule that stops Installer.run touching this host's systemd.
 // Skipped, and reported as skipped: silence would read as "checked and good".
 func TestStagedInstallSkipsVerificationRatherThanFailing(t *testing.T) {
+	// Provenance is a separate question, and a staged install gets no pass on
+	// it — see TestStagedInstallStillVerifiesProvenance. Stubbed to accept so
+	// this test stays about the executability check it was written for.
+	stubProvenance(t, 0, "")
 	root := t.TempDir()
 	spec := Spec{
 		ServiceName: "cloop-executor",
@@ -459,6 +465,7 @@ func TestStagedInstallSkipsVerificationRatherThanFailing(t *testing.T) {
 	// Bytes no local kernel would execute — exactly the legitimate case.
 	src := filepath.Join(t.TempDir(), "cloop-arm64")
 	mustWrite(t, src, corruptBinary, BinaryMode)
+	mustWrite(t, provenance.BundleNameFor(src), "{}", 0o644)
 
 	res, err := inst.Upgrade(norm, OutputSystemd, UpgradeOptions{Source: src})
 	if err != nil {

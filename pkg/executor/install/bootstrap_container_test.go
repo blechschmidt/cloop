@@ -90,7 +90,26 @@ func buildReleaseArchive(t *testing.T) (dir, asset, version string) {
 		t.Fatalf("packaging %s: %v\n%s", asset, err, out)
 	}
 
-	sum, err := exec.Command("sha256sum", archive).Output()
+	writeChecksums(t, dir, asset)
+
+	// Signature bundles, as the release workflow publishes them beside every
+	// artifact. Both are signed by the genuine release identity here; the
+	// tests that care re-sign one with a different identity or leave it stale.
+	signStub(t, dir, asset, genuineSigningIdentity)
+	signStub(t, dir, "checksums.txt", genuineSigningIdentity)
+
+	return dir, asset, version
+}
+
+// writeChecksums regenerates checksums.txt over the archive's current bytes.
+//
+// Split out because the tamper test needs to rewrite the archive and then make
+// the checksum *agree* with it again — that is the whole point of that test:
+// an attacker who replaces an asset replaces its checksum in the same breath,
+// so a valid checksum proves nothing about origin.
+func writeChecksums(t *testing.T, dir, asset string) {
+	t.Helper()
+	sum, err := exec.Command("sha256sum", filepath.Join(dir, asset)).Output()
 	if err != nil {
 		t.Skipf("sha256sum unavailable, cannot build a checksums.txt: %v", err)
 	}
@@ -98,8 +117,74 @@ func buildReleaseArchive(t *testing.T) (dir, asset, version string) {
 	if err := os.WriteFile(filepath.Join(dir, "checksums.txt"), []byte(line), 0o600); err != nil {
 		t.Fatalf("writing checksums.txt: %v", err)
 	}
-	return dir, asset, version
 }
+
+// genuineSigningIdentity is an identity that satisfies the pin the installer
+// carries — the one Fulcio would issue to this repository's release workflow
+// running on a tag.
+const genuineSigningIdentity = "https://github.com/blechschmidt/cloop/" +
+	".github/workflows/release.yml@refs/tags/v0.0.0-e2e"
+
+// signStub writes the stand-in bundle that stubCosign below understands: the
+// signing identity on line one, and the SHA-256 of the bytes that were signed
+// on line two.
+//
+// Not a real Sigstore bundle, and it does not need to be. A real one would
+// require a Fulcio certificate, which requires an OIDC token that exists only
+// inside the release workflow — so the container tests would have to skip
+// entirely, and the installer's *behaviour around a verdict* would go
+// untested. These two fields are exactly the two things a keyless verification
+// decides: were these the signed bytes, and who signed them.
+func signStub(t *testing.T, dir, name, identity string) {
+	t.Helper()
+	sum, err := exec.Command("sha256sum", filepath.Join(dir, name)).Output()
+	if err != nil {
+		t.Skipf("sha256sum unavailable, cannot sign %s: %v", name, err)
+	}
+	body := identity + "\n" + strings.Fields(string(sum))[0] + "\n"
+	path := filepath.Join(dir, name+".sigstore.json")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("writing %s: %v", path, err)
+	}
+}
+
+// stubCosign is a cosign stand-in for the container: enough of verify-blob to
+// render a real verdict.
+//
+// It implements the two checks that matter, and refuses to pass without being
+// told what to pin — so an installer that forgot to pass --certificate-identity-regexp
+// or --certificate-oidc-issuer fails here rather than quietly accepting any
+// valid Sigstore signature, which is the failure that would make the whole
+// exercise decorative.
+const stubCosign = `#!/bin/sh
+bundle= identity= issuer= blob=
+while [ $# -gt 0 ]; do
+  case "$1" in
+    verify-blob) shift ;;
+    --bundle) bundle=$2; shift 2 ;;
+    --certificate-identity-regexp) identity=$2; shift 2 ;;
+    --certificate-oidc-issuer) issuer=$2; shift 2 ;;
+    *) blob=$1; shift ;;
+  esac
+done
+[ -n "$identity" ] || { echo "stub cosign: no --certificate-identity-regexp; any signer would pass" >&2; exit 2; }
+[ -n "$issuer" ]   || { echo "stub cosign: no --certificate-oidc-issuer; any issuer would pass" >&2; exit 2; }
+[ -f "$bundle" ]   || { echo "stub cosign: no bundle at $bundle" >&2; exit 1; }
+
+signer=$(sed -n 1p "$bundle")
+signed=$(sed -n 2p "$bundle")
+actual=$(sha256sum "$blob" | cut -d' ' -f1)
+
+if [ "$actual" != "$signed" ]; then
+  echo "error: failed to verify signature: invalid signature when validating ASN.1 encoded signature" >&2
+  exit 1
+fi
+if ! printf '%s' "$signer" | grep -qE "$identity"; then
+  echo "error: none of the expected identities matched what was in the certificate" >&2
+  exit 1
+fi
+echo "Verified OK"
+`
 
 // assetNameForTest mirrors the one naming rule under test. It is spelled out
 // rather than imported from pkg/upgrade (which would be an import cycle in
@@ -140,6 +225,12 @@ func runInstallerHarness(t *testing.T, docker, script, harness string, port int)
 	}
 	if err := os.WriteFile(filepath.Join(in, "harness.sh"), []byte(harness), 0o644); err != nil {
 		t.Fatalf("writing harness: %v", err)
+	}
+	// Available for a harness to install onto PATH, but deliberately not
+	// installed here: alpine has no cosign, and a test that wants to prove the
+	// installer fails closed without one needs that to stay true.
+	if err := os.WriteFile(filepath.Join(in, "cosign"), []byte(stubCosign), 0o755); err != nil {
+		t.Fatalf("writing the stub cosign: %v", err)
 	}
 
 	cmd := exec.Command(docker, "run", "--rm",
@@ -190,6 +281,7 @@ func TestContainerInstallerFetchesAndInstalls(t *testing.T) {
 	// stdout, $bin is not a path and the comparison below fails, which is
 	// precisely how the 127 exit reached production.
 	harness := `set -eu
+install -m 0755 /in/cosign /usr/local/bin/cosign
 . /in/installer.sh
 command -v cloop >/dev/null 2>&1 && { echo "FAIL: the image already has cloop"; exit 1; }
 bin=$(find_or_fetch_cloop)
@@ -208,6 +300,13 @@ bin=$(find_or_fetch_cloop)
 	}
 	if !strings.Contains(out, "verified "+asset) {
 		t.Errorf("the installer did not verify %s against checksums.txt.\n%s", asset, out)
+	}
+	if !strings.Contains(out, "verified the signature on "+asset) {
+		t.Errorf("the installer did not verify the signature on %s.\n%s", asset, out)
+	}
+	if !strings.Contains(out, "verified the signature on checksums.txt") {
+		t.Errorf("the installer checked the archive against an unsigned checksums.txt, "+
+			"which reintroduces the problem signing exists to solve.\n%s", out)
 	}
 }
 
@@ -232,6 +331,7 @@ func TestContainerInstallerRefusesATamperedArchive(t *testing.T) {
 	// also check the filesystem: "refused" is only meaningful if nothing was
 	// installed on the way to refusing.
 	harness := `set -eu
+install -m 0755 /in/cosign /usr/local/bin/cosign
 . /in/installer.sh
 if bin=$(find_or_fetch_cloop); then
   printf 'FAIL: installed [%s] from a tampered archive\n' "$bin"
@@ -247,9 +347,177 @@ echo REFUSED
 	if err != nil || !strings.Contains(out, "REFUSED") {
 		t.Fatalf("the installer accepted a tampered archive (err=%v):\n%s", err, out)
 	}
-	if !strings.Contains(out, "checksum mismatch") {
-		t.Errorf("the installer refused the tampered archive, but not because of "+
-			"the checksum — so the refusal may be incidental:\n%s", out)
+	if !strings.Contains(out, "checksum mismatch") && !strings.Contains(out, "SIGNATURE VERIFICATION FAILED") {
+		t.Errorf("the installer refused the tampered archive, but neither the checksum "+
+			"nor the signature is why — so the refusal may be incidental:\n%s", out)
+	}
+}
+
+// TestContainerInstallerRefusesAValidChecksumWithABadSignature is the case the
+// checksum cannot reach, and the reason this task exists.
+//
+// checksums.txt is served from the same release as the archive. An attacker who
+// can replace one can replace the other, so here both are replaced *together*
+// and consistently: the archive is substituted and its checksum is rewritten to
+// match. Every integrity check the installer had before signing passes. The
+// only thing that still disagrees is the signature, which was made over the
+// bytes the release workflow actually produced.
+//
+// If this test ever passes while the signature check is removed, the installer
+// is back to proving transport integrity and calling it provenance.
+func TestContainerInstallerRefusesAValidChecksumWithABadSignature(t *testing.T) {
+	docker := requireContainerE2E(t)
+	dir, asset, _ := buildReleaseArchive(t)
+
+	// Substitute the artifact and make the checksum agree with the
+	// substitution — exactly what someone who can write to the release does.
+	if err := os.WriteFile(filepath.Join(dir, asset), []byte("a different tarball"), 0o600); err != nil {
+		t.Fatalf("substituting %s: %v", asset, err)
+	}
+	writeChecksums(t, dir, asset)
+	// checksums.txt changed, so re-sign it: the attacker controls this file too,
+	// and leaving it unsigned would let the test pass for the wrong reason.
+	signStub(t, dir, "checksums.txt", genuineSigningIdentity)
+	// The archive's bundle is NOT regenerated. It still attests the original
+	// bytes, because producing one over the new bytes is the thing an attacker
+	// cannot do.
+	port := serveDir(t, dir)
+
+	harness := `set -eu
+install -m 0755 /in/cosign /usr/local/bin/cosign
+. /in/installer.sh
+if bin=$(find_or_fetch_cloop); then
+  printf 'FAIL: installed [%s] — the checksum matched and nothing else was checked\n' "$bin"
+  exit 1
+fi
+if [ -e /usr/local/bin/cloop ]; then
+  echo "FAIL: refused, but left a binary behind at /usr/local/bin/cloop"
+  exit 1
+fi
+echo REFUSED
+`
+	out, err := runInstallerHarness(t, docker, installerBody(t), harness, port)
+	if err != nil || !strings.Contains(out, "REFUSED") {
+		t.Fatalf("the installer accepted an archive whose checksum was valid and whose "+
+			"signature was not (err=%v):\n%s", err, out)
+	}
+	if !strings.Contains(out, "SIGNATURE VERIFICATION FAILED") {
+		t.Errorf("the installer refused, but not because of the signature — the "+
+			"checksum was made to match, so something else refused for another "+
+			"reason and the signature check may not be running:\n%s", out)
+	}
+}
+
+// TestContainerInstallerRefusesASignatureFromAnUnexpectedIdentity covers the
+// half of keyless signing that a naive implementation gets wrong.
+//
+// The signature here is entirely valid: real bytes, real certificate, real
+// transparency log entry. Anyone can obtain one — that is what "keyless" means.
+// What makes it inadmissible is *who* signed it, so an installer that verifies
+// signatures without pinning the identity has added a step and no security.
+func TestContainerInstallerRefusesASignatureFromAnUnexpectedIdentity(t *testing.T) {
+	docker := requireContainerE2E(t)
+	dir, asset, _ := buildReleaseArchive(t)
+
+	// A signature over the genuine bytes, by someone else. Note the repository:
+	// a fork, whose release workflow is a workflow an attacker can run.
+	signStub(t, dir, asset,
+		"https://github.com/attacker/cloop/.github/workflows/release.yml@refs/tags/v9.9.9")
+	port := serveDir(t, dir)
+
+	harness := `set -eu
+install -m 0755 /in/cosign /usr/local/bin/cosign
+. /in/installer.sh
+if bin=$(find_or_fetch_cloop); then
+  printf 'FAIL: installed [%s] signed by an identity that is not cloop\n' "$bin"
+  exit 1
+fi
+if [ -e /usr/local/bin/cloop ]; then
+  echo "FAIL: refused, but left a binary behind at /usr/local/bin/cloop"
+  exit 1
+fi
+echo REFUSED
+`
+	out, err := runInstallerHarness(t, docker, installerBody(t), harness, port)
+	if err != nil || !strings.Contains(out, "REFUSED") {
+		t.Fatalf("the installer accepted a signature from an unexpected identity "+
+			"(err=%v):\n%s", err, out)
+	}
+	if !strings.Contains(out, "none of the expected identities matched") {
+		t.Errorf("the installer refused, but not over the signing identity — so the "+
+			"identity may not be pinned at all:\n%s", out)
+	}
+}
+
+// TestContainerInstallerRefusesWhenCosignIsAbsent is the misconfiguration most
+// likely to actually happen, and the one whose wrong handling is hardest to
+// notice: an installer that treats a missing verifier as "nothing to verify"
+// reports success on every device while checking nothing, and looks exactly
+// like an installer that is working.
+//
+// alpine has no cosign, so this harness simply does not install the stub.
+func TestContainerInstallerRefusesWhenCosignIsAbsent(t *testing.T) {
+	docker := requireContainerE2E(t)
+	dir, _, _ := buildReleaseArchive(t)
+	port := serveDir(t, dir)
+
+	harness := `set -eu
+command -v cosign >/dev/null 2>&1 && { echo "FAIL: the image already has cosign"; exit 1; }
+. /in/installer.sh
+if bin=$(find_or_fetch_cloop); then
+  printf 'FAIL: installed [%s] with no way to verify it\n' "$bin"
+  exit 1
+fi
+echo REFUSED
+`
+	out, err := runInstallerHarness(t, docker, installerBody(t), harness, port)
+	if err != nil || !strings.Contains(out, "REFUSED") {
+		t.Fatalf("the installer proceeded without cosign, so nothing was verified "+
+			"(err=%v):\n%s", err, out)
+	}
+	if !strings.Contains(out, "cosign is required") {
+		t.Errorf("the installer refused without naming cosign, so an operator cannot "+
+			"tell what to install:\n%s", out)
+	}
+	if !strings.Contains(out, "--insecure-skip-verify") {
+		t.Errorf("the refusal did not mention the escape hatch, leaving an air-gapped "+
+			"operator stuck:\n%s", out)
+	}
+}
+
+// TestContainerInstallerSkipVerifyInstallsWithoutCosign proves the escape hatch
+// the task requires actually works on a device with no cosign — the air-gapped
+// mirror case. It must also say what it gave up, since an operator reading a
+// provisioning log needs to be able to find the unverified installs.
+func TestContainerInstallerSkipVerifyInstallsWithoutCosign(t *testing.T) {
+	docker := requireContainerE2E(t)
+	dir, asset, version := buildReleaseArchive(t)
+	port := serveDir(t, dir)
+
+	harness := `set -eu
+. /in/installer.sh
+CLOOP_INSECURE_SKIP_VERIFY=1
+bin=$(find_or_fetch_cloop)
+[ "$bin" = "/usr/local/bin/cloop" ] || { printf 'FAIL: returned [%s]\n' "$bin"; exit 1; }
+"$bin" version
+`
+	out, err := runInstallerHarness(t, docker, installerBody(t), harness, port)
+	if err != nil {
+		t.Fatalf("--insecure-skip-verify did not install on a device without cosign: "+
+			"%v\n%s", err, out)
+	}
+	if !strings.Contains(out, "cloop "+version) {
+		t.Errorf("the binary was not installed:\n%s", out)
+	}
+	if !strings.Contains(out, "DISABLED") {
+		t.Errorf("skipping verification was not reported, so an unverified install is "+
+			"indistinguishable from a verified one in the log:\n%s", out)
+	}
+	// The checksum is not the escape hatch's business: it still runs, and still
+	// proves the download arrived intact.
+	if !strings.Contains(out, "verified "+asset) {
+		t.Errorf("--insecure-skip-verify also disabled the checksum, which it should "+
+			"not:\n%s", out)
 	}
 }
 

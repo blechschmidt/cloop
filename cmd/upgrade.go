@@ -13,12 +13,20 @@ var upgradeCmd = &cobra.Command{
 	Short: "Upgrade cloop to the latest GitHub release",
 	Long: `upgrade checks the GitHub releases API for the latest cloop version.
 
-Without flags it downloads the release asset for the current OS/arch,
-verifies the SHA-256 checksum, and atomically replaces the running binary.
+Without flags it downloads the release asset for the current OS/arch, verifies
+its Sigstore signature against cloop's release workflow, verifies the SHA-256
+checksum, and only then atomically replaces the running binary.
+
+The signature is the check that matters. checksums.txt is served from the same
+GitHub release as the archive it vouches for, so anyone who can replace the
+archive can replace its checksum too; a signature cannot be forged without
+being able to run cloop's release workflow. Verifying one requires cosign:
+  https://github.com/sigstore/cosign/releases
 
 Use --check to only report whether an update is available.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		checkOnly, _ := cmd.Flags().GetBool("check")
+		skipVerify, _ := cmd.Flags().GetBool("insecure-skip-verify")
 
 		// version.Version, not Version(): the raw stamp. Check treats the
 		// literal "dev" as "never self-upgrade", and the enriched form
@@ -41,9 +49,11 @@ Use --check to only report whether an update is available.`,
 			return nil
 		}
 
-		newVersion, err := upgrade.Upgrade(version.Version, func(msg string) {
-			fmt.Println(msg)
-		})
+		newVersion, err := upgrade.UpgradeWithOptions(
+			version.Version,
+			upgrade.Options{SkipVerify: skipVerify},
+			func(msg string) { fmt.Println(msg) },
+		)
 		if err != nil {
 			return fmt.Errorf("upgrade failed: %w", err)
 		}
@@ -55,5 +65,9 @@ Use --check to only report whether an update is available.`,
 
 func init() {
 	upgradeCmd.Flags().Bool("check", false, "check for updates without installing")
+	upgradeCmd.Flags().Bool("insecure-skip-verify", false,
+		"install without verifying the release signature. For air-gapped mirrors that "+
+			"cannot reach Sigstore; gives up the proof that the binary came from cloop's "+
+			"release workflow")
 	rootCmd.AddCommand(upgradeCmd)
 }

@@ -144,9 +144,13 @@ Examples:
 			from, _ := cmd.Flags().GetString("from")
 
 			settle, _ := cmd.Flags().GetDuration("settle-timeout")
+			bundle, _ := cmd.Flags().GetString("bundle-sig")
+			skipVerify, _ := cmd.Flags().GetBool("insecure-skip-verify")
 
 			res, err := inst.Upgrade(spec, out, install.UpgradeOptions{
 				Source:        strings.TrimSpace(from), // empty: Upgrade uses this executable
+				Bundle:        strings.TrimSpace(bundle),
+				SkipVerify:    skipVerify,
 				Force:         force,
 				DryRun:        dryRun,
 				SettleTimeout: settle,
@@ -476,6 +480,17 @@ func init() {
 		"replace the binary of an existing install and restart it; idempotent, keeps the unit and credentials")
 	f.String("from", "",
 		"with --upgrade, the new cloop binary to install (default: this executable)")
+	// --bundle-sig, not --bundle: --bundle already means the enrollment bundle
+	// on this same command, and two flags a letter apart meaning entirely
+	// different secrets is how an operator pastes an enrollment token into a
+	// signature path.
+	f.String("bundle-sig", "",
+		"with --upgrade, the Sigstore bundle proving the new binary's provenance "+
+			"(default: <binary>.sigstore.json beside it)")
+	f.Bool("insecure-skip-verify", false,
+		"with --upgrade, install without verifying the new binary's signature. Required "+
+			"for a locally built binary, which has no signature; for a release, it gives up "+
+			"the proof that the binary came from cloop's release workflow")
 	f.Bool("force", false,
 		"with --upgrade, replace and restart even when the installed binary is already identical, "+
 			"or when the new one is a downgrade")

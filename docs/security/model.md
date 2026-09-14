@@ -16,6 +16,7 @@ So every guarantee below ends in a row of the
 - [Workspace provisioning](#workspace-provisioning)
 - [Identity, roles and permissions](#identity-roles-and-permissions)
 - [Session lifecycle and revocation](#session-lifecycle-and-revocation)
+- [Release provenance and the trust root](#release-provenance-and-the-trust-root)
 - [The guarantee → test table](#the-guarantee--test-table)
 - [What is not mitigated](#what-is-not-mitigated)
 
@@ -1615,6 +1616,137 @@ What remains self-reported either way is the *amount*: see
 
 ---
 
+## Release provenance and the trust root
+
+Every guarantee above describes a running hub. This one is about how the code
+implementing them arrives on a machine in the first place — because an attacker
+who can choose the binary does not need to defeat any of the rest.
+
+It matters more here than in most projects. The artifact being installed is the
+**executor agent**: the component an enterprise deliberately places on
+high-value hosts, enrolls against the control plane, and then leases repository
+credentials, kubeconfigs and egress to. It is also self-upgrading
+(`cloop executor agent install --upgrade`), so a binary accepted once replaces
+the one that will evaluate the next upgrade.
+
+### What the trust root is
+
+Releases are signed with [Sigstore][sigstore] keyless signing. The release
+workflow proves its identity to Fulcio with GitHub's ambient OIDC token and
+receives a short-lived certificate naming the workflow, repository and ref that
+requested it. Two values are pinned, and are the whole of what is trusted:
+
+| Pinned | Value | Declared in |
+| --- | --- | --- |
+| OIDC issuer | `https://token.actions.githubusercontent.com` | `provenance.DefaultIssuer` |
+| Signing identity | `^https://github\.com/blechschmidt/cloop/\.github/workflows/release\.yml@refs/tags/v[^/]+$` | `provenance.DefaultIdentityRegexp` |
+
+There is no long-lived signing key anywhere in the project — nothing to leak,
+rotate, or store as a repository secret. The signing identity *is* the workflow
+file, and a signature satisfying the pin could only have been produced by that
+workflow running on a tag in this repository.
+
+The identity is a regexp because it embeds the tag, and it is anchored at both
+ends with `[^/]+` for the tag specifically. Each rejection below is a signature
+someone could plausibly obtain:
+
+- `…/release.yml@refs/heads/main` — a branch build, available to anyone who can
+  push a branch but not cut a release.
+- `…/ci.yml@refs/tags/v1.0.0` — another workflow in this repository. CI runs on
+  every pull request, so an unanchored-to-`release.yml` pin would make it a
+  signing oracle for anyone who opens one.
+- `github.com/attacker/cloop/…` — a fork, whose release workflow an attacker
+  controls outright.
+- `…@refs/tags/v1/../../heads/main` — path traversal past the tag, which `.*`
+  in place of `[^/]+` would admit.
+
+An unusual-but-real tag (`v2024.01.02.build7`) is accepted deliberately: anyone
+who can create a tag in this repository can already cut a release, so
+constraining the tag's *shape* buys nothing. The boundary is the repository and
+the workflow, not the version grammar.
+
+### Why the checksum was never enough
+
+`checksums.txt` is published beside the archives and both the installer and
+`cloop upgrade` check against it. It is worth keeping and it is not provenance.
+
+The file is served from the same GitHub release as the artifact it vouches for.
+Whoever can replace the asset can replace the checksum alongside it, and both
+sides of the comparison move together — the check passes and has asserted
+nothing about origin. `checksums.txt` is itself signed for the same reason: an
+installer that verified the archive against an unauthenticated list would have
+reintroduced the problem one level down.
+
+The distinction is the property under test in
+`TestContainerInstallerRefusesAValidChecksumWithABadSignature`, which
+substitutes the archive, rewrites the checksum to match, re-signs the checksum
+list, and requires the install to fail anyway.
+
+### Where it is enforced
+
+Three paths write a cloop binary to disk, and all three verify before writing:
+
+| Path | Verifies | Escape hatch |
+| --- | --- | --- |
+| `GET /install.sh` bootstrap installer | archive + `checksums.txt` | `--insecure-skip-verify`, `CLOOP_INSECURE_SKIP_VERIFY=1` |
+| `cloop upgrade` | release archive | `--insecure-skip-verify` |
+| `cloop executor agent install --upgrade` | the source binary | `--insecure-skip-verify` |
+
+Two ordering properties are load-bearing:
+
+- **Nothing reaches the destination before the verdict.** `cloop upgrade` holds
+  the download in memory and stages it to a private temp directory (mode
+  `0600`, removed on every exit path) purely because cosign reads files. The
+  running binary is never the staging location.
+- **Nothing is executed before the verdict.** The agent upgrade's existing
+  safety check works by *running* the candidate to ask what it is — the right
+  way to catch a truncated or wrong-architecture download, and the wrong thing
+  to do first to a binary that might be hostile. `verifyProvenance` therefore
+  runs before `verifyUpgrade`, and
+  `TestUpgradeVerifiesProvenanceBeforeExecutingTheBinary` fails if that order
+  is reversed.
+
+A staged install (`--root`, for image builds) skips the *executability* check,
+because the binary is legitimately for another architecture. It does **not**
+skip provenance: verifying a signature only reads bytes, and an image build is
+precisely where an unverified binary propagates to every device made from it.
+
+### Fail closed, including when cosign is absent
+
+Verification shells out to `cosign` — the same decision, for the same reasons,
+that `pkg/imagepolicy` made for container image signatures: sigstore's Go
+verification path pulls Fulcio, Rekor, TUF and a certificate chain
+implementation into a process that here is replacing its own binary.
+
+The consequence is that cosign can be missing, and the handling of that case is
+the most important line in `pkg/provenance`. A missing verifier is a **refusal
+with an install hint**, never a warning and never a skip. The alternative is
+the worst failure available: every install reports success while verifying
+nothing, and the misconfiguration is invisible precisely because it looks like
+it worked. `TestContainerInstallerRefusesWhenCosignIsAbsent` runs the real
+script on an Alpine container that genuinely has no cosign.
+
+A missing *bundle* fails closed for the same reason. "Verify if a signature is
+present" would let an attacker bypass the check by deleting a file.
+
+### The escape hatch, and the better alternative
+
+`--insecure-skip-verify` exists for air-gapped mirrors that cannot reach
+Sigstore. It disables the signature check only — the checksum still runs — and
+every path that uses it prints `provenance verification is DISABLED`
+(`provenance.SkipNotice`, one constant so a provisioning log is greppable for
+unverified installs regardless of which entry point performed one).
+
+A fork that builds and signs cloop itself should **not** use it. Setting
+`CLOOP_PROVENANCE_ISSUER` and `CLOOP_PROVENANCE_IDENTITY` repoints the trust
+root instead, which keeps a signature required and changes only whose signature
+satisfies it. That option exists deliberately: an all-or-nothing pin is one an
+organisation eventually turns off wholesale.
+
+[sigstore]: https://www.sigstore.dev/
+
+---
+
 ## The guarantee → test table
 
 Every row is machine-checked by `tests/security/`, which runs as a **required**
@@ -1645,6 +1777,32 @@ what it is looking for.
 | The policy ratchets — it can never be loosened back | `TestPolicyOnlyTightens` |
 | Each of the five host-touching endpoints returns 409 naming `allow_host_process` | `TestGatedHandlersRefuseUnderStrictMode` |
 | The gated-endpoint list and the gated-call-graph list cannot drift apart | `TestGatedListsAgree` |
+
+### Release provenance — `pkg/provenance`, `pkg/upgrade`, `pkg/executor/install`
+
+These live with the code they gate rather than in `tests/security/`: the
+container rows need a real Docker daemon and a cross-build, which the
+conformance suite deliberately does not require. Run them with
+`CLOOP_INSTALL_E2E=1 go test ./pkg/executor/install/ -run Container`.
+
+| Guarantee | Test |
+| --- | --- |
+| Verification pins both the OIDC issuer and the signing identity — without either, any valid Sigstore signature would pass | `pkg/provenance`: `TestVerifyPinsIssuerAndIdentity` |
+| The pinned identity admits a genuine tagged release and rejects a branch build, another workflow in this repo, a fork, and traversal past the tag | `pkg/provenance`: `TestIdentityRegexpIsAnchoredToTaggedReleases` |
+| A missing cosign is a refusal, not a silently skipped check | `pkg/provenance`: `TestMissingCosignIsARefusalNotASkip`; `pkg/upgrade`: `TestUpgradeFailsClosedWithoutCosign`; `pkg/executor/install`: `TestContainerInstallerRefusesWhenCosignIsAbsent` |
+| A real signature over real bytes stops verifying the moment those bytes change (round trip against the genuine cosign) | `pkg/provenance`: `TestRealCosignRejectsATamperedBlob` |
+| The installer refuses an archive whose **checksum is valid** and whose signature is not — the substitution a co-located checksum cannot detect | `pkg/executor/install`: `TestContainerInstallerRefusesAValidChecksumWithABadSignature` |
+| The installer refuses a valid signature made by an **unexpected identity** | `pkg/executor/install`: `TestContainerInstallerRefusesASignatureFromAnUnexpectedIdentity` |
+| The installer verifies `checksums.txt` itself, so the checksum comparison is not made against an unauthenticated list | `pkg/executor/install`: `TestContainerInstallerFetchesAndInstalls` |
+| An unsigned binary cannot be installed by simply omitting the bundle | `pkg/executor/install`: `TestUpgradeRefusesAnUnsignedBinary`; `pkg/upgrade`: `TestUpgradeRefusesAReleaseWithNoBundle` |
+| The agent upgrade refuses a binary whose signature does not verify, leaving the device untouched and the service unbounced | `pkg/executor/install`: `TestUpgradeRefusesABinaryWhoseSignatureDoesNotVerify` |
+| The agent upgrade pins the identity, asserted on the argv cosign actually received | `pkg/executor/install`: `TestUpgradeRefusesASignatureFromAnUnexpectedIdentity` |
+| Provenance is settled **before** the candidate binary is executed for verification | `pkg/executor/install`: `TestUpgradeVerifiesProvenanceBeforeExecutingTheBinary` |
+| A staged install still verifies provenance, though it legitimately cannot execute the candidate | `pkg/executor/install`: `TestStagedInstallStillVerifiesProvenance` |
+| `cloop upgrade` stages outside the destination and cleans up, so unverified bytes never sit at the path the operator runs | `pkg/upgrade`: `TestUpgradeVerificationStagesOutsideTheDestination` |
+| Verification is the default — the zero `Options` does not skip it | `pkg/upgrade`: `TestSkipVerifyIsOptIn` |
+| `--insecure-skip-verify` installs on a device with no cosign, reports that it did, and does not also disable the checksum | `pkg/executor/install`: `TestContainerInstallerSkipVerifyInstallsWithoutCosign`, `TestUpgradeSkipVerifyIsAnExplicitDecision` |
+| The trust root is overridable for a fork, and a blank override falls back to the pin rather than becoming "match anything" | `pkg/provenance`: `TestTrustRootIsOverridableForForks` |
 
 ### Secret non-disclosure — `secrets_test.go`, `audit_test.go`, `uiroutes_test.go`
 

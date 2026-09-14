@@ -48,6 +48,7 @@ package install
 //     rollback.go.
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -56,9 +57,11 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/executor/remote"
+	"github.com/blechschmidt/cloop/pkg/provenance"
 )
 
 // UpgradeOptions parameterises an in-place upgrade.
@@ -88,6 +91,21 @@ type UpgradeOptions struct {
 	// merely echoing the flags back.
 	DryRun bool
 
+	// Bundle is the Sigstore bundle proving the source binary's provenance.
+	// Empty looks for one beside the source, at <source>.sigstore.json, which
+	// is where a release download leaves it.
+	Bundle string
+
+	// SkipVerify installs a binary whose provenance has not been proven.
+	//
+	// The escape hatch for an air-gapped site that cannot reach Sigstore, and
+	// for a developer installing a locally built binary — which has no
+	// signature and cannot have one. It is a separate flag from Force on
+	// purpose: Force means "I know this is a downgrade", which is a statement
+	// about versions, and conflating it with "I do not know where this binary
+	// came from" would let a routine rollback silently drop a security check.
+	SkipVerify bool
+
 	// SettleTimeout bounds the wait for a restarted service to report itself
 	// active before the upgrade concludes the new build is bad and rolls back.
 	// Zero uses serviceSettleTimeout.
@@ -106,6 +124,63 @@ func (o UpgradeOptions) settleTimeout() time.Duration {
 		return o.SettleTimeout
 	}
 	return serviceSettleTimeout
+}
+
+// provenanceVerifier is the verifier used by verifyProvenance. A package
+// variable so tests can substitute a stand-in cosign without an upgrade having
+// to carry a verifier through its options.
+var provenanceVerifier = &provenance.Verifier{}
+
+// verifyProvenance proves the source binary came from cloop's release workflow
+// before anything executes or installs it.
+//
+// This is the executor agent: the binary an enterprise deliberately places on
+// high-value hosts and then leases credentials to. An upgrade path that
+// installs whatever file it is pointed at is a way to convert write access to
+// a staging directory — or a compromised hub telling an operator to upgrade —
+// into code execution on every device in the fleet.
+//
+// It fails closed, including when the bundle is simply absent. That is a real
+// cost: a locally built binary has no signature and never will, so a developer
+// upgrading a test device has to pass --insecure-skip-verify. The alternative
+// is worse in the way that matters — "no bundle found, proceeding" would mean
+// an attacker bypasses the check by deleting a file, which is not a check.
+func (in *Installer) verifyProvenance(res *UpgradeResult, source string, opts UpgradeOptions) error {
+	if opts.SkipVerify {
+		in.logf("WARNING: %s", provenance.SkipNotice)
+		res.ProvenanceVerified = false
+		return nil
+	}
+
+	bundle := strings.TrimSpace(opts.Bundle)
+	if bundle == "" {
+		bundle = provenance.BundleNameFor(source)
+	}
+
+	if _, err := os.Stat(bundle); err != nil {
+		return fmt.Errorf(
+			"%w\n\n"+
+				"No signature bundle for %s (looked for %s).\n"+
+				"Release downloads publish one beside every artifact; pass --bundle to point\n"+
+				"at it, or --insecure-skip-verify to install a binary whose origin is unknown\n"+
+				"— which is what a locally built binary always is.",
+			provenance.ErrBundleMissing, source, bundle)
+	}
+
+	issuer, identity := provenanceVerifier.TrustRoot()
+	if err := provenanceVerifier.VerifyBlob(context.Background(), source, bundle); err != nil {
+		return fmt.Errorf(
+			"%w\n\n"+
+				"Refusing to install %s onto this device.\n"+
+				"Required signing identity: %s\n"+
+				"Required OIDC issuer:      %s\n"+
+				"Pass --insecure-skip-verify only if you know where this binary came from.",
+			err, source, identity, issuer)
+	}
+
+	in.logf("verified the provenance of %s (identity %s)", source, identity)
+	res.ProvenanceVerified = true
+	return nil
 }
 
 // UpgradeResult describes what an upgrade did, so the CLI can report the truth
@@ -139,6 +214,11 @@ type UpgradeResult struct {
 	// binary may legitimately not run here), and the result must not be
 	// rendered as though the binary had been proven good.
 	Verified bool
+	// ProvenanceVerified reports that the source binary's signature was
+	// checked against cloop's release workflow before anything was executed or
+	// written. False means --insecure-skip-verify was passed, and the result
+	// must not be rendered as though the binary's origin were known.
+	ProvenanceVerified bool
 	// BackupPath is where the replaced binary was kept, so an operator can
 	// roll back by hand. Empty when nothing was replaced.
 	BackupPath string
@@ -258,6 +338,24 @@ func (in *Installer) Upgrade(spec Spec, out Output, opts UpgradeOptions) (Upgrad
 		res.AlreadyCurrent = true
 		in.logf("%s is the binary being run; nothing to copy", s.BinaryPath)
 		return res, nil
+	}
+
+	// Provenance, and it has to come before verifyUpgrade rather than after.
+	//
+	// verifyUpgrade's whole method is to *execute* the candidate binary and
+	// ask it what it is. That is the right way to find a truncated download or
+	// a wrong-architecture build, and exactly the wrong thing to do first to a
+	// binary that might be hostile: by the time it has printed a convincing
+	// version string it has already run as whatever user this command is, on a
+	// host chosen for holding credentials. So the question "did this come from
+	// cloop" is settled while the file is still inert.
+	//
+	// Unlike verifyUpgrade this also runs for staged installs (Root set).
+	// Checking a signature only reads the bytes, so a cross-architecture build
+	// being staged for another machine can have its origin proven here even
+	// though it could never be executed on this one.
+	if err := in.verifyProvenance(&res, source, opts); err != nil {
+		return res, err
 	}
 
 	// Run the thing before installing it. Everything up to here was a

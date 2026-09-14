@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/blechschmidt/cloop/pkg/provenance"
 )
 
 // upgradeFixture stages an "installed" agent under a temp directory and returns
@@ -26,6 +28,14 @@ type upgradeFixture struct {
 func newUpgradeFixture(t *testing.T, out Output, installedBinary string) *upgradeFixture {
 	t.Helper()
 	dir := t.TempDir()
+
+	// Upgrade now proves the candidate's provenance before it will touch the
+	// device, so these fixtures need a cosign that says yes. A stand-in rather
+	// than SkipVerify, deliberately: the bundle is still required and cosign is
+	// still invoked, so a regression that stopped verifying altogether stays
+	// visible to upgrade_provenance_test.go instead of being switched off here
+	// for the whole package. Tests about provenance re-stub it.
+	stubProvenance(t, 0, "")
 
 	spec := Spec{
 		ServiceName: "cloop-executor",
@@ -133,6 +143,11 @@ func (f *upgradeFixture) stageBinary(t *testing.T, body string) string {
 	t.Helper()
 	path := filepath.Join(f.dir, "tmp", "cloop-new")
 	mustWrite(t, path, body, BinaryMode)
+	// A release download leaves the signature bundle beside the binary, so the
+	// fixture does too. Its contents are never parsed here — the stand-in
+	// cosign from newUpgradeFixture renders the verdict — but it has to exist,
+	// because Upgrade refuses a binary with no bundle at all.
+	mustWrite(t, provenance.BundleNameFor(path), "{}", 0o644)
 	return path
 }
 

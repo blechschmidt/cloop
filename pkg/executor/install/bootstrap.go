@@ -24,6 +24,8 @@ package install
 import (
 	"fmt"
 	"strings"
+
+	"github.com/blechschmidt/cloop/pkg/provenance"
 )
 
 // BootstrapParams are the deployment-specific values baked into the script.
@@ -71,6 +73,21 @@ set -eu
 	fmt.Fprintf(&b, "CLOOP_PIN=%s\n", shellQuote(strings.TrimSpace(p.Pin)))
 	fmt.Fprintf(&b, "CLOOP_SERVICE_NAME=%s\n", shellQuote(name))
 	b.WriteString(`CLOOP_RELEASES=${CLOOP_RELEASES:-https://github.com/blechschmidt/cloop/releases/latest/download}
+CLOOP_INSECURE_SKIP_VERIFY=${CLOOP_INSECURE_SKIP_VERIFY:-0}
+`)
+
+	// Interpolated from the Go constants rather than written out here, so the
+	// script and pkg/provenance cannot drift into pinning different things.
+	// A script that pinned a stale identity would fail every install the day
+	// the workflow moved, and — far worse — one that pinned a looser identity
+	// than the Go path would be a quiet downgrade on the entry point that runs
+	// as root on a device that has no cloop on it yet.
+	fmt.Fprintf(&b, "CLOOP_PROVENANCE_ISSUER=${%s:-%s}\n",
+		provenance.IssuerEnv, shellQuote(provenance.DefaultIssuer))
+	fmt.Fprintf(&b, "CLOOP_PROVENANCE_IDENTITY=${%s:-%s}\n",
+		provenance.IdentityEnv, shellQuote(provenance.DefaultIdentityRegexp))
+
+	b.WriteString(`
 
 # Everything is inside a function invoked on the last line, so a `)
 	b.WriteString("`curl | sh`\n")
@@ -93,6 +110,7 @@ main() {
       --service-name) CLOOP_SERVICE_NAME=${2:-}; shift; [ $# -gt 0 ] && shift || true ;;
       --service-name=*) CLOOP_SERVICE_NAME=${1#--service-name=}; shift ;;
       --uninstall) action=uninstall; shift ;;
+      --insecure-skip-verify) CLOOP_INSECURE_SKIP_VERIFY=1; shift ;;
       -h|--help) usage; return 0 ;;
       *) die "unknown option: $1" ;;
     esac
@@ -139,10 +157,31 @@ cloop executor agent bootstrap
   CLOOP_ENROLL_BUNDLE=<bundle> sh install.sh [--service-name NAME]
   sh install.sh --uninstall [--service-name NAME]
 
+Options:
+  --service-name NAME      unit, container and state directory name
+  --bundle BUNDLE          enrollment bundle (prefer CLOOP_ENROLL_BUNDLE)
+  --uninstall              remove a previous install
+  --insecure-skip-verify   install without checking the download's signature.
+                           For air-gapped mirrors that cannot reach Sigstore.
+                           This gives up the proof that the binary came from
+                           cloop's release workflow; the checksum that remains
+                           is served from the same place as the archive and so
+                           proves only that the download arrived intact.
+
 Environment:
-  CLOOP_ENROLL_BUNDLE   enrollment bundle from the hub's Executors panel
-  CLOOP_BIN             use this cloop binary instead of downloading one
-  CLOOP_RELEASES        base URL for release downloads
+  CLOOP_ENROLL_BUNDLE          enrollment bundle from the hub's Executors panel
+  CLOOP_BIN                    use this cloop binary instead of downloading one
+  CLOOP_RELEASES               base URL for release downloads
+  CLOOP_INSECURE_SKIP_VERIFY   set to 1, same as --insecure-skip-verify
+  CLOOP_PROVENANCE_ISSUER      OIDC issuer to require (default: GitHub Actions)
+  CLOOP_PROVENANCE_IDENTITY    signing identity regexp to require, for a fork
+                               that builds and signs cloop itself
+
+Verify a downloaded archive by hand:
+  cosign verify-blob cloop_linux_amd64.tar.gz \\
+    --bundle cloop_linux_amd64.tar.gz.sigstore.json \\
+    --certificate-oidc-issuer "\$CLOOP_PROVENANCE_ISSUER" \\
+    --certificate-identity-regexp "\$CLOOP_PROVENANCE_IDENTITY"
 EOF
 }
 
@@ -184,6 +223,11 @@ fetch_cloop() {
   trap 'rm -rf "$tmp"' EXIT INT TERM
   say "downloading $url"
   download "$url" "$tmp/cloop.tar.gz" || die "download failed: $url"
+  # Provenance first, then integrity. The order is not arbitrary: the signature
+  # is the check that can actually fail in an attacker's presence, so it should
+  # be the one that runs before anything else has had a chance to go wrong. The
+  # checksum that follows is a second opinion, not the gate.
+  verify_signature "$tmp/cloop.tar.gz" "$name" "$tmp"
   verify_archive "$tmp/cloop.tar.gz" "$name" "$tmp"
   tar -xzf "$tmp/cloop.tar.gz" -C "$tmp" || die "could not extract $url"
   [ -f "$tmp/cloop" ] || die "the release archive did not contain a cloop binary"
@@ -199,6 +243,70 @@ download() {
   else
     die "neither curl nor wget is available; install the cloop binary manually and re-run"
   fi
+}
+
+# verify_signature proves the artifact was produced by cloop's release
+# workflow, which is the question verify_archive below cannot answer.
+#
+# checksums.txt is served from the same GitHub release as the archive it
+# vouches for. Whoever can replace one can replace the other, and the checksum
+# comparison then succeeds against the attacker's own list — it proves the
+# bytes arrived intact, never where they came from. The signature is the part
+# that cannot be forged without being able to run the release workflow itself.
+#
+# What is pinned is the OIDC issuer and the signing identity, and both are
+# needed. The issuer alone would accept any identity GitHub will mint a token
+# for; the identity alone could be asserted by any issuer Fulcio federates
+# with. Together they say: signed by this repository's release workflow,
+# running on a tag.
+#
+# A missing cosign is a refusal, not a skip. The tempting alternative — warn
+# and continue, as the checksum path does when no sha256sum exists — would
+# make every install report success while verifying nothing, and the
+# misconfiguration would be invisible precisely because it looks like it
+# worked. An operator who cannot install cosign has --insecure-skip-verify,
+# which leaves a record of the decision in the command line.
+#
+# Every variable here is prefixed vs_ because POSIX sh has no locals: a bare
+# "name=" would be the *caller's* name. verify_archive calls this function
+# while holding the archive's name in exactly that variable, so unprefixed
+# assignments silently rewrote it and the checksum was then looked up for
+# "checksums.txt" instead of for the artifact. The prefix is the fix, and the
+# reason it is worth a comment is that the symptom appeared two functions away
+# from the cause.
+verify_signature() {
+  vs_artifact=$1 vs_name=$2 vs_dir=$3
+
+  if [ "$CLOOP_INSECURE_SKIP_VERIFY" = "1" ]; then
+    warn "provenance verification is DISABLED (--insecure-skip-verify):"
+    warn "the origin of $vs_name has NOT been checked."
+    return 0
+  fi
+
+  command -v cosign >/dev/null 2>&1 || die \
+    "cosign is required to verify the provenance of $vs_name, and is not installed. \
+Install it from https://github.com/sigstore/cosign/releases, or re-run with \
+--insecure-skip-verify (or CLOOP_INSECURE_SKIP_VERIFY=1) to install without \
+checking where this binary came from."
+
+  vs_sig="$vs_dir/$vs_name.sigstore.json"
+  download "$CLOOP_RELEASES/$vs_name.sigstore.json" "$vs_sig" || die \
+    "could not download $CLOOP_RELEASES/$vs_name.sigstore.json. Every cloop release \
+publishes a signature bundle beside each artifact; if this 404s, the archive \
+did not come from a cloop release."
+
+  # cosign's own message names the actual mismatch, and the operator needs it:
+  # a wrong identity and a corrupted download have entirely different remedies.
+  if ! vs_out=$(cosign verify-blob "$vs_artifact" \
+      --bundle "$vs_sig" \
+      --certificate-oidc-issuer "$CLOOP_PROVENANCE_ISSUER" \
+      --certificate-identity-regexp "$CLOOP_PROVENANCE_IDENTITY" 2>&1); then
+    die "SIGNATURE VERIFICATION FAILED for $vs_name. Refusing to install. \
+This archive was not signed by cloop's release workflow, which means it is not \
+a cloop release — regardless of what its checksum says. cosign reported: $vs_out"
+  fi
+
+  say "verified the signature on $vs_name"
 }
 
 # verify_archive checks the download against the release's own checksums.txt.
@@ -230,6 +338,11 @@ verify_archive() {
 
   download "$CLOOP_RELEASES/checksums.txt" "$dir/checksums.txt" ||
     die "could not download $CLOOP_RELEASES/checksums.txt to verify $name"
+
+  # The list is signed too. Without this the checksum below would be a
+  # comparison against an unauthenticated file — which is the whole reason the
+  # signature work exists, reintroduced one level down.
+  verify_signature "$dir/checksums.txt" "checksums.txt" "$dir"
 
   # checksums.txt is GNU format: "<hex>  <filename>". Match the exact name so
   # a substring like cloop_linux_arm.tar.gz cannot satisfy cloop_linux_arm64.

@@ -45,7 +45,9 @@ to each. See [Providers](providers.md) for choosing between them.
 ## Download a release binary
 
 The only install path that needs no Go toolchain at all. Each release publishes
-a static binary per platform, plus a `checksums.txt` covering all of them:
+a static binary per platform, a `checksums.txt` covering all of them, and a
+Sigstore signature bundle (`<asset>.sigstore.json`) for every one of those
+files:
 
 | Platform | Asset |
 | --- | --- |
@@ -66,7 +68,17 @@ ASSET="cloop_$(uname -s | tr '[:upper:]' '[:lower:]')_amd64.tar.gz"
 BASE="https://github.com/blechschmidt/cloop/releases/latest/download"
 
 curl -fsSLO "$BASE/$ASSET"
+curl -fsSLO "$BASE/$ASSET.sigstore.json"
 curl -fsSLO "$BASE/checksums.txt"
+
+# Provenance: was this built by cloop's release workflow? See below.
+cosign verify-blob "$ASSET" \
+  --bundle "$ASSET.sigstore.json" \
+  --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+  --certificate-identity-regexp \
+    '^https://github\.com/blechschmidt/cloop/\.github/workflows/release\.yml@refs/tags/v[^/]+$'
+
+# Integrity: did the download arrive intact?
 sha256sum --ignore-missing -c checksums.txt   # shasum -a 256 -c on macOS
 
 # Members carry a "./" prefix (the archive is built with `tar -C "$workdir" .`),
@@ -75,6 +87,58 @@ sha256sum --ignore-missing -c checksums.txt   # shasum -a 256 -c on macOS
 tar -xzf "$ASSET" ./cloop
 sudo install -m 0755 cloop /usr/local/bin/cloop
 ```
+
+### Verifying provenance
+
+The `cosign verify-blob` above is the check worth understanding, because the
+`sha256sum` beside it cannot substitute for it.
+
+`checksums.txt` is served from the same GitHub release as the archive it vouches
+for. Anyone who can replace the archive can replace its checksum in the same
+breath, and the comparison then succeeds against their own list. A checksum
+proves the download arrived intact; it can never prove where it came from.
+
+The signature can. cloop's releases are signed with [Sigstore][sigstore]
+keyless signing: the release workflow proves its identity to Fulcio with
+GitHub's OIDC token and receives a short-lived certificate naming the workflow,
+repository and ref that asked for it. There is no long-lived private key
+anywhere in the project to leak or rotate — and producing a signature that
+satisfies the identity above requires being able to run *this repository's
+release workflow on a tag*.
+
+Both flags are required, and leaving either off makes the check meaningless:
+
+- `--certificate-oidc-issuer` — without it, a certificate from any issuer
+  Fulcio federates with is admissible.
+- `--certificate-identity-regexp` — without it, **any** valid Sigstore
+  signature passes. Anyone can sign anything; the identity is what matters.
+
+Install cosign from [its releases page][cosign]. The signature is also recorded
+in the public Rekor transparency log, so a signature that was ever issued for a
+cloop release is publicly auditable after the fact.
+
+[sigstore]: https://www.sigstore.dev/
+[cosign]: https://github.com/sigstore/cosign/releases
+
+### When verification is not possible
+
+An air-gapped site mirroring releases internally may not be able to reach
+Sigstore. Both self-installing paths take `--insecure-skip-verify`:
+
+```bash
+cloop upgrade --insecure-skip-verify
+cloop executor agent install --upgrade --from ./cloop --insecure-skip-verify
+sh install.sh --insecure-skip-verify        # or CLOOP_INSECURE_SKIP_VERIFY=1
+```
+
+It disables the signature check only — the checksum still runs. Every path that
+uses it says so in its output, so an unverified install is greppable in a
+provisioning log rather than indistinguishable from a verified one.
+
+A fork that builds and signs cloop itself has a better option than switching
+verification off: repoint the trust root with `CLOOP_PROVENANCE_ISSUER` and
+`CLOOP_PROVENANCE_IDENTITY`, which keeps a signature required and only changes
+whose signature satisfies it.
 
 To pin a specific release instead of tracking the newest, swap `latest/download`
 for `download/v<version>` — for example
@@ -86,7 +150,9 @@ older binary can upgrade forward.
 Unlike `go install`, these binaries carry a real version string, so
 `cloop upgrade` works from here: it queries the releases API, downloads the
 asset for the running OS and architecture, verifies its SHA-256 against the
-same `checksums.txt`, and swaps the running binary atomically.
+same `checksums.txt`, verifies its signature against the identity above, and
+only then swaps the running binary atomically. It needs `cosign` on `PATH` and
+refuses to upgrade without it rather than silently skipping the check.
 `cloop upgrade --check` reports whether an update exists and does nothing else.
 
 **There is no Windows build.** The process-group supervision cloop stops
