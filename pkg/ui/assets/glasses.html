@@ -213,6 +213,12 @@
   }
   #add.on, #dictate.on { display: block; }
   #dictate.rec { color: var(--bad); border-color: var(--bad); }
+  /* Push-to-talk (Task 20252): a hold on a phone must stay a hold. Without
+     touch-action the browser reclaims the gesture as a scroll partway through
+     a sentence; without the selection rules a long press pops the text-callout
+     menu over the button the finger is still on. */
+  #dictate { touch-action: none; -webkit-touch-callout: none;
+             -webkit-user-select: none; user-select: none; }
   #add:disabled, #dictate:disabled { opacity: .5; }
   /* The wearable cannot reach a microphone at all (see the note in the script),
      so where that is true speech is one muted line rather than a control: a
@@ -1089,7 +1095,11 @@ function fillBlock(block, text) {
 // silently filing work.
 
 var mic = { available: false, rec: null, chunks: [], stream: null, heard: '',
-            heardDesc: '', sound: false, ctx: null };
+            heardDesc: '', sound: false, ctx: null,
+            // Push-to-talk (Task 20252). held is the pointerId of the finger on
+            // the button, null when the session came from a click or a pinch.
+            held: null, holdStart: 0, suppressClick: false,
+            abort: false, abortMsg: '' };
 
 // Whisper does not answer "silence". Handed a clip with nothing in it it
 // returns a stock phrase — "Thank you." is the one this endpoint produces —
@@ -1231,10 +1241,110 @@ function setDictateLabel(text, recording, busy) {
   b.disabled = !!busy;
 }
 
+// ── push-to-talk (Task 20252) ───────────────────────────────────────────────
+//
+// This button is only ever on screen where a microphone exists, and on this
+// link that means the phone the glasses tether through — showAddControls hides
+// it on the wearable itself, where the platform grants no audio capture at all.
+// So the gesture it should answer to is a phone gesture: hold while speaking,
+// release to send, which cannot leave the microphone live the way a two-tap
+// toggle can.
+//
+// The wearable keeps the toggle, because it has to. A Neural Band pinch and a
+// captouch tap arrive here as key events, not pointer events — see the keydown
+// map above — and a key event cannot express a hold. The split below is by
+// pointerType for exactly that reason: touch holds, everything else clicks, and
+// nothing has to know which device it is running on.
+//
+// The dashboard's copy of this lives in assets/js/15-voice.js. The two cannot
+// share code — this page is a standalone document that loads no bundle, which
+// is what keeps it small enough for the glasses to fetch over Bluetooth.
+
+var MIN_HOLD_MS = 400;   // see DICTATE_MIN_HOLD_MS in 15-voice.js
+
 el('dictate').addEventListener('click', function() {
+  // The click a browser synthesises after touchend belongs to the hold that
+  // just ended; letting it through here would restart the recording the
+  // release stopped.
+  if (mic.suppressClick) { mic.suppressClick = false; return; }
   if (mic.rec) { stopDictation(); return; }
   startDictation();
 });
+
+el('dictate').addEventListener('pointerdown', function(ev) {
+  var b = el('dictate');
+  if (b.disabled) { return; }
+  if (ev.pointerType === 'mouse') { mic.suppressClick = false; return; }
+  mic.suppressClick = true;
+  if (mic.rec || mic.starting) { releaseHold(); return; }
+
+  ev.preventDefault();
+  mic.held = ev.pointerId;
+  mic.holdStart = Date.now();
+  mic.abort = false;
+  // Capture, so a fingertip that slides off the button still ends the hold
+  // here rather than leaving the microphone running.
+  try { b.setPointerCapture(ev.pointerId); } catch (e) {}
+  setDictateLabel('Starting…', false, false);
+  startDictation();
+});
+
+function endHold() {
+  var b = el('dictate');
+  if (b && mic.held !== null && mic.held !== undefined) {
+    try { b.releasePointerCapture(mic.held); } catch (e) {}
+  }
+  mic.held = null;
+  mic.holdStart = 0;
+}
+
+function releaseHold() {
+  // A zero start means this session did not come from a hold — a pinch or a
+  // click began it and this touch only ends it. There is no hold to be too
+  // short, and a real recording is waiting to be sent.
+  var fromHold = mic.holdStart !== 0;
+  var held = fromHold ? Date.now() - mic.holdStart : 0;
+
+  if (mic.rec) {
+    if (fromHold && held < MIN_HOLD_MS) {
+      // Too short to be speech. Discarding says so plainly; uploading it would
+      // come back as one of Whisper's stock phrases and put that on the
+      // confirmation screen as a real task.
+      endHold();
+      abandonDictation();
+      say('Hold the button while you speak.', true);
+      return;
+    }
+    endHold();
+    stopDictation();
+    return;
+  }
+
+  // Released before the microphone went live, so this hold captured nothing.
+  // startDictation acts on the note when getUserMedia finally resolves —
+  // stopping a recorder that does not exist yet would leak the stream it is
+  // about to be handed.
+  if (mic.starting) {
+    mic.abort = true;
+    // Silent when this was not a hold: a pinch that started dictation and a
+    // touch that stopped it before it began is a deliberate cancel.
+    mic.abortMsg = !fromHold ? ''
+      : held < MIN_HOLD_MS ? 'Hold the button while you speak.'
+      : 'Microphone ready. Hold and speak again.';
+    return;
+  }
+  endHold();
+}
+
+function onDictatePointerUp(ev) {
+  if (mic.held === null || mic.held === undefined) { return; }
+  if (ev && ev.pointerId !== undefined && ev.pointerId !== mic.held) { return; }
+  releaseHold();
+}
+
+el('dictate').addEventListener('pointerup', onDictatePointerUp);
+el('dictate').addEventListener('pointercancel', onDictatePointerUp);
+el('dictate').addEventListener('contextmenu', function(ev) { ev.preventDefault(); });
 
 function startDictation() {
   // mic.rec is only assigned once getUserMedia resolves, so two quick pinches
@@ -1274,9 +1384,24 @@ function startDictation() {
     };
     mic.rec.start();
     mic.starting = false;
-    setDictateLabel('■ Stop and add', true, false);
+    // The finger lifted while getUserMedia was resolving — on a phone this is
+    // the first hold of the session, where the permission prompt eats the whole
+    // press. Nothing was captured, so drop it and say the microphone is ready
+    // rather than reporting a failure the next hold will not repeat.
+    if (mic.abort) {
+      mic.abort = false;
+      endHold();
+      abandonDictation();
+      // Empty on purpose for a deliberate cancel; see releaseHold.
+      if (mic.abortMsg) { say(mic.abortMsg, true); }
+      mic.abortMsg = '';
+      return;
+    }
+    setDictateLabel(mic.held !== null && mic.held !== undefined
+      ? '■ Release to add' : '■ Stop and add', true, false);
   }).catch(function(err) {
     mic.starting = false;
+    endHold();
     resetDictate();
     say('Microphone unavailable: ' + (err && err.message ? err.message : err), true);
   });
@@ -1324,7 +1449,18 @@ function uploadDictation(blob) {
   }).catch(function(err) { resetDictate(); fail(err); });
 }
 
-function resetDictate() { setDictateLabel('🎤 Speak a new task', false, false); }
+// On a phone the button is held, so it has to say so — nothing else on the
+// screen does. The media query only picks wording; the behaviour is chosen per
+// gesture from pointerType, so guessing wrong here is cosmetic. The wearable
+// reports no coarse pointer (it has no pointer at all) and keeps the original
+// label, which is right: there a pinch is a click.
+function dictateIsHeld() {
+  try { return !!(window.matchMedia && window.matchMedia('(pointer: coarse)').matches); }
+  catch (e) { return false; }
+}
+function resetDictate() {
+  setDictateLabel(dictateIsHeld() ? '🎤 Hold to speak a new task' : '🎤 Speak a new task', false, false);
+}
 
 // openHeard is the confirmation screen: what is about to be created, then Add
 // and Discard. Reached from a transcript and from a ready-made row alike —

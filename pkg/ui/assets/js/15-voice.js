@@ -87,6 +87,24 @@ let dictateStarting = false;
 let dictateHeardSound = false;
 let dictateAudioCtx = null;
 
+// Push-to-talk state (Task 20252). dictateHeldPointer is the pointerId of the
+// finger currently on the button, or null when no hold is in progress — it is
+// also what tells the rest of the code whether this session came from a hold
+// or from a click, which changes the wording and nothing else.
+let dictateHeldPointer = null;
+let dictateHoldStart = 0;
+let dictateSuppressClick = false;
+let dictateCancel = false;          // onstop should discard rather than upload
+let dictateAbortPending = false;    // released before the recorder went live
+let dictateAbortMsg = '';
+
+// Shorter than this is a stray tap, not a sentence — a fingertip brushing the
+// button on the way to the text field beside it. Whisper answers a clip that
+// short with a hallucinated stock phrase, so the cost of guessing wrong is a
+// bogus task title, not a wasted round trip. No task title is spoken in under
+// four tenths of a second.
+const DICTATE_MIN_HOLD_MS = 400;
+
 // Whisper does not answer "silence" — handed a clip with nothing in it, it
 // confidently returns a stock phrase: "Thank you.", "Thanks for watching!", a
 // subtitle credit. Measured against the live endpoint, the metadata that
@@ -129,6 +147,16 @@ const DICTATE_STOP_ICON = '<svg viewBox="0 0 16 16" fill="currentColor" aria-hid
 function dictateBtn()   { return document.getElementById('dictateTaskBtn'); }
 function dictateLabel() { return document.getElementById('dictateTaskLabel'); }
 
+// A touch press is push-to-talk; a mouse click still toggles (Task 20252).
+// This media query only picks the *wording* — the behaviour is decided per
+// gesture from pointerType further down — so a hybrid device that guesses
+// wrong here is merely mislabelled, never broken.
+function dictateTouchPrimary() {
+  try { return !!(window.matchMedia && window.matchMedia('(pointer: coarse)').matches); }
+  catch (e) { return false; }
+}
+function dictateIdleLabel() { return dictateTouchPrimary() ? 'Hold to talk' : 'Dictate'; }
+
 // Paint the button. Kept in one place because three call sites (start, stop,
 // failure) all have to leave it in a consistent state, and a mic button stuck
 // on "Stop" with no recorder behind it is unrecoverable without a reload.
@@ -151,6 +179,7 @@ function setDictateState(state, text) {
 window.initTaskDictation = function() {
   const btn = dictateBtn();
   if (!btn) return;
+  bindTaskDictationGestures();
   // api() with no second argument is a GET; passing null would make it a POST.
   // Both halves have to hold: a hub with no speech backend, and a viewer who
   // could not create the task anyway, each get no button rather than one that
@@ -158,15 +187,28 @@ window.initTaskDictation = function() {
   api('/api/dictate').then(d => {
     const ok = !!(d && d.available && d.can_add_tasks);
     btn.style.display = ok ? '' : 'none';
-    if (ok) btn.title = 'Dictate the task title (' + (d.backend || 'speech') + ')';
+    if (ok) {
+      const how = dictateTouchPrimary() ? 'Hold to dictate' : 'Dictate';
+      btn.title = how + ' the task title (' + (d.backend || 'speech') + ')';
+      setDictateState('idle', dictateIdleLabel());
+    }
   }).catch(() => { btn.style.display = 'none'; });
 };
 
 document.addEventListener('DOMContentLoaded', () => { window.initTaskDictation(); });
 
-window.toggleTaskDictation = async function() {
+// The click path: mouse and keyboard, where a press-and-hold means nothing and
+// a toggle is the only gesture available. Touch never reaches the toggle — the
+// pointer handlers below claim the gesture and suppress the click the browser
+// synthesises after touchend, which would otherwise start a second recording
+// the instant the first one ended.
+window.toggleTaskDictation = function() {
+  if (dictateSuppressClick) { dictateSuppressClick = false; return; }
   if (dictateActive) { stopTaskDictation(); return; }
+  startTaskDictation();
+};
 
+async function startTaskDictation() {
   // dictateActive is only set after getUserMedia resolves, so a double click
   // would otherwise start two recorders and orphan the first one's microphone
   // track — the browser's recording indicator then stays lit with nothing able
@@ -179,6 +221,10 @@ window.toggleTaskDictation = async function() {
   // project cares about. Say which, because the two have different fixes.
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || typeof MediaRecorder === 'undefined') {
     dictateStarting = false;
+    endDictateHold();
+    // A touch press has already painted "Starting…", so this path has to put
+    // the label back even though the click path never changed it.
+    setDictateState('idle', dictateIdleLabel());
     toast(window.isSecureContext === false
       ? 'Dictation needs an https connection to reach the microphone'
       : 'This browser cannot record audio', 'err');
@@ -192,7 +238,8 @@ window.toggleTaskDictation = async function() {
     });
   } catch (err) {
     dictateStarting = false;
-    setDictateState('idle', 'Dictate');
+    endDictateHold();
+    setDictateState('idle', dictateIdleLabel());
     toast('Microphone unavailable: ' + (err && err.message ? err.message : err), 'err');
     return;
   }
@@ -213,7 +260,8 @@ window.toggleTaskDictation = async function() {
     stream.getTracks().forEach(t => t.stop());
     closeDictateAudioCtx();
     dictateStarting = false;
-    setDictateState('idle', 'Dictate');
+    endDictateHold();
+    setDictateState('idle', dictateIdleLabel());
     toast('This browser cannot record ' + (mime || 'audio'), 'err');
     return;
   }
@@ -225,8 +273,13 @@ window.toggleTaskDictation = async function() {
     stream.getTracks().forEach(t => t.stop());
     closeDictateAudioCtx();
     dictateActive = false;
+    // Discarded on purpose — a tap too short to be speech, or a hold that ran
+    // out before the microphone was live. cancelTaskDictation has already said
+    // so and repainted the button; uploading here would send a clip we know is
+    // empty and answer it with a misleading "check the microphone".
+    if (dictateCancel) { dictateCancel = false; return; }
     if (!dictateHeardSound) {
-      setDictateState('idle', 'Dictate');
+      setDictateState('idle', dictateIdleLabel());
       toast('No sound was recorded — check the microphone', 'err');
       return;
     }
@@ -236,8 +289,18 @@ window.toggleTaskDictation = async function() {
   dictateRecorder.start();
   dictateActive = true;
   dictateStarting = false;
-  setDictateState('recording', 'Stop');
-};
+
+  // The finger already lifted while getUserMedia was resolving, so this hold
+  // captured no audio and there is nothing to send. Common exactly once per
+  // browser: the permission prompt eats the whole press, and the user taps
+  // "Allow" long after releasing. Say the microphone is ready rather than
+  // reporting a failure, because the next hold will work.
+  if (dictateAbortPending) {
+    cancelTaskDictation(dictateAbortMsg);
+    return;
+  }
+  setDictateState('recording', dictateHeldPointer !== null ? 'Release to send' : 'Stop');
+}
 
 function stopTaskDictation() {
   if (dictateRecorder && dictateRecorder.state !== 'inactive') dictateRecorder.stop();
@@ -245,8 +308,142 @@ function stopTaskDictation() {
   setDictateState('busy', 'Transcribing…');
 }
 
+// End a session without uploading it, and leave the button usable. Every path
+// here is one where we already know the clip is not speech, so the recorder is
+// stopped purely to release the microphone.
+function cancelTaskDictation(msg) {
+  dictateCancel = true;
+  if (dictateRecorder && dictateRecorder.state !== 'inactive') {
+    dictateRecorder.stop();   // onstop releases the tracks and honours dictateCancel
+  } else {
+    dictateCancel = false;
+    closeDictateAudioCtx();
+  }
+  dictateActive = false;
+  endDictateHold();
+  setDictateState('idle', dictateIdleLabel());
+  if (msg) toast(msg, 'info');
+}
+
+// ── Push-to-talk on touch (Task 20252) ───────────────────────────────────────
+//
+// On a phone the toggle this button used to be is the wrong shape. It leaves
+// the microphone live between two taps, which on a device that is usually in a
+// pocket or a hand is exactly how a recording gets left running; and it costs
+// two deliberate presses to say four words. Holding is self-limiting — the
+// recording cannot outlive the finger — and it is the gesture every other
+// voice control on a phone already uses.
+//
+// The decision is made per gesture from pointerType rather than per device
+// from a media query, so a laptop with a touchscreen gets both: a mouse click
+// still toggles, a finger still holds. Nothing has to guess what kind of
+// machine this is.
+
+function endDictateHold() {
+  const btn = dictateBtn();
+  if (btn && dictateHeldPointer !== null) {
+    try { btn.releasePointerCapture(dictateHeldPointer); } catch (e) {}
+  }
+  dictateHeldPointer = null;
+  dictateHoldStart = 0;
+  dictateAbortPending = false;
+  dictateAbortMsg = '';
+}
+
+function dictatePointerDown(e) {
+  const btn = dictateBtn();
+  if (!btn || btn.disabled) return;
+
+  // A mouse keeps the toggle. Clearing the suppression flag here matters on a
+  // hybrid machine: a touch gesture that never produced its synthetic click —
+  // a pointercancel, a finger dragged off — would otherwise leave the flag set
+  // and swallow the next real mouse click.
+  if (e.pointerType === 'mouse') { dictateSuppressClick = false; return; }
+
+  // Whatever happens next, the click the browser synthesises after touchend
+  // belongs to this gesture and must not be read as a second press.
+  dictateSuppressClick = true;
+
+  if (dictateActive || dictateStarting) {   // already listening: this press ends it
+    releaseDictateHold();
+    return;
+  }
+
+  e.preventDefault();   // no text selection, no long-press callout
+  dictateHoldStart = Date.now();
+  dictateHeldPointer = e.pointerId;
+  dictateCancel = false;
+  dictateAbortPending = false;
+  // Capture, so a fingertip that drifts off the button still delivers its
+  // pointerup here. Without it the release lands on whatever is underneath and
+  // the recording runs on with nothing holding it.
+  try { btn.setPointerCapture(e.pointerId); } catch (err) {}
+  // Deliberately not painted as recording yet: the microphone is not live for
+  // another beat, and saying "speak now" before it is loses the first word.
+  setDictateState('idle', 'Starting…');
+  startTaskDictation();
+}
+
+function releaseDictateHold() {
+  // A zero start means this session did not come from a hold — it was started
+  // by a click or a keypress and is only being *ended* by this touch. There is
+  // no hold to be too short, and a real recording is waiting: measure nothing
+  // and send it, or a tablet user who started with the keyboard loses what they
+  // just said.
+  const fromHold = dictateHoldStart !== 0;
+  const held = fromHold ? Date.now() - dictateHoldStart : 0;
+
+  if (dictateActive) {
+    if (fromHold && held < DICTATE_MIN_HOLD_MS) {
+      cancelTaskDictation('Hold the button while you speak');
+      return;
+    }
+    endDictateHold();
+    stopTaskDictation();
+    return;
+  }
+
+  // The microphone has not gone live yet. Leave a note for startTaskDictation
+  // to act on when it does — stopping a recorder that does not exist would do
+  // nothing and leak the stream getUserMedia is still about to hand us.
+  if (dictateStarting) {
+    dictateAbortPending = true;
+    // Silent when this was not a hold: a click that started dictation and a
+    // touch that stopped it before it began is a deliberate cancel, and telling
+    // that user how to hold the button answers a question they did not ask.
+    dictateAbortMsg = !fromHold ? ''
+      : held < DICTATE_MIN_HOLD_MS ? 'Hold the button while you speak'
+      : 'Microphone ready — hold and speak again';
+    return;
+  }
+  endDictateHold();
+}
+
+function dictatePointerUp(e) {
+  if (dictateHeldPointer === null) return;
+  if (e && e.pointerId !== undefined && e.pointerId !== dictateHeldPointer) return;
+  releaseDictateHold();
+}
+
+// Wired once, on the button, rather than per render: this button is never
+// re-created, only relabelled by setDictateState, which replaces its children
+// and would drop listeners bound to them.
+function bindTaskDictationGestures() {
+  const btn = dictateBtn();
+  if (!btn || btn.dataset.pttBound === '1') return;
+  if (typeof window.PointerEvent === 'undefined') return;  // click-toggle still works
+  btn.dataset.pttBound = '1';
+  btn.addEventListener('pointerdown', dictatePointerDown);
+  btn.addEventListener('pointerup', dictatePointerUp);
+  // A pointercancel is the system taking the gesture away — a scroll it decided
+  // was really a scroll, a call arriving. Same release path: a hold long enough
+  // to be speech is still sent, a short one is still discarded.
+  btn.addEventListener('pointercancel', dictatePointerUp);
+  btn.addEventListener('contextmenu', e => e.preventDefault());
+}
+
 async function sendTaskDictation(blob) {
-  if (!blob || !blob.size) { setDictateState('idle', 'Dictate'); toast('Nothing was recorded', 'info'); return; }
+  if (!blob || !blob.size) { setDictateState('idle', dictateIdleLabel()); toast('Nothing was recorded', 'info'); return; }
   setDictateState('busy', 'Transcribing…');
 
   const ext = (blob.type || '').indexOf('ogg') >= 0 ? 'ogg' : 'webm';
@@ -261,7 +458,7 @@ async function sendTaskDictation(blob) {
 
     if (!resp.ok || !data.text) {
       toast((data && (data.message || data.error)) || 'Transcription failed', 'err');
-      setDictateState('idle', 'Dictate');
+      setDictateState('idle', dictateIdleLabel());
       return;
     }
 
@@ -277,7 +474,7 @@ async function sendTaskDictation(blob) {
   } catch (err) {
     toast('Transcription request failed', 'err');
   }
-  setDictateState('idle', 'Dictate');
+  setDictateState('idle', dictateIdleLabel());
 }
 
 window.sendVoiceAudio = async function() {

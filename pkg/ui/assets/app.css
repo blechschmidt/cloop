@@ -625,6 +625,12 @@
   .btn.mic { color:var(--purple); border-color:rgba(188,140,255,.4); }
   .btn.mic:hover { background:rgba(188,140,255,.1); border-color:var(--purple); }
   .btn.mic.recording { color:var(--red); border-color:rgba(248,81,73,.4); animation: pulse 1s infinite; }
+  /* Push-to-talk (Task 20252): a hold on this button must stay a hold. Without
+     touch-action the browser claims the gesture as a scroll partway through and
+     cancels the pointer stream mid-sentence; without the selection and callout
+     rules a long press pops the text-selection menu over the control the finger
+     is still on. */
+  .btn.mic { touch-action:none; -webkit-touch-callout:none; -webkit-user-select:none; user-select:none; }
 
   /* ── Voice modal ── */
   .voice-modal-backdrop { position:fixed; inset:0; background:rgba(0,0,0,.6); z-index:100; display:flex; align-items:center; justify-content:center; }
