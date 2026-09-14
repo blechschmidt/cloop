@@ -25,8 +25,8 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/localprocess"
-	"github.com/blechschmidt/cloop/pkg/redact"
 	"github.com/blechschmidt/cloop/pkg/executor/remote"
+	"github.com/blechschmidt/cloop/pkg/redact"
 	"github.com/blechschmidt/cloop/pkg/version"
 )
 
@@ -115,7 +115,7 @@ type Agent struct {
 	// attaches holds the live interactive sessions on this device
 	// (Task 20265). It locks itself.
 	attaches attachTable
-	root  string
+	root     string
 
 	// Transport settings resolved once in New and read-only thereafter, so
 	// the reconnect loop never re-derives them and cannot drift mid-life.
