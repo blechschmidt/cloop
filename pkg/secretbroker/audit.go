@@ -63,6 +63,25 @@ const (
 	// to be able to tell those apart.
 	ActionAppTokenDestroy Action = "github_app.token_destroy"
 
+	// Self-service request actions (Task 20271).
+	//
+	// Separate from the secret.grant family rather than folded into it, because
+	// a request and a grant are different facts and a reviewer needs to tell
+	// them apart. secret.grant answers "what authority exists"; these answer
+	// "who asked, who decided, and how long it took" — and the gap between a
+	// request and its approval is the number that tells an operator whether the
+	// request path is actually being used or routed around.
+	//
+	// secret.request_expire is its own action, not a flavour of deny, for the
+	// reason RequestExpired is its own state: denied is an answer and expired is
+	// the absence of one, and a trail that conflated them would hide a queue
+	// nobody is working.
+	ActionRequestOpen     Action = "secret.request"
+	ActionRequestApprove  Action = "secret.request_approve"
+	ActionRequestDeny     Action = "secret.request_deny"
+	ActionRequestWithdraw Action = "secret.request_withdraw"
+	ActionRequestExpire   Action = "secret.request_expire"
+
 	// Egress actions come from pkg/egressbroker, which brokers the hub's
 	// Internet connection as a fourth grantable resource alongside GitHub
 	// repositories, PATs, and Kubernetes clusters.
@@ -102,6 +121,11 @@ type Event struct {
 	SecretName string `json:"secret_name,omitempty"`
 	Kind       Kind   `json:"kind,omitempty"`
 	GrantID    string `json:"grant_id,omitempty"`
+	// RequestID is the access request an event concerns (Task 20271). Present
+	// on the request family above, and on nothing else: a grant minted directly
+	// has no request behind it, and leaving the field empty is what makes
+	// "which grants came through review" answerable from the trail.
+	RequestID  string `json:"request_id,omitempty"`
 	LeaseID    string `json:"lease_id,omitempty"`
 	ExecutorID string `json:"executor_id,omitempty"`
 	ProjectID  string `json:"project_id,omitempty"`
@@ -310,6 +334,7 @@ func (ev Event) Fields() string {
 	put("secret", ev.SecretName)
 	put("kind", string(ev.Kind))
 	put("grant_id", ev.GrantID)
+	put("request_id", ev.RequestID)
 	put("lease_id", ev.LeaseID)
 	put("executor", ev.ExecutorID)
 	put("project", ev.ProjectID)

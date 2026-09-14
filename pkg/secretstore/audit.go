@@ -49,6 +49,13 @@ func (a *Auditor) Audit(ev secretbroker.Event) {
 	if entityID == "" {
 		entityID = ev.GrantID
 	}
+	if entityID == "" {
+		// An access request denied before its secret was resolved — an unknown
+		// reference, or an approval of an id that does not exist — has neither
+		// of the above. Falling through would write a row with no entity at all,
+		// which is the one shape a reviewer cannot filter on.
+		entityID = ev.RequestID
+	}
 
 	actor := ev.Actor
 	if actor == "" {
@@ -68,6 +75,7 @@ func (a *Auditor) Audit(ev secretbroker.Event) {
 	put("secret_name", ev.SecretName)
 	put("kind", string(ev.Kind))
 	put("grant_id", ev.GrantID)
+	put("request_id", ev.RequestID)
 	put("lease_id", ev.LeaseID)
 	put("executor_id", ev.ExecutorID)
 	put("project_id", ev.ProjectID)

@@ -17,18 +17,26 @@ type memStore struct {
 	secrets map[string]Secret
 	grants  map[string]Grant
 	meta    map[string]string
+	// requests and uses back the RequestStore half below (Task 20271).
+	requests map[string]AccessRequest
+	uses     map[string][]RequestUse
 
 	// putGrantErr, when set, makes the next PutGrant fail. Used to check
 	// that a storage failure surfaces as a denial rather than a silent
 	// success.
 	putGrantErr error
+	// putRequestErr makes the next PutAccessRequest fail, which is how the
+	// "approval recorded, grant already minted" rollback is tested.
+	putRequestErr error
 }
 
 func newMemStore() *memStore {
 	return &memStore{
-		secrets: make(map[string]Secret),
-		grants:  make(map[string]Grant),
-		meta:    make(map[string]string),
+		secrets:  make(map[string]Secret),
+		grants:   make(map[string]Grant),
+		meta:     make(map[string]string),
+		requests: make(map[string]AccessRequest),
+		uses:     make(map[string][]RequestUse),
 	}
 }
 
@@ -206,4 +214,106 @@ func (c *fakeClock) advance(d time.Duration) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.now = c.now.Add(d)
+}
+
+// ---------------------------------------------------------------------------
+// RequestStore (Task 20271)
+// ---------------------------------------------------------------------------
+
+// The request half of the store, so the policy tests in request_test.go — the
+// two-person rule, the delegation clamp, the expiry refusal — run without a
+// SQLite file, exactly as the grant tests do.
+//
+// The one behaviour it must reproduce faithfully is ExpireAccessRequests
+// touching *only* pending rows. A double that also expired decided ones would
+// make the race test in TestExpireLeavesDecidedRequestsAlone pass against a
+// store whose real counterpart loses approvals.
+
+var _ RequestStore = (*memStore)(nil)
+
+func (m *memStore) PutAccessRequest(r AccessRequest) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.putRequestErr != nil {
+		err := m.putRequestErr
+		m.putRequestErr = nil
+		return err
+	}
+	if m.requests == nil {
+		m.requests = make(map[string]AccessRequest)
+	}
+	m.requests[r.ID] = r
+	return nil
+}
+
+func (m *memStore) GetAccessRequest(id string) (AccessRequest, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	r, ok := m.requests[id]
+	if !ok {
+		return AccessRequest{}, wrapf(ErrRequestNotFound, "%s", id)
+	}
+	return r, nil
+}
+
+func (m *memStore) ListAccessRequests() ([]AccessRequest, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]AccessRequest, 0, len(m.requests))
+	for _, r := range m.requests {
+		out = append(out, r)
+	}
+	return out, nil
+}
+
+func (m *memStore) ExpireAccessRequests(now time.Time) ([]AccessRequest, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var lapsed []AccessRequest
+	for id, r := range m.requests {
+		if r.State != RequestPending || r.ExpiresAt.IsZero() || now.Before(r.ExpiresAt) {
+			continue
+		}
+		r.State = RequestExpired
+		r.DecidedAt = now.UTC()
+		m.requests[id] = r
+		lapsed = append(lapsed, r)
+	}
+	return lapsed, nil
+}
+
+func (m *memStore) RecordRequestUse(u RequestUse) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.uses == nil {
+		m.uses = make(map[string][]RequestUse)
+	}
+	for i, existing := range m.uses[u.RequestID] {
+		if existing.LeaseID == u.LeaseID {
+			// Upsert, preserving first_seen — the property the real store's
+			// ON CONFLICT clause guarantees and the reason a renewal does not
+			// rewrite when a credential came into use.
+			u.FirstSeen = existing.FirstSeen
+			if u.TaskID == 0 {
+				u.TaskID = existing.TaskID
+			}
+			m.uses[u.RequestID][i] = u
+			return nil
+		}
+	}
+	m.uses[u.RequestID] = append(m.uses[u.RequestID], u)
+	return nil
+}
+
+func (m *memStore) ListRequestUses(requestID string) ([]RequestUse, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if requestID != "" {
+		return append([]RequestUse(nil), m.uses[requestID]...), nil
+	}
+	var out []RequestUse
+	for _, list := range m.uses {
+		out = append(out, list...)
+	}
+	return out, nil
 }

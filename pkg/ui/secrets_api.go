@@ -1310,6 +1310,15 @@ func isTruthyParam(v string) bool {
 // non-disclosure suite asserts this by seeding a credential and driving the
 // error paths.
 func writeBrokerError(w http.ResponseWriter, err error, action string) {
+	// The request sentinels first: several of them would otherwise fall through
+	// to CodeInternal, and "somebody else approved this a second ago" must not
+	// reach the panel as a 500 it can only report as a bug. See
+	// requestBrokerErrorCode in requests_api.go for what each code tells a
+	// client to do.
+	if code, ok := requestBrokerErrorCode(err); ok {
+		apierror.WriteError(w, apierror.New(code, err.Error()))
+		return
+	}
 	switch {
 	case errors.Is(err, secretbroker.ErrSecretNotFound),
 		errors.Is(err, secretbroker.ErrGrantNotFound),

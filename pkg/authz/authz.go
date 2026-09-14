@@ -201,6 +201,31 @@ const (
 	// a terminal one may not open. The hub checks both.
 	PermSandboxAttachWrite Permission = "sandbox.attach.write"
 
+	// PermSecretRequest is the right to *ask* for a credential — to file an
+	// access request, list one's own, and withdraw one (Task 20271).
+	//
+	// Granted from operator up, which makes it the only permission in the
+	// secret family below maintainer, and that asymmetry is the whole point.
+	// Asking confers nothing: a request is a row with a justification on it, and
+	// until somebody who holds PermSecretGrant approves it there is no
+	// credential, no lease, and nothing an executor can use. What it replaces is
+	// a conversation in a chat window — which is where over-broad grants come
+	// from, because the person minting one is reconstructing a scope from a
+	// sentence and a wider guess is always the cheaper one.
+	//
+	// Deliberately not granted to viewer. A request names a secret, a project
+	// and a repository allowlist, so the ability to file one is the ability to
+	// enumerate what exists by probing — and a viewer is the role that cannot
+	// start a run, which is to say the role with nothing to spend a credential
+	// on.
+	//
+	// Approving is a different permission and stays where it was: PermSecretGrant
+	// at maintainer. Holding both does not let one person do both — the broker
+	// refuses an approval by the identity that filed the request, which is the
+	// check that has to exist because on a small team those are frequently the
+	// same person.
+	PermSecretRequest Permission = "secret.request"
+
 	// PermViewPrefs is the right to change one's own dashboard presentation
 	// — currently, which projects to hide from the project list.
 	//
@@ -251,6 +276,7 @@ var AllPermissions = []Permission{
 	// appending keeps adding one from renumbering the rest.
 	PermSandboxAttach,
 	PermSandboxAttachWrite,
+	PermSecretRequest,
 }
 
 // Valid reports whether p is a known permission. PermPublic is not a
@@ -323,10 +349,12 @@ var rolePermissions = map[Role][]Permission{
 	RoleOperator: {
 		PermProjectRead, PermExecutorRead, PermViewPrefs,
 		PermRunStart, PermRunStop, PermTaskMutate,
+		PermSecretRequest,
 	},
 	RoleMaintainer: {
 		PermProjectRead, PermExecutorRead, PermViewPrefs,
 		PermRunStart, PermRunStop, PermTaskMutate,
+		PermSecretRequest,
 		PermProjectWrite, PermConfigWrite, PermSecretGrant, PermSecretRevoke,
 	},
 	RoleAdmin: AllPermissions,

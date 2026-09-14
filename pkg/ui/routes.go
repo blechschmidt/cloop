@@ -338,6 +338,7 @@ func (s *Server) routeTable() []routeSpec {
 		auditRead  = authz.PermAuditRead
 		secGrant   = authz.PermSecretGrant
 		secRevoke  = authz.PermSecretRevoke
+		secRequest = authz.PermSecretRequest
 		tokenAdmin = authz.PermTokenAdmin
 		sessAdmin  = authz.PermSessionAdmin
 		userMgmt   = authz.PermUserManage
@@ -658,6 +659,28 @@ func (s *Server) routeTable() []routeSpec {
 		{Pattern: "DELETE /api/grants/{id}", Handler: s.handleGrantDelete, Perm: secRevoke, Scope: scopeGlobal},
 		{Pattern: "GET /api/leases", Handler: s.handleLeasesList, Perm: secGrant, Scope: scopeGlobal},
 		{Pattern: "POST /api/leases/{id}/revoke", Handler: s.handleLeaseRevoke, Perm: secRevoke, Scope: scopeGlobal},
+		// Self-service access requests (Task 20271). The split permission is
+		// the feature: filing, listing and withdrawing take secRequest, which
+		// sits at operator, while deciding takes secGrant at maintainer.
+		// Asking confers nothing — a request is a row with a justification on
+		// it — and an operator who can ask is one who no longer has to
+		// negotiate access out of band, which is where over-broad standing
+		// grants come from.
+		//
+		// The list route is gated at the lower permission and narrowed inside
+		// the handler: a caller who cannot decide sees only their own
+		// requests, because the full queue names which credentials exist and
+		// who has been asking for them.
+		// The name-and-kind catalogue a requester needs to name a secret.
+		// Strictly less than GET /api/secrets, which stays at secGrant — see
+		// handleSecretCatalog for what is left out and why.
+		{Pattern: "GET /api/secrets/catalog", Handler: s.handleSecretCatalog, Perm: secRequest, Scope: scopeGlobal},
+		{Pattern: "GET /api/grant-requests", Handler: s.handleGrantRequestsList, Perm: secRequest, Scope: scopeGlobal},
+		{Pattern: "POST /api/grant-requests", Handler: s.handleGrantRequestCreate, Perm: secRequest, Scope: scopeGlobal},
+		{Pattern: "POST /api/grant-requests/{id}/withdraw", Handler: s.handleGrantRequestWithdraw, Perm: secRequest, Scope: scopeGlobal},
+		{Pattern: "POST /api/grant-requests/{id}/approve", Handler: s.handleGrantRequestApprove, Perm: secGrant, Scope: scopeGlobal},
+		{Pattern: "POST /api/grant-requests/{id}/deny", Handler: s.handleGrantRequestDeny, Perm: secGrant, Scope: scopeGlobal},
+		{Pattern: "GET /api/grant-requests/{id}/uses", Handler: s.handleGrantRequestUses, Perm: secGrant, Scope: scopeGlobal},
 
 		// ── API tokens ───────────────────────────────────────────────
 		// Global and admin-only. Minting a token provisions an identity

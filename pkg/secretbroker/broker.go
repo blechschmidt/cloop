@@ -627,6 +627,14 @@ func (b *Broker) LeaseFor(ctx context.Context, r Requester, actor string) (*Leas
 		Materials:  materials,
 	}
 
+	// Now that the lease has an ID, record which approved requests it redeemed
+	// (Task 20271). After the ID is minted rather than inside the loop above,
+	// because a use row keyed by a lease that failed to come into existence
+	// would tell an approver their grant was exercised when it was not.
+	for _, mat := range materials {
+		b.recordGrantUse(mat.GrantID, id, r, now)
+	}
+
 	kinds := lease.Kinds()
 	b.mu.Lock()
 	b.leases[lease.ID] = &leaseState{

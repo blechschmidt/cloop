@@ -1816,6 +1816,60 @@
 
         <div id="secBrokerBanner" class="sec-banner" style="display:none"></div>
 
+        <!-- ── Access requests (Task 20271) ──
+             First on the tab, and gated one rung lower than everything below
+             it: secret.request is an operator permission, so this is the one
+             section a non-maintainer can use. It leads because it is the only
+             thing here with a deadline attached — a grant sits until it
+             expires, an ask stops being answerable. -->
+        <div class="sec-sub" data-global-perm="secret.request" data-perm-hide>
+          <div class="sec-subtitle">
+            Access requests <span class="sec-count" id="secRequestsCount"></span>
+            <span style="font-size:11px;font-weight:400;color:var(--muted)">operator may ask &mdash; <code>secret.request</code>; maintainer decides &mdash; <code>secret.grant</code></span>
+            <label class="filter-check" style="font-weight:400;font-size:11.5px;margin-left:auto">
+              <select class="form-select" id="secRequestsFilter" onchange="loadGrantRequests()"
+                      aria-label="Filter access requests by state" title="Filter by state"
+                      style="padding:3px 8px;font-size:11.5px;width:auto">
+                <option value="">all states</option>
+                <option value="pending">pending</option>
+                <option value="approved">approved</option>
+                <option value="denied">denied</option>
+                <option value="withdrawn">withdrawn</option>
+                <option value="expired">expired</option>
+              </select>
+            </label>
+            <button class="btn" data-global-perm="secret.request"
+                    style="padding:3px 9px;font-size:12px"
+                    onclick="openRequestModal()" title="Ask for a credential you do not have">+ Request access</button>
+          </div>
+          <p class="sec-hint">
+            The other direction through the broker. Asking confers nothing &mdash; a request is a row with a
+            justification on it &mdash; while approving mints a real credential, which is why the two take
+            different permissions. Nobody can approve their own request, whatever they hold.
+          </p>
+          <div id="secRequestsEmpty" class="audit-empty" style="display:none">
+            No access requests.
+          </div>
+          <div style="overflow-x:auto">
+            <table class="audit-table" id="secRequestsTable" style="display:none">
+              <thead>
+                <tr>
+                  <th style="width:150px">Requested by</th>
+                  <th style="width:150px">Secret</th>
+                  <th style="width:170px">Subject</th>
+                  <th class="sec-hide-sm">Constraints</th>
+                  <th style="width:110px">Wants</th>
+                  <th class="sec-hide-sm">Justification</th>
+                  <th style="width:100px">State</th>
+                  <th style="width:120px">Deadline</th>
+                  <th style="width:250px"></th>
+                </tr>
+              </thead>
+              <tbody id="secRequestsBody"></tbody>
+            </table>
+          </div>
+        </div>
+
         <!-- ── Secrets ── -->
         <div class="sec-sub">
           <div class="sec-subtitle">Stored secrets <span class="sec-count" id="secSecretsCount"></span></div>
@@ -2468,6 +2522,228 @@
     <div class="modal-footer">
       <button class="btn" onclick="closeGrantModal()">Cancel</button>
       <button class="btn primary" id="grantSubmitBtn" data-global-perm="secret.grant" onclick="submitGrant()">Create grant</button>
+    </div>
+  </div>
+</div>
+
+<!--
+  Ask for access (Task 20271). The mirror of the grant wizard, one permission
+  rung lower: the same three dimensions — who, what allowlist, how long — but
+  filed as a request rather than minted. The kind is not chosen here; it comes
+  from the secret picked, because the asker's problem is that they do not
+  already know which credential exists.
+-->
+<div id="request-overlay" onclick="if(event.target===this)closeRequestModal()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
+  <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;width:700px;max-width:95vw;max-height:90vh;overflow:auto">
+    <h2 style="font-size:15px;font-weight:600;margin-bottom:6px">Request access</h2>
+    <p style="font-size:12px;color:var(--muted);margin-bottom:16px;line-height:1.5">
+      Nothing is granted by filing this. A maintainer other than you decides, and they can shorten the
+      lifetime but never widen the allowlist &mdash; so ask for the narrowest scope that does the job, and
+      say what the job is.
+    </p>
+
+    <div class="form-group">
+      <label class="form-label" for="requestSecret">Secret</label>
+      <select class="form-select" id="requestSecret" onchange="onRequestSecretChange()"></select>
+      <div class="sec-hint" id="requestKindHint" style="margin-top:6px"></div>
+    </div>
+
+    <div class="form-row">
+      <div class="form-group">
+        <label class="form-label" for="requestSubject">Subject (who would use it)</label>
+        <input class="form-input" id="requestSubject" placeholder="project:/srv/app">
+        <div class="sec-hint" style="margin-top:6px">
+          <code>project:/srv/app</code> or <code>executor:edge-01</code>. A maintainer may only approve a
+          request aimed at one named project or executor; a fleet-wide subject needs an admin.
+        </div>
+      </div>
+      <div class="form-group">
+        <label class="form-label" for="requestTTL">Grant lifetime asked for</label>
+        <select class="form-select" id="requestTTL">
+          <option value="60">1 hour</option>
+          <option value="480">8 hours</option>
+          <option value="1440" selected>24 hours (default)</option>
+          <option value="10080">7 days</option>
+          <option value="43200">30 days</option>
+        </select>
+        <div class="sec-hint" style="margin-top:6px">
+          A maintainer's approval is capped at 7 days regardless of what is asked. Longer needs an admin.
+        </div>
+      </div>
+    </div>
+
+    <!-- github_pat / github_app -->
+    <div class="sec-kindset" id="requestSet-github">
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label" for="requestRepos">Repository allowlist</label>
+          <input class="form-input" id="requestRepos" placeholder="acme/widgets">
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="requestPermissions">Permission subset</label>
+          <input class="form-input" id="requestPermissions" placeholder="contents:read">
+        </div>
+      </div>
+      <div class="sec-hint">
+        Comma-separated <code>owner/repo</code> globs; <code>*</code> does not cross the slash. A repository
+        allowlist is required &mdash; there is no "all repositories" default, only an explicit <code>*</code>,
+        which a reviewer will read as one.
+      </div>
+    </div>
+
+    <!-- kubeconfig -->
+    <div class="sec-kindset" id="requestSet-kubeconfig">
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label" for="requestContexts">Context allowlist</label>
+          <input class="form-input" id="requestContexts" placeholder="staging">
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="requestNamespaces">Namespace allowlist</label>
+          <input class="form-input" id="requestNamespaces" placeholder="team-a">
+        </div>
+      </div>
+      <div class="sec-hint">At least one of the two is required.</div>
+    </div>
+
+    <!-- registry -->
+    <div class="sec-kindset" id="requestSet-registry">
+      <div class="form-group">
+        <label class="form-label" for="requestRegistries">Registry allowlist</label>
+        <input class="form-input" id="requestRegistries" placeholder="ghcr.io">
+      </div>
+    </div>
+
+    <!-- env -->
+    <div class="sec-kindset" id="requestSet-env">
+      <div class="form-group">
+        <label class="form-label" for="requestEnvKeys">Key allowlist (optional)</label>
+        <input class="form-input" id="requestEnvKeys" placeholder="NPM_TOKEN">
+        <div class="sec-hint" style="margin-top:6px">
+          Leave empty to ask for every key the secret holds &mdash; safe here because an env secret's own
+          keys are its scope.
+        </div>
+      </div>
+    </div>
+
+    <!-- egress_proxy -->
+    <div class="sec-kindset" id="requestSet-egressproxy">
+      <div class="form-group">
+        <label class="form-label" for="requestProxyHosts">Allowed host list</label>
+        <input class="form-input" id="requestProxyHosts" placeholder="api.github.com, *.npmjs.org">
+      </div>
+    </div>
+
+    <!-- local_repo -->
+    <div class="sec-kindset" id="requestSet-localrepo">
+      <div class="form-group">
+        <label class="form-label" for="requestLocalRepos">Repository allowlist</label>
+        <input class="form-input" id="requestLocalRepos" placeholder="my-service">
+        <div class="sec-hint" style="margin-top:6px">
+          Names under the root the secret points at, not <code>owner/repo</code> globs.
+        </div>
+      </div>
+    </div>
+
+    <!-- host_device -->
+    <div class="sec-kindset" id="requestSet-hostdevice">
+      <div class="form-group">
+        <label class="form-label" for="requestDevices">Device allowlist</label>
+        <input class="form-input" id="requestDevices" placeholder="serial0">
+        <div class="sec-hint" style="margin-top:6px">
+          Handles from the executor's device inventory. Matched case-sensitively.
+        </div>
+      </div>
+    </div>
+
+    <!-- Writable is the one constraint that widens rather than narrows, and it
+         applies to two kinds, so it lives in its own block rather than inside
+         either of theirs. -->
+    <div class="sec-kindset" id="requestSet-writable">
+      <div class="form-group">
+        <label class="adv-label"><input type="checkbox" id="requestWritable"> Ask for read-write access</label>
+        <div class="sec-hint" style="margin-top:6px">
+          Read-only is the default and is usually enough: building against a checkout, grepping it, copying
+          from it. Ask for write only if the work commits.
+        </div>
+      </div>
+    </div>
+
+    <div class="form-row">
+      <div class="form-group">
+        <label class="form-label" for="requestScope">Label (optional)</label>
+        <input class="form-input" id="requestScope" placeholder="ci">
+      </div>
+      <div class="form-group">
+        <label class="form-label" for="requestWait">Wait for a decision</label>
+        <select class="form-select" id="requestWait">
+          <option value="60">1 hour</option>
+          <option value="480">8 hours</option>
+          <option value="1440">24 hours</option>
+          <option value="4320" selected>3 days (default)</option>
+          <option value="10080">7 days</option>
+          <option value="43200">30 days (maximum)</option>
+        </select>
+        <div class="sec-hint" style="margin-top:6px">
+          After this the request expires undecided. It is a deadline on the reviewer, not on the grant.
+        </div>
+      </div>
+    </div>
+
+    <div class="form-group">
+      <label class="form-label" for="requestJustification">Justification *</label>
+      <textarea class="form-textarea" id="requestJustification" style="min-height:80px"
+                placeholder="What are you doing that needs this, and why this scope? e.g. &quot;CI for acme/widgets needs to push release tags; read-only is not enough for step 4.&quot;"></textarea>
+      <div class="sec-hint" style="margin-top:6px">
+        Required. This is what the reviewer decides on &mdash; an ask with no stated reason can only be
+        rubber-stamped, which is the failure mode this whole queue exists to avoid.
+      </div>
+    </div>
+
+    <div id="requestError" style="font-size:12px;color:var(--red);margin-bottom:8px;display:none;white-space:pre-wrap"></div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeRequestModal()">Cancel</button>
+      <button class="btn primary" id="requestSubmitBtn" data-global-perm="secret.request" onclick="submitRequest()">File request</button>
+    </div>
+  </div>
+</div>
+
+<!--
+  Decide a request (Task 20271). One modal for both verdicts: the two differ by
+  a required note and an optional shortened TTL, and two dialogs would be two
+  places for the summary of what is actually being decided to fall out of date.
+-->
+<div id="request-decide-overlay" onclick="if(event.target===this)closeRequestDecideModal()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
+  <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;width:620px;max-width:95vw;max-height:90vh;overflow:auto">
+    <h2 id="requestDecideTitle" style="font-size:15px;font-weight:600;margin-bottom:12px">Decide request</h2>
+    <div id="requestDecideSummary" style="font-size:12px;line-height:1.6;padding:12px;border:1px solid var(--border);border-radius:var(--radius);margin-bottom:16px"></div>
+
+    <div class="form-group" id="requestDecideTTLGroup">
+      <label class="form-label" for="requestDecideTTL">Issue a shorter grant</label>
+      <select class="form-select" id="requestDecideTTL">
+        <option value="0" selected>as requested</option>
+        <option value="60">1 hour</option>
+        <option value="480">8 hours</option>
+        <option value="1440">24 hours</option>
+        <option value="10080">7 days</option>
+      </select>
+      <div class="sec-hint" style="margin-top:6px">
+        This can only narrow. A longer value than the request asked for, or than your role may delegate, is
+        clamped rather than honoured &mdash; approving is not a route to a grant you could not mint directly.
+      </div>
+    </div>
+
+    <div class="form-group">
+      <label class="form-label" for="requestDecideNote">Note</label>
+      <textarea class="form-textarea" id="requestDecideNote" style="min-height:70px"
+                placeholder="e.g. &quot;Narrowed to acme/widgets; ask again with a repo list if you need the org.&quot;"></textarea>
+      <div class="sec-hint" id="requestDecideNoteHint" style="margin-top:6px"></div>
+    </div>
+
+    <div id="requestDecideError" style="font-size:12px;color:var(--red);margin-bottom:8px;display:none;white-space:pre-wrap"></div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeRequestDecideModal()">Cancel</button>
+      <button class="btn primary" id="requestDecideSubmitBtn" data-global-perm="secret.grant" onclick="submitDecision()">Approve</button>
     </div>
   </div>
 </div>

@@ -77,6 +77,14 @@ var (
 	// requested ID.
 	ErrBrokerGrantNotFound = errors.New("statedb: broker grant not found")
 
+	// ErrGrantRequestNotFound indicates no secret_grant_requests row has the
+	// requested ID (Task 20271). Distinct from ErrBrokerGrantNotFound because
+	// the two answer different questions: an unknown grant means the
+	// authorisation does not exist, while an unknown request means nobody ever
+	// asked — and a decide call that confused them would report "already
+	// decided" for an id that was simply mistyped.
+	ErrGrantRequestNotFound = errors.New("statedb: grant request not found")
+
 	// ErrEgressGrantNotFound indicates no egress_grants row has the
 	// requested ID. Like the broker sentinels this is fatal for the
 	// operation: a caller must never fall back to a different egress policy

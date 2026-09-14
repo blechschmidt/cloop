@@ -104,4 +104,36 @@ var (
 	// ErrRotationFailed: a rotation could not rewrap every row. Rotation is
 	// resumable, so this means "run it again", not "start over".
 	ErrRotationFailed = errors.New("secretbroker: key rotation incomplete")
+
+	// Self-service request errors (Task 20271).
+	//
+	// ErrSelfApproval and ErrDelegationExceeded are denials in the sense the
+	// note at the top of this file draws: each is a refusal of authority that
+	// belongs in the audit trail, not a malformed request that never became a
+	// security event. They are separate sentinels because the caller's next
+	// move differs — find a second approver, versus find a more privileged one.
+
+	// ErrRequestsUnsupported: this broker's store does not keep requests, so
+	// the request path is unavailable. Reported rather than silently degrading
+	// to "no requests", which would make an empty queue indistinguishable from
+	// a queue nobody can read.
+	ErrRequestsUnsupported = errors.New("secretbroker: this store does not keep access requests")
+	// ErrInvalidRequest: the access request failed structural validation.
+	ErrInvalidRequest = errors.New("secretbroker: invalid access request")
+	// ErrRequestNotFound: no access request with that ID exists.
+	ErrRequestNotFound = errors.New("secretbroker: access request not found")
+	// ErrRequestNotPending: the request was already decided, withdrawn or
+	// expired, so it cannot be decided again.
+	ErrRequestNotPending = errors.New("secretbroker: access request is already decided")
+	// ErrRequestExpired: the request lapsed before anyone decided it.
+	ErrRequestExpired = errors.New("secretbroker: access request expired")
+	// ErrNotRequester: only the identity that filed a request may withdraw it.
+	ErrNotRequester = errors.New("secretbroker: only the requester may withdraw a request")
+	// ErrSelfApproval: the decider filed the request. Refused explicitly rather
+	// than left to the role check, because on a small team the requester very
+	// often holds the approving permission too.
+	ErrSelfApproval = errors.New("secretbroker: a request cannot be approved by the person who filed it")
+	// ErrDelegationExceeded: the approval would hand out more than this
+	// approver is entitled to delegate.
+	ErrDelegationExceeded = errors.New("secretbroker: approval exceeds what this approver may delegate")
 )

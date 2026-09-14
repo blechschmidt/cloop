@@ -871,14 +871,19 @@ which `cloop hub bootstrap` writes as `none`.
 | --- | --- |
 | `none` | nothing — the default default |
 | `viewer` | `project.read`, `executor.read`, `view.prefs` |
-| `operator` | `run.start`, `run.stop`, `task.mutate` |
+| `operator` | `run.start`, `run.stop`, `task.mutate`, `secret.request` |
 | `maintainer` | `project.write`, `config.write`, `secret.grant`, `secret.revoke` |
 | `admin` | everything, including `executor.manage`, `audit.read`, `user.manage`, `token.admin`, `session.admin` |
 
 **Permissions** (`AllPermissions`): `project.read`, `project.write`, `run.start`,
 `run.stop`, `task.mutate`, `executor.read`, `executor.manage`, `secret.grant`,
 `secret.revoke`, `config.write`, `audit.read`, `user.manage`, `token.admin`,
-`session.admin`, `view.prefs`.
+`session.admin`, `view.prefs`, `sandbox.attach`, `sandbox.attach.write`,
+`secret.request`.
+`secret.request` is the only permission in the secret family below `maintainer`,
+and the asymmetry is deliberate: it authorizes *asking* for a credential, which
+confers nothing on its own. See
+[Asking for access](#asking-for-access-the-request-path) below.
 `view.prefs` sits at the bottom of the ladder and authorizes nothing about a
 project: it records the caller's own dashboard preferences — currently which
 projects to hide from their project list — under their own viewer key, against
@@ -895,6 +900,89 @@ Roles are granted by matching a claim from the ID token — `group`, `role`,
 authenticates as `admin` with source `static_token`, which is why it belongs
 only in deployments that have no SSO. Every privileged decision, allow or deny,
 is written to the audit trail (`pkg/ui/authz.go:294`).
+
+### Asking for access: the request path
+
+Until Task 20271 the broker ran in one direction. `Mint` and `Grant` required
+`secret.grant`, and there was no other door — so a developer who needed a
+repository or a cluster asked in a chat window and waited for somebody to
+hand-mint a grant.
+
+That is not merely slow, and the reason it matters here rather than in a UX
+document is that **it is the mechanism by which over-broad standing grants get
+created.** The person minting is reconstructing a scope from a sentence, under
+interruption, against a credential they cannot see the contents of. A wider guess
+costs nothing and works; a narrow one that is wrong costs another round trip. The
+pressure is entirely in one direction, and it is not a discipline problem.
+
+An **access request** makes the ask a record: who, which stored secret, scoped to
+which project or executor, under which constraints, for how long, and why.
+
+```
+cloop hub grant request prod-kube --to project:/srv/app \
+      --contexts prod --namespaces app --ttl 8h \
+      --why "debugging the failed rollout in INC-2291"
+
+cloop hub grant list --state pending
+cloop hub grant approve req_1a2b3c4d --ttl 2h --reason "one namespace, ok"
+```
+
+Four properties carry the security argument, and each is a property of the code
+rather than of the workflow around it:
+
+**An approval cannot widen the ask.** The minted grant carries the request's own
+subject and constraints verbatim. `DecideInput` has no field that could
+substitute a different repository list or a different project — an approver who
+wants something narrower denies and says so, or mints directly with
+`cloop secret grant`, which is a different act with its own audit row.
+
+**An approval mints through the same path as everything else.**
+`Broker.ApproveRequest` calls `Broker.Grant`, the function the CLI and
+`POST /api/grants` already use. That is where constraints are validated against
+the secret's kind and where the creation audit row is written, so there is no
+second place for either to be missing.
+
+**Nobody approves their own request.** Refused by comparing the decider against
+the requester, not left to the surrounding role check — because on a small team
+the requester frequently *does* hold `secret.grant`, and a two-person rule that
+evaporates exactly then is not a rule. Withdrawal is the requester's own verb for
+the same reason in reverse: an approver who wants a request gone says no to it,
+on the record.
+
+**An approval cannot exceed what the approver may delegate.** The minted lifetime
+is the minimum of the ask, the approver's typed value, and their ceiling
+(`maintainer`: 7 days; `admin`: 90 days, which is also the product-wide maximum).
+A request aimed at `project:*`, `executor:*`, `any`, or a label selector is
+refused outright unless the approver is entitled to delegate fleet-wide — such a
+grant reaches every tenant for as long as it lasts, and it must not be creatable
+by approving somebody else's ask without reading it. From a shell that
+entitlement is the explicit `--fleet-wide` flag.
+
+**Requests expire.** Undecided ones lapse after 72 hours by default (30 days
+maximum) and the hourly retention sweep moves them, emitting one
+`secret.request_expire` event each. A request that sits pending forever is the
+one approved in a batch six weeks later by somebody who no longer remembers the
+incident it was filed for — by which point the justification has silently stopped
+being true. The broker additionally refuses to decide a request past its deadline
+whether or not the sweep has run, so the answer does not depend on janitor
+timing.
+
+**What the approval did.** `secret_grant_request_uses` records each lease that
+redeemed the grant, with the executor, the project, and — where the dispatch was
+task-scoped — the task. `GET /api/grant-requests/{id}/uses` and
+`cloop hub grant list --uses` report it. This is the question `broker_grants`
+cannot answer: a grant nothing ever redeemed and a grant feeding a workload
+around the clock look identical from the grant table alone. A lease is issued
+*before* the workload that holds it is dispatched, so the task is reconciled
+afterwards from the executor handle; a use with no task is a run-scoped lease,
+which is reported as such rather than as a missing value.
+
+Five audit actions cover the lifecycle — `secret.request`,
+`secret.request_approve`, `secret.request_deny`, `secret.request_withdraw`,
+`secret.request_expire` — all on the same hash chain as the grant and lease
+events. Expiry is its own action rather than a flavour of denial because denied
+is an answer and expired is the absence of one, and a trail that conflated them
+would hide a queue nobody is working.
 
 ### Session lifecycle and revocation
 

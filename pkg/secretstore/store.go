@@ -253,6 +253,8 @@ func translateErr(err error) error {
 		return fmt.Errorf("%w: %v", secretbroker.ErrSecretNotFound, err)
 	case errors.Is(err, statedb.ErrBrokerGrantNotFound):
 		return fmt.Errorf("%w: %v", secretbroker.ErrGrantNotFound, err)
+	case errors.Is(err, statedb.ErrGrantRequestNotFound):
+		return fmt.Errorf("%w: %v", secretbroker.ErrRequestNotFound, err)
 	default:
 		return err
 	}

@@ -20,7 +20,15 @@ const secState = {
 };
 
 window.loadSecretsPanel = function() {
-  const loads = [loadSecrets(), loadGrants(), loadLeases()];
+  const loads = [];
+  // Secrets, grants and leases are all secret.grant, and since Task 20271 the
+  // tab itself opens one rung lower — an operator holding only secret.request
+  // reaches this panel to file a request. Firing these three for them would
+  // produce three 403s and three audit rows recording their own denial, on
+  // every visit, for sections they cannot see.
+  if (typeof canGlobal !== 'function' || canGlobal('secret.grant')) {
+    loads.push(loadSecrets(), loadGrants(), loadLeases());
+  }
   // Tokens are admin-only and the section is hidden below token.admin, so
   // skip the fetch entirely for a maintainer rather than firing a request
   // whose only outcome is a 403 and an audit row for the denial.
@@ -32,6 +40,13 @@ window.loadSecretsPanel = function() {
   // outcome is a 403 and an audit row recording their own denial.
   if (typeof canGlobal !== 'function' || canGlobal('session.admin')) {
     loads.push(loadSessions());
+  }
+  // Access requests (Task 20271) sit one rung lower: secret.request is an
+  // operator permission, so this section is the one part of the tab a
+  // non-maintainer can use — and the only one they can use it for is their
+  // own requests, which is what the server sends them.
+  if (typeof canGlobal !== 'function' || canGlobal('secret.request')) {
+    loads.push(loadGrantRequests());
   }
   return Promise.all(loads).then(() => { _secStartTicker(); });
 };
@@ -380,6 +395,11 @@ function _secStartTicker() {
     if (!panel || !panel.classList.contains('active')) { _secStopTicker(); return; }
     _secRenderGrants();
     _secRenderLeases();
+    // A pending request is racing a decision deadline, so its countdown moves
+    // for the same reason a lease's does. Rendered from cached state — the
+    // list itself is refreshed by the secrets_update WebSocket event, never by
+    // this interval.
+    _reqRender();
   }, 1000);
 }
 
@@ -530,18 +550,75 @@ function _secFormError(el, msg) {
 
 // ── grant wizard ──
 
-// SEC_GRANT_KINDS maps each kind to the fieldset it reveals, whether it needs
-// a stored secret, and which broker creates it. Keeping this as data rather
-// than as a switch is what lets the same table drive the fieldset toggle, the
-// secret picker, and the request body.
+// SEC_KIND_FIELDSET names the constraint fieldset a kind reveals, without the
+// form's own prefix: the grant wizard renders it as `grantSet-github` and the
+// access-request form (Task 20271) as `requestSet-github`. One mapping with two
+// readers rather than two mappings, because the alternative is two forms that
+// quietly come to disagree about which allowlist belongs to which kind — and
+// the one that is wrong is the one nobody opened this week.
+const SEC_KIND_FIELDSET = {
+  github_pat:   'github',
+  github_app:   'github',
+  kubeconfig:   'kubeconfig',
+  registry:     'registry',
+  env:          'env',
+  egress_proxy: 'egressproxy',
+  local_repo:   'localrepo',
+  host_device:  'hostdevice',
+  egress:       'egress'
+};
+
+// SEC_KIND_CONSTRAINTS maps a kind to the allowlist dimensions it takes, as
+// [body field, input id suffix] pairs — the same shape both POST /api/grants
+// and POST /api/grant-requests accept.
+//
+// `egress` is absent on purpose: it is the hub's own connection rather than a
+// stored secret, its quota/port/CIDR fields have no counterpart in an access
+// request, and there is nothing to ask for because nothing was sealed. It stays
+// handled inline in submitGrant.
+const SEC_KIND_CONSTRAINTS = {
+  github_pat:   [['repos','Repos'], ['permissions','Permissions']],
+  github_app:   [['repos','Repos'], ['permissions','Permissions']],
+  kubeconfig:   [['contexts','Contexts'], ['namespaces','Namespaces']],
+  registry:     [['registries','Registries']],
+  env:          [['env_keys','EnvKeys']],
+  egress_proxy: [['hosts','ProxyHosts']],
+  local_repo:   [['repos','LocalRepos']],
+  host_device:  [['devices','Devices']]
+};
+
+// SEC_KIND_WRITABLE are the kinds whose grant can be widened to read-write.
+// The broker rejects `writable` on any other kind, so sending it would turn a
+// request that is merely over-specified into one that cannot be filed at all.
+const SEC_KIND_WRITABLE = {local_repo: true, host_device: true};
+
+// _secReadConstraints copies one kind's allowlist fields out of a prefixed
+// input group ('grant' or 'request') into an outgoing body.
+function _secReadConstraints(prefix, kind, body) {
+  (SEC_KIND_CONSTRAINTS[kind] || []).forEach(f => { body[f[0]] = _secList(prefix + f[1]); });
+  return body;
+}
+
+// _secShowKindSet reveals the one fieldset belonging to kind inside a form and
+// hides the rest. An unknown kind reveals nothing rather than falling back to
+// a neighbour's fieldset, which would invite an allowlist that gates nothing.
+function _secShowKindSet(overlayID, prefix, kind) {
+  document.querySelectorAll('#' + overlayID + ' .sec-kindset').forEach(el => el.classList.remove('on'));
+  const stem = SEC_KIND_FIELDSET[kind] || '';
+  const set = stem ? document.getElementById(prefix + 'Set-' + stem) : null;
+  if (set) set.classList.add('on');
+}
+
+// SEC_GRANT_KINDS says whether a kind needs a stored secret and which broker
+// creates it. The fieldset it reveals comes from SEC_KIND_FIELDSET above.
 const SEC_GRANT_KINDS = {
-  github_pat:   {set:'grantSet-github',      secret:true,  source:'secret'},
-  github_app:   {set:'grantSet-github',      secret:true,  source:'secret'},
-  kubeconfig:   {set:'grantSet-kubeconfig',  secret:true,  source:'secret'},
-  registry:     {set:'grantSet-registry',    secret:true,  source:'secret'},
-  env:          {set:'grantSet-env',         secret:true,  source:'secret'},
-  egress_proxy: {set:'grantSet-egressproxy', secret:true,  source:'secret'},
-  egress:       {set:'grantSet-egress',      secret:false, source:'egress'}
+  github_pat:   {secret:true,  source:'secret'},
+  github_app:   {secret:true,  source:'secret'},
+  kubeconfig:   {secret:true,  source:'secret'},
+  registry:     {secret:true,  source:'secret'},
+  env:          {secret:true,  source:'secret'},
+  egress_proxy: {secret:true,  source:'secret'},
+  egress:       {secret:false, source:'egress'}
 };
 
 window.openGrantModal = function() {
@@ -569,9 +646,7 @@ window.onGrantKindChange = function() {
   const kind = ((document.getElementById('grantKind') || {}).value) || 'github_pat';
   const spec = SEC_GRANT_KINDS[kind] || SEC_GRANT_KINDS.github_pat;
 
-  document.querySelectorAll('#grant-overlay .sec-kindset').forEach(el => el.classList.remove('on'));
-  const set = document.getElementById(spec.set);
-  if (set) set.classList.add('on');
+  _secShowKindSet('grant-overlay', 'grant', kind);
 
   // The secret picker offers only secrets of the chosen kind: a kubeconfig
   // grant against a PAT is rejected by the broker anyway, and offering it
@@ -630,19 +705,9 @@ window.submitGrant = function() {
     if (!body.secret_ref) { _secFormError(errEl, 'Store a secret of this kind first, then grant it.'); return; }
   }
 
-  if (kind === 'github_pat' || kind === 'github_app') {
-    body.repos = _secList('grantRepos');
-    body.permissions = _secList('grantPermissions');
-  } else if (kind === 'kubeconfig') {
-    body.contexts = _secList('grantContexts');
-    body.namespaces = _secList('grantNamespaces');
-  } else if (kind === 'registry') {
-    body.registries = _secList('grantRegistries');
-  } else if (kind === 'env') {
-    body.env_keys = _secList('grantEnvKeys');
-  } else if (kind === 'egress_proxy') {
-    body.hosts = _secList('grantProxyHosts');
-  } else if (kind === 'egress') {
+  if (kind !== 'egress') {
+    _secReadConstraints('grant', kind, body);
+  } else {
     body.hosts = _secList('grantHosts');
     body.cidrs = _secList('grantCIDRs');
     body.ports = _secList('grantPorts').map(p => parseInt(p, 10)).filter(p => !isNaN(p));
@@ -665,6 +730,525 @@ window.submitGrant = function() {
   }).catch(err => {
     if (btn) btn.disabled = false;
     _secFormError(errEl, (err && err.message) || String(err));
+  });
+};
+
+
+// ── Access requests (Task 20271) ────────────────────────────────────────────
+//
+// The other direction through the same broker. Everything above this line is
+// somebody handing out authority; this is somebody asking for it, so that the
+// ask has a record with a deadline on it instead of living in a chat window.
+//
+// Four rules this panel deliberately does not re-derive, because the server has
+// already decided them and a second copy would be the one that drifts:
+//
+//	decidable  — false for the caller's own request even when they hold
+//	             secret.grant, because the broker refuses self-approval. A
+//	             button rendered from a client-side guess would always fail.
+//	mine       — who may withdraw.
+//	the list   — already scoped: a caller who cannot decide is sent only their
+//	             own requests, so there is nothing left to filter out here.
+//	the TTL    — an approver may narrow but never widen; the broker clamps.
+//
+// Free text is the new surface this section adds — a justification and a
+// decision note, both typed by one user and read by another — so both go
+// through esc() on the way into the table, and neither is ever interpolated
+// into an attribute that carries code.
+const reqState = {
+  requests: [],
+  pending: 0,
+  canDecide: false,
+  actor: '',
+  // uses caches GET /api/grant-requests/{id}/uses per request. The countdown
+  // ticker re-renders this table every second, and re-fetching on each tick
+  // would be a poll wearing an expansion panel's clothes.
+  uses: {},
+  open: {},     // request id → its "what did this do" row is expanded
+  decide: null  // {id, action} while the decision modal is open
+};
+
+// _reqURL builds a sub-resource path: withdraw, approve, deny, uses.
+//
+// The separator is concatenated rather than left on the end of the base
+// literal, deliberately. The route-drift gate in frontend_test.go reads URL
+// literals out of the bundle and truncates each at its first interpolation; a
+// base ending in a slash would therefore be recorded as a two-segment path that
+// no route serves, and the gate would fail on a call that is perfectly correct.
+// Keeping the base whole records it as the collection route it belongs to.
+function _reqURL(id, action) {
+  return '/api/grant-requests' + '/' + encodeURIComponent(id) + '/' + action;
+}
+
+window.loadGrantRequests = function() {
+  const sel = document.getElementById('secRequestsFilter');
+  const state = (sel && sel.value) || '';
+  return api('/api/grant-requests' + (state ? '?state=' + encodeURIComponent(state) : '')).then(d => {
+    d = d || {};
+    reqState.requests  = Array.isArray(d.requests) ? d.requests : [];
+    reqState.pending   = Number(d.pending_count) || 0;
+    reqState.canDecide = !!d.can_decide;
+    reqState.actor     = d.actor || '';
+    _reqRender();
+    return d;
+  }).catch(err => _secFail('secRequestsEmpty', 'secRequestsTable', err, 'access requests'));
+};
+
+// _reqClamp shortens free text for a table cell. The full string still rides
+// along in the title attribute, so clamping hides nothing — it only stops one
+// four-kilobyte justification from owning the whole page.
+function _reqClamp(s, max) {
+  s = String(s ?? '');
+  return s.length > max ? s.slice(0, max - 1) + '…' : s;
+}
+
+function _reqRender() {
+  const body  = document.getElementById('secRequestsBody');
+  const table = document.getElementById('secRequestsTable');
+  const empty = document.getElementById('secRequestsEmpty');
+  const count = document.getElementById('secRequestsCount');
+  if (!body) return;
+
+  const rows = reqState.requests;
+  if (count) {
+    count.textContent = rows.length
+      ? '(' + (reqState.pending ? reqState.pending + ' pending / ' : '') + rows.length + ')'
+      : '';
+  }
+  if (!rows.length) {
+    if (table) table.style.display = 'none';
+    if (empty) {
+      empty.style.display = '';
+      // Naming the filter matters: "no access requests" under a state filter
+      // reads as "the queue is empty" when the queue may be full of another
+      // state, which is how an approver misses a pending row.
+      const state = ((document.getElementById('secRequestsFilter') || {}).value) || '';
+      empty.textContent = state
+        ? 'No ' + state + ' requests.'
+        : (reqState.canDecide
+            ? 'No access requests. Nothing is waiting on you.'
+            : 'You have no access requests. Ask for a credential here and the ask gets a deadline, a reviewer, and an audit row.');
+    }
+    body.innerHTML = '';
+    _secApplyGating();
+    return;
+  }
+  if (empty) empty.style.display = 'none';
+  if (table) table.style.display = '';
+
+  const now = Date.now();
+  body.innerHTML = rows.map(r => _reqRow(r, now)).join('');
+
+  body.querySelectorAll('[data-req-approve]').forEach(btn => {
+    btn.addEventListener('click', () => approveRequest(btn.getAttribute('data-req-approve')));
+  });
+  body.querySelectorAll('[data-req-deny]').forEach(btn => {
+    btn.addEventListener('click', () => denyRequest(btn.getAttribute('data-req-deny')));
+  });
+  body.querySelectorAll('[data-req-withdraw]').forEach(btn => {
+    btn.addEventListener('click', () => withdrawRequest(btn.getAttribute('data-req-withdraw')));
+  });
+  body.querySelectorAll('[data-req-uses]').forEach(btn => {
+    btn.addEventListener('click', () => toggleRequestUses(btn.getAttribute('data-req-uses')));
+  });
+  body.querySelectorAll('[data-req-audit]').forEach(btn => {
+    btn.addEventListener('click', () => secretsAuditFor('grant', btn.getAttribute('data-req-audit')));
+  });
+  _secApplyGating();
+}
+
+// _reqDeadlineCell is the countdown a pending request is racing.
+//
+// It is rendered from expires_at rather than from the server's
+// expires_in_seconds so the ticker can move it without a round trip, and it is
+// allowed to reach "deadline passed": expiry is applied by a sweep, so there is
+// a real window in which a row is past its deadline and still pending. Showing
+// that honestly is the difference between a queue an approver trusts and one
+// that appears to hold rows open forever.
+function _reqDeadlineCell(r, now) {
+  if (r.state !== 'pending') {
+    if (!r.decided_at) return '<span class="sec-count">—</span>';
+    return '<span class="audit-time">' + esc(_secFmtTime(r.decided_at)) + '</span>' +
+      (r.decided_by ? '<br><span class="sec-count">by ' + esc(r.decided_by) + '</span>' : '');
+  }
+  let remaining = Number(r.expires_in_seconds) || 0;
+  if (r.expires_at) {
+    remaining = Math.floor((new Date(r.expires_at).getTime() - now) / 1000);
+  }
+  if (remaining <= 0) {
+    return '<span class="sec-ttl gone" title="The decision window has closed. A sweep moves it to expired; until then it is still listed as pending.">deadline passed</span>';
+  }
+  return '<span class="' + _secTTLClass(remaining) + '">' + esc(_secFmtDuration(remaining)) + '</span>' +
+    '<br><span class="sec-count">to decide</span>';
+}
+
+// _reqWantsCell shows the lifetime asked for and, once approved, the one
+// actually issued. Both, because an approver narrowing a 30-day ask to 4 hours
+// is the behaviour this whole feature exists to make ordinary, and a panel that
+// printed only the ask would render that indistinguishable from waving it
+// through.
+function _reqWantsCell(r) {
+  const asked = (Number(r.ttl_minutes) || 0) * 60;
+  let html = '<span class="sec-ttl">' + esc(_secFmtDuration(asked)) + '</span>';
+  if (r.state !== 'approved' || !r.grant_expires_at) return html;
+  const from = r.decided_at ? new Date(r.decided_at).getTime() : 0;
+  const issued = from ? Math.floor((new Date(r.grant_expires_at).getTime() - from) / 1000) : 0;
+  if (issued > 0 && issued < asked - 60) {
+    html += '<br><span class="sec-chip warn" title="The approver issued a shorter grant than was asked for.">' +
+      esc(_secFmtDuration(issued)) + ' issued</span>';
+  }
+  html += '<br><span class="sec-count">until ' + esc(_secFmtTime(r.grant_expires_at)) + '</span>';
+  return html;
+}
+
+function _reqRow(r, now) {
+  const id = String(r.id || '');
+  const pending = r.state === 'pending';
+
+  const why = '<div title="' + esc(r.justification || '') + '">' +
+      esc(_reqClamp(r.justification, 160)) + '</div>' +
+    (r.decision_note
+      ? '<div class="sec-count" style="margin-top:4px" title="' + esc(r.decision_note) + '">decision: ' +
+          esc(_reqClamp(r.decision_note, 160)) + '</div>'
+      : '');
+
+  const actions =
+    (r.decidable
+      ? '<button class="btn" data-global-perm="secret.grant" data-req-approve="' + esc(id) + '">Approve</button>' +
+        '<button class="btn danger" data-global-perm="secret.grant" data-req-deny="' + esc(id) + '">Deny</button>'
+      : '') +
+    (r.mine && pending
+      ? '<button class="btn" data-global-perm="secret.request" data-req-withdraw="' + esc(id) + '">Withdraw</button>'
+      : '') +
+    (r.state === 'approved'
+      ? '<button class="btn" data-global-perm="secret.grant" data-perm-hide data-req-uses="' + esc(id) + '">' +
+          (reqState.open[id] ? 'Hide uses' : 'What did this do?') + '</button>'
+      : '') +
+    '<button class="btn" data-global-perm="audit.read" data-perm-hide data-req-audit="' + esc(id) + '">Audit</button>';
+
+  let html = '<tr>' +
+    '<td class="audit-entity"><strong>' + esc(r.requested_by || '—') + '</strong>' +
+      (r.mine ? ' <span class="sec-chip">you</span>' : '') + '</td>' +
+    '<td>' + esc(r.secret_name || r.secret_id || '—') +
+      (r.kind ? '<br><span class="sec-chip kind">' + esc(r.kind) + '</span>' : '') + '</td>' +
+    '<td class="audit-entity">' + esc(r.subject || '') +
+      (r.scope ? ' <span class="sec-chip">' + esc(r.scope) + '</span>' : '') + '</td>' +
+    '<td class="sec-hide-sm">' + (r.constraints
+      ? '<span class="sec-chip">' + esc(r.constraints) + '</span>'
+      : '<span class="sec-count">none</span>') + '</td>' +
+    '<td>' + _reqWantsCell(r) + '</td>' +
+    '<td class="sec-hide-sm">' + why + '</td>' +
+    '<td><span class="sec-status ' + esc(r.state || '') + '">' + esc(r.state || '') + '</span></td>' +
+    '<td>' + _reqDeadlineCell(r, now) + '</td>' +
+    '<td><div class="sec-actions">' + actions + '</div></td>' +
+  '</tr>';
+
+  if (reqState.open[id]) {
+    html += '<tr><td colspan="9">' + _reqUsesCell(id, r) + '</td></tr>';
+  }
+  return html;
+}
+
+// _reqUsesCell answers "what did approving this actually do".
+//
+// An approval mints authority; only the leases say whether anything ever
+// redeemed it. Three outcomes are distinguished rather than collapsed, because
+// they lead to different next decisions: not yet read, nothing ever used it,
+// and here is exactly what did. The middle one is a finding — an ask that was
+// wider than the work needed — so it is worded as one.
+function _reqUsesCell(id, r) {
+  const uses = reqState.uses[id];
+  if (uses === undefined) return '<p class="sec-hint">Reading the lease history&hellip;</p>';
+  if (typeof uses === 'string') {
+    return '<p class="sec-hint">Could not read the lease history: ' + esc(uses) + '</p>';
+  }
+  if (!uses.length) {
+    return '<p class="sec-hint">Grant <code>' + esc(r.grant_id || '') + '</code> has never been leased. ' +
+      'Nothing has used this credential — if that is still true when it expires, the ask was wider than the work needed.</p>';
+  }
+  const rows = uses.map(u => {
+    const first = u.first_seen ? new Date(u.first_seen).getTime() : 0;
+    const last  = u.last_seen ? new Date(u.last_seen).getTime() : 0;
+    const held  = (first && last && last > first) ? Math.floor((last - first) / 1000) : 0;
+    return '<tr>' +
+      '<td class="sec-fp">' + esc(u.lease_id || '—') + '</td>' +
+      '<td>' + esc(u.executor_id || '—') + '</td>' +
+      '<td class="audit-entity">' + esc(u.project_id || '—') + '</td>' +
+      // task_id is 0 both for "no task" and for "not attributed", so the
+      // server sends the discriminator rather than making the panel guess.
+      '<td>' + (u.attributed
+        ? 'task #' + esc(String(u.task_id))
+        : '<span class="sec-count" title="The lease was issued for a whole project run, so no single task can be named.">project run (not task-scoped)</span>') + '</td>' +
+      '<td class="audit-time">' + esc(_secFmtTime(u.first_seen)) + '</td>' +
+      '<td class="sec-ttl">' + esc(held ? _secFmtDuration(held) : '—') + '</td>' +
+    '</tr>';
+  }).join('');
+  return '<div class="sec-subtitle" style="margin-bottom:4px">What this grant did ' +
+      '<span class="sec-count">' + uses.length + ' lease' + (uses.length === 1 ? '' : 's') + '</span></div>' +
+    '<table class="audit-table"><thead><tr>' +
+      '<th style="width:190px">Lease</th><th style="width:150px">Executor</th>' +
+      '<th style="width:170px">Project</th><th style="width:200px">Attributed to</th>' +
+      '<th style="width:170px">First seen</th><th style="width:100px">Held for</th>' +
+    '</tr></thead><tbody>' + rows + '</tbody></table>';
+}
+
+window.toggleRequestUses = function(id) {
+  if (reqState.open[id]) { delete reqState.open[id]; _reqRender(); return; }
+  reqState.open[id] = true;
+  if (reqState.uses[id] !== undefined) { _reqRender(); return; }
+  _reqRender(); // paints the "reading…" line before the round trip
+  api(_reqURL(id, 'uses')).then(d => {
+    reqState.uses[id] = Array.isArray(d && d.uses) ? d.uses : [];
+    _reqRender();
+  }).catch(err => {
+    reqState.uses[id] = (err && err.message) ? String(err.message) : String(err);
+    _reqRender();
+  });
+};
+
+// ── file a request ──
+
+// _secCatalog resolves the name-and-kind list the request form's picker needs.
+//
+// A maintainer already has it: loadSecrets() populated secState.secrets from
+// GET /api/secrets. An operator does not and must not — that route is
+// maintainer-only because the full inventory (fingerprints, grant counts,
+// metadata) is reconnaissance — so they fetch GET /api/secrets/catalog, which
+// publishes an id, a name and a kind and nothing else.
+//
+// Resolved per open rather than cached, because a secret minted since the page
+// loaded is exactly the one somebody is about to ask for.
+function _secCatalog() {
+  if (secState.secrets && secState.secrets.length) {
+    return Promise.resolve(secState.secrets);
+  }
+  return api('/api/secrets/catalog')
+    .then(d => (d && Array.isArray(d.secrets)) ? d.secrets : [])
+    .catch(() => []);
+}
+
+window.openRequestModal = function() {
+  const sel = document.getElementById('requestSecret');
+  // Every stored secret, not one kind's worth: the request form's whole job is
+  // that the asker does not already know which credential exists, so the chosen
+  // secret decides the kind rather than the other way round.
+  _secCatalog().then(list => {
+    secState.catalog = list;
+    if (!sel) return;
+    sel.innerHTML = list.length
+      ? list.map(s =>
+          '<option value="' + esc(s.id) + '">' + esc(s.name || s.id) + ' — ' + esc(s.kind || '') + '</option>').join('')
+      : '<option value="">— no secrets stored on this hub —</option>';
+    // The kind-specific constraint fields follow the selection, so they can
+    // only be drawn once the list has arrived.
+    onRequestSecretChange();
+  });
+  ['requestSubject','requestScope','requestJustification','requestRepos','requestPermissions',
+   'requestContexts','requestNamespaces','requestRegistries','requestEnvKeys','requestProxyHosts',
+   'requestLocalRepos','requestDevices'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.value = '';
+  });
+  const wr = document.getElementById('requestWritable');
+  if (wr) wr.checked = false;
+  const err = document.getElementById('requestError');
+  if (err) err.style.display = 'none';
+  const ov = document.getElementById('request-overlay');
+  if (ov) ov.style.display = 'flex';
+  _secApplyGating();
+  setTimeout(() => { const s = document.getElementById('requestSubject'); if (s) s.focus(); }, 50);
+};
+
+window.closeRequestModal = function() {
+  const ov = document.getElementById('request-overlay');
+  if (ov) ov.style.display = 'none';
+};
+
+// _reqKindOf resolves the kind of the secret a request names. The kind decides
+// which allowlist the broker will demand, so it comes from the stored secret
+// rather than from a second picker the asker could set inconsistently.
+function _reqKindOf(secretID) {
+  // secState.catalog is whatever the picker was built from: the full secret
+  // list for a maintainer, the name-and-kind catalogue for an operator. Reading
+  // secState.secrets directly would resolve every kind to '' for an operator —
+  // whose GET /api/secrets is refused — so the form would ask for no allowlist
+  // and the broker would reject the request at the very last step.
+  const list = (secState.catalog && secState.catalog.length)
+    ? secState.catalog : (secState.secrets || []);
+  const s = list.filter(x => x.id === secretID)[0];
+  return (s && s.kind) || '';
+}
+
+window.onRequestSecretChange = function() {
+  const kind = _reqKindOf(((document.getElementById('requestSecret') || {}).value) || '');
+  _secShowKindSet('request-overlay', 'request', kind);
+  // writable is its own fieldset because it applies to two kinds rather than
+  // one, so it cannot live inside either kind's own block.
+  const wrSet = document.getElementById('requestSet-writable');
+  if (wrSet) wrSet.classList.toggle('on', !!SEC_KIND_WRITABLE[kind]);
+  const hint = document.getElementById('requestKindHint');
+  if (hint) {
+    hint.textContent = kind
+      ? 'A ' + kind + ' grant is scoped by the allowlist below. Ask for the narrowest one that does the job — a reviewer can shorten the lifetime, but widening means filing again.'
+      : 'Store a secret first: a request names a credential that already exists, it cannot ask for one to be created.';
+  }
+};
+
+window.submitRequest = function() {
+  const errEl = document.getElementById('requestError');
+  const btn   = document.getElementById('requestSubmitBtn');
+  const secretID = ((document.getElementById('requestSecret') || {}).value) || '';
+  const kind = _reqKindOf(secretID);
+
+  const body = {
+    secret_ref:    secretID,
+    subject:       (((document.getElementById('requestSubject') || {}).value) || '').trim(),
+    scope:         (((document.getElementById('requestScope') || {}).value) || '').trim(),
+    ttl_minutes:   parseInt(((document.getElementById('requestTTL') || {}).value) || '1440', 10),
+    wait_minutes:  parseInt(((document.getElementById('requestWait') || {}).value) || '4320', 10),
+    justification: (((document.getElementById('requestJustification') || {}).value) || '').trim()
+  };
+  if (!body.secret_ref) {
+    _secFormError(errEl, 'Pick a secret. A request names a credential that already exists.');
+    return;
+  }
+  if (!body.subject) {
+    _secFormError(errEl, 'A subject is required — a grant with no subject would match nothing.');
+    return;
+  }
+  if (!body.justification) {
+    _secFormError(errEl, 'A justification is required. The reviewer is deciding whether this credential should exist for you, and an ask with no stated reason can only be rubber-stamped.');
+    return;
+  }
+  _secReadConstraints('request', kind, body);
+  if (SEC_KIND_WRITABLE[kind]) {
+    body.writable = !!((document.getElementById('requestWritable') || {}).checked);
+  }
+
+  if (errEl) errEl.style.display = 'none';
+  if (btn) btn.disabled = true;
+  api('/api/grant-requests', body).then(() => {
+    if (btn) btn.disabled = false;
+    closeRequestModal();
+    toast('Request filed — a maintainer has to approve it', 'ok');
+    loadGrantRequests();
+  }).catch(err => {
+    if (btn) btn.disabled = false;
+    _secFormError(errEl, (err && err.message) || String(err));
+  });
+};
+
+window.withdrawRequest = function(id) {
+  const r = reqState.requests.filter(x => x.id === id)[0];
+  const what = (r && (r.secret_name || r.secret_id)) || id;
+  if (!confirm('Withdraw your request for "' + what + '"?\n\nIt stops waiting for a decision. Nothing was granted, so nothing is revoked — file a new one if you still need it.')) return;
+  api(_reqURL(id, 'withdraw'), {}).then(() => {
+    toast('Request withdrawn', 'ok');
+    loadGrantRequests();
+  }).catch(err => toast('Withdraw failed: ' + ((err && err.message) || String(err)), 'err'));
+};
+
+// ── decide a request ──
+
+window.approveRequest = function(id) { _reqOpenDecision(id, 'approve'); };
+window.denyRequest    = function(id) { _reqOpenDecision(id, 'deny'); };
+
+function _reqOpenDecision(id, action) {
+  const r = reqState.requests.filter(x => x.id === id)[0];
+  if (!r) { toast('That request is no longer in the list — refresh', 'err'); return; }
+  reqState.decide = {id: id, action: action};
+
+  const title = document.getElementById('requestDecideTitle');
+  if (title) title.textContent = (action === 'approve' ? 'Approve request' : 'Deny request');
+
+  // The summary is the whole point of the modal: a decision made without
+  // reading the ask is the thing this feature was built to stop being normal.
+  const sum = document.getElementById('requestDecideSummary');
+  if (sum) {
+    sum.innerHTML =
+      '<div><strong>' + esc(r.requested_by || '') + '</strong> asks for <strong>' +
+        esc(r.secret_name || r.secret_id || '') + '</strong>' +
+        (r.kind ? ' <span class="sec-chip kind">' + esc(r.kind) + '</span>' : '') + '</div>' +
+      '<div style="margin-top:4px"><span class="sec-count">for</span> ' + esc(r.subject || '') +
+        (r.scope ? ' <span class="sec-chip">' + esc(r.scope) + '</span>' : '') + '</div>' +
+      '<div style="margin-top:4px"><span class="sec-count">allowlist</span> ' +
+        esc(r.constraints || 'none') + '</div>' +
+      '<div style="margin-top:4px"><span class="sec-count">asked for</span> ' +
+        esc(_secFmtDuration((Number(r.ttl_minutes) || 0) * 60)) + '</div>' +
+      '<div style="margin-top:8px;white-space:pre-wrap">' + esc(r.justification || '') + '</div>';
+  }
+
+  const ttlGroup = document.getElementById('requestDecideTTLGroup');
+  if (ttlGroup) ttlGroup.style.display = (action === 'approve') ? '' : 'none';
+  const ttl = document.getElementById('requestDecideTTL');
+  if (ttl) ttl.value = '0';
+  const note = document.getElementById('requestDecideNote');
+  if (note) note.value = '';
+  const noteHint = document.getElementById('requestDecideNoteHint');
+  if (noteHint) {
+    noteHint.textContent = (action === 'approve')
+      ? 'Optional. Recorded on the grant and read back during review.'
+      : 'Required. The requester sees this and it is the only thing that tells them what to ask for instead.';
+  }
+  const btn = document.getElementById('requestDecideSubmitBtn');
+  if (btn) {
+    btn.textContent = (action === 'approve') ? 'Approve and mint the grant' : 'Deny';
+    btn.className = 'btn ' + (action === 'approve' ? 'primary' : 'danger');
+    btn.disabled = false;
+  }
+  const err = document.getElementById('requestDecideError');
+  if (err) err.style.display = 'none';
+
+  const ov = document.getElementById('request-decide-overlay');
+  if (ov) ov.style.display = 'flex';
+  _secApplyGating();
+  setTimeout(() => { if (note) note.focus(); }, 50);
+}
+
+window.closeRequestDecideModal = function() {
+  reqState.decide = null;
+  const ov = document.getElementById('request-decide-overlay');
+  if (ov) ov.style.display = 'none';
+};
+
+window.submitDecision = function() {
+  const d = reqState.decide;
+  if (!d) { closeRequestDecideModal(); return; }
+  const errEl = document.getElementById('requestDecideError');
+  const btn   = document.getElementById('requestDecideSubmitBtn');
+  const note  = (((document.getElementById('requestDecideNote') || {}).value) || '').trim();
+
+  // Refused here as well as in the broker. The server's 400 would be correct
+  // and useless: it arrives after the modal has closed over the text the
+  // approver would have had to retype.
+  if (d.action === 'deny' && !note) {
+    _secFormError(errEl, 'A denial needs a reason. It is the only thing the requester gets back, and without it they can only ask again identically.');
+    return;
+  }
+
+  const body = {note: note};
+  if (d.action === 'approve') {
+    const ttl = parseInt(((document.getElementById('requestDecideTTL') || {}).value) || '0', 10);
+    if (ttl > 0) body.ttl_minutes = ttl;
+  }
+
+  if (errEl) errEl.style.display = 'none';
+  if (btn) btn.disabled = true;
+  api(_reqURL(d.id, d.action), body).then(resp => {
+    if (btn) btn.disabled = false;
+    closeRequestDecideModal();
+    // The server's note is the honest description of when the approval lands —
+    // a grant is authority, and authority takes effect at the next lease.
+    toast((resp && resp.note) || (d.action === 'approve' ? 'Approved' : 'Denied'), 'ok');
+    loadGrantRequests();
+    if (d.action === 'approve') { loadGrants(); loadSecrets(); }
+  }).catch(err => {
+    if (btn) btn.disabled = false;
+    const msg = (err && err.message) || String(err);
+    _secFormError(errEl, /409|conflict|not pending/i.test(msg)
+      ? msg + '\n\nSomebody else decided this first. Close and refresh.'
+      : msg);
+    loadGrantRequests();
   });
 };
 

@@ -674,7 +674,7 @@ func TestPermissionAndRoleWireStability(t *testing.T) {
 		"task.mutate", "executor.read", "executor.manage",
 		"secret.grant", "secret.revoke", "config.write", "audit.read",
 		"user.manage", "token.admin", "session.admin", "view.prefs",
-		"sandbox.attach", "sandbox.attach.write",
+		"sandbox.attach", "sandbox.attach.write", "secret.request",
 	}
 	if len(AllPermissions) != len(wantPerms) {
 		t.Fatalf("AllPermissions has %d entries, want %d — add the new one to this test",

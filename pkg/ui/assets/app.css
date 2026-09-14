@@ -514,6 +514,13 @@
   .sec-status.active  { border-color:var(--green); color:var(--green); }
   .sec-status.expired { border-color:var(--border); color:var(--muted); }
   .sec-status.revoked { border-color:var(--red); color:var(--red); }
+  /* Access request states (Task 20271). `expired` above is shared: a request
+     that timed out undecided and a grant that ran out are the same non-event,
+     and colouring them differently would imply one of them was a decision. */
+  .sec-status.pending   { border-color:var(--yellow, #d29922); color:var(--yellow, #d29922); }
+  .sec-status.approved  { border-color:var(--green); color:var(--green); }
+  .sec-status.denied    { border-color:var(--red); color:var(--red); }
+  .sec-status.withdrawn { border-color:var(--border); color:var(--muted); }
   .sec-ttl { font-variant-numeric:tabular-nums; white-space:nowrap; }
   .sec-ttl.soon { color:var(--yellow, #d29922); }
   .sec-ttl.gone { color:var(--red); }

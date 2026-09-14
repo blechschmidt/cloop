@@ -77,9 +77,60 @@ func (s *Server) watchRetention(ctx context.Context) {
 func (s *Server) runRetentionSweep() {
 	defer recoverGoroutine("runRetentionSweep")
 
+	s.expireGrantRequests()
+
 	for _, e := range s.allProjectEntries() {
 		s.maybeRunRetention(e.Path)
 	}
+}
+
+// expireGrantRequests lapses access requests nobody decided in time
+// (Task 20271).
+//
+// It rides the retention sweep rather than getting its own goroutine because it
+// is the same kind of work — bounded, hub-global, best-effort housekeeping —
+// and an hourly cadence is right for a deadline measured in days.
+//
+// Expiry is not merely tidying. A request that sits pending forever is the one
+// that gets approved in a batch six weeks later by someone who no longer
+// remembers the incident it was filed for, and the justification on it has
+// silently stopped being true. Lapsing it means the ask has to be made again,
+// with a current reason — which is the point of requiring a reason at all.
+//
+// The broker refuses to decide a request past its deadline regardless of whether
+// this has run (see checkDecidable), so a hub where this sweep never fires is
+// still safe. What the sweep adds is the audit event and the visible state
+// change: without it a requester would see "pending" forever and never learn
+// that the answer was no.
+func (s *Server) expireGrantRequests() {
+	bs, err := s.openBrokers()
+	if err != nil {
+		return
+	}
+	defer bs.close()
+	if bs.secret == nil {
+		// No CLOOP_SECRET_KEY on this hub, so there is no secret broker and no
+		// requests to expire. Not a fault; see brokerUnavailableReason.
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+
+	lapsed, err := bs.secret.ExpireRequests(ctx)
+	if err != nil {
+		s.log().Warn(logger.EventAuthz, 0, "retention: expire access requests",
+			map[string]interface{}{"error": err.Error()})
+		return
+	}
+	if len(lapsed) == 0 {
+		return
+	}
+	s.log().Info(logger.EventAuthz, 0, "retention: access requests lapsed undecided",
+		map[string]interface{}{"count": len(lapsed)})
+	// One broadcast for the batch: the envelope carries an event verb and an id
+	// and nothing else, and the panel re-reads through the gated route.
+	s.broadcastSecretsUpdate("request_expired", "")
 }
 
 // maybeRunRetention runs one project's pass if its policy is enabled and its

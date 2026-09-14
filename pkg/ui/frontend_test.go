@@ -158,6 +158,13 @@ var openAPIAPISource string
 //go:embed attach_api.go
 var attachAPISource string
 
+// requestsAPISource is pkg/ui/requests_api.go (Task 20271). It registers the
+// six self-service access-request routes and broadcasts a secrets update on
+// every mutation, so the route-drift, authz and broadcast scans all need it.
+//
+//go:embed requests_api.go
+var requestsAPISource string
+
 // routesSource is pkg/ui/routes.go, which holds the declarative route table
 // (Task 20164). Routes moved out of server.go when registration started
 // carrying a required permission, so the architectural tests that scan for
@@ -179,7 +186,8 @@ func allUISources() string {
 		"\n" + executorsInventorySource + "\n" + executorDetailAPISource +
 		"\n" + versionAPISource + "\n" + telemetryAPISource +
 		"\n" + openAPIAPISource + "\n" + costAPISource +
-		"\n" + attachAPISource
+		"\n" + attachAPISource +
+		"\n" + requestsAPISource
 }
 
 // dashboardSource is the whole dashboard front end — the rendered index.html
