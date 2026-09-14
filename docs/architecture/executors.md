@@ -735,7 +735,7 @@ to stop scheduling onto the devices that predate it, and found out which ones
 those were from the failures.
 
 The floor is set once, fleet-wide, with `executors.min_agent_build` (see
-[configuration](../reference/configuration.md#executors)), and applied as a
+[configuration](../reference/configuration.md#execution-backends-executors)), and applied as a
 ratchet: a hub reads many tenants' `config.yaml`, so a tenant-controlled file
 must not be able to lower it. It is read inside the shared rejection path, which
 means `Select` and `CheckSandboxSupport` honour it identically — a floor enforced
