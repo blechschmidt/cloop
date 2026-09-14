@@ -38,6 +38,14 @@
 // global admin binding, so it keeps working untouched and a project-scoped
 // binding can still narrow it.
 //
+// # Runtime bindings
+//
+// Bindings come from two layers. The configured layer above is deployed with
+// the rest of the hub's YAML. The runtime layer (Config.Runtime, Task 20248)
+// is rows an operator wrote during an incident, read live rather than at
+// startup. Between the layers the rule is: deny wins, and the database
+// overrides config. Resolve states it in full and the tests pin it.
+//
 // This package has no dependencies beyond the standard library and knows
 // nothing about HTTP or OIDC wire formats; pkg/oidcauth extracts claims into
 // a Subject and pkg/ui enforces the Decision.
@@ -345,6 +353,17 @@ type Binding struct {
 	// Executor narrows the binding to one executor ID. Empty means "every
 	// executor".
 	Executor string
+
+	// Deny turns the binding into a withdrawal of authority rather than a
+	// grant of it, and it is meaningful only on a runtime binding (Task
+	// 20248). Role is ignored when it is set.
+	//
+	// It is a separate field rather than Role=RoleNone because the two are
+	// ranked differently. Allows compete on specificity and then on strength,
+	// so a tier-0 "none" loses to a tier-0 "admin" — which is exactly the
+	// collision an emergency demotion would hit, since oidc.admin_emails
+	// produces tier-0 admin bindings. A Deny does not compete: see Resolve.
+	Deny bool
 }
 
 // tier is the binding's specificity: higher wins outright over lower.
@@ -499,6 +518,16 @@ const (
 
 	// SourceAdminEmail means the legacy oidc.admin_emails list matched.
 	SourceAdminEmail Source = "admin_email"
+
+	// SourceRuntimeBinding means a runtime binding — one written by an
+	// operator rather than deployed in config — granted the role.
+	SourceRuntimeBinding Source = "runtime_binding"
+
+	// SourceRuntimeDeny means a runtime deny binding withdrew the caller's
+	// authority. Distinct from SourceDefaultRole so the audit trail
+	// distinguishes "nothing granted this person anything" from "somebody
+	// took it away, deliberately, and there is a reason on file".
+	SourceRuntimeDeny Source = "runtime_deny"
 
 	// SourceDefaultRole means no binding matched and oidc.default_role
 	// applied.
@@ -721,6 +750,31 @@ type Config struct {
 	// AdminEmails is the pre-RBAC admin list (oidc.admin_emails). Each
 	// entry becomes a global admin binding.
 	AdminEmails []string
+
+	// Runtime supplies bindings that are not configuration: rows an operator
+	// wrote at runtime to grant or, more importantly, withdraw authority
+	// during an incident (Task 20248). Nil on a hub with no such store, which
+	// is every hub that has never had an incident.
+	//
+	// It is an interface rather than a slice because the whole point is that
+	// these change while the process runs. The Resolver stays immutable — the
+	// reference is fixed at New — and the source owns its own freshness.
+	Runtime RuntimeSource
+}
+
+// RuntimeSource yields the runtime role bindings currently in force.
+//
+// Called on every authorization decision, so an implementation must be cheap
+// and safe for concurrent use; pkg/rolestore satisfies it with a TTL-cached
+// read of the control-plane database. Returning nil means "no runtime
+// bindings", which is the ordinary case and must stay free.
+//
+// An implementation that cannot reach its storage must return the last good
+// answer rather than an empty slice. Failing open here would make a deny
+// binding — the emergency demotion — evaporate exactly when the database is
+// unhealthy, which is not a moment to hand authority back.
+type RuntimeSource interface {
+	RuntimeBindings() []Binding
 }
 
 // Resolver evaluates Config against subjects and scopes. It is immutable
@@ -728,6 +782,7 @@ type Config struct {
 type Resolver struct {
 	defaultRole Role
 	bindings    []Binding
+	runtime     RuntimeSource
 	configured  bool
 }
 
@@ -789,7 +844,13 @@ func New(cfg Config) (*Resolver, error) {
 	return &Resolver{
 		defaultRole: def,
 		bindings:    bindings,
-		configured:  len(cfg.Bindings) > 0 || cfg.DefaultRole != "",
+		runtime:     cfg.Runtime,
+		// Deliberately not influenced by Runtime. Configured() decides whether
+		// deny-by-default is in force at all, and flipping that on because an
+		// operator wrote one emergency binding would lock out every user who
+		// matches no mapping — turning a targeted demotion into an outage. A
+		// deny binding does not need RBAC to be active to bite; see DeniedBy.
+		configured: len(cfg.Bindings) > 0 || cfg.DefaultRole != "",
 	}, nil
 }
 
@@ -807,6 +868,65 @@ func claimNames() string {
 		names[i] = string(c)
 	}
 	return strings.Join(names, ", ")
+}
+
+// NormalizeBinding canonicalizes and validates a binding the same way New
+// does for configured ones.
+//
+// Exported for the runtime layer, which does not go through New but must agree
+// with it exactly on what a binding's identity is. If storage lowercased an
+// email and resolution did not — or either kept Keycloak's leading "/" on a
+// group path — an operator would write a deny against a value that never
+// matches and get a confident success message for a binding that does nothing.
+//
+// A Deny binding needs no role and is normalized to RoleNone; anything else
+// is rejected on the same grounds as a configured binding.
+func NormalizeBinding(b Binding) (Binding, error) {
+	if b.Deny && strings.TrimSpace(string(b.Role)) == "" {
+		b.Role = RoleNone
+	}
+	nb, err := normalizeBinding(b)
+	if err != nil {
+		return nb, err
+	}
+	// A binding pinned to both a project and an executor can never match.
+	// appliesTo requires every narrowing to be satisfied, and no request the
+	// hub serves carries both: a project-scoped scope has no Executor and an
+	// executor-scoped one deliberately has no Project, so that holding
+	// maintainer on one project cannot confer fleet management. The tier-3
+	// bucket in tier() is reserved for a shape nothing constructs.
+	//
+	// Rejected here rather than stored, because this is the failure this
+	// function exists to prevent: accepting it means `role revoke --project X
+	// --executor Y` prints a confident DENIED for a binding that withdraws
+	// nothing, and the operator stops looking. The configured path
+	// (normalizeBinding, reached from New) is deliberately unchanged — a
+	// deployment whose YAML has carried such a mapping for a year must not
+	// fail to start over a binding that was already inert.
+	if nb.Project != "" && nb.Executor != "" {
+		return nb, fmt.Errorf(
+			"a binding cannot be narrowed to a project and an executor at once — " +
+				"no request carries both, so it would match nothing; pick one")
+	}
+	// Subjects are opaque and compared exactly, so a normalization that edits
+	// one produces a binding that silently matches nobody. normalizeBinding
+	// strips a leading "/" for every claim kind, which is right for Keycloak's
+	// group paths and wrong here; put it back.
+	if nb.Claim == ClaimSub {
+		nb.Value = strings.TrimSpace(b.Value)
+		if nb.Value == "" {
+			return nb, fmt.Errorf("value is required — a binding with an empty value would match nothing")
+		}
+		return nb, nil
+	}
+	// Case-fold the values that matches() already compares case-insensitively.
+	// Matching does not need it; *identity* does. A runtime binding is keyed by
+	// its tuple so that writing the same one twice is idempotent, and without
+	// this "Alice@corp" and "alice@corp" would be two rows that deny the same
+	// person — harmless in effect, but it makes `role list` lie about how many
+	// decisions are in force. ClaimSub already returned above.
+	nb.Value = strings.ToLower(nb.Value)
+	return nb, nil
 }
 
 func normalizeBinding(b Binding) (Binding, error) {
@@ -842,6 +962,29 @@ func normalizeClaimValue(v string) string {
 
 // Resolve computes the effective role and permission set for subject within
 // scope. A nil subject denies everything.
+//
+// # Precedence between the runtime and configured layers
+//
+// Two rules, in this order, and nothing else:
+//
+//  1. Deny wins. An applicable runtime binding with Deny set denies outright,
+//     whatever any other binding says and at whatever specificity. It is not
+//     ranked against allows and cannot be outvoted by one.
+//  2. The database overrides config. If any runtime binding applies, the
+//     configured bindings are not consulted at all — the winner is chosen
+//     among the runtime bindings alone, by the same tier-then-strength rule
+//     used within a layer.
+//
+// "Applicable" still means scope-satisfying: a binding pinned to one project
+// takes part only in decisions about that project, so `role revoke --project
+// payments` withdraws authority there and nowhere else. Scoping is what keeps
+// rule 1 from being blunt.
+//
+// Both rules exist for the same case. oidc.admin_emails becomes a global
+// admin binding (see New), so demoting a compromised administrator means
+// beating a tier-0 admin. Ranking a deny against it would lose; consulting
+// config after a runtime match would reinstate it. Anything short of both
+// rules leaves the emergency lever attached to nothing.
 func (r *Resolver) Resolve(subject *Subject, scope Scope) Decision {
 	if r == nil {
 		return Deny(SourceUnauthenticated, "", scope)
@@ -850,23 +993,29 @@ func (r *Resolver) Resolve(subject *Subject, scope Scope) Decision {
 		return Deny(SourceUnauthenticated, "", scope)
 	}
 
-	bestTier := -1
-	bestRole := RoleNone
-	var best *Binding
-
-	for i := range r.bindings {
-		b := r.bindings[i]
-		if !b.appliesTo(scope) || !b.matches(subject) {
-			continue
-		}
-		t := b.tier()
-		// A higher tier wins outright, even if it grants a weaker role:
-		// that is what makes a project-scoped downgrade possible.
-		if t > bestTier || (t == bestTier && b.Role.rank() > bestRole.rank()) {
-			bestTier, bestRole, best = t, b.Role, &r.bindings[i]
+	// Read the runtime layer once. It is a live source, so two reads in one
+	// decision could disagree and produce a resolution that matches neither
+	// the table before the write nor the table after it.
+	runtime := r.runtimeBindings()
+	if b := firstDeny(runtime, subject, scope); b != nil {
+		bound := *b
+		d := Deny(SourceRuntimeDeny, subject.Label(), scope)
+		d.Binding = &bound
+		return d
+	}
+	if best := pickBinding(runtime, subject, scope); best != nil {
+		bound := *best
+		return Decision{
+			Role:         bound.Role,
+			Source:       SourceRuntimeBinding,
+			Scope:        scope,
+			Binding:      &bound,
+			SubjectLabel: subject.Label(),
+			perms:        permSet(bound.Role),
 		}
 	}
 
+	best := pickBinding(r.bindings, subject, scope)
 	if best == nil {
 		return Decision{
 			Role:         r.defaultRole,
@@ -886,13 +1035,112 @@ func (r *Resolver) Resolve(subject *Subject, scope Scope) Decision {
 	}
 	bound := *best
 	return Decision{
-		Role:         bestRole,
+		Role:         bound.Role,
 		Source:       src,
 		Scope:        scope,
 		Binding:      &bound,
 		SubjectLabel: subject.Label(),
-		perms:        permSet(bestRole),
+		perms:        permSet(bound.Role),
 	}
+}
+
+// pickBinding returns the strongest applicable binding in bindings, or nil.
+//
+// Extracted from Resolve so both layers are ranked by one implementation:
+// runtime bindings that compete with each other must obey the same
+// tier-then-strength rule as configured ones, and two copies of it would be
+// two chances for them to drift.
+//
+// Deny bindings are skipped here. They do not rank — Resolve has already
+// settled them — and letting one place as an ordinary winner would grant its
+// Role, which for a deny is the meaningless zero value.
+func pickBinding(bindings []Binding, subject *Subject, scope Scope) *Binding {
+	bestTier := -1
+	bestRole := RoleNone
+	var best *Binding
+	for i := range bindings {
+		b := bindings[i]
+		if b.Deny || !b.appliesTo(scope) || !b.matches(subject) {
+			continue
+		}
+		t := b.tier()
+		// A higher tier wins outright, even if it grants a weaker role:
+		// that is what makes a project-scoped downgrade possible.
+		if t > bestTier || (t == bestTier && b.Role.rank() > bestRole.rank()) {
+			bestTier, bestRole, best = t, b.Role, &bindings[i]
+		}
+	}
+	return best
+}
+
+// RuntimeBindings returns a copy of the runtime bindings currently in force, or
+// nil when this hub has no runtime source.
+//
+// Exported so an operator surface can show the same list the resolver is
+// deciding from, rather than re-reading storage and possibly showing something
+// else. A copy because the source owns a live cache it swaps on refresh, and a
+// caller that sorted or filtered the returned slice in place would be mutating
+// the array a concurrent Resolve is scanning. Resolution itself goes through
+// runtimeBindings, which does not copy — this is a display path.
+func (r *Resolver) RuntimeBindings() []Binding {
+	live := r.runtimeBindings()
+	if len(live) == 0 {
+		return nil
+	}
+	out := make([]Binding, len(live))
+	copy(out, live)
+	return out
+}
+
+// HasRuntimeBindings reports whether any runtime binding is in force.
+//
+// Separate from RuntimeBindings because callers on the request path ask only
+// this, and asking it by taking the length of a copy would allocate the whole
+// slice on every request of every user for the lifetime of one deny binding.
+func (r *Resolver) HasRuntimeBindings() bool {
+	return len(r.runtimeBindings()) > 0
+}
+
+func (r *Resolver) runtimeBindings() []Binding {
+	if r == nil || r.runtime == nil {
+		return nil
+	}
+	return r.runtime.RuntimeBindings()
+}
+
+// DeniedBy returns the runtime deny binding that withdraws subject's authority
+// within scope, or nil.
+//
+// It exists as a separate entry point because a deny must bite on hubs where
+// Resolve is never consulted. RBAC is inactive unless an operator configured a
+// policy (see Configured), and a deployment running on oidc.admin_emails alone
+// has not — so every request there takes an allow-all path that never reaches
+// Resolve. A demotion that only worked on hubs which had already adopted RBAC
+// would be missing on exactly the older deployments most likely to still have a
+// long-lived admin list.
+//
+// Callers enforce this ahead of any authorization bypass. A nil subject or a
+// hub with no runtime source yields nil at no cost.
+func (r *Resolver) DeniedBy(subject *Subject, scope Scope) *Binding {
+	if r == nil || subject == nil || r.runtime == nil {
+		return nil
+	}
+	b := firstDeny(r.runtime.RuntimeBindings(), subject, scope)
+	if b == nil {
+		return nil
+	}
+	bound := *b
+	return &bound
+}
+
+func firstDeny(bindings []Binding, subject *Subject, scope Scope) *Binding {
+	for i := range bindings {
+		b := bindings[i]
+		if b.Deny && b.appliesTo(scope) && b.matches(subject) {
+			return &bindings[i]
+		}
+	}
+	return nil
 }
 
 // UnsatisfiableBindings reports the configured bindings that no identity from

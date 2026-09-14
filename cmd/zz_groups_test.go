@@ -42,6 +42,7 @@ func groupedParents(t *testing.T) []struct {
 		{rootCmd, rootGroups, rootCommandGroups},
 		{taskCmd, taskGroups, taskCommandGroups},
 		{planCmd, planGroups, planCommandGroups},
+		{hubCmd, hubGroups, hubCommandGroups},
 	}
 }
 

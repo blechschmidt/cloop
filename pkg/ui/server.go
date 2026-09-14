@@ -663,6 +663,12 @@ type Server struct {
 	// unlike tokens it is not lazily built on the request path. Zero value
 	// means process-local sessions.
 	sessions sessionStoreState
+
+	// roles holds the runtime role-binding source and its database handle
+	// (Task 20248). Opened alongside the session store, before Authz is
+	// constructed, because the resolver takes it as a fixed reference. Zero
+	// value means this hub resolves from configured bindings alone.
+	roles roleStoreState
 }
 
 // log returns s.Log, falling back to a default text logger if the field
@@ -1244,6 +1250,9 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	// Same for the session store: the janitor stopped with the watcher context
 	// above, so nothing is still reading through this handle.
 	s.closeSessionStore()
+	// And for the runtime role bindings, which are read only from the request
+	// path the listener has already stopped serving.
+	s.closeRoleStore()
 	// Stop the git interception proxy and close every live session, so the
 	// audit trail records why they ended rather than leaving rows that simply
 	// stop. Nil-safe when none is configured.
@@ -2536,6 +2545,15 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		case <-keepalive.C:
+			// The SSE half of the runtime-deny teardown (Task 20248). This
+			// is the transport a browser falls back to when the WebSocket
+			// upgrade fails, so leaving it unchecked would mean a demoted
+			// account keeps its live stream by the ordinary accident of
+			// being behind a proxy that breaks upgrades.
+			if b := s.connectionDenied(c.user, c.token, c.workDir); b != nil {
+				s.logConnectionDenied("SSE", b)
+				return
+			}
 			// SSE comment frame — ignored by EventSource clients but
 			// forces a TCP write so a dead peer is detected within
 			// sseKeepaliveInterval+sseWriteTimeout (instead of the
@@ -3005,6 +3023,27 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 			// status-coded close frame asynchronously.)
 			return
 		case <-pingTicker.C:
+			// Authorization for this connection was decided once, at
+			// upgrade. That is fine for a policy that only changes on
+			// redeploy, and not fine for a runtime deny binding, whose
+			// entire purpose is to take authority away from an account
+			// that is using it right now (Task 20248). Without this, a
+			// demoted administrator keeps a live stream of every task
+			// update, log line and state diff on the project they are
+			// attached to, for as long as they leave the tab open — and
+			// containment that leaves the data flowing is not
+			// containment.
+			//
+			// Checked on the ping tick rather than per message: it is the
+			// existing periodic hook, and one tick is the same order as
+			// the binding TTL, so nothing is gained by paying for it on a
+			// burst of a hundred task updates. The SSE fallback carries
+			// the same check on its keepalive.
+			if b := s.connectionDenied(hc.user, hc.token, workDir); b != nil {
+				s.logConnectionDenied("WebSocket", b)
+				_ = conn.Close(websocket.StatusPolicyViolation, "authorization withdrawn")
+				return
+			}
 			pctx, pcancel := context.WithTimeout(ctx, wsPingTimeout)
 			err := conn.Ping(pctx)
 			pcancel()
@@ -5946,6 +5985,13 @@ func (s *Server) handleProjectsEvents(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		case <-keepalive.C:
+			// Same teardown as the project stream above. This one carries
+			// the cross-project roster, so a denied identity left on it
+			// keeps watching the whole fleet's health.
+			if b := s.connectionDenied(c.user, c.token, c.workDir); b != nil {
+				s.logConnectionDenied("SSE", b)
+				return
+			}
 			if werr := writeSSE(w, flusher, ": keepalive\n\n"); werr != nil {
 				return
 			}

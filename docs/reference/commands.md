@@ -849,6 +849,88 @@ These subcommands write to the state database directly rather than through the
 HTTP API, so they require filesystem access to it — the same root-shell caveat
 as `cloop hub token`.
 
+### `cloop hub session`
+
+List and terminate signed-in dashboard sessions. Operates on the session table
+directly, so it keeps working when the HTTP listener does not — which is the
+situation that tends to produce the need for it.
+
+```bash
+cloop hub session list                                     # who is signed in
+cloop hub session list --identity alice@example.com        # ...for one person
+cloop hub session list --json                              # for scripting
+cloop hub session revoke 3f9c1e7a --reason "stolen cookie, INC-4412"
+cloop hub session revoke --identity alice@example.com --reason "compromise INC-4412"
+cloop hub session revoke --all --reason "rotating IdP client secret"
+```
+
+`revoke` requires exactly one selector — an id, `--identity`, or `--all` — with
+no default, because the three differ by two orders of magnitude in blast radius.
+A revoked session stops working within 30 seconds on a running hub, which is how
+long it may still be served from that process's session cache.
+
+### `cloop hub quota`
+
+Per-identity quota overrides: the one-off cap applied to a single tenant. Most
+quota policy belongs in `ui.quotas` in `.cloop/config.yaml`; this edits the
+exception.
+
+```bash
+cloop hub quota list                                       # overrides and usage
+cloop hub quota set alice@example.com \
+  --limit daily_cost_usd=5 --limit max_concurrent_tasks=2 \
+  --reason "runaway plan INC-4413"
+cloop hub quota set alice@example.com --unset max_projects --reason "back to policy"
+cloop hub quota clear alice@example.com --reason "INC-4413 closed"
+```
+
+Resources are named rather than flagged, so a resource added later needs no CLI
+change: `max_projects`, `max_concurrent_tasks`, `max_concurrent_reproductions`,
+`max_executors`, `max_sessions`, `daily_token_budget`, `daily_cost_usd`.
+
+`set` and `clear` **refuse while a hub holds the control-plane lease** and point
+at `PUT /api/quotas/{identity}`. The enforcer loads overrides once at startup, so
+a write behind a live hub would neither take effect nor survive the next edit
+made from the Quotas panel.
+
+### `cloop hub role`
+
+Runtime role bindings that layer over `ui.oidc`. This is the emergency demotion
+path: `oidc.admin_emails` and `oidc.role_mappings` are read at startup, so
+without it, demoting a compromised administrator means editing config and
+redeploying.
+
+```bash
+cloop hub role list                                        # runtime and configured
+cloop hub role list --identity alice@example.com
+cloop hub role grant email bob@example.com --role maintainer --project payments --reason "INC-4414"
+cloop hub role revoke email alice@example.com --reason "credential compromise INC-4412"
+cloop hub role revoke email contractor@example.com --project payments --reason "scope reduction"
+cloop hub role delete rb_e1be642bd28f --reason "investigation closed"
+```
+
+`revoke` *writes* a deny binding rather than deleting a grant, which is what
+lets it work against authority this table never issued. `delete` removes a
+binding row and is the only way back from a deny.
+
+Precedence between the two layers is fixed: **deny wins, and the database
+overrides config**. A deny beats every other binding at every specificity,
+including the global admin binding `oidc.admin_emails` produces. Bindings are
+read on a 10-second TTL, so these take effect on a running hub without a restart
+and take no lease.
+
+| Flag | Applies to | Description |
+|------|-----------|-------------|
+| `--reason` | every mutation | Required. Recorded in the audit trail with the operating OS user |
+| `--workdir` | all | Hub directory holding `.cloop/state.db` |
+| `--identity` | `session list/revoke`, `role list` | Email address or IdP subject |
+| `--project` / `--executor` | `role grant/revoke` | Narrow the binding instead of applying it everywhere |
+| `--json` | every `list` | Machine-readable output |
+
+The three incident playbooks these compose into — stolen session, runaway
+tenant, compromised admin — are in the
+[runbook](../operations/runbook.md#access-emergencies).
+
 ---
 
 ## Network egress

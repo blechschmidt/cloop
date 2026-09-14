@@ -193,10 +193,11 @@ func (s *Server) gate(rs routeSpec) http.HandlerFunc {
 		// request would be a real regression for the single-tenant local
 		// use this feature promises to leave untouched.
 		//
-		// authzActiveFor, not authzActive: an API token brings its own roles,
-		// so this short-circuit must not swallow them on a hub where the
-		// deployment-wide policy is off (Task 20175).
-		if !s.authzActiveFor(r) {
+		// authzGateFor, not authzActive: an API token brings its own roles, so
+		// this short-circuit must not swallow them on a hub where the
+		// deployment-wide policy is off (Task 20175) — and neither must it
+		// swallow a runtime deny binding (Task 20248).
+		if !s.authzGateFor(r) {
 			rs.Handler(w, r)
 			return
 		}

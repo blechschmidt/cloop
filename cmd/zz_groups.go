@@ -48,6 +48,10 @@ const (
 
 	groupPlanVersions = "plan-versions"
 	groupPlanAI       = "plan-ai"
+
+	groupHubSetup   = "hub-setup"
+	groupHubAccess  = "hub-access"
+	groupHubOperate = "hub-operate"
 )
 
 // helpFooterAnnotation opts a command into a trailing block in its help output.
@@ -325,6 +329,47 @@ var planCommandGroups = map[string]string{
 	"ai-roadmap": groupPlanAI,
 }
 
+var hubGroups = []*cobra.Group{
+	{ID: groupHubSetup, Title: "Standing up a hub:"},
+	{ID: groupHubAccess, Title: "Access and incident response:"},
+	{ID: groupHubOperate, Title: "Running it:"},
+}
+
+// hubCommandGroups maps a `cloop hub` subcommand to its group.
+//
+// The subtree got its own buckets when the incident-response commands landed
+// (Task 20248). Eleven entries is past the point where a flat list is a list
+// rather than a wall, and the split that matters is the one below: an on-call
+// engineer reaching for this tree at 3am is looking for exactly one of the
+// access commands and should not have to read past TLS setup to find it.
+var hubCommandGroups = map[string]string{
+	"bootstrap": groupHubSetup,
+	"tls-init":  groupHubSetup,
+	"pin":       groupHubSetup,
+
+	"session": groupHubAccess,
+	"role":    groupHubAccess,
+	"quota":   groupHubAccess,
+	"token":   groupHubAccess,
+	"key":     groupHubAccess,
+
+	"doctor":      groupHubOperate,
+	"healthcheck": groupHubOperate,
+	"lease":       groupHubOperate,
+	"audit":       groupHubOperate,
+	"retention":   groupHubOperate,
+}
+
+// hubHelpFooter points at the runbook rather than trying to be it. The three
+// incident playbooks are sequences across several commands plus the REST API,
+// which is not something a --help block can hold.
+const hubHelpFooter = `Incident response:
+  cloop hub session revoke --identity <who> --reason "..."   contain a stolen session
+  cloop hub quota set <who> --limit daily_cost_usd=5 ...     cap a runaway tenant
+  cloop hub role revoke email <who> --reason "..."           demote a compromised admin
+
+Full playbooks: docs/operations/runbook.md`
+
 // hiddenAIHelpers are the single-shot `ai-*` advisory wrappers: each one makes
 // one provider call, prints a report, and changes nothing unless you pass
 // --apply. Nine of them under `cloop task` and three under `cloop plan` is a
@@ -374,6 +419,10 @@ func applyCommandGroups() {
 	}
 	if planCmd != nil {
 		assignGroups(planCmd, planGroups, planCommandGroups)
+	}
+	if hubCmd != nil {
+		assignGroups(hubCmd, hubGroups, hubCommandGroups)
+		hubCmd.Annotations = withAnnotation(hubCmd.Annotations, helpFooterAnnotation, hubHelpFooter)
 	}
 
 	hideAIHelpers()

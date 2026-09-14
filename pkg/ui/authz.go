@@ -66,6 +66,41 @@ func (s *Server) authzActiveFor(r *http.Request) bool {
 	return s.authzActive() || tokenFromRequest(r) != nil
 }
 
+// authzGateFor reports whether gate() must run the full permission path for
+// this request. It is authzActiveFor plus the runtime binding layer.
+//
+// Deliberately a *separate* predicate rather than a third clause inside
+// authzActiveFor, and the distinction is load-bearing. authzActiveFor answers
+// "did a real authorization decision get made for this caller", and callers
+// rely on that meaning: requireExecutorAdmin short-circuits on it precisely
+// because a true answer means the route gate already required
+// executor.manage. A runtime binding does not make that true — a caller the
+// binding does not name still resolves through the allow-all bypass — so
+// folding it in there would turn writing one deny into fleet-admin for every
+// signed-in user on an admin_emails-only hub. It has to mean only what it says.
+//
+// Here the weaker statement is the right one: once any runtime binding exists,
+// "this deployment did not ask cloop to make authorization decisions" is no
+// longer true, so the gate must reach require() and let decide() consult the
+// deny. Without it the gate returns first and a demotion has no effect on any
+// request, which is how the emergency lever would end up attached to nothing
+// on exactly the deployments that most need it.
+//
+// The cost the short-circuit avoids — scope derivation stat-ing every
+// registered project — is therefore paid on hubs that have runtime bindings
+// and only on those. A hub with a live deny is mid-incident; correctness there
+// is worth a stat.
+func (s *Server) authzGateFor(r *http.Request) bool {
+	return s.authzActiveFor(r) || s.runtimeBindingsExist()
+}
+
+// runtimeBindingsExist reports whether an operator has written any runtime role
+// binding (Task 20248). A slice length behind the source's mutex, served from a
+// cache, so a hub with none pays nothing.
+func (s *Server) runtimeBindingsExist() bool {
+	return s.Authz.HasRuntimeBindings()
+}
+
 // subjectFromIdentity converts a validated OIDC identity into the claim
 // bundle pkg/authz resolves against.
 func subjectFromIdentity(id *oidcauth.Identity) *authz.Subject {
@@ -145,7 +180,30 @@ func (g *grant) decide(scope authz.Scope) authz.Decision {
 		if owner := g.token.Owner; owner != nil && g.server.authzActive() {
 			d = authz.Intersect(d, g.server.Authz.Resolve(subjectFromOwner(owner), scope))
 		}
+		// A delegated token outlives the demotion of the person it was minted
+		// for unless this is checked outside the authzActive guard above.
+		// Intersection already handles it where RBAC is on; where it is off
+		// there is no policy to intersect with, and a glasses link held by an
+		// account somebody just revoked would keep working. Task 20248.
+		if owner := g.token.Owner; owner != nil {
+			if b := g.server.Authz.DeniedBy(subjectFromOwner(owner), scope); b != nil {
+				return runtimeDenyDecision(b, g.subjectLabel(), scope)
+			}
+		}
 		return d
+	}
+	// Runtime deny bindings are enforced ahead of every bypass, and this is
+	// the only authority check that is. A bypass says "this deployment has not
+	// asked cloop to make authorization decisions" — which is a statement
+	// about policy, and a deny is not policy, it is containment written by an
+	// operator about one account during an incident. Honouring it only on
+	// hubs that had already adopted RBAC would leave the emergency demotion
+	// missing from exactly the deployments still running on an admin_emails
+	// list. See Resolver.DeniedBy.
+	if g.subject != nil {
+		if b := g.server.Authz.DeniedBy(g.subject, scope); b != nil {
+			return runtimeDenyDecision(b, g.subjectLabel(), scope)
+		}
 	}
 	if g.bypass != "" {
 		return authz.AllowAll(g.bypass, g.subjectLabel())
@@ -160,6 +218,15 @@ func (g *grant) decide(scope authz.Scope) authz.Decision {
 		g.cache = make(map[authz.Scope]authz.Decision, 4)
 	}
 	g.cache[scope] = d
+	return d
+}
+
+// runtimeDenyDecision builds the decision a runtime deny produces: nothing
+// granted, with the binding attached so auditAuthz records which one did it
+// and require()'s 403 can name a cause an operator can look up.
+func runtimeDenyDecision(b *authz.Binding, label string, scope authz.Scope) authz.Decision {
+	d := authz.Deny(authz.SourceRuntimeDeny, label, scope)
+	d.Binding = b
 	return d
 }
 
@@ -200,7 +267,18 @@ func (s *Server) newGrant(r *http.Request) *grant {
 		return &grant{server: s, token: tok}
 	}
 	if !s.authzActive() {
-		return &grant{server: s, bypass: authz.SourceAuthzDisabled}
+		g := &grant{server: s, bypass: authz.SourceAuthzDisabled}
+		// Resolve the caller anyway when runtime bindings exist, so a deny has
+		// a subject to match against on a hub that never turned RBAC on. The
+		// guard is a slice length behind a mutex, so the overwhelmingly common
+		// case — no incident has ever happened here — pays nothing, and the
+		// session lookup it gates is itself served from pkg/oidcauth's cache.
+		if len(s.Authz.RuntimeBindings()) > 0 {
+			if id := s.sessionIdentity(r); id != nil {
+				g.subject = subjectFromIdentity(id)
+			}
+		}
+		return g
 	}
 	id := s.sessionIdentity(r)
 	if id == nil {

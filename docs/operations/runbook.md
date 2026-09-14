@@ -922,6 +922,256 @@ permission error, a busy mount — and names it. The rest were still collected.
 
 ## Incident playbooks
 
+### Access emergencies
+
+Three sequences you can paste. They exist as CLI commands rather than only as
+dashboard actions because the situations that call for them are the ones where
+a browser is the wrong tool or is not available: the listener is wedged, you are
+on the host over SSH, or the account you need to contain is the one that would
+be doing the containing.
+
+Every mutation takes a required `--reason` and records it in the hash-chained
+audit trail along with the OS user who ran it, so `cloop audit-log list` answers
+"who did this, when, and why" without anybody reconstructing it from memory.
+Read them back with:
+
+```bash
+cloop audit-log list --entity session --since 24h
+cloop audit-log list --entity role_binding --since 24h
+cloop audit-log list --entity quota --since 24h
+```
+
+#### A session was stolen
+
+Contain the session, then the credentials behind it. Order matters: revoking the
+session first stops the active use while you work out what else the account
+holds.
+
+```bash
+# 1. See what the account has open, and from where. The IP column is usually
+#    what tells a stolen cookie from the user's own second browser.
+cloop hub session list --identity alice@example.com
+
+# 2. End one session, or all of theirs.
+cloop hub session revoke 3f9c1e7a2b5d48c0 --reason "reported stolen laptop, INC-4412"
+cloop hub session revoke --identity alice@example.com --reason "credential compromise INC-4412"
+
+# 3. Sessions are not the only credential. Revoke any API token the account holds.
+cloop hub token list
+cloop hub token revoke <token-id>
+
+# 4. If the account itself is suspect rather than just one cookie, demote it too
+#    — see "A compromised admin" below.
+```
+
+```console
+$ cloop hub session list --identity alice@example.com
+ID                IDENTITY           IP             IDLE  EXPIRES            IDP CHECKED
+3f9c1e7a2b5d48c0  alice@example.com  198.51.100.24  3s    2026-09-14 23:49Z  never
+a1d4f80b6c2e93aa  alice@example.com  203.0.113.9    17m   2026-09-14 23:49Z  never
+
+$ cloop hub session revoke --identity alice@example.com --reason "credential compromise INC-4412"
+Revoked 2 session(s).
+  3f9c1e7a2b5d48c0  alice@example.com
+  a1d4f80b6c2e93aa  alice@example.com
+
+A running hub may still honour these for up to 30s (its session cache).
+API tokens are a separate credential — see `cloop hub token list`.
+```
+
+**The 30 seconds are real.** A running hub serves sessions from a per-process
+cache with that TTL, which is the same bound it already accepts between
+replicas. "I revoked it and they were still in" for a few seconds is this, not a
+failure. If you need the window closed to zero, stop the hub.
+
+This command reads and writes the session table directly and takes no
+control-plane lease, which is deliberate: the case it exists for is a hub whose
+listener is wedged, and that hub is still holding its lease.
+
+#### A tenant is running away
+
+One identity is consuming the shared budget, executor slots, or project count.
+Cap it now and work out why afterwards.
+
+```bash
+# 1. What is this identity actually consuming?
+cloop hub quota list
+
+# 2. Cap it. The override is sparse — setting one ceiling leaves every other
+#    one exactly as it was, inherited or overridden.
+cloop hub quota set alice@example.com \
+  --limit daily_cost_usd=5 \
+  --limit max_concurrent_tasks=2 \
+  --reason "runaway plan INC-4413"
+
+# 3. Stop what is already running, which the cap does not do by itself.
+cloop hub session revoke --identity alice@example.com --reason "runaway plan INC-4413"
+
+# 4. Afterwards: drop one ceiling back to configured policy, or all of them.
+cloop hub quota set alice@example.com --unset max_concurrent_tasks --reason "tasks back to policy"
+cloop hub quota clear alice@example.com --reason "INC-4413 closed"
+```
+
+```console
+$ cloop hub quota set alice@example.com --limit daily_cost_usd=5 --limit max_concurrent_tasks=2 --reason "runaway plan INC-4413"
+Quota override for alice@example.com:
+  max_concurrent_tasks         2
+  daily_cost_usd               5
+
+Takes effect when the hub next starts — it loads overrides once. Start it now,
+or apply the same change through the Quotas panel on a running hub.
+
+$ cloop hub quota list
+IDENTITY           RESOURCE              OVERRIDE  USED  UPDATED BY
+alice@example.com  max_concurrent_tasks  2         -     cli:root
+alice@example.com  daily_cost_usd        5         -     cli:root
+```
+
+**This one refuses while a hub is running**, and points at the REST API:
+
+```console
+$ cloop hub quota set alice@example.com --limit daily_cost_usd=5 --reason "runaway plan"
+Error: a hub is running here and holds the control-plane lease: hub-1 (cloop-0 pid 812)
+
+This command writes state that hub loaded into memory at startup, so a
+write now would neither take effect nor survive its next edit. Use PUT
+/api/quotas/{identity} or the Quotas panel while it is running, or stop it first.
+```
+
+That is not a limitation to work around. The enforcer reads overrides once at
+startup, so a write behind a live hub would be invisible to it *and* would be
+overwritten by the next edit made from the panel. Use the Quotas panel, or:
+
+```bash
+curl -X PUT https://hub.example.com/api/quotas/alice@example.com \
+  -H "Authorization: Bearer $CLOOP_PAT" \
+  -H 'Content-Type: application/json' \
+  -d '{"limits":{"daily_cost_usd":5,"max_concurrent_tasks":2}}'
+```
+
+#### An admin is compromised
+
+This is the one that had no answer before. Admin status comes from
+`oidc.admin_emails` and `oidc.role_mappings`, which are read at startup — so
+demoting somebody used to mean editing config and redeploying, with whoever
+holds the deployment pipeline in the loop.
+
+`cloop hub role revoke` writes a **deny binding** into the control-plane
+database instead. It outranks every other binding at every specificity,
+including the global admin binding `oidc.admin_emails` produces, and a running
+hub picks it up within ten seconds without a restart.
+
+```bash
+# 1. Confirm where their authority comes from. This shows both layers: the
+#    runtime bindings and the configured ones they override.
+cloop hub role list --identity alice@example.com
+
+# 2. Demote. This works while the hub is running.
+cloop hub role revoke email alice@example.com --reason "credential compromise INC-4412"
+
+# 3. A deny stops them acting. It does not end sessions or revoke tokens.
+cloop hub session revoke --identity alice@example.com --reason "credential compromise INC-4412"
+cloop hub token list        # then revoke anything the account holds
+cloop hub token revoke <token-id>
+
+# 4. Rotate anything they could have read: cloop hub key rotate, plus the
+#    credentials behind any grant they could reach.
+
+# 5. When the investigation closes, remove the binding by id. Deleting a deny
+#    restores whatever remains in force — usually the configured policy, which
+#    for an admin_emails entry means restoring admin. Do it deliberately, and
+#    check `role list --identity` first: if a runtime grant for the same scope
+#    is also stored, that grant takes over instead of the configured policy.
+cloop hub role delete rb_e1be642bd28f --reason "investigation closed, account clean"
+```
+
+```console
+$ cloop hub role revoke email alice@example.com --reason "credential compromise INC-4412"
+DENIED email=alice@example.com (everywhere)
+  binding  rb_e1be642bd28f
+  This outranks every other binding, including oidc.admin_emails.
+  Undo with `cloop hub role delete rb_e1be642bd28f`.
+
+A deny stops them acting; it does not end their sessions or revoke their
+tokens. For a compromise, also run:
+  cloop hub session revoke --identity alice@example.com --reason "..."
+  cloop hub token list   # then revoke anything they hold
+
+A running hub picks this up within 10s. No restart needed.
+
+$ cloop hub role list --identity alice@example.com
+Runtime bindings (this database)
+  ID               EFFECT  CLAIM  VALUE              ROLE  SCOPE     BY        REASON
+  rb_e1be642bd28f  deny    email  alice@example.com  -     (global)  cli:root  credential compromise INC-4412
+
+Configured bindings (.cloop/config.yaml)
+  SOURCE        CLAIM  VALUE              ROLE   SCOPE
+  admin_emails  email  alice@example.com  admin  (global)
+
+alice@example.com is DENIED by rb_e1be642bd28f (everywhere) — every request resolves to no permissions.
+```
+
+**How long containment takes.** Three windows, and they are additive in the
+worst case:
+
+| | Bound | Why |
+|---|---|---|
+| REST and page loads | 10s | the binding TTL — bindings are re-read from the database on that interval |
+| Open WebSocket or SSE stream | +30s | the writer loop re-checks the deny on its keepalive tick and closes the connection |
+| Revoked session | 30s | the hub's per-process session cache |
+
+So a demoted account stops being able to *act* within about ten seconds and
+stops *receiving* within about forty. If you need both at zero, stop the hub —
+which is also what you would do if you suspected the process itself.
+
+**Precedence, in full.** Two rules, and nothing else:
+
+1. **Deny wins.** An applicable deny binding denies outright, whatever else
+   matches and at whatever specificity.
+2. **The database overrides config.** If any runtime binding applies, the
+   configured bindings are not consulted at all.
+
+Both are needed for step 2 above to work: rank a deny against a tier-0 admin
+binding and it loses; consult config after a runtime match and the admin binding
+comes back.
+
+**Scope it when you mean to.** With neither flag the deny is global. With
+`--project` it withdraws authority on one project and leaves the rest intact:
+
+```bash
+cloop hub role revoke email contractor@example.com --project payments --reason "scope reduction"
+```
+
+**Other claims work too**, which matters when the provider releases no email:
+
+```bash
+cloop hub role revoke sub 8f14e45fce      --reason "offboarded, IdP entry not yet removed"
+cloop hub role revoke group contractors   --reason "vendor breach, containing the whole group"
+```
+
+`cloop hub role grant` is the same mechanism in the other direction — a runtime
+grant overrides the configured bindings, so it is also how you narrow somebody
+(`--role viewer`) or widen them for one project, without a redeploy. It does not
+beat a deny, and it is *not* the way to undo one: granting over a live deny
+stores an inert row. The command says so, and `role delete` is the undo.
+
+A binding cannot be narrowed to a project and an executor at the same time. No
+request carries both — an executor action is a fleet action and deliberately
+resolves with no project — so such a binding would match nothing. The command
+refuses it rather than storing a deny that withdraws nothing.
+
+Runtime bindings are policy that no reviewed file records, so a hub that has any
+says so at startup:
+
+```
+RBAC: 2 role mapping(s), default role "none", plus 1 runtime binding(s) (1 deny) — see `cloop hub role list`
+```
+
+Treat that line as a reminder to clean up: a deny from a closed incident that
+nobody removed is an account somebody thinks still works.
+
+---
+
 **A credential leaked.**
 `cloop secret revoke <grant-id>` — then remember that material already
 materialised survives up to 15 minutes, so stop the affected runs too. Rotate the

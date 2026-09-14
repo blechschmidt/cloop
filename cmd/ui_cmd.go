@@ -181,10 +181,20 @@ but not for anything reachable from a network.`,
 				// must not silently degrade to a binding that never
 				// matches (and therefore a user who is denied everything,
 				// or worse, a default_role that was meant to be narrower).
+				// Runtime role bindings (Task 20248) — the layer an operator
+				// writes with `cloop hub role` during an incident, read live
+				// rather than at startup. Fatal on failure, unlike the session
+				// store above: a hub that cannot read this table comes up
+				// having silently dropped every demotion somebody wrote.
+				roleSource, roleErr := srv.OpenRoleStore()
+				if roleErr != nil {
+					return fmt.Errorf("could not open runtime role bindings: %w", roleErr)
+				}
 				resolver, authzErr := authz.New(authz.Config{
 					DefaultRole: authz.Role(cfg.UI.OIDC.DefaultRole),
 					Bindings:    roleMappingsToBindings(cfg.UI.OIDC.RoleMappings),
 					AdminEmails: cfg.UI.OIDC.AdminEmails,
+					Runtime:     roleSource,
 				})
 				if authzErr != nil {
 					return fmt.Errorf("ui.oidc role mappings are invalid: %w", authzErr)
@@ -192,8 +202,9 @@ but not for anything reachable from a network.`,
 				srv.Authz = resolver
 
 				fmt.Printf("OIDC authentication enabled (issuer: %s)\n", cfg.UI.OIDC.Issuer)
-				fmt.Printf("RBAC: %d role mapping(s), default role %q\n",
-					len(cfg.UI.OIDC.RoleMappings), effectiveDefaultRole(cfg.UI.OIDC.DefaultRole))
+				fmt.Printf("RBAC: %d role mapping(s), default role %q%s\n",
+					len(cfg.UI.OIDC.RoleMappings), effectiveDefaultRole(cfg.UI.OIDC.DefaultRole),
+					describeRuntimeBindings(resolver.RuntimeBindings()))
 				fmt.Printf("Sessions: %s absolute / %s idle, %s\n",
 					time.Duration(cfg.UI.OIDC.EffectiveSessionTTLHours())*time.Hour,
 					time.Duration(cfg.UI.OIDC.EffectiveIdleTimeoutHours())*time.Hour,
@@ -278,6 +289,28 @@ func roleMappingsToBindings(mappings []config.RoleMapping) []authz.Binding {
 		})
 	}
 	return bindings
+}
+
+// describeRuntimeBindings annotates the RBAC startup line with the runtime
+// layer, and says nothing when there is none.
+//
+// Worth a line on a hub that has any: a deny binding is an authorization
+// decision that no reviewed, deployed file records, so an operator reading
+// startup output to answer "what policy is this process enforcing?" would
+// otherwise be shown a complete-looking answer that is missing the part
+// somebody added under pressure at 3am and may well have meant to remove.
+func describeRuntimeBindings(bindings []authz.Binding) string {
+	if len(bindings) == 0 {
+		return ""
+	}
+	denies := 0
+	for _, b := range bindings {
+		if b.Deny {
+			denies++
+		}
+	}
+	return fmt.Sprintf(", plus %d runtime binding(s) (%d deny) — see `cloop hub role list`",
+		len(bindings), denies)
 }
 
 // quotaLimitsFrom converts the YAML limit map into the quota model.

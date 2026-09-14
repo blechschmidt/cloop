@@ -117,6 +117,12 @@ var (
 	// administrator just terminated all look like. All three must produce the
 	// same answer to the caller.
 	ErrSessionNotFound = errors.New("statedb: session not found")
+
+	// ErrRoleBindingNotFound indicates no role_bindings row has the requested
+	// id. Unlike the two above this is a genuine operator error rather than an
+	// expected outcome — binding ids are only ever obtained by listing the
+	// table — so callers should surface it instead of absorbing it.
+	ErrRoleBindingNotFound = errors.New("statedb: role binding not found")
 )
 
 // classifyDriverErr inspects a raw error returned by the modernc.org/sqlite
