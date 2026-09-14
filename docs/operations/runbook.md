@@ -744,10 +744,20 @@ migration did.
 Each migration is classified when it is applied and the verdict is stored in
 `schema_migrations.compat`. A migration that only *added* objects — new tables,
 new non-unique indexes, new views — is `additive`: a binary that predates it has
-no statement that can name them, so their presence changes nothing it does. A
-migration that altered, dropped or constrained something that already existed is
-`breaking`. Anything unclassified, including rows written by a build that
-predates this bookkeeping, counts as breaking.
+no statement that can name them, so their presence changes nothing it does.
+
+Appending a column counts as additive too, under conditions that are checked
+rather than assumed: the statement must be `ADD COLUMN`, the column must carry a
+`DEFAULT` or be nullable, and it must bring no constraint — no `UNIQUE`, no
+`PRIMARY KEY`, no `REFERENCES`, no `CHECK`. What makes that safe is that no
+query in `pkg/statedb` issues `SELECT *`; every read names its columns, so an
+appended one is invisible to an older binary, and the default keeps the rows it
+inserts legal. A column that is `NOT NULL` with no default is `breaking`,
+because every older `INSERT` would fail on it.
+
+A migration that altered, dropped or constrained something that already existed
+is otherwise `breaking`. Anything unclassified, including rows written by a
+build that predates this bookkeeping, counts as breaking.
 
 A database whose extra migrations are all additive opens normally. Otherwise the
 binary refuses, naming both versions, the build that moved the schema forward,

@@ -103,7 +103,13 @@ func classifyMigration(sqlText string) MigrationCompat {
 // recording any table it creates into created.
 func additiveStatement(stmt string, created map[string]bool) bool {
 	f := strings.Fields(stmt)
-	if len(f) < 2 || !strings.EqualFold(f[0], "CREATE") {
+	if len(f) < 2 {
+		return false
+	}
+	if strings.EqualFold(f[0], "ALTER") {
+		return additiveAlter(f, created)
+	}
+	if !strings.EqualFold(f[0], "CREATE") {
 		return false
 	}
 
@@ -156,6 +162,94 @@ func additiveStatement(stmt string, created map[string]bool) bool {
 		return onlyTouchesNewTable(rest, created)
 	}
 	return false
+}
+
+// additiveAlter reports whether an ALTER TABLE only appends a column that an
+// older binary cannot see and cannot trip over.
+//
+// Adding a column is the one ALTER that can be safe, and it is the shape every
+// migration that extends an existing table takes — so classifying the whole
+// family as breaking would either blank the older hub sharing this control
+// plane, or push authors toward rebuilding tables, which is genuinely
+// destructive. It is admitted under three conditions, each of which is the
+// reason an older binary is unaffected:
+//
+//	The statement is ADD COLUMN. RENAME and DROP change or remove something
+//	that binary already reads; there is no version of those that is safe.
+//
+//	The column has a DEFAULT, or is nullable. An older binary's INSERTs name
+//	their columns explicitly and will never name this one, so the row it writes
+//	must be acceptable without it. A NOT NULL column with no default makes
+//	every one of those INSERTs fail — and SQLite rejects the ALTER itself, so
+//	this also refuses to bless a migration that cannot apply.
+//
+//	The column carries no constraint: not UNIQUE, not PRIMARY KEY, no
+//	REFERENCES, no CHECK. Each of those is a new rule an older binary's writes
+//	would have to satisfy without knowing it exists — a foreign key in
+//	particular can reject a row whose default does not resolve in the parent.
+//
+// What makes the first condition sufficient rather than merely necessary is
+// that nothing in this package issues `SELECT *`: every read names its columns,
+// so an appended one is invisible to a binary compiled before it. A reader that
+// did select everything and scan into a fixed struct would break on the extra
+// value, and that is the assumption to re-check if this is ever relaxed
+// further.
+//
+// An ALTER against a table the same migration created is additive whatever it
+// says: an older binary has no statements that name a table it has never heard
+// of.
+func additiveAlter(f []string, created map[string]bool) bool {
+	if len(f) < 5 || !strings.EqualFold(f[1], "TABLE") {
+		return false
+	}
+	table := identifier(f[2])
+
+	// "ADD COLUMN x" or the "COLUMN"-less "ADD x" SQLite also accepts.
+	rest := f[3:]
+	if !strings.EqualFold(rest[0], "ADD") {
+		return false
+	}
+	rest = rest[1:]
+	if len(rest) > 0 && strings.EqualFold(rest[0], "COLUMN") {
+		rest = rest[1:]
+	}
+	if len(rest) < 2 {
+		// A bare name with no type is a form this function did not anticipate.
+		return false
+	}
+
+	if created[table] {
+		return true
+	}
+
+	// Scan the column definition for anything that is a rule rather than a
+	// value. Checked over the whole remainder, not just the tokens this
+	// function understands, so an unanticipated keyword cannot slip past by
+	// sitting somewhere the parser does not look.
+	hasDefault := false
+	notNull := false
+	for i, tok := range rest[1:] {
+		switch strings.ToUpper(strings.Trim(tok, "\"`[]';,()")) {
+		case "UNIQUE", "PRIMARY", "REFERENCES", "CHECK", "COLLATE", "GENERATED", "AS":
+			return false
+		case "DEFAULT":
+			// A DEFAULT must actually have a value after it.
+			if i+2 > len(rest)-1 {
+				return false
+			}
+			hasDefault = true
+		case "NULL":
+			// Distinguish "NOT NULL" from a bare "NULL"; the NOT is the token
+			// before it.
+			if i > 0 && strings.EqualFold(rest[i], "NOT") {
+				notNull = true
+			}
+		}
+	}
+	if notNull && !hasDefault {
+		return false
+	}
+	return true
 }
 
 // isCreateModifier reports whether tok is one of the words SQLite allows

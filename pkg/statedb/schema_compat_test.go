@@ -100,9 +100,17 @@ func TestClassifyMigration(t *testing.T) {
 		sql:  `CREATE TRIGGER t_guard BEFORE INSERT ON tasks BEGIN SELECT 1; END;`,
 		want: CompatBreaking,
 	}, {
-		name: "adding a column changes a table the old binary writes",
+		// Reclassified by Task 20264, deliberately. An older binary names its
+		// columns in every statement — this package issues no `SELECT *` — so
+		// an appended column is invisible to its reads, and the DEFAULT means
+		// the INSERTs that omit it still produce a legal row. Holding the whole
+		// ALTER family as breaking would have blanked the older hub sharing
+		// this control plane the moment 0035 appended costs.identity. The
+		// constraint-bearing and NOT NULL-without-default forms stay breaking:
+		// see TestAddColumnIsAdditiveWhenAnOlderBinaryCannotTripOverIt.
+		name: "appending a defaulted column is invisible to an older binary",
 		sql:  `ALTER TABLE tasks ADD COLUMN executor TEXT NOT NULL DEFAULT '';`,
-		want: CompatBreaking,
+		want: CompatAdditive,
 	}, {
 		name: "dropping anything is breaking",
 		sql:  `DROP TABLE obsolete;`,
@@ -112,9 +120,12 @@ func TestClassifyMigration(t *testing.T) {
 		sql:  `UPDATE tasks SET status = 'pending' WHERE status = '';`,
 		want: CompatBreaking,
 	}, {
+		// The example changed with the ALTER reclassification above — the
+		// property did not. One statement an older binary could trip over
+		// condemns the whole migration however much of it is harmless.
 		name: "one breaking statement poisons an otherwise additive migration",
 		sql: `CREATE TABLE fine (id INTEGER PRIMARY KEY);
-			  ALTER TABLE tasks ADD COLUMN oops TEXT NOT NULL DEFAULT '';`,
+			  UPDATE tasks SET status = 'pending' WHERE status = '';`,
 		want: CompatBreaking,
 	}, {
 		name: "a migration with no statements is not blessed",
@@ -447,5 +458,112 @@ func TestBackfillNeverRevisesARecordedVerdict(t *testing.T) {
 	}
 	if MigrationCompat(compat) != CompatBreaking {
 		t.Errorf("compat = %q, want the recorded verdict to survive back-fill", compat)
+	}
+}
+
+// TestAddColumnIsAdditiveWhenAnOlderBinaryCannotTripOverIt covers the ALTER
+// family (Task 20264).
+//
+// The motivation is concrete. Migration 0035 appends costs.identity, and two
+// hubs on this deployment share one control plane — the older one was still
+// reading every project's database through this mechanism. Classifying every
+// ALTER as breaking would have blanked its dashboard the moment the newer hub
+// applied 0035, which is the exact outage this file was written to prevent.
+//
+// The negative cases matter more than the positive one: each is a column an
+// older binary's writes could not satisfy, and admitting one would hand it a
+// database it corrupts rather than one it refuses.
+func TestAddColumnIsAdditiveWhenAnOlderBinaryCannotTripOverIt(t *testing.T) {
+	cases := []struct {
+		name string
+		sql  string
+		want MigrationCompat
+	}{{
+		name: "NOT NULL with a default is invisible to an older binary",
+		sql:  `ALTER TABLE costs ADD COLUMN identity TEXT NOT NULL DEFAULT '';`,
+		want: CompatAdditive,
+	}, {
+		name: "a nullable column needs no default",
+		sql:  `ALTER TABLE costs ADD COLUMN note TEXT;`,
+		want: CompatAdditive,
+	}, {
+		name: "the COLUMN keyword is optional in SQLite",
+		sql:  `ALTER TABLE costs ADD identity TEXT NOT NULL DEFAULT '';`,
+		want: CompatAdditive,
+	}, {
+		// The whole point: an older binary's INSERT names its columns and will
+		// never name this one, so the row it writes would violate NOT NULL.
+		name: "NOT NULL without a default breaks every older INSERT",
+		sql:  `ALTER TABLE costs ADD COLUMN identity TEXT NOT NULL;`,
+		want: CompatBreaking,
+	}, {
+		name: "a unique column is a new rule on existing rows",
+		sql:  `ALTER TABLE costs ADD COLUMN slot TEXT UNIQUE DEFAULT '';`,
+		want: CompatBreaking,
+	}, {
+		name: "a foreign key can reject a row whose default does not resolve",
+		sql:  `ALTER TABLE costs ADD COLUMN owner TEXT DEFAULT '' REFERENCES users(id);`,
+		want: CompatBreaking,
+	}, {
+		name: "a check constraint likewise",
+		sql:  `ALTER TABLE costs ADD COLUMN n INTEGER DEFAULT 0 CHECK (n >= 0);`,
+		want: CompatBreaking,
+	}, {
+		name: "renaming a column changes something already read",
+		sql:  `ALTER TABLE costs RENAME COLUMN task_id TO task;`,
+		want: CompatBreaking,
+	}, {
+		name: "dropping one certainly does",
+		sql:  `ALTER TABLE costs DROP COLUMN task_id;`,
+		want: CompatBreaking,
+	}, {
+		name: "renaming the table does too",
+		sql:  `ALTER TABLE costs RENAME TO spend;`,
+		want: CompatBreaking,
+	}, {
+		// A table the same migration created cannot be one an older binary
+		// names, so anything done to it is invisible.
+		name: "an ALTER on a table this migration created is invisible",
+		sql: `CREATE TABLE IF NOT EXISTS fresh (id INTEGER PRIMARY KEY);
+		      ALTER TABLE fresh ADD COLUMN k TEXT NOT NULL;`,
+		want: CompatAdditive,
+	}}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := classifyMigration(tc.sql); got != tc.want {
+				t.Errorf("classifyMigration(%q) = %q, want %q", tc.sql, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestShippedMigrationsThatOnlyAppendAreAdditive checks the real files rather
+// than hand-written SQL, so a migration whose classification would strand an
+// older binary is caught here instead of in production.
+//
+// It asserts 0035 specifically because that is the one this behaviour was
+// added for, and asserting it by name is what stops a later edit to the
+// classifier from quietly reclassifying it.
+func TestShippedMigrationsThatOnlyAppendAreAdditive(t *testing.T) {
+	embedded, err := loadMigrations()
+	if err != nil {
+		t.Fatalf("loadMigrations: %v", err)
+	}
+	byVersion := map[int]migration{}
+	for _, m := range embedded {
+		byVersion[m.Version] = m
+	}
+
+	for _, v := range []int{35, 36} {
+		m, ok := byVersion[v]
+		if !ok {
+			t.Fatalf("migration %04d is missing", v)
+		}
+		if got := classifyMigration(m.SQL); got != CompatAdditive {
+			t.Errorf("migration %04d classifies as %q; an older hub sharing this "+
+				"control plane would refuse every database it is applied to",
+				v, got)
+		}
 	}
 }
