@@ -107,6 +107,32 @@ for spec in "$@"; do
   fi
 
   echo "=== fuzzing $target in $pkg for $FUZZTIME ==="
+
+  # The target has to exist, and `go test -fuzz` is no help in establishing
+  # that: when its pattern matches nothing it prints
+  #
+  #     testing: warning: no fuzz tests to fuzz
+  #
+  # and exits 0. So a target that is renamed, deleted, or misspelled in
+  # FUZZ_TARGETS leaves this script green while fuzzing nothing at all — the
+  # same way `go test -bench` reports ok for a benchmark that no longer
+  # exists, which the Benchmarks job in ci.yml already guards against. Ask for
+  # the listing instead: it names the target or it does not, so this fails
+  # closed rather than on the wording of a warning.
+  if ! listing="$("$GO" test "$pkg" -list "^${target}\$" 2>&1)"; then
+    printf '%s\n' "$listing"
+    echo "::error title=$target::$pkg does not build, so nothing was fuzzed"
+    status=1
+    continue
+  fi
+  if ! printf '%s\n' "$listing" | grep -qx "$target"; then
+    echo "::error title=$target::$pkg has no fuzz target named $target — renamed," \
+         "deleted, or misspelled. Nothing was fuzzed, and without this check that" \
+         "would have passed."
+    status=1
+    continue
+  fi
+
   log="$(mktemp)"
   corpus="$(corpus_dir "$pkg" "$target")"
   before="$(corpus_snapshot "$corpus")"
