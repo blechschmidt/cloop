@@ -267,7 +267,10 @@ func TestUpgradeRollsBackWhenTheServiceDoesNotComeBack(t *testing.T) {
 				return nil // healthy before the upgrade
 			}
 			return errors.New("inactive")
-		case "try-restart":
+		case "try-restart", "restart":
+			// Both verbs count: the upgrade uses try-restart and the rollback
+			// uses restart, and what this counter is asserting is that the
+			// service was brought up twice.
 			restarts++
 		}
 		return nil
@@ -290,6 +293,16 @@ func TestUpgradeRollsBackWhenTheServiceDoesNotComeBack(t *testing.T) {
 	// down is not a rollback, it is a different outage.
 	if restarts < 2 {
 		t.Errorf("the restored binary was never started (restarts=%d)", restarts)
+	}
+	// And started with `restart`, not the `try-restart` the upgrade uses.
+	// try-restart only acts on a unit that is currently running, and the unit
+	// being rolled back is by definition one that just failed to stay up — so
+	// try-restart would return success having done nothing, leaving the device
+	// with the good binary and a stopped agent.
+	joined := strings.Join(*f.commands, "\n")
+	if !strings.Contains(joined, "systemctl restart cloop-executor.service") {
+		t.Errorf("the rollback used try-restart, which is a no-op on a failed unit; commands:\n%s",
+			joined)
 	}
 	if !strings.Contains(err.Error(), "rolled back") ||
 		!strings.Contains(err.Error(), "still in the fleet") {
@@ -395,10 +408,10 @@ func TestUpgradeReportsAFailedRollback(t *testing.T) {
 				return nil
 			}
 			return errors.New("inactive")
-		case "try-restart":
+		case "try-restart", "restart":
 			restarts++
 			if restarts > 1 {
-				// The restore's own restart fails too.
+				// The restore's own start fails too.
 				return errors.New("Job for cloop-executor.service failed")
 			}
 		}

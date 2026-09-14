@@ -97,11 +97,37 @@ func (in *Installer) restoreBackup(s Spec, out Output, backup string) error {
 		return fmt.Errorf("restore %s from %s: %w", s.BinaryPath, backup, err)
 	}
 	in.logf("restored the previous %s", s.BinaryPath)
-	if _, err := in.restartService(s, out); err != nil {
+	if err := in.startService(s, out); err != nil {
 		return fmt.Errorf("the previous binary was restored but %s did not restart: %w",
 			s.ServiceName, err)
 	}
 	return nil
+}
+
+// startService brings the service up unconditionally.
+//
+// `restart`, not the `try-restart` an upgrade uses. The difference is the whole
+// point of this function: try-restart only acts on a unit that is *currently
+// running*, and the unit that needs rolling back is by definition one that just
+// failed to stay up — systemd has it in a failed state, so try-restart is a
+// no-op that returns success. The device would be left with the good binary on
+// disk, a stopped agent, and a command that reported it had recovered.
+//
+// Using restart here does not reopen the case try-restart exists for. An upgrade
+// must not start a service an operator deliberately stopped; rollback is only
+// reached when the service was observed running *before* the upgrade, so
+// starting it is restoring their state rather than overriding it.
+func (in *Installer) startService(s Spec, out Output) error {
+	switch out {
+	case OutputSystemd:
+		return in.run("systemctl", "restart", s.UnitFileName())
+	case OutputShell:
+		// The init script's restart is already `stop; start`, which starts
+		// unconditionally — the distinction above does not exist there.
+		return in.run(s.InitScriptPath(), "restart")
+	default:
+		return nil
+	}
 }
 
 // serviceActive reports whether the supervisor considers the service running,
