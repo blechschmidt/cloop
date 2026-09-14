@@ -297,12 +297,23 @@ The hub transcribes with hosted Whisper on Groq, and only that. `cloop listen`
 on your own machine also falls back to a local `openai-whisper` CLI, but the
 hub never does: that fallback starts a Python process per request, fed
 caller-supplied audio, beside the control plane — which is precisely what
-[no host execution](../security/model.md) forbids. So the hub needs a key:
+[no host execution](../security/model.md) forbids. So the hub needs a key.
+
+Set it in **Settings → Speech-to-text**, which needs no shell on the hub's
+host. The panel reports whether a key is in force and where it came from, and
+offers to remove one the hub itself stores. Or from the command line:
 
 ```bash
 cloop config set stt.groq_api_key gsk_...     # or export GROQ_API_KEY
 cloop config set stt.language en              # optional; empty auto-detects
 ```
+
+The Settings panel writes the key to the **hub's** `.cloop/config.yaml`, never
+to the project you happen to have selected, because that is the only config
+dictation reads — `/api/dictate` and `/api/transcribe` are called without a
+project index. It is therefore its own endpoint, `GET`/`PUT`/`DELETE
+/api/config/stt`, rather than a key on `/api/config/set`. The key is never sent
+back to the browser; only whether one is set.
 
 | Key | Default | What it does |
 | --- | --- | --- |

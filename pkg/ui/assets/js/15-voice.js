@@ -143,9 +143,11 @@ function setDictateState(state, text) {
   if (fresh) fresh.textContent = text || (lab ? lab.textContent : 'Dictate');
 }
 
-// Reveal the button only when the hub can actually transcribe. One call at
-// load; the answer depends on hub config, which does not change under the
-// user's feet often enough to be worth re-checking.
+// Reveal the button only when the hub can actually transcribe. Called at load,
+// and again by the Settings panel when the speech-to-text key changes
+// (Task 20250) — which is why it sets visibility both ways rather than only
+// revealing: clearing the key has to take the button away again, or it stays on
+// screen and fails the next time someone speaks into it.
 window.initTaskDictation = function() {
   const btn = dictateBtn();
   if (!btn) return;
@@ -154,11 +156,10 @@ window.initTaskDictation = function() {
   // could not create the task anyway, each get no button rather than one that
   // fails or sits permanently disabled.
   api('/api/dictate').then(d => {
-    if (d && d.available && d.can_add_tasks) {
-      btn.style.display = '';
-      btn.title = 'Dictate the task title (' + (d.backend || 'speech') + ')';
-    }
-  }).catch(() => { /* leave it hidden — no backend, no button */ });
+    const ok = !!(d && d.available && d.can_add_tasks);
+    btn.style.display = ok ? '' : 'none';
+    if (ok) btn.title = 'Dictate the task title (' + (d.backend || 'speech') + ')';
+  }).catch(() => { btn.style.display = 'none'; });
 };
 
 document.addEventListener('DOMContentLoaded', () => { window.initTaskDictation(); });

@@ -39,16 +39,23 @@ package ui
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/apierror"
 	"github.com/blechschmidt/cloop/pkg/authz"
 	"github.com/blechschmidt/cloop/pkg/config"
+	"github.com/blechschmidt/cloop/pkg/eventlog"
+	"github.com/blechschmidt/cloop/pkg/logger"
 	"github.com/blechschmidt/cloop/pkg/stt"
 )
 
@@ -103,9 +110,19 @@ type transcribeResponse struct {
 // project, while still letting a project that needs a different language or a
 // different endpoint say so locally.
 func (s *Server) sttConfig(r *http.Request) stt.Config {
-	merged := config.STTConfig{}
 	// Hub first, project second, so the project overwrites field by field.
-	for _, dir := range []string{s.WorkDir, s.resolveWorkDir(r)} {
+	return s.sttConfigFrom(s.WorkDir, s.resolveWorkDir(r))
+}
+
+// sttConfigFrom resolves settings by overlaying dirs in order, later winning.
+//
+// Split out of sttConfig so the settings panel can ask the narrower question
+// "what does the hub itself have?" — which is the one that matters, because
+// dictation is only ever called without a project index. See the settings
+// section at the bottom of this file.
+func (s *Server) sttConfigFrom(dirs ...string) stt.Config {
+	merged := config.STTConfig{}
+	for _, dir := range dirs {
 		if dir == "" {
 			continue
 		}
@@ -286,4 +303,233 @@ func audioExt(name string) string {
 		return ext
 	}
 	return ".webm"
+}
+
+// ── Settings: the dictation credential (Task 20250) ──────────────────────────
+//
+// Until now the key dictation runs on could only be set by editing config.yaml
+// or running `cloop config set stt.groq_api_key` on the hub's own host — which
+// the operator of a hosted hub may well not have a shell on. These three routes
+// put it in the Settings panel.
+//
+// # Why this is not just another /api/config/set key
+//
+// /api/config/set is project-scoped: it writes to resolveWorkDir(r), the
+// project the dashboard currently has selected. Dictation reads the other way
+// round — the front end calls /api/dictate and /api/transcribe with no project
+// index at all, so sttConfig resolves both overlays against s.WorkDir.
+//
+// Adding "stt.groq_api_key" to applyUIConfigKey would therefore have produced
+// the worst kind of working feature: the field saves, the toast says so, the
+// key lands in some project's config.yaml, and the button it was meant to turn
+// on stays hidden forever because nothing reads it there. So the credential
+// gets its own hub-scoped routes that write where dictation actually looks, and
+// the Settings tab — which labels itself "global" — keeps that promise here.
+
+// maxSTTKeyBytes bounds a pasted credential. Groq's are ~56 characters; this
+// leaves room for a longer token from an OpenAI-compatible endpoint while
+// keeping a misdirected paste of something else out of config.yaml.
+const maxSTTKeyBytes = 4096
+
+// hubConfigMu serialises the load-modify-save of the hub's config.yaml.
+//
+// config.Save is atomic, so the file is never torn — but two writers that both
+// read before either wrote would still lose one of the two edits. The window is
+// tiny and the contention is nil (an operator typing into a settings form), so
+// a plain mutex is the whole fix.
+var hubConfigMu sync.Mutex
+
+// sttSettings is the Settings panel's view of the dictation credential.
+//
+// The key itself is absent in both directions of the round trip. Returning it
+// would make every reader of the settings tab a holder of the hub's credential,
+// and a password field that round-trips its own value is how a secret ends up
+// in a browser cache, a screenshot or a DOM dump.
+type sttSettings struct {
+	// HasKey is whether dictation has a key from anywhere at all.
+	HasKey bool `json:"has_key"`
+
+	// Stored is whether the hub's own config.yaml holds one. It is what makes
+	// "Clear" meaningful: a key arriving from the environment is not ours to
+	// remove, and a button offering to would be lying.
+	Stored bool `json:"stored"`
+
+	// FromEnv is whether GROQ_API_KEY is currently the one in force, so the
+	// panel can say that saving here takes precedence over it.
+	FromEnv bool `json:"from_env"`
+
+	// Available and Reason mirror /api/dictate, so the panel can state the
+	// consequence — dictation is off, and why — beside the field that fixes
+	// it, rather than making the user go and find the button to discover it.
+	Available bool   `json:"available"`
+	Reason    string `json:"reason,omitempty"`
+
+	// Endpoint names what the key authenticates against. Worth showing because
+	// it is overridable: a field labelled "Groq" that is in fact pointed at
+	// some other OpenAI-compatible server should say so.
+	Endpoint string `json:"endpoint,omitempty"`
+}
+
+// hubSTTSettings reports the dictation credential state of the hub itself.
+//
+// Deliberately not parameterised by the request: a caller passing ?project_idx
+// would otherwise be shown a project's override as though it were what
+// dictation uses, which it is not.
+func (s *Server) hubSTTSettings() sttSettings {
+	cfg := s.sttConfigFrom(s.WorkDir)
+	stored := strings.TrimSpace(cfg.GroqAPIKey)
+	fromEnv := stored == "" && strings.TrimSpace(os.Getenv("GROQ_API_KEY")) != ""
+
+	available, reason := stt.HostedAvailable(cfg)
+	endpoint := cfg.Endpoint
+	if endpoint == "" {
+		endpoint = stt.DefaultEndpoint
+	}
+	return sttSettings{
+		Endpoint:  redactURLUserinfo(endpoint),
+		HasKey:    stored != "" || fromEnv,
+		Stored:    stored != "",
+		FromEnv:   fromEnv,
+		Available: available,
+		Reason:    reason,
+	}
+}
+
+// redactURLUserinfo strips any user:password embedded in a URL.
+//
+// stt.endpoint is operator-set and points at any OpenAI-compatible server, and
+// some of those take their credential in the URL. This response is readable by
+// anyone with project read, which is a wider audience than holds the key — so
+// the one field here that a secret could ride in gets it removed.
+func redactURLUserinfo(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		// Unparseable: return the scheme-ish prefix only rather than guess.
+		return ""
+	}
+	if u.User == nil {
+		return raw
+	}
+	u.User = url.User("redacted")
+	return u.String()
+}
+
+// handleSTTSettings serves GET /api/config/stt.
+func (s *Server) handleSTTSettings(w http.ResponseWriter, r *http.Request) {
+	jsonOK(w, s.hubSTTSettings())
+}
+
+// handleSTTSettingsSave serves PUT /api/config/stt.
+func (s *Server) handleSTTSettingsSave(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		GroqAPIKey string `json:"groq_api_key"`
+	}
+	limitJSONBody(w, r, maxJSONBodyBytes)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondToBodyError(w, err)
+		return
+	}
+	key := strings.TrimSpace(req.GroqAPIKey)
+	if key == "" {
+		// Not a silent no-op: a blank save is either a mis-click or an attempt
+		// to clear, and the second one has its own route that says so.
+		jsonErr(w, "groq_api_key is required — use DELETE /api/config/stt to remove the stored key",
+			http.StatusBadRequest)
+		return
+	}
+	if err := validateSTTKey(key); err != nil {
+		jsonErr(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := s.writeHubSTTKey(key); err != nil {
+		jsonErr(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	s.auditSTTCredential(r, "stt.credential.set")
+	jsonOK(w, s.hubSTTSettings())
+}
+
+// handleSTTSettingsClear serves DELETE /api/config/stt.
+func (s *Server) handleSTTSettingsClear(w http.ResponseWriter, r *http.Request) {
+	if err := s.writeHubSTTKey(""); err != nil {
+		jsonErr(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	s.auditSTTCredential(r, "stt.credential.cleared")
+	jsonOK(w, s.hubSTTSettings())
+}
+
+// writeHubSTTKey stores key as the hub's dictation credential, or removes it
+// when key is empty.
+func (s *Server) writeHubSTTKey(key string) error {
+	hubConfigMu.Lock()
+	defer hubConfigMu.Unlock()
+
+	cfg, err := config.Load(s.WorkDir)
+	if err != nil {
+		return fmt.Errorf("load hub config: %w", err)
+	}
+	if cfg == nil {
+		return errors.New("load hub config: no configuration")
+	}
+	cfg.STT.GroqAPIKey = key
+	if err := config.Save(s.WorkDir, cfg); err != nil {
+		return fmt.Errorf("save hub config: %w", err)
+	}
+	return nil
+}
+
+// validateSTTKey rejects a credential that cannot work, before it is stored
+// rather than after someone has spoken a sentence into a button.
+//
+// The length bound keeps a misdirected paste out of config.yaml. The character
+// check is the one that earns its place: the key is interpolated into an
+// Authorization header, and Go's HTTP client refuses to send a header value
+// holding a newline or a control byte. Without this, such a key would store
+// happily and then fail every transcription with an error about the request,
+// pointing nowhere near the stray newline that a copy-paste put in it.
+func validateSTTKey(key string) error {
+	if len(key) > maxSTTKeyBytes {
+		return fmt.Errorf("api key is too long (%d bytes, limit %d)", len(key), maxSTTKeyBytes)
+	}
+	for i := 0; i < len(key); i++ {
+		if c := key[i]; c < 0x20 || c == 0x7f {
+			return errors.New("api key contains a control character — check for a stray newline in the pasted value")
+		}
+	}
+	return nil
+}
+
+// auditSTTCredential records a change to the hub-wide dictation credential.
+//
+// The payload names no part of the key, not even a length or a prefix: the
+// audit log is read by more people than hold the credential, and "which
+// characters did it start with" is not a question it needs to answer.
+//
+// Best-effort, matching every other emitter here — a wedged journal must not
+// stop an operator fixing their configuration.
+func (s *Server) auditSTTCredential(r *http.Request, eventType string) {
+	actor := s.auditActor(r)
+	if actor == "" {
+		actor = "anonymous"
+	}
+	log, err := eventlog.Open(s.WorkDir)
+	if err != nil {
+		if err != eventlog.ErrNoProject {
+			s.log().Warn(logger.EventAuthz, 0, "stt credential audit: open event log",
+				map[string]interface{}{"error": err.Error()})
+		}
+		return
+	}
+	defer log.Close()
+	if err := log.Append(&eventlog.AuditEvent{
+		Actor:      actor,
+		EventType:  eventType,
+		EntityType: "config",
+		EntityID:   "stt.groq_api_key",
+		Payload:    `{"scope":"hub"}`,
+	}); err != nil {
+		s.log().Warn(logger.EventAuthz, 0, "stt credential audit: append",
+			map[string]interface{}{"error": err.Error()})
+	}
 }

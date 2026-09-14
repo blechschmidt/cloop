@@ -1112,6 +1112,32 @@
         </div>
 
         <!--
+          Dictation credential (Task 20250). Hub-wide, unlike every field above
+          it: the dictate button and the glasses both call /api/transcribe with
+          no project index, so one key here serves every project. It therefore
+          writes through /api/config/stt rather than /api/config/set, which
+          would have filed it under whichever project happened to be selected
+          and left the button hidden. See dictate_api.go.
+        -->
+        <div class="settings-section">
+          <h3>Speech-to-text <span id="sttKeyStatus"></span></h3>
+          <p style="font-size:12px;color:var(--muted);margin-bottom:12px">
+            The key behind the <strong>Dictate</strong> button on the Tasks tab and on the display
+            glasses. Transcription is hosted (Groq Whisper) — the hub never runs a speech model on
+            the control-plane host. Set once here and every project can use it.
+          </p>
+          <div class="form-group">
+            <label class="form-label" for="cfgGroqKey">Groq API key (leave blank to keep existing)</label>
+            <input class="form-input" id="cfgGroqKey" type="password" autocomplete="off" placeholder="gsk_...">
+          </div>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <button class="btn settings-save" onclick="saveSTTCfg()">Save</button>
+            <button class="btn danger" id="sttClearBtn" style="display:none" onclick="clearSTTCfg()">Clear key</button>
+          </div>
+          <div id="sttStatusNote" style="font-size:12px;color:var(--muted);margin-top:10px"></div>
+        </div>
+
+        <!--
           Display glasses (Task 20194). Per-user, not per-project: the link is
           a credential belonging to whoever is signed in, and it reaches every
           project that user can already see. Lives in Settings rather than in

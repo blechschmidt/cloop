@@ -455,6 +455,15 @@ func (s *Server) routeTable() []routeSpec {
 			MethodPerms: map[string]authz.Permission{http.MethodGet: read},
 		},
 		{Pattern: "/api/config/set", Handler: s.handleConfigSet, Perm: cfgWrite, Scope: scopeProject},
+
+		// The dictation credential is hub-wide, not per project: /api/dictate
+		// and /api/transcribe are called with no project index, so they resolve
+		// against s.WorkDir alone. scopeGlobal puts the write where the read
+		// already looks — see dictate_api.go (Task 20250).
+		{Pattern: "GET /api/config/stt", Handler: s.handleSTTSettings, Perm: read, Scope: scopeGlobal},
+		{Pattern: "PUT /api/config/stt", Handler: s.handleSTTSettingsSave, Perm: cfgWrite, Scope: scopeGlobal},
+		{Pattern: "DELETE /api/config/stt", Handler: s.handleSTTSettingsClear, Perm: cfgWrite, Scope: scopeGlobal},
+
 		{Pattern: "POST /api/options/toggle", Handler: s.handleOptionsToggle, Perm: cfgWrite, Scope: scopeProject},
 		{Pattern: "POST /api/options/max-parallel", Handler: s.handleMaxParallelSet, Perm: cfgWrite, Scope: scopeProject},
 		{Pattern: "POST /api/options/step-timeout", Handler: s.handleStepTimeoutSet, Perm: cfgWrite, Scope: scopeProject},
