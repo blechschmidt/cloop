@@ -47,6 +47,22 @@ const (
 	ActionLeaseRevokeAcked  Action = "lease.revoke_acked"
 	ActionLeaseRevokeFailed Action = "lease.revoke_failed"
 
+	// ActionAppTokenDestroy records a GitHub App installation token being
+	// destroyed at GitHub (Task 20254).
+	//
+	// It is deliberately not ActionRevoke. A github_app token is destroyed on
+	// every ordinary lease release, so folding these rows into `secret.revoke`
+	// would make "how many grants did an operator withdraw" a number dominated
+	// by routine task teardown — and the one question the revoke series exists
+	// to answer would stop having an answer.
+	//
+	// It is also not ActionRelease, for the reason the lease.revoke_* family is
+	// separate from it: a release says a workload finished with a credential,
+	// while this says a credential stopped existing. When the DELETE fails the
+	// first is still true and the second is not, and an incident response needs
+	// to be able to tell those apart.
+	ActionAppTokenDestroy Action = "github_app.token_destroy"
+
 	// Egress actions come from pkg/egressbroker, which brokers the hub's
 	// Internet connection as a fourth grantable resource alongside GitHub
 	// repositories, PATs, and Kubernetes clusters.

@@ -152,11 +152,14 @@ where mode is r, rw (the default) or rwm. Grants then select from it by name:
 // validateMintPayload checks the payloads whose validity is knowable at mint
 // time, so the mistake is caught in front of the person who typed it.
 //
-// Two of the eight kinds qualify, and they are the two whose payload is a
+// Three of the eight kinds qualify. Two are the ones whose payload is a
 // reference to something on a host rather than a credential: a local_repo root
-// and a host_device inventory. For the rest — a PAT, a kubeconfig, a registry
-// login — "is this correct" is a question only the remote side can answer, and
-// guessing here would refuse working credentials.
+// and a host_device inventory. The third is github_app, whose payload is a
+// structured document the hub itself parses — an app ID, an installation ID and
+// an RS256 signing key — so "is this well-formed" is answerable here and a
+// malformed one can never mint anything. For the rest — a PAT, a kubeconfig, a
+// registry login — "is this correct" is a question only the remote side can
+// answer, and guessing here would refuse working credentials.
 //
 // Doing it before Mint rather than inside the broker is deliberate. Mint stores
 // bytes and is not the layer that knows what they mean; the delivery rule is,
@@ -179,6 +182,15 @@ func validateMintPayload(kind secretbroker.Kind, payload []byte) error {
 		// this path exist" is a question about the wrong machine. Preflight asks
 		// it on the right one.
 		_, err := secretbroker.ParseDeviceInventory(payload)
+		return err
+	case secretbroker.KindGitHubApp:
+		// The kind whose payload is least likely to be right on the first try:
+		// JSON assembled by hand out of two numbers from one GitHub page and a
+		// PEM file from another. The classic mistake — pasting a PAT under
+		// --kind github_app — used to be stored happily, because nothing ever
+		// looked at the payload. It now cannot mint anything, so refusing it
+		// here is the difference between a typo and a broken run.
+		_, err := secretbroker.ParseGitHubApp(payload)
 		return err
 	}
 	return nil

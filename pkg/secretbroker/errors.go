@@ -56,6 +56,22 @@ var (
 	// requires (e.g. a kubeconfig that is not valid YAML).
 	ErrMalformedPayload = errors.New("secretbroker: malformed secret payload")
 
+	// GitHub App minting errors (Task 20254).
+	//
+	// Separate from ErrMalformedPayload because they describe a failure at
+	// GitHub rather than in the stored credential, and separate from each
+	// other because they call for opposite responses: a failed mint denies a
+	// lease and the run does not start, while a failed revoke means a live
+	// credential outlived the lease that carried it and needs chasing.
+
+	// ErrGitHubAppMint: a GitHub App installation token could not be minted.
+	// The grant is denied — the private key is never delivered as a fallback.
+	ErrGitHubAppMint = errors.New("secretbroker: github app token mint failed")
+	// ErrGitHubAppRevoke: a minted installation token could not be destroyed
+	// at GitHub. It still lapses on GitHub's own expiry, but until then it is
+	// a credential nothing here can take back.
+	ErrGitHubAppRevoke = errors.New("secretbroker: github app token revoke failed")
+
 	// ErrNoKey: CLOOP_SECRET_KEY is unset, so payloads can be neither
 	// sealed nor opened.
 	ErrNoKey = errors.New("secretbroker: CLOOP_SECRET_KEY is not set")

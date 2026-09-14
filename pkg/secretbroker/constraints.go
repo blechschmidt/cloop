@@ -157,6 +157,17 @@ func (c Constraints) ValidateFor(kind Kind) error {
 				"%w: a %s grant needs a repository allowlist (--repos org/*, or --repos '*' to allow all)",
 				ErrInvalidConstraint, kind)
 		}
+		if kind == KindGitHubApp {
+			// A github_app grant's permissions are sent to GitHub verbatim, so
+			// their syntax has a right answer and a typo has a consequence:
+			// GitHub answers "pull_requests:maybe" with a 422 at lease time,
+			// inside someone else's run. Checked here, in front of the operator
+			// who wrote it. github_pat permissions stay free-form because
+			// nothing transmits them — AllowsPermission is the only reader.
+			if _, err := GitHubAppPermissions(c); err != nil {
+				return err
+			}
+		}
 	case KindKubeconfig:
 		if len(c.Namespaces) == 0 && len(c.Contexts) == 0 {
 			return fmt.Errorf(

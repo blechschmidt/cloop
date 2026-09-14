@@ -511,6 +511,17 @@ func (s *Server) handleSecretCreate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// A github_app payload is structured — an app ID, an installation ID and an
+	// RS256 signing key — and the hub parses it to mint installation tokens, so
+	// a malformed one is a secret that can never produce a credential. Catching
+	// it here means the person pasting the JSON sees the problem, rather than a
+	// run failing at lease time with nobody able to trace it back.
+	if kind == secretbroker.KindGitHubApp {
+		if _, err := secretbroker.ParseGitHubApp([]byte(req.Payload)); err != nil {
+			apierror.WriteError(w, apierror.New(apierror.CodeInvalidInput, err.Error()))
+			return
+		}
+	}
 
 	bs, ok := s.openBrokersOr(w)
 	if !ok {

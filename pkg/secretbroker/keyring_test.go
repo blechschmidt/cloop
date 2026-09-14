@@ -718,7 +718,7 @@ func TestReadsFailLoudlyOnceAKEKIsRetired(t *testing.T) {
 	// And through the broker, where an operator would actually meet it: the
 	// specific cause survives the wrapping, so `errors.Is` at any layer can
 	// distinguish a shredded key from a corrupt payload.
-	if _, merr := b.materialFor(stranded, Grant{ID: "g", SecretID: stranded.ID}); merr == nil {
+	if _, merr := b.materialFor(context.Background(), stranded, Grant{ID: "g", SecretID: stranded.ID}, &mints{}); merr == nil {
 		t.Fatal("materialFor succeeded against a retired key")
 	} else if !errors.Is(merr, ErrKeyRetired) || !errors.Is(merr, ErrSealFailed) {
 		t.Errorf("materialFor err = %v; want both ErrKeyRetired and ErrSealFailed", merr)

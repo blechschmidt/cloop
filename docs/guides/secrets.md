@@ -39,9 +39,13 @@ current grants each time.
 
 **Minimisation is the point.** For `kubeconfig`, `registry` and `env`, the
 broker *rewrites the payload* before delivery — a narrower credential cannot be
-widened by whoever holds it. `github_pat` and `github_app` are enforced at the
-point of use instead, because GitHub has no API to narrow an already-issued
-token. `egress_proxy`'s allowlist is enforced by the executor's network policy.
+widened by whoever holds it. `github_app` is narrowed by GitHub itself: the hub
+keeps the App's private key and mints a fresh ~1 h installation token scoped to
+the grant's repositories and permissions for each lease. `github_pat` is the one
+GitHub kind enforced at the point of use instead, because GitHub has no API to
+narrow an already-issued token — which is why
+[`github_app` is the one to prefer](../security/model.md#github_pat-versus-github_app).
+`egress_proxy`'s allowlist is enforced by the executor's network policy.
 `local_repo` is minimised by *selection* — only the repositories its allowlist
 matches are ever bound, and the bind is read-only unless the grant says
 otherwise. [The security model](../security/model.md#what-is-not-mitigated) is
@@ -62,7 +66,7 @@ cloop secret mint <name> --kind <kind> [--file <path> | --value <literal>]
 | Kind | Payload |
 | --- | --- |
 | `github_pat` | a GitHub personal access token |
-| `github_app` | GitHub App installation JSON (`app_id`, `installation_id`, `private_key`) |
+| `github_app` | GitHub App installation JSON: `app_id`, `installation_id`, `private_key`, optional `base_url`. The hub mints short-lived installation tokens from it and never delivers the key — [worked example](#github-repositories-and-pats) |
 | `kubeconfig` | a kubeconfig YAML document |
 | `registry` | docker `config.json`, or `user:password` |
 | `env` | one or more environment variables |
@@ -186,9 +190,57 @@ rather than starting a sandbox that would hold `GIT_CONFIG_GLOBAL` pointing at
 nothing and no token behind it. See
 [Secret file delivery](../architecture/executors.md#secret-file-delivery).
 
-**`github_app`** is minted and granted identically — `--kind github_app` with an
-installation JSON payload — and is constrained by the same `--repos` /
-`--permissions` flags.
+**`github_app`** is granted with the same `--repos` / `--permissions` flags, but
+the payload is a strict JSON document rather than a token, and what the sandbox
+receives is not what you stored.
+
+```
+$ cat app.json
+{
+  "app_id": 424242,
+  "installation_id": 313131,
+  "private_key": "-----BEGIN RSA PRIVATE KEY-----\nMIIEow...\n-----END RSA PRIVATE KEY-----\n"
+}
+
+$ cloop secret mint deploy-app --kind github_app --file app.json
+✓ minted deploy-app (github_app) as sec_9f14c2e0a7b36d5148e1cc02
+
+$ cloop secret grant deploy-app --to project:/srv/app \
+    --repos 'acme/tool' --permissions contents:write --ttl 24h
+```
+
+`app_id` and `installation_id` come from the App's settings page; `private_key`
+is the PEM the **Generate a private key** button downloads, with its newlines
+escaped as `\n` (`jq -Rs` does this). Both IDs must be integers and the key must
+parse as RSA — a malformed payload is refused by `cloop secret mint` and by the
+dashboard, rather than being stored and failing inside somebody's run. Add
+`"base_url": "https://ghe.example.com/api/v3"` for GitHub Enterprise Server.
+
+At lease time the hub signs a nine-minute JWT with that key and exchanges it for
+an installation token narrowed to the repositories the grant allows and the
+permissions it names. **Only the token is delivered.** The private key never
+leaves the hub, the token expires in about an hour, each lease renewal mints a
+fresh one and destroys the old, and releasing or revoking calls
+`DELETE /installation/token` so the credential dies at GitHub rather than only
+on the sandbox's disk. Each destruction is audited as `github_app.token_destroy`
+— its own action rather than `secret.revoke`, because it happens on every
+ordinary task teardown and would otherwise drown the count of grants an operator
+actually withdrew. A DELETE that GitHub refuses is recorded as a **denial**
+naming how long the token stays live, which is the row to search for during an
+incident.
+
+Two consequences worth knowing before you pick this kind:
+
+- **The hub needs reach to `api.github.com`.** A mint that fails denies the
+  grant — there is no fallback to delivering the key, because that fallback is
+  the thing this design exists to prevent. An air-gapped hub uses `github_pat`.
+- **A grant naming a repository the App is not installed on is refused**, with
+  the missing repository named, instead of producing a token that 404s at the
+  first clone. `--repos 'acme/*'` is resolved against the installation's actual
+  repository list, so the same check covers globs.
+
+[The security model](../security/model.md#github_pat-versus-github_app) has the
+side-by-side comparison and says when a PAT is still the right answer.
 
 The [git interception proxy](../git-interception-proxy.md) does **not** change
 any of this. It brokers the one repository cloop itself clones and pushes back

@@ -438,6 +438,66 @@ overwriting the bytes: the value becomes unreachable and is collected, but a
 memory dump taken in that window can still contain it. Files, which are
 mutable, *are* zeroed before being unlinked.
 
+### `github_pat` versus `github_app`
+
+Both kinds authenticate to the same GitHub and both are delivered through the
+same credential helper. They differ in what the *sandbox* ends up holding, and
+that difference decides how much a leak costs.
+
+| | `github_pat` | `github_app` |
+| --- | --- | --- |
+| What the hub stores | the token itself | an App ID, an installation ID and an RS256 **private key** |
+| What the sandbox receives | that same token | an installation token minted for this lease |
+| Who enforces the repository allowlist | cloop's credential helper, at `git`'s request | **GitHub**, on every call |
+| Lifetime in the sandbox | the PAT's own, typically months | ~1 hour, re-minted each lease period |
+| Revocation | wipe the file; the token itself is untouched | wipe the file **and** `DELETE /installation/token` |
+| If the workload reads the file and calls the REST API directly | unconstrained — the PAT is whatever GitHub issued | constrained — GitHub refuses anything outside the grant |
+
+**Prefer `github_app`.** It is the only kind where the constraint an operator
+writes becomes a constraint GitHub enforces. `--repos 'acme/tool'` on a PAT is a
+rule the credential helper applies to `git`; on an App it is the
+`repository_ids` field of the mint request, and a `curl` against
+`api.github.com/repos/acme/other` from inside the sandbox gets a 404 regardless
+of what the workload intended. `--permissions contents:read` is the same story:
+on an App it becomes `{"contents":"read"}` in the mint request, so a push fails
+at GitHub rather than being a rule nothing checks.
+
+**The private key never leaves the hub.** This is the property that makes the
+above worth anything, and it is not a free consequence of the design — before
+[Task 20254](#the-guarantee--test-table) the broker delivered the App payload
+verbatim, which handed sandboxes a credential with *no* expiry that could mint
+tokens for *every* repository in the installation. That is strictly worse than a
+PAT. The hub now signs a JWT valid for nine minutes, exchanges it for a scoped
+installation token, and delivers only the token;
+`tests/security/githubapp_test.go` sweeps every executor-visible surface for the
+key in raw, base64, hex and URL-encoded forms.
+
+**Choose `github_pat` when you cannot install an App.** A personal fork, a
+repository in an organisation you do not administer, or a GitHub Enterprise
+Server without App support leaves the PAT as the only option. It is a real
+control — the helper genuinely withholds the token for repositories outside the
+allowlist, and `tests/security` proves it against `git` itself — it is simply a
+control cloop enforces rather than one GitHub does. Scope the PAT as narrowly as
+GitHub's fine-grained tokens allow and treat the allowlist as defence in depth,
+not as the boundary.
+
+**What the App costs.** Three things, all of them real:
+
+- **The hub needs reach to `api.github.com`.** A mint that fails denies the
+  grant; there is deliberately no fallback to delivering the key, because the
+  fallback *is* the vulnerability. An air-gapped hub must use `github_pat`.
+- **A grant naming a repository the App is not installed on is refused**, rather
+  than producing a token that 404s at the first clone. The refusal names the
+  repository and says to add it to the installation.
+- **Resolving a glob costs an extra round trip.** `--repos 'acme/*'` is not
+  something GitHub can be told, so the broker enumerates the installation with a
+  throwaway `metadata:read` token — destroyed before the call returns, and
+  unable to read a line of code — and mints against the resulting IDs. The
+  inventory is cached for ten minutes, so a renewing lease does not re-enumerate.
+  A concrete `--repos 'acme/tool'` pays the same round trip and gets a precise
+  error when the repository is absent.
+
+
 ### What it is worth after a hub restart
 
 **Undiminished, on every backend.** A revocation issued after a restart reaches
@@ -1386,6 +1446,30 @@ what it is looking for.
 | A symlink planted in a lease directory does not redirect the wipe onto its target | `TestVaultDoesNotFollowSymlinks` (`pkg/executor/agent`) |
 | Scrubbing is race-safe against a task concurrently reading the credential | `TestVaultConcurrentReadAndScrub`, `TestScrubEnvConcurrentWithStatusAndSignal` |
 
+### GitHub App token minting — `githubapp_test.go`
+
+The one credential kind where the hub holds a *key generator* rather than a
+credential, and therefore the one where "what does the sandbox actually get"
+has a wrong answer that looks plausible. See
+[`github_pat` versus `github_app`](#github_pat-versus-github_app).
+
+| Guarantee | Test |
+| --- | --- |
+| No byte of the App private key reaches a materialised mount's files or environment, a sandbox delivery, the marshalled lease, or the audit trail — in raw, base64, hex or URL-encoded form | `TestGitHubAppPrivateKeyNeverReachesAnExecutor` |
+| The hub authenticates to GitHub with a signature over the key, not by forwarding it: every request carries a three-part JWS and no PEM | `TestGitHubAppPrivateKeyNeverReachesAnExecutor` |
+| …and the sweep is not vacuous: the delivered file holds the minted installation token, scoped to exactly the repository the grant named | `TestGitHubAppPrivateKeyNeverReachesAnExecutor` |
+| Releasing the lease destroys the token **at GitHub**, not only on the sandbox's disk | `TestGitHubAppTokenDiesAtGitHubOnRelease` |
+| A free-form payload — a PAT pasted under `--kind github_app`, a bare PEM, a non-integer `app_id` — is refused at mint time rather than at lease time | `TestParseGitHubAppRejectsFreeFormBlob` (`pkg/secretbroker`) |
+| The app JWT is RS256 and its `exp - iat` stays inside GitHub's 600-second maximum | `TestAppJWTIsRS256AndShortLived` (`pkg/secretbroker`) |
+| The grant's repository allowlist becomes GitHub's `repository_ids`, including for globs resolved against the installation | `TestLeaseMintsScopedInstallationToken`, `TestLeaseResolvesGlobAgainstInstallation` (`pkg/secretbroker`) |
+| A grant that allows pushes gets `contents:write`; one that does not gets `contents:read` | `TestLeaseWritePermissionFollowsTheGrant` (`pkg/secretbroker`) |
+| A repository outside the installation is refused loudly, and the refusal blames the installation rather than the pattern (and vice versa) | `TestLeaseFailsLoudlyOnScopeMismatch`, `TestSelectInstallationReposDistinguishesTheTwoFailures` (`pkg/secretbroker`) |
+| A failed mint — unreachable GitHub, or a hub with no API client — **denies the grant** rather than falling back to delivering the key | `TestMintFailureDeniesRatherThanFallingBack`, `TestBrokerWithoutGitHubClientDeniesAppGrants` (`pkg/secretbroker`) |
+| Renewal mints a fresh token and destroys the previous one, so a long run does not accumulate one live credential per lease period | `TestRenewMintsFreshTokenAndKillsTheOld` (`pkg/secretbroker`) |
+| Revoking the grant, deleting the secret, and sweeping an expired lease each destroy live tokens at GitHub | `TestRevokeGrantDestroysLiveTokens`, `TestDeleteSecretDestroysLiveTokens`, `TestSweepExpiredDestroysTokens` (`pkg/secretbroker`) |
+| A revocation GitHub refuses lands in the audit trail as a denial naming how long the token stays live | `TestRevokeFailureIsAudited` (`pkg/secretbroker`) |
+| The throwaway token that enumerates the installation is `metadata:read` only, and the inventory is cached so a renewal does not re-enumerate | `TestDiscoveryTokenIsMetadataOnly`, `TestInventoryIsCachedAcrossLeases` (`pkg/secretbroker`) |
+
 ### Credential destruction — `destruction_test.go`
 
 Revocation is a credential being *taken back*; destruction is a credential
@@ -1812,7 +1896,9 @@ no API to narrow an already-issued PAT, so the broker ships a git credential
 helper that releases the token only for allowlisted paths. That binds `git`. It
 does not bind a workload that reads the token file and calls the REST API
 directly. A bare `GITHUB_TOKEN` is exported only when the allowlist is explicitly
-`*`.
+`*`. `github_app` does not have this limitation — see
+[`github_pat` versus `github_app`](#github_pat-versus-github_app) — and is the
+kind to prefer where the choice is available.
 
 **A revoked environment variable stays in the running process.** Scrubbing
 removes the agent's copies; the child keeps its own, because nothing can reach

@@ -40,12 +40,38 @@ type Broker struct {
 	seal    sealer
 	keyring *Keyring
 	auditor Auditor
+	// appMinter turns a stored GitHub App credential into a short-lived,
+	// repository-scoped installation token. See githubapp.go.
+	appMinter *githubAppMinter
 
 	mu     sync.Mutex
 	leases map[string]*leaseState
+	// minted holds the GitHub App installation tokens this broker is
+	// responsible for destroying, keyed by lease ID.
+	//
+	// It is the difference between revocation and forgetting. Every other
+	// credential kind is minimized from something the operator already holds,
+	// so withdrawing it means wiping a file; an App token is a credential this
+	// hub brought into existence at GitHub, and nothing but a DELETE takes it
+	// back. Losing this map would leave live tokens with no owner.
+	minted map[string][]appToken
 
 	clock       func() time.Time
 	maxLeaseTTL time.Duration
+}
+
+// appToken is one GitHub App installation token the hub minted, remembered for
+// exactly as long as it takes to destroy it.
+//
+// The token field is a credential and is why this type is unexported with no
+// accessors: it must reach the revocation call and nothing else.
+type appToken struct {
+	grantID    string
+	secretID   string
+	secretName string
+	baseURL    string
+	token      string
+	expiresAt  time.Time
 }
 
 // leaseState remembers what a lease was issued for, so Renew can re-evaluate
@@ -120,6 +146,21 @@ func WithKeyring(kr *Keyring) Option {
 	}
 }
 
+// WithGitHubApp supplies the GitHub API client used to mint, enumerate and
+// destroy App installation tokens.
+//
+// Without it a broker talks to api.github.com. Tests substitute a fake so the
+// suite is hermetic, and a hub with no outbound access can substitute one that
+// refuses — which denies github_app grants rather than falling back to
+// delivering the private key, because there is no safe fallback.
+func WithGitHubApp(api GitHubAppAPI) Option {
+	return func(b *Broker) {
+		if api != nil {
+			b.appMinter = newGitHubAppMinter(api, nil)
+		}
+	}
+}
+
 // New builds a Broker over store. Unless WithCipher is supplied, the payload
 // key is derived from CLOOP_SECRET_KEY, and New fails if it is unset —
 // a broker that cannot open payloads would otherwise fail later, at lease
@@ -132,12 +173,21 @@ func New(store Store, opts ...Option) (*Broker, error) {
 		store:       store,
 		auditor:     nopAuditor{},
 		leases:      make(map[string]*leaseState),
+		minted:      make(map[string][]appToken),
 		clock:       time.Now,
 		maxLeaseTTL: DefaultMaxLeaseTTL,
 	}
 	for _, opt := range opts {
 		opt(b)
 	}
+	if b.appMinter == nil {
+		b.appMinter = newGitHubAppMinter(defaultGitHubAppAPI, nil)
+	}
+	// The minter shares the broker's clock so a test that advances time to
+	// exercise lease expiry sees the same "now" on both sides; a token whose
+	// freshness was judged against the wall clock while its lease was judged
+	// against a fake one is a test that proves nothing.
+	b.appMinter.clock = b.clock
 	if b.seal == nil {
 		// A store that can hold a KEK registry gets envelope encryption and
 		// online rotation; one that cannot keeps the single-key behaviour.
@@ -288,6 +338,13 @@ func (b *Broker) DeleteSecret(ctx context.Context, ref, actor string) error {
 			if rerr := b.store.RevokeGrant(g.ID, now); rerr != nil {
 				return b.denyf(ev, ErrInvalidGrant, "revoke dependent grant %s: %v", g.ID, rerr)
 			}
+			// Deleting the App credential does not reach the tokens already
+			// minted from it — those live at GitHub, not here — so they are
+			// destroyed with the grants that produced them. Otherwise deleting
+			// a secret would be the one withdrawal that leaves live credentials
+			// behind, which is the opposite of what an operator deleting a
+			// credential during an incident is asking for.
+			b.destroyGrantTokens(ctx, g.ID, "secret "+s.Name+" deleted")
 		}
 	}
 	if err := b.store.DeleteSecret(s.ID); err != nil {
@@ -449,6 +506,11 @@ func (b *Broker) Revoke(ctx context.Context, grantID, actor string) error {
 	if err := b.store.RevokeGrant(grantID, b.now()); err != nil {
 		return b.denyf(ev, ErrInvalidGrant, "revoke: %v", err)
 	}
+	// For a github_app grant the hub minted the credential, so it can end it
+	// now instead of waiting out the lease period. Done after the store write:
+	// if the write fails the grant is still live, and killing its tokens would
+	// break a running workload that the grant still authorises.
+	b.destroyGrantTokens(ctx, grantID, "grant "+grantID+" revoked")
 
 	ev.Decision = DecisionAllow
 	b.emit(ev)
@@ -499,6 +561,7 @@ func (b *Broker) LeaseFor(ctx context.Context, r Requester, actor string) (*Leas
 	var (
 		materials []Material
 		earliest  time.Time
+		rec       mints
 	)
 	for _, g := range grants {
 		if !g.Subject.Matches(r) {
@@ -531,7 +594,7 @@ func (b *Broker) LeaseFor(ctx context.Context, r Requester, actor string) (*Leas
 		}
 		ev.SecretName, ev.Kind = s.Name, s.Kind
 
-		mat, merr := b.materialFor(s, g)
+		mat, merr := b.materialFor(ctx, s, g, &rec)
 		if merr != nil {
 			_ = b.denyErr(ev, merr)
 			continue
@@ -549,6 +612,10 @@ func (b *Broker) LeaseFor(ctx context.Context, r Requester, actor string) (*Leas
 
 	id, err := newLeaseID()
 	if err != nil {
+		// Any App token minted above now belongs to a lease that will never
+		// exist. Destroy it here rather than let it live out GitHub's hour as
+		// a credential no record points at.
+		b.destroyAppTokens(ctx, rec.tokens, "lease creation failed")
 		return nil, err
 	}
 	lease := &Lease{
@@ -564,6 +631,9 @@ func (b *Broker) LeaseFor(ctx context.Context, r Requester, actor string) (*Leas
 	b.mu.Lock()
 	b.leases[lease.ID] = &leaseState{
 		requester: r, actor: actor, expiresAt: lease.ExpiresAt, kinds: kinds,
+	}
+	if len(rec.tokens) > 0 {
+		b.minted[lease.ID] = rec.tokens
 	}
 	b.mu.Unlock()
 	for _, k := range kinds {
@@ -620,6 +690,14 @@ func (b *Broker) Renew(ctx context.Context, leaseID string) (*Lease, error) {
 	delete(b.leases, leaseID)
 	b.mu.Unlock()
 
+	// And the credentials it carried are retired with it. The renewal above
+	// already minted a fresh installation token with a full hour ahead of it,
+	// which is what "refresh before expiry" means here: the workload never
+	// holds a token close to its expiry, because each lease period replaces it.
+	// Destroying the previous one is what stops a renewed run leaving a trail
+	// of live tokens behind, one per lease period.
+	b.destroyLeaseTokens(ctx, leaseID, "lease renewed as "+renewed.ID)
+
 	// Renewal is counted in addition to the issue that LeaseFor already
 	// counted, not instead of it: cloop_secret_lease_events_total{event="issued"}
 	// is "how many leases came into existence", which a renewal genuinely
@@ -642,13 +720,26 @@ func (b *Broker) Renew(ctx context.Context, leaseID string) (*Lease, error) {
 	return renewed, nil
 }
 
-// Release drops a lease's server-side record. Callers should Close the
-// Mount as well; Release only stops the lease from being renewable.
+// Release drops a lease's server-side record and destroys any credential the
+// hub minted for it. Callers should Close the Mount as well; wiping the lease
+// directory is what removes the copy on disk, and this is what removes the one
+// at GitHub.
+//
+// It takes no context because every caller is an executor cleanup path that has
+// already finished its work. The revocation gets its own bounded deadline
+// instead (appRevokeTimeout), so a hub cannot block on api.github.com while a
+// task teardown waits behind it.
 func (b *Broker) Release(leaseID string) {
 	b.mu.Lock()
 	st, ok := b.leases[leaseID]
 	delete(b.leases, leaseID)
 	b.mu.Unlock()
+
+	// Before the early return: a lease whose state record is already gone —
+	// swept, or released twice — may still have tokens to destroy, and
+	// returning here would strand them.
+	b.destroyLeaseTokens(context.Background(), leaseID, "lease released")
+
 	if !ok {
 		return
 	}
@@ -688,6 +779,7 @@ func (b *Broker) SweepExpired() (expired, live map[Kind]int) {
 	live = make(map[Kind]int)
 	now := b.now()
 
+	var lapsed []string
 	b.mu.Lock()
 	for id, st := range b.leases {
 		if now.Before(st.expiresAt) {
@@ -697,16 +789,114 @@ func (b *Broker) SweepExpired() (expired, live map[Kind]int) {
 			continue
 		}
 		delete(b.leases, id)
+		lapsed = append(lapsed, id)
 		for _, k := range st.kinds {
 			expired[k]++
 		}
 	}
 	b.mu.Unlock()
 
+	// An expired lease is the ordinary end of a task that was killed, or of an
+	// executor that went away without releasing — which is exactly the case
+	// where a minted App token would otherwise survive with nothing pointing at
+	// it. Destroy outside the lock: these are network calls.
+	for _, id := range lapsed {
+		b.destroyLeaseTokens(context.Background(), id, "lease expired")
+	}
+
 	for k, n := range expired {
 		hubmetrics.LeaseEvents.Add(float64(n), string(k), hubmetrics.LeaseExpired)
 	}
 	return expired, live
+}
+
+// ---------------------------------------------------------------------------
+// GitHub App token destruction
+// ---------------------------------------------------------------------------
+
+// destroyLeaseTokens revokes every App installation token minted for leaseID.
+//
+// Idempotent and cheap when there is nothing to do, which matters because
+// Release is on every task-teardown path: a lease with no App material takes
+// one map lookup and returns.
+func (b *Broker) destroyLeaseTokens(ctx context.Context, leaseID, reason string) {
+	b.mu.Lock()
+	tokens := b.minted[leaseID]
+	delete(b.minted, leaseID)
+	b.mu.Unlock()
+	if len(tokens) == 0 {
+		return
+	}
+	b.destroyAppTokens(ctx, tokens, reason)
+}
+
+// destroyGrantTokens revokes every App token minted under grantID, across every
+// lease still holding one.
+//
+// This is what makes Revoke mean "the credential is dead" rather than "the next
+// renewal will not include it". For every other kind the distinction is bounded
+// by the lease TTL and that is the deal the short TTL buys; for an App token the
+// hub is the party that created the credential, so it is the party that can end
+// it now.
+func (b *Broker) destroyGrantTokens(ctx context.Context, grantID, reason string) {
+	if strings.TrimSpace(grantID) == "" {
+		return
+	}
+	var doomed []appToken
+	b.mu.Lock()
+	for leaseID, tokens := range b.minted {
+		var keep []appToken
+		for _, t := range tokens {
+			if t.grantID == grantID {
+				doomed = append(doomed, t)
+				continue
+			}
+			keep = append(keep, t)
+		}
+		if len(keep) == 0 {
+			delete(b.minted, leaseID)
+		} else {
+			b.minted[leaseID] = keep
+		}
+	}
+	b.mu.Unlock()
+	b.destroyAppTokens(ctx, doomed, reason)
+}
+
+// destroyAppTokens calls DELETE /installation/token for each token and audits
+// the outcome.
+//
+// A failure is emitted as a denial rather than swallowed: the token outlives the
+// lease that carried it until GitHub's own expiry, and an operator responding to
+// an incident needs to know which credential is still live and for how long. The
+// error is not returned because every caller is a cleanup path with nothing
+// useful to do with it — the audit row is the report.
+func (b *Broker) destroyAppTokens(ctx context.Context, tokens []appToken, reason string) {
+	if len(tokens) == 0 || b.appMinter == nil || b.appMinter.api == nil {
+		return
+	}
+	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), appRevokeTimeout)
+	defer cancel()
+
+	for _, t := range tokens {
+		ev := Event{
+			Action:     ActionAppTokenDestroy,
+			GrantID:    t.grantID,
+			SecretID:   t.secretID,
+			SecretName: t.secretName,
+			Kind:       KindGitHubApp,
+			ExpiresAt:  t.expiresAt,
+		}
+		if err := b.appMinter.api.RevokeInstallationToken(rctx, t.baseURL, t.token); err != nil {
+			_ = b.denyf(ev, ErrGitHubAppRevoke,
+				"%s: installation token could not be destroyed and stays live until %s: %v",
+				reason, t.expiresAt.UTC().Format(time.RFC3339), err)
+			continue
+		}
+		ev.Decision = DecisionAllow
+		ev.Reason = reason + ": installation token destroyed at GitHub"
+		b.emit(ev)
+	}
 }
 
 // CheckRepoAccess is the in-process enforcement point for github grants: it
