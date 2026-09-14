@@ -167,6 +167,13 @@ const harness = {
   eventSources: [],
   requests: [],      // every URL fetched, in order
   routes: {},        // extra canned responses, keyed by path prefix
+  // HTTP status per route prefix, defaulting to 200. Needed because the
+  // bundle's parseAPIResponse branches on the status before it looks at the
+  // body: 401 reopens the login modal and 403 rejects the promise, so a
+  // renderer that only handles an error *body* still leaves "Loading…" on
+  // screen for a caller whose role was refused. A body alone cannot express
+  // that difference.
+  routeStatus: {},
 };
 globalThis.__harness = harness;
 
@@ -199,8 +206,14 @@ globalThis.fetch = function(url, opts) {
   const u = String(url);
   harness.requests.push({url: u, method: (opts && opts.method) || 'GET'});
 
+  // Insertion order, so a test that registers both '/api/executors/edge-1'
+  // and '/api/executors' must register the longer one first — the same
+  // longest-prefix discipline ServeMux applies for it, stated here because
+  // this loop does not.
   for (const prefix of Object.keys(harness.routes)) {
-    if (u.startsWith(prefix)) return jsonResponse(harness.routes[prefix]);
+    if (u.startsWith(prefix)) {
+      return jsonResponse(harness.routes[prefix], harness.routeStatus[prefix]);
+    }
   }
   if (u.startsWith('/api/state'))    return jsonResponse(stateFor(projectIdxOf(u)));
   if (u.startsWith('/api/projects')) return jsonResponse(harness.projects);

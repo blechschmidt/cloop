@@ -2468,6 +2468,23 @@
   </div>
 </div>
 
+<!--
+  Executor detail drill-in (Task 20258): what has actually run on one executor.
+  The hub's central promise is that the web UI never spawns a harness on the
+  host; this is the only screen where that promise can be checked after the
+  fact, per device, against the attribution stamped on each task.
+-->
+<div id="executor-detail-overlay" onclick="if(event.target===this)closeExecutorDetail()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
+  <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;width:760px;max-width:95vw;max-height:90vh;overflow:auto">
+    <h2 id="execDetailTitle" style="font-size:15px;font-weight:600;margin-bottom:2px">Executor</h2>
+    <div id="execDetailSub" style="font-family:monospace;font-size:11px;color:var(--muted);margin-bottom:16px"></div>
+    <div id="execDetailBody"></div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeExecutorDetail()">Close</button>
+    </div>
+  </div>
+</div>
+
 <!-- Provider / Model picker modal -->
 <div id="provider-model-overlay" onclick="if(event.target===this)closeProviderModelModal()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
   <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;width:520px;max-width:95vw">

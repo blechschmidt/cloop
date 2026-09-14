@@ -196,6 +196,14 @@ function _renderExecutors(d) {
   list.innerHTML = execs.map((ex, i) => {
     const kind = _execKindLabel(ex.kind);
     let h = '<div class="exec-card' + (ex.blocked ? ' blocked' : '') + '">';
+    // Everything above the action row is the drill-in target (Task 20258).
+    // The wrapper exists so the buttons below stay outside it: a card-wide
+    // handler would need the buttons to stopPropagation, and an onclick whose
+    // first token is `event` is invisible to the reachability gate in
+    // frontend_test.go — the fix would have quietly disabled the check that
+    // keeps Cordon and Drain wired.
+    h += '<div class="exec-card-main" onclick="openExecutorDetail(' + i + ')" '
+      + 'title="Show what has actually run on this executor">';
     h += '<div class="exec-card-head">';
     h += '<span class="exec-dot ' + _execDotClass(ex.status) + '" title="' + esc(ex.status || 'unknown') + '"></span>';
     h += '<span class="exec-name">' + esc(ex.name || ex.id) + '</span>';
@@ -280,9 +288,14 @@ function _renderExecutors(d) {
       }
     }
 
+    h += '</div>'; // .exec-card-main
+
     h += '<div class="exec-actions">';
     // Index-based dispatch, never an interpolated string: an executor name
     // with a quote in it is exactly how Tasks 163/20033 broke.
+    h += '<button class="btn" style="padding:3px 9px;font-size:11.5px" '
+      + 'onclick="openExecutorDetail(' + i + ')" '
+      + 'title="In-flight work, recent completions, and whether anything ran on the host">History</button>';
     if (ex.admin_held) {
       h += '<button class="btn" style="padding:3px 9px;font-size:11.5px" onclick="uncordonExecutor(' + i + ')">Uncordon</button>';
     } else {
@@ -385,6 +398,280 @@ window.drainExecutor = function(idx) {
       loadExecutors();
     })
     .catch(() => toast('Failed to drain executor', 'err'));
+};
+
+// ── Executor detail drill-in (Task 20258) ───────────────────────────────────
+//
+// GET /api/executors/{id} is where the hub's central promise stops being a
+// claim and becomes checkable: it reports, per executor, what is running now,
+// what recently finished, and how many of those tasks ran as a process on the
+// hub's own machine. The endpoint had computed all of that since Task 20244
+// and no frontend code called it, so the one screen that could audit the
+// no-host-execution guarantee did not exist.
+//
+// Two rules shape everything below, because getting either wrong turns an
+// audit view into false reassurance:
+//
+//   1. A number that was not measured is never rendered as a measurement.
+//      A capped sweep says "lower bound"; a request that was refused or failed
+//      says so and renders no figures at all. "We found no host runs" and "we
+//      could not look" must never paint the same pixels.
+//   2. host_total is stated in words, not buried in a counter. An operator
+//      scanning this panel should not have to notice that a 3 is not a 0.
+
+// execDetailRefs backs the index dispatch for task rows, the same way execData
+// backs the card actions: a project path or task title interpolated into an
+// onclick attribute is the bug class of Tasks 163/20033.
+let execDetailRefs = [];
+
+window.openExecutorDetail = function(idx) {
+  const ex = _execAt(idx);
+  if (!ex) return;
+  execDetailRefs = [];
+
+  const title = document.getElementById('execDetailTitle');
+  if (title) title.textContent = 'What ran on ' + (ex.name || ex.id);
+  const sub = document.getElementById('execDetailSub');
+  if (sub) sub.textContent = ex.id + ' · ' + _execKindLabel(ex.kind);
+  const body = document.getElementById('execDetailBody');
+  if (body) body.innerHTML = '<div class="exec-detail-note">Loading…</div>';
+  const ov = document.getElementById('executor-detail-overlay');
+  if (ov) ov.style.display = 'flex';
+
+  // Not pUrl(): this is fleet data, gated by executor.read on an executor
+  // scope. Appending the selected project would suggest a project filter the
+  // route does not apply.
+  api('/api/executors/' + encodeURIComponent(ex.id))
+    .then(d => {
+      // A 404 body arrives here rather than as a rejection — parseAPIResponse
+      // only diverts 401 and 403 — and on this route 404 is also the answer a
+      // caller who may not read the fleet gets, because require() withholds
+      // existence rather than confirming it with a 403. Both must land in the
+      // same "we could not look" branch.
+      if (!d || d.error) { _renderExecutorDetailError(d && d.error); return; }
+      _renderExecutorDetail(d);
+    })
+    .catch(err => _renderExecutorDetailError(err));
+};
+
+window.closeExecutorDetail = function() {
+  const ov = document.getElementById('executor-detail-overlay');
+  if (ov) ov.style.display = 'none';
+  execDetailRefs = [];
+};
+
+// _execDetailErrText pulls a sentence out of whatever the failure arrived as:
+// a structured API error body, a bare string, or a rejected promise.
+function _execDetailErrText(e) {
+  if (!e) return '';
+  if (typeof e === 'string') return e;
+  if (e.message) return e.message;
+  if (e.error) return _execDetailErrText(e.error);
+  return String(e);
+}
+
+// _renderExecutorDetailError is the honest failure state. It deliberately
+// renders no counts: a panel that showed "0 tasks ran on the host" after a
+// refused or failed request would be reporting the absence of an answer as a
+// clean bill of health, which is the single worst thing this view could do.
+function _renderExecutorDetailError(e) {
+  const body = document.getElementById('execDetailBody');
+  if (!body) return;
+  const detail = _execDetailErrText(e);
+  let h = '<div class="exec-detail-verdict unknown">';
+  h += '<strong>&#9888; This executor’s history could not be read.</strong>';
+  h += '<div>No counts are shown, on purpose. An unread history is not an empty one, '
+    + 'so no figure here would mean anything &mdash; least of all a zero.</div>';
+  if (detail) {
+    h += '<div class="exec-detail-note">' + esc(detail) + '</div>';
+  }
+  h += '<div class="exec-detail-note">If your role does not cover the fleet, this is what '
+    + 'you are meant to see: the hub answers &ldquo;no such executor&rdquo; rather than '
+    + 'confirming one exists that you may not read.</div>';
+  h += '</div>';
+  body.innerHTML = h;
+}
+
+// _execHostVerdict is the headline. Three outcomes, and the middle one is the
+// reason this function exists rather than an inline ternary: a sweep that hit
+// its cap cannot distinguish "nothing ran on the host" from "the host runs are
+// in the projects we did not read".
+function _execHostVerdict(w) {
+  const n = w.host_total || 0;
+  if (n > 0) {
+    const one = n === 1;
+    return '<div class="exec-detail-verdict bad">'
+      + '<strong>&#9888; ' + esc(n) + ' task' + (one ? '' : 's')
+      + ' ran directly on this host.</strong>'
+      + '<div>No sandbox stood between ' + (one ? 'it' : 'them') + ' and the hub’s own '
+      + 'filesystem, network and credentials. On a hub configured never to execute a harness '
+      + 'on the host, ' + (one ? 'this run is' : 'these runs are') + ' the finding.</div>'
+      + (w.projects_truncated
+          ? '<div>The sweep was capped, so the real count may be higher.</div>'
+          : '')
+      + '</div>';
+  }
+  if (w.projects_truncated) {
+    return '<div class="exec-detail-verdict unknown">'
+      + '<strong>No host execution found &mdash; but not every project was read.</strong>'
+      + '<div>The sweep stopped at its cap, so zero is a lower bound rather than a clean '
+      + 'record. Narrow the fleet, or check the projects beyond the cap directly, before '
+      + 'treating this as evidence.</div></div>';
+  }
+  // A sweep that read nothing is the same false reassurance as a capped one,
+  // reached by a different route: every project the hub serves can fail to
+  // load — no plan yet, a directory that moved, a database it cannot open —
+  // and the sweep skips each one silently. A fresh hub hits this on its first
+  // day, which is exactly when someone checks the guarantee for the first
+  // time and is least placed to know that a green tick meant "nothing read".
+  if (!w.projects_scanned) {
+    return '<div class="exec-detail-verdict unknown">'
+      + '<strong>No project history was read.</strong>'
+      + '<div>Not one project could be loaded, so there is nothing here to support a '
+      + 'claim either way. On a hub whose projects have plans, this points at the '
+      + 'projects themselves &mdash; moved, never initialised, or an unreadable '
+      + 'state database.</div></div>';
+  }
+  return '<div class="exec-detail-verdict good">'
+    + '<strong>&#10003; Nothing attributed to this executor ran on the host.</strong>'
+    + '<div>Every task below was placed inside an isolation boundary.</div></div>';
+}
+
+// _execCoverageNote says how much of the fleet the figures cover. Without it an
+// empty history is indistinguishable from an unread one — the same failure the
+// error state above guards against, one step less severe.
+function _execCoverageNote(w) {
+  const scanned = w.projects_scanned || 0;
+  let s = 'Swept ' + scanned + ' project' + (scanned === 1 ? '' : 's') + '.';
+  if (w.projects_truncated) {
+    s += ' The sweep stopped at the hub’s cap: projects past it were not read at all, '
+       + 'so every number on this panel is a lower bound.';
+  } else if (!scanned) {
+    // A literal em dash, not an entity: this string goes through esc() below,
+    // which would render "&mdash;" as those seven characters.
+    s += ' Every project the hub serves was skipped — none has a plan this '
+       + 'sweep could read.';
+  }
+  const off = w.projects_truncated || !scanned;
+  return '<div class="exec-detail-note' + (off ? ' warn' : '') + '">' + esc(s) + '</div>';
+}
+
+// _execTaskRow renders one attributed task and registers it for index dispatch.
+function _execTaskRow(ref) {
+  const i = execDetailRefs.push(ref) - 1;
+  let h = '<div class="exec-task-row' + (ref.on_host ? ' on-host' : '') + '">';
+  h += '<button class="exec-task-link" onclick="openExecutorTaskRef(' + i + ')" '
+    + 'title="Open this task in its project">#' + esc(ref.id) + ' '
+    + esc(ref.title || '(untitled)') + '</button>';
+  h += '<div class="exec-task-meta">';
+  h += '<span class="exec-chip">' + esc(ref.project_name || ref.project_path || 'unknown project') + '</span>';
+  h += '<span class="exec-chip">' + esc(ref.status || 'unknown') + '</span>';
+  if (ref.isolation) {
+    h += '<span class="exec-chip ' + (ref.isolation === 'none' ? 'neg' : 'pos') + '">'
+      + esc(ref.isolation) + '</span>';
+  }
+  // Repeated per row even though the verdict above already counts them: the
+  // verdict says how many, this says which, and an operator needs the second
+  // to do anything about the first.
+  if (ref.on_host) {
+    h += '<span class="exec-chip neg" title="This task ran as a process on the hub’s '
+      + 'own machine.">ran on host</span>';
+  }
+  if (ref.completed_at) {
+    h += '<span>finished ' + esc(relTime(new Date(ref.completed_at))) + '</span>';
+  } else if (ref.started_at) {
+    h += '<span>started ' + esc(relTime(new Date(ref.started_at))) + '</span>';
+  }
+  h += '</div></div>';
+  return h;
+}
+
+function _renderExecutorDetail(d) {
+  const body = document.getElementById('execDetailBody');
+  if (!body) return;
+  const w = (d && d.workload) || {};
+  const inFlight = w.in_flight || [];
+  const completed = w.completed || [];
+  let h = '';
+
+  // Liveness first and briefly — the card already carries it, and repeating it
+  // here only matters because "last heartbeat two days ago" changes how the
+  // history below should be read.
+  h += '<div class="exec-detail-meta">';
+  h += '<span>Status: ' + esc(d.status || 'unknown') + '</span>';
+  if (d.sched_state) h += '<span>Scheduling: ' + esc(d.sched_state) + '</span>';
+  h += '<span>Last heartbeat: '
+    + (d.last_heartbeat ? esc(relTime(new Date(d.last_heartbeat))) : 'never reported') + '</span>';
+  if (d.last_seen) h += '<span>Last seen: ' + esc(relTime(new Date(d.last_seen))) + '</span>';
+  if (d.projects && d.projects.length) {
+    h += '<span>Bound to ' + esc(d.projects.length) + ' project'
+      + (d.projects.length === 1 ? '' : 's') + '</span>';
+  }
+  h += '</div>';
+
+  h += _execHostVerdict(w);
+  h += _execCoverageNote(w);
+
+  // In flight. Never truncated by the backend, so the count is exact.
+  h += '<div class="exec-detail-section"><h3>In flight (' + esc(inFlight.length) + ')</h3>';
+  h += inFlight.length
+    ? inFlight.map(_execTaskRow).join('')
+    : '<div class="exec-detail-note">Nothing is running here right now.</div>';
+  h += '</div>';
+
+  // Recent completions. The backend caps the list but counts the total, so say
+  // both rather than letting 25 rows imply 25 tasks.
+  const total = w.completed_total || completed.length;
+  let head = 'Recent completions';
+  if (total > completed.length) {
+    head += ' (showing ' + completed.length + ' of ' + total + ')';
+  } else {
+    head += ' (' + completed.length + ')';
+  }
+  h += '<div class="exec-detail-section"><h3>' + esc(head) + '</h3>';
+  h += completed.length
+    ? completed.map(_execTaskRow).join('')
+    : '<div class="exec-detail-note">No finished task is attributed to this executor.</div>';
+  h += '</div>';
+
+  // Attributed but neither running nor finished — reset after a previous run,
+  // most often. Shown because otherwise a non-zero host count above two short
+  // lists reads as a bug in this panel rather than as the history it is.
+  if (w.not_running) {
+    const one = w.not_running === 1;
+    h += '<div class="exec-detail-note">' + esc(w.not_running) + ' further task'
+      + (one ? ' carries' : 's carry') + ' this executor’s attribution but '
+      + (one ? 'is' : 'are') + ' neither running nor finished — reset after '
+      + 'a previous run. ' + (one ? 'It is' : 'They are') + ' counted in the host '
+      + 'figure above, because the run that stamped ' + (one ? 'it' : 'them')
+      + ' did happen.</div>';
+  }
+
+  body.innerHTML = h;
+}
+
+// openExecutorTaskRef walks back from a fleet row to the project that owns it.
+//
+// The executor sweep reads every project the hub serves, which is not the same
+// set as the project list this browser holds. When the two disagree, say so
+// rather than navigating to whatever sits at that index — sending an operator
+// to the wrong project's task #7 is worse than not moving at all.
+window.openExecutorTaskRef = function(i) {
+  const ref = execDetailRefs[i];
+  if (!ref) return;
+  const projects = (window._lastProjectsData && window._lastProjectsData.projects) || [];
+  let pIdx = -1;
+  for (let k = 0; k < projects.length; k++) {
+    if (projects[k] && projects[k].path === ref.project_path) { pIdx = k; break; }
+  }
+  if (pIdx < 0) {
+    toast('Not in your project list: ' + (ref.project_name || ref.project_path || 'unknown project'), 'err');
+    return;
+  }
+  closeExecutorDetail();
+  openProject(pIdx, projects[pIdx].name || ref.project_name || '');
+  switchTab('tasks');
+  openTaskDetails(ref.id);
 };
 
 // ── Enrollment ──────────────────────────────────────────────────────────────
