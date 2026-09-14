@@ -385,26 +385,7 @@ func (s *Server) Start() error {
 // it triggers a bounded graceful shutdown (10s) and returns nil.
 func (s *Server) Run(ctx context.Context) error {
 	mux := http.NewServeMux()
-
-	// OpenAPI spec — no auth required so tooling can discover it.
-	mux.HandleFunc("GET /openapi.json", s.handleOpenAPI)
-
-	// Plan
-	mux.HandleFunc("GET /plan", s.handleGetPlan)
-
-	// Tasks
-	mux.HandleFunc("PATCH /tasks/{id}", s.handlePatchTask)
-
-	// Run control
-	mux.HandleFunc("POST /run/start", s.handleRunStart)
-	mux.HandleFunc("POST /run/stop", s.handleRunStop)
-
-	// Status & metrics
-	mux.HandleFunc("GET /status", s.handleStatus)
-	mux.HandleFunc("GET /metrics", s.handleMetrics)
-
-	// Artifacts
-	mux.HandleFunc("GET /artifacts/{taskId}", s.handleArtifact)
+	s.registerRoutes(mux)
 
 	addr := ":" + strconv.Itoa(s.Port)
 

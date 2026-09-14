@@ -68,7 +68,7 @@ func TestNonAdminCannotRaiseOwnQuotaThroughAnyRoute(t *testing.T) {
 		}
 		seen[handler] = true
 
-		method, _ := splitPattern(rs.Pattern)
+		method, _, _ := splitPattern(rs.Pattern)
 		perm := rs.permFor(method)
 		if perm != authz.PermUserManage {
 			t.Errorf("route %q writes a quota but requires %q — anything short of "+

@@ -134,6 +134,13 @@ var versionAPISource string
 //go:embed telemetry_api.go
 var telemetryAPISource string
 
+// openAPIAPISource is pkg/ui/openapi_api.go (Task 20257). It carries no
+// broadcast, but it registers GET /api/openapi.json, and the route-drift and
+// authz tests read the accepted verbs out of the handler body.
+//
+//go:embed openapi_api.go
+var openAPIAPISource string
+
 // routesSource is pkg/ui/routes.go, which holds the declarative route table
 // (Task 20164). Routes moved out of server.go when registration started
 // carrying a required permission, so the architectural tests that scan for
@@ -152,7 +159,8 @@ func allUISources() string {
 		"\n" + tokensAPISource + "\n" + sessionsAPISource + "\n" + quotasAPISource +
 		"\n" + reproduceAPISource + "\n" + ledgerAPISource + "\n" + retentionAPISource +
 		"\n" + executorsInventorySource + "\n" + executorDetailAPISource +
-		"\n" + versionAPISource + "\n" + telemetryAPISource
+		"\n" + versionAPISource + "\n" + telemetryAPISource +
+		"\n" + openAPIAPISource
 }
 
 // dashboardSource is the whole dashboard front end — the rendered index.html

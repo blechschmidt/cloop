@@ -1,5 +1,5 @@
 .PHONY: build test test-unit test-e2e test-e2e-update e2e-stack fuzz bench clean \
-        docs-check docs-stage docs-site docs-serve release-dist
+        docs-api docs-check docs-stage docs-site docs-serve release-dist
 
 BINARY := cloop
 
@@ -145,6 +145,15 @@ $(DOCS_VENV): website/requirements.txt
 	@$(DOCS_VENV)/bin/pip install --quiet --upgrade pip
 	@$(DOCS_VENV)/bin/pip install --quiet -r website/requirements.txt
 	@touch $(DOCS_VENV)
+
+## docs-api: regenerate docs/reference/http-api.md from the route tables
+#
+# The page is generated rather than written, so this is the only correct way to
+# change it. `go test ./tests/docs` fails when the checked-in copy no longer
+# matches the routes pkg/ui and pkg/apiserver register.
+docs-api:
+	@$(GO) test ./tests/docs -run TestHTTPAPIReference -update -count=1
+	@echo "==> regenerated docs/reference/http-api.md"
 
 ## docs-check: structural check — every page indexed, every relative link resolves
 docs-check:

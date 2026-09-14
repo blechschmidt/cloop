@@ -65,8 +65,48 @@ type routeSpec struct {
 	// the write requires more.
 	MethodPerms map[string]authz.Permission
 
+	// Methods names the verbs this route actually serves, and is required
+	// for — and only meaningful on — a pattern registered without a method
+	// prefix (Task 20257).
+	//
+	// http.ServeMux hands such a pattern every verb, so the pattern alone
+	// says nothing about what the route answers: 31 of them are registered
+	// this way, most so the handler's own method check stays reachable
+	// rather than falling through to "/" and answering a JSON client with
+	// an HTML page. That left the route table unable to describe its own
+	// surface — a machine-readable description could recover the path and
+	// the permission but had to guess the verb, and a guess in a generated
+	// document is worse than no document.
+	//
+	// This field is documentation, not enforcement: it does not narrow what
+	// the mux accepts, and the handler still performs its own check. What
+	// it does is make the omission impossible to ship — validate() rejects
+	// a method-less route that does not declare it, the way it already
+	// rejects one that declares no permission.
+	Methods []string
+
 	// Scope selects how the request's authz scope is derived.
 	Scope scopeKind
+}
+
+// methods returns the verbs this route serves. For a method-prefixed pattern
+// that is the prefix; otherwise it is the declared Methods.
+func (rs routeSpec) methods() []string {
+	if m, _, ok := splitPattern(rs.Pattern); ok {
+		return []string{m}
+	}
+	return rs.Methods
+}
+
+// splitPattern separates an optional method prefix from a ServeMux pattern.
+// ok is false when the pattern carries no method, in which case the mux
+// routes every verb to it.
+func splitPattern(pattern string) (method, path string, ok bool) {
+	method, path, found := strings.Cut(pattern, " ")
+	if !found {
+		return "", pattern, false
+	}
+	return method, strings.TrimSpace(path), true
 }
 
 // permFor returns the permission required for this request's method.
@@ -99,6 +139,29 @@ func (rs routeSpec) validate() error {
 		}
 		if p != authz.PermPublic && !p.Valid() {
 			return fmt.Errorf("route %q declares unknown permission %q for %s", rs.Pattern, p, method)
+		}
+	}
+	if method, _, ok := splitPattern(rs.Pattern); ok {
+		if len(rs.Methods) > 0 {
+			return fmt.Errorf("route %q carries the method prefix %s and must not also declare Methods", rs.Pattern, method)
+		}
+	} else {
+		// A pattern with no method prefix accepts every verb from the
+		// mux, so it has to say which ones it answers or it cannot be
+		// described. See the Methods field comment.
+		if len(rs.Methods) == 0 {
+			return fmt.Errorf("route %q is registered without a method prefix and must declare Methods", rs.Pattern)
+		}
+		for _, m := range rs.Methods {
+			if m != strings.ToUpper(m) || strings.TrimSpace(m) != m || m == "" {
+				return fmt.Errorf("route %q declares malformed method %q", rs.Pattern, m)
+			}
+			// Declaring a verb the gate refuses would document an
+			// endpoint that answers 405 to every caller.
+			if !methodAllowed(rs.permFor(m), m) {
+				return fmt.Errorf("route %q declares method %s, but that verb resolves to %q and is refused as read-only",
+					rs.Pattern, m, rs.permFor(m))
+			}
 		}
 	}
 	return nil
@@ -250,6 +313,10 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 		}
 		mux.HandleFunc(rs.Pattern, s.gate(rs))
 	}
+
+	// Render the API description from the same table, once, here rather
+	// than per request — see renderedOpenAPI in openapi_api.go.
+	s.buildOpenAPI()
 }
 
 // routeTable is the complete set of dashboard routes with their access
@@ -283,11 +350,11 @@ func (s *Server) routeTable() []routeSpec {
 		// The SPA shell and its assets: authMiddleware already decided
 		// whether this caller may load the dashboard at all, and the app
 		// renders only what /api/me says the user can do.
-		{Pattern: "/", Handler: s.handleDashboard, Perm: public},
+		{Pattern: "/", Handler: s.handleDashboard, Methods: []string{"GET"}, Perm: public},
 		// The dashboard's CSS, JS and vendored Chart.js, addressed by
 		// content hash. A subtree pattern rather than one route per file
 		// because the paths change with their contents (see static.go).
-		{Pattern: "/assets/", Handler: s.handleAsset, Perm: public},
+		{Pattern: "/assets/", Handler: s.handleAsset, Methods: []string{"GET"}, Perm: public},
 
 		// The display-glasses shell (Task 20194). Public for the same
 		// reason "/" is: authMiddleware has already decided whether this
@@ -334,13 +401,13 @@ func (s *Server) routeTable() []routeSpec {
 		{Pattern: "GET /api/version", Handler: s.handleVersion, Perm: public},
 
 		// ── Project state (read) ─────────────────────────────────────
-		{Pattern: "/api/state", Handler: s.handleState, Perm: read, Scope: scopeProject},
-		{Pattern: "/api/steps", Handler: s.handleSteps, Perm: read, Scope: scopeProject},
-		{Pattern: "/api/ws", Handler: s.handleWS, Perm: read, Scope: scopeProject},
-		{Pattern: "/api/events", Handler: s.handleEvents, Perm: read, Scope: scopeProject},
-		{Pattern: "/api/event-history", Handler: s.handleEventHistory, Perm: read, Scope: scopeProject},
-		{Pattern: "/api/livelog", Handler: s.handleLiveLog, Perm: read, Scope: scopeProject},
-		{Pattern: "/api/timeline", Handler: s.handleTimeline, Perm: read, Scope: scopeProject},
+		{Pattern: "/api/state", Handler: s.handleState, Methods: []string{"GET"}, Perm: read, Scope: scopeProject},
+		{Pattern: "/api/steps", Handler: s.handleSteps, Methods: []string{"GET"}, Perm: read, Scope: scopeProject},
+		{Pattern: "/api/ws", Handler: s.handleWS, Methods: []string{"GET"}, Perm: read, Scope: scopeProject},
+		{Pattern: "/api/events", Handler: s.handleEvents, Methods: []string{"GET"}, Perm: read, Scope: scopeProject},
+		{Pattern: "/api/event-history", Handler: s.handleEventHistory, Methods: []string{"GET"}, Perm: read, Scope: scopeProject},
+		{Pattern: "/api/livelog", Handler: s.handleLiveLog, Methods: []string{"GET"}, Perm: read, Scope: scopeProject},
+		{Pattern: "/api/timeline", Handler: s.handleTimeline, Methods: []string{"GET"}, Perm: read, Scope: scopeProject},
 		{Pattern: "GET /api/deps", Handler: s.handleDeps, Perm: read, Scope: scopeProject},
 		{Pattern: "GET /api/risk-matrix", Handler: s.handleRiskMatrix, Perm: read, Scope: scopeProject},
 		{Pattern: "GET /api/analytics", Handler: s.handleAnalytics, Perm: read, Scope: scopeProject},
@@ -353,22 +420,22 @@ func (s *Server) routeTable() []routeSpec {
 		{Pattern: "GET /api/epics", Handler: s.handleEpics, Perm: read, Scope: scopeProject},
 		{Pattern: "GET /api/queue", Handler: s.handleQueue, Perm: read, Scope: scopeProject},
 		{Pattern: "GET /api/queue/stats", Handler: s.handleQueueStats, Perm: read, Scope: scopeProject},
-		{Pattern: "/api/chat/history", Handler: s.handleChatHistory, Perm: read, Scope: scopeProject},
-		{Pattern: "/api/suggest/status", Handler: s.handleSuggestStatus, Perm: read, Scope: scopeProject},
+		{Pattern: "/api/chat/history", Handler: s.handleChatHistory, Methods: []string{"GET"}, Perm: read, Scope: scopeProject},
+		{Pattern: "/api/suggest/status", Handler: s.handleSuggestStatus, Methods: []string{"GET"}, Perm: read, Scope: scopeProject},
 
 		// ── Run controls ─────────────────────────────────────────────
 		// Starting a run spends the token budget; stopping one is a
 		// safety action, so the two are separate permissions and an
 		// operator who cannot start can still halt a runaway plan.
-		{Pattern: "/api/run", Handler: s.handleRun, Perm: start, Scope: scopeProject},
-		{Pattern: "/api/stop", Handler: s.handleStop, Perm: stop, Scope: scopeProject},
+		{Pattern: "/api/run", Handler: s.handleRun, Methods: []string{"POST"}, Perm: start, Scope: scopeProject},
+		{Pattern: "/api/stop", Handler: s.handleStop, Methods: []string{"POST"}, Perm: stop, Scope: scopeProject},
 
 		// ── Task management (legacy endpoints) ───────────────────────
-		{Pattern: "/api/task/add", Handler: s.handleTaskAdd, Perm: task, Scope: scopeProject},
-		{Pattern: "/api/task/status", Handler: s.handleTaskStatus, Perm: task, Scope: scopeProject},
-		{Pattern: "/api/task/move", Handler: s.handleTaskMove, Perm: task, Scope: scopeProject},
-		{Pattern: "/api/task/edit", Handler: s.handleTaskEdit, Perm: task, Scope: scopeProject},
-		{Pattern: "/api/task/remove", Handler: s.handleTaskRemove, Perm: task, Scope: scopeProject},
+		{Pattern: "/api/task/add", Handler: s.handleTaskAdd, Methods: []string{"POST"}, Perm: task, Scope: scopeProject},
+		{Pattern: "/api/task/status", Handler: s.handleTaskStatus, Methods: []string{"POST"}, Perm: task, Scope: scopeProject},
+		{Pattern: "/api/task/move", Handler: s.handleTaskMove, Methods: []string{"POST"}, Perm: task, Scope: scopeProject},
+		{Pattern: "/api/task/edit", Handler: s.handleTaskEdit, Methods: []string{"POST"}, Perm: task, Scope: scopeProject},
+		{Pattern: "/api/task/remove", Handler: s.handleTaskRemove, Methods: []string{"POST"}, Perm: task, Scope: scopeProject},
 
 		// ── Task management (RESTful) ────────────────────────────────
 		{Pattern: "GET /api/tasks", Handler: s.handleGetTasks, Perm: read, Scope: scopeProject},
@@ -402,11 +469,11 @@ func (s *Server) routeTable() []routeSpec {
 		// ── Suggestions, chat, voice ─────────────────────────────────
 		// All three spend provider budget and feed the plan, so viewers
 		// cannot invoke them.
-		{Pattern: "/api/suggest/generate", Handler: s.handleSuggestGenerate, Perm: task, Scope: scopeProject},
-		{Pattern: "/api/suggest/add", Handler: s.handleSuggestAdd, Perm: task, Scope: scopeProject},
-		{Pattern: "/api/chat", Handler: s.handleChat, Perm: task, Scope: scopeProject},
+		{Pattern: "/api/suggest/generate", Handler: s.handleSuggestGenerate, Methods: []string{"POST"}, Perm: task, Scope: scopeProject},
+		{Pattern: "/api/suggest/add", Handler: s.handleSuggestAdd, Methods: []string{"POST"}, Perm: task, Scope: scopeProject},
+		{Pattern: "/api/chat", Handler: s.handleChat, Methods: []string{"POST"}, Perm: task, Scope: scopeProject},
 		{Pattern: "POST /api/chat/plan", Handler: s.handlePlanChat, Perm: task, Scope: scopeProject},
-		{Pattern: "/api/voice", Handler: s.handleVoice, Perm: task, Scope: scopeProject},
+		{Pattern: "/api/voice", Handler: s.handleVoice, Methods: []string{"POST"}, Perm: task, Scope: scopeProject},
 
 		// Dictated tasks (Task 20238). Transcription only — no intent
 		// classification, no subprocess — so the microphone beside the
@@ -444,25 +511,25 @@ func (s *Server) routeTable() []routeSpec {
 		{Pattern: "POST /api/provider-calls/{id}/replay", Handler: s.handleProviderCallReplay, Perm: task, Scope: scopeProject},
 
 		// ── Project identity and lifecycle ───────────────────────────
-		{Pattern: "/api/init", Handler: s.handleInit, Perm: write, Scope: scopeProject},
-		{Pattern: "/api/reset", Handler: s.handleReset, Perm: write, Scope: scopeProject},
+		{Pattern: "/api/init", Handler: s.handleInit, Methods: []string{"POST"}, Perm: write, Scope: scopeProject},
+		{Pattern: "/api/reset", Handler: s.handleReset, Methods: []string{"POST"}, Perm: write, Scope: scopeProject},
 		// GET returns the current value and must stay available to
 		// viewers; the writes require project.write.
 		{
-			Pattern: "/api/goal", Handler: s.handleGoal, Perm: write, Scope: scopeProject,
+			Pattern: "/api/goal", Handler: s.handleGoal, Methods: []string{"GET", "POST", "PUT"}, Perm: write, Scope: scopeProject,
 			MethodPerms: map[string]authz.Permission{http.MethodGet: read},
 		},
 		{
-			Pattern: "/api/instructions", Handler: s.handleInstructions, Perm: write, Scope: scopeProject,
+			Pattern: "/api/instructions", Handler: s.handleInstructions, Methods: []string{"GET", "POST", "PUT"}, Perm: write, Scope: scopeProject,
 			MethodPerms: map[string]authz.Permission{http.MethodGet: read},
 		},
 
 		// ── Configuration ────────────────────────────────────────────
 		{
-			Pattern: "/api/config", Handler: s.handleConfig, Perm: cfgWrite, Scope: scopeProject,
+			Pattern: "/api/config", Handler: s.handleConfig, Methods: []string{"GET"}, Perm: cfgWrite, Scope: scopeProject,
 			MethodPerms: map[string]authz.Permission{http.MethodGet: read},
 		},
-		{Pattern: "/api/config/set", Handler: s.handleConfigSet, Perm: cfgWrite, Scope: scopeProject},
+		{Pattern: "/api/config/set", Handler: s.handleConfigSet, Methods: []string{"POST"}, Perm: cfgWrite, Scope: scopeProject},
 
 		// The dictation credential is hub-wide, not per project: /api/dictate
 		// and /api/transcribe are called with no project index, so they resolve
@@ -500,7 +567,7 @@ func (s *Server) routeTable() []routeSpec {
 		// ── Multi-project registry ───────────────────────────────────
 		// The list itself is already filtered per identity by
 		// visibleProjectEntries; project.read gates seeing the tab at all.
-		{Pattern: "/api/projects", Handler: s.handleProjects, Perm: read, Scope: scopeGlobal},
+		{Pattern: "/api/projects", Handler: s.handleProjects, Methods: []string{"GET"}, Perm: read, Scope: scopeGlobal},
 		{Pattern: "GET /api/projects/events", Handler: s.handleProjectsEvents, Perm: read, Scope: scopeGlobal},
 		{Pattern: "POST /api/projects/new", Handler: s.handleProjectNew, Perm: write, Scope: scopeGlobal},
 		{Pattern: "POST /api/projects/{idx}/run", Handler: s.handleProjectRun, Perm: start, Scope: scopeProjectIdx},
@@ -515,7 +582,7 @@ func (s *Server) routeTable() []routeSpec {
 		// Registered without a method prefix so the handler's own method
 		// check stays reachable: with `GET /api/executors`, any other verb
 		// falls through to "/" and answers a JSON client with an HTML page.
-		{Pattern: "/api/executors", Handler: s.handleExecutorsList, Perm: execRead, Scope: scopeGlobal},
+		{Pattern: "/api/executors", Handler: s.handleExecutorsList, Methods: []string{"GET"}, Perm: execRead, Scope: scopeGlobal},
 		{Pattern: "POST /api/executors/enroll", Handler: s.handleExecutorEnroll, Perm: execMgmt, Scope: scopeGlobal},
 		// The edge-device bootstrap script (Task 20172). Same permission as
 		// minting a token, because it is the other half of the same action:
@@ -527,7 +594,7 @@ func (s *Server) routeTable() []routeSpec {
 		// by the authz drift tests, which parse it as source. The literal is
 		// checked against installScriptPath by
 		// TestInstallScriptRouteMatchesTheConstant.
-		{Pattern: "/install.sh", Handler: s.handleInstallScript, Perm: execMgmt, Scope: scopeGlobal},
+		{Pattern: "/install.sh", Handler: s.handleInstallScript, Methods: []string{"GET", "HEAD"}, Perm: execMgmt, Scope: scopeGlobal},
 		// One executor, plus what it has actually run (Task 20244). execRead
 		// rather than execMgmt: this is the read half of the fleet view, and
 		// gating "what ran on the host" behind the permission to *change* the
@@ -671,6 +738,24 @@ func (s *Server) routeTable() []routeSpec {
 		// on the request — and a tenant who cannot see why a run was
 		// refused files a ticket instead of waiting for a counter to fall.
 		{Pattern: "GET /api/quota/me", Handler: s.handleQuotaMe, Perm: public},
+
+		// ── The hub's own description (Task 20257) ───────────────────
+		// An OpenAPI 3 document generated from this table, so an
+		// integrator does not have to read Go source to find out what the
+		// hub exposes or what each endpoint costs in permissions.
+		//
+		// project.read — the weakest real permission — rather than public,
+		// and the reasoning runs both ways. It is not secret: the surface
+		// is fixed by the build, identical on every hub of this version,
+		// and published at docs/reference/http-api.md, so gating it
+		// protects nothing an attacker could not read from the repository.
+		// But nothing needs it before authenticating either — the
+		// dashboard never fetches it, and the machine clients that do hold
+		// an API token — so leaving it open would widen the unauthenticated
+		// surface to buy exactly nothing. scopeGlobal because the document
+		// describes the hub, not a project; see /api/projects for the same
+		// pairing.
+		{Pattern: "GET /api/openapi.json", Handler: s.handleOpenAPI, Perm: read, Scope: scopeGlobal},
 
 		// Prometheus scrape endpoint. `cloop ui` served no metrics at all
 		// before this. Gated on audit.read because the payload names every

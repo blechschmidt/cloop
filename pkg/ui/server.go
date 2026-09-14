@@ -419,6 +419,13 @@ type Server struct {
 	Token    string   // optional auth token; empty = no auth
 	Projects []string // extra project directories for multi-project dashboard
 
+	// openAPI is the rendered API description, built once by
+	// registerRoutes. See openapi_api.go for why it is not built on
+	// demand: walking the route table from inside a request handler makes
+	// every handler statically reachable from that one, which would break
+	// the no-host-execution proof in tests/security.
+	openAPI atomic.Pointer[renderedOpenAPI]
+
 	// RPS and Burst control the per-IP token-bucket rate limiter.
 	// Zero values use 20 req/s and burst 50.
 	RPS   float64
@@ -1185,6 +1192,10 @@ func (s *Server) Run(ctx context.Context) error {
 		auth = " (token auth enabled)"
 	}
 	fmt.Printf("cloop dashboard running at %s://localhost%s%s\n", scheme, addr, auth)
+	// Name the API description the way `cloop serve` does. An operator who
+	// has just started a hub is exactly the person about to ask what it
+	// exposes, and the answer is otherwise only findable in the docs.
+	fmt.Printf("API description: %s://localhost%s/api/openapi.json\n", scheme, addr)
 	if tlsCfg != nil {
 		fmt.Printf("TLS enabled (minimum %s, certificate %s)\n",
 			tlsconf.VersionName(tlsCfg.MinVersion), s.TLSCertFile)

@@ -159,7 +159,7 @@ func TestIconTableMatchesServedIcons(t *testing.T) {
 
 	routed := map[string]bool{}
 	for _, rs := range srv.routeTable() {
-		if method, path := splitPattern(rs.Pattern); iconPaths[path] {
+		if method, path, _ := splitPattern(rs.Pattern); iconPaths[path] {
 			if method != http.MethodGet {
 				t.Errorf("icon route %q is registered for %s; isPublicIcon only exempts GET and HEAD",
 					rs.Pattern, method)

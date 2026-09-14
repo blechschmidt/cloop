@@ -63,6 +63,11 @@ Five pages in order, indexed at
   [`cloop egress firewall`](reference/commands.md#cloop-egress-firewall), which
   renders the packet filter an authorisation compiles to and answers
   "would this address get out" with the verdict in its exit status.
+- **[HTTP API](reference/http-api.md)** — every endpoint of both HTTP surfaces,
+  with the permission each one requires and the scope that permission is
+  evaluated against. Generated from the route tables themselves and gated
+  against them, so a new route cannot ship undocumented. The hub serves the
+  machine-readable form at `GET /api/openapi.json`.
 
 ## Security
 

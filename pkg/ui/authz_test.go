@@ -48,14 +48,11 @@ func isMutatingPermission(perm authz.Permission) bool {
 	return true
 }
 
-// splitPattern breaks "POST /api/foo" into its method and path. An empty
-// method means the route accepts every verb and does its own checking.
-func splitPattern(pattern string) (method, path string) {
-	if i := strings.Index(pattern, " "); i > 0 {
-		return pattern[:i], strings.TrimSpace(pattern[i+1:])
-	}
-	return "", pattern
-}
+// splitPattern lives in routes.go (Task 20257). It used to be defined here
+// too, with the same semantics — an empty method means the route accepts every
+// verb and does its own checking — and two copies of the parser that decides
+// what a route's method is are one copy too many once the route table also
+// has to describe itself. The tests below use the production function.
 
 // publicRouteAllowlist is the complete set of routes permitted to declare
 // authz.PermPublic. Making a route public is a security decision, so it
@@ -209,7 +206,7 @@ func TestMutatingRoutesRequireMutatingPermissions(t *testing.T) {
 		if rs.Perm == authz.PermPublic {
 			continue // covered by the allowlist test
 		}
-		method, _ := splitPattern(rs.Pattern)
+		method, _, _ := splitPattern(rs.Pattern)
 
 		if method != "" {
 			if !mutatingMethods[method] {
