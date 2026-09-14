@@ -839,6 +839,141 @@ jobs:
             for-each-ref --format='%(refname) %(objectname:short) %(contents:subject)' 2>/dev/null \
             || echo "(no remote)"
 
+  concurrency-soak:
+    name: Multi-tenant soak (bleed, leak, growth)
+    runs-on: ubuntu-latest
+    # Isolation under concurrency, which is the only condition it has ever
+    # failed under here.
+    #
+    # flagship-circuit proves one task completes one circuit. security-
+    # conformance machine-checks the guarantees against the source. Neither
+    # runs anything twice at once — and every isolation defect this project
+    # has actually shipped was a concurrency defect. The cross-tenant live log
+    # leak of Task 20189 came from the broadcast path walking every connected
+    # client, which is invisible when there is only one. The pkg/ui WebSocket
+    # tests are known to flake under load for the same underlying reason: the
+    # concurrent paths are the ones nothing exercises on purpose.
+    #
+    # This job supplies the one thing the others structurally cannot —
+    # simultaneity — and asserts the three things that only break under it:
+    #
+    #   bleed   every frame, log line and artifact byte delivered to a tenant
+    #           belongs to that tenant, checked with a per-tenant canary that
+    #           the workload reads out of its own bind-mounted workspace
+    #   leak    no container, credential staging directory, credential byte or
+    #           goroutine survives the run above the post-warm-up baseline
+    #   growth  database size, audit rows and RSS do not grow superlinearly in
+    #           task count — the shape of the Task 20218 audit amplification
+    #           and the unbounded retention Task 20229 fixed, each of which was
+    #           fixed once with nothing standing in the way of its return
+    #
+    # Under -race, because a data race in the broadcast path is how a frame
+    # reaches the wrong room in the first place.
+    #
+    # Gating, not advisory, from the first run. The flagship job was added
+    # advisory "until three green runs" and stayed that way through seventeen;
+    # eval-stack declined to repeat that and so does this. A red result here
+    # means a tenant can see another tenant's work, which is the one failure
+    # this deployment model cannot absorb.
+    #
+    # The flake risk is bounded rather than tolerated. The container suites do
+    # flake on a developer box, where one Docker daemon is shared by everything
+    # running at once; a hosted runner gets its own VM and its own daemon. The
+    # only step permitted to retry is the registry pull, whose failure is
+    # definitionally not a defect in cloop. The soak itself is never retried:
+    # re-running a failed isolation assertion is how a real regression gets
+    # re-run away.
+    #
+    # Above the sum of the per-step budgets, so a hang trips the step's named
+    # deadline — which says what it was waiting for — rather than this one.
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Pre-pull the sandbox base image
+        timeout-minutes: 5 # pulls ~8 MB, plus up to ~30s of backoff on retry
+        # Read out of the suite's own source rather than named again here, so
+        # a bump to the base cannot leave this step pulling the wrong image and
+        # the build silently pulling the right one mid-assertion.
+        #
+        # The one step allowed to retry. Docker Hub rate-limits by source IP
+        # and hosted runners share theirs, so a 429 says nothing about the
+        # change under test.
+        run: |
+          set -euo pipefail
+          base=$(grep -oE '"alpine:[0-9]+\.[0-9]+"' tests/soak/world_test.go | head -1 | tr -d '"')
+          [ -n "$base" ] || { echo "::error::no pinned base image in tests/soak/world_test.go"; exit 1; }
+          for attempt in 1 2 3; do
+            if docker pull -q "$base"; then
+              echo "pulled $base on attempt $attempt"
+              exit 0
+            fi
+            echo "::warning::pull attempt $attempt failed"
+            sleep $((attempt * 10))
+          done
+          echo "::error::could not pull $base after 3 attempts; this is the registry," \
+               "not the soak — nothing about cloop is asserted until it succeeds"
+          exit 1
+
+      - name: Drive the soak
+        timeout-minutes: 22 # observed locally: 33s under -race at these settings, warm image
+        env:
+          CLOOP_SOAK: "1"
+          # Stated here rather than left to the suite's defaults so the load
+          # this job actually applies is readable from the job.
+          CLOOP_SOAK_TENANTS: "3"
+          CLOOP_SOAK_PROJECTS_PER_TENANT: "2"
+          CLOOP_SOAK_TASKS: "20"
+        # The exit code alone is not sufficient evidence, for the same reason
+        # it is not in the flagship job — and the risk is sharper here: this
+        # suite *skips* when CLOOP_SOAK is unset or no container runtime
+        # answers, and a skip exits 0. So the three assertions are required to
+        # have run by name. A green status with any of them missing means the
+        # soak was skipped, not that it passed.
+        run: |
+          set -euo pipefail
+          go test -race -v -timeout 20m ./tests/soak/ 2>&1 | tee /tmp/soak.log
+          for sub in NoCrossTenantBleed NoLeakedResources BoundedGrowth; do
+            grep -q -- "--- PASS: TestSoakMultiTenantIsolation/${sub}" /tmp/soak.log || {
+              echo "::error::${sub} did not run and pass — the soak was skipped or died" \
+                   "before it, so isolation under concurrency is unverified for this commit"
+              exit 1
+            }
+          done
+          # And that it applied the load it was asked for, rather than a
+          # degenerate one that would satisfy every assertion above trivially.
+          grep -qE "drove ${CLOOP_SOAK_TASKS} tasks across 6 projects" /tmp/soak.log || {
+            echo "::error::the soak did not drive ${CLOOP_SOAK_TASKS} tasks across 6 projects"
+            grep -E "^\s+soak_test.go.*drove" /tmp/soak.log || true
+            exit 1
+          }
+
+      - name: Soak diagnostics on failure
+        timeout-minutes: 3
+        if: failure()
+        # The suite's own failures already name the tenant, the task and the
+        # offending frame. What it cannot report is what outlived it: a
+        # container or a lease directory still present here is a leak whose
+        # evidence the test process no longer exists to collect.
+        run: |
+          echo "── containers cloop created ──"
+          docker ps -a --filter label=cloop.managed=true \
+            --format '{{.Names}}\t{{.State}}\t{{.Status}}\t{{.Image}}' || true
+          echo "── credential material still on the host ──"
+          ls -la /dev/shm/cloop-lease-* /tmp/cloop-lease-* 2>/dev/null || echo "(none — wiped)"
+          echo "── the soak's own tail ──"
+          tail -120 /tmp/soak.log 2>/dev/null || echo "(no soak log)"
+          echo "── disk ──"
+          df -h / || true
+
   eval-stack:
     name: Eval stack (SSO + remote executor)
     runs-on: ubuntu-latest

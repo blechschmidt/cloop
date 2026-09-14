@@ -134,6 +134,10 @@ Five pages in order, indexed at
   dashboard and the display-glasses page record, how to read a session back
   from the CLI or the Telemetry tab, what is scrubbed before storage and why,
   the limits that bound a public ingest route, and how to turn it off.
+- **[Multi-tenant soak](operations/soak.md)** — the concurrency suite that
+  fails on cross-tenant bleed, leaked containers, credentials or goroutines,
+  and superlinear growth; how to run it, what it substitutes for an agent and
+  why, and the two operator-facing findings it surfaced.
 
 ## Elsewhere in the repository
 
