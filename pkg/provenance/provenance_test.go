@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -28,12 +29,16 @@ func fakeCosign(t *testing.T, exitCode int, stderr string) (bin, argsFile string
 	bin = filepath.Join(dir, "cosign")
 	argsFile = filepath.Join(dir, "args")
 
+	// argsFile is quoted: t.TempDir() derives its path from the test's name, so
+	// a subtest called "a b" yields a path with a space in it and an unquoted
+	// redirect would silently write to the wrong file — the arguments would
+	// simply never be recorded and every assertion about them would vanish.
 	script := "#!/bin/sh\n" +
-		"for a in \"$@\"; do printf '%s\\n' \"$a\" >> " + argsFile + "; done\n"
+		"for a in \"$@\"; do printf '%s\\n' \"$a\" >> " + shellSingleQuote(argsFile) + "; done\n"
 	if stderr != "" {
 		script += "printf '%s\\n' " + shellSingleQuote(stderr) + " >&2\n"
 	}
-	script += "exit " + itoa(exitCode) + "\n"
+	script += "exit " + strconv.Itoa(exitCode) + "\n"
 
 	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
 		t.Fatalf("writing fake cosign: %v", err)
@@ -43,13 +48,6 @@ func fakeCosign(t *testing.T, exitCode int, stderr string) (bin, argsFile string
 
 func shellSingleQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
-}
-
-func itoa(i int) string {
-	if i == 0 {
-		return "0"
-	}
-	return string(rune('0' + i))
 }
 
 // stageBlob writes a blob and a stand-in bundle beside it.
