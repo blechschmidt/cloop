@@ -13,10 +13,14 @@ package ui
 import (
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/blechschmidt/cloop/pkg/apitoken"
 	"github.com/blechschmidt/cloop/pkg/authz"
 	"github.com/blechschmidt/cloop/pkg/oidcauth"
+	"github.com/blechschmidt/cloop/pkg/rolestore"
+	"github.com/blechschmidt/cloop/pkg/state"
+	"github.com/blechschmidt/cloop/pkg/statedb"
 )
 
 // denyRuntime is an authz.RuntimeSource over a fixed slice.
@@ -233,6 +237,62 @@ func TestConnectionDeniedIsFreeWithoutRuntimeBindings(t *testing.T) {
 	user := &oidcauth.Identity{Sub: "s", Email: "alice@example.com"}
 	if b := srv.connectionDenied(user, nil, dir); b != nil {
 		t.Errorf("got %+v with an empty runtime layer, want nil", b)
+	}
+}
+
+// TestRealRoleStoreWiringReachesTheResolver closes the seam every other test in
+// this file leaves open.
+//
+// The rest inject a fake RuntimeSource, so they would all still pass if
+// OpenRoleStore returned a working store that cmd/ui_cmd.go then forgot to hand
+// to authz.New — and the feature would be entirely inert in production with a
+// green suite. This one writes a row to the server's own control-plane database
+// through the same translation the CLI uses, then builds the resolver the way
+// startup does, and asks whether the deny arrives.
+func TestRealRoleStoreWiringReachesTheResolver(t *testing.T) {
+	dir := setupProjectDir(t, cloopGoal, nil)
+	srv := New(dir, 0, "")
+	t.Cleanup(srv.closeRoleStore)
+
+	// A binding written the way `cloop hub role revoke` writes one.
+	db, err := statedb.Open(state.DBPath(dir))
+	if err != nil {
+		t.Fatalf("statedb.Open: %v", err)
+	}
+	binding, err := authz.NormalizeBinding(authz.Binding{
+		Claim: authz.ClaimEmail, Value: "alice@example.com", Deny: true})
+	if err != nil {
+		t.Fatalf("NormalizeBinding: %v", err)
+	}
+	row, err := rolestore.RowFor(binding, "wiring check", "cli:test", time.Now().UTC())
+	if err != nil {
+		t.Fatalf("RowFor: %v", err)
+	}
+	if _, err := db.PutRoleBinding(row); err != nil {
+		t.Fatalf("PutRoleBinding: %v", err)
+	}
+	_ = db.Close()
+
+	source, err := srv.OpenRoleStore()
+	if err != nil {
+		t.Fatalf("OpenRoleStore: %v", err)
+	}
+	// Exactly the call cmd/ui_cmd.go makes.
+	resolver, err := authz.New(authz.Config{Runtime: source})
+	if err != nil {
+		t.Fatalf("authz.New: %v", err)
+	}
+	srv.Authz = resolver
+
+	if !srv.runtimeBindingsExist() {
+		t.Fatal("the hub does not see a binding written to its own database — the " +
+			"runtime layer is wired to nothing")
+	}
+	if b := srv.Authz.DeniedBy(&authz.Subject{Email: "alice@example.com"}, authz.Scope{}); b == nil {
+		t.Error("a deny stored in the control plane does not reach the resolver")
+	}
+	if b := srv.Authz.DeniedBy(&authz.Subject{Email: "bob@example.com"}, authz.Scope{}); b != nil {
+		t.Errorf("the stored deny matched an unrelated identity: %+v", b)
 	}
 }
 
