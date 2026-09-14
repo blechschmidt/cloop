@@ -319,6 +319,12 @@ func (s *Server) routeTable() []routeSpec {
 		// must keep working for a user whose role grants nothing.
 		{Pattern: "POST /api/client-error", Handler: s.handleClientError, Perm: public},
 
+		// The hub's own build (Task 20249). Read-only, carries no project,
+		// tenant or user data, and every authenticated user needs it: the
+		// dashboard compares it on reconnect to notice it is running stale
+		// JavaScript after a redeploy.
+		{Pattern: "GET /api/version", Handler: s.handleVersion, Perm: public},
+
 		// ── Project state (read) ─────────────────────────────────────
 		{Pattern: "/api/state", Handler: s.handleState, Perm: read, Scope: scopeProject},
 		{Pattern: "/api/steps", Handler: s.handleSteps, Perm: read, Scope: scopeProject},

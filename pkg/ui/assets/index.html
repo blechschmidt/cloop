@@ -1147,6 +1147,24 @@
           <button class="btn danger" id="glassesRevokeBtn" onclick="revokeGlassesLink()" style="display:none">Revoke</button>
         </div>
 
+        <!-- Running build (Task 20249). The hub could report every executor
+             agent's build and flag its skew, but never its own — so "is the fix
+             I just pushed actually serving me?" had no answer short of ssh. -->
+        <div class="settings-section">
+          <h3 style="display:flex;align-items:center;gap:12px">
+            Build
+            <button class="btn" style="padding:4px 10px;font-size:12px;margin-left:auto;font-weight:400" onclick="loadBuildInfo()">&#8635; Refresh</button>
+          </h3>
+          <p style="font-size:12px;color:var(--muted);margin-bottom:12px">
+            Which build of cloop is serving this dashboard, and how recent it is. A deploy moves
+            both the identity and the timestamps below; a deploy that silently failed moves
+            neither, which is the only visible symptom of a stale deployment.
+          </p>
+          <div id="buildInfoBody">
+            <div style="font-size:13px;color:var(--muted)">Loading...</div>
+          </div>
+        </div>
+
         <!-- Hidden projects -->
         <div class="settings-section">
           <h3>Hidden Projects</h3>
@@ -2568,9 +2586,24 @@
   <span><kbd>1</kbd>-<kbd>9</kbd> tabs</span>
   <span class="kb-sep">|</span>
   <span><kbd>Esc</kbd> close</span>
+  <!-- Which build is serving this page (Task 20249). Lives in the footer so
+       the answer is one glance away from every tab; the full provenance is in
+       Settings → Build. Populated by 29-build.js, empty until it answers. -->
+  <span id="buildChip" class="build-chip" title="Running build"></span>
 </div>
 
 <div id="toast"></div>
+
+<!-- ── A newer build is running than the one that served this page ─────── -->
+<!-- Raised on WebSocket reconnect when the hub's build fingerprint has moved
+     (Task 20249). Persistent rather than a toast: it stays true until acted
+     on, and a redeploy typically lands while nobody is watching the tab. -->
+<div id="buildStaleBanner" role="status" aria-live="polite" style="display:none;position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:var(--surface);border:1px solid var(--accent);border-radius:var(--radius);padding:10px 14px;font-size:13px;z-index:120;box-shadow:0 4px 16px rgba(0,0,0,.35);max-width:min(480px,92vw);align-items:center;gap:10px;color:var(--text)">
+  <span aria-hidden="true" style="font-size:15px">&#8635;</span>
+  <span id="buildStaleText" style="flex:1">A new build of cloop is now running &mdash; this page is still on the previous one.</span>
+  <button type="button" class="btn primary" style="padding:4px 10px;font-size:12px" onclick="reloadForNewBuild()">Reload</button>
+  <button type="button" aria-label="Dismiss" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:16px;line-height:1;padding:0 2px" onclick="dismissBuildStale()">&times;</button>
+</div>
 
 <!-- ── JS error boundary toast + full-screen recovery banner ───────────── -->
 <div id="errboundary-toast" role="alert" aria-live="assertive" style="display:none;position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:var(--surface);border:1px solid rgba(248,81,73,.6);border-radius:var(--radius);padding:10px 14px;font-size:13px;z-index:120;box-shadow:0 4px 16px rgba(0,0,0,.35);max-width:min(440px,92vw);align-items:center;gap:10px;color:var(--text)">

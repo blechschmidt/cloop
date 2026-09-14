@@ -443,6 +443,14 @@ function connectWS() {
     wsBackoff = 1000; // reset on successful connect
     sseUsed = false;
     if (dot) dot.classList.add('connected');
+    // Re-check which build is serving us (Task 20249). A hub restart drops
+    // every socket, so this is the precise moment the server may have been
+    // replaced underneath a page that is still running the old JavaScript —
+    // and it is why the check needs no polling. Deliberately above the scope
+    // guard below: the build is a property of the hub, not of the project this
+    // socket belonged to, so a reconnect for a since-abandoned project must
+    // still notice a redeploy.
+    if (window.refreshBuildInfo) window.refreshBuildInfo();
     // A socket for a project the user has already navigated away from must not
     // hydrate the log panel: pUrl() would resolve against the *current*
     // selection, pulling the new project's log on the old project's event.
@@ -514,6 +522,14 @@ function connectSSE() {
   const dot = document.getElementById('liveDot');
   evtSource.onopen = () => {
     dot.classList.add('connected');
+    // Re-check the running build here too, for the same reason as the
+    // WebSocket path — and this is not the unlikely branch it looks like. A
+    // hub restart closes the socket with readyState CLOSED, which trips
+    // ws.onerror into _fallbackToSSE(); from then on the client is in SSE mode
+    // for the rest of the page's life. A redeploy is therefore the single most
+    // likely way to *end up* on this path, so leaving the check off it would
+    // have missed precisely the case it was written for.
+    if (window.refreshBuildInfo) window.refreshBuildInfo();
     if (!_scopeAccepts(scope)) return;
     api(pUrl('/api/livelog')).then(d => {
       if (d.lines && d.lines.length) {

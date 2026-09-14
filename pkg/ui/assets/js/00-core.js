@@ -186,7 +186,7 @@ window.switchTab = function(name) {
     if (name === 'replay') { loadReplayRuns(); try { window._populateReplayTaskSelector && window._populateReplayTaskSelector(); } catch(_) {} }
     if (name === 'provider-calls') loadProviderCalls();
   } else {
-    if (name === 'settings') { loadConfig(); loadGlassesLink(); loadHiddenProjects(); loadDiskUsage(); }
+    if (name === 'settings') { loadConfig(); loadGlassesLink(); loadHiddenProjects(); loadDiskUsage(); loadBuildInfo(); }
     if (name === 'overview') loadExecutors();
     if (name === 'tasks'  && appState) renderTasks(appState);
     if (name === 'kanban' && appState) renderKanban(appState);

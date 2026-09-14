@@ -119,6 +119,13 @@ var executorDetailAPISource string
 //go:embed executors_inventory.go
 var executorsInventorySource string
 
+// versionAPISource is pkg/ui/version_api.go (Task 20249). It carries no
+// broadcast, but it registers GET /api/version, and the route-drift tests read
+// the accepted verbs out of the handler body.
+//
+//go:embed version_api.go
+var versionAPISource string
+
 // routesSource is pkg/ui/routes.go, which holds the declarative route table
 // (Task 20164). Routes moved out of server.go when registration started
 // carrying a required permission, so the architectural tests that scan for
@@ -136,7 +143,8 @@ func allUISources() string {
 		"\n" + auditAPISource + "\n" + secretsAPISource + "\n" + installScriptSource +
 		"\n" + tokensAPISource + "\n" + sessionsAPISource + "\n" + quotasAPISource +
 		"\n" + reproduceAPISource + "\n" + ledgerAPISource + "\n" + retentionAPISource +
-		"\n" + executorsInventorySource + "\n" + executorDetailAPISource
+		"\n" + executorsInventorySource + "\n" + executorDetailAPISource +
+		"\n" + versionAPISource
 }
 
 // dashboardSource is the whole dashboard front end — the rendered index.html

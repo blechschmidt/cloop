@@ -95,10 +95,15 @@ var bundleFiles = []string{
 	// Renders into the Settings tab, which is where the config that governs
 	// it is already edited (Task 20229).
 	"assets/js/28-retention.js",
+	// The running hub's own build (Task 20249): the Settings panel, the footer
+	// chip, and the reconnect check that notices the page is now older than
+	// the server. One fragment rather than three edits, because those three
+	// surfaces share the fetch and the formatting.
+	"assets/js/29-build.js",
 	// Last, and it closes the IIFE 00-core.js opened. A fragment appended
 	// after the close lands at global scope, where none of the shared helpers
 	// are visible — see TestDashboard_MainIIFEClosesInLastFragment.
-	"assets/js/29-glasses.js",
+	"assets/js/30-glasses.js",
 }
 
 // Cache-Control values. Hashed asset URLs change whenever their bytes change,

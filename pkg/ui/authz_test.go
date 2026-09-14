@@ -73,6 +73,12 @@ var publicRouteAllowlist = map[string]string{
 		"immediately after losing a device",
 	"GET /api/me":            "reports the caller's own permissions; the UI cannot render without it",
 	"POST /api/client-error": "browser error reports; writes no state and must work for a user with no role",
+	"GET /api/version": "the hub's own build info (Task 20249). Read-only, identical for every caller, " +
+		"carrying no project, tenant or user data. Public here still means authenticated — only " +
+		"isPublicShell bypasses authMiddleware — so the build fingerprint reaches exactly the people " +
+		"already entitled to load the dashboard and never an anonymous scanner. It is not gated on a " +
+		"permission because the frontend compares it on every reconnect to notice it is running stale " +
+		"JavaScript, which has to keep working for a user whose role grants nothing",
 	"GET /api/quota/me": "reports the caller's own quota and live usage, scoped by construction — the " +
 		"handler takes no identity and reads the one on the request, so no parameter could reach " +
 		"someone else's. Strictly read-only: raising a quota is PUT /api/quotas/{identity}, gated on " +

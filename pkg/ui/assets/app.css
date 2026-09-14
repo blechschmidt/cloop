@@ -1120,6 +1120,27 @@
     font-family: inherit; margin-right: 2px;
   }
   #kb-footer .kb-sep { color: var(--border); }
+
+  /* ── Running build (Task 20249) ── */
+  /* margin-left:auto parks the chip at the far right of the footer so it never
+     competes with the shortcut hints for the eye. It wraps with them on a
+     narrow viewport rather than overflowing, because #kb-footer wraps. */
+  .build-chip { margin-left: auto; color: var(--muted); font-size: 11px; cursor: default; }
+  .build-chip.build-warn { color: var(--yellow); }
+  .build-warn { color: var(--yellow); }
+  /* Key/value layout: a narrow label column keeps the values left-aligned with
+     each other, which is what makes two builds comparable at a glance. */
+  .build-table th {
+    text-align: left; font-weight: 500; color: var(--muted);
+    white-space: nowrap; width: 1%; padding-right: 18px;
+  }
+  .build-table td { word-break: break-all; }
+  .build-note {
+    margin-top: 12px; padding: 10px 12px; font-size: 12px; line-height: 1.5;
+    border: 1px solid rgba(210,153,34,.3); background: rgba(210,153,34,.1);
+    border-radius: var(--radius); color: var(--text);
+  }
+
   /* push main content up so footer doesn't overlap */
   body { padding-bottom: 30px; }
 
