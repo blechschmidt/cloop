@@ -267,6 +267,14 @@ type Options struct {
 	// networkpolicy.go.
 	EgressFilter EgressFilter
 
+	// NetworkPolicyEnforcement carries what is known about whether this
+	// cluster's CNI honours a NetworkPolicy: the operator's assertion from
+	// executors.kubernetes.network_policy_enforced, and any verdict a previous
+	// probe recorded. The zero value is "unverified", which refuses
+	// per-project egress scopes — the direction a missing answer has to fail.
+	// See enforcement.go.
+	NetworkPolicyEnforcement NetworkPolicyEnforcement
+
 	// Credentials supplies the kubeconfig lease. Required.
 	Credentials CredentialSource
 
@@ -456,6 +464,58 @@ type Executor struct {
 	// revocations is the log of leases this executor has been told to give
 	// back, for the Secrets panel.
 	revocations *executor.RevocationLog
+
+	// enforcement is what is known about this cluster honouring NetworkPolicy.
+	//
+	// A mu-guarded field rather than a read of opts, for the same reason store
+	// is one: a probe can settle the question *after* construction, opts is
+	// read without a lock from every goroutine this driver spawns, and
+	// Capabilities — which consults this on every placement decision — is
+	// called concurrently with the CLI that records a verdict. Read through
+	// EnforcementState, written through RecordNetworkPolicyVerdict.
+	enforcement NetworkPolicyEnforcement
+}
+
+// EnforcementState reports whether this cluster is known to enforce a
+// NetworkPolicy, the sentence explaining why, and the verdict it rests on.
+//
+// The sentence is not decoration: it is what preflight prints, what the
+// placement refusal carries and what `cloop hub doctor` renders, and having one
+// derivation feed all three is what keeps the report and the refusal from
+// disagreeing about the same cluster.
+func (e *Executor) EnforcementState() (EnforcementStatus, string, ProbeVerdict) {
+	e.mu.Lock()
+	n := e.enforcement
+	e.mu.Unlock()
+	status, reason := n.Resolve(e.id, e.now())
+	return status, reason, n.Verdict
+}
+
+// EnforcementStatus is the gate alone, for callers that do not need the
+// sentence.
+//
+// Capabilities() calls this for every candidate on every placement decision, so
+// it resolves without building the explanation — see
+// NetworkPolicyEnforcement.resolve.
+func (e *Executor) EnforcementStatus() EnforcementStatus {
+	e.mu.Lock()
+	n := e.enforcement
+	e.mu.Unlock()
+	return n.Status(e.id, e.now())
+}
+
+// RecordNetworkPolicyVerdict installs a probe result on a live driver, so a
+// `cloop hub doctor --probe-network-policy` run against a hub's own executor
+// takes effect without waiting for a restart.
+//
+// It does not persist: durability belongs to the caller that holds the database
+// (see reconcile.SaveNetworkPolicyVerdict). Splitting them keeps this package
+// free of statedb, and keeps a probe run by a CLI against someone else's
+// cluster from writing into a hub's records.
+func (e *Executor) RecordNetworkPolicyVerdict(v ProbeVerdict) {
+	e.mu.Lock()
+	e.enforcement.Verdict = v
+	e.mu.Unlock()
 }
 
 // now is the driver's clock, and it delegates to the injectable one that every
@@ -468,7 +528,19 @@ type Executor struct {
 // operator pressed the button" — a question an incident review asks — and an
 // answer computed across two clocks is worse than no answer, because it looks
 // like one.
-func (e *Executor) now() time.Time { return e.opts.now() }
+//
+// Nil-tolerant, because an Executor is not always built by New. Options.now is
+// filled in by Normalize, so a struct-literal Executor — which several tests
+// and any future caller assembling one for a pure accessor will produce — has
+// none, and a read-only method like Capabilities must not be able to panic on
+// one. The fallback is the wall clock, which is exactly what Normalize would
+// have installed.
+func (e *Executor) now() time.Time {
+	if e.opts.now == nil {
+		return time.Now()
+	}
+	return e.opts.now()
+}
 
 // record is the driver's bookkeeping for one Pod.
 type record struct {
@@ -572,6 +644,7 @@ func New(opts Options) (*Executor, error) {
 		store:       norm.HandleStore,
 		leases:      executor.NewLeaseIndex(),
 		revocations: executor.NewRevocationLog(),
+		enforcement: norm.NetworkPolicyEnforcement,
 	}
 	ex.rehydrate()
 	return ex, nil
@@ -692,13 +765,18 @@ func (e *Executor) Capabilities() executor.Capabilities {
 		// host_device grant and is why HostDevice.KubernetesResource exists but
 		// is not yet consumed here.
 		SupportsDevices: false,
-		// False: egress here is a NetworkPolicy applied by the CNI, selected by
-		// Pod labels and scoped to the whole executor's namespace. Narrowing one
-		// project independently would mean a per-run policy object, and a CNI
-		// that does not implement NetworkPolicy at all (flannel) would accept it
-		// and enforce nothing — which is precisely the silent over-permission a
-		// scope exists to prevent. Refusing at placement says so instead.
-		SupportsEgressScope: false,
+		// True only when something has established that this cluster's CNI
+		// actually enforces a NetworkPolicy.
+		//
+		// The mechanism itself is no longer in doubt: networkpolicy.go compiles
+		// a per-run policy selecting one Pod by its unique handle-id label, and
+		// Start creates it before the Pod it governs. What remains in doubt is
+		// the cluster — flannel accepts the object, returns 201 and enforces
+		// nothing — and that is not something the Kubernetes API will answer.
+		// So the answer comes from an operator's assertion or from the probe
+		// that proves it, and everything else fails closed with a refusal
+		// naming the probe command. See enforcement.go.
+		SupportsEgressScope: e.EnforcementStatus().Enforced(),
 		// The credential files a secret lease produces are projected as a
 		// per-run Secret, mounted read-only at the directory the workload's
 		// environment already names (see secretfiles.go).
@@ -1224,7 +1302,8 @@ func (e *Executor) podRequestFor(ctx context.Context, spec executor.Spec, handle
 		RunAsGroup:            e.opts.RunAsGroup,
 		SandboxMounts:         spec.Mounts,
 		SandboxHash:           spec.SandboxHash,
-		DisableNetwork:        spec.DisableNetwork,
+		DisableNetwork:        spec.DisableNetwork || spec.EgressScope.RemovesNetwork(),
+		EgressScope:           spec.EgressScope,
 		Workspace:             spec.Workspace,
 		WriteBack:             spec.WriteBack,
 		WorkspaceSecretName:   workspaceSecret,
@@ -2163,14 +2242,15 @@ func (e *Executor) ReconcileOrphans(ctx context.Context) ([]string, error) {
 func (e *Executor) reconcileNetworkPolicies(ctx context.Context, cli *client, namespace string,
 	cutoff time.Time) []string {
 
-	if !e.opts.EgressFilter.Enabled {
+	if !e.createsNetworkPolicies() {
 		// This executor creates no policies, and its identity has no reason to
 		// hold the RBAC that would let it list them. Sweeping anyway would put a
 		// 403 in the log of every deployment that does not use the filter, which
-		// is how operators learn to ignore logs. An executor whose filter was
-		// turned *off* leaves its last policies behind; they govern Pods that no
-		// longer exist, and `kubectl delete netpol -l cloop.dev/managed=true`
-		// removes them.
+		// is how operators learn to ignore logs. An executor that has stopped
+		// creating them leaves its last policies behind; they select a
+		// per-run handle-id label no future Pod will ever carry, so they govern
+		// nothing, and `kubectl delete netpol -l cloop.dev/managed=true` removes
+		// them.
 		return nil
 	}
 
@@ -2228,6 +2308,24 @@ func (e *Executor) trackedPodNames() map[string]struct{} {
 		rec.mu.Unlock()
 	}
 	return names
+}
+
+// createsNetworkPolicies reports whether this executor can have put a
+// NetworkPolicy in its namespace, and therefore owes the namespace a sweep.
+//
+// Two ways, and missing the second one would leak. The obvious way is a
+// configured egress_filter, which policies every Pod. The other is a *project*:
+// an executor that can carry per-project egress scopes installs a policy for a
+// project whose sandbox.yaml asks for one, whatever the executor's own filter
+// says — so an executor with `egress_filter.enabled: false` and a proven CNI
+// creates policies that a filter-only guard would never collect, and a
+// control-plane restart would strand one per interrupted run.
+//
+// It is also why the probe's own deny-all policy is swept: the probe runs on an
+// executor that is being cleared for scopes, and a SIGKILL between creating that
+// policy and deleting it is the one exit path its janitor cannot cover.
+func (e *Executor) createsNetworkPolicies() bool {
+	return e.opts.EgressFilter.Enabled || e.EnforcementStatus().Enforced()
 }
 
 // trackedPolicyNames is the set of egress policies belonging to handles this

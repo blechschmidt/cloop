@@ -81,10 +81,14 @@ automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountT
 # must not hand out. Replacing a policy means deleting it, which means the Pod
 # it selected is already gone.
 #
-# The rule can be omitted for a deployment that does not filter egress: the
-# driver only creates, lists or deletes NetworkPolicies when the filter is
-# enabled, and `cloop executor test` reports a missing rule as a fatal finding
-# rather than silently running Pods unfiltered.
+# The rule can be omitted for a deployment that neither filters egress nor lets
+# a project confine its own. Those are two conditions, not one: the driver also
+# creates a policy for a project whose .cloop/sandbox.yaml sets
+# capabilities.egress, on an executor with no egress_filter of its own. The same
+# rule is what `cloop hub doctor --probe-network-policy` needs — deliberately,
+# so that proving the cluster enforces policies never asks for authority beyond
+# what enforcing them already required. `cloop executor test` reports a missing
+# rule as a fatal finding rather than silently running Pods unfiltered.
 #
 # There is still no `update` or `patch` on anything: the driver never mutates
 # an object after creating it, so a compromised hub cannot rewrite a running

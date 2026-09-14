@@ -325,24 +325,42 @@ and their result would be discarded with the Pod. A spec with `setup:` is
 therefore refused on Kubernetes, with the remedy: build the steps into an image,
 publish it, and reference it as `image:`.
 
-**Kubernetes cannot turn egress off from a Pod spec.** Only a NetworkPolicy can,
-and that is a namespace-scoped object the cluster operator owns. The driver
-labels every Pod `cloop.dev/egress: deny|allow` so a default-deny policy can
-select on it. **Without that policy installed, the label is documentation.**
-Install one alongside the hub:
+**Kubernetes confines egress with a `NetworkPolicy`, and the cluster has to
+apply it.** The driver compiles one per run from the same policy the container
+driver's nftables ruleset is compiled from, selecting that Pod alone by its
+unique `cloop.dev/handle-id` label, and creates it before the Pod it governs.
+That object is inert on a cluster whose CNI does not implement `NetworkPolicy` —
+flannel accepts it, returns `201`, and enforces nothing — and the Kubernetes API
+cannot be asked which case you are in.
+
+So a project whose `sandbox.yaml` sets `capabilities.egress` is **refused** on a
+Kubernetes executor until one of these is true:
+
+```bash
+# Prove it. Creates two throwaway Pods and a default-deny policy in the
+# executor's namespace, checks the connection actually stops working, records
+# the verdict, and cleans up on every exit path.
+cloop hub doctor --probe-network-policy
+```
 
 ```yaml
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: cloop-sandbox-egress-deny
-spec:
-  podSelector:
-    matchLabels:
-      cloop.dev/egress: deny
-  policyTypes: [Egress]
-  egress: []          # deny all; add a DNS rule if your images need resolution
+# …or assert it, if you already know your CNI.
+executors:
+  kubernetes:
+    enabled: true
+    network_policy_enforced: true
 ```
+
+`network_policy_enforced` is a three-state field. Leaving it out defers to a
+recorded probe. `true` asserts enforcement — a probe that *contradicts* it wins,
+because an operator can be wrong about a cluster whose CNI was swapped under
+them. `false` is a veto that takes effect immediately, which is how you withdraw
+the capability after a CNI change without waiting for a recorded verdict to
+expire. Verdicts expire after 30 days and are scoped to one executor.
+
+`cloop hub doctor` reports the current status without probing, and the placement
+refusal names the command to run. For the full precedence table and the design
+of the probe, see [Executors →](../architecture/executors.md#does-the-cluster-actually-enforce-a-networkpolicy).
 
 ## Reproducibility
 
@@ -392,7 +410,7 @@ can see.
 | `capabilities.network` names a grant the project lacks | 409 | `*sandbox.GrantDeniedError`, with the command to request it |
 | `capabilities.virtualized` on a kernel-sharing executor | 409 | `*executor.PlacementError`, constraint `virtualization` — or `*executor.HostExecutionDeniedError` when the bound executor is `localprocess`, where binding to a sandbox is the first step anyway |
 | `capabilities.kernel_isolated` on a runc executor | 409 | `*executor.PlacementError`, constraint `kernel_isolation`, naming both the gVisor and the Kata config key |
-| `capabilities.egress: public` on an executor that cannot scope egress | 409 | `*executor.PlacementError`, constraint `egress_scope` |
+| `capabilities.egress: public` on an executor that cannot scope egress | 409 | `*executor.PlacementError`, constraint `egress_scope`. On Kubernetes the message names `cloop hub doctor --probe-network-policy`, because the executor *can* scope egress — what is missing is proof the cluster applies the policy |
 | `capabilities.egress: public` on a broker-only executor | 409 | `executor.ErrUnsupported` — the scope asks for more reach than the executor grants, so it is refused rather than downgraded |
 | `capabilities.egress: public` with no `resolvers` configured | 400 | dropping private space drops the sandbox's resolver, so cloop refuses rather than install a policy with no working DNS |
 | `capabilities.devices` names an ungranted device | 409 | `*sandbox.DeviceNotGrantedError`, with the `cloop secret grant` command that fixes it |

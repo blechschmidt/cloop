@@ -314,8 +314,18 @@ Two limits of the layer-3 filter, stated rather than discovered:
 - **A `NetworkPolicy` is enforced by the cluster's CNI, not by cloop.** flannel
   does not implement one and the API server stores the object regardless, so a
   cluster with the wrong CNI looks identical to a working one from the hub's
-  side. `cloop executor test` reports this as a standing `egress-enforcement`
-  warning rather than claiming an enforcement it cannot check.
+  side. cloop does not claim an enforcement it cannot check: preflight reports
+  an `egress-enforcement` finding whose severity is the *state of the evidence*
+  — a warning while nothing has established it, a **fail** once a probe has
+  refuted it — and a project asking for a per-project egress scope
+  (`capabilities.egress`) is refused on that executor until enforcement is
+  proven by `cloop hub doctor --probe-network-policy` or asserted with
+  `executors.kubernetes.network_policy_enforced: true`. The probe is evidence
+  rather than testimony: it creates two throwaway Pods and a default-deny
+  policy, requires the connection to work *before* the policy and fail after,
+  and reports nothing at all when it cannot establish that control. A verdict
+  outranks an assertion in both directions. See
+  [Executors →](../architecture/executors.md#does-the-cluster-actually-enforce-a-networkpolicy).
 
 ---
 

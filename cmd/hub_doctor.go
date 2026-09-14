@@ -20,6 +20,7 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
@@ -72,9 +73,22 @@ func runHubDoctor(cmd *cobra.Command, _ []string) error {
 	offline, _ := cmd.Flags().GetBool("offline")
 	timeout, _ := cmd.Flags().GetDuration("timeout")
 	strict, _ := cmd.Flags().GetBool("strict")
+	probeNetpol, _ := cmd.Flags().GetBool("probe-network-policy")
+	probeExecutor, _ := cmd.Flags().GetString("executor")
+	probeImage, _ := cmd.Flags().GetString("probe-image")
+	probeTimeout, _ := cmd.Flags().GetDuration("probe-timeout")
 
 	if timeout <= 0 {
 		return fmt.Errorf("--timeout must be positive (got %s)", timeout)
+	}
+	if probeNetpol && probeTimeout <= 0 {
+		return fmt.Errorf("--probe-timeout must be positive (got %s)", probeTimeout)
+	}
+	// Naming an executor without asking for the probe is a command that
+	// silently does nothing the operator asked for. Say so rather than run the
+	// read-only checks and let them believe a probe happened.
+	if !probeNetpol && (strings.TrimSpace(probeExecutor) != "" || strings.TrimSpace(probeImage) != "") {
+		return fmt.Errorf("--executor and --probe-image only apply to --probe-network-policy")
 	}
 
 	dir, err := os.Getwd()
@@ -91,8 +105,17 @@ func runHubDoctor(cmd *cobra.Command, _ []string) error {
 	}
 
 	rep := hubdoctor.Run(cmd.Context(), dir, cfg, hubdoctor.Options{
-		Offline: offline,
-		Timeout: timeout,
+		Offline:            offline,
+		Timeout:            timeout,
+		ProbeNetworkPolicy: probeNetpol,
+		ProbeExecutorID:    probeExecutor,
+		ProbeImage:         probeImage,
+		ProbeTimeout:       probeTimeout,
+		// To stderr, so `--json | jq` still gets clean JSON on stdout while an
+		// operator watching a three-minute probe can see which Pod it is on.
+		ProbeLogf: func(format string, args ...any) {
+			fmt.Fprintf(os.Stderr, "  netpol-probe: "+format+"\n", args...)
+		},
 	})
 
 	if asJSON {
@@ -248,6 +271,15 @@ func init() {
 		"per-probe timeout")
 	hubDoctorCmd.Flags().Bool("strict", false,
 		"exit non-zero on warnings too")
+	hubDoctorCmd.Flags().Bool("probe-network-policy", false,
+		"prove whether the cluster enforces NetworkPolicy by creating two throwaway Pods "+
+			"and a default-deny policy (mutates the cluster; cleans up after itself)")
+	hubDoctorCmd.Flags().String("executor", "",
+		"restrict --probe-network-policy to one executor id")
+	hubDoctorCmd.Flags().String("probe-image", "",
+		"image the probe Pods run (default busybox:1.36; must provide sh, httpd and wget)")
+	hubDoctorCmd.Flags().Duration("probe-timeout", hubdoctor.DefaultNetworkPolicyProbeTimeout,
+		"time budget for one --probe-network-policy run")
 
 	hubCmd.AddCommand(hubDoctorCmd)
 }

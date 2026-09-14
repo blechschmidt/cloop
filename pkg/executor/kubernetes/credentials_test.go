@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
+	"github.com/blechschmidt/cloop/pkg/securewipe"
 )
 
 // memStore is an in-memory secretbroker.Store, so the broker integration can
@@ -215,9 +216,21 @@ func TestBrokerSource_LeasesInMemory(t *testing.T) {
 
 	after := leaseDirSnapshot(t)
 	for dir, entries := range after {
-		if len(entries) > len(before[dir]) {
-			t.Errorf("Acquire created %d new entries under %s; the kubeconfig must never "+
-				"become a file on the control-plane host", len(entries)-len(before[dir]), dir)
+		was := make(map[string]bool, len(before[dir]))
+		for _, name := range before[dir] {
+			was[name] = true
+		}
+		for _, name := range entries {
+			// Only a *lease directory* is evidence here. The earlier version of
+			// this check counted every entry in /tmp, which made it fail
+			// whenever anything else on the machine — another package's test
+			// binary calling t.TempDir(), a build cache, an unrelated process —
+			// created a file between the two snapshots. That is a flake, and a
+			// flaky security assertion is one that gets muted.
+			if !was[name] && strings.HasPrefix(name, securewipe.LeaseDirPrefix) {
+				t.Errorf("Acquire created %s/%s; the kubeconfig must never become a file on "+
+					"the control-plane host", dir, name)
+			}
 		}
 	}
 }

@@ -202,6 +202,40 @@ type Options struct {
 	// refusal or a resolution failure without depending on what the machine
 	// running the suite can reach; nil means a plain net.Dialer.
 	DialContext func(ctx context.Context, network, addr string) (net.Conn, error)
+
+	// ProbeNetworkPolicy runs the NetworkPolicy enforcement experiment against
+	// the configured Kubernetes executors.
+	//
+	// Opt-in because it is the only check here that *writes to the operator's
+	// cluster*: two throwaway Pods and a default-deny policy, removed on every
+	// exit path. A diagnostic that mutated infrastructure by default would be
+	// one nobody could safely run against production. See netpol.go.
+	ProbeNetworkPolicy bool
+
+	// ProbeExecutorID narrows the probe to one executor. Empty probes all of
+	// them, which on the usual single-cluster hub is the same thing.
+	ProbeExecutorID string
+
+	// ProbeImage overrides the busybox image the probe Pods run, for a cluster
+	// that mirrors its own registry or enforces an image policy.
+	ProbeImage string
+
+	// ProbeTimeout bounds one probe. Zero uses
+	// DefaultNetworkPolicyProbeTimeout — deliberately not Timeout, which bounds
+	// a single HTTP request and is far too short for scheduling three Pods.
+	ProbeTimeout time.Duration
+
+	// ProbeLogf narrates the probe's steps. `cloop hub doctor` wires it to the
+	// terminal, because the alternative is a command that prints nothing for
+	// three minutes and looks hung.
+	ProbeLogf func(format string, args ...any)
+}
+
+// probeLogf is the narrator, or a no-op when the caller wants silence.
+func (o Options) probeLogf(format string, args ...any) {
+	if o.ProbeLogf != nil {
+		o.ProbeLogf(format, args...)
+	}
 }
 
 // DefaultProbeTimeout bounds one network probe. Ten seconds is long enough for
@@ -281,6 +315,10 @@ func Run(ctx context.Context, dir string, cfg *config.Config, opts Options) *Rep
 	checkRBAC(cfg, add)
 	checkImagePolicy(ctx, cfg, opts, add)
 	checkExecutors(ctx, dir, cfg, opts, add)
+	// After checkExecutors, and not optional about the ordering: the probe
+	// needs a driver in the registry holding a live cluster credential, and
+	// reconciliation is what puts one there.
+	checkNetworkPolicyEnforcement(ctx, dir, cfg, opts, add)
 	checkGitProxy(ctx, cfg, opts, add)
 	checkEgressBroker(ctx, cfg, opts, add)
 	checkStorage(dir, add)

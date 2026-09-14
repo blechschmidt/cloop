@@ -784,6 +784,24 @@ func ensureKubernetes(
 	if opts.WrapWorkspaceSource != nil && driverOpts.Workspace != nil {
 		driverOpts.Workspace = opts.WrapWorkspaceSource(driverOpts.ID, driverOpts.Workspace)
 	}
+
+	// The operator's assertion arrived with driverOpts, from the config file.
+	// The other half of the evidence — what a probe actually observed against
+	// this cluster — lives in the hub's database, and this is the moment it has
+	// to be attached: Capabilities() is consulted synchronously during
+	// placement and cannot go and look it up.
+	//
+	// A read failure is logged and not fatal. The field's only effect is to
+	// *grant* a capability, so losing it costs a refusal naming the probe
+	// command, and refusing to start a hub because an optional record could not
+	// be read would turn a narrow degradation into an outage.
+	if v, err := LoadNetworkPolicyVerdictFromDir(dir, driverOpts.ID); err != nil {
+		opts.logf("executor: %s NetworkPolicy enforcement verdict could not be read, "+
+			"per-project egress scopes will be refused until it can: %v", driverOpts.ID, err)
+	} else {
+		driverOpts.NetworkPolicyEnforcement.Verdict = v
+	}
+
 	ex, err := kubernetes.Ensure(reg, driverOpts)
 	if err != nil {
 		// The source is live and owns an open state database, but nothing

@@ -251,20 +251,17 @@ func (e *Executor) Preflight(ctx context.Context) PreflightReport {
 					"networkpolicies: [create delete list]")
 		}
 
-		// Stated separately, and always, because it is the one part of this
-		// that cloop cannot check. Creating the object proves the API server
-		// stored it, not that anything enforces it: a NetworkPolicy is inert
-		// unless the cluster's CNI implements it, and flannel — still a common
-		// default — does not. The API server accepts the object regardless and
-		// reports nothing, so a cluster with the wrong CNI looks exactly like a
-		// working one from here.
-		add("egress-enforcement", LevelWarn,
-			"a NetworkPolicy is enforced by the cluster's CNI, not by cloop, and cloop cannot tell "+
-				"from the API whether yours implements one (flannel does not; Calico, Cilium, "+
-				"Antrea and most managed CNIs do)",
-			"confirm your CNI supports NetworkPolicy, then verify from inside a sandbox that a denied "+
-				"destination actually times out")
 	}
+
+	// --- 5b. is any of that actually enforced -----------------------------
+	//
+	// Stated separately from the filter, and stated whether or not the filter
+	// is on, because it is the one part of this that no API call answers and
+	// because it now gates a capability. Creating the object proves the API
+	// server stored it, not that anything applies it: a NetworkPolicy is inert
+	// unless the cluster's CNI implements it, and flannel — still a common
+	// default — does not, silently. See enforcement.go.
+	addEnforcementFinding(e, add)
 
 	// --- 6. workspace -----------------------------------------------------
 	//
@@ -289,6 +286,51 @@ func (e *Executor) Preflight(ctx context.Context) PreflightReport {
 	}
 
 	return report
+}
+
+// addEnforcementFinding reports whether this cluster is known to apply the
+// NetworkPolicies cloop creates, and what that means for placement.
+//
+// Four outcomes, and the severities are chosen by what each one costs rather
+// than by how it sounds. A refutation is a fail: the operator has an executor
+// whose egress filter is decorative, and every project that asked to be
+// confined will be refused. An unverified cluster is a warn, because that is
+// where every deployment starts and the filter may still be doing its job —
+// nobody has checked. A proof or an assertion is OK, and says which, because
+// "somebody typed true" and "a probe watched a connection die" are different
+// grades of evidence and an auditor reading this report needs to tell them
+// apart.
+func addEnforcementFinding(e *Executor, add func(name, level, msg, fix string)) {
+	status, reason, verdict := e.EnforcementState()
+	probe := ProbeCommand(e.id)
+
+	switch status {
+	case EnforcementProven:
+		add("egress-enforcement", LevelOK,
+			fmt.Sprintf("%s, so per-project egress scopes (.cloop/sandbox.yaml capabilities.egress) "+
+				"are honoured here: %s", reason, verdict.Detail),
+			"")
+	case EnforcementAsserted:
+		add("egress-enforcement", LevelOK,
+			reason+", so per-project egress scopes are honoured here on the operator's word",
+			"prove it rather than assert it: "+probe)
+	case EnforcementRefuted:
+		add("egress-enforcement", LevelFail,
+			fmt.Sprintf("%s: %s", reason, verdict.Detail),
+			"install a CNI that implements NetworkPolicy (Calico, Cilium, Antrea) — until then any "+
+				"egress_filter configured here is recorded by the API server and applied by nothing")
+	case EnforcementDenied:
+		add("egress-enforcement", LevelWarn,
+			reason+", so projects that set capabilities.egress will be refused on it",
+			"remove executors.kubernetes.network_policy_enforced, or set it to true once "+probe+
+				" confirms the cluster enforces policies")
+	default:
+		add("egress-enforcement", LevelWarn,
+			reason+", so projects that set capabilities.egress are refused rather than given a "+
+				"firewall that might not be applied",
+			"prove it with "+probe+", or set executors.kubernetes.network_policy_enforced: true if "+
+				"you already know your CNI")
+	}
 }
 
 // rbacFix is the Role the executor's identity needs, as something an operator

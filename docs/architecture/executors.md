@@ -600,7 +600,7 @@ IP-layer egress *independently of the other workloads on the same executor*, whi
 | Driver | `SupportsDevices` | `SupportsEgressScope` | Why |
 | --- | --- | --- | --- |
 | `container` | ✅ | ✅ | it runs on the machine with the hardware and the runtime takes `--device`; and a scope gets a bridge and an nftables table of its own, which this driver provisions |
-| `kubernetes` | ❌ | ❌ | Kubernetes takes no device paths — a device plugin hands the container whichever unit it has free — and egress here is a namespace-wide `NetworkPolicy` applied by the CNI, selected by Pod labels |
+| `kubernetes` | ❌ | ⚠️ once enforcement is proven | Kubernetes takes no device paths — a device plugin hands the container whichever unit it has free. Egress *is* confined per run, by a `NetworkPolicy` selecting one Pod by its unique handle-id label — but a `NetworkPolicy` is applied by the cluster's CNI, so the capability is advertised only once enforcement is [proven or asserted](#does-the-cluster-actually-enforce-a-networkpolicy) |
 | `remote` | ❌ | ❌ | a device path names the *hub's* host, and the agent runs each workload as a plain process, so there is neither a sandbox to put a device into nor a per-workload network namespace to filter |
 | `localprocess` | ❌ | ❌ | the workload is a process in the hub's own namespaces: every device the hub user can open is already open to it, and confining its egress would mean filtering the control plane's own traffic |
 
@@ -621,13 +621,109 @@ hardware the task exists to talk to.
 silent *and* over-permissive. An executor that ignored a project's request to be
 cut off from private address space would hand the harness the reach into the
 operator's internal network the project had explicitly renounced, and report
-success doing it. On Kubernetes the failure is worse than an omission — a CNI that
-does not implement `NetworkPolicy` at all (flannel) accepts the object and enforces
-nothing, which is precisely the silent over-permission a scope exists to prevent.
-`container` advertises it unconditionally rather than gating on
+success doing it. `container` advertises it unconditionally rather than gating on
 `egress_filter.enabled`, because the whole point of a scope is that a project can
 ask to be confined on an executor whose default is unfiltered; a host without
 `nft(8)` fails at install time with a message naming it.
+
+### Does the cluster actually enforce a NetworkPolicy?
+
+The Kubernetes driver is the one case where cloop does everything right and the
+result can still be nothing.
+
+`pkg/executor/kubernetes/networkpolicy.go` compiles a `NetworkPolicy` per run
+from the same `pkg/netfilter` policy the container driver's nftables ruleset is
+compiled from, selecting that Pod alone by its unique `cloop.dev/handle-id`
+label, and `Start` creates it *before* the Pod it governs — a Pod that started
+first would have a window of unfiltered egress, and a window is all an
+exfiltration needs.
+
+None of that matters if the cluster's CNI does not implement `NetworkPolicy`.
+flannel is the well-known case: the API server validates the object, persists
+it, returns `201`, and nothing ever reads it. `kubectl get netpol` lists a
+firewall that does not exist. **The Kubernetes API cannot be asked which case you
+are in**, so cloop refuses to guess:
+
+| Evidence | Status | `SupportsEgressScope` |
+| --- | --- | --- |
+| nothing | `unverified` | ❌ — placement refuses, naming the probe |
+| `network_policy_enforced: true` | `asserted` | ✅ on the operator's word |
+| a probe proved it | `proven` | ✅ |
+| a probe refuted it | `refuted` | ❌ — and preflight reports a **fail** |
+| `network_policy_enforced: false` | `denied` | ❌ |
+
+Precedence is deliberate and is the security argument:
+
+1. An explicit `false` wins outright. It is the restrictive direction, and it is
+   the only control that takes effect *immediately* — the alternative would be
+   editing config and then racing a recorded verdict still inside its expiry.
+2. A fresh probe beats an assertion **in both directions**. An operator who
+   asserted enforcement on a cluster that demonstrably ignores policies has made
+   a mistake, and the measurement is what catches it.
+3. An assertion beats nothing.
+4. Nothing is `unverified`, and `unverified` fails closed.
+
+A verdict expires after 30 days (`DefaultVerdictMaxAge`), because a CNI can be
+replaced by a platform team that has never heard of cloop; an expired one is
+treated as absent rather than as evidence against anything. A verdict recorded
+for a *different* executor is ignored outright — executors differ in namespace
+and in the credential they connect with, and a `NetworkPolicy` is namespaced.
+
+#### The probe
+
+```
+cloop hub doctor --probe-network-policy [--executor k8s] [--probe-image …]
+```
+
+It is the only `hub doctor` check that writes to the cluster, which is why it is
+opt-in. In the executor's own namespace it creates:
+
+1. a **target** Pod serving one byte over HTTP;
+2. a **control** client Pod that fetches it with no policy in place — this must
+   **succeed**;
+3. a **policed** client Pod carrying a label a default-deny egress policy
+   selects, fetching the same address — this must **fail**.
+
+Step 2 is what makes it a proof rather than a coincidence, and it is the step an
+obvious implementation leaves out. Without it, "the client could not connect" is
+indistinguishable from "the target never came up", "the image has no `wget`",
+"the node is wedged", or "the namespace already denies everything" — and every
+one of those would be recorded as *enforcement*, which is the exact false
+confidence the mechanism exists to prevent. A control that does not succeed
+yields `ErrProbeInconclusive` and **no verdict in either direction**.
+
+The connection attempt is the Pod's command and the result is its exit code read
+from Pod status, so the probe needs no `pods/exec` RBAC — exactly the `pods` and
+`networkpolicies` verbs the egress filter already requires. Every object is
+registered with a janitor *before* its create is attempted (a create that times
+out may still have landed) and removed on a detached context from a deferred
+call, so a probe interrupted by Ctrl-C, a timeout or a panic still cleans up. A
+leftover default-deny policy in a shared namespace is an outage for whatever is
+scheduled there next.
+
+The verdict is stored in the hub's control-plane database and pushed onto the
+live driver, so it takes effect without a restart *and* survives one. An
+in-cluster `ConfigMap` was rejected: it would make this feature's bookkeeping
+require `configmaps` RBAC the executor does not otherwise hold, and a security
+capability that fails closed when its bookkeeping is unauthorised trains
+operators to widen the Role until the warning goes away.
+
+#### Sweeping what it leaves
+
+Every per-run policy is deleted with its Pod, and `ReconcileOrphans` collects any
+that a control-plane restart stranded — using the same label selector and grace
+period as the Pod sweep. The grace period matters in the opposite direction here:
+deleting a Pod too eagerly kills a run, while deleting a *policy* too eagerly
+unfilters one that is still running.
+
+The sweep runs whenever the executor `createsNetworkPolicies()`, which is true
+for a configured `egress_filter` **or** a scope-capable executor. The second half
+is not redundant: an executor with `egress_filter.enabled: false` and a proven
+CNI still creates a policy for any project that asks for one, and a filter-only
+guard would strand one per interrupted run. Probe objects carry the sweep's
+labels for the same reason — a probe killed with `SIGKILL` runs no deferred
+cleanup, its Pods carry `activeDeadlineSeconds`, and nothing in Kubernetes ever
+expires a `NetworkPolicy`.
 
 `RequireWorkspaceProvisioning`, `RequireHostFilesystemWorkspace` and
 `RequireWriteBack` are the same argument applied to the source tree, and the

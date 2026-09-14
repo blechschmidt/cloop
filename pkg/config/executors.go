@@ -604,6 +604,19 @@ func ValidateKubernetesExecutor(k KubernetesExecutorConfig) error {
 		return fmt.Errorf("executors.kubernetes.egress_filter: %w", err)
 	}
 
+	// An assertion about a cluster this executor never contacts is not an
+	// assertion, it is a line that reads like one. Both directions are refused
+	// here rather than ignored, because the failure mode is silent in opposite
+	// ways: a `true` on a disabled executor looks like the capability was
+	// granted and grants nothing, and a `false` looks like it was withdrawn
+	// from somewhere it was never held.
+	if k.NetworkPolicyEnforced != nil && !k.Enabled {
+		return fmt.Errorf("executors.kubernetes.network_policy_enforced is set on an executor with "+
+			"enabled: false — it asserts what a cluster's CNI does with the NetworkPolicies this "+
+			"executor creates, and a disabled executor creates none. Enable the executor, or "+
+			"remove the key (got %t)", *k.NetworkPolicyEnforced)
+	}
+
 	// Delegated to the driver so the Pod-critical checks (namespace, image
 	// reference, quantities, tolerations) have a single definition.
 	if _, err := k.DriverOptions(); err != nil {
@@ -658,6 +671,13 @@ func (k KubernetesExecutorConfig) DriverOptions() (kubernetes.Options, error) {
 		KeepCompletedPods:     k.KeepCompletedPods,
 		MaxConcurrent:         k.MaxConcurrent,
 		EgressFilter:          k.EgressFilter.driverFilter(),
+		// Only the operator's half. The recorded probe verdict is the hub's to
+		// supply — it lives in the control-plane database, which a config
+		// validator must not need to open to answer "is this section
+		// well-formed". See reconcile.LoadNetworkPolicyVerdict.
+		NetworkPolicyEnforcement: kubernetes.NetworkPolicyEnforcement{
+			Assertion: k.NetworkPolicyEnforced,
+		},
 	}
 	if k.TerminationGracePeriodSeconds > 0 {
 		opts.TerminationGracePeriod = time.Duration(k.TerminationGracePeriodSeconds) * time.Second

@@ -351,6 +351,21 @@ func (f *fakeAPI) creates() []string {
 	return append([]string(nil), f.createOrder...)
 }
 
+// policyCreateCount reports how many NetworkPolicy creates the API server
+// accepted, so a test can distinguish "the policy was applied and ignored" from
+// "no policy was ever applied" — which look identical from the client Pod.
+func (f *fakeAPI) policyCreateCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n := 0
+	for _, kind := range f.createOrder {
+		if kind == "networkpolicy" {
+			n++
+		}
+	}
+	return n
+}
+
 func (f *fakeAPI) policyDeleteNames() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -363,14 +378,28 @@ func (f *fakeAPI) handleCreate(w http.ResponseWriter, r *http.Request) {
 		writeStatus(w, 400, "BadRequest", "undecodable body: "+err.Error())
 		return
 	}
-	if in.Metadata.GenerateName == "" {
-		writeStatus(w, 422, "Invalid", "metadata.generateName is required by this fake")
+	// One of the two, as the real API server requires. The harness path uses
+	// generateName so two Starts cannot collide; the enforcement probe names its
+	// Pods outright, because its janitor has to register a name *before* the
+	// create call — a create that times out may still have landed, and an object
+	// whose name only exists in the response is one an interrupted probe cannot
+	// clean up. Accepting both is what the real server does.
+	if in.Metadata.GenerateName == "" && in.Metadata.Name == "" {
+		writeStatus(w, 422, "Invalid", "metadata.name or metadata.generateName is required")
 		return
 	}
 
 	f.mu.Lock()
-	f.nextName++
-	in.Metadata.Name = fmt.Sprintf("%s%05d", in.Metadata.GenerateName, f.nextName)
+	if in.Metadata.Name == "" {
+		f.nextName++
+		in.Metadata.Name = fmt.Sprintf("%s%05d", in.Metadata.GenerateName, f.nextName)
+	} else if _, exists := f.pods[in.Metadata.Name]; exists {
+		// A named create is the one that can conflict, and the driver's error
+		// paths distinguish 409 from everything else.
+		f.mu.Unlock()
+		writeStatus(w, 409, "AlreadyExists", fmt.Sprintf("pods %q already exists", in.Metadata.Name))
+		return
+	}
 	in.Metadata.UID = "uid-" + in.Metadata.Name
 	in.Metadata.ResourceVersion = "1"
 	in.Metadata.CreationTimestamp = time.Now().UTC().Format(time.RFC3339)

@@ -1015,3 +1015,72 @@ func TestMinAgentBuildSurvivesARoundTrip(t *testing.T) {
 			got.Executors.MinAgentBuild)
 	}
 }
+
+// TestKubernetesNetworkPolicyEnforced covers the operator assertion that gates
+// per-project egress scopes on a Kubernetes executor.
+//
+// The field is a *bool and the three states are not decoration: unset defers to
+// a recorded probe, true asserts, and false vetoes a probe that said otherwise.
+// Collapsing false into unset would take away the only control that switches
+// the capability off the instant a CNI changes.
+func TestKubernetesNetworkPolicyEnforced(t *testing.T) {
+	base := func() KubernetesExecutorConfig {
+		return KubernetesExecutorConfig{Enabled: true, Namespace: "cloop-jobs"}
+	}
+
+	t.Run("all three states are accepted on an enabled executor", func(t *testing.T) {
+		for name, v := range map[string]*bool{
+			"unset":    nil,
+			"asserted": boolPtr(true),
+			"denied":   boolPtr(false),
+		} {
+			cfg := base()
+			cfg.NetworkPolicyEnforced = v
+			if err := ValidateKubernetesExecutor(cfg); err != nil {
+				t.Errorf("%s: ValidateKubernetesExecutor = %v, want nil", name, err)
+			}
+		}
+	})
+
+	t.Run("it is refused on a disabled executor", func(t *testing.T) {
+		// A line that reads like a security decision and has no effect is worse
+		// than no line: it looks as though the capability was granted, or
+		// withdrawn, somewhere it was never held.
+		for name, v := range map[string]*bool{"asserted": boolPtr(true), "denied": boolPtr(false)} {
+			cfg := base()
+			cfg.Enabled = false
+			cfg.NetworkPolicyEnforced = v
+			err := ValidateKubernetesExecutor(cfg)
+			if err == nil {
+				t.Errorf("%s: a disabled executor accepted network_policy_enforced", name)
+				continue
+			}
+			if !strings.Contains(err.Error(), "network_policy_enforced") {
+				t.Errorf("%s: the error does not name the key: %v", name, err)
+			}
+		}
+	})
+
+	t.Run("the assertion reaches the driver", func(t *testing.T) {
+		// The half of the evidence config owns. The other half — a recorded
+		// probe verdict — is attached by the hub at reconciliation, because a
+		// config validator must not need the control-plane database open to
+		// answer whether a section is well-formed.
+		cfg := base()
+		cfg.NetworkPolicyEnforced = boolPtr(true)
+		opts, err := cfg.DriverOptions()
+		if err != nil {
+			t.Fatalf("DriverOptions: %v", err)
+		}
+		got := opts.NetworkPolicyEnforcement
+		if got.Assertion == nil || !*got.Assertion {
+			t.Fatalf("the assertion did not reach the driver: %+v", got)
+		}
+		if got.Verdict.Recorded() {
+			t.Errorf("DriverOptions invented a probe verdict: %+v", got.Verdict)
+		}
+	})
+}
+
+// boolPtr is the &literal the tri-state assertion needs.
+func boolPtr(b bool) *bool { return &b }

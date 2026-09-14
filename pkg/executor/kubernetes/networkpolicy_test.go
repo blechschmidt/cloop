@@ -585,8 +585,10 @@ func TestPreflight_EgressFindings(t *testing.T) {
 		if f := findingNamed(t, report, "egress"); f.Level != LevelOK {
 			t.Errorf("egress finding = %s (%s), want ok when the endpoint answers", f.Level, f.Message)
 		}
-		// Always a warning, even on the happy path: creating the object proves
-		// the API server stored it, not that any CNI enforces it.
+		// A warning here because nothing has established that the CNI applies
+		// the object: creating it proves the API server stored it and nothing
+		// more. The severity tracks the evidence rather than the config — see
+		// TestPreflight_EnforcementFindingTracksTheEvidence.
 		f := findingNamed(t, report, "egress-enforcement")
 		if f.Level != LevelWarn || !strings.Contains(f.Message, "CNI") {
 			t.Errorf("egress-enforcement finding = %+v, want a warning naming the CNI", f)

@@ -393,7 +393,7 @@ The chart installs a Role scoped to exactly the calls the driver makes:
 | `pods` | `create`, `get`, `list`, `watch`, `delete` | start, poll, reconcile orphans, stream, stop |
 | `pods/log` | `get` | stream task output |
 | `secrets` | `create`, `delete` | deliver a brokered lease to a workload, then destroy it |
-| `networkpolicies` | `create`, `delete`, `list` | the per-Pod egress allowlist; `list` is for the orphan sweep |
+| `networkpolicies` | `create`, `delete`, `list` | the per-Pod egress allowlist; `list` is for the orphan sweep. The same three verbs are all `cloop hub doctor --probe-network-policy` needs |
 
 The absences are what matter, and each is deliberate. There is **no `update` or
 `patch` on `pods`** — the driver never mutates a Pod after creating it, so a

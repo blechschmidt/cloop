@@ -564,9 +564,8 @@ func reject(c Candidate, req Requirements) (Rejection, bool) {
 	}
 	if req.RequireEgressScope && !caps.SupportsEgressScope {
 		return no(ConstraintEgressScope, "cannot confine one project's egress independently "+
-			"of its neighbours (.cloop/sandbox.yaml sets capabilities.egress:); enable "+
-			"executors.container.egress_filter on a host with nft(8) and CAP_NET_ADMIN, or "+
-			"drop the key and inherit the executor's own policy")
+			"of its neighbours (.cloop/sandbox.yaml sets capabilities.egress:); %s",
+			egressScopeRemedy(c.Executor))
 	}
 	if req.RequireWorkspaceProvisioning && !caps.SupportsWorkspaceProvisioning {
 		return no(ConstraintWorkspace, "cannot materialise a source tree, so the harness "+

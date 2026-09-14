@@ -115,6 +115,13 @@ type EgressFilter struct {
 	// as "the network is broken" rather than "DNS is denied" — a diagnosis that
 	// costs an afternoon and ends with the filter being turned off.
 	AllowClusterDNS *bool
+
+	// AllowAllPorts waives the requirement to name ports alongside
+	// destinations. No config key sets it, and none should: it exists for
+	// forScope, where the bound being asked for is the *block set* rather than
+	// a port list, and demanding a port list there would force a project that
+	// said "the public Internet" to enumerate every port it might ever use.
+	AllowAllPorts bool
 }
 
 // ClusterDNSAllowed reports the effective setting, applying the on-by-default
@@ -170,7 +177,69 @@ func (f EgressFilter) Input() (netfilter.Input, error) {
 		in.Resolvers = append(in.Resolvers, ap)
 	}
 	in.AllowPublicInternet = f.AllowPublicInternet
+	in.AllowAllPorts = f.AllowAllPorts
 	return in, nil
+}
+
+// forScope resolves this executor's configured filter against one project's
+// requested egress scope, returning the filter the project's Pod actually gets.
+//
+// The invariant, and the entire security argument for per-project egress: a
+// scope may only ever *remove* reach. Every branch below is that sentence
+// applied to a shape the executor's own configuration can take.
+func (f EgressFilter) forScope(scope executor.EgressScope) (EgressFilter, error) {
+	// An unset scope is "no opinion" and leaves the executor's configuration
+	// exactly as it was; EgressScopeNone never needs a filter, because taking
+	// the network away is DisableNetwork's job and buildNetworkPolicy already
+	// compiles an empty authorisation for it.
+	if !scope.NeedsFilter() {
+		return f, nil
+	}
+	if scope != executor.EgressScopePublic {
+		// Unreachable while EgressScopePublic is the only filtering scope, and
+		// deliberately not a default case that guesses: the next scope added
+		// must come here and state its own compilation rather than inheriting
+		// this one's by falling through.
+		return EgressFilter{}, fmt.Errorf("kubernetes: egress scope %q has no policy mapping", scope)
+	}
+
+	// The one case that cannot be honoured. The executor filters egress and
+	// does not grant the public Internet, so its Pods reach only the CIDRs an
+	// operator named. "The public Internet" is strictly more than that, and the
+	// scope also drops those CIDRs — so honouring it literally would hand the
+	// project a policy that is simultaneously wider than the operator allowed
+	// and narrower than the project asked for.
+	//
+	// Refusing at placement is the only honest outcome. Widening is a security
+	// regression; silently returning the narrower intersection is a sandbox
+	// that believes it has Internet access and fails on its first fetch, on an
+	// executor whose configuration it cannot see.
+	if f.Enabled && !f.AllowPublicInternet {
+		return EgressFilter{}, fmt.Errorf(
+			"%w: this project requests the %q egress scope, but this executor's egress filter grants "+
+				"only the destinations named in executors.kubernetes.egress_filter.cidrs — the scope "+
+				"asks for more reach than the executor grants, not less. Either drop "+
+				"capabilities.egress from .cloop/sandbox.yaml and inherit the executor's policy, or "+
+				"set executors.kubernetes.egress_filter.allow_public_internet",
+			executor.ErrUnsupported, scope)
+	}
+
+	// Narrowing, in the two shapes it comes in: an unfiltered executor reduced
+	// to "public only", or a filtered one whose private-space CIDR grants are
+	// dropped while the public allowance it already had is kept.
+	return EgressFilter{
+		Enabled:             true,
+		AllowPublicInternet: true,
+		// No ports named, and that is the request rather than an omission: the
+		// scope's bound is the block set, not a port list.
+		AllowAllPorts: true,
+		// Carried over because they are infrastructure rather than reach. A
+		// sandbox that cannot resolve a name has no usable Internet access, and
+		// the symptom — every hostname failing — reads as "the network is
+		// blocked" and sends the reader somewhere the fix is not.
+		Resolvers:       f.Resolvers,
+		AllowClusterDNS: f.AllowClusterDNS,
+	}, nil
 }
 
 // parseResolver accepts "ip:port" and a bare address.
@@ -302,9 +371,19 @@ func networkPolicyName(handleID string) string {
 // is a security decision, and a security decision only inspectable by running
 // it against a live cluster is one that never gets inspected.
 func buildNetworkPolicy(req podRequest, filter EgressFilter) (*netfilter.NetworkPolicy, error) {
+	// The project's own scope is resolved first, because it can turn a filter
+	// that was switched off into one that must be installed: an executor with
+	// no egress_filter still owes a per-project `egress: public` an actual
+	// policy object, and that is exactly the case SupportsEgressScope now
+	// advertises. Resolution can also refuse — see forScope.
+	filter, err := filter.forScope(req.EgressScope)
+	if err != nil {
+		return nil, err
+	}
 	if !filter.Enabled {
-		// Unchanged behaviour for every deployment that has not opted in: no
-		// object, no selector, no policy types. See EgressFilter.Enabled.
+		// Unchanged behaviour for every deployment that has not opted in and
+		// whose projects ask for nothing: no object, no selector, no policy
+		// types. See EgressFilter.Enabled.
 		return nil, nil
 	}
 	// The selector is the security boundary of this file. LabelHandleID carries
@@ -328,7 +407,6 @@ func buildNetworkPolicy(req podRequest, filter EgressFilter) (*netfilter.Network
 	// narrower statement, and narrower always wins.
 	in := netfilter.Input{}
 	if !req.DisableNetwork {
-		var err error
 		if in, err = filter.Input(); err != nil {
 			return nil, fmt.Errorf("kubernetes: egress_filter: %w", err)
 		}

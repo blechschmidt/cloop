@@ -145,3 +145,40 @@ func (s EgressScope) RemovesNetwork() bool { return s == EgressScopeNone }
 // needs neither nft nor CAP_NET_ADMIN. That distinction is what lets a project
 // on an unprivileged host still express the strongest of these scopes.
 func (s EgressScope) NeedsFilter() bool { return s == EgressScopePublic }
+
+// EgressScopeExplainer is implemented by a driver that can say, in its own
+// vocabulary, why it is not carrying per-project egress scopes right now.
+//
+// It exists because the remedy is driver-specific and the refusal is not. A
+// container executor needs nft(8) and CAP_NET_ADMIN; a Kubernetes executor
+// needs proof that the cluster's CNI enforces the NetworkPolicy it already
+// creates, which is a different problem with a different command. Printing the
+// container remedy at a Kubernetes operator sends them to a config key their
+// deployment does not have — and a refusal whose remedy does not apply is one
+// people resolve by deleting the capability from sandbox.yaml, which is exactly
+// the outcome the refusal existed to prevent.
+//
+// Deliberately an interface rather than a field on Capabilities, for the reason
+// stated at SupportsRevocation: a string in a struct is a claim anyone can set
+// and nobody keeps current, while a method is answered by the driver that knows.
+type EgressScopeExplainer interface {
+	// ExplainEgressScopeRefusal returns a sentence completing "this executor
+	// cannot confine one project's egress independently of its neighbours; ...".
+	ExplainEgressScopeRefusal() string
+}
+
+// egressScopeRemedy asks the driver why, falling back to the generic advice.
+//
+// The fallback names the container remedy because that is the only other driver
+// with a per-workload filter, and because a caller holding no Executor at all —
+// a Candidate assembled from a stored capability snapshot — still deserves
+// something actionable.
+func egressScopeRemedy(ex Executor) string {
+	if e, ok := ex.(EgressScopeExplainer); ok {
+		if s := strings.TrimSpace(e.ExplainEgressScopeRefusal()); s != "" {
+			return s
+		}
+	}
+	return "enable executors.container.egress_filter on a host with nft(8) and CAP_NET_ADMIN, " +
+		"or drop the key and inherit the executor's own policy"
+}

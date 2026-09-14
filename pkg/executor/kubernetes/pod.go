@@ -387,6 +387,12 @@ type podStatus struct {
 	Reason    string `json:"reason,omitempty"`
 	Message   string `json:"message,omitempty"`
 	StartTime string `json:"startTime,omitempty"`
+	// PodIP is the address the Pod holds on the cluster network. Nothing in the
+	// harness path reads it — a harness Pod is reached through its log stream,
+	// never dialled — and it exists for the enforcement probe, which has to
+	// give one throwaway Pod an address to aim at without inventing a Service
+	// to resolve it by name. See netpolprobe.go.
+	PodIP string `json:"podIP,omitempty"`
 	// InitContainerStatuses is how the driver learns that provisioning
 	// finished. It is a separate list from ContainerStatuses, so code that
 	// only reads the latter sees a Pod that is Pending with no container
@@ -529,6 +535,17 @@ type podRequest struct {
 	// DisableNetwork marks the Pod as one that should not reach the network.
 	// See LabelEgress for what this driver can and cannot enforce.
 	DisableNetwork bool
+
+	// EgressScope is the project's own request to confine its reach, from
+	// .cloop/sandbox.yaml's capabilities.egress. It is resolved against the
+	// executor's configured filter by EgressFilter.forScope, and can only ever
+	// narrow — including turning an executor with no filter at all into one
+	// that installs a policy for this Pod alone.
+	//
+	// Placement has already refused this Pod if the scope needs a filter and
+	// the executor could not prove it enforces one, so by the time a scope
+	// arrives here the object about to be built is known to bite.
+	EgressScope executor.EgressScope
 
 	// Workspace says how the source tree gets into the workspace volume. It
 	// never holds a credential — only the name of a grant — so it is safe to

@@ -948,6 +948,32 @@ type KubernetesExecutorConfig struct {
 	// Absent means no policy is created and Pods keep the cluster's default
 	// egress, which is what an upgrade must not change under an operator.
 	EgressFilter KubernetesEgressFilterConfig `yaml:"egress_filter,omitempty"`
+
+	// NetworkPolicyEnforced asserts that this cluster's CNI actually enforces
+	// the NetworkPolicy objects cloop creates.
+	//
+	// It is the one fact this driver needs and cannot obtain. The API server
+	// accepts a NetworkPolicy whether or not anything implements it — flannel
+	// is the well-known case — so `kubectl get netpol` can list a firewall that
+	// does not exist, and a per-project `capabilities.egress` scope on such a
+	// cluster would be silently ignored. Placement therefore refuses those
+	// projects until somebody settles the question.
+	//
+	// A *bool with three meanings, because two are not enough:
+	//
+	//   - unset: nobody has said. A recorded probe verdict decides; with none,
+	//     per-project egress scopes are refused. This is every existing
+	//     deployment's behaviour and stays that way.
+	//   - true: the operator asserts enforcement. Cheapest answer, and only as
+	//     good as the person writing it — a probe that contradicts it wins.
+	//   - false: the operator states the cluster does *not* enforce policies.
+	//     Vetoes any recorded verdict, which is what lets you switch the
+	//     capability off the moment a CNI changes rather than waiting for a
+	//     stale probe result to age out.
+	//
+	// The stronger alternative to asserting is `cloop hub doctor
+	// --probe-network-policy`, which proves it against the running cluster.
+	NetworkPolicyEnforced *bool `yaml:"network_policy_enforced,omitempty"`
 }
 
 // KubernetesEgressFilterConfig turns a Pod's cluster egress into an enforced
