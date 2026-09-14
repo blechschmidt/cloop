@@ -337,6 +337,13 @@ function makeDOM(opts) {
 
   let micCtl = null;
 
+  // Listeners the page installs on window itself, as opposed to on document.
+  // The page uses these for the events that have no DOM target — an uncaught
+  // error and the page going away — which is how the diagnostic trail learns
+  // it should flush (Task 20251). Recorded rather than stubbed so a scenario
+  // can fire them and assert on what the page did.
+  const winListeners = {};
+
   return {
     doc,
     calls,
@@ -345,11 +352,27 @@ function makeDOM(opts) {
     recorder: () => (micCtl ? micCtl.recorder() : null),
     micStarts: () => mic.starts,
     setRoutes: r => { routes = r; },
+
+    // fireWindow dispatches to the listeners installed on window.
+    fireWindow: (type, ev) => {
+      (winListeners[type] || []).forEach(fn => fn(ev || { type }));
+    },
+
     install() {
       globalThis.window = globalThis;
       globalThis.document = doc;
       globalThis.location = { search: opts.search || '?token=test-token' };
       globalThis.fetch = win.fetch;
+      for (const k of Object.keys(winListeners)) { delete winListeners[k]; }
+      globalThis.addEventListener = (type, fn) => {
+        (winListeners[type] || (winListeners[type] = [])).push(fn);
+      };
+      globalThis.removeEventListener = (type, fn) => {
+        const l = winListeners[type];
+        if (!l) { return; }
+        const i = l.indexOf(fn);
+        if (i >= 0) { l.splice(i, 1); }
+      };
       globalThis.setInterval = (fn, ms) => { win.timers.push({ fn, ms }); return win.timers.length; };
       globalThis.clearInterval = id => { if (win.timers[id - 1]) { win.timers[id - 1].cleared = true; } };
       globalThis.isSecureContext = opts.insecure ? false : true;

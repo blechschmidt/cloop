@@ -125,6 +125,10 @@ Five pages in order, indexed at
   authenticate a scraper against it, every exported metric with its labels,
   the alerts worth writing, and what the cardinality ceiling does when an
   instrumentation bug reaches it.
+- **[Front-end telemetry](operations/telemetry.md)** — the diagnostic trail the
+  dashboard and the display-glasses page record, how to read a session back
+  from the CLI or the Telemetry tab, what is scrubbed before storage and why,
+  the limits that bound a public ingest route, and how to turn it off.
 
 ## Elsewhere in the repository
 

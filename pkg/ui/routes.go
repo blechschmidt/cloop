@@ -319,6 +319,14 @@ func (s *Server) routeTable() []routeSpec {
 		// must keep working for a user whose role grants nothing.
 		{Pattern: "POST /api/client-error", Handler: s.handleClientError, Perm: public},
 
+		// Browser telemetry ingest (Task 20251). Public for the same reason
+		// the line above is, and on the same reasoning: an instrument that
+		// records only while the page is healthy records nothing about the
+		// failures worth investigating. Bounded rather than gated — see
+		// telemetry_api.go for what holds it in place. Reading a trail back
+		// is a different matter and takes audit.read; those routes are below.
+		{Pattern: "POST /api/telemetry", Handler: s.handleTelemetryIngest, Perm: public},
+
 		// The hub's own build (Task 20249). Read-only, carries no project,
 		// tenant or user data, and every authenticated user needs it: the
 		// dashboard compares it on reconnect to notice it is running stale
@@ -538,6 +546,15 @@ func (s *Server) routeTable() []routeSpec {
 		{Pattern: "GET /api/audit", Handler: s.handleAuditList, Perm: auditRead, Scope: scopeGlobal},
 		{Pattern: "GET /api/audit/verify", Handler: s.handleAuditVerify, Perm: auditRead, Scope: scopeGlobal},
 
+		// ── Browser telemetry, read side (Task 20251) ────────────────
+		// Same permission and scope as the audit trail above, on the same
+		// reasoning: a trail carries URLs, view names, user agents and
+		// error text from other people's sessions, which is the same class
+		// of cross-tenant operational record. Writing one is public (see
+		// the ingest rows); reading one is not.
+		{Pattern: "GET /api/telemetry", Handler: s.handleTelemetryList, Perm: auditRead, Scope: scopeGlobal},
+		{Pattern: "GET /api/telemetry/sessions", Handler: s.handleTelemetrySessions, Perm: auditRead, Scope: scopeGlobal},
+
 		// ── Secrets, grants, and leases ──────────────────────────────
 		// Global, and never below maintainer. Reads are gated on
 		// secret.grant rather than project.read because the list of which
@@ -621,6 +638,16 @@ func (s *Server) routeTable() []routeSpec {
 		{Pattern: "GET /api/glasses/link", Handler: s.handleGlassesLinkGet, Perm: public},
 		{Pattern: "POST /api/glasses/link", Handler: s.handleGlassesLinkCreate, Perm: public},
 		{Pattern: "DELETE /api/glasses/link", Handler: s.handleGlassesLinkRevoke, Perm: public},
+
+		// The wearable's diagnostic trail (Task 20251). Duplicated onto this
+		// prefix for the same reason the dictation rows above are, and here
+		// the reason is the whole point of the row: the glasses are the front
+		// end with no console, no network inspector and no way for a wearer to
+		// report more than a sentence, so they are the surface telemetry was
+		// built for — and tokenKindAdmitted would refuse them at
+		// /api/telemetry by path. Public, like the dashboard's ingest: a link
+		// in its terminal dead state is exactly the condition worth recording.
+		{Pattern: "POST /api/glasses/telemetry", Handler: s.handleGlassesTelemetryIngest, Perm: public},
 
 		// ── Per-identity quotas (Task 20182) ─────────────────────────
 		// Global and admin-only. A quota is the ceiling on what an

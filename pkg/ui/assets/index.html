@@ -87,6 +87,7 @@
       <button class="tab-btn global-tab" data-global-perm="secret.grant" data-perm-hide onclick="switchTab('secrets')" id="tbtn-secrets" title="Credentials an executor may hold: GitHub repos and PATs, kubeconfigs, and Internet egress — with TTL grants and live leases (global, maintainer and above)">Secrets</button>
       <button class="tab-btn global-tab" data-global-perm="audit.read" data-perm-hide onclick="switchTab('audit')" id="tbtn-audit" title="Tamper-evident compliance trail: who granted which credential to which executor, and when (global, admin only)">Audit</button>
       <button class="tab-btn global-tab" data-global-perm="user.manage" data-perm-hide onclick="switchTab('quotas')" id="tbtn-quotas" title="Per-identity caps on projects, concurrent runs, executors, sessions and daily spend — with live usage (global, admin only)">Quotas</button>
+      <button class="tab-btn global-tab" data-global-perm="audit.read" data-perm-hide onclick="switchTab('telemetry')" id="tbtn-telemetry" title="What the browser and display-glasses front ends actually did: gestures, view changes, requests and errors, as an ordered trail per page load (global, admin only)">Telemetry</button>
       <button class="tab-btn global-tab" onclick="switchTab('settings')"  id="tbtn-settings" title="Settings (global)">Settings</button>
     </div>
     <div class="spacer"></div>
@@ -189,6 +190,7 @@
       <button class="m-tab-btn" onclick="switchTab('executors')" id="mtbtn-executors"><span class="m-tab-icon">&#127760;</span>Executors</button>
       <button class="m-tab-btn" data-global-perm="secret.grant" data-perm-hide onclick="switchTab('secrets')" id="mtbtn-secrets"><span class="m-tab-icon">&#128273;</span>Secrets</button>
       <button class="m-tab-btn" data-global-perm="audit.read" data-perm-hide onclick="switchTab('audit')" id="mtbtn-audit"><span class="m-tab-icon">&#128209;</span>Audit</button>
+      <button class="m-tab-btn" data-global-perm="audit.read" data-perm-hide onclick="switchTab('telemetry')" id="mtbtn-telemetry"><span class="m-tab-icon">&#128225;</span>Telemetry</button>
       <button class="m-tab-btn" onclick="switchTab('settings')"  id="mtbtn-settings"><span class="m-tab-icon">&#127760;</span>Settings</button>
     </nav>
   </div>
@@ -1698,6 +1700,93 @@
         </div>
         <div id="auditMore" style="display:none;text-align:center;padding:12px 0">
           <button class="btn" style="padding:5px 14px;font-size:12px" onclick="loadMoreAudit()">Load more</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ════════════════════════════════════════════════════════ TELEMETRY -->
+    <div id="tab-telemetry" class="tab-panel">
+      <div class="section">
+        <div class="section-title" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+          Front-end telemetry
+          <span style="font-size:11px;font-weight:400;color:var(--muted)">global &mdash; admin only</span>
+          <span id="telemetryState" style="font-size:11px;font-weight:400;color:var(--muted)"></span>
+          <button class="btn" style="padding:4px 10px;font-size:12px;margin-left:auto" onclick="copyTelemetryAsJSON()" title="Copy the events currently shown as JSON">&#128203; Copy as JSON</button>
+          <button class="btn" style="padding:4px 10px;font-size:12px" onclick="loadTelemetry()" title="Reload">&#8635; Refresh</button>
+        </div>
+        <p style="font-size:12px;color:var(--muted);margin-top:4px;margin-bottom:12px">
+          What the dashboard and the display-glasses page actually did, as an ordered trail per page
+          load: gestures received, views opened, requests and their status, and uncaught errors.
+          Built for the front ends this hub cannot otherwise observe &mdash; the glasses have no
+          console and no network inspector. Credentials are stripped at ingest and the table trims
+          itself; turn collection off with <code>ui.telemetry.enabled: false</code>. Read the same
+          data from a terminal with <code>cloop hub telemetry</code>.
+        </p>
+
+        <div class="audit-filters">
+          <div class="audit-field">
+            <label class="form-label" for="telemetryFilterSource">Source</label>
+            <select id="telemetryFilterSource" class="form-select" onchange="applyTelemetryFilters()"><option value="">Any</option></select>
+          </div>
+          <div class="audit-field">
+            <label class="form-label" for="telemetryFilterKind">Kind</label>
+            <select id="telemetryFilterKind" class="form-select" onchange="applyTelemetryFilters()"><option value="">Any</option></select>
+          </div>
+          <div class="audit-field">
+            <label class="form-label" for="telemetryFilterSession">Session</label>
+            <input id="telemetryFilterSession" class="form-input" type="text" placeholder="click a session below" onchange="applyTelemetryFilters()">
+          </div>
+          <div class="audit-field wide">
+            <label class="form-label" for="telemetryFilterSearch">Message contains</label>
+            <input id="telemetryFilterSearch" class="form-input" type="text" placeholder="substring match" onchange="applyTelemetryFilters()">
+          </div>
+          <div class="audit-field" style="flex:0 0 auto;min-width:0">
+            <label class="form-label">&nbsp;</label>
+            <button class="btn" style="padding:5px 12px;font-size:12px" onclick="resetTelemetryFilters()">Clear</button>
+          </div>
+        </div>
+
+        <!-- Sessions first: an investigation starts from "a wearer reported a
+             problem around ten past four" and has to become a session id before
+             any per-event view is useful. -->
+        <div style="font-size:12px;font-weight:600;margin:14px 0 6px">Recent sessions</div>
+        <div id="telemetrySessionsEmpty" class="audit-empty" style="display:none">No sessions recorded yet.</div>
+        <div style="overflow-x:auto">
+          <table class="audit-table" id="telemetrySessionsTable" style="display:none">
+            <thead>
+              <tr>
+                <th style="width:150px">Session</th>
+                <th style="width:90px">Source</th>
+                <th style="width:70px">Events</th>
+                <th style="width:70px">Errors</th>
+                <th style="width:170px">Last seen</th>
+                <th>Who / device</th>
+              </tr>
+            </thead>
+            <tbody id="telemetrySessionsBody"></tbody>
+          </table>
+        </div>
+
+        <div style="font-size:12px;font-weight:600;margin:18px 0 6px">Events</div>
+        <div id="telemetrySummary" style="font-size:11.5px;color:var(--muted);margin-bottom:8px"></div>
+        <div id="telemetryEmpty" class="audit-empty" style="display:none">No telemetry events match these filters.</div>
+        <div style="overflow-x:auto">
+          <table class="audit-table" id="telemetryTable" style="display:none">
+            <thead>
+              <tr>
+                <th style="width:170px">Time</th>
+                <th style="width:50px">Seq</th>
+                <th style="width:85px">Source</th>
+                <th style="width:85px">Kind</th>
+                <th style="width:110px">View</th>
+                <th>Message</th>
+              </tr>
+            </thead>
+            <tbody id="telemetryBody"></tbody>
+          </table>
+        </div>
+        <div id="telemetryMore" style="display:none;text-align:center;padding:12px 0">
+          <button class="btn" style="padding:5px 14px;font-size:12px" onclick="loadMoreTelemetry()">Load more</button>
         </div>
       </div>
     </div>

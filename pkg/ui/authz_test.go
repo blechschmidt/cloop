@@ -118,6 +118,29 @@ var publicRouteAllowlist = map[string]string{
 	"DELETE /api/glasses/link": "revokes the caller's own link, the same reasoning as " +
 		"POST /api/session/logout-all: a user who has lost a device must be able to withdraw their " +
 		"credential without an operator in the path",
+
+	// Telemetry ingest (Task 20251). One justification, two routes: they are
+	// the same handler behind two paths, split only because a display-glasses
+	// token is pinned by tokenKindAdmitted to the /api/glasses/ prefix and
+	// widening that pin to reach /api/telemetry would trade the whole of its
+	// containment for one endpoint.
+	"POST /api/telemetry": "browser diagnostic trails, the same reasoning as POST /api/client-error: " +
+		"an instrument that records only while the page is healthy records nothing about the failures " +
+		"worth investigating, and a user whose role grants nothing still has a broken page to report. " +
+		"Public here means no *permission* is required, not that no credential is — only isPublicShell " +
+		"bypasses authMiddleware, and it covers GET /glasses alone — so ingest reaches exactly the " +
+		"people already entitled to load a page, never an anonymous scanner. Bounded on top of that: " +
+		"pkg/telemetry clamps every field and caps the batch, credentials are scrubbed before storage, " +
+		"the body limit is 2 MiB rather than the 10 MiB default, the per-IP rate limiter applies as " +
+		"everywhere, and the table trims itself on the write path. Identity and address are stamped " +
+		"from the request, so a batch reports rather than asserts who sent it. Write-only: reading a " +
+		"trail back is audit.read",
+	"POST /api/glasses/telemetry": "the wearable's half of the route above, and the surface telemetry " +
+		"exists for — glasses have no console, no network inspector, and a wearer who can report only " +
+		"a sentence of prose. A separate path rather than a shared one because tokenKindAdmitted pins " +
+		"a glasses token to the /api/glasses/ prefix, and widening that pin would trade the whole of " +
+		"its containment for one endpoint. It is the weakest thing under that prefix: write-only, and " +
+		"it returns 204 whatever happens, so it discloses nothing a caller did not already send",
 }
 
 // TestEveryRouteDeclaresAPermission is the route-coverage check: every entry

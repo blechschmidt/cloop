@@ -358,6 +358,7 @@ var hubCommandGroups = map[string]string{
 	"lease":       groupHubOperate,
 	"audit":       groupHubOperate,
 	"retention":   groupHubOperate,
+	"telemetry":   groupHubOperate,
 }
 
 // hubHelpFooter points at the runbook rather than trying to be it. The three

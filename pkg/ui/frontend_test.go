@@ -126,6 +126,14 @@ var executorsInventorySource string
 //go:embed version_api.go
 var versionAPISource string
 
+// telemetryAPISource is pkg/ui/telemetry_api.go (Task 20251). It carries no
+// broadcast, but it registers four routes — two public ingest, two audit.read
+// reads — and the route-drift and authz tests read the accepted verbs and the
+// declared permissions out of the handler bodies.
+//
+//go:embed telemetry_api.go
+var telemetryAPISource string
+
 // routesSource is pkg/ui/routes.go, which holds the declarative route table
 // (Task 20164). Routes moved out of server.go when registration started
 // carrying a required permission, so the architectural tests that scan for
@@ -144,7 +152,7 @@ func allUISources() string {
 		"\n" + tokensAPISource + "\n" + sessionsAPISource + "\n" + quotasAPISource +
 		"\n" + reproduceAPISource + "\n" + ledgerAPISource + "\n" + retentionAPISource +
 		"\n" + executorsInventorySource + "\n" + executorDetailAPISource +
-		"\n" + versionAPISource
+		"\n" + versionAPISource + "\n" + telemetryAPISource
 }
 
 // dashboardSource is the whole dashboard front end — the rendered index.html
@@ -1154,7 +1162,22 @@ func TestDashboard_NoDuplicateWindowAssignments(t *testing.T) {
 	// Allowlist for handlers that are intentionally reassigned (e.g. a
 	// no-op default replaced by a real implementation when a feature
 	// initialises). Add new entries deliberately, with a comment.
-	allow := map[string]bool{}
+	allow := map[string]bool{
+		// fetch is wrapped twice, and the two wrappers chain rather than
+		// shadow: each captures the previous window.fetch and calls it.
+		// errboundary.js installs the telemetry recorder first (it is a
+		// separate <script>, so it runs before the bundle exists), then
+		// 04-realtime.js wraps that to inject X-Client-ID. The composed
+		// order is client-id → telemetry → native, so every request is
+		// both tagged and recorded.
+		//
+		// A wrapper rather than instrumenting the api() helper because
+		// api() is not a chokepoint: the bundle makes ~27 direct fetch
+		// calls across ten fragments, and a trail that silently omitted
+		// them would be most misleading exactly where a reader trusts it
+		// — "the request was never made" when it was.
+		"fetch": true,
+	}
 
 	var dupes []string
 	for name, n := range counts {

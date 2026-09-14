@@ -1175,6 +1175,47 @@ type UIConfig struct {
 	// Empty (the default) means unlimited, which is what keeps a
 	// single-tenant deployment untouched. See QuotasConfig.
 	Quotas QuotasConfig `yaml:"quotas,omitempty"`
+
+	// Telemetry governs collection of browser-side diagnostic trails.
+	// On by default; see TelemetryConfig.
+	Telemetry TelemetryConfig `yaml:"telemetry,omitempty"`
+}
+
+// TelemetryConfig is the switch for browser telemetry collection (Task 20251).
+//
+//	ui:
+//	  telemetry:
+//	    enabled: false
+//
+// Default on, which is the unusual choice and the deliberate one. The trails
+// exist to diagnose front ends the hub cannot otherwise observe — above all
+// the display-glasses page, which has no console and no network inspector —
+// and an instrument that has to be switched on in advance is never on when the
+// failure it was built for happens.
+//
+// What that default costs is bounded rather than argued: events are scrubbed
+// of credentials at ingest, clamped to fixed field budgets, capped per batch,
+// and stored in a table that trims itself on the write path. Reading them back
+// takes audit.read.
+//
+// The switch exists because "bounded" is not the same as "acceptable to
+// everyone": a deployment whose policy forbids storing user-agent strings or
+// client addresses at all needs a way to say so, and turning it off makes both
+// ingest routes answer 404 rather than silently discarding.
+type TelemetryConfig struct {
+	// Enabled is a pointer so that absent and explicitly-false are
+	// distinguishable. A plain bool would make the zero value — an operator
+	// who has never heard of this setting — mean "off", which is the opposite
+	// of the intended default.
+	Enabled *bool `yaml:"enabled,omitempty"`
+}
+
+// Effective reports whether collection is on, applying the default-on rule.
+func (t TelemetryConfig) Effective() bool {
+	if t.Enabled == nil {
+		return true
+	}
+	return *t.Enabled
 }
 
 // QuotasConfig is the per-identity admission policy (Task 20182).

@@ -896,6 +896,12 @@ When you run cloop in any AI-powered mode (PM, suggest, explain, etc.) cloop sen
 **No API keys, passwords, or environment variables** are ever included in prompts.
 **No telemetry** is sent to Anthropic or any third party by cloop itself.
 
+The hub does collect a browser diagnostic trail, but it never leaves the
+deployment: it is written by your own front ends to your own hub, stored in
+your own database, and scrubbed of credentials on the way in. See
+[front-end telemetry](../operations/telemetry.md), including how to turn it
+off.
+
 ### API key storage
 
 | Location | What is stored |
@@ -1141,6 +1147,29 @@ When a `--token` is set:
   - `X-Frame-Options: DENY`
   - `Referrer-Policy: no-referrer`
 - CORS is restricted to `localhost` / `127.0.0.1` origins only (no wildcard).
+
+#### Front-end telemetry
+
+The dashboard and the display-glasses page record a diagnostic trail — the
+gestures they received, the views they opened, the requests they issued and any
+errors — and post it to the hub, where `cloop hub telemetry` and the Telemetry
+tab read it back. It never leaves the deployment.
+
+```yaml
+ui:
+  telemetry:
+    enabled: true    # the default; set false to refuse ingest entirely
+```
+
+| Key | Default | What it does |
+| --- | --- | --- |
+| `enabled` | `true` | When false, both ingest routes answer `404` rather than silently discarding, so the setting is verifiable. Previously-collected events remain readable; remove them with `cloop hub telemetry prune`. |
+
+Default-on is deliberate: an instrument that has to be switched on in advance is
+never on when the failure it was built for happens — and the glasses page, which
+has no console and no network inspector, has no other way to be debugged.
+Credentials are scrubbed before storage and the table trims itself at 50,000
+rows. See [front-end telemetry](../operations/telemetry.md).
 
 ### TLS
 

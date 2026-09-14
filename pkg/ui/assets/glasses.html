@@ -325,8 +325,13 @@ function send(method, path, body) {
     headers['Content-Type'] = 'application/json';
     init.body = JSON.stringify(body);
   }
+  var started = Date.now();
   return fetch(path, init)
     .then(function(res) {
+      // On the trail before the status is acted on, so a link that dies mid
+      // session shows the call that killed it rather than only its aftermath.
+      tel('fetch', method + ' ' + path + ' → ' + res.status,
+        { status: res.status, ms: Date.now() - started });
       if (res.status === 401 || res.status === 403) {
         // Terminal, and the retry loop has to stop here rather than keep
         // asking. Every rejected attempt costs the hub an audit record and
@@ -334,7 +339,20 @@ function send(method, path, body) {
         // through a phone, that lockout is shared with every other caller
         // behind the same address. A pair sitting forgotten in a drawer must
         // not be able to lock out the CI tokens.
+        //
+        // The trail stops here too, and deliberately: telFlush refuses once
+        // dead is set, so whatever is still queued is dropped rather than
+        // posted with a credential the hub has just rejected. What was already
+        // flushed — the timer fires every ten seconds — is what an
+        // investigation gets, and the terminal state itself is the one thing
+        // the page reports in plain words to the wearer anyway.
+        //
+        // dead is set *before* the event is recorded, not after: tel() flushes
+        // as soon as the queue reaches its batch size, so recording first would
+        // — one time in thirty-two — post that batch while dead was still
+        // false, spending exactly the auth failure this branch exists to stop.
         dead = true;
+        tel('lifecycle', 'link rejected: ' + res.status);
         stopPolling();
         throw new Error(DEAD_MSG);
       }
@@ -353,6 +371,113 @@ function say(text, bad) {
 }
 
 function fail(err) { say(err && err.message ? err.message : String(err), true); }
+
+// ── diagnostic trail ────────────────────────────────────────────────────────
+// The reason this page has telemetry at all (Task 20251). These glasses have no
+// developer tools, no console, no network inspector, and a wearer whose entire
+// reporting channel is a sentence of prose. Three separate tasks were spent
+// reproducing such a sentence by simulation — "swiping right selects the first
+// item once and then nothing" was diagnosed by building a model of the device
+// and guessing until the guess matched. A trail answers it directly.
+//
+// So what is recorded is not exceptions. Almost none of these failures throw.
+// It is gestures: which key the device sent, how long the focus ring was, and
+// where the cursor went — which is precisely the evidence that distinguishes
+// "the gesture never arrived" from "it arrived and the ring was empty" from
+// "it arrived, the ring was fine, and select() did nothing".
+var TEL_ENDPOINT = '/api/glasses/telemetry';
+var telSession = '', telSeq = 0, telQueue = [], telTimer = null;
+var telRecorded = 0, telPosted = 0;
+// Budgets. Every gesture costs two events — one when it arrives, one for where
+// it left the cursor — so 400 is around 200 swipes, comfortably past the point
+// where a trail has already shown what went wrong, and about 60 KB on a link
+// that is usually a phone tether. Small enough that a runaway loop on a device
+// the wearer cannot debug stops costing anything quickly, which is the case
+// these exist for. The batch stays under telemetry.MaxBatchEvents (64), and the
+// flush is slower than the dashboard's because a wearable session is a handful
+// of glances rather than an afternoon.
+var TEL_EVENT_MAX = 400, TEL_POST_MAX = 30, TEL_BATCH = 32, TEL_FLUSH_MS = 10000;
+
+try {
+  var telBuf = new Uint8Array(8);
+  window.crypto.getRandomValues(telBuf);
+  for (var telI = 0; telI < telBuf.length; telI++) {
+    telSession += ('0' + telBuf[telI].toString(16)).slice(-2);
+  }
+} catch (e) { telSession = 'n' + Math.floor(Math.random() * 1e12).toString(16); }
+
+function tel(kind, message, detail) {
+  try {
+    if (telRecorded >= TEL_EVENT_MAX) { return; }
+    telRecorded++;
+    var d = '';
+    if (detail != null) { try { d = JSON.stringify(detail); } catch (e) { d = ''; } }
+    telQueue.push({
+      kind: kind, seq: ++telSeq, ts: Date.now(),
+      message: String(message == null ? '' : message),
+      view: state.view, detail: d
+    });
+    if (telQueue.length >= TEL_BATCH) { telFlush(false); }
+    else if (telTimer === null) {
+      telTimer = setTimeout(function() { telTimer = null; telFlush(false); }, TEL_FLUSH_MS);
+    }
+  } catch (e) { /* the trail must never be the thing that breaks the page */ }
+}
+
+function telFlush(beacon) {
+  try {
+    if (telTimer !== null) { clearTimeout(telTimer); telTimer = null; }
+    if (!telQueue.length) { return; }
+    // Once the link is dead, stop. This is the same rule send() follows and for
+    // the same reason: every rejected attempt costs an audit record and counts
+    // toward the hub's per-IP auth-failure lockout, which — because glasses
+    // tether through a phone — is shared with every other caller behind that
+    // address. A forgotten pair flushing a trail it can no longer authenticate
+    // would lock out exactly what the retry rule was written to protect.
+    if (dead || telPosted >= TEL_POST_MAX) { telQueue.length = 0; return; }
+    telPosted++;
+
+    var body = JSON.stringify({
+      source: 'glasses', session: telSession, events: telQueue.splice(0, TEL_BATCH)
+    });
+    // sendBeacon cannot carry the Authorization header this link authenticates
+    // with, so it is only usable when a cookie session also exists. Try it on
+    // the unload path anyway — when it works it is the only transport the
+    // browser promises to finish — and fall back to keepalive otherwise.
+    if (beacon && !TOKEN) {
+      try {
+        if (navigator.sendBeacon &&
+            navigator.sendBeacon(TEL_ENDPOINT, new Blob([body], {type: 'application/json'}))) {
+          return;
+        }
+      } catch (e) {}
+    }
+    var headers = { 'Content-Type': 'application/json' };
+    if (TOKEN) { headers['Authorization'] = 'Bearer ' + TOKEN; }
+    fetch(TEL_ENDPOINT, {
+      method: 'POST', headers: headers, body: body,
+      credentials: 'same-origin', keepalive: true
+    }).catch(function() {});   // diagnostic, never a reason to retry
+  } catch (e) {}
+}
+
+// setView is the only writer of state.view. Centralised so the transition is
+// recorded exactly once and only when it is real: a trail whose view column
+// repeats is a trail a reader stops trusting.
+function setView(v) {
+  if (state.view === v) { return; }
+  state.view = v;
+  tel('view', v);
+}
+
+window.addEventListener('error', function(ev) {
+  try {
+    tel('error', (ev && ev.message) || 'Unknown error',
+      { line: (ev && ev.lineno) | 0, col: (ev && ev.colno) | 0 });
+    telFlush(false);
+  } catch (e) {}
+});
+window.addEventListener('pagehide', function() { telFlush(true); });
 
 // ── dom ─────────────────────────────────────────────────────────────────────
 // Everything below builds nodes and writes textContent instead of assembling
@@ -626,6 +751,24 @@ document.addEventListener('keydown', function(ev) {
   if (ev.altKey || ev.ctrlKey || ev.metaKey) { return; }
   var g = gestureOf(ev);
 
+  // The trail entry this page exists to produce. Recorded before the gesture
+  // is acted on and carrying what the device actually sent alongside what the
+  // page made of it, because the failures worth debugging here divide exactly
+  // on that line: a spelling the lookup tables do not know shows up as a key
+  // with no gesture, while a recognised gesture that changes nothing points at
+  // the ring or at select(). telRing/telCursor are read here rather than
+  // inside moveCursor so an ignored gesture is on the trail too — one that
+  // never reaches moveCursor is the single most common shape of "swiping does
+  // nothing", and instrumenting only the handler would omit it.
+  try {
+    var telBefore = focusables();
+    tel('gesture', g || ('unmapped: ' + (ev.key || ev.code || ev.keyCode)), {
+      key: String(ev.key || ''), code: String(ev.code || ''), which: ev.keyCode || 0,
+      ring: telBefore.length, at: telBefore.indexOf(cursorNode()),
+      scrolls: pageScrolls()
+    });
+  } catch (e) {}
+
   if (g === 'next' || g === 'prev') {
     moveCursor(g === 'next' ? 1 : -1);
   } else if (g === 'down' || g === 'up') {
@@ -651,6 +794,15 @@ document.addEventListener('keydown', function(ev) {
   } else {
     return; // not ours: leave the default alone
   }
+  // Where the gesture left the cursor. Paired with the `at` recorded above,
+  // this is the whole of the reported symptom in two numbers: equal indices
+  // across consecutive gestures is "selects the first item once and then
+  // nothing", and it is otherwise invisible from outside the device.
+  try {
+    var telAfter = focusables();
+    tel('gesture', g + ' → ' + telAfter.indexOf(cursorNode()),
+      { after: telAfter.indexOf(cursorNode()), ring: telAfter.length });
+  } catch (e) {}
   ev.preventDefault();
 }, true);
 
@@ -658,7 +810,7 @@ document.addEventListener('keydown', function(ev) {
 
 function openProjects() {
   abandonDictation();
-  state.view = 'projects';
+  setView('projects');
   state.project = null;
   state.taskID = 0;
   state.quick = null;
@@ -734,7 +886,7 @@ var FILTERS = [
 
 function openTasks(idx, name) {
   abandonDictation();   // reachable from the Add screen, possibly mid-recording
-  state.view = 'tasks';
+  setView('tasks');
   state.project = { idx: idx, name: name };
   state.tasks = [];
   state.total = 0;
@@ -832,7 +984,7 @@ function renderFilters() {
 
 function openTask(id) {
   abandonDictation();
-  state.view = 'task';
+  setView('task');
   state.taskID = id;
   show(el('back'), true);
   show(el('more'), false);
@@ -1013,7 +1165,7 @@ function showAddControls() {
 // works on whatever is reading this page, as a list of pinchable rows.
 function openAdd() {
   if (!state.project) { return; }
-  state.view = 'add';
+  setView('add');
   state.taskID = 0;
   show(el('back'), true);
   show(el('more'), false);
@@ -1185,7 +1337,7 @@ function openHeard(text, desc, from) {
   mic.heard = text;
   mic.heardDesc = desc || '';
   mic.starting = false;
-  state.view = 'heard';
+  setView('heard');
   state.from = from || 'tasks';
   show(el('back'), true);
   show(el('more'), false);

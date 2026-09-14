@@ -67,6 +67,9 @@ window.refreshBuildInfo = function() {
     if (!d || !d.build_id) return null;
     _buildInfo = d;
     if (_buildBooted === null) _buildBooted = d.build_id;
+    // Tag this session's telemetry with the build that served it, so a trail
+    // read back weeks later can be tied to the code that produced it.
+    try { if (window.cloopTelemetry) window.cloopTelemetry.setRelease(d.build_id); } catch (_) {}
     _buildRenderChip(d);
     _buildRenderPanel(d);
     _buildCheckStale(d);

@@ -129,6 +129,11 @@ function clearProjectScopedPanels() {
 
 window.switchTab = function(name) {
   activeTab = name;
+  // Name the screen for the diagnostic trail (Task 20251). Done here rather
+  // than left to the reporter's DOM query, because this is the authoritative
+  // moment the view changes — and a trail whose view column is one tab behind
+  // attributes every error to the panel the user just left.
+  try { if (window.cloopTelemetry) window.cloopTelemetry.setView(name); } catch (_) {}
   document.querySelectorAll('.tab-panel').forEach(el => el.classList.remove('active'));
   document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
   document.querySelectorAll('.m-tab-btn').forEach(el => el.classList.remove('active'));

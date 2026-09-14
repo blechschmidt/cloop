@@ -931,6 +931,48 @@ The three incident playbooks these compose into — stolen session, runaway
 tenant, compromised admin — are in the
 [runbook](../operations/runbook.md#access-emergencies).
 
+### `cloop hub telemetry`
+
+Read the diagnostic trail the dashboard and the display-glasses page record —
+the gestures they received, the views they opened, the requests they issued and
+any errors. It exists because those front ends run where the hub cannot look:
+the glasses have no console, no network inspector, and a wearer whose entire
+reporting channel is a sentence of prose.
+
+```bash
+cloop hub telemetry sessions                    # recent page loads, newest first
+cloop hub telemetry sessions --source glasses   # just the wearable
+cloop hub telemetry show <session>              # one trail, forwards, in order
+cloop hub telemetry show <session> -v           # with urls, stacks and detail
+cloop hub telemetry list --kind error           # recent errors across all sessions
+cloop hub telemetry list --grep /api/tasks      # anything touching an endpoint
+cloop hub telemetry prune --before 7d           # delete old events now
+```
+
+Start with `sessions`: an investigation arrives as "somebody reported a problem
+around ten past four" and has to become a session id first.
+
+| Flag | Applies to | Description |
+|------|-----------|-------------|
+| `--source` | `sessions`, `list` | `dashboard` or `glasses` |
+| `--kind` | `list` | `error`, `rejection`, `gesture`, `view`, `fetch`, `lifecycle`, `note` |
+| `--grep` | `list` | Substring of the message, url, view or detail |
+| `--limit` | `sessions`, `list`, `show` | Maximum rows to read (default 200) |
+| `-v` / `--verbose` | `list`, `show` | Also print url, detail, stack, user agent and build |
+| `--before` | `prune` | `7d`, `48h`, `2026-01-01`, or RFC3339 |
+| `--yes` | `prune` | Skip the confirmation prompt |
+| `--workdir` | all | Hub directory holding `.cloop/state.db` (default: current directory) |
+
+Run it from the hub's own directory, or point `--workdir` at it. The command
+refuses to create a database it cannot find rather than reporting an empty one:
+"no telemetry recorded" from the wrong directory reads as "the instrument is
+broken", which is the one wrong answer a diagnostic tool must not give.
+
+Credentials are scrubbed before storage, the table trims itself at 50,000 rows,
+and collection can be switched off with `ui.telemetry.enabled: false`. The
+Telemetry tab in the dashboard shows the same data, gated on `audit.read`. See
+[front-end telemetry](../operations/telemetry.md).
+
 ---
 
 ## Network egress

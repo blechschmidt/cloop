@@ -100,10 +100,17 @@ var bundleFiles = []string{
 	// the server. One fragment rather than three edits, because those three
 	// surfaces share the fetch and the formatting.
 	"assets/js/29-build.js",
+	// The read side of the front-end diagnostic trail (Task 20251). Renders
+	// into its own global tab, gated on audit.read like the Audit panel it
+	// sits beside.
+	"assets/js/30-telemetry.js",
 	// Last, and it closes the IIFE 00-core.js opened. A fragment appended
 	// after the close lands at global scope, where none of the shared helpers
-	// are visible — see TestDashboard_MainIIFEClosesInLastFragment.
-	"assets/js/30-glasses.js",
+	// are visible — see TestDashboard_MainIIFEClosesInLastFragment. This is
+	// why it was renumbered from 30 when the telemetry panel was added: the
+	// list must stay in filename order, so a new fragment before the closer
+	// has to take a number below it.
+	"assets/js/31-glasses.js",
 }
 
 // Cache-Control values. Hashed asset URLs change whenever their bytes change,
