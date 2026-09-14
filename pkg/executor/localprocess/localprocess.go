@@ -43,6 +43,7 @@ import (
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/executor"
+	"github.com/blechschmidt/cloop/pkg/redact"
 )
 
 // DefaultID is the executor ID used by the zero-config singleton.
@@ -118,6 +119,19 @@ type record struct {
 
 	// killTimer enforces Spec.TimeoutMinutes; nil when unbounded.
 	killTimer *time.Timer
+
+	// redactor removes this workload's own leased credentials from its
+	// output. Nil when it holds none.
+	//
+	// A host process is the case where the hub materialised the lease on the
+	// shared filesystem, so Spec.SecretFiles is empty here and this covers
+	// the declared credential variables only. The file contents are caught
+	// on the other side, by the workload reading its own lease directory —
+	// see redact.FromEnviron. Neither half is sufficient alone.
+	redactor *redact.Set
+	// pending is the tail withheld by that redactor; see logbus, which
+	// carries the same mechanism for every other driver.
+	pending string
 
 	mu          sync.Mutex
 	state       executor.State
@@ -375,6 +389,7 @@ func (e *Executor) Start(ctx context.Context, spec executor.Spec) (executor.Hand
 		cmd:         cmd,
 		state:       executor.StateRunning,
 		subscribers: make(map[*subscriber]struct{}),
+		redactor:    spec.Redactor(),
 	}
 
 	e.mu.Lock()
@@ -769,11 +784,51 @@ func (e *Executor) pruneLocked() {
 
 // emit fans one output chunk out to every subscriber and appends it to the
 // bounded replay backlog.
+//
+// It is also where this driver's leased credentials stop being reproducible.
+// Every path the output takes — the live-log room, the replay backlog a late
+// subscriber reads, the buffer executor.Run persists as an artifact — starts
+// here, so filtering at any one of them would leave the others.
 func (r *record) emit(text string) {
 	if text == "" {
 		return
 	}
 	r.mu.Lock()
+	if r.redactor != nil {
+		text = r.redactor.String(r.pending + text)
+		// Withhold only a tail that could genuinely begin a known secret, so
+		// a credential split across two pipe reads is still matched while
+		// ordinary output keeps reaching the panel immediately.
+		if hold := r.redactor.Holdback(text); hold > 0 {
+			r.pending = text[len(text)-hold:]
+			text = text[:len(text)-hold]
+		} else {
+			r.pending = ""
+		}
+		if text == "" {
+			r.mu.Unlock()
+			return
+		}
+	}
+	r.publishLocked(text)
+}
+
+// emitRaw publishes text without passing it through the redactor, for the one
+// caller that has already scrubbed it: finish, flushing the held-back tail.
+// Routing that tail back through emit would re-run the holdback and withhold
+// it again, which is to say drop it.
+func (r *record) emitRaw(text string) {
+	if text == "" {
+		return
+	}
+	r.mu.Lock()
+	r.publishLocked(text)
+}
+
+// publishLocked numbers text, appends it to the bounded replay backlog and
+// hands it to every live subscriber. Called with r.mu held; returns with it
+// released, because the sends must not happen under the record lock.
+func (r *record) publishLocked(text string) {
 	r.seq++
 	line := executor.LogLine{
 		HandleID: r.id,
@@ -870,6 +925,21 @@ func (r *record) finished() bool {
 // store, matching the container and Kubernetes drivers, where e.finish exists
 // for the same reason.
 func (e *Executor) finish(rec *record, state executor.State, exitCode int, errMsg string) {
+	// Release whatever the redactor was still holding back, before the record
+	// is marked closed and emit turns into a no-op. A workload whose final
+	// bytes happened to look like the start of a credential must not lose
+	// them: the tail of the output is where the error message is.
+	if rec.redactor != nil {
+		rec.mu.Lock()
+		tail := rec.pending
+		rec.pending = ""
+		alreadyClosed := rec.closed
+		rec.mu.Unlock()
+		if tail != "" && !alreadyClosed {
+			rec.emitRaw(rec.redactor.String(tail))
+		}
+	}
+
 	rec.mu.Lock()
 	if rec.closed {
 		rec.mu.Unlock()

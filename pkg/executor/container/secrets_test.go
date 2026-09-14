@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/executor"
+	"github.com/blechschmidt/cloop/pkg/redact"
 )
 
 // leaseSpec builds a Spec carrying one lease's credential files at dir.
@@ -152,7 +153,18 @@ func TestSecretFilesReachTheContainer(t *testing.T) {
 		t.Fatalf("run with a credential file: %v", err)
 	}
 	out := string(res.Output)
-	if !strings.Contains(out, token) {
+	// Delivery is asserted through the redaction marker rather than through the
+	// token itself, because the driver now scrubs its own leased credentials out
+	// of the output it captures (Task 20250). The marker is the stronger signal
+	// of the two: an unreadable or empty file makes `cat` print nothing and
+	// produces no marker, so its presence still proves the sandbox read a file
+	// holding exactly the token — and its presence *instead of* the token proves
+	// the value never reached RunResult.Output, which is persisted as an
+	// artifact and broadcast to every attached browser.
+	if strings.Contains(out, token) {
+		t.Fatalf("the leased credential reached the captured output verbatim.\noutput: %s", out)
+	}
+	if !strings.Contains(out, redact.Marker) {
 		t.Fatalf("the sandbox could not read its credential file.\noutput: %s", out)
 	}
 	if strings.Contains(out, "WRITABLE") {

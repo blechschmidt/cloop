@@ -53,6 +53,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/blechschmidt/cloop/pkg/redact"
 )
 
 // WorkspaceKind selects how a workload's source tree is materialised.
@@ -618,17 +620,12 @@ func AuditWorkspace(ev WorkspaceEvent) {
 // error message. Redacting at the point output leaves the provisioning step is
 // the only place that catches every such path; filtering at the display layer
 // would leave the artifact on disk.
+//
+// The matching — including the short-value guard that keeps ordinary text from
+// being mangled — lives in pkg/redact, so the harness output path and this one
+// cannot drift apart in what they consider a secret.
 func RedactSecrets(s string, secrets []string) string {
-	for _, sec := range secrets {
-		if len(sec) < 8 {
-			// Too short to be a credential and long enough to appear in
-			// ordinary text; replacing it would corrupt the output for no
-			// security benefit.
-			continue
-		}
-		s = strings.ReplaceAll(s, sec, "[redacted]")
-	}
-	return s
+	return redact.New(secrets...).String(s)
 }
 
 // --- errors -----------------------------------------------------------------

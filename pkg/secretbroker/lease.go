@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/redact"
 	"github.com/blechschmidt/cloop/pkg/securewipe"
 )
 
@@ -31,6 +32,19 @@ type Material struct {
 	// credentials; this field is json:"-" so a Material cannot be
 	// serialised into an API response by accident.
 	Env map[string]string `json:"-"`
+	// SensitiveEnv names the Env keys whose values are credentials rather
+	// than the constraints those credentials were narrowed to.
+	//
+	// The distinction only exists because output redaction needs it. A
+	// material delivers GITHUB_TOKEN *and* CLOOP_GITHUB_REPO_ALLOWLIST;
+	// scrubbing the first out of a task transcript protects a credential,
+	// and scrubbing the second would replace every mention of a repository
+	// name with a marker. Nothing about the two values says which is which,
+	// so the builder that knows says so here.
+	//
+	// Names only — a value here would be a second copy of the secret in a
+	// struct whose whole point is to keep track of the first.
+	SensitiveEnv []string `json:"-"`
 	// Files are written into the lease's tmpfs directory.
 	Files []File `json:"-"`
 	// Mounts are host paths the grant opens to the workload. Unlike Files
@@ -307,6 +321,7 @@ func leaseBaseDir(override string) string {
 // point at" is how the sandbox ends up with a variable naming nothing.
 func (l *Lease) render(dir string) (env []string, files []placedFile, bindings []LeaseBinding, mounts []RepoMount, devices []GrantedDevice, err error) {
 	envMap := make(map[string]string)
+	sensitive := make(map[string]struct{})
 
 	for _, mat := range l.Materials {
 		binding := LeaseBinding{
@@ -319,6 +334,9 @@ func (l *Lease) render(dir string) (env []string, files []placedFile, bindings [
 		for k, v := range mat.Env {
 			envMap[k] = v
 			binding.EnvKeys = append(binding.EnvKeys, k)
+		}
+		for _, k := range mat.SensitiveEnv {
+			sensitive[k] = struct{}{}
 		}
 		for _, f := range mat.Files {
 			name, nerr := leaseFileName(f)
@@ -378,6 +396,18 @@ func (l *Lease) render(dir string) (env []string, files []placedFile, bindings [
 	// CLOOP_LEASE_DIR lets a workload find its own credential directory
 	// without having to be told out of band.
 	envMap["CLOOP_LEASE_DIR"] = dir
+	// And this names which of the variables above hold credentials, so the
+	// workload can scrub its own transcript without guessing. Names only;
+	// see redact.EnvKey. Sorted for the same reason binding.EnvKeys is: this
+	// value is inherited by every child process and shows up in diffs.
+	if len(sensitive) > 0 {
+		names := make([]string, 0, len(sensitive))
+		for k := range sensitive {
+			names = append(names, k)
+		}
+		sort.Strings(names)
+		envMap[redact.EnvKey] = strings.Join(names, ",")
+	}
 	if !l.ExpiresAt.IsZero() {
 		envMap["CLOOP_LEASE_EXPIRES_AT"] = l.ExpiresAt.UTC().Format(time.RFC3339)
 	}

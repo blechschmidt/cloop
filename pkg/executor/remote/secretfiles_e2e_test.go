@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/executor"
+	"github.com/blechschmidt/cloop/pkg/redact"
 )
 
 // e2eLeaseSecret is what the workload must end up able to read.
@@ -83,8 +84,16 @@ func TestLoopbackWorkloadReadsItsPlacedCredential(t *testing.T) {
 	}
 
 	out := string(res.Output)
-	// The point of the whole exercise: the process read the credential.
-	if !strings.Contains(out, e2eLeaseSecret) {
+	// The point of the whole exercise: the process read the credential — which
+	// is asserted through the redaction marker, because the hub now scrubs the
+	// credentials it sent to a device out of the output it captures back from
+	// it (Task 20250). `cat` of a missing or empty file prints nothing and
+	// yields no marker, so the marker still proves the read happened, while
+	// standing where the token is not.
+	if strings.Contains(out, e2eLeaseSecret) {
+		t.Fatalf("the leased credential came back from the device verbatim; output was %q", out)
+	}
+	if !strings.Contains(out, redact.Marker) {
 		t.Fatalf("the workload could not read its credential file; output was %q", out)
 	}
 

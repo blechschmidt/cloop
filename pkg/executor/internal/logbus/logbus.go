@@ -33,6 +33,7 @@ import (
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/executor"
+	"github.com/blechschmidt/cloop/pkg/redact"
 )
 
 const (
@@ -55,12 +56,19 @@ type Bus struct {
 	replayCap int
 	nowFn     func() time.Time
 
+	redact *redact.Set
+
 	mu          sync.Mutex
 	seq         uint64
 	replay      []executor.LogLine
 	replayBytes int
 	subscribers map[*subscriber]struct{}
 	closed      bool
+	// pending holds the trailing bytes of the last Emit that could still
+	// turn out to be the first bytes of a credential. Non-empty only while
+	// a redaction set is installed and the workload happens to have stopped
+	// mid-secret; Close releases whatever is left.
+	pending string
 }
 
 // Options tunes a Bus. Zero fields take the package defaults.
@@ -71,6 +79,15 @@ type Options struct {
 	ReplayBytes int
 	// Now overrides the clock, for deterministic tests.
 	Now func() time.Time
+	// Redact removes the workload's own leased credentials from its output.
+	// Nil means the workload holds none, which is the common case and costs
+	// nothing.
+	//
+	// It belongs here, on the bus, rather than on each consumer: every path
+	// that output takes out of a driver — the live-log room, the replay
+	// backlog a late subscriber reads, the buffer executor.Run persists —
+	// starts at Emit. Filtering at any one consumer would leave the others.
+	Redact *redact.Set
 }
 
 // New returns a Bus that stamps chunks with handleID and stream.
@@ -93,6 +110,7 @@ func New(handleID string, stream executor.StreamName, opts Options) *Bus {
 		bufSize:     opts.SubscriberBuffer,
 		replayCap:   opts.ReplayBytes,
 		nowFn:       opts.Now,
+		redact:      opts.Redact,
 		subscribers: make(map[*subscriber]struct{}),
 	}
 }
@@ -143,6 +161,49 @@ func (b *Bus) Emit(text string) {
 		b.mu.Unlock()
 		return
 	}
+	if b.redact != nil {
+		// Scrubbed here, before the chunk is numbered, so the replay backlog
+		// and every live subscriber see the same redacted bytes and nothing
+		// downstream has to remember to filter.
+		//
+		// The holdback is what makes a credential split across two reads of
+		// the workload's pipe still match. It withholds bytes only when the
+		// tail could actually begin a known secret, so ordinary output —
+		// including a prompt with no trailing newline — is published with no
+		// added latency.
+		text = b.redact.String(b.pending + text)
+		if hold := b.redact.Holdback(text); hold > 0 {
+			b.pending = text[len(text)-hold:]
+			text = text[:len(text)-hold]
+		} else {
+			b.pending = ""
+		}
+		if text == "" {
+			b.mu.Unlock()
+			return
+		}
+	}
+	b.publishLocked(text)
+}
+
+// emitRaw publishes text without passing it through the redactor, for the one
+// caller that has already scrubbed it: Close, flushing the held-back tail.
+func (b *Bus) emitRaw(text string) {
+	if text == "" {
+		return
+	}
+	b.mu.Lock()
+	if b.closed {
+		b.mu.Unlock()
+		return
+	}
+	b.publishLocked(text)
+}
+
+// publishLocked numbers text, appends it to the bounded replay backlog and
+// hands it to every live subscriber. Called with b.mu held; returns with it
+// released, because the sends must not happen under the bus lock.
+func (b *Bus) publishLocked(text string) {
 	b.seq++
 	line := executor.LogLine{
 		HandleID: b.handleID,
@@ -232,6 +293,20 @@ func (b *Bus) unsubscribe(sub *subscriber) {
 // recorded: a consumer that sees its channel close is entitled to read a
 // terminal Status immediately, and executor.Run depends on that ordering.
 func (b *Bus) Close() {
+	// Release whatever the redactor was still holding back. A workload whose
+	// last bytes happened to look like the start of a credential must not
+	// lose them: the tail of the output is where the error message is, which
+	// is the same reason executor.Run truncates from the front.
+	if b.redact != nil {
+		b.mu.Lock()
+		tail := b.pending
+		b.pending = ""
+		b.mu.Unlock()
+		if tail != "" {
+			b.emitRaw(b.redact.String(tail))
+		}
+	}
+
 	b.mu.Lock()
 	if b.closed {
 		b.mu.Unlock()

@@ -98,6 +98,9 @@ func (b *Broker) envMaterial(mat Material, plaintext []byte) (Material, error) {
 		}
 		mat.Env[k] = v
 		delivered = append(delivered, k)
+		// Every key of an env secret is the secret; there is no constraint
+		// echo in this material to tell apart from one.
+		mat.SensitiveEnv = append(mat.SensitiveEnv, k)
 	}
 	if len(delivered) == 0 {
 		return Material{}, wrapf(ErrMinimizedEmpty,
@@ -228,6 +231,7 @@ func deliverGitHubToken(mat Material, token string) (Material, error) {
 	if allowsAllRepos(mat.Constraints.Repos) {
 		mat.Env["GITHUB_TOKEN"] = token
 		mat.Env["GH_TOKEN"] = token
+		mat.SensitiveEnv = append(mat.SensitiveEnv, "GITHUB_TOKEN", "GH_TOKEN")
 	}
 	return mat, nil
 }
@@ -295,6 +299,11 @@ func (b *Broker) egressMaterial(mat Material, plaintext []byte) (Material, error
 	mat.Env["https_proxy"] = proxy
 	mat.Env["http_proxy"] = proxy
 	mat.Env["CLOOP_EGRESS_ALLOW"] = allow
+	// The proxy URL may carry userinfo — the same reason Summary names only
+	// the allowlist — so all four spellings are credential-bearing. The
+	// allowlist beside them is not, and must stay readable.
+	mat.SensitiveEnv = append(mat.SensitiveEnv,
+		"HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy")
 
 	mat.Files = []File{{
 		Name:    "egress-allow.txt",

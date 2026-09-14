@@ -986,7 +986,10 @@ func (e *Executor) Start(ctx context.Context, spec executor.Spec) (executor.Hand
 
 		wantWriteBack: spec.WriteBack,
 	}
-	rec.bus = logbus.New(rec.id, executor.StreamCombined, logbus.Options{})
+	// The Pod's log stream is this driver's only view of the workload, and it
+	// is the same stream that reaches the live-log room and the run artifact.
+	// A credential projected into the Pod above must not come back out of it.
+	rec.bus = logbus.New(rec.id, executor.StreamCombined, logbus.Options{Redact: spec.Redactor()})
 
 	e.mu.Lock()
 	if e.closed {

@@ -497,7 +497,6 @@ not as the boundary.
   A concrete `--repos 'acme/tool'` pays the same round trip and gets a precise
   error when the repository is absent.
 
-
 ### What it is worth after a hub restart
 
 **Undiminished, on every backend.** A revocation issued after a restart reaches
@@ -619,6 +618,55 @@ in-memory revocation log, which the Secrets panel reads — but that is live
 state, for replaying what an offline agent still owes. The hash-chained audit
 rows are the record: a process restart must not be able to erase the evidence
 that a credential was withdrawn.
+
+### The harness echoing its own credential
+
+Revocation bounds how long a credential is *usable*. It does nothing about how
+long the value is *readable*, and the workload itself is the likeliest place for
+it to escape: a `set -x` in a build script, a debug flag, an HTTP client dumping
+its request headers, a panic whose stack carries an argv. None of that is a
+compromise — it happens on a working system — but the places the value comes to
+rest all outlive the lease by a wide margin:
+
+| Sink | Lifetime |
+| --- | --- |
+| `.cloop/tasks/<id>-<slug>.md`, the task artifact | permanent |
+| `.cloop/artifacts/<id>_output.txt`, tailed by `cloop task watch` | until compaction |
+| the step log in `state.db` | until retention prunes it |
+| live-log frames | broadcast to every browser attached to the project |
+
+So the plaintext would survive its own revocation, in files nobody treats as a
+secret store. `cloop audit` scans for exactly this, which is the tell: the leak
+was expected and reported, never prevented.
+
+It is now removed at the two points where output is captured, on either side of
+the sandbox boundary — neither of which subsumes the other, because each sees
+output the other does not:
+
+| Where | What it covers | Built from |
+| --- | --- | --- |
+| `provider.Build`'s decorator, inside the sandbox | the provider result and the streamed tokens, before the orchestrator writes the artifact, the step log and the replay log | `redact.FromEnviron` — this process's own lease |
+| the executor driver's emit path, on the hub | `LogLine.Text` and `RunResult.Output`, before a frame is broadcast or persisted | `executor.Spec.Redactor` — what the hub injected |
+
+Matching is against **known values only** — the material a lease actually
+delivered. There is no entropy heuristic and no "looks like a token" regex:
+both would cost on every streamed token, and both would mangle a legitimate
+base64 blob in a diff. A value shorter than `redact.MinLen` (8) is never
+matched, for the same reason.
+
+The distinction that makes this usable is that a lease injects credentials *and*
+the constraints they were narrowed to — `GITHUB_TOKEN` beside
+`CLOOP_GITHUB_REPO_ALLOWLIST`, `KUBECONFIG` beside `CLOOP_K8S_NAMESPACE`.
+Redacting the second kind would replace every mention of a repository or a
+namespace with a marker, and operators would learn to distrust the marker. So
+the broker declares which is which when it mints the lease, through
+`CLOOP_REDACT_ENV` — **names only**, exactly like `SecretBinding.EnvKeys`, since
+a value there would be one more durable copy of the secret in the variable meant
+to protect it.
+
+A credential split across two chunks is still caught: both paths withhold a
+trailing fragment that could begin a known value, and only such a fragment, so
+ordinary output reaches the live panel with no added latency.
 
 ---
 
@@ -1409,6 +1457,21 @@ what it is looking for.
 | Those responses emit a closed, reviewed set of JSON keys, so a new struct field cannot start being serialised by accident | `TestSecretsAPIViewStructsCarryNoMaterialField` |
 | `GET /api/leases` renders a genuinely materialised lease without its credentials (in `pkg/ui`, which can issue one) | `TestSecretsAPINeverDisclosesLeaseMaterial` |
 
+### Harness output redaction — `redaction_test.go`
+
+The rows above keep a credential out of cloop's *own* surfaces. These keep it
+out of the **workload's** output — see
+[the harness echoing its own credential](#the-harness-echoing-its-own-credential).
+
+| Guarantee | Test |
+| --- | --- |
+| A task that echoes its leased credential produces a task artifact, a persisted step log and a streamed live artifact that all carry the marker and none the value — asserted through the real writers, not the decorator alone | `TestLeakedCredentialNeverReachesTheRunRecord` |
+| The constraint echo beside the credential (the repository allowlist) is left readable, so the marker stays meaningful | `TestRedactionLeavesTheConstraintEchoAlone` |
+| The broker declares which lease variables are credentials, by name and never by value — without which a real run would leak while the tests above still passed | `TestBrokerDeclaresWhichLeaseVariablesAreCredentials` |
+| `LogLine.Text` and `RunResult.Output` are scrubbed by the driver before the hub broadcasts a frame or persists them, driven by a real child process echoing its own environment | `TestExecutorScrubsTheFramesItBroadcasts` |
+| A credential split across two writes is still matched, and a trailing fragment that never becomes one is released rather than swallowed | `pkg/redact`: `TestWriter_CatchesASecretSplitAcrossWrites`, `TestWriter_FlushReleasesATrailingPartial` |
+| Delivery of a credential file into a container and onto an edge device is now proven *by* the marker — the same run asserts the sandbox read the file and that the value did not come back out | `pkg/executor/container`: `TestSecretFilesReachTheContainer`; `pkg/executor/remote`: `TestLoopbackWorkloadReadsItsPlacedCredential` |
+
 ### Lease revocation — `revocation_test.go`
 
 | Guarantee | Test |
@@ -1852,6 +1915,19 @@ restart](#what-it-is-worth-after-a-hub-restart)). The window is at most one
 upgrade wide and closes when that workload exits; until then, an operator
 decommissioning a device should rotate its credentials at the source rather than
 treat the drain as proof.
+
+**Output redaction is a known-value match, and the hub half does not survive a
+restart.** It removes the material a lease actually delivered, so a credential
+the workload *derives* — a session cookie exchanged using the PAT, a token
+minted from the kubeconfig — is not covered. And the hub-side half is rebuilt
+from the dispatched `Spec`, which is stored with its leased variables replaced by
+a placeholder: after a hub restart, a reattached workload streams through a
+driver that can no longer name its credentials. The in-sandbox half still
+applies, because that process still holds its own lease, so what is exposed is
+narrowly the output a workload produced outside the provider path during the
+window between a restart and the task ending. Closing it properly would mean
+persisting plaintext to survive a restart, which is the thing the store exists
+not to do.
 
 **DEKs live in process memory.** The suite asserts that a plaintext DEK never
 reaches disk or a log. It cannot assert that the kernel never paged one out of

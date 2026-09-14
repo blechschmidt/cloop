@@ -700,7 +700,12 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, extraMounts []
 		secretStage: stage,
 	}
 	started = true
-	rec.bus = logbus.New(rec.id, executor.StreamCombined, logbus.Options{})
+	// The spec is dropped, but the *values* it carried have to outlive it here.
+	// This container holds those credentials now, and everything it prints
+	// crosses this bus on its way to the live-log room and the run's artifact,
+	// so the bus is where they stop being reproducible. Only the derived match
+	// set is retained — never the spec.
+	rec.bus = logbus.New(rec.id, executor.StreamCombined, logbus.Options{Redact: spec.Redactor()})
 
 	e.mu.Lock()
 	e.handles[rec.id] = rec

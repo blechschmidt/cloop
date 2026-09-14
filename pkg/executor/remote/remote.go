@@ -409,7 +409,14 @@ func (e *Executor) Start(ctx context.Context, spec executor.Spec) (handle execut
 	hs := &handleState{
 		id:        handleID,
 		startedAt: now,
-		bus:       logbus.New(handleID, executor.StreamCombined, logbus.Options{Now: e.opts.now}),
+		// Output arrives from a device the hub does not control, so the hub
+		// redacts what it sent there rather than trusting the agent to have
+		// done it. The agent scrubs too — this is the half that holds when
+		// the agent is older than the guarantee, or lying.
+		bus: logbus.New(handleID, executor.StreamCombined, logbus.Options{
+			Now:    e.opts.now,
+			Redact: spec.Redactor(),
+		}),
 		status: executor.Status{
 			HandleID:   handleID,
 			ExecutorID: e.id,
