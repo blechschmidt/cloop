@@ -234,11 +234,26 @@ window.refreshState = function() {
 };
 
 // updateRunButtonState shows the Run button when not running, Stop when running.
+//
+// It positions every copy of that pair: the Overview tab's Controls section and
+// the Tasks tab's run bar (Task 20253). Driving them from one function is the
+// point — two independently-updated pairs would eventually disagree, and a
+// "Start run" button on a project that is already running invites the duplicate
+// dispatch that handleRun now refuses.
 function updateRunButtonState(running) {
-  const showIds = running ? ['ctrlStop'] : ['ctrlRun'];
-  const hideIds = running ? ['ctrlRun'] : ['ctrlStop'];
+  const showIds = running ? ['ctrlStop', 'tasksCtrlStop'] : ['ctrlRun', 'tasksCtrlRun'];
+  const hideIds = running ? ['ctrlRun', 'tasksCtrlRun'] : ['ctrlStop', 'tasksCtrlStop'];
   showIds.forEach(id => { const el = document.getElementById(id); if (el) el.style.display = ''; });
   hideIds.forEach(id => { const el = document.getElementById(id); if (el) el.style.display = 'none'; });
+
+  // Say which of the two states the button belongs to. Without it a lone
+  // "Start run" reads as an offer that may or may not have been acted on
+  // already, since this page shows no project status of its own.
+  const status = document.getElementById('tasksRunStatus');
+  if (status) {
+    status.className = running ? 'badge running' : 'badge unknown';
+    status.innerHTML = '<span class="badge-dot"></span>' + (running ? 'Running' : 'Not running');
+  }
 }
 
 // Run-state changes are pushed by the server as 'run_state' WebSocket events
@@ -253,6 +268,11 @@ window.apiRun = function() {
       updateRunButtonState(true);
     } else {
       toast(d.error||'Failed to start', 'err');
+      // The server refuses a second harness on a project that is already
+      // running (Task 20253) and says so with running:true. Believe it over
+      // whatever this tab last saw, so the button the user just proved wrong
+      // turns into the Stop button that is actually applicable.
+      if (d.running) updateRunButtonState(true);
     }
   }).catch(() => toast('Request failed', 'err'));
 };

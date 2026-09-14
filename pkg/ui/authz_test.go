@@ -775,6 +775,10 @@ func TestFrontendGatesTheHighRiskControls(t *testing.T) {
 	required := []struct{ marker, perm, why string }{
 		{`id="ctrlRun"`, "run.start", "starting a run spends the token budget"},
 		{`id="ctrlStop"`, "run.stop", "stopping a run"},
+		// The same pair on the Tasks tab (Task 20253). A second copy of a
+		// control is a second chance to forget its gate.
+		{`id="tasksCtrlRun"`, "run.start", "starting a run from the Tasks tab spends the token budget"},
+		{`id="tasksCtrlStop"`, "run.stop", "stopping a run from the Tasks tab"},
 		{`id="goalEditBtn"`, "project.write", "changing the goal reshapes the project"},
 		{`id="instructionsEditBtn"`, "project.write", "changing instructions reshapes the project"},
 		{`onclick="submitAddTask()"`, "task.mutate", "adding a task"},

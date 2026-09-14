@@ -76,6 +76,16 @@ let pendingDeleteId = null;
 let liveLogText = '';         // accumulated text for the panel
 let liveLogAutoScroll = true; // whether to auto-scroll (user can disable by scrolling up)
 
+// setTasksRunBarVisible shows or hides the Tasks tab's Start/Stop bar
+// (Task 20253). The bar acts on whichever project is selected, so it must be
+// hidden whenever that is nobody: with no selection apiRun() would fall back to
+// the hub's own working directory and start a run on a project the user is not
+// even looking at.
+function setTasksRunBarVisible(visible) {
+  const bar = document.getElementById('tasksRunBar');
+  if (bar) bar.style.display = visible ? '' : 'none';
+}
+
 // clearProjectScopedPanels blanks every panel rendered from appState, for use
 // when the selection changes and the new project's first frame has not arrived.
 //
@@ -108,6 +118,11 @@ function clearProjectScopedPanels() {
 
   // Nothing is known to be running on a project we have not loaded.
   try { updateBrowserTitle(); } catch(_) {}
+
+  // Likewise for the run bar: until the new project's first frame arrives we
+  // cannot say whether it is running, and offering the wrong half of the pair
+  // is worse than offering neither. render() puts it back.
+  setTasksRunBarVisible(false);
 }
 
 // ── Tab switching ───────────────────────────────────────────────────────────

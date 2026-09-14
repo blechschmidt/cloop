@@ -107,6 +107,9 @@ function render(s) {
   const hasProject = s && s.goal;
   document.getElementById('initPanel').style.display    = hasProject ? 'none' : '';
   document.getElementById('projectPanel').style.display = hasProject ? '' : 'none';
+  // The Tasks tab's run bar (Task 20253) has nothing to start until a project
+  // exists, and an uninitialised project would only answer Start with an error.
+  setTasksRunBarVisible(!!hasProject);
   if (!hasProject) return;
 
   // Goal

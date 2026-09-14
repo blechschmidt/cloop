@@ -451,6 +451,32 @@
 
     <!-- ════════════════════════════════════════════════════════════ TASKS -->
     <div id="tab-tasks" class="tab-panel">
+      <!-- Start/stop the run from the page the plan is on (Task 20253).
+           Someone who has just added, reset or reprioritised tasks is standing
+           here, and the only Run buttons used to live on the Overview tab and
+           the Projects grid — so acting on the plan in front of them meant
+           navigating away from it first.
+
+           Both buttons call the same apiRun/apiStop as the Overview pair and
+           are positioned by the same updateRunButtonState(), so the two pages
+           cannot end up offering contradictory affordances for one project.
+           Hidden until a project is loaded: there is nothing to start. -->
+      <div class="tasks-run-bar" id="tasksRunBar" style="display:none">
+        <span id="tasksRunStatus"></span>
+        <span class="tasks-run-hint">Options are set in <strong>Active Options</strong> on the Overview tab.</span>
+        <span class="spacer"></span>
+        <button id="tasksCtrlRun" class="btn success" data-perm="run.start" onclick="apiRun()"
+                title="Start a run on this project with the options enabled in Active Options on the Overview tab.">
+          <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 0a8 8 0 1 1 0 16A8 8 0 0 1 8 0zm3.5 7.5l-5-3a.5.5 0 0 0-.75.43v6a.5.5 0 0 0 .75.43l5-3a.5.5 0 0 0 0-.86z"/></svg>
+          Start run
+        </button>
+        <button id="tasksCtrlStop" class="btn danger" data-perm="run.stop" onclick="apiStop()" style="display:none"
+                title="Signal the running harness to stop after the current step.">
+          <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 0a8 8 0 1 1 0 16A8 8 0 0 1 8 0zM5.5 5.5h5v5h-5z"/></svg>
+          Pause / Stop
+        </button>
+      </div>
+
       <div class="section">
         <div class="section-title">Add Task</div>
         <div class="add-task-bar">

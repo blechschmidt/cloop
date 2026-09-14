@@ -178,7 +178,14 @@ window.projectRun = function(idx, pm) {
   // immediately after the run starts so the card and Run/Stop button
   // refresh on their own (Task 20126).
   api('/api/projects/' + idx + '/run', {method:'POST', body: JSON.stringify({pm})})
-    .then(() => { toast('Run started', 'ok'); })
+    // Report what the server actually did. This used to toast "Run started"
+    // for any response that parsed, which now includes the 409 refusing a
+    // second harness on an already-running project (Task 20253) — claiming
+    // success there would tell the user their click did something it did not.
+    .then(d => {
+      if (d && d.ok) toast('Run started', 'ok');
+      else toast((d && d.error) || 'Failed to start run', 'err');
+    })
     .catch(() => toast('Failed to start run', 'err'));
 };
 

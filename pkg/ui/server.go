@@ -3119,6 +3119,35 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 	// JSON body so older clients don't error.
 	_, _ = io.Copy(io.Discard, r.Body)
 
+	// Refuse to start a second harness on a project that is already running
+	// (Task 20253). Nothing downstream deduplicates: two harnesses in one
+	// working directory both schedule from the same plan, so they race for the
+	// same task and each overwrites the other's status writes.
+	//
+	// This became reachable in more ways once Start moved onto the Tasks tab as
+	// well as the Overview tab and the Projects grid. Any of those three can be
+	// looking at a stale run flag — a tab left open, a WebSocket that dropped,
+	// a run started from the CLI — and the button would then offer to start a
+	// run that is already underway.
+	//
+	// projectExecuting is the live predicate stale recovery trusts (it asks the
+	// OS for the process, then the executor driver, then the live-log flag)
+	// rather than the last-broadcast runStates cache, so a run that has really
+	// gone leaves nobody locked out of starting the next one.
+	//
+	// 409 because the request was well-formed and what conflicts is the state of
+	// the project. The running flag rides along so the client can correct the
+	// button it just proved wrong.
+	if workDir := s.resolveWorkDir(r); s.projectExecuting(workDir) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "a run is already in progress for this project — stop it before starting another",
+			"running": true,
+		})
+		return
+	}
+
 	// Admission (Task 20182), before anything is dispatched. Starting a run
 	// is the action that actually spends the fleet: it holds an executor
 	// slot for as long as it runs and bills tokens the whole time. Two gates
@@ -6257,6 +6286,19 @@ func (s *Server) handleProjectRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	entry := entries[idx]
+
+	// Same re-entrancy refusal as handleRun (Task 20253): the grid's Run button
+	// is one more view that can be looking at a stale run flag, and a second
+	// harness in one working directory races the first for every task.
+	if s.projectExecuting(entry.Path) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "a run is already in progress for this project — stop it before starting another",
+			"running": true,
+		})
+		return
+	}
 
 	var req struct {
 		PM bool `json:"pm"`

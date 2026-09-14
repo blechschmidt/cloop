@@ -832,6 +832,14 @@
   @media (max-width:900px) { .kanban-board { grid-template-columns:repeat(2,1fr); } }
   @media (max-width:560px) { .kanban-board { grid-template-columns:1fr; } }
 
+  /* ── Tasks tab run bar (Task 20253) ── */
+  .tasks-run-bar {
+    display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+    padding:10px 12px; margin-bottom:12px;
+    background:var(--surface); border:1px solid var(--border); border-radius:var(--radius);
+  }
+  .tasks-run-hint { font-size:11px; color:var(--muted); }
+
   /* ── Add task form ── */
   .add-task-bar { display:flex; gap:8px; margin-bottom:14px; flex-wrap:wrap; }
   .add-task-bar input { flex:1; min-width:160px; }
@@ -1881,6 +1889,9 @@
     /* Add task bar: stack on mobile (FAB handles quick add) */
     .add-task-bar { flex-direction: column; }
     .add-task-bar input, .add-task-bar button { width: 100%; }
+
+    /* Run bar: drop the hint so the status and the button stay on one row. */
+    .tasks-run-hint { display: none; }
 
     /* Form rows: stack */
     .form-row { flex-direction: column; }
