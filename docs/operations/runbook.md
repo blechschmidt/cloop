@@ -47,7 +47,7 @@ Two rules that prevent most of the bad days:
 | Endpoint | Question | Behaviour |
 | --- | --- | --- |
 | `/healthz` | is the process alive? | never fails while it can accept a connection — do **not** wire a restart to a slow database |
-| `/readyz` | should traffic come here? | two gates: the state database, then the execution path. Fails during startup, on storage loss, and when strict mode leaves no isolating executor registered |
+| `/readyz` | should traffic come here? | three gates: the state database, then the identity provider, then the execution path. Fails during startup, on storage loss, while an issuer has never resolved, and when strict mode leaves no isolating executor registered |
 | `/metrics` | Prometheus text | gated: requires the `audit.read` permission, unlike the two probes above |
 
 `/healthz` and `/readyz` bypass auth and rate limiting so a probe can never be
@@ -55,10 +55,23 @@ locked out by a flood or a broken IdP. `/metrics` does not — it is an ordinary
 authorised route, so a scraper needs a credential carrying `audit.read`. See
 [Metrics](metrics.md).
 
-The second `/readyz` gate is why a rollout of a misconfigured hub fails instead
-of going green. A hub with `allow_host_process: false` and no container,
-Kubernetes or enrolled-agent executor can only answer a run request with a 409,
-so it reports `not_ready` and the response body names the fix:
+The second and third gates are why a rollout of a misconfigured hub fails
+instead of going green.
+
+The identity gate covers the case that used to be invisible: a hub pointed at
+an unreachable, misspelled or wrongly-registered issuer came up green and
+failed for the first human who tried to sign in. It now resolves the issuer at
+startup — discovery and the JWKS fetch — and reports `not_ready` with
+`"check": "identity"` for as long as that has *never* succeeded. Once it has
+succeeded once the gate stays open: existing sessions keep authenticating
+through a later provider outage, and dropping the hub from its Service over one
+would turn a login outage into a total one. Set `ui.oidc.require_idp` (or
+`cloop ui --require-idp`) to refuse to start outright.
+
+The execution gate is the older one. A hub with `allow_host_process: false` and
+no container, Kubernetes or enrolled-agent executor can only answer a run
+request with a 409, so it reports `not_ready` and the response body names the
+fix:
 
 ```json
 {
@@ -934,6 +947,15 @@ Read the `check` field first — it names which gate failed.
 `cloop db verify`. Under Kubernetes, check the PVC is bound and that no second
 replica is mounting it — SQLite is `ReadWriteOnce` and the chart pins
 `replicaCount: 1` for that reason.
+
+`"check": "identity"` means the hub has never resolved its OIDC issuer, so
+nobody can sign in. The `error` field names the URL that was contacted and the
+HTTP status it returned, and `remediation` says what to change. Run
+`cloop hub doctor` from the same host for the full diagnosis — it performs the
+same two round trips and prints the resolved authorization, token and JWKS
+endpoints, which is the fastest way to tell a wrong realm path from a
+certificate the hub does not trust. The gate clears on its own once the
+provider answers, including via an ordinary sign-in; no restart is needed.
 
 **The hub exits with "another cloop hub already controls this state".**
 Not a bug — a second hub was started against a control plane that already has

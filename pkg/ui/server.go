@@ -578,12 +578,25 @@ type Server struct {
 	// like "closed db handle" or "state store not initialized".
 	ReadyCheck func(ctx context.Context) error
 
+	// RequireIdP makes a failed identity-provider preflight fatal at startup
+	// instead of a warning (ui.oidc.require_idp / --require-idp, Task 20247).
+	// Only consulted by PreflightIdP; readiness reports a degraded identity
+	// path either way.
+	RequireIdP bool
+
 	// Log is the structured logger used for lifecycle / error messages
 	// emitted by the UI server itself (panics in HTTP middleware, client
 	// JavaScript errors POSTed to /api/client-error, watcher failures).
 	// Nil means the package picks a sensible default at first use (text
 	// output to stdout, project bound).
 	Log logger.Logger
+
+	// claimGapOnce latches the one-shot diagnosis of role mappings the
+	// identity provider's claims cannot satisfy (see
+	// warnUnsatisfiableBindings). Per-Server rather than package-level so a
+	// test gets its own, and so a hub restarted after a config change says
+	// it again.
+	claimGapOnce sync.Once
 
 	// ccAuth tracks the in-flight `claude auth login` session driven from
 	// the UI. Nil until first use; lazily constructed on the first
@@ -983,6 +996,14 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 // first because an executor verdict is meaningless on a hub whose state store
 // is gone.
 //
+// The identity gate (Task 20247) reports a hub whose issuer has never
+// resolved. It is one-way: once discovery has succeeded the gate stays open,
+// because existing sessions keep authenticating through a later IdP outage and
+// dropping the hub from its Service over one would turn a login outage into a
+// total one. Before the first success there is no such argument — nobody can
+// get in at all, and a rollout that goes green anyway is the failure this
+// whole gate exists to prevent.
+//
 // The executor gate (Task 20170) is what stops a strict-mode hub with no
 // isolating executor from accepting traffic it can only answer with 409s. It
 // is deliberately not routed through Server.ReadyCheck: that hook exists so a
@@ -999,6 +1020,10 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	if err := storage(ctx); err != nil {
 		writeNotReady(w, "sqlite", err)
+		return
+	}
+	if err := s.idpReady(); err != nil {
+		writeNotReady(w, "identity", err)
 		return
 	}
 	if err := reconcile.Ready(); err != nil {
@@ -1027,6 +1052,17 @@ func writeNotReady(w http.ResponseWriter, check string, err error) {
 		}
 		if len(notReady.Diagnostics) > 0 {
 			body["diagnostics"] = notReady.Diagnostics
+		}
+	}
+	// Any error that can state its own fix gets to. The interface rather than
+	// a second concrete type because the audience for a readiness body is an
+	// operator reading `kubectl describe pod`, and what they need there is the
+	// change to make — a gate that only some errors can offer it through is a
+	// gate where the newest failure mode is the least explained.
+	var remediable interface{ Remediation() string }
+	if errors.As(err, &remediable) {
+		if fix := remediable.Remediation(); fix != "" {
+			body["remediation"] = fix
 		}
 	}
 	_ = json.NewEncoder(w).Encode(body)

@@ -214,6 +214,21 @@ oidc:
   #  - {claim: group, value: engineering,     role: operator}
   sessionTTLHours: 12
 
+  # Refuse to start when the issuer cannot be resolved, rather than warning and
+  # retrying at the first sign-in.
+  #
+  # True by default here and false in cloop's own default, because the failure
+  # modes differ. A pod that exits is rolled back by the deployment, so a
+  # misspelled issuer or an unregistered client never replaces a working hub.
+  # Without it the hub starts, stays out of its Service on the readiness gate,
+  # and an operator has to go looking for why — the same outcome, told less
+  # clearly.
+  #
+  # Set false if your identity provider runs in this cluster and may come up
+  # after the hub: with it on, the hub backs off and restarts until the
+  # provider answers, which is correct but noisy.
+  requireIdP: true
+
 # ── Secrets ─────────────────────────────────────────────────────────────────
 secrets:
   # Reference a Secret you created out-of-band. This is the production path:

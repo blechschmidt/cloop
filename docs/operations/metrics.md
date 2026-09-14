@@ -264,10 +264,12 @@ min_over_time(cloop_secret_kek_rotation_active[30m]) == 1
 `cloop_secret_kek_rotation_records` reports progress by `phase` — `total`,
 `rewrapped`, `skipped`, `failed`.
 
-## Sessions and API tokens
+## Sign-in, sessions and API tokens
 
 | Metric | Type | Labels |
 | --- | --- | --- |
+| `cloop_oidc_login_total` | counter | `outcome` |
+| `cloop_oidc_discovery_failures_total` | counter | — |
 | `cloop_sessions_created_total` | counter | — |
 | `cloop_sessions_terminated_total` | counter | `reason` |
 | `cloop_sessions_live` | gauge | — |
@@ -281,6 +283,30 @@ operational; the roster of who holds them belongs in the audit trail behind
 `reason` on termination is `idle_evicted`, `absolute_expired`, `admin_revoked`
 or `self_logout`. On token failure it is `malformed`, `not_found`,
 `bad_secret`, `revoked`, `expired` or `no_roles`.
+
+`outcome` on a sign-in is `success`, `discovery_failed`, `idp_error`,
+`invalid_request`, `invalid_state`, `exchange_failed`, `token_invalid`,
+`session_error` or `state_error`. They separate problems with different
+owners: `discovery_failed` is this hub's issuer setting, `exchange_failed` is
+the client registration at the provider, `idp_error` is the provider's own
+decision about the user, and `invalid_state` at any volume is somebody
+replaying callbacks. A redirect to the provider is not counted until it comes
+back — counting it would make the success ratio depend on how many people
+opened the login page and wandered off.
+
+**Nobody can sign in** — the alert that used to require a human to try:
+
+```promql
+rate(cloop_oidc_discovery_failures_total[5m]) > 0
+```
+
+A hub whose issuer has *never* resolved also reports `/readyz` as not ready
+with `"check": "identity"`, so a Kubernetes rollout stalls instead of replacing
+a working hub with one nobody can log into. Once discovery has succeeded once
+the gate stays open: existing sessions keep authenticating through a later
+provider outage, and dropping the hub from its Service over one would turn a
+login outage into a total one. Run `cloop hub doctor` for which of the two
+round trips failed and why.
 
 **Credential stuffing** — a `bad_secret` spike is a token ID that exists being
 tried with wrong secrets:

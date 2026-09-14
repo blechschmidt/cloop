@@ -11,44 +11,30 @@ package hubdoctor
 // shown. So this file re-derives, from the hub's side, everything the login
 // depends on and says which value is wrong.
 //
-// The probes mirror pkg/oidcauth exactly rather than approximating it: the same
-// well-known path, the same trailing-slash-tolerant issuer comparison, the same
-// JWKS URI taken from the document rather than guessed. A doctor that checks a
-// *different* thing than the code does is worse than no doctor, because it
-// produces confident green lines for a login that will fail.
+// The network probes do not mirror pkg/oidcauth — they *are* pkg/oidcauth.
+// oidcauth.Preflight is the same function the hub runs at startup and the same
+// two round trips a sign-in performs before it can begin, so this report cannot
+// be green about a login that will fail. That mattered enough to be worth a
+// shared entry point: a doctor which merely re-implemented the same checks
+// would drift the first time one side was fixed and the other was not, and the
+// failure mode of that drift is a confident green line.
 
 import (
 	"context"
-	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
-	"net/http"
 	"net/url"
 	"os"
 	"strings"
 
 	"github.com/blechschmidt/cloop/pkg/config"
+	"github.com/blechschmidt/cloop/pkg/oidcauth"
 )
-
-// maxDiscoveryBody bounds what a probe reads from an issuer. Discovery
-// documents and JWKS are a few kilobytes; a megabyte cap means a hostile or
-// misrouted endpoint cannot exhaust a CLI that is trying to diagnose it.
-const maxDiscoveryBody = 1 << 20
 
 // callbackPath is where pkg/ui mounts the OIDC callback. Repeated rather than
 // imported: pkg/ui pulls in the whole dashboard, and this is a constant that
 // has never changed and would be a breaking change if it did.
 const callbackPath = "/auth/callback"
-
-// discoveryDoc is the subset of the OpenID Provider metadata cloop uses. It
-// mirrors pkg/oidcauth's unexported type.
-type discoveryDoc struct {
-	Issuer                string `json:"issuer"`
-	AuthorizationEndpoint string `json:"authorization_endpoint"`
-	TokenEndpoint         string `json:"token_endpoint"`
-	JWKSURI               string `json:"jwks_uri"`
-	EndSessionEndpoint    string `json:"end_session_endpoint"`
-}
 
 func checkOIDC(ctx context.Context, cfg *config.Config, opts Options, add addFn) {
 	oc := cfg.UI.OIDC
@@ -89,10 +75,108 @@ func checkOIDC(ctx context.Context, cfg *config.Config, opts Options, add addFn)
 		})
 		return
 	}
-	doc := checkDiscovery(ctx, oc, opts, add)
-	if doc != nil {
-		checkJWKS(ctx, *doc, opts, add)
+	checkPreflight(ctx, oc, opts, add)
+}
+
+// checkPreflight runs the hub's own identity preflight and reports it as two
+// findings — discovery and signing keys — keeping the check ids an operator's
+// CI already selects on.
+//
+// The resolved endpoints are printed on success because they are the answer to
+// the question this command is usually run to settle: "is it talking to the
+// realm I think it is?" An issuer URL that resolves to the wrong realm looks
+// identical from the config file and obvious from its authorization endpoint.
+func checkPreflight(ctx context.Context, oc config.OIDCConfig, opts Options, add addFn) {
+	issuer := strings.TrimSpace(oc.Issuer)
+	res, err := oidcauth.Preflight(ctx, issuer, oidcauth.PreflightOptions{
+		Timeout: opts.timeout(),
+		Client:  opts.client(),
+	})
+
+	var pe *oidcauth.PreflightError
+	if err != nil && !errors.As(err, &pe) {
+		// Preflight always returns a *PreflightError; this branch exists so a
+		// future return path cannot produce a finding with no cause.
+		add(Finding{
+			Check: "oidc.discovery", Title: "Issuer discovery", Severity: SeverityFail,
+			Message:     "the issuer could not be resolved: " + err.Error(),
+			Remediation: "Check that this host can reach the issuer and trusts its certificate",
+		})
+		return
 	}
+
+	// The stages are reported separately because they fail separately and
+	// have different fixes. A key set that cannot be used is not a reason to
+	// stay quiet about an issuer that resolved perfectly well.
+	resolved := res
+	if resolved == nil && pe != nil {
+		resolved = pe.Resolved
+	}
+	if resolved == nil {
+		add(Finding{
+			Check: "oidc.discovery", Title: "Issuer discovery", Severity: SeverityFail,
+			Message:     preflightMessage(pe),
+			Remediation: pe.Remediation(),
+			Details:     preflightDetails(pe),
+		})
+		return
+	}
+
+	add(Finding{
+		Check: "oidc.discovery", Title: "Issuer discovery", Severity: SeverityPass,
+		Message: "the issuer is reachable and its document agrees on the issuer name",
+		Details: map[string]any{
+			"authorization_endpoint": resolved.AuthorizationEndpoint,
+			"token_endpoint":         resolved.TokenEndpoint,
+			"jwks_uri":               resolved.JWKSURI,
+		},
+	})
+	if pe != nil {
+		add(Finding{
+			Check: "oidc.jwks", Title: "Signing keys (JWKS)", Severity: SeverityFail,
+			Message:     preflightMessage(pe),
+			Remediation: pe.Remediation(),
+			Details:     preflightDetails(pe),
+		})
+		return
+	}
+	add(Finding{
+		Check: "oidc.jwks", Title: "Signing keys (JWKS)", Severity: SeverityPass,
+		Message: fmt.Sprintf("%d usable signing key(s) at %s", res.SigningKeys, res.JWKSURI),
+	})
+}
+
+// preflightMessage renders the failure for an operator: what was contacted,
+// what came back, and — for the two cases where the provider answered
+// correctly and the hub still cannot use it — what that costs.
+func preflightMessage(pe *oidcauth.PreflightError) string {
+	var b strings.Builder
+	if pe.URL != "" {
+		b.WriteString(pe.URL + " ")
+	}
+	switch {
+	case pe.Status != 0:
+		fmt.Fprintf(&b, "returned HTTP %d", pe.Status)
+	case pe.Reason == oidcauth.PreflightUnreachable:
+		b.WriteString("could not be fetched")
+	default:
+		b.WriteString("is not usable")
+	}
+	if pe.Detail != "" {
+		b.WriteString(": " + pe.Detail)
+	}
+	if pe.Reason == oidcauth.PreflightIssuerMismatch || pe.Reason == oidcauth.PreflightNoKeys {
+		b.WriteString(" — every sign-in will be rejected at ID-token validation")
+	}
+	return b.String()
+}
+
+func preflightDetails(pe *oidcauth.PreflightError) map[string]any {
+	d := map[string]any{"reason": pe.Reason}
+	if pe.Status != 0 {
+		d["http_status"] = pe.Status
+	}
+	return d
 }
 
 // checkOIDCClientCredentials verifies the hub can authenticate itself to the
@@ -221,177 +305,6 @@ func checkRedirectURI(cfg *config.Config, add addFn) {
 		Check: "oidc.redirect_uri", Title: "Redirect URI", Severity: SeverityPass,
 		Message: raw + " matches ui.external_url and the served callback path",
 	})
-}
-
-// checkDiscovery fetches the well-known document and validates the one property
-// the OIDC spec makes load-bearing: that the document's own issuer equals the
-// configured one. Returns the document so the JWKS check can use its jwks_uri
-// rather than guessing a path.
-func checkDiscovery(ctx context.Context, oc config.OIDCConfig, opts Options, add addFn) *discoveryDoc {
-	issuer := strings.TrimSpace(oc.Issuer)
-	if issuer == "" {
-		add(Finding{
-			Check: "oidc.discovery", Title: "Issuer discovery", Severity: SeverityFail,
-			Message:     "ui.oidc.issuer is empty",
-			Remediation: "Set ui.oidc.issuer to the identity provider's issuer URL",
-		})
-		return nil
-	}
-	wellKnown := strings.TrimSuffix(issuer, "/") + "/.well-known/openid-configuration"
-
-	body, err := getJSON(ctx, opts, wellKnown)
-	if err != nil {
-		add(Finding{
-			Check: "oidc.discovery", Title: "Issuer discovery", Severity: SeverityFail,
-			Message:     fmt.Sprintf("%s could not be fetched: %v", wellKnown, err),
-			Remediation: "Check that this host can reach the issuer and trusts its certificate (SSL_CERT_DIR adds a private CA)",
-		})
-		return nil
-	}
-	var doc discoveryDoc
-	if err := json.Unmarshal(body, &doc); err != nil {
-		add(Finding{
-			Check: "oidc.discovery", Title: "Issuer discovery", Severity: SeverityFail,
-			Message:     fmt.Sprintf("%s did not return a JSON discovery document: %v", wellKnown, err),
-			Remediation: "Confirm ui.oidc.issuer names the issuer itself, not a login page in front of it",
-		})
-		return nil
-	}
-	if doc.AuthorizationEndpoint == "" || doc.TokenEndpoint == "" {
-		add(Finding{
-			Check: "oidc.discovery", Title: "Issuer discovery", Severity: SeverityFail,
-			Message:     "the discovery document has no authorization_endpoint or token_endpoint",
-			Remediation: "Confirm ui.oidc.issuer names an OpenID Connect provider",
-		})
-		return nil
-	}
-	// The spec requires this equality, and cloop enforces it at login. A hub
-	// whose issuer resolves but disagrees about its own name fails every
-	// sign-in with an error that names neither value.
-	if !issuerEqual(doc.Issuer, issuer) {
-		add(Finding{
-			Check: "oidc.discovery", Title: "Issuer discovery", Severity: SeverityFail,
-			Message: fmt.Sprintf("the provider calls itself %q but ui.oidc.issuer is %q; "+
-				"every sign-in will be rejected at ID-token validation", doc.Issuer, issuer),
-			Remediation: "Set ui.oidc.issuer to " + doc.Issuer,
-		})
-		return &doc
-	}
-
-	add(Finding{
-		Check: "oidc.discovery", Title: "Issuer discovery", Severity: SeverityPass,
-		Message: "the issuer is reachable and its document agrees on the issuer name",
-		Details: map[string]any{
-			"authorization_endpoint": doc.AuthorizationEndpoint,
-			"token_endpoint":         doc.TokenEndpoint,
-		},
-	})
-	return &doc
-}
-
-// checkJWKS fetches the signing keys. Without at least one usable key every ID
-// token is rejected as unverifiable, which presents as "login worked and then
-// nothing happened".
-func checkJWKS(ctx context.Context, doc discoveryDoc, opts Options, add addFn) {
-	if strings.TrimSpace(doc.JWKSURI) == "" {
-		add(Finding{
-			Check: "oidc.jwks", Title: "Signing keys (JWKS)", Severity: SeverityFail,
-			Message:     "the discovery document advertises no jwks_uri, so ID tokens cannot be verified",
-			Remediation: "Confirm ui.oidc.issuer names an OpenID Connect provider, not a bare OAuth 2 server",
-		})
-		return
-	}
-	body, err := getJSON(ctx, opts, doc.JWKSURI)
-	if err != nil {
-		add(Finding{
-			Check: "oidc.jwks", Title: "Signing keys (JWKS)", Severity: SeverityFail,
-			Message:     fmt.Sprintf("%s could not be fetched: %v", doc.JWKSURI, err),
-			Remediation: "Check network reachability and certificate trust from this host to the issuer",
-		})
-		return
-	}
-	var set struct {
-		Keys []struct {
-			Kid string `json:"kid"`
-			Kty string `json:"kty"`
-			Alg string `json:"alg"`
-			Use string `json:"use"`
-		} `json:"keys"`
-	}
-	if err := json.Unmarshal(body, &set); err != nil {
-		add(Finding{
-			Check: "oidc.jwks", Title: "Signing keys (JWKS)", Severity: SeverityFail,
-			Message:     fmt.Sprintf("%s did not return a JWK set: %v", doc.JWKSURI, err),
-			Remediation: "Confirm jwks_uri serves RFC 7517 JSON",
-		})
-		return
-	}
-
-	// cloop verifies RS256 and ES256, so RSA and EC are the key types that
-	// matter. A set of only unsupported types is a working IdP and a hub that
-	// can never validate a token from it.
-	usable, kinds := 0, map[string]int{}
-	for _, k := range set.Keys {
-		kinds[k.Kty]++
-		if k.Use != "" && k.Use != "sig" {
-			continue
-		}
-		if k.Kty == "RSA" || k.Kty == "EC" {
-			usable++
-		}
-	}
-	switch {
-	case len(set.Keys) == 0:
-		add(Finding{
-			Check: "oidc.jwks", Title: "Signing keys (JWKS)", Severity: SeverityFail,
-			Message:     doc.JWKSURI + " returned an empty key set, so no ID token can be verified",
-			Remediation: "Check the identity provider's signing key configuration",
-		})
-	case usable == 0:
-		add(Finding{
-			Check: "oidc.jwks", Title: "Signing keys (JWKS)", Severity: SeverityFail,
-			Message: fmt.Sprintf("%d key(s) published but none are RSA or EC signing keys; "+
-				"cloop verifies RS256 and ES256 only", len(set.Keys)),
-			Remediation: "Configure the issuer to sign ID tokens with RS256 or ES256",
-			Details:     map[string]any{"key_types": kinds},
-		})
-	default:
-		add(Finding{
-			Check: "oidc.jwks", Title: "Signing keys (JWKS)", Severity: SeverityPass,
-			Message: fmt.Sprintf("%d usable signing key(s) at %s", usable, doc.JWKSURI),
-		})
-	}
-}
-
-// getJSON performs one bounded GET and returns the body.
-func getJSON(ctx context.Context, opts Options, rawURL string) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(ctx, opts.timeout())
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("build request: %w", err)
-	}
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := opts.client().Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer func() {
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxDiscoveryBody))
-		_ = resp.Body.Close()
-	}()
-	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return nil, fmt.Errorf("HTTP %s", resp.Status)
-	}
-	return io.ReadAll(io.LimitReader(resp.Body, maxDiscoveryBody))
-}
-
-// issuerEqual compares issuer URLs tolerating a trailing slash, matching
-// pkg/oidcauth so the doctor accepts exactly what a login accepts.
-func issuerEqual(a, b string) bool {
-	return strings.TrimSuffix(a, "/") == strings.TrimSuffix(b, "/")
 }
 
 func originOf(u *url.URL) string { return u.Scheme + "://" + u.Host }

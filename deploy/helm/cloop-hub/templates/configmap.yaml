@@ -154,6 +154,10 @@ data:
         client_id: {{ .Values.oidc.clientID | quote }}
         # client_secret arrives as CLOOP_OIDC_CLIENT_SECRET from the Secret.
         redirect_url: {{ printf "%s/auth/callback" (trimSuffix "/" .Values.config.externalURL) | quote }}
+        # Resolve the issuer before serving, and refuse to start if it will
+        # not resolve — so a bad issuer rolls back instead of replacing a
+        # working hub with one nobody can sign in to.
+        require_idp: {{ .Values.oidc.requireIdP }}
         {{- end }}
         scopes: {{ toJson .Values.oidc.scopes }}
         # Deny-by-default: authenticating is not authorization.

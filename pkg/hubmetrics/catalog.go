@@ -193,6 +193,34 @@ var (
 	})
 )
 
+// OIDC sign-in. The credential path a human uses, which until Task 20247 was
+// the only one with no metric at all while API tokens had two.
+//
+// The outcomes are oidcauth.Login* — a closed set declared in Go source, which
+// is what makes them admissible as a label. They are worth separating rather
+// than folding into success/failure because they name different problems with
+// different owners: discovery_failed is the hub's config, exchange_failed is
+// the client registration at the provider, invalid_state at any volume is
+// somebody replaying callbacks, and idp_error is the provider's own decision.
+var (
+	OIDCLogins = Default.MustRegister(Definition{
+		Name:   "cloop_oidc_login_total",
+		Help:   "Sign-in attempts that reached a verdict, by outcome (success, discovery_failed, idp_error, invalid_request, invalid_state, exchange_failed, token_invalid, session_error, state_error). A redirect to the provider is not counted until it comes back.",
+		Type:   TypeCounter,
+		Labels: []string{"outcome"},
+	})
+
+	// Unlabelled deliberately. The reason for a discovery failure is in the
+	// hub's log and in `cloop hub doctor`, both of which can afford prose;
+	// what a scrape needs is the single number an alert fires on, because
+	// any non-zero rate means nobody new can sign in.
+	OIDCDiscoveryFailures = Default.MustRegister(Definition{
+		Name: "cloop_oidc_discovery_failures_total",
+		Help: "Failures to resolve the OIDC issuer (discovery or JWKS). Any non-zero rate means no new sign-in can complete; run `cloop hub doctor` for which of the two failed and why.",
+		Type: TypeCounter,
+	})
+)
+
 // API token authentication. The failure reasons are pkg/apitoken's sentinel
 // errors, which is what makes them a closed set.
 var (

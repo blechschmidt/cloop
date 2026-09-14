@@ -422,6 +422,44 @@ type Subject struct {
 	Roles []string
 }
 
+// released reports whether the identity provider supplied anything at all
+// under kind for this subject.
+func (s *Subject) released(kind ClaimKind) bool {
+	if s == nil {
+		return false
+	}
+	switch kind {
+	case ClaimGroup:
+		return len(s.Groups) > 0
+	case ClaimRole:
+		return len(s.Roles) > 0
+	case ClaimEmail:
+		return strings.TrimSpace(s.Email) != ""
+	case ClaimSub:
+		return strings.TrimSpace(s.Sub) != ""
+	}
+	return false
+}
+
+// PresentClaims names the claim kinds the identity provider actually released
+// for s, in AllClaimKinds order.
+//
+// It exists to be printed next to a binding that cannot match: "you bound on
+// group, and this token carries only sub and email" is a diagnosis, where "no
+// role mapping matched" is a symptom.
+func (s *Subject) PresentClaims() []ClaimKind {
+	if s == nil {
+		return nil
+	}
+	var out []ClaimKind
+	for _, kind := range AllClaimKinds {
+		if s.released(kind) {
+			out = append(out, kind)
+		}
+	}
+	return out
+}
+
 // Label returns the most human-meaningful identifier for audit records:
 // email when available, else the subject.
 func (s *Subject) Label() string {
@@ -855,6 +893,50 @@ func (r *Resolver) Resolve(subject *Subject, scope Scope) Decision {
 		SubjectLabel: subject.Label(),
 		perms:        permSet(bestRole),
 	}
+}
+
+// UnsatisfiableBindings reports the configured bindings that no identity from
+// this issuer can ever match, judged from the claims one authenticated subject
+// actually carried.
+//
+// New already refuses a binding that is malformed — an unknown role, an
+// unknown claim kind. What it cannot see is the other half of the contract:
+// whether the identity provider releases the claim the binding reads. A hub
+// whose `groups` scope was never granted on the client, or whose provider maps
+// group membership under a different claim, accepts its role_mappings without
+// complaint and then resolves every user to default_role. Nothing in the
+// request path says why, because from resolution's point of view nothing went
+// wrong: no binding matched, which is a perfectly ordinary outcome.
+//
+// The judgement here is deliberately narrow. A binding is reported only when
+// the claim *kind* it reads was absent from the token entirely — not when its
+// value simply did not match, which is the normal case for every binding that
+// belongs to somebody else. That narrowness is what makes the result worth
+// logging: each entry is a binding that cannot match this user, and almost
+// certainly cannot match any user of the same issuer.
+//
+// A nil subject yields nothing: there is no evidence to reason from.
+func (r *Resolver) UnsatisfiableBindings(subject *Subject) []Binding {
+	if r == nil || subject == nil {
+		return nil
+	}
+	var out []Binding
+	for _, b := range r.bindings {
+		if !subject.released(b.Claim) {
+			out = append(out, b)
+		}
+	}
+	return out
+}
+
+// DefaultRole reports the role granted to an authenticated identity that
+// matches no binding. It is what an unsatisfiable binding silently degrades
+// to, so a diagnostic that names one should name this too.
+func (r *Resolver) DefaultRole() Role {
+	if r == nil {
+		return RoleNone
+	}
+	return r.defaultRole
 }
 
 func permSet(role Role) map[Permission]struct{} {

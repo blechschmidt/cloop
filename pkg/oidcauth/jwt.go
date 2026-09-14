@@ -233,11 +233,12 @@ func (a *Authenticator) verifyIDToken(ctx context.Context, raw, nonce string) (*
 		return nil, fmt.Errorf("oidcauth: id_token azp %q does not match client_id", claims.Azp)
 	}
 	now := time.Now()
-	if claims.Exp == 0 || now.After(time.Unix(claims.Exp, 0).Add(clockSkew)) {
-		return nil, errors.New("oidcauth: id_token is expired")
+	skew := a.clockSkew()
+	if claims.Exp == 0 || now.After(time.Unix(claims.Exp, 0).Add(skew)) {
+		return nil, fmt.Errorf("oidcauth: id_token is expired (leeway %s)", skew)
 	}
-	if claims.Iat != 0 && time.Unix(claims.Iat, 0).After(now.Add(clockSkew)) {
-		return nil, errors.New("oidcauth: id_token issued in the future (clock skew too large?)")
+	if claims.Iat != 0 && time.Unix(claims.Iat, 0).After(now.Add(skew)) {
+		return nil, fmt.Errorf("oidcauth: id_token issued in the future (leeway %s; clock skew too large?)", skew)
 	}
 	if nonce != "" && claims.Nonce != nonce {
 		return nil, errors.New("oidcauth: id_token nonce does not match this login attempt")
@@ -325,28 +326,49 @@ func (a *Authenticator) fetchJWKSLocked(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if disc.JWKSURI == "" {
-		return errors.New("oidcauth: discovery document has no jwks_uri; cannot verify id_token signatures")
-	}
-	body, err := a.getJSON(ctx, disc.JWKSURI)
+	keys, err := fetchJWKS(ctx, a.client, a.cfg.Issuer, disc)
 	if err != nil {
-		return fmt.Errorf("oidcauth: JWKS fetch: %w", err)
+		a.noteIdPErr(err)
+		return err
 	}
+	a.jwksKeys = keys
+	a.jwksFetched = time.Now()
+	// Reaching here means discovery *and* a usable key set both resolved,
+	// which is the whole of what readiness asserts — so a hub that never ran
+	// a preflight still becomes ready the moment somebody signs in.
+	a.noteIdPOK()
+	return nil
+}
+
+// errJWKSMalformed marks a key set that is not RFC 7517 JSON, as distinct from
+// one that parses and holds nothing cloop can use. The two have different
+// fixes, so the preflight reports them as different reasons.
+var errJWKSMalformed = errors.New("jwks is not a JSON key set")
+
+// parseJWKSet turns a JWK set into kid → public key, keeping only the keys
+// cloop can verify with (RS256/ES256, use=sig or unset).
+//
+// An unusable *entry* is skipped rather than fatal — a provider publishing an
+// encryption key alongside its signing key is normal, and other keys may still
+// verify. An empty *result* is fatal: the provider works and this hub can
+// never validate a token from it, which presents as "login worked and then
+// nothing happened" and is worth failing loudly for.
+func parseJWKSet(body []byte) (map[string]any, error) {
 	var set struct {
 		Keys []jwk `json:"keys"`
 	}
 	if err := json.Unmarshal(body, &set); err != nil {
-		return fmt.Errorf("oidcauth: JWKS parse: %w", err)
+		return nil, fmt.Errorf("%w: %v", errJWKSMalformed, err)
 	}
 	keys := make(map[string]any, len(set.Keys))
+	kinds := map[string]int{}
 	for i, k := range set.Keys {
+		kinds[k.Kty]++
 		if k.Use != "" && k.Use != "sig" {
 			continue
 		}
 		pub, err := parseJWK(k)
 		if err != nil {
-			// Skip unusable entries (unsupported kty/crv) rather than
-			// failing the whole set; other keys may still verify.
 			continue
 		}
 		kid := k.Kid
@@ -356,11 +378,13 @@ func (a *Authenticator) fetchJWKSLocked(ctx context.Context) error {
 		keys[kid] = pub
 	}
 	if len(keys) == 0 {
-		return errors.New("oidcauth: JWKS contained no usable RS256/ES256 signing keys")
+		if len(set.Keys) == 0 {
+			return nil, errors.New("the key set is empty, so no ID token can be verified")
+		}
+		return nil, fmt.Errorf("%d key(s) published but none are usable RS256/ES256 signing keys (types: %v)",
+			len(set.Keys), kinds)
 	}
-	a.jwksKeys = keys
-	a.jwksFetched = time.Now()
-	return nil
+	return keys, nil
 }
 
 func parseJWK(k jwk) (any, error) {

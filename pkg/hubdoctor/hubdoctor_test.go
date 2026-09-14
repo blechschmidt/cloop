@@ -9,8 +9,12 @@ package hubdoctor
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -184,10 +188,31 @@ func TestExitCodeIgnoresWarnings(t *testing.T) {
 
 // ── Identity ────────────────────────────────────────────────────────────────
 
+// signingJWK renders a real RSA public key as a JWK.
+//
+// A fixture with kty=RSA and no key material would do for a check that only
+// reads kty, and that is exactly why it will not do here: the probe is now
+// oidcauth's own, which parses the modulus and exponent because that is what
+// verifying a token requires. A key it cannot parse is a key the hub cannot
+// verify with, and the fixture has to be honest about the difference.
+func signingJWK(t *testing.T) string {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("rsa key: %v", err)
+	}
+	pub := &key.PublicKey
+	return `{"keys":[{"kid":"a","kty":"RSA","alg":"RS256","use":"sig","n":"` +
+		base64.RawURLEncoding.EncodeToString(pub.N.Bytes()) + `","e":"` +
+		base64.RawURLEncoding.EncodeToString(big.NewInt(int64(pub.E)).Bytes()) + `"}]}`
+}
+
 // TestOIDCDiscoveryAndJWKS drives the two network checks against a stand-in
 // issuer, including the spec requirement that the document agree on its own
 // issuer name.
 func TestOIDCDiscoveryAndJWKS(t *testing.T) {
+	usable := signingJWK(t)
+
 	cases := []struct {
 		name        string
 		issuerInDoc string // "" means: use the server's own URL
@@ -197,13 +222,13 @@ func TestOIDCDiscoveryAndJWKS(t *testing.T) {
 	}{
 		{
 			name:     "healthy",
-			jwks:     `{"keys":[{"kid":"a","kty":"RSA","alg":"RS256","use":"sig"}]}`,
+			jwks:     usable,
 			wantDisc: SeverityPass, wantJWKS: SeverityPass,
 		},
 		{
 			name:        "issuer disagrees with its own document",
 			issuerInDoc: "https://somewhere-else.example.com",
-			jwks:        `{"keys":[{"kid":"a","kty":"RSA"}]}`,
+			jwks:        usable,
 			wantDisc:    SeverityFail,
 		},
 		{
@@ -214,6 +239,19 @@ func TestOIDCDiscoveryAndJWKS(t *testing.T) {
 		{
 			name:     "no verifiable key types",
 			jwks:     `{"keys":[{"kid":"a","kty":"oct","alg":"HS256"}]}`,
+			wantDisc: SeverityPass, wantJWKS: SeverityFail,
+		},
+		{
+			// The case the doctor used to pass and the hub used to reject:
+			// an RSA entry with no modulus announces a signing key and
+			// supplies nothing to verify with.
+			name:     "RSA entry carrying no key material",
+			jwks:     `{"keys":[{"kid":"a","kty":"RSA","alg":"RS256","use":"sig"}]}`,
+			wantDisc: SeverityPass, wantJWKS: SeverityFail,
+		},
+		{
+			name:     "key set is not a JWK set",
+			jwks:     `not json at all`,
 			wantDisc: SeverityPass, wantJWKS: SeverityFail,
 		},
 	}

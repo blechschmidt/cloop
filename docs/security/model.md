@@ -1161,6 +1161,34 @@ written a policy yet. Writing a single mapping (or setting `default_role`,
 including to `none`) switches the deployment to deny-by-default. An invalid
 role or claim name aborts startup rather than silently never matching.
 
+**A mapping the provider cannot satisfy is reported once.** Startup validation
+covers the half of the contract cloop can see — the role names and claim kinds
+are well-formed. It cannot see the other half: whether the identity provider
+actually releases the claim a mapping reads. A `group` mapping on a deployment
+whose `groups` scope was never granted on the client, or whose provider
+publishes membership under a different claim, is accepted without complaint and
+then matches nobody; every user falls through to `default_role`, and nothing in
+the request path says why, because from resolution's point of view nothing went
+wrong.
+
+So after the first identity the hub authenticates, it logs one warning per
+mapping whose claim the token did not carry, naming the claims that *were*
+present and the released group and role values:
+
+```
+WARN  role mapping can never match: the identity provider released no group
+      claim, so this binding is inert and its users fall back to default_role
+      claim=group value=cloop-admins role=admin
+      claims_present=[role sub email] roles_released=[platform]
+      default_role=viewer
+```
+
+The diagnosis is deliberately narrow — a mapping whose *value* did not match
+this user is the ordinary case, since most mappings belong to somebody else,
+and reporting those would drown the one that is genuinely dead. It fires once
+per hub, not once per request: this is a configuration fact, and repeating it
+is how a warning becomes something people filter out.
+
 ### Quotas: how much, not whether
 
 Roles answer *may this identity act?* Quotas answer *how much?* Without them a

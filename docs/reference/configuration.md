@@ -987,6 +987,8 @@ ui:
     session_ttl_hours: 24          # absolute ceiling, set at sign-in
     idle_timeout_hours: 8          # ends an unused session sooner
     refresh_interval_minutes: 15   # how often the IdP is re-asked
+    clock_skew_seconds: 300        # leeway on an ID token's exp/iat
+    require_idp: false             # refuse to start if the issuer will not resolve
 ```
 
 | Key | Default | Range | What it bounds |
@@ -994,11 +996,55 @@ ui:
 | `session_ttl_hours` | `24` | `1`–`720` | The hard ceiling. No amount of activity extends it; when it lapses the user signs in again. |
 | `idle_timeout_hours` | `8` | `1`–`720`, and never above `session_ttl_hours` | How long a session may go unused. This is the clock that bounds an unattended browser, and usually the one to tighten first — shortening it costs a re-login after a long meeting, while shortening the ceiling interrupts people mid-task. |
 | `refresh_interval_minutes` | `15` | `1`–`1440`, or `-1` to disable | Worst-case lag between the identity provider disabling a user and their cloop session ending. Requires `CLOOP_SECRET_KEY`. |
+| `clock_skew_seconds` | `300` | `0`–`600`, or `-1` for none | Leeway applied to an ID token's `exp` and `iat`, for hosts whose clocks disagree with the provider's. |
+| `require_idp` | `false` | — | Makes an unresolvable issuer fatal at startup instead of a warning. Also available as `cloop ui --require-idp`. |
 
 Out-of-range values are clamped rather than rejected, and an
 `idle_timeout_hours` larger than `session_ttl_hours` is held down to it — an
 idle clock that can never fire would silently remove the protection you
 believe is on.
+
+`clock_skew_seconds` is the exception: above the bound it is **rejected**, not
+clamped. It exists for deployments that cannot fix the underlying problem — an
+on-premise provider on a host whose NTP is blocked by the same firewall that
+makes it on-premise — and raising it means accepting tokens that expired that
+long ago, so raise it only as far as the drift you have measured. Quietly
+giving an operator who wrote an hour ten minutes instead would leave them
+debugging the wrong thing.
+
+#### Failing fast on a misconfigured provider
+
+The hub resolves its issuer at startup rather than at the first sign-in:
+discovery and the JWKS fetch, with a ten-second budget for both.
+
+- It **logs** the issuer URL, the HTTP status and a one-line fix when that
+  fails, instead of the failure surfacing hours later as an error page written
+  by the provider, in the provider's words, about a value the provider was
+  never shown.
+- It **degrades `/readyz`** — `503` with `"check": "identity"` — for as long as
+  the issuer has *never* resolved. Once it has resolved once the gate stays
+  open: existing sessions keep authenticating through a later provider outage,
+  and dropping the hub from its Service over one would turn a login outage into
+  a total one.
+- With `require_idp` (or `--require-idp`) it **refuses to start**, so a
+  Kubernetes rollout fails and rolls back rather than replacing a working hub
+  with one nobody can sign in to.
+
+A failed preflight never disables the normal path, so a provider that is down
+for a minute recovers on its own at the next sign-in with no restart.
+`cloop hub doctor` runs the same two round trips and prints the resolved
+authorization, token and JWKS endpoints — which is usually the fastest way to
+settle "is it talking to the realm I think it is?", since a wrong realm looks
+identical in the config file and obvious in its authorization endpoint.
+
+A role mapping the provider cannot satisfy gets its own signal. `ui.oidc`
+validates role names and claim kinds at startup, but it cannot see whether the
+provider actually *releases* the claim a binding reads — so a `group` binding
+on a deployment whose `groups` scope was never granted is inert, and every user
+silently falls back to `default_role`. After the first identity the hub
+authenticates, it logs one warning per such binding, naming the claims that
+were present. See
+[Configuring role mappings](../security/model.md#configuring-role-mappings).
 
 Sessions are stored in the hub's own `state.db` and survive a restart or a
 rolling upgrade. The refresh token used for revalidation is sealed with

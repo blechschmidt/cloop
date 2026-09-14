@@ -210,7 +210,70 @@ func (s *Server) newGrant(r *http.Request) *grant {
 		// This matches the pre-RBAC behavior of requireExecutorAdmin.
 		return &grant{server: s, bypass: authz.SourceStaticToken}
 	}
-	return &grant{server: s, subject: subjectFromIdentity(id)}
+	subject := subjectFromIdentity(id)
+	s.warnUnsatisfiableBindings(subject)
+	return &grant{server: s, subject: subject}
+}
+
+// warnUnsatisfiableBindings reports, once per hub, every role mapping that the
+// identity provider's claims cannot possibly satisfy (Task 20247).
+//
+// authz.New already refuses a binding that is malformed. It cannot see the
+// other half of the contract — whether the provider releases the claim the
+// binding reads — because at startup no token has been seen. So a hub whose
+// `groups` scope was never granted on the client, or whose provider maps
+// groups under another claim, accepts its role_mappings without complaint and
+// then resolves every user to default_role. Nothing in the request path says
+// why: from resolution's point of view nothing went wrong, no binding matched,
+// which is an entirely ordinary outcome.
+//
+// The trigger is the first authenticated identity rather than the first
+// sign-in, because sessions outlive the process: a hub restarted at 3am may
+// not see a fresh login for hours, and the diagnosis is wanted at startup, not
+// at the next working day. Both reach here through the same door.
+//
+// Latched with a sync.Once and not repeated. This is a configuration
+// diagnosis, and configuration does not change between requests — repeating it
+// would put a line in the log for every request of every user for as long as
+// the typo lived, which is how an operator learns to filter it out.
+func (s *Server) warnUnsatisfiableBindings(subject *authz.Subject) {
+	if subject == nil || !s.Authz.Configured() {
+		return
+	}
+	s.claimGapOnce.Do(func() {
+		gaps := s.Authz.UnsatisfiableBindings(subject)
+		if len(gaps) == 0 {
+			return
+		}
+		present := make([]string, 0, len(authz.AllClaimKinds))
+		for _, kind := range subject.PresentClaims() {
+			present = append(present, string(kind))
+		}
+		for _, b := range gaps {
+			data := map[string]interface{}{
+				"claim":          string(b.Claim),
+				"value":          b.Value,
+				"role":           string(b.Role),
+				"claims_present": present,
+				"default_role":   string(s.Authz.DefaultRole()),
+			}
+			// The released group and role values are the actionable half:
+			// they are what turns "no groups claim" into "you wrote
+			// cloop-admins and the token carries platform-admins". Email and
+			// sub are not echoed — they identify a person and would not help
+			// fix a group binding.
+			if len(subject.Groups) > 0 {
+				data["groups_released"] = subject.Groups
+			}
+			if len(subject.Roles) > 0 {
+				data["roles_released"] = subject.Roles
+			}
+			s.log().Warn(logger.EventAuthz, 0,
+				"role mapping can never match: the identity provider released no "+
+					string(b.Claim)+" claim, so this binding is inert and its users fall back to default_role",
+				data)
+		}
+	})
 }
 
 // grantFor returns the request's grant, computing it on demand when the

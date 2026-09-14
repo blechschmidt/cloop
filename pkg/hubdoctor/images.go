@@ -239,6 +239,11 @@ func registryHosts(p imagepolicy.Policy) []string {
 	return out
 }
 
+// maxProbeBody bounds what a probe drains from an endpoint before closing it.
+// A registry response is a few kilobytes; a megabyte cap means a hostile or
+// misrouted endpoint cannot exhaust a CLI that is trying to diagnose it.
+const maxProbeBody = 1 << 20
+
 // probe performs one bounded GET and returns the status code.
 func probe(ctx context.Context, opts Options, rawURL string) (int, error) {
 	ctx, cancel := context.WithTimeout(ctx, opts.timeout())
@@ -253,7 +258,7 @@ func probe(ctx context.Context, opts Options, rawURL string) (int, error) {
 		return 0, err
 	}
 	defer func() {
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxDiscoveryBody))
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxProbeBody))
 		_ = resp.Body.Close()
 	}()
 	return resp.StatusCode, nil

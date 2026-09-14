@@ -21,15 +21,16 @@ import (
 )
 
 var (
-	uiPort      int
-	uiNoBrowser bool
-	uiToken     string
-	uiProjects  []string
-	uiScan      string
-	uiRateLimit float64
-	uiRateBurst int
-	uiTLSCert   string
-	uiTLSKey    string
+	uiPort       int
+	uiNoBrowser  bool
+	uiToken      string
+	uiProjects   []string
+	uiScan       string
+	uiRateLimit  float64
+	uiRateBurst  int
+	uiTLSCert    string
+	uiTLSKey     string
+	uiRequireIdP bool
 )
 
 var uiCmd = &cobra.Command{
@@ -160,6 +161,7 @@ but not for anything reachable from a network.`,
 					SessionTTL:      time.Duration(cfg.UI.OIDC.EffectiveSessionTTLHours()) * time.Hour,
 					IdleTimeout:     time.Duration(cfg.UI.OIDC.EffectiveIdleTimeoutHours()) * time.Hour,
 					RefreshInterval: time.Duration(refreshMinutes) * time.Minute,
+					ClockSkew:       cfg.UI.OIDC.EffectiveClockSkew(),
 					CookieSecure:    cfg.UI.OIDC.CookieSecure,
 					Store:           store,
 					Audit:           srv.SessionAuditSink(),
@@ -196,6 +198,15 @@ but not for anything reachable from a network.`,
 					time.Duration(cfg.UI.OIDC.EffectiveSessionTTLHours())*time.Hour,
 					time.Duration(cfg.UI.OIDC.EffectiveIdleTimeoutHours())*time.Hour,
 					describeRevalidation(refreshMinutes, srv.SessionStoreSealsRefreshTokens()))
+
+				// Resolve the issuer now rather than at the first sign-in
+				// (Task 20247). The flag wins over the config key so an
+				// operator can demand a hard failure for one start — a
+				// rollout, a smoke test — without editing the ConfigMap.
+				srv.RequireIdP = cfg.UI.OIDC.RequireIdP || uiRequireIdP
+				if err := srv.PreflightIdP(cmd.Context()); err != nil {
+					return err
+				}
 			}
 
 			// Per-identity quotas (ui.quotas — Task 20182). Fail-closed like
@@ -382,5 +393,8 @@ func init() {
 	uiCmd.Flags().IntVar(&uiRateBurst, "rate-burst", 0, "Burst size per IP for rate limiter (default 50; 0 = use default)")
 	uiCmd.Flags().StringVar(&uiTLSCert, "tls-cert", "", "PEM certificate chain to serve HTTPS with (overrides ui.tls.cert_file)")
 	uiCmd.Flags().StringVar(&uiTLSKey, "tls-key", "", "PEM private key matching --tls-cert (overrides ui.tls.key_file)")
+	uiCmd.Flags().BoolVar(&uiRequireIdP, "require-idp", false,
+		"Refuse to start when the OIDC issuer cannot be resolved, instead of warning and "+
+			"retrying at the first sign-in (also settable as ui.oidc.require_idp)")
 	rootCmd.AddCommand(uiCmd)
 }

@@ -16,6 +16,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -1359,6 +1360,28 @@ type OIDCConfig struct {
 	// are not retained — see docs/security/model.md.
 	RefreshIntervalMinutes int `yaml:"refresh_interval_minutes,omitempty"`
 
+	// ClockSkewSeconds is the leeway applied to an ID token's exp and iat
+	// claims. Zero uses the default (300); set it to -1 for no leeway at
+	// all. Values above OIDCClockSkewSecondsUpper are a startup error, not
+	// a silent clamp — see oidcauth.MaxClockSkew.
+	//
+	// The knob exists for deployments that cannot fix the underlying
+	// problem: an on-premise IdP on a host whose NTP is blocked by the same
+	// firewall that makes it on-premise. Raising it accepts tokens that
+	// expired that long ago, so raise it only as far as the observed drift.
+	ClockSkewSeconds int `yaml:"clock_skew_seconds,omitempty"`
+
+	// RequireIdP makes an unreachable or misconfigured issuer fatal at
+	// startup rather than a warning.
+	//
+	// Off by default, because the hub can serve existing sessions through a
+	// transient IdP outage and refusing to start would turn a login outage
+	// into a total one. Turn it on where a failed start is the *desired*
+	// signal — a Kubernetes rollout, where a pod that never becomes ready
+	// is rolled back automatically, rather than a hub nobody can sign in to
+	// quietly replacing one that worked.
+	RequireIdP bool `yaml:"require_idp,omitempty"`
+
 	// CookieSecure controls the session cookie's Secure flag:
 	// "auto" (default — set when the request arrived over TLS or with
 	// X-Forwarded-Proto: https), "always", or "never".
@@ -1455,6 +1478,35 @@ func (o OIDCConfig) EffectiveIdleTimeoutHours() int {
 		h = ttl
 	}
 	return h
+}
+
+// OIDC ID-token clock-skew bounds (seconds).
+//
+// The upper bound mirrors oidcauth.MaxClockSkew. It is not enforced here:
+// pkg/oidcauth validates it and fails startup, which is the same split
+// role_mappings has with authz.New — one place decides what is well-formed,
+// and this package stays free of the reasoning about why.
+const (
+	OIDCClockSkewSecondsDefault = 300
+	OIDCClockSkewSecondsUpper   = 600
+)
+
+// EffectiveClockSkew returns the leeway to apply to ID-token expiry.
+//
+// Zero means "not set" and yields the default; a negative value is the
+// explicit "no leeway" opt-out and is passed through as a negative duration,
+// which oidcauth.New normalises to zero. An out-of-range positive value is
+// passed through *unclamped* on purpose, so it reaches the validation that
+// refuses it: an operator who configured an hour of skew must be told, not
+// quietly given ten minutes.
+func (o OIDCConfig) EffectiveClockSkew() time.Duration {
+	switch {
+	case o.ClockSkewSeconds == 0:
+		return OIDCClockSkewSecondsDefault * time.Second
+	case o.ClockSkewSeconds < 0:
+		return -1 * time.Second
+	}
+	return time.Duration(o.ClockSkewSeconds) * time.Second
 }
 
 // EffectiveRefreshIntervalMinutes returns how often a session is revalidated

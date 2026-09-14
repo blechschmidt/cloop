@@ -808,3 +808,118 @@ func TestIntersectKeepsTheActingCredentialsLabels(t *testing.T) {
 		t.Errorf("the deny did not bound the token: role=%q perms=%v", got.Role, got.Permissions())
 	}
 }
+
+// ── Unsatisfiable bindings ──────────────────────────────────────────────────
+
+// TestUnsatisfiableBindings covers the failure New cannot see: a binding that
+// is perfectly well-formed and reads a claim the identity provider does not
+// release, so it can never match anybody.
+//
+// The narrowness is the point. A binding whose *value* does not match this
+// user is the normal case — most bindings belong to somebody else — and
+// reporting those would drown the one that is genuinely dead.
+func TestUnsatisfiableBindings(t *testing.T) {
+	cfg := Config{
+		DefaultRole: RoleViewer,
+		Bindings: []Binding{
+			{Claim: ClaimGroup, Value: "cloop-admins", Role: RoleAdmin},
+			{Claim: ClaimRole, Value: "platform", Role: RoleOperator},
+			{Claim: ClaimEmail, Value: "dana@example.com", Role: RoleMaintainer},
+			{Claim: ClaimSub, Value: "abc-123", Role: RoleOperator},
+		},
+	}
+	r, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	t.Run("an IdP releasing no groups kills every group binding", func(t *testing.T) {
+		subject := &Subject{Sub: "abc-123", Email: "alice@example.com", Roles: []string{"platform"}}
+		got := r.UnsatisfiableBindings(subject)
+		if len(got) != 1 {
+			t.Fatalf("got %d unsatisfiable binding(s), want 1: %+v", len(got), got)
+		}
+		if got[0].Claim != ClaimGroup || got[0].Value != "cloop-admins" {
+			t.Errorf("wrong binding reported: %+v", got[0])
+		}
+	})
+
+	t.Run("a value that simply did not match is not a misconfiguration", func(t *testing.T) {
+		// This user is in a group, just not that one, and is not Dana. Every
+		// binding's claim kind was released, so nothing is inert.
+		subject := &Subject{
+			Sub:    "abc-123",
+			Email:  "alice@example.com",
+			Groups: []string{"engineering"},
+			Roles:  []string{"reader"},
+		}
+		if got := r.UnsatisfiableBindings(subject); len(got) != 0 {
+			t.Errorf("reported %d binding(s) for an ordinary non-match, which would drown the real signal: %+v",
+				len(got), got)
+		}
+	})
+
+	t.Run("an IdP releasing neither groups nor roles kills both", func(t *testing.T) {
+		subject := &Subject{Sub: "abc-123", Email: "alice@example.com"}
+		got := r.UnsatisfiableBindings(subject)
+		if len(got) != 2 {
+			t.Fatalf("got %d, want 2: %+v", len(got), got)
+		}
+	})
+
+	t.Run("admin_emails is diagnosed too", func(t *testing.T) {
+		// The legacy admin list becomes an email binding, so an IdP that does
+		// not release email leaves the deployment with no administrator and
+		// nothing saying why.
+		withAdmins, err := New(Config{AdminEmails: []string{"root@example.com"}})
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		got := withAdmins.UnsatisfiableBindings(&Subject{Sub: "opaque-1"})
+		if len(got) != 1 || got[0].Role != RoleAdmin {
+			t.Fatalf("an email-less IdP must flag the admin list: %+v", got)
+		}
+	})
+
+	t.Run("no subject, no conclusion", func(t *testing.T) {
+		if got := r.UnsatisfiableBindings(nil); got != nil {
+			t.Errorf("a nil subject is no evidence: %+v", got)
+		}
+		var nilResolver *Resolver
+		if got := nilResolver.UnsatisfiableBindings(&Subject{Sub: "x"}); got != nil {
+			t.Errorf("nil resolver: %+v", got)
+		}
+	})
+
+	t.Run("the default role is reportable", func(t *testing.T) {
+		if got := r.DefaultRole(); got != RoleViewer {
+			t.Errorf("DefaultRole = %q, want %q", got, RoleViewer)
+		}
+		var nilResolver *Resolver
+		if got := nilResolver.DefaultRole(); got != RoleNone {
+			t.Errorf("nil resolver default = %q, want %q", got, RoleNone)
+		}
+	})
+}
+
+// TestPresentClaims: the other half of the diagnosis. Naming a dead binding is
+// only actionable next to what the token did carry.
+func TestPresentClaims(t *testing.T) {
+	subject := &Subject{Sub: "abc", Email: "alice@example.com", Groups: []string{"eng"}}
+	got := subject.PresentClaims()
+	want := []ClaimKind{ClaimGroup, ClaimEmail, ClaimSub}
+	if len(got) != len(want) {
+		t.Fatalf("PresentClaims = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("PresentClaims = %v, want %v (AllClaimKinds order)", got, want)
+		}
+	}
+	if got := (*Subject)(nil).PresentClaims(); got != nil {
+		t.Errorf("nil subject: %v", got)
+	}
+	if got := (&Subject{Email: "  "}).PresentClaims(); len(got) != 0 {
+		t.Errorf("a blank claim is not a released claim: %v", got)
+	}
+}

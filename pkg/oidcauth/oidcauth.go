@@ -74,9 +74,21 @@ const (
 	// exchange, JWKS fetch).
 	httpTimeout = 15 * time.Second
 
-	// clockSkew is the leeway applied to exp/iat validation so a modest
-	// clock drift between cloop and the IdP does not reject valid tokens.
-	clockSkew = 5 * time.Minute
+	// DefaultClockSkew is the leeway applied to exp/iat validation so a
+	// modest clock drift between cloop and the IdP does not reject valid
+	// tokens. Used when Config.ClockSkew is zero.
+	DefaultClockSkew = 5 * time.Minute
+
+	// MaxClockSkew is the largest leeway a deployment may configure.
+	//
+	// Ten minutes is already generous for hosts that both run NTP; past it
+	// the setting stops compensating for drift and starts extending the life
+	// of every expired token by the same amount, which is a different and
+	// much worse trade than the one the knob exists to make. Exceeding it is
+	// a startup error rather than a silent clamp: an operator who wrote an
+	// hour believes they got an hour, and quietly giving them ten minutes
+	// would leave them debugging the wrong thing.
+	MaxClockSkew = 10 * time.Minute
 
 	// jwksMinRefreshInterval throttles JWKS re-fetches on unknown key IDs
 	// so a flood of forged tokens with bogus kids cannot make cloop hammer
@@ -175,6 +187,18 @@ type Config struct {
 	// request or the janitor is waiting.
 	Audit func(SessionAudit)
 
+	// ClockSkew is the leeway applied to an ID token's exp and iat claims.
+	// Zero uses DefaultClockSkew; negative means no leeway at all (the
+	// strictest setting, appropriate where both clocks are known-good).
+	// Anything above MaxClockSkew is rejected by New.
+	//
+	// It is a knob rather than a constant because the deployments that need
+	// it are the ones that cannot fix the underlying problem: an on-premise
+	// IdP on a host whose NTP is blocked by the same firewall that makes it
+	// on-premise. The bound is what keeps it from being used as a way to
+	// accept tokens that expired ten minutes ago.
+	ClockSkew time.Duration
+
 	// Clock supplies the current time. Nil means time.Now. It exists so the
 	// two expiry clocks can be tested without sleeping through them.
 	Clock func() time.Time
@@ -269,6 +293,17 @@ type Authenticator struct {
 
 	store SessionStore
 
+	// idpMu guards the readiness view: whether the issuer has ever resolved,
+	// and the last failure if it has not.
+	//
+	// Its own mutex rather than discMu because /readyz reads this on every
+	// probe and must never queue behind an in-flight round trip to an
+	// unreachable IdP — a readiness probe that hangs is reported as a failed
+	// probe, which would turn "the IdP is slow" into "the hub is down".
+	idpMu    sync.Mutex
+	idpReady bool
+	idpErr   error
+
 	// mu guards pending and cache. It is deliberately not held across a store
 	// call: the store has its own synchronisation, and holding a process-wide
 	// mutex across SQLite would serialise every authenticated request behind
@@ -335,6 +370,18 @@ func New(cfg Config) (*Authenticator, error) {
 	}
 	if cfg.RefreshInterval == 0 {
 		cfg.RefreshInterval = DefaultRefreshInterval
+	}
+	switch {
+	case cfg.ClockSkew == 0:
+		cfg.ClockSkew = DefaultClockSkew
+	case cfg.ClockSkew < 0:
+		// The explicit "no leeway" opt-out. Normalised to zero so the
+		// validation path has one shape to check and jwt.go one value to add.
+		cfg.ClockSkew = 0
+	case cfg.ClockSkew > MaxClockSkew:
+		return nil, fmt.Errorf("oidcauth: clock_skew %s exceeds the maximum of %s — "+
+			"past that the setting extends the life of every expired token rather than "+
+			"compensating for drift", cfg.ClockSkew, MaxClockSkew)
 	}
 	store := cfg.Store
 	if store == nil {
@@ -414,21 +461,78 @@ func (a *Authenticator) IsAdmin(id *Identity) bool {
 	return false
 }
 
+// LoginOutcome is the verdict of one sign-in attempt.
+//
+// It is returned rather than recorded internally because this package is
+// stdlib-only by design and the hub's metric registry is not — the same split
+// that makes Config.Audit a callback. The values are a closed set, which is
+// what lets them be a metric label: see hubmetrics.OIDCLogins.
+type LoginOutcome string
+
+const (
+	// LoginPending is the zero value: the attempt has not reached a verdict.
+	// BeginLogin returns it on the redirect to the IdP, which is a sign-in
+	// still in progress and must not be counted as a completed one.
+	LoginPending LoginOutcome = ""
+
+	// LoginSuccess is a session established.
+	LoginSuccess LoginOutcome = "success"
+
+	// LoginDiscoveryFailed means the issuer could not be resolved, so the
+	// flow never started. This is the misconfiguration outcome.
+	LoginDiscoveryFailed LoginOutcome = "discovery_failed"
+
+	// LoginIdPError means the provider itself refused, redirecting back with
+	// an error parameter — a disabled account, a consent denial.
+	LoginIdPError LoginOutcome = "idp_error"
+
+	// LoginInvalidRequest means the callback arrived without state or code.
+	LoginInvalidRequest LoginOutcome = "invalid_request"
+
+	// LoginInvalidState means the state is unknown, expired, or replayed.
+	// A sustained rate of these against a hub with working logins is someone
+	// replaying callbacks.
+	LoginInvalidState LoginOutcome = "invalid_state"
+
+	// LoginExchangeFailed means the token endpoint refused the code —
+	// usually a wrong client secret or an unregistered redirect URI.
+	LoginExchangeFailed LoginOutcome = "exchange_failed"
+
+	// LoginTokenInvalid means the ID token failed validation: signature,
+	// issuer, audience, nonce, or expiry.
+	LoginTokenInvalid LoginOutcome = "token_invalid"
+
+	// LoginSessionError means everything about the identity checked out and
+	// the session could not be stored.
+	LoginSessionError LoginOutcome = "session_error"
+
+	// LoginStateError means the CSPRNG failed. It has never been observed;
+	// it is enumerated so no branch of the flow is unaccounted for.
+	LoginStateError LoginOutcome = "state_error"
+)
+
+// Recorded reports whether o is a verdict worth counting. A pending login is
+// not an outcome.
+func (o LoginOutcome) Recorded() bool { return o != LoginPending }
+
 // BeginLogin starts the authorization-code flow: it records a one-shot
 // state + nonce + PKCE verifier and redirects the browser to the IdP's
 // authorization endpoint.
-func (a *Authenticator) BeginLogin(w http.ResponseWriter, r *http.Request) {
+//
+// It returns LoginPending on the redirect. Any other value means the response
+// is already an error page and the attempt is over.
+func (a *Authenticator) BeginLogin(w http.ResponseWriter, r *http.Request) LoginOutcome {
 	disc, err := a.discover(r.Context())
 	if err != nil {
 		a.errorPage(w, http.StatusServiceUnavailable, "The identity provider is unreachable or misconfigured.", err)
-		return
+		return LoginDiscoveryFailed
 	}
 	state, err1 := randToken()
 	nonce, err2 := randToken()
 	verifier, err3 := randToken()
 	if err := errors.Join(err1, err2, err3); err != nil {
 		a.errorPage(w, http.StatusInternalServerError, "Could not generate login state.", err)
-		return
+		return LoginStateError
 	}
 
 	now := time.Now()
@@ -453,21 +557,23 @@ func (a *Authenticator) BeginLogin(w http.ResponseWriter, r *http.Request) {
 		sep = "&"
 	}
 	http.Redirect(w, r, disc.AuthorizationEndpoint+sep+q.Encode(), http.StatusFound)
+	return LoginPending
 }
 
 // HandleCallback completes the flow: validates state, exchanges the code,
 // verifies the ID token, creates a session, and redirects to the dashboard.
-func (a *Authenticator) HandleCallback(w http.ResponseWriter, r *http.Request) {
+// The returned outcome is always a verdict — this is where a sign-in ends.
+func (a *Authenticator) HandleCallback(w http.ResponseWriter, r *http.Request) LoginOutcome {
 	q := r.URL.Query()
 	if e := q.Get("error"); e != "" {
 		desc := strings.TrimSpace(e + " " + q.Get("error_description"))
 		a.errorPage(w, http.StatusForbidden, "The identity provider rejected the sign-in: "+desc, nil)
-		return
+		return LoginIdPError
 	}
 	state, code := q.Get("state"), q.Get("code")
 	if state == "" || code == "" {
 		a.errorPage(w, http.StatusBadRequest, "The callback is missing its state or code parameter.", nil)
-		return
+		return LoginInvalidRequest
 	}
 
 	now := time.Now()
@@ -477,7 +583,7 @@ func (a *Authenticator) HandleCallback(w http.ResponseWriter, r *http.Request) {
 	a.mu.Unlock()
 	if p == nil || now.Sub(p.created) > loginStateTTL {
 		a.errorPage(w, http.StatusBadRequest, "This sign-in attempt has expired or was not initiated here. Please try again.", nil)
-		return
+		return LoginInvalidState
 	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), httpTimeout)
@@ -485,21 +591,38 @@ func (a *Authenticator) HandleCallback(w http.ResponseWriter, r *http.Request) {
 	tok, err := a.exchangeCode(ctx, code, p.verifier)
 	if err != nil {
 		a.errorPage(w, http.StatusBadGateway, "Exchanging the authorization code with the identity provider failed.", err)
-		return
+		// A code exchange that could not even reach discovery is a
+		// misconfigured issuer, not a rejected code, and must be reported
+		// as the former or the operator debugs the wrong end.
+		if isPreflightFailure(err) {
+			return LoginDiscoveryFailed
+		}
+		return LoginExchangeFailed
 	}
 	id, err := a.verifyIDToken(ctx, tok.IDToken, p.nonce)
 	if err != nil {
 		a.errorPage(w, http.StatusForbidden, "The identity token failed validation.", err)
-		return
+		if isPreflightFailure(err) {
+			return LoginDiscoveryFailed
+		}
+		return LoginTokenInvalid
 	}
 
 	sid, err := a.createSession(*id, r, tok.RefreshToken)
 	if err != nil {
 		a.errorPage(w, http.StatusInternalServerError, "Could not create a session.", err)
-		return
+		return LoginSessionError
 	}
 	http.SetCookie(w, a.sessionCookie(r, sid, int(a.cfg.SessionTTL.Seconds())))
 	a.completeLogin(w, r)
+	return LoginSuccess
+}
+
+// isPreflightFailure reports whether err is the issuer failing to resolve,
+// as opposed to the sign-in itself being refused.
+func isPreflightFailure(err error) bool {
+	var pe *PreflightError
+	return errors.As(err, &pe)
 }
 
 // completeLogin sends the browser to the dashboard after a successful sign-in.
@@ -669,7 +792,8 @@ type discoveryDoc struct {
 
 // discover fetches (and caches) the issuer's well-known configuration.
 // Only a successful fetch is cached, so a transient IdP outage at first
-// login retries on the next attempt.
+// login retries on the next attempt — which is also what makes the lazy path
+// the retry mechanism for a preflight that failed at startup.
 func (a *Authenticator) discover(ctx context.Context) (*discoveryDoc, error) {
 	a.discMu.Lock()
 	defer a.discMu.Unlock()
@@ -677,23 +801,22 @@ func (a *Authenticator) discover(ctx context.Context) (*discoveryDoc, error) {
 		return a.disc, nil
 	}
 
-	wellKnown := strings.TrimSuffix(a.cfg.Issuer, "/") + "/.well-known/openid-configuration"
-	body, err := a.getJSON(ctx, wellKnown)
+	doc, err := fetchDiscovery(ctx, a.client, a.cfg.Issuer)
 	if err != nil {
-		return nil, fmt.Errorf("oidcauth: discovery %s: %w", wellKnown, err)
+		a.noteIdPErr(err)
+		return nil, err
 	}
-	var doc discoveryDoc
-	if err := json.Unmarshal(body, &doc); err != nil {
-		return nil, fmt.Errorf("oidcauth: discovery document parse: %w", err)
-	}
-	if doc.AuthorizationEndpoint == "" || doc.TokenEndpoint == "" {
-		return nil, errors.New("oidcauth: discovery document is missing authorization_endpoint or token_endpoint")
-	}
-	if !issuerEqual(doc.Issuer, a.cfg.Issuer) {
-		return nil, fmt.Errorf("oidcauth: discovery issuer %q does not match configured issuer %q", doc.Issuer, a.cfg.Issuer)
-	}
-	a.disc = &doc
+	a.disc = doc
 	return a.disc, nil
+}
+
+// clockSkew is the configured leeway for exp/iat validation. Safe on a nil
+// receiver so the jwt path needs no guard.
+func (a *Authenticator) clockSkew() time.Duration {
+	if a == nil {
+		return DefaultClockSkew
+	}
+	return a.cfg.ClockSkew
 }
 
 // issuerEqual compares issuer URLs, tolerating a trailing-slash mismatch
@@ -702,13 +825,37 @@ func issuerEqual(a, b string) bool {
 	return strings.TrimSuffix(a, "/") == strings.TrimSuffix(b, "/")
 }
 
-func (a *Authenticator) getJSON(ctx context.Context, u string) ([]byte, error) {
+// idpStatusError is a non-200 answer from an IdP metadata endpoint.
+//
+// A type rather than a formatted string because the status is the single most
+// useful thing an operator can be told about an unreachable issuer — a 404 is
+// a wrong path, a 401 is an issuer behind authentication, a 503 is an outage
+// that will clear on its own — and PreflightError surfaces it as its own
+// field so nothing has to parse it back out of a sentence.
+type idpStatusError struct {
+	URL    string
+	Status int
+	Body   string
+}
+
+func (e *idpStatusError) Error() string {
+	if e.Body == "" {
+		return fmt.Sprintf("unexpected status %d", e.Status)
+	}
+	return fmt.Sprintf("unexpected status %d: %s", e.Status, e.Body)
+}
+
+// getJSON performs one bounded GET against an IdP metadata endpoint. It takes
+// the client rather than hanging off the Authenticator so the standalone
+// Preflight — which runs before any Authenticator exists — uses exactly this
+// code, including the response-size bound.
+func getJSON(ctx context.Context, client *http.Client, u string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Accept", "application/json")
-	resp, err := a.client.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -718,7 +865,11 @@ func (a *Authenticator) getJSON(ctx context.Context, u string) ([]byte, error) {
 		return nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("unexpected status %d: %s", resp.StatusCode, truncate(string(body), 200))
+		return nil, &idpStatusError{
+			URL:    u,
+			Status: resp.StatusCode,
+			Body:   truncate(strings.TrimSpace(string(body)), 200),
+		}
 	}
 	return body, nil
 }

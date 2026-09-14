@@ -6,12 +6,17 @@ package ui
 // with OIDC disabled the dashboard behaves exactly as before.
 
 import (
+	"context"
 	"crypto/subtle"
+	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 
 	"github.com/blechschmidt/cloop/pkg/apitoken"
 	"github.com/blechschmidt/cloop/pkg/authz"
+	"github.com/blechschmidt/cloop/pkg/hubmetrics"
+	"github.com/blechschmidt/cloop/pkg/logger"
 	"github.com/blechschmidt/cloop/pkg/multiui"
 	"github.com/blechschmidt/cloop/pkg/oidcauth"
 )
@@ -181,7 +186,7 @@ func (s *Server) handleOIDCLogin(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "OIDC authentication is not enabled on this server", http.StatusNotFound)
 		return
 	}
-	s.OIDC.BeginLogin(w, r)
+	recordLoginOutcome(s.OIDC.BeginLogin(w, r))
 }
 
 func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
@@ -189,7 +194,92 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "OIDC authentication is not enabled on this server", http.StatusNotFound)
 		return
 	}
-	s.OIDC.HandleCallback(w, r)
+	recordLoginOutcome(s.OIDC.HandleCallback(w, r))
+}
+
+// recordLoginOutcome counts one sign-in attempt that reached a verdict.
+//
+// Sessions were the only credential path the hub could not graph: a token
+// rejection has had two counters since Task 20175, while a hub where every
+// human sign-in failed looked identical in a scrape to one where nobody had
+// tried. A redirect to the provider is not a verdict and is not counted —
+// counting it would make the success ratio depend on how many people opened
+// the login page and wandered off.
+func recordLoginOutcome(outcome oidcauth.LoginOutcome) {
+	if !outcome.Recorded() {
+		return
+	}
+	hubmetrics.OIDCLogins.Inc(string(outcome))
+	if outcome == oidcauth.LoginDiscoveryFailed {
+		hubmetrics.OIDCDiscoveryFailures.Inc()
+	}
+}
+
+// ── Identity provider preflight ─────────────────────────────────────────────
+
+// PreflightIdP resolves the identity provider before the listener binds.
+//
+// Discovery is otherwise lazy, which means a hub pointed at an unreachable,
+// misspelled, or wrongly-registered issuer starts green, reports healthy, and
+// fails for the first human who tries to sign in — with an error page written
+// in the provider's words about a value the provider was never shown. This
+// turns that into one line in the hub's own log at the moment an operator is
+// watching, naming the issuer and the HTTP status.
+//
+// It returns an error only when the deployment declared the provider mandatory
+// (RequireIdP). Otherwise a failure degrades readiness and nothing more: the
+// lazy path is still the retry mechanism, so an IdP that is down for a minute
+// recovers on its own, and a hub holding live sessions keeps serving them
+// rather than refusing to start over an outage it will outlive.
+func (s *Server) PreflightIdP(ctx context.Context) error {
+	if !s.oidcEnabled() {
+		return nil
+	}
+	res, err := s.OIDC.Preflight(ctx)
+	if err != nil {
+		hubmetrics.OIDCDiscoveryFailures.Inc()
+
+		remediation := ""
+		var pe *oidcauth.PreflightError
+		if errors.As(err, &pe) {
+			remediation = pe.Remediation()
+		}
+		if s.RequireIdP {
+			return fmt.Errorf("%w\n  → %s\n  (ui.oidc.require_idp is set, so this is fatal; "+
+				"unset it to start anyway and retry on the first sign-in)", err, remediation)
+		}
+		s.log().Warn(logger.EventAuthz, 0,
+			"identity provider preflight failed: nobody will be able to sign in until it resolves",
+			map[string]interface{}{
+				"issuer":      s.OIDC.Issuer(),
+				"error":       err.Error(),
+				"remediation": remediation,
+			})
+		return nil
+	}
+	s.log().Info(logger.EventAuthz, 0, "identity provider resolved",
+		map[string]interface{}{
+			"issuer":                 res.Issuer,
+			"authorization_endpoint": res.AuthorizationEndpoint,
+			"token_endpoint":         res.TokenEndpoint,
+			"jwks_uri":               res.JWKSURI,
+			"signing_keys":           res.SigningKeys,
+		})
+	return nil
+}
+
+// idpReady is the readiness gate for the identity path: nil once the issuer
+// has ever resolved, the last failure until then.
+//
+// Deliberately one-way. A hub that has resolved its issuer once is configured
+// correctly, and a later outage is a different condition: existing sessions
+// still authenticate, so flapping the whole hub out of its Service on the
+// provider's availability would convert a login outage into a total one.
+func (s *Server) idpReady() error {
+	if !s.oidcEnabled() {
+		return nil
+	}
+	return s.OIDC.IdPReady()
 }
 
 // handleOIDCLogout ends the caller's session here and tells the browser where
