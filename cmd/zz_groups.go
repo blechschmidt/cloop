@@ -243,6 +243,7 @@ var taskCommandGroups = map[string]string{
 	"archive":   groupTaskLifecycle,
 	"unarchive": groupTaskLifecycle,
 	"exec":      groupTaskLifecycle,
+	"attach":    groupTaskLifecycle,
 	"watch":     groupTaskLifecycle,
 
 	// Organize and annotate — metadata that does not change the work itself.

@@ -60,6 +60,12 @@ type Session struct {
 	done      chan struct{}
 	closeOnce sync.Once
 	closeMsg  string
+
+	// attaches routes interactive-session frames to the terminal that owns
+	// them (Task 20265). It locks itself, and is scoped to this connection
+	// because an attach session cannot survive one: the shell runs on the
+	// device, so a dropped link is a dead terminal, not a resumable one.
+	attaches attachRegistry
 }
 
 // AcceptOptions parameterises the server-side handshake.
@@ -271,6 +277,10 @@ func (s *Session) closeWithReason(reason string) error {
 			close(ch)
 		}
 		close(s.done)
+		// Every terminal on this connection dies with it. Doing it here rather
+		// than in the read loop's defer covers the watchdog path too, which
+		// closes the session without the read loop having returned yet.
+		s.closeAttachSessions("agent connection closed: " + reason)
 		_ = s.conn.Close(reason)
 	})
 	return nil
@@ -421,6 +431,10 @@ func (s *Session) handleFrame(ctx context.Context, f Frame) (stop bool) {
 		// reply to status_req and signal, so it is applied first and then
 		// routed to any waiter.
 		s.deliver(f)
+		return false
+
+	case TypeAttachData, TypeAttachClose, TypeAttachOpened:
+		s.handleAttachFrame(ctx, f)
 		return false
 
 	case TypeStarted, TypeRevoked, TypeError:

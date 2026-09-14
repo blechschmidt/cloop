@@ -151,6 +151,13 @@ var telemetryAPISource string
 //go:embed openapi_api.go
 var openAPIAPISource string
 
+// attachAPISource is pkg/ui/attach_api.go (Task 20265). It registers the two
+// live-sandbox-attach routes and runs its own WebSocket, so the route-drift and
+// authz scans both need it.
+//
+//go:embed attach_api.go
+var attachAPISource string
+
 // routesSource is pkg/ui/routes.go, which holds the declarative route table
 // (Task 20164). Routes moved out of server.go when registration started
 // carrying a required permission, so the architectural tests that scan for
@@ -171,7 +178,8 @@ func allUISources() string {
 		"\n" + reproduceAPISource + "\n" + ledgerAPISource + "\n" + retentionAPISource +
 		"\n" + executorsInventorySource + "\n" + executorDetailAPISource +
 		"\n" + versionAPISource + "\n" + telemetryAPISource +
-		"\n" + openAPIAPISource + "\n" + costAPISource
+		"\n" + openAPIAPISource + "\n" + costAPISource +
+		"\n" + attachAPISource
 }
 
 // dashboardSource is the whole dashboard front end — the rendered index.html

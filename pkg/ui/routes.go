@@ -342,6 +342,7 @@ func (s *Server) routeTable() []routeSpec {
 		sessAdmin  = authz.PermSessionAdmin
 		userMgmt   = authz.PermUserManage
 		viewPrefs  = authz.PermViewPrefs
+		attach     = authz.PermSandboxAttach
 		public     = authz.PermPublic
 	)
 
@@ -404,6 +405,25 @@ func (s *Server) routeTable() []routeSpec {
 		{Pattern: "/api/state", Handler: s.handleState, Methods: []string{"GET"}, Perm: read, Scope: scopeProject},
 		{Pattern: "/api/steps", Handler: s.handleSteps, Methods: []string{"GET"}, Perm: read, Scope: scopeProject},
 		{Pattern: "/api/ws", Handler: s.handleWS, Methods: []string{"GET"}, Perm: read, Scope: scopeProject},
+
+		// ── Live sandbox attach (Task 20265) ─────────────────────────
+		// Both routes carry sandbox.attach, which no default role below
+		// admin holds. Deliberately NOT project.read: reading a task's
+		// transcript and opening a shell in the machine running it are
+		// different authorities, and reusing the weaker one would promote
+		// every viewer on the hub the day this shipped.
+		//
+		// The info route is gated identically to the socket rather than at
+		// project.read, because its answer — which executor, how many
+		// sessions are open on it — is fleet reconnaissance for a caller
+		// who could never open one.
+		//
+		// Writing is a *second* permission (sandbox.attach.write) and is
+		// therefore not expressible in this table, which carries one
+		// permission per route. The handler checks it and downgrades the
+		// session to read-only when it is absent; see attach_api.go.
+		{Pattern: "GET /api/tasks/{id}/attach/info", Handler: s.handleAttachInfo, Perm: attach, Scope: scopeProject},
+		{Pattern: "/api/tasks/{id}/attach", Handler: s.handleAttachWS, Methods: []string{"GET"}, Perm: attach, Scope: scopeProject},
 		{Pattern: "/api/events", Handler: s.handleEvents, Methods: []string{"GET"}, Perm: read, Scope: scopeProject},
 		{Pattern: "/api/event-history", Handler: s.handleEventHistory, Methods: []string{"GET"}, Perm: read, Scope: scopeProject},
 		{Pattern: "/api/livelog", Handler: s.handleLiveLog, Methods: []string{"GET"}, Perm: read, Scope: scopeProject},

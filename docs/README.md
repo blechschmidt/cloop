@@ -137,6 +137,12 @@ Five pages in order, indexed at
   dashboard and the display-glasses page record, how to read a session back
   from the CLI or the Telemetry tab, what is scrubbed before storage and why,
   the limits that bound a public ingest route, and how to turn it off.
+- **[Live sandbox attach](operations/attach.md)** — the RBAC-gated, audited
+  shell into a running task's sandbox: the two deny-by-default permissions and
+  how to bind them, why a host-process task can never be entered, what each
+  driver supports, how a read-only session is enforced inside the sandbox
+  rather than at the hub, and the limits that stop a debugging tool becoming a
+  denial-of-service primitive.
 - **[Multi-tenant soak](operations/soak.md)** — the concurrency suite that
   fails on cross-tenant bleed, leaked containers, credentials or goroutines,
   and superlinear growth; how to run it, what it substitutes for an agent and

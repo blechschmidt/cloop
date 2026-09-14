@@ -115,6 +115,24 @@ func New(handleID string, stream executor.StreamName, opts Options) *Bus {
 	}
 }
 
+// Redactor returns the set installed at construction, or nil when the workload
+// carries no credential.
+//
+// It exists so a second consumer of the same workload's output — an interactive
+// attach session (Task 20265) — can scrub with the identical set rather than
+// rebuild one from a Spec it does not have. The bus is where the driver already
+// recorded "these bytes must never appear in this handle's output", so it is the
+// honest place to ask, and asking keeps the two paths from drifting: a credential
+// added to the log filter is filtered in the terminal by construction.
+//
+// The set is immutable after New, so handing it out shares no mutable state.
+func (b *Bus) Redactor() *redact.Set {
+	if b == nil {
+		return nil
+	}
+	return b.redact
+}
+
 // subscriber is one live consumer. The mutex guards the send/close pair; see
 // invariant 2 in the package doc.
 type subscriber struct {

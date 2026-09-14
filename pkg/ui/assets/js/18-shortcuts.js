@@ -312,6 +312,13 @@ document.addEventListener('keydown', function(e) {
   if (e.key === 'Escape') {
     if (helpOpen) { closeHelpModal(); return; }
     if (cmdOpen) { closeCommandPalette(); return; }
+    // Above td-overlay: the sandbox terminal is opened on top of the task
+    // details modal and both stay open, so Escape has to dismiss the one in
+    // front. Getting this order wrong would close the modal underneath and
+    // leave the terminal — and its socket — running with no way out but the
+    // Close button (Task 20265).
+    const at = document.getElementById('at-overlay');
+    if (at && at.classList.contains('open')) { closeAttachTerminal(); return; }
     const td = document.getElementById('td-overlay');
     if (td && td.classList.contains('open')) { closeTaskDetails(); return; }
     const dc = document.getElementById('dc-overlay');

@@ -25,6 +25,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/localprocess"
+	"github.com/blechschmidt/cloop/pkg/redact"
 	"github.com/blechschmidt/cloop/pkg/executor/remote"
 	"github.com/blechschmidt/cloop/pkg/version"
 )
@@ -110,6 +111,10 @@ func (c Config) logf(format string, args ...any) {
 type Agent struct {
 	cfg   Config
 	local *localprocess.Executor
+
+	// attaches holds the live interactive sessions on this device
+	// (Task 20265). It locks itself.
+	attaches attachTable
 	root  string
 
 	// Transport settings resolved once in New and read-only thereafter, so
@@ -153,6 +158,16 @@ type workload struct {
 	mu       sync.Mutex
 	status   executor.Status
 	finished bool
+	// workDir is where an interactive session starts (Task 20265). Recorded
+	// once the control-plane-supplied path has been resolved and confined by
+	// Agent.resolveWorkDir, so a terminal can never be opened at a path that
+	// the start path itself would have refused.
+	workDir string
+	// redactSet scrubs this workload's leased credentials out of anything the
+	// device sends back. The hub installs the same set on its log bus; this
+	// copy is what lets an attach transcript be scrubbed *before* it crosses
+	// the wire rather than after.
+	redactSet *redact.Set
 	// cancelProvision aborts an in-flight workspace fetch. It is the only
 	// handle anything has on a workload between the start frame and the launch
 	// — a clone can run for minutes, and during that window there is no process

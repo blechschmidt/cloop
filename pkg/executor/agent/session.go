@@ -72,6 +72,11 @@ func (a *Agent) runOnce(ctx context.Context) error {
 	}
 	sess := &deviceSession{conn: conn, closed: make(chan struct{})}
 	defer sess.close("session ended")
+	// Interactive sessions die with the link that carried them (Task 20265).
+	// Nobody is left to read the output, and a shell left running would hold
+	// the workload's credentials unattended on the device — which is exactly
+	// the unattributed process the audit trail exists to rule out.
+	defer a.closeAttachSessions()
 
 	welcome, err := a.handshake(ctx, sess, isEnrollment)
 	if err != nil {
@@ -418,6 +423,20 @@ func (a *Agent) frameLoop(ctx context.Context, sess *deviceSession) error {
 			// traffic behind one slow spawn.
 			go a.handleStart(ctx, sess, frame)
 
+		case remote.TypeAttachOpen:
+			// Own goroutine: starting a session waits on process spawn, and a
+			// slow one must not stall log acks for every other workload.
+			go a.handleAttachOpen(ctx, sess, frame)
+
+		case remote.TypeAttachData:
+			a.handleAttachData(ctx, sess, frame)
+
+		case remote.TypeAttachResize:
+			a.handleAttachResize(ctx, sess, frame)
+
+		case remote.TypeAttachClose:
+			a.handleAttachClose(ctx, sess, frame)
+
 		case remote.TypeSignal:
 			a.handleSignal(ctx, sess, frame)
 
@@ -548,6 +567,10 @@ func (a *Agent) handleStart(ctx context.Context, sess *deviceSession, frame remo
 		return
 	}
 	spec.WorkDir = workDir
+	// Remember what an interactive session will need, now that the path has
+	// been resolved and confined: attach must never be able to open a terminal
+	// somewhere resolveWorkDir would have refused (Task 20265).
+	wl.recordAttachContext(workDir, spec.Redactor())
 
 	// The tree has to be in place before the harness is, and only this device
 	// can put it there. A failure here fails the start rather than launching

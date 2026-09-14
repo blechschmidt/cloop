@@ -183,6 +183,10 @@ window.openTaskDetails = function(id) {
   if (!overlay || !body) return;
   body.innerHTML = '<div class="td-empty">Loading…</div>';
   overlay.classList.add('open');
+  // Independent of the details call and of _tdLoadReproductions: attachability
+  // is a property of the *live* executor session, not of the stored task, so it
+  // must not wait on — or be skipped by a failure of — either (Task 20265).
+  _atLoadInfo(id);
   fetch(pUrl('/api/tasks/'+id+'/details'), {credentials:'same-origin'})
     .then(r => r.json())
     .then(d => {
@@ -192,6 +196,10 @@ window.openTaskDetails = function(id) {
     .catch(() => { body.innerHTML = '<div class="td-empty">Request failed</div>'; });
 };
 
+// Leaves an open sandbox terminal alone (Task 20265). The two are independent
+// modals: the terminal is a live session the reader deliberately opened, and
+// tearing it down because they dismissed the task summary behind it would drop
+// the output they opened it to watch.
 window.closeTaskDetails = function() {
   const overlay = document.getElementById('td-overlay');
   if (overlay) overlay.classList.remove('open');
@@ -550,4 +558,296 @@ window.submitEditTask = function() {
     else toast(d.error||'Edit failed', 'err');
   }).catch(() => toast('Request failed', 'err'));
 };
+
+// ── Sandbox attach terminal (Task 20265) ───────────────────────────────────
+//
+// A shell inside the sandbox a *running* task is executing in. Two independent
+// questions decide whether the button is pressable, and the server answers
+// both — in one call, while the details modal is still painting:
+//
+//   sandbox.attach  — may this caller enter a sandbox at all? Without it
+//                     /attach/info answers non-2xx, and the button stays
+//                     disabled rather than offering a click that 403s.
+//   a live handle   — is this task running on an executor that supports
+//                     sessions? A finished task, or one that ran as a process
+//                     on the hub host, has nothing to enter. The server says
+//                     which case it is in `reason`, and that string becomes
+//                     the button's tooltip, so a disabled button always
+//                     explains itself.
+//
+// Writing is a second permission (sandbox.attach.write). Its absence downgrades
+// the session to read-only instead of refusing it, so the input is disabled and
+// says so rather than silently swallowing keystrokes.
+//
+// The screen is a <pre>, not a terminal emulator: escape sequences are stripped
+// rather than interpreted, and input is submitted a line at a time. That is
+// deliberate — this is the convenience path for "what is it doing right now",
+// and `cloop task attach --write` is the full-fidelity one.
+
+let _atInfo   = null; // last /attach/info answer for the task in the details modal
+let _atSock   = null; // live terminal socket, or null
+let _atTaskID = null; // task the socket belongs to (independent of _tdCurrentId)
+let _atBuf    = '';   // retained screen text, capped at _AT_MAX_CHARS
+
+// A chatty sandbox — a build log, a test suite — emits megabytes in seconds.
+// The cap is on the retained string rather than on the DOM node, because the
+// node is rewritten from the string on every frame; without it the tab grows
+// until it dies, on the one screen an operator leaves open the longest.
+const _AT_MAX_CHARS = 200000;
+
+// CSI (colour, cursor movement) and OSC (window title) sequences. Anything the
+// server sends that is not one of these — including a sequence split across two
+// frames — renders as-is. That is the accepted cost of not shipping a terminal
+// emulator: garbage on screen is recoverable, a swallowed line is not.
+const _AT_CSI_RE = /\x1b\[[0-9;?]*[ -\/]*[@-~]/g;
+const _AT_OSC_RE = /\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g;
+
+// _atStripANSI makes sandbox output safe to drop into a <pre>.
+//
+// A lone \r becomes a newline rather than being dropped. A terminal would use
+// it to overwrite the line in place; a <pre> cannot, so the choice is between
+// a progress bar that mashes every update onto one unreadable line (dropping)
+// and one that leaves a readable line per update (newline). The verbose option
+// is the one that never hides output.
+function _atStripANSI(s) {
+  return String(s == null ? '' : s)
+    .replace(_AT_OSC_RE, '')
+    .replace(_AT_CSI_RE, '')
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n');
+}
+
+// _atAppend writes to the screen, preserving the reader's scroll position.
+//
+// Auto-scrolling unconditionally would yank a reader who has scrolled up to
+// read an error back to the bottom on the next output frame — which, on a
+// running build, is immediately.
+function _atAppend(text) {
+  _atBuf += text;
+  if (_atBuf.length > _AT_MAX_CHARS) {
+    _atBuf = _atBuf.slice(_atBuf.length - _AT_MAX_CHARS);
+  }
+  const scr = document.getElementById('at-screen');
+  if (!scr) return;
+  const nearBottom = (scr.scrollHeight - scr.scrollTop - scr.clientHeight) < 40;
+  scr.textContent = _atBuf;
+  if (nearBottom) scr.scrollTop = scr.scrollHeight;
+}
+
+// _atNote appends a hub-generated line (an error, a close reason). Bracketed so
+// it cannot be mistaken for something the sandbox printed.
+function _atNote(msg) {
+  _atAppend('\n[' + String(msg == null ? '' : msg) + ']\n');
+}
+
+function _atSetBanner(html) {
+  const el = document.getElementById('at-banner');
+  if (el) el.innerHTML = html;
+}
+
+// _atGeometry estimates a character grid from the screen's pixel box, so the
+// PTY the server allocates is roughly the size of what the reader can see and
+// the sandbox's own line wrapping lands in the right place. The divisors track
+// .at-screen's 12px monospace / 17px line-height in app.css; the clamps keep a
+// collapsed or not-yet-laid-out element (width 0) from asking for a 0x0 PTY.
+function _atGeometry() {
+  let cols = 80, rows = 24;
+  const scr = document.getElementById('at-screen');
+  if (scr) {
+    const box = (typeof scr.getBoundingClientRect === 'function') ? scr.getBoundingClientRect() : null;
+    const w = (box && box.width)  || scr.offsetWidth  || 0;
+    const h = (box && box.height) || scr.clientHeight || 0;
+    if (w > 0) cols = Math.floor(w / 8);
+    if (h > 0) rows = Math.floor(h / 17);
+  }
+  cols = Math.max(20, Math.min(400, cols));
+  rows = Math.max(5,  Math.min(200, rows));
+  return {rows: rows, cols: cols};
+}
+
+// _atSocketURL turns the project-scoped HTTP path into an absolute ws:// one.
+//
+// pUrl() is what carries ?project_idx, and it returns a relative URL, so the
+// scheme swap has to happen after resolving it against the page. Building the
+// string by hand instead would mean re-implementing pUrl's query handling —
+// exactly the omission behind the recurring "acts on the wrong project" bug.
+//
+// The token rides as a query parameter because a WebSocket handshake cannot
+// carry an Authorization header; /api/ws does the same.
+function _atSocketURL(id) {
+  const u = new URL(pUrl('/api/tasks/' + id + '/attach'), location.href);
+  u.protocol = (location.protocol === 'https:') ? 'wss:' : 'ws:';
+  const geo = _atGeometry();
+  u.searchParams.set('rows', String(geo.rows));
+  u.searchParams.set('cols', String(geo.cols));
+  if (authToken) u.searchParams.set('token', authToken);
+  return u.toString();
+}
+
+function _atSetInput(enabled, placeholder) {
+  const inp = document.getElementById('at-input');
+  if (!inp) return;
+  inp.disabled = !enabled;
+  inp.placeholder = placeholder;
+}
+
+// _atLoadInfo runs when the details modal opens, for the same reason
+// _tdLoadReproductions does: a button that is always enabled and fails with
+// "task 41 is not running on any executor" on every click is a button people
+// learn to ignore, and on most tasks that is the honest answer.
+function _atLoadInfo(id) {
+  const btn = document.getElementById('td-attach-btn');
+  _atInfo = null;
+  if (btn) { btn.disabled = true; btn.title = 'Checking whether this task has an attachable sandbox…'; }
+
+  fetch(pUrl('/api/tasks/' + id + '/attach/info'), {credentials:'same-origin'})
+    .then(r => (r.ok ? r.json() : null))
+    .then(d => {
+      if (!btn || _tdCurrentId !== id) return;
+      // A 403/404 means this account has no sandbox.attach at all. Say that
+      // rather than leaving the "checking…" tooltip up forever.
+      if (!d || !d.ok) {
+        btn.disabled = true;
+        btn.title = 'Attaching to a sandbox is not available for this account.';
+        return;
+      }
+      _atInfo = d;
+      btn.disabled = !d.attachable;
+      btn.title = d.reason || (d.attachable
+        ? 'Open a shell in this task\'s sandbox.'
+        : 'This task has no attachable sandbox.');
+    })
+    .catch(() => {
+      if (!btn || _tdCurrentId !== id) return;
+      btn.disabled = true;
+      btn.title = 'Attaching to a sandbox is not available right now.';
+    });
+}
+
+// Deliberately does not close the task details modal behind it: the terminal is
+// a side view of the task being read, and closing it has to return the reader
+// to where they were.
+window.taskDetailsAttach = function() {
+  const id = _tdCurrentId;
+  if (!id) return;
+  const overlay = document.getElementById('at-overlay');
+  if (!overlay) return;
+
+  // A second Attach on a live session would leak the first socket.
+  _atCloseSocket('replaced by a new session');
+
+  _atTaskID = id;
+  _atBuf = '';
+  const scr = document.getElementById('at-screen');
+  if (scr) scr.textContent = '';
+  const title = document.getElementById('at-title');
+  if (title) title.textContent = 'Sandbox Terminal — Task #' + id;
+  _atSetBanner('Connecting…');
+  // can_write from /attach/info is only a preview. The server re-decides it
+  // when the socket opens and the `ready` frame is authoritative — this just
+  // avoids telling someone who may write "Read-only session" for the length of
+  // a handshake, which reads as a refusal rather than as a wait.
+  _atSetInput(false, (_atInfo && _atInfo.can_write) ? 'Connecting…' : 'Read-only session');
+  overlay.classList.add('open');
+
+  let sock;
+  try { sock = new WebSocket(_atSocketURL(id)); }
+  catch (_) { _atSetBanner('<span class="at-ro">Could not open a terminal session.</span>'); return; }
+  _atSock = sock;
+
+  sock.onmessage = ev => {
+    // A frame that arrives on a socket we have already replaced belongs to a
+    // session the reader has left; rendering it would interleave two sandboxes.
+    if (_atSock !== sock) return;
+    let m;
+    try { m = JSON.parse(ev.data); } catch (_) { return; }
+    if (!m || !m.type) return;
+    switch (m.type) {
+      case 'ready': {
+        const where = m.executor ? ' on <strong>' + esc(m.executor) + '</strong>' : '';
+        const mode  = m.writable
+          ? '<span class="at-rw">read-write</span>'
+          : '<span class="at-ro">read-only</span>';
+        _atSetBanner('Task #' + esc(String(_atTaskID)) + where + ' — ' + mode +
+          (m.tty ? ' · TTY' : '') +
+          (m.message ? ' · ' + esc(m.message) : ''));
+        _atSetInput(!!m.writable, m.writable
+          ? 'Type a command and press Enter'
+          : 'Read-only session');
+        break;
+      }
+      case 'data':
+        _atAppend(_atStripANSI(m.data));
+        break;
+      case 'error':
+        _atNote(m.message || 'session error');
+        break;
+      case 'closed':
+        _atNote(m.message || 'session closed');
+        _atSetInput(false, 'Session closed');
+        break;
+    }
+  };
+  sock.onerror = () => {
+    if (_atSock !== sock) return;
+    _atSetBanner('<span class="at-ro">The terminal connection failed.</span>');
+  };
+  sock.onclose = () => {
+    if (_atSock !== sock) return;
+    _atSock = null;
+    _atNote('disconnected');
+    _atSetInput(false, 'Session closed');
+  };
+};
+
+// _atCloseSocket ends the session politely — the server releases the sandbox's
+// attach slot on {"type":"close"}, whereas a bare socket close leaves it held
+// until the read side times out.
+function _atCloseSocket(reason) {
+  const sock = _atSock;
+  _atSock = null;
+  if (!sock) return;
+  try {
+    if (sock.readyState === WebSocket.OPEN) sock.send(JSON.stringify({type:'close'}));
+  } catch (_) {}
+  try { sock.close(); } catch (_) {}
+  if (reason) _atNote(reason);
+}
+
+window.closeAttachTerminal = function() {
+  _atCloseSocket('');
+  _atTaskID = null;
+  _atBuf = '';
+  const scr = document.getElementById('at-screen');
+  if (scr) scr.textContent = '';
+  _atSetBanner('');
+  _atSetInput(false, 'Read-only session');
+  const inp = document.getElementById('at-input');
+  if (inp) inp.value = '';
+  const overlay = document.getElementById('at-overlay');
+  if (overlay) overlay.classList.remove('open');
+};
+
+// A line-at-a-time input rather than raw key capture. Capturing keys in the
+// browser would promise an interactive terminal this transport does not
+// deliver (no local echo, no signal keys); a text field promises exactly what
+// it does.
+//
+// A named function rather than a trailing IIFE: a fragment whose last line is
+// `})();` closes the bundle's shared IIFE early, and every fragment after it
+// would load at global scope (see TestDashboard_MainIIFEClosesInLastFragment).
+function _atBindInput() {
+  const inp = document.getElementById('at-input');
+  if (!inp) return;
+  inp.addEventListener('keydown', function(e) {
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    if (!_atSock || _atSock.readyState !== WebSocket.OPEN) return;
+    const line = inp.value;
+    inp.value = '';
+    try { _atSock.send(JSON.stringify({type:'stdin', data: line + '\n'})); }
+    catch (_) { _atNote('could not send input'); }
+  });
+}
+_atBindInput();
 

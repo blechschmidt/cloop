@@ -199,7 +199,13 @@ func TestMutatingRoutesRequireMutatingPermissions(t *testing.T) {
 
 	srv := &Server{WorkDir: t.TempDir()}
 	sources := serverSource + "\n" + providerCallsSource + "\n" + executorsAPISource +
-		"\n" + routesSource + "\n" + installScriptSource
+		"\n" + routesSource + "\n" + installScriptSource +
+		// attach_api.go holds handleAttachWS, which is registered prefix-less (a
+		// WebSocket upgrade is a GET, like /api/ws) and so is checked by scanning
+		// the handler body rather than by reading a verb out of the pattern.
+		// Without the source here the scan finds nothing and reports the handler
+		// missing — which is this list's way of saying "register your file".
+		"\n" + attachAPISource
 	handlerNames := handlerNamesByPattern()
 
 	for _, rs := range srv.routeTable() {

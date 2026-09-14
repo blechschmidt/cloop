@@ -159,6 +159,48 @@ const (
 	// is never an escalation.
 	PermSessionAdmin Permission = "session.admin"
 
+	// PermSandboxAttach is the right to open an interactive session inside a
+	// running workload's sandbox — a read-only terminal (Task 20265).
+	//
+	// Its own permission, and granted to nobody below admin by default. Two
+	// reasons, and neither is "shells are scary":
+	//
+	// First, it is not a read of the project. project.read delivers the
+	// transcript the harness chose to emit; attach delivers the sandbox's
+	// filesystem, its process table, its environment, and whatever the
+	// workload happens to be holding at that instant. The lease broker
+	// deliberately never exports a bare token, and the redaction path scrubs
+	// the values it knows about — but a terminal is a general-purpose reader
+	// and a credential nobody declared is a credential nobody scrubs. Folding
+	// this into project.read would silently promote every viewer on the hub.
+	//
+	// Second, it is the one action in the product that reaches *through* the
+	// isolation boundary the rest of it exists to maintain. A permission that
+	// says so by name is what makes "who may enter a sandbox" answerable from
+	// the role binding rather than from reading route code.
+	//
+	// Deny-by-default in the strong sense: it appears in no role's list except
+	// admin's, which holds every permission. A deployment that wants an
+	// on-call engineer to debug without administering the fleet binds it
+	// explicitly — the same shape as PermSessionAdmin, and for the same reason.
+	PermSandboxAttach Permission = "sandbox.attach"
+
+	// PermSandboxAttachWrite is the right to *type* into such a session.
+	//
+	// Separate from PermSandboxAttach because observing and intervening are
+	// genuinely different acts, and the interesting grant is the narrow one: an
+	// operator diagnosing a hung task needs to look, and the reason to stop
+	// there is that anything they type runs as the workload, with the
+	// workload's credentials, inside a run whose output is about to be
+	// attributed to an AI agent. A write session makes the task's transcript a
+	// record of two authors, and the audit event is the only thing that will
+	// ever say so.
+	//
+	// Holding it is necessary but not sufficient: a writable session also
+	// requires PermSandboxAttach, because there is no such thing as typing into
+	// a terminal one may not open. The hub checks both.
+	PermSandboxAttachWrite Permission = "sandbox.attach.write"
+
 	// PermViewPrefs is the right to change one's own dashboard presentation
 	// — currently, which projects to hide from the project list.
 	//
@@ -203,6 +245,12 @@ var AllPermissions = []Permission{
 	PermTokenAdmin,
 	PermSessionAdmin,
 	PermViewPrefs,
+	// New permissions are appended rather than slotted in beside their
+	// thematic neighbours. The order is part of the wire contract — it is what
+	// /api/me sends and what TestPermissionAndRoleWireStability pins — so
+	// appending keeps adding one from renumbering the rest.
+	PermSandboxAttach,
+	PermSandboxAttachWrite,
 }
 
 // Valid reports whether p is a known permission. PermPublic is not a

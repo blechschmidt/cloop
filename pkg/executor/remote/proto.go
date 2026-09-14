@@ -91,7 +91,13 @@ const (
 	// another machine — so a repository-scoped github_pat arrived at an edge
 	// device as an environment variable pointing at a path that did not exist
 	// there, with no token behind it.
-	ProtocolVersion = 6
+	//
+	// v7 added the attach frames (see TypeAttachOpen): an operator's
+	// interactive session inside a running workload, multiplexed onto the
+	// session the device already holds open. Additive in the strictest sense —
+	// an older agent is never sent one, because the hub checks SupportsAttach
+	// before offering the capability at all.
+	ProtocolVersion = 7
 	// MinProtocolVersion is the oldest version this build still accepts.
 	MinProtocolVersion = 1
 	// MinRevocationVersion is the first version whose agents understand the

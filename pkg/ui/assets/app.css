@@ -1088,6 +1088,37 @@
   .td-repro-reason { line-height:1.5; }
   .td-repro-warn { color:#d29922; font-size:11px; margin-top:4px; line-height:1.45; }
 
+  /* ── Sandbox attach terminal (Task 20265) ──
+     Reuses #td-modal's header/close markup, so only the shell and the two
+     terminal-specific blocks are declared here. z-index sits above the task
+     details modal it is launched from: the terminal is opened on top of that
+     modal and both stay open, because closing the terminal has to return the
+     reader to the task they were looking at. */
+  #at-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,.7); z-index:70; align-items:center; justify-content:center; }
+  #at-overlay.open { display:flex; }
+  #at-modal { background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); padding:0; width:900px; max-width:96vw; max-height:90vh; display:flex; flex-direction:column; }
+  #at-modal .td-header { display:flex; align-items:center; justify-content:space-between; padding:14px 18px; border-bottom:1px solid var(--border); }
+  #at-modal .td-header h2 { font-size:14px; font-weight:600; margin:0; }
+  #at-modal .td-close { background:none; border:0; color:var(--muted); font-size:22px; line-height:1; cursor:pointer; padding:0 4px; }
+  #at-modal .td-close:hover { color:var(--text); }
+  #at-modal .modal-footer { padding:12px 18px; border-top:1px solid var(--border); margin-top:0; align-items:center; }
+  .at-banner { padding:9px 18px; font-size:12px; color:var(--muted); border-bottom:1px solid var(--border); line-height:1.5; }
+  .at-banner strong { color:var(--text); font-weight:600; }
+  .at-banner .at-ro { color:#d29922; }
+  .at-banner .at-rw { color:var(--green); }
+  /* `flex:1 1 auto` and not `flex:1`: the shorthand's 0% basis wins over
+     height in a column flex container, which collapses an empty <pre> to one
+     line. The terminal is measured to size the PTY the moment it opens — while
+     it is still empty — so that collapse asked the sandbox for a 5-row screen
+     and then grew the modal under the reader as output arrived.
+     word-break, not word-wrap: sandbox output is frequently one unbroken token
+     (a path, a base64 blob) that would otherwise push the modal wider than the
+     viewport. */
+  .at-screen { margin:0; flex:1 1 auto; min-height:0; height:55vh; overflow:auto; background:#0b0d11; color:#d6deeb;
+               border:0; padding:12px 18px; font-family:var(--mono,ui-monospace,Consolas,Menlo,monospace);
+               font-size:12px; line-height:17px; white-space:pre-wrap; word-break:break-all; }
+  .at-screen:focus { outline:1px solid var(--accent); outline-offset:-1px; }
+
   /* ── Decompose modal (AI task splitting) ── */
   #dc-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,.7); z-index:60; align-items:center; justify-content:center; }
   #dc-overlay.open { display:flex; }

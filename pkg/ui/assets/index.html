@@ -2645,9 +2645,28 @@
     <div id="td-body" class="td-body"></div>
     <div class="modal-footer">
       <button class="btn" onclick="closeTaskDetails()">Close</button>
+      <button class="btn" id="td-attach-btn" onclick="taskDetailsAttach()" disabled
+              title="Checking whether this task has an attachable sandbox…">Attach</button>
       <button class="btn" id="td-reproduce-btn" onclick="taskDetailsReproduce()" disabled
               title="Checking whether this task can be reproduced…">Reproduce</button>
       <button class="btn primary" id="td-edit-btn" onclick="taskDetailsEditCurrent()">Edit task</button>
+    </div>
+  </div>
+</div>
+
+<!-- Sandbox attach terminal (Task 20265) -->
+<div id="at-overlay" onclick="if(event.target===this)closeAttachTerminal()">
+  <div id="at-modal" role="dialog" aria-modal="true" aria-labelledby="at-title">
+    <div class="td-header">
+      <h2 id="at-title">Sandbox Terminal</h2>
+      <button class="td-close" onclick="closeAttachTerminal()" aria-label="Close">&times;</button>
+    </div>
+    <div id="at-banner" class="at-banner"></div>
+    <pre id="at-screen" class="at-screen" tabindex="0" aria-live="polite"></pre>
+    <div class="modal-footer">
+      <input class="form-input" id="at-input" placeholder="Read-only session" disabled
+             autocomplete="off" spellcheck="false" style="flex:1;font-family:var(--mono,monospace)">
+      <button class="btn" onclick="closeAttachTerminal()">Close</button>
     </div>
   </div>
 </div>
