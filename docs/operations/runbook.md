@@ -722,17 +722,30 @@ upgrade.
 
 ## Rollback
 
-**A newer schema cannot be opened by an older binary**, and there are no
-down-migrations. This is enforced, not merely advised: an older binary compares
-the database's recorded version against the highest migration it embeds and
-refuses to open it, naming both versions and the build that moved the schema
-forward.
+**A newer schema cannot be opened by an older binary once the difference
+matters**, and there are no down-migrations. This is enforced, not merely
+advised: an older binary compares the database's recorded version against the
+highest migration it embeds and, for every version it is missing, asks what that
+migration did.
+
+Each migration is classified when it is applied and the verdict is stored in
+`schema_migrations.compat`. A migration that only *added* objects — new tables,
+new non-unique indexes, new views — is `additive`: a binary that predates it has
+no statement that can name them, so their presence changes nothing it does. A
+migration that altered, dropped or constrained something that already existed is
+`breaking`. Anything unclassified, including rows written by a build that
+predates this bookkeeping, counts as breaking.
+
+A database whose extra migrations are all additive opens normally. Otherwise the
+binary refuses, naming both versions, the build that moved the schema forward,
+and which migrations specifically are incompatible.
 
 ```console
 $ cloop ui
 Error: statedb: database schema is newer than this binary: database is at schema
 version 30 but this binary carries 29 (applied by cloop v0.4.0 as
-0030_widget_policy.sql at 2026-05-02T09:14:22Z); …
+0030_widget_policy.sql at 2026-05-02T09:14:22Z); … Incompatible:
+0030_widget_policy.sql. …
 ```
 
 The refusal happens before the hub binds a port or takes the control-plane
@@ -751,10 +764,12 @@ Rollback is therefore *restore*, not *downgrade*:
 
 ### When the schemas are known-compatible
 
-Not every version bump changes a table an older binary reads. If you have
-checked the migrations between the two versions and none of them touches what
-the older build uses, `CLOOP_ALLOW_SCHEMA_DOWNGRADE=1` opens the database
-anyway:
+Purely additive gaps are handled automatically and need no intervention — see
+above. The escape hatch is for the rest: a migration classified `breaking` that
+you have read and judged harmless for your rollback, or one left unclassified by
+a build too old to record a verdict. If you have checked the migrations between
+the two versions and none of them touches what the older build uses,
+`CLOOP_ALLOW_SCHEMA_DOWNGRADE=1` opens the database anyway:
 
 ```bash
 CLOOP_ALLOW_SCHEMA_DOWNGRADE=1 cloop ui

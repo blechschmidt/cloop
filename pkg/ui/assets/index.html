@@ -1253,6 +1253,11 @@
         <div id="projListEmpty" style="display:none;color:var(--muted);font-size:13px;padding:12px 0">
           No projects loaded. Use <code>cloop ui --projects /path/a /path/b</code> or <code>--scan /root/Projects</code>.
         </div>
+        <!-- Shown when registered projects exist but will not load. Without it
+             a refused database renders as a project with no goal and no tasks,
+             which reads as "nothing to do here" rather than "something is
+             wrong" (Task 20254). -->
+        <div id="projFaultBanner" role="alert" style="display:none;margin:0 0 10px;padding:10px 12px;border:1px solid var(--danger,#e5534b);border-left-width:3px;border-radius:var(--radius);background:var(--surface);font-size:12.5px;color:var(--text)"></div>
         <div id="projList" style="display:flex;flex-direction:column;gap:10px"></div>
       </div>
 

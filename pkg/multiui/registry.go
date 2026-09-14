@@ -17,6 +17,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/state"
+	"github.com/blechschmidt/cloop/pkg/statedb"
 )
 
 // registryMu serializes the read-modify-write performed by AddPaths so that
@@ -625,6 +626,21 @@ type ProjectStatus struct {
 	HasProject   bool      `json:"has_project"` // false if no state file found
 	Running      bool      `json:"running"`     // true if cloop run is actually executing
 
+	// Error explains why a registered project could not be loaded.
+	//
+	// HasProject=false answers two very different questions with the same
+	// value: "this directory was never initialised" and "this project exists
+	// but its database would not open". On 2026-09-14 the second happened to
+	// all 18 projects at once — a schema skew refused every state.db — and the
+	// dashboard rendered them as 18 initialised-looking cards with no goal and
+	// no tasks, because a discarded error looks exactly like an empty project
+	// (Task 20254).
+	//
+	// Only real faults are reported. A directory that is simply not a cloop
+	// project is the normal state of a freshly registered path and leaves this
+	// empty, so the field's presence always means something is wrong.
+	Error string `json:"error,omitempty"`
+
 	// Hidden reports that the recipient of this payload has hidden the
 	// project from their dashboard. It is per-recipient, so GetStatus
 	// deliberately leaves it false: the status cache is shared by every
@@ -664,6 +680,12 @@ func GetStatusUsing(entry ProjectEntry, running bool) ProjectStatus {
 	if err != nil {
 		ps.HasProject = false
 		ps.Health = HealthUnknown
+		// An uninitialised directory is not a fault; anything else is, and
+		// saying so is the difference between "this project has no tasks" and
+		// "this project's tasks could not be read". See ProjectStatus.Error.
+		if !errors.Is(err, statedb.ErrProjectNotFound) {
+			ps.Error = err.Error()
+		}
 		return ps
 	}
 	ps.HasProject = true

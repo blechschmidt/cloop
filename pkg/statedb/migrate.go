@@ -208,6 +208,15 @@ func MigrateWithOptions(db *sql.DB, opts MigrateOptions) (*MigrationReport, erro
 		return nil, wrap(ErrSchemaMismatch, err)
 	}
 
+	// Classify what is already recorded, so a database migrated by a build that
+	// predates this mechanism still gives a future older binary something to
+	// reason about. Fatal like the schema_migrations maintenance above it: this
+	// runs after the skew check, so anything failing here is the bookkeeping
+	// table itself being unwritable, which the next statement would hit anyway.
+	if err := backfillCompat(db, migrations); err != nil {
+		return nil, wrap(ErrSchemaMismatch, err)
+	}
+
 	report := &MigrationReport{StartVersion: current}
 
 	// Adopt pre-framework databases: when schema_migrations is empty but the
@@ -218,7 +227,7 @@ func MigrateWithOptions(db *sql.DB, opts MigrateOptions) (*MigrationReport, erro
 			return nil, wrap(ErrSchemaMismatch, err)
 		}
 		if baseline {
-			if err := recordVersion(db, 1, "baseline (pre-framework adoption)"); err != nil {
+			if err := recordVersion(db, 1, "baseline (pre-framework adoption)", classifyMigration(migrations[0].SQL)); err != nil {
 				return nil, wrap(ErrSchemaMismatch, err)
 			}
 			report.BaselineApplied = true
@@ -257,7 +266,8 @@ func ensureMigrationsTable(db *sql.DB) error {
 			version     INTEGER PRIMARY KEY,
 			applied_at  TEXT    NOT NULL,
 			name        TEXT    NOT NULL DEFAULT '',
-			applied_by  TEXT    NOT NULL DEFAULT ''
+			applied_by  TEXT    NOT NULL DEFAULT '',
+			compat      TEXT    NOT NULL DEFAULT ''
 		)`)
 	if err != nil {
 		return fmt.Errorf("create schema_migrations: %w", err)
@@ -265,26 +275,77 @@ func ensureMigrationsTable(db *sql.DB) error {
 	return nil
 }
 
-// ensureMigrationsProvenance adds applied_by to a schema_migrations table
-// created before that column existed.
+// ensureMigrationsProvenance adds applied_by and compat to a schema_migrations
+// table created before those columns existed.
 //
 // Rows already there keep an empty applied_by, which reads as "an unidentified
 // build" — accurate, since nothing recorded it. Guarded by a column check
 // because SQLite has no ADD COLUMN IF NOT EXISTS and the alternative is
 // swallowing a "duplicate column name" error, which would also swallow real
 // ones.
+//
+// These columns are maintained here rather than by a numbered migration for the
+// same reason the table itself is: they describe the migration bookkeeping, and
+// a migration cannot depend on the bookkeeping it is about to be recorded in.
 func ensureMigrationsProvenance(db *sql.DB) error {
-	has, err := hasColumn(db, "schema_migrations", "applied_by")
+	for _, col := range []string{"applied_by", "compat"} {
+		has, err := hasColumn(db, "schema_migrations", col)
+		if err != nil {
+			return err
+		}
+		if has {
+			continue
+		}
+		if _, err := db.Exec(
+			`ALTER TABLE schema_migrations ADD COLUMN ` + col + ` TEXT NOT NULL DEFAULT ''`,
+		); err != nil {
+			return fmt.Errorf("add schema_migrations.%s: %w", col, err)
+		}
+	}
+	return nil
+}
+
+// backfillCompat classifies already-recorded migrations that this binary also
+// embeds but that were applied before compat was recorded.
+//
+// Without it the mechanism would only ever help databases migrated by a build
+// that already had this code, which on any existing deployment means "no
+// database for as long as the schema does not move". A binary that embeds
+// migration N holds its SQL and can classify it exactly as the build that
+// applied it would have, so the verdict is reconstructed rather than guessed.
+//
+// Only empty values are written. A recorded verdict is never revised: two
+// builds must not disagree about a migration, and if they somehow do, the
+// stricter reading is the one already in the database.
+func backfillCompat(db *sql.DB, migrations []migration) error {
+	rows, err := db.Query(`SELECT version FROM schema_migrations WHERE compat = ''`)
 	if err != nil {
-		return err
+		return fmt.Errorf("read unclassified migrations: %w", err)
 	}
-	if has {
-		return nil
+	defer rows.Close()
+
+	pending := make(map[int]bool)
+	for rows.Next() {
+		var v int
+		if err := rows.Scan(&v); err != nil {
+			return fmt.Errorf("scan unclassified migration: %w", err)
+		}
+		pending[v] = true
 	}
-	if _, err := db.Exec(
-		`ALTER TABLE schema_migrations ADD COLUMN applied_by TEXT NOT NULL DEFAULT ''`,
-	); err != nil {
-		return fmt.Errorf("add schema_migrations.applied_by: %w", err)
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("read unclassified migrations: %w", err)
+	}
+
+	for _, m := range migrations {
+		if !pending[m.Version] {
+			continue
+		}
+		if _, err := db.Exec(
+			`UPDATE schema_migrations SET compat = ? WHERE version = ? AND compat = ''`,
+			string(classifyMigration(m.SQL)), m.Version,
+		); err != nil {
+			return fmt.Errorf("classify migration %d: %w", m.Version, err)
+		}
 	}
 	return nil
 }
@@ -326,11 +387,12 @@ func detectBaseline(db *sql.DB) (bool, error) {
 //
 // applied_by is this build's identifier, which is what lets a later binary's
 // refusal name the build that moved the schema past it rather than only the
-// version number it landed on.
-func recordVersion(db *sql.DB, version int, name string) error {
+// version number it landed on. compat is this build's reading of whether the
+// migration is tolerable to binaries older than itself — see schema_compat.go.
+func recordVersion(db *sql.DB, version int, name string, compat MigrationCompat) error {
 	_, err := db.Exec(
-		`INSERT INTO schema_migrations(version, applied_at, name, applied_by) VALUES (?, ?, ?, ?)`,
-		version, time.Now().UTC().Format(time.RFC3339Nano), name, binaryVersion(),
+		`INSERT INTO schema_migrations(version, applied_at, name, applied_by, compat) VALUES (?, ?, ?, ?, ?)`,
+		version, time.Now().UTC().Format(time.RFC3339Nano), name, binaryVersion(), string(compat),
 	)
 	if err != nil {
 		// A concurrent process may have recorded the same baseline version
@@ -380,8 +442,9 @@ func applyOne(db *sql.DB, m migration) error {
 	}
 
 	if _, err := tx.Exec(
-		`INSERT INTO schema_migrations(version, applied_at, name, applied_by) VALUES (?, ?, ?, ?)`,
+		`INSERT INTO schema_migrations(version, applied_at, name, applied_by, compat) VALUES (?, ?, ?, ?, ?)`,
 		m.Version, time.Now().UTC().Format(time.RFC3339Nano), m.Name, binaryVersion(),
+		string(classifyMigration(m.SQL)),
 	); err != nil {
 		// A unique-constraint failure means a concurrent process won the race
 		// and recorded this version first — already applied, not an error.

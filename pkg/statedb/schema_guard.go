@@ -33,12 +33,21 @@ package statedb
 //	restore a backup to get back to a known-good build. CLOOP_ALLOW_SCHEMA_
 //	DOWNGRADE=1 says "I have checked"; `cloop hub doctor` then reports that the
 //	guard is off, so the exemption cannot be forgotten in place.
+//
+// That opt-out was, for a while, the only relief — and being manual, it was no
+// relief at all on a deployment whose "operator" is a nightly timer. Task 20254
+// made the common case answer itself: schema_compat.go has the applying binary
+// record whether each migration is tolerable to older builds, and the check
+// below reads those verdicts instead of comparing version numbers alone. A
+// database that only gained new tables is no longer refused; everything else,
+// including anything unclassified, is refused exactly as before.
 
 import (
 	"database/sql"
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -99,6 +108,10 @@ type SchemaStamp struct {
 	Name      string    `json:"name,omitempty"`
 	AppliedAt time.Time `json:"applied_at,omitempty"`
 	AppliedBy string    `json:"applied_by,omitempty"`
+	// Compat is the applying build's reading of whether this migration is
+	// tolerable to older binaries. Empty for rows written before that was
+	// recorded, which reads as "not known to be safe".
+	Compat MigrationCompat `json:"compat,omitempty"`
 }
 
 // SchemaTooNewError is the detail behind ErrSchemaTooNew: the two versions that
@@ -119,6 +132,11 @@ type SchemaTooNewError struct {
 	// be read. A zero Stamp means the row was unreadable, not that it is
 	// absent — either way the message simply omits the provenance.
 	Stamp SchemaStamp
+	// Blocking lists the migrations ahead of this binary that it cannot
+	// tolerate: the ones recorded as breaking, plus any it could not classify.
+	// Migrations recorded as additive are absent, because they did not
+	// contribute to the refusal.
+	Blocking []SchemaStamp
 }
 
 func (e *SchemaTooNewError) Error() string {
@@ -129,11 +147,31 @@ func (e *SchemaTooNewError) Error() string {
 		b.WriteString(" (" + p + ")")
 	}
 	b.WriteString("; this build does not know the tables and columns the newer one added, " +
-		"so opening the database would corrupt it or fail later with a confusing SQL error. " +
-		"Roll forward to the newer cloop, or restore a backup taken before the upgrade " +
+		"so opening the database would corrupt it or fail later with a confusing SQL error.")
+	if blocked := e.blockers(); blocked != "" {
+		b.WriteString(" Incompatible: " + blocked + ".")
+	}
+	b.WriteString(" Roll forward to the newer cloop, or restore a backup taken before the upgrade " +
 		"(see `cloop db restore`). If the schemas are known-compatible, set " +
 		EnvAllowSchemaDowngrade + "=1 to open it anyway.")
 	return b.String()
+}
+
+// blockers names the migrations that actually caused the refusal, so an
+// operator looking at a 12-version gap is not left to diff all twelve.
+func (e *SchemaTooNewError) blockers() string {
+	var parts []string
+	for _, s := range e.Blocking {
+		switch {
+		case s.Name != "" && s.Compat == CompatBreaking:
+			parts = append(parts, s.Name)
+		case s.Name != "":
+			parts = append(parts, s.Name+" (unclassified)")
+		default:
+			parts = append(parts, fmt.Sprintf("v%d (unrecorded)", s.Version))
+		}
+	}
+	return strings.Join(parts, ", ")
 }
 
 // provenance renders the "applied by …" clause, or "" when the database
@@ -172,13 +210,87 @@ func checkNotFromFuture(db *sql.DB, current, latest int, allow bool) error {
 	if current <= latest || allow {
 		return nil
 	}
-	err := &SchemaTooNewError{DBVersion: current, BinaryVersion: latest}
+
+	// Ahead — but not necessarily in a way that matters. Ask what the missing
+	// migrations actually did before refusing. See schema_compat.go; anything
+	// unrecorded or unrecognised reads as breaking, so this can only relax the
+	// refusal for migrations a build positively classified as additive.
+	blocking, cErr := breakingVersionsAhead(db, latest, current)
+	if cErr == nil && len(blocking) == 0 {
+		return nil
+	}
+
+	err := &SchemaTooNewError{DBVersion: current, BinaryVersion: latest, Blocking: blocking}
 	// Best-effort: a database we cannot introspect still gets refused, just
 	// without the provenance clause.
 	if stamp, sErr := readSchemaStamp(db, current); sErr == nil {
 		err.Stamp = stamp
 	}
 	return err
+}
+
+// breakingVersionsAhead returns the versions in (latest, current] that this
+// binary cannot tolerate, in ascending order.
+//
+// A version with no row of its own is reported as blocking: currentVersion is
+// a MAX, so a gap means the database knows something happened that it cannot
+// describe, and that is not a basis for relaxing a safety check.
+func breakingVersionsAhead(db *sql.DB, latest, current int) ([]SchemaStamp, error) {
+	has, err := hasColumn(db, "schema_migrations", "compat")
+	if err != nil {
+		return nil, err
+	}
+	if !has {
+		// Written by a build with no notion of compatibility. Everything ahead
+		// is unknown, therefore everything ahead blocks.
+		return unknownRange(latest, current), nil
+	}
+
+	rows, err := db.Query(
+		`SELECT version, name, compat FROM schema_migrations
+		  WHERE version > ? AND version <= ? ORDER BY version`, latest, current)
+	if err != nil {
+		return nil, fmt.Errorf("read migration compatibility: %w", err)
+	}
+	defer rows.Close()
+
+	seen := make(map[int]bool)
+	var blocking []SchemaStamp
+	for rows.Next() {
+		var (
+			st     SchemaStamp
+			compat string
+		)
+		if err := rows.Scan(&st.Version, &st.Name, &compat); err != nil {
+			return nil, fmt.Errorf("scan migration compatibility: %w", err)
+		}
+		seen[st.Version] = true
+		st.Compat = MigrationCompat(compat)
+		if !st.Compat.Tolerable() {
+			blocking = append(blocking, st)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read migration compatibility: %w", err)
+	}
+
+	// Any version in the range without a row at all.
+	for v := latest + 1; v <= current; v++ {
+		if !seen[v] {
+			blocking = append(blocking, SchemaStamp{Version: v})
+		}
+	}
+	sort.Slice(blocking, func(i, j int) bool { return blocking[i].Version < blocking[j].Version })
+	return blocking, nil
+}
+
+// unknownRange describes every version in (latest, current] as unclassified.
+func unknownRange(latest, current int) []SchemaStamp {
+	var out []SchemaStamp
+	for v := latest + 1; v <= current; v++ {
+		out = append(out, SchemaStamp{Version: v})
+	}
+	return out
 }
 
 // readSchemaStamp returns the schema_migrations row for version.

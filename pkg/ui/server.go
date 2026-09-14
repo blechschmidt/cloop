@@ -2188,7 +2188,18 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 	// on a 5k-step project (Task 20125).
 	ps, err := state.LoadLite(workDir)
 	if err != nil {
-		jsonErr(w, "no cloop project found", http.StatusNotFound)
+		// "No project here" is a 404 and genuinely unremarkable. Anything else
+		// is the project failing to load, and reporting that as "no cloop
+		// project found" sent an operator looking for a missing directory
+		// while 18 present ones were being refused by a schema guard
+		// (Task 20254). A fault is a 500 and says what it was.
+		if errors.Is(err, statedb.ErrProjectNotFound) {
+			jsonErr(w, "no cloop project found", http.StatusNotFound)
+			return
+		}
+		s.log().WithContext(r.Context()).Error("state_load_failed", 0, err.Error(),
+			map[string]interface{}{"project": workDir})
+		jsonErr(w, "project state could not be loaded: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	// Enrich from config.

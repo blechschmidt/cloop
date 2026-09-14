@@ -65,6 +65,53 @@ window.toggleCompletedProjects = function() {
   if (window._lastProjectsData) renderProjects(window._lastProjectsData.projects, window._lastProjectsData.stats);
 };
 
+// renderProjectFaults surfaces projects the hub could not load.
+//
+// A project whose state.db will not open arrives with every count at zero, so
+// the grid alone cannot tell it apart from a project with nothing in it. On
+// 2026-09-14 a schema skew refused all 18 databases at once and the dashboard
+// showed 18 ordinary-looking cards; the only record of the cause was a line in
+// the hub's journal. The banner exists so that failure has somewhere to appear
+// (Task 20254).
+//
+// Distinct errors are listed rather than counted: "all 18 say the same thing"
+// is a deployment problem and "one says something different" is a project
+// problem, and collapsing them hides which one you have.
+function renderProjectFaults(projects) {
+  const banner = document.getElementById('projFaultBanner');
+  if (!banner) return;
+
+  const faulted = (projects || []).filter(p => p && p.error);
+  if (!faulted.length) {
+    banner.style.display = 'none';
+    banner.textContent = '';
+    return;
+  }
+
+  const byError = new Map();
+  faulted.forEach(p => {
+    const names = byError.get(p.error) || [];
+    names.push(p.name);
+    byError.set(p.error, names);
+  });
+
+  const head = faulted.length === 1
+    ? '1 project could not be loaded'
+    : faulted.length + ' projects could not be loaded';
+  const detail = [...byError.entries()].map(([err, names]) => {
+    const who = names.length > 3
+      ? esc(names.slice(0, 3).join(', ')) + ' and ' + (names.length - 3) + ' more'
+      : esc(names.join(', '));
+    return '<div style="margin-top:6px"><strong>' + who + '</strong>'
+         + '<div style="color:var(--muted);margin-top:2px;word-break:break-word">' + esc(err) + '</div></div>';
+  }).join('');
+
+  banner.innerHTML = '<strong>' + head + '</strong>'
+    + '<div style="color:var(--muted);margin-top:2px">Their tasks and progress are unavailable until this is resolved.</div>'
+    + detail;
+  banner.style.display = '';
+}
+
 function renderProjects(projects, stats) {
   window._lastProjectsData = {projects, stats};
   // Projects this viewer hid are still delivered — the server keeps them in
@@ -83,6 +130,8 @@ function renderProjects(projects, stats) {
   set('paDone',   stats.done_tasks      ?? 0);
   set('paFailed', stats.failed_tasks    ?? 0);
   set('paSteps',  stats.total_steps     ?? 0);
+
+  renderProjectFaults(projects);
 
   const list  = document.getElementById('projList');
   const empty = document.getElementById('projListEmpty');
@@ -123,7 +172,12 @@ function renderProjects(projects, stats) {
   list.innerHTML = visibleI.map(({p, i: idx}) => {
     const health  = p.health || 'unknown';
     const pct     = p.total_tasks > 0 ? Math.round(p.done_tasks / p.total_tasks * 100) : 0;
-    const goal    = p.goal ? esc(p.goal.substring(0, 80)) : '<em style="color:var(--muted)">no goal set</em>';
+    // A faulted project has no goal to show, and "no goal set" would be a
+    // third wrong answer after the empty counts and the unknown health. Say
+    // what actually happened instead (Task 20254).
+    const goal    = p.error
+      ? '<span style="color:var(--danger,#e5534b)" title="' + esc(p.error) + '">&#9888; could not be loaded</span>'
+      : (p.goal ? esc(p.goal.substring(0, 80)) : '<em style="color:var(--muted)">no goal set</em>');
     const lastAct = p.last_activity ? relTime(new Date(p.last_activity)) : '—';
     const taskInfo = p.done_tasks + '/' + p.total_tasks + ' tasks';
     const selCls  = (selectedProjectIdx === idx) ? ' selected' : '';
