@@ -180,6 +180,20 @@ func TestSessionsListShapeAndPolicy(t *testing.T) {
 		t.Errorf("policy fields = %d/%d, want both positive so the panel can state the rules",
 			out.AbsoluteTTLSeconds, out.IdleTimeoutSeconds)
 	}
+
+	// The degradation indicators must be on the wire, not merely computed.
+	// claims_reasserted/claims_unverified tell an operator whether this IdP
+	// re-asserts roles on refresh at all — if it never does, deprivileging
+	// does not reach a live session before it expires (Task 20249).
+	var envelope map[string]any
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		t.Fatalf("decode envelope: %v", err)
+	}
+	for _, key := range []string{"durable", "idp_revocation", "claims_reasserted", "claims_unverified"} {
+		if _, present := envelope[key]; !present {
+			t.Errorf("response omits %q — an operator cannot see the degradation where they act on it", key)
+		}
+	}
 	if len(out.Sessions) < 4 {
 		t.Fatalf("got %d sessions, want at least the 4 signed-in clients", len(out.Sessions))
 	}
@@ -310,5 +324,62 @@ func TestLogoutClearsSessionAndOffersIdPRedirect(t *testing.T) {
 	}
 	if got := statusOf(t, c, http.MethodGet, base+"/api/state"); got != http.StatusUnauthorized {
 		t.Fatalf("GET /api/state after logout = %d, want 401", got)
+	}
+}
+
+// TestEffectiveRoleForBridgesClaimsToTheRoleLadder covers the hook pkg/oidcauth
+// calls to name what a user lost when the IdP narrows their claims mid-session
+// (Task 20249). It is the difference between an audit event that says
+// "admin → viewer" and one that says "something changed".
+//
+// The ranks matter as much as the names: pkg/oidcauth decides whether to audit
+// at all by comparing them, so a ladder that does not order correctly would
+// either report every change as a demotion or none of them.
+func TestEffectiveRoleForBridgesClaimsToTheRoleLadder(t *testing.T) {
+	resolver, err := authz.New(authz.Config{
+		Bindings: []authz.Binding{
+			{Claim: authz.ClaimGroup, Value: "readers", Role: authz.RoleViewer},
+			{Claim: authz.ClaimGroup, Value: "owners", Role: authz.RoleAdmin},
+		},
+	})
+	if err != nil {
+		t.Fatalf("authz.New: %v", err)
+	}
+	srv := &Server{Authz: resolver}
+
+	admin, adminRank := srv.EffectiveRoleFor("admin@example.com", []string{"owners"}, nil)
+	if admin != "admin" {
+		t.Fatalf("owners resolved to %q, want admin", admin)
+	}
+	viewer, viewerRank := srv.EffectiveRoleFor("admin@example.com", []string{"readers"}, nil)
+	if viewer != "viewer" {
+		t.Fatalf("readers resolved to %q, want viewer", viewer)
+	}
+	if !(viewerRank < adminRank) {
+		t.Fatalf("ranks viewer=%d admin=%d do not order; a narrowing would go unnoticed",
+			viewerRank, adminRank)
+	}
+
+	// Losing every mapped group falls to the default role, which must rank at
+	// or below the weakest mapped one — otherwise dropping out of all groups
+	// would read as a promotion.
+	none, noneRank := srv.EffectiveRoleFor("admin@example.com", nil, nil)
+	if noneRank > viewerRank {
+		t.Fatalf("claimless identity resolved to %q (rank %d), above viewer (%d)",
+			none, noneRank, viewerRank)
+	}
+}
+
+// TestEffectiveRoleForWithoutResolverIsInert: the hook is wired before
+// srv.Authz is assigned, and a hub with RBAC unconfigured must get a usable
+// zero rather than a panic on the janitor goroutine.
+func TestEffectiveRoleForWithoutResolverIsInert(t *testing.T) {
+	var srv *Server
+	if role, rank := srv.EffectiveRoleFor("a@b.com", []string{"owners"}, nil); role != "" || rank != 0 {
+		t.Fatalf("nil server returned (%q, %d), want (\"\", 0)", role, rank)
+	}
+	bare := &Server{}
+	if role, rank := bare.EffectiveRoleFor("a@b.com", []string{"owners"}, nil); role != "" || rank != 0 {
+		t.Fatalf("server without a resolver returned (%q, %d), want (\"\", 0)", role, rank)
 	}
 }

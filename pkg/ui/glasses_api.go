@@ -47,7 +47,10 @@ package ui
 //     (authz.Intersect). Editing a role mapping narrows every link that user
 //     holds, immediately. The claims themselves are the mint-time snapshot,
 //     though — an IdP dropping someone from a group is not noticed until the
-//     link expires, so offboarding means revoking, not just unbinding.
+//     link expires, so offboarding means revoking, not just unbinding. That is
+//     what `cloop hub user offboard` does (Task 20261): a glasses link is one
+//     of the surfaces it severs, counted and audited separately from a PAT
+//     because "their link still works" is its own incident.
 //
 //   - Only their projects. visibleProjectEntries filters through
 //     recipientIdentity, which resolves an owner-bound token to its owner — so

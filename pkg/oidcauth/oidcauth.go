@@ -216,6 +216,21 @@ type Config struct {
 	// the invariant the cap exists for (no identity holds more than N)
 	// without that failure mode.
 	SessionLimit func(identity string, groups, roles []string) int
+
+	// EffectiveRole reports the role a set of claims resolves to, and its
+	// rank on the role ladder (higher is more authority). It exists so a
+	// revalidation that narrows somebody's authority can say *what* they
+	// lost — "admin → viewer" rather than "claims changed".
+	//
+	// Supplied by pkg/ui from the pkg/authz resolver, for the same reason
+	// SessionLimit is: this package stays stdlib-only and holds no opinion
+	// about how claims become roles. Nil is fully supported — narrowing is
+	// then reported by the claims that disappeared, which is the fact this
+	// package can establish on its own.
+	//
+	// It is consulted only on the revalidation path, never per request, so
+	// its cost is paid once per session per refresh interval.
+	EffectiveRole func(identity string, groups, roles []string) (role string, rank int)
 }
 
 // Identity is the authenticated user extracted from a validated ID token.
@@ -311,6 +326,31 @@ type Authenticator struct {
 	mu      sync.Mutex
 	pending map[string]*pendingLogin
 	cache   map[string]*cachedSession
+
+	// Whether IdP revalidations actually re-assert claims, counted so an
+	// operator can answer "are my users' roles being re-checked?" with a
+	// number instead of a belief. Guarded by mu. claimsUnverifiedSeen is the
+	// one-shot guard on AuditSessionClaimsUnverified — see its doc for why
+	// the event is per-process rather than per-session.
+	claimsAsserted       uint64
+	claimsUnverified     uint64
+	claimsUnverifiedSeen bool
+}
+
+// RefreshClaimStats reports how many IdP revalidations since startup returned
+// an id_token whose claims were re-applied, and how many returned none and so
+// left the session's authority as captured at sign-in.
+//
+// A hub whose unverified count climbs while asserted stays at zero is one
+// where deprivileging at the IdP will not reach live sessions before they
+// expire, however short the refresh interval is set.
+func (a *Authenticator) RefreshClaimStats() (asserted, unverified uint64) {
+	if a == nil {
+		return 0, 0
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.claimsAsserted, a.claimsUnverified
 }
 
 // New validates cfg and returns a ready Authenticator. It is an error to
@@ -788,6 +828,11 @@ type discoveryDoc struct {
 	TokenEndpoint         string `json:"token_endpoint"`
 	JWKSURI               string `json:"jwks_uri"`
 	EndSessionEndpoint    string `json:"end_session_endpoint"`
+
+	// UserinfoEndpoint is how a session's claims stay current on a provider
+	// that returns no id_token from the refresh grant — which is most of them.
+	// See userinfo.go.
+	UserinfoEndpoint string `json:"userinfo_endpoint"`
 }
 
 // discover fetches (and caches) the issuer's well-known configuration.

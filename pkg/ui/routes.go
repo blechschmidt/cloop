@@ -732,6 +732,16 @@ func (s *Server) routeTable() []routeSpec {
 		{Pattern: "PUT /api/quotas/{identity}", Handler: s.handleQuotaSet, Perm: userMgmt, Scope: scopeGlobal},
 		{Pattern: "DELETE /api/quotas/{identity}", Handler: s.handleQuotaClear, Perm: userMgmt, Scope: scopeGlobal},
 
+		// Offboarding (Task 20261). PermUserManage because it is the most
+		// consequential access change the hub offers: it ends every session
+		// and credential one identity holds and writes a deny binding.
+		//
+		// The dry-run preview shares the route, and therefore the gate.
+		// Enumerating somebody's entire credential footprint is exactly the
+		// read a stolen operator cookie would want, and putting it behind a
+		// cheaper permission is how the two drift apart.
+		{Pattern: "POST /api/users/offboard", Handler: s.handleUserOffboard, Perm: userMgmt, Scope: scopeGlobal},
+
 		// The caller's own quota. Ungated for the same reason as
 		// /api/session/logout-all: it is scoped to the caller by
 		// construction — the handler takes no identity and reads the one

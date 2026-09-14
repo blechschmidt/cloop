@@ -347,6 +347,7 @@ var hubCommandGroups = map[string]string{
 	"tls-init":  groupHubSetup,
 	"pin":       groupHubSetup,
 
+	"user":    groupHubAccess,
 	"session": groupHubAccess,
 	"role":    groupHubAccess,
 	"quota":   groupHubAccess,

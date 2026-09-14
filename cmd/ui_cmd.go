@@ -170,6 +170,11 @@ but not for anything reachable from a network.`,
 					// quota takes effect at their next sign-in without a
 					// restart.
 					SessionLimit: srv.SessionLimitFor,
+					// Names the authority a user lost when the IdP narrows
+					// their claims mid-session (Task 20249). Resolved live
+					// against srv.Authz, which is assigned just below — a
+					// method value, so the nil resolver here is never read.
+					EffectiveRole: srv.EffectiveRoleFor,
 				})
 				if oidcErr != nil {
 					return fmt.Errorf("ui.oidc is enabled but invalid: %w", oidcErr)

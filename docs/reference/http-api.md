@@ -51,7 +51,7 @@ The dashboard and everything an integrator can drive: projects, tasks, runs,
 the executor fleet, secrets and grants, audit, and the display-glasses surface.
 Generated from `routeTable()` in `pkg/ui/routes.go`.
 
-153 endpoints, by the permission each one requires:
+154 endpoints, by the permission each one requires:
 
 | Permission | Endpoints |
 |------------|-----------|
@@ -69,7 +69,7 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 | `session.admin` | 2 |
 | `task.mutate` | 26 |
 | `token.admin` | 3 |
-| `user.manage` | 3 |
+| `user.manage` | 4 |
 | `view.prefs` | 1 |
 
 | Method | Path | Permission | Scope |
@@ -210,6 +210,7 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 | POST | `/api/tokens` | `token.admin` | global |
 | DELETE | `/api/tokens/{id}` | `token.admin` | global |
 | POST | `/api/transcribe` | `task.mutate` | project |
+| POST | `/api/users/offboard` | `user.manage` | global |
 | GET | `/api/version` | `public` | global |
 | POST | `/api/voice` | `task.mutate` | project |
 | GET | `/api/ws` | `project.read` | project |

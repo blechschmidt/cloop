@@ -919,6 +919,61 @@ transplanted token decrypts for nobody — and redeeming it on an interval. The 
   session alone. That is a misconfiguration on this side, and nobody's access
   should end because an operator rotated a client secret.
 
+**Deprivileging mid-session.** Ending a session is the blunt outcome; the
+common one is a user who keeps their account and loses an entitlement. When the
+refresh response carries an `id_token`, cloop verifies it and writes the
+**groups and roles it asserts back onto the session**, so removing somebody
+from the admin group at the IdP costs them admin here within one refresh
+interval rather than at the 24-hour ceiling. The cached copy is dropped in the
+same step, so the next request re-resolves RBAC from the new claims.
+
+Only the group and role claims are replaced. Email and name stay as captured at
+sign-in: project ownership is recorded under the email, so rewriting it
+mid-session would cut a user off from their own projects — re-keying an
+identity is a migration, not something a background refresh does. An `id_token`
+for a *different* subject is not a claim update at all; it terminates the
+session (`idp_subject_mismatch`) rather than transplanting someone else's
+authority onto it.
+
+**When there is no `id_token`, cloop asks `userinfo`.** Most providers only
+issue an `id_token` on the initial code exchange, so for most deployments the
+paragraph above would never apply. The access token the refresh just returned is
+exactly the credential that authorises reading the issuer's `userinfo`
+endpoint, so that is the second source of current claims, and groups and roles
+are re-asserted from it under the same rules.
+
+The response is bound to the session three ways before it is allowed to change
+anything: it comes from the endpoint named by the issuer's own discovery
+document over TLS; it is authorised by an access token the IdP minted seconds
+earlier for this session's refresh token; and its `sub` is compared against the
+session's, which ends the session outright on a mismatch rather than applying
+somebody else's groups. A signed response (`application/jwt`, OIDC Core 5.3.2)
+is signature-verified against the same JWKS as an `id_token` and its issuer
+checked, so a validly-signed body from another tenant of a shared IdP is
+refused.
+
+A `userinfo` endpoint that is absent, unreachable or refuses the access token
+is **not** treated as a revocation. The grant itself succeeded, so the session
+survives with its previous claims — an outage there would otherwise sign out
+every user on the hub, which is a far worse failure than stale claims.
+
+| Outcome of a refresh | Audit event |
+| --- | --- |
+| The user lost a group or role, or dropped a rung on the role ladder | `session.role_narrowed`, naming the prior and new role and the dropped claims |
+| Neither an `id_token` nor `userinfo` could re-assert the claims | `session.claims_unverified`, once per process |
+
+`session.role_narrowed` marks the transition, not the state: once the narrowed
+claims are stored, later refreshes agree with them and stay silent. A pure
+widening is applied but not audited here — gaining authority is the ordinary
+outcome of a grant, and recording every one would bury the narrowings.
+
+A provider that offers neither source is not a failure — the grant being
+renewed at all is what proves it is still alive, which is what the revocation
+taxonomy above depends on — but on such a deployment a session's roles *are*
+the ones it was created with, until it ends. `session.claims_unverified` and the
+counters behind it exist so an operator can tell the two deployments apart
+instead of assuming the stronger one.
+
 A rotated refresh token is stored before the next check, since failing to
 persist the replacement would make the following check look like a revocation
 and sign the user out for no reason.

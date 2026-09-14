@@ -80,6 +80,13 @@ var sessionsAPISource string
 //go:embed quotas_api.go
 var quotasAPISource string
 
+// offboardAPISource is pkg/ui/offboard_api.go (Task 20261). Embedded for the
+// same reason as tokens_api.go: its handler is a registered route whose
+// accepted verbs the route-drift tests read out of the handler body.
+//
+//go:embed offboard_api.go
+var offboardAPISource string
+
 // reproduceAPISource is pkg/ui/reproduce_api.go (Task 20221). Embedded for the
 // same reason as tokens_api.go: it carries no broadcast, but its four handlers
 // are registered routes whose accepted verbs the route-drift tests read out of
@@ -157,6 +164,7 @@ func allUISources() string {
 	return serverSource + "\n" + providerCallsSource + "\n" + executorsAPISource +
 		"\n" + auditAPISource + "\n" + secretsAPISource + "\n" + installScriptSource +
 		"\n" + tokensAPISource + "\n" + sessionsAPISource + "\n" + quotasAPISource +
+		"\n" + offboardAPISource +
 		"\n" + reproduceAPISource + "\n" + ledgerAPISource + "\n" + retentionAPISource +
 		"\n" + executorsInventorySource + "\n" + executorDetailAPISource +
 		"\n" + versionAPISource + "\n" + telemetryAPISource +

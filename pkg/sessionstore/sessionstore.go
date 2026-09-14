@@ -232,8 +232,8 @@ func (s *Store) DueForRefresh(cutoff time.Time, limit int) ([]oidcauth.SessionRe
 	return s.toRecords(rows), nil
 }
 
-func (s *Store) SetRefresh(id, refreshToken string, checkedAt time.Time) error {
-	env, err := s.seal(id, refreshToken)
+func (s *Store) ApplyRefresh(id string, res oidcauth.RefreshResult) error {
+	env, err := s.seal(id, res.RefreshToken)
 	if err != nil {
 		// Returning here rather than writing an empty envelope is the point: a
 		// nil sealed value clears the column, so a transient sealing failure
@@ -241,7 +241,16 @@ func (s *Store) SetRefresh(id, refreshToken string, checkedAt time.Time) error {
 		// revalidation into a spurious "the IdP revoked this user".
 		return err
 	}
-	if err := s.db.UpdateSessionRefresh(id, env.KeyID, env.WrappedDEK, env.Ciphertext, checkedAt); err != nil {
+	up := statedb.SessionRefreshUpdate{
+		KeyID:      env.KeyID,
+		WrappedDEK: env.WrappedDEK,
+		Sealed:     env.Ciphertext,
+		CheckedAt:  res.CheckedAt,
+	}
+	if res.ClaimsAsserted {
+		up.Claims = &statedb.SessionClaims{Groups: res.Groups, Roles: res.Roles}
+	}
+	if err := s.db.UpdateSessionRefresh(id, up); err != nil {
 		if errors.Is(err, statedb.ErrSessionNotFound) {
 			return oidcauth.ErrSessionNotFound
 		}

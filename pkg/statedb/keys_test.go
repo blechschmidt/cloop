@@ -144,7 +144,7 @@ func TestRetirementRefusesWhileEitherPopulationReferencesTheKey(t *testing.T) {
 	}
 
 	// Clearing the token also clears the key id, so the row stops blocking.
-	if err := db.UpdateSessionRefresh("sess_1", "", nil, nil, time.Now()); err != nil {
+	if err := db.UpdateSessionRefresh("sess_1", SessionRefreshUpdate{CheckedAt: time.Now()}); err != nil {
 		t.Fatalf("clear refresh: %v", err)
 	}
 	if err := db.RetireKEK("kek_held", time.Now()); err != nil {

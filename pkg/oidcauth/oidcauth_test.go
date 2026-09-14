@@ -47,6 +47,54 @@ type fakeIdP struct {
 	nextRefreshToken string // rotation: what the IdP hands back
 	issueRefresh     string // refresh_token in the authorization_code response
 	endSession       string // advertised end_session_endpoint ("" = none)
+
+	// refreshIDToken supplies the claims for an id_token returned alongside
+	// the refresh grant, and is called with the 1-based request number so a
+	// test can change what the provider asserts between one check and the
+	// next — which is how "the user was removed from the admin group" looks
+	// on the wire. Returning nil for a call omits the id_token, which is what
+	// many real providers do on every refresh and is the default here.
+	refreshIDToken func(n int) map[string]any
+
+	// userinfo knobs (Task 20261). When userinfo is non-nil the provider
+	// advertises a userinfo_endpoint and serves it, which is how a deployment
+	// that omits the id_token on refresh still re-asserts claims. It is called
+	// with the 1-based request number, so a test can drop a group between one
+	// revalidation and the next.
+	userinfo         func(n int) map[string]any
+	userinfoSigned   bool // serve application/jwt instead of JSON
+	userinfoStatus   int  // non-zero: return this status and no body
+	userinfoRequests int
+	lastUserinfoAuth string
+
+	// forgeKey, when set, signs tokens while the JWKS keeps advertising the
+	// real key — a forged response, on the wire.
+	forgeKey *rsa.PrivateKey
+}
+
+// signWith makes this provider sign with another's key without changing the
+// JWKS it publishes, so a test can produce a well-formed token whose signature
+// does not verify.
+func (f *fakeIdP) signWith(other *fakeIdP) { f.forgeKey = other.key }
+
+// refreshClaims builds an id_token payload for a refresh response, filling in
+// the registered claims a test does not care about so each case states only
+// what it varies.
+func (f *fakeIdP) refreshClaims(over map[string]any) map[string]any {
+	claims := map[string]any{
+		"iss": f.server.URL,
+		"sub": "u1",
+		"aud": "cloop-dashboard",
+		// Real wall-clock: verifyIDToken validates exp/iat against time.Now(),
+		// not the injected clock, so a test advancing its clock by hours must
+		// not push the token's own validity out of range.
+		"exp": time.Now().Add(time.Hour).Unix(),
+		"iat": time.Now().Unix(),
+	}
+	for k, v := range over {
+		claims[k] = v
+	}
+	return claims
 }
 
 func newFakeIdP(t *testing.T) *fakeIdP {
@@ -67,7 +115,37 @@ func newFakeIdP(t *testing.T) *fakeIdP {
 		if idp.endSession != "" {
 			doc["end_session_endpoint"] = idp.endSession
 		}
+		// Advertised only when a test wants one: a provider that offers no
+		// userinfo endpoint is a real configuration, and the claim-freshness
+		// path has to degrade rather than fail on it.
+		if idp.userinfo != nil {
+			doc["userinfo_endpoint"] = idp.server.URL + "/userinfo"
+		}
 		_ = json.NewEncoder(w).Encode(doc)
+	})
+	mux.HandleFunc("/userinfo", func(w http.ResponseWriter, r *http.Request) {
+		idp.userinfoRequests++
+		idp.lastUserinfoAuth = r.Header.Get("Authorization")
+		if idp.userinfoStatus != 0 {
+			w.WriteHeader(idp.userinfoStatus)
+			return
+		}
+		if idp.userinfo == nil {
+			http.NotFound(w, r)
+			return
+		}
+		claims := idp.userinfo(idp.userinfoRequests)
+		if claims == nil {
+			http.Error(w, "no claims", http.StatusInternalServerError)
+			return
+		}
+		if idp.userinfoSigned {
+			w.Header().Set("Content-Type", "application/jwt")
+			_, _ = w.Write([]byte(idp.signToken(claims)))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(claims)
 	})
 	mux.HandleFunc("/jwks", func(w http.ResponseWriter, r *http.Request) {
 		pub := &idp.key.PublicKey
@@ -101,12 +179,18 @@ func newFakeIdP(t *testing.T) *fakeIdP {
 				_, _ = w.Write([]byte(idp.refreshBody))
 				return
 			}
-			_ = json.NewEncoder(w).Encode(map[string]any{
+			resp := map[string]any{
 				"access_token":  "at-refreshed",
 				"token_type":    "Bearer",
 				"expires_in":    3600,
 				"refresh_token": idp.nextRefreshToken,
-			})
+			}
+			if idp.refreshIDToken != nil {
+				if claims := idp.refreshIDToken(idp.refreshRequests); claims != nil {
+					resp["id_token"] = idp.signToken(claims)
+				}
+			}
+			_ = json.NewEncoder(w).Encode(resp)
 			return
 		}
 		if r.PostForm.Get("grant_type") != "authorization_code" || r.PostForm.Get("code") == "" {
@@ -150,7 +234,11 @@ func (f *fakeIdP) signToken(claims map[string]any) string {
 	payload, _ := json.Marshal(claims)
 	input := base64.RawURLEncoding.EncodeToString(header) + "." + base64.RawURLEncoding.EncodeToString(payload)
 	digest := sha256.Sum256([]byte(input))
-	sig, err := rsa.SignPKCS1v15(rand.Reader, f.key, crypto.SHA256, digest[:])
+	key := f.key
+	if f.forgeKey != nil {
+		key = f.forgeKey
+	}
+	sig, err := rsa.SignPKCS1v15(rand.Reader, key, crypto.SHA256, digest[:])
 	if err != nil {
 		f.t.Fatalf("sign: %v", err)
 	}

@@ -480,6 +480,38 @@ func (s *Server) SessionLimitFor(identity string, groups, roles []string) int {
 	return int(limit)
 }
 
+// EffectiveRoleFor resolves a set of claims to a role name and its rank on the
+// role ladder, for the deprivileging hook in pkg/oidcauth (Task 20249).
+//
+// Resolved live against s.Authz rather than captured, so a role mapping an
+// operator changes — or a runtime binding written with `cloop hub role`
+// during an incident — is reflected in the next revalidation without a
+// restart. Global scope: the question being asked is "did this user's
+// authority shrink", which is about the identity, not about one project.
+//
+// Rank is the index in authz.AllRoles, which is ordered weakest to strongest.
+// An unknown role reports -1 so it can never look like an upgrade.
+func (s *Server) EffectiveRoleFor(identity string, groups, roles []string) (string, int) {
+	if s == nil || s.Authz == nil {
+		return "", 0
+	}
+	// Same identity-key decoding as SessionLimitFor: an owner key is an email
+	// or a "sub:"-prefixed subject, and having two readings of that string
+	// would eventually resolve one user to two different roles.
+	subj := quota.SubjectForIdentity(identity)
+	if subj == nil {
+		return "", 0
+	}
+	subj.Groups, subj.Roles = groups, roles
+	role := s.Authz.Resolve(subj, authz.GlobalScope).Role
+	for i, known := range authz.AllRoles {
+		if known == role {
+			return string(role), i
+		}
+	}
+	return string(role), -1
+}
+
 // ── the admin API ───────────────────────────────────────────────────────────
 
 type quotaView struct {

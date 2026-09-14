@@ -393,3 +393,84 @@ func TestGetMissingReturnsSentinel(t *testing.T) {
 func TestStoreSatisfiesInterface(t *testing.T) {
 	var _ oidcauth.SessionStore = (*Store)(nil)
 }
+
+// TestApplyRefreshPersistsNarrowedClaims is the durable half of Task 20249.
+// pkg/oidcauth proves the policy against an in-memory store; only a real
+// database shows that the narrowed claims are actually written to the columns
+// RBAC reads back, and survive the restart that re-reads them.
+//
+// The stamp is asserted alongside the claims because the two are written in
+// one statement on purpose: a row recorded as freshly checked while still
+// holding withdrawn authority is the precise state this work exists to
+// prevent.
+func TestApplyRefreshPersistsNarrowedClaims(t *testing.T) {
+	t.Setenv(secretbroker.EnvPassphraseKey, "test-passphrase")
+	dir := t.TempDir()
+	now := time.Now().UTC().Truncate(time.Millisecond)
+
+	store, _ := newTestStore(t, dir)
+	if err := store.Put(sampleRecord("hash-abc", now)); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	checked := now.Add(20 * time.Minute)
+	if err := store.ApplyRefresh("hash-abc", oidcauth.RefreshResult{
+		RefreshToken:   "rotated-token",
+		CheckedAt:      checked,
+		ClaimsAsserted: true,
+		Groups:         []string{"engineering"}, // cloop-admins withdrawn
+		Roles:          nil,                     // operator withdrawn
+	}); err != nil {
+		t.Fatalf("ApplyRefresh: %v", err)
+	}
+
+	// Reopened handle: what a restarted hub — or a second replica — reads.
+	reopened, _ := newTestStore(t, dir)
+	got, err := reopened.Get("hash-abc")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if len(got.Identity.Groups) != 1 || got.Identity.Groups[0] != "engineering" {
+		t.Fatalf("groups = %v, want only [engineering]; the withdrawn group is still granting access",
+			got.Identity.Groups)
+	}
+	if len(got.Identity.Roles) != 0 {
+		t.Fatalf("roles = %v, want none: an empty assertion is a real answer, not a missing one",
+			got.Identity.Roles)
+	}
+	if got.RefreshToken != "rotated-token" {
+		t.Fatalf("refresh token = %q, want the rotated one", got.RefreshToken)
+	}
+	if !got.RefreshCheckedAt.Equal(checked) {
+		t.Fatalf("refresh_checked_at = %s, want %s", got.RefreshCheckedAt, checked)
+	}
+}
+
+// TestApplyRefreshWithoutClaimsLeavesThemAlone: a provider that renews the
+// grant without an id_token must not have its silence written into the row as
+// "this user is in no groups", which would deny them everything.
+func TestApplyRefreshWithoutClaimsLeavesThemAlone(t *testing.T) {
+	t.Setenv(secretbroker.EnvPassphraseKey, "test-passphrase")
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	store, _ := newTestStore(t, t.TempDir())
+	if err := store.Put(sampleRecord("hash-abc", now)); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	if err := store.ApplyRefresh("hash-abc", oidcauth.RefreshResult{
+		RefreshToken: "rotated-token",
+		CheckedAt:    now.Add(20 * time.Minute),
+		// ClaimsAsserted false: the IdP said nothing about who this is.
+	}); err != nil {
+		t.Fatalf("ApplyRefresh: %v", err)
+	}
+
+	got, err := store.Get("hash-abc")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if len(got.Identity.Groups) != 2 || len(got.Identity.Roles) != 1 {
+		t.Fatalf("claims = groups %v / roles %v, want them untouched",
+			got.Identity.Groups, got.Identity.Roles)
+	}
+}

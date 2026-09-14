@@ -524,7 +524,7 @@ func (a *Authenticator) revalidate(ctx context.Context, rec SessionRecord) bool 
 	ctx, cancel := context.WithTimeout(ctx, httpTimeout)
 	defer cancel()
 
-	tok, err := a.refreshGrant(ctx, rec.RefreshToken)
+	tok, refreshed, err := a.refreshGrant(ctx, rec.RefreshToken)
 	now := a.now()
 	if err != nil {
 		if isGrantRevoked(err) {
@@ -533,9 +533,22 @@ func (a *Authenticator) revalidate(ctx context.Context, rec SessionRecord) bool 
 		}
 		// Transient or local: back off by stamping the attempt, keeping the
 		// existing token so the next interval retries with it.
-		_ = a.store.SetRefresh(rec.ID, rec.RefreshToken, now)
+		_ = a.store.ApplyRefresh(rec.ID, RefreshResult{
+			RefreshToken: rec.RefreshToken,
+			CheckedAt:    now,
+		})
 		a.invalidateCache(rec.ID)
 		return false
+	}
+
+	// A refreshed id_token for a different subject is not a claim update, it
+	// is a different person. Applying its groups would hand this session
+	// somebody else's authority, so the only safe reading is that this session
+	// no longer corresponds to anything the provider will vouch for. It takes
+	// an IdP bug or a token substitution to get here; both warrant ending it.
+	if refreshed != nil && refreshed.Sub != rec.Identity.Sub {
+		a.terminate(rec, AuditSessionIdPRevoked, "idp_subject_mismatch", "idp")
+		return true
 	}
 
 	// Rotation: an IdP that issues a new refresh token has invalidated the old
@@ -545,11 +558,151 @@ func (a *Authenticator) revalidate(ctx context.Context, rec SessionRecord) bool 
 	if next == "" {
 		next = rec.RefreshToken
 	}
-	if err := a.store.SetRefresh(rec.ID, next, now); err != nil {
+	res := RefreshResult{RefreshToken: next, CheckedAt: now}
+	if refreshed != nil {
+		// Groups and roles only. Email and name are deliberately left as
+		// captured at sign-in: OwnerKey is derived from the email and is what
+		// every project ownership row was recorded under, so rewriting it
+		// mid-session would silently orphan a user from their own projects —
+		// a data-access change masquerading as a security fix. Re-keying an
+		// identity is a migration, not something a background refresh does.
+		res.ClaimsAsserted = true
+		res.Groups, res.Roles = refreshed.Groups, refreshed.Roles
+	}
+	if err := a.store.ApplyRefresh(rec.ID, res); err != nil {
+		// Nothing was stamped, so this session stays due and the next pass
+		// retries it rather than waiting out a full interval on claims that
+		// were never written.
 		return false
 	}
+	// Evict last: until the row is written there is nothing new to re-read,
+	// and a request landing in the gap would only refill the cache from the
+	// pre-refresh row it just dropped.
 	a.invalidateCache(rec.ID)
+	a.noteClaimAssertion(rec, refreshed, now)
 	return false
+}
+
+// noteClaimAssertion records what the refresh did to this session's authority:
+// an audit event when it narrowed, and the counters behind RefreshClaimStats.
+func (a *Authenticator) noteClaimAssertion(rec SessionRecord, refreshed *Identity, now time.Time) {
+	if refreshed == nil {
+		a.mu.Lock()
+		a.claimsUnverified++
+		first := !a.claimsUnverifiedSeen
+		a.claimsUnverifiedSeen = true
+		a.mu.Unlock()
+		if first {
+			a.audit(SessionAudit{
+				Event:     AuditSessionClaimsUnverified,
+				SessionID: rec.ID,
+				Subject:   rec.Identity.Sub,
+				Email:     rec.Identity.Email,
+				Actor:     "idp",
+				Reason:    "no_id_token_and_no_userinfo",
+				At:        now,
+			})
+		}
+		return
+	}
+
+	a.mu.Lock()
+	a.claimsAsserted++
+	a.mu.Unlock()
+
+	dropped := droppedClaims(rec.Identity, *refreshed)
+
+	// Both roles are resolved under the session's *existing* identity key,
+	// varying only the claims. The refreshed identity is not used for this:
+	// plenty of providers omit the email claim from a refresh id_token, and
+	// resolving the new claims under an empty-email key would miss every
+	// email-keyed binding — reporting an administrator as demoted on every
+	// single refresh. Since the subject is confirmed identical above and the
+	// email is deliberately not rewritten, the key is by construction the same
+	// on both sides, and the claims are the only thing that moved.
+	key := rec.Identity.OwnerKey()
+	priorRole, priorRank := a.effectiveRole(key, rec.Identity.Groups, rec.Identity.Roles)
+	nextRole, nextRank := a.effectiveRole(key, refreshed.Groups, refreshed.Roles)
+
+	// Two independent narrowings, because they answer different questions. A
+	// rank drop is the one that changed what this user may do; a dropped claim
+	// that leaves the rank alone still records that they left a group, which
+	// is what makes the trail usable for "when did access to X end". A pure
+	// widening is not audited here: gaining authority is the ordinary outcome
+	// of a grant, and auditing every one of them would bury the narrowings.
+	rankNarrowed := priorRole != "" && nextRank < priorRank
+	if !rankNarrowed && len(dropped) == 0 {
+		return
+	}
+	reason := "claims_dropped"
+	if rankNarrowed {
+		reason = "role_downgraded"
+	}
+	a.audit(SessionAudit{
+		Event:         AuditSessionRoleNarrowed,
+		SessionID:     rec.ID,
+		Subject:       rec.Identity.Sub,
+		Email:         rec.Identity.Email,
+		Actor:         "idp",
+		Reason:        reason,
+		IP:            rec.IP,
+		UserAgent:     rec.UserAgent,
+		At:            now,
+		PriorRole:     priorRole,
+		Role:          nextRole,
+		DroppedClaims: dropped,
+	})
+}
+
+// effectiveRole consults the optional resolver hook. Without one it reports
+// ("", 0), which callers read as "this deployment cannot name roles".
+func (a *Authenticator) effectiveRole(identity string, groups, roles []string) (string, int) {
+	if a.cfg.EffectiveRole == nil {
+		return "", 0
+	}
+	return a.cfg.EffectiveRole(identity, groups, roles)
+}
+
+// droppedClaims lists the group and role values present before and absent
+// after, sorted so the event is stable to compare across sessions.
+//
+// Values are matched the way they are consumed: case-insensitively and with a
+// leading path separator trimmed, matching pkg/authz's normalisation. An IdP
+// that restyles "/admins" as "admins" has not deprivileged anybody, and
+// reporting that as a lost group would train operators to ignore the event.
+func droppedClaims(before, after Identity) []string {
+	held := make(map[string]struct{}, len(after.Groups)+len(after.Roles))
+	for _, v := range after.Groups {
+		held[normalizeClaim(v)] = struct{}{}
+	}
+	for _, v := range after.Roles {
+		held[normalizeClaim(v)] = struct{}{}
+	}
+
+	var out []string
+	seen := make(map[string]struct{}, len(before.Groups)+len(before.Roles))
+	for _, v := range append(append([]string(nil), before.Groups...), before.Roles...) {
+		key := normalizeClaim(v)
+		if key == "" {
+			continue
+		}
+		if _, ok := held[key]; ok {
+			continue
+		}
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		// The original spelling, not the normalised key: an operator greps
+		// the trail for what their IdP calls the group.
+		out = append(out, strings.TrimSpace(v))
+	}
+	sort.Strings(out)
+	return out
+}
+
+func normalizeClaim(v string) string {
+	return strings.ToLower(strings.TrimPrefix(strings.TrimSpace(v), "/"))
 }
 
 // invalidateCache drops a cached copy so the next request re-reads the row.
@@ -559,7 +712,8 @@ func (a *Authenticator) invalidateCache(id string) {
 	a.mu.Unlock()
 }
 
-// refreshGrant performs the refresh_token grant.
+// refreshGrant performs the refresh_token grant, returning the token response
+// and the identity its id_token asserts — nil when the provider returned none.
 //
 // The response's id_token, when present, is verified with the same rules as at
 // login minus the nonce binding (there is no authorization request to bind
@@ -567,10 +721,20 @@ func (a *Authenticator) invalidateCache(id string) {
 // compromised or misrouted cannot keep a session alive with an unsigned
 // answer — a check that costs one signature verification per session per
 // interval.
-func (a *Authenticator) refreshGrant(ctx context.Context, refreshToken string) (*tokenResponse, error) {
+//
+// The verified identity is *returned* rather than discarded because it is the
+// only current statement the provider makes about who this user is. Verifying
+// it and then keeping the claims captured at sign-in means an administrator
+// removed from the admin group at the IdP holds admin here until the absolute
+// session TTL runs out, however often this runs.
+//
+// When the provider returns no id_token — the common case, since most only
+// issue one on the initial code exchange — the userinfo endpoint is asked
+// instead, so that hole is not simply conceded. See userinfo.go.
+func (a *Authenticator) refreshGrant(ctx context.Context, refreshToken string) (*tokenResponse, *Identity, error) {
 	disc, err := a.discover(ctx)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	form := url.Values{}
 	form.Set("grant_type", "refresh_token")
@@ -582,14 +746,28 @@ func (a *Authenticator) refreshGrant(ctx context.Context, refreshToken string) (
 		tok, _, err = a.postToken(ctx, disc.TokenEndpoint, form, false)
 	}
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	if tok.IDToken != "" {
-		if _, verr := a.verifyIDToken(ctx, tok.IDToken, ""); verr != nil {
-			return nil, fmt.Errorf("oidcauth: refreshed id_token failed validation: %w", verr)
+	if tok.IDToken == "" {
+		// No id_token — the common case, and the one that used to leave claims
+		// frozen at sign-in. Ask userinfo instead, using the access token this
+		// very response carried.
+		//
+		// A failure here is deliberately not propagated: the *grant* succeeded,
+		// so the session is still valid and must survive. Returning the error
+		// would terminate it over an unreachable userinfo endpoint. The nil
+		// identity is what the caller records as "claims unverified".
+		id, uerr := a.userinfoIdentity(ctx, tok.AccessToken)
+		if uerr != nil || id == nil {
+			return tok, nil, nil
 		}
+		return tok, id, nil
 	}
-	return tok, nil
+	id, verr := a.verifyIDToken(ctx, tok.IDToken, "")
+	if verr != nil {
+		return nil, nil, fmt.Errorf("oidcauth: refreshed id_token failed validation: %w", verr)
+	}
+	return tok, id, nil
 }
 
 // isGrantRevoked reports whether err means the IdP has withdrawn this session.

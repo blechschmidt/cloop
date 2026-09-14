@@ -1978,6 +1978,31 @@
             </table>
           </div>
         </div>
+
+        <!-- ── Offboarding (Task 20261) ──
+             Gated on user.manage, not session.admin: this ends every
+             credential an identity holds and writes a deny binding, which is
+             the same authority as editing role bindings. Hidden entirely
+             below that, because the preview enumerates a person's whole
+             credential footprint. -->
+        <div class="sec-sub" data-global-perm="user.manage" data-perm-hide>
+          <div class="sec-subtitle" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+            Offboard a user
+            <span style="font-size:11px;font-weight:400;color:var(--muted)">admin only &mdash; <code>user.manage</code></span>
+          </div>
+          <p class="sec-hint">
+            Severs every credential surface one identity holds &mdash; sessions, API tokens,
+            glasses links, secret leases and running tasks &mdash; and writes a deny binding so a
+            fresh sign-in gets nothing either. Projects they own are reported, never deleted.
+            Preview first: nothing is changed until you confirm.
+          </p>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+            <input type="text" id="offboardIdentity" placeholder="email address or IdP subject"
+                   style="flex:1;min-width:220px;padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--text)">
+            <button class="btn" id="offboardPreviewBtn" data-global-perm="user.manage">Preview</button>
+          </div>
+          <div id="offboardResult" style="display:none;margin-top:12px"></div>
+        </div>
       </div>
     </div>
 

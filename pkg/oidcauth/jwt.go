@@ -157,62 +157,9 @@ func dedupeFold(values []string) []string {
 // empty there — and a *present* nonce that does not match is still rejected
 // below, so an IdP echoing someone else's nonce does not slip through.
 func (a *Authenticator) verifyIDToken(ctx context.Context, raw, nonce string) (*Identity, error) {
-	parts := strings.Split(raw, ".")
-	if len(parts) != 3 {
-		return nil, errors.New("oidcauth: id_token is not a compact JWS")
-	}
-	headerJSON, err := base64.RawURLEncoding.DecodeString(parts[0])
-	if err != nil {
-		return nil, fmt.Errorf("oidcauth: id_token header decode: %w", err)
-	}
-	var hdr struct {
-		Alg string `json:"alg"`
-		Kid string `json:"kid"`
-	}
-	if err := json.Unmarshal(headerJSON, &hdr); err != nil {
-		return nil, fmt.Errorf("oidcauth: id_token header parse: %w", err)
-	}
-	payloadJSON, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
-		return nil, fmt.Errorf("oidcauth: id_token payload decode: %w", err)
-	}
-	sig, err := base64.RawURLEncoding.DecodeString(parts[2])
-	if err != nil {
-		return nil, fmt.Errorf("oidcauth: id_token signature decode: %w", err)
-	}
-
-	switch hdr.Alg {
-	case "RS256", "ES256":
-	default:
-		return nil, fmt.Errorf("oidcauth: unsupported id_token alg %q (supported: RS256, ES256)", hdr.Alg)
-	}
-	key, err := a.signingKey(ctx, hdr.Kid)
+	payloadJSON, err := a.verifyJWSPayload(ctx, "id_token", raw)
 	if err != nil {
 		return nil, err
-	}
-	digest := sha256.Sum256([]byte(parts[0] + "." + parts[1]))
-	switch pub := key.(type) {
-	case *rsa.PublicKey:
-		if hdr.Alg != "RS256" {
-			return nil, fmt.Errorf("oidcauth: alg %s does not match RSA signing key", hdr.Alg)
-		}
-		if err := rsa.VerifyPKCS1v15(pub, crypto.SHA256, digest[:], sig); err != nil {
-			return nil, fmt.Errorf("oidcauth: id_token signature invalid: %w", err)
-		}
-	case *ecdsa.PublicKey:
-		if hdr.Alg != "ES256" {
-			return nil, fmt.Errorf("oidcauth: alg %s does not match EC signing key", hdr.Alg)
-		}
-		if len(sig) != 64 {
-			return nil, fmt.Errorf("oidcauth: ES256 signature must be 64 bytes, got %d", len(sig))
-		}
-		r := new(big.Int).SetBytes(sig[:32])
-		s := new(big.Int).SetBytes(sig[32:])
-		if !ecdsa.Verify(pub, digest[:], r, s) {
-			return nil, errors.New("oidcauth: id_token signature invalid")
-		}
-	default:
-		return nil, fmt.Errorf("oidcauth: unsupported signing key type %T", key)
 	}
 
 	var claims idClaims
@@ -258,6 +205,79 @@ func (a *Authenticator) verifyIDToken(ctx context.Context, raw, nonce string) (*
 		Groups: claims.groupValues(),
 		Roles:  claims.roleValues(a.cfg.ClientID),
 	}, nil
+}
+
+// verifyJWSPayload parses a compact JWS, verifies its signature against the
+// issuer's JWKS, and returns the raw payload. Claim validation is the caller's
+// business, because the two callers validate different things: an id_token
+// carries exp/aud/nonce, while a signed userinfo response carries neither an
+// expiry nor a nonce and is bound to the session by its sub instead.
+//
+// kind names the artefact in error messages. It is threaded through rather
+// than hardcoded so an operator reading "userinfo signature invalid" is not
+// sent looking at their id_token configuration.
+func (a *Authenticator) verifyJWSPayload(ctx context.Context, kind, raw string) ([]byte, error) {
+	parts := strings.Split(raw, ".")
+	if len(parts) != 3 {
+		return nil, fmt.Errorf("oidcauth: %s is not a compact JWS", kind)
+	}
+	headerJSON, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil {
+		return nil, fmt.Errorf("oidcauth: %s header decode: %w", kind, err)
+	}
+	var hdr struct {
+		Alg string `json:"alg"`
+		Kid string `json:"kid"`
+	}
+	if err := json.Unmarshal(headerJSON, &hdr); err != nil {
+		return nil, fmt.Errorf("oidcauth: %s header parse: %w", kind, err)
+	}
+	payloadJSON, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return nil, fmt.Errorf("oidcauth: %s payload decode: %w", kind, err)
+	}
+	sig, err := base64.RawURLEncoding.DecodeString(parts[2])
+	if err != nil {
+		return nil, fmt.Errorf("oidcauth: %s signature decode: %w", kind, err)
+	}
+
+	// "none" and the HMAC family are rejected by omission: an algorithm the
+	// caller does not name cannot be negotiated by the token itself, which is
+	// the alg-confusion attack this switch exists to refuse.
+	switch hdr.Alg {
+	case "RS256", "ES256":
+	default:
+		return nil, fmt.Errorf("oidcauth: unsupported %s alg %q (supported: RS256, ES256)", kind, hdr.Alg)
+	}
+	key, err := a.signingKey(ctx, hdr.Kid)
+	if err != nil {
+		return nil, err
+	}
+	digest := sha256.Sum256([]byte(parts[0] + "." + parts[1]))
+	switch pub := key.(type) {
+	case *rsa.PublicKey:
+		if hdr.Alg != "RS256" {
+			return nil, fmt.Errorf("oidcauth: alg %s does not match RSA signing key", hdr.Alg)
+		}
+		if err := rsa.VerifyPKCS1v15(pub, crypto.SHA256, digest[:], sig); err != nil {
+			return nil, fmt.Errorf("oidcauth: %s signature invalid: %w", kind, err)
+		}
+	case *ecdsa.PublicKey:
+		if hdr.Alg != "ES256" {
+			return nil, fmt.Errorf("oidcauth: alg %s does not match EC signing key", hdr.Alg)
+		}
+		if len(sig) != 64 {
+			return nil, fmt.Errorf("oidcauth: ES256 signature must be 64 bytes, got %d", len(sig))
+		}
+		r := new(big.Int).SetBytes(sig[:32])
+		s := new(big.Int).SetBytes(sig[32:])
+		if !ecdsa.Verify(pub, digest[:], r, s) {
+			return nil, fmt.Errorf("oidcauth: %s signature invalid", kind)
+		}
+	default:
+		return nil, fmt.Errorf("oidcauth: unsupported signing key type %T", key)
+	}
+	return payloadJSON, nil
 }
 
 func audContains(aud audClaim, clientID string) bool {

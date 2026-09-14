@@ -14,9 +14,12 @@ package oidcauth
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -565,6 +568,387 @@ func TestRevalidationDisabled(t *testing.T) {
 	if checked, _ := a.RevalidateDue(context.Background()); checked != 0 {
 		t.Fatalf("checked %d sessions with revalidation disabled, want 0", checked)
 	}
+}
+
+// ── refreshed claims (Task 20249) ───────────────────────────────────────────
+
+// stubRoleLadder is an EffectiveRole hook over a two-rung ladder: anyone in
+// the admin group is an admin, everyone else is a viewer. Enough to tell a
+// narrowing from a widening without dragging pkg/authz into a stdlib-only
+// package's tests.
+func stubRoleLadder(_ string, groups, roles []string) (string, int) {
+	for _, v := range append(append([]string(nil), groups...), roles...) {
+		if strings.EqualFold(strings.TrimPrefix(v, "/"), "admins") {
+			return "admin", 4
+		}
+	}
+	return "viewer", 1
+}
+
+// adminThenDemoted is an IdP that releases the admin group on the first
+// refresh and withholds it from then on: a user removed from a group at the
+// provider, expressed on the wire.
+func adminThenDemoted(idp *fakeIdP) func(int) map[string]any {
+	return func(n int) map[string]any {
+		if n <= 1 {
+			return idp.refreshClaims(map[string]any{"groups": []string{"admins", "engineering"}})
+		}
+		return idp.refreshClaims(map[string]any{"groups": []string{"engineering"}})
+	}
+}
+
+// TestRefreshedClaimsDeprivilegeWithinOneInterval is the defect this work
+// exists to close. The refresh grant already fetched and verified an id_token
+// carrying the user's *current* groups; throwing it away and keeping the
+// claims captured at sign-in means somebody removed from the admin group at
+// the IdP stays an admin here until the 24-hour absolute TTL runs out.
+//
+// The assertion is made through IdentityFromRequest rather than against the
+// store, because the read path serves a cache: claims written to the row that
+// the next request does not see would close nothing.
+func TestRefreshedClaimsDeprivilegeWithinOneInterval(t *testing.T) {
+	idp := newFakeIdP(t)
+	clk := newClock()
+	a := newLifecycleAuth(t, idp, NewMemorySessionStore(0), clk, func(c *Config) {
+		c.RefreshInterval = 15 * time.Minute
+	})
+	idp.refreshIDToken = adminThenDemoted(idp)
+
+	sid, err := a.createSession(
+		Identity{Sub: "u1", Email: "alice@example.com", Groups: []string{"admins", "engineering"}},
+		reqWithCookie("x"), "rt-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Warm the cache, so the test also proves the refresh reaches through it.
+	if id := a.IdentityFromRequest(reqWithCookie(sid)); id == nil || len(id.Groups) != 2 {
+		t.Fatalf("session should start with both groups, got %+v", id)
+	}
+
+	// First check: the IdP still says admin, so nothing changes.
+	clk.advance(16 * time.Minute)
+	a.RevalidateDue(context.Background())
+	if id := a.IdentityFromRequest(reqWithCookie(sid)); id == nil || !hasClaim(id.Groups, "admins") {
+		t.Fatalf("a refresh that re-asserts the same claims must not disturb them, got %+v", id)
+	}
+
+	// Second check: the group is gone at the provider.
+	clk.advance(16 * time.Minute)
+	a.RevalidateDue(context.Background())
+
+	id := a.IdentityFromRequest(reqWithCookie(sid))
+	if id == nil {
+		t.Fatal("losing a group must narrow the session, not end it")
+	}
+	if hasClaim(id.Groups, "admins") {
+		t.Fatalf("session still carries the admin group after the IdP withdrew it: %v — "+
+			"deprivileging at the IdP does not reach live sessions", id.Groups)
+	}
+	if !hasClaim(id.Groups, "engineering") {
+		t.Fatalf("the groups the user kept were dropped too: %v", id.Groups)
+	}
+}
+
+// TestRefreshWithoutIDTokenLeavesClaimsUntouched covers the other half: a
+// provider that renews the grant without re-asserting anything must neither
+// widen the session nor blank it. "The IdP did not say" is not "the IdP said
+// nothing applies" — reading it as the latter would sign a working deployment
+// out of everything it can do; as the former, silently, would let an operator
+// believe claims are re-checked every 15 minutes when they never are.
+func TestRefreshWithoutIDTokenLeavesClaimsUntouched(t *testing.T) {
+	idp := newFakeIdP(t)
+	clk := newClock()
+	rec := &auditRecorder{}
+	a := newLifecycleAuth(t, idp, NewMemorySessionStore(0), clk, func(c *Config) {
+		c.RefreshInterval = 15 * time.Minute
+		c.Audit = rec.sink
+		c.EffectiveRole = stubRoleLadder
+	})
+	// The fake IdP's default: a refresh response with no id_token at all.
+	sid, err := a.createSession(
+		Identity{Sub: "u1", Groups: []string{"engineering"}}, reqWithCookie("x"), "rt-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	clk.advance(16 * time.Minute)
+	if _, terminated := a.RevalidateDue(context.Background()); terminated != 0 {
+		t.Fatal("a refresh without an id_token must not end the session")
+	}
+
+	id := a.IdentityFromRequest(reqWithCookie(sid))
+	if id == nil {
+		t.Fatal("a renewed grant must keep the session alive")
+	}
+	if len(id.Groups) != 1 || id.Groups[0] != "engineering" {
+		t.Fatalf("claims = %v, want them left exactly as captured at sign-in", id.Groups)
+	}
+	if rec.countOf(AuditSessionRoleNarrowed) != 0 {
+		t.Fatal("nothing was asserted, so nothing narrowed; the event is misleading here")
+	}
+
+	// It must be recorded, so an operator can tell this deployment from one
+	// where claims really are re-checked.
+	if rec.countOf(AuditSessionClaimsUnverified) != 1 {
+		t.Fatalf("claims_unverified events = %d, want exactly 1",
+			rec.countOf(AuditSessionClaimsUnverified))
+	}
+	asserted, unverified := a.RefreshClaimStats()
+	if asserted != 0 || unverified != 1 {
+		t.Fatalf("RefreshClaimStats() = (%d asserted, %d unverified), want (0, 1)", asserted, unverified)
+	}
+
+	// ...but recorded once, not once per session per interval forever.
+	clk.advance(16 * time.Minute)
+	a.RevalidateDue(context.Background())
+	if got := rec.countOf(AuditSessionClaimsUnverified); got != 1 {
+		t.Fatalf("the event repeated (%d): it describes the provider, not each check, "+
+			"and repeating it would bury the trail it is written into", got)
+	}
+	if _, unverified := a.RefreshClaimStats(); unverified != 2 {
+		t.Fatalf("unverified count = %d, want 2 — the counter is what tracks the rate", unverified)
+	}
+}
+
+// TestRoleNarrowingIsAudited is the auditor's question: silent deprivileging
+// is exactly what has to be visible after the fact, naming what was lost.
+func TestRoleNarrowingIsAudited(t *testing.T) {
+	idp := newFakeIdP(t)
+	clk := newClock()
+	rec := &auditRecorder{}
+	a := newLifecycleAuth(t, idp, NewMemorySessionStore(0), clk, func(c *Config) {
+		c.RefreshInterval = 15 * time.Minute
+		c.Audit = rec.sink
+		c.EffectiveRole = stubRoleLadder
+	})
+	idp.refreshIDToken = adminThenDemoted(idp)
+
+	if _, err := a.createSession(
+		Identity{Sub: "u1", Email: "alice@example.com", Groups: []string{"admins", "engineering"}},
+		reqWithCookie("x"), "rt-1"); err != nil {
+		t.Fatal(err)
+	}
+
+	clk.advance(16 * time.Minute)
+	a.RevalidateDue(context.Background())
+	if got := rec.countOf(AuditSessionRoleNarrowed); got != 0 {
+		t.Fatalf("re-asserting identical claims produced %d narrowing events, want 0", got)
+	}
+
+	clk.advance(16 * time.Minute)
+	a.RevalidateDue(context.Background())
+
+	ev, ok := rec.last(AuditSessionRoleNarrowed)
+	if !ok {
+		t.Fatal("losing the admin group must be audited — silent deprivileging is the thing an auditor needs to see")
+	}
+	if ev.PriorRole != "admin" || ev.Role != "viewer" {
+		t.Fatalf("audit named %q → %q, want admin → viewer", ev.PriorRole, ev.Role)
+	}
+	if ev.Reason != "role_downgraded" {
+		t.Fatalf("reason = %q, want role_downgraded", ev.Reason)
+	}
+	if len(ev.DroppedClaims) != 1 || ev.DroppedClaims[0] != "admins" {
+		t.Fatalf("dropped claims = %v, want exactly [admins]", ev.DroppedClaims)
+	}
+	if ev.Subject != "u1" || ev.Email != "alice@example.com" {
+		t.Fatalf("the event must identify the user: %+v", ev)
+	}
+
+	// The narrowing is a transition, not a state. Once the claims are written
+	// back, later refreshes agree with them and must stay silent — otherwise
+	// every demoted session rewrites this event every interval until it
+	// expires, and the trail that was supposed to make deprivileging visible
+	// is the thing burying it.
+	clk.advance(16 * time.Minute)
+	a.RevalidateDue(context.Background())
+	if got := rec.countOf(AuditSessionRoleNarrowed); got != 1 {
+		t.Fatalf("narrowing events = %d after a third check, want 1: the event must mark the "+
+			"transition, not repeat for as long as the session lives", got)
+	}
+}
+
+// TestClaimRestylingIsNotANarrowing guards the false positive that would train
+// operators to ignore the event: an IdP that starts spelling "/admins" as
+// "admins", or changes its case, has deprivileged nobody.
+func TestClaimRestylingIsNotANarrowing(t *testing.T) {
+	idp := newFakeIdP(t)
+	clk := newClock()
+	rec := &auditRecorder{}
+	a := newLifecycleAuth(t, idp, NewMemorySessionStore(0), clk, func(c *Config) {
+		c.RefreshInterval = 15 * time.Minute
+		c.Audit = rec.sink
+		c.EffectiveRole = stubRoleLadder
+	})
+	idp.refreshIDToken = func(int) map[string]any {
+		return idp.refreshClaims(map[string]any{"groups": []string{"Admins"}})
+	}
+	if _, err := a.createSession(
+		Identity{Sub: "u1", Groups: []string{"/admins"}}, reqWithCookie("x"), "rt-1"); err != nil {
+		t.Fatal(err)
+	}
+
+	clk.advance(16 * time.Minute)
+	a.RevalidateDue(context.Background())
+
+	if got := rec.countOf(AuditSessionRoleNarrowed); got != 0 {
+		t.Fatalf("a restyled group name produced %d narrowing events, want 0", got)
+	}
+}
+
+// TestRefreshOmittingEmailIsNotANarrowing guards a false positive that would
+// fire on every refresh for every user. Many providers omit the email claim
+// from a refresh id_token; resolving the new claims under the resulting
+// empty-email identity key would miss every email-keyed binding and report a
+// perfectly intact administrator as demoted, over and over.
+func TestRefreshOmittingEmailIsNotANarrowing(t *testing.T) {
+	idp := newFakeIdP(t)
+	clk := newClock()
+	rec := &auditRecorder{}
+	a := newLifecycleAuth(t, idp, NewMemorySessionStore(0), clk, func(c *Config) {
+		c.RefreshInterval = 15 * time.Minute
+		c.Audit = rec.sink
+		// An email-keyed ladder, like oidc.admin_emails: authority comes from
+		// the identity key, not from any claim in the refreshed token.
+		c.EffectiveRole = func(identity string, _, _ []string) (string, int) {
+			if identity == "alice@example.com" {
+				return "admin", 4
+			}
+			return "viewer", 1
+		}
+	})
+	// The refreshed token asserts the same groups but carries no email.
+	idp.refreshIDToken = func(int) map[string]any {
+		return idp.refreshClaims(map[string]any{"groups": []string{"engineering"}})
+	}
+	if _, err := a.createSession(
+		Identity{Sub: "u1", Email: "alice@example.com", Groups: []string{"engineering"}},
+		reqWithCookie("x"), "rt-1"); err != nil {
+		t.Fatal(err)
+	}
+
+	clk.advance(16 * time.Minute)
+	a.RevalidateDue(context.Background())
+
+	if got := rec.countOf(AuditSessionRoleNarrowed); got != 0 {
+		t.Fatalf("an id_token without an email claim produced %d narrowing events, want 0: "+
+			"an admin whose entitlements are unchanged must not be reported as demoted", got)
+	}
+}
+
+// TestWideningClaimsAppliesWithoutNarrowingAudit: gaining authority is the
+// ordinary outcome of a grant and applies just as promptly, but auditing every
+// one of them would bury the narrowings this trail exists to surface.
+func TestWideningClaimsAppliesWithoutNarrowingAudit(t *testing.T) {
+	idp := newFakeIdP(t)
+	clk := newClock()
+	rec := &auditRecorder{}
+	a := newLifecycleAuth(t, idp, NewMemorySessionStore(0), clk, func(c *Config) {
+		c.RefreshInterval = 15 * time.Minute
+		c.Audit = rec.sink
+		c.EffectiveRole = stubRoleLadder
+	})
+	idp.refreshIDToken = func(int) map[string]any {
+		return idp.refreshClaims(map[string]any{"groups": []string{"engineering", "admins"}})
+	}
+	sid, err := a.createSession(
+		Identity{Sub: "u1", Groups: []string{"engineering"}}, reqWithCookie("x"), "rt-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	clk.advance(16 * time.Minute)
+	a.RevalidateDue(context.Background())
+
+	id := a.IdentityFromRequest(reqWithCookie(sid))
+	if id == nil || !hasClaim(id.Groups, "admins") {
+		t.Fatalf("a claim the IdP now releases must be applied, got %+v", id)
+	}
+	if got := rec.countOf(AuditSessionRoleNarrowed); got != 0 {
+		t.Fatalf("a widening produced %d narrowing events, want 0", got)
+	}
+}
+
+// TestRefreshSubjectMismatchTerminates: an id_token for a different subject is
+// not a claim update, it is a different person. Applying its groups would hand
+// this session somebody else's authority — a vulnerability that only becomes
+// reachable once refreshed claims are trusted at all.
+func TestRefreshSubjectMismatchTerminates(t *testing.T) {
+	idp := newFakeIdP(t)
+	clk := newClock()
+	rec := &auditRecorder{}
+	a := newLifecycleAuth(t, idp, NewMemorySessionStore(0), clk, func(c *Config) {
+		c.RefreshInterval = 15 * time.Minute
+		c.Audit = rec.sink
+	})
+	idp.refreshIDToken = func(int) map[string]any {
+		return idp.refreshClaims(map[string]any{"sub": "somebody-else", "groups": []string{"admins"}})
+	}
+	sid, err := a.createSession(Identity{Sub: "u1"}, reqWithCookie("x"), "rt-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	clk.advance(16 * time.Minute)
+	if _, terminated := a.RevalidateDue(context.Background()); terminated != 1 {
+		t.Fatal("an id_token for another subject must end the session")
+	}
+	if a.IdentityFromRequest(reqWithCookie(sid)) != nil {
+		t.Fatal("the session must stop authenticating")
+	}
+	if ev, ok := rec.last(AuditSessionIdPRevoked); !ok || ev.Reason != "idp_subject_mismatch" {
+		t.Fatalf("want session.idp_revoked/idp_subject_mismatch, got %+v (found=%v)", ev, ok)
+	}
+}
+
+// TestClaimWriteFailureLeavesSessionDue is the fail-safe ordering. A store
+// that cannot record the narrowed claims must not leave the session stamped as
+// freshly checked: that would mean a failed write buys the stale claims
+// another full refresh interval, with nothing to show it happened.
+func TestClaimWriteFailureLeavesSessionDue(t *testing.T) {
+	idp := newFakeIdP(t)
+	clk := newClock()
+	store := &refusingApplyStore{SessionStore: NewMemorySessionStore(0)}
+	a := newLifecycleAuth(t, idp, store, clk, func(c *Config) {
+		c.RefreshInterval = 15 * time.Minute
+	})
+	idp.refreshIDToken = adminThenDemoted(idp)
+	if _, err := a.createSession(
+		Identity{Sub: "u1", Groups: []string{"admins"}}, reqWithCookie("x"), "rt-1"); err != nil {
+		t.Fatal(err)
+	}
+
+	store.fail.Store(true)
+	clk.advance(16 * time.Minute)
+	a.RevalidateDue(context.Background())
+
+	// Still unstamped, so the very next pass retries rather than waiting out
+	// another interval on claims that were never written.
+	if checked, _ := a.RevalidateDue(context.Background()); checked != 1 {
+		t.Fatalf("after a failed claim write the session was not re-checked (%d due), want 1", checked)
+	}
+}
+
+// refusingApplyStore fails ApplyRefresh on demand.
+type refusingApplyStore struct {
+	SessionStore
+	fail atomic.Bool
+}
+
+func (s *refusingApplyStore) ApplyRefresh(id string, res RefreshResult) error {
+	if s.fail.Load() {
+		return errors.New("store unavailable")
+	}
+	return s.SessionStore.ApplyRefresh(id, res)
+}
+
+func hasClaim(values []string, want string) bool {
+	for _, v := range values {
+		if strings.EqualFold(strings.TrimPrefix(v, "/"), want) {
+			return true
+		}
+	}
+	return false
 }
 
 // ── concurrency ─────────────────────────────────────────────────────────────

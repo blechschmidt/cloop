@@ -119,6 +119,20 @@ func (d *DB) AppendAuditEvents(evs []*AuditEvent) error {
 	if len(evs) == 0 {
 		return nil
 	}
+	if err := normalizeAuditEvents(evs); err != nil {
+		return err
+	}
+	return d.appendAuditEvents(evs)
+}
+
+// normalizeAuditEvents fills in the auto-populated fields and rejects an event
+// that cannot be written, mutating each element in place.
+//
+// Extracted so the transaction-scoped writer validates identically. It used to
+// be inline here, which meant a caller reaching appendAuditEventsTx directly
+// could insert a row with no event_type — a row that exists, chains, and
+// matches no query an auditor would run.
+func normalizeAuditEvents(evs []*AuditEvent) error {
 	for i, ev := range evs {
 		if ev == nil {
 			return fmt.Errorf("statedb audit: nil event at index %d", i)
@@ -135,7 +149,7 @@ func (d *DB) AppendAuditEvents(evs []*AuditEvent) error {
 			return fmt.Errorf("statedb audit: empty event_type at index %d", i)
 		}
 	}
-	return d.appendAuditEvents(evs)
+	return nil
 }
 
 // appendAuditEvents is the shared writer. Callers have already normalised and
@@ -149,6 +163,33 @@ func (d *DB) appendAuditEvents(evs []*AuditEvent) error {
 		return fmt.Errorf("statedb audit: begin: %w", classifyDriverErr(err))
 	}
 	defer tx.Rollback() //nolint:errcheck
+
+	if err := appendAuditEventsTx(tx, evs); err != nil {
+		return err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("statedb audit: commit: %w", classifyDriverErr(err))
+	}
+	return nil
+}
+
+// appendAuditEventsTx normalises, chains and inserts into a transaction the
+// caller already holds, without committing it.
+//
+// It exists so a mutation and its audit record can share one commit. Appending
+// from a separate transaction would mean the two can disagree: the change
+// commits and the record does not, leaving authority altered with nothing to
+// review. Callers must hold d.mu (the transaction does not provide in-process
+// exclusion on its own, and auditChainTip's MAX(id) read must not race an
+// interleaved insert).
+func appendAuditEventsTx(tx *sql.Tx, evs []*AuditEvent) error {
+	if len(evs) == 0 {
+		return nil
+	}
+	if err := normalizeAuditEvents(evs); err != nil {
+		return err
+	}
 
 	nextID, prevHash, err := auditChainTip(tx)
 	if err != nil {
@@ -179,10 +220,6 @@ func (d *DB) appendAuditEvents(evs []*AuditEvent) error {
 		}
 		nextID++
 		prevHash = ev.RowHash
-	}
-
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("statedb audit: commit: %w", classifyDriverErr(err))
 	}
 	return nil
 }

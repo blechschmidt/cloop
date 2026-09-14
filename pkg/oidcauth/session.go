@@ -104,10 +104,40 @@ type SessionStore interface {
 	// last IdP check is at or before cutoff, oldest first.
 	DueForRefresh(cutoff time.Time, limit int) ([]SessionRecord, error)
 
-	// SetRefresh stores a rotated refresh token and stamps the check time. An
-	// empty token clears the stored one, which is how a session that can no
-	// longer be revalidated stops being retried.
-	SetRefresh(id, refreshToken string, checkedAt time.Time) error
+	// ApplyRefresh records the outcome of one IdP revalidation. It must apply
+	// every field of res in a single atomic write — see RefreshResult for why
+	// splitting it is a privilege-retention bug.
+	ApplyRefresh(id string, res RefreshResult) error
+}
+
+// RefreshResult is what one IdP revalidation learned about a session.
+//
+// It is applied as a unit rather than field by field, and that is a security
+// property rather than an optimisation. The stamp is what marks a session
+// re-authorized until the next interval; the claims are the authority it is
+// re-authorized *with*. A store that wrote the stamp and then failed to write
+// the claims would leave a session recorded as freshly checked while still
+// carrying the roles it held before the IdP narrowed them — the exact
+// retention window this machinery exists to close, now hidden behind a
+// successful-looking check. Written together, a failure leaves the session
+// unstamped and the next pass simply retries it.
+type RefreshResult struct {
+	// RefreshToken is the token to present next time: the provider's
+	// replacement when it rotated, otherwise the one just redeemed. Empty
+	// clears the stored token, which is how a session that can no longer be
+	// revalidated stops being retried.
+	RefreshToken string
+
+	// CheckedAt stamps when the IdP last answered for this session.
+	CheckedAt time.Time
+
+	// ClaimsAsserted reports whether the refresh response carried an id_token
+	// that verified. Only then are Groups and Roles meaningful; when it is
+	// false the stored claims must be left exactly as they are, because
+	// "the IdP did not say" is not "the IdP said nothing applies".
+	ClaimsAsserted bool
+	Groups         []string
+	Roles          []string
 }
 
 // HashSessionID maps a session cookie to the identifier used everywhere else.
@@ -144,6 +174,40 @@ const (
 	// withdrawn, or the IdP forced a sign-out. This is the event that proves
 	// IdP-side revocation actually reached the hub.
 	AuditSessionIdPRevoked = "session.idp_revoked"
+
+	// AuditSessionRoleNarrowed records a live session losing authority because
+	// the IdP stopped releasing a group or role it released at sign-in.
+	//
+	// Deprivileging is the one claim change that must never be silent. Every
+	// other outcome of a revalidation leaves a trace an operator can reason
+	// about — the session ends, or it visibly continues — but authority
+	// quietly draining out of a session that stays signed in is invisible
+	// unless it is written down. It is also the event an auditor asks for by
+	// name after an incident: "show me that removing them from the admin group
+	// actually took effect, and when."
+	AuditSessionRoleNarrowed = "session.role_narrowed"
+
+	// AuditSessionClaimsUnverified records that a renewal could re-assert the
+	// session's claims from neither source: the provider returned no id_token,
+	// and the userinfo endpoint did not answer either (it is unadvertised,
+	// unreachable, or refused the access token).
+	//
+	// This is not a failure of the renewal: many providers only issue an
+	// id_token on the initial code exchange, and the refresh grant succeeding
+	// still proves the grant is alive, which is what IdP-side revocation
+	// depends on. What it does mean is that the session's groups and roles are
+	// still the ones captured at sign-in and will stay that way until it ends —
+	// so a group removal at the IdP does not take effect on this hub. An
+	// operator reading the trail has to be able to tell such a deployment from
+	// one where claims genuinely are re-checked every interval, otherwise
+	// "cloop re-authorizes every 15 minutes" is believed where it does not
+	// happen. Emitted once per process rather than once per session per
+	// interval: it describes the provider, not the user, so every session on
+	// such a hub would otherwise write the same fact forever.
+	//
+	// Before Task 20261 this was the outcome for every provider that omits the
+	// id_token, which is most of them. It is now the exception.
+	AuditSessionClaimsUnverified = "session.claims_unverified"
 )
 
 // SessionAudit describes one session lifecycle event.
@@ -160,6 +224,18 @@ type SessionAudit struct {
 	IP        string
 	UserAgent string
 	At        time.Time
+
+	// PriorRole and Role name the effective role before and after a claim
+	// refresh, and are set only by AuditSessionRoleNarrowed. They are empty
+	// when the deployment supplies no EffectiveRole hook, in which case
+	// DroppedClaims alone describes the narrowing.
+	PriorRole string
+	Role      string
+
+	// DroppedClaims lists the group and role values the IdP released at
+	// sign-in and no longer releases. Naming them is the difference between
+	// an event an auditor can act on and one that only says something changed.
+	DroppedClaims []string
 }
 
 // ── in-memory store ─────────────────────────────────────────────────────────
@@ -314,15 +390,22 @@ func (m *memStore) DueForRefresh(cutoff time.Time, limit int) ([]SessionRecord, 
 	return out, nil
 }
 
-func (m *memStore) SetRefresh(id, refreshToken string, checkedAt time.Time) error {
+func (m *memStore) ApplyRefresh(id string, res RefreshResult) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	rec, ok := m.rows[id]
 	if !ok {
 		return ErrSessionNotFound
 	}
-	rec.RefreshToken = refreshToken
-	rec.RefreshCheckedAt = checkedAt
+	rec.RefreshToken = res.RefreshToken
+	rec.RefreshCheckedAt = res.CheckedAt
+	if res.ClaimsAsserted {
+		// Copied, not aliased: the caller's slices came from a decoded token
+		// it is free to reuse, and a store that kept a reference to them would
+		// let a later refresh mutate a session's authority in place.
+		rec.Identity.Groups = append([]string(nil), res.Groups...)
+		rec.Identity.Roles = append([]string(nil), res.Roles...)
+	}
 	m.rows[id] = rec
 	return nil
 }

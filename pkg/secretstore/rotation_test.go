@@ -738,8 +738,12 @@ func TestSessionTokenIsBoundToItsSessionRow(t *testing.T) {
 	}
 	// Copy the whole sealed envelope across, exactly as a database writer
 	// would.
-	if err := h.db.UpdateSessionRefresh(attacker.ID, adminRow.RefreshKeyID,
-		adminRow.RefreshWrappedDEK, adminRow.RefreshSealed, time.Now()); err != nil {
+	if err := h.db.UpdateSessionRefresh(attacker.ID, statedb.SessionRefreshUpdate{
+		KeyID:      adminRow.RefreshKeyID,
+		WrappedDEK: adminRow.RefreshWrappedDEK,
+		Sealed:     adminRow.RefreshSealed,
+		CheckedAt:  time.Now(),
+	}); err != nil {
 		t.Fatalf("transplant: %v", err)
 	}
 
@@ -897,7 +901,12 @@ func TestSecretEnvelopeCannotBeReadAsASessionToken(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("put session: %v", err)
 	}
-	if err := h.db.UpdateSessionRefresh(sec.ID, row.KeyID, row.WrappedDEK, row.Payload, time.Now()); err != nil {
+	if err := h.db.UpdateSessionRefresh(sec.ID, statedb.SessionRefreshUpdate{
+		KeyID:      row.KeyID,
+		WrappedDEK: row.WrappedDEK,
+		Sealed:     row.Payload,
+		CheckedAt:  time.Now(),
+	}); err != nil {
 		t.Fatalf("transplant: %v", err)
 	}
 

@@ -1077,6 +1077,66 @@ curl -X PUT https://hub.example.com/api/quotas/alice@example.com \
   -d '{"limits":{"daily_cost_usd":5,"max_concurrent_tasks":2}}'
 ```
 
+#### Somebody leaves
+
+**One command.** Disabling an account at the identity provider does not, on its
+own, sever anything this hub has already issued. Six surfaces outlive it:
+
+| Surface | What survives an IdP disablement |
+| --- | --- |
+| Sessions | Until the absolute TTL — the refresh grant proves the grant is alive, not that the person still works here |
+| API tokens | Until `ExpiresAt`. The owner binding was never consulted on departure |
+| Glasses links | Same rows, same problem — up to 30 days |
+| Deny binding | Does not exist until somebody writes it |
+| Secret leases | Real credentials, materialised inside a running sandbox |
+| Running tasks | Still executing, in their name |
+
+`cloop hub user offboard` severs all six, and reports a seventh — the projects
+they own — without touching it.
+
+```bash
+# 1. Look first. Nothing is changed, and the set printed is exactly the set
+#    the write acts on.
+cloop hub user offboard alice@example.com --dry-run
+
+# 2. Do it.
+cloop hub user offboard alice@example.com --reason "left the company, HR-882"
+```
+
+Sessions, API tokens, glasses links and the deny binding are written in **one
+transaction**: either the person is out of all four or nothing changed. There is
+no half-offboarded state to discover a month later. Leases and running tasks
+cannot join that transaction — they are broker memory and other databases — so
+they are applied after it, and any failure is reported rather than rolled back
+over a severing that already succeeded. A partial run exits non-zero.
+
+**Give an email or a subject; either resolves to both.** The surfaces are keyed
+inconsistently — a session carries an email, a token's owner may carry only a
+subject — so the command expands what you type to every identifier that turns
+out to address the same person. Matching literally on the input is how a
+departed user's PAT keeps working.
+
+**Projects are reported, never deleted.** They usually hold the team's work.
+The command lists them and writes a `user.offboard_project` audit event so the
+reassignment is on somebody's record; `cloop workspace` is how you hand them
+over.
+
+The trail carries one event per surface touched, all under entity type `user`
+and keyed by the identity, so the whole operation greps as one unit:
+
+```bash
+cloop hub audit --entity-type user --entity-id alice@example.com
+```
+
+The same operation is in the dashboard under **Secrets → Offboard a user**,
+gated on `user.manage`. It previews before it writes, for the same reason the
+CLI does. It refuses to offboard the identity making the request — that would
+revoke the session issuing it and deny the account that must undo it; use the
+CLI if that is really what you want.
+
+> A running hub may keep honouring a revoked session for up to 30 seconds (its
+> session cache). Tokens and deny bindings take effect immediately.
+
 #### An admin is compromised
 
 This is the one that had no answer before. Admin status comes from
@@ -1098,6 +1158,9 @@ cloop hub role list --identity alice@example.com
 cloop hub role revoke email alice@example.com --reason "credential compromise INC-4412"
 
 # 3. A deny stops them acting. It does not end sessions or revoke tokens.
+#    `cloop hub user offboard` does all three in one transaction, and is the
+#    right tool unless you specifically want to demote without ending sessions
+#    (e.g. containing an account you are still watching).
 cloop hub session revoke --identity alice@example.com --reason "credential compromise INC-4412"
 cloop hub token list        # then revoke anything the account holds
 cloop hub token revoke <token-id>

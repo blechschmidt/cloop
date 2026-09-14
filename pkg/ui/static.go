@@ -104,13 +104,17 @@ var bundleFiles = []string{
 	// into its own global tab, gated on audit.read like the Audit panel it
 	// sits beside.
 	"assets/js/30-telemetry.js",
+	// Offboarding (Task 20261). Renders into the Secrets tab beside the
+	// sessions table, and reuses that file's gating helper, so it must load
+	// after 26-sessions.js.
+	"assets/js/31-offboard.js",
 	// Last, and it closes the IIFE 00-core.js opened. A fragment appended
 	// after the close lands at global scope, where none of the shared helpers
 	// are visible — see TestDashboard_MainIIFEClosesInLastFragment. This is
-	// why it was renumbered from 30 when the telemetry panel was added: the
-	// list must stay in filename order, so a new fragment before the closer
-	// has to take a number below it.
-	"assets/js/31-glasses.js",
+	// why it keeps being renumbered as panels are added: the list must stay in
+	// filename order, so a new fragment before the closer has to take a number
+	// below it.
+	"assets/js/32-glasses.js",
 }
 
 // Cache-Control values. Hashed asset URLs change whenever their bytes change,

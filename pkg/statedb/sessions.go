@@ -143,25 +143,64 @@ func (d *DB) TouchSession(id string, t time.Time) error {
 	return nil
 }
 
-// UpdateSessionRefresh stores a rotated refresh token and stamps the check
-// time. A nil sealed value clears the stored token, which is how a session
-// that can no longer be revalidated stops being retried.
+// SessionClaims is a replacement set of group and role claims.
+type SessionClaims struct {
+	Groups []string
+	Roles  []string
+}
+
+// SessionRefreshUpdate is the outcome of one IdP revalidation.
+//
+// Claims is nil when the provider returned no id_token, meaning the stored
+// claims are left untouched; a non-nil value replaces them, including with an
+// empty set, which is how a user losing their last group is recorded.
+type SessionRefreshUpdate struct {
+	KeyID      string
+	WrappedDEK []byte
+	Sealed     []byte
+	CheckedAt  time.Time
+	Claims     *SessionClaims
+}
+
+// UpdateSessionRefresh stores a rotated refresh token, stamps the check time,
+// and — when the provider re-asserted them — replaces the row's claims. A nil
+// sealed value clears the stored token, which is how a session that can no
+// longer be revalidated stops being retried.
 //
 // Clearing also blanks the key id. Leaving a stale one behind would make the
 // row look, to the rotator and to `cloop hub key retire`, like material still
 // sealed under a key that in fact protects nothing — which is exactly the kind
 // of phantom reference that makes an operator conclude retirement is broken.
-func (d *DB) UpdateSessionRefresh(id, keyID string, wrappedDEK, sealed []byte, checkedAt time.Time) error {
-	if len(sealed) == 0 {
+//
+// One statement, not two. The stamp records that the session was checked and
+// the claims record what it was checked *as*; a row carrying the first without
+// the second is a session that looks freshly re-authorized while still holding
+// authority the IdP has withdrawn.
+func (d *DB) UpdateSessionRefresh(id string, up SessionRefreshUpdate) error {
+	keyID, wrappedDEK := up.KeyID, up.WrappedDEK
+	if len(up.Sealed) == 0 {
 		keyID, wrappedDEK = "", nil
 	}
+
+	set := `refresh_sealed = ?, refresh_key_id = ?, refresh_wrapped_dek = ?, refresh_checked_at = ?`
+	args := []any{up.Sealed, keyID, wrappedDEK, formatOptionalTime(up.CheckedAt)}
+	if up.Claims != nil {
+		groups, err := marshalStringSlice(up.Claims.Groups)
+		if err != nil {
+			return fmt.Errorf("statedb: marshal session groups: %w", err)
+		}
+		roles, err := marshalStringSlice(up.Claims.Roles)
+		if err != nil {
+			return fmt.Errorf("statedb: marshal session roles: %w", err)
+		}
+		set += `, groups_json = ?, roles_json = ?`
+		args = append(args, groups, roles)
+	}
+	args = append(args, id)
+
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	res, err := d.conn.Exec(
-		`UPDATE sessions SET refresh_sealed = ?, refresh_key_id = ?, refresh_wrapped_dek = ?,
-		        refresh_checked_at = ? WHERE id = ?`,
-		sealed, keyID, wrappedDEK, formatOptionalTime(checkedAt), id,
-	)
+	res, err := d.conn.Exec(`UPDATE sessions SET `+set+` WHERE id = ?`, args...)
 	if err != nil {
 		return fmt.Errorf("statedb: update session refresh: %w", classifyDriverErr(err))
 	}

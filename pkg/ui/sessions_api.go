@@ -153,6 +153,18 @@ func (s *Server) SessionAuditSink() func(oidcauth.SessionAudit) {
 		if ev.UserAgent != "" {
 			payload["user_agent"] = ev.UserAgent
 		}
+		// Deprivileging detail (Task 20249). Discrete fields rather than prose
+		// folded into the reason, so "who lost admin, and when" is a query
+		// against the trail instead of a grep.
+		if ev.PriorRole != "" {
+			payload["prior_role"] = ev.PriorRole
+		}
+		if ev.Role != "" {
+			payload["role"] = ev.Role
+		}
+		if len(ev.DroppedClaims) > 0 {
+			payload["dropped_claims"] = ev.DroppedClaims
+		}
 		actor := ev.Actor
 		if actor == "" {
 			actor = "system"
@@ -245,6 +257,17 @@ type sessionsListResponse struct {
 	Durable       bool `json:"durable"`
 	IdPRevocation bool `json:"idp_revocation"`
 
+	// The third degradation of the same kind (Task 20249): whether the
+	// provider actually re-asserts claims when the grant is renewed. Many
+	// only issue an id_token on the initial code exchange, and on such a
+	// deployment a live session's roles are the ones it was created with
+	// until it ends — so removing somebody from the admin group at the IdP
+	// does not reach them, however short refresh_interval_minutes is set.
+	// Counted rather than flagged because the honest answer is a ratio: it
+	// is a property of the provider's responses, not of cloop's config.
+	ClaimsReasserted uint64 `json:"claims_reasserted"`
+	ClaimsUnverified uint64 `json:"claims_unverified"`
+
 	// Total is how many sessions exist, which differs from len(Sessions) only
 	// when the response was capped. Reported rather than silently truncated:
 	// a list that quietly drops rows reads as "these are all the sessions",
@@ -289,12 +312,15 @@ func (s *Server) handleSessionsList(w http.ResponseWriter, r *http.Request) {
 	for _, rec := range rows {
 		views = append(views, toSessionView(rec, now, currentID))
 	}
+	reasserted, unverified := s.OIDC.RefreshClaimStats()
 	jsonOK(w, sessionsListResponse{
 		Sessions:           views,
 		AbsoluteTTLSeconds: int64(s.OIDC.SessionTTL().Seconds()),
 		IdleTimeoutSeconds: int64(s.OIDC.IdleTimeout().Seconds()),
 		Durable:            s.sessionStoreDurable(),
 		IdPRevocation:      s.SessionStoreSealsRefreshTokens(),
+		ClaimsReasserted:   reasserted,
+		ClaimsUnverified:   unverified,
 		Total:              total,
 		Truncated:          truncated,
 	})
