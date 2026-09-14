@@ -97,6 +97,29 @@ Override the per-target budget:
 make fuzz FUZZTIME=2m
 ```
 
+CI runs this same `make fuzz` target on every push (the **Parser fuzzing** job)
+at `FUZZTIME=20s`, which is ~3.5 minutes of fuzzing in total. That budget is
+sized for the shallow panic a refactor introduces — the accumulated corpus
+finds those in seconds — not for discovering something new. A deep campaign is
+`make fuzz FUZZTIME=5m` on a machine with time to spare.
+
+The run goes through `scripts/fuzz-ci.sh` rather than calling `go test -fuzz`
+directly, because two outcomes look identical to `go test` and must not be
+treated alike:
+
+- **A clean budget expiry reported as a failure.** Go's fuzz coordinator
+  intermittently reports `context deadline exceeded` as a test failure when the
+  `-fuzztime` deadline fires mid-RPC (golang/go#72104). Nothing was found; the
+  same target passes on the next run. The script tolerates that one artifact.
+- **A committed regression seed.** A fixed crash keeps its input under
+  `testdata/fuzz/` forever, so "this corpus directory has files in it" is true
+  of every package that has ever had a finding fixed. The script decides
+  "reproducer written" against a snapshot of the directory taken immediately
+  before the run, so only a *new* file counts.
+
+Everything else — a build error, a panic in the harness, a seed that has
+started crashing again — fails.
+
 ### Fuzz targets
 
 | Package              | Target                  | Surface                                                    |
@@ -119,8 +142,11 @@ make fuzz FUZZTIME=2m
 3. Inside `f.Fuzz(func(t *testing.T, ...))`, exercise the parser. The fuzz
    function must return cleanly — a parse error is fine, a panic or `t.Fatal`
    on benign-but-malformed input is a real failure.
-4. Wire the target into the `fuzz` recipe in the `Makefile` so `make fuzz`
-   runs it.
+4. Add the target to `FUZZ_TARGETS` in the `Makefile`, as
+   `./pkg/<pkg>/:FuzzXxx`. That list is the only place the set of targets is
+   written down — CI runs `make fuzz`, so a target added there is gated on the
+   next push with no second edit and no way for the two to disagree about what
+   is covered.
 
 ### When a fuzz run finds a crash
 
@@ -169,6 +195,23 @@ Packages that currently ship a leak test: `pkg/orchestrator`, `pkg/ui`,
 goroutine to any subsystem, add a matching test in that package — copy
 the canonical reference file's shape and document the goroutine you're
 guarding.
+
+## Unreferenced packages
+
+A new `pkg/<feature>/` that nothing imports fails CI's **Static analysis** job:
+
+```bash
+go test ./tests/arch/
+```
+
+The gate exists because an unreferenced package is invisible to everything
+else — it still builds, it still vets clean, and its own tests still pass.
+`pkg/adr` was a complete 433-line feature in that state for months. So when you
+add a package, wire it into a command or a caller in the same change; when the
+gate fires, the two legitimate answers are to wire it up or to delete it, and
+it deliberately prefers neither. `tests/arch/orphan_test.go` has an `exempt`
+map for packages that are unreferenced on purpose — it is empty, and an entry
+needs an argument a reader can check.
 
 ## Committing
 

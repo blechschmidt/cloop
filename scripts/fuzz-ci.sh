@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Run the security fuzz targets in CI, failing on findings and only on findings.
+# Run fuzz targets in CI, failing on findings and only on findings.
 #
 # # Why this is not just `go test -fuzz`
 #
@@ -38,32 +38,88 @@
 # complaint is the deadline did not, and anything else (a build error, a panic
 # in the harness, an OOM) fails too rather than being quietly tolerated.
 #
+# "Wrote a reproducer" is decided against a snapshot of the corpus directory
+# taken immediately before the run, not against the directory being non-empty.
+# A fixed crash leaves its input committed under testdata/fuzz/ on purpose —
+# that is how it becomes a permanent regression seed (see CONTRIBUTING.md) — so
+# "this directory has files in it" is true of every package that has ever had a
+# finding fixed, and using it as the signal would report those packages as
+# newly failing forever. pkg/egressbroker and pkg/secretbroker already carry
+# five such seeds between them.
+#
 # Usage:
 #   scripts/fuzz-ci.sh <target> [target...]
+#   scripts/fuzz-ci.sh <pkg>:<target> [<pkg>:<target>...]
+#
+# A bare target name runs in $FUZZPKG. The <pkg>:<target> form names the
+# package per target, which is what the parser targets need: they live in the
+# five packages that own the parsers rather than in one suite.
 #
 # Environment:
 #   FUZZTIME   per-target budget, default 60s
-#   FUZZPKG    package under test, default ./tests/security/
+#   FUZZPKG    package for bare target names, default ./tests/security/
+#   GO         the go command, default `go` from PATH
 
 set -uo pipefail
 
 FUZZTIME="${FUZZTIME:-60s}"
 FUZZPKG="${FUZZPKG:-./tests/security/}"
-# Where `go test` persists a reproducer, relative to the repository root.
-CORPUS="${FUZZPKG#./}testdata/fuzz"
+# From PATH by default, and overridable for the same reason the Makefile's GO
+# is: a developer box may keep its toolchain outside PATH, and on a runner the
+# one on PATH is the version setup-go pinned from go.mod.
+GO="${GO:-go}"
 
 if [ "$#" -eq 0 ]; then
-  echo "usage: $0 <target> [target...]" >&2
+  echo "usage: $0 [<pkg>:]<target> [[<pkg>:]<target>...]" >&2
   exit 2
 fi
 
+# corpus_dir maps a package and target to where `go test` persists a
+# reproducer, relative to the repository root: ./pkg/config/ -> pkg/config.
+corpus_dir() {
+  local pkg="${1#./}"
+  printf '%s/testdata/fuzz/%s' "${pkg%/}" "$2"
+}
+
+# corpus_snapshot lists the reproducers currently on disk for one target, one
+# per line and sorted, or nothing at all when the directory does not exist.
+#
+# `cd | ls -A` rather than `find -printf`, which is GNU-only: this script is
+# what `make fuzz` runs, so it has to work on a contributor's machine as well
+# as on the runner.
+corpus_snapshot() {
+  [ -d "$1" ] || return 0
+  (cd "$1" && ls -A) | sort
+}
+
 status=0
 
-for target in "$@"; do
-  echo "=== fuzzing $target for $FUZZTIME ==="
-  log="$(mktemp)"
+for spec in "$@"; do
+  # Everything before the last colon is the package; no colon means $FUZZPKG.
+  # Split this way round because an import path can contain a colon far more
+  # plausibly than a Go identifier can.
+  if [ "$spec" = "${spec##*:}" ]; then
+    pkg="$FUZZPKG"
+    target="$spec"
+  else
+    pkg="${spec%:*}"
+    target="${spec##*:}"
+  fi
 
-  go test "$FUZZPKG" -run XXX -fuzz "$target" -fuzztime "$FUZZTIME" >"$log" 2>&1
+  echo "=== fuzzing $target in $pkg for $FUZZTIME ==="
+  log="$(mktemp)"
+  corpus="$(corpus_dir "$pkg" "$target")"
+  before="$(corpus_snapshot "$corpus")"
+
+  # -run '^$' rather than a name that happens to match nothing: the unit tests
+  # of these packages are not what is being measured, and an unanchored
+  # pattern would eventually match one by accident.
+  #
+  # -fuzz is anchored for the same reason. `go test` refuses to fuzz when the
+  # pattern matches more than one target, so an unanchored prefix — FuzzImport
+  # against pkg/planio's YAML, JSON and TOML targets — fails the run with a
+  # message about the pattern rather than fuzzing anything.
+  "$GO" test "$pkg" -run '^$' -fuzz "^${target}\$" -fuzztime "$FUZZTIME" >"$log" 2>&1
   rc=$?
   cat "$log"
 
@@ -72,15 +128,18 @@ for target in "$@"; do
     continue
   fi
 
-  # A reproducer on disk is a finding, whatever else the log says.
-  if grep -q 'Failing input written to' "$log"; then
-    echo "::error title=$target::the fuzzer found a crashing input; the reproducer is in the fuzz-corpus artifact"
+  # A reproducer written during this run is a finding, whatever else the log
+  # says.
+  new="$(comm -13 <(printf '%s\n' "$before") <(corpus_snapshot "$corpus"))"
+  if [ -n "$new" ]; then
+    echo "::error title=$target::the fuzzer found a crashing input; the reproducer is in the fuzz-corpus artifact:" \
+         "$(printf '%s' "$new" | tr '\n' ' ')"
     status=1
     rm -f "$log"
     continue
   fi
-  if [ -d "$CORPUS/$target" ] && [ -n "$(ls -A "$CORPUS/$target" 2>/dev/null)" ]; then
-    echo "::error title=$target::a reproducer exists at $CORPUS/$target but the run did not name it; treating as a finding"
+  if grep -q 'Failing input written to' "$log"; then
+    echo "::error title=$target::the fuzzer reported a crashing input; see the log above"
     status=1
     rm -f "$log"
     continue

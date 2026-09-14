@@ -53,6 +53,21 @@ jobs:
           fi
           echo "all files are gofmt-clean"
 
+      - name: No package is orphaned
+        # tests/arch is a structural gate, which is why it belongs here rather
+        # than in the test job: it parses the module with go/ast and reports
+        # packages that nothing imports. That state is invisible to everything
+        # else in this workflow — an unreferenced package still builds, still
+        # vets clean, and its own tests still pass — and it is how pkg/adr sat
+        # in the tree as 433 lines of dead feature for months.
+        #
+        # It existed and passed and gated nothing: the suite was in neither a
+        # workflow nor the Makefile, so `go test ./...` was the only thing that
+        # ran it and nobody reads a green line in a 120-package run. Two
+        # seconds here, against the build cache `go vet` above has already
+        # warmed.
+        run: go test -v ./tests/arch/
+
       - name: go.mod and go.sum are tidy
         # Compared against a copy taken just beforehand, not against HEAD.
         # `git diff` would also fire on any unrelated uncommitted change to
@@ -464,6 +479,70 @@ jobs:
           retention-days: 30
           if-no-files-found: ignore
 
+  parser-fuzz:
+    name: Parser fuzzing
+    runs-on: ubuntu-latest
+    # Seven fuzz targets covering every parser in cloop that ingests input a
+    # user did not type — config YAML, the three plan-import formats, the
+    # legacy state.json migration, the relative-deadline parser and the config
+    # validator — were written, documented in CONTRIBUTING.md with a table, and
+    # wired into `make fuzz`, which nothing ran. Only the three protocol
+    # targets in tests/security were gated. So the parsers had fuzz coverage in
+    # the same sense that this repository had a flagship test: it existed and
+    # it was not a gate.
+    #
+    # A separate job rather than more steps on Security Conformance, because
+    # that job is 9 minutes and this is the second-longest after Build and
+    # Test. Running in parallel costs the workflow no wall-clock at all — its
+    # critical path is Build and Test at ~14 minutes — where appending to an
+    # existing job would have pushed a serial chain closer to the timeout cliff
+    # Task 20227 pulled it back from.
+    #
+    # 20s per target, ~3.5 minutes of fuzzing in total. Short on purpose: this
+    # gate is for the shallow panic a refactor introduces, which the corpus
+    # finds in seconds. A deep campaign is `make fuzz FUZZTIME=5m` on a machine
+    # with time to spare, not something to make every push wait for.
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Fuzz every parser that ingests untrusted input
+        # `make fuzz`, not the targets repeated here: the Makefile holds the
+        # list, so adding a target there gates it here with no second edit and
+        # no way for the two to disagree about what is covered.
+        #
+        # The budget is the only thing CI overrides. FUZZTIME defaults to 30s
+        # for a human running this locally; 20s is what fits the shape of this
+        # job, and both go through the same runner, which is what makes a
+        # failure here reproducible with one command.
+        run: make fuzz FUZZTIME=20s
+
+      - name: Upload fuzz failure corpus
+        # A crash writes its reproducer into <pkg>/testdata/fuzz/<Target>/.
+        # Without this it lives only on the runner and is gone before anyone
+        # can look — and that file *is* the bug report: committing it turns it
+        # into a permanent regression seed.
+        #
+        # Globbed rather than listed, so a newly fuzzed package is collected
+        # without editing this. The cost is that the seeds already committed
+        # under pkg/egressbroker and pkg/secretbroker ride along; the script's
+        # error annotation names the file that is actually new.
+        if: failure()
+        uses: actions/upload-artifact@v5
+        with:
+          name: parser-fuzz-corpus
+          path: pkg/*/testdata/fuzz/
+          retention-days: 30
+          if-no-files-found: ignore
+
   docs-drift:
     name: Documentation drift
     runs-on: ubuntu-latest
@@ -607,12 +686,31 @@ jobs:
     # entire process environment, CLOOP_SECRET_KEY and CLOOP_UI_TOKEN included,
     # into every sandbox that held a grant.
     #
-    # continue-on-error until it has three consecutive green runs on main, then
-    # drop this line and make it required. It is advisory *because* it is new,
-    # not because its assertions are soft: the container suites are known to
-    # flake under load, and a new job that gates every PR before its own
-    # stability is established teaches people to ignore it.
-    continue-on-error: true
+    # This job is required. It carried `continue-on-error: true` when it was
+    # added, to be dropped "after three consecutive green runs on main" — and
+    # the condition was met five times over without anyone coming back to it,
+    # which is how an advisory check becomes permanent. Every run of this job
+    # since it was written has passed, with every step green:
+    #
+    #   17 of 17 runs green (eac64f8 .. 71182b7), 57s / 64s / 105s
+    #   min / median / max, and the circuit's own step 10s / 11s / 14s. The
+    #   105s is runner overhead rather than the circuit: that run's steps
+    #   summed to 67s, and its circuit step was 11s — the median.
+    #
+    # The flake risk it was hedging against is real but is not *here*. The
+    # container suites flake under load on a developer box, where one Docker
+    # daemon is shared by everything running at once. On GitHub-hosted runners
+    # each job gets its own VM and its own daemon: in run 71182b7 this job and
+    # Deployment artifacts — the only other job that builds and runs
+    # containers — started in the same second on runners 1000008839 and
+    # 1000008835 respectively, and both passed. So there is no cross-job race
+    # to serialize, and adding `needs:` would buy nothing but latency.
+    #
+    # What is left is the network, which is bounded below rather than tolerated:
+    # the one step that talks to a registry retries, and nothing else does. The
+    # circuit itself is never retried — a second attempt at an assertion that
+    # failed is how a real regression gets re-run away.
+    #
     # Above the sum of the test's own per-step budgets, so a hang trips the
     # step's named deadline — which says what it was waiting for — rather than
     # this one, which cannot.
@@ -629,6 +727,12 @@ jobs:
           cache: true
 
       - name: Build a static cloop for the sandbox
+        # Per-step timeouts from here down, each several times its observed
+        # cost (given in each comment, median over the 17 runs above). The job
+        # deadline alone cannot say which step stopped making progress; these
+        # can, and a step that hangs no longer consumes the whole job's budget
+        # before reporting.
+        timeout-minutes: 5 # observed: 45s
         # CGO_ENABLED=0 is load-bearing rather than an optimisation. The sandbox
         # image is alpine (musl) and the hub bind-mounts its own binary in, so a
         # dynamically linked build dies there with "exec …: no such file or
@@ -653,19 +757,40 @@ jobs:
           }
 
       - name: Pre-pull the pinned sandbox base
+        timeout-minutes: 4 # observed: 1s, plus up to ~30s of backoff on retry
         # The base is pinned by digest in tests/flagship, and pulling it in a
         # step of its own means a registry hiccup fails *here*, named, rather
         # than inside the image build the test drives — where it would read as
         # a failure of the circuit. Nothing is pulled once the circuit is
         # running: the container driver passes --pull=never.
+        #
+        # This is the one step in the job that retries, and the reason it is
+        # allowed to is that it is the one step whose failure is definitionally
+        # not a defect in cloop. It contains a single `docker pull` against
+        # Docker Hub — which rate-limits by source IP, and hosted runners share
+        # theirs with every other account on the fleet — so a 429 or a reset
+        # connection here says nothing about the change under test. Everything
+        # downstream is an assertion about this repository's code and is run
+        # exactly once.
         run: |
           set -euo pipefail
           digest=$(grep -oE 'alpine@sha256:[0-9a-f]{64}' tests/flagship/flagship_test.go | head -1)
           [ -n "$digest" ] || { echo "::error::no pinned base image found in tests/flagship"; exit 1; }
           echo "pinned base: $digest"
-          docker pull "$digest"
+          for attempt in 1 2 3; do
+            if docker pull "$digest"; then
+              echo "pulled on attempt $attempt"
+              exit 0
+            fi
+            echo "::warning::pull attempt $attempt failed"
+            sleep $((attempt * 10))
+          done
+          echo "::error::could not pull $digest after 3 attempts; this is the registry," \
+               "not the circuit — the job asserts nothing about cloop until this succeeds"
+          exit 1
 
       - name: Run the circuit
+        timeout-minutes: 21 # observed: 12s; -timeout 20m below fires first
         env:
           CLOOP_FLAGSHIP_E2E: "1"
           CLOOP_FLAGSHIP_BIN: /tmp/cloop-flagship-bin
@@ -674,9 +799,29 @@ jobs:
           CLOOP_FLAGSHIP_KEEP: "1"
         # -timeout above the test's own budgets for the same reason as
         # timeout-minutes: the test's deadlines are the informative ones.
-        run: go test ./tests/flagship/ -run TestFlagshipCircuit -v -count=1 -timeout 20m
+        #
+        # The exit code is not sufficient evidence that the circuit ran. The
+        # test skips — exit 0, job green — when CLOOP_FLAGSHIP_E2E is unset or
+        # when docker is absent or unresponsive (requireDocker in
+        # flagship_test.go), both of which are correct on a laptop and silent
+        # here. A required gate that can pass without executing is the exact
+        # thing this job was promoted out of, so assert the outcome rather than
+        # the status: the top-level result line is at column 0, its subtests
+        # are indented, and SKIP and PASS are distinguishable in a way that
+        # `go test`'s status is not.
+        run: |
+          set -euo pipefail
+          go test ./tests/flagship/ -run TestFlagshipCircuit -v -count=1 -timeout 20m \
+            2>&1 | tee /tmp/flagship.log
+          grep -qE '^--- PASS: TestFlagshipCircuit \(' /tmp/flagship.log || {
+            echo "::error::go test succeeded but TestFlagshipCircuit did not pass — it was" \
+                 "skipped. The sandbox claim is unverified for this commit; see the log for" \
+                 "the skip reason (docker unavailable, or CLOOP_FLAGSHIP_E2E lost)."
+            exit 1
+          }
 
       - name: Circuit diagnostics on failure
+        timeout-minutes: 3 # observed: <1s; bounded because it shells out too
         # A failure here is a failure of an eight-step circuit, and the step
         # that failed is rarely the one that broke. The hub's log says what it
         # dispatched and what came back; a surviving container or a surviving

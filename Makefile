@@ -81,14 +81,28 @@ e2e-stack:
 ## fuzz: run each fuzz target for $(FUZZTIME) (default 30s) — see CONTRIBUTING.md
 ##       targets: pkg/config, pkg/planio (yaml/json/toml), pkg/state, pkg/pm,
 ##                pkg/configvalidate. None should panic on hostile input.
+##
+## This list is the single source of truth. CI's Parser fuzzing job runs this
+## same target with a shorter budget rather than repeating the targets in YAML,
+## so a target added here is gated there without a second edit — which is what
+## CONTRIBUTING.md has always told contributors to expect, and what was not
+## previously true: these seven were defined, documented, and run by nothing.
+FUZZ_TARGETS := \
+	./pkg/config/:FuzzLoadConfig \
+	./pkg/planio/:FuzzImportYAML \
+	./pkg/planio/:FuzzImportJSON \
+	./pkg/planio/:FuzzImportTOML \
+	./pkg/state/:FuzzMigrateLegacyJSON \
+	./pkg/pm/:FuzzParseDeadline \
+	./pkg/configvalidate/:FuzzValidate
+
+## Through scripts/fuzz-ci.sh rather than a `go test -fuzz` per line, because
+## two of its distinctions matter locally as much as in CI: Go intermittently
+## reports a clean -fuzztime expiry as a failure (golang/go#72104), and a
+## committed regression seed is not a fresh finding. Both are in the script's
+## header.
 fuzz:
-	$(GO) test -run=^$$ -fuzz=FuzzLoadConfig      -fuzztime=$(FUZZTIME) ./pkg/config/
-	$(GO) test -run=^$$ -fuzz=FuzzImportYAML      -fuzztime=$(FUZZTIME) ./pkg/planio/
-	$(GO) test -run=^$$ -fuzz=FuzzImportJSON      -fuzztime=$(FUZZTIME) ./pkg/planio/
-	$(GO) test -run=^$$ -fuzz=FuzzImportTOML      -fuzztime=$(FUZZTIME) ./pkg/planio/
-	$(GO) test -run=^$$ -fuzz=FuzzMigrateLegacyJSON -fuzztime=$(FUZZTIME) ./pkg/state/
-	$(GO) test -run=^$$ -fuzz=FuzzParseDeadline   -fuzztime=$(FUZZTIME) ./pkg/pm/
-	$(GO) test -run=^$$ -fuzz=FuzzValidate        -fuzztime=$(FUZZTIME) ./pkg/configvalidate/
+	@GO=$(GO) FUZZTIME=$(FUZZTIME) ./scripts/fuzz-ci.sh $(FUZZ_TARGETS)
 
 ## bench: benchmark the hub control-plane hot paths
 ##
