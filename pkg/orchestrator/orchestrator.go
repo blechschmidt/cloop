@@ -22,7 +22,6 @@ import (
 	"github.com/blechschmidt/cloop/pkg/checkpoint"
 	"github.com/blechschmidt/cloop/pkg/clarify"
 	"github.com/blechschmidt/cloop/pkg/coach"
-	"github.com/blechschmidt/cloop/pkg/condition"
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/consensus"
 	"github.com/blechschmidt/cloop/pkg/cost"
@@ -1628,54 +1627,21 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			}
 		}
 
-		task := s.Plan.NextTask()
-		if task == nil {
-			// Auto-skip tasks that are permanently blocked by failed deps
-			skipped := 0
-			for _, t := range s.Plan.Tasks {
-				if t.Status == pm.TaskPending && s.Plan.PermanentlyBlocked(t) {
-					failColor.Printf("⊘ Task %d skipped (blocked by failed dependency): %s\n", t.ID, t.Title)
-					t.Status = pm.TaskSkipped
-					pm.AddAnnotation(t, "ai", "Task skipped: permanently blocked by failed dependency.")
-					skipped++
-				}
-			}
-			if skipped > 0 {
-				s.Save()
-				continue
-			}
-			break
-		}
-
-		// Tag filter: skip tasks that don't match any of the requested tags.
-		if len(o.config.TagFilter) > 0 && !pm.TaskMatchesTags(task, o.config.TagFilter) {
-			color.New(color.Faint).Printf("⊘ Task %d skipped (no matching tag): %s\n", task.ID, task.Title)
-			task.Status = pm.TaskSkipped
-			pm.AddAnnotation(task, "ai", fmt.Sprintf("Task skipped: did not match active tag filter %v.", o.config.TagFilter))
+		// Decide what runs: dependencies, the blocked sweep, the tag filter and
+		// the condition gate, all in GateTasks so this path and runPMParallel
+		// cannot disagree about the outcome or how it is worded.
+		gate := GateTasks(ctx, s.Plan, o.gateConfig(false))
+		printGateDecision(gate, failColor, dimColor)
+		if gate.Skipped() > 0 {
 			s.Save()
+		}
+		if len(gate.Runnable) == 0 {
+			if gate.Exhausted {
+				break
+			}
 			continue
 		}
-
-		// Condition gate: evaluate the task's condition before execution.
-		if task.Condition != "" {
-			condOpts := provider.Options{
-				Model:   s.Model,
-				Timeout: o.config.StepTimeout,
-			}
-			res, condErr := condition.Evaluate(ctx, task, s.Plan, o.provider, condOpts, o.config.WorkDir)
-			if condErr != nil {
-				dimColor.Printf("  condition eval error for task %d (proceeding): %v\n", task.ID, condErr)
-			}
-			if !res.Proceed {
-				color.New(color.Faint).Printf("⊘ Task %d skipped (condition not met): %s\n  Condition: %s\n  Reason: %s\n",
-					task.ID, task.Title, task.Condition, res.Reason)
-				task.Status = pm.TaskSkipped
-				pm.AddAnnotation(task, "ai", fmt.Sprintf("Task skipped: condition gate %q not met. Reason: %s", task.Condition, res.Reason))
-				s.Save()
-				continue
-			}
-			dimColor.Printf("  Condition met for task %d: %s\n", task.ID, res.Reason)
-		}
+		task := gate.Runnable[0]
 
 		// Check max steps limit
 		if s.MaxSteps > 0 && s.CurrentStep >= s.MaxSteps {
@@ -3553,81 +3519,23 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 			return nil
 		}
 
-		// Auto-skip permanently blocked tasks.
-		skipped := 0
-		for _, t := range s.Plan.Tasks {
-			if t.Status == pm.TaskPending && s.Plan.PermanentlyBlocked(t) {
-				failColor.Printf("⊘ Task %d skipped (blocked by failed dependency): %s\n", t.ID, t.Title)
-				t.Status = pm.TaskSkipped
-				pm.AddAnnotation(t, "ai", "Task skipped: permanently blocked by failed dependency (parallel mode).")
-				skipped++
-			}
-		}
-		if skipped > 0 {
+		// Decide what runs: dependencies, the blocked sweep, the tag filter and
+		// the condition gate, all in GateTasks so this path and
+		// runPMSequential cannot disagree about the outcome or how it is
+		// worded. Parallel mode differs only in taking every eligible task
+		// rather than the single highest-priority one.
+		gate := GateTasks(ctx, s.Plan, o.gateConfig(true))
+		printGateDecision(gate, failColor, dimColor)
+		if gate.Skipped() > 0 {
 			s.Save()
+		}
+		if len(gate.Runnable) == 0 {
+			if gate.Exhausted {
+				break
+			}
 			continue
 		}
-
-		ready := s.Plan.ReadyTasks()
-		if len(ready) == 0 {
-			break
-		}
-
-		// Tag filter: skip tasks that don't match any of the requested tags.
-		if len(o.config.TagFilter) > 0 {
-			filtered := ready[:0]
-			for _, t := range ready {
-				if pm.TaskMatchesTags(t, o.config.TagFilter) {
-					filtered = append(filtered, t)
-				} else {
-					color.New(color.Faint).Printf("⊘ Task %d skipped (no matching tag): %s\n", t.ID, t.Title)
-					t.Status = pm.TaskSkipped
-					pm.AddAnnotation(t, "ai", fmt.Sprintf("Task skipped: did not match active tag filter %v (parallel mode).", o.config.TagFilter))
-				}
-			}
-			if len(ready) != len(filtered) {
-				s.Save()
-			}
-			ready = filtered
-			if len(ready) == 0 {
-				continue
-			}
-		}
-
-		// Condition gate: evaluate each task's condition and skip those that fail.
-		{
-			condOpts := provider.Options{
-				Model:   s.Model,
-				Timeout: o.config.StepTimeout,
-			}
-			gated := ready[:0]
-			for _, t := range ready {
-				if t.Condition == "" {
-					gated = append(gated, t)
-					continue
-				}
-				res, condErr := condition.Evaluate(ctx, t, s.Plan, o.provider, condOpts, o.config.WorkDir)
-				if condErr != nil {
-					dimColor.Printf("  condition eval error for task %d (proceeding): %v\n", t.ID, condErr)
-				}
-				if !res.Proceed {
-					color.New(color.Faint).Printf("⊘ Task %d skipped (condition not met): %s\n  Condition: %s\n  Reason: %s\n",
-						t.ID, t.Title, t.Condition, res.Reason)
-					t.Status = pm.TaskSkipped
-					pm.AddAnnotation(t, "ai", fmt.Sprintf("Task skipped: condition gate %q not met (parallel mode). Reason: %s", t.Condition, res.Reason))
-				} else {
-					dimColor.Printf("  Condition met for task %d: %s\n", t.ID, res.Reason)
-					gated = append(gated, t)
-				}
-			}
-			if len(ready) != len(gated) {
-				s.Save()
-			}
-			ready = gated
-			if len(ready) == 0 {
-				continue
-			}
-		}
+		ready := gate.Runnable
 
 		// Daily budget enforcement: abort before spending tokens if any limit is exceeded.
 		if budgetErr := budget.Enforce(o.config.WorkDir, o.config.Budget, o.config.NotifyCfg); budgetErr != nil {
