@@ -176,6 +176,8 @@ func (s *Store) Put(rec oidcauth.SessionRecord) error {
 		RefreshKeyID:      env.KeyID,
 		RefreshWrappedDEK: env.WrappedDEK,
 		RefreshCheckedAt:  rec.RefreshCheckedAt,
+		ClaimsAsOf:        rec.ClaimsAsOf,
+		ClaimsExpireAt:    rec.ClaimsExpireAt,
 	})
 }
 
@@ -242,10 +244,12 @@ func (s *Store) ApplyRefresh(id string, res oidcauth.RefreshResult) error {
 		return err
 	}
 	up := statedb.SessionRefreshUpdate{
-		KeyID:      env.KeyID,
-		WrappedDEK: env.WrappedDEK,
-		Sealed:     env.Ciphertext,
-		CheckedAt:  res.CheckedAt,
+		KeyID:          env.KeyID,
+		WrappedDEK:     env.WrappedDEK,
+		Sealed:         env.Ciphertext,
+		CheckedAt:      res.CheckedAt,
+		ClaimsAsOf:     res.ClaimsAsOf,
+		ClaimsExpireAt: res.ClaimsExpireAt,
 	}
 	if res.ClaimsAsserted {
 		up.Claims = &statedb.SessionClaims{Groups: res.Groups, Roles: res.Roles}
@@ -330,6 +334,8 @@ func (s *Store) toRecord(row statedb.SessionRow) oidcauth.SessionRecord {
 		ExpiresAt:        row.ExpiresAt,
 		RefreshToken:     s.unseal(row),
 		RefreshCheckedAt: row.RefreshCheckedAt,
+		ClaimsAsOf:       row.ClaimsAsOf,
+		ClaimsExpireAt:   row.ClaimsExpireAt,
 	}
 }
 

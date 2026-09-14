@@ -46,7 +46,8 @@ func adminSession(t *testing.T, a *Authenticator) string {
 	t.Helper()
 	sid, err := a.createSession(
 		Identity{Sub: "u1", Email: "alice@example.com", Groups: []string{"admins", "engineering"}},
-		reqWithCookie("x"), "rt-1")
+		reqWithCookie("x"), "rt-1", nil)
+
 	if err != nil {
 		t.Fatal(err)
 	}

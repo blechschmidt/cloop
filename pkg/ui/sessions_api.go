@@ -237,6 +237,20 @@ type sessionView struct {
 	// ago" from "nobody has asked since sign-in".
 	IdPChecked string `json:"idp_checked_at,omitempty"`
 
+	// ClaimsAsOf and ClaimAgeSeconds date the session's *claims* rather than
+	// its grant, and ClaimsStale says whether they are currently too old to
+	// authorise anything above operator (Task 20273).
+	//
+	// Reported next to IdPChecked precisely because the two routinely disagree
+	// and the difference is the thing an operator needs to see. A provider that
+	// renews the grant without restating claims advances IdPChecked every
+	// interval while ClaimsAsOf stands still — which reads as a healthy,
+	// freshly-checked session and is in fact one carrying sign-in-time
+	// authority. Showing only the first would keep that invisible.
+	ClaimsAsOf      string `json:"claims_as_of,omitempty"`
+	ClaimAgeSeconds int64  `json:"claim_age_seconds"`
+	ClaimsStale     bool   `json:"claims_stale"`
+
 	// Current marks the caller's own session so the panel can label it and
 	// warn before terminating it.
 	Current bool `json:"current"`
@@ -267,6 +281,19 @@ type sessionsListResponse struct {
 	// is a property of the provider's responses, not of cloop's config.
 	ClaimsReasserted uint64 `json:"claims_reasserted"`
 	ClaimsUnverified uint64 `json:"claims_unverified"`
+
+	// MaxClaimAgeSeconds is the bound a privileged action re-checks against,
+	// zero when the deployment disabled it, and ClaimsRefused counts the
+	// privileged actions this process has refused because the bound could not
+	// be met (Task 20273).
+	//
+	// The pair belongs here rather than in a log line for the same reason the
+	// two counters above do: the panel is where somebody looks when an
+	// administrator reports that a grant button stopped working, and a refusal
+	// count climbing next to a policy of five minutes answers that in one
+	// glance.
+	MaxClaimAgeSeconds int64  `json:"max_claim_age_seconds"`
+	ClaimsRefused      uint64 `json:"claims_refused"`
 
 	// Total is how many sessions exist, which differs from len(Sessions) only
 	// when the response was capped. Reported rather than silently truncated:
@@ -308,11 +335,19 @@ func (s *Server) handleSessionsList(w http.ResponseWriter, r *http.Request) {
 	if len(rows) > maxSessionsInResponse {
 		rows, truncated = rows[:maxSessionsInResponse], true
 	}
+	maxClaimAge := s.OIDC.MaxClaimAge()
 	views := make([]sessionView, 0, len(rows))
 	for _, rec := range rows {
-		views = append(views, toSessionView(rec, now, currentID))
+		views = append(views, toSessionView(rec, now, currentID, maxClaimAge))
 	}
 	reasserted, unverified := s.OIDC.RefreshClaimStats()
+	// A disabled bound is reported as zero rather than as a negative sentinel:
+	// the panel's question is "how fresh must claims be", and "not at all" is
+	// the honest rendering of the opt-out.
+	claimAgeSeconds := int64(0)
+	if maxClaimAge > 0 {
+		claimAgeSeconds = int64(maxClaimAge.Seconds())
+	}
 	jsonOK(w, sessionsListResponse{
 		Sessions:           views,
 		AbsoluteTTLSeconds: int64(s.OIDC.SessionTTL().Seconds()),
@@ -321,6 +356,8 @@ func (s *Server) handleSessionsList(w http.ResponseWriter, r *http.Request) {
 		IdPRevocation:      s.SessionStoreSealsRefreshTokens(),
 		ClaimsReasserted:   reasserted,
 		ClaimsUnverified:   unverified,
+		MaxClaimAgeSeconds: claimAgeSeconds,
+		ClaimsRefused:      s.OIDC.ClaimsRefused(),
 		Total:              total,
 		Truncated:          truncated,
 	})
@@ -385,7 +422,7 @@ func (s *Server) handleLogoutAll(w http.ResponseWriter, r *http.Request) {
 // helpers
 // ---------------------------------------------------------------------------
 
-func toSessionView(rec oidcauth.SessionRecord, now time.Time, currentID string) sessionView {
+func toSessionView(rec oidcauth.SessionRecord, now time.Time, currentID string, maxClaimAge time.Duration) sessionView {
 	v := sessionView{
 		ID:          rec.ID,
 		Subject:     rec.Identity.Sub,
@@ -398,6 +435,14 @@ func toSessionView(rec oidcauth.SessionRecord, now time.Time, currentID string) 
 		ExpiresAt:   formatSessionTime(rec.ExpiresAt),
 		IdPChecked:  formatSessionTime(rec.RefreshCheckedAt),
 		Current:     currentID != "" && rec.ID == currentID,
+
+		// ClaimsAssertedAt, not ClaimsAsOf: a session predating the claim
+		// columns reports its sign-in, which is when its claims were in fact
+		// asserted. Rendering those as "never" would put a red row against
+		// every live session the moment the binary rolls.
+		ClaimsAsOf:      formatSessionTime(rec.ClaimsAssertedAt()),
+		ClaimAgeSeconds: int64(rec.ClaimAge(now).Seconds()),
+		ClaimsStale:     rec.ClaimsStale(now, maxClaimAge),
 	}
 	if !rec.LastSeen.IsZero() {
 		v.IdleSeconds = int64(now.Sub(rec.LastSeen).Seconds())

@@ -41,6 +41,7 @@ package oidcauth
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -52,6 +53,41 @@ import (
 // limit is here so a compromised or malfunctioning IdP cannot make the hub read
 // an unbounded body once per session per revalidation interval.
 const maxUserinfoBytes = 1 << 20 // 1 MiB
+
+// ErrClaimsRepudiated marks a userinfo response in which the provider actively
+// declined to vouch for the session — as opposed to one it simply could not
+// answer (Task 20273).
+//
+// The distinction is the whole reason it exists. "The endpoint timed out" and
+// "the endpoint said your token is not valid" arrive at the same call site and
+// mean opposite things: the first is the hub's problem and must not change what
+// a session may do, the second is the provider's verdict on this session's
+// authorization and must.
+var ErrClaimsRepudiated = errors.New("oidcauth: the identity provider refused to confirm this session's claims")
+
+// userinfoRepudiates reports whether a non-200 userinfo response is the
+// provider declining to vouch, rather than failing to answer.
+//
+// RFC 6750 §3.1 puts the reason in WWW-Authenticate rather than the body, so
+// that is where it is read from. A bare 401 counts on its own: the header is
+// recommended, not universal, and a provider that rejects a bearer token
+// without explaining why has still rejected it.
+//
+// 403 counts only with an explicit invalid_token. A 403 alone is ambiguous in
+// exactly the direction that matters — it is what a provider returns when the
+// token is perfectly valid but lacks a scope, which is a deployment
+// misconfiguration and must not be read as a verdict about the user. Anything
+// else (404, 5xx, a gateway's HTML error page) is an endpoint that did not
+// answer and is left to the unreachable path.
+func userinfoRepudiates(resp *http.Response) bool {
+	switch resp.StatusCode {
+	case http.StatusUnauthorized:
+		return true
+	case http.StatusForbidden:
+		return strings.Contains(strings.ToLower(resp.Header.Get("WWW-Authenticate")), "invalid_token")
+	}
+	return false
+}
 
 // userinfoIdentity fetches and validates the userinfo response for the session
 // the access token belongs to.
@@ -89,13 +125,28 @@ func (a *Authenticator) userinfoIdentity(ctx context.Context, accessToken string
 		return nil, fmt.Errorf("oidcauth: userinfo read: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		// 401 here means the access token was rejected. That is *not* treated
-		// as a revoked grant: the refresh itself had just succeeded, so the
-		// likelier readings are a provider that does not accept this token at
-		// userinfo, or one that requires a scope this deployment did not
-		// request. Signing the user out over that would turn a claim-freshness
-		// improvement into a logout bug.
-		return nil, fmt.Errorf("oidcauth: userinfo returned %s", resp.Status)
+		err := fmt.Errorf("oidcauth: userinfo returned %s", resp.Status)
+		if userinfoRepudiates(resp) {
+			// The provider rejected an access token it minted seconds ago, on
+			// this very session's refresh. It is still not treated as a revoked
+			// grant — the refresh itself succeeded, and the competing readings
+			// (a provider that does not accept this token at userinfo, one that
+			// wants a scope this deployment did not request) are misconfigurations
+			// rather than statements about the user, so terminating here would
+			// turn a claim-freshness improvement into a fleet-wide logout bug.
+			//
+			// What it is no longer treated as is nothing at all. Before Task
+			// 20273 this returned an undifferentiated error that the caller
+			// recorded as "claims unverified" and then kept the sign-in-time
+			// claims indefinitely — so the one response in which the IdP
+			// explicitly declines to vouch for a session was the response that
+			// changed the least. It is now reported as a repudiation:
+			// ErrClaimsRepudiated marks the session's claims expired as of this
+			// instant, which leaves reads working and refuses everything above
+			// operator until a later read succeeds.
+			return nil, fmt.Errorf("%w: %w", ErrClaimsRepudiated, err)
+		}
+		return nil, err
 	}
 
 	claims, err := a.decodeUserinfo(ctx, resp.Header.Get("Content-Type"), body)

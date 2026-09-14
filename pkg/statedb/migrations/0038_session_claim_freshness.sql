@@ -1,0 +1,67 @@
+-- 0038_session_claim_freshness: date a session's claims, not just its grant
+-- (Task 20273).
+--
+-- 0017_sessions gave every session a refresh_checked_at, and for two tasks that
+-- column has quietly answered a question nobody asked it. It records when the
+-- identity provider last *renewed the grant* — written on every revalidation
+-- attempt, including the ones that learned nothing about the user — which is
+-- exactly right for bounding IdP-initiated revocation and exactly wrong for
+-- bounding authorization staleness.
+--
+-- The two come apart on most providers. RFC 6749 does not require an id_token
+-- on a refresh, and Okta, Auth0 and Keycloak all omit one under common
+-- configurations; 0021-era cloop then asked the userinfo endpoint instead, and
+-- on a deployment with neither, refresh_checked_at advances every fifteen
+-- minutes while groups_json never moves. A hub reading that column as "claims
+-- are fifteen minutes old" would be reporting a freshness it does not have,
+-- and would grant admin on claims captured at sign-in days earlier.
+--
+-- So claims get their own two columns:
+--
+--   claims_as_of      when the provider last asserted this row's groups_json
+--                     and roles_json. Written only on the branch that actually
+--                     replaces them — a verified id_token from the refresh, a
+--                     userinfo response, or the id_token at sign-in. Empty on
+--                     rows written before this migration, which pkg/oidcauth
+--                     reads as "asserted at issued_at": true, since a session
+--                     cannot exist without one verified id_token, and the
+--                     honest alternative ("never") would make every live
+--                     session on the hub unable to perform a privileged action
+--                     the instant the binary rolls.
+--
+--   claims_expire_at  the provider's own deadline on that assertion, from the
+--                     access token's expires_in — which cloop has parsed and
+--                     discarded since the first token exchange. A provider
+--                     issuing five-minute tokens is stating how long it stands
+--                     behind the authorization that produced these claims, and
+--                     honouring it costs one field and gives that deployment
+--                     the tighter re-check it configured without mirroring the
+--                     number into cloop's YAML.
+--
+--                     It is also how a *repudiation* is recorded. When userinfo
+--                     answers 401 for an access token the same refresh minted
+--                     seconds earlier, this is set to that instant: the row
+--                     keeps saying when the claims were last true and starts
+--                     saying they have stopped being so. Reads continue;
+--                     anything above operator is refused until a later
+--                     assertion succeeds. Before this, that 401 was explicitly
+--                     ignored — the one response in which the provider declines
+--                     to vouch for a session was the response that changed the
+--                     least.
+--
+-- Both are checked against max_claim_age before a permission above operator
+-- (secret.grant, user.manage, token.admin, session.admin, executor.manage,
+-- config.write), whichever deadline falls first. Read paths never consult
+-- them and stay on the background cadence, so the authenticated hot path is
+-- unchanged — see pkg/oidcauth/bench_test.go, which measures it.
+--
+-- # Why two ALTERs and not a rebuild
+--
+-- Appended columns with defaults and no constraints are the one ALTER
+-- schema_compat.go classifies as additive, so a hub still running the previous
+-- build keeps opening these databases instead of blanking its dashboard until
+-- the next rebuild. Nothing in pkg/statedb issues SELECT *, so a binary
+-- compiled before these columns cannot see them and cannot trip over them.
+
+ALTER TABLE sessions ADD COLUMN claims_as_of TEXT NOT NULL DEFAULT '';
+ALTER TABLE sessions ADD COLUMN claims_expire_at TEXT NOT NULL DEFAULT '';

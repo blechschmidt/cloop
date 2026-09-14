@@ -47,6 +47,15 @@ type uiFakeIdP struct {
 	roles  []string
 
 	lastNonce string
+
+	// issueRefresh, when set, is the refresh_token handed back with the
+	// authorization code — which is what makes a session revalidatable at all.
+	// The refresh grant then answers with an id_token built from the *current*
+	// groups and roles above, so a test that mutates them is expressing "the
+	// administrator was removed from the group" exactly as it appears on the
+	// wire (Task 20273).
+	issueRefresh    string
+	refreshRequests int
 }
 
 // testIdPKey is generated once per test binary and shared by every fake IdP.
@@ -106,6 +115,10 @@ func newUIFakeIdP(t *testing.T) *uiFakeIdP {
 	})
 	mux.HandleFunc("/token", func(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
+		refresh := r.PostForm.Get("grant_type") == "refresh_token"
+		if refresh {
+			idp.refreshRequests++
+		}
 		header, _ := json.Marshal(map[string]string{"alg": "RS256", "kid": "k1"})
 		claims := map[string]any{
 			"iss":   idp.server.URL,
@@ -116,6 +129,11 @@ func newUIFakeIdP(t *testing.T) *uiFakeIdP {
 			"nonce": idp.lastNonce,
 			"email": idp.email,
 			"name":  idp.name,
+		}
+		if refresh {
+			// No authorization request to bind to, so no nonce — matching what
+			// a real provider returns and what verifyIDToken expects here.
+			delete(claims, "nonce")
 		}
 		// Omit empty claims entirely: an IdP that releases no groups must
 		// be indistinguishable from one that releases an empty list.
@@ -132,10 +150,14 @@ func newUIFakeIdP(t *testing.T) *uiFakeIdP {
 		if err != nil {
 			idp.t.Fatalf("sign: %v", err)
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{
+		resp := map[string]any{
 			"access_token": "at", "token_type": "Bearer", "expires_in": 3600,
 			"id_token": input + "." + base64.RawURLEncoding.EncodeToString(sig),
-		})
+		}
+		if idp.issueRefresh != "" {
+			resp["refresh_token"] = idp.issueRefresh
+		}
+		_ = json.NewEncoder(w).Encode(resp)
 	})
 	idp.server = httptest.NewServer(mux)
 	t.Cleanup(idp.server.Close)

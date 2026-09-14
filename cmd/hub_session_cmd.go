@@ -98,15 +98,16 @@ var hubSessionListCmd = &cobra.Command{
 		}
 		now := time.Now()
 		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-		fmt.Fprintln(w, "ID\tIDENTITY\tIP\tIDLE\tEXPIRES\tIDP CHECKED")
+		fmt.Fprintln(w, "ID\tIDENTITY\tIP\tIDLE\tEXPIRES\tIDP CHECKED\tCLAIM AGE")
 		for _, rec := range records {
-			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 				truncateField(rec.ID, 16),
 				truncateField(sessionIdentityLabel(rec), 32),
 				truncateField(orDash(rec.IP), 20),
 				durationLabel(now.Sub(rec.LastSeen)),
 				expiryLabel(rec.ExpiresAt),
-				lastUsedLabel(rec.RefreshCheckedAt))
+				lastUsedLabel(rec.RefreshCheckedAt),
+				claimAgeLabel(rec, now))
 		}
 		return w.Flush()
 	},
@@ -282,6 +283,30 @@ func sessionIdentityLabel(rec oidcauth.SessionRecord) string {
 	return "(unknown)"
 }
 
+// claimAgeLabel renders how long ago the identity provider last asserted this
+// session's groups and roles (Task 20273).
+//
+// A separate column from IDP CHECKED because the two answer different questions
+// and, on most providers, disagree. IDP CHECKED says the grant was alive; this
+// says the *authority* was confirmed. A hub whose provider renews grants without
+// restating claims shows a fresh IDP CHECKED beside a claim age of hours, and
+// that gap is the single most useful thing this table can tell an operator
+// asking why a demotion has not taken effect.
+//
+// "expired" is the repudiated case: the provider declined to vouch, so the
+// claims have a date but are no longer usable for a privileged action.
+func claimAgeLabel(rec oidcauth.SessionRecord, now time.Time) string {
+	at := rec.ClaimsAssertedAt()
+	if at.IsZero() {
+		return "unknown"
+	}
+	label := durationLabel(now.Sub(at))
+	if !rec.ClaimsExpireAt.IsZero() && !now.Before(rec.ClaimsExpireAt) {
+		label += " (expired)"
+	}
+	return label
+}
+
 func revokeSelectorLabel(id, identity string, all bool) string {
 	switch {
 	case all:
@@ -307,6 +332,12 @@ func sessionsToJSON(records []oidcauth.SessionRecord) []map[string]any {
 			"last_seen":      rec.LastSeen.UTC(),
 			"expires_at":     rec.ExpiresAt.UTC(),
 			"idp_checked_at": rec.RefreshCheckedAt.UTC(),
+			// Claim freshness (Task 20273) — dates the groups and roles rather
+			// than the grant. Emitted for scripting the same question the table
+			// answers: which sessions are carrying authority nobody has
+			// re-confirmed.
+			"claims_as_of":     rec.ClaimsAssertedAt().UTC(),
+			"claims_expire_at": rec.ClaimsExpireAt.UTC(),
 		})
 	}
 	return out

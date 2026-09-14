@@ -21,6 +21,8 @@ const sessState = {
   idleTimeout: 0,
   durable: true,
   idpRevocation: true,
+  maxClaimAge: 0,
+  claimsRefused: 0,
 };
 
 window.loadSessions = function() {
@@ -33,6 +35,8 @@ window.loadSessions = function() {
     sessState.idleTimeout   = d.idle_timeout_seconds || 0;
     sessState.durable       = d.durable !== false;
     sessState.idpRevocation = d.idp_revocation !== false;
+    sessState.maxClaimAge   = d.max_claim_age_seconds || 0;
+    sessState.claimsRefused = d.claims_refused || 0;
     _sessRenderPolicy();
     _sessRenderBanner();
     _sessRender();
@@ -49,10 +53,27 @@ function _sessRenderPolicy() {
   const idle = sessState.idleTimeout > 0
     ? 'go unused for ' + _secFmtDuration(sessState.idleTimeout)
     : 'never time out on inactivity';
+  // The claim-freshness sentence is a separate statement because it bounds a
+  // different thing (Task 20273): the two clauses above say when a session
+  // ends, this one says how current the *authority* inside a live session must
+  // be before it is used for something consequential.
+  const claims = sessState.maxClaimAge > 0
+    ? ' Group and role claims older than ' + esc(_secFmtDuration(sessState.maxClaimAge)) +
+      ' are re-checked with the identity provider before any action above operator ' +
+      '(granting credentials, minting tokens, managing users or executors), and the action is refused ' +
+      'if it cannot be confirmed.'
+    : ' Claim-freshness checking is disabled (<code>max_claim_age_minutes: -1</code>), so privileged ' +
+      'actions use the groups and roles captured at sign-in however old they are.';
+  const refused = sessState.claimsRefused > 0
+    ? ' <strong>' + sessState.claimsRefused + '</strong> privileged action' +
+      (sessState.claimsRefused === 1 ? ' has' : 's have') +
+      ' been refused since startup because claims could not be confirmed.'
+    : '';
   el.innerHTML =
     'Sessions end after ' + esc(_secFmtDuration(sessState.absoluteTTL)) + ' regardless of activity, or sooner if they ' +
     esc(idle) + '. Terminating one takes effect on this hub immediately and on any other replica within 30 seconds; ' +
-    'work already running on behalf of that user is not interrupted, only their access to start more.';
+    'work already running on behalf of that user is not interrupted, only their access to start more.' +
+    claims + refused;
 }
 
 // _sessRenderBanner surfaces the two degraded modes where the operator will act
@@ -116,6 +137,7 @@ function _sessRender() {
         esc(_secFmtDuration(Math.max(0, s.expires_in_seconds || 0))) + '</span></td>' +
       '<td class="audit-time sec-hide-sm">' +
         esc(s.idp_checked_at ? _secFmtTime(s.idp_checked_at) : 'never') + '</td>' +
+      '<td>' + _sessClaimCell(s) + '</td>' +
       '<td><div class="sec-actions">' +
         '<button class="btn" data-global-perm="session.admin" data-sess-revoke="' + esc(s.id) + '">' +
           (s.current ? 'End mine' : 'Terminate') + '</button>' +
@@ -127,6 +149,30 @@ function _sessRender() {
     btn.addEventListener('click', () => revokeSession(btn.getAttribute('data-sess-revoke')));
   });
   _secApplyGating();
+}
+
+// _sessClaimCell renders how long ago the IdP last asserted this session's
+// groups and roles, flagged when that is past the configured bound (Task 20273).
+//
+// Worth its own column next to "IdP checked" precisely because operators read
+// that one as claim freshness and on most providers it is not: a refresh grant
+// that returns no id_token renews the session without restating who the user
+// is. A row showing "IdP checked: 30s ago / Claim age: 6h" is a session whose
+// authority nobody has re-confirmed since this morning, and there is no other
+// place in the dashboard that fact appears.
+//
+// The stale flag is the server's verdict, not a client-side comparison against
+// max_claim_age: the provider's own access-token expiry can make claims stale
+// earlier than the configured bound, and re-deriving that here would let the
+// panel disagree with the gate that actually refuses the action.
+function _sessClaimCell(s) {
+  if (!s.claims_as_of) return '<span class="sec-count">unknown</span>';
+  const age = _secFmtDuration(Math.max(0, s.claim_age_seconds || 0));
+  if (!s.claims_stale) return esc(age);
+  return '<span class="sec-chip warn" title="' +
+    esc('The identity provider has not confirmed these claims recently enough for a privileged action. ' +
+        'The next one will re-check synchronously.') +
+    '">' + esc(age) + ' &middot; stale</span>';
 }
 
 // _sessIdleCell colours the idle column against the configured timeout, so a

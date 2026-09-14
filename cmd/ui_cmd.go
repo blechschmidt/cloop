@@ -150,6 +150,7 @@ but not for anything reachable from a network.`,
 					fmt.Printf("warning: sessions are process-local (%v) — a restart will sign every user out\n", storeWarn)
 				}
 				refreshMinutes := cfg.UI.OIDC.EffectiveRefreshIntervalMinutes()
+				claimAgeMinutes := cfg.UI.OIDC.EffectiveMaxClaimAgeMinutes()
 				auth, oidcErr := oidcauth.New(oidcauth.Config{
 					Enabled:         true,
 					Issuer:          cfg.UI.OIDC.Issuer,
@@ -161,10 +162,15 @@ but not for anything reachable from a network.`,
 					SessionTTL:      time.Duration(cfg.UI.OIDC.EffectiveSessionTTLHours()) * time.Hour,
 					IdleTimeout:     time.Duration(cfg.UI.OIDC.EffectiveIdleTimeoutHours()) * time.Hour,
 					RefreshInterval: time.Duration(refreshMinutes) * time.Minute,
-					ClockSkew:       cfg.UI.OIDC.EffectiveClockSkew(),
-					CookieSecure:    cfg.UI.OIDC.CookieSecure,
-					Store:           store,
-					Audit:           srv.SessionAuditSink(),
+					// Bounded authorization staleness for privileged actions
+					// (Task 20273). Independent of RefreshInterval on purpose:
+					// a hub that disabled the background pass still may not
+					// grant a credential on claims of unknown age.
+					MaxClaimAge:  time.Duration(claimAgeMinutes) * time.Minute,
+					ClockSkew:    cfg.UI.OIDC.EffectiveClockSkew(),
+					CookieSecure: cfg.UI.OIDC.CookieSecure,
+					Store:        store,
+					Audit:        srv.SessionAuditSink(),
 					// Per-identity session cap (Task 20182). Resolved live
 					// rather than captured, so an admin lowering somebody's
 					// quota takes effect at their next sign-in without a

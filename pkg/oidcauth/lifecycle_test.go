@@ -129,7 +129,7 @@ func TestSessionSurvivesRestart(t *testing.T) {
 	rec := &auditRecorder{}
 
 	before := newLifecycleAuth(t, idp, store, nil, func(c *Config) { c.Audit = rec.sink })
-	sid, err := before.createSession(Identity{Sub: "u1", Email: "alice@example.com"}, reqWithCookie("x"), "")
+	sid, err := before.createSession(Identity{Sub: "u1", Email: "alice@example.com"}, reqWithCookie("x"), "", nil)
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -155,7 +155,7 @@ func TestOnlyTheHashIsStored(t *testing.T) {
 	store := NewMemorySessionStore(0)
 	a := newLifecycleAuth(t, idp, store, nil, nil)
 
-	sid, err := a.createSession(Identity{Sub: "u1"}, reqWithCookie("x"), "")
+	sid, err := a.createSession(Identity{Sub: "u1"}, reqWithCookie("x"), "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -189,7 +189,7 @@ func TestIdleTimeoutEndsSession(t *testing.T) {
 		c.Audit = rec.sink
 	})
 
-	sid, err := a.createSession(Identity{Sub: "u1"}, reqWithCookie("x"), "")
+	sid, err := a.createSession(Identity{Sub: "u1"}, reqWithCookie("x"), "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -229,7 +229,7 @@ func TestAbsoluteExpiryEndsSession(t *testing.T) {
 		c.Audit = rec.sink
 	})
 
-	sid, err := a.createSession(Identity{Sub: "u1"}, reqWithCookie("x"), "")
+	sid, err := a.createSession(Identity{Sub: "u1"}, reqWithCookie("x"), "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -274,7 +274,7 @@ func TestSweepExpiredAuditsOnce(t *testing.T) {
 		c.Audit = rec.sink
 	})
 	for i := 0; i < 3; i++ {
-		if _, err := a.createSession(Identity{Sub: "u1"}, reqWithCookie("x"), ""); err != nil {
+		if _, err := a.createSession(Identity{Sub: "u1"}, reqWithCookie("x"), "", nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -302,7 +302,7 @@ func TestRevokeThenRequestIsRefused(t *testing.T) {
 	rec := &auditRecorder{}
 	a := newLifecycleAuth(t, idp, NewMemorySessionStore(0), nil, func(c *Config) { c.Audit = rec.sink })
 
-	sid, err := a.createSession(Identity{Sub: "u1", Email: "alice@example.com"}, reqWithCookie("x"), "")
+	sid, err := a.createSession(Identity{Sub: "u1", Email: "alice@example.com"}, reqWithCookie("x"), "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -342,19 +342,19 @@ func TestLogoutAllEndsOtherSessionsOnly(t *testing.T) {
 	rec := &auditRecorder{}
 	a := newLifecycleAuth(t, idp, NewMemorySessionStore(0), nil, func(c *Config) { c.Audit = rec.sink })
 
-	mine, err := a.createSession(Identity{Sub: "u1", Email: "alice@example.com"}, reqWithCookie("x"), "")
+	mine, err := a.createSession(Identity{Sub: "u1", Email: "alice@example.com"}, reqWithCookie("x"), "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	var others []string
 	for i := 0; i < 2; i++ {
-		sid, err := a.createSession(Identity{Sub: "u1", Email: "alice@example.com"}, reqWithCookie("x"), "")
+		sid, err := a.createSession(Identity{Sub: "u1", Email: "alice@example.com"}, reqWithCookie("x"), "", nil)
 		if err != nil {
 			t.Fatal(err)
 		}
 		others = append(others, sid)
 	}
-	bob, err := a.createSession(Identity{Sub: "u2", Email: "bob@example.com"}, reqWithCookie("x"), "")
+	bob, err := a.createSession(Identity{Sub: "u2", Email: "bob@example.com"}, reqWithCookie("x"), "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -388,7 +388,7 @@ func TestLogoutClearsCookieAndSession(t *testing.T) {
 	rec := &auditRecorder{}
 	a := newLifecycleAuth(t, idp, NewMemorySessionStore(0), nil, func(c *Config) { c.Audit = rec.sink })
 
-	sid, err := a.createSession(Identity{Sub: "u1"}, reqWithCookie("x"), "")
+	sid, err := a.createSession(Identity{Sub: "u1"}, reqWithCookie("x"), "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -427,7 +427,7 @@ func TestRefreshRejectionTerminatesSession(t *testing.T) {
 		c.Audit = rec.sink
 	})
 
-	sid, err := a.createSession(Identity{Sub: "u1", Email: "alice@example.com"}, reqWithCookie("x"), "rt-1")
+	sid, err := a.createSession(Identity{Sub: "u1", Email: "alice@example.com"}, reqWithCookie("x"), "rt-1", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -467,7 +467,7 @@ func TestRefreshOutageKeepsSession(t *testing.T) {
 		c.Audit = rec.sink
 	})
 
-	sid, err := a.createSession(Identity{Sub: "u1"}, reqWithCookie("x"), "rt-1")
+	sid, err := a.createSession(Identity{Sub: "u1"}, reqWithCookie("x"), "rt-1", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -504,7 +504,7 @@ func TestRefreshRotationStoresNewToken(t *testing.T) {
 	store := NewMemorySessionStore(0)
 	a := newLifecycleAuth(t, idp, store, clk, func(c *Config) { c.RefreshInterval = 15 * time.Minute })
 
-	sid, err := a.createSession(Identity{Sub: "u1"}, reqWithCookie("x"), "rt-1")
+	sid, err := a.createSession(Identity{Sub: "u1"}, reqWithCookie("x"), "rt-1", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -543,7 +543,7 @@ func TestNoRefreshTokenSkipsRevalidation(t *testing.T) {
 	a := newLifecycleAuth(t, idp, NewMemorySessionStore(0), clk, func(c *Config) {
 		c.RefreshInterval = 15 * time.Minute
 	})
-	if _, err := a.createSession(Identity{Sub: "u1"}, reqWithCookie("x"), ""); err != nil {
+	if _, err := a.createSession(Identity{Sub: "u1"}, reqWithCookie("x"), "", nil); err != nil {
 		t.Fatal(err)
 	}
 	clk.advance(time.Hour)
@@ -562,7 +562,7 @@ func TestRevalidationDisabled(t *testing.T) {
 	a := newLifecycleAuth(t, idp, NewMemorySessionStore(0), nil, func(c *Config) {
 		c.RefreshInterval = -1
 	})
-	if _, err := a.createSession(Identity{Sub: "u1"}, reqWithCookie("x"), "rt-1"); err != nil {
+	if _, err := a.createSession(Identity{Sub: "u1"}, reqWithCookie("x"), "rt-1", nil); err != nil {
 		t.Fatal(err)
 	}
 	if checked, _ := a.RevalidateDue(context.Background()); checked != 0 {
@@ -616,7 +616,8 @@ func TestRefreshedClaimsDeprivilegeWithinOneInterval(t *testing.T) {
 
 	sid, err := a.createSession(
 		Identity{Sub: "u1", Email: "alice@example.com", Groups: []string{"admins", "engineering"}},
-		reqWithCookie("x"), "rt-1")
+		reqWithCookie("x"), "rt-1", nil)
+
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -666,7 +667,8 @@ func TestRefreshWithoutIDTokenLeavesClaimsUntouched(t *testing.T) {
 	})
 	// The fake IdP's default: a refresh response with no id_token at all.
 	sid, err := a.createSession(
-		Identity{Sub: "u1", Groups: []string{"engineering"}}, reqWithCookie("x"), "rt-1")
+		Identity{Sub: "u1", Groups: []string{"engineering"}}, reqWithCookie("x"), "rt-1", nil)
+
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -725,7 +727,7 @@ func TestRoleNarrowingIsAudited(t *testing.T) {
 
 	if _, err := a.createSession(
 		Identity{Sub: "u1", Email: "alice@example.com", Groups: []string{"admins", "engineering"}},
-		reqWithCookie("x"), "rt-1"); err != nil {
+		reqWithCookie("x"), "rt-1", nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -784,7 +786,7 @@ func TestClaimRestylingIsNotANarrowing(t *testing.T) {
 		return idp.refreshClaims(map[string]any{"groups": []string{"Admins"}})
 	}
 	if _, err := a.createSession(
-		Identity{Sub: "u1", Groups: []string{"/admins"}}, reqWithCookie("x"), "rt-1"); err != nil {
+		Identity{Sub: "u1", Groups: []string{"/admins"}}, reqWithCookie("x"), "rt-1", nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -823,7 +825,7 @@ func TestRefreshOmittingEmailIsNotANarrowing(t *testing.T) {
 	}
 	if _, err := a.createSession(
 		Identity{Sub: "u1", Email: "alice@example.com", Groups: []string{"engineering"}},
-		reqWithCookie("x"), "rt-1"); err != nil {
+		reqWithCookie("x"), "rt-1", nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -852,7 +854,8 @@ func TestWideningClaimsAppliesWithoutNarrowingAudit(t *testing.T) {
 		return idp.refreshClaims(map[string]any{"groups": []string{"engineering", "admins"}})
 	}
 	sid, err := a.createSession(
-		Identity{Sub: "u1", Groups: []string{"engineering"}}, reqWithCookie("x"), "rt-1")
+		Identity{Sub: "u1", Groups: []string{"engineering"}}, reqWithCookie("x"), "rt-1", nil)
+
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -884,7 +887,7 @@ func TestRefreshSubjectMismatchTerminates(t *testing.T) {
 	idp.refreshIDToken = func(int) map[string]any {
 		return idp.refreshClaims(map[string]any{"sub": "somebody-else", "groups": []string{"admins"}})
 	}
-	sid, err := a.createSession(Identity{Sub: "u1"}, reqWithCookie("x"), "rt-1")
+	sid, err := a.createSession(Identity{Sub: "u1"}, reqWithCookie("x"), "rt-1", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -914,7 +917,7 @@ func TestClaimWriteFailureLeavesSessionDue(t *testing.T) {
 	})
 	idp.refreshIDToken = adminThenDemoted(idp)
 	if _, err := a.createSession(
-		Identity{Sub: "u1", Groups: []string{"admins"}}, reqWithCookie("x"), "rt-1"); err != nil {
+		Identity{Sub: "u1", Groups: []string{"admins"}}, reqWithCookie("x"), "rt-1", nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -977,7 +980,7 @@ func TestConcurrentRequestsDoNotCorruptLastSeen(t *testing.T) {
 		c.IdleTimeout = time.Hour
 	})
 
-	sid, err := a.createSession(Identity{Sub: "u1"}, reqWithCookie("x"), "")
+	sid, err := a.createSession(Identity{Sub: "u1"}, reqWithCookie("x"), "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

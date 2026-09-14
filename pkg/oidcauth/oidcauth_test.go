@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -21,9 +22,18 @@ import (
 // and a token endpoint that returns an RS256-signed ID token built from the
 // mutable claim fields below.
 type fakeIdP struct {
-	t      *testing.T
+	t      testing.TB
 	key    *rsa.PrivateKey
 	server *httptest.Server
+
+	// mu guards the request counters and the knobs the handlers read.
+	//
+	// Added for the claim-freshness tests (Task 20273), which fire concurrent
+	// requests at one session to prove single-flighting collapses them. Held
+	// across the whole handler rather than around each counter: serialising a
+	// test IdP costs nothing, and the property under test is how many requests
+	// arrive, not how many arrive at once.
+	mu sync.Mutex
 
 	// claim knobs; tests set these before driving the callback.
 	nonce     string
@@ -67,6 +77,17 @@ type fakeIdP struct {
 	userinfoRequests int
 	lastUserinfoAuth string
 
+	// userinfoAuthHeader is returned as WWW-Authenticate alongside
+	// userinfoStatus, which is where RFC 6750 §3.1 puts the reason. It is what
+	// separates "this token is not valid" from "this token lacks a scope" on a
+	// 403 (Task 20273).
+	userinfoAuthHeader string
+
+	// refreshExpiresIn overrides expires_in on the refresh response. Zero uses
+	// the realistic default; it exists so a test can state a provider whose
+	// access tokens die sooner than cloop's own claim-age bound.
+	refreshExpiresIn int
+
 	// forgeKey, when set, signs tokens while the JWKS keeps advertising the
 	// real key — a forged response, on the wire.
 	forgeKey *rsa.PrivateKey
@@ -97,7 +118,11 @@ func (f *fakeIdP) refreshClaims(over map[string]any) map[string]any {
 	return claims
 }
 
-func newFakeIdP(t *testing.T) *fakeIdP {
+// newFakeIdP takes a testing.TB rather than a *testing.T so benchmarks use the
+// same provider as the tests. Duplicating the handler set to get one would
+// leave two fake IdPs to keep in step, which is how a benchmark ends up
+// measuring a path the tests no longer cover.
+func newFakeIdP(t testing.TB) *fakeIdP {
 	t.Helper()
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -124,9 +149,14 @@ func newFakeIdP(t *testing.T) *fakeIdP {
 		_ = json.NewEncoder(w).Encode(doc)
 	})
 	mux.HandleFunc("/userinfo", func(w http.ResponseWriter, r *http.Request) {
+		idp.mu.Lock()
+		defer idp.mu.Unlock()
 		idp.userinfoRequests++
 		idp.lastUserinfoAuth = r.Header.Get("Authorization")
 		if idp.userinfoStatus != 0 {
+			if idp.userinfoAuthHeader != "" {
+				w.Header().Set("WWW-Authenticate", idp.userinfoAuthHeader)
+			}
 			w.WriteHeader(idp.userinfoStatus)
 			return
 		}
@@ -158,6 +188,8 @@ func newFakeIdP(t *testing.T) *fakeIdP {
 		})
 	})
 	mux.HandleFunc("/token", func(w http.ResponseWriter, r *http.Request) {
+		idp.mu.Lock()
+		defer idp.mu.Unlock()
 		idp.tokenRequests++
 		if err := r.ParseForm(); err != nil {
 			http.Error(w, "bad form", http.StatusBadRequest)
@@ -179,10 +211,14 @@ func newFakeIdP(t *testing.T) *fakeIdP {
 				_, _ = w.Write([]byte(idp.refreshBody))
 				return
 			}
+			expiresIn := idp.refreshExpiresIn
+			if expiresIn == 0 {
+				expiresIn = 3600
+			}
 			resp := map[string]any{
 				"access_token":  "at-refreshed",
 				"token_type":    "Bearer",
-				"expires_in":    3600,
+				"expires_in":    expiresIn,
 				"refresh_token": idp.nextRefreshToken,
 			}
 			if idp.refreshIDToken != nil {
@@ -468,7 +504,7 @@ func TestSessionExpiry(t *testing.T) {
 	a := newTestAuthenticator(t, idp)
 	a.cfg.SessionTTL = 10 * time.Millisecond
 
-	sid, err := a.createSession(Identity{Sub: "u1"}, httptest.NewRequest(http.MethodGet, "/", nil), "")
+	sid, err := a.createSession(Identity{Sub: "u1"}, httptest.NewRequest(http.MethodGet, "/", nil), "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

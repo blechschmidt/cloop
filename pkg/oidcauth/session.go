@@ -50,6 +50,25 @@ type SessionRecord struct {
 
 	RefreshToken     string
 	RefreshCheckedAt time.Time
+
+	// ClaimsAsOf is when the identity provider last asserted Identity's groups
+	// and roles, and ClaimsExpireAt is the provider's own deadline on that
+	// assertion (Task 20273).
+	//
+	// They are separate from RefreshCheckedAt because the two answer different
+	// questions and routinely disagree. RefreshCheckedAt is stamped on every
+	// revalidation attempt including the ones that learned nothing, so it means
+	// "the grant was still alive at this instant" — which is what bounds
+	// IdP-initiated revocation. These two mean "the claims in this row were
+	// true at this instant", which is what bounds authorization staleness. A
+	// provider that renews the grant without restating claims advances the
+	// first and not the second, and collapsing them would report such a hub as
+	// re-authorizing every fifteen minutes while its roles never move.
+	//
+	// See claimfresh.go for how they are read; ClaimsAssertedAt handles the
+	// zero value, which is a session created before these columns existed.
+	ClaimsAsOf     time.Time
+	ClaimsExpireAt time.Time
 }
 
 // Expired reports whether the session is past its absolute ceiling.
@@ -138,6 +157,28 @@ type RefreshResult struct {
 	ClaimsAsserted bool
 	Groups         []string
 	Roles          []string
+
+	// ClaimsAsOf and ClaimsExpireAt update the session's claim-freshness clocks
+	// (Task 20273). A zero value leaves the stored one alone, which is what
+	// makes the three outcomes of a revalidation expressible:
+	//
+	//	claims re-asserted   both set — the assertion, and how long the IdP
+	//	                     stands behind it (from the access token's
+	//	                     expires_in, or zero when it named none)
+	//	claims repudiated    ClaimsExpireAt set to the instant of the refusal,
+	//	                     ClaimsAsOf untouched — the row still records when
+	//	                     the claims were last true, and now also records
+	//	                     that they have stopped being so
+	//	nothing learned      both zero — the grant is alive, the claims are as
+	//	                     stale as they were, and nothing may pretend
+	//	                     otherwise
+	//
+	// They are part of RefreshResult, and therefore of its single atomic write,
+	// for the reason in the type comment: a stamp written without the claims it
+	// stands for is a session that looks re-authorized while holding authority
+	// the provider has withdrawn.
+	ClaimsAsOf     time.Time
+	ClaimsExpireAt time.Time
 }
 
 // HashSessionID maps a session cookie to the identifier used everywhere else.
@@ -208,6 +249,33 @@ const (
 	// Before Task 20261 this was the outcome for every provider that omits the
 	// id_token, which is most of them. It is now the exception.
 	AuditSessionClaimsUnverified = "session.claims_unverified"
+
+	// AuditSessionClaimsRejected records the identity provider refusing to
+	// vouch for a session's claims: the userinfo endpoint answered 401, or
+	// named invalid_token, for an access token the very same refresh grant had
+	// minted seconds earlier (Task 20273).
+	//
+	// Before this event that response was read and discarded, on the reasoning
+	// that a provider which does not accept its own access token at userinfo,
+	// or which wants a scope this deployment did not request, is a
+	// misconfiguration rather than a revocation — and signing the fleet out
+	// over it would turn a claim-freshness feature into a logout bug. That
+	// reasoning still holds, and the conclusion drawn from it did not: the
+	// session survives, and its claims stop being usable for anything above
+	// operator until a later read succeeds. So the ambiguous case costs
+	// privileged actions rather than everybody's session, and — unlike before
+	// — it costs something, which is what gets it noticed and fixed.
+	AuditSessionClaimsRejected = "session.claims_rejected"
+
+	// AuditSessionClaimsStale records a privileged operation refused because
+	// the session's claims were older than max_claim_age and could not be
+	// refreshed (Task 20273).
+	//
+	// This is the event that proves the bound is load-bearing. Without it an
+	// operator sees a 403 and nothing else, and cannot distinguish "my role
+	// binding is wrong" — which they will go and change, incorrectly — from
+	// "the hub could not reach the IdP", which is a different fix entirely.
+	AuditSessionClaimsStale = "session.claims_stale"
 )
 
 // SessionAudit describes one session lifecycle event.
@@ -399,6 +467,16 @@ func (m *memStore) ApplyRefresh(id string, res RefreshResult) error {
 	}
 	rec.RefreshToken = res.RefreshToken
 	rec.RefreshCheckedAt = res.CheckedAt
+	// The same rule the SQL store applies, for the same reasons: a fresh
+	// assertion replaces both clocks — including clearing a previous
+	// provider deadline this response did not restate — while a repudiation
+	// sets only the deadline, leaving on record when the claims were last true.
+	switch {
+	case !res.ClaimsAsOf.IsZero():
+		rec.ClaimsAsOf, rec.ClaimsExpireAt = res.ClaimsAsOf, res.ClaimsExpireAt
+	case !res.ClaimsExpireAt.IsZero():
+		rec.ClaimsExpireAt = res.ClaimsExpireAt
+	}
 	if res.ClaimsAsserted {
 		// Copied, not aliased: the caller's slices came from a decoded token
 		// it is free to reuse, and a store that kept a reference to them would

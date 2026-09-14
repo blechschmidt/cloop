@@ -1450,6 +1450,32 @@ type OIDCConfig struct {
 	// are not retained — see docs/security/model.md.
 	RefreshIntervalMinutes int `yaml:"refresh_interval_minutes,omitempty"`
 
+	// MaxClaimAgeMinutes bounds how stale a session's group and role claims
+	// may be at the moment it exercises a permission above operator —
+	// secret.grant, secret.revoke, user.manage, token.admin, session.admin,
+	// executor.manage, config.write and the rest of the maintainer and admin
+	// tiers. Past it, cloop re-asks the identity provider synchronously and
+	// refuses the action if it cannot get an answer. Zero uses the default
+	// (5); values are clamped to 1..60.
+	//
+	// This is the bound on how long a demotion at the IdP can go unnoticed
+	// *for actions that matter*, and it is deliberately not the same knob as
+	// RefreshIntervalMinutes. That one sets a background cadence and may be
+	// switched off entirely; a hub with it disabled still holds this one,
+	// because "never re-check before granting a credential" should not be
+	// expressible by turning off a periodic task.
+	//
+	// Read paths are not covered and are not meant to be: they stay on the
+	// background cadence so an unreachable IdP makes the dashboard slow to
+	// revoke, never slow to serve.
+	//
+	// Set it to -1 to disable the check. That is the right setting for a
+	// deployment with no CLOOP_SECRET_KEY — no refresh token is retained, so
+	// claims can never be re-asserted and every privileged action would be
+	// refused with an explanation. Turning it off there is an explicit,
+	// recorded choice to act on sign-in-time claims.
+	MaxClaimAgeMinutes int `yaml:"max_claim_age_minutes,omitempty"`
+
 	// ClockSkewSeconds is the leeway applied to an ID token's exp and iat
 	// claims. Zero uses the default (300); set it to -1 for no leeway at
 	// all. Values above OIDCClockSkewSecondsUpper are a startup error, not
@@ -1530,6 +1556,17 @@ const (
 	OIDCRefreshIntervalMinutesDefault = 15
 	OIDCRefreshIntervalMinutesLower   = 1
 	OIDCRefreshIntervalMinutesUpper   = 1440
+)
+
+// OIDC claim-freshness bounds (minutes). The upper bound mirrors
+// oidcauth.MaxMaxClaimAge; unlike clock skew it is clamped here rather than
+// refused, because an operator who wrote a day plainly wanted the check
+// relaxed and -1 says that exactly — there is no interpretation under which
+// refusing to start the hub helps them.
+const (
+	OIDCMaxClaimAgeMinutesDefault = 5
+	OIDCMaxClaimAgeMinutesLower   = 1
+	OIDCMaxClaimAgeMinutesUpper   = 60
 )
 
 // EffectiveSessionTTLHours returns the configured session lifetime with the
@@ -1614,6 +1651,24 @@ func (o OIDCConfig) EffectiveRefreshIntervalMinutes() int {
 		return OIDCRefreshIntervalMinutesUpper
 	}
 	return o.RefreshIntervalMinutes
+}
+
+// EffectiveMaxClaimAgeMinutes returns how stale a session's claims may be
+// before a privileged action re-checks them against the IdP. A negative
+// configured value is passed through as -1, the explicit opt-out; every other
+// out-of-band value is clamped.
+func (o OIDCConfig) EffectiveMaxClaimAgeMinutes() int {
+	switch {
+	case o.MaxClaimAgeMinutes < 0:
+		return -1
+	case o.MaxClaimAgeMinutes == 0:
+		return OIDCMaxClaimAgeMinutesDefault
+	case o.MaxClaimAgeMinutes < OIDCMaxClaimAgeMinutesLower:
+		return OIDCMaxClaimAgeMinutesLower
+	case o.MaxClaimAgeMinutes > OIDCMaxClaimAgeMinutesUpper:
+		return OIDCMaxClaimAgeMinutesUpper
+	}
+	return o.MaxClaimAgeMinutes
 }
 
 // EffectiveMaxWebSocketConns returns the configured total cap, substituting

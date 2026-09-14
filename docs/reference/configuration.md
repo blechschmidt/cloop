@@ -1035,6 +1035,7 @@ ui:
     session_ttl_hours: 24          # absolute ceiling, set at sign-in
     idle_timeout_hours: 8          # ends an unused session sooner
     refresh_interval_minutes: 15   # how often the IdP is re-asked
+    max_claim_age_minutes: 5       # claim freshness required for privileged actions
     clock_skew_seconds: 300        # leeway on an ID token's exp/iat
     require_idp: false             # refuse to start if the issuer will not resolve
 ```
@@ -1044,6 +1045,7 @@ ui:
 | `session_ttl_hours` | `24` | `1`–`720` | The hard ceiling. No amount of activity extends it; when it lapses the user signs in again. |
 | `idle_timeout_hours` | `8` | `1`–`720`, and never above `session_ttl_hours` | How long a session may go unused. This is the clock that bounds an unattended browser, and usually the one to tighten first — shortening it costs a re-login after a long meeting, while shortening the ceiling interrupts people mid-task. |
 | `refresh_interval_minutes` | `15` | `1`–`1440`, or `-1` to disable | Worst-case lag between the identity provider disabling a user and their cloop session ending. Requires `CLOOP_SECRET_KEY`. |
+| `max_claim_age_minutes` | `5` | `1`–`60`, or `-1` to disable | How stale a session's group and role claims may be when it performs an action **above operator**. Past it the provider is re-asked synchronously and the action is refused if it cannot answer. Requires `CLOOP_SECRET_KEY`. |
 | `clock_skew_seconds` | `300` | `0`–`600`, or `-1` for none | Leeway applied to an ID token's `exp` and `iat`, for hosts whose clocks disagree with the provider's. |
 | `require_idp` | `false` | — | Makes an unresolvable issuer fatal at startup instead of a warning. Also available as `cloop ui --require-idp`. |
 
@@ -1102,6 +1104,60 @@ refresh tokens at all (rather than storing a live credential in plaintext), so
 `refresh_interval_minutes` has no effect and IdP-side revocation is
 unavailable. `cloop ui` says so at startup and the **Active sessions** panel
 shows a banner.
+
+The same applies to `max_claim_age_minutes`, and there it is louder: with no
+refresh token there is nothing to re-assert claims with, so once the bound
+lapses **every action above operator is refused** with a message naming the
+cause. That is deliberate — a hub that cannot establish current authority
+should not act on stale authority — but it means a deployment that has chosen
+to run without an encryption key must also set `max_claim_age_minutes: -1`,
+which records that choice explicitly rather than leaving administrators to
+discover it at the moment they need to grant something.
+
+### Claim freshness for privileged actions
+
+`refresh_interval_minutes` is a *background cadence*: it bounds how long a
+disabled account keeps a working session. It does not bound how stale the
+**claims inside a live session** are, and on most providers those are two very
+different numbers. RFC 6749 does not require an `id_token` on a refresh, and
+Okta, Auth0 and Keycloak all omit one under common configurations — so the
+grant is renewed every interval while the groups and roles stay exactly as they
+were at sign-in. cloop asks the `userinfo` endpoint in that case, but a
+deployment with neither leaves a session carrying sign-in-time authority for
+its whole life.
+
+`max_claim_age_minutes` bounds the second number, and only where it matters.
+Before a permission **above the operator tier** — `secret.grant`,
+`secret.revoke`, `user.manage`, `token.admin`, `session.admin`,
+`executor.manage`, `config.write`, `project.write`, `project.share`,
+`audit.read`, `sandbox.attach` — cloop checks when the provider last asserted
+that session's claims. If it is longer ago than this bound, the provider is
+asked *synchronously*, the decision is made against whatever it now says, and
+the action is refused if it cannot be reached.
+
+Three things keep that affordable:
+
+- **Reads never take the path.** Everything a viewer or operator may do —
+  including running and stopping plans — stays on the background cadence, so an
+  IdP outage makes the hub slow to revoke, never slow to serve.
+- **Concurrent checks share one round trip.** A dashboard panel that fires six
+  admin requests at once costs one call to the provider, and all six see the
+  same answer. A demotion cannot be outrun by sending more requests.
+- **Fresh claims cost nothing.** Only the first privileged call in each window
+  contacts the provider; the rest are a single indexed read.
+
+The provider's own `expires_in` tightens the bound but never loosens it: an IdP
+issuing five-minute access tokens is stating how long it stands behind the
+authorization that produced those claims, and cloop honours whichever deadline
+falls first.
+
+Claim age is visible per session in the **Active sessions** panel and in
+`cloop hub session list`, next to the grant check so the gap between them is
+readable at a glance. A session whose claims the provider has actively refused
+to confirm — a `401` or `invalid_token` from `userinfo` — keeps working for
+reads and is refused for everything above operator until a later check
+succeeds; both outcomes are written to the audit trail as
+`session.claims_rejected` and `session.claims_stale`.
 
 Operators with the `session.admin` permission get an Active sessions table in
 the Secrets tab — subject, IP, device, sign-in time, idle time, and a

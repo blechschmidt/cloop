@@ -33,7 +33,7 @@ import (
 // createSession mints a session cookie, records the session, and returns the
 // cookie value. The returned string is the only place the raw session id ever
 // exists outside the browser: the store receives its digest.
-func (a *Authenticator) createSession(id Identity, r *http.Request, refreshToken string) (string, error) {
+func (a *Authenticator) createSession(id Identity, r *http.Request, refreshToken string, tok *tokenResponse) (string, error) {
 	sid, err := randToken()
 	if err != nil {
 		return "", err
@@ -57,6 +57,16 @@ func (a *Authenticator) createSession(id Identity, r *http.Request, refreshToken
 		// Not stamped as checked: a session that has never been revalidated
 		// should come due on the first pass, not one interval later.
 		RefreshToken: refreshToken,
+
+		// The claim clocks *are* stamped, and the asymmetry is deliberate. The
+		// id_token just verified is a current assertion of this person's groups
+		// and roles, so treating the session as claim-stale from birth would
+		// make the very first privileged action after signing in pay an IdP
+		// round trip for claims seconds old. RefreshCheckedAt answers a
+		// different question — "is the grant still alive" — which the sign-in
+		// genuinely has not established for the refresh token it was handed.
+		ClaimsAsOf:     now,
+		ClaimsExpireAt: accessTokenExpiry(tok, now),
 	}
 	if err := a.store.Put(rec); err != nil {
 		return "", fmt.Errorf("oidcauth: persist session: %w", err)
@@ -494,11 +504,30 @@ func (a *Authenticator) RevalidateDue(ctx context.Context) (int, int) {
 		if ctx.Err() != nil {
 			break
 		}
-		if a.revalidate(ctx, rec) {
+		if a.revalidate(ctx, rec).terminated {
 			terminated++
 		}
 	}
 	return len(due), terminated
+}
+
+// revalidateOutcome is what one revalidation established, for the two callers
+// that need to react differently to it.
+//
+// The background pass only cares whether the session survived. The synchronous
+// claim-freshness gate (see claimfresh.go) also has to distinguish "the
+// provider could not be reached" from "the provider declined to vouch", because
+// it turns each into a different message for the administrator whose action was
+// just refused.
+type revalidateOutcome struct {
+	terminated bool
+
+	// claimsRejected is set when the provider repudiated the session's claims
+	// — see ErrClaimsRepudiated. Distinct from an unreachable endpoint.
+	claimsRejected bool
+
+	// err is the underlying failure, when there was one, for the message.
+	err error
 }
 
 // revalidate redeems one session's refresh token. It reports whether the
@@ -517,19 +546,19 @@ func (a *Authenticator) RevalidateDue(ctx context.Context) (int, int) {
 //   - The IdP rejects *cloop's own* credentials (invalid_client): also leave
 //     the session alone. That is a misconfiguration on this side, and no
 //     user's access should end because an operator rotated a client secret.
-func (a *Authenticator) revalidate(ctx context.Context, rec SessionRecord) bool {
+func (a *Authenticator) revalidate(ctx context.Context, rec SessionRecord) revalidateOutcome {
 	if rec.RefreshToken == "" {
-		return false
+		return revalidateOutcome{}
 	}
 	ctx, cancel := context.WithTimeout(ctx, httpTimeout)
 	defer cancel()
 
-	tok, refreshed, err := a.refreshGrant(ctx, rec.RefreshToken)
+	tok, refreshed, claimErr, err := a.refreshGrant(ctx, rec.RefreshToken)
 	now := a.now()
 	if err != nil {
 		if isGrantRevoked(err) {
 			a.terminate(rec, AuditSessionIdPRevoked, grantErrorReason(err), "idp")
-			return true
+			return revalidateOutcome{terminated: true, err: err}
 		}
 		// Transient or local: back off by stamping the attempt, keeping the
 		// existing token so the next interval retries with it.
@@ -538,7 +567,7 @@ func (a *Authenticator) revalidate(ctx context.Context, rec SessionRecord) bool 
 			CheckedAt:    now,
 		})
 		a.invalidateCache(rec.ID)
-		return false
+		return revalidateOutcome{err: err}
 	}
 
 	// A refreshed id_token for a different subject is not a claim update, it
@@ -548,7 +577,7 @@ func (a *Authenticator) revalidate(ctx context.Context, rec SessionRecord) bool 
 	// an IdP bug or a token substitution to get here; both warrant ending it.
 	if refreshed != nil && refreshed.Sub != rec.Identity.Sub {
 		a.terminate(rec, AuditSessionIdPRevoked, "idp_subject_mismatch", "idp")
-		return true
+		return revalidateOutcome{terminated: true}
 	}
 
 	// Rotation: an IdP that issues a new refresh token has invalidated the old
@@ -559,6 +588,14 @@ func (a *Authenticator) revalidate(ctx context.Context, rec SessionRecord) bool 
 		next = rec.RefreshToken
 	}
 	res := RefreshResult{RefreshToken: next, CheckedAt: now}
+	if claimErr != nil && errors.Is(claimErr, ErrClaimsRepudiated) {
+		// The provider declined to vouch (Task 20273). Expire the claim clock
+		// as of this instant rather than advancing it: the row keeps recording
+		// when the claims were last true, and now also records that they have
+		// stopped being so, which is what ClaimsStale reads. The session is
+		// deliberately left alive — see AuditSessionClaimsRejected.
+		res.ClaimsExpireAt = now
+	}
 	if refreshed != nil {
 		// Groups and roles only. Email and name are deliberately left as
 		// captured at sign-in: OwnerKey is derived from the email and is what
@@ -568,19 +605,60 @@ func (a *Authenticator) revalidate(ctx context.Context, rec SessionRecord) bool 
 		// identity is a migration, not something a background refresh does.
 		res.ClaimsAsserted = true
 		res.Groups, res.Roles = refreshed.Groups, refreshed.Roles
+
+		// The claim-freshness clocks, set only here — on the one branch where
+		// the provider actually restated who this person is (Task 20273).
+		//
+		// ClaimsExpireAt comes from the access token's expires_in, which until
+		// now was parsed into tokenResponse and never read. It is the provider
+		// saying how long it stands behind the authorization that just produced
+		// these claims, and honouring it means a deployment with short-lived
+		// tokens gets the tighter re-check it configured without anyone
+		// mirroring the number into cloop's YAML. It can only tighten:
+		// ClaimsStale takes whichever of this and max_claim_age comes first.
+		res.ClaimsAsOf = now
+		res.ClaimsExpireAt = accessTokenExpiry(tok, now)
 	}
 	if err := a.store.ApplyRefresh(rec.ID, res); err != nil {
 		// Nothing was stamped, so this session stays due and the next pass
 		// retries it rather than waiting out a full interval on claims that
 		// were never written.
-		return false
+		return revalidateOutcome{err: err}
 	}
 	// Evict last: until the row is written there is nothing new to re-read,
 	// and a request landing in the gap would only refill the cache from the
 	// pre-refresh row it just dropped.
 	a.invalidateCache(rec.ID)
 	a.noteClaimAssertion(rec, refreshed, now)
-	return false
+	if claimErr != nil && errors.Is(claimErr, ErrClaimsRepudiated) {
+		a.audit(SessionAudit{
+			Event:     AuditSessionClaimsRejected,
+			SessionID: rec.ID,
+			Subject:   rec.Identity.Sub,
+			Email:     rec.Identity.Email,
+			Actor:     "idp",
+			Reason:    "userinfo_rejected_access_token",
+			IP:        rec.IP,
+			UserAgent: rec.UserAgent,
+			At:        now,
+		})
+		return revalidateOutcome{claimsRejected: true, err: claimErr}
+	}
+	return revalidateOutcome{}
+}
+
+// accessTokenExpiry turns a token response's expires_in into an absolute
+// deadline, or the zero time when the provider named none.
+//
+// A non-positive expires_in is treated as "not stated" rather than "already
+// expired". A provider that says zero has almost certainly omitted the field
+// and had it default, and reading that as an instantly-dead assertion would
+// make every privileged call on such a deployment a round trip.
+func accessTokenExpiry(tok *tokenResponse, now time.Time) time.Time {
+	if tok == nil || tok.ExpiresIn <= 0 {
+		return time.Time{}
+	}
+	return now.Add(time.Duration(tok.ExpiresIn) * time.Second)
 }
 
 // noteClaimAssertion records what the refresh did to this session's authority:
@@ -712,8 +790,14 @@ func (a *Authenticator) invalidateCache(id string) {
 	a.mu.Unlock()
 }
 
-// refreshGrant performs the refresh_token grant, returning the token response
-// and the identity its id_token asserts — nil when the provider returned none.
+// refreshGrant performs the refresh_token grant.
+//
+// The two error returns must not be collapsed. err is the grant itself failing,
+// which is what can end a session. claimErr is the grant having succeeded while
+// the claims could not be re-asserted — the session is alive and must stay
+// alive, but its authority is as stale as it was. Only claimErr can carry
+// ErrClaimsRepudiated, which is the provider explicitly declining to vouch, as
+// opposed to failing to answer.
 //
 // The response's id_token, when present, is verified with the same rules as at
 // login minus the nonce binding (there is no authorization request to bind
@@ -731,10 +815,10 @@ func (a *Authenticator) invalidateCache(id string) {
 // When the provider returns no id_token — the common case, since most only
 // issue one on the initial code exchange — the userinfo endpoint is asked
 // instead, so that hole is not simply conceded. See userinfo.go.
-func (a *Authenticator) refreshGrant(ctx context.Context, refreshToken string) (*tokenResponse, *Identity, error) {
+func (a *Authenticator) refreshGrant(ctx context.Context, refreshToken string) (tok *tokenResponse, id *Identity, claimErr, err error) {
 	disc, err := a.discover(ctx)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	form := url.Values{}
 	form.Set("grant_type", "refresh_token")
@@ -746,28 +830,29 @@ func (a *Authenticator) refreshGrant(ctx context.Context, refreshToken string) (
 		tok, _, err = a.postToken(ctx, disc.TokenEndpoint, form, false)
 	}
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	if tok.IDToken == "" {
 		// No id_token — the common case, and the one that used to leave claims
 		// frozen at sign-in. Ask userinfo instead, using the access token this
 		// very response carried.
 		//
-		// A failure here is deliberately not propagated: the *grant* succeeded,
-		// so the session is still valid and must survive. Returning the error
-		// would terminate it over an unreachable userinfo endpoint. The nil
-		// identity is what the caller records as "claims unverified".
-		id, uerr := a.userinfoIdentity(ctx, tok.AccessToken)
-		if uerr != nil || id == nil {
-			return tok, nil, nil
+		// A failure here is returned as claimErr, never as err: the *grant*
+		// succeeded, so the session is still valid and must survive. Promoting
+		// it would terminate the session over an unreachable userinfo endpoint.
+		// The nil identity is what the caller records as "claims unverified" —
+		// unless claimErr is a repudiation, which it also acts on.
+		uid, uerr := a.userinfoIdentity(ctx, tok.AccessToken)
+		if uerr != nil || uid == nil {
+			return tok, nil, uerr, nil
 		}
-		return tok, id, nil
+		return tok, uid, nil, nil
 	}
-	id, verr := a.verifyIDToken(ctx, tok.IDToken, "")
+	vid, verr := a.verifyIDToken(ctx, tok.IDToken, "")
 	if verr != nil {
-		return nil, nil, fmt.Errorf("oidcauth: refreshed id_token failed validation: %w", verr)
+		return nil, nil, nil, fmt.Errorf("oidcauth: refreshed id_token failed validation: %w", verr)
 	}
-	return tok, id, nil
+	return tok, vid, nil, nil
 }
 
 // isGrantRevoked reports whether err means the IdP has withdrawn this session.

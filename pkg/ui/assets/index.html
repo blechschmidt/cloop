@@ -2025,6 +2025,12 @@
                   <th style="width:110px">Idle</th>
                   <th style="width:110px">Expires in</th>
                   <th style="width:120px" class="sec-hide-sm">IdP checked</th>
+                  <!-- Claim age (Task 20273). A different clock from "IdP
+                       checked", and on most providers a much older one: that
+                       column says the grant was renewed, this one says the
+                       groups and roles were restated. The gap between them is
+                       how long a demotion at the IdP has gone unapplied. -->
+                  <th style="width:110px">Claim age</th>
                   <th style="width:130px"></th>
                 </tr>
               </thead>

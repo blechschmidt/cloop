@@ -175,6 +175,23 @@ type Config struct {
 	// the two timeouts then become the only way a session ends.
 	RefreshInterval time.Duration
 
+	// MaxClaimAge bounds how stale a session's group and role claims may be at
+	// the moment it exercises a permission above operator — granting a
+	// credential, minting a token, rewriting role bindings (Task 20273). Past
+	// it, EnsureFreshClaims re-asserts them against the IdP synchronously and
+	// the operation is refused if the provider cannot be asked.
+	//
+	// Zero uses DefaultMaxClaimAge; negative disables the check, which is the
+	// documented opt-out for a deployment that cannot retain refresh tokens.
+	// Anything above MaxMaxClaimAge is rejected by New — past an hour this has
+	// stopped being a freshness bound.
+	//
+	// It is deliberately independent of RefreshInterval. That knob sets a
+	// background cadence and can be switched off entirely; this one is a
+	// property the privileged path must hold whatever the background pass is
+	// doing, so "never re-check" must not be expressible for it by accident.
+	MaxClaimAge time.Duration
+
 	// Store persists sessions. Nil installs a process-local store, which is
 	// the pre-Task-20176 behaviour: a restart signs everyone out.
 	Store SessionStore
@@ -335,6 +352,17 @@ type Authenticator struct {
 	claimsAsserted       uint64
 	claimsUnverified     uint64
 	claimsUnverifiedSeen bool
+
+	// claimsRefused counts privileged operations denied because the session's
+	// claims were stale and could not be refreshed (Task 20273). Guarded by mu.
+	claimsRefused uint64
+
+	// flights collapses concurrent synchronous revalidations of one session
+	// into a single IdP round trip — see EnsureFreshClaims. Its own mutex
+	// rather than mu because a flight is held for the duration of a network
+	// call, and mu is taken on paths that must never queue behind one.
+	flightMu sync.Mutex
+	flights  map[string]*claimFlight
 }
 
 // RefreshClaimStats reports how many IdP revalidations since startup returned
@@ -412,6 +440,17 @@ func New(cfg Config) (*Authenticator, error) {
 		cfg.RefreshInterval = DefaultRefreshInterval
 	}
 	switch {
+	case cfg.MaxClaimAge == 0:
+		cfg.MaxClaimAge = DefaultMaxClaimAge
+	case cfg.MaxClaimAge < 0:
+		// The explicit opt-out, normalised so ClaimsStale has one comparison.
+		cfg.MaxClaimAge = -1
+	case cfg.MaxClaimAge > MaxMaxClaimAge:
+		return nil, fmt.Errorf("oidcauth: max_claim_age %s exceeds the maximum of %s — "+
+			"past that it is a second session lifetime rather than a freshness bound; "+
+			"set it negative to disable the check outright", cfg.MaxClaimAge, MaxMaxClaimAge)
+	}
+	switch {
 	case cfg.ClockSkew == 0:
 		cfg.ClockSkew = DefaultClockSkew
 	case cfg.ClockSkew < 0:
@@ -433,6 +472,7 @@ func New(cfg Config) (*Authenticator, error) {
 		jwksKeys: map[string]any{},
 		pending:  map[string]*pendingLogin{},
 		cache:    map[string]*cachedSession{},
+		flights:  map[string]*claimFlight{},
 		store:    store,
 	}, nil
 }
@@ -648,7 +688,7 @@ func (a *Authenticator) HandleCallback(w http.ResponseWriter, r *http.Request) L
 		return LoginTokenInvalid
 	}
 
-	sid, err := a.createSession(*id, r, tok.RefreshToken)
+	sid, err := a.createSession(*id, r, tok.RefreshToken, tok)
 	if err != nil {
 		a.errorPage(w, http.StatusInternalServerError, "Could not create a session.", err)
 		return LoginSessionError

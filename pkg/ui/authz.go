@@ -426,6 +426,17 @@ func (s *Server) require(w http.ResponseWriter, r *http.Request, perm authz.Perm
 		return true
 	}
 	g := s.grantFor(r)
+	// Above the operator tier, the claims this decision is about to be made
+	// from must be ones the identity provider has confirmed recently — see
+	// claimfreshness.go. Returns nil for everything else, including every read,
+	// so the authenticated hot path is untouched (Task 20273).
+	if fresh, err := s.freshClaimGrant(r, perm); err != nil {
+		s.auditAuthz(r, g.decide(scope), perm, scope, false)
+		s.writeClaimFreshnessError(w, r, perm, err)
+		return false
+	} else if fresh != nil {
+		g = fresh
+	}
 	d := g.decide(scope)
 	if d.Allows(perm) {
 		s.auditAuthz(r, d, perm, scope, true)

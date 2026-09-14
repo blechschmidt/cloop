@@ -1008,6 +1008,10 @@ them:**
 | Signed out, or terminated by an operator | `session.revoked` | immediate |
 | The identity provider refused to renew it | `session.idp_revoked` | `refresh_interval_minutes`, default 15m |
 
+A session ending is not the only way a user's authority changes, and the other
+way needs its own bound — see
+[Claim freshness for privileged actions](#claim-freshness-for-privileged-actions).
+
 Sign-in emits `session.created`. Every one of these is appended to the
 hash-chained trail, so "why is this person signed out" and "who signed them
 out" are answerable after the fact and cannot be edited away.
@@ -1071,15 +1075,33 @@ is signature-verified against the same JWKS as an `id_token` and its issuer
 checked, so a validly-signed body from another tenant of a shared IdP is
 refused.
 
-A `userinfo` endpoint that is absent, unreachable or refuses the access token
-is **not** treated as a revocation. The grant itself succeeded, so the session
-survives with its previous claims — an outage there would otherwise sign out
-every user on the hub, which is a far worse failure than stale claims.
+A `userinfo` endpoint that is absent or unreachable is **not** treated as a
+revocation. The grant itself succeeded, so the session survives with its
+previous claims — an outage there would otherwise sign out every user on the
+hub, which is a far worse failure than stale claims.
+
+A `userinfo` endpoint that **refuses the access token** — `401`, or `403` naming
+`invalid_token` in `WWW-Authenticate` — is a third case, and it is not a
+revocation either. The competing readings are a provider that does not accept
+its own access token at `userinfo` and one that wants a scope this deployment
+did not request; both are misconfigurations rather than statements about the
+user, so terminating over them would turn a claim-freshness feature into a
+fleet-wide logout bug.
+
+What it *is* no longer is nothing at all. The session's claims are marked
+expired as of that instant: reads keep working, and every action above operator
+is refused until a later check succeeds. The refusal is written as
+`session.claims_rejected`. So the one response in which the provider explicitly
+declines to vouch for a session now costs something — which is what gets a
+misconfigured scope noticed and fixed, rather than silently believed to be
+working.
 
 | Outcome of a refresh | Audit event |
 | --- | --- |
 | The user lost a group or role, or dropped a rung on the role ladder | `session.role_narrowed`, naming the prior and new role and the dropped claims |
 | Neither an `id_token` nor `userinfo` could re-assert the claims | `session.claims_unverified`, once per process |
+| `userinfo` refused the access token | `session.claims_rejected` |
+| A privileged action was refused because claims could not be brought current | `session.claims_stale`, with the reason |
 
 `session.role_narrowed` marks the transition, not the state: once the narrowed
 claims are stored, later refreshes agree with them and stay silent. A pure
@@ -1102,6 +1124,65 @@ are not retained rather than being written in plaintext, so disabling a user at
 the provider does not end their cloop session until a timeout does, or until an
 operator terminates it. This is stated at startup and in the Active Sessions
 panel rather than left to be discovered during an incident.
+
+### Claim freshness for privileged actions
+
+Everything above moves a session's claims *eventually*, on a background cadence.
+That is the right shape for revocation — an unreachable provider must make the
+hub slow to revoke, never slow to serve — and it is the wrong shape for the
+moment somebody exercises authority. Between the IdP narrowing an account and
+the next background pass, this hub would still grant admin: for up to
+`refresh_interval_minutes`, and indefinitely on a hub that set it to `-1`.
+
+The window is only intolerable for a small set of operations, so the
+enforcement is proportional:
+
+| | Bound | IdP contact |
+| --- | --- | --- |
+| Reads, and everything the operator tier holds | `refresh_interval_minutes` (background) | never on the request |
+| Anything **above** operator | `max_claim_age_minutes`, default 5m | synchronous, when the bound has lapsed |
+
+The second row covers `secret.grant`, `secret.revoke`, `user.manage`,
+`token.admin`, `session.admin`, `executor.manage`, `config.write`,
+`project.write`, `project.share`, `audit.read` and `sandbox.attach`. The set is
+**derived from the role ladder** rather than listed — it is exactly the
+permissions an operator does not hold — so a permission added above that tier is
+covered the day it is added, instead of being omitted until an incident reveals
+it.
+
+**The bound is independent of `refresh_interval_minutes` on purpose.** That knob
+sets a background cadence and may be switched off; this one is a property the
+privileged path holds regardless, because "never re-check before granting a
+credential" should not be expressible by turning off a periodic task.
+
+**Two deadlines, whichever falls first.** `max_claim_age_minutes` is cloop's;
+the access token's `expires_in` is the provider's, and honouring it means an IdP
+configured for short-lived tokens gets the tighter re-check it asked for without
+an operator mirroring the number here. It can only tighten — a provider issuing
+day-long tokens is still held to the configured bound.
+
+**A demotion cannot be outrun.** Concurrent privileged requests for one session
+share a single round trip and all see its result, so an administrator being
+narrowed at that instant cannot keep their old authority by having several
+requests in flight. The same mechanism is what keeps a dashboard panel that
+fires six admin calls from becoming six calls to the provider.
+
+**A provider that cannot be asked costs privileged actions, not sessions.** The
+refusal is a `403` naming the cause and the remedy — not a `503`, which invites
+a retry loop against a provider that is already the problem — and it is audited
+as `session.claims_stale`. Reads continue throughout.
+
+This is also the one place where running without `CLOOP_SECRET_KEY` has a hard
+edge: with no retained refresh token there is nothing to re-assert claims with,
+so once the bound lapses every privileged action is refused. Such a deployment
+must set `max_claim_age_minutes: -1`, which makes acting on sign-in-time claims
+an explicit recorded choice rather than an accident.
+
+Per-session claim age is shown in the Active Sessions panel and in
+`cloop hub session list`, beside the grant check. The gap between the two
+columns is the answer to "we removed them from the group, why do they still
+have admin" — on a provider that renews grants without restating claims, the
+first column moves every interval and the second does not.
 
 **Operator and self-service controls.**
 

@@ -40,12 +40,19 @@ type SessionRow struct {
 	RefreshKeyID      string
 	RefreshWrappedDEK []byte
 	RefreshCheckedAt  time.Time
+
+	// ClaimsAsOf and ClaimsExpireAt date the row's groups and roles, as opposed
+	// to RefreshCheckedAt which dates the grant (Task 20273). See
+	// migrations/0038_session_claim_freshness.sql for why they must be separate
+	// columns, and pkg/oidcauth/claimfresh.go for what reads them.
+	ClaimsAsOf     time.Time
+	ClaimsExpireAt time.Time
 }
 
 const sessionColumns = `id, subject, issuer, email, display_name, owner_key,
 	groups_json, roles_json, ip, user_agent,
 	issued_at, last_seen, expires_at, refresh_sealed, refresh_checked_at,
-	refresh_key_id, refresh_wrapped_dek`
+	refresh_key_id, refresh_wrapped_dek, claims_as_of, claims_expire_at`
 
 // PutSession inserts a session row.
 //
@@ -74,7 +81,7 @@ func (d *DB) PutSession(row SessionRow) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	_, err = d.conn.Exec(
-		`INSERT INTO sessions(`+sessionColumns+`) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		`INSERT INTO sessions(`+sessionColumns+`) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		row.ID, row.Subject, row.Issuer, row.Email, row.DisplayName, row.OwnerKey,
 		groups, roles, row.IP, row.UserAgent,
 		row.IssuedAt.UTC().Format(time.RFC3339Nano),
@@ -84,6 +91,8 @@ func (d *DB) PutSession(row SessionRow) error {
 		formatOptionalTime(row.RefreshCheckedAt),
 		defaultString(row.RefreshKeyID, "legacy"),
 		row.RefreshWrappedDEK,
+		formatOptionalTime(row.ClaimsAsOf),
+		formatOptionalTime(row.ClaimsExpireAt),
 	)
 	if err != nil {
 		return fmt.Errorf("statedb: insert session: %w", classifyDriverErr(err))
@@ -160,6 +169,14 @@ type SessionRefreshUpdate struct {
 	Sealed     []byte
 	CheckedAt  time.Time
 	Claims     *SessionClaims
+
+	// ClaimsAsOf and ClaimsExpireAt update the claim-freshness clocks. A zero
+	// value leaves the stored column alone, which is what lets one update
+	// express "claims re-asserted" (both set), "claims repudiated"
+	// (ClaimsExpireAt only, backdated to the refusal) and "grant renewed but
+	// nothing learned" (neither) without a separate statement for each.
+	ClaimsAsOf     time.Time
+	ClaimsExpireAt time.Time
 }
 
 // UpdateSessionRefresh stores a rotated refresh token, stamps the check time,
@@ -195,6 +212,26 @@ func (d *DB) UpdateSessionRefresh(id string, up SessionRefreshUpdate) error {
 		}
 		set += `, groups_json = ?, roles_json = ?`
 		args = append(args, groups, roles)
+	}
+	// Folded into the same statement, and for the same reason the claims are:
+	// a row stamped as freshly claim-checked whose claims were not written is
+	// the precise failure this update path exists to make impossible.
+	//
+	// A fresh assertion writes *both* columns, and the deadline is written even
+	// when it is empty. Leaving a previous refresh's claims_expire_at in place
+	// because this response carried no expires_in would hold newly-asserted
+	// claims against an old provider deadline — on a provider that states one
+	// intermittently, every such assertion would land already expired and the
+	// session would be permanently unable to act. A repudiation writes only the
+	// deadline, on purpose: claims_as_of must keep recording when the claims
+	// were last true.
+	switch {
+	case !up.ClaimsAsOf.IsZero():
+		set += `, claims_as_of = ?, claims_expire_at = ?`
+		args = append(args, formatOptionalTime(up.ClaimsAsOf), formatOptionalTime(up.ClaimsExpireAt))
+	case !up.ClaimsExpireAt.IsZero():
+		set += `, claims_expire_at = ?`
+		args = append(args, formatOptionalTime(up.ClaimsExpireAt))
 	}
 	args = append(args, id)
 
@@ -347,13 +384,14 @@ func scanSessionRow(sc rowScanner) (SessionRow, error) {
 		out                             SessionRow
 		groups, roles                   string
 		issued, lastSeen, expires, chkd string
+		claimsAsOf, claimsExpire        string
 		sealed                          []byte
 	)
 	if err := sc.Scan(
 		&out.ID, &out.Subject, &out.Issuer, &out.Email, &out.DisplayName, &out.OwnerKey,
 		&groups, &roles, &out.IP, &out.UserAgent,
 		&issued, &lastSeen, &expires, &sealed, &chkd,
-		&out.RefreshKeyID, &out.RefreshWrappedDEK,
+		&out.RefreshKeyID, &out.RefreshWrappedDEK, &claimsAsOf, &claimsExpire,
 	); err != nil {
 		return SessionRow{}, err
 	}
@@ -363,6 +401,8 @@ func scanSessionRow(sc rowScanner) (SessionRow, error) {
 	out.LastSeen = parseOptionalTime(lastSeen)
 	out.ExpiresAt = parseOptionalTime(expires)
 	out.RefreshCheckedAt = parseOptionalTime(chkd)
+	out.ClaimsAsOf = parseOptionalTime(claimsAsOf)
+	out.ClaimsExpireAt = parseOptionalTime(claimsExpire)
 	out.RefreshSealed = sealed
 	return out, nil
 }
