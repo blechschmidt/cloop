@@ -58,7 +58,7 @@ window.loadDiskUsage = function() {
       const el = document.getElementById('diskUsageBody');
       if (el) {
         el.innerHTML = '<div class="empty-state"><p>Could not load disk usage: ' +
-          escapeHtml(err && err.message ? err.message : String(err)) + '</p></div>';
+          esc(err && err.message ? err.message : String(err)) + '</p></div>';
       }
     });
 };
@@ -80,7 +80,7 @@ function _renderDiskUsage(d) {
 
   if (d.db_error) {
     html += '<div class="du-stat"><div class="du-stat-val">—</div>' +
-            '<div class="du-stat-label">reclaimable (' + escapeHtml(d.db_error) + ')</div></div>';
+            '<div class="du-stat-label">reclaimable (' + esc(d.db_error) + ')</div></div>';
   } else if (d.db_bytes) {
     const pct = Math.round((d.free_ratio || 0) * 100);
     const warn = d.free_ratio >= (pol.vacuum_free_ratio || 0.3);
@@ -101,10 +101,10 @@ function _renderDiskUsage(d) {
       const share = total > 0 ? (e.bytes / total) * 100 : 0;
       html += '<tr>' +
         '<td><span class="du-bar" style="width:' + Math.max(2, Math.round(share)) + '%"></span>' +
-        escapeHtml(e.name) + '</td>' +
+        esc(e.name) + '</td>' +
         '<td class="du-num">' + _duFmtBytes(e.bytes) + '</td>' +
         '<td class="du-num">' + (e.is_dir ? e.files : '') + '</td>' +
-        '<td class="du-note">' + escapeHtml(_duAdvice[e.name] || '') + '</td>' +
+        '<td class="du-note">' + esc(_duAdvice[e.name] || '') + '</td>' +
         '</tr>';
     }
     html += '</tbody></table>';
