@@ -18,6 +18,7 @@ package install
 // identity it is not supervising or a supervisor with no identity.
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -28,6 +29,16 @@ import (
 
 // Runner executes a system command. Tests substitute a recorder.
 type Runner func(name string, args ...string) error
+
+// Prober executes a candidate cloop binary and returns its stdout.
+//
+// Separate from Runner, and not merely because it returns output. Runner shells
+// out to the *system* — systemctl, useradd — and is disabled entirely for a
+// staged installer, since a staged install describes a machine that is not this
+// one. A Prober runs a file the caller explicitly named and asks it what it is,
+// which is a different act with a different safety argument: it is how Upgrade
+// refuses to replace a working agent with a truncated download. See verify.go.
+type Prober func(ctx context.Context, path string, args ...string) ([]byte, error)
 
 // Installer applies and reverses plans.
 //
@@ -44,6 +55,11 @@ type Installer struct {
 	// Run executes a command. Nil uses exec.Command. Ignored when Root is
 	// set.
 	Run Runner
+
+	// Exec runs a candidate cloop binary during upgrade verification. Nil
+	// uses exec.CommandContext; a staged installer with no Exec skips
+	// verification rather than running a binary built for another machine.
+	Exec Prober
 
 	// Logf receives progress messages. Nil discards them.
 	Logf func(format string, args ...any)

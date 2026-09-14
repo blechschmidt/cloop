@@ -164,6 +164,9 @@ func applyHostExecutionPolicy(dir string) {
 		return
 	}
 	executor.ApplyHostExecutionPolicy(cfg.Executors.HostProcessAllowed())
+	// Same ratchet, same reason: a tenant's config.yaml must not be able to
+	// lower the fleet's minimum agent build.
+	executor.ApplyMinAgentBuild(cfg.Executors.MinAgentBuild)
 }
 
 // reconcileConfiguredExecutors brings up the container and Kubernetes drivers

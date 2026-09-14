@@ -70,6 +70,7 @@ const (
 	ConstraintWriteBack        Constraint = "write_back"
 	ConstraintSecretFiles      Constraint = "secret_files"
 	ConstraintRevocation       Constraint = "revocation"
+	ConstraintAgentBuild       Constraint = "agent_build"
 )
 
 // Candidate is one executor offered to the scheduler, together with everything
@@ -473,6 +474,17 @@ func reject(c Candidate, req Requirements) (Rejection, bool) {
 	if !HostExecutionAllowed() && caps.Isolation == IsolationNone {
 		return no(ConstraintHostPolicy, "runs on the control-plane host, which policy forbids")
 	}
+	// Beside the host-execution switch because it is the same kind of rule: a
+	// deployment-wide statement about which nodes may run anything at all,
+	// read from the process-wide policy rather than threaded through
+	// Requirements, so both entry points into placement honour it. A build
+	// that predates a fix the operator has deployed is a property of the node,
+	// like its health, and naming it here means the refusal arrives at
+	// scheduling time with a remediation instead of at run time as whatever
+	// the missing fix does when it is missing. See agentbuild.go.
+	if detail, rejected := rejectForBuild(c.Executor, MinAgentBuild()); rejected {
+		return no(ConstraintAgentBuild, "%s", detail)
+	}
 	if req.RequireIsolation && caps.Isolation == IsolationNone {
 		return no(ConstraintIsolation, "offers no isolation from the host")
 	}
@@ -634,6 +646,15 @@ func lessCandidate(a, b Candidate) bool {
 	bIso := b.Executor.Capabilities().Isolation != IsolationNone
 	if aIso != bIso {
 		return aIso
+	}
+	// Newer build before older, among nodes that are otherwise equally good.
+	// Below capacity deliberately: spreading load matters more than build
+	// currency, and ranking build first would pile a fleet's whole workload
+	// onto whichever device was upgraded most recently. Above the ID tiebreak
+	// so a stale device goes idle — which is how an operator finds out it is
+	// stale, rather than from the failure its missing fix eventually causes.
+	if aFirst, ok := buildRank(a, b); ok {
+		return aFirst
 	}
 	return a.ID() < b.ID()
 }

@@ -944,3 +944,74 @@ func TestExecutorWarnings_Kubernetes(t *testing.T) {
 		t.Errorf("warnings %q do not flag that unbound projects still run on the host", joined)
 	}
 }
+
+// ── executors.min_agent_build (Task 20252) ──────────────────────────────────
+
+// TestMinAgentBuildMustBeComparable. The floor is only worth having if the
+// scheduler can evaluate it, and a value it cannot parse is ignored — so the
+// one thing this setting must never do is accept a version silently and enforce
+// nothing.
+func TestMinAgentBuildMustBeComparable(t *testing.T) {
+	for _, bad := range []string{"v1.2", "1", "latest", "dev", "v1.x.0", "vv1.0.0"} {
+		if err := ValidateExecutors(ExecutorsConfig{MinAgentBuild: bad}); err == nil {
+			t.Errorf("min_agent_build %q was accepted; placement cannot order it, so no "+
+				"floor would be enforced", bad)
+		}
+	}
+	for _, good := range []string{"", "v0.1.0", "v1.2.3", "1.2.3", "v2.0.0-rc1"} {
+		if err := ValidateExecutors(ExecutorsConfig{MinAgentBuild: good}); err != nil {
+			t.Errorf("min_agent_build %q was refused: %v", good, err)
+		}
+	}
+}
+
+// TestUnparseableMinAgentBuildRaisesABanner covers the path `config set` does
+// not guard: a hand-edited config.yaml. Load clamps and warns rather than
+// refusing to boot — right for everything else in this file, and a denial of
+// service here — so the operator has to be told that no floor is in force,
+// rather than left to assume the opposite.
+func TestUnparseableMinAgentBuildRaisesABanner(t *testing.T) {
+	warnings := ExecutorWarnings(ExecutorsConfig{MinAgentBuild: "nonsense"})
+	var found string
+	for _, w := range warnings {
+		if strings.Contains(w, "min_agent_build") {
+			found = w
+		}
+	}
+	if found == "" {
+		t.Fatalf("an unparseable build floor produced no warning: %v", warnings)
+	}
+	// The consequence, not just the syntax error: "invalid value" would leave a
+	// reader thinking the floor is merely mis-typed rather than absent.
+	if !strings.Contains(found, "no build floor is being enforced") {
+		t.Errorf("the warning does not say the fleet is ungated: %s", found)
+	}
+
+	if w := ExecutorWarnings(ExecutorsConfig{MinAgentBuild: "v1.0.0"}); len(w) > 0 {
+		for _, msg := range w {
+			if strings.Contains(msg, "min_agent_build") {
+				t.Errorf("a valid floor produced a warning: %s", msg)
+			}
+		}
+	}
+}
+
+// TestMinAgentBuildSurvivesARoundTrip. A floor dropped by Save would silently
+// re-open the fleet on the next config write, which is the same class of bug
+// that made allow_host_process a *bool.
+func TestMinAgentBuildSurvivesARoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	cfg := Default()
+	cfg.Executors.MinAgentBuild = "v1.4.0"
+	if err := Save(dir, cfg); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.Executors.MinAgentBuild != "v1.4.0" {
+		t.Errorf("min_agent_build = %q after a round trip, want v1.4.0",
+			got.Executors.MinAgentBuild)
+	}
+}

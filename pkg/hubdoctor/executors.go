@@ -38,6 +38,9 @@ func checkExecutors(ctx context.Context, dir string, cfg *config.Config, opts Op
 	// permissive default a CLI starts with. The ratchet only tightens, so
 	// this cannot loosen a process that was already strict.
 	executor.ApplyHostExecutionPolicy(cfg.Executors.HostProcessAllowed())
+	// Same ratchet, so `hub doctor` reports the placement a run would
+	// actually get rather than one with the build floor missing.
+	executor.ApplyMinAgentBuild(cfg.Executors.MinAgentBuild)
 
 	// Reconcile without publishing: `cloop hub doctor` may be run alongside a
 	// hub in the same directory, and overwriting the live report with a CLI

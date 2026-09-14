@@ -311,7 +311,17 @@ func (s *Server) executorPolicy() executorPolicyView {
 
 // blockedFor reports whether policy forbids dispatching to ex, and why.
 func blockedFor(ex executor.Executor) (bool, string) {
-	if ex == nil || executor.HostExecutionAllowed() {
+	if ex == nil {
+		return false, ""
+	}
+	// The build floor first: a device below it is refused whether or not it
+	// isolates, and a remote agent always isolates, so checking host policy
+	// first would return "not blocked" for exactly the executors this rule
+	// governs. See executor.BlockedByBuildFloor.
+	if blocked, reason := executor.BlockedByBuildFloor(ex); blocked {
+		return true, reason
+	}
+	if executor.HostExecutionAllowed() {
 		return false, ""
 	}
 	if ex.Capabilities().Isolation != executor.IsolationNone {
@@ -1401,6 +1411,17 @@ func (s *Server) handleProjectExecutorBind(w http.ResponseWriter, r *http.Reques
 			http.StatusBadRequest)
 		return
 	}
+	// Checked before blockedFor's host-policy branch and reported under its own
+	// code, because the two refusals have nothing in common but their status.
+	// A build-floor block folded into host_execution_denied would tell an
+	// operator that host execution is disabled — about a remote device, which
+	// is not the host — and offer "bind to an isolated executor" as the fix,
+	// which is advice they have already taken.
+	if blocked, reason := executor.BlockedByBuildFloor(ex); blocked {
+		writeExecutorBlocked(w, "agent_build_too_old",
+			fmt.Sprintf("executor %q is below this fleet's minimum agent build", id), reason)
+		return
+	}
 	if blocked, reason := blockedFor(ex); blocked {
 		// 409 rather than 400: the request is well-formed and would have
 		// been accepted under a different policy. This is the same status
@@ -1515,6 +1536,25 @@ func (s *Server) requireExecutorAdmin(w http.ResponseWriter, r *http.Request) bo
 // produces, with the remediation in a dedicated field so the frontend can
 // render "what went wrong" and "what to do" as separate elements instead of
 // regex-ing one sentence apart.
+// writeExecutorBlocked writes a 409 for an executor that policy forbids, under
+// a code naming the actual cause.
+//
+// The envelope is deliberately identical to writeHostExecutionDenied's — same
+// status, same `error`/`code`/`remediation` keys — so a client that does not
+// recognise a new code still renders the sentence rather than falling back to
+// "something went wrong". Only the taxonomy is new, and only because the
+// remediation differs: "bind this project to a sandbox" and "upgrade the device"
+// send an operator to opposite places.
+func writeExecutorBlocked(w http.ResponseWriter, code, message, remediation string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusConflict)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"error":       message,
+		"code":        code,
+		"remediation": remediation,
+	})
+}
+
 func writeHostExecutionDenied(w http.ResponseWriter, denied *executor.HostExecutionDeniedError, remediation string) {
 	if remediation == "" && denied != nil {
 		remediation = denied.Remediation()

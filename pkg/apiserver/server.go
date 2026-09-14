@@ -192,6 +192,9 @@ func bootstrapExecutors(dir string) {
 		if loaded, err := config.Load(dir); err == nil && loaded != nil {
 			cfg = loaded
 			executor.ApplyHostExecutionPolicy(cfg.Executors.HostProcessAllowed())
+			// Same ratchet: the REST API places work too, so it must see the
+			// same build floor the Web UI does.
+			executor.ApplyMinAgentBuild(cfg.Executors.MinAgentBuild)
 		}
 	}
 	registerBuiltinExecutors()

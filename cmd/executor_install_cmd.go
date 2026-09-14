@@ -70,6 +70,17 @@ It is idempotent — an upgrade to the identical binary copies nothing and
 restarts nothing — and it refuses rather than half-installing a device that was
 never installed in the first place.
 
+Before anything is replaced, the staged binary is executed and made to identify
+itself. A truncated download, a copy built for another architecture and a file
+that is not cloop all hash perfectly well, and all three used to be renamed over
+a working agent's binary; now they are refused. A build older than the one
+installed, or one speaking a protocol this control plane no longer accepts, is
+refused too — pass --force for a deliberate rollback.
+
+The replaced binary is kept beside the new one. If the service was running before
+the upgrade and does not come back on the new build, the old one is restored and
+restarted, so a bad rollout leaves the device in the fleet rather than offline.
+
 Examples:
 
   # Everything from one blob (the bundle carries server, token and pin).
@@ -132,10 +143,13 @@ Examples:
 			spec.BinaryPath = strings.TrimSpace(dest)
 			from, _ := cmd.Flags().GetString("from")
 
+			settle, _ := cmd.Flags().GetDuration("settle-timeout")
+
 			res, err := inst.Upgrade(spec, out, install.UpgradeOptions{
-				Source: strings.TrimSpace(from), // empty: Upgrade uses this executable
-				Force:  force,
-				DryRun: dryRun,
+				Source:        strings.TrimSpace(from), // empty: Upgrade uses this executable
+				Force:         force,
+				DryRun:        dryRun,
+				SettleTimeout: settle,
 			})
 			if err != nil {
 				return err
@@ -344,6 +358,7 @@ func printUpgraded(w io.Writer, res install.UpgradeResult) {
 		fmt.Fprintf(w, "  from:    %s\n", res.Source)
 		fmt.Fprintf(w, "  build:   %s -> %s\n",
 			shortChecksum(res.PreviousChecksum), shortChecksum(res.NewChecksum))
+		printVerification(w, res)
 		dim.Fprintf(w, "\n  Would replace the binary and restart %s.\n", res.Spec.ServiceName)
 		dim.Fprintln(w, "  The unit file and credential would be left unchanged.")
 		return
@@ -353,6 +368,13 @@ func printUpgraded(w io.Writer, res install.UpgradeResult) {
 	fmt.Fprintf(w, "  binary:  %s\n", res.Spec.BinaryPath)
 	fmt.Fprintf(w, "  from:    %s\n", res.Source)
 	fmt.Fprintf(w, "  build:   %s -> %s\n", shortChecksum(res.PreviousChecksum), shortChecksum(res.NewChecksum))
+	printVerification(w, res)
+	if res.BackupPath != "" {
+		// Named because it is the operator's manual escape hatch, and because
+		// a file silently appearing beside the service binary is the kind of
+		// thing that gets deleted by whoever finds it next.
+		dim.Fprintf(w, "  rollback: %s (the binary this replaced)\n", res.BackupPath)
+	}
 
 	if res.Restarted {
 		fmt.Fprintf(w, "  service: restarted\n")
@@ -374,6 +396,25 @@ func printUpgraded(w io.Writer, res install.UpgradeResult) {
 	dim.Fprintln(w, "  To change either, re-run a full install with the enrollment bundle.")
 	if res.Output == install.OutputSystemd {
 		dim.Fprintf(w, "  logs: journalctl -fu %s\n", res.Spec.UnitFileName())
+	}
+}
+
+// printVerification reports what the staged binary said about itself.
+//
+// A skipped check is printed as skipped rather than omitted. An operator reading
+// output with no verification line would reasonably conclude the binary was
+// checked and found good, and the one mode where it is not checked — a staged
+// install, whose target is another machine — is exactly the mode where that
+// assumption is wrong.
+func printVerification(w io.Writer, res install.UpgradeResult) {
+	dim := color.New(color.Faint)
+	if !res.Verified {
+		dim.Fprintln(w, "  verified: skipped (staged install: the binary is for another machine)")
+		return
+	}
+	fmt.Fprintf(w, "  verified: %s\n", res.StagedBuild)
+	if prev := res.InstalledBuild.Version; prev != "" && prev != res.StagedBuild.Version {
+		dim.Fprintf(w, "  replacing: %s\n", prev)
 	}
 }
 
@@ -436,7 +477,11 @@ func init() {
 	f.String("from", "",
 		"with --upgrade, the new cloop binary to install (default: this executable)")
 	f.Bool("force", false,
-		"with --upgrade, replace and restart even when the installed binary is already identical")
+		"with --upgrade, replace and restart even when the installed binary is already identical, "+
+			"or when the new one is a downgrade")
+	f.Duration("settle-timeout", 0,
+		"with --upgrade, how long to wait for the restarted service to come back before rolling "+
+			"back to the previous binary (default 30s)")
 	f.String("root", "",
 		"stage the files beneath this directory instead of installing them, for image builds")
 

@@ -829,6 +829,48 @@ Hardening before any device has enrolled is a supported intermediate state —
 remote executors arrive at runtime, not through this file — so the config still
 loads and warns rather than refusing to boot.
 
+### Minimum agent build
+
+A fleet-wide floor on the cloop build a remote executor agent may be running and
+still receive work:
+
+```yaml
+executors:
+  min_agent_build: v0.1.0
+```
+
+Absent — the default — means no floor, so an existing deployment places exactly
+as it did before.
+
+It exists because the negotiated protocol version cannot express most of what
+changes between builds. The protocol number moves only when a *frame* moves, so
+two devices can both speak the current protocol and differ by a year of fixes to
+things the wire never sees. Without a floor, an operator who has deployed such a
+fix has no way to stop scheduling onto the devices that predate it, and finds out
+which ones those were from the failures.
+
+A device below the floor is refused at placement with the `agent_build`
+constraint and a message naming both versions and the upgrade command, rather
+than being selected and failing at run time. A device that cannot *prove* it
+meets the floor — reporting no build, the legacy `1` placeholder, or an
+unreleased `dev+g…` build — is refused too, with a message saying which of those
+it was. Container, Kubernetes and local-process executors are never subject to
+it: they run the hub's own binary and have no separate build to compare.
+
+The value must be a comparable `vMAJOR.MINOR.PATCH` release. `cloop config set`
+refuses anything else outright; a hand-edited `config.yaml` is not refused — that
+would turn a typo into a hub that will not boot — but it raises a banner on the
+Executors tab saying **no floor is being enforced**. A floor the scheduler cannot
+parse is a rule that silently does nothing while the operator believes their
+fleet is gated, and that is the one outcome this setting must never have quietly.
+
+Like `allow_host_process`, it is applied as a **ratchet**: a hub reads many
+tenants' `config.yaml`, and a tenant-controlled file must not be able to lower a
+fleet-wide floor. Lowering it means restarting with the looser config.
+
+See [Placement](../architecture/executors.md#placement) for how the constraint is
+ranked and enforced on both the scheduling and the project-binding paths.
+
 The policy is a **ratchet**: it can only tighten at runtime. A control plane
 manages many projects, each with its own `config.yaml`, and applying them
 symmetrically would let a tenant re-enable host execution by editing a file they

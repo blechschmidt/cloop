@@ -655,7 +655,7 @@ named: `no_candidates`, `executor_id`, `health`, `host_execution_policy`,
 `harness`, `container_runtime`, `network_egress`, `resource_limits`, `stream`,
 `signal`, `memory`, `capacity`, `image_override`, `sandbox_build`,
 `sandbox_mounts`, `host_mounts`, `devices`, `egress_scope`, `workspace`,
-`write_back`, `secret_files`, `revocation`. An operator asking
+`write_back`, `secret_files`, `revocation`, `agent_build`. An operator asking
 "why did nothing schedule?" gets a per-node answer, not a shrug.
 
 `virtualization` is the one whose message names the two config keys that fix it,
@@ -721,6 +721,50 @@ in is a backend advertising a guarantee it does not implement. A new driver
 therefore opts in by writing the code; until it does, every workload carrying a
 brokered credential is refused there by name. See
 [Revocation per backend](../security/model.md#revocation-per-backend).
+
+`agent_build` is the only constraint that is not about a capability at all. Every
+other entry asks whether a node *can* do something; this one asks whether the
+cloop build it is running is recent enough to be trusted with the work.
+
+It exists because the negotiated protocol version cannot express most of what
+changes between builds. The protocol number moves only when a frame moves, so two
+devices can both speak the current protocol and differ by a year of fixes to
+things the wire never sees — a workspace cleaned up wrongly, a credential not
+wiped, a signal not forwarded. An operator who has deployed such a fix had no way
+to stop scheduling onto the devices that predate it, and found out which ones
+those were from the failures.
+
+The floor is set once, fleet-wide, with `executors.min_agent_build` (see
+[configuration](../reference/configuration.md#executors)), and applied as a
+ratchet: a hub reads many tenants' `config.yaml`, so a tenant-controlled file
+must not be able to lower it. It is read inside the shared rejection path, which
+means `Select` and `CheckSandboxSupport` honour it identically — a floor enforced
+on only one of the two would be a floor with a bypass.
+
+A device that *cannot prove* it meets the floor is refused along with one that is
+genuinely older, and the message distinguishes them, because the fixes differ: a
+device reporting no build at all predates build-version reporting, one reporting
+the placeholder `1` is a build from before agents knew their own version, and one
+reporting an unreleased `dev+g…` build carries nothing that can be ordered
+against a release. Setting a floor is a request for devices that can substantiate
+their build, not for devices that decline to answer.
+
+Container, Kubernetes and local-process executors are never subject to it. They
+run the control plane's own binary, so there is no separate build to compare, and
+treating them as "build unknown" would take every sandbox out of the fleet the
+moment a floor was configured.
+
+Build currency is also a *ranking* input, below capacity and above the ID
+tie-break: among otherwise-equal nodes, the newer build wins. Ranking it above
+capacity would pile a fleet's whole workload onto whichever device was upgraded
+most recently; leaving it out entirely means a stale device keeps taking work
+because it happens to sort first alphabetically, and nothing ever surfaces that
+it is stale.
+
+The remedy named in the message is `cloop executor agent install --upgrade`, which
+is safe to run against a critical host: it executes the staged binary before
+replacing anything and restores the previous one if the service does not come
+back. See [Upgrading a device](#upgrading-a-device).
 
 One subtlety worth knowing: a node that advertises *no* harnesses passes the
 harness requirement. Empty means "detection failed", not "has none" — treating
@@ -1985,7 +2029,9 @@ sudo cloop executor agent install --upgrade
 # Or from an explicit path, without replacing the binary you are running.
 sudo cloop executor agent install --upgrade --from /tmp/cloop-new
 
-# See what it would do first.
+# See what it would do first. This runs the real checks, including executing
+# the new binary — a dry run that only echoed the flags back would not be worth
+# running before bouncing a service on a device you cannot easily reach.
 cloop executor agent install --upgrade --dry-run
 ```
 
@@ -1993,6 +2039,72 @@ cloop executor agent install --upgrade --dry-run
 running executable cannot be opened for writing on Linux at all) and then asks
 systemd to `try-restart` the unit. `try-restart` rather than `restart`, so a
 service an operator deliberately stopped stays stopped.
+
+#### The staged binary is executed before it is installed
+
+Comparing checksums answers exactly one question — "are these the same bytes" —
+and a truncated download, a binary built for another architecture, and a text
+file all pass it. All three used to be renamed over a working agent's binary and
+the service restarted, which on an unreachable edge device means a site visit.
+
+So the new binary is run first, with a timeout, in a directory containing no
+cloop project, against `cloop version --json`:
+
+```json
+{ "version": "v0.1.0", "go": "go1.25.9", "os": "linux", "arch": "amd64",
+  "protocol": 6, "min_protocol": 1 }
+```
+
+A binary older than that flag exits non-zero on it, which is information rather
+than failure: the probe falls back to plain `cloop version`, whose first line has
+read `cloop <version>` since the command existed, and records the protocol
+numbers as unknown rather than inventing them.
+
+Four refusals come out of this, and they divide on whether `--force` can override
+them:
+
+| Refusal | `--force`? | Why |
+| --- | --- | --- |
+| will not execute here (`ENOEXEC`, timeout, non-zero exit) | **no** | a binary that will not run before the rename will not run after it |
+| ran, but did not identify itself as cloop | **no** | the likely cause is a path typo pointing at another tool |
+| older build than the one installed | yes | a deliberate rollback is a real operation |
+| speaks a protocol below the hub's `MinProtocolVersion` | yes | installing it would take the device out of the fleet — the hub would refuse its hello frame |
+
+`--force` has always meant "replace even though the bytes are identical". It is
+deliberately not widened to mean "install something proven broken": that would
+delete the only check standing between a bad download and an offline device. The
+two downgrade cases are overridable because refusing them outright would send an
+operator backing out a bad release to `cp` and `systemctl`, bypassing every other
+check here.
+
+An unreleased `dev+g…` build is *allowed*. It cannot be ordered against a
+release, and a developer testing a fix on a device is legitimate — the binary has
+already been shown to run, which is the check that matters.
+
+#### A failed upgrade is reverted
+
+Execution proves the binary runs *here*. It cannot prove it will stay up
+*there* — a newer libc than the device has, a startup panic on its hardware —
+and the only evidence of that is a service that will not stay running, by which
+point the binary that worked is gone.
+
+So the replaced binary is kept beside the new one at `<binary>.prev` (one
+generation, not one per upgrade — a device with a small root filesystem must not
+fill up from routine rollouts), and after the restart the upgrade waits up to 30
+seconds, `--settle-timeout` to change, for the service to report itself active.
+If it does not, the previous binary is restored and restarted, and the command
+fails saying the device is still in the fleet.
+
+Whether the service was running is sampled **before** the restart, not after.
+`try-restart` succeeds whether or not it restarted anything, so afterwards a
+service an operator had deliberately stopped is indistinguishable from one that
+crashed on the new build — and rolling back on that would revert a good upgrade
+every time it landed on a stopped agent, including every device installed with
+`--no-start`.
+
+If the restore itself fails, that is the one outcome needing a human on the
+device, and it is reported as such rather than in the same register as an
+ordinary failure.
 
 It deliberately does **not** re-render the unit file and does not touch the
 credential. The unit embeds the hub URL and the certificate pin, both of which
@@ -2002,7 +2114,7 @@ pointing at no server, turning "your agent is one version behind" into "your
 agent no longer knows where its hub is". Changing the unit means re-running a
 full install with the bundle.
 
-Three properties, each covered by a test:
+Five properties, each covered by a test:
 
 - **Idempotent.** An upgrade to a byte-identical binary copies nothing and
   restarts nothing, and says so. Pass `--force` to replace and restart anyway.
@@ -2011,10 +2123,20 @@ Three properties, each covered by a test:
   binary with no supervisor around it. With `--output docker` there is no binary
   on the filesystem to replace, so it refuses and prints the pull-and-recreate
   procedure instead.
+- **Verified.** The staged binary is executed and made to identify itself before
+  anything is replaced.
+- **Reversible.** The replaced binary is kept, and restored if a service that
+  was running does not come back on the new build.
 - **Honest about the outcome.** "Nothing needed doing", "replaced and
   restarted", and "replaced but the service was not running" are three different
   successes, and the last one — where everything looks fine and the old build is
-  still what would run — gets a warning.
+  still what would run — gets a warning. A skipped verification is printed as
+  skipped, never omitted: output with no verification line would reasonably read
+  as "checked and good".
+
+The one mode where the binary is *not* executed is `--root`, which stages an
+install tree for a different machine. That machine's binary may legitimately not
+run on this one, which is the same reason `--root` never invokes `systemctl`.
 
 ---
 

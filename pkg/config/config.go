@@ -460,6 +460,29 @@ type ExecutorsConfig struct {
 	// Save, silently re-opening host execution.
 	AllowHostProcess *bool `yaml:"allow_host_process,omitempty"`
 
+	// MinAgentBuild is the oldest cloop build a remote executor agent may be
+	// running and still receive work. Empty — the default — means no floor.
+	//
+	// It exists because the negotiated protocol version cannot express most of
+	// what changes between builds. The protocol number moves only when a frame
+	// moves, so two agents can both speak the current protocol and differ by a
+	// year of fixes to things the wire never sees. An operator who has deployed
+	// such a fix had no way to stop scheduling onto the devices that predate
+	// it, and learned which ones those were from the failures.
+	//
+	// A device that cannot prove it meets the floor — one reporting no build,
+	// the legacy "1" placeholder, or an unreleased build that carries no
+	// comparable version — is refused along with one that is genuinely older,
+	// and the placement error says which of the two it was. Setting a floor is
+	// a request for devices that can substantiate their build, not for devices
+	// that decline to answer.
+	//
+	// Applied as a ratchet (executor.ApplyMinAgentBuild): a hub reads many
+	// projects' config.yaml, and a tenant-controlled file must not be able to
+	// lower a fleet-wide floor. Lowering means restarting with the looser
+	// config. See pkg/executor/agentbuild.go.
+	MinAgentBuild string `yaml:"min_agent_build,omitempty"`
+
 	// Container configures the Docker/Podman sandbox executor.
 	Container ContainerExecutorConfig `yaml:"container,omitempty"`
 

@@ -32,6 +32,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/egressbroker"
 	"github.com/blechschmidt/cloop/pkg/executor/container"
 	"github.com/blechschmidt/cloop/pkg/executor/kubernetes"
+	"github.com/blechschmidt/cloop/pkg/version"
 )
 
 // ErrSizeTooLarge is returned when a size string parses but exceeds its
@@ -195,6 +196,19 @@ func clampSizeMB(parse func(string) (int, error), s string, upperMB int) (int, b
 // for a security control. ExecutorWarnings surfaces it as advice instead, and
 // the Executors tab shows it as a banner.
 func ValidateExecutors(e ExecutorsConfig) error {
+	// Refused at the door rather than ignored at placement time. A floor the
+	// scheduler cannot parse is a rule that silently does nothing, and the
+	// operator who typed it believes their fleet is gated when it is not —
+	// worse than having no floor, because it is a guarantee they think they
+	// have. Compare(v, v) is the parse check: it succeeds only for a version
+	// this hub can order, which is exactly the property a floor needs.
+	if v := strings.TrimSpace(e.MinAgentBuild); v != "" {
+		if _, ok := version.Compare(v, v); !ok {
+			return fmt.Errorf("executors.min_agent_build: %q is not a comparable version; use a "+
+				"released vMAJOR.MINOR.PATCH build such as v0.1.0, or leave it unset to place on "+
+				"any agent", v)
+		}
+	}
 	if err := ValidateContainerExecutor(e.Container); err != nil {
 		return err
 	}
@@ -212,6 +226,24 @@ func ValidateExecutors(e ExecutorsConfig) error {
 // operator probably did not intend.
 func ExecutorWarnings(e ExecutorsConfig) []string {
 	var out []string
+
+	// A floor the scheduler cannot parse is ignored, which is the one outcome
+	// this setting must never have quietly: the deployment believes its fleet
+	// is gated on a minimum build and it is not. ValidateExecutors rejects one
+	// arriving through `cloop config set`, but a hand-edited config.yaml never
+	// passes through there — Load clamps and warns rather than refusing to
+	// boot, which is right for everything else in this file and would be a
+	// denial of service here. So it is surfaced as a banner instead, on the
+	// Executors tab and in `cloop hub bootstrap`.
+	if v := strings.TrimSpace(e.MinAgentBuild); v != "" {
+		if _, ok := version.Compare(v, v); !ok {
+			out = append(out, fmt.Sprintf("executors.min_agent_build is %q, which is not a "+
+				"comparable version, so no build floor is being enforced and every agent is "+
+				"eligible. Use a released vMAJOR.MINOR.PATCH build such as v0.1.0, or remove "+
+				"the key.", v))
+		}
+	}
+
 	isolated := e.Container.Enabled || e.Kubernetes.Enabled
 	if !e.HostProcessAllowed() && !isolated {
 		out = append(out, "executors.allow_host_process is false and no isolated executor is "+

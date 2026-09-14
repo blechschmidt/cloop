@@ -43,8 +43,10 @@ func newUpgradeFixture(t *testing.T, out Output, installedBinary string) *upgrad
 		t.Fatalf("normalize: %v", err)
 	}
 
-	// The binary, at the path an install would have put it.
-	mustWrite(t, norm.BinaryPath, installedBinary, BinaryMode)
+	// The binary, at the path an install would have put it. Wrapped into
+	// something that actually runs and answers `version`, because Upgrade now
+	// executes both binaries before it replaces anything — see fakeCloop.
+	mustWrite(t, norm.BinaryPath, fakeCloop(fixtureVersion, installedBinary), BinaryMode)
 	// The supervision artifact, which is what Upgrade checks to decide whether
 	// anything is installed at all.
 	switch out {
@@ -79,8 +81,55 @@ func mustWrite(t *testing.T, path, body string, mode os.FileMode) {
 	}
 }
 
+// fixtureVersion is the build both the installed and the staged binary claim in
+// the tests that do not care about versions.
+//
+// The *same* version on both sides deliberately: it keeps two binaries with the
+// same marker byte-identical, which is what the idempotence and same-file cases
+// depend on, and an equal version is not a downgrade so the safety check lets
+// every other case through. Tests about version ordering build their binaries
+// explicitly instead.
+const fixtureVersion = "v1.0.0"
+
+// fakeCloop renders a stand-in for the cloop binary: a shell script that answers
+// `version` and `version --json` the way a real build does, and carries a marker
+// so a test can tell which one ended up installed.
+//
+// A script rather than a copy of the real binary, because these tests need to
+// vary the version and the protocol freely, and because the property under test
+// is "Upgrade ran it and believed what it said" — not "the real cloop prints a
+// version", which cmd/version_test.go covers.
+func fakeCloop(version, marker string) string {
+	return "#!/bin/sh\n" +
+		"# cloop-test-marker: " + marker + "\n" +
+		"if [ \"$1\" = \"version\" ] && [ \"$2\" = \"--json\" ]; then\n" +
+		"  printf '{\"version\":\"" + version + "\",\"protocol\":6,\"min_protocol\":1}\\n'\n" +
+		"  exit 0\n" +
+		"fi\n" +
+		"if [ \"$1\" = \"version\" ]; then echo \"cloop " + version + "\"; exit 0; fi\n" +
+		"exit 0\n"
+}
+
+// markerOf recovers what fakeCloop embedded, so the existing assertions can keep
+// comparing short names instead of whole scripts.
+func markerOf(body string) string {
+	for _, line := range strings.Split(body, "\n") {
+		if rest, ok := strings.CutPrefix(strings.TrimSpace(line), "# cloop-test-marker:"); ok {
+			return strings.TrimSpace(rest)
+		}
+	}
+	return body
+}
+
 // newBinary writes a "new build" to the temp dir and returns its path.
 func (f *upgradeFixture) newBinary(t *testing.T, body string) string {
+	t.Helper()
+	return f.stageBinary(t, fakeCloop(fixtureVersion, body))
+}
+
+// stageBinary writes an arbitrary body as the staged binary. The escape hatch
+// for the tests that need something other than a well-behaved cloop.
+func (f *upgradeFixture) stageBinary(t *testing.T, body string) string {
 	t.Helper()
 	path := filepath.Join(f.dir, "tmp", "cloop-new")
 	mustWrite(t, path, body, BinaryMode)
@@ -93,7 +142,7 @@ func (f *upgradeFixture) installed(t *testing.T) string {
 	if err != nil {
 		t.Fatalf("read installed binary: %v", err)
 	}
-	return string(body)
+	return markerOf(string(body))
 }
 
 // TestUpgradeReplacesBinaryAndRestarts is the happy path: the whole point of
@@ -269,11 +318,16 @@ func TestUpgradeShellOutputRestartsInitScript(t *testing.T) {
 // TestUpgradeReportsUnrestartedService covers the outcome an operator must not
 // miss: the binary landed but the supervisor refused, so the device is still
 // running the old build even though the command mostly succeeded.
+//
+// The service is *not* running in this scenario — an unloaded unit cannot be —
+// and that is what distinguishes it from the rollback case below. Nothing was
+// taken down by the upgrade, so there is nothing to restore, and the right
+// outcome is the honest partial success rather than a revert.
 func TestUpgradeReportsUnrestartedService(t *testing.T) {
 	f := newUpgradeFixture(t, OutputSystemd, "OLD BUILD")
 	src := f.newBinary(t, "NEW BUILD")
 	f.inst.Run = func(name string, args ...string) error {
-		if len(args) > 0 && args[0] == "try-restart" {
+		if len(args) > 0 && (args[0] == "try-restart" || args[0] == "is-active") {
 			return errors.New("Unit cloop-executor.service not loaded")
 		}
 		return nil

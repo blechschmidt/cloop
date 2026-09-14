@@ -98,6 +98,9 @@ func init() {
 				// safe: strict mode refuses only non-isolating ones. The
 				// policy is a ratchet — see executor.ApplyHostExecutionPolicy.
 				executor.ApplyHostExecutionPolicy(cfg.Executors.HostProcessAllowed())
+				// Same ratchet, same reason: a tenant's config.yaml must not be
+				// able to lower the fleet's minimum agent build.
+				executor.ApplyMinAgentBuild(cfg.Executors.MinAgentBuild)
 
 				// Commands that construct a control plane reconcile from
 				// their OWN workdir a moment later, and skipping the pass

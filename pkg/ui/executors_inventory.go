@@ -43,8 +43,12 @@ import (
 // cmd/executor_install_cmd.go defined no such flag — so the one command the UI
 // offered as a remedy failed with an unknown-flag error. The flag now exists
 // (see install.Upgrade), and naming it from one place means the string and the
-// flag cannot drift apart again without the drift test noticing.
-const AgentUpgradeCommand = "cloop executor agent install --upgrade"
+// flag cannot drift apart again.
+//
+// An alias rather than a second literal: the scheduler emits the same sentence
+// when it refuses a device for being below the fleet's build floor, and two
+// copies of an operator instruction is how one of them goes stale.
+const AgentUpgradeCommand = executor.AgentUpgradeProcedure
 
 // upgradeHint is the sentence appended to any skew message, naming the real
 // procedure. Kept separate from pkg/version's prose so the version package
