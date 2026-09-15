@@ -600,8 +600,8 @@ ui: kubernetes access monitor NOT started: kubernetes monitor listen on 0.0.0.0:
 
 ### Checking it from the outside
 
-[`cloop hub doctor`](../reference/commands.md#cloop-hub-doctor) reports on the
-monitor under the `kubeguard.*` checks, and it is worth running even when
+[`cloop hub doctor`](../operations/runbook.md#configuration-health-cloop-hub-doctor)
+reports on the monitor under the `kubeguard.*` checks, and it is worth running even when
 nothing appears to be wrong — because when this is misconfigured, nothing does
 appear to be wrong. A hub with the monitor off leases, dispatches and runs
 `kubectl` exactly like one with it on.
