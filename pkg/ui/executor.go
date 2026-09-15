@@ -199,6 +199,9 @@ func reconcileConfiguredExecutors(dir string) {
 		// paying for the sweep that cleans up Pods a previous instance left
 		// running when it died mid-run.
 		ReconcileOrphans: true,
+		// And keeps paying for it: a hub that stays up for weeks loses Pods to
+		// node evictions, which the startup sweep by definition never sees.
+		SweepInterval: cfg.Executors.OrphanSweepInterval(),
 		// Route the Kubernetes driver's workspace fetches and write-back
 		// pushes through the git interception proxy when one is configured.
 		// Nil-safe: with no proxy the source is returned unchanged.
