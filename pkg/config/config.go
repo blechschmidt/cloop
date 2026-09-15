@@ -128,6 +128,27 @@ const (
 	RetentionVacuumMaxInlineMBLower = 1
 	RetentionVacuumMaxInlineMBUpper = 1 << 20
 
+	// Row-table retention (Task 20291). These share the zero-means-default
+	// convention above and add one value to it: RetentionKeepEverything opts a
+	// single table out. The opt-out is needed because these limits, unlike the
+	// archive's, are on by default — so an operator who wants a table kept in
+	// full has to have a way to say so that is not "disable the janitor".
+	RetentionProviderCallBodyAgeDaysLower = 1
+	RetentionProviderCallBodyAgeDaysUpper = 3650
+	RetentionTelemetryMaxAgeDaysLower     = 1
+	RetentionTelemetryMaxAgeDaysUpper     = 3650
+
+	// RetentionRowsLower is the floor every row ceiling shares. Below a
+	// hundred, a ceiling stops bounding a table and starts emptying it, and a
+	// mistyped `10` would silently discard a project's history on the next
+	// pass.
+	RetentionRowsLower = 100
+	RetentionRowsUpper = 100_000_000
+
+	// RetentionKeepEverything disables one row limit while leaving the rest of
+	// the retention policy in force.
+	RetentionKeepEverything = -1
+
 	// HTTP request body cap for the cloop ui and cloop serve servers
 	// (Task 20102). The cap protects against memory-exhaustion DoS via
 	// oversized POST/PUT/PATCH payloads on the long-running daemon. Zero
@@ -393,12 +414,72 @@ type RetentionConfig struct {
 	// has no heartbeat to lose. Zero selects
 	// janitor.DefaultVacuumMaxInlineBytes.
 	VacuumMaxInlineMB int `yaml:"vacuum_max_inline_mb,omitempty"`
+
+	// ── Row tables (Task 20291) ──
+	//
+	// The keys above bound files and dead pages. These bound the tables that
+	// grow a row per unit of work, none of which anything reclaimed before:
+	// on this repository's control plane provider_calls alone held 47.5 MB of
+	// prompt text in 265 rows, and no code path in the tree would ever have
+	// removed it.
+	//
+	// All default on. Each takes RetentionKeepEverything (-1) to opt one table
+	// out; zero means "use the default" as everywhere else in this struct.
+
+	// ProviderCallBodyAgeDays clears the recorded prompt, system prompt and
+	// response of provider-call rows older than this, keeping the row's
+	// metadata — which is what the inspector list and the cost reports read.
+	// Default 30. Validated to
+	// RetentionProviderCallBodyAgeDaysLower..Upper.
+	ProviderCallBodyAgeDays int `yaml:"provider_call_body_age_days,omitempty"`
+
+	// ProviderCallMaxRows, StepMaxRows, EventMaxRows and CostMaxRows are row
+	// ceilings; the newest rows survive. Validated to
+	// RetentionRowsLower..RetentionRowsUpper.
+	ProviderCallMaxRows int `yaml:"provider_call_max_rows,omitempty"`
+	StepMaxRows         int `yaml:"step_max_rows,omitempty"`
+	EventMaxRows        int `yaml:"event_max_rows,omitempty"`
+	CostMaxRows         int `yaml:"cost_max_rows,omitempty"`
+
+	// TelemetryMaxAgeDays deletes browser telemetry older than this. Age
+	// rather than a row count because statedb already caps that table on the
+	// write path — a public ingest endpoint must not be able to fill a disk
+	// between two passes — leaving only the question a write-time cap cannot
+	// answer: when does a trail nobody returned to expire. Default 30.
+	TelemetryMaxAgeDays int `yaml:"telemetry_max_age_days,omitempty"`
 }
 
 // RetentionEnabled reports whether the janitor should run, resolving the
 // absent-means-default pointer.
 func (r RetentionConfig) RetentionEnabled() bool {
 	return r.Enabled == nil || *r.Enabled
+}
+
+// rowLimitField describes one row-table limit to the validators.
+type rowLimitField struct {
+	key          string
+	value        *int
+	lower, upper int
+}
+
+// rowLimitFields is the single description of the row-table bands, walked by
+// both validateAndClamp and ValidateNumeric.
+//
+// One table rather than twelve near-identical if statements because the two
+// validators are meant to agree, and the way they stop agreeing is a key added
+// to one and forgotten in the other — cloop already has three config paths that
+// disagree about what they check.
+func (r *RetentionConfig) rowLimitFields() []rowLimitField {
+	return []rowLimitField{
+		{"retention.provider_call_body_age_days", &r.ProviderCallBodyAgeDays,
+			RetentionProviderCallBodyAgeDaysLower, RetentionProviderCallBodyAgeDaysUpper},
+		{"retention.telemetry_max_age_days", &r.TelemetryMaxAgeDays,
+			RetentionTelemetryMaxAgeDaysLower, RetentionTelemetryMaxAgeDaysUpper},
+		{"retention.provider_call_max_rows", &r.ProviderCallMaxRows, RetentionRowsLower, RetentionRowsUpper},
+		{"retention.step_max_rows", &r.StepMaxRows, RetentionRowsLower, RetentionRowsUpper},
+		{"retention.event_max_rows", &r.EventMaxRows, RetentionRowsLower, RetentionRowsUpper},
+		{"retention.cost_max_rows", &r.CostMaxRows, RetentionRowsLower, RetentionRowsUpper},
+	}
 }
 
 // AuditConfig is the retention policy for .cloop/state.db's audit_events
@@ -2594,6 +2675,21 @@ func (c *Config) validateAndClamp(path string) {
 		warn("retention.vacuum_max_inline_mb", fmt.Sprintf("value %d outside [%d, %d]", c.Retention.VacuumMaxInlineMB, RetentionVacuumMaxInlineMBLower, RetentionVacuumMaxInlineMBUpper))
 		c.Retention.VacuumMaxInlineMB = 0
 	}
+	// Row tables: RetentionKeepEverything passes through as the deliberate
+	// opt-out; anything else outside the band falls back to zero, which is the
+	// default rather than "off". That direction matters — clamping a typo to
+	// "keep everything" would silently restore the unbounded growth this policy
+	// exists to stop.
+	for _, f := range c.Retention.rowLimitFields() {
+		if *f.value == 0 || *f.value == RetentionKeepEverything {
+			continue
+		}
+		if *f.value < f.lower || *f.value > f.upper {
+			warn(f.key, fmt.Sprintf("value %d outside [%d, %d] (use %d to keep everything)",
+				*f.value, f.lower, f.upper, RetentionKeepEverything))
+			*f.value = 0
+		}
+	}
 	// Request body cap: zero means default; out-of-range falls back to zero
 	// so the runtime substitutes MaxRequestBodyBytesDefault. Pathological
 	// values (negative, microscopically small, or absurdly large) are
@@ -2750,6 +2846,15 @@ func (c *Config) ValidateNumeric() error {
 	if c.Retention.VacuumMaxInlineMB != 0 && (c.Retention.VacuumMaxInlineMB < RetentionVacuumMaxInlineMBLower || c.Retention.VacuumMaxInlineMB > RetentionVacuumMaxInlineMBUpper) {
 		return fmt.Errorf("retention.vacuum_max_inline_mb must be between %d and %d (or 0 for the default) (got %d)",
 			RetentionVacuumMaxInlineMBLower, RetentionVacuumMaxInlineMBUpper, c.Retention.VacuumMaxInlineMB)
+	}
+	for _, f := range c.Retention.rowLimitFields() {
+		if *f.value == 0 || *f.value == RetentionKeepEverything {
+			continue
+		}
+		if *f.value < f.lower || *f.value > f.upper {
+			return fmt.Errorf("%s must be between %d and %d (0 for the default, %d to keep everything) (got %d)",
+				f.key, f.lower, f.upper, RetentionKeepEverything, *f.value)
+		}
 	}
 	if c.UI.MaxWebSocketConns != 0 && c.UI.MaxWebSocketConnsPerIP != 0 && c.UI.MaxWebSocketConnsPerIP > c.UI.MaxWebSocketConns {
 		return fmt.Errorf("ui.max_websocket_conns_per_ip (%d) must not exceed ui.max_websocket_conns (%d)",

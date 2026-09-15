@@ -118,6 +118,55 @@ const (
 	DefaultVacuumMaxInlineBytes int64 = 1 << 30 // 1 GiB of live data
 )
 
+// Defaults for the row tables (Task 20291). Every one of these is on by
+// default, because unlike the audit archive these tables hold derived
+// observability data with a second copy or no lasting value, and unlike plan
+// history nothing bounded them at write time.
+//
+// The numbers come from measuring this repository's control plane, where
+// provider_calls held 47.5 MB in 265 rows — 14% of everything live in a 2.4 GB
+// file — and steps held 5,152 rows after four and a half months.
+const (
+	// DefaultProviderCallBodyMaxAge is when a recorded prompt and response are
+	// cleared, leaving the row's metadata behind.
+	//
+	// Thirty days is chosen from what the bodies are for. The inspector's
+	// per-call modal and its replay button are debugging tools aimed at a call
+	// you are currently reasoning about; their value decays in hours, while the
+	// row's timestamp, model, token counts and latency keep feeding the list
+	// and every cost-shaped report indefinitely. At the measured 178 KB per row
+	// this is the single largest reclaim in the whole janitor.
+	DefaultProviderCallBodyMaxAge = 30 * 24 * time.Hour
+
+	// DefaultProviderCallMaxRows bounds the table itself. A stripped row costs
+	// roughly 200 bytes, so ten thousand of them is about 2 MB — small enough
+	// to keep a long history, finite enough that the table is bounded.
+	DefaultProviderCallMaxRows = 10000
+
+	// DefaultStepMaxRows bounds the step history. Steps are loaded in full by
+	// state.Load, so this ceiling is also a bound on a run's resident memory;
+	// at the measured average of roughly 450 bytes of output per step, twenty
+	// thousand is about 9 MB.
+	DefaultStepMaxRows = 20000
+
+	// DefaultEventMaxRows bounds the unified event journal, which the dashboard
+	// pages through newest-first and never reads whole.
+	DefaultEventMaxRows = 20000
+
+	// DefaultCostMaxRows bounds the cost ledger, and is deliberately the
+	// loosest of these: a cost row is tiny, `cloop cost report` aggregates over
+	// the entire table, and the hub's spend enforcement reads forward from a
+	// stored cursor. At the measured rate this ceiling is decades away, which
+	// is the intent — it exists so the table is bounded, not so it is pruned.
+	DefaultCostMaxRows = 50000
+
+	// DefaultTelemetryMaxAge ages out browser diagnostic trails. The write path
+	// already caps the table at statedb.TelemetryMaxRows — a public ingest
+	// endpoint must not be able to fill a disk between two passes — so this is
+	// the half no write-time cap can express: a trail nobody came back for.
+	DefaultTelemetryMaxAge = 30 * 24 * time.Hour
+)
+
 // Policy is the retention configuration for one pass.
 type Policy struct {
 	// Enabled gates the whole janitor. False means the hub starts no
@@ -169,6 +218,29 @@ type Policy struct {
 	// no lease at stake has nothing to protect.
 	VacuumMaxInlineBytes int64
 
+	// ── Row tables (Task 20291) ──
+	//
+	// Zero selects the package default for each; negative disables the limit
+	// and keeps everything, which is how an operator opts a table out.
+
+	// ProviderCallBodyMaxAge clears the prompt, system prompt and response of
+	// provider_calls rows older than this, keeping the row. See
+	// DefaultProviderCallBodyMaxAge for why the bodies and the row have
+	// different lifetimes.
+	ProviderCallBodyMaxAge time.Duration
+
+	// ProviderCallMaxRows, StepMaxRows, EventMaxRows and CostMaxRows are the
+	// per-table row ceilings; the newest rows survive.
+	ProviderCallMaxRows int
+	StepMaxRows         int
+	EventMaxRows        int
+	CostMaxRows         int
+
+	// TelemetryMaxAge deletes browser telemetry older than this. Age rather
+	// than count because the table already has a write-time row cap; what it
+	// lacks is a way for a quiet trail to expire.
+	TelemetryMaxAge time.Duration
+
 	// ArchiveDir is the directory holding sealed audit exports. Empty means
 	// <workDir>/.cloop/audit-archive, which is auditretention's default — but
 	// a real deployment is advised to point audit.export_dir at storage the
@@ -180,12 +252,18 @@ type Policy struct {
 // DefaultPolicy returns the policy a hub uses when config says nothing.
 func DefaultPolicy() Policy {
 	return Policy{
-		Enabled:              true,
-		Interval:             DefaultInterval,
-		KeepSnapshots:        pm.DefaultSnapshotRetention,
-		VacuumFreeRatio:      DefaultVacuumFreeRatio,
-		VacuumMinFreeBytes:   DefaultVacuumMinFreeBytes,
-		VacuumMaxInlineBytes: DefaultVacuumMaxInlineBytes,
+		Enabled:                true,
+		Interval:               DefaultInterval,
+		KeepSnapshots:          pm.DefaultSnapshotRetention,
+		VacuumFreeRatio:        DefaultVacuumFreeRatio,
+		VacuumMinFreeBytes:     DefaultVacuumMinFreeBytes,
+		VacuumMaxInlineBytes:   DefaultVacuumMaxInlineBytes,
+		ProviderCallBodyMaxAge: DefaultProviderCallBodyMaxAge,
+		ProviderCallMaxRows:    DefaultProviderCallMaxRows,
+		StepMaxRows:            DefaultStepMaxRows,
+		EventMaxRows:           DefaultEventMaxRows,
+		CostMaxRows:            DefaultCostMaxRows,
+		TelemetryMaxAge:        DefaultTelemetryMaxAge,
 	}
 }
 
@@ -224,6 +302,28 @@ func PolicyFromConfig(cfg *config.Config) Policy {
 	if rc.VacuumMaxInlineMB > 0 {
 		p.VacuumMaxInlineBytes = int64(rc.VacuumMaxInlineMB) << 20
 	}
+	// Row tables: config says days and rows, and a negative value is the
+	// operator's way of saying "keep everything in this table". normalise
+	// turns that back into a zero the prune reads as disabled, so the negative
+	// has to survive the copy rather than be filtered out here.
+	if rc.ProviderCallBodyAgeDays != 0 {
+		p.ProviderCallBodyMaxAge = days(rc.ProviderCallBodyAgeDays)
+	}
+	if rc.ProviderCallMaxRows != 0 {
+		p.ProviderCallMaxRows = rc.ProviderCallMaxRows
+	}
+	if rc.StepMaxRows != 0 {
+		p.StepMaxRows = rc.StepMaxRows
+	}
+	if rc.EventMaxRows != 0 {
+		p.EventMaxRows = rc.EventMaxRows
+	}
+	if rc.CostMaxRows != 0 {
+		p.CostMaxRows = rc.CostMaxRows
+	}
+	if rc.TelemetryMaxAgeDays != 0 {
+		p.TelemetryMaxAge = days(rc.TelemetryMaxAgeDays)
+	}
 	// Seals follow audit.export_dir when the operator moved them. Without
 	// this the janitor bounds .cloop/audit-archive — which in that
 	// configuration is empty — while the directory actually filling up is
@@ -249,7 +349,50 @@ func (p Policy) normalise() Policy {
 	if p.VacuumMaxInlineBytes == 0 {
 		p.VacuumMaxInlineBytes = DefaultVacuumMaxInlineBytes
 	}
+	// Row limits: zero means "use the default", negative means "keep
+	// everything". The prune layer reads any non-positive value as disabled, so
+	// collapsing negatives to zero here is what makes the opt-out work without
+	// every call site having to know the convention.
+	p.ProviderCallBodyMaxAge = normaliseDuration(p.ProviderCallBodyMaxAge, DefaultProviderCallBodyMaxAge)
+	p.TelemetryMaxAge = normaliseDuration(p.TelemetryMaxAge, DefaultTelemetryMaxAge)
+	p.ProviderCallMaxRows = normaliseLimit(p.ProviderCallMaxRows, DefaultProviderCallMaxRows)
+	p.StepMaxRows = normaliseLimit(p.StepMaxRows, DefaultStepMaxRows)
+	p.EventMaxRows = normaliseLimit(p.EventMaxRows, DefaultEventMaxRows)
+	p.CostMaxRows = normaliseLimit(p.CostMaxRows, DefaultCostMaxRows)
 	return p
+}
+
+// normaliseLimit resolves the zero-is-default, negative-is-off convention the
+// row limits share.
+func normaliseLimit(v, def int) int {
+	switch {
+	case v == 0:
+		return def
+	case v < 0:
+		return 0
+	default:
+		return v
+	}
+}
+
+func normaliseDuration(v, def time.Duration) time.Duration {
+	switch {
+	case v == 0:
+		return def
+	case v < 0:
+		return 0
+	default:
+		return v
+	}
+}
+
+// days converts an operator-facing day count, preserving the negative that
+// means "disabled".
+func days(n int) time.Duration {
+	if n < 0 {
+		return -1
+	}
+	return time.Duration(n) * 24 * time.Hour
 }
 
 // Options configures a single pass.
@@ -276,6 +419,19 @@ type Options struct {
 	// run — pruning old snapshots is safe under a live writer.
 	SkipVacuum       bool
 	SkipVacuumReason string
+
+	// RunActive tells the pass that this project is currently executing a
+	// task, and RunActiveReason says how the caller knows. It suppresses the
+	// steps prune only.
+	//
+	// Separate from SkipVacuum because it protects against a different thing.
+	// SkipVacuum is about latency: a rewrite would stall a live run's writes.
+	// This is about correctness: a run keeps the whole step history in memory
+	// and upserts all of it on every save, so rows deleted underneath it come
+	// back. Every other row table here is append-only and safe to prune while a
+	// task runs.
+	RunActive       bool
+	RunActiveReason string
 
 	// Now is the clock, injectable for tests. Nil means time.Now.
 	Now func() time.Time
@@ -318,11 +474,19 @@ type StepResult struct {
 	// principally the VACUUM below its threshold. Distinguished from "ran and
 	// found nothing" so an operator can tell a working threshold from a
 	// broken step.
-	Skipped    bool
-	Reason     string
-	Deleted    int
+	Skipped bool
+	Reason  string
+	Deleted int
+	// BytesFreed is space returned to the filesystem — files removed, or the
+	// shrink a VACUUM achieved.
 	BytesFreed int64
-	Err        error
+	// BytesReleased is space returned to the *database freelist* by deleting
+	// rows. The file does not shrink until the VACUUM step runs, which is why
+	// this is reported separately and is deliberately excluded from
+	// Report.BytesFreed: adding both would count the same bytes twice, once
+	// when the rows went and again when the rewrite handed the pages back.
+	BytesReleased int64
+	Err           error
 }
 
 // Report describes a completed pass.
@@ -333,19 +497,57 @@ type Report struct {
 	DryRun      bool          `json:"dry_run"`
 	PlanHistory StepResult    `json:"plan_history"`
 	Archive     StepResult    `json:"audit_archive"`
-	Vacuum      StepResult    `json:"vacuum"`
+	// The row tables (Task 20291), pruned before the VACUUM so it has
+	// something to reclaim.
+	ProviderCalls StepResult `json:"provider_calls"`
+	Steps         StepResult `json:"steps"`
+	Events        StepResult `json:"events"`
+	Costs         StepResult `json:"costs"`
+	Telemetry     StepResult `json:"telemetry"`
+	Vacuum        StepResult `json:"vacuum"`
 	// Before and After are the .cloop breakdowns either side of the pass.
 	// After is nil for a dry run, which changes nothing.
 	Before *diskusage.Usage `json:"before,omitempty"`
 	After  *diskusage.Usage `json:"after,omitempty"`
 }
 
-// BytesFreed totals what the pass reclaimed.
+// rowSteps returns the row-table steps in report order.
+func (r *Report) rowSteps() []StepResult {
+	if r == nil {
+		return nil
+	}
+	return []StepResult{r.ProviderCalls, r.Steps, r.Events, r.Costs, r.Telemetry}
+}
+
+// BytesFreed totals what the pass returned to the filesystem.
+//
+// Row pruning is not in this sum: deleting a row frees a database page, not a
+// byte of disk, and the VACUUM step below already reports the shrink those
+// pages made possible. See BytesReleased.
 func (r *Report) BytesFreed() int64 {
 	if r == nil {
 		return 0
 	}
 	return r.PlanHistory.BytesFreed + r.Archive.BytesFreed + r.Vacuum.BytesFreed
+}
+
+// BytesReleased totals what row pruning returned to the database freelist,
+// which the VACUUM step reclaims if it runs.
+func (r *Report) BytesReleased() int64 {
+	var n int64
+	for _, s := range r.rowSteps() {
+		n += s.BytesReleased
+	}
+	return n
+}
+
+// RowsDeleted totals the rows removed across every table.
+func (r *Report) RowsDeleted() int {
+	var n int
+	for _, s := range r.rowSteps() {
+		n += s.Deleted
+	}
+	return n
 }
 
 // Errs collects the per-step failures, if any.
@@ -354,7 +556,8 @@ func (r *Report) Errs() []error {
 		return nil
 	}
 	var out []error
-	for _, s := range []StepResult{r.PlanHistory, r.Archive, r.Vacuum} {
+	steps := append([]StepResult{r.PlanHistory, r.Archive}, r.rowSteps()...)
+	for _, s := range append(steps, r.Vacuum) {
 		if s.Err != nil {
 			out = append(out, s.Err)
 		}
@@ -377,6 +580,15 @@ func (r *Report) Summary() string {
 	}
 	if r.Archive.Deleted > 0 {
 		parts = append(parts, fmt.Sprintf("%d seals", r.Archive.Deleted))
+	}
+	// Rows are reported as their own clause rather than folded into the byte
+	// total: the bytes they released are still inside the file until the
+	// VACUUM runs, and a summary that implied otherwise would be wrong on
+	// every pass where the freelist stayed below the threshold.
+	if n := r.RowsDeleted(); n > 0 {
+		parts = append(parts, fmt.Sprintf("%d rows (%s to the freelist)", n, diskusage.HumanBytes(r.BytesReleased())))
+	} else if b := r.BytesReleased(); b > 0 {
+		parts = append(parts, fmt.Sprintf("%s of call bodies to the freelist", diskusage.HumanBytes(b)))
 	}
 	switch {
 	case r.Vacuum.Ran:
@@ -412,6 +624,19 @@ func RunOnce(opts Options) (*Report, error) {
 
 	rep.PlanHistory = prunePlanHistory(opts.WorkDir, pol.KeepSnapshots, opts.DryRun)
 	rep.Archive = pruneArchive(resolveArchiveDir(opts.WorkDir, pol), pol, opts.now(), opts.DryRun)
+	// Rows before the VACUUM, so the pages those deletes free are on the
+	// freelist by the time the VACUUM decides whether the file is worth
+	// rewriting — and are reclaimed by the same pass rather than the next one.
+	pruneRowTables(opts, pol, rep)
+	// Re-measure: `before` was taken before the row prunes, and the VACUUM
+	// thresholds are read off the freelist those prunes just grew. Using the
+	// stale reading would make a pass that freed a gigabyte of pages decline to
+	// reclaim it, which is the exact ordering bug this step exists to fix.
+	if !opts.DryRun && rep.BytesReleased() > 0 {
+		if after, err := diskusage.Measure(opts.WorkDir); err == nil {
+			before = after
+		}
+	}
 	rep.Vacuum = maybeVacuum(opts, pol, before)
 
 	if !opts.DryRun {

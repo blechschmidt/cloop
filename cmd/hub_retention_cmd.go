@@ -12,6 +12,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/diskusage"
 	"github.com/blechschmidt/cloop/pkg/janitor"
+	"github.com/blechschmidt/cloop/pkg/multiui"
 )
 
 // `cloop hub retention` is the manual face of the janitor the hub runs on a
@@ -36,16 +37,23 @@ var hubRetentionCmd = &cobra.Command{
 
 Runs the same retention pass the hub performs on its own schedule: bound
 plan-history to the configured keep-count, apply size and age limits to the
-sealed audit archive, and VACUUM the database when its freelist has grown
-large enough to be worth rewriting the file for.
+sealed audit archive, bound the row tables that grow with every unit of work
+(provider calls, steps, events, costs, telemetry), and VACUUM the database when
+its freelist has grown large enough to be worth rewriting the file for.
 
 With no flags this is a DRY RUN — nothing is deleted and nothing is vacuumed.
 Pass --apply to actually reclaim.
 
+Row pruning and the VACUUM report different numbers on purpose. Deleting a row
+frees a page inside state.db; only the VACUUM hands pages back to the
+filesystem. The row steps therefore run first, so the same pass can reclaim what
+they released.
+
 The VACUUM step is refused while another hub holds the control-plane lease,
 because it rewrites the database file underneath that process's open
-connections. The file-level steps are safe alongside a running hub and still
-apply.`,
+connections. The step-history prune is skipped while a run is executing here,
+because a live run rewrites its own step history from memory. Everything else is
+safe alongside a running hub and still applies.`,
 	Example: `  cloop hub retention                # what would be reclaimed
   cloop hub retention --json         # the same, machine-readable
   cloop hub retention --apply        # reclaim it`,
@@ -68,10 +76,19 @@ func runHubRetention(cmd *cobra.Command, _ []string) error {
 	}
 	pol := janitor.PolicyFromConfig(cfg)
 
+	// A `cloop run` executing in this directory keeps the whole step history in
+	// memory and upserts all of it on every save, so pruning steps underneath
+	// it is work that undoes itself. Probing the process table is how the
+	// dashboard answers the same question, and it is the only signal available
+	// to a command running outside the hub.
+	running := multiui.IsCloopRunningInDir(workDir)
+
 	rep, err := janitor.RunOnce(janitor.Options{
-		WorkDir: workDir,
-		Policy:  pol,
-		DryRun:  hubRetentionDryRun,
+		WorkDir:         workDir,
+		Policy:          pol,
+		DryRun:          hubRetentionDryRun,
+		RunActive:       running,
+		RunActiveReason: "a cloop run is executing in this directory",
 	})
 	if err != nil {
 		return err
@@ -137,20 +154,31 @@ func renderRetention(rep *janitor.Report, pol janitor.Policy) {
 	steps := []struct {
 		name string
 		res  janitor.StepResult
+		// unit names what Deleted counts, which differs by step: the
+		// file-level steps delete files and the row steps delete rows.
+		unit string
 	}{
-		{"plan-history", rep.PlanHistory},
-		{"audit-archive", rep.Archive},
-		{"vacuum", rep.Vacuum},
+		{"plan-history", rep.PlanHistory, "file"},
+		{"audit-archive", rep.Archive, "file"},
+		{"provider-calls", rep.ProviderCalls, "row"},
+		{"steps", rep.Steps, "row"},
+		{"events", rep.Events, "row"},
+		{"costs", rep.Costs, "row"},
+		{"telemetry", rep.Telemetry, "row"},
+		{"vacuum", rep.Vacuum, "file"},
 	}
 	for _, s := range steps {
 		switch {
 		case s.res.Err != nil:
 			warn.Printf("  ✗ %-16s %v\n", s.name, s.res.Err)
-		case s.res.Deleted > 0 || s.res.BytesFreed > 0:
+		case s.res.Deleted > 0 || s.res.BytesFreed > 0 || s.res.BytesReleased > 0:
 			good.Printf("  ✓ %-16s ", s.name)
-			fmt.Printf("%s", diskusage.HumanBytes(s.res.BytesFreed))
+			// Row steps free pages inside the file rather than disk, so they
+			// report their own number; printing it as "reclaimed" would
+			// promise a shrink only the VACUUM can deliver.
+			fmt.Printf("%s", diskusage.HumanBytes(s.res.BytesFreed+s.res.BytesReleased))
 			if s.res.Deleted > 0 {
-				fmt.Printf(" in %d file(s)", s.res.Deleted)
+				fmt.Printf(" in %d %s(s)", s.res.Deleted, s.unit)
 			}
 			fmt.Printf(" — %s\n", s.res.Reason)
 		default:
@@ -164,6 +192,16 @@ func renderRetention(rep *janitor.Report, pol janitor.Policy) {
 		verb = "Reclaimed"
 	}
 	fmt.Printf("%s %s in %s\n", verb, diskusage.HumanBytes(rep.BytesFreed()), rep.Duration.Round(time.Millisecond))
+	// Stated separately from the reclaim above, because these bytes are still
+	// inside state.db: deleting a row frees a page, and only a VACUUM hands
+	// pages back to the filesystem.
+	if released := rep.BytesReleased(); released > 0 {
+		note := "released to the database freelist"
+		if !rep.Vacuum.Ran {
+			note += "; a future VACUUM returns it to the filesystem"
+		}
+		fmt.Printf("%s %s %s\n", verb, diskusage.HumanBytes(released), note)
+	}
 	if !pol.Enabled {
 		warn.Println("note: retention.enabled is false, so the hub will not do this on its own")
 	}

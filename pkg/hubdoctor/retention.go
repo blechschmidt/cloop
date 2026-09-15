@@ -17,8 +17,11 @@ package hubdoctor
 // package is meant to catch.
 
 import (
+	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/config"
@@ -63,6 +66,74 @@ func checkRetention(dir string, cfg *config.Config, add addFn) {
 	}
 
 	checkRetentionDisk(dir, pol, add)
+	checkRetentionTables(dir, pol, add)
+}
+
+// checkRetentionTables reports the row tables and names any that the active
+// policy does not bound (Task 20291).
+//
+// The question this answers has no other source. `du` sees one state.db file;
+// the freelist finding above sees how much of it is dead; neither can say that
+// 14% of the live data is 265 provider-call rows carrying whole LLM prompts,
+// which is what a measurement of this hub actually found. And a limit set to
+// RetentionKeepEverything is invisible until the table it exempted is the
+// reason a disk filled — so an exemption is reported as a warning, with the
+// table's current size attached, rather than silently honoured.
+func checkRetentionTables(dir string, pol janitor.Policy, add addFn) {
+	stats, err := janitor.RowTableStats(dir)
+	if err != nil {
+		// A project that has never run has no database, which is not a finding.
+		if errors.Is(err, os.ErrNotExist) {
+			return
+		}
+		add(Finding{
+			Check: "retention.tables", Title: "Row tables", Severity: SeverityWarn,
+			Message:     "could not measure the row tables: " + err.Error(),
+			Remediation: "Run `cloop db verify` to inspect the database",
+		})
+		return
+	}
+
+	details := map[string]any{}
+	var (
+		unbounded []string
+		rows      int64
+		bytes     int64
+	)
+	for _, s := range stats {
+		rows += s.Rows
+		bytes += s.Bytes
+		details[s.Name] = fmt.Sprintf("%d rows, %s", s.Rows, diskusage.HumanBytes(s.Bytes))
+		if !janitor.TableBounded(pol, s.Name) {
+			unbounded = append(unbounded, s.Name)
+		}
+	}
+
+	if len(unbounded) == 0 {
+		add(Finding{
+			Check: "retention.tables", Title: "Row tables", Severity: SeverityPass,
+			Message: fmt.Sprintf("%d rows across %d tables (%s), all bounded by the active policy",
+				rows, len(stats), diskusage.HumanBytes(bytes)),
+			Details: details,
+		})
+		return
+	}
+
+	details["unbounded"] = unbounded
+	sev := SeverityWarn
+	remedy := "Set a limit for " + strings.Join(unbounded, ", ") + " under `retention:` in .cloop/config.yaml"
+	if !pol.Enabled {
+		// The janitor being off is already reported above as its own warning;
+		// repeating it per table would bury that finding under this one.
+		remedy = "Re-enable the retention janitor, or bound these tables externally"
+	}
+	add(Finding{
+		Check: "retention.tables", Title: "Row tables", Severity: sev,
+		Message: fmt.Sprintf("%d rows across %d tables (%s); %s not bounded by the active policy",
+			rows, len(stats), diskusage.HumanBytes(bytes), strings.Join(unbounded, ", ")),
+		Remediation: remedy,
+		Details:     details,
+	})
 }
 
 // checkRetentionDisk reports the measured .cloop breakdown and the reclaimable

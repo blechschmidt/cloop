@@ -59,6 +59,18 @@ type providerCallDetail struct {
 	SystemPrompt string                 `json:"system_prompt,omitempty"`
 	Response     string                 `json:"response"`
 	Headers      map[string]interface{} `json:"headers"`
+
+	// BodiesPruned marks a call whose prompt and response were dropped by
+	// retention (Task 20291), with BodiesPrunedAt saying when.
+	//
+	// Without this the panel would render an aged call as one made with an
+	// empty prompt — a defect, not a policy — and the Replay button would offer
+	// to re-run it. The flag is derived from the headers JSON rather than from
+	// a column, because the schema-compat classifier treats any ALTER as
+	// breaking and a migration here would lock older hubs out of every project
+	// database.
+	BodiesPruned   bool       `json:"bodies_pruned,omitempty"`
+	BodiesPrunedAt *time.Time `json:"bodies_pruned_at,omitempty"`
 }
 
 // Pagination bounds for /api/provider-calls. These mirror what
@@ -201,6 +213,20 @@ func (s *Server) handleProviderCallReplay(w http.ResponseWriter, r *http.Request
 	if body.Prompt != nil {
 		replayPrompt = *body.Prompt
 	}
+	// A call whose bodies retention has dropped has no prompt to replay
+	// (Task 20291). Without this the handler would happily bill a provider for
+	// completing the empty string and record the result as a replay of the
+	// original — a fabricated comparison, which is worse than a refusal. An
+	// explicit prompt in the request body is still honoured: editing the prompt
+	// is the other half of what this endpoint is for, and a supplied one does
+	// not depend on the stored one.
+	if body.Prompt == nil && replayPrompt == "" {
+		if _, pruned := statedb.ProviderCallBodiesPruned(original.Headers); pruned {
+			jsonErr(w, "this call's prompt was dropped by retention; supply a prompt to replay it",
+				http.StatusConflict)
+			return
+		}
+	}
 	replaySystem := original.SystemPrompt
 	if body.SystemPrompt != nil {
 		replaySystem = *body.SystemPrompt
@@ -297,6 +323,12 @@ func detailFromRow(r statedb.ProviderCallRow) providerCallDetail {
 	}
 	if r.Headers != "" {
 		_ = json.Unmarshal([]byte(r.Headers), &d.Headers)
+	}
+	if at, ok := statedb.ProviderCallBodiesPruned(r.Headers); ok {
+		d.BodiesPruned = true
+		if !at.IsZero() {
+			d.BodiesPrunedAt = &at
+		}
 	}
 	return d
 }

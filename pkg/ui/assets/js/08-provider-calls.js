@@ -197,11 +197,20 @@ function _pcRenderModal(d) {
     ].filter(Boolean).join('');
   }
 
+  // A call whose bodies retention dropped (Task 20291) still has every
+  // metadata field above; what it no longer has is the text. Say so, because
+  // "" rendered in the prompt pane is otherwise indistinguishable from a call
+  // that really was made with an empty prompt.
+  const pruned = !!d.bodies_pruned;
+  const prunedNote = pruned
+    ? '(dropped by retention' + (d.bodies_pruned_at ? ' on ' + _pcTimeShort(d.bodies_pruned_at) : '') + ')'
+    : '';
+
   // Prompt tab
   const sys = document.getElementById('pcSystemPrompt');
-  if (sys) sys.textContent = d.system_prompt || '(no system prompt)';
+  if (sys) sys.textContent = d.system_prompt || (pruned ? prunedNote : '(no system prompt)');
   const prompt = document.getElementById('pcPrompt');
-  if (prompt) prompt.textContent = d.prompt || '';
+  if (prompt) prompt.textContent = d.prompt || (pruned ? prunedNote : '');
 
   // Response tab
   const respErr = document.getElementById('pcResponseError');
@@ -214,7 +223,7 @@ function _pcRenderModal(d) {
     if (resp) resp.textContent = d.response || '(no response — call failed)';
   } else {
     if (respErr) respErr.style.display = 'none';
-    if (resp)    resp.textContent     = d.response || '(empty response)';
+    if (resp)    resp.textContent     = d.response || (pruned ? prunedNote : '(empty response)');
   }
 
   // Headers tab
@@ -234,7 +243,15 @@ function _pcRenderModal(d) {
   const rPrompt = document.getElementById('pcReplayPrompt');
   if (rModel)  rModel.value  = d.model || '';
   if (rSystem) rSystem.value = d.system_prompt || '';
-  if (rPrompt) rPrompt.value = d.prompt || '';
+  if (rPrompt) {
+    rPrompt.value = d.prompt || '';
+    // A verbatim re-run is impossible once the prompt is gone — the server
+    // refuses rather than completing the empty string and calling the result a
+    // replay — so the field has to ask for one instead of looking merely blank.
+    rPrompt.placeholder = pruned
+      ? 'The original prompt was dropped by retention. Type a prompt to replay this call.'
+      : '';
+  }
 
   const rRes = document.getElementById('pcReplayResult');
   if (rRes) rRes.style.display = 'none';

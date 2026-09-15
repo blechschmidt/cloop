@@ -271,22 +271,20 @@ func (d *DB) ListTelemetrySessions(source string, limit int) ([]TelemetrySession
 // PruneTelemetry deletes events older than cutoff and returns how many went.
 // The operator-invoked companion to the automatic row ceiling: `cloop hub
 // telemetry prune` for when a trail should go now rather than when it ages out.
+//
+// The age half of the same policy now also runs unattended — see
+// PruneTelemetryRows and the janitor's telemetry step (Task 20291). Both go
+// through rowretention.go's id-bounded path rather than comparing the
+// RFC3339Nano text column directly, because a string comparison on that column
+// is only an ordering if every writer used identical UTC formatting, and a row
+// whose timestamp will not parse must stop the prune rather than be swept into
+// it.
 func (d *DB) PruneTelemetry(cutoff time.Time) (int64, error) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-
-	res, err := d.conn.Exec(
-		`DELETE FROM telemetry_events WHERE received_at < ?`,
-		formatOptionalTime(cutoff.UTC()),
-	)
-	if err != nil {
-		return 0, fmt.Errorf("statedb: prune telemetry: %w", classifyDriverErr(err))
+	cutID, ok, err := d.ageCutoffID(tableTelemetryEvents, cutoff)
+	if err != nil || !ok {
+		return 0, err
 	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return 0, nil // the delete succeeded; only the count is unavailable
-	}
-	return n, nil
+	return d.deleteUpToID(tableTelemetryEvents, cutID)
 }
 
 // telemetryWhere builds the shared filter clause. Every value is bound as a

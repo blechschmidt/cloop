@@ -1075,7 +1075,7 @@ retention:
 
 | Key | Default | Range | What it does |
 | --- | --- | --- | --- |
-| `enabled` | `true` | — | Runs a pass every `interval_hours`. Set `false` and nothing reclaims `.cloop` automatically. |
+| `enabled` | `true` | — | Runs a pass every `interval_hours`. Set `false` and nothing reclaims `.cloop` automatically, including the row limits below. |
 | `interval_hours` | `24` | `1`–`336` | How often a pass runs. The stamp at `.cloop/retention-last-run` makes the cadence survive a restart. |
 | `keep_snapshots` | `50` | `1`–`10000` | How many plan snapshots survive. Enforced **at write time** inside `SaveSnapshot` as well as by the pass, so a busy project cannot outrun the interval. |
 | `vacuum_free_ratio` | `0.30` | `≥ 0.01` | Free-page fraction at which `state.db` is rewritten. `1` or more never vacuums. A ratio, not a size: 2 GB of freelist is urgent in a 2.3 GB file and unremarkable in a 200 GB one. |
@@ -1090,9 +1090,49 @@ VACUUM is refused unless another hub does not hold the control-plane lease and
 the filesystem has room for the rebuild — SQLite needs free space *before* it
 returns any, which makes a nearly-full disk the worst moment to try.
 
+#### Row tables
+
+The keys above bound files and dead pages. These bound the tables that gain a
+row per unit of work, which until recently nothing reclaimed at all — measured
+on this project's own control plane, `provider_calls` held **47.5 MB in 265
+rows**, 14% of every live byte in the database, because each row stores the full
+prompt and response of one provider call.
+
+```yaml
+retention:
+  provider_call_body_age_days: 30 # clear recorded prompts/responses after 30 days
+  provider_call_max_rows: 10000   # ...and delete the rows themselves past this many
+  step_max_rows: 20000
+  event_max_rows: 20000
+  cost_max_rows: 50000
+  telemetry_max_age_days: 30
+```
+
+| Key | Default | Range | What it does |
+| --- | --- | --- | --- |
+| `provider_call_body_age_days` | `30` | `1`–`3650`, or `-1` | Clears the stored prompt, system prompt and response of older calls, **keeping the row**. The inspector's list and every cost report read only the metadata — timestamp, model, tokens, latency — which costs ~200 bytes; the bodies are the other 99%. A stripped call is marked as such, so the panel says "dropped by retention" rather than showing an empty prompt, and Replay asks for a new prompt instead of re-running an empty one. |
+| `provider_call_max_rows` | `10000` | `100`–`100000000`, or `-1` | Row ceiling for `provider_calls`; newest survive. |
+| `step_max_rows` | `20000` | `100`–`100000000`, or `-1` | Row ceiling for `steps`. Also a bound on a run's resident memory, since `state.Load` reads every step. Skipped while a run is executing — a live run rewrites its own step history from memory, so rows deleted underneath it come straight back. |
+| `event_max_rows` | `20000` | `100`–`100000000`, or `-1` | Row ceiling for the unified event journal. |
+| `cost_max_rows` | `50000` | `100`–`100000000`, or `-1` | Row ceiling for the cost ledger. Deliberately the loosest — a cost row is tiny, `cloop cost report` aggregates over the whole table, and the ledger is mirrored to `.cloop/costs.jsonl`. It exists so the table is bounded, not so it is pruned. |
+| `telemetry_max_age_days` | `30` | `1`–`3650`, or `-1` | Ages out browser telemetry. There is no row key because the write path already caps that table: a public ingest endpoint must not be able to fill a disk between two passes. |
+
+`-1` keeps a table in full while leaving the rest of the policy in force — the
+opt-out these need and the archive keys do not, because these default to on. A
+value outside the range falls back to the **default**, not to "off": clamping a
+typo to "keep everything" would silently restore the growth this policy exists
+to stop.
+
+Row pruning and the VACUUM report separate numbers, and the distinction is real.
+Deleting a row frees a page *inside* `state.db`; only a VACUUM hands pages back
+to the filesystem. The row steps therefore run first in a pass, so the same pass
+can reclaim what they released.
+
 Preview or force a pass with `cloop hub retention` (a dry run unless you pass
 `--apply`). `cloop doctor` and `cloop hub doctor` both report the per-directory
-breakdown and the reclaimable-page estimate.
+breakdown and the reclaimable-page estimate; `cloop hub doctor` additionally
+reports per-table row counts and names any table the active policy leaves
+unbounded.
 
 ### Interactive access: single sign-on and sessions
 

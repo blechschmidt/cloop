@@ -11,6 +11,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/janitor"
 	"github.com/blechschmidt/cloop/pkg/logger"
+	"github.com/blechschmidt/cloop/pkg/multiui"
 	"github.com/blechschmidt/cloop/pkg/pm"
 )
 
@@ -79,8 +80,14 @@ func (s *Server) runRetentionSweep() {
 
 	s.expireGrantRequests()
 
+	// One /proc walk for the whole sweep, consulted per project below. The
+	// hub's own runStates map is not enough here: it records runs *this hub*
+	// dispatched, and a `cloop run` started from a shell against a registered
+	// project is invisible to it while being exactly as fatal to a step prune.
+	running := multiui.ScanRunningDirs()
+
 	for _, e := range s.allProjectEntries() {
-		s.maybeRunRetention(e.Path)
+		s.maybeRunRetention(e.Path, running)
 	}
 }
 
@@ -134,8 +141,9 @@ func (s *Server) expireGrantRequests() {
 }
 
 // maybeRunRetention runs one project's pass if its policy is enabled and its
-// interval has elapsed.
-func (s *Server) maybeRunRetention(workDir string) {
+// interval has elapsed. running is the sweep-wide snapshot of where cloop run
+// processes are executing.
+func (s *Server) maybeRunRetention(workDir string, running multiui.RunningDirs) {
 	// Nothing to retain, and stopping here matters because MarkRun below
 	// creates the directory it writes into: without this, a sweep would
 	// manufacture a .cloop in every registered path that does not have one.
@@ -174,12 +182,20 @@ func (s *Server) maybeRunRetention(workDir string) {
 		opts.InstanceID = s.Lease.InstanceID()
 	}
 
-	// Never rewrite a database underneath a live run. The file-level steps
-	// still apply: pruning old plan snapshots is safe while a task writes new
-	// ones, and it is where most of the reclaimable space is anyway.
-	if s.projectRunning(workDir) {
+	// Never rewrite a database underneath a live run, and never prune its step
+	// history — a run holds every step in memory and upserts all of them on
+	// each save, so deleted rows would simply come back. Everything else still
+	// applies: plan snapshots, audit seals and the append-only row tables are
+	// all safe to prune while a task writes.
+	//
+	// Both signals are consulted because they answer different questions. The
+	// hub's own belief covers a run it dispatched; the /proc snapshot covers one
+	// started anywhere else, including in a task worktree beneath the project.
+	if s.projectRunning(workDir) || running.Contains(workDir) {
 		opts.SkipVacuum = true
 		opts.SkipVacuumReason = "a task is running; a rewrite would stall its writes"
+		opts.RunActive = true
+		opts.RunActiveReason = "a task is running"
 	}
 
 	// Stamp the attempt, not the success. A pass that dies partway — the hub

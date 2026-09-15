@@ -242,6 +242,98 @@ func TestProviderCalls_Replay_NotFound(t *testing.T) {
 	}
 }
 
+// ─── retention-stripped bodies (Task 20291) ──────────────────────────────────
+
+// seedStrippedCall inserts a row shaped the way retention leaves one: metadata
+// intact, bodies empty, and the marker in the headers JSON.
+func seedStrippedCall(t *testing.T, dir string) int64 {
+	t.Helper()
+	return seedProviderCall(t, dir, statedb.ProviderCallRow{
+		Timestamp: time.Now().UTC().Add(-90 * 24 * time.Hour),
+		Provider:  "anthropic", Model: "claude-opus-4-8",
+		TaskID: 7, TaskTitle: "aged task", Status: "ok",
+		Headers: `{"max_tokens":4096,"` + statedb.ProviderCallBodiesPrunedKey +
+			`":"2026-08-01T00:00:00Z"}`,
+		InputTokens: 100, OutputTokens: 50, LatencyMs: 1234,
+	})
+}
+
+// TestProviderCalls_Detail_MarksStrippedBodies pins that the panel is told the
+// bodies were dropped. Without the flag an aged call renders as one made with
+// an empty prompt — a defect, not a policy.
+func TestProviderCalls_Detail_MarksStrippedBodies(t *testing.T) {
+	dir := setupProjectDir(t, cloopGoal, nil)
+	ts := newTestServer(t, dir, nil)
+	id := seedStrippedCall(t, dir)
+
+	got := apiGET(t, ts, "/api/provider-calls/"+itoa64(id))
+	if pruned, _ := got["bodies_pruned"].(bool); !pruned {
+		t.Errorf("bodies_pruned = %v, want true: %+v", got["bodies_pruned"], got)
+	}
+	if got["bodies_pruned_at"] == nil {
+		t.Error("bodies_pruned_at missing")
+	}
+	// The metadata the list and the cost reports read must still be there —
+	// that is the whole reason the row was kept rather than deleted.
+	if got["model"] != "claude-opus-4-8" {
+		t.Errorf("model = %v, want claude-opus-4-8", got["model"])
+	}
+	if n, _ := got["input_tokens"].(float64); int(n) != 100 {
+		t.Errorf("input_tokens = %v, want 100", got["input_tokens"])
+	}
+}
+
+// TestProviderCalls_Replay_RefusesAStrippedCall covers the consequence of
+// stripping: a verbatim replay would send the empty string to a provider and
+// record the answer as a replay of the original. A refusal is correct; a
+// fabricated comparison is not.
+func TestProviderCalls_Replay_RefusesAStrippedCall(t *testing.T) {
+	dir := setupProjectDir(t, cloopGoal, nil)
+	ts := newTestServer(t, dir, nil)
+	id := seedStrippedCall(t, dir)
+
+	resp, err := http.Post(ts.URL+"/api/provider-calls/"+itoa64(id)+"/replay",
+		"application/json", bytes.NewBufferString(`{}`))
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("verbatim replay of a stripped call returned %d, want 409", resp.StatusCode)
+	}
+	var body map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	msg, _ := body["error"].(string)
+	if !strings.Contains(msg, "retention") {
+		t.Errorf("error = %q, want it to explain that retention dropped the prompt", msg)
+	}
+}
+
+// TestProviderCalls_Replay_AcceptsAnEditedStrippedCall is the other half: the
+// endpoint also exists for editing a prompt, and a supplied prompt does not
+// depend on the stored one, so the refusal must not extend to it.
+//
+// It asserts the refusal is gone rather than that the call succeeds — the test
+// server has no provider credentials, so the replay fails downstream, which is
+// a different failure and is the point.
+func TestProviderCalls_Replay_AcceptsAnEditedStrippedCall(t *testing.T) {
+	dir := setupProjectDir(t, cloopGoal, nil)
+	ts := newTestServer(t, dir, nil)
+	id := seedStrippedCall(t, dir)
+
+	resp, err := http.Post(ts.URL+"/api/provider-calls/"+itoa64(id)+"/replay",
+		"application/json", bytes.NewBufferString(`{"prompt":"a fresh prompt"}`))
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck
+	if resp.StatusCode == http.StatusConflict {
+		t.Error("an explicitly supplied prompt was refused as stripped")
+	}
+}
+
 func TestProviderCalls_PerProjectScoping(t *testing.T) {
 	// Each project's audit log lives in its own state.db; the list endpoint
 	// must honour ?project_idx=N. This is the multi-project bug class that
