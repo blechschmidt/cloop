@@ -528,7 +528,7 @@ executors:
     ca_file: /etc/cloop/tls/kube-guard-ca.pem    # empty falls back to cert_file
     min_tls_version: "1.2"                       # or "1.3"; empty means 1.2
     session_minutes: 60                          # 0 means 60; ceiling is 720
-    # A hub-wide floor. Empty lets each grant speak for itself.
+    # A hub-wide ceiling. Empty lets each grant speak for itself.
     verbs: [get, list, watch]
     namespaces: ["team-*"]
     resources: ["pods", "services", "configmaps", "apps/deployments"]

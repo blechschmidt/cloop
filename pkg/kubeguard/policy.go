@@ -209,6 +209,21 @@ func (p *Policy) Normalize() {
 	}
 }
 
+// ValidateAsFloor checks a deployment-wide floor, where an empty verb list is
+// legitimate and means "no ceiling — let each grant decide".
+//
+// Separate from Validate because the two are asked about different objects: a
+// *session* policy permitting no verbs permits nothing and is a bug, while a
+// *floor* permitting no verbs in particular is the default configuration.
+func (p Policy) ValidateAsFloor() error {
+	if len(p.Verbs) == 0 {
+		// Borrow the rest of the checks by validating against a stand-in verb
+		// set; only the emptiness rule differs.
+		p.Verbs = ReadVerbs
+	}
+	return p.Validate()
+}
+
 // Validate reports the first structural problem. Call after Normalize.
 func (p Policy) Validate() error {
 	if len(p.Verbs) == 0 {
@@ -244,8 +259,16 @@ func (p Policy) Validate() error {
 // Summary renders the policy for an audit row or a UI badge. It is short by
 // design: "read-only, namespaces app|app-staging".
 func (p Policy) Summary() string {
+	// An empty verb list reads differently depending on which kind of policy
+	// this is, and only one of the two readings is ever true of a *session*:
+	// Normalize fills it with the read set, so a session never has one. A
+	// deployment floor can, and there it means "no ceiling" — so calling it
+	// read-only, which ReadOnly() does vacuously, would be exactly backwards.
 	parts := []string{"verbs=" + strings.Join(p.Verbs, "|")}
-	if p.ReadOnly() {
+	switch {
+	case len(p.Verbs) == 0:
+		parts[0] = "no verb ceiling"
+	case p.ReadOnly():
 		parts[0] = "read-only"
 	}
 	if len(p.Namespaces) > 0 {
@@ -294,11 +317,26 @@ func (p Policy) Summary() string {
 // narrowing happens at all. An operator who does write a floor should write
 // it as a literal superset of what grants will ask for.
 func (p Policy) Intersect(other Policy) (Policy, error) {
+	// Verbs are normalised but *not* defaulted, because on this side an empty
+	// list means "no restriction from that side" — exactly what it means for
+	// the glob lists below, and the opposite of what it means on a session
+	// policy.
+	//
+	// The distinction is the whole behaviour of an unconfigured floor.
+	// Defaulting here made `executors.kube_guard.verbs: <unset>` a hub-wide
+	// read-only *ceiling*, so `cloop secret grant --verbs create` produced a
+	// read-only session and the flag looked broken. The read-only default
+	// belongs on the grant (Constraints.KubeVerbs) — where "nobody said"
+	// genuinely means "nobody asked to write" — not on the hub-wide floor,
+	// where it would mean "nobody may ever write, and there is no way to say
+	// otherwise per project".
+	pv, ov := normalizeVerbs(p.Verbs), normalizeVerbs(other.Verbs)
 	p.Normalize()
 	other.Normalize()
+	p.Verbs, other.Verbs = pv, ov
 
 	out := Policy{
-		Verbs:        intersectVerbs(p.Verbs, other.Verbs),
+		Verbs:        narrowVerbs(pv, ov),
 		MaxBodyBytes: min(p.MaxBodyBytes, other.MaxBodyBytes),
 	}
 	var err error
@@ -319,6 +357,19 @@ func (p Policy) Intersect(other Policy) (Policy, error) {
 	// excluded it. Validate reports it instead, which is safe because an
 	// empty verb list genuinely does mean "nothing" to every reader.
 	return out, nil
+}
+
+// narrowVerbs intersects two verb lists, treating an empty one on either side
+// as "no restriction from that side". See Intersect for why that asymmetry
+// with a session policy is deliberate.
+func narrowVerbs(a, b []string) []string {
+	switch {
+	case len(a) == 0:
+		return append([]string(nil), b...)
+	case len(b) == 0:
+		return append([]string(nil), a...)
+	}
+	return intersectVerbs(a, b)
 }
 
 // intersectVerbs returns the verbs in both lists, in a's order.
@@ -546,6 +597,13 @@ func decideUpgrade(r APIRequest) error {
 				"normally over HTTP", r.Path),
 	}
 }
+
+// NormalizeVerbs lowercases, trims, drops empties and dedupes a verb list
+// *without* substituting the read-only default for an empty one.
+//
+// Exported for pkg/config, which builds the deployment floor and must keep
+// "unset" distinguishable from "read-only" — see Intersect.
+func NormalizeVerbs(in []string) []string { return normalizeVerbs(in) }
 
 // normalizeVerbs lowercases, trims, drops empties and dedupes while keeping
 // the caller's order.

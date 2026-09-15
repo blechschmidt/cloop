@@ -152,22 +152,28 @@ func checkKubeGuard(ctx context.Context, cfg *config.Config, opts Options, add a
 		}
 	}
 
-	// A floor that permits writing is legitimate and deliberate, and worth
-	// saying out loud: it is the setting that decides whether any project on
-	// this hub can change a cluster, and its default is the reason the
-	// subsystem is a boundary at all.
+	// The verb ceiling is worth reporting either way, because both states are
+	// legitimate and neither is visible anywhere else.
+	//
+	// Deliberately *not* a warning when it is unset. Unset is the default and
+	// means "each grant decides", and a grant that names no verbs is
+	// read-only — so warning about it would fire on every correctly-configured
+	// hub. What is worth a note is a ceiling that has been widened past the
+	// read set, since that is someone deciding the fleet may write and is the
+	// only setting here that can be wrong in the dangerous direction.
 	pol := k.Policy()
-	if !pol.ReadOnly() {
+	if len(pol.Verbs) > 0 && !pol.ReadOnly() {
 		add(Finding{
 			Check:    "kubeguard.verbs",
-			Title:    "Kubernetes monitor verb floor",
+			Title:    "Kubernetes monitor verb ceiling",
 			Severity: SeverityWarn,
-			Message: fmt.Sprintf("executors.kube_guard.verbs allows %s, so a grant on this hub may "+
-				"be given authority to change a cluster; leaving it unset holds every project "+
-				"to get, list and watch regardless of what its grant asks for",
+			Message: fmt.Sprintf("executors.kube_guard.verbs raises the fleet-wide ceiling to %s; "+
+				"it is a cap on what a grant may ask for, not a grant, so setting it wider than "+
+				"the read set only matters if some grant also asks to write",
 				strings.Join(pol.Verbs, ", ")),
-			Remediation: "Remove executors.kube_guard.verbs unless a workload genuinely needs to " +
-				"write, and grant the write verbs per project with `cloop secret grant --verbs`",
+			Remediation: "Leave executors.kube_guard.verbs unset to let each grant decide, or set " +
+				"it to get,list,watch to forbid writes fleet-wide; authorise writes per project " +
+				"with `cloop secret grant --verbs`",
 			Details: map[string]any{"verbs": pol.Verbs},
 		})
 	}

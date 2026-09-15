@@ -48,8 +48,7 @@ func ValidateKubeGuardConfig(k KubeGuardConfig) error {
 	// with, so a verb nobody spells correctly or a glob that matches nothing
 	// is refused here rather than read as a working allowlist.
 	if len(k.Verbs) > 0 || len(k.Namespaces) > 0 || len(k.Resources) > 0 {
-		pol := k.Policy()
-		if err := pol.Validate(); err != nil {
+		if err := k.Policy().ValidateAsFloor(); err != nil {
 			return fmt.Errorf("executors.kube_guard: %w", err)
 		}
 	}
@@ -143,7 +142,7 @@ func clampKubeGuardConfig(k *KubeGuardConfig) []string {
 		}
 	}
 	if len(k.Verbs) > 0 || len(k.Namespaces) > 0 || len(k.Resources) > 0 {
-		if err := k.Policy().Validate(); err != nil {
+		if err := k.Policy().ValidateAsFloor(); err != nil {
 			// Reset all three together rather than dropping the bad entry and
 			// keeping the rest: a half-applied policy is one nobody wrote,
 			// and the default is narrower than any override an operator was
@@ -193,6 +192,13 @@ func (k KubeGuardConfig) Policy() kubeguard.Policy {
 		Namespaces: append([]string(nil), k.Namespaces...),
 		Resources:  append([]string(nil), k.Resources...),
 	}
-	pol.Normalize()
+	// Deliberately not Normalize()d. Normalize substitutes the read-only set
+	// for an empty verb list, which is right for a session policy and wrong
+	// here: it would turn "no ceiling configured" into "no project on this hub
+	// may ever write", and `cloop secret grant --verbs create` would silently
+	// produce a read-only session. kubeguard.Policy.Intersect reads an empty
+	// list on this side as "no restriction", the same way it reads an empty
+	// namespace list.
+	pol.Verbs = kubeguard.NormalizeVerbs(pol.Verbs)
 	return pol
 }

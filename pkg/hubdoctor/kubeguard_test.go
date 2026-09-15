@@ -60,7 +60,9 @@ func TestKubeGuardEnabledAndWellConfiguredPasses(t *testing.T) {
 	got := findingsFor(t, t.TempDir(), cfg, Options{Offline: true})
 	f := only(t, got, "kubeguard.enabled")
 	wantSeverity(t, f, SeverityPass)
-	if !strings.Contains(f.Message, "read-only") {
+	// An unset floor is "no verb ceiling", not "read-only" — Summary would
+	// otherwise call an absent ceiling the tightest one, which is backwards.
+	if !strings.Contains(f.Message, "no verb ceiling") {
 		t.Fatalf("the pass does not state the policy in force: %q", f.Message)
 	}
 	for _, unwanted := range []string{"kubeguard.tls", "kubeguard.advertise_url", "kubeguard.verbs"} {

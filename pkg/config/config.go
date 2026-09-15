@@ -576,10 +576,15 @@ type KubeGuardConfig struct {
 	// project on the hub, and leaving them empty lets each grant speak for
 	// itself.
 	//
-	// Empty Verbs means read-only, which is also what a grant that names no
-	// verbs gets. Setting them to read-only explicitly is how an operator
-	// says "no project on this hub may ever write to a cluster", regardless
-	// of what any grant asks for.
+	// Empty means *no ceiling*: each grant decides, and a grant that names no
+	// verbs of its own is read-only. Setting these to the read set explicitly
+	// is how an operator says "no project on this hub may ever write to a
+	// cluster", regardless of what any grant asks for.
+	//
+	// The difference between unset and read-only is load-bearing, which is
+	// why Policy() does not normalise these: defaulting an unset floor to the
+	// read set would make `cloop secret grant --verbs create` silently
+	// produce a read-only session with no error saying why.
 	Verbs      []string `yaml:"verbs,omitempty"`
 	Namespaces []string `yaml:"namespaces,omitempty"`
 	Resources  []string `yaml:"resources,omitempty"`

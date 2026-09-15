@@ -814,7 +814,7 @@ executors:
     ca_file: /etc/cloop/tls/kube-guard-ca.pem    # empty falls back to cert_file
     min_tls_version: "1.2"                       # or "1.3"
     session_minutes: 60                          # 0 means 60; ceiling is 720
-    verbs: [get, list, watch]                    # a hub-wide floor, not the policy
+    verbs: [get, list, watch]                    # a hub-wide ceiling; omit to let grants decide
     namespaces: ["team-*"]
     resources: ["pods", "configmaps", "apps/deployments"]
 ```
@@ -833,12 +833,15 @@ executors:
   bare `https://` base with no path — it becomes the kubeconfig's `server:`.
   Empty falls back to the bound address, which is right only when the sandbox
   shares the hub's network namespace.
-- **`verbs` is a hub-wide floor**, intersected with each grant's own: empty means
-  read-only, and setting it read-only is how an operator says "no project on this
-  hub may ever write to a cluster". A grant asking for verbs the floor excludes
-  is refused. `namespaces` and `resources` intersect too, but an empty result on
-  those reads as "no restriction" rather than as a refusal — write them as a
-  literal superset of every grant, or leave them empty. See
+- **`verbs` is a hub-wide *ceiling*, not a grant**, intersected with each grant's
+  own. Empty means no ceiling — each grant decides, and a grant that names no
+  verbs of its own is read-only. Setting it to `[get, list, watch]` is how an
+  operator says "no project on this hub may ever write to a cluster", regardless
+  of what any grant asks for. `namespaces` and `resources` intersect the same
+  way. An empty intersection on **any** of the three refuses the lease rather
+  than producing a session: an empty namespace list would otherwise read as "no
+  confinement", which would make the narrowing widen. Write these as a literal
+  superset of every grant, or leave them empty. See
   [the floor](../architecture/kubernetes-access.md#the-deployment-floor-and-the-grant-intersect).
 - **`exec`, `attach`, `portforward` and `proxy` are refused for every verb** and
   cannot be re-enabled by any policy: `GET .../pods/x/exec` is a shell, not a

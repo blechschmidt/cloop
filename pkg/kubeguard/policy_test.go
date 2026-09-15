@@ -362,3 +362,57 @@ func TestSummaryNamesReadOnly(t *testing.T) {
 		t.Errorf("Summary() = %q claims read-only for a policy that may create", got)
 	}
 }
+
+// TestIntersectTreatsAnUnsetFloorAsNoCeiling is the regression test for a bug
+// that made `cloop secret grant --verbs create` look broken.
+//
+// Intersect used to Normalize() both sides first, which substitutes the
+// read-only set for an empty verb list. On a hub whose
+// executors.kube_guard.verbs was unset — the default, and the documented way
+// to let each grant speak for itself — that turned "no ceiling" into a
+// hub-wide read-only ceiling, so a grant that explicitly asked to create got a
+// read-only session and no error explaining why.
+//
+// The read-only default belongs on the *grant* (Constraints.KubeVerbs, where
+// "nobody said" means "nobody asked to write"), not on the floor.
+func TestIntersectTreatsAnUnsetFloorAsNoCeiling(t *testing.T) {
+	var unset Policy // as config.KubeGuardConfig.Policy() renders an unset section
+	grant := Policy{Verbs: []string{"get", "list", "watch", "create", "patch"}}
+
+	got, err := unset.Intersect(grant)
+	if err != nil {
+		t.Fatalf("Intersect: %v", err)
+	}
+	if err := got.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if got.ReadOnly() {
+		t.Fatalf("an unset floor clamped a write grant to read-only: %s", got.Summary())
+	}
+	for _, v := range []string{"create", "patch"} {
+		if !got.AllowsVerb(v) {
+			t.Errorf("verb %q did not survive an unset floor", v)
+		}
+	}
+
+	// The mirror image still holds: a floor that *is* set is a real ceiling.
+	readOnlyFloor := Policy{Verbs: ReadVerbs}
+	got, err = readOnlyFloor.Intersect(grant)
+	if err != nil {
+		t.Fatalf("Intersect: %v", err)
+	}
+	if !got.ReadOnly() {
+		t.Errorf("an explicit read-only floor was widened by a grant: %s", got.Summary())
+	}
+
+	// And a grant that says nothing under an unset floor still resolves to
+	// read-only, because the session policy's own Normalize supplies it.
+	got, err = unset.Intersect(Policy{})
+	if err != nil {
+		t.Fatalf("Intersect: %v", err)
+	}
+	got.Normalize()
+	if !got.ReadOnly() {
+		t.Errorf("a grant that named no verbs is not read-only: %s", got.Summary())
+	}
+}
