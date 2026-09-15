@@ -172,7 +172,16 @@ scenarios.navigation_never_leaves_the_ring_unanchored = async () => {
 
   // Deliberately not settled. This is the instant the trail captured: the view
   // has switched and cleared its list, and the request has not come back.
-  const during = { sel: dom.selName(), focus: dom.focusName(), ring: dom.ring().length };
+  //
+  // anchorScrolls is the guard on the cure. reanchor() also runs on the minute
+  // poll, and the control it lands on lives in the header: if that selection
+  // scrolled, a wearer part way down a long task result would be pulled back to
+  // the top once a minute by a cursor move they never asked for.
+  const anchored = dom.focused();
+  const during = {
+    sel: dom.selName(), focus: dom.focusName(), ring: dom.ring().length,
+    anchorScrolls: anchored ? anchored.scrollIntoViewCalls : -1,
+  };
 
   await dom.settle();
   return { before, during, after: dom.selName() };

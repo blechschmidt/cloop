@@ -1513,9 +1513,10 @@ func TestGlassesNavigationNeverLeavesTheRingUnanchored(t *testing.T) {
 	var nav struct {
 		Before string `json:"before"`
 		During struct {
-			Sel   string `json:"sel"`
-			Focus string `json:"focus"`
-			Ring  int    `json:"ring"`
+			Sel           string `json:"sel"`
+			Focus         string `json:"focus"`
+			Ring          int    `json:"ring"`
+			AnchorScrolls int    `json:"anchorScrolls"`
 		} `json:"during"`
 		After string `json:"after"`
 	}
@@ -1537,5 +1538,14 @@ func TestGlassesNavigationNeverLeavesTheRingUnanchored(t *testing.T) {
 	}
 	if nav.After == "<none>" {
 		t.Error("the cursor was still missing once the task list had landed")
+	}
+	// The cure must not cost what Task 20237 bought. reanchor() runs on the
+	// minute poll too, and it lands on Refresh, which is in the header: a
+	// selection that scrolled would drag a wearer reading a long task result
+	// back to the top once a minute.
+	if nav.During.AnchorScrolls > 0 {
+		t.Errorf("re-anchoring scrolled the page (%d scrollIntoView calls); this runs on the "+
+			"minute poll, so it would yank the wearer's viewport to the header",
+			nav.During.AnchorScrolls)
 	}
 }

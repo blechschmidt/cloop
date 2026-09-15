@@ -713,7 +713,10 @@ function cursorNode() {
   return null;
 }
 
-function select(node) {
+// stay is the second argument for a selection the wearer did not ask for — see
+// reanchor(). It keeps everything except the scroll: the cursor moves, the
+// highlight moves, focus moves, and the viewport stays exactly where it is.
+function select(node, stay) {
   if (!node) { return; }
   if (cursor && cursor !== node && cursor.classList) { cursor.classList.remove('sel'); }
   cursor = node;
@@ -722,7 +725,7 @@ function select(node) {
   // with 'nearest': a row already on screen stays exactly where the wearer is
   // looking instead of being yanked to the middle.
   try { node.focus({ preventScroll: true }); } catch (e) { try { node.focus(); } catch (e2) {} }
-  if (node.scrollIntoView) { node.scrollIntoView({ block: 'nearest' }); }
+  if (!stay && node.scrollIntoView) { node.scrollIntoView({ block: 'nearest' }); }
 }
 
 // How much of a control the wearer can see: 2 whole, 1 partly, 0 not at all.
@@ -810,7 +813,14 @@ function reanchor() {
   var ring = focusables();
   if (!ring.length) { return; }
   var refresh = el('reload');
-  select(ring.indexOf(refresh) >= 0 ? refresh : ring[0]);
+  // `stay`, because this also runs on the minute poll, and Refresh lives in the
+  // header. A wearer part way down a long task result would otherwise be pulled
+  // back to the top once a minute by a selection they never made — the exact
+  // complaint ("auto-reloading should be smooth instead of entirely resetting
+  // the view") that Task 20237 was opened for. Nothing is lost: on the
+  // transition this is written for, the list has just been cleared and the page
+  // is at the top already.
+  select(ring.indexOf(refresh) >= 0 ? refresh : ring[0], true);
 }
 
 function pageScrolls() {
