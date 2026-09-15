@@ -88,6 +88,14 @@
        whatever a future row puts in it. The vertical axis is unaffected: with
        one axis hidden the other computes to auto rather than visible. */
     overflow-x: hidden;
+    /* And the sideways gesture belongs to the page, not to the compositor.
+       overflow-x above stops a horizontal scroll from existing; this stops the
+       browser from *claiming* the axis before the page is consulted. Without
+       it a horizontal drag can be swallowed as a pan that then scrolls nothing,
+       and the touchmove handler below never gets the chance to call
+       preventDefault. pan-y keeps the vertical axis native, which is the half
+       of the gesture model the wearer asked to keep. */
+    touch-action: pan-y;
   }
   #app { padding: 14px 16px 28px; max-width: 900px; margin: 0 auto; }
 
@@ -467,6 +475,41 @@ function telFlush(beacon) {
   } catch (e) {}
 }
 
+// What the engine currently considers focused, in one short string.
+//
+// The page deliberately does not *trust* document.activeElement — owning the
+// cursor in a variable is what made the ring walk survive a hostile focus model
+// (Task 20242). But not trusting it is not a reason not to record it, and the
+// distinction it draws is the one the last investigation could not make: a
+// device that aims its key events at the focused element has nowhere to aim
+// them when that is the body. 'body' on a row that should be sitting on a
+// button is the signature of a page that has gone deaf.
+function activeDesc() {
+  try {
+    var a = document.activeElement;
+    if (!a || !a.tagName) { return 'none'; }
+    var s = a.tagName.toLowerCase();
+    if (a.id) { s += '#' + a.id; }
+    else if (a.dataset && a.dataset.key) { s += '[' + a.dataset.key + ']'; }
+    return s;
+  } catch (e) { return '?'; }
+}
+
+// Input the page saw and did not act on.
+//
+// Budgeted separately and tightly: a wearer reading a long result produces a
+// steady stream of vertical drags, and the point of this record is not to count
+// them. It is to answer one question the first trail could not — when the
+// wearer says a swipe did nothing, did anything reach the page at all? A
+// handful of rows settles it; the rest are noise.
+var TEL_INPUT_MAX = 20, telInputs = 0;
+
+function telInput(channel, dx, dy) {
+  if (telInputs >= TEL_INPUT_MAX) { return; }
+  telInputs++;
+  tel('input', 'ignored ' + channel, { ch: channel, dx: dx, dy: dy, ae: activeDesc() });
+}
+
 // setView is the only writer of state.view. Centralised so the transition is
 // recorded exactly once and only when it is real: a trail whose view column
 // repeats is a trail a reader stops trusting.
@@ -484,6 +527,25 @@ window.addEventListener('error', function(ev) {
   } catch (e) {}
 });
 window.addEventListener('pagehide', function() { telFlush(true); });
+
+// Whether the wearer is still looking.
+//
+// The one real session on record stops dead after five events and nothing in it
+// says why. Two explanations fit — the wearer looked away, or the page stopped
+// receiving input — and they call for opposite fixes. Recording the transition
+// separates them for nothing: a 'hidden' row means the first, and its absence
+// while gestures have gone missing means the second.
+//
+// The flush is the other half of the same gap. A wearable session is a glance,
+// and the tail of one was being lost to the ten-second timer every time: this
+// trail arrived in a single batch and everything after it died with the page.
+// `pagehide` was meant to cover that, but a WebView killed while hidden never
+// fires it. Going hidden is the last moment a record is reliably sendable.
+document.addEventListener('visibilitychange', function() {
+  var vis = document.visibilityState === 'visible';
+  tel('lifecycle', vis ? 'visible' : 'hidden');
+  if (!vis) { telFlush(true); }
+});
 
 // ── dom ─────────────────────────────────────────────────────────────────────
 // Everything below builds nodes and writes textContent instead of assembling
@@ -722,6 +784,35 @@ function selectFirstRow() {
   moveCursor(1);
 }
 
+// The ring is never left without a cursor.
+//
+// Straight from the trail: one gesture ended `go → -1` on a ring of six. The
+// wearer had pinched a project open, the view had switched to tasks, and for
+// the whole of the fetch that followed — 466 ms there, unbounded on a phone
+// tether — the page offered six reachable controls and had selected none of
+// them. Two things are wrong with that at once. The wearer loses the highlight
+// and has nothing to aim at; and because this device delivers its key events to
+// document.activeElement, an unanchored page is one with nowhere to deliver
+// them.
+//
+// Landing somewhere costs nothing: when the list arrives a moment later
+// loadProjects/loadTasks call selectFirstRow() and move the cursor on.
+//
+// Somewhere, but not just anywhere. This anchor is a placeholder the page
+// picked, not a choice the wearer made, so it goes on the control where an
+// accidental pinch is harmless. That rules out the first of the ring: on the
+// tasks screen that is Back, and a wearer who pinches twice — the ordinary
+// "did that register?" reaction to a screen that has not painted yet — would
+// bounce straight out of the project they just opened. Refresh is always on
+// screen and costs a reload at worst.
+function reanchor() {
+  if (cursorNode()) { return; }
+  var ring = focusables();
+  if (!ring.length) { return; }
+  var refresh = el('reload');
+  select(ring.indexOf(refresh) >= 0 ? refresh : ring[0]);
+}
+
 function pageScrolls() {
   var d = document.scrollingElement || document.documentElement;
   return !!d && d.scrollHeight > d.clientHeight + 1;
@@ -752,6 +843,42 @@ function gestureOf(ev) {
     lookup(GESTURE_CODES, ev.keyCode || ev.which) || '';
 }
 
+// What a gesture does, independent of how it arrived. Split out from the
+// keydown handler because a key is no longer the only way one gets here: the
+// touch recogniser below feeds the same five words in. Returns false for a
+// gesture this page does not claim, which is the signal to leave the browser's
+// default alone.
+function applyGesture(g) {
+  if (g === 'next' || g === 'prev') {
+    moveCursor(g === 'next' ? 1 : -1);
+    return true;
+  }
+  if (g === 'down' || g === 'up') {
+    if (pageScrolls()) { return false; }   // the reading axis: leave the scroll alone
+    moveCursor(g === 'down' ? 1 : -1);
+    return true;
+  }
+  if (g === 'go') {
+    // A pinch arrives as Enter on whatever has focus, and on a fresh or
+    // rebuilt screen that can still be the body. Treat it as "give me the
+    // cursor back" rather than dropping the gesture: it is the only way out
+    // for a wearer who has no other key to press.
+    var target = cursorNode();
+    if (target) {
+      // Activate explicitly and swallow the default. A native button would
+      // otherwise do it too, and the device's Enter is not reliably trusted;
+      // doing it here is one activation in both cases rather than two in one
+      // and none in the other.
+      target.click();
+    } else {
+      moveCursor(1);
+    }
+    return true;
+  }
+  if (g === 'back') { goBack(); return true; }
+  return false;
+}
+
 document.addEventListener('keydown', function(ev) {
   // A modifier means a real keyboard and a real shortcut; the band has none.
   if (ev.altKey || ev.ctrlKey || ev.metaKey) { return; }
@@ -769,48 +896,159 @@ document.addEventListener('keydown', function(ev) {
   try {
     var telBefore = focusables();
     tel('gesture', g || ('unmapped: ' + (ev.key || ev.code || ev.keyCode)), {
+      ch: 'key',
       key: String(ev.key || ''), code: String(ev.code || ''), which: ev.keyCode || 0,
       ring: telBefore.length, at: telBefore.indexOf(cursorNode()),
-      scrolls: pageScrolls()
+      scrolls: pageScrolls(), ae: activeDesc()
     });
   } catch (e) {}
 
-  if (g === 'next' || g === 'prev') {
-    moveCursor(g === 'next' ? 1 : -1);
-  } else if (g === 'down' || g === 'up') {
-    if (pageScrolls()) { return; }   // the reading axis: leave the scroll alone
-    moveCursor(g === 'down' ? 1 : -1);
-  } else if (g === 'go') {
-    // A pinch arrives as Enter on whatever has focus, and on a fresh or
-    // rebuilt screen that can still be the body. Treat it as "give me the
-    // cursor back" rather than dropping the gesture: it is the only way out
-    // for a wearer who has no other key to press.
-    var target = cursorNode();
-    if (target) {
-      // Activate explicitly and swallow the default. A native button would
-      // otherwise do it too, and the device's Enter is not reliably trusted;
-      // doing it here is one activation in both cases rather than two in one
-      // and none in the other.
-      target.click();
-    } else {
-      moveCursor(1);
-    }
-  } else if (g === 'back') {
-    goBack();
-  } else {
-    return; // not ours: leave the default alone
-  }
-  // Where the gesture left the cursor. Paired with the `at` recorded above,
-  // this is the whole of the reported symptom in two numbers: equal indices
-  // across consecutive gestures is "selects the first item once and then
-  // nothing", and it is otherwise invisible from outside the device.
-  try {
-    var telAfter = focusables();
-    tel('gesture', g + ' → ' + telAfter.indexOf(cursorNode()),
-      { after: telAfter.indexOf(cursorNode()), ring: telAfter.length });
-  } catch (e) {}
+  if (!applyGesture(g)) { return; }   // not ours: leave the default alone
+  telLanded('key', g);
   ev.preventDefault();
 }, true);
+
+// Where the gesture left the cursor. Paired with the `at` recorded when it
+// arrived, this is the whole of the reported symptom in two numbers: equal
+// indices across consecutive gestures is "selects the first item once and then
+// nothing", and it is otherwise invisible from outside the device.
+function telLanded(channel, g) {
+  try {
+    var ring = focusables(), at = ring.indexOf(cursorNode());
+    tel('gesture', g + ' → ' + at, { ch: channel, after: at, ring: ring.length, ae: activeDesc() });
+  } catch (e) {}
+}
+
+// ── touch ───────────────────────────────────────────────────────────────────
+// The sideways gesture is not a key on this device.
+//
+// That is not a guess. The handler above records `unmapped: <key>` for any
+// keydown whose spelling the tables do not know, and the one real Ray-Ban
+// Display session on record contains no such row — no ArrowLeft, no Left, no
+// stray keyCode. It contains exactly one gesture, a pinch, which arrived as
+// Enter/13 and was handled correctly. Meanwhile the wearer reported twice that
+// sideways gestures moved a scrollbar, and that up and down scrolled the page.
+// Both of those are touch panning. The device speaks touch; the page had been
+// listening for arrow keys it never sends.
+//
+// So this is the channel the cursor actually needs, and the keydown handler
+// above stays exactly as it was — a real keyboard, a tethered phone and any
+// firmware that does send arrows all keep working.
+//
+// Recognition is on touchend rather than mid-drag, because one swipe should
+// move the cursor one stop: a threshold crossed during touchmove fires again on
+// every later move of the same drag, which is a cursor that skids.
+var SWIPE_MIN_PX = 28;    // below this a drag is a tap with a shaky finger
+var SWIPE_BIAS = 1.3;     // and it must be this much more sideways than vertical
+var swipeFrom = null;
+
+// The dictate button runs its own pointer gesture with its own touch-action and
+// pointer capture, and a hold that drifts sideways must not also be read as a
+// swipe — that would move the cursor out from under a recording in progress.
+function ownsItsOwnTouch(node) {
+  for (var n = node; n && n !== document; n = n.parentNode) {
+    if (n.id === 'dictate') { return true; }
+  }
+  return false;
+}
+
+document.addEventListener('touchstart', function(ev) {
+  if (!ev.touches || ev.touches.length !== 1 || ownsItsOwnTouch(ev.target)) {
+    swipeFrom = null;
+    return;
+  }
+  swipeFrom = { x: ev.touches[0].clientX, y: ev.touches[0].clientY };
+}, true);
+
+document.addEventListener('touchmove', function(ev) {
+  if (!swipeFrom) { return; }
+  // A second finger is a pinch-zoom or a stray temple touch, not a swipe.
+  if (ev.touches && ev.touches.length > 1) { swipeFrom = null; return; }
+  var t = ev.touches && ev.touches[0];
+  if (!t) { return; }
+  // Claim the horizontal axis as soon as the drag is clearly sideways. The
+  // page has no horizontal scroll to give away (overflow-x is hidden), so the
+  // only thing preventDefault suppresses here is the browser deciding this
+  // gesture belongs to it.
+  if (isSideways(t.clientX - swipeFrom.x, t.clientY - swipeFrom.y) && ev.cancelable) {
+    ev.preventDefault();
+  }
+}, { capture: true, passive: false });
+
+document.addEventListener('touchend', function(ev) {
+  var from = swipeFrom;
+  swipeFrom = null;
+  if (!from) { return; }
+  var t = ev.changedTouches && ev.changedTouches[0];
+  if (!t) { return; }
+  var dx = t.clientX - from.x, dy = t.clientY - from.y;
+
+  if (!isSideways(dx, dy)) {
+    // Not a swipe, and worth a line on the trail only if it is also not one of
+    // the two things that are meant to end up here. A tap is the wearer
+    // pressing a control and a downward drag is them reading; both work, both
+    // are constant, and both would spend the budget before anything surprising
+    // arrived. What is left is a gesture the page saw and could not name — the
+    // exact evidence missing when the first trail showed a swipe doing nothing.
+    var tap = Math.abs(dx) < SWIPE_MIN_PX && Math.abs(dy) < SWIPE_MIN_PX;
+    var reading = Math.abs(dy) >= Math.abs(dx) * SWIPE_BIAS;
+    if (!tap && !reading) { telInput('touch', Math.round(dx), Math.round(dy)); }
+    return;
+  }
+
+  var g = dx < 0 ? 'next' : 'prev';
+  try {
+    var ring = focusables();
+    tel('gesture', g, {
+      ch: 'touch', dx: Math.round(dx), dy: Math.round(dy),
+      ring: ring.length, at: ring.indexOf(cursorNode()),
+      scrolls: pageScrolls(), ae: activeDesc()
+    });
+  } catch (e) {}
+
+  applyGesture(g);
+  telLanded('touch', g);
+  // Suppress the click the browser synthesises from this touch. Without it a
+  // sideways swipe that happens to end over a row opens that row — the wearer
+  // asks for the next item and lands two screens away.
+  if (ev.cancelable) { ev.preventDefault(); }
+}, true);
+
+function isSideways(dx, dy) {
+  return Math.abs(dx) >= SWIPE_MIN_PX && Math.abs(dx) >= Math.abs(dy) * SWIPE_BIAS;
+}
+
+// Some WebViews report a band swipe as a wheel rather than as touch. Cheap to
+// accept and impossible to confuse with anything else here: this page has no
+// horizontal scrolling surface, so a horizontal wheel can only be a gesture.
+// A vertical wheel is left alone — that is the reading axis.
+var WHEEL_MIN_PX = 40, WHEEL_QUIET_MS = 250;
+var wheelAcc = 0, wheelAt = 0;
+
+document.addEventListener('wheel', function(ev) {
+  var dx = ev.deltaX || 0, dy = ev.deltaY || 0;
+  if (Math.abs(dx) < Math.abs(dy) * SWIPE_BIAS) { wheelAcc = 0; return; }
+  var now = Date.now();
+  // One physical gesture arrives as a burst of small deltas. Accumulate within
+  // the burst and reset once it goes quiet, so a flick is one cursor stop.
+  if (now - wheelAt > WHEEL_QUIET_MS) { wheelAcc = 0; }
+  wheelAt = now;
+  wheelAcc += dx;
+  if (Math.abs(wheelAcc) < WHEEL_MIN_PX) { return; }
+  var g = wheelAcc > 0 ? 'next' : 'prev';   // deltaX > 0 is content moving left
+  wheelAcc = 0;
+  try {
+    var ring = focusables();
+    tel('gesture', g, {
+      ch: 'wheel', dx: Math.round(dx), dy: Math.round(dy),
+      ring: ring.length, at: ring.indexOf(cursorNode()),
+      scrolls: pageScrolls(), ae: activeDesc()
+    });
+  } catch (e) {}
+  applyGesture(g);
+  telLanded('wheel', g);
+  if (ev.cancelable) { ev.preventDefault(); }
+}, { capture: true, passive: false });
 
 // ── projects ────────────────────────────────────────────────────────────────
 
@@ -1588,6 +1826,12 @@ el('reload').addEventListener('click', function() {
 // and hand them the first row" and "patch what changed and touch nothing
 // else", which is the whole of the smooth-refresh behaviour.
 function load(navigating) {
+  // Every view that fetches has just cleared its list, so this is the moment
+  // the ring is at its shortest and the cursor most likely to be gone. Anchor
+  // before the request rather than after it: the wait is the window the wearer
+  // swipes into, and a cursor that only reappears when the network answers is
+  // one the device has nothing to aim at until then. See reanchor().
+  reanchor();
   if (state.view === 'projects') { return loadProjects(navigating).catch(fail); }
   if (state.view === 'tasks' && state.project) { return loadTasks(navigating, navigating ? 'open' : 'refresh').catch(fail); }
   if (state.view === 'task') { return loadTask().catch(fail); }

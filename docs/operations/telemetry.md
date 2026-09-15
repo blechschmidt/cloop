@@ -42,10 +42,40 @@ ended up. Two consecutive entries with the same value are the reported bug.
 | `error` | an uncaught exception, with its stack |
 | `rejection` | an unhandled promise rejection |
 | `gesture` | an input the page received — a key, swipe, pinch or click |
+| `input` | an input the page received and did **not** act on |
 | `view` | a tab or screen the page opened |
 | `fetch` | a request the page issued, with status and duration |
 | `lifecycle` | page load, visibility change, a link reaching its terminal state |
 | `note` | anything else, and where an unrecognised kind lands |
+
+### Reading a glasses trail
+
+Three fields on a `gesture` carry most of the diagnostic weight, and each was
+added because an investigation stalled without it.
+
+`ch` is the channel the input arrived on — `key`, `touch` or `wheel`. The first
+real Ray-Ban Display trail recorded a pinch as `Enter` and, for a sideways
+swipe, nothing at all: the page listened only for keydown, so a gesture that
+came in as touch left no trace and "the swipe did nothing" could not be
+distinguished from "the swipe never happened". Every gesture now names its
+channel, so that question is a query.
+
+`ae` is `document.activeElement` at the moment of the gesture. The page does not
+*trust* focus — it owns the cursor in a variable, because the device's focus
+model cannot be relied on — but the device does aim its key events at whatever
+is focused. An `ae` of `body` while controls are on screen is a page with
+nowhere to receive the next gesture.
+
+A row of kind `input` is the complement: the page saw something and could not
+name it. Taps and vertical drags are excluded, because those are meant to end
+up unhandled; what is left is a gesture arriving on a channel nothing handles
+yet — which is exactly the shape of the failure above, and the first thing to
+look for when a wearer reports that a gesture does nothing.
+
+Silence is also evidence, but only alongside `lifecycle`. A trail that stops
+has two readings — the wearer looked away, or the page stopped receiving input
+— and they call for opposite fixes. A `lifecycle` row of `hidden` means the
+first; missing gestures with no such row means the second.
 
 Each event carries the session (one page load), a monotonic sequence number,
 the page's own clock, the view it happened in, and a small free-form detail

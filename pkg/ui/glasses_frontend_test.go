@@ -1361,3 +1361,181 @@ func TestGlassesDictationRefusesSilence(t *testing.T) {
 		t.Errorf("a real recording did not reach the confirmation screen: %v", loud.Rows)
 	}
 }
+
+// TestGlassesSidewaysTouchWalksTheRing is Task 20279 in the shim, so that CI —
+// which has no browser — still fails if the touch recogniser is removed.
+//
+// Its companion in glasses_browser_test.go drives real Chromium and is the
+// stronger gate: the synthesised click after a touch, touch-action and layout
+// all belong to the browser. This one cannot see any of that. What it can see
+// is the property the whole fix turns on — that a fingertip moving sideways
+// steers the cursor at all — and that is worth having everywhere.
+//
+// The evidence for driving it this way rather than with press(): the one real
+// Ray-Ban Display session on record contains a pinch delivered as Enter/13 and
+// no key of any spelling for a swipe, not even an unrecognised one, which the
+// handler logs. The device speaks touch.
+func TestGlassesSidewaysTouchWalksTheRing(t *testing.T) {
+	t.Parallel()
+
+	results := glassesScenarios(t)
+
+	var fwd struct {
+		Start string   `json:"start"`
+		Stops []string `json:"stops"`
+		Back  []string `json:"back"`
+		Ring  []string `json:"ring"`
+	}
+	glassesScenario(t, results, "sideways_touch_walks_the_ring", &fwd)
+
+	if len(fwd.Ring) < 3 {
+		t.Fatalf("focus ring = %v, want the refresh control and one stop per project", fwd.Ring)
+	}
+	if fwd.Start == "<none>" {
+		t.Error("nothing is selected once the first screen has loaded; the wearer's first " +
+			"swipe has no defined starting point")
+	}
+	for i, stop := range fwd.Stops {
+		prev := fwd.Start
+		if i > 0 {
+			prev = fwd.Stops[i-1]
+		}
+		if stop == prev {
+			t.Fatalf("touch swipe %d left the cursor on %q: the selection is stuck.\n"+
+				"start %q, stops %v\nthis is the wearer's report — one gesture lands and "+
+				"the next does nothing", i+1, stop, fwd.Start, fwd.Stops)
+		}
+	}
+	// "Swiping left or right does not move to the previous element anymore" was
+	// the other half of the report, so the reverse direction is its own check.
+	for i, stop := range fwd.Back {
+		prev := fwd.Stops[len(fwd.Stops)-1]
+		if i > 0 {
+			prev = fwd.Back[i-1]
+		}
+		if stop == prev {
+			t.Errorf("swiping back %d left the cursor on %q: %v → %v",
+				i+1, stop, fwd.Stops, fwd.Back)
+		}
+	}
+}
+
+// TestGlassesVerticalTouchIsLeftForReading holds the line the wearer drew
+// themselves: "swiping up and down moves the scrollbar. That's good."
+//
+// The sideways recogniser must not claim the vertical axis on its way past. A
+// fix that steered the cursor with every drag would break the one part of this
+// page that was already working.
+func TestGlassesVerticalTouchIsLeftForReading(t *testing.T) {
+	t.Parallel()
+
+	results := glassesScenarios(t)
+
+	var v struct {
+		Before    string `json:"before"`
+		After     string `json:"after"`
+		Prevented bool   `json:"prevented"`
+	}
+	glassesScenario(t, results, "vertical_touch_is_left_for_reading", &v)
+
+	if v.After != v.Before {
+		t.Errorf("a vertical drag moved the cursor %q → %q; that axis is for reading",
+			v.Before, v.After)
+	}
+	if v.Prevented {
+		t.Error("a vertical drag was consumed by the page, so it can no longer scroll — " +
+			"the wearer asked to keep this gesture")
+	}
+}
+
+// TestGlassesTapIsNotASwipe keeps the recogniser from eating a press.
+//
+// A fingertip never lands perfectly still, and the wearer's press of a control
+// carries a few pixels of drift. Reading that as a swipe would move the cursor
+// out from under the very control they were pressing.
+func TestGlassesTapIsNotASwipe(t *testing.T) {
+	t.Parallel()
+
+	results := glassesScenarios(t)
+
+	var tap struct {
+		Before    string `json:"before"`
+		After     string `json:"after"`
+		Prevented bool   `json:"prevented"`
+	}
+	glassesScenario(t, results, "a_tap_is_not_a_swipe", &tap)
+
+	if tap.After != tap.Before {
+		t.Errorf("a few pixels of drift moved the cursor %q → %q: a press is being read "+
+			"as a swipe", tap.Before, tap.After)
+	}
+	if tap.Prevented {
+		t.Error("a tap was consumed by the gesture handler, so the control under the " +
+			"wearer's finger never receives its click")
+	}
+}
+
+// TestGlassesSidewaysTouchIsConsumed pins the suppression.
+//
+// A browser synthesises a click from a touch, and a swipe that happens to end
+// over a row would otherwise open that row: the wearer asks for the next item
+// and lands two screens away.
+func TestGlassesSidewaysTouchIsConsumed(t *testing.T) {
+	t.Parallel()
+
+	results := glassesScenarios(t)
+
+	var s struct {
+		Prevented bool `json:"prevented"`
+	}
+	glassesScenario(t, results, "sideways_touch_is_consumed", &s)
+
+	if !s.Prevented {
+		t.Error("a sideways swipe was not consumed; the click the browser synthesises " +
+			"from it will activate whatever the finger happened to stop over")
+	}
+}
+
+// TestGlassesNavigationNeverLeavesTheRingUnanchored is the trail's own last
+// entry, turned into an assertion.
+//
+// That session ends with `go → -1` on a ring of six: the wearer had opened a
+// project, the view had switched, and for the whole of the fetch that followed
+// the page offered six reachable controls and had selected none of them. The
+// wearer loses the highlight — and because this device aims its key events at
+// document.activeElement, the page also loses the only thing a gesture can be
+// delivered to.
+func TestGlassesNavigationNeverLeavesTheRingUnanchored(t *testing.T) {
+	t.Parallel()
+
+	results := glassesScenarios(t)
+
+	var nav struct {
+		Before string `json:"before"`
+		During struct {
+			Sel   string `json:"sel"`
+			Focus string `json:"focus"`
+			Ring  int    `json:"ring"`
+		} `json:"during"`
+		After string `json:"after"`
+	}
+	glassesScenario(t, results, "navigation_never_leaves_the_ring_unanchored", &nav)
+
+	if nav.During.Ring == 0 {
+		t.Fatalf("precondition: no controls on screen mid-navigation, so there is nothing "+
+			"to anchor to: %+v", nav.During)
+	}
+	if nav.During.Sel == "<none>" {
+		t.Errorf("the cursor was dropped while the view was loading: %d controls on screen, "+
+			"none selected\nthis is the trail's `go → -1` on a ring of 6", nav.During.Ring)
+	}
+	if nav.During.Focus == "<body>" {
+		t.Errorf("focus fell to the body while the view was loading (%d controls on screen)\n"+
+			"on this device that is not cosmetic: key events are aimed at "+
+			"document.activeElement, so an unfocused page has nowhere to receive the "+
+			"next gesture", nav.During.Ring)
+	}
+	if nav.After == "<none>" {
+		t.Error("the cursor was still missing once the task list had landed")
+	}
+}

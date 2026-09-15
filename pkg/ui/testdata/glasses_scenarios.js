@@ -95,6 +95,89 @@ scenarios.swipe_left_walks_back = async () => {
   return { before, back };
 };
 
+// ── the channel the device actually speaks ──────────────────────────────────
+// Task 20279. Everything above this line presses keys, because that is what the
+// page was built to receive — and the telemetry from a real session says the
+// device does not send them for a swipe. It sent one gesture in that trail, a
+// pinch, as Enter/13. For a sideways swipe it sent nothing the page could see:
+// not an arrow, not a legacy spelling, not an unrecognised keyCode, all three of
+// which the handler records. The wearer described the same gap from outside —
+// sideways gestures moved a scrollbar, which is a touch pan.
+//
+// So these drive the page the way the hardware does, with a fingertip.
+
+scenarios.sideways_touch_walks_the_ring = async () => {
+  const dom = boot({ routes: { '/api/glasses/projects': { projects: PROJECTS } } });
+  await dom.settle();
+
+  const start = dom.selName();
+  const stops = [];
+  for (let i = 0; i < 4; i++) { dom.swipe(-120, 0); stops.push(dom.selName()); }
+  // And back the way they came: "cannot reach the previous element" was half
+  // the report, and a ring that only walks one way still fails it.
+  const back = [];
+  for (let i = 0; i < 2; i++) { dom.swipe(120, 0); back.push(dom.selName()); }
+  return { start, stops, back, ring: dom.ring() };
+};
+
+scenarios.vertical_touch_is_left_for_reading = async () => {
+  const dom = boot({ routes: { '/api/glasses/projects': { projects: PROJECTS } } });
+  await dom.settle();
+  dom.layout(80, 0, 240);             // a column taller than the display
+  const before = dom.selName();
+  const ev = dom.swipe(0, -200);
+  // Untouched selection and an unprevented event: the page hands the vertical
+  // axis back to the browser so it can scroll, which is what the wearer asked
+  // to keep.
+  return { before, after: dom.selName(), prevented: ev.defaultPrevented };
+};
+
+scenarios.a_tap_is_not_a_swipe = async () => {
+  const dom = boot({ routes: { '/api/glasses/projects': { projects: PROJECTS } } });
+  await dom.settle();
+  const before = dom.selName();
+  // A fingertip never lands perfectly still. A few pixels of drift is someone
+  // pressing the control under it, and reading that as a swipe would move the
+  // cursor out from under the press.
+  const ev = dom.swipe(6, 3);
+  return { before, after: dom.selName(), prevented: ev.defaultPrevented };
+};
+
+scenarios.sideways_touch_is_consumed = async () => {
+  const dom = boot({ routes: { '/api/glasses/projects': { projects: PROJECTS } } });
+  await dom.settle();
+  // The click a browser synthesises after a touch is the hazard here: a swipe
+  // that ends over a row would otherwise open that row, so the wearer asks for
+  // the next item and lands two screens away.
+  return { prevented: dom.swipe(-120, 0).defaultPrevented };
+};
+
+// The other half of the same trail, and the more literal one. That session's
+// last recorded gesture is `go → -1` on a ring of 6: the wearer had opened a
+// project, the view had switched, and while the task list was in flight the
+// page offered six reachable controls and had selected none of them. On a
+// device that aims its key events at document.activeElement, an unanchored page
+// is one with nowhere to deliver the next gesture.
+scenarios.navigation_never_leaves_the_ring_unanchored = async () => {
+  const dom = boot({
+    routes: {
+      '/api/glasses/projects': { projects: PROJECTS },
+      '/api/glasses/tasks': tasksRoute(mkTasks(4)),
+    },
+  });
+  await dom.settle();
+
+  const before = dom.selName();
+  dom.press('Enter');                  // open the selected project
+
+  // Deliberately not settled. This is the instant the trail captured: the view
+  // has switched and cleared its list, and the request has not come back.
+  const during = { sel: dom.selName(), focus: dom.focusName(), ring: dom.ring().length };
+
+  await dom.settle();
+  return { before, during, after: dom.selName() };
+};
+
 scenarios.arrow_keys_are_consumed = async () => {
   const dom = boot({ routes: { '/api/glasses/projects': { projects: PROJECTS } } });
   await dom.settle();

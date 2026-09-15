@@ -161,7 +161,12 @@ function makeDOM(opts) {
   // whatever the event passed through on its way up.
 
   function dispatch(target, init) {
-    const ev = Object.assign({ target, defaultPrevented: false }, init);
+    // cancelable by default because every event this shim sends — keydown,
+    // click, touch — is cancelable in a real DOM. The page guards its touch
+    // preventDefault on it (calling preventDefault on a passive or
+    // non-cancelable event is a console warning at best), so a shim that left
+    // it undefined would silently skip the suppression it is meant to test.
+    const ev = Object.assign({ target, cancelable: true, defaultPrevented: false }, init);
     ev.preventDefault = () => { ev.defaultPrevented = true; };
     const path = [];
     for (let n = target; n; n = n.parentNode) { path.push(n); }
@@ -404,6 +409,40 @@ function makeDOM(opts) {
         if (first) { doc.activeElement = first; }
       }
       return ev;
+    },
+    // swipe models the gesture the device actually sends (Task 20279).
+    //
+    // The telemetry from a real Ray-Ban Display session records a pinch
+    // arriving as Enter and no key whatsoever for a sideways swipe — not even
+    // one the page failed to recognise, which it would have logged. The wearer
+    // reported the same thing from the other side: sideways gestures moved a
+    // scrollbar. That is touch, so press() is not enough to drive this page any
+    // more and a suite that only presses keys cannot fail the way the hardware
+    // does.
+    //
+    // Deliberately coarse. Real geometry, momentum and the compositor belong to
+    // the browser gate in glasses_browser_test.go; what this models is the one
+    // thing the page's recogniser reads — where the finger started and where it
+    // left — so the recogniser cannot be deleted without something going red in
+    // CI, which has no browser.
+    swipe: (dx, dy, opts) => {
+      const o = opts || {};
+      const target = o.target || doc.activeElement || doc.body;
+      const x0 = 150, y0 = 300;
+      const pt = (x, y) => [{ clientX: x, clientY: y, identifier: 1 }];
+      dispatch(target, { type: 'touchstart', touches: pt(x0, y0), changedTouches: pt(x0, y0) });
+      // Two moves, not one: a recogniser that fires mid-drag would step the
+      // cursor once per move, and one swipe has to be one stop.
+      for (const f of [0.5, 1]) {
+        dispatch(target, {
+          type: 'touchmove',
+          touches: pt(x0 + dx * f, y0 + dy * f),
+          changedTouches: pt(x0 + dx * f, y0 + dy * f),
+        });
+      }
+      return dispatch(target, {
+        type: 'touchend', touches: [], changedTouches: pt(x0 + dx, y0 + dy),
+      });
     },
     click: el => dispatch(el, { type: 'click' }),
     tick: () => win.timers.filter(t => !t.cleared).forEach(t => t.fn()),
