@@ -1,0 +1,2 @@
+# the probe is run with `go run .`, never installed
+/celprobe

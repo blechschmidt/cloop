@@ -142,28 +142,122 @@ This is the same shape as Google's workload identity federation
 `attribute_condition`, deliberately, because anyone federating GitHub Actions
 has probably read those docs.
 
-It is a **strict subset** of CEL, and what it leaves out is as important as
-what it keeps:
+### Every GitHub claim is a string
 
-| Supported | Not supported |
+Before the grammar, the one fact that causes more broken rules than the rest of
+this section combined:
+
+**GitHub sends every one of its claims as a JSON string — `repository_id`,
+`actor_id`, `run_id`, `run_number`, `run_attempt` and `ref_protected`
+included.** Only the standard JWT time claims (`iat`, `exp`, `nbf`) are JSON
+numbers.
+
+```
+assertion.repository_id == "123456"    # correct
+assertion.repository_id == 123456      # never matches: refused as a type error
+assertion.ref_protected == "false"     # correct — a stringified boolean
+assertion.ref_protected == false       # never matches
+```
+
+The second and fourth lines are the natural thing to write and they cannot
+work. They are refused rather than silently evaluating false, so the rule
+editor's **Test** button tells you immediately — but no amount of re-reading
+the expression reveals the problem, because the expression is not what is
+wrong.
+
+### The supported subset
+
+This is a **strict subset** of CEL, and what it leaves out is as important as
+what it keeps.
+
+| Supported | Written as |
 | --- | --- |
-| string, int, bool and list literals | floats, hex, durations, timestamps |
-| `assertion.<claim>`, nested selection | indexing, optional chaining |
-| `==` `!=` `in` `&&` `\|\|` `!` and parentheses | `<` `>` `+` `-`, ternaries |
-| `startsWith` `endsWith` `contains` `matches` | macros (`all`, `exists`, `map`), `size()`, any other function |
+| claim selection, nested | `assertion.repository`, `assertion.ctx.env` |
+| string literals, single or double quoted | `"acme/tool"`, `'acme/tool'` |
+| decimal integer literals | `123456` |
+| boolean literals | `true`, `false` |
+| homogeneous list literals, trailing comma allowed | `["main", "release",]` |
+| equality | `==`, `!=` |
+| list membership | `in` |
+| boolean connectives and grouping | `&&`, `\|\|`, `!`, `(` `)` |
+| four string methods | `startsWith`, `endsWith`, `contains`, `matches` |
 
-Anything outside that table is a **parse error when you save the rule**, not a
-surprise when a pipeline is denied mid-release. `matches()` takes a literal
-regular expression so a bad pattern is caught at the same moment.
+`&&` binds tighter than `||`, as in CEL. Comparisons do not chain: `a == b == c`
+is refused, because CEL reads it as `(a == b) == c` and nobody means that.
 
-Two semantics worth knowing, both chosen so the failure mode is refusal:
+`matches()` takes a **literal** regular expression — not a computed one — so a
+pattern that does not compile is caught when you save the rule rather than when
+a pipeline presents a token. It is RE2, unanchored (a search, not a full
+match), and supports inline flags like `(?i)`.
+
+### What is refused, and when
+
+Everything below is **refused when you save the rule**. That is the entire
+point: a construct this evaluator does not implement must never be a construct
+it *misreads*.
+
+| Refused | Write instead |
+| --- | --- |
+| `<` `>` `<=` `>=` | nothing — ordering has no use over identity claims |
+| `+` `-` `*` `/` `%`, unary minus | nothing |
+| `? :` ternaries | `&&` / `\|\|` |
+| `has(assertion.x)` | pin the claim you want: `assertion.x == "…"` |
+| macros — `all`, `exists`, `exists_one`, `map`, `filter` | one narrow rule per case |
+| `size()`, `lowerAscii()`, and every function outside the four above | `matches("(?i)…")` for case folding |
+| indexing — `assertion.groups[0]` | `"eng" in assertion.groups` |
+| map literals and `in` over a map — `"k" in assertion.ctx` | `assertion.ctx.k == "…"` |
+| float and hex literals — `1.5`, `0x10` | decimal integers |
+| `null`, and `true`/`false`/`null` as field names | — |
+| mixed-type list literals — `["123456", 999]` | one type per list (see below) |
+| `//` comments | the rule's **name** field |
+| durations, timestamps, optional chaining, type coercion | — |
+
+Several of these are legal CEL that this evaluator declines. `size()`,
+indexing, `has()`, macros and ternaries all *work* in real CEL; refusing them
+keeps the policy readable by eye, which is the property an audit reader needs.
+If you need one of them, you are describing a policy that should be several
+narrow rules.
+
+### Where this deliberately disagrees with CEL
+
+If you know CEL, these five are the surprises. Every one of them makes this
+evaluator **stricter** than CEL — it refuses where CEL would reach a verdict —
+and that direction is deliberate: a refusal costs you a clearer error message,
+whereas the opposite would admit a pipeline you did not intend.
 
 - **A missing claim is an error, not `false`.** A rule reading
   `assertion.environment` against a job that declared no environment does not
-  quietly fall through to its remaining conditions — it becomes undecidable and
-  is skipped, and the reason is recorded.
-- **Cross-type comparison is an error.** `assertion.repository_id == "123"`
-  does not silently evaluate false while you wonder why your rule never fires.
+  quietly fall through to its remaining conditions. It becomes undecidable, the
+  rule is skipped, and the reason is recorded.
+- **Cross-type comparison is an error, including under `!=`.** In CEL,
+  `assertion.repository_id != 123456` is *true* for GitHub's string claim —
+  the types differ, so they are unequal. Here it is a refusal. A negated
+  condition over a mistyped claim is the one shape where CEL's answer is
+  "admit".
+- **No commutative absorption.** CEL lets `<error> || true` be `true` and
+  `<error> && false` be `false`, so that operand order does not matter. Here a
+  reached error propagates. `assertion.environment == "prod" || assertion.repository == "acme/tool"`
+  admits under CEL and is undecidable here when the token carries no
+  `environment`. Put the claim that is always present first, or split the rule.
+- **A claim that is present but `null` is an error**, not a value that compares
+  unequal to everything.
+- **A mixed-type list literal is refused when you save the rule.** CEL's own
+  checker rejects `"123" in [123]`, but it accepts `assertion.x in [123, "123"]`
+  where the claim's type is not known statically. Here both are refused,
+  because a comparison across types cannot be decided and the alternative is
+  worse than a refusal: it would make the verdict depend on the order you typed
+  the entries in. `assertion.repository_id in ["123456", 999]` would admit —
+  the match is found before the `999` is reached — while
+  `assertion.repository_id in [999, "123456"]` would not. Same allowlist, same
+  intent, two different outcomes, and reordering a list silently changes who
+  gets in.
+
+The subset's conformance against the reference CEL implementation is machine-
+checked: `pkg/celmatch/testdata/conformance.json` is a corpus of expressions
+and claim sets, `testdata/cel-verdicts.json` records what real `cel-go` does
+with each, and `testdata/conformance-table.txt` is the resulting side-by-side.
+Every row where the two disagree is the subset being stricter, and a test fails
+if that ever stops being true.
 
 Use **Test** in the rule editor. It answers both questions a rule's author has
 — does this compile, and would it admit the pipeline I am thinking of —

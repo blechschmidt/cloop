@@ -34,6 +34,33 @@
 // failure modes of a trust policy are asymmetric, and an expression that
 // evaluates to true because a claim was missing is the one outcome worth
 // engineering against.
+//
+// # The conformance contract
+//
+// Being a subset is only safe in one direction. The operator who writes a rule
+// takes their mental model from GitHub's and Google's OIDC documentation, both
+// of which describe real CEL — so any expression this evaluator admits and CEL
+// would deny is an authorization bypass that the operator cannot find by
+// re-reading their own policy. Their policy means what they think it means;
+// this evaluator is the thing that disagrees. The reverse costs nothing: a
+// refusal is a denial with a clearer message.
+//
+// So the invariant, asserted in conformance_test.go, is one-directional:
+//
+//	celmatch admits  =>  real CEL admits
+//
+// It is held against cel.dev/cel-go rather than against anybody's reading of
+// the specification. testdata/conformance.json is the corpus,
+// testdata/celprobe is a nested module that runs it through the reference
+// implementation, and testdata/conformance-table.txt is the side-by-side that
+// results — currently ~50 rows where the two disagree, every one of them this
+// package being stricter. FuzzCompile and FuzzEvalClaims extend the same
+// invariant past the corpus using the oracle in oracle_test.go.
+//
+// Before changing any semantics here, read that table. Several of the
+// divergences look like bugs and are not: no commutative absorption for
+// `&&`/`||`, an error rather than false for cross-type equality, and a refusal
+// rather than a verdict for a mixed-type list literal are all load-bearing.
 package celmatch
 
 import (
@@ -488,6 +515,7 @@ func (p *parser) parsePrimary(depth int) (node, error) {
 }
 
 func (p *parser) parseList(depth int) (node, error) {
+	open := p.peek().pos
 	if err := p.expectPunct("["); err != nil {
 		return nil, err
 	}
@@ -505,6 +533,9 @@ func (p *parser) parseList(depth int) (node, error) {
 			// Tolerate a trailing comma before ]: it is how a long
 			// allowlist gets edited, and refusing it teaches nothing.
 			if p.acceptPunct("]") {
+				if err := checkHomogeneous(p, open, lst); err != nil {
+					return nil, err
+				}
 				return lst, nil
 			}
 			continue
@@ -512,8 +543,62 @@ func (p *parser) parseList(depth int) (node, error) {
 		if err := p.expectPunct("]"); err != nil {
 			return nil, err
 		}
+		if err := checkHomogeneous(p, open, lst); err != nil {
+			return nil, err
+		}
 		return lst, nil
 	}
+}
+
+// checkHomogeneous refuses a list literal whose literal elements are not all
+// the same type.
+//
+// This is a load-bearing refusal rather than tidiness. `in` walks the list and
+// compares element by element, and a comparison across types is an error — so
+// without this check the verdict for a mixed allowlist depends on the order the
+// operator happened to type it in. `assertion.repository_id in ["123456", 999]`
+// admitted, because the match was found before the int was reached, while
+// `assertion.repository_id in [123456, "123456"]` was undecidable, because it
+// was not. Two spellings of one intent, two different authorization outcomes,
+// and reordering an allowlist silently changes which one you get.
+//
+// Refusing at compile time collapses both to the same answer and delivers it
+// when the rule is saved, which is this package's whole contract. It is also
+// what real CEL does: its checker rejects `"123" in [123]` outright with "no
+// matching overload for '@in' applied to '(string, list(int))'".
+//
+// Only literal elements can be checked here — `[assertion.a, "b"]` has a type
+// nobody knows until evaluation — which is the same limit CEL's own checker
+// has, and covers every allowlist an operator actually writes.
+func checkHomogeneous(p *parser, pos int, lst *listNode) error {
+	var want string
+	for _, el := range lst.elems {
+		lit, ok := el.(*litNode)
+		if !ok {
+			continue
+		}
+		got := typeName(lit.val)
+		if want == "" {
+			want = got
+			continue
+		}
+		if got != want {
+			return p.errorf(pos,
+				"list mixes %s and %s elements; a comparison across types cannot "+
+					"be decided, so whether this matches would depend on the order "+
+					"the entries are written in — use one type per list",
+				want, got)
+		}
+	}
+	return nil
+}
+
+// celLiteralWords are the identifiers CEL's grammar treats as literals, which
+// therefore cannot appear as a field name.
+var celLiteralWords = map[string]bool{
+	"true":  true,
+	"false": true,
+	"null":  true,
 }
 
 // stringMethods are the only calls the grammar admits. Each takes exactly one
@@ -531,6 +616,21 @@ func (p *parser) parseSelectors(base node, depth int) (node, error) {
 		name := p.next()
 		if name.kind != tokIdent {
 			return nil, p.errorf(name.pos, "expected a field name after '.', found %s", name.describe())
+		}
+		// `true`, `false` and `null` are CEL literals, so CEL's parser refuses
+		// them in field position: `assertion.true` is "mismatched input 'true'
+		// expecting IDENTIFIER". Accepting them here would mean compiling an
+		// expression the operator's reference implementation rejects outright,
+		// and evaluating it against a claim of that name if one ever existed.
+		//
+		// Only these three. CEL's *spec* reserves a longer list (`if`, `for`,
+		// `return`, ...) but cel-go accepts those as field names and resolves
+		// them at runtime, so refusing them would be strictness with no
+		// divergence behind it — and would block a legitimate claim for nothing.
+		if celLiteralWords[name.text] {
+			return nil, p.errorf(name.pos,
+				"%q is a CEL literal and cannot name a field; CEL itself refuses "+
+					"to parse %s.%s", name.text, RootVar, name.text)
 		}
 		if !p.acceptPunct("(") {
 			base = &selectNode{base: base, field: name.text}
@@ -800,17 +900,38 @@ func (n *inNode) eval(a *activation) (any, error) {
 	if !ok {
 		return nil, fmt.Errorf("celmatch: `in` needs a list on the right, not %s", typeName(hay))
 	}
+	// Scan the whole list for a match before reporting a type mismatch.
+	//
+	// A heterogeneous list is still an operator mistake worth naming — an
+	// allowlist of ["main", 1] against a string claim must not quietly behave
+	// like ["main"] — but naming it must not depend on where in the list the
+	// odd element sits. Returning the first error instead made the verdict
+	// order-sensitive: `x in ["123456", 999]` admitted and `x in [999,
+	// "123456"]` was undecidable, for the same claim and the same intent.
+	//
+	// So a match anywhere wins, and a mismatch is only reported when there was
+	// no match to find. That is order-independent, and it cannot admit anything
+	// CEL would not: `equals` requires matching types, so a match here implies
+	// the same element compares equal under CEL's own equality.
+	//
+	// A list *literal* cannot get this far heterogeneous — checkHomogeneous
+	// refuses it when the rule is saved. This path is for a list that arrived
+	// in a claim, where the operator controls neither the order nor the types.
+	var mismatch error
 	for _, el := range list {
 		eq, err := equals(needle, el)
 		if err != nil {
-			// A heterogeneous list is an operator mistake worth naming, not
-			// an element to skip: ["main", 1] against a string claim would
-			// otherwise quietly behave like ["main"].
-			return nil, err
+			if mismatch == nil {
+				mismatch = err
+			}
+			continue
 		}
 		if eq {
 			return true, nil
 		}
+	}
+	if mismatch != nil {
+		return nil, mismatch
 	}
 	return false, nil
 }
