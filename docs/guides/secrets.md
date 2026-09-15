@@ -116,6 +116,7 @@ cloop secret grant <secret> --to <subject> [constraints] [--ttl 24h]
 | `--permissions` | `github_pat`, `github_app` | e.g. `contents:read,pull_requests:write` |
 | `--contexts` | `kubeconfig` | context allowlist |
 | `--namespaces` | `kubeconfig` | namespace allowlist — at least one of contexts/namespaces required |
+| `--verbs` | `kubeconfig` | RBAC verb allowlist; omit for read-only (`get,list,watch`). Needs the [access monitor](../architecture/kubernetes-access.md) to be enforced |
 | `--registries` | `registry` | registry allowlist — required |
 | `--env-keys` | `env` | key allowlist; omit to deliver every key in the secret |
 | `--hosts` | `egress_proxy` | host allowlist — required |
@@ -441,8 +442,8 @@ $ cloop secret grant prod-kube \
   expires:     2026-08-22T21:51:12Z (in 12h0m0s)
 ```
 
-This is the strongest of the guarantees, because the document is rewritten
-before it is delivered:
+**Which clusters** is the strongest of the guarantees, because the document is
+rewritten before it is delivered:
 
 1. only contexts in `--contexts` survive;
 2. each survivor is pinned to an allowed namespace — if its current namespace is
@@ -456,6 +457,19 @@ A workload granted the `prod` context receives a kubeconfig that contains no
 server address and no token for `staging`. It cannot reach a cluster it was not
 granted, regardless of what it does with the file.
 
+**Which namespaces, and read-only, are a different matter.** Step 2 pins a
+namespace into the delivered context, and a `namespace:` in a kubeconfig is only
+the value `kubectl` uses when you omit `-n` — `kubectl -n kube-system get
+secrets` ignores it. Verbs cannot be written into a kubeconfig at all; the
+document carries a credential, and its authority is whatever the cluster's RBAC
+grants the user it belongs to.
+
+Both are enforced by the [Kubernetes access monitor](../architecture/kubernetes-access.md),
+which runs outside the sandbox and decides every API request before the cluster
+credential is attached. Turn it on with `executors.kube_guard.enabled: true`.
+Without it, `--namespaces` and `--verbs` are recorded and audited but not
+enforced, and the Secrets panel marks such a grant **unguarded**.
+
 Delivered as:
 
 ```
@@ -463,7 +477,12 @@ files:  kubeconfig   0600
 env:    KUBECONFIG=<lease dir>/kubeconfig
         CLOOP_K8S_NAMESPACE=team-a
         CLOOP_K8S_ALLOWED_NAMESPACES=team-a
+        CLOOP_K8S_VERBS=get,list,watch
 ```
+
+With the monitor on, the delivered `kubeconfig` points at the monitor and
+carries a short-lived session token instead of the cluster credential, and
+`CLOOP_KUBEGUARD_SESSION` names the session so an operator can revoke it.
 
 ---
 
