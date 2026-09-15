@@ -133,6 +133,12 @@ func TestWSOriginAllowed(t *testing.T) {
 // Since Task 20174 the asset is addressed by content hash, so the URL is
 // discovered from the served page rather than hard-coded — which also proves
 // the page and the handler agree on it.
+//
+// Since Task 20289 the page names that URL in a <meta> instead of a <script>,
+// because the library is fetched on demand by the Analytics tab rather than on
+// the way to first paint. Everything this test asserts is unchanged — same
+// origin, not the CDN, real JavaScript behind the URL — only where the page
+// states the URL has moved.
 func TestChartJSServedLocally(t *testing.T) {
 	dir := setupProjectDir(t, cloopGoal, nil)
 	ts := newTestServer(t, dir, nil)
@@ -147,9 +153,10 @@ func TestChartJSServedLocally(t *testing.T) {
 	if bytes.Contains(dash, []byte("cdn.jsdelivr.net")) {
 		t.Error("dashboard still references the jsdelivr CDN (blocked by CSP)")
 	}
-	m := regexp.MustCompile(`<script src="(/assets/chart\.[0-9a-f]+\.js)">`).FindSubmatch(dash)
+	m := regexp.MustCompile(`name="cloop-chart-src" content="(/assets/chart\.[0-9a-f]+\.js)"`).FindSubmatch(dash)
 	if m == nil {
-		t.Fatal("dashboard does not reference a same-origin /assets/chart.<hash>.js")
+		t.Fatal(`dashboard does not name a same-origin /assets/chart.<hash>.js in its ` +
+			`<meta name="cloop-chart-src"> — ensureChartLib has no URL to fetch`)
 	}
 
 	// The asset must be served with a JS content type and non-empty body.

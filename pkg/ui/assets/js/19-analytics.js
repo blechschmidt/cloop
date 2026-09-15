@@ -35,6 +35,46 @@ window.analyticsResetRange = function() {
   loadAnalytics();
 };
 
+// _setChartStatus drives the banner above the canvases (Task 20289).
+//
+// `state` is one of:
+//   'loading'    — chart.js is in flight; the cards are hidden so the user is
+//                  not looking at five blank boxes with no explanation.
+//   'ready'      — hide the banner, show the cards.
+//   'lib-error'  — the library never arrived. Offer a retry.
+//   'data-error' — the library is fine but /api/analytics failed. Also
+//                  retryable, and worth distinguishing: the two have different
+//                  causes and the message should not blame the wrong one.
+function _setChartStatus(state, detail) {
+  const box   = document.getElementById('analyticsChartStatus');
+  const text  = document.getElementById('analyticsChartStatusText');
+  const retry = document.getElementById('analyticsChartRetry');
+  const cards = document.getElementById('analyticsCharts');
+
+  if (cards) cards.style.display = (state === 'ready') ? '' : 'none';
+  if (!box || !text || !retry) return;
+
+  if (state === 'ready') {
+    box.style.display = 'none';
+    return;
+  }
+  box.style.display = 'flex';
+  if (state === 'loading') {
+    text.textContent = 'Loading charts…';
+    retry.style.display = 'none';
+    return;
+  }
+  const why = (detail && detail.message) ? detail.message : String(detail || 'unknown error');
+  text.textContent = (state === 'lib-error')
+    ? 'Charts could not be loaded: ' + why + '.'
+    : 'Chart data could not be loaded: ' + why + '.';
+  retry.style.display = '';
+}
+
+// retryAnalyticsCharts is the banner's Retry button. ensureChartLib() forgets a
+// failed load, so this genuinely re-fetches rather than replaying the rejection.
+window.retryAnalyticsCharts = function() { loadAnalytics(); };
+
 window.loadAnalytics = function() {
   // Initialise date pickers if empty.
   const fi = document.getElementById('analyticsFrom');
@@ -51,13 +91,20 @@ window.loadAnalytics = function() {
   const toVal   = ti ? ti.value : '';
   const qs = (fromVal ? '&from=' + fromVal : '') + (toVal ? '&to=' + toVal : '');
 
-  api(pUrl('/api/analytics?' + qs)).then(d => {
-    _renderAnalytics(d);
-  }).catch(err => {
-    console.warn('analytics load error', err);
-  });
+  // Chart.js is fetched here rather than in the document head (Task 20289), so
+  // the ~200 KiB only costs the sessions that actually open this tab. Already
+  // loaded — the usual case on a second visit — resolves synchronously and the
+  // banner never becomes visible.
+  if (!window.Chart) _setChartStatus('loading');
+  ensureChartLib().then(
+    () => api(pUrl('/api/analytics?' + qs))
+      .then(d => { _setChartStatus('ready'); _renderAnalytics(d); })
+      .catch(err => { console.warn('analytics data error', err); _setChartStatus('data-error', err); }),
+    err => { console.warn('chart library error', err); _setChartStatus('lib-error', err); }
+  );
 
-  // Load epics panel separately (no date filter needed).
+  // Load epics panel separately (no date filter needed, and no chart library:
+  // it renders as plain DOM, so it still appears when chart.js cannot be had).
   api(pUrl('/api/epics')).then(d => {
     _renderEpics(d);
   }).catch(() => {});

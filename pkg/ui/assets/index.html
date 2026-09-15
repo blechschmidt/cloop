@@ -16,7 +16,16 @@
 <meta name="theme-color" content="#0d1117">
 <script>(function(){var t=localStorage.getItem('cloop-theme')||(window.matchMedia('(prefers-color-scheme: light)').matches?'light':'dark');document.documentElement.setAttribute('data-theme',t);})();</script>
 <link rel="stylesheet" href="{{asset:app.css}}">
-<script src="{{asset:chart.js}}"></script>
+<!-- Chart.js is named here but not loaded here (Task 20289). It is ~200 KiB
+     decoded — a fifth of everything the dashboard ships — and its only
+     consumers are the five canvases on the Analytics tab. Loaded from the head
+     it was fetched, parsed and compiled on the way to first paint by every
+     visitor, including the display-glasses front end and the many sessions that
+     never leave Projects or Tasks. ensureChartLib() in 00-core.js reads this
+     content-addressed URL and injects the script the first time a panel
+     actually needs to draw, so the asset stays immutable and cacheable exactly
+     as before while costing nothing to the loads that never open Analytics. -->
+<meta name="cloop-chart-src" content="{{asset:chart.js}}">
 </head>
 <body>
 
@@ -1434,6 +1443,17 @@
           </div>
         </div>
 
+        <!-- Chart library status (Task 20289). The five canvases below are drawn
+             by chart.js, which is fetched on demand the first time this tab is
+             opened rather than on every page load. This says so while that is in
+             flight, and offers a retry if it never arrives — over a slow link a
+             silent set of blank cards is indistinguishable from "no data". -->
+        <div id="analyticsChartStatus" role="status" style="display:none;margin-top:16px;padding:12px 14px;border:1px solid var(--border);border-radius:var(--radius);background:var(--surface);font-size:12.5px;color:var(--muted);align-items:center;gap:10px;flex-wrap:wrap">
+          <span id="analyticsChartStatusText">Loading charts…</span>
+          <button class="btn" id="analyticsChartRetry" style="display:none;padding:3px 10px;font-size:11px" onclick="retryAnalyticsCharts()">Retry</button>
+        </div>
+
+        <div id="analyticsCharts">
         <!-- Row 1: Donut + Velocity -->
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px" class="analytics-grid">
           <div class="analytics-card">
@@ -1478,8 +1498,11 @@
             </div>
           </div>
         </div>
+        </div><!-- /analyticsCharts -->
 
-        <!-- Row 4: Epics progress -->
+        <!-- Row 4: Epics progress, drawn with plain DOM and so independent of
+             the chart library: a failed chart.js fetch must not blank a panel
+             that would have rendered fine. -->
         <div style="margin-top:16px">
           <div class="analytics-card" id="epicsCard" style="display:none">
             <div class="analytics-card-title">Epic Progress</div>

@@ -151,9 +151,23 @@ func TestStaticAssets_ServedPageIsFullyAssembled(t *testing.T) {
 	}
 
 	refs := assetRefRe.FindAllStringSubmatch(page, -1)
-	if len(refs) < 4 {
-		t.Fatalf("served page references %d assets, want at least 4 "+
-			"(app.css, chart.js, errboundary.js, app.js)", len(refs))
+	if len(refs) < 3 {
+		t.Fatalf("served page references %d assets, want at least 3 "+
+			"(app.css, errboundary.js, app.js)", len(refs))
+	}
+
+	// chart.js is named by the page but not fetched by it (Task 20289): it
+	// lives in a <meta> that ensureChartLib reads on demand, so it is
+	// deliberately absent from the src/href set counted above. It must still
+	// resolve — a stale or mistyped URL there would surface only as an
+	// Analytics tab that never draws.
+	chartRef := regexp.MustCompile(`name="cloop-chart-src" content="(/assets/[a-zA-Z0-9._-]+)"`)
+	m := chartRef.FindStringSubmatch(page)
+	if m == nil {
+		t.Error(`the served page has no <meta name="cloop-chart-src" content="/assets/…">; ` +
+			"the deferred chart loader has no URL to fetch")
+	} else if _, body := getAsset(t, ts, m[1]); len(body) == 0 {
+		t.Errorf("the deferred chart URL %s served an empty body", m[1])
 	}
 	var js []string
 	for _, m := range refs {

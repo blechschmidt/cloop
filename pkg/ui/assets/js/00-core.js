@@ -126,6 +126,63 @@ function clearProjectScopedPanels() {
   setTasksRunBarVisible(false);
 }
 
+// ── Deferred chart library (Task 20289) ─────────────────────────────────────
+
+// The single in-flight or settled load of chart.js. Memoised so that several
+// panels asking at once share one script element, and so returning to a chart
+// tab does not refetch.
+let _chartLibPromise = null;
+
+// ensureChartLib resolves once window.Chart is usable, fetching the library on
+// first demand instead of from the document head.
+//
+// The URL is read from the <meta> index.html renders rather than written here,
+// because it carries the asset's content hash: it changes whenever the library
+// does and is served `immutable`. A path hard-coded in JS would either pin a
+// stale revision forever or have to give up that caching.
+//
+// A failed load clears the memo, so the caller's retry is a real second attempt
+// rather than the first attempt's rejection replayed for the life of the page.
+// That matters because the hub is often reached over a slow or flaky link, and
+// a chart that silently never appears is worse than one that says so.
+function ensureChartLib() {
+  if (window.Chart) return Promise.resolve(window.Chart);
+  if (_chartLibPromise) return _chartLibPromise;
+
+  const p = new Promise((resolve, reject) => {
+    const meta = document.querySelector && document.querySelector('meta[name="cloop-chart-src"]');
+    const src  = meta && meta.getAttribute && meta.getAttribute('content');
+    if (!src) {
+      reject(new Error('the chart library URL is missing from the page'));
+      return;
+    }
+    if (!document.head || !document.createElement) {
+      reject(new Error('no document head to load the chart library into'));
+      return;
+    }
+    const el = document.createElement('script');
+    el.src   = src;
+    el.async = true;
+    el.onload = () => {
+      // A 200 that is not the library — a captive portal or an error page
+      // served as JS — loads without error but defines no global. Treat that
+      // as the failure it is rather than letting `new Chart` throw later.
+      if (window.Chart) resolve(window.Chart);
+      else reject(new Error('the chart library loaded but defined no Chart global'));
+    };
+    el.onerror = () => reject(new Error('the chart library could not be fetched'));
+    document.head.appendChild(el);
+  });
+
+  _chartLibPromise = p;
+  // Attaching the handler to p (not to a reassigned variable) also marks p as
+  // handled, so a rejection the caller catches does not also surface as an
+  // unhandled promise rejection in the console.
+  p.catch(() => { if (_chartLibPromise === p) _chartLibPromise = null; });
+  return p;
+}
+window.ensureChartLib = ensureChartLib;
+
 // ── Tab switching ───────────────────────────────────────────────────────────
 
 window.switchTab = function(name) {
