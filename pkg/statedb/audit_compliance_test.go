@@ -22,6 +22,7 @@ package statedb
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -287,6 +288,94 @@ func TestTaskFinishIsEmittedOnEveryExitPath(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestCrashRecoveryFinishNamesTheRunThatActuallyRan is the exit path that
+// cannot be tested inside one process.
+//
+// A hub dies holding a task. A *different* process — the next hub, or the stale
+// run reconciler — finds it still in_progress and requeues it. That process
+// never dispatched the task, holds no leases and has no run id of its own, so
+// the terminal row it writes could easily name nothing, or worse, name the
+// recovering run. Either would break the join precisely where an auditor is
+// asking which credentials the dead execution was holding when it died.
+//
+// The "process boundary" here is a fresh DB handle and a fresh LoadState, which
+// is exactly what the recovering process does: the run id has to come back off
+// disk, because there is nowhere else left for it to come from.
+func TestCrashRecoveryFinishNamesTheRunThatActuallyRan(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "state.db")
+	const runID = "run_crashed0123456789abcdef012345"
+
+	prev := auditEnabled
+	SetAuditEnabled(true)
+	t.Cleanup(func() { SetAuditEnabled(prev) })
+
+	// ── the process that dies ──
+	first, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	started := time.Now().UTC().Add(-10 * time.Minute)
+	task := &pm.Task{ID: 63, Title: "long job", Status: pm.TaskInProgress,
+		StartedAt: &started, RunID: runID, ExecutorID: "edge-pi4",
+		ExecutorKind: "remote", Isolation: "remote"}
+	st := &State{Goal: "g", WorkDir: dir, Plan: &pm.Plan{Tasks: []*pm.Task{task}}}
+	if err := first.SaveState(st); err != nil {
+		t.Fatalf("save in_progress: %v", err)
+	}
+	if err := first.Close(); err != nil { // the crash
+		t.Fatalf("close: %v", err)
+	}
+
+	// ── the process that recovers ──
+	second, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer second.Close()
+
+	loaded, err := second.LoadState()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	rec := loaded.Plan.Tasks[0]
+	if rec.Status != pm.TaskInProgress {
+		t.Fatalf("recovered status = %q, want in_progress", rec.Status)
+	}
+	if rec.RunID != runID {
+		t.Fatalf("recovered RunID = %q, want %q — the terminal row cannot name the "+
+			"execution that spent the leases", rec.RunID, runID)
+	}
+	// What taskrecover does when the artifact carries no signal: requeue.
+	rec.Status = pm.TaskPending
+	rec.StartedAt = nil
+	loaded.WorkDir = dir
+	if err := second.SaveState(loaded); err != nil {
+		t.Fatalf("requeue: %v", err)
+	}
+
+	rows, _, err := second.ListAuditEvents(AuditFilter{
+		EntityType: "task", EntityID: "63", EventType: "task.finish",
+	})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("got %d task.finish rows, want 1 — a task the hub died holding "+
+			"left no terminal record", len(rows))
+	}
+	p := decodeAuditPayload(rows[0].Payload)
+	if got := payloadString(p, "run_id"); got != runID {
+		t.Errorf("run_id = %q, want %q — the terminal row names the wrong execution", got, runID)
+	}
+	if got := payloadString(p, "outcome"); got != string(pm.TaskPending) {
+		t.Errorf("outcome = %q, want pending", got)
+	}
+	if got := payloadString(p, "executor_id"); got != "edge-pi4" {
+		t.Errorf("executor_id = %q, want edge-pi4", got)
 	}
 }
 
