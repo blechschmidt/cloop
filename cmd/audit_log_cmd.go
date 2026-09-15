@@ -33,6 +33,8 @@ import (
 	"github.com/spf13/cobra"
 )
 
+var auditLogTask int
+
 var auditLogCmd = &cobra.Command{
 	Use:   "audit-log",
 	Short: "Read, verify, and export the tamper-evident audit trail",
@@ -49,10 +51,27 @@ Subcommands:
   verify                     Validate the SHA-256 hash chain (tamper detection)
   export --format jsonl|csv|cef   Ship the trail to a SIEM or an auditor
 
+With --task, reconstructs one task's whole story — every execution, the
+executor and image each ran on, the credentials it held, and how it ended —
+from the audit trail alone, consulting no other table.
+
 Examples:
+  cloop audit-log --task 63
   cloop audit-log list --actor alice@example.com --since 7d
   cloop audit-log verify
   cloop audit-log export --format cef --since 24h --output /var/log/cloop.cef`,
+	// RunE on the parent rather than a `task` subcommand because --task is the
+	// spelling an auditor reaches for, and because the parent otherwise only
+	// prints help. A bare `cloop audit-log` still does exactly that.
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if !cmd.Flags().Changed("task") {
+			return cmd.Help()
+		}
+		if auditLogTask <= 0 {
+			return fmt.Errorf("--task must be a positive task id, got %d", auditLogTask)
+		}
+		return runAuditLogTask(auditLogTask)
+	},
 }
 
 // ── list ────────────────────────────────────────────────────────────────────
@@ -367,6 +386,8 @@ func init() {
 	auditLogExportCmd.Flags().StringVar(&auditLogExportUntil, "until", "", "Events at/before RFC3339, YYYY-MM-DD, or 30m/2h/7d")
 	auditLogExportCmd.Flags().IntVar(&auditLogExportLimit, "limit", 0, "Cap the number of exported events (0 = no cap)")
 	auditLogExportCmd.Flags().BoolVar(&auditLogExportVerify, "verify", false, "Verify the hash chain first and refuse to export if it is broken")
+
+	auditLogCmd.Flags().IntVar(&auditLogTask, "task", 0, "Reconstruct one task's whole story from the audit trail")
 
 	auditLogCmd.AddCommand(auditLogListCmd, auditLogVerifyCmd, auditLogExportCmd)
 	rootCmd.AddCommand(auditLogCmd)

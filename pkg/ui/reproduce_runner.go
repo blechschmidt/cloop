@@ -37,6 +37,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/artifact"
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/taskreplay"
 )
@@ -165,7 +166,11 @@ func (r *reproduceRunner) run(ctx context.Context, rs runSpec) (*taskreplay.RunO
 		return nil, err
 	}
 
-	lease := acquireSecretLease(controlPlaneDir(), rs.ProjectDir, ex)
+	// A reproduction is its own execution and gets its own run id, deliberately
+	// not the original's: it holds its own leases, and filing them under the run
+	// being reproduced would put credentials the original never held into that
+	// run's trail (Task 20282).
+	lease := acquireSecretLease(controlPlaneDir(), rs.ProjectDir, ex, artifact.NewRunID())
 	defer lease.Close()
 
 	spec, err := applyLease(uiSpec(rs.ProjectDir, rs.Argv, map[string]string{

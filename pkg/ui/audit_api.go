@@ -30,6 +30,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/apierror"
 	"github.com/blechschmidt/cloop/pkg/eventlog"
 	"github.com/blechschmidt/cloop/pkg/logger"
+	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 )
 
@@ -261,6 +262,37 @@ func (s *Server) openAuditLog(w http.ResponseWriter, r *http.Request) (*eventlog
 // person's whole session rather than half of it under a second spelling.
 func (s *Server) auditActor(r *http.Request) string {
 	return s.grantFor(r).subjectLabel()
+}
+
+// auditTaskStatus records a manual task status flip (Task 20282).
+//
+// This is the row that names a human. The orchestrator's task.dispatch and
+// task.finish rows describe executions, and an execution has no opinion about
+// who ended it — a task killed from the dashboard reaches the orchestrator as a
+// kill_requests row, and the terminal row it eventually writes says "failed",
+// not "because Alice pressed stop at 14:02". Without this emission the trail
+// could say a task was killed and never say by whom.
+//
+// It opens the *project's* database, not the control plane's, because that is
+// where the task's other rows live: the lifecycle rows are written by SaveState
+// against the project it belongs to, and filing the human decision somewhere
+// else would split one story across two hash chains.
+//
+// Best-effort, matching every other emitter here. The status has already been
+// persisted by the time this runs; a wedged audit log must not turn a
+// successful operator action into an HTTP error.
+func (s *Server) auditTaskStatus(r *http.Request, workDir string, taskID int, oldStatus, newStatus string) {
+	if oldStatus == newStatus {
+		return
+	}
+	db, err := statedb.Open(state.DBPath(workDir))
+	if err != nil {
+		s.log().Warn(logger.EventAuthz, taskID, "audit: open project db for task status event",
+			map[string]interface{}{"error": err.Error(), "task_id": taskID})
+		return
+	}
+	defer db.Close()
+	statedb.AuditTaskStatus(db, taskID, oldStatus, newStatus, s.auditActor(r))
 }
 
 // auditExecutorAction records an executor-fleet mutation in the hub's own

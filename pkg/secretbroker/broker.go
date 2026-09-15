@@ -617,6 +617,11 @@ func (b *Broker) LeaseFor(ctx context.Context, r Requester, actor string) (*Leas
 		Actor:      actor,
 		ExecutorID: r.ExecutorID,
 		ProjectID:  r.ProjectID,
+		// Stamped on the base event rather than only on the success path, so a
+		// *denied* lease is correlatable too. "This run asked for a credential
+		// and was refused" is the more interesting of the two rows during an
+		// incident, and a success-only stamp is exactly what would lose it.
+		RunID: r.RunID,
 	}
 
 	grants, err := b.store.ListGrants()
@@ -689,6 +694,7 @@ func (b *Broker) LeaseFor(ctx context.Context, r Requester, actor string) (*Leas
 		ID:         id,
 		ExecutorID: r.ExecutorID,
 		ProjectID:  r.ProjectID,
+		RunID:      r.RunID,
 		IssuedAt:   now,
 		ExpiresAt:  b.leaseDeadline(now, earliest),
 		Materials:  materials,
@@ -788,6 +794,7 @@ func (b *Broker) Renew(ctx context.Context, leaseID string) (*Lease, error) {
 		LeaseID:    renewed.ID,
 		ExecutorID: renewed.ExecutorID,
 		ProjectID:  renewed.ProjectID,
+		RunID:      renewed.RunID,
 		Decision:   DecisionAllow,
 		ExpiresAt:  renewed.ExpiresAt,
 		Reason:     "renewed from " + leaseID,
@@ -827,6 +834,7 @@ func (b *Broker) Release(leaseID string) {
 		LeaseID:    leaseID,
 		ExecutorID: st.requester.ExecutorID,
 		ProjectID:  st.requester.ProjectID,
+		RunID:      st.requester.RunID,
 		Decision:   DecisionAllow,
 	})
 }

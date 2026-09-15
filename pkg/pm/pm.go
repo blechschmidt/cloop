@@ -254,6 +254,18 @@ type Task struct {
 	ExecutorID   string `json:"executor_id,omitempty"`
 	ExecutorKind string `json:"executor_kind,omitempty"`
 	Isolation    string `json:"isolation,omitempty"`
+	// RunID names the execution this task was dispatched into (Task 20282).
+	//
+	// It is the join key between this task's audit rows and the secret-lease
+	// rows the hub wrote when it started the run — "which leases did task 63
+	// hold" has as many answers as task 63 has attempts, and only a per-run
+	// token makes the question answerable exactly.
+	//
+	// Stamped at start alongside the executor fields, and deliberately *not*
+	// cleared when a task is reset: the run id belongs to the attempt that is
+	// ending, and the terminal audit row is written after the reset. It is
+	// overwritten by the next attempt's dispatch.
+	RunID string `json:"run_id,omitempty"`
 	// Background records work the agent harness left running after it claimed
 	// to be finished (Task 20205), so the UI can show why a task waited, or
 	// why it was not accepted as done.

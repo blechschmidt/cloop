@@ -2,12 +2,14 @@ package orchestrator
 
 import (
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/artifact"
 	"github.com/blechschmidt/cloop/pkg/cost"
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/pm"
+	"github.com/blechschmidt/cloop/pkg/statedb"
 )
 
 // processStart is when this binary started, captured at package init.
@@ -70,6 +72,127 @@ func resolveTaskAttribution(workDir string) (id, kind, isolation string) {
 		return "", executor.KindLocalProcess, string(executor.IsolationNone)
 	}
 	return rec.ExecutorID, rec.ExecutorKind, isolationOf(rec)
+}
+
+// runID is the identifier for this orchestrator process's execution, resolved
+// once (Task 20282).
+//
+// Resolved lazily rather than at init because it reads the project directory,
+// which the config names and which package init cannot see.
+var (
+	runIDOnce  sync.Once
+	runIDValue string
+)
+
+// resolveRunID reports the execution id to stamp on this run's tasks.
+//
+// The hub minted one before it acquired anything and left it in the placement
+// record, and using *that* value is the entire point: it is what the broker
+// already wrote on the secret.lease rows, so reusing it is what makes the two
+// halves of the trail join.
+//
+// A bare `cloop run` has no record and mints its own. That is not a fallback of
+// last resort but the correct answer — the execution is real and its tasks
+// deserve a correlatable trace, even though no leases were issued to it.
+// Minting one here rather than leaving it empty also avoids the failure mode
+// that would matter: an empty run id on every unmanaged run makes them all
+// join to each other.
+//
+// A stale record is treated as no record, for the reason staleRecord exists —
+// otherwise a developer's own run in a directory the hub once used would file
+// its tasks under an execution that ended yesterday, and inherit that run's
+// leases in any query that joins on the id.
+func resolveRunID(workDir string) string {
+	runIDOnce.Do(func() {
+		if rec, ok := artifact.LoadSandboxRun(workDir); ok && !staleRecord(rec) {
+			if id := strings.TrimSpace(rec.RunID); id != "" {
+				runIDValue = id
+				return
+			}
+		}
+		runIDValue = artifact.NewRunID()
+	})
+	return runIDValue
+}
+
+// dispatchFacts is the placement record joined to the task about to run.
+//
+// It exists so the dispatch row carries what the hub knew — the image that was
+// actually pinned, the spec that asked for it, the leases handed over — rather
+// than only what the task row can hold. Those facts are on the opposite side of
+// the sandbox boundary from the hub that chose them, and the placement record
+// is the one channel that crosses it.
+type dispatchFacts struct {
+	RunID          string
+	ExecutorID     string
+	ExecutorKind   string
+	Isolation      string
+	RequestedImage string
+	PinnedImage    string
+	SpecHash       string
+	SetupHash      string
+	LeaseIDs       []string
+	Identity       string
+}
+
+// resolveDispatchFacts reads the placement record for the dispatch row.
+//
+// Re-read per task rather than cached for the reason resolveTaskAttribution
+// gives: a hub that fails a workload over to another executor mid-plan rewrites
+// the record, and the tasks that run afterwards belong to the new placement.
+// The run id is the exception and is resolved once — a failover does not end
+// the execution the leases were issued to.
+func resolveDispatchFacts(workDir string) dispatchFacts {
+	f := dispatchFacts{RunID: resolveRunID(workDir)}
+	f.ExecutorID, f.ExecutorKind, f.Isolation = resolveTaskAttribution(workDir)
+
+	rec, ok := artifact.LoadSandboxRun(workDir)
+	if !ok || staleRecord(rec) {
+		return f
+	}
+	f.RequestedImage = rec.RequestedImage
+	f.PinnedImage = rec.PinnedImage
+	f.SpecHash = rec.SpecHash
+	f.SetupHash = rec.SetupHash
+	f.LeaseIDs = rec.LeaseIDs
+	f.Identity = strings.TrimSpace(rec.Identity)
+	return f
+}
+
+// beginTaskExecution stamps placement onto a task and records the dispatch.
+//
+// Both orchestrator loops call this at the moment a task enters in_progress, so
+// the sequential and parallel paths cannot disagree about what a dispatch is —
+// the same class of divergence Task 20269 removed from the gating decision.
+//
+// The audit row is emitted here, before the save, and the state store emits its
+// own thinner one when the status is persisted. They are not duplicates of each
+// other in any case that matters: this one is the full record and fires only
+// when the orchestrator dispatches, while the store's fires for *any* writer
+// that moves a task into in_progress — including tools that are not this
+// orchestrator, which is exactly the case an auditor must not have hidden from
+// them. `observed_by` on the payload tells them apart.
+func (o *Orchestrator) beginTaskExecution(task *pm.Task) dispatchFacts {
+	f := resolveDispatchFacts(o.config.WorkDir)
+	stampAttribution(task, f.ExecutorID, f.ExecutorKind, f.Isolation)
+	task.RunID = f.RunID
+
+	statedb.AuditTaskDispatch(o.statedb, statedb.TaskDispatchInput{
+		TaskID:         task.ID,
+		TaskTitle:      task.Title,
+		ProjectPath:    o.config.WorkDir,
+		RunID:          f.RunID,
+		ExecutorID:     f.ExecutorID,
+		ExecutorKind:   f.ExecutorKind,
+		Isolation:      f.Isolation,
+		RequestedImage: f.RequestedImage,
+		PinnedImage:    f.PinnedImage,
+		SpecHash:       f.SpecHash,
+		SetupHash:      f.SetupHash,
+		LeaseIDs:       f.LeaseIDs,
+		Actor:          f.Identity,
+	})
+	return f
 }
 
 // staleRecord reports whether a placement record describes an earlier run.

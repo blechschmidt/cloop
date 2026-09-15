@@ -76,7 +76,7 @@ func TestIsolatedExecutorGetsTheBytesAndTheHubKeepsNoFile(t *testing.T) {
 	ex := stubExec{id: "sandbox-1", caps: executor.Capabilities{
 		SupportsSecretFiles: true, SecretFilesFromHostPath: false,
 	}}
-	lease := acquireSecretLease(dir, "/srv/proj", ex)
+	lease := acquireSecretLease(dir, "/srv/proj", ex, "run_test")
 	if lease == nil {
 		t.Fatal("no lease was issued, so this test would be vacuous")
 	}
@@ -128,7 +128,7 @@ func TestHostPathExecutorStillGetsFilesOnDisk(t *testing.T) {
 	ex := stubExec{id: "host-1", caps: executor.Capabilities{
 		SupportsSecretFiles: true, SecretFilesFromHostPath: true,
 	}}
-	lease := acquireSecretLease(dir, "/srv/proj", ex)
+	lease := acquireSecretLease(dir, "/srv/proj", ex, "run_test")
 	if lease == nil {
 		t.Fatal("no lease was issued, so this test would be vacuous")
 	}
@@ -170,7 +170,7 @@ func TestExecutorThatCannotTakeFilesIsRefused(t *testing.T) {
 	ex := stubExec{id: "old-edge", caps: executor.Capabilities{
 		Isolation: executor.IsolationRemote, SupportsSecretFiles: false,
 	}}
-	lease := acquireSecretLease(dir, "/srv/proj", ex)
+	lease := acquireSecretLease(dir, "/srv/proj", ex, "run_test")
 	if lease == nil {
 		t.Fatal("no lease was issued, so this test would be vacuous")
 	}
@@ -232,7 +232,7 @@ func TestIsolatedExecutorDoesNotInheritTheHubEnvironment(t *testing.T) {
 		Isolation:           executor.IsolationContainer,
 		SupportsSecretFiles: true,
 	}}
-	lease := acquireSecretLease(dir, "/srv/proj", ex)
+	lease := acquireSecretLease(dir, "/srv/proj", ex, "run_test")
 	if lease == nil {
 		t.Fatal("no lease was issued, so this test would be vacuous")
 	}
@@ -277,7 +277,7 @@ func TestHostExecutorStillInheritsTheEnvironment(t *testing.T) {
 		SupportsSecretFiles:     true,
 		SecretFilesFromHostPath: true,
 	}}
-	lease := acquireSecretLease(dir, "/srv/proj", ex)
+	lease := acquireSecretLease(dir, "/srv/proj", ex, "run_test")
 	if lease == nil {
 		t.Fatal("no lease was issued, so this test would be vacuous")
 	}

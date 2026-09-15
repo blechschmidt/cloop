@@ -684,6 +684,7 @@ func setTaskStatus(idStr string, status pm.TaskStatus) error {
 	if err := s.Save(); err != nil {
 		return err
 	}
+	auditManualTaskStatus(workdir, id, old, status)
 
 	verb := map[pm.TaskStatus]string{
 		pm.TaskPending: "reset to pending",

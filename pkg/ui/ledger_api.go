@@ -116,6 +116,9 @@ func (s *Server) handleTaskReopenAborted(w http.ResponseWriter, r *http.Request)
 		"old_status":  oldStatus,
 		"source":      "ui",
 	})
+	// Reopening is a manual status flip like any other, and the one most worth
+	// attributing: it overrides a recorded outcome (Task 20282).
+	s.auditTaskStatus(r, workDir, task.ID, oldStatus, string(pm.TaskPending))
 	s.broadcastStateDiff(workDir, ps)
 	jsonOK(w, map[string]interface{}{"ok": true, "id": task.ID, "status": string(pm.TaskPending)})
 }

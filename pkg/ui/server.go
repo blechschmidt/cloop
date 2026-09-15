@@ -3966,6 +3966,11 @@ func (s *Server) handleTaskStatus(w http.ResponseWriter, r *http.Request) {
 			Step:      state.NoStep,
 			Message:   fmt.Sprintf("Task #%d status changed: %s → %s (via UI)", req.ID, oldStatus, req.Status),
 		}, map[string]any{"old_status": oldStatus, "new_status": req.Status})
+		// The audit trail's record of the human behind the flip (Task 20282).
+		// The event journal above is the project's activity feed; this is the
+		// tamper-evident chain an auditor reads, and until now a task killed by
+		// hand left no row in it naming who did the killing.
+		s.auditTaskStatus(r, workDir, req.ID, oldStatus, req.Status)
 	}
 	jsonOK(w, map[string]interface{}{"ok": true, "id": req.ID, "status": req.Status})
 }
@@ -4255,6 +4260,13 @@ func (s *Server) handlePutTask(w http.ResponseWriter, r *http.Request) {
 		if killErr := state.RequestTaskKill(s.resolveWorkDir(r), id, req.Status, "ui", priorAttempt); killErr != nil {
 			fmt.Fprintf(os.Stderr, "[ui] task %d kill request: %v\n", id, killErr)
 		}
+	}
+	// Record the human behind the flip (Task 20282). This PUT is the other
+	// route by which an operator changes a status — the Kanban board's
+	// drag-and-drop lands here — so leaving it unaudited would make the
+	// coverage depend on which widget was clicked.
+	if statusChanged {
+		s.auditTaskStatus(r, s.resolveWorkDir(r), id, string(priorStatus), string(task.Status))
 	}
 
 	// Detect which fields were mutated and check for concurrent-edit conflicts.

@@ -161,6 +161,25 @@ func (sl *secretLease) Env() []string {
 	return sl.delivery.Env()
 }
 
+// LeaseIDs returns the broker lease identifiers this lease covers, for the
+// dispatch record (Task 20282).
+//
+// Identifiers only, never material — a lease id is an opaque handle the broker
+// mints, and the credential it refers to is not reachable from it. That is what
+// makes it safe to write into the project directory, which the workload can
+// read.
+//
+// A slice rather than a single string because the shape is the broker's to
+// change: today LeaseFor returns one lease covering every matching grant, and a
+// caller that assumed a scalar would silently record the first of several the
+// day that stops being true.
+func (sl *secretLease) LeaseIDs() []string {
+	if sl == nil || sl.lease == nil || sl.lease.ID == "" {
+		return nil
+	}
+	return []string{sl.lease.ID}
+}
+
 // Mounts returns the local repositories this lease opened. Nil when the
 // project holds no local_repo grant, which is the overwhelmingly common case.
 func (sl *secretLease) Mounts() []secretbroker.RepoMount {
@@ -297,7 +316,14 @@ func (sl *secretLease) Close() {
 // The executor is a parameter rather than an ID because *where* the plaintext
 // goes is its decision. See secretLease: a lease bound for an isolated sandbox
 // is never written to this host at all.
-func acquireSecretLease(controlPlaneDir, workDir string, ex executor.Executor) *secretLease {
+// acquireSecretLease leases the credentials a run is entitled to.
+//
+// runID names the execution the credentials are being handed to, and rides the
+// Requester onto every audit row the broker writes for this lease (Task 20282).
+// Without it a secret.lease row names only an executor and a project, and
+// answering "which leases did this task hold" means reconstructing a time
+// window and hoping no other run of the same project overlapped it.
+func acquireSecretLease(controlPlaneDir, workDir string, ex executor.Executor, runID string) *secretLease {
 	executorID := ""
 	if ex != nil {
 		executorID = ex.ID()
@@ -318,6 +344,7 @@ func acquireSecretLease(controlPlaneDir, workDir string, ex executor.Executor) *
 	lease, err := broker.LeaseFor(ctx, secretbroker.Requester{
 		ExecutorID: executorID,
 		ProjectID:  workDir,
+		RunID:      runID,
 	}, "ui")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ui: lease secrets for %s: %v\n", workDir, err)

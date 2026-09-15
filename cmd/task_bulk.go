@@ -163,12 +163,24 @@ func bulkStatusFn(newStatus pm.TaskStatus, verb string) func(*cobra.Command, []s
 			return err
 		}
 
-		for _, t := range targets {
+		// Captured before the assignment: after it, every target reads as
+		// newStatus and the trail could only record that they are now what they
+		// were just set to.
+		priorStatus := make([]pm.TaskStatus, len(targets))
+		for i, t := range targets {
+			priorStatus[i] = t.Status
 			t.Status = newStatus
 		}
 
 		if err := s.Save(); err != nil {
 			return err
+		}
+		// One row per task rather than one per command (Task 20282). A bulk
+		// operation is a convenience for the operator, not a different kind of
+		// event: an auditor asking what happened to task 63 must find it whether
+		// it was flipped alone or as one of forty.
+		for i, t := range targets {
+			auditManualTaskStatus(workdir, t.ID, priorStatus[i], newStatus)
 		}
 
 		green := color.New(color.FgGreen)

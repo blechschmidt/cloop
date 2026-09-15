@@ -30,6 +30,14 @@ type AuditEvent = statedb.AuditEvent
 // AuditFilter re-exports statedb.AuditFilter.
 type AuditFilter = statedb.AuditFilter
 
+// TaskStory and TaskRunStory are one task's reconstructed history and one of
+// its executions. Aliased here so callers of this package do not have to import
+// pkg/statedb to name what ReconstructTask returns.
+type TaskStory = statedb.TaskStory
+
+// TaskRunStory is one execution within a TaskStory.
+type TaskRunStory = statedb.TaskRunStory
+
 // VerifyReport re-exports statedb.AuditVerifyReport.
 type VerifyReport = statedb.AuditVerifyReport
 
@@ -89,6 +97,16 @@ func (l *Log) Append(ev *AuditEvent) error {
 // List returns events matching the filter and the unfiltered total count.
 func (l *Log) List(f AuditFilter) ([]AuditEvent, int, error) {
 	return l.db.ListAuditEvents(f)
+}
+
+// ReconstructTask assembles one task's whole history — every execution, the
+// executor each ran on, the credentials it held and how it ended — from the
+// audit trail alone (Task 20282).
+//
+// It reads no table but audit_events. See pkg/statedb/audit_story.go for why
+// that restriction is the feature rather than an implementation detail.
+func (l *Log) ReconstructTask(taskID int) (TaskStory, error) {
+	return l.db.ReconstructTask(taskID)
 }
 
 // Verify recomputes the SHA-256 chain from the genesis row to head. Returns

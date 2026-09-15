@@ -247,7 +247,7 @@ func (d *DB) getMeta(key string) (string, error) {
 // ────────────────────────────────────────────────────────────
 
 func (d *DB) SaveState(s *State) error {
-	changed, deleted, err := d.saveStateLocked(s)
+	changed, deleted, edges, err := d.saveStateLocked(s)
 	if err != nil {
 		return err
 	}
@@ -261,18 +261,20 @@ func (d *DB) SaveState(s *State) error {
 	// for why that diff cannot be done here.
 	auditStateSave(d, s)
 	auditPlanTasks(d, changed, deleted)
+	auditTaskLifecycle(d, edges, s.WorkDir)
 	return nil
 }
 
 // saveStateLocked writes the state and returns the task-audit delta the write
-// produced: tasks whose audit payload changed, and ids that disappeared.
-func (d *DB) saveStateLocked(s *State) (changed []taskAuditChange, deleted []int, err error) {
+// produced: tasks whose audit payload changed, ids that disappeared, and the
+// tasks that crossed the execution boundary in either direction.
+func (d *DB) saveStateLocked(s *State) (changed []taskAuditChange, deleted []int, edges []taskLifecycleEdge, err error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
 	tx, err := d.conn.Begin()
 	if err != nil {
-		return nil, nil, classifyDriverErr(err)
+		return nil, nil, nil, classifyDriverErr(err)
 	}
 	defer tx.Rollback() //nolint:errcheck
 
@@ -334,14 +336,14 @@ func (d *DB) saveStateLocked(s *State) (changed []taskAuditChange, deleted []int
 	// pkg/ui's stale-run recovery refuses to repair a project whose state
 	// points somewhere else.
 	if existing, err := getMeta(tx, "workdir"); err != nil {
-		return nil, nil, fmt.Errorf("read metadata %q: %w", "workdir", classifyDriverErr(err))
+		return nil, nil, nil, fmt.Errorf("read metadata %q: %w", "workdir", classifyDriverErr(err))
 	} else if existing != "" {
 		delete(meta, "workdir")
 	}
 
 	for k, v := range meta {
 		if err := d.setMeta(tx, k, v); err != nil {
-			return nil, nil, fmt.Errorf("set metadata %q: %w", k, classifyDriverErr(err))
+			return nil, nil, nil, fmt.Errorf("set metadata %q: %w", k, classifyDriverErr(err))
 		}
 	}
 
@@ -357,14 +359,21 @@ func (d *DB) saveStateLocked(s *State) (changed []taskAuditChange, deleted []int
 		// audit bookkeeping exactly as consistent as the tasks.
 		changed, deleted, err = diffPlanTaskFingerprints(tx, s.Plan.Tasks)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
+		}
+		// Execution-boundary detection, in the same transaction and for the
+		// same reason: the cursor it advances must commit or roll back with
+		// the statuses it describes (Task 20282).
+		edges, err = diffTaskLifecycle(tx, s.Plan.Tasks)
+		if err != nil {
+			return nil, nil, nil, err
 		}
 		if _, err := tx.Exec(`DELETE FROM plan_tasks`); err != nil {
-			return nil, nil, classifyDriverErr(err)
+			return nil, nil, nil, classifyDriverErr(err)
 		}
 		for _, t := range s.Plan.Tasks {
 			if err := insertTask(tx, t); err != nil {
-				return nil, nil, fmt.Errorf("insert task %d: %w", t.ID, classifyDriverErr(err))
+				return nil, nil, nil, fmt.Errorf("insert task %d: %w", t.ID, classifyDriverErr(err))
 			}
 		}
 	}
@@ -372,14 +381,14 @@ func (d *DB) saveStateLocked(s *State) (changed []taskAuditChange, deleted []int
 	// ── steps (upsert, never delete) ──
 	for _, row := range s.Steps {
 		if err := upsertStep(tx, row); err != nil {
-			return nil, nil, fmt.Errorf("upsert step %d: %w", row.Step, classifyDriverErr(err))
+			return nil, nil, nil, fmt.Errorf("upsert step %d: %w", row.Step, classifyDriverErr(err))
 		}
 	}
 
 	if err := tx.Commit(); err != nil {
-		return nil, nil, classifyDriverErr(err)
+		return nil, nil, nil, classifyDriverErr(err)
 	}
-	return changed, deleted, nil
+	return changed, deleted, edges, nil
 }
 
 // HasProjectState reports whether any project state has ever been written to
@@ -633,7 +642,8 @@ func (d *DB) LoadTask(id int) (*pm.Task, error) {
 			tags, fail_count, heal_attempts, annotations, condition_expr,
 			recurrence, next_run_at, requires_approval, approved, max_minutes,
 			write_back_branch, write_back_commit, background, abort,
-			executor_id, executor_kind, isolation
+			executor_id, executor_kind, isolation,
+			COALESCE((SELECT run_id FROM task_runs WHERE task_runs.task_id = plan_tasks.id), '')
 		FROM plan_tasks WHERE id = ? LIMIT 1`, id)
 	if err != nil {
 		return nil, classifyDriverErr(err)
@@ -663,7 +673,7 @@ func (d *DB) LoadTask(id int) (*pm.Task, error) {
 		&annJSON, &t.Condition, &t.Recurrence,
 		&nextRunAt, &reqApproval, &approved, &t.MaxMinutes,
 		&t.WriteBackBranch, &t.WriteBackCommit, &bgJSON, &abortJSON,
-		&t.ExecutorID, &t.ExecutorKind, &t.Isolation,
+		&t.ExecutorID, &t.ExecutorKind, &t.Isolation, &t.RunID,
 	); err != nil {
 		return nil, classifyDriverErr(err)
 	}
@@ -714,6 +724,14 @@ func (d *DB) DeleteTask(id int) error {
 	// make the next task to claim that id look unchanged against a predecessor
 	// it has nothing to do with — an unrelated task's creation going unaudited.
 	if err := forgetTaskFingerprintTx(tx, id); err != nil {
+		_ = tx.Rollback()
+		d.mu.Unlock()
+		return err
+	}
+	// Same reasoning for the run correlation: an id reused later must start
+	// from "never dispatched" rather than inheriting the run and lifecycle
+	// cursor of an unrelated task, which would suppress its first dispatch row.
+	if err := forgetTaskRunTx(tx, id); err != nil {
 		_ = tx.Rollback()
 		d.mu.Unlock()
 		return err
@@ -837,7 +855,8 @@ func loadTasks(conn *sql.DB) ([]*pm.Task, error) {
 			tags, fail_count, heal_attempts, annotations, condition_expr,
 			recurrence, next_run_at, requires_approval, approved, max_minutes,
 			write_back_branch, write_back_commit, background, abort,
-			executor_id, executor_kind, isolation
+			executor_id, executor_kind, isolation,
+			COALESCE((SELECT run_id FROM task_runs WHERE task_runs.task_id = plan_tasks.id), '')
 		FROM plan_tasks ORDER BY id`)
 	if err != nil {
 		return nil, err
@@ -864,7 +883,7 @@ func loadTasks(conn *sql.DB) ([]*pm.Task, error) {
 			&annJSON, &t.Condition, &t.Recurrence,
 			&nextRunAt, &reqApproval, &approved, &t.MaxMinutes,
 			&t.WriteBackBranch, &t.WriteBackCommit, &bgJSON, &abortJSON,
-			&t.ExecutorID, &t.ExecutorKind, &t.Isolation,
+			&t.ExecutorID, &t.ExecutorKind, &t.Isolation, &t.RunID,
 		); err != nil {
 			return nil, err
 		}

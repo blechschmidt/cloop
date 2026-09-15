@@ -10,6 +10,7 @@ package statedb
 import (
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -382,6 +383,250 @@ func AuditWorkspaceProvision(d *DB, in WorkspaceAuditInput) {
 		EntityID:   in.ProjectPath,
 		Payload:    MarshalAuditPayload(payload),
 	})
+}
+
+// TaskDispatchInput carries the placement facts for one task execution
+// (Task 20282).
+//
+// It is filled by the orchestrator, which is the only layer that knows both a
+// task id and the environment it was placed into: the hub chose the executor
+// and started a whole `cloop run`, and by the time a task begins there is no
+// placement decision left to read — the decision is why the process exists.
+// What the hub leaves behind is .cloop/sandbox-run.json, and this struct is
+// that record joined to the task it is about to run.
+//
+// No field can carry a credential. LeaseIDs are the broker's opaque handles,
+// not material; the digest and hashes are content addresses; Actor is an
+// identity label. The token behind a lease never enters this package's scope.
+type TaskDispatchInput struct {
+	// TaskID and TaskTitle identify the unit of work. The title is recorded
+	// rather than joined later because a plan can be edited: an auditor reading
+	// this row six weeks on should see what the task said when it ran.
+	TaskID    int
+	TaskTitle string
+
+	// ProjectPath is the project the task belongs to.
+	ProjectPath string
+
+	// RunID names the execution. It is the join key to the secret.lease rows
+	// the hub wrote for the same dispatch, and the reason leases attach to an
+	// execution rather than to a task id that may run many times.
+	RunID string
+
+	// ExecutorID, ExecutorKind and Isolation are where the work landed, as
+	// advertised at placement. Stored rather than derived by joining the
+	// executor registry later, for the reason migration 0032 gives: an executor
+	// re-enrolled under the same id would otherwise rewrite the history of
+	// every task it ever ran.
+	ExecutorID   string
+	ExecutorKind string
+	Isolation    string
+
+	// RequestedImage is the reference the sandbox spec asked for; PinnedImage
+	// is what actually ran, digest-pinned where the driver could resolve one.
+	// Both, because the gap between them is the question — a spec naming a tag
+	// and a run on a digest is reproducible, a run on the tag is not.
+	RequestedImage string
+	PinnedImage    string
+
+	// SpecHash is the .cloop/sandbox.yaml content hash, empty when the project
+	// has no spec and ran on the executor's defaults. SetupHash identifies
+	// commands baked into a derived image.
+	SpecHash  string
+	SetupHash string
+
+	// LeaseIDs are the secret leases handed to this run.
+	LeaseIDs []string
+
+	// Actor is who asked for the run.
+	Actor string
+}
+
+// AuditTaskDispatch records one task entering execution.
+//
+// Best-effort, like every other emitter in this file: a wedged audit log must
+// not stop a task from running. The chain verifier surfaces the resulting gap.
+func AuditTaskDispatch(d *DB, in TaskDispatchInput) {
+	actor := in.Actor
+	if actor == "" {
+		actor = "system"
+	}
+	payload := map[string]any{"task_id": in.TaskID}
+	for k, v := range map[string]string{
+		"title":           in.TaskTitle,
+		"project":         in.ProjectPath,
+		"run_id":          in.RunID,
+		"executor_id":     in.ExecutorID,
+		"executor_kind":   in.ExecutorKind,
+		"isolation":       in.Isolation,
+		"requested_image": in.RequestedImage,
+		"pinned_image":    in.PinnedImage,
+		"spec_sha256":     in.SpecHash,
+		"setup_sha256":    in.SetupHash,
+	} {
+		if v != "" {
+			payload[k] = v
+		}
+	}
+	if len(in.LeaseIDs) > 0 {
+		payload["lease_ids"] = in.LeaseIDs
+	}
+	// Recorded rather than omitted, for the reason the provisioning emitter
+	// records an unbounded depth explicitly: an absent key reads as "nobody
+	// asked", and "this execution held no brokered credentials" is a positive
+	// and audit-relevant fact about the run.
+	if len(in.LeaseIDs) == 0 {
+		payload["lease_ids"] = []string{}
+	}
+	emit(d, &AuditEvent{
+		Actor:      actor,
+		EventType:  "task.dispatch",
+		EntityType: "task",
+		EntityID:   fmt.Sprintf("%d", in.TaskID),
+		Payload:    MarshalAuditPayload(payload),
+	})
+}
+
+// auditTaskLifecycle emits the terminal rows for one SaveState.
+//
+// The edges were computed inside the write transaction by diffTaskLifecycle;
+// see task_runs.go for why detection lives at the write rather than at each of
+// the orchestrator's exit paths.
+//
+// # Why only the terminal half
+//
+// The dispatch edge is detected here — the cursor has to move on it, or the
+// terminal edge could never fire — but no row is written for it. Placement
+// happens at exactly one point, and the orchestrator emits a full task.dispatch
+// there with the image digest, spec hash and lease ids that this layer cannot
+// see. Emitting a second, thinner row for the same placement would make the
+// simplest possible audit query — "how many times did this task run" — return
+// twice the truth for an orchestrator-run task and once for any other, which is
+// worse than either answer alone.
+//
+// Termination is the opposite shape: it happens at a dozen points, several of
+// them in processes that never dispatched the task, so the only place that sees
+// all of them is the write every one of them must perform.
+//
+// A task moved into in_progress by something other than the orchestrator is not
+// left unrecorded by this asymmetry. That is a human action, and it is covered
+// by task.status — which names the person, where a synthesised dispatch row
+// could only have said "system".
+func auditTaskLifecycle(d *DB, edges []taskLifecycleEdge, projectPath string) {
+	if !auditEnabled || d == nil || len(edges) == 0 {
+		return
+	}
+	evs := make([]*AuditEvent, 0, len(edges))
+	for _, e := range edges {
+		if e.Task == nil || e.Dispatch() {
+			continue
+		}
+		evs = append(evs, taskFinishEvent(e, projectPath))
+	}
+	if len(evs) == 0 {
+		return
+	}
+	if err := d.AppendAuditEvents(evs); err != nil {
+		auditWarn("emit %d task lifecycle events: %v", len(evs), err)
+	}
+}
+
+// taskFinishEvent renders the terminal row: outcome, duration and reason.
+//
+// The reason is assembled from what the task itself records, rather than passed
+// in by whichever exit path fired, because the exit paths do not all agree on
+// where they write it — an abort lands in Task.Abort, a timeout only in the
+// status, a kill in an annotation, a failure diagnosis in its own field. Reading
+// them here means a new exit path gets a usable reason without having to know
+// this function exists.
+func taskFinishEvent(e taskLifecycleEdge, projectPath string) *AuditEvent {
+	t := e.Task
+	payload := map[string]any{
+		"task_id": t.ID,
+		"outcome": e.NewStatus,
+	}
+	for k, v := range map[string]string{
+		"title":         t.Title,
+		"project":       projectPath,
+		"run_id":        e.RunID,
+		"executor_id":   t.ExecutorID,
+		"executor_kind": t.ExecutorKind,
+		"isolation":     t.Isolation,
+		"reason":        taskExitReason(t, e.NewStatus),
+	} {
+		if v != "" {
+			payload[k] = v
+		}
+	}
+	if t.StartedAt != nil {
+		payload["started_at"] = t.StartedAt.UTC().Format(time.RFC3339Nano)
+		end := t.CompletedAt
+		if end != nil {
+			payload["completed_at"] = end.UTC().Format(time.RFC3339Nano)
+			payload["duration_ms"] = end.Sub(*t.StartedAt).Milliseconds()
+		}
+	}
+	if t.Abort != nil {
+		payload["abort_class"] = t.Abort.Class
+		payload["abort_cleared"] = t.Abort.Cleared
+	}
+	if t.FailCount > 0 {
+		payload["fail_count"] = t.FailCount
+	}
+	if t.WriteBackCommit != "" {
+		payload["write_back_commit"] = t.WriteBackCommit
+	}
+	return &AuditEvent{
+		Actor:      "system",
+		EventType:  "task.finish",
+		EntityType: "task",
+		EntityID:   fmt.Sprintf("%d", t.ID),
+		Payload:    MarshalAuditPayload(payload),
+	}
+}
+
+// maxExitReason bounds the free-text reason. A task result is the agent's own
+// output and can be megabytes; the audit row is for what happened, not for the
+// content, which the artifact already holds.
+const maxExitReason = 400
+
+// taskExitReason describes why an execution ended, in one line.
+//
+// Ordered most-specific first. A provider refusal is the reading that matters
+// most when present, because a task whose status says "pending" after an abort
+// looks from the status alone like a task that simply has not run.
+func taskExitReason(t *pm.Task, outcome string) string {
+	if t.Abort != nil && t.Abort.Reason != "" {
+		return truncateReason("provider abort: " + t.Abort.Reason)
+	}
+	switch outcome {
+	case string(pm.TaskTimedOut):
+		return "execution exceeded its time budget"
+	case string(pm.TaskPending):
+		// Leaving in_progress for pending is not an outcome a task can reach on
+		// its own: something reset it — a crash reconciliation that found no
+		// signal, an operator, or an abort retry.
+		return "returned to pending without a recorded outcome"
+	}
+	if t.FailureDiagnosis != "" {
+		return truncateReason(t.FailureDiagnosis)
+	}
+	if t.Result != "" {
+		return truncateReason(t.Result)
+	}
+	return ""
+}
+
+// truncateReason bounds and single-lines a free-text reason. Newlines are
+// folded because an audit row is read in a table, and a reason containing the
+// agent's multi-line output would break every renderer that shows one row per
+// line.
+func truncateReason(s string) string {
+	s = strings.Join(strings.Fields(s), " ")
+	if len(s) > maxExitReason {
+		return s[:maxExitReason] + "…"
+	}
+	return s
 }
 
 func auditStateSave(d *DB, s *State) {

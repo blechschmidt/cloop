@@ -531,6 +531,15 @@ type Requester struct {
 	ExecutorID string
 	ProjectID  string
 	Labels     map[string]string
+	// RunID names the execution the credentials are for (Task 20282). It is
+	// recorded on the audit rows this request produces and is deliberately
+	// never matched against: a grant is issued to a project or an executor, not
+	// to one run, so letting a run id participate in Subject.Matches would
+	// invent an authority scope that operators cannot see, list or revoke.
+	//
+	// Empty for every non-dispatch caller — a CLI lease, a UI inspection — and
+	// an empty run id simply leaves the field off the row.
+	RunID string
 }
 
 // Wildcard reports whether this subject selects an open-ended set of

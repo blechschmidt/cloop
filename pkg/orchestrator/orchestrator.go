@@ -1791,9 +1791,11 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		task.Status = pm.TaskInProgress
 		task.StartedAt = &now
 		// Stamp placement before the task runs, not after it finishes, so an
-		// in-flight task is attributable too (Task 20244).
-		execID, execKind, execIso := resolveTaskAttribution(o.config.WorkDir)
-		stampAttribution(task, execID, execKind, execIso)
+		// in-flight task is attributable too (Task 20244), and record the
+		// dispatch in the audit trail while the placement facts are in hand
+		// (Task 20282).
+		f := o.beginTaskExecution(task)
+		execID, execKind, execIso := f.ExecutorID, f.ExecutorKind, f.Isolation
 		pm.AddAnnotation(task, "ai", fmt.Sprintf("Task started on executor %s (kind: %s, isolation: %s, provider: %s)",
 			attributionLabel(execID), execKind, execIso, o.provider.Name()))
 		s.Save()
@@ -3572,11 +3574,13 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 		now := time.Now()
 		// One placement for the whole batch: every task in it runs inside this
 		// same process on the executor the hub already chose (Task 20244).
-		execID, execKind, execIso := resolveTaskAttribution(o.config.WorkDir)
+		// Each still gets its own dispatch row — they are separate units of
+		// work that end separately, and a batch-level row could not be joined
+		// to the task.finish rows that follow (Task 20282).
 		for i, t := range ready {
 			t.Status = pm.TaskInProgress
 			t.StartedAt = &now
-			stampAttribution(t, execID, execKind, execIso)
+			f := o.beginTaskExecution(t)
 			queueIDs[i] = o.enqueueWork(taskqueue.Entry{
 				Kind:        taskqueue.KindTask,
 				TaskID:      t.ID,
@@ -3598,9 +3602,10 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 				"priority":      t.Priority,
 				"role":          t.Role,
 				"parallel":      true,
-				"executor_id":   execID,
-				"executor_kind": execKind,
-				"isolation":     execIso,
+				"executor_id":   f.ExecutorID,
+				"executor_kind": f.ExecutorKind,
+				"isolation":     f.Isolation,
+				"run_id":        f.RunID,
 			})
 		}
 		s.Save()

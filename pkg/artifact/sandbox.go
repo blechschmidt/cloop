@@ -28,6 +28,8 @@ package artifact
 // with no record produces artifacts without the stamp rather than no artifacts.
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -94,6 +96,58 @@ type SandboxRecord struct {
 	// lands in a directory the workload can write to, and a workload that
 	// could name the payer could drain a colleague's budget.
 	Identity string `json:"identity,omitempty"`
+
+	// RunID names this execution (Task 20282). It is minted by the hub before
+	// anything is acquired for the run, so the same token can be stamped on the
+	// secret-lease rows the broker writes, on this record, and — through it —
+	// on the task.dispatch and task.finish rows the orchestrator and the state
+	// store emit.
+	//
+	// It exists because a task id is not a key. Task 63 may run five times, and
+	// "which leases did task 63 hold" has five different answers; joining lease
+	// rows to a task id silently unions them. A run id makes the join exact:
+	// leases attach to the execution that spent them.
+	//
+	// Empty for a bare `cloop run`, which the orchestrator fills in with a run
+	// id of its own so that even an unmanaged run has a correlatable trace.
+	RunID string `json:"run_id,omitempty"`
+
+	// LeaseIDs are the secret leases handed to this run, in the order the
+	// broker issued them.
+	//
+	// Identifiers only — never material, and structurally incapable of carrying
+	// it: a lease id is an opaque token the broker mints, and the payload it
+	// refers to never enters this package's scope. They ride the record for the
+	// same reason the executor fields do: the hub knows them and the
+	// orchestrator, which writes the dispatch row, cannot see them from inside
+	// the sandbox.
+	//
+	// The authoritative binding is still the broker's own secret.lease rows,
+	// which carry the same run id and which a workload cannot write. These are
+	// the convenience copy that makes a dispatch row readable on its own; a
+	// reader who needs to defend the join against a hostile workload should use
+	// the run id and read the broker's rows.
+	LeaseIDs []string `json:"lease_ids,omitempty"`
+}
+
+// NewRunID mints an identifier for one execution.
+//
+// Random rather than derived from a counter or a timestamp: run ids are
+// compared across hubs and across restarts, and the two obvious derivations
+// both collide exactly where it hurts. A counter restarts at zero when the hub
+// does, and a timestamp collides when two projects are dispatched in the same
+// instant — which is the normal case on a hub running a fleet.
+//
+// Falls back to a time-derived value only if the system entropy source fails,
+// which on Linux means the process is already in serious trouble. A colliding
+// id is still better than an empty one here: an empty run id would make every
+// unattributable run join to every other.
+func NewRunID() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return fmt.Sprintf("run_t%036x", time.Now().UnixNano())
+	}
+	return "run_" + hex.EncodeToString(b[:])
 }
 
 // Pinned reports whether the recorded image is immutable — whether re-running
@@ -108,8 +162,14 @@ func (r SandboxRecord) Pinned() bool {
 }
 
 // IsZero reports whether the record carries nothing worth stamping.
+//
+// RunID counts. A hub-dispatched run on a driver with no image and no sandbox
+// spec still has a run id, and that id is the join key the whole audit trail
+// hangs on — treating such a record as empty would drop it at the
+// LoadSandboxRun guard and leave the task rows with nothing to correlate
+// against the lease rows the same dispatch wrote.
 func (r SandboxRecord) IsZero() bool {
-	return r.ExecutorID == "" && r.SpecHash == "" && r.PinnedImage == ""
+	return r.ExecutorID == "" && r.SpecHash == "" && r.PinnedImage == "" && r.RunID == ""
 }
 
 // WriteSandboxRun persists the record for the run that is about to start.
@@ -173,6 +233,9 @@ func (r SandboxRecord) frontmatter() string {
 		return ""
 	}
 	var b strings.Builder
+	if r.RunID != "" {
+		fmt.Fprintf(&b, "run_id: %q\n", r.RunID)
+	}
 	if r.ExecutorID != "" {
 		fmt.Fprintf(&b, "executor_id: %q\n", r.ExecutorID)
 	}

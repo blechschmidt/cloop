@@ -129,6 +129,14 @@ type Event struct {
 	LeaseID    string `json:"lease_id,omitempty"`
 	ExecutorID string `json:"executor_id,omitempty"`
 	ProjectID  string `json:"project_id,omitempty"`
+	// RunID names the execution a lease was issued to (Task 20282). It is what
+	// makes "which credentials did this task hold" answerable exactly: a task
+	// id may run many times and unions every attempt's leases, whereas a run id
+	// names the one execution that spent them.
+	//
+	// Populated for dispatch-time leases. Empty for grant and mint events,
+	// which are operator actions with no execution behind them.
+	RunID string `json:"run_id,omitempty"`
 	// Constraints is the allowlist summary that applied to the decision.
 	Constraints string `json:"constraints,omitempty"`
 	// ExpiresAt is the TTL stamp of the grant or lease involved.
@@ -338,6 +346,7 @@ func (ev Event) Fields() string {
 	put("lease_id", ev.LeaseID)
 	put("executor", ev.ExecutorID)
 	put("project", ev.ProjectID)
+	put("run_id", ev.RunID)
 	put("constraints", ev.Constraints)
 	put("reason", ev.Reason)
 	put("task", ev.TaskID)

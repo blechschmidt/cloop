@@ -117,6 +117,12 @@ type Lease struct {
 	ProjectID  string    `json:"project_id,omitempty"`
 	IssuedAt   time.Time `json:"issued_at"`
 	ExpiresAt  time.Time `json:"expires_at"`
+	// RunID is the execution this lease was issued to (Task 20282). Carried on
+	// the lease so the renew and release rows correlate to the same run as the
+	// issuance — a lease's *end* is as audit-relevant as its start, and a
+	// release row that could not name its run would break the join at exactly
+	// the point an auditor is checking that a credential stopped being held.
+	RunID string `json:"run_id,omitempty"`
 	// Materials carries the credentials. json:"-" on the sensitive fields
 	// of Material keeps a marshalled Lease audit-safe.
 	Materials []Material `json:"materials"`

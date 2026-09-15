@@ -425,6 +425,51 @@ $ cloop audit-log export --format cef  --since 24h --verify | logger -t cloop -p
 | `csv` | flat table for spreadsheets |
 | `cef` | ArcSight Common Event Format, syslog-ready |
 
+### Reconstructing one task
+
+The question an auditor actually arrives with is about a single piece of work:
+*which executor ran task 63, under which secret leases, and how did it end?*
+
+```console
+$ cloop audit-log --task 63
+Task #63 — Provision the staging cluster
+2 execution(s) recorded
+
+── run 1/2  run_0123456789abcdef0123456789abcdef
+   executor    edge-pi4  kind=remote  isolation=remote
+   actor       alice@example.com
+   image       ghcr.io/acme/harness@sha256:3f1a…
+   sandbox     spec sha256:9c4e0b1a7d22
+   leases      lease-7f3c
+               2026-09-15 09:14:02  secret.lease  gh-deploy-key
+   outcome     failed  after 1m30s
+   reason      terraform apply exited 1: quota exceeded in eu-west-1
+```
+
+This reads `audit_events` and **no other table** — not the plan, not the task
+record. That restriction is the point rather than an implementation detail: an
+auditor reviewing an incident has an exported trail, not a live database, and a
+reconstruction that needed the hub's working state would be unusable exactly
+when it is needed. `pkg/statedb` has a test that drops `plan_tasks` before
+reconstructing, so the guarantee cannot quietly regress.
+
+The join it performs is on the **run id**, which every dispatch, terminal and
+lease row carries. A task id is not enough: task 63 above ran twice, and each
+execution held a different credential. Joining credentials to the task id would
+report that it held both, throughout — which is how a narrow finding becomes a
+wrong one.
+
+| Event | Written when |
+| --- | --- |
+| `task.dispatch` | a task enters execution — executor, isolation, pinned image digest, sandbox spec hash, lease ids, actor |
+| `task.finish` | it leaves execution, by *any* path: signal, kill, timeout, provider abort, or a hub crash reconciled later — outcome, duration, reason |
+| `task.status` | a human flips a status from the dashboard or the CLI, naming them |
+
+`task.finish` is emitted where the status is persisted rather than at each of
+the orchestrator's exit paths, so an exit path added later cannot forget it.
+A run still in flight — or one whose hub died so hard it never wrote a terminal
+row — shows as `no terminal row` rather than being given an invented outcome.
+
 ### Retention: keeping the trail bounded
 
 The trail only grows, and on a busy hub it grows fast enough to matter — this

@@ -153,11 +153,13 @@ func auditImageDenial(workDir string, err error) {
 // Best-effort by design. A project directory that cannot be written is already
 // a run that will fail on its first artifact, and failing the start here would
 // replace that clear error with a confusing one about provenance.
-func recordSandboxProvenance(workDir string, resolved *sandbox.Resolved, ex executor.Executor, h executor.Handle, identity string) {
+func recordSandboxProvenance(workDir string, resolved *sandbox.Resolved, ex executor.Executor, h executor.Handle, identity, runID string, leaseIDs []string) {
 	rec := artifact.SandboxRecord{
 		PinnedImage: h.Image,
 		StartedAt:   h.StartedAt,
 		Identity:    identity,
+		RunID:       runID,
+		LeaseIDs:    leaseIDs,
 	}
 	if rec.StartedAt.IsZero() {
 		rec.StartedAt = time.Now()

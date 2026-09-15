@@ -79,6 +79,10 @@ func (a *Auditor) Audit(ev secretbroker.Event) {
 	put("lease_id", ev.LeaseID)
 	put("executor_id", ev.ExecutorID)
 	put("project_id", ev.ProjectID)
+	// The join key back to task.dispatch / task.finish (Task 20282). Without it
+	// on the persisted row, "which leases did this execution hold" is a time
+	// window and a guess.
+	put("run_id", ev.RunID)
 	put("constraints", ev.Constraints)
 	put("reason", ev.Reason)
 	put("task_id", ev.TaskID)

@@ -30,6 +30,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/artifact"
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/localprocess"
@@ -351,6 +352,13 @@ func startWorkloadAs(envFor func(executor.Executor) []string, identity, workDir 
 		return nil, executor.Handle{}, fmt.Errorf("no executor available for %s: %w", workDir, err)
 	}
 
+	// Minted before anything is acquired, because the point of a run id is to
+	// be on the *first* record this dispatch writes. The broker's lease rows
+	// come before the workload exists, so a token derived from the handle — the
+	// obvious alternative — would be too late to appear on them, and the leases
+	// would again have nothing to join to (Task 20282).
+	runID := artifact.NewRunID()
+
 	base := uiSpec(workDir, argv, labels)
 	if envFor != nil {
 		if extra := envFor(ex); len(extra) > 0 {
@@ -365,7 +373,7 @@ func startWorkloadAs(envFor func(executor.Executor) []string, identity, workDir 
 	// would pull the credential files out from under a process that has not
 	// read them yet, so cleanup is deferred to a watcher that waits for the
 	// handle to reach a terminal state.
-	lease := acquireSecretLease(controlPlaneDir(), workDir, ex)
+	lease := acquireSecretLease(controlPlaneDir(), workDir, ex, runID)
 	spec, err := applyLease(base, ex, lease)
 	if err != nil {
 		lease.Close()
@@ -443,7 +451,7 @@ func startWorkloadAs(envFor func(executor.Executor) []string, identity, workDir 
 		return nil, executor.Handle{}, err
 	}
 	go wipeLeaseOnExit(ex, handle.ID, lease)
-	recordSandboxProvenance(workDir, sandboxSpec, ex, handle, identity)
+	recordSandboxProvenance(workDir, sandboxSpec, ex, handle, identity, runID, lease.LeaseIDs())
 
 	// Record the dispatch so the supervisor can fail it over if this executor
 	// dies holding it. Best-effort: a session that cannot be recorded yields
@@ -540,8 +548,11 @@ func runWorkloadEnvFor(ctx context.Context, workDir string, argv []string, envFo
 	if envFor != nil {
 		extraEnv = envFor(ex)
 	}
-	// Run is synchronous, so the lease's lifetime is exactly this call's.
-	lease := acquireSecretLease(controlPlaneDir(), workDir, ex)
+	// Run is synchronous, so the lease's lifetime is exactly this call's. The
+	// run id still exists so the lease rows are attributable, even though no
+	// task.dispatch will reference it: these are helper subcommands
+	// (`cloop suggest`, `cloop do`), not task executions.
+	lease := acquireSecretLease(controlPlaneDir(), workDir, ex, artifact.NewRunID())
 	defer lease.Close()
 
 	base := uiSpec(workDir, argv, labels)
