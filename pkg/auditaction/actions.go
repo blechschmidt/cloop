@@ -25,6 +25,15 @@ const (
 	// ActionTaskFinish records a dispatched task reaching a terminal outcome.
 	ActionTaskFinish Action = "task.finish"
 
+	// ── run ────────────────────────────────────────────────────────────────
+
+	// ActionRunCapPaused records a run parked by a Claude Code subscription
+	// cap, together with when the window reopens.
+	ActionRunCapPaused Action = "run.cap_paused"
+	// ActionRunCapResumed records the hub restarting such a run once the
+	// window rolled over, with no human involved.
+	ActionRunCapResumed Action = "run.cap_resumed"
+
 	// ── step ───────────────────────────────────────────────────────────────
 
 	// ActionStepAppend records one execution step's transcript.

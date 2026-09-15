@@ -50,7 +50,7 @@ the other.
 
 ## Who may read these
 
-Reading all 107 of the actions below requires the `audit.read` permission, held by `admin`.
+Reading all 109 of the actions below requires the `audit.read` permission, held by `admin`.
 
 The trail is one table behind one pair of admin-only endpoints, so the
 permission does not vary by action today. It is recorded per action anyway,
@@ -61,10 +61,10 @@ leaves them guessing whether it varies.
 
 ## Actions by family
 
-107 actions in 30 families. Every action is listed: this section is the whole
+109 actions in 31 families. Every action is listed: this section is the whole
 vocabulary of the `event_type` column.
 
-[`task.*`](#task) (5) · [`step.*`](#step) (1) · [`state.*`](#state) (1) · [`config.*`](#config) (1) · [`executor.*`](#executor) (9) · [`workspace.*`](#workspace) (2) · [`sandbox.*`](#sandbox) (1) · [`sandbox.attach.*`](#sandboxattach) (3) · [`secret.*`](#secret) (13) · [`secret.lease.*`](#secretlease) (1) · [`lease.*`](#lease) (3) · [`github_app.*`](#github_app) (1) · [`egress.*`](#egress) (6) · [`gitproxy.*`](#gitproxy) (6) · [`kubeguard.*`](#kubeguard) (5) · [`ci.*`](#ci) (1) · [`ci.session.*`](#cisession) (3) · [`ci.exchange.*`](#ciexchange) (2) · [`ci.relay.*`](#cirelay) (2) · [`ci.rule.*`](#cirule) (3) · [`ci.config.*`](#ciconfig) (1) · [`authz.*`](#authz) (2) · [`api_token.*`](#api_token) (4) · [`session.*`](#session) (8) · [`role_binding.*`](#role_binding) (3) · [`quota.*`](#quota) (4) · [`sealing_key.*`](#sealing_key) (2) · [`stt.credential.*`](#sttcredential) (2) · [`user.*`](#user) (9) · [`project.member.*`](#projectmember) (3)
+[`task.*`](#task) (5) · [`run.*`](#run) (2) · [`step.*`](#step) (1) · [`state.*`](#state) (1) · [`config.*`](#config) (1) · [`executor.*`](#executor) (9) · [`workspace.*`](#workspace) (2) · [`sandbox.*`](#sandbox) (1) · [`sandbox.attach.*`](#sandboxattach) (3) · [`secret.*`](#secret) (13) · [`secret.lease.*`](#secretlease) (1) · [`lease.*`](#lease) (3) · [`github_app.*`](#github_app) (1) · [`egress.*`](#egress) (6) · [`gitproxy.*`](#gitproxy) (6) · [`kubeguard.*`](#kubeguard) (5) · [`ci.*`](#ci) (1) · [`ci.session.*`](#cisession) (3) · [`ci.exchange.*`](#ciexchange) (2) · [`ci.relay.*`](#cirelay) (2) · [`ci.rule.*`](#cirule) (3) · [`ci.config.*`](#ciconfig) (1) · [`authz.*`](#authz) (2) · [`api_token.*`](#api_token) (4) · [`session.*`](#session) (8) · [`role_binding.*`](#role_binding) (3) · [`quota.*`](#quota) (4) · [`sealing_key.*`](#sealing_key) (2) · [`stt.credential.*`](#sttcredential) (2) · [`user.*`](#user) (9) · [`project.member.*`](#projectmember) (3)
 
 ### task.*
 
@@ -88,6 +88,21 @@ Payload keys:
 - `task.finish` — `outcome` carries the terminal status; `reason` carries why, when there is one.
 - `task.upsert` — Emitted from the diff SaveState computes inside its own transaction, not from the plan — a byte-identical re-save produces no row. Before that diff existed this action was 99.7% of a 1.09M-row table.
 
+### run.*
+
+| Action | Entity | Stability | Fires when |
+| --- | --- | --- | --- |
+| `run.cap_paused` | `plan` | stable | A Claude Code subscription cap stops the run before it dispatches its next task. |
+| `run.cap_resumed` | `plan` | stable | The hub restarts a cap-paused run after its window rolled over, without a human. |
+
+Payload keys:
+
+- `run.cap_paused` — `project`, `windows`, `utilization`, `cap`, `resumes_at`, `detail`
+- `run.cap_resumed` — `project`, `paused_detail`, `resumes_at`, `resumed_at`
+
+- `run.cap_paused` — Distinct from state.save's bare "paused" status because a cap is the one pause that ends by itself: `resumes_at` is the window's reset from the OAuth usage API, and it is what run.cap_resumed is later matched against.
+- `run.cap_resumed` — The only action recording work that a machine started on its own initiative, so "who restarted this project" stays answerable from the trail alone.
+
 ### step.*
 
 | Action | Entity | Stability | Fires when |
@@ -102,7 +117,9 @@ Payload keys, on every action above: `step`, `task`, `exit_code`, `duration`, `t
 | --- | --- | --- | --- |
 | `state.save` | `plan` | stable | The project's plan-level state is written: goal, run status, counters, and the mode flags in force. |
 
-Payload keys, on every action above: `goal`, `status`, `current_step`, `evolve_step`, `plan_version`, `task_count`, `total_input_tokens`, `total_output_tokens`, `auto_evolve`, `innovate_mode`, `parallel`, `max_parallel`
+Payload keys, on every action above: `goal`, `status`, `current_step`, `evolve_step`, `plan_version`, `task_count`, `total_input_tokens`, `total_output_tokens`, `auto_evolve`, `innovate_mode`, `parallel`, `max_parallel`, `pause_code`, `pause_detail`, `pause_resumes_at`
+
+- `state.save` — The `pause_*` keys appear only when `status` is `paused`, and are what make an approval gate distinguishable from a spent budget or an exhausted usage window — before them all ~26 pause conditions recorded the same word.
 
 ### config.*
 

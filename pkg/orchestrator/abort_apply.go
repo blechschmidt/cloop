@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/logger"
+	"github.com/blechschmidt/cloop/pkg/pausereason"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/fatih/color"
@@ -162,7 +163,7 @@ func abortWait(ab Abort, now time.Time, ceiling, backoff time.Duration) (wait ti
 // not spin — it marked the task done and moved on — which is how five
 // consecutive tasks were closed against a single limit message.
 func (o *Orchestrator) scheduleAbortRetry(ctx context.Context, s *state.ProjectState, ab Abort) (stop bool) {
-	wait, pause := abortWait(ab, time.Now(), o.abortWaitCeiling(), o.abortRetryBackoff())
+	wait, pause := abortWait(ab, o.now(), o.abortWaitCeiling(), o.abortRetryBackoff())
 	if pause {
 		if ab.RetryAfter.IsZero() {
 			color.New(color.FgYellow).Printf("⏸ Pausing run: %s. Resolve it and run cloop again.\n", ab.Reason)
@@ -171,7 +172,7 @@ func (o *Orchestrator) scheduleAbortRetry(ctx context.Context, s *state.ProjectS
 				"⏸ Pausing run: %s; it does not reset until %s (%s away). Run cloop again after that.\n",
 				ab.Reason, ab.RetryAfter.UTC().Format(time.RFC1123), wait.Round(time.Minute))
 		}
-		s.Status = "paused"
+		s.SetPaused(abortPauseReason(ab))
 		s.Save()
 		return true
 	}
@@ -204,6 +205,17 @@ func (o *Orchestrator) abortRetryBackoff() time.Duration {
 		return o.testAbortBackoff
 	}
 	return abortBackoff
+}
+
+// abortPauseReason maps an abort onto the pause reason recorded against the
+// run. A usage window reopens on its own and carries the instant it does; the
+// classes that need an operator do not, and saying so is the difference
+// between a project the hub may resume and one it must not touch.
+func abortPauseReason(ab Abort) pausereason.Reason {
+	if ab.Class == AbortUsageLimit {
+		return pausereason.NewUntil(pausereason.CodeUsageCap, ab.Reason, ab.RetryAfter)
+	}
+	return pausereason.New(pausereason.CodeAbort, ab.Reason)
 }
 
 // abortSummaryForQueue renders the queue's terminal note for an aborted item.

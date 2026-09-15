@@ -1472,6 +1472,10 @@
   .proj-health-dot.unknown  { background: var(--border); }
   .proj-name   { font-weight: 600; font-size: 14px; min-width: 120px; }
   .proj-goal   { flex: 1; font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 320px; }
+  /* Why a paused project stopped. Amber rather than muted grey: on a grid of
+     projects this is the line that tells an operator whether to act, so it
+     must not read as secondary detail (Task 20285). */
+  .proj-pause  { font-size: 11px; color: var(--warning, #d29922); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 320px; }
   .proj-meta   { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; font-size: 12px; color: var(--muted); }
   .proj-progress-wrap { display: flex; align-items: center; gap: 6px; }
   .proj-progress-bar  { width: 80px; height: 4px; background: var(--border); border-radius: 2px; overflow: hidden; }

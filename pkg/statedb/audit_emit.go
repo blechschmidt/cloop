@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/auditaction"
+	"github.com/blechschmidt/cloop/pkg/pausereason"
 	"github.com/blechschmidt/cloop/pkg/pm"
 )
 
@@ -640,25 +641,42 @@ func auditStateSave(d *DB, s *State) {
 		taskCount = len(s.Plan.Tasks)
 		planVersion = s.Plan.Version
 	}
+	payload := map[string]any{
+		"goal":                s.Goal,
+		"status":              s.Status,
+		"current_step":        s.CurrentStep,
+		"evolve_step":         s.EvolveStep,
+		"plan_version":        planVersion,
+		"task_count":          taskCount,
+		"total_input_tokens":  s.TotalInputTokens,
+		"total_output_tokens": s.TotalOutputTokens,
+		"auto_evolve":         s.AutoEvolve,
+		"innovate_mode":       s.InnovateMode,
+		"parallel":            s.Parallel,
+		"max_parallel":        s.MaxParallel,
+	}
+
+	// Why a "paused" status happened, so the trail can tell an approval gate
+	// from a spent budget from an exhausted usage window (Task 20285). Without
+	// it every one of the ~26 pause conditions lands here as the same word,
+	// and reconstructing which one it was means reading the terminal output of
+	// a process that has already exited.
+	if pr := pausereason.Normalize(s.Status, s.PauseReason); pr != nil {
+		payload["pause_code"] = string(pr.Code)
+		if pr.Detail != "" {
+			payload["pause_detail"] = pr.Detail
+		}
+		if pr.ResumesAt != nil {
+			payload["pause_resumes_at"] = pr.ResumesAt.UTC().Format(time.RFC3339)
+		}
+	}
+
 	emit(d, &AuditEvent{
 		Actor:      "system",
 		EventType:  string(auditaction.ActionStateSave),
 		EntityType: "plan",
 		EntityID:   "",
-		Payload: MarshalAuditPayload(map[string]any{
-			"goal":                s.Goal,
-			"status":              s.Status,
-			"current_step":        s.CurrentStep,
-			"evolve_step":         s.EvolveStep,
-			"plan_version":        planVersion,
-			"task_count":          taskCount,
-			"total_input_tokens":  s.TotalInputTokens,
-			"total_output_tokens": s.TotalOutputTokens,
-			"auto_evolve":         s.AutoEvolve,
-			"innovate_mode":       s.InnovateMode,
-			"parallel":            s.Parallel,
-			"max_parallel":        s.MaxParallel,
-		}),
+		Payload:    MarshalAuditPayload(payload),
 	})
 }
 

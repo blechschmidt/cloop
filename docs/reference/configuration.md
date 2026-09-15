@@ -1299,6 +1299,32 @@ has no console and no network inspector, has no other way to be debugged.
 Credentials are scrubbed before storage and the table trims itself at 50,000
 rows. See [front-end telemetry](../operations/telemetry.md).
 
+#### Resuming a capped run
+
+A run stopped by a Claude Code subscription cap records *when* the window it hit
+reopens, because the OAuth usage API reports each window's reset. The hub sweeps
+every five minutes and restarts such runs once that instant has passed.
+
+```yaml
+ui:
+  auto_resume_on_cap_reset: true   # the default; set false to require a human
+```
+
+| Key | Default | What it does |
+| --- | --- | --- |
+| `auto_resume_on_cap_reset` | `true` | When false, a cap-paused run stays paused until someone presses Run. The pause reason and its `resumes_at` are still recorded either way, so the dashboard says when the window reopened regardless. |
+
+Only a usage cap is ever resumed this way, and only once its reset has passed. A
+run paused by a declined approval, a spent budget, an operator's Stop or a
+rejected credential is never restarted on a timer — each of those is a decision
+that a resume would override, and none of them ends by itself. A cap whose reset
+the API did not report is also left alone: without a reset there is nothing to
+say the wall has moved.
+
+Default-on is deliberate. The alternative is what it replaced: an unattended
+fleet parked for the rest of a weekly window over a condition that had already
+cleared, and whose exact clearing time the hub already knew.
+
 ### TLS
 
 **Serving.** `cloop ui` and `cloop serve` can terminate TLS themselves, or sit

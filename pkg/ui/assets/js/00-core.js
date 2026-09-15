@@ -732,11 +732,58 @@ function apiMethod(method, url, body) {
   return fetch(url, opts).then(parseAPIResponse);
 }
 
-function statusBadge(status) {
+// pauseReasonLabels is the operator-facing noun for each pausereason.Code
+// (pkg/pausereason). Kept in sync with the Go enum by
+// TestEveryPauseReasonCodeIsRenderable in tests/arch — a code with no entry
+// here would render its raw identifier to the operator.
+const pauseReasonLabels = {
+  usage_cap:    'subscription usage cap reached',
+  budget:       'budget limit reached',
+  token_budget: 'token budget reached',
+  step_limit:   'step limit reached',
+  approval:     'waiting for approval',
+  abort:        'run aborted',
+  cancelled:    'run interrupted',
+  plan_only:    'plan-only mode',
+  idle:         'no runnable tasks',
+  operator:     'stopped by operator',
+  stale:        'previous run ended unexpectedly',
+};
+
+// pauseReasonText renders a pause reason as one line of prose:
+//
+//   5-hour cap reached, resumes 14:50
+//
+// The clock is formatted in the browser's zone, which is why the server sends
+// resumes_at as an RFC3339 instant and does not format it: only the browser
+// knows what time it is where the reader is sitting. A reset that has already
+// passed is not shown as a future time — the hub's sweep may not have run yet,
+// and "resumes 14:50" at 15:10 reads as broken rather than as pending.
+function pauseReasonText(pr) {
+  if (!pr || !pr.code) return '';
+  const label = pr.detail || pauseReasonLabels[pr.code] || pr.code;
+  if (!pr.resumes_at) return label;
+  const at = new Date(pr.resumes_at);
+  if (isNaN(at.getTime())) return label;
+  if (at.getTime() <= Date.now()) return label + ', resuming';
+  const hh = String(at.getHours()).padStart(2, '0');
+  const mm = String(at.getMinutes()).padStart(2, '0');
+  return label + ', resumes ' + hh + ':' + mm;
+}
+
+// statusBadge renders the run status. A paused run carries why it paused when
+// the caller has it, so the dashboard distinguishes a run waiting on a human
+// from one that restarts by itself at 14:50 — before this the two were the
+// same word.
+function statusBadge(status, pauseReason) {
   const s = status || 'unknown';
   const labels = {running:'Running',complete:'Complete',failed:'Failed',
                   paused:'Paused',initialized:'Ready',evolving:'Evolving'};
-  const label = labels[s] || s;
+  let label = labels[s] || s;
+  if (s === 'paused') {
+    const why = pauseReasonText(pauseReason);
+    if (why) label += ': ' + why;
+  }
   return '<span class="badge '+esc(s)+'"><span class="badge-dot"></span>'+esc(label)+'</span>';
 }
 

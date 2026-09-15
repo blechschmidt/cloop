@@ -39,6 +39,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/logger"
 	"github.com/blechschmidt/cloop/pkg/multiui"
+	"github.com/blechschmidt/cloop/pkg/pausereason"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/taskrecover"
 )
@@ -158,6 +159,25 @@ type runVerdict struct {
 	// worth saying out loud because the remedy is different from every other
 	// cause: give the executor more memory, or make the task smaller.
 	OOM bool
+	// Requested reports that cloop itself asked for the kill — the Stop
+	// button, not a crash. It is the difference between a pause the operator
+	// chose and one that happened to them, and only the latter is worth
+	// flagging as something that went wrong (Task 20285).
+	Requested bool
+}
+
+// deadRunPauseReason turns a verdict about a vanished run into the reason the
+// dashboard shows. A stop the operator asked for is not a fault and should not
+// be dressed as one; everything else is a run that ended without saying so.
+func deadRunPauseReason(v runVerdict) pausereason.Reason {
+	if v.Requested {
+		return pausereason.New(pausereason.CodeOperator, "run stopped")
+	}
+	detail := "previous run ended without reporting an outcome"
+	if v.Detail != "" {
+		detail = "previous run ended unexpectedly: " + v.Detail
+	}
+	return pausereason.New(pausereason.CodeStale, detail)
 }
 
 // runEnded settles a run whose output stream has closed. Every dispatch site
@@ -201,7 +221,12 @@ func workloadVerdict(ex executor.Executor, handleID string) runVerdict {
 			OOM: true,
 		}
 	case st.State == executor.StateKilled:
-		return runVerdict{Detail: "it was killed before it finished (" + st.Error + ")"}
+		// unrequestedKill already claimed the signal kills above, so what is
+		// left here is a stop cloop asked for.
+		return runVerdict{
+			Detail:    "it was killed before it finished (" + st.Error + ")",
+			Requested: true,
+		}
 	case st.State == executor.StateFailed:
 		detail := st.Error
 		if detail == "" {
@@ -298,13 +323,15 @@ func (s *Server) reconcileDeadRun(workDir string, verdict runVerdict) bool {
 	// "paused" is the terminal the orchestrator itself writes on a graceful
 	// interrupt, and it is deliberately used for a killed run too: the field
 	// says whether a run is in flight and whether one may be started, and both
-	// answers are the same however the last one ended. Why it ended is recorded
-	// in the event journal, where a timeline can show it and a second terminal
-	// status would only fragment the recovery path.
+	// answers are the same however the last one ended. A second terminal status
+	// would only fragment the recovery path — but *why* it ended now rides
+	// along in the pause reason rather than only in the event journal, so a
+	// dashboard can distinguish "this crashed" from "this finished cleanly"
+	// without joining two stores (Task 20285).
 	claimed := st.Status
 	staleStatus := claimed == "running" || claimed == "evolving"
 	if staleStatus {
-		st.Status = "paused"
+		st.SetPaused(deadRunPauseReason(verdict))
 	}
 
 	if len(outcomes) == 0 && !staleStatus {

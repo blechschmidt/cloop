@@ -220,11 +220,17 @@ function renderProjects(projects, stats) {
     }
     const tipSafe = esc(_tip);
     const pathSafe = JSON.stringify(p.path || '').replace(/"/g, '&quot;');
+    // Why a paused project stopped (Task 20285). Shown on the card itself
+    // rather than only after opening the project: the grid is where an
+    // operator scans a fleet, and "paused" alone gave no way to tell the one
+    // waiting on an approval from the one that resumes by itself at 14:50.
+    const pauseWhy = (p.status === 'paused') ? pauseReasonText(p.pause_reason) : '';
     return `
       <div class="proj-card${selCls}" onclick="openProject(${idx},${nameSafe})" title="${tipSafe}">
         <div class="proj-health-dot ${health}"></div>
         <div class="proj-name">${esc(p.name)}</div>
         <div class="proj-goal" title="${esc(p.goal || '')}">${goal}</div>
+        ${pauseWhy ? `<div class="proj-pause" title="${esc(pauseWhy)}">&#9208; Paused: ${esc(pauseWhy)}</div>` : ''}
         <div class="proj-meta">
           <span class="badge ${health}" style="font-size:10px">${health}</span>
           <div class="proj-progress-wrap"><div class="proj-progress-bar"><div class="proj-progress-fill" style="width:${pct}%"></div></div><span>${pct}%</span></div>

@@ -15,6 +15,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/atomicfile"
 	"github.com/blechschmidt/cloop/pkg/config"
+	"github.com/blechschmidt/cloop/pkg/pausereason"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/statedb"
@@ -605,17 +606,22 @@ const (
 
 // ProjectStatus is the live status of a project, returned by the /api/projects endpoint.
 type ProjectStatus struct {
-	Name         string    `json:"name"`
-	Path         string    `json:"path"`
-	Status       string    `json:"status"` // state.Status field value
-	Health       Health    `json:"health"` // computed indicator
-	Goal         string    `json:"goal"`
-	TotalTasks   int       `json:"total_tasks"`
-	DoneTasks    int       `json:"done_tasks"`
-	FailedTasks  int       `json:"failed_tasks"`
-	ActiveTasks  int       `json:"active_tasks"`
-	TotalSteps   int       `json:"total_steps"`
-	LastActivity time.Time `json:"last_activity"`
+	Name   string `json:"name"`
+	Path   string `json:"path"`
+	Status string `json:"status"` // state.Status field value
+	// PauseReason explains a "paused" Status — which condition stopped the
+	// run and, for a usage cap, when it lifts. Nil for every other status.
+	// Without it a project card can only say "paused", which is the same word
+	// for a run waiting on a human and one that resumes by itself at 14:50.
+	PauseReason  *pausereason.Reason `json:"pause_reason,omitempty"`
+	Health       Health              `json:"health"` // computed indicator
+	Goal         string              `json:"goal"`
+	TotalTasks   int                 `json:"total_tasks"`
+	DoneTasks    int                 `json:"done_tasks"`
+	FailedTasks  int                 `json:"failed_tasks"`
+	ActiveTasks  int                 `json:"active_tasks"`
+	TotalSteps   int                 `json:"total_steps"`
+	LastActivity time.Time           `json:"last_activity"`
 	// LastStepTime is the timestamp of the project's most recent step. It is
 	// kept off the wire and exists so RefreshHealth can re-derive staleness
 	// from a cached status without reloading the project.
@@ -691,6 +697,7 @@ func GetStatusUsing(entry ProjectEntry, running bool) ProjectStatus {
 	ps.HasProject = true
 	ps.Goal = st.Goal
 	ps.Status = st.Status
+	ps.PauseReason = st.PauseReason
 	ps.TotalSteps = st.StepCount
 	ps.Provider = st.Provider
 	ps.Model = st.Model

@@ -85,6 +85,31 @@ var registry = []Entry{
 		Note:      "`outcome` carries the terminal status; `reason` carries why, when there is one.",
 	},
 
+	// ── run ────────────────────────────────────────────────────────────────
+	{
+		Action:  ActionRunCapPaused,
+		Entity:  "plan",
+		Trigger: "A Claude Code subscription cap stops the run before it dispatches its next task.",
+		Payload: []string{
+			"project", "windows", "utilization", "cap", "resumes_at", "detail",
+		},
+		Stability: StabilityStable,
+		Read:      authz.PermAuditRead,
+		Note: "Distinct from state.save's bare \"paused\" status because a cap is the " +
+			"one pause that ends by itself: `resumes_at` is the window's reset from " +
+			"the OAuth usage API, and it is what run.cap_resumed is later matched against.",
+	},
+	{
+		Action:    ActionRunCapResumed,
+		Entity:    "plan",
+		Trigger:   "The hub restarts a cap-paused run after its window rolled over, without a human.",
+		Payload:   []string{"project", "paused_detail", "resumes_at", "resumed_at"},
+		Stability: StabilityStable,
+		Read:      authz.PermAuditRead,
+		Note: "The only action recording work that a machine started on its own initiative, " +
+			"so \"who restarted this project\" stays answerable from the trail alone.",
+	},
+
 	// ── step ───────────────────────────────────────────────────────────────
 	{
 		Action:    ActionStepAppend,
@@ -103,10 +128,13 @@ var registry = []Entry{
 		Payload: []string{
 			"goal", "status", "current_step", "evolve_step", "plan_version", "task_count",
 			"total_input_tokens", "total_output_tokens", "auto_evolve", "innovate_mode",
-			"parallel", "max_parallel",
+			"parallel", "max_parallel", "pause_code", "pause_detail", "pause_resumes_at",
 		},
 		Stability: StabilityStable,
 		Read:      authz.PermAuditRead,
+		Note: "The `pause_*` keys appear only when `status` is `paused`, and are what " +
+			"make an approval gate distinguishable from a spent budget or an exhausted " +
+			"usage window — before them all ~26 pause conditions recorded the same word.",
 	},
 	{
 		Action:    ActionConfigSet,

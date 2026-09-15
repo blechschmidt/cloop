@@ -41,6 +41,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/multiagent"
 	"github.com/blechschmidt/cloop/pkg/notify"
 	"github.com/blechschmidt/cloop/pkg/optimizer"
+	"github.com/blechschmidt/cloop/pkg/pausereason"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/promote"
 	"github.com/blechschmidt/cloop/pkg/promptopt"
@@ -425,6 +426,11 @@ type Orchestrator struct {
 	// abortWaitCeiling and abortRetryBackoff.
 	testAbortWaitCeiling time.Duration
 	testAbortBackoff     time.Duration
+
+	// testNow replaces the wall clock for the abort and subscription-cap
+	// policy, so a test can put a usage window's reset in the past instead of
+	// sleeping until one really rolls over. Nil means time.Now. See now().
+	testNow func() time.Time
 
 	// capWarnMu guards the rate-limiting of the "subscription caps are not
 	// being enforced" warning, which is reached before every task and so
@@ -1276,7 +1282,8 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 
 	// Plan-only mode: just show the plan, don't execute
 	if o.config.PlanOnly {
-		s.Status = "paused"
+		s.SetPaused(pausereason.New(pausereason.CodePlanOnly,
+			"plan-only mode: the plan was generated but not executed"))
 		s.Save()
 		return nil
 	}
@@ -1428,7 +1435,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 
 		select {
 		case <-ctx.Done():
-			s.Status = "paused"
+			s.SetPaused(pausereason.New(pausereason.CodeCancelled, "run interrupted"))
 			s.Save()
 			return ctx.Err()
 		default:
@@ -1436,7 +1443,8 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 
 		if o.config.StepsLimit > 0 && s.CurrentStep >= startStep+o.config.StepsLimit {
 			color.New(color.FgYellow).Printf("⏸ Reached --steps limit (%d). Run 'cloop run' to continue.\n", o.config.StepsLimit)
-			s.Status = "paused"
+			s.SetPaused(pausereason.New(pausereason.CodeStepLimit,
+				fmt.Sprintf("--steps limit of %d reached", o.config.StepsLimit)))
 			s.Save()
 			return nil
 		}
@@ -1445,7 +1453,8 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		// (where the work-execution path's check would otherwise be skipped).
 		if o.config.TokenBudget > 0 && s.TotalInputTokens+s.TotalOutputTokens >= o.config.TokenBudget {
 			color.New(color.FgYellow).Printf("⏸ Token budget reached (%d tokens). Run 'cloop run' to continue.\n", o.config.TokenBudget)
-			s.Status = "paused"
+			s.SetPaused(pausereason.New(pausereason.CodeTokenBudget,
+				fmt.Sprintf("token budget of %d tokens spent", o.config.TokenBudget)))
 			s.Save()
 			return nil
 		}
@@ -1549,7 +1558,8 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 					// completed session — pause so the next run resumes evolving.
 					if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || ctx.Err() != nil {
 						color.New(color.FgMagenta, color.Bold).Printf("\n⏹ Evolve interrupted: %v\n", err)
-						s.Status = "paused"
+						s.SetPaused(pausereason.New(pausereason.CodeCancelled,
+							"run interrupted while evolving the plan"))
 						s.Save()
 						if ctxErr := ctx.Err(); ctxErr != nil {
 							return ctxErr
@@ -1646,7 +1656,8 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		// Check max steps limit
 		if s.MaxSteps > 0 && s.CurrentStep >= s.MaxSteps {
 			color.New(color.FgYellow).Printf("⏸ Reached max steps (%d). Run 'cloop run' to continue.\n", s.MaxSteps)
-			s.Status = "paused"
+			s.SetPaused(pausereason.New(pausereason.CodeStepLimit,
+				fmt.Sprintf("project max-steps limit of %d reached", s.MaxSteps)))
 			s.Save()
 			return nil
 		}
@@ -1654,17 +1665,22 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		// Daily budget enforcement: abort before spending tokens if any limit is exceeded.
 		if budgetErr := budget.Enforce(o.config.WorkDir, o.config.Budget, o.config.NotifyCfg); budgetErr != nil {
 			failColor.Printf("\n✗ Budget limit reached: %v\n", budgetErr)
-			s.Status = "paused"
+			s.SetPaused(pausereason.New(pausereason.CodeBudget, budgetErr.Error()))
 			s.Save()
 			return budgetErr
 		}
 
-		// Per-project claudecode subscription cap enforcement.
+		// Per-project claudecode subscription cap enforcement. A cap whose
+		// window reopens soon is waited out in place rather than ending the
+		// run; a distant one pauses with the reset recorded as resumes_at, so
+		// the hub can restart it without a human (Task 20285). Shared by both
+		// loops so the sequential and parallel paths cannot disagree about
+		// what a cap means.
 		if ccErr := o.enforceClaudeCodeLimits(); ccErr != nil {
-			failColor.Printf("\n✗ %v\n", ccErr)
-			s.Status = "paused"
-			s.Save()
-			return ccErr
+			if o.handleUsageCap(ctx, s, ccErr) {
+				return ccErr
+			}
+			continue
 		}
 
 		// Ensure a request ID is bound to ctx for this task iteration before
@@ -1720,7 +1736,8 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 				s.Save()
 				continue
 			case res.Paused:
-				s.Status = "paused"
+				s.SetPaused(pausereason.New(pausereason.CodeApproval,
+					fmt.Sprintf("approval declined for task #%d", task.ID)))
 				s.Save()
 				color.New(color.FgYellow).Printf("⏸ Approval gate: execution declined. Run 'cloop run' to resume.\n")
 				return nil
@@ -1748,12 +1765,14 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 				s.Save()
 				continue
 			case "quit":
-				s.Status = "paused"
+				s.SetPaused(pausereason.New(pausereason.CodeApproval,
+					"interactive review: operator quit"))
 				s.Save()
 				color.New(color.FgYellow).Printf("⏸ Review mode: user quit. Run 'cloop run' to resume.\n")
 				return nil
 			case "no":
-				s.Status = "paused"
+				s.SetPaused(pausereason.New(pausereason.CodeApproval,
+					fmt.Sprintf("interactive review: operator declined task #%d", task.ID)))
 				s.Save()
 				color.New(color.FgYellow).Printf("⏸ Task execution declined. Run 'cloop run' to resume.\n")
 				return nil
@@ -2241,13 +2260,14 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			color.New(color.FgYellow).Printf("⏸ Token budget reached (%d tokens). Run 'cloop run' to continue.\n", o.config.TokenBudget)
 			// Mark the in-progress task as pending so it retries next time
 			task.Status = pm.TaskPending
-			s.Status = "paused"
+			s.SetPaused(pausereason.New(pausereason.CodeTokenBudget,
+				fmt.Sprintf("token budget of %d tokens spent", o.config.TokenBudget)))
 			s.Save()
 			return nil
 		}
 		if o.checkCostLimit(s) {
 			task.Status = pm.TaskPending
-			s.Status = "paused"
+			s.SetPaused(pausereason.New(pausereason.CodeBudget, "cost limit reached"))
 			s.Save()
 			return nil
 		}
@@ -3045,7 +3065,8 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		if o.config.StepDelay > 0 {
 			select {
 			case <-ctx.Done():
-				s.Status = "paused"
+				s.SetPaused(pausereason.New(pausereason.CodeCancelled,
+					"run interrupted between steps"))
 				s.Save()
 				return ctx.Err()
 			case <-time.After(o.config.StepDelay):
@@ -3053,7 +3074,11 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		}
 	}
 
-	s.Status = "paused"
+	// The loop exits when nothing is left to schedule. That is the ordinary end
+	// of a run rather than a fault, but it is still a pause: auto-evolve or an
+	// operator may add work to the same plan, so the project is not complete.
+	s.SetPaused(pausereason.New(pausereason.CodeIdle,
+		"every runnable task is finished"))
 	s.Save()
 
 	// Distil cross-session learnings into .cloop/memory.md after the plan completes.
@@ -3342,7 +3367,8 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 	}
 
 	if o.config.PlanOnly {
-		s.Status = "paused"
+		s.SetPaused(pausereason.New(pausereason.CodePlanOnly,
+			"plan-only mode: the plan was generated but not executed"))
 		s.Save()
 		return nil
 	}
@@ -3371,7 +3397,7 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
-			s.Status = "paused"
+			s.SetPaused(pausereason.New(pausereason.CodeCancelled, "run interrupted"))
 			s.Save()
 			return ctx.Err()
 		default:
@@ -3379,7 +3405,8 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 
 		if o.config.StepsLimit > 0 && s.CurrentStep >= startStep+o.config.StepsLimit {
 			color.New(color.FgYellow).Printf("⏸ Reached --steps limit (%d). Run 'cloop run' to continue.\n", o.config.StepsLimit)
-			s.Status = "paused"
+			s.SetPaused(pausereason.New(pausereason.CodeStepLimit,
+				fmt.Sprintf("--steps limit of %d reached", o.config.StepsLimit)))
 			s.Save()
 			return nil
 		}
@@ -3388,7 +3415,8 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 		// (where the work-execution path's check would otherwise be skipped).
 		if o.config.TokenBudget > 0 && s.TotalInputTokens+s.TotalOutputTokens >= o.config.TokenBudget {
 			color.New(color.FgYellow).Printf("⏸ Token budget reached (%d tokens). Run 'cloop run' to continue.\n", o.config.TokenBudget)
-			s.Status = "paused"
+			s.SetPaused(pausereason.New(pausereason.CodeTokenBudget,
+				fmt.Sprintf("token budget of %d tokens spent", o.config.TokenBudget)))
 			s.Save()
 			return nil
 		}
@@ -3478,7 +3506,8 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 					// completed session — pause so the next run resumes evolving.
 					if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || ctx.Err() != nil {
 						color.New(color.FgMagenta, color.Bold).Printf("\n⏹ Evolve interrupted: %v\n", err)
-						s.Status = "paused"
+						s.SetPaused(pausereason.New(pausereason.CodeCancelled,
+							"run interrupted while evolving the plan"))
 						s.Save()
 						if ctxErr := ctx.Err(); ctxErr != nil {
 							return ctxErr
@@ -3542,17 +3571,22 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 		// Daily budget enforcement: abort before spending tokens if any limit is exceeded.
 		if budgetErr := budget.Enforce(o.config.WorkDir, o.config.Budget, o.config.NotifyCfg); budgetErr != nil {
 			failColor.Printf("\n✗ Budget limit reached: %v\n", budgetErr)
-			s.Status = "paused"
+			s.SetPaused(pausereason.New(pausereason.CodeBudget, budgetErr.Error()))
 			s.Save()
 			return budgetErr
 		}
 
-		// Per-project claudecode subscription cap enforcement.
+		// Per-project claudecode subscription cap enforcement. A cap whose
+		// window reopens soon is waited out in place rather than ending the
+		// run; a distant one pauses with the reset recorded as resumes_at, so
+		// the hub can restart it without a human (Task 20285). Shared by both
+		// loops so the sequential and parallel paths cannot disagree about
+		// what a cap means.
 		if ccErr := o.enforceClaudeCodeLimits(); ccErr != nil {
-			failColor.Printf("\n✗ %v\n", ccErr)
-			s.Status = "paused"
-			s.Save()
-			return ccErr
+			if o.handleUsageCap(ctx, s, ccErr) {
+				return ccErr
+			}
+			continue
 		}
 
 		// Apply worker pool limit: cap the batch to MaxParallel if set.
@@ -3788,7 +3822,8 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 				case <-time.After(parallelShutdownGracePeriod):
 					color.New(color.FgYellow).Printf("⚠ %d task goroutine(s) did not exit within %s of cancellation; returning anyway\n", parallelTotal-parallelDone, parallelShutdownGracePeriod)
 				}
-				s.Status = "paused"
+				s.SetPaused(pausereason.New(pausereason.CodeCancelled,
+					"run interrupted while parallel tasks were in flight"))
 				s.Save()
 				return ctx.Err()
 			}
@@ -3938,13 +3973,14 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 			if o.config.TokenBudget > 0 && s.TotalInputTokens+s.TotalOutputTokens >= o.config.TokenBudget {
 				color.New(color.FgYellow).Printf("⏸ Token budget reached (%d tokens). Run 'cloop run' to continue.\n", o.config.TokenBudget)
 				task.Status = pm.TaskPending
-				s.Status = "paused"
+				s.SetPaused(pausereason.New(pausereason.CodeTokenBudget,
+					fmt.Sprintf("token budget of %d tokens spent", o.config.TokenBudget)))
 				s.Save()
 				return nil
 			}
 			if o.checkCostLimit(s) {
 				task.Status = pm.TaskPending
-				s.Status = "paused"
+				s.SetPaused(pausereason.New(pausereason.CodeBudget, "cost limit reached"))
 				s.Save()
 				return nil
 			}
@@ -4223,7 +4259,11 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 		}
 	}
 
-	s.Status = "paused"
+	// The loop exits when nothing is left to schedule. That is the ordinary end
+	// of a run rather than a fault, but it is still a pause: auto-evolve or an
+	// operator may add work to the same plan, so the project is not complete.
+	s.SetPaused(pausereason.New(pausereason.CodeIdle,
+		"every runnable task is finished"))
 	s.Save()
 
 	// Distil cross-session learnings into .cloop/memory.md after the plan completes.

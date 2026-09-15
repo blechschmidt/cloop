@@ -131,8 +131,9 @@ function render(s) {
     overviewTitle.textContent = (isMultiProject && selectedProjectName) ? 'Overview — ' + selectedProjectName : 'Overview';
   }
 
-  // Status badge
-  document.getElementById('statusBadge').innerHTML = statusBadge(s.status);
+  // Status badge — carries the pause reason, so "paused" says which wall the
+  // run hit and, for a usage cap, when it lifts (Task 20285).
+  document.getElementById('statusBadge').innerHTML = statusBadge(s.status, s.pause_reason);
 
   renderAbortedLedgerBanner(s);
 

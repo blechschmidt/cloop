@@ -11,6 +11,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/boundedread"
 	"github.com/blechschmidt/cloop/pkg/milestone"
+	"github.com/blechschmidt/cloop/pkg/pausereason"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 )
@@ -85,18 +86,23 @@ type StepResult struct {
 }
 
 type ProjectState struct {
-	Goal         string       `json:"goal"`
-	WorkDir      string       `json:"workdir"`
-	MaxSteps     int          `json:"max_steps"`
-	CurrentStep  int          `json:"current_step"`
-	Status       string       `json:"status"` // running, complete, failed, paused, evolving
-	Steps        []StepResult `json:"steps"`
-	CreatedAt    time.Time    `json:"created_at"`
-	UpdatedAt    time.Time    `json:"updated_at"`
-	Model        string       `json:"model,omitempty"`
-	Instructions string       `json:"instructions,omitempty"`
-	AutoEvolve   bool         `json:"auto_evolve"`
-	EvolveStep   int          `json:"evolve_step"`
+	Goal        string `json:"goal"`
+	WorkDir     string `json:"workdir"`
+	MaxSteps    int    `json:"max_steps"`
+	CurrentStep int    `json:"current_step"`
+	Status      string `json:"status"` // running, complete, failed, paused, evolving
+	// PauseReason explains a "paused" status: which of the ~26 conditions
+	// stopped the run, and — for a subscription cap — when it lifts. Nil
+	// for every other status; the invariant is enforced in toRaw/fromRaw
+	// rather than at the call sites. Always set via SetPaused.
+	PauseReason  *pausereason.Reason `json:"pause_reason,omitempty"`
+	Steps        []StepResult        `json:"steps"`
+	CreatedAt    time.Time           `json:"created_at"`
+	UpdatedAt    time.Time           `json:"updated_at"`
+	Model        string              `json:"model,omitempty"`
+	Instructions string              `json:"instructions,omitempty"`
+	AutoEvolve   bool                `json:"auto_evolve"`
+	EvolveStep   int                 `json:"evolve_step"`
 
 	// Provider settings
 	Provider string `json:"provider,omitempty"`
@@ -500,6 +506,23 @@ func (s *ProjectState) mergeExternalTasks() {
 	s.Effort = disk.Effort
 }
 
+// SetPaused parks the run and records why.
+//
+// This is the only sanctioned way to reach the "paused" status: a direct
+// `s.Status = "paused"` is rejected by TestPausedStatusAlwaysCarriesAReason in
+// tests/arch, because a pause without a reason is exactly the silent stall
+// this field exists to end. Callers that genuinely have nothing to say should
+// still pick a code — pausereason.CodeIdle is the ordinary end of a run.
+func (s *ProjectState) SetPaused(r pausereason.Reason) {
+	s.Status = "paused"
+	s.PauseReason = &r
+}
+
+// PausedFor reports whether the run is paused for the given reason code.
+func (s *ProjectState) PausedFor(code pausereason.Code) bool {
+	return s.Status == "paused" && s.PauseReason != nil && s.PauseReason.Code == code
+}
+
 // Init creates a new project state and persists it.
 func Init(workdir, goal string, maxSteps int) (*ProjectState, error) {
 	s := &ProjectState{
@@ -543,6 +566,7 @@ func toRaw(s *ProjectState) *statedb.State {
 		MaxSteps:          s.MaxSteps,
 		CurrentStep:       s.CurrentStep,
 		Status:            s.Status,
+		PauseReason:       pausereason.Normalize(s.Status, s.PauseReason),
 		CreatedAt:         s.CreatedAt,
 		UpdatedAt:         s.UpdatedAt,
 		Model:             s.Model,
@@ -589,6 +613,7 @@ func fromRaw(r *statedb.State) *ProjectState {
 		MaxSteps:          r.MaxSteps,
 		CurrentStep:       r.CurrentStep,
 		Status:            r.Status,
+		PauseReason:       pausereason.Normalize(r.Status, r.PauseReason),
 		CreatedAt:         r.CreatedAt,
 		UpdatedAt:         r.UpdatedAt,
 		Model:             r.Model,

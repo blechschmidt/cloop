@@ -17,6 +17,7 @@ import (
 	_ "modernc.org/sqlite" // pure-Go SQLite driver, no CGo
 
 	"github.com/blechschmidt/cloop/pkg/milestone"
+	"github.com/blechschmidt/cloop/pkg/pausereason"
 	"github.com/blechschmidt/cloop/pkg/pm"
 )
 
@@ -28,6 +29,11 @@ type State struct {
 	MaxSteps    int
 	CurrentStep int
 	Status      string
+	// PauseReason explains a "paused" Status. Stored as JSON in the
+	// schemaless metadata table rather than as a column, so adding it needed
+	// no migration — and an older binary reading this DB just ignores the key
+	// instead of being locked out by a schema it does not know.
+	PauseReason *pausereason.Reason
 	Steps       []StepRow
 	// StepCount mirrors len(Steps) on full loads but is also populated by
 	// LoadStateLite — where Steps is nil — so callers that only need a
@@ -325,6 +331,16 @@ func (d *DB) saveStateLocked(s *State) (changed []taskAuditChange, deleted []int
 		meta["milestones"] = ""
 	}
 
+	// Written unconditionally — including the empty string — because clearing
+	// matters as much as setting: a run that resumes must not leave last
+	// week's cap pause behind for the dashboard to keep reporting.
+	if pr := pausereason.Normalize(s.Status, s.PauseReason); pr != nil {
+		b, _ := json.Marshal(pr)
+		meta["pause_reason"] = string(b)
+	} else {
+		meta["pause_reason"] = ""
+	}
+
 	// workdir is write-once: it records where the project was created, and the
 	// process saving is not always in a position to know that. An isolating
 	// executor bind-mounts the project somewhere of its own — the container
@@ -520,6 +536,16 @@ func (d *DB) loadStateMetaTx() (*State, error) {
 	if v := metaMap["milestones"]; v != "" {
 		if err := json.Unmarshal([]byte(v), &s.Milestones); err != nil {
 			s.Milestones = nil
+		}
+	}
+
+	if v := metaMap["pause_reason"]; v != "" {
+		var pr pausereason.Reason
+		if err := json.Unmarshal([]byte(v), &pr); err == nil {
+			// Normalize drops a reason whose code this binary does not know,
+			// so a row written by a newer cloop degrades to a bare "paused"
+			// rather than rendering a code the UI has no label for.
+			s.PauseReason = pausereason.Normalize(s.Status, &pr)
 		}
 	}
 

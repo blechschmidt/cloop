@@ -1265,6 +1265,23 @@ func (o OrchestratorConfig) EffectiveTaskTimeoutMinutes() int {
 // writer-loop ticker) plus an entry in the per-project hub registry; without
 // caps a single client can register thousands of simultaneous peers.
 type UIConfig struct {
+	// AutoResumeOnCapReset lets the hub restart a run that a Claude Code
+	// subscription cap stopped, once the window it was waiting on has rolled
+	// over (Task 20285).
+	//
+	// A *bool rather than a bool because absent and explicitly-false must
+	// differ: the default is on, so a plain bool's zero value would silently
+	// disable the feature for every existing config file.
+	//
+	// On is the right default. The alternative is what this replaced — an
+	// unattended fleet parked until a human notices, for a condition that had
+	// already cleared and whose exact reset time the hub already knew. It only
+	// ever restarts a run paused *solely* for a usage cap: a declined
+	// approval, a spent budget or an operator's Stop are never resumed on a
+	// timer, because each of those is a decision the resume would override.
+	// Operators who want a human in that loop can set it to false.
+	AutoResumeOnCapReset *bool `yaml:"auto_resume_on_cap_reset,omitempty"`
+
 	// MaxWebSocketConns caps the total number of concurrent WebSocket
 	// connections the UI server will accept across all remote IPs.
 	// Zero substitutes WebSocketConnsDefault (256).

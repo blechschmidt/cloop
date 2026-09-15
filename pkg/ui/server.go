@@ -431,6 +431,16 @@ type Server struct {
 	RPS   float64
 	Burst int
 
+	// nowFn replaces the wall clock for the cap auto-resume sweep, so a test
+	// can place a subscription window's reset in the past instead of sleeping
+	// through a real one. Nil means time.Now. See autoresume.go.
+	nowFn func() time.Time
+
+	// autoResumeStart replaces the harness dispatch in the same sweep, so a
+	// test can assert *which* projects would be resumed without starting a
+	// real workload. Nil means the real dispatch.
+	autoResumeStart func(workDir string) error
+
 	// MaxWebSocketConns caps the total number of concurrent WebSocket
 	// connections accepted across every remote IP. Zero substitutes
 	// config.WebSocketConnsDefault (256). Each accepted upgrade spawns
@@ -1176,6 +1186,11 @@ func (s *Server) Run(ctx context.Context) error {
 	// and the lease is what entitles this process to do that. See
 	// retention.go.
 	go s.watchRetention(watcherCtx)
+	// Restarts runs a subscription cap parked, once the window they were
+	// waiting on has rolled over. Started with the other sweeps and for the
+	// same reason: it acts on every registered project, so it belongs to
+	// whichever hub holds the instance lease. See autoresume.go.
+	go s.watchAutoResume(watcherCtx)
 	s.startSessionJanitor(watcherCtx)
 	// Sweeps lapsed secret leases off live agents. Without it a lease TTL
 	// binds only the hub: an executor handed a fifteen-minute credential
@@ -3293,69 +3308,83 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	go func() {
-		// Unconditional, and before the recover: the concurrency slot must
-		// come back whether the watcher exits cleanly or panics. A deferred
-		// release inside the recover branch would leak the slot on the
-		// normal path, and one after it would be skipped on the panic path.
-		defer releaseSlot()
-		defer func() {
-			if rec := recover(); rec != nil {
-				fmt.Fprintf(os.Stderr, "ui: run output goroutine panic recovered: %v\n", rec)
-				// Best-effort cleanup so the UI doesn't think a run is still in progress.
-				s.liveLogSetRunning(workDir, false)
-			}
-		}()
-		// Book spend as the run produces it, so a daily budget is a real
-		// ceiling rather than a check performed once at the start. The ticker
-		// runs alongside the output loop rather than inside it: a run that has
-		// gone quiet mid-task is exactly when an overrun needs catching, and a
-		// loop driven by log lines would not tick at all.
-		// Deferred for the same reason releaseSlot is: a panic in the output
-		// loop is recovered above, and a plain call after the loop would then
-		// be skipped — leaving the ticker draining this project every thirty
-		// seconds for the life of the process, and the last task unbooked.
-		stopDrain := s.startSpendDrain(workDir)
-		defer stopDrain()
-		defer func() { _, _ = s.drainSpend(workDir) }()
-
-		// The driver closes the channel only after the workload has been
-		// reaped, so falling out of this loop means the run is over.
-		for line := range lines {
-			if line.Text == "" {
-				continue
-			}
-			os.Stderr.WriteString(line.Text) // also echo to server's stderr
-			s.broadcastLog(workDir, line.Text)
-		}
-		stopDrain()
-		// One final drain after the workload is reaped: the last task's cost
-		// row lands as the run exits, and without this it would stay unbooked
-		// until the next run — letting a tenant spend a fresh budget every
-		// time by running one task per run.
-		s.drainSpend(workDir)
-		s.liveLogSetRunning(workDir, false)
-		s.broadcastRunState(workDir, false, true)
-		// The stream closing is the earliest and best-informed moment to
-		// settle the run: the driver still holds its exit status, so a run
-		// that was killed rather than finished can be recorded as such
-		// instead of being inferred later from an empty /proc scan. Must
-		// follow liveLogSetRunning(false), which is what tells the liveness
-		// check that this run is no longer the one in flight.
-		s.runEnded(workDir, ex, handle.ID)
-		// Broadcast updated state after run completes. Lite-load —
-		// marshalStateForWire drops Steps before broadcast (Task 20125).
-		// SSE consumers get the full state; WS clients get a state_diff
-		// against the cached snapshot (Task 20132).
-		if ps, loadErr := state.LoadLite(workDir); loadErr == nil {
-			if data, marshalErr := marshalStateForWire(ps); marshalErr == nil {
-				s.broadcast(workDir, string(data))
-			}
-			s.broadcastStateDiff(workDir, ps)
-		}
-	}()
+	go s.consumeRunOutput(workDir, ex, handle.ID, lines, releaseSlot)
 
 	jsonOK(w, map[string]interface{}{"ok": true, "command": "cloop " + strings.Join(args, " ")})
+}
+
+// consumeRunOutput drains a dispatched run's output and settles it when the
+// stream closes: books its spend, clears the running flag, records how it
+// ended, and broadcasts the result.
+//
+// Extracted from handleRun so the timer-driven auto-resume dispatch settles a
+// run exactly the way a hand-started one does (Task 20285). The two differ
+// only in onExit, which handleRun uses to return the tenant's concurrency
+// slot; auto-resume holds no slot and passes nil.
+//
+// Runs as its own goroutine and returns when the driver closes lines.
+func (s *Server) consumeRunOutput(workDir string, ex executor.Executor, handleID string, lines <-chan executor.LogLine, onExit func()) {
+	// Unconditional, and before the recover: the concurrency slot must
+	// come back whether the watcher exits cleanly or panics. A deferred
+	// release inside the recover branch would leak the slot on the
+	// normal path, and one after it would be skipped on the panic path.
+	if onExit != nil {
+		defer onExit()
+	}
+	defer func() {
+		if rec := recover(); rec != nil {
+			fmt.Fprintf(os.Stderr, "ui: run output goroutine panic recovered: %v\n", rec)
+			// Best-effort cleanup so the UI doesn't think a run is still in progress.
+			s.liveLogSetRunning(workDir, false)
+		}
+	}()
+	// Book spend as the run produces it, so a daily budget is a real
+	// ceiling rather than a check performed once at the start. The ticker
+	// runs alongside the output loop rather than inside it: a run that has
+	// gone quiet mid-task is exactly when an overrun needs catching, and a
+	// loop driven by log lines would not tick at all.
+	// Deferred for the same reason releaseSlot is: a panic in the output
+	// loop is recovered above, and a plain call after the loop would then
+	// be skipped — leaving the ticker draining this project every thirty
+	// seconds for the life of the process, and the last task unbooked.
+	stopDrain := s.startSpendDrain(workDir)
+	defer stopDrain()
+	defer func() { _, _ = s.drainSpend(workDir) }()
+
+	// The driver closes the channel only after the workload has been
+	// reaped, so falling out of this loop means the run is over.
+	for line := range lines {
+		if line.Text == "" {
+			continue
+		}
+		os.Stderr.WriteString(line.Text) // also echo to server's stderr
+		s.broadcastLog(workDir, line.Text)
+	}
+	stopDrain()
+	// One final drain after the workload is reaped: the last task's cost
+	// row lands as the run exits, and without this it would stay unbooked
+	// until the next run — letting a tenant spend a fresh budget every
+	// time by running one task per run.
+	s.drainSpend(workDir)
+	s.liveLogSetRunning(workDir, false)
+	s.broadcastRunState(workDir, false, true)
+	// The stream closing is the earliest and best-informed moment to
+	// settle the run: the driver still holds its exit status, so a run
+	// that was killed rather than finished can be recorded as such
+	// instead of being inferred later from an empty /proc scan. Must
+	// follow liveLogSetRunning(false), which is what tells the liveness
+	// check that this run is no longer the one in flight.
+	s.runEnded(workDir, ex, handleID)
+	// Broadcast updated state after run completes. Lite-load —
+	// marshalStateForWire drops Steps before broadcast (Task 20125).
+	// SSE consumers get the full state; WS clients get a state_diff
+	// against the cached snapshot (Task 20132).
+	if ps, loadErr := state.LoadLite(workDir); loadErr == nil {
+		if data, marshalErr := marshalStateForWire(ps); marshalErr == nil {
+			s.broadcast(workDir, string(data))
+		}
+		s.broadcastStateDiff(workDir, ps)
+	}
 }
 
 // handleStop sends SIGINT to the "cloop run" processes of the requested
