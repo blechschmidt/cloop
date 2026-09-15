@@ -81,12 +81,11 @@ window.removeTask = function(id) {
   const title = task ? task.title : '#' + id;
   document.getElementById('deleteModalMsg').textContent =
     'Delete task "' + title + '"? This action cannot be undone.';
-  const overlay = document.getElementById('delete-modal-overlay');
-  overlay.style.display = 'flex';
+  openOverlay('delete-modal-overlay', {dismiss: closeDeleteModal});
 };
 
 window.closeDeleteModal = function() {
-  document.getElementById('delete-modal-overlay').style.display = 'none';
+  closeOverlay('delete-modal-overlay');
   pendingDeleteId = null;
 };
 
@@ -164,12 +163,11 @@ window.openEditModal = function(id) {
   document.getElementById('modalDeps').value     = (t.depends_on && t.depends_on.length) ? t.depends_on.join(',') : '';
   const mmEl = document.getElementById('modalMaxMinutes');
   if (mmEl) mmEl.value = t.max_minutes || 0;
-  document.getElementById('modal-overlay').classList.add('open');
-  document.getElementById('modalTitle_').focus();
+  openOverlay('modal-overlay', {dismiss: closeModal, focus: '#modalTitle_'});
 };
 
 window.closeModal = function() {
-  document.getElementById('modal-overlay').classList.remove('open');
+  closeOverlay('modal-overlay');
 };
 
 // ── Task details modal (read-only execution view) ──────────────────────────
@@ -182,7 +180,7 @@ window.openTaskDetails = function(id) {
   const body    = document.getElementById('td-body');
   if (!overlay || !body) return;
   body.innerHTML = '<div class="td-empty">Loading…</div>';
-  overlay.classList.add('open');
+  openOverlay(overlay, {dismiss: closeTaskDetails});
   // Independent of the details call and of _tdLoadReproductions: attachability
   // is a property of the *live* executor session, not of the stored task, so it
   // must not wait on — or be skipped by a failure of — either (Task 20265).
@@ -201,8 +199,7 @@ window.openTaskDetails = function(id) {
 // tearing it down because they dismissed the task summary behind it would drop
 // the output they opened it to watch.
 window.closeTaskDetails = function() {
-  const overlay = document.getElementById('td-overlay');
-  if (overlay) overlay.classList.remove('open');
+  closeOverlay('td-overlay');
   _tdCurrentId = null;
 };
 
@@ -748,7 +745,7 @@ window.taskDetailsAttach = function() {
   // avoids telling someone who may write "Read-only session" for the length of
   // a handshake, which reads as a refusal rather than as a wait.
   _atSetInput(false, (_atInfo && _atInfo.can_write) ? 'Connecting…' : 'Read-only session');
-  overlay.classList.add('open');
+  openOverlay(overlay, {dismiss: closeAttachTerminal});
 
   let sock;
   try { sock = new WebSocket(_atSocketURL(id)); }
@@ -824,8 +821,7 @@ window.closeAttachTerminal = function() {
   _atSetInput(false, 'Read-only session');
   const inp = document.getElementById('at-input');
   if (inp) inp.value = '';
-  const overlay = document.getElementById('at-overlay');
-  if (overlay) overlay.classList.remove('open');
+  closeOverlay('at-overlay');
 };
 
 // A line-at-a-time input rather than raw key capture. Capturing keys in the

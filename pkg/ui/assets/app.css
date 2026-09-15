@@ -1062,6 +1062,19 @@
   #modal h2 { font-size:15px; font-weight:600; margin-bottom:16px; }
   .modal-footer { display:flex; gap:8px; justify-content:flex-end; margin-top:16px; }
 
+  /* The replay-diff and provider-call dialogs are the only two that style
+     themselves by class rather than by id, and neither class had a rule — so
+     both opened as an in-flow flex box inside their tab panel, with nothing
+     dimmed and nothing covered, while still carrying the `event.target===this`
+     backdrop guard that only a real backdrop can satisfy. Survivable while they
+     were merely mis-painted; not once they contain focus (Task 20288), because
+     a dialog that seals the page behind it has to be the thing the user can
+     actually see. */
+  .modal-backdrop { display:none; position:fixed; inset:0; background:rgba(0,0,0,.7); z-index:50; align-items:center; justify-content:center; }
+  .modal-card { background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); padding:24px; max-width:92vw; }
+  .modal-header { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:14px; }
+  .modal-header h2 { font-size:15px; font-weight:600; margin:0; }
+
   /* ── Task Details modal ── */
   #td-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,.7); z-index:60; align-items:center; justify-content:center; }
   #td-overlay.open { display:flex; }

@@ -162,7 +162,7 @@ function openProviderCallModal(id) {
   api(url).then(detail => {
     _pcCurrent = detail || null;
     _pcRenderModal(detail);
-    document.getElementById('pcModal').style.display = 'flex';
+    openOverlay('pcModal', {dismiss: closeProviderCallModal});
     pcSwitchSub('prompt');
   }).catch(err => {
     toast('Failed to load call: ' + (err && err.message || err), 'error');
@@ -170,7 +170,7 @@ function openProviderCallModal(id) {
 }
 
 function closeProviderCallModal() {
-  document.getElementById('pcModal').style.display = 'none';
+  closeOverlay('pcModal');
   const r = document.getElementById('pcReplayResult');
   if (r) r.style.display = 'none';
   _pcCurrent = null;

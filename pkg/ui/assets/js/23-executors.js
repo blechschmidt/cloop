@@ -481,8 +481,7 @@ window.openExecutorDetail = function(idx) {
   if (sub) sub.textContent = ex.id + ' · ' + _execKindLabel(ex.kind);
   const body = document.getElementById('execDetailBody');
   if (body) body.innerHTML = '<div class="exec-detail-note">Loading…</div>';
-  const ov = document.getElementById('executor-detail-overlay');
-  if (ov) ov.style.display = 'flex';
+  openOverlay('executor-detail-overlay', {dismiss: closeExecutorDetail});
 
   // Not pUrl(): this is fleet data, gated by executor.read on an executor
   // scope. Appending the selected project would suggest a project filter the
@@ -501,8 +500,7 @@ window.openExecutorDetail = function(idx) {
 };
 
 window.closeExecutorDetail = function() {
-  const ov = document.getElementById('executor-detail-overlay');
-  if (ov) ov.style.display = 'none';
+  closeOverlay('executor-detail-overlay');
   execDetailRefs = [];
 };
 
@@ -734,14 +732,11 @@ window.openEnrollModal = function() {
   if (ttl) ttl.value = '';
   const root = document.getElementById('enrollRoot');
   if (root) root.value = '';
-  const ov = document.getElementById('enroll-overlay');
-  if (ov) ov.style.display = 'flex';
-  setTimeout(() => { if (name) name.focus(); }, 50);
+  openOverlay('enroll-overlay', {dismiss: closeEnrollModal, focus: name});
 };
 
 window.closeEnrollModal = function() {
-  const ov = document.getElementById('enroll-overlay');
-  if (ov) ov.style.display = 'none';
+  closeOverlay('enroll-overlay');
   // Refresh on close so a token minted moments ago is reflected even before
   // the device redeems it.
   loadExecutors();
@@ -874,8 +869,7 @@ window.openExecutorPickerModal = function() {
   const sel = document.getElementById('epExecutor');
   const err = document.getElementById('epError');
   if (err) err.style.display = 'none';
-  const ov = document.getElementById('executor-picker-overlay');
-  if (ov) ov.style.display = 'flex';
+  openOverlay('executor-picker-overlay', {dismiss: closeExecutorPickerModal});
   if (sel) sel.innerHTML = '<option value="">Loading…</option>';
   // Always refetch: an executor may have gone offline, or the policy may
   // have changed, since the tab was last painted.
@@ -908,8 +902,7 @@ function _populateExecutorPicker(d) {
 }
 
 window.closeExecutorPickerModal = function() {
-  const ov = document.getElementById('executor-picker-overlay');
-  if (ov) ov.style.display = 'none';
+  closeOverlay('executor-picker-overlay');
 };
 
 window.submitExecutorBind = function() {

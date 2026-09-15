@@ -572,10 +572,8 @@ window.openSecretModal = function() {
   const err = document.getElementById('secretError');
   if (err) err.style.display = 'none';
   onSecretKindChange();
-  const ov = document.getElementById('secret-overlay');
-  if (ov) ov.style.display = 'flex';
+  openOverlay('secret-overlay', {dismiss: closeSecretModal, focus: '#secretName'});
   _secApplyGating();
-  setTimeout(() => { const n = document.getElementById('secretName'); if (n) n.focus(); }, 50);
 };
 
 window.closeSecretModal = function() {
@@ -584,8 +582,7 @@ window.closeSecretModal = function() {
   // buffer, and this modal is the one place in the dashboard that holds one.
   const p = document.getElementById('secretPayload');
   if (p) p.value = '';
-  const ov = document.getElementById('secret-overlay');
-  if (ov) ov.style.display = 'none';
+  closeOverlay('secret-overlay');
 };
 
 window.onSecretKindChange = function() {
@@ -712,15 +709,12 @@ window.openGrantModal = function() {
     if (el) el.value = '';
   });
   onGrantKindChange();
-  const ov = document.getElementById('grant-overlay');
-  if (ov) ov.style.display = 'flex';
+  openOverlay('grant-overlay', {dismiss: closeGrantModal, focus: '#grantSubject'});
   _secApplyGating();
-  setTimeout(() => { const s = document.getElementById('grantSubject'); if (s) s.focus(); }, 50);
 };
 
 window.closeGrantModal = function() {
-  const ov = document.getElementById('grant-overlay');
-  if (ov) ov.style.display = 'none';
+  closeOverlay('grant-overlay');
 };
 
 window.onGrantKindChange = function() {
@@ -1140,15 +1134,12 @@ window.openRequestModal = function() {
   if (wr) wr.checked = false;
   const err = document.getElementById('requestError');
   if (err) err.style.display = 'none';
-  const ov = document.getElementById('request-overlay');
-  if (ov) ov.style.display = 'flex';
+  openOverlay('request-overlay', {dismiss: closeRequestModal, focus: '#requestSubject'});
   _secApplyGating();
-  setTimeout(() => { const s = document.getElementById('requestSubject'); if (s) s.focus(); }, 50);
 };
 
 window.closeRequestModal = function() {
-  const ov = document.getElementById('request-overlay');
-  if (ov) ov.style.display = 'none';
+  closeOverlay('request-overlay');
 };
 
 // _reqKindOf resolves the kind of the secret a request names. The kind decides
@@ -1286,16 +1277,13 @@ function _reqOpenDecision(id, action) {
   const err = document.getElementById('requestDecideError');
   if (err) err.style.display = 'none';
 
-  const ov = document.getElementById('request-decide-overlay');
-  if (ov) ov.style.display = 'flex';
+  openOverlay('request-decide-overlay', {dismiss: closeRequestDecideModal, focus: note});
   _secApplyGating();
-  setTimeout(() => { if (note) note.focus(); }, 50);
 }
 
 window.closeRequestDecideModal = function() {
   reqState.decide = null;
-  const ov = document.getElementById('request-decide-overlay');
-  if (ov) ov.style.display = 'none';
+  closeOverlay('request-decide-overlay');
 };
 
 window.submitDecision = function() {
@@ -1490,10 +1478,8 @@ window.openTokenModal = function() {
   if (err) err.style.display = 'none';
 
   _tokShowStep('form');
-  const ov = document.getElementById('token-overlay');
-  if (ov) ov.style.display = 'flex';
+  openOverlay('token-overlay', {dismiss: closeTokenModal, focus: name});
   _secApplyGating();
-  setTimeout(() => { if (name) name.focus(); }, 50);
 };
 
 window.closeTokenModal = function() {
@@ -1504,8 +1490,7 @@ window.closeTokenModal = function() {
   tokState.plaintext = '';
   const pt = document.getElementById('tokenPlaintext');
   if (pt) pt.value = '';
-  const ov = document.getElementById('token-overlay');
-  if (ov) ov.style.display = 'none';
+  closeOverlay('token-overlay');
   _tokShowStep('form');
 };
 

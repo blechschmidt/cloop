@@ -21,7 +21,7 @@
 <body>
 
 <!-- ── Login overlay ── -->
-<div id="loginOverlay">
+<div id="loginOverlay" data-overlay="class:visible">
   <div class="login-box">
     <h2>cloop dashboard</h2>
     <p>This dashboard is protected. Enter the access token to continue.</p>
@@ -164,7 +164,7 @@
   </div>
 
   <!-- ── Mobile navigation overlay ── -->
-  <div class="mobile-nav-overlay" id="mobileNavOverlay" onclick="if(event.target===this)closeMobileNav()" aria-hidden="true">
+  <div class="mobile-nav-overlay" id="mobileNavOverlay" data-overlay="class:open" onclick="if(event.target===this)closeMobileNav()" aria-hidden="true">
     <nav class="mobile-nav-panel" role="navigation" aria-label="Main navigation">
       <div class="mobile-nav-header">
         <span class="mobile-nav-title">cloop</span>
@@ -405,7 +405,7 @@
             </button>
           </div>
           <!-- Voice modal -->
-          <div id="voiceModalBackdrop" class="voice-modal-backdrop" style="display:none">
+          <div id="voiceModalBackdrop" data-overlay="flex" class="voice-modal-backdrop" style="display:none">
             <div class="voice-modal">
               <h3>Voice Command</h3>
               <div class="voice-status" id="voiceStatus">Click Record to start recording...</div>
@@ -887,7 +887,7 @@
       </div>
 
       <!-- side-by-side diff modal -->
-      <div id="replayDiffModal" class="modal-backdrop" style="display:none" onclick="if(event.target===this)closeReplayDiff()">
+      <div id="replayDiffModal" data-overlay="flex" class="modal-backdrop" style="display:none" onclick="if(event.target===this)closeReplayDiff()">
         <div class="modal-card" style="max-width:1200px;width:96%;max-height:90vh;display:flex;flex-direction:column">
           <div class="modal-header">
             <span class="section-title" id="replayDiffTitle" style="margin:0">Replay diff</span>
@@ -962,7 +962,7 @@
       </div>
 
       <!-- Provider call detail / replay modal -->
-      <div id="pcModal" class="modal-backdrop" style="display:none" onclick="if(event.target===this)closeProviderCallModal()">
+      <div id="pcModal" data-overlay="flex" class="modal-backdrop" style="display:none" onclick="if(event.target===this)closeProviderCallModal()">
         <div class="modal-card" style="max-width:1280px;width:97%;max-height:92vh;display:flex;flex-direction:column">
           <div class="modal-header">
             <span class="section-title" id="pcModalTitle" style="margin:0">Provider call</span>
@@ -2234,7 +2234,7 @@
 </div>
 
 <!-- New Project modal -->
-<div id="new-project-overlay" onclick="if(event.target===this)closeNewProjectModal()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
+<div id="new-project-overlay" data-overlay="flex" onclick="if(event.target===this)closeNewProjectModal()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
   <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;width:560px;max-width:95vw;max-height:90vh;overflow:auto">
     <h2 style="font-size:15px;font-weight:600;margin-bottom:16px">New Project</h2>
     <div class="form-group">
@@ -2322,7 +2322,7 @@
 </div>
 
 <!-- Executor enrollment modal (global; token shown once) -->
-<div id="enroll-overlay" onclick="if(event.target===this)closeEnrollModal()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
+<div id="enroll-overlay" data-overlay="flex" onclick="if(event.target===this)closeEnrollModal()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
   <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;width:640px;max-width:95vw;max-height:90vh;overflow:auto">
     <h2 style="font-size:15px;font-weight:600;margin-bottom:6px">Enroll a remote executor</h2>
     <p style="font-size:12px;color:var(--muted);margin-bottom:16px;line-height:1.5">
@@ -2393,7 +2393,7 @@
 </div>
 
 <!-- Add-secret modal (Task 20171) -->
-<div id="secret-overlay" onclick="if(event.target===this)closeSecretModal()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
+<div id="secret-overlay" data-overlay="flex" onclick="if(event.target===this)closeSecretModal()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
   <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;width:640px;max-width:95vw;max-height:90vh;overflow:auto">
     <h2 style="font-size:15px;font-weight:600;margin-bottom:6px">Store a secret</h2>
     <p style="font-size:12px;color:var(--muted);margin-bottom:16px;line-height:1.5">
@@ -2436,7 +2436,7 @@
 </div>
 
 <!-- Mint-an-API-token modal (Task 20175) -->
-<div id="token-overlay" onclick="if(event.target===this)closeTokenModal()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
+<div id="token-overlay" data-overlay="flex" onclick="if(event.target===this)closeTokenModal()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
   <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;width:640px;max-width:95vw;max-height:90vh;overflow:auto">
 
     <!-- Step 1: the form -->
@@ -2511,7 +2511,7 @@
 </div>
 
 <!-- New-grant wizard (Task 20171) -->
-<div id="grant-overlay" onclick="if(event.target===this)closeGrantModal()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
+<div id="grant-overlay" data-overlay="flex" onclick="if(event.target===this)closeGrantModal()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
   <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;width:700px;max-width:95vw;max-height:90vh;overflow:auto">
     <h2 style="font-size:15px;font-weight:600;margin-bottom:6px">New grant</h2>
     <p style="font-size:12px;color:var(--muted);margin-bottom:16px;line-height:1.5">
@@ -2721,7 +2721,7 @@
   from the secret picked, because the asker's problem is that they do not
   already know which credential exists.
 -->
-<div id="request-overlay" onclick="if(event.target===this)closeRequestModal()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
+<div id="request-overlay" data-overlay="flex" onclick="if(event.target===this)closeRequestModal()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
   <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;width:700px;max-width:95vw;max-height:90vh;overflow:auto">
     <h2 style="font-size:15px;font-weight:600;margin-bottom:6px">Request access</h2>
     <p style="font-size:12px;color:var(--muted);margin-bottom:16px;line-height:1.5">
@@ -2901,7 +2901,7 @@
   a required note and an optional shortened TTL, and two dialogs would be two
   places for the summary of what is actually being decided to fall out of date.
 -->
-<div id="request-decide-overlay" onclick="if(event.target===this)closeRequestDecideModal()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
+<div id="request-decide-overlay" data-overlay="flex" onclick="if(event.target===this)closeRequestDecideModal()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
   <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;width:620px;max-width:95vw;max-height:90vh;overflow:auto">
     <h2 id="requestDecideTitle" style="font-size:15px;font-weight:600;margin-bottom:12px">Decide request</h2>
     <div id="requestDecideSummary" style="font-size:12px;line-height:1.6;padding:12px;border:1px solid var(--border);border-radius:var(--radius);margin-bottom:16px"></div>
@@ -2937,7 +2937,7 @@
 </div>
 
 <!-- Executor picker modal (per-project: where this project's harness runs) -->
-<div id="executor-picker-overlay" onclick="if(event.target===this)closeExecutorPickerModal()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
+<div id="executor-picker-overlay" data-overlay="flex" onclick="if(event.target===this)closeExecutorPickerModal()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
   <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;width:560px;max-width:95vw;max-height:90vh;overflow:auto">
     <h2 style="font-size:15px;font-weight:600;margin-bottom:6px">Execution target</h2>
     <p style="font-size:12px;color:var(--muted);margin-bottom:16px;line-height:1.5">
@@ -2963,7 +2963,7 @@
   host; this is the only screen where that promise can be checked after the
   fact, per device, against the attribution stamped on each task.
 -->
-<div id="executor-detail-overlay" onclick="if(event.target===this)closeExecutorDetail()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
+<div id="executor-detail-overlay" data-overlay="flex" onclick="if(event.target===this)closeExecutorDetail()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
   <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;width:760px;max-width:95vw;max-height:90vh;overflow:auto">
     <h2 id="execDetailTitle" style="font-size:15px;font-weight:600;margin-bottom:2px">Executor</h2>
     <div id="execDetailSub" style="font-family:monospace;font-size:11px;color:var(--muted);margin-bottom:16px"></div>
@@ -2975,7 +2975,7 @@
 </div>
 
 <!-- Provider / Model picker modal -->
-<div id="provider-model-overlay" onclick="if(event.target===this)closeProviderModelModal()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
+<div id="provider-model-overlay" data-overlay="flex" onclick="if(event.target===this)closeProviderModelModal()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
   <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;width:520px;max-width:95vw">
     <h2 style="font-size:15px;font-weight:600;margin-bottom:16px">Provider &amp; Model</h2>
     <div class="form-row">
@@ -3020,7 +3020,7 @@
 </div>
 
 <!-- Edit Goal modal -->
-<div id="goal-edit-overlay" onclick="if(event.target===this)closeGoalEditModal()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
+<div id="goal-edit-overlay" data-overlay="flex" onclick="if(event.target===this)closeGoalEditModal()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
   <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;width:520px;max-width:95vw">
     <h2 style="font-size:15px;font-weight:600;margin-bottom:16px">Edit Project Goal</h2>
     <div class="form-group">
@@ -3037,7 +3037,7 @@
 </div>
 
 <!-- Edit Instructions modal -->
-<div id="instructions-edit-overlay" onclick="if(event.target===this)closeInstructionsEditModal()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
+<div id="instructions-edit-overlay" data-overlay="flex" onclick="if(event.target===this)closeInstructionsEditModal()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
   <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;width:620px;max-width:95vw">
     <h2 style="font-size:15px;font-weight:600;margin-bottom:16px">Edit Instructions / Constraints</h2>
     <div class="form-group">
@@ -3054,7 +3054,7 @@
 </div>
 
 <!-- Delete confirmation modal -->
-<div id="delete-modal-overlay" onclick="if(event.target===this)closeDeleteModal()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
+<div id="delete-modal-overlay" data-overlay="flex" onclick="if(event.target===this)closeDeleteModal()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
   <div id="delete-modal" style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;width:400px;max-width:92vw">
     <h2 style="font-size:15px;font-weight:600;margin-bottom:10px;color:var(--red)">Delete Task</h2>
     <p id="deleteModalMsg" style="font-size:13px;color:var(--muted);margin-bottom:16px"></p>
@@ -3066,7 +3066,7 @@
 </div>
 
 <!-- Edit task modal -->
-<div id="modal-overlay" onclick="if(event.target===this)closeModal()">
+<div id="modal-overlay" data-overlay="class:open" onclick="if(event.target===this)closeModal()">
   <div id="modal">
     <h2 id="modalTitle">Edit Task</h2>
     <div class="form-group">
@@ -3100,7 +3100,7 @@
 </div>
 
 <!-- Task details modal (read-only — execution result, failure diagnosis, output) -->
-<div id="td-overlay" onclick="if(event.target===this)closeTaskDetails()">
+<div id="td-overlay" data-overlay="class:open" onclick="if(event.target===this)closeTaskDetails()">
   <div id="td-modal" role="dialog" aria-modal="true" aria-labelledby="td-title">
     <div class="td-header">
       <h2 id="td-title">Task Details</h2>
@@ -3119,7 +3119,7 @@
 </div>
 
 <!-- Sandbox attach terminal (Task 20265) -->
-<div id="at-overlay" onclick="if(event.target===this)closeAttachTerminal()">
+<div id="at-overlay" data-overlay="class:open" onclick="if(event.target===this)closeAttachTerminal()">
   <div id="at-modal" role="dialog" aria-modal="true" aria-labelledby="at-title">
     <div class="td-header">
       <h2 id="at-title">Sandbox Terminal</h2>
@@ -3136,7 +3136,7 @@
 </div>
 
 <!-- Decompose modal (AI splits a task into sub-tasks; user reviews before applying) -->
-<div id="dc-overlay" onclick="if(event.target===this)closeDecomposeModal()">
+<div id="dc-overlay" data-overlay="class:open" onclick="if(event.target===this)closeDecomposeModal()">
   <div id="dc-modal" role="dialog" aria-modal="true" aria-labelledby="dc-title">
     <div class="dc-header">
       <h2 id="dc-title">Decompose Task</h2>
@@ -3152,7 +3152,7 @@
 </div>
 
 <!-- ── Delete project confirmation modal ───────────────────────────────── -->
-<div id="delproj-overlay" onclick="if(event.target===this)closeDeleteProjectModal()" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,.7); z-index:90; align-items:center; justify-content:center;">
+<div id="delproj-overlay" data-overlay="flex" onclick="if(event.target===this)closeDeleteProjectModal()" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,.7); z-index:90; align-items:center; justify-content:center;">
   <div id="delproj-modal" style="background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); padding:24px; width:520px; max-width:92vw;">
     <h2 style="font-size:15px; font-weight:600; margin-bottom:12px; color:var(--danger,#e55);">Delete project</h2>
     <p style="font-size:13px; color:var(--muted); margin-bottom:14px;">
@@ -3181,7 +3181,7 @@
 </div>
 
 <!-- ── Command Palette ─────────────────────────────────────────────────── -->
-<div id="cmd-backdrop" role="dialog" aria-modal="true" aria-label="Command palette">
+<div id="cmd-backdrop" data-overlay="class:open" role="dialog" aria-modal="true" aria-label="Command palette">
   <div id="cmd-palette">
     <div id="cmd-input-wrap">
       <span id="cmd-input-icon">⌘</span>
@@ -3198,7 +3198,7 @@
 </div>
 
 <!-- ── Help modal (keyboard shortcuts cheat sheet) ─────────────────────── -->
-<div id="help-backdrop" role="dialog" aria-modal="true" aria-labelledby="help-modal-title">
+<div id="help-backdrop" data-overlay="class:open" role="dialog" aria-modal="true" aria-labelledby="help-modal-title">
   <div id="help-modal">
     <div id="help-modal-header">
       <h3 id="help-modal-title">Keyboard Shortcuts</h3>

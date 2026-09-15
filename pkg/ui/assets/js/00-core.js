@@ -38,12 +38,13 @@ function authHeaders() {
 }
 
 function showLoginModal() {
-  document.getElementById('loginOverlay').classList.add('visible');
-  setTimeout(() => document.getElementById('loginTokenInput').focus(), 50);
+  // No dismiss: Escape must not close the login gate, because everything
+  // behind it is unusable until a token is accepted.
+  openOverlay('loginOverlay', {focus: '#loginTokenInput'});
 }
 
 function hideLoginModal() {
-  document.getElementById('loginOverlay').classList.remove('visible');
+  closeOverlay('loginOverlay');
   document.getElementById('loginError').classList.remove('visible');
   document.getElementById('loginTokenInput').value = '';
 }

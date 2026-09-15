@@ -99,12 +99,12 @@ window.openHelpModal = function() {
   if (helpOpen) return;
   helpOpen = true;
   _renderHelpModalBody();
-  document.getElementById('help-backdrop').classList.add('open');
+  openOverlay('help-backdrop', {dismiss: closeHelpModal});
 };
 
 window.closeHelpModal = function() {
   helpOpen = false;
-  document.getElementById('help-backdrop').classList.remove('open');
+  closeOverlay('help-backdrop');
 };
 
 // Close help modal when clicking backdrop (not modal itself).
@@ -184,16 +184,15 @@ function openCommandPalette() {
   cmdOpen = true;
   cmdSelectedIdx = 0;
   cmdFiltered = [...CMD_REGISTRY];
-  document.getElementById('cmd-backdrop').classList.add('open');
   const inp = document.getElementById('cmd-input');
   inp.value = '';
   renderCmdResults('');
-  setTimeout(() => inp.focus(), 30);
+  openOverlay('cmd-backdrop', {dismiss: closeCommandPalette, focus: '#cmd-input'});
 }
 
 function closeCommandPalette() {
   cmdOpen = false;
-  document.getElementById('cmd-backdrop').classList.remove('open');
+  closeOverlay('cmd-backdrop');
 }
 
 function renderCmdResults(query) {
@@ -308,25 +307,25 @@ document.addEventListener('keydown', function(e) {
     return;
   }
 
-  // Escape — close any open modal / palette.
+  // Escape — close whichever dialog is in front.
+  //
+  // This used to be a hand-written chain testing one overlay at a time, which
+  // had three problems the overlay stack removes outright. It covered 6 of the
+  // 25 dialogs, so Escape did nothing in the other 19. It hard-coded the
+  // stacking order — the sandbox terminal above the task details modal
+  // (Task 20265) — which the stack now knows for free, since the last dialog
+  // opened is by definition the one in front. And its last branch,
+  // `document.querySelector('.voice-modal-backdrop').remove()`, deleted a
+  // *static* node: the voice modal is only ever hidden, never created, so the
+  // selector matched whether or not it was open and the first Escape anywhere
+  // on the page destroyed it for the life of the document, after which
+  // openVoiceModal() threw on a null.
+  //
+  // dismissTopOverlay() runs the dialog's own close function — the same one its
+  // backdrop click and its Close button call — so focus restoration cannot be
+  // skipped by leaving through this path.
   if (e.key === 'Escape') {
-    if (helpOpen) { closeHelpModal(); return; }
-    if (cmdOpen) { closeCommandPalette(); return; }
-    // Above td-overlay: the sandbox terminal is opened on top of the task
-    // details modal and both stay open, so Escape has to dismiss the one in
-    // front. Getting this order wrong would close the modal underneath and
-    // leave the terminal — and its socket — running with no way out but the
-    // Close button (Task 20265).
-    const at = document.getElementById('at-overlay');
-    if (at && at.classList.contains('open')) { closeAttachTerminal(); return; }
-    const td = document.getElementById('td-overlay');
-    if (td && td.classList.contains('open')) { closeTaskDetails(); return; }
-    const dc = document.getElementById('dc-overlay');
-    if (dc && dc.classList.contains('open')) { closeDecomposeModal(); return; }
-    const modal = document.getElementById('modal-overlay');
-    if (modal && modal.classList.contains('open')) { closeModal(); return; }
-    const voice = document.querySelector('.voice-modal-backdrop');
-    if (voice) { voice.remove(); return; }
+    if (dismissTopOverlay()) return;
     kbClearFocus();
     kbClearKanbanFocus();
     return;

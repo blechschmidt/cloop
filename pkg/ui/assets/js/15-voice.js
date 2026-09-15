@@ -6,7 +6,6 @@ let voiceRecording = false;
 let voiceBlob = null;
 
 window.openVoiceModal = function() {
-  document.getElementById('voiceModalBackdrop').style.display = 'flex';
   document.getElementById('voiceStatus').textContent = 'Click Record to start recording...';
   document.getElementById('voiceTranscript').textContent = 'Transcription will appear here';
   document.getElementById('voiceTranscript').style.color = 'var(--muted)';
@@ -14,11 +13,14 @@ window.openVoiceModal = function() {
   document.getElementById('voiceOutput').textContent = '';
   document.getElementById('voiceSendBtn').disabled = true;
   voiceBlob = null; voiceChunks = [];
+  // Opened last, so the initial focus lands on a button whose state the lines
+  // above have already settled.
+  openOverlay('voiceModalBackdrop', {dismiss: closeVoiceModal});
 };
 
 window.closeVoiceModal = function() {
   if (voiceRecording) stopVoiceRecording();
-  document.getElementById('voiceModalBackdrop').style.display = 'none';
+  closeOverlay('voiceModalBackdrop');
 };
 
 window.toggleVoiceRecording = async function() {

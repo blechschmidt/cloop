@@ -52,7 +52,7 @@ function _openReplayDiff(id) {
   const meta  = document.getElementById('replayDiffMeta');
   const title = document.getElementById('replayDiffTitle');
   if (!modal) return;
-  modal.style.display = 'flex';
+  openOverlay(modal, {dismiss: closeReplayDiff});
   if (orig) orig.textContent = 'Loading…';
   if (repl) repl.textContent = '';
   api(pUrl('/api/replay-runs/' + encodeURIComponent(id))).then(d => {
@@ -71,8 +71,7 @@ function _openReplayDiff(id) {
 }
 
 window.closeReplayDiff = function() {
-  const modal = document.getElementById('replayDiffModal');
-  if (modal) modal.style.display = 'none';
+  closeOverlay('replayDiffModal');
 };
 
 window.submitReplay = function() {

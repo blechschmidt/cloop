@@ -62,6 +62,10 @@ var assetFS embed.FS
 // The numeric prefixes keep the on-disk order identical to this list.
 var bundleFiles = []string{
 	"assets/js/00-core.js",
+	// The shared open/close path every dialog on the page goes through
+	// (Task 20288). Early, because it owns the document-level Tab handler that
+	// contains focus and the stack the Escape chain in 18-shortcuts.js reads.
+	"assets/js/00-overlay.js",
 	"assets/js/01-overview.js",
 	"assets/js/02-tasks.js",
 	"assets/js/03-kanban.js",

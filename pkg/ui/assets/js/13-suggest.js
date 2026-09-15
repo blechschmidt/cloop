@@ -179,7 +179,7 @@ window.openDecomposeModal = function(id) {
   document.getElementById('dc-body').innerHTML =
     '<div class="dc-spin"><span class="spinner"></span>'+
     '<span>Asking the AI to break this task into smaller sub-tasks… this can take a minute.</span></div>';
-  document.getElementById('dc-overlay').classList.add('open');
+  openOverlay('dc-overlay', {dismiss: closeDecomposeModal});
 
   api(pUrl('/api/tasks/'+id+'/decompose'), {}).then(d => {
     dcBusy = false;
@@ -200,7 +200,7 @@ window.openDecomposeModal = function(id) {
 };
 
 window.closeDecomposeModal = function() {
-  document.getElementById('dc-overlay').classList.remove('open');
+  closeOverlay('dc-overlay');
   dcTaskId = 0; dcSubtasks = []; dcBusy = false;
 };
 

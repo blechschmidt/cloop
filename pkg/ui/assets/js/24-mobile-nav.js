@@ -3,32 +3,21 @@ window.openMobileNav = function() {
   const overlay = document.getElementById('mobileNavOverlay');
   const btn     = document.getElementById('hamburgerBtn');
   if (!overlay) return;
-  overlay.classList.add('open');
-  overlay.setAttribute('aria-hidden', 'false');
   if (btn) btn.setAttribute('aria-expanded', 'true');
-  // Trap focus: first close button
-  const closeBtn = overlay.querySelector('.mobile-nav-close');
-  if (closeBtn) setTimeout(() => closeBtn.focus(), 50);
+  openOverlay(overlay, {dismiss: closeMobileNav, focus: '.mobile-nav-close'});
 };
 
 window.closeMobileNav = function() {
   const overlay = document.getElementById('mobileNavOverlay');
   const btn     = document.getElementById('hamburgerBtn');
   if (!overlay) return;
-  overlay.classList.remove('open');
-  overlay.setAttribute('aria-hidden', 'true');
   if (btn) btn.setAttribute('aria-expanded', 'false');
+  closeOverlay(overlay);
 };
 
-// Close mobile nav on Escape key.
-document.addEventListener('keydown', function(e) {
-  if (e.key === 'Escape') {
-    const overlay = document.getElementById('mobileNavOverlay');
-    if (overlay && overlay.classList.contains('open')) {
-      closeMobileNav();
-    }
-  }
-});
+// Escape is handled centrally by dismissTopOverlay() in 18-shortcuts.js, which
+// closes whichever dialog is in front. A second listener here would have fired
+// as well, closing the nav from underneath a dialog opened over it.
 
 // ── FAB: quick-add task on mobile ─────────────────────────────
 window.fabAddTask = function() {

@@ -364,12 +364,11 @@ window.projectDelete = function(idx, name, path) {
   document.getElementById('delproj-path').textContent = path || '';
   document.getElementById('delproj-idx').value = String(idx);
   document.getElementById('delproj-deleteRoot').checked = false;
-  overlay.style.display = 'flex';
+  openOverlay(overlay, {dismiss: closeDeleteProjectModal});
 };
 
 window.closeDeleteProjectModal = function() {
-  const overlay = document.getElementById('delproj-overlay');
-  if (overlay) overlay.style.display = 'none';
+  closeOverlay('delproj-overlay');
 };
 
 window.submitDeleteProject = function() {
@@ -532,8 +531,7 @@ window.openProviderModelModal = function() {
   const effSel = document.getElementById('pmEffort');
   if (effSel) effSel.value = _currentEffort || '';
   updatePMEffortAvailability();
-  const el = document.getElementById('provider-model-overlay');
-  if (el) el.style.display = 'flex';
+  openOverlay('provider-model-overlay', {dismiss: closeProviderModelModal});
 };
 
 // Effort is only honored by the claudecode provider — gray it out (but keep
@@ -548,8 +546,7 @@ function updatePMEffortAvailability() {
 }
 
 window.closeProviderModelModal = function() {
-  const el = document.getElementById('provider-model-overlay');
-  if (el) el.style.display = 'none';
+  closeOverlay('provider-model-overlay');
 };
 
 window.onPMProviderChange = function() {
@@ -594,14 +591,11 @@ window.openGoalEditModal = function() {
   const cur = (document.getElementById('goalText') || {}).textContent || '';
   document.getElementById('goalEditInput').value = cur;
   document.getElementById('goalEditError').style.display = 'none';
-  const el = document.getElementById('goal-edit-overlay');
-  if (el) el.style.display = 'flex';
-  setTimeout(() => { try { document.getElementById('goalEditInput').focus(); } catch(e) {} }, 0);
+  openOverlay('goal-edit-overlay', {dismiss: closeGoalEditModal, focus: '#goalEditInput'});
 };
 
 window.closeGoalEditModal = function() {
-  const el = document.getElementById('goal-edit-overlay');
-  if (el) el.style.display = 'none';
+  closeOverlay('goal-edit-overlay');
 };
 
 window.saveGoalEdit = function() {
@@ -636,14 +630,11 @@ window.openInstructionsEditModal = function() {
   api(pUrl('/api/instructions')).then(d => {
     if (inputEl) inputEl.value = (d && typeof d.instructions === 'string') ? d.instructions : '';
   }).catch(() => {});
-  const el = document.getElementById('instructions-edit-overlay');
-  if (el) el.style.display = 'flex';
-  setTimeout(() => { try { document.getElementById('instructionsEditInput').focus(); } catch(e) {} }, 0);
+  openOverlay('instructions-edit-overlay', {dismiss: closeInstructionsEditModal, focus: '#instructionsEditInput'});
 };
 
 window.closeInstructionsEditModal = function() {
-  const el = document.getElementById('instructions-edit-overlay');
-  if (el) el.style.display = 'none';
+  closeOverlay('instructions-edit-overlay');
 };
 
 window.saveInstructionsEdit = function() {
@@ -1081,13 +1072,11 @@ window.openNewProjectModal = function() {
   // the fleet and the secret store as those answer.
   _npResetAccess();
   _npLoadAccessSources();
-  const el = document.getElementById('new-project-overlay');
-  if (el) { el.style.display = 'flex'; }
+  openOverlay('new-project-overlay', {dismiss: closeNewProjectModal});
 };
 
 window.closeNewProjectModal = function() {
-  const el = document.getElementById('new-project-overlay');
-  if (el) el.style.display = 'none';
+  closeOverlay('new-project-overlay');
 };
 
 window.submitNewProject = function() {
