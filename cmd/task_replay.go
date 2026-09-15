@@ -188,7 +188,7 @@ Examples:
 			return err
 		}
 		if s.Plan == nil || len(s.Plan.Tasks) == 0 {
-			return fmt.Errorf("no task plan found: %w", statedb.ErrTaskNotFound)
+			return statedb.UserErrorf(statedb.ErrTaskNotFound, "no task plan found")
 		}
 
 		headerColor := color.New(color.FgCyan, color.Bold)

@@ -225,10 +225,15 @@ func Load(workdir string) (*ProjectState, error) {
 	}
 
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+		// UserErrorf, not fmt.Errorf("%w"): this message is the first thing a
+		// new user sees, and %w would append the sentinel's own text to it.
+		// errors.Is(err, statedb.ErrProjectNotFound) still holds.
 		if dir != workdir {
-			return nil, fmt.Errorf("active session has no state (run 'cloop init' in this session): %w", statedb.ErrProjectNotFound)
+			return nil, statedb.UserErrorf(statedb.ErrProjectNotFound,
+				"active session has no state (run 'cloop init' in this session)")
 		}
-		return nil, fmt.Errorf("no cloop project found (run 'cloop init' first): %w", statedb.ErrProjectNotFound)
+		return nil, statedb.UserErrorf(statedb.ErrProjectNotFound,
+			"no cloop project found (run 'cloop init' first)")
 	}
 
 	db, err := statedb.Open(dbPath)
@@ -299,10 +304,14 @@ func LoadLite(workdir string) (*ProjectState, error) {
 	}
 
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+		// Same two audiences as Load above: prose for the reader, sentinel
+		// for errors.Is.
 		if dir != workdir {
-			return nil, fmt.Errorf("active session has no state (run 'cloop init' in this session): %w", statedb.ErrProjectNotFound)
+			return nil, statedb.UserErrorf(statedb.ErrProjectNotFound,
+				"active session has no state (run 'cloop init' in this session)")
 		}
-		return nil, fmt.Errorf("no cloop project found (run 'cloop init' first): %w", statedb.ErrProjectNotFound)
+		return nil, statedb.UserErrorf(statedb.ErrProjectNotFound,
+			"no cloop project found (run 'cloop init' first)")
 	}
 
 	db, err := statedb.Open(dbPath)

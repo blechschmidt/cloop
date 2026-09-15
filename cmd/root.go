@@ -38,11 +38,30 @@ Commands are grouped below. Every group has more in it than the examples show �
   cloop task list           # the tasks themselves
   cloop ui                  # web dashboard on localhost:8080
   cloop doctor              # check the environment before you start`,
+
+	// Cobra prints a returned error itself unless told not to, and Execute
+	// below printed it a second time — so every failing command in the CLI
+	// reported its error twice. Execute owns the single print, because it is
+	// the only place that can also map the error onto an exit code.
+	//
+	// This governs errors only. Usage output is governed by SilenceUsage,
+	// which PersistentPreRunE sets after flag parsing and Args validation have
+	// already succeeded (see below), so genuine CLI misuse — an unknown flag,
+	// the wrong number of arguments — still prints usage, while a runtime
+	// failure does not.
+	//
+	// It also fixes the nested dispatches: `cloop do` and `cloop listen`
+	// re-enter rootCmd.Execute in-process, which previously made a failure
+	// there print three times.
+	SilenceErrors: true,
 }
 
 func Execute() {
 	if err := rootCmd.Execute(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		// The one place a command error is rendered. "Error:" matches the
+		// prefix cobra used, so the line itself is unchanged — only the
+		// duplicate is gone.
+		fmt.Fprintln(os.Stderr, "Error:", err)
 		os.Exit(exitCodeFor(err))
 	}
 }

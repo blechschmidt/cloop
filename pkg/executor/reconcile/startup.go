@@ -32,6 +32,7 @@ package reconcile
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -106,14 +107,35 @@ func (o Options) handleStore(dir string) executor.HandleStore {
 	if st, ok := handleStoreCache[abs]; ok {
 		return st
 	}
-	db, err := statedb.Open(state.DBPath(abs))
+	// Whether this directory is already a project, asked before Open rather
+	// than after: Open creates the database when the .cloop directory exists,
+	// so afterwards the answer would always be yes.
+	//
+	// It decides only whether a failure is worth reporting, never whether to
+	// try — a hub bootstrapped into a directory that has a config but no
+	// database yet still gets its store created here, as it always did.
+	dbPath := state.DBPath(abs)
+	_, statErr := os.Stat(dbPath)
+	projectExists := statErr == nil
+
+	db, err := statedb.Open(dbPath)
 	if err != nil {
-		// Not fatal, and not even loud on the common path: a `cloop` command
-		// run outside a project has no database and wants no persistence.
-		// What it costs is that this process cannot survive its own restart,
-		// which is the pre-Task-20191 behaviour.
-		o.logf("executor: handle persistence unavailable (%v); "+
-			"workloads dispatched by this process will not survive a restart", err)
+		// Not fatal: what it costs is that this process cannot survive its own
+		// restart, which is the pre-Task-20191 behaviour.
+		//
+		// And not worth saying at all when there is no project here. That case
+		// is every `cloop` command run outside one — including `cloop init`,
+		// which by definition runs before the database exists — where Open
+		// fails with a raw SQLite errno ("unable to open database file (14)")
+		// that blames the storage layer for what is really "you are not in a
+		// cloop project", on a command that dispatches nothing and so has
+		// nothing to persist. A database that *does* exist and still will not
+		// open is corruption, a permissions problem or a lock, and that is
+		// worth saying out loud (Task 20294).
+		if projectExists {
+			o.logf("executor: handle persistence unavailable (%v); "+
+				"workloads dispatched by this process will not survive a restart", err)
+		}
 		handleStoreCache[abs] = nil
 		return nil
 	}

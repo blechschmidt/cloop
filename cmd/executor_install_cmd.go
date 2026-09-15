@@ -100,8 +100,10 @@ Examples:
 
   # Remove it, including the agent's identity and workspaces.
   sudo cloop executor agent install --uninstall --purge`,
-	Args:          cobra.NoArgs,
-	SilenceErrors: false,
+	Args: cobra.NoArgs,
+	// No SilenceErrors here: rootCmd sets it, and cmd.Execute prints the one
+	// copy (Task 20294). A per-command "false" cannot re-enable cobra's print
+	// — the check is on the root as well — so stating it only misled.
 	RunE: func(cmd *cobra.Command, args []string) error {
 		spec, out, err := specFromFlags(cmd)
 		if err != nil {
