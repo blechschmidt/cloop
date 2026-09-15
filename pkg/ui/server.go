@@ -975,7 +975,10 @@ func (s *Server) Handler() http.Handler {
 // the route gates will enforce (Task 20164).
 func (s *Server) buildHandler(mux *http.ServeMux) http.Handler {
 	app := s.uiRateLimitMiddleware(s.securityHeaders(s.executorConnectBypass(s.authMiddleware(s.authzMiddleware(mux)))))
-	return uiRequestIDMiddleware(panicRecoveryMiddleware(s.probeBypass(app)))
+	// gzip wraps the application but sits below the panic recovery, so a
+	// handler that panics mid-body still unwinds into the 500 rather than
+	// leaving a half-written deflate stream the browser cannot parse.
+	return uiRequestIDMiddleware(panicRecoveryMiddleware(s.probeBypass(s.gzipAPIMiddleware(app))))
 }
 
 // uiRequestIDMiddleware threads a correlation ID through every Web UI
@@ -2840,6 +2843,19 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	}
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 		InsecureSkipVerify: true, // origin already validated by wsOriginAllowed
+		// The connect burst carries a full state snapshot — 731 KB for the
+		// hub's own project — and CompressionMode's zero value is
+		// CompressionDisabled, so every byte of it went out raw on every
+		// project switch. permessage-deflate takes that frame to ~230 KB
+		// (Task 20280).
+		//
+		// ContextTakeover rather than NoContextTakeover: the sliding window is
+		// retained between messages, which is what makes the steady-state
+		// state_diff frames nearly free — they repeat the field names of the
+		// snapshot that preceded them. The cost is 32 KB of window per
+		// connection, bounded by the existing per-IP and total connection
+		// caps (Task 20090).
+		CompressionMode: websocket.CompressionContextTakeover,
 	})
 	if err != nil {
 		return

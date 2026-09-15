@@ -44,17 +44,43 @@ document.addEventListener('DOMContentLoaded', () => {
 
 // ── Projects tab ─────────────────────────────────────────────────────────────
 
+// A roster the caller has already fetched, handed over for the next
+// loadProjects() to render instead of requesting again.
+//
+// First paint needs /api/projects twice over: once as its authentication probe
+// and once as the landing page's data. They are the same document, but
+// switchTab('projects') reaches loadProjects() with no way to say so, and
+// /api/projects is the hub's most expensive read — it opens all 26 registered
+// projects' databases in series. Boot paid that twice (Task 20280).
+//
+// Consumed once and cleared, rather than cached with a timeout: the roster
+// carries per-project run state that goes stale in seconds, and a handoff that
+// can only be read by the call immediately following cannot serve anything old.
+let _projectsSeed = null;
+
+function seedProjects(d) {
+  _projectsSeed = d;
+}
+
+function applyProjects(d) {
+  const projects = d.projects || [];
+  isMultiProject = d.multi_project === true || projects.length > 1;
+  renderProjects(projects, d.stats || {});
+  updateProjectSelector();
+  // Refresh the overview cards if we're on the overview tab with no project selected.
+  if (isMultiProject && selectedProjectIdx === null && activeTab === 'overview') {
+    renderMultiProjectOverview();
+  }
+}
+
 function loadProjects() {
-  api('/api/projects').then(d => {
-    const projects = d.projects || [];
-    isMultiProject = d.multi_project === true || projects.length > 1;
-    renderProjects(projects, d.stats || {});
-    updateProjectSelector();
-    // Refresh the overview cards if we're on the overview tab with no project selected.
-    if (isMultiProject && selectedProjectIdx === null && activeTab === 'overview') {
-      renderMultiProjectOverview();
-    }
-  }).catch(() => {});
+  if (_projectsSeed) {
+    const d = _projectsSeed;
+    _projectsSeed = null;
+    applyProjects(d);
+    return;
+  }
+  api('/api/projects').then(applyProjects).catch(() => {});
 }
 
 window.toggleCompletedProjects = function() {

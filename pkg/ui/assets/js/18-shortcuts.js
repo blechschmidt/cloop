@@ -434,40 +434,61 @@ document.addEventListener('keydown', function(e) {
 
 // On page load, probe the server. If it returns 401 show the login modal,
 // otherwise detect multi-project mode and start WebSocket (SSE as fallback).
+// First paint. /api/projects is both the authentication probe and the landing
+// page's data, which is the whole point of doing it in that order.
+//
+// This used to probe with /api/state and then request /api/projects from inside
+// its .then(), which cost the landing page twice over. /api/state is scoped to
+// the hub's own WorkDir when no project is selected, so the probe downloaded
+// that project's entire task list — 734 KB for cloop, its largest — and in
+// multi-project mode the body was then discarded unread, because the
+// r.json() branch below only runs for a single project. The projects list, the
+// one thing the user is waiting to see, could not start loading until that
+// discarded download had finished.
+//
+// Both endpoints carry the same Perm: read, so /api/projects 401s under exactly
+// the conditions /api/state did and the probe is no weaker for the swap
+// (Task 20280).
 function checkAuthAndInit() {
-  // First paint — runs before any project is selected, so pUrl would be
-  // a no-op. The per-project state is fetched after multi-project init.
-  fetch('/api/state', {headers: authHeaders()}).then(r => {
-    if (r.status === 401) {
+  fetch('/api/projects', {headers: authHeaders()}).then(pr => {
+    if (pr.status === 401) {
       showLoginModal();
       return;
     }
-    // Also check for multi-project mode.
-    fetch('/api/projects', {headers: authHeaders()}).then(pr => pr.json()).then(pd => {
+    return pr.json().then(pd => {
       const projects = pd.projects || [];
       isMultiProject = pd.multi_project === true || projects.length > 1;
       connectWS();
       if (isMultiProject) {
-        // In multi-project mode, Projects list is the landing page.
-        renderProjects(projects, pd.stats || {});
-        updateProjectSelector();
+        // In multi-project mode, Projects list is the landing page. No
+        // per-project state is fetched here: opening a project reconnects the
+        // WebSocket scoped to it and the connect burst delivers that state.
+        //
+        // Handed to switchTab rather than rendered here, because switching to
+        // the Projects tab calls loadProjects() itself — rendering first would
+        // draw the roster and then immediately re-request it.
+        seedProjects(pd);
         switchTab('projects');
-      } else {
-        r.json().then(s => render(s)).catch(() => {});
-        // Single-project mode: still show the "Project" scope hint for the default Overview tab.
-        updateScopeHint(activeTab || 'overview');
-        // Overview is the landing tab here, so its Executor card needs its
-        // one non-state-diff field (Task 20160).
-        loadExecutors();
+        return;
       }
-    }).catch(() => {
-      connectWS();
-      r.json().then(s => render(s)).catch(() => {});
+      // Single-project mode renders the Overview immediately, so this is the
+      // one path that still needs the state document up front.
+      return fetch('/api/state', {headers: authHeaders()})
+        .then(r => r.json()).then(s => render(s)).catch(() => {})
+        .then(() => {
+          // Still show the "Project" scope hint for the default Overview tab.
+          updateScopeHint(activeTab || 'overview');
+          // Overview is the landing tab here, so its Executor card needs its
+          // one non-state-diff field (Task 20160).
+          loadExecutors();
+        });
     });
     // Initial run state arrives as a 'run_state' WebSocket event on connect
     // (see handleWS), and subsequent transitions are pushed by the watcher
     // and the run/stop handlers — no polling required.
   }).catch(() => {
+    // The roster could not be read. Connect anyway so a hub that recovers
+    // starts pushing without a reload.
     connectWS();
   });
 }

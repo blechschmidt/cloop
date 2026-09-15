@@ -1013,9 +1013,15 @@ func TestDashboard_ProjectScopedAPIs_UsePUrl(t *testing.T) {
 		{path: "/api/state", hint: "detect auth failures"},
 		// SSE-fallback reconnect probe — variant of the above.
 		{path: "/api/state", hint: "SSE fallback reconnect probe"},
-		// Initial state load on first paint — runs before
+		// Single-project mode's initial state load, which runs before
 		// `selectedProjectIdx` has been chosen, so pUrl would be a no-op.
-		{path: "/api/state", hint: "First paint"},
+		//
+		// Multi-project mode no longer reaches this call at all: the roster is
+		// the landing page, and a project's state arrives on the WebSocket when
+		// one is opened. It used to be fetched here as the authentication probe
+		// and the body discarded — 734 KB of the hub's own project, ahead of
+		// the roster the page actually draws (Task 20280).
+		{path: "/api/state", hint: "still needs the state document up front"},
 	}
 	allowedSite := func(path, line string) bool {
 		for _, a := range allowlist {
