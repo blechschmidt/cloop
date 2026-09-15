@@ -230,7 +230,10 @@ func (s *Server) buildCIService(cfg *config.Config) (*ciService, error) {
 
 	var auditDB *statedb.DB
 	if db, dbErr := statedb.Open(state.DBPath(s.WorkDir)); dbErr == nil {
-		auditDB = db
+		// s.WorkDir is the hub's own directory. A CI pipeline authenticates to
+		// the hub, not to a project, so its sessions and relayed calls are
+		// fleet facts even when the job they run is about one repository.
+		auditDB = db.AsControlPlane()
 	} else {
 		fmt.Fprintf(os.Stderr,
 			"ui: CI relay decisions will go to stderr, not the audit trail: %v\n", dbErr)

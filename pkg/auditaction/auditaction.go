@@ -166,6 +166,17 @@ type Entry struct {
 	// the trail by subject needs it to know which id space they are in.
 	Entity string
 
+	// Home is which of the two `audit_events` chains this action is written
+	// to: the hub's control plane, the project's own database, or — for
+	// authorization decisions alone — whichever the decision was scoped to.
+	//
+	// Declared rather than inferred because there is nothing to infer it
+	// from. The home is decided by which *statedb.DB handle an emission site
+	// holds, which is a fact about a call stack and not about the row, so a
+	// reader of the trail cannot recover it and a mis-routed row cannot be
+	// distinguished from a correctly-routed one. See home.go.
+	Home HomeDB
+
 	// Trigger is one sentence, present tense, naming the moment the row is
 	// written — not what the feature is for. "A push is refused by branch
 	// policy", not "guards pushes".

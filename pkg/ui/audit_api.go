@@ -18,16 +18,27 @@ package ui
 // journal to read (each project keeps its own state.db, and the hub keeps
 // one for global events), and is validated against the caller's visible
 // project list so a wild index cannot address an unregistered path.
+//
+// ?source= selects how many of those journals to read (Task 20292). The
+// default, `project`, is the single-chain read described above. `all` merges
+// the resolved project's journal with the hub's, because the question an
+// operator actually asks — "what happened to project X" — spans both: the
+// plan's own life is in the project's chain, while the executor that ran it,
+// the image policy that admitted it and the credentials it held are in the
+// hub's. A single-chain answer to that question is confidently incomplete,
+// which is worse than a slow one.
 
 import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/apierror"
+	"github.com/blechschmidt/cloop/pkg/auditmerge"
 	"github.com/blechschmidt/cloop/pkg/eventlog"
 	"github.com/blechschmidt/cloop/pkg/logger"
 	"github.com/blechschmidt/cloop/pkg/state"
@@ -42,6 +53,16 @@ const (
 	// millions of rows; an unbounded limit is a memory amplification lever
 	// for anyone who can reach the endpoint.
 	auditPageMax = 1000
+
+	// auditSourceProject reads only the journal the request resolved to. It
+	// is the default because it is what every caller got before merged mode
+	// existed, and a read endpoint that silently widened its scope would
+	// change what an export or a saved query means.
+	auditSourceProject = "project"
+
+	// auditSourceAll reads the resolved project's journal together with the
+	// hub's.
+	auditSourceAll = "all"
 )
 
 // auditEventJSON is the wire shape of one row.
@@ -59,6 +80,43 @@ type auditEventJSON struct {
 	Payload    string `json:"payload"`
 	PrevHash   string `json:"prev_hash"`
 	RowHash    string `json:"row_hash"`
+
+	// Source and Dir say which chain the row came from, and are sent only
+	// for a merged read. Omitted otherwise, so a single-chain response is
+	// byte-identical to what it has always been — and because labelling a
+	// row "project" when the caller asked for exactly one journal would be
+	// noise, not provenance.
+	//
+	// ids are per-chain and collide across a merge, so (source, id) is the
+	// pair that identifies a merged row; id alone does not.
+	Source string `json:"source,omitempty"`
+	Dir    string `json:"dir,omitempty"`
+}
+
+// auditChainJSON names one database a read covered.
+//
+// Sent so the panel can state its own coverage. An empty merged result means
+// "nothing matched in these chains", and without naming them it reads
+// identically to "one of them was not there" — which is the exact ambiguity
+// merged mode exists to remove.
+type auditChainJSON struct {
+	Source string `json:"source"`
+	Dir    string `json:"dir"`
+}
+
+// auditChainVerdictJSON is one chain's integrity result.
+//
+// Error is distinct from OK=false on purpose: "could not check this chain"
+// and "checked it and found a break" call for different responses, and
+// collapsing them is how an unreadable trail gets reported as an intact one.
+type auditChainVerdictJSON struct {
+	Source    string `json:"source"`
+	Dir       string `json:"dir"`
+	OK        bool   `json:"ok"`
+	Total     int    `json:"total"`
+	BreakAtID int64  `json:"break_at_id"`
+	Reason    string `json:"reason,omitempty"`
+	Error     string `json:"error,omitempty"`
 }
 
 // auditListResponse is what GET /api/audit returns.
@@ -77,6 +135,11 @@ type auditListResponse struct {
 	// paint.
 	Actors      []string `json:"actors"`
 	EntityTypes []string `json:"entity_types"`
+
+	// Chains lists the databases this page was read from, and is sent only
+	// for a merged read. The panel reports it verbatim: an operator acting on
+	// the trail needs to know what was searched, not just what was found.
+	Chains []auditChainJSON `json:"chains,omitempty"`
 }
 
 // auditVerifyResponse is what GET /api/audit/verify returns.
@@ -99,6 +162,14 @@ type auditVerifyResponse struct {
 	PrunedCount    int64  `json:"pruned_count"`
 	ArchivePath    string `json:"archive_path"`
 	ArchiveSHA256  string `json:"archive_sha256"`
+
+	// Chains carries one verdict per chain for a merged verification, and is
+	// absent otherwise. The fields above stay populated from the resolved
+	// project's chain so a client that predates merged mode reads the same
+	// answer it always did — but they cannot speak for the other chain, and a
+	// single boolean would let an intact project chain vouch for a broken hub
+	// one. Clients that understand this array must fail if any entry does.
+	Chains []auditChainVerdictJSON `json:"chains,omitempty"`
 }
 
 // handleAuditList serves GET /api/audit.
@@ -114,6 +185,15 @@ func (s *Server) handleAuditList(w http.ResponseWriter, r *http.Request) {
 	filter, err := auditFilterFromQuery(r)
 	if err != nil {
 		apierror.WriteError(w, apierror.New(apierror.CodeInvalidInput, err.Error()))
+		return
+	}
+	source, err := auditSourceFromQuery(r)
+	if err != nil {
+		apierror.WriteError(w, apierror.New(apierror.CodeInvalidInput, err.Error()))
+		return
+	}
+	if source == auditSourceAll {
+		s.serveMergedAuditList(w, r, filter)
 		return
 	}
 
@@ -156,17 +236,7 @@ func (s *Server) handleAuditList(w http.ResponseWriter, r *http.Request) {
 		HasMore: filter.Offset+len(rows) < total,
 	}
 	for _, ev := range rows {
-		resp.Events = append(resp.Events, auditEventJSON{
-			ID:         ev.ID,
-			Timestamp:  ev.Timestamp.UTC().Format(time.RFC3339Nano),
-			Actor:      ev.Actor,
-			EventType:  ev.EventType,
-			EntityType: ev.EntityType,
-			EntityID:   ev.EntityID,
-			Payload:    ev.Payload,
-			PrevHash:   ev.PrevHash,
-			RowHash:    ev.RowHash,
-		})
+		resp.Events = append(resp.Events, auditEventWire(ev))
 	}
 	// Facets are advisory; a failure here must not cost the caller the page
 	// they asked for.
@@ -179,6 +249,141 @@ func (s *Server) handleAuditList(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, resp)
 }
 
+// auditEventWire renders one stored row for the client, without provenance —
+// the merged path fills that in, and the single-chain path deliberately leaves
+// it empty.
+func auditEventWire(ev statedb.AuditEvent) auditEventJSON {
+	return auditEventJSON{
+		ID:         ev.ID,
+		Timestamp:  ev.Timestamp.UTC().Format(time.RFC3339Nano),
+		Actor:      ev.Actor,
+		EventType:  ev.EventType,
+		EntityType: ev.EntityType,
+		EntityID:   ev.EntityID,
+		Payload:    ev.Payload,
+		PrevHash:   ev.PrevHash,
+		RowHash:    ev.RowHash,
+	}
+}
+
+// serveMergedAuditList answers ?source=all: the hub's journal and the resolved
+// project's, read as one timestamp-ordered trail.
+//
+// A missing database is skipped rather than refused (auditmerge.Open), so a
+// project that has never been run still answers with the hub's rows about it
+// instead of an error — the same reasoning as openAuditLog's empty-but-valid
+// response for an uninitialised workdir.
+func (s *Server) serveMergedAuditList(w http.ResponseWriter, r *http.Request, filter eventlog.AuditFilter) {
+	reader, err := auditmerge.Open(s.auditChains(r))
+	if err != nil {
+		s.log().Error(logger.EventAuthz, 0, "audit: open merged trail",
+			map[string]interface{}{"error": err.Error()})
+		apierror.WriteError(w, apierror.New(apierror.CodeInternal, "could not open the audit trail"))
+		return
+	}
+	defer reader.Close()
+
+	rows, all, err := reader.List(filter)
+	if err != nil {
+		s.log().Error(logger.EventAuthz, 0, "audit: list merged events",
+			map[string]interface{}{"error": err.Error()})
+		apierror.WriteError(w, apierror.New(apierror.CodeInternal, "could not read the audit trail"))
+		return
+	}
+
+	// Same bargain as the single-chain path: the store reports the unfiltered
+	// count, so a narrowing filter needs its own unpaged pass.
+	total := all
+	if filterIsNarrowing(filter) {
+		counting := filter
+		counting.Limit = 0 // store clamps to its 10 000 ceiling, per chain
+		counting.Offset = 0
+		matched, _, cerr := reader.List(counting)
+		if cerr != nil {
+			s.log().Warn(logger.EventAuthz, 0, "audit: count filtered merged events",
+				map[string]interface{}{"error": cerr.Error()})
+			total = filter.Offset + len(rows)
+		} else {
+			total = len(matched)
+		}
+	}
+
+	chains := reader.Chains()
+	resp := auditListResponse{
+		Events:  make([]auditEventJSON, 0, len(rows)),
+		Total:   total,
+		All:     all,
+		Limit:   filter.Limit,
+		Offset:  filter.Offset,
+		HasMore: filter.Offset+len(rows) < total,
+		Chains:  make([]auditChainJSON, 0, len(chains)),
+	}
+	for _, row := range rows {
+		ev := auditEventWire(row.AuditEvent)
+		ev.Source = string(row.Source)
+		ev.Dir = row.Dir
+		resp.Events = append(resp.Events, ev)
+	}
+	for _, c := range chains {
+		resp.Chains = append(resp.Chains, auditChainJSON{Source: string(c.Source), Dir: c.Dir})
+	}
+	resp.Actors, resp.EntityTypes = mergedAuditFacets(chains)
+	jsonOK(w, resp)
+}
+
+// auditChains lists the databases a merged read covers.
+//
+// The hub's chain is listed first because auditmerge keeps the first label
+// when two chains resolve to the same file — which they do whenever the
+// request is scoped to the hub's own directory. Filing the fleet's executor,
+// secret and image-policy rows under one project's name would misreport what
+// they govern.
+func (s *Server) auditChains(r *http.Request) []auditmerge.Chain {
+	return []auditmerge.Chain{
+		{Source: auditmerge.SourceControlPlane, Dir: s.WorkDir},
+		{Source: auditmerge.SourceProject, Dir: s.resolveWorkDir(r)},
+	}
+}
+
+// mergedAuditFacets unions the filter-bar dropdown values across the chains
+// that were read.
+//
+// Offering one chain's actors over a two-chain view would leave the operator
+// who merged precisely to find *who* enrolled an executor unable to select
+// them. It costs a second read-only open per chain, which is the price of a
+// filter bar that can name everything the table below it contains.
+//
+// Advisory, like the single-chain facets: a chain that will not answer is
+// skipped rather than failing the page the caller asked for.
+func mergedAuditFacets(chains []auditmerge.Chain) (actors, entityTypes []string) {
+	seenActor, seenType := map[string]bool{}, map[string]bool{}
+	collect := func(into []string, seen map[string]bool, values []string) []string {
+		for _, v := range values {
+			if !seen[v] {
+				seen[v] = true
+				into = append(into, v)
+			}
+		}
+		return into
+	}
+	for _, c := range chains {
+		log, err := eventlog.Open(c.Dir)
+		if err != nil {
+			continue
+		}
+		if got, gerr := log.DistinctActors(); gerr == nil {
+			actors = collect(actors, seenActor, got)
+		}
+		if got, gerr := log.DistinctEntityTypes(); gerr == nil {
+			entityTypes = collect(entityTypes, seenType, got)
+		}
+		log.Close()
+	}
+	sort.Strings(actors)
+	sort.Strings(entityTypes)
+	return actors, entityTypes
+}
+
 // handleAuditVerify serves GET /api/audit/verify.
 func (s *Server) handleAuditVerify(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -186,6 +391,16 @@ func (s *Server) handleAuditVerify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !s.requireVisibleProject(w, r) {
+		return
+	}
+
+	source, err := auditSourceFromQuery(r)
+	if err != nil {
+		apierror.WriteError(w, apierror.New(apierror.CodeInvalidInput, err.Error()))
+		return
+	}
+	if source == auditSourceAll {
+		s.serveMergedAuditVerify(w, r)
 		return
 	}
 
@@ -220,6 +435,100 @@ func (s *Server) handleAuditVerify(w http.ResponseWriter, r *http.Request) {
 		ArchivePath:    report.ExportPath,
 		ArchiveSHA256:  report.ExportSHA256,
 	})
+}
+
+// serveMergedAuditVerify answers GET /api/audit/verify?source=all.
+//
+// Each chain is verified on its own, because they are independent: one hash
+// chain says nothing about the other. The top-level fields still describe the
+// resolved project's chain — a client written before merged mode reads exactly
+// what it used to — and the per-chain array carries the rest.
+func (s *Server) serveMergedAuditVerify(w http.ResponseWriter, r *http.Request) {
+	reader, err := auditmerge.Open(s.auditChains(r))
+	if err != nil {
+		s.log().Error(logger.EventAuthz, 0, "audit: open merged trail for verify",
+			map[string]interface{}{"error": err.Error()})
+		apierror.WriteError(w, apierror.New(apierror.CodeInternal, "could not verify the audit chain"))
+		return
+	}
+	defer reader.Close()
+
+	verdicts := reader.Verify()
+
+	// An uninitialised workdir has no chain to check, and reports an empty
+	// trail rather than a failure — the same answer openAuditLog gives.
+	resp := auditVerifyResponse{
+		OK:        true,
+		CheckedAt: time.Now().UTC().Format(time.RFC3339),
+		Chains:    make([]auditChainVerdictJSON, 0, len(verdicts)),
+	}
+	for _, v := range verdicts {
+		entry := auditChainVerdictJSON{
+			Source:    string(v.Source),
+			Dir:       v.Dir,
+			OK:        v.OK(),
+			Total:     v.Report.Total,
+			BreakAtID: v.Report.BreakAtID,
+			Reason:    v.Report.Reason,
+		}
+		if v.Err != nil {
+			entry.Error = v.Err.Error()
+		}
+		resp.Chains = append(resp.Chains, entry)
+	}
+
+	if primary, found := primaryAuditVerdict(verdicts, s.resolveWorkDir(r)); found {
+		resp.OK = primary.OK()
+		resp.Total = primary.Report.Total
+		resp.BreakAtID = primary.Report.BreakAtID
+		resp.Reason = primary.Report.Reason
+		resp.ExpectedHash = primary.Report.ExpectedHash
+		resp.ActualHash = primary.Report.ActualHash
+		resp.Anchored = primary.Report.Anchored
+		resp.VerifiedFromID = primary.Report.VerifiedFromID
+		resp.PrunedCount = primary.Report.PrunedCount
+		resp.ArchivePath = primary.Report.ExportPath
+		resp.ArchiveSHA256 = primary.Report.ExportSHA256
+		if primary.Err != nil && resp.Reason == "" {
+			resp.Reason = primary.Err.Error()
+		}
+	}
+	jsonOK(w, resp)
+}
+
+// primaryAuditVerdict picks the chain whose verdict fills the response's
+// top-level fields: the one the request resolved to.
+//
+// A miss falls back to the first chain rather than to nothing, because the two
+// chains collapse into one whenever the project asked about is the hub's own
+// directory — and reporting "no chain" for the hub itself would be wrong in the
+// most common case there is.
+func primaryAuditVerdict(verdicts []auditmerge.Verdict, workDir string) (auditmerge.Verdict, bool) {
+	if len(verdicts) == 0 {
+		return auditmerge.Verdict{}, false
+	}
+	for _, v := range verdicts {
+		if v.Dir == workDir {
+			return v, true
+		}
+	}
+	return verdicts[0], true
+}
+
+// auditSourceFromQuery reads ?source=, defaulting to the single-chain read.
+//
+// An unrecognised value is an error rather than a silent fallback, matching the
+// numeric parameters: a caller asking for a scope this build does not have must
+// not be answered with a narrower one that looks the same.
+func auditSourceFromQuery(r *http.Request) (string, error) {
+	switch v := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("source"))); v {
+	case "", auditSourceProject:
+		return auditSourceProject, nil
+	case auditSourceAll:
+		return auditSourceAll, nil
+	default:
+		return "", fmt.Errorf("source: %q is not one of %q, %q", v, auditSourceProject, auditSourceAll)
+	}
 }
 
 // openAuditLog resolves which journal to read and opens it, writing the

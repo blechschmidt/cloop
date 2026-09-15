@@ -85,6 +85,11 @@ type StepRow struct {
 type DB struct {
 	mu   sync.Mutex
 	conn *sql.DB
+
+	// role is which of the two audit chains this handle may write to, set by
+	// AsControlPlane or AsProject. Zero means unclassified, which asserts
+	// nothing. See audit_home.go.
+	role roleField
 }
 
 // Open opens (or creates) the SQLite database at dbPath, applies tuning

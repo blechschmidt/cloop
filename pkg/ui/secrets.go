@@ -463,6 +463,11 @@ func openUIBrokerDB(controlPlaneDir string) (*secretbroker.Broker, *statedb.DB, 
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	// Every secret action is homed in the control plane: a credential is held
+	// by the hub and leased to projects, so filing its lifecycle in a project's
+	// chain would scatter one credential's history across every project that
+	// ever borrowed it.
+	db.AsControlPlane()
 	store, err := secretstore.New(db)
 	if err != nil {
 		_ = db.Close()

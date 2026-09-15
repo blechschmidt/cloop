@@ -422,6 +422,10 @@ func (s *Server) auditSpendRefusal(workDir, identity string, d *quota.Denial) {
 		return
 	}
 	defer func() { _ = db.Close() }()
+	// A spend refusal is a quota decision about an identity, not about a plan,
+	// so it belongs to the hub's chain — `project` in the payload is the thing
+	// that was stopped, not the place this is filed.
+	db.AsControlPlane()
 
 	payload, err := json.Marshal(map[string]any{
 		"identity": identity,

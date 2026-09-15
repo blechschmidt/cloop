@@ -159,7 +159,9 @@ func startKubeGuard(cfg *config.Config, dir string) (*kubeGuardService, error) {
 
 	var auditDB *statedb.DB
 	if db, dbErr := statedb.Open(state.DBPath(dir)); dbErr == nil {
-		auditDB = db
+		// Same bargain as the git proxy: the monitor sits outside the sandbox
+		// it is watching, so what it sees is a fleet fact.
+		auditDB = db.AsControlPlane()
 	} else {
 		fmt.Fprintf(os.Stderr,
 			"ui: kubernetes monitor decisions will go to stderr, not the audit trail: %v\n", dbErr)

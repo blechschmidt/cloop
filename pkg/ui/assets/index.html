@@ -1826,12 +1826,20 @@
           <button class="btn" style="padding:4px 10px;font-size:12px;margin-left:auto" onclick="verifyAuditChain()" title="Recompute the SHA-256 chain from the genesis row">&#128274; Verify chain</button>
           <button class="btn" style="padding:4px 10px;font-size:12px" onclick="copyAuditAsJSON()" title="Copy the rows currently shown as JSON">&#128203; Copy as JSON</button>
           <button class="btn" style="padding:4px 10px;font-size:12px" onclick="loadAudit()" title="Reload the trail">&#8635; Refresh</button>
+          <label for="auditMergeSources" style="display:flex;align-items:center;gap:5px;font-size:11.5px;font-weight:400;color:var(--muted);cursor:pointer" title="Read this project's journal and the hub's control-plane journal as one trail, ordered by timestamp. Verification then covers both chains.">
+            <input type="checkbox" id="auditMergeSources" onchange="toggleAuditMerged()" style="margin:0;cursor:pointer">Merge both chains
+          </label>
         </div>
         <p style="font-size:12px;color:var(--muted);margin-top:4px;margin-bottom:12px">
           Append-only, hash-chained record of every state mutation: task changes, config writes,
           authorization decisions, credential leases, egress grants, and executor fleet changes.
           Each row's hash covers the one before it, so any edit, deletion, or insertion made behind
-          cloop's back breaks the chain and is reported above. Export the same data with
+          cloop's back breaks the chain and is reported above. The trail is kept in <em>two</em>
+          independently chained journals &mdash; this project's <code>.cloop/state.db</code> holds its
+          own task and config history, while the hub's control-plane database holds the fleet-wide
+          record of executors, secret leases, workspaces and image policy. &ldquo;Merge both chains&rdquo;
+          reads them together, labels every row with the chain it came from, and verifies each one
+          separately. Export the same data with
           <code>cloop audit-log export --format jsonl|csv|cef</code>.
         </p>
 
@@ -1878,6 +1886,7 @@
               <tr>
                 <th style="width:60px">ID</th>
                 <th style="width:170px">Time (UTC)</th>
+                <th style="width:110px">Source</th>
                 <th style="width:180px">Actor</th>
                 <th style="width:170px">Event</th>
                 <th class="audit-hide-sm">Entity</th>

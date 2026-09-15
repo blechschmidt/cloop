@@ -26,6 +26,7 @@ func Markdown(intro string) string {
 	b.WriteString("\n\n")
 
 	writeReaders(&b)
+	writeHomes(&b)
 
 	b.WriteString("## Actions by family\n\n")
 	b.WriteString(fmt.Sprintf(
@@ -84,6 +85,56 @@ const readerNote = "The trail is one table behind one pair of admin-only endpoin
 	"better served by a column that says \"the same everywhere\" than by prose that\n" +
 	"leaves them guessing whether it varies."
 
+// writeHomes renders which of the two chains each group of actions lives in.
+//
+// This section exists because the single most expensive thing a reader of this
+// page can believe is that there is one audit table. There are two, with
+// separate hash chains, and an operator who reads a project's trail looking for
+// an executor or credential event will find nothing and reasonably conclude
+// nothing happened.
+func writeHomes(b *strings.Builder) {
+	b.WriteString("## Which database an action is recorded in\n\n")
+	b.WriteString(homeNote + "\n\n")
+
+	b.WriteString("| Home | Meaning | Actions |\n")
+	b.WriteString("| --- | --- | --- |\n")
+	for _, h := range []HomeDB{HomeControlPlane, HomeProject, HomeEither} {
+		entries := InHome(h)
+		b.WriteString(fmt.Sprintf("| `%s` | %s | %d |\n", h, h.Describe(), len(entries)))
+	}
+	b.WriteString("\n")
+
+	// The project and either sets are short enough to name in full, and naming
+	// them is the useful direction: a reader wants "what *can* I expect to find
+	// in this project's chain", and the answer is a list of ten rather than a
+	// list of ninety-seven.
+	for _, h := range []HomeDB{HomeProject, HomeEither} {
+		entries := InHome(h)
+		if len(entries) == 0 {
+			continue
+		}
+		var names []string
+		for _, e := range entries {
+			names = append(names, "`"+string(e.Action)+"`")
+		}
+		b.WriteString(fmt.Sprintf("Recorded in %s: %s.\n\n",
+			h.Describe(), strings.Join(names, ", ")))
+	}
+	b.WriteString("Everything else is recorded in " + HomeControlPlane.Describe() + ".\n\n")
+}
+
+const homeNote = "`audit_events` is not one table. It exists in the hub's own control-plane\n" +
+	"`state.db` and in every project's `.cloop/state.db`, and **each copy carries its\n" +
+	"own independent hash chain**. A row does not say which database it came from, so\n" +
+	"verifying one chain proves nothing about the other: both stay internally\n" +
+	"consistent whether or not an event landed in the right one.\n\n" +
+	"This matters when answering a question about one project. The plan's own life is\n" +
+	"in the project's chain; the executor that ran it, the image policy that admitted\n" +
+	"it, the workspace that was fetched for it and the credentials it held are in the\n" +
+	"hub's. Use `cloop hub audit list` to read both at once — it labels every row with\n" +
+	"its source — and `cloop hub audit verify` to verify both chains rather than\n" +
+	"whichever one happened to be opened."
+
 // rolesHolding returns the roles whose default permission set contains p.
 func rolesHolding(p authz.Permission) []authz.Role {
 	var out []authz.Role
@@ -138,11 +189,11 @@ func writeFamily(b *strings.Builder, family string) {
 	entries := InFamily(family)
 	b.WriteString("### " + familyHeading(family) + "\n\n")
 
-	b.WriteString("| Action | Entity | Stability | Fires when |\n")
-	b.WriteString("| --- | --- | --- | --- |\n")
+	b.WriteString("| Action | Entity | Home | Stability | Fires when |\n")
+	b.WriteString("| --- | --- | --- | --- | --- |\n")
 	for _, e := range entries {
-		b.WriteString(fmt.Sprintf("| `%s` | `%s` | %s | %s |\n",
-			e.Action, e.Entity, e.Stability, cell(e.Trigger)))
+		b.WriteString(fmt.Sprintf("| `%s` | `%s` | %s | %s | %s |\n",
+			e.Action, e.Entity, e.Home, e.Stability, cell(e.Trigger)))
 	}
 	b.WriteString("\n")
 

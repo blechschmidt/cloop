@@ -283,12 +283,17 @@ type sweepView struct {
 // than in a managed project's database, because an executor is not owned by a
 // project: one device runs work for many, and a project pinned to a remote
 // executor may have no readable local .cloop directory at all.
+//
+// The handle is marked as the control plane's, which is what lets the audit
+// append path refuse to write a project-homed event through it. The mark
+// matters most here because this database is also the hub's own project — the
+// same file, reached two ways — so nothing about the path distinguishes them.
 func (s *Server) controlPlaneDB() (*statedb.DB, error) {
 	db, err := statedb.Open(state.DBPath(s.WorkDir))
 	if err != nil {
 		return nil, fmt.Errorf("open control-plane database: %w", err)
 	}
-	return db, nil
+	return db.AsControlPlane(), nil
 }
 
 // executorPolicy renders the current host-execution policy for the banner.

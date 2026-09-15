@@ -160,6 +160,9 @@ func (s *Server) auditAutoResume(workDir string, reason *pausereason.Reason, res
 		return
 	}
 	defer db.Close() //nolint:errcheck
+	// A cap pause and its resume are two halves of one story about this plan,
+	// so they have to land in the same chain the pause did — the project's.
+	db.AsProject()
 	statedb.AuditCapResume(db, statedb.CapResumeInput{
 		ProjectPath:  workDir,
 		PausedDetail: reason.Label(),

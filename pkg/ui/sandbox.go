@@ -131,6 +131,11 @@ func auditImageDenial(workDir string, err error) {
 		return
 	}
 	defer db.Close()
+	// An image-policy denial is a placement decision the hub made, so it is
+	// recorded in the hub's chain even though workDir names a project. Marking
+	// the handle is what keeps that deliberate choice from reading like the
+	// accident it resembles.
+	db.AsControlPlane()
 
 	in := statedb.ImagePolicyDenialInput{
 		ProjectPath: workDir,

@@ -560,6 +560,12 @@ func New(cfg Config, prov provider.Provider) (*Orchestrator, error) {
 			"path":  stateDBPath,
 		})
 		sdb = nil
+	} else {
+		// This is the handle every task.dispatch and task.finish row is written
+		// through. Marking it as a project handle is what makes a fleet-homed
+		// event emitted here — an executor or secret action that should have
+		// gone to the hub — fail loudly instead of landing in the plan's chain.
+		sdb.AsProject()
 	}
 
 	// The watchdog is a plain per-task cancel registry: the kill-request

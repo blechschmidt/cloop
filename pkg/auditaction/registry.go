@@ -31,6 +31,7 @@ var registry = []Entry{
 	// UI-journal rows.
 	{
 		Action:    ActionTaskUpsert,
+		Home:      HomeProject,
 		Entity:    "task",
 		Trigger:   "A task is created, or a saved task's audited fields differ from the ones already stored.",
 		Payload:   []string{"id", "title", "status", "priority", "role", "description"},
@@ -42,6 +43,7 @@ var registry = []Entry{
 	},
 	{
 		Action:    ActionTaskDelete,
+		Home:      HomeProject,
 		Entity:    "task",
 		Trigger:   "A task disappears from the plan between two saves, or is deleted outright.",
 		Payload:   []string{"id"},
@@ -50,6 +52,7 @@ var registry = []Entry{
 	},
 	{
 		Action:    ActionTaskStatus,
+		Home:      HomeProject,
 		Entity:    "task",
 		Trigger:   "Somebody flips a task's status by hand, rather than the orchestrator moving it.",
 		Payload:   []string{"id", "old_status", "new_status"},
@@ -58,6 +61,7 @@ var registry = []Entry{
 	},
 	{
 		Action:  ActionTaskDispatch,
+		Home:    HomeProject,
 		Entity:  "task",
 		Trigger: "A task is handed to an executor, recording where it will run and what it was given.",
 		Payload: []string{
@@ -73,6 +77,7 @@ var registry = []Entry{
 	},
 	{
 		Action:  ActionTaskFinish,
+		Home:    HomeProject,
 		Entity:  "task",
 		Trigger: "A dispatched task reaches a terminal outcome — done, failed, skipped, timed out, or aborted.",
 		Payload: []string{
@@ -88,6 +93,7 @@ var registry = []Entry{
 	// ── run ────────────────────────────────────────────────────────────────
 	{
 		Action:  ActionRunCapPaused,
+		Home:    HomeProject,
 		Entity:  "plan",
 		Trigger: "A Claude Code subscription cap stops the run before it dispatches its next task.",
 		Payload: []string{
@@ -101,6 +107,7 @@ var registry = []Entry{
 	},
 	{
 		Action:    ActionRunCapResumed,
+		Home:      HomeProject,
 		Entity:    "plan",
 		Trigger:   "The hub restarts a cap-paused run after its window rolled over, without a human.",
 		Payload:   []string{"project", "paused_detail", "resumes_at", "resumed_at"},
@@ -113,6 +120,7 @@ var registry = []Entry{
 	// ── step ───────────────────────────────────────────────────────────────
 	{
 		Action:    ActionStepAppend,
+		Home:      HomeProject,
 		Entity:    "step",
 		Trigger:   "One execution step finishes and its transcript is appended to the run.",
 		Payload:   []string{"step", "task", "exit_code", "duration", "time", "input_tokens", "output_tokens"},
@@ -123,6 +131,7 @@ var registry = []Entry{
 	// ── state / config ─────────────────────────────────────────────────────
 	{
 		Action:  ActionStateSave,
+		Home:    HomeProject,
 		Entity:  "plan",
 		Trigger: "The project's plan-level state is written: goal, run status, counters, and the mode flags in force.",
 		Payload: []string{
@@ -138,6 +147,7 @@ var registry = []Entry{
 	},
 	{
 		Action:    ActionConfigSet,
+		Home:      HomeProject,
 		Entity:    "config",
 		Trigger:   "A configuration write lands, from the Settings panel, the CLI, or config validation repair.",
 		Payload:   []string{"yaml"},
@@ -152,6 +162,7 @@ var registry = []Entry{
 	// identifies a session rather than a node, and says so.
 	{
 		Action:    ActionExecutorEnroll,
+		Home:      HomeControlPlane,
 		Entity:    "executor",
 		Trigger:   "A remote agent completes outbound enrolment and joins the fleet.",
 		Payload:   []string{"action", "executor_id", "name", "expires_at", "workdir_root", "labels"},
@@ -161,6 +172,7 @@ var registry = []Entry{
 	},
 	{
 		Action:    ActionExecutorRevoke,
+		Home:      HomeControlPlane,
 		Entity:    "executor",
 		Trigger:   "An enrolled agent's credential is revoked and it is removed from the fleet.",
 		Payload:   []string{"action", "executor_id", "name", "kind"},
@@ -169,6 +181,7 @@ var registry = []Entry{
 	},
 	{
 		Action:    ActionExecutorCordon,
+		Home:      HomeControlPlane,
 		Entity:    "executor",
 		Trigger:   "An executor is marked to refuse new work while finishing what it holds.",
 		Payload:   []string{"action", "executor_id", "reason", "state"},
@@ -177,6 +190,7 @@ var registry = []Entry{
 	},
 	{
 		Action:    ActionExecutorUncordon,
+		Home:      HomeControlPlane,
 		Entity:    "executor",
 		Trigger:   "A cordoned executor is returned to normal scheduling.",
 		Payload:   []string{"action", "executor_id", "state"},
@@ -185,6 +199,7 @@ var registry = []Entry{
 	},
 	{
 		Action:    ActionExecutorDrain,
+		Home:      HomeControlPlane,
 		Entity:    "executor",
 		Trigger:   "An executor is set to shed in-flight work as well as refuse new work.",
 		Payload:   []string{"action", "executor_id", "reason", "state"},
@@ -193,6 +208,7 @@ var registry = []Entry{
 	},
 	{
 		Action:    ActionExecutorBind,
+		Home:      HomeControlPlane,
 		Entity:    "executor",
 		Trigger:   "A project is pinned to one executor, at creation time or from the Executors panel.",
 		Payload:   []string{"action", "executor_id", "project", "project_path", "kind", "via"},
@@ -202,6 +218,7 @@ var registry = []Entry{
 	},
 	{
 		Action:    ActionExecutorUnbind,
+		Home:      HomeControlPlane,
 		Entity:    "executor",
 		Trigger:   "A project's executor pin is cleared and it falls back to registry placement.",
 		Payload:   []string{"action", "project", "project_path"},
@@ -210,6 +227,7 @@ var registry = []Entry{
 	},
 	{
 		Action:    ActionExecutorStateChange,
+		Home:      HomeControlPlane,
 		Entity:    "executor",
 		Trigger:   "Liveness tracking moves an executor between health states without an operator asking.",
 		Payload:   []string{"from", "to", "reason"},
@@ -218,6 +236,7 @@ var registry = []Entry{
 	},
 	{
 		Action:    ActionExecutorFailover,
+		Home:      HomeControlPlane,
 		Entity:    "executor_session",
 		Trigger:   "A session is moved off an executor that stopped answering, or fails to be placed anywhere.",
 		Payload:   []string{"session_id", "from", "to", "attempt", "project_path", "task_id", "placed", "error"},
@@ -229,6 +248,7 @@ var registry = []Entry{
 	// ── workspace ──────────────────────────────────────────────────────────
 	{
 		Action:  ActionWorkspaceProvisionStart,
+		Home:    HomeControlPlane,
 		Entity:  "project",
 		Trigger: "An executor begins materialising a project's source tree, before the harness starts.",
 		Payload: []string{
@@ -241,6 +261,7 @@ var registry = []Entry{
 	},
 	{
 		Action:  ActionWorkspaceProvisionEnd,
+		Home:    HomeControlPlane,
 		Entity:  "project",
 		Trigger: "Workspace provisioning finishes, successfully or not.",
 		Payload: []string{
@@ -255,6 +276,7 @@ var registry = []Entry{
 	// ── sandbox ────────────────────────────────────────────────────────────
 	{
 		Action:    ActionSandboxImageDenied,
+		Home:      HomeControlPlane,
 		Entity:    "project",
 		Trigger:   "Image trust policy refuses a container image a project asked to run.",
 		Payload:   []string{"image", "rule", "reason", "registry", "repository", "project"},
@@ -271,6 +293,7 @@ var registry = []Entry{
 	// is what bounds how long a human held a shell inside a workload.
 	{
 		Action:    ActionSandboxAttachOpen,
+		Home:      HomeControlPlane,
 		Entity:    "sandbox_session",
 		Trigger:   "A caller is admitted to a shell inside a running task's sandbox.",
 		Payload:   []string{"session_id", "writable", "executor_id", "handle_id", "task_id", "command"},
@@ -280,6 +303,7 @@ var registry = []Entry{
 	},
 	{
 		Action:    ActionSandboxAttachClose,
+		Home:      HomeControlPlane,
 		Entity:    "sandbox_session",
 		Trigger:   "An attached session ends, by the caller leaving or the sandbox going away.",
 		Payload:   []string{"session_id", "writable", "executor_id", "handle_id", "task_id", "command", "detail"},
@@ -288,6 +312,7 @@ var registry = []Entry{
 	},
 	{
 		Action:    ActionSandboxAttachDenied,
+		Home:      HomeControlPlane,
 		Entity:    "sandbox_session",
 		Trigger:   "An attach request is refused, by permission, by scope, or because the target is not running.",
 		Payload:   []string{"session_id", "writable", "executor_id", "handle_id", "task_id", "command", "detail"},
@@ -303,6 +328,7 @@ var registry = []Entry{
 	// a permanent, hash-chained row.
 	{
 		Action:    ActionSecretMint,
+		Home:      HomeControlPlane,
 		Entity:    "secret",
 		Trigger:   "A credential is sealed and stored as a new secret.",
 		Payload:   secretPayload,
@@ -311,6 +337,7 @@ var registry = []Entry{
 	},
 	{
 		Action:    ActionSecretDelete,
+		Home:      HomeControlPlane,
 		Entity:    "secret",
 		Trigger:   "A secret is destroyed and every grant depending on it is revoked with it.",
 		Payload:   secretPayload,
@@ -319,6 +346,7 @@ var registry = []Entry{
 	},
 	{
 		Action:    ActionSecretGrant,
+		Home:      HomeControlPlane,
 		Entity:    "secret",
 		Trigger:   "A grant is written authorising a subject to lease a secret.",
 		Payload:   secretPayload,
@@ -328,6 +356,7 @@ var registry = []Entry{
 	},
 	{
 		Action:    ActionSecretRevoke,
+		Home:      HomeControlPlane,
 		Entity:    "secret",
 		Trigger:   "An operator marks a grant unusable.",
 		Payload:   secretPayload,
@@ -336,6 +365,7 @@ var registry = []Entry{
 	},
 	{
 		Action:    ActionSecretLease,
+		Home:      HomeControlPlane,
 		Entity:    "secret",
 		Trigger:   "A lease is issued — or refused — against the grants matching a request.",
 		Payload:   secretPayload,
@@ -345,6 +375,7 @@ var registry = []Entry{
 	},
 	{
 		Action:    ActionSecretRenew,
+		Home:      HomeControlPlane,
 		Entity:    "secret",
 		Trigger:   "A live lease is re-issued to the same holder before it expires.",
 		Payload:   secretPayload,
@@ -353,6 +384,7 @@ var registry = []Entry{
 	},
 	{
 		Action:    ActionSecretRelease,
+		Home:      HomeControlPlane,
 		Entity:    "secret",
 		Trigger:   "A workload finishes with a lease and it is dropped from the server-side record.",
 		Payload:   secretPayload,
@@ -362,6 +394,7 @@ var registry = []Entry{
 	},
 	{
 		Action:    ActionSecretAccessCheck,
+		Home:      HomeControlPlane,
 		Entity:    "secret",
 		Trigger:   "A repository or cluster access decision is evaluated against a grant's constraints.",
 		Payload:   secretPayload,
@@ -370,6 +403,7 @@ var registry = []Entry{
 	},
 	{
 		Action:    ActionSecretRequest,
+		Home:      HomeControlPlane,
 		Entity:    "secret",
 		Trigger:   "A developer files a self-service request for access they do not have.",
 		Payload:   secretPayload,
@@ -379,6 +413,7 @@ var registry = []Entry{
 	},
 	{
 		Action:    ActionSecretRequestApprove,
+		Home:      HomeControlPlane,
 		Entity:    "secret",
 		Trigger:   "A reviewer approves a pending request and the grant it asked for is minted.",
 		Payload:   secretPayload,
@@ -387,6 +422,7 @@ var registry = []Entry{
 	},
 	{
 		Action:    ActionSecretRequestDeny,
+		Home:      HomeControlPlane,
 		Entity:    "secret",
 		Trigger:   "A reviewer refuses a pending request.",
 		Payload:   secretPayload,
@@ -395,6 +431,7 @@ var registry = []Entry{
 	},
 	{
 		Action:    ActionSecretRequestWithdraw,
+		Home:      HomeControlPlane,
 		Entity:    "secret",
 		Trigger:   "A requester withdraws their own pending request.",
 		Payload:   secretPayload,
@@ -403,6 +440,7 @@ var registry = []Entry{
 	},
 	{
 		Action:    ActionSecretRequestExpire,
+		Home:      HomeControlPlane,
 		Entity:    "secret",
 		Trigger:   "A pending request lapses with nobody having decided it.",
 		Payload:   secretPayload,
@@ -412,6 +450,7 @@ var registry = []Entry{
 	},
 	{
 		Action:    ActionSecretLeaseSweep,
+		Home:      HomeControlPlane,
 		Entity:    "secret",
 		Trigger:   "The periodic sweeper reaps leases whose TTL has passed.",
 		Payload:   []string{"decision", "wiped", "vanished", "skipped", "failed", "expired"},
@@ -427,6 +466,7 @@ var registry = []Entry{
 	// at a moment when it demonstrably still worked.
 	{
 		Action:    ActionLeaseRevokeSent,
+		Home:      HomeControlPlane,
 		Entity:    "lease",
 		Trigger:   "A revocation is queued for delivery to the executors holding a lease.",
 		Payload:   []string{"decision", "lease_id", "grant_id", "executor_id", "project_id", "action", "secrets", "holders", "reason"},
@@ -435,6 +475,7 @@ var registry = []Entry{
 	},
 	{
 		Action:    ActionLeaseRevokeAcked,
+		Home:      HomeControlPlane,
 		Entity:    "lease",
 		Trigger:   "An executor confirms it destroyed the material for a revoked lease.",
 		Payload:   []string{"decision", "lease_id", "grant_id", "executor_id", "project_id", "action", "state", "env_scrubbed", "files_removed", "reason"},
@@ -443,6 +484,7 @@ var registry = []Entry{
 	},
 	{
 		Action:    ActionLeaseRevokeFailed,
+		Home:      HomeControlPlane,
 		Entity:    "lease",
 		Trigger:   "A revocation fails to land on an executor that still holds the credential.",
 		Payload:   []string{"decision", "lease_id", "grant_id", "executor_id", "project_id", "action", "state", "error", "reason"},
@@ -454,6 +496,7 @@ var registry = []Entry{
 	// ── github_app ─────────────────────────────────────────────────────────
 	{
 		Action:    ActionGitHubAppTokenDestroy,
+		Home:      HomeControlPlane,
 		Entity:    "secret",
 		Trigger:   "A GitHub App installation token is deleted at GitHub.",
 		Payload:   secretPayload,
@@ -467,6 +510,7 @@ var registry = []Entry{
 	// ── egress ─────────────────────────────────────────────────────────────
 	{
 		Action:    ActionEgressGrant,
+		Home:      HomeControlPlane,
 		Entity:    "secret",
 		Trigger:   "A subject is authorised to reach the network through the hub's egress proxy.",
 		Payload:   secretPayload,
@@ -475,6 +519,7 @@ var registry = []Entry{
 	},
 	{
 		Action:    ActionEgressRevoke,
+		Home:      HomeControlPlane,
 		Entity:    "secret",
 		Trigger:   "An egress authorisation is marked unusable.",
 		Payload:   secretPayload,
@@ -483,6 +528,7 @@ var registry = []Entry{
 	},
 	{
 		Action:    ActionEgressRedeem,
+		Home:      HomeControlPlane,
 		Entity:    "secret",
 		Trigger:   "A proxy session is minted against a matching egress grant.",
 		Payload:   secretPayload,
@@ -491,6 +537,7 @@ var registry = []Entry{
 	},
 	{
 		Action:    ActionEgressConnect,
+		Home:      HomeControlPlane,
 		Entity:    "secret",
 		Trigger:   "A sandbox's connection attempt is evaluated against the session's host allowlist.",
 		Payload:   secretPayload,
@@ -500,6 +547,7 @@ var registry = []Entry{
 	},
 	{
 		Action:    ActionEgressRequest,
+		Home:      HomeControlPlane,
 		Entity:    "secret",
 		Trigger:   "An HTTP request passes through the egress proxy.",
 		Payload:   secretPayload,
@@ -508,6 +556,7 @@ var registry = []Entry{
 	},
 	{
 		Action:    ActionEgressClose,
+		Home:      HomeControlPlane,
 		Entity:    "secret",
 		Trigger:   "An egress proxy session closes, carrying the bytes it moved in each direction.",
 		Payload:   secretPayload,
@@ -522,6 +571,7 @@ var registry = []Entry{
 	// what makes the whole payload safe to export.
 	{
 		Action:    ActionGitProxySessionMinted,
+		Home:      HomeControlPlane,
 		Entity:    "gitproxy",
 		Trigger:   "A proxy session is created for a task, scoping which repository and refs it may touch.",
 		Payload:   gitProxyPayload,
@@ -530,6 +580,7 @@ var registry = []Entry{
 	},
 	{
 		Action:    ActionGitProxySessionClosed,
+		Home:      HomeControlPlane,
 		Entity:    "gitproxy",
 		Trigger:   "A proxy session ends and its credential stops working.",
 		Payload:   gitProxyPayload,
@@ -538,6 +589,7 @@ var registry = []Entry{
 	},
 	{
 		Action:    ActionGitProxyPushAllowed,
+		Home:      HomeControlPlane,
 		Entity:    "gitproxy",
 		Trigger:   "A push is checked against the session's branch allowlist and forwarded.",
 		Payload:   gitProxyPayload,
@@ -546,6 +598,7 @@ var registry = []Entry{
 	},
 	{
 		Action:    ActionGitProxyPushDenied,
+		Home:      HomeControlPlane,
 		Entity:    "gitproxy",
 		Trigger:   "A push is refused because it names a ref the session may not write.",
 		Payload:   gitProxyPayload,
@@ -556,6 +609,7 @@ var registry = []Entry{
 	},
 	{
 		Action:    ActionGitProxyFetch,
+		Home:      HomeControlPlane,
 		Entity:    "gitproxy",
 		Trigger:   "A read passes through the proxy.",
 		Payload:   gitProxyPayload,
@@ -564,6 +618,7 @@ var registry = []Entry{
 	},
 	{
 		Action:    ActionGitProxyRejected,
+		Home:      HomeControlPlane,
 		Entity:    "gitproxy",
 		Trigger:   "A request is refused before any policy could be evaluated — no session, bad credential, unknown repository.",
 		Payload:   gitProxyPayload,
@@ -574,6 +629,7 @@ var registry = []Entry{
 	// ── kubeguard ──────────────────────────────────────────────────────────
 	{
 		Action:    ActionKubeGuardSessionMinted,
+		Home:      HomeControlPlane,
 		Entity:    "kubeguard",
 		Trigger:   "A Kubernetes proxy session is created for a task against one cluster and context.",
 		Payload:   kubeGuardPayload,
@@ -582,6 +638,7 @@ var registry = []Entry{
 	},
 	{
 		Action:    ActionKubeGuardSessionClosed,
+		Home:      HomeControlPlane,
 		Entity:    "kubeguard",
 		Trigger:   "A Kubernetes proxy session ends.",
 		Payload:   kubeGuardPayload,
@@ -590,6 +647,7 @@ var registry = []Entry{
 	},
 	{
 		Action:    ActionKubeGuardRequestDenied,
+		Home:      HomeControlPlane,
 		Entity:    "kubeguard",
 		Trigger:   "A Kubernetes request is refused by the session's verb and resource policy.",
 		Payload:   kubeGuardPayload,
@@ -599,6 +657,7 @@ var registry = []Entry{
 	},
 	{
 		Action:    ActionKubeGuardRequestAllowed,
+		Home:      HomeControlPlane,
 		Entity:    "kubeguard",
 		Trigger:   "A Kubernetes request is admitted by policy.",
 		Payload:   kubeGuardPayload,
@@ -608,6 +667,7 @@ var registry = []Entry{
 	},
 	{
 		Action:    ActionKubeGuardRejected,
+		Home:      HomeControlPlane,
 		Entity:    "kubeguard",
 		Trigger:   "A request is refused before its session could be identified.",
 		Payload:   kubeGuardPayload,
@@ -622,6 +682,7 @@ var registry = []Entry{
 	// pipelines did with that.
 	{
 		Action:    ActionCIRejected,
+		Home:      HomeControlPlane,
 		Entity:    "ci_session",
 		Trigger:   "A relay request is refused before a session could be established.",
 		Payload:   ciPayload,
@@ -630,6 +691,7 @@ var registry = []Entry{
 	},
 	{
 		Action:    ActionCISessionMinted,
+		Home:      HomeControlPlane,
 		Entity:    "ci_session",
 		Trigger:   "A pipeline's OIDC token matches an allowlist rule and a relay session is issued.",
 		Payload:   ciPayload,
@@ -638,6 +700,7 @@ var registry = []Entry{
 	},
 	{
 		Action:    ActionCISessionClosed,
+		Home:      HomeControlPlane,
 		Entity:    "ci_session",
 		Trigger:   "A relay session ends, by expiry or by revocation.",
 		Payload:   ciPayload,
@@ -646,6 +709,7 @@ var registry = []Entry{
 	},
 	{
 		Action:    ActionCISessionRevoked,
+		Home:      HomeControlPlane,
 		Entity:    "ci_rule",
 		Trigger:   "An operator revokes a live relay session from the CI panel.",
 		Payload:   ciRulePayload,
@@ -654,6 +718,7 @@ var registry = []Entry{
 	},
 	{
 		Action:    ActionCIExchangeAccepted,
+		Home:      HomeControlPlane,
 		Entity:    "ci_session",
 		Trigger:   "A pipeline's OIDC token is verified and exchanged for relay credentials.",
 		Payload:   ciPayload,
@@ -662,6 +727,7 @@ var registry = []Entry{
 	},
 	{
 		Action:    ActionCIExchangeRejected,
+		Home:      HomeControlPlane,
 		Entity:    "ci_session",
 		Trigger:   "A token exchange fails: bad signature, wrong issuer, or no rule admits the claims.",
 		Payload:   ciPayload,
@@ -671,6 +737,7 @@ var registry = []Entry{
 	},
 	{
 		Action:    ActionCIRelayAllowed,
+		Home:      HomeControlPlane,
 		Entity:    "ci_session",
 		Trigger:   "A relayed API call is forwarded upstream on a live session.",
 		Payload:   ciPayload,
@@ -679,6 +746,7 @@ var registry = []Entry{
 	},
 	{
 		Action:    ActionCIRelayDenied,
+		Home:      HomeControlPlane,
 		Entity:    "ci_session",
 		Trigger:   "A relayed API call is refused — expired session, unsupported path, or a quota.",
 		Payload:   ciPayload,
@@ -687,6 +755,7 @@ var registry = []Entry{
 	},
 	{
 		Action:    ActionCIRuleCreated,
+		Home:      HomeControlPlane,
 		Entity:    "ci_rule",
 		Trigger:   "An allowlist rule is added, widening which pipelines may authenticate.",
 		Payload:   ciRulePayload,
@@ -696,6 +765,7 @@ var registry = []Entry{
 	},
 	{
 		Action:    ActionCIRuleUpdated,
+		Home:      HomeControlPlane,
 		Entity:    "ci_rule",
 		Trigger:   "An allowlist rule is edited; live sessions it no longer admits are revoked in the same operation.",
 		Payload:   ciRulePayload,
@@ -704,6 +774,7 @@ var registry = []Entry{
 	},
 	{
 		Action:    ActionCIRuleDeleted,
+		Home:      HomeControlPlane,
 		Entity:    "ci_rule",
 		Trigger:   "An allowlist rule is removed.",
 		Payload:   ciRulePayload,
@@ -712,6 +783,7 @@ var registry = []Entry{
 	},
 	{
 		Action:    ActionCIConfigUpdated,
+		Home:      HomeControlPlane,
 		Entity:    "ci_rule",
 		Trigger:   "The CI relay's own settings change — whether it is enabled, its issuer, its session ceiling.",
 		Payload:   ciRulePayload,
@@ -722,16 +794,20 @@ var registry = []Entry{
 	// ── authz ──────────────────────────────────────────────────────────────
 	{
 		Action:    ActionAuthzGranted,
+		Home:      HomeEither,
 		Entity:    "permission",
 		Trigger:   "A privileged permission is exercised successfully.",
 		Payload:   authzPayload,
 		Stability: StabilityStable,
 		Read:      authz.PermAuditRead,
 		Note: "Not every allow: ordinary reads would drown the table, so only privileged " +
-			"permissions are recorded on this side.",
+			"permissions are recorded on this side. Home varies with scope — a check " +
+			"against a project lands in that project's chain, a fleet-wide one in the " +
+			"hub's — so answering \"what was this subject allowed to do\" needs both.",
 	},
 	{
 		Action:    ActionAuthzDenied,
+		Home:      HomeEither,
 		Entity:    "permission",
 		Trigger:   "Any permission check refuses a caller.",
 		Payload:   authzPayload,
@@ -750,6 +826,7 @@ var registry = []Entry{
 	// ── api_token ──────────────────────────────────────────────────────────
 	{
 		Action:    ActionAPITokenCreated,
+		Home:      HomeControlPlane,
 		Entity:    "api_token",
 		Trigger:   "A scoped API token or a display-glasses link is minted, from the UI or the CLI.",
 		Payload:   []string{"name", "roles", "project_scope", "expires_at", "kind", "owner"},
@@ -759,6 +836,7 @@ var registry = []Entry{
 	},
 	{
 		Action:    ActionAPITokenRevoked,
+		Home:      HomeControlPlane,
 		Entity:    "api_token",
 		Trigger:   "A token or glasses link is revoked, or rotated — a rotation revokes the old one.",
 		Payload:   []string{"name", "roles", "reason"},
@@ -767,6 +845,7 @@ var registry = []Entry{
 	},
 	{
 		Action:    ActionAPITokenAuthFailed,
+		Home:      HomeControlPlane,
 		Entity:    "api_token",
 		Trigger:   "A request presents a token that does not authenticate: unknown, revoked, or expired.",
 		Payload:   []string{"reason", "ip", "method", "path"},
@@ -779,6 +858,7 @@ var registry = []Entry{
 	},
 	{
 		Action:    ActionAPITokenCreateDenied,
+		Home:      HomeControlPlane,
 		Entity:    "api_token",
 		Trigger:   "A token mint is refused because it would grant more than the caller holds.",
 		Payload:   []string{"reason", "roles", "project_scope"},
@@ -794,6 +874,7 @@ var registry = []Entry{
 	// session.
 	{
 		Action:    ActionSessionCreated,
+		Home:      HomeControlPlane,
 		Entity:    "session",
 		Trigger:   "A sign-in completes and a durable session is written.",
 		Payload:   sessionPayload,
@@ -802,6 +883,7 @@ var registry = []Entry{
 	},
 	{
 		Action:    ActionSessionExpired,
+		Home:      HomeControlPlane,
 		Entity:    "session",
 		Trigger:   "The session janitor removes a session past its absolute or idle deadline.",
 		Payload:   sessionPayload,
@@ -810,6 +892,7 @@ var registry = []Entry{
 	},
 	{
 		Action:    ActionSessionRevoked,
+		Home:      HomeControlPlane,
 		Entity:    "session",
 		Trigger:   "A user logs out, or an operator terminates a session from the UI or the CLI.",
 		Payload:   sessionPayload,
@@ -818,6 +901,7 @@ var registry = []Entry{
 	},
 	{
 		Action:    ActionSessionIdPRevoked,
+		Home:      HomeControlPlane,
 		Entity:    "session",
 		Trigger:   "The identity provider reports the authorisation behind a session is gone.",
 		Payload:   sessionPayload,
@@ -826,6 +910,7 @@ var registry = []Entry{
 	},
 	{
 		Action:    ActionSessionRoleNarrowed,
+		Home:      HomeControlPlane,
 		Entity:    "session",
 		Trigger:   "A re-assertion finds the session's claims now map to a lower role than it held.",
 		Payload:   sessionPayload,
@@ -835,6 +920,7 @@ var registry = []Entry{
 	},
 	{
 		Action:    ActionSessionClaimsUnverified,
+		Home:      HomeControlPlane,
 		Entity:    "session",
 		Trigger:   "The hub cannot reach the IdP to re-assert a session's claims.",
 		Payload:   sessionPayload,
@@ -843,6 +929,7 @@ var registry = []Entry{
 	},
 	{
 		Action:    ActionSessionClaimsRejected,
+		Home:      HomeControlPlane,
 		Entity:    "session",
 		Trigger:   "The IdP answers the re-assertion by refusing the claims outright.",
 		Payload:   sessionPayload,
@@ -851,6 +938,7 @@ var registry = []Entry{
 	},
 	{
 		Action:    ActionSessionClaimsStale,
+		Home:      HomeControlPlane,
 		Entity:    "session",
 		Trigger:   "A privileged operation is blocked because the session's claims are older than the freshness bound allows.",
 		Payload:   sessionPayload,
@@ -862,6 +950,7 @@ var registry = []Entry{
 	// ── role_binding ───────────────────────────────────────────────────────
 	{
 		Action:    ActionRoleBindingGranted,
+		Home:      HomeControlPlane,
 		Entity:    "role_binding",
 		Trigger:   "A runtime binding is written mapping a claim to a role, without an IdP or config change.",
 		Payload:   roleBindingPayload,
@@ -870,6 +959,7 @@ var registry = []Entry{
 	},
 	{
 		Action:    ActionRoleBindingDenied,
+		Home:      HomeControlPlane,
 		Entity:    "role_binding",
 		Trigger:   "A runtime deny binding is written, demoting an identity ahead of the IdP catching up.",
 		Payload:   roleBindingPayload,
@@ -879,6 +969,7 @@ var registry = []Entry{
 	},
 	{
 		Action:    ActionRoleBindingDeleted,
+		Home:      HomeControlPlane,
 		Entity:    "role_binding",
 		Trigger:   "A runtime binding is removed and the identity falls back to its configured role.",
 		Payload:   roleBindingPayload,
@@ -889,6 +980,7 @@ var registry = []Entry{
 	// ── quota ──────────────────────────────────────────────────────────────
 	{
 		Action:    ActionQuotaDenied,
+		Home:      HomeControlPlane,
 		Entity:    "quota",
 		Trigger:   "Admission control refuses an operation because the caller is at a resource ceiling.",
 		Payload:   []string{"limit", "used", "requested", "source", "transient", "method", "path"},
@@ -898,6 +990,7 @@ var registry = []Entry{
 	},
 	{
 		Action:    ActionQuotaOverrideSet,
+		Home:      HomeControlPlane,
 		Entity:    "quota",
 		Trigger:   "A per-identity quota override is written, from the UI or the CLI.",
 		Payload:   []string{"target", "identity", "limits", "unset", "reason", "via", "os_user"},
@@ -908,6 +1001,7 @@ var registry = []Entry{
 	},
 	{
 		Action:    ActionQuotaOverrideCleared,
+		Home:      HomeControlPlane,
 		Entity:    "quota",
 		Trigger:   "A per-identity override is removed and the identity returns to the default ceiling.",
 		Payload:   []string{"target", "identity", "cleared_limits", "reason", "via", "os_user"},
@@ -916,6 +1010,7 @@ var registry = []Entry{
 	},
 	{
 		Action:    ActionQuotaSpendRefused,
+		Home:      HomeControlPlane,
 		Entity:    "project",
 		Trigger:   "A run is stopped between tasks because the identity paying for it is over its spend limit.",
 		Payload:   []string{"identity", "resource", "limit", "used", "source", "project", "outcome"},
@@ -927,6 +1022,7 @@ var registry = []Entry{
 	// ── sealing_key ────────────────────────────────────────────────────────
 	{
 		Action:    ActionSealingKeyRotated,
+		Home:      HomeControlPlane,
 		Entity:    "sealing_key",
 		Trigger:   "The secret store's sealing key is rotated and stored payloads are re-wrapped under the new one.",
 		Payload:   []string{"from_primary", "to_key", "rewrapped", "skipped", "failed", "complete", "via"},
@@ -936,6 +1032,7 @@ var registry = []Entry{
 	},
 	{
 		Action:    ActionSealingKeyRetired,
+		Home:      HomeControlPlane,
 		Entity:    "sealing_key",
 		Trigger:   "A superseded sealing key is retired once nothing is wrapped under it.",
 		Payload:   []string{"key_id", "via"},
@@ -946,6 +1043,7 @@ var registry = []Entry{
 	// ── stt.credential ─────────────────────────────────────────────────────
 	{
 		Action:    ActionSTTCredentialSet,
+		Home:      HomeControlPlane,
 		Entity:    "config",
 		Trigger:   "The speech-to-text API key behind the Dictate button is configured.",
 		Payload:   []string{"scope"},
@@ -955,6 +1053,7 @@ var registry = []Entry{
 	},
 	{
 		Action:    ActionSTTCredentialCleared,
+		Home:      HomeControlPlane,
 		Entity:    "config",
 		Trigger:   "The speech-to-text API key is removed.",
 		Payload:   []string{"scope"},
@@ -970,6 +1069,7 @@ var registry = []Entry{
 	// cannot answer "what is still live".
 	{
 		Action:    ActionUserOffboard,
+		Home:      HomeControlPlane,
 		Entity:    "user",
 		Trigger:   "An identity is offboarded, summarising every surface the operation touched.",
 		Payload:   append([]string{"sessions", "tokens", "glasses", "denies", "leases", "tasks", "projects", "memberships", "warnings"}, offboardPayload...),
@@ -978,6 +1078,7 @@ var registry = []Entry{
 	},
 	{
 		Action:    ActionUserOffboardSession,
+		Home:      HomeControlPlane,
 		Entity:    "user",
 		Trigger:   "Offboarding revokes the identity's live sessions.",
 		Payload:   append([]string{"count", "sessions"}, offboardPayload...),
@@ -986,6 +1087,7 @@ var registry = []Entry{
 	},
 	{
 		Action:    ActionUserOffboardToken,
+		Home:      HomeControlPlane,
 		Entity:    "user",
 		Trigger:   "Offboarding revokes the identity's API tokens.",
 		Payload:   append([]string{"count", "tokens"}, offboardPayload...),
@@ -994,6 +1096,7 @@ var registry = []Entry{
 	},
 	{
 		Action:    ActionUserOffboardGlasses,
+		Home:      HomeControlPlane,
 		Entity:    "user",
 		Trigger:   "Offboarding revokes the identity's display-glasses links.",
 		Payload:   append([]string{"count", "links"}, offboardPayload...),
@@ -1002,6 +1105,7 @@ var registry = []Entry{
 	},
 	{
 		Action:    ActionUserOffboardDeny,
+		Home:      HomeControlPlane,
 		Entity:    "user",
 		Trigger:   "Offboarding writes deny bindings so a stale IdP mapping cannot re-admit the identity.",
 		Payload:   append([]string{"count", "bindings", "claims"}, offboardPayload...),
@@ -1010,6 +1114,7 @@ var registry = []Entry{
 	},
 	{
 		Action:    ActionUserOffboardMembership,
+		Home:      HomeControlPlane,
 		Entity:    "user",
 		Trigger:   "Offboarding drops the identity's project memberships.",
 		Payload:   append([]string{"count", "projects"}, offboardPayload...),
@@ -1018,6 +1123,7 @@ var registry = []Entry{
 	},
 	{
 		Action:    ActionUserOffboardLease,
+		Home:      HomeControlPlane,
 		Entity:    "user",
 		Trigger:   "Offboarding releases secret leases held on the identity's behalf.",
 		Payload:   append([]string{"count", "leases"}, offboardPayload...),
@@ -1026,6 +1132,7 @@ var registry = []Entry{
 	},
 	{
 		Action:    ActionUserOffboardTask,
+		Home:      HomeControlPlane,
 		Entity:    "user",
 		Trigger:   "Offboarding stops tasks the identity had running.",
 		Payload:   append([]string{"count", "tasks"}, offboardPayload...),
@@ -1034,6 +1141,7 @@ var registry = []Entry{
 	},
 	{
 		Action:    ActionUserOffboardProject,
+		Home:      HomeControlPlane,
 		Entity:    "user",
 		Trigger:   "Offboarding reports projects that need a new owner; it does not reassign them.",
 		Payload:   append([]string{"count", "projects", "action"}, offboardPayload...),
@@ -1045,6 +1153,7 @@ var registry = []Entry{
 	// ── project.member ─────────────────────────────────────────────────────
 	{
 		Action:    ActionProjectMemberGrant,
+		Home:      HomeControlPlane,
 		Entity:    "project_member",
 		Trigger:   "An identity is added to a project's roster.",
 		Payload:   projectMemberPayload,
@@ -1053,6 +1162,7 @@ var registry = []Entry{
 	},
 	{
 		Action:    ActionProjectMemberRevoke,
+		Home:      HomeControlPlane,
 		Entity:    "project_member",
 		Trigger:   "A maintainer removes an identity from a project's roster.",
 		Payload:   projectMemberPayload,
@@ -1061,6 +1171,7 @@ var registry = []Entry{
 	},
 	{
 		Action:    ActionProjectMemberLeave,
+		Home:      HomeControlPlane,
 		Entity:    "project_member",
 		Trigger:   "A member removes themselves from a project.",
 		Payload:   projectMemberPayload,

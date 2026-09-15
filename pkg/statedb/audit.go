@@ -155,6 +155,11 @@ func normalizeAuditEvents(evs []*AuditEvent) error {
 // appendAuditEvents is the shared writer. Callers have already normalised and
 // validated every element.
 func (d *DB) appendAuditEvents(evs []*AuditEvent) error {
+	// Before the lock, and deliberately not fatal: a mis-routed event still
+	// gets written. See assertAuditHome for why recording it in the wrong
+	// chain beats dropping it.
+	d.assertAuditHome(evs)
+
 	d.mu.Lock()
 	defer d.mu.Unlock()
 

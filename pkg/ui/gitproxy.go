@@ -171,7 +171,9 @@ func startGitProxy(cfg *config.Config, dir string) (*gitProxyService, error) {
 	// boundary — the proxy still refuses what it should.
 	var auditDB *statedb.DB
 	if db, dbErr := statedb.Open(state.DBPath(dir)); dbErr == nil {
-		auditDB = db
+		// dir is the control plane's. The proxy runs outside every sandbox and
+		// arbitrates for the whole fleet, so its decisions are the hub's.
+		auditDB = db.AsControlPlane()
 	} else {
 		fmt.Fprintf(os.Stderr,
 			"ui: git proxy decisions will go to stderr, not the audit trail: %v\n", dbErr)
