@@ -699,7 +699,8 @@ var registry = []Entry{
 		Payload:   authzPayload,
 		Stability: StabilityStable,
 		Read:      authz.PermAuditRead,
-		Note:      "Not every allow: ordinary reads would drown the table. Only the permissions whose use is itself worth recording.",
+		Note: "Not every allow: ordinary reads would drown the table, so only privileged " +
+			"permissions are recorded on this side.",
 	},
 	{
 		Action:    ActionAuthzDenied,
@@ -708,7 +709,14 @@ var registry = []Entry{
 		Payload:   authzPayload,
 		Stability: StabilityStable,
 		Read:      authz.PermAuditRead,
-		Note:      "Every denial, unlike the grant side. `scope` says whether the check was fleet-wide or against one project; `binding` names the runtime rule when one decided it.",
+		Note: "Every denial, unlike the grant side. `scope` says whether the check was " +
+			"fleet-wide or against one project; `binding` names the runtime rule when one " +
+			"decided it. Neither action in this family is emitted when RBAC is not in " +
+			"force for the caller — with no identity provider configured every request is " +
+			"granted everything and there is no decision to record, so an absence of rows " +
+			"here means \"nobody was refused\" only on a hub that has SSO or API tokens. " +
+			"Project-scoped decisions land in that project's trail rather than the control " +
+			"plane's.",
 	},
 
 	// ── api_token ──────────────────────────────────────────────────────────
@@ -736,7 +744,10 @@ var registry = []Entry{
 		Payload:   []string{"reason", "ip", "method", "path"},
 		Stability: StabilityStable,
 		Read:      authz.PermAuditRead,
-		Note:      "Never carries the presented token or any prefix of it. Rate of this action by `ip` is the credential-stuffing signal.",
+		Note: "Filed against the token's *public* id (`cloop_pat_<id>`), never the secret " +
+			"half, and against `(unparseable)` when the credential is not even shaped like " +
+			"a token — so a garbage value is not echoed back into the trail. Rate of this " +
+			"action by `ip` is the credential-stuffing signal.",
 	},
 	{
 		Action:    ActionAPITokenCreateDenied,

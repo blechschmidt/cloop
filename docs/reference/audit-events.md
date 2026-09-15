@@ -363,8 +363,8 @@ Payload keys, on every action above: `rule_id`, `rule_name`, `repository`, `ref`
 
 Payload keys, on every action above: `outcome`, `permission`, `role`, `source`, `scope`, `subject`, `method`, `path`, `binding`
 
-- `authz.denied` — Every denial, unlike the grant side. `scope` says whether the check was fleet-wide or against one project; `binding` names the runtime rule when one decided it.
-- `authz.granted` — Not every allow: ordinary reads would drown the table. Only the permissions whose use is itself worth recording.
+- `authz.denied` — Every denial, unlike the grant side. `scope` says whether the check was fleet-wide or against one project; `binding` names the runtime rule when one decided it. Neither action in this family is emitted when RBAC is not in force for the caller — with no identity provider configured every request is granted everything and there is no decision to record, so an absence of rows here means "nobody was refused" only on a hub that has SSO or API tokens. Project-scoped decisions land in that project's trail rather than the control plane's.
+- `authz.granted` — Not every allow: ordinary reads would drown the table, so only privileged permissions are recorded on this side.
 
 ### api_token.*
 
@@ -382,7 +382,7 @@ Payload keys:
 - `api_token.created` — `name`, `roles`, `project_scope`, `expires_at`, `kind`, `owner`
 - `api_token.revoked` — `name`, `roles`, `reason`
 
-- `api_token.auth_failed` — Never carries the presented token or any prefix of it. Rate of this action by `ip` is the credential-stuffing signal.
+- `api_token.auth_failed` — Filed against the token's *public* id (`cloop_pat_<id>`), never the secret half, and against `(unparseable)` when the credential is not even shaped like a token — so a garbage value is not echoed back into the trail. Rate of this action by `ip` is the credential-stuffing signal.
 - `api_token.create_denied` — The anti-escalation check. A maintainer trying to mint an admin token lands here.
 - `api_token.created` — `kind` distinguishes a service-account token from a glasses link, which is a token with one narrow role and a URL as its only delivery mechanism.
 
