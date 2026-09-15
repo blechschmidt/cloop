@@ -179,6 +179,60 @@ inspected as text.
 The result: `git clone`, `git push` and `gh` inside `myorg/*` work normally, and
 the same commands against `otherorg/private` fail to authenticate.
 
+### The helper's limit, and what removes it
+
+Be precise about what the paragraph above buys, because it is less than it
+looks. The helper runs **inside the sandbox**, and it reads `github-token`,
+which is also inside the sandbox. A workload that ignores git and reads the file
+has the whole token. So for a `github_pat` the allowlist is enforced against
+*git*, not against the workload — it stops an honest `git clone otherorg/private`
+and it does not stop a determined one.
+
+That gap matters most in the case this is usually used for. A personal access
+token normally carries `repo` across everything its owner can see, so a user who
+grants one to a project is, absent anything further, granting the project that
+whole reach.
+
+**Turning on the [git interception proxy](../git-interception-proxy.md) closes
+it.** With `executors.git_proxy.enabled: true`, a `github_pat` is delivered
+differently: the hub keeps the token and the sandbox gets a proxy session
+instead.
+
+```
+files:  git-proxy-credential    0600   a session credential, useless off the proxy
+        git-credential-cloop    0700   releases it for the proxy host only
+        gitconfig               0600   rewrites github.com to the proxy
+env:    GIT_CONFIG_GLOBAL=<lease dir>/gitconfig
+        CLOOP_GIT_PROXY_URL=https://hub.internal:8443
+        CLOOP_GIT_PROXY_SESSION=<session id>
+        CLOOP_GIT_PROXY_MODE=read-only
+        CLOOP_GITHUB_REPO_ALLOWLIST=myorg/*
+```
+
+There is no `github-token`. The allowlist moves from a script the workload can
+read around to the network path it cannot avoid, and two things become true that
+were not before:
+
+- **The allowlist is enforced.** `myorg/*` is checked by the proxy, outside the
+  sandbox, on every request. Reaching `otherorg/private` is a 403 from the proxy
+  and an audit row, whatever the workload does with the files it was given.
+- **`--permissions` starts meaning something.** A grant that authorises no write
+  (`contents:read`, or no `--permissions` at all) yields a session that cannot
+  push — even though the PAT behind it can. Deletes are never granted. The hub's
+  configured `allowed_refs` is the ceiling, and a grant can only narrow within
+  it.
+
+`git clone`, `git push` and submodules keep working unchanged, because the
+rewriting is transparent: a remote of `https://github.com/myorg/tool` — or
+`git@github.com:myorg/tool` — resolves to the proxy without the workload opting
+in. What breaks is `gh` and anything else speaking the GitHub **API**, which is
+not git traffic and has no proxy to route through; those need a `github_app`
+grant, whose token GitHub itself has already narrowed.
+
+If `executors.git_proxy.enabled` is true and the proxy is not running, a
+`github_pat` lease **fails** rather than falling back to writing the token into
+the sandbox. A boundary that fails open is not a boundary.
+
 **Those three files have to reach the sandbox for any of this to be true**, and
 which executor you are bound to decides how they get there. The hub writes them
 to its own disk only for the host-process driver; a container gets a private

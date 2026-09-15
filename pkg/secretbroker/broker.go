@@ -44,6 +44,16 @@ type Broker struct {
 	// repository-scoped installation token. See githubapp.go.
 	appMinter *githubAppMinter
 
+	// GitGuard, when set, takes custody of a GitHub PAT so the sandbox
+	// receives a git-proxy session instead of the token. It turns the
+	// repository allowlist from something the workload is asked to respect
+	// into something it cannot exceed. See gitguard.go.
+	//
+	// Exported and settable after construction because the proxy it fronts is
+	// started by pkg/ui alongside the hub, later than the broker and from a
+	// layer this package must not import.
+	GitGuard GitGuard
+
 	mu     sync.Mutex
 	leases map[string]*leaseState
 	// minted holds the GitHub App installation tokens this broker is
@@ -640,7 +650,7 @@ func (b *Broker) LeaseFor(ctx context.Context, r Requester, actor string) (*Leas
 		}
 		ev.SecretName, ev.Kind = s.Name, s.Kind
 
-		mat, merr := b.materialFor(ctx, s, g, &rec)
+		mat, merr := b.materialFor(ctx, s, g, r, actor, &rec)
 		if merr != nil {
 			_ = b.denyErr(ev, merr)
 			continue

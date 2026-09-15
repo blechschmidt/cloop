@@ -285,6 +285,15 @@ func (s *gitProxyService) Wrap(execID string, src executor.WorkspaceCredentialSo
 	if err != nil {
 		fmt.Fprintf(os.Stderr,
 			"ui: executor %s is NOT routed through the git proxy: %v\n", execID, err)
+		if gitProxyRequired.Load() {
+			// Same reasoning as the s == nil branch above, which this used to
+			// contradict: returning src here hands the forge PAT to every
+			// sandbox on this executor while the config says interception is
+			// on. That the cause is a policy this process failed to validate
+			// rather than a proxy that failed to start makes no difference to
+			// what the sandbox ends up holding.
+			return unavailableWorkspaceSource{}
+		}
 		return src
 	}
 	return wrapped

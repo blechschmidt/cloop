@@ -263,6 +263,17 @@ func (sl *secretLease) Close() {
 			// contain a credential this hub merely relayed.
 			_ = sl.delivery.Close()
 		}
+		// End the git proxy sessions this lease's credentials stood on.
+		//
+		// Wiping the lease directory removes the session *token* from the
+		// sandbox, but a workload that copied it out would otherwise keep
+		// PAT-backed access to the whole allowlist through the proxy until the
+		// session's own TTL expired — up to an hour by default, and surviving
+		// both the end of the task and an operator revoking the grant. The
+		// session is the thing that carries authority here, so it has to be
+		// closed along with everything else that does.
+		closeGuardedSessions(sl.lease)
+
 		if sl.broker != nil && sl.lease != nil {
 			sl.broker.Release(sl.lease.ID)
 		}
@@ -431,7 +442,12 @@ func openUIBrokerDB(controlPlaneDir string) (*secretbroker.Broker, *statedb.DB, 
 		_ = db.Close()
 		return nil, nil, nil, err
 	}
-	return broker, db, func() { _ = db.Close() }, nil
+	// Point the broker at the git proxy so a GitHub PAT is delivered as a
+	// proxy session rather than as the token itself. This is the lease path —
+	// the one that materialises a project's granted credentials into a
+	// sandbox — and it is where a user's personal PAT would otherwise land in
+	// the workload's filesystem. See gitguard.go.
+	return attachGitGuard(broker), db, func() { _ = db.Close() }, nil
 }
 
 // isBrokerUnconfigured reports whether the broker simply is not set up on

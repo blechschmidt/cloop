@@ -293,8 +293,9 @@ distinguishes the three authorities.
 
 ## Session lifecycle
 
-A session is one sandbox's brokered access to one repository, for one TTL, under
-one policy.
+A session is one sandbox's brokered access to a repository — or, when it carries
+an allowlist, to a set of them — for one TTL, under one policy. See
+[Scoped sessions](#scoped-sessions-an-allowlist-instead-of-one-repository).
 
 ### Minting
 
@@ -310,13 +311,108 @@ to present there, the `Policy`, a TTL, and audit labels (`ProjectID`, `TaskID`,
 
 `Minted.Credential()` renders the pair a driver delivers into the sandbox.
 
-The repository is **pinned** at mint time. `UpstreamRepoPath` parses `owner/name`
-out of the upstream URL, requiring `https`, a host, and no embedded credentials;
-that path is what the session is served under and what every request is compared
-against. The shape is not cosmetic: `executor.Workspace`'s `RepoPath` parses
-exactly this out of a clone URL to match a GitHub grant's repository allowlist,
-so a proxy URL that did not preserve it would break grant matching for every
-workspace routed through the proxy.
+By default the repository is **pinned** at mint time. `UpstreamRepoPath` parses
+`owner/name` out of the upstream URL, requiring `https`, a host, and no embedded
+credentials; that path is what the session is served under and what every
+request is compared against. The shape is not cosmetic: `executor.Workspace`'s
+`RepoPath` parses exactly this out of a clone URL to match a GitHub grant's
+repository allowlist, so a proxy URL that did not preserve it would break grant
+matching for every workspace routed through the proxy.
+
+### Scoped sessions: an allowlist instead of one repository
+
+Pinning works for workspace write-back, where the hub knows the repository
+before it dispatches. It does not work for a **user's GitHub PAT**, which is
+granted to a project with an allowlist like `acme/*` — a set that lives on
+GitHub, changes without telling anyone, and that neither the user nor the hub
+can enumerate at mint time.
+
+Setting `MintRequest.RepoPatterns` mints a *scoped* session instead: one that
+carries the allowlist and matches per request. `Upstream` then has to be a bare
+forge host base (`https://github.com`), validated by `UpstreamHostBase` against
+the opposite requirement from `UpstreamRepoPath` — there must be **no** path,
+because on a scoped session every path segment comes from the request and a base
+with one would silently prefix them all.
+
+| | Pinned | Scoped |
+| --- | --- | --- |
+| `MintRequest.Upstream` | the repository URL | the forge host base |
+| `Session.RepoPath` | `owner/name` | empty |
+| `Session.RepoPatterns` | empty | the allowlist |
+| `Minted.RepoURL` | proxy base + `owner/name` | the proxy base alone |
+| Admits | exactly that repository | whatever the allowlist matches |
+
+`Minted.RepoURL` differs because there is nothing to name: the sandbox is not
+handed one remote, it is handed a base that `url.<base>.insteadOf` rewrites
+`https://github.com/` to, and the repository comes from whatever it was already
+trying to clone. See [the secrets guide](guides/secrets.md#the-helpers-limit-and-what-removes-it)
+for what that delivery looks like in a lease directory.
+
+**Matching.** Patterns are `owner/name` globs, normalised to lowercase with any
+`.git` suffix and surrounding slashes stripped, matched with `path.Match` — so
+`*` does not cross a `/` and `acme/*` admits `acme/tool` but not
+`acme/group/tool`. Deduplicated at mint time, capped at `MaxRepoPatterns` (64),
+and an empty or malformed allowlist is an error rather than a session that
+admits everything or nothing.
+
+**The charset is part of the allowlist, not cosmetic.** Both segments must be
+`[A-Za-z0-9._-]`, no longer than 100 characters, and free of `..` — the same
+rule `secretbroker.validRepoSegment` applies on the grant side, so the two
+cannot disagree about what is nameable.
+
+This is load-bearing because `AllowsRepo` matches a *string* and that string is
+then built into a URL which `net/http` parses **again** on the way to the forge.
+Any character that survives matching and changes meaning during the second parse
+makes the approved path and the forwarded path two different things. The concrete
+escape it closes, which this proxy shipped with:
+
+```
+sandbox: GET /acme/..%252F..%252Fsomebody-else%252Fprivate/info/refs
+         → reaches the proxy as the literal text "..%2F..%2Fsomebody-else%2Fprivate"
+         → contains no separator, so it passes the one-slash check
+         → matches "acme/*"
+         → the forge decodes %2F back into "/" and serves a denied repository
+```
+
+`%3F` and `%23` do the same with `?` and `#`, truncating the path at the second
+parse so the forge sees a prefix of what was matched. Restricting to what a
+forge actually permits in a repository name makes the matched string and the
+forwarded string necessarily identical.
+
+**A name still ending in `.git` after normalising is refused too**, and it is
+worth stating separately because it is the same defect arriving through a
+different channel. `.git` is stripped in *three* places — `splitGitPath`,
+`NormalizeRepoPath`, and again where the upstream URL is assembled — but
+approval happens after the second:
+
+```
+sandbox: GET /acme/tool.git.git.git/info/refs
+         splitGitPath      → acme/tool.git.git
+         NormalizeRepoPath → acme/tool.git      ← approved against the allowlist
+         upstream assembly → acme/tool          ← what the forge is asked for
+```
+
+With an allowlist of `acme/tool.*` the first is admitted and the second is
+denied, so the sandbox reads — and can push to — a repository it was refused.
+The general fault is that `NormalizeRepoPath` was not idempotent while the
+check/forward seam assumed it was; refusing the input that makes it non-idempotent
+restores the assumption. `acme/tool.git` itself is untouched — that is the
+ordinary form a git client sends, and it normalises to `acme/tool`.
+
+**The invariant, not the input list, is what is tested.**
+`TestNormalizeIsIdempotentForEverythingAdmitted` asserts that anything
+`AllowsRepo` admits normalises to a fixed point, so a future normalisation step
+that is not idempotent fails there rather than shipping as a third bypass.
+`TestAllowsRepoRejectsPathsThatChangeMeaningWhenReparsed` pins the concrete
+cases, and both bypasses above are in it as regressions.
+
+**What scoping does not relax.** The credential is still only ever presented to
+the host the *session* names. `Session.upstreamFor` builds the upstream URL from
+the session's own base plus the request's path, and re-runs `AllowsRepo` rather
+than trusting that `ServeHTTP` already did — the check and the URL construction
+live in one function so neither can be moved away from the other by a later
+edit. There is no input a request can carry that changes which host the token
+reaches.
 
 TTLs:
 
@@ -370,12 +466,22 @@ closing audit row carries the session's counters. It is what makes revocation a
 local decision: the next request is refused with no forge round-trip and no
 coordination.
 
-No command exposes it. The hub closes sessions on shutdown and nowhere else, so
-an operator ending one early either restarts the hub — which closes all of them —
-or waits for the TTL, which is enforced at authentication whether or not the
-reaper has swept it. Revoking the underlying grant with `cloop secret revoke`
-stops the *next* dispatch from minting anything; it does not reach a session
-already minted.
+No command exposes it, and for a *workspace* session the hub closes only on
+shutdown — so an operator ending one early either restarts the hub, which closes
+all of them, or waits for the TTL, which is enforced at authentication whether or
+not the reaper has swept it. Revoking the underlying grant with
+`cloop secret revoke` stops the *next* dispatch from minting anything; it does
+not reach a session already minted.
+
+**A guarded `github_pat` session is the exception**: it is closed when the
+lease that created it is released. Wiping the lease directory removes the
+session token from the sandbox, but a workload that copied it out first would
+otherwise keep PAT-backed access to the whole allowlist until the TTL ran out —
+up to an hour by default, outliving both the task and any revocation the
+operator performed. The session id rides in the material's environment as
+`CLOOP_GIT_PROXY_SESSION` (it is not secret; the token is in a separate 0600
+file), which is how `secretLease.Close` finds the sessions to end without the
+broker having to learn what a proxy session is.
 
 `Registry.ReapExpired()` drops sessions past their TTL and returns how many
 went. `Authenticate` already refuses an expired session, so this is hygiene

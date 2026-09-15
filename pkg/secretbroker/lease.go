@@ -66,6 +66,27 @@ type Material struct {
 	// Summary is the audit-safe description of what was delivered
 	// (surviving kubeconfig contexts, allowed registries, env key names).
 	Summary string `json:"summary,omitempty"`
+
+	// githubToken is the raw GitHub credential, for the hub's own use.
+	//
+	// It is separate from Files because the two audiences diverged once the
+	// git proxy could hold the token: Files is what the *sandbox* receives,
+	// and under a guarded delivery the token is deliberately not in it, while
+	// workspace provisioning (pkg/executor/gitcreds) still runs on the hub and
+	// still needs the real credential to hand to the proxy.
+	//
+	// Unexported so it cannot be set from outside this package or serialised
+	// anywhere. GitHubToken is the only reader.
+	githubToken string
+
+	// Who this material is being delivered for. Audit labels, not authority:
+	// nothing here is consulted to decide what a grant permits. A GitGuard
+	// puts them on the proxy session so its events join to the run, and so a
+	// personal credential's use names the person it belongs to.
+	projectID  string
+	executorID string
+	actor      string
+	owner      string
 }
 
 // File is one credential file to place in the lease directory.

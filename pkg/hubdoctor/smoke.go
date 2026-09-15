@@ -717,6 +717,25 @@ func smokeLease(ctx context.Context, dir string, ex executor.Executor, caps exec
 	st.broker = broker
 	st.attempted = true
 
+	// The lease below returns *every* grant matching this executor, not only
+	// the throwaway one minted just after — so an operator who granted a
+	// github_pat to `executor:*` would have that token materialised into the
+	// smoke sandbox. On a hub with executors.git_proxy enabled the token is
+	// supposed to stay on the hub, and this process cannot honour that: the
+	// proxy runs inside the running hub, not in a short-lived CLI, so there is
+	// nothing here to hand the credential to.
+	//
+	// Refuse that one kind rather than deliver it unguarded. The smoke test's
+	// own credential is a kubeconfig and is unaffected, so the diagnostic still
+	// exercises the whole path it exists to check.
+	if cfg, cerr := config.Load(dir); cerr == nil && cfg != nil && cfg.Executors.GitProxy.Enabled {
+		broker.GitGuard = secretbroker.UnavailableGitGuard{
+			Reason: "cloop hub doctor runs outside the hub process and has no git proxy to " +
+				"hold this token; executors.git_proxy is enabled, so it is refused rather " +
+				"than written into the smoke sandbox",
+		}
+	}
+
 	name := "cloop-smoke-" + nonce
 	secret, err := broker.Mint(ctx, secretbroker.MintRequest{
 		Name:    name,

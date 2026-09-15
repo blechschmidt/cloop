@@ -227,9 +227,9 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		p.reject(w, r, http.StatusUnauthorized, repoPath, err.Error())
 		return
 	}
-	if !strings.EqualFold(repoPath, sess.RepoPath) {
+	if !sess.AllowsRepo(repoPath) {
 		p.rejectSession(w, r, sess, http.StatusForbidden,
-			fmt.Sprintf("session is scoped to %s, not %s", sess.RepoPath, repoPath))
+			fmt.Sprintf("session is scoped to %s, not %s", sess.scopeDescription(), repoPath))
 		return
 	}
 
@@ -464,11 +464,22 @@ func requestBody(w http.ResponseWriter, r *http.Request, maxBytes int64) (io.Rea
 
 // upstreamRequest builds and sends the forge-side request.
 //
-// This is the only place the real credential is attached, and it is attached to
-// a URL derived from the session rather than from anything the sandbox sent —
-// so a request cannot steer the credential at a host of its choosing.
+// This is the only place the real credential is attached, and the host it is
+// attached to is always the session's — so a request cannot steer the
+// credential at a host of its choosing.
+//
+// On a scoped session the *path* does come from the request, because the
+// repository is not known until the sandbox names one. That is safe only
+// because upstreamFor re-runs AllowsRepo rather than trusting that ServeHTTP
+// already did: the check and the URL construction live together, so neither
+// can be moved away from the other by a later edit.
 func (p *Proxy) upstreamRequest(r *http.Request, sess *Session, suffix string, body io.Reader) (*http.Response, error) {
-	target := strings.TrimSuffix(sess.Upstream, ".git") + ".git" + suffix
+	repoPath, _, _ := splitGitPath(r.URL.Path)
+	base, err := sess.upstreamFor(repoPath)
+	if err != nil {
+		return nil, err
+	}
+	target := strings.TrimSuffix(base, ".git") + ".git" + suffix
 	method := http.MethodGet
 	if body != nil {
 		method = http.MethodPost

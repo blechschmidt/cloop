@@ -22,6 +22,12 @@ const tokenFileName = "github-token"
 // gitconfigName is the git configuration that installs the helper.
 const gitconfigName = "gitconfig"
 
+// proxyCredentialName holds the git proxy session credential in guarded
+// delivery. Like tokenFileName it is kept out of the helper script's body, and
+// for the same reason — but what it holds is a session token that is worth
+// nothing off the proxy, rather than the PAT itself.
+const proxyCredentialName = "git-proxy-credential"
+
 // buildGitCredentialHelper generates a POSIX sh credential helper that
 // releases the token only for repositories inside the allowlist.
 //
@@ -142,15 +148,24 @@ func buildGitConfig() string {
 // GITHUB_TOKEN is only exported for an unrestricted "*" grant, so relying on it
 // would make narrow grants silently unable to clone.
 //
-// Reading the token out of Files rather than re-deriving it keeps one source of
-// truth: whatever githubMaterial decided to deliver is what a caller sees. The
-// returned string is the caller's to handle carefully — it is a credential, and
-// nothing here can stop it being logged.
+// The returned string is the caller's to handle carefully — it is a
+// credential, and nothing here can stop it being logged.
+//
+// The dedicated field is consulted first and the Files scan is the fallback.
+// The two used to be one thing, and separating them is what lets a guarded
+// delivery withhold the token from the sandbox without also withholding it
+// from the hub: under GitGuard there is no token file to find, but the hub's
+// own workspace provisioning still needs the credential to hand to the proxy.
+// The fallback keeps Materials built by older paths — and by tests that
+// construct one directly — answering as they did.
 func (m Material) GitHubToken() (string, bool) {
 	switch m.Kind {
 	case KindGitHubPAT, KindGitHubApp:
 	default:
 		return "", false
+	}
+	if t := strings.TrimSpace(m.githubToken); t != "" {
+		return t, true
 	}
 	for _, f := range m.Files {
 		if f.Name != tokenFileName {

@@ -433,6 +433,12 @@ func TestSecretsAPIViewStructsCarryNoMaterialField(t *testing.T) {
 			"constraints": true, "expires_at": true, "created_at": true,
 			"created_by": true, "revoked_at": true, "status": true,
 			"active": true, "remaining_seconds": true,
+			// Reviewed (Task 20276): "proxy" or "unguarded", saying where a
+			// github_pat grant's repository allowlist is actually enforced. It
+			// is derived from whether this hub runs the git proxy, holds no
+			// credential material, and is the one thing on the row that
+			// distinguishes a bounded PAT from a broad one.
+			"enforcement": true,
 		},
 	}
 	lists := map[string]string{"/api/secrets": "secrets", "/api/grants": "grants"}

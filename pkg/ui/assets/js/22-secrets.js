@@ -253,6 +253,24 @@ function _secConstraintCell(g) {
   if (c.session_ttl_seconds) {
     parts.push('<div><span class="sec-count">session</span> ' + esc(_secFmtDuration(c.session_ttl_seconds)) + '</div>');
   }
+  // Where the repos allowlist above is actually checked. Only github_pat sends
+  // this, because it is the only kind whose allowlist can be advisory: without
+  // the git proxy the token itself goes into the sandbox and the allowlist is
+  // enforced by a helper the workload could read around. The row already shows
+  // "repos acme/*" either way, so without this the two cases are
+  // indistinguishable — which is the case worth marking.
+  if (g.enforcement === 'proxy') {
+    parts.push('<div><span class="sec-count">enforced</span> ' +
+      '<span class="sec-chip ok" title="The git proxy holds the token. The repository ' +
+      'allowlist and ref policy are enforced outside the sandbox, which never sees ' +
+      'the credential.">&#128274; git proxy</span></div>');
+  } else if (g.enforcement === 'unguarded') {
+    parts.push('<div><span class="sec-count">enforced</span> ' +
+      '<span class="sec-chip warn" title="The token is delivered into the sandbox and ' +
+      'the allowlist is enforced by a credential helper the workload could read around. ' +
+      'Enable executors.git_proxy to hold the token on the hub instead.">' +
+      '&#9888; in sandbox</span></div>');
+  }
   return parts.length ? parts.join('') : '<span class="sec-count">' + esc(g.summary || 'none') + '</span>';
 }
 

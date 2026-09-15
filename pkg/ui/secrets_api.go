@@ -178,6 +178,21 @@ type grantView struct {
 	Status           string `json:"status"`
 	Active           bool   `json:"active"`
 	RemainingSeconds int64  `json:"remaining_seconds"`
+
+	// Enforcement says where this grant's repository allowlist is actually
+	// checked. Only github_pat carries it, because it is the only kind whose
+	// answer can be "not really anywhere".
+	//
+	//	proxy   the git proxy holds the token; the allowlist is a property of
+	//	        the network path and the sandbox never sees the credential
+	//	unguarded  the token is delivered into the sandbox and the allowlist is
+	//	        enforced by a credential helper the workload could read around
+	//
+	// Surfaced because the difference is invisible from everything else on
+	// this row — same constraints, same summary, same expiry — and it is the
+	// difference between a bounded credential and a broad one. A user who
+	// stored a personal token has a right to know which hub they are on.
+	Enforcement string `json:"enforcement,omitempty"`
 }
 
 // grantConstraintsView carries every constraint dimension either broker
@@ -794,6 +809,7 @@ func secretGrantView(g secretbroker.Grant, sec secretbroker.Secret, now time.Tim
 			EnvKeys:     g.Constraints.EnvKeys,
 			Writable:    g.Constraints.Writable,
 		},
+		Enforcement:      grantEnforcement(sec.Kind),
 		CreatedAt:        g.CreatedAt,
 		CreatedBy:        g.CreatedBy,
 		Status:           status,
@@ -947,7 +963,7 @@ func (s *Server) handleGrantCreate(w http.ResponseWriter, r *http.Request) {
 	// that check here would create a second, drifting copy of the rule that
 	// rejects a github grant with no repo allowlist.
 	grant, err := bs.secret.Grant(r.Context(), secretbroker.GrantRequest{
-		Viewer: viewer,
+		Viewer:    viewer,
 		SecretRef: strings.TrimSpace(req.SecretRef),
 		Subject:   subject,
 		Scope:     strings.TrimSpace(req.Scope),

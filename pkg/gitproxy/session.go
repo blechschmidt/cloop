@@ -83,8 +83,18 @@ type Session struct {
 	// proxy serves this session under. Pinning it means a session minted for
 	// one repository cannot be replayed against another the same proxy happens
 	// to be serving.
+	//
+	// Empty on a scoped session, where RepoPatterns takes over. See scope.go.
 	RepoPath string
-	// Upstream is the real https clone URL. It never reaches the sandbox.
+	// RepoPatterns is an owner/name glob allowlist. When non-empty the session
+	// is *scoped* rather than pinned: it admits every repository the allowlist
+	// matches, which is what lets one session stand in for a user's PAT grant
+	// whose allowlist the hub cannot enumerate. See scope.go.
+	RepoPatterns []string
+	// Upstream is the real https clone URL — or, for a scoped session, the
+	// forge host base beneath which repository paths are resolved. Either way
+	// it never reaches the sandbox, and it is the only source of the host the
+	// credential is ever presented to.
 	Upstream string
 	// Policy is what this session may do.
 	Policy Policy
@@ -144,8 +154,17 @@ func (s *Session) Stats() Stats {
 
 // MintRequest describes the session to create.
 type MintRequest struct {
-	// Upstream is the real https repository URL the proxy will forward to.
+	// Upstream is the real https repository URL the proxy will forward to —
+	// or, when RepoPatterns is set, the forge host base (https://github.com)
+	// beneath which the allowlisted repositories live.
 	Upstream string
+	// RepoPatterns, when non-empty, mints a *scoped* session: one that admits
+	// every repository matching an owner/name glob, rather than the single
+	// repository Upstream names. Upstream must then be a bare host base.
+	//
+	// This is the mode a user's GitHub PAT grant uses, because its allowlist
+	// ("acme/*") names a set that only the forge can enumerate. See scope.go.
+	RepoPatterns []string
 	// Credential authenticates the proxy upstream. Optional: a public
 	// repository needs none, though pushing to one generally does.
 	Credential Credential
@@ -248,9 +267,31 @@ func (r *Registry) now() time.Time {
 
 // Mint creates a session and returns its one-time token.
 func (r *Registry) Mint(req MintRequest) (*Minted, error) {
-	repoPath, err := UpstreamRepoPath(req.Upstream)
-	if err != nil {
-		return nil, err
+	// Two shapes of session, distinguished by whether the caller supplied an
+	// allowlist. They validate Upstream against opposite requirements — a
+	// pinned session needs a repository URL, a scoped one needs a bare host —
+	// so getting this wrong fails here rather than at the first fetch.
+	var (
+		repoPath string
+		patterns []string
+		upstream string
+		err      error
+	)
+	if len(req.RepoPatterns) > 0 {
+		patterns, err = normalizeRepoPatterns(req.RepoPatterns)
+		if err != nil {
+			return nil, err
+		}
+		upstream, err = UpstreamHostBase(req.Upstream)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		repoPath, err = UpstreamRepoPath(req.Upstream)
+		if err != nil {
+			return nil, err
+		}
+		upstream = strings.TrimSuffix(strings.TrimSpace(req.Upstream), "/")
 	}
 
 	pol := req.Policy
@@ -283,18 +324,19 @@ func (r *Registry) Mint(req MintRequest) (*Minted, error) {
 
 	now := r.now()
 	s := &Session{
-		ID:         id,
-		RepoPath:   repoPath,
-		Upstream:   strings.TrimSuffix(strings.TrimSpace(req.Upstream), "/"),
-		Policy:     pol,
-		ProjectID:  req.ProjectID,
-		TaskID:     req.TaskID,
-		ExecutorID: req.ExecutorID,
-		Actor:      req.Actor,
-		IssuedAt:   now,
-		ExpiresAt:  now.Add(ttl),
-		tokenHash:  sha256.Sum256([]byte(token)),
-		credential: req.Credential,
+		ID:           id,
+		RepoPath:     repoPath,
+		RepoPatterns: patterns,
+		Upstream:     upstream,
+		Policy:       pol,
+		ProjectID:    req.ProjectID,
+		TaskID:       req.TaskID,
+		ExecutorID:   req.ExecutorID,
+		Actor:        req.Actor,
+		IssuedAt:     now,
+		ExpiresAt:    now.Add(ttl),
+		tokenHash:    sha256.Sum256([]byte(token)),
+		credential:   req.Credential,
 	}
 
 	r.mu.Lock()
@@ -304,10 +346,17 @@ func (r *Registry) Mint(req MintRequest) (*Minted, error) {
 	r.sessions[id] = s
 	r.mu.Unlock()
 
+	// A scoped session has no single repository to name, so the audit row
+	// carries the allowlist instead. Leaving RepoPath empty in the event would
+	// make every scoped mint look like a malformed one.
+	scope := repoPath
+	if s.Scoped() {
+		scope = strings.Join(patterns, ",")
+	}
 	r.emit(Event{
 		Kind:      EventSessionMinted,
 		SessionID: id,
-		RepoPath:  repoPath,
+		RepoPath:  scope,
 		ProjectID: req.ProjectID,
 		TaskID:    req.TaskID,
 		Actor:     req.Actor,
@@ -315,7 +364,15 @@ func (r *Registry) Mint(req MintRequest) (*Minted, error) {
 		Detail:    fmt.Sprintf("allow %s until %s", strings.Join(pol.AllowedRefs, ","), s.ExpiresAt.UTC().Format(time.RFC3339)),
 	})
 
-	return &Minted{Session: s, Token: token, RepoURL: r.BaseURL + "/" + repoPath}, nil
+	// A pinned session hands back the one remote URL the sandbox clones. A
+	// scoped one cannot: the repository is not known until the sandbox asks
+	// for it, so what it gets is the base to rewrite github.com to, and the
+	// path comes from whatever it was already trying to clone.
+	repoURL := r.BaseURL
+	if !s.Scoped() {
+		repoURL = r.BaseURL + "/" + repoPath
+	}
+	return &Minted{Session: s, Token: token, RepoURL: repoURL}, nil
 }
 
 // Authenticate resolves a session from the basic credential a sandbox

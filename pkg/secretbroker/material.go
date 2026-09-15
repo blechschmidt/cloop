@@ -37,7 +37,7 @@ func (m *mints) add(t appToken) {
 // KindGitHubApp is the one branch that does not narrow a payload at all: it
 // mints a new credential from it, so rec collects what was minted and ctx is
 // the lease request's own deadline.
-func (b *Broker) materialFor(ctx context.Context, s Secret, g Grant, rec *mints) (Material, error) {
+func (b *Broker) materialFor(ctx context.Context, s Secret, g Grant, req Requester, actor string, rec *mints) (Material, error) {
 	plaintext, err := b.seal.OpenEnvelope(AADFor(SetSecrets, s.ID), s.Envelope())
 	if err != nil {
 		// Both sentinels are chained. Callers that only know about
@@ -59,13 +59,21 @@ func (b *Broker) materialFor(ctx context.Context, s Secret, g Grant, rec *mints)
 		Kind:        s.Kind,
 		Constraints: g.Constraints,
 		Env:         map[string]string{},
+		// Who this delivery is for. Only a GitGuard reads these today, to
+		// label the proxy session it mints; they are carried on the Material
+		// rather than passed down every deliver* function because every one of
+		// them would have to grow the parameter to reach the one that uses it.
+		projectID:  req.ProjectID,
+		executorID: req.ExecutorID,
+		actor:      actor,
+		owner:      s.Owner,
 	}
 
 	switch s.Kind {
 	case KindEnv:
 		return b.envMaterial(mat, plaintext)
 	case KindGitHubPAT:
-		return b.githubMaterial(mat, plaintext)
+		return b.githubMaterial(ctx, mat, plaintext)
 	case KindGitHubApp:
 		return b.githubAppMaterial(ctx, mat, plaintext, rec)
 	case KindKubeconfig:
@@ -117,14 +125,71 @@ func (b *Broker) envMaterial(mat Material, plaintext []byte) (Material, error) {
 // A bare GITHUB_TOKEN is exported only for a "*" allowlist, because an
 // environment variable is unscoped by construction: every tool in the
 // workload reads it and can point it at any repository. For a narrower grant
-// the helper is the only delivery path, so "may only touch org/*" is
-// something the workload cannot exceed rather than something it is asked to
-// respect.
-func (b *Broker) githubMaterial(mat Material, plaintext []byte) (Material, error) {
+// the helper is the only delivery path, which makes "may only touch org/*"
+// something *git* will not exceed.
+//
+// Note the limit of that, because it used to be stated too strongly here: the
+// helper runs inside the sandbox and reads a token file inside the sandbox, so
+// a workload that bypasses git is not bound by it. The allowlist is enforced
+// against git, not against the workload.
+//
+// When a GitGuard is configured it takes custody of the token first, and what
+// reaches the sandbox is a proxy session instead. That path is strictly
+// stronger — the allowlist stops being advisory — so it is tried before the
+// helper, and a guard that fails takes the lease with it rather than falling
+// back to handing over the broad credential. See gitguard.go.
+func (b *Broker) githubMaterial(ctx context.Context, mat Material, plaintext []byte) (Material, error) {
 	token := strings.TrimSpace(string(plaintext))
 	if token == "" {
 		return Material{}, wrapf(ErrMalformedPayload, "github secret %s is empty", mat.SecretName)
 	}
+	// Recorded before either delivery branch, because the hub needs it whether
+	// or not the sandbox gets it.
+	mat.githubToken = token
+
+	if b != nil && b.GitGuard != nil {
+		if len(mat.Constraints.Repos) == 0 {
+			return Material{}, wrapf(ErrRepoDenied,
+				"github grant %s carries no repository allowlist", mat.GrantID)
+		}
+		res, err := b.GitGuard.GuardGitHub(ctx, GitGuardRequest{
+			Token:       token,
+			Repos:       mat.Constraints.Repos,
+			Permissions: mat.Constraints.Permissions,
+			SecretName:  mat.SecretName,
+			SecretID:    mat.SecretID,
+			GrantID:     mat.GrantID,
+			ProjectID:   mat.projectID,
+			ExecutorID:  mat.executorID,
+			Actor:       mat.actor,
+			Owner:       mat.owner,
+		})
+		if err != nil {
+			return Material{}, fmt.Errorf("%w: guard github secret %s: %w",
+				ErrGuardUnavailable, mat.SecretName, err)
+		}
+		if res.Guarded() {
+			mat, err = deliverGuardedGitHub(mat, res)
+			if err != nil {
+				return Material{}, err
+			}
+			// The guard's own summary when it wrote one: it knows the ref
+			// policy it applied, which this package cannot see and which is
+			// half of what "narrowed" means for a guarded grant.
+			mode := "read-write"
+			if res.ReadOnly {
+				mode = "read-only"
+			}
+			mat.Summary = fmt.Sprintf("github repos: %s (proxy-guarded, %s)",
+				strings.Join(mat.Constraints.Repos, "|"), mode)
+			if s := strings.TrimSpace(res.Summary); s != "" {
+				mat.Summary = "github " + s
+			}
+			return mat, nil
+		}
+		// Declined, not failed: the hub has no proxy running and said so.
+	}
+
 	mat, err := deliverGitHubToken(mat, token)
 	if err != nil {
 		return Material{}, err
