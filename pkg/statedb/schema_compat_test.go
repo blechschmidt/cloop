@@ -555,7 +555,10 @@ func TestShippedMigrationsThatOnlyAppendAreAdditive(t *testing.T) {
 		byVersion[m.Version] = m
 	}
 
-	for _, v := range []int{35, 36} {
+	// 0041 (task_runs, Task 20282) is asserted here for the same reason: it is
+	// applied to every project database by whichever hub is newer, and the
+	// other one has to keep serving a dashboard while it is.
+	for _, v := range []int{35, 36, 41} {
 		m, ok := byVersion[v]
 		if !ok {
 			t.Fatalf("migration %04d is missing", v)

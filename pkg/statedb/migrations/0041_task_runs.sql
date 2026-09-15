@@ -10,20 +10,29 @@
 -- Two columns close that, and they are deliberately in a table of their own
 -- rather than on plan_tasks.
 --
--- # Why a new table instead of ALTER TABLE plan_tasks
+-- # Why a new table instead of two columns on plan_tasks
 --
--- schema_compat.go classifies every migration by reading its SQL, and an ALTER
--- on a pre-existing table is classified breaking — correctly, because an older
--- binary issues statements against plan_tasks and must not meet a shape it does
--- not know. This deployment runs two hubs against one set of project databases
--- (:8080 from the installed binary, :8888 from main), and a breaking migration
--- applied by the newer one blanks the older one's dashboard until the next
--- nightly rebuild. That has happened before, on 0034.
+-- Not for compatibility. `ALTER TABLE ... ADD COLUMN` with a DEFAULT and no
+-- constraint has classified as additive since Task 20264, so either shape would
+-- have left the older hub sharing this control plane able to read the database
+-- (see schema_compat.go, and 0034 for what a breaking migration costs). The
+-- reasons are about where the two values belong.
 --
--- A CREATE TABLE is additive: the older binary has never heard of task_runs and
--- issues nothing that names it, so it keeps reading plan_tasks exactly as
--- before. The audit correlation is bookkeeping about executions, not plan data,
--- so it belongs beside the plan rather than inside it anyway.
+-- audited_status is a cursor, not plan data. plan_tasks is the row pm.Task
+-- marshals to and from, and pm.Task is serialised whole into the payload of
+-- every task.upsert audit row. A bookkeeping field on it would appear in the
+-- audit payload of every task and shift that payload's fingerprint on every
+-- transition — audit machinery showing up inside the audit records it produces.
+-- It belongs next to audit_task_fingerprints, which is a cursor for the same
+-- reason and lives outside plan_tasks for the same reason.
+--
+-- run_id could have been a column, and keeping it with the cursor keeps one
+-- concern in one place instead of splitting it across a column and a table.
+--
+-- The compatibility class is asserted in schema_compat_test.go rather than
+-- assumed here, because a CREATE TABLE is unconditionally additive whereas an
+-- ADD COLUMN stays additive only while it keeps its DEFAULT and gains no
+-- constraint — a property a later edit can lose silently.
 --
 -- # Columns
 --
