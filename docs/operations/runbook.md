@@ -144,6 +144,82 @@ line. `--offline` reports them as skipped rather than passing.
 Run it twice: once before the first `helm install` or `docker compose up`, and
 once in CI against the config repo. `--offline` makes the second cheap.
 
+### Dispatch health: `cloop hub doctor --smoke`
+
+Everything above reads configuration. None of it can catch the failure an
+operator actually has after enrolling a device: every check passes, and the
+first real task still dies — because the harness image has no shell, or ships
+an `ENTRYPOINT` that swallows the argv, or the agent cannot write its
+workspace, or the driver drops the credential files it advertised support for.
+
+`--smoke` dispatches a trivial workload through the same primitives a real task
+takes and reports each leg separately.
+
+```console
+$ cloop hub doctor --smoke                          # every non-cordoned executor
+$ cloop hub doctor --smoke --executor edge-01       # one device
+$ cloop hub doctor --smoke --json | jq '.smoke[] | select(.first_failure != "")'
+```
+
+```
+DISPATCH SMOKE TEST
+  container (container, isolation container) — 426ms
+    ✔ placement      the scheduler would place a task on container
+    ✔ workspace      the workload read a file the hub wrote and could write its own
+    ✔ lease          the sandbox opened the leased credential file and it held this run's material
+    ✔ dispatch       the workload ran in the sandbox and exited 0
+    ✔ logs           streamed 130 bytes, complete and correctly attributed
+    – write_back     this backend shares its workspace with the hub, so there is nothing to write back
+    ✔ revocation     the credential was destroyed and the lease no longer renews
+    ✔ cleanup        every container, credential and directory this run created was removed
+    the dispatch circuit works end to end
+```
+
+| Stage | What a failure means |
+| --- | --- |
+| `placement` | the scheduler would not choose this executor at all — host-execution policy, a cordon, or an agent below `executors.min_agent_build` |
+| `workspace` | the sandbox got no usable working directory; on a filesystem-sharing driver, that it could not see a file the hub wrote |
+| `lease` | a throwaway credential was minted, granted and delivered — a failure names the delivery path, not the grant |
+| `dispatch` | the workload did not start or exited non-zero; the last lines of its own output are in `--json` under `details.output` |
+| `logs` | output did not come back, was truncated, dropped chunks, or **carried another run's id** — the last is a confidentiality problem on a multi-tenant hub, not a logging bug |
+| `write_back` | a driver that advertises the capability produced no result, so a task's commits would be made in the sandbox and silently lost |
+| `revocation` | the credential outlived its lease — verified by stat-ing the files and asking the broker to renew, not assumed |
+| `cleanup` | something this run created could not be removed |
+
+A stage reports `skip`, never `pass`, when it does not apply to the backend or
+cannot be proved hermetically — `write_back` on a driver whose workspace *is*
+the hub's directory, `lease` on a driver that cannot take a credential back.
+"We did not look" and "we looked and it was fine" are different answers.
+
+**It is safe against production.** The workload touches no network, clones no
+repository and calls no model. The credential it mints is a kubeconfig pointing
+at `127.0.0.1:1`, its TTL is measured in seconds, and it is destroyed and
+*verified destroyed* before the command exits. Everything else — container,
+workspace, lease directory, and the secret and grant rows — is removed on every
+exit path, including ctrl-C. Anything it could not remove is named in the report
+and exits 5.
+
+**Exit codes**, so it works as a Kubernetes readiness gate and a post-deploy CI
+step without parsing JSON:
+
+| Code | Meaning |
+| --- | --- |
+| 0 | every target smoked clean |
+| 1 | a configuration check failed (the hub is misconfigured regardless of dispatch) |
+| 3 | no executor to dispatch to — *not* the same as healthy |
+| 4 | an executor failed a stage |
+| 5 | the run could not clean up after itself; needs a human |
+
+The default sweeps every non-cordoned executor, so "which of my ten devices is
+broken" is one command. Cordoned and draining devices are skipped — and the
+report says which, because a clean verdict over seven of ten devices is worse
+than no verdict. Naming one with `--executor` smokes it anyway, which is how
+you check whether a cordoned device is fixed before returning it to rotation.
+
+As a readiness gate, note that it starts a container per executor: point a
+liveness probe at `/healthz` and use this on a timer or after deploys, not on
+every kubelet poll.
+
 ---
 
 ## The control-plane lease

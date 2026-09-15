@@ -191,22 +191,7 @@ func (sl *secretLease) SecretFiles() []executor.SecretFile {
 	if sl == nil || sl.delivery == nil {
 		return nil
 	}
-	raw := sl.delivery.Files()
-	if len(raw) == 0 {
-		return nil
-	}
-	out := make([]executor.SecretFile, 0, len(raw))
-	for _, f := range raw {
-		out = append(out, executor.SecretFile{
-			LeaseID: sl.lease.ID,
-			GrantID: f.GrantID,
-			Dir:     f.Dir,
-			Name:    f.Name,
-			Mode:    f.Mode,
-			Content: f.Content,
-		})
-	}
-	return out
+	return secretbroker.ExecutorSecretFiles(sl.lease.ID, sl.delivery.Files())
 }
 
 // leaseBindings returns the per-grant attribution from whichever rendering is
@@ -233,22 +218,7 @@ func (sl *secretLease) Bindings() []executor.SecretBinding {
 	if sl == nil || sl.lease == nil {
 		return nil
 	}
-	raw := sl.leaseBindings()
-	out := make([]executor.SecretBinding, 0, len(raw))
-	for _, b := range raw {
-		out = append(out, executor.SecretBinding{
-			LeaseID:    sl.lease.ID,
-			GrantID:    b.GrantID,
-			SecretName: b.SecretName,
-			Kind:       string(b.Kind),
-			EnvKeys:    b.EnvKeys,
-			Files:      b.Files,
-			Dir:        b.Dir,
-			Egress:     b.Kind == secretbroker.KindEgressProxy,
-			ExpiresAt:  sl.lease.ExpiresAt,
-		})
-	}
-	return out
+	return secretbroker.ExecutorBindings(sl.lease.ID, sl.lease.ExpiresAt, sl.leaseBindings())
 }
 
 // ExecutorID returns the executor this lease was issued to, or "".

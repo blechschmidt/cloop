@@ -1972,6 +1972,37 @@ then a real task runs on the device against a tree it fetched over HTTPS. See
 
 Transport is covered in [the security model](../security/model.md#②-hub--remote-agent).
 
+**Confirming a device actually works.** An agent that has connected shows as
+`ready` in the Executors panel, which means its heartbeat arrives — not that it
+can run anything. The difference is where the time goes when a fleet
+misbehaves: a device whose harness image has no shell, whose workspace root is
+not writable, or whose protocol is too old to accept a credential heartbeats
+perfectly and fails every task.
+
+```console
+$ cloop hub doctor --smoke --executor edge-1
+```
+
+That dispatches a hermetic workload — no network, no repository, no model call
+— through placement, workspace provisioning, a throwaway credential lease, log
+streaming, teardown and write-back, and reports each leg separately. It leaves
+nothing behind on the device or the hub, and its exit code distinguishes a
+broken executor (4) from a misconfigured hub (1). Run it once per device after
+enrolling, and on a timer against the whole fleet; see
+[the runbook](../operations/runbook.md#dispatch-health-cloop-hub-doctor---smoke).
+
+Two failures it catches that nothing else does, both specific to edge devices:
+
+- **An expired or replayed enrollment token.** Both now carry a remediation
+  rather than a bare error. They are not the same problem: an expired token
+  means mint another and mind the `--ttl`, while a replayed one may mean
+  somebody redeemed it before the device did — in which case revoking the agent
+  it created matters more than enrolling again.
+- **A harness image with an `ENTRYPOINT`.** The container driver will not
+  override one (that would change what argv means), so the arguments are
+  appended to it and something else runs. A harness image must leave
+  `ENTRYPOINT` empty and let cloop supply argv.
+
 ### Installing the agent as a service
 
 `cloop executor agent --bundle …` runs in the foreground and installs nothing.

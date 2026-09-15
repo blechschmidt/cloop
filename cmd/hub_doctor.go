@@ -56,13 +56,42 @@ worst possible moment when they are wrong:
 
 Every finding that is not a pass carries a one-line remediation.
 
-Exit codes: 0 with only passes and warnings, 1 with any failure. Warnings do
-not fail the command — several are legitimate deployment choices, and a CI gate
-that goes red on choices gets disabled, taking the failures with it.
+` + "`--smoke`" + ` adds the check the others cannot make: it dispatches a trivial
+workload — no network, no repository, no model call — through the same
+primitives a real task takes, and reports each leg separately.
+
+  placement    would the scheduler actually choose this executor
+  workspace    did the workload get a usable working directory
+  lease        was a throwaway credential file delivered to the sandbox
+  dispatch     did the workload start and exit zero
+  logs         did its output come back, complete and correctly attributed
+  write_back   did file changes return, where the backend advertises it
+  revocation   is the credential gone — verified, not assumed
+  cleanup      was every container, directory and credential removed
+
+It defaults to every non-cordoned executor, so "which of my ten devices is
+broken" is one command; --executor narrows it to one, and naming a cordoned
+device smokes it anyway. Nothing it creates outlives the run: the credential's
+TTL is measured in seconds, and everything is removed on every exit path,
+including ctrl-C.
+
+Every finding that is not a pass carries a one-line remediation.
+
+Exit codes. Warnings never fail the command — several are legitimate
+deployment choices, and a CI gate that goes red on choices gets disabled,
+taking the real failures with it.
+
+  0  only passes and warnings
+  1  a configuration check failed
+  3  --smoke found no executor to dispatch to
+  4  --smoke failed a stage on at least one executor
+  5  --smoke could not clean up after itself — needs a human
 
   cloop hub doctor
   cloop hub doctor --json | jq '.findings[] | select(.severity=="fail")'
-  cloop hub doctor --offline     # config only; contacts nothing`,
+  cloop hub doctor --offline     # config only; contacts nothing
+  cloop hub doctor --smoke       # every non-cordoned executor
+  cloop hub doctor --smoke --executor edge-01 --json`,
 	Args:         cobra.NoArgs,
 	SilenceUsage: true,
 	RunE:         runHubDoctor,
@@ -77,6 +106,8 @@ func runHubDoctor(cmd *cobra.Command, _ []string) error {
 	probeExecutor, _ := cmd.Flags().GetString("executor")
 	probeImage, _ := cmd.Flags().GetString("probe-image")
 	probeTimeout, _ := cmd.Flags().GetDuration("probe-timeout")
+	smoke, _ := cmd.Flags().GetBool("smoke")
+	smokeTimeout, _ := cmd.Flags().GetDuration("smoke-timeout")
 
 	if timeout <= 0 {
 		return fmt.Errorf("--timeout must be positive (got %s)", timeout)
@@ -84,11 +115,18 @@ func runHubDoctor(cmd *cobra.Command, _ []string) error {
 	if probeNetpol && probeTimeout <= 0 {
 		return fmt.Errorf("--probe-timeout must be positive (got %s)", probeTimeout)
 	}
-	// Naming an executor without asking for the probe is a command that
-	// silently does nothing the operator asked for. Say so rather than run the
-	// read-only checks and let them believe a probe happened.
-	if !probeNetpol && (strings.TrimSpace(probeExecutor) != "" || strings.TrimSpace(probeImage) != "") {
-		return fmt.Errorf("--executor and --probe-image only apply to --probe-network-policy")
+	if smoke && smokeTimeout <= 0 {
+		return fmt.Errorf("--smoke-timeout must be positive (got %s)", smokeTimeout)
+	}
+	// Naming an executor without asking for a probe is a command that silently
+	// does nothing the operator asked for. Say so rather than run the read-only
+	// checks and let them believe a probe happened.
+	if !probeNetpol && !smoke && strings.TrimSpace(probeExecutor) != "" {
+		return fmt.Errorf("--executor applies to --smoke or --probe-network-policy; " +
+			"add one of them, or drop --executor")
+	}
+	if !probeNetpol && strings.TrimSpace(probeImage) != "" {
+		return fmt.Errorf("--probe-image only applies to --probe-network-policy")
 	}
 
 	dir, err := os.Getwd()
@@ -111,10 +149,12 @@ func runHubDoctor(cmd *cobra.Command, _ []string) error {
 		ProbeExecutorID:    probeExecutor,
 		ProbeImage:         probeImage,
 		ProbeTimeout:       probeTimeout,
+		Smoke:              smoke,
+		SmokeTimeout:       smokeTimeout,
 		// To stderr, so `--json | jq` still gets clean JSON on stdout while an
-		// operator watching a three-minute probe can see which Pod it is on.
+		// operator watching a long probe can see which Pod or device it is on.
 		ProbeLogf: func(format string, args ...any) {
-			fmt.Fprintf(os.Stderr, "  netpol-probe: "+format+"\n", args...)
+			fmt.Fprintf(os.Stderr, "  probe: "+format+"\n", args...)
 		},
 	})
 
@@ -188,6 +228,8 @@ func renderHubDoctor(rep *hubdoctor.Report) {
 		}
 	}
 
+	renderSmoke(rep, pass, warn, fail, dim)
+
 	passN, warnN, failN := rep.Counts()
 	fmt.Println()
 	summary := fmt.Sprintf("%d passed, %d warning(s), %d failure(s)", passN, warnN, failN)
@@ -198,6 +240,57 @@ func renderHubDoctor(rep *hubdoctor.Report) {
 		warn.Println(summary)
 	default:
 		pass.Println(summary)
+	}
+}
+
+// renderSmoke prints the per-stage table for each executor that was smoked.
+//
+// It is rendered separately from the findings rather than as more of them
+// because the two answer different questions. A finding is a verdict on the
+// hub; this is a trace of one run through it, and an operator debugging a
+// broken device reads it top to bottom looking for the first ✗. Collapsing it
+// into the findings list would either bury that trace or flood the report with
+// eight rows per device.
+func renderSmoke(rep *hubdoctor.Report, pass, warn, fail, dim *color.Color) {
+	if len(rep.Smoke) == 0 {
+		return
+	}
+	fmt.Println()
+	dim.Println("DISPATCH SMOKE TEST")
+	for _, res := range rep.Smoke {
+		fmt.Printf("  %s (%s, isolation %s) — %dms\n",
+			res.ExecutorID, res.Kind, res.Isolation, res.DurationMS)
+		for _, s := range res.Stages {
+			c, symbol := pass, "✔"
+			switch s.Outcome {
+			case hubdoctor.StageFail:
+				c, symbol = fail, "✗"
+			case hubdoctor.StageSkip:
+				c, symbol = dim, "–"
+			}
+			c.Printf("    %s ", symbol)
+			fmt.Printf("%-14s %s\n", s.Stage, s.Message)
+			// Only a non-pass gets its remediation printed. A green run that
+			// explained how to fix each stage would be unreadable, and the
+			// text is still in --json for anyone who wants it.
+			if s.Outcome != hubdoctor.StagePass && s.Remediation != "" {
+				dim.Printf("        → %s\n", s.Remediation)
+			}
+		}
+		switch {
+		case len(res.Leaked) > 0:
+			fail.Printf("    leaked: %s\n", strings.Join(res.Leaked, "; "))
+		case res.FirstFailure != "":
+			fail.Printf("    first failure: %s\n", res.FirstFailure)
+		default:
+			pass.Printf("    the dispatch circuit works end to end\n")
+		}
+	}
+	// Named here rather than only in the exit status, because an operator
+	// running this by hand never sees $?.
+	if code := rep.SmokeExitCode(); code == hubdoctor.SmokeExitLeaked {
+		warn.Println("\n  This run could not clean up after itself. Remove the resources named " +
+			"above before re-running.")
 	}
 }
 
@@ -249,8 +342,14 @@ func sortedDetailKeys(m map[string]any) []string {
 // exitFor turns the report into a process exit, bypassing Cobra's error
 // decoration: a doctor that printed a full report and then appended "Error:
 // exit status 1" reads as if the tool itself broke.
+//
+// A --smoke run uses the granular code, so a pipeline can tell a misconfigured
+// hub from a broken executor from a leak without parsing JSON. A plain run
+// keeps the two-valued code it has always had, because every gate built on it
+// treats non-zero as "something is wrong" and a new value would be read as a
+// crash.
 func exitFor(rep *hubdoctor.Report, strict bool) error {
-	code := rep.ExitCode()
+	code := rep.SmokeExitCode()
 	if code == 0 && strict {
 		if _, warn, _ := rep.Counts(); warn > 0 {
 			code = 1
@@ -280,6 +379,12 @@ func init() {
 		"image the probe Pods run (default busybox:1.36; must provide sh, httpd and wget)")
 	hubDoctorCmd.Flags().Duration("probe-timeout", hubdoctor.DefaultNetworkPolicyProbeTimeout,
 		"time budget for one --probe-network-policy run")
+	hubDoctorCmd.Flags().Bool("smoke", false,
+		"dispatch a trivial hermetic workload through the real circuit — placement, workspace, "+
+			"a throwaway credential lease, log streaming, teardown and write-back — and report "+
+			"each stage (default: every non-cordoned executor)")
+	hubDoctorCmd.Flags().Duration("smoke-timeout", hubdoctor.DefaultSmokeTimeout,
+		"time budget for one executor's --smoke run")
 
 	hubCmd.AddCommand(hubDoctorCmd)
 }

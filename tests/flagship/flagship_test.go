@@ -735,6 +735,169 @@ func runCircuit(t *testing.T, w *world) {
 		})
 	})
 
+	smokeTheOperatorsOwnHub(t, w)
+}
+
+// ── cloop hub doctor --smoke ────────────────────────────────────────────────
+
+// smokeTheOperatorsOwnHub runs the dispatch smoke test against the hub this
+// file has just proved, and checks that it agrees — and that it cleans up.
+//
+// It reuses this harness deliberately. The smoke test's own package tests
+// drive a fake executor, which is right for stage ordering and attribution and
+// cannot answer the question that actually matters here: does the command work
+// against a *real* container runtime, a real image, a real broker and a real
+// hub? Standing up a second harness to ask that would be a fork of everything
+// above — the image build, the uid arrangement, the grants, the port — and the
+// two would drift. So the smoke runs last, on the world the circuit already
+// built, where the surrounding assertions have just established that this hub
+// genuinely dispatches work.
+//
+// Running it *after* the circuit is also what makes the cleanup assertion
+// meaningful: the staging directories were verified empty a moment ago, so
+// anything present afterwards was left by the smoke run and nothing else.
+func smokeTheOperatorsOwnHub(t *testing.T, w *world) {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), runTimeout)
+	defer cancel()
+
+	before := sandboxContainers(ctx, t)
+
+	// --json so the verdict is parsed rather than scraped, and the check ids
+	// this asserts on are the ones a pipeline greps for.
+	cmd := w.cloop(ctx, w.hubDir, "hub", "doctor", "--smoke", "--json")
+	out, runErr := cmd.Output()
+
+	var report struct {
+		SmokeRan bool `json:"smoke_ran"`
+		Smoke    []struct {
+			ExecutorID   string   `json:"executor_id"`
+			FirstFailure string   `json:"first_failure"`
+			Leaked       []string `json:"leaked"`
+			Stages       []struct {
+				Stage       string `json:"stage"`
+				Outcome     string `json:"outcome"`
+				Message     string `json:"message"`
+				Remediation string `json:"remediation"`
+			} `json:"stages"`
+		} `json:"smoke"`
+	}
+	if err := json.Unmarshal(out, &report); err != nil {
+		t.Fatalf("`cloop hub doctor --smoke --json` did not emit parseable JSON: %v\nerr: %v\noutput:\n%s",
+			err, runErr, tail(string(out), 40))
+	}
+
+	t.Run("the smoke test proves the circuit it just ran on", func(t *testing.T) {
+		if !report.SmokeRan {
+			t.Fatal("--smoke did not run the smoke check at all")
+		}
+		if len(report.Smoke) == 0 {
+			t.Fatal("--smoke found no executor to dispatch to, on a hub that has just run a task")
+		}
+		for _, res := range report.Smoke {
+			if res.FirstFailure != "" {
+				// Print the whole stage table: the first failure is the
+				// actionable line, and the rest is the context for it.
+				for _, s := range res.Stages {
+					t.Logf("  %-14s %-5s %s", s.Stage, s.Outcome, s.Message)
+				}
+				t.Errorf("executor %s failed the smoke at stage %q", res.ExecutorID, res.FirstFailure)
+			}
+			// The stages that must be *proved* here rather than skipped. On a
+			// container executor with a real grant, a skip for either of these
+			// would mean the smoke quietly checked nothing — which is the
+			// failure mode a diagnostic is most likely to have and least
+			// likely to reveal.
+			for _, want := range []string{"dispatch", "logs"} {
+				var outcome string
+				for _, s := range res.Stages {
+					if s.Stage == want {
+						outcome = s.Outcome
+					}
+				}
+				if outcome != "pass" {
+					t.Errorf("stage %q on %s is %q, want pass: this hub demonstrably dispatches "+
+						"work, so the smoke test must be able to show it", want, res.ExecutorID, outcome)
+				}
+			}
+			// Every non-pass carries its fix, asserted against the real
+			// command rather than only in the unit tests.
+			for _, s := range res.Stages {
+				if s.Outcome != "pass" && strings.TrimSpace(s.Remediation) == "" {
+					t.Errorf("stage %q on %s is %q with no remediation",
+						s.Stage, res.ExecutorID, s.Outcome)
+				}
+			}
+		}
+	})
+
+	t.Run("the smoke test left nothing behind", func(t *testing.T) {
+		for _, res := range report.Smoke {
+			if len(res.Leaked) > 0 {
+				t.Errorf("the smoke run reported leaks on %s: %s",
+					res.ExecutorID, strings.Join(res.Leaked, "; "))
+			}
+		}
+
+		// Checked against the runtime rather than only against the report,
+		// because "did it clean up" must not be answered by the thing under
+		// test. A container the smoke created and did not remove is visible
+		// here whatever the report claims.
+		after := sandboxContainers(ctx, t)
+		for name := range after {
+			if !before[name] {
+				t.Errorf("the smoke run left a container behind: %s", name)
+			}
+		}
+
+		// And no credential material. The circuit's own wipe assertion ran
+		// before the smoke, so anything here is the smoke's.
+		waitFor(t, wipeTimeout, "the smoke run's lease staging to be wiped", func() (bool, string) {
+			left := leaseStagingDirs()
+			if len(left) == 0 {
+				return true, ""
+			}
+			return false, "still present: " + strings.Join(left, ", ")
+		})
+
+		// No workspace either. The smoke stages its throwaway trees under the
+		// control plane's own .cloop/smoke, which should be empty or absent.
+		smokeRoot := filepath.Join(w.hubDir, ".cloop", "smoke")
+		if entries, err := os.ReadDir(smokeRoot); err == nil && len(entries) > 0 {
+			var names []string
+			for _, e := range entries {
+				names = append(names, e.Name())
+			}
+			t.Errorf("the smoke run left workspaces under %s: %v", smokeRoot, names)
+		}
+	})
+}
+
+// sandboxContainers returns the names of cloop's sandbox containers, as a set.
+//
+// Filtered by cloop's own naming rather than counting everything, so a
+// container belonging to another test or to the machine's normal workload
+// cannot be mistaken for a leak — or mask one.
+func sandboxContainers(ctx context.Context, t *testing.T) map[string]bool {
+	t.Helper()
+	cmd := exec.CommandContext(ctx, "docker", "ps", "-a", "--format", "{{.Names}}")
+	out, err := cmd.Output()
+	if err != nil {
+		// Not fatal: this is a corroborating check, and the report-based
+		// assertion above still stands. Saying so beats failing the circuit
+		// over a docker CLI hiccup.
+		t.Logf("could not list containers to check for leaks: %v", err)
+		return map[string]bool{}
+	}
+	names := map[string]bool{}
+	for _, line := range strings.Split(string(out), "\n") {
+		name := strings.TrimSpace(line)
+		if name != "" && strings.Contains(name, "cloop") {
+			names[name] = true
+		}
+	}
+	return names
 }
 
 // ── the hub process ─────────────────────────────────────────────────────────

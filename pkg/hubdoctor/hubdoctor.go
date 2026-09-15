@@ -122,6 +122,15 @@ type Report struct {
 	Offline bool `json:"offline"`
 	// Findings, in the order the checks produced them.
 	Findings []Finding `json:"findings"`
+
+	// SmokeRan reports that --smoke was asked for and the check ran, whether
+	// or not it found anything to dispatch to. It is what lets SmokeExitCode
+	// tell "no executor to smoke" from "smoke was never requested", which are
+	// the same empty Smoke array but opposite answers for a readiness gate.
+	SmokeRan bool `json:"smoke_ran,omitempty"`
+	// Smoke carries the per-stage dispatch results, one entry per executor.
+	// Empty unless Options.Smoke was set.
+	Smoke []SmokeResult `json:"smoke,omitempty"`
 }
 
 // Counts returns the number of findings at each severity.
@@ -161,6 +170,44 @@ func (r *Report) ExitCode() int {
 		return 1
 	}
 	return 0
+}
+
+// SmokeExitCode is the exit status for a run that included --smoke.
+//
+// It is deliberately more granular than ExitCode. A readiness gate only asks
+// whether the value is zero, but a post-deploy CI step wants to tell three
+// different situations apart without parsing JSON: the hub is misconfigured,
+// the hub is fine but an executor cannot run work, and the diagnostic itself
+// left something behind. Those have different owners and different urgencies.
+//
+// Precedence runs from most to least urgent, because a run can be several of
+// these at once and the exit code has room for one. A leak outranks everything
+// — it is the only outcome that needs a human on a machine rather than a
+// change to a config file.
+func (r *Report) SmokeExitCode() int {
+	if !r.SmokeRan {
+		return r.ExitCode()
+	}
+	var failed bool
+	for _, s := range r.Smoke {
+		if len(s.Leaked) > 0 {
+			return SmokeExitLeaked
+		}
+		if s.FirstFailure != "" {
+			failed = true
+		}
+	}
+	switch {
+	case failed:
+		return SmokeExitFailed
+	case r.ExitCode() != 0:
+		// A hub whose identity or storage is broken is misconfigured even if
+		// the one executor it has happens to run a shell script.
+		return SmokeExitConfig
+	case len(r.Smoke) == 0:
+		return SmokeExitNoTargets
+	}
+	return SmokeExitOK
 }
 
 // JSON renders the report for --json, with a trailing newline.
@@ -212,9 +259,26 @@ type Options struct {
 	// one nobody could safely run against production. See netpol.go.
 	ProbeNetworkPolicy bool
 
-	// ProbeExecutorID narrows the probe to one executor. Empty probes all of
+	// ProbeExecutorID narrows a probe to one executor. Empty probes all of
 	// them, which on the usual single-cluster hub is the same thing.
+	//
+	// Shared by --probe-network-policy and --smoke because it means the same
+	// thing to both ("restrict this to one executor") and because an operator
+	// should not have to remember two spellings of --executor.
 	ProbeExecutorID string
+
+	// Smoke runs the dispatch smoke test: a trivial hermetic workload sent
+	// through the same primitives a real task takes. See smoke.go.
+	//
+	// Opt-in for the same reason ProbeNetworkPolicy is — it starts a real
+	// workload and mints a real, if throwaway, credential — though it is far
+	// cheaper and safe against production.
+	Smoke bool
+
+	// SmokeTimeout bounds one executor's smoke run. Zero uses
+	// DefaultSmokeTimeout. Not Timeout, which bounds a single HTTP request
+	// and is nowhere near long enough to start a container.
+	SmokeTimeout time.Duration
 
 	// ProbeImage overrides the busybox image the probe Pods run, for a cluster
 	// that mirrors its own registry or enforces an image policy.
@@ -325,6 +389,11 @@ func Run(ctx context.Context, dir string, cfg *config.Config, opts Options) *Rep
 	checkConfigDrift(dir, add)
 	checkRetention(dir, cfg, add)
 	checkAdmission(cfg, add)
+	// Last, and after checkExecutors for the same reason the NetworkPolicy
+	// probe is: it dispatches to the registry reconciliation builds. Running
+	// it last also means an operator watching a terminal has read every
+	// configuration verdict before the slow part starts.
+	checkSmoke(ctx, dir, cfg, opts, rep, add)
 
 	return rep
 }

@@ -10,7 +10,6 @@ package cmd
 // `enroll` prints a copy-pasteable command rather than doing anything itself.
 
 import (
-	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -370,10 +369,16 @@ or when the control plane revokes its credential.`,
 		defer stop()
 
 		if err := a.Run(ctx); err != nil {
-			if errors.Is(err, remote.ErrRevoked) || errors.Is(err, remote.ErrCredentialInvalid) {
-				return fmt.Errorf("%w\n\nThis device's credential is no longer accepted. "+
-					"Mint a new token on the control plane with `cloop executor enroll` "+
-					"and re-run with --token", err)
+			// Every enrollment failure that has a known fix now carries it.
+			// This used to cover only a revoked credential, which left the two
+			// most common ways an enrolment actually fails — an expired token
+			// and a replayed one — surfacing as a bare Go error on a device
+			// that is frequently in another building. The replay case in
+			// particular needs its sentence read: it can mean somebody else
+			// redeemed the token first, and the response to that is not
+			// "try again".
+			if remedy := remote.EnrollmentRemediation(err); remedy != "" {
+				return fmt.Errorf("%w\n\n%s", err, remedy)
 			}
 			return err
 		}

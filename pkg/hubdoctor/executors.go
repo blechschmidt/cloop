@@ -28,6 +28,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/reconcile"
+	"github.com/blechschmidt/cloop/pkg/executor/remote"
 	"github.com/blechschmidt/cloop/pkg/executorstore"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 )
@@ -177,10 +178,18 @@ func executorFinding(ctx context.Context, ex executor.Executor, opts Options) Fi
 	probeCtx, cancel := context.WithTimeout(ctx, opts.timeout())
 	defer cancel()
 	if err := ex.HealthCheck(probeCtx); err != nil {
+		// A device that failed enrolment has a specific fix, and it is rarely
+		// the generic "restart the agent" one: an expired token needs a new
+		// token, and a replayed one may need a revocation. Prefer the sentinel's
+		// own advice when the error carries one.
+		remedy := remote.EnrollmentRemediation(err)
+		if remedy == "" {
+			remedy = remediationFor(ex)
+		}
 		return Finding{
 			Check: "executors.health", Title: title, Severity: SeverityWarn,
 			Message:     fmt.Sprintf("unreachable: %v", err),
-			Remediation: remediationFor(ex),
+			Remediation: remedy,
 			Details:     details,
 		}
 	}
