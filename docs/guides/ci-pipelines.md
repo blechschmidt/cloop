@@ -220,7 +220,7 @@ forge for a fresh one if you need another.
 | requests | 500 | rule `max_requests` |
 | `max_tokens` per call | 32000 | rule `max_output_tokens` |
 | lifetime | 60 min (max 6 h) | rule `ttl_seconds` |
-| API surface | `POST /v1/messages`, `POST /v1/messages/count_tokens`, `GET /v1/models` | fixed |
+| API surface | `POST /v1/messages`, `POST /v1/messages/count_tokens`, `GET /v1/models`, `GET /v1/models/{id}` | fixed |
 
 A `max_tokens` over the cap is **clamped, not refused** — a stock SDK
 configuration must keep working behind a policy that sets one. A model outside
