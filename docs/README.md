@@ -78,6 +78,14 @@ Five pages in order, indexed at
   evaluated against. Generated from the route tables themselves and gated
   against them, so a new route cannot ship undocumented. The hub serves the
   machine-readable form at `GET /api/openapi.json`.
+- **[Audit events](reference/audit-events.md)** — every action name the hub can
+  write to the `event_type` column of `audit_events`, with what fires it, the
+  payload keys it carries, the permission that gates reading it, and how far a
+  consumer may rely on the name. Read this before writing a SIEM detection
+  rule: it is the whole vocabulary rather than the part someone remembered to
+  write down. Generated from the registry the emitters reference and gated
+  against it, so an action cannot ship undocumented — and an action name cited
+  anywhere else in these docs cannot outlive the code that emits it.
 
 ## Security
 

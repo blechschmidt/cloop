@@ -41,6 +41,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/auditaction"
 	"github.com/blechschmidt/cloop/pkg/securewipe"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/statedb"
@@ -201,7 +202,7 @@ func reportLeaseSweep(db *statedb.DB, controlPlaneDir string, res leaseSweepResu
 	// is unavailable would trade a recorded cleanup for no cleanup at all.
 	statedb.AuditSecretDecision(db, statedb.SecretAuditInput{
 		Actor:     "system",
-		EventType: "secret.lease.sweep",
+		EventType: auditaction.ActionSecretLeaseSweep,
 		EntityID:  controlPlaneDir,
 		Payload:   payload,
 	})

@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/blechschmidt/cloop/pkg/auditaction"
 	"net"
 	"net/http"
 	"net/url"
@@ -291,7 +292,7 @@ func (a *Authenticator) touch(hash string, now time.Time) {
 // The store's report of whether a row existed is the arbiter: whoever actually
 // deleted it writes the event. Everyone else — a concurrent request that saw
 // the same expired session, a janitor pass racing a sign-out — stays silent.
-func (a *Authenticator) terminate(rec SessionRecord, event, reason, actor string) {
+func (a *Authenticator) terminate(rec SessionRecord, event auditaction.Action, reason, actor string) {
 	a.mu.Lock()
 	delete(a.cache, rec.ID)
 	a.mu.Unlock()
@@ -303,7 +304,7 @@ func (a *Authenticator) terminate(rec SessionRecord, event, reason, actor string
 	a.auditTermination(rec, event, reason, actor)
 }
 
-func (a *Authenticator) auditTermination(rec SessionRecord, event, reason, actor string) {
+func (a *Authenticator) auditTermination(rec SessionRecord, event auditaction.Action, reason, actor string) {
 	if actor == "" {
 		actor = "system"
 	}

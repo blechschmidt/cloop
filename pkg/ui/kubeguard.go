@@ -39,6 +39,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/auditaction"
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/kubeguard"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
@@ -471,7 +472,7 @@ func kubeGuardAuditSink(db *statedb.DB) func(kubeguard.Event) {
 		if err := db.AppendAuditEvent(&statedb.AuditEvent{
 			Timestamp:  e.At,
 			Actor:      e.Actor,
-			EventType:  "kubeguard." + string(e.Kind),
+			EventType:  string(auditaction.KubeGuardEvent(string(e.Kind))),
 			EntityType: "kubeguard",
 			EntityID:   e.SessionID,
 			Payload:    string(payload),

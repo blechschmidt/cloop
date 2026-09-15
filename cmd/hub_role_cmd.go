@@ -36,6 +36,7 @@ import (
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 
+	"github.com/blechschmidt/cloop/pkg/auditaction"
 	"github.com/blechschmidt/cloop/pkg/authz"
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/rolestore"
@@ -267,7 +268,7 @@ that looks like it grants something small.`,
 			}
 			return err
 		}
-		if err := auditHubAdmin(db, "role_binding.deleted", "role_binding", row.ID, reason,
+		if err := auditHubAdmin(db, auditaction.ActionRoleBindingDeleted, "role_binding", row.ID, reason,
 			roleBindingPayload(row)); err != nil {
 			return err
 		}
@@ -343,9 +344,9 @@ func writeRoleBinding(cmd *cobra.Command, claim, value, role string, deny bool) 
 	}
 	defer closer()
 
-	eventType := "role_binding.granted"
+	eventType := auditaction.ActionRoleBindingGranted
 	if deny {
-		eventType = "role_binding.denied"
+		eventType = auditaction.ActionRoleBindingDenied
 	}
 	// Audit first, mutate second: an unrecorded change to who may act is an
 	// authority change with nothing to review, and re-running the command is

@@ -31,6 +31,7 @@ import (
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 
+	"github.com/blechschmidt/cloop/pkg/auditaction"
 	"github.com/blechschmidt/cloop/pkg/eventlog"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
 	"github.com/blechschmidt/cloop/pkg/secretstore"
@@ -250,7 +251,7 @@ Retiring the old key is deliberately not part of this command. Do it once
 		})
 
 		if !dryRun && report.TargetKeyID != "" {
-			appendKeyAuditEvent(workdir, "sealing_key.rotated", report.TargetKeyID, map[string]any{
+			appendKeyAuditEvent(workdir, auditaction.ActionSealingKeyRotated, report.TargetKeyID, map[string]any{
 				"from_primary": before,
 				"to_key":       report.TargetKeyID,
 				"rewrapped":    report.Rewrapped,
@@ -345,7 +346,7 @@ rows.`,
 		if err := h.rotator.RetireKey(keyID); err != nil {
 			return err
 		}
-		appendKeyAuditEvent(workdir, "sealing_key.retired", keyID, map[string]any{
+		appendKeyAuditEvent(workdir, auditaction.ActionSealingKeyRetired, keyID, map[string]any{
 			"key_id": keyID,
 			"via":    "cli",
 		})
@@ -435,7 +436,7 @@ func openHubKeyring(workdir string, readOnly bool) (*hubKeyring, error) {
 // successful rotation every row looks normal. The audit entry is the only
 // durable evidence that it happened, and it carries key IDs and counts —
 // never salts, never DEKs.
-func appendKeyAuditEvent(workdir, eventType, keyID string, payload map[string]any) {
+func appendKeyAuditEvent(workdir string, eventType auditaction.Action, keyID string, payload map[string]any) {
 	if workdir == "" {
 		wd, err := os.Getwd()
 		if err != nil {
@@ -454,7 +455,7 @@ func appendKeyAuditEvent(workdir, eventType, keyID string, payload map[string]an
 	}
 	_ = log.Append(&eventlog.AuditEvent{
 		Actor:      "cli:" + currentUser(),
-		EventType:  eventType,
+		EventType:  string(eventType),
 		EntityType: "sealing_key",
 		EntityID:   keyID,
 		Payload:    string(blob),

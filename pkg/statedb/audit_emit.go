@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/auditaction"
 	"github.com/blechschmidt/cloop/pkg/pm"
 )
 
@@ -57,7 +58,7 @@ func auditTaskUpsert(d *DB, t *pm.Task, actor string) {
 	}
 	emit(d, &AuditEvent{
 		Actor:      actor,
-		EventType:  "task.upsert",
+		EventType:  string(auditaction.ActionTaskUpsert),
 		EntityType: "task",
 		EntityID:   fmt.Sprintf("%d", t.ID),
 		Payload:    MarshalAuditPayload(t),
@@ -78,7 +79,7 @@ func AuditTaskDelete(d *DB, taskID int, actor string) {
 	}
 	emit(d, &AuditEvent{
 		Actor:      actor,
-		EventType:  "task.delete",
+		EventType:  string(auditaction.ActionTaskDelete),
 		EntityType: "task",
 		EntityID:   fmt.Sprintf("%d", taskID),
 		Payload:    MarshalAuditPayload(map[string]any{"id": taskID}),
@@ -92,7 +93,7 @@ func AuditTaskStatus(d *DB, taskID int, oldStatus, newStatus, actor string) {
 	}
 	emit(d, &AuditEvent{
 		Actor:      actor,
-		EventType:  "task.status",
+		EventType:  string(auditaction.ActionTaskStatus),
 		EntityType: "task",
 		EntityID:   fmt.Sprintf("%d", taskID),
 		Payload: MarshalAuditPayload(map[string]any{
@@ -109,7 +110,7 @@ func auditStepAppend(d *DB, row StepRow, actor string) {
 	}
 	emit(d, &AuditEvent{
 		Actor:      actor,
-		EventType:  "step.append",
+		EventType:  string(auditaction.ActionStepAppend),
 		EntityType: "step",
 		EntityID:   fmt.Sprintf("%d", row.Step),
 		Payload: MarshalAuditPayload(map[string]any{
@@ -142,7 +143,7 @@ func auditConfigSet(d *DB, yamlBlob, actor string) {
 	}
 	emit(d, &AuditEvent{
 		Actor:      actor,
-		EventType:  "config.set",
+		EventType:  string(auditaction.ActionConfigSet),
 		EntityType: "config",
 		EntityID:   "",
 		Payload:    MarshalAuditPayload(map[string]any{"yaml": redactYAMLSecrets(yamlBlob)}),
@@ -199,7 +200,7 @@ func AuditExecutorLifecycle(d *DB, in ExecutorAuditInput) {
 	}
 	emit(d, &AuditEvent{
 		Actor:      actor,
-		EventType:  "executor." + in.Action,
+		EventType:  string(auditaction.ExecutorLifecycle(in.Action)),
 		EntityType: "executor",
 		EntityID:   in.ExecutorID,
 		Payload:    MarshalAuditPayload(payload),
@@ -264,7 +265,7 @@ func AuditImagePolicyDenial(d *DB, in ImagePolicyDenialInput) {
 	}
 	emit(d, &AuditEvent{
 		Actor:      actor,
-		EventType:  "sandbox.image_denied",
+		EventType:  string(auditaction.ActionSandboxImageDenied),
 		EntityType: "project",
 		EntityID:   in.ProjectPath,
 		Payload:    MarshalAuditPayload(payload),
@@ -378,7 +379,7 @@ func AuditWorkspaceProvision(d *DB, in WorkspaceAuditInput) {
 	}
 	emit(d, &AuditEvent{
 		Actor:      actor,
-		EventType:  "workspace." + suffix,
+		EventType:  string(auditaction.WorkspacePhase(suffix)),
 		EntityType: "project",
 		EntityID:   in.ProjectPath,
 		Payload:    MarshalAuditPayload(payload),
@@ -480,7 +481,7 @@ func AuditTaskDispatch(d *DB, in TaskDispatchInput) {
 	}
 	emit(d, &AuditEvent{
 		Actor:      actor,
-		EventType:  "task.dispatch",
+		EventType:  string(auditaction.ActionTaskDispatch),
 		EntityType: "task",
 		EntityID:   fmt.Sprintf("%d", in.TaskID),
 		Payload:    MarshalAuditPayload(payload),
@@ -578,7 +579,7 @@ func taskFinishEvent(e taskLifecycleEdge, projectPath string) *AuditEvent {
 	}
 	return &AuditEvent{
 		Actor:      "system",
-		EventType:  "task.finish",
+		EventType:  string(auditaction.ActionTaskFinish),
 		EntityType: "task",
 		EntityID:   fmt.Sprintf("%d", t.ID),
 		Payload:    MarshalAuditPayload(payload),
@@ -641,7 +642,7 @@ func auditStateSave(d *DB, s *State) {
 	}
 	emit(d, &AuditEvent{
 		Actor:      "system",
-		EventType:  "state.save",
+		EventType:  string(auditaction.ActionStateSave),
 		EntityType: "plan",
 		EntityID:   "",
 		Payload: MarshalAuditPayload(map[string]any{
@@ -666,8 +667,17 @@ func auditStateSave(d *DB, s *State) {
 // AuditEvent — and, more to the point, so the entity_type is set in exactly
 // one place and every broker row is filterable as entity_type='secret'.
 type SecretAuditInput struct {
-	Actor     string
-	EventType string // "secret.lease", "secret.grant", "secret.revoke", ...
+	Actor string
+	// EventType is the registered action: auditaction.ActionSecretLease,
+	// ActionSecretGrant, ActionSecretRevoke, and the rest of the secret,
+	// lease, egress and github_app families.
+	//
+	// Typed rather than a bare string because the whole broker surface funnels
+	// through this one struct, which makes it the single place a made-up
+	// action could enter the trail. Requiring an auditaction.Action means the
+	// value came from the registry, and tests/arch/auditaction_test.go can see
+	// that it did.
+	EventType auditaction.Action
 	EntityID  string // secret ID, or grant ID when no secret is involved
 	Timestamp time.Time
 	// Payload is the decision's metadata. Callers are responsible for
@@ -691,7 +701,7 @@ func AuditSecretDecision(d *DB, in SecretAuditInput) {
 	emit(d, &AuditEvent{
 		Timestamp:  in.Timestamp,
 		Actor:      actor,
-		EventType:  in.EventType,
+		EventType:  string(in.EventType),
 		EntityType: "secret",
 		EntityID:   in.EntityID,
 		Payload:    MarshalAuditPayload(in.Payload),
@@ -722,7 +732,7 @@ func auditPlanTasks(d *DB, changed []taskAuditChange, deleted []int) {
 		}
 		evs = append(evs, &AuditEvent{
 			Actor:      "system",
-			EventType:  "task.upsert",
+			EventType:  string(auditaction.ActionTaskUpsert),
 			EntityType: "task",
 			EntityID:   fmt.Sprintf("%d", c.Task.ID),
 			// Reuse the payload the diff already marshalled and redacted.
@@ -735,7 +745,7 @@ func auditPlanTasks(d *DB, changed []taskAuditChange, deleted []int) {
 	for _, id := range deleted {
 		evs = append(evs, &AuditEvent{
 			Actor:      "system",
-			EventType:  "task.delete",
+			EventType:  string(auditaction.ActionTaskDelete),
 			EntityType: "task",
 			EntityID:   fmt.Sprintf("%d", id),
 			Payload:    MarshalAuditPayload(map[string]any{"id": id}),

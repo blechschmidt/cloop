@@ -37,6 +37,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/auditaction"
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/gitproxycreds"
@@ -390,7 +391,7 @@ func gitProxyAuditSink(db *statedb.DB) func(gitproxy.Event) {
 		if err := db.AppendAuditEvent(&statedb.AuditEvent{
 			Timestamp:  e.At,
 			Actor:      e.Actor,
-			EventType:  "gitproxy." + string(e.Kind),
+			EventType:  string(auditaction.GitProxyEvent(string(e.Kind))),
 			EntityType: "gitproxy",
 			EntityID:   e.SessionID,
 			Payload:    string(payload),

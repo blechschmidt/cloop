@@ -54,6 +54,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/auditaction"
 	"github.com/blechschmidt/cloop/pkg/cost"
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/logger"
@@ -66,7 +67,7 @@ import (
 // AuditSpendRefused is the audit event type for a run stopped because its
 // paying identity exhausted a daily budget. Named rather than inlined so the
 // Audit panel's filter and any SIEM rule key off one constant.
-const AuditSpendRefused = "quota.spend_refused"
+const AuditSpendRefused = auditaction.ActionQuotaSpendRefused
 
 // spendDrainBatch bounds one drain. A hub that was down while a long plan ran
 // comes back to a backlog; this keeps the catch-up read off the heap in one
@@ -437,7 +438,7 @@ func (s *Server) auditSpendRefusal(workDir, identity string, d *quota.Denial) {
 
 	_ = db.AppendAuditEvent(&statedb.AuditEvent{
 		Actor:      identity,
-		EventType:  AuditSpendRefused,
+		EventType:  string(AuditSpendRefused),
 		EntityType: "project",
 		EntityID:   workDir,
 		Payload:    string(payload),

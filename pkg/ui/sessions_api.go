@@ -181,13 +181,13 @@ func (s *Server) SessionAuditSink() func(oidcauth.SessionAudit) {
 		if err := log.Append(&eventlog.AuditEvent{
 			Timestamp:  ev.At,
 			Actor:      actor,
-			EventType:  ev.Event,
+			EventType:  string(ev.Event),
 			EntityType: "session",
 			EntityID:   ev.SessionID,
 			Payload:    statedb.MarshalAuditPayload(payload),
 		}); err != nil {
 			s.log().Warn(logger.EventAuthz, 0, "session audit: append",
-				map[string]interface{}{"error": err.Error(), "event": ev.Event})
+				map[string]interface{}{"error": err.Error(), "event": string(ev.Event)})
 		}
 	}
 }

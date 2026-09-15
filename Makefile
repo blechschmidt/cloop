@@ -1,5 +1,5 @@
 .PHONY: build test test-unit test-e2e test-e2e-update e2e-stack fuzz bench clean \
-        docs-api docs-check docs-stage docs-site docs-serve release-dist
+        docs-api docs-audit docs-check docs-stage docs-site docs-serve release-dist
 
 BINARY := cloop
 
@@ -154,6 +154,17 @@ $(DOCS_VENV): website/requirements.txt
 docs-api:
 	@$(GO) test ./tests/docs -run TestHTTPAPIReference -update -count=1
 	@echo "==> regenerated docs/reference/http-api.md"
+
+## docs-audit: regenerate docs/reference/audit-events.md from the action registry
+#
+# Same arrangement as docs-api, for the same reason: the page is rendered from
+# pkg/auditaction rather than written, so this is the only correct way to change
+# it. `go test ./tests/docs` fails when the checked-in copy stops matching the
+# registry, and `go test ./tests/arch` fails when an emission site names an
+# action the registry does not have.
+docs-audit:
+	@$(GO) test ./tests/docs -run TestAuditEventsReference -update-audit -count=1
+	@echo "==> regenerated docs/reference/audit-events.md"
 
 ## docs-check: structural check — every page indexed, every relative link resolves
 docs-check:

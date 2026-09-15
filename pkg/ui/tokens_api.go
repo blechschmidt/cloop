@@ -46,6 +46,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/apierror"
 	"github.com/blechschmidt/cloop/pkg/apitoken"
+	"github.com/blechschmidt/cloop/pkg/auditaction"
 	"github.com/blechschmidt/cloop/pkg/authz"
 	"github.com/blechschmidt/cloop/pkg/eventlog"
 	"github.com/blechschmidt/cloop/pkg/logger"
@@ -216,7 +217,7 @@ func (s *Server) authenticateAPIToken(w http.ResponseWriter, r *http.Request) (*
 		s.recordAuthFailure(ip)
 		s.auditTokenEvent(tokenAuditRecord{
 			Actor:     "anonymous",
-			EventType: "api_token.auth_failed",
+			EventType: auditaction.ActionAPITokenAuthFailed,
 			TokenID:   tokenIDForAudit(cred),
 			Extra: map[string]any{
 				"reason": tokenFailureReason(verr),
@@ -273,7 +274,7 @@ func (s *Server) tokenKindAdmitted(w http.ResponseWriter, r *http.Request, tok *
 	if s.oidcEnabled() && tok.Owner == nil {
 		s.auditTokenEvent(tokenAuditRecord{
 			Actor:     "anonymous",
-			EventType: "api_token.auth_failed",
+			EventType: auditaction.ActionAPITokenAuthFailed,
 			TokenID:   tok.Prefix,
 			Extra: map[string]any{
 				"reason": "unowned_link_on_multi_tenant_hub",
@@ -472,7 +473,7 @@ func (s *Server) handleTokenCreate(w http.ResponseWriter, r *http.Request) {
 	if err := apitoken.CheckDelegation(s.delegatorFor(r), roles, scope); err != nil {
 		s.auditTokenEvent(tokenAuditRecord{
 			Actor:     s.grantFor(r).subjectLabel(),
-			EventType: "api_token.create_denied",
+			EventType: auditaction.ActionAPITokenCreateDenied,
 			Extra: map[string]any{
 				"reason":        err.Error(),
 				"roles":         roles,
@@ -509,7 +510,7 @@ func (s *Server) handleTokenCreate(w http.ResponseWriter, r *http.Request) {
 
 	s.auditTokenEvent(tokenAuditRecord{
 		Actor:     actor,
-		EventType: "api_token.created",
+		EventType: auditaction.ActionAPITokenCreated,
 		TokenID:   minted.Token.Prefix,
 		Extra: map[string]any{
 			"name":          minted.Token.Name,
@@ -563,7 +564,7 @@ func (s *Server) handleTokenRevoke(w http.ResponseWriter, r *http.Request) {
 
 	s.auditTokenEvent(tokenAuditRecord{
 		Actor:     s.grantFor(r).subjectLabel(),
-		EventType: "api_token.revoked",
+		EventType: auditaction.ActionAPITokenRevoked,
 		TokenID:   tok.Prefix,
 		Extra: map[string]any{
 			"name":  tok.Name,
@@ -694,7 +695,7 @@ func formatTokenTime(t time.Time) string {
 // tokenAuditRecord is one entry appended to the hash-chained trail.
 type tokenAuditRecord struct {
 	Actor     string
-	EventType string
+	EventType auditaction.Action
 	TokenID   string
 	Extra     map[string]any
 }
@@ -737,7 +738,7 @@ func (s *Server) auditTokenEvent(rec tokenAuditRecord) {
 	defer log.Close()
 	if err := log.Append(&eventlog.AuditEvent{
 		Actor:      actor,
-		EventType:  rec.EventType,
+		EventType:  string(rec.EventType),
 		EntityType: "api_token",
 		EntityID:   rec.TokenID,
 		Payload:    string(blob),

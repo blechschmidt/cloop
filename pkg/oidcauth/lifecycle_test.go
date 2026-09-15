@@ -15,6 +15,7 @@ package oidcauth
 import (
 	"context"
 	"errors"
+	"github.com/blechschmidt/cloop/pkg/auditaction"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -92,7 +93,7 @@ func (a *auditRecorder) sink(ev SessionAudit) {
 	a.events = append(a.events, ev)
 }
 
-func (a *auditRecorder) countOf(event string) int {
+func (a *auditRecorder) countOf(event auditaction.Action) int {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	n := 0
@@ -104,7 +105,7 @@ func (a *auditRecorder) countOf(event string) int {
 	return n
 }
 
-func (a *auditRecorder) last(event string) (SessionAudit, bool) {
+func (a *auditRecorder) last(event auditaction.Action) (SessionAudit, bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	for i := len(a.events) - 1; i >= 0; i-- {

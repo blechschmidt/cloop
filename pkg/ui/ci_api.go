@@ -37,6 +37,7 @@ import (
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/apierror"
+	"github.com/blechschmidt/cloop/pkg/auditaction"
 	"github.com/blechschmidt/cloop/pkg/ciauth"
 	"github.com/blechschmidt/cloop/pkg/claudeproxy"
 	"github.com/blechschmidt/cloop/pkg/config"
@@ -487,7 +488,7 @@ func (s *Server) handleCIRuleCreate(w http.ResponseWriter, r *http.Request) {
 		apierror.WriteError(w, apierror.New(apierror.CodeUnavailable, err.Error()))
 		return
 	}
-	s.auditCIRule(r, "ci.rule.created", rule, "")
+	s.auditCIRule(r, auditaction.ActionCIRuleCreated, rule, "")
 	jsonOK(w, map[string]any{"ok": true, "id": id})
 }
 
@@ -528,7 +529,7 @@ func (s *Server) handleCIRuleUpdate(w http.ResponseWriter, r *http.Request) {
 	// old text would keep spending under a policy that no longer exists. The
 	// pipeline re-federates on its next run at the cost of one request.
 	closed := s.closeCISessionsForRule(id, "rule edited")
-	s.auditCIRule(r, "ci.rule.updated", rule, fmt.Sprintf("%d live sessions revoked", closed))
+	s.auditCIRule(r, auditaction.ActionCIRuleUpdated, rule, fmt.Sprintf("%d live sessions revoked", closed))
 	jsonOK(w, map[string]any{"ok": true, "revoked_sessions": closed})
 }
 
@@ -555,7 +556,7 @@ func (s *Server) handleCIRuleDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	closed := s.closeCISessionsForRule(id, "rule deleted")
-	s.auditCIRule(r, "ci.rule.deleted", ciauth.Rule{ID: id},
+	s.auditCIRule(r, auditaction.ActionCIRuleDeleted, ciauth.Rule{ID: id},
 		fmt.Sprintf("%d live sessions revoked", closed))
 	jsonOK(w, map[string]any{"ok": true, "revoked_sessions": closed})
 }
@@ -734,7 +735,7 @@ func (s *Server) handleCISessionRevoke(w http.ResponseWriter, r *http.Request) {
 		apierror.WriteError(w, apierror.New(apierror.CodeNotFound, "no such session"))
 		return
 	}
-	s.auditCIRule(r, "ci.session.revoked", ciauth.Rule{ID: id}, "revoked by operator")
+	s.auditCIRule(r, auditaction.ActionCISessionRevoked, ciauth.Rule{ID: id}, "revoked by operator")
 	jsonOK(w, map[string]any{"ok": true})
 }
 
@@ -916,7 +917,7 @@ func (s *Server) handleCISettingsSave(w http.ResponseWriter, r *http.Request) {
 		}
 		s.ci.mu.Unlock()
 	}
-	s.auditCIRule(r, "ci.config.updated", ciauth.Rule{},
+	s.auditCIRule(r, auditaction.ActionCIConfigUpdated, ciauth.Rule{},
 		fmt.Sprintf("enabled=%v issuer=%q audience=%q",
 			cfg.UI.CI.Enabled, cfg.UI.CI.Issuer, cfg.UI.CI.Audience))
 	jsonOK(w, s.ciSettings(r))
@@ -1013,7 +1014,7 @@ func (s *Server) recordCIExchange(r *http.Request, row statedb.CIExchangeRow, cl
 }
 
 // auditCIRule records an operator's change to the allowlist.
-func (s *Server) auditCIRule(r *http.Request, eventType string, rule ciauth.Rule, detail string) {
+func (s *Server) auditCIRule(r *http.Request, eventType auditaction.Action, rule ciauth.Rule, detail string) {
 	payload, err := json.Marshal(map[string]any{
 		"rule_id":    rule.ID,
 		"rule_name":  rule.Name,
@@ -1036,7 +1037,7 @@ func (s *Server) auditCIRule(r *http.Request, eventType string, rule ciauth.Rule
 	if err := db.AppendAuditEvent(&statedb.AuditEvent{
 		Timestamp:  time.Now().UTC(),
 		Actor:      s.grantFor(r).subjectLabel(),
-		EventType:  eventType,
+		EventType:  string(eventType),
 		EntityType: "ci_rule",
 		EntityID:   rule.ID,
 		Payload:    string(payload),

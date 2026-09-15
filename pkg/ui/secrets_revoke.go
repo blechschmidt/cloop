@@ -38,6 +38,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/auditaction"
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/remote"
 	"github.com/blechschmidt/cloop/pkg/logger"
@@ -261,7 +262,7 @@ func (s *Server) auditRevokeEvent(action secretbroker.Action, actor, leaseID str
 
 	statedb.AuditSecretDecision(db, statedb.SecretAuditInput{
 		Actor:     actor,
-		EventType: string(action),
+		EventType: auditaction.Action(action),
 		EntityID:  leaseID,
 		Payload:   payload,
 	})

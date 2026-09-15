@@ -91,6 +91,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/apierror"
 	"github.com/blechschmidt/cloop/pkg/apitoken"
+	"github.com/blechschmidt/cloop/pkg/auditaction"
 	"github.com/blechschmidt/cloop/pkg/authz"
 	"github.com/blechschmidt/cloop/pkg/oidcauth"
 	"github.com/blechschmidt/cloop/pkg/pm"
@@ -255,7 +256,7 @@ func (s *Server) handleGlassesLinkCreate(w http.ResponseWriter, r *http.Request)
 		}
 		s.auditTokenEvent(tokenAuditRecord{
 			Actor:     actor,
-			EventType: "api_token.revoked",
+			EventType: auditaction.ActionAPITokenRevoked,
 			TokenID:   prev.Prefix,
 			Extra:     map[string]any{"name": prev.Name, "reason": "glasses_link_rotated"},
 		})
@@ -298,7 +299,7 @@ func (s *Server) handleGlassesLinkCreate(w http.ResponseWriter, r *http.Request)
 
 	s.auditTokenEvent(tokenAuditRecord{
 		Actor:     actor,
-		EventType: "api_token.created",
+		EventType: auditaction.ActionAPITokenCreated,
 		TokenID:   minted.Token.Prefix,
 		Extra: map[string]any{
 			"name":       minted.Token.Name,
@@ -405,7 +406,7 @@ func (s *Server) handleGlassesLinkRevoke(w http.ResponseWriter, r *http.Request)
 		}
 		s.auditTokenEvent(tokenAuditRecord{
 			Actor:     actor,
-			EventType: "api_token.revoked",
+			EventType: auditaction.ActionAPITokenRevoked,
 			TokenID:   tok.Prefix,
 			Extra:     map[string]any{"name": tok.Name, "reason": "glasses_link_revoked"},
 		})

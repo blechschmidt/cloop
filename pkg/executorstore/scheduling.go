@@ -30,6 +30,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/auditaction"
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 )
@@ -38,8 +39,8 @@ import (
 // filter the audit log down to infrastructure changes with one predicate.
 const (
 	AuditEntityExecutor    = "executor"
-	AuditEventStateChange  = "executor.state_change"
-	AuditEventFailover     = "executor.failover"
+	AuditEventStateChange  = auditaction.ActionExecutorStateChange
+	AuditEventFailover     = auditaction.ActionExecutorFailover
 	AuditActorSupervisor   = "supervisor"
 	auditSessionEntityType = "executor_session"
 )
@@ -404,7 +405,7 @@ func (s *Scheduler) ExecutorTransition(t executor.Transition) {
 	_ = s.db.AppendAuditEvent(&statedb.AuditEvent{
 		Timestamp:  t.At,
 		Actor:      s.actor,
-		EventType:  AuditEventStateChange,
+		EventType:  string(AuditEventStateChange),
 		EntityType: AuditEntityExecutor,
 		EntityID:   t.ExecutorID,
 		Payload: statedb.MarshalAuditPayload(map[string]any{
@@ -436,7 +437,7 @@ func (s *Scheduler) ExecutorFailover(ev executor.FailoverEvent) {
 	_ = s.db.AppendAuditEvent(&statedb.AuditEvent{
 		Timestamp:  ev.At,
 		Actor:      s.actor,
-		EventType:  AuditEventFailover,
+		EventType:  string(AuditEventFailover),
 		EntityType: auditSessionEntityType,
 		EntityID:   ev.Session.ID,
 		Payload:    statedb.MarshalAuditPayload(payload),

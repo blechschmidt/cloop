@@ -22,6 +22,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/blechschmidt/cloop/pkg/auditaction"
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/eventlog"
 	"github.com/blechschmidt/cloop/pkg/state"
@@ -245,7 +246,10 @@ func TestEveryAuditRowIsScannedForSecrets(t *testing.T) {
 			Detail: map[string]any{"reason": "routine", "api_key": auditCanary},
 		})
 	}
-	for _, evType := range []string{"secret.mint", "secret.grant", "secret.lease", "secret.revoke"} {
+	for _, evType := range []auditaction.Action{
+		auditaction.ActionSecretMint, auditaction.ActionSecretGrant,
+		auditaction.ActionSecretLease, auditaction.ActionSecretRevoke,
+	} {
 		statedb.AuditSecretDecision(db, statedb.SecretAuditInput{
 			Actor: "alice@example.com", EventType: evType, EntityID: "github-pat",
 			Payload: map[string]any{"password": auditCanary, "decision": "allow"},

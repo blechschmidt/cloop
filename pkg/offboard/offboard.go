@@ -52,6 +52,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/auditaction"
 	"github.com/blechschmidt/cloop/pkg/authz"
 	"github.com/blechschmidt/cloop/pkg/rolestore"
 	"github.com/blechschmidt/cloop/pkg/statedb"
@@ -441,7 +442,7 @@ func Run(o Options) (Report, error) {
 			o.Leases.Release(l.ID)
 			rep.LeasesReleased = append(rep.LeasesReleased, l.ID)
 		}
-		if err := auditSurface(o, plan, "user.offboard_lease", map[string]any{
+		if err := auditSurface(o, plan, auditaction.ActionUserOffboardLease, map[string]any{
 			"count":  len(rep.LeasesReleased),
 			"leases": rep.LeasesReleased,
 		}); err != nil {
@@ -460,7 +461,7 @@ func Run(o Options) (Report, error) {
 			rep.TasksStopped = append(rep.TasksStopped, t)
 		}
 		if len(rep.TasksStopped) > 0 {
-			if err := auditSurface(o, plan, "user.offboard_task", map[string]any{
+			if err := auditSurface(o, plan, auditaction.ActionUserOffboardTask, map[string]any{
 				"count": len(rep.TasksStopped),
 				"tasks": rep.TasksStopped,
 			}); err != nil {
@@ -472,7 +473,7 @@ func Run(o Options) (Report, error) {
 	// 4. Projects: reported only. The event records that a human still owes a
 	//    reassignment, which is the whole reason not to delete them.
 	if len(plan.Projects) > 0 {
-		if err := auditSurface(o, plan, "user.offboard_project", map[string]any{
+		if err := auditSurface(o, plan, auditaction.ActionUserOffboardProject, map[string]any{
 			"count":    len(plan.Projects),
 			"projects": plan.Projects,
 			"action":   "reported_for_reassignment",
@@ -498,7 +499,7 @@ func Run(o Options) (Report, error) {
 // payload, so "what exactly was severed" is still answerable.
 func credentialAuditEvents(plan Plan, o Options, a statedb.OffboardApplied) ([]*statedb.AuditEvent, error) {
 	var evs []*statedb.AuditEvent
-	add := func(eventType string, payload map[string]any) error {
+	add := func(eventType auditaction.Action, payload map[string]any) error {
 		ev, err := newEvent(o, plan, eventType, payload, a.At)
 		if err != nil {
 			return err
@@ -509,7 +510,7 @@ func credentialAuditEvents(plan Plan, o Options, a statedb.OffboardApplied) ([]*
 
 	// The summary comes first so a reviewer reading the chain in order meets
 	// the operation before its parts.
-	if err := add("user.offboard", map[string]any{
+	if err := add(auditaction.ActionUserOffboard, map[string]any{
 		"sessions": len(a.Sessions),
 		"tokens":   len(a.Tokens),
 		"glasses":  len(a.Glasses),
@@ -522,25 +523,25 @@ func credentialAuditEvents(plan Plan, o Options, a statedb.OffboardApplied) ([]*
 		return nil, err
 	}
 	if len(a.Sessions) > 0 {
-		if err := add("user.offboard_session", map[string]any{
+		if err := add(auditaction.ActionUserOffboardSession, map[string]any{
 			"count": len(a.Sessions), "sessions": a.Sessions}); err != nil {
 			return nil, err
 		}
 	}
 	if len(a.Tokens) > 0 {
-		if err := add("user.offboard_token", map[string]any{
+		if err := add(auditaction.ActionUserOffboardToken, map[string]any{
 			"count": len(a.Tokens), "tokens": a.Tokens}); err != nil {
 			return nil, err
 		}
 	}
 	if len(a.Glasses) > 0 {
-		if err := add("user.offboard_glasses", map[string]any{
+		if err := add(auditaction.ActionUserOffboardGlasses, map[string]any{
 			"count": len(a.Glasses), "links": a.Glasses}); err != nil {
 			return nil, err
 		}
 	}
 	if len(a.DenyBindingIDs) > 0 {
-		if err := add("user.offboard_deny", map[string]any{
+		if err := add(auditaction.ActionUserOffboardDeny, map[string]any{
 			"count": len(a.DenyBindingIDs), "bindings": a.DenyBindingIDs,
 			"claims": plan.Denies}); err != nil {
 			return nil, err
@@ -550,7 +551,7 @@ func credentialAuditEvents(plan Plan, o Options, a statedb.OffboardApplied) ([]*
 }
 
 // auditSurface records one of the surfaces severed outside the transaction.
-func auditSurface(o Options, plan Plan, eventType string, payload map[string]any) error {
+func auditSurface(o Options, plan Plan, eventType auditaction.Action, payload map[string]any) error {
 	ev, err := newEvent(o, plan, eventType, payload, o.now())
 	if err != nil {
 		return err
@@ -558,7 +559,7 @@ func auditSurface(o Options, plan Plan, eventType string, payload map[string]any
 	return o.DB.AppendAuditEvent(ev)
 }
 
-func newEvent(o Options, plan Plan, eventType string, payload map[string]any, at time.Time) (*statedb.AuditEvent, error) {
+func newEvent(o Options, plan Plan, eventType auditaction.Action, payload map[string]any, at time.Time) (*statedb.AuditEvent, error) {
 	if payload == nil {
 		payload = map[string]any{}
 	}
@@ -579,7 +580,7 @@ func newEvent(o Options, plan Plan, eventType string, payload map[string]any, at
 	return &statedb.AuditEvent{
 		Timestamp:  at,
 		Actor:      actor,
-		EventType:  eventType,
+		EventType:  string(eventType),
 		EntityType: "user",
 		EntityID:   plan.Target.Key,
 		Payload:    blob,

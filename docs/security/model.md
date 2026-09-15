@@ -945,7 +945,12 @@ Roles are granted by matching a claim from the ID token — `group`, `role`,
 `email` or `sub` — optionally scoped to a project. A static bearer token
 authenticates as `admin` with source `static_token`, which is why it belongs
 only in deployments that have no SSO. Every privileged decision, allow or deny,
-is written to the audit trail (`pkg/ui/authz.go:294`).
+is written to the audit trail as [`authz.granted`](../reference/audit-events.md#authz) or
+[`authz.denied`](../reference/audit-events.md#authz) (`pkg/ui/authz.go:294`). Every action name the
+hub can write is listed in the
+[audit event reference](../reference/audit-events.md), which is generated from the registry the
+emitters reference — so a name cited anywhere in this document is a name the
+code still emits.
 
 ### Asking for access: the request path
 
@@ -1023,7 +1028,7 @@ around the clock look identical from the grant table alone. A lease is issued
 afterwards from the executor handle; a use with no task is a run-scoped lease,
 which is reported as such rather than as a missing value.
 
-Five audit actions cover the lifecycle — `secret.request`,
+Five audit actions cover the lifecycle — [`secret.request`](../reference/audit-events.md#secret),
 `secret.request_approve`, `secret.request_deny`, `secret.request_withdraw`,
 `secret.request_expire` — all on the same hash chain as the grant and lease
 events. Expiry is its own action rather than a flavour of denial because denied
@@ -1108,10 +1113,10 @@ them:**
 
 | Cause | Audit event | Bound |
 | --- | --- | --- |
-| Absolute lifetime reached | `session.expired` (`absolute_ttl`) | `session_ttl_hours`, default 24h |
-| Unused too long | `session.expired` (`idle_timeout`) | `idle_timeout_hours`, default 8h |
-| Signed out, or terminated by an operator | `session.revoked` | immediate |
-| The identity provider refused to renew it | `session.idp_revoked` | `refresh_interval_minutes`, default 15m |
+| Absolute lifetime reached | [`session.expired`](../reference/audit-events.md#session) (`absolute_ttl`) | `session_ttl_hours`, default 24h |
+| Unused too long | [`session.expired`](../reference/audit-events.md#session) (`idle_timeout`) | `idle_timeout_hours`, default 8h |
+| Signed out, or terminated by an operator | [`session.revoked`](../reference/audit-events.md#session) | immediate |
+| The identity provider refused to renew it | [`session.idp_revoked`](../reference/audit-events.md#session) | `refresh_interval_minutes`, default 15m |
 
 A session ending is not the only way a user's authority changes, and the other
 way needs its own bound — see

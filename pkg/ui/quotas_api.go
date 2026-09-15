@@ -47,6 +47,7 @@ import (
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/apierror"
+	"github.com/blechschmidt/cloop/pkg/auditaction"
 	"github.com/blechschmidt/cloop/pkg/authz"
 	"github.com/blechschmidt/cloop/pkg/eventlog"
 	"github.com/blechschmidt/cloop/pkg/executor/remote"
@@ -300,7 +301,7 @@ func (s *Server) auditQuotaDenial(r *http.Request, d *quota.Denial) {
 			path = r.URL.Path
 		}
 	}
-	s.auditQuotaEvent(d.Identity, "quota.denied", string(d.Resource), map[string]any{
+	s.auditQuotaEvent(d.Identity, auditaction.ActionQuotaDenied, string(d.Resource), map[string]any{
 		"limit":     d.Limit,
 		"used":      d.Used,
 		"requested": d.Requested,
@@ -318,7 +319,7 @@ func (s *Server) auditQuotaDenial(r *http.Request, d *quota.Denial) {
 //
 // Best-effort, matching every other emitter: a wedged journal must not turn a
 // refusal into an admission, nor block an admin from editing a quota.
-func (s *Server) auditQuotaEvent(actor, eventType, entityID string, payload map[string]any) {
+func (s *Server) auditQuotaEvent(actor string, eventType auditaction.Action, entityID string, payload map[string]any) {
 	if actor == "" {
 		actor = "anonymous"
 	}
@@ -337,7 +338,7 @@ func (s *Server) auditQuotaEvent(actor, eventType, entityID string, payload map[
 	defer log.Close()
 	if err := log.Append(&eventlog.AuditEvent{
 		Actor:      actor,
-		EventType:  eventType,
+		EventType:  string(eventType),
 		EntityType: "quota",
 		EntityID:   entityID,
 		Payload:    string(blob),
@@ -656,7 +657,7 @@ func (s *Server) handleQuotaSet(w http.ResponseWriter, r *http.Request) {
 		apierror.WriteFromError(w, err)
 		return
 	}
-	s.auditQuotaChange(r, identity, "quota.override_set", limits)
+	s.auditQuotaChange(r, identity, auditaction.ActionQuotaOverrideSet, limits)
 
 	subj := quota.SubjectForIdentity(identity)
 	jsonOK(w, map[string]interface{}{"ok": true, "quota": renderQuotaView(e.ViewFor(subj))})
@@ -685,11 +686,11 @@ func (s *Server) handleQuotaClear(w http.ResponseWriter, r *http.Request) {
 			"no quota override exists for this identity"))
 		return
 	}
-	s.auditQuotaChange(r, identity, "quota.override_cleared", nil)
+	s.auditQuotaChange(r, identity, auditaction.ActionQuotaOverrideCleared, nil)
 	jsonOK(w, map[string]interface{}{"ok": true})
 }
 
-func (s *Server) auditQuotaChange(r *http.Request, identity, event string, limits quota.Limits) {
+func (s *Server) auditQuotaChange(r *http.Request, identity string, event auditaction.Action, limits quota.Limits) {
 	payload := map[string]any{"target": identity}
 	for res, v := range limits {
 		payload[string(res)] = v

@@ -28,6 +28,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/apierror"
 	"github.com/blechschmidt/cloop/pkg/apitoken"
+	"github.com/blechschmidt/cloop/pkg/auditaction"
 	"github.com/blechschmidt/cloop/pkg/authz"
 	"github.com/blechschmidt/cloop/pkg/eventlog"
 	"github.com/blechschmidt/cloop/pkg/logger"
@@ -583,7 +584,7 @@ func (s *Server) auditAuthz(r *http.Request, d authz.Decision, perm authz.Permis
 	defer log.Close()
 	if err := log.Append(&eventlog.AuditEvent{
 		Actor:      actor,
-		EventType:  "authz." + outcome,
+		EventType:  string(auditaction.AuthzOutcome(outcome)),
 		EntityType: "permission",
 		EntityID:   string(perm),
 		Payload:    string(blob),

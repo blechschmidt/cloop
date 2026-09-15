@@ -52,6 +52,7 @@ import (
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/apierror"
+	"github.com/blechschmidt/cloop/pkg/auditaction"
 	"github.com/blechschmidt/cloop/pkg/authz"
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/eventlog"
@@ -445,7 +446,7 @@ func (s *Server) handleSTTSettingsSave(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	s.auditSTTCredential(r, "stt.credential.set")
+	s.auditSTTCredential(r, auditaction.ActionSTTCredentialSet)
 	jsonOK(w, s.hubSTTSettings())
 }
 
@@ -455,7 +456,7 @@ func (s *Server) handleSTTSettingsClear(w http.ResponseWriter, r *http.Request) 
 		jsonErr(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	s.auditSTTCredential(r, "stt.credential.cleared")
+	s.auditSTTCredential(r, auditaction.ActionSTTCredentialCleared)
 	jsonOK(w, s.hubSTTSettings())
 }
 
@@ -508,7 +509,7 @@ func validateSTTKey(key string) error {
 //
 // Best-effort, matching every other emitter here — a wedged journal must not
 // stop an operator fixing their configuration.
-func (s *Server) auditSTTCredential(r *http.Request, eventType string) {
+func (s *Server) auditSTTCredential(r *http.Request, eventType auditaction.Action) {
 	actor := s.auditActor(r)
 	if actor == "" {
 		actor = "anonymous"
@@ -524,7 +525,7 @@ func (s *Server) auditSTTCredential(r *http.Request, eventType string) {
 	defer log.Close()
 	if err := log.Append(&eventlog.AuditEvent{
 		Actor:      actor,
-		EventType:  eventType,
+		EventType:  string(eventType),
 		EntityType: "config",
 		EntityID:   "stt.groq_api_key",
 		Payload:    `{"scope":"hub"}`,

@@ -29,6 +29,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/blechschmidt/cloop/pkg/apitoken"
+	"github.com/blechschmidt/cloop/pkg/auditaction"
 	"github.com/blechschmidt/cloop/pkg/eventlog"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/statedb"
@@ -100,7 +101,7 @@ Examples:
 		if err != nil {
 			return err
 		}
-		appendTokenAuditEvent(workdir, "api_token.created", minted.Token.Prefix, map[string]any{
+		appendTokenAuditEvent(workdir, auditaction.ActionAPITokenCreated, minted.Token.Prefix, map[string]any{
 			"name":          minted.Token.Name,
 			"roles":         minted.Token.Roles,
 			"project_scope": minted.Token.ProjectScope,
@@ -214,7 +215,7 @@ already-revoked token is a no-op.`,
 		if err := mgr.Revoke(args[0]); err != nil {
 			return err
 		}
-		appendTokenAuditEvent(workdir, "api_token.revoked", tok.Prefix, map[string]any{
+		appendTokenAuditEvent(workdir, auditaction.ActionAPITokenRevoked, tok.Prefix, map[string]any{
 			"name":  tok.Name,
 			"roles": tok.Roles,
 			"via":   "cli",
@@ -357,7 +358,7 @@ func currentUser() string {
 // Best-effort, matching the HTTP path: a wedged journal must not make minting
 // a credential fail. The payload never contains the token value — only its
 // public prefix, name, roles, and scope.
-func appendTokenAuditEvent(workdir, eventType, prefix string, payload map[string]any) {
+func appendTokenAuditEvent(workdir string, eventType auditaction.Action, prefix string, payload map[string]any) {
 	if workdir == "" {
 		wd, err := os.Getwd()
 		if err != nil {
@@ -376,7 +377,7 @@ func appendTokenAuditEvent(workdir, eventType, prefix string, payload map[string
 	}
 	_ = log.Append(&eventlog.AuditEvent{
 		Actor:      "cli:" + currentUser(),
-		EventType:  eventType,
+		EventType:  string(eventType),
 		EntityType: "api_token",
 		EntityID:   prefix,
 		Payload:    string(blob),

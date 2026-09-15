@@ -27,6 +27,7 @@ import (
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 
+	"github.com/blechschmidt/cloop/pkg/auditaction"
 	"github.com/blechschmidt/cloop/pkg/oidcauth"
 	"github.com/blechschmidt/cloop/pkg/sessionstore"
 )
@@ -220,7 +221,7 @@ Examples:
 				continue
 			}
 			revoked = append(revoked, rec)
-			if err := auditHubAdmin(db, "session.revoked", "session", rec.ID, reason, map[string]any{
+			if err := auditHubAdmin(db, auditaction.ActionSessionRevoked, "session", rec.ID, reason, map[string]any{
 				"subject":   rec.Identity.Sub,
 				"email":     rec.Identity.Email,
 				"ip":        rec.IP,

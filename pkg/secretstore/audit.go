@@ -1,6 +1,7 @@
 package secretstore
 
 import (
+	"github.com/blechschmidt/cloop/pkg/auditaction"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 )
@@ -102,7 +103,7 @@ func (a *Auditor) Audit(ev secretbroker.Event) {
 
 	statedb.AuditSecretDecision(a.db, statedb.SecretAuditInput{
 		Actor:     actor,
-		EventType: string(ev.Action),
+		EventType: auditaction.Action(ev.Action),
 		EntityID:  entityID,
 		Timestamp: ev.Time,
 		Payload:   payload,

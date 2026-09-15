@@ -1,5 +1,7 @@
 package statedb
 
+import "github.com/blechschmidt/cloop/pkg/auditaction"
+
 // audit_attach.go records interactive sandbox sessions in the tamper-evident
 // trail (Task 20265).
 //
@@ -29,14 +31,16 @@ package statedb
 
 // AttachAuditInput carries one interactive-session lifecycle event.
 type AttachAuditInput struct {
-	// Event is the fully-qualified type: "sandbox.attach.open",
-	// "sandbox.attach.close", or "sandbox.attach.denied".
+	// Event is the fully-qualified action: auditaction.ActionSandboxAttachOpen,
+	// ActionSandboxAttachClose, or ActionSandboxAttachDenied.
 	//
 	// Passed in whole rather than assembled from an action suffix, because
 	// these three are the complete set and a typo should be visible at the
 	// call site rather than produce a plausible-looking new event type that
-	// no retention rule or SIEM filter knows about.
-	Event string
+	// no retention rule or SIEM filter knows about. Typing it as an
+	// auditaction.Action is what turns "should be visible" into "cannot
+	// compile": there is no longer a bare string to get wrong.
+	Event auditaction.Action
 	// Actor is the acting identity — the OIDC subject label, the same
 	// spelling auditAuthz writes, so filtering the trail by person returns a
 	// whole session rather than half of it.
@@ -99,7 +103,7 @@ func AuditAttachSession(d *DB, in AttachAuditInput) {
 	}
 	emit(d, &AuditEvent{
 		Actor:      actor,
-		EventType:  in.Event,
+		EventType:  string(in.Event),
 		EntityType: "sandbox_session",
 		EntityID:   in.SessionID,
 		Payload:    MarshalAuditPayload(payload),

@@ -29,6 +29,7 @@ import (
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 
+	"github.com/blechschmidt/cloop/pkg/auditaction"
 	"github.com/blechschmidt/cloop/pkg/quota"
 	"github.com/blechschmidt/cloop/pkg/quotastore"
 )
@@ -201,7 +202,7 @@ Examples:
 			return fmt.Errorf("invalid limits: %w", err)
 		}
 
-		if err := auditHubAdmin(db, "quota.override_set", "quota", identity, reason, map[string]any{
+		if err := auditHubAdmin(db, auditaction.ActionQuotaOverrideSet, "quota", identity, reason, map[string]any{
 			"identity": identity,
 			"limits":   quotaLimitsPayload(normalized),
 			"unset":    resourceNames(drop),
@@ -286,7 +287,7 @@ covered by nothing returns to ui.quotas.defaults.`,
 		if existing == nil {
 			return fmt.Errorf("%q has no quota override — nothing to clear", identity)
 		}
-		if err := auditHubAdmin(db, "quota.override_cleared", "quota", identity, reason, map[string]any{
+		if err := auditHubAdmin(db, auditaction.ActionQuotaOverrideCleared, "quota", identity, reason, map[string]any{
 			"identity":       identity,
 			"cleared_limits": quotaLimitsPayload(existing),
 		}); err != nil {

@@ -47,6 +47,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/auditaction"
 	"github.com/blechschmidt/cloop/pkg/hublease"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/statedb"
@@ -205,7 +206,7 @@ func requireReason(raw string) (string, error) {
 // unperformed one — it is the same authority change with nothing to review.
 // Callers write the row first and mutate second, so a failure aborts before
 // anything has changed.
-func auditHubAdmin(db *statedb.DB, eventType, entityType, entityID, reason string, payload map[string]any) error {
+func auditHubAdmin(db *statedb.DB, eventType auditaction.Action, entityType, entityID, reason string, payload map[string]any) error {
 	if payload == nil {
 		payload = map[string]any{}
 	}
@@ -223,7 +224,7 @@ func auditHubAdmin(db *statedb.DB, eventType, entityType, entityID, reason strin
 	ev := &statedb.AuditEvent{
 		Timestamp:  time.Now().UTC(),
 		Actor:      operatorActor(),
-		EventType:  eventType,
+		EventType:  string(eventType),
 		EntityType: entityType,
 		EntityID:   entityID,
 		Payload:    string(blob),

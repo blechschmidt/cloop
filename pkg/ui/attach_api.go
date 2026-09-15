@@ -46,6 +46,7 @@ import (
 
 	"nhooyr.io/websocket"
 
+	"github.com/blechschmidt/cloop/pkg/auditaction"
 	"github.com/blechschmidt/cloop/pkg/authz"
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/logger"
@@ -249,7 +250,7 @@ func (s *Server) handleAttachWS(w http.ResponseWriter, r *http.Request) {
 
 	// Recorded before the session opens. An audit written on close is an audit
 	// that a crash — or a caller who forces one — erases.
-	s.auditAttach(r, "sandbox.attach.open", target, sessionID, command, writable, "")
+	s.auditAttach(r, auditaction.ActionSandboxAttachOpen, target, sessionID, command, writable, "")
 
 	req := executor.AttachRequest{
 		HandleID: target.handleID,
@@ -262,7 +263,7 @@ func (s *Server) handleAttachWS(w http.ResponseWriter, r *http.Request) {
 	}
 	conn, err := target.attacher.Attach(r.Context(), req)
 	if err != nil {
-		s.auditAttach(r, "sandbox.attach.denied", target, sessionID, command, writable, err.Error())
+		s.auditAttach(r, auditaction.ActionSandboxAttachDenied, target, sessionID, command, writable, err.Error())
 		jsonErr(w, attachReason(err), attachStatus(err))
 		return
 	}
@@ -275,7 +276,7 @@ func (s *Server) handleAttachWS(w http.ResponseWriter, r *http.Request) {
 	defer ws.CloseNow()
 
 	reason := s.pumpAttachSession(r, ws, conn, target, writable, wantTTY)
-	s.auditAttach(r, "sandbox.attach.close", target, sessionID, command, writable, reason)
+	s.auditAttach(r, auditaction.ActionSandboxAttachClose, target, sessionID, command, writable, reason)
 }
 
 // pumpAttachSession runs the session until either end hangs up, returning why.
@@ -406,13 +407,13 @@ func attachBanner(writable bool) string {
 // stop an operator from reaching a sandbox during an incident. The event is
 // what makes an attach attributable — without it, a shell inside a sandbox is
 // indistinguishable from the agent's own work.
-func (s *Server) auditAttach(r *http.Request, event string, target attachTarget,
+func (s *Server) auditAttach(r *http.Request, event auditaction.Action, target attachTarget,
 	sessionID string, command []string, writable bool, detail string) {
 
 	db, err := s.controlPlaneDB()
 	if err != nil {
 		s.log().Warn(logger.EventAuthz, 0, "audit: open control-plane db for attach event",
-			map[string]interface{}{"error": err.Error(), "event": event})
+			map[string]interface{}{"error": err.Error(), "event": string(event)})
 		return
 	}
 	defer db.Close()
@@ -428,7 +429,7 @@ func (s *Server) auditAttach(r *http.Request, event string, target attachTarget,
 		Writable:   writable,
 		Detail:     detail,
 	})
-	s.broadcastAuditAppend(event)
+	s.broadcastAuditAppend(string(event))
 }
 
 // ── Request parsing ───────────────────────────────────────────────────────

@@ -14,6 +14,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"github.com/blechschmidt/cloop/pkg/auditaction"
 	"sort"
 	"sync"
 	"time"
@@ -198,23 +199,23 @@ func HashSessionID(sessionID string) string {
 // hash-chained trail; they are wire values and must never be renamed.
 const (
 	// AuditSessionCreated records a successful sign-in.
-	AuditSessionCreated = "session.created"
+	AuditSessionCreated = auditaction.ActionSessionCreated
 
 	// AuditSessionExpired records a session the janitor removed because one of
 	// its two clocks ran out. Distinct from a revocation because "nobody
 	// intervened, it simply lapsed" is a different answer to "why is this
 	// person signed out".
-	AuditSessionExpired = "session.expired"
+	AuditSessionExpired = auditaction.ActionSessionExpired
 
 	// AuditSessionRevoked records a deliberate termination: the user signing
 	// out, the user ending every session, or an operator terminating one.
-	AuditSessionRevoked = "session.revoked"
+	AuditSessionRevoked = auditaction.ActionSessionRevoked
 
 	// AuditSessionIdPRevoked records a session terminated because the identity
 	// provider refused to renew it — the user was disabled, consent was
 	// withdrawn, or the IdP forced a sign-out. This is the event that proves
 	// IdP-side revocation actually reached the hub.
-	AuditSessionIdPRevoked = "session.idp_revoked"
+	AuditSessionIdPRevoked = auditaction.ActionSessionIdPRevoked
 
 	// AuditSessionRoleNarrowed records a live session losing authority because
 	// the IdP stopped releasing a group or role it released at sign-in.
@@ -226,7 +227,7 @@ const (
 	// unless it is written down. It is also the event an auditor asks for by
 	// name after an incident: "show me that removing them from the admin group
 	// actually took effect, and when."
-	AuditSessionRoleNarrowed = "session.role_narrowed"
+	AuditSessionRoleNarrowed = auditaction.ActionSessionRoleNarrowed
 
 	// AuditSessionClaimsUnverified records that a renewal could re-assert the
 	// session's claims from neither source: the provider returned no id_token,
@@ -248,7 +249,7 @@ const (
 	//
 	// Before Task 20261 this was the outcome for every provider that omits the
 	// id_token, which is most of them. It is now the exception.
-	AuditSessionClaimsUnverified = "session.claims_unverified"
+	AuditSessionClaimsUnverified = auditaction.ActionSessionClaimsUnverified
 
 	// AuditSessionClaimsRejected records the identity provider refusing to
 	// vouch for a session's claims: the userinfo endpoint answered 401, or
@@ -265,7 +266,7 @@ const (
 	// operator until a later read succeeds. So the ambiguous case costs
 	// privileged actions rather than everybody's session, and — unlike before
 	// — it costs something, which is what gets it noticed and fixed.
-	AuditSessionClaimsRejected = "session.claims_rejected"
+	AuditSessionClaimsRejected = auditaction.ActionSessionClaimsRejected
 
 	// AuditSessionClaimsStale records a privileged operation refused because
 	// the session's claims were older than max_claim_age and could not be
@@ -275,7 +276,7 @@ const (
 	// operator sees a 403 and nothing else, and cannot distinguish "my role
 	// binding is wrong" — which they will go and change, incorrectly — from
 	// "the hub could not reach the IdP", which is a different fix entirely.
-	AuditSessionClaimsStale = "session.claims_stale"
+	AuditSessionClaimsStale = auditaction.ActionSessionClaimsStale
 )
 
 // SessionAudit describes one session lifecycle event.
@@ -283,7 +284,7 @@ const (
 // It carries no credential material by construction: the session id here is
 // the digest, and there is no field a refresh or ID token could be written to.
 type SessionAudit struct {
-	Event     string
+	Event     auditaction.Action
 	SessionID string
 	Subject   string
 	Email     string

@@ -57,6 +57,7 @@ import (
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/apierror"
+	"github.com/blechschmidt/cloop/pkg/auditaction"
 	"github.com/blechschmidt/cloop/pkg/authz"
 	"github.com/blechschmidt/cloop/pkg/egressbroker"
 	"github.com/blechschmidt/cloop/pkg/executor"
@@ -1413,7 +1414,7 @@ func (s *Server) auditLeaseRevoke(r *http.Request, leaseID, executorID, projectI
 
 	statedb.AuditSecretDecision(db, statedb.SecretAuditInput{
 		Actor:     s.auditActor(r),
-		EventType: string(secretbroker.ActionRelease),
+		EventType: auditaction.Action(secretbroker.ActionRelease),
 		EntityID:  leaseID,
 		Payload: map[string]any{
 			"decision":    string(secretbroker.DecisionAllow),
