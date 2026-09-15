@@ -108,13 +108,16 @@ var bundleFiles = []string{
 	// sessions table, and reuses that file's gating helper, so it must load
 	// after 26-sessions.js.
 	"assets/js/31-offboard.js",
+	// CI/CD pipeline federation (Task 20278): the Settings panel that edits
+	// the pipeline allowlist and watches the sessions it mints.
+	"assets/js/32-cicd.js",
 	// Last, and it closes the IIFE 00-core.js opened. A fragment appended
 	// after the close lands at global scope, where none of the shared helpers
 	// are visible — see TestDashboard_MainIIFEClosesInLastFragment. This is
 	// why it keeps being renumbered as panels are added: the list must stay in
 	// filename order, so a new fragment before the closer has to take a number
 	// below it.
-	"assets/js/32-glasses.js",
+	"assets/js/33-glasses.js",
 }
 
 // Cache-Control values. Hashed asset URLs change whenever their bytes change,

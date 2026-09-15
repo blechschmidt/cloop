@@ -51,13 +51,13 @@ The dashboard and everything an integrator can drive: projects, tasks, runs,
 the executor fleet, secrets and grants, audit, and the display-glasses surface.
 Generated from `routeTable()` in `pkg/ui/routes.go`.
 
-164 endpoints, by the permission each one requires:
+177 endpoints, by the permission each one requires:
 
 | Permission | Endpoints |
 |------------|-----------|
-| `public` (no permission) | 22 |
+| `public` (no permission) | 25 |
 | `audit.read` | 5 |
-| `config.write` | 15 |
+| `config.write` | 16 |
 | `executor.manage` | 8 |
 | `executor.read` | 2 |
 | `project.read` | 46 |
@@ -65,10 +65,10 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 | `run.start` | 3 |
 | `run.stop` | 2 |
 | `sandbox.attach` | 2 |
-| `secret.grant` | 4 |
+| `secret.grant` | 12 |
 | `secret.own` | 6 |
 | `secret.request` | 4 |
-| `secret.revoke` | 1 |
+| `secret.revoke` | 2 |
 | `session.admin` | 2 |
 | `task.mutate` | 26 |
 | `token.admin` | 3 |
@@ -87,6 +87,19 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 | POST | `/api/chat` | `task.mutate` | project |
 | GET | `/api/chat/history` | `project.read` | project |
 | POST | `/api/chat/plan` | `task.mutate` | project |
+| GET | `/api/ci/anthropic/` *(subtree)* | `public` | global |
+| POST | `/api/ci/anthropic/` *(subtree)* | `public` | global |
+| GET | `/api/ci/config` | `secret.grant` | global |
+| PUT | `/api/ci/config` | `config.write` | global |
+| GET | `/api/ci/exchanges` | `secret.grant` | global |
+| GET | `/api/ci/rules` | `secret.grant` | global |
+| POST | `/api/ci/rules` | `secret.grant` | global |
+| POST | `/api/ci/rules/test` | `secret.grant` | global |
+| PUT | `/api/ci/rules/{id}` | `secret.grant` | global |
+| DELETE | `/api/ci/rules/{id}` | `secret.grant` | global |
+| GET | `/api/ci/sessions` | `secret.grant` | global |
+| DELETE | `/api/ci/sessions/{id}` | `secret.revoke` | global |
+| POST | `/api/ci/token` | `public` | global |
 | GET | `/api/claude-usage` | `project.read` | global |
 | GET | `/api/claudecode-limits` | `project.read` | project |
 | PUT | `/api/claudecode-limits` | `config.write` | project |

@@ -1297,6 +1297,128 @@ type UIConfig struct {
 	// Telemetry governs collection of browser-side diagnostic trails.
 	// On by default; see TelemetryConfig.
 	Telemetry TelemetryConfig `yaml:"telemetry,omitempty"`
+
+	// CI federates CI/CD pipeline OIDC identities and relays their Anthropic
+	// calls. Disabled by default; see CIConfig.
+	CI CIConfig `yaml:"ci,omitempty"`
+}
+
+// CIConfig turns a cloop hub into an OIDC relying party for CI/CD pipelines,
+// and into an Anthropic API proxy for the ones it trusts (Task 20278).
+//
+// With it on, a GitHub Actions job exchanges its OIDC token at
+// POST /api/ci/token for a short-lived session, then points
+// ANTHROPIC_BASE_URL at this hub and runs Claude Code. The hub's Anthropic
+// credential never reaches the runner.
+//
+// Which pipelines are trusted is *not* configured here: that lives in the
+// database, editable from Settings → CI/CD, because an allowlist is edited far
+// more often than a deployment is reconfigured and because every edit should
+// leave an audit row. What lives here is the deployment's shape.
+type CIConfig struct {
+	// Enabled turns CI federation on. Default false: with it off the
+	// exchange and proxy routes refuse, and no pipeline can reach this hub
+	// whatever rules are stored.
+	Enabled bool `yaml:"enabled,omitempty"`
+
+	// Issuer is the pipeline platform's OIDC issuer. Empty uses GitHub
+	// Actions (https://token.actions.githubusercontent.com). Any issuer that
+	// publishes a standard discovery document and an RS256 or ES256 key set
+	// works; the claim names rules match on are GitHub's, so another forge
+	// needs rules written with `condition`.
+	Issuer string `yaml:"issuer,omitempty"`
+
+	// Audience is the `aud` a pipeline's token must carry. Empty uses
+	// "cloop". Set a distinct value per hub if you run more than one: it is
+	// not a security boundary on its own — a workflow may request any
+	// audience — but it stops a token minted for one hub being accepted by
+	// another that trusts the same repositories.
+	Audience string `yaml:"audience,omitempty"`
+
+	// ClockSkewSeconds tolerated on the token's exp/iat/nbf. Zero uses 60;
+	// values are clamped to 300. These tokens live minutes, so a generous
+	// skew is a meaningful extension of their life.
+	ClockSkewSeconds int `yaml:"clock_skew_seconds,omitempty"`
+
+	// DefaultModels is the model allowlist applied to a rule that names
+	// none. Empty uses DefaultCIModels. It is never "every model": a rule
+	// with no models and a hub with no default mints nothing.
+	DefaultModels []string `yaml:"default_models,omitempty"`
+
+	// UpstreamBaseURL overrides the Anthropic API endpoint, for a
+	// deployment that already fronts it with a gateway. Empty uses
+	// https://api.anthropic.com.
+	UpstreamBaseURL string `yaml:"upstream_base_url,omitempty"`
+
+	// UpstreamAuthToken relays with an OAuth bearer instead of an API key.
+	// Leave empty to use the hub's anthropic.api_key, which is what nearly
+	// every deployment wants: one credential, configured once, in the place
+	// the rest of cloop already looks for it.
+	UpstreamAuthToken string `yaml:"upstream_auth_token,omitempty"`
+
+	// ExchangeKeepRecords bounds the stored exchange log, which is the
+	// operator's debugging surface for "my pipeline says 401". Zero uses
+	// CIExchangeKeepDefault.
+	ExchangeKeepRecords int `yaml:"exchange_keep_records,omitempty"`
+}
+
+// CI federation bounds and defaults.
+const (
+	// CIClockSkewDefault and CIClockSkewMax bound CIConfig.ClockSkewSeconds.
+	CIClockSkewDefault = 60
+	CIClockSkewMax     = 300
+
+	// CIExchangeKeepDefault and CIExchangeKeepMax bound the exchange log.
+	CIExchangeKeepDefault = 200
+	CIExchangeKeepMax     = 500
+)
+
+// DefaultCIModels is the model allowlist a rule inherits when it names none.
+//
+// It is a conservative default rather than a permissive one: a pipeline that
+// has been lent the hub's credential should reach the models an agent harness
+// actually needs, and an operator who wants the largest model available to CI
+// should have to say so. The patterns are globs so a point release does not
+// silently lock every pipeline out.
+var DefaultCIModels = []string{
+	"claude-sonnet-*",
+	"claude-haiku-*",
+}
+
+// Models returns the effective default model allowlist.
+func (c CIConfig) Models() []string {
+	out := make([]string, 0, len(c.DefaultModels))
+	for _, m := range c.DefaultModels {
+		if s := strings.TrimSpace(m); s != "" {
+			out = append(out, s)
+		}
+	}
+	if len(out) == 0 {
+		return append([]string(nil), DefaultCIModels...)
+	}
+	return out
+}
+
+// ClockSkew returns the clamped skew tolerance in seconds.
+func (c CIConfig) ClockSkew() int {
+	if c.ClockSkewSeconds <= 0 {
+		return CIClockSkewDefault
+	}
+	if c.ClockSkewSeconds > CIClockSkewMax {
+		return CIClockSkewMax
+	}
+	return c.ClockSkewSeconds
+}
+
+// ExchangeKeep returns the clamped exchange-log bound.
+func (c CIConfig) ExchangeKeep() int {
+	if c.ExchangeKeepRecords <= 0 {
+		return CIExchangeKeepDefault
+	}
+	if c.ExchangeKeepRecords > CIExchangeKeepMax {
+		return CIExchangeKeepMax
+	}
+	return c.ExchangeKeepRecords
 }
 
 // TelemetryConfig is the switch for browser telemetry collection (Task 20251).

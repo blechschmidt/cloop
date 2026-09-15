@@ -495,6 +495,14 @@ type Server struct {
 	// timeout and fail CI. Tests point this at a stub.
 	SelfExe string
 
+	// ci holds the CI/CD federation service — the OIDC verifier, the session
+	// registry and the Anthropic relay (Task 20278). It is per-Server rather
+	// than a package global, unlike the git and Kubernetes monitors, because
+	// nothing outside a request handler reaches it and a global would be one
+	// more thing a pkg/ui test mutates for every other test in the package.
+	// The zero value is "not built yet"; see ci.go.
+	ci ciState
+
 	mu      sync.Mutex
 	clients map[*sseClient]struct{}
 	lastMod time.Time
@@ -1291,6 +1299,11 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	// audit trail records why they ended rather than leaving rows that simply
 	// stop. Nil-safe when none is configured.
 	activeGitProxy().Close()
+	// Same for the CI relay (Task 20278): revoke every federated session so
+	// the audit trail records a close rather than a gap, and stop the reaper
+	// goroutine. A session that outlived the process able to authenticate it
+	// is unusable anyway; what matters is that the record says so.
+	s.closeCI()
 	// Kill any parked `claude auth login` children. Each one is a subprocess
 	// blocked on stdin waiting for a pasted code, so on a multi-user hub an
 	// unclean stop could otherwise leave one per half-finished login.
@@ -1549,17 +1562,29 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// servedBeforeAuth is the complete set of requests answered without a
-// credential: the display-glasses shell and the icons. It exists so that "what
-// can an unauthenticated caller reach" has one answer to read rather than a
-// growing chain of conditions inside authMiddleware.
+// servedBeforeAuth is the complete set of requests answered without a *hub*
+// credential. It exists so that "what can an unauthenticated caller reach" has
+// one answer to read rather than a growing chain of conditions inside
+// authMiddleware.
 //
-// Both carve-outs share a justification — a static document or image compiled
-// into the binary, identical on every deployment, carrying no project, tenant
-// or user data — and both are narrow in the same way: exact paths, read-only
-// verbs, failing closed on anything else.
+// There are two kinds of entry here, and they are exempt for opposite reasons.
+//
+// The display-glasses shell and the icons carry no credential at all: a static
+// document or image compiled into the binary, identical on every deployment,
+// carrying no project, tenant or user data. They are narrow in the obvious
+// way — exact paths, read-only verbs, failing closed on anything else.
+//
+// The CI federation endpoints (Task 20278) are the other kind. They are not
+// unauthenticated; they authenticate against something this middleware cannot
+// check. A GitHub Actions runner presents a forge-signed OIDC assertion, and
+// then a session token the hub minted for it, and has no cloop session to
+// present because the whole point is that it never holds one. Sending them
+// through authMiddleware would mean every pipeline also needed the hub's
+// static token or an OIDC login — which is the long-lived shared credential
+// the feature exists to remove. They refuse outright when ui.ci.enabled is
+// false, and the rate limiter still applies: it sits outside this middleware.
 func servedBeforeAuth(r *http.Request) bool {
-	return isPublicShell(r) || isPublicIcon(r)
+	return isPublicShell(r) || isPublicIcon(r) || isCIFederationEndpoint(r)
 }
 
 // isPublicShell reports whether the request is for the display-glasses

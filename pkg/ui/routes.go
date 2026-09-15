@@ -694,6 +694,43 @@ func (s *Server) routeTable() []routeSpec {
 		{Pattern: "POST /api/grant-requests/{id}/deny", Handler: s.handleGrantRequestDeny, Perm: secGrant, Scope: scopeGlobal},
 		{Pattern: "GET /api/grant-requests/{id}/uses", Handler: s.handleGrantRequestUses, Perm: secGrant, Scope: scopeGlobal},
 
+		// ── CI/CD federation (Task 20278) ────────────────────────────
+		// Two of these are public and the rest are not, and the split is
+		// the whole design.
+		//
+		// The exchange and the relay are reached by a GitHub Actions
+		// runner, which has no cloop session and never will: its credential
+		// is a forge-signed OIDC assertion, and then a session token this
+		// hub minted for it. Declaring them public here is not a gap — it
+		// says the route gate has nothing to add, because the handler does
+		// the authenticating. servedBeforeAuth carries the same two paths
+		// past the hub's own auth for the same reason, and both refuse
+		// outright when ui.ci.enabled is false.
+		//
+		// Everything else is an operator editing a policy that hands out
+		// the hub's Anthropic credential, which is the authority secGrant
+		// already names: writing a rule is materially minting a credential
+		// for a repository. Reading the allowlist takes the same permission
+		// rather than a lower one, because the list of repositories a hub
+		// will act for is itself a map of what to compromise to reach it.
+		{Pattern: "POST /api/ci/token", Handler: s.handleCIExchange, Perm: public, Scope: scopeGlobal},
+		// A subtree pattern, because the path is whichever Anthropic endpoint
+		// the SDK inside the runner chose to call. The verbs listed are the
+		// ones the relay's own allowlist admits (pkg/claudeproxy/policy.go);
+		// anything else is refused by the mux before the handler runs, which
+		// is one fewer place the API surface is decided.
+		{Pattern: "/api/ci/anthropic/", Handler: s.handleCIRelay, Methods: []string{"GET", "POST"}, Perm: public, Scope: scopeGlobal},
+		{Pattern: "GET /api/ci/config", Handler: s.handleCISettings, Perm: secGrant, Scope: scopeGlobal},
+		{Pattern: "PUT /api/ci/config", Handler: s.handleCISettingsSave, Perm: cfgWrite, Scope: scopeGlobal},
+		{Pattern: "GET /api/ci/rules", Handler: s.handleCIRulesList, Perm: secGrant, Scope: scopeGlobal},
+		{Pattern: "POST /api/ci/rules", Handler: s.handleCIRuleCreate, Perm: secGrant, Scope: scopeGlobal},
+		{Pattern: "POST /api/ci/rules/test", Handler: s.handleCIRuleTest, Perm: secGrant, Scope: scopeGlobal},
+		{Pattern: "PUT /api/ci/rules/{id}", Handler: s.handleCIRuleUpdate, Perm: secGrant, Scope: scopeGlobal},
+		{Pattern: "DELETE /api/ci/rules/{id}", Handler: s.handleCIRuleDelete, Perm: secGrant, Scope: scopeGlobal},
+		{Pattern: "GET /api/ci/sessions", Handler: s.handleCISessionsList, Perm: secGrant, Scope: scopeGlobal},
+		{Pattern: "DELETE /api/ci/sessions/{id}", Handler: s.handleCISessionRevoke, Perm: secRevoke, Scope: scopeGlobal},
+		{Pattern: "GET /api/ci/exchanges", Handler: s.handleCIExchanges, Perm: secGrant, Scope: scopeGlobal},
+
 		// ── API tokens ───────────────────────────────────────────────
 		// Global and admin-only. Minting a token provisions an identity
 		// that acts without a browser or an IdP session, which is the same

@@ -131,6 +131,16 @@ var (
 	// expected outcome — binding ids are only ever obtained by listing the
 	// table — so callers should surface it instead of absorbing it.
 	ErrRoleBindingNotFound = errors.New("statedb: role binding not found")
+
+	// ErrCIPipelineRuleNotFound indicates no ci_pipeline_rules row carries the
+	// requested id (Task 20278).
+	//
+	// Surfaced rather than absorbed. A rule id is only ever obtained from a
+	// listing, so not finding one means the operator's view is stale — most
+	// likely because a second maintainer deleted the same rule concurrently —
+	// and a PUT that silently recreated it would resurrect an allowlist entry
+	// somebody had just decided to remove.
+	ErrCIPipelineRuleNotFound = errors.New("statedb: ci pipeline rule not found")
 )
 
 // classifyDriverErr inspects a raw error returned by the modernc.org/sqlite

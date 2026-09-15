@@ -165,6 +165,13 @@ var attachAPISource string
 //go:embed requests_api.go
 var requestsAPISource string
 
+// ciAPISource is pkg/ui/ci_api.go, the CI/CD federation endpoints (Task
+// 20278): the OIDC exchange, the Anthropic relay, and the RBAC-gated
+// allowlist CRUD behind the Settings panel.
+//
+//go:embed ci_api.go
+var ciAPISource string
+
 // routesSource is pkg/ui/routes.go, which holds the declarative route table
 // (Task 20164). Routes moved out of server.go when registration started
 // carrying a required permission, so the architectural tests that scan for
@@ -187,7 +194,8 @@ func allUISources() string {
 		"\n" + versionAPISource + "\n" + telemetryAPISource +
 		"\n" + openAPIAPISource + "\n" + costAPISource +
 		"\n" + attachAPISource +
-		"\n" + requestsAPISource
+		"\n" + requestsAPISource +
+		"\n" + ciAPISource
 }
 
 // dashboardSource is the whole dashboard front end — the rendered index.html

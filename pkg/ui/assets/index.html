@@ -1140,6 +1140,162 @@
         </div>
 
         <!--
+          CI/CD pipeline federation (Task 20278). Hub-wide, and gated on
+          secret.grant rather than config.write: a rule here decides which
+          GitHub repositories may spend this hub's Anthropic credential, which
+          is materially the same authority as minting one for them.
+        -->
+        <div class="settings-section" id="ciPanel" data-global-perm="secret.grant" data-perm-hide>
+          <h3>CI/CD pipelines <span id="ciStatus"></span></h3>
+          <p style="font-size:12px;color:var(--muted);margin-bottom:12px">
+            Let a GitHub Actions job run Claude Code without a long-lived API key in a repository
+            secret. The job proves who it is with a short-lived OIDC token, the hub checks it against
+            the allowlist below, and hands back a session that relays through this hub. The hub's
+            Anthropic credential never reaches the runner, and every call it makes is metered and
+            revocable from here.
+          </p>
+          <label style="display:flex;align-items:center;gap:8px;font-size:13px;margin-bottom:12px">
+            <input type="checkbox" id="ciEnabled">
+            Accept OIDC federation from CI/CD pipelines
+          </label>
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label" for="ciAudience">Token audience</label>
+              <input class="form-input" id="ciAudience" placeholder="cloop">
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="ciIssuer">Issuer</label>
+              <input class="form-input" id="ciIssuer" placeholder="https://token.actions.githubusercontent.com">
+            </div>
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="ciDefaultModels">Default model allowlist (comma separated globs)</label>
+            <input class="form-input" id="ciDefaultModels" placeholder="claude-sonnet-*, claude-haiku-*">
+          </div>
+          <button class="btn settings-save" onclick="saveCISettings()">Save</button>
+          <div id="ciStatusNote" style="font-size:12px;color:var(--muted);margin-top:10px"></div>
+
+          <h4 style="margin-top:20px">Allowlisted pipelines</h4>
+          <p style="font-size:12px;color:var(--muted);margin-bottom:8px">
+            First match wins, in creation order. A rule must name a repository — either with a
+            pattern whose owner is literal, or with a condition that pins
+            <code>assertion.repository</code>.
+          </p>
+          <table class="data-table">
+            <thead><tr><th>Rule</th><th>State</th><th>Models</th><th>Budget</th><th>Last match</th><th></th></tr></thead>
+            <tbody id="ciRulesBody"></tbody>
+          </table>
+          <div id="ciRulesEmpty" class="muted" style="font-size:12px;margin:8px 0"></div>
+          <button class="btn" onclick="ciNewRule()">Add pipeline rule</button>
+
+          <div id="ciRuleForm" style="display:none;margin-top:16px;padding:12px;border:1px solid var(--border);border-radius:6px">
+            <h4 id="ciRuleFormTitle">Add pipeline rule</h4>
+            <div class="form-row">
+              <div class="form-group">
+                <label class="form-label" for="ciRuleName">Name</label>
+                <input class="form-input" id="ciRuleName" placeholder="acme/tool releases">
+              </div>
+              <div class="form-group">
+                <label class="form-label" for="ciRuleRepo">Repository (owner must be literal)</label>
+                <input class="form-input" id="ciRuleRepo" placeholder="acme/tool or acme/*">
+              </div>
+            </div>
+            <div class="form-row">
+              <div class="form-group">
+                <label class="form-label" for="ciRuleRef">Ref</label>
+                <input class="form-input" id="ciRuleRef" placeholder="refs/heads/main or refs/heads/**">
+              </div>
+              <div class="form-group">
+                <label class="form-label" for="ciRuleWorkflow">Workflow</label>
+                <input class="form-input" id="ciRuleWorkflow" placeholder="release, or the .yml path">
+              </div>
+            </div>
+            <div class="form-row">
+              <div class="form-group">
+                <label class="form-label" for="ciRuleEnv">Environment</label>
+                <input class="form-input" id="ciRuleEnv" placeholder="production">
+              </div>
+              <div class="form-group">
+                <label class="form-label" for="ciRuleActor">Actor</label>
+                <input class="form-input" id="ciRuleActor" placeholder="dana">
+              </div>
+              <div class="form-group">
+                <label class="form-label" for="ciRuleEvent">Event</label>
+                <input class="form-input" id="ciRuleEvent" placeholder="push">
+              </div>
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="ciRuleCondition">Condition (CEL over the token claims)</label>
+              <input class="form-input" id="ciRuleCondition" style="font-family:monospace;font-size:12px"
+                     placeholder='assertion.repository == "acme/tool" &amp;&amp; assertion.ref.startsWith("refs/heads/release/")'>
+              <p style="font-size:11px;color:var(--muted);margin-top:4px">
+                A strict subset: literals, <code>==</code>, <code>!=</code>, <code>in</code>,
+                <code>&amp;&amp;</code>, <code>||</code>, <code>!</code>, and
+                <code>startsWith</code> / <code>endsWith</code> / <code>contains</code> /
+                <code>matches</code>. Anything else is refused when you save, not when a
+                pipeline is denied.
+              </p>
+            </div>
+            <div class="form-row">
+              <div class="form-group">
+                <label class="form-label" for="ciRuleModels">Models (blank inherits the default)</label>
+                <input class="form-input" id="ciRuleModels" placeholder="claude-sonnet-*">
+              </div>
+              <div class="form-group">
+                <label class="form-label" for="ciRuleProject">Project (optional)</label>
+                <input class="form-input" id="ciRuleProject" placeholder="tool">
+              </div>
+            </div>
+            <div class="form-row">
+              <div class="form-group">
+                <label class="form-label" for="ciRuleMaxRequests">Max requests</label>
+                <input class="form-input" id="ciRuleMaxRequests" type="number" min="0" placeholder="500">
+              </div>
+              <div class="form-group">
+                <label class="form-label" for="ciRuleMaxOutput">Max output tokens</label>
+                <input class="form-input" id="ciRuleMaxOutput" type="number" min="0" placeholder="32000">
+              </div>
+              <div class="form-group">
+                <label class="form-label" for="ciRuleTTL">Session TTL (minutes)</label>
+                <input class="form-input" id="ciRuleTTL" type="number" min="1" placeholder="60">
+              </div>
+            </div>
+            <label style="display:flex;align-items:center;gap:8px;font-size:12px;margin-bottom:10px">
+              <input type="checkbox" id="ciRuleEnabled" checked>
+              Enabled
+            </label>
+            <div style="display:flex;gap:8px;flex-wrap:wrap">
+              <button class="btn primary" onclick="ciSaveRule()">Save rule</button>
+              <button class="btn" onclick="ciTestRule()">Test</button>
+              <button class="btn" onclick="ciCancelRule()">Cancel</button>
+            </div>
+            <div id="ciRuleTestResult" style="font-size:12px;margin-top:10px"></div>
+          </div>
+
+          <h4 style="margin-top:20px">Live sessions</h4>
+          <table class="data-table">
+            <thead><tr><th>Pipeline</th><th>Rule</th><th>Spend</th><th>Remaining</th><th></th></tr></thead>
+            <tbody id="ciSessionsBody"></tbody>
+          </table>
+          <div id="ciSessionsEmpty" class="muted" style="font-size:12px;margin:8px 0"></div>
+
+          <h4 style="margin-top:20px">Recent exchanges</h4>
+          <p style="font-size:12px;color:var(--muted);margin-bottom:8px">
+            Every federation attempt, accepted or refused. This is where a pipeline reporting
+            <code>403</code> is diagnosed — the refusal it sees carries no detail on purpose.
+          </p>
+          <table class="data-table">
+            <thead><tr><th>When</th><th>Pipeline</th><th>Verdict</th><th>Rule</th><th>Detail</th></tr></thead>
+            <tbody id="ciExchangesBody"></tbody>
+          </table>
+          <div id="ciExchangesEmpty" class="muted" style="font-size:12px;margin:8px 0"></div>
+
+          <h4 style="margin-top:20px">Workflow snippet</h4>
+          <pre id="ciSnippet" style="font-size:11px;background:var(--code-bg,#1e1e1e);color:var(--code-fg,#ddd);padding:10px;border-radius:6px;overflow:auto;max-height:300px"></pre>
+          <button class="btn" onclick="copyCISnippet()">Copy snippet</button>
+        </div>
+
+        <!--
           Display glasses (Task 20194). Per-user, not per-project: the link is
           a credential belonging to whoever is signed in, and it reaches every
           project that user can already see. Lives in Settings rather than in

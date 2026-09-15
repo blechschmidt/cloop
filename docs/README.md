@@ -117,6 +117,11 @@ Five pages in order, indexed at
   a running task, and for the workspace fetch that happens before one), a
   kubeconfig, a registry login, environment variables, and an Internet egress
   lease, with TTLs, constraints, and real command output.
+- **[Running an agent in CI](guides/ci-pipelines.md)** — letting a GitHub
+  Actions job use Claude through the hub instead of through an `ANTHROPIC_API_KEY`
+  repository secret: OIDC federation, the pipeline allowlist and its CEL
+  conditions, the workflow step to paste, what a session may do, and how to
+  diagnose a refusal from the exchange log.
 - **[Proving a commit reproduces](guides/reproduce.md)** — `cloop task
   reproduce`: re-running a task in a fresh sandbox and comparing the commit it
   returns against the original. The four verdicts, why equivalence is gated on

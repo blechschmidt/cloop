@@ -102,6 +102,24 @@ var publicRouteAllowlist = map[string]string{
 	"GET /icon.svg":             "static icon, see the note above",
 	"GET /manifest.webmanifest": "static web app manifest naming the icons above; no project data",
 
+	// CI/CD federation (Task 20278). These two are unauthenticated in the
+	// sense this list means — no hub permission gates them — but they are not
+	// unauthenticated in the sense that matters: each one authenticates
+	// against a credential the route gate has no way to check, and does so
+	// before it acts.
+	"POST /api/ci/token": "the OIDC exchange. The caller is a CI runner presenting a forge-signed " +
+		"assertion; it holds no cloop credential and the whole point is that it never will. " +
+		"pkg/ciauth verifies the signature against the issuer's published keys, pins iss/aud/exp " +
+		"and refuses a replayed jti, then matches the claims against an allowlist an operator " +
+		"wrote — so trust requires both the forge's signature and a stored rule, and a valid " +
+		"token from an unlisted repository gets nothing. Refuses outright when ui.ci.enabled is " +
+		"false, and the per-IP rate limiter still applies",
+	"/api/ci/anthropic/": "the Anthropic relay. Authenticated by the session token minted above, " +
+		"compared in constant time against a hash the hub holds (pkg/claudeproxy/session.go); an " +
+		"unknown, expired or revoked token is refused identically so probing learns nothing. The " +
+		"session's policy bounds which models, how many requests and how large a body, and the " +
+		"hub's own Anthropic credential is attached only after that policy has returned nil",
+
 	"GET /api/glasses/link": "reports whether the caller holds a display-glasses link, never the link " +
 		"itself (the secret is not stored). Scoped by construction: the owner is read off the session " +
 		"and no parameter names a user. glassesSelfService additionally refuses any caller presenting " +
