@@ -2257,10 +2257,20 @@
                 style="font-family:var(--mono, monospace);font-size:12px" placeholder="ghp_…"></textarea>
       <div class="sec-hint" id="secretPayloadHint" style="margin-top:6px"></div>
     </div>
+    <div class="form-group" id="secretOwnershipGroup">
+      <label class="form-label">Who it belongs to</label>
+      <label class="sec-own-opt"><input type="radio" name="secretOwnership" id="secretOwnPersonal" value="personal" checked>
+        <span><strong>Mine</strong> &mdash; only you can see, use or delete it. Use this for your own GitHub token,
+        kubeconfig or registry login.</span></label>
+      <label class="sec-own-opt" id="secretOwnSharedRow" data-global-perm="secret.grant" data-perm-hide>
+        <input type="radio" name="secretOwnership" id="secretOwnShared" value="shared">
+        <span><strong>Shared</strong> &mdash; the organisation's credential. Every maintainer can see it and grant it
+        to any project.</span></label>
+    </div>
     <div id="secretError" style="font-size:12px;color:var(--red);margin-bottom:8px;display:none"></div>
     <div class="modal-footer">
       <button class="btn" onclick="closeSecretModal()">Cancel</button>
-      <button class="btn primary" id="secretSubmitBtn" data-global-perm="secret.grant" onclick="submitSecret()">Store secret</button>
+      <button class="btn primary" id="secretSubmitBtn" data-global-perm="secret.own" onclick="submitSecret()">Store secret</button>
     </div>
   </div>
 </div>

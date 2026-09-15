@@ -226,6 +226,32 @@ const (
 	// same person.
 	PermSecretRequest Permission = "secret.request"
 
+	// PermSecretOwn is the right to keep credentials of one's own on the hub:
+	// to mint a personal secret, list the personal secrets one owns, grant one
+	// to one's own work, and destroy it (Task 20275).
+	//
+	// Granted from operator up, alongside PermSecretRequest and for a related
+	// reason: what it authorises is not reach into the organisation's
+	// credentials but the ability to bring your own. The secrets it creates
+	// carry an owner, and the broker refuses every attempt to list, grant or
+	// delete one from any identity but that owner — so holding this permission
+	// widens nobody's access to anything that already exists.
+	//
+	// It is emphatically not a weaker PermSecretGrant, and the distinction is
+	// the one that makes the pair safe to hold together. secret.grant is
+	// authority over the organisation's credentials — a maintainer deciding
+	// that the fleet's deploy key may reach a repository. secret.own is
+	// custody of your own, and the blast radius of misusing it is your own
+	// account at GitHub. Merging them would mean either that a developer
+	// cannot store a personal PAT without also being handed the fleet's, or
+	// that the fleet's credentials become operator-reachable; both are worse
+	// than a second permission.
+	//
+	// Not granted to viewer, on the same ground as secret.request: a viewer
+	// cannot start a run, so a credential stored under their name is one
+	// nothing they can do would ever spend.
+	PermSecretOwn Permission = "secret.own"
+
 	// PermViewPrefs is the right to change one's own dashboard presentation
 	// — currently, which projects to hide from the project list.
 	//
@@ -277,6 +303,7 @@ var AllPermissions = []Permission{
 	PermSandboxAttach,
 	PermSandboxAttachWrite,
 	PermSecretRequest,
+	PermSecretOwn,
 }
 
 // Valid reports whether p is a known permission. PermPublic is not a
@@ -349,12 +376,12 @@ var rolePermissions = map[Role][]Permission{
 	RoleOperator: {
 		PermProjectRead, PermExecutorRead, PermViewPrefs,
 		PermRunStart, PermRunStop, PermTaskMutate,
-		PermSecretRequest,
+		PermSecretRequest, PermSecretOwn,
 	},
 	RoleMaintainer: {
 		PermProjectRead, PermExecutorRead, PermViewPrefs,
 		PermRunStart, PermRunStop, PermTaskMutate,
-		PermSecretRequest,
+		PermSecretRequest, PermSecretOwn,
 		PermProjectWrite, PermConfigWrite, PermSecretGrant, PermSecretRevoke,
 	},
 	RoleAdmin: AllPermissions,

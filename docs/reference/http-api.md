@@ -65,9 +65,10 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 | `run.start` | 3 |
 | `run.stop` | 2 |
 | `sandbox.attach` | 2 |
-| `secret.grant` | 8 |
+| `secret.grant` | 4 |
+| `secret.own` | 6 |
 | `secret.request` | 4 |
-| `secret.revoke` | 3 |
+| `secret.revoke` | 1 |
 | `session.admin` | 2 |
 | `task.mutate` | 26 |
 | `token.admin` | 3 |
@@ -133,9 +134,9 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 | POST | `/api/grant-requests/{id}/deny` | `secret.grant` | global |
 | GET | `/api/grant-requests/{id}/uses` | `secret.grant` | global |
 | POST | `/api/grant-requests/{id}/withdraw` | `secret.request` | global |
-| GET | `/api/grants` | `secret.grant` | global |
-| POST | `/api/grants` | `secret.grant` | global |
-| DELETE | `/api/grants/{id}` | `secret.revoke` | global |
+| GET | `/api/grants` | `secret.own` | global |
+| POST | `/api/grants` | `secret.own` | global |
+| DELETE | `/api/grants/{id}` | `secret.own` | global |
 | POST | `/api/init` | `project.write` | project |
 | GET | `/api/instructions` | `project.read` | project |
 | POST | `/api/instructions` | `project.write` | project |
@@ -179,10 +180,10 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 | POST | `/api/reset` | `project.write` | project |
 | GET | `/api/risk-matrix` | `project.read` | project |
 | POST | `/api/run` | `run.start` | project |
-| GET | `/api/secrets` | `secret.grant` | global |
-| POST | `/api/secrets` | `secret.grant` | global |
+| GET | `/api/secrets` | `secret.own` | global |
+| POST | `/api/secrets` | `secret.own` | global |
 | GET | `/api/secrets/catalog` | `secret.request` | global |
-| DELETE | `/api/secrets/{id}` | `secret.revoke` | global |
+| DELETE | `/api/secrets/{id}` | `secret.own` | global |
 | POST | `/api/session/logout-all` | `public` | global |
 | GET | `/api/sessions` | `session.admin` | global |
 | DELETE | `/api/sessions/{id}` | `session.admin` | global |

@@ -34,20 +34,30 @@ import (
 	"github.com/blechschmidt/cloop/pkg/statedb"
 )
 
-// secretsReadRoutes are the routes gated on secret.grant, which maintainer
-// and admin hold.
+// secretsReadRoutes are the routes an operator may now reach, since Task 20275
+// lowered their floor to secret.own so a user can manage credentials of their
+// own. Reaching them is not seeing the organisation's secrets: the handlers
+// narrow below the floor, which secrets_owner_test.go asserts.
 var secretsReadRoutes = []struct{ method, path string }{
 	{http.MethodGet, "/api/secrets"},
 	{http.MethodGet, "/api/grants"},
-	{http.MethodGet, "/api/leases"},
 	{http.MethodPost, "/api/secrets"},
 	{http.MethodPost, "/api/grants"},
 }
 
-// secretsRevokeRoutes are the routes gated on secret.revoke.
+// secretsRevokeRoutes are the routes an operator may now reach for the same
+// reason: deleting a secret you own is yours to do.
 var secretsRevokeRoutes = []struct{ method, path string }{
 	{http.MethodDelete, "/api/secrets/sec_nonexistent"},
 	{http.MethodDelete, "/api/grants/grant_nonexistent"},
+}
+
+// secretsFleetRoutes stayed at secret.grant/secret.revoke. A lease is live
+// fleet state — which executor holds which credential right now — with no
+// personal dimension to scope it by, so it keeps the maintainer floor the
+// whole panel used to have.
+var secretsFleetRoutes = []struct{ method, path string }{
+	{http.MethodGet, "/api/leases"},
 	{http.MethodPost, "/api/leases/lease_nonexistent/revoke"},
 }
 
@@ -77,16 +87,21 @@ func requestNoBody(t *testing.T, c *http.Client, method, url string) (int, strin
 
 // TestSecretsRoutesDenyBelowMaintainer is the deny-by-default assertion.
 //
-// The interesting row is `operator`: an operator starts runs, and a run is
-// what consumes brokered credentials, so it is tempting to let them see which
-// ones exist. They must not — being able to spend a credential is not the
-// same as being able to enumerate the fleet's credentials.
+// The interesting row used to be `operator`, which was denied everything here.
+// Since Task 20275 an operator holds secret.own and reaches the six
+// secret/grant routes to manage credentials of their own — so this test now
+// covers the roles that hold neither permission, and the fleet routes that
+// stayed at maintainer for every role below it.
+//
+// What an admitted operator may actually *see* is the subject of
+// secrets_owner_test.go, which is where the "cannot enumerate the fleet's
+// credentials" property moved to. It did not go away.
 func TestSecretsRoutesDenyBelowMaintainer(t *testing.T) {
 	_, base, clients := newAuditFixture(t)
 
 	all := append(append([]struct{ method, path string }{}, secretsReadRoutes...), secretsRevokeRoutes...)
 	for _, rt := range all {
-		for _, role := range []string{"viewer", "operator", "unmapped"} {
+		for _, role := range []string{"viewer", "unmapped"} {
 			t.Run(role+" denied "+rt.method+" "+rt.path, func(t *testing.T) {
 				code, body := requestNoBody(t, clients[role], rt.method, base+rt.path)
 				if code != http.StatusForbidden {
@@ -137,12 +152,15 @@ func TestSecretsRoutesDeclareTheRightPermissions(t *testing.T) {
 	srv, _, _ := newAuditFixture(t)
 
 	want := map[string]authz.Permission{
-		"GET /api/secrets":             authz.PermSecretGrant,
-		"POST /api/secrets":            authz.PermSecretGrant,
-		"DELETE /api/secrets/{id}":     authz.PermSecretRevoke,
-		"GET /api/grants":              authz.PermSecretGrant,
-		"POST /api/grants":             authz.PermSecretGrant,
-		"DELETE /api/grants/{id}":      authz.PermSecretRevoke,
+		// Lowered to secret.own by Task 20275 and narrowed inside the
+		// handlers; see secrets_owner.go and the route-table comment.
+		"GET /api/secrets":         authz.PermSecretOwn,
+		"POST /api/secrets":        authz.PermSecretOwn,
+		"DELETE /api/secrets/{id}": authz.PermSecretOwn,
+		"GET /api/grants":          authz.PermSecretOwn,
+		"POST /api/grants":         authz.PermSecretOwn,
+		"DELETE /api/grants/{id}":  authz.PermSecretOwn,
+		// Unchanged: no personal dimension to scope a live lease by.
 		"GET /api/leases":              authz.PermSecretGrant,
 		"POST /api/leases/{id}/revoke": authz.PermSecretRevoke,
 	}

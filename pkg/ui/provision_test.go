@@ -142,7 +142,7 @@ func TestProjectGrantConstraintsMapAllDimensions(t *testing.T) {
 }
 
 func TestValidateProjectAccessRejectsUnknownExecutor(t *testing.T) {
-	err := validateProjectAccess(nil, projectAccessRequest{ExecutorID: "no-such-executor"})
+	err := validateProjectAccess(nil, secretbroker.PrivilegedViewer("test"), projectAccessRequest{ExecutorID: "no-such-executor"})
 	if err == nil {
 		t.Fatal("accepted a binding to an executor that does not exist; the project would " +
 			"be created and then fail at its first run")
@@ -155,7 +155,7 @@ func TestValidateProjectAccessRejectsUnknownExecutor(t *testing.T) {
 func TestValidateProjectAccessRefusesGrantsWithNoBroker(t *testing.T) {
 	// A hub with no CLOOP_SECRET_KEY cannot mint grants. Saying so is better
 	// than creating the project and leaving the grants silently absent.
-	err := validateProjectAccess(nil, projectAccessRequest{
+	err := validateProjectAccess(nil, secretbroker.PrivilegedViewer("test"), projectAccessRequest{
 		Grants: []projectGrantRequest{{SecretRef: "prod-cluster", Contexts: []string{"prod"}}},
 	})
 	if err == nil {
@@ -168,7 +168,7 @@ func TestValidateProjectAccessRefusesGrantsWithNoBroker(t *testing.T) {
 
 func TestValidateProjectAccessRequiresSecretRef(t *testing.T) {
 	bs := &brokerSet{secret: newProvisionTestBroker(t)}
-	err := validateProjectAccess(bs, projectAccessRequest{
+	err := validateProjectAccess(bs, secretbroker.PrivilegedViewer("test"), projectAccessRequest{
 		Grants: []projectGrantRequest{{Contexts: []string{"prod"}}},
 	})
 	if err == nil || !strings.Contains(err.Error(), "secret_ref") {
@@ -178,7 +178,7 @@ func TestValidateProjectAccessRequiresSecretRef(t *testing.T) {
 
 func TestValidateProjectAccessRejectsUnknownSecret(t *testing.T) {
 	bs := &brokerSet{secret: newProvisionTestBroker(t)}
-	err := validateProjectAccess(bs, projectAccessRequest{
+	err := validateProjectAccess(bs, secretbroker.PrivilegedViewer("test"), projectAccessRequest{
 		Grants: []projectGrantRequest{{SecretRef: "not-a-secret", Contexts: []string{"prod"}}},
 	})
 	if err == nil {
@@ -200,7 +200,7 @@ func TestValidateProjectAccessEnforcesConstraintsPerKind(t *testing.T) {
 	bs := &brokerSet{secret: b}
 
 	t.Run("kubeconfig with no scoping is refused", func(t *testing.T) {
-		err := validateProjectAccess(bs, projectAccessRequest{
+		err := validateProjectAccess(bs, secretbroker.PrivilegedViewer("test"), projectAccessRequest{
 			Grants: []projectGrantRequest{{SecretRef: "prod-cluster"}},
 		})
 		if err == nil {
@@ -212,7 +212,7 @@ func TestValidateProjectAccessEnforcesConstraintsPerKind(t *testing.T) {
 	})
 
 	t.Run("local_repo with no allowlist is refused", func(t *testing.T) {
-		err := validateProjectAccess(bs, projectAccessRequest{
+		err := validateProjectAccess(bs, secretbroker.PrivilegedViewer("test"), projectAccessRequest{
 			Grants: []projectGrantRequest{{SecretRef: "dev-src"}},
 		})
 		if err == nil {
@@ -221,7 +221,7 @@ func TestValidateProjectAccessEnforcesConstraintsPerKind(t *testing.T) {
 	})
 
 	t.Run("well-formed grants pass", func(t *testing.T) {
-		err := validateProjectAccess(bs, projectAccessRequest{
+		err := validateProjectAccess(bs, secretbroker.PrivilegedViewer("test"), projectAccessRequest{
 			Grants: []projectGrantRequest{
 				{SecretRef: "prod-cluster", Contexts: []string{"prod"}, Namespaces: []string{"default"}},
 				{SecretRef: "dev-src", Repos: []string{"api", "shared-*"}},
@@ -236,7 +236,7 @@ func TestValidateProjectAccessEnforcesConstraintsPerKind(t *testing.T) {
 func TestValidateProjectAccessRejectsOutOfRangeTTL(t *testing.T) {
 	b := newProvisionTestBroker(t)
 	mintForTest(t, b, "dev-src", secretbroker.KindLocalRepo, []byte(t.TempDir()))
-	err := validateProjectAccess(&brokerSet{secret: b}, projectAccessRequest{
+	err := validateProjectAccess(&brokerSet{secret: b}, secretbroker.PrivilegedViewer("test"), projectAccessRequest{
 		Grants: []projectGrantRequest{{
 			SecretRef: "dev-src", Repos: []string{"api"}, TTLMinutes: -5,
 		}},

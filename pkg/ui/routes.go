@@ -339,6 +339,7 @@ func (s *Server) routeTable() []routeSpec {
 		secGrant   = authz.PermSecretGrant
 		secRevoke  = authz.PermSecretRevoke
 		secRequest = authz.PermSecretRequest
+		secOwn     = authz.PermSecretOwn
 		tokenAdmin = authz.PermTokenAdmin
 		sessAdmin  = authz.PermSessionAdmin
 		userMgmt   = authz.PermUserManage
@@ -651,12 +652,23 @@ func (s *Server) routeTable() []routeSpec {
 		// have no reason to enumerate it. Deletions and lease revocations
 		// take secret.revoke, so an operator can be given the ability to
 		// pull a leaked credential without the ability to issue one.
-		{Pattern: "GET /api/secrets", Handler: s.handleSecretsList, Perm: secGrant, Scope: scopeGlobal},
-		{Pattern: "POST /api/secrets", Handler: s.handleSecretCreate, Perm: secGrant, Scope: scopeGlobal},
-		{Pattern: "DELETE /api/secrets/{id}", Handler: s.handleSecretDelete, Perm: secRevoke, Scope: scopeGlobal},
-		{Pattern: "GET /api/grants", Handler: s.handleGrantsList, Perm: secGrant, Scope: scopeGlobal},
-		{Pattern: "POST /api/grants", Handler: s.handleGrantCreate, Perm: secGrant, Scope: scopeGlobal},
-		{Pattern: "DELETE /api/grants/{id}", Handler: s.handleGrantDelete, Perm: secRevoke, Scope: scopeGlobal},
+		//
+		// The first six are declared at secret.own, which sits at operator,
+		// and narrowed inside each handler (Task 20275). The permission on the
+		// route is a floor, not the whole answer: a caller holding only
+		// secret.own sees and manages the secrets they personally own, while
+		// the shared inventory above still requires secret.grant/secret.revoke
+		// exactly as it did before. That narrowing is written once in
+		// secrets_owner.go and pinned by
+		// TestSecretsRoutesNarrowOperatorsToTheirOwn, because a floor that is
+		// lower than the real rule is only safe while every handler above it
+		// remembers to apply the rule.
+		{Pattern: "GET /api/secrets", Handler: s.handleSecretsList, Perm: secOwn, Scope: scopeGlobal},
+		{Pattern: "POST /api/secrets", Handler: s.handleSecretCreate, Perm: secOwn, Scope: scopeGlobal},
+		{Pattern: "DELETE /api/secrets/{id}", Handler: s.handleSecretDelete, Perm: secOwn, Scope: scopeGlobal},
+		{Pattern: "GET /api/grants", Handler: s.handleGrantsList, Perm: secOwn, Scope: scopeGlobal},
+		{Pattern: "POST /api/grants", Handler: s.handleGrantCreate, Perm: secOwn, Scope: scopeGlobal},
+		{Pattern: "DELETE /api/grants/{id}", Handler: s.handleGrantDelete, Perm: secOwn, Scope: scopeGlobal},
 		{Pattern: "GET /api/leases", Handler: s.handleLeasesList, Perm: secGrant, Scope: scopeGlobal},
 		{Pattern: "POST /api/leases/{id}/revoke", Handler: s.handleLeaseRevoke, Perm: secRevoke, Scope: scopeGlobal},
 		// Self-service access requests (Task 20271). The split permission is

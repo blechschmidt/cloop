@@ -228,6 +228,19 @@ type MintRequest struct {
 	Payload  []byte
 	Metadata map[string]string
 	Actor    string
+	// Owner, when set, mints a *personal* secret belonging to that identity
+	// rather than a shared one belonging to the organisation (Task 20275).
+	// See ownership.go for everything that changes as a result.
+	Owner string
+	// Personal asserts that this mint is meant to produce a personal secret.
+	//
+	// Redundant with a non-empty Owner in the success case, and that is the
+	// point: it separates "mint this for alice@corp" from "mint this for
+	// whatever identity the caller happened to resolve", so a handler whose
+	// identity lookup silently returned "" produces ErrOwnerRequired instead
+	// of quietly minting the user's private credential as an organisation-wide
+	// one that every maintainer can then spend.
+	Personal bool
 }
 
 // Mint seals a payload and stores it as a new secret.
@@ -252,6 +265,11 @@ func (b *Broker) Mint(ctx context.Context, req MintRequest) (Secret, error) {
 	}
 	if _, err := findSecretByName(b.store, req.Name); err == nil {
 		return Secret{}, b.denyf(ev, ErrDuplicateName, "a secret named %q already exists", req.Name)
+	}
+	owner := NormalizeOwner(req.Owner)
+	if req.Personal && owner == "" {
+		return Secret{}, b.denyf(ev, ErrOwnerRequired,
+			"a personal secret was requested but no owner identity resolved")
 	}
 
 	// The ID is minted before the payload is sealed because it *is* the
@@ -279,6 +297,7 @@ func (b *Broker) Mint(ctx context.Context, req MintRequest) (Secret, error) {
 		Metadata:   req.Metadata,
 		CreatedAt:  b.now(),
 		CreatedBy:  req.Actor,
+		Owner:      owner,
 	}
 	if err := s.Validate(); err != nil {
 		return Secret{}, b.denyf(ev, ErrInvalidSecret, "%v", err)
@@ -375,6 +394,15 @@ type GrantRequest struct {
 	// would break running projects at an unpredictable moment.
 	NoExpiry bool
 	Actor    string
+	// Viewer is the identity the grant is created on behalf of. It gates
+	// personal secrets: only their owner may hand one to an executor
+	// (Task 20275). The zero value sees no personal secret at all, so a
+	// caller that forgets it is refused rather than privileged.
+	//
+	// Shared secrets ignore it entirely, which is what keeps every existing
+	// call site — the CLI, the legacy import, the approval path — correct
+	// without change.
+	Viewer Viewer
 }
 
 // Grant authorises a subject to use a secret under constraints.
@@ -395,6 +423,23 @@ func (b *Broker) Grant(ctx context.Context, req GrantRequest) (Grant, error) {
 	}
 	ev.SecretID, ev.SecretName, ev.Kind = s.ID, s.Name, s.Kind
 
+	// Ownership is checked before anything is written, and before the subject
+	// is validated, so that a refusal over somebody else's credential is
+	// recorded as exactly that rather than as whatever the subject happened to
+	// be malformed into.
+	if err := checkSpendable(s, req.Viewer); err != nil {
+		return Grant{}, b.denyErr(ev, err)
+	}
+	// A personal credential granted to "every project" or "every executor" is
+	// no longer personal: the next run by anyone redeems it. Refused rather
+	// than silently narrowed, because narrowing would guess which project the
+	// owner meant.
+	if s.Personal() && req.Subject.Wildcard() {
+		return Grant{}, b.denyf(ev, ErrPersonalWildcard,
+			"%s is owned by %s and must name one project or executor, not %q",
+			s.Name, s.Owner, req.Subject.String())
+	}
+
 	id, err := newID("grant")
 	if err != nil {
 		return Grant{}, err
@@ -408,6 +453,7 @@ func (b *Broker) Grant(ctx context.Context, req GrantRequest) (Grant, error) {
 		Constraints: req.Constraints,
 		CreatedAt:   now,
 		CreatedBy:   req.Actor,
+		Owner:       s.Owner,
 	}
 	if !req.NoExpiry {
 		ttl := req.TTL

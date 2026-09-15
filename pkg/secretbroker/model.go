@@ -167,12 +167,133 @@ type Secret struct {
 	// WrappedDEK is this secret's data key, sealed under KeyID. Rotation
 	// rewrites this field and leaves Sealed untouched.
 	WrappedDEK []byte `json:"-"`
-	// Metadata is non-sensitive descriptive data (owner, rotation date).
+	// Metadata is non-sensitive descriptive data (rotation date, ticket).
 	// It is included in audit payloads, so callers must not put credential
 	// material here.
 	Metadata  map[string]string `json:"metadata,omitempty"`
 	CreatedAt time.Time         `json:"created_at"`
 	CreatedBy string            `json:"created_by,omitempty"`
+	// Owner is the identity this secret belongs to personally, in the
+	// OwnerKey namespace the rest of the hub uses for people (a lowercased
+	// email, or "sub:<issuer subject>"). Empty means a shared secret: the
+	// organisation's credential, provisioned by a maintainer, which is what
+	// every secret was before Task 20275.
+	//
+	// It is deliberately not a Metadata entry. Metadata is operator free text
+	// that lands in audit payloads and that nothing enforces; Owner is an
+	// authorisation input read by VisibleTo and by every mutation path in the
+	// broker. A rule enforced against a map any caller may overwrite is not a
+	// rule, and the two have opposite handling: metadata is for humans to
+	// read, Owner is for this package to obey.
+	Owner string `json:"owner,omitempty"`
+}
+
+// Personal reports whether the secret belongs to one person rather than to the
+// organisation.
+func (s Secret) Personal() bool { return strings.TrimSpace(s.Owner) != "" }
+
+// OwnedBy reports whether identity owns this secret.
+//
+// Both sides go through NormalizeOwner and are then compared exactly, so that
+// "is this yours" has one definition rather than two that can drift. The
+// normaliser is where the asymmetry lives, and it is deliberate on both sides:
+//
+//	email  folded to lowercase. IdPs are inconsistent about the case they
+//	       release an address in, and "Alice@corp" locked out of the secret
+//	       "alice@corp" minted is a lockout, not a security win.
+//	sub:   left exactly as issued. An issuer subject is an opaque identifier,
+//	       case-sensitive by specification, so folding it could silently merge
+//	       two distinct people into one owner.
+func (s Secret) OwnedBy(identity string) bool {
+	if !s.Personal() {
+		return false
+	}
+	want := NormalizeOwner(identity)
+	return want != "" && NormalizeOwner(s.Owner) == want
+}
+
+// Viewer is the identity a read or a mutation is performed on behalf of.
+//
+// It exists so the broker can answer "may this person see, spend or destroy
+// this secret" without importing pkg/authz, which would invert the dependency:
+// authz is a policy over HTTP routes and OIDC claims, and the broker must stay
+// usable from the CLI and from tests with neither present.
+//
+// A Viewer answers one question and deliberately not two: *ownership*. Whether
+// the caller holds organisation-level authority over the shared, unowned
+// secrets that were the only kind before Task 20275 is not asked here — that is
+// authz.PermSecretGrant and authz.PermSecretRevoke, enforced by the hub's route
+// table, which already does it correctly and is already tested. Answering it
+// twice, in two packages, with two notions of who counts, is how the two
+// answers come to disagree.
+//
+// So: shared secrets pass through this type untouched, exactly as they did
+// before, and every existing call site stays correct without change. What the
+// zero value cannot do is see, spend or delete a *personal* secret — which is
+// the whole of the new capability, and which therefore fails closed for any
+// caller that forgets to say who they are.
+type Viewer struct {
+	// Identity is the viewer's OwnerKey, matched against Secret.Owner. It
+	// authorises everything about the viewer's own personal secrets and
+	// nothing about anybody else's.
+	Identity string
+
+	// Admin marks a caller entitled to administer *other people's* personal
+	// secrets: to see that alice@corp keeps one here, and to destroy it when
+	// she leaves.
+	//
+	// It confers visibility and deletion, never use. Offboarding requires both,
+	// and pretending an admin cannot see the row would be theatre — the
+	// material is sealed under a key the hub operator already holds. Spending
+	// somebody else's credential is a different act, it is the one thing the
+	// ownership model exists to prevent, and no flag here enables it.
+	Admin bool
+}
+
+// PrivilegedViewer is the viewer for callers that already hold full authority
+// over the secret store: the CLI running on the hub host, key rotation, and
+// offboarding sweeps.
+//
+// Named rather than written as a literal at each site so that the places which
+// deliberately see every user's secrets are greppable, and so that reviewing
+// "what can see everything" is a search for one identifier.
+func PrivilegedViewer(identity string) Viewer {
+	return Viewer{Identity: identity, Admin: true}
+}
+
+// VisibleTo reports whether v may see that this secret exists.
+func (s Secret) VisibleTo(v Viewer) bool {
+	if !s.Personal() {
+		return true
+	}
+	return v.Admin || s.OwnedBy(v.Identity)
+}
+
+// SpendableBy reports whether v may grant this secret to an executor — the act
+// that puts the credential to work.
+//
+// Strictly narrower than VisibleTo, and the one place where Admin buys nothing.
+// An admin may see a colleague's personal secret and may delete it; handing it
+// to a workload is neither of those, and allowing it would make ownership
+// advisory.
+func (s Secret) SpendableBy(v Viewer) bool {
+	if !s.Personal() {
+		return true
+	}
+	return s.OwnedBy(v.Identity)
+}
+
+// DeletableBy reports whether v may destroy this secret.
+//
+// Wider than SpendableBy by exactly one case: an admin may delete a personal
+// secret they do not own, because otherwise a hub could never complete an
+// offboarding — an account that no longer exists cannot come back to press the
+// button. The deletion is audited with the actor's name attached.
+func (s Secret) DeletableBy(v Viewer) bool {
+	if !s.Personal() {
+		return true
+	}
+	return v.Admin || s.OwnedBy(v.Identity)
 }
 
 // Envelope returns the secret's sealed material in the form the keyring
@@ -412,6 +533,24 @@ type Requester struct {
 	Labels     map[string]string
 }
 
+// Wildcard reports whether this subject selects an open-ended set of
+// requesters rather than one named project or executor.
+//
+// "any" and an explicit "*" both qualify. A label selector does not: it names a
+// property of a machine, and an operator who labels two executors has said
+// which two — whereas "*" says "and every one added later", which is a
+// different promise and the one a personal credential cannot make.
+func (s Subject) Wildcard() bool {
+	switch s.Type {
+	case SubjectAny:
+		return true
+	case SubjectProject, SubjectExecutor:
+		return strings.TrimSpace(s.Value) == "*"
+	default:
+		return false
+	}
+}
+
 // Matches reports whether this subject selects r.
 //
 // A wildcard "*" is honoured within project/executor types, but only when
@@ -476,6 +615,39 @@ type Grant struct {
 	CreatedAt time.Time `json:"created_at"`
 	CreatedBy string    `json:"created_by,omitempty"`
 	RevokedAt time.Time `json:"revoked_at,omitempty"`
+	// Owner is copied from the secret this grant points at when that secret
+	// is personal, and is empty otherwise.
+	//
+	// Denormalised on purpose. A grant listing is read far more often than a
+	// secret is minted, and the alternative — resolving every grant's secret
+	// to find out whether the row should be shown — is the N+1 read that the
+	// listing handlers already go out of their way to avoid. More importantly
+	// it keeps the row self-describing: when the secret is deleted, the
+	// revoked grants it leaves behind still say whose credential they spent,
+	// which is exactly the question an offboarding or incident review asks.
+	Owner string `json:"owner,omitempty"`
+}
+
+// Personal reports whether this grant hands out a personally-owned credential.
+func (g Grant) Personal() bool { return strings.TrimSpace(g.Owner) != "" }
+
+// VisibleTo reports whether v may see this grant.
+//
+// A grant follows the secret it points at: over a shared secret it is
+// organisation business, over a personal one it is its owner's, and the owner
+// is on the row so that deciding needs no second read.
+func (g Grant) VisibleTo(v Viewer) bool {
+	if !g.Personal() {
+		return true
+	}
+	if v.Admin {
+		return true
+	}
+	// Same comparison rule as Secret.OwnedBy, reached through the same
+	// normaliser rather than reimplemented — a grant that disagrees with its
+	// secret about who owns it is the bug this shares code to avoid.
+	want := NormalizeOwner(v.Identity)
+	return want != "" && NormalizeOwner(g.Owner) == want
 }
 
 // Active reports whether the grant may be used at time now.

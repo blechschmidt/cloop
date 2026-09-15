@@ -6488,9 +6488,11 @@ func (s *Server) handleProjectNew(w http.ResponseWriter, r *http.Request) {
 	access := req.projectAccessRequest
 	var accessBrokers *brokerSet
 	if access.requested() {
-		if !s.authorizeProjectAccess(w, r, access) {
-			return
-		}
+		// The broker is opened before the permission check rather than after,
+		// because since Task 20275 the answer depends on *which* secrets are
+		// named: wiring in a personal secret you own needs only secret.own,
+		// while the organisation's shared credentials still need secret.grant.
+		// That question cannot be answered without resolving the refs.
 		if len(access.Grants) > 0 {
 			bs, ok := s.openBrokersOr(w)
 			if !ok {
@@ -6499,7 +6501,10 @@ func (s *Server) handleProjectNew(w http.ResponseWriter, r *http.Request) {
 			defer bs.close()
 			accessBrokers = bs
 		}
-		if err := validateProjectAccess(accessBrokers, access); err != nil {
+		if !s.authorizeProjectAccess(w, r, accessBrokers, access) {
+			return
+		}
+		if err := validateProjectAccess(accessBrokers, s.secretViewer(r), access); err != nil {
 			jsonErr(w, err.Error(), http.StatusBadRequest)
 			return
 		}

@@ -590,13 +590,27 @@ func (s *Server) handleSecretCatalog(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	secrets, err := bs.secret.ListSecrets()
+	// Scoped, because the catalogue is the one secrets endpoint an ordinary
+	// operator could always read, and personal secrets (Task 20275) must not
+	// appear in it for anyone but their owner. A colleague's credential is not
+	// something to file a request against — the request path exists to ask an
+	// approver for the organisation's credentials, and there is no approver for
+	// somebody's private PAT — so listing one here would only leak the name.
+	viewer := s.secretViewer(r)
+	secrets, err := bs.secret.ListSecretsFor(viewer)
 	if err != nil {
 		writeBrokerError(w, err, "list secret catalogue")
 		return
 	}
 	out := make([]catalogEntry, 0, len(secrets))
 	for _, sec := range secrets {
+		// An admin sees every personal secret through ListSecretsFor, which is
+		// right for the Secrets panel and wrong here: this is the "what may I
+		// ask for" list, and an admin may not request a colleague's credential
+		// any more than anyone else may.
+		if sec.Personal() && !sec.OwnedBy(viewer.Identity) {
+			continue
+		}
 		out = append(out, catalogEntry{ID: sec.ID, Name: sec.Name, Kind: string(sec.Kind)})
 	}
 	jsonOK(w, map[string]any{"secrets": out, "kinds": kindNames()})

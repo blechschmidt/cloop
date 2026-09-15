@@ -136,4 +136,30 @@ var (
 	// ErrDelegationExceeded: the approval would hand out more than this
 	// approver is entitled to delegate.
 	ErrDelegationExceeded = errors.New("secretbroker: approval exceeds what this approver may delegate")
+
+	// Personal-secret errors (Task 20275).
+
+	// ErrNotOwner: the caller tried to spend, re-scope or destroy a personal
+	// secret belonging to somebody else. A denial, not a validation error:
+	// reaching for another person's credential is precisely the event the
+	// ownership model exists to record.
+	//
+	// Paths that must not reveal the secret exists at all report
+	// ErrSecretNotFound instead; this sentinel is for the paths where the
+	// caller has already legitimately been shown the secret and is asking to
+	// act on it.
+	ErrNotOwner = errors.New("secretbroker: this secret belongs to another user")
+
+	// ErrOwnerRequired: a personal secret was requested without an identity to
+	// own it. An anonymously-owned secret would be indistinguishable from a
+	// shared one at every later check, so it is refused at the point of
+	// minting rather than silently widened into the organisation's.
+	ErrOwnerRequired = errors.New("secretbroker: a personal secret needs an owner identity")
+
+	// ErrPersonalWildcard: a personal secret was granted to a wildcard or
+	// "any" subject. A personal credential exists to be spent on its owner's
+	// own work, and a subject matching every project or every executor hands
+	// it to whoever runs next — the one outcome personal ownership is meant
+	// to prevent.
+	ErrPersonalWildcard = errors.New("secretbroker: a personal secret cannot be granted to a wildcard subject")
 )

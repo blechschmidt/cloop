@@ -57,6 +57,7 @@ import (
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/apierror"
+	"github.com/blechschmidt/cloop/pkg/authz"
 	"github.com/blechschmidt/cloop/pkg/egressbroker"
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/remote"
@@ -125,6 +126,19 @@ type secretView struct {
 	// pull access out from under a running project.
 	Grants       int `json:"grants"`
 	ActiveGrants int `json:"active_grants"`
+
+	// Owner names the user this secret belongs to personally, empty for a
+	// shared one (Task 20275). It is an identity, not a credential: the same
+	// string already appears on project cards and in the audit trail, and the
+	// panel needs it to separate "my secrets" from the organisation's.
+	Owner string `json:"owner,omitempty"`
+	// Personal is Owner != "", precomputed so the frontend does not have to
+	// re-derive the distinction that decides which controls it renders.
+	Personal bool `json:"personal,omitempty"`
+	// Mine marks a row the *requesting* user owns. Distinct from Personal,
+	// which is true for a colleague's secret an admin is looking at: only Mine
+	// means the viewer may grant it.
+	Mine bool `json:"mine,omitempty"`
 }
 
 // grantView is one row of GET /api/grants, covering both brokers.
@@ -404,19 +418,25 @@ func (s *Server) handleSecretsList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	secrets, err := bs.secret.ListSecrets()
+	// Two filters, because ownership and organisation-level authority are two
+	// different questions and only the first belongs to the broker. The broker
+	// drops other people's personal secrets; visibleSecrets drops the shared
+	// inventory from a caller who holds secret.own but not secret.grant.
+	viewer := s.secretViewer(r)
+	secrets, err := bs.secret.ListSecretsFor(viewer)
 	if err != nil {
 		s.log().Error(logger.EventAuthz, 0, "secrets: list",
 			map[string]interface{}{"error": err.Error()})
 		apierror.WriteError(w, apierror.New(apierror.CodeInternal, "could not read the secret store"))
 		return
 	}
+	secrets = s.visibleSecrets(r, secrets)
 
 	// One grant listing, then a count per secret: the alternative is a
 	// ListGrants call inside the loop, which is the same read N times.
 	total := map[string]int{}
 	active := map[string]int{}
-	if grants, gerr := bs.secret.ListGrants(secretbroker.GrantFilter{}); gerr == nil {
+	if grants, gerr := bs.secret.ListGrantsFor(secretbroker.GrantFilter{}, viewer); gerr == nil {
 		now := time.Now()
 		for _, g := range grants {
 			total[g.SecretID]++
@@ -437,6 +457,9 @@ func (s *Server) handleSecretsList(w http.ResponseWriter, r *http.Request) {
 			CreatedBy:    sec.CreatedBy,
 			Grants:       total[sec.ID],
 			ActiveGrants: active[sec.ID],
+			Owner:        sec.Owner,
+			Personal:     sec.Personal(),
+			Mine:         sec.OwnedBy(viewer.Identity),
 		})
 	}
 	jsonOK(w, resp)
@@ -459,6 +482,15 @@ type createSecretRequest struct {
 	// sealed on arrival and no endpoint in this file can return it.
 	Payload  string            `json:"payload"`
 	Metadata map[string]string `json:"metadata"`
+	// Personal asks for a secret owned by the caller alone (Task 20275).
+	//
+	// Explicit rather than inferred from the caller's role, because the two
+	// readings of an unqualified "store this credential" have opposite blast
+	// radii: a maintainer who meant "mine" and got a shared secret has just
+	// published their own GitHub token to every other maintainer. The frontend
+	// sends it from a radio the user chooses; the default below decides for
+	// callers that send neither.
+	Personal *bool `json:"personal,omitempty"`
 }
 
 // handleSecretCreate serves POST /api/secrets.
@@ -536,6 +568,33 @@ func (s *Server) handleSecretCreate(w http.ResponseWriter, r *http.Request) {
 	// buffer before the response is written. The decoded string it was copied
 	// from is not zeroable in Go and lives until the collector reclaims it —
 	// which is exactly why nothing here logs the request body.
+	// Which of the two kinds is being minted, and may this caller mint it?
+	//
+	// The default when the client says nothing is personal whenever the caller
+	// has an identity to own it. That is the safe direction: a secret minted
+	// personal by mistake is visible to one person too few and is fixed by
+	// re-minting it, while one minted shared by mistake has already been handed
+	// to every maintainer and cannot be un-shared by deleting it.
+	viewer := s.secretViewer(r)
+	personal := viewer.Identity != ""
+	if req.Personal != nil {
+		personal = *req.Personal
+	}
+	if !personal && !s.holdsSharedSecretWrite(r) {
+		denySharedSecret(w, authz.PermSecretGrant, "creating one")
+		return
+	}
+	if personal && viewer.Identity == "" {
+		// No signed-in identity to own it. Reported here rather than left to
+		// the broker so the message can name the cause: this is what a
+		// single-user hub with no OIDC looks like, and the answer is that it
+		// does not need personal secrets rather than that something is broken.
+		apierror.WriteError(w, apierror.New(apierror.CodeInvalidInput,
+			"a personal secret needs a signed-in user to own it; this hub has no "+
+				"identity provider configured, so every secret it stores is shared"))
+		return
+	}
+
 	payload := []byte(req.Payload)
 	sec, err := bs.secret.Mint(r.Context(), secretbroker.MintRequest{
 		Name:     strings.TrimSpace(req.Name),
@@ -543,6 +602,8 @@ func (s *Server) handleSecretCreate(w http.ResponseWriter, r *http.Request) {
 		Payload:  payload,
 		Metadata: req.Metadata,
 		Actor:    s.auditActor(r),
+		Owner:    viewer.Identity,
+		Personal: personal,
 	})
 	if err != nil {
 		writeBrokerError(w, err, "mint secret")
@@ -561,6 +622,9 @@ func (s *Server) handleSecretCreate(w http.ResponseWriter, r *http.Request) {
 		Metadata:    sec.Metadata,
 		CreatedAt:   sec.CreatedAt,
 		CreatedBy:   sec.CreatedBy,
+		Owner:       sec.Owner,
+		Personal:    sec.Personal(),
+		Mine:        sec.OwnedBy(viewer.Identity),
 	})
 }
 
@@ -584,7 +648,22 @@ func (s *Server) handleSecretDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := bs.secret.DeleteSecret(r.Context(), id, s.auditActor(r)); err != nil {
+	// Resolve before deleting so the shared-vs-personal question is answered
+	// against the stored row rather than against what the caller claimed.
+	viewer := s.secretViewer(r)
+	target, err := bs.secret.DescribeSecretFor(id, viewer)
+	if err != nil {
+		writeBrokerError(w, err, "delete secret")
+		return
+	}
+	if !target.Personal() && !s.holdsSharedSecretDelete(r) {
+		denySharedSecret(w, authz.PermSecretRevoke, "deleting one")
+		return
+	}
+	// DeleteSecretFor re-checks ownership itself: this handler decides the
+	// organisation-level half, the broker decides the personal half, and
+	// neither trusts the other to have done it.
+	if err := bs.secret.DeleteSecretFor(r.Context(), id, viewer); err != nil {
 		writeBrokerError(w, err, "delete secret")
 		return
 	}
@@ -619,26 +698,40 @@ func (s *Server) handleGrantsList(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 	resp := grantsListResponse{Grants: []grantView{}, Broker: bs.status}
 
+	viewer := s.secretViewer(r)
 	if bs.secret != nil {
+		// The name map is scoped as well as the grant list. It is only used to
+		// decorate a row with its secret's name and kind, but an unscoped map
+		// would still be a place for a colleague's secret name to arrive from,
+		// and a filter that has to be right twice is one that will eventually
+		// be right once.
 		names := map[string]secretbroker.Secret{}
-		if secrets, serr := bs.secret.ListSecrets(); serr == nil {
-			for _, sec := range secrets {
+		if secrets, serr := bs.secret.ListSecretsFor(viewer); serr == nil {
+			for _, sec := range s.visibleSecrets(r, secrets) {
 				names[sec.ID] = sec
 			}
 		}
-		grants, err := bs.secret.ListGrants(secretbroker.GrantFilter{
+		grants, err := bs.secret.ListGrantsFor(secretbroker.GrantFilter{
 			Subject:    subject,
 			ActiveOnly: activeOnly,
-		})
+		}, viewer)
 		if err != nil {
 			s.log().Error(logger.EventAuthz, 0, "secrets: list grants",
 				map[string]interface{}{"error": err.Error()})
 			apierror.WriteError(w, apierror.New(apierror.CodeInternal, "could not read grants"))
 			return
 		}
-		for _, g := range grants {
+		for _, g := range s.visibleGrants(r, grants) {
 			resp.Grants = append(resp.Grants, secretGrantView(g, names[g.SecretID], now))
 		}
+	}
+
+	// Egress grants have no owner dimension: an egress allowance is the hub's
+	// own Internet connection, which belongs to the deployment rather than to
+	// any user. They stay behind the organisation-level permission the route
+	// used to require outright.
+	if !s.holdsSharedSecretRead(r) {
+		bs.egress = nil
 	}
 
 	if bs.egress != nil {
@@ -820,10 +913,31 @@ func (s *Server) handleGrantCreate(w http.ResponseWriter, r *http.Request) {
 
 	actor := s.auditActor(r)
 	if strings.EqualFold(strings.TrimSpace(req.Source), "egress") {
+		// Egress is organisation-owned; see handleGrantsList.
+		if !s.holdsSharedSecretWrite(r) {
+			denySharedSecret(w, authz.PermSecretGrant, "granting the hub's egress")
+			return
+		}
 		s.createEgressGrant(w, r, bs, req, subject, ttl, actor)
 		return
 	}
 	if !bs.requireSecretBroker(w) {
+		return
+	}
+
+	// The organisation-level half: handing out a shared secret still needs
+	// secret.grant, exactly as before this route admitted operators. The
+	// personal half — that only an owner may spend their own credential — is
+	// enforced inside Broker.Grant via the viewer below, so a caller cannot
+	// reach somebody else's secret by any route that reaches the broker.
+	viewer := s.secretViewer(r)
+	target, terr := bs.secret.DescribeSecretFor(strings.TrimSpace(req.SecretRef), viewer)
+	if terr != nil {
+		writeBrokerError(w, terr, "create grant")
+		return
+	}
+	if !target.Personal() && !s.holdsSharedSecretWrite(r) {
+		denySharedSecret(w, authz.PermSecretGrant, "granting it")
 		return
 	}
 
@@ -833,6 +947,7 @@ func (s *Server) handleGrantCreate(w http.ResponseWriter, r *http.Request) {
 	// that check here would create a second, drifting copy of the rule that
 	// rejects a github grant with no repo allowlist.
 	grant, err := bs.secret.Grant(r.Context(), secretbroker.GrantRequest{
+		Viewer: viewer,
 		SecretRef: strings.TrimSpace(req.SecretRef),
 		Subject:   subject,
 		Scope:     strings.TrimSpace(req.Scope),
@@ -945,6 +1060,33 @@ func (s *Server) handleGrantDelete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !bs.requireSecretBroker(w) {
+		return
+	}
+	// Revocation follows the grant's secret: a personal grant is its owner's to
+	// pull (and an admin's, for offboarding), a shared one still needs
+	// secret.revoke. Resolved from the stored row rather than from the request,
+	// so the ID is the only thing the caller gets to choose.
+	viewer := s.secretViewer(r)
+	existing, gerr := bs.secret.ListGrantsFor(secretbroker.GrantFilter{}, viewer)
+	if gerr != nil {
+		writeBrokerError(w, gerr, "revoke grant")
+		return
+	}
+	var target secretbroker.Grant
+	for _, g := range existing {
+		if g.ID == id && g.VisibleTo(viewer) {
+			target = g
+			break
+		}
+	}
+	if target.ID == "" {
+		// Not visible is reported as not found, so revoking by guessed ID
+		// cannot be used to learn which grants exist.
+		apierror.WriteError(w, apierror.New(apierror.CodeNotFound, "no such grant"))
+		return
+	}
+	if !target.Personal() && !s.holdsSharedSecretDelete(r) {
+		denySharedSecret(w, authz.PermSecretRevoke, "revoking a grant over it")
 		return
 	}
 	if err := bs.secret.Revoke(r.Context(), id, actor); err != nil {

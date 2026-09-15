@@ -34,6 +34,9 @@ type BrokerSecretRow struct {
 	MetadataJSON string
 	CreatedAt    string
 	CreatedBy    string
+	// Owner is the identity that personally owns this secret, or "" for a
+	// shared one. See migration 0039.
+	Owner string
 }
 
 // BrokerGrantRow is one row of broker_grants.
@@ -48,6 +51,9 @@ type BrokerGrantRow struct {
 	CreatedAt       string
 	CreatedBy       string
 	RevokedAt       string
+	// Owner is denormalised from the secret this grant points at, so a grant
+	// listing can be scoped without resolving each row's secret.
+	Owner string
 }
 
 // PutBrokerSecret inserts or replaces a secret.
@@ -67,16 +73,16 @@ func (d *DB) PutBrokerSecret(row BrokerSecretRow) error {
 
 	if _, err := d.conn.Exec(
 		`INSERT INTO broker_secrets(id, kind, name, payload, key_id, wrapped_dek,
-		                            metadata_json, created_at, created_by)
-		 VALUES (?,?,?,?,?,?,?,?,?)
+		                            metadata_json, created_at, created_by, owner)
+		 VALUES (?,?,?,?,?,?,?,?,?,?)
 		 ON CONFLICT(id) DO UPDATE SET
 		   kind=excluded.kind, name=excluded.name, payload=excluded.payload,
 		   key_id=excluded.key_id, wrapped_dek=excluded.wrapped_dek,
 		   metadata_json=excluded.metadata_json, created_at=excluded.created_at,
-		   created_by=excluded.created_by`,
+		   created_by=excluded.created_by, owner=excluded.owner`,
 		row.ID, row.Kind, row.Name, row.Payload,
 		defaultString(row.KeyID, "legacy"), row.WrappedDEK,
-		defaultJSON(row.MetadataJSON), row.CreatedAt, row.CreatedBy,
+		defaultJSON(row.MetadataJSON), row.CreatedAt, row.CreatedBy, row.Owner,
 	); err != nil {
 		return fmt.Errorf("statedb: put broker secret %s: %w", row.ID, classifyDriverErr(err))
 	}
@@ -90,10 +96,11 @@ func (d *DB) GetBrokerSecret(id string) (BrokerSecretRow, error) {
 
 	var row BrokerSecretRow
 	err := d.conn.QueryRow(
-		`SELECT id, kind, name, payload, key_id, wrapped_dek, metadata_json, created_at, created_by
+		`SELECT id, kind, name, payload, key_id, wrapped_dek, metadata_json, created_at,
+		        created_by, owner
 		 FROM broker_secrets WHERE id = ?`, id,
 	).Scan(&row.ID, &row.Kind, &row.Name, &row.Payload, &row.KeyID, &row.WrappedDEK,
-		&row.MetadataJSON, &row.CreatedAt, &row.CreatedBy)
+		&row.MetadataJSON, &row.CreatedAt, &row.CreatedBy, &row.Owner)
 	if err == sql.ErrNoRows {
 		return BrokerSecretRow{}, fmt.Errorf("%w: broker secret %q", ErrBrokerSecretNotFound, id)
 	}
@@ -109,7 +116,8 @@ func (d *DB) ListBrokerSecrets() ([]BrokerSecretRow, error) {
 	defer d.mu.Unlock()
 
 	rows, err := d.conn.Query(
-		`SELECT id, kind, name, payload, key_id, wrapped_dek, metadata_json, created_at, created_by
+		`SELECT id, kind, name, payload, key_id, wrapped_dek, metadata_json, created_at,
+		        created_by, owner
 		 FROM broker_secrets ORDER BY name ASC`)
 	if err != nil {
 		return nil, fmt.Errorf("statedb: list broker secrets: %w", classifyDriverErr(err))
@@ -120,7 +128,7 @@ func (d *DB) ListBrokerSecrets() ([]BrokerSecretRow, error) {
 	for rows.Next() {
 		var row BrokerSecretRow
 		if err := rows.Scan(&row.ID, &row.Kind, &row.Name, &row.Payload, &row.KeyID, &row.WrappedDEK,
-			&row.MetadataJSON, &row.CreatedAt, &row.CreatedBy); err != nil {
+			&row.MetadataJSON, &row.CreatedAt, &row.CreatedBy, &row.Owner); err != nil {
 			return nil, fmt.Errorf("statedb: scan broker secret: %w", classifyDriverErr(err))
 		}
 		out = append(out, row)
@@ -161,17 +169,17 @@ func (d *DB) PutBrokerGrant(row BrokerGrantRow) error {
 
 	if _, err := d.conn.Exec(
 		`INSERT INTO broker_grants(id, secret_id, scope, subject_type, subject_value,
-		     constraints_json, expires_at, created_at, created_by, revoked_at)
-		 VALUES (?,?,?,?,?,?,?,?,?,?)
+		     constraints_json, expires_at, created_at, created_by, revoked_at, owner)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?)
 		 ON CONFLICT(id) DO UPDATE SET
 		   secret_id=excluded.secret_id, scope=excluded.scope,
 		   subject_type=excluded.subject_type, subject_value=excluded.subject_value,
 		   constraints_json=excluded.constraints_json, expires_at=excluded.expires_at,
 		   created_at=excluded.created_at, created_by=excluded.created_by,
-		   revoked_at=excluded.revoked_at`,
+		   revoked_at=excluded.revoked_at, owner=excluded.owner`,
 		row.ID, row.SecretID, row.Scope, row.SubjectType, row.SubjectValue,
 		defaultJSON(row.ConstraintsJSON), row.ExpiresAt, row.CreatedAt,
-		row.CreatedBy, row.RevokedAt,
+		row.CreatedBy, row.RevokedAt, row.Owner,
 	); err != nil {
 		return fmt.Errorf("statedb: put broker grant %s: %w", row.ID, classifyDriverErr(err))
 	}
@@ -186,10 +194,11 @@ func (d *DB) GetBrokerGrant(id string) (BrokerGrantRow, error) {
 	var row BrokerGrantRow
 	err := d.conn.QueryRow(
 		`SELECT id, secret_id, scope, subject_type, subject_value, constraints_json,
-		        expires_at, created_at, created_by, revoked_at
+		        expires_at, created_at, created_by, revoked_at, owner
 		 FROM broker_grants WHERE id = ?`, id,
 	).Scan(&row.ID, &row.SecretID, &row.Scope, &row.SubjectType, &row.SubjectValue,
-		&row.ConstraintsJSON, &row.ExpiresAt, &row.CreatedAt, &row.CreatedBy, &row.RevokedAt)
+		&row.ConstraintsJSON, &row.ExpiresAt, &row.CreatedAt, &row.CreatedBy, &row.RevokedAt,
+		&row.Owner)
 	if err == sql.ErrNoRows {
 		return BrokerGrantRow{}, fmt.Errorf("%w: broker grant %q", ErrBrokerGrantNotFound, id)
 	}
@@ -210,7 +219,7 @@ func (d *DB) ListBrokerGrants() ([]BrokerGrantRow, error) {
 
 	rows, err := d.conn.Query(
 		`SELECT id, secret_id, scope, subject_type, subject_value, constraints_json,
-		        expires_at, created_at, created_by, revoked_at
+		        expires_at, created_at, created_by, revoked_at, owner
 		 FROM broker_grants ORDER BY created_at DESC, id ASC`)
 	if err != nil {
 		return nil, fmt.Errorf("statedb: list broker grants: %w", classifyDriverErr(err))
@@ -222,7 +231,7 @@ func (d *DB) ListBrokerGrants() ([]BrokerGrantRow, error) {
 		var row BrokerGrantRow
 		if err := rows.Scan(&row.ID, &row.SecretID, &row.Scope, &row.SubjectType,
 			&row.SubjectValue, &row.ConstraintsJSON, &row.ExpiresAt,
-			&row.CreatedAt, &row.CreatedBy, &row.RevokedAt); err != nil {
+			&row.CreatedAt, &row.CreatedBy, &row.RevokedAt, &row.Owner); err != nil {
 			return nil, fmt.Errorf("statedb: scan broker grant: %w", classifyDriverErr(err))
 		}
 		out = append(out, row)

@@ -26,8 +26,17 @@ window.loadSecretsPanel = function() {
   // reaches this panel to file a request. Firing these three for them would
   // produce three 403s and three audit rows recording their own denial, on
   // every visit, for sections they cannot see.
+  // Since Task 20275 the secrets and grants tables open one rung lower again:
+  // an operator holding secret.own has personal credentials of their own to
+  // manage, and the server sends them their own rows and no others. Leases
+  // stayed at secret.grant — a lease is live fleet state with no owner to
+  // scope it by — so it is fetched separately rather than riding along and
+  // producing a 403 plus an audit row on every operator's visit.
+  if (typeof canGlobal !== 'function' || canGlobal('secret.own')) {
+    loads.push(loadSecrets(), loadGrants());
+  }
   if (typeof canGlobal !== 'function' || canGlobal('secret.grant')) {
-    loads.push(loadSecrets(), loadGrants(), loadLeases());
+    loads.push(loadLeases());
   }
   // Tokens are admin-only and the section is hidden below token.admin, so
   // skip the fetch entirely for a maintainer rather than firing a request
@@ -151,6 +160,19 @@ function _secChips(values, cls) {
   return values.map(v => '<span class="sec-chip' + (cls ? ' ' + cls : '') + '">' + esc(String(v)) + '</span>').join('');
 }
 
+// _secOwnerBadge marks whose credential a row is.
+//
+// Three states, because they mean three different things to the person
+// reading the table: "Mine" is yours to grant and delete, a named owner is a
+// colleague's that an admin can see but not spend, and no badge at all is the
+// organisation's shared credential.
+function _secOwnerBadge(s) {
+  if (!s || !s.personal) return '';
+  if (s.mine) return ' <span class="sec-chip sec-own-mine" title="Only you can see, grant or delete this.">Mine</span>';
+  return ' <span class="sec-chip sec-own-other" title="Belongs to another user. You can see it because you administer users, but you cannot grant it.">' +
+    esc(s.owner || 'another user') + '</span>';
+}
+
 function _secRenderSecrets() {
   const body  = document.getElementById('secSecretsBody');
   const table = document.getElementById('secSecretsTable');
@@ -171,7 +193,7 @@ function _secRenderSecrets() {
 
   body.innerHTML = rows.map(s =>
     '<tr>' +
-      '<td><strong>' + esc(s.name || '') + '</strong></td>' +
+      '<td><strong>' + esc(s.name || '') + '</strong>' + _secOwnerBadge(s) + '</td>' +
       '<td><span class="sec-chip kind">' + esc(s.kind || '') + '</span></td>' +
       '<td class="sec-fp sec-hide-sm" title="A digest of the sealed record, not of the value. Re-storing the same credential yields a different fingerprint.">' +
         esc(s.fingerprint || '—') + '</td>' +
@@ -180,7 +202,18 @@ function _secRenderSecrets() {
       '<td class="audit-time sec-hide-sm">' + esc(_secFmtTime(s.created_at)) + '</td>' +
       '<td><div class="sec-actions">' +
         '<button class="btn" data-global-perm="audit.read" data-perm-hide data-sec-audit="' + esc(s.id) + '">Audit</button>' +
-        '<button class="btn" data-global-perm="secret.revoke" data-sec-delete="' + esc(s.id) + '">Delete</button>' +
+        // A secret you own is yours to delete, so your own rows gate on
+        // secret.own and the organisation's on secret.revoke. Gating both on
+        // secret.revoke would show an operator a Delete button on their own
+        // credential that the server then refuses.
+        //
+        // Written as two whole literal buttons rather than one with a computed
+        // data-global-perm, because TestFrontendPermissionAttributesAreValid
+        // reads these attributes statically to catch a misspelled permission —
+        // and a gate whose value it cannot read is a gate that never denies.
+        (s.mine
+          ? '<button class="btn" data-global-perm="secret.own" data-sec-delete="' + esc(s.id) + '">Delete</button>'
+          : '<button class="btn" data-global-perm="secret.revoke" data-sec-delete="' + esc(s.id) + '">Delete</button>') +
       '</div></td>' +
     '</tr>'
   ).join('');
@@ -521,10 +554,15 @@ window.onSecretKindChange = function() {
 window.submitSecret = function() {
   const errEl = document.getElementById('secretError');
   const btn   = document.getElementById('secretSubmitBtn');
+  // Default to personal when the shared radio is absent, which is what an
+  // operator without secret.grant sees. Defaulting the other way would turn a
+  // hidden control into a silent publication of the user's own credential.
+  const sharedEl = document.getElementById('secretOwnShared');
   const body = {
-    name:    ((document.getElementById('secretName') || {}).value || '').trim(),
-    kind:    (document.getElementById('secretKind') || {}).value || '',
-    payload: (document.getElementById('secretPayload') || {}).value || ''
+    name:     ((document.getElementById('secretName') || {}).value || '').trim(),
+    kind:     (document.getElementById('secretKind') || {}).value || '',
+    payload:  (document.getElementById('secretPayload') || {}).value || '',
+    personal: !(sharedEl && sharedEl.checked)
   };
   if (!body.name)    { _secFormError(errEl, 'A name is required.'); return; }
   if (!body.payload) { _secFormError(errEl, 'A payload is required.'); return; }

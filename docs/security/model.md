@@ -369,6 +369,47 @@ it is allowed to exist. `TestGatedListsAgree` fails if that list and the list of
 gated HTTP routes ever diverge, so a new gated handler cannot be added on one
 side only.
 
+### No sandbox is reused across tasks
+
+Every task gets a container, or a Pod, that did not exist before it and does not
+survive it. There is no warm pool.
+
+This is worth stating explicitly because it is the obvious thing to reach for
+when someone measures the cold start. A sandboxed dispatch costs roughly 250 ms
+before `run -d` returns and ~430 ms before the task's first byte of output
+(`BenchmarkDispatchRuntime`, Docker on a 4-core host, `alpine`). A pool would
+remove nearly all of it, and that is exactly why the argument has to be made
+here rather than in a performance change.
+
+**What a pool would cost.** A reused sandbox carries everything the previous
+task left in it: files written outside the workspace, a poisoned `~/.gitconfig`
+or credential helper, a process still running in the namespace, a resolver cache,
+anything under `/tmp`. Across *tenants* that is a direct breach of the isolation
+the [lease-revocation guarantee](#the-lease-revocation-guarantee) and the secret
+non-disclosure suite exist to enforce: credentials are staged into the sandbox
+per task and wiped when it ends, and a container that outlives the wipe is a
+container the next tenant inherits. The guarantee that a leased credential's
+blast radius is one task depends on the sandbox's lifetime being one task.
+
+**If it is ever proposed**, the bar is:
+
+- **per project, never per executor.** Two tasks sharing a sandbox must belong to
+  the same project, which is cloop's tenancy unit (see
+  [Identity, roles and permissions](#identity-roles-and-permissions)). Sharing
+  across projects is not a tunable, it is a different product.
+- **argued in this document**, with the reuse window, what is reset between
+  tasks, and which of the guarantees below changes shape — not introduced as an
+  optimisation in a driver.
+- **covered by `tests/security`**, which is what makes the claim checkable rather
+  than asserted.
+
+The cheap wins were taken instead, and they are additive rather than in tension
+with any of this: the independent setup steps in `container.Start` run
+concurrently (~71 ms off a dispatch with the egress filter on), the sandbox image
+is pulled at hub startup rather than inside the first task's latency budget, and
+a fetched workspace is shallow by default. None of them shortens a sandbox's
+lifetime or widens what it can see.
+
 ---
 
 ## The lease-revocation guarantee
@@ -871,19 +912,24 @@ which `cloop hub bootstrap` writes as `none`.
 | --- | --- |
 | `none` | nothing — the default default |
 | `viewer` | `project.read`, `executor.read`, `view.prefs` |
-| `operator` | `run.start`, `run.stop`, `task.mutate`, `secret.request` |
-| `maintainer` | `project.write`, `config.write`, `secret.grant`, `secret.revoke` |
+| `operator` | `run.start`, `run.stop`, `task.mutate`, `secret.request`, `secret.own` |
+| `maintainer` | `project.write`, `project.share`, `config.write`, `secret.grant`, `secret.revoke` |
 | `admin` | everything, including `executor.manage`, `audit.read`, `user.manage`, `token.admin`, `session.admin` |
 
 **Permissions** (`AllPermissions`): `project.read`, `project.write`, `run.start`,
 `run.stop`, `task.mutate`, `executor.read`, `executor.manage`, `secret.grant`,
 `secret.revoke`, `config.write`, `audit.read`, `user.manage`, `token.admin`,
 `session.admin`, `view.prefs`, `sandbox.attach`, `sandbox.attach.write`,
-`secret.request`.
-`secret.request` is the only permission in the secret family below `maintainer`,
-and the asymmetry is deliberate: it authorizes *asking* for a credential, which
-confers nothing on its own. See
-[Asking for access](#asking-for-access-the-request-path) below.
+`secret.request`, `secret.own`.
+`secret.request` and `secret.own` are the two permissions in the secret family
+below `maintainer`, and the asymmetry is deliberate in both cases.
+`secret.request` authorizes *asking* for one of the organisation's credentials,
+which confers nothing on its own — see
+[Asking for access](#asking-for-access-the-request-path) below. `secret.own`
+authorizes keeping credentials **of your own**: it creates secrets stamped with
+the caller's identity, which no other user can list, grant or delete, so holding
+it widens nobody's access to anything that already exists. See
+[Personal secrets](#personal-secrets) below.
 `view.prefs` sits at the bottom of the ladder and authorizes nothing about a
 project: it records the caller's own dashboard preferences — currently which
 projects to hide from their project list — under their own viewer key, against
@@ -983,6 +1029,65 @@ Five audit actions cover the lifecycle — `secret.request`,
 events. Expiry is its own action rather than a flavour of denial because denied
 is an answer and expired is the absence of one, and a trail that conflated them
 would hide a queue nobody is working.
+
+### Personal secrets
+
+The request path above brokers the *organisation's* credentials: a maintainer
+holds them, and a developer asks. It is the wrong shape for the other half of a
+multi-user hub — the credential a developer already owns. Their own GitHub PAT,
+their own kubeconfig, their own registry login. Before Task 20275 there was
+nowhere to put one: every secret in the store was visible, grantable and
+deletable by anybody holding `secret.grant`, so "store my token on the hub"
+meant "hand a working copy to every maintainer", and the practical alternative
+was to paste it into a project config where it was worse off.
+
+A secret may now carry an **owner** — an identity in the same `OwnerKey`
+namespace the rest of the hub uses for people (a lowercased email, or
+`sub:<issuer subject>` when the IdP releases no email). Empty means shared,
+which is what every pre-existing secret is and what the whole model was.
+
+| Act | Shared secret | Personal secret |
+| --- | --- | --- |
+| See that it exists | `secret.grant` | its owner, or `user.manage` |
+| Grant it to an executor | `secret.grant` | **its owner only** |
+| Delete it | `secret.revoke` | its owner, or `user.manage` |
+| Appear in `GET /api/secrets/catalog` | everyone with `secret.request` | its owner only |
+
+The row that carries the weight is the second. `user.manage` — admin — confers
+visibility and deletion but **never** use, and that asymmetry is deliberate on
+both sides. Deletion has to reach a personal secret, or a hub could never
+complete an offboarding: when someone leaves, their credentials must go with
+them, and an account that no longer exists cannot come back to press the button.
+Spending one must not, because an admin reaching into a colleague's private
+credential to hand it to a workload is the single thing ownership exists to
+prevent. Hiding the *existence* of the row from an admin would be theatre — the
+material is sealed under a key the hub operator already holds — so the model
+says plainly what an admin can and cannot do rather than pretending.
+
+Two further rules keep a personal secret personal:
+
+- **No wildcard subjects.** A grant over a personal secret must name one project
+  or one executor. `any`, `project:*` and `executor:*` are refused
+  (`ErrPersonalWildcard`), because a credential granted to every project is
+  redeemed by whoever runs next, which is exactly the outcome ownership is for.
+- **Absence, not refusal.** A secret you do not own reports `ErrSecretNotFound`
+  rather than a permission error, on every path that takes a name or an ID.
+  Secret names are chosen by people and are guessable, so an error that
+  distinguished "no such secret" from "not yours" would answer the
+  reconnaissance question directly. This is the same choice `require()` makes
+  for projects a caller cannot reach, which answer 404 rather than 403.
+
+Enforcement lives in `pkg/secretbroker` rather than in the HTTP handlers, so the
+CLI goes through it too and a future handler cannot skip it by forgetting a
+filter. The hub adds the one thing the broker deliberately does not know: whether
+the caller also holds organisation-level authority over the *shared* secrets. The
+six secret and grant routes are declared at `secret.own` and narrowed inside
+their handlers (`pkg/ui/secrets_owner.go`), which is why an operator now reaches
+`GET /api/secrets` and still sees none of the fleet's credentials there.
+
+`GET /api/leases` and lease revocation stayed at `secret.grant`/`secret.revoke`.
+A lease is live fleet state — which executor is holding which credential right
+now — and has no owner to scope it by.
 
 ### Session lifecycle and revocation
 
@@ -2021,6 +2126,24 @@ conformance suite deliberately does not require. Run them with
 | The Secrets & Grants REST API never returns material, on any route, read path, write path or error path | `TestSecretsAPIRoutesNeverDiscloseMaterial` |
 | Those responses emit a closed, reviewed set of JSON keys, so a new struct field cannot start being serialised by accident | `TestSecretsAPIViewStructsCarryNoMaterialField` |
 | `GET /api/leases` renders a genuinely materialised lease without its credentials (in `pkg/ui`, which can issue one) | `TestSecretsAPINeverDisclosesLeaseMaterial` |
+
+### Personal secret tenancy — `ownership_test.go`
+
+The rows above keep a credential inside the broker. These keep one user's
+credential away from another user — see [Personal secrets](#personal-secrets).
+
+| Guarantee | Test |
+| --- | --- |
+| A personal secret is unreachable by another user through every read path: listing, resolve-by-id, resolve-by-guessable-name, and grant listing | `TestPersonalSecretIsNotReachableByAnotherTenant` |
+| Being able to *see* a personal secret is not being able to *use* it — an admin may list and delete one for offboarding, never grant it | `TestSeeingAPersonalSecretIsNotUsingIt` |
+| A personal credential never materialises into another tenant's lease, across env values, file bodies and the audit summary | `TestPersonalCredentialNeverLeasesToAnotherTenantsWork` |
+| A personal secret cannot be granted to `any`, `project:*` or `executor:*`, while a shared one still can | `TestAPersonalSecretCannotBeGrantedToEveryone` |
+| Pre-existing unowned secrets keep behaving exactly as before, for every viewer | `TestUnownedSecretsBehaveExactlyAsBefore` |
+| Two signed-in users get two different answers from `GET /api/secrets` (in `pkg/ui`, which has sessions) | `TestPersonalSecretsAreInvisibleToOtherUsersOverHTTP` |
+| An operator admitted by `secret.own` still cannot enumerate the organisation's shared secrets | `TestOperatorAdmittedBySecretOwnStillCannotSeeSharedSecrets` |
+| An operator cannot mint into the shared namespace | `TestOperatorCannotMintASharedSecret` |
+| The request catalogue never names another user's personal secret, not even to an admin | `TestSecretCatalogHidesOtherUsersPersonalSecrets` |
+| The six routes lowered to `secret.own` are exactly the six intended, and leases stayed above them | `TestSecretsRoutesNarrowOperatorsToTheirOwn` |
 
 ### Harness output redaction — `redaction_test.go`
 

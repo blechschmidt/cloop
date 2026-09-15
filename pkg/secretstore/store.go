@@ -54,6 +54,7 @@ func (s *Store) PutSecret(sec secretbroker.Secret) error {
 		MetadataJSON: string(meta),
 		CreatedAt:    formatTime(sec.CreatedAt),
 		CreatedBy:    sec.CreatedBy,
+		Owner:        sec.Owner,
 	})
 }
 
@@ -102,6 +103,7 @@ func (s *Store) PutGrant(g secretbroker.Grant) error {
 		CreatedAt:       formatTime(g.CreatedAt),
 		CreatedBy:       g.CreatedBy,
 		RevokedAt:       formatTime(g.RevokedAt),
+		Owner:           g.Owner,
 	})
 }
 
@@ -171,6 +173,7 @@ func toSecret(row statedb.BrokerSecretRow) secretbroker.Secret {
 		Metadata:   meta,
 		CreatedAt:  parseTime(row.CreatedAt),
 		CreatedBy:  row.CreatedBy,
+		Owner:      row.Owner,
 	}
 }
 
@@ -195,6 +198,7 @@ func toGrant(row statedb.BrokerGrantRow) (secretbroker.Grant, error) {
 		CreatedAt:   parseTime(row.CreatedAt),
 		CreatedBy:   row.CreatedBy,
 		RevokedAt:   parseTime(row.RevokedAt),
+		Owner:       row.Owner,
 	}, nil
 }
 

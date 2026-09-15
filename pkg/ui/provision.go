@@ -109,18 +109,42 @@ func (a projectAccessRequest) requested() bool {
 // Called before the project directory is touched. A developer who is allowed to
 // create projects but not to grant secrets finds out now, with nothing created,
 // rather than after an init they would have to clean up.
-func (s *Server) authorizeProjectAccess(w http.ResponseWriter, r *http.Request, a projectAccessRequest) bool {
+func (s *Server) authorizeProjectAccess(w http.ResponseWriter, r *http.Request, bs *brokerSet, a projectAccessRequest) bool {
 	if strings.TrimSpace(a.ExecutorID) != "" {
 		if !s.require(w, r, authz.PermExecutorManage, authz.GlobalScope) {
 			return false
 		}
 	}
-	if len(a.Grants) > 0 {
-		if !s.require(w, r, authz.PermSecretGrant, authz.GlobalScope) {
-			return false
+	if len(a.Grants) == 0 {
+		return true
+	}
+
+	// Which permission this needs depends on what is being wired in, and that
+	// distinction is the point of personal secrets (Task 20275). Attaching the
+	// organisation's shared deploy key to a new project is brokering the
+	// fleet's credentials and still takes secret.grant. Attaching your own
+	// GitHub PAT to your own project is spending something that is already
+	// yours, and requiring a maintainer for it would leave the feature with no
+	// way to be used by the people it is for.
+	//
+	// A ref that resolves to nothing falls into the shared branch. It will fail
+	// validation a moment later with a better message; what matters here is
+	// that an unresolvable name cannot take the cheaper permission path.
+	viewer := s.secretViewer(r)
+	allPersonal := bs != nil && bs.secret != nil
+	if allPersonal {
+		for _, g := range a.Grants {
+			sec, err := bs.secret.DescribeSecretFor(strings.TrimSpace(g.SecretRef), viewer)
+			if err != nil || !sec.OwnedBy(viewer.Identity) {
+				allPersonal = false
+				break
+			}
 		}
 	}
-	return true
+	if allPersonal {
+		return s.require(w, r, authz.PermSecretOwn, authz.GlobalScope)
+	}
+	return s.require(w, r, authz.PermSecretGrant, authz.GlobalScope)
 }
 
 // validateProjectAccess checks everything that can be known before the project
@@ -132,7 +156,7 @@ func (s *Server) authorizeProjectAccess(w http.ResponseWriter, r *http.Request, 
 // discovered after the directory, the init and the registry entry had all
 // happened, and the developer would be left holding a half-provisioned project
 // and a 500.
-func validateProjectAccess(bs *brokerSet, a projectAccessRequest) error {
+func validateProjectAccess(bs *brokerSet, viewer secretbroker.Viewer, a projectAccessRequest) error {
 	if id := strings.TrimSpace(a.ExecutorID); id != "" {
 		ex, err := executor.Get(id)
 		if err != nil {
@@ -153,7 +177,9 @@ func validateProjectAccess(bs *brokerSet, a projectAccessRequest) error {
 		if ref == "" {
 			return fmt.Errorf("grants[%d]: secret_ref is required", i)
 		}
-		sec, err := bs.secret.DescribeSecret(ref)
+		// Scoped: a secret the caller may not see must read as absent here, or
+		// this loop becomes a name oracle for other people's credentials.
+		sec, err := bs.secret.DescribeSecretFor(ref, viewer)
 		if err != nil {
 			return fmt.Errorf("grants[%d]: %w", i, err)
 		}
@@ -260,6 +286,7 @@ func (s *Server) applyProjectAccess(r *http.Request, bs *brokerSet, projectPath 
 			return rollback, fmt.Errorf("grants[%d]: %w", i, ttlErr)
 		}
 		grant, gErr := bs.secret.Grant(r.Context(), secretbroker.GrantRequest{
+			Viewer:      s.secretViewer(r),
 			SecretRef:   strings.TrimSpace(g.SecretRef),
 			Subject:     subject,
 			Scope:       strings.TrimSpace(g.Scope),
