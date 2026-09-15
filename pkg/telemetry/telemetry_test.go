@@ -226,6 +226,31 @@ func TestNormalize_UnknownKindBecomesNote(t *testing.T) {
 	}
 }
 
+// TestNormalize_InputKindSurvives keeps the glasses page's own kind from
+// collapsing into the pile it was split out of (Task 20279).
+//
+// The display page records an `input` row when it sees a gesture it cannot
+// name — the evidence that was missing when a swipe arriving on an unlistened
+// channel left no trace at all. That is only worth recording if it stays
+// filterable: an unknown kind becomes `note`, and a reader scanning every note
+// ever written is back to the scan this kind exists to replace.
+func TestNormalize_InputKindSurvives(t *testing.T) {
+	t.Parallel()
+
+	evs := Normalize(Batch{Events: []WireEvent{
+		{Kind: "input", Message: "ignored touch"},
+	}}, ctxFor(SourceGlasses))
+
+	if len(evs) != 1 {
+		t.Fatalf("the event was dropped (got %d)", len(evs))
+	}
+	if evs[0].Kind != KindInput {
+		t.Errorf("Kind = %q, want %q — an input row that lands in %q is not "+
+			"separately filterable, which is the whole reason it is its own kind",
+			evs[0].Kind, KindInput, KindNote)
+	}
+}
+
 func TestNormalize_DropsEventsWithNothingLegible(t *testing.T) {
 	t.Parallel()
 

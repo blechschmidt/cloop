@@ -86,13 +86,25 @@ const (
 	// KindLifecycle is a page-level transition: load, visibility change,
 	// WebSocket connect or drop, the terminal dead-link state.
 	KindLifecycle Kind = "lifecycle"
+	// KindInput is an input the page received and did *not* act on — the
+	// complement of KindGesture (Task 20279). Separate rather than folded into
+	// KindNote because it answers a question nothing else can: when a wearer
+	// says a gesture did nothing, did anything reach the page at all? The
+	// display glasses cost three tasks' worth of fixes on exactly that, because
+	// a swipe arriving on a channel the page did not listen to left no trace of
+	// any kind. "Show me what this page could not name" has to be one filter,
+	// not a scan of every note ever recorded.
+	KindInput Kind = "input"
 	// KindNote is anything a caller wants recorded that is none of the above,
 	// and the landing place for a kind this build does not recognise.
 	KindNote Kind = "note"
 )
 
 // Kinds lists every known kind, in the order a UI should offer them.
-var Kinds = []Kind{KindError, KindRejection, KindGesture, KindView, KindFetch, KindLifecycle, KindNote}
+//
+// Appended rather than slotted in beside its thematic neighbour: this order is
+// what a filter UI renders, so adding one should not renumber the rest.
+var Kinds = []Kind{KindError, KindRejection, KindGesture, KindView, KindFetch, KindLifecycle, KindNote, KindInput}
 
 // Valid reports whether k is a known kind.
 func (k Kind) Valid() bool {
