@@ -63,9 +63,6 @@ var (
 	// authentication.
 	ErrSessionNotFound = errors.New("claudeproxy: no such session")
 
-	// ErrBudgetExhausted means the session's request budget is spent.
-	ErrBudgetExhausted = errors.New("claudeproxy: session request budget exhausted")
-
 	// ErrNoUpstream means no Anthropic credential is configured, so there is
 	// nothing to relay to.
 	ErrNoUpstream = errors.New("claudeproxy: no upstream Anthropic credential is configured")

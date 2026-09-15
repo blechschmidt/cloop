@@ -67,7 +67,6 @@ const ciReapInterval = 5 * time.Minute
 // reached only from handlers, and a global would be one more thing a pkg/ui
 // test mutates for every other test in the package.
 type ciService struct {
-	cfg      config.CIConfig
 	verifier *ciauth.Verifier
 	reg      *claudeproxy.Registry
 	proxy    *claudeproxy.Proxy
@@ -250,7 +249,6 @@ func (s *Server) buildCIService(cfg *config.Config) (*ciService, error) {
 
 	reapCtx, stop := context.WithCancel(context.Background())
 	svc := &ciService{
-		cfg:         c,
 		verifier:    verifier,
 		reg:         reg,
 		proxy:       px,

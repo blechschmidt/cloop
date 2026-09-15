@@ -54,12 +54,12 @@ const DefaultAudience = "cloop"
 var (
 	// ErrUnverified means the token is not something this hub will read: bad
 	// signature, wrong issuer, wrong audience, expired, replayed.
+	//
+	// Its counterpart — a genuine token naming a pipeline no rule admits — has
+	// no error, because it is not one. RuleSet.Match reports a nil Rule, which
+	// is the ordinary outcome on a correctly configured hub and the caller
+	// turns into a 403.
 	ErrUnverified = errors.New("ciauth: token not verified")
-
-	// ErrNoRule means the token is genuine and names an identity no rule
-	// admits. This is the common case on a correctly configured hub and is
-	// not an error condition worth alerting on.
-	ErrNoRule = errors.New("ciauth: no rule admits this pipeline")
 
 	// ErrReplayed means this exact token was already exchanged.
 	ErrReplayed = errors.New("ciauth: token has already been exchanged")

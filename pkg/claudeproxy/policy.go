@@ -27,8 +27,13 @@ const (
 	DenyBodyTooLarge    DenyReason = "body_too_large"
 	DenyBodyMalformed   DenyReason = "body_malformed"
 	DenyBudget          DenyReason = "budget_exhausted"
-	DenyExpired         DenyReason = "session_expired"
 )
+
+// There is deliberately no "session_expired" reason. An expired session is
+// refused by Registry.Authenticate, which reports ErrUnauthenticated and is
+// indistinguishable from an unknown one — so no relay denial can ever carry
+// it, and a reason code nothing emits is a promise to an audit consumer that
+// will never be kept.
 
 // Denial is a refusal with a reason and a message safe to return to the
 // pipeline. The message names what is wrong with the request, never what the
