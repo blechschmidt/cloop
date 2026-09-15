@@ -232,25 +232,42 @@ const (
 	enforcementUnguarded = "unguarded"
 )
 
-// grantEnforcement reports where a grant of this kind has its repository
-// allowlist checked on this hub.
+// grantEnforcement reports where a grant of this kind has its scope checked
+// on this hub.
 //
-// Only github_pat is answered. Every other kind is narrowed by rewriting the
-// payload before delivery — a kubeconfig loses the contexts it may not use, an
-// App credential is exchanged for a token GitHub itself has already scoped — so
-// there is no gap between what the grant says and what the workload holds, and
-// no question for this field to answer.
+// Two kinds are answered, and they are the two whose grant says more than the
+// delivered payload can enforce by itself:
+//
+//   - github_pat, whose repository allowlist is otherwise checked by a
+//     credential helper running inside the sandbox;
+//   - kubeconfig, whose namespace allowlist is otherwise a client-side
+//     default that `kubectl -n` ignores, and whose verbs have no
+//     representation in the document at all.
+//
+// The other kinds are narrowed by rewriting the payload before delivery — an
+// App credential is exchanged for a token GitHub itself has already scoped, a
+// registry secret loses the auth entries it may not use — so there is no gap
+// between what the grant says and what the workload holds, and no question
+// for this field to answer.
 func grantEnforcement(kind secretbroker.Kind) string {
-	if kind != secretbroker.KindGitHubPAT {
+	// Required-but-absent reports as unguarded rather than as proxy in both
+	// cases: the lease will fail, and a row claiming the stronger mode would
+	// be the one thing worse than the weaker one — a promise the hub is not
+	// keeping.
+	switch kind {
+	case secretbroker.KindGitHubPAT:
+		if activeGitProxy() == nil {
+			return enforcementUnguarded
+		}
+		return enforcementProxy
+	case secretbroker.KindKubeconfig:
+		if activeKubeGuard() == nil {
+			return enforcementUnguarded
+		}
+		return enforcementProxy
+	default:
 		return ""
 	}
-	// Required-but-absent reports as unguarded rather than as proxy: the lease
-	// will fail, and a row claiming the stronger mode would be the one thing
-	// worse than the weaker one — a promise the hub is not keeping.
-	if activeGitProxy() == nil {
-		return enforcementUnguarded
-	}
-	return enforcementProxy
 }
 
 // unavailableGitGuard is what a hub that asked for a proxy and has not got one

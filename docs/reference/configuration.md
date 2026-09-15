@@ -787,6 +787,75 @@ that mints them must be the one that serves them — and there is deliberately n
 standalone command. Full design and operations:
 [git interception proxy](../git-interception-proxy.md).
 
+### Kubernetes access monitor
+
+A kubeconfig grant is delivered by rewriting the document: contexts outside
+`--contexts` are dropped, and the clusters and users nothing references go with
+them. That answers "which clusters" and nothing else. The namespace written into
+a delivered context is a **client-side default** — `kubectl -n kube-system get
+secrets` ignores it — and read-only has no representation in a kubeconfig at all,
+because the document carries a credential whose authority is the cluster's RBAC,
+frequently cluster-admin on a kubeconfig a developer uploaded.
+
+`executors.kube_guard` inverts that: the hub keeps the cluster credential, runs
+an API interception proxy, and hands the sandbox a kubeconfig pointing at the
+monitor with a short-lived bearer token. Every request is parsed into (verb,
+group, resource, subresource, namespace, name) and matched against the grant
+before the credential is attached.
+
+```yaml
+executors:
+  kube_guard:
+    enabled: true
+    listen_addr: "0.0.0.0:8444"                  # where it binds
+    advertise_url: "https://hub.internal:8444"   # what the SANDBOX connects to
+    cert_file: /etc/cloop/tls/kube-guard.crt
+    key_file: /etc/cloop/tls/kube-guard.key
+    ca_file: /etc/cloop/tls/kube-guard-ca.pem    # empty falls back to cert_file
+    min_tls_version: "1.2"                       # or "1.3"
+    session_minutes: 60                          # 0 means 60; ceiling is 720
+    verbs: [get, list, watch]                    # a hub-wide floor, not the policy
+    namespaces: ["team-*"]
+    resources: ["pods", "configmaps", "apps/deployments"]
+```
+
+- **Off by default.** Interposing a monitor changes the server a sandbox's
+  `kubectl` talks to, so it is an operator's decision rather than something a
+  config file acquires on upgrade. With it off, kubeconfigs are minimised and
+  delivered exactly as before.
+- **TLS is required.** The session token rides an `Authorization` header on every
+  request. An enabled section without both `cert_file` and `key_file` is switched
+  off at load rather than publishing tokens in cleartext. Unlike the git proxy,
+  the trust anchor needs no change to the sandbox image: `ca_file` (or
+  `cert_file`) is embedded into the delivered kubeconfig as
+  `certificate-authority-data`.
+- **`advertise_url` must be reachable from where `kubectl` runs**, and must be a
+  bare `https://` base with no path — it becomes the kubeconfig's `server:`.
+  Empty falls back to the bound address, which is right only when the sandbox
+  shares the hub's network namespace.
+- **`verbs` is a hub-wide floor**, intersected with each grant's own: empty means
+  read-only, and setting it read-only is how an operator says "no project on this
+  hub may ever write to a cluster". A grant asking for verbs the floor excludes
+  is refused. `namespaces` and `resources` intersect too, but an empty result on
+  those reads as "no restriction" rather than as a refusal — write them as a
+  literal superset of every grant, or leave them empty. See
+  [the floor](../architecture/kubernetes-access.md#the-deployment-floor-and-the-grant-intersect).
+- **`exec`, `attach`, `portforward` and `proxy` are refused for every verb** and
+  cannot be re-enabled by any policy: `GET .../pods/x/exec` is a shell, not a
+  read. Protocol upgrades are refused; ordinary watches still work.
+- **A hub that cannot start the monitor refuses kubeconfig leases** rather than
+  falling back to delivering the cluster credential. Everything else keeps
+  working.
+- Every decision lands in the hash-chained audit log as
+  `kubeguard.request_denied`, `kubeguard.session_minted`,
+  `kubeguard.session_closed` and `kubeguard.rejected`, and is counted by
+  `cloop_kubeguard_requests_total` and `cloop_kubeguard_denials_total`. Alert on
+  the first.
+
+Like the git proxy, it runs inside the hub process and has no standalone command.
+Full design and operations:
+[Kubernetes access monitor](../architecture/kubernetes-access.md).
+
 ### Hardened (enterprise) configuration
 
 By default cloop may run workloads as child processes of the control plane. To

@@ -273,6 +273,10 @@ func (sl *secretLease) Close() {
 		// session is the thing that carries authority here, so it has to be
 		// closed along with everything else that does.
 		closeGuardedSessions(sl.lease)
+		// The Kubernetes monitor's sessions carry authority in exactly the
+		// same way, and outlive a released lease in exactly the same way if
+		// nothing closes them.
+		closeKubeGuardSessions(sl.lease)
 
 		if sl.broker != nil && sl.lease != nil {
 			sl.broker.Release(sl.lease.ID)
@@ -447,7 +451,12 @@ func openUIBrokerDB(controlPlaneDir string) (*secretbroker.Broker, *statedb.DB, 
 	// the one that materialises a project's granted credentials into a
 	// sandbox — and it is where a user's personal PAT would otherwise land in
 	// the workload's filesystem. See gitguard.go.
-	return attachGitGuard(broker), db, func() { _ = db.Close() }, nil
+	// And at the Kubernetes access monitor, so a kubeconfig is delivered as a
+	// monitor session rather than as the cluster credential. Same path, same
+	// reasoning: this is where a user's personal kubeconfig — frequently the
+	// cluster-admin one their own administrator issued them — would otherwise
+	// land in the workload's filesystem. See kubeguard.go.
+	return attachKubeGuard(attachGitGuard(broker)), db, func() { _ = db.Close() }, nil
 }
 
 // isBrokerUnconfigured reports whether the broker simply is not set up on

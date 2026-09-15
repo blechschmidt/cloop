@@ -71,6 +71,32 @@ func newClient(rc *RESTConfig, requestTimeout time.Duration) (*client, error) {
 	if rc == nil {
 		return nil, fmt.Errorf("kubernetes: nil REST config")
 	}
+	transport, err := rc.Transport(requestTimeout)
+	if err != nil {
+		return nil, err
+	}
+	return &client{
+		rest:      rc,
+		unary:     &http.Client{Transport: transport, Timeout: requestTimeout},
+		stream:    &http.Client{Transport: transport},
+		userAgent: "cloop-executor/1 (kubernetes)",
+	}, nil
+}
+
+// Transport returns an http.Transport that reaches this API server with this
+// config's TLS material. It performs no I/O.
+//
+// responseHeaderTimeout bounds how long the server may take to send response
+// headers; pass zero for streaming callers, where any such bound is a bug.
+//
+// Exported because pkg/kubeguard proxies to an API server described by a
+// RESTConfig it obtained the same way this driver does, and a second TLS
+// construction there would be a second place for "does this kubeconfig say
+// insecure" to be answered. One function, so the two cannot drift.
+func (rc *RESTConfig) Transport(responseHeaderTimeout time.Duration) (*http.Transport, error) {
+	if rc == nil {
+		return nil, fmt.Errorf("kubernetes: nil REST config")
+	}
 	tlsCfg, err := rc.tlsConfig()
 	if err != nil {
 		return nil, err
@@ -79,7 +105,7 @@ func newClient(rc *RESTConfig, requestTimeout time.Duration) (*client, error) {
 		TLSClientConfig:       tlsCfg,
 		DialContext:           (&net.Dialer{Timeout: dialTimeout, KeepAlive: 30 * time.Second}).DialContext,
 		TLSHandshakeTimeout:   tlsTimeout,
-		ResponseHeaderTimeout: requestTimeout,
+		ResponseHeaderTimeout: responseHeaderTimeout,
 		MaxIdleConnsPerHost:   4,
 		// Streaming endpoints send chunked bodies that must not be buffered.
 		DisableCompression: true,
@@ -92,12 +118,7 @@ func newClient(rc *RESTConfig, requestTimeout time.Duration) (*client, error) {
 		}
 		transport.Proxy = http.ProxyURL(pu)
 	}
-	return &client{
-		rest:      rc,
-		unary:     &http.Client{Transport: transport, Timeout: requestTimeout},
-		stream:    &http.Client{Transport: transport},
-		userAgent: "cloop-executor/1 (kubernetes)",
-	}, nil
+	return transport, nil
 }
 
 // close releases pooled connections. Called when a handle is finished so a

@@ -315,7 +315,11 @@ capabilities dropped, `seccompProfile: RuntimeDefault`, and
 `automountServiceAccountToken: false`. The kubeconfig comes from a
 [secret broker lease](../guides/secrets.md#kubeconfig), is held in memory for the
 handle's lifetime, renewed while running, and released on a terminal state — it
-is never written to the hub's disk.
+is never written to the hub's disk. This is the hub acting as itself, so it is
+deliberately *not* routed through the
+[Kubernetes access monitor](kubernetes-access.md): that monitor governs the
+kubeconfigs delivered **into** a sandbox, and a read-only policy in front of this
+one would stop the hub creating Pods at all.
 
 There is no bind mount here, so `/workspace` starts empty and the source tree
 arrives by way of a `workspace` init container — see

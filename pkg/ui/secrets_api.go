@@ -204,9 +204,21 @@ type grantConstraintsView struct {
 	Permissions []string `json:"permissions,omitempty"`
 	Namespaces  []string `json:"namespaces,omitempty"`
 	Contexts    []string `json:"contexts,omitempty"`
-	Hosts       []string `json:"hosts,omitempty"`
-	Registries  []string `json:"registries,omitempty"`
-	EnvKeys     []string `json:"env_keys,omitempty"`
+	// Verbs is the kubeconfig RBAC verb allowlist, exactly as the grant
+	// stores it — empty when the operator said nothing, which is a different
+	// fact from "read-only" and is why ReadOnly is sent beside it.
+	Verbs []string `json:"verbs,omitempty"`
+	// ReadOnly is the resolved answer to "can this grant change the cluster",
+	// sent only for kubeconfig. It is here rather than derived in the panel
+	// because the rule it encodes — an empty verb list means get, list and
+	// watch — lives in secretbroker.Constraints.KubeReadOnly, and a second
+	// copy of it in JavaScript is a copy that can drift. A blank Verbs with
+	// no ReadOnly beside it is exactly the shape an operator would misread as
+	// "unconstrained", which for a cluster credential is the wrong way round.
+	ReadOnly   bool     `json:"read_only,omitempty"`
+	Hosts      []string `json:"hosts,omitempty"`
+	Registries []string `json:"registries,omitempty"`
+	EnvKeys    []string `json:"env_keys,omitempty"`
 	// Writable is local_repo-only: true means the bind is read-write.
 	Writable bool `json:"writable,omitempty"`
 
@@ -804,6 +816,7 @@ func secretGrantView(g secretbroker.Grant, sec secretbroker.Secret, now time.Tim
 			Permissions: g.Constraints.Permissions,
 			Namespaces:  g.Constraints.Namespaces,
 			Contexts:    g.Constraints.Contexts,
+			Verbs:       g.Constraints.Verbs,
 			Hosts:       g.Constraints.Hosts,
 			Registries:  g.Constraints.Registries,
 			EnvKeys:     g.Constraints.EnvKeys,
@@ -815,6 +828,13 @@ func secretGrantView(g secretbroker.Grant, sec secretbroker.Secret, now time.Tim
 		Status:           status,
 		Active:           active,
 		RemainingSeconds: remaining,
+	}
+	// Only for kubeconfig. KubeReadOnly answers true for every other kind too —
+	// they carry no verbs, so the read-only set is trivially what they resolve
+	// to — and a "read-only" flag on a github grant would be a claim about
+	// something this field does not describe.
+	if sec.Kind == secretbroker.KindKubeconfig {
+		v.Constraints.ReadOnly = g.Constraints.KubeReadOnly()
 	}
 	if !g.ExpiresAt.IsZero() {
 		exp := g.ExpiresAt
@@ -885,9 +905,14 @@ type createGrantRequest struct {
 	Permissions []string `json:"permissions"`
 	Namespaces  []string `json:"namespaces"`
 	Contexts    []string `json:"contexts"`
-	Hosts       []string `json:"hosts"`
-	Registries  []string `json:"registries"`
-	EnvKeys     []string `json:"env_keys"`
+	// Verbs is the kubeconfig RBAC verb allowlist. Absent means read-only —
+	// get, list and watch — so a panel that omits the field grants the safe
+	// reading rather than an unconstrained one. The broker rejects it on any
+	// other kind.
+	Verbs      []string `json:"verbs"`
+	Hosts      []string `json:"hosts"`
+	Registries []string `json:"registries"`
+	EnvKeys    []string `json:"env_keys"`
 	// Writable makes a local_repo grant read-write. Absent means read-only,
 	// which is both the safe reading and the common one.
 	Writable bool `json:"writable"`
@@ -975,6 +1000,7 @@ func (s *Server) handleGrantCreate(w http.ResponseWriter, r *http.Request) {
 			Permissions: cleanList(req.Permissions),
 			Namespaces:  cleanList(req.Namespaces),
 			Contexts:    cleanList(req.Contexts),
+			Verbs:       cleanList(req.Verbs),
 			Hosts:       cleanList(req.Hosts),
 			Registries:  cleanList(req.Registries),
 			EnvKeys:     cleanList(req.EnvKeys),

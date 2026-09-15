@@ -95,6 +95,10 @@ func bootstrapExecutors(dir string) {
 	// after this point would route the edge devices that connect later and
 	// silently miss every Pod. See gitproxy.go.
 	ensureGitProxy(dir)
+	// The Kubernetes access monitor, for the same reason and at the same
+	// point: a broker built before it exists would deliver an unmonitored
+	// kubeconfig. See kubeguard.go.
+	ensureKubeGuard(dir)
 	// Policy first. Registration of a non-isolating driver is refused under
 	// strict mode, so reading the config after registering would let the host
 	// driver in through the door the policy exists to close. (The eviction

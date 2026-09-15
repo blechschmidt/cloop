@@ -369,6 +369,42 @@ security signal and not only an operational one. `reason` is
 rate(cloop_gitproxy_push_denials_total{reason="ref_not_allowed"}[5m]) > 0.1
 ```
 
+## Kubernetes access monitor
+
+| Metric | Type | Labels |
+| --- | --- | --- |
+| `cloop_kubeguard_requests_total` | counter | `result` |
+| `cloop_kubeguard_denials_total` | counter | `reason` |
+
+Same shape and same reasoning as the git proxy above: this is the boundary a
+sandbox's `kubectl` passes through, so the denial counter says whether the
+boundary is being tested. `result` is `allowed` or `denied`; `reason` is
+`verb_not_allowed`, `namespace_not_allowed`, `cluster_scope`,
+`resource_not_allowed`, `dangerous_subresource`, `non_resource_path`,
+`protocol_upgrade`, `body_too_large` or `unauthenticated`. Sustained
+`verb_not_allowed` is a workload expecting write access it was not granted;
+`dangerous_subresource` is an attempt to open a shell inside a pod.
+
+A proxy-side failure — an unreachable cluster, an unusable credential — is
+counted as **neither** allowed nor denied, so the denial rate does not lie in
+exactly the situation an operator is paging on.
+
+**A workload expecting write access it was not granted**
+
+```promql
+rate(cloop_kubeguard_denials_total{reason="verb_not_allowed"}[5m]) > 0.1
+```
+
+**An attempt to get a shell in a pod.** The monitor refuses `exec`, `attach`,
+`portforward` and `proxy` for every verb, so this should be flat at zero:
+
+```promql
+rate(cloop_kubeguard_denials_total{reason="dangerous_subresource"}[5m]) > 0
+```
+
+See [the Kubernetes access monitor](../architecture/kubernetes-access.md) for
+what each reason means.
+
 ## Egress broker
 
 | Metric | Type | Labels |

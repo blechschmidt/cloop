@@ -293,6 +293,25 @@ var (
 	})
 )
 
+// Kubernetes access monitor. Same shape and same reasoning as the git proxy
+// above: this is the boundary a sandbox's kubectl passes through, so the
+// denial counter says whether the boundary is being tested.
+var (
+	KubeGuardRequests = Default.MustRegister(Definition{
+		Name:   "cloop_kubeguard_requests_total",
+		Help:   "Kubernetes API requests evaluated by the access monitor, by result (allowed or denied).",
+		Type:   TypeCounter,
+		Labels: []string{"result"},
+	})
+
+	KubeGuardDenials = Default.MustRegister(Definition{
+		Name:   "cloop_kubeguard_denials_total",
+		Help:   "Kubernetes API requests refused, by reason (verb_not_allowed, namespace_not_allowed, cluster_scope, resource_not_allowed, dangerous_subresource, non_resource_path, protocol_upgrade, body_too_large, unauthenticated). Sustained verb_not_allowed is a workload that expects write access it was not granted; dangerous_subresource is an attempt to exec into a pod.",
+		Type:   TypeCounter,
+		Labels: []string{"reason"},
+	})
+)
+
 // Egress broker: the hub's Internet connection, leased to sandboxes.
 var (
 	EgressRequests = Default.MustRegister(Definition{

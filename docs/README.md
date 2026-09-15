@@ -42,6 +42,16 @@ Five pages in order, indexed at
   — the `--internal` network, the host-side nftables ruleset, the per-Pod
   `NetworkPolicy` and why the filter is installed before the workload — and the
   outbound agent enrollment flow for NAT'd edge devices.
+- **[Kubernetes access monitor](architecture/kubernetes-access.md)** — how a
+  sandbox is allowed to read one namespace of a cluster and nothing else,
+  without ever holding a credential that could reach the rest of it: why a
+  minimised kubeconfig cannot express either a namespace bound or read-only,
+  the proxy that parses every API request into (verb, group, resource,
+  subresource, namespace, name) before the cluster credential is attached, the
+  subresources that are refused for every verb because they are a shell rather
+  than data, and [operating it](architecture/kubernetes-access.md#turning-it-on)
+  — `executors.kube_guard`, the grant's `--verbs`, and what a leaked session
+  token is worth. Off by default.
 
 ## Reference
 

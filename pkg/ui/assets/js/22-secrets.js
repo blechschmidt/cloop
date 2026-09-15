@@ -240,6 +240,18 @@ function _secConstraintCell(g) {
   add('perms', _secChips(c.permissions));
   add('contexts', _secChips(c.contexts));
   add('namespaces', _secChips(c.namespaces));
+  // Verbs are the one dimension whose empty value is not "unset" but a policy
+  // of its own, so the row renders the *effective* set rather than a blank an
+  // operator would read as "anything goes". Whether that set writes comes from
+  // the server (constraints.read_only) rather than from a second copy of the
+  // rule here — the two disagreeing would be a badge that lies about a cluster
+  // credential, which is the one thing this cell exists to prevent.
+  if (g.kind === 'kubeconfig') {
+    add('verbs', _secChips((c.verbs && c.verbs.length) ? c.verbs : ['get','list','watch']) +
+      (c.read_only
+        ? ' <span class="sec-chip ok" title="Read-only: nothing this grant permits can create, change or delete anything in the cluster.">read-only</span>'
+        : ' <span class="sec-chip warn" title="This grant carries a write verb, so the holder can change the cluster within the granted contexts and namespaces.">writes</span>'));
+  }
   add('hosts', _secChips(c.hosts));
   add('cidrs', _secChips(c.cidrs));
   add('ports', _secChips(c.ports));
@@ -253,23 +265,36 @@ function _secConstraintCell(g) {
   if (c.session_ttl_seconds) {
     parts.push('<div><span class="sec-count">session</span> ' + esc(_secFmtDuration(c.session_ttl_seconds)) + '</div>');
   }
-  // Where the repos allowlist above is actually checked. Only github_pat sends
-  // this, because it is the only kind whose allowlist can be advisory: without
-  // the git proxy the token itself goes into the sandbox and the allowlist is
-  // enforced by a helper the workload could read around. The row already shows
-  // "repos acme/*" either way, so without this the two cases are
-  // indistinguishable — which is the case worth marking.
+  // Where the allowlist above is actually checked. Two kinds send this, because
+  // they are the two whose grant can say more than the delivered payload
+  // enforces: a github_pat's repository list is otherwise checked by a helper
+  // inside the sandbox, and a kubeconfig's verbs have no representation in the
+  // file at all. The row already shows "repos acme/*" or "verbs create" either
+  // way, so without this the two cases are indistinguishable — which is the
+  // case worth marking.
+  //
+  // The wording follows the kind rather than the mode, because the remedy
+  // differs: a kubeconfig row telling an operator to enable the git proxy
+  // names a setting that would not change anything about this grant.
+  const kube = g.kind === 'kubeconfig';
   if (g.enforcement === 'proxy') {
     parts.push('<div><span class="sec-count">enforced</span> ' +
-      '<span class="sec-chip ok" title="The git proxy holds the token. The repository ' +
-      'allowlist and ref policy are enforced outside the sandbox, which never sees ' +
-      'the credential.">&#128274; git proxy</span></div>');
+      '<span class="sec-chip ok" title="' + (kube
+        ? 'The Kubernetes access monitor stands between the sandbox and the API server. ' +
+          'Contexts, namespaces and verbs are checked outside the sandbox, on every request.'
+        : 'The git proxy holds the token. The repository allowlist and ref policy are ' +
+          'enforced outside the sandbox, which never sees the credential.') +
+      '">&#128274; ' + (kube ? 'kube monitor' : 'git proxy') + '</span></div>');
   } else if (g.enforcement === 'unguarded') {
     parts.push('<div><span class="sec-count">enforced</span> ' +
-      '<span class="sec-chip warn" title="The token is delivered into the sandbox and ' +
-      'the allowlist is enforced by a credential helper the workload could read around. ' +
-      'Enable executors.git_proxy to hold the token on the hub instead.">' +
-      '&#9888; in sandbox</span></div>');
+      '<span class="sec-chip warn" title="' + (kube
+        ? 'The kubeconfig is delivered into the sandbox and nothing checks the verbs on it — ' +
+          'a kubeconfig has no field for them, so the cluster\'s own RBAC is the only limit. ' +
+          'Enable executors.kube_guard to enforce this grant outside the sandbox.'
+        : 'The token is delivered into the sandbox and the allowlist is enforced by a ' +
+          'credential helper the workload could read around. Enable executors.git_proxy to ' +
+          'hold the token on the hub instead.') +
+      '">&#9888; in sandbox</span></div>');
   }
   return parts.length ? parts.join('') : '<span class="sec-count">' + esc(g.summary || 'none') + '</span>';
 }
@@ -680,7 +705,7 @@ const SEC_GRANT_KINDS = {
 window.openGrantModal = function() {
   const err = document.getElementById('grantError');
   if (err) err.style.display = 'none';
-  ['grantRepos','grantPermissions','grantContexts','grantNamespaces','grantHosts',
+  ['grantRepos','grantPermissions','grantContexts','grantNamespaces','grantVerbs','grantHosts',
    'grantCIDRs','grantPorts','grantMethods','grantMaxUp','grantMaxDown','grantSessionTTL',
    'grantRegistries','grantEnvKeys','grantProxyHosts','grantScope','grantSubject'].forEach(id => {
     const el = document.getElementById(id);
@@ -763,6 +788,12 @@ window.submitGrant = function() {
 
   if (kind !== 'egress') {
     _secReadConstraints('grant', kind, body);
+    // Verbs stay out of SEC_KIND_CONSTRAINTS for the same reason egress's
+    // dimensions do: that table is shared with the access-request form, whose
+    // body has no verbs field. An entry there would let an asker type
+    // `create` into a request that files without it, and the approval would
+    // read as granting a write it never carried.
+    if (kind === 'kubeconfig') body.verbs = _secList('grantVerbs');
   } else {
     body.hosts = _secList('grantHosts');
     body.cidrs = _secList('grantCIDRs');

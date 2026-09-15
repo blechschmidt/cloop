@@ -30,6 +30,25 @@ type Constraints struct {
 	// Contexts is the kubeconfig context allowlist. The delivered
 	// kubeconfig contains only these contexts.
 	Contexts []string `json:"contexts,omitempty"`
+	// Verbs is the RBAC verb allowlist for a kubeconfig grant: what the
+	// holder may *do* to the cluster, as opposed to which parts of it the
+	// other two fields let them see.
+	//
+	// Empty means read-only — get, list and watch — which is the answer to
+	// "an operator granted a cluster and said nothing about writes". It is
+	// the one place in this struct where an empty list is neither "allow all"
+	// nor a validation error, and the asymmetry is deliberate: the safe
+	// reading of silence about a cluster credential is that nobody asked for
+	// the ability to change anything.
+	//
+	// Unlike Namespaces and Contexts, this cannot be enforced by rewriting
+	// the kubeconfig — a kubeconfig has no field for it. It is enforced by
+	// pkg/kubeguard, the monitor the hub runs outside the sandbox, and it
+	// therefore only takes effect when executors.kube_guard is enabled.
+	// KubeconfigGuarded reports whether that is so for a given grant, and the
+	// Secrets panel renders the difference rather than letting a grant claim
+	// an enforcement that is not running.
+	Verbs []string `json:"verbs,omitempty"`
 	// Hosts is the allowed-host list for egress_proxy. A leading "*."
 	// matches subdomains only, not the bare domain.
 	Hosts []string `json:"hosts,omitempty"`
@@ -174,6 +193,14 @@ func (c Constraints) ValidateFor(kind Kind) error {
 				"%w: a kubeconfig grant needs --namespaces and/or --contexts",
 				ErrInvalidConstraint)
 		}
+		for _, v := range c.Verbs {
+			if !knownKubeVerb(v) {
+				return fmt.Errorf(
+					"%w: %q is not a Kubernetes verb; use one or more of %s, or omit --verbs "+
+						"for read-only access",
+					ErrInvalidConstraint, v, strings.Join(kubeVerbOrder, ", "))
+			}
+		}
 	case KindEgressProxy:
 		if len(c.Hosts) == 0 {
 			return fmt.Errorf(
@@ -211,7 +238,67 @@ func (c Constraints) ValidateFor(kind Kind) error {
 			"%w: a device allowlist applies to host_device grants, not %s",
 			ErrInvalidConstraint, kind)
 	}
+	if len(c.Verbs) > 0 && kind != KindKubeconfig {
+		return fmt.Errorf(
+			"%w: a verb allowlist applies to kubeconfig grants, not %s",
+			ErrInvalidConstraint, kind)
+	}
 	return nil
+}
+
+// kubeVerbOrder is the RBAC verb set, in the order an operator reads it.
+//
+// Spelled out here rather than imported from pkg/kubeguard because that
+// package parses a kubeconfig with pkg/executor/kubernetes, which imports
+// this one — so the dependency can only run one way. The lists agreeing is a
+// correctness requirement rather than a coincidence, and
+// pkg/kubeguard/constraints_test.go asserts it from the side that is allowed
+// to see both.
+var kubeVerbOrder = []string{
+	"get", "list", "watch", "create", "update", "patch", "delete", "deletecollection",
+}
+
+// kubeReadVerbs are the verbs that only read. The empty Verbs list means
+// exactly this set; see the field comment.
+var kubeReadVerbs = []string{"get", "list", "watch"}
+
+func knownKubeVerb(v string) bool {
+	want := strings.ToLower(strings.TrimSpace(v))
+	for _, k := range kubeVerbOrder {
+		if k == want {
+			return true
+		}
+	}
+	return false
+}
+
+// KubeVerbs returns the effective verb allowlist for a kubeconfig grant,
+// resolving the empty list to read-only.
+//
+// Callers must use this rather than reading Verbs directly, because the two
+// differ in exactly the case that matters: a grant nobody configured.
+func (c Constraints) KubeVerbs() []string {
+	if len(c.Verbs) == 0 {
+		return append([]string(nil), kubeReadVerbs...)
+	}
+	out := make([]string, 0, len(c.Verbs))
+	for _, v := range c.Verbs {
+		out = append(out, strings.ToLower(strings.TrimSpace(v)))
+	}
+	return out
+}
+
+// KubeReadOnly reports whether the grant's effective verbs only read. It is
+// what the UI badges and the audit summary render.
+func (c Constraints) KubeReadOnly() bool {
+	for _, v := range c.KubeVerbs() {
+		switch v {
+		case "get", "list", "watch":
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // validateEnvKey enforces POSIX-ish environment variable naming. A key with
@@ -563,6 +650,7 @@ func (c Constraints) Summary() string {
 	add("perms", c.Permissions)
 	add("ns", c.Namespaces)
 	add("ctx", c.Contexts)
+	add("verbs", c.Verbs)
 	add("hosts", c.Hosts)
 	add("registries", c.Registries)
 	add("env", c.EnvKeys)

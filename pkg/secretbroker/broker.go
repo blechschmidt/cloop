@@ -54,6 +54,17 @@ type Broker struct {
 	// layer this package must not import.
 	GitGuard GitGuard
 
+	// KubeGuard, when set, takes custody of a kubeconfig so the sandbox
+	// receives a monitor session instead of the cluster credential. It turns
+	// the namespace allowlist from a client-side default into a bound, and it
+	// is the only way a kubeconfig grant's verbs mean anything at all. See
+	// kubeguard.go.
+	//
+	// Exported and settable after construction for the same reason GitGuard
+	// is: the monitor it fronts is started by pkg/ui alongside the hub, later
+	// than the broker and from a layer this package must not import.
+	KubeGuard KubeGuard
+
 	mu     sync.Mutex
 	leases map[string]*leaseState
 	// minted holds the GitHub App installation tokens this broker is

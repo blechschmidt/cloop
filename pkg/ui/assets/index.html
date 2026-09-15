@@ -2440,12 +2440,24 @@
           <input class="form-input" id="grantNamespaces" placeholder="team-a, team-a-ci">
         </div>
       </div>
+      <div class="form-group">
+        <label class="form-label" for="grantVerbs">Verb allowlist</label>
+        <input class="form-input" id="grantVerbs" placeholder="leave blank for read-only &mdash; get, list, watch">
+      </div>
       <div class="sec-hint">
-        At least one of the two is required. The delivered kubeconfig is <em>rewritten</em> to contain only the
-        allowed contexts with an allowed namespace pinned on each, so this is enforced by construction rather
-        than by convention. Verb-level restriction is not cloop's to give: which verbs the kubeconfig's user may
-        use is decided by the cluster's own RBAC, so bind that user to a Role that permits only what this grant
-        is for.
+        A context or namespace allowlist is required. The verb allowlist is optional, and blank means
+        <strong>read-only</strong>: <code>get</code>, <code>list</code>, <code>watch</code>. Naming any other verb
+        (<code>create</code>, <code>update</code>, <code>patch</code>, <code>delete</code>,
+        <code>deletecollection</code>) is what authorises a write.
+        <br><br>
+        The delivered kubeconfig is <em>rewritten</em> to contain only the allowed contexts, so a cluster this
+        grant excludes is unreachable by construction. The namespace and the verbs are not like that: a namespace
+        in a kubeconfig is only the default <code>kubectl</code> uses when you omit <code>-n</code>, and a
+        kubeconfig has no field for verbs at all. Both are enforced outside the sandbox by the
+        <strong>Kubernetes access monitor</strong>, which reads every API request before the cluster credential is
+        attached. With <code>executors.kube_guard</code> off they are recorded and audited but not enforced, and
+        the cluster&rsquo;s own RBAC is the only limit &mdash; so bind that user to a Role that permits only what
+        this grant is for.
       </div>
     </div>
 

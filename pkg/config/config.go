@@ -496,6 +496,93 @@ type ExecutorsConfig struct {
 	// GitProxy configures the git interception proxy that keeps the forge
 	// credential on the hub and enforces a branch allowlist on every push.
 	GitProxy GitProxyConfig `yaml:"git_proxy,omitempty"`
+
+	// KubeGuard configures the Kubernetes access monitor that keeps the
+	// cluster credential on the hub and decides every API request.
+	KubeGuard KubeGuardConfig `yaml:"kube_guard,omitempty"`
+}
+
+// KubeGuardConfig configures the Kubernetes access monitor (Task 20277).
+//
+// With it off, a kubeconfig grant delivers a *minimised* kubeconfig: the
+// contexts outside the allowlist are gone, and with them the clusters and
+// users nothing references. That is real, and for "which clusters may this
+// project reach" it is sufficient. It cannot do the other two things:
+//
+//   - the namespace in a delivered context is a client-side default, so
+//     `kubectl -n kube-system get secrets` ignores it entirely;
+//   - read-only cannot be expressed in a kubeconfig at all, because the
+//     document carries a credential and the credential's authority is
+//     whatever the cluster's RBAC says — frequently cluster-admin, since the
+//     kubeconfig a developer uploads is usually their own.
+//
+// With it on, the cluster credential stays on the hub. The sandbox receives a
+// kubeconfig pointing at this monitor, holding a bearer token worth only what
+// the grant's verbs and namespaces permit, for the session's TTL. Every
+// request is parsed and decided before it reaches the API server, and every
+// refusal lands in the audit trail.
+type KubeGuardConfig struct {
+	// Enabled starts the monitor with the control plane and routes every
+	// kubeconfig grant through it. Off by default: interposing a monitor
+	// changes the server a sandbox's kubectl talks to, and that must be an
+	// operator's decision rather than something a config file acquires on
+	// upgrade.
+	Enabled bool `yaml:"enabled,omitempty"`
+
+	// ListenAddr is the monitor's bind address. Empty binds an ephemeral
+	// loopback port, which is safe and — for anything but a sandbox sharing
+	// the host's network namespace — unusable. See AdvertiseURL.
+	ListenAddr string `yaml:"listen_addr,omitempty"`
+
+	// AdvertiseURL is the https base URL sandboxes are pointed at; it becomes
+	// the `server:` field of the delivered kubeconfig. It must be reachable
+	// *from the sandbox*, which is frequently not where the hub sees itself:
+	// podman reaches the host at host.containers.internal, docker at
+	// host.docker.internal, a Pod at a Service name, and an edge device at
+	// whatever address the hub has on the link between them.
+	AdvertiseURL string `yaml:"advertise_url,omitempty"`
+
+	// CertFile and KeyFile are the monitor's TLS material. Both are required
+	// when Enabled: the session token rides an Authorization header on every
+	// request, and over cleartext that token is published rather than
+	// delivered.
+	CertFile string `yaml:"cert_file,omitempty"`
+	KeyFile  string `yaml:"key_file,omitempty"`
+
+	// CAFile is the PEM bundle embedded into the delivered kubeconfig as
+	// certificate-authority-data, so the sandbox's kubectl trusts the
+	// monitor. Empty falls back to CertFile, which is the right answer for a
+	// self-signed certificate and harmless for a publicly-signed one.
+	//
+	// This exists because a kubeconfig can carry its own trust anchor, unlike
+	// git, which has to be told through the image's CA store. It is the one
+	// place this section is *easier* to deploy than executors.git_proxy.
+	CAFile string `yaml:"ca_file,omitempty"`
+
+	// MinTLSVersion is "1.2" or "1.3". Empty means 1.2, matching the hub.
+	MinTLSVersion string `yaml:"min_tls_version,omitempty"`
+
+	// SessionMinutes bounds one session. Zero uses 60. Values outside
+	// [1, KubeGuardSessionMinutesUpper] are clamped.
+	//
+	// This is the deadline that actually bounds a sandbox's access to the
+	// cluster. Before the monitor the sandbox held the kubeconfig and its
+	// access ended when someone rotated the credential.
+	SessionMinutes int `yaml:"session_minutes,omitempty"`
+
+	// Verbs, Namespaces and Resources are a deployment-wide *floor*, not the
+	// policy a session runs under. Each grant carries its own, and the
+	// session gets the intersection — so narrowing these narrows every
+	// project on the hub, and leaving them empty lets each grant speak for
+	// itself.
+	//
+	// Empty Verbs means read-only, which is also what a grant that names no
+	// verbs gets. Setting them to read-only explicitly is how an operator
+	// says "no project on this hub may ever write to a cluster", regardless
+	// of what any grant asks for.
+	Verbs      []string `yaml:"verbs,omitempty"`
+	Namespaces []string `yaml:"namespaces,omitempty"`
+	Resources  []string `yaml:"resources,omitempty"`
 }
 
 // GitProxyConfig configures the git interception proxy.
@@ -2380,6 +2467,17 @@ func (c *Config) validateAndClamp(path string) {
 		field, detail, found := strings.Cut(msg, ": ")
 		if !found {
 			field, detail = "executors.git_proxy", msg
+		}
+		warn(field, detail)
+	}
+
+	// The Kubernetes access monitor, on the same terms: a repair that would
+	// leave it unusable disables it, and with it off a kubeconfig grant is
+	// delivered exactly as it was before the monitor existed.
+	for _, msg := range clampKubeGuardConfig(&c.Executors.KubeGuard) {
+		field, detail, found := strings.Cut(msg, ": ")
+		if !found {
+			field, detail = "executors.kube_guard", msg
 		}
 		warn(field, detail)
 	}

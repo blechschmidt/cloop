@@ -218,7 +218,10 @@ func ValidateExecutors(e ExecutorsConfig) error {
 	if err := ValidateEgressConfig(e.Egress); err != nil {
 		return err
 	}
-	return ValidateGitProxyConfig(e.GitProxy)
+	if err := ValidateGitProxyConfig(e.GitProxy); err != nil {
+		return err
+	}
+	return ValidateKubeGuardConfig(e.KubeGuard)
 }
 
 // ExecutorWarnings returns advisory messages about a valid-but-questionable

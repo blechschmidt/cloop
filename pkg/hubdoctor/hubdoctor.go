@@ -384,6 +384,7 @@ func Run(ctx context.Context, dir string, cfg *config.Config, opts Options) *Rep
 	// reconciliation is what puts one there.
 	checkNetworkPolicyEnforcement(ctx, dir, cfg, opts, add)
 	checkGitProxy(ctx, cfg, opts, add)
+	checkKubeGuard(ctx, cfg, opts, add)
 	checkEgressBroker(ctx, cfg, opts, add)
 	checkStorage(dir, add)
 	checkConfigDrift(dir, add)

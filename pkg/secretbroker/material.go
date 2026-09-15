@@ -77,7 +77,7 @@ func (b *Broker) materialFor(ctx context.Context, s Secret, g Grant, req Request
 	case KindGitHubApp:
 		return b.githubAppMaterial(ctx, mat, plaintext, rec)
 	case KindKubeconfig:
-		return b.kubeMaterial(mat, plaintext)
+		return b.kubeMaterial(ctx, mat, plaintext)
 	case KindRegistry:
 		return b.registryMaterial(mat, plaintext)
 	case KindEgressProxy:
@@ -303,14 +303,46 @@ func deliverGitHubToken(mat Material, token string) (Material, error) {
 
 // kubeMaterial delivers a kubeconfig rewritten to the allowed contexts and
 // namespaces. See MinimizeKubeconfig for the rules.
-func (b *Broker) kubeMaterial(mat Material, plaintext []byte) (Material, error) {
+//
+// When a KubeGuard is configured it takes custody of the minimised document
+// and what reaches the sandbox is a monitor session instead. That path is
+// strictly stronger — the namespace allowlist stops being a client-side
+// default and the verb allowlist starts existing at all — so it is tried
+// first, and a guard that fails takes the lease with it rather than falling
+// back to handing over the cluster credential. See kubeguard.go.
+func (b *Broker) kubeMaterial(ctx context.Context, mat Material, plaintext []byte) (Material, error) {
 	minimized, err := MinimizeKubeconfig(plaintext, mat.Constraints)
 	if err != nil {
 		return Material{}, err
 	}
+
+	delivered := minimized
+	guarded := KubeGuardResult{}
+	if b != nil && b.KubeGuard != nil {
+		guarded, err = b.KubeGuard.GuardKubeconfig(ctx, KubeGuardRequest{
+			Kubeconfig: minimized,
+			Verbs:      mat.Constraints.KubeVerbs(),
+			Namespaces: mat.Constraints.Namespaces,
+			SecretName: mat.SecretName,
+			SecretID:   mat.SecretID,
+			GrantID:    mat.GrantID,
+			ProjectID:  mat.projectID,
+			ExecutorID: mat.executorID,
+			Actor:      mat.actor,
+			Owner:      mat.owner,
+		})
+		if err != nil {
+			return Material{}, fmt.Errorf("%w: guard kubeconfig secret %s: %w",
+				ErrGuardUnavailable, mat.SecretName, err)
+		}
+		if guarded.Guarded() {
+			delivered = guarded.Kubeconfig
+		}
+	}
+
 	mat.Files = []File{{
 		Name:    "kubeconfig",
-		Content: minimized,
+		Content: delivered,
 		Mode:    0o600,
 		EnvVar:  "KUBECONFIG",
 	}}
@@ -318,7 +350,30 @@ func (b *Broker) kubeMaterial(mat Material, plaintext []byte) (Material, error) 
 		mat.Env["CLOOP_K8S_NAMESPACE"] = ns
 	}
 	mat.Env["CLOOP_K8S_ALLOWED_NAMESPACES"] = strings.Join(mat.Constraints.Namespaces, ",")
-	mat.Summary = "kubeconfig contexts: " + KubeconfigSummary(minimized)
+	// The verbs the grant permits, announced to the workload so a harness can
+	// read them and not attempt a write it will be refused. This is a
+	// courtesy, not a control: the enforcement is pkg/kubeguard, outside the
+	// sandbox, and a harness that ignores this variable gets a 403 rather
+	// than a write.
+	mat.Env["CLOOP_K8S_VERBS"] = strings.Join(mat.Constraints.KubeVerbs(), ",")
+	access := "read-only"
+	if !mat.Constraints.KubeReadOnly() {
+		access = strings.Join(mat.Constraints.KubeVerbs(), "|")
+	}
+	// The context summary is always taken from the *minimised* document, not
+	// the delivered one: under a guard the delivered kubeconfig names one
+	// synthetic context pointing at the monitor, and an audit row saying
+	// "contexts: cloop" would describe the plumbing instead of the access.
+	mat.Summary = "kubeconfig " + access + " contexts: " + KubeconfigSummary(minimized)
+
+	if guarded.Guarded() {
+		mat.Env[KubeGuardSessionEnvKey] = guarded.SessionID
+		if s := strings.TrimSpace(guarded.Summary); s != "" {
+			mat.Summary = "kubeconfig " + s + ", contexts: " + KubeconfigSummary(minimized)
+		} else {
+			mat.Summary += " (monitored)"
+		}
+	}
 	return mat, nil
 }
 

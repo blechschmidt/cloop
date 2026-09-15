@@ -33,6 +33,7 @@ var (
 	grantPermsFlag      []string
 	grantNamespacesFlag []string
 	grantContextsFlag   []string
+	grantVerbsFlag      []string
 	grantHostsFlag      []string
 	grantRegistriesFlag []string
 	grantEnvKeysFlag    []string
@@ -256,7 +257,21 @@ no implicit wildcard.
 
 A local_repo grant is read-only unless --writable is given. Its --repos
 patterns match repository *directory names* under the granted root, not
-owner/repo as they do for github.`,
+owner/repo as they do for github.
+
+A kubeconfig grant is likewise read-only unless --verbs widens it. Omitting
+--verbs means get, list and watch; naming any other verb is what authorises a
+write. The two side by side:
+
+  cloop secret grant prod-kube --to project:/srv/app --namespaces team-a
+  cloop secret grant prod-kube --to project:/srv/app --namespaces team-a --verbs get,list,watch,create,patch
+
+Verbs are the one kubeconfig constraint the delivered credential cannot carry
+— a kubeconfig has no field for them, so unlike --namespaces and --contexts
+they cannot be enforced by rewriting the document. They are enforced outside
+the sandbox by the Kubernetes access monitor, executors.kube_guard. With that
+monitor off, the verbs on a grant are recorded and audited but not enforced at
+all, and the cluster's own RBAC is the only limit on what the credential does.`,
 	Args:         cobra.ExactArgs(1),
 	SilenceUsage: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -289,6 +304,7 @@ owner/repo as they do for github.`,
 				Permissions: grantPermsFlag,
 				Namespaces:  grantNamespacesFlag,
 				Contexts:    grantContextsFlag,
+				Verbs:       grantVerbsFlag,
 				Hosts:       grantHostsFlag,
 				Registries:  grantRegistriesFlag,
 				EnvKeys:     grantEnvKeysFlag,
@@ -587,6 +603,9 @@ func init() {
 		"kubernetes namespace allowlist")
 	secretGrantCmd.Flags().StringSliceVar(&grantContextsFlag, "contexts", nil,
 		"kubeconfig context allowlist")
+	secretGrantCmd.Flags().StringSliceVar(&grantVerbsFlag, "verbs", nil,
+		"kubeconfig RBAC verb allowlist (get,list,watch,create,update,patch,delete,deletecollection); "+
+			"omit for read-only get,list,watch — enforced only where executors.kube_guard runs")
 	secretGrantCmd.Flags().StringSliceVar(&grantHostsFlag, "hosts", nil,
 		"egress host allowlist ('*.example.com' matches subdomains only)")
 	secretGrantCmd.Flags().StringSliceVar(&grantRegistriesFlag, "registries", nil,
