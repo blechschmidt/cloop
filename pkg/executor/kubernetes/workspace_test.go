@@ -132,6 +132,8 @@ func (f *fakeAPI) routeSecret(w http.ResponseWriter, r *http.Request) {
 		if !exists {
 			stored := in
 			f.secrets[in.Metadata.Name] = &stored
+			f.secretCreates++
+			f.createOrder = append(f.createOrder, "secret")
 		}
 		f.mu.Unlock()
 		if exists {
@@ -610,8 +612,10 @@ func TestStart_WorkspaceSecretDeliversTheCredential(t *testing.T) {
 		}
 	}
 
-	// The Secret is POSTed before the Pod: an init container whose secretKeyRef
-	// names an object that does not exist yet sits in CreateContainerConfigError.
+	// The Secret is POSTed *after* the Pod, because it carries an ownerReference
+	// naming that Pod and only the API server can assign the UID it needs. The
+	// Pod parks harmlessly for the two API calls in between; what the ordering
+	// buys is that the credential is never in etcd unowned (Task 20281).
 	secretAt, podAt := -1, -1
 	for i, req := range requests {
 		switch {
@@ -621,8 +625,9 @@ func TestStart_WorkspaceSecretDeliversTheCredential(t *testing.T) {
 			podAt = i
 		}
 	}
-	if secretAt < 0 || podAt < 0 || secretAt > podAt {
-		t.Errorf("request order = %v; the Secret must be created before the Pod", requests)
+	if secretAt < 0 || podAt < 0 || podAt > secretAt {
+		t.Errorf("request order = %v; the Pod must be created before the Secret that names it as owner",
+			requests)
 	}
 
 	// The Pod object itself is clean.

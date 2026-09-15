@@ -1123,12 +1123,38 @@ an argv element, and both publish it to everyone with `get pods`, to every
 workload's spec or swap a credential under a Pod that has already started.
 
 A hub without the rule fails at `Start` with a 403 that prints the exact YAML to
-add. One honest gap: a control plane killed between creating the Secret and
-observing the init container finish leaves the Secret behind, named
-`cloop-ws-<handle>`. Nothing sweeps it, because sweeping needs `list secrets`.
-The window is seconds and the material expires on the broker's own TTL
-regardless, which is a better trade than holding read authority over every
-Secret in the namespace forever.
+add.
+
+This used to carry an honest gap: a control plane killed between creating the
+Secret and observing the init container finish left the Secret behind, named
+`cloop-ws-<handle>`, and nothing swept it — sweeping needs `list secrets`, which
+this driver deliberately does not hold.
+
+Task 20281 closed it without taking that read access. Both per-run Secrets carry
+an `ownerReferences` entry naming the Pod that consumes them, so the cluster's
+own garbage collector deletes them when the Pod goes: deleted by the driver, by
+the orphan sweep, by a node eviction, or by an operator with `kubectl`. Setting
+an ownerReference on create needs no verb beyond the `create` already held, so
+the Role is unchanged — and `blockOwnerDeletion` is deliberately left false,
+because setting it true would make the `OwnerReferencesPermissionEnforcement`
+admission plugin demand `update` on `pods/finalizers`.
+
+That is why the Secrets are created *after* the Pod rather than before it. An
+ownerReference needs the owner's UID, the API server assigns it, and a client
+cannot choose one — so no ordering lets a Secret created first name the Pod that
+comes second. The Pod is unscheduled in the gap and the kubelet cannot resolve a
+`secretKeyRef` before the scheduler has bound it, so losing that race costs a
+kubelet retry rather than a run.
+
+The **NetworkPolicy is the exception, and stays unowned.** It has to exist
+*before* the Pod — a Pod that starts before its policy has a window of
+unfiltered egress — so there is no ordering that gives it both a UID to name and
+a guarantee of preceding the workload. Attaching one afterwards would need
+`patch` on `networkpolicies`, which is also the authority to widen a running
+sandbox's firewall, and is the one verb this Role must never grant. It does not
+need one: unlike a Secret, a policy *is* listable by this driver, so the orphan
+sweep collects it — which is why the same task made that sweep periodic instead
+of startup-only.
 
 ---
 
@@ -1698,10 +1724,34 @@ FromConfig
   │                      → go sweepOrphans
   ├─ attachHandleStores  → the localprocess singleton, enrolled remote executors
   ├─ publish the report
-  └─ go Sweep(dir)
-       ├─ sweepSessions   → close stale `running` rows; return the task IDs that survived
-       └─ pruneWorktrees  → collect leaked worktrees, sparing those task IDs
+  ├─ go Sweep(dir)
+  │    ├─ sweepSessions   → close stale `running` rows; return the task IDs that survived
+  │    └─ pruneWorktrees  → collect leaked worktrees, sparing those task IDs
+  └─ StartPeriodicSweep   → and again every 15m, for the orphans a restart never sees
 ```
+
+### The periodic sweep
+
+Startup-only answered "what did the process I am replacing leave behind?", and
+that is not the only way to orphan a workload. A node eviction, a cluster
+upgrade that drains a node, or an operator deleting a Pod all strand an object
+while the hub is perfectly healthy — and before Task 20281 those accumulated
+until someone restarted it, which is the one operation a healthy deployment
+never performs.
+
+`reconcile.StartPeriodicSweep` re-runs the same per-driver reapers every
+`executors.orphan_sweep_interval_minutes` (default 15, `0` disables). It is the
+identical code path, deliberately, so there is no second implementation to
+drift; repeating it is safe by construction, because a tracked workload is never
+touched and an untracked one is only removed once it is past the grace period.
+
+Exactly one sweeper runs per process — `StartPeriodicSweep` replaces rather than
+adds, since `Bootstrap` reconciles twice by design — and both hub binaries stop
+it from `Shutdown`. The last pass is published through `reconcile.LastSweep` and
+surfaced on `GET /api/executors` as `sweep`, with the per-driver breakdown: a
+driver whose sweep is *failing* is the condition an operator has to act on,
+because a Role that lost its `list` rule leaves a namespace quietly filling with
+Pods and nothing else in the UI would ever say why.
 
 The ordering is not incidental. Rehydration must have happened first, because
 the question the session sweep asks — "does this row's executor still own its

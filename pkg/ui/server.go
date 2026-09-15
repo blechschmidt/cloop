@@ -1288,6 +1288,10 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	// still writing health rows into a database handle that is about to be
 	// closed under it.
 	stopExecutorSupervisor()
+	// And stop the periodic orphan sweep for the same reason: it is detached
+	// from the reconciliation pass that started it, so this is what owns it
+	// (Task 20281).
+	reconcile.StopPeriodicSweep()
 	// Release the API-token database handle held open for the authentication
 	// path, so a hub restarted in-process (tests, `cloop hub bootstrap`) does
 	// not leak a connection per lifecycle.

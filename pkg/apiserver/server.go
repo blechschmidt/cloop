@@ -203,6 +203,7 @@ func bootstrapExecutors(dir string) {
 	}
 	reconcile.Bootstrap(dir, cfg, reconcile.Options{
 		ReconcileOrphans: true,
+		SweepInterval:    cfg.Executors.OrphanSweepInterval(),
 		Logf: func(format string, args ...any) {
 			fmt.Fprintf(os.Stderr, "apiserver: "+format+"\n", args...)
 		},
@@ -478,6 +479,9 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	if srv == nil {
 		return nil
 	}
+	// The periodic orphan sweep is detached from the reconciliation pass that
+	// started it, so this is what owns it (Task 20281).
+	reconcile.StopPeriodicSweep()
 	return srv.Shutdown(ctx)
 }
 

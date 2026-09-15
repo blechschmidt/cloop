@@ -203,6 +203,69 @@ type objectMeta struct {
 	DeletionTimestamp string            `json:"deletionTimestamp,omitempty"`
 	Labels            map[string]string `json:"labels,omitempty"`
 	Annotations       map[string]string `json:"annotations,omitempty"`
+	OwnerReferences   []ownerReference  `json:"ownerReferences,omitempty"`
+}
+
+// ownerReference makes the cluster's own garbage collector responsible for an
+// object, so that cleanup no longer depends on this process being alive.
+//
+// It is the answer to the one gap the driver could not close any other way. The
+// per-run Secrets hold live credential material and are deleted explicitly when
+// the init container finishes — but a control plane killed in between left them
+// in the namespace with nothing to reap them, because reaping needs `list
+// secrets` and this driver deliberately holds no read access to Secrets at all.
+// An ownerReference inverts that: the Secret names the Pod that owns it, and
+// when the Pod goes — deleted by the driver, by the orphan sweep, by a node
+// eviction, or by an operator with kubectl — the API server's GC deletes the
+// Secret without anyone having to look at it. No read authority, no polling, no
+// dependence on the hub surviving.
+//
+// # Why no Controller, and no BlockOwnerDeletion
+//
+// Both are deliberately left false. Controller is a claim of exclusive
+// management used by controllers that adopt objects; nothing here adopts.
+// BlockOwnerDeletion is the one that matters for RBAC: setting it true makes
+// the API server's OwnerReferencesPermissionEnforcement admission plugin
+// require `update` on the owner's finalizers subresource — pods/finalizers —
+// which is authority this Role does not have and must not gain to keep the
+// no-mutation property the chart documents. Left false, setting an
+// ownerReference on create needs no verb beyond the `create` already held.
+type ownerReference struct {
+	APIVersion string `json:"apiVersion"`
+	Kind       string `json:"kind"`
+	Name       string `json:"name"`
+	UID        string `json:"uid"`
+	// Both are emitted explicitly rather than omitted. They default to false
+	// server-side either way, but an operator reading the object should see
+	// what this driver decided rather than have to know the default.
+	Controller         bool `json:"controller"`
+	BlockOwnerDeletion bool `json:"blockOwnerDeletion"`
+}
+
+// podOwnerReference builds the reference every per-run object carries.
+//
+// It returns false when the API server's response carried no UID. That should
+// not happen — a created Pod always has one — but an ownerReference with an
+// empty UID is rejected by the API server with a validation error that names
+// the dependent object rather than the missing UID, so the caller checks and
+// creates the dependent unowned instead of failing a run over it.
+func podOwnerReference(p *pod) (ownerReference, bool) {
+	if p == nil {
+		return ownerReference{}, false
+	}
+	uid := strings.TrimSpace(p.Metadata.UID)
+	name := strings.TrimSpace(p.Metadata.Name)
+	if uid == "" || name == "" {
+		return ownerReference{}, false
+	}
+	return ownerReference{
+		APIVersion:         "v1",
+		Kind:               "Pod",
+		Name:               name,
+		UID:                uid,
+		Controller:         false,
+		BlockOwnerDeletion: false,
+	}, true
 }
 
 type pod struct {

@@ -60,6 +60,21 @@ automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountT
 # server's audit log. With it, the Pod carries a reference and the material
 # lives for the length of one git fetch.
 #
+# ### How the Secrets get collected without a read verb
+#
+# They are not swept, and could not be: finding them would need `list secrets`.
+# Instead each per-run Secret carries an `ownerReferences` entry naming the Pod
+# that consumes it, so the cluster's own garbage collector deletes it when that
+# Pod goes — whether the hub deleted it, the orphan sweep did, a node eviction
+# did, or an operator did. Nothing reads a Secret back on any of those paths.
+#
+# This is why the rules below did not change for Task 20281. Setting an
+# ownerReference on create requires no verb beyond the `create` already listed,
+# and the driver deliberately leaves `blockOwnerDeletion` false: setting it true
+# makes the OwnerReferencesPermissionEnforcement admission plugin require
+# `update` on the owner's `pods/finalizers` subresource, which would widen this
+# Role to fix a problem it does not have.
+#
 # ## The networkpolicies rule
 #
 # create, delete and list, in the networking.k8s.io group. This is what makes
@@ -73,6 +88,17 @@ automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountT
 # control plane killed mid-run leaves the policy behind along with the Pod, and
 # the sweep that collects orphaned Pods by label has to be able to find their
 # policies by the same label. Nothing else in the driver reads a policy back.
+# Since Task 20281 that sweep also runs on a timer rather than only at startup,
+# which uses this same rule and adds no verb — see
+# executors.orphan_sweep_interval_minutes.
+#
+# A NetworkPolicy gets no ownerReference, unlike the Secrets above, and the
+# reason is the ordering rather than an oversight. It has to exist *before* the
+# Pod, and an ownerReference needs a UID the API server only assigns when the
+# Pod is created — so there is no ordering that gives it both. Attaching one
+# afterwards would need `patch`, which is the same authority as widening a
+# running sandbox's egress, and is refused below for exactly that reason. The
+# policy does not need one: it is listable, so the sweep reaches it.
 #
 # There is deliberately no update or patch, here or anywhere else in this Role.
 # A policy is written once, before the workload it governs starts; an identity

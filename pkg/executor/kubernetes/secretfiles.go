@@ -285,23 +285,27 @@ func secretFileVolumes(secretName string, files []executor.SecretFile) ([]volume
 	return vols, mounts, nil
 }
 
-// provisionSecretFiles parks a lease's credential files in a per-run Secret the
-// Pod can project.
+// provisionSecretFiles prepares the per-run Secret that projects a lease's
+// credential files into the Pod.
 //
 // It returns nil state and nil error when the Spec carries no files, which is
 // every run that leases nothing and every run whose grants deliver only
 // environment variables. A non-nil state means there is something to clean up,
 // whether or not the create succeeded.
+//
+// As with the workspace Secret the object is built here and created by the
+// returned pendingSecret, once the Pod that will own it exists. See the
+// ownerReference note in pod.go for why the create cannot come first.
 func (e *Executor) provisionSecretFiles(ctx context.Context, spec executor.Spec, cli *client,
-	handleID, namespace string) (*secretFilesState, error) {
+	handleID, namespace string) (*secretFilesState, *pendingSecret, error) {
 
 	if len(spec.SecretFiles) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	data, err := secretFileData(spec.SecretFiles)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	name := secretFilesSecretName(handleID)
@@ -331,28 +335,38 @@ func (e *Executor) provisionSecretFiles(ctx context.Context, spec executor.Spec,
 
 	st := &secretFilesState{namespace: namespace}
 
-	createCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), requestTimeout)
-	defer cancel()
-	if _, err := cli.createSecret(createCtx, namespace, obj); err != nil {
-		// A create that failed may still have landed, and the same reasoning
-		// provisionWorkspace uses applies: a 4xx is the API server stating it
-		// did not, so arming the delete would only produce a second confusing
-		// 403 in the log; anything else leaves the question open, and an
-		// orphaned Secret holding live credential files is much worse than a
-		// delete for an object that was never created, which the API server
-		// answers 404 and this driver treats as success.
-		if ae, ok := asAPIError(err); !ok || ae.Code >= 500 {
-			st.mu.Lock()
-			st.secretName = name
-			st.mu.Unlock()
+	create := func(ctx context.Context, owner ownerReference, owned bool) error {
+		if owned {
+			obj.Metadata.OwnerReferences = []ownerReference{owner}
 		}
-		return st, explainSecretFileFailure(namespace, name, err)
-	}
 
-	st.mu.Lock()
-	st.secretName = name
-	st.mu.Unlock()
-	return st, nil
+		createCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), requestTimeout)
+		defer cancel()
+		if _, err := cli.createSecret(createCtx, namespace, obj); err != nil {
+			// A create that failed may still have landed, and the same reasoning
+			// provisionWorkspace uses applies: a 4xx is the API server stating it
+			// did not, so arming the delete would only produce a second confusing
+			// 403 in the log; anything else leaves the question open, and an
+			// orphaned Secret holding live credential files is much worse than a
+			// delete for an object that was never created, which the API server
+			// answers 404 and this driver treats as success.
+			//
+			// As with the workspace Secret, the ownerReference is the backstop
+			// that makes a Secret which landed unseen reap with its Pod anyway.
+			if ae, ok := asAPIError(err); !ok || ae.Code >= 500 {
+				st.mu.Lock()
+				st.secretName = name
+				st.mu.Unlock()
+			}
+			return explainSecretFileFailure(namespace, name, err)
+		}
+
+		st.mu.Lock()
+		st.secretName = name
+		st.mu.Unlock()
+		return nil
+	}
+	return st, &pendingSecret{create: create}, nil
 }
 
 // discardSecretFiles deletes the credential-file Secret. It is safe to call with

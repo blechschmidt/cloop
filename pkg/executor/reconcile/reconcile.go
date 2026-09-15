@@ -208,6 +208,20 @@ type Options struct {
 	// the sweep — see pruneWorktrees.
 	WorktreeMinAge time.Duration
 
+	// SweepInterval is how often the orphan sweep repeats after startup. Zero
+	// uses DefaultSweepInterval; negative disables it entirely.
+	//
+	// Negative-means-off rather than zero-means-off because zero is what an
+	// unset field is, and the default has to be the behaviour a deployment
+	// that never heard of this option should get. An operator turning it off
+	// says so explicitly; see ExecutorsConfig.OrphanSweepIntervalMinutes,
+	// where the operator-facing 0 is translated to a negative here.
+	//
+	// Only honoured alongside ReconcileOrphans: the sweep is the same work,
+	// and an entry point that does not want it at startup does not want it
+	// every fifteen minutes either. See periodic.go.
+	SweepInterval time.Duration
+
 	// KubernetesCredentials overrides how the Kubernetes driver's identity is
 	// obtained. nil uses BrokerCredentials, which reads the secret broker out
 	// of dir's state database. Tests and embedders that already hold a
@@ -502,6 +516,20 @@ func FromConfig(ctx context.Context, dir string, cfg *config.Config, opts Option
 	// listing must not sit between the hub's start and its listener.
 	if opts.ReconcileOrphans {
 		go Sweep(context.WithoutCancel(ctx), dir, opts)
+		// And again on a timer from here on. Startup-only covered a control
+		// plane killed mid-run and nothing else; a node eviction orphans a Pod
+		// while this process is perfectly healthy, and before Task 20281 those
+		// accumulated until the next restart. See periodic.go.
+		//
+		// Started here rather than at each entry point so the two hub binaries
+		// cannot drift on whether they run it, and replacing rather than adding
+		// so Bootstrap's two deliberate passes leave one sweeper, not two.
+		//
+		// Detached explicitly: ctx here is the reconciliation pass's, which is
+		// bounded by the preflight timeout, and a loop tied to it would stop a
+		// minute after the hub started. Its real owner is the process, and
+		// StopPeriodicSweep is how a shutting-down server gives it up.
+		StartPeriodicSweep(context.WithoutCancel(ctx), opts)
 	}
 	return report
 }

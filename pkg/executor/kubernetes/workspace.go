@@ -34,13 +34,31 @@ package kubernetes
 // runs — and again, unconditionally, when the workload reaches a terminal state
 // or when Start fails at any point after the Secret was created.
 //
-// One honest gap: a control plane killed between creating the Secret and seeing
-// the init container finish leaves the Secret behind. Nothing sweeps it,
-// because sweeping needs `list secrets` and this driver deliberately has no
-// read access to Secrets at all (see the Role in the Helm chart). The window is
-// seconds, and the material inside expires on the broker's own TTL regardless,
-// which is a better trade than holding read authority over every Secret in the
-// namespace for the rest of time.
+// # Who deletes it when this process does not
+//
+// That used to be an honest gap: a control plane killed between creating the
+// Secret and seeing the init container finish left the Secret behind, and
+// nothing swept it, because sweeping needs `list secrets` and this driver
+// deliberately has no read access to Secrets at all (see the Role in the Helm
+// chart).
+//
+// It is now closed, and without taking that read access. The Secret carries an
+// ownerReference naming the Pod that consumes it, so the cluster's own garbage
+// collector deletes it when the Pod goes — whether the Pod was deleted by this
+// driver, by the orphan sweep, by a node eviction, or by an operator. The
+// explicit delete above is still the fast path, because it takes the material
+// back at the end of one init container rather than at the end of the run; GC
+// is the path that does not require this process to still exist.
+//
+// That is what moved the create to *after* the Pod. An ownerReference needs the
+// owner's UID, the API server assigns it, and a client cannot choose it — so
+// there is no ordering in which a Secret created first can name the Pod that
+// comes second. The Pod is created first and parks harmlessly for the few
+// milliseconds until its Secret lands: it is unschedulable-then-scheduled in
+// that window, and the kubelet cannot reach a secretKeyRef before the scheduler
+// has bound the Pod at all. What the reordering buys is that from the instant
+// the material exists in etcd, something other than this process is responsible
+// for destroying it.
 
 import (
 	"context"
@@ -66,9 +84,18 @@ const workspaceSecretPrefix = "cloop-ws-"
 // in the Secret it writes, which is what makes "where could this leak" a
 // question with a short answer.
 type workspaceState struct {
-	// secretName is "" when no credential was leased, which is the ordinary
-	// case for a public repository. The Pod then has an init container with no
-	// token env var at all and the fetch is unauthenticated.
+	// plannedName is the Secret the Pod's init container references. It is ""
+	// when no credential was leased, which is the ordinary case for a public
+	// repository: the init container then has no token env var at all and the
+	// fetch is unauthenticated.
+	//
+	// It is set before the Secret exists, because the Pod is built — and now
+	// created — first, so that the Secret can name it as its owner.
+	plannedName string
+	// secretName is what cleanup deletes. It is set only once a create has
+	// happened that may have landed, which is what keeps a failure path from
+	// arming a delete for an object that was never there. It therefore lags
+	// plannedName, and the two are never used for each other's purpose.
 	secretName string
 	namespace  string
 	handleID   string
@@ -95,13 +122,17 @@ type workspaceState struct {
 // secret returns the Secret name the Pod must reference, or "" when there is
 // none. Nil-safe, because the ordinary case — a Spec with no workspace at all —
 // produces no state and every caller would otherwise need the same guard.
+//
+// This is the planned name, not the created one. The Pod is built and created
+// before the Secret exists — see the file comment on ownerReferences — so a
+// reader that waited for the create would wire no reference at all.
 func (s *workspaceState) secret() string {
 	if s == nil {
 		return ""
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.secretName
+	return s.plannedName
 }
 
 // workspaceSecretName derives the Secret's name from the handle ID.
@@ -119,13 +150,77 @@ func workspaceSecretName(handleID string) string {
 	return workspaceSecretPrefix + slug
 }
 
-// provisionWorkspace leases the workspace credential and parks it in a Secret
-// the Pod's init container can mount.
+// pendingSecret is a per-run Secret that has been decided but not yet created,
+// because the Pod that will own it does not exist yet.
+//
+// The split it represents is forced by ownerReferences: the Secret's content is
+// decided before the Pod — the Pod spec references it by name, and for the
+// workspace Secret the same broker call also decides where the fetch is routed
+// — while the Secret's *creation* has to come after, because an ownerReference
+// needs a UID only the API server can assign. So provisioning returns what it
+// decided, and Start materialises it once it has an owner.
+//
+// A nil *pendingSecret means there is nothing to create: a public-repository
+// workspace that leased no credential, or a Spec carrying no credential files.
+//
+// # Exactly one of materialise and abandon runs
+//
+// That invariant is the whole reason this is a struct and not a bare closure.
+// The workspace credential is held on a broker lease that must come back
+// whether or not the Secret is ever written, and Start has failure paths
+// between deciding and creating — a refused Pod create being the obvious one.
+// A closure that released only on the create path would leak the lease on
+// every one of them, with the broker believing a credential is out on loan for
+// the rest of the hub's life. Both methods are idempotent and nil-safe so the
+// cleanup path can call abandon without knowing whether Start got far enough
+// to materialise.
+type pendingSecret struct {
+	// create writes the object. The owner may be the zero reference with
+	// owned=false, which creates the Secret unowned rather than failing the
+	// run. Everything else it needs — the built object, the credential to
+	// redact an API error against, and the lease to release — it captured
+	// lexically, so the material never has to be parked on a struct field to
+	// survive the gap between deciding and creating.
+	create func(ctx context.Context, owner ownerReference, owned bool) error
+	// release returns what the decision borrowed, on the paths where create is
+	// never called. Nil when nothing was borrowed.
+	release func()
+	done    bool
+}
+
+// materialise creates the Secret, owned by the Pod when one is available.
+func (p *pendingSecret) materialise(ctx context.Context, owner ownerReference, owned bool) error {
+	if p == nil || p.done {
+		return nil
+	}
+	p.done = true
+	return p.create(ctx, owner, owned)
+}
+
+// abandon gives back whatever the decision borrowed, for a Start that failed
+// before there was a Pod to own the Secret.
+func (p *pendingSecret) abandon() {
+	if p == nil || p.done {
+		return
+	}
+	p.done = true
+	if p.release != nil {
+		p.release()
+	}
+}
+
+// provisionWorkspace leases the workspace credential and prepares the Secret
+// the Pod's init container will mount.
 //
 // It returns a non-nil state whenever the Spec asks for provisioning, even on
-// the paths where no Secret was created, so the caller has something to clean
-// up with and something to audit against. A nil state means the Spec asked for
-// nothing and there is nothing to undo.
+// the paths where no Secret will be created, so the caller has something to
+// clean up with and something to audit against. A nil state means the Spec
+// asked for nothing and there is nothing to undo.
+//
+// The Secret is *not* created here — see pendingSecret. The returned closure
+// creates it, and is also what releases the broker lease, so the documented
+// lease lifetime is unchanged: released as soon as the cluster holds the
+// material, not when the fetch finishes.
 //
 // A *executor.WorkspaceGrantError from the credential source is returned
 // unchanged. It is the one error in this package a caller is expected to type-
@@ -133,10 +228,10 @@ func workspaceSecretName(handleID string) string {
 // command, and wrapping it in a fmt.Errorf that hid the type would turn that
 // into an unactionable string.
 func (e *Executor) provisionWorkspace(ctx context.Context, spec executor.Spec, cli *client,
-	handleID, namespace, projectPath string) (*workspaceState, error) {
+	handleID, namespace, projectPath string) (*workspaceState, *pendingSecret, error) {
 
 	if !spec.Workspace.NeedsProvisioning() {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	st := &workspaceState{
@@ -177,7 +272,7 @@ func (e *Executor) provisionWorkspace(ctx context.Context, spec executor.Spec, c
 			release()
 			// Returned verbatim: a *executor.WorkspaceGrantError must survive
 			// errors.As all the way to the UI, which prints its remediation.
-			return st, e.failWorkspace(st, cred, err)
+			return st, nil, e.failWorkspace(st, cred, err)
 		}
 	} else if spec.Workspace.RequiresCredential() {
 		// The Spec named a grant and there is nothing here to honour it with.
@@ -185,29 +280,39 @@ func (e *Executor) provisionWorkspace(ctx context.Context, spec executor.Spec, c
 		// it must not masquerade as one — the operator's fix is to wire the
 		// broker, not to create a grant that already exists.
 		release()
-		return st, e.failWorkspace(st, cred, fmt.Errorf(
+		return st, nil, e.failWorkspace(st, cred, fmt.Errorf(
 			"%w: this executor has no workspace credential source, so grant %q cannot be honoured; "+
 				"the hub was built or configured without a secret broker",
 			executor.ErrWorkspaceUnavailable, strings.TrimSpace(spec.Workspace.CredentialGrant)))
 	}
-	// Released here and not at the end of the run: see the file comment.
-	defer release()
 
 	st.grantID, st.leaseID = cred.GrantID, cred.LeaseID
 	if cred.Empty() {
 		// Nothing to deliver. The init container still runs — the tree still
-		// has to be fetched — it just has no token env var.
-		return st, nil
+		// has to be fetched — it just has no token env var. Nothing was leased
+		// that the create path would have released, so release here: there is
+		// no pendingSecret to carry it.
+		release()
+		return st, nil, nil
 	}
 	if !cred.ExpiresAt.IsZero() && !cred.ExpiresAt.After(e.opts.now()) {
 		// A credential that has already lapsed would produce a 401 from the
 		// remote and a failed run whose cause is three layers away.
-		return st, e.failWorkspace(st, cred, fmt.Errorf(
+		release()
+		return st, nil, e.failWorkspace(st, cred, fmt.Errorf(
 			"%w: the leased workspace credential expired at %s, before the Pod could be created",
 			executor.ErrWorkspaceUnavailable, cred.ExpiresAt.UTC().Format(time.RFC3339)))
 	}
 
 	name := workspaceSecretName(handleID)
+	// Recorded before the create, because the Pod is built before the create
+	// and its init container references the Secret by this name. secretName —
+	// the name cleanup deletes — stays unset until a create that may have
+	// landed, so a failure path does not arm a delete for an object that was
+	// never there.
+	st.mu.Lock()
+	st.plannedName = name
+	st.mu.Unlock()
 	obj := &secret{
 		APIVersion: "v1",
 		Kind:       "Secret",
@@ -235,30 +340,51 @@ func (e *Executor) provisionWorkspace(ctx context.Context, spec executor.Spec, c
 		StringData: map[string]string{EnvWorkspaceToken: cred.Password},
 	}
 
-	createCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), requestTimeout)
-	defer cancel()
-	if _, err := cli.createSecret(createCtx, namespace, obj); err != nil {
-		// A create that failed may still have landed. A 4xx is the API server
-		// stating it did not — a rejection, a conflict, an authorization
-		// failure — so there is nothing to clean up and arming the delete would
-		// only produce a second confusing 403 in the log. Anything else (a
-		// timeout, a 5xx, a connection dropped after the request was written)
-		// leaves the question open, and an orphaned Secret holding a live
-		// credential is much worse than a delete for an object that was never
-		// created, which the API server answers 404 and this driver treats as
-		// success.
-		if ae, ok := asAPIError(err); !ok || ae.Code >= 500 {
-			st.mu.Lock()
-			st.secretName = name
-			st.mu.Unlock()
-		}
-		return st, e.failWorkspace(st, cred, explainSecretFailure(namespace, name, err))
-	}
+	// Everything below runs after the Pod exists. cred, obj and release are
+	// captured rather than stored on the state: the token is already inside obj,
+	// so closing over it adds no exposure, and keeping it out of a struct field
+	// means there is no lifetime to reason about beyond this closure's own.
+	create := func(ctx context.Context, owner ownerReference, owned bool) error {
+		// Released as soon as the cluster holds the material — unchanged by the
+		// move, because the release travelled here with the create it was
+		// always paired with. See the file comment.
+		defer release()
 
-	st.mu.Lock()
-	st.secretName = name
-	st.mu.Unlock()
-	return st, nil
+		if owned {
+			obj.Metadata.OwnerReferences = []ownerReference{owner}
+		}
+
+		createCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), requestTimeout)
+		defer cancel()
+		if _, err := cli.createSecret(createCtx, namespace, obj); err != nil {
+			// A create that failed may still have landed. A 4xx is the API
+			// server stating it did not — a rejection, a conflict, an
+			// authorization failure — so there is nothing to clean up and arming
+			// the delete would only produce a second confusing 403 in the log.
+			// Anything else (a timeout, a 5xx, a connection dropped after the
+			// request was written) leaves the question open, and an orphaned
+			// Secret holding a live credential is much worse than a delete for
+			// an object that was never created, which the API server answers 404
+			// and this driver treats as success.
+			//
+			// The ownerReference makes this less load-bearing than it was: a
+			// Secret that landed unseen is now reaped with the Pod regardless.
+			// The explicit delete is kept because it takes the material back in
+			// seconds rather than whenever the Pod ends.
+			if ae, ok := asAPIError(err); !ok || ae.Code >= 500 {
+				st.mu.Lock()
+				st.secretName = name
+				st.mu.Unlock()
+			}
+			return e.failWorkspace(st, cred, explainSecretFailure(namespace, name, err))
+		}
+
+		st.mu.Lock()
+		st.secretName = name
+		st.mu.Unlock()
+		return nil
+	}
+	return st, &pendingSecret{create: create, release: release}, nil
 }
 
 // failWorkspace closes out a failed provisioning: one end event, with the

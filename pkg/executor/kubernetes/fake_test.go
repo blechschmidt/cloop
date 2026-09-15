@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -45,11 +46,26 @@ type fakeAPI struct {
 	// handlers and every assertion about them are in workspace_test.go.
 	secrets       map[string]*secret
 	secretDeletes []string
+	// secretCreates counts accepted Secret creates. It is separate from
+	// len(secrets) because a Secret that was created and then deleted is
+	// indistinguishable from one that never existed if you only count what is
+	// left — and "credential material never reached etcd" is a stronger claim
+	// than "nothing is left", which is exactly what the failure paths assert.
+	secretCreates int
+	// gcDeleted records what the garbage collector reaped, as "kind/name", so a
+	// test can tell an object the *driver* deleted from one the *cluster*
+	// collected on its owner's behalf. That distinction is the whole point of
+	// Task 20281: the second path is the one that still works when the hub is
+	// dead.
+	gcDeleted []string
 	// policies holds the egress NetworkPolicies the driver creates, keyed by
 	// name, and policyDeletes records every delete. The routing that fills them
 	// is here; the assertions are in networkpolicy_test.go.
 	policies      map[string]*netfilter.NetworkPolicy
 	policyDeletes []string
+	// policyOwners holds the ownerReferences each created policy carried on the
+	// wire, which netfilter.NetworkPolicy does not model. See collectGarbage.
+	policyOwners map[string][]ownerReference
 	// createOrder records the kind of every object create, in arrival order, so
 	// a test can prove the policy landed before the Pod it governs. A Pod that
 	// starts first has a window of unfiltered egress, and a window is all an
@@ -122,14 +138,15 @@ type apiFailure struct {
 func newFakeAPI(t *testing.T) *fakeAPI {
 	t.Helper()
 	f := &fakeAPI{
-		t:        t,
-		pods:     make(map[string]*pod),
-		watchers: make(map[string][]chan watchEvent),
-		logs:     make(map[string]*logStream),
-		history:  make(map[string][]versionedEvent),
-		failures: make(map[string]apiFailure),
-		secrets:  make(map[string]*secret),
-		policies: make(map[string]*netfilter.NetworkPolicy),
+		t:            t,
+		pods:         make(map[string]*pod),
+		watchers:     make(map[string][]chan watchEvent),
+		logs:         make(map[string]*logStream),
+		history:      make(map[string][]versionedEvent),
+		failures:     make(map[string]apiFailure),
+		secrets:      make(map[string]*secret),
+		policyOwners: make(map[string][]ownerReference),
+		policies:     make(map[string]*netfilter.NetworkPolicy),
 	}
 	f.srv = httptest.NewTLSServer(http.HandlerFunc(f.route))
 	t.Cleanup(f.srv.Close)
@@ -236,11 +253,24 @@ func (f *fakeAPI) routeNetworkPolicy(w http.ResponseWriter, r *http.Request) {
 	name := pathAfter(r.URL.Path, "networkpolicies")
 	switch {
 	case r.Method == http.MethodPost && name == "":
+		body, rerr := io.ReadAll(r.Body)
+		if rerr != nil {
+			writeStatus(w, 400, "BadRequest", "unreadable body: "+rerr.Error())
+			return
+		}
 		var in netfilter.NetworkPolicy
-		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		if err := json.Unmarshal(body, &in); err != nil {
 			writeStatus(w, 400, "BadRequest", "undecodable body: "+err.Error())
 			return
 		}
+		// Decoded a second time for the one field netfilter.NetworkPolicy does
+		// not model, so collectGarbage sees what was really sent.
+		var wire struct {
+			Metadata struct {
+				OwnerReferences []ownerReference `json:"ownerReferences"`
+			} `json:"metadata"`
+		}
+		_ = json.Unmarshal(body, &wire)
 		if in.Metadata.Name == "" {
 			writeStatus(w, 422, "Invalid", "metadata.name is required")
 			return
@@ -250,6 +280,7 @@ func (f *fakeAPI) routeNetworkPolicy(w http.ResponseWriter, r *http.Request) {
 		if !exists {
 			stored := in
 			f.policies[in.Metadata.Name] = &stored
+			f.policyOwners[in.Metadata.Name] = wire.Metadata.OwnerReferences
 			f.createOrder = append(f.createOrder, "networkpolicy")
 		}
 		f.mu.Unlock()
@@ -487,7 +518,9 @@ func (f *fakeAPI) handleDelete(w http.ResponseWriter, r *http.Request, name stri
 
 	f.mu.Lock()
 	p, ok := f.pods[name]
+	var uid string
 	if ok {
+		uid = p.Metadata.UID
 		delete(f.pods, name)
 		f.deletes = append(f.deletes, deleteRecord{Name: name, Grace: grace})
 	}
@@ -498,9 +531,91 @@ func (f *fakeAPI) handleDelete(w http.ResponseWriter, r *http.Request, name stri
 		writeStatus(w, 404, "NotFound", fmt.Sprintf("pods %q not found", name))
 		return
 	}
+	f.collectGarbage(uid)
 	raw, _ := json.Marshal(p)
 	f.recordDeletion(name, raw)
 	writeJSON(w, 200, map[string]string{"kind": "Status", "status": "Success"})
+}
+
+// collectGarbage models the API server's garbage collector: when an object is
+// deleted, everything holding an ownerReference to its UID goes with it.
+//
+// Modelling it here is what lets a Go test assert the cascade at all — the
+// driver never deletes these objects on the path being tested, so without a GC
+// the fake would show them surviving and the test would be asserting the
+// fixture's silence rather than the cluster's behaviour. The real collector is
+// asynchronous and this one is not, which is the one way this is not a faithful
+// model; it is why the ownerReference *shape* the driver emits is also checked
+// against a real cluster (see TestOwnerReference_RealClusterGarbageCollection).
+func (f *fakeAPI) collectGarbage(ownerUID string) {
+	if strings.TrimSpace(ownerUID) == "" {
+		return
+	}
+	owned := func(refs []ownerReference) bool {
+		for _, ref := range refs {
+			if ref.UID == ownerUID {
+				return true
+			}
+		}
+		return false
+	}
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for name, s := range f.secrets {
+		if owned(s.Metadata.OwnerReferences) {
+			delete(f.secrets, name)
+			f.gcDeleted = append(f.gcDeleted, "secret/"+name)
+		}
+	}
+	// NetworkPolicies are read from the raw POST body rather than from the
+	// decoded netfilter.NetworkPolicy, which models no ownerReferences field at
+	// all. Going through the wire bytes keeps this collector honest: it reaps
+	// whatever the driver actually sent, so a change that started owning
+	// policies would show up here instead of being invisible to the fixture.
+	for name, refs := range f.policyOwners {
+		if !owned(refs) {
+			continue
+		}
+		delete(f.policies, name)
+		delete(f.policyOwners, name)
+		f.gcDeleted = append(f.gcDeleted, "networkpolicy/"+name)
+	}
+	sort.Strings(f.gcDeleted)
+}
+
+// policyOwnerRefs returns the ownerReferences the driver put on a policy it
+// created, as they went over the wire.
+func (f *fakeAPI) policyOwnerRefs(name string) []ownerReference {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]ownerReference(nil), f.policyOwners[name]...)
+}
+
+// garbageCollected returns what the collector reaped, as sorted "kind/name".
+func (f *fakeAPI) garbageCollected() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.gcDeleted...)
+}
+
+// secretCreateCount reports how many Secret creates the API server accepted.
+func (f *fakeAPI) secretCreateCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.secretCreates
+}
+
+// secretObject returns the stored Secret, or nil.
+func (f *fakeAPI) secretObject(name string) *secret {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	s, ok := f.secrets[name]
+	if !ok {
+		return nil
+	}
+	cp := *s
+	return &cp
 }
 
 func (f *fakeAPI) handleWatch(w http.ResponseWriter, r *http.Request) {
@@ -804,12 +919,21 @@ func (f *fakeAPI) setUnauthorized(v bool) {
 func (f *fakeAPI) handleDeleteDirect(name string) {
 	f.mu.Lock()
 	p, ok := f.pods[name]
+	var uid string
+	if ok {
+		uid = p.Metadata.UID
+	}
 	delete(f.pods, name)
 	f.logs[name].close()
 	f.mu.Unlock()
 	if !ok {
 		return
 	}
+	// The collector runs here too. This is the path a test uses to model a Pod
+	// vanishing for a reason the driver had nothing to do with — a node
+	// eviction, or an operator with kubectl — which is exactly the case
+	// ownerReferences exist to cover.
+	f.collectGarbage(uid)
 	raw, _ := json.Marshal(p)
 	f.recordDeletion(name, raw)
 }

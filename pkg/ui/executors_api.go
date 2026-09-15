@@ -235,6 +235,17 @@ type executorsResponse struct {
 	// container executor not here" was an empty list.
 	Reconciliation *reconciliationView `json:"reconciliation,omitempty"`
 
+	// Sweep is the last periodic orphan sweep: when it ran, and how much it
+	// collected. Nil until one has completed, which on a freshly started hub
+	// means "not for another interval" rather than "broken".
+	//
+	// It is on the fleet response rather than on a card because one pass covers
+	// every driver and the number an operator wants is the aggregate. The
+	// per-driver breakdown rides inside it for the case where one driver's
+	// sweep is failing while the rest are fine — which is what a Role that lost
+	// its list rule looks like from here (Task 20281).
+	Sweep *sweepView `json:"sweep,omitempty"`
+
 	// Ready mirrors what /readyz reports about the execution path, so the
 	// panel can show the same verdict an orchestrator acts on rather than
 	// leaving an operator to infer it from the card list.
@@ -252,6 +263,18 @@ type reconciliationView struct {
 	// Problems counts diagnostics that are failed or degraded, so the tab can
 	// badge the section without walking the list.
 	Problems int `json:"problems"`
+}
+
+// sweepView is the last periodic orphan sweep, rendered for the Executors tab.
+type sweepView struct {
+	At      time.Time `json:"at"`
+	Removed int       `json:"removed"`
+	// Executors is the per-driver breakdown, including any driver whose pass
+	// failed.
+	Executors []reconcile.ExecutorSweep `json:"executors,omitempty"`
+	// Failures counts drivers whose sweep could not complete, so the tab can
+	// badge the row without walking the list — the same shape Problems has.
+	Failures int `json:"failures"`
 }
 
 // controlPlaneDB opens the control plane's own state database.
@@ -733,6 +756,15 @@ func (s *Server) handleExecutorsList(w http.ResponseWriter, r *http.Request) {
 		if resp.Reconciliation.Diagnostics == nil {
 			resp.Reconciliation.Diagnostics = []reconcile.Diagnostic{}
 		}
+	}
+	if sweep, ok := reconcile.LastSweep(); ok {
+		view := &sweepView{At: sweep.At, Removed: sweep.Removed, Executors: sweep.Executors}
+		for _, e := range sweep.Executors {
+			if e.Error != "" {
+				view.Failures++
+			}
+		}
+		resp.Sweep = view
 	}
 	if err := reconcile.Ready(); err != nil {
 		resp.Ready = false

@@ -953,27 +953,49 @@ func (e *Executor) Start(ctx context.Context, spec executor.Spec) (executor.Hand
 	// closure, so the same release() is correct before and after any of them
 	// exists.
 	var (
-		ws         *workspaceState
-		leaseFiles *secretFilesState
-		policyName string
+		ws           *workspaceState
+		leaseFiles   *secretFilesState
+		provisionWS  *pendingSecret
+		provisionFil *pendingSecret
+		policyName   string
+		podName      string
 	)
 	handleID := newHandleID()
 	namespace := e.namespaceFor(creds)
 	release := func() {
+		// Abandon before discard. A pending Secret that was never materialised
+		// still holds the broker lease behind its credential, and the broker
+		// would otherwise believe it is out on loan for the rest of this hub's
+		// life. Both are no-ops once the create has run.
+		provisionWS.abandon()
+		provisionFil.abandon()
 		e.discardWorkspaceSecret(ws, cli,
 			"the workload was never started, so the tree was never fetched")
 		e.discardSecretFiles(leaseFiles, cli)
 		e.deleteNetworkPolicyDetached(cli, namespace, policyName)
+		// The Pod is deleted last, and only on the paths that got far enough to
+		// create one. Deleting it also cascades to any Secret above whose own
+		// delete failed, because both name it as their owner — so a cleanup
+		// that half-succeeds still leaves nothing holding credential material.
+		e.deleteStartedPodDetached(cli, namespace, podName)
 		cli.close()
 		e.opts.Credentials.Release(creds.LeaseID)
 	}
 
-	// Before the Pod, not after. An init container whose secretKeyRef names a
-	// Secret that does not exist yet does not wait for it — the kubelet parks
-	// the Pod in CreateContainerConfigError and retries on its own schedule,
-	// so a Start that created the Pod first would work only by winning a race
-	// it never has to enter.
-	ws, err = e.provisionWorkspace(ctx, spec, cli, handleID, namespace, projectID)
+	// Prepared before the Pod, created after it. The Pod spec references both
+	// Secrets by name and is routed by whatever the credential source decided,
+	// so those decisions have to happen first; the Secrets themselves cannot be
+	// created until the Pod exists, because they carry an ownerReference naming
+	// it and only the API server can assign the UID that reference needs.
+	//
+	// The Pod tolerates the gap. It is unscheduled when created, and the kubelet
+	// cannot resolve a secretKeyRef or mount a Secret volume before the
+	// scheduler has bound the Pod — which is orders of magnitude slower than the
+	// two API calls that follow. If it ever did lose that race the kubelet
+	// retries, so the cost is latency, not a failed run, and what it buys is
+	// that credential material is never in etcd without an owner responsible for
+	// destroying it.
+	ws, provisionWS, err = e.provisionWorkspace(ctx, spec, cli, handleID, namespace, projectID)
 	if err != nil {
 		release()
 		return executor.Handle{}, err
@@ -987,11 +1009,8 @@ func (e *Executor) Start(ctx context.Context, spec executor.Spec) (executor.Hand
 		spec.Workspace = ws.routed
 	}
 
-	// Before the Pod for the same reason, one step stronger: a Pod whose volume
-	// names a Secret that does not exist is not started at all — the kubelet
-	// parks it in ContainerCreating and retries — so creating the Pod first
-	// would trade a guaranteed ordering for a race with nothing to gain.
-	leaseFiles, err = e.provisionSecretFiles(ctx, spec, cli, handleID, namespace)
+	// Prepared here, created after the Pod, for the reason above.
+	leaseFiles, provisionFil, err = e.provisionSecretFiles(ctx, spec, cli, handleID, namespace)
 	if err != nil {
 		release()
 		return executor.Handle{}, err
@@ -1047,6 +1066,32 @@ func (e *Executor) Start(ctx context.Context, spec executor.Spec) (executor.Hand
 	if err != nil {
 		release()
 		return executor.Handle{}, explainCreateFailure(e.opts, namespace, err)
+	}
+	podName = created.Metadata.Name
+
+	// The owner every per-run Secret points at. A Pod the API server accepted
+	// always carries a UID; if one somehow does not, the Secrets are created
+	// unowned rather than the run being refused — that is the behaviour this
+	// driver had before ownerReferences existed, and it is recoverable by the
+	// explicit deletes, where a failed Start is not recoverable at all.
+	owner, owned := podOwnerReference(created)
+	if !owned {
+		fmt.Fprintf(os.Stderr, "kubernetes: pod %s/%s was created without a UID; its per-run "+
+			"Secrets cannot be garbage-collected by the cluster and depend on this hub "+
+			"deleting them\n", namespace, podName)
+	}
+
+	// Now that there is an owner, materialise the credential objects. A failure
+	// here is fatal to the Start: the Pod cannot run without the Secret it
+	// references, and leaving it to park in ContainerCreating forever would
+	// report a started run that never starts.
+	if err := provisionWS.materialise(ctx, owner, owned); err != nil {
+		release()
+		return executor.Handle{}, err
+	}
+	if err := provisionFil.materialise(ctx, owner, owned); err != nil {
+		release()
+		return executor.Handle{}, err
 	}
 
 	rec := &record{
@@ -2083,6 +2128,33 @@ func (e *Executor) deleteNetworkPolicyDetached(cli *client, namespace, name stri
 		fmt.Fprintf(os.Stderr, "kubernetes: could not delete egress NetworkPolicy %s/%s: %v — "+
 			"it governs a Pod that no longer exists and will be collected by the next orphan sweep\n",
 			namespace, name, err)
+	}
+}
+
+// deleteStartedPodDetached removes a Pod created by a Start that then failed.
+//
+// It is the record-less counterpart of deletePodDetached, because on this path
+// there is no record yet: the Pod exists but Start has not got far enough to
+// build one.
+//
+// It exists because the Pod is now created before the Secrets it consumes: a
+// failure to materialise either one leaves a Pod that can never run, and
+// abandoning it would be a worse leak than the one ownerReferences were added
+// to close — a parked Pod holds a scheduler slot and a ResourceQuota slot
+// indefinitely, where the orphan sweep would only reach it after the grace
+// period.
+//
+// Deleting it is also what collects the Secrets: they name this Pod as their
+// owner, so a Secret whose own delete failed goes with it.
+func (e *Executor) deleteStartedPodDetached(cli *client, namespace, name string) {
+	if cli == nil || strings.TrimSpace(name) == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
+	defer cancel()
+	if err := cli.deletePod(ctx, namespace, name, e.opts.KillGracePeriod); err != nil {
+		fmt.Fprintf(os.Stderr, "kubernetes: could not delete pod %s/%s after a failed start: %v — "+
+			"it will be collected by the next orphan sweep\n", namespace, name, err)
 	}
 }
 

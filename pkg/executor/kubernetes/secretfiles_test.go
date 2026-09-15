@@ -185,8 +185,10 @@ func TestStart_SecretFilesTravelInASecretAndAreProjected(t *testing.T) {
 		}
 	}
 
-	// Created before the Pod: a Pod whose volume names a Secret that does not
-	// exist yet sits in ContainerCreating instead of starting.
+	// Created *after* the Pod, and that ordering is the point: the Secret names
+	// the Pod as its owner, and an ownerReference needs a UID only the API
+	// server can assign. Reversing this would mean the Secret is in etcd with
+	// nothing responsible for deleting it, which is the leak Task 20281 closed.
 	secretAt, podAt := -1, -1
 	for i, req := range requests {
 		switch {
@@ -196,8 +198,9 @@ func TestStart_SecretFilesTravelInASecretAndAreProjected(t *testing.T) {
 			podAt = i
 		}
 	}
-	if secretAt < 0 || podAt < 0 || secretAt > podAt {
-		t.Errorf("request order = %v; the Secret must be created before the Pod", requests)
+	if secretAt < 0 || podAt < 0 || podAt > secretAt {
+		t.Errorf("request order = %v; the Pod must be created before the Secret that names it as owner",
+			requests)
 	}
 
 	// The Pod itself: one volume, projecting the Secret read-only at the
@@ -294,11 +297,18 @@ func TestStart_SecretFilesAreDeletedWhenTheWorkloadFinishes(t *testing.T) {
 	leases.waitOutstandingEmpty(t, 2*time.Second)
 }
 
-// TestStart_SecretFilesAreDeletedWhenThePodCreateFails: the Secret exists
-// before the Pod, so every failure between the two has to unwind it — otherwise
-// a refused Start leaves live credentials in etcd with nothing to ever collect
-// them.
-func TestStart_SecretFilesAreDeletedWhenThePodCreateFails(t *testing.T) {
+// TestStart_SecretFilesNeverExistWhenThePodCreateFails.
+//
+// A refused Start must not leave live credentials in etcd. Since Task 20281 it
+// satisfies that in the strongest available way: the Pod is created first, so a
+// Pod create that fails means the Secret was never written at all. There is
+// nothing to unwind, rather than something that had to be unwound correctly.
+//
+// The assertion is deliberately "no create and no delete" and not just "no
+// Secret left behind". Those are the same end state, and only the first one
+// distinguishes material that never existed from material that existed and was
+// cleaned up — which is the difference a hub killed at the wrong instant sees.
+func TestStart_SecretFilesNeverExistWhenThePodCreateFails(t *testing.T) {
 	ex, api, leases := newTestExecutor(t, nil)
 	api.failAlways("POST /pods", apiFailure{Code: 403, Reason: "Forbidden", Message: "pods is forbidden"})
 
@@ -308,9 +318,15 @@ func TestStart_SecretFilesAreDeletedWhenThePodCreateFails(t *testing.T) {
 	if names := api.secretNames(); len(names) != 0 {
 		t.Errorf("the credential Secret outlived the failed Start: %v", names)
 	}
-	if got := api.secretDeleteNames(); len(got) != 1 {
-		t.Errorf("secret deletes = %v, want exactly one", got)
+	if got := api.secretCreateCount(); got != 0 {
+		t.Errorf("secret creates = %d, want 0: the Pod create failed first, so no credential "+
+			"material should ever have reached the cluster", got)
 	}
+	if got := api.secretDeleteNames(); len(got) != 0 {
+		t.Errorf("secret deletes = %v, want none: nothing was created to delete", got)
+	}
+	// The broker lease still has to come back. It is released by the pending
+	// create, and the path that never runs one must release it anyway.
 	leases.waitOutstandingEmpty(t, 2*time.Second)
 }
 

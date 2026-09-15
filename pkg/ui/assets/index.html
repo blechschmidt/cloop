@@ -1715,6 +1715,10 @@
 
         <div id="execPolicyBanner" class="exec-banner" style="display:none"></div>
         <div id="execWarnings" style="display:none;margin-bottom:12px"></div>
+        <!-- Last periodic orphan sweep (Task 20281): when it ran, what it
+             collected, and any driver it could not sweep. Hidden until the
+             first pass completes, which on a fresh hub is one interval away. -->
+        <div id="execSweep" style="display:none;margin-bottom:12px"></div>
 
         <!--
           The empty state used to read "That should not happen — the host driver

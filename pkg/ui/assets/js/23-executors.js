@@ -152,6 +152,50 @@ function _execInventoryChips(ex) {
   return chips.join('');
 }
 
+// _renderExecSweep shows the last periodic orphan sweep (Task 20281).
+//
+// It is fleet-level rather than per-card because one pass covers every driver.
+// The line is deliberately quiet when the last pass collected nothing — which
+// is the healthy steady state — and becomes loud only when a driver's sweep is
+// failing, because that is the condition an operator has to act on: a Role that
+// lost its list rule leaves a namespace filling with Pods and nothing else in
+// the UI would ever say why.
+function _renderExecSweep(sweep) {
+  const box = document.getElementById('execSweep');
+  if (!box) return;
+  if (!sweep || !sweep.at) {
+    // Not an error state. A hub that started five minutes ago has not swept
+    // yet, and claiming a problem would train the operator to ignore this row.
+    box.style.display = 'none';
+    return;
+  }
+  const failures = sweep.failures || 0;
+  const removed = sweep.removed || 0;
+  let text = 'Orphan sweep ran ' + esc(_execAgo(sweep.at)) + ' and collected '
+    + removed + (removed === 1 ? ' object' : ' objects') + '.';
+  if (failures) {
+    const failed = (sweep.executors || []).filter(e => e.error);
+    text += ' ' + failures + (failures === 1 ? ' executor' : ' executors')
+      + ' could not be swept: '
+      + failed.map(e => esc(e.id) + ' (' + esc(e.error) + ')').join('; ');
+  }
+  box.className = 'exec-warning' + (failures ? '' : ' muted');
+  box.innerHTML = text;
+  box.style.display = 'block';
+}
+
+// _execAgo renders a timestamp as a rough age. Exact times are not useful for a
+// background job whose whole point is that nobody watches it.
+function _execAgo(iso) {
+  const then = Date.parse(iso);
+  if (isNaN(then)) return 'recently';
+  const secs = Math.max(0, Math.round((Date.now() - then) / 1000));
+  if (secs < 90) return secs + 's ago';
+  const mins = Math.round(secs / 60);
+  if (mins < 90) return mins + 'm ago';
+  return Math.round(mins / 60) + 'h ago';
+}
+
 function _renderExecutors(d) {
   const banner = document.getElementById('execPolicyBanner');
   const warnBox = document.getElementById('execWarnings');
@@ -189,6 +233,8 @@ function _renderExecutors(d) {
   // remediation fields so a client can act on the verdict without re-deriving
   // it. (No backticks in this file's JS comments — the whole dashboard is a
   // Go raw string literal and one would close it.)
+
+  _renderExecSweep(d && d.sweep);
 
   const execs = (d && d.executors) || [];
   if (empty) empty.style.display = execs.length ? 'none' : 'block';

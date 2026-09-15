@@ -483,6 +483,22 @@ type ExecutorsConfig struct {
 	// config. See pkg/executor/agentbuild.go.
 	MinAgentBuild string `yaml:"min_agent_build,omitempty"`
 
+	// OrphanSweepIntervalMinutes is how often the hub re-runs the orphan sweep
+	// that collects workloads it is no longer tracking. Absent uses
+	// reconcile.DefaultSweepInterval (15 minutes); an explicit 0 disables it.
+	//
+	// Before Task 20281 the sweep ran only at process start, which covered the
+	// case it was written for — a control plane killed mid-run — and no other.
+	// A node eviction, a cluster upgrade that drains a node, or an operator
+	// deleting a Pod by hand all orphan objects while the hub is perfectly
+	// healthy, and those accumulated until someone restarted it.
+	//
+	// A *int for the reason AllowHostProcess is a *bool: absent, explicitly
+	// zero and explicitly set are three different intentions, and a plain int
+	// with omitempty would drop an operator's deliberate 0 on the next Save,
+	// silently re-enabling a sweep they had turned off.
+	OrphanSweepIntervalMinutes *int `yaml:"orphan_sweep_interval_minutes,omitempty"`
+
 	// Container configures the Docker/Podman sandbox executor.
 	Container ContainerExecutorConfig `yaml:"container,omitempty"`
 
@@ -723,6 +739,29 @@ func (e ExecutorsConfig) HostProcessAllowed() bool {
 // distinguish "permissive because nobody has decided yet" from "permissive on
 // purpose".
 func (e ExecutorsConfig) HostProcessExplicit() bool { return e.AllowHostProcess != nil }
+
+// OrphanSweepInterval renders the configured cadence as a duration for
+// reconcile.Options.SweepInterval.
+//
+// The two encodings differ on purpose, and this function is the single place
+// that reconciles them. An operator writes 0 to mean "off", because that is
+// what 0 means in a config file. reconcile.Options is a Go struct whose zero
+// value has to be the production default, so "off" there is negative. Doing the
+// translation here keeps every caller from having to remember which convention
+// it is holding — and getting that backwards would silently disable the sweep
+// on every deployment that never set the field.
+//
+// A negative value in the file is read as "off" too: it is not a cadence, and
+// refusing to run is the safer reading of a value nobody can have meant.
+func (e ExecutorsConfig) OrphanSweepInterval() time.Duration {
+	if e.OrphanSweepIntervalMinutes == nil {
+		return 0 // absent: reconcile applies its default
+	}
+	if m := *e.OrphanSweepIntervalMinutes; m > 0 {
+		return time.Duration(m) * time.Minute
+	}
+	return -1 // explicitly disabled
+}
 
 // SetHostProcessAllowed records an explicit policy decision.
 func (e *ExecutorsConfig) SetHostProcessAllowed(allowed bool) {
