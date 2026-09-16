@@ -81,6 +81,10 @@ function stopVoiceRecording() {
 // not perfect, and the difference between a wrong word here and a wrong word
 // in a chat message is that this one becomes a row in someone's plan. The
 // field is inches away, so review costs a glance.
+//
+// Two buttons, one recorder (Task 20302). The second lives in the edit modal
+// and speaks into a field that already has words in it, which is the whole
+// difference between them: see openDictateApply below.
 
 let dictateRecorder = null;
 let dictateChunks = [];
@@ -146,8 +150,25 @@ function closeDictateAudioCtx() {
 const DICTATE_IDLE_ICON = '<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M5 3a3 3 0 0 1 6 0v5a3 3 0 0 1-6 0V3z"/><path d="M3.5 6.5A.5.5 0 0 1 4 7v1a4 4 0 0 0 8 0V7a.5.5 0 0 1 1 0v1a5 5 0 0 1-4.5 4.975V15h2a.5.5 0 0 1 0 1h-5a.5.5 0 0 1 0-1h2v-2.025A5 5 0 0 1 3 8V7a.5.5 0 0 1 .5-.5z"/></svg>';
 const DICTATE_STOP_ICON = '<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M5 5h6v6H5z"/></svg>';
 
-function dictateBtn()   { return document.getElementById('dictateTaskBtn'); }
-function dictateLabel() { return document.getElementById('dictateTaskLabel'); }
+// Which field the microphone is speaking into (Task 20302). One value rather
+// than per-button state, because there is one recorder: the two buttons can
+// never be pressed at once — the edit modal inerts the page behind it, which
+// includes the Add Task row — so "which button is live" is always a single
+// answer.
+//
+//   'add'  → the Add Task title field. The transcript goes straight in.
+//   'edit' → the edit modal's Description. The transcript opens a chooser,
+//            because overwriting what is already there may not be what the
+//            speaker meant.
+const DICTATE_TARGETS = {
+  add:  {btn: 'dictateTaskBtn', label: 'dictateTaskLabel'},
+  edit: {btn: 'dictateEditBtn', label: 'dictateEditLabel'},
+};
+let dictateTarget = 'add';
+
+function dictateIDs()   { return DICTATE_TARGETS[dictateTarget] || DICTATE_TARGETS.add; }
+function dictateBtn()   { return document.getElementById(dictateIDs().btn); }
+function dictateLabel() { return document.getElementById(dictateIDs().label); }
 
 // A touch press is push-to-talk; a mouse click still toggles (Task 20252).
 // This media query only picks the *wording* — the behaviour is decided per
@@ -159,19 +180,29 @@ function dictateTouchPrimary() {
 }
 function dictateIdleLabel() { return dictateTouchPrimary() ? 'Hold to talk' : 'Dictate'; }
 
-// Paint the button. Kept in one place because three call sites (start, stop,
+// Paint one button. Kept in one place because three call sites (start, stop,
 // failure) all have to leave it in a consistent state, and a mic button stuck
 // on "Stop" with no recorder behind it is unrecoverable without a reload.
-function setDictateState(state, text) {
-  const btn = dictateBtn(), lab = dictateLabel();
+//
+// The label span is rebuilt with the id it had, because setting innerHTML
+// destroys the previous one — a single hard-coded id would silently move the
+// add-task label into the edit modal's button the first time it was painted.
+function paintDictate(key, state, text) {
+  const ids = DICTATE_TARGETS[key];
+  if (!ids) return;
+  const btn = document.getElementById(ids.btn);
   if (!btn) return;
+  const prev = document.getElementById(ids.label);
+  const carry = text || (prev ? prev.textContent : 'Dictate');
   btn.classList.toggle('recording', state === 'recording');
   btn.disabled = (state === 'busy');
   btn.innerHTML = (state === 'recording' ? DICTATE_STOP_ICON : DICTATE_IDLE_ICON) +
-                  ' <span id="dictateTaskLabel"></span>';
-  const fresh = document.getElementById('dictateTaskLabel');
-  if (fresh) fresh.textContent = text || (lab ? lab.textContent : 'Dictate');
+                  ' <span id="' + ids.label + '"></span>';
+  const fresh = document.getElementById(ids.label);
+  if (fresh) fresh.textContent = carry;
 }
+
+function setDictateState(state, text) { paintDictate(dictateTarget, state, text); }
 
 // Reveal the button only when the hub can actually transcribe. Called at load,
 // and again by the Settings panel when the speech-to-text key changes
@@ -179,22 +210,29 @@ function setDictateState(state, text) {
 // revealing: clearing the key has to take the button away again, or it stays on
 // screen and fails the next time someone speaks into it.
 window.initTaskDictation = function() {
-  const btn = dictateBtn();
-  if (!btn) return;
-  bindTaskDictationGestures();
+  const keys = Object.keys(DICTATE_TARGETS);
+  keys.forEach(k => bindTaskDictationGestures(document.getElementById(DICTATE_TARGETS[k].btn), k));
+  const showAll = ok => keys.forEach(k => {
+    const btn = document.getElementById(DICTATE_TARGETS[k].btn);
+    if (btn) btn.style.display = ok ? '' : 'none';
+  });
   // api() with no second argument is a GET; passing null would make it a POST.
   // Both halves have to hold: a hub with no speech backend, and a viewer who
   // could not create the task anyway, each get no button rather than one that
   // fails or sits permanently disabled.
   api('/api/dictate').then(d => {
     const ok = !!(d && d.available && d.can_add_tasks);
-    btn.style.display = ok ? '' : 'none';
-    if (ok) {
-      const how = dictateTouchPrimary() ? 'Hold to dictate' : 'Dictate';
-      btn.title = how + ' the task title (' + (d.backend || 'speech') + ')';
-      setDictateState('idle', dictateIdleLabel());
-    }
-  }).catch(() => { btn.style.display = 'none'; });
+    showAll(ok);
+    if (!ok) return;
+    const how = dictateTouchPrimary() ? 'Hold to dictate' : 'Dictate';
+    const backend = ' (' + (d.backend || 'speech') + ')';
+    keys.forEach(k => {
+      const btn = document.getElementById(DICTATE_TARGETS[k].btn);
+      if (!btn) return;
+      btn.title = (k === 'edit' ? how + ' a change to these details' : how + ' the task title') + backend;
+      paintDictate(k, 'idle', dictateIdleLabel());
+    });
+  }).catch(() => showAll(false));
 };
 
 document.addEventListener('DOMContentLoaded', () => { window.initTaskDictation(); });
@@ -204,11 +242,28 @@ document.addEventListener('DOMContentLoaded', () => { window.initTaskDictation()
 // pointer handlers below claim the gesture and suppress the click the browser
 // synthesises after touchend, which would otherwise start a second recording
 // the instant the first one ended.
-window.toggleTaskDictation = function() {
+function beginDictation(key) {
   if (dictateSuppressClick) { dictateSuppressClick = false; return; }
-  if (dictateActive) { stopTaskDictation(); return; }
+  if (dictateActive) {
+    // A second press on the button that is recording ends it. A press on the
+    // *other* one is somebody reaching for the wrong control mid-sentence:
+    // stopping here would post the audio into a field they did not aim at, so
+    // it does nothing instead.
+    if (key === dictateTarget) stopTaskDictation();
+    return;
+  }
+  // startTaskDictation guards this too, but bailing here as well keeps a
+  // double click from retargeting a session that is already coming up.
+  if (dictateStarting) return;
+  dictateTarget = key;
   startTaskDictation();
-};
+}
+
+window.toggleTaskDictation = function() { beginDictation('add'); };
+
+// The edit modal's microphone (Task 20302). Same recorder, different landing
+// place — what changes is only what happens to the transcript.
+window.toggleEditDictation = function() { beginDictation('edit'); };
 
 async function startTaskDictation() {
   // dictateActive is only set after getUserMedia resolves, so a double click
@@ -352,8 +407,8 @@ function endDictateHold() {
   dictateAbortMsg = '';
 }
 
-function dictatePointerDown(e) {
-  const btn = dictateBtn();
+function dictatePointerDown(e, key) {
+  const btn = document.getElementById(DICTATE_TARGETS[key].btn);
   if (!btn || btn.disabled) return;
 
   // A mouse keeps the toggle. Clearing the suppression flag here matters on a
@@ -372,6 +427,9 @@ function dictatePointerDown(e) {
   }
 
   e.preventDefault();   // no text selection, no long-press callout
+  // Before any painting: setDictateState below resolves the button through
+  // dictateTarget, so getting this wrong would light up the other microphone.
+  dictateTarget = key;
   dictateHoldStart = Date.now();
   dictateHeldPointer = e.pointerId;
   dictateCancel = false;
@@ -427,15 +485,14 @@ function dictatePointerUp(e) {
   releaseDictateHold();
 }
 
-// Wired once, on the button, rather than per render: this button is never
-// re-created, only relabelled by setDictateState, which replaces its children
+// Wired once, on the button, rather than per render: the buttons are never
+// re-created, only relabelled by paintDictate, which replaces their children
 // and would drop listeners bound to them.
-function bindTaskDictationGestures() {
-  const btn = dictateBtn();
+function bindTaskDictationGestures(btn, key) {
   if (!btn || btn.dataset.pttBound === '1') return;
   if (typeof window.PointerEvent === 'undefined') return;  // click-toggle still works
   btn.dataset.pttBound = '1';
-  btn.addEventListener('pointerdown', dictatePointerDown);
+  btn.addEventListener('pointerdown', e => dictatePointerDown(e, key));
   btn.addEventListener('pointerup', dictatePointerUp);
   // A pointercancel is the system taking the gesture away — a scroll it decided
   // was really a scroll, a call arriving. Same release path: a hold long enough
@@ -464,19 +521,182 @@ async function sendTaskDictation(blob) {
       return;
     }
 
-    const title = document.getElementById('newTaskTitle');
-    if (title) {
-      // Append rather than replace when the field already has words in it, so
-      // a second press extends a sentence instead of discarding the first.
-      title.value = title.value.trim() ? (title.value.trim() + ' ' + data.text) : data.text;
-      title.focus();
-      title.setSelectionRange(title.value.length, title.value.length);
+    if (dictateTarget === 'edit') {
+      // The edit modal's Description is not an empty field, so the transcript
+      // is a question rather than an answer (Task 20302).
+      window.openDictateApply(data.text);
+    } else {
+      const title = document.getElementById('newTaskTitle');
+      if (title) {
+        // Append rather than replace when the field already has words in it, so
+        // a second press extends a sentence instead of discarding the first.
+        title.value = title.value.trim() ? (title.value.trim() + ' ' + data.text) : data.text;
+        title.focus();
+        title.setSelectionRange(title.value.length, title.value.length);
+      }
+      toast('Heard: ' + data.text, 'ok');
     }
-    toast('Heard: ' + data.text, 'ok');
   } catch (err) {
     toast('Transcription request failed', 'err');
   }
   setDictateState('idle', dictateIdleLabel());
+}
+
+// ── Applying what was dictated into an open edit modal (Task 20302) ──────────
+//
+// The microphone beside the Add Task field never has to ask anything: the
+// field is empty or holds a half-typed title the speaker is plainly extending.
+// The one in the edit modal speaks into a description somebody already wrote,
+// and "and make sure it works on mobile" and "scrap that, this is really about
+// the migration" are the same sound to a transcriber. Guessing wrong in one
+// direction loses a paragraph; guessing wrong in the other buries the new
+// instruction at the end of text that contradicts it.
+//
+// So it asks, with three answers:
+//
+//   Replace        the spoken words become the details
+//   Add to the end the details keep their text and gain a paragraph
+//   Edit with AI   the spoken words are an *instruction*, and the model
+//                  applies them to the details that are there
+//
+// Only the third leaves the browser, and none of the three writes to the plan:
+// every one lands in the textarea, and the modal's own Save Changes is still
+// the only way in. That is what makes letting a model rewrite somebody's task
+// description defensible — a misheard instruction is a visible paragraph they
+// can Cancel, never a silent edit.
+
+let dictateHeardText = '';
+
+// Bumped every time the chooser opens or closes, so a revision that comes back
+// after the user gave up on it can tell. Without this, dismissing the dialog
+// and carrying on typing ends with the model's answer landing in the textarea
+// seconds later, over whatever was written in the meantime — the one way this
+// feature could still edit a description nobody accepted.
+let dictateApplySeq = 0;
+
+// openDictateApply asks the question — but only when there is something to
+// lose. An empty description has exactly one sensible answer, and a dialog
+// whose buttons all do the same thing teaches people to dismiss dialogs.
+//
+// On window because it is this feature's entry point: everything above it is a
+// microphone, everything below is what happens to words. That seam is also
+// where dictate_apply_scenarios.js drives the bundle — the alternative is a
+// headless browser with a fake capture device just to reach a branch that has
+// nothing to do with audio.
+window.openDictateApply = function(text) {
+  dictateApplySeq++;
+  dictateHeardText = String(text == null ? '' : text).trim();
+  if (!dictateHeardText) return;
+
+  const desc = document.getElementById('modalDesc');
+  if (!desc) { toast('Heard: ' + dictateHeardText, 'ok'); return; }
+  if (!desc.value.trim()) {
+    applyDictatedDetails(dictateHeardText, 'Details dictated — review, then Save Changes');
+    return;
+  }
+
+  const heard = document.getElementById('dr-heard');
+  if (heard) heard.textContent = dictateHeardText;
+  setDictateApplyBusy(false);
+  openOverlay('dr-overlay', {dismiss: closeDictateApply});
+};
+
+window.closeDictateApply = function() {
+  dictateApplySeq++;
+  closeOverlay('dr-overlay');
+};
+
+// applyDictatedDetails writes the chosen text into the editor and leaves the
+// cursor at the end of it, so the next thing the user does is read what landed.
+function applyDictatedDetails(text, msg) {
+  const desc = document.getElementById('modalDesc');
+  if (!desc) return;
+  desc.value = text;
+  desc.focus();
+  try { desc.setSelectionRange(desc.value.length, desc.value.length); } catch (e) {}
+  toast(msg, 'ok');
+}
+
+window.dictateApplyReplace = function() {
+  const text = dictateHeardText;
+  closeDictateApply();
+  applyDictatedDetails(text, 'Details replaced — review, then Save Changes');
+};
+
+window.dictateApplyAppend = function() {
+  const desc = document.getElementById('modalDesc');
+  const text = dictateHeardText;
+  closeDictateApply();
+  const existing = desc ? desc.value.replace(/\s+$/, '') : '';
+  applyDictatedDetails(existing ? existing + '\n\n' + text : text,
+                       'Added to the details — review, then Save Changes');
+};
+
+// setDictateApplyBusy disables the three answers while the model is working.
+// Without it a second click posts a second revision, and whichever reply lands
+// last wins — which on a slow provider is not the one the user waited for.
+function setDictateApplyBusy(on) {
+  const busy = document.getElementById('dr-busy');
+  if (busy) busy.style.display = on ? '' : 'none';
+  ['dr-append-btn', 'dr-replace-btn', 'dr-revise-btn'].forEach(id => {
+    const b = document.getElementById(id);
+    if (b) b.disabled = !!on;
+  });
+}
+
+window.dictateApplyRevise = function() {
+  const idEl = document.getElementById('modalTaskId');
+  const desc = document.getElementById('modalDesc');
+  const id = idEl ? parseInt(idEl.value, 10) : NaN;
+  if (!desc || !Number.isFinite(id) || id <= 0) { toast('No task is open to edit', 'err'); return; }
+
+  const titleEl = document.getElementById('modalTitle_');
+  const seq = dictateApplySeq;
+  setDictateApplyBusy(true);
+  // The *draft* description, deliberately, not the stored one: the user may
+  // have typed into this field since the modal opened, and revising the saved
+  // copy would discard exactly the edits this dialog exists to protect.
+  api(pUrl('/api/tasks/' + id + '/revise'), {
+    instruction: dictateHeardText,
+    description: desc.value,
+    title: titleEl ? titleEl.value : '',
+  }).then(d => {
+    setDictateApplyBusy(false);
+    // Dismissed, or a second transcript arrived, while the model was thinking.
+    // Silent on purpose: the user has moved on, and a toast about a revision
+    // they cancelled is noise about work they already decided against.
+    if (seq !== dictateApplySeq) return;
+    if (!d || !d.ok || !d.description) {
+      // Leaves the dialog open on purpose. The model is the only part of this
+      // that can fail, and Replace and Add to the end are still right there —
+      // closing would make the user say the sentence again to reach them.
+      toast((d && (d.message || d.error)) || 'Editing the details failed', 'err');
+      return;
+    }
+    closeDictateApply();
+    applyDictatedDetails(d.description, 'Details edited — review, then Save Changes');
+  }).catch(() => {
+    setDictateApplyBusy(false);
+    if (seq !== dictateApplySeq) return;
+    toast('Request failed', 'err');
+  });
+};
+
+// cancelEditDictation releases the microphone when the edit modal closes
+// underneath it. Without it, dismissing the modal mid-sentence leaves the
+// recorder running against a field that is no longer on screen — and the
+// browser's recording indicator lit with nothing able to turn it off.
+//
+// Called from closeModal in 12-task-crud.js, which loads earlier in the same
+// IIFE; function declarations hoist across the whole bundle, so the call site
+// resolves regardless of fragment order.
+function cancelEditDictation() {
+  closeDictateApply();
+  dictateHeardText = '';
+  if (dictateTarget !== 'edit') return;
+  if (dictateActive || dictateStarting) cancelTaskDictation('');
+  paintDictate('edit', 'idle', dictateIdleLabel());
+  dictateTarget = 'add';
 }
 
 window.sendVoiceAudio = async function() {

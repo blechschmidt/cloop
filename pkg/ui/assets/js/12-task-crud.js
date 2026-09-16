@@ -189,6 +189,11 @@ window.openEditModal = function(id) {
 };
 
 window.closeModal = function() {
+  // Before the overlay closes, not after: cancelEditDictation dismisses the
+  // "apply what you said" chooser, which sits on top of this modal, and the
+  // overlay stack has to unwind innermost-first or the focus it hands back
+  // goes to a dialog that is already hidden (Task 20302).
+  if (typeof cancelEditDictation === 'function') cancelEditDictation();
   closeOverlay('modal-overlay');
 };
 

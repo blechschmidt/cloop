@@ -3106,7 +3106,24 @@
       <input class="form-input" id="modalTitle_" placeholder="Task title">
     </div>
     <div class="form-group">
-      <label class="form-label">Description</label>
+      <div class="form-label-row">
+        <label class="form-label" for="modalDesc">Description</label>
+        <!-- Dictate a change to the details (Task 20302). Hidden until
+             GET /api/dictate reports a speech backend, exactly like the
+             microphone beside the Add Task field.
+
+             Unlike that one, what is heard here does not go straight into
+             the field: this field already has words in it, and the audio
+             cannot say whether the speaker meant to replace them or to
+             build on them. The transcript opens the chooser below instead,
+             and nothing reaches the plan until Save Changes. -->
+        <button class="btn mic" id="dictateEditBtn" data-perm="task.mutate" style="display:none"
+                title="Dictate a change to these details" aria-label="Dictate a change to these details"
+                onclick="toggleEditDictation()">
+          <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M5 3a3 3 0 0 1 6 0v5a3 3 0 0 1-6 0V3z"/><path d="M3.5 6.5A.5.5 0 0 1 4 7v1a4 4 0 0 0 8 0V7a.5.5 0 0 1 1 0v1a5 5 0 0 1-4.5 4.975V15h2a.5.5 0 0 1 0 1h-5a.5.5 0 0 1 0-1h2v-2.025A5 5 0 0 1 3 8V7a.5.5 0 0 1 .5-.5z"/></svg>
+          <span id="dictateEditLabel">Dictate</span>
+        </button>
+      </div>
       <textarea class="form-textarea" id="modalDesc" placeholder="Optional description"></textarea>
     </div>
     <div class="form-row">
@@ -3163,6 +3180,41 @@
       <input class="form-input" id="at-input" placeholder="Read-only session" disabled
              autocomplete="off" spellcheck="false" style="flex:1;font-family:var(--mono,monospace)">
       <button class="btn" onclick="closeAttachTerminal()">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- What to do with dictated details (Task 20302).
+
+     Opens over the edit modal when the microphone in it hears something and
+     the Description field is not empty. The three answers are deliberately
+     spelled out rather than guessed: "and make sure it works on mobile" and
+     "scrap that, this is really about the migration" sound identical to a
+     transcriber, and one of them destroys a paragraph if guessed wrong.
+
+     Replace and "Add to the end" happen in the browser and are instant.
+     "Edit with AI" is the only one that costs a provider call, so it is the
+     only one that can fail — and when it does, the other two are still on
+     screen. -->
+<div id="dr-overlay" data-overlay="class:open" onclick="if(event.target===this)closeDictateApply()">
+  <div id="dr-modal" role="dialog" aria-modal="true" aria-labelledby="dr-title">
+    <div class="dc-header">
+      <h2 id="dr-title">Apply what you said</h2>
+      <button class="dc-close" onclick="closeDictateApply()" aria-label="Close">&times;</button>
+    </div>
+    <div class="dc-body">
+      <div class="dc-hint">These details already have text in them. Choose what to do with what you just said — nothing is saved until you press Save Changes.</div>
+      <div class="dr-heard" id="dr-heard"></div>
+      <div class="dr-busy" id="dr-busy" style="display:none">Editing the details with the model — this takes a few seconds.</div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeDictateApply()">Cancel</button>
+      <button class="btn" id="dr-append-btn" onclick="dictateApplyAppend()"
+              title="Keep the existing details and add what you said to the end.">Add to the end</button>
+      <button class="btn" id="dr-replace-btn" onclick="dictateApplyReplace()"
+              title="Discard the existing details and use what you said instead.">Replace</button>
+      <button class="btn primary" id="dr-revise-btn" onclick="dictateApplyRevise()"
+              title="Treat what you said as an instruction and let the model edit the existing details.">Edit with AI</button>
     </div>
   </div>
 </div>

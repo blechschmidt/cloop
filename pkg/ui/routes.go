@@ -487,6 +487,12 @@ func (s *Server) routeTable() []routeSpec {
 		// level as the mutation they precede rather than as a read.
 		{Pattern: "POST /api/tasks/{id}/decompose", Handler: s.handleTaskDecompose, Perm: task, Scope: scopeProject},
 		{Pattern: "POST /api/tasks/{id}/decompose/apply", Handler: s.handleTaskDecomposeApply, Perm: task, Scope: scopeProject},
+		// Applying a dictated instruction to a task's details (Task 20302).
+		// Writes nothing — it hands a revision back for the editor to accept
+		// or discard — but it spends a provider call, so it is gated exactly
+		// like the decomposition preview above rather than as a read. See
+		// revise_api.go.
+		{Pattern: "POST /api/tasks/{id}/revise", Handler: s.handleTaskRevise, Perm: task, Scope: scopeProject},
 
 		// ── Suggestions, chat, voice ─────────────────────────────────
 		// All three spend provider budget and feed the plan, so viewers

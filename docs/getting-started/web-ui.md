@@ -295,6 +295,31 @@ good, not perfect, and the field is right there to correct before you press
 The button only appears when the hub has a speech backend configured, and the
 browser needs an `https` origin (or `localhost`) to reach a microphone at all.
 
+### Dictating a change to a task
+
+The same button sits beside *Description* when you edit a task. It behaves
+differently there, because that field already has words in it and "…and make
+sure it works on mobile" sounds exactly like "scrap that, this is really about
+the migration". So it asks:
+
+| | |
+| --- | --- |
+| **Replace** | the details become what you said |
+| **Add to the end** | the details keep their text and gain a paragraph |
+| **Edit with AI** | what you said is an *instruction*, and the model applies it to the details that are there |
+
+The first two are instant and happen in the browser. The third posts the open
+draft — not the saved copy, so anything you have typed since opening the modal
+is what gets revised — to `POST /api/tasks/{id}/revise`, and costs one provider
+call against the project's budget. If the model is unavailable the dialog stays
+up, so the other two answers are still one click away.
+
+None of the three saves anything. The text lands in the textarea and *Save
+Changes* is still the only way into the plan, which is what makes letting a
+model rewrite a task description safe: a misheard instruction is a paragraph you
+can read and cancel, never a silent edit. A description that is empty to begin
+with skips the question — there is nothing to lose, so the words go straight in.
+
 The glasses page offers the same thing as **🎤 Speak a new task**, on the *+
 Add task* screen described above, with a confirmation step — the transcript,
 then *Add task* or *Discard* — because a wearer has no keyboard to correct a

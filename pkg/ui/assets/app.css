@@ -1178,6 +1178,37 @@
   .dc-sub-desc { font-size:12px; color:var(--muted); margin-top:3px; line-height:1.45; white-space:pre-wrap; word-wrap:break-word; }
   .dc-sub-meta { display:flex; gap:6px; margin-top:5px; font-size:11px; color:var(--muted); flex-wrap:wrap; }
   .dc-sub-meta span { background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:1px 7px; }
+
+  /* ── Dictated details chooser (Task 20302) ──
+     Reuses the decompose modal's header/body/footer classes rather than
+     restating them: the two dialogs are the same shape, and a second copy of
+     the rules is a second place for the padding to drift.
+
+     z-index sits above the edit modal (50) it opens over and below the sandbox
+     terminal (70), which can be open over the task-details modal at the same
+     time. */
+  #dr-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,.7); z-index:65; align-items:center; justify-content:center; }
+  #dr-overlay.open { display:flex; }
+  #dr-modal { background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); padding:0; width:560px; max-width:96vw; max-height:88vh; display:flex; flex-direction:column; }
+  #dr-modal .dc-header { display:flex; align-items:center; justify-content:space-between; padding:14px 18px; border-bottom:1px solid var(--border); }
+  #dr-modal .dc-header h2 { font-size:14px; font-weight:600; margin:0; }
+  #dr-modal .dc-close { background:none; border:0; color:var(--muted); font-size:22px; line-height:1; cursor:pointer; padding:0 4px; }
+  #dr-modal .dc-close:hover { color:var(--text); }
+  #dr-modal .dc-body { padding:16px 18px; overflow-y:auto; flex:1; min-height:0; }
+  /* wrap, because four buttons and a Cancel do not fit a phone on one line —
+     and a footer that overflows puts the destructive one off screen. */
+  #dr-modal .modal-footer { padding:12px 18px; border-top:1px solid var(--border); margin-top:0; align-items:center; flex-wrap:wrap; }
+  /* word-break, not word-wrap: a transcript is occasionally one long unbroken
+     token (a URL the speaker read out), which would otherwise push the dialog
+     wider than the viewport. */
+  .dr-heard { background:var(--bg); border:1px solid var(--border); border-left:3px solid var(--purple); border-radius:var(--radius);
+              padding:10px 12px; font-size:13px; line-height:1.5; white-space:pre-wrap; word-break:break-word; max-height:30vh; overflow-y:auto; }
+  .dr-busy { margin-top:10px; font-size:12px; color:var(--muted); }
+
+  /* A label with a control on the same line (the Description field's mic). */
+  .form-label-row { display:flex; align-items:center; gap:8px; margin-bottom:4px; }
+  .form-label-row .form-label { margin-bottom:0; }
+  .form-label-row .btn { margin-left:auto; padding:3px 9px; font-size:11px; }
   .dc-spin { display:flex; align-items:center; gap:10px; padding:22px 4px; color:var(--muted); font-size:13px; }
 
   /* ── Toast ── */
