@@ -160,9 +160,25 @@ Task** appends it immediately.
 
 **Editing** happens in a modal with title, description, priority, dependencies
 and a per-task **Max minutes** budget (`0` inherits the project default).
-**Reordering** is drag and drop. The per-row buttons — **Done**, **Skip**,
-**Fail**, **Reset**, **Edit**, **Remove** — set status directly; **Remove**
-asks for confirmation first.
+The per-row buttons — **Done**, **Skip**, **Fail**, **Reset**, **Edit**,
+**Remove** — set status directly; **Remove** asks for confirmation first.
+
+**Reordering** is drag and drop, and the list is the run queue: tasks run top to
+bottom, and dragging a row rewrites the priorities the scheduler reads. This
+holds while a run is in flight — the orchestrator re-reads the order on every
+iteration, so a task dragged to the top is the next one picked up and nothing
+needs restarting. Three things bound it:
+
+- **Dependencies win.** A task dragged to the top still waits for whatever it
+  depends on. The queue orders what is *ready*; it does not override the graph.
+- **Only pending tasks have a position.** Completed and currently-running rows
+  carry no drag handle: one is history, the other has already left the queue.
+- **Pinned tasks lead.** `cloop task pin` puts a task at the head and keeps it
+  there, so a drag across that divider is refused rather than half applied —
+  `cloop task unpin <id>` first.
+
+With **max-parallel** above 1 the same order decides which tasks start: the top
+*N* of the queue, where *N* is the worker count.
 
 The same plan is visible other ways: **Kanban** as four columns (Pending, In
 Progress, Done, Failed/Skipped) with draggable cards, **Timeline** as a Gantt

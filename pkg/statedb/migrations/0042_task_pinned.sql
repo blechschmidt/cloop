@@ -1,0 +1,32 @@
+-- plan_task_pins — the durable home pm.Task.Pinned always needed.
+--
+-- `cloop task pin` has set the field in memory since it shipped, and the
+-- dashboard, kanban and TUI all float pinned rows to the top. None of it
+-- survived: the cutover to SQLite enumerated plan_tasks' columns by hand and
+-- `pinned` was not among them, so every pin was dropped by the next Save and
+-- read back as false. The feature could not be observed to be broken because
+-- its only visible effect was the thing being discarded.
+--
+-- Task 20299 makes the flag part of the execution order — the queue's top row
+-- is what runs next — so it now has to outlive a save.
+--
+-- A side table rather than `ALTER TABLE plan_tasks ADD COLUMN pinned`, which is
+-- the obvious shape and the wrong one: schema_compat.go classifies any ALTER as
+-- breaking, and a breaking migration makes every older binary sharing these
+-- databases refuse to open them. That is not hypothetical — it is the
+-- 2026-09-14 outage recorded in that file, where one dev build blanked 18
+-- projects on the deployed dashboard until the next nightly rebuild. A bare
+-- CREATE TABLE classifies additive: an older hub has no statement that names
+-- this table, so it reads every task exactly as it does today, without a pin.
+--
+-- Presence is the flag, and presence is all it stores. A pinned_at timestamp
+-- would be the natural second column and would be a lie: SaveState rewrites the
+-- plan by deleting plan_tasks wholesale and re-inserting it, so the cascade
+-- clears these rows on every save and any timestamp written here would read as
+-- "when the project was last saved", not "when this was pinned".
+--
+-- ON DELETE CASCADE (foreign_keys is ON, see applyPragmas) keeps a pin from
+-- outliving its task and resurrecting on an id a later plan reuses.
+CREATE TABLE IF NOT EXISTS plan_task_pins (
+    task_id INTEGER PRIMARY KEY REFERENCES plan_tasks(id) ON DELETE CASCADE
+);

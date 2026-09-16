@@ -165,18 +165,16 @@ func GateTasks(ctx context.Context, plan *pm.Plan, cfg GateConfig) GateDecision 
 		return d
 	}
 
-	// (3) Selection. In sequential mode this reproduces Plan.NextTask exactly:
-	// the same candidate set (ReadyTasks), the same strictly-less-than
-	// comparison, so ties still resolve to the first task in plan order.
+	// (3) Selection. ReadyTasks returns its candidates already in execution
+	// order (pm.LessByExecutionOrder), so sequential mode takes the head and
+	// parallel mode keeps the whole list — in that order, because the caller
+	// truncates it to the worker-pool size. Parallel mode used to keep the list
+	// unsorted, which made the cap select by ID: reordering the queue in the UI
+	// changed the priorities the scheduler read and still dispatched the same
+	// low-numbered tasks (Task 20299).
 	candidates := eligible
 	if !cfg.Parallel {
-		best := eligible[0]
-		for _, t := range eligible[1:] {
-			if t.Priority < best.Priority {
-				best = t
-			}
-		}
-		candidates = []*pm.Task{best}
+		candidates = []*pm.Task{eligible[0]}
 	}
 
 	// (4) Tag filter.

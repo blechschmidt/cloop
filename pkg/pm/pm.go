@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"sort"
 	"strings"
 	"time"
 
@@ -345,6 +346,53 @@ func SortPinnedFirst(tasks []*Task) []*Task {
 	return out
 }
 
+// LessByExecutionOrder reports whether a runs before b.
+//
+// This is the single definition of "the order tasks run in", and the dashboard's
+// Tasks tab renders pending rows through the same three keys so that the list a
+// user is looking at *is* the run queue. Before Task 20299 there was no such
+// definition: the sequential path compared Priority, the parallel path compared
+// nothing at all (it dispatched in plan order, which is ID order after a load),
+// and the dashboard floated pinned rows to the top — so the same plan had three
+// different answers and dragging a row changed only one of them.
+//
+// The keys, in order:
+//
+//  1. Pinned. `cloop task pin` documents itself as marking a high-priority task
+//     to "always appear at top", and a queue whose top entry is not the next
+//     thing to run is not a queue. Pinning is therefore a scheduling decision,
+//     not a decoration.
+//  2. Priority ascending — 1 is the most urgent. This is what the drag-to-reorder
+//     endpoint rewrites, so a drag is expressed in the same units the scheduler
+//     already reads.
+//  3. ID ascending, to break ties by creation order. Without it the order of
+//     equal-priority tasks would depend on slice order, which differs between a
+//     freshly decomposed plan (append order) and one read back from SQLite
+//     (ORDER BY id) — the same plan would run in two different orders depending
+//     on whether the hub had restarted.
+func LessByExecutionOrder(a, b *Task) bool {
+	if a.Pinned != b.Pinned {
+		return a.Pinned
+	}
+	if a.Priority != b.Priority {
+		return a.Priority < b.Priority
+	}
+	return a.ID < b.ID
+}
+
+// SortByExecutionOrder returns a shallow copy of tasks in the order they run.
+// It does NOT mutate the input slice — callers hold the plan's own backing
+// array, and reordering it underneath them would change which task a pending
+// index refers to.
+func SortByExecutionOrder(tasks []*Task) []*Task {
+	out := make([]*Task, len(tasks))
+	copy(out, tasks)
+	sort.SliceStable(out, func(i, j int) bool {
+		return LessByExecutionOrder(out[i], out[j])
+	})
+	return out
+}
+
 // PinnedCount returns the number of pinned tasks in the slice.
 func PinnedCount(tasks []*Task) int {
 	n := 0
@@ -408,25 +456,24 @@ func depIsTerminalFailure(dep *Task) bool {
 	return dep.Status == TaskFailed || dep.Status == TaskTimedOut
 }
 
-// NextTask returns the highest-priority pending task whose dependencies are all satisfied.
+// NextTask returns the pending task that runs next: the first of ReadyTasks in
+// execution order. It agrees with GateTasks by construction — both take the
+// head of the same sorted candidate set — which is what stops the CLI's "next
+// task" readouts (cloop task next, cloop context, cloop prioritize) from naming
+// a different task than the orchestrator actually picks.
 func (p *Plan) NextTask() *Task {
-	var best *Task
-	for _, t := range p.Tasks {
-		if t.Status != TaskPending {
-			continue
-		}
-		if !p.DepsReady(t) {
-			continue
-		}
-		if best == nil || t.Priority < best.Priority {
-			best = t
-		}
+	ready := p.ReadyTasks()
+	if len(ready) == 0 {
+		return nil
 	}
-	return best
+	return ready[0]
 }
 
-// ReadyTasks returns all pending tasks whose dependencies are satisfied.
-// In parallel mode, all of these can be run concurrently.
+// ReadyTasks returns all pending tasks whose dependencies are satisfied, in the
+// order they run. In parallel mode all of these can run concurrently, but the
+// order still decides which ones start first when the worker pool is smaller
+// than the queue — so it is sorted here rather than left in plan order, which
+// would make a reorder in the UI invisible to every capped parallel run.
 func (p *Plan) ReadyTasks() []*Task {
 	var ready []*Task
 	for _, t := range p.Tasks {
@@ -434,7 +481,7 @@ func (p *Plan) ReadyTasks() []*Task {
 			ready = append(ready, t)
 		}
 	}
-	return ready
+	return SortByExecutionOrder(ready)
 }
 
 // IsComplete returns true if all tasks are done or skipped, or if remaining

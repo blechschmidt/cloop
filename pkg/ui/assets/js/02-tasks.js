@@ -150,6 +150,14 @@ function _syncFilterBarVisibility(tabName) {
 
 // ── Render tasks tab ─────────────────────────────────────────────────────────
 
+// Only a task that has not started yet has a position in the run queue, so only
+// those rows are draggable. A finished task's place is history and a running
+// one has already left the queue — offering a drag handle on either is an
+// affordance for something the scheduler cannot honour.
+function isReorderable(t) {
+  return (t.status || 'pending') === 'pending';
+}
+
 window.toggleCompletedTasks = function() {
   showCompletedTasks = !showCompletedTasks;
   const btn = document.getElementById('toggleCompletedBtn');
@@ -197,6 +205,15 @@ function renderTasks(s) {
     const active = byId.filter(t => !t.pinned).sort(sortNonCompleted);
     sorted = [...byId.filter(t=>t.pinned), ...active];
   }
+  // Publish the run queue for the drop handler. Pending rows appear here in
+  // the same order pm.LessByExecutionOrder puts them in — pinned first, then
+  // priority, then id — which is what makes this list both what the user sees
+  // and what the orchestrator will run (Task 20299). It is taken from `sorted`
+  // rather than `visible` deliberately: a search filter hides rows but must not
+  // drop them out of the queue being rewritten, and moving a task to the
+  // position of a visible target inside the full list lands it correctly in the
+  // filtered view too.
+  renderedQueue = sorted.filter(isReorderable).map(t => t.id);
   const done    = sorted.filter(t => t.status==='done').length;
 
   // Apply search/filter bar. When status filters are active they override the showCompleted toggle.
@@ -228,16 +245,22 @@ function renderTasks(s) {
     // A task whose recorded "work" is a provider refusal gets the row marked
     // too (Task 20224) — it is the opposite of finished, however it is filed.
     const abCls = isOpenAbortFinding(t) ? ' has-aborted-outcome' : '';
-    return '<div class="task-item '+esc(cls)+bgCls+abCls+'" draggable="true" data-task-id="'+tid+'" '+
+    // Drag affordances are attached per row rather than to every row: a done or
+    // running task is not in the queue, so it is neither a source nor a drop
+    // target, and a handle on it would promise a reorder that cannot happen.
+    const canOrder = isReorderable(t);
+    const dragAttrs = canOrder
+      ? ' draggable="true" ondragstart="onDragStart(event,'+tid+')"'+
+        ' ondragover="onDragOver(event,'+tid+')" ondragleave="onDragLeave(event)"'+
+        ' ondrop="onDrop(event,'+tid+')" ondragend="onDragEnd(event)"'
+      : '';
+    return '<div class="task-item '+esc(cls)+bgCls+abCls+'" data-task-id="'+tid+'"'+dragAttrs+' '+
       'onclick="taskRowClick(event,'+tid+')" '+
       'style="cursor:pointer" '+
-      'title="Click to view execution summary, output, and history" '+
-      'ondragstart="onDragStart(event,'+tid+')" '+
-      'ondragover="onDragOver(event,'+tid+')" '+
-      'ondragleave="onDragLeave(event)" '+
-      'ondrop="onDrop(event,'+tid+')" '+
-      'ondragend="onDragEnd(event)">'+
-      '<div class="drag-handle" title="Drag to reorder">&#8597;</div>'+
+      'title="Click to view execution summary, output, and history">'+
+      (canOrder
+        ? '<div class="drag-handle" title="Drag to reorder — tasks run top to bottom">&#8597;</div>'
+        : '<div class="drag-handle drag-handle-disabled" aria-hidden="true"></div>')+
       '<div class="task-icon">'+taskIcon(cls)+'</div>'+
       '<div class="task-body">'+
         '<div class="task-title">'+(t.pinned?'<span class="pin-badge" title="Pinned">📌</span> ':'')+esc(t.title)+'</div>'+

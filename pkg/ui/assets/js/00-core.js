@@ -73,6 +73,13 @@ window.submitLogin = function() {
 let dragSrcId = null;
 let pendingDeleteId = null;
 
+// The run queue exactly as renderTasks last laid it out: the ids of every task
+// that can still run, in the order the rows appear. onDrop splices this rather
+// than re-deriving an order of its own — the drop target is a position on
+// screen, so the only list it can be an index into is the one on screen
+// (Task 20299).
+let renderedQueue = [];
+
 // ── Live output state ────────────────────────────────────────────────────────
 let liveLogText = '';         // accumulated text for the panel
 let liveLogAutoScroll = true; // whether to auto-scroll (user can disable by scrolling up)

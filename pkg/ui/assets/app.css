@@ -828,6 +828,11 @@
     opacity: 0.5; user-select: none;
   }
   .task-item:hover .drag-handle { opacity: 1; }
+  /* A row that is not in the run queue keeps the handle's footprint so titles
+     stay aligned with the draggable rows above, but shows nothing to grab and
+     leaves the cursor alone. */
+  .drag-handle-disabled { cursor: default; opacity: 0; width: 14px; }
+  .task-item:hover .drag-handle-disabled { opacity: 0; }
 
   /* ── Kanban board ── */
   .kanban-toolbar { display:flex; align-items:center; gap:10px; padding:12px 0 10px; flex-wrap:wrap; }

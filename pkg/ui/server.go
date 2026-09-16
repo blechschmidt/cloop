@@ -4598,16 +4598,47 @@ func (s *Server) handleReorderTasks(w http.ResponseWriter, r *http.Request) {
 	for _, t := range ps.Plan.Tasks {
 		taskMap[t.ID] = t
 	}
-	for i, id := range req.IDs {
-		if t, ok := taskMap[id]; ok {
-			t.Priority = i + 1
+
+	// Validate before mutating anything. The handler used to skip IDs it did
+	// not recognise and renumber the rest, so a client working from a stale
+	// plan — a task deleted in another tab, a duplicate id from a drop handler
+	// that fired twice — got HTTP 200 and an order nobody asked for. A reorder
+	// is a statement about a whole list; a partially applied one is not a
+	// smaller version of it.
+	seen := make(map[int]struct{}, len(req.IDs))
+	for _, id := range req.IDs {
+		if _, ok := taskMap[id]; !ok {
+			jsonErr(w, fmt.Sprintf("task %d is not in this plan", id), http.StatusBadRequest)
+			return
 		}
+		if _, dup := seen[id]; dup {
+			jsonErr(w, fmt.Sprintf("task %d appears twice in ids", id), http.StatusBadRequest)
+			return
+		}
+		seen[id] = struct{}{}
+	}
+
+	// Dense ranks over exactly the tasks named, in the order given. The client
+	// sends its whole queue — every task that can still run — so 1..N is a
+	// total order over the things this rewrite is allowed to affect. Tasks not
+	// named keep their priority: a request scoped to the pending queue must not
+	// renumber completed history, and a filtered view must not silently
+	// reprioritise the rows it is hiding.
+	for i, id := range req.IDs {
+		taskMap[id].Priority = i + 1
 	}
 
 	if err := ps.SaveDirect(); err != nil {
 		jsonErr(w, "save failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	// Tell every other client watching this project. Without this the browser
+	// that performed the drag refetches and sees the new order while a second
+	// tab — or the operator's phone — keeps rendering the old queue until
+	// something unrelated happens to push a diff.
+	s.broadcastStateDiff(s.resolveWorkDir(r), ps)
+
 	jsonOK(w, map[string]bool{"ok": true})
 }
 

@@ -674,6 +674,7 @@ func (d *DB) LoadTask(id int) (*pm.Task, error) {
 			recurrence, next_run_at, requires_approval, approved, max_minutes,
 			write_back_branch, write_back_commit, background, abort,
 			executor_id, executor_kind, isolation,
+			EXISTS(SELECT 1 FROM plan_task_pins WHERE plan_task_pins.task_id = plan_tasks.id),
 			COALESCE((SELECT run_id FROM task_runs WHERE task_runs.task_id = plan_tasks.id), '')
 		FROM plan_tasks WHERE id = ? LIMIT 1`, id)
 	if err != nil {
@@ -691,7 +692,7 @@ func (d *DB) LoadTask(id int) (*pm.Task, error) {
 		status, role, depsJSON, tagsJSON, annJSON   string
 		bgJSON, abortJSON                           string
 		startedAt, completedAt, deadline, nextRunAt sql.NullString
-		reqApproval, approved                       int
+		reqApproval, approved, pinned               int
 	)
 	if err := rows.Scan(
 		&t.ID, &t.Title, &t.Description, &t.Priority, &status, &role,
@@ -704,7 +705,7 @@ func (d *DB) LoadTask(id int) (*pm.Task, error) {
 		&annJSON, &t.Condition, &t.Recurrence,
 		&nextRunAt, &reqApproval, &approved, &t.MaxMinutes,
 		&t.WriteBackBranch, &t.WriteBackCommit, &bgJSON, &abortJSON,
-		&t.ExecutorID, &t.ExecutorKind, &t.Isolation, &t.RunID,
+		&t.ExecutorID, &t.ExecutorKind, &t.Isolation, &pinned, &t.RunID,
 	); err != nil {
 		return nil, classifyDriverErr(err)
 	}
@@ -717,6 +718,7 @@ func (d *DB) LoadTask(id int) (*pm.Task, error) {
 	t.Abort = decodeAbort(abortJSON)
 	t.RequiresApproval = reqApproval == 1
 	t.Approved = approved == 1
+	t.Pinned = pinned == 1
 	if startedAt.Valid {
 		ts, _ := time.Parse(time.RFC3339Nano, startedAt.String)
 		t.StartedAt = &ts
@@ -875,6 +877,24 @@ func upsertTaskTx(tx *sql.Tx, t *pm.Task) error {
 		encodeAbort(t.Abort),
 		t.ExecutorID, t.ExecutorKind, t.Isolation,
 	)
+	if err != nil {
+		return err
+	}
+	return upsertTaskPinTx(tx, t)
+}
+
+// upsertTaskPinTx mirrors t.Pinned into plan_task_pins, where presence is the
+// flag. It lives beside the task upsert rather than in a caller so that no save
+// path can persist a task and forget its pin — which is precisely how the flag
+// came to be silently dropped for as long as it was.
+func upsertTaskPinTx(tx *sql.Tx, t *pm.Task) error {
+	if !t.Pinned {
+		_, err := tx.Exec(`DELETE FROM plan_task_pins WHERE task_id = ?`, t.ID)
+		return err
+	}
+	_, err := tx.Exec(
+		`INSERT INTO plan_task_pins(task_id) VALUES (?) ON CONFLICT(task_id) DO NOTHING`,
+		t.ID)
 	return err
 }
 
@@ -887,6 +907,7 @@ func loadTasks(conn *sql.DB) ([]*pm.Task, error) {
 			recurrence, next_run_at, requires_approval, approved, max_minutes,
 			write_back_branch, write_back_commit, background, abort,
 			executor_id, executor_kind, isolation,
+			EXISTS(SELECT 1 FROM plan_task_pins WHERE plan_task_pins.task_id = plan_tasks.id),
 			COALESCE((SELECT run_id FROM task_runs WHERE task_runs.task_id = plan_tasks.id), '')
 		FROM plan_tasks ORDER BY id`)
 	if err != nil {
@@ -901,7 +922,7 @@ func loadTasks(conn *sql.DB) ([]*pm.Task, error) {
 			status, role, depsJSON, tagsJSON, annJSON   string
 			bgJSON, abortJSON                           string
 			startedAt, completedAt, deadline, nextRunAt sql.NullString
-			reqApproval, approved                       int
+			reqApproval, approved, pinned               int
 		)
 		if err := rows.Scan(
 			&t.ID, &t.Title, &t.Description, &t.Priority, &status, &role,
@@ -914,10 +935,11 @@ func loadTasks(conn *sql.DB) ([]*pm.Task, error) {
 			&annJSON, &t.Condition, &t.Recurrence,
 			&nextRunAt, &reqApproval, &approved, &t.MaxMinutes,
 			&t.WriteBackBranch, &t.WriteBackCommit, &bgJSON, &abortJSON,
-			&t.ExecutorID, &t.ExecutorKind, &t.Isolation, &t.RunID,
+			&t.ExecutorID, &t.ExecutorKind, &t.Isolation, &pinned, &t.RunID,
 		); err != nil {
 			return nil, err
 		}
+		t.Pinned = pinned == 1
 		t.Status = pm.TaskStatus(status)
 		t.Role = pm.AgentRole(role)
 		_ = json.Unmarshal([]byte(depsJSON), &t.DependsOn)

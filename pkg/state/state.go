@@ -368,8 +368,12 @@ func (s *ProjectState) Save() error {
 
 	s.UpdatedAt = time.Now()
 
-	// Merge externally-added tasks before persisting.
-	s.mergeExternalTasks()
+	// Merge externally-added tasks before persisting. keepQueueOrder, because
+	// this is the write side: whatever the caller has in memory is the change
+	// being saved, and taking the order from disk here would make every writer
+	// that goes through Save — `cloop task edit --priority`, `task pin`,
+	// `task reorder` — silently discard its own edit.
+	s.mergeExternalTasks(keepQueueOrder)
 
 	// Ensure the parent directory of state.db exists.
 	dbPath := effectiveDBPath(s.WorkDir)
@@ -432,10 +436,14 @@ func (s *ProjectState) SaveDirect() error {
 }
 
 // SyncFromDisk re-reads the on-disk state and merges externally-added tasks.
+//
+// This is the read side of the merge, so it also adopts the queue order from
+// disk: the caller is a running orchestrator about to decide what to execute
+// next, and another process may have reordered the queue since it last looked.
 func (s *ProjectState) SyncFromDisk() {
 	liveMu.Lock()
 	defer liveMu.Unlock()
-	s.mergeExternalTasks()
+	s.mergeExternalTasks(adoptQueueOrder)
 }
 
 // RequireTask returns the task with the given ID, wrapping
@@ -453,12 +461,22 @@ func (s *ProjectState) RequireTask(id int) (*pm.Task, error) {
 	return t, nil
 }
 
+// Whether a merge takes the queue order from disk or leaves the caller's own.
+// Named rather than a bare bool because the two call sites are a reader and a
+// writer, and getting them the wrong way round is silent in both directions:
+// a reader that keeps its order ignores every reorder, a writer that adopts
+// one discards the edit it was called to persist.
+const (
+	adoptQueueOrder = true
+	keepQueueOrder  = false
+)
+
 // mergeExternalTasks reads the current state from disk and merges tasks added
 // externally (e.g. via 'cloop task add' while running). Any task on disk whose
 // ID is not present in the in-memory plan is appended, preserving its full
 // content. This is an ID-set merge — it does NOT rely on maxInMemID comparisons,
 // so externally-added tasks are never silently dropped due to ID ordering.
-func (s *ProjectState) mergeExternalTasks() {
+func (s *ProjectState) mergeExternalTasks(adoptOrder bool) {
 	// Read via LoadFromDir so the merge reads the exact same database Save
 	// writes (effectiveDBPath(s.WorkDir)). Going through Load would resolve
 	// .cloop/active_session, so a session activated mid-run would merge tasks
@@ -474,6 +492,34 @@ func (s *ProjectState) mergeExternalTasks() {
 	inMemIDs := make(map[int]struct{}, len(s.Plan.Tasks))
 	for _, t := range s.Plan.Tasks {
 		inMemIDs[t.ID] = struct{}{}
+	}
+	// Pick up UI-driven reordering of tasks this run already knows about
+	// (Task 20299). The merge below only ever *appends* unseen IDs, so without
+	// this a drag in the dashboard was worse than ignored: the handler wrote
+	// the new priorities to the database, the orchestrator kept running its own
+	// stale copy, and its next Save — which upserts every task in the plan —
+	// wrote the old order straight back over them. The row visibly moved and
+	// then jumped back, and nothing ran in the requested order either way.
+	//
+	// Only the two ordering keys are adopted, and only for tasks that are still
+	// pending. Everything else about a task belongs to whoever is executing it:
+	// copying status or timestamps from disk would let a stale reader resurrect
+	// a task a worker has just finished. A task that is already running cannot
+	// be reordered anyway — it is not in the queue any more.
+	if adoptOrder {
+		diskByID := make(map[int]*pm.Task, len(disk.Plan.Tasks))
+		for _, t := range disk.Plan.Tasks {
+			diskByID[t.ID] = t
+		}
+		for _, t := range s.Plan.Tasks {
+			if t.Status != pm.TaskPending {
+				continue
+			}
+			if d, ok := diskByID[t.ID]; ok {
+				t.Priority = d.Priority
+				t.Pinned = d.Pinned
+			}
+		}
 	}
 	// Append every disk task whose ID is absent from memory (full content preserved).
 	for _, t := range disk.Plan.Tasks {

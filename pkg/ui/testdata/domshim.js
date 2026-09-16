@@ -204,7 +204,14 @@ function jsonResponse(body, status) {
 
 globalThis.fetch = function(url, opts) {
   const u = String(url);
-  harness.requests.push({url: u, method: (opts && opts.method) || 'GET'});
+  // The body is recorded as well as the URL: for a mutation the interesting
+  // question is not that the bundle called the endpoint but what it asked for,
+  // and a reorder is entirely payload — same method, same path, every time.
+  harness.requests.push({
+    url: u,
+    method: (opts && opts.method) || 'GET',
+    body: (opts && opts.body) || null,
+  });
 
   // Insertion order, so a test that registers both '/api/executors/edge-1'
   // and '/api/executors' must register the longer one first — the same

@@ -126,18 +126,40 @@ window.onDragLeave = function(e) {
 window.onDrop = function(e, targetId) {
   e.preventDefault();
   document.querySelectorAll('.task-item').forEach(el => el.classList.remove('drag-over', 'dragging'));
-  if (dragSrcId === null || dragSrcId === targetId) { dragSrcId = null; return; }
-  if (!appState || !appState.plan || !appState.plan.tasks) { dragSrcId = null; return; }
+  const srcId = dragSrcId;
+  dragSrcId = null;
+  if (srcId === null || srcId === targetId) return;
+  if (!appState || !appState.plan || !appState.plan.tasks) return;
 
-  const sorted = [...appState.plan.tasks].sort((a,b) => a.priority - b.priority);
-  const ids = sorted.map(t => t.id);
-  const fromIdx = ids.indexOf(dragSrcId);
+  // Splice the queue the user is looking at. This used to re-sort every task in
+  // the plan by priority alone and index into *that*, which is a different list
+  // from the rendered one whenever a pinned or running row has floated to the
+  // top — so a drag across that boundary moved the task somewhere the user had
+  // not pointed at, and often nowhere at all: dropping a task onto the pinned
+  // row above it produced exactly the order that was already on screen, and the
+  // row snapped back (Task 20299).
+  const ids = renderedQueue.slice();
+  const fromIdx = ids.indexOf(srcId);
   const toIdx   = ids.indexOf(targetId);
-  if (fromIdx === -1 || toIdx === -1) { dragSrcId = null; return; }
+  if (fromIdx === -1 || toIdx === -1) return;
+
+  // Pinned tasks lead the queue by definition, so a drop that would interleave
+  // the two groups cannot be honoured — priorities alone cannot express it, and
+  // silently clamping the task to its own group's edge would look like the drag
+  // landed somewhere it did not. Say so instead.
+  const byId = appState.plan.tasks;
+  const pinnedOf = id => { const t = byId.find(x => x.id === id); return !!(t && t.pinned); };
+  if (pinnedOf(srcId) !== pinnedOf(targetId)) {
+    // Name the task and the command: pinning has no control in this dashboard,
+    // so "unpin it" alone leaves the user with a rule and no way to satisfy it.
+    const pinnedId = pinnedOf(srcId) ? srcId : targetId;
+    toast('Task #' + pinnedId + ' is pinned, and pinned tasks always run first. ' +
+          'Run "cloop task unpin ' + pinnedId + '" to reorder across it.', 'err');
+    return;
+  }
 
   ids.splice(fromIdx, 1);
-  ids.splice(toIdx, 0, dragSrcId);
-  dragSrcId = null;
+  ids.splice(toIdx, 0, srcId);
 
   apiMethod('POST', pUrl('/api/tasks/reorder'), {ids}).then(d => {
     if (d.ok) refreshState();
