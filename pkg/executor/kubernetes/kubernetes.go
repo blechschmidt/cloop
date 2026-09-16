@@ -1369,6 +1369,33 @@ func (e *Executor) podRequestFor(ctx context.Context, spec executor.Spec, handle
 	if q := quantityFromMB(spec.ResourceLimits.DiskMB); q != "" {
 		req.EphemeralStorageLimit = q
 	}
+
+	// The operator's fleet/project ceiling fills whatever is still unbounded
+	// (Task 20301).
+	//
+	// Narrower than the container driver's use of the same ceiling, and the
+	// difference is forced by the types rather than chosen. There, every limit
+	// is an int and the ceiling can simply be a `min`. Here they are Kubernetes
+	// quantity strings — "4Gi", "500m" — and a value that is already set was
+	// written by the operator in this hub's own config.yaml, not by a tenant:
+	// re-clamping it would mean parsing the quantity grammar to compare two
+	// numbers the same person chose. A tenant's request cannot reach this point
+	// unclamped, because executor.BoundSpec lowered it before dispatch.
+	//
+	// What is left is the case a ceiling exists for: no request and no
+	// configured limit is a Pod with no limit at all, which on a shared cluster
+	// is the one a fleet-wide cap is meant to stop.
+	if ceiling := executor.CeilingFor(spec.WorkDir); !ceiling.IsZero() {
+		if req.CPULimit == "" {
+			req.CPULimit = quantityFromMillis(ceiling.CPUMillis)
+		}
+		if req.MemoryLimit == "" {
+			req.MemoryLimit = quantityFromMB(ceiling.MemoryMB)
+		}
+		if req.EphemeralStorageLimit == "" {
+			req.EphemeralStorageLimit = quantityFromMB(ceiling.DiskMB)
+		}
+	}
 	// A per-Spec timeout becomes activeDeadlineSeconds, which the API server
 	// enforces. That is strictly better than a client-side timer: it survives
 	// a control-plane restart, where a timer would not.

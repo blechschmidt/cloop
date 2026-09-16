@@ -948,6 +948,80 @@ manages many projects, each with its own `config.yaml`, and applying them
 symmetrically would let a tenant re-enable host execution by editing a file they
 control. Loosening requires a restart with a permissive config.
 
+### Resource ceilings
+
+A ceiling on what any single workload may be given, whichever executor runs it:
+
+```yaml
+executors:
+  limits:
+    max_cpu: 4        # cores
+    max_memory: 8g    # 512m, 2g, or a bare integer read as megabytes
+    max_disk: 20g     # workspace + scratch
+    max_pids: 2048    # processes/threads
+```
+
+Every field is optional; an absent one leaves that resource uncapped, so adding
+the section to an existing deployment changes nothing until you name a key.
+
+**This is the only resource setting in the file that is a bound rather than a
+default.** `executors.container.memory` and the Kubernetes requests/limits say
+what a workload gets when it asks for nothing, and a project's
+[`.cloop/sandbox.yaml`](sandbox.md) *overrides* them — correct for a default, and
+useless as a policy, because that file is committed to the repository and
+authored by whoever can push to it. Under the override rule alone a project could
+name `memory: 900g` and get it, bounded only by a built-in 1 TiB constant sized
+to catch typos rather than tenants.
+
+A ceiling also bounds a request that was never made. In a spec, an absent
+`resources.memory` means *no limit* — not "the default" — so a cap that only
+lowered stated numbers would be defeated by deleting a line, which is also the
+state of every project that has never heard of sandbox specs.
+
+That case is closed by the executor rather than by the spec, and the order
+matters: the driver first resolves the request against its own configured
+default (`executors.container.memory` and friends), and *then* applies the
+ceiling to whatever came out. So a project that asks for nothing on a hub with
+`container.memory: 4g` under an 8 GB ceiling still gets 4 GB — a ceiling only
+ever lowers. It fills in a limit only where nothing else set one, which is the
+genuinely unbounded case a fleet cap exists for.
+
+Like `min_agent_build` it is applied as a **ratchet**, and for a sharper reason:
+a hub reads many tenants' `config.yaml`, and combining them symmetrically would
+let one tenant raise a cap that applies to everyone else in the process.
+Loosening means restarting with the looser config.
+
+A malformed section is not refused at boot — that would turn a typo into an
+outage — but it installs *nothing*, and raises a banner saying no ceiling is
+being enforced. `cloop config set` refuses one outright.
+
+### Per-project resource ceilings
+
+The fleet ceiling holds everything below one number. To hold a single project
+lower — a noisy neighbour, an untrusted tenant — set a ceiling on it directly:
+
+```console
+$ cloop hub limits set /srv/projects/noisy --memory 2g --reason "OOMing the box"
+$ cloop hub limits list
+$ cloop hub limits clear /srv/projects/noisy --reason "moved to its own node"
+```
+
+These live in the hub's control-plane database rather than in any file the
+project can reach, which is the point: a project states what it *needs* in its
+own repository, and the operator states what it may *have* somewhere the project
+cannot edit.
+
+The two ceilings compose by getting tighter, resource by resource, and neither
+can be raised by the project. A per-project ceiling above the fleet's is stored
+as written and simply does not bind — it is a second bound, never a waiver.
+
+Ceilings are read on every dispatch, so an edit applies to the next task to
+start: no hub restart, and `cloop hub limits` does not refuse while a hub is
+running. When one lowers a workload, the reduction is recorded on the project's
+own event log naming the resource, both numbers and which ceiling bound it —
+otherwise a sandbox that quietly received 2 GB instead of 8 is indistinguishable
+from a slow machine, and nothing in the repository would explain it.
+
 ---
 
 

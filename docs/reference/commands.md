@@ -893,6 +893,34 @@ at `PUT /api/quotas/{identity}`. The enforcer loads overrides once at startup, s
 a write behind a live hub would neither take effect nor survive the next edit
 made from the Quotas panel.
 
+### `cloop hub limits`
+
+Per-project resource ceilings: how much CPU, memory, disk and how many processes
+one project's sandboxes may be given. The fleet-wide ceiling lives in
+`executors.limits` in `.cloop/config.yaml`; this holds a single project below it.
+
+```bash
+cloop hub limits list                                      # both ceilings, and every capped project
+cloop hub limits set /srv/projects/noisy \
+  --memory 2g --cpu 2 --reason "OOMing the build box"
+cloop hub limits set /srv/projects/noisy --memory 0 --reason "memory cap lifted"
+cloop hub limits clear /srv/projects/noisy --reason "moved to its own node"
+```
+
+`set` merges onto the stored ceiling, so capping memory leaves an existing CPU
+cap alone; pass a resource explicitly as `0` to uncap just that one. Sizes take
+the same grammar as the rest of the executor config (`512m`, `2g`, or a bare
+integer read as megabytes).
+
+The two ceilings compose by getting tighter and neither can be raised by the
+project — a project's own `.cloop/sandbox.yaml` is a request, and a ceiling
+bounds it even when it asks for nothing, because an omitted key means *no limit*
+rather than "the default".
+
+Unlike `hub quota`, these **do not refuse while a hub is running**. Ceilings are
+read from the database on every dispatch rather than cached at startup, so an
+edit binds the next task to start.
+
 ### `cloop hub role`
 
 Runtime role bindings that layer over `ui.oidc`. This is the emergency demotion

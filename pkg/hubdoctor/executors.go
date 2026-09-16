@@ -42,6 +42,11 @@ func checkExecutors(ctx context.Context, dir string, cfg *config.Config, opts Op
 	// Same ratchet, so `hub doctor` reports the placement a run would
 	// actually get rather than one with the build floor missing.
 	executor.ApplyMinAgentBuild(cfg.Executors.MinAgentBuild)
+	// And the resource ceiling, so the report describes the sandbox a run
+	// would actually be given rather than the one it asked for.
+	if ceiling, err := cfg.Executors.Limits.Ceiling(); err == nil {
+		executor.ApplyResourceCeiling(ceiling)
+	}
 
 	// Reconcile without publishing: `cloop hub doctor` may be run alongside a
 	// hub in the same directory, and overwriting the live report with a CLI

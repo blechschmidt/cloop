@@ -346,6 +346,18 @@ func redispatchSession(ctx context.Context, dir string, ev executor.FailoverEven
 		return fmt.Errorf("failover: replacement executor %s: %w", ev.To, err)
 	}
 
+	// And re-apply the resource ceilings, for the same reason and against a
+	// sharper version of the same risk. This spec was persisted at its original
+	// dispatch, so its limits are the ones that were in force *then*: an
+	// operator who has since tightened a ceiling would watch a failover put the
+	// workload back at the old allowance, and a session created before ceilings
+	// existed at all carries whatever its .cloop/sandbox.yaml asked for. A
+	// stranded run is exactly when a cap matters most — the node it stranded on
+	// may have died of the load.
+	spec, clamps := applyResourceCeiling(spec, spec.WorkDir)
+	logResourceClamps(spec.WorkDir, clamps)
+	logUnenforceableCeiling(target, spec.WorkDir, clamps)
+
 	// Detached from ctx: ctx belongs to the probe round that noticed the
 	// failure, and the replacement run must outlive it exactly as the
 	// original outlived the HTTP request that started it.

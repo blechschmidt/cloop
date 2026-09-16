@@ -70,6 +70,19 @@ const (
 	// "You've hit your limit" — and let auto-evolve plan follow-up work on
 	// the belief that they had shipped.
 	EventTaskAborted EventType = "task_aborted"
+
+	// EventResourceCeiling records that an operator's resource ceiling lowered
+	// what a workload was given (Task 20301).
+	//
+	// It is on the project's own journal rather than only in the hub's log
+	// because the person it concerns is the developer whose sandbox got less
+	// memory than its .cloop/sandbox.yaml asked for. To them an unannounced
+	// clamp is indistinguishable from a slow machine, and there is nothing in
+	// their repository that would explain it — the ceiling lives on the hub,
+	// deliberately out of their reach. One row naming the resource, both
+	// numbers and which ceiling bound it is the difference between a mystery
+	// and an address to complain to.
+	EventResourceCeiling EventType = "resource_ceiling"
 )
 
 // NoStep is the EventRow.Step value for events that are not bound to any

@@ -50,7 +50,7 @@ the other.
 
 ## Who may read these
 
-Reading all 109 of the actions below requires the `audit.read` permission, held by `admin`.
+Reading all 111 of the actions below requires the `audit.read` permission, held by `admin`.
 
 The trail is one table behind one pair of admin-only endpoints, so the
 permission does not vary by action today. It is recorded per action anyway,
@@ -76,7 +76,7 @@ whichever one happened to be opened.
 
 | Home | Meaning | Actions |
 | --- | --- | --- |
-| `control-plane` | the hub's own state.db | 97 |
+| `control-plane` | the hub's own state.db | 99 |
 | `project` | the project's .cloop/state.db | 10 |
 | `either` | whichever chain the decision was scoped to | 2 |
 
@@ -88,10 +88,10 @@ Everything else is recorded in the hub's own state.db.
 
 ## Actions by family
 
-109 actions in 31 families. Every action is listed: this section is the whole
+111 actions in 32 families. Every action is listed: this section is the whole
 vocabulary of the `event_type` column.
 
-[`task.*`](#task) (5) · [`run.*`](#run) (2) · [`step.*`](#step) (1) · [`state.*`](#state) (1) · [`config.*`](#config) (1) · [`executor.*`](#executor) (9) · [`workspace.*`](#workspace) (2) · [`sandbox.*`](#sandbox) (1) · [`sandbox.attach.*`](#sandboxattach) (3) · [`secret.*`](#secret) (13) · [`secret.lease.*`](#secretlease) (1) · [`lease.*`](#lease) (3) · [`github_app.*`](#github_app) (1) · [`egress.*`](#egress) (6) · [`gitproxy.*`](#gitproxy) (6) · [`kubeguard.*`](#kubeguard) (5) · [`ci.*`](#ci) (1) · [`ci.session.*`](#cisession) (3) · [`ci.exchange.*`](#ciexchange) (2) · [`ci.relay.*`](#cirelay) (2) · [`ci.rule.*`](#cirule) (3) · [`ci.config.*`](#ciconfig) (1) · [`authz.*`](#authz) (2) · [`api_token.*`](#api_token) (4) · [`session.*`](#session) (8) · [`role_binding.*`](#role_binding) (3) · [`quota.*`](#quota) (4) · [`sealing_key.*`](#sealing_key) (2) · [`stt.credential.*`](#sttcredential) (2) · [`user.*`](#user) (9) · [`project.member.*`](#projectmember) (3)
+[`task.*`](#task) (5) · [`run.*`](#run) (2) · [`step.*`](#step) (1) · [`state.*`](#state) (1) · [`config.*`](#config) (1) · [`executor.*`](#executor) (9) · [`workspace.*`](#workspace) (2) · [`sandbox.*`](#sandbox) (1) · [`sandbox.attach.*`](#sandboxattach) (3) · [`secret.*`](#secret) (13) · [`secret.lease.*`](#secretlease) (1) · [`lease.*`](#lease) (3) · [`github_app.*`](#github_app) (1) · [`egress.*`](#egress) (6) · [`gitproxy.*`](#gitproxy) (6) · [`kubeguard.*`](#kubeguard) (5) · [`ci.*`](#ci) (1) · [`ci.session.*`](#cisession) (3) · [`ci.exchange.*`](#ciexchange) (2) · [`ci.relay.*`](#cirelay) (2) · [`ci.rule.*`](#cirule) (3) · [`ci.config.*`](#ciconfig) (1) · [`authz.*`](#authz) (2) · [`api_token.*`](#api_token) (4) · [`session.*`](#session) (8) · [`role_binding.*`](#role_binding) (3) · [`quota.*`](#quota) (4) · [`resource_ceiling.*`](#resource_ceiling) (2) · [`sealing_key.*`](#sealing_key) (2) · [`stt.credential.*`](#sttcredential) (2) · [`user.*`](#user) (9) · [`project.member.*`](#projectmember) (3)
 
 ### task.*
 
@@ -479,6 +479,20 @@ Payload keys:
 - `quota.denied` — The identity is the row's actor and the resource is its entity id, so neither repeats in the payload.
 - `quota.override_set` — Two emitters with different shapes: the UI writes `target` plus one key per resource, the CLI writes `identity` with the limits nested under `limits`.
 - `quota.spend_refused` — Enforced between tasks, not mid-task: a task already running is allowed to finish.
+
+### resource_ceiling.*
+
+| Action | Entity | Home | Stability | Fires when |
+| --- | --- | --- | --- | --- |
+| `resource_ceiling.cleared` | `project_resource_limit` | control-plane | stable | A per-project ceiling is removed and the project returns to the fleet ceiling alone. |
+| `resource_ceiling.set` | `project_resource_limit` | control-plane | stable | A per-project resource ceiling is written with `cloop hub limits set`. |
+
+Payload keys:
+
+- `resource_ceiling.cleared` — `target`, `project`, `reason`, `via`, `os_user`
+- `resource_ceiling.set` — `target`, `project`, `cpu_millis`, `memory_mb`, `disk_mb`, `pids`, `reason`, `via`, `os_user`
+
+- `resource_ceiling.set` — The values are the merged ceiling that was stored, not the flags that were passed: `set` merges onto the existing row, so the flags alone would not say what the project ended up capped at.
 
 ### sealing_key.*
 

@@ -192,6 +192,14 @@ func (r *reproduceRunner) run(ctx context.Context, rs runSpec) (*taskreplay.RunO
 	if spec, err = applyWorkspace(spec, ex, rs.ProjectDir); err != nil {
 		return nil, err
 	}
+	// A reproduction runs under the same ceilings as the run it reproduces.
+	// Exempting it would make the verdict meaningless in the one direction that
+	// matters: a commit that only builds in more memory than its project is
+	// allowed would reproduce here and fail in production.
+	spec, clamps := applyResourceCeiling(spec, rs.ProjectDir)
+	logResourceClamps(rs.ProjectDir, clamps)
+	logUnenforceableCeiling(ex, rs.ProjectDir, clamps)
+
 	if spec, err = pinWorkspaceTo(spec, rs.BaseSHA); err != nil {
 		return nil, err
 	}

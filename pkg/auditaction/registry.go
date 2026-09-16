@@ -1009,6 +1009,27 @@ var registry = []Entry{
 		Read:      authz.PermAuditRead,
 	},
 	{
+		Action:    ActionResourceCeilingSet,
+		Home:      HomeControlPlane,
+		Entity:    "project_resource_limit",
+		Trigger:   "A per-project resource ceiling is written with `cloop hub limits set`.",
+		Payload:   []string{"target", "project", "cpu_millis", "memory_mb", "disk_mb", "pids", "reason", "via", "os_user"},
+		Stability: StabilityStable,
+		Read:      authz.PermAuditRead,
+		Note: "The values are the merged ceiling that was stored, not the flags that were " +
+			"passed: `set` merges onto the existing row, so the flags alone would not say " +
+			"what the project ended up capped at.",
+	},
+	{
+		Action:    ActionResourceCeilingCleared,
+		Home:      HomeControlPlane,
+		Entity:    "project_resource_limit",
+		Trigger:   "A per-project ceiling is removed and the project returns to the fleet ceiling alone.",
+		Payload:   []string{"target", "project", "reason", "via", "os_user"},
+		Stability: StabilityStable,
+		Read:      authz.PermAuditRead,
+	},
+	{
 		Action:    ActionQuotaSpendRefused,
 		Home:      HomeControlPlane,
 		Entity:    "project",

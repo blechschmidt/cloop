@@ -120,6 +120,11 @@ func init() {
 				// Same ratchet, same reason: a tenant's config.yaml must not be
 				// able to lower the fleet's minimum agent build.
 				executor.ApplyMinAgentBuild(cfg.Executors.MinAgentBuild)
+				// And the fleet resource ceiling, where a tenant raising the
+				// cap would be helping itself to the machine's RAM.
+				if ceiling, err := cfg.Executors.Limits.Ceiling(); err == nil {
+					executor.ApplyResourceCeiling(ceiling)
+				}
 
 				// Commands that construct a control plane reconcile from
 				// their OWN workdir a moment later, and skipping the pass

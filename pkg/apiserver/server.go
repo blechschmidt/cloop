@@ -195,6 +195,11 @@ func bootstrapExecutors(dir string) {
 			// Same ratchet: the REST API places work too, so it must see the
 			// same build floor the Web UI does.
 			executor.ApplyMinAgentBuild(cfg.Executors.MinAgentBuild)
+			// And the same resource ceiling, for the same reason: a second
+			// dispatch surface that skipped it would be the way around it.
+			if ceiling, err := cfg.Executors.Limits.Ceiling(); err == nil {
+				executor.ApplyResourceCeiling(ceiling)
+			}
 		}
 	}
 	registerBuiltinExecutors()
@@ -936,6 +941,13 @@ func (s *Server) startRun(ctx context.Context, args []string) (executor.Executor
 	if err := executor.RequireRevocable(ex, spec); err != nil {
 		return nil, executor.Handle{}, err
 	}
+
+	// The operator's resource ceilings. This spec names no limits at all, and
+	// under BoundSpec's semantics that means *unlimited* rather than "the
+	// default" — so without this call the REST API would be a second, quieter
+	// way to start an unbounded workload on a hub whose Web UI caps every one
+	// of them. Exactly the failure the comment above predicts.
+	executor.BoundSpec(&spec, s.WorkDir)
 
 	// Start is given a context detached from the request: the run outlives
 	// the HTTP call that asked for it, and tying it to r.Context() would kill

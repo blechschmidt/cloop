@@ -580,6 +580,23 @@ type ExecutorsConfig struct {
 	// silently re-enabling a sweep they had turned off.
 	OrphanSweepIntervalMinutes *int `yaml:"orphan_sweep_interval_minutes,omitempty"`
 
+	// Limits is the hub-wide ceiling on what any single workload may be given,
+	// whichever executor runs it.
+	//
+	// It is the only resource setting in this file that is a *bound* rather
+	// than a default. The per-driver keys below (container.memory, and the
+	// kubernetes requests/limits) say what a workload gets when it asks for
+	// nothing, and a project's .cloop/sandbox.yaml overrides them — which is
+	// correct for a default and useless as a policy, because that file is
+	// committed to the repository and authored by whoever can push to it.
+	// These keys cannot be overridden by it. See pkg/executor/ceiling.go.
+	//
+	// Applied as a ratchet (executor.ApplyResourceCeiling) for the reason
+	// MinAgentBuild is: a control plane reads many projects' config.yaml, and
+	// applying them symmetrically would let one tenant's file raise a
+	// fleet-wide cap for every other tenant in the process.
+	Limits ExecutorLimitsConfig `yaml:"limits,omitempty"`
+
 	// Container configures the Docker/Podman sandbox executor.
 	Container ContainerExecutorConfig `yaml:"container,omitempty"`
 

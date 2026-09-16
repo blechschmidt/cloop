@@ -172,6 +172,12 @@ func applyHostExecutionPolicy(dir string) {
 	// Same ratchet, same reason: a tenant's config.yaml must not be able to
 	// lower the fleet's minimum agent build.
 	executor.ApplyMinAgentBuild(cfg.Executors.MinAgentBuild)
+	// And the same again for the resource ceiling, where the stakes are the
+	// machine's RAM rather than a build number. A malformed section installs
+	// nothing; config.ExecutorLimitWarnings is what tells the operator so.
+	if ceiling, err := cfg.Executors.Limits.Ceiling(); err == nil {
+		executor.ApplyResourceCeiling(ceiling)
+	}
 }
 
 // reconcileConfiguredExecutors brings up the container and Kubernetes drivers
@@ -428,6 +434,14 @@ func startWorkloadAs(envFor func(executor.Executor) []string, identity, workDir 
 		return nil, executor.Handle{}, err
 	}
 
+	// The operator's ceilings, last of the spec-shaping steps because they
+	// bound what all of them produced — including the workspace size limit
+	// applyWorkspace just carried across from the sandbox file. Everything
+	// above this line is what the project asked for; this is what it may have.
+	spec, clamps := applyResourceCeiling(spec, workDir)
+	logResourceClamps(workDir, clamps)
+	logUnenforceableCeiling(ex, workDir, clamps)
+
 	// Last gate before dispatch, and deliberately after every step that can add
 	// a binding to the spec: the lease, the repository grants and the workspace
 	// credential each contribute material, so a check placed earlier would be
@@ -598,6 +612,14 @@ func runWorkloadEnvFor(ctx context.Context, workDir string, argv []string, envFo
 	if err != nil {
 		return nil, err
 	}
+	// The ceilings apply here too. A subcommand is a smaller workload than a
+	// harness, not an exempt one — `cloop suggest` on a repository whose
+	// sandbox.yaml asks for 900g would otherwise be the way around a cap that
+	// the harness path enforces.
+	spec, clamps := applyResourceCeiling(spec, workDir)
+	logResourceClamps(workDir, clamps)
+	logUnenforceableCeiling(ex, workDir, clamps)
+
 	res, runErr := executor.Run(ctx, ex, spec)
 	if runErr != nil {
 		auditImageDenial(workDir, runErr)

@@ -1066,6 +1066,30 @@ func (e *Executor) buildRequest(spec executor.Spec, workDir string, extraMounts 
 		req.PIDsLimit = spec.ResourceLimits.PIDs
 	}
 
+	// Then the operator's ceiling, which is not a default and so gets the last
+	// word over both of the lines above (Task 20301).
+	//
+	// It has to be applied *here*, after the request has been resolved against
+	// the configured default, rather than onto the Spec before dispatch. A
+	// ceiling written onto the Spec would arrive as a stated request and win the
+	// comparison above — so on a hub configured `memory: 4g` under an 8 GB
+	// ceiling, a project that asked for nothing would be handed 8 GB and the
+	// ceiling would have *raised* its allowance. Here, `min` is the only thing
+	// it can do.
+	//
+	// A resolved value of zero is the case the ceiling exists for: no request
+	// and no configured default is an unbounded container, which is precisely
+	// what a fleet-wide cap is meant to stop. BoundLimit fills those in.
+	if ceiling := executor.CeilingFor(spec.WorkDir); !ceiling.IsZero() {
+		req.CPUs = executor.BoundCPUs(req.CPUs, ceiling.CPUMillis)
+		req.MemoryMB = executor.BoundLimit(req.MemoryMB, ceiling.MemoryMB)
+		// A negative PIDsLimit is the runtimes' "unlimited" sentinel, which an
+		// operator may set on the executor and a ceiling must still override.
+		// BoundLimit reads it as "nothing has bounded this yet" and returns the
+		// cap, which is the intended reading.
+		req.PIDsLimit = executor.BoundLimit(req.PIDsLimit, ceiling.PIDs)
+	}
+
 	// User mapping. Rootless podman maps the invoking user with keep-id, so
 	// bind-mounted files keep their ownership without a --user flag. Rootful
 	// runtimes get an explicit UID taken from the project directory's owner,

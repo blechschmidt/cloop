@@ -260,6 +260,21 @@ const (
 	// ActionQuotaSpendRefused records a run stopped for exceeding a spend limit.
 	ActionQuotaSpendRefused Action = "quota.spend_refused"
 
+	// ── resource_ceiling ───────────────────────────────────────────────────
+
+	// ActionResourceCeilingSet records a per-project resource ceiling being
+	// written (Task 20301).
+	//
+	// Beside the quota overrides above, and for the same reason they are on the
+	// trail: the authority to edit one is the authority to decide how much of
+	// the machine a tenant gets. The fleet ceiling has no action of its own
+	// because it is not editable at runtime — it comes from config.yaml, which
+	// is reviewed and deployed rather than written through an API.
+	ActionResourceCeilingSet Action = "resource_ceiling.set"
+	// ActionResourceCeilingCleared records a per-project ceiling being removed,
+	// after which the project is bounded by the fleet ceiling alone.
+	ActionResourceCeilingCleared Action = "resource_ceiling.cleared"
+
 	// ── sealing_key ────────────────────────────────────────────────────────
 
 	// ActionSealingKeyRotated records the secret store's sealing key being rotated.

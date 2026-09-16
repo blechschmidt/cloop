@@ -209,6 +209,9 @@ func ValidateExecutors(e ExecutorsConfig) error {
 				"any agent", v)
 		}
 	}
+	if err := ValidateExecutorLimits(e.Limits); err != nil {
+		return err
+	}
 	if err := ValidateContainerExecutor(e.Container); err != nil {
 		return err
 	}
@@ -246,6 +249,10 @@ func ExecutorWarnings(e ExecutorsConfig) []string {
 				"the key.", v))
 		}
 	}
+
+	// An unparseable ceiling is silently no ceiling — the same failure shape as
+	// an unparseable build floor, and the same treatment.
+	out = append(out, ExecutorLimitWarnings(e.Limits)...)
 
 	isolated := e.Container.Enabled || e.Kubernetes.Enabled
 	if !e.HostProcessAllowed() && !isolated {
