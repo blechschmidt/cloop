@@ -943,7 +943,11 @@
   .hidden-proj-row { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:8px 0; border-bottom:1px solid var(--border); }
   .hidden-proj-row:last-child { border-bottom:none; }
   .hidden-proj-info { display:flex; flex-direction:column; gap:2px; min-width:0; }
-  .hidden-proj-name { font-size:13px; font-weight:600; color:var(--text); }
+  /* Same unbroken-basename problem as .proj-card's .proj-name, in the third
+     place the project list is drawn. The path below it already truncates, but
+     the name had no handling at all, so on a phone a long one ran out through
+     the side of the Settings panel and took the document width with it. */
+  .hidden-proj-name { font-size:13px; font-weight:600; color:var(--text); overflow-wrap:anywhere; }
   .hidden-proj-path { font-size:11px; color:var(--muted); font-family:var(--mono,monospace); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 
   /* ── Step history ── */
@@ -1450,7 +1454,21 @@
     min-width: 220px; max-width: 320px;
     background: var(--surface); border: 1px solid var(--border);
     border-radius: var(--radius); box-shadow: 0 8px 24px rgba(0,0,0,.4);
-    z-index: 50; overflow: hidden;
+    z-index: 50;
+    /* One row per project and nothing bounding the total: at 24 projects this
+       panel is ~840px tall, which does not fit a laptop window and certainly
+       not a phone. It hangs out of a position:sticky header, so the tail is
+       not merely off-screen — scrolling the page moves the header and takes
+       the dropdown with it, and the last projects can never be brought into
+       view at all. Hence a cap, and a scroll to go with it: the cap alone
+       would turn an unreachable tail into a deleted one, because the panel
+       used to be overflow:hidden. */
+    max-height: min(420px, calc(100vh - 140px));
+    overflow-x: hidden;
+    overflow-y: auto;
+    /* Don't hand the scroll to the page when the list hits its end. */
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
   }
   .proj-selector-dropdown.open { display: block; }
   .proj-selector-item {
@@ -1488,7 +1506,17 @@
   .proj-health-dot.complete { background: var(--green); }
   .proj-health-dot.idle     { background: var(--muted); }
   .proj-health-dot.unknown  { background: var(--border); }
-  .proj-name   { font-weight: 600; font-size: 14px; min-width: 120px; }
+  /* overflow-wrap:anywhere, not break-word: a project name is a directory
+     basename, and plenty of them are one unbroken token. CSS offers a break
+     opportunity after a hyphen but none after an underscore, so
+     `some_long_internal_project_2026` lays out as a single 400px word — wider
+     than a phone — and drags the whole document sideways with it. `break-word`
+     would wrap the glyphs but still report the longest word as the element's
+     min-content width, so as a flex item it would keep forcing the card open;
+     `anywhere` shrinks min-content too, which is what actually lets the card
+     fit. min-width holds the desktop column alignment and is harmless below it,
+     since the mobile card is a column and sizes to the available width. */
+  .proj-name   { font-weight: 600; font-size: 14px; min-width: 120px; overflow-wrap: anywhere; }
   .proj-goal   { flex: 1; font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 320px; }
   /* Why a paused project stopped. Amber rather than muted grey: on a grid of
      projects this is the line that tells an operator whether to act, so it
@@ -2055,7 +2083,13 @@
 
     /* Project cards: stack */
     .proj-card { flex-direction: column; align-items: flex-start; gap: 8px; }
-    .proj-goal { max-width: 100%; }
+    /* Both of these carry a 320px cap for the desktop row layout. A phone card
+       is narrower than that once padding is taken out — 260px of content at a
+       320px viewport — so the cap stops being a limit and becomes a floor that
+       pushes the row out through the side of the card. .proj-goal was already
+       relaxed here; .proj-pause was added later (Task 20285) and was not, so a
+       paused project was the one card state that still overflowed. */
+    .proj-goal, .proj-pause { max-width: 100%; }
     .proj-actions { width: 100%; }
     .proj-actions .btn { flex: 1; justify-content: center; }
 
@@ -2071,6 +2105,35 @@
     /* Project selector: constrain width */
     .proj-selector-wrap { max-width: 160px; }
     .proj-selector-btn  { max-width: 140px; }
+
+    /* The dropdown hangs off a button sitting mid-header, and its own
+       min-width is wider than the room left to the right of it: at 390px it
+       reached 113px past the screen edge, at 320px it reached 183px past.
+       That is worse than a clipped panel. `width=device-width` plus content
+       that does not fit makes the browser shrink the whole page to fit, so
+       opening the project list zoomed the entire dashboard out — every
+       control on screen got smaller, and the page began sliding sideways
+       under a thumb that meant to scroll down.
+
+       Re-anchoring it to the header fixes both axes at once. Dropping the
+       positioning off the wrapper and the inline-styled div inside it moves
+       the dropdown's containing block up to <header>, which is a containing
+       block already because position:sticky is not position:static. Against
+       that box, `top: calc(100% + 4px)` from the base rule now means "below
+       the header" instead of "below the button" — still the right place —
+       and pinning left and right makes the panel exactly as wide as the
+       screen less its margins. It cannot overflow either edge by
+       construction, at any viewport, whatever the longest project is called.
+       !important is for the wrapper's inner div, which carries
+       position:relative as an inline style that a class selector cannot
+       otherwise beat. */
+    .proj-selector-wrap,
+    .proj-selector-wrap > div { position: static !important; }
+    .proj-selector-dropdown {
+      left: 12px; right: 12px;
+      min-width: 0; max-width: none;
+      max-height: min(60vh, 420px);
+    }
 
     /* Step meta: compact */
     .step-meta > *:not(:first-child):not(:last-child) { display: none; }
