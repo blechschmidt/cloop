@@ -673,8 +673,7 @@ func (d *DB) LoadTask(id int) (*pm.Task, error) {
 			tags, fail_count, heal_attempts, annotations, condition_expr,
 			recurrence, next_run_at, requires_approval, approved, max_minutes,
 			write_back_branch, write_back_commit, background, abort,
-			executor_id, executor_kind, isolation,
-			EXISTS(SELECT 1 FROM plan_task_pins WHERE plan_task_pins.task_id = plan_tasks.id),
+			executor_id, executor_kind, isolation, pinned,
 			COALESCE((SELECT run_id FROM task_runs WHERE task_runs.task_id = plan_tasks.id), '')
 		FROM plan_tasks WHERE id = ? LIMIT 1`, id)
 	if err != nil {
@@ -837,8 +836,8 @@ func upsertTaskTx(tx *sql.Tx, t *pm.Task) error {
 			tags, fail_count, heal_attempts, annotations, condition_expr,
 			recurrence, next_run_at, requires_approval, approved, max_minutes,
 			write_back_branch, write_back_commit, background, abort,
-			executor_id, executor_kind, isolation
-		) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+			executor_id, executor_kind, isolation, pinned
+		) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(id) DO UPDATE SET
 			title=excluded.title, description=excluded.description,
 			priority=excluded.priority, status=excluded.status, role=excluded.role,
@@ -861,7 +860,7 @@ func upsertTaskTx(tx *sql.Tx, t *pm.Task) error {
 			background=excluded.background, abort=excluded.abort,
 			executor_id=excluded.executor_id,
 			executor_kind=excluded.executor_kind,
-			isolation=excluded.isolation`,
+			isolation=excluded.isolation, pinned=excluded.pinned`,
 		t.ID, t.Title, t.Description, t.Priority, string(t.Status), string(t.Role),
 		string(depsJSON), t.Result,
 		startedAt, completedAt, deadline,
@@ -875,26 +874,8 @@ func upsertTaskTx(tx *sql.Tx, t *pm.Task) error {
 		t.MaxMinutes,
 		t.WriteBackBranch, t.WriteBackCommit, encodeBackground(t.Background),
 		encodeAbort(t.Abort),
-		t.ExecutorID, t.ExecutorKind, t.Isolation,
+		t.ExecutorID, t.ExecutorKind, t.Isolation, boolInt(t.Pinned),
 	)
-	if err != nil {
-		return err
-	}
-	return upsertTaskPinTx(tx, t)
-}
-
-// upsertTaskPinTx mirrors t.Pinned into plan_task_pins, where presence is the
-// flag. It lives beside the task upsert rather than in a caller so that no save
-// path can persist a task and forget its pin — which is precisely how the flag
-// came to be silently dropped for as long as it was.
-func upsertTaskPinTx(tx *sql.Tx, t *pm.Task) error {
-	if !t.Pinned {
-		_, err := tx.Exec(`DELETE FROM plan_task_pins WHERE task_id = ?`, t.ID)
-		return err
-	}
-	_, err := tx.Exec(
-		`INSERT INTO plan_task_pins(task_id) VALUES (?) ON CONFLICT(task_id) DO NOTHING`,
-		t.ID)
 	return err
 }
 
@@ -906,8 +887,7 @@ func loadTasks(conn *sql.DB) ([]*pm.Task, error) {
 			tags, fail_count, heal_attempts, annotations, condition_expr,
 			recurrence, next_run_at, requires_approval, approved, max_minutes,
 			write_back_branch, write_back_commit, background, abort,
-			executor_id, executor_kind, isolation,
-			EXISTS(SELECT 1 FROM plan_task_pins WHERE plan_task_pins.task_id = plan_tasks.id),
+			executor_id, executor_kind, isolation, pinned,
 			COALESCE((SELECT run_id FROM task_runs WHERE task_runs.task_id = plan_tasks.id), '')
 		FROM plan_tasks ORDER BY id`)
 	if err != nil {

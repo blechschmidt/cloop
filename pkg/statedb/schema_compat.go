@@ -71,12 +71,19 @@ func (c MigrationCompat) Tolerable() bool { return c == CompatAdditive }
 // classifyMigration decides whether a migration is additive for binaries that
 // predate it.
 //
-// Conservative by construction: a statement has to be recognised as adding a
-// brand-new object to keep the migration additive, and anything else — ALTER,
-// DROP, INSERT, UPDATE, DELETE, PRAGMA, or a CREATE this function cannot parse
-// — makes the whole migration breaking. Being wrong in the additive direction
-// hands an old binary a database it will corrupt; being wrong in the breaking
-// direction costs a refusal that was already today's behaviour.
+// Conservative by construction: a statement has to be recognised as adding
+// something an older binary cannot see to keep the migration additive, and
+// anything else — DROP, INSERT, UPDATE, DELETE, PRAGMA, or a CREATE this
+// function cannot parse — makes the whole migration breaking. Being wrong in
+// the additive direction hands an old binary a database it will corrupt; being
+// wrong in the breaking direction costs a refusal that was already today's
+// behaviour.
+//
+// ALTER is not a blanket refusal: additiveAlter admits ADD COLUMN in the one
+// shape an older binary cannot notice — nullable or defaulted, with no UNIQUE,
+// PRIMARY KEY, REFERENCES or CHECK — because such a binary enumerates its
+// columns explicitly and so neither selects nor inserts the new one. Every
+// other ALTER, including RENAME and DROP COLUMN, is breaking.
 func classifyMigration(sqlText string) MigrationCompat {
 	stmts := splitStatements(sqlText)
 	if len(stmts) == 0 {

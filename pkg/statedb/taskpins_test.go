@@ -7,8 +7,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/pm"
 )
 
-// TestTaskPinsMigrationIsAdditive is the compatibility gate, and the reason
-// this feature is a side table instead of a column.
+// TestTaskPinsMigrationIsAdditive is the compatibility gate.
 //
 // :8080 and :8888 run from the same directory and therefore share one control
 // plane, and dev builds migrate every registered project's state.db. A
@@ -16,9 +15,11 @@ import (
 // which blanks its dashboard until the nightly rebuild — the 2026-09-14 outage
 // recorded in schema_compat.go.
 //
-// The obvious shape for a boolean on a task is `ALTER TABLE plan_tasks ADD
-// COLUMN pinned`, and the classifier treats every ALTER as breaking. This test
-// is what stops a later edit from quietly reaching for one.
+// ADD COLUMN is admitted only in a narrow form: with a DEFAULT (or nullable)
+// and carrying no UNIQUE, PRIMARY KEY, REFERENCES or CHECK. This migration is
+// inside that form, but the margin is one word wide — adding a constraint, or
+// dropping the default from the NOT NULL, flips the verdict silently. Asserting
+// it here is what makes that edit fail in CI instead of in production.
 func TestTaskPinsMigrationIsAdditive(t *testing.T) {
 	migrations, err := loadMigrations()
 	if err != nil {
@@ -92,9 +93,8 @@ func TestTaskPin_UnpinClearsIt(t *testing.T) {
 }
 
 // A pin must not outlive its task. SaveState rewrites the plan by deleting
-// plan_tasks and re-inserting it, so without the cascade a removed task would
-// leave an orphan row — and task ids are reused by later plans, which would
-// hand the pin to an unrelated task.
+// plan_tasks and re-inserting it, and task ids are reused by later plans — so a
+// pin that survived its row would be handed to an unrelated task.
 func TestTaskPin_DoesNotSurviveItsTask(t *testing.T) {
 	db := openTestDB(t)
 
@@ -120,22 +120,13 @@ func TestTaskPin_DoesNotSurviveItsTask(t *testing.T) {
 	if got.Plan.TaskByID(7).Pinned {
 		t.Error("a new task inherited the pin of the task that used to hold its id")
 	}
-
-	var orphans int
-	if err := db.conn.QueryRow(
-		`SELECT COUNT(*) FROM plan_task_pins
-		 WHERE task_id NOT IN (SELECT id FROM plan_tasks)`).Scan(&orphans); err != nil {
-		t.Fatalf("count orphans: %v", err)
-	}
-	if orphans != 0 {
-		t.Errorf("%d pin rows have no task", orphans)
-	}
 }
 
 // plan_tasks has two readers — the whole-plan load and the single-task load —
-// and each spells out its own column list. A side table has to be joined in
-// both, and a reader that forgets it does not fail: it silently answers
-// "unpinned", which reads as a task that was never pinned.
+// and each spells out its own column list. A new column has to be added to
+// both, and a reader that misses it does not fail loudly: it answers "not
+// pinned", which is indistinguishable from a task nobody ever pinned. That is
+// the same silence that hid the missing column for as long as it did.
 func TestTaskPin_BothReadersAgree(t *testing.T) {
 	db := openTestDB(t)
 
@@ -165,9 +156,10 @@ func TestTaskPin_BothReadersAgree(t *testing.T) {
 	}
 }
 
-// An older database has no plan_task_pins rows at all, which must read as "no
-// task is pinned" rather than as an error.
-func TestTaskPin_AbsentRowsReadAsUnpinned(t *testing.T) {
+// Rows written before this column existed carry its DEFAULT, which must read as
+// "not pinned" rather than as an error or a true. This is what an older hub's
+// rows look like after the migration runs.
+func TestTaskPin_PreExistingRowsReadAsUnpinned(t *testing.T) {
 	db, err := Open(filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {
 		t.Fatalf("open: %v", err)
@@ -180,15 +172,20 @@ func TestTaskPin_AbsentRowsReadAsUnpinned(t *testing.T) {
 	}}); err != nil {
 		t.Fatalf("save: %v", err)
 	}
-	if _, err := db.conn.Exec(`DELETE FROM plan_task_pins`); err != nil {
-		t.Fatalf("clear pins: %v", err)
+	// Exactly what an old binary's INSERT leaves behind: the column unmentioned,
+	// so the default fills it in.
+	if _, err := db.conn.Exec(
+		`INSERT INTO plan_tasks(id, title, status) VALUES (2, 'legacy', 'pending')`); err != nil {
+		t.Fatalf("insert legacy row: %v", err)
 	}
 
 	got, err := db.LoadState()
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	if got.Plan.TaskByID(1).Pinned {
-		t.Error("a task with no pin row came back pinned")
+	for _, id := range []int{1, 2} {
+		if got.Plan.TaskByID(id).Pinned {
+			t.Errorf("task %d came back pinned and was never pinned", id)
+		}
 	}
 }

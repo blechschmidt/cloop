@@ -38,10 +38,12 @@ package statedb
 // ProviderCallBodiesPrunedKey. Without that marker an aged call would render as
 // a call with an empty prompt — indistinguishable from a bug — and the replay
 // endpoint would cheerfully send "" to the provider. The marker goes in headers
-// rather than in a new column because the schema-compat classifier treats any
-// ALTER as breaking (see schema_compat.go), and a migration that locks older
-// hubs out of every project database is a far worse defect than the one this
-// file fixes.
+// rather than in a new column because a column would have meant a migration,
+// and at the time the schema-compat classifier treated every ALTER as breaking
+// — a migration that locks older hubs out of every project database being a far
+// worse defect than the one this file fixes. Task 20264 has since taught it to
+// admit a defaulted ADD COLUMN, so that constraint no longer applies; the
+// marker stays in headers because moving it now would buy nothing.
 //
 // # Concurrency
 //
