@@ -10,6 +10,26 @@ schema and the hub's HTTP API may change in any release.
 
 ## [Unreleased]
 
+## [0.0.2] - 2026-09-17
+
+This release exists to publish the installer fix below, which was written
+against 0.0.1 and then never shipped. The repository was corrected; no release
+was cut; and so `releases/latest/download` kept resolving against the versioned
+names 0.0.1 had published, and every device kept getting a `404`. The code
+being right is not the same as the artifact being right — and from a device,
+only the artifact is reachable.
+
+### Added
+
+- **A scheduled check that the published release still installs.** Every
+  existing gate compares this repository against itself, which is why the
+  0.0.1 breakage survived its own fix: `scripts/build-release.sh`,
+  `pkg/upgrade.assetNameFor` and the generated script all agreed, and the
+  release disagreed with all three. `.github/workflows/released-installer.yml`
+  now runs the real installer against the real release on a timer, because a
+  release that goes stale relative to the code produces no commit for a
+  pull-request check to catch.
+
 ### Fixed
 
 - **The executor bootstrap installer could never install anything.** Two
@@ -96,4 +116,5 @@ is now installable as a versioned binary rather than only from source.
   stable, and upgrades between 0.0.x releases may require configuration
   changes.
 
+[0.0.2]: https://github.com/blechschmidt/cloop/releases/tag/v0.0.2
 [0.0.1]: https://github.com/blechschmidt/cloop/releases/tag/v0.0.1

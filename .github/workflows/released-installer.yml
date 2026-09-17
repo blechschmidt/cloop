@@ -1,0 +1,65 @@
+name: Released installer
+
+# Does the installer the hub hands out actually work, right now, against the
+# release GitHub is currently serving?
+#
+# Every other check in this repository answers a question about the working
+# tree, and none of them can answer this one. scripts/build-release.sh,
+# pkg/upgrade.assetNameFor and the shell in bootstrap.go are gated against each
+# other; the container suite drives the real script against a mirror built from
+# the tree. After Task 20240 all of them were green and `curl … | sh` still
+# 404'd on every device, because the fix was never released — the published
+# artifacts still carried `cloop_0.0.1_…` in their names, and the URL the
+# installer hardcodes resolves only against a fixed name.
+#
+# That failure has no commit. It appeared the moment the code moved ahead of the
+# release and would have persisted for as long as that release stayed current,
+# so a job on the pull-request path could not have caught it and a job triggered
+# by a release could not either — the release predates the check.
+#
+# Hence a clock. This is the only job in the repository whose failure means
+# "ship something", not "fix your diff", which is also why it does not gate
+# pull requests: a contributor must not be blocked by a release they did not cut
+# and cannot re-cut.
+on:
+  schedule:
+    # 06:00 UTC daily. Cheap — four HTTP requests and one small container.
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  published-release:
+    name: The published release installs
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: The published release satisfies the installer
+        # The expected asset names come from scripts/build-release.sh --list
+        # inside the test, so adding a platform to the release matrix extends
+        # this check automatically rather than leaving that platform's users to
+        # find the gap for themselves.
+        env:
+          CLOOP_PUBLISHED_RELEASE: '1'
+        run: |
+          set -euo pipefail
+          go test ./pkg/executor/install/ -run Published -v
+
+      - name: Say what to do about it
+        if: failure()
+        run: |
+          echo "::error::The installer served at GET /install.sh cannot install \
+          the current release. Cut a new release from a commit whose \
+          scripts/build-release.sh publishes unversioned asset names — the \
+          fix is a tag, not a code change."
