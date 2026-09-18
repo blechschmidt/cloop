@@ -508,10 +508,18 @@ run "the_rendered_config_parses_as_yaml" {
     error_message = "Every app-role mapping and every extra mapping must survive as its own list entry."
   }
 
+  # try(), because the decoded list is heterogeneous: an app-role mapping
+  # carries {claim, value, role} and nothing else, while a scoped one adds
+  # project or executor. A bare m.project is an "Unsupported attribute" error
+  # on every object without one — and whether that error is reached depends on
+  # whether && short-circuits, which changed between Terraform versions. It
+  # short-circuits on 1.15 and does not on 1.9, so the bare form passed here
+  # and failed in CI. try() is correct on both and says what is meant: read the
+  # key if the mapping has one.
   assert {
     condition = anytrue([
       for m in yamldecode(output.cloop_config_yaml).ui.oidc.role_mappings :
-      m.value == "a: b #c" && m.project == "team \"x\": prod" && m.role == "viewer"
+      m.value == "a: b #c" && try(m.project, null) == "team \"x\": prod" && m.role == "viewer"
     ])
     error_message = "A mapping whose value or project contains YAML metacharacters was mangled by the rendering."
   }
@@ -519,9 +527,21 @@ run "the_rendered_config_parses_as_yaml" {
   assert {
     condition = anytrue([
       for m in yamldecode(output.cloop_config_yaml).ui.oidc.role_mappings :
-      m.value == "&anchor" && m.executor == "edge-1"
+      m.value == "&anchor" && try(m.executor, null) == "edge-1"
     ])
     error_message = "A leading & must render as a quoted scalar, not a YAML anchor."
+  }
+
+  # The unscoped mappings really do omit the keys, rather than rendering them
+  # empty — which is what makes the try() above necessary and is also the
+  # behaviour cloop wants: an empty `project` would be a mapping scoped to a
+  # project named "".
+  assert {
+    condition = alltrue([
+      for m in yamldecode(output.cloop_config_yaml).ui.oidc.role_mappings :
+      try(m.project, null) != "" && try(m.executor, null) != ""
+    ])
+    error_message = "A mapping rendered an empty project or executor key, which cloop reads as a scope rather than as absent."
   }
 
   assert {

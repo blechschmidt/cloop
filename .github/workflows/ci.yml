@@ -668,7 +668,7 @@ jobs:
           node /tmp/mermaid-tools/check.mjs
 
   terraform-modules:
-    name: Terraform modules
+    name: Terraform ${{ matrix.make }} (${{ matrix.terraform }})
     runs-on: ubuntu-latest
     # deploy/terraform/ provisions the identity side of a hosted hub — on
     # Entra ID, the application registration cloop signs users in against.
@@ -687,6 +687,26 @@ jobs:
     # whether the HCL parses. Both are needed, and they belong in the job that
     # has the toolchain for each.
 
+    strategy:
+      # Independent facts. A failure at the floor and a failure at latest have
+      # different fixes, and cancelling one on the other's account hides which.
+      fail-fast: false
+      matrix:
+        include:
+          # The module's declared required_version. A consumer on this must be
+          # able to *use* it, which is a weaker claim than running its tests —
+          # `terraform test` did not exist in a usable form until 1.7 — so this
+          # entry validates and stops there. Without it, `>= 1.5` in versions.tf
+          # would be a number nobody had ever tried.
+          - terraform: "1.5.7"
+            make: terraform-validate
+          # Oldest that can run the suite: mock_provider arrived in 1.7.
+          - terraform: "1.7.5"
+            make: terraform-test
+          # And whatever is current, because the language keeps moving.
+          - terraform: "latest"
+            make: terraform-test
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
@@ -694,21 +714,25 @@ jobs:
       - name: Set up Terraform
         uses: hashicorp/setup-terraform@v3
         with:
-          # `terraform test` with mock_provider needs 1.7+; the module itself
-          # declares >= 1.5. Pinning a floor rather than a version keeps this
-          # honest about what the module actually requires.
-          terraform_version: "1.9.8"
+          terraform_version: ${{ matrix.terraform }}
           # The wrapper intercepts stdout to expose it as a step output, which
           # mangles the multi-line output of `terraform test` into something
           # unreadable in the log — and this job's whole value is its log.
           terraform_wrapper: false
 
-      - name: fmt, validate, examples and unit tests
+      - name: ${{ matrix.make }}
         # Through the Makefile rather than inlined here, so the same command
-        # reproduces the failure locally. The target is a no-op when terraform
-        # is absent, which is why this job pins a version rather than relying
-        # on it: a silent skip in CI is a gate that is not one.
-        run: make terraform-test
+        # reproduces the failure locally — with TF= pointing at the matching
+        # version. The target is a no-op when terraform is absent, which is why
+        # this job installs one rather than relying on the runner image: a
+        # silent skip in CI is a gate that is not one.
+        #
+        # Spanning versions is not thoroughness for its own sake. `&&`
+        # short-circuits in 1.15 and does not in 1.9, so an assertion reading
+        # an attribute that only some elements carry passed on a developer's
+        # machine and failed here — which is exactly the class of difference a
+        # single pinned version cannot see.
+        run: make ${{ matrix.make }}
 
   flagship-circuit:
     name: Flagship circuit

@@ -1,6 +1,6 @@
 .PHONY: build test test-unit test-e2e test-e2e-update e2e-stack fuzz bench clean \
         docs-api docs-audit docs-check docs-stage docs-site docs-serve release-dist \
-        terraform-test
+        terraform-test terraform-validate
 
 BINARY := cloop
 
@@ -171,7 +171,8 @@ docs-audit:
 docs-check:
 	@./scripts/check-docs.sh
 
-## terraform-test: fmt, validate and unit-test the deployment Terraform modules
+## terraform-validate: fmt and validate the deployment Terraform modules
+## terraform-test:     the above, plus their unit tests
 ##
 ## The modules provision an identity provider, not cloop, so `go test` cannot
 ## see them at all — and a broken one fails at `terraform apply` on an
@@ -179,18 +180,26 @@ docs-check:
 ## mocks the provider, so this needs no Azure credentials and no network beyond
 ## the provider download.
 ##
-## It does not replace tests/docs/terraform_azure_test.go: that gates the
-## module against *cloop* (the callback route, the role ladder, the config
-## keys), which Terraform cannot check and Go can. This gates the module
-## against itself.
+## Two targets because they have different floors, and the difference is a
+## claim worth checking. A *consumer* needs whatever the module's
+## required_version says (1.5); running the tests needs 1.7, where
+## mock_provider was introduced. CI runs validate at the declared floor and the
+## full suite at 1.7 and at latest — which is not belt-and-braces: `&&`
+## short-circuits on 1.15 and not on 1.9, and a test that read an optional
+## attribute passed locally and failed in CI for exactly that reason.
+##
+## Neither replaces tests/docs/terraform_azure_test.go: that gates the module
+## against *cloop* (the callback route, the role ladder, the config keys),
+## which Terraform cannot check and Go can. These gate it against itself.
 TF ?= terraform
 TF_MODULES := deploy/terraform/azure-entra-id
 
-terraform-test:
+terraform-validate:
 	@command -v $(TF) >/dev/null 2>&1 || { \
 	  echo "==> $(TF) not installed — skipping (CI gates this; see .github/workflows/ci.yml)"; \
 	  exit 0; \
 	}
+	@$(TF) version | head -1
 	@for m in $(TF_MODULES); do \
 	  echo "==> $$m: fmt"; \
 	  $(TF) fmt -check -recursive -diff $$m || { \
@@ -204,6 +213,11 @@ terraform-test:
 	    $(TF) -chdir=$$ex init -backend=false -input=false >/dev/null || exit 1; \
 	    $(TF) -chdir=$$ex validate || exit 1; \
 	  done; \
+	done
+
+terraform-test: terraform-validate
+	@command -v $(TF) >/dev/null 2>&1 || exit 0
+	@for m in $(TF_MODULES); do \
 	  echo "==> $$m: test"; \
 	  $(TF) -chdir=$$m test || exit 1; \
 	done
