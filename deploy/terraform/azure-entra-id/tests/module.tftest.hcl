@@ -443,3 +443,89 @@ run "a_certificate_deployment_creates_no_password" {
     error_message = "The rendered config must still enable OIDC without a module-managed secret."
   }
 }
+
+# --------------------------------------------------- the rendered YAML is YAML
+
+run "the_rendered_config_parses_as_yaml" {
+  command = apply
+
+  variables {
+    # Deliberately hostile values. Every scalar in the rendered block goes
+    # through jsonencode() — JSON being a subset of YAML, that produces a valid
+    # double-quoted scalar — and these are the inputs that would expose it if
+    # any did not: a colon-space starts a mapping, a leading `&` is an anchor,
+    # a `#` begins a comment, and a `"` closes the scalar early. A project name
+    # is operator-supplied, so none of this is hypothetical.
+    cloop_admin_emails = ["first.last+cloop@example.com"]
+    cloop_extra_role_mappings = [
+      { claim = "group", value = "a: b #c", role = "viewer", project = "team \"x\": prod" },
+      { claim = "sub", value = "&anchor", role = "operator", executor = "edge-1" },
+    ]
+  }
+
+  # Parses at all. Without this the suite could only ever assert that certain
+  # substrings appear, which is true of a file that no parser accepts.
+  assert {
+    condition     = can(yamldecode(output.cloop_config_yaml))
+    error_message = "The rendered cloop config is not valid YAML."
+  }
+
+  # And the values land where cloop reads them, rather than merely appearing
+  # somewhere in the document.
+  assert {
+    condition     = yamldecode(output.cloop_config_yaml).ui.oidc.issuer == output.issuer
+    error_message = "ui.oidc.issuer did not survive the round trip."
+  }
+
+  assert {
+    condition     = yamldecode(output.cloop_config_yaml).ui.oidc.client_id == output.client_id
+    error_message = "ui.oidc.client_id did not survive the round trip."
+  }
+
+  assert {
+    condition     = yamldecode(output.cloop_config_yaml).ui.oidc.redirect_url == output.redirect_url
+    error_message = "ui.oidc.redirect_url did not survive the round trip, so it could differ from the registered redirect URI."
+  }
+
+  assert {
+    condition     = yamldecode(output.cloop_config_yaml).ui.external_url == "https://cloop.example.com"
+    error_message = "ui.external_url did not survive the round trip."
+  }
+
+  assert {
+    condition     = yamldecode(output.cloop_config_yaml).ui.oidc.enabled == true
+    error_message = "ui.oidc.enabled must decode as a boolean, not the string \"true\"."
+  }
+
+  assert {
+    condition     = contains(yamldecode(output.cloop_config_yaml).ui.oidc.scopes, "offline_access")
+    error_message = "The scopes list must decode as a list containing offline_access."
+  }
+
+  # Four app roles plus the two extras, with the awkward characters intact.
+  assert {
+    condition     = length(yamldecode(output.cloop_config_yaml).ui.oidc.role_mappings) == 6
+    error_message = "Every app-role mapping and every extra mapping must survive as its own list entry."
+  }
+
+  assert {
+    condition = anytrue([
+      for m in yamldecode(output.cloop_config_yaml).ui.oidc.role_mappings :
+      m.value == "a: b #c" && m.project == "team \"x\": prod" && m.role == "viewer"
+    ])
+    error_message = "A mapping whose value or project contains YAML metacharacters was mangled by the rendering."
+  }
+
+  assert {
+    condition = anytrue([
+      for m in yamldecode(output.cloop_config_yaml).ui.oidc.role_mappings :
+      m.value == "&anchor" && m.executor == "edge-1"
+    ])
+    error_message = "A leading & must render as a quoted scalar, not a YAML anchor."
+  }
+
+  assert {
+    condition     = yamldecode(output.cloop_config_yaml).ui.oidc.admin_emails == ["first.last+cloop@example.com"]
+    error_message = "admin_emails must decode as a list of strings."
+  }
+}
