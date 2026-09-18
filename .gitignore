@@ -25,6 +25,25 @@ polyauth/
 # `make docs-site` builds. All of it is derived from docs/ and website/.
 dist/
 
+# Terraform working state under deploy/terraform/.
+#
+# .terraform/ is a downloaded provider cache — hundreds of megabytes of
+# platform-specific binary. The lock file is excluded too, which is the
+# opposite of the advice for a root module and right for this one: these are
+# reusable modules and examples, and a committed lock would pin every consumer
+# to whatever provider build resolved on the day it was written.
+#
+# *.tfstate is the one that matters. A state file here would contain the
+# cloop hub's client secret in plaintext.
+**/.terraform/
+**/.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+*.tfplan
+*.tfvars
+!*.tfvars.example
+crash.log
+
 # OS
 .DS_Store
 Thumbs.db

@@ -1,5 +1,6 @@
 .PHONY: build test test-unit test-e2e test-e2e-update e2e-stack fuzz bench clean \
-        docs-api docs-audit docs-check docs-stage docs-site docs-serve release-dist
+        docs-api docs-audit docs-check docs-stage docs-site docs-serve release-dist \
+        terraform-test
 
 BINARY := cloop
 
@@ -169,6 +170,43 @@ docs-audit:
 ## docs-check: structural check — every page indexed, every relative link resolves
 docs-check:
 	@./scripts/check-docs.sh
+
+## terraform-test: fmt, validate and unit-test the deployment Terraform modules
+##
+## The modules provision an identity provider, not cloop, so `go test` cannot
+## see them at all — and a broken one fails at `terraform apply` on an
+## operator's tenant, which is the worst place to find out. `terraform test`
+## mocks the provider, so this needs no Azure credentials and no network beyond
+## the provider download.
+##
+## It does not replace tests/docs/terraform_azure_test.go: that gates the
+## module against *cloop* (the callback route, the role ladder, the config
+## keys), which Terraform cannot check and Go can. This gates the module
+## against itself.
+TF ?= terraform
+TF_MODULES := deploy/terraform/azure-entra-id
+
+terraform-test:
+	@command -v $(TF) >/dev/null 2>&1 || { \
+	  echo "==> $(TF) not installed — skipping (CI gates this; see .github/workflows/ci.yml)"; \
+	  exit 0; \
+	}
+	@for m in $(TF_MODULES); do \
+	  echo "==> $$m: fmt"; \
+	  $(TF) fmt -check -recursive -diff $$m || { \
+	    echo "::error::$$m is not terraform-fmt clean — run: $(TF) fmt -recursive $$m"; exit 1; }; \
+	  echo "==> $$m: init"; \
+	  $(TF) -chdir=$$m init -backend=false -input=false >/dev/null || exit 1; \
+	  echo "==> $$m: validate"; \
+	  $(TF) -chdir=$$m validate || exit 1; \
+	  for ex in $$m/examples/*/; do \
+	    echo "==> $$ex: validate"; \
+	    $(TF) -chdir=$$ex init -backend=false -input=false >/dev/null || exit 1; \
+	    $(TF) -chdir=$$ex validate || exit 1; \
+	  done; \
+	  echo "==> $$m: test"; \
+	  $(TF) -chdir=$$m test || exit 1; \
+	done
 
 ## docs-stage: assemble dist/docs-src and dist/mkdocs.yml from docs/ and README.md
 docs-stage:

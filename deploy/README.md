@@ -11,6 +11,13 @@ bootstrap command that generates a hardened configuration.
 | Evaluation stack | [`../docker-compose.yml`](../docker-compose.yml) | Trying SSO + RBAC + TLS in one command |
 | Helm chart | [`helm/cloop-hub/`](helm/cloop-hub/) | Kubernetes, including in-cluster execution |
 | Bootstrap command | `cloop hub bootstrap` | Bare metal, systemd, or generating any of the above |
+| Entra ID SSO module | [`terraform/azure-entra-id/`](terraform/azure-entra-id/README.md) | Provisioning the identity side on Microsoft Entra ID |
+
+The last one is the odd entry: it provisions nothing that runs cloop. The other
+four give you a hub; that one gives the hub an identity provider to point at,
+which is the step that turns a token-authenticated dashboard into one with
+named users and roles. It is also where the provider-specific details live —
+the ones that make a sign-in fail in ways the Azure portal will not explain.
 
 ---
 

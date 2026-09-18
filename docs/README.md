@@ -176,6 +176,11 @@ Five pages in order, indexed at
 - [`README.md`](../README.md) — overview, install, quick start, command index
 - [`deploy/README.md`](../deploy/README.md) — container image, docker-compose
   evaluation stack, Helm chart
+- [`deploy/terraform/azure-entra-id/`](../deploy/terraform/azure-entra-id/README.md)
+  — a worked Terraform module for SSO on Microsoft Entra ID: the app
+  registration, the four cloop roles as app roles, and the five non-obvious
+  things (the pinned issuer, the `/v2.0` suffix, the post-logout redirect URI,
+  `offline_access`, and why group claims are the worse instrument on Entra)
 - [`tests/security/`](../tests/security/) — the executable specification of the
   threat model
 

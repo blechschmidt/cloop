@@ -667,6 +667,49 @@ jobs:
           JS
           node /tmp/mermaid-tools/check.mjs
 
+  terraform-modules:
+    name: Terraform modules
+    runs-on: ubuntu-latest
+    # deploy/terraform/ provisions the identity side of a hosted hub — on
+    # Entra ID, the application registration cloop signs users in against.
+    #
+    # `go build` cannot see a .tf file, so without this job the module is the
+    # one shipped artifact with no gate at all: it would fail at
+    # `terraform apply`, on an operator's own tenant, which is the worst place
+    # to discover a typo. The module's suite mocks the provider, so this needs
+    # no Azure credentials and no network beyond the provider download.
+    #
+    # The other half of the gate is in the Documentation drift job, which runs
+    # tests/docs/ — that is where the module is checked against *cloop*: that
+    # the callback path is still a route pkg/ui serves, that the app roles are
+    # still pkg/authz's ladder, that the rendered YAML keys are still fields of
+    # config.OIDCConfig. Terraform cannot see any of that, and Go cannot see
+    # whether the HCL parses. Both are needed, and they belong in the job that
+    # has the toolchain for each.
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          # `terraform test` with mock_provider needs 1.7+; the module itself
+          # declares >= 1.5. Pinning a floor rather than a version keeps this
+          # honest about what the module actually requires.
+          terraform_version: "1.9.8"
+          # The wrapper intercepts stdout to expose it as a step output, which
+          # mangles the multi-line output of `terraform test` into something
+          # unreadable in the log — and this job's whole value is its log.
+          terraform_wrapper: false
+
+      - name: fmt, validate, examples and unit tests
+        # Through the Makefile rather than inlined here, so the same command
+        # reproduces the failure locally. The target is a no-op when terraform
+        # is absent, which is why this job pins a version rather than relying
+        # on it: a silent skip in CI is a gate that is not one.
+        run: make terraform-test
+
   flagship-circuit:
     name: Flagship circuit
     runs-on: ubuntu-latest

@@ -1215,6 +1215,16 @@ unbounded.
 these are the keys that govern how long a session lives and how quickly it can
 be taken away.
 
+For Microsoft Entra ID there is a worked Terraform module at
+[`deploy/terraform/azure-entra-id/`](../../deploy/terraform/azure-entra-id/README.md).
+It creates the application registration, declares cloop's four roles as Entra
+app roles, and prints the `ui.oidc` block to paste in here — including the
+provider-specific details that are invisible until a sign-in fails: the issuer
+must carry a `/v2.0` suffix and name one tenant, the hub's bare origin has to
+be a registered redirect URI or sign-out dead-ends, and `offline_access` must
+be in `scopes` or Entra issues no refresh token and both of the revocation
+knobs below quietly stop working.
+
 ```yaml
 ui:
   oidc:
