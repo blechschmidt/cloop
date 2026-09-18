@@ -401,3 +401,45 @@ run "an_unknown_role_name_is_refused" {
 
   expect_failures = [var.role_assignments]
 }
+
+# ------------------------------------------------------------ no client secret
+
+run "a_certificate_deployment_creates_no_password" {
+  command = apply
+
+  variables {
+    create_client_secret = false
+  }
+
+  # Supported for a deployment supplying a certificate or a federated identity
+  # credential out of band. Both the password and its rotation clock are gated
+  # on the same variable, so neither may survive.
+  assert {
+    condition     = length(azuread_application_password.cloop) == 0
+    error_message = "create_client_secret = false must create no client secret."
+  }
+
+  assert {
+    condition     = length(time_rotating.client_secret) == 0
+    error_message = "The rotation clock exists only to date a secret; without one it is a resource that rotates nothing."
+  }
+
+  # The outputs must degrade rather than fail: a missing secret is a
+  # configuration, not an error, and `terraform output` has to keep working.
+  assert {
+    condition     = output.client_secret == null
+    error_message = "The client_secret output must be null, not an error, when no secret was created."
+  }
+
+  assert {
+    condition     = output.client_secret_expires_at == null
+    error_message = "The expiry output must be null when there is nothing to expire."
+  }
+
+  # The rest of the registration is untouched — this is still a working
+  # confidential client, just one whose credential arrived another way.
+  assert {
+    condition     = strcontains(output.cloop_config_yaml, "enabled: true")
+    error_message = "The rendered config must still enable OIDC without a module-managed secret."
+  }
+}
