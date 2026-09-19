@@ -165,3 +165,108 @@ func TestBuildRequest_NoCeilingIsUnchanged(t *testing.T) {
 		t.Fatalf("MemoryMB = %d, want the spec's 65536 untouched on an uncapped hub", req.MemoryMB)
 	}
 }
+
+// withExecutorCeiling installs a per-executor ceiling for one test (Task 20310).
+//
+// Separate from withCeiling above because the two switches are independent and
+// a test needs to be able to install either without the other: the whole point
+// of the executor source is that it binds a machine the fleet ceiling says
+// nothing about.
+func withExecutorCeiling(t *testing.T, want map[string]executor.ResourceCeiling) {
+	t.Helper()
+	executor.ResetResourceCeiling()
+	executor.SetExecutorCeilingLookup(func(id string) (executor.ResourceCeiling, bool) {
+		c, ok := want[id]
+		return c, ok
+	})
+	t.Cleanup(executor.ResetResourceCeiling)
+}
+
+// TestBuildRequest_ExecutorCeilingCapsTheSpec is the per-executor half of the
+// guarantee above, measured in the same place: the numbers that become
+// --memory, --cpus and --pids-limit on the runtime's command line.
+//
+// The admin here has capped one machine and nothing else — no fleet ceiling, no
+// project ceiling — which is the case the executor source exists for and the
+// one neither of the others can express.
+func TestBuildRequest_ExecutorCeilingCapsTheSpec(t *testing.T) {
+	ex := fakeExecutor(t, Options{CPUs: 1, MemoryMB: 256, PIDsLimit: 64})
+	withExecutorCeiling(t, map[string]executor.ResourceCeiling{
+		ex.id: {CPUMillis: 2000, MemoryMB: 2048, PIDs: 256},
+	})
+
+	req, err := ex.buildRequest(executor.Spec{
+		WorkDir: "/srv/proj",
+		Argv:    []string{"cloop", "run"},
+		// What a repository could commit to .cloop/sandbox.yaml.
+		ResourceLimits: executor.ResourceLimits{
+			CPUMillis: 64000,
+			MemoryMB:  921600,
+			PIDs:      60000,
+		},
+	}, "/srv/proj", nil)
+	if err != nil {
+		t.Fatalf("buildRequest: %v", err)
+	}
+
+	if req.CPUs != 2 {
+		t.Errorf("CPUs = %v, want 2 (this executor's ceiling)", req.CPUs)
+	}
+	if req.MemoryMB != 2048 {
+		t.Errorf("MemoryMB = %d, want 2048 (this executor's ceiling)", req.MemoryMB)
+	}
+	if req.PIDsLimit != 256 {
+		t.Errorf("PIDsLimit = %d, want 256 (this executor's ceiling)", req.PIDsLimit)
+	}
+}
+
+// TestBuildRequest_AnotherExecutorsCeilingDoesNotApply is the scoping
+// assertion, and the one that would make this feature actively harmful if it
+// failed: a cap entered against one machine must not bind a workload on
+// another.
+func TestBuildRequest_AnotherExecutorsCeilingDoesNotApply(t *testing.T) {
+	ex := fakeExecutor(t, Options{CPUs: 4, MemoryMB: 8192, PIDsLimit: 1024})
+	withExecutorCeiling(t, map[string]executor.ResourceCeiling{
+		"some-other-box": {MemoryMB: 128},
+	})
+
+	req, err := ex.buildRequest(executor.Spec{
+		WorkDir: "/srv/proj",
+		Argv:    []string{"cloop", "run"},
+	}, "/srv/proj", nil)
+	if err != nil {
+		t.Fatalf("buildRequest: %v", err)
+	}
+	if req.MemoryMB != 8192 {
+		t.Errorf("MemoryMB = %d, want this executor's own default of 8192 — "+
+			"another executor's ceiling bound a workload it says nothing about", req.MemoryMB)
+	}
+}
+
+// TestBuildRequest_FleetAndExecutorCeilingsBothBind proves the two compose by
+// getting tighter rather than one replacing the other, at the driver's own call
+// site. Each ceiling names one resource the other does not, so a bug that kept
+// only the last one consulted would show up as an unbounded field.
+func TestBuildRequest_FleetAndExecutorCeilingsBothBind(t *testing.T) {
+	ex := fakeExecutor(t, Options{CPUs: 16, MemoryMB: 65536, PIDsLimit: 60000})
+	withExecutorCeiling(t, map[string]executor.ResourceCeiling{
+		ex.id: {MemoryMB: 1024},
+	})
+	// Installed after the lookup: ResetResourceCeiling in withExecutorCeiling's
+	// setup would otherwise clear it.
+	executor.ApplyResourceCeiling(executor.ResourceCeiling{CPUMillis: 2000})
+
+	req, err := ex.buildRequest(executor.Spec{
+		WorkDir: "/srv/proj",
+		Argv:    []string{"cloop", "run"},
+	}, "/srv/proj", nil)
+	if err != nil {
+		t.Fatalf("buildRequest: %v", err)
+	}
+	if req.CPUs != 2 {
+		t.Errorf("CPUs = %v, want the fleet ceiling's 2", req.CPUs)
+	}
+	if req.MemoryMB != 1024 {
+		t.Errorf("MemoryMB = %d, want this executor's 1024", req.MemoryMB)
+	}
+}
