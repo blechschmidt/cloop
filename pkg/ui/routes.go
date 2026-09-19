@@ -567,6 +567,18 @@ func (s *Server) routeTable() []routeSpec {
 		{Pattern: "PUT /api/config/stt", Handler: s.handleSTTSettingsSave, Perm: cfgWrite, Scope: scopeGlobal},
 		{Pattern: "DELETE /api/config/stt", Handler: s.handleSTTSettingsClear, Perm: cfgWrite, Scope: scopeGlobal},
 
+		// Single sign-on (Task 20308). userMgmt, not cfgWrite, on all three
+		// including the read: this block decides who may sign in and what
+		// authority they arrive with, so writing it is equivalent to granting
+		// a role — and cfgWrite is held by maintainers, who must not be able
+		// to promote themselves by editing a role mapping. The read is gated
+		// just as tightly because the issuer, client id and redirect URL
+		// together are most of what an attacker needs to stand up a
+		// convincing fake login for this hub.
+		{Pattern: "GET /api/config/oidc", Handler: s.handleOIDCSettings, Perm: userMgmt, Scope: scopeGlobal},
+		{Pattern: "PUT /api/config/oidc", Handler: s.handleOIDCSettingsSave, Perm: userMgmt, Scope: scopeGlobal},
+		{Pattern: "POST /api/config/oidc/test", Handler: s.handleOIDCTest, Perm: userMgmt, Scope: scopeGlobal},
+
 		{Pattern: "POST /api/options/toggle", Handler: s.handleOptionsToggle, Perm: cfgWrite, Scope: scopeProject},
 		{Pattern: "POST /api/options/max-parallel", Handler: s.handleMaxParallelSet, Perm: cfgWrite, Scope: scopeProject},
 		{Pattern: "POST /api/options/step-timeout", Handler: s.handleStepTimeoutSet, Perm: cfgWrite, Scope: scopeProject},

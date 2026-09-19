@@ -291,6 +291,12 @@ const (
 	// ActionSealingKeyRetired records a superseded sealing key being retired.
 	ActionSealingKeyRetired Action = "sealing_key.retired"
 
+	// ── oidc ───────────────────────────────────────────────────────────────
+
+	// ActionOIDCConfigUpdated records the hub's single sign-on configuration
+	// being changed.
+	ActionOIDCConfigUpdated Action = "oidc.config.updated"
+
 	// ── stt.credential ─────────────────────────────────────────────────────
 
 	// ActionSTTCredentialSet records the speech-to-text key being configured.

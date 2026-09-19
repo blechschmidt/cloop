@@ -1160,6 +1160,136 @@
         </div>
 
         <!--
+          Single sign-on (Task 20308). Hub-wide, and gated on user.manage
+          rather than config.write: this block decides who may sign in and what
+          authority they arrive with, so editing it is equivalent to granting a
+          role. A maintainer holds config.write and must not be able to promote
+          themselves by adding a role mapping.
+
+          The form refuses to save anything the next startup would reject —
+          cmd/ui_cmd.go treats an invalid ui.oidc block as fatal on purpose, so
+          a bad save here would produce a hub that will not boot rather than a
+          broken login page. See pkg/ui/oidcconfig.go.
+        -->
+        <div class="settings-section" id="oidcPanel" data-global-perm="user.manage" data-perm-hide>
+          <h3>Single sign-on (OIDC) <span id="oidcStatus"></span></h3>
+          <p style="font-size:12px;color:var(--muted);margin-bottom:12px">
+            Authenticate dashboard users against your identity provider instead of a shared token.
+            With it on, every browser request needs a provider session, projects created here are
+            owned by the user who created them, and roles come from the claims your IdP releases.
+            The static <code>--token</code> keeps working for automation.
+          </p>
+          <div id="oidcRestartNote" style="display:none"></div>
+          <label style="display:flex;align-items:center;gap:8px;font-size:13px;margin-bottom:12px">
+            <input type="checkbox" id="oidcEnabled">
+            Require single sign-on for the dashboard
+          </label>
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label" for="oidcIssuer">Issuer URL</label>
+              <input class="form-input" id="oidcIssuer" autocomplete="off" placeholder="https://login.microsoftonline.com/&lt;tenant&gt;/v2.0">
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="oidcRedirectUrl">Redirect URL</label>
+              <input class="form-input" id="oidcRedirectUrl" autocomplete="off" placeholder="https://cloop.example.com/auth/callback">
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label" for="oidcClientId">Client ID</label>
+              <input class="form-input" id="oidcClientId" autocomplete="off" placeholder="cloop-dashboard">
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="oidcClientSecret">Client secret <span id="oidcSecretState" class="muted"></span></label>
+              <input class="form-input" id="oidcClientSecret" type="password" autocomplete="off" placeholder="leave blank to keep existing">
+            </div>
+          </div>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:12px">
+            <button class="btn" onclick="oidcTestIssuer()">Test connection</button>
+            <button class="btn danger" id="oidcClearSecretBtn" style="display:none" onclick="oidcClearSecret()">Clear secret</button>
+            <span id="oidcTestNote" style="font-size:12px;color:var(--muted)"></span>
+          </div>
+
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label" for="oidcScopes">Scopes (comma separated)</label>
+              <input class="form-input" id="oidcScopes" autocomplete="off" placeholder="openid, profile, email">
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="oidcCookieSecure">Session cookie Secure flag</label>
+              <select class="form-select" id="oidcCookieSecure">
+                <option value="auto">auto — set when the request arrived over TLS</option>
+                <option value="always">always</option>
+                <option value="never">never (development only)</option>
+              </select>
+            </div>
+          </div>
+
+          <h4 style="margin-top:20px">Who gets in</h4>
+          <p style="font-size:12px;color:var(--muted);margin-bottom:8px">
+            The default role applies to a signed-in user matching no mapping below.
+            <strong>none</strong> denies everything, which is the safe default — but a hub with no
+            administrator cannot be administered, so at least one admin email or a mapping granting
+            <code>admin</code> is required before SSO can be turned on.
+          </p>
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label" for="oidcAdminEmails">Admin emails (comma separated)</label>
+              <input class="form-input" id="oidcAdminEmails" autocomplete="off" placeholder="ops@example.com">
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="oidcDefaultRole">Default role</label>
+              <select class="form-select" id="oidcDefaultRole"></select>
+            </div>
+          </div>
+          <table class="data-table">
+            <thead><tr><th>Claim</th><th>Value</th><th>Role</th><th>Project</th><th>Executor</th><th></th></tr></thead>
+            <tbody id="oidcMappingsBody"></tbody>
+          </table>
+          <div id="oidcMappingsEmpty" class="muted" style="font-size:12px;margin:8px 0"></div>
+          <button class="btn" onclick="oidcAddMapping()">Add role mapping</button>
+
+          <h4 style="margin-top:20px">Sessions</h4>
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label" for="oidcSessionTtl">Absolute lifetime (hours)</label>
+              <input class="form-input" id="oidcSessionTtl" type="number" autocomplete="off">
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="oidcIdleTimeout">Idle timeout (hours)</label>
+              <input class="form-input" id="oidcIdleTimeout" type="number" autocomplete="off">
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label" for="oidcRefreshInterval">Re-check with the IdP every (minutes, -1 to disable)</label>
+              <input class="form-input" id="oidcRefreshInterval" type="number" autocomplete="off">
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="oidcMaxClaimAge">Max claim age for privileged actions (minutes, -1 to disable)</label>
+              <input class="form-input" id="oidcMaxClaimAge" type="number" autocomplete="off">
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label" for="oidcClockSkew">Clock skew allowance (seconds, -1 for none)</label>
+              <input class="form-input" id="oidcClockSkew" type="number" autocomplete="off">
+            </div>
+            <div class="form-group">
+              <label style="display:flex;align-items:center;gap:8px;font-size:13px;margin-top:26px">
+                <input type="checkbox" id="oidcRequireIdp">
+                Refuse to start if the IdP is unreachable
+              </label>
+            </div>
+          </div>
+
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:12px">
+            <button class="btn settings-save" onclick="saveOIDCSettings()">Save</button>
+          </div>
+          <div id="oidcStatusNote" style="font-size:12px;color:var(--muted);margin-top:10px"></div>
+        </div>
+
+        <!--
           GitHub App connection (Task 20306). Hub-wide, and gated on
           secret.grant because what it stores is a signing key that can mint
           repository credentials.

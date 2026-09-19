@@ -356,6 +356,13 @@ type Config struct {
 	// unlike audit retention, the growth this bounds is not a compliance
 	// record and an unattended hub that fills its disk is an outage.
 	Retention RetentionConfig `yaml:"retention,omitempty"`
+
+	// envShadow records what the file held for each credential the
+	// environment overrode, so Save can write the file's own value back
+	// instead of committing a secret that was deliberately kept out of it.
+	// Unexported, so it is invisible to yaml.Marshal — see
+	// withoutEnvSourcedSecrets.
+	envShadow map[string]string
 }
 
 // RetentionConfig is the policy for the in-hub retention janitor
@@ -1899,6 +1906,15 @@ type RoleMapping struct {
 	Executor string `yaml:"executor,omitempty"`
 }
 
+// OIDCDisabledSentinel is the value the optional OIDC behaviours take to
+// switch off rather than to fall back to their default: IdP revalidation,
+// the claim-freshness gate, and clock-skew leeway.
+//
+// Named because three fields share it and two audiences need to agree on it —
+// `cloop config set` has to accept it as in-range, and the Settings panel has
+// to offer it as a choice rather than reject it as below the lower bound.
+const OIDCDisabledSentinel = -1
+
 // OIDC session TTL bounds (hours).
 const (
 	OIDCSessionTTLHoursDefault = 24
@@ -2897,14 +2913,11 @@ func (c *Config) applyEnvVars() {
 	if v := os.Getenv("CLOOP_PROVIDER"); v != "" {
 		c.Provider = v
 	}
-	if v := os.Getenv("ANTHROPIC_API_KEY"); v != "" {
-		c.Anthropic.APIKey = v
-	}
+	// The API keys are not here: they are credentials, and every credential the
+	// environment may supply goes through envSecretFields below so that Save
+	// can reverse the override rather than commit it.
 	if v := os.Getenv("ANTHROPIC_BASE_URL"); v != "" {
 		c.Anthropic.BaseURL = v
-	}
-	if v := os.Getenv("OPENAI_API_KEY"); v != "" {
-		c.OpenAI.APIKey = v
 	}
 	if v := os.Getenv("OPENAI_BASE_URL"); v != "" {
 		c.OpenAI.BaseURL = v
@@ -2912,18 +2925,82 @@ func (c *Config) applyEnvVars() {
 	if v := os.Getenv("OLLAMA_BASE_URL"); v != "" {
 		c.Ollama.BaseURL = v
 	}
-	if v := os.Getenv("GITHUB_TOKEN"); v != "" {
-		c.GitHub.Token = v
+	// Credentials are overlaid through a table rather than one block each,
+	// because Save has to reverse exactly this set — see
+	// withoutEnvSourcedSecrets. Two hand-maintained lists would drift, and
+	// the direction they would drift in is "a secret gets committed".
+	for _, f := range c.envSecretFields() {
+		v := os.Getenv(f.env)
+		if v == "" {
+			continue
+		}
+		if c.envShadow == nil {
+			c.envShadow = map[string]string{}
+		}
+		c.envShadow[f.env] = *f.field
+		*f.field = v
 	}
-	// The OIDC client secret is the one credential a *hosted* deployment
-	// cannot keep in this file. config.yaml is the thing an operator templates
-	// into a ConfigMap, commits to a config repo and diffs in a pull request;
-	// the client secret is the thing that must arrive from a Kubernetes Secret
-	// or a systemd EnvironmentFile. Without this override the two requirements
-	// are in direct conflict and the secret ends up committed.
-	if v := os.Getenv(EnvOIDCClientSecret); v != "" {
-		c.UI.OIDC.ClientSecret = v
+}
+
+// envSecretField pairs an environment variable with the config field it
+// overrides. The field is a pointer so one table can serve both directions:
+// applyEnvVars writes through it, withoutEnvSourcedSecrets restores through it.
+type envSecretField struct {
+	env   string
+	field *string
+}
+
+// envSecretFields lists the credentials the environment may supply.
+//
+// The OIDC client secret is the one that makes this load-bearing rather than
+// tidy. config.yaml is the thing an operator templates into a ConfigMap,
+// commits to a config repo and diffs in a pull request; the client secret is
+// the thing that must arrive from a Kubernetes Secret or a systemd
+// EnvironmentFile. Without the override those two requirements are in direct
+// conflict and the secret ends up committed — and without Save reversing the
+// override, any later write to the file commits it anyway, which is the same
+// outcome by a slower route.
+func (c *Config) envSecretFields() []envSecretField {
+	return []envSecretField{
+		{env: EnvOIDCClientSecret, field: &c.UI.OIDC.ClientSecret},
+		{env: "ANTHROPIC_API_KEY", field: &c.Anthropic.APIKey},
+		{env: "OPENAI_API_KEY", field: &c.OpenAI.APIKey},
+		{env: "GITHUB_TOKEN", field: &c.GitHub.Token},
 	}
+}
+
+// withoutEnvSourcedSecrets returns cfg with any credential that arrived from
+// the environment put back to the value the file itself held.
+//
+// Load overlays the environment, so every load-modify-save — `cloop config
+// set`, the Settings panel, config repair — reads a config whose credential
+// fields may hold values that were deliberately kept out of the file, and
+// would write them into it. The cost is not hypothetical: it turns a hub
+// whose secret lives in a Kubernetes Secret into one whose secret is in the
+// YAML an operator commits, the first time anybody changes an unrelated
+// setting.
+//
+// The restore is conditional on the field still holding exactly what the
+// environment supplied. That is what distinguishes "nobody touched this since
+// Load" from "a caller assigned a new value", and the second case must be
+// persisted — it is someone typing a key into the Settings panel on a machine
+// that happens to also export one.
+func withoutEnvSourcedSecrets(cfg *Config) *Config {
+	if cfg == nil {
+		return nil
+	}
+	// Shallow copy: only scalar string fields are rewritten below, so sharing
+	// the slices and maps with the caller is safe — and the caller must not
+	// observe its own config being emptied by a save.
+	clean := *cfg
+	for _, f := range clean.envSecretFields() {
+		v := os.Getenv(f.env)
+		if v == "" || *f.field != v {
+			continue
+		}
+		*f.field = clean.envShadow[f.env]
+	}
+	return &clean
 }
 
 // Save writes the config to .cloop/config.yaml.
@@ -2937,7 +3014,7 @@ func Save(workdir string, cfg *Config) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	data, err := yaml.Marshal(cfg)
+	data, err := yaml.Marshal(withoutEnvSourcedSecrets(cfg))
 	if err != nil {
 		return err
 	}

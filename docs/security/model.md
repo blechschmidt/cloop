@@ -1560,8 +1560,56 @@ Register cloop at your IdP as a **confidential client** with the
 authorization-code flow and the redirect URL above (PKCE is used
 automatically). All four required fields must be set or `cloop ui` refuses
 to start — the server fails closed rather than silently serving without
-authentication. The same keys are settable via `cloop config set
-ui.oidc.<key> <value>`.
+authentication. Every key is also settable via `cloop config set
+ui.oidc.<key> <value>`, except `role_mappings`, which is a list of records that
+a flat key/value setter cannot express.
+
+#### Editing it from the dashboard
+
+**Settings → Single sign-on** edits the same block, for operators who should not
+need a shell on the hub to change who can sign in. It is gated on `user.manage`
+— admin only, not `config.write` — because writing this block is equivalent to
+granting a role, and a maintainer must not be able to promote themselves by
+adding a role mapping. The panel edits `role_mappings` too, as a table.
+
+Three properties follow from `ui.oidc` being read at startup rather than per
+request, and are worth knowing before using it:
+
+- **It refuses rather than warns.** A block that would abort the next startup is
+  rejected with the offending field named, because saving one would produce a
+  hub that will not boot — repairable only from a shell, which is the situation
+  the panel exists to avoid. The check is the real one: the panel hands the
+  prospective block to the same constructors `cloop ui` runs, so it cannot drift
+  from what startup accepts.
+- **It refuses two things startup does not check.** Enabling SSO with no
+  administrator — no `admin_emails`, no mapping granting `admin`, and
+  `default_role` not `admin` — is valid configuration that denies every
+  signed-in user everything, including this panel. And a change that would strip
+  the *caller's own* admin access is refused, since the surface that would tell
+  them is the one they just lost. Both are answered by building the prospective
+  policy and asking it, so a mapping granting admin through a group claim counts
+  exactly as much as an entry in `admin_emails`.
+- **A save is not live until the hub restarts.** The authenticator is built once
+  at startup, so the panel shows the running configuration beside the saved one
+  and says when they differ. Turning SSO on and reloading the page does not
+  produce a login prompt; restarting the hub does.
+
+The client secret is never sent to the browser. The panel reports whether one is
+set and whether it came from the file or from `CLOOP_OIDC_CLIENT_SECRET`; an
+empty field on save keeps the stored value, so the issuer can be edited without
+re-typing a credential the page cannot display. Clearing it is a separate
+button. On a hub where the environment supplies the secret the panel says so,
+rather than accepting a value that would be overridden on the next load.
+
+**Test connection** runs the same discovery and JWKS round trips startup runs,
+against whatever issuer is in the box, without saving anything. Reachability is
+the one thing static validation cannot answer and the most common thing to get
+wrong — a mistyped tenant id is a perfectly valid `https` URL that fails every
+sign-in.
+
+Every change is audited as `oidc.config.updated` in the hub's own trail, naming
+which fields moved. The client secret appears in that list when it changes and
+nowhere else — not its value, not its length.
 
 When enabled:
 

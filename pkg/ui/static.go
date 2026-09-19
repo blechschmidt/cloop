@@ -120,6 +120,10 @@ var bundleFiles = []string{
 	// overview — in one fragment, because they share the state that carries
 	// a discovered installation from the first to the second.
 	"assets/js/32-githubapp.js",
+	// Single sign-on (Task 20308): the Settings panel that edits ui.oidc.
+	// Depends on nothing but 00-core.js's helpers, so its position is fixed
+	// only by the filename-order rule.
+	"assets/js/32-oidc.js",
 	// Last, and it closes the IIFE 00-core.js opened. A fragment appended
 	// after the close lands at global scope, where none of the shared helpers
 	// are visible — see TestDashboard_MainIIFEClosesInLastFragment. This is

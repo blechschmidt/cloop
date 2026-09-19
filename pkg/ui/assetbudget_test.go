@@ -34,7 +34,7 @@ import (
 // number measured here is the number that crosses the network.
 //
 // Measured at 240,895 B (946,640 B decoded) immediately after Task 20289
-// deferred chart.js, down from 308,554 B (1,145,442 B decoded); the ceiling is
+// deferred chart.js, down from 308,554 B (1,145,442 B decoded); the ceiling was
 // that figure plus ~8%
 // headroom. The headroom is deliberately modest — enough to absorb ordinary
 // panel growth and any jitter in compress/gzip's output across toolchain
@@ -42,7 +42,34 @@ import (
 //
 // Raising this is a legitimate thing to do, but it should be a decision with a
 // reason in the commit message, not a reflex to make a red test green.
-const eagerWireBudgetBytes = 260_000
+//
+// Raised to 270,000 B by Task 20308, which added the single sign-on Settings
+// panel: 5,550 B wire (14.5 KiB of JavaScript and 7.4 KiB of markup). The
+// reason it is a raise rather than a deferral is worth recording, because the
+// next person will face the same choice with less room than this one had:
+//
+//   - The 260,000 B ceiling was already spent. HEAD measured 259,025 B — 975 B
+//     of headroom — so the budget had stopped being a brake on large additions
+//     and become a tripwire for the next addition of any size.
+//   - The prose above distinguishes "ordinary panel growth" from "another
+//     70 KiB library". A Settings section with a role-mapping editor is the
+//     former; for scale, the whole stylesheet is 23 KiB wire.
+//   - Deferral — the remedy the failure message recommends first, and the right
+//     one for an admin-only panel most sessions never open — is not cheap here.
+//     The bundle is one IIFE and none of the shared helpers (api, apiMethod,
+//     esc, toast, canGlobal) are on window, so a fragment fetched separately
+//     runs at global scope where it can reach none of them. Doing it properly
+//     means either widening the global surface or threading a helpers object
+//     through a loader shim, which is a frontend refactor with its own
+//     regression risk and does not belong in a task about configuring OIDC.
+//   - The display-glasses front end does not pay for this: glasses.html does
+//     not reference app.js, so bundle growth never reaches it.
+//
+// The new figure is the measurement plus ~2%, not ~8%, on purpose. That is
+// ample for gzip jitter across toolchain revisions and deliberately too little
+// for another panel — so the next addition here has to build the deferral path
+// rather than move this number again.
+const eagerWireBudgetBytes = 270_000
 
 // eagerAsset is one member of the first-paint set.
 type eagerAsset struct {

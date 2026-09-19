@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/blechschmidt/cloop/pkg/authz"
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/configdiff"
 	"github.com/blechschmidt/cloop/pkg/provider"
@@ -375,18 +376,7 @@ func applyConfigKey(cfg *config.Config, key, value string) error {
 	case "ui.oidc.redirect_url":
 		cfg.UI.OIDC.RedirectURL = value
 	case "ui.oidc.admin_emails":
-		if value == "" {
-			cfg.UI.OIDC.AdminEmails = nil
-		} else {
-			parts := strings.Split(value, ",")
-			emails := make([]string, 0, len(parts))
-			for _, p := range parts {
-				if e := strings.TrimSpace(p); e != "" {
-					emails = append(emails, e)
-				}
-			}
-			cfg.UI.OIDC.AdminEmails = emails
-		}
+		cfg.UI.OIDC.AdminEmails = splitCommaList(value)
 	case "ui.oidc.session_ttl_hours":
 		n, err := strconv.Atoi(value)
 		if err != nil {
@@ -403,6 +393,79 @@ func applyConfigKey(cfg *config.Config, key, value string) error {
 			cfg.UI.OIDC.CookieSecure = value
 		default:
 			return fmt.Errorf("ui.oidc.cookie_secure must be auto, always, or never (got %q)", value)
+		}
+
+	// The rest of ui.oidc (Task 20308). These had no key, so the only way to
+	// set them was to hand-edit config.yaml — on a hub whose whole point is
+	// that its configuration is reviewable, and where `config set` is what a
+	// provisioning script has. Role mappings stay out: they are a list of
+	// five-field records, which is a shape a flat key=value setter cannot
+	// express honestly. The Settings panel and the YAML file are the two ways
+	// to write those.
+	case "ui.oidc.scopes":
+		cfg.UI.OIDC.Scopes = splitCommaList(value)
+	case "ui.oidc.default_role":
+		role := strings.ToLower(strings.TrimSpace(value))
+		if role != "" && !authz.Role(role).Valid() {
+			return fmt.Errorf("ui.oidc.default_role must be one of %s (or empty for %s) (got %q)",
+				strings.Join(authzRoleNames(), ", "), authz.RoleNone, value)
+		}
+		cfg.UI.OIDC.DefaultRole = role
+	case "ui.oidc.idle_timeout_hours":
+		n, err := strconv.Atoi(value)
+		if err != nil {
+			return fmt.Errorf("ui.oidc.idle_timeout_hours: expected integer, got %q", value)
+		}
+		if n != 0 && (n < config.OIDCIdleTimeoutHoursLower || n > config.OIDCIdleTimeoutHoursUpper) {
+			return fmt.Errorf("ui.oidc.idle_timeout_hours must be between %d and %d (or 0 to use the default %d) (got %d)",
+				config.OIDCIdleTimeoutHoursLower, config.OIDCIdleTimeoutHoursUpper, config.OIDCIdleTimeoutHoursDefault, n)
+		}
+		cfg.UI.OIDC.IdleTimeoutHours = n
+	case "ui.oidc.refresh_interval_minutes":
+		n, err := strconv.Atoi(value)
+		if err != nil {
+			return fmt.Errorf("ui.oidc.refresh_interval_minutes: expected integer, got %q", value)
+		}
+		// -1 is not out of range, it is the documented "off" value: it turns
+		// off IdP revalidation, and with it IdP-initiated revocation.
+		if n != 0 && n != config.OIDCDisabledSentinel &&
+			(n < config.OIDCRefreshIntervalMinutesLower || n > config.OIDCRefreshIntervalMinutesUpper) {
+			return fmt.Errorf("ui.oidc.refresh_interval_minutes must be between %d and %d (0 for the default %d, %d to disable revalidation) (got %d)",
+				config.OIDCRefreshIntervalMinutesLower, config.OIDCRefreshIntervalMinutesUpper,
+				config.OIDCRefreshIntervalMinutesDefault, config.OIDCDisabledSentinel, n)
+		}
+		cfg.UI.OIDC.RefreshIntervalMinutes = n
+	case "ui.oidc.max_claim_age_minutes":
+		n, err := strconv.Atoi(value)
+		if err != nil {
+			return fmt.Errorf("ui.oidc.max_claim_age_minutes: expected integer, got %q", value)
+		}
+		if n != 0 && n != config.OIDCDisabledSentinel &&
+			(n < config.OIDCMaxClaimAgeMinutesLower || n > config.OIDCMaxClaimAgeMinutesUpper) {
+			return fmt.Errorf("ui.oidc.max_claim_age_minutes must be between %d and %d (0 for the default %d, %d to disable the freshness gate) (got %d)",
+				config.OIDCMaxClaimAgeMinutesLower, config.OIDCMaxClaimAgeMinutesUpper,
+				config.OIDCMaxClaimAgeMinutesDefault, config.OIDCDisabledSentinel, n)
+		}
+		cfg.UI.OIDC.MaxClaimAgeMinutes = n
+	case "ui.oidc.clock_skew_seconds":
+		n, err := strconv.Atoi(value)
+		if err != nil {
+			return fmt.Errorf("ui.oidc.clock_skew_seconds: expected integer, got %q", value)
+		}
+		if n != 0 && n != config.OIDCDisabledSentinel &&
+			(n < 0 || n > config.OIDCClockSkewSecondsUpper) {
+			return fmt.Errorf("ui.oidc.clock_skew_seconds must be between 0 and %d (0 for the default %d, %d for no leeway) (got %d)",
+				config.OIDCClockSkewSecondsUpper, config.OIDCClockSkewSecondsDefault, config.OIDCDisabledSentinel, n)
+		}
+		cfg.UI.OIDC.ClockSkewSeconds = n
+	case "ui.oidc.require_idp":
+		switch strings.ToLower(value) {
+		case "true", "1", "yes", "on":
+			cfg.UI.OIDC.RequireIdP = true
+		case "false", "0", "no", "off":
+			cfg.UI.OIDC.RequireIdP = false
+		default:
+			return fmt.Errorf("ui.oidc.require_idp: expected true/false, got %q", value)
 		}
 
 	// Container executor (Task 20157). Each case assigns into a copy that is
@@ -573,6 +636,18 @@ Sensitive values (api keys, tokens, webhook secrets) are masked in the output.`,
 		}
 		return nil
 	},
+}
+
+// authzRoleNames lists the role names a config key may be set to, for the
+// error message when it is set to something else. Derived from authz.AllRoles
+// rather than written out, so a role added to the ladder appears here without
+// anybody remembering to update a string.
+func authzRoleNames() []string {
+	names := make([]string, 0, len(authz.AllRoles))
+	for _, r := range authz.AllRoles {
+		names = append(names, string(r))
+	}
+	return names
 }
 
 // configSyncCmd resolves drift by overwriting one source with the other.

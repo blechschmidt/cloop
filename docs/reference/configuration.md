@@ -1215,6 +1215,14 @@ unbounded.
 these are the keys that govern how long a session lives and how quickly it can
 be taken away.
 
+All of `ui.oidc` is editable three ways: this file, `cloop config set
+ui.oidc.<key> <value>`, and **Settings → Single sign-on** in the dashboard. The
+panel is gated on `user.manage` rather than `config.write`, refuses a block that
+would stop the hub starting, and does not take effect until the hub restarts —
+see [editing it from the dashboard](../security/model.md#editing-it-from-the-dashboard).
+`role_mappings` is the one key `cloop config set` cannot reach, being a list of
+records; use the file or the panel's table.
+
 For Microsoft Entra ID there is a worked Terraform module at
 [`deploy/terraform/azure-entra-id/`](../../deploy/terraform/azure-entra-id/README.md).
 It creates the application registration, declares cloop's four roles as Entra

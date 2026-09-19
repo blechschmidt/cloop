@@ -150,38 +150,26 @@ but not for anything reachable from a network.`,
 					fmt.Printf("warning: sessions are process-local (%v) — a restart will sign every user out\n", storeWarn)
 				}
 				refreshMinutes := cfg.UI.OIDC.EffectiveRefreshIntervalMinutes()
-				claimAgeMinutes := cfg.UI.OIDC.EffectiveMaxClaimAgeMinutes()
-				auth, oidcErr := oidcauth.New(oidcauth.Config{
-					Enabled:         true,
-					Issuer:          cfg.UI.OIDC.Issuer,
-					ClientID:        cfg.UI.OIDC.ClientID,
-					ClientSecret:    cfg.UI.OIDC.ClientSecret,
-					RedirectURL:     cfg.UI.OIDC.RedirectURL,
-					Scopes:          cfg.UI.OIDC.Scopes,
-					AdminEmails:     cfg.UI.OIDC.AdminEmails,
-					SessionTTL:      time.Duration(cfg.UI.OIDC.EffectiveSessionTTLHours()) * time.Hour,
-					IdleTimeout:     time.Duration(cfg.UI.OIDC.EffectiveIdleTimeoutHours()) * time.Hour,
-					RefreshInterval: time.Duration(refreshMinutes) * time.Minute,
-					// Bounded authorization staleness for privileged actions
-					// (Task 20273). Independent of RefreshInterval on purpose:
-					// a hub that disabled the background pass still may not
-					// grant a credential on claims of unknown age.
-					MaxClaimAge:  time.Duration(claimAgeMinutes) * time.Minute,
-					ClockSkew:    cfg.UI.OIDC.EffectiveClockSkew(),
-					CookieSecure: cfg.UI.OIDC.CookieSecure,
-					Store:        store,
-					Audit:        srv.SessionAuditSink(),
-					// Per-identity session cap (Task 20182). Resolved live
-					// rather than captured, so an admin lowering somebody's
-					// quota takes effect at their next sign-in without a
-					// restart.
-					SessionLimit: srv.SessionLimitFor,
-					// Names the authority a user lost when the IdP narrows
-					// their claims mid-session (Task 20249). Resolved live
-					// against srv.Authz, which is assigned just below — a
-					// method value, so the nil resolver here is never read.
-					EffectiveRole: srv.EffectiveRoleFor,
-				})
+				// The static fields come from ui.OIDCAuthConfig rather than
+				// being spelled out here, because the Settings panel validates
+				// a prospective block by handing the same builder's output to
+				// the same constructor (Task 20308). Two construction sites
+				// would let the panel accept a configuration this line then
+				// refuses — and refusing here is fatal, so the symptom would be
+				// a hub that will not start.
+				authCfg := ui.OIDCAuthConfig(cfg.UI.OIDC)
+				authCfg.Store = store
+				authCfg.Audit = srv.SessionAuditSink()
+				// Per-identity session cap (Task 20182). Resolved live rather
+				// than captured, so an admin lowering somebody's quota takes
+				// effect at their next sign-in without a restart.
+				authCfg.SessionLimit = srv.SessionLimitFor
+				// Names the authority a user lost when the IdP narrows their
+				// claims mid-session (Task 20249). Resolved live against
+				// srv.Authz, which is assigned just below — a method value, so
+				// the nil resolver here is never read.
+				authCfg.EffectiveRole = srv.EffectiveRoleFor
+				auth, oidcErr := oidcauth.New(authCfg)
 				if oidcErr != nil {
 					return fmt.Errorf("ui.oidc is enabled but invalid: %w", oidcErr)
 				}
@@ -201,12 +189,7 @@ but not for anything reachable from a network.`,
 				if roleErr != nil {
 					return fmt.Errorf("could not open runtime role bindings: %w", roleErr)
 				}
-				resolver, authzErr := authz.New(authz.Config{
-					DefaultRole: authz.Role(cfg.UI.OIDC.DefaultRole),
-					Bindings:    roleMappingsToBindings(cfg.UI.OIDC.RoleMappings),
-					AdminEmails: cfg.UI.OIDC.AdminEmails,
-					Runtime:     roleSource,
-				})
+				resolver, authzErr := authz.New(ui.OIDCAuthzConfig(cfg.UI.OIDC, roleSource))
 				if authzErr != nil {
 					return fmt.Errorf("ui.oidc role mappings are invalid: %w", authzErr)
 				}
@@ -282,26 +265,6 @@ but not for anything reachable from a network.`,
 	},
 }
 
-// roleMappingsToBindings converts the YAML shape into the authz model.
-// Validation (unknown roles, unknown claim kinds, empty values) happens in
-// authz.New so there is exactly one place that decides what is well-formed.
-func roleMappingsToBindings(mappings []config.RoleMapping) []authz.Binding {
-	if len(mappings) == 0 {
-		return nil
-	}
-	bindings := make([]authz.Binding, 0, len(mappings))
-	for _, m := range mappings {
-		bindings = append(bindings, authz.Binding{
-			Claim:    authz.ClaimKind(m.Claim),
-			Value:    m.Value,
-			Role:     authz.Role(m.Role),
-			Project:  m.Project,
-			Executor: m.Executor,
-		})
-	}
-	return bindings
-}
-
 // describeRuntimeBindings annotates the RBAC startup line with the runtime
 // layer, and says nothing when there is none.
 //
@@ -327,7 +290,7 @@ func describeRuntimeBindings(bindings []authz.Binding) string {
 // quotaLimitsFrom converts the YAML limit map into the quota model.
 // Validation (unknown resources, negative ceilings) happens in quota.New so
 // there is exactly one place that decides what is well-formed — the same
-// split roleMappingsToBindings has with authz.New.
+// split ui.OIDCBindings has with authz.New.
 func quotaLimitsFrom(m map[string]float64) quota.Limits {
 	if len(m) == 0 {
 		return nil

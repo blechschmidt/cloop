@@ -1078,6 +1078,23 @@ var registry = []Entry{
 		Read:      authz.PermAuditRead,
 	},
 
+	// ── oidc ───────────────────────────────────────────────────────────────
+	{
+		Action:  ActionOIDCConfigUpdated,
+		Home:    HomeControlPlane,
+		Entity:  "config",
+		Trigger: "The hub's single sign-on configuration is changed, from the Settings panel or `cloop config set ui.oidc.*`.",
+		Payload: []string{"changed", "enabled", "was_enabled", "issuer", "default_role",
+			"admin_emails", "role_mappings", "require_idp", "restart_required"},
+		Stability: StabilityStable,
+		Read:      authz.PermAuditRead,
+		Note: "`changed` lists the field names that moved, so the row answers what was touched without storing two copies of the block. " +
+			"The client secret appears in `changed` when it moves and nowhere else — not its value, not its length. " +
+			"`admin_emails` and `role_mappings` are counts, not contents. " +
+			"`restart_required` records whether the change was live yet, because the authenticator is built at startup: " +
+			"a row with it set means the hub was still running the previous configuration when the change landed.",
+	},
+
 	// ── stt.credential ─────────────────────────────────────────────────────
 	{
 		Action:    ActionSTTCredentialSet,
