@@ -358,17 +358,21 @@ ui:
     enabled: true
     issuer: {{.OIDCIssuer}}
     client_id: {{.OIDCClient}}
-    # client_secret comes from CLOOP_OIDC_CLIENT_SECRET in .cloop/hub.env.
+    # No client_secret: PKCE (S256) authenticates the code exchange, so a
+    # public-client registration needs none. If this client is registered as
+    # confidential, set CLOOP_OIDC_CLIENT_SECRET in .cloop/hub.env instead.
     redirect_url: {{.ExternalURL}}/auth/callback
 {{- else}}
     # No identity provider was given to ` + "`cloop hub bootstrap`" + `. Until this is
     # enabled the dashboard is protected by CLOOP_UI_TOKEN alone — one shared
     # bearer token, no per-user identity, and therefore no usable audit trail.
-    # Fill in the four required fields and set enabled: true.
+    # Fill in the three required fields and set enabled: true.
     enabled: false
     # issuer: https://idp.example.com/realms/main
     # client_id: cloop-hub
-    # client_secret comes from CLOOP_OIDC_CLIENT_SECRET in .cloop/hub.env.
+    # A client_secret is optional: without one the hub signs in as a public
+    # client and PKCE (S256) authenticates the code exchange. For a
+    # confidential registration set CLOOP_OIDC_CLIENT_SECRET in .cloop/hub.env.
     redirect_url: {{.ExternalURL}}/auth/callback
 {{- end}}
     scopes: [openid, profile, email, groups]
@@ -450,8 +454,11 @@ CLOOP_SECRET_KEY=%s
 # keeps using afterwards. Send it as ` + "`Authorization: Bearer <token>`" + `.
 CLOOP_UI_TOKEN=%s
 
-# OIDC client secret, when ui.oidc.enabled is true. The value belongs to the
-# client registration at your identity provider, so it is not generated here.
+# OIDC client secret. Only needed when the client is registered at your
+# identity provider as a CONFIDENTIAL client — a public-client registration
+# needs none, because PKCE (S256) authenticates the code exchange on its own,
+# and that is the default the bundled Terraform module provisions. The value
+# belongs to the registration, so it is not generated here.
 #CLOOP_OIDC_CLIENT_SECRET=
 
 # Model provider credentials. Read from the environment rather than
