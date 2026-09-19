@@ -793,19 +793,27 @@ func legacyDBHasState(dbPath string) (bool, error) {
 // legacyState mirrors ProjectState for JSON decoding (avoids the import of
 // newer packages that might not exist in old JSON files).
 type legacyState struct {
-	Goal              string                 `json:"goal"`
-	WorkDir           string                 `json:"workdir"`
-	MaxSteps          int                    `json:"max_steps"`
-	CurrentStep       int                    `json:"current_step"`
-	Status            string                 `json:"status"`
-	Steps             []StepResult           `json:"steps"`
-	CreatedAt         time.Time              `json:"created_at"`
-	UpdatedAt         time.Time              `json:"updated_at"`
-	Model             string                 `json:"model,omitempty"`
-	Instructions      string                 `json:"instructions,omitempty"`
-	AutoEvolve        bool                   `json:"auto_evolve"`
-	EvolveStep        int                    `json:"evolve_step"`
-	Provider          string                 `json:"provider,omitempty"`
+	Goal         string       `json:"goal"`
+	WorkDir      string       `json:"workdir"`
+	MaxSteps     int          `json:"max_steps"`
+	CurrentStep  int          `json:"current_step"`
+	Status       string       `json:"status"`
+	Steps        []StepResult `json:"steps"`
+	CreatedAt    time.Time    `json:"created_at"`
+	UpdatedAt    time.Time    `json:"updated_at"`
+	Model        string       `json:"model,omitempty"`
+	Instructions string       `json:"instructions,omitempty"`
+	AutoEvolve   bool         `json:"auto_evolve"`
+	EvolveStep   int          `json:"evolve_step"`
+	Provider     string       `json:"provider,omitempty"`
+	// Effort was missing from this mirror until Task 20316 and was therefore
+	// dropped by every migration that ran: a project upgraded from state.json
+	// silently lost its reasoning-effort setting and fell back to the
+	// provider default. It matters twice now, because a dispatch to an
+	// isolating executor seeds the sandbox through this same decoder
+	// (pkg/executor/projectseed) — an omission here is a field the sandbox
+	// runs without.
+	Effort            string                 `json:"effort,omitempty"`
 	PMMode            bool                   `json:"pm_mode,omitempty"`
 	Plan              *pm.Plan               `json:"plan,omitempty"`
 	Milestones        []*milestone.Milestone `json:"milestones,omitempty"`
@@ -852,6 +860,7 @@ func migrateFromJSON(dir, jsonPath, dbPath string) error {
 		AutoEvolve:        legacy.AutoEvolve,
 		EvolveStep:        legacy.EvolveStep,
 		Provider:          legacy.Provider,
+		Effort:            legacy.Effort,
 		PMMode:            legacy.PMMode,
 		Plan:              legacy.Plan,
 		Milestones:        legacy.Milestones,

@@ -89,6 +89,14 @@ var (
 	// producing a run whose git authentication fails for a reason nothing names.
 	ErrSecretFilesUnsupported = errors.New("remote: agent does not support secret credential files")
 
+	// ErrProjectSeedUnsupported: the agent speaks a protocol version older than
+	// MinProjectSeedVersion, so it would ignore the project state and run the
+	// harness in a clone that holds a source repository but no cloop project.
+	// Placing such a workload fails with this rather than producing a run that
+	// exits with "no cloop project found" — a message that names the project
+	// rather than the device that dropped it.
+	ErrProjectSeedUnsupported = errors.New("remote: agent does not support project seeding")
+
 	// ErrSandboxModeUnsupported: the agent speaks a protocol version older than
 	// MinSandboxModeVersion, so it would ignore StartPayload.Sandbox and run the
 	// payload as a host process — whatever containment an admin configured for

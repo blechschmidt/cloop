@@ -124,7 +124,19 @@ const (
 	// nor the device. Kata hardcodes accel=kvm and its bundled QEMU is built
 	// --disable-tcg, so there is no degraded mode to fall back to; the only
 	// honest answers are "yes" and "refuse".
-	ProtocolVersion = 9
+	// v10 added StartPayload.ProjectSeed: the hub's `.cloop/` — goal,
+	// instructions, provider selection and plan — placed into the tree the
+	// device just cloned. Until then nothing carried a cloop *project* across
+	// a dispatch, only a source repository, so `cloop run` on the device
+	// exited on its first line with "no cloop project found" against a
+	// perfectly good checkout. The only way to make a remote run work at all
+	// was to commit `.cloop/state.db` — a live SQLite file — into the user's
+	// repository.
+	//
+	// Additive like v6, and gated the same way and for the same shape of
+	// reason: a pre-v10 agent does not reject the field, it ignores it and
+	// runs the harness in a tree with no project. See MinProjectSeedVersion.
+	ProtocolVersion = 10
 	// MinProtocolVersion is the oldest version this build still accepts.
 	MinProtocolVersion = 1
 	// MinRevocationVersion is the first version whose agents understand the
@@ -226,6 +238,20 @@ const (
 	// that *did* answer can contradict it. An operator upgrading the agent is
 	// what turns the guess into a fact.
 	MinVirtualizationProbeVersion = 9
+	// MinProjectSeedVersion is the first version whose agents place the hub's
+	// project state into the workspace before starting the harness.
+	//
+	// A placement rule, like MinSecretFilesVersion, and its failure is loud but
+	// aimed at the wrong thing — which is worse than quiet. A pre-v10 agent
+	// ignores the field, provisions a correct tree, and the harness exits
+	// immediately with "no cloop project found (run 'cloop init' first)". An
+	// operator reading that goes to look at the project, which is intact, and
+	// has no reason to suspect the device.
+	//
+	// The workload is refused, not the device, for the reason given at
+	// MinSecretFilesVersion: a v9 agent still runs everything that needs no
+	// seed, and every executor that shares the hub's filesystem needs none.
+	MinProjectSeedVersion = 10
 )
 
 // SupportsRevocation reports whether an agent speaking this protocol version
@@ -248,6 +274,10 @@ func SupportsResumeTerminate(version int) bool { return version >= MinResumeTerm
 // SupportsSecretFiles reports whether an agent speaking this protocol version
 // receives a lease's credential file contents and places them for the workload.
 func SupportsSecretFiles(version int) bool { return version >= MinSecretFilesVersion }
+
+// SupportsProjectSeed reports whether an agent speaking this protocol version
+// places the hub's `.cloop/` project state into the workspace it provisioned.
+func SupportsProjectSeed(version int) bool { return version >= MinProjectSeedVersion }
 
 // SupportsSandboxMode reports whether an agent speaking this protocol version
 // reads StartPayload.Sandbox and selects its driver from it, rather than always
@@ -694,9 +724,15 @@ func (c AgentCapabilities) Executor() executor.Capabilities {
 		// so it can never read files at the path the hub wrote them to. That is
 		// exactly why the bytes travel in the start frame.
 		SecretFilesFromHostPath: false,
-		MaxConcurrent:           c.MaxConcurrent,
-		Platform:                c.OS,
-		Arch:                    c.Arch,
+		// True for the same reason and with the same narrowing: placing the
+		// project state is os.MkdirAll plus a write into a directory the agent
+		// has already provisioned and confined. Whether the *session* can
+		// carry the bytes is decided in Executor.Capabilities, which knows the
+		// protocol version.
+		SupportsProjectSeed: true,
+		MaxConcurrent:       c.MaxConcurrent,
+		Platform:            c.OS,
+		Arch:                c.Arch,
 	}
 }
 
@@ -863,6 +899,20 @@ type StartPayload struct {
 	// driver that shares the hub's filesystem reads the files the broker
 	// already wrote, and a driver on another machine has nothing to read.
 	SecretFiles []SecretFile `json:"secret_files,omitempty"`
+	// ProjectSeed is the hub's `.cloop/` project state — gzip-compressed JSON
+	// in the shape state.Load already migrates from — for the device to place
+	// into the tree it provisions. Added in protocol v10.
+	//
+	// A sibling of Spec like the two fields above, and for the size reason
+	// rather than the secrecy one: executor.Spec.ProjectSeed is json:"-" so a
+	// few hundred kilobytes of plan are not written to the handle store, echoed
+	// into the audit trail and re-read by reconcile on every dispatch. Here the
+	// bytes are one field of one frame.
+	//
+	// []byte, so encoding/json base64s it on the wire — the payload is
+	// compressed binary, and it is validated on receipt before a byte of it
+	// reaches a filesystem.
+	ProjectSeed []byte `json:"project_seed,omitempty"`
 	// Sandbox is the admin's per-executor answer to where this payload runs on
 	// the device: as a host process, or in a container on that host, and under
 	// which engine, runtime and image. Added in protocol v8; the zero value

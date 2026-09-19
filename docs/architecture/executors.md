@@ -1327,6 +1327,100 @@ of startup-only.
 
 ---
 
+## The tree is not the project: seeding `.cloop/` (Task 20316)
+
+Everything above gets the *source tree* onto the executor. A cloop project is
+not only a source tree: it is also `.cloop/` — the goal, the instructions, the
+provider and effort selection, and the plan. The hub holds all of that in its
+own `.cloop/state.db`, and for a long time nothing carried any of it across a
+dispatch.
+
+The dispatched argv is `cloop run`, and that process reads `.cloop/` from the
+directory it is standing in. On a `bind` workspace that directory *is* the hub's
+project, so this was invisible. On a `git` workspace it is a fresh clone of a
+source repository, which contains no cloop project, so the run exited on its
+first line with:
+
+```
+Error: no cloop project found (run 'cloop init' first)
+```
+
+The only way to make a remote or Kubernetes run work at all was to commit
+`.cloop/state.db` — a live, WAL-backed SQLite file — into the repository. That
+is not a workaround a product can ship: it publishes the plan to everyone who
+can read the repo, it is a binary blob the sandbox then rewrites, and it is
+silently truncated unless the author remembers to `PRAGMA wal_checkpoint`
+first.
+
+So a `git` workspace now carries the project with it.
+
+| | |
+| --- | --- |
+| Field | `Spec.ProjectSeed []byte` (`json:"-"`) |
+| Format | gzip-compressed JSON in the legacy `.cloop/state.json` shape |
+| Built by | `projectseed.Build`, from `state.LoadLite` |
+| Placed by | `projectseed.Write`, into `<workspace>/.cloop/state.json` |
+| Capability | `supports_project_seed` |
+| Wire | `StartPayload.ProjectSeed`, protocol **v10** |
+| Ceilings | 4 MiB compressed, 32 MiB inflated |
+
+**Why the legacy `state.json` shape.** It is not a new format: it is the one
+`state.Load` already migrates from on every open. The sandbox side therefore
+needs no new code at all — the first `state.Load` finds a `state.json` and no
+`state.db`, migrates, and returns a populated project through the import path
+every legacy project on disk has exercised for a year. It also fixes a second
+bug for free: a reused work directory on an edge device kept the *previous*
+dispatch's `state.db`, so the next run read stale state and reported every task
+already complete without running anything. A freshly written `state.json` is
+newer than that database, which is the migration's second trigger, so the stale
+state is replaced rather than believed.
+
+**What a seed deliberately leaves out.** Step history, which is the overwhelming
+majority of a long-running project's state and none of which the sandbox needs —
+this is what keeps a 482-task plan in the hundreds of kilobytes. And `WorkDir`,
+which is cleared: it is the path `Save` writes back through, so a seed carrying
+the hub's absolute path would aim the sandbox's writes at a directory on another
+machine. The far side re-derives it from wherever it is migrating.
+
+**The payload names no destination.** Nothing inside a seed influences where it
+lands; the receiving side always writes `<workspace>/.cloop/state.json` inside
+the directory it has already confined. A seed that carried its own path would be
+an arbitrary-file-write primitive aimed at whichever host materialised it — the
+same reasoning that makes `SecretFile.Name` a bare file name below.
+
+**Why `json:"-"`, like `Spec.SecretFiles`.** Different motive, same rule. Secret
+files are excluded because they are plaintext credentials; a seed is excluded
+because it is *large and reconstructible*. `pkg/executorstore` persists the
+dispatched Spec, the audit trail echoes it, and reconcile re-reads it after a
+restart — a few hundred kilobytes of plan written to three places on every
+dispatch would undo the control plane's own retention work. A wire format that
+needs the bytes opts in explicitly.
+
+**This one capability degrades instead of refusing placement**, and that is the
+deliberate exception to the rule the rest of this page follows. Every other
+capability gap is a refusal, because a workload needing something the executor
+cannot do is a workload that will fail. A seed is different: *every*
+project-scoped run carries one, so making it a requirement would refuse every
+dispatch to every pre-v10 agent in a fleet — including the installations that
+work today by committing `.cloop/` into the repository, which was the only way
+this path worked before. A fix for a broken flow must not break the workaround
+people adopted because it was broken. A capable executor gets the seed; an older
+one behaves exactly as it does today and the project's journal gets a
+`project_seed` row naming the executor and the upgrade.
+
+`Spec.SandboxRequirements()` still derives `RequireProjectSeed` from the field,
+so a *future* caller that attaches a seed without checking the capability is
+refused rather than silently dropped.
+
+**Not yet seeded: Kubernetes.** The Pod driver reports `supports_project_seed`
+false, so it takes the degraded path above. A Pod's workspace is provisioned by
+a `cloop workspace provision` init container, and delivering the seed to it
+needs a projected volume that does not exist yet — so for now a Kubernetes
+executor still requires `.cloop/` committed to the repository, and says so on
+the project's journal rather than failing mutely.
+
+---
+
 ## Secret file delivery
 
 A secret lease produces three shapes of material, and only two of them used to

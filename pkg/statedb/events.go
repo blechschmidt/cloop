@@ -83,6 +83,19 @@ const (
 	// numbers and which ceiling bound it is the difference between a mystery
 	// and an address to complain to.
 	EventResourceCeiling EventType = "resource_ceiling"
+
+	// EventProjectSeed records that a run dispatched to an isolating executor
+	// went without the project state the hub would normally send with it
+	// (Task 20316).
+	//
+	// On the project's journal for the same reason as the ceiling above: the
+	// consequence lands on the developer and nothing in their repository
+	// explains it. A sandbox that receives no seed finds no `.cloop/` in the
+	// tree it cloned, so `cloop run` exits with "no cloop project found" —
+	// which reads as a broken project rather than as an executor too old to
+	// have been sent one. One row naming the executor and the upgrade is the
+	// difference between that and an hour spent debugging an intact project.
+	EventProjectSeed EventType = "project_seed"
 )
 
 // NoStep is the EventRow.Step value for events that are not bound to any

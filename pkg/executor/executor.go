@@ -163,6 +163,18 @@ type Capabilities struct {
 	// placement time. Drivers that share the host filesystem report false and
 	// are given Kind "bind" instead, because their tree is already there.
 	SupportsWorkspaceProvisioning bool `json:"supports_workspace_provisioning"`
+	// SupportsProjectSeed reports whether this driver places Spec.ProjectSeed
+	// into the workspace before the harness starts.
+	//
+	// Separate from SupportsWorkspaceProvisioning, which it always accompanies,
+	// because the two failures look nothing alike. A driver that cannot
+	// provision leaves an empty directory, and the harness says so loudly. A
+	// driver that provisions but drops the seed produces a tree that is
+	// entirely correct and a `cloop run` that exits on its first line with
+	// "no cloop project found" — pointing at the project, which is fine, rather
+	// than at the dispatch, which is not. A capability makes that a refusal at
+	// placement time instead.
+	SupportsProjectSeed bool `json:"supports_project_seed"`
 	// SupportsWriteBack reports whether this driver can return the files a
 	// workload changed (Spec.WriteBack).
 	//
@@ -393,6 +405,14 @@ type Spec struct {
 	// its own; see remote.StartPayload.SecretFiles.
 	SecretFiles []SecretFile `json:"-"`
 
+	// ProjectSeed carries the hub's `.cloop/` project state — goal,
+	// instructions, provider selection and plan — for a workload whose
+	// workspace had to be fetched rather than shared. Empty for a bind
+	// workspace, where the real `.cloop/` is already at WorkDir.
+	//
+	// json:"-" for size rather than for secrecy; see seed.go.
+	ProjectSeed []byte `json:"-"`
+
 	// Workspace says how the source tree gets into WorkDir. It carries no
 	// credential — only the name of a grant — for the reasons set out in
 	// workspace.go. The zero value is "unspecified", which leaves a driver's
@@ -533,8 +553,20 @@ func (s Spec) Validate() error {
 	if err := ValidateSecretFiles(s.SecretFiles); err != nil {
 		return err
 	}
+	if err := ValidateProjectSeed(s.ProjectSeed); err != nil {
+		return err
+	}
 	if err := s.Workspace.Validate(); err != nil {
 		return err
+	}
+	// A seed is the `.cloop/` for a tree the executor fetched. On a bind
+	// workspace the hub's own `.cloop/` is already at WorkDir, so writing one
+	// would overwrite the operator's live project state with a copy of itself
+	// — the same class of mistake as cloning over a bind mount, which
+	// workspace.go refuses one field up.
+	if len(s.ProjectSeed) > 0 && s.Workspace.Kind == WorkspaceBind {
+		return fmt.Errorf("%w: project_seed is set on a bind workspace, whose .cloop/ is "+
+			"already the control plane's own", ErrInvalidSpec)
 	}
 	// A tree that must be fetched and a workload forbidden from reaching the
 	// network is a contradiction, and the failure it produces otherwise —
@@ -617,6 +649,7 @@ func (s Spec) SandboxRequirements() Requirements {
 		RequireWorkspaceProvisioning:   s.Workspace.NeedsProvisioning(),
 		RequireHostFilesystemWorkspace: s.Workspace.Kind == WorkspaceBind,
 		RequireWriteBack:               s.WriteBack.Enabled(),
+		RequireProjectSeed:             len(s.ProjectSeed) > 0,
 		RequireSecretFiles:             s.NeedsSecretFiles(),
 		// A spec carrying material that can be taken back must go somewhere
 		// that can take it back. See RequireRevocable for the same rule applied

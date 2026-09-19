@@ -232,6 +232,15 @@ type Requirements struct {
 	// the sandbox. The first is confusing on arrival, the second is invisible
 	// until someone goes looking for the commit.
 	RequireWriteBack bool
+	// RequireProjectSeed demands a node that places the hub's `.cloop/` into
+	// the workspace it fetched, because a cloned tree carries a source
+	// repository and not a cloop project.
+	//
+	// Its failure is loud but misdirected, which is its own hazard: the harness
+	// exits on its first line with "no cloop project found (run 'cloop init'
+	// first)", so the operator goes looking at the project — which is intact —
+	// instead of at the executor that dropped its state.
+	RequireProjectSeed bool
 	// RequireSecretFiles demands a node that delivers a secret lease's
 	// credential *files* to the workload, not only its environment.
 	//
@@ -578,6 +587,11 @@ func reject(c Candidate, req Requirements) (Rejection, bool) {
 	if req.RequireWriteBack && !caps.SupportsWriteBack {
 		return no(ConstraintWriteBack, "cannot return the files a task changes, so the work "+
 			"would be discarded with the sandbox when the run ends")
+	}
+	if req.RequireProjectSeed && !caps.SupportsProjectSeed {
+		return no(ConstraintWorkspace, "cannot place the project's .cloop/ into the tree it "+
+			"fetches, so `cloop run` there would exit with \"no cloop project found\" against a "+
+			"perfectly good checkout; upgrade the executor agent")
 	}
 	if req.RequireSecretFiles && !caps.SupportsSecretFiles {
 		return no(ConstraintSecretFiles, "cannot deliver a secret lease's credential files to the "+

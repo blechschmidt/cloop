@@ -52,6 +52,7 @@ const (
 	EventEvolveDiscovered  = statedb.EventEvolveDiscovered
 	EventEvolveNoOp        = statedb.EventEvolveNoOp
 	EventResourceCeiling   = statedb.EventResourceCeiling
+	EventProjectSeed       = statedb.EventProjectSeed
 )
 
 // LogEvent appends one row to the project's event journal. Best-effort: any

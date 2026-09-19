@@ -49,6 +49,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/gitcreds"
+	"github.com/blechschmidt/cloop/pkg/executor/projectseed"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
 	"github.com/blechschmidt/cloop/pkg/secretstore"
 	"github.com/blechschmidt/cloop/pkg/state"
@@ -170,6 +171,44 @@ func applyWorkspace(spec executor.Spec, ex executor.Executor, workDir string) (e
 	}
 	spec.Workspace = ws
 
+	// A clone of the source repository is not a cloop project, and `cloop run`
+	// inside one reads `.cloop/` from the tree it is standing in. Attach the
+	// hub's project state so there is something there to read.
+	//
+	// Only on this branch. The bind and none branches returned above, which is
+	// exactly right: bind already has the operator's real `.cloop/` at WorkDir
+	// and seeding it would overwrite live state with a copy (Spec.Validate
+	// refuses it outright), and none is a workload with no project at all.
+	//
+	// # Why this degrades instead of refusing
+	//
+	// Every other capability in this file is enforced by refusing placement,
+	// and that is right for all of them: a workload needing a credential file
+	// an agent cannot write is a workload that will fail. This one is not the
+	// same shape, because *every* project-scoped run carries a seed. Making it
+	// a requirement would refuse every dispatch to every pre-v10 agent in a
+	// fleet — including the installations that work today by committing
+	// `.cloop/` into the repository, which was the only way this path could be
+	// made to work at all before now. A fix for a broken flow must not break
+	// the workaround people adopted because it was broken.
+	//
+	// So a capable executor gets the seed and stops needing the workaround; an
+	// older one behaves exactly as it does today and gets a row on the
+	// project's journal saying why. Spec.SandboxRequirements still derives
+	// RequireProjectSeed from the field, so a *future* caller that sets one
+	// without checking is still refused rather than silently dropped.
+	seed, err := projectSeedFor(workDir)
+	if err != nil {
+		return spec, err
+	}
+	if len(seed) > 0 {
+		if ex.Capabilities().SupportsProjectSeed {
+			spec.ProjectSeed = seed
+		} else {
+			logUnseedableExecutor(ex, workDir)
+		}
+	}
+
 	// Last: can this executor actually do what the spec now asks for? The gate
 	// runs here rather than at the call sites because only now does the Spec
 	// carry a workspace, and RequireWorkspaceProvisioning is derived from it —
@@ -186,6 +225,70 @@ func applyWorkspace(spec executor.Spec, ex executor.Executor, workDir string) (e
 		return spec, err
 	}
 	return spec, nil
+}
+
+// projectSeedFor reads the project at workDir into the bytes a git workspace
+// carries alongside its source tree.
+//
+// # Why LoadLite
+//
+// A seed holds no step history — see pkg/executor/projectseed — and LoadLite is
+// the read that does not fetch any. On this hub that is the difference between
+// a handful of plan rows and several hundred megabytes of captured output, paid
+// on every dispatch, to build a payload that then discards it.
+//
+// # Why "no project" is not an error
+//
+// The one caller that legitimately has no state here is `/api/projects/new`,
+// which dispatches `cloop init` precisely because the project does not exist
+// yet. Returning an error for it would replace a clear existing refusal with a
+// confusing new one. Every other read failure *is* returned: a corrupt or
+// unreadable database means the hub cannot say what this run is supposed to do,
+// and dispatching anyway produces a sandbox that fetches a tree, finds no
+// plan, and reports success having run nothing — the failure mode this whole
+// file exists to remove.
+func projectSeedFor(workDir string) ([]byte, error) {
+	st, err := state.LoadLite(workDir)
+	if err != nil {
+		if errors.Is(err, statedb.ErrProjectNotFound) {
+			return nil, nil
+		}
+		return nil, &workspaceSourceError{
+			ProjectPath: workDir,
+			Reason: fmt.Sprintf("could not read the project state to send to the executor: %v. "+
+				"The sandbox fetches the source tree but gets its goal, instructions and plan "+
+				"from here, so a run dispatched now would find no project to work on", err),
+		}
+	}
+	seed, err := projectseed.Build(st)
+	if err != nil {
+		return nil, &workspaceSourceError{
+			ProjectPath: workDir,
+			Reason:      err.Error(),
+		}
+	}
+	return seed, nil
+}
+
+// logUnseedableExecutor records that a run went out without its project state,
+// on the journal of the project it concerns.
+//
+// The message has to name the workaround as well as the upgrade, because for
+// the reader it may already be in place: an installation that commits `.cloop/`
+// into the repository is unaffected by any of this and should not be sent
+// chasing an upgrade it does not need.
+func logUnseedableExecutor(ex executor.Executor, workDir string) {
+	state.LogEvent(workDir, state.EventRow{
+		Type: state.EventProjectSeed,
+		Step: state.NoStep,
+		Message: fmt.Sprintf(
+			"executor %q (%s) cannot be sent this project's state, so the sandbox will see only "+
+				"what is committed to the repository; if `.cloop/` is not in the repo the run will "+
+				"exit with \"no cloop project found\". Upgrade the executor agent with "+
+				"`cloop executor agent install --upgrade`, or bind this project to an executor "+
+				"that shares the control plane's filesystem",
+			ex.ID(), ex.Kind()),
+	})
 }
 
 // workspaceGrantFor returns the name of the secret grant that authorises

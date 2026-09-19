@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/executor"
+	"github.com/blechschmidt/cloop/pkg/executor/projectseed"
 	"github.com/blechschmidt/cloop/pkg/executor/remote"
 )
 
@@ -608,6 +609,31 @@ func (a *Agent) handleStart(ctx context.Context, sess *deviceSession, frame remo
 		})
 		return
 	}
+	// The tree is a clone of a source repository, which is not a cloop
+	// project. Place the hub's `.cloop/` into it before anything can read it.
+	//
+	// After prepareWorkspace and not inside it: a checkout is git's business
+	// and this is the control plane's, and folding the two together would mean
+	// a seed failure reported as a provisioning failure. Before the harness for
+	// the obvious reason, and before planWriteBack because that records the
+	// base commit — a seed written afterwards would land in the tree without
+	// being part of what the base describes.
+	//
+	// Failing the start rather than continuing, on the same argument
+	// prepareWorkspace makes one comment up: a harness started without a
+	// project does not do less work, it exits immediately with a message that
+	// blames the project, and the hub records a run that looks like a fast
+	// clean failure of the plan itself.
+	if err := projectseed.Write(spec.WorkDir, payload.ProjectSeed); err != nil {
+		a.forget(handleID)
+		a.reply(ctx, sess, remote.TypeStarted, frame.ID, handleID, remote.StartedPayload{
+			HandleID: handleID,
+			Error: fmt.Sprintf("could not place the project state sent by the control plane into "+
+				"the workspace on %s: %v", deviceName(), err),
+		})
+		return
+	}
+
 	// Remember how to give the work back, before the Spec is rewritten below
 	// and before the harness is allowed to touch the tree. Both orderings are
 	// load-bearing: provisionedWorkspace is about to replace the git workspace

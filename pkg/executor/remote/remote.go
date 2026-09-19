@@ -338,6 +338,13 @@ func (e *Executor) Capabilities() executor.Capabilities {
 		if !SupportsSecretFiles(sess.Version()) {
 			caps.SupportsSecretFiles = false
 		}
+		// Same shape as SecretFiles above: the device needs no tool to write a
+		// file, so the session version is the whole question, and placement has
+		// to see it before routing a project-scoped run to an agent whose frame
+		// has nowhere to put the plan.
+		if !SupportsProjectSeed(sess.Version()) {
+			caps.SupportsProjectSeed = false
+		}
 	}
 	return caps
 }
@@ -461,6 +468,22 @@ func (e *Executor) Start(ctx context.Context, spec executor.Spec) (handle execut
 				"`cloop executor agent install --upgrade`, or remove the grant from this project",
 			ErrSecretFilesUnsupported, e.id, e.name, sess.Version(),
 			describeSecretFiles(spec), MinSecretFilesVersion)
+	}
+
+	// And again for the project state. Same mechanism as the two above — an
+	// older agent ignores a field it does not know — but the symptom is the
+	// misleading one: the device clones the tree correctly, starts the harness,
+	// and `cloop run` exits on its first line with "no cloop project found"
+	// because a source repository is not a cloop project. Nothing in that
+	// message points at the agent, so an operator spends the next hour looking
+	// at a project that is perfectly intact.
+	if len(spec.ProjectSeed) > 0 && !SupportsProjectSeed(sess.Version()) {
+		return executor.Handle{}, fmt.Errorf(
+			"%w: agent %s (%s) speaks protocol v%d but this workload's project state — its goal, "+
+				"instructions and plan — has to be placed into the cloned tree by the device "+
+				"(needs v%d); upgrade the agent with `cloop executor agent install --upgrade`, or "+
+				"run this project on an executor that shares the control plane's filesystem",
+			ErrProjectSeedUnsupported, e.id, e.name, sess.Version(), MinProjectSeedVersion)
 	}
 
 	// Where this payload runs on the device. Read before anything is leased or
@@ -663,6 +686,15 @@ func (e *Executor) Start(ctx context.Context, spec executor.Spec) (handle execut
 	// still sends none, and one that does never reaches here on a v5 session.
 	if len(secretFiles) > 0 && SupportsSecretFiles(sess.Version()) {
 		payload.SecretFiles = secretFiles
+	}
+	// The project state travels beside the Spec for the same structural reason
+	// and a different motive: executor.Spec.ProjectSeed is json:"-" to keep a
+	// few hundred kilobytes of plan out of the handle store and the audit
+	// trail, so the bytes are absent from the marshalled Spec however the
+	// caller filled it in. Guarded by the session version as the belt to the
+	// Start gate's braces, exactly as above.
+	if len(spec.ProjectSeed) > 0 && SupportsProjectSeed(sess.Version()) {
+		payload.ProjectSeed = spec.ProjectSeed
 	}
 
 	frame, err := sess.frame(TypeStart, newCorrelationID(), handleID, payload)
