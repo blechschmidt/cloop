@@ -303,6 +303,64 @@ $ cloop hub doctor --json | jq '.findings[] | select(.check=="executors") | .det
 
 ---
 
+## Remote executors (enrolled devices)
+
+This is the path the troubleshooting table points at when the hub itself cannot
+start a VM, and it is the one case where the machine that needs `/dev/kvm` is
+*not* the machine you are running commands on. The hub never sees the device's
+hardware, so it has to be told.
+
+Set the sandbox on the executor rather than in `config.yaml` — an enrolled
+device's containment is control-plane state, not a hub-local file. From the
+**Executors** panel, or over the API:
+
+```console
+$ curl -X PUT https://hub.example.com/api/executors/$ID/sandbox \
+    -H 'Content-Type: application/json' \
+    -d '{"mode":"container","engine":"docker","runtime":"kata","image":"ubuntu:24.04"}'
+```
+
+The device reports whether it can actually honour that at every connect, and the
+panel answers before you commit to it:
+
+```json
+"warning": "This device reports no usable /dev/kvm, so the \"kata\" runtime
+            cannot start a VM on it and dispatch here is refused."
+```
+
+Two things follow from a device that answers no, and both are deliberate:
+
+- **It stops advertising the boundary.** `Virtualized` goes false, so placement
+  will not route work that required a hypervisor here. `KernelIsolated` goes
+  with it for a Kata runtime — Kata's isolation *is* the guest kernel — but
+  survives for `runsc`, whose Sentry needs no `/dev/kvm`.
+- **Dispatch is refused** rather than attempted. Without the refusal the payload
+  reaches the device, Kata launches QEMU with `accel=kvm`, and roughly fifty
+  seconds later the shim gives up with `timed out waiting for QMP ready:
+  Connection refused` — an error that names neither KVM nor nested
+  virtualization nor the executor, and that recurs on every dispatch.
+
+There is no degraded mode to fall back to. Kata passes `accel=kvm`
+unconditionally and the QEMU it bundles is built `--disable-tcg`, so on a host
+without nested virtualization `qemu-system-x86_64 -accel help` lists `kvm` and
+nothing else. Either the device can start a VM or it cannot.
+
+An agent older than protocol v9 does not answer the question at all. Absence is
+reported as *unknown*, not as *no*: such a device keeps the behaviour it has
+today, and the panel and preflight both say that cloop could not ask rather than
+implying a hypervisor is there. `cloop executor agent install --upgrade` turns
+the guess into a fact.
+
+> **If the device is a cloud instance, check this first.** Most hosted instance
+> types do not pass the CPU virtualization extensions through to the guest.
+> `grep -c vmx /proc/cpuinfo` returning `0` on the device, or `modprobe
+> kvm_intel` failing with *Operation not supported*, means nested virtualization
+> is off at the hypervisor and nothing installed inside the guest will change
+> it. Use `runsc` for a kernel boundary without a VM, or move the work to a
+> metal instance.
+
+---
+
 ## Requiring it
 
 Advertising a VM sandbox and *demanding* one are different things. Placement can
@@ -339,6 +397,9 @@ runc under the name `kata` and cloop will believe you.
 | Isolation still reads `container` | the name is not one the matcher recognises as Kata | use `kata`, `kata-qemu`, `kata-clh` or another `kata-*` name |
 | Pods stay unscheduled after setting `runtime_class` | the Kata pool is tainted | add the matching `tolerations` and `node_selector` |
 | Preflight green, smoke test fails | Kata is configured but the VM did not boot | read the runtime's stderr in the smoke output; usually a missing hypervisor binary or a nested-virtualization limit |
+| `unknown config key "executors.container.oci_runtime"` | a cloop older than the fix for this; the key was documented and enforced but not settable | upgrade, or set it by hand in `.cloop/config.yaml` |
+| A remote executor's dispatch fails with *device cannot start a virtual machine* | the enrolled device reported no usable `/dev/kvm` | [Remote executors](#remote-executors-enrolled-devices) — enable nested virtualization on the device's host, or switch that executor to `runsc` |
+| `timed out waiting for QMP ready: Connection refused` on a device | Kata could not start QEMU there, almost always no `/dev/kvm` | upgrade the agent to v9+ so the hub refuses the dispatch up front and names the cause |
 
 ---
 

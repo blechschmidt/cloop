@@ -111,7 +111,20 @@ const (
 	// container-mode workload to a pre-v8 device rather than sending it and
 	// hoping — see Executor.Start. Host mode and unset are sent to any version,
 	// because for those the old behaviour and the new instruction agree.
-	ProtocolVersion = 8
+	//
+	// v9 added AgentCapabilities.Virtualization: the device's own answer to
+	// whether it can start a VM at all. v8 let an admin name a Kata runtime for
+	// a device, and the hub believed the name — Capabilities reported
+	// Virtualized from the configured string alone, because nothing on the wire
+	// could contradict it. On a device without nested virtualization that claim
+	// is simply false, and it is false in the direction the isolation model
+	// says must never happen: placement routes work that *required* a
+	// hypervisor onto a machine that has none, and the run dies ~50s later
+	// inside the sandbox with a QMP connection timeout that names neither KVM
+	// nor the device. Kata hardcodes accel=kvm and its bundled QEMU is built
+	// --disable-tcg, so there is no degraded mode to fall back to; the only
+	// honest answers are "yes" and "refuse".
+	ProtocolVersion = 9
 	// MinProtocolVersion is the oldest version this build still accepts.
 	MinProtocolVersion = 1
 	// MinRevocationVersion is the first version whose agents understand the
@@ -196,6 +209,23 @@ const (
 	// anyway, so sending them to one is not a downgrade; refusing those would
 	// strand a fleet mid-upgrade for no gain.
 	MinSandboxModeVersion = 8
+	// MinVirtualizationProbeVersion is the first version whose agents report
+	// whether the device can start a VM (AgentCapabilities.Virtualization).
+	//
+	// This one is a rule about *silence*, which makes it the inverse of the
+	// floors above. They ask "may the hub send this?"; this asks "may the hub
+	// believe a field the agent never set?". A pre-v9 agent omits
+	// Virtualization, and the zero value of a bool is false — so reading the
+	// field unconditionally would demote every already-deployed Kata device to
+	// "cannot virtualize" the moment this build ships, refusing placements that
+	// work today. That is the stranding MinProtocolVersion's comment warns
+	// about, arriving through a default rather than a version bump.
+	//
+	// So absence means "unknown", not "no": below this version the hub keeps
+	// trusting the configured runtime name exactly as v8 did, and only a device
+	// that *did* answer can contradict it. An operator upgrading the agent is
+	// what turns the guess into a fact.
+	MinVirtualizationProbeVersion = 9
 )
 
 // SupportsRevocation reports whether an agent speaking this protocol version
@@ -223,6 +253,20 @@ func SupportsSecretFiles(version int) bool { return version >= MinSecretFilesVer
 // reads StartPayload.Sandbox and selects its driver from it, rather than always
 // running the payload as a host process.
 func SupportsSandboxMode(version int) bool { return version >= MinSandboxModeVersion }
+
+// SupportsVirtualizationProbe reports whether an agent speaking this protocol
+// version answers AgentCapabilities.Virtualization, and therefore whether a
+// false in that field means "this device cannot start a VM" rather than "this
+// agent is too old to have been asked".
+func SupportsVirtualizationProbe(version int) bool {
+	return version >= MinVirtualizationProbeVersion
+}
+
+// agentKVMDevice is the device an agent probes for AgentCapabilities.
+// Virtualization, named here only so hub-side messages can quote it. The
+// authoritative constant is agent.KVMDevice; this package cannot import it,
+// because the agent imports this one.
+const agentKVMDevice = "/dev/kvm"
 
 // Timing constants. These are protocol-level agreements, not tunables: both
 // sides must derive their timeouts from the same numbers or a healthy agent
@@ -562,6 +606,29 @@ type AgentCapabilities struct {
 	WriteBack bool `json:"write_back,omitempty"`
 	// MaxConcurrent is the agent's ceiling on simultaneous workloads.
 	MaxConcurrent int `json:"max_concurrent,omitempty"`
+	// Virtualization reports that this device can actually start a
+	// hypervisor-backed sandbox: /dev/kvm exists and the agent can open it
+	// read-write.
+	//
+	// Advertised for the same reason WorkspaceProvisioning and WriteBack are,
+	// against the same shape of silent failure — but this one is the only
+	// capability here that the control plane would otherwise assert on the
+	// device's behalf. Whether a payload is virtualized was treated as purely a
+	// property of the runtime name an admin configured, which is true of the
+	// *intent* and not of the *ability*: naming kata for a device with no
+	// nested virtualization produced a hub that reported a hypervisor boundary
+	// that could never exist. Only the device can answer this, so only the
+	// device does.
+	//
+	// False on a v9+ agent is load-bearing: see Executor.Capabilities, which
+	// stops claiming Virtualized, and Executor.Start, which refuses the
+	// dispatch rather than letting QEMU fail inside the sandbox.
+	//
+	// This is deliberately *only* about a hypervisor. gVisor needs no /dev/kvm
+	// — its Sentry is a userspace kernel — so a device reporting false here can
+	// still serve a kernel-isolated sandbox under runsc, and KernelIsolated is
+	// never narrowed by it.
+	Virtualization bool `json:"virtualization,omitempty"`
 	// Labels are free-form selectors (region, site, gpu) set by the operator.
 	Labels map[string]string `json:"labels,omitempty"`
 }

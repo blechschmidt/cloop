@@ -336,8 +336,8 @@ reads the row at dispatch and stamps it on every start frame
 the *next task*, with no agent restart and no window in which the device's idea
 of its own containment differs from the control plane's.
 
-Three refusals keep the setting a control rather than a hint. Each exists because
-the failure it prevents is silent:
+Four refusals keep the setting a control rather than a hint. Each exists because
+the failure it prevents is silent, useless, or both:
 
 - **A pre-v8 agent is refused container-mode work.** It would not reject an
   unknown `sandbox` field; it would ignore it and run the harness on its host,
@@ -352,16 +352,33 @@ the failure it prevents is silent:
   executor and silently got host execution would believe they had an isolation
   boundary they do not have* — one machine further out.
 
+- **A device that cannot start a VM is refused a Kata runtime.** Unlike the three
+  above, this failure is loud — and useless with it. The payload arrives, Kata
+  launches QEMU with `accel=kvm`, and roughly fifty seconds later the shim gives
+  up with `timed out waiting for QMP ready: Connection refused`, naming neither
+  KVM nor nested virtualization nor the executor. `ErrVirtualizationUnavailable`.
+
 Only container mode is version-gated. Host and unset are what a pre-v8 agent does
 anyway, so refusing those would strand a fleet mid-upgrade for nothing.
 
-Capabilities follow the configuration, which is what finally makes a Kata edge
-device describable as one: `Virtualized` and `KernelIsolated` are properties of
-the runtime the hub names, so before this they were necessarily false for every
-remote executor. They are reported only when the mode is `container` *and* the
-live session can honour it — a runtime recorded against host mode confines
-nothing, and an executor must not advertise containment its own `Start` would
-then refuse.
+Capabilities follow the configuration *and* the device, which is what finally
+makes a Kata edge device describable as one without making every other device
+falsely describable as one. The runtime the hub names says what an admin asked
+for; whether the machine can deliver it is a fact only the machine has, so since
+protocol v9 the agent reports it (`AgentCapabilities.Virtualization`, an open of
+`/dev/kvm`). `Virtualized` and `KernelIsolated` are reported only when the mode
+is `container`, the live session can honour it, *and* — for a Kata runtime — the
+device answered yes.
+
+The three conditions fail in different directions on purpose. A runtime recorded
+against host mode confines nothing. An executor must not advertise containment
+its own `Start` would refuse. And a device with no `/dev/kvm` loses `Virtualized`
+outright, because claiming a hypervisor that cannot exist is the false-positive
+direction the runtime matcher is written to avoid; it loses `KernelIsolated` too
+under Kata, whose isolation *is* the guest kernel, but keeps it under `runsc`,
+whose Sentry never opens `/dev/kvm`. A pre-v9 agent is not demoted: absence of
+the field is *unknown*, not *no*, and reading a zero value as a denial would
+strand every Kata device already deployed.
 
 One operational note, because it is the first thing a container mode meets on a
 small device: the driver refuses to run a workload as uid 0. Root inside a

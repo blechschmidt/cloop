@@ -270,6 +270,21 @@ func (s *Server) describeSandboxTarget(view *executorSandboxView, id string) {
 				"install --upgrade` (needs v%d); until then a container mode is refused at dispatch "+
 				"rather than silently downgraded.",
 			inv.protocol, remoteSandboxMinVersion)
+	// A hypervisor the machine does not have. Placed above the engine check
+	// because it is the more specific answer to what this admin just
+	// configured, and because unlike a missing engine it usually cannot be
+	// fixed on the device at all: nested virtualization is the hosting
+	// hypervisor's decision, so the useful advice is a boundary the machine
+	// can actually provide.
+	case inv.remote && inv.connected && view.Settings.IsVirtualized() &&
+		inv.virtProbed && !inv.virtualization:
+		view.Warning = fmt.Sprintf(
+			"This device reports no usable /dev/kvm, so the %q runtime cannot start a VM on it and "+
+				"dispatch here is refused. Enable nested virtualization on the hypervisor hosting "+
+				"the device (GCP: --enable-nested-virtualization; AWS: a metal instance type) and "+
+				"reconnect the agent, or choose runsc — gVisor keeps workload syscalls off the "+
+				"device's kernel without needing a hypervisor.",
+			view.Settings.Runtime)
 	case inv.remote && len(inv.engines) == 0 && inv.connected:
 		view.Warning = "This device reported no container engine on its PATH at its last connect, so a " +
 			"container mode would fail at dispatch. Install docker or podman on it, or leave this " +

@@ -45,7 +45,17 @@ type DetectOptions struct {
 	LookPath func(string) (string, error)
 	// MemoryMB overrides memory detection for tests; -1 forces "unknown".
 	MemoryMB int
+	// KVMDevice overrides the virtualization device probed by
+	// detectVirtualization. Tests point it at a temp file; empty means
+	// KVMDevice.
+	KVMDevice string
 }
+
+// KVMDevice is the device QEMU opens to use hardware virtualization. Its
+// absence is what makes a Kata sandbox impossible rather than merely slow:
+// Kata passes accel=kvm unconditionally and the QEMU it bundles is built
+// --disable-tcg, so there is no software-emulation fallback to degrade to.
+const KVMDevice = "/dev/kvm"
 
 // Detect gathers this device's capabilities.
 func Detect(opts DetectOptions) remote.AgentCapabilities {
@@ -86,6 +96,8 @@ func Detect(opts DetectOptions) remote.AgentCapabilities {
 		caps.MemoryMB = detectMemoryMB()
 	}
 
+	caps.Virtualization = detectVirtualization(opts.KVMDevice)
+
 	for _, rt := range knownContainerRuntimes {
 		if _, err := lookPath(rt); err == nil {
 			caps.ContainerRuntimes = append(caps.ContainerRuntimes, rt)
@@ -97,6 +109,31 @@ func Detect(opts DetectOptions) remote.AgentCapabilities {
 		}
 	}
 	return caps
+}
+
+// detectVirtualization reports whether this device can start a VM.
+//
+// It opens the device rather than stat-ing it, for the reason the container
+// driver's own probe does: /dev/kvm is mode 0660 root:kvm on most
+// distributions, so a stat succeeds for a user who cannot use it, and an agent
+// running as a non-root service user is exactly the case that would then
+// advertise a hypervisor it cannot start. What the hypervisor needs is an open,
+// so an open is what is tested.
+//
+// Any failure is reported as false. That is the safe direction here and the
+// opposite of the rule for the rest of this file: elsewhere an unreadable
+// /proc/meminfo must not cost a device its enrollment, but a device that cannot
+// prove it can virtualize must not be described as if it could.
+func detectVirtualization(device string) bool {
+	if device == "" {
+		device = KVMDevice
+	}
+	f, err := os.OpenFile(device, os.O_RDWR, 0)
+	if err != nil {
+		return false
+	}
+	_ = f.Close()
+	return true
 }
 
 // detectMemoryMB reads total system memory, returning 0 when it cannot.

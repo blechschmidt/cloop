@@ -176,8 +176,18 @@ func TestCapabilitiesReportContainmentOnlyWhenConfigured(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			ex := sandboxExecutor(t, tc.settings, nil)
+			// The device is stipulated to be capable of everything the
+			// configuration might ask for, because this table is about the
+			// mapping from configuration to capabilities and nothing else.
+			// Since v9 a device also gets a say — one that reports no
+			// /dev/kvm has its Kata claim withdrawn — and leaving that at the
+			// zero value here would silently turn the "container on kata"
+			// row into a test of the hardware probe. That probe has its own
+			// table in virtualization_test.go.
+			hello := defaultHello()
+			hello.Capabilities.Virtualization = true
 			_, sess := connect(t, ex, remote.AgentRecord{AgentID: "agent-1", Name: "edge-1"},
-				defaultHello(), nil)
+				hello, nil)
 			defer sess.Close()
 
 			caps := ex.Capabilities()

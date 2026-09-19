@@ -271,7 +271,8 @@ func (e *Executor) Capabilities() executor.Capabilities {
 	// virtualized, not kernel-isolated" — a placement that requires either is
 	// refused, which is the conservative outcome. The dispatch path does not
 	// share this fallback: see Start, where the same read failing is fatal.
-	if sandbox, err := e.opts.sandboxSettings(); err == nil {
+	sandbox, sandboxErr := e.opts.sandboxSettings()
+	if sandboxErr == nil {
 		caps.Virtualized = sandbox.IsVirtualized()
 		caps.KernelIsolated = sandbox.IsKernelIsolated()
 		if sandbox.Mode == executor.SandboxModeContainer {
@@ -294,6 +295,30 @@ func (e *Executor) Capabilities() executor.Capabilities {
 		if !SupportsSandboxMode(sess.Version()) {
 			caps.Virtualized = false
 			caps.KernelIsolated = false
+		}
+		// The configured runtime name says what the admin *asked for*; this says
+		// what the device can actually deliver. They diverge on any machine
+		// without nested virtualization — a cloud VM whose hypervisor does not
+		// expose vmx/svm is the common case — and when they do, the name is the
+		// one that is wrong. Believing it advertises a hypervisor boundary that
+		// cannot exist, which is the false-positive direction virtualization.go
+		// singles out as the dangerous one.
+		//
+		// Only a device that was actually asked can contradict the name: below
+		// v9 the field is absent, not false, and demoting on a zero value would
+		// strand every Kata device already in the field.
+		//
+		// KernelIsolated follows only when the isolation *was* the VM. Kata
+		// serves the workload's syscalls from a guest kernel, so a hypervisor
+		// it cannot start takes that property with it; gVisor's Sentry is a
+		// userspace kernel that never opens /dev/kvm, so a runsc sandbox keeps
+		// it on a device with no virtualization at all. Clearing both
+		// unconditionally would refuse placements this machine can honour.
+		if SupportsVirtualizationProbe(sess.Version()) && !e.AgentCapabilities().Virtualization {
+			caps.Virtualized = false
+			if sandboxErr == nil && !executor.IsUserspaceKernelRuntime(sandbox.Runtime) {
+				caps.KernelIsolated = false
+			}
 		}
 		// The device may be able to do it; the session may not be able to
 		// carry it. Both narrowings are applied here rather than in
@@ -468,6 +493,29 @@ func (e *Executor) Start(ctx context.Context, spec executor.Spec) (handle execut
 				"`cloop executor agent install --upgrade`, or set this executor's sandbox mode back to "+
 				"host if running on the device's host is acceptable",
 			ErrSandboxModeUnsupported, e.id, e.name, sess.Version(), MinSandboxModeVersion)
+	}
+
+	// A hypervisor the device does not have. Refused here for the same reason
+	// the check above exists — the cheapest refusal is the earliest one — but
+	// against a failure that is loud rather than silent, and useless with it:
+	// the payload reaches the device, Kata launches QEMU with accel=kvm,
+	// /dev/kvm is not there, and ~50s later the shim gives up with "timed out
+	// waiting for QMP ready: Connection refused". That error names neither KVM
+	// nor nested virtualization nor this executor, and it arrives once per
+	// dispatch forever, because nothing in the loop learns from it.
+	//
+	// Gated on the probe version so a pre-v9 agent behaves exactly as it does
+	// today: unknown is not no, and a fleet mid-upgrade keeps running the Kata
+	// work it is running now.
+	if sandbox.IsVirtualized() && SupportsVirtualizationProbe(sess.Version()) &&
+		!e.AgentCapabilities().Virtualization {
+		return executor.Handle{}, fmt.Errorf(
+			"%w: agent %s (%s) is configured to run payloads under the %q runtime, but the device "+
+				"reports no usable %s, so it cannot start a VM; enable nested virtualization on "+
+				"the machine hosting this device, or set this executor's sandbox runtime to runsc "+
+				"(gVisor keeps syscalls off the host kernel without needing a hypervisor) or leave "+
+				"it unset for a plain container",
+			ErrVirtualizationUnavailable, e.id, e.name, sandbox.Runtime, agentKVMDevice)
 	}
 
 	// Convert and bound the credential files here, before a credential is leased

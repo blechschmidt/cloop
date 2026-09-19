@@ -27,6 +27,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/executor/container"
 	"github.com/blechschmidt/cloop/pkg/executor/kubernetes"
 	"github.com/blechschmidt/cloop/pkg/executor/reconcile"
+	"github.com/blechschmidt/cloop/pkg/executor/remote"
 )
 
 var executorCmd = &cobra.Command{
@@ -142,6 +143,7 @@ Exit codes:
 		// --- phase 1: preflight ---------------------------------------
 		cex, isContainer := ex.(*container.Executor)
 		kex, isKubernetes := ex.(*kubernetes.Executor)
+		rex, isRemote := ex.(*remote.Executor)
 		switch {
 		case skipPreflight:
 			dim.Printf("Skipping preflight.\n\n")
@@ -166,6 +168,15 @@ Exit codes:
 			dim.Printf("  server:    %s\n", report.Server)
 			dim.Printf("  namespace: %s\n", report.Namespace)
 			dim.Printf("  image:     %s\n\n", report.Image)
+
+		case isRemote:
+			report := rex.Preflight()
+			printPreflight(header, pass, warn, fail, dim, toRemoteFindings(report.Findings))
+			if !report.OK() {
+				fail.Println("Preflight failed; not attempting to run a workload.")
+				dim.Println("Re-run with --skip-preflight to try anyway.")
+				return errExit{code: 2, err: report.Err()}
+			}
 
 		default:
 			dim.Printf("This executor has no preflight; running the smoke test directly.\n\n")
@@ -300,6 +311,14 @@ type preflightFinding struct {
 }
 
 func toFindings(in []container.Finding) []preflightFinding {
+	out := make([]preflightFinding, 0, len(in))
+	for _, f := range in {
+		out = append(out, preflightFinding{Name: f.Name, Level: f.Level, Message: f.Message, Fix: f.Fix})
+	}
+	return out
+}
+
+func toRemoteFindings(in []remote.Finding) []preflightFinding {
 	out := make([]preflightFinding, 0, len(in))
 	for _, f := range in {
 		out = append(out, preflightFinding{Name: f.Name, Level: f.Level, Message: f.Message, Fix: f.Fix})

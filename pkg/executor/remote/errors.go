@@ -104,6 +104,19 @@ var (
 	// briefly busy, which is a containment decision made by a storage fault.
 	ErrSandboxModeUnavailable = errors.New("remote: executor sandbox configuration is unreadable")
 
+	// ErrVirtualizationUnavailable: this executor is configured to run payloads
+	// under a Kata runtime, but the device reported that it cannot open
+	// /dev/kvm. Dispatch fails here rather than on the device, where the same
+	// condition costs ~50s and surfaces as a QMP socket timeout that names
+	// neither KVM nor the executor.
+	//
+	// Distinct from ErrSandboxModeUnsupported because the remedy is: that one
+	// is fixed by upgrading the agent, this one usually cannot be fixed on the
+	// device at all — nested virtualization is the hosting hypervisor's
+	// decision — so the useful advice is to choose a boundary the machine can
+	// actually provide.
+	ErrVirtualizationUnavailable = errors.New("remote: device cannot start a virtual machine")
+
 	// ErrLeaseNotHeld: the agent was asked to revoke a lease it is not
 	// holding. It is reported, not raised — "the material is not here" is
 	// the end state a revocation wants — so callers treat it as success

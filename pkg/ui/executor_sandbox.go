@@ -136,6 +136,13 @@ type sandboxTargetInfo struct {
 	protocol int
 	// sandboxCapable reports that the agent can honour a container mode.
 	sandboxCapable bool
+	// virtProbed reports that the agent is new enough to have been asked
+	// whether it can start a VM. False means "unknown", which is why it is
+	// kept separate from virtualization rather than folded into it.
+	virtProbed bool
+	// virtualization reports that the device can open /dev/kvm. Meaningful
+	// only when virtProbed.
+	virtualization bool
 }
 
 // executorInventory describes one executor for the sandbox panel.
@@ -173,5 +180,7 @@ func (s *Server) executorInventory(id string) sandboxTargetInfo {
 	info.protocol = rex.ProtocolVersion()
 	info.sandboxCapable = remote.SupportsSandboxMode(info.protocol)
 	info.engines = rex.AgentCapabilities().ContainerRuntimes
+	info.virtProbed = remote.SupportsVirtualizationProbe(info.protocol)
+	info.virtualization = rex.AgentCapabilities().Virtualization
 	return info
 }
