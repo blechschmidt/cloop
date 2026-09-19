@@ -602,28 +602,14 @@ func validateNonRootUser(user string) error {
 // the network namespace entirely, so the workload can reach every service
 // bound to the host's loopback — including the control plane's own API and
 // any unauthenticated metadata endpoint.
+//
+// The rule itself lives in executor.ValidateNetworkName, which the
+// per-executor sandbox settings also use. Two copies would be two places for
+// "host" to stop being refused, and only one of them would be the one an
+// admin's HTTP request passed through.
 func ValidateNetwork(name string) error {
-	if name == "host" {
-		return fmt.Errorf(
-			"container: network \"host\" is not permitted — it removes network isolation and " +
-				"exposes services bound to the host loopback; use \"none\", \"bridge\", or a named network")
-	}
-	if strings.HasPrefix(name, "container:") {
-		return fmt.Errorf("container: joining another container's network namespace is not permitted")
-	}
-	if strings.HasPrefix(name, "-") {
-		return fmt.Errorf("container: network name %q may not begin with '-'", name)
-	}
-	if len(name) > 128 {
-		return fmt.Errorf("container: network name is too long (%d bytes)", len(name))
-	}
-	for _, r := range name {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
-		case r == '_' || r == '.' || r == '-':
-		default:
-			return fmt.Errorf("container: network name %q contains an invalid character %q", name, r)
-		}
+	if err := executor.ValidateNetworkName(name); err != nil {
+		return fmt.Errorf("container: %w", err)
 	}
 	return nil
 }

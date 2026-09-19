@@ -325,9 +325,24 @@ It is now configurable per executor, by an admin, from the Executors panel
 | `engine` | `docker`, `podman`, `nerdctl` | the device detects one |
 | `runtime` | the `--runtime` name: `runc`, `crun`, `runsc`, `kata`… | the engine's default |
 | `image` | the sandbox image | the executor's configured default |
+| `network` | the container network: `none`, `bridge`, or one the operator created on the device | `none` |
 
-The configuration lives in the control plane (`executor_sandbox`, migration
-0044), not on the device, for the reason `project_executors` does: it is an
+`network` is the one field whose default is both correct and, for most real
+projects, insufficient. Deny-by-default is right — a payload that cannot reach
+the network cannot exfiltrate what it was given — but everything cloop brokers
+is a *network service*: repositories arrive through the git interception proxy,
+clusters through the Kubernetes access monitor, the Internet through the egress
+broker, each addressed by URL. A container-mode executor left on `none` will be
+granted credentials it has no way to spend, and the failure surfaces inside the
+sandbox as `Could not resolve host` rather than at the hub as a refusal. Set it
+to `bridge`, or to a network you created on the device that reaches the hub.
+
+`host` is refused outright, along with `container:<id>`: both hand the payload
+the network namespace the sandbox exists to take away, and with it every service
+bound to that device's loopback.
+
+The configuration lives in the control plane (`executor_sandbox`, migrations
+0044 and 0047), not on the device, for the reason `project_executors` does: it is an
 operator's policy *about* an executor rather than a fact belonging to it. A
 device that stored its own containment setting could be asked by its own
 operator to misreport it, and the hub would have no way to tell. Instead the hub
@@ -379,6 +394,15 @@ under Kata, whose isolation *is* the guest kernel, but keeps it under `runsc`,
 whose Sentry never opens `/dev/kvm`. A pre-v9 agent is not demoted: absence of
 the field is *unknown*, not *no*, and reading a zero value as a denial would
 strand every Kata device already deployed.
+
+Credential files follow the payload into the container. The agent writes a
+lease's files into a directory it owns under `/dev/shm` and rewrites the
+workload's environment onto that path; in container mode it additionally binds
+that directory into the sandbox read-only, at the same path. Same path because
+the broker baked it into `CLOOP_LEASE_DIR`, `GIT_CONFIG_GLOBAL` and `KUBECONFIG`
+before the frame was sent, and the agent's own revocation index points at it —
+remapping would break both. Without the bind the workload starts holding paths
+that exist one namespace away, which git reports as `could not read Username`.
 
 One operational note, because it is the first thing a container mode meets on a
 small device: the driver refuses to run a workload as uid 0. Root inside a

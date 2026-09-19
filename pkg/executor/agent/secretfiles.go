@@ -76,6 +76,34 @@ type placedSecrets struct {
 	files []string
 }
 
+// hostMounts renders the lease directories as bind mounts, for a payload that
+// runs in a container on this device rather than as a process on it.
+//
+// Same path on both sides: the broker wrote the directory into the workload's
+// environment before the frame was sent, and this agent's vault indexed it for
+// revocation. Remapping it here would break both — the workload would read a
+// path nothing mounted, and a revoke would scrub a directory the workload was
+// not using.
+//
+// Read-only, because a sandbox has no reason to write a credential it was
+// issued, and a writable bind would let one workload corrupt the material a
+// revocation is about to account for.
+func (p *placedSecrets) hostMounts() []executor.HostMount {
+	if p == nil {
+		return nil
+	}
+	out := make([]executor.HostMount, 0, len(p.dirs))
+	for _, dir := range p.dirs {
+		out = append(out, executor.HostMount{
+			Name:     "cloop-lease",
+			Source:   dir,
+			Target:   dir,
+			ReadOnly: true,
+		})
+	}
+	return out
+}
+
 // paths returns what was written, for a test or a diagnostic. Nil-safe so it
 // can be called on a workload that leased nothing.
 func (p *placedSecrets) paths() []string {

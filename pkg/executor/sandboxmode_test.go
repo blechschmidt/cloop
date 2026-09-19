@@ -218,3 +218,77 @@ func TestSandboxSettings_Describe(t *testing.T) {
 		}
 	}
 }
+
+// TestValidateNetworkName_RefusesNamespaceEscapes is the security half of the
+// network setting. Shape errors are cosmetic; these two values are not, because
+// each hands the payload the network the sandbox exists to take away.
+func TestValidateNetworkName_RefusesNamespaceEscapes(t *testing.T) {
+	t.Parallel()
+	for _, name := range []string{"host", " host ", "container:abc123"} {
+		if err := ValidateNetworkName(name); err == nil {
+			t.Errorf("ValidateNetworkName(%q) must be refused: it removes the sandbox's "+
+				"own network namespace", name)
+		}
+	}
+}
+
+func TestValidateNetworkName_AcceptsTheUsableValues(t *testing.T) {
+	t.Parallel()
+	// Empty is "unset", which every reader treats as none — so it must not be
+	// an error, or adding the field would break every existing record.
+	for _, name := range []string{"", "   ", "none", "bridge", "team-a_net.1"} {
+		if err := ValidateNetworkName(name); err != nil {
+			t.Errorf("ValidateNetworkName(%q) = %v, want nil", name, err)
+		}
+	}
+	for _, bad := range []string{"-net", "a net", "net;rm", strings.Repeat("n", 129)} {
+		if err := ValidateNetworkName(bad); err == nil {
+			t.Errorf("ValidateNetworkName(%q) must be refused", bad)
+		}
+	}
+}
+
+// TestSandboxSettings_NetworkIsDroppedOutsideContainerMode mirrors the rule the
+// other container-only fields follow: a value the mode makes meaningless must
+// not survive to be resurrected by a later switch back.
+func TestSandboxSettings_NetworkIsDroppedOutsideContainerMode(t *testing.T) {
+	t.Parallel()
+	got := SandboxSettings{Mode: SandboxModeHost, Network: "bridge"}.Normalize()
+	if got.Network != "" {
+		t.Errorf("Normalize() kept network %q under host mode", got.Network)
+	}
+	kept := SandboxSettings{Mode: SandboxModeContainer, Network: " bridge "}.Normalize()
+	if kept.Network != "bridge" {
+		t.Errorf("Normalize() = %q, want the trimmed %q", kept.Network, "bridge")
+	}
+	if (SandboxSettings{Network: "bridge"}).IsZero() {
+		t.Error("settings naming a network are not zero")
+	}
+}
+
+// TestSandboxSettings_DescribeNamesTheNetwork: the audit trail and the agent's
+// own log line are built from Describe, and "container runtime=runsc" with no
+// network in it reads as though the payload had one.
+func TestSandboxSettings_DescribeNamesTheNetwork(t *testing.T) {
+	t.Parallel()
+	quiet := SandboxSettings{Mode: SandboxModeContainer}.Describe()
+	if !strings.Contains(quiet, "network=none") {
+		t.Errorf("Describe() = %q, want it to state network=none for an unset network", quiet)
+	}
+	loud := SandboxSettings{Mode: SandboxModeContainer, Network: "bridge"}.Describe()
+	if !strings.Contains(loud, "network=bridge") {
+		t.Errorf("Describe() = %q, want it to mention network=bridge", loud)
+	}
+	// Host mode has no network of its own to name.
+	if got := (SandboxSettings{Mode: SandboxModeHost}).Describe(); strings.Contains(got, "network") {
+		t.Errorf("Describe() = %q, want no network for host mode", got)
+	}
+}
+
+func TestSandboxSettings_ValidateRejectsHostNetwork(t *testing.T) {
+	t.Parallel()
+	err := SandboxSettings{Mode: SandboxModeContainer, Network: "host"}.Validate()
+	if err == nil {
+		t.Fatal("a container on the host network is not a sandbox; Validate must refuse it")
+	}
+}

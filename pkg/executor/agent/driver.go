@@ -84,10 +84,22 @@ type driverKey struct {
 	engine  string
 	runtime string
 	image   string
+	// network belongs in the key for the same reason runtime does: it is baked
+	// into the driver's Options and therefore into the argv of every container
+	// that driver starts. An admin who switches an executor from none to
+	// bridge must get a new driver, or the cached one would keep starting
+	// network-less containers against a setting that says otherwise.
+	network string
 }
 
 func keyFor(s executor.SandboxSettings) driverKey {
-	return driverKey{mode: s.Mode, engine: s.Engine, runtime: s.Runtime, image: s.Image}
+	return driverKey{
+		mode:    s.Mode,
+		engine:  s.Engine,
+		runtime: s.Runtime,
+		image:   s.Image,
+		network: s.Network,
+	}
 }
 
 // driverCache holds one driver per configuration the hub has asked for.
@@ -143,6 +155,19 @@ func (c *driverCache) driverFor(s executor.SandboxSettings, host payloadDriver) 
 		Runtime:    s.Engine,
 		OCIRuntime: s.Runtime,
 		Image:      s.Image,
+		// Empty stays empty: container.Options normalises it to "none", which
+		// is what every container-mode executor got before this field existed
+		// and is still the right default.
+		//
+		// It is forwarded rather than left unset because the hub's whole
+		// credential story is network-shaped. A sandbox reaches its
+		// repositories through the git interception proxy, its cluster through
+		// the Kubernetes access monitor and its Internet through the egress
+		// broker — three services addressed by URL. With no network the
+		// payload resolves none of them, so a credential the hub brokered
+		// correctly failed inside the sandbox as "Could not resolve host",
+		// with nothing on the control plane saying why.
+		Network: s.Network,
 	}
 	ex, err := container.New(opts)
 	if err != nil {

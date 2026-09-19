@@ -191,3 +191,60 @@ func TestExecutorSandboxMigrationIsAdditive(t *testing.T) {
 		t.Fatal("no executor_sandbox migration found; this test names the wrong file")
 	}
 }
+
+// TestExecutorSandboxNetworkRoundTrips covers the column added by 0048. A
+// setting that does not survive the write is the same failure as no setting at
+// all: the agent is told nothing, builds a network-less driver, and the sandbox
+// cannot reach the git proxy it was granted a credential for.
+func TestExecutorSandboxNetworkRoundTrips(t *testing.T) {
+	db := openTestDB(t)
+
+	want := executor.SandboxSettings{
+		Mode:    executor.SandboxModeContainer,
+		Engine:  "docker",
+		Runtime: "runsc",
+		Image:   "example/harness:1",
+		Network: "bridge",
+	}
+	if err := db.SetExecutorSandbox("edge-1", want, "admin@example.com"); err != nil {
+		t.Fatalf("SetExecutorSandbox: %v", err)
+	}
+
+	got, ok, err := db.ExecutorSandboxSettings("edge-1")
+	if err != nil || !ok {
+		t.Fatalf("ExecutorSandboxSettings: %v (ok=%v)", err, ok)
+	}
+	if got.Network != "bridge" {
+		t.Errorf("settings network = %q, want %q", got.Network, "bridge")
+	}
+
+	rec, ok, err := db.ExecutorSandboxRecord("edge-1")
+	if err != nil || !ok {
+		t.Fatalf("ExecutorSandboxRecord: %v (ok=%v)", err, ok)
+	}
+	if rec.Settings.Network != "bridge" {
+		t.Errorf("record network = %q, want %q", rec.Settings.Network, "bridge")
+	}
+
+	list, err := db.ListExecutorSandboxes()
+	if err != nil {
+		t.Fatalf("ListExecutorSandboxes: %v", err)
+	}
+	if len(list) != 1 || list[0].Settings.Network != "bridge" {
+		t.Fatalf("ListExecutorSandboxes = %+v, want one row on the bridge network", list)
+	}
+
+	// Narrowing is the direction that matters: an admin taking the network away
+	// must not leave the old value behind for the next dispatch to read.
+	want.Network = ""
+	if err := db.SetExecutorSandbox("edge-1", want, "admin@example.com"); err != nil {
+		t.Fatalf("SetExecutorSandbox (narrow): %v", err)
+	}
+	got, _, err = db.ExecutorSandboxSettings("edge-1")
+	if err != nil {
+		t.Fatalf("ExecutorSandboxSettings after narrowing: %v", err)
+	}
+	if got.Network != "" {
+		t.Errorf("network = %q after being cleared, want empty", got.Network)
+	}
+}

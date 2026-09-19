@@ -3239,6 +3239,12 @@
         <input class="form-input" id="execSandboxImage" placeholder="executor default" spellcheck="false">
         <div class="form-hint">Left empty, the executor uses its own configured image. A project's <code>.cloop/sandbox.yaml</code> may still override it, subject to the image trust policy.</div>
       </div>
+      <div class="form-group">
+        <label class="form-label" for="execSandboxNetwork">Container network</label>
+        <input class="form-input" id="execSandboxNetwork" list="execSandboxNetworkList" placeholder="none" spellcheck="false">
+        <datalist id="execSandboxNetworkList"></datalist>
+        <div class="form-hint">Empty means <code>none</code>. A payload with no network cannot reach the git proxy, the Kubernetes monitor or the egress broker — each is a service it resolves by name — so a project that fetches repositories here needs <code>bridge</code> or a network you created on the device. <code>host</code> is refused.</div>
+      </div>
     </div>
 
     <div class="modal-footer">

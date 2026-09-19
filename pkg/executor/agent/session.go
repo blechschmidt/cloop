@@ -651,6 +651,24 @@ func (a *Agent) handleStart(ctx context.Context, sess *deviceSession, frame remo
 		return
 	}
 
+	// The lease directories were written a moment ago onto *this device's*
+	// filesystem, which a host process shares and a container does not. Without
+	// this the workload starts with CLOOP_LEASE_DIR, GIT_CONFIG_GLOBAL and
+	// KUBECONFIG all naming a directory that exists one namespace away: git
+	// falls back to prompting and fails with "could not read Username", and the
+	// grant the hub brokered correctly is unusable for a reason nothing in the
+	// transcript explains.
+	//
+	// Bound at the same path rather than relocated again, because the broker
+	// baked that path into the environment and the vault indexed it for
+	// revocation; a second relocation would leave the wipe scrubbing a
+	// directory the workload was not reading. Read-only for the same reason the
+	// files are 0600: nothing in a sandbox has a reason to write a credential
+	// the hub issued it.
+	if placed != nil && payload.Sandbox.Normalize().Mode == executor.SandboxModeContainer {
+		spec.HostMounts = append(spec.HostMounts, placed.hostMounts()...)
+	}
+
 	handle, err := runner.Start(context.WithoutCancel(ctx), spec)
 	if err != nil {
 		// Release the reservation: nothing is running, and holding the slot

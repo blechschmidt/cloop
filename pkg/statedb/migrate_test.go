@@ -389,3 +389,71 @@ func TestOpen_TwiceIsIdempotent(t *testing.T) {
 		t.Errorf("schema version drift across Opens: v1=%d v2=%d", v1, v2)
 	}
 }
+
+// TestMigrateNamesADivergentVersion is the regression for a migration that was
+// applied never and reported nowhere.
+//
+// Two changes developed in parallel both take the next free number, because the
+// contiguity check only ever sees one tree. Whichever lands second is skipped
+// against every database the first one already touched — its column is missing,
+// the code that selects it fails at runtime, and schema_migrations says the
+// database is current. Nothing said otherwise until this check existed.
+func TestMigrateNamesADivergentVersion(t *testing.T) {
+	db := openRaw(t, filepath.Join(t.TempDir(), "state.db"))
+	if _, err := Migrate(db); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+
+	// Rewrite one recorded name to something no file has, which is exactly the
+	// state a same-numbered sibling migration leaves behind.
+	migs, err := loadMigrations()
+	if err != nil {
+		t.Fatalf("loadMigrations: %v", err)
+	}
+	victim := migs[len(migs)-1]
+	if _, err := db.Exec(
+		`UPDATE schema_migrations SET name = ? WHERE version = ?`,
+		"0999_somebody_elses_change.sql", victim.Version,
+	); err != nil {
+		t.Fatalf("stage the divergence: %v", err)
+	}
+
+	report, err := Migrate(db)
+	if err != nil {
+		t.Fatalf("Migrate must not refuse a divergent name — that would turn a fixable "+
+			"skew into an outage: %v", err)
+	}
+	if len(report.Divergent) != 1 {
+		t.Fatalf("Divergent = %+v, want exactly the one version whose name was rewritten",
+			report.Divergent)
+	}
+	got := report.Divergent[0]
+	if got.Version != victim.Version || got.Embedded != victim.Name {
+		t.Errorf("Divergent[0] = %+v, want version %d embedded as %q",
+			got, victim.Version, victim.Name)
+	}
+	if got.Recorded != "0999_somebody_elses_change.sql" {
+		t.Errorf("Divergent[0].Recorded = %q, want the name the database actually holds",
+			got.Recorded)
+	}
+}
+
+// TestMigrateReportsNoDivergenceOnACleanDatabase keeps the check from warning
+// about the v1 baseline row or about a database that is simply up to date.
+func TestMigrateReportsNoDivergenceOnACleanDatabase(t *testing.T) {
+	db := openRaw(t, filepath.Join(t.TempDir(), "state.db"))
+	report, err := Migrate(db)
+	if err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	if len(report.Divergent) != 0 {
+		t.Errorf("a freshly migrated database reported divergence: %+v", report.Divergent)
+	}
+	again, err := Migrate(db)
+	if err != nil {
+		t.Fatalf("Migrate (second): %v", err)
+	}
+	if len(again.Divergent) != 0 {
+		t.Errorf("a re-migrated database reported divergence: %+v", again.Divergent)
+	}
+}

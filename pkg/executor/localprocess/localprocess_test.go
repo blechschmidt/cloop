@@ -947,3 +947,80 @@ func TestRequestedKillKeepsItsOwnReason(t *testing.T) {
 			"which recovery reads as an out-of-memory kill", st.Error)
 	}
 }
+
+// TestStartGivesAnExplicitEnvironmentAPath is the regression for a run that
+// could not execute anything.
+//
+// Unlike its neighbours it does shell out, because the defect *is* name
+// resolution: a child forked from the test binary would be addressed by an
+// absolute path and would pass on the broken code.
+//
+// A Spec with a nil Env inherits and was never affected. The broken case is an
+// *explicit* one, which on an isolating executor is what a leased credential
+// produces: pkg/ui composes the lease's variables over a nil base on purpose,
+// so the sandbox is not handed the hub's whole environment. That is layered on
+// the image's environment by a container engine — and replaced outright by this
+// driver, which is what a remote agent in host mode uses. The workload then
+// started with the lease's variables and nothing else, so a post-task hook died
+// on `exec: "sh": executable file not found in $PATH`.
+func TestStartGivesAnExplicitEnvironmentAPath(t *testing.T) {
+	ex := New("env-floor")
+	dir := t.TempDir()
+
+	h, err := ex.Start(context.Background(), executor.Spec{
+		WorkDir: dir,
+		// Resolved by name, not by path: that is the whole point.
+		Argv: []string{"sh", "-c", "echo home=$HOME; echo path=${PATH:-unset}"},
+		// One variable, exactly as a lease delivers — and no PATH.
+		Env: []string{"CLOOP_LEASE_DIR=" + dir},
+	})
+	if err != nil {
+		t.Fatalf("Start with an explicit environment: %v", err)
+	}
+	out := drainOutput(t, ex, h.ID)
+	if !strings.Contains(out, "path="+defaultPath) {
+		t.Errorf("workload saw %q, want PATH to fall back to %q", out, defaultPath)
+	}
+	if !strings.Contains(out, "home="+dir) {
+		t.Errorf("workload saw %q, want HOME to default to its own working directory", out)
+	}
+}
+
+// TestStartDoesNotOverrideAnExplicitPath: the floor is a floor. A Spec that
+// names PATH has made a decision, and this driver must not second-guess it.
+func TestStartDoesNotOverrideAnExplicitPath(t *testing.T) {
+	ex := New("env-explicit")
+	dir := t.TempDir()
+
+	h, err := ex.Start(context.Background(), executor.Spec{
+		WorkDir: dir,
+		Argv:    []string{"/bin/sh", "-c", "echo path=$PATH; echo home=$HOME"},
+		Env:     []string{"PATH=/opt/only", "HOME=/opt/home"},
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	out := drainOutput(t, ex, h.ID)
+	if !strings.Contains(out, "path=/opt/only") {
+		t.Errorf("output %q: the Spec's own PATH must win", out)
+	}
+	if !strings.Contains(out, "home=/opt/home") {
+		t.Errorf("output %q: the Spec's own HOME must win", out)
+	}
+}
+
+// drainOutput waits for the workload to finish and returns everything it wrote.
+func drainOutput(t *testing.T, ex *Executor, handleID string) string {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	lines, err := ex.Stream(ctx, handleID)
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	var sb strings.Builder
+	for line := range lines {
+		sb.WriteString(line.Text)
+	}
+	return sb.String()
+}

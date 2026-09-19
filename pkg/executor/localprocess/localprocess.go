@@ -366,7 +366,7 @@ func (e *Executor) Start(ctx context.Context, spec executor.Spec) (executor.Hand
 	cmd := exec.Command(spec.Argv[0], spec.Argv[1:]...) //nolint:gosec — argv is caller-supplied, never shell-interpreted
 	cmd.Dir = spec.WorkDir
 	if spec.Env != nil {
-		cmd.Env = spec.Env
+		cmd.Env = withRunnableEnv(spec.Env, spec.WorkDir)
 	}
 	cmd.Stdout = pipeW
 	cmd.Stderr = pipeW
@@ -1062,4 +1062,63 @@ func newHandleID() string {
 		return fmt.Sprintf("h-%d", time.Now().UnixNano())
 	}
 	return "h-" + hex.EncodeToString(b[:])
+}
+
+// defaultPath is the PATH a workload gets when its Spec named none. The
+// entries are the ones a POSIX system puts there; nothing about this machine's
+// own configuration is copied in, because the point is to name programs that
+// exist rather than to share the parent's environment.
+const defaultPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+// withRunnableEnv returns env with the two variables a process needs in order
+// to run anything at all, added only where env did not already say.
+//
+// # Why this is not the caller's job
+//
+// A nil Spec.Env means "inherit", and that case is untouched. This is about a
+// Spec that carries an *explicit* environment, which on an isolating executor
+// is exactly what a leased credential produces: pkg/ui's applyLease composes
+// the leased variables over a nil base, deliberately, so that a sandbox is not
+// handed the hub's whole environment — CLOOP_SECRET_KEY included.
+//
+// That reasoning is sound and its comment states the assumption it rests on:
+// the leased material is "layered on the image's own environment". For a
+// container that is true — `docker run --env NAME=v` adds to what the image
+// declares. For this driver it is not, because cmd.Env *replaces*. So a remote
+// agent told to run payloads on its host would start them with nothing but the
+// lease's own variables: no PATH, and therefore no program resolvable by name.
+//
+// The symptom was a post-task hook failing with `exec: "sh": executable file
+// not found in $PATH` on a device where /bin/sh plainly exists — and only for
+// projects that held a grant, because a project without one has a nil Env and
+// inherits. Anything the harness shells out to would have failed the same way.
+//
+// HOME is here for the same reason and one more: git refuses to write a commit
+// without somewhere to look for a config, and the workload's own directory is
+// the answer that needs no decision from an operator.
+func withRunnableEnv(env []string, workDir string) []string {
+	hasPath, hasHome := false, false
+	for _, kv := range env {
+		switch {
+		case strings.HasPrefix(kv, "PATH="):
+			hasPath = true
+		case strings.HasPrefix(kv, "HOME="):
+			hasHome = true
+		}
+	}
+	if hasPath && (hasHome || workDir == "") {
+		return env
+	}
+	// A fresh slice: env belongs to the Spec, which the caller may still hold
+	// and which executorstore persists.
+	out := make([]string, 0, len(env)+2)
+	if !hasPath {
+		out = append(out, "PATH="+defaultPath)
+	}
+	if !hasHome && workDir != "" {
+		out = append(out, "HOME="+workDir)
+	}
+	// The Spec's own values come last so that an explicit PATH or HOME in it
+	// wins over these, which are only ever a floor.
+	return append(out, env...)
 }

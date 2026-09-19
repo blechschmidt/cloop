@@ -32,6 +32,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -117,6 +118,18 @@ type MigrationReport struct {
 	EndVersion      int   // highest version applied (or already present)
 	Applied         []int // versions newly applied during this run
 	BaselineApplied bool  // true when an existing pre-framework DB was adopted at v1
+
+	// Divergent names a version this database recorded under a different
+	// migration file than this binary embeds. See checkNames.
+	Divergent []VersionDivergence
+}
+
+// VersionDivergence is one version whose recorded name is not the name this
+// binary embeds for it.
+type VersionDivergence struct {
+	Version  int
+	Recorded string
+	Embedded string
 }
 
 // MigrateOptions configures MigrateWithOptions.
@@ -250,7 +263,93 @@ func MigrateWithOptions(db *sql.DB, opts MigrateOptions) (*MigrationReport, erro
 		current = m.Version
 	}
 	report.EndVersion = current
+
+	// Asked after applying, because the answer is only interesting for versions
+	// that were already there — a migration this run applied recorded its own
+	// name a moment ago.
+	div, err := checkNames(db, migrations)
+	if err != nil {
+		// Not fatal: this is diagnosis, and a database that will not answer a
+		// SELECT on its own bookkeeping table has a bigger problem that the
+		// next statement will surface with a better message.
+		return report, nil
+	}
+	report.Divergent = div
+	for _, d := range div {
+		fmt.Fprintf(os.Stderr,
+			"warning: schema version %d was applied from %q, but this build embeds %q for that "+
+				"version — so %q has been SKIPPED and its effects are absent from this database. "+
+				"Two migrations were numbered the same; renumber the later one and re-apply it by "+
+				"hand.\n", d.Version, d.Recorded, d.Embedded, d.Embedded)
+	}
 	return report, nil
+}
+
+// checkNames reports versions whose recorded migration name is not the one this
+// binary embeds.
+//
+// # Why this is worth a check at all
+//
+// The apply loop skips any migration whose version is already recorded, and it
+// compares nothing else. That is correct for the case it was written for — a
+// database that is simply up to date — and silently wrong for the one this
+// function exists to name: two different migration files numbered the same.
+//
+// It happens whenever two changes are developed in parallel, because the next
+// free number is obvious and the same for both, and the sequence check that
+// enforces contiguity only sees one tree at a time. Whichever file lands second
+// is then, against any database the first one already touched, applied never
+// and reported nowhere. The column it was supposed to add does not exist, the
+// code that selects it fails at runtime, and the schema version says the
+// database is current.
+//
+// # Why it warns rather than refuses
+//
+// Refusing would be the stronger guarantee and the wrong trade. A hub whose
+// control plane carries an overtaken version number is a *deployment* that
+// works — the overtaken migration's effects are missing, not corrupt — and
+// turning that into a refusal to open the database converts a fixable
+// divergence into an outage for every tenant on it. The warning names both
+// files and the remedy, which is what an operator needs and what nothing
+// previously said.
+func checkNames(db *sql.DB, migrations []migration) ([]VersionDivergence, error) {
+	rows, err := db.Query(`SELECT version, name FROM schema_migrations`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	embedded := make(map[int]string, len(migrations))
+	for _, m := range migrations {
+		embedded[m.Version] = m.Name
+	}
+
+	var out []VersionDivergence
+	for rows.Next() {
+		var (
+			version int
+			name    string
+		)
+		if err := rows.Scan(&version, &name); err != nil {
+			return nil, err
+		}
+		want, ok := embedded[version]
+		// A name this binary has no migration for is a database from a newer
+		// build, which the skew guard has already decided about; and the v1
+		// baseline row is recorded under a name no file has.
+		if !ok || name == "" || name == want {
+			continue
+		}
+		if version == 1 && strings.HasPrefix(name, "baseline") {
+			continue
+		}
+		out = append(out, VersionDivergence{Version: version, Recorded: name, Embedded: want})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Version < out[j].Version })
+	return out, nil
 }
 
 // ensureMigrationsTable creates the schema_migrations bookkeeping table.

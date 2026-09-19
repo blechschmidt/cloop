@@ -1,0 +1,25 @@
+-- executor_sandbox.network — which network a container-mode payload is
+-- attached to on that executor (Task 20315).
+--
+-- 0044 made containment configurable per executor and stopped there, which
+-- left the configuration unable to express the thing the containment is for.
+-- The agent built its container driver with no network at all, so every
+-- container-mode remote executor ran its payloads under `--network none` and
+-- no admin could say otherwise.
+--
+-- That is the correct default and the wrong only option. A sandbox reaches its
+-- repositories through the hub's git interception proxy, its cluster through
+-- the Kubernetes access monitor, and its Internet through the egress broker —
+-- every one of them a network service addressed by URL. Without a network the
+-- payload cannot resolve any of them, so an executor could be granted
+-- credentials it had no way to spend, and the failure arrived as a DNS error
+-- inside a sandbox rather than as a refusal at the hub.
+--
+-- Empty means unset, which every reader treats as 'none': adding the column
+-- changes no existing deployment's behaviour.
+--
+-- Additive: one ALTER TABLE ADD COLUMN, the form schema_compat.go's
+-- additiveAlter admits. A binary that predates this column never selects it,
+-- so an older hub sharing this database keeps reading it rather than refusing
+-- to open it.
+ALTER TABLE executor_sandbox ADD COLUMN network TEXT NOT NULL DEFAULT '';

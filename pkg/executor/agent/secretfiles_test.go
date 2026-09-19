@@ -415,3 +415,48 @@ func TestTwoLeasesGetSeparateDirectories(t *testing.T) {
 		}
 	}
 }
+
+// TestPlacedSecretsHostMountsBindEachLeaseDirectoryInPlace covers the delivery
+// half of container mode.
+//
+// The agent writes credential files onto the device's own filesystem, which a
+// host process shares and a container does not. Without a bind mount the
+// workload starts with CLOOP_LEASE_DIR and GIT_CONFIG_GLOBAL naming a directory
+// one namespace away: git stops finding its credential helper and fails with
+// "could not read Username", while the lease looks correctly delivered from
+// every angle the hub can see.
+func TestPlacedSecretsHostMountsBindEachLeaseDirectoryInPlace(t *testing.T) {
+	p := &placedSecrets{dirs: []string{"/dev/shm/cloop-lease-a", "/dev/shm/cloop-lease-b"}}
+
+	got := p.hostMounts()
+	if len(got) != 2 {
+		t.Fatalf("hostMounts() returned %d mounts, want one per lease directory", len(got))
+	}
+	for i, m := range got {
+		if m.Source != p.dirs[i] {
+			t.Errorf("mount %d source = %q, want %q", i, m.Source, p.dirs[i])
+		}
+		// Identical, deliberately: the broker baked this path into the
+		// workload's environment and the vault indexed it for revocation.
+		if m.Target != m.Source {
+			t.Errorf("mount %d target = %q, want the same path as the source %q — "+
+				"remapping breaks both the environment and the revoke", i, m.Target, m.Source)
+		}
+		if !m.ReadOnly {
+			t.Errorf("mount %d is writable; a sandbox has no reason to write a credential "+
+				"it was issued", i)
+		}
+		if err := m.Validate(); err != nil {
+			t.Errorf("mount %d is not a valid host mount: %v", i, err)
+		}
+	}
+}
+
+// TestPlacedSecretsHostMountsIsNilSafe: a workload that leased nothing takes
+// the same code path, and a nil dereference there would fail every start.
+func TestPlacedSecretsHostMountsIsNilSafe(t *testing.T) {
+	var p *placedSecrets
+	if got := p.hostMounts(); got != nil {
+		t.Errorf("hostMounts() on nil = %v, want nil", got)
+	}
+}

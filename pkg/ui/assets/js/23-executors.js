@@ -78,8 +78,14 @@ function _execCapChips(ex) {
     const sb = ex.sandbox;
     if (sb && sb.mode === 'container') {
       const rt = sb.runtime ? ' / ' + sb.runtime : '';
+      // The network is named in the tooltip because "container, no network" is
+      // a working configuration that cannot fetch a repository, and the failure
+      // it produces shows up inside the sandbox as a DNS error rather than here.
+      const net = sb.network || 'none';
       chips.push('<span class="exec-chip pos" title="Payloads run in a container on this '
         + 'device' + (sb.runtime ? ', under the ' + esc(sb.runtime) + ' runtime' : '')
+        + ', on the ' + esc(net) + ' network'
+        + (net === 'none' ? ' — so they cannot reach the git proxy or any other hub service' : '')
         + '. Set in this executor\'s Sandbox panel.">sandbox: container' + esc(rt) + '</span>');
     } else if (sb && sb.mode === 'host') {
       chips.push('<span class="exec-chip neg" title="Payloads run directly on this device\'s '
@@ -657,6 +663,21 @@ function _execSandboxFill(d) {
   const img = document.getElementById('execSandboxImage');
   if (img) img.value = s.image || '';
 
+  // A datalist rather than a select: the two the backend offers are the two
+  // every engine has, but an operator may have created a named network on the
+  // device that this hub cannot enumerate, and a closed list would make that
+  // network unselectable.
+  const netList = document.getElementById('execSandboxNetworkList');
+  if (netList) {
+    netList.innerHTML = ((d && d.networks) || []).map(n =>
+      '<option value="' + esc(n) + '">' + esc(n)
+        + (n === 'none' ? ' — no network at all' : '')
+        + (n === 'bridge' ? ' — the engine\u2019s default network' : '')
+        + '</option>').join('');
+  }
+  const net = document.getElementById('execSandboxNetwork');
+  if (net) net.value = s.network || '';
+
   const hint = document.getElementById('execSandboxModeHint');
   if (hint) {
     hint.textContent = d && d.configured
@@ -698,6 +719,7 @@ window.saveExecutorSandbox = function() {
     engine:  (document.getElementById('execSandboxEngine') || {}).value || '',
     runtime: ((document.getElementById('execSandboxRuntime') || {}).value || '').trim(),
     image:   ((document.getElementById('execSandboxImage') || {}).value || '').trim(),
+    network: ((document.getElementById('execSandboxNetwork') || {}).value || '').trim(),
   };
   apiMethod('PUT', '/api/executors/' + encodeURIComponent(t.id) + '/sandbox', payload)
     .then(d => {

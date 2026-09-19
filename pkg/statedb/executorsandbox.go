@@ -1,6 +1,7 @@
 // executorsandbox.go stores the per-executor sandbox configuration an admin
 // sets from the UI: whether payloads run on the executor's host or in a
-// container on it, and which engine, runtime and image that container uses.
+// container on it, and which engine, runtime, image and network that container
+// uses.
 //
 // The sibling of projectlimits.go and executors.go's project_executors. All
 // three record an operator's policy about something rather than a fact
@@ -57,16 +58,17 @@ func (d *DB) SetExecutorSandbox(executorID string, s executor.SandboxSettings, s
 
 	_, err := d.conn.Exec(
 		`INSERT INTO executor_sandbox(
-		     executor_id, mode, engine, runtime, image, set_at, set_by)
-		 VALUES(?,?,?,?,?,?,?)
+		     executor_id, mode, engine, runtime, image, network, set_at, set_by)
+		 VALUES(?,?,?,?,?,?,?,?)
 		 ON CONFLICT(executor_id) DO UPDATE SET
 		   mode    = excluded.mode,
 		   engine  = excluded.engine,
 		   runtime = excluded.runtime,
 		   image   = excluded.image,
+		   network = excluded.network,
 		   set_at  = excluded.set_at,
 		   set_by  = excluded.set_by`,
-		executorID, string(s.Mode), s.Engine, s.Runtime, s.Image,
+		executorID, string(s.Mode), s.Engine, s.Runtime, s.Image, s.Network,
 		time.Now().UTC().Format(time.RFC3339Nano), setBy)
 	if err != nil {
 		return fmt.Errorf("statedb: set executor sandbox for %q: %w", executorID, classifyDriverErr(err))
@@ -101,12 +103,12 @@ func (d *DB) ExecutorSandboxSettings(executorID string) (executor.SandboxSetting
 	defer d.mu.Unlock()
 
 	var (
-		mode, engine, runtime, image string
+		mode, engine, runtime, image, network string
 	)
 	err := d.conn.QueryRow(
-		`SELECT mode, engine, runtime, image
+		`SELECT mode, engine, runtime, image, network
 		   FROM executor_sandbox WHERE executor_id = ?`, executorID,
-	).Scan(&mode, &engine, &runtime, &image)
+	).Scan(&mode, &engine, &runtime, &image, &network)
 	if errors.Is(err, sql.ErrNoRows) {
 		return executor.SandboxSettings{}, false, nil
 	}
@@ -119,6 +121,7 @@ func (d *DB) ExecutorSandboxSettings(executorID string) (executor.SandboxSetting
 		Engine:  engine,
 		Runtime: runtime,
 		Image:   image,
+		Network: network,
 	}, true, nil
 }
 
@@ -130,12 +133,12 @@ func (d *DB) ExecutorSandboxRecord(executorID string) (ExecutorSandbox, bool, er
 
 	rec := ExecutorSandbox{ExecutorID: executorID}
 	var (
-		mode, engine, runtime, image, setAt string
+		mode, engine, runtime, image, network, setAt string
 	)
 	err := d.conn.QueryRow(
-		`SELECT mode, engine, runtime, image, set_at, set_by
+		`SELECT mode, engine, runtime, image, network, set_at, set_by
 		   FROM executor_sandbox WHERE executor_id = ?`, executorID,
-	).Scan(&mode, &engine, &runtime, &image, &setAt, &rec.SetBy)
+	).Scan(&mode, &engine, &runtime, &image, &network, &setAt, &rec.SetBy)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ExecutorSandbox{ExecutorID: executorID}, false, nil
 	}
@@ -148,6 +151,7 @@ func (d *DB) ExecutorSandboxRecord(executorID string) (ExecutorSandbox, bool, er
 		Engine:  engine,
 		Runtime: runtime,
 		Image:   image,
+		Network: network,
 	}
 	if t, err := time.Parse(time.RFC3339Nano, setAt); err == nil {
 		rec.SetAt = t
@@ -163,7 +167,7 @@ func (d *DB) ListExecutorSandboxes() ([]ExecutorSandbox, error) {
 	defer d.mu.Unlock()
 
 	rows, err := d.conn.Query(
-		`SELECT executor_id, mode, engine, runtime, image, set_at, set_by
+		`SELECT executor_id, mode, engine, runtime, image, network, set_at, set_by
 		   FROM executor_sandbox ORDER BY set_at DESC, executor_id ASC`)
 	if err != nil {
 		return nil, fmt.Errorf("statedb: list executor sandboxes: %w", classifyDriverErr(err))
@@ -173,11 +177,11 @@ func (d *DB) ListExecutorSandboxes() ([]ExecutorSandbox, error) {
 	var out []ExecutorSandbox
 	for rows.Next() {
 		var (
-			rec                          ExecutorSandbox
-			mode, engine, runtime, image string
-			setAt                        string
+			rec                                   ExecutorSandbox
+			mode, engine, runtime, image, network string
+			setAt                                 string
 		)
-		if err := rows.Scan(&rec.ExecutorID, &mode, &engine, &runtime, &image, &setAt, &rec.SetBy); err != nil {
+		if err := rows.Scan(&rec.ExecutorID, &mode, &engine, &runtime, &image, &network, &setAt, &rec.SetBy); err != nil {
 			return nil, fmt.Errorf("statedb: scan executor sandbox: %w", classifyDriverErr(err))
 		}
 		rec.Settings = executor.SandboxSettings{
@@ -185,6 +189,7 @@ func (d *DB) ListExecutorSandboxes() ([]ExecutorSandbox, error) {
 			Engine:  engine,
 			Runtime: runtime,
 			Image:   image,
+			Network: network,
 		}
 		if t, err := time.Parse(time.RFC3339Nano, setAt); err == nil {
 			rec.SetAt = t

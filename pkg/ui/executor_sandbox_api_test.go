@@ -339,3 +339,61 @@ func TestExecutorSandbox_RequiresAnID(t *testing.T) {
 		t.Error("a request with no executor id was accepted")
 	}
 }
+
+// TestExecutorSandbox_NetworkRoundTripsAndReachesTheRow covers the setting the
+// git proxy needs. A container-mode executor with no network cannot resolve the
+// proxy, so the credential the hub brokered for it is unusable — and before
+// this field there was no way for an admin to say otherwise.
+func TestExecutorSandbox_NetworkRoundTripsAndReachesTheRow(t *testing.T) {
+	dir := setupProjectDir(t, "sandbox network", nil)
+	ts := newTestServer(t, dir, nil)
+
+	code, _ := sandboxPUT(t, ts, "edge-net", map[string]any{
+		"mode": "container", "engine": "docker", "runtime": "runsc",
+		"image": "ghcr.io/x/y:v1", "network": "bridge",
+	})
+	if code != http.StatusOK {
+		t.Fatalf("PUT = HTTP %d, want 200", code)
+	}
+
+	got := sandboxGET(t, ts, "edge-net")
+	if got.Settings.Network != "bridge" {
+		t.Errorf("settings.network = %q, want %q", got.Settings.Network, "bridge")
+	}
+	// Served rather than hardcoded in the form, so the list the admin picks
+	// from is the one the backend accepts.
+	if len(got.Networks) == 0 {
+		t.Error("the view must offer the selectable networks")
+	}
+
+	db, err := statedb.Open(state.DBPath(dir))
+	if err != nil {
+		t.Fatalf("open control plane: %v", err)
+	}
+	defer db.Close()
+	stored, ok, err := db.ExecutorSandboxSettings("edge-net")
+	if err != nil || !ok {
+		t.Fatalf("read the stored row: ok=%v err=%v", ok, err)
+	}
+	if stored.Network != "bridge" {
+		t.Errorf("stored network = %q — the dispatch path reads this row, so an echoed "+
+			"value that never landed would leave the sandbox network-less", stored.Network)
+	}
+}
+
+// TestExecutorSandbox_RefusesHostNetwork: --network=host is not a sandbox. The
+// refusal belongs at this boundary because the value arrives from a browser and
+// ends up in an engine's argv on a machine the hub does not administer.
+func TestExecutorSandbox_RefusesHostNetwork(t *testing.T) {
+	dir := setupProjectDir(t, "sandbox network host", nil)
+	ts := newTestServer(t, dir, nil)
+
+	for _, bad := range []string{"host", "container:abc", "-net"} {
+		code, body := sandboxPUT(t, ts, "edge-bad", map[string]any{
+			"mode": "container", "network": bad,
+		})
+		if code != http.StatusBadRequest {
+			t.Errorf("PUT network=%q = HTTP %d, want 400 (%v)", bad, code, body)
+		}
+	}
+}

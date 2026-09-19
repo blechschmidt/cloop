@@ -2,7 +2,7 @@ package ui
 
 // executor_sandbox_api.go is the admin's surface for one question per executor:
 // do payloads run on that machine's host, or in a container on it, and under
-// which engine, runtime and image (Task 20307)?
+// which engine, runtime, image and network (Task 20307, Task 20315)?
 //
 // # Why this could not be done through /api/config/set
 //
@@ -57,12 +57,19 @@ type executorSandboxView struct {
 	SetAt      string `json:"set_at,omitempty"`
 	SetBy      string `json:"set_by,omitempty"`
 
-	// Modes and Engines are the selectable values, served rather than hardcoded
-	// in the frontend so that the allowlist the backend enforces is the same
-	// list the form offers. A frontend with its own copy would eventually offer
-	// a value the API rejects, and the admin would read that as a bug.
-	Modes   []string `json:"modes"`
-	Engines []string `json:"engines"`
+	// Modes, Engines and Networks are the selectable values, served rather than
+	// hardcoded in the frontend so that the allowlist the backend enforces is
+	// the same list the form offers. A frontend with its own copy would
+	// eventually offer a value the API rejects, and the admin would read that
+	// as a bug.
+	//
+	// Networks is the shortest of the three and the only one that is not an
+	// allowlist: a named network an operator created on the device is accepted
+	// too, because the hub cannot enumerate what exists over there. What it
+	// serves is the two every engine has.
+	Modes    []string `json:"modes"`
+	Engines  []string `json:"engines"`
+	Networks []string `json:"networks"`
 
 	// DeviceEngines is what this device reported finding on PATH at its last
 	// connect. Empty for a driver the hub runs itself — those are configured in
@@ -96,6 +103,7 @@ type executorSandboxRequest struct {
 	Engine  string `json:"engine"`
 	Runtime string `json:"runtime"`
 	Image   string `json:"image"`
+	Network string `json:"network"`
 	// Clear removes the configuration entirely, returning the executor to its
 	// own default. Distinct from saving an all-empty record: that is an admin
 	// asserting the default, which the panel shows as configured.
@@ -165,6 +173,7 @@ func (s *Server) renderExecutorSandbox(w http.ResponseWriter, db *statedb.DB, id
 		SetBy:      rec.SetBy,
 		Modes:      sandboxModeNames(),
 		Engines:    executor.ContainerEngines(),
+		Networks:   executor.SandboxNetworks(),
 	}
 	if !rec.SetAt.IsZero() {
 		view.SetAt = rec.SetAt.UTC().Format("2006-01-02T15:04:05Z07:00")
@@ -215,6 +224,7 @@ func (s *Server) serveExecutorSandboxPut(w http.ResponseWriter, r *http.Request,
 		Engine:  req.Engine,
 		Runtime: req.Runtime,
 		Image:   req.Image,
+		Network: req.Network,
 	}
 	// Validated before normalizing, so an admin who typed a bad runtime and then
 	// switched the mode to host is told about the runtime rather than having it

@@ -126,6 +126,77 @@ func ValidContainerEngine(name string) bool {
 	return false
 }
 
+// SandboxNetworkNone and SandboxNetworkBridge are the two networks every
+// engine has without an operator creating one. A named network is accepted
+// too — that is how an operator attaches payloads to a segment they built —
+// but only these two can be offered as choices, because the set of named
+// networks lives on the device rather than here.
+const (
+	SandboxNetworkNone   = "none"
+	SandboxNetworkBridge = "bridge"
+)
+
+// SandboxNetworks lists the networks an admin may pick from a menu, in UI
+// order. Deny-by-default first: a payload that cannot reach the network cannot
+// exfiltrate what it was given, and an admin choosing otherwise should be
+// choosing, not accepting a pre-selected default.
+func SandboxNetworks() []string {
+	return []string{SandboxNetworkNone, SandboxNetworkBridge}
+}
+
+// maxNetworkNameLen bounds a network name, for the reason MaxRuntimeNameLen
+// bounds a runtime name: the value reaches an engine's argv.
+const maxNetworkNameLen = 128
+
+// ValidateNetworkName checks that name is a network an executor may be told to
+// attach a payload to.
+//
+// Empty is valid and means "unset", which every caller reads as the
+// deny-by-default "none".
+//
+// The two refusals are the point of the function, and neither is about shape:
+//
+//   - "host" removes the network namespace altogether. The payload would then
+//     reach every service bound to the device's loopback — which on a machine
+//     running a cloop agent includes whatever else that machine is for. It is
+//     also the one value that makes the container's own address the host's, so
+//     an egress filter attached to the sandbox would filter nothing.
+//   - "container:<id>" joins another container's namespace, which is the same
+//     escape wearing a different name: the neighbour may have the network this
+//     one was refused.
+//
+// This is the canonical definition; container.ValidateNetwork defers to it, so
+// the rule cannot drift between the hub's config file and its per-executor API.
+func ValidateNetworkName(name string) error {
+	n := strings.TrimSpace(name)
+	if n == "" {
+		return nil
+	}
+	if n == "host" {
+		return fmt.Errorf(
+			"network \"host\" is not permitted — it removes network isolation and exposes " +
+				"services bound to the executor's loopback; use \"none\", \"bridge\", or a named network")
+	}
+	if strings.HasPrefix(n, "container:") {
+		return fmt.Errorf("joining another container's network namespace is not permitted")
+	}
+	if strings.HasPrefix(n, "-") {
+		return fmt.Errorf("network name %q may not begin with '-'", n)
+	}
+	if len(n) > maxNetworkNameLen {
+		return fmt.Errorf("network name is too long (%d bytes, max %d)", len(n), maxNetworkNameLen)
+	}
+	for _, r := range n {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '_' || r == '.' || r == '-':
+		default:
+			return fmt.Errorf("network name %q contains an invalid character %q", n, string(r))
+		}
+	}
+	return nil
+}
+
 // MaxRuntimeNameLen bounds an OCI runtime name. Real names are well under 20
 // characters; the limit exists so a pathological value cannot produce an
 // unreadable error or a surprising argv.
@@ -204,6 +275,26 @@ type SandboxSettings struct {
 	// Image is the container image payloads run in. Empty means the
 	// executor's own configured default. Ignored unless Mode is container.
 	Image string `json:"image,omitempty"`
+	// Network is the container network payloads are attached to: "none"
+	// (the default), "bridge", or a network the operator created on the
+	// device. Ignored unless Mode is container.
+	//
+	// It exists because "none" is both the right default and unusable for the
+	// flow this product is built around. A sandbox reaches its repositories
+	// through the hub's git interception proxy, its cluster through the
+	// Kubernetes access monitor and its Internet through the egress broker —
+	// and all three are *network services*, addressed by URL. Without a
+	// network the payload cannot resolve or connect to any of them, so a
+	// container-mode remote executor could be granted credentials it had no
+	// way to use, and the failure surfaced inside the sandbox as a DNS error
+	// rather than at the hub as a refusal.
+	//
+	// Its own field rather than a derived one, because the answer is a
+	// property of the device: which network exists, and whether it reaches
+	// the hub, is something the admin who enrolled it knows and the hub does
+	// not. Deriving it from "does this dispatch need the proxy" would also
+	// silently widen a payload's reach every time a grant was added.
+	Network string `json:"network,omitempty"`
 }
 
 // Provenance — who configured this and when — is deliberately not a field
@@ -218,7 +309,8 @@ func (s SandboxSettings) IsZero() bool {
 	return s.Mode == SandboxModeDefault &&
 		strings.TrimSpace(s.Engine) == "" &&
 		strings.TrimSpace(s.Runtime) == "" &&
-		strings.TrimSpace(s.Image) == ""
+		strings.TrimSpace(s.Image) == "" &&
+		strings.TrimSpace(s.Network) == ""
 }
 
 // Normalize trims whitespace and drops fields that the selected mode makes
@@ -236,11 +328,13 @@ func (s SandboxSettings) Normalize() SandboxSettings {
 		Engine:  strings.TrimSpace(s.Engine),
 		Runtime: strings.TrimSpace(s.Runtime),
 		Image:   strings.TrimSpace(s.Image),
+		Network: strings.TrimSpace(s.Network),
 	}
 	if out.Mode != SandboxModeContainer {
 		out.Engine = ""
 		out.Runtime = ""
 		out.Image = ""
+		out.Network = ""
 	}
 	return out
 }
@@ -264,6 +358,9 @@ func (s SandboxSettings) Validate() error {
 		if err := validateImageRef(img); err != nil {
 			return err
 		}
+	}
+	if err := ValidateNetworkName(s.Network); err != nil {
+		return err
 	}
 	return nil
 }
@@ -343,5 +440,12 @@ func (s SandboxSettings) Describe() string {
 	if s.Image != "" {
 		parts = append(parts, "image="+s.Image)
 	}
+	// Named even when unset, because "none" is the answer an operator reading
+	// a failed fetch needs and the absence of the word would read as "some".
+	network := s.Network
+	if network == "" {
+		network = SandboxNetworkNone
+	}
+	parts = append(parts, "network="+network)
 	return strings.Join(parts, " ")
 }
