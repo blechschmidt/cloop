@@ -117,7 +117,11 @@ function renderOIDCSecretState(d) {
   } else if (d.client_secret_set) {
     state.textContent = '— stored';
   } else {
-    state.textContent = '— not set';
+    // "not set" read as an unfinished form, which is how an operator ends up
+    // hunting for a credential that a public-client registration does not
+    // have. The field is optional: with it empty the hub authenticates the
+    // code exchange with PKCE alone.
+    state.textContent = '— optional; not set, so this hub signs in as a public client using PKCE';
   }
 }
 

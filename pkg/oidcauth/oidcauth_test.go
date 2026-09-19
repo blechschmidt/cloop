@@ -46,6 +46,17 @@ type fakeIdP struct {
 	tokenRequests int
 	rejectBasic   bool // force fallback to client_secret_post
 
+	// Observations of the most recent token request, for the public-client
+	// tests (Task 20314). sawSecretField is whether the form carried a
+	// client_secret *key* at all — deliberately not whether it carried a
+	// non-empty value, because "client_secret=" is a different request from
+	// one with no credential, and IdPs reject it on its own terms rather
+	// than treating it as unauthenticated. That distinction is the bug this
+	// records, so the assertion has to be able to see it.
+	sawSecretField   bool
+	sawAuthHeader    bool
+	lastCodeVerifier string
+
 	// refresh-grant knobs (Task 20176). refreshStatus/refreshBody, when set,
 	// are returned verbatim for a grant_type=refresh_token request, which is
 	// how the tests drive each branch of the failure taxonomy: an
@@ -195,6 +206,9 @@ func newFakeIdP(t testing.TB) *fakeIdP {
 			http.Error(w, "bad form", http.StatusBadRequest)
 			return
 		}
+		_, idp.sawSecretField = r.PostForm["client_secret"]
+		idp.sawAuthHeader = r.Header.Get("Authorization") != ""
+		idp.lastCodeVerifier = r.PostForm.Get("code_verifier")
 		if _, _, ok := r.BasicAuth(); ok {
 			idp.sawBasicAuth = true
 			if idp.rejectBasic {
@@ -499,6 +513,100 @@ func TestClientSecretPostFallback(t *testing.T) {
 	}
 }
 
+// newPublicTestAuthenticator builds an authenticator with no client secret —
+// the default the Terraform module now provisions (Task 20314).
+func newPublicTestAuthenticator(t *testing.T, idp *fakeIdP) *Authenticator {
+	t.Helper()
+	a, err := New(Config{
+		Enabled:     true,
+		Issuer:      idp.server.URL,
+		ClientID:    "cloop-dashboard",
+		RedirectURL: "http://localhost:8080/auth/callback",
+		AdminEmails: []string{"admin@example.com"},
+	})
+	if err != nil {
+		t.Fatalf("New without a client secret must succeed: %v", err)
+	}
+	return a
+}
+
+// TestPublicClientLoginSendsNoCredential is the core of Task 20314: a hub with
+// no client secret completes the authorization-code flow, and the token
+// request carries PKCE and nothing else.
+func TestPublicClientLoginSendsNoCredential(t *testing.T) {
+	idp := newFakeIdP(t)
+	a := newPublicTestAuthenticator(t, idp)
+	state, nonce := beginLogin(t, a)
+	idp.nonce = nonce
+
+	rec := doCallback(a, state)
+	if rec.Code != http.StatusFound {
+		t.Fatalf("public-client login status = %d, want 302 (body: %s)", rec.Code, rec.Body.String())
+	}
+	if idp.sawAuthHeader {
+		t.Error("a public client must send no Authorization header")
+	}
+	if idp.sawSecretField {
+		t.Error("a public client must omit client_secret entirely, not send an empty one")
+	}
+	if idp.lastCodeVerifier == "" {
+		t.Error("code_verifier must still be sent: PKCE is the only thing binding the code")
+	}
+	// One request, not two. There is no second credential encoding to try,
+	// and a byte-identical retry would only obscure the IdP's own error.
+	if idp.tokenRequests != 1 {
+		t.Errorf("tokenRequests = %d, want 1 (a public client has no fallback method)", idp.tokenRequests)
+	}
+}
+
+// TestPublicClientRefreshSendsNoCredential covers the other grant. The refresh
+// path used to carry its own copy of the basic-then-post fallback, so it could
+// regress independently of the code exchange.
+func TestPublicClientRefreshSendsNoCredential(t *testing.T) {
+	idp := newFakeIdP(t)
+	a := newPublicTestAuthenticator(t, idp)
+
+	tok, _, claimErr, err := a.refreshGrant(t.Context(), "rt-1")
+	if err != nil {
+		t.Fatalf("public-client refresh grant: %v (claimErr: %v)", err, claimErr)
+	}
+	if tok.AccessToken != "at-refreshed" {
+		t.Fatalf("access token = %q, want at-refreshed", tok.AccessToken)
+	}
+	if idp.lastRefreshToken != "rt-1" {
+		t.Errorf("refresh_token = %q, want rt-1", idp.lastRefreshToken)
+	}
+	if idp.sawAuthHeader {
+		t.Error("a public client must send no Authorization header on refresh")
+	}
+	if idp.sawSecretField {
+		t.Error("a public client must omit client_secret on refresh")
+	}
+	if idp.tokenRequests != 1 {
+		t.Errorf("tokenRequests = %d, want 1", idp.tokenRequests)
+	}
+}
+
+// TestConfidentialClientStillAuthenticates pins the behaviour a configured
+// secret must keep: making the secret optional must not make it inert.
+func TestConfidentialClientStillAuthenticates(t *testing.T) {
+	idp := newFakeIdP(t)
+	a := newTestAuthenticator(t, idp)
+	state, nonce := beginLogin(t, a)
+	idp.nonce = nonce
+
+	rec := doCallback(a, state)
+	if rec.Code != http.StatusFound {
+		t.Fatalf("confidential login status = %d, want 302 (body: %s)", rec.Code, rec.Body.String())
+	}
+	if !idp.sawBasicAuth {
+		t.Error("a configured secret must still be presented as client_secret_basic")
+	}
+	if idp.tokenRequests != 1 {
+		t.Errorf("tokenRequests = %d, want 1 (basic accepted, no fallback needed)", idp.tokenRequests)
+	}
+}
+
 func TestSessionExpiry(t *testing.T) {
 	idp := newFakeIdP(t)
 	a := newTestAuthenticator(t, idp)
@@ -555,7 +663,6 @@ func TestNewValidation(t *testing.T) {
 		{"missing issuer", func(c *Config) { c.Issuer = "" }},
 		{"http issuer non-localhost", func(c *Config) { c.Issuer = "http://idp.example.com" }},
 		{"missing client_id", func(c *Config) { c.ClientID = "" }},
-		{"missing client_secret", func(c *Config) { c.ClientSecret = "" }},
 		{"missing redirect_url", func(c *Config) { c.RedirectURL = "" }},
 		{"bad cookie_secure", func(c *Config) { c.CookieSecure = "sometimes" }},
 	}
@@ -567,6 +674,16 @@ func TestNewValidation(t *testing.T) {
 				t.Fatalf("New must reject %s", tc.name)
 			}
 		})
+	}
+
+	// An empty client_secret is a configuration, not an omission: it selects
+	// the public-client flow, where PKCE carries what the secret otherwise
+	// would (Task 20314). Asserted positively rather than left as a deleted
+	// table row, so nothing can quietly restore the requirement.
+	noSecret := base()
+	noSecret.ClientSecret = ""
+	if _, err := New(noSecret); err != nil {
+		t.Fatalf("New must accept an empty client_secret (public client + PKCE): %v", err)
 	}
 
 	// http localhost issuer is allowed for dev IdPs.

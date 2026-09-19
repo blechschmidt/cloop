@@ -1546,8 +1546,8 @@ ui:
     enabled: true
     issuer: https://auth.example.com/realms/main
     client_id: cloop-dashboard
-    client_secret: "..."
     redirect_url: https://cloop.example.com/auth/callback
+    # client_secret: "..."             # optional; see below. Prefer CLOOP_OIDC_CLIENT_SECRET
     admin_emails: [ops@example.com]   # optional: these users see all projects
     # scopes: [openid, profile, email]  # default
     # session_ttl_hours: 24             # default; 1..720
@@ -1556,11 +1556,25 @@ ui:
     # cookie_secure: auto               # auto | always | never
 ```
 
-Register cloop at your IdP as a **confidential client** with the
-authorization-code flow and the redirect URL above (PKCE is used
-automatically). All four required fields must be set or `cloop ui` refuses
-to start — the server fails closed rather than silently serving without
-authentication. Every key is also settable via `cloop config set
+Register cloop at your IdP for the authorization-code flow with the redirect
+URL above. **PKCE (S256) is unconditional** — cloop sends a challenge on every
+authorization request and the verifier never leaves the hub process — and a
+**client secret is optional**.
+
+Left unset, cloop registers as a *public client*: it presents only its
+`client_id` at the token endpoint, and the PKCE binding is what makes an
+intercepted authorization code useless to whoever intercepted it. That is the
+default the [Entra ID Terraform module](../../deploy/terraform/azure-entra-id/README.md)
+provisions, and it removes the credential that is otherwise the most expensive
+part of running a hub: one that must reach every replica, be rotated before it
+expires, and be revoked the day it leaks.
+
+Set it to authenticate the client as well. The choice must match the
+registration at the IdP — a hub with no secret against a confidential
+registration fails the code exchange, and only the IdP can see the mismatch.
+Whichever you choose, `issuer`, `client_id` and `redirect_url` must be set or
+`cloop ui` refuses to start — the server fails closed rather than silently
+serving without authentication. Every key is also settable via `cloop config set
 ui.oidc.<key> <value>`, except `role_mappings`, which is a list of records that
 a flat key/value setter cannot express.
 
@@ -1595,7 +1609,9 @@ request, and are worth knowing before using it:
   produce a login prompt; restarting the hub does.
 
 The client secret is never sent to the browser. The panel reports whether one is
-set and whether it came from the file or from `CLOOP_OIDC_CLIENT_SECRET`; an
+set — and says outright that an unset one is a public client using PKCE, rather
+than leaving a blank that reads as an unfinished form — and whether it came
+from the file or from `CLOOP_OIDC_CLIENT_SECRET`; an
 empty field on save keeps the stored value, so the issuer can be edited without
 re-typing a credential the page cannot display. Clearing it is a separate
 button. On a hub where the environment supplies the secret the panel says so,

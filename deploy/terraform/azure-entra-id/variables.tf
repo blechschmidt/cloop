@@ -92,18 +92,60 @@ variable "extra_redirect_uris" {
 
 # ---------------------------------------------------------------- credentials
 
+variable "client_type" {
+  description = <<-EOT
+    Whether the hub authenticates to the token endpoint with a credential.
+
+    "public" (the default) registers the redirect URIs on Entra's public-client
+    platform ("Mobile and desktop applications"). No secret is created and none
+    is needed: cloop sends code_challenge_method=S256 on every authorization
+    request, and the PKCE verifier — which never leaves the hub process — is
+    what binds the authorization code to this hub. This is the OAuth 2.1
+    shape, and it removes the credential that is otherwise the most expensive
+    part of operating the hub: one that must be distributed to every replica,
+    rotated before it expires, and revoked on the day it leaks.
+
+    "confidential" registers them on the Web platform and, unless you set
+    create_client_secret = false, mints a client secret that cloop presents in
+    addition to PKCE. Choose it when a policy requires client authentication,
+    or when you intend to supply a certificate or a federated identity
+    credential out of band.
+
+    What you give up by going public: this registration can no longer obtain
+    app-only tokens (client credentials) or use on-behalf-of. cloop needs
+    neither — it reads the ID token and nothing else. Anyone who learns the
+    client ID can start a sign-in against it, but a client ID was never a
+    secret, and the code that results is redeemable only by whoever holds the
+    matching PKCE verifier and controls a registered redirect URI.
+
+    Switching an existing deployment re-registers the redirect URIs under a
+    different platform. Sign-in breaks between the apply and the hub being
+    reconfigured, so do the two together.
+  EOT
+  type        = string
+  default     = "public"
+
+  validation {
+    condition     = contains(["public", "confidential"], var.client_type)
+    error_message = "client_type must be \"public\" (PKCE only, no secret) or \"confidential\" (Web platform with a client credential)."
+  }
+}
+
 variable "create_client_secret" {
   description = <<-EOT
-    Create a client secret for the application.
+    Whether to create a client secret. Null (the default) follows client_type:
+    a secret on "confidential", none on "public".
 
-    cloop is a confidential client: it authenticates to the token endpoint with
-    a client secret (client_secret_basic, falling back to client_secret_post)
-    in addition to PKCE, so it needs one of these unless you supply a
-    certificate or a federated credential out of band. Set this to false only
-    if you are doing that.
+    Set it to false on a confidential registration that gets its credential out
+    of band — a certificate or a federated identity credential. Setting it to
+    true on a public registration is refused rather than ignored: Entra will
+    not accept a client credential for a code issued to a public-client
+    redirect URI, so the secret could never be presented.
+
+    Leave it alone to get the secretless default.
   EOT
   type        = bool
-  default     = true
+  default     = null
 }
 
 variable "client_secret_rotation_days" {

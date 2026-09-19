@@ -153,10 +153,19 @@ const (
 // Config holds the relying-party settings, typically mapped from
 // config.OIDCConfig (ui.oidc.* in .cloop/config.yaml).
 type Config struct {
-	Enabled      bool
-	Issuer       string // e.g. https://auth.example.com/realms/main
-	ClientID     string
+	Enabled  bool
+	Issuer   string // e.g. https://auth.example.com/realms/main
+	ClientID string
+
+	// ClientSecret is optional. Empty means cloop registers as a public
+	// client and presents no credential at the token endpoint, relying on
+	// the PKCE S256 binding that every authorization request carries
+	// regardless. That is the default the Terraform module provisions,
+	// because a credential that must be rotated, distributed and revoked is
+	// the most expensive part of running this and PKCE removes the need for
+	// one. Set it to add client authentication on top.
 	ClientSecret string
+
 	RedirectURL  string   // e.g. https://cloop.example.com/auth/callback
 	Scopes       []string // default: openid profile email
 	AdminEmails  []string // users who see every project regardless of owner
@@ -402,9 +411,23 @@ func New(cfg Config) (*Authenticator, error) {
 	if cfg.ClientID == "" {
 		return nil, errors.New("oidcauth: client_id is required")
 	}
-	if cfg.ClientSecret == "" {
-		return nil, errors.New("oidcauth: client_secret is required (cloop acts as a confidential client)")
-	}
+	// No client_secret check. An empty secret is a supported configuration,
+	// not a missing one: cloop then acts as an RFC 6749 §2.1 *public* client
+	// and authenticates at the token endpoint with nothing but its client_id,
+	// which is what `token_endpoint_auth_method: none` means.
+	//
+	// That is only safe because PKCE is unconditional here — BeginLogin has
+	// always sent code_challenge_method=S256 and exchangeCode has always sent
+	// the verifier — so an intercepted authorization code is useless without
+	// the verifier that never left this process. The secret was the belt; the
+	// PKCE binding is the braces, and it is the braces that hold.
+	//
+	// It is deliberately not gated on the IdP advertising "none" in
+	// token_endpoint_auth_methods_supported. Entra ID accepts exactly this
+	// exchange for a public-client registration and still omits "none" from
+	// that list (it also omits code_challenge_methods_supported while fully
+	// supporting S256), so believing the metadata would refuse the very
+	// deployment this is for. See deploy/terraform/azure-entra-id.
 	if cfg.RedirectURL == "" {
 		return nil, errors.New("oidcauth: redirect_url is required (e.g. https://cloop.example.com/auth/callback)")
 	}
@@ -973,10 +996,7 @@ type tokenResponse struct {
 	RefreshToken string `json:"refresh_token"`
 }
 
-// exchangeCode redeems the authorization code at the token endpoint. Client
-// authentication tries client_secret_basic first (the OIDC default) and
-// falls back to client_secret_post for IdPs that only accept form
-// credentials.
+// exchangeCode redeems the authorization code at the token endpoint.
 func (a *Authenticator) exchangeCode(ctx context.Context, code, verifier string) (*tokenResponse, error) {
 	disc, err := a.discover(ctx)
 	if err != nil {
@@ -987,13 +1007,11 @@ func (a *Authenticator) exchangeCode(ctx context.Context, code, verifier string)
 	form.Set("grant_type", "authorization_code")
 	form.Set("code", code)
 	form.Set("redirect_uri", a.cfg.RedirectURL)
+	// Unconditional, and on a public client it is the only thing standing
+	// between an intercepted code and a session. See clientAuth.
 	form.Set("code_verifier", verifier)
 
-	tok, status, err := a.postToken(ctx, disc.TokenEndpoint, form, true)
-	if err != nil && (status == http.StatusUnauthorized || isOAuthCode(err, "invalid_client")) {
-		// Retry once with credentials in the form body.
-		tok, _, err = a.postToken(ctx, disc.TokenEndpoint, form, false)
-	}
+	tok, err := a.postTokenAuthenticated(ctx, disc.TokenEndpoint, form)
 	if err != nil {
 		return nil, err
 	}
@@ -1003,16 +1021,59 @@ func (a *Authenticator) exchangeCode(ctx context.Context, code, verifier string)
 	return tok, nil
 }
 
-// postToken performs one token-endpoint POST. basicAuth selects
-// client_secret_basic (RFC 6749 §2.3.1: credentials are form-urlencoded
-// before the Basic header) vs client_secret_post.
-func (a *Authenticator) postToken(ctx context.Context, endpoint string, form url.Values, basicAuth bool) (*tokenResponse, int, error) {
+// clientAuth is how cloop proves its own identity to the token endpoint.
+type clientAuth int
+
+const (
+	// authBasic is client_secret_basic, the OIDC default.
+	authBasic clientAuth = iota
+	// authPost is client_secret_post, for IdPs that only accept form
+	// credentials.
+	authPost
+	// authNone is a public client: client_id and nothing else. Not a
+	// degraded authBasic — the secret is absent by configuration, and
+	// sending an empty one would be a different request that IdPs reject
+	// on its own terms rather than treating as unauthenticated.
+	authNone
+)
+
+// postTokenAuthenticated performs a token-endpoint POST with whichever client
+// authentication this hub is configured for, retrying once across the two
+// secret-bearing methods.
+//
+// The retry exists because client_secret_basic and client_secret_post are both
+// permitted and IdPs disagree about which they accept, so the first refusal
+// that looks like a credential problem is worth one second attempt. A public
+// client has no second method — there is no credential to re-encode — so it
+// makes exactly one request and returns its error. Retrying a byte-identical
+// request would only double the load on the IdP and halve the clarity of the
+// error the operator eventually sees.
+func (a *Authenticator) postTokenAuthenticated(ctx context.Context, endpoint string, form url.Values) (*tokenResponse, error) {
+	if a.cfg.ClientSecret == "" {
+		tok, _, err := a.postToken(ctx, endpoint, form, authNone)
+		return tok, err
+	}
+	tok, status, err := a.postToken(ctx, endpoint, form, authBasic)
+	if err != nil && (status == http.StatusUnauthorized || isOAuthCode(err, "invalid_client")) {
+		// Retry once with credentials in the form body.
+		tok, _, err = a.postToken(ctx, endpoint, form, authPost)
+	}
+	return tok, err
+}
+
+// postToken performs one token-endpoint POST using the given client
+// authentication method (RFC 6749 §2.3.1: for Basic, credentials are
+// form-urlencoded before the header).
+func (a *Authenticator) postToken(ctx context.Context, endpoint string, form url.Values, auth clientAuth) (*tokenResponse, int, error) {
 	f := url.Values{}
 	for k, v := range form {
 		f[k] = v
 	}
+	// Sent under every method. RFC 6749 makes it optional alongside Basic,
+	// but it is what lets an IdP identify the client before it has decided
+	// how to authenticate it, and it is required outright for authNone.
 	f.Set("client_id", a.cfg.ClientID)
-	if !basicAuth {
+	if auth == authPost {
 		f.Set("client_secret", a.cfg.ClientSecret)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(f.Encode()))
@@ -1021,7 +1082,7 @@ func (a *Authenticator) postToken(ctx context.Context, endpoint string, form url
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
-	if basicAuth {
+	if auth == authBasic {
 		req.SetBasicAuth(url.QueryEscape(a.cfg.ClientID), url.QueryEscape(a.cfg.ClientSecret))
 	}
 	resp, err := a.client.Do(req)

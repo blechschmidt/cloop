@@ -5,11 +5,19 @@
 # Four things drive every decision below, and each is a property of this
 # codebase, not a preference:
 #
-#   1. cloop is a CONFIDENTIAL client using the authorization-code flow with
-#      PKCE. pkg/oidcauth refuses to start without a client secret, and sends
-#      code_challenge_method=S256 on every authorization request. So this is a
-#      "Web" platform registration with a secret — never an SPA, where Entra
-#      forbids a secret and cloop would then have no credential at all.
+#   1. cloop uses the authorization-code flow with PKCE, and by default holds
+#      NO CLIENT SECRET. pkg/oidcauth sends code_challenge_method=S256 on every
+#      authorization request and treats an empty secret as the public-client
+#      configuration, presenting only its client_id at the token endpoint. So
+#      the default registration here puts the redirect URIs on Entra's
+#      public-client ("Mobile and desktop applications") platform and creates
+#      no password — see the client_type variable, which can put this back to a
+#      "Web" platform registration with a secret.
+#
+#      Never an SPA: Entra refuses to redeem a code for an spa-typed redirect
+#      URI unless the request carries an Origin header (AADSTS9002327), and the
+#      hub redeems it server-side from Go, not from the browser. The
+#      public-client platform has no such gate.
 #
 #   2. cloop PINS THE ISSUER. pkg/oidcauth compares the discovery document's
 #      `issuer` and the ID token's `iss` against the configured value, both for
@@ -56,6 +64,17 @@ locals {
   # tests/docs/terraform_azure_test.go asserts that this string is still a real
   # route in the hub's table.
   callback_path = "/auth/callback"
+
+  # Public by default: no secret to mint, rotate, distribute or revoke, with
+  # PKCE carrying what the secret otherwise would.
+  is_public = var.client_type == "public"
+
+  # null means "follow the client type", which is what lets the default be
+  # secretless without making an operator who picks client_type =
+  # "confidential" also remember to ask for the credential that choice implies.
+  # An explicit false still means "confidential, credential supplied out of
+  # band" — a certificate or a federated identity credential.
+  create_secret = var.create_client_secret != null ? var.create_client_secret : !local.is_public
 
   # Redirect URIs, and why there are two per hub.
   #
@@ -154,19 +173,40 @@ resource "azuread_application" "cloop" {
   # other audience produces a constant one.
   sign_in_audience = "AzureADMyOrg"
 
-  # A confidential client. Entra infers the client type from the registered
-  # redirect URIs, and this pins the fallback for the flows where it cannot —
-  # so the registration can never be treated as a public client that needs no
-  # secret.
+  # False under BOTH client types, and it is not the knob that makes this a
+  # public client — the registered *type of the redirect URI* is, and that is
+  # decided by which block below carries local.redirect_uris.
+  #
+  # Entra consults this flag only when it cannot infer the client type from a
+  # redirect URI, which means only for the flows that have none: resource owner
+  # password credentials, device code, Windows integrated auth. cloop uses none
+  # of them. Setting it true would therefore change nothing about sign-in while
+  # newly permitting ROPC and device code against this registration, so it
+  # stays false even on a public client, where the name most invites flipping
+  # it.
   fallback_public_client_enabled = false
 
   # Only emitted when the operator opts in; null leaves the claim off
   # entirely. See the emit_group_claims variable for why the default is off.
   group_membership_claims = var.emit_group_claims ? var.group_membership_claims : null
 
+  # The redirect URIs live in exactly one of the two blocks below, and which
+  # one is the entire public-vs-confidential decision. Entra classifies the
+  # request by the type of the redirect URI it carries, so a Web-typed URI
+  # demands a client credential (AADSTS7000218 without one) and an
+  # InstalledClient-typed URI does not.
+  #
+  # An ordinary https:// URI is legal on the public-client platform — the
+  # localhost/nativeclient values in Microsoft's docs are recommendations, not
+  # an allowlist, and Microsoft's own App Service guide registers an
+  # https://...authentication callback there.
   web {
-    homepage_url  = var.hub_base_urls[0]
-    redirect_uris = local.redirect_uris
+    homepage_url = var.hub_base_urls[0]
+
+    # Empty on a public client: leaving even one Web-typed URI registered would
+    # be harmless for the callback but pointless, and having the list follow
+    # the client type keeps the portal showing exactly one platform.
+    redirect_uris = local.is_public ? [] : local.redirect_uris
 
     # Front-channel logout is deliberately NOT configured. cloop's sign-out
     # route is "POST /auth/logout"; Entra would call a logout URL with a GET,
@@ -182,6 +222,27 @@ resource "azuread_application" "cloop" {
       # additional way to obtain a token that nothing in cloop needs.
       access_token_issuance_enabled = false
       id_token_issuance_enabled     = false
+    }
+  }
+
+  # "Mobile and desktop applications" in the portal, InstalledClient in the
+  # manifest. Present only on a public client — an empty block would still
+  # register the platform.
+  dynamic "public_client" {
+    for_each = local.is_public ? [1] : []
+    content {
+      redirect_uris = local.redirect_uris
+    }
+  }
+
+  # Evaluated on every plan because this resource always exists, which is why
+  # the check lives here rather than on the password: that one is counted out
+  # to zero in precisely the case being guarded, so its own precondition would
+  # never run.
+  lifecycle {
+    precondition {
+      condition     = !(local.is_public && coalesce(var.create_client_secret, false))
+      error_message = "create_client_secret = true needs client_type = \"confidential\". Entra refuses to redeem a code with a client credential when the redirect URI is registered as a public client, so the secret would not merely be unused — it would be a credential that cannot be presented. Either drop create_client_secret, or set client_type = \"confidential\" to register the callback on the Web platform."
     }
   }
 
@@ -287,13 +348,13 @@ resource "azuread_app_role_assignment" "cloop" {
 # would differ on every plan, so Terraform would rotate the credential — and
 # break the running hub — every time anyone ran it.
 resource "time_rotating" "client_secret" {
-  count = var.create_client_secret ? 1 : 0
+  count = local.create_secret ? 1 : 0
 
   rotation_days = var.client_secret_rotation_days
 }
 
 resource "azuread_application_password" "cloop" {
-  count = var.create_client_secret ? 1 : 0
+  count = local.create_secret ? 1 : 0
 
   # 3.x takes the application's resource ID (/applications/<object id>), not
   # its client ID. Passing .client_id here is the most common 2.x→3.x

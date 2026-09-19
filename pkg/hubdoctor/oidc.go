@@ -208,11 +208,20 @@ func checkOIDCClientCredentials(oc config.OIDCConfig, add addFn) {
 			Message: "supplied via " + config.EnvOIDCClientSecret + ", not from the config file",
 		})
 	case !inConfig:
+		// Pass, not fail. An absent secret is the public-client configuration
+		// — the one the Terraform module provisions by default — where the
+		// PKCE S256 binding authenticates the code exchange on its own. This
+		// used to report a hub that works as one that cannot sign anyone in.
+		//
+		// It stays a distinct message rather than silence because the failure
+		// it can still describe is a real one: a *confidential* registration
+		// whose secret was never exported looks exactly like this from here,
+		// and the only place the difference is visible is the IdP.
 		add(Finding{
-			Check: "oidc.client_secret", Title: "OIDC client secret", Severity: SeverityFail,
-			Message: "no client secret: neither ui.oidc.client_secret nor " +
-				config.EnvOIDCClientSecret + " is set, so the code exchange will be rejected",
-			Remediation: "Export " + config.EnvOIDCClientSecret + " (it is written to .cloop/hub.env by `cloop hub bootstrap`)",
+			Check: "oidc.client_secret", Title: "OIDC client secret", Severity: SeverityPass,
+			Message: "no client secret, so the hub authenticates the code exchange with PKCE (S256) " +
+				"as a public client; if this client is registered as confidential at the issuer, " +
+				"export " + config.EnvOIDCClientSecret + " instead",
 		})
 	default:
 		add(Finding{

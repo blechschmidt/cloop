@@ -79,9 +79,52 @@ run "defaults_produce_a_working_registration" {
     error_message = "The registration must be single-tenant: cloop compares the ID token's iss against one configured issuer, and a multi-tenant app issues a different one per signing-in tenant."
   }
 
+  # False on a public client too. This flag is consulted only for flows that
+  # carry no redirect URI (ROPC, device code), so turning it on would not
+  # affect sign-in at all while newly permitting those — the opposite of what
+  # its name suggests, and the reason it is asserted rather than left alone.
   assert {
     condition     = azuread_application.cloop.fallback_public_client_enabled == false
-    error_message = "cloop authenticates to the token endpoint with a client secret; the registration must stay a confidential client."
+    error_message = "fallback_public_client_enabled must stay false: it does not make this a public client (the redirect URI's platform does) and setting it would enable ROPC and device code against this registration."
+  }
+
+  # The public-vs-confidential decision, asserted where it is actually made.
+  # Entra classifies a token request by the registered type of the redirect URI
+  # it carries: a Web-typed URI demands a client credential and fails with
+  # AADSTS7000218 without one. So "is this a public client" is precisely "are
+  # the URIs in public_client and not in web", and nothing else in this file
+  # can see that — output.redirect_uris is the same list either way.
+  assert {
+    condition     = length(azuread_application.cloop.public_client) == 1
+    error_message = "The default must register a public-client platform; without it the callback is Web-typed and Entra refuses a secretless code exchange."
+  }
+
+  assert {
+    condition     = contains(azuread_application.cloop.public_client[0].redirect_uris, "https://cloop.example.com/auth/callback")
+    error_message = "The callback must be registered on the public-client platform, not merely present in the computed list."
+  }
+
+  assert {
+    condition     = length(azuread_application.cloop.web[0].redirect_uris) == 0
+    error_message = "No URI may stay Web-typed on a public client: one is enough for Entra to demand a credential the hub does not have."
+  }
+
+  # The default is secretless. This is the property the whole client_type
+  # change exists for, so it is asserted on the defaults rather than only in
+  # the opt-out test below.
+  assert {
+    condition     = length(azuread_application_password.cloop) == 0
+    error_message = "The default registration must create no client secret; PKCE is what authenticates the code exchange."
+  }
+
+  assert {
+    condition     = output.client_secret == null
+    error_message = "There is no secret to output by default."
+  }
+
+  assert {
+    condition     = output.client_type == "public"
+    error_message = "The module must default to a public client."
   }
 
   # Both redirect URIs, and the bare origin's trailing slash, are exactly what
@@ -240,9 +283,18 @@ run "the_rendered_config_carries_no_secret" {
     error_message = "The rendered config must not contain a client_secret field; the secret belongs in CLOOP_OIDC_CLIENT_SECRET."
   }
 
+  # On the default public client there is no secret at all, and the rendered
+  # config has to say so. Silence reads as an omission to anyone who has
+  # configured OIDC before, and sends them looking for a value that does not
+  # exist.
   assert {
-    condition     = strcontains(output.cloop_config_yaml, "CLOOP_OIDC_CLIENT_SECRET")
-    error_message = "The rendered config should say where the secret comes from."
+    condition     = !strcontains(output.cloop_config_yaml, "CLOOP_OIDC_CLIENT_SECRET")
+    error_message = "A public-client config must not point at a secret variable there is nothing to put in."
+  }
+
+  assert {
+    condition     = strcontains(output.cloop_config_yaml, "PKCE")
+    error_message = "The rendered config should say what authenticates the code exchange when no secret does."
   }
 
   assert {
@@ -408,6 +460,7 @@ run "a_certificate_deployment_creates_no_password" {
   command = apply
 
   variables {
+    client_type          = "confidential"
     create_client_secret = false
   }
 
@@ -437,11 +490,89 @@ run "a_certificate_deployment_creates_no_password" {
   }
 
   # The rest of the registration is untouched — this is still a working
-  # confidential client, just one whose credential arrived another way.
+  # confidential client, just one whose credential arrived another way. Which
+  # means the URIs must stay Web-typed: a certificate is a client credential,
+  # and Entra will not accept one for a public-client redirect URI.
   assert {
     condition     = strcontains(output.cloop_config_yaml, "enabled: true")
     error_message = "The rendered config must still enable OIDC without a module-managed secret."
   }
+
+  assert {
+    condition     = length(azuread_application.cloop.public_client) == 0
+    error_message = "A confidential registration must not also expose a public-client platform: the callback would then be redeemable with no credential at all."
+  }
+
+  assert {
+    condition     = contains(azuread_application.cloop.web[0].redirect_uris, "https://cloop.example.com/auth/callback")
+    error_message = "A confidential registration must keep the callback Web-typed, or the certificate it authenticates with cannot be presented."
+  }
+}
+
+# ------------------------------------------------------- the confidential path
+
+run "confidential_mints_a_secret_and_stays_web_typed" {
+  command = apply
+
+  variables {
+    client_type = "confidential"
+  }
+
+  # client_type alone is enough: create_client_secret defaults to null, which
+  # means "follow the client type". An operator who asks for a confidential
+  # client should not also have to remember to ask for the credential that
+  # choice implies.
+  assert {
+    condition     = length(azuread_application_password.cloop) == 1
+    error_message = "client_type = confidential must mint a client secret without also needing create_client_secret = true."
+  }
+
+  assert {
+    condition     = length(time_rotating.client_secret) == 1
+    error_message = "A secret that exists must have a rotation clock dating it."
+  }
+
+  assert {
+    condition     = length(azuread_application.cloop.public_client) == 0
+    error_message = "A confidential registration must register no public-client platform."
+  }
+
+  assert {
+    condition     = contains(azuread_application.cloop.web[0].redirect_uris, "https://cloop.example.com/auth/callback")
+    error_message = "A confidential registration must register the callback on the Web platform."
+  }
+
+  # Here the secret DOES exist, so the rendered config must point at the
+  # environment variable that carries it — the inverse of the public case.
+  assert {
+    condition     = strcontains(output.cloop_config_yaml, "CLOOP_OIDC_CLIENT_SECRET")
+    error_message = "A confidential config must say where the secret comes from."
+  }
+
+  assert {
+    condition     = !strcontains(output.cloop_config_yaml, "client_secret:")
+    error_message = "Even with a secret, the rendered YAML must stay committable."
+  }
+
+  assert {
+    condition     = output.client_type == "confidential"
+    error_message = "The client_type output must report what was registered."
+  }
+}
+
+# A secret on a public client is refused, not silently dropped. Entra will not
+# accept a client credential for a code issued to a public-client redirect URI,
+# so honouring the request is impossible and ignoring it would leave an
+# operator believing the hub authenticates when it does not.
+run "a_secret_on_a_public_client_is_refused" {
+  command = plan
+
+  variables {
+    client_type          = "public"
+    create_client_secret = true
+  }
+
+  expect_failures = [azuread_application.cloop]
 }
 
 # --------------------------------------------------- the rendered YAML is YAML

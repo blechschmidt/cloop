@@ -239,7 +239,7 @@ structurally: `ProtectSystem=strict`, `NoNewPrivileges`, an empty
 | Flag | Effect |
 | --- | --- |
 | `--behind-proxy` | Leave `ui.tls` empty; a proxy or Ingress terminates TLS. **The proxy must set `X-Forwarded-Proto: https`** — that header is what marks the session cookie `Secure`. |
-| `--oidc-issuer`, `--oidc-client-id` | Enable SSO. The client *secret* is never written to the config; it comes from `CLOOP_OIDC_CLIENT_SECRET`. |
+| `--oidc-issuer`, `--oidc-client-id` | Enable SSO. A client *secret* is optional — without one the hub is a public client and PKCE authenticates the code exchange. Where one is used it is never written to the config; it comes from `CLOOP_OIDC_CLIENT_SECRET`. |
 | `--admin-email` | Break-glass admin, matched on the email claim. Repeatable. |
 | `--force` | Overwrite an existing deployment. Read the warning first: it mints a new master key, and a new key cannot open payloads sealed with the old one. |
 

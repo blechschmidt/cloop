@@ -14,9 +14,14 @@ module "cloop_sso" {
 ```console
 $ terraform apply
 $ terraform output -raw cloop_config_yaml >> .cloop/config.yaml
-$ export CLOOP_OIDC_CLIENT_SECRET=$(terraform output -raw client_secret)
 $ cloop ui
 ```
+
+There is no third line exporting a secret, and that is the default: the
+registration is a **public client** and the hub authenticates the code exchange
+with PKCE. Nothing has to be rotated, distributed to each replica, or revoked
+on the day it leaks. Set `client_type = "confidential"` to get a client secret
+back — see [Credentials](#credentials).
 
 It is an example in the sense that it is meant to be read and adapted, and a
 module in the sense that it works as it stands. What it is not is a generic app
@@ -29,10 +34,10 @@ token, and the ones that are not obvious are the reason this exists.
 
 | Resource | Why |
 | --- | --- |
-| `azuread_application` | The registration: Web platform, single-tenant, four app roles, `email` optional claim, four delegated Graph scopes |
+| `azuread_application` | The registration: public-client platform by default, single-tenant, four app roles, `email` optional claim, four delegated Graph scopes |
 | `azuread_service_principal` | The enterprise app. Assignments and Conditional Access attach here, not to the application |
-| `azuread_application_password` | The client secret, on a rotation schedule |
-| `time_rotating` | The schedule, held still between rotations so plans do not churn |
+| `azuread_application_password` | The client secret — **only** when `client_type = "confidential"` |
+| `time_rotating` | Its rotation schedule, held still between rotations so plans do not churn |
 | `azuread_app_role_assignment` | One per (role, group-or-user) pair you declare |
 
 ---
@@ -138,7 +143,53 @@ bind on the group claim in cloop instead.
 
 ---
 
-## Rotation
+## Credentials
+
+By default there are none, and everything in the rest of this section is
+inapplicable. `client_type = "public"` registers the redirect URIs on Entra's
+public-client platform ("Mobile and desktop applications" in the portal,
+`InstalledClient` in the manifest), and Entra then redeems a code presented
+with a `client_id` and a PKCE verifier and no credential at all.
+
+Three things about that are worth stating, because each is commonly assumed the
+other way:
+
+- **An ordinary `https://` URI is allowed there.** The `localhost` and
+  `nativeclient` values in Microsoft's docs are recommendations, not an
+  allowlist; Microsoft's own App Service guide registers an
+  `https://…/.auth/login/aad/callback` on that platform.
+- **It is not the "Allow public client flows" toggle.** That flag
+  (`fallback_public_client_enabled`, `isFallbackPublicClient`) is consulted
+  only for flows that carry no redirect URI — ROPC, device code — so it does
+  nothing for sign-in while enabling those. The module leaves it `false` under
+  both client types.
+- **It is not an SPA registration.** Entra refuses to redeem a code for an
+  `spa`-typed URI unless the request carries an `Origin` header
+  (**AADSTS9002327**), and the hub redeems server-side from Go. SPA
+  registrations also get 24-hour refresh tokens.
+
+What you give up: this registration can no longer obtain app-only tokens
+(client credentials) or use on-behalf-of. cloop needs neither — it reads the ID
+token and nothing else.
+
+Set `client_type = "confidential"` where a policy requires client
+authentication. That registers the URIs on the Web platform and mints a secret,
+which you then supply out of band:
+
+```console
+$ export CLOOP_OIDC_CLIENT_SECRET=$(terraform output -raw client_secret)
+```
+
+With `create_client_secret = false` alongside it, no secret is created and you
+supply a certificate or a federated identity credential yourself — still a
+confidential client, credential obtained elsewhere. Asking for
+`create_client_secret = true` on a *public* client is refused at plan time
+rather than silently ignored, because Entra will not accept a credential for a
+code issued to a public-client URI: the secret could never be presented.
+
+### Rotation
+
+Applies to `client_type = "confidential"` only.
 
 The client secret rotates on a schedule (`client_secret_rotation_days`,
 default 180) and expires `client_secret_grace_days` (default 30) later. The
@@ -189,8 +240,9 @@ credentials to a sandbox and attach to a running one.
 | `owners` | `list(string)` | `[]` | Directory principals who may administer the app |
 | `tags` | `list(string)` | `["cloop", "terraform-managed"]` | Entra tags are plain strings |
 | `extra_redirect_uris` | `list(string)` | `[]` | e.g. a developer's `http://localhost:8080/auth/callback` |
-| `create_client_secret` | `bool` | `true` | Off only if supplying a certificate or federated credential |
-| `client_secret_rotation_days` | `number` | `180` | |
+| `client_type` | `string` | `"public"` | `"public"` = PKCE only, no secret. `"confidential"` = Web platform with a credential |
+| `create_client_secret` | `bool` | `null` | Follows `client_type`. `false` on a confidential client supplying a certificate or federated credential |
+| `client_secret_rotation_days` | `number` | `180` | Confidential only |
 | `client_secret_grace_days` | `number` | `30` | Margin for a late apply |
 | `client_secret_rotation_token` | `string` | `"initial"` | Change to rotate now |
 | `require_app_role_assignment` | `bool` | `true` | Entra refuses unassigned users |
@@ -204,7 +256,7 @@ credentials to a sandbox and attach to a running one.
 
 ## Outputs
 
-`cloop_config_yaml` is the one you want. The rest —`client_id`,
+`cloop_config_yaml` is the one you want. The rest —`client_id`, `client_type`,
 `client_secret`, `client_secret_expires_at`, `issuer`, `discovery_url`,
 `redirect_url`, `redirect_uris`, `tenant_id`, `application_object_id`,
 `service_principal_object_id`, `app_role_ids`, `admin_consent_url`,
@@ -220,14 +272,20 @@ The module has a suite that needs no Azure tenant:
 ```console
 $ terraform init -backend=false
 $ terraform test
-Success! 13 passed, 0 failed.
+Success! 17 passed, 0 failed.
 ```
 
 It mocks the provider, so it proves nothing about what Entra accepts — only an
 apply against a real tenant does that. What it does prove is everything
-decidable from the configuration: both redirect URIs, the `/v2.0` issuer, the
-rendered scopes, the derived app role IDs, and that the input validation
-refuses the URLs Entra would refuse later and less clearly.
+decidable from the configuration: both redirect URIs and *which platform block
+carries them*, the `/v2.0` issuer, the rendered scopes, the derived app role
+IDs, and that the input validation refuses the URLs Entra would refuse later
+and less clearly.
+
+The platform assertions are the ones to keep if you trim: public-vs-confidential
+is decided entirely by whether the URIs sit in `public_client` or `web`, and
+the computed `redirect_uris` output is identical either way — so nothing else
+in the suite can tell the two registrations apart.
 
 The joins to cloop itself are checked from Go, in
 [`tests/docs/terraform_azure_test.go`](../../../tests/docs/terraform_azure_test.go),
@@ -247,7 +305,9 @@ permission the registration was granted.
 | --- | --- |
 | **AADSTS50011** redirect URI mismatch | `ui.oidc.redirect_url` differs from what is registered — usually a hub reached on a different hostname than `hub_base_urls` |
 | **AADSTS50105** user not assigned | Working as intended. Assign an app role, or set `require_app_role_assignment = false` |
+| **AADSTS7000218** request body must contain `client_assertion` or `client_secret` | The two sides disagree about the client type: the callback is registered on the Web platform but the hub has no secret. Either `client_type = "public"` here, or export `CLOOP_OIDC_CLIENT_SECRET` there |
 | **AADSTS7000222** invalid client secret | Expired. Apply to rotate, then restart the hub |
+| **AADSTS9002327** tokens for the SPA client-type may only be redeemed cross-origin | A redirect URI got registered on the SPA platform. cloop redeems the code server-side, so it must be public-client or Web — this module never registers SPA |
 | Hub refuses to start, names the issuer | `curl` the `discovery_url` output from the hub. cloop's startup preflight fetches exactly that, so a failure here is DNS, egress or a proxy — not cloop |
 | Sign-in works, everything is read-only | The user holds no app role and got `default_role`. Check the `roles` claim at <https://jwt.ms> |
 | Sign-out lands on a Microsoft page | The bare origin (with trailing slash) is not a registered redirect URI |

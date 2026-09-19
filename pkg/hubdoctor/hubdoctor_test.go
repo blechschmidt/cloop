@@ -373,10 +373,18 @@ func TestClientSecretSource(t *testing.T) {
 		got := findingsFor(t, t.TempDir(), cfg, Options{Offline: true})
 		wantSeverity(t, only(t, got, "oidc.client_secret"), SeverityWarn)
 	})
-	t.Run("absent", func(t *testing.T) {
+	// Absent is a configuration, not a defect: it is the public-client hub
+	// the Terraform module provisions by default, where PKCE authenticates
+	// the code exchange. Reporting it as a failure told operators their
+	// working hub was broken (Task 20314).
+	t.Run("absent is a public client, not a failure", func(t *testing.T) {
 		t.Setenv(config.EnvOIDCClientSecret, "")
 		got := findingsFor(t, t.TempDir(), hubCfg(), Options{Offline: true})
-		wantSeverity(t, only(t, got, "oidc.client_secret"), SeverityFail)
+		f := only(t, got, "oidc.client_secret")
+		wantSeverity(t, f, SeverityPass)
+		if !strings.Contains(f.Message, "PKCE") {
+			t.Errorf("a secretless hub should be told what authenticates it instead; got %q", f.Message)
+		}
 	})
 }
 

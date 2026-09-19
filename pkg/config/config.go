@@ -1742,8 +1742,8 @@ const EnvOIDCClientSecret = "CLOOP_OIDC_CLIENT_SECRET"
 // Projects created through the UI are stamped with the signed-in user's
 // identity and are only visible to that user (and admins); projects without
 // an owner remain shared. Disabled by default — enabling requires issuer,
-// client_id, client_secret, and redirect_url to all be set, otherwise
-// `cloop ui` refuses to start (fail closed).
+// client_id, and redirect_url to be set, otherwise `cloop ui` refuses to start
+// (fail closed). client_secret is optional: see the field.
 type OIDCConfig struct {
 	// Enabled turns OIDC authentication on. Default false.
 	Enabled bool `yaml:"enabled,omitempty"`
@@ -1753,8 +1753,18 @@ type OIDCConfig struct {
 	// Plain http is only accepted for localhost development IdPs.
 	Issuer string `yaml:"issuer,omitempty"`
 
-	// ClientID / ClientSecret identify cloop as a confidential client.
-	ClientID     string `yaml:"client_id,omitempty"`
+	// ClientID identifies cloop at the issuer.
+	ClientID string `yaml:"client_id,omitempty"`
+
+	// ClientSecret is optional. Left empty, cloop is a public client: it
+	// presents only its client_id at the token endpoint and the PKCE S256
+	// challenge it sends on every authorization request is what binds the
+	// code to this hub. Set it to add client authentication as well, which
+	// requires a registration that expects one — the two must agree, and
+	// only the issuer can see that they do.
+	//
+	// Prefer supplying it through EnvOIDCClientSecret: this file is
+	// committed in every deployment topology cloop documents.
 	ClientSecret string `yaml:"client_secret,omitempty"`
 
 	// RedirectURL is the externally reachable callback,

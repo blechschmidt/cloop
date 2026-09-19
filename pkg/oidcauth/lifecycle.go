@@ -826,10 +826,7 @@ func (a *Authenticator) refreshGrant(ctx context.Context, refreshToken string) (
 	form.Set("refresh_token", refreshToken)
 	form.Set("scope", strings.Join(a.cfg.Scopes, " "))
 
-	tok, status, err := a.postToken(ctx, disc.TokenEndpoint, form, true)
-	if err != nil && (status == http.StatusUnauthorized || isOAuthCode(err, "invalid_client")) {
-		tok, _, err = a.postToken(ctx, disc.TokenEndpoint, form, false)
-	}
+	tok, err = a.postTokenAuthenticated(ctx, disc.TokenEndpoint, form)
 	if err != nil {
 		return nil, nil, nil, err
 	}
