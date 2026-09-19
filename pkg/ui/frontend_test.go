@@ -43,6 +43,16 @@ var executorsAPISource string
 //go:embed executor_sandbox_api.go
 var executorSandboxAPISource string
 
+// executorPolicyAPISource is pkg/ui/executor_policy_api.go (Task 20310).
+// Embedded for the same two reasons as the file above: it broadcasts
+// `executor_update` when an admin changes an executor's ceiling or access list,
+// and each of its two handlers is registered without a method prefix — one
+// handler serves the read and the write, so the verbs it accepts are
+// discoverable only from its body.
+//
+//go:embed executor_policy_api.go
+var executorPolicyAPISource string
+
 // auditAPISource is pkg/ui/audit_api.go, for the same reason again: the
 // `audit_append` broadcast (Task 20167) lives there.
 //
@@ -205,7 +215,8 @@ func allUISources() string {
 		"\n" + attachAPISource +
 		"\n" + requestsAPISource +
 		"\n" + ciAPISource +
-		"\n" + executorSandboxAPISource
+		"\n" + executorSandboxAPISource +
+		"\n" + executorPolicyAPISource
 }
 
 // dashboardSource is the whole dashboard front end — the rendered index.html

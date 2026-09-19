@@ -295,12 +295,31 @@ good, not perfect, and the field is right there to correct before you press
 The button only appears when the hub has a speech backend configured, and the
 browser needs an `https` origin (or `localhost`) to reach a microphone at all.
 
+### Speaking into a particular field
+
+The title is where the words go when the cursor is nowhere in particular. Click
+into a text box first — the description beside it, the task filter, the title in
+the edit modal — and that is where they go instead. The words join what is
+already in the field at the cursor rather than replacing it, and the toast names
+the field they landed in.
+
+Pressing the microphone does not move the cursor, so the field you were typing
+in is still the field you are speaking into, and you can carry on typing
+afterwards without clicking back. Number fields — *Priority*, *Max minutes* —
+are never destinations: speech arrives as words, and the box would discard
+"forty two" without saying so.
+
+The destination is fixed when the recording starts, not when the text comes
+back, so clicking elsewhere while the hub transcribes does not redirect a
+sentence you have already said.
+
 ### Dictating a change to a task
 
-The same button sits beside *Description* when you edit a task. It behaves
-differently there, because that field already has words in it and "…and make
-sure it works on mobile" sounds exactly like "scrap that, this is really about
-the migration". So it asks:
+The same button sits beside *Description* when you edit a task, and that is
+where it speaks unless you have put the cursor somewhere else in the dialog.
+It behaves differently there, because that field already has words in it and
+"…and make sure it works on mobile" sounds exactly like "scrap that, this is
+really about the migration". So it asks:
 
 | | |
 | --- | --- |
@@ -319,6 +338,8 @@ Changes* is still the only way into the plan, which is what makes letting a
 model rewrite a task description safe: a misheard instruction is a paragraph you
 can read and cancel, never a silent edit. A description that is empty to begin
 with skips the question — there is nothing to lose, so the words go straight in.
+So does dictating into any *other* field of the dialog: the question is about
+losing a paragraph, and a one-line title has none to lose.
 
 The glasses page offers the same thing as **🎤 Speak a new task**, on the *+
 Add task* screen described above, with a confirmation step — the transcript,
@@ -401,6 +422,14 @@ more decisions, and both have their own documentation.
   `executors.allow_host_process: false` switch that makes host execution
   impossible, are in
   [the configuration reference](../reference/configuration.md#execution-backends-executors).
+
+  Each executor card in the **Executors** tab carries three admin dialogs:
+  **Sandbox** (host or container, and the engine, runtime and image a container
+  gets), **Limits** (the most CPU, memory, disk and processes any one workload
+  there may be given), and **Access** (which users and groups may run work on
+  it at all). An executor with an empty access list is available to everyone,
+  which is how every executor starts. See
+  [who may use an executor](../architecture/executors.md#who-may-use-an-executor).
 - **Running it day to day** — backup, upgrade, key rotation and incident
   playbooks are in [the operator runbook](../operations/runbook.md).
 

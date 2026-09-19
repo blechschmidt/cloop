@@ -227,7 +227,11 @@ func TestMutatingRoutesRequireMutatingPermissions(t *testing.T) {
 		// executor_sandbox_api.go holds handleExecutorSandbox, registered
 		// prefix-less because one handler serves the read and the write, so the
 		// verbs it accepts are only discoverable from its body (Task 20307).
-		"\n" + executorSandboxAPISource
+		"\n" + executorSandboxAPISource +
+		// executor_policy_api.go holds handleExecutorLimits and
+		// handleExecutorAudience, both prefix-less for the same reason
+		// (Task 20310).
+		"\n" + executorPolicyAPISource
 	handlerNames := handlerNamesByPattern()
 
 	for _, rs := range srv.routeTable() {
@@ -293,6 +297,7 @@ func TestRegisterRoutesUsesTheRouteTable(t *testing.T) {
 		{"server.go", serverSource},
 		{"executors_api.go", executorsAPISource},
 		{"executor_sandbox_api.go", executorSandboxAPISource},
+		{"executor_policy_api.go", executorPolicyAPISource},
 		{"provider_calls.go", providerCallsSource},
 	} {
 		if loc := re.FindStringIndex(src.body); loc != nil {

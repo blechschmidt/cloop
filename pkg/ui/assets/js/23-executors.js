@@ -94,6 +94,23 @@ function _execCapChips(ex) {
         + 'Set one in its Sandbox panel.">sandbox: unset</span>');
     }
   }
+  // Access (Task 20310). Shown only when restricted, for the reason the
+  // virtualization chip below is: an unrestricted executor is the norm, and a
+  // chip on every row saying so would read as a warning rather than a default.
+  //
+  // The two restricted states render differently because they mean different
+  // things to the person reading the card: one is "you may use this", the other
+  // is "do not bind a project here, you will be refused".
+  if (ex.restricted) {
+    if (ex.admitted) {
+      chips.push('<span class="exec-chip pos" title="This executor has an access list and '
+        + 'you are on it. Managed in its Access panel.">access: restricted</span>');
+    } else {
+      chips.push('<span class="exec-chip neg" title="This executor has an access list and '
+        + 'your account is not on it — binding a project here or starting a run will be '
+        + 'refused. Managed in its Access panel.">access: denied</span>');
+    }
+  }
   // Shown only when true, unlike the flags below. Virtualization is not a
   // capability an executor is expected to have — the great majority of
   // correctly-configured backends share a kernel — so a "no kata" chip on
@@ -378,6 +395,17 @@ function _renderExecutors(d) {
         + 'onclick="openExecutorSandbox(' + i + ')" '
         + 'title="Whether payloads run on this device&#39;s host or in a container on it, and under which runtime">Sandbox</button>';
     }
+    // Limits and Access apply to every executor kind, unlike Sandbox above: a
+    // ceiling bounds whatever the driver hands out, and an access list names
+    // who may reach the device at all. Neither is implied by the driver, so
+    // both are offered for hub-configured backends as well as enrolled ones
+    // (Task 20310).
+    h += '<button class="btn" style="padding:3px 9px;font-size:11.5px" '
+      + 'onclick="openExecutorLimits(' + i + ')" '
+      + 'title="The most CPU, memory, disk and processes any one workload here may be given">Limits</button>';
+    h += '<button class="btn" style="padding:3px 9px;font-size:11.5px" '
+      + 'onclick="openExecutorAudience(' + i + ')" '
+      + 'title="Which users and groups may run work on this executor">Access</button>';
     if (ex.admin_held) {
       h += '<button class="btn" style="padding:3px 9px;font-size:11.5px" onclick="uncordonExecutor(' + i + ')">Uncordon</button>';
     } else {
@@ -1560,3 +1588,291 @@ window.saveBudgetProject = function() {
   }).catch(err => console.warn('budget project save error', err));
 };
 
+
+// ── Resource ceiling and access list (Task 20310) ───────────────────────────
+//
+// The two policies a hub holds *about* an executor that the Sandbox dialog
+// above does not cover: how much any one workload on it may be given, and who
+// may run work on it at all.
+//
+// Both dialogs follow the Sandbox one's shape deliberately — hold the target
+// rather than the card index, clear the form before the fetch, and render the
+// backend's own vocabulary rather than a hardcoded copy — because the reasons
+// it does those things apply identically here.
+
+// execLimitsTarget / execAudienceTarget are the executors the open dialogs are
+// editing. Held rather than re-derived from the card index for the reason
+// execSandboxTarget is: loadExecutors may reorder the list while a dialog is
+// open, and saving into whichever executor now sits at that index would be the
+// worst possible outcome of a race.
+let execLimitsTarget = null;
+let execAudienceTarget = null;
+
+// _execFmtMB renders a megabyte count the way an admin would type it back in,
+// so a form that was saved as "8g" does not reopen reading "8192".
+function _execFmtMB(mb) {
+  if (!mb) return '';
+  if (mb % 1024 === 0) return (mb / 1024) + 'g';
+  return mb + 'm';
+}
+
+window.openExecutorLimits = function(idx) {
+  const ex = _execAt(idx);
+  if (!ex) return;
+  execLimitsTarget = {id: ex.id, name: ex.name || ex.id};
+
+  const sub = document.getElementById('execLimitsSub');
+  if (sub) sub.textContent = ex.id + ' · ' + _execKindLabel(ex.kind);
+  _execLimitsWarn('');
+  _execLimitsFill({ceiling: {}, fleet: {}});
+  openOverlay('executor-limits-overlay', {dismiss: closeExecutorLimits});
+
+  api('/api/executors/' + encodeURIComponent(ex.id) + '/limits')
+    .then(d => {
+      if (!d || d.error) {
+        _execLimitsWarn((d && d.error) || 'Could not read this executor’s resource ceiling.');
+        return;
+      }
+      _execLimitsFill(d);
+    })
+    .catch(err => _execLimitsWarn(_execDetailErrText(err)
+      || 'Could not read this executor’s resource ceiling.'));
+};
+
+window.closeExecutorLimits = function() {
+  closeOverlay('executor-limits-overlay');
+  execLimitsTarget = null;
+};
+
+function _execLimitsWarn(text) {
+  const el = document.getElementById('execLimitsWarn');
+  if (!el) return;
+  if (!text) { el.style.display = 'none'; el.textContent = ''; return; }
+  el.style.display = '';
+  el.textContent = text;
+}
+
+function _execLimitsFill(d) {
+  const c = (d && d.ceiling) || {};
+  const cpu = document.getElementById('execLimitsCPU');
+  if (cpu) cpu.value = c.cpu_millis ? (c.cpu_millis / 1000) : '';
+  const mem = document.getElementById('execLimitsMemory');
+  if (mem) mem.value = _execFmtMB(c.memory_mb);
+  const disk = document.getElementById('execLimitsDisk');
+  if (disk) disk.value = _execFmtMB(c.disk_mb);
+  const pids = document.getElementById('execLimitsPIDs');
+  if (pids) pids.value = c.pids || '';
+
+  const hint = document.getElementById('execLimitsHint');
+  if (hint) {
+    hint.textContent = d && d.configured
+      ? 'Set by ' + (d.set_by || 'an admin') + (d.set_at ? ' · ' + relTime(new Date(d.set_at)) : '')
+      : 'No ceiling — workloads here are bounded only by the hub-wide limit, if there is one.';
+  }
+
+  // The fleet ceiling, shown because the tighter of the two wins. An admin who
+  // cannot see it would set 16g here, read it back as 16g, and watch workloads
+  // get 8 — and have no way to discover why.
+  const fleet = document.getElementById('execLimitsFleet');
+  if (fleet) {
+    const f = (d && d.fleet) || {};
+    const parts = [];
+    if (f.cpu_millis) parts.push((f.cpu_millis / 1000) + ' cores');
+    if (f.memory_mb) parts.push(_execFmtMB(f.memory_mb) + ' memory');
+    if (f.disk_mb) parts.push(_execFmtMB(f.disk_mb) + ' disk');
+    if (f.pids) parts.push(f.pids + ' processes');
+    fleet.textContent = parts.length
+      ? 'Hub-wide ceiling: ' + parts.join(', ') + '. The tighter of the two applies.'
+      : 'No hub-wide ceiling is configured, so this one applies on its own.';
+  }
+
+  // Whether the device will actually hold a workload to the number. A remote
+  // agent reports its capacity for placement and then runs the payload without
+  // confining it, and an admin who is not told that has a cap they believe in
+  // rather than one they have.
+  if (d && d.configured && d.enforced === false) {
+    _execLimitsWarn('This executor does not enforce resource limits: the ceiling will be recorded '
+      + 'on each run’s spec but nothing will hold the workload to it. Bind projects to a container '
+      + 'or Kubernetes executor for an enforced cap.');
+  }
+}
+
+window.saveExecutorLimits = function() {
+  const t = execLimitsTarget;
+  if (!t) return;
+  const payload = {
+    max_cpu:    parseFloat((document.getElementById('execLimitsCPU') || {}).value || '0') || 0,
+    max_memory: ((document.getElementById('execLimitsMemory') || {}).value || '').trim(),
+    max_disk:   ((document.getElementById('execLimitsDisk') || {}).value || '').trim(),
+    max_pids:   parseInt((document.getElementById('execLimitsPIDs') || {}).value || '0', 10) || 0,
+  };
+  apiMethod('PUT', '/api/executors/' + encodeURIComponent(t.id) + '/limits', payload)
+    .then(d => {
+      if (!d || d.error) { toast((d && d.error) || 'Failed to save resource ceiling', 'err'); return; }
+      toast('Resource ceiling saved for ' + t.name, 'ok');
+      closeExecutorLimits();
+      loadExecutors();
+    })
+    .catch(err => toast(_execDetailErrText(err) || 'Failed to save resource ceiling', 'err'));
+};
+
+window.clearExecutorLimits = function() {
+  const t = execLimitsTarget;
+  if (!t) return;
+  if (!confirm('Remove the resource ceiling on ' + t.name + '?\n\nWorkloads here will be bounded '
+      + 'only by the hub-wide limit, if one is configured.')) {
+    return;
+  }
+  apiMethod('PUT', '/api/executors/' + encodeURIComponent(t.id) + '/limits', {clear: true})
+    .then(d => {
+      if (!d || d.error) { toast((d && d.error) || 'Failed to clear', 'err'); return; }
+      toast('Resource ceiling removed from ' + t.name, 'ok');
+      closeExecutorLimits();
+      loadExecutors();
+    })
+    .catch(() => toast('Failed to clear resource ceiling', 'err'));
+};
+
+// ── Access list ─────────────────────────────────────────────────────────────
+
+window.openExecutorAudience = function(idx) {
+  const ex = _execAt(idx);
+  if (!ex) return;
+  execAudienceTarget = {id: ex.id, name: ex.name || ex.id};
+
+  const sub = document.getElementById('execAudienceSub');
+  if (sub) sub.textContent = ex.id + ' · ' + _execKindLabel(ex.kind);
+  _execAudienceWarn('');
+  _execAudienceFill({members: [], restricted: false});
+  openOverlay('executor-audience-overlay', {dismiss: closeExecutorAudience});
+  _execAudienceLoad(ex.id);
+};
+
+function _execAudienceLoad(id) {
+  api('/api/executors/' + encodeURIComponent(id) + '/audience')
+    .then(d => {
+      if (!d || d.error) {
+        _execAudienceWarn((d && d.error) || 'Could not read this executor’s access list.');
+        return;
+      }
+      _execAudienceFill(d);
+    })
+    .catch(err => _execAudienceWarn(_execDetailErrText(err)
+      || 'Could not read this executor’s access list.'));
+}
+
+window.closeExecutorAudience = function() {
+  closeOverlay('executor-audience-overlay');
+  execAudienceTarget = null;
+};
+
+function _execAudienceWarn(text) {
+  const el = document.getElementById('execAudienceWarn');
+  if (!el) return;
+  if (!text) { el.style.display = 'none'; el.textContent = ''; return; }
+  el.style.display = '';
+  el.textContent = text;
+}
+
+// _execAudienceMembers is the list the open dialog is showing. The remove
+// buttons dispatch by index into it rather than interpolating the principal
+// into an onclick attribute — a group path or an email is attacker-influenced
+// text, and Tasks 163/20033 are what that costs.
+let _execAudienceMembers = [];
+
+function _execAudienceFill(d) {
+  _execAudienceMembers = (d && d.members) || [];
+  const box = document.getElementById('execAudienceList');
+  if (box) {
+    if (!_execAudienceMembers.length) {
+      box.innerHTML = '<div style="color:var(--muted);font-size:12.5px;padding:6px 0">'
+        + 'Unrestricted — every user who can reach this hub may run work here. '
+        + 'Add a user or group below to restrict it.</div>';
+    } else {
+      let h = '';
+      _execAudienceMembers.forEach((m, i) => {
+        h += '<div style="display:flex;align-items:center;gap:8px;padding:5px 0;'
+          + 'border-bottom:1px solid var(--border)">'
+          + '<span class="badge" style="font-size:10.5px">' + esc(m.kind || '') + '</span>'
+          + '<span style="flex:1;font-size:12.5px">' + esc(m.value || '') + '</span>'
+          + '<span style="font-size:11px;color:var(--muted)">'
+          + esc(m.added_by || '') + '</span>'
+          + '<button class="btn danger" style="padding:2px 8px;font-size:11px" '
+          + 'onclick="removeExecutorAudience(' + i + ')">Remove</button>'
+          + '</div>';
+      });
+      box.innerHTML = h;
+    }
+  }
+
+  const state = document.getElementById('execAudienceState');
+  if (state) {
+    if (!(d && d.restricted)) {
+      state.textContent = 'This executor is available to everyone on the hub.';
+    } else if (d.caller_admitted === false) {
+      // Managing an executor and being allowed to use it are separate rights,
+      // so this is a reachable and legitimate state — but an admin who is not
+      // told would discover it at their next run instead.
+      state.textContent = 'Restricted to ' + _execAudienceMembers.length + ' principal'
+        + (_execAudienceMembers.length === 1 ? '' : 's')
+        + '. You are not on this list, so you cannot run work here yourself.';
+    } else {
+      state.textContent = 'Restricted to ' + _execAudienceMembers.length + ' principal'
+        + (_execAudienceMembers.length === 1 ? '' : 's') + ', including you.';
+    }
+  }
+}
+
+window.addExecutorAudience = function() {
+  const t = execAudienceTarget;
+  if (!t) return;
+  const kind = (document.getElementById('execAudienceKind') || {}).value || 'group';
+  const value = ((document.getElementById('execAudienceValue') || {}).value || '').trim();
+  if (!value) {
+    _execAudienceWarn('Enter a group name, email address or subject to admit.');
+    return;
+  }
+  _execAudienceWarn('');
+  apiMethod('POST', '/api/executors/' + encodeURIComponent(t.id) + '/audience',
+      {kind: kind, value: value})
+    .then(d => {
+      if (!d || d.error) {
+        _execAudienceWarn((d && d.error) || 'Failed to admit that principal.');
+        return;
+      }
+      const input = document.getElementById('execAudienceValue');
+      if (input) input.value = '';
+      _execAudienceFill(d);
+      toast('Admitted ' + value + ' to ' + t.name, 'ok');
+      loadExecutors();
+    })
+    .catch(err => _execAudienceWarn(_execDetailErrText(err) || 'Failed to admit that principal.'));
+};
+
+window.removeExecutorAudience = function(i) {
+  const t = execAudienceTarget;
+  const m = _execAudienceMembers[i];
+  if (!t || !m) return;
+  // Named in the prompt, because withdrawing the last entry does not narrow
+  // this executor — it opens it to the whole hub, which is the opposite of
+  // what "Remove" reads like.
+  const last = _execAudienceMembers.length === 1;
+  const msg = last
+    ? 'Remove ' + m.value + ' from ' + t.name + '?\n\nIt is the only entry, so this executor '
+      + 'will become available to every user on the hub.'
+    : 'Remove ' + m.value + ' from ' + t.name + '?';
+  if (!confirm(msg)) return;
+
+  apiMethod('DELETE', '/api/executors/' + encodeURIComponent(t.id) + '/audience',
+      {kind: m.kind, value: m.value})
+    .then(d => {
+      if (!d || d.error) {
+        _execAudienceWarn((d && d.error) || 'Failed to withdraw that principal.');
+        return;
+      }
+      _execAudienceFill(d);
+      toast('Withdrew ' + m.value + ' from ' + t.name, 'ok');
+      loadExecutors();
+    })
+    .catch(err => _execAudienceWarn(_execDetailErrText(err) || 'Failed to withdraw that principal.'));
+};

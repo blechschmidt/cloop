@@ -673,6 +673,15 @@ func (s *Server) routeTable() []routeSpec {
 		// an administrative act.
 		{Pattern: "/api/executors/{id}/sandbox", Handler: s.handleExecutorSandbox, Methods: []string{"GET", "PUT", "POST"}, Perm: execMgmt, Scope: scopeExecutor},
 
+		// The other two policies a hub holds about an executor (Task 20310).
+		// Same shape and same reasoning as the sandbox route above, including
+		// execMgmt on the GET: a ceiling describes what this device will and
+		// will not hold a workload to, and an access list names the people and
+		// groups who may reach it. Both are reconnaissance in the hands of
+		// someone deciding where to put a payload.
+		{Pattern: "/api/executors/{id}/limits", Handler: s.handleExecutorLimits, Methods: []string{"GET", "PUT", "POST"}, Perm: execMgmt, Scope: scopeExecutor},
+		{Pattern: "/api/executors/{id}/audience", Handler: s.handleExecutorAudience, Methods: []string{"GET", "POST", "DELETE"}, Perm: execMgmt, Scope: scopeExecutor},
+
 		// ── Compliance audit trail ───────────────────────────────────
 		// Admin-only, and global: the trail records the actions of every
 		// role including those above the reader, so it is not something a

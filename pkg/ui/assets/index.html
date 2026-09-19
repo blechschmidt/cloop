@@ -3249,6 +3249,86 @@
   </div>
 </div>
 
+<!-- Executor resource ceiling (Task 20310) -->
+<div id="executor-limits-overlay" data-overlay="flex" onclick="if(event.target===this)closeExecutorLimits()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
+  <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;width:620px;max-width:95vw;max-height:90vh;overflow:auto">
+    <h2 style="font-size:15px;font-weight:600;margin-bottom:2px">Resource limits</h2>
+    <div id="execLimitsSub" style="font-family:monospace;font-size:11px;color:var(--muted);margin-bottom:16px"></div>
+    <div id="execLimitsWarn" class="exec-sched-note" style="display:none;margin-bottom:14px"></div>
+
+    <div class="form-hint" style="margin-bottom:14px">The most any <em>one</em> workload on this executor may be given. This is a ceiling, not a default: a project asking for more in its <code>.cloop/sandbox.yaml</code> is lowered to it. Leave a field empty to leave that resource uncapped.</div>
+
+    <div class="form-row">
+      <div class="form-group" style="flex:1">
+        <label class="form-label" for="execLimitsCPU">CPU cores</label>
+        <input class="form-input" id="execLimitsCPU" placeholder="uncapped" spellcheck="false">
+        <div class="form-hint">Fractional allowed, e.g. <code>1.5</code>.</div>
+      </div>
+      <div class="form-group" style="flex:1">
+        <label class="form-label" for="execLimitsMemory">Memory</label>
+        <input class="form-input" id="execLimitsMemory" placeholder="uncapped" spellcheck="false">
+        <div class="form-hint">Size string, e.g. <code>2g</code> or <code>512m</code>.</div>
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group" style="flex:1">
+        <label class="form-label" for="execLimitsDisk">Disk</label>
+        <input class="form-input" id="execLimitsDisk" placeholder="uncapped" spellcheck="false">
+        <div class="form-hint">Bounds the workspace clone as well as scratch space.</div>
+      </div>
+      <div class="form-group" style="flex:1">
+        <label class="form-label" for="execLimitsPIDs">Processes</label>
+        <input class="form-input" id="execLimitsPIDs" placeholder="uncapped" spellcheck="false">
+        <div class="form-hint">Processes and threads in one workload.</div>
+      </div>
+    </div>
+
+    <div class="form-hint" id="execLimitsHint" style="margin-bottom:6px"></div>
+    <div class="form-hint" id="execLimitsFleet"></div>
+
+    <div class="modal-footer">
+      <button class="btn danger" id="execLimitsClear" onclick="clearExecutorLimits()">Remove ceiling</button>
+      <button class="btn" onclick="closeExecutorLimits()">Cancel</button>
+      <button class="btn primary" onclick="saveExecutorLimits()">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- Executor access list (Task 20310) -->
+<div id="executor-audience-overlay" data-overlay="flex" onclick="if(event.target===this)closeExecutorAudience()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
+  <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;width:620px;max-width:95vw;max-height:90vh;overflow:auto">
+    <h2 style="font-size:15px;font-weight:600;margin-bottom:2px">Access</h2>
+    <div id="execAudienceSub" style="font-family:monospace;font-size:11px;color:var(--muted);margin-bottom:16px"></div>
+    <div id="execAudienceWarn" class="exec-sched-note" style="display:none;margin-bottom:14px"></div>
+
+    <div class="form-hint" style="margin-bottom:14px">Who may bind a project to this executor and run work on it. An empty list means everyone; adding the first entry restricts it. Managing an executor and being allowed to use it are separate rights, so admit yourself if you need to run work here.</div>
+
+    <div id="execAudienceList" style="margin-bottom:12px"></div>
+    <div class="form-hint" id="execAudienceState" style="margin-bottom:14px"></div>
+
+    <div class="form-row">
+      <div class="form-group" style="width:150px">
+        <label class="form-label" for="execAudienceKind">Kind</label>
+        <select class="form-select" id="execAudienceKind">
+          <option value="group">Group</option>
+          <option value="user">User</option>
+          <option value="role">Role</option>
+        </select>
+      </div>
+      <div class="form-group" style="flex:1">
+        <label class="form-label" for="execAudienceValue">Group name, email or subject</label>
+        <input class="form-input" id="execAudienceValue" placeholder="platform-team" spellcheck="false">
+        <div class="form-hint">Matched against your identity provider's claims. A group path such as <code>/platform-team</code> and the bare name are interchangeable.</div>
+      </div>
+    </div>
+
+    <div class="modal-footer">
+      <button class="btn" onclick="closeExecutorAudience()">Close</button>
+      <button class="btn primary" onclick="addExecutorAudience()">Admit</button>
+    </div>
+  </div>
+</div>
+
 <!-- Provider / Model picker modal -->
 <div id="provider-model-overlay" data-overlay="flex" onclick="if(event.target===this)closeProviderModelModal()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
   <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;width:520px;max-width:95vw">

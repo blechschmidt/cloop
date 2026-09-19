@@ -71,6 +71,26 @@ const (
 	// payload carries both, so "when did this device stop isolating its
 	// workloads, and who decided that" is answerable from the trail alone.
 	ActionExecutorSandbox Action = "executor.sandbox"
+	// ActionExecutorLimits records an executor's resource ceiling being set:
+	// the most CPU, memory, disk and processes any one workload on that device
+	// may be given, whatever it asks for (Task 20310).
+	//
+	// Auditable for the reason the sandbox action is: it bounds what code
+	// running on that machine can consume, so raising it is a change an
+	// incident reviewer needs attributed. The payload carries the previous
+	// ceiling as well as the new one, because "who raised the memory cap on
+	// the build fleet the day it fell over" is not answerable from the new
+	// value alone.
+	ActionExecutorLimits Action = "executor.limits"
+	// ActionExecutorAudience records a change to who may run work on one
+	// executor (Task 20310).
+	//
+	// The one executor action that is an access-control decision rather than a
+	// configuration change. It is emitted for the add and the removal alike,
+	// and carries whether the list became restricted or unrestricted as a
+	// result — an executor's last audience entry being withdrawn widens access
+	// to the whole fleet, which reads as a small edit and is not one.
+	ActionExecutorAudience Action = "executor.audience"
 	// ActionExecutorStateChange records a health-state transition nobody asked for.
 	ActionExecutorStateChange Action = "executor.state_change"
 	// ActionExecutorFailover records a session moving off a failed executor.

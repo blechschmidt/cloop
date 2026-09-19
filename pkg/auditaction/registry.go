@@ -237,10 +237,35 @@ var registry = []Entry{
 		Payload:   []string{"action", "executor_id", "from", "to", "mode", "cleared"},
 		Stability: StabilityStable,
 		Read:      authz.PermAuditRead,
-		Note: "The only executor action that records its previous value: it changes a containment " +
+		Note: "One of two executor actions that record their previous value: it changes a containment " +
 			"boundary, so `from` is what makes \"when did this device stop isolating its workloads\" " +
 			"answerable from the trail alone. `cleared` is true when the configuration was removed " +
 			"rather than replaced.",
+	},
+	{
+		Action:    ActionExecutorLimits,
+		Home:      HomeControlPlane,
+		Entity:    "executor",
+		Trigger:   "An admin sets the most CPU, memory, disk and processes any one workload on an executor may be given.",
+		Payload:   []string{"action", "executor_id", "from", "to", "cleared"},
+		Stability: StabilityStable,
+		Read:      authz.PermAuditRead,
+		Note: "Records its previous ceiling as well as the new one. A raised cap is the change worth " +
+			"reviewing, and it is invisible in the new value alone. `cleared` is true when the " +
+			"ceiling was removed, which makes the executor uncapped rather than capped at zero.",
+	},
+	{
+		Action:    ActionExecutorAudience,
+		Home:      HomeControlPlane,
+		Entity:    "executor",
+		Trigger:   "An admin admits a user or group to an executor, or withdraws one.",
+		Payload:   []string{"action", "executor_id", "principal_kind", "principal_value", "restricted", "members"},
+		Stability: StabilityStable,
+		Read:      authz.PermAuditRead,
+		Note: "`action` is \"admit\" or \"withdraw\"; `restricted` is whether the executor is " +
+			"access-controlled *after* the change, and `members` how many principals remain. " +
+			"Withdrawing the last entry sets restricted=false, which widens the executor to the " +
+			"whole fleet — the one edit here that grants rather than revokes.",
 	},
 	{
 		Action:    ActionExecutorStateChange,
