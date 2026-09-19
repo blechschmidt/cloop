@@ -111,11 +111,9 @@ func OIDCBindings(mappings []config.RoleMapping) []authz.Binding {
 
 // OIDCAuthzConfig builds the authz.Config a hub runs from its ui.oidc block.
 //
-// runtime may be nil: a prospective policy is evaluated without the runtime
-// layer on purpose. Those rows are an operator's emergency grants and
-// withdrawals, and a config change must not be judged safe because somebody
-// currently holds authority from an incident binding that is meant to be
-// temporary.
+// runtime may be nil, which evaluates the configured policy alone. Whether that
+// is the right thing to pass depends on the question being asked —
+// validateOIDCConfig needs it both ways and explains why.
 func OIDCAuthzConfig(o config.OIDCConfig, runtime authz.RuntimeSource) authz.Config {
 	return authz.Config{
 		DefaultRole: authz.Role(o.DefaultRole),
@@ -149,9 +147,13 @@ func (p oidcConfigProblem) Error() string {
 // deployment's root credential and there is no session to demote. The
 // self-demotion check is skipped then, not failed: nobody to strand.
 //
+// runtime supplies the operator-written role bindings in force, and is used for
+// exactly one of the two lockout checks. The split is the point: see the two
+// resolvers built below.
+//
 // A nil error means the next `cloop ui` start will accept this block and come
 // up with at least one administrator.
-func validateOIDCConfig(o config.OIDCConfig, caller *authz.Subject) error {
+func validateOIDCConfig(o config.OIDCConfig, caller *authz.Subject, runtime authz.RuntimeSource) error {
 	if !o.Enabled {
 		// A disabled block is not read by anything, so there is nothing to
 		// get wrong and nothing to be locked out of. Saving a half-filled
@@ -162,17 +164,34 @@ func validateOIDCConfig(o config.OIDCConfig, caller *authz.Subject) error {
 	if err := oidcStartupParity(o); err != nil {
 		return err
 	}
-	resolver, err := authz.New(OIDCAuthzConfig(o, nil))
+	// Two resolvers over the same prospective config, differing only in whether
+	// the runtime layer is visible, because the two questions want different
+	// answers about it.
+	//
+	// "Does this deployment have an administrator" must not be satisfied by a
+	// runtime binding: those are an operator's emergency grants, written during
+	// an incident and meant to be withdrawn, and a hub whose only admin is one
+	// is a hub that loses its last admin when somebody tidies up.
+	//
+	// "Can the person saving this still change it back" must be: if their
+	// authority comes from such a binding then this config change does not take
+	// it away, they are not locked out, and refusing them would block the
+	// incident-response path at exactly the moment it is being used.
+	configured, err := authz.New(OIDCAuthzConfig(o, nil))
 	if err != nil {
 		// Reachable: authz.New rejects an unknown claim kind, an unknown role
 		// name, and a default_role that is neither. Startup treats each as
 		// fatal, so each must be refused here.
 		return oidcConfigProblem{Field: "role_mappings", Message: err.Error()}
 	}
-	if err := wouldStrandTheHub(o, resolver); err != nil {
+	if err := wouldStrandTheHub(o, configured); err != nil {
 		return err
 	}
-	return wouldDemoteCaller(resolver, caller)
+	withRuntime, err := authz.New(OIDCAuthzConfig(o, runtime))
+	if err != nil {
+		return oidcConfigProblem{Field: "role_mappings", Message: err.Error()}
+	}
+	return wouldDemoteCaller(withRuntime, caller)
 }
 
 // oidcStartupParity asks the constructor that runs at startup whether it would

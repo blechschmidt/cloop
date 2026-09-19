@@ -46,6 +46,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/blechschmidt/cloop/pkg/apierror"
 	"github.com/blechschmidt/cloop/pkg/auditaction"
@@ -255,12 +256,14 @@ func (s *Server) oidcViewOf(o config.OIDCConfig) oidcSettingsView {
 // oidcRestartRequired reports whether the saved block differs from what this
 // process is running.
 //
-// Only the two fields that are observable from a running authenticator are
-// compared — whether SSO is on, and against which issuer. A finer diff would
-// need the Authenticator to expose its whole config, and would answer a
-// question nobody asks: an operator who changed a session TTL knows they
-// changed it, while "I turned this on and the login page never appeared" is the
-// report this exists to pre-empt.
+// Every field a running Authenticator will disclose is compared, not just
+// whether SSO is on: the accessors cover the issuer and the three session
+// clocks, and each of them is a change an operator can make and then watch not
+// happen. The ones with no accessor — the client credentials, the scopes, the
+// role mappings — are a false negative here, which is the right direction for
+// the error to run. Claiming a restart is needed when it is not would teach an
+// operator to ignore the banner, and the banner's whole job is to be believed
+// the one time it says the hub is still running without SSO.
 func (s *Server) oidcRestartRequired(o config.OIDCConfig) bool {
 	if o.Enabled != s.oidcEnabled() {
 		return true
@@ -268,7 +271,19 @@ func (s *Server) oidcRestartRequired(o config.OIDCConfig) bool {
 	if !o.Enabled {
 		return false
 	}
-	return strings.TrimSpace(o.Issuer) != strings.TrimSpace(s.OIDC.Issuer())
+	if strings.TrimSpace(o.Issuer) != strings.TrimSpace(s.OIDC.Issuer()) {
+		return true
+	}
+	// Effective values on both sides: the running authenticator holds clamped
+	// durations, so comparing them against the raw config would report a
+	// restart for every hub that left a field at 0 and got the default.
+	if time.Duration(o.EffectiveSessionTTLHours())*time.Hour != s.OIDC.SessionTTL() {
+		return true
+	}
+	if time.Duration(o.EffectiveIdleTimeoutHours())*time.Hour != s.OIDC.IdleTimeout() {
+		return true
+	}
+	return time.Duration(o.EffectiveMaxClaimAgeMinutes())*time.Minute != s.OIDC.MaxClaimAge()
 }
 
 func oidcRoleNames() []string {
@@ -339,7 +354,13 @@ func (s *Server) handleOIDCSettingsSave(w http.ResponseWriter, r *http.Request) 
 
 	// Refuse before writing, not after: an invalid block here is a hub that
 	// will not start, and the repair for that is a shell on the box.
-	if err := validateOIDCConfig(cfg.UI.OIDC, s.callerSubject(r)); err != nil {
+	//
+	// s.Authz is passed as the runtime source — it satisfies RuntimeSource via
+	// RuntimeBindings — so an operator whose admin standing comes from an
+	// incident binding is not told they are about to demote themselves. It is
+	// nil on a hub that has never had a policy, which validateOIDCConfig
+	// handles.
+	if err := validateOIDCConfig(cfg.UI.OIDC, s.callerSubject(r), s.runtimeRoleSource()); err != nil {
 		hubConfigMu.Unlock()
 		writeOIDCProblem(w, err)
 		return
@@ -468,6 +489,19 @@ func (s *Server) callerSubject(r *http.Request) *authz.Subject {
 		return nil
 	}
 	return subjectFromIdentity(id)
+}
+
+// runtimeRoleSource exposes the live runtime role bindings as a RuntimeSource,
+// or nil when this hub has no resolver at all.
+//
+// Returning the resolver itself rather than a snapshot keeps the "source owns
+// its own freshness" contract pkg/authz documents: a binding written a moment
+// ago is visible to the check that is about to read it.
+func (s *Server) runtimeRoleSource() authz.RuntimeSource {
+	if s.Authz == nil {
+		return nil
+	}
+	return s.Authz
 }
 
 // writeOIDCProblem renders a refusal, keeping the blamed field machine-readable

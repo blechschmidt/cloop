@@ -257,6 +257,57 @@ func TestOIDCSave_RefusesDemotingTheCaller(t *testing.T) {
 	}
 }
 
+// fixedRuntime is a RuntimeSource holding a fixed set of operator-written
+// bindings, standing in for pkg/rolestore.
+type fixedRuntime []authz.Binding
+
+func (f fixedRuntime) RuntimeBindings() []authz.Binding { return f }
+
+// TestOIDCSave_RuntimeAdminIsNotTreatedAsSelfDemotion. An operator who granted
+// themselves admin with `cloop hub role` during an incident is not locked out by
+// a config change — the binding survives it — so refusing their save would block
+// the incident-response path at exactly the moment it is being used.
+//
+// The same binding must NOT satisfy "this deployment has an administrator",
+// which is the other half of the split and is asserted below it: an emergency
+// grant is meant to be withdrawn, and a hub whose only admin is one loses its
+// last admin when somebody tidies up.
+func TestOIDCSave_RuntimeAdminIsNotTreatedAsSelfDemotion(t *testing.T) {
+	caller := &authz.Subject{Sub: "u-1", Email: "responder@example.com"}
+	runtime := fixedRuntime{
+		{Claim: authz.ClaimEmail, Value: "responder@example.com", Role: authz.RoleAdmin},
+	}
+
+	// A config that grants admin to somebody else entirely. Complete, so the
+	// startup-parity check passes and the lockout checks are what is exercised.
+	o := validOIDC()
+	o.ClientSecret = "s3cret"
+	o.AdminEmails = []string{"someone.else@example.com"}
+
+	// Without the runtime layer the caller looks demoted…
+	if err := validateOIDCConfig(o, caller, nil); err == nil {
+		t.Fatal("precondition: with no runtime layer this must read as a self-demotion")
+	}
+	// …and with it, they are not, because the binding outlives the change.
+	if err := validateOIDCConfig(o, caller, runtime); err != nil {
+		t.Errorf("a runtime-granted admin is not demoted by a config change: %v", err)
+	}
+
+	// The other half: a runtime binding must not stand in for a configured
+	// administrator. No admin_emails, no mapping granting admin — refused even
+	// though the runtime layer currently holds one.
+	stranded := validOIDC()
+	stranded.ClientSecret = "s3cret"
+	stranded.AdminEmails = nil
+	err := validateOIDCConfig(stranded, caller, runtime)
+	if err == nil {
+		t.Fatal("a runtime binding must not satisfy the configured-administrator check")
+	}
+	if !strings.Contains(err.Error(), "no administrator") {
+		t.Errorf("expected the no-administrator refusal, got: %v", err)
+	}
+}
+
 // TestOIDCSave_AllowsIncompleteBlockWhileDisabled: a half-filled draft with the
 // switch off has to stay savable, because that is how an operator stages an
 // issuer before turning SSO on. Nothing reads a disabled block, so there is
@@ -470,6 +521,45 @@ func TestOIDCView_ReportsRestartRequired(t *testing.T) {
 	}
 	if view.RestartRequired {
 		t.Error("both off: nothing is pending")
+	}
+}
+
+// TestOIDCView_RestartRequiredComparesTheSessionClocks. The banner has to fire
+// for more than the on/off switch: an operator who shortens an idle timeout and
+// sees nothing happen has the same problem as one who enables SSO and sees
+// nothing happen. Every value a running Authenticator will disclose is compared.
+func TestOIDCView_RestartRequiredComparesTheSessionClocks(t *testing.T) {
+	idp := newUIFakeIdP(t)
+	srv, _ := newOIDCTestServer(t, idp, "", nil)
+
+	// What newOIDCTestServer's authenticator is actually running: no explicit
+	// clocks, so oidcauth applied its own defaults.
+	running := config.OIDCConfig{
+		Enabled:  true,
+		Issuer:   srv.OIDC.Issuer(),
+		ClientID: "cloop-dashboard",
+	}
+	if srv.oidcRestartRequired(running) {
+		t.Fatalf("a config matching the running authenticator must not ask for a restart "+
+			"(ttl=%s idle=%s claim=%s)", srv.OIDC.SessionTTL(), srv.OIDC.IdleTimeout(), srv.OIDC.MaxClaimAge())
+	}
+
+	for _, tc := range []struct {
+		name   string
+		mutate func(*config.OIDCConfig)
+	}{
+		{"issuer", func(o *config.OIDCConfig) { o.Issuer = "https://elsewhere.example.com" }},
+		{"session_ttl_hours", func(o *config.OIDCConfig) { o.SessionTTLHours = 1 }},
+		{"idle_timeout_hours", func(o *config.OIDCConfig) { o.IdleTimeoutHours = 1 }},
+		{"max_claim_age_minutes", func(o *config.OIDCConfig) { o.MaxClaimAgeMinutes = 60 }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			changed := running
+			tc.mutate(&changed)
+			if !srv.oidcRestartRequired(changed) {
+				t.Errorf("changing %s is inert until a restart, so it must set restart_required", tc.name)
+			}
+		})
 	}
 }
 
