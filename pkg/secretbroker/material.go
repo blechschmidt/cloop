@@ -267,15 +267,24 @@ func (b *Broker) githubAppMaterial(ctx context.Context, mat Material, plaintext 
 			Owner:       mat.owner,
 		})
 		if gerr != nil {
-			// A guard that was asked for and is broken fails the lease. The
-			// minted token is already in rec, so releasing the lease destroys
-			// it at GitHub — this does not leak a credential, it denies one.
+			// A guard that was asked for and is broken denies the grant rather
+			// than falling back to handing the token over.
+			//
+			// The token exists at GitHub and will now never reach a workload,
+			// so destroy it here rather than let it live out its hour. It stays
+			// in rec as well, which is the backstop: LeaseFor only `continue`s
+			// past a failed material, so rec is what guarantees the token is
+			// destroyed even if this call does not land. Revoking twice is
+			// harmless — GitHub answers the second with 401/404, which
+			// RevokeInstallationToken treats as the end state it wanted.
+			b.appMinter.revoke(ctx, cred.BaseURL, res.token.Token)
 			return Material{}, fmt.Errorf("%w: guard github app secret %s: %w",
 				ErrGuardUnavailable, mat.SecretName, gerr)
 		}
 		if guarded.Guarded() {
 			mat, err = deliverGuardedGitHub(mat, guarded)
 			if err != nil {
+				b.appMinter.revoke(ctx, cred.BaseURL, res.token.Token)
 				return Material{}, err
 			}
 			mode := "read-write"
@@ -296,6 +305,7 @@ func (b *Broker) githubAppMaterial(ctx context.Context, mat Material, plaintext 
 
 	mat, err = deliverGitHubToken(mat, res.token.Token)
 	if err != nil {
+		b.appMinter.revoke(ctx, cred.BaseURL, res.token.Token)
 		return Material{}, err
 	}
 

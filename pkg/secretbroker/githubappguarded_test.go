@@ -166,3 +166,24 @@ func TestBrokenAppGuardFailsTheLease(t *testing.T) {
 		t.Errorf("material was returned alongside the error: %+v", mat.Files)
 	}
 }
+
+// TestBrokenAppGuardDestroysTheMintedToken: the token is minted before the
+// guard is consulted, so a guard failure leaves a live credential at GitHub
+// that no workload will ever use. It must be destroyed at once rather than
+// left to run out GitHub's hour.
+func TestBrokenAppGuardDestroysTheMintedToken(t *testing.T) {
+	guard := &fakeGuard{err: errors.New("proxy is not running")}
+	repos := []InstallationRepo{{ID: 1, FullName: "acme/api"}}
+	_, gh, err := appMaterialWithGuard(t, guard, repos, Constraints{
+		Repos: []string{"acme/api"},
+	})
+	if err == nil {
+		t.Fatal("a broken guard did not fail the lease")
+	}
+	// liveTokens is what the fake still honours. The discovery token the
+	// inventory lookup mints is destroyed by the minter itself, so a denied
+	// grant should leave nothing behind at all.
+	if live := gh.liveTokens(); len(live) != 0 {
+		t.Errorf("%d token(s) still live at GitHub after a denied grant: %v", len(live), live)
+	}
+}
