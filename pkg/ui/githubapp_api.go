@@ -149,15 +149,28 @@ type repositoryView struct {
 	Private  bool   `json:"private"`
 }
 
-// handleGitHubAppRepositories serves GET /api/github-app/repositories.
+// handleGitHubAppRepositories serves
+// GET /api/projects/{idx}/repositories/available.
 //
 // The secret is named by ?secret=<id-or-name>. This is what turns assigning
 // repositories into picking from a list: the names come from the installation's
 // own inventory, so one that is offered is one GitHub has already confirmed the
 // App can reach.
+//
+// It is scoped to a project rather than global, even though an installation's
+// inventory is hub-wide, because the caller who needs it is the one about to
+// assign from it. A binding pinned to a project never satisfies a global
+// request — holding maintainer on one project must not confer it fleet-wide —
+// so a global route here would have let a project's maintainer create the grant
+// while refusing to show them the list they were choosing from.
 func (s *Server) handleGitHubAppRepositories(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		jsonErr(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	// Resolved for its authorization side effect: an index naming no visible
+	// project is refused before any stored credential is opened.
+	if _, ok := s.projectEntryFromPath(w, r); !ok {
 		return
 	}
 	ref := strings.TrimSpace(r.URL.Query().Get("secret"))

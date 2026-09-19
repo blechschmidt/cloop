@@ -275,7 +275,8 @@ function ghAppLoadRepos() {
   const secret = sel.value;
   out.innerHTML = '<div style="font-size:12px;color:var(--muted)">Asking GitHub…</div>';
 
-  apiMethod('GET', '/api/github-app/repositories?secret=' + encodeURIComponent(secret))
+  apiMethod('GET', '/api/projects/' + ghAppProjectIdx() +
+    '/repositories/available?secret=' + encodeURIComponent(secret))
     .then(d => {
       if (!d || d.error) {
         out.innerHTML = '<div style="color:var(--danger);font-size:12px">' +

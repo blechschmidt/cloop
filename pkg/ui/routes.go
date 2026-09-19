@@ -614,6 +614,11 @@ func (s *Server) routeTable() []routeSpec {
 		{Pattern: "GET /api/projects/{idx}/repositories", Handler: s.handleProjectRepositories, Perm: read, Scope: scopeProjectIdx},
 		{Pattern: "POST /api/projects/{idx}/repositories", Handler: s.handleProjectRepositoriesAssign, Perm: secGrant, Scope: scopeProjectIdx},
 		{Pattern: "DELETE /api/projects/{idx}/repositories", Handler: s.handleProjectRepositoriesRevoke, Perm: secRevoke, Scope: scopeProjectIdx},
+		// The installation's own inventory, for the picker. Project-scoped
+		// rather than global despite describing a hub-wide App: it is read by
+		// whoever is about to grant from it, and a project-pinned binding never
+		// satisfies a global request.
+		{Pattern: "GET /api/projects/{idx}/repositories/available", Handler: s.handleGitHubAppRepositories, Perm: secGrant, Scope: scopeProjectIdx},
 
 		// ── Executor fleet ───────────────────────────────────────────
 		// Registered without a method prefix so the handler's own method
@@ -689,11 +694,11 @@ func (s *Server) routeTable() []routeSpec {
 		// Connecting a GitHub App (Task 20306). Discovery takes a private key
 		// in the request body and stores nothing, but it is gated at secGrant
 		// rather than read: it is the first step of minting a credential, and
-		// it makes the hub sign an assertion of its own identity to a host the
-		// caller names. The inventory route carries the same authority because
-		// it enumerates what a stored credential reaches.
+		// it makes the hub sign an assertion of this hub's identity to a host
+		// the caller names. Global, because connecting an App is hub-wide —
+		// the per-project half of the feature lives on the project routes
+		// above.
 		{Pattern: "POST /api/github-app/installations", Handler: s.handleGitHubAppInstallations, Perm: secGrant, Scope: scopeGlobal},
-		{Pattern: "GET /api/github-app/repositories", Handler: s.handleGitHubAppRepositories, Perm: secGrant, Scope: scopeGlobal},
 		// Self-service access requests (Task 20271). The split permission is
 		// the feature: filing, listing and withdrawing take secRequest, which
 		// sits at operator, while deciding takes secGrant at maintainer.

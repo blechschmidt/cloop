@@ -78,7 +78,7 @@ func TestGitHubAppRepositoriesRequiresASecret(t *testing.T) {
 	}
 	ts := newTestServer(t, dir, nil)
 
-	resp, err := http.Get(ts.URL + "/api/github-app/repositories")
+	resp, err := http.Get(ts.URL + "/api/projects/0/repositories/available")
 	if err != nil {
 		t.Fatalf("GET: %v", err)
 	}
@@ -223,7 +223,7 @@ func TestLiveGitHubAppFlowThroughTheAPI(t *testing.T) {
 	var inventory struct {
 		Repositories []repositoryView `json:"repositories"`
 	}
-	getJSON(t, ts, "/api/github-app/repositories?secret="+created.ID, &inventory)
+	getJSON(t, ts, "/api/projects/0/repositories/available?secret="+created.ID, &inventory)
 	t.Logf("installation covers %d repositories", len(inventory.Repositories))
 	if len(inventory.Repositories) == 0 {
 		t.Skip("the installation covers no repositories, so there is nothing to assign")
