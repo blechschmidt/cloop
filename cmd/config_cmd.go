@@ -9,6 +9,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/authz"
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/configdiff"
+	"github.com/blechschmidt/cloop/pkg/executor/container"
 	"github.com/blechschmidt/cloop/pkg/provider"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
@@ -478,6 +479,7 @@ func applyConfigKey(cfg *config.Config, key, value string) error {
 	case "executors.container.enabled",
 		"executors.container.id",
 		"executors.container.runtime",
+		"executors.container.oci_runtime",
 		"executors.container.image",
 		"executors.container.cpus",
 		"executors.container.memory",
@@ -496,7 +498,7 @@ func applyConfigKey(cfg *config.Config, key, value string) error {
 		cfg.Executors.Container = next
 
 	default:
-		return fmt.Errorf("unknown config key %q\n\nValid keys:\n  provider\n  anthropic.api_key, anthropic.model, anthropic.base_url\n  openai.api_key, openai.model, openai.base_url\n  ollama.base_url, ollama.model\n  claudecode.model, claudecode.effort\n  mock.responses_file, mock.default\n  webhook.url, webhook.events\n  notify.slack_webhook, notify.discord_webhook\n  github.token, github.repo, github.labels\n  sync.remote, sync.branch\n  tracing.enabled, tracing.endpoint, tracing.service_name\n  max_parallel\n  rate_limit.requests_per_second, rate_limit.burst\n  budget.monthly_usd, budget.daily_usd_limit, budget.daily_token_limit\n  budget.alert_threshold_pct, budget.global_usd_pct, budget.global_token_pct\n  ui.max_websocket_conns, ui.max_websocket_conns_per_ip\n  ui.oidc.enabled, ui.oidc.issuer, ui.oidc.client_id, ui.oidc.client_secret\n  ui.oidc.redirect_url, ui.oidc.admin_emails, ui.oidc.session_ttl_hours, ui.oidc.cookie_secure\n  executors.allow_host_process, executors.min_agent_build\n  executors.container.enabled, executors.container.id, executors.container.runtime\n  executors.container.image, executors.container.cpus, executors.container.memory\n  executors.container.pids_limit, executors.container.network, executors.container.allow_hosts\n  executors.container.extra_args, executors.container.selinux_label", key)
+		return fmt.Errorf("unknown config key %q\n\nValid keys:\n  provider\n  anthropic.api_key, anthropic.model, anthropic.base_url\n  openai.api_key, openai.model, openai.base_url\n  ollama.base_url, ollama.model\n  claudecode.model, claudecode.effort\n  mock.responses_file, mock.default\n  webhook.url, webhook.events\n  notify.slack_webhook, notify.discord_webhook\n  github.token, github.repo, github.labels\n  sync.remote, sync.branch\n  tracing.enabled, tracing.endpoint, tracing.service_name\n  max_parallel\n  rate_limit.requests_per_second, rate_limit.burst\n  budget.monthly_usd, budget.daily_usd_limit, budget.daily_token_limit\n  budget.alert_threshold_pct, budget.global_usd_pct, budget.global_token_pct\n  ui.max_websocket_conns, ui.max_websocket_conns_per_ip\n  ui.oidc.enabled, ui.oidc.issuer, ui.oidc.client_id, ui.oidc.client_secret\n  ui.oidc.redirect_url, ui.oidc.admin_emails, ui.oidc.session_ttl_hours, ui.oidc.cookie_secure\n  executors.allow_host_process, executors.min_agent_build\n  executors.container.enabled, executors.container.id, executors.container.runtime\n  executors.container.oci_runtime, executors.container.image, executors.container.cpus\n  executors.container.memory\n  executors.container.pids_limit, executors.container.network, executors.container.allow_hosts\n  executors.container.extra_args, executors.container.selinux_label", key)
 	}
 	return nil
 }
@@ -538,6 +540,20 @@ func applyContainerExecutorKey(c *config.ContainerExecutorConfig, key, value str
 		c.ID = strings.TrimSpace(value)
 	case "executors.container.runtime":
 		c.Runtime = strings.TrimSpace(value)
+	case "executors.container.oci_runtime":
+		// The OCI runtime `--runtime` resolves against (kata, runsc), as
+		// distinct from .runtime above, which selects the engine CLI (docker,
+		// podman). Adjacent names for unrelated things, so the error paths
+		// below name which one they mean.
+		//
+		// Validated here rather than left to the clamp in ValidateExecutors,
+		// because that one *disables the executor* on a bad value: an operator
+		// who mistypes a runtime should be told at the point of typing, not
+		// discover at the next hub start that their container executor is gone.
+		if err := container.ValidateOCIRuntime(strings.TrimSpace(value)); err != nil {
+			return fmt.Errorf("executors.container.oci_runtime: %w", err)
+		}
+		c.OCIRuntime = strings.TrimSpace(value)
 	case "executors.container.image":
 		c.Image = strings.TrimSpace(value)
 	case "executors.container.cpus":
