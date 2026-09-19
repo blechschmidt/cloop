@@ -97,7 +97,21 @@ const (
 	// session the device already holds open. Additive in the strictest sense —
 	// an older agent is never sent one, because the hub checks SupportsAttach
 	// before offering the capability at all.
-	ProtocolVersion = 7
+	//
+	// v8 added StartPayload.Sandbox: the admin's answer to whether this
+	// executor's payloads run on the device's host or in a container on it, and
+	// under which engine, runtime and image. Until then the device decided, and
+	// it always decided host — while advertising the container runtimes it had
+	// found on PATH, so the fleet view showed a containment that did not exist.
+	//
+	// Unlike the additive fields above, this one has a rule about *old* agents
+	// that matters more than the field itself. A pre-v8 agent cannot honour a
+	// container mode; it would receive the frame, ignore the unknown key, and
+	// run the payload on its host. So the hub refuses to dispatch a
+	// container-mode workload to a pre-v8 device rather than sending it and
+	// hoping — see Executor.Start. Host mode and unset are sent to any version,
+	// because for those the old behaviour and the new instruction agree.
+	ProtocolVersion = 8
 	// MinProtocolVersion is the oldest version this build still accepts.
 	MinProtocolVersion = 1
 	// MinRevocationVersion is the first version whose agents understand the
@@ -168,6 +182,20 @@ const (
 	// stranding a fleet mid-upgrade over a capability most work does not use
 	// would be a worse failure than the one being prevented.
 	MinSecretFilesVersion = 6
+	// MinSandboxModeVersion is the first version whose agents read
+	// StartPayload.Sandbox and choose a driver from it.
+	//
+	// A placement rule, like the two above, and the one whose failure mode is
+	// least visible. An older agent handed a container mode does not error: it
+	// ignores a JSON key it does not know and runs the harness as a host
+	// process, reporting success. Nothing in the transcript says the boundary
+	// the admin configured was never applied — which is precisely why this has
+	// to be checked before dispatch rather than discovered afterwards.
+	//
+	// Only container mode is gated. Host and unset are what a pre-v8 agent does
+	// anyway, so sending them to one is not a downgrade; refusing those would
+	// strand a fleet mid-upgrade for no gain.
+	MinSandboxModeVersion = 8
 )
 
 // SupportsRevocation reports whether an agent speaking this protocol version
@@ -190,6 +218,11 @@ func SupportsResumeTerminate(version int) bool { return version >= MinResumeTerm
 // SupportsSecretFiles reports whether an agent speaking this protocol version
 // receives a lease's credential file contents and places them for the workload.
 func SupportsSecretFiles(version int) bool { return version >= MinSecretFilesVersion }
+
+// SupportsSandboxMode reports whether an agent speaking this protocol version
+// reads StartPayload.Sandbox and selects its driver from it, rather than always
+// running the payload as a host process.
+func SupportsSandboxMode(version int) bool { return version >= MinSandboxModeVersion }
 
 // Timing constants. These are protocol-level agreements, not tunables: both
 // sides must derive their timeouts from the same numbers or a healthy agent
@@ -763,6 +796,27 @@ type StartPayload struct {
 	// driver that shares the hub's filesystem reads the files the broker
 	// already wrote, and a driver on another machine has nothing to read.
 	SecretFiles []SecretFile `json:"secret_files,omitempty"`
+	// Sandbox is the admin's per-executor answer to where this payload runs on
+	// the device: as a host process, or in a container on that host, and under
+	// which engine, runtime and image. Added in protocol v8; the zero value
+	// means "unset" and leaves the device's own default alone.
+	//
+	// A value rather than a pointer, and sent on every start rather than
+	// negotiated once at hello. Both follow from the same property: this is the
+	// control plane *instructing* the device, not asking it. A pointer would
+	// make "the hub said nothing" and "the hub said default" two states the
+	// agent has to tell apart when they mean the same thing, and a
+	// hello-time negotiation would mean an admin's change in the UI took effect
+	// only after the device happened to reconnect — leaving a window in which
+	// the hub believed an executor was contained and the device did not agree.
+	//
+	// Unlike WorkspaceCredential and SecretFiles, this belongs inside no
+	// secret-free carve-out: it holds no credential, so it is safe for
+	// pkg/executorstore to persist and for the audit trail to echo. That it is
+	// a sibling of Spec rather than a Spec field is instead about ownership —
+	// Spec describes one workload, and this describes the executor every
+	// workload on that device gets.
+	Sandbox executor.SandboxSettings `json:"sandbox,omitempty"`
 }
 
 // SecretFile is one credential file, with the bytes, on its way to a device.

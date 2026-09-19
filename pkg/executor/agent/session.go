@@ -514,6 +514,14 @@ func (a *Agent) handleStart(ctx context.Context, sess *deviceSession, frame remo
 	wl := &workload{
 		handleID: handleID,
 		buf:      newRetainBuffer(a.cfg.RetainBytes),
+		// Seeded with the host driver and replaced below by whatever actually
+		// starts the payload. Seeded rather than left nil so that runner() has
+		// no nil case for callers to forget: a status request can arrive while
+		// this workload is still fetching its source tree, and at that point
+		// localID is empty — which every driver answers with an unknown-handle
+		// error that the caller already falls back from. A nil here would turn
+		// that harmless question into a panic on the device.
+		driver: a.local,
 		status: executor.Status{
 			HandleID: handleID,
 			State:    executor.StatePending,
@@ -608,7 +616,27 @@ func (a *Agent) handleStart(ctx context.Context, sess *deviceSession, frame remo
 	// say the tree is already in place. See provisionedWorkspace.
 	spec.Workspace = provisionedWorkspace(spec.Workspace)
 
-	handle, err := a.local.Start(context.WithoutCancel(ctx), spec)
+	// Which driver runs this payload — a host process, or a container on this
+	// device — is the control plane's decision, carried in the start frame
+	// (Task 20307). A configuration this device cannot honour fails the start
+	// rather than falling back to the host: see driver.go for why that is the
+	// whole security value of the setting.
+	//
+	// Resolved here, after the workspace is on disk and the write-back plan is
+	// made, because a container mounts that tree rather than creating it — and
+	// before anything is launched, so a device that cannot provide the
+	// configured containment has not started a harness by the time it says so.
+	runner, err := a.drivers.driverFor(payload.Sandbox, a.local)
+	if err != nil {
+		a.forget(handleID)
+		a.reply(ctx, sess, remote.TypeStarted, frame.ID, handleID, remote.StartedPayload{
+			HandleID: handleID,
+			Error:    err.Error(),
+		})
+		return
+	}
+
+	handle, err := runner.Start(context.WithoutCancel(ctx), spec)
 	if err != nil {
 		// Release the reservation: nothing is running, and holding the slot
 		// would leak capacity on every failed start.
@@ -621,6 +649,7 @@ func (a *Agent) handleStart(ctx context.Context, sess *deviceSession, frame remo
 	}
 
 	wl.mu.Lock()
+	wl.driver = runner
 	wl.localID = handle.ID
 	wl.startedAt = handle.StartedAt
 	wl.status = executor.Status{
@@ -683,7 +712,7 @@ func (a *Agent) drainOutput(ctx context.Context, wl *workload, localID string, l
 			if armed {
 				continue
 			}
-			if st, err := a.local.Status(ctx, localID); err == nil && st.State.Terminal() {
+			if st, err := wl.runner().Status(ctx, localID); err == nil && st.State.Terminal() {
 				armed = true
 				graceTimer.Reset(drainGrace)
 			}
@@ -713,7 +742,10 @@ func (a *Agent) pumpOutput(wl *workload) {
 	// truncate the log.
 	ctx := context.Background()
 	localID, _ := wl.local()
-	lines, err := a.local.Stream(ctx, localID)
+	// Whatever started this payload is what can read it back. See
+	// workload.runner.
+	runner := wl.runner()
+	lines, err := runner.Stream(ctx, localID)
 	if err != nil {
 		a.cfg.logf("stream %s: %v", wl.handleID, err)
 	} else {
@@ -722,7 +754,7 @@ func (a *Agent) pumpOutput(wl *workload) {
 
 	// The stream is closed, so the workload has terminated and its exit code
 	// is available.
-	status, statusErr := a.local.Status(ctx, localID)
+	status, statusErr := runner.Status(ctx, localID)
 	if statusErr != nil {
 		status = executor.Status{State: executor.StateFailed, Error: statusErr.Error()}
 	}
@@ -864,11 +896,12 @@ func (a *Agent) handleSignal(ctx context.Context, sess *deviceSession, frame rem
 		})
 		return
 	}
-	if err := a.local.Signal(ctx, localID, payload.Signal); err != nil {
+	runner := wl.runner()
+	if err := runner.Signal(ctx, localID, payload.Signal); err != nil {
 		a.replyError(ctx, sess, frame.ID, remote.CodeProtocol, err.Error())
 		return
 	}
-	status, err := a.local.Status(ctx, localID)
+	status, err := runner.Status(ctx, localID)
 	if err != nil {
 		status = wl.snapshot()
 	}
@@ -887,7 +920,7 @@ func (a *Agent) handleStatusReq(ctx context.Context, sess *deviceSession, frame 
 		return
 	}
 	localID, _ := wl.local()
-	status, err := a.local.Status(ctx, localID)
+	status, err := wl.runner().Status(ctx, localID)
 	if err != nil {
 		status = wl.snapshot()
 	}
@@ -1091,7 +1124,7 @@ func (w *workload) cancelProvisioning() bool {
 	return true
 }
 
-// local returns the localprocess handle ID and start time. Both are written
+// local returns the inner driver's handle ID and start time. Both are written
 // once, after the slot is reserved but before the output pump starts, so a
 // concurrent reader (resumeOffers on a reconnect, a status request) needs the
 // lock to avoid observing a half-initialised workload.
@@ -1099,6 +1132,22 @@ func (w *workload) local() (localID string, startedAt time.Time) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return w.localID, w.startedAt
+}
+
+// runner returns the driver that started this workload, or nil if it has not
+// been launched yet.
+//
+// Every post-start call — status, stream, signal, the revocation escalation —
+// goes through here rather than through Agent.local, because localID is only
+// meaningful to whichever driver minted it. Reading the agent's current
+// configuration instead would break precisely when it matters: an admin
+// switching this executor from container back to host while a task runs would
+// leave that task addressed by a driver that never heard of it, so it would
+// report unknown status and survive every attempt to kill it.
+func (w *workload) runner() payloadDriver {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.driver
 }
 
 // reply sends a typed response frame, best-effort.

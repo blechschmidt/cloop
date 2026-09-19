@@ -109,8 +109,15 @@ func (c Config) logf(format string, args ...any) {
 
 // Agent is the device-side executor client.
 type Agent struct {
-	cfg   Config
+	cfg Config
+	// local runs payloads as host processes. Still a concrete type rather than
+	// the payloadDriver interface, because the revocation path uses ScrubEnv,
+	// which only this driver can offer — see scrubHandleEnv.
 	local *localprocess.Executor
+	// drivers holds the container drivers this device has been asked for, one
+	// per distinct sandbox configuration. Empty on a device the hub has never
+	// configured for container mode, which is every device before Task 20307.
+	drivers *driverCache
 
 	// attaches holds the live interactive sessions on this device
 	// (Task 20265). It locks itself.
@@ -145,9 +152,18 @@ type Agent struct {
 // workload is one running task on this device.
 type workload struct {
 	handleID  string // assigned by the control plane
-	localID   string // localprocess handle
+	localID   string // inner driver's handle
 	startedAt time.Time
 	buf       *retainBuffer
+
+	// driver is what started this payload and therefore the only thing that can
+	// address it afterwards: localID is the inner driver's handle, and a pid
+	// means nothing to a container engine while a container name means nothing
+	// to localprocess. Recorded per workload rather than read from the agent
+	// because an admin may change the executor's sandbox mode while this task is
+	// running, and the task has to keep being stoppable by whatever it was
+	// started by. Written once, under mu, beside localID (Task 20307).
+	driver payloadDriver
 
 	// sendMu serialises flushes so two goroutines (the output pump and a
 	// reconnect resume) cannot interleave chunks and produce out-of-order
@@ -268,6 +284,7 @@ func New(cfg Config) (*Agent, error) {
 	a := &Agent{
 		cfg:       cfg,
 		local:     localprocess.New("agent-local"),
+		drivers:   newDriverCache(),
 		workloads: make(map[string]*workload),
 		vault:     newVault(),
 	}

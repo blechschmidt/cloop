@@ -226,6 +226,23 @@ var registry = []Entry{
 		Read:      authz.PermAuditRead,
 	},
 	{
+		Action:  ActionExecutorSandbox,
+		Home:    HomeControlPlane,
+		Entity:  "executor",
+		Trigger: "An admin sets where an executor's payloads run: the device's host, or a container on it.",
+		// `from` and `to` are rendered descriptions of the whole configuration,
+		// not just the mode, because the runtime is what decides whether a
+		// container is behind a hypervisor — a change from runc to kata is a
+		// change of boundary with the mode untouched.
+		Payload:   []string{"action", "executor_id", "from", "to", "mode", "cleared"},
+		Stability: StabilityStable,
+		Read:      authz.PermAuditRead,
+		Note: "The only executor action that records its previous value: it changes a containment " +
+			"boundary, so `from` is what makes \"when did this device stop isolating its workloads\" " +
+			"answerable from the trail alone. `cleared` is true when the configuration was removed " +
+			"rather than replaced.",
+	},
+	{
 		Action:    ActionExecutorStateChange,
 		Home:      HomeControlPlane,
 		Entity:    "executor",

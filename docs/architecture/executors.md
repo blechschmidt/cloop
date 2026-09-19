@@ -302,6 +302,76 @@ itself before starting the harness — see
 device and protocol v3; an agent below either is refused the *placement* rather
 than trusted to notice.
 
+#### Where the payload runs on the device (Task 20307)
+
+`isolation: remote` is a fact about the network, not about containment. It says
+the workload is on another machine whose filesystem the hub cannot read — and it
+says exactly that whether the device runs the harness in a container or as a
+plain process with the agent's own privileges.
+
+Until Task 20307 it was always the latter. The agent built one
+`localprocess.Executor` and used it unconditionally, while its capability
+detection reported the `docker`/`podman`/`nerdctl` binaries it had found on
+`PATH` and the fleet card rendered them as chips. Nothing was lying on purpose;
+there was simply no way for anyone to ask for a container, so "remote" was the
+strongest true statement available.
+
+It is now configurable per executor, by an admin, from the Executors panel
+(**Sandbox** button) or `PUT /api/executors/{id}/sandbox`:
+
+| Field | Meaning | Empty means |
+| --- | --- | --- |
+| `mode` | `host` or `container` | unset — the device behaves as it always did |
+| `engine` | `docker`, `podman`, `nerdctl` | the device detects one |
+| `runtime` | the `--runtime` name: `runc`, `crun`, `runsc`, `kata`… | the engine's default |
+| `image` | the sandbox image | the executor's configured default |
+
+The configuration lives in the control plane (`executor_sandbox`, migration
+0044), not on the device, for the reason `project_executors` does: it is an
+operator's policy *about* an executor rather than a fact belonging to it. A
+device that stored its own containment setting could be asked by its own
+operator to misreport it, and the hub would have no way to tell. Instead the hub
+reads the row at dispatch and stamps it on every start frame
+(`StartPayload.Sandbox`, protocol v8) — so an admin's change in the panel governs
+the *next task*, with no agent restart and no window in which the device's idea
+of its own containment differs from the control plane's.
+
+Three refusals keep the setting a control rather than a hint. Each exists because
+the failure it prevents is silent:
+
+- **A pre-v8 agent is refused container-mode work.** It would not reject an
+  unknown `sandbox` field; it would ignore it and run the harness on its host,
+  reporting success. `ErrSandboxModeUnsupported`.
+- **An unreadable configuration fails the dispatch.** "I could not read whether
+  this executor is supposed to be contained" must not resolve to "run it on the
+  host" — that is a containment decision made by a busy database, in the weaker
+  direction, on a hub too unhealthy to notice. `ErrSandboxModeUnavailable`.
+- **A device that cannot provide the configured containment fails the start.** No
+  fallback to a host process. See `pkg/executor/agent/driver.go`, which extends
+  the container driver's own rule — *an operator who configured a container
+  executor and silently got host execution would believe they had an isolation
+  boundary they do not have* — one machine further out.
+
+Only container mode is version-gated. Host and unset are what a pre-v8 agent does
+anyway, so refusing those would strand a fleet mid-upgrade for nothing.
+
+Capabilities follow the configuration, which is what finally makes a Kata edge
+device describable as one: `Virtualized` and `KernelIsolated` are properties of
+the runtime the hub names, so before this they were necessarily false for every
+remote executor. They are reported only when the mode is `container` *and* the
+live session can honour it — a runtime recorded against host mode confines
+nothing, and an executor must not advertise containment its own `Start` would
+then refuse.
+
+One operational note, because it is the first thing a container mode meets on a
+small device: the driver refuses to run a workload as uid 0. Root inside a
+container defeats `--cap-drop=ALL`, so a runtime escape becomes host root. The
+sandbox user is derived from the workspace directory's owner, which means an agent
+running as root with a root-owned `workdir_root` is refused with a message naming
+the fix. The hardened service unit `cloop executor agent install` writes already
+runs the agent as a dedicated unprivileged user, so a device onboarded that way
+satisfies this without anyone thinking about it.
+
 ### `kubernetes` — Kind `kubernetes`, isolation `remote`
 
 One ephemeral Pod per workload: `generateName`, `restartPolicy: Never`, no

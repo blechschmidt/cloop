@@ -54,7 +54,11 @@ import (
 // maxOCIRuntimeNameLen bounds the name. Real names are under 20 characters;
 // the limit exists so a pathological config cannot produce an unreadable
 // error message or a surprising argv.
-const maxOCIRuntimeNameLen = 64
+//
+// Defined as the shared bound rather than as its own 64, so this package's
+// tests and the validator they exercise cannot disagree about where the
+// boundary is.
+const maxOCIRuntimeNameLen = executor.MaxRuntimeNameLen
 
 // KVMDevice is the host device Kata needs in order to start a VM. Its absence
 // is the single most common reason a kata executor fails on a cloud host: the
@@ -65,34 +69,16 @@ const KVMDevice = "/dev/kvm"
 //
 // Empty is valid and means "the runtime's own default" — no --runtime flag is
 // emitted at all, which is what every existing deployment gets.
+//
+// The rule itself lives in executor.ValidateRuntimeName, which is also what the
+// per-executor sandbox settings an admin sets in the UI are checked against.
+// One definition rather than two is the point: a name the hub's config.yaml
+// accepts and its API refuses — or the reverse — would be a difference of
+// opinion about the same `--runtime` value, and the more permissive of the two
+// would be the one that decided.
 func ValidateOCIRuntime(name string) error {
-	n := strings.TrimSpace(name)
-	if n == "" {
-		return nil
-	}
-	if len(n) > maxOCIRuntimeNameLen {
-		return fmt.Errorf("container: oci_runtime %q is too long (max %d characters)", n, maxOCIRuntimeNameLen)
-	}
-	// A leading dash would be parsed by the CLI as another flag rather than
-	// as the value of --runtime.
-	if strings.HasPrefix(n, "-") {
-		return fmt.Errorf("container: oci_runtime %q may not start with a dash", n)
-	}
-	if strings.ContainsAny(n, `/\`) {
-		return fmt.Errorf(
-			"container: oci_runtime must be a registered runtime name, not a path (got %q) — "+
-				"register the binary in /etc/docker/daemon.json (docker) or containers.conf "+
-				"[engine.runtimes] (podman) and name it here", n)
-	}
-	for _, r := range n {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
-		case r == '.' || r == '_' || r == '-':
-		default:
-			return fmt.Errorf(
-				"container: oci_runtime %q contains %q — names may use letters, digits, dot, underscore and dash",
-				n, string(r))
-		}
+	if err := executor.ValidateRuntimeName(name); err != nil {
+		return fmt.Errorf("container: oci_runtime: %w", err)
 	}
 	return nil
 }

@@ -62,6 +62,15 @@ const (
 	ActionExecutorBind Action = "executor.bind"
 	// ActionExecutorUnbind records a project's executor pin being cleared.
 	ActionExecutorUnbind Action = "executor.unbind"
+	// ActionExecutorSandbox records an executor's sandbox configuration being
+	// set: whether its payloads run on the device's host or in a container on
+	// it, and under which engine, runtime and image (Task 20307).
+	//
+	// Auditable because it is a change to a containment boundary, which makes it
+	// the one executor setting whose *previous* value a reviewer needs. The
+	// payload carries both, so "when did this device stop isolating its
+	// workloads, and who decided that" is answerable from the trail alone.
+	ActionExecutorSandbox Action = "executor.sandbox"
 	// ActionExecutorStateChange records a health-state transition nobody asked for.
 	ActionExecutorStateChange Action = "executor.state_change"
 	// ActionExecutorFailover records a session moving off a failed executor.

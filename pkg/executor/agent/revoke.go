@@ -124,7 +124,25 @@ func (a *Agent) scrubHandleEnv(handleID string, keys []string) []string {
 		// means the start will observe the scrub rather than race it.
 		return nil
 	}
-	return a.local.ScrubEnv(localID, keys)
+	// Only a host process has an environment this device retains a copy of, so
+	// only the localprocess driver can offer the scrub — hence the type
+	// assertion rather than a method on payloadDriver (Task 20307).
+	//
+	// A container workload reporting "nothing scrubbed" is accurate, not a
+	// regression. Its environment lives in the engine's own record of the
+	// container, which this process cannot edit, and the credential *files* a
+	// lease delivered are wiped by the container driver when the workload goes
+	// terminal. The sharp limit in the doc comment above therefore applies with
+	// full force in container mode: the lever that actually takes material back
+	// from a running container is killHolders, which destroys the container and
+	// with it everything in its namespaces.
+	scrubber, ok := wl.runner().(interface {
+		ScrubEnv(handleID string, keys []string) []string
+	})
+	if !ok {
+		return nil
+	}
+	return scrubber.ScrubEnv(localID, keys)
 }
 
 // killHolders terminates every workload still holding a revoked lease.
@@ -174,12 +192,13 @@ func (a *Agent) terminateWorkload(ctx context.Context, handleID, reason string) 
 	if st := wl.snapshot(); st.State.Terminal() {
 		return false
 	}
-	if err := a.local.Signal(ctx, localID, executor.SignalTerminate); err != nil {
+	runner := wl.runner()
+	if err := runner.Signal(ctx, localID, executor.SignalTerminate); err != nil {
 		a.cfg.logf("terminate %s: %v", handleID, err)
 		return false
 	}
 	a.cfg.logf("terminated %s: %s", handleID, reason)
-	go a.escalateKill(handleID, localID)
+	go a.escalateKill(handleID, localID, runner)
 	return true
 }
 
@@ -187,12 +206,17 @@ func (a *Agent) terminateWorkload(ctx context.Context, handleID, reason string) 
 //
 // Detached from the caller's context on purpose: a revoke's ack goes out
 // immediately and a refused resume's handshake returns immediately, and the
-// escalation must not be cancelled by either. It works off the localprocess
+// escalation must not be cancelled by either. It works off the inner driver's
 // handle rather than looking the workload up again, so it still fires for a
 // workload the caller has since dropped from its bookkeeping — which is exactly
 // the abandoned-resume case, where forgetting the handle is the point.
 // Bounded by killGrace either way, so it cannot leak.
-func (a *Agent) escalateKill(handleID, localID string) {
+//
+// The driver is passed in for the same reason the handle is: after killGrace the
+// workload may no longer be in the agent's map, so there is nothing left to ask
+// which driver owns it. Capturing the pair at the moment of the SIGTERM is what
+// keeps the SIGKILL aimed at the same thing (Task 20307).
+func (a *Agent) escalateKill(handleID, localID string, runner payloadDriver) {
 	defer func() {
 		if r := recover(); r != nil {
 			a.cfg.logf("panic escalating kill for %s: %v", handleID, r)
@@ -204,11 +228,11 @@ func (a *Agent) escalateKill(handleID, localID string) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	st, err := a.local.Status(ctx, localID)
+	st, err := runner.Status(ctx, localID)
 	if err != nil || st.State.Terminal() {
 		return
 	}
-	if err := a.local.Signal(ctx, localID, executor.SignalKill); err != nil {
+	if err := runner.Signal(ctx, localID, executor.SignalKill); err != nil {
 		a.cfg.logf("revoke: force-kill %s: %v", handleID, err)
 		return
 	}

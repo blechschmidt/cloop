@@ -84,6 +84,19 @@ type HubOptions struct {
 	// workload naming a grant is refused rather than dispatched to fetch a
 	// private repository anonymously.
 	WorkspaceSource func(executorID string) executor.WorkspaceCredentialSource
+	// SandboxSource resolves an executor's admin-configured sandbox settings:
+	// whether payloads run on that device's host or in a container on it, and
+	// under which engine, runtime and image (Task 20307).
+	//
+	// A factory taking the executor ID, like WorkspaceSource, because the
+	// configuration is per executor — and the inner function takes no arguments
+	// and returns an error, because it is re-read on every dispatch and a failed
+	// read must be able to refuse one. See Options.Sandbox for why that refusal
+	// is the only safe answer.
+	//
+	// Nil leaves every executor unconfigured, which is the pre-Task-20307
+	// behaviour: payloads run as host processes on the device.
+	SandboxSource func(executorID string) func() (executor.SandboxSettings, error)
 	// ExternalURL is what this deployment calls itself, e.g.
 	// https://cloop.example.com. Its host is always an accepted WebSocket
 	// Origin, which is what makes the Executors panel work when a reverse
@@ -210,6 +223,9 @@ func (h *Hub) executorFor(agent AgentRecord, caps AgentCapabilities) (*Executor,
 	}
 	if h.opts.WorkspaceSource != nil {
 		opts.Workspace = h.opts.WorkspaceSource(agent.AgentID)
+	}
+	if h.opts.SandboxSource != nil {
+		opts.Sandbox = h.opts.SandboxSource(agent.AgentID)
 	}
 	ex, err := NewExecutor(opts)
 	if err != nil {

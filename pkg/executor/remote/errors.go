@@ -89,6 +89,21 @@ var (
 	// producing a run whose git authentication fails for a reason nothing names.
 	ErrSecretFilesUnsupported = errors.New("remote: agent does not support secret credential files")
 
+	// ErrSandboxModeUnsupported: the agent speaks a protocol version older than
+	// MinSandboxModeVersion, so it would ignore StartPayload.Sandbox and run the
+	// payload as a host process — whatever containment an admin configured for
+	// this executor. Placing a container-mode workload fails with this rather
+	// than running it on the host and reporting success, which is the one
+	// failure mode of this feature that nothing downstream could detect.
+	ErrSandboxModeUnsupported = errors.New("remote: agent does not support sandbox mode selection")
+
+	// ErrSandboxModeUnavailable: the control plane could not read this
+	// executor's configured sandbox mode, so it does not know whether the
+	// payload is supposed to be contained. Dispatch fails rather than
+	// proceeding: the alternative is running on the host because a database was
+	// briefly busy, which is a containment decision made by a storage fault.
+	ErrSandboxModeUnavailable = errors.New("remote: executor sandbox configuration is unreadable")
+
 	// ErrLeaseNotHeld: the agent was asked to revoke a lease it is not
 	// holding. It is reported, not raised — "the material is not here" is
 	// the end state a revocation wants — so callers treat it as success

@@ -50,7 +50,7 @@ the other.
 
 ## Who may read these
 
-Reading all 111 of the actions below requires the `audit.read` permission, held by `admin`.
+Reading all 112 of the actions below requires the `audit.read` permission, held by `admin`.
 
 The trail is one table behind one pair of admin-only endpoints, so the
 permission does not vary by action today. It is recorded per action anyway,
@@ -76,7 +76,7 @@ whichever one happened to be opened.
 
 | Home | Meaning | Actions |
 | --- | --- | --- |
-| `control-plane` | the hub's own state.db | 99 |
+| `control-plane` | the hub's own state.db | 100 |
 | `project` | the project's .cloop/state.db | 10 |
 | `either` | whichever chain the decision was scoped to | 2 |
 
@@ -88,10 +88,10 @@ Everything else is recorded in the hub's own state.db.
 
 ## Actions by family
 
-111 actions in 32 families. Every action is listed: this section is the whole
+112 actions in 32 families. Every action is listed: this section is the whole
 vocabulary of the `event_type` column.
 
-[`task.*`](#task) (5) · [`run.*`](#run) (2) · [`step.*`](#step) (1) · [`state.*`](#state) (1) · [`config.*`](#config) (1) · [`executor.*`](#executor) (9) · [`workspace.*`](#workspace) (2) · [`sandbox.*`](#sandbox) (1) · [`sandbox.attach.*`](#sandboxattach) (3) · [`secret.*`](#secret) (13) · [`secret.lease.*`](#secretlease) (1) · [`lease.*`](#lease) (3) · [`github_app.*`](#github_app) (1) · [`egress.*`](#egress) (6) · [`gitproxy.*`](#gitproxy) (6) · [`kubeguard.*`](#kubeguard) (5) · [`ci.*`](#ci) (1) · [`ci.session.*`](#cisession) (3) · [`ci.exchange.*`](#ciexchange) (2) · [`ci.relay.*`](#cirelay) (2) · [`ci.rule.*`](#cirule) (3) · [`ci.config.*`](#ciconfig) (1) · [`authz.*`](#authz) (2) · [`api_token.*`](#api_token) (4) · [`session.*`](#session) (8) · [`role_binding.*`](#role_binding) (3) · [`quota.*`](#quota) (4) · [`resource_ceiling.*`](#resource_ceiling) (2) · [`sealing_key.*`](#sealing_key) (2) · [`stt.credential.*`](#sttcredential) (2) · [`user.*`](#user) (9) · [`project.member.*`](#projectmember) (3)
+[`task.*`](#task) (5) · [`run.*`](#run) (2) · [`step.*`](#step) (1) · [`state.*`](#state) (1) · [`config.*`](#config) (1) · [`executor.*`](#executor) (10) · [`workspace.*`](#workspace) (2) · [`sandbox.*`](#sandbox) (1) · [`sandbox.attach.*`](#sandboxattach) (3) · [`secret.*`](#secret) (13) · [`secret.lease.*`](#secretlease) (1) · [`lease.*`](#lease) (3) · [`github_app.*`](#github_app) (1) · [`egress.*`](#egress) (6) · [`gitproxy.*`](#gitproxy) (6) · [`kubeguard.*`](#kubeguard) (5) · [`ci.*`](#ci) (1) · [`ci.session.*`](#cisession) (3) · [`ci.exchange.*`](#ciexchange) (2) · [`ci.relay.*`](#cirelay) (2) · [`ci.rule.*`](#cirule) (3) · [`ci.config.*`](#ciconfig) (1) · [`authz.*`](#authz) (2) · [`api_token.*`](#api_token) (4) · [`session.*`](#session) (8) · [`role_binding.*`](#role_binding) (3) · [`quota.*`](#quota) (4) · [`resource_ceiling.*`](#resource_ceiling) (2) · [`sealing_key.*`](#sealing_key) (2) · [`stt.credential.*`](#sttcredential) (2) · [`user.*`](#user) (9) · [`project.member.*`](#projectmember) (3)
 
 ### task.*
 
@@ -168,6 +168,7 @@ Payload keys, on every action above: `yaml`
 | `executor.enroll` | `executor` | control-plane | stable | A remote agent completes outbound enrolment and joins the fleet. |
 | `executor.failover` | `executor_session` | control-plane | stable | A session is moved off an executor that stopped answering, or fails to be placed anywhere. |
 | `executor.revoke` | `executor` | control-plane | stable | An enrolled agent's credential is revoked and it is removed from the fleet. |
+| `executor.sandbox` | `executor` | control-plane | stable | An admin sets where an executor's payloads run: the device's host, or a container on it. |
 | `executor.state_change` | `executor` | control-plane | stable | Liveness tracking moves an executor between health states without an operator asking. |
 | `executor.unbind` | `executor` | control-plane | stable | A project's executor pin is cleared and it falls back to registry placement. |
 | `executor.uncordon` | `executor` | control-plane | stable | A cordoned executor is returned to normal scheduling. |
@@ -180,6 +181,7 @@ Payload keys:
 - `executor.enroll` — `action`, `executor_id`, `name`, `expires_at`, `workdir_root`, `labels`
 - `executor.failover` — `session_id`, `from`, `to`, `attempt`, `project_path`, `task_id`, `placed`, `error`
 - `executor.revoke` — `action`, `executor_id`, `name`, `kind`
+- `executor.sandbox` — `action`, `executor_id`, `from`, `to`, `mode`, `cleared`
 - `executor.state_change` — `from`, `to`, `reason`
 - `executor.unbind` — `action`, `project`, `project_path`
 - `executor.uncordon` — `action`, `executor_id`, `state`
@@ -187,6 +189,7 @@ Payload keys:
 - `executor.bind` — Where a project's code runs is the most consequential setting on the hub, which is why the creation-dialog path emits this too.
 - `executor.enroll` — `action` repeats the verb without the family prefix — `enroll`, not `executor.enroll`.
 - `executor.failover` — `placed` distinguishes a successful move from an exhausted one; on failure `to` is empty and `error` says why.
+- `executor.sandbox` — The only executor action that records its previous value: it changes a containment boundary, so `from` is what makes "when did this device stop isolating its workloads" answerable from the trail alone. `cleared` is true when the configuration was removed rather than replaced.
 
 ### workspace.*
 

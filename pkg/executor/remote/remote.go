@@ -114,8 +114,44 @@ type Options struct {
 	// synchronously, while the state database that backs the store is opened
 	// later; AttachHandleStore installs it once that has happened.
 	HandleStore executor.HandleStore
+	// Sandbox resolves this executor's admin-configured sandbox settings —
+	// whether payloads run on the device's host or in a container on it, and
+	// under which engine, runtime and image (Task 20307).
+	//
+	// A function rather than a value, consulted on every Start rather than read
+	// once here, because the whole point is that an admin can change it from the
+	// UI and have the next task honour it. A value captured at construction
+	// would go stale the moment the panel was used and would only refresh when
+	// the device happened to reconnect.
+	//
+	// It returns an error rather than just a value, and the error is fatal to
+	// the dispatch. That is deliberate: "I could not read whether this executor
+	// is supposed to be contained" must not resolve to "run it on the host".
+	// See statedb.SandboxSettingsFor, which is the implementation the hub
+	// installs, for the full argument.
+	//
+	// Nil means no configuration source — the pre-Task-20307 behaviour, and what
+	// a hub with no control-plane database gets. Payloads run as they did.
+	Sandbox func() (executor.SandboxSettings, error)
 	// Now overrides the clock for tests.
 	Now func() time.Time
+}
+
+// sandboxSettings resolves the executor's configured sandbox settings.
+//
+// Normalizing here rather than trusting the source keeps one rule in one place:
+// a row written by an older binary, or by a future one with a field this build
+// does not know, is reduced to what this build can actually honour before
+// anything is decided from it.
+func (o Options) sandboxSettings() (executor.SandboxSettings, error) {
+	if o.Sandbox == nil {
+		return executor.SandboxSettings{}, nil
+	}
+	s, err := o.Sandbox()
+	if err != nil {
+		return executor.SandboxSettings{}, err
+	}
+	return s.Normalize(), nil
 }
 
 func (o Options) now() time.Time {
@@ -221,7 +257,44 @@ func (e *Executor) AgentCapabilities() AgentCapabilities {
 // provision a workspace".
 func (e *Executor) Capabilities() executor.Capabilities {
 	caps := e.AgentCapabilities().Executor()
+	// What the admin configured, which for two of these is the only thing that
+	// can answer the question at all. Whether a payload on this device sits
+	// behind a hypervisor or a userspace kernel is not a property of the device
+	// — it is a property of the runtime the hub tells the device to use, so
+	// before this configuration existed both were necessarily false and a Kata
+	// edge device could not be described as one.
+	//
+	// A read error leaves the capabilities unenriched rather than failing, and
+	// that is safe in exactly this direction: Capabilities has no error return
+	// and is called to render a card and to filter placement, so the fallback
+	// must be the claim that grants the least. Unenriched means "not
+	// virtualized, not kernel-isolated" — a placement that requires either is
+	// refused, which is the conservative outcome. The dispatch path does not
+	// share this fallback: see Start, where the same read failing is fatal.
+	if sandbox, err := e.opts.sandboxSettings(); err == nil {
+		caps.Virtualized = sandbox.IsVirtualized()
+		caps.KernelIsolated = sandbox.IsKernelIsolated()
+		if sandbox.Mode == executor.SandboxModeContainer {
+			// Only now are these true. The image and the setup: block are the
+			// container driver's abilities, and until the device was told to run
+			// one there was nothing on the far side that could honour them — a
+			// project naming its own image got the host's environment instead,
+			// silently.
+			caps.SupportsImageOverride = true
+			caps.SupportsSandboxBuild = true
+			caps.SupportsResourceLimits = true
+		}
+	}
 	if sess := e.currentSession(); sess != nil {
+		// Container mode needs a v8 agent to be honoured at all, and placement
+		// has to see that: an executor that advertises containment the link
+		// cannot deliver would be chosen for work that Start then refuses. The
+		// refusal is correct — better than running on the host — but a
+		// capability that is false of the pair should not be true here.
+		if !SupportsSandboxMode(sess.Version()) {
+			caps.Virtualized = false
+			caps.KernelIsolated = false
+		}
 		// The device may be able to do it; the session may not be able to
 		// carry it. Both narrowings are applied here rather than in
 		// AgentCapabilities.Executor because that method has no session to
@@ -365,6 +438,38 @@ func (e *Executor) Start(ctx context.Context, spec executor.Spec) (handle execut
 			describeSecretFiles(spec), MinSecretFilesVersion)
 	}
 
+	// Where this payload runs on the device. Read before anything is leased or
+	// persisted, because it can refuse the dispatch and the cheapest refusal is
+	// the earliest one.
+	//
+	// An unreadable configuration is fatal rather than defaulted. The whole
+	// reason this setting exists in the control plane is that the device does not
+	// get to decide its own containment, and "the database was busy" must not be
+	// able to decide it either — silently, in the weaker direction, on a hub too
+	// unhealthy to report it.
+	sandbox, sandboxErr := e.opts.sandboxSettings()
+	if sandboxErr != nil {
+		return executor.Handle{}, fmt.Errorf(
+			"%w: agent %s (%s): %w — refusing to dispatch rather than run the payload on the "+
+				"device's host without knowing whether that is what the operator configured",
+			ErrSandboxModeUnavailable, e.id, e.name, sandboxErr)
+	}
+
+	// And the same placement rule as the three above, for the same reason and
+	// with the least visible failure of the four: a pre-v8 agent does not reject
+	// an unknown Sandbox field, it ignores it — and runs the harness as a host
+	// process while the fleet view reports the container mode an admin chose.
+	// Nothing downstream can tell the difference, so this is the only place it
+	// can be named.
+	if sandbox.Mode == executor.SandboxModeContainer && !SupportsSandboxMode(sess.Version()) {
+		return executor.Handle{}, fmt.Errorf(
+			"%w: agent %s (%s) speaks protocol v%d but this executor is configured to run payloads in "+
+				"a container on the device (needs v%d); upgrade the agent with "+
+				"`cloop executor agent install --upgrade`, or set this executor's sandbox mode back to "+
+				"host if running on the device's host is acceptable",
+			ErrSandboxModeUnsupported, e.id, e.name, sess.Version(), MinSandboxModeVersion)
+	}
+
 	// Convert and bound the credential files here, before a credential is leased
 	// or a handle row is written, so a lease that cannot fit in a start frame
 	// fails naming the files rather than surfacing later as an oversized-payload
@@ -481,7 +586,7 @@ func (e *Executor) Start(ctx context.Context, spec executor.Spec) (handle execut
 		SecretsRecorded: true,
 	})
 
-	payload := StartPayload{Spec: spec, HandleID: handleID}
+	payload := StartPayload{Spec: spec, HandleID: handleID, Sandbox: sandbox}
 	// Route the *shipped* copy of the workspace, not the one persisted and
 	// audited above. When a git proxy is interposed the device must fetch and
 	// push through it, while the durable record should keep naming the real
