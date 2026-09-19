@@ -213,6 +213,16 @@ func (b *Broker) githubMaterial(ctx context.Context, mat Material, plaintext []b
 // tokens for every repository in the installation, which is strictly worse than
 // the PAT the kind was introduced to improve on. There is deliberately no
 // fallback to that behaviour: a mint that fails denies the grant.
+//
+// When a GitGuard is configured it then takes custody of the minted token and
+// what reaches the sandbox is a proxy session, exactly as for a PAT. Before
+// Task 20306 this branch went straight to deliverGitHubToken and wrote the
+// installation token into a file inside the sandbox — so on a proxy-guarded hub
+// the App kind, the *narrower* of the two GitHub credentials, was the one that
+// still handed a usable GitHub token to the workload. An installation token is
+// short-lived and repository-scoped, which bounds that, but "bounded" is not the
+// property the hub claims: a guarded grant is one whose credential the workload
+// never holds.
 func (b *Broker) githubAppMaterial(ctx context.Context, mat Material, plaintext []byte, rec *mints) (Material, error) {
 	cred, err := ParseGitHubApp(plaintext)
 	if err != nil {
@@ -228,19 +238,12 @@ func (b *Broker) githubAppMaterial(ctx context.Context, mat Material, plaintext 
 		return Material{}, err
 	}
 
-	mat, derr := deliverGitHubToken(mat, res.token.Token)
-	if derr != nil {
-		// The token exists at GitHub but will never reach a workload, so it is
-		// destroyed here rather than left to lapse on its own hour.
-		b.appMinter.revoke(ctx, cred.BaseURL, res.token.Token)
-		return Material{}, derr
-	}
-
-	// The workload is told when its credential dies so a long task can decide
-	// to re-read the file after a renewal rather than discovering the expiry as
-	// an authentication failure. A timestamp is not a credential.
-	mat.Env["CLOOP_GITHUB_TOKEN_EXPIRES_AT"] = res.token.ExpiresAt.UTC().Format(time.RFC3339)
-
+	// Recorded before either delivery branch and before either can fail, for
+	// two reasons: the hub's own workspace provisioning reads it through
+	// Material.GitHubToken() whether or not the sandbox gets a copy, and rec
+	// below is what makes the token revocable. A return that skipped rec would
+	// leave a live credential at GitHub that this hub no longer knows it owns.
+	mat.githubToken = res.token.Token
 	rec.add(appToken{
 		grantID:    mat.GrantID,
 		secretID:   mat.SecretID,
@@ -249,6 +252,57 @@ func (b *Broker) githubAppMaterial(ctx context.Context, mat Material, plaintext 
 		token:      res.token.Token,
 		expiresAt:  res.token.ExpiresAt,
 	})
+
+	if b != nil && b.GitGuard != nil {
+		guarded, gerr := b.GitGuard.GuardGitHub(ctx, GitGuardRequest{
+			Token:       res.token.Token,
+			Repos:       mat.Constraints.Repos,
+			Permissions: mat.Constraints.Permissions,
+			SecretName:  mat.SecretName,
+			SecretID:    mat.SecretID,
+			GrantID:     mat.GrantID,
+			ProjectID:   mat.projectID,
+			ExecutorID:  mat.executorID,
+			Actor:       mat.actor,
+			Owner:       mat.owner,
+		})
+		if gerr != nil {
+			// A guard that was asked for and is broken fails the lease. The
+			// minted token is already in rec, so releasing the lease destroys
+			// it at GitHub — this does not leak a credential, it denies one.
+			return Material{}, fmt.Errorf("%w: guard github app secret %s: %w",
+				ErrGuardUnavailable, mat.SecretName, gerr)
+		}
+		if guarded.Guarded() {
+			mat, err = deliverGuardedGitHub(mat, guarded)
+			if err != nil {
+				return Material{}, err
+			}
+			mode := "read-write"
+			if guarded.ReadOnly {
+				mode = "read-only"
+			}
+			// Both halves are worth stating: which installation and repositories
+			// GitHub scoped the token to, and the fact that the sandbox holds a
+			// proxy session rather than that token.
+			mat.Summary = fmt.Sprintf(
+				"github app installation %d token for %s (proxy-guarded, %s), expires %s",
+				cred.InstallationID, res.summary, mode,
+				res.token.ExpiresAt.UTC().Format(time.RFC3339))
+			return mat, nil
+		}
+		// Declined, not failed: this hub runs no proxy. Fall through.
+	}
+
+	mat, err = deliverGitHubToken(mat, res.token.Token)
+	if err != nil {
+		return Material{}, err
+	}
+
+	// The workload is told when its credential dies so a long task can decide
+	// to re-read the file after a renewal rather than discovering the expiry as
+	// an authentication failure. A timestamp is not a credential.
+	mat.Env["CLOOP_GITHUB_TOKEN_EXPIRES_AT"] = res.token.ExpiresAt.UTC().Format(time.RFC3339)
 
 	mat.Summary = fmt.Sprintf("github app installation %d token for %s, expires %s",
 		cred.InstallationID, res.summary, res.token.ExpiresAt.UTC().Format(time.RFC3339))

@@ -154,6 +154,27 @@ func (n *appNumber) UnmarshalJSON(b []byte) error {
 // integers and the key must parse as RSA, because RS256 is the only algorithm
 // GitHub accepts for an app JWT.
 func ParseGitHubApp(payload []byte) (*AppCredential, error) {
+	return parseGitHubApp(payload, true)
+}
+
+// ParseGitHubAppConnection parses the half of a github_app payload that exists
+// before the App's installation is known: the App ID and the signing key.
+//
+// It is what discovery runs on. An operator configuring cloop has just come
+// from GitHub's App settings page, which shows an App ID and offers a key
+// download, and has no installation ID because that is a property of the
+// *install*, not of the App. The credential this returns can sign an app JWT —
+// enough to ask GitHub where the App is installed — and nothing else: its
+// InstallationID is zero, so mint refuses it (see mint's guard) and it can
+// never be stored as a working secret by mistake.
+//
+// Everything else is validated exactly as ParseGitHubApp validates it, so a
+// malformed key is reported in the connect dialog rather than at the next step.
+func ParseGitHubAppConnection(payload []byte) (*AppCredential, error) {
+	return parseGitHubApp(payload, false)
+}
+
+func parseGitHubApp(payload []byte, requireInstallation bool) (*AppCredential, error) {
 	trimmed := bytes.TrimSpace(payload)
 	if len(trimmed) == 0 {
 		return nil, wrapf(ErrMalformedPayload, "github_app payload is empty")
@@ -177,8 +198,15 @@ func ParseGitHubApp(payload []byte) (*AppCredential, error) {
 	if p.AppID <= 0 {
 		return nil, wrapf(ErrMalformedPayload, "github_app payload: app_id must be a positive integer")
 	}
-	if p.InstallationID <= 0 {
-		return nil, wrapf(ErrMalformedPayload, "github_app payload: installation_id must be a positive integer")
+	switch {
+	case requireInstallation && p.InstallationID <= 0:
+		return nil, wrapf(ErrMalformedPayload,
+			"github_app payload: installation_id must be a positive integer "+
+				"(the hub can discover it from the App ID and key — see the Connect GitHub App dialog)")
+	case !requireInstallation && p.InstallationID < 0:
+		// Absent is the point of this path; negative is still a typo.
+		return nil, wrapf(ErrMalformedPayload,
+			"github_app payload: installation_id must be a positive integer")
 	}
 
 	// Structural fields before the crypto: a bad base_url is cheaper to detect
@@ -325,6 +353,39 @@ func (c *AppCredential) signJWT(now time.Time) (string, error) {
 type InstallationRepo struct {
 	ID       int64  `json:"id"`
 	FullName string `json:"full_name"`
+	Private  bool   `json:"private"`
+}
+
+// AppInstallation is one place an App has been installed: an organisation or a
+// user account.
+//
+// It exists because an installation ID is the one field of a github_app payload
+// that the person configuring it does not have. GitHub hands out an App ID and
+// a private key on the App's own settings page; the installation is created
+// afterwards, by whoever installs the App on their org, and its ID appears only
+// in the URL of a settings page that person may never visit. Asking an operator
+// to go and find it — as this package did before Task 20306 — is asking them to
+// read a number out of a browser address bar, which is exactly the kind of step
+// that gets guessed wrong and surfaces as a 404 at lease time.
+//
+// So the hub asks GitHub instead. Nothing here is a secret: an App ID, an
+// installation ID and an account name are all public identifiers, which is what
+// makes it safe to show the whole list in a dialog.
+type AppInstallation struct {
+	// ID is the installation_id a github_app payload needs.
+	ID int64 `json:"id"`
+	// AppID is the app the installation belongs to. Echoed back so a caller
+	// holding several keys can tell which one produced this list.
+	AppID int64 `json:"app_id"`
+	// Account is the org or user the App is installed on ("bb-selforg").
+	Account string `json:"account"`
+	// AccountType is "Organization" or "User".
+	AccountType string `json:"account_type"`
+	// RepositorySelection is "all" or "selected" — whether the installation
+	// covers every repository the account owns or an explicitly chosen subset.
+	// An operator who granted "all" and still cannot reach a repository has a
+	// different problem from one who granted "selected" and forgot to tick it.
+	RepositorySelection string `json:"repository_selection"`
 }
 
 // InstallationTokenRequest is a mint request. Zero-valued scoping fields mean
@@ -379,6 +440,11 @@ type GitHubAppAPI interface {
 	// call. After it returns nil the credential is dead at GitHub, not merely
 	// deleted from a sandbox's disk.
 	RevokeInstallationToken(ctx context.Context, baseURL, installationToken string) error
+	// ListAppInstallations enumerates where the App is installed. It is
+	// authenticated with the app JWT rather than an installation token —
+	// it is the one call that runs before any installation is known, which is
+	// the whole reason it exists.
+	ListAppInstallations(ctx context.Context, baseURL, appJWT string) ([]AppInstallation, error)
 }
 
 // ---------------------------------------------------------------------------
@@ -474,6 +540,61 @@ func (h *httpGitHubApp) ListInstallationRepos(ctx context.Context, baseURL, toke
 		}
 		out = append(out, body.Repositories...)
 		if len(body.Repositories) == 0 || len(out) >= body.TotalCount {
+			break
+		}
+	}
+	return out, nil
+}
+
+// maxInstallationPages bounds the installation listing for the same reason
+// maxRepoPages bounds the repository one. An App installed on more than 5,000
+// accounts is not a configuration this dialog can help with anyway.
+const maxInstallationPages = 50
+
+func (h *httpGitHubApp) ListAppInstallations(ctx context.Context, baseURL, appJWT string) ([]AppInstallation, error) {
+	// GitHub's wire shape nests the account, and names the same field
+	// differently for an org and a user, so it is decoded into a local type
+	// rather than onto AppInstallation directly.
+	type wireInstallation struct {
+		ID      int64 `json:"id"`
+		AppID   int64 `json:"app_id"`
+		Account struct {
+			Login string `json:"login"`
+			Type  string `json:"type"`
+		} `json:"account"`
+		RepositorySelection string `json:"repository_selection"`
+	}
+
+	var out []AppInstallation
+	for page := 1; page <= maxInstallationPages; page++ {
+		endpoint := fmt.Sprintf("%s/app/installations?per_page=100&page=%d", baseURL, page)
+		resp, err := h.do(ctx, http.MethodGet, endpoint, appJWT, nil)
+		if err != nil {
+			return nil, wrapf(ErrGitHubAppMint, "list app installations: %v", err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			err := wrapf(ErrGitHubAppMint, "list app installations: %s", describeGitHubError(resp))
+			drainClose(resp)
+			return nil, err
+		}
+		var page0 []wireInstallation
+		derr := json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(&page0)
+		drainClose(resp)
+		if derr != nil {
+			return nil, wrapf(ErrGitHubAppMint, "decode app installations: %v", derr)
+		}
+		for _, w := range page0 {
+			out = append(out, AppInstallation{
+				ID:                  w.ID,
+				AppID:               w.AppID,
+				Account:             w.Account.Login,
+				AccountType:         w.Account.Type,
+				RepositorySelection: w.RepositorySelection,
+			})
+		}
+		// This endpoint carries no total_count, so a short page is the only
+		// end-of-list signal there is.
+		if len(page0) < 100 {
 			break
 		}
 	}
@@ -667,6 +788,14 @@ func (m *githubAppMinter) mint(ctx context.Context, cred *AppCredential, c Const
 		return mintResult{}, wrapf(ErrGitHubAppMint,
 			"this hub has no GitHub API client, so a github_app grant cannot be minted "+
 				"(the stored private key is deliberately never delivered as-is)")
+	}
+	if cred == nil || cred.InstallationID <= 0 {
+		// A connection credential (ParseGitHubAppConnection) can sign a JWT but
+		// names no installation, so it must never reach a mint. Without this the
+		// request below would POST to /app/installations/0/access_tokens and the
+		// failure would arrive as a GitHub 404 that names nothing useful.
+		return mintResult{}, wrapf(ErrGitHubAppMint,
+			"github app credential names no installation; discover the installation first")
 	}
 	perms, err := GitHubAppPermissions(c)
 	if err != nil {

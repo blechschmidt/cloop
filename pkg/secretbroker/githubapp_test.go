@@ -88,15 +88,20 @@ type fakeGitHub struct {
 	lifetime time.Duration
 	clock    func() time.Time
 
-	// createErr, listErr and revokeErr force failures.
-	createErr error
-	listErr   error
-	revokeErr error
+	// installs is where the app is installed, for discovery.
+	installs []AppInstallation
+
+	// createErr, listErr, revokeErr and installErr force failures.
+	createErr  error
+	listErr    error
+	revokeErr  error
+	installErr error
 
 	// Recorded traffic.
-	creates []InstallationTokenRequest
-	revoked []string
-	lists   int
+	creates      []InstallationTokenRequest
+	revoked      []string
+	lists        int
+	installCalls int
 
 	// live tracks tokens minted and not yet revoked, which is what makes
 	// "the credential died at the source" checkable.
@@ -133,6 +138,23 @@ func (f *fakeGitHub) CreateInstallationToken(_ context.Context, req Installation
 		ExpiresAt:   f.now().Add(f.lifetime),
 		Permissions: req.Permissions,
 	}, nil
+}
+
+func (f *fakeGitHub) ListAppInstallations(_ context.Context, _, appJWT string) ([]AppInstallation, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.installErr != nil {
+		return nil, f.installErr
+	}
+	// Discovery runs before any installation is known, so it must be the app
+	// JWT that authenticates it. Asserted here because a implementation that
+	// reached for an installation token instead would still pass every
+	// behavioural test while being impossible to use for its one purpose.
+	if strings.Count(appJWT, ".") != 2 {
+		return nil, fmt.Errorf("fake github: app jwt is not a three-part JWS")
+	}
+	f.installCalls++
+	return append([]AppInstallation(nil), f.installs...), nil
 }
 
 func (f *fakeGitHub) ListInstallationRepos(_ context.Context, _, token string) ([]InstallationRepo, error) {

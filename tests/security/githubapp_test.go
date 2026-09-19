@@ -84,6 +84,22 @@ func (g *conformanceGitHub) ListInstallationRepos(_ context.Context, _, _ string
 	return append([]secretbroker.InstallationRepo(nil), g.repos...), nil
 }
 
+func (g *conformanceGitHub) ListAppInstallations(_ context.Context, _, appJWT string) ([]secretbroker.AppInstallation, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	// Recorded alongside the mint JWTs so assertKeyAbsent covers discovery
+	// traffic too: it is the one call an operator makes with a key that is not
+	// yet stored anywhere, so a leak here would escape every other check.
+	g.jwts = append(g.jwts, appJWT)
+	return []secretbroker.AppInstallation{{
+		ID:                  313131,
+		AppID:               424242,
+		Account:             "conformance-org",
+		AccountType:         "Organization",
+		RepositorySelection: "all",
+	}}, nil
+}
+
 func (g *conformanceGitHub) RevokeInstallationToken(_ context.Context, _, token string) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
