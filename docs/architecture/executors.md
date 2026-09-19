@@ -1121,18 +1121,6 @@ discovered in production. `Workspace.GitPlan` renders that sequence as a pure
 function — no I/O, no clock, no environment — which is what lets both callers
 emit the same commands and lets a test assert on them without a git binary.
 
-The fetch is **shallow by default**: `--depth 1` unless the project asked for
-something else. Running a task against a ref needs the tree at that ref, not the
-history behind it, and on a long-lived repository the history is the dominant
-term in provisioning — paid twice, once in transfer and again in the
-post-fetch size check against `Workspace.SizeLimitMB`. `Workspace.FetchDepth()`
-is the single place that resolves it, so the Kubernetes init container and the
-remote agent cannot disagree about what an unset depth means; the Pod's argv
-carries the resolved `--depth` (or `--full-history`) explicitly rather than
-relying on both ends defaulting alike. Projects that read the past rather than
-the tree opt out with `workspace.full_history` in
-[`.cloop/sandbox.yaml`](../reference/sandbox.md#workspace-how-much-history).
-
 **Kubernetes** renders an init container named `workspace` whose argv is exactly
 [`cloop workspace provision`](../reference/commands.md#cloop-workspace-provision).
 Four choices there each had a plausible alternative:
@@ -1591,39 +1579,6 @@ daemon. Running both is safe because reconciliation is **idempotent** — a
 driver already in the registry is reused rather than rebuilt, which matters
 beyond tidiness for the Kubernetes driver, whose credential source opens a
 state database it holds for the process's lifetime.
-
-### Image pre-staging
-
-Once a container driver's preflight passes, reconciliation pulls its configured
-sandbox image into the local store in the background.
-
-The driver never pulls during `Start` — `InspectImage` reports a missing image
-as an error naming the `pull` command — and that is the right behaviour there:
-an implicit pull inside a dispatch is an unbounded network wait held open inside
-an HTTP handler, and a typo'd reference becomes a registry request from the hub.
-But it left nobody responsible for the pull at all. On a freshly provisioned
-host the first task refused with a fix-it message; on a host where someone had
-run the pull by hand, the cost was paid at a moment nobody was measuring.
-
-Startup is where it belongs. Nothing waits on the answer, the call is bounded
-(15 minutes), and a failure is a log line next to the executor it concerns
-rather than an error attached to somebody's task. Pre-staging runs strictly
-after the diagnostic is complete and never changes it: an optimisation must not
-be able to alter the answer to "is this executor usable", which the preflight
-above has already given. An unreachable registry is an ordinary condition — an
-air-gapped deployment has no registry by design — so a failure is logged and
-nothing else.
-
-It deliberately does **not** build derived images. A derived build runs the
-`setup:` commands from a project's own repository, and moving that from "the
-first task that asks for it" to "hub startup" would mean repo-controlled
-commands executing before any task was requested. That is a question about
-*when untrusted code runs*, not a latency question, and the build is
-content-addressed and cached across every task forever — so warming it would buy
-one build, once, in exchange. See [the security model](../security/model.md#no-sandbox-is-reused-across-tasks).
-
-Short-lived CLI callers set `SkipPreflight`, which implies no pre-staging: a
-`cloop config validate` that moved gigabytes would be a surprising command.
 
 Diagnostics are surfaced in three places, so a failure cannot be silent:
 
