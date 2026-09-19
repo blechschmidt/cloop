@@ -492,18 +492,28 @@ mutable, *are* zeroed before being unlinked.
 
 ### `github_pat` versus `github_app`
 
-Both kinds authenticate to the same GitHub and both are delivered through the
-same credential helper. They differ in what the *sandbox* ends up holding, and
-that difference decides how much a leak costs.
+Both kinds authenticate to the same GitHub and, absent a git proxy, both are
+delivered through the same credential helper. They differ in what the *sandbox*
+ends up holding, and that difference decides how much a leak costs.
 
 | | `github_pat` | `github_app` |
 | --- | --- | --- |
 | What the hub stores | the token itself | an App ID, an installation ID and an RS256 **private key** |
-| What the sandbox receives | that same token | an installation token minted for this lease |
+| What the sandbox receives, no git proxy | that same token | an installation token minted for this lease |
+| What the sandbox receives, git proxy configured | a proxy session credential | a proxy session credential |
 | Who enforces the repository allowlist | cloop's credential helper, at `git`'s request | **GitHub**, on every call |
 | Lifetime in the sandbox | the PAT's own, typically months | ~1 hour, re-minted each lease period |
 | Revocation | wipe the file; the token itself is untouched | wipe the file **and** `DELETE /installation/token` |
 | If the workload reads the file and calls the REST API directly | unconstrained — the PAT is whatever GitHub issued | constrained — GitHub refuses anything outside the grant |
+
+**Under a git proxy neither token reaches the workload at all.** When a proxy is
+configured the hub keeps custody of the credential and the sandbox is handed a
+session that is worth nothing anywhere else. Both GitHub kinds take that path;
+until Task 20306 only `github_pat` did, so the App kind — the narrower of the
+two, and the one this section recommends — was the one that still wrote a usable
+GitHub token into the sandbox's filesystem. The installation token's hour and
+its repository scope bounded that, but "bounded" is not the claim a guarded
+grant makes.
 
 **Prefer `github_app`.** It is the only kind where the constraint an operator
 writes becomes a constraint GitHub enforces. `--repos 'acme/tool'` on a PAT is a

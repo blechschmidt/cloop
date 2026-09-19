@@ -251,13 +251,15 @@ window.switchTab = function(name) {
     // bindings live in the control plane's database rather than in project
     // state.
     if (name === 'overview') loadExecutors();
+    if (name === 'overview') loadProjectRepositories();
     if (name === 'chat') loadChatHistory();
     if (name === 'assistant') loadAssistantHistory();
     if (name === 'replay') { loadReplayRuns(); try { window._populateReplayTaskSelector && window._populateReplayTaskSelector(); } catch(_) {} }
     if (name === 'provider-calls') loadProviderCalls();
   } else {
-    if (name === 'settings') { loadConfig(); loadSTTSettings(); loadCIPanel(); loadGlassesLink(); loadHiddenProjects(); loadDiskUsage(); loadBuildInfo(); }
+    if (name === 'settings') { loadConfig(); loadSTTSettings(); loadCIPanel(); loadGitHubApps(); loadGlassesLink(); loadHiddenProjects(); loadDiskUsage(); loadBuildInfo(); }
     if (name === 'overview') loadExecutors();
+    if (name === 'overview') loadProjectRepositories();
     if (name === 'tasks'  && appState) renderTasks(appState);
     if (name === 'kanban' && appState) renderKanban(appState);
     if (name === 'projects') loadProjects();

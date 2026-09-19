@@ -51,7 +51,7 @@ The dashboard and everything an integrator can drive: projects, tasks, runs,
 the executor fleet, secrets and grants, audit, and the display-glasses surface.
 Generated from `routeTable()` in `pkg/ui/routes.go`.
 
-178 endpoints, by the permission each one requires:
+183 endpoints, by the permission each one requires:
 
 | Permission | Endpoints |
 |------------|-----------|
@@ -60,15 +60,15 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 | `config.write` | 16 |
 | `executor.manage` | 8 |
 | `executor.read` | 2 |
-| `project.read` | 46 |
+| `project.read` | 47 |
 | `project.write` | 8 |
 | `run.start` | 3 |
 | `run.stop` | 2 |
 | `sandbox.attach` | 2 |
-| `secret.grant` | 12 |
+| `secret.grant` | 15 |
 | `secret.own` | 6 |
 | `secret.request` | 4 |
-| `secret.revoke` | 2 |
+| `secret.revoke` | 3 |
 | `session.admin` | 2 |
 | `task.mutate` | 27 |
 | `token.admin` | 3 |
@@ -128,6 +128,8 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 | POST | `/api/executors/{id}/cordon` | `executor.manage` | executor |
 | POST | `/api/executors/{id}/drain` | `executor.manage` | executor |
 | POST | `/api/executors/{id}/uncordon` | `executor.manage` | executor |
+| POST | `/api/github-app/installations` | `secret.grant` | global |
+| GET | `/api/github-app/repositories` | `secret.grant` | global |
 | GET | `/api/glasses/dictate` | `project.read` | project |
 | GET | `/api/glasses/link` | `public` | global |
 | POST | `/api/glasses/link` | `public` | global |
@@ -174,6 +176,9 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 | DELETE | `/api/projects/{idx}` | `project.write` | project-index |
 | POST | `/api/projects/{idx}/executor` | `executor.manage` | project-index |
 | POST | `/api/projects/{idx}/hidden` | `view.prefs` | project-index |
+| GET | `/api/projects/{idx}/repositories` | `project.read` | project-index |
+| POST | `/api/projects/{idx}/repositories` | `secret.grant` | project-index |
+| DELETE | `/api/projects/{idx}/repositories` | `secret.revoke` | project-index |
 | POST | `/api/projects/{idx}/run` | `run.start` | project-index |
 | POST | `/api/projects/{idx}/stop` | `run.stop` | project-index |
 | GET | `/api/provider-calls` | `project.read` | project |

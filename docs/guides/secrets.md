@@ -9,6 +9,7 @@ binary. Copy them.
 - [The model](#the-model)
 - [Minting a secret](#minting-a-secret)
 - [Granting it](#granting-it)
+- [Connecting a GitHub App from the dashboard](#connecting-a-github-app-from-the-dashboard)
 - [GitHub repositories and PATs](#github-repositories-and-pats)
 - [Granting a PAT for workspace provisioning](#granting-a-pat-for-workspace-provisioning)
 - [Kubeconfig](#kubeconfig)
@@ -66,7 +67,7 @@ cloop secret mint <name> --kind <kind> [--file <path> | --value <literal>]
 | Kind | Payload |
 | --- | --- |
 | `github_pat` | a GitHub personal access token |
-| `github_app` | GitHub App installation JSON: `app_id`, `installation_id`, `private_key`, optional `base_url`. The hub mints short-lived installation tokens from it and never delivers the key — [worked example](#github-repositories-and-pats) |
+| `github_app` | GitHub App installation JSON: `app_id`, `installation_id`, `private_key`, optional `base_url`. The hub mints short-lived installation tokens from it and never delivers the key. The dashboard [discovers the installation ID for you](#connecting-a-github-app-from-the-dashboard) — [worked example](#github-repositories-and-pats) |
 | `kubeconfig` | a kubeconfig YAML document |
 | `registry` | docker `config.json`, or `user:password` |
 | `env` | one or more environment variables |
@@ -130,6 +131,33 @@ see [Read-only by default](#read-only-by-default) and
 [Narrowing is the only direction](#narrowing-is-the-only-direction).
 
 ---
+
+## Connecting a GitHub App from the dashboard
+
+The CLI needs an `installation_id`, and GitHub does not give you one. The App's
+settings page hands out an App ID and a private key; the installation is created
+later, by whoever installs the App on their organisation, and its ID appears
+only in the URL of a settings page you may never open.
+
+So the dashboard asks GitHub instead. Under **Settings → GitHub Apps**, paste
+the App ID and the PEM and press **Find installations**: the hub signs a
+short-lived app JWT, calls `GET /app/installations`, and lists every account the
+App is installed on with its type and whether it covers all repositories or a
+chosen subset. Pick one and the `github_app` secret is stored with that ID
+filled in. Nothing is persisted until you pick — the key is held only for the
+length of the dialog.
+
+Then, on a project's **Overview** tab, **Repository Access** lists what that
+project may reach and offers the rest. Choosing an App and pressing **List
+repositories** enumerates the installation's own inventory, so the names you
+tick are ones GitHub has already confirmed the App can see rather than patterns
+typed from memory. Pick **Read only** or **Read and write** — which expand to
+`contents:read` and to `contents:write` plus `pull_requests:write`, and to
+nothing else — and the grant is created against `project:<path>`.
+
+This is the same broker call `cloop secret grant` makes, so a grant created
+either way shows up in both places, and `cloop hub audit list` records it
+identically.
 
 ## GitHub repositories and PATs
 

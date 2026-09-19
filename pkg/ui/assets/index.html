@@ -447,6 +447,17 @@
           <div class="live-output-box" id="liveOutputBox" role="log" aria-live="polite" aria-label="Live run output"></div>
         </div>
 
+        <!-- Repository access (Task 20306): which GitHub repositories this
+             project may work on, granted through a connected GitHub App. The
+             installation token is minted by the hub and held by the git proxy,
+             so it never enters the sandbox. -->
+        <div class="section" id="projectReposPanel" style="display:none">
+          <div class="section-title">Repository Access</div>
+          <div class="card">
+            <div id="projectReposBody"></div>
+          </div>
+        </div>
+
         <!-- Event history (Task 20118): step results merged with task starts,
              evolves, kills, skips, status changes, etc. The DOM id remains
              "stepList" so existing CSS keeps working; the renderer now paints
@@ -1146,6 +1157,53 @@
             <button class="btn danger" id="sttClearBtn" style="display:none" onclick="clearSTTCfg()">Clear key</button>
           </div>
           <div id="sttStatusNote" style="font-size:12px;color:var(--muted);margin-top:10px"></div>
+        </div>
+
+        <!--
+          GitHub App connection (Task 20306). Hub-wide, and gated on
+          secret.grant because what it stores is a signing key that can mint
+          repository credentials.
+
+          The two-step shape is deliberate: GitHub's settings page gives out an
+          App ID and a key, never an installation ID, so the hub asks GitHub
+          where the App is installed rather than asking the operator to read a
+          number out of a browser address bar.
+        -->
+        <div class="settings-section" id="ghAppPanel" data-global-perm="secret.grant" data-perm-hide>
+          <h3>GitHub Apps</h3>
+          <p style="font-size:12px;color:var(--muted);margin-bottom:12px">
+            Connect a GitHub App so projects can be granted access to specific repositories.
+            cloop mints a short-lived installation token per run, scoped by GitHub itself to
+            exactly the repositories and permissions granted. When a git proxy is configured the
+            token stays in the hub and the sandbox only ever holds a proxy session, so the
+            credential is never visible to the agent.
+          </p>
+          <div id="ghAppList" style="margin-bottom:14px"></div>
+
+          <div style="padding-top:12px;border-top:1px solid var(--border)">
+            <div style="font-weight:600;margin-bottom:8px">Connect an App</div>
+            <div class="form-row">
+              <label for="ghAppId">App ID</label>
+              <input type="text" id="ghAppId" class="input" placeholder="1234567" autocomplete="off">
+            </div>
+            <div class="form-row">
+              <label for="ghAppName">Name (optional)</label>
+              <input type="text" id="ghAppName" class="input" placeholder="github-acme" autocomplete="off">
+            </div>
+            <div class="form-row">
+              <label for="ghAppBaseUrl">API base URL (GitHub Enterprise only)</label>
+              <input type="text" id="ghAppBaseUrl" class="input" placeholder="https://api.github.com" autocomplete="off">
+            </div>
+            <div class="form-row">
+              <label for="ghAppKey">Private key (PEM)</label>
+              <textarea id="ghAppKey" class="input" rows="5" spellcheck="false" autocomplete="off"
+                placeholder="-----BEGIN RSA PRIVATE KEY-----&#10;..."></textarea>
+            </div>
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+              <button class="btn settings-save" onclick="ghAppDiscover()">Find installations</button>
+            </div>
+            <div id="ghAppInstallations" style="margin-top:12px"></div>
+          </div>
         </div>
 
         <!--

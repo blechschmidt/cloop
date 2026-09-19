@@ -605,6 +605,15 @@ func (s *Server) routeTable() []routeSpec {
 		// Choosing where a project's code runs is a fleet decision, not a
 		// project one.
 		{Pattern: "POST /api/projects/{idx}/executor", Handler: s.handleProjectExecutorBind, Perm: execMgmt, Scope: scopeProjectIdx},
+		// Which repositories a project may work on (Task 20306). Reading the
+		// list needs only project.read — it names repositories, not
+		// credentials — while granting and withdrawing carry the same
+		// authority as any other credential write. All three are evaluated
+		// against *this* project's scope, so holding secret.grant on one
+		// project does not let its maintainer widen another's access.
+		{Pattern: "GET /api/projects/{idx}/repositories", Handler: s.handleProjectRepositories, Perm: read, Scope: scopeProjectIdx},
+		{Pattern: "POST /api/projects/{idx}/repositories", Handler: s.handleProjectRepositoriesAssign, Perm: secGrant, Scope: scopeProjectIdx},
+		{Pattern: "DELETE /api/projects/{idx}/repositories", Handler: s.handleProjectRepositoriesRevoke, Perm: secRevoke, Scope: scopeProjectIdx},
 
 		// ── Executor fleet ───────────────────────────────────────────
 		// Registered without a method prefix so the handler's own method
@@ -677,6 +686,14 @@ func (s *Server) routeTable() []routeSpec {
 		{Pattern: "DELETE /api/grants/{id}", Handler: s.handleGrantDelete, Perm: secOwn, Scope: scopeGlobal},
 		{Pattern: "GET /api/leases", Handler: s.handleLeasesList, Perm: secGrant, Scope: scopeGlobal},
 		{Pattern: "POST /api/leases/{id}/revoke", Handler: s.handleLeaseRevoke, Perm: secRevoke, Scope: scopeGlobal},
+		// Connecting a GitHub App (Task 20306). Discovery takes a private key
+		// in the request body and stores nothing, but it is gated at secGrant
+		// rather than read: it is the first step of minting a credential, and
+		// it makes the hub sign an assertion of its own identity to a host the
+		// caller names. The inventory route carries the same authority because
+		// it enumerates what a stored credential reaches.
+		{Pattern: "POST /api/github-app/installations", Handler: s.handleGitHubAppInstallations, Perm: secGrant, Scope: scopeGlobal},
+		{Pattern: "GET /api/github-app/repositories", Handler: s.handleGitHubAppRepositories, Perm: secGrant, Scope: scopeGlobal},
 		// Self-service access requests (Task 20271). The split permission is
 		// the feature: filing, listing and withdrawing take secRequest, which
 		// sits at operator, while deciding takes secGrant at maintainer.

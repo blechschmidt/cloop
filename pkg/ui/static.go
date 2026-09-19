@@ -115,6 +115,11 @@ var bundleFiles = []string{
 	// CI/CD pipeline federation (Task 20278): the Settings panel that edits
 	// the pipeline allowlist and watches the sessions it mints.
 	"assets/js/32-cicd.js",
+	// GitHub App connection and per-project repository assignment
+	// (Task 20306). Two panels — one on Settings, one on the project
+	// overview — in one fragment, because they share the state that carries
+	// a discovered installation from the first to the second.
+	"assets/js/32-githubapp.js",
 	// Last, and it closes the IIFE 00-core.js opened. A fragment appended
 	// after the close lands at global scope, where none of the shared helpers
 	// are visible — see TestDashboard_MainIIFEClosesInLastFragment. This is
