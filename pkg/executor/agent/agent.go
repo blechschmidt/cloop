@@ -316,6 +316,16 @@ func New(cfg Config) (*Agent, error) {
 			cfg.CredentialPath)
 	}
 	if !a.cred.Valid() && strings.TrimSpace(cfg.Token) == "" {
+		// Name the enrollment file when one was configured. Otherwise this
+		// reads as "no --token was given" to an operator who did supply one,
+		// via the path the installed unit uses — and who then has no hint
+		// that the path is what is wrong.
+		if tf := strings.TrimSpace(cfg.TokenFile); tf != "" {
+			return nil, fmt.Errorf(
+				"agent: this device is not enrolled, and no token was found at %s.\n"+
+					"Run `cloop executor enroll --name <name>` on the control plane, then write the token to that file",
+				tf)
+		}
 		return nil, fmt.Errorf(
 			"agent: this device is not enrolled and no --token was given.\n" +
 				"Run `cloop executor enroll --name <name>` on the control plane, then re-run with --token <token>")

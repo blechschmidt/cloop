@@ -10,7 +10,9 @@ package cmd
 // `enroll` prints a copy-pasteable command rather than doing anything itself.
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"net/url"
 	"os"
 	"os/signal"
@@ -308,16 +310,20 @@ or when the control plane revokes its credential.`,
 		// material: the file is 0600 and the unit carries only its path, so
 		// the token never appears in ExecStart, in `ps`, or in the shell
 		// history of whoever provisioned the device.
-		if strings.TrimSpace(tokenFile) != "" {
-			b, warning, err := remote.ReadTokenFile(tokenFile)
-			if err != nil {
-				return err
-			}
-			if warning != "" {
-				color.New(color.FgYellow, color.Bold).Fprintf(os.Stderr, "warning: %s\n", warning)
-			}
-			applyBundleDefaults(b, &server, &token, &pin, &root)
+		//
+		// A missing file is not an error here — see loadEnrollmentFile. The
+		// unit passes --token-file on every start, but the token behind it is
+		// spent and deleted after the first, so whether this device can still
+		// authenticate is a question about its credential. agent.New answers
+		// it, and refuses only when there is neither.
+		b, warning, _, err := loadEnrollmentFile(tokenFile)
+		if err != nil {
+			return err
 		}
+		if warning != "" {
+			color.New(color.FgYellow, color.Bold).Fprintf(os.Stderr, "warning: %s\n", warning)
+		}
+		applyBundleDefaults(b, &server, &token, &pin, &root)
 
 		labels, err := parseLabelPairs(labelPairs)
 		if err != nil {
@@ -626,6 +632,33 @@ func applyBundleDefaults(b remote.Bundle, server, token, pin, root *string) {
 	if strings.TrimSpace(*root) == "" {
 		*root = b.WorkDirRoot
 	}
+}
+
+// loadEnrollmentFile reads enrollment material from path, reporting a file
+// that is simply absent as not-present rather than as an error.
+//
+// That distinction is the whole point. The agent deletes this file the instant
+// enrollment succeeds (agent.retireTokenFile), because a redeemed single-use
+// token lying around is a credential with no remaining purpose. So on every
+// start after the first, the file being gone is the *expected* state, not a
+// fault — and the durable credential written beside it is what the device
+// authenticates with from then on.
+//
+// Anything else stays fatal. A file that exists but cannot be read, is empty,
+// or does not parse is a provisioning mistake the operator needs told about;
+// only ErrNotExist carries the "already enrolled" meaning.
+func loadEnrollmentFile(path string) (b remote.Bundle, warning string, present bool, err error) {
+	if strings.TrimSpace(path) == "" {
+		return remote.Bundle{}, "", false, nil
+	}
+	b, warning, err = remote.ReadTokenFile(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return remote.Bundle{}, "", false, nil
+		}
+		return remote.Bundle{}, warning, false, err
+	}
+	return b, warning, true, nil
 }
 
 // parseLabelPairs converts repeated --label k=v flags into a map.
