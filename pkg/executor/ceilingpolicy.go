@@ -70,6 +70,7 @@ func ApplyResourceCeiling(c ResourceCeiling) {
 func ResetResourceCeiling() {
 	fleetCeiling.Store(nil)
 	projectCeilingLookup.Store(nil)
+	executorCeilingLookup.Store(nil)
 }
 
 // projectCeilingLookup resolves a project's own ceiling.
@@ -100,14 +101,48 @@ func ProjectResourceCeiling(projectPath string) (ResourceCeiling, bool) {
 	return (*p)(projectPath)
 }
 
-// CeilingFor returns the single ceiling in force for projectPath: the fleet's
-// and the project's, tightened together.
+// executorCeilingLookup resolves one executor's own ceiling.
 //
-// This is what a driver calls. The drivers need it because they, not this
-// package, hold the last word on what a workload is given — see BoundSpec for
-// why the ceiling cannot simply be written onto the Spec ahead of them.
-func CeilingFor(projectPath string) ResourceCeiling {
+// The same hook shape as projectCeilingLookup, installed by the control plane
+// for the same reason: the row lives in SQLite, which this package cannot
+// import. A process that never installs one sees fleet ceilings only.
+var executorCeilingLookup atomic.Pointer[func(executorID string) (ResourceCeiling, bool)]
+
+// SetExecutorCeilingLookup installs the per-executor ceiling resolver.
+func SetExecutorCeilingLookup(fn func(executorID string) (ResourceCeiling, bool)) {
+	if fn == nil {
+		executorCeilingLookup.Store(nil)
+		return
+	}
+	executorCeilingLookup.Store(&fn)
+}
+
+// ExecutorResourceCeiling returns the ceiling recorded for executorID.
+func ExecutorResourceCeiling(executorID string) (ResourceCeiling, bool) {
+	p := executorCeilingLookup.Load()
+	if p == nil || executorID == "" {
+		return ResourceCeiling{}, false
+	}
+	return (*p)(executorID)
+}
+
+// CeilingFor returns the single ceiling in force for a workload: the fleet's,
+// the executor's and the project's, tightened together.
+//
+// This is what a driver calls, passing its own ID as executorID. The drivers
+// need it because they, not this package, hold the last word on what a workload
+// is given — see BoundSpec for why the ceiling cannot simply be written onto
+// the Spec ahead of them.
+//
+// An empty executorID asks only the fleet and the project. That is the honest
+// answer for a caller that does not know where the workload will land, and it
+// errs in the safe direction: a ceiling this function did not apply is one the
+// driver still applies for itself, because the driver always knows its own ID.
+func CeilingFor(projectPath, executorID string) ResourceCeiling {
 	ceiling := FleetResourceCeiling()
+	if ex, ok := ExecutorResourceCeiling(executorID); ok {
+		ceiling = ceiling.Tighten(ex)
+	}
 	if project, ok := ProjectResourceCeiling(projectPath); ok {
 		ceiling = ceiling.Tighten(project)
 	}
@@ -173,22 +208,30 @@ func BoundCPUs(effective float64, capMillis int) float64 {
 //
 // It never fails. A ceiling is a bound, not an admission decision: the outcome
 // of asking for too much is a smaller sandbox, not a refused run.
-func BoundSpec(spec *Spec, projectPath string) []Clamp {
+func BoundSpec(spec *Spec, projectPath, executorID string) []Clamp {
 	if spec == nil {
 		return nil
 	}
-	ceiling := CeilingFor(projectPath)
+	ceiling := CeilingFor(projectPath, executorID)
 	if ceiling.IsZero() {
 		return nil
 	}
 	var clamps []Clamp
 
-	// Fleet first, so that when both ceilings would clamp to the same number
-	// the reported source is the hub-wide one. Of two true answers, "your hub
-	// caps this" is the more useful to the person who has to go and ask.
+	// Fleet first, then executor, then project: widest scope to narrowest, so
+	// that when two ceilings would clamp to the same number the reported source
+	// is the one that binds the most other workloads too. Of several true
+	// answers, "your hub caps this" is more useful than "this machine does" to
+	// the person who has to go and ask — and both are more useful than the
+	// project's own cap, which the asker may well have set themselves.
 	if fleet := FleetResourceCeiling(); !fleet.IsZero() {
 		var c []Clamp
 		spec.ResourceLimits, c = fleet.applyStated(spec.ResourceLimits, CeilingSourceFleet)
+		clamps = append(clamps, c...)
+	}
+	if ex, ok := ExecutorResourceCeiling(executorID); ok && !ex.IsZero() {
+		var c []Clamp
+		spec.ResourceLimits, c = ex.applyStated(spec.ResourceLimits, CeilingSourceExecutor)
 		clamps = append(clamps, c...)
 	}
 	if project, ok := ProjectResourceCeiling(projectPath); ok && !project.IsZero() {

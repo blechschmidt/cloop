@@ -947,7 +947,7 @@ func (s *Server) startRun(ctx context.Context, args []string) (executor.Executor
 	// default" — so without this call the REST API would be a second, quieter
 	// way to start an unbounded workload on a hub whose Web UI caps every one
 	// of them. Exactly the failure the comment above predicts.
-	executor.BoundSpec(&spec, s.WorkDir)
+	executor.BoundSpec(&spec, s.WorkDir, ex.ID())
 
 	// Start is given a context detached from the request: the run outlives
 	// the HTTP call that asked for it, and tying it to r.Context() would kill

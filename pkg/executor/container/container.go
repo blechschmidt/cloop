@@ -1080,7 +1080,7 @@ func (e *Executor) buildRequest(spec executor.Spec, workDir string, extraMounts 
 	// A resolved value of zero is the case the ceiling exists for: no request
 	// and no configured default is an unbounded container, which is precisely
 	// what a fleet-wide cap is meant to stop. BoundLimit fills those in.
-	if ceiling := executor.CeilingFor(spec.WorkDir); !ceiling.IsZero() {
+	if ceiling := executor.CeilingFor(spec.WorkDir, e.id); !ceiling.IsZero() {
 		req.CPUs = executor.BoundCPUs(req.CPUs, ceiling.CPUMillis)
 		req.MemoryMB = executor.BoundLimit(req.MemoryMB, ceiling.MemoryMB)
 		// A negative PIDsLimit is the runtimes' "unlimited" sentinel, which an

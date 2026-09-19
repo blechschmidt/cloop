@@ -27,8 +27,16 @@ import (
 	"github.com/blechschmidt/cloop/pkg/statedb"
 )
 
-// applyResourceCeiling bounds spec's resource limits by the fleet ceiling and
-// then by this project's, returning the clamps so they can be explained.
+// applyResourceCeiling bounds spec's resource limits by the fleet ceiling, then
+// by the ceiling on the executor it is about to run on, then by this project's,
+// returning the clamps so they can be explained.
+//
+// ex is the executor the caller already resolved. It is passed rather than
+// re-derived because the two must not be allowed to disagree: a ceiling applied
+// against a different executor than the one that runs the workload is worse
+// than no ceiling, since an operator would believe it held. A nil ex asks only
+// the fleet and the project, which is the honest answer when the caller has not
+// placed the workload yet.
 //
 // It never fails the dispatch. A ceiling is a bound, not an admission decision:
 // the outcome of exceeding one is a smaller sandbox, not a refused run, and a
@@ -36,17 +44,22 @@ import (
 // inside what it may have. Refusal is the right answer for a capability the
 // executor cannot provide — see applySandbox — and the wrong one for a number
 // that can simply be lowered.
-func applyResourceCeiling(spec executor.Spec, workDir string) (executor.Spec, []executor.Clamp) {
+func applyResourceCeiling(spec executor.Spec, workDir string, ex executor.Executor) (executor.Spec, []executor.Clamp) {
 	// The clamping itself lives in pkg/executor, because the REST API server
 	// dispatches too and must get the identical answer. This wrapper exists for
-	// the project lookup's control-plane directory, which is a Web UI concept.
+	// the lookups' control-plane directory, which is a Web UI concept.
 	installProjectCeilingLookup()
-	clamps := executor.BoundSpec(&spec, workDir)
+	var id string
+	if ex != nil {
+		id = ex.ID()
+	}
+	clamps := executor.BoundSpec(&spec, workDir, id)
 	return spec, clamps
 }
 
 // installProjectCeilingLookup wires the control-plane database into
-// pkg/executor's ceiling resolver.
+// pkg/executor's ceiling resolvers, both the per-project one and the
+// per-executor one.
 //
 // Idempotent and cheap, and called from the dispatch path rather than only from
 // bootstrapExecutors because several tests build a Server as a struct literal
@@ -57,6 +70,9 @@ func applyResourceCeiling(spec executor.Spec, workDir string) (executor.Spec, []
 func installProjectCeilingLookup() {
 	executor.SetProjectCeilingLookup(func(projectPath string) (executor.ResourceCeiling, bool) {
 		return lookupProjectResourceCeiling(controlPlaneDir(), projectPath)
+	})
+	executor.SetExecutorCeilingLookup(func(executorID string) (executor.ResourceCeiling, bool) {
+		return lookupExecutorResourceCeiling(controlPlaneDir(), executorID)
 	})
 }
 
@@ -136,6 +152,37 @@ func lookupProjectResourceCeiling(controlPlaneDir, projectPath string) (executor
 	defer db.Close()
 
 	c, ok, err := db.ProjectResourceCeiling(projectPath)
+	if err != nil || !ok || c.IsZero() {
+		return executor.ResourceCeiling{}, false
+	}
+	return c, true
+}
+
+// lookupExecutorResourceCeiling reads the per-executor ceiling from the control
+// plane's state database.
+//
+// The same shape and the same failure posture as the per-project lookup above,
+// and bounded the same way: a control-plane fault degrades this executor from
+// its own cap to the fleet's, never to no cap. The asymmetry worth noting is
+// that the drivers call CeilingFor for themselves at build-request time, so a
+// blip here that the driver's own later read does not see still ends with the
+// limit applied — this lookup decides what the *spec* records, not solely what
+// the container gets.
+func lookupExecutorResourceCeiling(controlPlaneDir, executorID string) (executor.ResourceCeiling, bool) {
+	if controlPlaneDir == "" || executorID == "" {
+		return executor.ResourceCeiling{}, false
+	}
+	dbPath := state.DBPath(controlPlaneDir)
+	if _, err := os.Stat(dbPath); err != nil {
+		return executor.ResourceCeiling{}, false
+	}
+	db, err := statedb.Open(dbPath)
+	if err != nil {
+		return executor.ResourceCeiling{}, false
+	}
+	defer db.Close()
+
+	c, ok, err := db.ExecutorResourceCeiling(executorID)
 	if err != nil || !ok || c.IsZero() {
 		return executor.ResourceCeiling{}, false
 	}

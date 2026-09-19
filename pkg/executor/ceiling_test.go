@@ -281,7 +281,7 @@ func TestBoundSpecAppliesBothCeilings(t *testing.T) {
 
 	// The capped project gets the tighter of the two, per resource.
 	spec := Spec{ResourceLimits: ResourceLimits{MemoryMB: 65536, CPUMillis: 32000}}
-	clamps := BoundSpec(&spec, "/srv/noisy")
+	clamps := BoundSpec(&spec, "/srv/noisy", "")
 	if spec.ResourceLimits.MemoryMB != 1024 {
 		t.Errorf("memory: got %d MB, want the project's 1024", spec.ResourceLimits.MemoryMB)
 	}
@@ -294,7 +294,7 @@ func TestBoundSpecAppliesBothCeilings(t *testing.T) {
 
 	// Another project sees the fleet ceiling only.
 	other := Spec{ResourceLimits: ResourceLimits{MemoryMB: 65536}}
-	BoundSpec(&other, "/srv/quiet")
+	BoundSpec(&other, "/srv/quiet", "")
 	if other.ResourceLimits.MemoryMB != 8192 {
 		t.Errorf("memory: got %d MB, want the fleet's 8192", other.ResourceLimits.MemoryMB)
 	}
@@ -314,7 +314,7 @@ func TestBoundSpecLeavesAnUnstatedRequestToTheDriver(t *testing.T) {
 	ApplyResourceCeiling(ResourceCeiling{MemoryMB: 2048})
 
 	spec := Spec{WorkDir: "/srv/proj", Argv: []string{"cloop", "run"}}
-	clamps := BoundSpec(&spec, spec.WorkDir)
+	clamps := BoundSpec(&spec, spec.WorkDir, "")
 
 	if spec.ResourceLimits.MemoryMB != 0 {
 		t.Fatalf("the spec was given an explicit %d MB request it never made",
@@ -326,10 +326,10 @@ func TestBoundSpecLeavesAnUnstatedRequestToTheDriver(t *testing.T) {
 
 	// The ceiling is nonetheless reachable to whoever runs the workload, and
 	// bounds a driver that resolved no limit of its own.
-	if got := CeilingFor(spec.WorkDir); got.MemoryMB != 2048 {
+	if got := CeilingFor(spec.WorkDir, ""); got.MemoryMB != 2048 {
 		t.Fatalf("CeilingFor lost the ceiling: got %+v", got)
 	}
-	if got := BoundLimit(0, CeilingFor(spec.WorkDir).MemoryMB); got != 2048 {
+	if got := BoundLimit(0, CeilingFor(spec.WorkDir, "").MemoryMB); got != 2048 {
 		t.Fatalf("an unbounded driver default was left at %d MB, want 2048", got)
 	}
 }
@@ -343,7 +343,7 @@ func TestCeilingForTightensBothSources(t *testing.T) {
 		return ResourceCeiling{MemoryMB: 1024}, true
 	})
 
-	got := CeilingFor("/srv/proj")
+	got := CeilingFor("/srv/proj", "")
 	if got.MemoryMB != 1024 {
 		t.Errorf("memory: got %d, want the project's tighter 1024", got.MemoryMB)
 	}
@@ -361,7 +361,7 @@ func TestBoundSpecWithoutALookupUsesFleetOnly(t *testing.T) {
 	ApplyResourceCeiling(ResourceCeiling{MemoryMB: 2048})
 
 	spec := Spec{ResourceLimits: ResourceLimits{MemoryMB: 65536}}
-	if clamps := BoundSpec(&spec, "/srv/proj"); len(clamps) != 1 {
+	if clamps := BoundSpec(&spec, "/srv/proj", ""); len(clamps) != 1 {
 		t.Fatalf("want exactly the fleet clamp, got %+v", clamps)
 	}
 	if spec.ResourceLimits.MemoryMB != 2048 {
@@ -374,7 +374,7 @@ func TestBoundSpecWithoutALookupUsesFleetOnly(t *testing.T) {
 
 // TestBoundSpecIsSafeOnNil keeps a defensive call from panicking a dispatch.
 func TestBoundSpecIsSafeOnNil(t *testing.T) {
-	if clamps := BoundSpec(nil, "/srv/proj"); clamps != nil {
+	if clamps := BoundSpec(nil, "/srv/proj", ""); clamps != nil {
 		t.Errorf("want no clamps for a nil spec, got %+v", clamps)
 	}
 }

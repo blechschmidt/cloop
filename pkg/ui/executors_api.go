@@ -104,7 +104,16 @@ type executorView struct {
 	// same as host mode, and the card renders the two differently: an unset
 	// remote device is one whose containment nobody has decided.
 	Sandbox *executorSandboxSummary `json:"sandbox,omitempty"`
-	Labels  map[string]string       `json:"labels,omitempty"`
+	// Restricted reports that this executor has a non-empty access list
+	// (Task 20310). Admitted is whether the identity asking may use it.
+	//
+	// Both on the card rather than only in the Access dialog, for the reason
+	// the sandbox mode is: an admin scanning the fleet for a machine to bind a
+	// project to needs to see which ones are off limits before they choose one
+	// and are refused. Admitted is always true when Restricted is false.
+	Restricted bool              `json:"restricted,omitempty"`
+	Admitted   bool              `json:"admitted"`
+	Labels     map[string]string `json:"labels,omitempty"`
 
 	LastHeartbeat *time.Time `json:"last_heartbeat,omitempty"`
 	CreatedAt     *time.Time `json:"created_at,omitempty"`
@@ -795,6 +804,7 @@ func (s *Server) handleExecutorsList(w http.ResponseWriter, r *http.Request) {
 	// an executor that failed to register is exactly the one whose configured
 	// containment an operator is trying to account for.
 	resp.Executors = applySandboxModes(resp.Executors, db)
+	resp.Executors = s.applyAudience(r, resp.Executors, db)
 	jsonOK(w, resp)
 }
 
@@ -1478,6 +1488,19 @@ func (s *Server) handleProjectExecutorBind(w http.ResponseWriter, r *http.Reques
 			ProjectPath:  entry.Path,
 			Alternatives: executor.IsolatedIDs(),
 		}, reason)
+		return
+	}
+	// The access list, last of the refusals because it is the only one about
+	// *who is asking* rather than about the executor itself — an operator
+	// should learn that a device is below the build floor whether or not they
+	// personally may use it.
+	//
+	// Binding is gated as well as running so the refusal arrives when the
+	// choice is made rather than at the next run, but it is the run-time gate
+	// in handleRun that is load-bearing: an admin may narrow an audience after
+	// a project was bound, and a binding made yesterday must not outlive the
+	// access it was made under.
+	if !s.admitExecutorAudience(w, r, id) {
 		return
 	}
 

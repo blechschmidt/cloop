@@ -50,6 +50,15 @@ import (
 const (
 	// CeilingSourceFleet is the hub-wide cap from config `executors.limits`.
 	CeilingSourceFleet = "fleet"
+	// CeilingSourceExecutor is the per-executor cap an admin set on the hub.
+	//
+	// It sits between the fleet's and the project's because it answers a
+	// question neither of them can: *this machine* has 8 GB, whatever the fleet
+	// allows and whatever any project asks for. The fleet ceiling cannot say it
+	// without holding every other executor to the weakest device in the fleet,
+	// and the project ceiling cannot say it because a project does not know
+	// which executor it will land on.
+	CeilingSourceExecutor = "executor"
 	// CeilingSourceProject is the per-project cap an operator set on the hub.
 	CeilingSourceProject = "project"
 )

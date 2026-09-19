@@ -95,7 +95,7 @@ func TestSandboxYAMLCannotExceedTheFleetCeiling(t *testing.T) {
 			spec.ResourceLimits.MemoryMB)
 	}
 
-	got, clamps := applyResourceCeiling(spec, workDir)
+	got, clamps := applyResourceCeiling(spec, workDir, nil)
 
 	if got.ResourceLimits.MemoryMB != 2048 {
 		t.Errorf("memory: got %d MB, want it clamped to the fleet ceiling of 2048",
@@ -138,13 +138,13 @@ func TestAbsentSandboxYAMLIsStillBounded(t *testing.T) {
 		t.Fatal("precondition: an unconfigured project should request nothing")
 	}
 
-	got, _ := applyResourceCeiling(spec, spec.WorkDir)
+	got, _ := applyResourceCeiling(spec, spec.WorkDir, nil)
 	if !got.ResourceLimits.IsZero() {
 		t.Fatalf("the spec was given limits it never requested: %+v", got.ResourceLimits)
 	}
 
 	// What the driver will resolve for a container with no configured default.
-	ceiling := executor.CeilingFor(spec.WorkDir)
+	ceiling := executor.CeilingFor(spec.WorkDir, "")
 	if mem := executor.BoundLimit(0, ceiling.MemoryMB); mem != 2048 {
 		t.Errorf("memory: an unconfigured project would get %d MB, want it bound to 2048", mem)
 	}
@@ -178,7 +178,7 @@ func TestProjectCeilingTightensBelowTheFleet(t *testing.T) {
 	withControlPlaneDir(t, hub)
 
 	spec := executor.Spec{WorkDir: project, ResourceLimits: executor.ResourceLimits{MemoryMB: 65536}}
-	got, clamps := applyResourceCeiling(spec, project)
+	got, clamps := applyResourceCeiling(spec, project, nil)
 
 	if got.ResourceLimits.MemoryMB != 1024 {
 		t.Fatalf("memory: got %d MB, want the tighter per-project ceiling of 1024",
@@ -207,7 +207,7 @@ func TestUnreadableControlPlaneFallsBackToTheFleetCeiling(t *testing.T) {
 	withControlPlaneDir(t, filepath.Join(t.TempDir(), "does-not-exist"))
 
 	spec := executor.Spec{ResourceLimits: executor.ResourceLimits{MemoryMB: 65536}}
-	got, _ := applyResourceCeiling(spec, t.TempDir())
+	got, _ := applyResourceCeiling(spec, t.TempDir(), nil)
 
 	if got.ResourceLimits.MemoryMB != 2048 {
 		t.Fatalf("a missing control plane left the workload at %d MB; the fleet ceiling "+
@@ -231,7 +231,7 @@ func TestDiskCeilingAlsoBoundsTheWorkspaceFetch(t *testing.T) {
 		ResourceLimits: executor.ResourceLimits{DiskMB: 65536},
 		Workspace:      executor.Workspace{Kind: executor.WorkspaceGit, SizeLimitMB: 65536},
 	}
-	got, _ := applyResourceCeiling(spec, t.TempDir())
+	got, _ := applyResourceCeiling(spec, t.TempDir(), nil)
 
 	if got.ResourceLimits.DiskMB != 1024 {
 		t.Errorf("disk: got %d MB, want 1024", got.ResourceLimits.DiskMB)
@@ -252,7 +252,7 @@ func TestWorkspaceFetchLimitIsNotRaised(t *testing.T) {
 		ResourceLimits: executor.ResourceLimits{DiskMB: 512},
 		Workspace:      executor.Workspace{Kind: executor.WorkspaceGit, SizeLimitMB: 256},
 	}
-	got, _ := applyResourceCeiling(spec, t.TempDir())
+	got, _ := applyResourceCeiling(spec, t.TempDir(), nil)
 
 	if got.Workspace.SizeLimitMB != 256 {
 		t.Fatalf("workspace fetch limit: got %d MB, want the project's tighter 256 kept",
@@ -268,7 +268,7 @@ func TestNoCeilingChangesNothing(t *testing.T) {
 	withControlPlaneDir(t, "")
 
 	spec := executor.Spec{ResourceLimits: executor.ResourceLimits{MemoryMB: 65536, CPUMillis: 32000}}
-	got, clamps := applyResourceCeiling(spec, t.TempDir())
+	got, clamps := applyResourceCeiling(spec, t.TempDir(), nil)
 
 	if got.ResourceLimits != spec.ResourceLimits {
 		t.Errorf("an unconfigured hub changed the limits:\n got %+v\nwant %+v",

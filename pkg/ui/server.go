@@ -3236,6 +3236,20 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 	// apply — a concurrency slot the tenant may not have, and a daily budget
 	// it may already have spent — and each returns a typed QUOTA_EXCEEDED
 	// with a Retry-After, because both clear on their own.
+	// Whether this identity may use the executor this project will land on
+	// (Task 20310). First of the admission gates, and deliberately ahead of the
+	// quota ones: being refused an executor is a permanent answer that an
+	// administrator has to change, where a quota refusal clears on its own. A
+	// user told to wait and retry, who then discovers they were never allowed
+	// on that machine, has been sent to the wrong place.
+	//
+	// It is also cheap to be wrong about the order in the other direction: a
+	// caller who fails this gate consumed no slot, so there is nothing to give
+	// back on the way out.
+	if !s.admitExecutorAudienceForProject(w, r, s.resolveWorkDir(r)) {
+		return
+	}
+
 	quotaID := s.quotaIdentity(r)
 	if !s.admitSpend(w, r) {
 		return

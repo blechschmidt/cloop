@@ -438,7 +438,7 @@ func startWorkloadAs(envFor func(executor.Executor) []string, identity, workDir 
 	// bound what all of them produced — including the workspace size limit
 	// applyWorkspace just carried across from the sandbox file. Everything
 	// above this line is what the project asked for; this is what it may have.
-	spec, clamps := applyResourceCeiling(spec, workDir)
+	spec, clamps := applyResourceCeiling(spec, workDir, ex)
 	logResourceClamps(workDir, clamps)
 	logUnenforceableCeiling(ex, workDir, clamps)
 
@@ -616,7 +616,7 @@ func runWorkloadEnvFor(ctx context.Context, workDir string, argv []string, envFo
 	// harness, not an exempt one — `cloop suggest` on a repository whose
 	// sandbox.yaml asks for 900g would otherwise be the way around a cap that
 	// the harness path enforces.
-	spec, clamps := applyResourceCeiling(spec, workDir)
+	spec, clamps := applyResourceCeiling(spec, workDir, ex)
 	logResourceClamps(workDir, clamps)
 	logUnenforceableCeiling(ex, workDir, clamps)
 

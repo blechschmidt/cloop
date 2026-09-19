@@ -354,7 +354,7 @@ func redispatchSession(ctx context.Context, dir string, ev executor.FailoverEven
 	// existed at all carries whatever its .cloop/sandbox.yaml asked for. A
 	// stranded run is exactly when a cap matters most — the node it stranded on
 	// may have died of the load.
-	spec, clamps := applyResourceCeiling(spec, spec.WorkDir)
+	spec, clamps := applyResourceCeiling(spec, spec.WorkDir, target)
 	logResourceClamps(spec.WorkDir, clamps)
 	logUnenforceableCeiling(target, spec.WorkDir, clamps)
 

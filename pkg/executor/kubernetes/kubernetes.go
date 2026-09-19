@@ -1385,7 +1385,7 @@ func (e *Executor) podRequestFor(ctx context.Context, spec executor.Spec, handle
 	// What is left is the case a ceiling exists for: no request and no
 	// configured limit is a Pod with no limit at all, which on a shared cluster
 	// is the one a fleet-wide cap is meant to stop.
-	if ceiling := executor.CeilingFor(spec.WorkDir); !ceiling.IsZero() {
+	if ceiling := executor.CeilingFor(spec.WorkDir, e.id); !ceiling.IsZero() {
 		if req.CPULimit == "" {
 			req.CPULimit = quantityFromMillis(ceiling.CPUMillis)
 		}
