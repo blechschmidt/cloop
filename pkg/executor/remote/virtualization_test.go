@@ -282,3 +282,40 @@ func TestPreflightFailsWhenNoAgentIsConnected(t *testing.T) {
 		t.Errorf("agent finding level = %q, want fail", got)
 	}
 }
+
+// TestPreflightDoesNotClaimTheDeviceHasGVisorInstalled draws the line between
+// two different facts that read identically in a green checklist: that cloop
+// recognises the runtime name an admin typed, and that the device can actually
+// run it.
+//
+// The agent reports container engines ("docker") and never the OCI runtimes
+// registered with them, so the hub genuinely cannot tell — and a finding that
+// reads as verification of an isolation boundary, on a device where runsc may
+// simply not be installed, is the same false positive the /dev/kvm probe was
+// added to remove.
+func TestPreflightDoesNotClaimTheDeviceHasGVisorInstalled(t *testing.T) {
+	s := kataSandbox()
+	s.Runtime = "runsc"
+	ex := sandboxExecutor(t, s, nil)
+	// A device that reports no virtualization: gVisor needs none, so this must
+	// still pass — the point is what the message promises, not whether it does.
+	_, sess := connect(t, ex, remote.AgentRecord{AgentID: "agent-1", Name: "edge-1"},
+		helloReporting(remote.MinVirtualizationProbeVersion, false), nil)
+	defer sess.Close()
+
+	report := ex.Preflight()
+	if !report.OK() {
+		t.Fatalf("a gVisor runtime needs no hypervisor and must not fail preflight: %v", report.Err())
+	}
+	f := findingFor(report, "gvisor")
+	if f.Level != remote.LevelOK {
+		t.Fatalf("gvisor finding = %+v, want ok", f)
+	}
+	// The device was never asked, so the finding must not read as an answer.
+	if !strings.Contains(f.Message, "not visible from here") {
+		t.Errorf("finding must say the device's runtime list was not checked; got %q", f.Message)
+	}
+	if !strings.Contains(f.Fix, "cloop executor test") {
+		t.Errorf("finding should point at the check that can confirm it; got %q", f.Fix)
+	}
+}

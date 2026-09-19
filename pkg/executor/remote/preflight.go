@@ -123,9 +123,20 @@ func (e *Executor) preflightVirtualization(sandbox executor.SandboxSettings, ver
 	// about /dev/kvm below would be noise, and an operator who typed a name
 	// cloop did not recognise needs to hear that rather than nothing.
 	if sandbox.IsKernelIsolated() && !sandbox.IsVirtualized() {
+		// Say what was checked, and no more. This recognises the name the
+		// admin typed; it does not establish that the device has that runtime
+		// installed, because the agent reports container engines and never the
+		// OCI runtimes registered with them. Claiming otherwise would repeat,
+		// for gVisor, the mistake the /dev/kvm probe below exists to correct —
+		// advertising an isolation guarantee from stated intent rather than
+		// demonstrated ability.
 		add("gvisor", LevelOK,
 			fmt.Sprintf("%q is recognised as gVisor: workload syscalls are served by the Sentry "+
-				"rather than the device's kernel, and no hypervisor is required", sandbox.Runtime), "")
+				"rather than the device's kernel, and no hypervisor is required. "+
+				"Whether the device has it registered is not visible from here and is "+
+				"settled at dispatch", sandbox.Runtime),
+			"run `cloop executor test` on the device itself to confirm its container "+
+				"engine knows the runtime")
 		return
 	}
 	if !sandbox.IsVirtualized() {
