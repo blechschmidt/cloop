@@ -196,6 +196,15 @@ Exit codes:
 			pass.Printf("\nOK — the sandbox ran the workload in %s\n", result.Duration.Round(time.Millisecond))
 			dim.Printf("  image:     %s\n", result.Image)
 			dim.Printf("  runtime:   %s\n", result.Runtime)
+			// Name the low-level runtime the workload actually ran under. The
+			// line above is the engine (docker, podman), which is the same
+			// whether the sandbox was a gVisor Sentry, a Kata VM, or plain
+			// runc — so without this an operator cannot tell a successful run
+			// from a silent fall back to the default, and the isolation they
+			// configured is precisely what they cannot confirm.
+			if result.OCIRuntime != "" {
+				dim.Printf("  oci:       %s\n", result.OCIRuntime)
+			}
 			dim.Printf("  container: %s\n", result.ContainerName)
 			if result.MountedBinary != "" {
 				dim.Printf("  binary:    %s (bind-mounted read-only at %s)\n",

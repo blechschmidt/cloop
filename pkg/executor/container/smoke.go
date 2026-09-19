@@ -57,6 +57,18 @@ type SmokeTestResult struct {
 // command that hangs forever is worse than one that reports a timeout.
 const smokeTestTimeout = 2 * time.Minute
 
+// smokeTestUID and smokeTestGID own the throwaway workdir when the control
+// plane runs as root, and so become the UID the sandbox runs as.
+//
+// 65534 is the conventional "nobody"/"nogroup" on Linux and in the Debian and
+// Ubuntu base images. The exact account does not matter — nothing in the
+// sandbox needs to resolve it to a name, and the directory is mode 0777 — only
+// that it is not 0, which is the one value the driver refuses.
+const (
+	smokeTestUID = 65534
+	smokeTestGID = 65534
+)
+
 // SmokeTest runs `cloop version` inside the sandbox and returns what it
 // printed.
 //
@@ -87,6 +99,22 @@ func (e *Executor) SmokeTest(ctx context.Context, workDir string) (SmokeTestResu
 		// the control-plane user, so widen it enough for that UID to write.
 		if err := os.Chmod(tmp, 0o777); err != nil {
 			return result, fmt.Errorf("container: prepare smoke-test workdir: %w", err)
+		}
+		// Hand the directory to an unprivileged owner when the control plane
+		// is root. A rootful run takes the sandbox UID from this directory's
+		// owner (Executor.sandboxUser), and the driver refuses uid 0 — so a
+		// root-owned temp dir makes the smoke test impossible on exactly the
+		// hosts that run the hub as a system service, and the refusal talks
+		// about a "project directory" the operator never named.
+		//
+		// The rule this sidesteps — inherit the project's owner so files stay
+		// readable on the host afterwards — has nothing to hold here: this
+		// directory is deleted a few hundred milliseconds from now.
+		if os.Geteuid() == 0 {
+			if err := os.Chown(tmp, smokeTestUID, smokeTestGID); err != nil {
+				return result, fmt.Errorf(
+					"container: hand the smoke-test workdir to uid %d: %w", smokeTestUID, err)
+			}
 		}
 		workDir = tmp
 	}
