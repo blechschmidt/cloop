@@ -152,7 +152,22 @@ func (a *Agent) handshake(ctx context.Context, sess *deviceSession, isEnrollment
 		agentID = ""
 	}
 
-	hello, err := remote.NewFrame(remote.TypeHello, "hello", "", remote.HelloPayload{
+	// The hello's *envelope* is stamped at the floor, not at this build's
+	// maximum, for the same reason an error frame is: it is sent before a
+	// version exists to stamp it with, so it has to be readable by any hub in
+	// the supported range. A receiver validates the envelope against its own
+	// range before it looks inside, so a v9 agent greeting a v8 hub with a v9
+	// envelope is rejected as "frame version 9 not in [1,8]" — and rejected at
+	// the transport, where NegotiateVersion never runs and its whole premise
+	// ("the peer is newer, ask it to drop to our maximum") never gets a chance.
+	// That turned every protocol bump into a hard requirement to upgrade every
+	// hub before any agent, which is the opposite of the compatibility the
+	// version ladder is for.
+	//
+	// The build's real version still travels, in the payload field below, which
+	// is what the hub actually negotiates against. Envelope and payload answer
+	// different questions here: "can you parse this frame" and "what can I do".
+	hello, err := remote.NewFrameAt(remote.MinProtocolVersion, remote.TypeHello, "hello", "", remote.HelloPayload{
 		ProtocolVersion: remote.ProtocolVersion,
 		AgentID:         agentID,
 		Name:            name,
