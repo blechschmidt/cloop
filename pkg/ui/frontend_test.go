@@ -34,6 +34,15 @@ var providerCallsSource string
 //go:embed executors_api.go
 var executorsAPISource string
 
+// executorSandboxAPISource is pkg/ui/executor_sandbox_api.go (Task 20307).
+// Embedded for both reasons at once: it broadcasts `executor_update` when an
+// admin changes an executor's containment, and its one handler is registered
+// without a method prefix — so the route-drift tests have to read the handler
+// body to learn that it accepts GET, PUT and POST.
+//
+//go:embed executor_sandbox_api.go
+var executorSandboxAPISource string
+
 // auditAPISource is pkg/ui/audit_api.go, for the same reason again: the
 // `audit_append` broadcast (Task 20167) lives there.
 //
@@ -195,7 +204,8 @@ func allUISources() string {
 		"\n" + openAPIAPISource + "\n" + costAPISource +
 		"\n" + attachAPISource +
 		"\n" + requestsAPISource +
-		"\n" + ciAPISource
+		"\n" + ciAPISource +
+		"\n" + executorSandboxAPISource
 }
 
 // dashboardSource is the whole dashboard front end — the rendered index.html

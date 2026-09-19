@@ -92,6 +92,13 @@ func (s *Server) remoteHub() (*remote.Hub, error) {
 			// a broker per workload, or per agent, would leak a handle on
 			// every dispatch.
 			WorkspaceSource: workspaceCredentialFactory(db),
+			// Where an executor's sandbox mode comes from (Task 20307): the
+			// admin's row in this control plane, re-read on every dispatch so a
+			// change made in the Executors panel governs the next task rather
+			// than the next reconnect.
+			//
+			// Over the same database handle, for the reason the two above give.
+			SandboxSource: sandboxSettingsFactory(db),
 			// Agents send no Origin, so these only ever affect browsers.
 			//
 			// The hub gets AllowedOrigins but NOT AllowedWSOrigins: an entry

@@ -66,6 +66,34 @@ function _execCapChips(ex) {
     chips.push('<span class="exec-chip ' + (isolated ? 'pos' : 'neg') + '">isolation: '
       + esc(ex.isolation) + '</span>');
   }
+  // Where payloads run, for an enrolled device (Task 20307).
+  //
+  // The isolation chip above says `remote` for every device and says it whether
+  // or not the machine contains its workloads, because "remote" is a fact about
+  // the network and not about containment. This chip is the one that answers the
+  // question an admin auditing the fleet is actually asking, and it names the
+  // runtime with it: a container on runc and a container on kata are different
+  // boundaries.
+  if (ex.kind === 'remote') {
+    const sb = ex.sandbox;
+    if (sb && sb.mode === 'container') {
+      const rt = sb.runtime ? ' / ' + sb.runtime : '';
+      chips.push('<span class="exec-chip pos" title="Payloads run in a container on this '
+        + 'device' + (sb.runtime ? ', under the ' + esc(sb.runtime) + ' runtime' : '')
+        + '. Set in this executor\'s Sandbox panel.">sandbox: container' + esc(rt) + '</span>');
+    } else if (sb && sb.mode === 'host') {
+      chips.push('<span class="exec-chip neg" title="Payloads run directly on this device\'s '
+        + 'host, with the agent\'s own privileges and filesystem. Chosen in this executor\'s '
+        + 'Sandbox panel.">sandbox: host</span>');
+    } else {
+      // Unset is not host, and the distinction is the point: nobody has decided.
+      // Rendered as a caution rather than a negative for that reason — what it
+      // reports is an open question, not a configuration.
+      chips.push('<span class="exec-chip neg" title="No sandbox mode configured, so this '
+        + 'device runs payloads the way it always has — as a process on its own host. '
+        + 'Set one in its Sandbox panel.">sandbox: unset</span>');
+    }
+  }
   // Shown only when true, unlike the flags below. Virtualization is not a
   // capability an executor is expected to have — the great majority of
   // correctly-configured backends share a kernel — so a "no kata" chip on
@@ -342,6 +370,14 @@ function _renderExecutors(d) {
     h += '<button class="btn" style="padding:3px 9px;font-size:11.5px" '
       + 'onclick="openExecutorDetail(' + i + ')" '
       + 'title="In-flight work, recent completions, and whether anything ran on the host">History</button>';
+    // Only for enrolled devices. For a driver the hub builds itself the mode is
+    // implied by the driver and lives in config.yaml, so offering the button
+    // would promise a control that could not take effect (Task 20307).
+    if (ex.kind === 'remote') {
+      h += '<button class="btn" style="padding:3px 9px;font-size:11.5px" '
+        + 'onclick="openExecutorSandbox(' + i + ')" '
+        + 'title="Whether payloads run on this device&#39;s host or in a container on it, and under which runtime">Sandbox</button>';
+    }
     if (ex.admin_held) {
       h += '<button class="btn" style="padding:3px 9px;font-size:11.5px" onclick="uncordonExecutor(' + i + ')">Uncordon</button>';
     } else {
@@ -502,6 +538,167 @@ window.openExecutorDetail = function(idx) {
 window.closeExecutorDetail = function() {
   closeOverlay('executor-detail-overlay');
   execDetailRefs = [];
+};
+
+// ── Sandbox configuration (Task 20307) ──────────────────────────────────────
+//
+// Where an executor's payloads run: on the device's host, or in a container on
+// it, and under which engine, runtime and image. Before this panel the answer
+// was unconfigurable for the one executor kind where it is not implied by the
+// driver — an enrolled remote device, which always ran the harness as a host
+// process while the card above advertised the container runtimes it had found.
+//
+// The dialog reads its options from the API rather than hardcoding them, so the
+// engines it offers are the ones the backend will accept. A frontend with its
+// own copy of that allowlist drifts, and the admin reads the resulting 400 as a
+// bug rather than as a stale build.
+
+// execSandboxTarget is the executor the open dialog is editing. Held rather than
+// re-derived from the card index, because loadExecutors may reorder the list
+// while the dialog is open and saving into whichever executor now sits at that
+// index would be the worst possible outcome of a race.
+let execSandboxTarget = null;
+
+window.openExecutorSandbox = function(idx) {
+  const ex = _execAt(idx);
+  if (!ex) return;
+  execSandboxTarget = {id: ex.id, name: ex.name || ex.id};
+
+  const sub = document.getElementById('execSandboxSub');
+  if (sub) sub.textContent = ex.id + ' · ' + _execKindLabel(ex.kind);
+  _execSandboxWarn('');
+  // Cleared before the fetch so a previous executor's settings are never on
+  // screen under this one's name.
+  _execSandboxFill({settings: {}, modes: [], engines: []});
+  openOverlay('executor-sandbox-overlay', {dismiss: closeExecutorSandbox});
+
+  api('/api/executors/' + encodeURIComponent(ex.id) + '/sandbox')
+    .then(d => {
+      if (!d || d.error) {
+        _execSandboxWarn((d && d.error) || 'Could not read this executor’s sandbox configuration.');
+        return;
+      }
+      _execSandboxFill(d);
+    })
+    .catch(err => _execSandboxWarn(_execDetailErrText(err)
+      || 'Could not read this executor’s sandbox configuration.'));
+};
+
+window.closeExecutorSandbox = function() {
+  closeOverlay('executor-sandbox-overlay');
+  execSandboxTarget = null;
+};
+
+// _execSandboxWarn shows or hides the caveat line.
+function _execSandboxWarn(text) {
+  const el = document.getElementById('execSandboxWarn');
+  if (!el) return;
+  if (!text) { el.style.display = 'none'; el.textContent = ''; return; }
+  el.style.display = '';
+  el.textContent = text;
+}
+
+// _execSandboxFill populates the form from an API view.
+function _execSandboxFill(d) {
+  const s = (d && d.settings) || {};
+  const mode = document.getElementById('execSandboxMode');
+  if (mode) mode.value = s.mode || '';
+
+  // The engine list is the backend's, plus whatever the device reported. A
+  // device advertising an engine the backend does not accept would otherwise be
+  // invisible here; listing it and letting the save fail with a real message is
+  // more use than silently omitting it.
+  const engine = document.getElementById('execSandboxEngine');
+  if (engine) {
+    const offered = (d && d.engines) || [];
+    const seen = {};
+    let opts = '<option value="">Auto-detect on the device</option>';
+    offered.forEach(e => {
+      if (seen[e]) return;
+      seen[e] = true;
+      const present = ((d && d.device_engines) || []).indexOf(e) >= 0;
+      opts += '<option value="' + esc(e) + '">' + esc(e)
+        + (present ? ' — found on the device' : '') + '</option>';
+    });
+    engine.innerHTML = opts;
+    engine.value = s.engine || '';
+  }
+
+  const rt = document.getElementById('execSandboxRuntime');
+  if (rt) rt.value = s.runtime || '';
+  const img = document.getElementById('execSandboxImage');
+  if (img) img.value = s.image || '';
+
+  const hint = document.getElementById('execSandboxModeHint');
+  if (hint) {
+    hint.textContent = d && d.configured
+      ? 'Set by ' + (d.set_by || 'an admin') + (d.set_at ? ' · ' + relTime(new Date(d.set_at)) : '')
+      : 'Never configured — this executor runs payloads the way its driver always has.';
+  }
+  const engineHint = document.getElementById('execSandboxEngineHint');
+  if (engineHint) {
+    const found = (d && d.device_engines) || [];
+    engineHint.textContent = found.length
+      ? 'This device reported: ' + found.join(', ')
+      : 'This device reported no container engine at its last connect.';
+  }
+  if (d && d.warning) _execSandboxWarn(d.warning);
+  _execSandboxSyncFields();
+}
+
+// _execSandboxSyncFields shows the container fields only for container mode.
+//
+// The values are left in the inputs when they are hidden rather than cleared,
+// so an admin who switches to host to read the hint and switches back has not
+// lost their typing. What must not happen is those values being *saved* under
+// host mode — and they are not: the backend normalizes them away, and does so
+// as the single rule for every writer rather than trusting this function.
+function _execSandboxSyncFields() {
+  const mode = document.getElementById('execSandboxMode');
+  const box = document.getElementById('execSandboxContainerFields');
+  if (!box) return;
+  box.style.display = (mode && mode.value === 'container') ? '' : 'none';
+}
+
+window.onExecSandboxModeChange = function() { _execSandboxSyncFields(); };
+
+window.saveExecutorSandbox = function() {
+  const t = execSandboxTarget;
+  if (!t) return;
+  const payload = {
+    mode:    (document.getElementById('execSandboxMode') || {}).value || '',
+    engine:  (document.getElementById('execSandboxEngine') || {}).value || '',
+    runtime: ((document.getElementById('execSandboxRuntime') || {}).value || '').trim(),
+    image:   ((document.getElementById('execSandboxImage') || {}).value || '').trim(),
+  };
+  apiMethod('PUT', '/api/executors/' + encodeURIComponent(t.id) + '/sandbox', payload)
+    .then(d => {
+      if (!d || d.error) { toast((d && d.error) || 'Failed to save sandbox configuration', 'err'); return; }
+      const where = (d.settings && d.settings.mode === 'container')
+        ? 'a container on ' + t.name
+        : (d.settings && d.settings.mode === 'host') ? t.name + '’s host' : 'the executor default';
+      toast('Payloads on ' + t.name + ' now run in ' + where, 'ok');
+      closeExecutorSandbox();
+      loadExecutors();
+    })
+    .catch(() => toast('Failed to save sandbox configuration', 'err'));
+};
+
+window.clearExecutorSandbox = function() {
+  const t = execSandboxTarget;
+  if (!t) return;
+  if (!confirm('Reset ' + t.name + ' to its default?\n\nIts payloads will run the way its driver '
+      + 'always has — for an enrolled device, that is a process on the device’s own host.')) {
+    return;
+  }
+  apiMethod('PUT', '/api/executors/' + encodeURIComponent(t.id) + '/sandbox', {clear: true})
+    .then(d => {
+      if (!d || d.error) { toast((d && d.error) || 'Failed to reset', 'err'); return; }
+      toast(t.name + ' reset to its default', 'ok');
+      closeExecutorSandbox();
+      loadExecutors();
+    })
+    .catch(() => toast('Failed to reset sandbox configuration', 'err'));
 };
 
 // _execDetailErrText pulls a sentence out of whatever the failure arrived as:

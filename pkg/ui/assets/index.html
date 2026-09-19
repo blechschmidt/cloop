@@ -3064,6 +3064,61 @@
   </div>
 </div>
 
+<!-- Executor sandbox modal (Task 20307): where this executor's payloads run.
+     The mode selector governs the three fields below it, which are only
+     meaningful for a container — see toggleExecSandboxMode. -->
+<div id="executor-sandbox-overlay" data-overlay="flex" onclick="if(event.target===this)closeExecutorSandbox()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
+  <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;width:620px;max-width:95vw;max-height:90vh;overflow:auto">
+    <h2 style="font-size:15px;font-weight:600;margin-bottom:2px">Sandbox</h2>
+    <div id="execSandboxSub" style="font-family:monospace;font-size:11px;color:var(--muted);margin-bottom:16px"></div>
+    <div id="execSandboxWarn" class="exec-sched-note" style="display:none;margin-bottom:14px"></div>
+
+    <div class="form-group">
+      <label class="form-label" for="execSandboxMode">Where payloads run</label>
+      <select class="form-select" id="execSandboxMode" onchange="onExecSandboxModeChange()">
+        <option value="">Executor default (unset)</option>
+        <option value="host">On the executor host</option>
+        <option value="container">In a container on the executor host</option>
+      </select>
+      <div class="form-hint" id="execSandboxModeHint"></div>
+    </div>
+
+    <div id="execSandboxContainerFields" style="display:none">
+      <div class="form-row">
+        <div class="form-group" style="flex:1">
+          <label class="form-label" for="execSandboxEngine">Container engine</label>
+          <select class="form-select" id="execSandboxEngine"></select>
+          <div class="form-hint" id="execSandboxEngineHint"></div>
+        </div>
+        <div class="form-group" style="flex:1">
+          <label class="form-label" for="execSandboxRuntime">Container runtime</label>
+          <input class="form-input" id="execSandboxRuntime" list="execSandboxRuntimeList" placeholder="default (runc)" spellcheck="false">
+          <datalist id="execSandboxRuntimeList">
+            <option value="runc">runc — host kernel, namespaces only</option>
+            <option value="crun">crun — host kernel, namespaces only</option>
+            <option value="runsc">runsc — gVisor userspace kernel</option>
+            <option value="kata">kata — hypervisor, own guest kernel</option>
+            <option value="kata-qemu">kata-qemu</option>
+            <option value="kata-clh">kata-clh</option>
+          </datalist>
+          <div class="form-hint">The <code>--runtime</code> name the engine resolves against its own root-owned config. A path is refused.</div>
+        </div>
+      </div>
+      <div class="form-group">
+        <label class="form-label" for="execSandboxImage">Container image</label>
+        <input class="form-input" id="execSandboxImage" placeholder="executor default" spellcheck="false">
+        <div class="form-hint">Left empty, the executor uses its own configured image. A project's <code>.cloop/sandbox.yaml</code> may still override it, subject to the image trust policy.</div>
+      </div>
+    </div>
+
+    <div class="modal-footer">
+      <button class="btn danger" id="execSandboxClear" onclick="clearExecutorSandbox()">Reset to default</button>
+      <button class="btn" onclick="closeExecutorSandbox()">Cancel</button>
+      <button class="btn primary" onclick="saveExecutorSandbox()">Save</button>
+    </div>
+  </div>
+</div>
+
 <!-- Provider / Model picker modal -->
 <div id="provider-model-overlay" data-overlay="flex" onclick="if(event.target===this)closeProviderModelModal()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
   <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;width:520px;max-width:95vw">

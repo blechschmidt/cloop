@@ -99,7 +99,12 @@ type executorView struct {
 	// backend that is not an enrolled device; a Skew of "none" means compared
 	// and uniform, which is distinct from never compared.
 	VersionSkew *executorSkewView `json:"version_skew,omitempty"`
-	Labels      map[string]string `json:"labels,omitempty"`
+	// Sandbox is the admin-configured answer to where this executor's payloads
+	// run (Task 20307). Nil when nobody has configured it — which is not the
+	// same as host mode, and the card renders the two differently: an unset
+	// remote device is one whose containment nobody has decided.
+	Sandbox *executorSandboxSummary `json:"sandbox,omitempty"`
+	Labels  map[string]string       `json:"labels,omitempty"`
 
 	LastHeartbeat *time.Time `json:"last_heartbeat,omitempty"`
 	CreatedAt     *time.Time `json:"created_at,omitempty"`
@@ -785,6 +790,11 @@ func (s *Server) handleExecutorsList(w http.ResponseWriter, r *http.Request) {
 	// it with a separate list, then add cards for the ones that never
 	// registered and would otherwise be invisible.
 	resp.Executors = missingExecutorViews(applyDiagnostics(resp.Executors, resp.Reconciliation), resp.Reconciliation)
+	// Where each executor's payloads run (Task 20307). After missingExecutorViews
+	// so the cards it synthesises for never-registered drivers are annotated too:
+	// an executor that failed to register is exactly the one whose configured
+	// containment an operator is trying to account for.
+	resp.Executors = applySandboxModes(resp.Executors, db)
 	jsonOK(w, resp)
 }
 

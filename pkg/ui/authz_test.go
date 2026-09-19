@@ -223,7 +223,11 @@ func TestMutatingRoutesRequireMutatingPermissions(t *testing.T) {
 		// the handler body rather than by reading a verb out of the pattern.
 		// Without the source here the scan finds nothing and reports the handler
 		// missing — which is this list's way of saying "register your file".
-		"\n" + attachAPISource
+		"\n" + attachAPISource +
+		// executor_sandbox_api.go holds handleExecutorSandbox, registered
+		// prefix-less because one handler serves the read and the write, so the
+		// verbs it accepts are only discoverable from its body (Task 20307).
+		"\n" + executorSandboxAPISource
 	handlerNames := handlerNamesByPattern()
 
 	for _, rs := range srv.routeTable() {
@@ -288,6 +292,7 @@ func TestRegisterRoutesUsesTheRouteTable(t *testing.T) {
 		{"routes.go", routesSource},
 		{"server.go", serverSource},
 		{"executors_api.go", executorsAPISource},
+		{"executor_sandbox_api.go", executorSandboxAPISource},
 		{"provider_calls.go", providerCallsSource},
 	} {
 		if loc := re.FindStringIndex(src.body); loc != nil {

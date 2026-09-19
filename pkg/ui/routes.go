@@ -647,6 +647,19 @@ func (s *Server) routeTable() []routeSpec {
 		{Pattern: "POST /api/executors/{id}/cordon", Handler: s.handleExecutorCordon, Perm: execMgmt, Scope: scopeExecutor},
 		{Pattern: "POST /api/executors/{id}/uncordon", Handler: s.handleExecutorUncordon, Perm: execMgmt, Scope: scopeExecutor},
 		{Pattern: "POST /api/executors/{id}/drain", Handler: s.handleExecutorDrain, Perm: execMgmt, Scope: scopeExecutor},
+		// Where this executor's payloads run: on the device's host, or in a
+		// container on it, and under which engine, runtime and image (Task
+		// 20307). Registered without a method prefix because one handler serves
+		// both the read and the write — see handleExecutorSandbox for why they
+		// are not two routes — and its own method check answers anything else.
+		//
+		// execMgmt for the GET as well as the write, which is stricter than the
+		// executor detail route above. Deliberately: this response describes a
+		// containment boundary and the precise reasons it might not hold on a
+		// given device — an agent too old to honour it, an engine missing from
+		// its PATH. That is reconnaissance rather than status, so reading it is
+		// an administrative act.
+		{Pattern: "/api/executors/{id}/sandbox", Handler: s.handleExecutorSandbox, Methods: []string{"GET", "PUT", "POST"}, Perm: execMgmt, Scope: scopeExecutor},
 
 		// ── Compliance audit trail ───────────────────────────────────
 		// Admin-only, and global: the trail records the actions of every
