@@ -1287,21 +1287,23 @@ function _renderClaudeAuth(d) {
   panel.innerHTML = h;
 }
 
+// api()/apiMethod(), not fetch(): reaching for fetch() here is what skipped
+// parseAPIResponse, so 401/403 went unhandled and an apierror body rendered as
+// "[object Object]" (Task 20320).
 window.startClaudeAuthLogin = function(opts) {
   var panel = document.getElementById('ccAuthPanel');
   if (panel) panel.innerHTML = '<div style="font-size:13px;color:var(--muted)">Launching <code>claude auth login</code>...</div>';
-  fetch('/api/claudecode/auth/login', {
-    method: 'POST',
-    headers: Object.assign({'Content-Type':'application/json'}, authHeaders()),
-    body: JSON.stringify(opts || {})
-  }).then(function(r) { return r.json(); }).then(function(d) {
+  api('/api/claudecode/auth/login', opts || {}).then(function(d) {
     if (d.error) {
       panel.innerHTML = '<div style="font-size:13px;color:var(--red,#e74c3c)">' + esc(d.error) + '</div><div style="margin-top:8px"><button class="btn" type="button" onclick="loadClaudeAuthStatus()">Back</button></div>';
       return;
     }
     _renderClaudeAuth({session: d.session});
   }).catch(function(err) {
-    if (panel) panel.innerHTML = '<div style="font-size:13px;color:var(--red,#e74c3c)">' + esc(err && err.message || String(err)) + '</div>';
+    // parseAPIResponse already showed 401/403; a bare code would say less.
+    var m = (err && err.message) || String(err);
+    if (m === '401' || m === 'FORBIDDEN') { loadClaudeAuthStatus(); return; }
+    if (panel) panel.innerHTML = '<div style="font-size:13px;color:var(--red,#e74c3c)">' + esc(m) + '</div>';
   });
 };
 
@@ -1315,39 +1317,30 @@ window.submitClaudeAuthCode = function() {
     return;
   }
   if (msg) msg.textContent = 'Submitting...';
-  fetch('/api/claudecode/auth/login/code', {
-    method: 'POST',
-    headers: Object.assign({'Content-Type':'application/json'}, authHeaders()),
-    body: JSON.stringify({code: code})
-  }).then(function(r) { return r.json(); }).then(function(d) {
+  api('/api/claudecode/auth/login/code', {code: code}).then(function(d) {
     if (d.error) {
       if (msg) msg.textContent = d.error;
       return;
     }
     _renderClaudeAuth(d);
   }).catch(function(err) {
-    if (msg) msg.textContent = (err && err.message) || String(err);
+    var m = (err && err.message) || String(err);
+    if (msg) msg.textContent = (m === '401' || m === 'FORBIDDEN') ? '' : m;
   });
 };
 
 window.cancelClaudeAuthLogin = function() {
-  fetch('/api/claudecode/auth/login/cancel', {
-    method: 'POST',
-    headers: authHeaders()
-  }).then(function() {
+  apiMethod('POST', '/api/claudecode/auth/login/cancel').then(function() {
     loadClaudeAuthStatus();
-  });
+  }).catch(function() { loadClaudeAuthStatus(); });
 };
 
 window.logoutClaudeAuth = function() {
   if (!confirm('Sign out of Claude Code? You will need to sign in again to use the claudecode provider.')) return;
-  fetch('/api/claudecode/auth/logout', {
-    method: 'POST',
-    headers: authHeaders()
-  }).then(function(r) { return r.json(); }).then(function(d) {
-    if (d.error) alert('Logout failed: ' + d.error);
+  apiMethod('POST', '/api/claudecode/auth/logout').then(function(d) {
+    if (d.error) toast('Logout failed: ' + d.error, 'err');
     loadClaudeAuthStatus();
-  });
+  }).catch(function() { loadClaudeAuthStatus(); });
 };
 
 window.copyClaudeAuthURL = function() {

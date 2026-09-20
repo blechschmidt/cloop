@@ -69,7 +69,37 @@ import (
 // ample for gzip jitter across toolchain revisions and deliberately too little
 // for another panel — so the next addition here has to build the deferral path
 // rather than move this number again.
-const eagerWireBudgetBytes = 270_000
+//
+// Raised to 270,500 B by Task 20320, and the paragraph above is the reason this
+// one needs an explicit answer rather than a measurement.
+//
+// What it bought: 620 B wire. HEAD measured 269,641 B, leaving 359 B, so this
+// did not fit. The bytes are errText() and normalizeAPIError() in 00-core.js,
+// plus routing the Claude Code panel through api() instead of fetch().
+//
+// Why it is not the addition that comment was aimed at. That sentence is about
+// panels — admin-only UI most sessions never open, which is deferrable in
+// principle and was deferred in practice by naming a second hashed asset and
+// fetching it on demand. These two functions are inside parseAPIResponse, which
+// is the function every api() call already goes through before any panel exists.
+// There is no later moment to load them at: the first response they have to
+// normalise can arrive before the first tab is opened. Deferring them is not
+// expensive here, it is not possible.
+//
+// And they are not a feature. The hub answers in two error dialects, and
+// middleware — authorization, quota, rate limiting — produces the nested one, so
+// every refusal a user most needs to read was reaching the DOM as the literal
+// "[object Object]". Flattening it once here is what makes ~100 existing render
+// sites correct without touching them; the alternative measured *larger*,
+// because a wrapper at every call site costs more than one at the boundary.
+//
+// Trimming was done first and is in the figure: the prose on both functions is
+// deliberately terse and points at claude_login_frontend_test.go for the
+// rationale, which is why 620 B buys two functions and a panel conversion.
+//
+// The new slack is 239 B — tighter than what was inherited, on purpose. The
+// next addition still has to build the deferral path.
+const eagerWireBudgetBytes = 270_500
 
 // eagerAsset is one member of the first-paint set.
 type eagerAsset struct {

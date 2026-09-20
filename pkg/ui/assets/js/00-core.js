@@ -686,6 +686,22 @@ function esc(s) {
     .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
 
+// errText: any API error value -> one line of readable text (Task 20320).
+// Cases and rationale: claude_login_frontend_test.go. Terse: ships on first paint.
+function errText(x) {
+  if (x == null) return '';
+  if (typeof x === 'string') return x;
+  if (typeof x !== 'object') return String(x);
+  if (typeof x.message === 'string' && x.message) {
+    var need = x.details && x.details.required_permission;
+    return need ? x.message + ' (requires ' + need + ')' : x.message;
+  }
+  // Unwrap once; the identity test stops a self-referential body.
+  if (x.error != null && x.error !== x) return errText(x.error);
+  if (typeof x.code === 'string' && x.code) return x.code;
+  try { var j = JSON.stringify(x); return j === '{}' ? '' : j; } catch (_) { return String(x); }
+}
+
 function toast(msg, type) {
   const el = document.getElementById('toast');
   el.textContent = msg;
@@ -764,9 +780,11 @@ function refreshPermissions() {
 function handleForbidden(r, payload) {
   const err = (payload && payload.error) || {};
   const need = (err.details && err.details.required_permission) || '';
-  toast(need
+  // The server's sentence first: a claim-freshness denial names the config
+  // changes that fix the hub, which required_permission alone threw away.
+  toast(errText(err) || (need
     ? 'Not permitted: this action needs "' + need + '"'
-    : 'Not permitted by your role', 'error');
+    : 'Not permitted by your role'), 'error');
   refreshPermissions();
   return Promise.reject(new Error(err.code || 'FORBIDDEN'));
 }
@@ -779,7 +797,17 @@ function parseAPIResponse(r) {
   if (r.status === 403) {
     return r.json().catch(() => null).then(body => handleForbidden(r, body));
   }
-  return r.json();
+  return r.json().then(normalizeAPIError);
+}
+
+// normalizeAPIError flattens apierror's {"error":{code,message}} into the
+// {"error":"text"} every caller already reads, so the hub's two dialects become
+// one here rather than at ~100 render sites (Task 20320).
+function normalizeAPIError(body) {
+  if (body && typeof body === 'object' && body.error != null && typeof body.error !== 'string') {
+    body.error = errText(body.error);
+  }
+  return body;
 }
 
 function api(url, body) {

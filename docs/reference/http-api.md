@@ -57,7 +57,7 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 |------------|-----------|
 | `public` (no permission) | 25 |
 | `audit.read` | 5 |
-| `config.write` | 16 |
+| `config.write` | 12 |
 | `executor.manage` | 17 |
 | `executor.read` | 2 |
 | `project.read` | 47 |
@@ -66,7 +66,7 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 | `run.stop` | 2 |
 | `sandbox.attach` | 2 |
 | `secret.grant` | 15 |
-| `secret.own` | 6 |
+| `secret.own` | 10 |
 | `secret.request` | 4 |
 | `secret.revoke` | 3 |
 | `session.admin` | 2 |
@@ -103,10 +103,10 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 | GET | `/api/claude-usage` | `project.read` | global |
 | GET | `/api/claudecode-limits` | `project.read` | project |
 | PUT | `/api/claudecode-limits` | `config.write` | project |
-| POST | `/api/claudecode/auth/login` | `config.write` | global |
-| POST | `/api/claudecode/auth/login/cancel` | `config.write` | global |
-| POST | `/api/claudecode/auth/login/code` | `config.write` | global |
-| POST | `/api/claudecode/auth/logout` | `config.write` | global |
+| POST | `/api/claudecode/auth/login` | `secret.own` | global |
+| POST | `/api/claudecode/auth/login/cancel` | `secret.own` | global |
+| POST | `/api/claudecode/auth/login/code` | `secret.own` | global |
+| POST | `/api/claudecode/auth/logout` | `secret.own` | global |
 | GET | `/api/claudecode/auth/status` | `project.read` | global |
 | POST | `/api/client-error` | `public` | global |
 | GET | `/api/config` | `project.read` | project |

@@ -603,14 +603,34 @@ func (s *Server) routeTable() []routeSpec {
 		{Pattern: "PUT /api/claudecode-limits", Handler: s.handleClaudeCodeLimitsSave, Perm: cfgWrite, Scope: scopeProject},
 
 		// ── Claude Code authentication ───────────────────────────────
-		// Login/logout changes the credential every project on this hub
-		// executes with, so it is a configuration change, not a per-user
-		// preference.
+		// secret.own, because since Task 20241 a Claude login is custody of
+		// the caller's own credential and nothing else: claudeScopeFor
+		// resolves a per-identity CLAUDE_CONFIG_DIR whenever OIDC is on, so
+		// signing in writes only to the caller's own home and the blast
+		// radius of misusing it is their own Anthropic account. It is the
+		// same shape as minting a personal secret, which is what that
+		// permission exists for.
+		//
+		// These rows read config.write until Task 20320, from when the hub
+		// had exactly one Claude account and logging in really did rebind
+		// what every project executed with. That reasoning did not survive
+		// per-user logins, and leaving it behind cost more than tidiness:
+		// config.write is above the operator tier, and pkg/authz requires
+		// IdP-confirmed claims for everything up there. A hub with no
+		// CLOOP_SECRET_KEY seals no refresh token, so those claims can never
+		// be confirmed — which made "Sign in with Claude.ai" fail for every
+		// role including admin, five minutes after sign-in, permanently. It
+		// also locked out the operator tier entirely, which is the tier that
+		// runs the tasks a Claude credential is for.
+		//
+		// Still gated: secret.own is held from operator up, so a viewer is
+		// refused. A viewer cannot start a run, so a credential stored under
+		// their name is one nothing they can do would ever spend.
 		{Pattern: "GET /api/claudecode/auth/status", Handler: s.handleClaudeCodeAuthStatus, Perm: read, Scope: scopeGlobal},
-		{Pattern: "POST /api/claudecode/auth/login", Handler: s.handleClaudeCodeAuthLoginStart, Perm: cfgWrite, Scope: scopeGlobal},
-		{Pattern: "POST /api/claudecode/auth/login/code", Handler: s.handleClaudeCodeAuthLoginCode, Perm: cfgWrite, Scope: scopeGlobal},
-		{Pattern: "POST /api/claudecode/auth/login/cancel", Handler: s.handleClaudeCodeAuthLoginCancel, Perm: cfgWrite, Scope: scopeGlobal},
-		{Pattern: "POST /api/claudecode/auth/logout", Handler: s.handleClaudeCodeAuthLogout, Perm: cfgWrite, Scope: scopeGlobal},
+		{Pattern: "POST /api/claudecode/auth/login", Handler: s.handleClaudeCodeAuthLoginStart, Perm: secOwn, Scope: scopeGlobal},
+		{Pattern: "POST /api/claudecode/auth/login/code", Handler: s.handleClaudeCodeAuthLoginCode, Perm: secOwn, Scope: scopeGlobal},
+		{Pattern: "POST /api/claudecode/auth/login/cancel", Handler: s.handleClaudeCodeAuthLoginCancel, Perm: secOwn, Scope: scopeGlobal},
+		{Pattern: "POST /api/claudecode/auth/logout", Handler: s.handleClaudeCodeAuthLogout, Perm: secOwn, Scope: scopeGlobal},
 
 		// ── Multi-project registry ───────────────────────────────────
 		// The list itself is already filtered per identity by
