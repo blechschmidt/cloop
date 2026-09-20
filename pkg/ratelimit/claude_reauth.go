@@ -155,51 +155,9 @@ func clearAuthFailure(dir string) {
 	authFailMu.Unlock()
 }
 
-// transientBackoff is how long a *non-auth* fetch failure (429, 5xx, network)
-// suppresses further attempts.
-//
-// Without it a failing fetch is retried by every caller that asks, because
-// only a *successful* fetch populates the snapshot cache: before every task in
-// a parallel plan and on every dashboard render. Against an endpoint that
-// answers "Rate limited. Please try again later." that is self-sustaining —
-// the retries are what keep it rate-limited, so the caps stay frozen for as
-// long as the loop runs. Shorter than MinUsageCacheTTL because these failures
-// really are transient and should recover on their own.
-const transientBackoff = 30 * time.Second
-
-type fetchFailure struct {
-	err error
-	at  time.Time
-}
-
-var (
-	fetchErrMu sync.Mutex
-	fetchErrs  = map[string]fetchFailure{}
-)
-
-// recentFetchError returns a still-current transient failure for dir, or nil
-// to let the caller try again.
-func recentFetchError(dir string) error {
-	fetchErrMu.Lock()
-	defer fetchErrMu.Unlock()
-	f := fetchErrs[dir]
-	if f.err != nil && time.Since(f.at) < transientBackoff {
-		return f.err
-	}
-	return nil
-}
-
-func recordFetchError(dir string, err error) {
-	fetchErrMu.Lock()
-	fetchErrs[dir] = fetchFailure{err: err, at: time.Now()}
-	fetchErrMu.Unlock()
-}
-
-func clearFetchError(dir string) {
-	fetchErrMu.Lock()
-	delete(fetchErrs, dir)
-	fetchErrMu.Unlock()
-}
+// The transient-failure backoff that used to live here now lives in
+// claude_backoff.go, where a rate-limit response gets a longer wall than a
+// network blip instead of the same one (Task 20326).
 
 // AuthFailure reports the currently cached authentication failure for this
 // process's own credential, or nil when the last usage fetch authenticated

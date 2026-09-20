@@ -338,6 +338,18 @@ func fetchUsageWithToken(dir, token string) (*ClaudeUsage, int, error) {
 		return nil, resp.StatusCode, fmt.Errorf("reading usage response: %w", err)
 	}
 
+	// Classify a rate-limit refusal before parsing, because it is frequently
+	// not JSON at all: a gateway answers 429 with a bare "Rate limited. Please
+	// try again later." and parsing that first would bury the one status whose
+	// whole point is to change how long we wait (Task 20326).
+	if isRateLimitStatus(resp.StatusCode) {
+		return nil, resp.StatusCode, &RateLimitError{
+			Status:     resp.StatusCode,
+			RetryAfter: parseRetryAfter(resp.Header, time.Now()),
+			Detail:     rateLimitDetail(resp.StatusCode, body),
+		}
+	}
+
 	var raw ClaudeUsageResponse
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return nil, resp.StatusCode, fmt.Errorf("parsing usage response: %w", err)

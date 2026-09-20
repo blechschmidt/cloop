@@ -99,7 +99,28 @@ import (
 //
 // The new slack is 239 B — tighter than what was inherited, on purpose. The
 // next addition still has to build the deferral path.
-const eagerWireBudgetBytes = 270_500
+//
+// Raised to 271,850 B by Task 20326, which stopped the Claude Code caps panel
+// re-fetching from render(): 1,120 B wire. HEAD measured 270,478 B, 22 B of
+// headroom, so nothing of any size fitted.
+//
+// This raise is a different shape from the three above, and the difference is
+// the justification. Those bought panels — new surface, deferrable in
+// principle. This buys a *reduction*: a throttle, a project-key check and a
+// focus guard, which together take the dashboard from ~54 requests/minute at
+// /api/claudecode-limits down to one. The trade is bytes once against requests
+// for as long as the tab is open, and it was measured in a browser both ways
+// (18 requests in 20 s before, 1 in 60 s after).
+//
+// Deferral does not apply. The other raises could at least argue about loader
+// shims; this code is called from render() by way of updateCCLimitsVisibility,
+// so it has to be resident before the first project view paints. There is no
+// later moment to fetch it at.
+//
+// The new slack is 230 B, held at the same order as the 239 B above — this
+// raise does not reopen the room the previous one closed, and the deferral
+// refactor named there is still the next frontend task.
+const eagerWireBudgetBytes = 271_850
 
 // eagerAsset is one member of the first-paint set.
 type eagerAsset struct {

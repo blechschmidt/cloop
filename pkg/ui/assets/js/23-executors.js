@@ -1360,15 +1360,45 @@ window.copyClaudeAuthURL = function() {
 };
 
 // ── Claude Code per-project caps (overview panel) ──────────────────────────
-window.loadCCLimits = function() {
+//
+// This panel used to reload from render(), which runs on every state diff —
+// ~1 request/second during a run (Task 20326). Nothing here moves that fast:
+// caps change only on save, and the server serves usage from a cache floored
+// at ratelimit.MinUsageCacheTTL. The surplus requests bought nothing and cost
+// two things: they rewrote the inputs under whoever was typing in them, and
+// they kept a refresh permanently due the moment that cache expired — the
+// traffic that gets the usage API answering "Rate limited".
+//
+// So: fetch on becoming visible, at most once a window after that, and
+// whenever the operator asks. Renders still call in, but a call is now cheap.
+var CC_LIMITS_REFRESH_MS = 60000;   // == MinUsageCacheTTL; faster cannot be newer
+var _ccLimitsLastFetch = 0;
+var _ccLimitsLastKey   = null;      // project the displayed figures belong to
+
+// _ccSetVal is _setVal that will not overwrite the field being typed into.
+function _ccSetVal(id, v) {
+  var el = document.getElementById(id);
+  if (!el || el === document.activeElement) return;
+  _setVal(id, v);
+}
+
+// {force:true} skips the throttle: the ↻ button and the reload after a save.
+window.loadCCLimits = function(opts) {
   var section = document.getElementById('ccLimitsSection');
   if (!section) return;
+  var force = !!(opts && opts.force);
+  var key   = (typeof selectedProjectIdx !== 'undefined') ? String(selectedProjectIdx) : 'single';
+  // Switching projects invalidates the figures on screen regardless of age.
+  if (key !== _ccLimitsLastKey) force = true;
+  if (!force && (Date.now() - _ccLimitsLastFetch) < CC_LIMITS_REFRESH_MS) return;
+  _ccLimitsLastFetch = Date.now();
+  _ccLimitsLastKey   = key;
   api(pUrl('/api/claudecode-limits')).then(function(d) {
     var limits = d.limits || {};
-    _setVal('ccMaxWeeklyPct',       limits.max_weekly_pct        || '');
-    _setVal('ccMaxFiveHourPct',     limits.max_five_hour_pct     || '');
-    _setVal('ccMaxWeeklyOpusPct',   limits.max_weekly_opus_pct   || '');
-    _setVal('ccMaxWeeklySonnetPct', limits.max_weekly_sonnet_pct || '');
+    _ccSetVal('ccMaxWeeklyPct',       limits.max_weekly_pct        || '');
+    _ccSetVal('ccMaxFiveHourPct',     limits.max_five_hour_pct     || '');
+    _ccSetVal('ccMaxWeeklyOpusPct',   limits.max_weekly_opus_pct   || '');
+    _ccSetVal('ccMaxWeeklySonnetPct', limits.max_weekly_sonnet_pct || '');
 
     // Authentication banner. When the OAuth credential has expired or been
     // revoked the caps simply stop advancing, which on its own looks like
@@ -1472,17 +1502,39 @@ window.saveCCLimits = function() {
       msg.style.display = '';
       setTimeout(function() { msg.style.display = 'none'; }, 2000);
     }
-    loadCCLimits();
+    loadCCLimits({force: true});
   }).catch(function(err) { alert('Save failed: ' + err); });
 };
 
+// Returning to a backgrounded tab is when staleness shows, so refresh then.
+// Throttled, so tab-flicking costs nothing, and a hidden tab asks for nothing —
+// its share of the traffic is part of what gets the usage API to rate-limit us.
+//
+// A listener rather than a repeating timer, deliberately. setInterval would
+// also hold open the event loop of the headless harness that drives this
+// bundle under node (TestDashboard_BackgroundWorkIsVisible), which exits when
+// the loop drains. It is not needed either: render() fires on every state diff,
+// so while anything is happening the throttled call below keeps the figures
+// current, and while nothing is happening they are not moving.
+document.addEventListener('visibilitychange', function() {
+  if (document.hidden) return;
+  var section = document.getElementById('ccLimitsSection');
+  if (section && section.style.display !== 'none') loadCCLimits();
+});
+
 // Show the cc-limits section only when active provider is claudecode.
+//
+// Called from render(), so it runs on every state diff and must stay a pure
+// visibility toggle: the fetch belongs to the *transition* into visibility, not
+// to the render that happened to observe it (Task 20326).
 window.updateCCLimitsVisibility = function(provider) {
   var section = document.getElementById('ccLimitsSection');
   if (!section) return;
   if ((provider || '').toLowerCase() === 'claudecode') {
+    var wasHidden = section.style.display === 'none';
     section.style.display = '';
-    loadCCLimits();
+    if (wasHidden) loadCCLimits({force: true});
+    else           loadCCLimits();   // throttled; a no-op inside the window
   } else {
     section.style.display = 'none';
   }
