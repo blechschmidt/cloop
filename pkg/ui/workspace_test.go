@@ -83,6 +83,31 @@ func remoteExecutor() *workspaceTestExecutor {
 	}
 }
 
+// seedingRemoteExecutor is a remote agent new enough to place the project's
+// `.cloop/` into the working tree — protocol v10 and up, which is every agent
+// that can run a project with no repository of its own.
+func seedingRemoteExecutor() *workspaceTestExecutor {
+	ex := remoteExecutor()
+	ex.caps.SupportsProjectSeed = true
+	return ex
+}
+
+// writeRepolessProject creates the shape Task 20324 is about: a real cloop
+// project — it has state, a goal, a plan — that is not a git repository and
+// never was. Nothing about it is malformed; it simply keeps its code somewhere
+// else, in the repositories granted to it.
+func writeRepolessProject(t *testing.T, goal string) string {
+	t.Helper()
+	dir := t.TempDir()
+	if _, err := state.Init(dir, goal, 0); err != nil {
+		t.Fatalf("state.Init: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".git")); !os.IsNotExist(err) {
+		t.Fatalf(".git exists in a fixture that must not have one (stat err: %v)", err)
+	}
+	return dir
+}
+
 // writeGitFixture creates a project directory whose git metadata says it was
 // cloned from remote and has head checked out. head may be a branch name or
 // "detached" for a raw object id.
@@ -258,44 +283,153 @@ func TestApplyWorkspaceDerivesGitWorkspace(t *testing.T) {
 	}
 }
 
-// TestApplyWorkspaceRefusesProjectWithoutRemote is the regression this task
-// exists for: no remote means no way to move the tree, and the run must be
-// refused rather than started against an empty directory.
-func TestApplyWorkspaceRefusesProjectWithoutRemote(t *testing.T) {
+// TestApplyWorkspaceRefusesCheckoutWithoutRemote: a project that *is* a git
+// repository but has no origin holds local history, and an executor-owned
+// workspace would start the run against a directory that has none of it. This
+// is the half of "no remote" that must keep refusing — see
+// TestApplyWorkspaceKeepsRepolessProjectOnTheExecutor for the half that no
+// longer does, and errNoGitRepo for the line between them.
+func TestApplyWorkspaceRefusesCheckoutWithoutRemote(t *testing.T) {
 	newWorkspaceControlPlane(t)
 
-	cases := map[string]func(t *testing.T) string{
-		"not a git repository": func(t *testing.T) string { return t.TempDir() },
-		"git repository with no origin": func(t *testing.T) string {
-			return writeGitFixture(t, "", "main")
-		},
+	dir := writeGitFixture(t, "", "main")
+	ex := remoteExecutor()
+	_, err := applyWorkspace(uiSpec(dir, []string{"cloop", "run"}, nil), ex, dir)
+	if err == nil {
+		t.Fatal("applyWorkspace accepted a checkout with no git remote")
 	}
-	for name, makeDir := range cases {
-		t.Run(name, func(t *testing.T) {
-			dir := makeDir(t)
-			ex := remoteExecutor()
-			_, err := applyWorkspace(uiSpec(dir, []string{"cloop", "run"}, nil), ex, dir)
-			if err == nil {
-				t.Fatal("applyWorkspace accepted a project with no git remote")
-			}
-			var missing *workspaceSourceError
-			if !errors.As(err, &missing) {
-				t.Fatalf("error %T (%v) is not a *workspaceSourceError", err, err)
-			}
-			if !errors.Is(err, executor.ErrWorkspaceUnavailable) {
-				t.Errorf("error does not unwrap to ErrWorkspaceUnavailable: %v", err)
-			}
-			if missing.ProjectPath != dir || missing.ExecutorID != ex.ID() {
-				t.Errorf("error names project %q on executor %q, want %q on %q",
-					missing.ProjectPath, missing.ExecutorID, dir, ex.ID())
-			}
-			if fix := missing.Remediation(); !strings.Contains(fix, "git remote") {
-				t.Errorf("Remediation() = %q, want it to name the git remote to add", fix)
-			}
-			if !strings.Contains(err.Error(), ex.ID()) {
-				t.Errorf("Error() = %q, want it to name executor %q", err.Error(), ex.ID())
-			}
-		})
+	var missing *workspaceSourceError
+	if !errors.As(err, &missing) {
+		t.Fatalf("error %T (%v) is not a *workspaceSourceError", err, err)
+	}
+	if !errors.Is(err, executor.ErrWorkspaceUnavailable) {
+		t.Errorf("error does not unwrap to ErrWorkspaceUnavailable: %v", err)
+	}
+	if missing.ProjectPath != dir || missing.ExecutorID != ex.ID() {
+		t.Errorf("error names project %q on executor %q, want %q on %q",
+			missing.ProjectPath, missing.ExecutorID, dir, ex.ID())
+	}
+	// The git advice is the right one here precisely because there *is* a
+	// repository: pushing it is what makes the local history reachable.
+	if fix := missing.Remediation(); !strings.Contains(fix, "git remote") {
+		t.Errorf("Remediation() = %q, want it to name the git remote to add", fix)
+	}
+	if !strings.Contains(err.Error(), ex.ID()) {
+		t.Errorf("Error() = %q, want it to name executor %q", err.Error(), ex.ID())
+	}
+}
+
+// TestApplyWorkspaceKeepsRepolessProjectOnTheexecutor is Task 20324: a project
+// with no repository at all is not a broken project, it is the ordinary shape
+// for a hub whose code arrives as granted repositories the harness clones for
+// itself. It must dispatch, with the working directory on the executor and the
+// project's own state — and nothing else — carried across.
+func TestApplyWorkspaceKeepsRepolessProjectOnTheExecutor(t *testing.T) {
+	newWorkspaceControlPlane(t)
+	dir := writeRepolessProject(t, "ship the widget")
+	ex := seedingRemoteExecutor()
+
+	spec, err := applyWorkspace(uiSpec(dir, []string{"cloop", "run"}, nil), ex, dir)
+	if err != nil {
+		t.Fatalf("applyWorkspace refused a project with no repository: %v", err)
+	}
+	if spec.Workspace.Kind != executor.WorkspaceExecutor {
+		t.Fatalf("Kind = %q, want %q", spec.Workspace.Kind, executor.WorkspaceExecutor)
+	}
+	// Nothing is fetched, so every git-shaped field must be empty — a Repo here
+	// would be a spec whose author believes a clone happens.
+	if spec.Workspace.Repo != "" || spec.Workspace.Ref != "" || spec.Workspace.CredentialGrant != "" {
+		t.Errorf("Repo=%q Ref=%q Grant=%q, want all empty",
+			spec.Workspace.Repo, spec.Workspace.Ref, spec.Workspace.CredentialGrant)
+	}
+	if err := spec.Workspace.Validate(); err != nil {
+		t.Errorf("derived workspace does not validate: %v", err)
+	}
+	// The project state is the only thing that crosses, and without it the
+	// harness starts in a directory holding no plan.
+	if len(spec.ProjectSeed) == 0 {
+		t.Error("no project seed was attached, so the executor would have no project to run")
+	}
+	// "The project path should refer to a path on the remote executor, not to a
+	// path on the host": the hub's absolute path must not survive into the spec.
+	if filepath.IsAbs(spec.WorkDir) || spec.WorkDir == dir {
+		t.Errorf("WorkDir = %q, want a path relative to the executor's own work root, not the hub's %q",
+			spec.WorkDir, dir)
+	}
+	if want := executor.DeviceWorkDir(dir); spec.WorkDir != want {
+		t.Errorf("WorkDir = %q, want %q", spec.WorkDir, want)
+	}
+}
+
+// TestApplyWorkspaceRepolessWorkDirIsStable: the value of keeping the directory
+// on the executor is that work survives between dispatches, which only holds if
+// the same project resolves to the same directory every time.
+func TestApplyWorkspaceRepolessWorkDirIsStable(t *testing.T) {
+	newWorkspaceControlPlane(t)
+	dir := writeRepolessProject(t, "ship the widget")
+
+	first, err := applyWorkspace(uiSpec(dir, []string{"cloop", "run"}, nil), seedingRemoteExecutor(), dir)
+	if err != nil {
+		t.Fatalf("first applyWorkspace: %v", err)
+	}
+	second, err := applyWorkspace(uiSpec(dir, []string{"cloop", "run"}, nil), seedingRemoteExecutor(), dir)
+	if err != nil {
+		t.Fatalf("second applyWorkspace: %v", err)
+	}
+	if first.WorkDir != second.WorkDir {
+		t.Errorf("WorkDir moved between dispatches: %q then %q — a tree cloned by one task "+
+			"would not be there for the next", first.WorkDir, second.WorkDir)
+	}
+	if !first.Workspace.Kind.KeepsWorkDir() {
+		t.Error("Kind.KeepsWorkDir() = false, so nothing promises the directory survives")
+	}
+}
+
+// TestApplyWorkspaceRefusesRepolessProjectOnSeedlessExecutor: with no
+// repository to fetch, the seed is the only carrier the project has. An
+// executor that cannot take one would run against an empty directory, so it is
+// refused — and told the fix that actually applies, not the git one.
+func TestApplyWorkspaceRefusesRepolessProjectOnSeedlessExecutor(t *testing.T) {
+	newWorkspaceControlPlane(t)
+	dir := writeRepolessProject(t, "ship the widget")
+	ex := remoteExecutor() // SupportsProjectSeed is false
+
+	_, err := applyWorkspace(uiSpec(dir, []string{"cloop", "run"}, nil), ex, dir)
+	if err == nil {
+		t.Fatal("applyWorkspace dispatched a repo-less project to an executor that cannot be seeded")
+	}
+	var refused *workspaceSourceError
+	if !errors.As(err, &refused) {
+		t.Fatalf("error %T (%v) is not a *workspaceSourceError", err, err)
+	}
+	// Sending the operator to create a git remote would be telling them to undo
+	// the very shape the project is meant to have.
+	if fix := refused.Remediation(); strings.Contains(fix, "git remote") {
+		t.Errorf("Remediation() = %q, want it not to demand a git remote for a project "+
+			"that legitimately has none", fix)
+	}
+	if !strings.Contains(err.Error(), "upgrade") && !strings.Contains(err.Error(), "--upgrade") {
+		t.Errorf("Error() = %q, want it to name the upgrade that adds seed support", err.Error())
+	}
+}
+
+// TestApplyWorkspaceRefusesRepolessProjectWithNoHubState: no repository and no
+// state is nothing to send at all, and a run dispatched anyway is one that
+// reports a clean result having had no plan to work from.
+func TestApplyWorkspaceRefusesRepolessProjectWithNoHubState(t *testing.T) {
+	newWorkspaceControlPlane(t)
+	dir := t.TempDir() // no .git, and no .cloop either
+
+	_, err := applyWorkspace(uiSpec(dir, []string{"cloop", "run"}, nil), seedingRemoteExecutor(), dir)
+	if err == nil {
+		t.Fatal("applyWorkspace dispatched a project that has neither a repository nor any state")
+	}
+	var refused *workspaceSourceError
+	if !errors.As(err, &refused) {
+		t.Fatalf("error %T (%v) is not a *workspaceSourceError", err, err)
+	}
+	if fix := refused.Remediation(); strings.Contains(fix, "git remote") {
+		t.Errorf("Remediation() = %q, want it not to demand a git remote", fix)
 	}
 }
 

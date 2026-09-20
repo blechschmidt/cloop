@@ -296,11 +296,13 @@ zero. One `Executor` therefore spans many WebSocket sessions, and workloads
 outlive the connection that started them. Agents heartbeat every 15 s (±25 %
 jitter); three missed heartbeats mark the node unreachable (~45 s).
 
-The device shares nothing with the hub, so it fetches the project's source tree
-itself before starting the harness — see
-[Workspace provisioning](#workspace-provisioning). That needs `git` on the
-device and protocol v3; an agent below either is refused the *placement* rather
-than trusted to notice.
+The device shares nothing with the hub, so it either fetches the project's
+source tree itself before starting the harness, or — for a project that has no
+repository of its own — keeps a working directory of its own that the hub seeds
+with the project's state. See
+[Workspace provisioning](#workspace-provisioning). Fetching needs `git` on the
+device and protocol v3; seeding needs protocol v10. An agent below either is
+refused the *placement* rather than trusted to notice.
 
 #### Where the payload runs on the device (Task 20307)
 
@@ -1056,13 +1058,56 @@ about a repository it never read. Nothing in the hub's view distinguishes it
 from a real run — no error, no exit code, no missing artifact.
 
 So every dispatched `Spec` now carries an explicit `Workspace`, and there are
-exactly three answers to "where does the code come from":
+exactly four answers to "where does the code come from":
 
 | `Kind` | Meaning | Chosen when |
 | --- | --- | --- |
 | `bind` | the tree is already at `WorkDir`; the executor is looking at the same filesystem the hub is | `Capabilities().SharesHostFilesystem` |
-| `git` | the executor fetches it before the harness starts | anything else, for a project-scoped workload |
+| `git` | the executor fetches it before the harness starts | the project is a checkout with a fetchable https remote |
+| `executor` | the directory belongs to the executor and is kept there between runs; only the project's state crosses | the project is not a git repository at all |
 | `none` | the workload genuinely wants an empty directory | the workload has no project at all (the voice handler runs `cloop listen --file …`) |
+
+### Projects with no repository of their own (Task 20324)
+
+`executor` exists because demanding a git remote was demanding the wrong thing
+of a legitimate project shape — and the common one for this product. A project
+here is a *unit of work*; its code is whichever repositories have been
+[granted](../guides/secrets.md) to it, which the harness clones for itself
+through the [git proxy](../git-interception-proxy.md) once it is running. Such a
+project's own directory holds `.cloop/` and little else, and there is nothing
+useful to fetch from it.
+
+Before this, the hub refused those dispatches outright, telling the operator to
+`git remote add origin …` and push a directory with no source in it.
+
+What crosses instead is `Spec.ProjectSeed` and nothing else — the goal, the
+instructions and the plan, with the step history dropped (see
+[`pkg/executor/projectseed`](https://github.com/blechschmidt/cloop/blob/main/pkg/executor/projectseed/projectseed.go)).
+That is typically a few hundred bytes to a few hundred kilobytes, against a
+source tree that is not sent at all. Three consequences are worth stating
+plainly:
+
+- **`WorkDir` names a path on the executor, not on the hub.** It is
+  `DeviceWorkDir(<hub path>)` — a stable name derived from the hub's project
+  path — resolved beneath the agent's own `--workdir-root`. The hub's absolute
+  path never becomes a path the device is asked to open.
+- **The directory is kept.** The name is deterministic and the agent does not
+  wipe it, so a repository cloned by one task is still there for the next. This
+  is the one kind for which `WorkspaceKind.KeepsWorkDir()` is true.
+- **The seed is mandatory, not best-effort.** On a `git` workspace `.cloop/` may
+  already be committed in the fetched repository, so a seedless executor merely
+  degrades. Here nothing is fetched, so a seedless executor would start the
+  harness in a directory with no project — `SandboxRequirements()` therefore
+  derives `RequireProjectSeed` from the *kind*, and such an executor is refused
+  placement.
+
+A project that *is* a git repository but has no usable remote keeps refusing,
+and that distinction is deliberate: it has local history that an executor-owned
+workspace would silently leave behind on the hub. Only the total absence of
+`.git` takes this branch.
+
+Kubernetes refuses `executor` outright. A Pod's working tree is an `emptyDir`
+that dies with the Pod, so it cannot keep the promise the kind makes.
 
 The zero value is `""` — *unspecified* — and leaves a driver's pre-existing
 behaviour alone. It exists so a caller with no workspace concern (`cloop
@@ -1086,7 +1131,7 @@ are indistinguishable at the point where it matters.
 | --- | --- | --- | --- | --- |
 | `localprocess` | ✅ | ❌ | `bind` | forks in the operator's own directory |
 | `container` | ✅ | ❌ | `bind` | `--volume <project dir>:/cloop/work` |
-| `kubernetes` | ❌ | ✅ | `git` | a `workspace` init container, before the harness container starts |
+| `kubernetes` | ❌ | ✅ | `git` | a `workspace` init container, before the harness container starts (`executor` is refused: an `emptyDir` cannot be kept) |
 | `remote` | ❌ | ✅ *if* the device has `git` on `PATH` **and** speaks protocol ≥ 3 | `git` | a pre-step on the device, before it hands the Spec to its inner host driver |
 
 Kubernetes reports `true` unconditionally, including when no secret broker is

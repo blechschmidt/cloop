@@ -15,6 +15,7 @@ package remote_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -28,7 +29,9 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/agent"
+	"github.com/blechschmidt/cloop/pkg/executor/projectseed"
 	"github.com/blechschmidt/cloop/pkg/executor/remote"
+	"github.com/blechschmidt/cloop/pkg/state"
 )
 
 // loopback wires a hub, an httptest server, and an enrolled agent together.
@@ -469,5 +472,118 @@ func TestLoopbackSignalledWorkloadKeepsDyingOutput(t *testing.T) {
 	}
 	if ex.LogGapped(handle.ID) {
 		t.Error("no output was actually lost, so the log must not be flagged as gapped")
+	}
+}
+
+// TestLoopbackRunsRepolessProjectFromASeed is Task 20324 end to end, over a
+// real WebSocket to a real agent running a real process.
+//
+// The project being dispatched has no git repository and never had one — the
+// shape a hub produces when a project's code is the set of repositories granted
+// to it rather than a checkout on the control plane. Before this, such a
+// project could not be dispatched off-host at all: the hub refused it, telling
+// the operator to invent a git remote for a directory holding only `.cloop/`.
+//
+// Three things have to hold together for it to work, and all three are checked
+// against the filesystem the agent actually wrote rather than against the
+// hub's intent:
+//
+//	the location   the tree is a directory on the *device*, beneath the agent's
+//	               own root, not the hub path the project is known by
+//	the transfer   the project's state crossed and landed where `cloop run`
+//	               looks for it, with nothing else sent alongside it
+//	the persistence the directory is kept, so a repository cloned by one task
+//	               is still there for the next
+func TestLoopbackRunsRepolessProjectFromASeed(t *testing.T) {
+	lb := newLoopback(t)
+	ex := lb.executor(t)
+
+	// The hub-side project path. It names a directory on the control plane
+	// that the device has never seen and must never be asked to open.
+	const hubPath = "/tmp/test-remote-executor"
+	deviceDir := executor.DeviceWorkDir(hubPath)
+	if filepath.IsAbs(deviceDir) || deviceDir == hubPath {
+		t.Fatalf("DeviceWorkDir(%q) = %q, want a name relative to the device's own root",
+			hubPath, deviceDir)
+	}
+
+	seed, err := projectseed.Build(&state.ProjectState{
+		Goal:     "push a hello world to the granted repository",
+		WorkDir:  hubPath,
+		Provider: "claudecode",
+	})
+	if err != nil {
+		t.Fatalf("projectseed.Build: %v", err)
+	}
+
+	spec := executor.Spec{
+		WorkDir:     deviceDir,
+		Workspace:   executor.Workspace{Kind: executor.WorkspaceExecutor},
+		ProjectSeed: seed,
+		// Reads back the two facts under test from inside the sandbox: where
+		// the harness is standing, and whether a project is there to run.
+		Argv:   []string{"/bin/sh", "-c", "pwd; cat .cloop/state.json"},
+		Labels: map[string]string{"component": "e2e", "project": hubPath},
+	}
+	if err := spec.Validate(); err != nil {
+		t.Fatalf("the dispatched spec does not validate: %v", err)
+	}
+
+	res, err := executor.Run(context.Background(), ex, spec)
+	if err != nil {
+		t.Fatalf("Run: %v (output=%q)", err, res.Output)
+	}
+	out := string(res.Output)
+
+	// The location. The harness ran beneath the agent's root, and the hub's
+	// own path never became a path the device tried to use.
+	if !strings.Contains(out, lb.root) {
+		t.Errorf("workload ran outside the agent's root %q; pwd said %q", lb.root, out)
+	}
+	if strings.Contains(out, hubPath+"\n") {
+		t.Errorf("the hub's own project path reached the device as a working directory: %q", out)
+	}
+
+	// The transfer. The goal is the hub's, read back from inside the sandbox,
+	// so the seed survived marshalling, compression, the frame, and the write.
+	if !strings.Contains(out, "push a hello world to the granted repository") {
+		t.Errorf("the project's goal did not reach the sandbox; output was %q", out)
+	}
+	// And nothing carried the hub's path into the state the sandbox will write
+	// back through — that field is re-derived on arrival.
+	seedFile := filepath.Join(lb.root, deviceDir, ".cloop", "state.json")
+	raw, err := os.ReadFile(seedFile)
+	if err != nil {
+		t.Fatalf("the agent did not place the project state at %s: %v", seedFile, err)
+	}
+	var landed struct {
+		Goal    string `json:"goal"`
+		WorkDir string `json:"work_dir"`
+	}
+	if err := json.Unmarshal(raw, &landed); err != nil {
+		t.Fatalf("the placed project state is not readable JSON: %v", err)
+	}
+	if landed.Goal != "push a hello world to the granted repository" {
+		t.Errorf("placed goal = %q, want the hub's", landed.Goal)
+	}
+	if landed.WorkDir == hubPath {
+		t.Errorf("the placed state still points at the hub's directory %q, so the sandbox's "+
+			"writes would name a path on another machine", landed.WorkDir)
+	}
+
+	// The persistence. A file left behind by this dispatch has to still be
+	// there for the next one — that is the whole value of the executor keeping
+	// the directory, and what lets a task clone a granted repository once.
+	marker := filepath.Join(lb.root, deviceDir, "cloned-repo.txt")
+	if err := os.WriteFile(marker, []byte("bb-selforg/cloop-hello-world"), 0o600); err != nil {
+		t.Fatalf("seed a marker for the second dispatch: %v", err)
+	}
+	res2, err := executor.Run(context.Background(), ex, spec)
+	if err != nil {
+		t.Fatalf("second Run: %v (output=%q)", err, res2.Output)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Errorf("the working directory did not survive a second dispatch, so work done by "+
+			"one task would be lost before the next: %v", err)
 	}
 }

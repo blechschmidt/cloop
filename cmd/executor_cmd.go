@@ -85,7 +85,10 @@ var executorListCmd = &cobra.Command{
 			fmt.Printf("%-20s %-14s %-12s %-8s %s\n",
 				ex.ID(), ex.Kind(), caps.Isolation, egress, strings.Join(notes, ", "))
 		}
-		dim.Println("\nBind a project with `cloop executor bind` (see the Executors panel in the Web UI).")
+		// Not "`cloop executor bind`": that command has never existed, and this
+		// line sent anyone who tried it to a usage dump listing every
+		// subcommand except the one it had just named.
+		dim.Println("\nBind a project to one of these in the Executors panel of the Web UI.")
 		return nil
 	},
 }

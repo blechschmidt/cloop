@@ -589,9 +589,11 @@ func reject(c Candidate, req Requirements) (Rejection, bool) {
 			"would be discarded with the sandbox when the run ends")
 	}
 	if req.RequireProjectSeed && !caps.SupportsProjectSeed {
-		return no(ConstraintWorkspace, "cannot place the project's .cloop/ into the tree it "+
-			"fetches, so `cloop run` there would exit with \"no cloop project found\" against a "+
-			"perfectly good checkout; upgrade the executor agent")
+		return no(ConstraintWorkspace, "cannot place the project's .cloop/ into the working "+
+			"tree, so `cloop run` there would exit with \"no cloop project found\" — against a "+
+			"perfectly good checkout if it fetched one, and against an empty directory if the "+
+			"project has no repository and the state was all there was to send; upgrade the "+
+			"executor agent")
 	}
 	if req.RequireSecretFiles && !caps.SupportsSecretFiles {
 		return no(ConstraintSecretFiles, "cannot deliver a secret lease's credential files to the "+

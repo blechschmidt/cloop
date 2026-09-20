@@ -819,3 +819,28 @@ func TestEnforceWorkspaceSizeIgnoresUnsetLimit(t *testing.T) {
 		t.Errorf("an unset size limit must not refuse a tree: %v", err)
 	}
 }
+
+// TestProvisionedWorkspaceFlattensExecutorOwned: the agent hands the Spec to an
+// inner driver that shares its filesystem, so what that driver is told has to
+// describe the world it will find. For an executor-owned workspace the
+// directory is simply there — the device created it and wrote the seed into it
+// — which is exactly what bind asserts. Passing the kind down unchanged would
+// make every inner driver learn about a kind whose only meaning is on the hub.
+func TestProvisionedWorkspaceFlattensExecutorOwned(t *testing.T) {
+	got := provisionedWorkspace(executor.Workspace{
+		Kind:        executor.WorkspaceExecutor,
+		SizeLimitMB: 512,
+	})
+	if got.Kind != executor.WorkspaceBind {
+		t.Errorf("Kind = %q, want %q", got.Kind, executor.WorkspaceBind)
+	}
+	if got.SizeLimitMB != 512 {
+		t.Errorf("SizeLimitMB = %d, want 512 — the budget still describes the workload",
+			got.SizeLimitMB)
+	}
+	// "none" still means an intentionally empty tree and must not be rewritten
+	// into a claim that a tree is present.
+	if none := provisionedWorkspace(executor.Workspace{Kind: executor.WorkspaceNone}); none.Kind != executor.WorkspaceNone {
+		t.Errorf("none became %q, want it left alone", none.Kind)
+	}
+}

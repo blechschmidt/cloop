@@ -707,6 +707,19 @@ func buildPod(req podRequest) (*pod, error) {
 			"plane's filesystem, and a Pod does not — use kind git with a repo, or kind none for "+
 			"an intentionally empty tree", executor.ErrInvalidSpec, executor.WorkspaceBind)
 	}
+	if req.Workspace.Kind.KeepsWorkDir() {
+		// The promise this kind makes is that the directory survives between
+		// dispatches, so a repository the harness cloned for one task is still
+		// there for the next. A Pod's working tree is an emptyDir that dies with
+		// the Pod, and this driver has no seed path to re-establish the project
+		// inside a fresh one either. Both halves fail quietly — the next run
+		// finds an empty directory, or no project in it at all — so this is
+		// refused rather than approximated.
+		return nil, fmt.Errorf("%w: workspace kind %q keeps the working directory on the "+
+			"executor between runs, and a Pod's is an emptyDir that does not outlive it — "+
+			"give the project a git remote so its tree can be fetched per run, or bind it to "+
+			"a remote agent, which does keep one", executor.ErrInvalidSpec, req.Workspace.Kind)
+	}
 
 	labels := map[string]string{
 		LabelManaged:    "true",

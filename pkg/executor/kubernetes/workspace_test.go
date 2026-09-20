@@ -996,3 +996,28 @@ func TestExplainSecretFailure(t *testing.T) {
 		}
 	}
 }
+
+// TestBuildPod_RejectsExecutorOwnedWorkspace: an executor-owned workspace
+// promises the directory outlives the run, so a repository the harness cloned
+// for one task is still there for the next. A Pod's working tree is an emptyDir
+// that dies with the Pod, and this driver has no seed path to rebuild the
+// project inside a fresh one. Both halves fail silently — the next run finds an
+// empty directory, or no project in it — so the refusal has to be explicit.
+func TestBuildPod_RejectsExecutorOwnedWorkspace(t *testing.T) {
+	req := baseRequest()
+	req.Workspace = executor.Workspace{Kind: executor.WorkspaceExecutor}
+	_, err := buildPod(req)
+	if err == nil {
+		t.Fatal("buildPod accepted a workspace kind that keeps the directory between runs; " +
+			"a Pod's emptyDir does not outlive it")
+	}
+	if !errors.Is(err, executor.ErrInvalidSpec) {
+		t.Errorf("error %v does not wrap ErrInvalidSpec", err)
+	}
+	// The refusal is only useful if it says where such a project can run.
+	for _, want := range []string{"emptyDir", "git remote", "remote agent"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q, so it does not say what to do instead", err, want)
+		}
+	}
+}

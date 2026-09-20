@@ -649,8 +649,15 @@ func (s Spec) SandboxRequirements() Requirements {
 		RequireWorkspaceProvisioning:   s.Workspace.NeedsProvisioning(),
 		RequireHostFilesystemWorkspace: s.Workspace.Kind == WorkspaceBind,
 		RequireWriteBack:               s.WriteBack.Enabled(),
-		RequireProjectSeed:             len(s.ProjectSeed) > 0,
-		RequireSecretFiles:             s.NeedsSecretFiles(),
+		// The kind matters as much as the payload. An executor-owned workspace
+		// fetches nothing, so the seed is the *only* thing that can put a
+		// project on the far side — a driver that cannot place one would start
+		// the harness in a directory holding no plan. Deriving the requirement
+		// from the field alone would miss that, because a spec refused a seed
+		// for lack of support then carries no seed and so asks for nothing.
+		RequireProjectSeed: len(s.ProjectSeed) > 0 ||
+			s.Workspace.Kind == WorkspaceExecutor,
+		RequireSecretFiles: s.NeedsSecretFiles(),
 		// A spec carrying material that can be taken back must go somewhere
 		// that can take it back. See RequireRevocable for the same rule applied
 		// at the moment of dispatch.

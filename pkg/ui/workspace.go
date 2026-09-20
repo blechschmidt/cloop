@@ -119,6 +119,32 @@ func applyWorkspace(spec executor.Spec, ex executor.Executor, workDir string) (e
 	}
 
 	origin, err := readGitOrigin(workDir)
+	if errors.Is(err, errNoGitRepo) {
+		// The project has no source tree of its own, and that is a legitimate
+		// shape rather than a mistake — it is the ordinary one for this
+		// product. A project here is a unit of work; its *code* is whichever
+		// repositories have been granted to it, which the harness clones for
+		// itself through the git proxy once it is running. Demanding that such
+		// a project first invent a git remote for a directory holding nothing
+		// but `.cloop/` was asking the operator to fabricate a repository so
+		// that cloop could clone emptiness out of it.
+		//
+		// So the working directory becomes the executor's own, kept there
+		// between dispatches, and the only thing that crosses the wire is the
+		// project's control state. That is the "sync what is required, not the
+		// entire project" rule: a seed is the goal, the instructions and the
+		// plan — no step history, no source, typically tens of kilobytes.
+		//
+		// Note which failures do *not* land here. errNoGitRepo is only set when
+		// there is no .git at all. A project whose .git exists but has no
+		// usable remote still refuses below, because it has local history that
+		// this branch would silently leave on the hub.
+		spec.Workspace = executor.Workspace{
+			Kind:        executor.WorkspaceExecutor,
+			SizeLimitMB: sizeLimit,
+		}
+		return finishWorkspace(spec, ex, workDir)
+	}
 	if err != nil {
 		return spec, &workspaceSourceError{
 			ProjectPath:  workDir,
@@ -170,43 +196,81 @@ func applyWorkspace(spec executor.Spec, ex executor.Executor, workDir string) (e
 		}
 	}
 	spec.Workspace = ws
+	return finishWorkspace(spec, ex, workDir)
+}
 
-	// A clone of the source repository is not a cloop project, and `cloop run`
-	// inside one reads `.cloop/` from the tree it is standing in. Attach the
-	// hub's project state so there is something there to read.
-	//
-	// Only on this branch. The bind and none branches returned above, which is
-	// exactly right: bind already has the operator's real `.cloop/` at WorkDir
-	// and seeding it would overwrite live state with a copy (Spec.Validate
-	// refuses it outright), and none is a workload with no project at all.
-	//
-	// # Why this degrades instead of refusing
-	//
-	// Every other capability in this file is enforced by refusing placement,
-	// and that is right for all of them: a workload needing a credential file
-	// an agent cannot write is a workload that will fail. This one is not the
-	// same shape, because *every* project-scoped run carries a seed. Making it
-	// a requirement would refuse every dispatch to every pre-v10 agent in a
-	// fleet — including the installations that work today by committing
-	// `.cloop/` into the repository, which was the only way this path could be
-	// made to work at all before now. A fix for a broken flow must not break
-	// the workaround people adopted because it was broken.
-	//
-	// So a capable executor gets the seed and stops needing the workaround; an
-	// older one behaves exactly as it does today and gets a row on the
-	// project's journal saying why. Spec.SandboxRequirements still derives
-	// RequireProjectSeed from the field, so a *future* caller that sets one
-	// without checking is still refused rather than silently dropped.
+// finishWorkspace attaches the project's control state to a spec whose source
+// tree will be materialised on the far side, then gates the result on what the
+// executor can actually do.
+//
+// It is shared by the two branches of applyWorkspace that reach it — git and
+// executor-owned — and by neither of the two that do not. That split is the
+// point: a bind workspace already has the operator's live `.cloop/` at WorkDir
+// and seeding it would overwrite real state with a copy (Spec.Validate refuses
+// it outright), and a "none" workspace belongs to a workload with no project at
+// all.
+//
+// A clone of the source repository is not a cloop project, and `cloop run`
+// inside one reads `.cloop/` from the tree it is standing in. Attaching the
+// hub's project state is what puts something there to read.
+//
+// # Why a git workspace degrades and an executor-owned one refuses
+//
+// The two branches need the seed to different degrees, and treating them alike
+// would be wrong in one direction or the other.
+//
+// On a git workspace the seed is an improvement, not a precondition: `.cloop/`
+// may already be committed in the fetched repository, which was the only way
+// this path worked at all before seeds existed. Making it mandatory would
+// refuse every dispatch to every pre-v10 agent in a fleet, including the
+// installations using that workaround precisely because the flow was broken —
+// and a fix for a broken flow must not break the workaround people adopted
+// because of it. So a capable executor gets the seed and stops needing the
+// workaround; an older one behaves as it did and gets a row on the project's
+// journal saying why.
+//
+// On an executor-owned workspace there is no other source for `.cloop/`. No
+// repository is fetched, so nothing can have `.cloop/` committed in it. Without
+// the seed the harness starts in a directory with no project and exits on its
+// first line blaming the plan. Degrading there would reintroduce the exact
+// failure — a clean-looking run that did nothing — that this whole file exists
+// to remove, so it refuses instead, naming the upgrade.
+func finishWorkspace(spec executor.Spec, ex executor.Executor, workDir string) (executor.Spec, error) {
 	seed, err := projectSeedFor(workDir)
 	if err != nil {
 		return spec, err
 	}
-	if len(seed) > 0 {
-		if ex.Capabilities().SupportsProjectSeed {
-			spec.ProjectSeed = seed
-		} else {
-			logUnseedableExecutor(ex, workDir)
+	seedable := ex.Capabilities().SupportsProjectSeed
+	mustSeed := spec.Workspace.Kind == executor.WorkspaceExecutor
+
+	switch {
+	case len(seed) > 0 && seedable:
+		spec.ProjectSeed = seed
+	case mustSeed && !seedable:
+		return spec, &workspaceSourceError{
+			ProjectPath:  workDir,
+			ExecutorID:   ex.ID(),
+			ExecutorKind: ex.Kind(),
+			Reason: "this project has no git remote, so its project state is the only thing " +
+				"that can carry it to an executor — and this one cannot accept a project " +
+				"state. A remote agent gains that by upgrading: " +
+				"`cloop executor agent install --upgrade`",
+			// The git remediation does not apply: the whole point of this
+			// branch is that the project legitimately has no repository.
+			SuppressRemoteFix: true,
 		}
+	case mustSeed && len(seed) == 0:
+		return spec, &workspaceSourceError{
+			ProjectPath:  workDir,
+			ExecutorID:   ex.ID(),
+			ExecutorKind: ex.Kind(),
+			Reason: "this project has no git remote and no state on the hub, so there is " +
+				"nothing to send to the executor and nothing for the harness to work on. " +
+				"Create the project first (`cloop init`) and run it again",
+			SuppressRemoteFix: true,
+		}
+	case len(seed) > 0:
+		logUnseedableExecutor(ex, workDir)
 	}
 
 	// Last: can this executor actually do what the spec now asks for? The gate
@@ -407,6 +471,31 @@ func workspaceGrantFor(w executor.Workspace, ex executor.Executor, workDir strin
 
 // --- errors -----------------------------------------------------------------
 
+// errNoGitRepo marks the single git-metadata failure applyWorkspace is allowed
+// to handle by itself: the project directory has no .git at all.
+//
+// It is a sentinel rather than a string match because the decision it gates is
+// consequential and the two neighbouring failures must not be caught by
+// accident. A .git that exists but holds no origin remote, or names a remote
+// this contract will not fetch, is a project with *local history* — and routing
+// that to an executor-owned workspace would start a run against a directory
+// that has none of it, which is precisely the "plausible transcript over no
+// code" failure this file was written to prevent. Those keep refusing.
+var errNoGitRepo = errors.New("the project directory is not a git repository")
+
+// noGitRepoError carries the operator-facing wording unchanged while still
+// matching errors.Is(err, errNoGitRepo). Wrapping with %w would have prefixed
+// the sentinel's own text onto a sentence that already says the same thing.
+type noGitRepoError struct{ projectDir string }
+
+func (e *noGitRepoError) Error() string {
+	return fmt.Sprintf(
+		"%s is not a git repository (no .git), so its source tree cannot be fetched",
+		e.projectDir)
+}
+
+func (e *noGitRepoError) Unwrap() error { return errNoGitRepo }
+
 // workspaceSourceError: this project's tree cannot be materialised on the
 // executor it is bound to.
 //
@@ -428,6 +517,14 @@ type workspaceSourceError struct {
 	Remote string
 	// Reason is the specific observation.
 	Reason string
+	// SuppressRemoteFix drops the "give the project a git remote" advice from
+	// Remediation.
+	//
+	// Set on the refusals that arise *after* applyWorkspace has already
+	// accepted that this project legitimately has no repository. Telling the
+	// operator to create one would send them to undo the very shape the run was
+	// admitted under, to fix something that is not what went wrong.
+	SuppressRemoteFix bool
 }
 
 // Error implements error.
@@ -468,18 +565,31 @@ func (e *workspaceSourceError) Unwrap() error { return executor.ErrWorkspaceUnav
 // applies depends on whether the deployment wants this project running off-host
 // at all — so both are offered rather than one guessed at.
 func (e *workspaceSourceError) Remediation() string {
+	// Named as the Web UI panel rather than as a CLI command, because there is
+	// no CLI command: `cloop executor bind`, which this advice used to print,
+	// has never existed. An operator who followed it got a usage dump listing
+	// every subcommand except the one they had just been told to run. Binding
+	// is POST /api/projects/{idx}/executor, whose one front end is that panel.
+	var bind string
+	if e.ExecutorID != "" {
+		bind = "bind the project to an executor that shares this host's filesystem, " +
+			"in the Executors panel of the Web UI"
+	}
+	if e.SuppressRemoteFix {
+		// The Reason already carries the fix that fits this project. Binding
+		// elsewhere remains a real alternative, so it is still offered.
+		return bind
+	}
 	add := "give the project an https git remote and push it " +
 		"(git remote add origin https://host/owner/name && git push -u origin HEAD)"
 	if e.Remote != "" {
 		add = "point the project's origin remote at an https URL " +
 			"(git remote set-url origin https://host/owner/name)"
 	}
-	if e.ExecutorID == "" {
+	if bind == "" {
 		return add
 	}
-	return fmt.Sprintf("%s, or bind the project to an executor that shares this host's "+
-		"filesystem with: cloop executor bind %s --executor <local-or-container-executor>",
-		add, e.ProjectPath)
+	return add + ", or " + bind
 }
 
 // --- reading the project's own checkout ---------------------------------------
@@ -544,8 +654,13 @@ func resolveGitDir(projectDir string) (gitDir, commonDir string, err error) {
 	dot := filepath.Join(projectDir, ".git")
 	info, err := os.Lstat(dot)
 	if err != nil {
-		return "", "", fmt.Errorf(
-			"%s is not a git repository (no .git), so its source tree cannot be fetched", projectDir)
+		// Marked with errNoGitRepo, which applyWorkspace tests for. The
+		// distinction it draws is the whole reason this sentinel exists: a
+		// project with *no* .git has no source of its own and belongs on an
+		// executor-owned workspace, while a project whose .git exists but is
+		// unusable has local history that an executor-owned workspace would
+		// silently leave behind. Only the first may be handled automatically.
+		return "", "", &noGitRepoError{projectDir: projectDir}
 	}
 
 	gitDir = dot

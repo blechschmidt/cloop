@@ -139,11 +139,18 @@ func provisionWorkspace(ctx context.Context, dir string, w executor.Workspace,
 // that is the whole content of the assertion. The size limit is carried across
 // because it still describes the workload's budget.
 //
-// A workspace that needed no provisioning is returned untouched — "none" means
-// an intentionally empty tree, and rewriting it to bind would claim a tree that
-// was never meant to exist.
+// An executor-owned workspace is rewritten for the same reason, and the
+// assertion is just as literal: the directory is this device's, it is at
+// WorkDir, and the seed the control plane sent has already been written into
+// it. From the inner driver's position that is indistinguishable from a bind,
+// and saying so is what stops the inner driver being handed a kind it would
+// have to learn about to run a directory that is simply there.
+//
+// A workspace that needed neither is returned untouched — "none" means an
+// intentionally empty tree, and rewriting it to bind would claim a tree that was
+// never meant to exist.
 func provisionedWorkspace(w executor.Workspace) executor.Workspace {
-	if !w.NeedsProvisioning() {
+	if !w.NeedsProvisioning() && !w.Kind.KeepsWorkDir() {
 		return w
 	}
 	return executor.Workspace{Kind: executor.WorkspaceBind, SizeLimitMB: w.SizeLimitMB}

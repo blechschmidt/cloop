@@ -73,6 +73,36 @@ const (
 	// WorkspaceGit: the executor clones Repo at Ref into WorkDir before
 	// starting the harness.
 	WorkspaceGit WorkspaceKind = "git"
+	// WorkspaceExecutor: the working directory belongs to the executor and
+	// persists there between dispatches. The hub sends no source tree at all —
+	// only the project's control state, as Spec.ProjectSeed.
+	//
+	// This is the answer for a project that has no source of its own to fetch:
+	// no git remote, and often nothing in the directory but `.cloop/`. That
+	// shape is not a misconfiguration, it is the ordinary one for the flow this
+	// product is built around — a project is a unit of work whose *code* is the
+	// set of repositories granted to it, which the harness clones for itself
+	// through the git proxy once it is running. Before this kind existed such a
+	// project could not run off-host at all: applyWorkspace found no remote and
+	// refused the dispatch, telling the operator to invent a git remote for a
+	// project that legitimately has none.
+	//
+	// Three properties distinguish it from WorkspaceNone, which is otherwise
+	// the closest fit:
+	//
+	//   - the directory is *kept*. WorkDir is derived deterministically from
+	//     the hub's project path (see DeviceWorkDir), so every dispatch of the
+	//     same project lands in the same place and a tree the harness cloned
+	//     for task 1 is still there for task 2. "none" promises the opposite —
+	//     an empty tree — and a reader who believed it would be wrong.
+	//   - a seed is mandatory rather than best-effort. On the git path `.cloop/`
+	//     may already be committed in the fetched repository, so a missing seed
+	//     degrades. Here there is no other source for it: without the seed the
+	//     directory holds no project and the harness exits on its first line.
+	//   - it says the project path names a location on the *executor*. That is
+	//     the whole point, and it is the thing the operator has to understand
+	//     to reason about where their work lives.
+	WorkspaceExecutor WorkspaceKind = "executor"
 	// WorkspaceNone: an intentionally empty working tree.
 	WorkspaceNone WorkspaceKind = "none"
 )
@@ -80,11 +110,21 @@ const (
 // Valid reports whether k is one of the known kinds.
 func (k WorkspaceKind) Valid() bool {
 	switch k {
-	case WorkspaceUnspecified, WorkspaceBind, WorkspaceGit, WorkspaceNone:
+	case WorkspaceUnspecified, WorkspaceBind, WorkspaceGit, WorkspaceExecutor, WorkspaceNone:
 		return true
 	}
 	return false
 }
+
+// KeepsWorkDir reports whether the executor is expected to preserve WorkDir
+// between dispatches of the same project.
+//
+// Only WorkspaceExecutor makes that promise. A bind workspace is the hub's own
+// directory and is not the executor's to keep or discard; a git workspace is
+// re-fetched; "none" is empty by definition. Callers use this to decide whether
+// reusing a directory is correct or is the stale-state bug projectseed's
+// package comment describes.
+func (k WorkspaceKind) KeepsWorkDir() bool { return k == WorkspaceExecutor }
 
 // Bounds on the fields, all of which arrive from outside this process.
 const (
@@ -147,7 +187,7 @@ func (w Workspace) IsZero() bool { return w == Workspace{} }
 // brokered token on the wire in cleartext.
 func (w Workspace) Validate() error {
 	if !w.Kind.Valid() {
-		return fmt.Errorf("%w: workspace kind %q is not one of bind, git, none",
+		return fmt.Errorf("%w: workspace kind %q is not one of bind, git, executor, none",
 			ErrInvalidSpec, w.Kind)
 	}
 	if w.SizeLimitMB < 0 {
@@ -298,6 +338,8 @@ func (w Workspace) Describe() string {
 		return s
 	case WorkspaceBind:
 		return "bind (host filesystem)"
+	case WorkspaceExecutor:
+		return "executor (kept on the executor, seeded from the hub)"
 	case WorkspaceNone:
 		return "none (empty tree)"
 	default:

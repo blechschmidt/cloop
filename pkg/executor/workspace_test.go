@@ -506,3 +506,65 @@ func TestWorkspaceDescribeIsLogSafe(t *testing.T) {
 		}
 	}
 }
+
+// --- executor-owned workspaces (Task 20324) ---------------------------------
+
+// TestWorkspaceExecutorKindContract pins the three properties the rest of the
+// system reads off this kind. Each one is load-bearing somewhere that would
+// fail quietly if it flipped: Valid gates whether a spec crosses the wire at
+// all, KeepsWorkDir is what the Kubernetes driver refuses on and what the
+// agent rewrites on, and the git-only fields must stay empty because a Repo
+// here would be a spec whose author believes a clone happens.
+func TestWorkspaceExecutorKindContract(t *testing.T) {
+	if !WorkspaceExecutor.Valid() {
+		t.Error("WorkspaceExecutor.Valid() = false, so every spec carrying it is refused")
+	}
+	if !WorkspaceExecutor.KeepsWorkDir() {
+		t.Error("WorkspaceExecutor.KeepsWorkDir() = false, so nothing promises the " +
+			"directory survives between dispatches")
+	}
+	for _, k := range []WorkspaceKind{WorkspaceBind, WorkspaceGit, WorkspaceNone, WorkspaceUnspecified} {
+		if k.KeepsWorkDir() {
+			t.Errorf("%q.KeepsWorkDir() = true, want false — only an executor-owned "+
+				"workspace makes that promise", k)
+		}
+	}
+
+	w := Workspace{Kind: WorkspaceExecutor}
+	if err := w.Validate(); err != nil {
+		t.Errorf("a bare executor-owned workspace does not validate: %v", err)
+	}
+	if got := w.Describe(); got == "" || got == "unspecified" {
+		t.Errorf("Describe() = %q, want it to name the kind", got)
+	}
+	// Nothing is fetched, so nothing may be provisioned or authenticated.
+	if w.NeedsProvisioning() {
+		t.Error("NeedsProvisioning() = true, but an executor-owned workspace fetches nothing")
+	}
+	if w.RequiresCredential() {
+		t.Error("RequiresCredential() = true, but there is no fetch to authenticate")
+	}
+	if err := (Workspace{Kind: WorkspaceExecutor, Repo: "https://github.com/acme/w.git"}).Validate(); err == nil {
+		t.Error("a repo was accepted on an executor-owned workspace, which fetches nothing")
+	}
+}
+
+// TestSpecRequiresProjectSeedForExecutorWorkspace: with no repository to fetch,
+// the seed is the only thing that can put a project on the far side. The
+// requirement therefore has to follow the *kind*, not just the payload —
+// deriving it from the payload alone is circular, because a spec refused a seed
+// for lack of support then carries none and so asks for nothing.
+func TestSpecRequiresProjectSeedForExecutorWorkspace(t *testing.T) {
+	spec := Spec{Workspace: Workspace{Kind: WorkspaceExecutor}}
+	if !spec.SandboxRequirements().RequireProjectSeed {
+		t.Error("RequireProjectSeed = false for an executor-owned workspace, so an executor " +
+			"that cannot place a project would be accepted and run against an empty directory")
+	}
+	// The other kinds must not acquire the requirement by accident: a bind
+	// workspace is explicitly forbidden from carrying a seed at all.
+	for _, k := range []WorkspaceKind{WorkspaceBind, WorkspaceNone} {
+		if (Spec{Workspace: Workspace{Kind: k}}).SandboxRequirements().RequireProjectSeed {
+			t.Errorf("RequireProjectSeed = true for kind %q with no seed attached", k)
+		}
+	}
+}
