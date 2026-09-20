@@ -1224,7 +1224,7 @@ see [editing it from the dashboard](../security/model.md#editing-it-from-the-das
 records; use the file or the panel's table.
 
 If two hubs share a working directory, `ui.oidc` belongs in that hub's
-[`.cloop/config.ui-<port>.yaml`](#two-dashboards-one-directory-cloopconfiguiportyaml)
+[`.cloop/config.ui-<port>.yaml`](#two-dashboards-in-one-directory)
 instead — `redirect_url` names one origin, and the hub it does not name cannot
 serve the callback.
 
@@ -1413,7 +1413,7 @@ When a `--token` is set:
   - `Referrer-Policy: no-referrer`
 - CORS is restricted to `localhost` / `127.0.0.1` origins only (no wildcard).
 
-#### Two dashboards, one directory: `.cloop/config.ui-<port>.yaml`
+#### Two dashboards in one directory
 
 A hub reads `.cloop/config.yaml` from its working directory. When two hubs share
 that directory — a stable dashboard beside a bleeding-edge one, say — everything
