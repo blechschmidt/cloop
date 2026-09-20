@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/apierror"
+	"github.com/blechschmidt/cloop/pkg/authz"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
 )
 
@@ -191,7 +192,7 @@ func (s *Server) handleGitHubAppRepositories(w http.ResponseWriter, r *http.Requ
 
 	ctx, cancel := context.WithTimeout(r.Context(), githubAppDiscoveryTimeout)
 	defer cancel()
-	repos, err := bs.secret.GitHubAppRepositories(ctx, ref)
+	repos, err := bs.secret.GitHubAppRepositoriesFor(ctx, ref, s.secretViewer(r))
 	if err != nil {
 		writeBrokerError(w, err, "list GitHub App repositories")
 		return
@@ -229,8 +230,14 @@ type githubAppChoice struct {
 // handleProjectRepositories serves GET /api/projects/{idx}/repositories.
 //
 // It answers, for one project, both halves of the picture the assignment panel
-// needs: which GitHub Apps this hub has, and which repositories the project can
-// already reach through them.
+// needs: which GitHub Apps this caller may grant from, and which repositories
+// the project can already reach through them.
+//
+// "may grant from" rather than "this hub has", and the distinction is the whole
+// of Task 20323. An inventory of every App on the hub is both reconnaissance a
+// project reader has no claim to and a menu of choices the POST will refuse —
+// which is how an operator came to be told the App they had just connected did
+// not exist.
 func (s *Server) handleProjectRepositories(w http.ResponseWriter, r *http.Request) {
 	entry, ok := s.projectEntryFromPath(w, r)
 	if !ok {
@@ -245,7 +252,23 @@ func (s *Server) handleProjectRepositories(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	secrets, err := bs.secret.ListSecrets()
+	// Scoped to the caller, not to the hub. This route is gated on project.read
+	// — deliberately, since it names repositories rather than credentials — so
+	// an unscoped listing handed the name and ID of every GitHub App on the hub,
+	// personal ones included, to anyone who could open a project's Overview tab.
+	viewer := s.secretViewer(r)
+
+	// Whether this caller could grant a *shared* App here, evaluated against
+	// this project's scope rather than the global one — the same question, at
+	// the same scope, that the route table asks before admitting the POST. Read
+	// globally it would answer "no" for a maintainer bound to one project, and
+	// hide from their dropdown the very Apps that project's POST would accept:
+	// the dropdown-disagrees-with-the-handler bug this whole change is about,
+	// reintroduced one line further down.
+	scope, scopeOK := s.projectScopeFromIdx(r)
+	canGrantShared := scopeOK && s.permissionsFor(r, scope).Allows(authz.PermSecretGrant)
+
+	secrets, err := bs.secret.ListSecretsFor(viewer)
 	if err != nil {
 		writeBrokerError(w, err, "list secrets")
 		return
@@ -254,12 +277,28 @@ func (s *Server) handleProjectRepositories(w http.ResponseWriter, r *http.Reques
 	apps := make([]githubAppChoice, 0, 4)
 	for _, sec := range secrets {
 		byID[sec.ID] = sec
-		if sec.Kind == secretbroker.KindGitHubApp {
-			apps = append(apps, githubAppChoice{ID: sec.ID, Name: sec.Name})
+		if sec.Kind != secretbroker.KindGitHubApp {
+			continue
 		}
+		// `apps` populates a dropdown whose only purpose is to grant from what
+		// it lists, so the test for inclusion is the same one the POST applies:
+		// can this caller actually spend it. Visibility alone is wider in both
+		// directions — an admin may see a colleague's personal App but never
+		// spend one, and an operator sees no shared secret they could grant —
+		// and offering either guarantees the "secret not found" that opened
+		// Task 20323.
+		if !sec.SpendableBy(viewer) || (!sec.Personal() && !canGrantShared) {
+			continue
+		}
+		apps = append(apps, githubAppChoice{ID: sec.ID, Name: sec.Name})
 	}
 
-	grants, err := bs.secret.ListGrants(secretbroker.GrantFilter{ActiveOnly: true})
+	// Assignments are narrowed by ownership only, not by holdsSharedSecretRead:
+	// "which repositories may this project reach" is the project's own
+	// configuration, and a reader admitted by project.read is entitled to it.
+	// What they are not entitled to is a colleague's personal credential
+	// appearing in it, which is what ListGrantsFor removes.
+	grants, err := bs.secret.ListGrantsFor(secretbroker.GrantFilter{ActiveOnly: true}, viewer)
 	if err != nil {
 		writeBrokerError(w, err, "list grants")
 		return
@@ -359,6 +398,12 @@ func (s *Server) handleProjectRepositoriesAssign(w http.ResponseWriter, r *http.
 
 	grant, err := bs.secret.Grant(r.Context(), secretbroker.GrantRequest{
 		SecretRef: strings.TrimSpace(req.Secret),
+		// Who this grant is created on behalf of. Omitting it left the zero
+		// Viewer, which owns nothing, so every personal credential was refused
+		// here — as ErrSecretNotFound, because the broker will not confirm a
+		// name to a caller who may not see it. The operator was told the App
+		// they had just connected did not exist (Task 20323).
+		Viewer: s.secretViewer(r),
 		// The subject is the project this route resolved, never a value from
 		// the body: the caller's authority was checked against that project and
 		// nothing else.

@@ -311,6 +311,18 @@ all, and the cluster's own RBAC is the only limit on what the credential does.`,
 				Writable:    grantWritableFlag,
 			},
 			Actor: currentActor(),
+			// The same omission the hub had (Task 20323), with a milder
+			// symptom that was still a lie: without a Viewer, a personal
+			// secret is invisible, so granting one reported "secret not
+			// found" for a credential `cloop secret list` had just printed.
+			//
+			// PrivilegedViewer confers visibility, never use — Secret.
+			// SpendableBy ignores Admin on purpose — so this hands the CLI no
+			// authority it lacked. What changes is the refusal: "this secret
+			// belongs to alice@corp.example" instead of a denial of its
+			// existence, which is the difference between an operator finding
+			// the owner and an operator hunting a phantom typo.
+			Viewer: secretbroker.PrivilegedViewer(currentActor()),
 		})
 		if err != nil {
 			return err

@@ -292,6 +292,25 @@ func (b *Broker) Mint(ctx context.Context, req MintRequest) (Secret, error) {
 		return Secret{}, b.denyf(ev, ErrOwnerRequired,
 			"a personal secret was requested but no owner identity resolved")
 	}
+	// The mirror image, and the one that actually bit (Task 20323). Owner and
+	// Personal are documented as redundant in the success case, so a caller
+	// that sets one and not the other has contradicted itself — and until this
+	// check existed, Mint resolved the contradiction silently in favour of
+	// Owner. A handler that passed the signed-in identity alongside a
+	// shared-secret request therefore minted a *personal* secret: the hub-wide
+	// GitHub App connected from the Settings dialog came out owned by whoever
+	// happened to be logged in, invisible to every other maintainer.
+	//
+	// Refused rather than resolved in either direction. Clearing the owner
+	// would widen somebody's private credential into the organisation's on the
+	// strength of a flag a handler got wrong, which is the one direction that
+	// cannot be undone by re-minting; keeping it is what already went wrong.
+	if !req.Personal && owner != "" {
+		return Secret{}, b.denyf(ev, ErrInvalidSecret,
+			"a shared secret was requested but an owner (%s) was supplied; "+
+				"set Personal to mint it for that identity, or omit Owner to mint it "+
+				"for the organisation", owner)
+	}
 
 	// The ID is minted before the payload is sealed because it *is* the
 	// envelope's associated data: binding the ciphertext to the row it lives

@@ -245,7 +245,7 @@ function ghAppRenderAssignments() {
     const apps = ghAppState.apps;
     if (!apps.length) {
       html += '<div style="font-size:12px;color:var(--muted);margin-top:10px">' +
-        'No GitHub App is connected. An admin can connect one under ' +
+        'No GitHub App is available. Connect one under ' +
         '<strong>Settings → GitHub Apps</strong>.</div>';
     } else {
       html += '<div style="margin-top:14px;padding-top:12px;border-top:1px solid var(--border)">' +

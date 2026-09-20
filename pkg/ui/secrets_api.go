@@ -623,6 +623,17 @@ func (s *Server) handleSecretCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Only a personal mint carries an owner. Sending the signed-in identity
+	// regardless read naturally and was wrong: Owner is not "who did this" —
+	// that is Actor, recorded separately — but "who this belongs to", and a
+	// shared secret belongs to nobody in particular. The broker now refuses the
+	// contradiction outright (Task 20323); this is the half that means a hub
+	// with an IdP can still connect a shared GitHub App at all.
+	owner := ""
+	if personal {
+		owner = viewer.Identity
+	}
+
 	payload := []byte(req.Payload)
 	sec, err := bs.secret.Mint(r.Context(), secretbroker.MintRequest{
 		Name:     strings.TrimSpace(req.Name),
@@ -630,7 +641,7 @@ func (s *Server) handleSecretCreate(w http.ResponseWriter, r *http.Request) {
 		Payload:  payload,
 		Metadata: req.Metadata,
 		Actor:    s.auditActor(r),
-		Owner:    viewer.Identity,
+		Owner:    owner,
 		Personal: personal,
 	})
 	if err != nil {
@@ -1517,6 +1528,16 @@ func writeBrokerError(w http.ResponseWriter, err error, action string) {
 		errors.Is(err, secretbroker.ErrInvalidSubject),
 		errors.Is(err, secretbroker.ErrInvalidConstraint),
 		errors.Is(err, egressbroker.ErrInvalidGrant):
+		apierror.WriteError(w, apierror.New(apierror.CodeInvalidInput, err.Error()))
+	// The ownership sentinels (Task 20323). Each is a refusal of authority, and
+	// until they were mapped every one of them reached the dashboard as a 500
+	// the panel could only report as a bug — "this secret belongs to another
+	// user" presented as an internal error, which tells the operator to file a
+	// ticket rather than to pick a different credential.
+	case errors.Is(err, secretbroker.ErrNotOwner),
+		errors.Is(err, secretbroker.ErrPersonalWildcard):
+		apierror.WriteError(w, apierror.New(apierror.CodeForbidden, err.Error()))
+	case errors.Is(err, secretbroker.ErrOwnerRequired):
 		apierror.WriteError(w, apierror.New(apierror.CodeInvalidInput, err.Error()))
 	case errors.Is(err, secretbroker.ErrNoKey):
 		apierror.WriteError(w, apierror.New(apierror.CodeUnavailable, err.Error()))

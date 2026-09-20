@@ -88,12 +88,32 @@ func (b *Broker) DiscoverGitHubAppInstallations(ctx context.Context, payload []b
 // The secret's private key is opened, used, and dropped inside this call. The
 // discovery token minted to read the list is metadata:read and is destroyed
 // before the function returns.
+// It is unscoped, for the CLI and the hub host. Anything serving a browser
+// request must call GitHubAppRepositoriesFor instead.
 func (b *Broker) GitHubAppRepositories(ctx context.Context, ref string) ([]InstallationRepo, error) {
+	return b.GitHubAppRepositoriesFor(ctx, ref, PrivilegedViewer(""))
+}
+
+// GitHubAppRepositoriesFor is GitHubAppRepositories on behalf of one identity.
+//
+// Gated on SpendableBy rather than VisibleTo, which is stricter than it first
+// looks: enumerating signs a JWT with the stored key and presents it to GitHub,
+// so it *uses* the credential. An admin may see that a colleague keeps a
+// personal App here and may destroy it, but no permission in the ladder lets
+// them spend one — and a route that enumerates on their behalf would be exactly
+// that, with the assertion already sent by the time anything refused
+// (Task 20323).
+func (b *Broker) GitHubAppRepositoriesFor(ctx context.Context, ref string, v Viewer) ([]InstallationRepo, error) {
 	if b == nil {
 		return nil, wrapf(ErrGitHubAppMint, "no broker")
 	}
 	sec, err := b.DescribeSecret(ref)
 	if err != nil {
+		return nil, err
+	}
+	// Before the envelope is opened, so a refusal costs no decryption and
+	// reveals nothing about a secret the caller may not see.
+	if err := checkSpendable(sec, v); err != nil {
 		return nil, err
 	}
 	if sec.Kind != KindGitHubApp {
