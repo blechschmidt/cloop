@@ -284,9 +284,15 @@ function oidcErrText(d) {
 }
 
 // oidcErrField is the input the hub blamed, if it named one.
+//
+// Reads errorDetail as well as error: parseAPIResponse now flattens an apierror
+// body to its message so ~100 render sites stop showing "[object Object]"
+// (Task 20320), and it parks the original object there precisely so the details
+// this needs survive the flattening.
 function oidcErrField(d) {
-  if (!d || !d.error || typeof d.error === 'string') return '';
-  return (d.error.details && d.error.details.field) || '';
+  if (!d) return '';
+  var e = (d.error && typeof d.error !== 'string') ? d.error : d.errorDetail;
+  return (e && e.details && e.details.field) || '';
 }
 
 // oidcShowFieldError puts a refusal beside the input that caused it.

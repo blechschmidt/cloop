@@ -805,6 +805,9 @@ function parseAPIResponse(r) {
 // one here rather than at ~100 render sites (Task 20320).
 function normalizeAPIError(body) {
   if (body && typeof body === 'object' && body.error != null && typeof body.error !== 'string') {
+    // errorDetail keeps code/details, which the flattened string drops and
+    // oidcErrField still needs to blame the right input.
+    body.errorDetail = body.error;
     body.error = errText(body.error);
   }
   return body;

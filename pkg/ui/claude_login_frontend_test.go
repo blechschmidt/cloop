@@ -118,6 +118,9 @@ type claudeRefusalResult struct {
 	NamesRequiredPermission bool   `json:"names_required_permission"`
 	ShowsMessage            bool   `json:"shows_message"`
 	OffersCodeInput         bool   `json:"offers_code_input"`
+	FocusedID               string `json:"focused_id"`
+	FieldPreNormalise       string `json:"field_pre_normalise"`
+	FieldFlatDialect        string `json:"field_flat_dialect"`
 	Error                   string `json:"error"`
 }
 
@@ -219,5 +222,27 @@ func TestDashboard_ClaudeLoginRefusalIsReadable(t *testing.T) {
 	if !got.OffersCodeInput {
 		t.Error("a successful login start did not advance to the code-entry step — " +
 			"normalizeAPIError or a truthy-error check is treating success as failure")
+	}
+
+	// Flattening must not eat the details another panel depends on. The OIDC
+	// form blames a specific input from error.details.field, which is why
+	// normalizeAPIError parks the original object on errorDetail.
+	got = need("oidc_field_blamed")
+	if got.ShowsObjectObject || !got.ShowsMessage {
+		t.Errorf("the OIDC settings refusal did not render: object_object=%v shows_message=%v",
+			got.ShowsObjectObject, got.ShowsMessage)
+	}
+	if got.FocusedID != "issuer" {
+		t.Errorf("oidcErrField on a flattened body = %q, want \"issuer\" — "+
+			"error.details.field did not survive normalizeAPIError, so the OIDC "+
+			"form would blame the wrong input", got.FocusedID)
+	}
+	if got.FieldPreNormalise != "issuer" {
+		t.Errorf("oidcErrField on an un-normalised body = %q, want \"issuer\" — a "+
+			"direct fetch() still hands over the nested shape", got.FieldPreNormalise)
+	}
+	if got.FieldFlatDialect != "" {
+		t.Errorf("oidcErrField invented a field %q for a flat-dialect error",
+			got.FieldFlatDialect)
 	}
 }

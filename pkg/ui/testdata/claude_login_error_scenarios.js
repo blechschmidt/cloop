@@ -143,6 +143,44 @@ async function main() {
     };
   }
 
+  // 4. Flattening must not eat the details other panels rely on. The OIDC
+  //    settings form blames a specific input by reading error.details.field, so
+  //    normalizeAPIError parks the original object on errorDetail.
+  //
+  //    Checked by exercising the three functions out of the bundle source rather
+  //    than by driving the form, because the only observable effect of
+  //    oidcErrField is input.focus() — and domshim's focus() is a no-op that
+  //    tracks no activeElement. Asserting on focus would make this test pass or
+  //    fail on the shim's capabilities rather than on the contract it is about.
+  {
+    const src = require('fs').readFileSync(bundlePath, 'utf8');
+    const grab = name => {
+      const m = src.match(new RegExp('function ' + name + '\\([\\s\\S]*?\\n\\}'));
+      if (!m) throw new Error('not found in bundle: ' + name);
+      return m[0];
+    };
+    const sandbox = {};
+    // eslint-disable-next-line no-new-func
+    new Function('out', grab('errText') + grab('normalizeAPIError') + grab('oidcErrField') +
+      'out.f = {errText, normalizeAPIError, oidcErrField};')(sandbox);
+    const {normalizeAPIError, oidcErrField} = sandbox.f;
+
+    const nested = {error: {code: 'INVALID_INPUT', message: 'issuer must be https',
+                            details: {field: 'issuer'}}};
+    const flattened = normalizeAPIError(JSON.parse(JSON.stringify(nested)));
+    out.oidc_field_blamed = {
+      shows_object_object: String(flattened.error).indexOf('[object Object]') !== -1,
+      shows_message: flattened.error === 'issuer must be https',
+      // The field has to survive the flattening...
+      focused_id: oidcErrField(flattened),
+      // ...and still be found on a body that never went through it, because a
+      // direct fetch() still hands over the nested shape.
+      field_pre_normalise: oidcErrField(nested),
+      // A flat-dialect body names no field and must not invent one.
+      field_flat_dialect: oidcErrField({error: 'boom'}),
+    };
+  }
+
   return out;
 }
 
