@@ -116,8 +116,31 @@ type ciState struct {
 // Deliberately re-read rather than cached: the settings panel writes
 // config.yaml, and a CI service built from a snapshot taken at boot would keep
 // federating under a policy an operator has already changed.
+//
+// Includes the per-instance overlay (Task 20318) for the same reason it is
+// re-read at all: this has to answer with the configuration the hub is running
+// under. Where two dashboards share a working directory, the bare project
+// config is partly a different hub's policy.
 func (s *Server) loadHubConfig() (*config.Config, error) {
-	return config.Load(s.WorkDir)
+	cfg, _, err := config.LoadUIInstance(s.WorkDir, s.Port)
+	return cfg, err
+}
+
+// hubConfigOverlay returns this hub's per-instance overlay path, or "" when its
+// configuration comes from .cloop/config.yaml alone.
+//
+// Existence is tested on each call rather than remembered from startup: an
+// overlay created while the hub is running has to be found by the next write,
+// which is the only way the settings panel can ever create one.
+func (s *Server) hubConfigOverlay() string {
+	if s.Port <= 0 {
+		return ""
+	}
+	path := config.UIInstanceConfigPath(s.WorkDir, s.Port)
+	if _, err := os.Stat(path); err != nil {
+		return ""
+	}
+	return path
 }
 
 // ciEnabled reports whether CI federation is configured on.

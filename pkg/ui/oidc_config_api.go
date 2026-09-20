@@ -343,7 +343,7 @@ func (s *Server) handleOIDCSettingsSave(w http.ResponseWriter, r *http.Request) 
 	}
 
 	hubConfigMu.Lock()
-	cfg, err := config.Load(s.WorkDir)
+	cfg, err := s.loadHubConfig()
 	if err != nil || cfg == nil {
 		hubConfigMu.Unlock()
 		apierror.WriteError(w, apierror.New(apierror.CodeUnavailable, "load hub config"))
@@ -365,7 +365,18 @@ func (s *Server) handleOIDCSettingsSave(w http.ResponseWriter, r *http.Request) 
 		writeOIDCProblem(w, err)
 		return
 	}
-	if err := config.Save(s.WorkDir, cfg); err != nil {
+	// Write where this hub read (Task 20318). On a host where a second
+	// dashboard shares the working directory, saving SSO into the shared
+	// config.yaml would be wrong in both directions at once: this hub would
+	// not pick the change up, because its own overlay still shadows it, and
+	// the other hub would pick up a redirect_url naming an origin it does not
+	// serve. So an overlay, once it exists, is what the panel maintains.
+	if overlay := s.hubConfigOverlay(); overlay != "" {
+		err = config.SaveUIInstanceOIDC(overlay, cfg.UI.OIDC)
+	} else {
+		err = config.Save(s.WorkDir, cfg)
+	}
+	if err != nil {
 		hubConfigMu.Unlock()
 		apierror.WriteError(w, apierror.New(apierror.CodeInternal, err.Error()))
 		return

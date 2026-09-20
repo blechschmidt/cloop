@@ -116,9 +116,19 @@ but not for anything reachable from a network.`,
 		// deployment in plaintext with no authentication and only a line on
 		// stderr to say so. Load returns defaults with a nil error when the
 		// file is absent, so the no-config case is unaffected.
-		cfg, err := config.Load(workdir)
+		//
+		// Read through LoadUIInstance so a host running two dashboards out of
+		// one working directory can say something to this one alone — see
+		// pkg/config/uiinstance.go for why the overlay is a separate file and
+		// not a section. It is named on stdout when it applies: a setting
+		// whose source is invisible is the one an operator edits in the wrong
+		// file.
+		cfg, overlay, err := config.LoadUIInstance(workdir, uiPort)
 		if err != nil {
 			return fmt.Errorf("could not load %s: %w", config.ConfigPath(workdir), err)
+		}
+		if overlay != "" {
+			fmt.Printf("Instance config: %s merged over %s\n", overlay, config.ConfigPath(workdir))
 		}
 		if cfg != nil {
 			srv.MaxWebSocketConns = cfg.UI.MaxWebSocketConns

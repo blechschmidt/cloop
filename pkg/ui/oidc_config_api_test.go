@@ -621,3 +621,83 @@ func TestOIDCChangedFields(t *testing.T) {
 		t.Errorf("identical blocks reported changes: %v", got)
 	}
 }
+
+// TestOIDCSave_WritesToThePerInstanceOverlay covers the case where two hubs
+// share a working directory (Task 20318).
+//
+// Both failures this prevents are silent. Saving into the shared config.yaml
+// would not reach this hub at all — its own overlay still shadows that file, so
+// the panel would report success and change nothing. And it would reach the
+// *other* hub, which would inherit a redirect_url naming an origin it does not
+// serve, taking down a dashboard nobody was editing.
+func TestOIDCSave_WritesToThePerInstanceOverlay(t *testing.T) {
+	dir := t.TempDir()
+	base := config.Default()
+	base.Provider = "claudecode"
+	if err := config.Save(dir, base); err != nil {
+		t.Fatalf("seed config.yaml: %v", err)
+	}
+	overlay := config.UIInstanceConfigPath(dir, 8081)
+	seed := validOIDC()
+	if err := config.SaveUIInstanceOIDC(overlay, seed); err != nil {
+		t.Fatalf("seed overlay: %v", err)
+	}
+
+	srv := &Server{WorkDir: dir, Port: 8081}
+	rec := putOIDC(t, srv, map[string]any{"issuer": "https://idp2.example.com"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT = %d, want 200 (%s)", rec.Code, rec.Body.String())
+	}
+
+	// The change landed where this hub reads.
+	effective, applied, err := config.LoadUIInstance(dir, 8081)
+	if err != nil {
+		t.Fatalf("LoadUIInstance: %v", err)
+	}
+	if applied != overlay {
+		t.Fatalf("overlay not in effect: %q", applied)
+	}
+	if effective.UI.OIDC.Issuer != "https://idp2.example.com" {
+		t.Errorf("issuer = %q, want the saved value visible to this hub", effective.UI.OIDC.Issuer)
+	}
+
+	// And nowhere else: the hub on the other port is still SSO-free.
+	other, _, err := config.LoadUIInstance(dir, 8080)
+	if err != nil {
+		t.Fatalf("LoadUIInstance(8080): %v", err)
+	}
+	if other.UI.OIDC.Enabled {
+		t.Error("the panel enabled SSO for a hub it does not administer")
+	}
+	shared, err := config.Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if shared.UI.OIDC.Enabled || shared.UI.OIDC.Issuer != "" {
+		t.Errorf("the panel wrote SSO into the shared config.yaml: %+v", shared.UI.OIDC)
+	}
+}
+
+// TestOIDCSave_WritesConfigYAMLWithoutAnOverlay keeps the ordinary single-hub
+// deployment on its original path: write where the hub read.
+func TestOIDCSave_WritesConfigYAMLWithoutAnOverlay(t *testing.T) {
+	srv := oidcTestServer(t, config.OIDCConfig{})
+	srv.Port = 8080
+
+	rec := putOIDC(t, srv, map[string]any{
+		"enabled":      true,
+		"issuer":       "https://idp.example.com",
+		"client_id":    "cloop-dashboard",
+		"redirect_url": "https://cloop.example.com/auth/callback",
+		"admin_emails": []string{"ops@example.com"},
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT = %d, want 200 (%s)", rec.Code, rec.Body.String())
+	}
+	if got := savedOIDC(t, srv); !got.Enabled || got.Issuer != "https://idp.example.com" {
+		t.Errorf("config.yaml did not receive the save: %+v", got)
+	}
+	if _, err := os.Stat(config.UIInstanceConfigPath(srv.WorkDir, 8080)); err == nil {
+		t.Error("an overlay was created for a hub that did not have one")
+	}
+}

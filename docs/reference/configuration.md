@@ -1223,6 +1223,11 @@ see [editing it from the dashboard](../security/model.md#editing-it-from-the-das
 `role_mappings` is the one key `cloop config set` cannot reach, being a list of
 records; use the file or the panel's table.
 
+If two hubs share a working directory, `ui.oidc` belongs in that hub's
+[`.cloop/config.ui-<port>.yaml`](#two-dashboards-one-directory-cloopconfiguiportyaml)
+instead — `redirect_url` names one origin, and the hub it does not name cannot
+serve the callback.
+
 For Microsoft Entra ID there is a worked Terraform module at
 [`deploy/terraform/azure-entra-id/`](../../deploy/terraform/azure-entra-id/README.md).
 It creates the application registration, declares cloop's four roles as Entra
@@ -1407,6 +1412,69 @@ When a `--token` is set:
   - `X-Frame-Options: DENY`
   - `Referrer-Policy: no-referrer`
 - CORS is restricted to `localhost` / `127.0.0.1` origins only (no wildcard).
+
+#### Two dashboards, one directory: `.cloop/config.ui-<port>.yaml`
+
+A hub reads `.cloop/config.yaml` from its working directory. When two hubs share
+that directory — a stable dashboard beside a bleeding-edge one, say — everything
+in that file is said to both of them, including the settings that can only be
+true of one:
+
+```ini
+# /etc/systemd/system/cloop-ui.service
+ExecStart=/usr/local/bin/cloop ui --port 8080          # reachable at :1234
+# /etc/systemd/system/cloop-ui-latest.service
+ExecStart=/usr/local/bin/cloop-latest ui --port 8081   # reachable at :8888
+```
+
+`ui.oidc.redirect_url` names one origin. Configure SSO for the second hub in the
+shared file and the first one starts authenticating people into a callback it
+does not serve — an endless login loop, or, on a binary predating the
+public-client support in `ui.oidc`, a refusal to start at all.
+
+So `cloop ui --port N` reads **`.cloop/config.ui-N.yaml`** after `config.yaml`
+and merges it over the top. The listen port is the key because it already
+distinguishes the two hubs. When an overlay applies, startup names it:
+
+```
+Instance config: /srv/app/.cloop/config.ui-8081.yaml merged over /srv/app/.cloop/config.yaml
+```
+
+```yaml
+# /srv/app/.cloop/config.ui-8081.yaml — read only by the hub on :8081
+ui:
+  oidc:
+    enabled: true
+    issuer: https://login.microsoftonline.com/contoso.onmicrosoft.com/v2.0
+    client_id: 00000000-0000-0000-0000-000000000000
+    redirect_url: https://hub.example.com:8888/auth/oidc
+    default_role: none
+    admin_emails: [ops@example.com]
+```
+
+- **Merge is per key.** A key present in the overlay replaces the value under
+  it; a key absent leaves the project's value alone. Sequences replace rather
+  than append — the `scopes` list above means those scopes, not those plus
+  whatever `config.yaml` listed.
+- **Bounds still apply.** Overlay values go through the same clamping as
+  `config.yaml`, so a limit cannot be escaped by writing it one file over.
+- **A parse error is fatal**, for the same reason it is in `config.yaml`: the
+  file decides whether anyone has to log in.
+- **Only `cloop ui` reads it.** Put settings that describe *this hub* in it —
+  `ui.oidc`, `ui.tls`, the origin allowlist, the WebSocket caps. Leave API keys
+  and budgets in `config.yaml`, where every other command reads them.
+- **The Settings panel follows the hub.** Once an overlay exists, `PUT
+  /api/config/oidc` maintains the `ui.oidc` block *in the overlay*, preserving
+  the rest of the file and its comments. Without one it writes `config.yaml` as
+  before.
+- Give it mode `0600`: it can hold a client secret, and `cloop ui` warns if it
+  is readable by anyone else.
+
+It is a separate file rather than a port-keyed section of `config.yaml` because
+of what an older binary sharing the directory does with a key it does not know:
+not ignore it, but drop it, the next time anything calls `Save()`. A block whose
+job is to require a login must not be deletable that way. Nothing opens a
+filename it has never heard of.
 
 #### Front-end telemetry
 

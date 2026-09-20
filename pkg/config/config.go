@@ -2528,25 +2528,7 @@ func Load(workdir string) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Warn on Unix if the config file is world- or group-readable. The warning
-	// fires once per path per process — Load() is hot in long-running processes
-	// (UI, daemon, auto-evolve) and an unconditional Fprintf would flood stderr.
-	if runtime.GOOS != "windows" {
-		if fi, statErr := os.Stat(path); statErr == nil {
-			if fi.Mode().Perm()&0o077 != 0 {
-				permWarnedMu.Lock()
-				_, already := permWarnedPaths[path]
-				if !already {
-					permWarnedPaths[path] = struct{}{}
-				}
-				permWarnedMu.Unlock()
-				if !already {
-					fmt.Fprintf(os.Stderr, "warning: %s has permissions %o — it may contain API keys. Run: chmod 600 %s\n",
-						path, fi.Mode().Perm(), path)
-				}
-			}
-		}
-	}
+	warnIfConfigTooOpen(path)
 	if err := yaml.Unmarshal(data, cfg); err != nil {
 		return nil, err
 	}
@@ -3061,6 +3043,34 @@ func Save(workdir string, cfg *Config) error {
 	// YAML write — YAML is the canonical store, SQLite is a queryable mirror.
 	mirrorToSQLite(workdir, data)
 	return nil
+}
+
+// warnIfConfigTooOpen prints a one-time warning when a config file is world-
+// or group-readable.
+//
+// The warning fires once per path per process: Load() is hot in long-running
+// processes (UI, daemon, auto-evolve) and an unconditional Fprintf would flood
+// stderr. Shared with the per-instance overlay, which can hold an OIDC client
+// secret and so deserves the same check under the same dedup.
+func warnIfConfigTooOpen(path string) {
+	if runtime.GOOS == "windows" {
+		return
+	}
+	fi, err := os.Stat(path)
+	if err != nil || fi.Mode().Perm()&0o077 == 0 {
+		return
+	}
+	permWarnedMu.Lock()
+	_, already := permWarnedPaths[path]
+	if !already {
+		permWarnedPaths[path] = struct{}{}
+	}
+	permWarnedMu.Unlock()
+	if already {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "warning: %s has permissions %o — it may contain API keys. Run: chmod 600 %s\n",
+		path, fi.Mode().Perm(), path)
 }
 
 // WriteDefault creates a default config.yaml if one doesn't exist.
