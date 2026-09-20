@@ -3,12 +3,12 @@ package cmd
 import (
 	"bufio"
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/clijson"
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/memory"
 	"github.com/blechschmidt/cloop/pkg/pm"
@@ -136,16 +136,17 @@ Examples:
 		defer cancel()
 
 		if suggestJSON {
-			// Machine-readable mode for the Web UI: emit JSON only, no decoration,
-			// no state mutation. The Web UI captures stdout+stderr into a single
-			// buffer and json.Unmarshals it, so any stray write here breaks parsing.
+			// Machine-readable mode for the Web UI: no decoration, no state
+			// mutation. The payload is framed rather than written bare,
+			// because the UI reads it back through an executor that merges
+			// stdout and stderr into one stream — so a diagnostic from any
+			// package that happens to run during startup would otherwise be
+			// parsed as the result. See pkg/clijson (Task 20325).
 			result, err := suggest.Generate(ctx, prov, prompt, model, 3*time.Minute)
 			if err != nil {
 				return fmt.Errorf("suggestion generation failed: %w", err)
 			}
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
-			return enc.Encode(result)
+			return clijson.Emit(os.Stdout, result)
 		}
 
 		headerColor := color.New(color.FgCyan, color.Bold)

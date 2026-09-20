@@ -31,6 +31,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/blocker"
 	"github.com/blechschmidt/cloop/pkg/boundedread"
 	"github.com/blechschmidt/cloop/pkg/claudecodeauth"
+	"github.com/blechschmidt/cloop/pkg/clijson"
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/cost"
 	"github.com/blechschmidt/cloop/pkg/decompose"
@@ -4757,8 +4758,11 @@ func (s *Server) handleSuggestGenerate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// Not json.Unmarshal(out): out is stdout and stderr merged by the
+		// executor, so the payload has to be located in it rather than
+		// assumed to be all of it. See pkg/clijson (Task 20325).
 		var result suggest.Result
-		if err := json.Unmarshal(out, &result); err != nil {
+		if err := clijson.Unmarshal(out, &result); err != nil {
 			s.suggestErr = "could not parse suggestions: " + err.Error()
 			s.suggestMu.Unlock()
 			s.broadcastSuggestStatus(suggestWorkDir)

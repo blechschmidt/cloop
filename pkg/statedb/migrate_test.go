@@ -457,3 +457,36 @@ func TestMigrateReportsNoDivergenceOnACleanDatabase(t *testing.T) {
 		t.Errorf("a re-migrated database reported divergence: %+v", again.Divergent)
 	}
 }
+
+// TestDivergenceWarningIsPrintedOnce covers the dedup added in Task 20325.
+//
+// A single command opens statedb more than once, so an unconditional warn
+// printed the same finding several times. That noise is what displaced the
+// JSON payload the Web UI's suggest panel parses; the panel is now framed
+// against it either way, but one finding should still read as one finding.
+func TestDivergenceWarningIsPrintedOnce(t *testing.T) {
+	divergenceWarnedMu.Lock()
+	saved := divergenceWarned
+	divergenceWarned = map[string]struct{}{}
+	divergenceWarnedMu.Unlock()
+	t.Cleanup(func() {
+		divergenceWarnedMu.Lock()
+		divergenceWarned = saved
+		divergenceWarnedMu.Unlock()
+	})
+
+	d := VersionDivergence{Version: 37, Recorded: "0037_a.sql", Embedded: "0037_b.sql"}
+	if divergenceAlreadyWarned(d) {
+		t.Fatal("first sighting must not be suppressed")
+	}
+	if !divergenceAlreadyWarned(d) {
+		t.Fatal("second sighting of the same finding must be suppressed")
+	}
+
+	// A different finding at the same version is a new finding, not the one
+	// already shown — suppressing it would hide a real change.
+	other := VersionDivergence{Version: 37, Recorded: "0037_a.sql", Embedded: "0037_c.sql"}
+	if divergenceAlreadyWarned(other) {
+		t.Fatal("a different divergence at the same version must still be reported")
+	}
+}

@@ -36,6 +36,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -276,6 +277,9 @@ func MigrateWithOptions(db *sql.DB, opts MigrateOptions) (*MigrationReport, erro
 	}
 	report.Divergent = div
 	for _, d := range div {
+		if divergenceAlreadyWarned(d) {
+			continue
+		}
 		fmt.Fprintf(os.Stderr,
 			"warning: schema version %d was applied from %q, but this build embeds %q for that "+
 				"version — so %q has been SKIPPED and its effects are absent from this database. "+
@@ -283,6 +287,34 @@ func MigrateWithOptions(db *sql.DB, opts MigrateOptions) (*MigrationReport, erro
 				"hand.\n", d.Version, d.Recorded, d.Embedded, d.Embedded)
 	}
 	return report, nil
+}
+
+// divergenceWarned records which divergences this process has already
+// reported, so repeated Opens do not repeat the warning.
+//
+// A single command opens statedb more than once — the control plane and the
+// project store are separate handles over the same file — and an unconditional
+// Fprintf makes one genuine problem look like several. The report returned to
+// the caller is unaffected: this suppresses the duplicate console line, not the
+// finding. Same reason and same shape as warnIfConfigTooOpen in pkg/config.
+var (
+	divergenceWarnedMu sync.Mutex
+	divergenceWarned   = map[string]struct{}{}
+)
+
+// divergenceAlreadyWarned reports whether d has been printed, recording it if
+// not. Keyed by all three fields rather than the version alone: a database that
+// diverges at one version and is then repaired to diverge differently is a new
+// finding, not the one already shown.
+func divergenceAlreadyWarned(d VersionDivergence) bool {
+	key := fmt.Sprintf("%d\x00%s\x00%s", d.Version, d.Recorded, d.Embedded)
+	divergenceWarnedMu.Lock()
+	defer divergenceWarnedMu.Unlock()
+	if _, ok := divergenceWarned[key]; ok {
+		return true
+	}
+	divergenceWarned[key] = struct{}{}
+	return false
 }
 
 // checkNames reports versions whose recorded migration name is not the one this
