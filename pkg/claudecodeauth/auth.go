@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -230,10 +231,21 @@ type Session struct {
 	StartedAt time.Time
 	URL       string
 
-	mu         sync.Mutex
-	cmd        *exec.Cmd
-	stdin      io.WriteCloser
-	stdoutBuf  *bufferedReader
+	// expectState is the `state` parameter of URL: the value the IdP will hand
+	// back alongside the authorization code, and therefore the half of a
+	// `code#state` paste that identifies which sign-in attempt the code came
+	// from. Empty when the URL carried no state, which makes the check
+	// inoperative rather than wrong — see normalizePastedCode.
+	expectState string
+
+	mu        sync.Mutex
+	cmd       *exec.Cmd
+	stdin     io.WriteCloser
+	stdoutBuf *bufferedReader
+	// pipes are the parent's ends of stdout and stderr. Held only so kill can
+	// force the reader goroutines out of a read that will never end on its
+	// own — see forcePipeCloseAfter.
+	pipes      []io.Closer
 	done       chan struct{}
 	exitErr    error
 	output     string
@@ -268,10 +280,14 @@ func (s *Session) Snapshot() State {
 		st.Done = true
 		st.Active = false
 		if s.exitErr != nil {
-			// Include CLI output so the UI shows what actually went wrong,
-			// not just "exit status 1".
+			// Summarized, not dumped. The full transcript stays in Output for
+			// anyone who wants it; Error is what the panel renders on one
+			// line, and pasting the URL and the prompt back at the user buries
+			// the single sentence that says what went wrong.
 			out := strings.TrimSpace(s.output)
-			if out != "" {
+			if summary := summarizeLoginFailure(out); summary != "" {
+				st.Error = summary
+			} else if out != "" {
 				st.Error = out
 			} else {
 				st.Error = s.exitErr.Error()
@@ -387,13 +403,25 @@ func (m *Manager) Start(ctx context.Context, key, configDir string, opts LoginOp
 		cmd:       cmd,
 		stdin:     stdin,
 		stdoutBuf: newBufferedReader(),
+		pipes:     []io.Closer{stdout, stderr},
 		done:      make(chan struct{}),
 	}
 
 	// Pump stdout and stderr into a single bounded buffer so the snapshot
 	// can show the URL line, prompts, and any error text.
-	go sess.stdoutBuf.consume(stdout)
-	go sess.stdoutBuf.consume(stderr)
+	//
+	// Tracked, and waited on below before the child is reaped. os/exec closes
+	// the parent's ends of these pipes inside Wait as soon as it sees the
+	// child exit — "it is thus incorrect to call Wait before all reads from
+	// the pipe have completed" — so a Wait racing the readers either steals
+	// whatever is still sitting in the kernel buffer or fails their read
+	// outright. For this flow the tail is the entire payload: it is the CLI's
+	// error text when a login fails, and losing it is why a failed login
+	// could report nothing actionable.
+	var readers sync.WaitGroup
+	readers.Add(2)
+	go func() { defer readers.Done(); sess.stdoutBuf.consume(stdout) }()
+	go func() { defer readers.Done(); sess.stdoutBuf.consume(stderr) }()
 
 	// Wait for either the URL to appear or the process to exit. Bound the
 	// wait so a wedged or unauthenticated child can't pin the handler.
@@ -403,6 +431,11 @@ func (m *Manager) Start(ctx context.Context, key, configDir string, opts LoginOp
 	}()
 
 	go func() {
+		// Both readers at EOF first, then reap, then snapshot. The buffer is
+		// only complete once the goroutines filling it have stopped, so
+		// snapshotting beside a live reader would truncate the output even if
+		// Wait had not already closed the pipe under it.
+		readers.Wait()
 		err := cmd.Wait()
 		sess.mu.Lock()
 		sess.exitErr = err
@@ -418,11 +451,17 @@ func (m *Manager) Start(ctx context.Context, key, configDir string, opts LoginOp
 	case url := <-urlCh:
 		sess.mu.Lock()
 		sess.URL = url
+		sess.expectState = oauthStateFromURL(url)
 		sess.mu.Unlock()
 		if url == "" {
 			// No URL within the timeout window — either the CLI errored out
 			// immediately or it's emitting something we don't recognise.
 			sess.kill("no OAuth URL emitted within timeout")
+			// Wait for the readers to finish before reading their buffer:
+			// this error message is the only account of why the login failed,
+			// and snapshotting beside a live reader reports half of it.
+			// Bounded by kill's own pipe-close backstop.
+			<-sess.done
 			out := sess.stdoutBuf.snapshot()
 			return nil, fmt.Errorf("claude auth login did not emit an OAuth URL: %s", strings.TrimSpace(out))
 		}
@@ -474,24 +513,38 @@ func (m *Manager) SubmitCode(key, code string) (State, error) {
 		return State{}, errors.New("no active login session")
 	}
 
-	code = strings.TrimSpace(code)
-	if code == "" {
-		return State{}, errors.New("authorization code is required")
-	}
-
+	// Validated before anything is written, and without disturbing the
+	// session: a rejected paste leaves the flow exactly as it was, so the user
+	// can correct it against the link still on screen. Consuming the session
+	// here would force them to restart — which mints a new challenge and makes
+	// the code they are holding genuinely unusable.
 	sess.mu.Lock()
+	expect := sess.expectState
 	stdin := sess.stdin
 	sess.mu.Unlock()
+
+	line, err := normalizePastedCode(code, expect)
+	if err != nil {
+		return State{}, err
+	}
+
 	if stdin == nil {
 		return State{}, errors.New("login session is no longer accepting input")
 	}
 
-	if _, err := io.WriteString(stdin, code+"\n"); err != nil {
+	if _, err := io.WriteString(stdin, line+"\n"); err != nil {
 		return State{}, fmt.Errorf("write code to claude CLI: %w", err)
 	}
-	// Close stdin so the CLI knows no more input is coming and proceeds
-	// with the PKCE token exchange immediately. Without EOF the CLI may
-	// loop waiting for a retry code instead of exchanging the current one.
+	// Close stdin because this session will never be written to again — the
+	// manager drops it below, so one Start is one code.
+	//
+	// Not, as this comment claimed until Task 20321, because the CLI needs EOF
+	// to proceed: the exchange is driven by readline's "line" event, which
+	// fires on the newline above. Measured against the real CLI (v2.1.181), a
+	// login handed EOF and nothing else hangs until it is killed, so EOF
+	// triggers nothing. What EOF does do is make the CLI's own "Invalid code"
+	// re-prompt unreachable, which is why the paste is normalized above rather
+	// than left for the CLI to reject.
 	_ = stdin.Close()
 
 	// Don't hold m.mu while waiting — let other handlers read status.
@@ -511,6 +564,158 @@ func (m *Manager) SubmitCode(key, code string) (State, error) {
 	m.mu.Unlock()
 
 	return snap, nil
+}
+
+// summarizeLoginFailure reduces a failed login's captured transcript to the
+// lines that say why it failed, and translates the CLI's HTTP-level phrasing
+// into something a user can act on.
+//
+// The transcript is mostly noise for this purpose: three of its four lines are
+// the banner, the authorize URL and the paste prompt, all of which the panel is
+// already showing. Rendering the lot is how a 400 reached the user as a
+// paragraph beginning "Opening browser to sign in…".
+//
+// Returns "" when nothing recognisable is found, leaving the caller to fall
+// back to the full text rather than to silence.
+func summarizeLoginFailure(output string) string {
+	var keep []string
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		switch {
+		case line == "":
+		case strings.HasPrefix(line, "Login failed:"):
+			keep = append(keep, translateLoginFailure(line))
+		case strings.HasPrefix(line, "Invalid code"):
+			keep = append(keep, line)
+		case strings.HasPrefix(line, "OAuth login failed"):
+			keep = append(keep, line)
+		}
+	}
+	return strings.Join(keep, " ")
+}
+
+// translateLoginFailure rewrites the CLI's axios-level message for the one
+// status that has a specific, actionable cause in this flow.
+//
+// "Request failed with status code 400" is what the token endpoint returns
+// when the code cannot be redeemed against the verifier being offered: it was
+// already used, it expired, or it was minted for a different sign-in attempt.
+// The first two are recoverable by retrying; the third is what
+// normalizePastedCode now catches up front, so reaching here means the state
+// matched and the code itself was refused.
+func translateLoginFailure(line string) string {
+	if !strings.Contains(line, "status code 400") {
+		return line
+	}
+	return line + " — the authorization code was refused. A code can be used once and expires quickly, " +
+		"so this usually means it was already submitted or too much time passed. Start the sign-in again and paste a fresh code."
+}
+
+// ErrCodeFromAnotherLogin reports a paste whose `state` belongs to a different
+// sign-in attempt than the session that would receive it. Exchanging it is
+// guaranteed to fail, because the PKCE verifier that would be sent with it
+// belongs to this session and the code was minted against another one's
+// challenge.
+//
+// This is the whole reason the check exists: the CLI cannot make it. Its
+// readline handler splits the paste into `authorizationCode` and `state` and
+// then calls handleManualAuthCodeInput, which uses only the code and discards
+// the state — so a stale code is exchanged against the live session's verifier
+// and the token endpoint answers 400. The CLI surfaces that verbatim as
+// "Login failed: Request failed with status code 400", which names neither the
+// cause nor a remedy. The hub is the only layer holding both states at once.
+var ErrCodeFromAnotherLogin = errors.New(
+	"this authorization code is from a different sign-in attempt: the sign-in was restarted after that link was opened, " +
+		"which replaced the one-time code it was issued for. Open the link shown above again, authorize, and paste the new code")
+
+// ErrCodeMalformed reports a paste that is not an authorization code at all.
+var ErrCodeMalformed = errors.New("that does not look like an authorization code")
+
+// oauthStateFromURL returns the `state` query parameter of an OAuth authorize
+// URL, or "" if the URL is unparseable or carries no state.
+func oauthStateFromURL(raw string) string {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(u.Query().Get("state"))
+}
+
+// normalizePastedCode turns whatever a human pasted into the exact line the
+// Claude CLI's readline handler expects — `code#state` — or explains why it
+// cannot.
+//
+// It accepts three shapes, because all three are things people actually paste:
+//
+//	code#state   the canonical form the callback page displays
+//	code         just the code, with the state half left behind
+//	https://platform.claude.com/oauth/code/callback?code=…&state=…
+//	             the whole callback URL, straight from the address bar
+//
+// expectState is the session's own state, from its authorize URL. When it is
+// empty the URL carried no state and there is nothing to compare against, so
+// the paste is forwarded untouched: an inoperative check must not become a
+// wrong one, and a CLI that stops emitting state must not become a CLI nobody
+// can log in with.
+//
+// A bare code is repaired rather than refused. The CLI discards the pasted
+// state anyway, so `code#expectState` is byte-for-byte what a correct paste
+// would have reduced to — and refusing it would strand the user, because the
+// CLI's own "Invalid code" re-prompt is unreachable through this pipe: it
+// `return`s to a readline that SubmitCode has already closed.
+func normalizePastedCode(paste, expectState string) (string, error) {
+	paste = strings.TrimSpace(paste)
+	paste = strings.Trim(paste, "\"'")
+	paste = strings.TrimSpace(paste)
+	if paste == "" {
+		return "", errors.New("authorization code is required")
+	}
+
+	code, state := paste, ""
+	if strings.HasPrefix(paste, "http://") || strings.HasPrefix(paste, "https://") {
+		u, err := url.Parse(paste)
+		if err != nil {
+			return "", ErrCodeMalformed
+		}
+		q := u.Query()
+		code, state = strings.TrimSpace(q.Get("code")), strings.TrimSpace(q.Get("state"))
+		// The authorize link is itself ?code=true&state=… — "code" there is
+		// the flag selecting manual-paste mode, not an authorization code, and
+		// it carries the very state we are about to compare against. Taken at
+		// face value it parses into a plausible-looking "true#<state>" that
+		// passes every later check and fails only at the token endpoint, as a
+		// 400. Recognise the link by its path and say so.
+		if strings.Contains(u.Path, "/authorize") || code == "" || code == "true" {
+			return "", fmt.Errorf("%w: that is the sign-in link, not the code it leads to. Open it, authorize, then paste the code shown on the page you land on", ErrCodeMalformed)
+		}
+	} else if before, after, found := strings.Cut(paste, "#"); found {
+		code, state = strings.TrimSpace(before), strings.TrimSpace(after)
+	}
+
+	// stdin here is line-oriented: the CLI reads one line and splits it on
+	// "#". An embedded newline would be read as a second, attacker-chosen
+	// line, so it is rejected rather than trimmed.
+	if code == "" || strings.ContainsAny(code, "\n\r \t") {
+		return "", ErrCodeMalformed
+	}
+	if strings.ContainsAny(state, "\n\r \t") {
+		return "", ErrCodeMalformed
+	}
+
+	// No state to compare against: hand over the parsed form rather than the
+	// raw paste, so a callback URL is still unpacked into what the CLI reads.
+	// A bare code stays bare here — with no state of our own there is nothing
+	// to repair it with, and the CLI's own complaint is the better answer.
+	if expectState == "" {
+		if state == "" {
+			return code, nil
+		}
+		return code + "#" + state, nil
+	}
+	if state != "" && state != expectState {
+		return "", ErrCodeFromAnotherLogin
+	}
+	return code + "#" + expectState, nil
 }
 
 // Cancel kills one identity's login session (if any) and clears the manager's
@@ -565,7 +770,45 @@ func (s *Session) kill(reason string) {
 	if cmd != nil && cmd.Process != nil {
 		_ = cmd.Process.Kill()
 	}
+	// Reaping now waits for the readers, so something still holding the write
+	// end of stdout would keep them — and therefore every caller blocked on
+	// s.done — waiting indefinitely. A grandchild that inherited the
+	// descriptors is the way that happens; pkg/executor/gitprovision.BoundChild
+	// exists because git does exactly this.
+	go s.forcePipeCloseAfter(pipeDrainGrace)
 	_ = reason // retained for callers/grep; not surfaced separately.
+}
+
+// pipeDrainGrace is how long a killed session's readers get to reach EOF on
+// their own before their pipes are closed out from under them.
+//
+// Deliberately not zero. A killed child normally closes its descriptors on the
+// way out and the readers drain within microseconds, so cutting them off
+// immediately would throw away the very error text the caller killed the
+// session to read. This only ever elapses when the ordinary path has already
+// failed.
+//
+// A var so the test that exercises the backstop need not spend five seconds
+// doing it; nothing outside that test assigns to it.
+var pipeDrainGrace = 5 * time.Second
+
+// forcePipeCloseAfter closes the parent's ends of stdout and stderr if the
+// session has not finished within d, unblocking readers that will never see
+// EOF. Closing a *os.File unblocks a read already in flight, which is the
+// whole point: the goroutines are parked in read(2), not waiting on a channel.
+func (s *Session) forcePipeCloseAfter(d time.Duration) {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-s.done:
+	case <-t.C:
+		s.mu.Lock()
+		pipes := s.pipes
+		s.mu.Unlock()
+		for _, p := range pipes {
+			_ = p.Close()
+		}
+	}
 }
 
 func contextWithTimeoutIfNone(parent context.Context, d time.Duration) (context.Context, context.CancelFunc) {
