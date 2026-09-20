@@ -1578,6 +1578,46 @@ serving without authentication. Every key is also settable via `cloop config set
 ui.oidc.<key> <value>`, except `role_mappings`, which is a list of records that
 a flat key/value setter cannot express.
 
+**`redirect_url` decides the route, not just the registration.** cloop serves
+the callback at whatever path this URL names, so a registration created by hand
+with `/auth/oidc` needs no other change. The path must be under `/auth/` —
+that subtree is the one an unauthenticated request is allowed through, and the
+constraint also stops a stray value shadowing the dashboard or an API route.
+`cloop ui` refuses a redirect URL it could not serve rather than starting and
+404ing after a successful sign-in.
+
+#### Microsoft Entra ID
+
+Three of its behaviours surprise a first deployment, and cloop accommodates all
+three — they are listed here because each one used to present as something
+else entirely.
+
+- **The issuer you configure is not the issuer it declares.** Addressing a
+  tenant by domain — `https://login.microsoftonline.com/contoso.onmicrosoft.com/v2.0`
+  — returns a discovery document declaring the *tenant GUID* form, and ID
+  tokens carry the GUID. cloop accepts a declared issuer that differs from the
+  configured one only in path, at the same origin, and validates tokens against
+  the declared value. A document naming a *different origin* is still refused:
+  that is metadata for some other provider, not an alias.
+- **An SPA-platform redirect URI may only be redeemed cross-origin.** Entra
+  refuses a server-side code exchange for such a registration with
+  `AADSTS9002327`. cloop retries once with an `Origin` header set to the
+  redirect URI's own origin, which satisfies it. The header is never sent on a
+  first attempt, because a Web or desktop registration is refused *with* one
+  (`AADSTS9002326`) — and it is never sent at all by a hub configured with a
+  client secret, because Entra rejects credentials and `Origin` together. Note
+  that SPA-issued refresh tokens expire after 24 hours and cannot be extended,
+  so a session on such a registration ends in a re-login sooner than
+  `session_ttl_hours` suggests. Register the callback on the **Web** platform
+  to avoid both effects.
+- **`email` is often absent.** Entra emits it only when the account has a mail
+  attribute; the address a person signs in with arrives as
+  `preferred_username`. cloop falls back to that claim when it is
+  address-shaped, which is what lets an `admin_emails` entry or a `claim:
+  email` mapping match at all. On a provider where users can edit their own
+  `preferred_username`, bind on `claim: sub` instead — OIDC Core does not
+  promise that claim is stable or unique.
+
 #### Editing it from the dashboard
 
 **Settings → Single sign-on** edits the same block, for operators who should not

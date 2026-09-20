@@ -59,10 +59,12 @@ data "azuread_service_principal" "msgraph" {
 }
 
 locals {
-  # The hub's OIDC callback. This is not a convention the operator may choose:
-  # it is the literal route pkg/ui registers ("GET /auth/callback"), and
-  # tests/docs/terraform_azure_test.go asserts that this string is still a real
-  # route in the hub's table.
+  # The hub's OIDC callback. cloop serves this at whatever path
+  # ui.oidc.redirect_url names, so long as it is under /auth/ — a registration
+  # created by hand often uses something else, and the hub follows it. This
+  # module pins the default, and tests/docs/terraform_azure_test.go asserts
+  # that the pinned value is still a real route in the hub's table, so a hub
+  # configured from this module's output needs no redirect_url of its own.
   callback_path = "/auth/callback"
 
   # Public by default: no secret to mint, rotate, distribute or revoke, with

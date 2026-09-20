@@ -370,7 +370,15 @@ func (s *Server) routeTable() []routeSpec {
 		// OIDC login machinery. Gating these on a permission would make
 		// signing in require being signed in.
 		{Pattern: "GET /auth/login", Handler: s.handleOIDCLogin, Perm: public},
-		{Pattern: "GET /auth/callback", Handler: s.handleOIDCCallback, Perm: public},
+		// Not a fixed path: the IdP decides where the browser comes back,
+		// and the app registration is often created by somebody else with a
+		// path of their choosing. Serving a hardcoded /auth/callback against
+		// a redirect_url of /auth/oidc authenticates the user and then drops
+		// them into the SPA shell with no session — an endless login loop
+		// and nothing logged. oidcauth.New constrains this to /auth/ so the
+		// route cannot shadow "/" or an /api path, and oidcGate lets the
+		// whole /auth/ subtree through unauthenticated.
+		{Pattern: "GET " + s.oidcCallbackPath(), Handler: s.handleOIDCCallback, Perm: public},
 		{Pattern: "POST /auth/logout", Handler: s.handleOIDCLogout, Perm: public},
 
 		// Self-service "sign out everywhere" (Task 20176). Ungated on

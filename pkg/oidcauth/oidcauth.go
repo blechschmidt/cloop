@@ -431,8 +431,22 @@ func New(cfg Config) (*Authenticator, error) {
 	if cfg.RedirectURL == "" {
 		return nil, errors.New("oidcauth: redirect_url is required (e.g. https://cloop.example.com/auth/callback)")
 	}
-	if _, err := url.Parse(cfg.RedirectURL); err != nil {
+	red, err := url.Parse(cfg.RedirectURL)
+	if err != nil {
 		return nil, fmt.Errorf("oidcauth: invalid redirect_url: %w", err)
+	}
+	// The path is not decoration: it is the route the hub has to answer on
+	// when the browser comes back from the IdP. Registering the callback
+	// somewhere the redirect never lands produces the worst failure this
+	// package has — the IdP authenticates the user, redirects to a path that
+	// falls through to the SPA shell, the shell finds no session and bounces
+	// to /auth/login, and the operator watches an endless login loop with
+	// nothing in the log. Constrain it to /auth/ so the one gate that lets
+	// unauthenticated requests through (oidcGate) covers it by construction,
+	// and so a stray redirect_url cannot shadow "/" or an /api route.
+	if !isCallbackPath(red.Path) {
+		return nil, fmt.Errorf("oidcauth: redirect_url path must be under /auth/ (got %q in %q) — "+
+			"cloop serves the callback there and nowhere else", red.Path, cfg.RedirectURL)
 	}
 	switch cfg.CookieSecure {
 	case "", "auto", "always", "never":
@@ -548,6 +562,37 @@ func (a *Authenticator) Issuer() string {
 		return ""
 	}
 	return a.cfg.Issuer
+}
+
+// DefaultCallbackPath is where cloop serves the OIDC redirect when
+// redirect_url does not say otherwise. It is only a default: the IdP decides
+// this path, and on a registration somebody else already created it is
+// routinely something else (Entra's SPA platform, for instance, is commonly
+// registered as /auth/oidc).
+const DefaultCallbackPath = "/auth/callback"
+
+// CallbackPath is the path component of the configured redirect_url — the
+// route the hub must serve for the authorization-code flow to complete.
+// Safe on nil and on a disabled authenticator, both of which report the
+// default so the route table has a stable shape either way.
+func (a *Authenticator) CallbackPath() string {
+	if a == nil || a.cfg.RedirectURL == "" {
+		return DefaultCallbackPath
+	}
+	u, err := url.Parse(a.cfg.RedirectURL)
+	if err != nil || !isCallbackPath(u.Path) {
+		// Unreachable via New, which rejects both. Falling back rather than
+		// panicking keeps a hand-built Authenticator in a test from taking
+		// the whole route table down.
+		return DefaultCallbackPath
+	}
+	return u.Path
+}
+
+// isCallbackPath reports whether p may serve as the OIDC redirect path. The
+// rule is deliberately narrow: under /auth/, and with something after it.
+func isCallbackPath(p string) bool {
+	return strings.HasPrefix(p, "/auth/") && len(p) > len("/auth/")
 }
 
 // IsAdmin reports whether id's email is on the configured admin list.
@@ -1050,21 +1095,80 @@ const (
 // error the operator eventually sees.
 func (a *Authenticator) postTokenAuthenticated(ctx context.Context, endpoint string, form url.Values) (*tokenResponse, error) {
 	if a.cfg.ClientSecret == "" {
-		tok, _, err := a.postToken(ctx, endpoint, form, authNone)
+		tok, _, err := a.postToken(ctx, endpoint, form, authNone, "")
+		if err != nil && isSPACrossOriginRefusal(err) {
+			// Entra ID refusing a browser-registered callback redeemed from
+			// a server. See spaOriginRetry for why the header is the fix and
+			// why it is only ever sent on the second attempt.
+			tok, _, err = a.postToken(ctx, endpoint, form, authNone, a.redirectOrigin())
+		}
 		return tok, err
 	}
-	tok, status, err := a.postToken(ctx, endpoint, form, authBasic)
+	tok, status, err := a.postToken(ctx, endpoint, form, authBasic, "")
 	if err != nil && (status == http.StatusUnauthorized || isOAuthCode(err, "invalid_client")) {
 		// Retry once with credentials in the form body.
-		tok, _, err = a.postToken(ctx, endpoint, form, authPost)
+		tok, _, err = a.postToken(ctx, endpoint, form, authPost, "")
 	}
+	// Deliberately no SPA retry here. Entra rejects client credentials and an
+	// Origin header in the same request, so a confidential client cannot take
+	// this route — and a registration that needs it should not have a secret.
 	return tok, err
+}
+
+// isSPACrossOriginRefusal reports whether err is Entra ID declining a
+// server-side redemption of a callback registered as a single-page app — the
+// one vendor-specific behaviour this package carries, because the alternative
+// is a deployment that cannot sign anyone in and gives no hint why.
+//
+// Entra types each redirect URI by platform. A URI registered under
+// "Single-page application" may only be redeemed cross-origin: the token
+// request must carry an Origin header, and Entra answers AADSTS9002327 —
+// "Tokens issued for the 'Single-Page Application' client-type may only be
+// redeemed via cross-origin requests" — when it does not. Go's http.Client
+// never sends Origin, so cloop's redemption fails every time against such a
+// registration, and the error that reaches the operator blames the
+// authorization code rather than the platform the URI was filed under.
+//
+// Setting Origin to the redirect URI's own origin satisfies the check. It is
+// only ever attempted after a refusal naming 9002327, never pre-emptively,
+// because the inverse rule also exists: a Web or desktop registration
+// redeemed *with* an Origin header is refused with AADSTS9002326. Sending it
+// unconditionally would trade this failure for its mirror image, so the
+// refusal itself is what selects the second attempt.
+//
+// Matching on a provider-specific code is what oauthError's own documentation
+// warns against. The justification is that the AADSTS numbers are Microsoft's
+// stable, documented identifiers for exactly this condition — unlike the prose
+// beside them — and that a false positive costs one extra request rather than
+// a wrong security decision.
+func isSPACrossOriginRefusal(err error) bool {
+	var oe *oauthError
+	if !errors.As(err, &oe) {
+		return false
+	}
+	return strings.Contains(oe.Description, "AADSTS9002327") || strings.Contains(oe.Body, "AADSTS9002327")
+}
+
+// redirectOrigin is the scheme://host[:port] of the configured redirect_url —
+// the value Entra expects to see in the Origin header, since that is the
+// origin the SPA redirect URI was registered under. Empty when the redirect
+// URL cannot be parsed, which suppresses the retry rather than sending a
+// header that means nothing.
+func (a *Authenticator) redirectOrigin() string {
+	u, err := url.Parse(a.cfg.RedirectURL)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return ""
+	}
+	return u.Scheme + "://" + u.Host
 }
 
 // postToken performs one token-endpoint POST using the given client
 // authentication method (RFC 6749 §2.3.1: for Basic, credentials are
 // form-urlencoded before the header).
-func (a *Authenticator) postToken(ctx context.Context, endpoint string, form url.Values, auth clientAuth) (*tokenResponse, int, error) {
+//
+// origin, when non-empty, is sent as the Origin header. Only the SPA retry
+// sets it — see isSPACrossOriginRefusal.
+func (a *Authenticator) postToken(ctx context.Context, endpoint string, form url.Values, auth clientAuth, origin string) (*tokenResponse, int, error) {
 	f := url.Values{}
 	for k, v := range form {
 		f[k] = v
@@ -1082,6 +1186,9 @@ func (a *Authenticator) postToken(ctx context.Context, endpoint string, form url
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
+	if origin != "" {
+		req.Header.Set("Origin", origin)
+	}
 	if auth == authBasic {
 		req.SetBasicAuth(url.QueryEscape(a.cfg.ClientID), url.QueryEscape(a.cfg.ClientSecret))
 	}

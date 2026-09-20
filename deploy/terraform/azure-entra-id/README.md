@@ -307,7 +307,7 @@ permission the registration was granted.
 | **AADSTS50105** user not assigned | Working as intended. Assign an app role, or set `require_app_role_assignment = false` |
 | **AADSTS7000218** request body must contain `client_assertion` or `client_secret` | The two sides disagree about the client type: the callback is registered on the Web platform but the hub has no secret. Either `client_type = "public"` here, or export `CLOOP_OIDC_CLIENT_SECRET` there |
 | **AADSTS7000222** invalid client secret | Expired. Apply to rotate, then restart the hub |
-| **AADSTS9002327** tokens for the SPA client-type may only be redeemed cross-origin | A redirect URI got registered on the SPA platform. cloop redeems the code server-side, so it must be public-client or Web — this module never registers SPA |
+| **AADSTS9002327** tokens for the SPA client-type may only be redeemed cross-origin | A redirect URI got registered on the SPA platform. cloop now recovers from this by retrying the exchange with an `Origin` header, so sign-in still works; this module registers Web, which needs no retry. Do not add a client secret to an SPA registration — Entra refuses credentials and `Origin` in the same request |
 | Hub refuses to start, names the issuer | `curl` the `discovery_url` output from the hub. cloop's startup preflight fetches exactly that, so a failure here is DNS, egress or a proxy — not cloop |
 | Sign-in works, everything is read-only | The user holds no app role and got `default_role`. Check the `roles` claim at <https://jwt.ms> |
 | Sign-out lands on a Microsoft page | The bare origin (with trailing slash) is not a registered redirect URI |

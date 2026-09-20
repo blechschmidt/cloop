@@ -164,8 +164,12 @@ func (a *Authenticator) userinfoIdentity(ctx context.Context, accessToken string
 		name = claims.PreferredUsername
 	}
 	return &Identity{
-		Sub:    claims.Sub,
-		Email:  strings.ToLower(claims.Email),
+		Sub: claims.Sub,
+		// Same rule as the id_token path (idClaims.emailAddress). It has to
+		// be: this response is what re-asserts a live session's claims, so a
+		// different rule here would demote an Entra administrator on the
+		// first revalidation after sign-in.
+		Email:  claims.emailAddress(),
 		Name:   name,
 		Groups: claims.groupValues(),
 		Roles:  claims.roleValues(a.cfg.ClientID),

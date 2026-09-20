@@ -100,6 +100,52 @@ type idClaims struct {
 	} `json:"resource_access"`
 }
 
+// emailAddress is the address cloop identifies this person by: the `email`
+// claim, or `preferred_username` when the provider sent no `email` but did
+// send something address-shaped.
+//
+// The fallback exists because Microsoft Entra ID only emits `email` when the
+// account has a mail attribute populated, while the address a person actually
+// signs in with — their UPN — always arrives as `preferred_username`. Without
+// it, an Entra deployment authenticates the administrator named in
+// admin_emails and then resolves them to no role at all, because the email
+// binding has nothing to match. That failure is silent from the user's side:
+// sign-in succeeds and the dashboard is simply empty.
+//
+// It is guarded on the value looking like an address, because OIDC Core §5.1
+// makes no promise that `preferred_username` is one — on some providers it is
+// a bare login name, and a bare name can never match an email binding anyway.
+// The guard is what keeps this from widening identity matching in general.
+//
+// Worth knowing when choosing bindings: OIDC Core also warns that
+// `preferred_username` need not be stable or unique, so on a provider where
+// users can edit their own, prefer `claim: sub` bindings. On Entra, Okta,
+// Auth0 and Keycloak the value is the administrator-controlled login.
+func (c *idClaims) emailAddress() string {
+	if e := strings.TrimSpace(c.Email); e != "" {
+		return strings.ToLower(e)
+	}
+	u := strings.TrimSpace(c.PreferredUsername)
+	if looksLikeEmail(u) {
+		return strings.ToLower(u)
+	}
+	return ""
+}
+
+// looksLikeEmail is a deliberately conservative shape check: exactly one "@",
+// something either side of it, and a dot in the domain. It decides only
+// whether a username may stand in for a missing email claim — never whether
+// an address is deliverable.
+func looksLikeEmail(s string) bool {
+	at := strings.IndexByte(s, '@')
+	if at <= 0 || at != strings.LastIndexByte(s, '@') || at == len(s)-1 {
+		return false
+	}
+	domain := s[at+1:]
+	dot := strings.IndexByte(domain, '.')
+	return dot > 0 && dot < len(domain)-1 && !strings.ContainsAny(s, " \t\r\n")
+}
+
 // groupValues returns the flattened, de-duplicated group claim values.
 func (c *idClaims) groupValues() []string {
 	return dedupeFold(c.Groups)
@@ -200,7 +246,7 @@ func (a *Authenticator) verifyIDToken(ctx context.Context, raw, nonce string) (*
 	}
 	return &Identity{
 		Sub:    claims.Sub,
-		Email:  strings.ToLower(claims.Email),
+		Email:  claims.emailAddress(),
 		Name:   name,
 		Groups: claims.groupValues(),
 		Roles:  claims.roleValues(a.cfg.ClientID),

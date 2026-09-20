@@ -26,6 +26,13 @@ func (s *Server) oidcEnabled() bool {
 	return s.OIDC.Enabled()
 }
 
+// oidcCallbackPath is the route the authorization-code flow returns to,
+// taken from the configured redirect_url. One accessor so the route table
+// and any test that walks it cannot disagree about where the callback lives.
+func (s *Server) oidcCallbackPath() string {
+	return s.OIDC.CallbackPath()
+}
+
 // sessionIdentity returns the authenticated dashboard user for the request,
 // or nil when OIDC is disabled, the request has no session, or it
 // authenticated via the static bearer token instead.

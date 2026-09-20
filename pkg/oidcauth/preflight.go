@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -55,10 +56,11 @@ const (
 	// document it is supposed to serve.
 	PreflightMalformed = "malformed"
 
-	// PreflightIssuerMismatch means the provider calls itself something
-	// other than the configured issuer. The spec makes that equality
-	// load-bearing, and cloop enforces it at ID-token validation, so this
-	// is a hub whose every sign-in will be rejected.
+	// PreflightIssuerMismatch means the discovery document describes a
+	// provider at a different origin than the one configured — the endpoint
+	// answered, but with somebody else's metadata. A same-origin difference
+	// (Entra's domain-vs-GUID tenant forms) is an alias and is accepted; see
+	// sameOriginIssuer.
 	PreflightIssuerMismatch = "issuer_mismatch"
 
 	// PreflightNoJWKSURI means the discovery document advertises no signing
@@ -183,7 +185,8 @@ func (e *PreflightError) Remediation() string {
 	case PreflightMalformed:
 		return "Confirm ui.oidc.issuer names the OpenID provider itself, not a login page in front of it"
 	case PreflightIssuerMismatch:
-		return "Set ui.oidc.issuer to the name the provider gives itself in its discovery document"
+		return "Point ui.oidc.issuer at the provider that serves the discovery document, " +
+			"or set it to the name that document gives itself"
 	case PreflightNoJWKSURI:
 		return "Confirm ui.oidc.issuer names an OpenID Connect provider, not a bare OAuth 2 server"
 	case PreflightNoKeys:
@@ -341,14 +344,48 @@ func fetchDiscovery(ctx context.Context, client *http.Client, issuer string) (*d
 			Detail: "the discovery document is missing authorization_endpoint or token_endpoint",
 		}
 	}
-	if !issuerEqual(doc.Issuer, issuer) {
+	if !issuerEqual(doc.Issuer, issuer) && !sameOriginIssuer(issuer, doc.Issuer) {
 		return nil, &PreflightError{
 			Issuer: issuer, Stage: StageDiscovery, URL: u,
 			Reason: PreflightIssuerMismatch,
-			Detail: fmt.Sprintf("the provider calls itself %q, so every ID token will be rejected", doc.Issuer),
+			Detail: fmt.Sprintf("the provider calls itself %q — a different origin from the configured issuer, "+
+				"so this document describes some other provider", doc.Issuer),
 		}
 	}
 	return &doc, nil
+}
+
+// sameOriginIssuer reports whether declared is the same provider as configured
+// under a different name: identical scheme, host and port, differing only in
+// path.
+//
+// OIDC Discovery §4.3 wants the two byte-identical, and for a single-tenant
+// provider they are. Entra ID is the counterexample that matters: a tenant is
+// addressable both by domain and by GUID, so fetching
+// .../contoso.onmicrosoft.com/v2.0/.well-known/openid-configuration returns a
+// document declaring .../{tenant-guid}/v2.0. Microsoft documents both forms
+// and issues ID tokens carrying the GUID one. Refusing that refuses the
+// configuration its own portal hands you.
+//
+// Accepting it costs nothing, because the path already validates ID tokens
+// against the *declared* issuer (see verifyIDToken) and fetches keys from the
+// document's jwks_uri. The origin is the part TLS authenticated, and the part
+// an attacker would have to move to redefine the provider; the path below it
+// is how a multi-tenant IdP addresses one tenant. So the origin is what has to
+// match, and a cross-origin redefinition stays fatal.
+func sameOriginIssuer(configured, declared string) bool {
+	c, err := url.Parse(strings.TrimSuffix(configured, "/"))
+	if err != nil {
+		return false
+	}
+	d, err := url.Parse(strings.TrimSuffix(declared, "/"))
+	if err != nil {
+		return false
+	}
+	if c.Scheme == "" || c.Host == "" || d.Scheme == "" || d.Host == "" {
+		return false
+	}
+	return strings.EqualFold(c.Scheme, d.Scheme) && strings.EqualFold(c.Host, d.Host)
 }
 
 // fetchJWKS performs the key-set round trip and parses it into kid → public
