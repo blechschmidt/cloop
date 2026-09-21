@@ -1513,12 +1513,13 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		}
 		if s.Plan.IsComplete() {
 			if !o.log.IsJSON() {
-				if s.AutoEvolve {
-					successColor.Printf("🎉 All tasks complete! Auto-evolve enabled — discovering more work.\n")
-				} else {
-					successColor.Printf("🎉 All tasks complete! Goal achieved.\n")
+				line, achieved := settlementLine(s.Plan, s.AutoEvolve)
+				banner := successColor
+				if !achieved {
+					banner = color.New(color.FgYellow, color.Bold)
 				}
-				successColor.Printf("   %s\n\n", s.Plan.Summary())
+				banner.Printf("%s\n", line)
+				banner.Printf("   %s\n\n", s.Plan.Summary())
 			}
 			o.log.Info(logger.EventSessionDone, 0, "all tasks complete", map[string]interface{}{
 				"summary": s.Plan.Summary(),
@@ -3474,12 +3475,13 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 			continue
 		}
 		if s.Plan.IsComplete() {
-			if s.AutoEvolve {
-				successColor.Printf("🎉 All tasks complete! Auto-evolve enabled — discovering more work.\n")
-			} else {
-				successColor.Printf("🎉 All tasks complete! Goal achieved.\n")
+			line, achieved := settlementLine(s.Plan, s.AutoEvolve)
+			banner := successColor
+			if !achieved {
+				banner = color.New(color.FgYellow, color.Bold)
 			}
-			successColor.Printf("   %s\n\n", s.Plan.Summary())
+			banner.Printf("%s\n", line)
+			banner.Printf("   %s\n\n", s.Plan.Summary())
 			if o.config.Notify {
 				notify.Send("cloop: All Tasks Complete", s.Goal)
 			}

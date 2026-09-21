@@ -130,4 +130,21 @@ var (
 	// the end state a revocation wants — so callers treat it as success
 	// with a note rather than as something to retry.
 	ErrLeaseNotHeld = errors.New("remote: agent is not holding this lease")
+
+	// ErrHarnessUnavailable: the payload will run on the device's own host, and
+	// the device does not have the agent CLI the project's provider drives.
+	//
+	// The failure this replaces is the most expensive shape a dispatch has: the
+	// hub leases a credential, the broker writes an audit row, the agent places
+	// the material on the device's tmpfs, the workspace is provisioned — and
+	// then `cloop run` execs a binary that is not there and the whole thing
+	// unwinds in under a second, leaving "executable file not found in $PATH"
+	// as the only evidence, on the far side of the link, naming neither the
+	// executor nor the provider that asked for it.
+	//
+	// Gated on the sandbox mode, which is the whole subtlety: AgentCapabilities
+	// describes the *device*, and in container mode the harness comes from the
+	// image instead. Refusing on the device's inventory there would reject the
+	// configuration that actually fixes this one.
+	ErrHarnessUnavailable = errors.New("remote: device does not have the harness this project needs")
 )

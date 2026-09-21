@@ -349,6 +349,29 @@ type Spec struct {
 	// timeout — cloop runs are long-lived by design (Task 20148 removed the
 	// implicit task timeout), so this must stay opt-in.
 	TimeoutMinutes int `json:"timeout_minutes,omitempty"`
+	// Harness names the agent CLI this workload will invoke once it is running
+	// — "claude" for the claudecode provider, and empty for a provider that
+	// talks to an HTTP API and so needs no binary on the machine.
+	//
+	// Argv does not carry it: argv is `cloop run`, and which harness that
+	// process goes on to exec is a property of the *project's* configuration,
+	// resolved inside the workload long after placement is over. So the one
+	// thing an executor must have for the run to get anywhere is the one thing
+	// nothing downstream could see, and a device that advertised no `claude`
+	// was dispatched to anyway — failing on the far side with
+	//
+	//	exec: "claude": executable file not found in $PATH
+	//
+	// after the hub had leased a credential, delivered it to the device and
+	// provisioned a workspace. Every input to that refusal was on the hub
+	// before any of it happened.
+	//
+	// It is a requirement, not an instruction: no driver execs this. It exists
+	// so SandboxRequirements can state it and placement can refuse on it, which
+	// is why an unset value is not "no harness" but "no opinion" — a caller
+	// with no basis for the claim (`cloop executor test`, a smoke run) must not
+	// be forced to invent one.
+	Harness string `json:"harness,omitempty"`
 
 	// --- per-project sandbox (Task 20173) --------------------------------
 	//
@@ -720,7 +743,20 @@ func (s Spec) SandboxRequirements() Requirements {
 		// that can take it back. See RequireRevocable for the same rule applied
 		// at the moment of dispatch.
 		RequireRevocation: len(s.RevocableSecrets()) > 0,
+		// Nil when Harness is unset rather than a slice holding "": the
+		// constraint loop asks hasHarness for every entry, and an empty name
+		// matches nothing, so a spec with no opinion would be refused by every
+		// executor on earth.
+		Harnesses: harnessRequirement(s.Harness),
 	}
+}
+
+// harnessRequirement lifts Spec.Harness into the Requirements list form.
+func harnessRequirement(name string) []string {
+	if strings.TrimSpace(name) == "" {
+		return nil
+	}
+	return []string{strings.TrimSpace(name)}
 }
 
 // Handle identifies one started workload. It is the token every subsequent

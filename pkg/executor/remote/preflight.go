@@ -113,7 +113,51 @@ func (e *Executor) Preflight() PreflightReport {
 	}
 
 	e.preflightVirtualization(sandbox, sess.Version(), add)
+	e.preflightHarness(sandbox, caps, add)
 	return report
+}
+
+// preflightHarness reports the device's agent-CLI inventory against the mode it
+// will run payloads in.
+//
+// A warning rather than a failure, because Preflight has no project in hand: it
+// is asked about an executor, and which harness a workload needs is a property
+// of whichever project is dispatched to it. `cloop executor test` runs `cloop
+// version`, which needs no harness at all and will pass here regardless — so
+// the useful thing this can say is what the device has, before someone points a
+// claudecode project at it and finds out the expensive way. checkHarness is the
+// gate; this is the notice.
+func (e *Executor) preflightHarness(sandbox executor.SandboxSettings, caps AgentCapabilities,
+	add func(name, level, msg, fix string)) {
+
+	if sandbox.Mode == executor.SandboxModeContainer {
+		add("harness", LevelOK,
+			fmt.Sprintf("payloads run in a container (%s), so the harness comes from the image "+
+				"rather than from this device", sandbox.Describe()), "")
+		return
+	}
+	if len(caps.Harnesses) == 0 {
+		add("harness", LevelWarn,
+			"payloads run on the device's host and it advertised no agent CLIs at all, so a project "+
+				"whose provider drives one would fail on its first task",
+			"install the harness on the device, or switch this executor to a container sandbox "+
+				"with image "+HarnessImageHint)
+		return
+	}
+	// Named explicitly because it is the one every claudecode project needs and
+	// the one whose absence produced the original report; the rest of the
+	// inventory is listed so an operator can see what the device does have.
+	if !harnessAdvertised(caps.Harnesses, "claude") {
+		add("harness", LevelWarn,
+			fmt.Sprintf("payloads run on the device's host, which has %s but no `claude`, so a "+
+				"project using the claudecode provider would be refused here",
+				describeHarnesses(caps.Harnesses)),
+			"install `claude` on the device, or switch this executor to a container sandbox with "+
+				"image "+HarnessImageHint)
+		return
+	}
+	add("harness", LevelOK,
+		fmt.Sprintf("payloads run on the device's host, which has %s", describeHarnesses(caps.Harnesses)), "")
 }
 
 // preflightVirtualization reports whether the device can honour a

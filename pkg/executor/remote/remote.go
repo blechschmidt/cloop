@@ -541,6 +541,15 @@ func (e *Executor) Start(ctx context.Context, spec executor.Spec) (handle execut
 			ErrVirtualizationUnavailable, e.id, e.name, sandbox.Runtime, agentKVMDevice)
 	}
 
+	// The harness the project's provider drives, against what the device said it
+	// has. Last of the four placement refusals and the only one whose subject is
+	// the payload rather than the boundary around it, which is also why it is the
+	// one that was missing: everything above asks "can this device contain the
+	// work", and nothing asked "can it run the work at all".
+	if err := e.checkHarness(spec, sandbox); err != nil {
+		return executor.Handle{}, err
+	}
+
 	// Convert and bound the credential files here, before a credential is leased
 	// or a handle row is written, so a lease that cannot fit in a start frame
 	// fails naming the files rather than surfacing later as an oversized-payload

@@ -318,6 +318,12 @@ func uiSpec(workDir string, argv []string, labels map[string]string) executor.Sp
 	}
 	if workDir != "" {
 		spec.Labels["project"] = workDir
+		// Set here rather than at the several call sites that build a workload,
+		// so that every dispatch the dashboard makes for a project carries it
+		// and none has to remember to. A workload with no project (there are a
+		// few: version probes, the enrollment smoke run) names no harness, which
+		// is the "no opinion" Spec.Harness documents.
+		spec.Harness = projectHarness(workDir)
 	}
 	for k, v := range labels {
 		spec.Labels[k] = v
