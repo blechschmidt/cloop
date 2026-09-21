@@ -146,11 +146,21 @@ func TestProjectSeedVersionGate(t *testing.T) {
 	if !remote.SupportsProjectSeed(remote.ProtocolVersion) {
 		t.Error("this build must be able to send a seed to itself")
 	}
-	// The floor is the current version: a seed is new in this build, so an
-	// older floor would claim agents that predate the field can receive it.
-	if remote.MinProjectSeedVersion != remote.ProtocolVersion {
-		t.Errorf("MinProjectSeedVersion = %d, ProtocolVersion = %d; the seed floor should be "+
-			"the version that introduced it", remote.MinProjectSeedVersion, remote.ProtocolVersion)
+	// The floor is pinned to the version that introduced the seed. That was the
+	// newest version when this was written and is not any more — v11 added the
+	// upgrade frame (Task 20331) — so comparing it against ProtocolVersion has
+	// stopped being the same assertion. As a literal it still catches the drift
+	// it was written for: a floor that creeps upward with every protocol bump
+	// would refuse to seed agents that honour the field perfectly well.
+	const introducedIn = 10
+	if remote.MinProjectSeedVersion != introducedIn {
+		t.Errorf("MinProjectSeedVersion = %d, want %d; raising the floor strands agents that "+
+			"already honour the seed", remote.MinProjectSeedVersion, introducedIn)
+	}
+	if remote.MinProjectSeedVersion > remote.ProtocolVersion {
+		t.Errorf("MinProjectSeedVersion = %d is above ProtocolVersion = %d, so no agent this "+
+			"build can talk to could ever be seeded",
+			remote.MinProjectSeedVersion, remote.ProtocolVersion)
 	}
 }
 

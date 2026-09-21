@@ -50,7 +50,7 @@ the other.
 
 ## Who may read these
 
-Reading all 115 of the actions below requires the `audit.read` permission, held by `admin`.
+Reading all 117 of the actions below requires the `audit.read` permission, held by `admin`.
 
 The trail is one table behind one pair of admin-only endpoints, so the
 permission does not vary by action today. It is recorded per action anyway,
@@ -76,7 +76,7 @@ whichever one happened to be opened.
 
 | Home | Meaning | Actions |
 | --- | --- | --- |
-| `control-plane` | the hub's own state.db | 103 |
+| `control-plane` | the hub's own state.db | 105 |
 | `project` | the project's .cloop/state.db | 10 |
 | `either` | whichever chain the decision was scoped to | 2 |
 
@@ -88,10 +88,10 @@ Everything else is recorded in the hub's own state.db.
 
 ## Actions by family
 
-115 actions in 33 families. Every action is listed: this section is the whole
+117 actions in 33 families. Every action is listed: this section is the whole
 vocabulary of the `event_type` column.
 
-[`task.*`](#task) (5) · [`run.*`](#run) (2) · [`step.*`](#step) (1) · [`state.*`](#state) (1) · [`config.*`](#config) (1) · [`executor.*`](#executor) (12) · [`workspace.*`](#workspace) (2) · [`sandbox.*`](#sandbox) (1) · [`sandbox.attach.*`](#sandboxattach) (3) · [`secret.*`](#secret) (13) · [`secret.lease.*`](#secretlease) (1) · [`lease.*`](#lease) (3) · [`github_app.*`](#github_app) (1) · [`egress.*`](#egress) (6) · [`gitproxy.*`](#gitproxy) (6) · [`kubeguard.*`](#kubeguard) (5) · [`ci.*`](#ci) (1) · [`ci.session.*`](#cisession) (3) · [`ci.exchange.*`](#ciexchange) (2) · [`ci.relay.*`](#cirelay) (2) · [`ci.rule.*`](#cirule) (3) · [`ci.config.*`](#ciconfig) (1) · [`authz.*`](#authz) (2) · [`api_token.*`](#api_token) (4) · [`session.*`](#session) (8) · [`role_binding.*`](#role_binding) (3) · [`quota.*`](#quota) (4) · [`resource_ceiling.*`](#resource_ceiling) (2) · [`sealing_key.*`](#sealing_key) (2) · [`oidc.*`](#oidc) (1) · [`stt.credential.*`](#sttcredential) (2) · [`user.*`](#user) (9) · [`project.member.*`](#projectmember) (3)
+[`task.*`](#task) (5) · [`run.*`](#run) (2) · [`step.*`](#step) (1) · [`state.*`](#state) (1) · [`config.*`](#config) (1) · [`executor.*`](#executor) (14) · [`workspace.*`](#workspace) (2) · [`sandbox.*`](#sandbox) (1) · [`sandbox.attach.*`](#sandboxattach) (3) · [`secret.*`](#secret) (13) · [`secret.lease.*`](#secretlease) (1) · [`lease.*`](#lease) (3) · [`github_app.*`](#github_app) (1) · [`egress.*`](#egress) (6) · [`gitproxy.*`](#gitproxy) (6) · [`kubeguard.*`](#kubeguard) (5) · [`ci.*`](#ci) (1) · [`ci.session.*`](#cisession) (3) · [`ci.exchange.*`](#ciexchange) (2) · [`ci.relay.*`](#cirelay) (2) · [`ci.rule.*`](#cirule) (3) · [`ci.config.*`](#ciconfig) (1) · [`authz.*`](#authz) (2) · [`api_token.*`](#api_token) (4) · [`session.*`](#session) (8) · [`role_binding.*`](#role_binding) (3) · [`quota.*`](#quota) (4) · [`resource_ceiling.*`](#resource_ceiling) (2) · [`sealing_key.*`](#sealing_key) (2) · [`oidc.*`](#oidc) (1) · [`stt.credential.*`](#sttcredential) (2) · [`user.*`](#user) (9) · [`project.member.*`](#projectmember) (3)
 
 ### task.*
 
@@ -163,6 +163,7 @@ Payload keys, on every action above: `yaml`
 | Action | Entity | Home | Stability | Fires when |
 | --- | --- | --- | --- | --- |
 | `executor.audience` | `executor` | control-plane | stable | An admin admits a user or group to an executor, or withdraws one. |
+| `executor.autoupdate` | `executor` | control-plane | stable | An administrator changes whether the control plane upgrades executors unattended, which release they converge on, or how many move at once. |
 | `executor.bind` | `executor` | control-plane | stable | A project is pinned to one executor, at creation time or from the Executors panel. |
 | `executor.cordon` | `executor` | control-plane | stable | An executor is marked to refuse new work while finishing what it holds. |
 | `executor.drain` | `executor` | control-plane | stable | An executor is set to shed in-flight work as well as refuse new work. |
@@ -174,10 +175,12 @@ Payload keys, on every action above: `yaml`
 | `executor.state_change` | `executor` | control-plane | stable | Liveness tracking moves an executor between health states without an operator asking. |
 | `executor.unbind` | `executor` | control-plane | stable | A project's executor pin is cleared and it falls back to registry placement. |
 | `executor.uncordon` | `executor` | control-plane | stable | A cordoned executor is returned to normal scheduling. |
+| `executor.upgrade` | `executor` | control-plane | stable | The control plane asks an enrolled device to replace its own binary with a published release and restart. |
 
 Payload keys:
 
 - `executor.audience` — `action`, `executor_id`, `principal_kind`, `principal_value`, `restricted`, `members`
+- `executor.autoupdate` — `action`, `enabled`, `target_version`, `max_in_flight`
 - `executor.bind` — `action`, `executor_id`, `project`, `project_path`, `kind`, `via`
 - `executor.cordon` — `action`, `executor_id`, `reason`, `state`
 - `executor.drain` — `action`, `executor_id`, `reason`, `state`
@@ -189,6 +192,7 @@ Payload keys:
 - `executor.state_change` — `from`, `to`, `reason`
 - `executor.unbind` — `action`, `project`, `project_path`
 - `executor.uncordon` — `action`, `executor_id`, `state`
+- `executor.upgrade` — `action`, `executor_id`, `requested_version`, `force`, `accepted`, `from_version`, `target_version`, `reason`
 
 - `executor.audience` — `action` is "admit" or "withdraw"; `restricted` is whether the executor is access-controlled *after* the change, and `members` how many principals remain. Withdrawing the last entry sets restricted=false, which widens the executor to the whole fleet — the one edit here that grants rather than revokes.
 - `executor.bind` — Where a project's code runs is the most consequential setting on the hub, which is why the creation-dialog path emits this too.

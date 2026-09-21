@@ -136,7 +136,12 @@ const (
 	// Additive like v6, and gated the same way and for the same shape of
 	// reason: a pre-v10 agent does not reject the field, it ignores it and
 	// runs the harness in a tree with no project. See MinProjectSeedVersion.
-	ProtocolVersion = 10
+	//
+	// v11 adds the upgrade frame, which lets the control plane ask a device to
+	// roll its own binary forward (Task 20331). Additive, and gated harder than
+	// the rest: see MinUpgradeVersion in upgradeproto.go for why a pre-v11
+	// agent is refused outright rather than allowed to ignore the frame.
+	ProtocolVersion = 11
 	// MinProtocolVersion is the oldest version this build still accepts.
 	MinProtocolVersion = 1
 	// MinRevocationVersion is the first version whose agents understand the

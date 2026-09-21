@@ -91,6 +91,25 @@ const (
 	// result — an executor's last audience entry being withdrawn widens access
 	// to the whole fleet, which reads as a small edit and is not one.
 	ActionExecutorAudience Action = "executor.audience"
+	// ActionExecutorUpgrade records the control plane asking a device to
+	// replace its own binary and restart (Task 20331).
+	//
+	// Its own name rather than a flavour of state_change, because of the three
+	// things this vocabulary says about an executor — a configuration changed,
+	// a health state moved, a binary was replaced — only this one is remote
+	// code execution. An auditor building a detection rule for "who can make
+	// our edge fleet run new code" needs a string to key on, and a name they
+	// have to find inside another event's payload is one they will miss.
+	ActionExecutorUpgrade Action = "executor.upgrade"
+	// ActionExecutorAutoUpdate records a change to the fleet's standing
+	// auto-update policy: whether the hub rolls devices forward unattended,
+	// onto which release, and how many at a time.
+	//
+	// Separate from ActionExecutorUpgrade because enabling the policy is not an
+	// upgrade — it is a grant of the authority to perform them indefinitely
+	// without another human decision. That is the rarer event, and the more
+	// interesting one to review.
+	ActionExecutorAutoUpdate Action = "executor.autoupdate"
 	// ActionExecutorStateChange records a health-state transition nobody asked for.
 	ActionExecutorStateChange Action = "executor.state_change"
 	// ActionExecutorFailover records a session moving off a failed executor.

@@ -106,6 +106,28 @@ type UpgradeOptions struct {
 	// came from" would let a routine rollback silently drop a security check.
 	SkipVerify bool
 
+	// ProvenanceEstablished states that the caller has already proven this
+	// binary's provenance against a signed artifact, and that there is
+	// therefore no bundle to find beside it (Task 20331).
+	//
+	// It exists for exactly one caller: a remote agent upgrading itself. The
+	// release signs the *archive*, not the executable inside it, so by the time
+	// pkg/upgrade has verified the signature and extracted the binary there is
+	// no bundle that would match the extracted file — the check has already
+	// happened, one layer up, and cannot be repeated here.
+	//
+	// It is deliberately not spelled as SkipVerify. Reusing that flag would
+	// work and would be a lie in two directions: it would print a warning
+	// saying provenance was not checked when it was, and it would record
+	// ProvenanceVerified=false in the result an operator reads afterwards.
+	// Distinguishing "verified elsewhere" from "not verified" is the difference
+	// between an audit trail and a plausible one.
+	//
+	// Like SkipVerify, this is settable only in-process. Nothing an agent
+	// receives from the control plane reaches it; see the security argument in
+	// pkg/executor/remote/upgradeproto.go.
+	ProvenanceEstablished bool
+
 	// SettleTimeout bounds the wait for a restarted service to report itself
 	// active before the upgrade concludes the new build is bad and rolls back.
 	// Zero uses serviceSettleTimeout.
@@ -149,6 +171,15 @@ func (in *Installer) verifyProvenance(res *UpgradeResult, source string, opts Up
 	if opts.SkipVerify {
 		in.logf("WARNING: %s", provenance.SkipNotice)
 		res.ProvenanceVerified = false
+		return nil
+	}
+
+	// Checked after SkipVerify so the two cannot disagree: if a caller somehow
+	// set both, the honest answer is the weaker one, and reporting "verified"
+	// because the stronger-sounding field won would be the one outcome this
+	// flag exists to prevent.
+	if opts.ProvenanceEstablished {
+		res.ProvenanceVerified = true
 		return nil
 	}
 

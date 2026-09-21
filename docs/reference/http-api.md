@@ -51,15 +51,15 @@ The dashboard and everything an integrator can drive: projects, tasks, runs,
 the executor fleet, secrets and grants, audit, and the display-glasses surface.
 Generated from `routeTable()` in `pkg/ui/routes.go`.
 
-195 endpoints, by the permission each one requires:
+198 endpoints, by the permission each one requires:
 
 | Permission | Endpoints |
 |------------|-----------|
 | `public` (no permission) | 25 |
 | `audit.read` | 5 |
 | `config.write` | 12 |
-| `executor.manage` | 17 |
-| `executor.read` | 2 |
+| `executor.manage` | 19 |
+| `executor.read` | 3 |
 | `project.read` | 47 |
 | `project.write` | 8 |
 | `run.start` | 3 |
@@ -140,6 +140,9 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 | POST | `/api/executors/{id}/sandbox` | `executor.manage` | executor |
 | PUT | `/api/executors/{id}/sandbox` | `executor.manage` | executor |
 | POST | `/api/executors/{id}/uncordon` | `executor.manage` | executor |
+| POST | `/api/executors/{id}/upgrade` | `executor.manage` | executor |
+| GET | `/api/fleet/autoupdate` | `executor.read` | global |
+| PUT | `/api/fleet/autoupdate` | `executor.manage` | global |
 | POST | `/api/github-app/installations` | `secret.grant` | global |
 | GET | `/api/glasses/dictate` | `project.read` | project |
 | GET | `/api/glasses/link` | `public` | global |

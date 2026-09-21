@@ -11,6 +11,11 @@ window.loadExecutors = function() {
     execData = d || {};
     _renderExecutors(execData);
     _renderExecutorCard(execData);
+    // Cached behind its own guard. loadExecutors runs on every executor event,
+    // and a policy that re-fetched with it would put a second request behind
+    // each one for a value that only changes when an admin edits it — the
+    // shape of the caps-panel regression in Task 20326.
+    loadFleetAutoUpdate();
     return execData;
   }).catch(err => {
     console.warn('executors load error', err);
@@ -419,6 +424,7 @@ function _renderExecutors(d) {
       h += '<button class="btn" style="padding:3px 9px;font-size:11.5px" onclick="drainExecutor(' + i + ')">Drain</button>';
     }
     if (ex.enrolled && ex.kind === 'remote') {
+      h += _execUpgradeButton(ex, i);
       h += '<button class="btn danger" style="padding:3px 9px;font-size:11.5px" onclick="revokeExecutor(' + i + ')">Revoke</button>';
     } else {
       h += '<span style="font-size:11px;color:var(--muted)">Configured in .cloop/config.yaml</span>';
@@ -1942,4 +1948,167 @@ window.removeExecutorAudience = function(i) {
       loadExecutors();
     })
     .catch(err => _execAudienceWarn(_execDetailErrText(err) || 'Failed to withdraw that principal.'));
+};
+
+// ── Rolling the fleet forward (Task 20331) ──────────────────────────────────
+//
+// The panel has always been able to say a device was out of date — the skew
+// chip and its note have been rendered since the fleet inventory landed — and
+// the note's advice was to go and SSH into the machine. For the edge devices
+// this hub is built to adopt, sitting behind NAT in buildings nobody is
+// visiting, that advice is not something an operator can act on.
+//
+// So the skew becomes a button. Two things it deliberately does not do:
+//
+//   It does not promise the upgrade worked. The device restarts to finish, so
+//   the session carrying the request dies mid-flight and the only honest report
+//   the hub can make is "it accepted and is trying". The confirmation is the
+//   device reconnecting with a new build, which arrives as an ordinary executor
+//   update and repaints the row. The toast says so rather than claiming success.
+//
+//   It does not hide itself when a device looks current. "Current" is a
+//   comparison against a build the *hub* is running, and an operator pinning
+//   the fleet to an older release, or reinstalling one that was interrupted
+//   halfway, has a legitimate reason to press it anyway. It is styled down to
+//   a plain button instead, and says why in its tooltip.
+
+// _execUpgradeButton renders the per-device Upgrade control.
+function _execUpgradeButton(ex, i) {
+  const skew = ex.version_skew || {};
+  const material = !!skew.material;
+  const current = (ex.inventory && ex.inventory.agent_version_label) || 'an unreported build';
+  // Highlighted only when the device is genuinely behind. A panel where every
+  // row shows an emphasised Upgrade button trains an operator to ignore it,
+  // which is the opposite of what a fleet with one stale device needs.
+  const cls = material ? 'btn primary' : 'btn';
+  const title = material
+    ? 'This device is running ' + current + ' and the hub is on '
+      + (skew.hub_version || 'a newer build') + '. Roll it forward now.'
+    : 'Reinstall or change this device’s build. It reports ' + current + '.';
+  return '<button class="' + cls + '" style="padding:3px 9px;font-size:11.5px" '
+    + 'onclick="upgradeExecutor(' + i + ')" title="' + esc(title) + '">Upgrade</button>';
+}
+
+// upgradeExecutor asks one device to roll forward.
+window.upgradeExecutor = function(idx) {
+  const ex = _execAt(idx);
+  if (!ex) return;
+  const name = ex.name || ex.id;
+  const hub = (ex.version_skew && ex.version_skew.hub_version) || '';
+  // Prefilled with the hub's own build rather than "latest": matching the
+  // control plane is the invariant an operator actually wants, and "latest"
+  // evaluated separately on each device is how a fleet ends up split across
+  // two releases when something is published mid-rollout.
+  const target = prompt(
+    'Upgrade ' + name + ' to which release?\n\n'
+    + 'Leave as-is to match this hub, or enter a tag such as v0.1.4. '
+    + 'The device downloads it itself and verifies the signature before installing; '
+    + 'it will restart and drop off the fleet briefly.',
+    hub || 'latest');
+  if (target === null) return;
+
+  apiMethod('POST', '/api/executors/' + encodeURIComponent(ex.id) + '/upgrade',
+    {target_version: (target || '').trim()})
+    .then(d => {
+      if (!d || d.error) { toast((d && d.error) || 'Failed to request the upgrade', 'err'); return; }
+      // already_current and a refusal are both "nothing is happening", but only
+      // one of them is a problem — surfacing them with the same severity would
+      // make a benign no-op look like a failure.
+      toast(d.message || 'Upgrade requested', d.accepted ? 'ok' : (d.already_current ? 'ok' : 'err'));
+      loadExecutors();
+    })
+    .catch(() => toast('Failed to request the upgrade', 'err'));
+};
+
+// ── Fleet auto-update policy ────────────────────────────────────────────────
+//
+// The bar is built here rather than in index.html so the panel's markup stays
+// in one place with the code that fills it, and so this lands without an edit
+// to the shared page shell.
+
+let fleetAutoUpdate = null;
+
+function _autoUpdateBar() {
+  let bar = document.getElementById('fleetAutoUpdateBar');
+  if (bar) return bar;
+  const list = document.getElementById('execList');
+  if (!list || !list.parentNode) return null;
+  bar = document.createElement('div');
+  bar.id = 'fleetAutoUpdateBar';
+  bar.style.cssText = 'margin:0 0 12px;padding:10px 12px;border:1px solid var(--border);'
+    + 'border-radius:8px;font-size:12.5px;display:flex;align-items:center;gap:10px;flex-wrap:wrap';
+  list.parentNode.insertBefore(bar, list);
+  return bar;
+}
+
+window.loadFleetAutoUpdate = function(force) {
+  // Served from cache unless an edit invalidated it. See the call site in
+  // loadExecutors for why re-fetching per render is the wrong default.
+  if (fleetAutoUpdate && !force) { _renderAutoUpdateBar(fleetAutoUpdate); return Promise.resolve(fleetAutoUpdate); }
+  return api('/api/fleet/autoupdate').then(d => {
+    if (!d || d.error) return null;
+    fleetAutoUpdate = d;
+    _renderAutoUpdateBar(d);
+    return d;
+  }).catch(() => null);
+};
+
+function _renderAutoUpdateBar(d) {
+  const bar = _autoUpdateBar();
+  if (!bar) return;
+  const eff = d.effective || {};
+  const on = !!d.enabled;
+  const target = eff.target_version || d.hub_version || 'this hub’s build';
+  let h = '<strong>Automatic upgrades</strong>';
+  h += '<span class="exec-chip ' + (on ? 'pos' : 'neg') + '">' + (on ? 'on' : 'off') + '</span>';
+  if (on) {
+    // The effective values, not the stored ones: an empty target means "match
+    // the hub", and showing a blank would leave the operator to guess.
+    h += '<span style="color:var(--muted)">converging the fleet on <code>' + esc(target)
+      + '</code>, ' + esc(String(eff.max_in_flight || 1)) + ' at a time</span>';
+  } else {
+    h += '<span style="color:var(--muted)">devices stay on their current build until '
+      + 'upgraded by hand</span>';
+  }
+  h += '<button class="btn" style="padding:3px 9px;font-size:11.5px;margin-left:auto" '
+    + 'onclick="editFleetAutoUpdate()">Configure</button>';
+  bar.innerHTML = h;
+}
+
+window.editFleetAutoUpdate = function() {
+  const d = fleetAutoUpdate || {};
+  const eff = d.effective || {};
+  const on = confirm(
+    'Turn automatic executor upgrades ' + (d.enabled ? 'OFF' : 'ON') + '?\n\n'
+    + 'When on, the hub rolls idle devices forward on its own. It never interrupts '
+    + 'running work, never touches a cordoned device, and upgrades only a few at a time.\n\n'
+    + 'OK = turn it ' + (d.enabled ? 'off' : 'on') + ', Cancel = leave it as it is.')
+    ? !d.enabled : d.enabled;
+
+  let target = d.target_version || '';
+  let maxInFlight = eff.max_in_flight || 1;
+  if (on) {
+    const t = prompt(
+      'Which release should the fleet converge on?\n\n'
+      + 'Leave empty to track this hub’s own build, or pin a tag such as v0.1.4.',
+      target);
+    if (t === null) return;
+    target = t.trim();
+    const m = prompt('How many devices may upgrade at the same time?\n\n'
+      + 'Keep this small: each one restarts and is briefly unavailable.', String(maxInFlight));
+    if (m === null) return;
+    const parsed = parseInt(m, 10);
+    if (isNaN(parsed) || parsed < 1) { toast('That is not a number of devices', 'err'); return; }
+    maxInFlight = parsed;
+  }
+
+  apiMethod('PUT', '/api/fleet/autoupdate',
+    {enabled: on, target_version: target, max_in_flight: maxInFlight})
+    .then(r => {
+      if (!r || r.error) { toast((r && r.error) || 'Failed to save the policy', 'err'); return; }
+      fleetAutoUpdate = r;
+      _renderAutoUpdateBar(r);
+      toast('Automatic upgrades are ' + (r.enabled ? 'on' : 'off'), 'ok');
+    })
+    .catch(() => toast('Failed to save the policy', 'err'));
 };

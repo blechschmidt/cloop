@@ -468,6 +468,14 @@ func (a *Agent) frameLoop(ctx context.Context, sess *deviceSession) error {
 			// stall heartbeat acks and every other handle's control traffic.
 			go a.handleRevoke(ctx, sess, frame)
 
+		case remote.TypeUpgrade:
+			// Its own goroutine for the usual reason — a release download is
+			// slow, and the frame loop carries every other handle's traffic —
+			// and for one specific to this frame: the handler's work ends by
+			// restarting this process, which must not happen from inside the
+			// loop that is meant to keep serving right up until it does.
+			go a.handleUpgrade(ctx, sess, frame)
+
 		case remote.TypeHeartbeatAck:
 			// Liveness confirmed; nothing to do. Its value is in arriving.
 

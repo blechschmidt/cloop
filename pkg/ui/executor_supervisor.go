@@ -101,8 +101,17 @@ func startExecutorSupervisor(dir string) {
 	)
 	stop := sv.Start(context.Background())
 
+	// Fleet auto-update shares the supervisor's lifetime and its database
+	// handle (Task 20331). It re-reads the policy on every tick rather than at
+	// start, so turning it on from the dashboard takes effect without a hub
+	// restart — and a hub that never turns it on pays one query per interval
+	// rather than holding machinery it will not use.
+	autoCtx, stopAuto := context.WithCancel(context.Background())
+	go newAutoUpdater(db, sv).run(autoCtx)
+
 	fleetSupervisor = sv
 	fleetStopFn = func() {
+		stopAuto()
 		stop()
 		_ = db.Close()
 	}

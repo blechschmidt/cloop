@@ -189,6 +189,27 @@ var registry = []Entry{
 		Read:      authz.PermAuditRead,
 	},
 	{
+		Action: ActionExecutorUpgrade,
+		Home:   HomeControlPlane,
+		Entity: "executor",
+		Trigger: "The control plane asks an enrolled device to replace its own binary with a " +
+			"published release and restart.",
+		Payload: []string{"action", "executor_id", "requested_version", "force", "accepted",
+			"from_version", "target_version", "reason"},
+		Stability: StabilityStable,
+		Read:      authz.PermAuditRead,
+	},
+	{
+		Action: ActionExecutorAutoUpdate,
+		Home:   HomeControlPlane,
+		Entity: "executor",
+		Trigger: "An administrator changes whether the control plane upgrades executors " +
+			"unattended, which release they converge on, or how many move at once.",
+		Payload:   []string{"action", "enabled", "target_version", "max_in_flight"},
+		Stability: StabilityStable,
+		Read:      authz.PermAuditRead,
+	},
+	{
 		Action:    ActionExecutorUncordon,
 		Home:      HomeControlPlane,
 		Entity:    "executor",

@@ -976,5 +976,6 @@ func (s *Server) routeTable() []routeSpec {
 	// apart. Public, and additionally exempt from authentication: nothing that
 	// fetches an icon — a browser probing /favicon.ico, a display-glasses
 	// launcher rendering a saved app — sends a credential. See icons.go.
+	table = append(table, s.executorUpgradeRoutes()...)
 	return append(table, s.iconRoutes()...)
 }
