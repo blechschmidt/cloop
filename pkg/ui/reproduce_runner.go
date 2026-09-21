@@ -173,10 +173,18 @@ func (r *reproduceRunner) run(ctx context.Context, rs runSpec) (*taskreplay.RunO
 	lease := acquireSecretLease(controlPlaneDir(), rs.ProjectDir, ex, artifact.NewRunID())
 	defer lease.Close()
 
-	spec, err := applyLease(uiSpec(rs.ProjectDir, rs.Argv, map[string]string{
+	base := uiSpec(rs.ProjectDir, rs.Argv, map[string]string{
 		"handler":   "reproduce",
 		"ephemeral": "true",
-	}), ex, lease)
+	})
+	// resolveIsolatingExecutor has already guaranteed this executor has a
+	// filesystem of its own, so unlike the other dispatch sites this one has no
+	// unisolated case at all: argv[0] here is the hub's path to the hub's
+	// binary and is never resolvable on the far side. A reproduction sandbox
+	// could therefore never run on a hub installed under any other name.
+	executor.DeviceArgv(&base, ex)
+
+	spec, err := applyLease(base, ex, lease)
 	if err != nil {
 		return nil, err
 	}

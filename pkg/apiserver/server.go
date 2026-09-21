@@ -933,6 +933,11 @@ func (s *Server) startRun(ctx context.Context, args []string) (executor.Executor
 		},
 	}
 
+	// exe above is this host's path to this host's binary, which an isolating
+	// executor cannot resolve. Translated here rather than at os.Executable
+	// because the answer depends on the executor, and that is only known now.
+	executor.DeviceArgv(&spec, ex)
+
 	// This spec carries no brokered bindings today — the REST server does not
 	// apply leases — so the check passes trivially. It is here because the
 	// moment it grows one, the refusal must already be in place: a guarantee

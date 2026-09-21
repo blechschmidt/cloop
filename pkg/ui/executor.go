@@ -366,6 +366,11 @@ func startWorkloadAs(envFor func(executor.Executor) []string, identity, workDir 
 	runID := artifact.NewRunID()
 
 	base := uiSpec(workDir, argv, labels)
+	// argv[0] is this hub's own binary, by an absolute path only this host
+	// has. Translated before anything else shapes the spec so that every step
+	// below — the audit rows, the persisted handle, the labels a remote agent
+	// echoes back — records the program that will actually run.
+	executor.DeviceArgv(&base, ex)
 	if envFor != nil {
 		if extra := envFor(ex); len(extra) > 0 {
 			// Inheriting the hub's environment first matches what the local
@@ -575,6 +580,11 @@ func runWorkloadEnvFor(ctx context.Context, workDir string, argv []string, envFo
 	defer lease.Close()
 
 	base := uiSpec(workDir, argv, labels)
+	// Same translation as startWorkloadAs, and for the same reason: a helper
+	// subcommand is dispatched to the project's executor exactly like a
+	// harness is, so `cloop suggest` on an edge device needs the device's
+	// cloop, not this host's path to one.
+	executor.DeviceArgv(&base, ex)
 	if len(extraEnv) > 0 {
 		if executor.IsolatesFromHost(ex) {
 			base.Env = extraEnv
