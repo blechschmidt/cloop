@@ -145,7 +145,34 @@ import (
 // why the remaining bytes are structural.
 //
 // The new slack is 225 B, held at the same order as the two above.
-const eagerWireBudgetBytes = 272_750
+//
+// Raised to 274,000 B by Task 20328, which moved the list of hidden projects
+// out of the Settings page and into a dialog: 1,231 B wire. HEAD measured
+// 272,525 B, 225 B of headroom, so again nothing of any size fitted.
+//
+// What the bytes are. About a quarter is markup — one more overlay root, the
+// dialog and the button that opens it — and the rest is the open/close pair,
+// the count renderer, and splitting the old renderer in two so that filling the
+// list and being *allowed* to fill it are separate decisions. It is not a panel:
+// no new data, no new endpoint, no new tab. The prose was trimmed first and that
+// is in the figure (the untrimmed version measured 1,725 B); the rationale it
+// used to carry now lives in hidden_frontend_test.go, which is not served.
+//
+// Deferral does not apply, for the same reason as the raise above and more
+// bluntly. This code is in 05-projects.js, which draws the projects grid — the
+// landing page of a multi-project hub. It is resident before anything a user
+// could click, so there is no later moment to fetch it at.
+//
+// Worth stating because it is the opposite of the usual trade: the change
+// *removes* something from the page. Every hidden project's name and path used
+// to be rendered into the Settings panel on every projects payload, open tab or
+// not; now they reach the DOM only while the dialog is up. The bytes buy the
+// mechanism that keeps them out.
+//
+// The new slack is 244 B, the same order as the 225 B, 230 B and 239 B above.
+// This raise does not reopen the room any of them closed, and the deferral
+// refactor named there is still the next frontend task.
+const eagerWireBudgetBytes = 274_000
 
 // eagerAsset is one member of the first-paint set.
 type eagerAsset struct {

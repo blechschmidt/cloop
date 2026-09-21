@@ -226,8 +226,10 @@ of those keys means is in
 [Choosing and configuring a provider](providers.md).
 
 Below it: **Display glasses**, a personal link for Meta Ray-Ban Display glasses
-that expires after 30 days and can be revoked; **Hidden Projects**, with an
-Unhide button per entry; and a **Danger Zone** whose *Reset Project State*
+that expires after 30 days and can be revoked; **Hidden Projects**, which says
+only how many you have hidden and opens a dialog — one Unhide button per entry
+— when you click it, so that landing on this tab for something else does not
+put their names on screen; and a **Danger Zone** whose *Reset Project State*
 clears step history and resets status while preserving the goal and
 configuration.
 

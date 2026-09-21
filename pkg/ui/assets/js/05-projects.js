@@ -145,7 +145,8 @@ function renderProjects(projects, stats) {
   // project — so the grid drops them here while carrying the original index
   // along for the action buttons. Settings is where they reappear.
   const shown = projects.map((p, i) => ({p, i})).filter(({p}) => !p.hidden);
-  renderHiddenProjects(projects);
+  renderHiddenProjectsButton(projects);
+  renderHiddenProjects(projects);   // a no-op unless the dialog is open
 
   // Update aggregate stats. The server already discounts hidden projects, so
   // the local fallback must too or the counter disagrees with the grid.
@@ -290,8 +291,8 @@ window.projectStop = function(idx) {
 // confirmation modal; the undo lives in Settings and the toast says where.
 
 // setProjectHidden posts the preference and lets the server's 'projects'
-// broadcast redraw both the grid and the Settings list. loadProjects() covers
-// the case where that stream is down.
+// broadcast redraw both the grid and the hidden-projects dialog.
+// loadProjects() covers the case where that stream is down.
 function setProjectHidden(idx, name, hidden) {
   api('/api/projects/' + idx + '/hidden', {hidden})
     .then(d => {
@@ -319,12 +320,34 @@ window.projectUnhide = function(idx, name) {
   setProjectHidden(idx, name, false);
 };
 
-// renderHiddenProjects fills the Settings list from the same payload that
-// feeds the grid, so the two can never disagree about what is hidden.
-function renderHiddenProjects(projects) {
+// The hidden ones live behind a dialog, not on the Settings page (Task 20328):
+// Settings carries a count, and the names are in the DOM only while
+// #hiddenproj-overlay is up. Rationale and the gates in hidden_frontend_test.go.
+//
+// hiddenProjectEntries pairs each hidden project with its index in the *full*
+// /api/projects list, which is the index every action still dispatches on.
+function hiddenProjectEntries(projects) {
+  return (projects || []).map((p, i) => ({p, i})).filter(({p}) => p.hidden);
+}
+
+// renderHiddenProjectsButton shows how many are hidden and never which. The
+// count is what makes the button worth clicking, and names nobody.
+function renderHiddenProjectsButton(projects) {
+  const btn = document.getElementById('hiddenProjectsBtn');
+  if (!btn) return;
+  const n = hiddenProjectEntries(projects).length;
+  btn.textContent = n ? 'Show hidden projects (' + n + ')' : 'No hidden projects';
+  btn.disabled = !n;
+}
+
+// fillHiddenProjectsList writes the rows. Separate from the guarded entry point
+// below so the open path can fill the list *before* the dialog is shown:
+// openOverlay() focuses the first control it finds, and rows appearing above it
+// afterwards move the focus target out from under a keyboard user.
+function fillHiddenProjectsList(projects) {
   const box = document.getElementById('hiddenProjectsList');
   if (!box) return;
-  const hidden = (projects || []).map((p, i) => ({p, i})).filter(({p}) => p.hidden);
+  const hidden = hiddenProjectEntries(projects);
   if (!hidden.length) {
     box.innerHTML = '<p style="font-size:12px;color:var(--muted)">No hidden projects.</p>';
     return;
@@ -343,15 +366,62 @@ function renderHiddenProjects(projects) {
   }).join('');
 }
 
-// loadHiddenProjects populates the Settings list when that tab is opened.
-// Renders from the cached payload when there is one, otherwise fetches —
-// Settings can be the first tab a user opens.
+// Permission to have names in the page. Stated by the dialog's own open and
+// close paths rather than inferred from the overlay's inline style, where an
+// unset `display` reads as "not none" and would grant it by default. All three
+// ways out — Close, the backdrop, Escape via dismissTopOverlay() — run
+// closeHiddenProjectsModal(), so none of them can leave this set.
+let hiddenProjectsDialogOpen = false;
+
+// renderHiddenProjects is what the projects stream calls, on every payload.
+// Open, it keeps the rows current: unhide one of three and that row must go.
+// Closed, it writes nothing and clears what is there, so a broadcast arriving
+// after the dialog was dismissed cannot quietly put the names back.
+function renderHiddenProjects(projects) {
+  const box = document.getElementById('hiddenProjectsList');
+  if (!box) return;
+  if (!hiddenProjectsDialogOpen) {
+    box.innerHTML = '';
+    return;
+  }
+  fillHiddenProjectsList(projects);
+}
+
+// loadHiddenProjects refreshes the Settings button when that tab is opened.
+// From the cached payload when there is one, otherwise a fetch — Settings can
+// be the first tab opened, and the count would otherwise read zero.
 window.loadHiddenProjects = function() {
   if (window._lastProjectsData) {
-    renderHiddenProjects(window._lastProjectsData.projects);
+    renderHiddenProjectsButton(window._lastProjectsData.projects);
   } else if (typeof loadProjects === 'function') {
     loadProjects();
   }
+};
+
+window.openHiddenProjectsModal = function() {
+  const box = document.getElementById('hiddenProjectsList');
+  const data = window._lastProjectsData;
+  hiddenProjectsDialogOpen = true;
+  if (data) {
+    fillHiddenProjectsList(data.projects);
+  } else if (box) {
+    box.innerHTML = '<p style="font-size:12px;color:var(--muted)">Loading…</p>';
+  }
+  openOverlay('hiddenproj-overlay', {dismiss: window.closeHiddenProjectsModal});
+  // No cached payload: the fetch's render pass fills the dialog, which is now
+  // open and so no longer refused by renderHiddenProjects().
+  if (!data && typeof loadProjects === 'function') loadProjects();
+};
+
+window.closeHiddenProjectsModal = function() {
+  // Revoked first, so a payload landing in between cannot refill what is on its
+  // way out.
+  hiddenProjectsDialogOpen = false;
+  closeOverlay('hiddenproj-overlay');
+  // Emptied, not merely hidden: rows left in a display:none dialog keep every
+  // hidden name and path in the page for the rest of the session.
+  const box = document.getElementById('hiddenProjectsList');
+  if (box) box.innerHTML = '';
 };
 
 // projectDelete opens the confirmation modal for removing a project from the

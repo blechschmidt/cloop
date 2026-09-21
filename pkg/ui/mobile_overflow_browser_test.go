@@ -456,14 +456,17 @@ func TestMobileLongProjectList_DoesNotOverflow(t *testing.T) {
 		}
 	})
 
-	t.Run("the Settings list of hidden projects fits too", func(t *testing.T) {
+	t.Run("the hidden-projects dialog fits too", func(t *testing.T) {
 		// The roster is drawn in three places and this is the third. Its name
 		// row is the only one with no truncation or wrapping of any kind, so a
 		// fix applied to the grid alone would leave the same overflow one tab
 		// away — which is how this class of bug has come back before.
+		//
+		// Since Task 20328 these rows live in a dialog rather than on the
+		// Settings page, so the driver opens it before measuring.
 		r := got.HiddenList.Rows
 		if !r.Present {
-			t.Fatal("the Settings panel has no hidden-projects list, so nothing here was measured")
+			t.Fatal("there is no hidden-projects list node, so nothing here was measured")
 		}
 		if r.Count == 0 {
 			t.Fatal("no hidden project rendered; the driver's hide never took effect " +

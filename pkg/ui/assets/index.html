@@ -1549,8 +1549,8 @@
         <!-- Hidden projects -->
         <div class="settings-section">
           <h3>Hidden Projects</h3>
-          <p style="font-size:12px;color:var(--muted);margin-bottom:12px">Projects you have hidden from the Projects tab. Hiding is yours alone: it changes nothing for other users, and the project keeps running.</p>
-          <div id="hiddenProjectsList"></div>
+          <p style="font-size:12px;color:var(--muted);margin-bottom:12px">Projects you have hidden from the Projects tab. Hiding is yours alone: it changes nothing for other users, and the project keeps running. Which projects they are is behind the button &mdash; opening Settings does not put their names on screen.</p>
+          <button class="btn" id="hiddenProjectsBtn" onclick="openHiddenProjectsModal()" disabled>No hidden projects</button>
         </div>
 
         <!-- Danger zone -->
@@ -3649,6 +3649,24 @@
     <div class="modal-footer">
       <button class="btn" onclick="closeDeleteProjectModal()">Cancel</button>
       <button class="btn danger" onclick="submitDeleteProject()">Delete</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Hidden projects (Task 20328) ─────────────────────────────────────────
+     #hiddenProjectsList is deliberately empty here: the names exist only while
+     this dialog is open, filled by openHiddenProjectsModal() and cleared by
+     closeHiddenProjectsModal(). Settings itself carries only a count. -->
+<div id="hiddenproj-overlay" data-overlay="flex" onclick="if(event.target===this)closeHiddenProjectsModal()" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,.7); z-index:90; align-items:center; justify-content:center;">
+  <div id="hiddenproj-modal" style="background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); padding:24px; width:520px; max-width:92vw; max-height:80vh; overflow-y:auto;">
+    <h2 style="font-size:15px; font-weight:600; margin-bottom:8px;">Hidden projects</h2>
+    <p style="font-size:13px; color:var(--muted); margin-bottom:14px;">
+      Unhiding a project puts it back on your Projects tab. Closing this dialog takes
+      the names off the page again.
+    </p>
+    <div id="hiddenProjectsList"></div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeHiddenProjectsModal()">Close</button>
     </div>
   </div>
 </div>

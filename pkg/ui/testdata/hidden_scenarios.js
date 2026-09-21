@@ -41,6 +41,14 @@ function projectsPayload(hiddenIdx) {
 
 function clone(o) { return JSON.parse(JSON.stringify(o)); }
 
+// Every element the bundle has asked for, so a scenario can sweep the whole
+// page for a name that must not be on it. The shim models no tree, so
+// document.body.innerHTML aggregates nothing and a page-wide grep has to be
+// assembled from the nodes themselves. Installed before the bundle loads, and
+// complete because the shim hands out one cached object per id: an element
+// nothing ever fetched cannot have been written to.
+let touched = new Set();
+
 async function boot(payload) {
   for (const k of Object.keys(require.cache)) delete require.cache[k];
   require(shimPath);
@@ -48,9 +56,38 @@ async function boot(payload) {
   h.projects = clone(payload);
   h.states = {0: {goal: 'alpha goal', status: 'idle', plan: {goal: 'alpha goal', tasks: []}}};
 
+  touched = new Set();
+  const byId = document.getElementById.bind(document);
+  document.getElementById = id => { const el = byId(id); touched.add(el); return el; };
+
   require(bundlePath);
   await globalThis.__settle(5);
   return h;
+}
+
+// pageMentions returns the ids of every element whose rendered content contains
+// needle. Both innerHTML and textContent are read: panels built by assigning
+// markup land in the first, ones built by setting text in the second.
+function pageMentions(needle) {
+  const hits = [];
+  for (const el of touched) {
+    const where = String(el.innerHTML || '') + ' ' + String(el.textContent || '');
+    if (where.includes(needle)) hits.push(el.id || '?');
+  }
+  return hits.sort();
+}
+
+// hiddenButton is all Settings itself shows: a label, and whether it is
+// clickable. The label carries a count and never a name.
+function hiddenButton() {
+  const btn = document.getElementById('hiddenProjectsBtn');
+  return {label: String(btn.textContent || ''), disabled: !!btn.disabled};
+}
+
+// openHidden clicks the Settings button the way the user does.
+async function openHidden() {
+  window.openHiddenProjectsModal();
+  await globalThis.__settle(5);
 }
 
 // gridIndices returns the project index each rendered card dispatches on, in
@@ -76,8 +113,9 @@ function gridNames() {
   return out;
 }
 
-// hiddenPanel returns what the Settings list offers to restore: the index
-// each Unhide button posts to, and the names shown beside them.
+// hiddenPanel returns what the dialog offers to restore: the index each Unhide
+// button posts to, and the names shown beside them. Only meaningful once the
+// dialog has been opened — closed, this node is deliberately empty.
 function hiddenPanel() {
   const html = document.getElementById('hiddenProjectsList').innerHTML || '';
   const indices = [];
@@ -96,9 +134,12 @@ const scenarios = {
     await boot(projectsPayload(-1));
     window.switchTab('projects');
     await globalThis.__settle();
+    const button = hiddenButton();
+    await openHidden();
     return {
       grid: gridIndices(),
       names: gridNames(),
+      button,
       panel: hiddenPanel(),
       total: String(document.getElementById('paTotal').textContent),
     };
@@ -111,9 +152,12 @@ const scenarios = {
     await boot(projectsPayload(1));
     window.switchTab('projects');
     await globalThis.__settle();
+    const button = hiddenButton();
+    await openHidden();
     return {
       grid: gridIndices(),
       names: gridNames(),
+      button,
       panel: hiddenPanel(),
       total: String(document.getElementById('paTotal').textContent),
     };
@@ -163,10 +207,13 @@ const scenarios = {
     await globalThis.__settle();
 
     const html = document.getElementById('projList').innerHTML || '';
+    const button = hiddenButton();
+    await openHidden();
     return {
       grid: gridIndices(),
       mentionsSettings: /Settings/.test(html),
       mentionsCompleted: /completed/i.test(html),
+      button,
       panel: hiddenPanel(),
     };
   },
@@ -203,14 +250,85 @@ const scenarios = {
     };
   },
 
-  // Opening Settings before ever visiting the Projects tab must still list
+  // Opening Settings before ever visiting the Projects tab must still offer
   // what is hidden — that path renders from a fetch, not from a cached
-  // payload.
+  // payload, and would otherwise show a count of zero for a hidden project.
   async settings_first_still_lists_hidden() {
     await boot(projectsPayload(1));
     window.switchTab('settings');
     await globalThis.__settle(5);
-    return {panel: hiddenPanel()};
+    const button = hiddenButton();
+    await openHidden();
+    return {button, panel: hiddenPanel()};
+  },
+
+  // Task 20328, the property this dialog exists for: opening Settings must not
+  // put a hidden project's name anywhere on the page. Swept across every node
+  // the bundle wrote to, not just the list container, because the leak this
+  // guards against is a *render* of the hidden project — and it would be no
+  // less of one for happening in a panel nobody thought to check.
+  //
+  // Both spellings are searched. The name is what a bystander reads; the path
+  // is what identifies the work, and on this hub a project path routinely names
+  // the customer whose repository it is.
+  async settings_page_does_not_reveal() {
+    await boot(projectsPayload(1));
+    window.switchTab('settings');
+    await globalThis.__settle(5);
+
+    const closed = {
+      name: pageMentions('beta'),
+      path: pageMentions('/srv/beta'),
+      button: hiddenButton(),
+      panel: hiddenPanel(),
+    };
+
+    await openHidden();
+    const open = {name: pageMentions('beta'), panel: hiddenPanel()};
+
+    // And gone again on the way out: a dialog that only hides its rows leaves
+    // them in the document for the rest of the session.
+    window.closeHiddenProjectsModal();
+    await globalThis.__settle(5);
+    const reclosed = {name: pageMentions('beta'), panel: hiddenPanel()};
+
+    return {closed, open, reclosed};
+  },
+
+  // A projects broadcast arriving while the dialog is shut must not refill it —
+  // the stream fires on every run state change, so this is the ordinary case,
+  // not a corner one. And while it is open the rows must track the payload,
+  // or unhiding one of three would leave a row that posts against a project
+  // that is no longer hidden.
+  async broadcast_respects_the_dialog() {
+    const h = await boot(projectsPayload(1));
+    window.switchTab('settings');
+    await globalThis.__settle(5);
+
+    // The real push path, not a direct call to the renderer: this is a 'projects'
+    // frame on the dashboard's own socket.
+    const ws = h.sockets[0];
+    if (!ws) throw new Error('the bundle opened no WebSocket');
+    ws.open();
+    const push = async payload => {
+      ws.deliver('projects', {projects: payload.projects, stats: payload.stats});
+      await globalThis.__settle(5);
+    };
+
+    // Shut: a frame must leave the page as silent as it found it.
+    await push(clone(h.projects));
+    const whileClosed = {name: pageMentions('beta'), panel: hiddenPanel()};
+
+    // Open: alpha is hidden too now, and the dialog must grow that row rather
+    // than keep showing a one-project list that is already out of date.
+    await openHidden();
+    const twoHidden = clone(h.projects);
+    twoHidden.projects[0].hidden = true;
+    twoHidden.stats.total_projects = 1;
+    await push(twoHidden);
+    const whileOpen = {panel: hiddenPanel(), button: hiddenButton()};
+
+    return {whileClosed, whileOpen};
   },
 };
 

@@ -427,11 +427,16 @@ const cardsExpr = expW => `(() => {
         };
       })()`),
     };
-    // ── 6. The Settings list of hidden projects ────────────────────────────
+    // ── 6. The hidden-projects dialog ──────────────────────────────────────
     // The third place the roster is drawn, and the one with no truncation of
     // any kind on the name. Measured last and at the narrowest viewport,
     // because hiding a project changes the grid and the dropdown and would
     // invalidate every scenario above.
+    //
+    // Reached through the Settings button rather than by reading the panel:
+    // since Task 20328 the rows only exist while #hiddenproj-overlay is open,
+    // so a measurement taken on the Settings page alone would find no rows and
+    // report a tidy zero overflow for a layout it never laid out.
     await cdp.send('Emulation.setDeviceMetricsOverride', {
       width: 320, height: 568, deviceScaleFactor: 2, mobile: true,
     });
@@ -450,6 +455,11 @@ const cardsExpr = expW => `(() => {
     })()`);
     await cdp.eval(`switchTab('settings')`);
     await sleep(400);
+    // Clicked, not called: this also proves the button is enabled and its
+    // onclick resolves, in a real browser. A disabled button or an unexported
+    // handler leaves the list empty and fails the count assertion below.
+    await cdp.eval(`document.getElementById('hiddenProjectsBtn').click()`);
+    await sleep(200);
     out.hidden_list = {
       page: await cdp.eval(pageExpr(320)),
       widest: await cdp.eval(widestExpr(320)),
