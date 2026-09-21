@@ -74,6 +74,7 @@ cloop secret mint <name> --kind <kind> [--file <path> | --value <literal>]
 | `egress_proxy` | an outbound proxy endpoint, credentials optional |
 | `local_repo` | an absolute path **on the hub host** to a directory of git repositories (or to a single repository) |
 | `host_device` | an inventory of device nodes on the executor's host, one `name=/dev/path` per line |
+| `host_interface` | an inventory of network interfaces on the executor's host, one `name=ifname` per line. Honouring one **moves** the interface into the sandbox, so the executor gives it up for the life of the run — [worked example](#host-network-interfaces) |
 
 Prefer **stdin** or `--file`. `--value` puts the credential in your shell history
 and in the host process table, and the flag's own help text says so:
@@ -122,6 +123,7 @@ cloop secret grant <secret> --to <subject> [constraints] [--ttl 24h]
 | `--env-keys` | `env` | key allowlist; omit to deliver every key in the secret |
 | `--hosts` | `egress_proxy` | host allowlist — required |
 | `--devices` | `host_device` | device-*name* globs from the inventory — **required** |
+| `--interfaces` | `host_interface` | interface-*name* globs from the inventory — **required** |
 
 `--scope` is a grouping label for operators and carries **no** authority.
 
@@ -1115,6 +1117,73 @@ runtime CLI.
 The end-to-end host setup — the inventory, the udev rules, gVisor, the egress
 filter and how they compose on one bench machine — is
 [critical hosts as cloop executors](enterprise-hosts.md).
+
+---
+
+## Host network interfaces
+
+`host_device` cannot carry a network interface. A netdev is not a node under
+`/dev`, so there is nothing to bind and no cgroup rule to write, and neither
+runtime has a flag for it. `host_interface` is the kind that can: it **moves**
+an interface out of the executor's network namespace and into the sandbox's,
+giving the workload a seat on the segment rather than a route through the host.
+That is what makes ARP, DHCP and raw Ethernet work, which is the point of
+plugging a machine into a board in the first place.
+
+It is the widest grant this broker issues, and the only one that takes something
+*away* from the executor: an interface lives in exactly one namespace, so the
+host cannot use it while the run holds it.
+
+```bash
+$ cloop secret mint bench-net --kind host_interface --file - <<'EOF'
+# rack 3, bench A — a veth end that lands on the bench bridge
+dut=bench-sbx,target=eth1,address=172.31.99.200/24
+# a physical port wired straight to the board
+can0=enp3s0,target=eth1
+# a capture port: no address, jumbo frames, raw L2 only
+capture=enp4s0f1,mtu=9000
+EOF
+✓ minted bench-net (host_interface) as sec_5f19c0a3b8e27d41
+
+$ cloop secret grant bench-net \
+    --to project:/srv/projects/firmware \
+    --interfaces dut \
+    --ttl 8h
+```
+
+The line format is `name=ifname` plus optional comma-separated attributes —
+`target=`, `address=` (a CIDR), `gateway=` (needs `address=`) and `mtu=`.
+Comma-separated rather than colon-separated because `fd00::10/64` is full of
+colons. `--interfaces` is required for the reason `--devices` is: a grant with
+no allowlist would open every segment in the inventory.
+
+`.cloop/sandbox.yaml` then selects from what the project holds, and can only
+shorten the list:
+
+```yaml
+capabilities:
+  network: bench-egress
+  interfaces: [dut]
+```
+
+Three refusals are worth knowing before you mint one:
+
+| Refused | Why |
+| --- | --- |
+| `lo`, `docker0`, `podman0`, `cni-podman0`, `virbr0`, `br-*` | moving one disconnects the host or every container on it. A Docker per-network bridge is what the sandbox's veth peer *attaches to*, not what gets moved |
+| the interface carrying the host's default route | checked on the executor at attach time, where the routing table can be read. On a remote bench this is the difference between a lab machine and an unreachable one |
+| a Kata or gVisor executor | the move succeeds and the workload still sees nothing, because both build their view of the network when the sandbox starts. Refused at placement rather than attempted |
+
+Revocation has the same honest limit as `host_device`: an interface already
+inside a running sandbox's network namespace cannot be reached from outside it,
+so a revoked grant lapses when the workload exits. Stopping the run is what cuts
+it immediately — and stopping gracefully is also what returns a veth pair to the
+host intact, since the kernel deletes virtual interfaces along with the
+namespace rather than handing them back.
+
+The full bench recipe — the bridge, the veth pair, the runtime constraints and
+the start-up window — is
+[Network interfaces: L2 passthrough](enterprise-hosts.md#network-interfaces-l2-passthrough).
 
 ---
 

@@ -72,6 +72,9 @@ const (
 	// select from what a grant already delivered, so a longer one is naming
 	// devices that cannot exist.
 	MaxDeviceSelectors = 16
+	// MaxInterfaceSelectors matches executor.MaxInterfaces, for the reason
+	// MaxDeviceSelectors matches executor.MaxDevices.
+	MaxInterfaceSelectors = 8
 )
 
 // ErrNotFound is returned by Load when the project has no sandbox spec. It is a
@@ -194,6 +197,15 @@ type Capabilities struct {
 	// the task meaningless, so it is better to refuse than to start a firmware
 	// build with no serial port.
 	Devices []string `yaml:"devices"`
+	// Interfaces selects, by name, from the host_interface grants this
+	// project already holds. Empty means every granted interface is moved in.
+	//
+	// Selection only, with the same asymmetry Devices has and the same
+	// reason: starting a bring-up task on a board it has no wire to is worse
+	// than refusing. What this key cannot do is name an interface the
+	// project was not granted — a repo-committed file that could would be a
+	// pull request that takes the executor's network away.
+	Interfaces []string `yaml:"interfaces"`
 }
 
 // Mount is the YAML shape of executor.SpecMount.
@@ -403,6 +415,28 @@ func (s *Spec) normalize() ([]string, error) {
 	}
 	s.Capabilities.Devices = devices
 
+	if len(s.Capabilities.Interfaces) > MaxInterfaceSelectors {
+		return warnings, fmt.Errorf("capabilities.interfaces: %d names, at most %d are allowed",
+			len(s.Capabilities.Interfaces), MaxInterfaceSelectors)
+	}
+	seenIface := make(map[string]struct{}, len(s.Capabilities.Interfaces))
+	ifaces := make([]string, 0, len(s.Capabilities.Interfaces))
+	for i, name := range s.Capabilities.Interfaces {
+		name = strings.TrimSpace(name)
+		// The same selector grammar as a device: these are grant handles, not
+		// interface names, so they are bounded by what an operator may call a
+		// grant rather than by IFNAMSIZ.
+		if err := validateDeviceSelector(name); err != nil {
+			return warnings, fmt.Errorf("capabilities.interfaces[%d]: %w", i, err)
+		}
+		if _, dup := seenIface[name]; dup {
+			continue
+		}
+		seenIface[name] = struct{}{}
+		ifaces = append(ifaces, name)
+	}
+	s.Capabilities.Interfaces = ifaces
+
 	// --- mounts ---------------------------------------------------------
 	for i := range s.Mounts {
 		s.Mounts[i].Source = strings.TrimSpace(s.Mounts[i].Source)
@@ -528,7 +562,8 @@ func (s *Spec) IsZero() bool {
 		len(s.Mounts) == 0 && s.Resources == (Resources{}) &&
 		s.Capabilities.Git == false && s.Capabilities.Network == "" &&
 		s.Capabilities.Virtualized == false && s.Capabilities.KernelIsolated == false &&
-		s.Capabilities.Egress == "" && len(s.Capabilities.Devices) == 0
+		s.Capabilities.Egress == "" && len(s.Capabilities.Devices) == 0 &&
+		len(s.Capabilities.Interfaces) == 0
 }
 
 // validateEnvName enforces the POSIX-ish shape both container runtimes and the

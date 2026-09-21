@@ -572,6 +572,143 @@ Grant TTLs are the routine control, and they are the reason the above is usually
 academic. Eight hours for a bench session is better than a week, because the
 grant lapsing is what makes it a session rather than a standing entitlement.
 
+### Network interfaces: L2 passthrough
+
+A device grant cannot carry a network interface. A netdev is not a node under
+`/dev`, so there is nothing to bind and no cgroup rule to write, and neither
+runtime has a flag for it — `/dev/net/tun` lets a sandbox *build* an interface,
+which is a different thing from being handed one.
+
+`host_interface` is that different thing. It **moves** an interface out of the
+executor's network namespace and into the sandbox's, which puts the workload on
+the segment the interface is attached to rather than behind a route through the
+host. That is what makes ARP, DHCP, PTP, raw Ethernet and every other
+link-layer protocol work — the ones a bring-up engineer actually needs, and the
+ones no egress rule can carry.
+
+**Read this before granting one.** Two properties have no analogue anywhere else
+in cloop:
+
+- **The host gives the interface up.** A netdev lives in exactly one namespace.
+  For the life of the run the executor cannot use it at all. Naming the wrong
+  interface does not widen a boundary — it severs the machine, and on a remote
+  bench that means losing the machine. cloop refuses `lo`, the container
+  runtimes' own bridges (`docker0`, `podman0`, `cni-podman0`, `virbr0`, any
+  `br-*`) and, at attach time on the executor itself, whichever interface
+  carries that host's default route.
+- **Teardown is the kernel's decision.** When a network namespace is destroyed
+  the kernel returns *physical* devices to the initial namespace and **deletes**
+  virtual ones. A passed-through NIC comes home by itself; a passed-through
+  veth end is destroyed, taking its peer with it. cloop moves interfaces back
+  while the container is still up, so a graceful stop preserves a veth bench —
+  but a workload that is killed outright, or a host that loses power, leaves the
+  kernel's rules in force.
+
+#### Which executors can honour it
+
+Only a **container** executor, running **as root**, on the machine the interface
+is attached to, with `ip(8)` and `nsenter(1)` installed, under **`runc` or
+`crun`**.
+
+The last condition is the one worth internalising. Kata and gVisor build their
+view of the network when the sandbox starts and never see a link that arrives
+afterwards — so the move succeeds, the host loses the interface, and
+`/proc/net/dev` inside the container still lists only `lo`. That is the worst
+possible outcome, so cloop reports the capability as false on those runtimes and
+refuses at placement instead of trying. A bench that needs both a wire and a
+guest kernel needs a different mechanism (SR-IOV VF assignment at VM creation),
+which cloop does not drive.
+
+#### Wire the bench
+
+The usual shape is a veth pair with one end on a bridge and the other granted to
+the sandbox. This is the exact bench cloop's own integration test builds:
+
+```bash
+# a segment with the device under test on it
+docker network create --driver bridge --subnet 172.31.99.0/24 bench
+BR=br-$(docker network inspect -f '{{.Id}}' bench | cut -c1-12)
+
+# the veth pair: one end on the bridge, one end for the sandbox
+ip link add bench-sbx type veth peer name bench-br
+ip link set bench-br master "$BR"
+ip link set bench-br up
+ip link set bench-sbx up
+```
+
+For a *physical* bench port — a NIC wired to the board — skip the veth entirely
+and grant the interface itself. That is the case the kernel handles best: it
+comes back to the host on its own when the sandbox ends.
+
+#### Inventory and grant
+
+```bash
+cloop secret mint bench-net --kind host_interface --file - <<'EOF'
+# rack 3, bench A — the veth end that lands on the bench bridge
+dut=bench-sbx,target=eth1,address=172.31.99.200/24
+# a physical port wired straight to the board, addressed by DHCP in-sandbox
+can0=enp3s0,target=eth1
+# a capture port: no address, jumbo frames, raw L2 only
+capture=enp4s0f1,mtu=9000
+EOF
+
+cloop secret grant bench-net \
+  --to project:/srv/projects/firmware \
+  --interfaces dut \
+  --ttl 8h
+```
+
+The line format is `name=ifname` followed by optional comma-separated
+attributes: `target=` (the name inside the sandbox), `address=` (a CIDR — an
+address with a prefix length), `gateway=` (needs `address=`; makes the sandbox's
+default route point at the bench) and `mtu=`. Comma-separated rather than
+colon-separated, because `fd00::10/64` is full of colons.
+
+Omit `address=` for a segment with DHCP on it, or for a workload doing raw L2:
+the interface arrives up and unaddressed.
+
+#### Select from the grant
+
+```yaml
+# .cloop/sandbox.yaml
+capabilities:
+  network: bench-egress   # `interfaces:` with `network:` unset is a 400
+  interfaces: [dut]
+```
+
+Omitting `interfaces:` moves in everything the project was granted. Naming an
+interface the project holds **no grant for is an error**, for the same reason a
+missing device is: starting a bring-up task on a board it has no wire to is
+worse than refusing.
+
+`interfaces:` together with `network: none` is refused rather than resolved.
+The two statements contradict each other, and honouring either silently would
+discard the other — the repo would have renounced the network and been given
+one, or the host would have handed over an interface the workload cannot see.
+
+Inside the sandbox, `CLOOP_HOST_INTERFACES=dut` lists the handles that arrived.
+Host interface names are deliberately not in the environment: the bench's wiring
+is not something every process in the sandbox needs.
+
+#### The start-up window
+
+The interface is moved in **after** the container starts, because the namespace
+it moves into does not exist until then. cloop does it before `Start` returns —
+so the task is never dispatched to a sandbox whose wire has not landed — but a
+workload whose very first instruction probes for the link can still miss it by a
+few tens of milliseconds.
+
+The window is one-directional: it can only ever show a workload *less* than it
+was granted, never more. A workload that needs to synchronise waits for the link
+named by `$CLOOP_HOST_INTERFACES`:
+
+```sh
+while [ ! -e /sys/class/net/eth1 ]; do sleep 0.05; done
+```
+
+A workload that exits before the move completes is a hard failure, not a silent
+one: the container is destroyed and the error says what to do about it.
+
 ## Putting it together
 
 A bench host with instruments, serving one firmware project:

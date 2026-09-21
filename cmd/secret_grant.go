@@ -30,6 +30,7 @@ var (
 	grantToFlag         string
 	grantReposFlag      []string
 	grantDevicesFlag    []string
+	grantInterfacesFlag []string
 	grantPermsFlag      []string
 	grantNamespacesFlag []string
 	grantContextsFlag   []string
@@ -97,7 +98,7 @@ var secretMintCmd = &cobra.Command{
 constrained and delivered.
 
 Kinds: github_pat, github_app, kubeconfig, registry, env, egress_proxy,
-local_repo, host_device
+local_repo, host_device, host_interface
 
 The payload comes from --value, from --file, or from stdin. Prefer --file or
 stdin: a --value argument is visible in the process table and in shell history.
@@ -113,7 +114,16 @@ things on a host rather than credentials, so --value and --file are natural.
 A host_device inventory is one 'name=/dev/path[:/dev/target][:mode]' per line,
 where mode is r, rw (the default) or rwm. Grants then select from it by name:
 
-  cloop secret grant bench-hw --to project:/srv/fw --devices serial0 --ttl 8h`,
+  cloop secret grant bench-hw --to project:/srv/fw --devices serial0 --ttl 8h
+
+A host_interface inventory is one 'name=ifname[,target=][,address=][,gateway=]
+[,mtu=]' per line. Grants then select from it by name:
+
+  cloop secret mint  bench-net --kind host_interface --file bench-net.txt
+  cloop secret grant bench-net --to project:/srv/fw --interfaces dut --ttl 8h
+
+Honouring one moves the interface out of the executor's namespace for the life
+of the run, so the host cannot use it meanwhile.`,
 	Args:         cobra.ExactArgs(1),
 	SilenceUsage: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -183,6 +193,14 @@ func validateMintPayload(kind secretbroker.Kind, payload []byte) error {
 		// this path exist" is a question about the wrong machine. Preflight asks
 		// it on the right one.
 		_, err := secretbroker.ParseDeviceInventory(payload)
+		return err
+	case secretbroker.KindHostInterface:
+		// Same reasoning as host_device, with a failure mode that is worse
+		// than exposure: an inventory naming the host's own uplink would move
+		// it into a sandbox and take the executor off the network. The driver
+		// refuses that at attach time, where the routing table can be read;
+		// this is the check that reaches the operator first.
+		_, err := secretbroker.ParseInterfaceInventory(payload)
 		return err
 	case secretbroker.KindGitHubApp:
 		// The kind whose payload is least likely to be right on the first try:
@@ -301,6 +319,7 @@ all, and the cluster's own RBAC is the only limit on what the credential does.`,
 			Constraints: secretbroker.Constraints{
 				Repos:       grantReposFlag,
 				Devices:     grantDevicesFlag,
+				Interfaces:  grantInterfacesFlag,
 				Permissions: grantPermsFlag,
 				Namespaces:  grantNamespacesFlag,
 				Contexts:    grantContextsFlag,
@@ -596,7 +615,7 @@ func materialFileNames(m secretbroker.Material) string {
 func init() {
 	secretMintCmd.Flags().StringVar(&mintKindFlag, "kind", "env",
 		"secret kind: github_pat, github_app, kubeconfig, registry, env, egress_proxy, "+
-			"local_repo, host_device")
+			"local_repo, host_device, host_interface")
 	secretMintCmd.Flags().StringVar(&mintFileFlag, "file", "", "read the payload from a file (\"-\" for stdin)")
 	secretMintCmd.Flags().StringVar(&mintValueFlag, "value", "",
 		"payload as a literal (visible in the process table — prefer --file or stdin)")
@@ -605,6 +624,8 @@ func init() {
 		"subject: project:<path>, executor:<id>, label:<k=v,...>, or any")
 	secretGrantCmd.Flags().StringSliceVar(&grantReposFlag, "repos", nil,
 		"repository allowlist: owner/repo globs for github, directory-name globs for local_repo")
+	secretGrantCmd.Flags().StringSliceVar(&grantInterfacesFlag, "interfaces", nil,
+		"host_interface allowlist: interface-name globs from the inventory (e.g. dut,can*)")
 	secretGrantCmd.Flags().StringSliceVar(&grantDevicesFlag, "devices", nil,
 		"host_device allowlist: device-name globs from the inventory (e.g. serial0,gpu*)")
 	secretGrantCmd.Flags().BoolVar(&grantWritableFlag, "writable", false,

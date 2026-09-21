@@ -925,7 +925,7 @@ named: `no_candidates`, `executor_id`, `health`, `host_execution_policy`,
 `isolation`, `virtualization`, `kernel_isolation`, `labels`, `platform`, `arch`,
 `harness`, `container_runtime`, `network_egress`, `resource_limits`, `stream`,
 `signal`, `memory`, `capacity`, `image_override`, `sandbox_build`,
-`sandbox_mounts`, `host_mounts`, `devices`, `egress_scope`, `workspace`,
+`sandbox_mounts`, `host_mounts`, `devices`, `interfaces`, `egress_scope`, `workspace`,
 `write_back`, `secret_files`, `revocation`, `agent_build`. An operator asking
 "why did nothing schedule?" gets a per-node answer, not a shrug.
 
@@ -943,6 +943,16 @@ must not be a kernel bug on the host" can say that, instead of demanding a VM an
 watching every `runsc` node in the fleet get rejected for a property it had
 provided. Every virtualized executor is also kernel-isolated; the reverse does
 not hold, and the gap between them is exactly gVisor.
+
+`interfaces` is `devices` narrowed twice over, and the second narrowing is the
+one that surprises people. A `host_interface` grant needs an executor on the
+machine the interface is attached to, like a device grant — and it additionally
+needs a runtime whose kernel will *notice* a link that appears after the sandbox
+has started. A Kata guest kernel and a gVisor Sentry both build their view of
+the network when the sandbox starts, so on those runtimes the move succeeds, the
+host loses the interface, and the workload sees nothing. That is worse than any
+refusal, so the capability is false there and placement says why. See
+[Hardware and network devices](../guides/enterprise-hosts.md#4-hardware-and-network-devices).
 
 `devices` and `egress_scope` are the two whose refusal is about *where* rather
 than about a missing feature. A `host_device` grant names hardware on one

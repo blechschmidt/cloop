@@ -217,6 +217,26 @@ type Capabilities struct {
 	// /dev is missing exactly the hardware the task exists to talk to, so
 	// the honest outcome is a placement refusal naming the executor.
 	SupportsDevices bool `json:"supports_devices"`
+	// SupportsInterfaces reports whether Spec.Interfaces is honoured — i.e.
+	// whether this driver can move a host network interface into the
+	// sandbox's network namespace.
+	//
+	// Separate from SupportsDevices because a netdev is not a node under
+	// /dev: there is nothing to bind and no cgroup rule to write, and the
+	// runtimes have no flag for it. The operation is a namespace move, which
+	// needs the driver to be co-resident with the interface, privileged
+	// enough to perform it, and — decisively — to be handing the workload a
+	// kernel that will observe the new device. A Kata guest and a gVisor
+	// Sentry both build their view of the network when the sandbox starts
+	// and never see an interface that arrives afterwards, so on those
+	// runtimes this is false even though the move itself would succeed.
+	//
+	// That last case is why a driver must not treat the field as
+	// best-effort. The move appears to work, the host loses the interface,
+	// and the workload sees no new link at all: a bench with no wire in it,
+	// reported as a success. The honest outcome is a placement refusal
+	// naming the executor.
+	SupportsInterfaces bool `json:"supports_interfaces"`
 	// SupportsEgressScope reports whether Spec.EgressScope is honoured —
 	// whether this driver can confine one workload's IP-layer egress
 	// independently of the other workloads on the same executor.
@@ -365,6 +385,19 @@ type Spec struct {
 	// broker recorded who. A sandbox spec may select among what the project
 	// was granted, never add to it. See HostDevice.
 	Devices []HostDevice `json:"devices,omitempty"`
+	// Interfaces move host network interfaces into the sandbox's network
+	// namespace, giving the workload a seat on the segment they are attached
+	// to rather than a route through the host.
+	//
+	// Same authority rule as Devices, and nothing that parses a
+	// repo-committed file may set them: the only writer is a secret lease
+	// (secretbroker.KindHostInterface). A sandbox spec may select among what
+	// the project was granted, never add to it. See HostInterface.
+	//
+	// Unlike every other field here, honouring this one takes something away
+	// from the host: an interface belongs to exactly one network namespace,
+	// so for the life of the workload the executor cannot use it.
+	Interfaces []HostInterface `json:"interfaces,omitempty"`
 	// EgressScope confines this workload's IP-layer network reach
 	// independently of the other workloads on the same executor.
 	//
@@ -542,6 +575,30 @@ func (s Spec) Validate() error {
 	if err := ValidateDevices(s.Devices); err != nil {
 		return err
 	}
+	if err := ValidateInterfaces(s.Interfaces); err != nil {
+		return err
+	}
+	// An interface and DisableNetwork are a contradiction, and refusing is the
+	// only reading that does not silently discard one of them.
+	//
+	// The two say opposite things about the same workload: the repo-committed
+	// spec renounced the network, and an operator granted a seat on a segment.
+	// Letting DisableNetwork win would move the host's interface away and hand
+	// the workload a namespace it cannot see it in — the exact
+	// looks-like-success-delivers-nothing failure SupportsInterfaces exists to
+	// prevent. Letting the grant win would put a workload that declared it
+	// wanted no network onto one.
+	if s.DisableNetwork && len(s.Interfaces) > 0 {
+		// The remedy names both spellings because the common case is the one
+		// nobody typed: a .cloop/sandbox.yaml with no `network:` key at all
+		// disables the network, so an author reading "drop network: none"
+		// would go looking for a line that is not there.
+		return fmt.Errorf("%w: the sandbox spec disables networking (capabilities.network is "+
+			"unset or none) but %d host interface(s) (%s) were granted to this project; set "+
+			"capabilities.network to the egress grant this project holds, or narrow the "+
+			"capabilities.interfaces selector so no interface is claimed",
+			ErrInvalidSpec, len(s.Interfaces), strings.Join(InterfaceNames(s.Interfaces), ", "))
+	}
 	if !s.EgressScope.Valid() {
 		return fmt.Errorf("%w: egress_scope %q is not a known scope (want one of: %s)",
 			ErrInvalidSpec, s.EgressScope, joinEgressScopes())
@@ -638,6 +695,7 @@ func (s Spec) SandboxRequirements() Requirements {
 		RequireSandboxMounts: len(s.Mounts) > 0,
 		RequireHostMounts:    len(s.HostMounts) > 0,
 		RequireDevices:       len(s.Devices) > 0,
+		RequireInterfaces:    len(s.Interfaces) > 0,
 		// Only a scope that needs a filter installed becomes a requirement.
 		// EgressScopeNone is honourable by every driver that can take the
 		// network away, which is every driver that has one, so requiring

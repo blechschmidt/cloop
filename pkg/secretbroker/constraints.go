@@ -67,6 +67,11 @@ type Constraints struct {
 	// grant on "gpu0" also open "GPU0" — which, if both existed, would be two
 	// different pieces of hardware nobody named.
 	Devices []string `json:"devices,omitempty"`
+	// Interfaces is the interface-name allowlist for host_interface. Patterns
+	// match case-sensitively against the inventory's handles, exactly as
+	// Devices does and for the same reason; "*" alone allows every interface
+	// in the inventory.
+	Interfaces []string `json:"interfaces,omitempty"`
 	// Writable makes a local_repo grant read-write. It is the one constraint
 	// that widens rather than narrows, so it is a bool that defaults to the
 	// safe reading: a grant that says nothing delivers a read-only mount.
@@ -163,6 +168,9 @@ func (c Constraints) ValidateFor(kind Kind) error {
 	if err := validatePatterns("devices", c.Devices); err != nil {
 		return err
 	}
+	if err := validatePatterns("interfaces", c.Interfaces); err != nil {
+		return err
+	}
 	for _, k := range c.EnvKeys {
 		if err := validateEnvKey(k); err != nil {
 			return err
@@ -225,6 +233,12 @@ func (c Constraints) ValidateFor(kind Kind) error {
 				"%w: a host_device grant needs a device allowlist (--devices serial0, or --devices '*' for every device in the inventory)",
 				ErrInvalidConstraint)
 		}
+	case KindHostInterface:
+		if len(c.Interfaces) == 0 {
+			return fmt.Errorf(
+				"%w: a host_interface grant needs an interface allowlist (--interfaces dut, or --interfaces '*' for every interface in the inventory)",
+				ErrInvalidConstraint)
+		}
 	case KindEnv:
 		// EnvKeys may be empty: an env secret's own keys bound it.
 	}
@@ -236,6 +250,11 @@ func (c Constraints) ValidateFor(kind Kind) error {
 	if len(c.Devices) > 0 && kind != KindHostDevice {
 		return fmt.Errorf(
 			"%w: a device allowlist applies to host_device grants, not %s",
+			ErrInvalidConstraint, kind)
+	}
+	if len(c.Interfaces) > 0 && kind != KindHostInterface {
+		return fmt.Errorf(
+			"%w: an interface allowlist applies to host_interface grants, not %s",
 			ErrInvalidConstraint, kind)
 	}
 	if len(c.Verbs) > 0 && kind != KindKubeconfig {
@@ -655,6 +674,7 @@ func (c Constraints) Summary() string {
 	add("registries", c.Registries)
 	add("env", c.EnvKeys)
 	add("devices", c.Devices)
+	add("interfaces", c.Interfaces)
 	if c.Writable {
 		// Only when true. A "writable=false" on every github grant's summary
 		// would be noise, and the read-only default is what the absence means.

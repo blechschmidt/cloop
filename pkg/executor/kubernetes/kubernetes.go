@@ -765,6 +765,14 @@ func (e *Executor) Capabilities() executor.Capabilities {
 		// host_device grant and is why HostDevice.KubernetesResource exists but
 		// is not yet consumed here.
 		SupportsDevices: false,
+		// False, and unlike devices there is no device-plugin equivalent that
+		// could make it true. A Pod's network is built by CNI before the
+		// containers start and belongs to the cluster's network model; moving
+		// a node's interface into one would take that interface away from a
+		// node the scheduler picked, breaking whatever else it carries. A
+		// bench with a wire in it is a machine, not a cluster workload: bind
+		// the project to a container executor on it.
+		SupportsInterfaces: false,
 		// True only when something has established that this cluster's CNI
 		// actually enforces a NetworkPolicy.
 		//

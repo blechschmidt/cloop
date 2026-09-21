@@ -117,6 +117,11 @@ func (s *Spec) Hash() string {
 	for _, name := range devices {
 		fmt.Fprintf(&b, "device=%s\n", name)
 	}
+	ifaces := append([]string(nil), s.Capabilities.Interfaces...)
+	sort.Strings(ifaces)
+	for _, name := range ifaces {
+		fmt.Fprintf(&b, "interface=%s\n", name)
+	}
 	mounts := append([]Mount(nil), s.Mounts...)
 	sort.Slice(mounts, func(i, j int) bool { return mounts[i].Target < mounts[j].Target })
 	for _, m := range mounts {
@@ -212,6 +217,12 @@ func (r *Resolved) Requirements() executor.Requirements {
 		// executors. That case is carried by Spec.SandboxRequirements instead,
 		// which counts the devices actually attached.
 		req.RequireDevices = true
+	}
+	if len(s.Capabilities.Interfaces) > 0 {
+		// The same argument as Devices, for the narrower capability. An empty
+		// selector is again carried by Spec.SandboxRequirements instead, which
+		// counts the interfaces actually attached.
+		req.RequireInterfaces = true
 	}
 	if s.Capabilities.Git {
 		req.Harnesses = append(req.Harnesses, "git")
@@ -358,6 +369,18 @@ func (r *Resolved) ApplyTo(spec *executor.Spec, projectPath string, grants Grant
 		spec.Devices = kept
 	}
 
+	// --- interfaces ------------------------------------------------------
+	// Selection, never addition, exactly as for devices: spec.Interfaces
+	// already holds whatever the project's host_interface grants delivered
+	// (see pkg/ui.applyInterfaceGrants), so this can only shorten it.
+	if sel := s.Capabilities.Interfaces; len(sel) > 0 {
+		kept, missing := selectInterfaces(spec.Interfaces, sel)
+		if len(missing) > 0 {
+			return &InterfaceNotGrantedError{ProjectPath: projectPath, Names: missing}
+		}
+		spec.Interfaces = kept
+	}
+
 	// --- network ---------------------------------------------------------
 	// The asymmetry is the security property. No grant named → the network is
 	// removed. A grant named → it must already exist, and if it does the
@@ -461,6 +484,53 @@ func selectDevices(granted []executor.HostDevice, want []string) ([]executor.Hos
 		kept = append(kept, d)
 	}
 	return kept, missing
+}
+
+// selectInterfaces narrows a granted interface list to the names a spec asked
+// for. It is selectDevices for the other grant-backed list and, like it, can
+// only shorten what it is given.
+func selectInterfaces(granted []executor.HostInterface, want []string) ([]executor.HostInterface, []string) {
+	byName := make(map[string]executor.HostInterface, len(granted))
+	for _, n := range granted {
+		byName[strings.TrimSpace(n.Name)] = n
+	}
+	kept := make([]executor.HostInterface, 0, len(want))
+	var missing []string
+	for _, name := range want {
+		name = strings.TrimSpace(name)
+		n, ok := byName[name]
+		if !ok {
+			missing = append(missing, name)
+			continue
+		}
+		kept = append(kept, n)
+	}
+	return kept, missing
+}
+
+// InterfaceNotGrantedError is returned when a sandbox spec names an interface
+// the project holds no host_interface grant for.
+//
+// Typed for the reason DeviceNotGrantedError is, and separate from it because
+// the remediation names a different flag on a different inventory: an operator
+// reading "grant the device" when the missing thing is a network segment would
+// go looking in the wrong secret.
+type InterfaceNotGrantedError struct {
+	ProjectPath string
+	Names       []string
+}
+
+func (e *InterfaceNotGrantedError) Error() string {
+	return fmt.Sprintf("%s: capabilities.interfaces names %s, which this project holds no "+
+		"host_interface grant for", FileName, strings.Join(e.Names, ", "))
+}
+
+// Remediation is the operator-facing next step, kept beside the error so the UI
+// and the CLI print the same sentence.
+func (e *InterfaceNotGrantedError) Remediation() string {
+	return fmt.Sprintf("grant the interface to this project: cloop secret grant "+
+		"<inventory-secret> --subject project:%s --interfaces %s",
+		e.ProjectPath, strings.Join(e.Names, ","))
 }
 
 // DeviceNotGrantedError is returned when a sandbox spec names a device the

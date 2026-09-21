@@ -404,6 +404,11 @@ func startWorkloadAs(envFor func(executor.Executor) []string, identity, workDir 
 		lease.Close()
 		return nil, executor.Handle{}, err
 	}
+	spec, err = applyInterfaceGrants(spec, ex, lease)
+	if err != nil {
+		lease.Close()
+		return nil, executor.Handle{}, err
+	}
 
 	// The project's .cloop/sandbox.yaml, if it has one. It is applied after
 	// the lease so its env allowlist can narrow the leased secrets, and it is
@@ -586,6 +591,10 @@ func runWorkloadEnvFor(ctx context.Context, workDir string, argv []string, envFo
 		return nil, err
 	}
 	spec, err = applyDeviceGrants(spec, ex, lease)
+	if err != nil {
+		return nil, err
+	}
+	spec, err = applyInterfaceGrants(spec, ex, lease)
 	if err != nil {
 		return nil, err
 	}

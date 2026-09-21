@@ -571,6 +571,17 @@ func (s *Server) handleSecretCreate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// A host_interface inventory is checked here for the same reasons and one
+	// that is sharper than any of them: naming the wrong interface does not
+	// widen a boundary, it takes the interface away from the host. On a remote
+	// executor that is the difference between a lab bench and a machine nobody
+	// can reach, and the person typing it is the only one who can catch it.
+	if kind == secretbroker.KindHostInterface {
+		if _, err := secretbroker.ParseInterfaceInventory([]byte(req.Payload)); err != nil {
+			apierror.WriteError(w, apierror.New(apierror.CodeInvalidInput, err.Error()))
+			return
+		}
+	}
 	// A github_app payload is structured — an app ID, an installation ID and an
 	// RS256 signing key — and the hub parses it to mint installation tokens, so
 	// a malformed one is a secret that can never produce a credential. Catching

@@ -108,6 +108,15 @@ const (
 	// .cloop/sandbox.yaml, which is whatever a pull request says it is. See
 	// hostdevice.go.
 	KindHostDevice Kind = "host_device"
+	// KindHostInterface is an inventory of network interfaces on the
+	// executor's host, moved into one project's sandbox. Constrained by an
+	// interface-name allowlist, and delivered as a namespace move rather
+	// than as bytes.
+	//
+	// It is wider still than KindHostDevice, and differs from every other
+	// kind in one way: honouring it takes the interface *away* from the
+	// host for the life of the workload. See hostinterface.go.
+	KindHostInterface Kind = "host_interface"
 )
 
 // Kinds returns every valid Kind, sorted, for CLI help and validation
@@ -115,7 +124,8 @@ const (
 func Kinds() []Kind {
 	return []Kind{
 		KindEgressProxy, KindEnv, KindGitHubApp,
-		KindGitHubPAT, KindHostDevice, KindKubeconfig, KindLocalRepo, KindRegistry,
+		KindGitHubPAT, KindHostDevice, KindHostInterface, KindKubeconfig,
+		KindLocalRepo, KindRegistry,
 	}
 }
 
@@ -123,7 +133,8 @@ func Kinds() []Kind {
 func (k Kind) Valid() bool {
 	switch k {
 	case KindGitHubPAT, KindGitHubApp, KindKubeconfig,
-		KindRegistry, KindEnv, KindEgressProxy, KindLocalRepo, KindHostDevice:
+		KindRegistry, KindEnv, KindEgressProxy, KindLocalRepo, KindHostDevice,
+		KindHostInterface:
 		return true
 	}
 	return false

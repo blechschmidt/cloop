@@ -63,6 +63,7 @@ var (
 	hubGrantToFlag         string
 	hubGrantReposFlag      []string
 	hubGrantDevicesFlag    []string
+	hubGrantInterfacesFlag []string
 	hubGrantPermsFlag      []string
 	hubGrantNamespacesFlag []string
 	hubGrantContextsFlag   []string
@@ -194,6 +195,7 @@ approver has to decide against.`,
 			Constraints: secretbroker.Constraints{
 				Repos:       hubGrantReposFlag,
 				Devices:     hubGrantDevicesFlag,
+				Interfaces:  hubGrantInterfacesFlag,
 				Permissions: hubGrantPermsFlag,
 				Namespaces:  hubGrantNamespacesFlag,
 				Contexts:    hubGrantContextsFlag,
@@ -560,6 +562,7 @@ func init() {
 	rf.StringSliceVar(&hubGrantRegistriesFlag, "registries", nil, "registry: allowed registries")
 	rf.StringSliceVar(&hubGrantEnvKeysFlag, "env-keys", nil, "env: allowed variable names")
 	rf.StringSliceVar(&hubGrantDevicesFlag, "devices", nil, "host_device: allowed device names")
+	rf.StringSliceVar(&hubGrantInterfacesFlag, "interfaces", nil, "host_interface: allowed interface names")
 	rf.BoolVar(&hubGrantWritableFlag, "writable", false, "local_repo: mount read-write")
 	_ = hubGrantRequestCmd.MarkFlagRequired("to")
 	_ = hubGrantRequestCmd.MarkFlagRequired("why")

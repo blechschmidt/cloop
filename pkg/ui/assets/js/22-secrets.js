@@ -555,7 +555,10 @@ const SEC_PAYLOAD_HINTS = {
   kubeconfig:   'A full kubeconfig YAML document. Delivery rewrites it to contain only the granted contexts, with the granted namespace pinned on each.',
   registry:     'A docker config JSON, or "user:password". Delivery filters it to the granted registries.',
   env:          'A JSON object of key/value pairs, or a bare value delivered as one variable named after the secret.',
-  egress_proxy: 'The proxy endpoint, e.g. http://user:pass@proxy.internal:3128.'
+  egress_proxy: 'The proxy endpoint, e.g. http://user:pass@proxy.internal:3128.',
+  local_repo:   'One name=/absolute/path per line, naming git repositories on the executor\u2019s host. Grants then select from it by name.',
+  host_device:  'The host\u2019s device inventory: one name=/dev/path[:/dev/target][:mode] per line, where mode is r, rw (the default) or rwm. Grants then select from it by name.',
+  host_interface: 'The host\u2019s interface inventory: one name=ifname[,target=eth1][,address=172.31.99.200/24][,gateway=\u2026][,mtu=\u2026] per line. Moving one into a sandbox takes it away from the executor for the life of the run, so never name the interface this host is reached on.'
 };
 
 window.openSecretModal = function() {
@@ -643,6 +646,7 @@ const SEC_KIND_FIELDSET = {
   egress_proxy: 'egressproxy',
   local_repo:   'localrepo',
   host_device:  'hostdevice',
+  host_interface: 'hostinterface',
   egress:       'egress'
 };
 
@@ -662,7 +666,8 @@ const SEC_KIND_CONSTRAINTS = {
   env:          [['env_keys','EnvKeys']],
   egress_proxy: [['hosts','ProxyHosts']],
   local_repo:   [['repos','LocalRepos']],
-  host_device:  [['devices','Devices']]
+  host_device:  [['devices','Devices']],
+  host_interface: [['interfaces','Interfaces']]
 };
 
 // SEC_KIND_WRITABLE are the kinds whose grant can be widened to read-write.
@@ -696,6 +701,9 @@ const SEC_GRANT_KINDS = {
   registry:     {secret:true,  source:'secret'},
   env:          {secret:true,  source:'secret'},
   egress_proxy: {secret:true,  source:'secret'},
+  local_repo:   {secret:true,  source:'secret'},
+  host_device:  {secret:true,  source:'secret'},
+  host_interface: {secret:true, source:'secret'},
   egress:       {secret:false, source:'egress'}
 };
 
@@ -704,7 +712,8 @@ window.openGrantModal = function() {
   if (err) err.style.display = 'none';
   ['grantRepos','grantPermissions','grantContexts','grantNamespaces','grantVerbs','grantHosts',
    'grantCIDRs','grantPorts','grantMethods','grantMaxUp','grantMaxDown','grantSessionTTL',
-   'grantRegistries','grantEnvKeys','grantProxyHosts','grantScope','grantSubject'].forEach(id => {
+   'grantRegistries','grantEnvKeys','grantProxyHosts','grantScope','grantSubject',
+   'grantLocalRepos','grantDevices','grantInterfaces'].forEach(id => {
     const el = document.getElementById(id);
     if (el) el.value = '';
   });
@@ -722,6 +731,13 @@ window.onGrantKindChange = function() {
   const spec = SEC_GRANT_KINDS[kind] || SEC_GRANT_KINDS.github_pat;
 
   _secShowKindSet('grant-overlay', 'grant', kind);
+  // writable has its own fieldset for the reason the request form's does: it
+  // applies to two kinds rather than one, so it cannot live inside either
+  // kind's own block.
+  const wrSet = document.getElementById('grantSet-writable');
+  if (wrSet) wrSet.classList.toggle('on', !!SEC_KIND_WRITABLE[kind]);
+  const wr = document.getElementById('grantWritable');
+  if (wr && !SEC_KIND_WRITABLE[kind]) wr.checked = false;
 
   // The secret picker offers only secrets of the chosen kind: a kubeconfig
   // grant against a PAT is rejected by the broker anyway, and offering it
@@ -788,6 +804,12 @@ window.submitGrant = function() {
     // `create` into a request that files without it, and the approval would
     // read as granting a write it never carried.
     if (kind === 'kubeconfig') body.verbs = _secList('grantVerbs');
+    // Only for the kinds that take it: the broker rejects `writable` on any
+    // other kind, so sending it unconditionally would make every grant
+    // unfileable rather than merely over-specified.
+    if (SEC_KIND_WRITABLE[kind]) {
+      body.writable = !!((document.getElementById('grantWritable') || {}).checked);
+    }
   } else {
     body.hosts = _secList('grantHosts');
     body.cidrs = _secList('grantCIDRs');
@@ -1126,7 +1148,7 @@ window.openRequestModal = function() {
   });
   ['requestSubject','requestScope','requestJustification','requestRepos','requestPermissions',
    'requestContexts','requestNamespaces','requestRegistries','requestEnvKeys','requestProxyHosts',
-   'requestLocalRepos','requestDevices'].forEach(id => {
+   'requestLocalRepos','requestDevices','requestInterfaces'].forEach(id => {
     const el = document.getElementById(id);
     if (el) el.value = '';
   });

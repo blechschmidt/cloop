@@ -356,6 +356,12 @@ type record struct {
 	// they can be wiped when it is terminal. Nil for a workload with no
 	// file-backed grants, which is the common case.
 	secretStage *secretStage
+	// interfaces are the host network interfaces moved into this container's
+	// network namespace, kept so a graceful stop can return them to the host
+	// before the kernel's own teardown rules apply — which destroy a veth
+	// rather than returning it. Empty for every workload without an
+	// interface grant, which is nearly all of them.
+	interfaces []executor.HostInterface
 
 	mu         sync.Mutex
 	state      executor.State
@@ -530,6 +536,13 @@ func (e *Executor) Capabilities() executor.Capabilities {
 		// answered by Preflight rather than here — this field says the driver
 		// honours the field, not that /dev/ttyUSB0 exists.
 		SupportsDevices: true,
+		// Interfaces are a narrower claim than devices and cannot be made
+		// unconditionally: the move needs ip(8), CAP_NET_ADMIN on the host,
+		// and a runtime whose kernel will observe a link that arrives after
+		// the sandbox started. A Kata or gVisor executor on the very machine
+		// with the wire reports false here, because there the move succeeds
+		// and the workload still sees nothing — see netiface.go.
+		SupportsInterfaces: canMoveInterfaces(e.opts.OCIRuntime),
 		// A per-project egress scope needs a bridge of its own and an nftables
 		// table of its own, both of which this driver provisions (see
 		// firewall.go). Advertised unconditionally rather than gated on
@@ -685,6 +698,47 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, extraMounts []
 		return executor.Handle{}, explainRunFailure(e.rt, req.Image, res)
 	}
 
+	// Interfaces last, and before the handle exists.
+	//
+	// Last because it is the only step that cannot be done earlier: the
+	// namespace it moves into is created by the run above. Before the handle
+	// because that is what bounds the window — the caller is not told the
+	// workload is running until its segments are attached, so nothing
+	// downstream can dispatch a task to a bench with no wire in it.
+	//
+	// Fail-closed, and the container is destroyed on the way out. The
+	// alternative is a sandbox that runs without the hardware it exists to
+	// talk to while the host has already given up the interface, which is
+	// worse than a failed start in both directions at once.
+	if len(spec.Interfaces) > 0 {
+		if !e.Capabilities().SupportsInterfaces {
+			e.removeContainer(context.WithoutCancel(ctx), req.Name)
+			return executor.Handle{}, fmt.Errorf(
+				"%w: executor %s was asked to move %d host interface(s) into the sandbox, "+
+					"but cannot: %s", executor.ErrInvalidSpec, e.id, len(spec.Interfaces),
+				interfaceSupportReason(e.opts.OCIRuntime))
+		}
+		pid, perr := e.awaitContainerPID(ctx, req.Name)
+		if perr != nil || pid <= 0 {
+			e.removeContainer(context.WithoutCancel(ctx), req.Name)
+			if perr == nil {
+				// The workload finished before the namespace could be reached
+				// into. That is the one shape of the post-start window that
+				// cannot be closed from this side, so the error says what the
+				// workload has to do about it rather than reporting a fault.
+				perr = fmt.Errorf("the sandbox exited before its interfaces could be " +
+					"attached; a workload granted host interfaces must stay alive long " +
+					"enough to receive them and wait for the links named by " +
+					"$CLOOP_HOST_INTERFACES to appear")
+			}
+			return executor.Handle{}, fmt.Errorf("container: %s: %w", req.Name, perr)
+		}
+		if aerr := attachInterfaces(ctx, pid, spec.Interfaces); aerr != nil {
+			e.removeContainer(context.WithoutCancel(ctx), req.Name)
+			return executor.Handle{}, aerr
+		}
+	}
+
 	// Deliberately not retaining spec: Spec.Env holds the caller's secret
 	// values, and a finished handle stays queryable for a long time. Nothing
 	// after Start needs them, so they are dropped as soon as the container
@@ -698,6 +752,10 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, extraMounts []
 		// by finish, which every terminal path funnels through, rather than by
 		// the deferred cleanup above.
 		secretStage: stage,
+		// Retained where Spec.Env is not: an interface list is a set of
+		// handles and host device names with no credential in it, and
+		// without it a graceful stop could not return the interfaces.
+		interfaces: append([]executor.HostInterface(nil), spec.Interfaces...),
 	}
 	started = true
 	// The spec is dropped, but the *values* it carried have to outlive it here.
@@ -1030,6 +1088,17 @@ func (e *Executor) buildRequest(spec executor.Spec, workDir string, extraMounts 
 		req.Devices = append([]executor.HostDevice(nil), spec.Devices...)
 		req.Labels[LabelDevices] = strings.Join(executor.DeviceNames(spec.Devices), ",")
 	}
+	if len(spec.Interfaces) > 0 {
+		if err := executor.ValidateInterfaces(spec.Interfaces); err != nil {
+			return runRequest{}, err
+		}
+		// Recorded as a label rather than rendered into argv, because unlike
+		// devices there is no flag to render: the move happens after the run.
+		// The label is what lets `docker inspect` answer which segments a
+		// running sandbox holds, which is the question an operator asks when
+		// an interface is missing from the host.
+		req.Labels[LabelInterfaces] = strings.Join(executor.InterfaceNames(spec.Interfaces), ",")
+	}
 
 	// A sandbox spec may take the network away and may never add one, so this
 	// is an assignment in one direction only. See executor.Spec.DisableNetwork.
@@ -1352,11 +1421,30 @@ func (e *Executor) Signal(ctx context.Context, handleID string, sig executor.Sig
 	rec.mu.Lock()
 	running := rec.state == executor.StateRunning || rec.state == executor.StatePending
 	name := rec.name
+	ifaces := rec.interfaces
 	rec.mu.Unlock()
 	if !running {
 		// The caller wanted it stopped and it is stopped.
 		return nil
 	}
+
+	// Return the host's interfaces before the signal, because this is the last
+	// moment at which they can be returned at all.
+	//
+	// The namespace dies with the workload, and the kernel's teardown rules
+	// then decide: a physical NIC is handed back to the initial namespace and a
+	// veth is *deleted*, taking the peer on the host with it. So a bench built
+	// out of veth pairs — the usual way to wire a sandbox onto a bridge —
+	// survives a stop only if the move happens while the container is still up.
+	//
+	// Best-effort on purpose. Every failure here is a diagnostic about
+	// interfaces that will be reclaimed by the kernel one way or another
+	// moments later, and none of them is a reason to refuse to stop a
+	// workload the caller asked to stop.
+	if len(ifaces) > 0 {
+		detachInterfaces(ctx, e.recordPID(ctx, name), ifaces)
+	}
+
 	if sig == executor.SignalKill {
 		// Record intent before delivering, so a Status read racing the
 		// reaper reports "killed" rather than a bare non-zero exit.
@@ -1378,6 +1466,19 @@ func (e *Executor) Signal(ctx context.Context, handleID string, sig executor.Sig
 		return fmt.Errorf("container: signal %s to %s failed: %s", sig, name, firstLine(res.Stderr))
 	}
 	return nil
+}
+
+// recordPID is containerPID for the paths that have no use for the error.
+//
+// A stop racing a container that has just exited is the expected case rather
+// than a fault, and it reports 0 — which detachInterfaces reads as "nothing to
+// do" without needing to distinguish it from a genuine failure.
+func (e *Executor) recordPID(ctx context.Context, name string) int {
+	pid, err := e.containerPID(ctx, name)
+	if err != nil {
+		return 0
+	}
+	return pid
 }
 
 // osSignalName maps the driver-independent signal onto the name both

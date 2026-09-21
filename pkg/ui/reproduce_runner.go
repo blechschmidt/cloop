@@ -186,6 +186,9 @@ func (r *reproduceRunner) run(ctx context.Context, rs runSpec) (*taskreplay.RunO
 	if spec, err = applyDeviceGrants(spec, ex, lease); err != nil {
 		return nil, err
 	}
+	if spec, err = applyInterfaceGrants(spec, ex, lease); err != nil {
+		return nil, err
+	}
 	if spec, _, err = applySandbox(spec, ex, rs.ProjectDir); err != nil {
 		return nil, err
 	}

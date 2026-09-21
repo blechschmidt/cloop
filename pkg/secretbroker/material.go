@@ -86,6 +86,8 @@ func (b *Broker) materialFor(ctx context.Context, s Secret, g Grant, req Request
 		return b.localRepoMaterial(mat, plaintext)
 	case KindHostDevice:
 		return b.hostDeviceMaterial(mat, plaintext)
+	case KindHostInterface:
+		return b.hostInterfaceMaterial(mat, plaintext)
 	default:
 		return Material{}, wrapf(ErrInvalidKind, "no delivery rule for kind %q", s.Kind)
 	}

@@ -702,6 +702,20 @@ func (c AgentCapabilities) Executor() executor.Capabilities {
 		// hardware into a confined sandbox by running the container executor on
 		// the machine that has the hardware; see docs/guides/enterprise-hosts.md.
 		SupportsDevices: false,
+		// False for the second of those reasons, which applies with no
+		// qualification: localprocess gives the workload the agent's own
+		// network namespace, so there is no namespace to move an interface
+		// *into*. The interfaces the workload can reach are the ones the
+		// device already has, and moving one within a single namespace is
+		// not an operation.
+		//
+		// This is the capability an edge device with a wire attached most
+		// wants, so the remedy is worth naming rather than leaving to be
+		// discovered: run the *container* executor on that machine — enrolled
+		// directly, or alongside the agent — and bind the project to it. The
+		// hardware is then behind a sandbox boundary instead of beside the
+		// agent, which is the whole point of passing it in.
+		SupportsInterfaces: false,
 		// False for the second of those reasons alone: there is no per-workload
 		// network namespace on the agent to filter. A project needing bounded
 		// egress on a remote site needs a sandbox there, not a scope here.

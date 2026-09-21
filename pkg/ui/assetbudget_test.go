@@ -120,7 +120,32 @@ import (
 // The new slack is 230 B, held at the same order as the 239 B above — this
 // raise does not reopen the room the previous one closed, and the deferral
 // refactor named there is still the next frontend task.
-const eagerWireBudgetBytes = 271_850
+//
+// Raised to 272,750 B by Task 20329, which added host_interface passthrough:
+// 675 B wire, all of it markup in the Secrets panel's two dialogs.
+//
+// Most of that is not the new kind. Three of the four fieldsets it adds are
+// `local_repo`, `host_device` and the writable checkbox on the *grant* dialog,
+// which were simply missing: SEC_GRANT_KINDS listed neither kind, so an
+// operator could file an access *request* for a device and could not issue the
+// grant that answers it. Minting a device inventory from the dashboard and then
+// having to reach for the CLI to hand it out was the gap; this closes it.
+//
+// Deferral was considered and rejected on consistency grounds rather than on
+// cost. The Secrets panel's markup is already resident in index.html in its
+// entirety, so lifting out only the four newest fieldsets would leave the
+// dialog split across two fetch paths for no measurable gain — 675 B is 0.25%
+// of the set, and the panel's own two dialogs are ~40x that. The deferral that
+// pays here is the whole panel, which is the refactor the 20326 note already
+// names as next; this raise does not make that job larger.
+//
+// Trimming came first and is in the diff: the hint copy on all four new
+// fieldsets was cut to the two facts an operator must not miss. It recovered
+// 65 B, which is the honest measure of how little prose weighs after gzip and
+// why the remaining bytes are structural.
+//
+// The new slack is 225 B, held at the same order as the two above.
+const eagerWireBudgetBytes = 272_750
 
 // eagerAsset is one member of the first-paint set.
 type eagerAsset struct {

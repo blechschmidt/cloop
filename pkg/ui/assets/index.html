@@ -2750,6 +2750,9 @@
         <option value="registry">Container registry &mdash; registry allowlist</option>
         <option value="env">Environment variables &mdash; key allowlist</option>
         <option value="egress_proxy">External egress proxy secret &mdash; host allowlist</option>
+        <option value="local_repo">Local repository &mdash; repository allowlist</option>
+        <option value="host_device">Host device &mdash; device allowlist</option>
+        <option value="host_interface">Host network interface &mdash; interface allowlist</option>
       </select>
     </div>
 
@@ -2918,6 +2921,51 @@
       </div>
     </div>
 
+    <!-- local_repo -->
+    <div class="sec-kindset" id="grantSet-localrepo">
+      <div class="form-group">
+        <label class="form-label" for="grantLocalRepos">Repository allowlist</label>
+        <input class="form-input" id="grantLocalRepos" placeholder="firmware, vendor-sdk">
+        <div class="sec-hint" style="margin-top:6px">
+          Names from the secret&rsquo;s repository inventory, not <code>owner/repo</code> globs.
+        </div>
+      </div>
+    </div>
+
+    <!-- host_device -->
+    <div class="sec-kindset" id="grantSet-hostdevice">
+      <div class="form-group">
+        <label class="form-label" for="grantDevices">Device allowlist</label>
+        <input class="form-input" id="grantDevices" placeholder="serial0, gpu*">
+        <div class="sec-hint" style="margin-top:6px">
+          Handles from the secret&rsquo;s device inventory, matched case-sensitively.
+          <code>*</code> opens every device in it; sandbox.yaml may narrow, never widen.
+        </div>
+      </div>
+    </div>
+
+    <!-- host_interface -->
+    <div class="sec-kindset" id="grantSet-hostinterface">
+      <div class="form-group">
+        <label class="form-label" for="grantInterfaces">Interface allowlist</label>
+        <input class="form-input" id="grantInterfaces" placeholder="dut, can*">
+        <div class="sec-hint" style="margin-top:6px">
+          A granted interface is <strong>moved</strong> into the sandbox, so the executor
+          loses it for the run. Needs a container executor as root under
+          <code>runc</code>/<code>crun</code>: a Kata or gVisor kernel never sees a link
+          that arrives after the sandbox started.
+        </div>
+      </div>
+    </div>
+
+    <!-- writable widens rather than narrows and applies to more than one kind. -->
+    <div class="sec-kindset" id="grantSet-writable">
+      <div class="form-group">
+        <label class="adv-label"><input type="checkbox" id="grantWritable"> Grant read-write access</label>
+        <div class="sec-hint" style="margin-top:6px">Off means read-only.</div>
+      </div>
+    </div>
+
     <div class="form-group">
       <label class="form-label" for="grantScope">Label (optional)</label>
       <input class="form-input" id="grantScope" placeholder="ci">
@@ -3060,6 +3108,18 @@
         <input class="form-input" id="requestDevices" placeholder="serial0">
         <div class="sec-hint" style="margin-top:6px">
           Handles from the executor's device inventory. Matched case-sensitively.
+        </div>
+      </div>
+    </div>
+
+    <!-- host_interface -->
+    <div class="sec-kindset" id="requestSet-hostinterface">
+      <div class="form-group">
+        <label class="form-label" for="requestInterfaces">Interface allowlist</label>
+        <input class="form-input" id="requestInterfaces" placeholder="dut">
+        <div class="sec-hint" style="margin-top:6px">
+          Handles from the executor&rsquo;s interface inventory. A granted interface is
+          moved into the sandbox, so the executor gives it up for the run.
         </div>
       </div>
     </div>

@@ -63,6 +63,11 @@ type Material struct {
 	// json:"-", because a device name, path and access mode are exactly what
 	// an operator inspecting a lease needs to see and carry no credential.
 	Devices []GrantedDevice `json:"devices,omitempty"`
+	// Interfaces are host network interfaces the grant moves into the
+	// sandbox. Not written anywhere either, and not json:"-" for the reason
+	// Devices is not: a handle, a host name and an address are what an
+	// operator inspecting a lease needs to see and carry no credential.
+	Interfaces []GrantedInterface `json:"interfaces,omitempty"`
 	// Summary is the audit-safe description of what was delivered
 	// (surviving kubeconfig contexts, allowed registries, env key names).
 	Summary string `json:"summary,omitempty"`
@@ -201,6 +206,7 @@ type Mount struct {
 	files    []string
 	mounts   []RepoMount
 	devices  []GrantedDevice
+	ifaces   []GrantedInterface
 	bindings []LeaseBinding
 	closed   bool
 }
@@ -233,6 +239,21 @@ func (m *Mount) Devices() []GrantedDevice {
 		return nil
 	}
 	return append([]GrantedDevice(nil), m.devices...)
+}
+
+// Interfaces returns the host network interfaces this lease moves into the
+// sandbox. Like Devices there is nothing on disk to clean up: the netdev
+// already exists and the grant is permission to claim it.
+func (m *Mount) Interfaces() []GrantedInterface {
+	if m == nil {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed {
+		return nil
+	}
+	return append([]GrantedInterface(nil), m.ifaces...)
 }
 
 // LeaseBinding attributes part of a materialised lease to the grant that
@@ -278,6 +299,14 @@ type LeaseBinding struct {
 	// not when the grant is revoked, and narrowing that window means stopping
 	// the workload.
 	Devices []GrantedDevice
+	// Interfaces are the host network interfaces this grant moved into the
+	// sandbox, recorded for the audit trail rather than for revocation.
+	//
+	// The same limitation as Devices applies: an interface inside a running
+	// sandbox's network namespace cannot be reached from outside it, so a
+	// host_interface grant lapses when the workload exits rather than when
+	// the grant is revoked.
+	Interfaces []GrantedInterface
 }
 
 // RepoMount is one local git repository a grant opens to a workload.
@@ -346,7 +375,7 @@ func leaseBaseDir(override string) string {
 // existed: an isolated executor computes its environment from a directory it
 // will create itself, and a second implementation of "what does GIT_CONFIG_GLOBAL
 // point at" is how the sandbox ends up with a variable naming nothing.
-func (l *Lease) render(dir string) (env []string, files []placedFile, bindings []LeaseBinding, mounts []RepoMount, devices []GrantedDevice, err error) {
+func (l *Lease) render(dir string) (env []string, files []placedFile, bindings []LeaseBinding, mounts []RepoMount, devices []GrantedDevice, ifaces []GrantedInterface, err error) {
 	envMap := make(map[string]string)
 	sensitive := make(map[string]struct{})
 
@@ -368,7 +397,7 @@ func (l *Lease) render(dir string) (env []string, files []placedFile, bindings [
 		for _, f := range mat.Files {
 			name, nerr := leaseFileName(f)
 			if nerr != nil {
-				return nil, nil, nil, nil, nil, nerr
+				return nil, nil, nil, nil, nil, nil, nerr
 			}
 			path := filepath.Join(dir, name)
 			files = append(files, placedFile{
@@ -397,7 +426,7 @@ func (l *Lease) render(dir string) (env []string, files []placedFile, bindings [
 		// that hands over a host path verbatim.
 		for _, rm := range mat.Mounts {
 			if verr := rm.validate(); verr != nil {
-				return nil, nil, nil, nil, nil, verr
+				return nil, nil, nil, nil, nil, nil, verr
 			}
 			binding.Mounts = append(binding.Mounts, rm)
 			mounts = append(mounts, rm)
@@ -408,10 +437,21 @@ func (l *Lease) render(dir string) (env []string, files []placedFile, bindings [
 		// driver receives rather than on what the broker minted.
 		for _, gd := range mat.Devices {
 			if verr := gd.validate(); verr != nil {
-				return nil, nil, nil, nil, nil, verr
+				return nil, nil, nil, nil, nil, nil, verr
 			}
 			binding.Devices = append(binding.Devices, gd)
 			devices = append(devices, gd)
+		}
+		// Interfaces, re-validated for the reason devices are and one more:
+		// this material names a netdev that a root-privileged process is about
+		// to move out of the host's own namespace, which is the one delivery
+		// in this package that can take the executor off the network.
+		for _, gi := range mat.Interfaces {
+			if verr := gi.validate(); verr != nil {
+				return nil, nil, nil, nil, nil, nil, verr
+			}
+			binding.Interfaces = append(binding.Interfaces, gi)
+			ifaces = append(ifaces, gi)
 		}
 		// Sorted so the binding — which ends up in an audit row and in a
 		// revoke frame — is stable across runs rather than reflecting Go's
@@ -451,7 +491,7 @@ func (l *Lease) render(dir string) (env []string, files []placedFile, bindings [
 	for _, k := range keys {
 		env = append(env, k+"="+envMap[k])
 	}
-	return env, files, bindings, mounts, devices, nil
+	return env, files, bindings, mounts, devices, ifaces, nil
 }
 
 // placedFile is one credential file after render has decided where it goes.
@@ -580,13 +620,13 @@ func (l *Lease) MaterializeAt(dir string) (*Mount, error) {
 	}
 	dir = clean
 
-	env, files, bindings, mounts, devices, err := l.render(dir)
+	env, files, bindings, mounts, devices, ifaces, err := l.render(dir)
 	if err != nil {
 		_ = os.RemoveAll(dir)
 		return nil, err
 	}
 
-	m := &Mount{Dir: dir, env: env, bindings: bindings, mounts: mounts, devices: devices}
+	m := &Mount{Dir: dir, env: env, bindings: bindings, mounts: mounts, devices: devices, ifaces: ifaces}
 	for _, f := range files {
 		if werr := m.writeFile(f); werr != nil {
 			_ = m.Close()
@@ -612,13 +652,13 @@ func (l *Lease) Deliver(dir string) (*Delivery, error) {
 	if clean == "" || clean == "." || !filepath.IsAbs(clean) {
 		return nil, wrapf(ErrInvalidSecret, "delivery directory %q is not an absolute path", dir)
 	}
-	env, files, bindings, mounts, devices, err := l.render(clean)
+	env, files, bindings, mounts, devices, ifaces, err := l.render(clean)
 	if err != nil {
 		return nil, err
 	}
 	return &Delivery{
 		Dir: clean, env: env, files: files,
-		bindings: bindings, mounts: mounts, devices: devices,
+		bindings: bindings, mounts: mounts, devices: devices, ifaces: ifaces,
 	}, nil
 }
 
@@ -640,6 +680,7 @@ type Delivery struct {
 	bindings []LeaseBinding
 	mounts   []RepoMount
 	devices  []GrantedDevice
+	ifaces   []GrantedInterface
 	closed   bool
 }
 
@@ -664,6 +705,20 @@ func (d *Delivery) Devices() []GrantedDevice {
 		return nil
 	}
 	return append([]GrantedDevice(nil), d.devices...)
+}
+
+// Interfaces returns the host network interfaces this lease moves into the
+// sandbox.
+func (d *Delivery) Interfaces() []GrantedInterface {
+	if d == nil {
+		return nil
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.closed {
+		return nil
+	}
+	return append([]GrantedInterface(nil), d.ifaces...)
 }
 
 // Mounts returns the host repositories this lease opens.

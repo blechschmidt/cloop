@@ -203,6 +203,18 @@ func (sl *secretLease) Devices() []secretbroker.GrantedDevice {
 	return sl.delivery.Devices()
 }
 
+// Interfaces returns the host network interfaces this lease moves into the
+// sandbox, or nil.
+func (sl *secretLease) Interfaces() []secretbroker.GrantedInterface {
+	if sl == nil {
+		return nil
+	}
+	if sl.mount != nil {
+		return sl.mount.Interfaces()
+	}
+	return sl.delivery.Interfaces()
+}
+
 // SecretFiles returns the credential files the driver has to place, with their
 // contents. Empty for a hub-materialised lease, where the files already exist
 // at the paths the bindings name.
@@ -821,6 +833,79 @@ func applyDeviceGrantsList(spec executor.Spec, ex executor.Executor, granted []s
 	}
 	spec.Env = append(append(make([]string, 0, len(base)+1), base...),
 		"CLOOP_HOST_DEVICES="+strings.Join(names, ","))
+	return spec, nil
+}
+
+// applyInterfaceGrants writes a lease's host_interface grants onto the spec.
+//
+// applyDeviceGrants' sibling, and it differs from it in exactly one place,
+// which is the place that matters: there is no benign degraded outcome. A
+// device grant on the host driver is satisfied in the weakest possible sense —
+// the workload could already open every node the hub user can — so that case is
+// a warning. An interface is not like that. Nothing is "already visible":
+// either a netdev was moved into the workload's namespace or it was not, and on
+// the host driver the workload shares the host's namespace, so moving anything
+// in would be moving it away from the control plane itself.
+//
+// So every executor that does not advertise SupportsInterfaces is an error
+// here, including the one that gets a warning for devices.
+func applyInterfaceGrants(spec executor.Spec, ex executor.Executor, sl *secretLease) (executor.Spec, error) {
+	return applyInterfaceGrantsList(spec, ex, sl.Interfaces())
+}
+
+// applyInterfaceGrantsList is applyInterfaceGrants with the lease's interface
+// list already extracted, so the outcomes can be tested against a stub executor
+// without standing up a sealed store to produce a lease whose only contribution
+// is this slice.
+func applyInterfaceGrantsList(spec executor.Spec, ex executor.Executor, granted []secretbroker.GrantedInterface) (executor.Spec, error) {
+	if len(granted) == 0 {
+		return spec, nil
+	}
+	caps := ex.Capabilities()
+	names := make([]string, 0, len(granted))
+	for _, n := range granted {
+		names = append(names, n.Name)
+	}
+
+	if !caps.SupportsInterfaces {
+		return spec, fmt.Errorf(
+			"%w: executor %s (%s) cannot move a host network interface into a sandbox, but "+
+				"this project holds a host_interface grant for %s. An interface grant names a "+
+				"network segment on one machine, so bind the project to a container executor "+
+				"running as root on the host the interface is attached to — and note that a "+
+				"Kata or gVisor runtime cannot honour it even there, because their kernels "+
+				"never see a link that arrives after the sandbox has started",
+			executor.ErrInvalidSpec, ex.ID(), ex.Kind(), strings.Join(names, ", "))
+	}
+
+	for _, n := range granted {
+		spec.Interfaces = append(spec.Interfaces, executor.HostInterface{
+			Name:    n.Name,
+			Source:  n.Source,
+			Target:  n.Target,
+			Address: n.Address,
+			Gateway: n.Gateway,
+			MTU:     n.MTU,
+		})
+	}
+	// The assembled list rather than each entry, because the failures that
+	// matter are collisions between grants — two grants claiming one host
+	// interface, which cannot both be honoured because a netdev lives in one
+	// namespace — and no single entry can reveal them.
+	if err := executor.ValidateInterfaces(spec.Interfaces); err != nil {
+		return spec, err
+	}
+
+	// Handles only, for the reason the device list carries names only: the
+	// host's name for a netdev is a fact about one bench. What a workload
+	// needs is the sandbox-side name, and it has that — the interface is in
+	// its own namespace and it can enumerate it.
+	base := spec.Env
+	if base == nil {
+		base = os.Environ()
+	}
+	spec.Env = append(append(make([]string, 0, len(base)+1), base...),
+		"CLOOP_HOST_INTERFACES="+strings.Join(names, ","))
 	return spec, nil
 }
 

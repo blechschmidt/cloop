@@ -65,6 +65,7 @@ const (
 	ConstraintSandboxMounts    Constraint = "sandbox_mounts"
 	ConstraintHostMounts       Constraint = "host_mounts"
 	ConstraintDevices          Constraint = "devices"
+	ConstraintInterfaces       Constraint = "interfaces"
 	ConstraintEgressScope      Constraint = "egress_scope"
 	ConstraintWorkspace        Constraint = "workspace"
 	ConstraintWriteBack        Constraint = "write_back"
@@ -179,6 +180,17 @@ type Requirements struct {
 	// facts; the alternative is a harness that opens the path, gets ENOENT,
 	// and reports that the device is broken.
 	RequireDevices bool
+	// RequireInterfaces demands a node that honours Spec.Interfaces — one
+	// that can move a host network interface into the sandbox.
+	//
+	// Narrower than RequireDevices, and the extra narrowness is the point. A
+	// device grant needs an executor on the machine with the hardware; an
+	// interface grant needs that *and* a runtime whose kernel will notice a
+	// link that appears after the sandbox has started, which rules out Kata
+	// and gVisor on the very machine that has the wire. Placement is the only
+	// layer that can say so before the host has already given the interface
+	// away.
+	RequireInterfaces bool
 	// RequireEgressScope demands a node that can confine one workload's
 	// IP-layer egress independently of its neighbours (Spec.EgressScope).
 	RequireEgressScope bool
@@ -570,6 +582,13 @@ func reject(c Candidate, req Requirements) (Rejection, bool) {
 		return no(ConstraintDevices, "cannot expose host devices inside the sandbox, so a "+
 			"host_device grant would deliver nothing; bind a container or Kata executor on "+
 			"the host that has the hardware, or enrol that host as a remote executor")
+	}
+	if req.RequireInterfaces && !caps.SupportsInterfaces {
+		return no(ConstraintInterfaces, "cannot move a host network interface into the "+
+			"sandbox, so a host_interface grant would deliver nothing; bind a container "+
+			"executor running as root on the host the interface is attached to, and note "+
+			"that a Kata or gVisor runtime cannot honour this even there — their kernels "+
+			"never see a link that arrives after the sandbox has started")
 	}
 	if req.RequireEgressScope && !caps.SupportsEgressScope {
 		return no(ConstraintEgressScope, "cannot confine one project's egress independently "+
