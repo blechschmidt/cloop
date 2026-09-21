@@ -64,12 +64,12 @@ func EnrollmentRemediation(err error) string {
 			"is outbound-only, so no inbound port needs opening"
 
 	case errors.Is(err, ErrVersionUnsupported):
-		return "The agent and the hub do not share a protocol version. Upgrade the agent with " +
-			"`cloop executor upgrade <id>`, or upgrade the hub if the device is the newer one"
+		return "The agent and the hub do not share a protocol version. press Upgrade on the device's row in the Executors panel, " +
+			"or run `sudo cloop executor agent install --upgrade` on it; upgrade the hub instead if the device is the newer one"
 
 	case errors.Is(err, ErrRevocationUnsupported):
 		return "This agent is too old to honour a mid-run credential revocation, so the hub " +
-			"refuses to hand it secrets. Upgrade it with `cloop executor upgrade <id>`"
+			"refuses to hand it secrets. Press Upgrade on the device's row in the Executors panel, or run `sudo cloop executor agent install --upgrade` on it"
 
 	case errors.Is(err, ErrAgentNotFound):
 		return "No agent with that ID is enrolled. `cloop executor list` shows the fleet; a " +

@@ -82,7 +82,7 @@ func (e *Executor) Attach(ctx context.Context, req executor.AttachRequest) (exec
 	}
 	if !SupportsAttach(sess.Version()) {
 		return nil, fmt.Errorf("%w: agent %s speaks protocol v%d; interactive attach needs v%d "+
-			"(upgrade the agent with `cloop executor upgrade`)",
+			"(press Upgrade on the device's row in the Executors panel, or run `sudo cloop executor agent install --upgrade` on it)",
 			executor.ErrAttachUnsupported, e.id, sess.Version(), MinAttachVersion)
 	}
 

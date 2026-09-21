@@ -559,8 +559,8 @@ func placementRemediation(err error, ex executor.Executor) string {
 				ex.ID() + "` returns it to rotation; `cloop executor test " + ex.ID() + "` diagnoses " +
 				"an unreachable one"
 		case executor.ConstraintAgentBuild:
-			return "The agent on this device is older than executors.min_agent_build. Upgrade it " +
-				"with `cloop executor upgrade " + ex.ID() + "`, or lower the floor"
+			return "The agent on this device is older than executors.min_agent_build. " +
+				"Press Upgrade on the device's row in the Executors panel, run `sudo cloop executor agent install --upgrade` on it, or lower the floor"
 		}
 	}
 	return "Run `cloop executor test " + ex.ID() + "` for the driver's own diagnosis"
