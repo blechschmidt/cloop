@@ -41,6 +41,9 @@ cloop ui         # the same thing in a browser, live
 
 [**Your first project**](docs/getting-started/first-project.md) walks through
 what happens between those commands, and what to do when a task fails.
+[**A walkthrough of the dashboard**](docs/getting-started/walkthrough.md) does
+the same ground in a browser, in screenshots: where work is allowed to run, a
+project pinned there, and the plan it runs.
 
 ### Requirements
 
@@ -99,7 +102,7 @@ its source is [`docs/`](docs/README.md).
 
 | | |
 | --- | --- |
-| **[Getting started](docs/getting-started/README.md)** | install, your first project, how the loop works, providers, the dashboard |
+| **[Getting started](docs/getting-started/README.md)** | install, your first project, how the loop works, providers, the dashboard, and a screenshot walkthrough of it |
 | **[Executor architecture](docs/architecture/executors.md)** | how a task travels from the orchestrator to a sandbox and back — the four backends, placement, health supervision, failover, remote agent enrollment |
 | **[Security model](docs/security/model.md)** | the four trust boundaries, the no-host-execution guarantee, SSO and RBAC, and a table mapping every guarantee to the test that checks it |
 | **[Threat model](docs/security/threat-model.md)** | STRIDE per boundary, with an honest residual-risk column |
