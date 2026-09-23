@@ -15,7 +15,7 @@ moment it is listed here and nowhere else.
 
 ## Getting started
 
-Five pages in order, indexed at
+Six pages in order, indexed at
 **[getting started](getting-started/README.md)**:
 
 - **[Installation](getting-started/installation.md)** — prerequisites,
@@ -30,6 +30,10 @@ Five pages in order, indexed at
   them.
 - **[Web dashboard](getting-started/web-ui.md)** — `cloop ui`, what each screen
   shows, and the authentication default to know before exposing it.
+- **[Dashboard walkthrough](getting-started/walkthrough.md)** — the same three
+  things in the order you meet them, in screenshots: choose where work is
+  allowed to run, create a project that runs there, fill it with tasks and
+  start it. Includes enrolling a remote device.
 
 ## Architecture
 

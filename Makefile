@@ -232,6 +232,16 @@ docs-site: $(DOCS_VENV) docs-check docs-stage
 	@$(DOCS_MKDOCS) build --strict -f $(DIST)/mkdocs.yml
 	@echo "==> site built: $(DIST)/docs-site/index.html"
 
+## screenshots: rebuild docs/screenshots/ from a throwaway demo hub
+##
+## Boots a hub that has never seen a real project, photographs it with headless
+## Chromium, and destroys it — so a published image cannot carry somebody's
+## work. Needs Chrome and node; see scripts/screenshots/README.md. Deliberately
+## not a CI job: images that regenerate on every push are a binary diff on
+## every push.
+screenshots:
+	@GO=$(GO) ./scripts/screenshots/capture.sh
+
 ## docs-serve: live-preview the documentation site (http://127.0.0.1:$(DOCS_PORT))
 docs-serve: $(DOCS_VENV) docs-stage
 	@echo "==> mkdocs serve on http://127.0.0.1:$(DOCS_PORT)  (re-run to pick up docs/ edits)"

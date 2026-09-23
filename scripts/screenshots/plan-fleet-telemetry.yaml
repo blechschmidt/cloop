@@ -1,0 +1,38 @@
+goal: Collect metrics from field gateways over intermittent links and surface them in Grafana
+tasks:
+  - id: 1
+    title: Buffer metrics on the gateway so a dropped link loses nothing
+    description: >-
+      A ring buffer on disk, sized to the longest outage we have measured,
+      drained in order once the uplink returns.
+    priority: 1
+    status: pending
+    role: backend
+    tags: [gateway]
+    estimated_minutes: 90
+
+  - id: 2
+    title: Batch and compress the uplink payload
+    priority: 2
+    status: pending
+    role: backend
+    depends_on: [1]
+    tags: [gateway]
+    estimated_minutes: 45
+
+  - id: 3
+    title: Reject a gateway whose clock has drifted past the ingest window
+    priority: 2
+    status: pending
+    role: data
+    tags: [ingest]
+    estimated_minutes: 60
+
+  - id: 4
+    title: "Grafana dashboard: per-site uptime, queue depth, last contact"
+    priority: 3
+    status: pending
+    role: frontend
+    depends_on: [3]
+    tags: [dashboard]
+    estimated_minutes: 75

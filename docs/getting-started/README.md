@@ -1,6 +1,6 @@
 # Getting started
 
-Five pages, in order. They assume nothing except a terminal and a provider you
+Six pages, in order. They assume nothing except a terminal and a provider you
 can reach.
 
 - **[Installation](installation.md)** — prerequisites, `go install`, building
@@ -18,6 +18,10 @@ can reach.
 - **[The web dashboard](web-ui.md)** — running `cloop ui`, what each screen
   shows, and the authentication default you should know before binding it to
   anything but localhost.
+- **[A walkthrough of the dashboard](walkthrough.md)** — the same ground as your
+  first project, done from a browser and in the order the screens come at you:
+  decide where work may run, create a project pinned there, then build and start
+  its plan. Screenshots throughout.
 
 ## After that
 

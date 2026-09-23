@@ -88,14 +88,16 @@ Executors, Secrets, Audit, Quotas and Settings. The last three are hidden
 outright unless your role carries the matching permission, so a single-user
 install typically sees Projects, Budget, Executors and Settings.
 
-The screenshots below were taken from an earlier release; the tab bar has grown
-since, but the panels they show work the same way.
+This page is the reference: one section per screen. If you would rather be walked
+through setting a hub up — where work may run, then a project, then its tasks —
+[the dashboard walkthrough](walkthrough.md) does that instead, in the same
+screenshots.
 
 ---
 
 ## Projects
 
-![The Projects tab: fleet-wide counters across the top, then one row per registered project with its goal, run status, progress bar, task count, last activity and provider, plus Run / PM / Stop buttons.](../screenshots/01-projects-overview.png)
+![The Projects tab: fleet-wide counters for projects, active runs, total, done and failed tasks and total steps, then one row per registered project with its goal, status pill, progress bar, task count, last activity, provider and model, plus Run / PM / Hide / Delete buttons.](../screenshots/01-projects-overview.png)
 
 The Projects tab is the fleet view: counters for projects, active runs, total /
 done / failed tasks and total steps, then one row per project. Each row carries
@@ -148,7 +150,7 @@ effect on the next run — work already in flight stays where it started.
 
 ## Tasks
 
-![The Tasks tab: a search and filter bar, an inline Add Task form with title, description, priority and dependency fields, then the task list — each entry showing its status, role tags, priority badge and ID, with Done, Skip, Fail, Reset, Edit and Remove buttons.](../screenshots/03-tasks.png)
+![The Tasks tab with completed work shown: a run bar, an inline Add Task form with title, description, priority and dependency fields, then the task list — five done tasks each carrying the result its run produced, and three pending ones with drag handles, role and tag chips, dependency references, estimates and priority badges, and per-row status buttons that differ by status — Reset on the finished ones, Done and Split on the pending ones.](../screenshots/03-tasks.png)
 
 The list filters by free text, status, priority, assignee and tags, and hides
 completed tasks behind a **Show completed** toggle. The header counts what is
@@ -160,8 +162,10 @@ Task** appends it immediately.
 
 **Editing** happens in a modal with title, description, priority, dependencies
 and a per-task **Max minutes** budget (`0` inherits the project default).
-The per-row buttons — **Done**, **Skip**, **Fail**, **Reset**, **Edit**,
-**Remove** — set status directly; **Remove** asks for confirmation first.
+The per-row buttons set status directly, and a row carries the ones that make
+sense for the status it has: **Done**, **Skip**, **Fail**, **Split**, **Edit**
+and **Remove** on a pending task, with **Reset** replacing Done and Split once
+it has finished. **Remove** asks for confirmation first.
 
 **Reordering** is drag and drop, and the list is the run queue: tasks run top to
 bottom, and dragging a row rewrites the priorities the scheduler reads. This
@@ -215,7 +219,7 @@ will use.
 
 ## Settings
 
-![The global Settings tab: a Configuration section with cards for Default Provider, ClaudeCode, Anthropic and OpenAI — each with its own model, base URL and password-masked API key field, and its own Save button.](../screenshots/05-settings.png)
+![The global Settings tab: a Configuration section with cards for Default Provider, ClaudeCode, Anthropic, OpenAI and Ollama — each with its own model, base URL and password-masked API key field, its own Save button, and a "no key" badge on the backends that have none.](../screenshots/05-settings.png)
 
 Settings is global rather than per-project. The **Configuration** section edits
 the same provider keys `cloop config set` writes — the default provider, and

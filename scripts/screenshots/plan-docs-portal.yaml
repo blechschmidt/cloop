@@ -1,0 +1,26 @@
+goal: Rebuild the customer documentation portal with versioned API references
+tasks:
+  - id: 1
+    title: Generate the API reference from the OpenAPI document
+    priority: 1
+    status: pending
+    role: docs
+    tags: [reference]
+    estimated_minutes: 90
+
+  - id: 2
+    title: Serve every released version, with the current one as the default
+    priority: 2
+    status: pending
+    role: frontend
+    depends_on: [1]
+    tags: [versioning]
+    estimated_minutes: 120
+
+  - id: 3
+    title: Redirect the old portal's URLs instead of breaking them
+    priority: 2
+    status: pending
+    role: devops
+    tags: [migration]
+    estimated_minutes: 45

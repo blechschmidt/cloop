@@ -1,0 +1,103 @@
+# The plan the `checkout-api` demo project starts from.
+#
+# Every task here is `pending`. The states visible in the published screenshots
+# — done, in progress, failed — are produced by actually running the project
+# against the offline `mock` provider, not written down here, so the screenshots
+# show a plan cloop really executed rather than a mock-up of one.
+goal: Ship an idempotent payment capture API with end-to-end audit coverage
+tasks:
+  - id: 1
+    title: Define the idempotency key contract for payment capture
+    description: >-
+      Decide what a merchant sends, how long a key is honoured, and what a
+      replay returns. Write it down as the reference the handler is built
+      against.
+    priority: 1
+    status: pending
+    role: backend
+    tags: [design, payments]
+    estimated_minutes: 45
+
+  - id: 2
+    title: Add the idempotency_keys table and a 24-hour retention sweep
+    description: >-
+      Migration plus the background sweep that drops expired keys. The sweep
+      has to be safe to run concurrently on more than one replica.
+    priority: 1
+    status: pending
+    role: data
+    depends_on: [1]
+    tags: [migration]
+    estimated_minutes: 60
+
+  - id: 3
+    title: Replay a captured payment with the original response, not a 409
+    description: >-
+      A retried capture carrying a key we have already seen must return the
+      first response byte for byte. Returning a conflict makes every client
+      retry loop into an outage.
+    priority: 1
+    status: pending
+    role: backend
+    depends_on: [2]
+    tags: [payments]
+    estimated_minutes: 90
+
+  - id: 4
+    title: Route capture, refund and void through the audit trail
+    description: >-
+      Each state transition writes one audit event with the actor, the
+      idempotency key and the acquirer's reference.
+    priority: 2
+    status: pending
+    role: security
+    depends_on: [3]
+    tags: [audit, compliance]
+    estimated_minutes: 75
+
+  - id: 5
+    title: Back the acquirer client off exponentially instead of hammering it
+    description: >-
+      Retry budget per request, jittered backoff, and a circuit breaker that
+      opens before the acquirer rate-limits the whole merchant account.
+    priority: 2
+    status: pending
+    role: backend
+    depends_on: [4]
+    tags: [resilience]
+    estimated_minutes: 60
+
+  - id: 6
+    title: Contract tests against the acquirer sandbox
+    description: >-
+      Pin the acquirer's documented responses so a change on their side fails
+      our build rather than a merchant's checkout.
+    priority: 3
+    status: pending
+    role: testing
+    depends_on: [5]
+    tags: [tests]
+    estimated_minutes: 90
+
+  - id: 7
+    title: Sustain 500 captures per second for ten minutes
+    description: >-
+      Load profile, the run, and the p99 the result has to stay under. Record
+      where it breaks first.
+    priority: 3
+    status: pending
+    role: testing
+    depends_on: [5]
+    tags: [performance]
+    estimated_minutes: 120
+
+  - id: 8
+    title: Document the merchant-facing error codes
+    description: >-
+      One table: code, what caused it, whether retrying helps, and what the
+      merchant should show the cardholder.
+    priority: 4
+    status: pending
+    role: docs
+    tags: [docs]
+    estimated_minutes: 45
