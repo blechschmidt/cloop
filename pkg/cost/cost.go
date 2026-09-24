@@ -265,6 +265,16 @@ type ModelPricing struct {
 // Keys are lowercase model IDs. Partial prefix matches are tried on miss.
 var prices = map[string]ModelPricing{
 	// Anthropic Claude 5 / 4.x
+	// The Claude 5 family was offered in the dashboard's model picker but never
+	// priced here, and an unpriced model is not an error — lookup misses,
+	// Estimate reports (0, false) and EstimateSessionCost returns 0. So every
+	// run on one of them booked as free, which the budget caps then enforced
+	// against: a spend ceiling cannot stop what it measures as zero. Opus 5.5
+	// is listed ahead of Opus 5 for readability only; lookup is exact-match
+	// first, so the neighbouring prefix cannot shadow it.
+	"claude-opus-5-5":   {InputPerM: 5.00, OutputPerM: 25.00},
+	"claude-opus-5":     {InputPerM: 5.00, OutputPerM: 25.00},
+	"claude-sonnet-5":   {InputPerM: 3.00, OutputPerM: 15.00},
 	"claude-fable-5":    {InputPerM: 10.00, OutputPerM: 50.00},
 	"claude-opus-4-8":   {InputPerM: 5.00, OutputPerM: 25.00},
 	"claude-opus-4-7":   {InputPerM: 5.00, OutputPerM: 25.00},

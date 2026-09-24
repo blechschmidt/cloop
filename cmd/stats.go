@@ -167,9 +167,16 @@ func computeStepDurations(steps []state.StepResult) (total, min, max time.Durati
 func estimateCost(s *state.ProjectState) (float64, bool) {
 	// Cost per million tokens (input, output) in USD.
 	// Values approximate as of 2025.
+	//
+	// Matching below is exact with no prefix fallback, so a model missing from
+	// this map yields no estimate at all rather than an approximate one —
+	// which is how the entire Claude 5 family read as uncosted here.
 	type pricing struct{ inPer1M, outPer1M float64 }
 	prices := map[string]pricing{
 		"claude-fable-5":          {10.0, 50.0},
+		"claude-opus-5-5":         {5.0, 25.0},
+		"claude-opus-5":           {5.0, 25.0},
+		"claude-sonnet-5":         {3.0, 15.0},
 		"claude-opus-4-8":         {5.0, 25.0},
 		"claude-opus-4-7":         {5.0, 25.0},
 		"claude-opus-4-6":         {15.0, 75.0},

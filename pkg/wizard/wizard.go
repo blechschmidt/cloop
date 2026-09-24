@@ -105,8 +105,12 @@ func Run() (*Result, error) {
 	// ── Step 4: Model ────────────────────────────────────────────────────────
 	printStep(4, 6, "Model")
 	defaultModels := map[string][]string{
-		"claudecode": {"(provider default)", "claude-fable-5", "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5-20251001"},
-		"anthropic":  {"claude-sonnet-4-6", "claude-fable-5", "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6", "claude-haiku-4-5-20251001"},
+		// Entries are stored verbatim as the model ID below, so they carry no
+		// annotation — the Opus 5.5 harness-build floor that the dashboard's
+		// picker spells out cannot be repeated here without becoming part of
+		// the ID.
+		"claudecode": {"(provider default)", "claude-fable-5", "claude-opus-5-5", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5-20251001"},
+		"anthropic":  {"claude-sonnet-4-6", "claude-fable-5", "claude-opus-5-5", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6", "claude-haiku-4-5-20251001"},
 		"openai":     {"gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "o1"},
 		"ollama":     {"llama3.2", "mistral", "qwen2.5", "deepseek-r1"},
 		"mock":       {"(provider default)"},

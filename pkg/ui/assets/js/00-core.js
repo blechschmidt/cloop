@@ -330,6 +330,13 @@ const providerModels = {
   claudecode: [
     {value: '', label: '(default — claude-sonnet-4-6)'},
     {value: 'claude-fable-5', label: 'Claude Fable 5'},
+    // The API gates Opus 5.5 on the harness build, not just on account access:
+    // an older CLI is refused with "Claude Code <ver> does not support this
+    // model; version 2.1.280 or newer is required". That is a 400 on every
+    // task, so the floor is named here — at the point of choice — rather than
+    // discovered one failed run at a time. The Anthropic API entry below
+    // carries no such note: the floor is the local binary, not the model.
+    {value: 'claude-opus-5-5', label: 'Claude Opus 5.5 (needs Claude Code 2.1.280+)'},
     {value: 'claude-opus-5', label: 'Claude Opus 5'},
     {value: 'claude-opus-4-8', label: 'Claude Opus 4.8'},
     {value: 'claude-opus-4-7', label: 'Claude Opus 4.7'},
@@ -343,6 +350,7 @@ const providerModels = {
   anthropic: [
     {value: '', label: '(default — claude-opus-4-6)'},
     {value: 'claude-fable-5', label: 'Claude Fable 5'},
+    {value: 'claude-opus-5-5', label: 'Claude Opus 5.5'},
     {value: 'claude-opus-5', label: 'Claude Opus 5'},
     {value: 'claude-opus-4-8', label: 'Claude Opus 4.8'},
     {value: 'claude-opus-4-7', label: 'Claude Opus 4.7'},
@@ -614,6 +622,7 @@ function estimateCost(provider, model, inputTok, outputTok) {
   // Pricing table: [inputPerM, outputPerM] in USD
   const prices = {
     'claude-fable-5':             [10.00, 50.00],
+    'claude-opus-5-5':            [5.00,  25.00],
     'claude-opus-5':              [5.00,  25.00],
     'claude-sonnet-5':            [3.00,  15.00],
     'claude-opus-4-8':            [5.00,  25.00],
