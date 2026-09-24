@@ -133,8 +133,26 @@ type Options struct {
 	// Nil means no configuration source — the pre-Task-20307 behaviour, and what
 	// a hub with no control-plane database gets. Payloads run as they did.
 	Sandbox func() (executor.SandboxSettings, error)
+	// AutoInstallHarness reports whether this hub may ask a device to install
+	// a missing harness from that harness's official installer (Task 20336).
+	//
+	// A function for the same reason Sandbox is one: it is an admin setting
+	// that must take effect on the next dispatch rather than at the next
+	// reconnect.
+	//
+	// Nil means enabled, and that default is the feature. The behaviour it
+	// replaces is a refusal telling an operator to go and install something by
+	// hand on a machine the fleet exists to stop hand-administering. Sites that
+	// do not want a vendor script run on a critical host turn it off here, and
+	// get the Task 20332 refusal back unchanged.
+	AutoInstallHarness func() bool
 	// Now overrides the clock for tests.
 	Now func() time.Time
+}
+
+// autoInstallHarness reports whether a missing harness may be installed.
+func (o Options) autoInstallHarness() bool {
+	return o.AutoInstallHarness == nil || o.AutoInstallHarness()
 }
 
 // sandboxSettings resolves the executor's configured sandbox settings.
@@ -546,7 +564,7 @@ func (e *Executor) Start(ctx context.Context, spec executor.Spec) (handle execut
 	// the payload rather than the boundary around it, which is also why it is the
 	// one that was missing: everything above asks "can this device contain the
 	// work", and nothing asked "can it run the work at all".
-	if err := e.checkHarness(spec, sandbox); err != nil {
+	if err := e.checkHarness(ctx, spec, sandbox); err != nil {
 		return executor.Handle{}, err
 	}
 

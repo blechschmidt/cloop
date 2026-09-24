@@ -141,7 +141,14 @@ const (
 	// roll its own binary forward (Task 20331). Additive, and gated harder than
 	// the rest: see MinUpgradeVersion in upgradeproto.go for why a pre-v11
 	// agent is refused outright rather than allowed to ignore the frame.
-	ProtocolVersion = 11
+	//
+	// v12 adds the harness-install frame, which lets the control plane ask a
+	// device to install the harness a project needs from that harness's own
+	// official installer (Task 20336). Additive, and gated the *softest* of
+	// any frame here: a pre-v12 agent simply keeps the Task 20332 behaviour of
+	// refusing a harness it does not have, so the hub skips the attempt rather
+	// than failing on it. See MinHarnessInstallVersion in installproto.go.
+	ProtocolVersion = 12
 	// MinProtocolVersion is the oldest version this build still accepts.
 	MinProtocolVersion = 1
 	// MinRevocationVersion is the first version whose agents understand the

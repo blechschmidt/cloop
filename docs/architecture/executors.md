@@ -2519,6 +2519,62 @@ stamped with
 an unstamped agent is classified `unversioned` rather than silently assumed
 current.
 
+### Installing a missing harness
+
+A device reports the agent CLIs it has (`claude`, `codex`, `gemini`, `cloop`) in
+its hello, and the hub refuses a host-mode dispatch whose harness is not among
+them. That refusal replaced a much worse failure — the run used to start, lease a
+GitHub credential, provision a workspace, and only then die on
+`exec: "claude": executable file not found in $PATH` — but for the case that
+produces it most often, a device enrolled ten minutes ago, the right answer is
+not a better error. It is to install the thing.
+
+So the hub tries first. When a host-mode dispatch needs a harness the device
+lacks, it sends an `install_harness` frame (protocol v12); the device installs,
+reports the outcome, and the same dispatch carries on. Only if that cannot help
+does the refusal appear — now carrying the device's own account of why.
+
+**The hub names a harness, not a script.** This is the protocol's second remote
+code execution primitive, and it is constrained exactly like the first:
+
+| The frame carries      | The frame must never carry                     |
+| ---------------------- | ---------------------------------------------- |
+| a harness name, a reason | a URL, a script, an argv, an env, an interpreter |
+
+The device holds the name→installer table, compiled in, and today it has one
+entry: `claude` → `https://claude.ai/install.sh`. A hub that has been taken over
+can ask for Claude Code from Anthropic and for nothing else.
+`TestInstallHarnessPayloadHasNoRemoteCodeExecutionFields` enforces the right-hand
+column by reflection, so a later field that widens it fails the build rather than
+quietly enlarging the blast radius of a hub compromise.
+
+The agent fetches the script itself instead of shelling out to `curl … | bash`.
+That is what lets it check the *final* URL after redirects — a CDN compromise
+that redirects elsewhere is refused rather than piped into a shell — bound the
+body, run without inheriting the agent's own environment (its enrollment
+credential is in there), and capture the output so a failure reaches the hub.
+
+**Unlike upgrade, the answer is a real outcome.** An upgrade restarts the agent
+and destroys the session its reply would travel on, so the best it can report is
+"accepted". Installing a harness restarts nothing, so the device reports whether
+the binary is now there — which is what makes install-then-continue possible
+inside one dispatch.
+
+**PATH is half the feature.** The official installer needs no root and writes no
+system path: `claude` lands in `~/.local/bin`, which is not on a systemd unit's
+`PATH`. Without a fix for that the device would install the harness, fail to
+detect it, refuse the dispatch it was trying to unblock, and install it again
+next time. The agent therefore adds its per-user harness directories to its own
+environment — which detection and any inheriting payload then see — *and* to any
+payload `Spec` carrying an explicit `PATH`, because `cmd.Env` replaces rather
+than adds and a leased credential always produces an explicit environment. Fix
+only the first and the harness resolves for projects without a secret grant and
+not for projects with one, which is not a distinction anyone would test by hand.
+
+Operators who do not want a vendor script run on their machines set
+[`executors.auto_install_harness: false`](../reference/configuration.md#automatic-harness-installation)
+and get the plain refusal back.
+
 ### Upgrading a device
 
 ```bash

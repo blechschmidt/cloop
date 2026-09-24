@@ -943,6 +943,64 @@ fleet-wide floor. Lowering it means restarting with the looser config.
 See [Placement](../architecture/executors.md#placement) for how the constraint is
 ranked and enforced on both the scheduling and the project-binding paths.
 
+### Automatic harness installation
+
+A project driven by the `claudecode` provider needs the `claude` CLI on whatever
+runs it. A freshly enrolled edge device does not have one, so by default the hub
+asks the device to install it from **Anthropic's official installer** the first
+time a dispatch needs it:
+
+```yaml
+executors:
+  auto_install_harness: true    # the default; absent means true
+```
+
+The device reports what it did, and the same dispatch carries on. Turn it off to
+get the older behaviour — the dispatch is refused with a message naming the
+manual remedies:
+
+```yaml
+executors:
+  auto_install_harness: false
+```
+
+Set it `false` where "the control plane may fetch and run a vendor shell script
+here" is a decision you want to keep for yourself — a critical host, an
+air-gapped site, or anywhere a change of installed software has to go through
+review. What it does **not** control is *what* can be installed; see below.
+
+**What the hub may ask for.** The install frame names a *harness*, never a URL,
+a script, an argv or an interpreter. The device holds the table mapping a name
+to an installer, compiled into the agent binary, and the only entry is:
+
+| Harness  | Installer                                                       |
+| -------- | --------------------------------------------------------------- |
+| `claude` | `https://claude.ai/install.sh` (Anthropic's documented install)  |
+
+So a hub that has been taken over can ask a device to install Claude Code from
+Anthropic, and can ask for nothing else — there is nothing else to ask for. The
+agent fetches the script itself rather than piping `curl` into a shell, which
+lets it reject a redirect that leaves the vendor's domain, bound the response,
+and capture the script's output so a failure is reported to the hub instead of
+scrolling past on a machine nobody is logged into. `cloop` itself is deliberately
+absent from the table: it already has
+[remote upgrade](../architecture/executors.md#upgrading-a-device), which verifies
+Sigstore provenance against a pinned identity, and a shell script would be a
+downgrade.
+
+**Where it lands.** The official installer needs no root and writes no system
+path — the binary goes to `~/.local/bin/claude`. That directory is not on a
+systemd unit's `PATH`, so the agent adds it to its own environment and to any
+payload environment that carries an explicit `PATH`. An operator debugging this
+can read the resolved path back from the Fleet panel; a device that installed
+the harness but still cannot resolve it says so rather than reporting success.
+
+**When it is skipped.** In container sandbox mode nothing is installed on the
+device's host — the harness comes out of the image, which is the configuration
+that *fixes* a device without one. An agent older than protocol v12 does not
+know the frame, and gets the plain refusal rather than a complaint about its
+version.
+
 The policy is a **ratchet**: it can only tighten at runtime. A control plane
 manages many projects, each with its own `config.yaml`, and applying them
 symmetrically would let a tenant re-enable host execution by editing a file they

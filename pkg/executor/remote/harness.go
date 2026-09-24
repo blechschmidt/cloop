@@ -46,6 +46,8 @@
 package remote
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -62,7 +64,8 @@ import (
 // problem.
 const HarnessImageHint = "ghcr.io/blechschmidt/cloop-harness:latest"
 
-// checkHarness refuses a dispatch whose harness the device cannot provide.
+// checkHarness clears a dispatch whose harness the device has — installing it
+// first if it does not, and refusing only when that cannot be done.
 //
 // Silent in three cases, each of which is an absence of evidence rather than
 // evidence of absence:
@@ -73,7 +76,17 @@ const HarnessImageHint = "ghcr.io/blechschmidt/cloop-harness:latest"
 //   - the payload runs in a container, where the image supplies the binary;
 //   - the device advertised no inventory at all, matching hasHarness in
 //     pkg/executor/placement — an agent that said nothing has not said no.
-func (e *Executor) checkHarness(spec executor.Spec, sandbox executor.SandboxSettings) error {
+//
+// The install attempt (Task 20336) sits between detection and refusal rather
+// than replacing either. Refusal is still the outcome for a device that cannot
+// be fixed — an agent too old to understand the frame, a harness with no
+// official installer, an install that failed — and the message it produces is
+// unchanged, because those are exactly the cases where the operator does have
+// to go and do something by hand. What changed is that the common case no
+// longer reaches it.
+func (e *Executor) checkHarness(
+	ctx context.Context, spec executor.Spec, sandbox executor.SandboxSettings,
+) error {
 	want := strings.TrimSpace(spec.Harness)
 	if want == "" || sandbox.Mode == executor.SandboxModeContainer {
 		return nil
@@ -82,6 +95,26 @@ func (e *Executor) checkHarness(spec executor.Spec, sandbox executor.SandboxSett
 	if harnessAdvertised(caps.Harnesses, want) {
 		return nil
 	}
+
+	if e.opts.autoInstallHarness() {
+		if installed, detail := e.tryInstallHarness(ctx, want); installed {
+			return nil
+		} else if detail != "" {
+			// Folded into the refusal rather than logged and dropped. This
+			// string is the only account of why the automatic path did not
+			// save the operator the trip, and without it the message below
+			// would read as though nothing had been tried.
+			return fmt.Errorf(
+				"%w: agent %s (%s) runs payloads on the device's own host and has no %q there "+
+					"(it has: %s). Installing it automatically did not work: %s. "+
+					"Install %s on the device by hand, or switch this executor to a container "+
+					"sandbox whose image carries it (Fleet → this executor → Sandbox, mode "+
+					"container, image %s), or bind this project to an executor that has it",
+				ErrHarnessUnavailable, e.id, e.name, want, describeHarnesses(caps.Harnesses),
+				detail, want, HarnessImageHint)
+		}
+	}
+
 	return fmt.Errorf(
 		"%w: agent %s (%s) runs payloads on the device's own host and reports no %q there "+
 			"(it has: %s), so `cloop run` would fail with \"executable file not found in $PATH\" "+
@@ -89,6 +122,32 @@ func (e *Executor) checkHarness(spec executor.Spec, sandbox executor.SandboxSett
 			"sandbox whose image carries it (Fleet → this executor → Sandbox, mode container, image "+
 			"%s), or bind this project to an executor that has it",
 		ErrHarnessUnavailable, e.id, e.name, want, describeHarnesses(caps.Harnesses), want, HarnessImageHint)
+}
+
+// tryInstallHarness asks the device to install a missing harness, reporting
+// whether the dispatch may now proceed and, when it may not, why the attempt
+// did not help.
+//
+// The empty detail is meaningful: it marks the cases where no attempt was made
+// at all — an agent too old for the frame, a device whose session dropped —
+// and tells the caller to produce its ordinary refusal rather than one that
+// claims an install was tried and failed. Reporting "install failed: agent
+// does not support remote install" would be true and useless; the operator's
+// problem is the missing harness, not the protocol version.
+func (e *Executor) tryInstallHarness(ctx context.Context, want string) (bool, string) {
+	reason := fmt.Sprintf("a task bound to this device needs the %s harness", want)
+
+	out, err := e.RequestHarnessInstall(ctx, want, reason)
+	switch {
+	case errors.Is(err, ErrHarnessInstallUnsupported), errors.Is(err, ErrAgentUnreachable):
+		return false, ""
+	case err != nil:
+		return false, err.Error()
+	case out.Installed:
+		return true, ""
+	default:
+		return false, strings.TrimSpace(out.Reason)
+	}
 }
 
 // harnessAdvertised reports whether want is in the device's inventory.

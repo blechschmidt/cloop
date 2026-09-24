@@ -415,6 +415,14 @@ func (a *Agent) WorkDirRoot() string { return a.root }
 // Capabilities reports what this device advertises. MaxConcurrent is
 // normalised in New, so this is exactly the ceiling admission control applies.
 func (a *Agent) Capabilities() remote.AgentCapabilities {
+	// Before detecting, not after. A harness installed by its own official
+	// installer lives under the home directory, which is not on a service
+	// manager's PATH — so without this a device would fail to detect a harness
+	// it already has, refuse every dispatch needing it, and then install a
+	// second copy the next time it was asked. Idempotent; harnesspath.go has
+	// the argument for why the fix has to be to the process environment.
+	EnsureHarnessPath()
+
 	return Detect(DetectOptions{
 		WorkDirRoot:   a.root,
 		MaxConcurrent: a.cfg.MaxConcurrent,

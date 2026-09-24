@@ -548,6 +548,31 @@ type ExecutorsConfig struct {
 	// Save, silently re-opening host execution.
 	AllowHostProcess *bool `yaml:"allow_host_process,omitempty"`
 
+	// AutoInstallHarness permits the hub to ask a remote executor to install a
+	// missing harness from that harness's official installer, instead of
+	// refusing the dispatch and telling the operator to go and do it by hand
+	// (Task 20336). Absent means true.
+	//
+	// The refusal it replaces was itself an improvement — before Task 20332 the
+	// same misconfiguration surfaced five minutes into a run as `exec: claude:
+	// executable file not found in $PATH`, after a GitHub credential had been
+	// leased and a workspace provisioned. But for the ordinary case that
+	// produces it, a freshly enrolled device, a better error message is not the
+	// right answer: the fleet exists so that machines do not have to be
+	// hand-administered one at a time.
+	//
+	// Set it false where that trade does not hold. On a critical host, "the
+	// control plane may fetch and run a vendor shell script here" is a decision
+	// an operator may want to keep for themselves, and turning it off restores
+	// the Task 20332 refusal exactly. What it never does is widen what the hub
+	// can ask for: the frame names a harness, and the *device* holds the table
+	// mapping that to an installer URL. See pkg/executor/remote/installproto.go.
+	//
+	// A *bool for the reason AllowHostProcess is one: absent, explicitly true
+	// and explicitly false are three distinguishable states, and a plain bool
+	// with omitempty would drop an explicit false on the next Save.
+	AutoInstallHarness *bool `yaml:"auto_install_harness,omitempty"`
+
 	// MinAgentBuild is the oldest cloop build a remote executor agent may be
 	// running and still receive work. Empty — the default — means no floor.
 	//
@@ -844,6 +869,12 @@ func (e ExecutorsConfig) HostProcessAllowed() bool {
 // distinguish "permissive because nobody has decided yet" from "permissive on
 // purpose".
 func (e ExecutorsConfig) HostProcessExplicit() bool { return e.AllowHostProcess != nil }
+
+// AutoInstallHarnessAllowed reports the effective policy, applying the
+// permissive-by-default rule for an absent setting.
+func (e ExecutorsConfig) AutoInstallHarnessAllowed() bool {
+	return e.AutoInstallHarness == nil || *e.AutoInstallHarness
+}
 
 // OrphanSweepInterval renders the configured cadence as a duration for
 // reconcile.Options.SweepInterval.

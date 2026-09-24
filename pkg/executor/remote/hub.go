@@ -97,6 +97,18 @@ type HubOptions struct {
 	// Nil leaves every executor unconfigured, which is the pre-Task-20307
 	// behaviour: payloads run as host processes on the device.
 	SandboxSource func(executorID string) func() (executor.SandboxSettings, error)
+	// AutoInstallHarness reports whether this hub may ask a device to install a
+	// missing harness from that harness's official installer (Task 20336).
+	//
+	// Deployment-wide rather than per-executor, unlike SandboxSource. Sandbox
+	// mode describes one machine's containment and genuinely differs between
+	// devices; "may this control plane run a vendor install script on the
+	// machines it manages" is a policy about the deployment, and per-device
+	// copies of it would be a setting an operator has to remember to re-apply
+	// to every device they ever enroll.
+	//
+	// Nil means enabled. See Options.AutoInstallHarness.
+	AutoInstallHarness func() bool
 	// ExternalURL is what this deployment calls itself, e.g.
 	// https://cloop.example.com. Its host is always an accepted WebSocket
 	// Origin, which is what makes the Executors panel work when a reverse
@@ -218,8 +230,9 @@ func (h *Hub) executorFor(agent AgentRecord, caps AgentCapabilities) (*Executor,
 		// that dials in immediately after a restart must find its handles
 		// already adopted, and an attach one statement later would be a race
 		// whose losing side terminates the device's work.
-		HandleStore: h.opts.HandleStore,
-		Now:         h.opts.Now,
+		HandleStore:        h.opts.HandleStore,
+		AutoInstallHarness: h.opts.AutoInstallHarness,
+		Now:                h.opts.Now,
 	}
 	if h.opts.WorkspaceSource != nil {
 		opts.Workspace = h.opts.WorkspaceSource(agent.AgentID)

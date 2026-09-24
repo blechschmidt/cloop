@@ -23,6 +23,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/remote"
 	"github.com/blechschmidt/cloop/pkg/executorstore"
@@ -99,6 +100,22 @@ func (s *Server) remoteHub() (*remote.Hub, error) {
 			//
 			// Over the same database handle, for the reason the two above give.
 			SandboxSource: sandboxSettingsFactory(db),
+			// Whether a device may be asked to install a harness it lacks
+			// (Task 20336). Read per dispatch, not captured here, so an
+			// operator who turns it off in config.yaml governs the next task
+			// rather than the next restart of this process.
+			AutoInstallHarness: func() bool {
+				cfg, err := config.Load(s.WorkDir)
+				if err != nil || cfg == nil {
+					// An unreadable config states no policy, and the default
+					// policy is permissive. Failing closed here would be the
+					// wrong kind of safe: it would silently reinstate the
+					// hand-administration this feature removes, on exactly the
+					// deployments whose config is already in trouble.
+					return true
+				}
+				return cfg.Executors.AutoInstallHarnessAllowed()
+			},
 			// Agents send no Origin, so these only ever affect browsers.
 			//
 			// The hub gets AllowedOrigins but NOT AllowedWSOrigins: an entry

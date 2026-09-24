@@ -476,6 +476,15 @@ func (a *Agent) frameLoop(ctx context.Context, sess *deviceSession) error {
 			// loop that is meant to keep serving right up until it does.
 			go a.handleUpgrade(ctx, sess, frame)
 
+		case remote.TypeInstallHarness:
+			// Its own goroutine, and for this frame that is not optional. The
+			// hub sends it from inside a dispatch and blocks on the reply, so
+			// serving it on the frame loop would stop the loop for as long as
+			// a vendor installer takes to download a platform binary — during
+			// which every other handle's output, every status answer and every
+			// heartbeat ack on this device would queue behind it.
+			go a.handleInstallHarness(ctx, sess, frame)
+
 		case remote.TypeHeartbeatAck:
 			// Liveness confirmed; nothing to do. Its value is in arriving.
 
@@ -558,6 +567,14 @@ func (a *Agent) handleStart(ctx context.Context, sess *deviceSession, frame remo
 	}
 
 	spec := payload.Spec
+
+	// A harness installed by its own official installer lives under the home
+	// directory, and a Spec carrying an explicit environment does not inherit
+	// this process's PATH — cmd.Env replaces rather than adds. Without this the
+	// harness would resolve for a project with no secret grant (nil Env, so it
+	// inherits) and fail to resolve for a project that holds one, which is not
+	// a distinction anyone would think to test against. See harnesspath.go.
+	spec.Env = withHarnessPath(spec.Env, NativeHarnessDirs())
 
 	// Place the lease's credential files first, because everything below
 	// depends on where they actually landed.

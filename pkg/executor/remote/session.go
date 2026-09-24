@@ -437,7 +437,7 @@ func (s *Session) handleFrame(ctx context.Context, f Frame) (stop bool) {
 		s.handleAttachFrame(ctx, f)
 		return false
 
-	case TypeStarted, TypeRevoked, TypeUpgrading, TypeError:
+	case TypeStarted, TypeRevoked, TypeUpgrading, TypeHarnessInstalled, TypeError:
 		s.deliver(f)
 		return false
 
