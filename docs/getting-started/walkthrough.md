@@ -160,6 +160,18 @@ Both are applied as part of the creation, and if the executor or any grant is
 refused the whole project is rolled back rather than left half-provisioned. A
 mistyped secret name costs you nothing.
 
+**A device does not get your Claude login.** Signing in to Claude Code from
+Settings authenticates harnesses that run on the hub itself. A harness in a
+container, a Pod or on an enrolled device receives credentials only through a
+grant — [why](../security/claude-code-identity.md#isolating-executors-do-not-get-a-directory)
+— so a `claudecode` project bound to one also needs an `env` secret holding
+`CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`) or `ANTHROPIC_API_KEY`,
+granted to it with that key. Without it the first task stops with *Not logged
+in*. Repositories work the same way, with one default to watch: the project's
+**Repositories** panel assigns *Read only* unless you pick *Read and write*,
+which is enough to clone and not to push. The harness is told which
+repositories it holds and whether it may push, and clones them itself.
+
 Note what the Grants list says when it is empty: *"No grants — the project
 starts able to reach nothing."* There is no allow-everything default anywhere in
 this dialog. An empty allowlist is rejected as a mistake rather than read as
